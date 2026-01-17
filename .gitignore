@@ -55,3 +55,4 @@ specs/
 .geminiignore
 .gemini
 src/rs/target
+.cargo/

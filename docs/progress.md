@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-- PRD-0 foundation and repository cleanup.
+- PRD-1 Rust IPC core layer (completed).
 
 ## Progress (PRD-0)
 
@@ -16,18 +16,33 @@
 - Added Bun/TypeScript workspace scaffold with tests and minimal stubs.
 - Updated Makefile for cross-language install/upgrade/build/test/lint with fail-fast behavior.
 - Added architecture + conventions docs (`docs/arch.md`, `CLAUDE.md`, `README.md`).
+- Completed `make test-all` and `uv lock --upgrade`.
 
 ### Verified
 - `make install` completed successfully on 2026-01-17.
-- `make test-all` pending after recent test harness fixes.
+- `make test-all` completed successfully on 2026-01-17.
+- `uv lock --upgrade` completed successfully on 2026-01-17.
+
+## Progress (PRD-1)
+
+### Completed
+- Shared memory backends for Linux/macOS/Windows with named Unix support and crash-safe headers.
+- SPSC shared-memory ring + MPMC ring (epoch/sequence-based) with backpressure.
+- Buffer pool + buffer channel (zero-copy metadata handoff) and Arrow IPC helpers.
+- Cross-platform wait/wake shim with file-lock fallback and shared mutex/rwlock/condvar.
+- Rust benchmarks (SPSC ping-pong + throughput, MPMC baseline).
+- PyO3 + napi bindings (ShmRegion, BufferPool, SPSC/MPMC, BufferChannel).
+- Multi-process tests for shared memory and shared mutex.
+- CI workflow for Rust build/test/lint + nightly Miri.
+- Python IPC examples and README docs.
+
+### Verified
+- `cargo test --workspace` (CARGO_HOME local) passed on 2026-01-17.
+- `cargo doc --workspace --no-deps` passed on 2026-01-17.
+- `uv run pytest src/py/tests` passed on 2026-01-17.
+- `bun test` passed on 2026-01-17.
 
 ## Next Steps
-
-### Finish PRD-0
-- Re-run `make test-all` to confirm a clean cross-language test run.
-- Regenerate `uv.lock` (`uv lock --upgrade`) to capture the 3.12 baseline and current deps.
-- Log any remaining DMA references as explicit “known legacy issues” if discovered.
-
-### Prepare PRD-1
-- Define IPC abstraction boundaries for Unix (UDS + shared memory) and Windows (named pipes + shared memory).
-- Validate zero-copy pathways and the hybrid serialization model (Arrow for large payloads, msgspec/MessagePack for control/data plane).
+### Start PRD-2
+- Build Python-first API surface and type bridge (AST + HMR).
+- Align Litestar-style API patterns with type generation.

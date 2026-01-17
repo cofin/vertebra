@@ -39,8 +39,15 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 
 ### Status
 
-**Current Phase**: Planning Complete
-**Next Phase**: Implementation Phase 1 (Foundation & Build System)
+**Current Phase**: Implementation Phase 1 (Foundation & Build System) in progress
+**Next Phase**: Phase 2 (Shared Memory primitives)
+
+### Decisions Locked (OS-API Shim)
+
+- **Shared memory**: Linux `memfd_create` fast-path + `shm_open` fallback; macOS `shm_open`; Windows `CreateFileMappingW` unnamed.
+- **Handle passing**: UDS `SCM_RIGHTS` on Unix, `DuplicateHandle` on Windows (avoid named mappings except fallback rendezvous).
+- **Sync**: Linux futex, macOS `ulock` (opt-in feature `macos-ulock`) with spin+nanosleep fallback (pthread shared-cond planned), Windows `WaitOnAddress`.
+- **Layout**: Versioned C-ABI header, cacheline-aligned hot atomics (128B on Apple Silicon macOS, 64B elsewhere), power-of-two **fixed-slot** ring.
 
 ---
 
@@ -64,8 +71,8 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 
 ```
 /home/cody/code/c/vertebra/src/rs/
-├── Cargo.toml                     # Workspace manifest (to be created)
-├── vertebra-core/                 # Core Rust library (to be created)
+├── Cargo.toml                     # Workspace manifest
+├── vertebra-core/                 # Core Rust library (baseline created)
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
@@ -79,7 +86,7 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 
 ### Build System
 
-- **Makefile**: `/home/cody/code/c/vertebra/Makefile` (add Rust targets)
+- **Makefile**: `/home/cody/code/c/vertebra/Makefile` (Rust targets already present: `rs-build`, `rs-test`, `rs-lint`, `rs-miri`, `rs-bench`)
 - **CI**: GitHub Actions or equivalent (add Rust validation)
 
 ---
@@ -88,13 +95,13 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 
 ### Phase 1: Foundation (Week 1) - NEXT
 
-**Status**: Not Started
+**Status**: In Progress
 
 **Key Tasks**:
-1. Create Cargo workspace structure
-2. Initialize vertebra-core and ensure binding crates are wired in
+1. Create Cargo workspace structure ✅
+2. Initialize vertebra-core and ensure binding crates are wired in ✅
 3. Configure dependencies (rustix, arrow-rs, etc.)
-4. Add Makefile integration
+4. Add Makefile integration ✅
 5. Set up CI pipeline
 
 **Start Here**: `/home/cody/code/c/vertebra/docs/prd/PRD-1-rust-ipc/tasks.md` (Phase 1)
@@ -183,10 +190,10 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 
 ```bash
 cd /home/cody/code/c/vertebra
-make rust-build          # Build Rust components
-make rust-test           # Run tests
-make rust-miri           # Run Miri (UB detection)
-make rust-bench          # Run benchmarks
+make rs-build            # Build Rust components
+make rs-test             # Run tests
+make rs-miri             # Run Miri (UB detection)
+make rs-bench            # Run benchmarks
 ```
 
 ### Development
@@ -213,8 +220,8 @@ cargo bench
 ### CI Validation
 
 ```bash
-make rust-build
-make rust-test
+make rs-build
+make rs-test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 cargo +nightly miri test

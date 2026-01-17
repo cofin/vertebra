@@ -12,6 +12,16 @@ Vertebra is a **Python-first, high-performance application backbone** that combi
 make install
 ```
 
+## Rust Build Instructions
+
+```bash
+cd src/rs
+cargo build
+cargo test
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
 ## Common Commands
 
 ```bash
@@ -35,10 +45,24 @@ src/
 ## Documentation
 
 - Architecture: `docs/arch.md`
+- Rust IPC core architecture: `docs/architecture/rust-ipc-core.md`
+- Rust IPC getting started: `docs/architecture/rust-ipc-getting-started.md`
+- Python IPC guide: `docs/architecture/python-ipc-guide.md`
+- Performance tuning: `docs/architecture/performance-tuning.md`
+- Error handling: `docs/architecture/error-handling.md`
+- API reference: `docs/architecture/api-reference.md`
+- Diagrams: `docs/architecture/diagrams.md`
 - Progress + next steps: `docs/progress.md`
 - PRDs: `docs/prd/`
 
 ## Status
 
-PRD-0 foundation work is in progress. See `docs/progress.md` for current status
-and `docs/prd/PRD-0-foundation.md` for the detailed plan.
+PRD-0 is complete and PRD-1 (Rust IPC core) is now in progress. See
+`docs/progress.md` for current status.
+
+## IPC Example
+
+```bash
+uv run python tools/ipc_producer.py --name /vertebra-demo
+uv run python tools/ipc_consumer.py --name /vertebra-demo
+```

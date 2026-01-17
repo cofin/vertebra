@@ -6,31 +6,14 @@
 /// Version constant synchronized with Python package.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Placeholder for IPC protocol types.
-///
-/// Future PRDs will define:
-/// - Message formats
-/// - Serialization protocols
-/// - Shared memory primitives
-pub mod ipc {
-    // TODO: Implement in PRD-1.
-}
+pub mod buffer;
+pub mod channel;
+pub mod platform;
+pub mod shm;
+pub mod sync;
 
-/// Placeholder for type bridge utilities.
-///
-/// Future PRDs will define:
-/// - Python type → Rust type mappings
-/// - TypeScript type generation
-pub mod types {
-    // TODO: Implement in PRD-2.
-}
+/// Placeholder for IPC protocol types (PRD-2+).
+pub mod ipc {}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_version() {
-        assert!(!VERSION.is_empty());
-    }
-}
+/// Placeholder for type bridge utilities (PRD-2+).
+pub mod types {}

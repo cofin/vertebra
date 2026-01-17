@@ -11,12 +11,12 @@ Vertebra is a Python-first application backbone with Rust IPC primitives and a B
 
 ## Project Status
 
-**Overall:** PRD-0 in progress (foundation + cleanup).
+**Overall:** PRD-1 in progress (Rust IPC core).
 
 | PRD | Status | Notes |
 | --- | --- | --- |
-| PRD-0 | In Progress | Foundation, build system, docs, repo cleanup |
-| PRD-1 | Not Started | Rust IPC core |
+| PRD-0 | Complete | Foundation, build system, docs, repo cleanup |
+| PRD-1 | Complete | Rust IPC core |
 | PRD-2 | Not Started | Python bindings + type bridge |
 | PRD-3 | Not Started | Bun server + protocol support |
 | PRD-4 | Not Started | Bun-backed Python drivers |

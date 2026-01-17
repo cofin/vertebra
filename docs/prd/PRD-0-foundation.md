@@ -1,6 +1,6 @@
 # PRD-0: Foundation and Repository Cleanup
 
-**Status:** In Progress
+**Status:** Complete
 **Author:** Vertebra Team
 **Created:** 2026-01-17
 **Last Updated:** 2026-01-17
@@ -2025,17 +2025,17 @@ make clean && make install && make test-all
 - [x] Updated Makefile with cross-language install/upgrade/build/test/lint targets and fail-fast behavior.
 - [x] Removed unused N-API import warning in `vertebra-js`.
 - [x] Added architecture + conventions docs (`docs/arch.md`, `CLAUDE.md`, `README.md`).
-- [ ] Re-run `make test-all` to confirm a clean cross-language test run.
-- [ ] Regenerate `uv.lock` (`uv lock --upgrade`) to capture the 3.12 baseline and current deps.
-- [ ] Capture any remaining legacy DMA references in a short “known issues” list if discovered.
+- [x] `make test-all` completed after pytest plugin cleanup and N-API warning removal.
+- [x] Regenerated `uv.lock` (`uv lock --upgrade`) to capture the 3.12 baseline and current deps.
+- [x] Confirmed no remaining legacy DMA references beyond documented notes.
 
 ### Verification Status
 - `make install` verified on 2026-01-17.
-- `make test-all` pending after latest test harness fixes.
+- `make test-all` verified on 2026-01-17.
+- `uv lock --upgrade` verified on 2026-01-17.
 
-### Next Steps (PRD-0)
-- Run `make test-all` and record the output.
-- Regenerate `uv.lock` once dependency versions are approved.
+### Close-Out Notes
+- PRD-0 complete; move to PRD-1 (Rust core IPC).
 
 ---
 

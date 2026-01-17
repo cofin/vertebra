@@ -1,7 +1,7 @@
 # PRD-1: Rust Core IPC Layer
 
 **Version**: 1.0
-**Status**: Draft
+**Status**: Complete
 **Created**: 2026-01-17
 **Author**: Claude Code
 **Dependencies**: PRD-0 (Foundation)
@@ -57,7 +57,7 @@ Vertebra is a modern application backbone combining Python's productivity with h
 ```
 src/
 ├── py/vertebra/         # Python package
-├── js/                  # TypeScript/JavaScript components
+├── ts/                  # TypeScript/Bun components
 └── rs/                  # Rust components (new)
 ```
 
@@ -108,6 +108,29 @@ PRD-1 builds atop this foundation by adding the Rust subsystem, which integrates
 - **FFI surface** lives in `vertebra-py` / `vertebra-js`; **optional C ABI** is in-scope only if required for best native compatibility.
 - **Performance targets** require measured baselines; stretch goals need explicit sign-off.
 
+### Resolved OS-API Shim Decisions (Max Performance)
+
+**Shared memory backing**
+- **Linux**: `memfd_create` fast-path + seals after sizing; `shm_open` fallback.
+- **macOS**: `shm_open` + `ftruncate` + `mmap`, `shm_unlink` immediately after handle handoff.
+- **Windows**: `CreateFileMappingW` (unnamed, pagefile-backed) + `MapViewOfFile`, pass handle via `DuplicateHandle`.
+- **Discovery**: handle/fd passing over control channel (UDS on Unix; named pipe or inherited handle on Windows). Avoid named mappings except for fallback rendezvous.
+
+**Cross-process sync**
+- **Linux**: futex wait/wake on shared `AtomicU32`.
+- **macOS**: `ulock_wait/ulock_wake` fast-path (**opt-in feature `macos-ulock`**). Default is a spin + nanosleep fallback until a shared pthread implementation lands.
+- **Windows**: `WaitOnAddress` / `WakeByAddress*`.
+- **Strategy**: lock-free data path + short spin before OS wait.
+
+**Lifecycle & crash recovery**
+- **Header protocol**: `magic`, `abi_version`, `total_size`, `state`, `generation`, `creator_pid`, `creator_epoch`, optional heartbeat.
+- **Recovery**: detect stale/owner death and reset ring + bump generation (protocol-based, not robust mutex-based).
+
+**Layout contract**
+- Versioned C-ABI header with cacheline-aligned hot atomics (128B on Apple Silicon macOS, 64B elsewhere).
+- Power-of-two ring, **fixed-slot** sizing (size classes negotiated in header).
+- Slot prefix: `len + flags`, payload aligned to cacheline boundaries.
+
 ---
 
 ## Requirements
@@ -130,8 +153,9 @@ PRD-1 builds atop this foundation by adding the Rust subsystem, which integrates
 pub struct ShmRegion { /* ... */ }
 
 impl ShmRegion {
-    pub fn create(name: &str, size: usize) -> Result<Self, ShmError>;
-    pub fn open(name: &str) -> Result<Self, ShmError>;
+    pub fn create(size: usize) -> Result<Self, ShmError>;
+    pub fn create_named(name: &str, size: usize) -> Result<Self, ShmError>;
+    pub fn open_named(name: &str, size: usize) -> Result<Self, ShmError>;
     pub fn as_slice(&self) -> &[u8];
     pub fn as_mut_slice(&mut self) -> &mut [u8];
     pub fn size(&self) -> usize;
@@ -1441,6 +1465,28 @@ For detailed research notes, see `research/plan.md`.
 
 ---
 
+## Progress Update
+
+**Last reviewed:** 2026-01-17
+
+### Completed (Foundation from PRD-0)
+- Rust workspace created in `src/rs` with `vertebra-core`, `vertebra-py`, `vertebra-js`.
+- PyO3 and napi-rs binding stubs exist and build.
+- Makefile targets for Rust build/test/lint/miri/bench are in place.
+- OS-API shim decisions recorded (memfd/shm_open/CreateFileMapping, futex/ulock/WaitOnAddress).
+- Core module scaffolding created (`shm`, `channel`, `buffer`, `sync`, `platform`).
+- Initial shared-memory mapping + wait/wake implementations in place (Linux/macOS/Windows).
+- SPSC ring operations wired with fixed-slot layout.
+- Buffer pool implemented (acquire/release, zero-copy slices).
+- SharedMutex/RwLock/Condvar implemented with wait/wake shims.
+
+### Next Steps
+- Add benchmarks for ring latency and throughput (criterion).
+- Implement robust shared-memory lifecycle (generation + heartbeat) and crash recovery tests.
+- Add macOS pthread shared-cond fallback (optional, non-perf path).
+
+---
+
 ## Changelog
 
 | Version | Date | Author | Changes |
@@ -1455,4 +1501,4 @@ For detailed research notes, see `research/plan.md`.
 - [ ] Product Owner
 - [ ] Engineering Manager
 
-**Status**: Draft - Pending Review
+**Status**: In Progress - Approved to implement

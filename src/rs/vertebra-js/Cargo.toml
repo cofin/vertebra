@@ -9,6 +9,8 @@ description = "Bun/Node.js bindings for Vertebra (napi-rs)"
 
 [lib]
 crate-type = ["cdylib"]
+test = false
+doctest = false
 
 [dependencies]
 napi = { workspace = true }

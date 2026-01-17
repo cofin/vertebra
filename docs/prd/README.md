@@ -5,7 +5,7 @@ This directory contains Product Requirement Documents (PRDs) for the Vertebra pr
 ## Active PRDs
 
 ### [PRD-0: Foundation and Repository Cleanup](./PRD-0-foundation.md)
-**Status:** In Progress
+**Status:** Complete
 **Estimated Effort:** 3-5 days
 
 Complete removal of DMA legacy code and establishment of multi-language build infrastructure (Python + Rust + TypeScript/Bun).
@@ -30,6 +30,7 @@ grep -r "dma" --include="*.py" --include="*.toml" src/  # Should return empty
 ```
 
 ### [PRD-1: Rust Core IPC Layer](./PRD-1-rust-ipc.md)
+**Status:** In Progress
 Core IPC primitives, shared memory, lock-free channels, and Rust bindings.
 
 ### [PRD-2: Python Bindings and Type Bridge](./PRD-2-python-bindings.md)
