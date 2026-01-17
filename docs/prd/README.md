@@ -30,10 +30,11 @@ grep -r "dma" --include="*.py" --include="*.toml" src/  # Should return empty
 ```
 
 ### [PRD-1: Rust Core IPC Layer](./PRD-1-rust-ipc.md)
-**Status:** In Progress
+**Status:** Complete
 Core IPC primitives, shared memory, lock-free channels, and Rust bindings.
 
 ### [PRD-2: Python Bindings and Type Bridge](./PRD-2-python-bindings.md)
+**Status:** In Progress
 Decorator system, registry, type extraction, and TypeScript codegen bridge.
 
 ### [PRD-3: Bun Server and Protocol Support](./PRD-3-bun-server.md)

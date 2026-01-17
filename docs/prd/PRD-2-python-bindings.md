@@ -1,6 +1,6 @@
 # PRD-2: Python Bindings and Type Bridge
 
-**Status:** Draft
+**Status:** In Progress
 **Version:** 1.0
 **Created:** 2026-01-17
 **Owner:** Vertebra Core Team

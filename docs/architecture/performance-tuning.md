@@ -20,6 +20,9 @@
 ## Synchronization
 
 - The fast path is lock-free; wait/wake is only on backpressure.
+- Timeout paths use OS waits (`wait_on_address_timeout`) instead of busy-yield loops.
+- macOS defaults to a bounded spin + nanosleep fallback; enable `macos-ulock`
+  for lower-latency waits.
 - File-lock fallback is available if wait primitives are unavailable.
 
 ## Benchmarking

@@ -156,6 +156,10 @@ impl WaitWord {
         wait_on_address(&self.word, expected)
     }
 
+    pub fn wait_timeout(&self, expected: u32, timeout: Duration) -> Result<bool, SyncError> {
+        wait_on_address_timeout(&self.word, expected, timeout)
+    }
+
     pub fn wake_one(&self) -> Result<(), SyncError> {
         wake_one(&self.word)
     }
@@ -182,12 +186,51 @@ pub fn wait_on_address(word: &AtomicU32, expected: u32) -> Result<(), SyncError>
     }
 }
 
+pub fn wait_on_address_timeout(
+    word: &AtomicU32,
+    expected: u32,
+    timeout: Duration,
+) -> Result<bool, SyncError> {
+    if timeout.is_zero() {
+        return Ok(false);
+    }
+    if fallback_enabled() {
+        return Ok(fallback_wait_timeout(word, expected, timeout));
+    }
+    match platform::wait_on_address_timeout(word, expected, timeout) {
+        Ok(result) => {
+            mark_wait_ready();
+            Ok(result)
+        }
+        Err(err) if wait_is_unsupported(&err) => {
+            enable_fallback("wait primitive unsupported");
+            Ok(fallback_wait_timeout(word, expected, timeout))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 pub fn wake_one(word: &AtomicU32) -> Result<(), SyncError> {
     platform::wake_one(word)
 }
 
 pub fn wake_all(word: &AtomicU32) -> Result<(), SyncError> {
     platform::wake_all(word)
+}
+
+fn fallback_wait_timeout(word: &AtomicU32, expected: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if word.load(Ordering::Acquire) != expected {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let remaining = deadline - now;
+        std::thread::sleep(remaining.min(Duration::from_millis(1)));
+    }
 }
 
 /// A shared mutex intended for use in shared memory.

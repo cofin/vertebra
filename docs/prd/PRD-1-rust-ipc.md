@@ -121,6 +121,7 @@ PRD-1 builds atop this foundation by adding the Rust subsystem, which integrates
 - **macOS**: `ulock_wait/ulock_wake` fast-path (**opt-in feature `macos-ulock`**). Default is a spin + nanosleep fallback until a shared pthread implementation lands.
 - **Windows**: `WaitOnAddress` / `WakeByAddress*`.
 - **Strategy**: lock-free data path + short spin before OS wait.
+- **Timeouts**: `wait_on_address_timeout` uses OS-native timed waits (futex/ulock/WaitOnAddress) with bounded spin fallback on macOS when ulock is disabled.
 
 **Lifecycle & crash recovery**
 - **Header protocol**: `magic`, `abi_version`, `total_size`, `state`, `generation`, `creator_pid`, `creator_epoch`, optional heartbeat.

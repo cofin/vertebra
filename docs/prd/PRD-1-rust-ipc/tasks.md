@@ -366,8 +366,8 @@
 - [ ] 7.4.3 - Run coverage report (target: 90%+)
 - [ ] 7.4.4 - Run benchmarks (verify targets met)
 - [ ] 7.4.5 - Run valgrind (no leaks)
-- [ ] 7.4.6 - Run clippy (no warnings)
-- [ ] 7.4.7 - Run rustfmt (consistent formatting)
+- [x] 7.4.6 - Run clippy (no warnings)
+- [x] 7.4.7 - Run rustfmt (consistent formatting)
 - [x] 7.4.8 - Run Python tests (integration)
 
 ### Release Preparation

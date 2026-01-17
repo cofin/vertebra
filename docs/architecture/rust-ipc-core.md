@@ -48,11 +48,23 @@ Buffers live in a shared `BufferPool`, enabling zero-copy transfers.
 `sync.rs` wraps platform wait/wake primitives:
 
 - Linux: futex
-- macOS: ulock (opt-in) + spin fallback
+- macOS: ulock (opt-in) + spin/sleep fallback
 - Windows: WaitOnAddress/WakeByAddress
 
 Shared mutex/rwlock/condvar types are built atop these primitives, with a
 file-lock fallback for environments lacking wait/wake support.
+
+### OS-API Shim (Timed Waits)
+
+Timeout-based waits route through the OS shim to avoid busy-yield loops:
+
+- Linux: `futex(FUTEX_WAIT)` with `timespec`.
+- macOS: `__ulock_wait` with timeout (feature `macos-ulock`), otherwise a
+  bounded spin + nanosleep loop.
+- Windows: `WaitOnAddress` with millisecond timeout.
+
+SPSC `send_timeout` / `recv_timeout` use `wait_on_address_timeout`, so the
+data path stays lock-free while backpressure waits are handled by the OS.
 
 ## FFI Surface
 

@@ -14,9 +14,9 @@ PRD-2 defines the Python bindings layer for Vertebra, a tRPC-like framework that
 
 ### Current Status
 
-- **PRD Status:** Complete, ready for implementation
-- **Phase:** Planning complete, implementation not started
-- **Dependencies:** PRD-1 (Rust Core IPC Layer) required for Phase 3
+- **PRD Status:** In Progress
+- **Phase:** Phase 1 underway (decorator/registry/type IR + TS generator)
+- **Dependencies:** PRD-1 complete; required for Phase 3 IPC integration
 
 ### Key Documents
 
@@ -114,6 +114,26 @@ TypeScript Client (Vite plugin)
 - TypeScript generator for basic types
 
 **Deliverable:** Can register procedures and generate TypeScript for simple types.
+
+**Implemented So Far (2026-01-17):**
+- `src/py/vertebra/procedures/decorator.py` (`@procedure` + metadata wiring)
+- `src/py/vertebra/procedures/registry.py` (thread-safe registry + metadata dataclass)
+- `src/py/vertebra/types/ir.py` (Type IR nodes)
+- `src/py/vertebra/types/extractor.py` (primitive/collection/union extraction + AST cache)
+- `src/py/vertebra/types/extractor.py` (msgspec.Struct AST extraction + optional runtime metadata merge via msgspec.inspect)
+- `src/py/vertebra/types/extractor.py` (pydantic.BaseModel AST extraction + optional runtime metadata merge)
+- `src/py/vertebra/types/extractor.py` (pydantic model_json_schema fallback + $ref conversion)
+- `src/py/vertebra/types/extractor.py` (pydantic discriminator metadata via JSON Schema)
+- `src/py/vertebra/types/extractor.py` (dataclass + TypedDict AST extraction)
+- `src/py/vertebra/types/extractor.py` (Generic[T] extraction + TS generics support)
+- `src/py/vertebra/types/extractor.py` (forward-reference resolution + import/cache helpers)
+- `src/py/vertebra/types/typescript.py` (cycle detection emits type aliases for recursive types)
+- `src/py/vertebra/types/ir.py` + `types.typescript` now carry `AnnotatedType` metadata into TypeScript comments
+- `src/py/vertebra/types/typescript.py` (basic .d.ts generator + namespace grouping + topo sort + validation + formatting helper)
+- Tests: `src/py/tests/test_procedures.py`, `src/py/tests/test_types.py`
+
+**Validation Note:** `validate_typescript()` uses `bunx tsc` or `tsc` when available.
+If the compiler is unavailable or cannot write temp files, validation is skipped.
 
 ### Phase 2: Advanced Type System (3 weeks)
 
@@ -246,9 +266,9 @@ packages/@vertebra/vite-plugin/
 
 ### 3. Incomplete Type Coverage
 
-**Problem:** Edge cases like `TypeVar`, `ParamSpec` fail to extract.
+**Problem:** Edge cases like `ParamSpec` fail to extract.
 
-**Solution:** Document limitations upfront, provide escape hatches (type_overrides parameter).
+**Solution:** TypeVar bounds/constraints are now captured; document remaining limitations (ParamSpec) and provide escape hatches (type_overrides parameter).
 
 ### 4. HMR Latency
 

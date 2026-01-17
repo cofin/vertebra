@@ -1,6 +1,6 @@
 # Implementation Tasks for PRD-2: Python Bindings and Type Bridge
 
-**Status:** Ready for Implementation
+**Status:** In Progress
 **Estimated Duration:** 9 weeks
 **Dependencies:** PRD-1 (Rust Core IPC Layer) - required for Phase 3
 
@@ -10,34 +10,34 @@
 
 ### Milestone 1.1: Decorator & Registry (3 days)
 
-- [ ] **T1.1.1:** Implement `@procedure` decorator
-  - [ ] Create `vertebra/procedures/decorator.py`
-  - [ ] Basic decorator that wraps handler functions
-  - [ ] Extract function signature using `inspect.signature()`
-  - [ ] Extract type hints using `typing.get_type_hints(..., include_extras=True)`
-  - [ ] Support optional parameters (name, serializer, metadata)
-  - [ ] Use `functools.wraps` to preserve metadata
+- [x] **T1.1.1:** Implement `@procedure` decorator
+  - [x] Create `vertebra/procedures/decorator.py`
+  - [x] Basic decorator that wraps handler functions
+  - [x] Extract function signature using `inspect.signature()`
+  - [x] Extract type hints using `typing.get_type_hints(..., include_extras=True)`
+  - [x] Support optional parameters (name, serializer, metadata)
+  - [x] Use `functools.wraps` to preserve metadata
 
-- [ ] **T1.1.2:** Implement ProcedureRegistry
-  - [ ] Create `vertebra/procedures/registry.py`
-  - [ ] Define `ProcedureMetadata` dataclass
-  - [ ] Implement singleton pattern for global registry
-  - [ ] Add thread-safe registration methods (Lock-based)
-  - [ ] Add query methods (get_procedures, get_procedure)
-  - [ ] Add update/unregister methods for hot reload
+- [x] **T1.1.2:** Implement ProcedureRegistry
+  - [x] Create `vertebra/procedures/registry.py`
+  - [x] Define `ProcedureMetadata` dataclass
+  - [x] Implement singleton pattern for global registry
+  - [x] Add thread-safe registration methods (Lock-based)
+  - [x] Add query methods (get_procedures, get_procedure)
+  - [x] Add update/unregister methods for hot reload
 
 - [ ] **T1.1.3:** Litestar Integration
   - [ ] Test decorator stacking with `@get`, `@post`, etc.
   - [ ] Verify metadata preservation
-  - [ ] Add procedure metadata to Litestar route `opt` dict
+  - [x] Add procedure metadata to Litestar route `opt` dict
   - [ ] Test with Litestar dependency injection
 
-- [ ] **T1.1.4:** Unit Tests
-  - [ ] Test decorator basic functionality
-  - [ ] Test decorator parameters (name, serializer, metadata)
-  - [ ] Test registry registration/query operations
-  - [ ] Test thread safety (concurrent registration)
-  - [ ] Test Litestar integration
+- [x] **T1.1.4:** Unit Tests
+  - [x] Test decorator basic functionality
+  - [x] Test decorator parameters (name, serializer, metadata)
+  - [x] Test registry registration/query operations
+  - [x] Test thread safety (concurrent registration)
+  - [x] Test Litestar integration
 
 **Deliverable:** Working `@procedure` decorator and registry
 
@@ -45,48 +45,48 @@
 
 ### Milestone 1.2: Basic Type Extraction (5 days)
 
-- [ ] **T1.2.1:** Type IR Foundation
-  - [ ] Create `vertebra/types/ir.py`
-  - [ ] Implement `TypeNode` abstract base class
-  - [ ] Implement `PrimitiveType` (int, str, float, bool, null, bytes)
-  - [ ] Implement `ArrayType` with generic item type
-  - [ ] Implement `ObjectType` with fields dict
-  - [ ] Implement `UnionType` with variants list
-  - [ ] Implement `LiteralType` for literal values
-  - [ ] Add `to_typescript()` method to each type node
+- [x] **T1.2.1:** Type IR Foundation
+  - [x] Create `vertebra/types/ir.py`
+  - [x] Implement `TypeNode` abstract base class
+  - [x] Implement `PrimitiveType` (int, str, float, bool, null, bytes)
+  - [x] Implement `ArrayType` with generic item type
+  - [x] Implement `ObjectType` with fields dict
+  - [x] Implement `UnionType` with variants list
+  - [x] Implement `LiteralType` for literal values
+  - [x] Add `to_typescript()` method to each type node
 
-- [ ] **T1.2.2:** Type Extractor - Primitives
-  - [ ] Create `vertebra/types/extractor.py`
-  - [ ] Implement `TypeExtractor` class
-  - [ ] Map Python primitives to Type IR (int→number, str→string, etc.)
-  - [ ] Handle `None` → `null`
-  - [ ] Handle `bytes` → `Uint8Array`
+- [x] **T1.2.2:** Type Extractor - Primitives
+  - [x] Create `vertebra/types/extractor.py`
+  - [x] Implement `TypeExtractor` class
+  - [x] Map Python primitives to Type IR (int→number, str→string, etc.)
+  - [x] Handle `None` → `null`
+  - [x] Handle `bytes` → `Uint8Array`
 
-- [ ] **T1.2.3:** Type Extractor - Collections
-  - [ ] Extract `list[T]` → `ArrayType`
-  - [ ] Extract `dict[K, V]` → `GenericType("Record")`
-  - [ ] Extract `set[T]` → `GenericType("Set")`
-  - [ ] Extract `tuple[T, ...]` → `ArrayType` (variable length)
-  - [ ] Extract `tuple[T1, T2]` → tuple type (fixed length)
+- [x] **T1.2.3:** Type Extractor - Collections
+  - [x] Extract `list[T]` → `ArrayType`
+  - [x] Extract `dict[K, V]` → `GenericType("Record")`
+  - [x] Extract `set[T]` → `GenericType("Set")`
+  - [x] Extract `tuple[T, ...]` → `ArrayType` (variable length)
+  - [x] Extract `tuple[T1, T2]` → tuple type (fixed length)
 
-- [ ] **T1.2.4:** Type Extractor - Optional/Union
-  - [ ] Extract `Optional[T]` → `UnionType([T, null])`
-  - [ ] Extract `T | None` → `UnionType([T, null])`
-  - [ ] Extract `Union[T1, T2]` → `UnionType([T1, T2])`
-  - [ ] Extract `T1 | T2` → `UnionType([T1, T2])`
+- [x] **T1.2.4:** Type Extractor - Optional/Union
+  - [x] Extract `Optional[T]` → `UnionType([T, null])`
+  - [x] Extract `T | None` → `UnionType([T, null])`
+  - [x] Extract `Union[T1, T2]` → `UnionType([T1, T2])`
+  - [x] Extract `T1 | T2` → `UnionType([T1, T2])`
 
-- [ ] **T1.2.5:** Type Extractor - AST Setup
-  - [ ] Add `from_source_file(path)` method
-  - [ ] Parse Python file using `ast.parse()`
-  - [ ] Walk AST to find class definitions
-  - [ ] Cache parsed ASTs by file hash
+- [x] **T1.2.5:** Type Extractor - AST Setup
+  - [x] Add `from_source_file(path)` method
+  - [x] Parse Python file using `ast.parse()`
+  - [x] Walk AST to find class definitions
+  - [x] Cache parsed ASTs by file hash
 
-- [ ] **T1.2.6:** Unit Tests
-  - [ ] Test primitive type extraction
-  - [ ] Test collection type extraction
-  - [ ] Test optional/union type extraction
-  - [ ] Test Type IR node construction
-  - [ ] Test TypeScript generation for basic types
+- [x] **T1.2.6:** Unit Tests
+  - [x] Test primitive type extraction
+  - [x] Test collection type extraction
+  - [x] Test optional/union type extraction
+  - [x] Test Type IR node construction
+  - [x] Test TypeScript generation for basic types
 
 **Deliverable:** Type extraction for primitives, collections, optional/union types
 
@@ -94,37 +94,37 @@
 
 ### Milestone 1.3: TypeScript Generator (4 days)
 
-- [ ] **T1.3.1:** Basic TypeScript Generation
-  - [ ] Create `vertebra/types/typescript.py`
-  - [ ] Implement `TypeScriptGenerator` class
-  - [ ] Generate interface definitions from `ObjectType`
-  - [ ] Generate type aliases from `UnionType`, `LiteralType`
-  - [ ] Generate proper TypeScript syntax
+- [x] **T1.3.1:** Basic TypeScript Generation
+  - [x] Create `vertebra/types/typescript.py`
+  - [x] Implement `TypeScriptGenerator` class
+  - [x] Generate interface definitions from `ObjectType`
+  - [x] Generate type aliases from `UnionType`, `LiteralType`
+  - [x] Generate proper TypeScript syntax
 
-- [ ] **T1.3.2:** Procedure Signature Generation
-  - [ ] Generate function signatures from `ProcedureMetadata`
-  - [ ] Format parameters as object type
-  - [ ] Format return type as `Promise<T>`
-  - [ ] Group procedures by namespace (controller path)
+- [x] **T1.3.2:** Procedure Signature Generation
+  - [x] Generate function signatures from `ProcedureMetadata`
+  - [x] Format parameters as object type
+  - [x] Format return type as `Promise<T>`
+  - [x] Group procedures by namespace (controller path)
 
-- [ ] **T1.3.3:** Module Assembly
-  - [ ] Collect all types used by procedures
-  - [ ] Deduplicate identical types
-  - [ ] Topologically sort types (handle dependencies)
-  - [ ] Generate header comment (DO NOT EDIT)
-  - [ ] Export namespace structure
+- [x] **T1.3.3:** Module Assembly
+  - [x] Collect all types used by procedures
+  - [x] Deduplicate identical types
+  - [x] Topologically sort types (handle dependencies)
+  - [x] Generate header comment (DO NOT EDIT)
+  - [x] Export namespace structure
 
-- [ ] **T1.3.4:** Output Validation
-  - [ ] Run generated .d.ts through TypeScript compiler
-  - [ ] Verify syntax correctness
-  - [ ] Add formatting (prettier-style)
+- [x] **T1.3.4:** Output Validation
+  - [x] Run generated .d.ts through TypeScript compiler
+  - [x] Verify syntax correctness
+  - [x] Add formatting (prettier-style)
 
-- [ ] **T1.3.5:** Unit Tests
-  - [ ] Test interface generation
-  - [ ] Test procedure signature generation
-  - [ ] Test namespace grouping
-  - [ ] Test type deduplication
-  - [ ] Validate generated TypeScript compiles
+- [x] **T1.3.5:** Unit Tests
+  - [x] Test interface generation
+  - [x] Test procedure signature generation
+  - [x] Test namespace grouping
+  - [x] Test type deduplication
+  - [x] Validate generated TypeScript compiles
 
 **Deliverable:** TypeScript .d.ts generation for basic procedures
 
@@ -134,34 +134,34 @@
 
 ### Milestone 2.1: msgspec.Struct Support (5 days)
 
-- [ ] **T2.1.1:** Struct AST Extraction
-  - [ ] Extract fields from `msgspec.Struct` via AST
-  - [ ] Walk class body for `AnnAssign` nodes
-  - [ ] Extract field names and type annotations
-  - [ ] Handle default values (field optional if has default)
+- [x] **T2.1.1:** Struct AST Extraction
+  - [x] Extract fields from `msgspec.Struct` via AST
+  - [x] Walk class body for `AnnAssign` nodes
+  - [x] Extract field names and type annotations
+  - [x] Handle default values (field optional if has default)
 
 - [ ] **T2.1.2:** Nested Struct Support
-  - [ ] Detect when field type is another Struct
-  - [ ] Recursively extract nested Struct definitions
-  - [ ] Handle circular references (detect and break cycle)
+  - [x] Detect when field type is another Struct
+  - [x] Recursively extract nested Struct definitions
+  - [x] Handle circular references (detect and break cycle)
 
-- [ ] **T2.1.3:** msgspec.inspect Integration
-  - [ ] Use `msgspec.inspect.type_info()` for metadata
-  - [ ] Extract field constraints (min_length, max_length, etc.)
-  - [ ] Extract validation metadata
-  - [ ] Compare AST vs runtime introspection (prefer AST)
+- [x] **T2.1.3:** msgspec.inspect Integration
+  - [x] Use `msgspec.inspect.type_info()` for metadata
+  - [x] Extract field constraints (min_length, max_length, etc.)
+  - [x] Extract validation metadata
+  - [x] Compare AST vs runtime introspection (prefer AST)
 
-- [ ] **T2.1.4:** Type Metadata
-  - [ ] Extract `Annotated[T, Meta(...)]` metadata
-  - [ ] Store constraints in Type IR (for future JSON Schema)
-  - [ ] Document in TypeScript comments
+- [x] **T2.1.4:** Type Metadata
+  - [x] Extract `Annotated[T, Meta(...)]` metadata
+  - [x] Store constraints in Type IR (for future JSON Schema)
+  - [x] Document in TypeScript comments
 
-- [ ] **T2.1.5:** Unit Tests
-  - [ ] Test simple Struct extraction
-  - [ ] Test nested Struct extraction
-  - [ ] Test circular reference handling
-  - [ ] Test field optionality
-  - [ ] Test metadata extraction
+- [x] **T2.1.5:** Unit Tests
+  - [x] Test simple Struct extraction
+  - [x] Test nested Struct extraction
+  - [x] Test circular reference handling
+  - [x] Test field optionality
+  - [x] Test metadata extraction
 
 **Deliverable:** Full msgspec.Struct support
 
@@ -169,28 +169,28 @@
 
 ### Milestone 2.2: Pydantic Support (4 days)
 
-- [ ] **T2.2.1:** BaseModel Extraction
-  - [ ] Extract fields from `pydantic.BaseModel` via AST
-  - [ ] Use `model_fields` for runtime metadata
-  - [ ] Handle field validators
-  - [ ] Handle computed fields (exclude from TypeScript)
+- [x] **T2.2.1:** BaseModel Extraction
+  - [x] Extract fields from `pydantic.BaseModel` via AST
+  - [x] Use `model_fields` for runtime metadata
+  - [x] Handle field validators
+  - [x] Handle computed fields (exclude from TypeScript)
 
 - [ ] **T2.2.2:** Pydantic v2 Features
-  - [ ] Support `Field()` configuration
-  - [ ] Extract field descriptions
-  - [ ] Handle field aliases
-  - [ ] Support discriminated unions (via `model_config`)
+  - [x] Support `Field()` configuration
+  - [x] Extract field descriptions
+  - [x] Handle field aliases
+  - [x] Support discriminated unions (via `model_config`)
 
-- [ ] **T2.2.3:** model_json_schema Integration
-  - [ ] Use `model_json_schema()` as fallback
-  - [ ] Convert JSON Schema to Type IR
-  - [ ] Handle $ref references
+- [x] **T2.2.3:** model_json_schema Integration
+  - [x] Use `model_json_schema()` as fallback
+  - [x] Convert JSON Schema to Type IR
+  - [x] Handle $ref references
 
-- [ ] **T2.2.4:** Unit Tests
-  - [ ] Test BaseModel extraction
-  - [ ] Test Field() configuration
-  - [ ] Test validators (ensure they don't break extraction)
-  - [ ] Test json_schema fallback
+- [x] **T2.2.4:** Unit Tests
+  - [x] Test BaseModel extraction
+  - [x] Test Field() configuration
+  - [x] Test validators (ensure they don't break extraction)
+  - [x] Test json_schema fallback
 
 **Deliverable:** Full Pydantic v2 BaseModel support
 
@@ -198,40 +198,40 @@
 
 ### Milestone 2.3: Advanced Types (5 days)
 
-- [ ] **T2.3.1:** Literal Types
-  - [ ] Extract `Literal["a", "b"]` → union of string literals
-  - [ ] Extract `Literal[1, 2]` → union of numeric literals
-  - [ ] Extract `Literal[True, False]` → boolean literals
-  - [ ] Implement `LiteralType` in Type IR
+- [x] **T2.3.1:** Literal Types
+  - [x] Extract `Literal["a", "b"]` → union of string literals
+  - [x] Extract `Literal[1, 2]` → union of numeric literals
+  - [x] Extract `Literal[True, False]` → boolean literals
+  - [x] Implement `LiteralType` in Type IR
 
 - [ ] **T2.3.2:** Generic Types
-  - [ ] Extract `Generic[T]` class definitions
-  - [ ] Map generic parameters to TypeScript generics
-  - [ ] Handle bounded generics (limited support)
-  - [ ] Document limitations (TypeVar constraints)
+  - [x] Extract `Generic[T]` class definitions
+  - [x] Map generic parameters to TypeScript generics
+  - [x] Handle bounded generics (limited support)
+  - [x] Document limitations (TypeVar constraints)
 
-- [ ] **T2.3.3:** dataclass Support
-  - [ ] Extract fields from `@dataclass` via AST
-  - [ ] Use `__dataclass_fields__` for metadata
-  - [ ] Handle field() configuration
-  - [ ] Handle InitVar and ClassVar (skip in TypeScript)
+- [x] **T2.3.3:** dataclass Support
+  - [x] Extract fields from `@dataclass` via AST
+  - [x] Use `__dataclass_fields__` for metadata
+  - [x] Handle field() configuration
+  - [x] Handle InitVar and ClassVar (skip in TypeScript)
 
-- [ ] **T2.3.4:** TypedDict Support
-  - [ ] Extract TypedDict fields via AST
-  - [ ] Handle total=False (all fields optional)
-  - [ ] Handle Required[] and NotRequired[]
+- [x] **T2.3.4:** TypedDict Support
+  - [x] Extract TypedDict fields via AST
+  - [x] Handle total=False (all fields optional)
+  - [x] Handle Required[] and NotRequired[]
 
-- [ ] **T2.3.5:** Annotated Metadata
-  - [ ] Extract `Annotated[T, ...]` and unwrap to T
-  - [ ] Preserve metadata for future use
-  - [ ] Document validation constraints in TS comments
+- [x] **T2.3.5:** Annotated Metadata
+  - [x] Extract `Annotated[T, ...]` and unwrap to T
+  - [x] Preserve metadata for future use
+  - [x] Document validation constraints in TS comments
 
 - [ ] **T2.3.6:** Unit Tests
-  - [ ] Test literal types
-  - [ ] Test generic types
-  - [ ] Test dataclass extraction
-  - [ ] Test TypedDict extraction
-  - [ ] Test Annotated metadata
+  - [x] Test literal types
+  - [x] Test generic types
+  - [x] Test dataclass extraction
+  - [x] Test TypedDict extraction
+  - [x] Test Annotated metadata
 
 **Deliverable:** Support for advanced Python type constructs
 
@@ -239,34 +239,34 @@
 
 ### Milestone 2.4: Type Resolution (3 days)
 
-- [ ] **T2.4.1:** Forward Reference Resolution
-  - [ ] Detect string annotations (e.g., `"User"`)
-  - [ ] Resolve within same module
-  - [ ] Resolve from imports
-  - [ ] Fallback to `any` with warning if unresolved
+- [x] **T2.4.1:** Forward Reference Resolution
+  - [x] Detect string annotations (e.g., `"User"`)
+  - [x] Resolve within same module
+  - [x] Resolve from imports
+  - [x] Fallback to `any` with warning if unresolved
 
-- [ ] **T2.4.2:** Circular Reference Detection
-  - [ ] Track type dependency graph during extraction
-  - [ ] Detect cycles (e.g., Node → Node)
-  - [ ] Use TypeScript `type` keyword for recursive types
+- [x] **T2.4.2:** Circular Reference Detection
+  - [x] Track type dependency graph during extraction
+  - [x] Detect cycles (e.g., Node → Node)
+  - [x] Use TypeScript `type` keyword for recursive types
 
-- [ ] **T2.4.3:** Import Resolution
-  - [ ] Parse import statements from AST
-  - [ ] Resolve imported types to their source files
-  - [ ] Cache imported type definitions
-  - [ ] Handle relative imports
+- [x] **T2.4.3:** Import Resolution
+  - [x] Parse import statements from AST
+  - [x] Resolve imported types to their source files
+  - [x] Cache imported type definitions
+  - [x] Handle relative imports
 
-- [ ] **T2.4.4:** Caching Strategy
-  - [ ] Hash file contents for cache keys
-  - [ ] Cache parsed AST per file
-  - [ ] Cache extracted types per class
-  - [ ] Invalidate cache on file change
+- [x] **T2.4.4:** Caching Strategy
+  - [x] Hash file contents for cache keys
+  - [x] Cache parsed AST per file
+  - [x] Cache extracted types per class
+  - [x] Invalidate cache on file change
 
-- [ ] **T2.4.5:** Unit Tests
-  - [ ] Test forward reference resolution
-  - [ ] Test circular reference detection
-  - [ ] Test import resolution
-  - [ ] Test cache invalidation
+- [x] **T2.4.5:** Unit Tests
+  - [x] Test forward reference resolution
+  - [x] Test circular reference detection
+  - [x] Test import resolution
+  - [x] Test cache invalidation
 
 **Deliverable:** Robust type resolution and caching
 
@@ -278,32 +278,32 @@
 
 ### Milestone 3.1: Serialization Framework (3 days)
 
-- [ ] **T3.1.1:** Serializer Protocol
-  - [ ] Create `vertebra/procedures/serialization.py`
-  - [ ] Define `Serializer` Protocol class
-  - [ ] Add methods: `serialize()`, `deserialize()`, `get_type_metadata()`
+- [x] **T3.1.1:** Serializer Protocol
+  - [x] Create `vertebra/procedures/serialization.py`
+  - [x] Define `Serializer` Protocol class
+  - [x] Add methods: `serialize()`, `deserialize()`, `get_type_metadata()`
 
-- [ ] **T3.1.2:** MsgspecSerializer
-  - [ ] Implement using `msgspec.json.Encoder/Decoder`
-  - [ ] Cache encoders/decoders per type
-  - [ ] Use `msgspec.inspect` for type metadata
-  - [ ] Optimize for Struct types
+- [x] **T3.1.2:** MsgspecSerializer
+  - [x] Implement using `msgspec.json.Encoder/Decoder`
+  - [x] Cache encoders/decoders per type
+  - [x] Use `msgspec.inspect` for type metadata
+  - [x] Optimize for Struct types
 
-- [ ] **T3.1.3:** PydanticSerializer
-  - [ ] Implement using `model_dump_json()` / `model_validate_json()`
-  - [ ] Handle validation errors
-  - [ ] Use `model_fields` for type metadata
+- [x] **T3.1.3:** PydanticSerializer
+  - [x] Implement using `model_dump_json()` / `model_validate_json()`
+  - [x] Handle validation errors
+  - [x] Use `model_fields` for type metadata
 
-- [ ] **T3.1.4:** Auto-Detection
-  - [ ] Implement `detect_serializer(type_hint)` function
-  - [ ] Check if type is msgspec.Struct → "msgspec"
-  - [ ] Check if type is BaseModel → "pydantic"
-  - [ ] Default to "msgspec"
+- [x] **T3.1.4:** Auto-Detection
+  - [x] Implement `detect_serializer(type_hint)` function
+  - [x] Check if type is msgspec.Struct → "msgspec"
+  - [x] Check if type is BaseModel → "pydantic"
+  - [x] Default to "msgspec"
 
-- [ ] **T3.1.5:** Unit Tests
-  - [ ] Test msgspec roundtrip serialization
-  - [ ] Test pydantic roundtrip serialization
-  - [ ] Test auto-detection logic
+- [x] **T3.1.5:** Unit Tests
+  - [x] Test msgspec roundtrip serialization
+  - [x] Test pydantic roundtrip serialization
+  - [x] Test auto-detection logic
   - [ ] Benchmark serialization performance
 
 **Deliverable:** Pluggable serialization framework

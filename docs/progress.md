@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-- PRD-1 Rust IPC core layer (completed).
+- PRD-2 Python bindings + type bridge (in progress).
 
 ## Progress (PRD-0)
 
@@ -30,6 +30,7 @@
 - SPSC shared-memory ring + MPMC ring (epoch/sequence-based) with backpressure.
 - Buffer pool + buffer channel (zero-copy metadata handoff) and Arrow IPC helpers.
 - Cross-platform wait/wake shim with file-lock fallback and shared mutex/rwlock/condvar.
+- Timed wait OS shim (futex/ulock/WaitOnAddress) wired into SPSC timeout paths.
 - Rust benchmarks (SPSC ping-pong + throughput, MPMC baseline).
 - PyO3 + napi bindings (ShmRegion, BufferPool, SPSC/MPMC, BufferChannel).
 - Multi-process tests for shared memory and shared mutex.
@@ -41,8 +42,34 @@
 - `cargo doc --workspace --no-deps` passed on 2026-01-17.
 - `uv run pytest src/py/tests` passed on 2026-01-17.
 - `bun test` passed on 2026-01-17.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed on 2026-01-17.
+- `cargo fmt --all` completed on 2026-01-17.
+
+## Progress (PRD-2)
+
+### Completed
+- Implemented `@procedure` decorator with registry integration and Litestar opt metadata.
+- Added thread-safe `ProcedureRegistry` + `ProcedureMetadata` dataclass.
+- Built Type IR (primitive, array, object, union, literal, tuple, generic, raw/unknown).
+- Implemented TypeExtractor for primitives, collections, unions/optionals, literals, and AST cache.
+- Added msgspec.Struct AST extraction with nested type references.
+- Added optional msgspec.inspect metadata merge (best-effort when msgspec is installed).
+- Added pydantic BaseModel AST extraction + runtime metadata merge (Field description/alias).
+- Added JSON Schema fallback for pydantic models with $ref resolution.
+- Added discriminator metadata support for pydantic unions via JSON Schema.
+- Added dataclass and TypedDict AST extraction with Required/NotRequired handling.
+- Added Generic[T] extraction with TS generics + TypeVar bounds/constraints emitted as `extends`.
+- Added forward-reference resolution for local and imported types with AST/import caches.
+- Added cycle detection for recursive types and cache invalidation tests.
+- Captured Annotated metadata in Type IR and rendered comments in TypeScript output.
+- Added TypeScript generator (interfaces + namespace grouping + topo sort + validation + formatting helpers).
+- Added serializer protocol with msgspec + pydantic backends, registry helpers, and auto-detection.
+
+### Verified
+- `uv run pytest src/py/tests` passed on 2026-01-17.
 
 ## Next Steps
-### Start PRD-2
-- Build Python-first API surface and type bridge (AST + HMR).
-- Align Litestar-style API patterns with type generation.
+### Continue PRD-2
+- Phase 3: PyO3 IPC channel bindings + async integration.
+- Phase 3: BufferView zero-copy handoff and msgspec buffer integration.
+- HMR dev server + file watching for in-memory type updates.

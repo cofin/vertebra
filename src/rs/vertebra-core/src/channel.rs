@@ -196,16 +196,20 @@ impl SpscRing {
         flags: u32,
         timeout: Duration,
     ) -> Result<bool, ChannelError> {
-        let start = Instant::now();
+        let deadline = Instant::now() + timeout;
         loop {
             match self.try_send(payload, flags) {
                 Ok(()) => return Ok(true),
                 Err(ChannelError::Full) => {
-                    if start.elapsed() >= timeout {
+                    let now = Instant::now();
+                    if now >= deadline {
                         return Ok(false);
                     }
-                    std::thread::yield_now();
-                    std::thread::sleep(Duration::from_micros(50));
+                    let remaining = deadline - now;
+                    let head = self.read_head().load(Ordering::Acquire);
+                    if !sync::wait_on_address_timeout(self.read_head(), head, remaining)? {
+                        return Ok(false);
+                    }
                 }
                 Err(err) => return Err(err),
             }
@@ -243,16 +247,20 @@ impl SpscRing {
         out: &mut [u8],
         timeout: Duration,
     ) -> Result<Option<usize>, ChannelError> {
-        let start = Instant::now();
+        let deadline = Instant::now() + timeout;
         loop {
             match self.try_recv(out) {
                 Ok(len) => return Ok(Some(len)),
                 Err(ChannelError::Empty) => {
-                    if start.elapsed() >= timeout {
+                    let now = Instant::now();
+                    if now >= deadline {
                         return Ok(None);
                     }
-                    std::thread::yield_now();
-                    std::thread::sleep(Duration::from_micros(50));
+                    let remaining = deadline - now;
+                    let tail = self.write_head().load(Ordering::Acquire);
+                    if !sync::wait_on_address_timeout(self.write_head(), tail, remaining)? {
+                        return Ok(None);
+                    }
                 }
                 Err(err) => return Err(err),
             }

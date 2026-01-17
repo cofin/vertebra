@@ -2,6 +2,7 @@
 
 use core::sync::atomic::AtomicU32;
 use std::io;
+use std::time::Duration;
 
 use crate::sync::SyncError;
 
@@ -22,6 +23,40 @@ pub(crate) fn wait_on_address(word: &AtomicU32, expected: u32) -> Result<(), Syn
     let err = io::Error::last_os_error();
     match err.raw_os_error() {
         Some(libc::EAGAIN) | Some(libc::EINTR) => Ok(()),
+        _ => Err(SyncError::Syscall(err)),
+    }
+}
+
+pub(crate) fn wait_on_address_timeout(
+    word: &AtomicU32,
+    expected: u32,
+    timeout: Duration,
+) -> Result<bool, SyncError> {
+    if timeout.is_zero() {
+        return Ok(false);
+    }
+    let addr = word as *const AtomicU32 as *const u32;
+    let secs = timeout.as_secs().min(i64::MAX as u64) as i64;
+    let ts = libc::timespec {
+        tv_sec: secs as libc::time_t,
+        tv_nsec: timeout.subsec_nanos() as libc::c_long,
+    };
+    let res = unsafe {
+        libc::syscall(
+            libc::SYS_futex,
+            addr,
+            libc::FUTEX_WAIT,
+            expected,
+            &ts as *const libc::timespec,
+        )
+    } as i64;
+    if res == 0 {
+        return Ok(true);
+    }
+    let err = io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::ETIMEDOUT) => Ok(false),
+        Some(libc::EAGAIN) | Some(libc::EINTR) => Ok(true),
         _ => Err(SyncError::Syscall(err)),
     }
 }

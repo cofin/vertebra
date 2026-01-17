@@ -56,3 +56,5 @@ specs/
 .gemini
 src/rs/target
 .cargo/
+.tmp
+**/*/bun.lockb
