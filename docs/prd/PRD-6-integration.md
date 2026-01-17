@@ -85,6 +85,12 @@ By completing PRD-6, Vertebra will have:
 - Load testing at extreme scale (focus on comparative performance)
 - Internationalization/localization documentation
 
+### Assumptions and Constraints
+
+- **Cross-platform parity** (Linux/macOS/Windows) is a target for MVP; if deferred, the test harness must not block later parity.
+- **Docs tooling**: Sphinx + TypeDoc + rustdoc unless superseded by future tooling decisions.
+- **Benchmarking** will use reproducible hardware or containerized runners where possible.
+
 ---
 
 ## Deliverables
@@ -427,7 +433,7 @@ async fn process_orders(pool: SharedPool) {
 1. **Prerequisites**
    - Vertebra version compatibility
    - Python version requirements (3.12+)
-   - Node.js/Bun version requirements
+   - Bun version requirements (drivers are Bun-only; Node optional for tooling)
    - Rust toolchain (handled by Vertebra, transparent to users)
 
 2. **Dependency Changes**
@@ -1342,28 +1348,23 @@ jobs:
 This PRD is informed by industry best practices and research:
 
 ### Multi-Language Integration Testing
-- [Temporal's Rust Polyglot SDK Development](https://www.infoq.com/news/2025/11/temporal-rust-polygot-sdk/) - Architecture patterns for multi-language SDKs
-- [PyO3 Testing Patterns](https://github.com/cjermain/rust-python-coverage) - Automated test coverage for Rust and Python
-- [PyO3 User Guide](https://pyo3.rs/) - Python-Rust integration best practices
+- https://pyo3.rs/
 
 ### Performance Benchmarking
-- [The Correct Way to Benchmark Web Servers](https://georgelitos.com/post/benchmark-webserver/) - Methodology for accurate benchmarking
-- [wrk vs k6 Comparison](https://community.grafana.com/t/from-wrk-to-k6-equivalent-parameters-and-testing-methodology/111033) - Tool selection guidance
-- [k6 Documentation](https://grafana.com/docs/k6/latest/) - Modern load testing
+- https://grafana.com/docs/k6/latest/
 
 ### Testing Tools
-- [Testcontainers for Python](https://testcontainers.com/guides/getting-started-with-testcontainers-for-python/) - Integration testing with Docker
-- [Playwright WebSocket Testing](https://playwright.dev/docs/api/class-websocket) - WebSocket testing best practices
-- [DZone: Playwright for Real-Time Applications](https://dzone.com/articles/playwright-for-real-time-applications-testing-webs) - Testing WebSockets and live data
+- https://testcontainers-python.readthedocs.io/
+- https://playwright.dev/docs/api/class-websocket
+- https://docs.pytest.org/
 
 ### Documentation
-- [Polyglot Monorepo Documentation](https://github.com/dundalek/dinodoc) - Unified documentation for multiple languages
-- [Graphite: Managing Multiple Languages in a Monorepo](https://graphite.com/guides/managing-multiple-languages-in-a-monorepo) - Monorepo documentation strategies
-- [Documentation Migration Tips](https://dev.to/emiloju/how-to-migrate-technical-documentation-tools-checklist-and-tips-28gd) - Migration guide best practices
+- https://www.sphinx-doc.org/en/master/
+- https://typedoc.org/
+- https://doc.rust-lang.org/rustdoc/
 
 ### API Contract Testing
-- [PactFlow Documentation](https://docs.pactflow.io/docs/bi-directional-contract-testing/contracts/oas/) - OpenAPI contract testing
-- [The Best API Contract Testing Tools of 2026](https://www.testsprite.com/use-cases/en/the-top-api-contract-testing-tools) - Tool comparison
+- https://docs.pactflow.io/docs/bi-directional-contract-testing/contracts/oas/
 
 ---
 

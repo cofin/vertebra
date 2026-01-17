@@ -127,6 +127,9 @@ mobc          : 165%  (async, multi-runtime)
 - Zero-copy data transfer
 - Simple API (similar to channels)
 
+**Portability Note**:
+- shmipc is Linux-centric; macOS/Windows require alternate IPC backends.
+
 **Performance**:
 - Sub-microsecond latency
 - Efficient for message-passing patterns
@@ -963,7 +966,6 @@ The research provides a solid foundation for confident implementation of Vertebr
 - [Rust Pool Benchmark](https://github.com/Astro36/rust-pool-benchmark)
 
 ### Zero-Copy IPC
-- [Unlocking Nanosecond Communication in Rust](https://medium.com/@FAANG/unlocking-nanosecond-communication-how-i-built-a-zero-copy-ipc-layer-in-rust-that-left-go-and-c-in-77af138d1144)
 - [Eclipse iceoryx2 GitHub](https://github.com/eclipse-iceoryx/iceoryx2)
 - [shmipc on crates.io](https://crates.io/crates/shmipc)
 - [IpcArc Design Document](https://dev.to/x0rw/ipcarc-a-design-document-for-inter-process-communication-in-rust-16pf)

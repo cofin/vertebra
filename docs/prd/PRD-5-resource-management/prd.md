@@ -87,6 +87,12 @@ Python multi-worker deployments suffer from resource multiplication:
 - Custom connection protocols (use existing drivers)
 - Query optimization or caching
 
+### 1.4 Assumptions and Constraints
+
+- **Cross-platform target**: Linux/macOS/Windows parity for MVP if feasible.
+- **IPC transport**: UDS on Unix, named pipes on Windows.
+- **Broker ownership**: Single broker per node manages pools and fairness.
+
 ---
 
 ## 2. Solution Architecture
@@ -247,11 +253,11 @@ Python Worker                Rust Broker
 
 **Primary**: shmipc (ByteDance's shared memory IPC)
 - Zero-copy data transfer
-- Linux shared memory based
-- Unix socket for synchronization
-- High performance (nanosecond latency)
+ - POSIX or Windows shared memory based
+ - IPC transport for synchronization (UDS/named pipe)
+- High performance (reported sub-microsecond latency; validate locally)
 
-**Fallback**: Unix domain sockets
+**Fallback**: IPC transport (UDS/named pipe)
 - Standard POSIX IPC
 - Lower performance but universally supported
 - Automatic fallback if shmipc unavailable
@@ -731,23 +737,12 @@ groups:
 
 ### 5.1 Security Considerations
 
-#### 5.1.1 IPC Socket Security
+#### 5.1.1 IPC Transport Security
 
 **Permissions**:
 ```rust
-use std::os::unix::fs::PermissionsExt;
-
-async fn create_ipc_socket(path: &Path) -> Result<UnixListener> {
-    let _ = std::fs::remove_file(path);
-    let listener = UnixListener::bind(path)?;
-
-    // Owner read/write only (0o600)
-    let mut perms = std::fs::metadata(path)?.permissions();
-    perms.set_mode(0o600);
-    std::fs::set_permissions(path, perms)?;
-
-    Ok(listener)
-}
+// Unix: set 0600 on UDS path
+// Windows: apply named pipe ACLs for local-user access only
 ```
 
 **Worker Authentication**:
@@ -1473,7 +1468,7 @@ async def load_test_scenario():
 **Milestone 1.1: Rust Broker Skeleton**
 - [ ] Set up vertebra-broker crate structure
 - [ ] Implement configuration loading (TOML)
-- [ ] Create IPC server (Unix socket)
+- [ ] Create IPC server (UDS on Unix, named pipe on Windows)
 - [ ] Message serialization/deserialization
 - [ ] Structured logging
 
@@ -1695,26 +1690,20 @@ async def load_test_scenario():
 
 ### 13.1 Research Sources
 
-**Rust Connection Pooling**:
-- [Efficient Database Connection Management with deadpool and bb8](https://leapcell.io/blog/efficient-database-connection-management-with-sqlx-and-bb8-deadpool-in-rust)
-- [Performance Benchmark of Rust Generic Pools](https://github.com/Astro36/rust-pool-benchmark)
+**POSIX Shared Memory & IPC**:
+- https://man7.org/linux/man-pages/man3/shm_open.3.html
+- https://man7.org/linux/man-pages/man2/mmap.2.html
 
-**Zero-Copy IPC**:
-- [Unlocking Nanosecond Communication in Rust](https://medium.com/@FAANG/unlocking-nanosecond-communication-how-i-built-a-zero-copy-ipc-layer-in-rust-that-left-go-and-c-in-77af138d1144)
-- [Eclipse iceoryx2 - True Zero-Copy IPC](https://github.com/eclipse-iceoryx/iceoryx2)
-- [shmipc - ByteDance IPC Library](https://crates.io/crates/shmipc)
-- [IPC in Rust - Ping Pong Comparison](https://3tilley.github.io/posts/simple-ipc-ping-pong/)
+**Async Runtime**:
+- https://docs.rs/tokio/
 
-**Fair Scheduling**:
-- [Round-robin scheduling - Wikipedia](https://en.wikipedia.org/wiki/Round-robin_scheduling)
-- [Fair queuing - Wikipedia](https://en.wikipedia.org/wiki/Fair_queuing)
-- [Completely Fair Scheduler - Wikipedia](https://en.wikipedia.org/wiki/Completely_Fair_Scheduler)
-- [Optimizing Weighted Fair Queuing with DRL](https://www.mdpi.com/2673-4001/6/3/46)
+**Observability**:
+- https://opentelemetry.io/docs/
+- https://prometheus.io/docs/introduction/overview/
 
-**Python AsyncIO + Multiprocessing**:
-- [Combining Multiprocessing and Asyncio in Python](https://www.dataleadsfuture.com/combining-multiprocessing-and-asyncio-in-python-for-performance-boosts/)
-- [Supercharge Your Asyncio with Aiomultiprocess](https://towardsdatascience.com/supercharge-your-python-asyncio-with-aiomultiprocess-a-comprehensive-guide-571ee0e2f416/)
-- [High-Performance Python Guide (2026)](https://medium.com/@yogeshkrishnanseeniraj/high-performance-python-asyncio-vs-multiprocessing-vs-threadpools-2026-guide-ad49d40452fc)
+**Zero-Copy IPC (Reference Implementations)**:
+- https://github.com/eclipse-iceoryx/iceoryx2
+- https://crates.io/crates/shmipc
 
 ### 13.2 Glossary
 

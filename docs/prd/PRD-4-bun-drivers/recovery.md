@@ -118,6 +118,10 @@ cat research/plan.md
 
 **Decisions**:
 - Full DB-API 2.0 compliance (non-negotiable)
+
+### 4. Runtime Constraint
+
+**Decision**: Drivers are Bun-only for performance. If Bun is unavailable, raise an explicit "unsupported runtime" error.
 - Full fsspec compatibility
 - asyncpg-compatible async interface
 - SQLSpec adapter support
@@ -428,7 +432,8 @@ storage = ["vertebra[filesystem]"]
 
 ### Best Practices Articles
 
-- [Node.js Connection Pooling for PostgreSQL/MySQL](https://oneuptime.com/blog/post/2026-01-06-nodejs-connection-pooling-postgresql-mysql/view)
+- [Bun SQL Documentation](https://bun.sh/docs/api/sql)
+- [Bun File I/O](https://bun.sh/docs/api/file-io)
 - [S3 Streaming Best Practices](https://github.com/aio-libs/aiobotocore)
 - [fsspec Custom Backends](https://filesystem-spec.readthedocs.io/en/latest/_sources/async.rst)
 

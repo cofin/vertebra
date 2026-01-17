@@ -28,23 +28,23 @@ PRD-1 introduces a **Rust-based core IPC layer** that provides:
 2. **Lock-free channels** (SPSC/MPMC) for message passing
 3. **Pre-allocated buffer pools** for memory efficiency
 4. **Cross-process synchronization primitives** (futex-based)
-5. **C ABI FFI layer** for seamless Python integration
-6. **Apache Arrow IPC support** for structured data exchange
+5. **FFI surfaces** exposed via `vertebra-py` (PyO3) and `vertebra-js` (napi-rs), with optional C ABI for future bindings
+6. **Apache Arrow IPC support** for structured data exchange (optional, gated by benchmarks)
 
 **Key Benefits**:
 - Sub-microsecond latency (< 1μs target) for small messages
 - Memory safety guaranteed by Rust's ownership system
 - Verified via Miri for undefined behavior detection
-- Linux-first implementation leveraging POSIX primitives
-- Python integration through stable C ABI
+- Cross-platform design with Linux-first implementation (macOS/Windows parity target)
+- Python integration through PyO3 (and optional C ABI where needed)
 
 ### Success Criteria
 
-1. **Performance**: < 1μs round-trip latency for messages < 1KB
+1. **Performance**: < 1μs round-trip latency for messages < 1KB (stretch), with baseline measurements documented
 2. **Safety**: All Miri tests pass (no undefined behavior)
 3. **Coverage**: 90%+ test coverage across all modules
 4. **Reliability**: Zero data loss under normal operation
-5. **Integration**: Seamless Python FFI with comprehensive examples
+5. **Integration**: Seamless Python/Rust integration with comprehensive examples
 
 ---
 
@@ -69,20 +69,19 @@ Rust is uniquely positioned for high-performance IPC:
 
 1. **Memory Safety**: Ownership system prevents data races and use-after-free
 2. **Zero-Cost Abstractions**: Performance equivalent to C with higher-level APIs
-3. **FFI Stability**: C ABI ensures compatibility across Python versions
+3. **FFI Stability**: PyO3 + optional abi3, and napi-rs for Node/Bun compatibility
 4. **Ecosystem**: Rich libraries for concurrency (crossbeam), I/O (rustix), and data (arrow-rs)
 5. **Verification**: Miri enables undefined behavior detection in unsafe code
 
-### Linux-First Approach
+### Cross-Platform Approach (Linux-first, MVP parity target)
 
-PRD-1 targets Linux as the primary platform due to:
+PRD-1 targets Linux as the primary platform for initial development, while keeping the IPC layer **cross-platform-ready** for macOS and Windows at MVP when feasible.
 
-- **POSIX compliance**: Mature shared memory and futex APIs
-- **Performance**: Optimized kernel primitives for IPC
-- **Deployment**: Vertebra targets Linux production environments
-- **Ecosystem**: Best-in-class tooling (perf, valgrind, eBPF)
+- **Linux**: POSIX shared memory + futex-based synchronization
+- **macOS**: POSIX shared memory + pthread `pshared` primitives
+- **Windows**: Named shared memory + named mutex/condvar equivalents
 
-Future phases may add macOS support (with platform-specific adaptations) and potentially Windows (requiring alternative IPC primitives).
+If cross-platform parity slips, the design **must not** introduce Linux-only assumptions that block later support. Platform-specific implementations live behind a unified trait/interface layer.
 
 ### Relationship to PRD-0
 
@@ -93,6 +92,14 @@ PRD-0 (Foundation) establishes the base project structure, including:
 - Documentation standards
 
 PRD-1 builds atop this foundation by adding the Rust subsystem, which integrates with existing Python components while maintaining clear architectural boundaries.
+
+### Assumptions and Constraints
+
+- **Cross-platform target**: Linux + macOS + Windows are MVP targets if feasible; Linux is the initial implementation path.
+- **Platform abstraction**: shared memory and sync primitives must be behind OS-specific backends.
+- **Python 3.12+** baseline (aligned with `pyproject.toml`).
+- **FFI surface** lives in `vertebra-py` / `vertebra-js`; **optional C ABI** is in-scope only if required for best native compatibility.
+- **Performance targets** require measured baselines; stretch goals need explicit sign-off.
 
 ---
 
@@ -128,6 +135,7 @@ impl ShmRegion {
 - Names must follow POSIX requirements (start with `/`, max 255 chars)
 - Size must be page-aligned (4KB on x86_64)
 - Permissions: 0600 (owner read/write only)
+- Windows backend will use named shared memory conventions (e.g., `Local\\`/`Global\\`)
 
 #### FR-2: Lock-Free Channels (channel.rs)
 
@@ -232,49 +240,51 @@ pub struct SharedCondvar { /* ... */ }
 ```
 
 **Constraints**:
-- Linux kernel 4.18+ required for modern futex APIs
+- Linux kernel 4.18+ required for futex-based implementation
+- macOS/Windows use platform-specific primitives behind the same API
 - Must reside in shared memory for cross-process access
 - Alignment: 4-byte (AtomicU32) or 8-byte (AtomicU64)
 
-#### FR-5: FFI Layer (vertebra-ffi)
+#### FR-5: FFI Surfaces (vertebra-py / vertebra-js)
 
-**Description**: C ABI exports for Python integration via cffi.
+**Description**: Expose IPC primitives to Python and Bun/Node via native bindings. A pure C ABI layer is optional for future language targets.
 
 **Capabilities**:
-- Opaque pointer types for type safety
-- Error handling via return codes
-- Thread-safe operations (reentrant)
-- Memory management: explicit create/destroy functions
-- No panics across FFI boundary
+- PyO3 module exposing IPC types for Python (managed lifetimes, error mapping)
+- napi-rs module exposing IPC functions for Bun/Node
+- Thread-safe operations and explicit resource lifecycles
+- No panics across FFI boundaries (errors mapped to language-native exceptions)
 
-**API Surface** (C):
-```c
-// Opaque types
-typedef struct VertebraShmRegion VertebraShmRegion;
-typedef struct VertebraSpscChannel VertebraSpscChannel;
-typedef struct VertebraBufferPool VertebraBufferPool;
+**API Surface** (Rust binding entry points):
+```rust
+// vertebra-py/src/lib.rs (PyO3)
+#[pymodule]
+fn _vertebra(py: Python, m: &PyModule) -> PyResult<()> { /* ... */ }
 
-// Shared memory
-VertebraShmRegion* vertebra_shm_create(const char* name, size_t size);
-VertebraShmRegion* vertebra_shm_open(const char* name);
-void vertebra_shm_destroy(VertebraShmRegion* region);
-uint8_t* vertebra_shm_data(VertebraShmRegion* region);
-size_t vertebra_shm_size(VertebraShmRegion* region);
-
-// SPSC channel
-VertebraSpscChannel* vertebra_spsc_create(size_t capacity);
-void vertebra_spsc_destroy(VertebraSpscChannel* channel);
-int vertebra_spsc_send(VertebraSpscChannel* channel, const void* data, size_t len);
-int vertebra_spsc_recv(VertebraSpscChannel* channel, void* data, size_t len);
-
-// Error handling
-const char* vertebra_error_message(int error_code);
+// vertebra-js/src/lib.rs (napi-rs)
+#[napi]
+pub fn shm_create(name: String, size: u64) -> Result<JsObject>;
 ```
 
 **Constraints**:
-- C89 compatibility for maximum portability
-- No C++ exceptions (C ABI only)
-- Error codes follow POSIX conventions (0 = success, negative = error)
+- Optional C ABI is **in-scope only if required** for best native compatibility or additional language targets.
+- Error mapping must be deterministic and test-covered.
+
+#### C ABI Decision Checklist
+
+Use this checklist at the end of Phase 6 (bindings) to decide whether a C ABI shim is required.
+
+**Triggers (any true → evaluate C ABI):**
+1. PyO3 or napi-rs cannot meet **binary compatibility** requirements for target platforms.
+2. We need a **stable ABI** for distribution across multiple Python versions/environments where `abi3` is insufficient.
+3. Another language target (non‑Python/JS) is required for MVP.
+4. Performance profiling shows binding overhead dominates end‑to‑end latency and cannot be reduced in PyO3/napi‑rs.
+
+**Go/No‑Go Criteria:**
+- **GO** if at least one trigger is true **and** the minimal C ABI surface can be limited to core IPC primitives with no API explosion.
+- **NO‑GO** if PyO3/napi‑rs meet compatibility and performance targets, or if C ABI would delay MVP parity.
+
+**Decision Owner**: Tech Lead (with input from bindings + platform owners).
 
 #### FR-6: Apache Arrow IPC Integration
 
@@ -301,6 +311,7 @@ pub fn read_arrow_ipc(
 **Constraints**:
 - Arrow schema must be shared separately (out-of-band)
 - Buffer size must accommodate entire RecordBatch
+- Feature is **gated by benchmarks** and may ship after core IPC APIs
 - No streaming support in Phase 1 (future enhancement)
 
 ### Non-Functional Requirements
@@ -333,10 +344,10 @@ pub fn read_arrow_ipc(
 
 #### NFR-4: Compatibility
 
-- **Platform**: Linux kernel 4.18+ (x86_64, aarch64)
-- **Python**: 3.11+ (matching pyproject.toml)
+- **Platform**: Linux (4.18+), macOS, Windows (x86_64, aarch64 where supported)
+- **Python**: 3.12+ (matching pyproject.toml)
 - **Rust**: 1.75+ (stable), nightly for Miri
-- **C ABI**: Stable across Rust versions
+- **FFI**: PyO3 + napi-rs, optional abi3 for Python stability; optional C ABI if required
 
 #### NFR-5: Security
 
@@ -362,15 +373,15 @@ The Rust Core IPC Layer follows a layered architecture:
 
 ```
 ┌─────────────────────────────────────────┐
-│        Python Application Layer         │
-│  (vertebra Python package via cffi)     │
+│     Python/Bun Application Layers       │
+│ (vertebra-py / vertebra-js bindings)    │
 └─────────────────────────────────────────┘
                     ▲
-                    │ C ABI FFI
+                    │ PyO3 / napi-rs
                     ▼
 ┌─────────────────────────────────────────┐
-│         vertebra-ffi (C exports)        │
-│   Opaque pointers, error handling       │
+│   vertebra-py / vertebra-js bindings    │
+│   Error mapping, resource lifecycles    │
 └─────────────────────────────────────────┘
                     ▲
                     │ Internal Rust API
@@ -392,8 +403,8 @@ The Rust Core IPC Layer follows a layered architecture:
 ```
 
 **Component Interaction**:
-1. Python applications import vertebra FFI via cffi
-2. FFI layer validates inputs, calls vertebra-core APIs
+1. Python/Bun applications import vertebra bindings
+2. Binding layers validate inputs, call vertebra-core APIs
 3. Core modules use rustix for safe POSIX access
 4. Kernel provides shared memory and synchronization
 
@@ -579,65 +590,17 @@ If futex operations fail (e.g., on older kernels):
 3. Log warning about performance degradation
 4. Continue operation (correctness preserved)
 
-#### FFI Layer (vertebra-ffi)
+#### FFI Surfaces (vertebra-py / vertebra-js)
 
-**Opaque Pointer Pattern**:
+**Binding Strategy**:
+- PyO3 module exposes IPC types to Python (`vertebra._vertebra`)
+- napi-rs module exposes IPC primitives to Bun/Node
+- Binding layers handle error mapping and resource lifecycles
 
-```rust
-// In vertebra-ffi/src/lib.rs
-#[repr(C)]
-pub struct VertebraShmRegion {
-    inner: *mut vertebra_core::ShmRegion,
-}
-
-#[no_mangle]
-pub extern "C" fn vertebra_shm_create(
-    name: *const c_char,
-    size: usize,
-) -> *mut VertebraShmRegion {
-    // Validate inputs
-    if name.is_null() { return null_mut(); }
-
-    // Convert C string to Rust
-    let name_str = unsafe {
-        match CStr::from_ptr(name).to_str() {
-            Ok(s) => s,
-            Err(_) => return null_mut(),
-        }
-    };
-
-    // Call Rust API
-    match vertebra_core::ShmRegion::create(name_str, size) {
-        Ok(region) => {
-            let boxed = Box::new(VertebraShmRegion {
-                inner: Box::into_raw(Box::new(region)),
-            });
-            Box::into_raw(boxed)
-        }
-        Err(_) => null_mut(),
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn vertebra_shm_destroy(region: *mut VertebraShmRegion) {
-    if region.is_null() { return; }
-    unsafe {
-        let region = Box::from_raw(region);
-        let _ = Box::from_raw(region.inner); // Drop ShmRegion
-    }
-}
-```
-
-**Error Handling**:
-- Return codes: 0 (success), -1 (error)
-- Thread-local error message storage
-- `vertebra_error_message()` retrieves last error
-- No panics: `catch_unwind` around all operations
-
-**Memory Management**:
-- Caller owns returned pointers (explicit destroy required)
-- No hidden allocations
-- Leak detection via valgrind in tests
+**Design Notes**:
+- No panics across FFI boundaries
+- Deterministic error conversion (Rust error → Python exception / JS error)
+- Optional C ABI is deferred unless the decision checklist triggers it
 
 #### Apache Arrow IPC Integration
 
@@ -688,7 +651,7 @@ pub fn read_arrow_ipc(buffer: &[u8]) -> Result<RecordBatch, ArrowError> {
 # Cargo.toml (workspace root)
 [workspace]
 resolver = "2"
-members = ["vertebra-core", "vertebra-ffi"]
+members = ["vertebra-core", "vertebra-py", "vertebra-js"]
 
 [workspace.dependencies]
 rustix = { version = "0.38", features = ["shm", "mm", "thread"] }
@@ -723,20 +686,7 @@ proptest = { workspace = true }
 crate-type = ["rlib"]
 ```
 
-```toml
-# vertebra-ffi/Cargo.toml
-[package]
-name = "vertebra-ffi"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-vertebra-core = { path = "../vertebra-core" }
-libc = { workspace = true }
-
-[lib]
-crate-type = ["cdylib"]
-```
+Binding crates (`vertebra-py`, `vertebra-js`) are defined in PRD-0 and consume `vertebra-core` via workspace dependencies.
 
 **Makefile Integration**:
 
@@ -781,7 +731,7 @@ rust-bench:                                        ## Run Rust benchmarks
 ### Phase 1: Foundation and Build System (Week 1)
 
 **Deliverables**:
-- Cargo workspace with vertebra-core and vertebra-ffi crates
+- Cargo workspace with `vertebra-core` and binding crates (`vertebra-py`, `vertebra-js`) wired to it
 - CI pipeline (GitHub Actions or equivalent)
 - Basic project structure (lib.rs, module stubs)
 - Makefile integration for Rust commands
@@ -789,7 +739,7 @@ rust-bench:                                        ## Run Rust benchmarks
 
 **Tasks**:
 1. Create `src/rs/Cargo.toml` workspace manifest
-2. Initialize `vertebra-core` and `vertebra-ffi` crates
+2. Initialize `vertebra-core` and ensure binding crates (`vertebra-py`, `vertebra-js`) depend on it (see PRD-0)
 3. Configure workspace dependencies (rustix, arrow-rs, etc.)
 4. Set up CI pipeline with Rust toolchain
 5. Add Makefile targets (`rust-build`, `rust-test`, etc.)
@@ -898,29 +848,43 @@ rust-bench:                                        ## Run Rust benchmarks
 - Fallback works on systems without futex
 - Contention benchmarks show acceptable overhead
 
-### Phase 6: FFI Layer (Week 5-6)
+### Phase 6: Binding Surfaces (Week 5-6)
 
 **Deliverables**:
-- C ABI exports for all core modules
-- Python cffi bindings
-- FFI safety tests
+- PyO3 module exposing core IPC primitives
+- napi-rs module exposing core IPC primitives
+- Binding safety tests
 - Memory leak validation
 
 **Tasks**:
-1. Define C ABI function signatures
-2. Implement opaque pointer pattern for type safety
-3. Add error handling (return codes, error messages)
-4. Create Python cffi wrapper module
-5. Write FFI safety tests (null pointer handling)
-6. Add memory leak tests (valgrind)
-7. Document FFI usage patterns
-8. Create Python integration examples
+1. Implement PyO3 module exports for IPC primitives
+2. Implement napi-rs exports for IPC primitives
+3. Add error mapping (Rust → Python/JS errors)
+4. Write binding safety tests (null/invalid input handling)
+5. Add memory leak tests (valgrind)
+6. Document binding usage patterns
+7. Create Python + Bun integration examples
 
 **Success Criteria**:
-- All FFI functions callable from Python
+- IPC primitives callable from Python and Bun/Node
 - No crashes with invalid inputs
 - No memory leaks (valgrind clean)
-- Python examples execute successfully
+- Examples execute successfully
+
+### Phase 6b: Optional C ABI (If Required) (Week 6-7)
+
+**Trigger**: Only if PyO3/napi-rs bindings are insufficient for native compatibility, stable ABI distribution, or additional language targets.
+
+**Deliverables**:
+- C ABI shim with opaque pointers
+- Stable ABI surface documented and tested
+- Language-neutral error mapping
+
+**Tasks**:
+1. Define minimal C ABI surface for core IPC primitives
+2. Implement opaque pointer wrappers and explicit destroy APIs
+3. Add C ABI tests and leak checks
+4. Document C ABI usage and versioning strategy
 
 ### Phase 7: Integration and Documentation (Week 6-7)
 
@@ -956,7 +920,8 @@ rust-bench:                                        ## Run Rust benchmarks
 | 3. Channels | Week 2-3 | Phase 1 | SPSC/MPMC with benchmarks |
 | 4. Buffer Pool | Week 3-4 | Phase 1 | BufferPool + Arrow |
 | 5. Synchronization | Week 4-5 | Phase 1, 2 | Futex primitives |
-| 6. FFI Layer | Week 5-6 | Phase 2-5 | C ABI + Python bindings |
+| 6. Binding Surfaces | Week 5-6 | Phase 2-5 | PyO3 + napi-rs bindings |
+| 6b. Optional C ABI | Week 6-7 | Phase 6 | C ABI shim (if required) |
 | 7. Integration | Week 6-7 | All | Documentation, examples |
 
 **Total Duration**: 7 weeks (35 business days)
@@ -965,7 +930,7 @@ rust-bench:                                        ## Run Rust benchmarks
 - **Week 2**: Shared memory validated with Miri
 - **Week 3**: SPSC channel achieves < 1μs latency
 - **Week 5**: All core modules complete
-- **Week 6**: Python FFI functional
+- **Week 6**: Python + Bun/Node bindings functional
 - **Week 7**: Final release ready
 
 ---
@@ -981,7 +946,7 @@ rust-bench:                                        ## Run Rust benchmarks
 - channel.rs: 90%
 - buffer.rs: 90%
 - sync.rs: 90%
-- FFI: 85% (some code is panic handlers)
+- Bindings: 85% (some code is error mapping/interop)
 
 **Tools**:
 - `cargo test` for standard tests
@@ -1100,7 +1065,7 @@ proptest! {
 
 **Strategy**:
 - Run Miri on pure Rust code (vertebra-core)
-- Use valgrind for FFI layer (vertebra-ffi)
+- Use valgrind for binding layers (`vertebra-py`, `vertebra-js`)
 - Multiple seeds for non-deterministic tests
 
 ### Benchmarking
@@ -1444,16 +1409,28 @@ criterion_main!(benches);
 
 ### References
 
-This PRD is informed by extensive research documented in `docs/prd/PRD-1-rust-ipc/research/plan.md`. Key sources include:
+This PRD is informed by research documented in `docs/prd/PRD-1-rust-ipc/research/plan.md`. Core sources include:
 
-1. **POSIX Shared Memory**: rustix documentation, Medium articles on Rust shared memory
-2. **Lock-Free Data Structures**: DEV Community SPSC tutorial, ringbuf crate, iceoryx2 architecture
-3. **Apache Arrow IPC**: arrow-rs documentation, arXiv papers on cluster shared memory
-4. **Rust-Python FFI**: University of São Paulo benchmarks, PyO3 vs cffi comparison
-5. **Miri Testing**: POPL 2026 paper, Rust forums on unsafe code verification
-6. **Performance**: IPC ping-pong benchmarks, perf profiling guides
+1. **POSIX Shared Memory & Memory Mapping**
+   - https://man7.org/linux/man-pages/man3/shm_open.3.html
+   - https://man7.org/linux/man-pages/man2/mmap.2.html
+2. **memfd for Anonymous Shared Memory**
+   - https://man7.org/linux/man-pages/man2/memfd_create.2.html
+3. **Rust POSIX Abstractions**
+   - https://docs.rs/rustix/
+4. **Async Runtime**
+   - https://docs.rs/tokio/
+5. **Miri**
+   - https://github.com/rust-lang/miri
+6. **PyO3 abi3**
+   - https://pyo3.rs/main/building-and-distribution.html
+7. **Node-API / napi-rs**
+   - https://nodejs.org/api/n-api.html
+   - https://napi.rs/
+8. **Apache Arrow IPC**
+   - https://arrow.apache.org/docs/
 
-For complete citations and detailed research notes, see `research/plan.md`.
+For detailed research notes, see `research/plan.md`.
 
 ---
 

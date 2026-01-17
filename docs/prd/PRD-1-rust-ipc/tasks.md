@@ -18,9 +18,9 @@
 ### Crate Initialization
 
 - [ ] 1.2.1 - Create `vertebra-core` crate with `cargo new --lib`
-- [ ] 1.2.2 - Create `vertebra-ffi` crate with `cargo new --lib`
-- [ ] 1.2.3 - Configure `vertebra-core` with `crate-type = ["rlib"]`
-- [ ] 1.2.4 - Configure `vertebra-ffi` with `crate-type = ["cdylib"]`
+- [ ] 1.2.2 - Ensure `vertebra-py` crate exists (PyO3 bindings)
+- [ ] 1.2.3 - Ensure `vertebra-js` crate exists (napi-rs bindings)
+- [ ] 1.2.4 - Configure `vertebra-py`/`vertebra-js` with `crate-type = ["cdylib"]`
 
 ### Dependencies
 
@@ -38,7 +38,8 @@
 - [ ] 1.4.3 - Create `vertebra-core/src/channel.rs` (stub)
 - [ ] 1.4.4 - Create `vertebra-core/src/buffer.rs` (stub)
 - [ ] 1.4.5 - Create `vertebra-core/src/sync.rs` (stub)
-- [ ] 1.4.6 - Create `vertebra-ffi/src/lib.rs` with FFI exports
+- [ ] 1.4.6 - Create binding stubs in `vertebra-py/src/lib.rs` and `vertebra-js/src/lib.rs`
+- [ ] 1.4.7 - Add `vertebra-core/src/platform/` with Linux/macOS/Windows backends (stubs)
 
 ### Build Integration
 
@@ -56,6 +57,7 @@
 - [ ] 1.6.4 - Add `cargo clippy` linting to CI
 - [ ] 1.6.5 - Add `cargo fmt --check` to CI
 - [ ] 1.6.6 - Add Miri tests to CI (nightly toolchain)
+- [ ] 1.6.7 - Add CI matrix for Linux/macOS/Windows (smoke build/tests)
 
 ### Documentation
 
@@ -81,6 +83,8 @@
 - [ ] 2.1.8 - Implement Drop trait with `munmap()` and `shm_unlink()`
 - [ ] 2.1.9 - Add `ShmError` enum with thiserror derives
 - [ ] 2.1.10 - Add `size()` method returning region size
+- [ ] 2.1.11 - Implement macOS shared memory backend (POSIX shm)
+- [ ] 2.1.12 - Implement Windows shared memory backend (CreateFileMapping/MapViewOfFile)
 
 ### Safety
 
@@ -284,56 +288,28 @@
 
 ---
 
-## Phase 6: FFI Layer (Week 5-6)
+## Phase 6: Binding Surfaces (Week 5-6)
 
-### C API Design
+### PyO3 Bindings
 
-- [ ] 6.1.1 - Define opaque types in header file
-- [ ] 6.1.2 - Define function signatures (C89 compatible)
-- [ ] 6.1.3 - Define error codes (enum or constants)
-- [ ] 6.1.4 - Document ownership semantics in comments
+- [ ] 6.1.1 - Expose shared memory APIs in `vertebra-py`
+- [ ] 6.1.2 - Expose channels and buffer pool APIs in `vertebra-py`
+- [ ] 6.1.3 - Map Rust errors to Python exceptions
+- [ ] 6.1.4 - Add PyO3 tests (lifecycle + invalid input)
 
-### Shared Memory FFI
+### napi-rs Bindings
 
-- [ ] 6.2.1 - Implement `vertebra_shm_create(name, size)`
-- [ ] 6.2.2 - Implement `vertebra_shm_open(name)`
-- [ ] 6.2.3 - Implement `vertebra_shm_destroy(region)`
-- [ ] 6.2.4 - Implement `vertebra_shm_data(region)` -> pointer
-- [ ] 6.2.5 - Implement `vertebra_shm_size(region)` -> size
-- [ ] 6.2.6 - Add null pointer checks
-- [ ] 6.2.7 - Wrap all code in `catch_unwind` to prevent panics
+- [ ] 6.2.1 - Expose shared memory APIs in `vertebra-js`
+- [ ] 6.2.2 - Expose channels and buffer pool APIs in `vertebra-js`
+- [ ] 6.2.3 - Map Rust errors to JS exceptions
+- [ ] 6.2.4 - Add napi-rs tests (lifecycle + invalid input)
 
-### Channel FFI
+### Optional C ABI (If Required)
 
-- [ ] 6.3.1 - Implement `vertebra_spsc_create(capacity)`
-- [ ] 6.3.2 - Implement `vertebra_spsc_destroy(channel)`
-- [ ] 6.3.3 - Implement `vertebra_spsc_send(channel, data, len)`
-- [ ] 6.3.4 - Implement `vertebra_spsc_recv(channel, data, len)`
-- [ ] 6.3.5 - Return error codes on failure
-- [ ] 6.3.6 - Add MPMC variants
-
-### Buffer Pool FFI
-
-- [ ] 6.4.1 - Implement `vertebra_buffer_pool_create(size, count)`
-- [ ] 6.4.2 - Implement `vertebra_buffer_pool_destroy(pool)`
-- [ ] 6.4.3 - Implement `vertebra_buffer_acquire(pool)`
-- [ ] 6.4.4 - Implement `vertebra_buffer_release(buffer)`
-- [ ] 6.4.5 - Implement `vertebra_buffer_data(buffer)` -> pointer
-
-### Error Handling
-
-- [ ] 6.5.1 - Define error enum with descriptive variants
-- [ ] 6.5.2 - Implement thread-local error storage
-- [ ] 6.5.3 - Implement `vertebra_error_message(code)` -> string
-- [ ] 6.5.4 - Implement `vertebra_last_error()` for Python
-- [ ] 6.5.5 - Document error handling in API docs
-
-### Python Bindings
-
-- [ ] 6.6.1 - Create Python module with cffi
-- [ ] 6.6.2 - Load shared library (.so/.dylib)
-- [ ] 6.6.3 - Define ffi.cdef() with C signatures
-- [ ] 6.6.4 - Wrap C API in Pythonic classes
+- [ ] 6.3.1 - Decision gate: do we require C ABI for compatibility?
+- [ ] 6.3.2 - If yes, define minimal C API surface
+- [ ] 6.3.3 - Implement opaque pointer wrappers and explicit destroy APIs
+- [ ] 6.3.4 - Add C ABI tests and leak checks
 - [ ] 6.6.5 - Add context managers (`__enter__`/`__exit__`)
 - [ ] 6.6.6 - Add type hints to all Python functions
 - [ ] 6.6.7 - Document Python API with docstrings

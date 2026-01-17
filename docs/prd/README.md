@@ -27,39 +27,41 @@ cd src/js && bun install && bun test
 grep -r "dma" --include="*.py" --include="*.toml" src/  # Should return empty
 ```
 
+### [PRD-1: Rust Core IPC Layer](./PRD-1-rust-ipc.md)
+Core IPC primitives, shared memory, lock-free channels, and Rust bindings.
+
+### [PRD-2: Python Bindings and Type Bridge](./PRD-2-python-bindings.md)
+Decorator system, registry, type extraction, and TypeScript codegen bridge.
+
+### [PRD-3: Bun Server and Protocol Support](./PRD-3-bun-server.md)
+Bun HTTP server, protocol handling, IPC bridging, and server configuration.
+
+### [PRD-4: Bun-Backed Python Drivers](./PRD-4-bun-drivers.md)
+Database drivers, filesystem integration, and cloud storage clients via Bun.
+
+### [PRD-5: Cooperative Resource Management](./PRD-5-resource-management.md)
+Cross-process resource pools, fairness, observability, and lifecycle management.
+
+### [PRD-6: Integration, Testing, and Documentation](./PRD-6-integration.md)
+Integration tests, benchmarks, example apps, migration guides, and docs.
+
+### [PRD-7: MCP Integration](./PRD-7-mcp-integration.md)
+MCP server, tool/resource registry, schema generation, and transport support.
+
 ## Planned PRDs
-
-### PRD-1: Zero-Copy IPC Foundation
-Core IPC primitives, protocol design, shared memory management.
-
-### PRD-2: Procedure System
-tRPC-like decorators, router implementation, procedure registry.
-
-### PRD-3: Type Bridge
-Python AST → Rust types, TypeScript type generation, validation.
-
-### PRD-4: ASGI Server
-Rust+Bun HTTP server, Litestar integration, worker management.
-
-### PRD-5: Bun Database Drivers
-PostgreSQL, MySQL, Redis drivers using Bun's fast I/O.
-
-### PRD-6: WebSocket Support
-Bi-directional type-safe communication, subscriptions.
-
-### PRD-7: Distributed Tracing
+### PRD-8: Distributed Tracing
 OpenTelemetry integration, trace correlation across languages.
 
-### PRD-8: Code Generation CLI
+### PRD-9: Code Generation CLI
 `vertebra generate` command, watch mode, plugins.
 
-### PRD-9: Browser SDK
+### PRD-10: Browser SDK
 Optimized client bundle, React hooks, tree-shaking.
 
-### PRD-10: Schema Versioning
+### PRD-11: Schema Versioning
 API versioning, backward compatibility, migration tools.
 
-### PRD-11: ORM Integration
+### PRD-12: ORM Integration
 SQLAlchemy, Tortoise ORM, Prisma integration patterns.
 
 ## PRD Template

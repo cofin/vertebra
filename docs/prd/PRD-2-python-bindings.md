@@ -53,6 +53,12 @@ Unlike TypeScript, Python's type system is based on runtime annotations and stat
 
 **Solution:** Use Abstract Syntax Tree (AST) analysis to extract types statically, similar to how mypy and pyright work.
 
+### Assumptions and Constraints
+
+- **Python 3.12+** baseline (aligned with `pyproject.toml`).
+- **Annotation resolution** must handle `from __future__ import annotations` and deferred evaluation (PEP 649).
+- **Type extraction** prioritizes runtime hints when available, falling back to AST parsing for source-level fidelity.
+
 ---
 
 ## Architecture Overview
@@ -233,6 +239,12 @@ type_nodes = extractor.from_source_file("path/to/handlers.py")
 # Extract from specific function
 type_node = extractor.from_function(get_user)
 ```
+
+#### Annotation Resolution Strategy
+
+- Use `typing.get_type_hints(..., include_extras=True)` for runtime hints when available.
+- Fall back to AST parsing for modules that defer annotations or use forward refs.
+- Preserve `Annotated` metadata for validation and downstream codegen.
 
 #### Supported Type Constructs
 
@@ -1720,29 +1732,22 @@ See `/examples/todo-app` in repository for complete CRUD application with:
 
 ### Technical References
 
-1. **tRPC Type Safety Patterns**
-   - [Understanding tRPC: Building Type-Safe APIs in TypeScript](https://medium.com/@ignatovich.dm/understanding-trpc-building-type-safe-apis-in-typescript-45258c6c3b73)
-   - [Achieving End-to-End Type Safety in Full-Stack TypeScript with tRPC](https://leapcell.io/blog/achieving-end-to-end-type-safety-in-full-stack-typescript-with-trpc)
-   - [tRPC Official Documentation](https://trpc.io/)
+1. **tRPC**
+   - https://trpc.io/docs
 
-2. **Python to TypeScript Type Bridges**
-   - [PyFlow.ts - Bridge Python and TypeScript](https://github.com/ExtensityAI/PyFlow.ts)
-   - [PyBridge - TypeScript to Python Bridge](https://marcjschmidt.de/pybridge)
-   - [TypeScript2Python - Type Transpiler](https://github.com/TheLartians/TypeScript2Python)
+2. **Python Typing & Annotation Semantics**
+   - https://docs.python.org/3/library/typing.html
+   - https://peps.python.org/pep-0563/
+   - https://peps.python.org/pep-0649/
 
-3. **Zero-Copy IPC and PyO3**
-   - [Spikard - Rust-powered Multi-language Toolkit](https://github.com/Goldziher/spikard)
-   - [5 Zero-Copy Bridges Between Python and Rust with PyO3](https://medium.com/@sparknp1/5-zero-copy-bridges-between-python-and-rust-with-pyo3-bc64961e4fca)
-   - [pyo3-arrow - Zero-Copy Arrow Integration](https://crates.io/crates/pyo3-arrow)
+3. **Python AST**
+   - https://docs.python.org/3/library/ast.html
 
-4. **Python AST and TypeScript Code Generation**
-   - [Going Beyond the Abstract Syntax Tree with TypeScript Type Checker](https://www.satellytes.com/blog/post/typescript-ast-type-checker/)
-   - [Python AST Documentation](https://docs.python.org/3/library/ast.html)
-   - [Writing a TypeScript Code Generator: Templates vs AST](https://medium.com/singapore-gds/writing-a-typescript-code-generator-templates-vs-ast-ab391e5d1f5e)
+4. **PyO3**
+   - https://pyo3.rs/
 
-5. **TypeScript Best Practices (2026)**
-   - [TypeScript Best Practices for Large-Scale Web Applications in 2026](https://johal.in/typescript-best-practices-for-large-scale-web-applications-in-2026/)
-   - [State of TypeScript 2026](https://devnewsletter.com/p/state-of-typescript-2026)
+5. **TypeScript**
+   - https://www.typescriptlang.org/docs/
 
 ### Library Documentation
 

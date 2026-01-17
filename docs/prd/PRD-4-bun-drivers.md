@@ -88,6 +88,13 @@ Bun provides excellent I/O performance through its native implementation (writte
 - Custom query builders
 - Direct wire protocol implementations (using Bun's database libraries)
 
+### Assumptions and Constraints
+
+- **Bun SQL / bun:sqlite** are the primary data access layers; PostgreSQL/MySQL support must be validated against Bun’s SQL APIs.
+- **DB-API 2.0 (PEP 249)** compliance is required for sync drivers; async APIs aim for asyncpg/aiomysql compatibility.
+- **Cross-platform target**: Linux/macOS/Windows parity for MVP if feasible; Linux-first implementation.
+- **Node runtime** is not supported for drivers by default; enable only if performance parity can be proven.
+
 ---
 
 ## Architecture
@@ -141,6 +148,9 @@ Bun provides excellent I/O performance through its native implementation (writte
 - More complex protocol design (mitigated by using MessagePack)
 - Dependency on Bun server availability (mitigated by connection retry and graceful degradation)
 
+**Runtime Constraint**:
+Drivers are **Bun-only** for performance. If running under Node (or without Bun), modules must raise a clear "unsupported runtime" error rather than falling back to slower implementations.
+
 ### Key Design Decisions
 
 | Decision | Rationale |
@@ -150,6 +160,7 @@ Bun provides excellent I/O performance through its native implementation (writte
 | **MessagePack serialization** | Fast binary format, schema-less (flexible), well-supported in both Python and TypeScript. Protocol Buffers considered for future optimization. |
 | **Streaming for large results** | Results >10MB or >10000 rows sent in chunks to avoid memory issues. Python can iterate results without loading all into memory. |
 | **Type conversion in Python** | Python layer converts between Python types and database wire format. Keeps serialization simple (JSON-compatible types). |
+| **Bun-only enforcement** | Preserve performance by disabling drivers under Node; allow future Node support only if parity is demonstrated. |
 
 ---
 
@@ -1452,11 +1463,13 @@ storage = [
 - [asyncpg Connection Pooling](https://github.com/magicstack/asyncpg/blob/master/docs/usage.rst)
 - [fsspec AbstractFileSystem](https://filesystem-spec.readthedocs.io/en/latest/_modules/fsspec/spec)
 - [MessagePack Specification](https://msgpack.org/)
-- [Bun SQL Documentation](https://bun.com/docs/runtime/sql)
+- [Bun SQL Documentation](https://bun.sh/docs/api/sql)
+- [Bun File I/O](https://bun.sh/docs/api/file-io)
+- [Bun S3 Client](https://bun.sh/docs/api/s3)
+- [Bun Redis Client](https://bun.sh/docs/api/redis)
 
 ### Research Sources
 
-- [How to Implement Connection Pooling in Node.js for PostgreSQL/MySQL](https://oneuptime.com/blog/post/2026-01-06-nodejs-connection-pooling-postgresql-mysql/view)
 - [aiobotocore Documentation](https://aiobotocore.readthedocs.io/)
 - [S3 Streaming Best Practices](https://github.com/aio-libs/aiobotocore)
 

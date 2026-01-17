@@ -104,6 +104,12 @@
 - [ ] Add connection pooling for IPC sockets
 - [ ] Write IPC tests
 
+### 1.7 Bun-Only Runtime Guard
+
+- [ ] Detect Bun runtime availability on startup
+- [ ] Raise clear "unsupported runtime" errors when Bun is absent
+- [ ] Add tests for runtime guard behavior
+
 **Files**:
 - `src/py/vertebra/_internal/ipc.py`
 - `tests/unit/test_ipc.py`

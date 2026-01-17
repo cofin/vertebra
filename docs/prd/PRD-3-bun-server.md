@@ -10,15 +10,15 @@
 
 ## Executive Summary
 
-This PRD outlines the design and implementation of Vertebra's high-performance Bun-based HTTP server with multi-protocol support and zero-copy IPC to Python ASGI applications. The primary goal is to outperform Granian (currently the fastest ASGI server at 50,000 req/s) by leveraging Bun's exceptional performance characteristics (89,000+ req/s in benchmarks) while maintaining compatibility with existing Litestar and ASGI applications.
+This PRD outlines the design and implementation of Vertebra's high-performance Bun-based HTTP server with multi-protocol support and zero-copy IPC to Python ASGI applications. The primary goal is to outperform leading ASGI servers (e.g., Granian) by leveraging Bun’s performance characteristics, validated through local benchmarks, while maintaining compatibility with existing Litestar and ASGI applications.
 
-The architecture consists of three layers: (1) Bun HTTP server handling TLS termination, HTTP parsing, and protocol negotiation, (2) an IPC bridge using Unix Domain Sockets and Protocol Buffers for sub-millisecond overhead, and (3) a Python worker pool running Litestar ASGI handlers. This hybrid approach combines Bun's superior HTTP performance with Python's rich ecosystem and existing application code.
+The architecture consists of three layers: (1) Bun HTTP server handling TLS termination, HTTP parsing, and protocol negotiation, (2) an IPC bridge using **Unix Domain Sockets on Unix** or **named pipes/TCP on Windows**, and (3) a Python worker pool running Litestar ASGI handlers. This hybrid approach combines Bun's HTTP performance with Python's rich ecosystem and existing application code.
 
 **Success Criteria**:
 - Throughput exceeding 50,000 requests/second (Granian baseline)
 - IPC bridge overhead under 1 millisecond (p95)
 - Support for 10,000+ concurrent connections
-- Full protocol support: HTTP/1.1, HTTP/2, HTTP/3, WebSocket, gRPC, JSON-RPC 2.0, Server-Sent Events, and h2c
+- Full protocol support roadmap: HTTP/1.1, HTTP/2, WebSocket, JSON-RPC 2.0, SSE (HTTP/3 + gRPC are exploratory)
 - Type-safe client generation from Python routes
 - Drop-in replacement for Granian/Uvicorn (CLI compatibility)
 
@@ -28,34 +28,31 @@ The architecture consists of three layers: (1) Bun HTTP server handling TLS term
 
 ### Current Landscape
 
-Modern Python ASGI servers have reached impressive performance levels, with Granian leading at 50,000 req/s through its Rust implementation. However, several limitations persist:
+Modern Python ASGI servers have reached impressive performance levels; reported benchmarks often cite Granian as a leader. However, several limitations persist:
 
 1. **Protocol limitations**: Most ASGI servers support only HTTP/1.1, HTTP/2, and WebSocket. Advanced protocols like gRPC and JSON-RPC require separate implementations or proxies.
 2. **Static file performance**: Python-based servers struggle with static file serving compared to specialized servers.
 3. **Type safety**: Cross-language type generation is not standard, leading to potential runtime errors.
-4. **Memory efficiency**: Each worker consumes 15-30MB of memory, limiting density.
+4. **Memory efficiency**: Per-worker memory footprint to be measured in Phase 1.
 
 ### Why Bun?
 
-Bun has emerged as a breakthrough JavaScript runtime with exceptional performance characteristics:
+Bun has emerged as a high-performance JavaScript runtime. Published benchmarks and vendor docs suggest strong throughput, but local baselines must be validated:
 
-- **89,234 req/s** for simple HTTP workloads (vs Node.js 52,341 req/s)
-- **1,098,770 WebSocket messages/second** (vs Node.js 179,186) - 6-7x faster
-- **JavaScriptCore engine** providing 4x HTTP throughput over V8
-- **io_uring on Linux** for optimized I/O operations
-- **Built on uWebSockets** for high-performance WebSocket handling
-- **Native HTTP/2 support** with server push capabilities
-- **gRPC.js compatibility** since v1.0.13
+- HTTP and WebSocket throughput: **validate in Phase 1**
+- JavaScriptCore performance characteristics: **verify with local benchmarks**
+- io_uring usage and HTTP/2 support: **confirm via Bun docs + tests**
+- gRPC compatibility: **verify against Bun’s current API surface**
 
-Recent benchmarks (January 2026) show Bun competing directly with Rust frameworks in microservice workloads, with 157ms mean response time and 0% failure rate under heavy load.
+Public benchmarks and vendor docs indicate Bun is competitive in microservice workloads; exact baselines will be validated in Phase 1.
 
 ### The Hybrid Architecture Advantage
 
 By combining Bun's front-end HTTP performance with Python's ASGI ecosystem, Vertebra aims to:
 
 1. **Maximize throughput**: Bun handles HTTP parsing, TLS termination, and static files at native speed
-2. **Minimize latency**: Unix Domain Sockets provide 30-66% lower latency than TCP localhost
-3. **Extend protocols**: Native gRPC, JSON-RPC, and advanced protocol support
+2. **Minimize latency**: UDS (Unix) or named pipes (Windows) are expected to reduce IPC latency vs TCP localhost (to be validated)
+3. **Extend protocols**: JSON-RPC and gRPC support are exploratory; confirm against Bun APIs
 4. **Preserve compatibility**: Existing Litestar apps work without modification
 5. **Enable type safety**: TypeScript code generation from Python routes
 
@@ -65,15 +62,28 @@ Based on research into Bun's capabilities and IPC optimization techniques, Verte
 
 | Metric | Target | Baseline (Granian) |
 |--------|--------|-------------------|
-| Throughput (req/s) | 60,000+ | 50,000 |
-| Latency p50 (ms) | < 2 | 2-3 |
-| Latency p95 (ms) | < 10 | 12-15 |
-| IPC overhead (ms) | < 1 | N/A |
-| Memory/worker (MB) | ≤ 20 | 15 |
-| Concurrent connections | 10,000+ | 5,000+ |
-| WebSocket msg/s | 500,000+ | N/A |
+| Throughput (req/s) | 60,000+ | TBD (benchmark) |
+| Latency p50 (ms) | < 2 | TBD (benchmark) |
+| Latency p95 (ms) | < 10 | TBD (benchmark) |
+| IPC overhead (ms) | < 1 | TBD (benchmark) |
+| Memory/worker (MB) | ≤ 20 | TBD (benchmark) |
+| Concurrent connections | 10,000+ | TBD (benchmark) |
+| WebSocket msg/s | 500,000+ | TBD (benchmark) |
 
-The key challenge is ensuring IPC overhead doesn't negate Bun's performance advantage. Using Unix Domain Sockets (2-3μs latency), Protocol Buffers serialization (2x faster than JSON), and connection pooling, we target sub-millisecond IPC overhead.
+The key challenge is ensuring IPC overhead doesn't negate Bun's performance advantage. We will validate IPC latency and serialization choices during Phase 1 and adjust targets accordingly.
+
+### Assumptions and Constraints
+
+- **Bun APIs**: rely on `Bun.serve` and `ServerWebSocket` as stable interfaces.
+- **Cross-platform target**: Linux + macOS + Windows at MVP if feasible; Linux-first implementation.
+- **IPC transport**: UDS on Unix, named pipes or TCP on Windows (pluggable transport).
+- **HTTP/2 and gRPC** are exploratory and may be deferred if Bun support is incomplete.
+
+### Cross-Platform Transport Strategy
+
+- **Unix**: UDS by default for lowest overhead.
+- **Windows**: named pipes preferred; TCP fallback if necessary.
+- The transport layer is abstracted so Windows/macOS parity can be added without breaking API contracts.
 
 ---
 
@@ -102,7 +112,7 @@ The key challenge is ensuring IPC overhead doesn't negate Bun's performance adva
                   │    Vertebra IPC Bridge        │
                   │                               │
                   │  ┌─────────────────────────┐ │
-                  │  │  Unix Domain Socket     │ │
+                  │  │  IPC Transport          │ │
                   │  │  Protocol Buffers       │ │
                   │  │  Connection Pool        │ │
                   │  └─────────┬───────────────┘ │
@@ -138,7 +148,7 @@ The key challenge is ensuring IPC overhead doesn't negate Bun's performance adva
 **Technology Stack**:
 - Bun runtime (v1.0.13+)
 - Native HTTP/2 server
-- uWebSockets-based WebSocket implementation
+- Bun WebSocket implementation (verify specifics against current Bun release)
 - @grpc/grpc-js for gRPC support
 - io_uring for optimized Linux I/O
 
@@ -152,7 +162,7 @@ The key challenge is ensuring IPC overhead doesn't negate Bun's performance adva
 
 **Responsibilities**:
 - Serialize HTTP requests to Protocol Buffer format
-- Transmit requests to Python workers via Unix Domain Sockets
+- Transmit requests to Python workers via IPC transport (UDS or named pipe)
 - Manage connection pool to workers
 - Deserialize Protocol Buffer responses
 - Handle timeouts and failures
@@ -209,7 +219,7 @@ message WebSocketMessage {
 
 **IPC Transport**:
 
-Unix Domain Sockets provide optimal performance for same-host IPC:
+IPC transport provides optimal performance for same-host IPC:
 - **30-66% lower latency** than TCP localhost
 - **7x greater throughput** in benchmarks
 - **2-3 microseconds latency** vs 3.6μs for TCP loopback
@@ -219,7 +229,7 @@ Socket location: `/tmp/vertebra-{pid}.sock` with permissions 0600 (owner only).
 
 **Connection Pooling**:
 
-Maintain a pool of persistent UDS connections to each worker:
+Maintain a pool of persistent IPC transport connections to each worker:
 - Initial pool size: 2 connections per worker
 - Max pool size: 10 connections per worker
 - Connection reuse for request pipelining
@@ -252,7 +262,7 @@ This optimization targets file uploads, large JSON payloads, and streaming respo
 
 Each worker is a separate Python process with:
 - Single asyncio event loop
-- Unix Domain Socket server listening for IPC
+- IPC transport server listening for worker traffic (UDS or named pipe)
 - ASGI application loaded at startup
 - Request handler coroutine pool
 - Graceful shutdown handler
@@ -264,7 +274,7 @@ async def worker_main(worker_id: int, socket_path: str, app_path: str):
     # Load ASGI application
     app = import_app(app_path)  # e.g., "myapp:app"
 
-    # Create UDS server
+    # Create IPC transport server (UDS or named pipe)
     server = await asyncio.start_unix_server(
         handle_connection,
         path=socket_path
@@ -347,10 +357,8 @@ HTTP/3 over QUIC support pending Bun implementation:
 
 **WebSocket**:
 
-Leveraging Bun's uWebSockets-based implementation:
-- 1,098,770 messages/second throughput
-- 48MB memory for 10k connections (vs Node.js 125MB)
-- 6ms latency (vs Node.js 15ms)
+Leverage Bun’s WebSocket implementation (verify details against current Bun release):
+- Throughput/latency/memory baselines to be measured in Phase 1
 
 WebSocket lifecycle:
 1. Client sends WebSocket upgrade request
@@ -761,7 +769,7 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 
 **Objectives**:
 - Define Protocol Buffer schemas for ASGI messages
-- Design Unix Domain Socket protocol
+- Design IPC transport protocol (UDS on Unix, named pipe/TCP on Windows)
 - Create TypeScript/Python code generation pipeline
 
 **Deliverables**:
@@ -808,11 +816,11 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 ### Phase 3: IPC Bridge - TypeScript Side (2 weeks)
 
 **Objectives**:
-- Implement Unix Domain Socket client
+- Implement IPC transport client
 - Add request serialization and connection pooling
 
 **Deliverables**:
-1. UDS connection manager
+1. IPC connection manager (UDS or named pipe)
 2. Protocol Buffer request serializer
 3. Response deserializer
 4. Connection pool with load balancing
@@ -821,7 +829,7 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 7. Unit tests for IPC client
 
 **Success Criteria**:
-- UDS connection established successfully
+- IPC connection established successfully
 - Protocol Buffer serialization < 100μs (p95)
 - Connection pooling works (reuse verified)
 - Timeout handling tested
@@ -832,12 +840,12 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 ### Phase 4: IPC Bridge - Python Side (2 weeks)
 
 **Objectives**:
-- Implement Unix Domain Socket server
+- Implement IPC transport server
 - Add ASGI application interface
 - Create worker process infrastructure
 
 **Deliverables**:
-1. UDS server implementation (asyncio)
+1. IPC transport server implementation (asyncio)
 2. Protocol Buffer deserializer to ASGI dict
 3. ASGI application invoker
 4. Response serializer to Protocol Buffers
@@ -1028,7 +1036,7 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 
 **Parallel Development**:
 - PRD-3 (Bun) can proceed independently of PRD-1 (Rust)
-- Both target the same IPC protocol (Protocol Buffers over UDS)
+- Both target the same IPC protocol (Protocol Buffers over IPC transport)
 - Learnings from PRD-3 can inform PRD-1 design
 
 **Migration Path**:
@@ -1176,7 +1184,7 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 
 ### Security Considerations
 
-**Unix Domain Socket Security**:
+**IPC Transport Security**:
 - Socket file permissions: 0600 (owner only)
 - Socket location: `/tmp/vertebra-{pid}.sock` (unique per instance)
 - Verify socket ownership before connection
@@ -1236,7 +1244,7 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 **Resource Exhaustion**:
 1. Out of memory: gracefully refuse new connections (503)
 2. File descriptor limit: close idle connections
-3. Shared memory full: fall back to UDS serialization
+3. Shared memory full: fall back to IPC transport serialization
 4. Worker pool saturated: return 503 Service Unavailable
 
 **Error Response Format**:
@@ -1498,7 +1506,7 @@ Suggestion: Ensure user_id is an integer in the request URL
 **Impact**: High (project goal not achieved)
 
 **Mitigation**:
-1. Use Unix Domain Sockets (not TCP)
+1. Use UDS on Unix; named pipes on Windows (avoid TCP when possible)
 2. Use Protocol Buffers (faster than JSON/MessagePack)
 3. Implement connection pooling (reuse connections)
 4. Add shared memory for large payloads
@@ -1583,7 +1591,7 @@ Suggestion: Ensure user_id is an integer in the request URL
 
 **Contingency**:
 - Pin to known-good Bun version
-- Consider Node.js fallback (slower but more stable)
+- Consider Node.js fallback only if performance parity can be demonstrated; not in MVP
 
 ---
 
@@ -1655,61 +1663,21 @@ Suggestion: Ensure user_id is an integer in the request URL
 
 ## Appendix A: Research Sources
 
-### Bun Performance
-- [Strapi: Bun vs Node.js 2025 Performance Guide](https://strapi.io/blog/bun-vs-nodejs-performance-comparison-guide)
-- [Medium: Why Choose Bun Over Node.js in Late 2026](https://medium.com/@lalatenduswain/why-choose-bun-over-node-js-deno-and-other-javascript-runtimes-in-late-2026-121f25f208eb)
-- [Özkan Pakdil: Bun Microservice Framework Benchmark](https://ozkanpakdil.github.io/posts/my_collections/2026/2026-01-10-bun-microservice-framework-benchmark/)
-- [Fenil Sonani: Bun vs Node.js Performance Comparison](https://fenilsonani.com/articles/bun-vs-nodejs-performance-comparison)
+### Bun Runtime & Server APIs
+- https://bun.sh/docs/api/http
+- https://bun.sh/docs/api/websockets
 
-### Bun WebSocket Performance
-- [GitHub: WebSocket Benchmark](https://github.com/ntsd/websocket-benchmark)
-- [Daniel Lemire: WebSocket Benchmark in JavaScript](https://lemire.me/blog/2023/11/25/a-simple-websocket-benchmark-in-javascript-node-js-versus-bun/)
-- [Bun Documentation: WebSockets](https://bun.sh/docs/api/websockets)
+### ASGI & Litestar
+- https://asgi.readthedocs.io/en/latest/specs/www.html
+- https://docs.litestar.dev/
 
-### Granian Performance
-- [GitHub: Granian - Rust HTTP Server for Python](https://github.com/emmett-framework/granian)
-- [DeployHQ: Python Application Servers in 2025](https://www.deployhq.com/blog/python-application-servers-in-2025-from-wsgi-to-modern-asgi-solutions)
-- [Granian Benchmarks vs Other Servers](https://github.com/emmett-framework/granian/blob/master/benchmarks/vs.md)
+### Serialization Formats
+- https://msgpack.org/
+- https://protobuf.dev/
 
-### IPC Performance
-- [Baeldung: IPC Performance Comparison](https://www.baeldung.com/linux/ipc-performance-comparison)
-- [CopyProgramming: TCP Loopback vs Unix Domain Socket](https://copyprogramming.com/howto/tcp-loopback-connection-vs-unix-domain-socket-performance)
-- [REVSYS: Unix Sockets Performance](https://www.revsys.com/12days/unix-sockets/)
-- [Medium: Unix Domain Sockets for High-Performance Microservices](https://medium.com/@sanathshetty444/beyond-http-unleashing-the-power-of-unix-domain-sockets-for-high-performance-microservices-252eee7b96ad)
-
-### Zero-Copy IPC
-- [InfoQ: Zero-Copy In-Memory Sharing](https://www.infoq.com/news/2023/03/zero-copy-v6d/)
-- [metafunctor: ZeroIPC](https://metafunctor.com/post/2025-01-zeroipc/)
-- [GitHub: Eclipse iceoryx](https://github.com/eclipse-iceoryx/iceoryx)
-
-### Serialization Performance
-- [Medium: Message Serialization Experiments](https://medium.com/@hugovs/the-need-for-speed-experimenting-with-message-serialization-93d7562b16e4)
-- [DEV: Protocol Buffers vs MessagePack Performance](https://dev.to/nate10/performance-analysis-of-json-buffer-custom-binary-protocol-protobuf-and-messagepack-for-websockets-2apn)
-- [peerdh: Comparing MessagePack vs Protocol Buffers](https://peerdh.com/blogs/programming-insights/comparing-data-serialization-techniques-messagepack-vs-protocol-buffers-in-python)
-- [CloudThat: Optimizing API Performance with Protocol Buffers](https://www.cloudthat.com/resources/blog/optimizing-api-performance-with-protocol-buffers-flatbuffers-messagepack-and-cbor)
-
-### gRPC with TypeScript/Bun
-- [OneUpTime: gRPC in Node.js with TypeScript](https://oneuptime.com/blog/post/2026-01-08-grpc-nodejs-typescript/view)
-- [Bun Blog: gRPC.js Support in Bun v1.0.13](https://bun.sh/blog/bun-v1.0.13)
-
-### ASGI and HTTP/2
-- [ASGI 3.0 Documentation](https://asgi.readthedocs.io/en/latest/specs/www.html)
-- [Encode: Working with ASGI and HTTP](https://www.encode.io/articles/asgi-http)
-
-### Litestar Framework
-- [GitHub: Litestar](https://github.com/litestar-org/litestar)
-- [Litestar Documentation: Lifecycle Hooks](https://docs.litestar.dev/main/usage/lifecycle-hooks.html)
-- [Medium: Introducing Litestar Framework](https://medium.com/django-unleashed/introducing-litestar-production-ready-light-flexible-extensible-asgi-api-framework-9c1ee642df17)
-
-### Python Concurrency
-- [Medium: AsyncIO vs Multiprocessing vs ThreadPools](https://medium.com/@yogeshkrishnanseeniraj/high-performance-python-asyncio-vs-multiprocessing-vs-threadpools-2026-guide-ad49d40452fc)
-- [Real Python: Speed Up Python with Concurrency](https://realpython.com/python-concurrency/)
-- [TestDriven: Concurrency, Parallelism, and asyncio](https://testdriven.io/blog/concurrency-parallelism-asyncio/)
-
-### Protocol Buffers with TypeScript
-- [GitHub: ts-proto](https://github.com/stephenh/ts-proto)
-- [Buf: Protobuf-ES](https://buf.build/blog/protobuf-es-the-protocol-buffers-typescript-javascript-runtime-we-all-deserve)
-- [Escape Tech: Using Protobuf with TypeScript](https://escape.tech/blog/using-protobuf-typescript/)
+### IPC & Shared Memory (context for server↔Python bridge)
+- https://man7.org/linux/man-pages/man3/shm_open.3.html
+- https://man7.org/linux/man-pages/man2/mmap.2.html
 
 ---
 
@@ -1736,7 +1704,7 @@ src/js/
 │   │   │   └── h2c.ts            # HTTP/2 cleartext
 │   │   ├── bridge/
 │   │   │   ├── index.ts          # IPC bridge interface
-│   │   │   ├── uds.ts            # Unix Domain Socket
+│   │   │   ├── ipc.ts            # IPC transport (UDS/named pipe)
 │   │   │   ├── serializer.ts     # Protobuf serialization
 │   │   │   ├── pool.ts           # Connection pooling
 │   │   │   └── shm.ts            # Shared memory (future)
@@ -1772,7 +1740,7 @@ src/py/vertebra/
 ├── __init__.py
 ├── server/
 │   ├── __init__.py
-│   ├── bridge.py             # IPC bridge (UDS server)
+│   ├── bridge.py             # IPC bridge (transport server)
 │   ├── worker.py             # Worker process main
 │   ├── asgi.py               # ASGI adapter
 │   └── lifecycle.py          # Startup/shutdown

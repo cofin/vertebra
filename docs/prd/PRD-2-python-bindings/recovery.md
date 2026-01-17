@@ -65,6 +65,8 @@ TypeScript Client (Vite plugin)
 
 **Trade-off:** More complex than runtime reflection, but better performance and DX.
 
+**Note**: Annotation resolution must handle `from __future__ import annotations` and PEP 649 deferred evaluation; use `typing.get_type_hints(..., include_extras=True)` with AST fallback.
+
 ### 2. Type IR (Intermediate Representation)
 
 **Why:** Allows future expansion to other targets (GraphQL, OpenAPI, JSON Schema).

@@ -87,6 +87,13 @@ Python multi-worker deployments suffer from resource multiplication:
 - Custom connection protocols (use existing drivers)
 - Query optimization or caching
 
+### 1.4 Assumptions and Constraints
+
+- **Cross-platform target**: Linux/macOS/Windows parity for MVP if feasible; Linux-first implementation.
+- **IPC transport**: UDS on Unix; named pipes (or TCP fallback) on Windows.
+- **Central broker** pattern is required for pool ownership and fairness.
+- **OpenTelemetry + Prometheus** are the default observability stack unless overridden.
+
 ---
 
 ## 2. Solution Architecture
@@ -107,7 +114,7 @@ Python multi-worker deployments suffer from resource multiplication:
 **Technology Stack**:
 - **Runtime**: tokio for async execution
 - **Pooling**: deadpool for PostgreSQL/Redis/MySQL
-- **IPC**: shmipc for zero-copy shared memory IPC
+- **IPC**: shmipc for zero-copy shared memory IPC on Linux (alternatives required for macOS/Windows)
 - **Serialization**: bincode for efficient message passing
 - **Metrics**: prometheus for instrumentation
 - **Logging**: tracing for structured logging
@@ -245,16 +252,19 @@ Python Worker                Rust Broker
 
 #### 2.2.3 Transport Mechanism
 
-**Primary**: shmipc (ByteDance's shared memory IPC)
+**Primary (Linux)**: shmipc (ByteDance's shared memory IPC)
 - Zero-copy data transfer
-- Linux shared memory based
-- Unix socket for synchronization
-- High performance (nanosecond latency)
+- Shared memory based (POSIX on Unix, named shared memory on Windows)
+- IPC transport for synchronization (UDS on Unix, named pipe on Windows)
+- High performance (reported sub-microsecond latency; validate locally)
 
-**Fallback**: Unix domain sockets
-- Standard POSIX IPC
+**Primary (macOS/Windows)**: OS-native shared memory + IPC transport
+- macOS: POSIX shared memory + UDS
+- Windows: Named shared memory + named pipes
+
+**Fallback**: IPC transport without shared memory
+- UDS on Unix, TCP on Windows if named pipes unavailable
 - Lower performance but universally supported
-- Automatic fallback if shmipc unavailable
 
 ### 2.3 Fair Scheduling Algorithm
 
@@ -413,6 +423,8 @@ async fn release(&self, conn: Connection) -> Result<()> {
     Ok(())
 }
 ```
+
+**Windows Note**: use named pipe client impersonation / token checks for equivalent worker identity verification.
 
 ---
 
@@ -731,24 +743,11 @@ groups:
 
 ### 5.1 Security Considerations
 
-#### 5.1.1 IPC Socket Security
+#### 5.1.1 IPC Transport Security
 
 **Permissions**:
-```rust
-use std::os::unix::fs::PermissionsExt;
-
-async fn create_ipc_socket(path: &Path) -> Result<UnixListener> {
-    let _ = std::fs::remove_file(path);
-    let listener = UnixListener::bind(path)?;
-
-    // Owner read/write only (0o600)
-    let mut perms = std::fs::metadata(path)?.permissions();
-    perms.set_mode(0o600);
-    std::fs::set_permissions(path, perms)?;
-
-    Ok(listener)
-}
-```
+- **Unix**: enforce 0600 on UDS path
+- **Windows**: restrict named pipe ACLs to local user/service
 
 **Worker Authentication**:
 ```rust
@@ -1473,7 +1472,7 @@ async def load_test_scenario():
 **Milestone 1.1: Rust Broker Skeleton**
 - [ ] Set up vertebra-broker crate structure
 - [ ] Implement configuration loading (TOML)
-- [ ] Create IPC server (Unix socket)
+- [ ] Create IPC server (UDS on Unix, named pipe on Windows)
 - [ ] Message serialization/deserialization
 - [ ] Structured logging
 
@@ -1695,26 +1694,20 @@ async def load_test_scenario():
 
 ### 13.1 Research Sources
 
-**Rust Connection Pooling**:
-- [Efficient Database Connection Management with deadpool and bb8](https://leapcell.io/blog/efficient-database-connection-management-with-sqlx-and-bb8-deadpool-in-rust)
-- [Performance Benchmark of Rust Generic Pools](https://github.com/Astro36/rust-pool-benchmark)
+**POSIX Shared Memory & IPC**:
+- https://man7.org/linux/man-pages/man3/shm_open.3.html
+- https://man7.org/linux/man-pages/man2/mmap.2.html
 
-**Zero-Copy IPC**:
-- [Unlocking Nanosecond Communication in Rust](https://medium.com/@FAANG/unlocking-nanosecond-communication-how-i-built-a-zero-copy-ipc-layer-in-rust-that-left-go-and-c-in-77af138d1144)
-- [Eclipse iceoryx2 - True Zero-Copy IPC](https://github.com/eclipse-iceoryx/iceoryx2)
-- [shmipc - ByteDance IPC Library](https://crates.io/crates/shmipc)
-- [IPC in Rust - Ping Pong Comparison](https://3tilley.github.io/posts/simple-ipc-ping-pong/)
+**Async Runtime**:
+- https://docs.rs/tokio/
 
-**Fair Scheduling**:
-- [Round-robin scheduling - Wikipedia](https://en.wikipedia.org/wiki/Round-robin_scheduling)
-- [Fair queuing - Wikipedia](https://en.wikipedia.org/wiki/Fair_queuing)
-- [Completely Fair Scheduler - Wikipedia](https://en.wikipedia.org/wiki/Completely_Fair_Scheduler)
-- [Optimizing Weighted Fair Queuing with DRL](https://www.mdpi.com/2673-4001/6/3/46)
+**Observability**:
+- https://opentelemetry.io/docs/
+- https://prometheus.io/docs/introduction/overview/
 
-**Python AsyncIO + Multiprocessing**:
-- [Combining Multiprocessing and Asyncio in Python](https://www.dataleadsfuture.com/combining-multiprocessing-and-asyncio-in-python-for-performance-boosts/)
-- [Supercharge Your Asyncio with Aiomultiprocess](https://towardsdatascience.com/supercharge-your-python-asyncio-with-aiomultiprocess-a-comprehensive-guide-571ee0e2f416/)
-- [High-Performance Python Guide (2026)](https://medium.com/@yogeshkrishnanseeniraj/high-performance-python-asyncio-vs-multiprocessing-vs-threadpools-2026-guide-ad49d40452fc)
+**Zero-Copy IPC (Reference Implementations)**:
+- https://github.com/eclipse-iceoryx/iceoryx2
+- https://crates.io/crates/shmipc
 
 ### 13.2 Glossary
 

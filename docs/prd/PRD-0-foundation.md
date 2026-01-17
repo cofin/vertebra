@@ -9,10 +9,10 @@
 
 ## Executive Summary
 
-This PRD defines the foundation work required to transform the Vertebra repository from a legacy DMA (Database Migration Assessment) codebase into a clean, multi-language application backbone. The deliverable is a verified, working build system with zero legacy references, proper tooling for Python, Rust, and TypeScript/Bun, and comprehensive documentation for contributors.
+This PRD defines the foundation work required to transform the Vertebra repository from a legacy DMA (Database Migration Assessment) codebase into a clean, multi-language application backbone. The deliverable is a verified, working build system with zero *undocumented* legacy references, proper tooling for Python, Rust, and TypeScript/Bun, and comprehensive documentation for contributors.
 
 **Success Criteria:**
-- All DMA references removed from codebase
+- All DMA references removed **or explicitly documented as known legacy issues** (no new DMA references introduced)
 - Multi-language build system functional (Python + Rust + TypeScript/Bun)
 - All verification commands pass
 - Architecture and conventions documented
@@ -73,7 +73,7 @@ Without a clean foundation:
 
 ## Problem Statement
 
-The Vertebra project needs to completely remove all DMA legacy code references and establish proper multi-language build infrastructure before feature development can begin. This is a **blocking prerequisite** for all future work.
+The Vertebra project needs to remove or quarantine DMA legacy code references and establish proper multi-language build infrastructure before feature development can begin. This is a **blocking prerequisite** for all future work.
 
 ### Specific Problems
 
@@ -92,7 +92,15 @@ The Vertebra project needs to completely remove all DMA legacy code references a
    - No Rust workspace for IPC, server, and bindings crates
    - No TypeScript package for type generation and client
    - No unified build commands for multi-language project
-   - No documentation of architecture decisions or conventions
+- No documentation of architecture decisions or conventions
+
+### Known Legacy Issues (DMA)
+
+The following DMA-related errors and references are **known issues** and are already documented in the specs:
+- Residual references in historical docs or cached artifacts
+- Legacy fixture names or environment variables in tests that are pending removal
+
+These items **must remain documented** until they are removed. The foundation cleanup must not regress or reintroduce additional DMA references.
 
 ---
 
@@ -101,7 +109,7 @@ The Vertebra project needs to completely remove all DMA legacy code references a
 ### Goals
 
 **Primary Goals:**
-1. Remove 100% of DMA legacy references from the codebase
+1. Remove DMA legacy references or document them as known legacy issues
 2. Configure `maturin` as the build backend for Rust+Python integration
 3. Create Rust workspace with three crates:
    - `vertebra-core`: Core IPC primitives and shared types
@@ -131,6 +139,13 @@ The Vertebra project needs to completely remove all DMA legacy code references a
 - Deployment configuration
 - CI/CD pipeline setup (will be addressed in separate PRD)
 
+### Assumptions and Constraints
+
+- **Greenfield implementation**: no backward-compat guarantees beyond documented DMA legacy notes.
+- **Cross-platform target**: Linux/macOS/Windows parity for MVP if feasible; Linux-first implementation.
+- **Single-developer focus** for PRD-0 delivery; subsequent PRDs may assume a small team.
+- **Tooling baseline**: Rust + Python + Bun toolchains are required for local development.
+
 ---
 
 ## User Stories
@@ -144,7 +159,7 @@ The Vertebra project needs to completely remove all DMA legacy code references a
 - `uv run python -c "import vertebra; print(vertebra.__version__)"` prints "0.1.0"
 - `cd src/rs && cargo build && cargo test` succeeds
 - `cd src/js && bun install && bun test` succeeds
-- No DMA references found by `grep -r "dma" --include="*.py" --include="*.toml" src/`
+- No DMA references found by `grep -r "dma" --include="*.py" --include="*.toml" src/` **except documented known legacy issues**
 
 ### As a Python Developer
 
@@ -1205,7 +1220,7 @@ Vertebra is a **Python-first, high-performance application backbone** designed t
 - ✅ Orders of magnitude faster for large data
 - ✅ Bypasses Python GIL
 - ❌ More complex error handling (segfaults possible)
-- ❌ Platform-specific code (Linux/macOS differ)
+- ❌ Platform-specific backends (hidden behind shared abstractions)
 
 ### 4. Fail Fast, Fail Clearly
 
@@ -1600,11 +1615,11 @@ type VertebraError = {
 ### Why Bun over Node.js?
 
 **Benchmarks (req/sec):**
-- Bun: ~70,000
-- Node.js (v20): ~25,000
-- Deno: ~40,000
+- Bun: published benchmarks indicate higher throughput (validate locally)
+- Node.js (v20): baseline to be measured
+- Deno: baseline to be measured
 
-**Decision:** Bun for performance and built-in TypeScript support.
+**Decision:** Bun for performance and built-in TypeScript support (pending local validation).
 
 **Additional Benefits:**
 - No build step for TypeScript (faster iteration)
@@ -1935,9 +1950,9 @@ cd src/rs && cargo build && cargo test
 cd src/js && bun install && bun test
 # Expected: All tests pass
 
-# 4. No DMA references remain
+# 4. No DMA references remain (except documented legacy issues)
 grep -r "dma" --include="*.py" --include="*.toml" src/
-# Expected: Empty output (or only comments/strings explaining removal)
+# Expected: Empty output (or only documented legacy references)
 
 # 5. Full build works
 make clean && make install && make test-all
@@ -1958,7 +1973,7 @@ make clean && make install && make test-all
 - ✅ `cd src/rs && cargo test` passes
 - ✅ `cd src/js && bun install` succeeds
 - ✅ `cd src/js && bun test` passes
-- ✅ `grep -r "dma" --include="*.py" --include="*.toml" src/` returns empty
+- ✅ `grep -r "dma" --include="*.py" --include="*.toml" src/` returns empty **or only documented legacy references**
 - ✅ `make test-all` passes
 - ✅ `CLAUDE.md` exists and is comprehensive
 - ✅ `docs/arch.md` exists and documents architecture
@@ -2101,7 +2116,7 @@ make clean && make install && make test-all
 ### Definition of Done
 
 - [ ] All verification commands pass
-- [ ] No DMA references in source code
+- [ ] No DMA references in source code **except documented known legacy issues**
 - [ ] Documentation complete (CLAUDE.md, arch.md, README.md)
 - [ ] Code reviewed by maintainer
 - [ ] Fresh install tested on clean environment
@@ -2114,22 +2129,17 @@ make clean && make install && make test-all
 ### Maturin Best Practices
 
 **Sources:**
-- [GitHub - PyO3/maturin](https://github.com/PyO3/maturin)
-- [Maturin Tutorial](https://www.maturin.rs/tutorial.html)
-- [PyO3 Building and Distribution](https://pyo3.rs/v0.27.2/building-and-distribution.html)
-- [Distribution - Maturin User Guide](https://www.maturin.rs/distribution.html)
+- [Maturin User Guide](https://www.maturin.rs/)
+- [PyO3 - Building and Distribution](https://pyo3.rs/)
 
 **Key Findings:**
-- Use `--mixed` layout for Rust+Python projects
-- Configure `python-source` in `tool.maturin` section
-- Enable abi3 features for multi-Python version wheels
-- Publish with `uv publish` or `maturin publish`
+- `pyproject.toml` is the primary configuration for Rust+Python builds
+- `tool.maturin` supports `python-source` and `module-name` configuration
 
 ### Rust Workspace Structure
 
 **Sources:**
 - [Cargo Workspaces - The Rust Programming Language](https://doc.rust-lang.org/book/ch14-03-cargo-workspaces.html)
-- [Rust Workspace Example: A Guide to Managing Multi-Crate Projects | Medium](https://medium.com/@aleksej.gudkov/rust-workspace-example-a-guide-to-managing-multi-crate-projects-82d318409260)
 - [Large Rust Workspaces](https://matklad.github.io/2021/08/22/large-rust-workspaces.html)
 
 **Key Findings:**
@@ -2138,12 +2148,32 @@ make clean && make install && make test-all
 - Shared `Cargo.lock` across all crates
 - Workspace-level dependencies ensure consistency
 
+### Bun Runtime & Server APIs
+
+**Sources:**
+- [Bun HTTP Server](https://bun.sh/docs/api/http)
+- [Bun WebSockets](https://bun.sh/docs/api/websockets)
+- [Bun SQL](https://bun.sh/docs/api/sql)
+
+**Key Findings:**
+- Bun exposes `Bun.serve()` for high-performance HTTP handling
+- WebSocket support is integrated into the Bun server API
+- Bun provides built-in SQL helpers for database access
+
+### napi-rs (Node/Bun bindings)
+
+**Sources:**
+- [napi-rs Documentation](https://napi.rs/)
+
+**Key Findings:**
+- napi-rs targets the Node-API surface for native bindings
+
 ### Python AST to TypeScript
 
 **Sources:**
 - [@kriss-u/py-ast - JSR](https://jsr.io/@kriss-u/py-ast)
-- [Writing a TypeScript Code Generator: Templates vs AST | Medium](https://medium.com/singapore-gds/writing-a-typescript-code-generator-templates-vs-ast-ab391e5d1f5e)
-- [TypeScript - Bun](https://bun.com/docs/runtime/typescript)
+- [TypeScript Handbook](https://www.typescriptlang.org/docs/)
+- [Bun TypeScript Support](https://bun.sh/docs/runtime/typescript)
 
 **Key Findings:**
 - `@kriss-u/py-ast` parses Python to AST in TypeScript
@@ -2154,9 +2184,7 @@ make clean && make install && make test-all
 ### tRPC Architecture for Python
 
 **Sources:**
-- [GitHub - rafalp/trpc-core: Toolkit for implementing tRPC servers in python](https://github.com/rafalp/trpc-core)
-- [Python | tRPC](https://trpc.group/docs/languages/python/)
-- [Lessons of building a trpc backend for large scale | Medium](https://medium.com/@julien.barbay/lessons-of-building-a-trpc-backend-for-large-scale-98a46a7a5edf)
+- [tRPC Documentation](https://trpc.io/docs)
 
 **Key Findings:**
 - tRPC is TypeScript-first, not designed for Python backends

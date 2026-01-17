@@ -14,7 +14,7 @@
   - [ ] Create `vertebra/procedures/decorator.py`
   - [ ] Basic decorator that wraps handler functions
   - [ ] Extract function signature using `inspect.signature()`
-  - [ ] Extract type hints using `typing.get_type_hints()`
+  - [ ] Extract type hints using `typing.get_type_hints(..., include_extras=True)`
   - [ ] Support optional parameters (name, serializer, metadata)
   - [ ] Use `functools.wraps` to preserve metadata
 

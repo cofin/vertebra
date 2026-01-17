@@ -25,7 +25,8 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 - Lock-free channels (SPSC/MPMC)
 - Pre-allocated buffer pools
 - Cross-process synchronization primitives
-- C ABI FFI for Python integration
+- PyO3 + napi-rs bindings for Python/Bun integration
+- Optional C ABI (only if required for compatibility)
 - Apache Arrow IPC support
 
 ### Goals
@@ -33,7 +34,8 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 - **Performance**: < 1μs latency for small messages
 - **Safety**: Memory safety via Rust ownership + Miri validation
 - **Coverage**: 90%+ test coverage
-- **Integration**: Seamless Python FFI
+- **Integration**: Seamless Python/Bun bindings (C ABI only if required)
+- **Compatibility**: Linux-first with macOS/Windows parity target
 
 ### Status
 
@@ -71,10 +73,8 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 │       ├── channel.rs             # Lock-free channels
 │       ├── buffer.rs              # Buffer pool
 │       └── sync.rs                # Synchronization primitives
-└── vertebra-ffi/                  # C ABI exports (to be created)
-    ├── Cargo.toml
-    └── src/
-        └── lib.rs
+├── vertebra-py/                   # PyO3 bindings (from PRD-0)
+└── vertebra-js/                   # napi-rs bindings (from PRD-0)
 ```
 
 ### Build System
@@ -92,7 +92,7 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 
 **Key Tasks**:
 1. Create Cargo workspace structure
-2. Initialize vertebra-core and vertebra-ffi crates
+2. Initialize vertebra-core and ensure binding crates are wired in
 3. Configure dependencies (rustix, arrow-rs, etc.)
 4. Add Makefile integration
 5. Set up CI pipeline
@@ -115,9 +115,9 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 
 **Deliverables**: Cross-process futex-based primitives
 
-### Phase 6: FFI Layer (Week 5-6)
+### Phase 6: Binding Surfaces (Week 5-6)
 
-**Deliverables**: C ABI + Python bindings
+**Deliverables**: PyO3 + napi-rs bindings
 
 ### Phase 7: Integration (Week 6-7)
 
@@ -129,8 +129,8 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 
 ### Technical Choices
 
-1. **FFI Approach**: C ABI with cffi (not PyO3)
-   - Rationale: Minimal surface, stable ABI, no Python runtime deps
+1. **FFI Approach**: PyO3 + napi-rs bindings; optional C ABI only if required
+   - Rationale: Native ergonomics with room for ABI-stable shim if needed
 
 2. **Shared Memory**: rustix for POSIX abstractions
    - Rationale: Safe, well-maintained, pure Rust
@@ -149,8 +149,8 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 
 ### Architecture Patterns
 
-- **Workspace Structure**: Separate -core and -ffi crates
-- **FFI Safety**: Opaque pointers, no panics across boundary
+- **Workspace Structure**: `vertebra-core` + binding crates (`vertebra-py`, `vertebra-js`)
+- **FFI Safety**: Deterministic error mapping, no panics across boundary
 - **RAII**: Automatic cleanup via Drop trait
 - **Testing**: Unit + Integration + Property-based + Miri
 
@@ -231,7 +231,7 @@ Comprehensive research is documented in `/home/cody/code/c/vertebra/docs/prd/PRD
 1. **POSIX Shared Memory**: rustix provides safe abstractions, close fd after mmap
 2. **Lock-Free Channels**: Cache padding critical for SPSC performance
 3. **Arrow IPC**: Zero-copy via memory-mapped files, 64-byte alignment
-4. **FFI**: C ABI preferred for minimal surface, PyO3 for high-level APIs
+4. **FFI**: PyO3/napi-rs first; optional C ABI only if compatibility or ABI stability requires it
 5. **Miri**: Essential for UB detection, combine with valgrind for FFI
 6. **Buffer Pools**: Slice-based views with Arc sharing, 5x speedup possible
 7. **Futex**: Custom wrapper needed (no FUTEX_PRIVATE_FLAG), fallback to file locks
@@ -263,7 +263,7 @@ Comprehensive research is documented in `/home/cody/code/c/vertebra/docs/prd/PRD
 - [ ] Unit tests ≥ 90% coverage
 - [ ] Integration tests for all modules
 - [ ] Property-based tests for invariants
-- [ ] FFI tests from Rust and Python
+- [ ] Binding tests from Rust and Python/JS
 
 ### Documentation
 
@@ -271,7 +271,7 @@ Comprehensive research is documented in `/home/cody/code/c/vertebra/docs/prd/PRD
 - [ ] Getting started guide
 - [ ] Integration guide
 - [ ] Performance guide
-- [ ] API reference (Rust + Python + C)
+- [ ] API reference (Rust + Python + JS)
 
 ---
 
@@ -290,8 +290,8 @@ Comprehensive research is documented in `/home/cody/code/c/vertebra/docs/prd/PRD
 
 ### Medium-Priority Risks
 
-4. **FFI Safety and Memory Leaks**
-   - Mitigation: Opaque pointers, Python context managers, valgrind tests
+4. **Binding Safety and Memory Leaks**
+   - Mitigation: Deterministic error mapping, valgrind tests
 
 5. **Miri Coverage Limitations**
    - Mitigation: Minimize unsafe code, valgrind for FFI, manual review
@@ -303,7 +303,7 @@ Comprehensive research is documented in `/home/cody/code/c/vertebra/docs/prd/PRD
 ### Immediate (Phase 1)
 
 1. Create workspace structure in `/home/cody/code/c/vertebra/src/rs/`
-2. Initialize vertebra-core and vertebra-ffi crates
+2. Initialize vertebra-core and ensure binding crates are wired
 3. Configure Cargo.toml with dependencies
 4. Add Makefile targets for Rust builds
 5. Set up CI pipeline for Rust validation
@@ -317,8 +317,8 @@ Comprehensive research is documented in `/home/cody/code/c/vertebra/docs/prd/PRD
 ### Long-Term (Phase 4-7)
 
 1. Complete all core modules
-2. Implement FFI layer
-3. Create Python bindings
+2. Implement binding surfaces
+3. Create Python/Bun bindings
 4. Write comprehensive documentation
 
 ---

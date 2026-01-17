@@ -23,7 +23,7 @@ Cooperative Resource Management enables shared connection pools across Python wo
 │  MySQL Pool (10 conns)              │
 │  Redis Pool (5 conns)               │
 └─────────────────────────────────────┘
-         │ Zero-copy IPC
+         │ IPC transport (UDS / named pipes)
     ┌────┴────┬────┴────┬────┴────┐
     │Worker 1 │Worker 2 │Worker N │
     └─────────┴─────────┴─────────┘

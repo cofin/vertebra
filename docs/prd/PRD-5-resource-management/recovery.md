@@ -166,6 +166,7 @@ pool_manager.release(handle).await?;
 ```toml
 [broker]
 ipc_socket_path = "/var/run/vertebra/broker.sock"
+ipc_named_pipe = "\\\\.\\pipe\\vertebra-broker" # Windows
 
 [[pools.postgres]]
 name = "main"
@@ -179,6 +180,7 @@ from vertebra.resources import configure_client
 
 configure_client(
     broker_socket="/var/run/vertebra/broker.sock",
+    broker_named_pipe="\\\\.\\pipe\\vertebra-broker",  # Windows
     default_timeout=5.0
 )
 ```
@@ -276,7 +278,7 @@ cargo build --release
 **A**:
 
 1. Check broker logs: `journalctl -u vertebra-broker -f`
-2. Verify socket exists: `ls -la /var/run/vertebra/broker.sock`
+2. Verify IPC endpoint exists: `ls -la /var/run/vertebra/broker.sock` (Unix) or check named pipe on Windows
 3. Check metrics: `curl http://localhost:9090/metrics | grep pool_`
 4. Enable trace logging: Set `VERTEBRA_LOG_LEVEL=trace`
 
@@ -394,7 +396,7 @@ struct WorkerQueue {
 
 **Solutions**:
 1. Verify broker running: `systemctl status vertebra-broker`
-2. Check socket exists: `ls -la /var/run/vertebra/broker.sock`
+2. Check IPC endpoint exists: `ls -la /var/run/vertebra/broker.sock` (Unix) or check named pipe on Windows
 3. Verify permissions: Socket should be mode 0600 or 0660
 4. Check client config: `broker_socket` path matches broker config
 

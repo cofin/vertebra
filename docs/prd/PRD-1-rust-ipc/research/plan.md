@@ -169,13 +169,12 @@ A University of São Paulo study ([arXiv:2507.00264](https://arxiv.org/pdf/2507.
 
 From the [Medium article on Rust-Python FFI](https://medium.com/@sparknp1/rust-python-ffi-faster-data-work-without-leaving-python-da7f707d1298), PyO3 is ideal when work is CPU-bound (string parsing, tokenization, feature engineering) or when pure-Python vectorization hits limits.
 
-### When to Use C ABI
+### Optional C ABI (Deferred)
 
-Despite PyO3's advantages, raw C ABI with cffi is preferable when:
-- Minimizing FFI surface area (low-level primitives)
-- Targeting multiple language bindings (not just Python)
-- Avoiding Python runtime dependencies in Rust code
-- Maintaining stable ABI across Python versions
+PyO3 is the primary path. A raw C ABI layer is **optional** and deferred unless:
+- Additional language targets require a C ABI
+- We need a minimal, language-agnostic surface
+- abi3 constraints become insufficient for the desired stability
 
 ### Best Practices (2025)
 
@@ -190,11 +189,14 @@ From the [Johal.in guide on PyO3](https://johal.in/rust-python-ffi-with-pyo3-cre
 
 3. **Failure rate**: <1% post-mitigation in 2025 benchmarks
 
-**Recommendation**: PyO3 for high-level APIs, C ABI for low-level primitives.
+**Recommendation**: PyO3/napi-rs first; evaluate C ABI only if compatibility or ABI stability requires it.
 
 **References**:
 - [Rust vs. C for Python Libraries - arXiv](https://arxiv.org/pdf/2507.00264)
-- [PyO3 Documentation](https://pyo3.rs/main/doc/pyo3_ffi/index.html)
+- [PyO3 Documentation](https://pyo3.rs/)
+- [PyO3 Building and Distribution](https://pyo3.rs/main/building-and-distribution.html)
+- [Node-API (N-API)](https://nodejs.org/api/n-api.html)
+- [napi-rs](https://napi.rs/)
 - [5 Rust FFI Patterns - Medium](https://medium.com/@kaushalsinh73/5-rust-ffi-patterns-to-speed-up-hot-python-paths-5192201e1cdc)
 - [Rust-Python FFI 2025 - Johal.in](https://johal.in/rust-programming-systems-integration-with-python-ffi-implementation-2025/)
 
@@ -396,7 +398,7 @@ From the [Earthly blog on Cargo workspaces](https://earthly.dev/blog/cargo-works
 ```toml
 [workspace]
 resolver = "2"
-members = ["vertebra-core", "vertebra-ffi"]
+members = ["vertebra-core", "vertebra-py", "vertebra-js"]
 
 [workspace.dependencies]
 rustix = "0.38"
@@ -466,12 +468,12 @@ This research provides a solid foundation for implementing PRD-1: Rust Core IPC 
 1. **POSIX shared memory** with rustix provides safe abstractions
 2. **Lock-free channels** require cache-padding and careful atomic ordering
 3. **Arrow IPC** enables zero-copy structured data exchange
-4. **C ABI FFI** preferred for low-level primitives over PyO3
+4. **PyO3/napi-rs first**; optional C ABI only if compatibility or ABI stability requires it
 5. **Miri testing** essential for memory safety validation
 6. **Buffer pools** with slice-based views achieve true zero-copy
 7. **Futex synchronization** requires custom implementation for cross-process
 8. **iceoryx2 patterns** inform decentralized architecture
-9. **Cargo workspaces** separate core and FFI concerns
+9. **Cargo workspaces** separate core and binding concerns
 10. **Ping-pong benchmarking** validates <1μs latency requirement
 
 Total research coverage: 2400+ words across 10 technical domains with 25+ authoritative sources.

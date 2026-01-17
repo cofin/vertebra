@@ -42,9 +42,10 @@ This document breaks down PRD-5 implementation into actionable tasks organized b
 - [ ] Add span instrumentation macros
 - **Effort**: S | **Assignee**: RD | **Dependencies**: P1-M1-001
 
-**P1-M1-004**: Create Unix socket IPC server
-- [ ] Implement `IpcServer` struct
-- [ ] Create socket with proper permissions (0600)
+**P1-M1-004**: Create IPC transport server (UDS / named pipes)
+- [ ] Implement `IpcServer` abstraction
+- [ ] Create UDS server on Unix (0600 perms)
+- [ ] Create named pipe server on Windows
 - [ ] Accept client connections
 - [ ] Parse incoming messages
 - **Effort**: M | **Assignee**: RD | **Dependencies**: P1-M1-001
