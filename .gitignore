@@ -1,0 +1,56 @@
+# Environment Files
+.env.*
+.env
+!.env.example
+
+# Node modules
+node_modules/
+
+# Biome cache
+.biome/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+.sqlspec
+# C extensions
+*.so
+**/*.so
+**/*.sqlite
+**/*.sqlite*
+*.iml
+.coverage
+.dmypy.json
+.ruff_cache
+/docs/_build/
+coverage.*
+setup.py
+tmp/
+*.log
+.bugs
+.tmp
+.todos
+todo/
+# Distribution / packaging
+.Python
+build/
+dist/
+downloads/
+.python-version
+.mypy-cache
+.mypy-cache**
+**/*/.mypy-cache
+src/py/dma/domain/web/static/
+docs/requirements/inputs/*
+.cursor/
+.zed/
+.tmp/
+.idea/
+.claude/
+.cache/
+.gemini/mcp-tools.txt
+CLAUDE.md
+specs/
+.geminiignore
+.gemini
