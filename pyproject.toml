@@ -1,0 +1,380 @@
+
+[project]
+authors = [
+  { name = "Cody Fincher", email = "cody@litestar.dev" },
+]
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python",
+]
+dependencies = [
+ 
+]
+description = "Python-first, high-performance application backbone with tRPC-like DX"
+keywords = ["trpc", "asgi", "ipc", "performance", "bun"]
+license = { text = "Apache" }
+maintainers = [
+  { name = "Cody Fincher", email = "codyfincher@google.com" }, 
+]
+name = "vertebra"
+readme = "README.md"
+requires-python = ">=3.12"
+version = "0.1.0"
+
+[project.urls]
+documentation = "https://github.com/litestar-org/vertebra"
+homepage = "https://github.com/litestar-org/vertebra"
+repository = "https://github.com/litestar-org/vertebra"
+ 
+[dependency-groups]
+docs = [ 
+]
+dev = [ "bump-my-version", { include-group = "lint" }, { include-group = "test" }, { include-group = "docs" }, "build>=1.2.2.post1", "maturin>=1.0,<2.0"]
+lint = ["mypy", "pre-commit", "pyright", "ruff", "slotscheck", "types-click", "types-pyyaml", "types-requests"]
+test = [
+  "anyio",
+  "coverage[toml]",
+  "pytest>=7.4.4",
+  "pytest-cov>=5.0.0",
+  "pytest-databases>=0.10.0",
+  "pytest-lazy-fixtures>=1.1.1",
+  "pytest-dotenv",
+  "pytest-mock>=3.14.0",
+  "pytest-sugar>=1.0.0",
+  "pytest-xdist>=3.6.1",
+  "time-machine>=2.15.0",
+]
+
+
+[build-system]
+build-backend = "maturin"
+requires = ["maturin>=1.0,<2.0"]
+
+[tool.maturin]
+manifest-path = "src/rs/vertebra-py/Cargo.toml"
+python-source = "src/py"
+module-name = "vertebra._vertebra"
+features = ["pyo3/extension-module"]
+bindings = "pyo3"
+
+[tool.hatch.metadata]
+# direct dependency references, e.g `pip @ git+https://github.com/pypa/pip.git@master`
+allow-direct-references = true
+
+[tool.hatch.build]
+dev-mode-dirs = ["src/py", "."]
+ignore-vcs = true
+
+[tool.hatch.build.targets.sdist]
+exclude = [".github", "docs"]
+packages = ["src/py/vertebra"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/py/vertebra"]
+artifacts = [
+  "*.j2",
+  "*.sql",
+  "*.ini",
+  "*.ico",
+  "*.png",
+  "*.svg",
+  "*.css",
+  "*.js",
+  "*.html",
+  "*.txt",
+  "*.json",
+]
+
+[tool.hatch.build.targets.binary]
+scripts = ["vertebra"]
+pyapp-version = "0.27.0"
+python-version = "3.12"
+
+[tool.hatch.build.targets.binary.env]
+PYAPP_DISTRIBUTION_EMBED = "1"
+PYAPP_FULL_ISOLATION = "1"
+PYAPP_UV_ENABLED = "1"
+
+[tool.bumpversion]
+allow_dirty = true
+commit = false
+commit_args = "--no-verify"
+current_version = "0.1.0"
+ignore_missing_files = false
+ignore_missing_version = false
+message = "Bump version: {current_version} → {new_version}"
+parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
+regex = false
+replace = "{new_version}"
+search = "{current_version}"
+serialize = ["{major}.{minor}.{patch}"]
+sign_tags = false
+tag = false
+tag_message = "Bump version: {current_version} → {new_version}"
+tag_name = "v{new_version}"
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+replace = 'version = "{new_version}"'
+search = 'version = "{current_version}"'
+
+[[tool.bumpversion.files]]
+filename = "src/ts/package.json"
+replace = '"version": "{new_version}"'
+search = '"version": "{current_version}"'
+
+[tool.codespell]
+ignore-words-list = ["alog", "codeetr", "migvisor", "selectin", "mot", "afterAll", "cofuse"]
+skip = 'uv.lock,src/ts/*/package-lock.json,pyproject.toml,.vscode/settings.json,.venv/*,node_modules, **/*/node_modules/*'
+
+
+[tool.coverage.report]
+exclude_lines = [
+  "if __name__ == .__main__.:",
+  '@(abc\.)?abstractmethod',
+  'class .*\bProtocol\):',
+  'def __repr__',
+  'if 0:',
+  'if TYPE_CHECKING:',
+  'if self\.debug:',
+  'if settings\.DEBUG',
+  'pragma: no cover',
+  'raise AssertionError',
+  'raise NotImplementedError',
+]
+omit = ["*/tests/*"]
+show_missing = true
+
+[tool.coverage.run]
+branch = true
+disable_warnings = ["no-data-collected"]
+omit = ["**/*/migrations/**/*.py", "tests/*"]
+
+[tool.pytest.ini_options]
+addopts = ["-q", "-ra"]
+filterwarnings = [
+  "ignore::DeprecationWarning:aiosql.*",
+  "ignore::DeprecationWarning:google.*",
+  "ignore::DeprecationWarning:passlib.*",
+  "ignore::DeprecationWarning:pkg_resources",
+  "ignore::DeprecationWarning:rich_click.*",
+  "ignore::DeprecationWarning:litestar.*",
+  "ignore::DeprecationWarning:httpx.*",
+  "ignore::PendingDeprecationWarning:rich_click.*",
+  "ignore:.*uvloop.install\\(\\) is deprecated.*:DeprecationWarning:uvloop.*",
+  "ignore:the \\(type, exc, tb\\) signature of throw\\(\\) is deprecated.*:DeprecationWarning",
+]
+markers = [
+  "unit: Execute unit tests",
+  "integration: Execute integration tests (HTTP endpoints with full ASGI stack)",
+  "full: tests for full testing",
+  "postgres: mark a test as postgres-dependent",
+  "mysql: mark a test as mysql-dependent",
+  "sqlserver: mark a test as sqlserver-dependent",
+  "oracle: mark a test as oracle-dependent",
+  "asyncio: legacy asyncio mark (runs under anyio asyncio backend)",
+]
+anyio_mode = "auto"
+testpaths = ["src/py/tests"]
+
+[tool.ruff]
+exclude = [
+  ".bzr",
+  ".direnv",
+  ".eggs",
+  ".git",
+  ".hg",
+  ".mypy_cache",
+  ".nox",
+  ".pants.d",
+  ".ruff_cache",
+  ".svn",
+  ".tox",
+  ".venv",
+  "__pypackages__",
+  "_build",
+  "buck-out",
+  "build",
+  "dist",
+  "node_modules",
+  "venv",
+  '__pycache__',
+]
+fix = true
+line-length = 120
+src = ["src/py", "src/py/tests"]
+target-version = "py312"
+unsafe-fixes = true
+
+[tool.ruff.format]
+preview = true
+skip-magic-trailing-comma = true
+
+[tool.ruff.lint]
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+fixable = ["ALL"]
+select = ["ALL"]
+ignore = [
+  "A003",    # flake8-builtins - class attribute {name} is shadowing a python builtin
+  "ANN401",  # ruff - Dynamically typed expressions (typing.Any) are disallowed
+  "ARG001",  # Unused function argument
+  "ARG002",  # Unused method argument
+  "B008",    # flake8-bugbear - Do not perform function call `Parameter` in argument defaults
+  "B010",    # flake8-bugbear - do not call setattr with a constant attribute value
+  "D100",    # pydocstyle - missing docstring in public module
+  "D101",    # pydocstyle - missing docstring in public class
+  "D102",    # pydocstyle - missing docstring in public method
+  "D103",    # pydocstyle - missing docstring in public function
+  "D104",    # pydocstyle - missing docstring in public package
+  "D105",    # pydocstyle - missing docstring in magic method
+  "D106",    # pydocstyle - missing docstring in public nested class
+  "D107",    # pydocstyle - missing docstring in __init__
+  "D202",    # pydocstyle - no blank lines allowed after function docstring
+  "D205",    # pydocstyle - 1 blank line required between summary line and description
+  "D415",    # pydocstyle - first line should end with a period, question mark, or exclamation point
+  "E501",    # pycodestyle line too long, handled by black
+  "FBT",     # flake8-boolean-trap
+  "FBT001",  # Boolean typed positional argument in function definition
+  "FBT002",  # Boolean default positional argument in function definition
+  "FBT003",  # Boolean positional value in function call
+  "FIX002",  # Line contains TODO
+  "PERF203", # ignore for now; investigate
+  "PGH003",  # Use specific rule codes when ignoring type issues
+  "PLR0913", # Too many arguments to function call
+  "PLR2004", # Magic value used in comparison
+  "PLW2901", # pylint - for loop variable overwritten by assignment target
+  "PT",      # flake8-pytest-style
+  "PT007",   # Wrong values type in pytest.mark.parametrize
+  "RUF006",  # Store a reference to the return value of asyncio.create_task
+  "RUF012",  # ruff - mutable class attributes should be annotated with `typing.ClassVar`
+  "SLF001",  # Private member accessed
+  "TD",      # flake8-todos
+  "TD002",   # Missing author in TODO
+  "TD003",   # Missing issue link on the line following this TODO
+  "UP037",   # pyupgrade - removes quotes from type annotation
+  "PLR0915", # Too many statements
+  "PLR6301", # Method could be a function or static method
+  "S603",    # subprocess call - check for execution of untrusted input
+  "A005",    # Module shadows a Python builtin module
+  "COM812",  # Trailing comma missing
+  "PLC0415", # import should be at the top-level of a file
+  "CPY001",  # Missing copyright notice at top of file
+  "RUF029",  # Function is declared async but doesn't await
+  "PLC2701", # Private name import from external module
+  "PLR0917", # Too many positional arguments
+  "PLR0914", # Too many local variables
+  "DOC201",  # return is not documented in docstring
+  "DOC402",  # yield is not documented in docstring
+  "DOC501",  # Raised exception missing from docstring
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 25
+
+[tool.ruff.lint.pep8-naming]
+classmethod-decorators = ["classmethod", "pydantic.field_validator", "pydantic.root_validator", "pydantic.validator"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/src/py/tests/**/*.py" = ['S101', 'S105', 'S108', 'S106', 'S404', 'ANN001', 'S608', 'PLW0603'] # Allow assert, hardcoded passwords, temp files, SQL strings, and global statements in tests
+"**/tools/**/*.py" = ['C901', 'A002', 'S105', 'S106', 'S107', 'S607', 'BLE001', 'PLR0911', 'PLR0912'] # Allow hardcoded passwords in database config classes
+"**/tools/**/database.py" = ['S105', 'S106'] # Allow hardcoded passwords in database config classes
+"__init__.py" = ['D104', 'F401']
+
+[tool.ruff.lint.isort]
+known-first-party = ['vertebra', 'tests', 'tools']
+split-on-trailing-comma=false
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.slotscheck]
+strict-imports = false
+
+[tool.mypy]
+disallow_any_generics = false
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+disallow_untyped_defs = true
+python_version = "3.12"
+exclude = '''(?x)(
+^build/
+|^dist/
+|^.venv/
+|^node_modules/
+)
+'''
+implicit_reexport = false
+plugins = ['pydantic.mypy']
+show_error_codes = true
+strict = true
+warn_redundant_casts = true
+warn_return_any = true
+warn_unreachable = true
+warn_unused_configs = true
+warn_unused_ignores = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+warn_untyped_fields = true
+
+[[tool.mypy.overrides]]
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+disallow_untyped_defs = false
+module = "tests.*"
+strict = false
+warn_return_any = false
+warn_unused_ignores = false
+
+[[tool.mypy.overrides]]
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+module = ["googleapiclient.*", "google.auth"]
+
+[[tool.mypy.overrides]]
+ignore_missing_imports = true
+module = [
+  "aiohttp.*",
+  "fsspec.*",
+  "gcsfs.*",
+  "google.*",
+  "google.auth",
+  "google.cloud.*",
+  "google.protobuf.*",
+  "jsbeautifier",
+  "jsbeautifier.*",
+  "pyarrow.*",
+  "googleapiclient",
+  "googleapiclient.*",
+  "uvloop.*",
+]
+
+[[tool.mypy.overrides]]
+ignore_errors = true
+module = ["pyspark.sql.connect.proto", "pyspark.sql.connect.proto.*"]
+
+[[tool.mypy.overrides]]
+ignore_missing_imports = true
+module = [
+    "oracledb.*",
+    "mysql.connector.*",
+    "asyncpg.*",
+    "mysql.*",
+    "pyodbc.*",
+]
+
+
+[tool.pyright]
+include = ["src/py/vertebra", "src/py/tests"]
+pythonVersion = "3.12"
+reportMissingTypeStubs = false
+reportPrivateImportUsage = false
+reportUnknownMemberType = false
+reportUnusedFunction = false
+venv = ".venv"
+venvPath = "."

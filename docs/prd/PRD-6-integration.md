@@ -1243,8 +1243,8 @@ jobs:
 - ✅ PRD-1: Core Rust server implementation
 - ✅ PRD-2: Python (Litestar) integration
 - ✅ PRD-3: TypeScript/JavaScript integration
-- ✅ PRD-4: Type bridge implementation
-- ✅ PRD-5: WebSocket and advanced features
+- ✅ PRD-4: Bun-Backed Python Drivers
+- ✅ PRD-5: Cooperative Resource Management
 
 **This PRD cannot begin until all previous PRDs are functionally complete.**
 

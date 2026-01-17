@@ -90,8 +90,15 @@ PRD-0 (Foundation) establishes the base project structure, including:
 - Build system configuration
 - Testing and CI infrastructure
 - Documentation standards
+- **Cross-PRD Architectural Decisions** (serialization strategy, dependency versions, platform IPC backends)
 
 PRD-1 builds atop this foundation by adding the Rust subsystem, which integrates with existing Python components while maintaining clear architectural boundaries.
+
+> **Note**: See PRD-0 "Cross-PRD Architectural Decisions" for canonical decisions on:
+> - Python 3.12+ baseline
+> - Serialization: bincode for internal Rust IPC (this PRD), msgspec for Python codec
+> - thiserror 2.0 for error handling
+> - Cross-platform IPC backends (shm_open + UDS on Linux/macOS, CreateFileMapping + Named Pipes on Windows)
 
 ### Assumptions and Constraints
 
@@ -1388,7 +1395,7 @@ criterion_main!(benches);
 | Component | Version | Notes |
 |-----------|---------|-------|
 | Linux kernel | 4.18+ | For modern futex APIs |
-| Python | 3.11+ | Matching pyproject.toml |
+| Python | 3.12+ | Matching pyproject.toml and PRD-0 baseline |
 | Rust | 1.75+ (stable) | For core development |
 | Rust | nightly | For Miri testing |
 | GCC/Clang | 9+ | For C compilation |

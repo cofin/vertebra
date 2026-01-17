@@ -6,6 +6,8 @@
 **Authors**: Vertebra Team
 **Dependencies**: PRD-4 (Bun-Backed Drivers)
 
+> **Cross-PRD Decisions**: See [PRD-0 Cross-PRD Architectural Decisions](./PRD-0-foundation.md#cross-prd-architectural-decisions) for serialization strategy (bincode for internal Rust IPC), Python version (3.12+), and IPC transport decisions.
+
 ---
 
 ## Executive Summary

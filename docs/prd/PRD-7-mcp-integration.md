@@ -6,6 +6,8 @@
 **Author**: Vertebra Team
 **Dependencies**: PRD-1 (Rust IPC Layer), PRD-2 (Python Bindings), PRD-3 (Bun Server)
 
+> **Cross-PRD Decisions**: See [PRD-0 Cross-PRD Architectural Decisions](./PRD-0-foundation.md#cross-prd-architectural-decisions) for serialization strategy (Protobuf for MCP control plane), Python version (3.12+), and protocol priorities.
+
 ---
 
 ## Executive Summary
@@ -530,7 +532,7 @@ const result = await response.json();
 
 **Implementation** (TypeScript):
 ```typescript
-// src/js/mcp/server.ts
+// src/ts/mcp/server.ts
 import { Server } from '@modelcontextprotocol/sdk/server';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio';
 import { MCPError, ErrorCode } from '@modelcontextprotocol/sdk/types';
@@ -731,7 +733,7 @@ class MCPSchemaGenerator:
 Leverages existing Vertebra IPC infrastructure (PRD-1):
 
 ```typescript
-// src/js/mcp/ipc-bridge.ts
+// src/ts/mcp/ipc-bridge.ts
 import { IpcClient } from '@vertebra/core';
 
 export class MCPIPCBridge {

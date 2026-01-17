@@ -172,7 +172,7 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 ### System Requirements
 
 - Linux kernel 4.18+
-- Python 3.11+
+- Python 3.12+
 - Rust 1.75+ (stable) + nightly (for Miri)
 
 ---

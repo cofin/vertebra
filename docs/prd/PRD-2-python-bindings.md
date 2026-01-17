@@ -59,6 +59,11 @@ Unlike TypeScript, Python's type system is based on runtime annotations and stat
 - **Annotation resolution** must handle `from __future__ import annotations` and deferred evaluation (PEP 649).
 - **Type extraction** prioritizes runtime hints when available, falling back to AST parsing for source-level fidelity.
 
+> **See PRD-0 Cross-PRD Architectural Decisions** for canonical project-wide choices:
+> - Python 3.12+ baseline (unanimous consensus)
+> - **msgspec as Python codec** - default serializer for zero-copy performance
+> - Serialization layering: msgspec (Python), Protobuf (gRPC/MCP), MessagePack (drivers), bincode (internal Rust)
+
 ---
 
 ## Architecture Overview

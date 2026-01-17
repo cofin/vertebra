@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "vertebra-core",
+    "vertebra-py",
+    "vertebra-js",
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Cody Fincher <cody@litestar.dev>"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/litestar-org/vertebra"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.35", features = ["full"] }
+
+pyo3 = { version = "0.27", features = ["extension-module"] }
+
+napi = { version = "2.16", features = ["tokio_rt"] }
+napi-derive = "2.16"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

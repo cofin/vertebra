@@ -90,10 +90,15 @@ Bun provides excellent I/O performance through its native implementation (writte
 
 ### Assumptions and Constraints
 
-- **Bun SQL / bun:sqlite** are the primary data access layers; PostgreSQL/MySQL support must be validated against Bun’s SQL APIs.
+- **Bun SQL / bun:sqlite** are the primary data access layers; PostgreSQL/MySQL support must be validated against Bun's SQL APIs.
 - **DB-API 2.0 (PEP 249)** compliance is required for sync drivers; async APIs aim for asyncpg/aiomysql compatibility.
 - **Cross-platform target**: Linux/macOS/Windows parity for MVP if feasible; Linux-first implementation.
 - **Node runtime** is not supported for drivers by default; enable only if performance parity can be proven.
+
+> **See PRD-0 Cross-PRD Architectural Decisions** for canonical project-wide choices:
+> - **MessagePack for driver data plane** (consistent with this PRD)
+> - Python 3.12+ baseline
+> - Directory layout: `src/ts/` for TypeScript/Bun code (not `src/js/`)
 
 ---
 

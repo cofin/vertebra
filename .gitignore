@@ -49,8 +49,9 @@ docs/requirements/inputs/*
 .idea/
 .claude/
 .cache/
-.gemini/mcp-tools.txt
+GEMINI.md
 CLAUDE.md
 specs/
 .geminiignore
 .gemini
+src/rs/target

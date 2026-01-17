@@ -1,0 +1,16 @@
+[package]
+name = "vertebra-js"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bun/Node.js bindings for Vertebra (napi-rs)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { workspace = true }
+napi-derive = { workspace = true }
+vertebra-core = { path = "../vertebra-core" }

@@ -18,7 +18,7 @@ The architecture consists of three layers: (1) Bun HTTP server handling TLS term
 - Throughput exceeding 50,000 requests/second (Granian baseline)
 - IPC bridge overhead under 1 millisecond (p95)
 - Support for 10,000+ concurrent connections
-- Full protocol support roadmap: HTTP/1.1, HTTP/2, WebSocket, JSON-RPC 2.0, SSE (HTTP/3 + gRPC are exploratory)
+- Full protocol support roadmap: HTTP/1.1, HTTP/2, H2C, WebSocket, JSON-RPC 2.0, SSE (P0); gRPC (P1); HTTP/3 (P2)
 - Type-safe client generation from Python routes
 - Drop-in replacement for Granian/Uvicorn (CLI compatibility)
 
@@ -77,7 +77,9 @@ The key challenge is ensuring IPC overhead doesn't negate Bun's performance adva
 - **Bun APIs**: rely on `Bun.serve` and `ServerWebSocket` as stable interfaces.
 - **Cross-platform target**: Linux + macOS + Windows at MVP if feasible; Linux-first implementation.
 - **IPC transport**: UDS on Unix, named pipes or TCP on Windows (pluggable transport).
-- **HTTP/2 and gRPC** are exploratory and may be deferred if Bun support is incomplete.
+- **HTTP/2 and H2C are P0** (user mandate: "100% in scope for MVP"). gRPC is P1 (aspirational MVP).
+
+> **See PRD-0 Cross-PRD Architectural Decisions** for canonical project-wide choices on serialization (Protobuf for gRPC/control plane), Python 3.12+ baseline, and runtime strategy (Bun-first).
 
 ### Cross-Platform Transport Strategy
 
@@ -459,10 +461,11 @@ HTTP/2 without TLS:
 - Automatic reconnection
 - CORS support
 
-**h2c (HTTP/2 Cleartext)** (Priority: P2)
+**h2c (HTTP/2 Cleartext)** (Priority: P0)
 - Upgrade mechanism
 - Prior knowledge mode
-- Development and testing use cases
+- Required for gRPC over cleartext
+- Development, testing, and internal service use cases
 
 ### 2. Static File Serving
 
@@ -486,14 +489,18 @@ HTTP/2 without TLS:
 ### 3. Type-Safe Client Generation
 
 **Requirements** (Priority: P1):
-- Introspect Litestar routes at runtime
-- Generate TypeScript client with type-safe methods
+- Use PRD-2 Type Bridge registry/IR as the **single source of truth**
+- Generate TypeScript client with type-safe methods from PRD-2 metadata
 - Support for request/response types
 - Path parameter and query string types
 - Header and cookie types
 - WebSocket client generation
 - In-memory generation (no file I/O during development)
 - Optional file output for production builds
+
+**Notes**:
+- Litestar integration should **populate the PRD-2 registry** (plugin/decorator/monkeypatch POC),
+  not introduce a separate route-introspection pipeline.
 
 **Example**:
 
@@ -963,20 +970,20 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 ### Phase 9: Type-Safe Client Generation (2 weeks)
 
 **Objectives**:
-- Introspect Litestar routes
-- Generate TypeScript client with types
+- Consume PRD-2 Type Bridge registry/IR
+- Generate TypeScript client from PRD-2 metadata
 
 **Deliverables**:
-1. Route introspection system
+1. Registry consumer (PRD-2 metadata)
 2. TypeScript type emitter
 3. Client method generator
 4. In-memory type generation
 5. File output mode for builds
 6. CLI tool for codegen
-7. Integration with Litestar
+7. Litestar plugin/adapter that feeds PRD-2 registry
 
 **Success Criteria**:
-- Routes introspected successfully
+- Registry data consumed successfully
 - TypeScript types generated accurately
 - Client methods type-safe (IntelliSense works)
 - Round-trip type safety (TS → Python → TS)
@@ -1684,7 +1691,7 @@ Suggestion: Ensure user_id is an integer in the request URL
 ## Appendix B: TypeScript Module Structure
 
 ```
-src/js/
+src/ts/
 ├── package.json
 ├── tsconfig.json
 ├── bun.config.ts

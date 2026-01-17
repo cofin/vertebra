@@ -8,7 +8,7 @@
 
 ## Phase 1: MCP Server Core (Weeks 1-2)
 
-- [ ] Define MCP server package layout in `src/js/src/mcp/`
+- [ ] Define MCP server package layout in `src/ts/src/mcp/`
 - [ ] Implement JSON-RPC 2.0 request/response handling
 - [ ] Implement stdio transport (baseline)
 - [ ] Add structured logging + request IDs

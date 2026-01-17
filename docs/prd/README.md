@@ -5,10 +5,12 @@ This directory contains Product Requirement Documents (PRDs) for the Vertebra pr
 ## Active PRDs
 
 ### [PRD-0: Foundation and Repository Cleanup](./PRD-0-foundation.md)
-**Status:** Draft
+**Status:** In Progress
 **Estimated Effort:** 3-5 days
 
 Complete removal of DMA legacy code and establishment of multi-language build infrastructure (Python + Rust + TypeScript/Bun).
+
+Progress + next steps: `docs/progress.md`
 
 **Deliverables:**
 - Remove all DMA references from codebase
@@ -23,7 +25,7 @@ Complete removal of DMA legacy code and establishment of multi-language build in
 make clean && make install
 uv run python -c "import vertebra; print(vertebra.__version__)"
 cd src/rs && cargo build && cargo test
-cd src/js && bun install && bun test
+cd src/ts && bun install && bun test
 grep -r "dma" --include="*.py" --include="*.toml" src/  # Should return empty
 ```
 

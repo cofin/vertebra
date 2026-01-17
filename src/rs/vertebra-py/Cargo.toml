@@ -1,0 +1,16 @@
+[package]
+name = "vertebra-py"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Python bindings for Vertebra (PyO3)"
+
+[lib]
+name = "_vertebra"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true }
+vertebra-core = { path = "../vertebra-core" }

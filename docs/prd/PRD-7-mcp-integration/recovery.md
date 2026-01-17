@@ -58,5 +58,5 @@ Python Tool/Resource Handlers
 
 1. Implement MCP JSON-RPC core in Bun.
 2. Add stdio transport and baseline conformance tests.
-3. Define MCP server module layout in `src/js/src/mcp/`.
+3. Define MCP server module layout in `src/ts/src/mcp/`.
 

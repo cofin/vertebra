@@ -1,6 +1,6 @@
 # PRD-0: Foundation and Repository Cleanup
 
-**Status:** Draft
+**Status:** In Progress
 **Author:** Vertebra Team
 **Created:** 2026-01-17
 **Last Updated:** 2026-01-17
@@ -30,10 +30,11 @@ This PRD defines the foundation work required to transform the Vertebra reposito
 5. [Technical Approach](#technical-approach)
 6. [Detailed Specification](#detailed-specification)
 7. [Implementation Phases](#implementation-phases)
-8. [Verification and Testing](#verification-and-testing)
-9. [Risks and Mitigations](#risks-and-mitigations)
-10. [Success Metrics](#success-metrics)
-11. [Research and References](#research-and-references)
+8. [Progress Update](#progress-update)
+9. [Verification and Testing](#verification-and-testing)
+10. [Risks and Mitigations](#risks-and-mitigations)
+11. [Success Metrics](#success-metrics)
+12. [Research and References](#research-and-references)
 
 ---
 
@@ -54,7 +55,7 @@ Vertebra is a **Python-first, high-performance application backbone** that provi
 The repository currently contains:
 - Legacy DMA code references in `pyproject.toml`, `Makefile`, and `conftest.py`
 - Build system configured for `hatchling` (pure Python), not `maturin` (Rust+Python)
-- Empty placeholder directories for Rust (`src/rs/`) and JavaScript (`src/js/`)
+- Empty placeholder directories for Rust (`src/rs/`) and JavaScript (`src/ts/`)
 - No Rust workspace configuration (`Cargo.toml`)
 - No TypeScript package configuration (`package.json`)
 - No architecture documentation
@@ -146,6 +147,56 @@ These items **must remain documented** until they are removed. The foundation cl
 - **Single-developer focus** for PRD-0 delivery; subsequent PRDs may assume a small team.
 - **Tooling baseline**: Rust + Python + Bun toolchains are required for local development.
 
+### Cross-PRD Architectural Decisions
+
+The following decisions apply across all Vertebra PRDs. They were consolidated via multi-model consensus (Gemini 3 Pro, GPT 5.2) to resolve conflicts and ensure consistency.
+
+#### Python Version
+- **Baseline: Python 3.12+** (unanimous)
+- Enables: `type` statement, improved generics, performance gains
+- All PRDs must not reference Python 3.11 or earlier
+
+#### Serialization Strategy
+Hybrid approach by layer to avoid protocol sprawl:
+
+| Layer | Format | Rationale |
+|-------|--------|-----------|
+| **Python codec** | msgspec | Zero-copy, fastest Python serialization |
+| **gRPC/MCP control plane** | Protobuf | Industry standard, schema evolution |
+| **Driver data plane** | MessagePack | Compact binary, cross-language |
+| **Internal Rust IPC** | bincode | Zero-copy Rust-native, no schema overhead |
+
+#### Directory Layout
+- **Canonical path: `src/ts/`** (established in PRD-0)
+- Do NOT use `src/js/` - this conflicts with PRD-0's structure
+- All PRDs must reference `src/ts/` for TypeScript/Bun code
+
+#### Dependency Versions
+- **thiserror: 2.0** (greenfield project, use latest)
+- **PyO3: 0.27+** (latest stable)
+- **napi-rs: 2.16+** (latest stable)
+
+#### Runtime Strategy
+- **Bun-first** with napi-rs providing Node.js compatibility
+- Node fallback available "for free" via napi-rs ABI
+- Prefer Bun-native APIs where they offer performance gains
+
+#### Protocol Priorities (MVP)
+| Protocol | Priority | Rationale |
+|----------|----------|-----------|
+| HTTP/2 | P0 | User mandate: "100% in scope for MVP" |
+| H2C (cleartext HTTP/2) | P0 | Required for gRPC, local dev |
+| gRPC | P1 | Aspirational MVP, enables MCP integration |
+
+#### Cross-Platform IPC
+- **Linux/macOS**: `shm_open`/`mmap` + Unix domain sockets
+- **Windows**: `CreateFileMapping` + Named Pipes
+- **Not using**: Mach ports (macOS-only, adds complexity)
+
+#### Bindings Strategy
+- **Primary**: PyO3 (Python) + napi-rs (Bun/Node)
+- **C ABI**: Only if external consumers require it (not MVP)
+
 ---
 
 ## User Stories
@@ -158,7 +209,7 @@ These items **must remain documented** until they are removed. The foundation cl
 - `make install` completes without errors
 - `uv run python -c "import vertebra; print(vertebra.__version__)"` prints "0.1.0"
 - `cd src/rs && cargo build && cargo test` succeeds
-- `cd src/js && bun install && bun test` succeeds
+- `cd src/ts && bun install && bun test` succeeds
 - No DMA references found by `grep -r "dma" --include="*.py" --include="*.toml" src/` **except documented known legacy issues**
 
 ### As a Python Developer
@@ -246,7 +297,7 @@ This structure allows:
 **Decision: Monorepo-style src/ Organization**
 
 ```
-src/js/
+src/ts/
 ├── package.json
 ├── tsconfig.json
 ├── bun.lockb
@@ -439,7 +490,7 @@ repository = "https://github.com/litestar-org/vertebra"
 tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 
 # PyO3 for Python bindings
 pyo3 = { version = "0.27", features = ["extension-module"] }
@@ -631,7 +682,7 @@ fn main() {
 
 ### 7. TypeScript Package Configuration
 
-**Create: `/home/cody/code/c/vertebra/src/js/package.json`**
+**Create: `/home/cody/code/c/vertebra/src/ts/package.json`**
 
 ```json
 {
@@ -659,7 +710,7 @@ fn main() {
 }
 ```
 
-**Create: `/home/cody/code/c/vertebra/src/js/tsconfig.json`**
+**Create: `/home/cody/code/c/vertebra/src/ts/tsconfig.json`**
 
 ```json
 {
@@ -684,7 +735,7 @@ fn main() {
 }
 ```
 
-**Create: `/home/cody/code/c/vertebra/src/js/src/index.ts`**
+**Create: `/home/cody/code/c/vertebra/src/ts/src/index.ts`**
 
 ```typescript
 /**
@@ -704,17 +755,17 @@ export const VERSION = "0.1.0";
 **Create skeleton directories:**
 
 ```typescript
-// src/js/src/client/index.ts
+// src/ts/src/client/index.ts
 export {}; // TODO: Implement in PRD-2
 
-// src/js/src/codegen/index.ts
+// src/ts/src/codegen/index.ts
 export {}; // TODO: Implement in PRD-3
 
-// src/js/src/server/index.ts
+// src/ts/src/server/index.ts
 export {}; // TODO: Implement in PRD-4
 ```
 
-**Create: `/home/cody/code/c/vertebra/src/js/src/index.test.ts`**
+**Create: `/home/cody/code/c/vertebra/src/ts/src/index.test.ts`**
 
 ```typescript
 import { describe, it, expect } from "bun:test";
@@ -802,7 +853,7 @@ install: destroy clean                              ## Install the project, depe
 
 	# Install JavaScript dependencies
 	@echo "${INFO} Installing JavaScript dependencies... 📦"
-	@cd src/js && bun install >/dev/null 2>&1
+	@cd src/ts && bun install >/dev/null 2>&1
 
 	@cd $(CURDIR) && echo "${OK} Installation complete! 🎉"
 ```
@@ -961,7 +1012,7 @@ cd src/rs && cargo build --release
 ```bash
 make js-test       # Run Bun tests
 make js-type-check # TypeScript type checking
-cd src/js && bun run dev
+cd src/ts && bun run dev
 ```
 
 ## Development Conventions
@@ -1058,8 +1109,8 @@ docs(arch): Document type bridge design
 
 ### Adding TypeScript Types
 
-1. Define types in `src/js/src/types/`
-2. Export from `src/js/src/index.ts`
+1. Define types in `src/ts/src/types/`
+2. Export from `src/ts/src/index.ts`
 3. Add tests in `*.test.ts`
 4. Generate type documentation
 5. Validate against Python types
@@ -1092,7 +1143,7 @@ from vertebra.ipc import Client
 
 ```bash
 # Debug Python AST parsing
-cd src/js
+cd src/ts
 bun run src/codegen/index.ts --debug example.py
 ```
 
@@ -1443,7 +1494,7 @@ def update_user(id: int, data: UserUpdate) -> User:
 - Generate schema for Rust validation
 - Emit TypeScript types via codegen
 
-### 5. TypeScript Codegen (src/js/codegen)
+### 5. TypeScript Codegen (src/ts/codegen)
 
 **Purpose:** Generate TypeScript types from Python functions.
 
@@ -1474,7 +1525,7 @@ export interface UserRouter {
 }
 ```
 
-### 6. TypeScript Client (src/js/client)
+### 6. TypeScript Client (src/ts/client)
 
 **Purpose:** Type-safe client for calling Python procedures.
 
@@ -1865,16 +1916,16 @@ cd src/rs && cargo test   # Should pass all tests
 ### Phase 3: TypeScript Package (Day 2)
 
 **Tasks:**
-1. Create `src/js/package.json`
-2. Create `src/js/tsconfig.json`
-3. Create `src/js/src/index.ts` with VERSION
+1. Create `src/ts/package.json`
+2. Create `src/ts/tsconfig.json`
+3. Create `src/ts/src/index.ts` with VERSION
 4. Create skeleton directories (client, codegen, server)
 5. Create basic test file
 
 **Verification:**
 ```bash
-cd src/js && bun install  # Should install dependencies
-cd src/js && bun test     # Should pass version test
+cd src/ts && bun install  # Should install dependencies
+cd src/ts && bun test     # Should pass version test
 ```
 
 ### Phase 4: Build Integration (Day 2-3)
@@ -1947,7 +1998,7 @@ cd src/rs && cargo build && cargo test
 # Expected: All tests pass
 
 # 3. Bun/JS works
-cd src/js && bun install && bun test
+cd src/ts && bun install && bun test
 # Expected: All tests pass
 
 # 4. No DMA references remain (except documented legacy issues)
@@ -1961,6 +2012,33 @@ make clean && make install && make test-all
 
 ---
 
+## Progress Update
+
+**Last reviewed:** 2026-01-17
+
+### Progress Checklist
+- [x] Standardized TypeScript/Bun layout to `src/ts` and aligned PRD docs accordingly.
+- [x] Enforced Python 3.12+ baseline across tooling and documentation.
+- [x] Switched Python build backend to `maturin` with PyO3 bindings at `src/rs/vertebra-py`.
+- [x] Created Rust workspace (`vertebra-core`, `vertebra-py`, `vertebra-js`) with minimal bindings.
+- [x] Added Bun/TypeScript workspace scaffold with tests and minimal server/client/codegen stubs.
+- [x] Updated Makefile with cross-language install/upgrade/build/test/lint targets and fail-fast behavior.
+- [x] Removed unused N-API import warning in `vertebra-js`.
+- [x] Added architecture + conventions docs (`docs/arch.md`, `CLAUDE.md`, `README.md`).
+- [ ] Re-run `make test-all` to confirm a clean cross-language test run.
+- [ ] Regenerate `uv.lock` (`uv lock --upgrade`) to capture the 3.12 baseline and current deps.
+- [ ] Capture any remaining legacy DMA references in a short “known issues” list if discovered.
+
+### Verification Status
+- `make install` verified on 2026-01-17.
+- `make test-all` pending after latest test harness fixes.
+
+### Next Steps (PRD-0)
+- Run `make test-all` and record the output.
+- Regenerate `uv.lock` once dependency versions are approved.
+
+---
+
 ## Verification and Testing
 
 ### Acceptance Criteria
@@ -1971,8 +2049,8 @@ make clean && make install && make test-all
 - ✅ Python can import Rust extension: `from vertebra._vertebra import __version__`
 - ✅ `cd src/rs && cargo build` succeeds
 - ✅ `cd src/rs && cargo test` passes
-- ✅ `cd src/js && bun install` succeeds
-- ✅ `cd src/js && bun test` passes
+- ✅ `cd src/ts && bun install` succeeds
+- ✅ `cd src/ts && bun test` passes
 - ✅ `grep -r "dma" --include="*.py" --include="*.toml" src/` returns empty **or only documented legacy references**
 - ✅ `make test-all` passes
 - ✅ `CLAUDE.md` exists and is comprehensive
@@ -2213,13 +2291,13 @@ make clean && make install && make test-all
 - [x] `src/rs/vertebra-js/Cargo.toml`
 - [x] `src/rs/vertebra-js/src/lib.rs`
 - [x] `src/rs/vertebra-js/build.rs`
-- [x] `src/js/package.json`
-- [x] `src/js/tsconfig.json`
-- [x] `src/js/src/index.ts`
-- [x] `src/js/src/index.test.ts`
-- [x] `src/js/src/client/index.ts`
-- [x] `src/js/src/codegen/index.ts`
-- [x] `src/js/src/server/index.ts`
+- [x] `src/ts/package.json`
+- [x] `src/ts/tsconfig.json`
+- [x] `src/ts/src/index.ts`
+- [x] `src/ts/src/index.test.ts`
+- [x] `src/ts/src/client/index.ts`
+- [x] `src/ts/src/codegen/index.ts`
+- [x] `src/ts/src/server/index.ts`
 - [x] `src/py/vertebra/__init__.py`
 - [x] `src/py/vertebra/server/__init__.py`
 - [x] `src/py/vertebra/procedures/__init__.py`
@@ -2243,7 +2321,7 @@ make clean && make install && make test-all
 - `napi-derive = "2.16"` (Derive macros)
 - `tokio = "1.35"` (Async runtime)
 - `serde = "1.0"` (Serialization)
-- `thiserror = "1.0"` (Error handling)
+- `thiserror = "2.0"` (Error handling)
 
 **TypeScript:**
 - `@kriss-u/py-ast` (Python AST parser)
