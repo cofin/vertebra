@@ -11,7 +11,7 @@ classifiers = [
   "Programming Language :: Python",
 ]
 dependencies = [
- 
+  "msgspec>=0.18.0",
 ]
 description = "Python-first, high-performance application backbone with tRPC-like DX"
 keywords = ["trpc", "asgi", "ipc", "performance", "bun"]
@@ -32,7 +32,7 @@ repository = "https://github.com/litestar-org/vertebra"
 [dependency-groups]
 docs = [ 
 ]
-dev = [ "bump-my-version", { include-group = "lint" }, { include-group = "test" }, { include-group = "docs" }, "build>=1.2.2.post1", "maturin>=1.0,<2.0"]
+dev = [ "bump-my-version", { include-group = "lint" }, { include-group = "test" }, { include-group = "docs" }, "build>=1.2.2.post1", "maturin>=1.0,<2.0", "watchdog>=4.0.0" ]
 lint = ["mypy", "pre-commit", "pyright", "ruff", "slotscheck", "types-click", "types-pyyaml", "types-requests"]
 test = [
   "anyio",

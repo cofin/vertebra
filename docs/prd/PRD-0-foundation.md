@@ -1494,7 +1494,7 @@ def update_user(id: int, data: UserUpdate) -> User:
 - Generate schema for Rust validation
 - Emit TypeScript types via codegen
 
-### 5. TypeScript Codegen (src/ts/codegen)
+### 5. TypeScript Codegen (src/ts/src/codegen)
 
 **Purpose:** Generate TypeScript types from Python functions.
 
@@ -1525,7 +1525,7 @@ export interface UserRouter {
 }
 ```
 
-### 6. TypeScript Client (src/ts/client)
+### 6. TypeScript Client (src/ts/src/client)
 
 **Purpose:** Type-safe client for calling Python procedures.
 

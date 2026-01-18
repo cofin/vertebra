@@ -1,2 +1,2 @@
-// TODO: Implement Python AST → TypeScript generator (see PRD-2).
-export {};
+export { vertebraTypes } from "./vite-plugin";
+export type { VertebraTypesPluginOptions } from "./vite-plugin";

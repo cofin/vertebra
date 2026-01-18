@@ -1,6 +1,6 @@
 # PRD-7: MCP Integration - Implementation Tasks
 
-**Status**: Planning Complete
+**Status**: In Progress
 **Created**: 2026-01-17
 **Est. Duration**: 14-16 weeks
 
@@ -8,8 +8,8 @@
 
 ## Phase 1: MCP Server Core (Weeks 1-2)
 
-- [ ] Define MCP server package layout in `src/ts/src/mcp/`
-- [ ] Implement JSON-RPC 2.0 request/response handling
+- [x] Define MCP server package layout in `src/ts/src/mcp/`
+- [x] Implement JSON-RPC 2.0 request/response handling
 - [ ] Implement stdio transport (baseline)
 - [ ] Add structured logging + request IDs
 - [ ] Add conformance tests for MCP core methods
@@ -68,4 +68,3 @@
 - **MCP Spec Lock**: confirm target spec revision before Phase 3
 - **Serialization Format**: confirm MessagePack vs Protobuf by end of Phase 4
 - **Optional C ABI**: if non-Python/JS tools are required, coordinate with PRD-1 Phase 6b
-

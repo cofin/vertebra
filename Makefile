@@ -216,6 +216,24 @@ rs-lint:                                            ## Run Rust linting
 	@cd src/rs && cargo clippy --all-targets --all-features -- -D warnings
 	@echo "${OK} Rust linting complete"
 
+.PHONY: rs-tsan
+rs-tsan:                                            ## Run ThreadSanitizer on Rust tests
+	@echo "${INFO} Running ThreadSanitizer... 🧪"
+	@./tools/rs_tsan.sh
+	@echo "${OK} ThreadSanitizer complete"
+
+.PHONY: rs-valgrind
+rs-valgrind:                                        ## Run valgrind against Rust tests
+	@echo "${INFO} Running valgrind... 🧪"
+	@./tools/rs_valgrind.sh
+	@echo "${OK} Valgrind checks complete"
+
+.PHONY: rs-coverage
+rs-coverage:                                        ## Run Rust coverage (cargo-llvm-cov)
+	@echo "${INFO} Running Rust coverage... 📊"
+	@./tools/rs_coverage.sh
+	@echo "${OK} Rust coverage complete"
+
 .PHONY: rs-clean
 rs-clean:                                           ## Clean Rust build artifacts
 	@echo "${INFO} Cleaning Rust artifacts... 🧹"

@@ -21,6 +21,52 @@ pub fn get_version() -> String {
     vertebra_core::VERSION.to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_matches_core() {
+        assert_eq!(get_version(), vertebra_core::VERSION.to_string());
+    }
+
+    #[test]
+    fn shm_region_read_write() {
+        let mut region = ShmRegionHandle::new(64).expect("create shm");
+        let payload = Buffer::from(vec![1u8, 2, 3, 4]);
+        region.write(0, payload).expect("write");
+        let read = region.read(0, 4).expect("read");
+        assert_eq!(read.as_ref(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn buffer_pool_roundtrip() {
+        let pool = BufferPoolHandle::new(16, 1);
+        let mut buffer = pool.acquire().expect("acquire").expect("buffer");
+        buffer.write(Buffer::from(vec![9u8, 8, 7])).expect("write");
+        let data = buffer.read().expect("read");
+        assert_eq!(data.as_ref(), &[9, 8, 7]);
+    }
+
+    #[test]
+    fn spsc_send_recv() {
+        let ring = SpscRingHandle::new(64, 8).expect("ring");
+        ring.send(Buffer::from(vec![5u8, 6, 7]), 0)
+            .expect("send");
+        let recv = ring.recv(16).expect("recv");
+        assert_eq!(recv.as_ref(), &[5, 6, 7]);
+    }
+
+    #[test]
+    fn mpmc_send_recv() {
+        let ring = MpmcRingHandle::new(64, 8).expect("ring");
+        ring.send(Buffer::from(vec![1u8, 2]), 0)
+            .expect("send");
+        let recv = ring.recv(16).expect("recv");
+        assert_eq!(recv.as_ref(), &[1, 2]);
+    }
+}
+
 #[napi]
 pub struct ShmRegionHandle {
     inner: ShmRegion,

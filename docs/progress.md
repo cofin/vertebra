@@ -4,7 +4,8 @@
 
 ## Current Focus
 
-- PRD-2 Python bindings + type bridge (in progress).
+- PRD-3 Bun server foundations + IPC protocol (in progress).
+- PRD-4 Bun-backed drivers Phase 1 foundation (in progress).
 
 ## Progress (PRD-0)
 
@@ -79,14 +80,80 @@
 - Added async IPC + end-to-end procedure flow tests.
 - Added Python serialization + IPC latency benchmark scripts.
 - Documented zero-copy vs fallback behavior and benchmark entrypoints.
+- Added Type Bridge endpoint + ASGI app + debounced file watcher.
+- Added Vite type polling plugin (virtual module, HMR reload).
+- Added Bun server + client scaffolding (Bun-only).
+- Added napi-rs unit tests and Rust validation scripts (tsan/valgrind/coverage).
+- Added MessagePack codec + Bun IPC client for driver transport.
+- Added driver protocol specification and API docs (protocol + drivers).
 
 ### Verified
 
 - `uv run pytest src/py/tests` passed on 2026-01-18.
+- `uv run pytest src/py/tests` passed on 2026-01-18 (SQLite driver test added).
+- `bun test` passed on 2026-01-18.
+- `cargo test -p vertebra-broker` passed on 2026-01-18.
+
+## Progress (PRD-3)
+
+### Completed
+
+- Added initial Bun server scaffolding (`src/ts/src/server`).
+- Added Protocol Buffer schema placeholders for ASGI/config/metrics (`src/ts/src/proto`).
+- Added Bun server config loader, router, and worker-pool stub.
+- Added Bun IPC client (MessagePack) and ASGI bridge wrapper.
+- Added Python ASGI worker harness with IPC framing and tests.
+
+## Progress (PRD-4)
+
+### Completed
+
+- Defined TypeScript driver protocol messages and MessagePack serialization helpers.
+- Added Python MessagePack codec for driver transport.
+- Added DB-API base driver protocols and exception hierarchy.
+- Added baseline type conversion helpers (Postgres/MySQL/SQLite + JSON/UUID).
+- Added Bun runtime guard + IPC client skeleton for driver transport.
+- Added unit tests for driver exceptions, MessagePack codec, IPC guard, and type conversions.
+- Added IPC client retry + pooling and request/response tests.
+- Added Bun SQLite driver server (TCP) and Python SQLite driver/client scaffolding.
+- Added async SQLite driver IPC test harness (mock server).
+- Added Bun Postgres driver server + Python Postgres driver (sync/async) with IPC tests.
+
+## Progress (PRD-5)
+
+### Completed
+
+- Initialized `vertebra-broker` crate and workspace wiring.
+- Added broker config parsing (TOML + env substitution) with unit tests.
+- Added IPC server and pool manager stubs for broker scaffolding.
+- Added broker protocol framing, bincode serialization, and TCP/UDS/named-pipe IPC server.
+- Added broker IPC echo integration test.
+- Added broker JSON logging toggle via VERTEBRA_LOG_JSON.
+- Added Python broker client (msgpack codec) with unit tests.
+
+## Progress (PRD-7)
+
+### Completed
+
+- Added MCP TypeScript server skeleton with JSON-RPC handler.
+- Added MCP IPC bridge stub for future transport wiring.
 
 ## Next Steps
 
-### Continue PRD-2
+### PRD-3
 
-- Phase 3: verify memory-usage/leak checks for zero-copy buffers.
-- Phase 4: HMR dev server + file watching for in-memory type updates.
+- Implement Bun server config loader, router, and worker pool.
+- Build IPC bridge (TS side) with connection pool + MessagePack/Protobuf transport toggle.
+- Add Python-side IPC worker harness for ASGI apps.
+
+### PRD-4
+
+- Implement Bun-only IPC server handlers for database requests.
+- Add base Postgres driver (sync + async) and pool with tests.
+- Add protocol compliance tests + integration scaffolding (pytest-databases).
+
+### PRD-5/6/7
+
+- Scaffold vertebra-broker crate and IPC client for resource pools.
+- Add integration test harness + docs/benchmarks for cross-language flows.
+- Start MCP server skeleton in `src/ts/src/mcp` with schema registry + transport.

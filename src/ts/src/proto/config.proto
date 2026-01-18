@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package vertebra.config;
+
+message ServerConfig {
+  string hostname = 1;
+  int32 port = 2;
+  bool reuse_port = 3;
+  bool enable_http2 = 4;
+  bool enable_websocket = 5;
+}
+
+message WorkerConfig {
+  int32 worker_count = 1;
+  int32 max_inflight = 2;
+}
+
+message RuntimeConfig {
+  ServerConfig server = 1;
+  WorkerConfig workers = 2;
+}

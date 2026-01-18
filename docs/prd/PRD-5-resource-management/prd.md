@@ -1466,11 +1466,11 @@ async def load_test_scenario():
 ### Phase 1: Foundation (Weeks 1-3)
 
 **Milestone 1.1: Rust Broker Skeleton**
-- [ ] Set up vertebra-broker crate structure
-- [ ] Implement configuration loading (TOML)
-- [ ] Create IPC server (UDS on Unix, named pipe on Windows)
-- [ ] Message serialization/deserialization
-- [ ] Structured logging
+- [x] Set up vertebra-broker crate structure
+- [x] Implement configuration loading (TOML)
+- [x] Create IPC server (UDS on Unix, named pipe on Windows)
+- [x] Message serialization/deserialization
+- [x] Structured logging
 
 **Milestone 1.2: Single Pool**
 - [ ] Integrate deadpool-postgres

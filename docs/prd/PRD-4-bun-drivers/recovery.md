@@ -379,17 +379,14 @@ storage = ["vertebra[filesystem]"]
    mkdir -p src/py/vertebra/fs
    mkdir -p src/py/vertebra/storage
    mkdir -p src/py/vertebra/_internal
-   mkdir -p src/ts/vertebra/drivers
-   mkdir -p src/ts/vertebra/fs
-   mkdir -p src/ts/vertebra/storage
-   mkdir -p src/ts/vertebra/protocol
+   mkdir -p src/ts/src/drivers
+   mkdir -p src/ts/src/fs
+   mkdir -p src/ts/src/storage
+   mkdir -p src/ts/src/protocol
    mkdir -p tests/{unit,integration,compliance,performance,stress}
    ```
 
-3. **Start with Phase 1, Task 1.1** (IPC Protocol Definition):
-   - Create `src/ts/vertebra/protocol/messages.ts`
-   - Define TypeScript interfaces
-   - Document protocol specification
+3. **Phase 1 complete**: proceed to Phase 2 driver implementations.
 
 4. **Review reference implementations**:
    - AsyncPG: https://github.com/magicstack/asyncpg

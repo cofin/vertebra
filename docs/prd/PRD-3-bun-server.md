@@ -1,9 +1,9 @@
 # PRD-3: Bun Server and Protocol Support
 
-**Status**: Draft
+**Status**: In Progress
 **Author**: Vertebra Team
 **Created**: 2026-01-17
-**Last Updated**: 2026-01-17
+**Last Updated**: 2026-01-18
 **Version**: 1.0
 
 ---

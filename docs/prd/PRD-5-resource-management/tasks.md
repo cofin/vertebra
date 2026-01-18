@@ -1,7 +1,7 @@
 # PRD-5 Implementation Tasks
 
 **Document Version**: 1.0
-**Last Updated**: 2026-01-17
+**Last Updated**: 2026-01-18
 **Purpose**: Detailed task breakdown for PRD-5 implementation
 
 ---
@@ -23,45 +23,45 @@ This document breaks down PRD-5 implementation into actionable tasks organized b
 ### Milestone 1.1: Rust Broker Skeleton
 
 **P1-M1-001**: Create vertebra-broker crate structure
-- [ ] Initialize cargo project: `cargo new --lib vertebra-broker`
-- [ ] Set up module structure (lib.rs, pool_manager.rs, etc.)
-- [ ] Configure Cargo.toml with dependencies
+- [x] Initialize cargo project: `cargo new --lib vertebra-broker`
+- [x] Set up module structure (lib.rs, pool_manager.rs, etc.)
+- [x] Configure Cargo.toml with dependencies
 - **Effort**: S | **Assignee**: RD | **Dependencies**: None
 
 **P1-M1-002**: Implement TOML configuration parsing
-- [ ] Define `BrokerConfig` struct with serde
-- [ ] Implement `from_file()` method
-- [ ] Add environment variable substitution
-- [ ] Write unit tests for config parsing
+- [x] Define `BrokerConfig` struct with serde
+- [x] Implement `from_file()` method
+- [x] Add environment variable substitution
+- [x] Write unit tests for config parsing
 - **Effort**: M | **Assignee**: RD | **Dependencies**: P1-M1-001
 
 **P1-M1-003**: Set up structured logging with tracing
-- [ ] Configure tracing-subscriber
-- [ ] Define log levels (error, warn, info, debug, trace)
-- [ ] Implement JSON formatter
+- [x] Configure tracing-subscriber
+- [x] Define log levels (error, warn, info, debug, trace)
+- [x] Implement JSON formatter
 - [ ] Add span instrumentation macros
 - **Effort**: S | **Assignee**: RD | **Dependencies**: P1-M1-001
 
 **P1-M1-004**: Create IPC transport server (UDS / named pipes)
-- [ ] Implement `IpcServer` abstraction
-- [ ] Create UDS server on Unix (0600 perms)
-- [ ] Create named pipe server on Windows
-- [ ] Accept client connections
-- [ ] Parse incoming messages
+- [x] Implement `IpcServer` abstraction
+- [x] Create UDS server on Unix (0600 perms)
+- [x] Create named pipe server on Windows
+- [x] Accept client connections
+- [x] Parse incoming messages
 - **Effort**: M | **Assignee**: RD | **Dependencies**: P1-M1-001
 
 **P1-M1-005**: Implement message serialization with bincode
-- [ ] Define message types (AcquireRequest, AcquireResponse, etc.)
-- [ ] Implement serialize/deserialize with bincode
-- [ ] Add message framing (length prefix)
-- [ ] Write serialization unit tests
+- [x] Define message types (AcquireRequest, AcquireResponse, etc.)
+- [x] Implement serialize/deserialize with bincode
+- [x] Add message framing (length prefix)
+- [x] Write serialization unit tests
 - **Effort**: M | **Assignee**: RD | **Dependencies**: P1-M1-004
 
 **P1-M1-006**: Create IPC echo server for testing
-- [ ] Implement simple echo handler
-- [ ] Add integration test with test client
+- [x] Implement simple echo handler
+- [x] Add integration test with test client
 - [ ] Measure round-trip latency
-- [ ] Validate message integrity
+- [x] Validate message integrity
 - **Effort**: S | **Assignee**: RD | **Dependencies**: P1-M1-005
 
 ### Milestone 1.2: Single Pool Implementation
@@ -123,23 +123,23 @@ This document breaks down PRD-5 implementation into actionable tasks organized b
 ### Milestone 2.1: Python IPC Client
 
 **P2-M1-001**: Create vertebra.resources package structure
-- [ ] Create `src/py/vertebra/resources/` directory
-- [ ] Add `__init__.py`, `pool.py`, `connection.py`, etc.
+- [x] Create `src/py/vertebra/resources/` directory
+- [x] Add `__init__.py`, `pool.py`, `connection.py`, etc.
 - [ ] Set up pyproject.toml dependencies
 - [ ] Configure package exports
 - **Effort**: S | **Assignee**: PD | **Dependencies**: None
 
 **P2-M1-002**: Implement IPCClient for broker communication
-- [ ] Create `IPCClient` class
-- [ ] Connect to Unix socket
-- [ ] Implement send/receive methods
+- [x] Create `IPCClient` class
+- [x] Connect to Unix socket
+- [x] Implement send/receive methods
 - [ ] Add connection pooling for IPC
 - **Effort**: M | **Assignee**: PD | **Dependencies**: P2-M1-001
 
 **P2-M1-003**: Implement bincode serialization in Python
-- [ ] Use py-bincode library or implement custom
-- [ ] Match Rust message format exactly
-- [ ] Add serialization tests
+- [x] Use msgpack codec for Python client (Rust broker supports msgpack)
+- [x] Match Rust message format for msgpack enum encoding
+- [x] Add serialization tests
 - [ ] Benchmark performance
 - **Effort**: M | **Assignee**: PD | **Dependencies**: P2-M1-002
 
@@ -151,17 +151,17 @@ This document breaks down PRD-5 implementation into actionable tasks organized b
 - **Effort**: S | **Assignee**: PD | **Dependencies**: P2-M1-002
 
 **P2-M1-005**: Add error handling and retry logic
-- [ ] Define exception hierarchy (PoolException, etc.)
+- [x] Define exception hierarchy (PoolException, etc.)
 - [ ] Implement retry with exponential backoff
-- [ ] Add timeout handling
+- [x] Add timeout handling
 - [ ] Log errors appropriately
 - **Effort**: M | **Assignee**: PD | **Dependencies**: P2-M1-004
 
 **P2-M1-006**: Write Python unit tests
-- [ ] Test IPCClient message serialization
+- [x] Test IPCClient message serialization
 - [ ] Test Connection context manager
-- [ ] Test error handling
-- [ ] Mock broker responses
+- [x] Test error handling
+- [x] Mock broker responses
 - **Effort**: M | **Assignee**: PD | **Dependencies**: P2-M1-005
 
 **P2-M1-007**: Create end-to-end integration test

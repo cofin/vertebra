@@ -23,6 +23,14 @@ core building blocks (decorator, registry, IR, extractor, and generator).
   - Generates `.d.ts` output with namespace grouping and topological ordering.
   - Optional validation through `tsc` (prefers `bun run -C src/ts tsc`; falls back to `bunx tsc`).
   - Optional formatting through `prettier` (`bunx prettier` if available).
+- `types.bridge`
+  - Generates and caches TypeScript definitions.
+  - Serves `/__vertebra/types.d.ts` with ETag + gzip support.
+- `types.watch`
+  - Debounced file watcher to invalidate cached types on `.py` changes.
+- `@vertebra/vite-plugin` (TS)
+  - Polls `/__vertebra/types.d.ts` and updates a virtual module for IDE types.
+  - Triggers full reload on type changes.
 
 ## Current Capabilities
 
@@ -41,8 +49,28 @@ core building blocks (decorator, registry, IR, extractor, and generator).
 - Named object types with dependency ordering.
 - Deduplication by name with conflict detection.
 - Optional TypeScript compiler validation.
+- Type bridge endpoint + ASGI app for in-process serving.
+- Debounced file watcher for in-memory regeneration.
+- Vite plugin with polling + virtual module support (`virtual:vertebra-types`).
+
+### Vite Plugin Usage (Dev)
+
+```ts
+import { defineConfig } from \"vite\";
+import { vertebraTypes } from \"vertebra/codegen\";
+
+export default defineConfig({
+  plugins: [vertebraTypes({ endpoint: \"http://127.0.0.1:8000/__vertebra/types.d.ts\" })],
+});
+```
+
+Import the virtual module once in your client entry to load types:
+
+```ts
+import type \"virtual:vertebra-types\";
+```
 
 ## Next Steps
 
-- Serializer protocol + IPC plumbing (PRD-2 Phase 3).
-- HMR dev server + file watching for in-memory type updates.
+- Vite HMR plugin wiring in apps (polling or websocket).
+- File watching + regeneration tuning (< 100ms updates).

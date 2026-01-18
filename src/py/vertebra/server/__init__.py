@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from vertebra.server.worker import AsgiWorker, WorkerConfig
 
 @dataclass(frozen=True, slots=True)
 class ServerConfig:
@@ -31,4 +32,4 @@ def get_server_backend() -> ServerBackend:
     raise RuntimeError("Server backend not configured yet")
 
 
-__all__ = ["ServerBackend", "ServerConfig", "get_server_backend"]
+__all__ = ["AsgiWorker", "ServerBackend", "ServerConfig", "WorkerConfig", "get_server_backend"]

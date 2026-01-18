@@ -404,17 +404,17 @@
 
 ### Milestone 4.1: File Watching (3 days)
 
-- [ ] **T4.1.1:** watchdog Integration
-  - [ ] Add watchdog dependency
-  - [ ] Create `SourceFileChangeHandler` class
-  - [ ] Watch configured paths recursively
-  - [ ] Filter for .py files only
+- [x] **T4.1.1:** watchdog Integration
+  - [x] Add watchdog dependency
+  - [x] Create `SourceFileChangeHandler` class
+  - [x] Watch configured paths recursively
+  - [x] Filter for .py files only
 
-- [ ] **T4.1.2:** Change Detection
-  - [ ] Trigger type regeneration on file modify
-  - [ ] Debounce rapid changes (100ms window)
-  - [ ] Batch multiple file changes
-  - [ ] Ignore non-procedure files (optimization)
+- [x] **T4.1.2:** Change Detection
+  - [x] Trigger type regeneration on file modify
+  - [x] Debounce rapid changes (100ms window)
+  - [x] Batch multiple file changes
+  - [x] Ignore non-procedure files (optimization)
 
 - [ ] **T4.1.3:** Incremental Updates
   - [ ] Only re-extract changed files
@@ -438,32 +438,31 @@
 
 ### Milestone 4.2: Type Bridge Endpoint (3 days)
 
-- [ ] **T4.2.1:** HTTP Endpoint
-  - [ ] Create `vertebra/types/bridge.py`
-  - [ ] Implement `TypeBridge` class
-  - [ ] Add `GET /__vertebra/types.d.ts` endpoint
-  - [ ] Serve generated TypeScript with correct Content-Type
+- [x] **T4.2.1:** HTTP Endpoint
+  - [x] Create `vertebra/types/bridge.py`
+  - [x] Implement `TypeBridge` class
+  - [x] Add `GET /__vertebra/types.d.ts` endpoint
+  - [x] Serve generated TypeScript with correct Content-Type
 
-- [ ] **T4.2.2:** Cache Management
-  - [ ] Cache generated TypeScript in memory
-  - [ ] Compute ETag from types hash
-  - [ ] Return 304 Not Modified if ETag matches
-  - [ ] Add Cache-Control headers
+- [x] **T4.2.2:** Cache Management
+  - [x] Cache generated TypeScript in memory
+  - [x] Compute ETag from types hash
+  - [x] Return 304 Not Modified if ETag matches
+  - [x] Add Cache-Control headers
 
-- [ ] **T4.2.3:** Compression
-  - [ ] Gzip large type files (> 10KB)
-  - [ ] Add Content-Encoding header
+- [x] **T4.2.3:** Compression
+  - [x] Gzip large type files (> 10KB)
   - [ ] Benchmark compression overhead
 
-- [ ] **T4.2.4:** Versioning
-  - [ ] Add X-TypeScript-Version header (hash of types)
-  - [ ] Client uses version for change detection
-  - [ ] Include timestamp for debugging
+- [x] **T4.2.4:** Versioning
+  - [x] Add X-TypeScript-Version header (hash of types)
+  - [x] Client uses version for change detection
+  - [x] Include timestamp for debugging
 
-- [ ] **T4.2.5:** Unit Tests
-  - [ ] Test endpoint returns correct types
-  - [ ] Test ETag/304 behavior
-  - [ ] Test compression
+- [x] **T4.2.5:** Unit Tests
+  - [x] Test endpoint returns correct types
+  - [x] Test ETag/304 behavior
+  - [x] Test compression
   - [ ] Test concurrent requests
 
 **Deliverable:** Type serving endpoint with caching
@@ -472,16 +471,16 @@
 
 ### Milestone 4.3: HMR Integration (4 days)
 
-- [ ] **T4.3.1:** Vite Plugin
-  - [ ] Create `@vertebra/vite-plugin` package
-  - [ ] Poll /__vertebra/types.d.ts endpoint
-  - [ ] Detect changes via X-TypeScript-Version header
-  - [ ] Fetch updated types on change
+- [x] **T4.3.1:** Vite Plugin
+  - [x] Create `@vertebra/vite-plugin` package
+  - [x] Poll /__vertebra/types.d.ts endpoint
+  - [x] Detect changes via X-TypeScript-Version header
+  - [x] Fetch updated types on change
 
-- [ ] **T4.3.2:** In-Memory Type Updates
-  - [ ] Write types to virtual file in Vite
-  - [ ] Trigger TypeScript language server update
-  - [ ] No disk writes (truly in-memory)
+- [x] **T4.3.2:** In-Memory Type Updates
+  - [x] Write types to virtual file in Vite
+  - [x] Trigger TypeScript language server update
+  - [x] No disk writes (truly in-memory)
 
 - [ ] **T4.3.3:** Multi-Framework Support
   - [ ] Test with React (Vite)

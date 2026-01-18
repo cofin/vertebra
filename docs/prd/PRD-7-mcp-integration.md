@@ -1,6 +1,6 @@
 # PRD-7: MCP Integration
 
-**Status**: Draft
+**Status**: In Progress
 **Version**: 1.0
 **Created**: 2026-01-17
 **Author**: Vertebra Team
@@ -532,7 +532,7 @@ const result = await response.json();
 
 **Implementation** (TypeScript):
 ```typescript
-// src/ts/mcp/server.ts
+// src/ts/src/mcp/server.ts
 import { Server } from '@modelcontextprotocol/sdk/server';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio';
 import { MCPError, ErrorCode } from '@modelcontextprotocol/sdk/types';
@@ -733,7 +733,7 @@ class MCPSchemaGenerator:
 Leverages existing Vertebra IPC infrastructure (PRD-1):
 
 ```typescript
-// src/ts/mcp/ipc-bridge.ts
+// src/ts/src/mcp/ipc-bridge.ts
 import { IpcClient } from '@vertebra/core';
 
 export class MCPIPCBridge {

@@ -38,18 +38,22 @@ Core IPC primitives, shared memory, lock-free channels, and Rust bindings.
 Decorator system, registry, type extraction, and TypeScript codegen bridge.
 
 ### [PRD-3: Bun Server and Protocol Support](./PRD-3-bun-server.md)
+**Status:** In Progress
 Bun HTTP server, protocol handling, IPC bridging, and server configuration.
 
 ### [PRD-4: Bun-Backed Python Drivers](./PRD-4-bun-drivers.md)
+**Status:** In Progress
 Database drivers, filesystem integration, and cloud storage clients via Bun.
 
 ### [PRD-5: Cooperative Resource Management](./PRD-5-resource-management.md)
+**Status:** In Progress
 Cross-process resource pools, fairness, observability, and lifecycle management.
 
 ### [PRD-6: Integration, Testing, and Documentation](./PRD-6-integration.md)
 Integration tests, benchmarks, example apps, migration guides, and docs.
 
 ### [PRD-7: MCP Integration](./PRD-7-mcp-integration.md)
+**Status:** In Progress
 MCP server, tool/resource registry, schema generation, and transport support.
 
 ## Planned PRDs

@@ -1,6 +1,6 @@
 # PRD-4: Bun-Backed Python Drivers
 
-**Status**: Draft
+**Status**: In Progress
 **Created**: 2026-01-17
 **Owner**: Vertebra Core Team
 **Dependencies**: PRD-2 (Python Bindings), PRD-3 (Bun Server)
@@ -1509,7 +1509,7 @@ src/py/vertebra/
     ├── serialization.py     # MessagePack utils
     └── pool.py              # Pool management
 
-src/ts/vertebra/
+src/ts/src/
 ├── drivers/
 │   ├── postgres.ts          # PostgreSQL pool
 │   ├── mysql.ts             # MySQL pool

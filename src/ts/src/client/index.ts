@@ -1,2 +1,17 @@
-// TODO: Implement type-safe client (see PRD-2/PRD-3).
-export {};
+export type ProcedureMap = Record<string, (params: any) => Promise<any>>;
+
+export interface RpcTransport {
+  request: (procedureId: string, payload: unknown) => Promise<unknown>;
+}
+
+export function createClient<TProcedures extends ProcedureMap>(transport: RpcTransport) {
+  return {
+    async call<K extends keyof TProcedures>(
+      procedureId: K,
+      params: Parameters<TProcedures[K]>[0],
+    ): ReturnType<TProcedures[K]> {
+      const result = await transport.request(String(procedureId), params);
+      return result as ReturnType<TProcedures[K]>;
+    },
+  };
+}

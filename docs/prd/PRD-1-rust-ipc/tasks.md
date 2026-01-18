@@ -302,7 +302,7 @@
 - [x] 6.2.1 - Expose shared memory APIs in `vertebra-js`
 - [x] 6.2.2 - Expose channels and buffer pool APIs in `vertebra-js`
 - [x] 6.2.3 - Map Rust errors to JS exceptions
-- [ ] 6.2.4 - Add napi-rs tests (lifecycle + invalid input)
+- [x] 6.2.4 - Add napi-rs tests (lifecycle + invalid input)
 
 ### Optional C ABI (If Required)
 

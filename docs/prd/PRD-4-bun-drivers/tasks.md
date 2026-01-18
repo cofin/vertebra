@@ -1,6 +1,6 @@
 # PRD-4: Bun-Backed Python Drivers - Implementation Tasks
 
-**Status**: Ready for Implementation
+**Status**: In Progress
 **Created**: 2026-01-17
 **Est. Duration**: 8 weeks
 
@@ -10,42 +10,42 @@
 
 ### 1.1 IPC Protocol Definition
 
-- [ ] Define TypeScript interfaces for driver requests/responses
-- [ ] Define message types (DriverRequest, DriverResponse, StreamChunk)
-- [ ] Define column metadata format (ColumnDesc)
-- [ ] Define error response format
-- [ ] Document protocol specification
+- [x] Define TypeScript interfaces for driver requests/responses
+- [x] Define message types (DriverRequest, DriverResponse, StreamChunk)
+- [x] Define column metadata format (ColumnDesc)
+- [x] Define error response format
+- [x] Document protocol specification
 
 **Files**:
-- `src/ts/vertebra/protocol/messages.ts`
+- `src/ts/src/protocol/messages.ts`
 - `docs/protocol.md`
 
 ### 1.2 Serialization Layer
 
-- [ ] Implement MessagePack serialization in Python
-- [ ] Implement MessagePack deserialization in Python
-- [ ] Implement MessagePack serialization in TypeScript
-- [ ] Implement MessagePack deserialization in TypeScript
-- [ ] Add binary data handling (Uint8Array ↔ bytes)
-- [ ] Write serialization unit tests
+- [x] Implement MessagePack serialization in Python
+- [x] Implement MessagePack deserialization in Python
+- [x] Implement MessagePack serialization in TypeScript
+- [x] Implement MessagePack deserialization in TypeScript
+- [x] Add binary data handling (Uint8Array ↔ bytes)
+- [x] Write serialization unit tests
 
 **Files**:
 - `src/py/vertebra/_internal/serialization.py`
-- `src/ts/vertebra/protocol/serialization.ts`
-- `tests/unit/test_serialization.py`
+- `src/ts/src/protocol/serialization.ts`
+- `src/py/tests/test_driver_serialization.py`
 
 **Dependencies**:
-- `msgpack` (Python)
+- `msgspec` (Python)
 - `@msgpack/msgpack` (TypeScript)
 
 ### 1.3 Base Driver Interface
 
-- [ ] Create abstract BaseDriver class
-- [ ] Define Connection interface
-- [ ] Define Cursor interface
-- [ ] Define AsyncConnection interface
-- [ ] Define Pool interface
-- [ ] Document driver interface contract
+- [x] Create abstract BaseDriver class
+- [x] Define Connection interface
+- [x] Define Cursor interface
+- [x] Define AsyncConnection interface
+- [x] Define Pool interface
+- [x] Document driver interface contract
 
 **Files**:
 - `src/py/vertebra/drivers/base.py`
@@ -53,15 +53,15 @@
 
 ### 1.4 Exception Hierarchy
 
-- [ ] Implement DB-API 2.0 exception classes
-- [ ] Create exception hierarchy (Error, DatabaseError, etc.)
-- [ ] Implement error code mapping
-- [ ] Add error message formatting
-- [ ] Write exception tests
+- [x] Implement DB-API 2.0 exception classes
+- [x] Create exception hierarchy (Error, DatabaseError, etc.)
+- [x] Implement error code mapping
+- [x] Add error message formatting
+- [x] Write exception tests
 
 **Files**:
 - `src/py/vertebra/drivers/exceptions.py`
-- `tests/unit/test_exceptions.py`
+- `src/py/tests/test_driver_exceptions.py`
 
 **Exceptions**:
 - `Error`
@@ -76,17 +76,17 @@
 
 ### 1.5 Type Conversion
 
-- [ ] Implement Python → PostgreSQL type conversion
-- [ ] Implement PostgreSQL → Python type conversion
-- [ ] Implement Python → MySQL type conversion
-- [ ] Implement MySQL → Python type conversion
-- [ ] Implement SQLite type conversions
-- [ ] Handle special types (JSON, UUID, arrays, etc.)
-- [ ] Write type conversion tests
+- [x] Implement Python → PostgreSQL type conversion
+- [x] Implement PostgreSQL → Python type conversion
+- [x] Implement Python → MySQL type conversion
+- [x] Implement MySQL → Python type conversion
+- [x] Implement SQLite type conversions
+- [x] Handle special types (JSON, UUID, arrays, etc.)
+- [x] Write type conversion tests
 
 **Files**:
 - `src/py/vertebra/drivers/types.py`
-- `tests/unit/test_types.py`
+- `src/py/tests/test_driver_types.py`
 
 **Types to Handle**:
 - Primitives: int, float, str, bytes, bool, None
@@ -97,22 +97,22 @@
 
 ### 1.6 IPC Communication
 
-- [ ] Implement IPC client (Python side)
-- [ ] Implement request/response handling
-- [ ] Add connection retry logic
-- [ ] Implement timeout handling
-- [ ] Add connection pooling for IPC sockets
-- [ ] Write IPC tests
+- [x] Implement IPC client (Python side)
+- [x] Implement request/response handling
+- [x] Add connection retry logic
+- [x] Implement timeout handling
+- [x] Add connection pooling for IPC sockets
+- [x] Write IPC tests
 
 ### 1.7 Bun-Only Runtime Guard
 
-- [ ] Detect Bun runtime availability on startup
-- [ ] Raise clear "unsupported runtime" errors when Bun is absent
-- [ ] Add tests for runtime guard behavior
+- [x] Detect Bun runtime availability on startup
+- [x] Raise clear "unsupported runtime" errors when Bun is absent
+- [x] Add tests for runtime guard behavior
 
 **Files**:
 - `src/py/vertebra/_internal/ipc.py`
-- `tests/unit/test_ipc.py`
+- `src/py/tests/test_ipc_guard.py`
 
 **Deliverables**:
 - Working IPC layer between Python and Bun
@@ -127,13 +127,13 @@
 
 ### 2.1 PostgreSQL Driver - Core
 
-- [ ] Implement Connection class (DB-API 2.0)
-- [ ] Implement Cursor class (DB-API 2.0)
-- [ ] Implement execute() method
-- [ ] Implement executemany() method
-- [ ] Implement fetchone() method
-- [ ] Implement fetchmany() method
-- [ ] Implement fetchall() method
+- [x] Implement Connection class (DB-API 2.0)
+- [x] Implement Cursor class (DB-API 2.0)
+- [x] Implement execute() method
+- [x] Implement executemany() method
+- [x] Implement fetchone() method
+- [x] Implement fetchmany() method
+- [x] Implement fetchall() method
 - [ ] Add module-level attributes (apilevel, threadsafety, paramstyle)
 - [ ] Write DB-API 2.0 compliance tests
 
@@ -143,13 +143,13 @@
 
 ### 2.2 PostgreSQL Driver - Async Interface
 
-- [ ] Implement AsyncConnection class
-- [ ] Implement async fetch() method
-- [ ] Implement async fetchrow() method
-- [ ] Implement async fetchval() method
-- [ ] Implement async execute() method
-- [ ] Implement async executemany() method
-- [ ] Write async interface tests
+- [x] Implement AsyncConnection class
+- [x] Implement async fetch() method
+- [x] Implement async fetchrow() method
+- [x] Implement async fetchval() method
+- [x] Implement async execute() method
+- [x] Implement async executemany() method
+- [x] Write async interface tests
 
 **Files**:
 - `src/py/vertebra/drivers/postgres.py`
@@ -167,7 +167,7 @@
 
 **Files**:
 - `src/py/vertebra/drivers/postgres.py`
-- `src/ts/vertebra/drivers/postgres.ts` (Bun server)
+- `src/ts/src/drivers/postgres.ts` (Bun server)
 - `tests/integration/test_pooling.py`
 
 ### 2.4 PostgreSQL Driver - Transactions
@@ -204,7 +204,7 @@
 - [ ] Write Bun server tests
 
 **Files**:
-- `src/ts/vertebra/drivers/postgres.ts`
+- `src/ts/src/drivers/postgres.ts`
 - `tests/integration/test_postgres_integration.py`
 
 **Dependencies**:
@@ -222,7 +222,7 @@
 
 **Files**:
 - `src/py/vertebra/drivers/mysql.py`
-- `src/ts/vertebra/drivers/mysql.ts`
+- `src/ts/src/drivers/mysql.ts`
 - `tests/compliance/test_dbapi_mysql.py`
 - `tests/integration/test_mysql_integration.py`
 
@@ -231,16 +231,16 @@
 
 ### 2.8 SQLite Driver
 
-- [ ] Implement Connection class (DB-API 2.0)
-- [ ] Implement Cursor class (DB-API 2.0)
-- [ ] Implement AsyncConnection class
-- [ ] Add SQLite-specific type conversions
+- [x] Implement Connection class (DB-API 2.0)
+- [x] Implement Cursor class (DB-API 2.0)
+- [x] Implement AsyncConnection class
+- [x] Add SQLite-specific type conversions
 - [ ] Implement transaction management
-- [ ] Write SQLite tests
+- [x] Write SQLite tests
 
 **Files**:
 - `src/py/vertebra/drivers/sqlite.py`
-- `src/ts/vertebra/drivers/sqlite.ts`
+- `src/ts/src/drivers/sqlite.ts`
 - `tests/compliance/test_dbapi_sqlite.py`
 - `tests/integration/test_sqlite_integration.py`
 
@@ -340,7 +340,7 @@
 
 **Files**:
 - `src/py/vertebra/fs/local.py`
-- `src/ts/vertebra/fs/local.ts`
+- `src/ts/src/fs/local.ts`
 - `tests/integration/test_fs_local.py`
 
 ### 3.6 S3 Filesystem Backend
@@ -354,7 +354,7 @@
 
 **Files**:
 - `src/py/vertebra/fs/s3.py`
-- `src/ts/vertebra/fs/s3.ts`
+- `src/ts/src/fs/s3.ts`
 - `tests/integration/test_fs_s3.py`
 
 **Dependencies**:
@@ -371,7 +371,7 @@
 
 **Files**:
 - `src/py/vertebra/fs/gcs.py`
-- `src/ts/vertebra/fs/gcs.ts`
+- `src/ts/src/fs/gcs.ts`
 - `tests/integration/test_fs_gcs.py`
 
 **Dependencies**:
@@ -437,7 +437,7 @@
 
 **Files**:
 - `src/py/vertebra/storage/s3.py`
-- `src/ts/vertebra/storage/s3.ts`
+- `src/ts/src/storage/s3.ts`
 - `tests/integration/test_s3_multipart.py`
 
 ### 4.4 S3Client - Metadata and Listing
@@ -464,7 +464,7 @@
 
 **Files**:
 - `src/py/vertebra/storage/gcs.py`
-- `src/ts/vertebra/storage/gcs.ts`
+- `src/ts/src/storage/gcs.ts`
 - `tests/integration/test_gcs_client.py`
 
 ### 4.6 Error Handling

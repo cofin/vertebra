@@ -4,6 +4,7 @@ members = [
     "vertebra-core",
     "vertebra-py",
     "vertebra-js",
+    "vertebra-broker",
 ]
 
 [workspace.package]

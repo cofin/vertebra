@@ -13,6 +13,7 @@
     "typescript": "^5.7.0"
   },
   "dependencies": {
-    "@kriss-u/py-ast": "^0.7.0"
+    "@msgpack/msgpack": "^3.0.0",
+    "postgres": "^3.4.5"
   }
 }
