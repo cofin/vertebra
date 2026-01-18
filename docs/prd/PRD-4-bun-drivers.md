@@ -198,7 +198,7 @@ Exception
 
 **Connection Interface**:
 ```python
-class Connection:
+class SyncConnection:
     def close(self) -> None:
         """Close the connection to the database."""
 
@@ -208,13 +208,13 @@ class Connection:
     def rollback(self) -> None:
         """Rollback pending transaction."""
 
-    def cursor(self) -> Cursor:
-        """Return new Cursor object using the connection."""
+    def cursor(self) -> SyncCursor:
+        """Return new SyncCursor object using the connection."""
 ```
 
-**Cursor Interface**:
+**SyncCursor Interface**:
 ```python
-class Cursor:
+class SyncCursor:
     description: tuple[tuple]  # Column metadata
     rowcount: int              # Number of rows affected
 
@@ -267,7 +267,24 @@ class AsyncConnection:
 
 **Connection Pool**:
 ```python
-class Pool:
+class SyncPool:
+    def acquire(self) -> SyncConnection:
+        """Acquire connection from pool."""
+
+    def release(self, connection: SyncConnection) -> None:
+        """Release connection back to pool."""
+
+    def close(self) -> None:
+        """Close all connections in pool."""
+
+    def get_size(self) -> int:
+        """Get current pool size."""
+
+    def get_idle_size(self) -> int:
+        """Get number of idle connections."""
+
+
+class AsyncPool:
     async def acquire(self) -> AsyncConnection:
         """Acquire connection from pool."""
 
@@ -300,9 +317,10 @@ class Pool:
 **Example Usage**:
 ```python
 # Sync (DB-API 2.0)
-from vertebra.drivers import PostgresDriver
+from vertebra.drivers import SyncPostgresDriver, SyncPostgresDriverConfig, AsyncPostgresDriver
 
-conn = PostgresDriver.connect("postgresql://localhost/mydb")
+driver = SyncPostgresDriver(SyncPostgresDriverConfig(connection_string="postgresql://localhost/mydb"))
+conn = driver.connect()
 cursor = conn.cursor()
 cursor.execute("SELECT * FROM users WHERE id = %s", (123,))
 users = cursor.fetchall()
@@ -312,13 +330,13 @@ conn.close()
 import asyncio
 
 async def main():
-    pool = await PostgresDriver.create_pool(
-        "postgresql://localhost/mydb",
-        min_size=10,
-        max_size=20
+    async_driver = AsyncPostgresDriver(
+        SyncPostgresDriverConfig(connection_string="postgresql://localhost/mydb")
     )
+    pool = await async_driver.pool(min_size=10, max_size=20)
 
-    async with pool.acquire() as conn:
+    conn = await pool.acquire()
+    try:
         # Simple query
         users = await conn.fetch("SELECT * FROM users WHERE active = $1", True)
 
@@ -328,8 +346,9 @@ async def main():
                 "INSERT INTO users (name, email) VALUES ($1, $2)",
                 "Alice", "alice@example.com"
             )
-
-    await pool.close()
+    finally:
+        await pool.release(conn)
+        await pool.close()
 
 asyncio.run(main())
 ```
@@ -349,9 +368,10 @@ asyncio.run(main())
 **Example Usage**:
 ```python
 # Sync (DB-API 2.0)
-from vertebra.drivers import MySQLDriver
+from vertebra.drivers import SyncMySQLDriver, SyncMySQLDriverConfig, AsyncMySQLDriver
 
-conn = MySQLDriver.connect("mysql://user:pass@localhost/mydb")
+driver = SyncMySQLDriver(SyncMySQLDriverConfig(connection_string="mysql://user:pass@localhost/mydb"))
+conn = driver.connect()
 cursor = conn.cursor()
 cursor.execute("SELECT * FROM products WHERE price > %s", (100,))
 products = cursor.fetchall()
@@ -359,19 +379,17 @@ conn.close()
 
 # Async (aiomysql-like)
 async def main():
-    pool = await MySQLDriver.create_pool(
-        "mysql://user:pass@localhost/mydb",
-        minsize=5,
-        maxsize=15
+    async_driver = AsyncMySQLDriver(
+        SyncMySQLDriverConfig(connection_string="mysql://user:pass@localhost/mydb")
     )
+    pool = await async_driver.pool(min_size=5, max_size=15)
 
-    async with pool.acquire() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("SELECT * FROM products")
-            products = await cur.fetchall()
-
-    pool.close()
-    await pool.wait_closed()
+    conn = await pool.acquire()
+    try:
+        products = await conn.fetch("SELECT * FROM products")
+    finally:
+        await pool.release(conn)
+        await pool.close()
 ```
 
 ### SQLite Driver
@@ -388,9 +406,10 @@ async def main():
 **Example Usage**:
 ```python
 # Sync (DB-API 2.0)
-from vertebra.drivers import SQLiteDriver
+from vertebra.drivers import SyncSqliteDriver, SyncSqliteDriverConfig, AsyncSqliteDriver
 
-conn = SQLiteDriver.connect("database.db")
+driver = SyncSqliteDriver(SyncSqliteDriverConfig(path="database.db"))
+conn = driver.connect()
 cursor = conn.cursor()
 cursor.execute("SELECT * FROM logs")
 logs = cursor.fetchall()
@@ -398,59 +417,90 @@ conn.close()
 
 # Async (aiosqlite-like)
 async def main():
-    async with SQLiteDriver.connect("database.db") as db:
-        await db.execute("INSERT INTO logs (message) VALUES (?)", ("test",))
-        await db.commit()
+    async_driver = AsyncSqliteDriver(SyncSqliteDriverConfig(path="database.db"))
+    conn = await async_driver.connect()
+    await conn.execute("INSERT INTO logs (message) VALUES (?)", ("test",))
+    await conn.commit()
 
-        async with db.execute("SELECT * FROM logs") as cursor:
-            async for row in cursor:
-                print(row)
+    rows = await conn.fetch("SELECT * FROM logs")
+    for row in rows:
+        print(row)
+    await conn.close()
 ```
 
 ### SQLSpec Integration
 
-Vertebra drivers integrate seamlessly with SQLSpec for multi-database support:
+Vertebra drivers integrate with SQLSpec for multi-database support via a thin adapter layer (planned):
 
 ```python
-from vertebra.drivers import PostgresDriver, MySQLDriver
+from vertebra.drivers import (
+    SyncPostgresDriver,
+    SyncPostgresDriverConfig,
+    SyncMySQLDriver,
+    SyncMySQLDriverConfig,
+)
 from sqlspec import SQLSpec
 
 sql = SQLSpec()
 
-# Add multiple database configurations
-sql.add_config(PostgresDriver(dsn="postgresql://localhost/analytics"))
-sql.add_config(MySQLDriver(dsn="mysql://localhost/legacy"))
+sql.add_config(
+    SyncPostgresDriver(SyncPostgresDriverConfig(connection_string="postgresql://localhost/analytics"))
+)
+sql.add_config(
+    SyncMySQLDriver(SyncMySQLDriverConfig(connection_string="mysql://localhost/legacy"))
+)
 
+# SQLSpec routes queries to the configured driver adapters
 async with sql.provide_session() as session:
-    # SQLSpec routes queries to appropriate database
     users = await session.select_all("SELECT * FROM users")
     await session.execute("INSERT INTO audit_log (action) VALUES (?)", ("login",))
 ```
 
 **SQLSpec Adapter Interface**:
 ```python
-class PostgresDriver:
-    """SQLSpec-compatible driver adapter"""
+class SyncPostgresDriver:
+    """SQLSpec-compatible driver adapter (planned)"""
 
     def __init__(self, dsn: str, **pool_config):
         self.dsn = dsn
         self.pool_config = pool_config
         self._pool = None
 
-    async def get_connection(self):
+    def get_connection(self):
         """SQLSpec calls this to get connection"""
-        if not self._pool:
-            self._pool = await create_pool(self.dsn, **self.pool_config)
-        return await self._pool.acquire()
+        return self.connect()
 
-    async def release_connection(self, conn):
+    def release_connection(self, conn):
         """Release connection back to pool"""
-        await self._pool.release(conn)
+        conn.close()
 ```
+
+### Pluggable Backends (Bridge/Adapter Hooks)
+
+To support custom backends (SQLAlchemy, SQLSpec adapters, enterprise drivers), Vertebra exposes a backend registry:
+
+- `register_driver_backend(name, factory)` registers a backend factory.
+- `get_driver_backend(DriverConfig(...))` resolves a backend at runtime.
+- The IPC bridge can route to registered backends without hard-coding dependencies.
+
+This keeps the Bun-only default path while allowing vetted plugins to attach additional backends.
 
 ---
 
 ## File System Layer
+
+### Object Store Protocol (obstore-style)
+
+Vertebra exposes a storage protocol aligned with obstore-style object stores:
+
+- **SyncObjectStore / AsyncObjectStore**: unified API across local, S3, and GCS
+- Core operations: `get`, `get_range`, `get_ranges`, `put`, `delete`, `head`, `exists`
+- Streaming operations: `iter_chunks(...)`, `put_stream(...)`, `download_to_path(...)`, `upload_from_path(...)`
+- Signed URLs: `signed_url(path, method="GET", expires_in=3600)` (S3 supported; GCS deferred; returns `None` when unsupported)
+- Listing: `list(prefix)` returns an iterator/async iterator; `list_with_delimiter(prefix, "/")` groups common prefixes
+- URL-based registry: `store_from_url("s3://bucket/prefix")`, `store_from_url("gs://bucket/prefix")`, `store_from_url("file:///path")`
+
+The store protocol is the source-of-truth for filesystem semantics; higher-level integrations (fsspec) are thin adapters on top.
 
 ### fsspec Integration
 
@@ -475,9 +525,17 @@ class PostgresDriver:
 ```python
 class VertebraFileSystem(AbstractFileSystem):
     protocol = "vertebra"
-    async_impl = True
 
-    def __init__(self, backend: str = "local", **storage_options):
+    def __init__(
+        self,
+        backend: str = "local",
+        *,
+        bucket: str | None = None,
+        options: dict[str, Any] | None = None,
+        store: SyncObjectStore | None = None,
+        url: str | None = None,
+        **storage_options,
+    ):
         """
         Args:
             backend: "local", "s3", or "gcs"
@@ -485,6 +543,7 @@ class VertebraFileSystem(AbstractFileSystem):
         """
         super().__init__(**storage_options)
         self.backend = backend
+        # wraps a SyncObjectStore derived from backend/bucket/url
 
     # File operations
     def _ls(self, path: str, detail: bool = True) -> list:
@@ -928,7 +987,7 @@ Database errors are mapped to DB-API 2.0 exception hierarchy:
 ### Phase 2: Database Drivers (Weeks 3-5)
 
 **2.1 PostgreSQL Driver** (Priority 1):
-- DB-API 2.0 Connection and Cursor classes
+- DB-API 2.0 SyncConnection and SyncCursor classes
 - Async Connection and Pool classes
 - Connection pooling integration with Bun server
 - Transaction management (begin, commit, rollback, savepoints)
@@ -1198,10 +1257,11 @@ docs/api/
 
 **examples/basic_postgres.py**:
 ```python
-from vertebra.drivers import PostgresDriver
+from vertebra.drivers import SyncPostgresDriver, SyncPostgresDriverConfig, AsyncPostgresDriver
 
 # Sync usage (DB-API 2.0)
-conn = PostgresDriver.connect("postgresql://localhost/mydb")
+driver = SyncPostgresDriver(SyncPostgresDriverConfig(connection_string="postgresql://localhost/mydb"))
+conn = driver.connect()
 cursor = conn.cursor()
 cursor.execute("SELECT * FROM users WHERE id = %s", (123,))
 users = cursor.fetchall()
@@ -1211,21 +1271,27 @@ conn.close()
 import asyncio
 
 async def main():
-    pool = await PostgresDriver.create_pool("postgresql://localhost/mydb")
-    async with pool.acquire() as conn:
+    async_driver = AsyncPostgresDriver(
+        SyncPostgresDriverConfig(connection_string="postgresql://localhost/mydb")
+    )
+    pool = await async_driver.pool()
+    conn = await pool.acquire()
+    try:
         users = await conn.fetch("SELECT * FROM users")
-    await pool.close()
+    finally:
+        await pool.release(conn)
+        await pool.close()
 
 asyncio.run(main())
 ```
 
 **examples/sqlspec_integration.py**:
 ```python
-from vertebra.drivers import PostgresDriver
+from vertebra.drivers import SyncPostgresDriver, SyncPostgresDriverConfig
 from sqlspec import SQLSpec
 
 sql = SQLSpec()
-sql.add_config(PostgresDriver(dsn="postgresql://localhost/mydb"))
+sql.add_config(SyncPostgresDriver(SyncPostgresDriverConfig(connection_string="postgresql://localhost/mydb")))
 
 async with sql.provide_session() as session:
     users = await session.select_all("SELECT * FROM users")
@@ -1234,7 +1300,7 @@ async with sql.provide_session() as session:
 
 **examples/filesystem_usage.py**:
 ```python
-from vertebra.fs import VertebraFileSystem
+from vertebra.filesystem import VertebraFileSystem
 import pandas as pd
 import fsspec
 
@@ -1242,7 +1308,10 @@ import fsspec
 fsspec.register_implementation("vertebra", VertebraFileSystem)
 
 # Use with pandas
-df = pd.read_parquet("vertebra://s3/bucket/data.parquet")
+df = pd.read_parquet(
+    "vertebra://data.parquet",
+    storage_options={"backend": "s3", "bucket": "my-bucket"},
+)
 
 # Direct usage
 fs = VertebraFileSystem(backend="s3", bucket="my-bucket")
@@ -1252,21 +1321,14 @@ with fs.open("path/to/file.txt", "r") as f:
 
 **examples/s3_streaming.py**:
 ```python
-from vertebra.storage import S3Client
+from vertebra.storage import AsyncS3Client
 
 async def upload_large_file():
-    s3 = S3Client(bucket="my-bucket", region="us-east-1")
-
-    # Upload with progress
-    def progress(uploaded: int, total: int):
-        pct = (uploaded / total) * 100
-        print(f"Progress: {uploaded}/{total} bytes ({pct:.1f}%)")
-
-    await s3.upload("large-file.zip", "/local/file.zip", on_progress=progress)
-
-    # Stream download
-    async for chunk in s3.download_stream("large-file.zip"):
-        process_chunk(chunk)
+    s3 = AsyncS3Client(bucket="my-bucket")
+    data = b"..."
+    await s3.upload_bytes("large-file.zip", data, content_type="application/zip")
+    payload = await s3.download_bytes("large-file.zip")
+    process_payload(payload)
 ```
 
 ### Migration Guides
@@ -1285,10 +1347,15 @@ async with pool.acquire() as conn:
 
 ## After
 ```python
-from vertebra.drivers import PostgresDriver
-pool = await PostgresDriver.create_pool(dsn)
-async with pool.acquire() as conn:
+from vertebra.drivers import AsyncPostgresDriver, SyncPostgresDriverConfig
+async_driver = AsyncPostgresDriver(SyncPostgresDriverConfig(connection_string=dsn))
+pool = await async_driver.pool()
+conn = await pool.acquire()
+try:
     result = await conn.fetch("SELECT * FROM users")
+finally:
+    await pool.release(conn)
+    await pool.close()
 ```
 
 ## Benefits
@@ -1414,7 +1481,7 @@ storage = [
    - **Answer**: Support both. Tuples for sync, Records for async.
 
 5. **Connection pool per-pool config**: Should each pool have different min/max sizes?
-   - **Answer**: Yes, pass pool config to create_pool().
+   - **Answer**: Yes, pass pool config to `AsyncDriver.pool(min_size, max_size)`.
 
 ---
 

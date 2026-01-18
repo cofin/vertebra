@@ -69,17 +69,17 @@ def format_error_message(code: str | None, message: str) -> str:
 
 
 __all__ = [
-    "Error",
-    "Warning",
-    "InterfaceError",
-    "DatabaseError",
-    "DataError",
-    "OperationalError",
-    "IntegrityError",
-    "InternalError",
-    "ProgrammingError",
-    "NotSupportedError",
     "ERROR_CODE_MAP",
-    "map_error_code",
+    "DataError",
+    "DatabaseError",
+    "Error",
+    "IntegrityError",
+    "InterfaceError",
+    "InternalError",
+    "NotSupportedError",
+    "OperationalError",
+    "ProgrammingError",
+    "Warning",
     "format_error_message",
+    "map_error_code",
 ]

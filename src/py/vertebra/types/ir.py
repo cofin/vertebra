@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
 
 
 class TypeNode:
@@ -52,10 +55,8 @@ class ObjectType(TypeNode):
         return " ".join(parts)
 
     def iter_children(self) -> Iterable[TypeNode]:
-        for field_type in self.fields.values():
-            yield field_type
-        for constraint in self.type_param_constraints.values():
-            yield constraint
+        yield from self.fields.values()
+        yield from self.type_param_constraints.values()
 
 
 @dataclass(frozen=True, slots=True)

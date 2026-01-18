@@ -8,7 +8,6 @@ import types
 import typing
 import warnings
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, get_args, get_origin
 
 from vertebra.types.ir import (
@@ -25,6 +24,9 @@ from vertebra.types.ir import (
     UnionType,
     UnknownType,
 )
+
+if typing.TYPE_CHECKING:
+    from pathlib import Path
 
 
 @dataclass(slots=True)
@@ -68,7 +70,7 @@ class TypeExtractor:
     type_cache: dict[tuple[Path, str], ObjectType] = field(default_factory=dict)
 
     def from_hint(self, annotation: Any) -> TypeNode:
-        if annotation is None or annotation is type(None):  # noqa: E721 - intentional
+        if annotation is None or annotation is type(None):
             return PrimitiveType("null")
         if annotation in (int, float):
             return PrimitiveType("number")
@@ -792,11 +794,10 @@ class TypeExtractor:
         return False
 
     def _dataclass_has_default(self, node: ast.AST) -> bool:
-        if isinstance(node, ast.Call):
-            if self._base_name(node.func).split(".")[-1] == "field":
-                for keyword in node.keywords:
-                    if keyword.arg in ("default", "default_factory") and keyword.value is not None:
-                        return True
+        if isinstance(node, ast.Call) and self._base_name(node.func).split(".")[-1] == "field":
+            for keyword in node.keywords:
+                if keyword.arg in ("default", "default_factory") and keyword.value is not None:
+                    return True
         return True
 
     def _unwrap_required(self, annotation: ast.AST) -> tuple[ast.AST, bool | None]:
@@ -900,13 +901,12 @@ class TypeExtractor:
                 if resolved is not None:
                     return resolved
                 warnings.warn(
-                    f"Unresolved type reference: {node.id}", RuntimeWarning
+                    f"Unresolved type reference: {node.id}", RuntimeWarning, stacklevel=2
                 )
             return primitive
         if isinstance(node, ast.Attribute):
             name = self._base_name(node)
-            primitive = self._primitive_from_name(name.split(".")[-1])
-            return primitive
+            return self._primitive_from_name(name.split(".")[-1])
         if isinstance(node, ast.Constant):
             if isinstance(node.value, str):
                 if node.value in struct_names:
@@ -916,7 +916,7 @@ class TypeExtractor:
                     if resolved is not None:
                         return resolved
                     warnings.warn(
-                        f"Unresolved type reference: {node.value}", RuntimeWarning
+                        f"Unresolved type reference: {node.value}", RuntimeWarning, stacklevel=2
                     )
                 return UnknownType()
             return LiteralType(node.value)

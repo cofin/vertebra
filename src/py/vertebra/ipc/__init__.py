@@ -3,13 +3,7 @@
 from __future__ import annotations
 
 from vertebra import _vertebra
-from vertebra.ipc.channel import (
-    BufferView,
-    Channel,
-    ChannelError,
-    SerializationError,
-    ZeroCopyChannel,
-)
+from vertebra.ipc.channel import BufferView, Channel, ChannelError, SerializationError, ZeroCopyChannel
 
 ShmRegion = _vertebra.ShmRegion
 BufferPool = _vertebra.BufferPool

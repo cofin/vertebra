@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import struct
+import time
 from typing import Any
 
 from vertebra import _vertebra
@@ -65,12 +65,14 @@ def _encode_message(procedure_id: str, payload: bytes) -> bytes:
 
 def _decode_message(data: bytes) -> tuple[str, bytes]:
     if len(data) < _HEADER.size:
-        raise ChannelError("payload too small")
+        msg = "payload too small"
+        raise ChannelError(msg)
     name_len, payload_len = _HEADER.unpack_from(data)
     start = _HEADER.size
     end = start + name_len
     if len(data) < end + payload_len:
-        raise ChannelError("payload truncated")
+        msg = "payload truncated"
+        raise ChannelError(msg)
     procedure_id = data[start:end].decode("utf-8")
     payload = data[end : end + payload_len]
     return procedure_id, payload
@@ -95,7 +97,8 @@ class BufferView:
 
     def as_memoryview(self) -> memoryview:
         if self._buffer is None:
-            raise ChannelError("buffer released")
+            msg = "buffer released"
+            raise ChannelError(msg)
         try:
             view = memoryview(self._buffer)[: self._length]
         except TypeError:
@@ -119,7 +122,8 @@ class BufferView:
         try:
             import msgspec
         except Exception as exc:  # pragma: no cover - optional dependency
-            raise SerializationError("msgspec is not available") from exc
+            msg = "msgspec is not available"
+            raise SerializationError(msg) from exc
         decoder = msgspec.json.Decoder(type_hint)
         view = self.as_memoryview()
         try:
@@ -160,7 +164,8 @@ class ZeroCopyChannel:
 
     def send(self, buffer: BufferView, length: int, flags: int = 0) -> None:
         if buffer._buffer is None:
-            raise ChannelError("buffer released")
+            msg = "buffer released"
+            raise ChannelError(msg)
         try:
             buffer._release_view()
             self._channel.send(buffer._buffer, length, flags)
@@ -247,7 +252,8 @@ class Channel:
     def _require_handle(self) -> _vertebra.Channel:
         handle = self._handle
         if handle is None:
-            raise ChannelError("channel is closed", stage="closed")
+            msg = "channel is closed"
+            raise ChannelError(msg, stage="closed")
         return handle
 
     def send_sync(
@@ -280,8 +286,9 @@ class Channel:
                 stage="encode_message",
             ) from exc
         if len(message) > self._max_payload:
+            msg = "payload too large"
             raise ChannelError(
-                "payload too large",
+                msg,
                 procedure_id=procedure_id,
                 stage="send_request",
             )
@@ -298,8 +305,9 @@ class Channel:
                     if self._handle.try_send_request(message):
                         break
                     if time.monotonic() >= send_deadline:
+                        msg = "send timeout"
                         raise ChannelError(
-                            "send timeout",
+                            msg,
                             procedure_id=procedure_id,
                             stage="send_request",
                         )
@@ -311,8 +319,9 @@ class Channel:
                     if response is not None:
                         break
                     if time.monotonic() >= recv_deadline:
+                        msg = "response timeout"
                         raise ChannelError(
-                            "response timeout",
+                            msg,
                             procedure_id=procedure_id,
                             stage="recv_response",
                         )
@@ -370,7 +379,8 @@ class Channel:
                     if data is not None:
                         break
                     if time.monotonic() >= deadline:
-                        raise ChannelError("receive timeout", stage="recv_request")
+                        msg = "receive timeout"
+                        raise ChannelError(msg, stage="recv_request")
                     time.sleep(0.001)
         except RuntimeError as exc:
             raise ChannelError(str(exc), stage="recv_request") from exc
@@ -426,8 +436,9 @@ class Channel:
                 stage="serialize_response",
             ) from exc
         if len(payload) > self._max_payload:
+            msg = "payload too large"
             raise ChannelError(
-                "payload too large",
+                msg,
                 procedure_id=procedure_id,
                 stage="send_response",
             )

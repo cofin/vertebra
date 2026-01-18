@@ -4,11 +4,23 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Awaitable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any
 
 from vertebra._internal.ipc import IpcClient, IpcConfig
-from vertebra.drivers.base import AsyncConnection, BaseDriver, Connection, Cursor, Pool
+from vertebra.drivers.base import (
+    AsyncConnection,
+    AsyncCursor,
+    AsyncDriver,
+    AsyncPool,
+    SyncConnection,
+    SyncCursor,
+    SyncDriver,
+    SyncPool,
+)
 from vertebra.drivers.exceptions import DatabaseError, format_error_message, map_error_code
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Iterable, Sequence
 
 
 def _run_sync(coro: Awaitable[Any]) -> Any:
@@ -16,7 +28,8 @@ def _run_sync(coro: Awaitable[Any]) -> Any:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
-    raise RuntimeError("Use AsyncPostgresConnection inside an event loop")
+    msg = "Use AsyncPostgresConnection inside an event loop"
+    raise RuntimeError(msg)
 
 
 def _raise_for_error(response: dict[str, Any]) -> None:
@@ -30,13 +43,14 @@ def _raise_for_error(response: dict[str, Any]) -> None:
 
 
 @dataclass(slots=True)
-class PostgresDriverConfig:
+class SyncPostgresDriverConfig:
     connection_string: str = "postgres://localhost/postgres"
-    ipc: IpcConfig = IpcConfig(transport="tcp", host="127.0.0.1", port=7003, enforce_bun=False)
+    ipc: IpcConfig = IpcConfig(transport="tcp", host="127.0.0.1", port=7003, enforce_bun=False)  # noqa: RUF009
+    pool_max: int | None = None
 
 
-class PostgresCursor(Cursor):
-    def __init__(self, connection: "PostgresConnection") -> None:
+class SyncPostgresCursor(SyncCursor):
+    def __init__(self, connection: "SyncPostgresConnection") -> None:
         self._connection = connection
         self._rows: list[tuple[Any, ...]] = []
         self._columns: list[str] = []
@@ -80,13 +94,58 @@ class PostgresCursor(Cursor):
         self._index = 0
 
 
-class PostgresConnection(Connection):
+class AsyncPostgresCursor(AsyncCursor):
+    def __init__(self, connection: "AsyncPostgresConnection") -> None:
+        self._connection = connection
+        self._rows: list[tuple[Any, ...]] = []
+        self._columns: list[str] = []
+        self._index = 0
+
+    async def execute(self, query: str, params: Sequence[Any] | None = None) -> Any:
+        result = await self._connection._execute(query, params or [])
+        self._columns = list(result.get("columns", []))
+        self._rows = [tuple(row) for row in result.get("rows", [])]
+        self._index = 0
+        return result.get("rowcount")
+
+    async def executemany(self, query: str, params: Iterable[Sequence[Any]]) -> Any:
+        total = 0
+        for param_set in params:
+            result = await self._connection._execute(query, param_set)
+            total += result.get("rowcount", 0)
+        return total
+
+    async def fetchone(self) -> Any:
+        if self._index >= len(self._rows):
+            return None
+        row = self._rows[self._index]
+        self._index += 1
+        return row
+
+    async def fetchmany(self, size: int | None = None) -> list[Any]:
+        count = size or 1
+        rows = self._rows[self._index : self._index + count]
+        self._index += len(rows)
+        return rows
+
+    async def fetchall(self) -> list[Any]:
+        rows = self._rows[self._index :]
+        self._index = len(self._rows)
+        return rows
+
+    async def close(self) -> None:
+        self._rows = []
+        self._columns = []
+        self._index = 0
+
+
+class SyncPostgresConnection(SyncConnection):
     def __init__(self, client: IpcClient, connection_id: str) -> None:
         self._client = client
         self._connection_id = connection_id
 
-    def cursor(self) -> Cursor:
-        return PostgresCursor(self)
+    def cursor(self) -> SyncCursor:
+        return SyncPostgresCursor(self)
 
     def commit(self) -> None:
         return
@@ -96,59 +155,72 @@ class PostgresConnection(Connection):
 
     def close(self) -> None:
         _run_sync(
-            self._client.request(
-                {
-                    "id": "close",
-                    "driver": "postgres",
-                    "method": "close",
-                    "params": {"connectionId": self._connection_id},
-                }
-            )
+            self._client.request({
+                "id": "close",
+                "driver": "postgres",
+                "method": "close",
+                "params": {"connectionId": self._connection_id},
+            })
         )
         _run_sync(self._client.close())
 
+    def transaction(self, isolation: str | None = None) -> "SyncPostgresTransaction":
+        return SyncPostgresTransaction(self, isolation=isolation)
+
     def _execute(self, query: str, params: Sequence[Any]) -> dict[str, Any]:
         response = _run_sync(
-            self._client.request(
-                {
-                    "id": "execute",
-                    "driver": "postgres",
-                    "method": "execute",
-                    "params": {
-                        "connectionId": self._connection_id,
-                        "sql": query,
-                        "params": list(params),
-                    },
-                }
-            )
+            self._client.request({
+                "id": "execute",
+                "driver": "postgres",
+                "method": "execute",
+                "params": {"connectionId": self._connection_id, "sql": query, "params": list(params)},
+            })
         )
         _raise_for_error(response)
         return response.get("result", {})
 
 
 class AsyncPostgresConnection(AsyncConnection):
-    def __init__(self, client: IpcClient, connection_string: str, connection_id: str | None = None) -> None:
+    def __init__(
+        self,
+        client: IpcClient,
+        connection_string: str,
+        connection_id: str | None = None,
+        pool_max: int | None = None,
+    ) -> None:
         self._client = client
         self._connection_string = connection_string
         self._connection_id = connection_id
+        self._pool_max = pool_max
 
     async def _ensure_connection(self) -> str:
         if self._connection_id:
             return self._connection_id
-        response = await self._client.request(
-            {
-                "id": "connect",
-                "driver": "postgres",
-                "method": "connect",
-                "params": {"connectionString": self._connection_string},
-            }
-        )
+        params: dict[str, Any] = {"connectionString": self._connection_string}
+        if self._pool_max:
+            params["pool"] = {"max": self._pool_max}
+        response = await self._client.request({
+            "id": "connect",
+            "driver": "postgres",
+            "method": "connect",
+            "params": params,
+        })
         _raise_for_error(response)
         connection_id = response.get("result", {}).get("connectionId")
         if not connection_id:
-            raise DatabaseError("Connection id missing from response")
+            msg = "Connection id missing from response"
+            raise DatabaseError(msg)
         self._connection_id = connection_id
         return connection_id
+
+    def cursor(self) -> AsyncCursor:
+        return AsyncPostgresCursor(self)
+
+    async def commit(self) -> None:
+        return
+
+    async def rollback(self) -> None:
+        return
 
     async def fetch(self, query: str, params: Sequence[Any] | None = None) -> list[Any]:
         result = await self._execute(query, params or [])
@@ -178,44 +250,39 @@ class AsyncPostgresConnection(AsyncConnection):
     async def close(self) -> None:
         if not self._connection_id:
             return
-        await self._client.request(
-            {
-                "id": "close",
-                "driver": "postgres",
-                "method": "close",
-                "params": {"connectionId": self._connection_id},
-            }
-        )
+        await self._client.request({
+            "id": "close",
+            "driver": "postgres",
+            "method": "close",
+            "params": {"connectionId": self._connection_id},
+        })
         await self._client.close()
+
+    def transaction(self, isolation: str | None = None) -> "AsyncPostgresTransaction":
+        return AsyncPostgresTransaction(self, isolation=isolation)
 
     async def _execute(self, query: str, params: Sequence[Any]) -> dict[str, Any]:
         connection_id = await self._ensure_connection()
-        response = await self._client.request(
-            {
-                "id": "execute",
-                "driver": "postgres",
-                "method": "execute",
-                "params": {
-                    "connectionId": connection_id,
-                    "sql": query,
-                    "params": list(params),
-                },
-            }
-        )
+        response = await self._client.request({
+            "id": "execute",
+            "driver": "postgres",
+            "method": "execute",
+            "params": {"connectionId": connection_id, "sql": query, "params": list(params)},
+        })
         _raise_for_error(response)
         return response.get("result", {})
 
 
-class PostgresPool(Pool):
-    def __init__(self, driver: "PostgresDriver", min_size: int = 1, max_size: int = 5) -> None:
+class SyncPostgresPool(SyncPool):
+    def __init__(self, driver: "SyncPostgresDriver", min_size: int = 1, max_size: int = 5) -> None:
         self._driver = driver
         self._min_size = min_size
         self._max_size = max_size
 
-    def acquire(self) -> Connection:
-        return self._driver.connect()
+    def acquire(self) -> SyncConnection:
+        return self._driver._connect(pooled=True, pool_max=self._max_size)
 
-    def release(self, connection: Connection) -> None:
+    def release(self, connection: SyncConnection) -> None:
         connection.close()
 
     def close(self) -> None:
@@ -228,41 +295,123 @@ class PostgresPool(Pool):
         return self._min_size
 
 
-class PostgresDriver(BaseDriver):
-    def __init__(self, config: PostgresDriverConfig | None = None) -> None:
-        self._config = config or PostgresDriverConfig()
+class AsyncPostgresPool(AsyncPool):
+    def __init__(self, driver: "AsyncPostgresDriver", min_size: int = 1, max_size: int = 5) -> None:
+        self._driver = driver
+        self._min_size = min_size
+        self._max_size = max_size
 
-    def connect(self) -> Connection:
+    async def acquire(self) -> AsyncConnection:
+        return await self._driver._connect(pool_max=self._max_size)
+
+    async def release(self, connection: AsyncConnection) -> None:
+        await connection.close()
+
+    async def close(self) -> None:
+        return
+
+    def get_size(self) -> int:
+        return self._max_size
+
+    def get_idle_size(self) -> int:
+        return self._min_size
+
+
+class SyncPostgresDriver(SyncDriver):
+    def __init__(self, config: SyncPostgresDriverConfig | None = None) -> None:
+        self._config = config or SyncPostgresDriverConfig()
+
+    def _connect(self, pooled: bool = False, pool_max: int | None = None) -> SyncConnection:
         client = IpcClient(self._config.ipc)
+        params: dict[str, Any] = {"connectionString": self._config.connection_string}
+        if pooled:
+            params["pool"] = {"max": pool_max or self._config.pool_max or 10}
         response = _run_sync(
-            client.request(
-                {
-                    "id": "connect",
-                    "driver": "postgres",
-                    "method": "connect",
-                    "params": {"connectionString": self._config.connection_string},
-                }
-            )
+            client.request({"id": "connect", "driver": "postgres", "method": "connect", "params": params})
         )
         _raise_for_error(response)
         connection_id = response.get("result", {}).get("connectionId")
         if not connection_id:
-            raise DatabaseError("Connection id missing from response")
-        return PostgresConnection(client, connection_id)
+            msg = "Connection id missing from response"
+            raise DatabaseError(msg)
+        return SyncPostgresConnection(client, connection_id)
 
-    def connect_async(self) -> AsyncConnection:
+    def connect(self) -> SyncConnection:
+        return self._connect(pooled=False)
+
+    def pool(self, min_size: int = 1, max_size: int = 10) -> SyncPool:
+        return SyncPostgresPool(self, min_size=min_size, max_size=max_size)
+
+
+class AsyncPostgresDriver(AsyncDriver):
+    def __init__(self, config: SyncPostgresDriverConfig | None = None) -> None:
+        self._config = config or SyncPostgresDriverConfig()
+
+    async def _connect(self, pool_max: int | None = None) -> AsyncPostgresConnection:
         client = IpcClient(self._config.ipc)
-        return AsyncPostgresConnection(client, self._config.connection_string)
+        connection = AsyncPostgresConnection(
+            client,
+            self._config.connection_string,
+            pool_max=pool_max,
+        )
+        await connection._ensure_connection()
+        return connection
 
-    def pool(self, min_size: int = 1, max_size: int = 10) -> Pool:
-        return PostgresPool(self, min_size=min_size, max_size=max_size)
+    async def connect(self) -> AsyncConnection:
+        return await self._connect()
+
+    async def pool(self, min_size: int = 1, max_size: int = 10) -> AsyncPool:
+        return AsyncPostgresPool(self, min_size=min_size, max_size=max_size)
+
+
+class SyncPostgresTransaction:
+    def __init__(self, connection: SyncPostgresConnection, isolation: str | None = None) -> None:
+        self._connection = connection
+        self._isolation = isolation
+
+    def __enter__(self) -> "SyncPostgresTransaction":
+        statement = "BEGIN"
+        if self._isolation:
+            statement = f"BEGIN ISOLATION LEVEL {self._isolation}"
+        self._connection._execute(statement, [])
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc_type:
+            self._connection._execute("ROLLBACK", [])
+        else:
+            self._connection._execute("COMMIT", [])
+
+
+class AsyncPostgresTransaction:
+    def __init__(self, connection: AsyncPostgresConnection, isolation: str | None = None) -> None:
+        self._connection = connection
+        self._isolation = isolation
+
+    async def __aenter__(self) -> "AsyncPostgresTransaction":
+        statement = "BEGIN"
+        if self._isolation:
+            statement = f"BEGIN ISOLATION LEVEL {self._isolation}"
+        await self._connection._execute(statement, [])
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if exc_type:
+            await self._connection._execute("ROLLBACK", [])
+        else:
+            await self._connection._execute("COMMIT", [])
 
 
 __all__ = [
     "AsyncPostgresConnection",
-    "PostgresConnection",
-    "PostgresCursor",
-    "PostgresDriver",
-    "PostgresDriverConfig",
-    "PostgresPool",
+    "AsyncPostgresCursor",
+    "AsyncPostgresDriver",
+    "AsyncPostgresPool",
+    "AsyncPostgresTransaction",
+    "SyncPostgresConnection",
+    "SyncPostgresCursor",
+    "SyncPostgresDriver",
+    "SyncPostgresDriverConfig",
+    "SyncPostgresPool",
+    "SyncPostgresTransaction",
 ]

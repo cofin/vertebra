@@ -40,11 +40,11 @@
 
 ### 1.3 Base Driver Interface
 
-- [x] Create abstract BaseDriver class
-- [x] Define Connection interface
-- [x] Define Cursor interface
+- [x] Create SyncDriver / AsyncDriver base classes
+- [x] Define SyncConnection interface
+- [x] Define SyncCursor interface
 - [x] Define AsyncConnection interface
-- [x] Define Pool interface
+- [x] Define SyncPool / AsyncPool interfaces
 - [x] Document driver interface contract
 
 **Files**:
@@ -157,12 +157,12 @@
 
 ### 2.3 PostgreSQL Driver - Connection Pool
 
-- [ ] Implement Pool class
-- [ ] Implement pool.acquire() method
-- [ ] Implement pool.release() method
-- [ ] Add pool statistics (get_size, get_idle_size)
-- [ ] Implement pool.close() method
-- [ ] Add pool configuration (min_size, max_size, timeouts)
+- [x] Implement Pool class
+- [x] Implement pool.acquire() method
+- [x] Implement pool.release() method
+- [x] Add pool statistics (get_size, get_idle_size)
+- [x] Implement pool.close() method
+- [x] Add pool configuration (min_size, max_size, timeouts)
 - [ ] Write pool tests
 
 **Files**:
@@ -172,11 +172,11 @@
 
 ### 2.4 PostgreSQL Driver - Transactions
 
-- [ ] Implement Transaction context manager
-- [ ] Add transaction isolation levels
+- [x] Implement Transaction context manager
+- [x] Add transaction isolation levels
 - [ ] Implement savepoints (nested transactions)
 - [ ] Add transaction status tracking
-- [ ] Write transaction tests
+- [x] Write transaction tests
 
 **Files**:
 - `src/py/vertebra/drivers/postgres.py`
@@ -196,8 +196,8 @@
 
 ### 2.6 PostgreSQL - Bun Server Integration
 
-- [ ] Implement PostgreSQL connection pooling in Bun
-- [ ] Add query execution handler
+- [x] Implement PostgreSQL connection pooling in Bun
+- [x] Add query execution handler
 - [ ] Implement transaction management
 - [ ] Add prepared statement caching
 - [ ] Handle connection lifecycle
@@ -249,9 +249,9 @@
 
 ### 2.9 SQLSpec Adapters
 
-- [ ] Implement PostgresDriver SQLSpec adapter
-- [ ] Implement MySQLDriver SQLSpec adapter
-- [ ] Implement SQLiteDriver SQLSpec adapter
+- [ ] Implement SyncPostgresDriver SQLSpec adapter
+- [ ] Implement SyncMySQLDriver SQLSpec adapter
+- [ ] Implement SyncSqliteDriver SQLSpec adapter
 - [ ] Add get_connection() method
 - [ ] Add release_connection() method
 - [ ] Write SQLSpec integration tests
@@ -284,10 +284,28 @@
 - [ ] Write base class tests
 
 **Files**:
-- `src/py/vertebra/fs/base.py`
+- `src/py/vertebra/filesystem/fsspec.py`
+- `src/py/vertebra/filesystem/__init__.py`
 - `tests/unit/test_filesystem_base.py`
 
-### 3.2 Required File Operations
+### 3.2 Object Store Protocol (obstore-style)
+
+- [x] Define SyncObjectStore / AsyncObjectStore protocols
+- [x] Implement Local/S3/GCS stores backed by Bun filesystem client
+- [x] Add URL-based store registry (store_from_url/async_store_from_url)
+- [x] Add byte-range reads + list_with_delimiter support
+- [x] Add streaming helpers (iter_chunks/put_stream + upload/download to path)
+- [x] Add signed URL support for S3 (graceful fallback when unsupported)
+- [ ] Defer GCS signed URLs until a signing strategy is chosen
+- [ ] Write store protocol unit tests
+
+**Files**:
+- `src/py/vertebra/storage/store.py`
+- `src/py/vertebra/filesystem/client.py`
+- `src/ts/src/drivers/filesystem.ts`
+- `tests/unit/test_storage_store.py`
+
+### 3.3 Required File Operations
 
 - [ ] Implement \_ls() method
 - [ ] Implement \_cat_file() method
@@ -299,10 +317,10 @@
 - [ ] Write file operation tests
 
 **Files**:
-- `src/py/vertebra/fs/base.py`
+- `src/py/vertebra/filesystem/client.py`
 - `tests/unit/test_filesystem_ops.py`
 
-### 3.3 Async File Operations
+### 3.4 Async File Operations
 
 - [ ] Implement \_ls_async() method
 - [ ] Implement \_cat_file_async() method
@@ -313,10 +331,10 @@
 - [ ] Write async operation tests
 
 **Files**:
-- `src/py/vertebra/fs/base.py`
+- `src/py/vertebra/filesystem/client.py`
 - `tests/unit/test_filesystem_async.py`
 
-### 3.4 Streaming Support
+### 3.5 Streaming Support
 
 - [ ] Implement \_open() method
 - [ ] Create VertebraFile class (file-like object)
@@ -327,10 +345,10 @@
 - [ ] Write streaming tests
 
 **Files**:
-- `src/py/vertebra/fs/base.py`
+- `src/py/vertebra/filesystem/fsspec.py`
 - `tests/unit/test_filesystem_streaming.py`
 
-### 3.5 Local Filesystem Backend
+### 3.6 Local Filesystem Backend
 
 - [ ] Implement local filesystem operations
 - [ ] Use Bun I/O for file operations
@@ -339,11 +357,11 @@
 - [ ] Write local filesystem tests
 
 **Files**:
-- `src/py/vertebra/fs/local.py`
-- `src/ts/src/fs/local.ts`
+- `src/py/vertebra/filesystem/__init__.py`
+- `src/ts/src/drivers/filesystem.ts`
 - `tests/integration/test_fs_local.py`
 
-### 3.6 S3 Filesystem Backend
+### 3.7 S3 Filesystem Backend
 
 - [ ] Implement S3 list operations
 - [ ] Implement S3 read operations
@@ -353,14 +371,14 @@
 - [ ] Write S3 filesystem tests
 
 **Files**:
-- `src/py/vertebra/fs/s3.py`
-- `src/ts/src/fs/s3.ts`
+- `src/py/vertebra/filesystem/__init__.py`
+- `src/ts/src/drivers/filesystem.ts`
 - `tests/integration/test_fs_s3.py`
 
 **Dependencies**:
-- `@aws-sdk/client-s3` (Bun)
+- Bun `S3Client` (native)
 
-### 3.7 GCS Filesystem Backend
+### 3.8 GCS Filesystem Backend
 
 - [ ] Implement GCS list operations
 - [ ] Implement GCS read operations
@@ -370,14 +388,14 @@
 - [ ] Write GCS filesystem tests
 
 **Files**:
-- `src/py/vertebra/fs/gcs.py`
-- `src/ts/src/fs/gcs.ts`
+- `src/py/vertebra/filesystem/__init__.py`
+- `src/ts/src/drivers/filesystem.ts`
 - `tests/integration/test_fs_gcs.py`
 
 **Dependencies**:
-- `@google-cloud/storage` (Bun)
+- Bun `fetch` + GCS REST API (native)
 
-### 3.8 fsspec Integration
+### 3.9 fsspec Integration
 
 - [ ] Register VertebraFileSystem with fsspec
 - [ ] Test with pandas.read_parquet()
@@ -386,7 +404,8 @@
 - [ ] Write fsspec compliance tests
 
 **Files**:
-- `src/py/vertebra/fs/__init__.py`
+- `src/py/vertebra/filesystem/__init__.py`
+- `src/py/vertebra/filesystem/fsspec.py`
 - `tests/compliance/test_fsspec_compliance.py`
 
 **Deliverables**:

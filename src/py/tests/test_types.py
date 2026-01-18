@@ -5,6 +5,8 @@ import typing
 from pathlib import Path
 from typing import Literal
 
+import pytest
+
 from vertebra.procedures.registry import ProcedureMetadata
 from vertebra.types.extractor import TypeExtractor
 from vertebra.types.ir import (
@@ -19,13 +21,7 @@ from vertebra.types.ir import (
     UnionType,
     UnknownType,
 )
-import pytest
-
-from vertebra.types.typescript import (
-    TypeScriptGenerator,
-    format_typescript,
-    validate_typescript,
-)
+from vertebra.types.typescript import TypeScriptGenerator, format_typescript, validate_typescript
 
 
 def test_type_ir_to_typescript() -> None:
@@ -111,8 +107,8 @@ def test_msgspec_struct_extraction(tmp_path: Path) -> None:
         "    id: int\n\n"
         "class User(msgspec.Struct):\n"
         "    account: Account\n"
-        "    score: Annotated[int, \"min=1\"]\n"
-        "    name: str = \"anon\"\n"
+        '    score: Annotated[int, "min=1"]\n'
+        '    name: str = "anon"\n'
     )
     file_path = tmp_path / "models.py"
     file_path.write_text(source)
@@ -130,7 +126,7 @@ def test_msgspec_struct_circular_reference(tmp_path: Path) -> None:
         "from typing import Optional\n"
         "import msgspec\n\n"
         "class Node(msgspec.Struct):\n"
-        "    next: Optional[\"Node\"] = None\n"
+        '    next: Optional["Node"] = None\n'
     )
     file_path = tmp_path / "nodes.py"
     file_path.write_text(source)
@@ -154,7 +150,7 @@ def test_pydantic_model_extraction(tmp_path: Path) -> None:
         "from pydantic import BaseModel, Field\n\n"
         "class User(BaseModel):\n"
         "    id: int\n"
-        "    name: str = Field(default=\"\", description=\"name\")\n"
+        '    name: str = Field(default="", description="name")\n'
     )
     file_path = tmp_path / "models.py"
     file_path.write_text(source)
@@ -205,7 +201,7 @@ def test_pydantic_json_schema_conversion() -> None:
 
 
 def test_pydantic_discriminated_union_metadata() -> None:
-    from typing import Annotated, Literal, Union
+    from typing import Annotated
 
     from pydantic import BaseModel, Field
 
@@ -217,7 +213,7 @@ def test_pydantic_discriminated_union_metadata() -> None:
         kind: Literal["dog"]
         barks: int
 
-    Pet = Annotated[Union[Cat, Dog], Field(discriminator="kind")]
+    Pet = Annotated[Cat | Dog, Field(discriminator="kind")]
 
     class Owner(BaseModel):
         pet: Pet
@@ -258,8 +254,8 @@ def test_dataclass_extraction(tmp_path: Path) -> None:
         "@dataclass\n"
         "class User:\n"
         "    id: int\n"
-        "    name: str = \"anon\"\n"
-        "    token: ClassVar[str] = \"x\"\n"
+        '    name: str = "anon"\n'
+        '    token: ClassVar[str] = "x"\n'
         "    init_only: InitVar[int] = 1\n"
         "    score: int = field(default=0)\n"
     )
@@ -278,7 +274,7 @@ def test_generic_dataclass_extraction(tmp_path: Path) -> None:
     source = (
         "from dataclasses import dataclass\n"
         "from typing import Generic, TypeVar\n\n"
-        "T = TypeVar(\"T\")\n\n"
+        'T = TypeVar("T")\n\n'
         "@dataclass\n"
         "class Box(Generic[T]):\n"
         "    value: T\n"
@@ -298,8 +294,8 @@ def test_generic_constraints_extraction(tmp_path: Path) -> None:
         "from typing import Generic, TypeVar\n\n"
         "class Base:\n"
         "    pass\n\n"
-        "T = TypeVar(\"T\", int, str)\n"
-        "U = TypeVar(\"U\", bound=Base)\n\n"
+        'T = TypeVar("T", int, str)\n'
+        'U = TypeVar("U", bound=Base)\n\n'
         "@dataclass\n"
         "class Box(Generic[T, U]):\n"
         "    value: T\n"

@@ -13,10 +13,10 @@ from vertebra.procedures import (
 )
 
 __all__ = [
-    "__version__",
     "MsgspecSerializer",
     "PydanticSerializer",
     "Serializer",
+    "__version__",
     "detect_serializer",
     "get_serializer",
     "procedure",

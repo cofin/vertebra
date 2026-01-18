@@ -68,7 +68,7 @@ This document breaks down PRD-5 implementation into actionable tasks organized b
 
 **P1-M2-001**: Integrate deadpool-postgres
 - [ ] Add deadpool-postgres to Cargo.toml
-- [ ] Create `PostgresPool` wrapper struct
+- [ ] Create `SyncPostgresPool` wrapper struct
 - [ ] Implement pool initialization from config
 - [ ] Add connection validation
 - **Effort**: M | **Assignee**: RD | **Dependencies**: P1-M1-002
@@ -133,7 +133,7 @@ This document breaks down PRD-5 implementation into actionable tasks organized b
 - [x] Create `IPCClient` class
 - [x] Connect to Unix socket
 - [x] Implement send/receive methods
-- [ ] Add connection pooling for IPC
+- [x] Add connection pooling for IPC
 - **Effort**: M | **Assignee**: PD | **Dependencies**: P2-M1-001
 
 **P2-M1-003**: Implement bincode serialization in Python
@@ -144,8 +144,8 @@ This document breaks down PRD-5 implementation into actionable tasks organized b
 - **Effort**: M | **Assignee**: PD | **Dependencies**: P2-M1-002
 
 **P2-M1-004**: Create Connection wrapper with context manager
-- [ ] Implement `Connection` class
-- [ ] Add `__aenter__` and `__aexit__` methods
+- [x] Implement `Connection` class
+- [x] Add `__aenter__` and `__aexit__` methods
 - [ ] Track connection handle
 - [ ] Auto-release on context exit
 - **Effort**: S | **Assignee**: PD | **Dependencies**: P2-M1-002
@@ -159,7 +159,7 @@ This document breaks down PRD-5 implementation into actionable tasks organized b
 
 **P2-M1-006**: Write Python unit tests
 - [x] Test IPCClient message serialization
-- [ ] Test Connection context manager
+- [x] Test Connection context manager
 - [x] Test error handling
 - [x] Mock broker responses
 - **Effort**: M | **Assignee**: PD | **Dependencies**: P2-M1-005

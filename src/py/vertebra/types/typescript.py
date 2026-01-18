@@ -281,9 +281,8 @@ def format_typescript(output: str) -> str:
 def _find_tsc_command() -> tuple[list[str], pathlib.Path | None] | None:
     repo_root = pathlib.Path(__file__).resolve().parents[4]
     ts_root = repo_root / "src" / "ts"
-    if ts_root.exists() and shutil.which("bun"):
-        if (ts_root / "node_modules" / "typescript").exists():
-            return (["bun", "run", "tsc"], ts_root)
+    if ts_root.exists() and shutil.which("bun") and (ts_root / "node_modules" / "typescript").exists():
+        return (["bun", "run", "tsc"], ts_root)
     if shutil.which("tsc"):
         return (["tsc"], None)
     return None

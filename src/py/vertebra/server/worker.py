@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any
 
 import msgspec
 
@@ -52,7 +53,8 @@ class AsgiWorker:
             return
         if self._config.transport == "uds":
             if not self._config.path:
-                raise RuntimeError("UDS transport requires path")
+                msg = "UDS transport requires path"
+                raise RuntimeError(msg)
             self._server = await asyncio.start_unix_server(self._handle_client, path=self._config.path)
         else:
             self._server = await asyncio.start_server(self._handle_client, self._config.host, self._config.port)
@@ -135,4 +137,4 @@ class AsgiWorker:
         )
 
 
-__all__ = ["AsgiWorker", "AsgiRequest", "AsgiResponse", "WorkerConfig"]
+__all__ = ["AsgiRequest", "AsgiResponse", "AsgiWorker", "WorkerConfig"]

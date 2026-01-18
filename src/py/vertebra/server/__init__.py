@@ -7,6 +7,7 @@ from typing import Protocol, runtime_checkable
 
 from vertebra.server.worker import AsgiWorker, WorkerConfig
 
+
 @dataclass(frozen=True, slots=True)
 class ServerConfig:
     """Configuration for the Bun-backed server integration."""
@@ -29,7 +30,8 @@ class ServerBackend(Protocol):
 
 def get_server_backend() -> ServerBackend:
     """Return the configured server backend."""
-    raise RuntimeError("Server backend not configured yet")
+    msg = "Server backend not configured yet"
+    raise RuntimeError(msg)
 
 
 __all__ = ["AsgiWorker", "ServerBackend", "ServerConfig", "WorkerConfig", "get_server_backend"]

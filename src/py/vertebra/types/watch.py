@@ -5,9 +5,12 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING
 
-from vertebra.types.bridge import TypeBridge
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from vertebra.types.bridge import TypeBridge
 
 try:
     from watchdog.events import FileSystemEventHandler

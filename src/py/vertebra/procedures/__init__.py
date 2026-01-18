@@ -15,9 +15,9 @@ from vertebra.procedures.serialization import (
 
 __all__ = [
     "MsgspecSerializer",
-    "PydanticSerializer",
     "ProcedureMetadata",
     "ProcedureRegistry",
+    "PydanticSerializer",
     "Serializer",
     "detect_serializer",
     "get_serializer",

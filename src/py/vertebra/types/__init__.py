@@ -55,4 +55,4 @@ def __getattr__(name: str):
     raise AttributeError(name)
 
 
-__all__.extend(["TypeScriptGenerator", "TypeBridge", "TypeBridgeApp", "TypeBridgeWatcher"])
+__all__.extend(["TypeBridge", "TypeBridgeApp", "TypeBridgeWatcher", "TypeScriptGenerator"])

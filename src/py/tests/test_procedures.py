@@ -12,7 +12,7 @@ def test_procedure_decorator_registers() -> None:
     registry.clear()
 
     @procedure
-    def add(a: int, b: int) -> int:  # noqa: ANN001 - test stub
+    def add(a: int, b: int) -> int:
         return a + b
 
     meta = registry.list()[0]

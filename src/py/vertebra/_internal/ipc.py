@@ -37,9 +37,12 @@ def require_bun() -> None:
     """Ensure Bun runtime is available for Bun-only drivers."""
 
     if shutil.which("bun") is None:
-        raise BunRuntimeError(
+        msg = (
             "Bun runtime is required for Bun-backed drivers. "
             "Install Bun or set VERTEBRA_BUN_SKIP_CHECK=1 to bypass in tests."
+        )
+        raise BunRuntimeError(
+            msg
         )
 
 
@@ -59,7 +62,8 @@ class IpcClient:
             require_bun()
         if self._config.transport == "uds":
             if not self._config.path:
-                raise IpcError("UDS transport requires a socket path")
+                msg = "UDS transport requires a socket path"
+                raise IpcError(msg)
             self._reader, self._writer = await asyncio.open_unix_connection(self._config.path)
         else:
             self._reader, self._writer = await asyncio.open_connection(
@@ -87,7 +91,8 @@ class IpcClient:
                 if self._writer is None or self._reader is None:
                     await self.connect()
                 if self._writer is None or self._reader is None:
-                    raise IpcError("IPC connection unavailable")
+                    msg = "IPC connection unavailable"
+                    raise IpcError(msg)
                 encoded = self._codec.encode(payload)
                 frame = len(encoded).to_bytes(4, "big") + encoded
                 self._writer.write(frame)
@@ -100,14 +105,16 @@ class IpcClient:
                     self._reader.readexactly(size), timeout=self._config.timeout
                 )
                 return self._codec.decode(data)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 last_error = exc
                 await self.close()
                 if attempt < self._config.retries:
                     await asyncio.sleep(self._config.retry_delay)
                     continue
-                raise IpcError("IPC request failed") from exc
-        raise IpcError("IPC request failed") from last_error
+                msg = "IPC request failed"
+                raise IpcError(msg) from exc
+        msg = "IPC request failed"
+        raise IpcError(msg) from last_error
 
 
 @dataclass(slots=True)
@@ -131,7 +138,8 @@ class IpcPool:
         client = IpcClient(self._config, self._codec)
         await client.connect()
         if client._reader is None or client._writer is None:
-            raise IpcError("IPC connection unavailable")
+            msg = "IPC connection unavailable"
+            raise IpcError(msg)
         return _IpcConnection(client._reader, client._writer)
 
     async def acquire(self) -> _IpcConnection:
@@ -172,8 +180,8 @@ class IpcPool:
 
 __all__ = [
     "BunRuntimeError",
-    "IpcConfig",
     "IpcClient",
+    "IpcConfig",
     "IpcError",
     "IpcPool",
     "require_bun",

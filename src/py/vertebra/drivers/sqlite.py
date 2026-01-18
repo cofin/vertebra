@@ -3,18 +3,32 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from typing import Any, Awaitable, Iterable, Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from vertebra._internal.ipc import IpcClient, IpcConfig
-from vertebra.drivers.base import AsyncConnection, BaseDriver, Connection, Cursor, Pool
+from vertebra.drivers.base import (
+    AsyncConnection,
+    AsyncCursor,
+    AsyncDriver,
+    AsyncPool,
+    SyncConnection,
+    SyncCursor,
+    SyncDriver,
+    SyncPool,
+)
 from vertebra.drivers.exceptions import DatabaseError, format_error_message, map_error_code
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Iterable, Sequence
 
 
 @dataclass(slots=True)
-class SqliteDriverConfig:
+class SyncSqliteDriverConfig:
     path: str = ":memory:"
-    ipc: IpcConfig = IpcConfig(transport="tcp", host="127.0.0.1", port=7002, enforce_bun=False)
+    ipc: IpcConfig = field(
+        default_factory=lambda: IpcConfig(transport="tcp", host="127.0.0.1", port=7002, enforce_bun=False)
+    )
 
 
 def _run_sync(coro: Awaitable[Any]) -> Any:
@@ -22,7 +36,8 @@ def _run_sync(coro: Awaitable[Any]) -> Any:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
-    raise RuntimeError("Use AsyncSqliteConnection inside an event loop")
+    msg = "Use AsyncSqliteConnection inside an event loop"
+    raise RuntimeError(msg)
 
 
 def _raise_for_error(response: dict[str, Any]) -> None:
@@ -35,8 +50,8 @@ def _raise_for_error(response: dict[str, Any]) -> None:
     raise exc_type(format_error_message(str(code) if code else None, str(message)))
 
 
-class SqliteCursor(Cursor):
-    def __init__(self, connection: "SqliteConnection") -> None:
+class SyncSqliteCursor(SyncCursor):
+    def __init__(self, connection: "SyncSqliteConnection") -> None:
         self._connection = connection
         self._rows: list[tuple[Any, ...]] = []
         self._columns: list[str] = []
@@ -80,13 +95,58 @@ class SqliteCursor(Cursor):
         self._index = 0
 
 
-class SqliteConnection(Connection):
+class AsyncSqliteCursor(AsyncCursor):
+    def __init__(self, connection: "AsyncSqliteConnection") -> None:
+        self._connection = connection
+        self._rows: list[tuple[Any, ...]] = []
+        self._columns: list[str] = []
+        self._index = 0
+
+    async def execute(self, query: str, params: Sequence[Any] | None = None) -> Any:
+        result = await self._connection._execute(query, params or [])
+        self._columns = list(result.get("columns", []))
+        self._rows = [tuple(row) for row in result.get("rows", [])]
+        self._index = 0
+        return result.get("rowcount")
+
+    async def executemany(self, query: str, params: Iterable[Sequence[Any]]) -> Any:
+        total = 0
+        for param_set in params:
+            result = await self._connection._execute(query, param_set)
+            total += result.get("rowcount", 0)
+        return total
+
+    async def fetchone(self) -> Any:
+        if self._index >= len(self._rows):
+            return None
+        row = self._rows[self._index]
+        self._index += 1
+        return row
+
+    async def fetchmany(self, size: int | None = None) -> list[Any]:
+        count = size or 1
+        rows = self._rows[self._index : self._index + count]
+        self._index += len(rows)
+        return rows
+
+    async def fetchall(self) -> list[Any]:
+        rows = self._rows[self._index :]
+        self._index = len(self._rows)
+        return rows
+
+    async def close(self) -> None:
+        self._rows = []
+        self._columns = []
+        self._index = 0
+
+
+class SyncSqliteConnection(SyncConnection):
     def __init__(self, client: IpcClient, connection_id: str) -> None:
         self._client = client
         self._connection_id = connection_id
 
-    def cursor(self) -> Cursor:
-        return SqliteCursor(self)
+    def cursor(self) -> SyncCursor:
+        return SyncSqliteCursor(self)
 
     def commit(self) -> None:
         return
@@ -95,25 +155,25 @@ class SqliteConnection(Connection):
         return
 
     def close(self) -> None:
-        _run_sync(self._client.request({
-            "id": "close",
-            "driver": "sqlite",
-            "method": "close",
-            "params": {"connectionId": self._connection_id},
-        }))
+        _run_sync(
+            self._client.request({
+                "id": "close",
+                "driver": "sqlite",
+                "method": "close",
+                "params": {"connectionId": self._connection_id},
+            })
+        )
         _run_sync(self._client.close())
 
     def _execute(self, query: str, params: Sequence[Any]) -> dict[str, Any]:
-        response = _run_sync(self._client.request({
-            "id": "execute",
-            "driver": "sqlite",
-            "method": "execute",
-            "params": {
-                "connectionId": self._connection_id,
-                "sql": query,
-                "params": list(params),
-            },
-        }))
+        response = _run_sync(
+            self._client.request({
+                "id": "execute",
+                "driver": "sqlite",
+                "method": "execute",
+                "params": {"connectionId": self._connection_id, "sql": query, "params": list(params)},
+            })
+        )
         _raise_for_error(response)
         return response.get("result", {})
 
@@ -136,9 +196,19 @@ class AsyncSqliteConnection(AsyncConnection):
         _raise_for_error(response)
         connection_id = response.get("result", {}).get("connectionId")
         if not connection_id:
-            raise DatabaseError("Connection id missing from response")
+            msg = "Connection id missing from response"
+            raise DatabaseError(msg)
         self._connection_id = connection_id
         return connection_id
+
+    def cursor(self) -> AsyncCursor:
+        return AsyncSqliteCursor(self)
+
+    async def commit(self) -> None:
+        return
+
+    async def rollback(self) -> None:
+        return
 
     async def fetch(self, query: str, params: Sequence[Any] | None = None) -> list[Any]:
         result = await self._execute(query, params or [])
@@ -182,26 +252,22 @@ class AsyncSqliteConnection(AsyncConnection):
             "id": "execute",
             "driver": "sqlite",
             "method": "execute",
-            "params": {
-                "connectionId": connection_id,
-                "sql": query,
-                "params": list(params),
-            },
+            "params": {"connectionId": connection_id, "sql": query, "params": list(params)},
         })
         _raise_for_error(response)
         return response.get("result", {})
 
 
-class SqlitePool(Pool):
-    def __init__(self, driver: "SqliteDriver", min_size: int = 1, max_size: int = 5) -> None:
+class SyncSqlitePool(SyncPool):
+    def __init__(self, driver: "SyncSqliteDriver", min_size: int = 1, max_size: int = 5) -> None:
         self._driver = driver
         self._min_size = min_size
         self._max_size = max_size
 
-    def acquire(self) -> Connection:
+    def acquire(self) -> SyncConnection:
         return self._driver.connect()
 
-    def release(self, connection: Connection) -> None:
+    def release(self, connection: SyncConnection) -> None:
         connection.close()
 
     def close(self) -> None:
@@ -214,37 +280,75 @@ class SqlitePool(Pool):
         return self._min_size
 
 
-class SqliteDriver(BaseDriver):
-    def __init__(self, config: SqliteDriverConfig | None = None) -> None:
-        self._config = config or SqliteDriverConfig()
+class AsyncSqlitePool(AsyncPool):
+    def __init__(self, driver: "AsyncSqliteDriver", min_size: int = 1, max_size: int = 5) -> None:
+        self._driver = driver
+        self._min_size = min_size
+        self._max_size = max_size
 
-    def connect(self) -> Connection:
+    async def acquire(self) -> AsyncConnection:
+        return await self._driver.connect()
+
+    async def release(self, connection: AsyncConnection) -> None:
+        await connection.close()
+
+    async def close(self) -> None:
+        return
+
+    def get_size(self) -> int:
+        return self._max_size
+
+    def get_idle_size(self) -> int:
+        return self._min_size
+
+
+class SyncSqliteDriver(SyncDriver):
+    def __init__(self, config: SyncSqliteDriverConfig | None = None) -> None:
+        self._config = config or SyncSqliteDriverConfig()
+
+    def connect(self) -> SyncConnection:
         client = IpcClient(self._config.ipc)
-        response = _run_sync(client.request({
-            "id": "connect",
-            "driver": "sqlite",
-            "method": "connect",
-            "params": {"path": self._config.path},
-        }))
+        response = _run_sync(
+            client.request({
+                "id": "connect",
+                "driver": "sqlite",
+                "method": "connect",
+                "params": {"path": self._config.path},
+            })
+        )
         _raise_for_error(response)
         connection_id = response.get("result", {}).get("connectionId")
         if not connection_id:
-            raise DatabaseError("Connection id missing from response")
-        return SqliteConnection(client, connection_id)
+            msg = "Connection id missing from response"
+            raise DatabaseError(msg)
+        return SyncSqliteConnection(client, connection_id)
 
-    def connect_async(self) -> AsyncConnection:
+    def pool(self, min_size: int = 1, max_size: int = 10) -> SyncPool:
+        return SyncSqlitePool(self, min_size=min_size, max_size=max_size)
+
+
+class AsyncSqliteDriver(AsyncDriver):
+    def __init__(self, config: SyncSqliteDriverConfig | None = None) -> None:
+        self._config = config or SyncSqliteDriverConfig()
+
+    async def connect(self) -> AsyncConnection:
         client = IpcClient(self._config.ipc)
-        return AsyncSqliteConnection(client, self._config.path)
+        connection = AsyncSqliteConnection(client, self._config.path)
+        await connection._ensure_connection()
+        return connection
 
-    def pool(self, min_size: int = 1, max_size: int = 10) -> Pool:
-        return SqlitePool(self, min_size=min_size, max_size=max_size)
+    async def pool(self, min_size: int = 1, max_size: int = 10) -> AsyncPool:
+        return AsyncSqlitePool(self, min_size=min_size, max_size=max_size)
 
 
 __all__ = [
     "AsyncSqliteConnection",
-    "SqliteConnection",
-    "SqliteCursor",
-    "SqliteDriver",
-    "SqliteDriverConfig",
-    "SqlitePool",
+    "AsyncSqliteCursor",
+    "AsyncSqliteDriver",
+    "AsyncSqlitePool",
+    "SyncSqliteConnection",
+    "SyncSqliteCursor",
+    "SyncSqliteDriver",
+    "SyncSqliteDriverConfig",
+    "SyncSqlitePool",
 ]

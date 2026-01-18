@@ -93,6 +93,7 @@
 - `uv run pytest src/py/tests` passed on 2026-01-18 (SQLite driver test added).
 - `bun test` passed on 2026-01-18.
 - `cargo test -p vertebra-broker` passed on 2026-01-18.
+- `uv run pytest src/py/tests` passed on 2026-01-18 (broker pool + transaction tests added).
 
 ## Progress (PRD-3)
 
@@ -103,6 +104,7 @@
 - Added Bun server config loader, router, and worker-pool stub.
 - Added Bun IPC client (MessagePack) and ASGI bridge wrapper.
 - Added Python ASGI worker harness with IPC framing and tests.
+- Wired Bun server router to ASGI bridge helper (`createAsgiServer`).
 
 ## Progress (PRD-4)
 
@@ -110,7 +112,7 @@
 
 - Defined TypeScript driver protocol messages and MessagePack serialization helpers.
 - Added Python MessagePack codec for driver transport.
-- Added DB-API base driver protocols and exception hierarchy.
+- Added DB-API base driver protocols and exception hierarchy (Sync/Async split).
 - Added baseline type conversion helpers (Postgres/MySQL/SQLite + JSON/UUID).
 - Added Bun runtime guard + IPC client skeleton for driver transport.
 - Added unit tests for driver exceptions, MessagePack codec, IPC guard, and type conversions.
@@ -118,6 +120,15 @@
 - Added Bun SQLite driver server (TCP) and Python SQLite driver/client scaffolding.
 - Added async SQLite driver IPC test harness (mock server).
 - Added Bun Postgres driver server + Python Postgres driver (sync/async) with IPC tests.
+- Added Postgres pool support + transaction context (sync/async) with tests.
+- Added separate Sync/Async driver classes (connections/cursors/pools) for Postgres/MySQL/SQLite/Redis.
+- Added Redis driver server (Bun) and Python Redis driver (sync/async) scaffolding.
+- Added filesystem IPC server (local/S3/GCS) and Python filesystem + cloud storage clients.
+- Added object-store protocol (sync/async) with Local/S3/GCS stores and URL-based registry.
+- Added byte-range reads and list-with-delimiter semantics for storage backends.
+- Added streaming helpers for storage backends (iter_chunks/put_stream + upload/download to path).
+- Added signed URL support for storage backends with graceful fallback when unsupported.
+- Updated fsspec shim to wrap object-store protocol.
 
 ## Progress (PRD-5)
 
@@ -130,6 +141,7 @@
 - Added broker IPC echo integration test.
 - Added broker JSON logging toggle via VERTEBRA_LOG_JSON.
 - Added Python broker client (msgpack codec) with unit tests.
+- Added broker pool abstraction with async context manager and pooling tests.
 
 ## Progress (PRD-7)
 
@@ -148,9 +160,9 @@
 
 ### PRD-4
 
-- Implement Bun-only IPC server handlers for database requests.
-- Add base Postgres driver (sync + async) and pool with tests.
-- Add protocol compliance tests + integration scaffolding (pytest-databases).
+- Add SQLSpec adapter layer + compliance tests.
+- Add fsspec compliance tests + store protocol unit tests.
+- Expand filesystem/storage docs and examples (local/S3/GCS).
 
 ### PRD-5/6/7
 

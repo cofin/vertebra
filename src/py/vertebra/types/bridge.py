@@ -7,7 +7,6 @@ import hashlib
 import threading
 import time
 from dataclasses import dataclass
-from typing import Iterable
 
 from vertebra.procedures.registry import ProcedureRegistry
 from vertebra.types.typescript import TypeScriptGenerator, format_typescript

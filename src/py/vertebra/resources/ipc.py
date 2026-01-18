@@ -34,7 +34,8 @@ class BrokerClient:
     async def connect(self) -> None:
         if self._config.transport == "uds":
             if not self._config.path:
-                raise BrokerClientError("UDS transport requires a socket path")
+                msg = "UDS transport requires a socket path"
+                raise BrokerClientError(msg)
             self._reader, self._writer = await asyncio.open_unix_connection(self._config.path)
         else:
             self._reader, self._writer = await asyncio.open_connection(
@@ -53,11 +54,13 @@ class BrokerClient:
 
     async def request(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._config.codec != "msgpack":
-            raise BrokerClientError("Only msgpack codec is supported by the Python client")
+            msg = "Only msgpack codec is supported by the Python client"
+            raise BrokerClientError(msg)
         if self._reader is None or self._writer is None:
             await self.connect()
         if self._reader is None or self._writer is None:
-            raise BrokerClientError("Broker connection unavailable")
+            msg = "Broker connection unavailable"
+            raise BrokerClientError(msg)
         encoded = self._encoder.encode(payload)
         frame = len(encoded).to_bytes(4, "big") + encoded
         self._writer.write(frame)
@@ -85,7 +88,8 @@ def _unwrap_response(response: dict[str, Any], expected: str) -> dict[str, Any]:
         message = response["Error"].get("message", "Broker error")
         raise BrokerClientError(message)
     if expected not in response:
-        raise BrokerClientError("Unexpected broker response")
+        msg = "Unexpected broker response"
+        raise BrokerClientError(msg)
     return response[expected]
 
 

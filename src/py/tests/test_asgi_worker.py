@@ -8,7 +8,7 @@ import pytest
 from vertebra.server.worker import AsgiWorker, WorkerConfig
 
 
-async def app(scope, receive, send):
+async def app(scope, receive, send) -> None:
     assert scope["type"] == "http"
     message = await receive()
     body = message.get("body", b"")

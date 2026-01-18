@@ -5,9 +5,9 @@ from typing import Any
 
 import pytest
 
-from vertebra._internal.serialization import MessagePackCodec
-from vertebra.drivers.postgres import PostgresDriver, PostgresDriverConfig
 from vertebra._internal.ipc import IpcConfig
+from vertebra._internal.serialization import MessagePackCodec
+from vertebra.drivers.postgres import AsyncPostgresDriver, SyncPostgresDriverConfig
 
 
 async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -54,12 +54,12 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
 async def test_postgres_driver_async_fetch() -> None:
     server = await asyncio.start_server(_handle_client, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
-    config = PostgresDriverConfig(
+    config = SyncPostgresDriverConfig(
         connection_string="postgres://localhost/test",
         ipc=IpcConfig(transport="tcp", host="127.0.0.1", port=port, enforce_bun=False),
     )
-    driver = PostgresDriver(config)
-    conn = driver.connect_async()
+    driver = AsyncPostgresDriver(config)
+    conn = await driver.connect()
     rows = await conn.fetch("select 1")
     assert rows == [(42,)]
     await conn.close()

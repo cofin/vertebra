@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from typing import Any, Protocol, runtime_checkable
 
@@ -167,12 +168,8 @@ def get_serializer(
 
 def _ensure_default_serializers() -> None:
     if "msgspec" not in _SERIALIZERS:
-        try:
+        with contextlib.suppress(Exception):
             register_serializer("msgspec", MsgspecSerializer())
-        except Exception:
-            pass
     if "pydantic" not in _SERIALIZERS:
-        try:
+        with contextlib.suppress(Exception):
             register_serializer("pydantic", PydanticSerializer())
-        except Exception:
-            pass

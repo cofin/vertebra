@@ -1,15 +1,19 @@
-import postgres from "postgres";
+import { SQL } from "bun";
 import { decodeMessage, encodeMessage, frameMessage } from "../protocol/serialization";
 import type { DriverRequest, DriverResponse } from "../protocol/messages";
 
 export type PostgresServerConfig = {
   hostname?: string;
   port?: number;
+  options?: Bun.SQL.Options;
 };
 
 type ConnectionState = {
   id: string;
-  client: ReturnType<typeof postgres>;
+  sql: SQL;
+  reserved: Bun.ReservedSQL;
+  pooled: boolean;
+  poolKey?: string;
 };
 
 type SocketState = {
@@ -51,6 +55,7 @@ function errorResponse(request: DriverRequest, message: string): DriverResponse 
 export class PostgresDriverServer {
   private server: ReturnType<typeof Bun.listen> | null = null;
   private connections = new Map<string, ConnectionState>();
+  private pools = new Map<string, { sql: SQL; refs: number }>();
 
   constructor(private config: PostgresServerConfig = {}) {}
 
@@ -91,16 +96,21 @@ export class PostgresDriverServer {
     this.server?.stop();
     this.server = null;
     for (const state of this.connections.values()) {
-      void state.client.end();
+      state.reserved.release();
+      void state.sql.close({ timeout: 5 });
     }
     this.connections.clear();
+    for (const pool of this.pools.values()) {
+      void pool.sql.close({ timeout: 5 });
+    }
+    this.pools.clear();
   }
 
   private async handleRequest(request: DriverRequest): Promise<DriverResponse> {
     try {
       switch (request.method) {
         case "connect":
-          return this.handleConnect(request);
+          return await this.handleConnect(request);
         case "execute":
           return await this.handleExecute(request);
         case "close":
@@ -113,14 +123,43 @@ export class PostgresDriverServer {
     }
   }
 
-  private handleConnect(request: DriverRequest): DriverResponse {
-    const params = (request.params ?? {}) as { connectionString?: string; options?: Record<string, unknown> };
+  private async handleConnect(request: DriverRequest): Promise<DriverResponse> {
+    const params = (request.params ?? {}) as {
+      connectionString?: string;
+      options?: Record<string, unknown>;
+      pool?: { max?: number };
+    };
     const id = crypto.randomUUID();
-    const client = postgres(params.connectionString ?? "postgres://localhost/postgres", {
+    const connectionString = params.connectionString ?? "postgres://localhost/postgres";
+    const options = params.options ?? {};
+    if (params.pool) {
+      const key = JSON.stringify({ connectionString, options, pool: params.pool });
+      let pool = this.pools.get(key);
+      if (!pool) {
+        const sql = new SQL({
+          ...(options as Bun.SQL.Options),
+          url: connectionString,
+          adapter: "postgres",
+          max: params.pool.max ?? 10,
+        });
+        await sql.connect();
+        pool = { sql, refs: 0 };
+        this.pools.set(key, pool);
+      }
+      pool.refs += 1;
+      const reserved = await pool.sql.reserve();
+      this.connections.set(id, { id, sql: pool.sql, reserved, pooled: true, poolKey: key });
+      return okResponse(request, { connectionId: id });
+    }
+    const sql = new SQL({
+      ...(options as Bun.SQL.Options),
+      url: connectionString,
+      adapter: "postgres",
       max: 1,
-      ...(params.options ?? {}),
     });
-    this.connections.set(id, { id, client });
+    await sql.connect();
+    const reserved = await sql.reserve();
+    this.connections.set(id, { id, sql, reserved, pooled: false });
     return okResponse(request, { connectionId: id });
   }
 
@@ -134,9 +173,12 @@ export class PostgresDriverServer {
     if (!connection) {
       return errorResponse(request, "Unknown connection");
     }
-    const rows = await connection.client.unsafe(params.sql, params.params ?? []);
-    const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
-    const values = rows.map((row: Record<string, unknown>) => columns.map((col) => row[col]));
+    const result = await connection.reserved.unsafe(params.sql, params.params ?? []);
+    if (!Array.isArray(result)) {
+      return okResponse(request, { columns: [], rows: [], rowcount: 0 });
+    }
+    const columns = result.length > 0 ? Object.keys(result[0] ?? {}) : [];
+    const values = result.map((row: Record<string, unknown>) => columns.map((col) => row[col]));
     return okResponse(request, { columns, rows: values, rowcount: values.length });
   }
 
@@ -146,7 +188,19 @@ export class PostgresDriverServer {
     if (!connection) {
       return okResponse(request, { closed: false });
     }
-    await connection.client.end({ timeout: 5 });
+    connection.reserved.release();
+    if (connection.pooled && connection.poolKey) {
+      const pool = this.pools.get(connection.poolKey);
+      if (pool) {
+        pool.refs -= 1;
+        if (pool.refs <= 0) {
+          await pool.sql.close({ timeout: 5 });
+          this.pools.delete(connection.poolKey);
+        }
+      }
+    } else {
+      await connection.sql.close({ timeout: 5 });
+    }
     this.connections.delete(params.connectionId);
     return okResponse(request, { closed: true });
   }

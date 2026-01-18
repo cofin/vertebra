@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import pytest
 import msgspec
+import pytest
 
 from vertebra.resources import BrokerClient, BrokerClientConfig
 
