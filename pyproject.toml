@@ -37,6 +37,8 @@ lint = ["mypy", "pre-commit", "pyright", "ruff", "slotscheck", "types-click", "t
 test = [
   "anyio",
   "coverage[toml]",
+  "msgspec>=0.18.0",
+  "pydantic>=2.0.0",
   "pytest>=7.4.4",
   "pytest-cov>=5.0.0",
   "pytest-databases>=0.10.0",

@@ -28,7 +28,8 @@
     "dist": false,
     ".dmypy.json": true,
     ".claude": true,
-    "**/*/tsconfig.tsbuildinfo": true
+    "**/*/tsconfig.tsbuildinfo": true,
+    ".cargo": true
   },
   "cSpell.words": [
     "archlogs",

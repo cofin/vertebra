@@ -1684,7 +1684,7 @@ pydantic = ["pydantic ^2.0"]
 
 | Python Type | TypeScript Type | Limitation |
 |-------------|-----------------|------------|
-| `TypeVar` | `any` | No direct equivalent |
+| `TypeVar` | `<T extends ...>` | Emits `extends` when bounds/constraints are present |
 | `ParamSpec` | `...args: any[]` | Limited support |
 | `Callable[[int], str]` | `(arg0: number) => string` | Basic support |
 | `ClassVar[T]` | `T` | Static ignored |

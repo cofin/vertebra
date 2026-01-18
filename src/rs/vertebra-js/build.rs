@@ -1,3 +1,3 @@
 fn main() {
-    // TODO: Add napi-build setup when bindings expand.
+    napi_build::setup();
 }

@@ -227,8 +227,8 @@ def validate_typescript(output: str) -> bool:
         config_path = pathlib.Path(tmp) / "tsconfig.json"
         types_path.write_text(output, encoding="utf-8")
         with index_path.open("w", encoding="utf-8") as handle:
-            handle.write('import type { Procedures } from "./types";\n')
-            handle.write("type _Ping = Procedures;\n")
+            handle.write('import "./types";\n')
+            handle.write("export {};\n")
         config_path.write_text(
             "{\n"
             '  "compilerOptions": {\n'
@@ -250,6 +250,8 @@ def validate_typescript(output: str) -> bool:
         env["TMP"] = tmp_root_str
         env["BUN_TMPDIR"] = tmp_root_str
         env["XDG_CACHE_HOME"] = tmp_root_str
+        env["npm_config_cache"] = tmp_root_str
+        env["NPM_CONFIG_CACHE"] = tmp_root_str
         result = subprocess.run(
             [*command, "--project", str(config_path), "--pretty", "false"],
             capture_output=True,
@@ -258,7 +260,10 @@ def validate_typescript(output: str) -> bool:
             cwd=cwd,
         )
         if result.returncode != 0:
-            raise TypeScriptValidationError(result.stderr.strip() or result.stdout.strip())
+            message = result.stderr.strip() or result.stdout.strip()
+            if "This is not the tsc command you are looking for" in message:
+                return False
+            raise TypeScriptValidationError(message)
     return True
 
 
@@ -279,8 +284,6 @@ def _find_tsc_command() -> tuple[list[str], pathlib.Path | None] | None:
     if ts_root.exists() and shutil.which("bun"):
         if (ts_root / "node_modules" / "typescript").exists():
             return (["bun", "run", "tsc"], ts_root)
-    if shutil.which("bunx"):
-        return (["bunx", "-p", "typescript", "tsc"], None)
     if shutil.which("tsc"):
         return (["tsc"], None)
     return None

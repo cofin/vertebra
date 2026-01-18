@@ -3,17 +3,22 @@
 //! This module is imported as `vertebra._vertebra` in Python and provides
 //! access to high-performance Rust-based functionality.
 
+use pyo3::exceptions::PyBufferError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use pyo3::types::PyBytes;
+use pyo3::types::PyMemoryView;
 use pyo3::types::PyTuple;
 use pyo3::types::PyType;
-use pyo3::IntoPyObject;
+use pyo3::{ffi, IntoPyObject};
 
+use std::ffi::{c_int, c_void, CString};
+use std::ptr;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use vertebra_core::buffer::{Buffer, BufferPool, RingLayout};
-use vertebra_core::channel::{BufferChannel, BufferMessage, MpmcRing, SpscRing};
+use vertebra_core::channel::{BufferChannel, BufferMessage, ChannelError, MpmcRing, SpscRing};
 use vertebra_core::shm::ShmRegion;
 
 #[pyclass(name = "ShmRegion")]
@@ -129,7 +134,10 @@ impl PyBufferPool {
 
     fn acquire(&self) -> PyResult<Option<PyBuffer>> {
         match self.inner.acquire() {
-            Ok(buf) => Ok(Some(PyBuffer { inner: Some(buf) })),
+            Ok(buf) => Ok(Some(PyBuffer {
+                inner: Some(buf),
+                exports: AtomicUsize::new(0),
+            })),
             Err(_) => Ok(None),
         }
     }
@@ -146,6 +154,7 @@ impl PyBufferPool {
 #[pyclass(name = "Buffer")]
 struct PyBuffer {
     inner: Option<Buffer>,
+    exports: AtomicUsize,
 }
 
 impl PyBuffer {
@@ -162,9 +171,288 @@ impl PyBuffer {
     }
 
     fn take_inner(&mut self) -> PyResult<Buffer> {
+        if self.exports.load(AtomicOrdering::Acquire) > 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "buffer has active views",
+            ));
+        }
         self.inner
             .take()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("buffer is closed"))
+    }
+}
+
+#[pyclass(name = "Channel")]
+struct PyChannel {
+    send_ring: SpscRing,
+    recv_ring: SpscRing,
+}
+
+#[pymethods]
+impl PyChannel {
+    #[classmethod]
+    fn create_pair<'py>(
+        _cls: &Bound<'py, PyType>,
+        py: Python<'py>,
+        slot_size: usize,
+        slots: usize,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let layout = RingLayout::new(slot_size, slots);
+        let req_region = Arc::new(ShmRegion::create(layout.total_size).map_err(map_err)?);
+        let resp_region = Arc::new(ShmRegion::create(layout.total_size).map_err(map_err)?);
+        let req_client =
+            unsafe { SpscRing::initialize(Arc::clone(&req_region), layout, 0, 0) }
+                .map_err(map_err)?;
+        let req_server = unsafe { SpscRing::attach(Arc::clone(&req_region), layout) }
+            .map_err(map_err)?;
+        let resp_client =
+            unsafe { SpscRing::initialize(Arc::clone(&resp_region), layout, 0, 0) }
+                .map_err(map_err)?;
+        let resp_server = unsafe { SpscRing::attach(Arc::clone(&resp_region), layout) }
+            .map_err(map_err)?;
+        let client = Py::new(
+            py,
+            PyChannel {
+                send_ring: req_client,
+                recv_ring: resp_client,
+            },
+        )?;
+        let server = Py::new(
+            py,
+            PyChannel {
+                send_ring: resp_server,
+                recv_ring: req_server,
+            },
+        )?;
+        Ok(PyTuple::new(py, vec![client, server])?)
+    }
+
+    #[cfg(unix)]
+    #[classmethod]
+    fn create_named(
+        _cls: &Bound<'_, PyType>,
+        name: &str,
+        slot_size: usize,
+        slots: usize,
+        role: &str,
+    ) -> PyResult<Self> {
+        let layout = RingLayout::new(slot_size, slots);
+        let req_name = format!("{name}.req");
+        let resp_name = format!("{name}.resp");
+        let req_region = Arc::new(
+            ShmRegion::create_named(&req_name, layout.total_size).map_err(map_err)?,
+        );
+        let resp_region = Arc::new(
+            ShmRegion::create_named(&resp_name, layout.total_size).map_err(map_err)?,
+        );
+        let req_ring = unsafe { SpscRing::initialize(Arc::clone(&req_region), layout, 0, 0) }
+            .map_err(map_err)?;
+        let resp_ring = unsafe { SpscRing::initialize(Arc::clone(&resp_region), layout, 0, 0) }
+            .map_err(map_err)?;
+        match role {
+            "client" => Ok(Self {
+                send_ring: req_ring,
+                recv_ring: resp_ring,
+            }),
+            "server" => Ok(Self {
+                send_ring: resp_ring,
+                recv_ring: req_ring,
+            }),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "role must be 'client' or 'server'",
+            )),
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[classmethod]
+    fn create_named(
+        _cls: &Bound<'_, PyType>,
+        _name: &str,
+        _slot_size: usize,
+        _slots: usize,
+        _role: &str,
+    ) -> PyResult<Self> {
+        Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "named channels are only supported on Unix",
+        ))
+    }
+
+    #[cfg(unix)]
+    #[classmethod]
+    fn open_named(
+        _cls: &Bound<'_, PyType>,
+        name: &str,
+        slot_size: usize,
+        slots: usize,
+        role: &str,
+    ) -> PyResult<Self> {
+        let layout = RingLayout::new(slot_size, slots);
+        let req_name = format!("{name}.req");
+        let resp_name = format!("{name}.resp");
+        let req_region =
+            Arc::new(ShmRegion::open_named(&req_name, layout.total_size).map_err(map_err)?);
+        let resp_region =
+            Arc::new(ShmRegion::open_named(&resp_name, layout.total_size).map_err(map_err)?);
+        let req_ring = unsafe { SpscRing::attach(Arc::clone(&req_region), layout) }
+            .map_err(map_err)?;
+        let resp_ring = unsafe { SpscRing::attach(Arc::clone(&resp_region), layout) }
+            .map_err(map_err)?;
+        match role {
+            "client" => Ok(Self {
+                send_ring: req_ring,
+                recv_ring: resp_ring,
+            }),
+            "server" => Ok(Self {
+                send_ring: resp_ring,
+                recv_ring: req_ring,
+            }),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "role must be 'client' or 'server'",
+            )),
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[classmethod]
+    fn open_named(
+        _cls: &Bound<'_, PyType>,
+        _name: &str,
+        _slot_size: usize,
+        _slots: usize,
+        _role: &str,
+    ) -> PyResult<Self> {
+        Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "named channels are only supported on Unix",
+        ))
+    }
+
+    fn payload_capacity(&self) -> usize {
+        self.send_ring.payload_capacity()
+    }
+
+    fn send_request(&self, data: &[u8]) -> PyResult<()> {
+        Python::with_gil(|py| {
+            py.allow_threads(|| self.send_ring.send(data, 0).map_err(map_err))
+        })
+    }
+
+    fn try_send_request(&self, data: &[u8]) -> PyResult<bool> {
+        match self.send_ring.try_send(data, 0) {
+            Ok(()) => Ok(true),
+            Err(ChannelError::Full) => Ok(false),
+            Err(err) => Err(map_err(err)),
+        }
+    }
+
+    fn send_request_timeout(&self, data: &[u8], timeout_ms: u64) -> PyResult<bool> {
+        Python::with_gil(|py| {
+            py.allow_threads(|| {
+                self.send_ring
+                    .send_timeout(data, 0, std::time::Duration::from_millis(timeout_ms))
+                    .map_err(map_err)
+            })
+        })
+    }
+
+    fn recv_request<'py>(
+        &self,
+        py: Python<'py>,
+        max_len: usize,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let mut buffer = vec![0u8; max_len];
+        let len = py.allow_threads(|| self.recv_ring.recv(&mut buffer).map_err(map_err))?;
+        Ok(PyBytes::new(py, &buffer[..len]))
+    }
+
+    fn try_recv_request<'py>(
+        &self,
+        py: Python<'py>,
+        max_len: usize,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let mut buffer = vec![0u8; max_len];
+        match self.recv_ring.try_recv(&mut buffer) {
+            Ok(len) => Ok(Some(PyBytes::new(py, &buffer[..len]))),
+            Err(ChannelError::Empty) => Ok(None),
+            Err(err) => Err(map_err(err)),
+        }
+    }
+
+    fn recv_request_timeout<'py>(
+        &self,
+        py: Python<'py>,
+        max_len: usize,
+        timeout_ms: u64,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let mut buffer = vec![0u8; max_len];
+        let result = py.allow_threads(|| {
+            self.recv_ring
+                .recv_timeout(&mut buffer, std::time::Duration::from_millis(timeout_ms))
+                .map_err(map_err)
+        })?;
+        Ok(result.map(|len| PyBytes::new(py, &buffer[..len])))
+    }
+
+    fn send_response(&self, data: &[u8]) -> PyResult<()> {
+        Python::with_gil(|py| {
+            py.allow_threads(|| self.send_ring.send(data, 0).map_err(map_err))
+        })
+    }
+
+    fn try_send_response(&self, data: &[u8]) -> PyResult<bool> {
+        match self.send_ring.try_send(data, 0) {
+            Ok(()) => Ok(true),
+            Err(ChannelError::Full) => Ok(false),
+            Err(err) => Err(map_err(err)),
+        }
+    }
+
+    fn send_response_timeout(&self, data: &[u8], timeout_ms: u64) -> PyResult<bool> {
+        Python::with_gil(|py| {
+            py.allow_threads(|| {
+                self.send_ring
+                    .send_timeout(data, 0, std::time::Duration::from_millis(timeout_ms))
+                    .map_err(map_err)
+            })
+        })
+    }
+
+    fn recv_response<'py>(
+        &self,
+        py: Python<'py>,
+        max_len: usize,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let mut buffer = vec![0u8; max_len];
+        let len = py.allow_threads(|| self.recv_ring.recv(&mut buffer).map_err(map_err))?;
+        Ok(PyBytes::new(py, &buffer[..len]))
+    }
+
+    fn try_recv_response<'py>(
+        &self,
+        py: Python<'py>,
+        max_len: usize,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let mut buffer = vec![0u8; max_len];
+        match self.recv_ring.try_recv(&mut buffer) {
+            Ok(len) => Ok(Some(PyBytes::new(py, &buffer[..len]))),
+            Err(ChannelError::Empty) => Ok(None),
+            Err(err) => Err(map_err(err)),
+        }
+    }
+
+    fn recv_response_timeout<'py>(
+        &self,
+        py: Python<'py>,
+        max_len: usize,
+        timeout_ms: u64,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let mut buffer = vec![0u8; max_len];
+        let result = py.allow_threads(|| {
+            self.recv_ring
+                .recv_timeout(&mut buffer, std::time::Duration::from_millis(timeout_ms))
+                .map_err(map_err)
+        })?;
+        Ok(result.map(|len| PyBytes::new(py, &buffer[..len])))
     }
 }
 
@@ -191,6 +479,35 @@ impl PyBuffer {
         }
         slice[..data.len()].copy_from_slice(data);
         Ok(())
+    }
+
+    fn as_memoryview<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyMemoryView>> {
+        PyMemoryView::from(slf.as_any())
+    }
+
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: c_int,
+    ) -> PyResult<()> {
+        if view.is_null() {
+            return Err(PyBufferError::new_err("view is null"));
+        }
+        let mut buffer = slf.borrow_mut();
+        let inner = buffer.inner_mut()?;
+        fill_view_from_data(view, flags, inner.as_mut_slice(), slf.into_any(), true)?;
+        buffer.exports.fetch_add(1, AtomicOrdering::Relaxed);
+        Ok(())
+    }
+
+    unsafe fn __releasebuffer__(&self, view: *mut ffi::Py_buffer) {
+        if view.is_null() {
+            return;
+        }
+        if !(*view).format.is_null() {
+            drop(CString::from_raw((*view).format));
+        }
+        self.exports.fetch_sub(1, AtomicOrdering::Release);
     }
 
     fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -341,12 +658,14 @@ impl PyMpmcRing {
     }
 
     fn send(&self, data: &[u8], flags: u32) -> PyResult<()> {
-        self.inner.send(data, flags).map_err(map_err)
+        Python::with_gil(|py| {
+            py.allow_threads(|| self.inner.send(data, flags).map_err(map_err))
+        })
     }
 
     fn recv<'py>(&self, py: Python<'py>, max_len: usize) -> PyResult<Bound<'py, PyBytes>> {
         let mut buffer = vec![0u8; max_len];
-        let len = self.inner.recv(&mut buffer).map_err(map_err)?;
+        let len = py.allow_threads(|| self.inner.recv(&mut buffer).map_err(map_err))?;
         Ok(PyBytes::new(py, &buffer[..len]))
     }
 }
@@ -373,7 +692,10 @@ impl PyBufferChannel {
 
     fn acquire(&self) -> PyResult<Option<PyBuffer>> {
         match self.pool.acquire() {
-            Ok(buf) => Ok(Some(PyBuffer { inner: Some(buf) })),
+            Ok(buf) => Ok(Some(PyBuffer {
+                inner: Some(buf),
+                exports: AtomicUsize::new(0),
+            })),
             Err(_) => Ok(None),
         }
     }
@@ -381,15 +703,19 @@ impl PyBufferChannel {
     fn send(&self, buffer: &Bound<'_, PyBuffer>, len: usize, flags: u32) -> PyResult<()> {
         let mut buffer = buffer.borrow_mut();
         let inner = buffer.take_inner()?;
-        self.sender.send(inner, len, flags).map_err(map_err)
+        Python::with_gil(|py| {
+            py.allow_threads(|| self.sender.send(inner, len, flags).map_err(map_err))
+        })
     }
 
     fn recv<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        let BufferMessage { buffer, len, flags } = self.receiver.recv().map_err(map_err)?;
+        let BufferMessage { buffer, len, flags } =
+            py.allow_threads(|| self.receiver.recv().map_err(map_err))?;
         let buffer = Py::new(
             py,
             PyBuffer {
                 inner: Some(buffer),
+                exports: AtomicUsize::new(0),
             },
         )?;
         (buffer, len, flags).into_pyobject(py)
@@ -403,6 +729,7 @@ fn _vertebra(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyShmRegion>()?;
     m.add_class::<PyBufferPool>()?;
     m.add_class::<PyBuffer>()?;
+    m.add_class::<PyChannel>()?;
     m.add_class::<PySpscRing>()?;
     m.add_class::<PyMpmcRing>()?;
     m.add_class::<PyBufferChannel>()?;
@@ -411,4 +738,43 @@ fn _vertebra(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 fn map_err<E: std::fmt::Display>(err: E) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err.to_string())
+}
+
+unsafe fn fill_view_from_data(
+    view: *mut ffi::Py_buffer,
+    flags: c_int,
+    data: &[u8],
+    owner: Bound<'_, PyAny>,
+    writable: bool,
+) -> PyResult<()> {
+    if view.is_null() {
+        return Err(PyBufferError::new_err("view is null"));
+    }
+    if (flags & ffi::PyBUF_WRITABLE) == ffi::PyBUF_WRITABLE && !writable {
+        return Err(PyBufferError::new_err("object is not writable"));
+    }
+    (*view).obj = owner.into_ptr();
+    (*view).buf = data.as_ptr() as *mut c_void;
+    (*view).len = data.len() as isize;
+    (*view).readonly = if writable { 0 } else { 1 };
+    (*view).itemsize = 1;
+    (*view).format = if (flags & ffi::PyBUF_FORMAT) == ffi::PyBUF_FORMAT {
+        CString::new("B").unwrap().into_raw()
+    } else {
+        ptr::null_mut()
+    };
+    (*view).ndim = 1;
+    (*view).shape = if (flags & ffi::PyBUF_ND) == ffi::PyBUF_ND {
+        &mut (*view).len
+    } else {
+        ptr::null_mut()
+    };
+    (*view).strides = if (flags & ffi::PyBUF_STRIDES) == ffi::PyBUF_STRIDES {
+        &mut (*view).itemsize
+    } else {
+        ptr::null_mut()
+    };
+    (*view).suboffsets = ptr::null_mut();
+    (*view).internal = ptr::null_mut();
+    Ok(())
 }

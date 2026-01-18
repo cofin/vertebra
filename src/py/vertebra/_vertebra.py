@@ -7,6 +7,7 @@ __all__ = [
     "Buffer",
     "BufferChannel",
     "BufferPool",
+    "Channel",
     "MpmcRing",
     "ShmRegion",
     "SpscRing",

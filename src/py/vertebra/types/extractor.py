@@ -101,7 +101,8 @@ class TypeExtractor:
 
         if origin is typing.Literal:
             return self._from_literal(args)
-        if origin is types.LiteralType or origin is getattr(types, "LiteralType", None):
+        literal_type = getattr(types, "LiteralType", None)
+        if literal_type is not None and origin is literal_type:
             return self._from_literal(args)
 
         if origin is None and args:

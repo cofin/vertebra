@@ -42,7 +42,7 @@ pub enum ChannelError {
 #[derive(Debug, Copy, Clone)]
 pub enum ChannelMode {
     Spsc,
-    // TODO: Add MPMC once core SPSC is validated.
+    Mpmc,
 }
 
 /// SPSC ring channel backed by a shared memory region.

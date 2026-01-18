@@ -204,7 +204,7 @@
   - [x] Extract `Literal[True, False]` → boolean literals
   - [x] Implement `LiteralType` in Type IR
 
-- [ ] **T2.3.2:** Generic Types
+- [x] **T2.3.2:** Generic Types
   - [x] Extract `Generic[T]` class definitions
   - [x] Map generic parameters to TypeScript generics
   - [x] Handle bounded generics (limited support)
@@ -226,7 +226,7 @@
   - [x] Preserve metadata for future use
   - [x] Document validation constraints in TS comments
 
-- [ ] **T2.3.6:** Unit Tests
+- [x] **T2.3.6:** Unit Tests
   - [x] Test literal types
   - [x] Test generic types
   - [x] Test dataclass extraction
@@ -304,7 +304,7 @@
   - [x] Test msgspec roundtrip serialization
   - [x] Test pydantic roundtrip serialization
   - [x] Test auto-detection logic
-  - [ ] Benchmark serialization performance
+  - [x] Benchmark serialization performance
 
 **Deliverable:** Pluggable serialization framework
 
@@ -314,34 +314,31 @@
 
 **Depends on:** PRD-1 Rust Core IPC Layer completion
 
-- [ ] **T3.2.1:** FFI Interface Definition
-  - [ ] Create `src/py/vertebra/ipc/channel.py`
-  - [ ] Define Python Channel API
-  - [ ] Define method signatures matching Rust FFI
+- [x] **T3.2.1:** FFI Interface Definition
+  - [x] Create `src/py/vertebra/ipc/channel.py`
+  - [x] Define Python Channel API
+  - [x] Define method signatures matching Rust FFI
 
-- [ ] **T3.2.2:** PyO3 Bindings
-  - [ ] Create Rust PyO3 module `vertebra_core_py`
-  - [ ] Expose `create_channel(channel_id)` function
-  - [ ] Expose `channel_send(handle, procedure_id, data)` function
-  - [ ] Expose `channel_receive(handle)` function
-  - [ ] Expose `channel_close(handle)` function
+- [x] **T3.2.2:** PyO3 Bindings
+  - [x] Expose Channel class (pair + named create/open)
+  - [x] Expose request/response send + recv functions
+  - [x] Export channel handle via `_vertebra`
 
-- [ ] **T3.2.3:** Async Integration
-  - [ ] Use `pyo3_asyncio` for async/await support
-  - [ ] Bridge Rust async → Python asyncio
-  - [ ] Handle futures and coroutines correctly
-  - [ ] Test async procedure calls
+- [x] **T3.2.3:** Async Integration
+  - [x] Async wrappers via `asyncio.to_thread`
+  - [x] Bridge blocking Rust calls into asyncio
+  - [x] Test async procedure calls
 
-- [ ] **T3.2.4:** Error Handling
-  - [ ] Define Python exception types (ChannelError, SerializationError)
-  - [ ] Map Rust errors to Python exceptions
-  - [ ] Include error context (procedure_id, stack trace)
+- [x] **T3.2.4:** Error Handling
+  - [x] Define Python exception types (ChannelError, SerializationError)
+  - [x] Map Rust errors to Python exceptions
+  - [x] Include error context (procedure_id, stack trace)
 
-- [ ] **T3.2.5:** Unit Tests
-  - [ ] Test channel creation and closing
-  - [ ] Test send/receive operations
-  - [ ] Test async integration
-  - [ ] Test error propagation
+- [x] **T3.2.5:** Unit Tests
+  - [x] Test channel creation and closing
+  - [x] Test send/receive operations
+  - [x] Test async integration
+  - [x] Test error propagation
 
 **Deliverable:** Working PyO3 bindings to Rust IPC
 
@@ -349,30 +346,29 @@
 
 ### Milestone 3.3: Zero-Copy Protocol (4 days)
 
-- [ ] **T3.3.1:** BufferView Implementation
-  - [ ] Create `vertebra/ipc/buffer.py`
-  - [ ] Implement `BufferView` class
-  - [ ] Expose `as_bytes()` method returning memoryview
-  - [ ] Expose `as_msgspec(type_hint)` for direct decoding
+- [x] **T3.3.1:** BufferView Implementation
+  - [x] Create `vertebra/ipc/channel.py` BufferView
+  - [x] Implement `BufferView` class
+  - [x] Expose `as_bytes()` and `as_memoryview()`
+  - [x] Expose `as_msgspec(type_hint)` for direct decoding
 
-- [ ] **T3.3.2:** Rust Buffer Management
-  - [ ] Expose buffer pointers via PyO3
-  - [ ] Implement `get_buffer(ptr, size)` FFI function
-  - [ ] Implement `release_buffer(ptr)` for memory pool
-  - [ ] Ensure thread safety
+- [x] **T3.3.2:** Rust Buffer Management
+  - [x] Expose buffer pointers via PyO3 buffer protocol
+  - [x] Implement buffer view tracking for safe exports
+  - [x] Ensure thread safety
 
-- [ ] **T3.3.3:** msgspec Integration
-  - [ ] Use msgspec's buffer protocol support
-  - [ ] Decode directly from memoryview (zero-copy)
-  - [ ] Benchmark vs copy-based deserialization
+- [x] **T3.3.3:** msgspec Integration
+  - [x] Use msgspec's buffer protocol support
+  - [x] Decode directly from memoryview (zero-copy)
+  - [x] Benchmark vs copy-based deserialization
 
-- [ ] **T3.3.4:** Fallback for Non-msgspec
-  - [ ] Copy buffer to bytes for pydantic/other serializers
-  - [ ] Document when zero-copy is active vs fallback
+- [x] **T3.3.4:** Fallback for Non-msgspec
+  - [x] Copy buffer to bytes for pydantic/other serializers
+  - [x] Document when zero-copy is active vs fallback
 
 - [ ] **T3.3.5:** Performance Tests
-  - [ ] Benchmark zero-copy vs copy (msgspec)
-  - [ ] Benchmark different payload sizes (1KB, 10KB, 100KB)
+  - [x] Benchmark zero-copy vs copy (msgspec)
+  - [x] Benchmark different payload sizes (1KB, 10KB, 100KB)
   - [ ] Verify memory usage (no leaks)
 
 **Deliverable:** Zero-copy buffer protocol for msgspec
@@ -381,25 +377,24 @@
 
 ### Milestone 3.4: End-to-End Integration (2 days)
 
-- [ ] **T3.4.1:** Procedure Call Flow
-  - [ ] Client → TypeScript call
-  - [ ] TypeScript → IPC channel send
-  - [ ] IPC → Python Channel receive
-  - [ ] Python → Execute procedure
-  - [ ] Python → Serialize result
-  - [ ] IPC → Send result back
-  - [ ] TypeScript → Receive and deserialize
+- [x] **T3.4.1:** Procedure Call Flow
+  - [x] Client harness (Python) → IPC channel send
+  - [x] IPC → Python Channel receive
+  - [x] Python → Execute procedure
+  - [x] Python → Serialize result
+  - [x] IPC → Send result back
+  - [x] Client harness (Python) → Receive and deserialize
 
-- [ ] **T3.4.2:** Integration Tests
-  - [ ] Test simple procedure call (int param, str return)
-  - [ ] Test complex types (nested Struct)
-  - [ ] Test error handling (invalid params, Python exception)
-  - [ ] Test multiple concurrent calls
+- [x] **T3.4.2:** Integration Tests
+  - [x] Test simple procedure call (int param, str return)
+  - [x] Test complex types (nested Struct)
+  - [x] Test error handling (invalid params, Python exception)
+  - [x] Test multiple concurrent calls
 
-- [ ] **T3.4.3:** Performance Profiling
-  - [ ] Measure end-to-end latency
-  - [ ] Identify bottlenecks
-  - [ ] Optimize hot paths
+- [x] **T3.4.3:** Performance Profiling
+  - [x] Measure end-to-end latency
+  - [x] Identify bottlenecks
+  - [x] Optimize hot paths
 
 **Deliverable:** Working end-to-end procedure calls
 

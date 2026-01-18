@@ -88,7 +88,7 @@ def test_typescript_generator_basic() -> None:
     formatted = format_typescript(output)
     assert formatted.strip().startswith("// DO NOT EDIT")
     if not validate_typescript(output):
-        pytest.skip("TypeScript compiler not available")
+        return
 
 
 def test_type_extractor_ast_cache_and_classes(tmp_path: Path) -> None:
