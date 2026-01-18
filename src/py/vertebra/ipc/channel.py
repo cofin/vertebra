@@ -256,7 +256,7 @@ class Channel:
             raise ChannelError(msg, stage="closed")
         return handle
 
-    def send_sync(
+    def send_sync(  # noqa: PLR0912
         self,
         procedure_id: str,
         params: dict[str, Any],

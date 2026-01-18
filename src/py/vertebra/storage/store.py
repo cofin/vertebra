@@ -290,6 +290,26 @@ class SyncObjectStoreImpl:
             yield self._meta(entry)
 
     def list_with_delimiter(self, prefix: str = "", delimiter: str = "/") -> ListResult:
+        if self._is_local:
+            resolved = self._resolve(prefix) if prefix else self._resolve("")
+            base = Path(resolved)
+            objects: list[ObjectMeta] = []
+            prefixes: set[str] = set()
+            for entry in self._client.list(resolved):
+                objects.append(self._meta(entry))
+                try:
+                    rel = Path(entry.path).relative_to(base).as_posix()
+                except ValueError:
+                    rel = entry.path.replace("\\", "/")
+                if not rel:
+                    continue
+                if entry.is_dir:
+                    prefixes.add(rel.split(delimiter, 1)[0])
+                    continue
+                if delimiter in rel:
+                    prefixes.add(rel.split(delimiter, 1)[0])
+            return ListResult(objects=objects, prefixes=sorted(prefixes))
+
         objects = list(self.list(prefix))
         prefixes: set[str] = set()
         for obj in objects:

@@ -27,7 +27,7 @@ class AsgiRequest(msgspec.Struct):
     headers: list[tuple[str, str]]
     body: bytes = b""
     scheme: str = "http"
-    httpVersion: str = "1.1"
+    http_version: str = msgspec.field(default="1.1", name="httpVersion")
 
 
 class AsgiResponse(msgspec.Struct):
@@ -61,7 +61,9 @@ class AsgiWorker:
 
     async def serve_forever(self) -> None:
         await self.start()
-        assert self._server is not None
+        if self._server is None:
+            msg = "ASGI server failed to start"
+            raise RuntimeError(msg)
         async with self._server:
             await self._server.serve_forever()
 
@@ -92,7 +94,7 @@ class AsgiWorker:
     async def _handle_request(self, request: AsgiRequest) -> AsgiResponse:
         scope = {
             "type": "http",
-            "http_version": request.httpVersion,
+            "http_version": request.http_version,
             "method": request.method,
             "path": request.path,
             "raw_path": request.path.encode(),
@@ -100,7 +102,7 @@ class AsgiWorker:
             "headers": [(k.lower().encode(), v.encode()) for k, v in request.headers],
             "scheme": request.scheme,
             "server": (self._config.host, self._config.port),
-            "client": ("0.0.0.0", 0),
+            "client": ("127.0.0.1", 0),
         }
 
         body_chunks: list[bytes] = []

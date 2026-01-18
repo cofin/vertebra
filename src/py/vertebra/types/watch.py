@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -15,8 +15,8 @@ if TYPE_CHECKING:
 try:
     from watchdog.events import FileSystemEventHandler
     from watchdog.observers import Observer
-except Exception:  # pragma: no cover - optional dependency
-    FileSystemEventHandler = None
+except ImportError:  # pragma: no cover - optional dependency
+    FileSystemEventHandler = object  # type: ignore[misc,assignment]
     Observer = None
 
 
@@ -45,19 +45,19 @@ class _DebouncedHandler(FileSystemEventHandler):
     def _flush(self) -> None:
         self._bridge.invalidate()
 
-    def on_modified(self, event) -> None:  # type: ignore[override]
+    def on_modified(self, event: Any) -> None:  # type: ignore[override]
         if event.is_directory:
             return
         if event.src_path.endswith(".py"):
             self._schedule()
 
-    def on_created(self, event) -> None:  # type: ignore[override]
+    def on_created(self, event: Any) -> None:  # type: ignore[override]
         if event.is_directory:
             return
         if event.src_path.endswith(".py"):
             self._schedule()
 
-    def on_moved(self, event) -> None:  # type: ignore[override]
+    def on_moved(self, event: Any) -> None:  # type: ignore[override]
         if event.is_directory:
             return
         if event.dest_path.endswith(".py"):

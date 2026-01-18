@@ -42,7 +42,7 @@ def test_end_to_end_procedure_flow() -> None:
                 assert meta is not None
                 result = meta.handler_fn(**params)
                 server.respond_sync(proc_id, result, response_type=meta.return_type)
-            except Exception as exc:  # pragma: no cover - failure path
+            except Exception as exc:  # pragma: no cover - failure path  # noqa: BLE001
                 errors.append(exc)
                 break
 

@@ -258,6 +258,7 @@ def validate_typescript(output: str) -> bool:
             text=True,
             env=env,
             cwd=cwd,
+            check=False,
         )
         if result.returncode != 0:
             message = result.stderr.strip() or result.stdout.strip()
@@ -272,7 +273,13 @@ def format_typescript(output: str) -> str:
     command = _find_prettier_command()
     if command is None:
         return output
-    result = subprocess.run([*command, "--parser", "typescript"], input=output, capture_output=True, text=True)
+    result = subprocess.run(
+        [*command, "--parser", "typescript"],
+        input=output,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if result.returncode != 0:
         return output
     return result.stdout
@@ -309,7 +316,8 @@ def _ensure_tmpdir() -> pathlib.Path:
             test_file = path / ".write-test"
             test_file.write_text("ok", encoding="utf-8")
             test_file.unlink(missing_ok=True)
-            return path
         except OSError:
             continue
+        else:
+            return path
     return pathlib.Path(tempfile.gettempdir())

@@ -69,7 +69,7 @@ class TypeExtractor:
     type_var_cache: dict[Path, CachedTypeVars] = field(default_factory=dict)
     type_cache: dict[tuple[Path, str], ObjectType] = field(default_factory=dict)
 
-    def from_hint(self, annotation: Any) -> TypeNode:
+    def from_hint(self, annotation: Any) -> TypeNode:  # noqa: PLR0911, PLR0912
         if annotation is None or annotation is type(None):
             return PrimitiveType("null")
         if annotation in (int, float):
@@ -196,7 +196,7 @@ class TypeExtractor:
         self.import_cache[path] = CachedImports(digest=digest, imports=imports)
         return imports
 
-    def collect_type_vars(
+    def collect_type_vars(  # noqa: PLR0912
         self,
         tree: ast.AST,
         class_names: set[str],
@@ -409,7 +409,7 @@ class TypeExtractor:
     ) -> tuple[TypeNode, dict[str, ObjectType]]:
         try:
             from pydantic import BaseModel
-        except Exception:
+        except ImportError:
             return UnknownType(), {}
         if not isinstance(model_cls, type) or not issubclass(model_cls, BaseModel):
             return UnknownType(), {}
@@ -589,7 +589,7 @@ class TypeExtractor:
     def _msgspec_runtime_metadata(self, struct_cls: object) -> dict[str, tuple[object, ...]]:
         try:
             import msgspec
-        except Exception:
+        except ImportError:
             return {}
 
         inspect = getattr(msgspec, "inspect", None)
@@ -598,19 +598,19 @@ class TypeExtractor:
             return {}
         try:
             info = type_info(struct_cls)
-        except Exception:
+        except (TypeError, ValueError):
             return {}
         fields = getattr(info, "fields", None)
         if not fields:
             return {}
         metadata: dict[str, tuple[object, ...]] = {}
-        for field in fields:
-            name = getattr(field, "name", None)
+        for field_info in fields:
+            name = getattr(field_info, "name", None)
             if not name:
                 continue
             items: list[object] = []
             for key in ("metadata", "constraints", "validation"):
-                value = getattr(field, key, None)
+                value = getattr(field_info, key, None)
                 if value:
                     items.append({key: value})
             if items:
@@ -622,7 +622,7 @@ class TypeExtractor:
     ) -> tuple[dict[str, tuple[object, ...]], set[str]]:
         try:
             from pydantic import BaseModel
-        except Exception:
+        except ImportError:
             return {}, set()
         if not isinstance(model_cls, type) or not issubclass(model_cls, BaseModel):
             return {}, set()
@@ -653,13 +653,13 @@ class TypeExtractor:
                 for key, value in model.fields.items()
                 if key not in self._dataclass_excluded_fields(runtime_cls)
             }
-        merged[name] = ObjectType(
-            fields=filtered_fields,
-            name=model.name,
-            optional_fields=model.optional_fields | optional,
-            type_params=model.type_params,
-            type_param_constraints=model.type_param_constraints,
-        )
+            merged[name] = ObjectType(
+                fields=filtered_fields,
+                name=model.name,
+                optional_fields=model.optional_fields | optional,
+                type_params=model.type_params,
+                type_param_constraints=model.type_param_constraints,
+            )
         return merged
 
     def _dataclass_optional_fields(self, dataclass_cls: object) -> set[str]:
@@ -684,7 +684,7 @@ class TypeExtractor:
                 excluded.add(name)
         return excluded
 
-    def _from_json_schema(
+    def _from_json_schema(  # noqa: PLR0911, PLR0912
         self,
         schema: dict[str, object],
         definitions: dict[str, dict[str, object]],
@@ -880,7 +880,7 @@ class TypeExtractor:
             return init_file
         return None
 
-    def _from_annotation_node(
+    def _from_annotation_node(  # noqa: PLR0911, PLR0912
         self,
         node: ast.AST,
         struct_names: set[str],
@@ -924,7 +924,7 @@ class TypeExtractor:
             return self._from_subscript(node, struct_names, type_vars, context)
         return UnknownType()
 
-    def _from_subscript(
+    def _from_subscript(  # noqa: PLR0911
         self,
         node: ast.Subscript,
         struct_names: set[str],
@@ -999,20 +999,22 @@ class TypeExtractor:
     def _literal_arg(self, node: ast.AST) -> object:
         if isinstance(node, ast.Constant):
             return node.value
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            if isinstance(node.operand, ast.Constant) and isinstance(
-                node.operand.value, (int, float)
-            ):
-                return -node.operand.value
+        if (
+            isinstance(node, ast.UnaryOp)
+            and isinstance(node.op, ast.USub)
+            and isinstance(node.operand, ast.Constant)
+            and isinstance(node.operand.value, (int, float))
+        ):
+            return -node.operand.value
         return None
 
     def _metadata_from_node(self, node: ast.AST) -> object:
         try:
             return ast.literal_eval(node)
-        except Exception:
+        except (SyntaxError, ValueError):
             try:
                 return ast.unparse(node)
-            except Exception:
+            except (TypeError, ValueError):
                 return None
 
     def _primitive_from_name(self, name: str) -> TypeNode:

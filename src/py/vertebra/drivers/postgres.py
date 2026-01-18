@@ -21,6 +21,7 @@ from vertebra.drivers.exceptions import DatabaseError, format_error_message, map
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Iterable, Sequence
+    from types import TracebackType
 
 
 def _run_sync(coro: Awaitable[Any]) -> Any:
@@ -376,7 +377,12 @@ class SyncPostgresTransaction:
         self._connection._execute(statement, [])
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         if exc_type:
             self._connection._execute("ROLLBACK", [])
         else:
@@ -395,7 +401,12 @@ class AsyncPostgresTransaction:
         await self._connection._execute(statement, [])
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         if exc_type:
             await self._connection._execute("ROLLBACK", [])
         else:

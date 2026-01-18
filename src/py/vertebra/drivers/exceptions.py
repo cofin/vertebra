@@ -7,7 +7,7 @@ class Error(Exception):
     """Base error for all driver exceptions."""
 
 
-class Warning(Exception):
+class Warning(Exception):  # noqa: A001, N818
     """Non-fatal warning."""
 
 

@@ -134,18 +134,26 @@ def detect_serializer(type_hint: type | None) -> str:
     if isinstance(type_hint, type):
         try:
             import msgspec
-
-            if issubclass(type_hint, msgspec.Struct):
-                return "msgspec"
-        except Exception:
-            pass
+        except ImportError:
+            msgspec = None
+        if msgspec is not None:
+            try:
+                if issubclass(type_hint, msgspec.Struct):
+                    return "msgspec"
+            except TypeError:
+                pass
         try:
             from pydantic import BaseModel
-
-            if issubclass(type_hint, BaseModel):
-                return "pydantic"
-        except Exception:
-            pass
+        except ImportError:
+            base_model = None
+        else:
+            base_model = BaseModel
+        if base_model is not None:
+            try:
+                if issubclass(type_hint, base_model):
+                    return "pydantic"
+            except TypeError:
+                pass
     return "msgspec"
 
 

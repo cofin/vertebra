@@ -213,10 +213,10 @@ def test_pydantic_discriminated_union_metadata() -> None:
         kind: Literal["dog"]
         barks: int
 
-    Pet = Annotated[Cat | Dog, Field(discriminator="kind")]
+    pet_type = Annotated[Cat | Dog, Field(discriminator="kind")]
 
     class Owner(BaseModel):
-        pet: Pet
+        pet: pet_type
 
     extractor = TypeExtractor()
     root, _defs = extractor.extract_pydantic_json_schema(Owner)

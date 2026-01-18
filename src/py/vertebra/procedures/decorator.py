@@ -32,7 +32,7 @@ def procedure(
         extractor = TypeExtractor()
         try:
             hints = get_type_hints(fn, include_extras=True)
-        except Exception:
+        except (AttributeError, NameError, TypeError, ValueError):
             hints = getattr(fn, "__annotations__", {}) or {}
         signature = inspect.signature(fn)
 

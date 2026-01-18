@@ -11,14 +11,14 @@ from vertebra.drivers import (
     NotSupportedError,
     OperationalError,
     ProgrammingError,
-    Warning,
     format_error_message,
     map_error_code,
 )
+from vertebra.drivers import Warning as DriverWarning
 
 
 def test_exception_hierarchy() -> None:
-    assert issubclass(Warning, Exception)
+    assert issubclass(DriverWarning, Exception)
     assert issubclass(Error, Exception)
     assert issubclass(InterfaceError, Error)
     assert issubclass(DatabaseError, Error)

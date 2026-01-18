@@ -7,9 +7,13 @@ import hashlib
 import threading
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from vertebra.procedures.registry import ProcedureRegistry
 from vertebra.types.typescript import TypeScriptGenerator, format_typescript
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 DEFAULT_TYPES_ROUTE = "/__vertebra/types.d.ts"
 DEFAULT_COMPRESS_THRESHOLD = 10_000
@@ -108,7 +112,12 @@ class TypeBridgeApp:
         self._bridge = bridge or TypeBridge()
         self._route = route
 
-    async def __call__(self, scope: dict, receive, send) -> None:  # type: ignore[override]
+    async def __call__(
+        self,
+        scope: dict[str, Any],
+        receive: Callable[[], Awaitable[dict[str, Any]]],
+        send: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:  # type: ignore[override]
         if scope.get("type") != "http":
             return
         if scope.get("path") != self._route:

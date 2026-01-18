@@ -82,17 +82,20 @@ class IpcClient:
             self._reader = None
             self._writer = None
 
+    async def _ensure_connection(self) -> None:
+        if self._writer is None or self._reader is None:
+            await self.connect()
+        if self._writer is None or self._reader is None:
+            msg = "IPC connection unavailable"
+            raise IpcError(msg)
+
     async def request(self, payload: Any) -> Any:
         """Send a request and await the response."""
 
         last_error: Exception | None = None
         for attempt in range(self._config.retries + 1):
             try:
-                if self._writer is None or self._reader is None:
-                    await self.connect()
-                if self._writer is None or self._reader is None:
-                    msg = "IPC connection unavailable"
-                    raise IpcError(msg)
+                await self._ensure_connection()
                 encoded = self._codec.encode(payload)
                 frame = len(encoded).to_bytes(4, "big") + encoded
                 self._writer.write(frame)

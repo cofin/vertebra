@@ -36,9 +36,9 @@ def test_msgspec_serializer_roundtrip() -> None:
 
 def test_pydantic_serializer_roundtrip() -> None:
     pydantic = pytest.importorskip("pydantic")
-    BaseModel = pydantic.BaseModel
+    base_model = pydantic.BaseModel
 
-    class User(BaseModel):
+    class User(base_model):
         id: int
         name: str
 

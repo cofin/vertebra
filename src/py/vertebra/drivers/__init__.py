@@ -27,10 +27,10 @@ from vertebra.drivers.exceptions import (
     NotSupportedError,
     OperationalError,
     ProgrammingError,
-    Warning,
     format_error_message,
     map_error_code,
 )
+from vertebra.drivers.exceptions import Warning as DriverWarning
 from vertebra.drivers.mysql import (
     AsyncMySQLConnection,
     AsyncMySQLCursor,
@@ -87,6 +87,8 @@ from vertebra.drivers.types import (
     encode_postgres,
     encode_sqlite,
 )
+
+Warning = DriverWarning  # noqa: A001
 
 
 @dataclass(frozen=True, slots=True)

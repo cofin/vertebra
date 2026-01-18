@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from vertebra.types.extractor import TypeExtractor
 from vertebra.types.ir import (
     AnnotatedType,
@@ -35,7 +37,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     if name == "TypeBridge":
         from vertebra.types.bridge import TypeBridge
 
@@ -55,4 +57,4 @@ def __getattr__(name: str):
     raise AttributeError(name)
 
 
-__all__.extend(["TypeBridge", "TypeBridgeApp", "TypeBridgeWatcher", "TypeScriptGenerator"])
+__all__ += ["TypeBridge", "TypeBridgeApp", "TypeBridgeWatcher", "TypeScriptGenerator"]

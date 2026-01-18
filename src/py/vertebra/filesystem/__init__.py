@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vertebra.filesystem.client import AsyncFileSystemClient, FileEntry, FileSystemClient
-from vertebra.filesystem.fsspec import AsyncVertebraFileSystem, VertebraFileSystem
+
+if TYPE_CHECKING:
+    from vertebra.filesystem.fsspec import AsyncVertebraFileSystem, VertebraFileSystem
 
 
 @dataclass(slots=True)
@@ -423,3 +425,14 @@ __all__ = [
     "S3FileSystem",
     "VertebraFileSystem",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in {"AsyncVertebraFileSystem", "VertebraFileSystem"}:
+        from vertebra.filesystem.fsspec import AsyncVertebraFileSystem, VertebraFileSystem
+
+        return {
+            "AsyncVertebraFileSystem": AsyncVertebraFileSystem,
+            "VertebraFileSystem": VertebraFileSystem,
+        }[name]
+    raise AttributeError(name)

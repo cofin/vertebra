@@ -24,7 +24,7 @@ try:  # pragma: no cover - optional dependency
     from fsspec.spec import AbstractFileSystem
 
     _FSSPEC_AVAILABLE = True
-except Exception:  # pragma: no cover - optional dependency
+except ImportError:  # pragma: no cover - optional dependency
     AbstractFileSystem = object  # type: ignore[misc,assignment]
     _FSSPEC_AVAILABLE = False
 
