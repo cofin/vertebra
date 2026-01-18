@@ -39,7 +39,11 @@ impl IpcServer {
     where
         F: Fn(BrokerRequest) -> BrokerResponse + Send + Sync + Clone + 'static,
     {
-        let host = self.config.host.clone().unwrap_or_else(|| "127.0.0.1".into());
+        let host = self
+            .config
+            .host
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1".into());
         let port = self.config.port.unwrap_or(7001);
         let listener = TcpListener::bind((host.as_str(), port))
             .await
@@ -69,12 +73,14 @@ impl IpcServer {
                 .clone()
                 .ok_or_else(|| BrokerError::Ipc("UDS path required".to_string()))?;
             let _ = std::fs::remove_file(&path);
-            let listener = UnixListener::bind(&path)
-                .map_err(|err| BrokerError::Ipc(err.to_string()))?;
+            let listener =
+                UnixListener::bind(&path).map_err(|err| BrokerError::Ipc(err.to_string()))?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Err(err) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+                if let Err(err) =
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                {
                     if err.kind() != std::io::ErrorKind::NotFound {
                         return Err(BrokerError::Ipc(err.to_string()));
                     }
@@ -95,7 +101,9 @@ impl IpcServer {
         #[cfg(not(unix))]
         {
             let _ = handler;
-            Err(BrokerError::Ipc("UDS transport unsupported on this platform".to_string()))
+            Err(BrokerError::Ipc(
+                "UDS transport unsupported on this platform".to_string(),
+            ))
         }
     }
 
@@ -116,7 +124,10 @@ impl IpcServer {
                     .first_pipe_instance(true)
                     .create(&pipe_name)
                     .map_err(|err| BrokerError::Ipc(err.to_string()))?;
-                server.connect().await.map_err(|err| BrokerError::Ipc(err.to_string()))?;
+                server
+                    .connect()
+                    .await
+                    .map_err(|err| BrokerError::Ipc(err.to_string()))?;
                 let handler_clone = handler.clone();
                 let codec_clone = codec.clone();
                 tokio::spawn(async move {

@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
 import pytest
 
 # Set test environment before any other imports.
 os.environ.update({"VERTEBRA_DEBUG": "true", "VERTEBRA_DEV_MODE": "true", "VERTEBRA_LOG_LEVEL": "40"})
+
+# Ensure repo root is importable for tools/ helpers.
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 pytest_plugins = ["tests.database"]
 

@@ -200,16 +200,14 @@ impl PyChannel {
         let layout = RingLayout::new(slot_size, slots);
         let req_region = Arc::new(ShmRegion::create(layout.total_size).map_err(map_err)?);
         let resp_region = Arc::new(ShmRegion::create(layout.total_size).map_err(map_err)?);
-        let req_client =
-            unsafe { SpscRing::initialize(Arc::clone(&req_region), layout, 0, 0) }
-                .map_err(map_err)?;
-        let req_server = unsafe { SpscRing::attach(Arc::clone(&req_region), layout) }
+        let req_client = unsafe { SpscRing::initialize(Arc::clone(&req_region), layout, 0, 0) }
             .map_err(map_err)?;
-        let resp_client =
-            unsafe { SpscRing::initialize(Arc::clone(&resp_region), layout, 0, 0) }
-                .map_err(map_err)?;
-        let resp_server = unsafe { SpscRing::attach(Arc::clone(&resp_region), layout) }
+        let req_server =
+            unsafe { SpscRing::attach(Arc::clone(&req_region), layout) }.map_err(map_err)?;
+        let resp_client = unsafe { SpscRing::initialize(Arc::clone(&resp_region), layout, 0, 0) }
             .map_err(map_err)?;
+        let resp_server =
+            unsafe { SpscRing::attach(Arc::clone(&resp_region), layout) }.map_err(map_err)?;
         let client = Py::new(
             py,
             PyChannel {
@@ -239,12 +237,10 @@ impl PyChannel {
         let layout = RingLayout::new(slot_size, slots);
         let req_name = format!("{name}.req");
         let resp_name = format!("{name}.resp");
-        let req_region = Arc::new(
-            ShmRegion::create_named(&req_name, layout.total_size).map_err(map_err)?,
-        );
-        let resp_region = Arc::new(
-            ShmRegion::create_named(&resp_name, layout.total_size).map_err(map_err)?,
-        );
+        let req_region =
+            Arc::new(ShmRegion::create_named(&req_name, layout.total_size).map_err(map_err)?);
+        let resp_region =
+            Arc::new(ShmRegion::create_named(&resp_name, layout.total_size).map_err(map_err)?);
         let req_ring = unsafe { SpscRing::initialize(Arc::clone(&req_region), layout, 0, 0) }
             .map_err(map_err)?;
         let resp_ring = unsafe { SpscRing::initialize(Arc::clone(&resp_region), layout, 0, 0) }
@@ -294,10 +290,10 @@ impl PyChannel {
             Arc::new(ShmRegion::open_named(&req_name, layout.total_size).map_err(map_err)?);
         let resp_region =
             Arc::new(ShmRegion::open_named(&resp_name, layout.total_size).map_err(map_err)?);
-        let req_ring = unsafe { SpscRing::attach(Arc::clone(&req_region), layout) }
-            .map_err(map_err)?;
-        let resp_ring = unsafe { SpscRing::attach(Arc::clone(&resp_region), layout) }
-            .map_err(map_err)?;
+        let req_ring =
+            unsafe { SpscRing::attach(Arc::clone(&req_region), layout) }.map_err(map_err)?;
+        let resp_ring =
+            unsafe { SpscRing::attach(Arc::clone(&resp_region), layout) }.map_err(map_err)?;
         match role {
             "client" => Ok(Self {
                 send_ring: req_ring,
@@ -332,9 +328,7 @@ impl PyChannel {
     }
 
     fn send_request(&self, data: &[u8]) -> PyResult<()> {
-        Python::with_gil(|py| {
-            py.allow_threads(|| self.send_ring.send(data, 0).map_err(map_err))
-        })
+        Python::with_gil(|py| py.allow_threads(|| self.send_ring.send(data, 0).map_err(map_err)))
     }
 
     fn try_send_request(&self, data: &[u8]) -> PyResult<bool> {
@@ -355,11 +349,7 @@ impl PyChannel {
         })
     }
 
-    fn recv_request<'py>(
-        &self,
-        py: Python<'py>,
-        max_len: usize,
-    ) -> PyResult<Bound<'py, PyBytes>> {
+    fn recv_request<'py>(&self, py: Python<'py>, max_len: usize) -> PyResult<Bound<'py, PyBytes>> {
         let mut buffer = vec![0u8; max_len];
         let len = py.allow_threads(|| self.recv_ring.recv(&mut buffer).map_err(map_err))?;
         Ok(PyBytes::new(py, &buffer[..len]))
@@ -394,9 +384,7 @@ impl PyChannel {
     }
 
     fn send_response(&self, data: &[u8]) -> PyResult<()> {
-        Python::with_gil(|py| {
-            py.allow_threads(|| self.send_ring.send(data, 0).map_err(map_err))
-        })
+        Python::with_gil(|py| py.allow_threads(|| self.send_ring.send(data, 0).map_err(map_err)))
     }
 
     fn try_send_response(&self, data: &[u8]) -> PyResult<bool> {
@@ -417,11 +405,7 @@ impl PyChannel {
         })
     }
 
-    fn recv_response<'py>(
-        &self,
-        py: Python<'py>,
-        max_len: usize,
-    ) -> PyResult<Bound<'py, PyBytes>> {
+    fn recv_response<'py>(&self, py: Python<'py>, max_len: usize) -> PyResult<Bound<'py, PyBytes>> {
         let mut buffer = vec![0u8; max_len];
         let len = py.allow_threads(|| self.recv_ring.recv(&mut buffer).map_err(map_err))?;
         Ok(PyBytes::new(py, &buffer[..len]))
@@ -658,9 +642,7 @@ impl PyMpmcRing {
     }
 
     fn send(&self, data: &[u8], flags: u32) -> PyResult<()> {
-        Python::with_gil(|py| {
-            py.allow_threads(|| self.inner.send(data, flags).map_err(map_err))
-        })
+        Python::with_gil(|py| py.allow_threads(|| self.inner.send(data, flags).map_err(map_err)))
     }
 
     fn recv<'py>(&self, py: Python<'py>, max_len: usize) -> PyResult<Bound<'py, PyBytes>> {

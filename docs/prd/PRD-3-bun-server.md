@@ -26,9 +26,48 @@ The architecture consists of three layers: (1) Bun HTTP server handling TLS term
 
 ## Progress Update (2026-01-18)
 
-- Added Bun server scaffolding (`src/ts/src/server`) and router/worker pool stubs.
-- Added IPC client + ASGI bridge placeholders and Protocol Buffer schema placeholders.
+- Added Bun server scaffolding (`src/ts/src/server`) and router baseline.
+- Implemented Bun server config loader (env + `vertebra.config.ts` via `defineConfig`/`resolveServerConfig`).
+- Implemented round-robin worker pool with per-worker IPC pools + shutdown hooks.
+- Added Bun worker manager to spawn Python ASGI workers, restart on exit, and run health checks.
+- Updated ASGI bridge to use pooled IPC with error handling.
 - Wired Python ASGI worker harness and framing tests.
+
+**Known Gaps (2026-01-18)**:
+- IPC protocol defaults to MessagePack in the current implementation; Protocol Buffers are not wired yet.
+- Metrics collection for IPC latency/throughput remains unimplemented (documented in Phase 3/4 tasks).
+- WebSocket bridging and bidirectional streaming IPC (SSE + streamed request bodies + `http.disconnect` cancel) are not implemented yet.
+- HTTP/2/HTTP/3 support in Bun and h2c upgrade behavior are not yet verified end-to-end (see Protocol Support Notes).
+- Early hints/trailers are accepted over IPC but not surfaced to clients yet (Bun Fetch limitations).
+
+**Protobuf IPC Remaining Work (Spec)**:
+1. **Codegen**: generate TS + Python protobuf bindings from `src/ts/src/proto/asgi.proto` (choose toolchain, add build/docs).
+2. **TS IPC codec**: add protobuf encode/decode path in Bun IPC client + ASGI bridge; include streaming frame envelope; enforce `ipc.protocol === "protobuf"`.
+3. **Python worker**: accept protobuf frames (streaming-aware), decode to ASGI scope, encode protobuf responses.
+4. **Config/compat**: document default + migration between MessagePack and Protobuf, add compatibility tests.
+5. **Tests/benchmarks**: add IPC round-trip tests for protobuf and compare latency/CPU vs MessagePack.
+
+**ASGI Coverage (Current)**:
+- HTTP scope includes ASGI version/spec_version, raw_path/query_string, root_path, server/client, extensions, and shared `state`.
+- Lifespan is supported with startup/shutdown lifecycle and shared state.
+- Extensions implemented: `http.response.pathsend`, `http.response.zerocopysend` (file path + optional offset/count; file objects converted to paths).
+- Streaming IPC (response frames + backpressure) implemented for `http.response.start`/`body`.
+- Extensions accepted but not surfaced to clients: `http.response.trailers`, `http.response.early_hint`, `http.response.push` (Bun Fetch API limitations).
+- Not yet implemented: request-body streaming (`http.request` frames), disconnect propagation (`http.disconnect`), WebSocket bridging, SSE/long-lived response flow-control improvements.
+
+**Streaming IPC Plan (Spec)**:
+1. Introduce a frame envelope with `{type, request_id, flags, payload}` for streaming. (Implemented for response frames.)
+2. Support request body streaming: `http.request` frames with `body` + `more_body`, plus explicit `http.disconnect` cancel frames tied to Bun abort signals. (Pending.)
+3. Support response streaming: `http.response.start`, chunked `http.response.body`, optional `http.response.trailers` once Bun exposes trailer APIs. (Response frames implemented; trailers not surfaced.)
+4. Add per-connection flow control (credits/low-water marks) to avoid buffering large bodies in memory and to protect worker queues. (Partial: bounded queues + stream backpressure.)
+5. SSE bridging: map long-lived streaming responses to chunked `http.response.body` frames with keep-alive pacing. (Pending.)
+6. WebSocket bridging: bidirectional `websocket.accept` / `websocket.receive` / `websocket.send` frames over the same IPC channel with explicit close codes + reason. (Pending.)
+
+### Verification Steps (local)
+
+- `bun test` (TypeScript unit tests)
+- `uv run pytest src/py/tests -k asgi` (ASGI worker harness)
+- Manual smoke: `uv run python -m vertebra.server.worker --app myapp:app` then issue a Bun request through `createAsgiServer` (check 200 response)
 
 ## Background & Motivation
 
@@ -87,6 +126,12 @@ The key challenge is ensuring IPC overhead doesn't negate Bun's performance adva
 
 > **See PRD-0 Cross-PRD Architectural Decisions** for canonical project-wide choices on serialization (Protobuf for gRPC/control plane), Python 3.12+ baseline, and runtime strategy (Bun-first).
 
+### Protocol Support Notes (2026-01-18)
+
+- Current ASGI servers show varied protocol coverage: Uvicorn targets HTTP/1.1 + WebSocket, while Hypercorn adds HTTP/2 + HTTP/3, and Granian focuses on HTTP/1/2 + WebSocket (with a limited ASGI extension set). Use these as compatibility baselines while validating Bun parity.
+- HTTP/2 over cleartext (h2c) is supported by some servers but browsers only negotiate HTTP/2 over TLS; h2c upgrade is therefore for non-browser clients or internal traffic. Plan h2c upgrade support but do not rely on it for browser compatibility.
+- HTTP/3 requires QUIC support at the Bun layer; track Bun’s roadmap and design IPC so protocol details remain independent from ASGI message flow.
+
 ### Cross-Platform Transport Strategy
 
 - **Unix**: UDS by default for lowest overhead.
@@ -121,7 +166,8 @@ The key challenge is ensuring IPC overhead doesn't negate Bun's performance adva
                   │                               │
                   │  ┌─────────────────────────┐ │
                   │  │  IPC Transport          │ │
-                  │  │  Protocol Buffers       │ │
+                  │  │  MessagePack (current)  │ │
+                  │  │  Protobuf (planned)     │ │
                   │  │  Connection Pool        │ │
                   │  └─────────┬───────────────┘ │
                   └────────────┼───────────────────┘
@@ -169,17 +215,17 @@ The key challenge is ensuring IPC overhead doesn't negate Bun's performance adva
 #### 2. IPC Bridge
 
 **Responsibilities**:
-- Serialize HTTP requests to Protocol Buffer format
+- Serialize HTTP requests to MessagePack (current) and optionally Protocol Buffers (planned)
 - Transmit requests to Python workers via IPC transport (UDS or named pipe)
 - Manage connection pool to workers
-- Deserialize Protocol Buffer responses
+- Deserialize MessagePack/Protocol Buffer responses
 - Handle timeouts and failures
 - Implement backpressure when workers are saturated
 - Maintain bidirectional WebSocket frame forwarding
 
 **Protocol Design**:
 
-Using Protocol Buffers for type-safe, high-performance serialization:
+Current implementation uses MessagePack for IPC framing; Protocol Buffers remain the planned schema for future typed IPC. The `.proto` below is retained as the canonical planned schema (not wired in the runtime yet):
 
 ```protobuf
 // asgi.proto
@@ -224,6 +270,11 @@ message WebSocketMessage {
   string reason = 6;
 }
 ```
+
+**Serialization Options (Decision Notes)**:
+- **MessagePack (current)**: flexible, low-friction in TS/Python, good for small control-plane payloads.
+- **Protocol Buffers (planned)**: typed schema and codegen for cross-language stability; to be used for control-plane or gRPC-aligned flows once wired.
+- **FlatBuffers (evaluation)**: zero-copy reads and random access are attractive for large/streaming payloads, but require schema discipline and more complex builders; likely best paired with shared memory or bulk transfer paths rather than tiny per-request control frames.
 
 **IPC Transport**:
 
@@ -355,6 +406,12 @@ Bun's native HTTP server handles both protocols transparently:
 - Server push support (future enhancement)
 - Flow control and stream prioritization
 - Header compression (HPACK)
+
+**Runtime Constraints & Plan (2026-01-18)**:
+- Bun’s `Bun.serve` provides HTTP/1.1 today; HTTP/2 support requires `node:http2` integration with TLS for browser compatibility.
+- h2c upgrade should be implemented for non-browser clients (internal/gRPC) only; browsers require HTTPS + ALPN for HTTP/2.
+- HTTP/3 remains pending in Bun; plan for a dedicated QUIC front-end or a reverse proxy until Bun exposes HTTP/3 APIs.
+- WebSocket/SSE require streaming IPC so the Bun front-end can forward incremental frames without buffering.
 
 **HTTP/3** (Future):
 
@@ -572,7 +629,7 @@ interface VertebraConfig {
 
   ipc: {
     socketPath?: string;    // default: /tmp/vertebra-{pid}.sock
-    protocol: "protobuf" | "msgpack"; // default: "protobuf"
+    protocol: "protobuf" | "msgpack"; // default: "msgpack" (current impl), "protobuf" planned
     poolSize: number;       // default: 2
     poolMax: number;        // default: 10
     sharedMemoryThreshold?: number; // bytes, default: 1048576 (1MB)

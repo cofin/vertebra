@@ -103,9 +103,14 @@
 
 - Added initial Bun server scaffolding (`src/ts/src/server`).
 - Added Protocol Buffer schema placeholders for ASGI/config/metrics (`src/ts/src/proto`).
-- Added Bun server config loader, router, and worker-pool stub.
+- Implemented Bun server config loader with env + config file support (`defineConfig`, `resolveServerConfig`).
+- Implemented round-robin worker pool with per-worker IPC pools + shutdown hooks.
+- Added Bun worker manager to spawn Python ASGI workers, restart on exit, and run health checks.
+- Updated ASGI bridge to use pooled IPC requester + error handling (pathsend/zerocopysend supported).
 - Added Bun IPC client (MessagePack) and ASGI bridge wrapper.
-- Added Python ASGI worker harness with IPC framing and tests.
+- Added Python ASGI worker harness with IPC framing, lifespan support, and tests.
+- Added Bun ⇄ Python IPC integration tests for multi-worker routing + pathsend.
+- Added streaming IPC frames (response.start/body) with backpressure in the ASGI bridge.
 - Wired Bun server router to ASGI bridge helper (`createAsgiServer`).
 
 ## Progress (PRD-4)
@@ -158,9 +163,13 @@
 
 ### PRD-3
 
-- Implement Bun server config loader, router, and worker pool.
-- Build IPC bridge (TS side) with connection pool + MessagePack/Protobuf transport toggle.
-- Add Python-side IPC worker harness for ASGI apps.
+- Implement request-body streaming + `http.disconnect` propagation; add SSE/WebSocket IPC bridging frames.
+- Validate Bun protocol coverage (HTTP/2, HTTP/3, h2c upgrade) and document browser TLS constraints; plan ALPN + h2c upgrade behavior.
+- Implement Protobuf IPC support + metrics wiring (MessagePack remains default until codegen/codec added).
+- Add graceful drain/rolling restart + worker health surface metrics.
+
+Notes:
+- Protobuf IPC remains unimplemented; PRD-3 now lists the required codegen/codec/test steps explicitly.
 
 ### PRD-4
 

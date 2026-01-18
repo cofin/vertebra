@@ -28,7 +28,9 @@ pub fn encode_response(codec: &str, response: &BrokerResponse) -> Result<Vec<u8>
 pub fn decode_request(codec: &str, payload: &[u8]) -> Result<BrokerRequest, BrokerError> {
     match codec {
         "bincode" => bincode::deserialize(payload).map_err(|err| BrokerError::Ipc(err.to_string())),
-        "msgpack" => rmp_serde::from_slice(payload).map_err(|err| BrokerError::Ipc(err.to_string())),
+        "msgpack" => {
+            rmp_serde::from_slice(payload).map_err(|err| BrokerError::Ipc(err.to_string()))
+        }
         other => Err(BrokerError::Ipc(format!("unsupported codec: {other}"))),
     }
 }

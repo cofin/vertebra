@@ -51,8 +51,7 @@ mod tests {
     #[test]
     fn spsc_send_recv() {
         let ring = SpscRingHandle::new(64, 8).expect("ring");
-        ring.send(Buffer::from(vec![5u8, 6, 7]), 0)
-            .expect("send");
+        ring.send(Buffer::from(vec![5u8, 6, 7]), 0).expect("send");
         let recv = ring.recv(16).expect("recv");
         assert_eq!(recv.as_ref(), &[5, 6, 7]);
     }
@@ -60,8 +59,7 @@ mod tests {
     #[test]
     fn mpmc_send_recv() {
         let ring = MpmcRingHandle::new(64, 8).expect("ring");
-        ring.send(Buffer::from(vec![1u8, 2]), 0)
-            .expect("send");
+        ring.send(Buffer::from(vec![1u8, 2]), 0).expect("send");
         let recv = ring.recv(16).expect("recv");
         assert_eq!(recv.as_ref(), &[1, 2]);
     }

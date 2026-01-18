@@ -6,7 +6,10 @@ pub fn init_tracing() {
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if json_logs {
-        let subscriber = tracing_subscriber::fmt().with_env_filter(filter).json().finish();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .json()
+            .finish();
         let _ = tracing::subscriber::set_global_default(subscriber);
     } else {
         let subscriber = tracing_subscriber::fmt().with_env_filter(filter).finish();

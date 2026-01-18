@@ -1,6 +1,48 @@
+import { resolve as resolvePath } from "node:path";
+import { pathToFileURL } from "node:url";
+
+import { resolveIpcConfig, type IpcClientConfig, type IpcTransport } from "../ipc/client";
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
+export type WorkerCount = number | "auto";
+export type IpcProtocol = "msgpack" | "protobuf";
+
+export interface ServerSettings {
+  host?: string;
+  hostname?: string;
+  port?: number;
+  reusePort?: boolean;
+  staticDir?: string;
+  logLevel?: LogLevel;
+  workers?: WorkerCount;
+}
+
+export interface StaticConfig {
+  dir?: string;
+  maxAge?: number;
+}
+
+export interface WorkerConfig {
+  count?: WorkerCount;
+}
+
+export interface PythonConfig {
+  app?: string;
+  workers?: WorkerCount;
+  timeout?: number;
+  venv?: string;
+}
+
+export interface ServerIpcConfig extends IpcClientConfig {
+  protocol?: IpcProtocol;
+}
 
 export interface ServerConfig {
+  server?: ServerSettings;
+  static?: StaticConfig;
+  ipc?: ServerIpcConfig;
+  workers?: WorkerConfig;
+  python?: PythonConfig;
   hostname?: string;
   port?: number;
   reusePort?: boolean;
@@ -8,11 +50,44 @@ export interface ServerConfig {
   logLevel?: LogLevel;
 }
 
-const DEFAULT_CONFIG: Required<Pick<ServerConfig, "hostname" | "port" | "reusePort" | "logLevel">> = {
+export interface ResolvedServerSettings {
+  hostname: string;
+  port: number;
+  reusePort: boolean;
+  logLevel: LogLevel;
+  staticDir?: string;
+}
+
+export interface ResolvedServerConfig {
+  server: ResolvedServerSettings;
+  ipc: ServerIpcConfig;
+  workers: { count: number };
+  static: StaticConfig;
+  python: PythonConfig;
+}
+
+export interface ResolveConfigOptions {
+  configPath?: string;
+  skipFile?: boolean;
+}
+
+const DEFAULT_SERVER: ResolvedServerSettings = {
   hostname: "127.0.0.1",
   port: 8000,
   reusePort: false,
   logLevel: "info",
+};
+
+export function defineConfig(config: ServerConfig): ServerConfig {
+  return config;
+}
+
+type NormalizedConfig = {
+  server: ServerSettings;
+  static: StaticConfig;
+  ipc: ServerIpcConfig;
+  workers: WorkerConfig;
+  python: PythonConfig;
 };
 
 function readEnvNumber(value: string | undefined): number | undefined {
@@ -23,20 +98,220 @@ function readEnvNumber(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-export function loadConfig(overrides: ServerConfig = {}): ServerConfig {
+function readEnvBoolean(value: string | undefined): boolean | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value === "1") {
+    return true;
+  }
+  if (value === "0") {
+    return false;
+  }
+  const normalized = value.toLowerCase();
+  if (normalized === "true") {
+    return true;
+  }
+  if (normalized === "false") {
+    return false;
+  }
+  return undefined;
+}
+
+function readEnvWorkers(value: string | undefined): WorkerCount | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value.toLowerCase() === "auto") {
+    return "auto";
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function normalizeConfig(config: ServerConfig | undefined): NormalizedConfig {
+  return {
+    server: {
+      host: config?.server?.host ?? config?.server?.hostname ?? config?.hostname,
+      hostname: config?.server?.hostname,
+      port: config?.server?.port ?? config?.port,
+      reusePort: config?.server?.reusePort ?? config?.reusePort,
+      staticDir: config?.server?.staticDir ?? config?.staticDir,
+      logLevel: config?.server?.logLevel ?? config?.logLevel,
+      workers: config?.server?.workers,
+    },
+    static: {
+      dir: config?.static?.dir ?? config?.staticDir,
+      maxAge: config?.static?.maxAge,
+    },
+    ipc: { ...(config?.ipc ?? {}) },
+    workers: {
+      count: config?.workers?.count,
+    },
+    python: {
+      ...(config?.python ?? {}),
+    },
+  };
+}
+
+function mergeNormalized(base: NormalizedConfig, override: NormalizedConfig): NormalizedConfig {
+  return {
+    server: { ...base.server, ...override.server },
+    static: { ...base.static, ...override.static },
+    ipc: { ...base.ipc, ...override.ipc },
+    workers: { ...base.workers, ...override.workers },
+    python: { ...base.python, ...override.python },
+  };
+}
+
+function mergeConfigs(...configs: Array<ServerConfig | undefined | null>): NormalizedConfig {
+  const empty: NormalizedConfig = { server: {}, static: {}, ipc: {}, workers: {}, python: {} };
+  return configs.reduce((acc, config) => mergeNormalized(acc, normalizeConfig(config ?? undefined)), empty);
+}
+
+function resolveWorkerCount(config: NormalizedConfig): number {
+  const explicit = config.workers.count ?? config.server.workers ?? config.python.workers;
+  if (typeof explicit === "number") {
+    return Math.max(1, Math.floor(explicit));
+  }
+  const auto = typeof explicit === "string" && explicit.toLowerCase() === "auto";
+  if (auto || explicit === undefined) {
+    const available =
+      typeof Bun !== "undefined" && typeof Bun.availableParallelism === "function"
+        ? Bun.availableParallelism()
+        : globalThis.navigator?.hardwareConcurrency ?? 1;
+    return Math.max(1, Math.floor(available));
+  }
+  return 1;
+}
+
+function buildResolvedConfig(config: NormalizedConfig): ResolvedServerConfig {
+  const workerCount = resolveWorkerCount(config);
+  const ipcDefaults = resolveIpcConfig(config.ipc ?? {}, undefined, { preserveTemplate: true });
+  const ipcProtocol = config.ipc?.protocol ?? "msgpack";
+  if (ipcProtocol !== "msgpack" && ipcProtocol !== "protobuf") {
+    throw new Error(`Unsupported IPC protocol: ${ipcProtocol}`);
+  }
+  const ipc: ServerIpcConfig = {
+    ...ipcDefaults,
+    protocol: ipcProtocol,
+  };
+  if (config.ipc.path) {
+    ipc.path = config.ipc.path;
+  } else {
+    delete ipc.path;
+  }
+
+  return {
+    server: {
+      hostname: config.server.host ?? config.server.hostname ?? DEFAULT_SERVER.hostname,
+      port: config.server.port ?? DEFAULT_SERVER.port,
+      reusePort: config.server.reusePort ?? DEFAULT_SERVER.reusePort,
+      logLevel: config.server.logLevel ?? DEFAULT_SERVER.logLevel,
+      staticDir: config.static.dir ?? config.server.staticDir,
+    },
+    ipc,
+    workers: { count: workerCount },
+    static: config.static ?? {},
+    python: config.python ?? {},
+  };
+}
+
+function loadEnvConfig(): ServerConfig {
   const envHost = process.env.VERTEBRA_HOST;
   const envPort = readEnvNumber(process.env.VERTEBRA_PORT);
   const envStatic = process.env.VERTEBRA_STATIC_DIR;
-  const envReuse = process.env.VERTEBRA_REUSE_PORT;
+  const envReuse = readEnvBoolean(process.env.VERTEBRA_REUSE_PORT);
   const envLog = process.env.VERTEBRA_LOG_LEVEL as LogLevel | undefined;
+  const envWorkers = readEnvWorkers(process.env.VERTEBRA_WORKERS);
+
+  const envIpcTransport = process.env.VERTEBRA_IPC_TRANSPORT as IpcTransport | undefined;
+  const envIpcProtocol = process.env.VERTEBRA_IPC_PROTOCOL as IpcProtocol | undefined;
+  const envIpcHost = process.env.VERTEBRA_IPC_HOST;
+  const envIpcPort = readEnvNumber(process.env.VERTEBRA_IPC_PORT);
+  const envIpcPath = process.env.VERTEBRA_IPC_PATH;
+  const envIpcTimeout = readEnvNumber(process.env.VERTEBRA_IPC_TIMEOUT_MS);
+  const envIpcRetries = readEnvNumber(process.env.VERTEBRA_IPC_RETRIES);
+  const envIpcRetryDelay = readEnvNumber(process.env.VERTEBRA_IPC_RETRY_DELAY_MS);
+  const envIpcPoolSize = readEnvNumber(process.env.VERTEBRA_IPC_POOL_SIZE);
+  const envIpcPoolMax = readEnvNumber(process.env.VERTEBRA_IPC_POOL_MAX);
+  const envIpcAcquireTimeout = readEnvNumber(process.env.VERTEBRA_IPC_ACQUIRE_TIMEOUT_MS);
+  const envPythonApp = process.env.VERTEBRA_PYTHON_APP;
+  const envPythonWorkers = readEnvWorkers(process.env.VERTEBRA_PYTHON_WORKERS);
+  const envPythonTimeout = readEnvNumber(process.env.VERTEBRA_PYTHON_TIMEOUT);
+  const envPythonVenv = process.env.VERTEBRA_PYTHON_VENV;
 
   return {
-    hostname: overrides.hostname ?? envHost ?? DEFAULT_CONFIG.hostname,
-    port: overrides.port ?? envPort ?? DEFAULT_CONFIG.port,
-    reusePort:
-      overrides.reusePort ??
-      (envReuse ? envReuse === "1" || envReuse.toLowerCase() === "true" : DEFAULT_CONFIG.reusePort),
-    staticDir: overrides.staticDir ?? envStatic,
-    logLevel: overrides.logLevel ?? envLog ?? DEFAULT_CONFIG.logLevel,
+    server: {
+      host: envHost ?? undefined,
+      port: envPort ?? undefined,
+      reusePort: envReuse ?? undefined,
+      logLevel: envLog ?? undefined,
+      workers: envWorkers ?? undefined,
+    },
+    static: {
+      dir: envStatic ?? undefined,
+    },
+    ipc: {
+      transport: envIpcTransport ?? undefined,
+      protocol: envIpcProtocol ?? undefined,
+      host: envIpcHost ?? undefined,
+      port: envIpcPort ?? undefined,
+      path: envIpcPath ?? undefined,
+      timeoutMs: envIpcTimeout ?? undefined,
+      retries: envIpcRetries ?? undefined,
+      retryDelayMs: envIpcRetryDelay ?? undefined,
+      poolSize: envIpcPoolSize ?? undefined,
+      poolMax: envIpcPoolMax ?? undefined,
+      acquireTimeoutMs: envIpcAcquireTimeout ?? undefined,
+    },
+    python: {
+      app: envPythonApp ?? undefined,
+      workers: envPythonWorkers ?? undefined,
+      timeout: envPythonTimeout ?? undefined,
+      venv: envPythonVenv ?? undefined,
+    },
   };
+}
+
+async function loadConfigFile(configPath?: string): Promise<ServerConfig | null> {
+  const candidates: string[] = [];
+  if (configPath) {
+    candidates.push(configPath);
+  } else if (process.env.VERTEBRA_CONFIG) {
+    candidates.push(process.env.VERTEBRA_CONFIG);
+  } else {
+    candidates.push("vertebra.config.ts", "vertebra.config.js");
+  }
+
+  for (const candidate of candidates) {
+    const resolved = resolvePath(process.cwd(), candidate);
+    const file = Bun.file(resolved);
+    if (await file.exists()) {
+      const module = await import(pathToFileURL(resolved).href);
+      const config = module.default ?? module.config ?? module.vertebraConfig;
+      if (!config || typeof config !== "object") {
+        throw new Error(`Invalid vertebra config export in ${resolved}`);
+      }
+      return config as ServerConfig;
+    }
+  }
+
+  return null;
+}
+
+export function loadConfig(overrides: ServerConfig = {}): ResolvedServerConfig {
+  const envConfig = loadEnvConfig();
+  const merged = mergeConfigs(envConfig, overrides);
+  return buildResolvedConfig(merged);
+}
+
+export async function resolveServerConfig(
+  overrides: ServerConfig = {},
+  options: ResolveConfigOptions = {},
+): Promise<ResolvedServerConfig> {
+  const envConfig = loadEnvConfig();
+  const fileConfig = options.skipFile ? null : await loadConfigFile(options.configPath);
+  const merged = mergeConfigs(fileConfig, envConfig, overrides);
+  return buildResolvedConfig(merged);
 }

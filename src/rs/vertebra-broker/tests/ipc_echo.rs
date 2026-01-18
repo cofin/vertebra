@@ -21,7 +21,9 @@ async fn tcp_echo_roundtrip() {
 
     let server = IpcServer::new(config);
     let handler = |request: BrokerRequest| match request {
-        BrokerRequest::Health { pool } => BrokerResponse::Health { ok: pool == "default" },
+        BrokerRequest::Health { pool } => BrokerResponse::Health {
+            ok: pool == "default",
+        },
         _ => BrokerResponse::Error {
             message: "unsupported".into(),
         },

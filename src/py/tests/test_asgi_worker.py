@@ -40,13 +40,50 @@ async def test_asgi_worker_roundtrip() -> None:
     writer.write(len(encoded).to_bytes(4, "big") + encoded)
     await writer.drain()
 
-    header = await reader.readexactly(4)
-    size = int.from_bytes(header, "big")
-    response_payload = await reader.readexactly(size)
-    response = decoder.decode(response_payload)
-    assert response["status"] == 200
-    assert response["body"] == b"hello"
+    status = None
+    body = b""
+    while True:
+        header = await reader.readexactly(4)
+        size = int.from_bytes(header, "big")
+        response_payload = await reader.readexactly(size)
+        response = decoder.decode(response_payload)
+        if response["type"] == "http.response.start":
+            status = response["status"]
+        elif response["type"] == "http.response.body":
+            body += response.get("body", b"")
+            if not response.get("more_body", False):
+                break
+
+    assert status == 200
+    assert body == b"hello"
 
     writer.close()
     await writer.wait_closed()
     await worker.stop()
+
+
+@pytest.mark.anyio
+async def test_asgi_worker_lifespan() -> None:
+    startup = asyncio.Event()
+    shutdown = asyncio.Event()
+
+    async def lifespan_app(scope, receive, send) -> None:
+        if scope["type"] == "lifespan":
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    startup.set()
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    shutdown.set()
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+        else:
+            await send({"type": "http.response.start", "status": 204, "headers": []})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    worker = AsgiWorker(lifespan_app, WorkerConfig(host="127.0.0.1", port=0))
+    await worker.start()
+    assert startup.is_set()
+    await worker.stop()
+    assert shutdown.is_set()
