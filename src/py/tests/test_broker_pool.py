@@ -40,11 +40,7 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
 async def test_broker_pool_context_manager() -> None:
     server = await asyncio.start_server(_handle_client, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
-    pool = BrokerPool(
-        pool="default",
-        client_config=BrokerClientConfig(host="127.0.0.1", port=port),
-        max_clients=2,
-    )
+    pool = BrokerPool(pool="default", client_config=BrokerClientConfig(host="127.0.0.1", port=port), max_clients=2)
 
     async with await pool.acquire() as token:
         assert token == "lease-1"

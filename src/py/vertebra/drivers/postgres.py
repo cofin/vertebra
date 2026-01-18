@@ -183,11 +183,7 @@ class SyncPostgresConnection(SyncConnection):
 
 class AsyncPostgresConnection(AsyncConnection):
     def __init__(
-        self,
-        client: IpcClient,
-        connection_string: str,
-        connection_id: str | None = None,
-        pool_max: int | None = None,
+        self, client: IpcClient, connection_string: str, connection_id: str | None = None, pool_max: int | None = None
     ) -> None:
         self._client = client
         self._connection_string = connection_string
@@ -350,11 +346,7 @@ class AsyncPostgresDriver(AsyncDriver):
 
     async def _connect(self, pool_max: int | None = None) -> AsyncPostgresConnection:
         client = IpcClient(self._config.ipc)
-        connection = AsyncPostgresConnection(
-            client,
-            self._config.connection_string,
-            pool_max=pool_max,
-        )
+        connection = AsyncPostgresConnection(client, self._config.connection_string, pool_max=pool_max)
         await connection._ensure_connection()
         return connection
 
@@ -378,10 +370,7 @@ class SyncPostgresTransaction:
         return self
 
     def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
         if exc_type:
             self._connection._execute("ROLLBACK", [])
@@ -402,10 +391,7 @@ class AsyncPostgresTransaction:
         return self
 
     async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
         if exc_type:
             await self._connection._execute("ROLLBACK", [])
@@ -413,7 +399,7 @@ class AsyncPostgresTransaction:
             await self._connection._execute("COMMIT", [])
 
 
-__all__ = [
+__all__ = (
     "AsyncPostgresConnection",
     "AsyncPostgresCursor",
     "AsyncPostgresDriver",
@@ -425,4 +411,4 @@ __all__ = [
     "SyncPostgresDriverConfig",
     "SyncPostgresPool",
     "SyncPostgresTransaction",
-]
+)

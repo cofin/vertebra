@@ -26,10 +26,7 @@ class BrokerLease:
         return self.token
 
     async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
         await self.pool.release(self.client, self.token)
 
@@ -91,4 +88,4 @@ class BrokerPool:
         await self._client_pool.close()
 
 
-__all__ = ["BrokerClientPool", "BrokerLease", "BrokerPool", "BrokerPoolError"]
+__all__ = ("BrokerClientPool", "BrokerLease", "BrokerPool", "BrokerPoolError")

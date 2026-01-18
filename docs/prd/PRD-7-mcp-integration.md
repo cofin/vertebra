@@ -3,12 +3,18 @@
 **Status**: In Progress
 **Version**: 1.0
 **Created**: 2026-01-17
+**Last Updated**: 2026-01-18
 **Author**: Vertebra Team
 **Dependencies**: PRD-1 (Rust IPC Layer), PRD-2 (Python Bindings), PRD-3 (Bun Server)
 
 > **Cross-PRD Decisions**: See [PRD-0 Cross-PRD Architectural Decisions](./PRD-0-foundation.md#cross-prd-architectural-decisions) for serialization strategy (Protobuf for MCP control plane), Python version (3.12+), and protocol priorities.
 
 ---
+
+## Progress Update (2026-01-18)
+
+- Added MCP TypeScript server skeleton and JSON‑RPC handler stubs.
+- Added MCP IPC bridge placeholder for future transport wiring.
 
 ## Executive Summary
 

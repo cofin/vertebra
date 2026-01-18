@@ -20,7 +20,7 @@ from vertebra.types.ir import (
     UnknownType,
 )
 
-__all__ = [
+__all__ = (
     "AnnotatedType",
     "ArrayType",
     "GenericType",
@@ -30,11 +30,15 @@ __all__ = [
     "PrimitiveType",
     "RawType",
     "TupleType",
+    "TypeBridge",
+    "TypeBridgeApp",
+    "TypeBridgeWatcher",
     "TypeExtractor",
     "TypeNode",
+    "TypeScriptGenerator",
     "UnionType",
     "UnknownType",
-]
+)
 
 
 def __getattr__(name: str) -> Any:
@@ -55,6 +59,3 @@ def __getattr__(name: str) -> Any:
 
         return TypeBridgeWatcher
     raise AttributeError(name)
-
-
-__all__ += ["TypeBridge", "TypeBridgeApp", "TypeBridgeWatcher", "TypeScriptGenerator"]

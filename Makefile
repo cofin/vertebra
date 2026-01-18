@@ -336,6 +336,16 @@ js-lint:                                           ## Run TypeScript linting and
 	@cd src/ts && bunx @biomejs/biome check --write --unsafe src/ --files-ignore-unknown=true --no-errors-on-unmatched
 	@cd $(CURDIR) && echo "${OK} TypeScript linting complete ✨"
 
+.PHONY: js-format
+js-format:                                         ## Format TypeScript with Biome
+	@echo "${INFO} Formatting TypeScript with Biome... 🎨"
+	@if ! command -v bun >/dev/null 2>&1; then \
+		echo "${ERROR} bun not found; run 'make install-bun'"; \
+		exit 1; \
+	fi
+	@cd src/ts && bunx @biomejs/biome format --write src
+	@cd $(CURDIR) && echo "${OK} TypeScript formatting complete ✨"
+
 
 # =============================================================================
 # Python Development
@@ -405,7 +415,7 @@ fix:                                               ## Run formatting scripts
 	@echo "${INFO} Running code formatters... 🔧"
 	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests tools/
 	@uv run ruff format src/py/vertebra src/py/tests tools/
-	@cd src/ts && bunx @biomejs/biome check --write --unsafe src/ --files-ignore-unknown=true --no-errors-on-unmatched >/dev/null 2>&1
+	@$(MAKE) js-format
 	@cd $(CURDIR) && echo "${OK} Code formatting complete ✨"
 
 .PHONY: fmt
@@ -413,11 +423,14 @@ fmt:                                               ## Run formatting scripts
 	@echo "${INFO} Running code formatters... 🔧"
 	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests tools/
 	@uv run ruff format src/py/vertebra src/py/tests tools/
-	@cd src/ts && bunx @biomejs/biome check --write --unsafe src/ --files-ignore-unknown=true --no-errors-on-unmatched >/dev/null 2>&1
+	@$(MAKE) js-format
 	@cd $(CURDIR) && echo "${OK} Code formatting complete ✨"
 
 .PHONY: lint
-lint: py-lint js-lint rs-lint pre-commit type-check slotscheck ## Run all linting
+lint: py-lint js-format rs-fmt                     ## Format Python/TS/Rust with fixes
+
+.PHONY: lint-all
+lint-all: py-lint js-lint rs-lint pre-commit type-check slotscheck ## Run all linting
 
 .PHONY: coverage
 coverage:                                          ## Run the tests and generate coverage report

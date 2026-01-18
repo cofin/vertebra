@@ -89,25 +89,13 @@ class SyncObjectStore(Protocol):
     def iter_chunks(self, path: str, *, chunk_size: int = 8 * 1024 * 1024) -> Iterator[bytes]:
         """Iterate over object contents in chunks."""
 
-    def put_stream(
-        self,
-        path: str,
-        chunks: Iterator[bytes],
-        *,
-        options: PutOptions | None = None,
-    ) -> PutResult:
+    def put_stream(self, path: str, chunks: Iterator[bytes], *, options: PutOptions | None = None) -> PutResult:
         """Write object contents from a chunk iterator."""
 
     def download_to_path(self, path: str, local_path: str) -> int:
         """Download object to a local file path."""
 
-    def upload_from_path(
-        self,
-        local_path: str,
-        path: str,
-        *,
-        options: PutOptions | None = None,
-    ) -> PutResult:
+    def upload_from_path(self, local_path: str, path: str, *, options: PutOptions | None = None) -> PutResult:
         """Upload object from a local file path."""
 
     def signed_url(
@@ -160,24 +148,14 @@ class AsyncObjectStore(Protocol):
         """Iterate over object contents in chunks asynchronously."""
 
     async def put_stream(
-        self,
-        path: str,
-        chunks: AsyncIterator[bytes],
-        *,
-        options: PutOptions | None = None,
+        self, path: str, chunks: AsyncIterator[bytes], *, options: PutOptions | None = None
     ) -> PutResult:
         """Write object contents from an async chunk iterator."""
 
     async def download_to_path(self, path: str, local_path: str) -> int:
         """Download object to a local file path asynchronously."""
 
-    async def upload_from_path(
-        self,
-        local_path: str,
-        path: str,
-        *,
-        options: PutOptions | None = None,
-    ) -> PutResult:
+    async def upload_from_path(self, local_path: str, path: str, *, options: PutOptions | None = None) -> PutResult:
         """Upload object from a local file path asynchronously."""
 
     async def signed_url(
@@ -338,13 +316,7 @@ class SyncObjectStoreImpl:
             yield self.get_range(path, ByteRange(offset, length))
             offset += length
 
-    def put_stream(
-        self,
-        path: str,
-        chunks: Iterator[bytes],
-        *,
-        options: PutOptions | None = None,
-    ) -> PutResult:
+    def put_stream(self, path: str, chunks: Iterator[bytes], *, options: PutOptions | None = None) -> PutResult:
         if self._is_local:
             resolved = Path(self._resolve(path))
             resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -377,19 +349,10 @@ class SyncObjectStoreImpl:
                 return dst.write(src.read())
         return self._client.read_file(self._resolve(path), local_path)
 
-    def upload_from_path(
-        self,
-        local_path: str,
-        path: str,
-        *,
-        options: PutOptions | None = None,
-    ) -> PutResult:
+    def upload_from_path(self, local_path: str, path: str, *, options: PutOptions | None = None) -> PutResult:
         opts = options or PutOptions()
         bytes_written = self._client.write_file(
-            self._resolve(path),
-            local_path,
-            content_type=opts.content_type,
-            metadata=opts.metadata,
+            self._resolve(path), local_path, content_type=opts.content_type, metadata=opts.metadata
         )
         return PutResult(bytes=bytes_written)
 
@@ -405,11 +368,7 @@ class SyncObjectStoreImpl:
         if self._is_local:
             return None
         return self._client.signed_url(
-            self._resolve(path),
-            method=method,
-            expires_in=expires_in,
-            content_type=content_type,
-            acl=acl,
+            self._resolve(path), method=method, expires_in=expires_in, content_type=content_type, acl=acl
         )
 
 
@@ -502,11 +461,7 @@ class AsyncObjectStoreImpl:
             offset += length
 
     async def put_stream(
-        self,
-        path: str,
-        chunks: AsyncIterator[bytes],
-        *,
-        options: PutOptions | None = None,
+        self, path: str, chunks: AsyncIterator[bytes], *, options: PutOptions | None = None
     ) -> PutResult:
         temp_path = await _write_chunks_to_temp(chunks)
         try:
@@ -528,19 +483,10 @@ class AsyncObjectStoreImpl:
             return await _run_in_thread(_copy)
         return await self._client.read_file(self._resolve(path), local_path)
 
-    async def upload_from_path(
-        self,
-        local_path: str,
-        path: str,
-        *,
-        options: PutOptions | None = None,
-    ) -> PutResult:
+    async def upload_from_path(self, local_path: str, path: str, *, options: PutOptions | None = None) -> PutResult:
         opts = options or PutOptions()
         bytes_written = await self._client.write_file(
-            self._resolve(path),
-            local_path,
-            content_type=opts.content_type,
-            metadata=opts.metadata,
+            self._resolve(path), local_path, content_type=opts.content_type, metadata=opts.metadata
         )
         return PutResult(bytes=bytes_written)
 
@@ -556,11 +502,7 @@ class AsyncObjectStoreImpl:
         if self._is_local:
             return None
         return await self._client.signed_url(
-            self._resolve(path),
-            method=method,
-            expires_in=expires_in,
-            content_type=content_type,
-            acl=acl,
+            self._resolve(path), method=method, expires_in=expires_in, content_type=content_type, acl=acl
         )
 
 
@@ -610,10 +552,7 @@ class S3Store(SyncObjectStoreImpl):
         options: dict[str, Any] | None = None,
         client: FileSystemClient | None = None,
     ) -> None:
-        super().__init__(
-            client or FileSystemClient(backend="s3", bucket=bucket, options=options),
-            prefix=prefix,
-        )
+        super().__init__(client or FileSystemClient(backend="s3", bucket=bucket, options=options), prefix=prefix)
 
 
 class AsyncS3Store(AsyncObjectStoreImpl):
@@ -625,10 +564,7 @@ class AsyncS3Store(AsyncObjectStoreImpl):
         options: dict[str, Any] | None = None,
         client: AsyncFileSystemClient | None = None,
     ) -> None:
-        super().__init__(
-            client or AsyncFileSystemClient(backend="s3", bucket=bucket, options=options),
-            prefix=prefix,
-        )
+        super().__init__(client or AsyncFileSystemClient(backend="s3", bucket=bucket, options=options), prefix=prefix)
 
 
 class GCSStore(SyncObjectStoreImpl):
@@ -640,10 +576,7 @@ class GCSStore(SyncObjectStoreImpl):
         options: dict[str, Any] | None = None,
         client: FileSystemClient | None = None,
     ) -> None:
-        super().__init__(
-            client or FileSystemClient(backend="gcs", bucket=bucket, options=options),
-            prefix=prefix,
-        )
+        super().__init__(client or FileSystemClient(backend="gcs", bucket=bucket, options=options), prefix=prefix)
 
 
 class AsyncGCSStore(AsyncObjectStoreImpl):
@@ -655,10 +588,7 @@ class AsyncGCSStore(AsyncObjectStoreImpl):
         options: dict[str, Any] | None = None,
         client: AsyncFileSystemClient | None = None,
     ) -> None:
-        super().__init__(
-            client or AsyncFileSystemClient(backend="gcs", bucket=bucket, options=options),
-            prefix=prefix,
-        )
+        super().__init__(client or AsyncFileSystemClient(backend="gcs", bucket=bucket, options=options), prefix=prefix)
 
 
 StoreFactory = Callable[..., SyncObjectStore]
@@ -671,11 +601,7 @@ class StoreRegistry:
         self._async: dict[str, AsyncStoreFactory] = {}
 
     def register(
-        self,
-        scheme: str,
-        *,
-        sync_factory: StoreFactory | None = None,
-        async_factory: AsyncStoreFactory | None = None,
+        self, scheme: str, *, sync_factory: StoreFactory | None = None, async_factory: AsyncStoreFactory | None = None
     ) -> None:
         if sync_factory:
             self._sync[scheme] = sync_factory
@@ -719,7 +645,7 @@ def async_store_from_url(url: str, *, options: dict[str, Any] | None = None) -> 
     return store_registry.from_url(url, async_=True, options=options)
 
 
-__all__ = [
+__all__ = (
     "AsyncGCSStore",
     "AsyncLocalStore",
     "AsyncObjectStore",
@@ -740,4 +666,4 @@ __all__ = [
     "async_store_from_url",
     "store_from_url",
     "store_registry",
-]
+)

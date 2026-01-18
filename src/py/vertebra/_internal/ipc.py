@@ -41,9 +41,7 @@ def require_bun() -> None:
             "Bun runtime is required for Bun-backed drivers. "
             "Install Bun or set VERTEBRA_BUN_SKIP_CHECK=1 to bypass in tests."
         )
-        raise BunRuntimeError(
-            msg
-        )
+        raise BunRuntimeError(msg)
 
 
 class IpcClient:
@@ -66,9 +64,7 @@ class IpcClient:
                 raise IpcError(msg)
             self._reader, self._writer = await asyncio.open_unix_connection(self._config.path)
         else:
-            self._reader, self._writer = await asyncio.open_connection(
-                self._config.host, self._config.port
-            )
+            self._reader, self._writer = await asyncio.open_connection(self._config.host, self._config.port)
 
     async def close(self) -> None:
         """Close the IPC connection."""
@@ -100,13 +96,9 @@ class IpcClient:
                 frame = len(encoded).to_bytes(4, "big") + encoded
                 self._writer.write(frame)
                 await self._writer.drain()
-                header = await asyncio.wait_for(
-                    self._reader.readexactly(4), timeout=self._config.timeout
-                )
+                header = await asyncio.wait_for(self._reader.readexactly(4), timeout=self._config.timeout)
                 size = int.from_bytes(header, "big")
-                data = await asyncio.wait_for(
-                    self._reader.readexactly(size), timeout=self._config.timeout
-                )
+                data = await asyncio.wait_for(self._reader.readexactly(size), timeout=self._config.timeout)
                 return self._codec.decode(data)
             except Exception as exc:
                 last_error = exc
@@ -169,23 +161,12 @@ class IpcPool:
             frame = len(encoded).to_bytes(4, "big") + encoded
             connection.writer.write(frame)
             await connection.writer.drain()
-            header = await asyncio.wait_for(
-                connection.reader.readexactly(4), timeout=self._config.timeout
-            )
+            header = await asyncio.wait_for(connection.reader.readexactly(4), timeout=self._config.timeout)
             size = int.from_bytes(header, "big")
-            data = await asyncio.wait_for(
-                connection.reader.readexactly(size), timeout=self._config.timeout
-            )
+            data = await asyncio.wait_for(connection.reader.readexactly(size), timeout=self._config.timeout)
             return self._codec.decode(data)
         finally:
             await self.release(connection)
 
 
-__all__ = [
-    "BunRuntimeError",
-    "IpcClient",
-    "IpcConfig",
-    "IpcError",
-    "IpcPool",
-    "require_bun",
-]
+__all__ = ("BunRuntimeError", "IpcClient", "IpcConfig", "IpcError", "IpcPool", "require_bun")

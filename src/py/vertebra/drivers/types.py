@@ -104,11 +104,4 @@ def decode_sqlite(value: Any, type_name: str | None = None) -> Any:
     return value
 
 
-__all__ = [
-    "decode_mysql",
-    "decode_postgres",
-    "decode_sqlite",
-    "encode_mysql",
-    "encode_postgres",
-    "encode_sqlite",
-]
+__all__ = ("decode_mysql", "decode_postgres", "decode_sqlite", "encode_mysql", "encode_postgres", "encode_sqlite")

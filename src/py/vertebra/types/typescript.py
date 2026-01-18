@@ -65,14 +65,10 @@ class TypeScriptGenerator:
         return node.to_typescript()
 
     def _render_interface(self, name: str, obj: ObjectType) -> str:
-        type_params = self._render_type_params(
-            obj.type_params, obj.type_param_constraints
-        )
+        type_params = self._render_type_params(obj.type_params, obj.type_param_constraints)
         kind = "type" if name in self.cyclic_types else "interface"
         head = (
-            f"export {kind} {name}{type_params} = {{"
-            if kind == "type"
-            else f"export interface {name}{type_params} {{"
+            f"export {kind} {name}{type_params} = {{" if kind == "type" else f"export interface {name}{type_params} {{"
         )
         lines = [head]
         for field_name, field_type in obj.fields.items():
@@ -86,11 +82,7 @@ class TypeScriptGenerator:
         lines.append("}")
         return "\n".join(lines)
 
-    def _render_type_params(
-        self,
-        params: tuple[str, ...],
-        constraints: dict[str, TypeNode],
-    ) -> str:
+    def _render_type_params(self, params: tuple[str, ...], constraints: dict[str, TypeNode]) -> str:
         if not params:
             return ""
         rendered: list[str] = []
@@ -274,11 +266,7 @@ def format_typescript(output: str) -> str:
     if command is None:
         return output
     result = subprocess.run(
-        [*command, "--parser", "typescript"],
-        input=output,
-        capture_output=True,
-        text=True,
-        check=False,
+        [*command, "--parser", "typescript"], input=output, capture_output=True, text=True, check=False
     )
     if result.returncode != 0:
         return output

@@ -2,6 +2,7 @@
 
 **Status**: In Progress
 **Created**: 2026-01-17
+**Last Updated**: 2026-01-18
 **Owner**: Vertebra Core Team
 **Dependencies**: PRD-2 (Python Bindings), PRD-3 (Bun Server)
 
@@ -19,6 +20,13 @@ PRD-4 defines the implementation of high-performance database drivers, file syst
 - Maintain seamless integration with existing Python ecosystem (SQLSpec, pandas, dask)
 
 ---
+
+## Progress Update (2026-01-18)
+
+- Implemented Sync/Async drivers (Postgres/MySQL/SQLite/Redis) with DB‑API style cursors/pools.
+- Added Bun driver IPC transport + MessagePack codec (Python/TS).
+- Added filesystem IPC server + local/S3/GCS clients; object store protocol with streaming helpers.
+- Added signed URL support with graceful fallback where unsupported (GCS deferred).
 
 ## Problem Statement
 

@@ -24,12 +24,7 @@ class _LocalFsStub:
         return data[offset : offset + length]
 
     def write_bytes(
-        self,
-        path: str,
-        data: bytes,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, path: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(data)
@@ -47,10 +42,7 @@ class _LocalFsStub:
                 stat = entry.stat()
                 entries.append(
                     FileEntry(
-                        path=str(entry),
-                        is_dir=False,
-                        size=stat.st_size,
-                        modified=entry.stat().st_mtime.__str__(),
+                        path=str(entry), is_dir=False, size=stat.st_size, modified=entry.stat().st_mtime.__str__()
                     )
                 )
         return entries
@@ -97,12 +89,7 @@ class _LocalFsStub:
         return dst.stat().st_size
 
     def write_file(
-        self,
-        path: str,
-        local_path: str,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, path: str, local_path: str, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         src = Path(local_path)
         dst = Path(path)
@@ -130,12 +117,7 @@ class _AsyncLocalFsStub(_LocalFsStub):
         return super().read_range(path, offset, length)
 
     async def write_bytes(  # type: ignore[override]
-        self,
-        path: str,
-        data: bytes,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, path: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return super().write_bytes(path, data, content_type=content_type, metadata=metadata)
 
@@ -161,12 +143,7 @@ class _AsyncLocalFsStub(_LocalFsStub):
         return super().read_file(path, local_path)
 
     async def write_file(  # type: ignore[override]
-        self,
-        path: str,
-        local_path: str,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, path: str, local_path: str, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return super().write_file(path, local_path, content_type=content_type, metadata=metadata)
 

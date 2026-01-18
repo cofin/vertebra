@@ -13,7 +13,7 @@ from vertebra.procedures.serialization import (
     register_serializer,
 )
 
-__all__ = [
+__all__ = (
     "MsgspecSerializer",
     "ProcedureMetadata",
     "ProcedureRegistry",
@@ -23,4 +23,4 @@ __all__ = [
     "get_serializer",
     "procedure",
     "register_serializer",
-]
+)

@@ -14,8 +14,7 @@ def main() -> None:
     shm_name = f"{args.name}-shm"
     ring_name = f"{args.name}-ring"
 
-    region = _vertebra.ShmRegion.open_named(shm_name, 4096)
-    print("Shared memory says:", region.read(0, 14))
+    _vertebra.ShmRegion.open_named(shm_name, 4096)
 
     ring = _vertebra.SpscRing.open_named(ring_name, 64, 256)
     for _ in range(args.messages):

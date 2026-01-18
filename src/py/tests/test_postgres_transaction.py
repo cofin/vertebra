@@ -31,19 +31,11 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 sql = params.get("sql")
                 if isinstance(sql, str):
                     queries.append(sql)
-                response = {
-                    "id": request.get("id"),
-                    "ok": True,
-                    "result": {"columns": [], "rows": [], "rowcount": 0},
-                }
+                response = {"id": request.get("id"), "ok": True, "result": {"columns": [], "rows": [], "rowcount": 0}}
             elif method == "close":
                 response = {"id": request.get("id"), "ok": True, "result": {"closed": True}}
             else:
-                response = {
-                    "id": request.get("id"),
-                    "ok": False,
-                    "error": {"code": "postgres", "message": "unknown"},
-                }
+                response = {"id": request.get("id"), "ok": False, "error": {"code": "postgres", "message": "unknown"}}
             encoded = codec.encode(response)
             writer.write(len(encoded).to_bytes(4, "big") + encoded)
             await writer.drain()

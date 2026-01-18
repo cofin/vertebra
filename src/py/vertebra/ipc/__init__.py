@@ -13,7 +13,7 @@ SpscRing = _vertebra.SpscRing
 MpmcRing = _vertebra.MpmcRing
 BufferChannel = _vertebra.BufferChannel
 
-__all__ = [
+__all__ = (
     "Buffer",
     "BufferChannel",
     "BufferPool",
@@ -26,4 +26,4 @@ __all__ = [
     "ShmRegion",
     "SpscRing",
     "ZeroCopyChannel",
-]
+)

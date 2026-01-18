@@ -17,13 +17,7 @@ _MAX_NAME_LEN = 0xFFFF
 class ChannelError(RuntimeError):
     """Raised when channel operations fail."""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        procedure_id: str | None = None,
-        stage: str | None = None,
-    ) -> None:
+    def __init__(self, message: str, *, procedure_id: str | None = None, stage: str | None = None) -> None:
         super().__init__(_format_context(message, procedure_id, stage))
         self.procedure_id = procedure_id
         self.stage = stage
@@ -32,13 +26,7 @@ class ChannelError(RuntimeError):
 class SerializationError(RuntimeError):
     """Raised when serialization or deserialization fails."""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        procedure_id: str | None = None,
-        stage: str | None = None,
-    ) -> None:
+    def __init__(self, message: str, *, procedure_id: str | None = None, stage: str | None = None) -> None:
         super().__init__(_format_context(message, procedure_id, stage))
         self.procedure_id = procedure_id
         self.stage = stage
@@ -223,25 +211,13 @@ class Channel:
 
     @classmethod
     def create_named(
-        cls,
-        channel_id: str,
-        *,
-        slot_size: int = 4096,
-        slots: int = 64,
-        role: str = "client",
+        cls, channel_id: str, *, slot_size: int = 4096, slots: int = 64, role: str = "client"
     ) -> "Channel":
         handle = _vertebra.Channel.create_named(channel_id, slot_size, slots, role)
         return cls(handle)
 
     @classmethod
-    def open_named(
-        cls,
-        channel_id: str,
-        *,
-        slot_size: int = 4096,
-        slots: int = 64,
-        role: str = "client",
-    ) -> "Channel":
+    def open_named(cls, channel_id: str, *, slot_size: int = 4096, slots: int = 64, role: str = "client") -> "Channel":
         handle = _vertebra.Channel.open_named(channel_id, slot_size, slots, role)
         return cls(handle)
 
@@ -272,30 +248,16 @@ class Channel:
         try:
             payload = serializer_impl.serialize(params, dict)
         except Exception as exc:  # pragma: no cover - serializer dependent
-            raise SerializationError(
-                str(exc),
-                procedure_id=procedure_id,
-                stage="serialize_params",
-            ) from exc
+            raise SerializationError(str(exc), procedure_id=procedure_id, stage="serialize_params") from exc
         try:
             message = _encode_message(procedure_id, payload)
         except ChannelError as exc:
-            raise ChannelError(
-                str(exc),
-                procedure_id=procedure_id,
-                stage="encode_message",
-            ) from exc
+            raise ChannelError(str(exc), procedure_id=procedure_id, stage="encode_message") from exc
         if len(message) > self._max_payload:
             msg = "payload too large"
-            raise ChannelError(
-                msg,
-                procedure_id=procedure_id,
-                stage="send_request",
-            )
+            raise ChannelError(msg, procedure_id=procedure_id, stage="send_request")
         try:
-            supports_try = hasattr(self._handle, "try_send_request") and hasattr(
-                self._handle, "try_recv_response"
-            )
+            supports_try = hasattr(self._handle, "try_send_request") and hasattr(self._handle, "try_recv_response")
             if timeout_ms is None or not supports_try:
                 self._handle.send_request(message)
                 response = self._handle.recv_response(self._max_payload)
@@ -306,11 +268,7 @@ class Channel:
                         break
                     if time.monotonic() >= send_deadline:
                         msg = "send timeout"
-                        raise ChannelError(
-                            msg,
-                            procedure_id=procedure_id,
-                            stage="send_request",
-                        )
+                        raise ChannelError(msg, procedure_id=procedure_id, stage="send_request")
                     time.sleep(0.001)
                 recv_deadline = time.monotonic() + (timeout_ms / 1000.0)
                 response = None
@@ -320,26 +278,14 @@ class Channel:
                         break
                     if time.monotonic() >= recv_deadline:
                         msg = "response timeout"
-                        raise ChannelError(
-                            msg,
-                            procedure_id=procedure_id,
-                            stage="recv_response",
-                        )
+                        raise ChannelError(msg, procedure_id=procedure_id, stage="recv_response")
                     time.sleep(0.001)
         except RuntimeError as exc:
-            raise ChannelError(
-                str(exc),
-                procedure_id=procedure_id,
-                stage="ipc",
-            ) from exc
+            raise ChannelError(str(exc), procedure_id=procedure_id, stage="ipc") from exc
         try:
             return serializer_impl.deserialize(response, response_type)
         except Exception as exc:  # pragma: no cover - serializer dependent
-            raise SerializationError(
-                str(exc),
-                procedure_id=procedure_id,
-                stage="deserialize_response",
-            ) from exc
+            raise SerializationError(str(exc), procedure_id=procedure_id, stage="deserialize_response") from exc
 
     async def send(
         self,
@@ -360,11 +306,7 @@ class Channel:
         )
 
     def receive_sync(
-        self,
-        *,
-        timeout_ms: int | None = None,
-        params_type: type | None = None,
-        serializer: str | None = None,
+        self, *, timeout_ms: int | None = None, params_type: type | None = None, serializer: str | None = None
     ) -> tuple[str, Any]:
         self._require_handle()
         try:
@@ -394,34 +336,18 @@ class Channel:
         try:
             params = serializer_impl.deserialize(payload, params_type)
         except Exception as exc:  # pragma: no cover - serializer dependent
-            raise SerializationError(
-                str(exc),
-                procedure_id=procedure_id,
-                stage="deserialize_params",
-            ) from exc
+            raise SerializationError(str(exc), procedure_id=procedure_id, stage="deserialize_params") from exc
         return procedure_id, params
 
     async def receive(
-        self,
-        *,
-        timeout_ms: int | None = None,
-        params_type: type | None = None,
-        serializer: str | None = None,
+        self, *, timeout_ms: int | None = None, params_type: type | None = None, serializer: str | None = None
     ) -> tuple[str, Any]:
         return await asyncio.to_thread(
-            self.receive_sync,
-            timeout_ms=timeout_ms,
-            params_type=params_type,
-            serializer=serializer,
+            self.receive_sync, timeout_ms=timeout_ms, params_type=params_type, serializer=serializer
         )
 
     def respond_sync(
-        self,
-        procedure_id: str,
-        result: Any,
-        *,
-        response_type: type | None = None,
-        serializer: str | None = None,
+        self, procedure_id: str, result: Any, *, response_type: type | None = None, serializer: str | None = None
     ) -> None:
         self._require_handle()
         registry = ProcedureRegistry.instance()
@@ -430,39 +356,18 @@ class Channel:
         try:
             payload = serializer_impl.serialize(result, response_type)
         except Exception as exc:  # pragma: no cover - serializer dependent
-            raise SerializationError(
-                str(exc),
-                procedure_id=procedure_id,
-                stage="serialize_response",
-            ) from exc
+            raise SerializationError(str(exc), procedure_id=procedure_id, stage="serialize_response") from exc
         if len(payload) > self._max_payload:
             msg = "payload too large"
-            raise ChannelError(
-                msg,
-                procedure_id=procedure_id,
-                stage="send_response",
-            )
+            raise ChannelError(msg, procedure_id=procedure_id, stage="send_response")
         try:
             self._handle.send_response(payload)
         except RuntimeError as exc:
-            raise ChannelError(
-                str(exc),
-                procedure_id=procedure_id,
-                stage="send_response",
-            ) from exc
+            raise ChannelError(str(exc), procedure_id=procedure_id, stage="send_response") from exc
 
     async def respond(
-        self,
-        procedure_id: str,
-        result: Any,
-        *,
-        response_type: type | None = None,
-        serializer: str | None = None,
+        self, procedure_id: str, result: Any, *, response_type: type | None = None, serializer: str | None = None
     ) -> None:
         await asyncio.to_thread(
-            self.respond_sync,
-            procedure_id,
-            result,
-            response_type=response_type,
-            serializer=serializer,
+            self.respond_sync, procedure_id, result, response_type=response_type, serializer=serializer
         )

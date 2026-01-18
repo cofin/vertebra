@@ -1,6 +1,7 @@
 # PRD-7: MCP Integration - Session Recovery Guide
 
 **Created**: 2026-01-17
+**Last Updated**: 2026-01-18
 **Workspace**: `/home/cody/code/c/vertebra/docs/prd/PRD-7-mcp-integration/`
 
 ---
@@ -59,4 +60,3 @@ Python Tool/Resource Handlers
 1. Implement MCP JSON-RPC core in Bun.
 2. Add stdio transport and baseline conformance tests.
 3. Define MCP server module layout in `src/ts/src/mcp/`.
-

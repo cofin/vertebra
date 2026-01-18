@@ -35,11 +35,7 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             elif method == "close":
                 response = {"id": request.get("id"), "ok": True, "result": {"closed": True}}
             else:
-                response = {
-                    "id": request.get("id"),
-                    "ok": False,
-                    "error": {"code": "sqlite", "message": "unknown"},
-                }
+                response = {"id": request.get("id"), "ok": False, "error": {"code": "sqlite", "message": "unknown"}}
             encoded = codec.encode(response)
             writer.write(len(encoded).to_bytes(4, "big") + encoded)
             await writer.drain()
@@ -55,8 +51,7 @@ async def test_sqlite_driver_async_fetch() -> None:
     server = await asyncio.start_server(_handle_client, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     config = SyncSqliteDriverConfig(
-        path=":memory:",
-        ipc=IpcConfig(transport="tcp", host="127.0.0.1", port=port, enforce_bun=False),
+        path=":memory:", ipc=IpcConfig(transport="tcp", host="127.0.0.1", port=port, enforce_bun=False)
     )
     driver = AsyncSqliteDriver(config)
     conn = await driver.connect()

@@ -56,6 +56,8 @@ Integration tests, benchmarks, example apps, migration guides, and docs.
 **Status:** In Progress
 MCP server, tool/resource registry, schema generation, and transport support.
 
+**Note:** Integration tests are gated behind `--integration` and use Docker/Podman runtime abstraction (no compose).
+
 ## Planned PRDs
 ### PRD-8: Distributed Tracing
 OpenTelemetry integration, trace correlation across languages.

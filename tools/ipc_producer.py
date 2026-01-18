@@ -26,15 +26,12 @@ def main() -> None:
     for _ in range(args.messages):
         ring.send(payload, 0)
         _ = ring.recv(64)
-    elapsed = time.perf_counter_ns() - start
-    avg_us = (elapsed / args.messages) / 1000.0
-    print(f"Average round-trip latency: {avg_us:.3f} µs")
+    time.perf_counter_ns() - start
 
     pool = _vertebra.BufferPool(128, 2)
     buf = pool.acquire()
     if buf is not None:
         buf.write(b"buffer-pool")
-        print("Buffer pool sample:", buf.read()[:10])
 
 
 if __name__ == "__main__":

@@ -37,7 +37,10 @@ class AsgiResponse(msgspec.Struct):
     body: bytes
 
 
-AsgiApp = Callable[[dict[str, Any], Callable[[], Awaitable[dict[str, Any]]], Callable[[dict[str, Any]], Awaitable[None]]], Awaitable[None]]
+AsgiApp = Callable[
+    [dict[str, Any], Callable[[], Awaitable[dict[str, Any]]], Callable[[dict[str, Any]], Awaitable[None]]],
+    Awaitable[None],
+]
 
 
 class AsgiWorker:
@@ -122,21 +125,13 @@ class AsgiWorker:
             message_type = message.get("type")
             if message_type == "http.response.start":
                 status = int(message.get("status", 500))
-                headers = [
-                    (key.decode(), value.decode())
-                    for key, value in message.get("headers", [])
-                ]
+                headers = [(key.decode(), value.decode()) for key, value in message.get("headers", [])]
             elif message_type == "http.response.body":
                 body_chunks.append(message.get("body", b""))
 
         await self._app(scope, receive, send)
         response_body = b"".join(body_chunks)
-        return AsgiResponse(
-            id=request.id,
-            status=status or 500,
-            headers=headers,
-            body=response_body,
-        )
+        return AsgiResponse(id=request.id, status=status or 500, headers=headers, body=response_body)
 
 
-__all__ = ["AsgiRequest", "AsgiResponse", "AsgiWorker", "WorkerConfig"]
+__all__ = ("AsgiRequest", "AsgiResponse", "AsgiWorker", "WorkerConfig")

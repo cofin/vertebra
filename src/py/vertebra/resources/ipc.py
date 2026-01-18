@@ -38,9 +38,7 @@ class BrokerClient:
                 raise BrokerClientError(msg)
             self._reader, self._writer = await asyncio.open_unix_connection(self._config.path)
         else:
-            self._reader, self._writer = await asyncio.open_connection(
-                self._config.host, self._config.port
-            )
+            self._reader, self._writer = await asyncio.open_connection(self._config.host, self._config.port)
 
     async def close(self) -> None:
         if self._writer is None:
@@ -93,4 +91,4 @@ def _unwrap_response(response: dict[str, Any], expected: str) -> dict[str, Any]:
     return response[expected]
 
 
-__all__ = ["BrokerClient", "BrokerClientConfig", "BrokerClientError"]
+__all__ = ("BrokerClient", "BrokerClientConfig", "BrokerClientError")

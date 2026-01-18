@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 _MISSING = object()
 
+
 def procedure(
     _fn: Callable[..., Any] | None = None,
     *,

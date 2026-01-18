@@ -3,6 +3,7 @@
 **Version**: 1.0
 **Status**: Complete
 **Created**: 2026-01-17
+**Last Updated**: 2026-01-18
 **Author**: Claude Code
 **Dependencies**: PRD-0 (Foundation)
 
@@ -1468,9 +1469,9 @@ For detailed research notes, see `research/plan.md`.
 
 ## Progress Update
 
-**Last reviewed:** 2026-01-17
+**Last reviewed:** 2026-01-18
 
-### Completed (Foundation from PRD-0)
+### Completed
 - Rust workspace created in `src/rs` with `vertebra-core`, `vertebra-py`, `vertebra-js`.
 - PyO3 and napi-rs binding stubs exist and build.
 - Makefile targets for Rust build/test/lint/miri/bench are in place.
@@ -1480,11 +1481,12 @@ For detailed research notes, see `research/plan.md`.
 - SPSC ring operations wired with fixed-slot layout.
 - Buffer pool implemented (acquire/release, zero-copy slices).
 - SharedMutex/RwLock/Condvar implemented with wait/wake shims.
+- MPMC ring + buffer channel implemented with backpressure.
+- Benchmarks added for SPSC/MPMC throughput and latency.
+- Multi-process tests and crash-safe headers wired for shared memory.
 
 ### Next Steps
-- Add benchmarks for ring latency and throughput (criterion).
-- Implement robust shared-memory lifecycle (generation + heartbeat) and crash recovery tests.
-- Add macOS pthread shared-cond fallback (optional, non-perf path).
+- None (PRD-1 complete). Track new IPC extensions under PRD-5.
 
 ---
 
@@ -1502,4 +1504,4 @@ For detailed research notes, see `research/plan.md`.
 - [ ] Product Owner
 - [ ] Engineering Manager
 
-**Status**: In Progress - Approved to implement
+**Status**: Complete

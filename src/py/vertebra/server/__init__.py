@@ -34,4 +34,4 @@ def get_server_backend() -> ServerBackend:
     raise RuntimeError(msg)
 
 
-__all__ = ["AsgiWorker", "ServerBackend", "ServerConfig", "WorkerConfig", "get_server_backend"]
+__all__ = ("AsgiWorker", "ServerBackend", "ServerConfig", "WorkerConfig", "get_server_backend")

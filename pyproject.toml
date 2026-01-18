@@ -25,18 +25,25 @@ requires-python = ">=3.12"
 version = "0.1.0"
 
 [project.urls]
-documentation = "https://github.com/litestar-org/vertebra"
-homepage = "https://github.com/litestar-org/vertebra"
-repository = "https://github.com/litestar-org/vertebra"
+documentation = "https://github.com/cofin/vertebra"
+homepage = "https://github.com/cofin/vertebra"
+repository = "https://github.com/cofin/vertebra"
  
 [dependency-groups]
 docs = [ 
 ]
-dev = [ "bump-my-version", { include-group = "lint" }, { include-group = "test" }, { include-group = "docs" }, "build>=1.2.2.post1", "maturin>=1.0,<2.0", "watchdog>=4.0.0" ]
+build = [
+    "build>=1.2.2.post1",
+    "maturin>=1.0,<2.0",
+    "watchdog>=4.0.0",
+    "bump-my-version",
+]
+dev = [ { include-group = "lint" }, { include-group = "test" }, { include-group = "docs" }, { include-group = "build" } ]
 lint = ["mypy", "pre-commit", "pyright", "ruff", "slotscheck", "types-click", "types-pyyaml", "types-requests"]
 test = [
   "anyio",
   "coverage[toml]",
+  "filelock>=3.13.1",
   "msgspec>=0.18.0",
   "pydantic>=2.0.0",
   "pytest>=7.4.4",
@@ -129,7 +136,7 @@ replace = '"version": "{new_version}"'
 search = '"version": "{current_version}"'
 
 [tool.codespell]
-ignore-words-list = ["alog", "codeetr", "migvisor", "selectin", "mot", "afterAll", "cofuse"]
+ignore-words-list = ["alog"]
 skip = 'uv.lock,src/ts/*/package-lock.json,pyproject.toml,.vscode/settings.json,.venv/*,node_modules, **/*/node_modules/*'
 
 
@@ -153,7 +160,7 @@ show_missing = true
 [tool.coverage.run]
 branch = true
 disable_warnings = ["no-data-collected"]
-omit = ["**/*/migrations/**/*.py", "tests/*"]
+omit = ["tests/*"]
 
 [tool.pytest.ini_options]
 addopts = ["-q", "-ra"]
@@ -175,9 +182,8 @@ markers = [
   "full: tests for full testing",
   "postgres: mark a test as postgres-dependent",
   "mysql: mark a test as mysql-dependent",
-  "sqlserver: mark a test as sqlserver-dependent",
-  "oracle: mark a test as oracle-dependent",
-  "asyncio: legacy asyncio mark (runs under anyio asyncio backend)",
+  "redis: mark a test as redis-dependent",
+  "s3: mark a test as s3-dependent", 
 ]
 anyio_mode = "auto"
 testpaths = ["src/py/tests"]

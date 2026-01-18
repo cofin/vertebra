@@ -11,15 +11,15 @@ Vertebra is a Python-first application backbone with Rust IPC primitives and a B
 
 ## Project Status
 
-**Overall:** PRD-2 in progress (Python bindings + type bridge).
+**Overall:** PRD-2 through PRD-4 active; PRD-0/PRD-1 complete.
 
 | PRD | Status | Notes |
 | --- | --- | --- |
 | PRD-0 | Complete | Foundation, build system, docs, repo cleanup |
 | PRD-1 | Complete | Rust IPC core |
 | PRD-2 | In Progress | Python bindings + type bridge |
-| PRD-3 | Not Started | Bun server + protocol support |
-| PRD-4 | Not Started | Bun-backed Python drivers |
+| PRD-3 | In Progress | Bun server + protocol support |
+| PRD-4 | In Progress | Bun-backed Python drivers |
 | PRD-5 | Not Started | Resource management |
 | PRD-6 | Not Started | Integration + docs |
 | PRD-7 | Not Started | MCP integration |
@@ -54,6 +54,7 @@ TypeScript/Bun (Server + Tooling)
   - Unix: UDS + shared memory
   - Windows: named pipes + shared memory (TCP fallback)
 - **Runtime strategy**: Bun-first; Node fallback only if parity is proven.
+- **Test infrastructure**: Docker/Podman runtime abstraction for integration tests (no compose required).
 
 ## Performance Strategy
 
@@ -73,6 +74,8 @@ src/
   py/        # Python package (vertebra)
   rs/        # Rust workspace
   ts/        # Bun/TypeScript workspace
+tools/
+  lib/       # Tooling helpers (container runtime abstraction)
 ```
 
 ## Future Extensions

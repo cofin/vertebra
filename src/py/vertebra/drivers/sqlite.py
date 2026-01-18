@@ -341,7 +341,7 @@ class AsyncSqliteDriver(AsyncDriver):
         return AsyncSqlitePool(self, min_size=min_size, max_size=max_size)
 
 
-__all__ = [
+__all__ = (
     "AsyncSqliteConnection",
     "AsyncSqliteCursor",
     "AsyncSqliteDriver",
@@ -351,4 +351,4 @@ __all__ = [
     "SyncSqliteDriver",
     "SyncSqliteDriverConfig",
     "SyncSqlitePool",
-]
+)

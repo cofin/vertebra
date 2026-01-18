@@ -171,7 +171,7 @@ class AsyncDriver(ABC):
         """Create an async connection pool."""
 
 
-__all__ = [
+__all__ = (
     "AsyncConnection",
     "AsyncCursor",
     "AsyncDriver",
@@ -180,4 +180,4 @@ __all__ = [
     "SyncCursor",
     "SyncDriver",
     "SyncPool",
-]
+)

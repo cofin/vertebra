@@ -24,6 +24,12 @@ The architecture consists of three layers: (1) Bun HTTP server handling TLS term
 
 ---
 
+## Progress Update (2026-01-18)
+
+- Added Bun server scaffolding (`src/ts/src/server`) and router/worker pool stubs.
+- Added IPC client + ASGI bridge placeholders and Protocol Buffer schema placeholders.
+- Wired Python ASGI worker harness and framing tests.
+
 ## Background & Motivation
 
 ### Current Landscape

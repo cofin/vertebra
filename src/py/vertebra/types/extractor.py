@@ -197,10 +197,7 @@ class TypeExtractor:
         return imports
 
     def collect_type_vars(  # noqa: PLR0912
-        self,
-        tree: ast.AST,
-        class_names: set[str],
-        context: ResolveContext,
+        self, tree: ast.AST, class_names: set[str], context: ResolveContext
     ) -> dict[str, TypeNode]:
         typevar_calls: list[tuple[str, ast.Call]] = []
         typevar_names: set[str] = set()
@@ -227,27 +224,19 @@ class TypeExtractor:
         for name, call in typevar_calls:
             constraints: list[TypeNode] = []
             for arg in call.args[1:]:
-                node = self._from_annotation_node(
-                    arg, class_names, typevar_names, context
-                )
+                node = self._from_annotation_node(arg, class_names, typevar_names, context)
                 if not isinstance(node, UnknownType):
                     constraints.append(node)
 
             bound: TypeNode | None = None
             for keyword in call.keywords:
                 if keyword.arg == "bound":
-                    bound = self._from_annotation_node(
-                        keyword.value, class_names, typevar_names, context
-                    )
+                    bound = self._from_annotation_node(keyword.value, class_names, typevar_names, context)
                     break
 
             constraint_node: TypeNode | None = None
             if constraints:
-                constraint_node = (
-                    constraints[0]
-                    if len(constraints) == 1
-                    else UnionType(list(constraints))
-                )
+                constraint_node = constraints[0] if len(constraints) == 1 else UnionType(list(constraints))
             elif bound and not isinstance(bound, UnknownType):
                 constraint_node = bound
 
@@ -265,12 +254,7 @@ class TypeExtractor:
         classes = self.get_class_defs(path)
         imports = self.get_imports(path)
         class_names = set(classes.keys())
-        context = ResolveContext(
-            path=path,
-            imports=imports,
-            local_classes=class_names,
-            search_paths=(path.parent,),
-        )
+        context = ResolveContext(path=path, imports=imports, local_classes=class_names, search_paths=(path.parent,))
         type_vars = self.collect_type_vars(tree, class_names, context)
         self.type_var_cache[path] = CachedTypeVars(digest=digest, type_vars=type_vars)
         return type_vars
@@ -279,20 +263,11 @@ class TypeExtractor:
         classes = self.get_class_defs(path)
         imports = self.get_imports(path)
         type_vars = self.get_type_vars(path)
-        struct_names = {
-            name for name, cls in classes.items() if self._is_msgspec_struct(cls)
-        }
-        context = ResolveContext(
-            path=path,
-            imports=imports,
-            local_classes=struct_names,
-            search_paths=(path.parent,),
-        )
+        struct_names = {name for name, cls in classes.items() if self._is_msgspec_struct(cls)}
+        context = ResolveContext(path=path, imports=imports, local_classes=struct_names, search_paths=(path.parent,))
         structs: dict[str, ObjectType] = {}
         for name in struct_names:
-            structs[name] = self._build_msgspec_struct(
-                classes[name], struct_names, classes, type_vars, context
-            )
+            structs[name] = self._build_msgspec_struct(classes[name], struct_names, classes, type_vars, context)
             self.type_cache[(path, name)] = structs[name]
         return structs
 
@@ -300,20 +275,11 @@ class TypeExtractor:
         classes = self.get_class_defs(path)
         imports = self.get_imports(path)
         type_vars = self.get_type_vars(path)
-        model_names = {
-            name for name, cls in classes.items() if self._is_pydantic_model(cls)
-        }
-        context = ResolveContext(
-            path=path,
-            imports=imports,
-            local_classes=model_names,
-            search_paths=(path.parent,),
-        )
+        model_names = {name for name, cls in classes.items() if self._is_pydantic_model(cls)}
+        context = ResolveContext(path=path, imports=imports, local_classes=model_names, search_paths=(path.parent,))
         models: dict[str, ObjectType] = {}
         for name in model_names:
-            models[name] = self._build_pydantic_model(
-                classes[name], model_names, classes, type_vars, context
-            )
+            models[name] = self._build_pydantic_model(classes[name], model_names, classes, type_vars, context)
             self.type_cache[(path, name)] = models[name]
         return models
 
@@ -321,20 +287,11 @@ class TypeExtractor:
         classes = self.get_class_defs(path)
         imports = self.get_imports(path)
         type_vars = self.get_type_vars(path)
-        dataclass_names = {
-            name for name, cls in classes.items() if self._is_dataclass(cls)
-        }
-        context = ResolveContext(
-            path=path,
-            imports=imports,
-            local_classes=dataclass_names,
-            search_paths=(path.parent,),
-        )
+        dataclass_names = {name for name, cls in classes.items() if self._is_dataclass(cls)}
+        context = ResolveContext(path=path, imports=imports, local_classes=dataclass_names, search_paths=(path.parent,))
         models: dict[str, ObjectType] = {}
         for name in dataclass_names:
-            models[name] = self._build_dataclass(
-                classes[name], dataclass_names, classes, type_vars, context
-            )
+            models[name] = self._build_dataclass(classes[name], dataclass_names, classes, type_vars, context)
             self.type_cache[(path, name)] = models[name]
         return models
 
@@ -342,34 +299,23 @@ class TypeExtractor:
         classes = self.get_class_defs(path)
         imports = self.get_imports(path)
         type_vars = self.get_type_vars(path)
-        typed_dict_names = {
-            name for name, cls in classes.items() if self._is_typeddict(cls)
-        }
+        typed_dict_names = {name for name, cls in classes.items() if self._is_typeddict(cls)}
         context = ResolveContext(
-            path=path,
-            imports=imports,
-            local_classes=typed_dict_names,
-            search_paths=(path.parent,),
+            path=path, imports=imports, local_classes=typed_dict_names, search_paths=(path.parent,)
         )
         models: dict[str, ObjectType] = {}
         for name in typed_dict_names:
-            models[name] = self._build_typeddict(
-                classes[name], typed_dict_names, type_vars, context
-            )
+            models[name] = self._build_typeddict(classes[name], typed_dict_names, type_vars, context)
             self.type_cache[(path, name)] = models[name]
         return models
 
     def merge_msgspec_runtime_metadata(
-        self,
-        structs: dict[str, ObjectType],
-        runtime_classes: dict[str, object],
+        self, structs: dict[str, ObjectType], runtime_classes: dict[str, object]
     ) -> dict[str, ObjectType]:
         merged: dict[str, ObjectType] = {}
         for name, struct in structs.items():
             runtime_cls = runtime_classes.get(name)
-            metadata = (
-                self._msgspec_runtime_metadata(runtime_cls) if runtime_cls else {}
-            )
+            metadata = self._msgspec_runtime_metadata(runtime_cls) if runtime_cls else {}
             if metadata:
                 merged[name] = self._apply_field_metadata(struct, metadata)
             else:
@@ -377,20 +323,14 @@ class TypeExtractor:
         return merged
 
     def merge_pydantic_runtime_metadata(
-        self,
-        models: dict[str, ObjectType],
-        runtime_classes: dict[str, object],
+        self, models: dict[str, ObjectType], runtime_classes: dict[str, object]
     ) -> dict[str, ObjectType]:
         merged: dict[str, ObjectType] = {}
         for name, model in models.items():
             runtime_cls = runtime_classes.get(name)
-            metadata, computed = (
-                self._pydantic_runtime_metadata(runtime_cls) if runtime_cls else ({}, set())
-            )
+            metadata, computed = self._pydantic_runtime_metadata(runtime_cls) if runtime_cls else ({}, set())
             if computed:
-                filtered_fields = {
-                    key: value for key, value in model.fields.items() if key not in computed
-                }
+                filtered_fields = {key: value for key, value in model.fields.items() if key not in computed}
                 model = ObjectType(
                     fields=filtered_fields,
                     name=model.name,
@@ -404,9 +344,7 @@ class TypeExtractor:
                 merged[name] = model
         return merged
 
-    def extract_pydantic_json_schema(
-        self, model_cls: object
-    ) -> tuple[TypeNode, dict[str, ObjectType]]:
+    def extract_pydantic_json_schema(self, model_cls: object) -> tuple[TypeNode, dict[str, ObjectType]]:
         try:
             from pydantic import BaseModel
         except ImportError:
@@ -473,9 +411,7 @@ class TypeExtractor:
         for stmt in node.body:
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 field_name = stmt.target.id
-                field_type = self._from_annotation_node(
-                    stmt.annotation, struct_names, type_vars, context
-                )
+                field_type = self._from_annotation_node(stmt.annotation, struct_names, type_vars, context)
                 fields[field_name] = field_type
                 if stmt.value is not None:
                     optional_fields.add(field_name)
@@ -502,9 +438,7 @@ class TypeExtractor:
         for stmt in node.body:
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 field_name = stmt.target.id
-                field_type = self._from_annotation_node(
-                    stmt.annotation, model_names, type_vars, context
-                )
+                field_type = self._from_annotation_node(stmt.annotation, model_names, type_vars, context)
                 fields[field_name] = field_type
                 if stmt.value is not None:
                     optional_fields.add(field_name)
@@ -534,9 +468,7 @@ class TypeExtractor:
                 annotation = stmt.annotation
                 if self._is_classvar(annotation) or self._is_initvar(annotation):
                     continue
-                field_type = self._from_annotation_node(
-                    annotation, dataclass_names, type_vars, context
-                )
+                field_type = self._from_annotation_node(annotation, dataclass_names, type_vars, context)
                 fields[field_name] = field_type
                 if stmt.value is not None and self._dataclass_has_default(stmt.value):
                     optional_fields.add(field_name)
@@ -568,9 +500,7 @@ class TypeExtractor:
                 field_name = stmt.target.id
                 annotation = stmt.annotation
                 annotation, required_override = self._unwrap_required(annotation)
-                field_type = self._from_annotation_node(
-                    annotation, typed_dict_names, type_vars, context
-                )
+                field_type = self._from_annotation_node(annotation, typed_dict_names, type_vars, context)
                 fields[field_name] = field_type
                 if not total:
                     optional_fields.add(field_name)
@@ -617,9 +547,7 @@ class TypeExtractor:
                 metadata[name] = tuple(items)
         return metadata
 
-    def _pydantic_runtime_metadata(
-        self, model_cls: object
-    ) -> tuple[dict[str, tuple[object, ...]], set[str]]:
+    def _pydantic_runtime_metadata(self, model_cls: object) -> tuple[dict[str, tuple[object, ...]], set[str]]:
         try:
             from pydantic import BaseModel
         except ImportError:
@@ -685,10 +613,7 @@ class TypeExtractor:
         return excluded
 
     def _from_json_schema(  # noqa: PLR0911, PLR0912
-        self,
-        schema: dict[str, object],
-        definitions: dict[str, dict[str, object]],
-        name: str | None = None,
+        self, schema: dict[str, object], definitions: dict[str, dict[str, object]], name: str | None = None
     ) -> TypeNode:
         ref = schema.get("$ref")
         if isinstance(ref, str):
@@ -702,16 +627,12 @@ class TypeExtractor:
 
         if "oneOf" in schema or "anyOf" in schema:
             variants = schema.get("oneOf") or schema.get("anyOf") or []
-            node = UnionType(
-                [self._from_json_schema(item, definitions) for item in variants]
-            )
+            node = UnionType([self._from_json_schema(item, definitions) for item in variants])
             return self._apply_schema_metadata(node, schema)
 
         types = schema.get("type")
         if isinstance(types, list):
-            node = UnionType(
-                [self._from_json_schema({"type": t}, definitions) for t in types]
-            )
+            node = UnionType([self._from_json_schema({"type": t}, definitions) for t in types])
             return self._apply_schema_metadata(node, schema)
         if types == "object":
             properties = schema.get("properties") or {}
@@ -757,18 +678,13 @@ class TypeExtractor:
             return ref.split("/")[-1]
         return ref
 
-    def _apply_field_metadata(
-        self, struct: ObjectType, metadata: dict[str, tuple[object, ...]]
-    ) -> ObjectType:
+    def _apply_field_metadata(self, struct: ObjectType, metadata: dict[str, tuple[object, ...]]) -> ObjectType:
         fields: dict[str, TypeNode] = {}
         for name, field_type in struct.fields.items():
             extra = metadata.get(name)
             if extra:
                 if isinstance(field_type, AnnotatedType):
-                    fields[name] = AnnotatedType(
-                        base=field_type.base,
-                        metadata=field_type.metadata + extra,
-                    )
+                    fields[name] = AnnotatedType(base=field_type.base, metadata=field_type.metadata + extra)
                 else:
                     fields[name] = AnnotatedType(base=field_type, metadata=extra)
             else:
@@ -810,9 +726,7 @@ class TypeExtractor:
         return annotation, None
 
     def _generic_params(
-        self,
-        node: ast.ClassDef,
-        type_vars: dict[str, TypeNode] | None = None,
+        self, node: ast.ClassDef, type_vars: dict[str, TypeNode] | None = None
     ) -> tuple[tuple[str, ...], dict[str, TypeNode]]:
         params: list[str] = []
         for base in node.bases:
@@ -834,9 +748,7 @@ class TypeExtractor:
                     constraint_map[name] = constraint
         return tuple(params), constraint_map
 
-    def _resolve_forward_ref(
-        self, name: str, context: ResolveContext
-    ) -> TypeNode | None:
+    def _resolve_forward_ref(self, name: str, context: ResolveContext) -> TypeNode | None:
         if name in context.local_classes:
             return NamedTypeRef(name)
         target = context.imports.get(name)
@@ -852,11 +764,7 @@ class TypeExtractor:
         return None
 
     def _resolve_import_path(
-        self,
-        current_path: Path,
-        module: str,
-        level: int,
-        search_paths: tuple[Path, ...],
+        self, current_path: Path, module: str, level: int, search_paths: tuple[Path, ...]
     ) -> Path | None:
         if level > 0:
             base = current_path.parent
@@ -900,9 +808,7 @@ class TypeExtractor:
                 resolved = self._resolve_forward_ref(node.id, context)
                 if resolved is not None:
                     return resolved
-                warnings.warn(
-                    f"Unresolved type reference: {node.id}", RuntimeWarning, stacklevel=2
-                )
+                warnings.warn(f"Unresolved type reference: {node.id}", RuntimeWarning, stacklevel=2)
             return primitive
         if isinstance(node, ast.Attribute):
             name = self._base_name(node)
@@ -915,9 +821,7 @@ class TypeExtractor:
                     resolved = self._resolve_forward_ref(node.value, context)
                     if resolved is not None:
                         return resolved
-                    warnings.warn(
-                        f"Unresolved type reference: {node.value}", RuntimeWarning, stacklevel=2
-                    )
+                    warnings.warn(f"Unresolved type reference: {node.value}", RuntimeWarning, stacklevel=2)
                 return UnknownType()
             return LiteralType(node.value)
         if isinstance(node, ast.Subscript):
@@ -935,13 +839,9 @@ class TypeExtractor:
         base = self._base_name(node.value).split(".")[-1]
         args = self._subscript_args(node.slice)
         if base in ("list", "List"):
-            return ArrayType(
-                self._from_annotation_node(args[0], struct_names, type_vars, context)
-            )
+            return ArrayType(self._from_annotation_node(args[0], struct_names, type_vars, context))
         if base in ("set", "Set"):
-            return GenericType(
-                "Set", [self._from_annotation_node(args[0], struct_names, type_vars, context)]
-            )
+            return GenericType("Set", [self._from_annotation_node(args[0], struct_names, type_vars, context)])
         if base in ("dict", "Dict"):
             key = self._from_annotation_node(args[0], struct_names, type_vars, context)
             value = (
@@ -952,31 +852,17 @@ class TypeExtractor:
             return GenericType("Record", [key, value])
         if base in ("tuple", "Tuple"):
             if len(args) == 2 and isinstance(args[1], ast.Constant) and args[1].value is Ellipsis:
-                return ArrayType(
-                    self._from_annotation_node(args[0], struct_names, type_vars, context)
-                )
-            return TupleType(
-                tuple(
-                    self._from_annotation_node(arg, struct_names, type_vars, context)
-                    for arg in args
-                )
-            )
+                return ArrayType(self._from_annotation_node(args[0], struct_names, type_vars, context))
+            return TupleType(tuple(self._from_annotation_node(arg, struct_names, type_vars, context) for arg in args))
         if base in ("Optional",):
             inner = self._from_annotation_node(args[0], struct_names, type_vars, context)
             return UnionType([inner, PrimitiveType("null")])
         if base in ("Union",):
-            return UnionType(
-                [
-                    self._from_annotation_node(arg, struct_names, type_vars, context)
-                    for arg in args
-                ]
-            )
+            return UnionType([self._from_annotation_node(arg, struct_names, type_vars, context) for arg in args])
         if base in ("Annotated",):
             if not args:
                 return UnknownType()
-            base_type = self._from_annotation_node(
-                args[0], struct_names, type_vars, context
-            )
+            base_type = self._from_annotation_node(args[0], struct_names, type_vars, context)
             metadata = tuple(self._metadata_from_node(arg) for arg in args[1:])
             return AnnotatedType(base=base_type, metadata=metadata)
         if base in ("Literal",):
@@ -984,10 +870,7 @@ class TypeExtractor:
                 return LiteralType(self._literal_arg(args[0]))
             return UnionType([LiteralType(self._literal_arg(arg)) for arg in args])
         if base in struct_names:
-            params = [
-                self._from_annotation_node(arg, struct_names, type_vars, context)
-                for arg in args
-            ]
+            params = [self._from_annotation_node(arg, struct_names, type_vars, context) for arg in args]
             return GenericType(base, params)
         return UnknownType()
 

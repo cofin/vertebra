@@ -9,6 +9,7 @@
     "build": "echo \"No build step configured yet\""
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.0.6",
     "@types/bun": "latest",
     "typescript": "^5.7.0"
   },

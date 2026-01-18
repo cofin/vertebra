@@ -57,9 +57,7 @@ def test_type_extractor_annotated() -> None:
 def test_type_extractor_collections_and_union() -> None:
     extractor = TypeExtractor()
     assert extractor.from_hint(list[int]) == ArrayType(PrimitiveType("number"))
-    assert extractor.from_hint(tuple[int, str]) == TupleType(
-        (PrimitiveType("number"), PrimitiveType("string"))
-    )
+    assert extractor.from_hint(tuple[int, str]) == TupleType((PrimitiveType("number"), PrimitiveType("string")))
     assert extractor.from_hint(tuple[int, ...]) == ArrayType(PrimitiveType("number"))
     union = extractor.from_hint(int | None)
     assert isinstance(union, UnionType)
@@ -223,10 +221,7 @@ def test_pydantic_discriminated_union_metadata() -> None:
     assert isinstance(root, ObjectType)
     pet = root.fields["pet"]
     assert isinstance(pet, AnnotatedType)
-    assert any(
-        isinstance(item, dict) and "discriminator" in item
-        for item in pet.metadata
-    )
+    assert any(isinstance(item, dict) and "discriminator" in item for item in pet.metadata)
 
 
 def test_pydantic_validators_do_not_break_extraction() -> None:
@@ -306,26 +301,17 @@ def test_generic_constraints_extraction(tmp_path: Path) -> None:
     models = extractor.extract_dataclasses(file_path)
     box = models["Box"]
     assert box.type_params == ("T", "U")
-    assert box.type_param_constraints["T"] == UnionType(
-        [PrimitiveType("number"), PrimitiveType("string")]
-    )
+    assert box.type_param_constraints["T"] == UnionType([PrimitiveType("number"), PrimitiveType("string")])
     assert box.type_param_constraints["U"] == NamedTypeRef("Base")
 
 
 def test_forward_ref_import_resolution(tmp_path: Path) -> None:
     extractor = TypeExtractor()
     models_path = tmp_path / "models.py"
-    models_path.write_text(
-        "import msgspec\n\n"
-        "class User(msgspec.Struct):\n"
-        "    id: int\n"
-    )
+    models_path.write_text("import msgspec\n\nclass User(msgspec.Struct):\n    id: int\n")
     service_path = tmp_path / "service.py"
     service_path.write_text(
-        "import msgspec\n"
-        "from models import User\n\n"
-        "class Request(msgspec.Struct):\n"
-        "    user: User\n"
+        "import msgspec\nfrom models import User\n\nclass Request(msgspec.Struct):\n    user: User\n"
     )
     structs = extractor.extract_msgspec_structs(service_path)
     request = structs["Request"]
@@ -363,9 +349,7 @@ def test_typeddict_extraction(tmp_path: Path) -> None:
 
 def test_typescript_generator_toposort() -> None:
     account = ObjectType(fields={"id": PrimitiveType("number")}, name="Account")
-    user = ObjectType(
-        fields={"account": account, "name": PrimitiveType("string")}, name="User"
-    )
+    user = ObjectType(fields={"account": account, "name": PrimitiveType("string")}, name="User")
     meta = ProcedureMetadata(
         procedure_id="users.get",
         handler_fn=lambda: None,
@@ -449,10 +433,7 @@ def test_typescript_generator_rejects_conflicts() -> None:
 
 
 def test_typescript_generator_emits_metadata_comments() -> None:
-    annotated = AnnotatedType(
-        base=PrimitiveType("number"),
-        metadata=("min=1",),
-    )
+    annotated = AnnotatedType(base=PrimitiveType("number"), metadata=("min=1",))
     obj = ObjectType(fields={"value": annotated}, name="Metric")
     meta = ProcedureMetadata(
         procedure_id="metrics.get",

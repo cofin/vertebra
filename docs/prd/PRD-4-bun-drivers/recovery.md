@@ -1,6 +1,7 @@
 # PRD-4: Bun-Backed Python Drivers - Session Recovery Guide
 
 **Created**: 2026-01-17
+**Last Updated**: 2026-01-18
 **Workspace**: `/home/cody/code/c/vertebra/docs/prd/PRD-4-bun-drivers/`
 
 ---

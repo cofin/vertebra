@@ -24,7 +24,7 @@ from vertebra.storage.store import (
     store_registry,
 )
 
-__all__ = [
+__all__ = (
     "AsyncGCSClient",
     "AsyncGCSStore",
     "AsyncLocalStore",
@@ -46,4 +46,4 @@ __all__ = [
     "async_store_from_url",
     "store_from_url",
     "store_registry",
-]
+)

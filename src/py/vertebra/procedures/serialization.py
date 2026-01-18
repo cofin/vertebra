@@ -64,17 +64,10 @@ class MsgspecSerializer:
             fields[field.name] = field_type
             if not getattr(field, "required", True):
                 optional_fields.add(field.name)
-        return ObjectType(
-            name=type_hint.__name__,
-            fields=fields,
-            optional_fields=optional_fields,
-        )
+        return ObjectType(name=type_hint.__name__, fields=fields, optional_fields=optional_fields)
 
     def _convert_hint(self, type_hint: object) -> TypeNode:
-        if (
-            isinstance(type_hint, type)
-            and issubclass(type_hint, self._msgspec.Struct)
-        ):
+        if isinstance(type_hint, type) and issubclass(type_hint, self._msgspec.Struct):
             return NamedTypeRef(type_hint.__name__)
         return self._extractor.from_hint(type_hint)
 
@@ -108,17 +101,10 @@ class PydanticSerializer:
             fields[name] = self._convert_hint(annotation)
             if not field.is_required():
                 optional_fields.add(name)
-        return ObjectType(
-            name=type_hint.__name__,
-            fields=fields,
-            optional_fields=optional_fields,
-        )
+        return ObjectType(name=type_hint.__name__, fields=fields, optional_fields=optional_fields)
 
     def _convert_hint(self, type_hint: object) -> TypeNode:
-        if (
-            isinstance(type_hint, type)
-            and issubclass(type_hint, self._BaseModel)
-        ):
+        if isinstance(type_hint, type) and issubclass(type_hint, self._BaseModel):
             return NamedTypeRef(type_hint.__name__)
         return self._extractor.from_hint(type_hint)
 
@@ -157,11 +143,7 @@ def detect_serializer(type_hint: type | None) -> str:
     return "msgspec"
 
 
-def get_serializer(
-    serializer: str | Serializer | None = None,
-    *,
-    type_hint: type | None = None,
-) -> Serializer:
+def get_serializer(serializer: str | Serializer | None = None, *, type_hint: type | None = None) -> Serializer:
     if serializer is None:
         serializer = detect_serializer(type_hint)
     if isinstance(serializer, str):

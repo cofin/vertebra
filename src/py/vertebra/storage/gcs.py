@@ -18,12 +18,7 @@ class GCSClient:
         self._fs = GCSFileSystem(bucket, options=options)
 
     def upload_bytes(
-        self,
-        key: str,
-        data: bytes,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, key: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return self._fs.write_bytes(key, data, content_type=content_type, metadata=metadata)
 
@@ -51,13 +46,7 @@ class GCSClient:
         content_type: str | None = None,
         acl: str | None = None,
     ) -> str | None:
-        return self._fs.signed_url(
-            key,
-            method=method,
-            expires_in=expires_in,
-            content_type=content_type,
-            acl=acl,
-        )
+        return self._fs.signed_url(key, method=method, expires_in=expires_in, content_type=content_type, acl=acl)
 
 
 class AsyncGCSClient:
@@ -65,12 +54,7 @@ class AsyncGCSClient:
         self._fs = AsyncGCSFileSystem(bucket, options=options)
 
     async def upload_bytes(
-        self,
-        key: str,
-        data: bytes,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, key: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return await self._fs.write_bytes(key, data, content_type=content_type, metadata=metadata)
 
@@ -98,13 +82,7 @@ class AsyncGCSClient:
         content_type: str | None = None,
         acl: str | None = None,
     ) -> str | None:
-        return await self._fs.signed_url(
-            key,
-            method=method,
-            expires_in=expires_in,
-            content_type=content_type,
-            acl=acl,
-        )
+        return await self._fs.signed_url(key, method=method, expires_in=expires_in, content_type=content_type, acl=acl)
 
 
-__all__ = ["AsyncGCSClient", "GCSClient"]
+__all__ = ("AsyncGCSClient", "GCSClient")

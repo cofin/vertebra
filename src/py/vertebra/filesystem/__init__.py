@@ -25,12 +25,7 @@ class LocalFileSystem:
         return self.client.read_range(path, offset, length)
 
     def write_bytes(
-        self,
-        path: str,
-        data: bytes,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, path: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return self.client.write_bytes(path, data, content_type=content_type, metadata=metadata)
 
@@ -41,12 +36,7 @@ class LocalFileSystem:
         return self.client.read_file(path, local_path)
 
     def write_file(
-        self,
-        path: str,
-        local_path: str,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, path: str, local_path: str, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return self.client.write_file(path, local_path, content_type=content_type, metadata=metadata)
 
@@ -68,13 +58,7 @@ class LocalFileSystem:
         content_type: str | None = None,
         acl: str | None = None,
     ) -> str | None:
-        return self.client.signed_url(
-            path,
-            method=method,
-            expires_in=expires_in,
-            content_type=content_type,
-            acl=acl,
-        )
+        return self.client.signed_url(path, method=method, expires_in=expires_in, content_type=content_type, acl=acl)
 
     def mkdir(self, path: str) -> None:
         self.client.mkdir(path)
@@ -99,12 +83,7 @@ class S3FileSystem:
         return self.client.read_range(key, offset, length)
 
     def write_bytes(
-        self,
-        key: str,
-        data: bytes,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, key: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return self.client.write_bytes(key, data, content_type=content_type, metadata=metadata)
 
@@ -115,12 +94,7 @@ class S3FileSystem:
         return self.client.read_file(key, local_path)
 
     def write_file(
-        self,
-        key: str,
-        local_path: str,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, key: str, local_path: str, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return self.client.write_file(key, local_path, content_type=content_type, metadata=metadata)
 
@@ -142,13 +116,7 @@ class S3FileSystem:
         content_type: str | None = None,
         acl: str | None = None,
     ) -> str | None:
-        return self.client.signed_url(
-            key,
-            method=method,
-            expires_in=expires_in,
-            content_type=content_type,
-            acl=acl,
-        )
+        return self.client.signed_url(key, method=method, expires_in=expires_in, content_type=content_type, acl=acl)
 
 
 @dataclass(slots=True)
@@ -167,12 +135,7 @@ class GCSFileSystem:
         return self.client.read_range(key, offset, length)
 
     def write_bytes(
-        self,
-        key: str,
-        data: bytes,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, key: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return self.client.write_bytes(key, data, content_type=content_type, metadata=metadata)
 
@@ -183,12 +146,7 @@ class GCSFileSystem:
         return self.client.read_file(key, local_path)
 
     def write_file(
-        self,
-        key: str,
-        local_path: str,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, key: str, local_path: str, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return self.client.write_file(key, local_path, content_type=content_type, metadata=metadata)
 
@@ -210,13 +168,7 @@ class GCSFileSystem:
         content_type: str | None = None,
         acl: str | None = None,
     ) -> str | None:
-        return self.client.signed_url(
-            key,
-            method=method,
-            expires_in=expires_in,
-            content_type=content_type,
-            acl=acl,
-        )
+        return self.client.signed_url(key, method=method, expires_in=expires_in, content_type=content_type, acl=acl)
 
 
 class AsyncLocalFileSystem:
@@ -230,12 +182,7 @@ class AsyncLocalFileSystem:
         return await self.client.read_range(path, offset, length)
 
     async def write_bytes(
-        self,
-        path: str,
-        data: bytes,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, path: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return await self.client.write_bytes(path, data, content_type=content_type, metadata=metadata)
 
@@ -246,12 +193,7 @@ class AsyncLocalFileSystem:
         return await self.client.read_file(path, local_path)
 
     async def write_file(
-        self,
-        path: str,
-        local_path: str,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, path: str, local_path: str, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return await self.client.write_file(path, local_path, content_type=content_type, metadata=metadata)
 
@@ -274,11 +216,7 @@ class AsyncLocalFileSystem:
         acl: str | None = None,
     ) -> str | None:
         return await self.client.signed_url(
-            path,
-            method=method,
-            expires_in=expires_in,
-            content_type=content_type,
-            acl=acl,
+            path, method=method, expires_in=expires_in, content_type=content_type, acl=acl
         )
 
     async def mkdir(self, path: str) -> None:
@@ -299,12 +237,7 @@ class AsyncS3FileSystem:
         return await self.client.read_range(key, offset, length)
 
     async def write_bytes(
-        self,
-        key: str,
-        data: bytes,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, key: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return await self.client.write_bytes(key, data, content_type=content_type, metadata=metadata)
 
@@ -315,12 +248,7 @@ class AsyncS3FileSystem:
         return await self.client.read_file(key, local_path)
 
     async def write_file(
-        self,
-        key: str,
-        local_path: str,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, key: str, local_path: str, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return await self.client.write_file(key, local_path, content_type=content_type, metadata=metadata)
 
@@ -343,11 +271,7 @@ class AsyncS3FileSystem:
         acl: str | None = None,
     ) -> str | None:
         return await self.client.signed_url(
-            key,
-            method=method,
-            expires_in=expires_in,
-            content_type=content_type,
-            acl=acl,
+            key, method=method, expires_in=expires_in, content_type=content_type, acl=acl
         )
 
 
@@ -362,12 +286,7 @@ class AsyncGCSFileSystem:
         return await self.client.read_range(key, offset, length)
 
     async def write_bytes(
-        self,
-        key: str,
-        data: bytes,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, key: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return await self.client.write_bytes(key, data, content_type=content_type, metadata=metadata)
 
@@ -378,12 +297,7 @@ class AsyncGCSFileSystem:
         return await self.client.read_file(key, local_path)
 
     async def write_file(
-        self,
-        key: str,
-        local_path: str,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, key: str, local_path: str, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         return await self.client.write_file(key, local_path, content_type=content_type, metadata=metadata)
 
@@ -406,15 +320,11 @@ class AsyncGCSFileSystem:
         acl: str | None = None,
     ) -> str | None:
         return await self.client.signed_url(
-            key,
-            method=method,
-            expires_in=expires_in,
-            content_type=content_type,
-            acl=acl,
+            key, method=method, expires_in=expires_in, content_type=content_type, acl=acl
         )
 
 
-__all__ = [
+__all__ = (
     "AsyncGCSFileSystem",
     "AsyncLocalFileSystem",
     "AsyncS3FileSystem",
@@ -424,15 +334,12 @@ __all__ = [
     "LocalFileSystem",
     "S3FileSystem",
     "VertebraFileSystem",
-]
+)
 
 
 def __getattr__(name: str) -> Any:
     if name in {"AsyncVertebraFileSystem", "VertebraFileSystem"}:
         from vertebra.filesystem.fsspec import AsyncVertebraFileSystem, VertebraFileSystem
 
-        return {
-            "AsyncVertebraFileSystem": AsyncVertebraFileSystem,
-            "VertebraFileSystem": VertebraFileSystem,
-        }[name]
+        return {"AsyncVertebraFileSystem": AsyncVertebraFileSystem, "VertebraFileSystem": VertebraFileSystem}[name]
     raise AttributeError(name)

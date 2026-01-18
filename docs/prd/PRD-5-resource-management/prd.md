@@ -1,8 +1,8 @@
 # PRD-5: Cooperative Resource Management
 
-**Status**: Draft
+**Status**: In Progress
 **Version**: 1.0
-**Last Updated**: 2026-01-17
+**Last Updated**: 2026-01-18
 **Authors**: Vertebra Team
 **Dependencies**: PRD-4 (Bun-Backed Drivers)
 
@@ -42,6 +42,12 @@ Vertebra's Cooperative Resource Management system enables shared connection pool
 - Reduced memory footprint
 
 ---
+
+## Progress Update (2026-01-18)
+
+- Broker crate initialized with IPC server/pool scaffolding and configuration parsing.
+- Python broker client + pooling helpers added with unit tests.
+- IPC framing implemented (bincode) with echo integration test.
 
 ## 1. Problem Statement
 

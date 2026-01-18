@@ -68,7 +68,7 @@ def format_error_message(code: str | None, message: str) -> str:
     return message
 
 
-__all__ = [
+__all__ = (
     "ERROR_CODE_MAP",
     "DataError",
     "DatabaseError",
@@ -82,4 +82,4 @@ __all__ = [
     "Warning",
     "format_error_message",
     "map_error_code",
-]
+)

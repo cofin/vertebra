@@ -3,6 +3,7 @@
 **Status:** In Progress
 **Version:** 1.0
 **Created:** 2026-01-17
+**Last Updated:** 2026-01-18
 **Owner:** Vertebra Core Team
 **Dependencies:** PRD-1 (Rust Core IPC Layer)
 
@@ -25,6 +26,15 @@ The Type Bridge eliminates the traditional code generation workflow. Instead of 
 5. **Pluggable Architecture** - Extensible serialization (msgspec, pydantic, protobuf)
 
 ---
+
+## Progress Update (2026-01-18)
+
+- Completed `@procedure` decorator, registry, and Litestar opt metadata wiring.
+- Implemented Type IR, extractor (AST + runtime metadata), generics/TypeVar bounds, and JSON schema fallback.
+- Added serializer protocol with msgspec + pydantic backends and auto-detection.
+- Built Type Bridge endpoint, ASGI app, and file watcher for HMR invalidation.
+- Implemented TypeScript generator + optional validation/formatting helpers.
+- Added IPC channel wrappers with zero-copy helpers and PyO3 bindings.
 
 ## Background & Context
 

@@ -1,8 +1,8 @@
 # PRD-6: Integration, Testing, and Documentation
 
-**Status**: Draft
+**Status**: In Progress
 **Version**: 1.0
-**Last Updated**: 2026-01-17
+**Last Updated**: 2026-01-18
 **Owner**: Engineering
 **Dependencies**: PRD-0, PRD-1, PRD-2, PRD-3, PRD-4, PRD-5
 
@@ -18,6 +18,12 @@ PRD-6 represents the final validation phase of the Vertebra project, ensuring th
 **Risk Level**: Medium - Multi-language testing complexity and benchmark consistency
 
 ---
+
+## Progress Update (2026-01-18)
+
+- Added container runtime abstraction (Docker/Podman) to support integration tests without compose.
+- Added integration gating (`--integration`) and xdist grouping markers for db-backed tests.
+- Lint/format pipeline standardized (ruff fix + format, Biome v2, rustfmt).
 
 ## Problem Statement
 

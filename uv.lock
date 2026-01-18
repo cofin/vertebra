@@ -1142,11 +1142,18 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+build = [
+    { name = "build" },
+    { name = "bump-my-version" },
+    { name = "maturin" },
+    { name = "watchdog" },
+]
 dev = [
     { name = "anyio" },
     { name = "build" },
     { name = "bump-my-version" },
     { name = "coverage" },
+    { name = "filelock" },
     { name = "maturin" },
     { name = "msgspec" },
     { name = "mypy" },
@@ -1182,6 +1189,7 @@ lint = [
 test = [
     { name = "anyio" },
     { name = "coverage" },
+    { name = "filelock" },
     { name = "msgspec" },
     { name = "pydantic" },
     { name = "pytest" },
@@ -1199,11 +1207,18 @@ test = [
 requires-dist = [{ name = "msgspec", specifier = ">=0.18.0" }]
 
 [package.metadata.requires-dev]
+build = [
+    { name = "build", specifier = ">=1.2.2.post1" },
+    { name = "bump-my-version" },
+    { name = "maturin", specifier = ">=1.0,<2.0" },
+    { name = "watchdog", specifier = ">=4.0.0" },
+]
 dev = [
     { name = "anyio" },
     { name = "build", specifier = ">=1.2.2.post1" },
     { name = "bump-my-version" },
     { name = "coverage", extras = ["toml"] },
+    { name = "filelock", specifier = ">=3.13.1" },
     { name = "maturin", specifier = ">=1.0,<2.0" },
     { name = "msgspec", specifier = ">=0.18.0" },
     { name = "mypy" },
@@ -1240,6 +1255,7 @@ lint = [
 test = [
     { name = "anyio" },
     { name = "coverage", extras = ["toml"] },
+    { name = "filelock", specifier = ">=3.13.1" },
     { name = "msgspec", specifier = ">=0.18.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", specifier = ">=7.4.4" },

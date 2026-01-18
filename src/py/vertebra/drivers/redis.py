@@ -75,18 +75,12 @@ class SyncRedisConnection(SyncConnection):
 
     def command(self, command: str, *args: Any) -> Any:
         response = _run_sync(
-            self._client.request(
-                {
-                    "id": "command",
-                    "driver": "redis",
-                    "method": "command",
-                    "params": {
-                        "connectionId": self._connection_id,
-                        "command": command,
-                        "args": _normalize_args(args),
-                    },
-                }
-            )
+            self._client.request({
+                "id": "command",
+                "driver": "redis",
+                "method": "command",
+                "params": {"connectionId": self._connection_id, "command": command, "args": _normalize_args(args)},
+            })
         )
         _raise_for_error(response)
         return response.get("result")
@@ -102,14 +96,12 @@ class SyncRedisConnection(SyncConnection):
 
     def close(self) -> None:
         _run_sync(
-            self._client.request(
-                {
-                    "id": "close",
-                    "driver": "redis",
-                    "method": "close",
-                    "params": {"connectionId": self._connection_id},
-                }
-            )
+            self._client.request({
+                "id": "close",
+                "driver": "redis",
+                "method": "close",
+                "params": {"connectionId": self._connection_id},
+            })
         )
         _run_sync(self._client.close())
 
@@ -132,14 +124,12 @@ class AsyncRedisConnection(AsyncConnection):
     async def _ensure_connection(self) -> str:
         if self._connection_id:
             return self._connection_id
-        response = await self._client.request(
-            {
-                "id": "connect",
-                "driver": "redis",
-                "method": "connect",
-                "params": {"url": self._url},
-            }
-        )
+        response = await self._client.request({
+            "id": "connect",
+            "driver": "redis",
+            "method": "connect",
+            "params": {"url": self._url},
+        })
         _raise_for_error(response)
         connection_id = response.get("result", {}).get("connectionId")
         if not connection_id:
@@ -150,18 +140,12 @@ class AsyncRedisConnection(AsyncConnection):
 
     async def command(self, command: str, *args: Any) -> Any:
         connection_id = await self._ensure_connection()
-        response = await self._client.request(
-            {
-                "id": "command",
-                "driver": "redis",
-                "method": "command",
-                "params": {
-                    "connectionId": connection_id,
-                    "command": command,
-                    "args": _normalize_args(args),
-                },
-            }
-        )
+        response = await self._client.request({
+            "id": "command",
+            "driver": "redis",
+            "method": "command",
+            "params": {"connectionId": connection_id, "command": command, "args": _normalize_args(args)},
+        })
         _raise_for_error(response)
         return response.get("result")
 
@@ -177,14 +161,12 @@ class AsyncRedisConnection(AsyncConnection):
     async def close(self) -> None:
         if not self._connection_id:
             return
-        await self._client.request(
-            {
-                "id": "close",
-                "driver": "redis",
-                "method": "close",
-                "params": {"connectionId": self._connection_id},
-            }
-        )
+        await self._client.request({
+            "id": "close",
+            "driver": "redis",
+            "method": "close",
+            "params": {"connectionId": self._connection_id},
+        })
         await self._client.close()
 
 
@@ -239,14 +221,12 @@ class SyncRedisDriver(SyncDriver):
     def _connect(self) -> SyncConnection:
         client = IpcClient(self._config.ipc)
         response = _run_sync(
-            client.request(
-                {
-                    "id": "connect",
-                    "driver": "redis",
-                    "method": "connect",
-                    "params": {"url": self._config.url},
-                }
-            )
+            client.request({
+                "id": "connect",
+                "driver": "redis",
+                "method": "connect",
+                "params": {"url": self._config.url},
+            })
         )
         _raise_for_error(response)
         connection_id = response.get("result", {}).get("connectionId")
@@ -326,7 +306,7 @@ class AsyncRedisCursor(AsyncCursor):
         return
 
 
-__all__ = [
+__all__ = (
     "AsyncRedisConnection",
     "AsyncRedisCursor",
     "AsyncRedisDriver",
@@ -336,4 +316,4 @@ __all__ = [
     "SyncRedisDriver",
     "SyncRedisDriverConfig",
     "SyncRedisPool",
-]
+)

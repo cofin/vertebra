@@ -132,7 +132,7 @@ def available_driver_backends() -> list[str]:
     return sorted(_DRIVER_BACKENDS)
 
 
-__all__ = [
+__all__ = (
     "ERROR_CODE_MAP",
     "AsyncConnection",
     "AsyncCursor",
@@ -205,4 +205,4 @@ __all__ = [
     "get_driver_backend",
     "map_error_code",
     "register_driver_backend",
-]
+)

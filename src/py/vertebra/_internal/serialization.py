@@ -12,12 +12,8 @@ import msgspec
 class MessagePackCodec:
     """Reusable MessagePack encoder/decoder with optional typed decoding."""
 
-    encoder: msgspec.msgpack.Encoder = field(
-        default_factory=msgspec.msgpack.Encoder
-    )
-    _decoder_cache: dict[type, msgspec.msgpack.Decoder] = field(
-        default_factory=dict
-    )
+    encoder: msgspec.msgpack.Encoder = field(default_factory=msgspec.msgpack.Encoder)
+    _decoder_cache: dict[type, msgspec.msgpack.Decoder] = field(default_factory=dict)
 
     def encode(self, value: Any) -> bytes:
         """Encode a Python value to MessagePack bytes."""
@@ -41,4 +37,4 @@ class MessagePackCodec:
         return decoder.decode(data)
 
 
-__all__ = ["MessagePackCodec"]
+__all__ = ("MessagePackCodec",)

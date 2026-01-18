@@ -73,13 +73,7 @@ class _DebouncedHandler(FileSystemEventHandler):
 class TypeBridgeWatcher:
     """Watch Python sources and invalidate the type bridge cache."""
 
-    def __init__(
-        self,
-        bridge: TypeBridge,
-        paths: Iterable[Path],
-        *,
-        debounce_ms: int = 100,
-    ) -> None:
+    def __init__(self, bridge: TypeBridge, paths: Iterable[Path], *, debounce_ms: int = 100) -> None:
         self._bridge = bridge
         self._options = WatchOptions(tuple(Path(p) for p in paths), debounce_ms)
         self._observer = Observer() if Observer else None
@@ -107,4 +101,4 @@ class TypeBridgeWatcher:
             self._handler.stop()
 
 
-__all__ = ["TypeBridgeWatcher", "WatchOptions"]
+__all__ = ("TypeBridgeWatcher", "WatchOptions")

@@ -158,14 +158,12 @@ class SyncMySQLConnection(SyncConnection):
 
     def close(self) -> None:
         _run_sync(
-            self._client.request(
-                {
-                    "id": "close",
-                    "driver": "mysql",
-                    "method": "close",
-                    "params": {"connectionId": self._connection_id},
-                }
-            )
+            self._client.request({
+                "id": "close",
+                "driver": "mysql",
+                "method": "close",
+                "params": {"connectionId": self._connection_id},
+            })
         )
         _run_sync(self._client.close())
 
@@ -174,18 +172,12 @@ class SyncMySQLConnection(SyncConnection):
 
     def _execute(self, query: str, params: Sequence[Any]) -> dict[str, Any]:
         response = _run_sync(
-            self._client.request(
-                {
-                    "id": "execute",
-                    "driver": "mysql",
-                    "method": "execute",
-                    "params": {
-                        "connectionId": self._connection_id,
-                        "sql": query,
-                        "params": list(params),
-                    },
-                }
-            )
+            self._client.request({
+                "id": "execute",
+                "driver": "mysql",
+                "method": "execute",
+                "params": {"connectionId": self._connection_id, "sql": query, "params": list(params)},
+            })
         )
         _raise_for_error(response)
         return response.get("result", {})
@@ -193,11 +185,7 @@ class SyncMySQLConnection(SyncConnection):
 
 class AsyncMySQLConnection(AsyncConnection):
     def __init__(
-        self,
-        client: IpcClient,
-        connection_string: str,
-        connection_id: str | None = None,
-        pool_max: int | None = None,
+        self, client: IpcClient, connection_string: str, connection_id: str | None = None, pool_max: int | None = None
     ) -> None:
         self._client = client
         self._connection_string = connection_string
@@ -219,9 +207,12 @@ class AsyncMySQLConnection(AsyncConnection):
         params: dict[str, Any] = {"connectionString": self._connection_string}
         if self._pool_max:
             params["pool"] = {"max": self._pool_max}
-        response = await self._client.request(
-            {"id": "connect", "driver": "mysql", "method": "connect", "params": params}
-        )
+        response = await self._client.request({
+            "id": "connect",
+            "driver": "mysql",
+            "method": "connect",
+            "params": params,
+        })
         _raise_for_error(response)
         connection_id = response.get("result", {}).get("connectionId")
         if not connection_id:
@@ -258,14 +249,12 @@ class AsyncMySQLConnection(AsyncConnection):
     async def close(self) -> None:
         if not self._connection_id:
             return
-        await self._client.request(
-            {
-                "id": "close",
-                "driver": "mysql",
-                "method": "close",
-                "params": {"connectionId": self._connection_id},
-            }
-        )
+        await self._client.request({
+            "id": "close",
+            "driver": "mysql",
+            "method": "close",
+            "params": {"connectionId": self._connection_id},
+        })
         await self._client.close()
 
     def transaction(self, isolation: str | None = None) -> "AsyncMySQLTransaction":
@@ -273,18 +262,12 @@ class AsyncMySQLConnection(AsyncConnection):
 
     async def _execute(self, query: str, params: Sequence[Any]) -> dict[str, Any]:
         connection_id = await self._ensure_connection()
-        response = await self._client.request(
-            {
-                "id": "execute",
-                "driver": "mysql",
-                "method": "execute",
-                "params": {
-                    "connectionId": connection_id,
-                    "sql": query,
-                    "params": list(params),
-                },
-            }
-        )
+        response = await self._client.request({
+            "id": "execute",
+            "driver": "mysql",
+            "method": "execute",
+            "params": {"connectionId": connection_id, "sql": query, "params": list(params)},
+        })
         _raise_for_error(response)
         return response.get("result", {})
 
@@ -366,9 +349,7 @@ class AsyncMySQLDriver(AsyncDriver):
     async def _connect(self, pool_max: int | None = None) -> AsyncMySQLConnection:
         client = IpcClient(self._config.ipc)
         connection = AsyncMySQLConnection(
-            client,
-            self._config.connection_string,
-            pool_max=pool_max or self._config.pool_max,
+            client, self._config.connection_string, pool_max=pool_max or self._config.pool_max
         )
         await connection._ensure_connection()
         return connection
@@ -393,10 +374,7 @@ class SyncMySQLTransaction:
         return self
 
     def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
         if exc_type:
             self._connection._execute("ROLLBACK", [])
@@ -417,10 +395,7 @@ class AsyncMySQLTransaction:
         return self
 
     async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
         if exc_type:
             await self._connection._execute("ROLLBACK", [])
@@ -428,7 +403,7 @@ class AsyncMySQLTransaction:
             await self._connection._execute("COMMIT", [])
 
 
-__all__ = [
+__all__ = (
     "AsyncMySQLConnection",
     "AsyncMySQLCursor",
     "AsyncMySQLDriver",
@@ -440,4 +415,4 @@ __all__ = [
     "SyncMySQLDriverConfig",
     "SyncMySQLPool",
     "SyncMySQLTransaction",
-]
+)

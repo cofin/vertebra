@@ -3,7 +3,7 @@
 **Status:** Complete
 **Author:** Vertebra Team
 **Created:** 2026-01-17
-**Last Updated:** 2026-01-17
+**Last Updated:** 2026-01-18
 
 ---
 
@@ -2014,7 +2014,7 @@ make clean && make install && make test-all
 
 ## Progress Update
 
-**Last reviewed:** 2026-01-17
+**Last reviewed:** 2026-01-18
 
 ### Progress Checklist
 - [x] Standardized TypeScript/Bun layout to `src/ts` and aligned PRD docs accordingly.
@@ -2025,6 +2025,8 @@ make clean && make install && make test-all
 - [x] Updated Makefile with cross-language install/upgrade/build/test/lint targets and fail-fast behavior.
 - [x] Removed unused N-API import warning in `vertebra-js`.
 - [x] Added architecture + conventions docs (`docs/arch.md`, `CLAUDE.md`, `README.md`).
+- [x] Added Biome v2 config and TS formatting pipeline.
+- [x] Added Docker/Podman container runtime helper for integration test scaffolding.
 - [x] `make test-all` completed after pytest plugin cleanup and N-API warning removal.
 - [x] Regenerated `uv.lock` (`uv lock --upgrade`) to capture the 3.12 baseline and current deps.
 - [x] Confirmed no remaining legacy DMA references beyond documented notes.

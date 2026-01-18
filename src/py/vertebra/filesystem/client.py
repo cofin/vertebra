@@ -132,12 +132,7 @@ class FileSystemClient:
         return _coerce_bytes(response.get("data"))
 
     def write_bytes(
-        self,
-        path: str,
-        data: bytes,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, path: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         params = self._build_params(path)
         params["data"] = data
@@ -163,12 +158,7 @@ class FileSystemClient:
         return int(response.get("bytes", 0))
 
     def write_file(
-        self,
-        path: str,
-        local_path: str,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, path: str, local_path: str, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         params = self._build_params(path)
         params["localPath"] = local_path
@@ -277,12 +267,7 @@ class AsyncFileSystemClient:
         return _coerce_bytes(response.get("data"))
 
     async def write_bytes(
-        self,
-        path: str,
-        data: bytes,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, path: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         params = self._build_params(path)
         params["data"] = data
@@ -308,12 +293,7 @@ class AsyncFileSystemClient:
         return int(response.get("bytes", 0))
 
     async def write_file(
-        self,
-        path: str,
-        local_path: str,
-        *,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
+        self, path: str, local_path: str, *, content_type: str | None = None, metadata: dict[str, str] | None = None
     ) -> int:
         params = self._build_params(path)
         params["localPath"] = local_path

@@ -12,16 +12,8 @@ async def app(scope, receive, send) -> None:
     assert scope["type"] == "http"
     message = await receive()
     body = message.get("body", b"")
-    await send({
-        "type": "http.response.start",
-        "status": 200,
-        "headers": [(b"content-type", b"text/plain")],
-    })
-    await send({
-        "type": "http.response.body",
-        "body": body or b"ok",
-        "more_body": False,
-    })
+    await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/plain")]})
+    await send({"type": "http.response.body", "body": body or b"ok", "more_body": False})
 
 
 @pytest.mark.anyio

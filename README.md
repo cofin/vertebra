@@ -30,7 +30,8 @@ make rs-test       # Run Rust tests
 make js-test       # Run TypeScript tests
 make js-type-check # Run TypeScript type checks
 make test          # Run Python tests
-make lint          # Run all linters
+make lint          # Format Python/TS/Rust (ruff + biome + rustfmt)
+make lint-all      # Run full lint + type checks + pre-commit
 ```
 
 ## Repository Layout
@@ -57,8 +58,16 @@ src/
 
 ## Status
 
-PRD-0 is complete and PRD-1 (Rust IPC core) is now in progress. See
+PRD-0/PRD-1 are complete with PRD-2 through PRD-4 in active development. See
 `docs/progress.md` for current status.
+
+Integration tests will use a Docker/Podman runtime abstraction (no compose required)
+to start ephemeral services as needed.
+
+To run integration tests:
+```bash
+uv run pytest src/py/tests -m integration --integration
+```
 
 ## IPC Example
 

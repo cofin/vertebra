@@ -12,7 +12,7 @@ from vertebra.procedures import (
     register_serializer,
 )
 
-__all__ = [
+__all__ = (
     "MsgspecSerializer",
     "PydanticSerializer",
     "Serializer",
@@ -21,6 +21,6 @@ __all__ = [
     "get_serializer",
     "procedure",
     "register_serializer",
-]
+)
 
 __version__ = "0.1.0"

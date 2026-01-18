@@ -6,6 +6,7 @@
 
 - PRD-3 Bun server foundations + IPC protocol (in progress).
 - PRD-4 Bun-backed drivers Phase 1 foundation (in progress).
+- Tooling alignment: lint/format pipeline + container runtime abstraction for integration tests.
 
 ## Progress (PRD-0)
 
@@ -17,6 +18,7 @@
 - Created Rust workspace (`vertebra-core`, `vertebra-py`, `vertebra-js`).
 - Added Bun/TypeScript workspace scaffold with tests and minimal stubs.
 - Updated Makefile for cross-language install/upgrade/build/test/lint with fail-fast behavior.
+- Added `make lint` (ruff fix + ruff format + Biome format + rustfmt) and `make lint-all` for full checks.
 - Added architecture + conventions docs (`docs/arch.md`, `CLAUDE.md`, `README.md`).
 - Completed `make test-all` and `uv lock --upgrade`.
 
@@ -129,6 +131,8 @@
 - Added streaming helpers for storage backends (iter_chunks/put_stream + upload/download to path).
 - Added signed URL support for storage backends with graceful fallback when unsupported.
 - Updated fsspec shim to wrap object-store protocol.
+- Added Biome config for TypeScript formatting (`src/ts/biome.json`) and Biome dev dependency.
+- Added Docker/Podman container runtime helper for future integration tests (`tools/lib/container.py`).
 
 ## Progress (PRD-5)
 
@@ -163,6 +167,7 @@
 - Add SQLSpec adapter layer + compliance tests.
 - Add fsspec compliance tests + store protocol unit tests.
 - Expand filesystem/storage docs and examples (local/S3/GCS).
+- Add integration test harness using the container runtime abstraction (Docker/Podman, no compose).
 
 ### PRD-5/6/7
 

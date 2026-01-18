@@ -31,6 +31,7 @@ Cooperative Resource Management enables shared connection pools across Python wo
 
 ## Implementation Status
 
+Updated 2026-01-18: Broker scaffolding + Python client tests are in place.
 Check `tasks.md` for detailed task list and mark items as complete.
 
 **Phase Overview**:
