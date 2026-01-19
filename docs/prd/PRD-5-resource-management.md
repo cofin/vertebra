@@ -2,17 +2,21 @@
 
 **Status**: In Progress
 **Version**: 1.0
-**Last Updated**: 2026-01-18
+**Last Updated**: 2026-01-19
 **Authors**: Vertebra Team
 **Dependencies**: PRD-4 (Bun-Backed Drivers)
 
 > **Cross-PRD Decisions**: See [PRD-0 Cross-PRD Architectural Decisions](./PRD-0-foundation.md#cross-prd-architectural-decisions) for serialization strategy (bincode for internal Rust IPC), Python version (3.12+), and IPC transport decisions.
 
+**Note**: Socket-based broker IPC is superseded by the shared-memory broker spec in
+`specs/active/shared-memory-broker/`. The shared-memory C ABI is mandatory for SQL
+and storage access across runtimes.
+
 ---
 
 ## Executive Summary
 
-Vertebra's Cooperative Resource Management system enables shared connection pools across Python workers, dramatically reducing resource usage by 70-90%. Instead of each worker maintaining isolated connection pools, a centralized Rust-based broker manages shared pools accessible via zero-copy IPC.
+Vertebra's Cooperative Resource Management system enables shared connection pools across Python workers, dramatically reducing resource usage by 70-90%. Instead of each worker maintaining isolated connection pools, a centralized **Bun broker** manages shared pools accessible via **shared memory** (no sockets/TCP).
 
 **Problem**:
 - Traditional: 10 workers × 10 DB connections = 100 total connections
@@ -23,14 +27,14 @@ Vertebra's Cooperative Resource Management system enables shared connection pool
 ```
 ┌─────────────────────────────────────┐
 │     Vertebra Resource Broker        │
-│   (Rust process, manages pools)     │
+│   (Bun process, manages pools)      │
 ├─────────────────────────────────────┤
 │  PostgreSQL Pool (20 conns)         │
 │  MySQL Pool (10 conns)              │
 │  Redis Pool (5 conns)               │
 │  HTTP Client Pool                   │
 └─────────────────────────────────────┘
-         │ Zero-copy IPC
+         │ Shared-memory IPC (no sockets)
     ┌────┴────┬────┴────┬────┴────┐
     │Worker 1 │Worker 2 │Worker N │
     └─────────┴─────────┴─────────┘
@@ -47,9 +51,9 @@ Vertebra's Cooperative Resource Management system enables shared connection pool
 
 ## Progress Update (2026-01-18)
 
-- Broker crate initialized with IPC server/pool scaffolding and configuration parsing.
-- Python broker client + pooling helpers added with unit tests.
-- IPC framing implemented (bincode) with echo integration test.
+- Shared-memory broker spec (Bun + C ABI) adopted; socket-based IPC removed.
+- Python broker client + pooling helpers updated for shared-memory transport.
+- ASGI bridge now uses shared-memory rings for request/response routing.
 
 ## 1. Problem Statement
 
@@ -98,7 +102,7 @@ Python multi-worker deployments suffer from resource multiplication:
 ### 1.4 Assumptions and Constraints
 
 - **Cross-platform target**: Linux/macOS/Windows parity for MVP if feasible; Linux-first implementation.
-- **IPC transport**: UDS on Unix; named pipes (or TCP fallback) on Windows.
+- **IPC transport**: shared-memory C ABI (no sockets).
 - **Central broker** pattern is required for pool ownership and fairness.
 - **OpenTelemetry + Prometheus** are the default observability stack unless overridden.
 
@@ -260,19 +264,10 @@ Python Worker                Rust Broker
 
 #### 2.2.3 Transport Mechanism
 
-**Primary (Linux)**: shmipc (ByteDance's shared memory IPC)
+**Primary**: shared-memory C ABI (POSIX on Unix, CreateFileMapping on Windows)
 - Zero-copy data transfer
-- Shared memory based (POSIX on Unix, named shared memory on Windows)
-- IPC transport for synchronization (UDS on Unix, named pipe on Windows)
+- Shared memory based (no sockets)
 - High performance (reported sub-microsecond latency; validate locally)
-
-**Primary (macOS/Windows)**: OS-native shared memory + IPC transport
-- macOS: POSIX shared memory + UDS
-- Windows: Named shared memory + named pipes
-
-**Fallback**: IPC transport without shared memory
-- UDS on Unix, TCP on Windows if named pipes unavailable
-- Lower performance but universally supported
 
 ### 2.3 Fair Scheduling Algorithm
 
@@ -432,7 +427,7 @@ async fn release(&self, conn: Connection) -> Result<()> {
 }
 ```
 
-**Windows Note**: use named pipe client impersonation / token checks for equivalent worker identity verification.
+**Windows Note**: apply shared memory ACLs for equivalent worker identity verification.
 
 ---
 
@@ -754,14 +749,14 @@ groups:
 #### 5.1.1 IPC Transport Security
 
 **Permissions**:
-- **Unix**: enforce 0600 on UDS path
-- **Windows**: restrict named pipe ACLs to local user/service
+- **Unix**: enforce 0600 on shared memory segment
+- **Windows**: restrict shared memory ACLs to local user/service
 
 **Worker Authentication**:
 ```rust
 async fn authenticate_worker(&self, worker_id: WorkerId) -> Result<()> {
-    // Verify via SO_PEERCRED
-    let creds = get_peer_credentials(&socket)?;
+    // Verify via shared memory ACL / handle metadata
+    let creds = get_shared_memory_credentials()?;
 
     if creds.pid != worker_id.0 {
         return Err(Error::AuthenticationFailed);
@@ -1187,8 +1182,8 @@ spec:
         volumeMounts:
         - name: config
           mountPath: /etc/vertebra
-        - name: ipc-socket
-          mountPath: /var/run/vertebra
+        - name: shared-memory
+          mountPath: /dev/shm
         resources:
           requests:
             memory: "256Mi"
@@ -1212,9 +1207,9 @@ spec:
       - name: config
         configMap:
           name: vertebra-config
-      - name: ipc-socket
+      - name: shared-memory
         hostPath:
-          path: /var/run/vertebra
+          path: /dev/shm
           type: DirectoryOrCreate
 ```
 
@@ -1224,9 +1219,9 @@ spec:
 
 ```toml
 [broker]
-ipc_socket_path = "/var/run/vertebra/broker.sock"
-ipc_max_clients = 1000
-ipc_buffer_size = 65536
+name = "vertebra-broker"
+slot_size = 65536
+slots = 1024
 
 metrics_port = 9090
 metrics_path = "/metrics"
@@ -1264,16 +1259,15 @@ starvation_threshold = 10
 **Python Client Configuration**:
 
 ```python
-from vertebra.resources import configure_client
+from vertebra.resources import BrokerClient, BrokerClientConfig
 
-configure_client(
-    broker_socket="/var/run/vertebra/broker.sock",
-    default_timeout=5.0,
-    retry_attempts=3,
-    retry_backoff=1.0,
-    enable_metrics=True,
-    metrics_interval=10.0
+config = BrokerClientConfig(
+    name="vertebra-broker",
+    slot_size=65_536,
+    slots=1_024,
+    timeout_ms=5_000,
 )
+client = BrokerClient(config)
 ```
 
 ### 6.3 Operational Procedures
@@ -1466,7 +1460,7 @@ async def load_test_scenario():
 **Failure Scenarios**:
 1. Broker process killed (SIGKILL)
 2. Database connection refused
-3. Network partition between workers and broker
+3. Shared-memory transport failure between workers and broker
 4. Slow query causing connection leaks
 5. Worker process crashes mid-request
 6. Resource exhaustion (memory, file descriptors)
@@ -1475,104 +1469,35 @@ async def load_test_scenario():
 
 ## 8. Implementation Roadmap
 
-### Phase 1: Foundation (Weeks 1-3)
+This PRD now tracks the shared-memory broker program. Detailed tasks live in
+`specs/active/shared-memory-broker/tasks.md` and the production readiness phases.
 
-**Milestone 1.1: Rust Broker Skeleton**
-- [ ] Set up vertebra-broker crate structure
-- [ ] Implement configuration loading (TOML)
-- [ ] Create IPC server (UDS on Unix, named pipe on Windows)
-- [ ] Message serialization/deserialization
-- [ ] Structured logging
+### Phase 1: C ABI Shared Memory Library (Rust)
+- [x] Define C ABI for ring creation/open/close.
+- [x] Expose send/recv APIs with timeouts + stats.
+- [x] Add Arrow IPC helpers with buffer pooling.
+- [x] Add ffi-safe error codes + diagnostics.
 
-**Milestone 1.2: Single Pool**
-- [ ] Integrate deadpool-postgres
-- [ ] PoolManager for PostgreSQL
-- [ ] Acquisition/release logic
-- [ ] Health checks
-- [ ] Integration tests
+### Phase 2: Bun Broker (Central Authority)
+- [x] Bun broker process uses bun:ffi to shm library.
+- [x] Implement request loop + fairness scheduler.
+- [x] Implement Bun SQL pools (Postgres/MySQL/SQLite).
+- [x] Implement Redis pool (native in broker).
+- [x] Implement storage adapter registry + routing.
 
-### Phase 2: Python Client (Weeks 4-5)
+### Phase 3: Python CFFI Client + SQLSpec
+- [x] CFFI bindings to shm library (client + provider host).
+- [x] SQLSpec broker adapters + proxy configs.
+- [x] Plugin registration via `Vertebra(plugins=[...])`.
+- [x] Provider host for non-Bun adapters.
+- [x] Storage layer integration (fsspec bridge + brokered ops).
 
-**Milestone 2.1: IPC Client**
-- [ ] IPCClient implementation
-- [ ] Message serialization
-- [ ] Connection wrapper
-- [ ] Error handling & retry
-- [ ] End-to-end tests
-
-**Milestone 2.2: Multi-Pool Support**
-- [ ] Redis pool (deadpool-redis)
-- [ ] MySQL pool (sqlx-mysql)
-- [ ] Pool registry
-- [ ] Multi-pool tests
-
-### Phase 3: Fair Scheduling (Weeks 6-7)
-
-**Milestone 3.1: Basic Scheduler**
-- [ ] Round-robin scheduler
-- [ ] Per-worker queuing
-- [ ] Timeout handling
-- [ ] Queue metrics
-
-**Milestone 3.2: WFQ Implementation**
-- [ ] Weighted Fair Queuing
-- [ ] Deficit Round Robin
-- [ ] Starvation prevention
-- [ ] Fairness validation
-
-### Phase 4: Production Readiness (Weeks 8-10)
-
-**Milestone 4.1: Observability**
-- [ ] Prometheus metrics
-- [ ] Grafana dashboard
-- [ ] OpenTelemetry tracing
-- [ ] Alert rules
-
-**Milestone 4.2: Security & Resilience**
-- [ ] IPC authentication
-- [ ] Rate limiting
-- [ ] Circuit breakers
-- [ ] Leak detection
-- [ ] Crash handling
-
-**Milestone 4.3: Deployment**
-- [ ] Docker image
-- [ ] Kubernetes manifests
-- [ ] Systemd service
-- [ ] Operational runbooks
-
-### Phase 5: Integration & Testing (Weeks 11-12)
-
-**Milestone 5.1: Performance Testing**
-- [ ] Load testing (1000+ workers)
-- [ ] Latency benchmarks
-- [ ] Resource profiling
-- [ ] Comparison report
-
-**Milestone 5.2: PRD-4 Integration**
-- [ ] Bun driver integration
-- [ ] Performance comparison
-- [ ] E2E tests
-
-**Milestone 5.3: Production Pilot**
-- [ ] Staging deployment
-- [ ] 10% production traffic
-- [ ] Metrics monitoring
-- [ ] Incident response plan
-
-### Phase 6: Production Rollout (Weeks 13-14)
-
-**Milestone 6.1: Gradual Rollout**
-- [ ] 25% production traffic
-- [ ] 50% production traffic
-- [ ] 75% production traffic
-- [ ] 100% production traffic
-
-**Milestone 6.2: Documentation**
-- [ ] User guide
-- [ ] API documentation
-- [ ] Troubleshooting guide
-- [ ] Training sessions
+### Phase 4: Tests + Benchmarks
+- [ ] Shared-memory ring tests (multi-client).
+- [ ] Arrow threshold tests (msgspec vs Arrow).
+- [ ] SQLSpec integration tests (postgres/mysql/sqlite/redis).
+- [ ] Provider registration tests.
+- [ ] Storage integration tests (local backend + brokered access).
 
 ---
 

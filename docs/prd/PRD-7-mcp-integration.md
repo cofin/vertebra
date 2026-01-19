@@ -7,7 +7,7 @@
 **Author**: Vertebra Team
 **Dependencies**: PRD-1 (Rust IPC Layer), PRD-2 (Python Bindings), PRD-3 (Bun Server)
 
-> **Cross-PRD Decisions**: See [PRD-0 Cross-PRD Architectural Decisions](./PRD-0-foundation.md#cross-prd-architectural-decisions) for serialization strategy (Protobuf for MCP control plane), Python version (3.12+), and protocol priorities.
+> **Cross-PRD Decisions**: See [PRD-0 Cross-PRD Architectural Decisions](./PRD-0-foundation.md#cross-prd-architectural-decisions) for serialization strategy (MessagePack + Arrow for IPC data plane), Python version (3.12+), and protocol priorities.
 
 ---
 
@@ -33,7 +33,7 @@ AI assistants like Claude Desktop, Cursor, and other MCP-compatible clients need
 PRD-7 introduces native MCP integration for Vertebra using a Bun-based MCP server with low-overhead IPC to Python tool and resource handlers. This architecture combines:
 
 - **Bun MCP Server**: JSON-RPC 2.0 protocol handling, multiple transport support (stdio, SSE, Streamable HTTP)
-- **Vertebra IPC Bridge**: Sub-millisecond tool invocation via IPC transport (UDS or named pipes) and Protocol Buffers
+- **Vertebra IPC Bridge**: Sub-millisecond tool invocation via shared-memory C ABI (no sockets)
 - **Python Tool/Resource Handlers**: Decorator-based API (`@vertebra.tool`, `@vertebra.resource`)
 - **Type Bridge Integration**: Automatic MCP JSON Schema generation from Python type annotations
 - **Resource Pool Support**: Shared database connections, caches, and other resources across tools
@@ -66,7 +66,7 @@ PRD-7 introduces native MCP integration for Vertebra using a Bun-based MCP serve
 ### Assumptions and Constraints
 
 - **Cross-platform target**: Linux/macOS/Windows parity for MCP server transports.
-- **IPC transport**: UDS on Unix, named pipes or TCP on Windows.
+- **IPC transport**: Shared-memory C ABI (no sockets/UDS/TCP).
 - **MCP spec drift**: spec updates may require protocol adjustments; lock to specific revision per release.
 
 ### Success Criteria
@@ -429,18 +429,18 @@ const result = await response.json();
 │  │  - Hot reload on Python file changes        │   │
 │  └─────────────────┬───────────────────────────┘   │
 └────────────────────┼─────────────────────────────────┘
-                     │ Vertebra IPC (Protocol Buffers)
+                     │ Vertebra IPC (Shared Memory C ABI)
                      ▼
 ┌─────────────────────────────────────────────────────┐
 │         Vertebra IPC Bridge                         │
 │  ┌─────────────────────────────────────────────┐   │
-│  │  IPC Client (TypeScript → Rust)            │   │
-│  │  - IPC transport connection pool           │   │
-│  │  - Protocol Buffer serialization           │   │
+│  │  IPC Client (TypeScript → C ABI)           │   │
+│  │  - Shared-memory connection pool           │   │
+│  │  - MessagePack + Arrow serialization       │   │
 │  │  - Request/response correlation            │   │
 │  └─────────────────┬───────────────────────────┘   │
 └────────────────────┼─────────────────────────────────┘
-                     │ IPC transport + Protobuf
+                     │ Shared-memory C ABI
                      ▼
 ┌─────────────────────────────────────────────────────┐
 │       Rust Core IPC Layer (PRD-1)                   │
@@ -502,7 +502,7 @@ const result = await response.json();
    ```
 
 4. **Rust IPC Layer**:
-   - Receive from IPC transport (~0.1ms)
+  - Receive from shared-memory IPC (~0.1ms)
    - Route to available Python worker
    - Forward via PyO3 FFI
 
@@ -740,10 +740,10 @@ Leverages existing Vertebra IPC infrastructure (PRD-1):
 
 ```typescript
 // src/ts/src/mcp/ipc-bridge.ts
-import { IpcClient } from '@vertebra/core';
+import { BrokerClient } from '@vertebra/core';
 
 export class MCPIPCBridge {
-  private client: IpcClient;
+  private client: BrokerClient;
 
   async callTool(name: string, args: Record<string, any>): Promise<any> {
     // Serialize to Protocol Buffer
@@ -754,7 +754,7 @@ export class MCPIPCBridge {
     });
 
     // Send via IPC (< 1ms overhead target)
-    const response = await this.client.send(request);
+    const response = await this.client.request(request);
 
     // Deserialize response
     return this.deserializeResult(response);
@@ -1186,7 +1186,7 @@ configure_pools({
 |-----------|--------------|-----------|
 | JSON-RPC parsing | < 1ms | Bun native JSON |
 | Schema validation | < 0.5ms | Pre-compiled schemas |
-| IPC overhead | < 5ms | IPC transport + Protobuf |
+| IPC overhead | < 5ms | Shared-memory C ABI + MessagePack |
 | Tool invocation (simple) | < 10ms | End-to-end excluding Python execution |
 | Schema generation | < 100ms | For 50 tools (development) |
 | Hot reload | < 200ms | File change to registry update |

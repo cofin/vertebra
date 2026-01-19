@@ -7,15 +7,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from vertebra._internal.dependencies import WATCHDOG_INSTALLED
+from vertebra._internal.errors import MissingDependencyError
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from vertebra.types.bridge import TypeBridge
 
-try:
-    from watchdog.events import FileSystemEventHandler
-    from watchdog.observers import Observer
-except ImportError:  # pragma: no cover - optional dependency
+_WATCHDOG_AVAILABLE = WATCHDOG_INSTALLED
+_WATCHDOG_IMPORT_ERROR: Exception | None = None
+
+if _WATCHDOG_AVAILABLE:
+    try:  # pragma: no cover - optional dependency
+        from watchdog.events import FileSystemEventHandler
+        from watchdog.observers import Observer
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        _WATCHDOG_AVAILABLE = False
+        _WATCHDOG_IMPORT_ERROR = exc
+
+if not _WATCHDOG_AVAILABLE:
     FileSystemEventHandler = object  # type: ignore[misc,assignment]
     Observer = None
 
@@ -85,7 +96,7 @@ class TypeBridgeWatcher:
 
     def start(self) -> None:
         if self._observer is None:
-            return
+            raise MissingDependencyError(package="watchdog") from _WATCHDOG_IMPORT_ERROR
         handler = _DebouncedHandler(self._bridge, self._options.debounce_ms)
         self._handler = handler
         for path in self._options.paths:

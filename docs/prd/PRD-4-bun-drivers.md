@@ -2,7 +2,7 @@
 
 **Status**: In Progress
 **Created**: 2026-01-17
-**Last Updated**: 2026-01-18
+**Last Updated**: 2026-01-19
 **Owner**: Vertebra Core Team
 **Dependencies**: PRD-2 (Python Bindings), PRD-3 (Bun Server)
 
@@ -10,7 +10,7 @@
 
 ## Executive Summary
 
-PRD-4 defines the implementation of high-performance database drivers, file systems, and cloud storage clients for Python that leverage Bun's fast I/O capabilities through a client-server architecture. By routing I/O operations through Bun, Vertebra bypasses Python's Global Interpreter Lock (GIL) limitations and provides 2-5x performance improvements over native Python drivers while maintaining full compatibility with industry standards (DB-API 2.0, fsspec).
+PRD-4 defines the implementation of high-performance database drivers, file systems, and cloud storage clients for Python that leverage Bun's fast I/O capabilities through a **shared-memory broker** architecture. By routing I/O operations through Bun without sockets or TCP, Vertebra bypasses Python's Global Interpreter Lock (GIL) limitations and provides 2-5x performance improvements over native Python drivers while maintaining full compatibility with industry standards (DB-API 2.0, fsspec).
 
 **Key Goals**:
 - Provide DB-API 2.0 compliant database drivers (PostgreSQL, MySQL, SQLite)
@@ -21,12 +21,14 @@ PRD-4 defines the implementation of high-performance database drivers, file syst
 
 ---
 
-## Progress Update (2026-01-18)
+## Progress Update (2026-01-19)
 
-- Implemented Sync/Async drivers (Postgres/MySQL/SQLite/Redis) with DB‑API style cursors/pools.
-- Added Bun driver IPC transport + MessagePack codec (Python/TS).
-- Added filesystem IPC server + local/S3/GCS clients; object store protocol with streaming helpers.
-- Added signed URL support with graceful fallback where unsupported (GCS deferred).
+- Socket/TCP driver servers are **deprecated**; all access routes through the shared-memory broker.
+- Shared-memory transport uses MessagePack for small payloads and Arrow IPC for large results.
+- Central Bun broker owns pools; clients attach via C ABI (Python CFFI, Bun FFI).
+
+**Note**: Sections below that describe MessagePack over sockets are superseded by
+the shared-memory broker spec in `specs/active/shared-memory-broker/`.
 
 ## Problem Statement
 
@@ -129,10 +131,10 @@ Bun provides excellent I/O performance through its native implementation (writte
 │  └──────────────┘  └──────────────┘  └──────────────┘      │
 └─────────────────────────────────────────────────────────────┘
                               │
-                              │ IPC (MessagePack over socket)
+                              │ IPC (shared memory ring + msgpack/Arrow)
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                      Bun Server (PRD-3)                      │
+│                      Bun Broker (PRD-3)                      │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
 │  │  Connection  │  │  File I/O    │  │  Cloud SDK   │      │
 │  │    Pools     │  │   Handler    │  │   (AWS/GCP)  │      │
@@ -148,7 +150,7 @@ Bun provides excellent I/O performance through its native implementation (writte
 
 ### Design Philosophy: Thin Python Wrapper
 
-**Selected Approach**: Thin Python wrappers that serialize requests to Bun server
+**Selected Approach**: Thin Python wrappers that serialize requests to Bun broker via shared memory
 
 **Rationale**:
 1. **Maximum Performance**: All I/O, pooling, and state management in Bun/TypeScript

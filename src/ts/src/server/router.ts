@@ -1,4 +1,9 @@
-export type RequestHandler = (request: Request) => Response | Promise<Response>;
+import type { Server } from "bun";
+
+export type RequestHandler = (
+  request: Request,
+  server?: Server,
+) => Response | Promise<Response> | void;
 
 export interface RouterConfig {
   staticDir?: string;
@@ -16,7 +21,7 @@ export function createRouter(config: RouterConfig): RequestHandler {
   const staticDir = config.staticDir;
   const apiHandler = config.apiHandler;
 
-  return async (request: Request) => {
+  return async (request: Request, server?: Server) => {
     const url = new URL(request.url);
     if (staticDir && (request.method === "GET" || request.method === "HEAD")) {
       const path = normalizePath(url.pathname);
@@ -30,7 +35,11 @@ export function createRouter(config: RouterConfig): RequestHandler {
       }
     }
     if (apiHandler) {
-      return apiHandler(request);
+      const response = await apiHandler(request, server);
+      if (response !== undefined) {
+        return response;
+      }
+      return;
     }
     return new Response("Not Found", { status: 404 });
   };

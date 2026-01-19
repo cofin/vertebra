@@ -102,7 +102,7 @@
 - [x] Implement request/response handling
 - [x] Add connection retry logic
 - [x] Implement timeout handling
-- [x] Add connection pooling for IPC sockets
+- [x] Add connection pooling for shared-memory IPC clients
 - [x] Write IPC tests
 
 ### 1.7 Bun-Only Runtime Guard
@@ -112,8 +112,8 @@
 - [x] Add tests for runtime guard behavior
 
 **Files**:
-- `src/py/vertebra/_internal/ipc.py`
-- `src/py/tests/test_ipc_guard.py`
+- `src/py/vertebra/_internal/shm.py`
+- `src/py/vertebra/resources/ipc.py`
 
 **Deliverables**:
 - Working IPC layer between Python and Bun

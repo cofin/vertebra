@@ -6,22 +6,27 @@ import argparse
 import asyncio
 import contextlib
 import importlib
+import os
 import signal
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 import msgspec
 
+from vertebra._internal.shm import ShmRing, ShmRingConfig
+
 
 @dataclass(frozen=True, slots=True)
 class WorkerConfig:
-    transport: str = "tcp"
-    host: str = "127.0.0.1"
-    port: int = 8008
-    path: str | None = None
+    name: str = "vertebra-asgi"
+    worker_id: str | None = None
+    slot_size: int = 65536
+    slots: int = 1024
     timeout: float = 5.0
+    host: str = "127.0.0.1"
+    port: int = 8000
 
 
 class AsgiRequest(msgspec.Struct):
@@ -51,6 +56,57 @@ class AsgiResponse(msgspec.Struct):
     count: int | None = None
 
 
+@dataclass(slots=True)
+class RequestMeta:
+    scope_type: str
+    id: str
+    method: str
+    path: str
+    query: str
+    headers: list[tuple[str, str]]
+    scheme: str
+    http_version: str
+    raw_path: bytes | None
+    query_string: bytes | None
+    root_path: str
+    server: tuple[str, int | None] | None
+    client: tuple[str, int | None] | None
+    extensions: dict[str, dict[str, Any]]
+    subprotocols: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RequestBodyState:
+    queue: asyncio.Queue[dict[str, Any]]
+    done: bool = False
+    disconnected: bool = False
+
+
+@dataclass(slots=True)
+class RequestContext:
+    meta: RequestMeta
+    body: RequestBodyState
+    task: asyncio.Task[None]
+
+
+@dataclass(slots=True)
+class ClientState:
+    id: str
+    request: ShmRing
+    response: ShmRing
+
+
+class ResponseWriter:
+    def __init__(self, ring: ShmRing, encoder: msgspec.msgpack.Encoder, timeout_ms: int) -> None:
+        self._ring = ring
+        self._encoder = encoder
+        self._timeout_ms = timeout_ms
+
+    async def send(self, frame: dict[str, Any]) -> None:
+        payload = self._encoder.encode(frame)
+        self._ring.send(payload, 0, self._timeout_ms)
+
+
 AsgiApp = Callable[
     [dict[str, Any], Callable[[], Awaitable[dict[str, Any]]], Callable[[dict[str, Any]], Awaitable[None]]],
     Awaitable[None],
@@ -66,8 +122,10 @@ class AsgiWorker:
         self._app = app
         self._config = config or WorkerConfig()
         self._encoder = msgspec.msgpack.Encoder()
-        self._decoder = msgspec.msgpack.Decoder(AsgiRequest)
-        self._server: asyncio.base_events.Server | None = None
+        self._decoder = msgspec.msgpack.Decoder()
+        self._control: ShmRing | None = None
+        self._clients: dict[str, "ClientState"] = {}
+        self._running = False
         self._lifespan_task: asyncio.Task[None] | None = None
         self._lifespan_queue: asyncio.Queue[dict[str, Any]] | None = None
         self._lifespan_state: dict[str, Any] = {}
@@ -78,98 +136,345 @@ class AsgiWorker:
         self._lifespan_supported: bool | None = None
 
     async def start(self) -> None:
-        if self._server is not None:
+        if self._control is not None:
             return
         await self._start_lifespan()
-        if self._config.transport == "uds":
-            if not self._config.path:
-                msg = "UDS transport requires path"
-                raise RuntimeError(msg)
-            path = Path(self._config.path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if path.exists():
-                path.unlink()
-            self._server = await asyncio.start_unix_server(self._handle_client, path=self._config.path)
-        else:
-            self._server = await asyncio.start_server(self._handle_client, self._config.host, self._config.port)
+        control_name = self._control_ring_name()
+        self._control = ShmRing.create(
+            ShmRingConfig(name=control_name, slot_size=self._config.slot_size, slots=self._config.slots)
+        )
 
     async def serve_forever(self) -> None:
         await self.start()
-        if self._server is None:
-            msg = "ASGI server failed to start"
+        if self._control is None:
+            msg = "ASGI worker failed to start"
             raise RuntimeError(msg)
-        async with self._server:
-            await self._server.serve_forever()
+        self._running = True
+        contexts: dict[str, RequestContext] = {}
+        while self._running:
+            await self._poll_control(contexts)
+            await self._poll_clients(contexts)
+            await asyncio.sleep(0)
 
     async def stop(self) -> None:
-        if self._server is None:
+        self._running = False
+        if self._control is None:
             return
-        self._server.close()
-        await self._server.wait_closed()
-        self._server = None
-        if self._config.transport == "uds" and self._config.path:
-            path = Path(self._config.path)
-            if path.exists():
-                path.unlink()
+        self._control.close()
+        self._control = None
+        for client in self._clients.values():
+            client.request.close()
+            client.response.close()
+        self._clients = {}
         await self._shutdown_lifespan()
 
-    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    def _control_ring_name(self) -> str:
+        return f"/{self._config.name}.asgi.{self._worker_id()}.control"
+
+    def _client_ring_name(self, client_id: str, suffix: str) -> str:
+        return f"/{self._config.name}.asgi.{self._worker_id()}.client.{client_id}.{suffix}"
+
+    def _worker_id(self) -> str:
+        return self._config.worker_id or os.environ.get("VERTEBRA_WORKER_ID", "0")
+
+    async def _poll_control(self, contexts: dict[str, RequestContext]) -> None:
+        if self._control is None:
+            return
+        message = self._recv_ring(self._control)
+        if message is None:
+            return
+        kind = message.get("kind")
+        if kind != "register_client":
+            return
+        client_id = str(message.get("client_id") or "")
+        req_ring = str(message.get("req_ring") or "")
+        resp_ring = str(message.get("resp_ring") or "")
+        if not client_id or not req_ring or not resp_ring:
+            return
+        request = ShmRing.open(ShmRingConfig(name=req_ring, slot_size=self._config.slot_size, slots=self._config.slots))
+        response = ShmRing.open(
+            ShmRingConfig(name=resp_ring, slot_size=self._config.slot_size, slots=self._config.slots)
+        )
+        self._clients[client_id] = ClientState(id=client_id, request=request, response=response)
+        response.send(self._encoder.encode({"ok": True, "id": message.get("id")}), 0, int(self._config.timeout * 1000))
+
+    async def _poll_clients(self, contexts: dict[str, RequestContext]) -> None:
+        if not self._clients:
+            return
+        for client in list(self._clients.values()):
+            message = self._recv_ring(client.request)
+            if message is None:
+                continue
+            writer = ResponseWriter(client.response, self._encoder, int(self._config.timeout * 1000))
+            if "type" in message:
+                await self._handle_frame(message, contexts, writer)
+            else:
+                await self._handle_legacy_request(message, contexts, writer)
+
+    def _recv_ring(self, ring: ShmRing) -> dict[str, Any] | None:
         try:
-            while True:
-                header = await reader.readexactly(4)
-                size = int.from_bytes(header, "big")
-                payload = await reader.readexactly(size)
-                request = self._decoder.decode(payload)
-                async for frame in self._handle_request(request):
-                    encoded = self._encoder.encode(frame)
-                    writer.write(len(encoded).to_bytes(4, "big") + encoded)
-                    await writer.drain()
-        except asyncio.IncompleteReadError:
-            return
-        finally:
-            writer.close()
-            await writer.wait_closed()
+            data, _flags = ring.recv(0)
+        except TimeoutError:
+            return None
+        try:
+            message = self._decoder.decode(data)
+        except Exception:
+            return None
+        if not isinstance(message, dict):
+            return None
+        return message
 
-    async def _handle_request(self, request: AsgiRequest):
-        if request.path == HEALTH_PATH:
-            yield {
-                "id": request.id,
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [("content-type", "text/plain")],
+    def _parse_request_meta(self, message: dict[str, Any], scope_type: str = "http") -> RequestMeta | None:
+        try:
+            request_id = message.get("id")
+            if not isinstance(request_id, str):
+                return None
+            headers_raw = message.get("headers", [])
+            headers: list[tuple[str, str]] = []
+            for item in headers_raw:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    continue
+                key, value = item
+                headers.append((str(key), str(value)))
+            subprotocols_raw = message.get("subprotocols", []) or []
+            subprotocols: list[str] = [str(value) for value in subprotocols_raw]
+            return RequestMeta(
+                scope_type=scope_type,
+                id=request_id,
+                method=str(message.get("method", "GET")),
+                path=str(message.get("path", "/")),
+                query=str(message.get("query", "")),
+                headers=headers,
+                scheme=str(message.get("scheme", "http")),
+                http_version=str(message.get("httpVersion") or message.get("http_version") or "1.1"),
+                raw_path=message.get("rawPath"),
+                query_string=message.get("queryString"),
+                root_path=str(message.get("rootPath", "")),
+                server=message.get("server"),
+                client=message.get("client"),
+                extensions=message.get("extensions") or {},
+                subprotocols=subprotocols,
+            )
+        except Exception:
+            return None
+
+    def _extract_trace_id(self, headers: list[tuple[str, str]]) -> str | None:
+        for key, value in headers:
+            lowered = key.lower()
+            if lowered == "x-request-id":
+                return value
+            if lowered == "traceparent":
+                return value
+        return None
+
+    def _log(self, level: str, message: str, **fields: Any) -> None:
+        {
+            "timestamp": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+            "level": level,
+            "component": "worker",
+            "message": message,
+            **fields,
+        }
+
+    async def _handle_frame(
+        self, message: dict[str, Any], contexts: dict[str, RequestContext], writer: "ResponseWriter"
+    ) -> None:
+        frame_type = message.get("type")
+        if frame_type == "http.request.start":
+            meta = self._parse_request_meta(message, scope_type="http")
+            if meta is None:
+                return
+            await self._start_request(meta, None, contexts, writer)
+            return
+        if frame_type == "websocket.connect":
+            meta = self._parse_request_meta(message, scope_type="websocket")
+            if meta is None:
+                return
+            await self._start_request(meta, None, contexts, writer)
+            return
+        request_id = message.get("id")
+        if not isinstance(request_id, str):
+            return
+        context = contexts.get(request_id)
+        if context is None:
+            return
+        await self._enqueue_request_frame(context, message)
+
+    async def _handle_legacy_request(
+        self, message: dict[str, Any], contexts: dict[str, RequestContext], writer: "ResponseWriter"
+    ) -> None:
+        try:
+            request = msgspec.convert(message, AsgiRequest)
+        except Exception:
+            return
+        meta = RequestMeta(
+            scope_type="http",
+            id=request.id,
+            method=request.method,
+            path=request.path,
+            query=request.query,
+            headers=request.headers,
+            scheme=request.scheme,
+            http_version=request.http_version,
+            raw_path=request.raw_path,
+            query_string=request.query_string,
+            root_path=request.root_path,
+            server=request.server,
+            client=request.client,
+            extensions=request.extensions,
+            subprotocols=[],
+        )
+        await self._start_request(meta, request.body, contexts, writer)
+
+    async def _start_request(
+        self,
+        meta: RequestMeta,
+        initial_body: bytes | None,
+        contexts: dict[str, RequestContext],
+        writer: "ResponseWriter",
+    ) -> None:
+        if meta.id in contexts:
+            return
+        body_state = RequestBodyState(queue=asyncio.Queue(maxsize=1))
+        task = asyncio.create_task(self._run_http_request(meta, body_state, writer, contexts))
+        contexts[meta.id] = RequestContext(meta=meta, body=body_state, task=task)
+        if meta.scope_type == "websocket":
+            await body_state.queue.put({"type": "websocket.connect"})
+        if initial_body is not None:
+            body_state.done = True
+            await body_state.queue.put({"type": "http.request", "body": initial_body, "more_body": False})
+
+    async def _enqueue_request_frame(self, context: RequestContext, message: dict[str, Any]) -> None:
+        if message.get("type") in {"http.disconnect", "websocket.disconnect"}:
+            context.body.disconnected = True
+            context.body.done = True
+        if message.get("type") == "http.request" and not message.get("more_body"):
+            context.body.done = True
+        await context.body.queue.put(message)
+
+    async def _receive_body(self, state: RequestBodyState) -> dict[str, Any]:
+        if state.disconnected:
+            return {"type": "http.disconnect"}
+        if state.done and state.queue.empty():
+            return {"type": "http.disconnect"}
+        message = await state.queue.get()
+        if message.get("type") == "http.disconnect":
+            state.disconnected = True
+        if message.get("type") == "http.request" and not message.get("more_body", False):
+            state.done = True
+        return message
+
+    async def _run_http_request(
+        self,
+        meta: RequestMeta,
+        body_state: RequestBodyState,
+        writer: "ResponseWriter",
+        contexts: dict[str, RequestContext],
+    ) -> None:
+        response_started = False
+        try:
+            if meta.scope_type == "websocket":
+                await self._run_websocket_request(meta, body_state, writer)
+                return
+            if meta.path == HEALTH_PATH:
+                await writer.send({
+                    "id": meta.id,
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [("content-type", "text/plain")],
+                })
+                await writer.send({"id": meta.id, "type": "http.response.body", "body": b"ok", "more_body": False})
+                return
+
+            raw_path = meta.raw_path if meta.raw_path is not None else meta.path.encode()
+            query_string = meta.query_string if meta.query_string is not None else meta.query.encode()
+            scope = {
+                "type": "http",
+                "asgi": {"version": ASGI_VERSION, "spec_version": ASGI_HTTP_SPEC_VERSION},
+                "http_version": meta.http_version,
+                "method": meta.method,
+                "path": meta.path,
+                "raw_path": raw_path,
+                "query_string": query_string,
+                "headers": [(k.lower().encode(), v.encode()) for k, v in meta.headers],
+                "scheme": meta.scheme,
+                "root_path": meta.root_path,
+                "server": meta.server or (self._config.host, self._config.port),
+                "client": meta.client or ("127.0.0.1", 0),
+                "extensions": meta.extensions,
+                "state": self._lifespan_state,
             }
-            yield {"id": request.id, "type": "http.response.body", "body": b"ok", "more_body": False}
-            return
 
-        raw_path = request.raw_path if request.raw_path is not None else request.path.encode()
-        query_string = request.query_string if request.query_string is not None else request.query.encode()
+            queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+
+            async def receive() -> dict[str, Any]:
+                return await self._receive_body(body_state)
+
+            async def send(message: dict[str, Any]) -> None:
+                await queue.put(message)
+
+            app_task = asyncio.create_task(self._app(scope, receive, send))
+            try:
+                while True:
+                    if app_task.done() and queue.empty():
+                        break
+                    message = await queue.get()
+                    frame = self._format_response_frame(meta.id, message)
+                    if frame is None:
+                        continue
+                    if frame.get("type") == "http.response.start":
+                        response_started = True
+                    await writer.send(frame)
+            finally:
+                try:
+                    await app_task
+                except Exception as exc:
+                    trace_id = self._extract_trace_id(meta.headers)
+                    self._log(
+                        "error", "request.error", trace_id=trace_id, method=meta.method, path=meta.path, error=str(exc)
+                    )
+                    if not response_started:
+                        await writer.send({
+                            "id": meta.id,
+                            "type": "http.response.start",
+                            "status": 500,
+                            "headers": [("content-type", "text/plain")],
+                        })
+                        await writer.send({
+                            "id": meta.id,
+                            "type": "http.response.body",
+                            "body": b"Internal Server Error",
+                            "more_body": False,
+                        })
+                    return
+        finally:
+            contexts.pop(meta.id, None)
+
+    async def _run_websocket_request(
+        self, meta: RequestMeta, body_state: RequestBodyState, writer: "ResponseWriter"
+    ) -> None:
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+        raw_path = meta.raw_path if meta.raw_path is not None else meta.path.encode()
+        query_string = meta.query_string if meta.query_string is not None else meta.query.encode()
         scope = {
-            "type": "http",
+            "type": "websocket",
             "asgi": {"version": ASGI_VERSION, "spec_version": ASGI_HTTP_SPEC_VERSION},
-            "http_version": request.http_version,
-            "method": request.method,
-            "path": request.path,
+            "http_version": meta.http_version,
+            "path": meta.path,
             "raw_path": raw_path,
             "query_string": query_string,
-            "headers": [(k.lower().encode(), v.encode()) for k, v in request.headers],
-            "scheme": request.scheme,
-            "root_path": request.root_path,
-            "server": request.server or (self._config.host, self._config.port),
-            "client": request.client or ("127.0.0.1", 0),
-            "extensions": request.extensions,
+            "headers": [(k.lower().encode(), v.encode()) for k, v in meta.headers],
+            "scheme": meta.scheme,
+            "root_path": meta.root_path,
+            "server": meta.server or (self._config.host, self._config.port),
+            "client": meta.client or ("127.0.0.1", 0),
+            "subprotocols": meta.subprotocols,
+            "extensions": meta.extensions,
             "state": self._lifespan_state,
         }
 
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
-        consumed = False
-        response_started = False
-
         async def receive() -> dict[str, Any]:
-            nonlocal consumed
-            if consumed:
-                return {"type": "http.disconnect"}
-            consumed = True
-            return {"type": "http.request", "body": request.body, "more_body": False}
+            return await self._receive_body(body_state)
 
         async def send(message: dict[str, Any]) -> None:
             await queue.put(message)
@@ -180,30 +485,22 @@ class AsgiWorker:
                 if app_task.done() and queue.empty():
                     break
                 message = await queue.get()
-                frame = self._format_response_frame(request.id, message)
+                frame = self._format_response_frame(meta.id, message)
                 if frame is None:
                     continue
-                if frame.get("type") == "http.response.start":
-                    response_started = True
-                yield frame
+                await writer.send(frame)
         finally:
             try:
                 await app_task
-            except Exception:
-                if not response_started:
-                    yield {
-                        "id": request.id,
-                        "type": "http.response.start",
-                        "status": 500,
-                        "headers": [("content-type", "text/plain")],
-                    }
-                    yield {
-                        "id": request.id,
-                        "type": "http.response.body",
-                        "body": b"Internal Server Error",
-                        "more_body": False,
-                    }
-                return
+            except Exception as exc:
+                trace_id = self._extract_trace_id(meta.headers)
+                self._log("error", "websocket.error", trace_id=trace_id, path=meta.path, error=str(exc))
+                await writer.send({
+                    "id": meta.id,
+                    "type": "websocket.close",
+                    "code": 1011,
+                    "reason": "Internal Server Error",
+                })
 
     def _format_response_frame(self, request_id: str, message: dict[str, Any]) -> dict[str, Any] | None:
         message_type = message.get("type")
@@ -216,7 +513,7 @@ class AsgiWorker:
                 "id": request_id,
                 "type": message_type,
                 "body": message.get("body", b""),
-                "more_body": bool(message.get("more_body", False)),
+                "more_body": bool(message.get("more_body")),
             }
         if message_type == "http.response.pathsend":
             return {"id": request_id, "type": message_type, "path": message.get("path")}
@@ -236,6 +533,18 @@ class AsgiWorker:
         if message_type == "http.response.trailers":
             headers = [(key.decode(), value.decode()) for key, value in message.get("headers", [])]
             return {"id": request_id, "type": message_type, "headers": headers}
+        if message_type == "websocket.accept":
+            headers = [(key.decode(), value.decode()) for key, value in message.get("headers", [])]
+            return {"id": request_id, "type": message_type, "headers": headers}
+        if message_type == "websocket.send":
+            return {"id": request_id, "type": message_type, "bytes": message.get("bytes"), "text": message.get("text")}
+        if message_type == "websocket.close":
+            return {
+                "id": request_id,
+                "type": message_type,
+                "code": message.get("code"),
+                "reason": message.get("reason"),
+            }
         return None
 
     async def _start_lifespan(self) -> None:
@@ -357,15 +666,23 @@ async def _serve_worker(app_path: str, config: WorkerConfig) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Vertebra ASGI worker process")
     parser.add_argument("--app", required=True, help="ASGI app path (module:attr)")
-    parser.add_argument("--transport", choices=("tcp", "uds"), default="tcp")
+    parser.add_argument("--name", default="vertebra-asgi")
+    parser.add_argument("--worker-id", default=None)
+    parser.add_argument("--slot-size", type=int, default=65536)
+    parser.add_argument("--slots", type=int, default=1024)
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8008)
-    parser.add_argument("--path", default=None)
+    parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--timeout", type=float, default=5.0)
     args = parser.parse_args()
 
     config = WorkerConfig(
-        transport=args.transport, host=args.host, port=args.port, path=args.path, timeout=args.timeout
+        name=args.name,
+        worker_id=args.worker_id,
+        slot_size=args.slot_size,
+        slots=args.slots,
+        host=args.host,
+        port=args.port,
+        timeout=args.timeout,
     )
     asyncio.run(_serve_worker(args.app, config))
 

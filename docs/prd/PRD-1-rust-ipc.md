@@ -99,7 +99,7 @@ PRD-1 builds atop this foundation by adding the Rust subsystem, which integrates
 > - Python 3.12+ baseline
 > - Serialization: bincode for internal Rust IPC (this PRD), msgspec for Python codec
 > - thiserror 2.0 for error handling
-> - Cross-platform IPC backends (shm_open + UDS on Linux/macOS, CreateFileMapping + Named Pipes on Windows)
+> - Cross-platform IPC backends (shared memory only; no UDS/named pipes)
 
 ### Assumptions and Constraints
 
@@ -115,7 +115,7 @@ PRD-1 builds atop this foundation by adding the Rust subsystem, which integrates
 - **Linux**: `memfd_create` fast-path + seals after sizing; `shm_open` fallback.
 - **macOS**: `shm_open` + `ftruncate` + `mmap`, `shm_unlink` immediately after handle handoff.
 - **Windows**: `CreateFileMappingW` (unnamed, pagefile-backed) + `MapViewOfFile`, pass handle via `DuplicateHandle`.
-- **Discovery**: handle/fd passing over control channel (UDS on Unix; named pipe or inherited handle on Windows). Avoid named mappings except for fallback rendezvous.
+- **Discovery**: shared-memory control ring + lock file rendezvous (no sockets).
 
 **Cross-process sync**
 - **Linux**: futex wait/wake on shared `AtomicU32`.

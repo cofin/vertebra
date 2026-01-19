@@ -1,12 +1,10 @@
 """Filesystem IPC client helpers."""
 
-from __future__ import annotations
-
 import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from vertebra._internal.ipc import IpcClient, IpcConfig
+from vertebra.resources.ipc import BrokerClient, BrokerClientConfig, BrokerClientError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -27,7 +25,7 @@ class FileEntry:
     etag: str | None = None
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "FileEntry":
+    def from_dict(cls, payload: "dict[str, Any]") -> "FileEntry":
         return cls(
             path=str(payload.get("path") or ""),
             is_dir=bool(payload.get("isDir") or payload.get("is_dir")),
@@ -37,23 +35,13 @@ class FileEntry:
         )
 
 
-def _run_sync(coro: Awaitable[Any]) -> Any:
+def _run_sync(coro: "Awaitable[Any]") -> Any:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
     msg = "Use AsyncFileSystemClient inside an event loop"
     raise RuntimeError(msg)
-
-
-def _raise_for_error(response: dict[str, Any]) -> None:
-    if response.get("ok"):
-        return
-    error = response.get("error") or {}
-    code = error.get("code") or "filesystem"
-    message = error.get("message") or "Filesystem driver error"
-    msg = f"{code}: {message}"
-    raise FileSystemError(msg)
 
 
 def _coerce_bytes(value: Any) -> bytes:
@@ -68,7 +56,7 @@ def _coerce_bytes(value: Any) -> bytes:
     return bytes(value)
 
 
-def _parse_cloud_path(path: str, default_bucket: str | None, scheme: str) -> tuple[str, str]:
+def _parse_cloud_path(path: str, default_bucket: str | None, scheme: str) -> "tuple[str, str]":
     scheme_prefix = f"{scheme}://"
     aliases = [scheme_prefix]
     if scheme == "gcs":
@@ -94,28 +82,39 @@ class FileSystemClient:
         self,
         backend: Backend = "local",
         *,
-        config: IpcConfig | None = None,
-        bucket: str | None = None,
-        options: dict[str, Any] | None = None,
+        pool: "str | None" = None,
+        client_config: "BrokerClientConfig | None" = None,
+        bucket: "str | None" = None,
+        options: "dict[str, Any] | None" = None,
     ) -> None:
         self._backend = backend
         self._bucket = bucket
         self._options = options or {}
-        self._client = IpcClient(config or IpcConfig(transport="tcp", host="127.0.0.1", port=7005, enforce_bun=False))
+        self._pool = pool or f"storage-{backend}"
+        self._client = BrokerClient(client_config or BrokerClientConfig())
+        self._token: str | None = None
 
-    def _build_params(self, path: str) -> dict[str, Any]:
+    def _ensure_token(self) -> str:
+        if self._token is None:
+            self._token = _run_sync(self._client.acquire(self._pool))
+        return self._token
+
+    def _build_params(self, path: str) -> "dict[str, Any]":
         if self._backend == "local":
             return {"backend": self._backend, "path": path}
         scheme = "s3" if self._backend == "s3" else "gcs"
         bucket, key = _parse_cloud_path(path, self._bucket, scheme)
         return {"backend": self._backend, "bucket": bucket, "key": key, "options": self._options}
 
-    def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        response = _run_sync(
-            self._client.request({"id": method, "driver": "filesystem", "method": method, "params": params})
-        )
-        _raise_for_error(response)
-        return response.get("result", {}) if isinstance(response.get("result"), dict) else response
+    def _request(self, method: str, params: "dict[str, Any]") -> "dict[str, Any]":
+        token = self._ensure_token()
+        try:
+            result = _run_sync(self._client.command(self._pool, token, method, [params]))
+        except BrokerClientError as exc:
+            raise FileSystemError(str(exc)) from exc
+        if isinstance(result, dict):
+            return result
+        return {"result": result}
 
     def read_bytes(self, path: str) -> bytes:
         params = self._build_params(path)
@@ -132,7 +131,7 @@ class FileSystemClient:
         return _coerce_bytes(response.get("data"))
 
     def write_bytes(
-        self, path: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
+        self, path: str, data: bytes, *, content_type: str | None = None, metadata: "dict[str, str] | None" = None
     ) -> int:
         params = self._build_params(path)
         params["data"] = data
@@ -143,7 +142,7 @@ class FileSystemClient:
         response = self._request("write", params)
         return int(response.get("bytes", len(data)))
 
-    def list(self, path: str, *, prefix: str | None = None) -> list[FileEntry]:
+    def list(self, path: str, *, prefix: str | None = None) -> "list[FileEntry]":
         params = self._build_params(path)
         if prefix:
             params["prefix"] = prefix
@@ -158,7 +157,7 @@ class FileSystemClient:
         return int(response.get("bytes", 0))
 
     def write_file(
-        self, path: str, local_path: str, *, content_type: str | None = None, metadata: dict[str, str] | None = None
+        self, path: str, local_path: str, *, content_type: str | None = None, metadata: "dict[str, str] | None" = None
     ) -> int:
         params = self._build_params(path)
         params["localPath"] = local_path
@@ -192,7 +191,7 @@ class FileSystemClient:
         expires_in: int = 3600,
         content_type: str | None = None,
         acl: str | None = None,
-    ) -> str | None:
+    ) -> "str | None":
         params = self._build_params(path)
         params["method"] = method
         params["expiresIn"] = int(expires_in)
@@ -218,6 +217,11 @@ class FileSystemClient:
         self._request("rmdir", params)
 
     def close(self) -> None:
+        if self._token is not None:
+            try:
+                _run_sync(self._client.release(self._pool, self._token))
+            finally:
+                self._token = None
         _run_sync(self._client.close())
 
 
@@ -226,31 +230,39 @@ class AsyncFileSystemClient:
         self,
         backend: Backend = "local",
         *,
-        config: IpcConfig | None = None,
-        bucket: str | None = None,
-        options: dict[str, Any] | None = None,
+        pool: "str | None" = None,
+        client_config: "BrokerClientConfig | None" = None,
+        bucket: "str | None" = None,
+        options: "dict[str, Any] | None" = None,
     ) -> None:
         self._backend = backend
         self._bucket = bucket
         self._options = options or {}
-        self._client = IpcClient(config or IpcConfig(transport="tcp", host="127.0.0.1", port=7005, enforce_bun=False))
+        self._pool = pool or f"storage-{backend}"
+        self._client = BrokerClient(client_config or BrokerClientConfig())
+        self._token: str | None = None
 
-    def _build_params(self, path: str) -> dict[str, Any]:
+    async def _ensure_token(self) -> str:
+        if self._token is None:
+            self._token = await self._client.acquire(self._pool)
+        return self._token
+
+    def _build_params(self, path: str) -> "dict[str, Any]":
         if self._backend == "local":
             return {"backend": self._backend, "path": path}
         scheme = "s3" if self._backend == "s3" else "gcs"
         bucket, key = _parse_cloud_path(path, self._bucket, scheme)
         return {"backend": self._backend, "bucket": bucket, "key": key, "options": self._options}
 
-    async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        response = await self._client.request({
-            "id": method,
-            "driver": "filesystem",
-            "method": method,
-            "params": params,
-        })
-        _raise_for_error(response)
-        return response.get("result", {}) if isinstance(response.get("result"), dict) else response
+    async def _request(self, method: str, params: "dict[str, Any]") -> "dict[str, Any]":
+        token = await self._ensure_token()
+        try:
+            result = await self._client.command(self._pool, token, method, [params])
+        except BrokerClientError as exc:
+            raise FileSystemError(str(exc)) from exc
+        if isinstance(result, dict):
+            return result
+        return {"result": result}
 
     async def read_bytes(self, path: str) -> bytes:
         params = self._build_params(path)
@@ -267,7 +279,7 @@ class AsyncFileSystemClient:
         return _coerce_bytes(response.get("data"))
 
     async def write_bytes(
-        self, path: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
+        self, path: str, data: bytes, *, content_type: str | None = None, metadata: "dict[str, str] | None" = None
     ) -> int:
         params = self._build_params(path)
         params["data"] = data
@@ -278,7 +290,7 @@ class AsyncFileSystemClient:
         response = await self._request("write", params)
         return int(response.get("bytes", len(data)))
 
-    async def list(self, path: str, *, prefix: str | None = None) -> list[FileEntry]:
+    async def list(self, path: str, *, prefix: str | None = None) -> "list[FileEntry]":
         params = self._build_params(path)
         if prefix:
             params["prefix"] = prefix
@@ -293,7 +305,7 @@ class AsyncFileSystemClient:
         return int(response.get("bytes", 0))
 
     async def write_file(
-        self, path: str, local_path: str, *, content_type: str | None = None, metadata: dict[str, str] | None = None
+        self, path: str, local_path: str, *, content_type: str | None = None, metadata: "dict[str, str] | None" = None
     ) -> int:
         params = self._build_params(path)
         params["localPath"] = local_path
@@ -327,7 +339,7 @@ class AsyncFileSystemClient:
         expires_in: int = 3600,
         content_type: str | None = None,
         acl: str | None = None,
-    ) -> str | None:
+    ) -> "str | None":
         params = self._build_params(path)
         params["method"] = method
         params["expiresIn"] = int(expires_in)
@@ -353,4 +365,12 @@ class AsyncFileSystemClient:
         await self._request("rmdir", params)
 
     async def close(self) -> None:
+        if self._token is not None:
+            try:
+                await self._client.release(self._pool, self._token)
+            finally:
+                self._token = None
         await self._client.close()
+
+
+__all__ = ("AsyncFileSystemClient", "Backend", "FileEntry", "FileSystemClient", "FileSystemError")

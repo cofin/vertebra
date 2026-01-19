@@ -1,4 +1,4 @@
-"""Bun-backed driver interfaces."""
+"""Broker-backed driver interfaces."""
 
 from __future__ import annotations
 
@@ -32,52 +32,28 @@ from vertebra.drivers.exceptions import (
 )
 from vertebra.drivers.exceptions import Warning as DriverWarning
 from vertebra.drivers.mysql import (
-    AsyncMySQLConnection,
-    AsyncMySQLCursor,
-    AsyncMySQLDriver,
-    AsyncMySQLPool,
-    AsyncMySQLTransaction,
-    SyncMySQLConnection,
-    SyncMySQLCursor,
-    SyncMySQLDriver,
-    SyncMySQLDriverConfig,
-    SyncMySQLPool,
-    SyncMySQLTransaction,
+    AsyncMysqlDriver,
+    AsyncMysqlDriverConfig,
+    SyncMysqlDriver,
+    SyncMysqlDriverConfig,
 )
 from vertebra.drivers.postgres import (
-    AsyncPostgresConnection,
-    AsyncPostgresCursor,
     AsyncPostgresDriver,
-    AsyncPostgresPool,
-    AsyncPostgresTransaction,
-    SyncPostgresConnection,
-    SyncPostgresCursor,
+    AsyncPostgresDriverConfig,
     SyncPostgresDriver,
     SyncPostgresDriverConfig,
-    SyncPostgresPool,
-    SyncPostgresTransaction,
 )
 from vertebra.drivers.redis import (
-    AsyncRedisConnection,
-    AsyncRedisCursor,
     AsyncRedisDriver,
-    AsyncRedisPool,
-    SyncRedisConnection,
-    SyncRedisCursor,
+    AsyncRedisDriverConfig,
     SyncRedisDriver,
     SyncRedisDriverConfig,
-    SyncRedisPool,
 )
 from vertebra.drivers.sqlite import (
-    AsyncSqliteConnection,
-    AsyncSqliteCursor,
     AsyncSqliteDriver,
-    AsyncSqlitePool,
-    SyncSqliteConnection,
-    SyncSqliteCursor,
+    AsyncSqliteDriverConfig,
     SyncSqliteDriver,
     SyncSqliteDriverConfig,
-    SyncSqlitePool,
 )
 from vertebra.drivers.types import (
     decode_mysql,
@@ -93,7 +69,7 @@ Warning = DriverWarning  # noqa: A001
 
 @dataclass(frozen=True, slots=True)
 class DriverConfig:
-    """Configuration for Bun-backed drivers."""
+    """Configuration for broker-backed drivers."""
 
     name: str
     options: dict[str, Any] = field(default_factory=dict)
@@ -101,7 +77,7 @@ class DriverConfig:
 
 @runtime_checkable
 class DriverBackend(Protocol):
-    """Driver backend contract (implemented in PRD-4)."""
+    """Driver backend contract."""
 
     def connect(self) -> None:
         """Establish a connection to the backend."""
@@ -137,30 +113,27 @@ __all__ = (
     "AsyncConnection",
     "AsyncCursor",
     "AsyncDriver",
-    "AsyncMySQLConnection",
-    "AsyncMySQLCursor",
-    "AsyncMySQLDriver",
-    "AsyncMySQLPool",
-    "AsyncMySQLTransaction",
+    "AsyncMysqlDriver",
+    "AsyncMysqlDriverConfig",
     "AsyncPool",
-    "AsyncPostgresConnection",
-    "AsyncPostgresCursor",
     "AsyncPostgresDriver",
-    "AsyncPostgresPool",
-    "AsyncPostgresTransaction",
-    "AsyncRedisConnection",
-    "AsyncRedisCursor",
+    "AsyncPostgresDriverConfig",
     "AsyncRedisDriver",
-    "AsyncRedisPool",
-    "AsyncSqliteConnection",
-    "AsyncSqliteCursor",
+    "AsyncRedisDriverConfig",
     "AsyncSqliteDriver",
-    "AsyncSqlitePool",
+    "AsyncSqliteDriverConfig",
     "DataError",
     "DatabaseError",
+    "decode_mysql",
+    "decode_postgres",
+    "decode_sqlite",
     "DriverBackend",
     "DriverConfig",
+    "DriverWarning",
     "Error",
+    "encode_mysql",
+    "encode_postgres",
+    "encode_sqlite",
     "IntegrityError",
     "InterfaceError",
     "InternalError",
@@ -170,37 +143,16 @@ __all__ = (
     "SyncConnection",
     "SyncCursor",
     "SyncDriver",
-    "SyncMySQLConnection",
-    "SyncMySQLCursor",
-    "SyncMySQLDriver",
-    "SyncMySQLDriverConfig",
-    "SyncMySQLPool",
-    "SyncMySQLTransaction",
+    "SyncMysqlDriver",
+    "SyncMysqlDriverConfig",
     "SyncPool",
-    "SyncPostgresConnection",
-    "SyncPostgresCursor",
     "SyncPostgresDriver",
     "SyncPostgresDriverConfig",
-    "SyncPostgresPool",
-    "SyncPostgresTransaction",
-    "SyncRedisConnection",
-    "SyncRedisCursor",
     "SyncRedisDriver",
     "SyncRedisDriverConfig",
-    "SyncRedisPool",
-    "SyncSqliteConnection",
-    "SyncSqliteCursor",
     "SyncSqliteDriver",
     "SyncSqliteDriverConfig",
-    "SyncSqlitePool",
-    "Warning",
     "available_driver_backends",
-    "decode_mysql",
-    "decode_postgres",
-    "decode_sqlite",
-    "encode_mysql",
-    "encode_postgres",
-    "encode_sqlite",
     "format_error_message",
     "get_driver_backend",
     "map_error_code",

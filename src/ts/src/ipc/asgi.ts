@@ -1,4 +1,5 @@
 import { IpcPool, type IpcClientConfig, type IpcRequester } from "./client";
+import type { Server, ServerWebSocket, WebSocketHandler } from "bun";
 
 export type AsgiRequest = {
   id: string;
@@ -7,6 +8,23 @@ export type AsgiRequest = {
   query: string;
   headers: [string, string][];
   body: Uint8Array;
+  scheme?: string;
+  httpVersion?: string;
+  rawPath?: Uint8Array;
+  queryString?: Uint8Array;
+  rootPath?: string;
+  server?: [string, number | null];
+  client?: [string, number | null];
+  extensions?: Record<string, Record<string, unknown>>;
+};
+
+export type AsgiRequestStartFrame = {
+  id: string;
+  type: "http.request.start";
+  method: string;
+  path: string;
+  query: string;
+  headers: [string, string][];
   scheme?: string;
   httpVersion?: string;
   rawPath?: Uint8Array;
@@ -61,11 +79,89 @@ export type AsgiIpcFrame =
       id: string;
       type: "http.response.trailers";
       headers: [string, string][];
+    }
+  | {
+      id: string;
+      type: "http.request.start";
+      method: string;
+      path: string;
+      query: string;
+      headers: [string, string][];
+      scheme?: string;
+      httpVersion?: string;
+      rawPath?: Uint8Array;
+      queryString?: Uint8Array;
+      rootPath?: string;
+      server?: [string, number | null];
+      client?: [string, number | null];
+      extensions?: Record<string, Record<string, unknown>>;
+    }
+  | {
+      id: string;
+      type: "http.request";
+      body?: Uint8Array;
+      more_body?: boolean;
+    }
+  | {
+      id: string;
+      type: "http.disconnect";
+    }
+  | {
+      id: string;
+      type: "websocket.accept";
+      headers?: [string, string][];
+    }
+  | {
+      id: string;
+      type: "websocket.connect";
+      path: string;
+      query: string;
+      headers: [string, string][];
+      scheme?: string;
+      httpVersion?: string;
+      rawPath?: Uint8Array;
+      queryString?: Uint8Array;
+      rootPath?: string;
+      server?: [string, number | null];
+      client?: [string, number | null];
+      subprotocols?: string[];
+      extensions?: Record<string, Record<string, unknown>>;
+    }
+  | {
+      id: string;
+      type: "websocket.receive";
+      bytes?: Uint8Array;
+      text?: string;
+    }
+  | {
+      id: string;
+      type: "websocket.send";
+      bytes?: Uint8Array;
+      text?: string;
+    }
+  | {
+      id: string;
+      type: "websocket.close";
+      code?: number;
+      reason?: string;
+    }
+  | {
+      id: string;
+      type: "websocket.disconnect";
+      code?: number;
     };
 
 export type AsgiBridgeOptions = {
   ipc?: IpcClientConfig;
   requester?: IpcRequester;
+};
+
+type WebSocketState = {
+  id: string;
+  connectFrame: AsgiIpcFrame;
+  queue: AsyncFrameQueue<AsgiIpcFrame>;
+  accepted: boolean;
+  closed: boolean;
 };
 
 export class AsgiBridge {
@@ -76,40 +172,61 @@ export class AsgiBridge {
   }
 
   async handle(request: Request): Promise<Response> {
+    const meta = this.buildRequestMeta(request);
+    if (this.requester.requestStream) {
+      return this.handleStream(request, meta);
+    }
     const body = new Uint8Array(await request.arrayBuffer());
-    const headers: [string, string][] = [];
-    request.headers.forEach((value, key) => {
-      headers.push([key, value]);
-    });
-    const url = new URL(request.url);
-    const encoder = new TextEncoder();
-    const queryString = url.search.replace(/^\?/, "");
-    const port = url.port ? Number(url.port) : null;
-    const payload: AsgiRequest = {
-      id: crypto.randomUUID(),
-      method: request.method,
-      path: url.pathname,
-      query: queryString,
-      headers,
-      body,
-      scheme: url.protocol.replace(":", ""),
-      httpVersion: "1.1",
-      rawPath: encoder.encode(url.pathname),
-      queryString: encoder.encode(queryString),
-      rootPath: "",
-      server: [url.hostname, Number.isFinite(port) ? port : null],
-      client: null,
-      extensions: {
-        "http.response.pathsend": {},
-        "http.response.zerocopysend": {},
-        "http.response.early_hint": {},
-        "http.response.trailers": {},
+    return this.handleUnary(this.buildRequest(meta, body));
+  }
+
+  upgradeWebSocket(request: Request, server?: Server): boolean {
+    if (!server) {
+      return false;
+    }
+    if (!this.requester.requestStream) {
+      return false;
+    }
+    const upgrade = request.headers.get("upgrade");
+    if (!upgrade || upgrade.toLowerCase() !== "websocket") {
+      return false;
+    }
+    const state = this.createWebSocketState(request);
+    const headers = this.selectWebSocketHeaders(state);
+    return server.upgrade(request, { data: state, headers });
+  }
+
+  createWebSocketHandler(): WebSocketHandler<WebSocketState> {
+    return {
+      open: (ws) => {
+        const state = ws.data as WebSocketState;
+        void this.startWebSocketBridge(ws, state);
+      },
+      message: (ws, message) => {
+        const state = ws.data as WebSocketState;
+        if (state.closed) {
+          return;
+        }
+        const frame: AsgiIpcFrame =
+          typeof message === "string"
+            ? { id: state.id, type: "websocket.receive", text: message }
+            : {
+                id: state.id,
+                type: "websocket.receive",
+                bytes: message instanceof Uint8Array ? message : new Uint8Array(message as ArrayBuffer),
+              };
+        state.queue.push(frame);
+      },
+      close: (ws, code, reason) => {
+        const state = ws.data as WebSocketState;
+        if (!state.closed) {
+          state.closed = true;
+          state.queue.push({ id: state.id, type: "websocket.disconnect", code });
+          state.queue.close();
+        }
+        void this.stopWebSocketBridge(ws, code, reason);
       },
     };
-    if (this.requester.requestStream) {
-      return this.handleStream(payload);
-    }
-    return this.handleUnary(payload);
   }
 
   private async handleUnary(payload: AsgiRequest): Promise<Response> {
@@ -127,10 +244,10 @@ export class AsgiBridge {
     }
   }
 
-  private async handleStream(payload: AsgiRequest): Promise<Response> {
+  private async handleStream(request: Request, meta: AsgiRequestStartFrame): Promise<Response> {
     const stream = this.createBackpressureStream();
     const responseInfo = this.createResponseInfoPromise();
-    const frames = this.requester.requestStream?.<AsgiIpcFrame>(payload);
+    const frames = this.requester.requestStream?.<AsgiIpcFrame>(this.streamRequestFrames(request, meta));
 
     if (!frames) {
       return new Response("Bad Gateway", { status: 502 });
@@ -316,6 +433,249 @@ export class AsgiBridge {
         rejectFn(error);
       },
       isResolved: () => resolved,
+    };
+  }
+
+  private buildRequestMeta(request: Request): AsgiRequestStartFrame {
+    const headers: [string, string][] = [];
+    request.headers.forEach((value, key) => {
+      headers.push([key, value]);
+    });
+    const url = new URL(request.url);
+    const encoder = new TextEncoder();
+    const queryString = url.search.replace(/^\?/, "");
+    const port = url.port ? Number(url.port) : null;
+    return {
+      id: crypto.randomUUID(),
+      type: "http.request.start",
+      method: request.method,
+      path: url.pathname,
+      query: queryString,
+      headers,
+      scheme: url.protocol.replace(":", ""),
+      httpVersion: "1.1",
+      rawPath: encoder.encode(url.pathname),
+      queryString: encoder.encode(queryString),
+      rootPath: "",
+      server: [url.hostname, Number.isFinite(port) ? port : null],
+      client: null,
+      extensions: {
+        "http.response.pathsend": {},
+        "http.response.zerocopysend": {},
+        "http.response.early_hint": {},
+        "http.response.trailers": {},
+      },
+    };
+  }
+
+  private buildRequest(meta: AsgiRequestStartFrame, body: Uint8Array): AsgiRequest {
+    const { type: _type, ...rest } = meta;
+    return { ...rest, body };
+  }
+
+  private createWebSocketState(request: Request): WebSocketState {
+    const headers: [string, string][] = [];
+    request.headers.forEach((value, key) => {
+      headers.push([key, value]);
+    });
+    const url = new URL(request.url);
+    const encoder = new TextEncoder();
+    const queryString = url.search.replace(/^\?/, "");
+    const port = url.port ? Number(url.port) : null;
+    const subprotocolHeader = request.headers.get("sec-websocket-protocol");
+    const subprotocols = subprotocolHeader
+      ? subprotocolHeader
+          .split(",")
+          .map((value) => value.trim())
+          .filter((value) => value.length > 0)
+      : [];
+    const id = crypto.randomUUID();
+    const connectFrame: AsgiIpcFrame = {
+      id,
+      type: "websocket.connect",
+      path: url.pathname,
+      query: queryString,
+      headers,
+      scheme: url.protocol.replace(":", ""),
+      httpVersion: "1.1",
+      rawPath: encoder.encode(url.pathname),
+      queryString: encoder.encode(queryString),
+      rootPath: "",
+      server: [url.hostname, Number.isFinite(port) ? port : null],
+      client: null,
+      subprotocols,
+      extensions: {
+        "websocket.close": {},
+      },
+    };
+    return {
+      id,
+      connectFrame,
+      queue: new AsyncFrameQueue<AsgiIpcFrame>(),
+      accepted: false,
+      closed: false,
+    };
+  }
+
+  private selectWebSocketHeaders(state: WebSocketState): HeadersInit | undefined {
+    if (state.connectFrame.type !== "websocket.connect" || !state.connectFrame.subprotocols?.length) {
+      return undefined;
+    }
+    return { "sec-websocket-protocol": state.connectFrame.subprotocols[0] };
+  }
+
+  private async startWebSocketBridge(ws: ServerWebSocket, state: WebSocketState): Promise<void> {
+    const outbound = this.websocketOutbound(state);
+    const stream = this.requester.requestStream?.<AsgiIpcFrame>(outbound);
+    if (!stream) {
+      ws.close(1011, "IPC stream unavailable");
+      return;
+    }
+    try {
+      for await (const frame of stream) {
+        if (state.closed) {
+          break;
+        }
+        await this.handleWebSocketFrame(ws, state, frame);
+      }
+    } catch {
+      if (!state.closed) {
+        ws.close(1011, "IPC stream error");
+      }
+    }
+  }
+
+  private async handleWebSocketFrame(
+    ws: ServerWebSocket,
+    state: WebSocketState,
+    frame: AsgiIpcFrame,
+  ): Promise<void> {
+    switch (frame.type) {
+      case "websocket.accept":
+        state.accepted = true;
+        break;
+      case "websocket.send":
+        if (!state.accepted) {
+          return;
+        }
+        if (frame.text !== undefined) {
+          ws.send(frame.text);
+        } else if (frame.bytes) {
+          ws.send(frame.bytes);
+        }
+        break;
+      case "websocket.close":
+        state.closed = true;
+        ws.close(frame.code ?? 1000, frame.reason ?? "");
+        break;
+      case "websocket.disconnect":
+        state.closed = true;
+        ws.close(frame.code ?? 1000);
+        break;
+    }
+  }
+
+  private async stopWebSocketBridge(ws: ServerWebSocket, _code: number, _reason: string): Promise<void> {
+    if (!ws.data) {
+      return;
+    }
+  }
+
+  private async *websocketOutbound(state: WebSocketState): AsyncGenerator<AsgiIpcFrame> {
+    yield state.connectFrame;
+    for await (const frame of state.queue) {
+      yield frame;
+    }
+  }
+
+  private async *streamRequestFrames(
+    request: Request,
+    meta: AsgiRequestStartFrame,
+  ): AsyncGenerator<AsgiIpcFrame> {
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+    };
+    request.signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      yield meta;
+
+      const body = request.body;
+      if (!body) {
+        yield { id: meta.id, type: "http.request", body: new Uint8Array(), more_body: false };
+        if (aborted) {
+          yield { id: meta.id, type: "http.disconnect" };
+        }
+        return;
+      }
+
+      const reader = body.getReader();
+      try {
+        while (true) {
+          if (aborted) {
+            yield { id: meta.id, type: "http.disconnect" };
+            return;
+          }
+          const { value, done } = await reader.read();
+          if (done) {
+            yield { id: meta.id, type: "http.request", body: new Uint8Array(), more_body: false };
+            return;
+          }
+          if (value) {
+            yield { id: meta.id, type: "http.request", body: value, more_body: true };
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    } finally {
+      request.signal?.removeEventListener("abort", onAbort);
+    }
+  }
+}
+
+class AsyncFrameQueue<T> implements AsyncIterable<T> {
+  private queue: T[] = [];
+  private waiters: Array<(value: IteratorResult<T>) => void> = [];
+  private closed = false;
+
+  push(value: T): void {
+    if (this.closed) {
+      return;
+    }
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter({ value, done: false });
+      return;
+    }
+    this.queue.push(value);
+  }
+
+  close(): void {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    for (const waiter of this.waiters) {
+      waiter({ value: undefined as T, done: true });
+    }
+    this.waiters = [];
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<T> {
+    return {
+      next: () => {
+        if (this.queue.length > 0) {
+          const value = this.queue.shift() as T;
+          return Promise.resolve({ value, done: false });
+        }
+        if (this.closed) {
+          return Promise.resolve({ value: undefined as T, done: true });
+        }
+        return new Promise<IteratorResult<T>>((resolve) => {
+          this.waiters.push(resolve);
+        });
+      },
     };
   }
 }

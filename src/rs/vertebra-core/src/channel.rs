@@ -59,6 +59,14 @@ pub struct SpscRing {
 unsafe impl Send for SpscRing {}
 unsafe impl Sync for SpscRing {}
 
+#[derive(Debug, Copy, Clone)]
+pub struct RingStats {
+    pub slot_size: usize,
+    pub slots: usize,
+    pub read_head: u32,
+    pub write_head: u32,
+}
+
 impl SpscRing {
     /// Initialize a shared region in-place and return a ring handle.
     ///
@@ -141,6 +149,15 @@ impl SpscRing {
 
     pub fn payload_capacity(&self) -> usize {
         self.layout.slot_size - core::mem::size_of::<SlotHeader>()
+    }
+
+    pub fn stats(&self) -> RingStats {
+        RingStats {
+            slot_size: self.layout.slot_size,
+            slots: self.layout.slots,
+            read_head: self.read_head().load(Ordering::Acquire),
+            write_head: self.write_head().load(Ordering::Acquire),
+        }
     }
 
     /// Split the ring into sender/receiver handles.
@@ -229,6 +246,19 @@ impl SpscRing {
         Ok(len)
     }
 
+    pub fn try_recv_with_flags(&self, out: &mut [u8]) -> Result<(usize, u32), ChannelError> {
+        let head = self.read_head().load(Ordering::Acquire);
+        let tail = self.write_head().load(Ordering::Acquire);
+        if head == tail {
+            return Err(ChannelError::Empty);
+        }
+        let (len, flags) = unsafe { self.read_slot_with_flags(head, out)? };
+        let next = head.wrapping_add(1) & self.mask;
+        self.read_head().store(next, Ordering::Release);
+        sync::wake_one(self.read_head())?;
+        Ok((len, flags))
+    }
+
     pub fn recv(&self, out: &mut [u8]) -> Result<usize, ChannelError> {
         loop {
             match self.try_recv(out) {
@@ -251,6 +281,44 @@ impl SpscRing {
         loop {
             match self.try_recv(out) {
                 Ok(len) => return Ok(Some(len)),
+                Err(ChannelError::Empty) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Ok(None);
+                    }
+                    let remaining = deadline - now;
+                    let tail = self.write_head().load(Ordering::Acquire);
+                    if !sync::wait_on_address_timeout(self.write_head(), tail, remaining)? {
+                        return Ok(None);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    pub fn recv_with_flags(&self, out: &mut [u8]) -> Result<(usize, u32), ChannelError> {
+        loop {
+            match self.try_recv_with_flags(out) {
+                Ok(result) => return Ok(result),
+                Err(ChannelError::Empty) => {
+                    let tail = self.write_head().load(Ordering::Acquire);
+                    sync::wait_on_address(self.write_head(), tail)?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    pub fn recv_timeout_with_flags(
+        &self,
+        out: &mut [u8],
+        timeout: Duration,
+    ) -> Result<Option<(usize, u32)>, ChannelError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.try_recv_with_flags(out) {
+                Ok(result) => return Ok(Some(result)),
                 Err(ChannelError::Empty) => {
                     let now = Instant::now();
                     if now >= deadline {
@@ -303,6 +371,25 @@ impl SpscRing {
         ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
         Ok(len)
     }
+
+    unsafe fn read_slot_with_flags(
+        &self,
+        index: u32,
+        out: &mut [u8],
+    ) -> Result<(usize, u32), ChannelError> {
+        let slot = self.slot_ptr(index);
+        let header = &*slot.cast::<SlotHeader>();
+        let len = header.len as usize;
+        if len > out.len() {
+            return Err(ChannelError::BufferTooSmall {
+                len,
+                capacity: out.len(),
+            });
+        }
+        let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+        ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
+        Ok((len, header.flags))
+    }
 }
 
 #[derive(Debug)]
@@ -313,6 +400,10 @@ pub struct SpscSender {
 impl SpscSender {
     pub fn payload_capacity(&self) -> usize {
         self.ring.payload_capacity()
+    }
+
+    pub fn stats(&self) -> RingStats {
+        self.ring.stats()
     }
 
     /// Blocking send. Uses wait/wake to apply backpressure when full.
@@ -348,12 +439,32 @@ impl SpscReceiver {
         self.ring.try_recv(out)
     }
 
+    pub fn stats(&self) -> RingStats {
+        self.ring.stats()
+    }
+
+    pub fn recv_with_flags(&self, out: &mut [u8]) -> Result<(usize, u32), ChannelError> {
+        self.ring.recv_with_flags(out)
+    }
+
+    pub fn try_recv_with_flags(&self, out: &mut [u8]) -> Result<(usize, u32), ChannelError> {
+        self.ring.try_recv_with_flags(out)
+    }
+
     pub fn recv_timeout(
         &self,
         out: &mut [u8],
         timeout: Duration,
     ) -> Result<Option<usize>, ChannelError> {
         self.ring.recv_timeout(out, timeout)
+    }
+
+    pub fn recv_timeout_with_flags(
+        &self,
+        out: &mut [u8],
+        timeout: Duration,
+    ) -> Result<Option<(usize, u32)>, ChannelError> {
+        self.ring.recv_timeout_with_flags(out, timeout)
     }
 }
 

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from vertebra.server.worker import AsgiWorker, WorkerConfig
+if TYPE_CHECKING:
+    from vertebra.server.worker import AsgiWorker, WorkerConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +33,14 @@ def get_server_backend() -> ServerBackend:
     """Return the configured server backend."""
     msg = "Server backend not configured yet"
     raise RuntimeError(msg)
+
+
+def __getattr__(name: str) -> Any:
+    if name in {"AsgiWorker", "WorkerConfig"}:
+        from vertebra.server.worker import AsgiWorker, WorkerConfig
+
+        return AsgiWorker if name == "AsgiWorker" else WorkerConfig
+    raise AttributeError(name)
 
 
 __all__ = ("AsgiWorker", "ServerBackend", "ServerConfig", "WorkerConfig", "get_server_backend")

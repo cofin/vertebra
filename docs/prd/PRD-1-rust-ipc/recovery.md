@@ -45,7 +45,7 @@ PRD-1 implements a **Rust-based core IPC layer** for the Vertebra project, provi
 ### Decisions Locked (OS-API Shim)
 
 - **Shared memory**: Linux `memfd_create` fast-path + `shm_open` fallback; macOS `shm_open`; Windows `CreateFileMappingW` unnamed.
-- **Handle passing**: UDS `SCM_RIGHTS` on Unix, `DuplicateHandle` on Windows (avoid named mappings except fallback rendezvous).
+- **Handle passing**: shared-memory control ring + lock file rendezvous (no sockets).
 - **Sync**: Linux futex, macOS `ulock` (opt-in feature `macos-ulock`) with spin+nanosleep fallback (pthread shared-cond planned), Windows `WaitOnAddress`.
 - **Layout**: Versioned C-ABI header, cacheline-aligned hot atomics (128B on Apple Silicon macOS, 64B elsewhere), power-of-two **fixed-slot** ring.
 

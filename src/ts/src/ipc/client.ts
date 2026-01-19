@@ -1,13 +1,10 @@
-import { decodeMessage, encodeMessage, frameMessage } from "../protocol/serialization";
-import type { Socket } from "bun";
-
-export type IpcTransport = "tcp" | "uds";
+import { decodeMessage, encodeMessage } from "../protocol/serialization";
+import { ShmRing } from "../broker/shm";
 
 export type IpcClientConfig = {
-  transport?: IpcTransport;
-  host?: string;
-  port?: number;
-  path?: string;
+  name?: string;
+  slotSize?: number;
+  slots?: number;
   timeoutMs?: number;
   retries?: number;
   retryDelayMs?: number;
@@ -17,13 +14,8 @@ export type IpcClientConfig = {
 };
 
 export type ResolvedIpcConfig = Required<
-  Pick<IpcClientConfig, "transport" | "host" | "port" | "timeoutMs" | "retries" | "retryDelayMs" | "poolSize" | "poolMax" | "acquireTimeoutMs">
-> &
-  Pick<IpcClientConfig, "path">;
-
-export type ResolveIpcOptions = {
-  preserveTemplate?: boolean;
-};
+  Pick<IpcClientConfig, "name" | "slotSize" | "slots" | "timeoutMs" | "retries" | "retryDelayMs" | "poolSize" | "poolMax" | "acquireTimeoutMs">
+>;
 
 export interface IpcRequester {
   request<T = unknown>(payload: unknown): Promise<T>;
@@ -53,75 +45,13 @@ type PendingRequest = {
   timer: number | null;
 };
 
-type StreamWaiter = {
-  resolve: (value: IteratorResult<unknown>) => void;
-  reject: (reason: unknown) => void;
-};
-
-class StreamState {
-  private queue: unknown[] = [];
-  private waiters: StreamWaiter[] = [];
-  private done = false;
-  private error: unknown = null;
-
-  push(value: unknown): void {
-    if (this.done) {
-      return;
-    }
-    const waiter = this.waiters.shift();
-    if (waiter) {
-      waiter.resolve({ value, done: false });
-      return;
-    }
-    this.queue.push(value);
-  }
-
-  end(): void {
-    if (this.done) {
-      return;
-    }
-    this.done = true;
-    for (const waiter of this.waiters) {
-      waiter.resolve({ value: undefined, done: true });
-    }
-    this.waiters = [];
-  }
-
-  fail(error: unknown): void {
-    if (this.done) {
-      return;
-    }
-    this.done = true;
-    this.error = error;
-    for (const waiter of this.waiters) {
-      waiter.reject(error);
-    }
-    this.waiters = [];
-  }
-
-  next(): Promise<IteratorResult<unknown>> {
-    if (this.error) {
-      return Promise.reject(this.error);
-    }
-    if (this.queue.length > 0) {
-      const value = this.queue.shift();
-      return Promise.resolve({ value, done: false });
-    }
-    if (this.done) {
-      return Promise.resolve({ value: undefined, done: true });
-    }
-    return new Promise((resolve, reject) => {
-      this.waiters.push({ resolve, reject });
-    });
-  }
-}
-
 type PoolWaiter = {
   resolve: (connection: IpcConnection) => void;
   reject: (reason: unknown) => void;
   timer: number | null;
 };
 
+const DEFAULT_NAME = "vertebra-asgi";
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_RETRIES = 1;
 const DEFAULT_RETRY_DELAY_MS = 50;
@@ -134,47 +64,47 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-function concatBuffers(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const result = new Uint8Array(a.length + b.length);
-  result.set(a, 0);
-  result.set(b, a.length);
-  return result;
+function controlRingName(name: string, workerId: number): string {
+  return `/${name}.asgi.${workerId}.control`;
 }
 
-function parseFrame(buffer: Uint8Array): { frame: Uint8Array | null; rest: Uint8Array } {
-  if (buffer.length < 4) {
-    return { frame: null, rest: buffer };
+function requestRingName(name: string, workerId: number, clientId: string): string {
+  return `/${name}.asgi.${workerId}.client.${clientId}.req`;
+}
+
+function responseRingName(name: string, workerId: number, clientId: string): string {
+  return `/${name}.asgi.${workerId}.client.${clientId}.resp`;
+}
+
+function nextId(value?: unknown): string {
+  if (typeof value === "string" && value.length > 0) {
+    return value;
   }
-  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  const size = view.getUint32(0, false);
-  if (buffer.length - 4 < size) {
-    return { frame: null, rest: buffer };
+  return crypto.randomUUID();
+}
+
+function isTerminalFrame(frame: unknown): boolean {
+  if (!frame || typeof frame !== "object") {
+    return false;
   }
-  const frame = buffer.subarray(4, 4 + size);
-  const rest = buffer.subarray(4 + size);
-  return { frame, rest };
-}
-
-function renderTemplate(value: string, workerId?: number): string {
-  const pid = String(process.pid);
-  const worker = String(workerId ?? 0);
-  return value.replaceAll("{pid}", pid).replaceAll("{worker}", worker);
-}
-
-function defaultSocketPath(workerId?: number): string {
-  const suffix = workerId === undefined ? "" : `-${workerId}`;
-  if (Bun.platform === "win32") {
-    return `\\\\.\\pipe\\vertebra-${process.pid}${suffix}`;
+  const value = frame as Record<string, unknown>;
+  const type = value.type;
+  if (type === "http.response.body") {
+    return !value.more_body;
   }
-  return `/tmp/vertebra-${process.pid}${suffix}.sock`;
+  if (type === "http.response.pathsend" || type === "http.response.zerocopysend") {
+    return true;
+  }
+  if (type === "websocket.close" || type === "websocket.disconnect") {
+    return true;
+  }
+  return false;
 }
 
-export function resolveIpcConfig(
-  config: IpcClientConfig = {},
-  workerId?: number,
-  options: ResolveIpcOptions = {},
-): ResolvedIpcConfig {
-  const transport = config.transport ?? (Bun.platform === "win32" ? "tcp" : "uds");
+export function resolveIpcConfig(config: IpcClientConfig = {}): ResolvedIpcConfig {
+  const name = config.name ?? DEFAULT_NAME;
+  const slotSize = config.slotSize ?? 65_536;
+  const slots = config.slots ?? 1024;
   const poolSize = config.poolSize ?? DEFAULT_POOL_SIZE;
   const poolMax = config.poolMax ?? Math.max(poolSize, DEFAULT_POOL_MAX);
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -182,25 +112,10 @@ export function resolveIpcConfig(
   const retryDelayMs = config.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
   const acquireTimeoutMs = config.acquireTimeoutMs ?? timeoutMs;
 
-  let path = config.path;
-  if (transport === "uds") {
-    if (path) {
-      if (!(workerId === undefined && options.preserveTemplate)) {
-        path = renderTemplate(path, workerId ?? 0);
-      }
-    } else {
-      path = defaultSocketPath(workerId);
-    }
-  }
-
-  const basePort = config.port ?? 8008;
-  const resolvedPort = transport === "tcp" && workerId !== undefined ? basePort + workerId : basePort;
-
   return {
-    transport,
-    host: config.host ?? "127.0.0.1",
-    port: resolvedPort,
-    path,
+    name,
+    slotSize,
+    slots,
     timeoutMs,
     retries,
     retryDelayMs,
@@ -211,81 +126,83 @@ export function resolveIpcConfig(
 }
 
 class IpcConnection {
-  private socket: Socket | null = null;
-  private buffer = new Uint8Array();
+  private control: ShmRing | null = null;
+  private request: ShmRing | null = null;
+  private response: ShmRing | null = null;
   private pending: PendingRequest | null = null;
-  private stream: StreamState | null = null;
   private connecting: Promise<void> | null = null;
   private closed = false;
+  private seq = 0;
+  private clientId = crypto.randomUUID().replaceAll("-", "");
 
-  constructor(private config: ResolvedIpcConfig) {}
+  constructor(private config: ResolvedIpcConfig, private workerId: number) {}
 
   async request<T>(payload: unknown): Promise<T> {
     await this.ensureConnected();
-    if (!this.socket) {
-      throw new IpcConnectionError("IPC socket unavailable");
+    if (!this.request || !this.response) {
+      throw new IpcConnectionError("IPC ring unavailable");
     }
-    if (this.pending || this.stream) {
+    if (this.pending) {
       throw new IpcConnectionError("IPC connection is busy");
     }
-    const framed = frameMessage(encodeMessage(payload));
+    const message = this.ensureId(payload);
+    const id = String((message as Record<string, unknown>).id);
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.failPending(new IpcTimeoutError("IPC request timed out"));
       }, this.config.timeoutMs) as unknown as number;
       this.pending = {
-        resolve: (value) => {
-          resolve(value as T);
-        },
+        resolve: (value) => resolve(value as T),
         reject,
         timer,
       };
       try {
-        this.socket?.write(framed);
+        this.sendPayload(message);
       } catch (error) {
         this.failPending(error);
       }
+      void this.waitForResponse(id)
+        .then((response) => this.resolvePending(response))
+        .catch((error) => this.failPending(error));
     });
   }
 
   async *streamRequest<T>(payload: unknown): AsyncGenerator<T> {
     await this.ensureConnected();
-    if (!this.socket) {
-      throw new IpcConnectionError("IPC socket unavailable");
+    if (!this.request || !this.response) {
+      throw new IpcConnectionError("IPC ring unavailable");
     }
-    if (this.pending || this.stream) {
+    if (this.pending) {
       throw new IpcConnectionError("IPC connection is busy");
     }
-    const framed = frameMessage(encodeMessage(payload));
-    const stream = new StreamState();
-    this.stream = stream;
-    try {
-      this.socket?.write(framed);
-    } catch (error) {
-      this.failStream(error);
-      throw error;
-    }
+    const requestId = this.extractRequestId(payload);
+    const outbound = this.normalizeOutbound(payload, requestId);
+    const sendTask = this.sendOutbound(outbound, requestId);
+
     try {
       while (true) {
-        const next = await stream.next();
-        if (next.done) {
+        const frame = await this.waitForResponse(requestId);
+        yield frame as T;
+        if (isTerminalFrame(frame)) {
           return;
         }
-        yield next.value as T;
       }
     } finally {
-      this.endStream();
+      await sendTask;
     }
   }
 
-  close(): void {
-    if (this.socket) {
-      this.socket.end();
-    }
-    this.socket = null;
+  async close(): Promise<void> {
     this.closed = true;
-    this.failPending(new IpcConnectionError("IPC socket closed"));
-    this.failStream(new IpcConnectionError("IPC socket closed"));
+    this.failPending(new IpcConnectionError("IPC connection closed"));
+    if (this.request) {
+      this.request.close();
+      this.request = null;
+    }
+    if (this.response) {
+      this.response.close();
+      this.response = null;
+    }
   }
 
   isClosed(): boolean {
@@ -293,7 +210,7 @@ class IpcConnection {
   }
 
   private async ensureConnected(): Promise<void> {
-    if (this.socket && !this.closed) {
+    if (this.request && this.response && !this.closed) {
       return;
     }
     if (this.connecting) {
@@ -309,79 +226,114 @@ class IpcConnection {
 
   private async open(): Promise<void> {
     this.closed = false;
-    return new Promise((resolve, reject) => {
-      let resolved = false;
-      const socketHandlers = {
-        open: (socket: Socket) => {
-          this.socket = socket;
-          this.buffer = new Uint8Array();
-          resolved = true;
-          resolve();
-        },
-        data: (_socket: Socket, data: Uint8Array) => {
-          this.handleData(data);
-        },
-        error: (_socket: Socket, error: Error) => {
-          if (!resolved) {
-            reject(error);
-            return;
-          }
-          this.failPending(new IpcConnectionError(error.message));
-          this.failStream(new IpcConnectionError(error.message));
-          this.closed = true;
-        },
-        close: () => {
-          this.closed = true;
-          this.failPending(new IpcConnectionError("IPC socket closed"));
-          this.failStream(new IpcConnectionError("IPC socket closed"));
-        },
-      };
+    const controlName = controlRingName(this.config.name, this.workerId);
+    const reqName = requestRingName(this.config.name, this.workerId, this.clientId);
+    const respName = responseRingName(this.config.name, this.workerId, this.clientId);
 
-      const connectOptions: Record<string, unknown> = {
-        socket: socketHandlers,
-      };
+    this.request = ShmRing.create(reqName, this.config.slotSize, this.config.slots);
+    this.response = ShmRing.create(respName, this.config.slotSize, this.config.slots);
 
-      if (this.config.transport === "uds") {
-        if (!this.config.path) {
-          reject(new IpcConnectionError("IPC UDS path missing"));
-          return;
-        }
-        connectOptions.unix = this.config.path;
-      } else {
-        connectOptions.hostname = this.config.host;
-        connectOptions.port = this.config.port;
-      }
+    const control = await this.waitForControl(controlName);
+    this.control = control;
 
-      Bun.connect(connectOptions).catch((error) => {
-        if (!resolved) {
-          reject(error);
-        } else {
-          this.failPending(new IpcConnectionError(String(error)));
-          this.closed = true;
-        }
-      });
-    });
+    const registerId = this.nextSeq();
+    const registerMessage = {
+      id: registerId,
+      kind: "register_client",
+      client_id: this.clientId,
+      req_ring: reqName,
+      resp_ring: respName,
+    };
+    this.control.send(encodeMessage(registerMessage), 0, this.config.timeoutMs);
+    const response = await this.waitForResponse(String(registerId));
+    if (!response || !(response as Record<string, unknown>).ok) {
+      throw new IpcConnectionError("IPC registration failed");
+    }
   }
 
-  private handleData(data: Uint8Array): void {
-    this.buffer = concatBuffers(this.buffer, data);
-    while (true) {
-      const parsed = parseFrame(this.buffer);
-      this.buffer = parsed.rest;
-      if (!parsed.frame) {
-        return;
+  private async waitForControl(name: string): Promise<ShmRing> {
+    const deadline = Date.now() + this.config.timeoutMs;
+    let lastError: unknown = null;
+    while (Date.now() < deadline) {
+      try {
+        return ShmRing.open(name, this.config.slotSize, this.config.slots);
+      } catch (error) {
+        lastError = error;
+        await sleep(this.config.retryDelayMs);
       }
-      const decoded = decodeMessage(parsed.frame);
-      if (this.stream) {
-        this.stream.push(decoded);
-        continue;
-      }
-      if (!this.pending) {
-        continue;
-      }
-      this.resolvePending(decoded);
-      return;
     }
+    throw new IpcConnectionError("IPC control ring unavailable", { cause: lastError });
+  }
+
+  private async waitForResponse(expectedId: string): Promise<Record<string, unknown>> {
+    if (!this.response) {
+      throw new IpcConnectionError("IPC response ring unavailable");
+    }
+    const deadline = Date.now() + this.config.timeoutMs;
+    while (Date.now() < deadline) {
+      const chunk = this.response.recv(10);
+      if (!chunk) {
+        await sleep(1);
+        continue;
+      }
+      const decoded = decodeMessage<Record<string, unknown>>(chunk.data);
+      const id = decoded?.id;
+      if (String(id) !== expectedId) {
+        continue;
+      }
+      return decoded;
+    }
+    throw new IpcTimeoutError("IPC response timed out");
+  }
+
+  private sendPayload(payload: unknown): void {
+    if (!this.request) {
+      throw new IpcConnectionError("IPC request ring unavailable");
+    }
+    const encoded = encodeMessage(payload);
+    this.request.send(encoded, 0, this.config.timeoutMs);
+  }
+
+  private extractRequestId(payload: unknown): string {
+    if (payload && typeof payload === "object") {
+      const idValue = (payload as Record<string, unknown>).id;
+      return nextId(idValue);
+    }
+    return nextId();
+  }
+
+  private normalizeOutbound(payload: unknown, requestId: string): AsyncIterable<unknown> {
+    if (payload && typeof payload === "object" && Symbol.asyncIterator in payload) {
+      return payload as AsyncIterable<unknown>;
+    }
+    return (async function* () {
+      yield payload;
+    })();
+  }
+
+  private async sendOutbound(outbound: AsyncIterable<unknown>, requestId: string): Promise<void> {
+    for await (const frame of outbound) {
+      if (frame && typeof frame === "object") {
+        const payload = { ...(frame as Record<string, unknown>) };
+        if (!payload.id) {
+          payload.id = requestId;
+        }
+        this.sendPayload(payload);
+      } else {
+        this.sendPayload({ id: requestId, payload: frame });
+      }
+    }
+  }
+
+  private ensureId(payload: unknown): Record<string, unknown> {
+    if (payload && typeof payload === "object") {
+      const value = payload as Record<string, unknown>;
+      if (!value.id) {
+        return { ...value, id: nextId() };
+      }
+      return value;
+    }
+    return { id: nextId(), payload };
   }
 
   private resolvePending(value: unknown): void {
@@ -408,20 +360,9 @@ class IpcConnection {
     reject(reason);
   }
 
-  private endStream(): void {
-    if (!this.stream) {
-      return;
-    }
-    this.stream.end();
-    this.stream = null;
-  }
-
-  private failStream(reason: unknown): void {
-    if (!this.stream) {
-      return;
-    }
-    this.stream.fail(reason);
-    this.stream = null;
+  private nextSeq(): number {
+    this.seq += 1;
+    return this.seq;
   }
 }
 
@@ -429,9 +370,9 @@ export class IpcClient implements IpcRequester {
   private connection: IpcConnection;
   private config: ResolvedIpcConfig;
 
-  constructor(config: IpcClientConfig, workerId?: number) {
-    this.config = resolveIpcConfig({ ...config, poolSize: 1, poolMax: 1 }, workerId);
-    this.connection = new IpcConnection(this.config);
+  constructor(config: IpcClientConfig = {}, workerId = 0) {
+    this.config = resolveIpcConfig({ ...config, poolSize: 1, poolMax: 1 });
+    this.connection = new IpcConnection(this.config, workerId);
   }
 
   async request<T>(payload: unknown): Promise<T> {
@@ -441,7 +382,7 @@ export class IpcClient implements IpcRequester {
         return await this.connection.request<T>(payload);
       } catch (error) {
         lastError = error;
-        this.connection.close();
+        await this.connection.close();
         if (attempt < this.config.retries) {
           await sleep(this.config.retryDelayMs);
         }
@@ -460,7 +401,7 @@ export class IpcClient implements IpcRequester {
         return;
       } catch (error) {
         lastError = error;
-        this.connection.close();
+        await this.connection.close();
         if (attempt < this.config.retries) {
           await sleep(this.config.retryDelayMs);
         }
@@ -470,7 +411,7 @@ export class IpcClient implements IpcRequester {
   }
 
   async close(): Promise<void> {
-    this.connection.close();
+    await this.connection.close();
   }
 }
 
@@ -482,8 +423,8 @@ export class IpcPool implements IpcRequester {
   private total = 0;
   private closed = false;
 
-  constructor(config: IpcClientConfig = {}, workerId?: number) {
-    this.config = resolveIpcConfig(config, workerId);
+  constructor(config: IpcClientConfig = {}, private workerId = 0) {
+    this.config = resolveIpcConfig(config);
     const warm = Math.min(this.config.poolSize, this.config.poolMax);
     for (let i = 0; i < warm; i += 1) {
       const connection = this.createConnection();
@@ -551,7 +492,7 @@ export class IpcPool implements IpcRequester {
     }
     this.waiters = [];
     for (const connection of this.connections) {
-      connection.close();
+      await connection.close();
     }
     this.connections.clear();
     this.idle = [];
@@ -559,7 +500,7 @@ export class IpcPool implements IpcRequester {
   }
 
   private createConnection(): IpcConnection {
-    const connection = new IpcConnection(this.config);
+    const connection = new IpcConnection(this.config, this.workerId);
     this.connections.add(connection);
     this.total += 1;
     return connection;
@@ -569,7 +510,7 @@ export class IpcPool implements IpcRequester {
     if (!this.connections.has(connection)) {
       return;
     }
-    connection.close();
+    void connection.close();
     this.connections.delete(connection);
     this.total = Math.max(0, this.total - 1);
   }

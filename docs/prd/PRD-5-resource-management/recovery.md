@@ -153,11 +153,11 @@ async with get_pool("postgres").acquire() as conn:
     result = await conn.execute("SELECT * FROM users")
 ```
 
-**Rust Broker** (internal):
-```rust
-let handle = pool_manager.acquire(pool_name, worker_id).await?;
+**Bun Broker** (internal):
+```ts
+const handle = await poolManager.acquire(poolName, workerId);
 // ... use handle ...
-pool_manager.release(handle).await?;
+await poolManager.release(handle);
 ```
 
 ### Configuration Format
@@ -165,8 +165,11 @@ pool_manager.release(handle).await?;
 **Broker Config** (`/etc/vertebra/broker.toml`):
 ```toml
 [broker]
-ipc_socket_path = "/var/run/vertebra/broker.sock"
-ipc_named_pipe = "\\\\.\\pipe\\vertebra-broker" # Windows
+name = "vertebra-broker"
+control_name = "/vertebra-broker.control"
+slot_size = 65536
+slots = 1024
+timeout_ms = 5000
 
 [[pools.postgres]]
 name = "main"
@@ -176,12 +179,15 @@ max_connections = 20
 
 **Python Config**:
 ```python
-from vertebra.resources import configure_client
+from vertebra.resources import BrokerClient, BrokerClientConfig
 
-configure_client(
-    broker_socket="/var/run/vertebra/broker.sock",
-    broker_named_pipe="\\\\.\\pipe\\vertebra-broker",  # Windows
-    default_timeout=5.0
+client = BrokerClient(
+    BrokerClientConfig(
+        name="vertebra-broker",
+        slot_size=65_536,
+        slots=1_024,
+        timeout_ms=5_000,
+    )
 )
 ```
 
@@ -233,12 +239,8 @@ make lint
 # Type check
 make type-check
 
-# Build broker
-cd src/rs/vertebra-broker
-cargo build --release
-
-# Run broker locally
-./target/release/vertebra-broker --config config/dev.toml
+# Run broker locally (Bun)
+bun src/ts/src/broker/serve.ts --config config/dev.toml
 ```
 
 ---
@@ -247,21 +249,21 @@ cargo build --release
 
 ### Q: Where do I start if I'm new to the codebase?
 
-**A**: Start with Phase 1, Milestone 1.1 (Broker Skeleton):
+**A**: Start with the shared-memory broker spec:
 
-1. Read PRD Section 2.1.1 (Rust Resource Broker)
-2. Create `src/rs/vertebra-broker/` directory
-3. Follow tasks P1-M1-001 through P1-M1-006
-4. Refer to research doc Section 2 for technology details
+1. Read `specs/active/shared-memory-broker/index.md`
+2. Review `src/ts/src/broker/serve.ts` and `src/ts/src/broker/shm.ts`
+3. Follow tasks in `specs/active/shared-memory-broker/tasks.md`
+4. Refer to the research doc Section 2 for context
 
 ### Q: How do I test IPC communication locally?
 
 **A**:
 
-1. Build broker: `cargo build --release`
-2. Run broker: `./target/release/vertebra-broker --config test.toml`
-3. In Python: Use `IPCClient` to connect to `/var/run/vertebra/broker.sock`
-4. Send `AcquireRequest`, verify `AcquireResponse`
+1. Ensure the shared-memory C ABI library is built (`make install` or `cargo build`).
+2. Run broker: `bun src/ts/src/broker/serve.ts --config test.toml`
+3. In Python: use `BrokerClient` + `BrokerClientConfig(name="vertebra-broker")`
+4. Send `acquire`/`execute` requests and verify responses
 
 ### Q: What are the performance targets?
 
@@ -278,7 +280,7 @@ cargo build --release
 **A**:
 
 1. Check broker logs: `journalctl -u vertebra-broker -f`
-2. Verify IPC endpoint exists: `ls -la /var/run/vertebra/broker.sock` (Unix) or check named pipe on Windows
+2. Verify shared-memory library is found (`VERTEBRA_SHM_LIB` or `src/rs/target/*`)
 3. Check metrics: `curl http://localhost:9090/metrics | grep pool_`
 4. Enable trace logging: Set `VERTEBRA_LOG_LEVEL=trace`
 
@@ -294,85 +296,35 @@ cargo build --release
 
 ## Critical Code Snippets
 
-### IPC Message Definition (Rust)
+### Broker Request Shape (TypeScript)
 
-```rust
-// src/rs/vertebra-broker/src/protocol.rs
-
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum IpcMessage {
-    AcquireRequest {
-        pool_name: String,
-        worker_id: u64,
-        timeout: f64,
-    },
-    AcquireResponse {
-        connection_handle: Option<u64>,
-        error: Option<String>,
-    },
-    ReleaseRequest {
-        connection_handle: u64,
-    },
-    ReleaseResponse {
-        success: bool,
-    },
-}
+```ts
+type BrokerRequest =
+  | { kind: "acquire"; pool: string; timeout_ms?: number }
+  | { kind: "release"; pool: string; token: string }
+  | { kind: "execute"; pool: string; token: string; sql: string; params?: unknown[] };
 ```
 
-### Connection Wrapper (Python)
+### Broker Client (Python)
 
 ```python
-# src/py/vertebra/resources/connection.py
+from vertebra.resources import BrokerClient, BrokerClientConfig
 
-class Connection:
-    """Wrapper around connection handle with auto-release."""
-
-    def __init__(self, handle: int, ipc_client: IPCClient, pool_name: str):
-        self._handle = handle
-        self._ipc_client = ipc_client
-        self._pool_name = pool_name
-        self._released = False
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if not self._released:
-            await self.release()
-
-    async def release(self):
-        await self._ipc_client.release(self._handle)
-        self._released = True
-
-    async def execute(self, query, *args):
-        return await self._ipc_client.execute(self._handle, query, args)
+client = BrokerClient(BrokerClientConfig(name="vertebra-broker"))
+token = await client.acquire("postgres")
+result = await client.execute("postgres", token, "SELECT 1")
+await client.release("postgres", token)
 ```
 
-### Scheduler Interface (Rust)
+### Scheduler Interface (TypeScript)
 
-```rust
-// src/rs/vertebra-broker/src/scheduler.rs
-
-#[async_trait]
-pub trait Scheduler: Send + Sync {
-    async fn enqueue(&mut self, worker_id: WorkerId, request: AcquireRequest);
-    async fn dequeue(&mut self) -> Option<(WorkerId, AcquireRequest)>;
-    fn get_stats(&self) -> SchedulerStats;
-}
-
-pub struct WeightedFairScheduler {
-    queues: HashMap<WorkerId, WorkerQueue>,
-    quantum: u32,
-}
-
-struct WorkerQueue {
-    worker_id: WorkerId,
-    pending: VecDeque<AcquireRequest>,
-    weight: u32,
-    deficit: u32,
-    consecutive_misses: u32,
+```ts
+// src/ts/src/broker/scheduler.ts
+export class FairScheduler<T> {
+  constructor(config: { quantum: number; starvationMs: number }) {}
+  enqueue(clientId: string, weight: number, item: T, timeoutMs: number, cost = 1): void {}
+  next(): { item: T } | null {}
+  stats(): { pending: number } {}
 }
 ```
 
@@ -386,9 +338,9 @@ struct WorkerQueue {
 
 **Solutions**:
 1. Check config file: `vertebra-broker --config /path/to/config.toml`
-2. Verify socket path writable: `ls -la /var/run/vertebra/`
+2. Verify shared memory mount: `df -h /dev/shm` and `ls -la /dev/shm`
 3. Check logs: `journalctl -u vertebra-broker -n 50`
-4. Run in foreground: `RUST_LOG=debug vertebra-broker ...`
+4. Run in foreground: `VERTEBRA_LOG_LEVEL=debug bun src/ts/src/broker/serve.ts ...`
 
 ### Python client can't connect
 
@@ -396,9 +348,9 @@ struct WorkerQueue {
 
 **Solutions**:
 1. Verify broker running: `systemctl status vertebra-broker`
-2. Check IPC endpoint exists: `ls -la /var/run/vertebra/broker.sock` (Unix) or check named pipe on Windows
-3. Verify permissions: Socket should be mode 0600 or 0660
-4. Check client config: `broker_socket` path matches broker config
+2. Verify shared-memory library path: `echo $VERTEBRA_SHM_LIB`
+3. Verify control ring name: `/{name}.control` in client config
+4. Verify `/dev/shm` permissions are restricted to the broker user
 
 ### Pool exhaustion
 

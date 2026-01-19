@@ -52,7 +52,7 @@ This document captures comprehensive research findings from analyzing all existi
 1. Protobuf IPC codegen and codec (MessagePack remains default)
 2. Request body streaming to Python workers
 3. `http.disconnect` propagation
-4. SSE/WebSocket IPC bridging frames
+4. SSE IPC bridging frames (WebSocket IPC frames implemented)
 5. HTTP/2, HTTP/3, h2c upgrade validation
 6. Graceful drain/rolling restart
 7. Metrics wiring (latency, throughput, error rates)
@@ -75,9 +75,9 @@ This document captures comprehensive research findings from analyzing all existi
 
 #### PRD-5: Resource Management (20% Complete)
 **Completed:**
-- `vertebra-broker` crate initialized
-- Broker config parsing (TOML + env substitution)
-- IPC server + protocol framing (TCP/UDS/named-pipe)
+- Shared-memory C ABI library implemented
+- Bun broker config parsing (TOML + env substitution)
+- Shared-memory broker request framing
 - Python broker client with msgpack codec
 - Basic BrokerPool with async context manager
 
@@ -153,11 +153,11 @@ Current skeleton (`src/ts/src/mcp/server.ts`) is 52 lines with basic JSON-RPC. M
 - Security context propagation
 
 ### 4. Observability Gap
-No metrics, tracing, or structured logging infrastructure across:
-- Bun server (request latency, error rates, active connections)
-- Worker pool (utilization, health check results, restarts)
-- Resource broker (lease duration, pool exhaustion, timeout rates)
-- Driver layer (query timing, connection pool stats)
+Partial observability is in place (Bun JSON logs + Prometheus endpoint). Remaining gaps:
+- Unified metrics aggregation (broker + worker stats)
+- Worker pool utilization, health check timing, restart counters
+- Resource broker metrics (lease duration, pool exhaustion, timeout rates)
+- Driver layer metrics (query timing, connection pool stats)
 
 ## Performance Considerations
 

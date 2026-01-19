@@ -1,7 +1,7 @@
 import { resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { resolveIpcConfig, type IpcClientConfig, type IpcTransport } from "../ipc/client";
+import { resolveIpcConfig, type IpcClientConfig } from "../ipc/client";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type WorkerCount = number | "auto";
@@ -15,6 +15,7 @@ export interface ServerSettings {
   staticDir?: string;
   logLevel?: LogLevel;
   workers?: WorkerCount;
+  drainTimeoutMs?: number;
 }
 
 export interface StaticConfig {
@@ -33,6 +34,14 @@ export interface PythonConfig {
   venv?: string;
 }
 
+export interface BrokerConfig {
+  name?: string;
+  controlName?: string;
+  slotSize?: number;
+  slots?: number;
+  timeoutMs?: number;
+}
+
 export interface ServerIpcConfig extends IpcClientConfig {
   protocol?: IpcProtocol;
 }
@@ -43,6 +52,7 @@ export interface ServerConfig {
   ipc?: ServerIpcConfig;
   workers?: WorkerConfig;
   python?: PythonConfig;
+  broker?: BrokerConfig;
   hostname?: string;
   port?: number;
   reusePort?: boolean;
@@ -56,6 +66,7 @@ export interface ResolvedServerSettings {
   reusePort: boolean;
   logLevel: LogLevel;
   staticDir?: string;
+  drainTimeoutMs: number;
 }
 
 export interface ResolvedServerConfig {
@@ -64,6 +75,7 @@ export interface ResolvedServerConfig {
   workers: { count: number };
   static: StaticConfig;
   python: PythonConfig;
+  broker: BrokerConfig;
 }
 
 export interface ResolveConfigOptions {
@@ -76,6 +88,7 @@ const DEFAULT_SERVER: ResolvedServerSettings = {
   port: 8000,
   reusePort: false,
   logLevel: "info",
+  drainTimeoutMs: 5000,
 };
 
 export function defineConfig(config: ServerConfig): ServerConfig {
@@ -88,6 +101,7 @@ type NormalizedConfig = {
   ipc: ServerIpcConfig;
   workers: WorkerConfig;
   python: PythonConfig;
+  broker: BrokerConfig;
 };
 
 function readEnvNumber(value: string | undefined): number | undefined {
@@ -139,6 +153,7 @@ function normalizeConfig(config: ServerConfig | undefined): NormalizedConfig {
       staticDir: config?.server?.staticDir ?? config?.staticDir,
       logLevel: config?.server?.logLevel ?? config?.logLevel,
       workers: config?.server?.workers,
+      drainTimeoutMs: config?.server?.drainTimeoutMs,
     },
     static: {
       dir: config?.static?.dir ?? config?.staticDir,
@@ -151,6 +166,9 @@ function normalizeConfig(config: ServerConfig | undefined): NormalizedConfig {
     python: {
       ...(config?.python ?? {}),
     },
+    broker: {
+      ...(config?.broker ?? {}),
+    },
   };
 }
 
@@ -161,11 +179,12 @@ function mergeNormalized(base: NormalizedConfig, override: NormalizedConfig): No
     ipc: { ...base.ipc, ...override.ipc },
     workers: { ...base.workers, ...override.workers },
     python: { ...base.python, ...override.python },
+    broker: { ...base.broker, ...override.broker },
   };
 }
 
 function mergeConfigs(...configs: Array<ServerConfig | undefined | null>): NormalizedConfig {
-  const empty: NormalizedConfig = { server: {}, static: {}, ipc: {}, workers: {}, python: {} };
+  const empty: NormalizedConfig = { server: {}, static: {}, ipc: {}, workers: {}, python: {}, broker: {} };
   return configs.reduce((acc, config) => mergeNormalized(acc, normalizeConfig(config ?? undefined)), empty);
 }
 
@@ -187,7 +206,7 @@ function resolveWorkerCount(config: NormalizedConfig): number {
 
 function buildResolvedConfig(config: NormalizedConfig): ResolvedServerConfig {
   const workerCount = resolveWorkerCount(config);
-  const ipcDefaults = resolveIpcConfig(config.ipc ?? {}, undefined, { preserveTemplate: true });
+  const ipcDefaults = resolveIpcConfig(config.ipc ?? {});
   const ipcProtocol = config.ipc?.protocol ?? "msgpack";
   if (ipcProtocol !== "msgpack" && ipcProtocol !== "protobuf") {
     throw new Error(`Unsupported IPC protocol: ${ipcProtocol}`);
@@ -196,12 +215,6 @@ function buildResolvedConfig(config: NormalizedConfig): ResolvedServerConfig {
     ...ipcDefaults,
     protocol: ipcProtocol,
   };
-  if (config.ipc.path) {
-    ipc.path = config.ipc.path;
-  } else {
-    delete ipc.path;
-  }
-
   return {
     server: {
       hostname: config.server.host ?? config.server.hostname ?? DEFAULT_SERVER.hostname,
@@ -209,11 +222,19 @@ function buildResolvedConfig(config: NormalizedConfig): ResolvedServerConfig {
       reusePort: config.server.reusePort ?? DEFAULT_SERVER.reusePort,
       logLevel: config.server.logLevel ?? DEFAULT_SERVER.logLevel,
       staticDir: config.static.dir ?? config.server.staticDir,
+      drainTimeoutMs: config.server.drainTimeoutMs ?? DEFAULT_SERVER.drainTimeoutMs,
     },
     ipc,
     workers: { count: workerCount },
     static: config.static ?? {},
     python: config.python ?? {},
+    broker: {
+      name: config.broker?.name ?? "vertebra-broker",
+      controlName: config.broker?.controlName,
+      slotSize: config.broker?.slotSize ?? 65_536,
+      slots: config.broker?.slots ?? 1024,
+      timeoutMs: config.broker?.timeoutMs ?? 5_000,
+    },
   };
 }
 
@@ -224,12 +245,12 @@ function loadEnvConfig(): ServerConfig {
   const envReuse = readEnvBoolean(process.env.VERTEBRA_REUSE_PORT);
   const envLog = process.env.VERTEBRA_LOG_LEVEL as LogLevel | undefined;
   const envWorkers = readEnvWorkers(process.env.VERTEBRA_WORKERS);
+  const envDrainTimeout = readEnvNumber(process.env.VERTEBRA_DRAIN_TIMEOUT_MS);
 
-  const envIpcTransport = process.env.VERTEBRA_IPC_TRANSPORT as IpcTransport | undefined;
   const envIpcProtocol = process.env.VERTEBRA_IPC_PROTOCOL as IpcProtocol | undefined;
-  const envIpcHost = process.env.VERTEBRA_IPC_HOST;
-  const envIpcPort = readEnvNumber(process.env.VERTEBRA_IPC_PORT);
-  const envIpcPath = process.env.VERTEBRA_IPC_PATH;
+  const envIpcName = process.env.VERTEBRA_IPC_NAME;
+  const envIpcSlotSize = readEnvNumber(process.env.VERTEBRA_IPC_SLOT_SIZE);
+  const envIpcSlots = readEnvNumber(process.env.VERTEBRA_IPC_SLOTS);
   const envIpcTimeout = readEnvNumber(process.env.VERTEBRA_IPC_TIMEOUT_MS);
   const envIpcRetries = readEnvNumber(process.env.VERTEBRA_IPC_RETRIES);
   const envIpcRetryDelay = readEnvNumber(process.env.VERTEBRA_IPC_RETRY_DELAY_MS);
@@ -240,6 +261,11 @@ function loadEnvConfig(): ServerConfig {
   const envPythonWorkers = readEnvWorkers(process.env.VERTEBRA_PYTHON_WORKERS);
   const envPythonTimeout = readEnvNumber(process.env.VERTEBRA_PYTHON_TIMEOUT);
   const envPythonVenv = process.env.VERTEBRA_PYTHON_VENV;
+  const envBrokerName = process.env.VERTEBRA_BROKER_NAME;
+  const envBrokerControl = process.env.VERTEBRA_BROKER_CONTROL;
+  const envBrokerSlotSize = readEnvNumber(process.env.VERTEBRA_BROKER_SLOT_SIZE);
+  const envBrokerSlots = readEnvNumber(process.env.VERTEBRA_BROKER_SLOTS);
+  const envBrokerTimeout = readEnvNumber(process.env.VERTEBRA_BROKER_TIMEOUT_MS);
 
   return {
     server: {
@@ -248,16 +274,16 @@ function loadEnvConfig(): ServerConfig {
       reusePort: envReuse ?? undefined,
       logLevel: envLog ?? undefined,
       workers: envWorkers ?? undefined,
+      drainTimeoutMs: envDrainTimeout ?? undefined,
     },
     static: {
       dir: envStatic ?? undefined,
     },
     ipc: {
-      transport: envIpcTransport ?? undefined,
       protocol: envIpcProtocol ?? undefined,
-      host: envIpcHost ?? undefined,
-      port: envIpcPort ?? undefined,
-      path: envIpcPath ?? undefined,
+      name: envIpcName ?? undefined,
+      slotSize: envIpcSlotSize ?? undefined,
+      slots: envIpcSlots ?? undefined,
       timeoutMs: envIpcTimeout ?? undefined,
       retries: envIpcRetries ?? undefined,
       retryDelayMs: envIpcRetryDelay ?? undefined,
@@ -270,6 +296,13 @@ function loadEnvConfig(): ServerConfig {
       workers: envPythonWorkers ?? undefined,
       timeout: envPythonTimeout ?? undefined,
       venv: envPythonVenv ?? undefined,
+    },
+    broker: {
+      name: envBrokerName ?? undefined,
+      controlName: envBrokerControl ?? undefined,
+      slotSize: envBrokerSlotSize ?? undefined,
+      slots: envBrokerSlots ?? undefined,
+      timeoutMs: envBrokerTimeout ?? undefined,
     },
   };
 }

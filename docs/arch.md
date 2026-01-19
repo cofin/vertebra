@@ -11,18 +11,19 @@ Vertebra is a Python-first application backbone with Rust IPC primitives and a B
 
 ## Project Status
 
-**Overall:** PRD-2 through PRD-4 active; PRD-0/PRD-1 complete.
+**Overall:** PRD-0/PRD-1/PRD-2 complete; PRD-3/PRD-4/PRD-5/PRD-8 in progress.
 
 | PRD | Status | Notes |
 | --- | --- | --- |
 | PRD-0 | Complete | Foundation, build system, docs, repo cleanup |
 | PRD-1 | Complete | Rust IPC core |
-| PRD-2 | In Progress | Python bindings + type bridge |
+| PRD-2 | Complete | Python bindings + type bridge |
 | PRD-3 | In Progress | Bun server + protocol support |
 | PRD-4 | In Progress | Bun-backed Python drivers |
-| PRD-5 | Not Started | Resource management |
+| PRD-5 | In Progress | Resource management |
 | PRD-6 | Not Started | Integration + docs |
 | PRD-7 | Not Started | MCP integration |
+| PRD-8 | In Progress | Production readiness consolidation |
 
 ## Component Map
 
@@ -47,12 +48,12 @@ TypeScript/Bun (Server + Tooling)
 - **Serialization**:
   - Python codec: msgspec
   - MCP/gRPC control plane: Protobuf
-  - Driver data plane: MessagePack
+  - Driver data plane: MessagePack (small) + Arrow IPC (large)
   - Rust internal IPC: bincode
-  - Large structured payloads: Arrow (optional, data-plane only)
+  - Large structured payloads: Arrow (data-plane only)
 - **IPC transport**:
-  - Unix: UDS + shared memory
-  - Windows: named pipes + shared memory (TCP fallback)
+  - Driver/broker data plane: shared memory ring buffers (no sockets)
+  - Control plane: in-process or shared memory (no TCP)
 - **Runtime strategy**: Bun-first; Node fallback only if parity is proven.
 - **Test infrastructure**: Docker/Podman runtime abstraction for integration tests (no compose required).
 

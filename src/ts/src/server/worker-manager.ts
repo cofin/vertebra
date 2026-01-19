@@ -1,7 +1,7 @@
 import { delimiter, join, resolve as resolvePath } from "node:path";
 
 import { type AsgiIpcFrame, type AsgiRequest } from "../ipc/asgi";
-import { IpcClient, resolveIpcConfig, type IpcClientConfig } from "../ipc/client";
+import { IpcClient, resolveIpcConfig, type IpcClientConfig, type ResolvedIpcConfig } from "../ipc/client";
 import type { PythonConfig, ServerIpcConfig } from "./config";
 
 const HEALTH_PATH = "/__vertebra__/health";
@@ -73,6 +73,18 @@ export class WorkerManager {
     await Promise.all(Array.from(this.workers.values()).map((worker) => this.stopWorker(worker)));
   }
 
+  getStats(): { active: number; restarts: number } {
+    let active = 0;
+    let restarts = 0;
+    for (const worker of this.workers.values()) {
+      if (worker.proc) {
+        active += 1;
+      }
+      restarts += worker.restarts;
+    }
+    return { active, restarts };
+  }
+
   private spawnWorker(id: number): void {
     const worker = this.workers.get(id);
     if (!worker || worker.proc || this.stopping) {
@@ -82,20 +94,19 @@ export class WorkerManager {
     const ipcConfig = this.resolveWorkerIpc(id);
     const cmd = [
       python,
-      "-m",
-      "vertebra.server.worker",
+      "-c",
+      "from vertebra.server.worker import main; main()",
       "--app",
       this.options.python.app,
-      "--transport",
-      ipcConfig.transport,
-      "--host",
-      ipcConfig.host,
-      "--port",
-      String(ipcConfig.port),
+      "--name",
+      ipcConfig.name,
+      "--worker-id",
+      String(id),
+      "--slot-size",
+      String(ipcConfig.slotSize),
+      "--slots",
+      String(ipcConfig.slots),
     ];
-    if (ipcConfig.transport === "uds" && ipcConfig.path) {
-      cmd.push("--path", ipcConfig.path);
-    }
     if (this.options.python.timeout) {
       cmd.push("--timeout", String(this.options.python.timeout));
     }
@@ -177,9 +188,9 @@ export class WorkerManager {
     return "python";
   }
 
-  private resolveWorkerIpc(workerId: number): IpcClientConfig {
+  private resolveWorkerIpc(workerId: number): ResolvedIpcConfig {
     const { protocol: _protocol, ...ipc } = this.options.ipc;
-    return resolveIpcConfig(ipc, workerId);
+    return resolveIpcConfig(ipc);
   }
 
   private buildWorkerEnv(workerId: number): Record<string, string> {

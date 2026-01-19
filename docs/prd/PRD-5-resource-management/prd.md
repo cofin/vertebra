@@ -96,7 +96,7 @@ Python multi-worker deployments suffer from resource multiplication:
 ### 1.4 Assumptions and Constraints
 
 - **Cross-platform target**: Linux/macOS/Windows parity for MVP if feasible.
-- **IPC transport**: UDS on Unix, named pipes on Windows.
+- **IPC transport**: Shared-memory C ABI (no sockets/UDS/TCP).
 - **Broker ownership**: Single broker per node manages pools and fairness.
 
 ---
@@ -105,7 +105,7 @@ Python multi-worker deployments suffer from resource multiplication:
 
 ### 2.1 System Components
 
-#### 2.1.1 Rust Resource Broker
+#### 2.1.1 Bun Resource Broker
 
 **Purpose**: Centralized pool manager process
 
@@ -117,31 +117,28 @@ Python multi-worker deployments suffer from resource multiplication:
 - Collect and expose metrics
 
 **Technology Stack**:
-- **Runtime**: tokio for async execution
-- **Pooling**: deadpool for PostgreSQL/Redis/MySQL
-- **IPC**: shmipc for zero-copy shared memory IPC
-- **Serialization**: bincode for efficient message passing
-- **Metrics**: prometheus for instrumentation
-- **Logging**: tracing for structured logging
+- **Runtime**: Bun (TypeScript) for async execution
+- **Pooling**: Bun SQL + broker-managed pools (Postgres/MySQL/SQLite) and Redis pool
+- **IPC**: shared-memory C ABI via bun:ffi (no sockets)
+- **Serialization**: MessagePack for small payloads, Arrow IPC for large results
+- **Metrics**: prom-client for instrumentation
+- **Logging**: structured JSON logging
 
 **Module Structure**:
 ```
-src/rs/vertebra-broker/
-├── src/
-│   ├── lib.rs              # Broker initialization
-│   ├── pool_manager.rs     # Pool lifecycle management
-│   ├── scheduler.rs        # Weighted Fair Queue scheduler
-│   ├── ipc_server.rs       # IPC protocol handler
-│   ├── metrics.rs          # Prometheus metrics
-│   ├── health.rs           # Connection health checks
-│   ├── pools/
-│   │   ├── mod.rs
-│   │   ├── postgres.rs     # PostgreSQL pool
-│   │   ├── mysql.rs        # MySQL pool
-│   │   ├── redis.rs        # Redis pool
-│   │   └── http.rs         # HTTP client pool
-│   └── config.rs           # Configuration
-└── Cargo.toml
+src/ts/src/broker/
+├── serve.ts                # Broker process entry
+├── scheduler.ts            # Fairness scheduler
+├── client.ts               # Broker client helpers
+├── shm.ts                  # bun:ffi shared memory bindings
+└── index.ts                # Broker exports
+
+src/ts/src/drivers/
+├── postgres.ts             # PostgreSQL driver
+├── mysql.ts                # MySQL driver
+├── sqlite.ts               # SQLite driver
+├── redis.ts                # Redis driver
+└── filesystem.ts           # Storage bridge
 ```
 
 #### 2.1.2 Python Client Library
@@ -151,45 +148,34 @@ src/rs/vertebra-broker/
 **Python API Design**:
 
 ```python
-from vertebra.resources import get_pool, PoolConfig, ResourceType
+from vertebra.resources import BrokerClient, BrokerClientConfig
 
-# Simple usage
-async with get_pool("postgres").acquire() as conn:
-    result = await conn.execute("SELECT * FROM users")
-
-# Configuration
-config = PoolConfig(
-    name="postgres",
-    resource_type=ResourceType.POSTGRESQL,
-    max_connections=20,
-    min_connections=5,
-    connection_timeout=5.0,
-    dsn="postgresql://user:pass@localhost/db"
+client = BrokerClient(
+    BrokerClientConfig(
+        name="vertebra-broker",
+        slot_size=65_536,
+        slots=1_024,
+        timeout_ms=5_000,
+    )
 )
 
-await register_pool(config)
-
-# Multiple pools
-async with get_pool("redis").acquire() as redis:
-    await redis.set("key", "value")
-
-async with get_pool("mysql").acquire() as mysql:
-    await mysql.execute("INSERT INTO logs (...) VALUES (...)")
+token = await client.acquire("postgres")
+result = await client.execute("postgres", token, "SELECT * FROM users")
+await client.release("postgres", token)
 ```
 
 **Package Structure**:
 ```
 src/py/vertebra/resources/
 ├── __init__.py              # Public API
-├── pool.py                  # Pool interface
-├── connection.py            # Connection wrapper
-├── config.py                # Configuration
-├── ipc_client.py            # IPC communication
-├── exceptions.py            # Custom exceptions
-└── _internal/
-    ├── __init__.py
-    ├── protocol.py          # IPC protocol
-    └── serialization.py     # bincode integration
+├── ipc.py                   # Shared-memory broker client
+├── pool.py                  # Pool helpers + leases
+└── provider.py              # Provider host/handlers
+
+src/py/vertebra/_internal/
+├── shm.py                   # CFFI shared-memory bindings
+├── dependencies.py          # Optional dependency guards
+└── errors.py                # MissingDependencyError
 ```
 
 ### 2.2 IPC Protocol Design
@@ -240,7 +226,7 @@ struct MetricsResponse {
 #### 2.2.2 Communication Flow
 
 ```
-Python Worker                Rust Broker
+Python Worker                Bun Broker
      |                            |
      |-- AcquireRequest --------->|
      |                            |- Check availability
@@ -257,16 +243,10 @@ Python Worker                Rust Broker
 
 #### 2.2.3 Transport Mechanism
 
-**Primary**: shmipc (ByteDance's shared memory IPC)
-- Zero-copy data transfer
- - POSIX or Windows shared memory based
- - IPC transport for synchronization (UDS/named pipe)
-- High performance (reported sub-microsecond latency; validate locally)
-
-**Fallback**: IPC transport (UDS/named pipe)
-- Standard POSIX IPC
-- Lower performance but universally supported
-- Automatic fallback if shmipc unavailable
+**Shared Memory C ABI**
+- Zero-copy data transfer via POSIX or Windows shared memory rings
+- Control ring + per-client request/response rings
+- No sockets, no UDS, no TCP in the data plane
 
 ### 2.3 Fair Scheduling Algorithm
 
@@ -373,24 +353,19 @@ impl PoolScheduler {
 #### 2.4.2 Health Check Strategy
 
 **Periodic Health Checks** (for idle connections):
-```rust
-async fn periodic_health_check(&self) {
-    let mut interval = tokio::time::interval(Duration::from_secs(30));
-
-    loop {
-        interval.tick().await;
-
-        for conn in self.idle_connections() {
-            match self.health_check(conn).await {
-                Ok(true) => continue,
-                Ok(false) | Err(_) => {
-                    warn!("Connection {} failed health check", conn.id());
-                    self.remove_connection(conn).await;
-                    self.create_new_connection().await?;
-                }
-            }
-        }
+```ts
+async function periodicHealthCheck() {
+  const interval = createInterval(30_000);
+  for await (const _ of interval) {
+    for (const conn of idleConnections()) {
+      const ok = await healthCheck(conn);
+      if (!ok) {
+        log.warn("Connection failed health check", { id: conn.id });
+        await removeConnection(conn);
+        await createNewConnection();
+      }
     }
+  }
 }
 ```
 
@@ -432,7 +407,7 @@ async fn release(&self, conn: Connection) -> Result<()> {
 
 ### 3.1 PostgreSQL Pools
 
-**Implementation**: deadpool-postgres
+**Implementation**: Bun SQL Postgres pool
 
 **Configuration**:
 ```toml
@@ -449,21 +424,20 @@ ssl_mode = "require"
 ```
 
 **Health Check**:
-```rust
-async fn health_check_postgres(conn: &Connection) -> Result<bool> {
-    match conn.execute("SELECT 1", &[]).await {
-        Ok(_) => Ok(true),
-        Err(e) => {
-            warn!("PostgreSQL health check failed: {}", e);
-            Ok(false)
-        }
-    }
+```ts
+async function healthCheckPostgres(conn: SqlConnection): Promise<boolean> {
+  try {
+    await conn.query("SELECT 1");
+    return true;
+  } catch {
+    return false;
+  }
 }
 ```
 
 ### 3.2 MySQL Pools
 
-**Implementation**: sqlx-mysql + custom deadpool wrapper
+**Implementation**: Bun SQL MySQL pool
 
 **Configuration**:
 ```toml
@@ -480,21 +454,20 @@ connection_timeout = 5.0
 ```
 
 **Health Check**:
-```rust
-async fn health_check_mysql(conn: &Connection) -> Result<bool> {
-    match conn.ping().await {
-        Ok(_) => Ok(true),
-        Err(e) => {
-            warn!("MySQL health check failed: {}", e);
-            Ok(false)
-        }
-    }
+```ts
+async function healthCheckMySql(conn: SqlConnection): Promise<boolean> {
+  try {
+    await conn.query("SELECT 1");
+    return true;
+  } catch {
+    return false;
+  }
 }
 ```
 
 ### 3.3 Redis Pools
 
-**Implementation**: deadpool-redis
+**Implementation**: Bun Redis pool
 
 **Configuration**:
 ```toml
@@ -508,12 +481,13 @@ connection_timeout = 2.0
 ```
 
 **Health Check**:
-```rust
-async fn health_check_redis(conn: &Connection) -> Result<bool> {
-    match redis::cmd("PING").query_async::<_, String>(conn).await {
-        Ok(response) if response == "PONG" => Ok(true),
-        _ => Ok(false),
-    }
+```ts
+async function healthCheckRedis(conn: RedisClient): Promise<boolean> {
+  try {
+    return (await conn.ping()) === "PONG";
+  } catch {
+    return false;
+  }
 }
 ```
 
@@ -746,27 +720,17 @@ groups:
 #### 5.1.1 IPC Transport Security
 
 **Permissions**:
-```rust
-// Unix: set 0600 on UDS path
-// Windows: apply named pipe ACLs for local-user access only
+```
+- Linux/macOS: create shared-memory segments + control lock with 0600 perms
+- Windows: apply ACLs to shared-memory mappings for local-user access only
 ```
 
 **Worker Authentication**:
-```rust
-async fn authenticate_worker(&self, worker_id: WorkerId) -> Result<()> {
-    // Verify via SO_PEERCRED
-    let creds = get_peer_credentials(&socket)?;
-
-    if creds.pid != worker_id.0 {
-        return Err(Error::AuthenticationFailed);
-    }
-
-    // Check against allowed workers list
-    if !self.allowed_workers.contains(&worker_id) {
-        return Err(Error::Unauthorized);
-    }
-
-    Ok(())
+```ts
+async function authenticateWorker(meta: ShmClientMeta) {
+  if (!allowedWorkers.has(meta.workerId)) {
+    throw new Error("unauthorized worker");
+  }
 }
 ```
 
@@ -879,43 +843,22 @@ class ConnectionError(PoolException):
 #### 5.2.2 Retry Strategy
 
 **Exponential Backoff**:
-```rust
-pub struct RetryPolicy {
-    max_attempts: u32,
-    initial_backoff: Duration,
-    max_backoff: Duration,
-    backoff_multiplier: f64,
-}
-
-impl RetryPolicy {
-    pub async fn execute<F, T, E>(&self, mut f: F) -> Result<T, E>
-    where
-        F: FnMut() -> Future<Output = Result<T, E>>,
-        E: std::error::Error,
-    {
-        let mut backoff = self.initial_backoff;
-
-        for attempt in 1..=self.max_attempts {
-            match f().await {
-                Ok(result) => return Ok(result),
-                Err(e) if attempt == self.max_attempts => return Err(e),
-                Err(e) if is_retryable(&e) => {
-                    warn!("Attempt {}/{} failed: {}, retrying in {:?}",
-                          attempt, self.max_attempts, e, backoff);
-                    tokio::time::sleep(backoff).await;
-                    backoff = std::cmp::min(
-                        Duration::from_secs_f64(
-                            backoff.as_secs_f64() * self.backoff_multiplier
-                        ),
-                        self.max_backoff
-                    );
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        unreachable!()
+```ts
+async function executeWithRetry<T>(fn: () => Promise<T>): Promise<T> {
+  let backoff = initialBackoff;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt === maxAttempts || !isRetryable(err)) {
+        throw err;
+      }
+      log.warn("retrying broker call", { attempt, backoff });
+      await sleep(backoff);
+      backoff = Math.min(backoff * backoffMultiplier, maxBackoff);
     }
+  }
+  throw new Error("unreachable");
 }
 ```
 
@@ -947,24 +890,19 @@ impl PoolWithCircuitBreaker {
 #### 5.3.1 Worker Crash Detection
 
 **Automatic Cleanup**:
-```rust
-async fn monitor_workers(&self) {
-    let mut interval = tokio::time::interval(Duration::from_secs(5));
-
-    loop {
-        interval.tick().await;
-
-        for (worker_id, handles) in self.active_connections.iter() {
-            if !is_process_alive(worker_id.0) {
-                warn!("Worker {} appears dead, releasing {} connections",
-                      worker_id.0, handles.len());
-
-                for handle in handles {
-                    self.force_release(*handle).await;
-                }
-            }
+```ts
+async function monitorWorkers() {
+  const interval = createInterval(5_000);
+  for await (const _ of interval) {
+    for (const [workerId, handles] of activeConnections.entries()) {
+      if (!isProcessAlive(workerId)) {
+        log.warn("worker died, releasing connections", { workerId, count: handles.length });
+        for (const handle of handles) {
+          await forceRelease(handle);
         }
+      }
     }
+  }
 }
 ```
 
@@ -1012,51 +950,29 @@ impl ConnectionTracker {
 #### 5.3.3 Broker Restart Recovery
 
 **State Persistence**:
-```rust
-struct BrokerState {
-    active_connections: HashMap<WorkerId, Vec<ConnectionHandle>>,
-    pool_configs: Vec<PoolConfig>,
+```ts
+type BrokerState = {
+  activeConnections: Record<string, ConnectionHandle[]>;
+  poolConfigs: PoolConfig[];
+};
+
+async function persistState(state: BrokerState) {
+  const data = encodeMessagePack(state);
+  await fs.writeFile("/var/lib/vertebra/state.bin", data);
 }
 
-impl ResourceBroker {
-    async fn persist_state(&self) -> Result<()> {
-        let state = BrokerState {
-            active_connections: self.active_connections.clone(),
-            pool_configs: self.pools.values()
-                .map(|p| p.config().clone())
-                .collect(),
-        };
-
-        let data = bincode::serialize(&state)?;
-        tokio::fs::write("/var/lib/vertebra/state.bin", data).await?;
-
-        Ok(())
-    }
-
-    async fn recover_state(&mut self) -> Result<()> {
-        match tokio::fs::read("/var/lib/vertebra/state.bin").await {
-            Ok(data) => {
-                let state: BrokerState = bincode::deserialize(&data)?;
-
-                for config in state.pool_configs {
-                    let pool = self.create_pool(config).await?;
-                    self.pools.insert(pool.name().clone(), pool);
-                }
-
-                info!("State recovered, {} pools restored", self.pools.len());
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                info!("No state file, starting fresh");
-                Ok(())
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
+async function recoverState(): Promise<BrokerState | null> {
+  try {
+    const data = await fs.readFile("/var/lib/vertebra/state.bin");
+    return decodeMessagePack<BrokerState>(data);
+  } catch {
+    log.info("no state file, starting fresh");
+    return null;
+  }
 }
 ```
 
-#### 5.3.4 Network Partition Handling
+#### 5.3.4 Shared Memory Failure Handling
 
 **Client-Side Fallback**:
 ```python
@@ -1065,7 +981,7 @@ class ResilientConnection:
         try:
             return await self._execute_with_retry(query, *args)
         except (ConnectionError, TimeoutError) as e:
-            logger.error(f"Lost connection to broker: {e}")
+            logger.error(f"Lost shared-memory connection to broker: {e}")
 
             if self._fallback_enabled:
                 logger.info("Falling back to local connection")
@@ -1181,8 +1097,8 @@ spec:
         volumeMounts:
         - name: config
           mountPath: /etc/vertebra
-        - name: ipc-socket
-          mountPath: /var/run/vertebra
+        - name: shared-memory
+          mountPath: /dev/shm
         resources:
           requests:
             memory: "256Mi"
@@ -1206,10 +1122,9 @@ spec:
       - name: config
         configMap:
           name: vertebra-config
-      - name: ipc-socket
-        hostPath:
-          path: /var/run/vertebra
-          type: DirectoryOrCreate
+      - name: shared-memory
+        emptyDir:
+          medium: Memory
 ```
 
 ### 6.2 Configuration Management
@@ -1218,9 +1133,11 @@ spec:
 
 ```toml
 [broker]
-ipc_socket_path = "/var/run/vertebra/broker.sock"
-ipc_max_clients = 1000
-ipc_buffer_size = 65536
+name = "vertebra-broker"
+control_name = "/vertebra-broker.control"
+slot_size = 65536
+slots = 1024
+timeout_ms = 5000
 
 metrics_port = 9090
 metrics_path = "/metrics"
@@ -1258,46 +1175,32 @@ starvation_threshold = 10
 **Python Client Configuration**:
 
 ```python
-from vertebra.resources import configure_client
+from vertebra.resources import BrokerClient, BrokerClientConfig
 
-configure_client(
-    broker_socket="/var/run/vertebra/broker.sock",
-    default_timeout=5.0,
-    retry_attempts=3,
-    retry_backoff=1.0,
-    enable_metrics=True,
-    metrics_interval=10.0
+config = BrokerClientConfig(
+    name="vertebra-broker",
+    slot_size=65_536,
+    slots=1_024,
+    timeout_ms=5_000,
 )
+client = BrokerClient(config)
 ```
 
 ### 6.3 Operational Procedures
 
 #### 6.3.1 Graceful Shutdown
 
-```rust
-impl ResourceBroker {
-    pub async fn shutdown(&self, timeout: Duration) {
-        info!("Initiating graceful shutdown");
-
-        // Stop accepting new requests
-        self.ipc_server.stop_accepting().await;
-
-        // Wait for in-flight requests
-        let deadline = Instant::now() + timeout;
-        while self.has_active_requests() && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
-        // Release all connections
-        for pool in self.pools.values() {
-            pool.close().await;
-        }
-
-        // Flush metrics
-        self.metrics.flush().await;
-
-        info!("Shutdown complete");
-    }
+```ts
+async function shutdown(timeoutMs: number) {
+  log.info("initiating graceful shutdown");
+  stopAccepting();
+  const deadline = Date.now() + timeoutMs;
+  while (hasActiveRequests() && Date.now() < deadline) {
+    await sleep(100);
+  }
+  await closeAllPools();
+  await flushMetrics();
+  log.info("shutdown complete");
 }
 ```
 
@@ -1311,10 +1214,10 @@ kill -HUP $(cat /var/run/vertebra/broker.pid)
 systemctl reload vertebra-broker
 ```
 
-```rust
-async fn handle_sighup(&self) {
-    let new_config = BrokerConfig::from_file("/etc/vertebra/broker.toml")?;
-    self.reload_config(new_config).await?;
+```ts
+async function handleSighup() {
+  const newConfig = await loadBrokerConfig("/etc/vertebra/broker.toml");
+  await reloadConfig(newConfig);
 }
 ```
 
@@ -1334,60 +1237,50 @@ vertebra-cli drain-all --timeout 120s
 
 ### 7.1 Unit Tests
 
-**Rust Tests**:
-```rust
-#[cfg(test)]
-mod tests {
-    #[tokio::test]
-    async fn test_pool_acquisition_basic() {
-        let pool = create_test_pool().await;
-        let handle = pool.acquire(WorkerId(1)).await.unwrap();
-        assert!(handle.is_valid());
-        pool.release(handle).await.unwrap();
+**Bun Tests**:
+```ts
+import { describe, expect, it } from "bun:test";
+
+describe("broker scheduler", () => {
+  it("acquires + releases", async () => {
+    const pool = await createTestPool();
+    const handle = await pool.acquire("worker-1");
+    expect(handle).toBeDefined();
+    await pool.release(handle);
+  });
+
+  it("balances fairness", async () => {
+    const scheduler = new WeightedFairScheduler();
+    for (let i = 0; i < 10; i += 1) {
+      await scheduler.enqueue("worker-1", request());
+      await scheduler.enqueue("worker-2", request());
+      await scheduler.enqueue("worker-3", request());
     }
-
-    #[tokio::test]
-    async fn test_scheduler_fairness() {
-        let scheduler = WeightedFairScheduler::new();
-
-        for _ in 0..10 {
-            scheduler.enqueue(WorkerId(1), request()).await;
-            scheduler.enqueue(WorkerId(2), request()).await;
-            scheduler.enqueue(WorkerId(3), request()).await;
-        }
-
-        let stats = scheduler.get_stats();
-        assert!((stats.worker_1_served - 10).abs() <= 2);
-        assert!((stats.worker_2_served - 10).abs() <= 2);
-        assert!((stats.worker_3_served - 10).abs() <= 2);
-    }
-}
+    const stats = scheduler.getStats();
+    expect(Math.abs(stats.worker1Served - 10)).toBeLessThanOrEqual(2);
+    expect(Math.abs(stats.worker2Served - 10)).toBeLessThanOrEqual(2);
+    expect(Math.abs(stats.worker3Served - 10)).toBeLessThanOrEqual(2);
+  });
+});
 ```
 
 **Python Tests**:
 ```python
+from vertebra.resources import BrokerClient, BrokerClientConfig
+
 @pytest.mark.asyncio
 async def test_basic_pool_acquisition():
-    async with get_pool("test_postgres").acquire() as conn:
-        assert conn is not None
-        result = await conn.execute("SELECT 1")
-        assert result is not None
+    client = BrokerClient(BrokerClientConfig(name="vertebra-broker"))
+    token = await client.acquire("test_postgres")
+    result = await client.execute("test_postgres", token, "SELECT 1")
+    await client.release("test_postgres", token)
+    assert result is not None
 
 @pytest.mark.asyncio
 async def test_pool_timeout():
-    config = PoolConfig(
-        name="test_limited",
-        resource_type=ResourceType.POSTGRESQL,
-        max_connections=1,
-        connection_timeout=0.5
-    )
-
-    pool = await register_pool(config)
-
-    async with pool.acquire() as conn1:
-        with pytest.raises(PoolTimeoutError):
-            async with pool.acquire() as conn2:
-                pass
+    client = BrokerClient(BrokerClientConfig(name="vertebra-broker", timeout_ms=500))
+    with pytest.raises(TimeoutError):
+        await client.acquire("test_saturated_pool")
 ```
 
 ### 7.2 Integration Tests
@@ -1396,43 +1289,33 @@ async def test_pool_timeout():
 @pytest.mark.integration
 async def test_e2e_postgres_pool():
     broker = await start_test_broker()
+    client = BrokerClient(BrokerClientConfig(name="vertebra-broker"))
 
-    config = PoolConfig(
-        name="integration_postgres",
-        resource_type=ResourceType.POSTGRESQL,
-        dsn="postgresql://test:test@localhost/testdb",
-        max_connections=10
+    token = await client.acquire("integration_postgres")
+    result = await client.execute(
+        "integration_postgres",
+        token,
+        "INSERT INTO test_table (data) VALUES ($1) RETURNING id",
+        ["test_data"],
     )
+    await client.release("integration_postgres", token)
 
-    await register_pool(config)
-
-    async with get_pool("integration_postgres").acquire() as conn:
-        result = await conn.execute(
-            "INSERT INTO test_table (data) VALUES ($1) RETURNING id",
-            "test_data"
-        )
-        assert result["id"] is not None
-
+    assert result["id"] is not None
     await broker.stop()
 ```
 
 ### 7.3 Performance Benchmarks
 
-**Criterion Benchmarks** (Rust):
-```rust
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+**Benchmarks** (Bun):
+```ts
+import { bench } from "mitata";
+import { BrokerClient } from "vertebra";
 
-fn bench_pool_acquisition(c: &mut Criterion) {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let pool = runtime.block_on(create_test_pool());
-
-    c.bench_function("pool_acquire_release", |b| {
-        b.to_async(&runtime).iter(|| async {
-            let handle = pool.acquire(WorkerId(1)).await.unwrap();
-            pool.release(handle).await.unwrap();
-        });
-    });
-}
+bench("pool acquire/release", async () => {
+  const client = new BrokerClient({ name: "vertebra-broker" });
+  const token = await client.acquire("bench_postgres");
+  await client.release("bench_postgres", token);
+});
 ```
 
 **Load Testing** (Python):
@@ -1460,7 +1343,7 @@ async def load_test_scenario():
 **Failure Scenarios**:
 1. Broker process killed (SIGKILL)
 2. Database connection refused
-3. Network partition between workers and broker
+3. Shared-memory transport failure between workers and broker
 4. Slow query causing connection leaks
 5. Worker process crashes mid-request
 6. Resource exhaustion (memory, file descriptors)
@@ -1469,104 +1352,35 @@ async def load_test_scenario():
 
 ## 8. Implementation Roadmap
 
-### Phase 1: Foundation (Weeks 1-3)
+This PRD now tracks the shared-memory broker program. Detailed tasks live in
+`specs/active/shared-memory-broker/tasks.md` and the production readiness phases.
 
-**Milestone 1.1: Rust Broker Skeleton**
-- [x] Set up vertebra-broker crate structure
-- [x] Implement configuration loading (TOML)
-- [x] Create IPC server (UDS on Unix, named pipe on Windows)
-- [x] Message serialization/deserialization
-- [x] Structured logging
+### Phase 1: C ABI Shared Memory Library (Rust)
+- [x] Define C ABI for ring creation/open/close.
+- [x] Expose send/recv APIs with timeouts + stats.
+- [x] Add Arrow IPC helpers with buffer pooling.
+- [x] Add ffi-safe error codes + diagnostics.
 
-**Milestone 1.2: Single Pool**
-- [ ] Integrate deadpool-postgres
-- [ ] PoolManager for PostgreSQL
-- [ ] Acquisition/release logic
-- [ ] Health checks
-- [ ] Integration tests
+### Phase 2: Bun Broker (Central Authority)
+- [x] Bun broker process uses bun:ffi to shm library.
+- [x] Implement request loop + fairness scheduler.
+- [x] Implement Bun SQL pools (Postgres/MySQL/SQLite).
+- [x] Implement Redis pool (native in broker).
+- [x] Implement storage adapter registry + routing.
 
-### Phase 2: Python Client (Weeks 4-5)
+### Phase 3: Python CFFI Client + SQLSpec
+- [x] CFFI bindings to shm library (client + provider host).
+- [x] SQLSpec broker adapters + proxy configs.
+- [x] Plugin registration via `Vertebra(plugins=[...])`.
+- [x] Provider host for non-Bun adapters.
+- [x] Storage layer integration (fsspec bridge + brokered ops).
 
-**Milestone 2.1: IPC Client**
-- [ ] IPCClient implementation
-- [ ] Message serialization
-- [ ] Connection wrapper
-- [ ] Error handling & retry
-- [ ] End-to-end tests
-
-**Milestone 2.2: Multi-Pool Support**
-- [ ] Redis pool (deadpool-redis)
-- [ ] MySQL pool (sqlx-mysql)
-- [ ] Pool registry
-- [ ] Multi-pool tests
-
-### Phase 3: Fair Scheduling (Weeks 6-7)
-
-**Milestone 3.1: Basic Scheduler**
-- [ ] Round-robin scheduler
-- [ ] Per-worker queuing
-- [ ] Timeout handling
-- [ ] Queue metrics
-
-**Milestone 3.2: WFQ Implementation**
-- [ ] Weighted Fair Queuing
-- [ ] Deficit Round Robin
-- [ ] Starvation prevention
-- [ ] Fairness validation
-
-### Phase 4: Production Readiness (Weeks 8-10)
-
-**Milestone 4.1: Observability**
-- [ ] Prometheus metrics
-- [ ] Grafana dashboard
-- [ ] OpenTelemetry tracing
-- [ ] Alert rules
-
-**Milestone 4.2: Security & Resilience**
-- [ ] IPC authentication
-- [ ] Rate limiting
-- [ ] Circuit breakers
-- [ ] Leak detection
-- [ ] Crash handling
-
-**Milestone 4.3: Deployment**
-- [ ] Docker image
-- [ ] Kubernetes manifests
-- [ ] Systemd service
-- [ ] Operational runbooks
-
-### Phase 5: Integration & Testing (Weeks 11-12)
-
-**Milestone 5.1: Performance Testing**
-- [ ] Load testing (1000+ workers)
-- [ ] Latency benchmarks
-- [ ] Resource profiling
-- [ ] Comparison report
-
-**Milestone 5.2: PRD-4 Integration**
-- [ ] Bun driver integration
-- [ ] Performance comparison
-- [ ] E2E tests
-
-**Milestone 5.3: Production Pilot**
-- [ ] Staging deployment
-- [ ] 10% production traffic
-- [ ] Metrics monitoring
-- [ ] Incident response plan
-
-### Phase 6: Production Rollout (Weeks 13-14)
-
-**Milestone 6.1: Gradual Rollout**
-- [ ] 25% production traffic
-- [ ] 50% production traffic
-- [ ] 75% production traffic
-- [ ] 100% production traffic
-
-**Milestone 6.2: Documentation**
-- [ ] User guide
-- [ ] API documentation
-- [ ] Troubleshooting guide
-- [ ] Training sessions
+### Phase 4: Tests + Benchmarks
+- [ ] Shared-memory ring tests (multi-client).
+- [ ] Arrow threshold tests (msgspec vs Arrow).
+- [ ] SQLSpec integration tests (postgres/mysql/sqlite/redis).
+- [ ] Provider registration tests.
+- [ ] Storage integration tests (local backend + brokered access).
 
 ---
 
@@ -1641,21 +1455,20 @@ async def load_test_scenario():
 
 ### 11.1 External Dependencies
 
-**Rust Crates**:
-- `deadpool-postgres = "0.15"` - PostgreSQL pooling
-- `deadpool-redis = "0.18"` - Redis pooling
-- `sqlx = { version = "0.8", features = ["mysql"] }` - MySQL
-- `shmipc = "0.9"` - Zero-copy IPC
-- `tokio = { version = "1", features = ["full"] }` - Async runtime
-- `serde = { version = "1", features = ["derive"] }` - Serialization
-- `bincode = "1"` - Binary serialization
-- `prometheus = "0.13"` - Metrics
-- `tracing = "0.1"` - Logging
+**Bun / TypeScript**:
+- `bun` runtime
+- `@msgpack/msgpack` - MessagePack serialization
+- `prom-client` - Metrics
+
+**Rust (C ABI Shared Memory)**:
+- `serde` - Serialization for internal metadata
+- `arrow` - Arrow IPC helpers
 
 **Python Packages**:
-- `asyncio` (stdlib) - Async runtime
+- `cffi` - Shared-memory bindings
+- `msgspec` - MessagePack serialization
+- `pyarrow` (optional) - Arrow IPC decoding
 - `pytest-asyncio` - Async testing
-- `bincode` - Binary serialization (via FFI or pure Python)
 
 ### 11.2 Project Dependencies
 
@@ -1700,8 +1513,9 @@ async def load_test_scenario():
 - https://man7.org/linux/man-pages/man3/shm_open.3.html
 - https://man7.org/linux/man-pages/man2/mmap.2.html
 
-**Async Runtime**:
-- https://docs.rs/tokio/
+**Runtime**:
+- https://bun.sh/docs/runtime
+- https://bun.sh/docs/api/ffi
 
 **Observability**:
 - https://opentelemetry.io/docs/
@@ -1714,7 +1528,7 @@ async def load_test_scenario():
 ### 13.2 Glossary
 
 **Terms**:
-- **Broker**: Centralized Rust process managing connection pools
+- **Broker**: Centralized Bun process managing connection pools
 - **Worker**: Python process using shared pools
 - **IPC**: Inter-Process Communication
 - **WFQ**: Weighted Fair Queuing
@@ -1727,7 +1541,7 @@ async def load_test_scenario():
 
 ## 14. Conclusion
 
-PRD-5 defines a comprehensive cooperative resource management system for Vertebra that will deliver significant resource savings (70-90% reduction in connections) while maintaining high performance (sub-10ms latency). The architecture leverages Rust's performance and safety for the broker, combined with a simple Python API for ease of adoption.
+PRD-5 defines a comprehensive cooperative resource management system for Vertebra that will deliver significant resource savings (70-90% reduction in connections) while maintaining high performance (sub-10ms latency). The architecture leverages a Bun broker with a shared-memory C ABI, combined with a simple Python API for ease of adoption.
 
 The phased implementation approach ensures incremental validation of critical components (IPC performance, fair scheduling, security) before production rollout. With proper monitoring, testing, and operational procedures, this system will provide a robust foundation for efficient resource sharing across Vertebra deployments.
 

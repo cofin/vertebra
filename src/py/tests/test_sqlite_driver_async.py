@@ -3,60 +3,72 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import msgspec
 import pytest
 
-from vertebra._internal.ipc import IpcConfig
-from vertebra._internal.serialization import MessagePackCodec
 from vertebra.drivers.sqlite import AsyncSqliteDriver, SyncSqliteDriverConfig
+from vertebra.resources import BrokerClientConfig
 
-
-async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    codec = MessagePackCodec()
-    connection_id = "conn-1"
-    try:
-        while True:
-            header = await reader.readexactly(4)
-            size = int.from_bytes(header, "big")
-            payload = await reader.readexactly(size)
-            request = codec.decode(payload)
-            method = request.get("method")
-            if method == "connect":
-                response: dict[str, Any] = {
-                    "id": request.get("id"),
-                    "ok": True,
-                    "result": {"connectionId": connection_id},
-                }
-            elif method == "execute":
-                response = {
-                    "id": request.get("id"),
-                    "ok": True,
-                    "result": {"columns": ["value"], "rows": [[1], [2]], "rowcount": 2},
-                }
-            elif method == "close":
-                response = {"id": request.get("id"), "ok": True, "result": {"closed": True}}
-            else:
-                response = {"id": request.get("id"), "ok": False, "error": {"code": "sqlite", "message": "unknown"}}
-            encoded = codec.encode(response)
-            writer.write(len(encoded).to_bytes(4, "big") + encoded)
-            await writer.drain()
-    except asyncio.IncompleteReadError:
-        return
-    finally:
-        writer.close()
-        await writer.wait_closed()
+try:
+    from vertebra._internal.shm import SHM_AVAILABLE, ShmRing, ShmRingConfig
+except Exception as exc:  # pragma: no cover
+    ShmRing = None  # type: ignore[assignment]
+    ShmRingConfig = None  # type: ignore[assignment]
+    SHM_AVAILABLE = False
+    _IMPORT_ERROR = exc
+else:
+    _IMPORT_ERROR = None
 
 
 @pytest.mark.anyio
 async def test_sqlite_driver_async_fetch() -> None:
-    server = await asyncio.start_server(_handle_client, "127.0.0.1", 0)
-    port = server.sockets[0].getsockname()[1]
-    config = SyncSqliteDriverConfig(
-        path=":memory:", ipc=IpcConfig(transport="tcp", host="127.0.0.1", port=port, enforce_bun=False)
-    )
+    if ShmRing is None or not SHM_AVAILABLE:
+        reason = _IMPORT_ERROR or "shared memory library unavailable"
+        pytest.skip(f"Shared memory bindings unavailable: {reason}")
+    encoder = msgspec.msgpack.Encoder()
+    decoder = msgspec.msgpack.Decoder()
+
+    name = "vertebra-broker-test"
+    control = ShmRing.create(ShmRingConfig(name=f"/{name}.control", slot_size=4096, slots=64))
+
+    async def broker_task() -> None:
+        data, _flags = await asyncio.to_thread(control.recv, 1000)
+        register = decoder.decode(data)
+        req_ring = ShmRing.open(ShmRingConfig(name=register["req_ring"], slot_size=4096, slots=64))
+        resp_ring = ShmRing.open(ShmRingConfig(name=register["resp_ring"], slot_size=4096, slots=64))
+        resp_ring.send(encoder.encode({"ok": True, "id": register["id"]}), 0, 1000)
+
+        # acquire
+        data, _flags = await asyncio.to_thread(req_ring.recv, 1000)
+        request = decoder.decode(data)
+        resp_ring.send(encoder.encode({"ok": True, "token": "token", "id": request["id"]}), 0, 1000)
+        # execute
+        data, _flags = await asyncio.to_thread(req_ring.recv, 1000)
+        request = decoder.decode(data)
+        resp_ring.send(
+            encoder.encode(
+                {"ok": True, "result": {"columns": ["value"], "rows": [[1], [2]], "rowcount": 2}, "id": request["id"]}
+            ),
+            0,
+            1000,
+        )
+        # release
+        data, _flags = await asyncio.to_thread(req_ring.recv, 1000)
+        request = decoder.decode(data)
+        resp_ring.send(encoder.encode({"ok": True, "id": request["id"]}), 0, 1000)
+
+        req_ring.close()
+        resp_ring.close()
+
+    task = asyncio.create_task(broker_task())
+
+    client_config = BrokerClientConfig(name=name, slot_size=4096, slots=64, client_id="test-client")
+    config = SyncSqliteDriverConfig(pool="default", client=client_config)
     driver = AsyncSqliteDriver(config)
     conn = await driver.connect()
     rows = await conn.fetch("select 1")
     assert rows == [(1,), (2,)]
     await conn.close()
-    server.close()
-    await server.wait_closed()
+
+    await task
+    control.close()

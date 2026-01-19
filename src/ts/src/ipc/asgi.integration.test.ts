@@ -1,27 +1,60 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
 import { AsgiBridge, type AsgiIpcFrame } from "./asgi";
 import { IpcClient } from "./client";
+import { loadShmLib } from "../broker/shm";
 import { RoundRobinWorkerPool } from "../server/worker-pool";
 
-const PYTHON_BIN = process.env.VERTEBRA_PYTHON_BIN ?? "python";
+const PYTHON_CMD = resolvePythonCommand();
 const APP_PATH = "vertebra.server._test_app:app";
-const BASE_PORT = 9100;
+const ASGI_NAME = "vertebra-asgi-test";
+const SLOT_SIZE = 4096;
+const SLOTS = 64;
 const WORKERS = 2;
 const HEALTH_PATH = "/__vertebra__/health";
 
 const procs: Subprocess[] = [];
 let testFile = "";
 
+function resolvePythonCommand(): string[] {
+  if (process.env.VERTEBRA_PYTHON_BIN) {
+    return [process.env.VERTEBRA_PYTHON_BIN];
+  }
+  const uvBin = Bun.which("uv");
+  if (uvBin) {
+    return [uvBin, "run", "python"];
+  }
+  const venvRoot = process.env.VIRTUAL_ENV ?? join(process.cwd(), ".venv");
+  const venvPython = join(venvRoot, "bin", "python");
+  if (existsSync(venvPython)) {
+    return [venvPython];
+  }
+  const venvPython3 = join(venvRoot, "bin", "python3");
+  if (existsSync(venvPython3)) {
+    return [venvPython3];
+  }
+  return [Bun.which("python") ?? Bun.which("python3") ?? "python"];
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForHealth(port: number, attempts = 50): Promise<void> {
-  const client = new IpcClient({ transport: "tcp", host: "127.0.0.1", port });
+const SHM_AVAILABLE = (() => {
+  try {
+    loadShmLib();
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+async function waitForHealth(workerId: number, attempts = 50): Promise<void> {
+  const client = new IpcClient({ name: ASGI_NAME, slotSize: SLOT_SIZE, slots: SLOTS }, workerId);
   const payload = {
     id: crypto.randomUUID(),
     method: "GET",
@@ -56,10 +89,13 @@ async function waitForHealth(port: number, attempts = 50): Promise<void> {
     }
   }
   await client.close();
-  throw new Error(`Worker health check failed on port ${port}`);
+  throw new Error(`Worker health check failed for worker ${workerId}`);
 }
 
 beforeAll(async () => {
+  if (!SHM_AVAILABLE) {
+    return;
+  }
   testFile = join(tmpdir(), `vertebra-test-${Date.now()}.txt`);
   await Bun.write(testFile, "hello");
   const pythonPath = join(process.cwd(), "src", "py");
@@ -72,17 +108,19 @@ beforeAll(async () => {
     };
     const proc = Bun.spawn({
       cmd: [
-        PYTHON_BIN,
-        "-m",
-        "vertebra.server.worker",
+        ...PYTHON_CMD,
+        "-c",
+        "from vertebra.server.worker import main; main()",
         "--app",
         APP_PATH,
-        "--transport",
-        "tcp",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        String(BASE_PORT + i),
+        "--name",
+        ASGI_NAME,
+        "--worker-id",
+        String(i),
+        "--slot-size",
+        String(SLOT_SIZE),
+        "--slots",
+        String(SLOTS),
       ],
       env,
       stdout: "inherit",
@@ -90,10 +128,13 @@ beforeAll(async () => {
     });
     procs.push(proc);
   }
-  await Promise.all([waitForHealth(BASE_PORT), waitForHealth(BASE_PORT + 1)]);
+  await Promise.all([waitForHealth(0), waitForHealth(1)]);
 });
 
 afterAll(async () => {
+  if (!SHM_AVAILABLE) {
+    return;
+  }
   for (const proc of procs) {
     try {
       proc.kill("SIGTERM");
@@ -114,11 +155,13 @@ afterAll(async () => {
   }
 });
 
+const test = SHM_AVAILABLE ? it : it.skip;
+
 describe("ASGI IPC integration", () => {
-  it("routes across multiple workers via round-robin pool", async () => {
+  test("routes across multiple workers via round-robin pool", async () => {
     const pool = new RoundRobinWorkerPool({
       count: WORKERS,
-      ipc: { transport: "tcp", host: "127.0.0.1", port: BASE_PORT },
+      ipc: { name: ASGI_NAME, slotSize: SLOT_SIZE, slots: SLOTS },
     });
     const payload = {
       id: crypto.randomUUID(),
@@ -153,10 +196,10 @@ describe("ASGI IPC integration", () => {
     expect(unique.size).toBeGreaterThan(1);
   });
 
-  it("supports pathsend from ASGI worker", async () => {
+  test("supports pathsend from ASGI worker", async () => {
     const pool = new RoundRobinWorkerPool({
       count: WORKERS,
-      ipc: { transport: "tcp", host: "127.0.0.1", port: BASE_PORT },
+      ipc: { name: ASGI_NAME, slotSize: SLOT_SIZE, slots: SLOTS },
     });
     const bridge = new AsgiBridge({ requester: pool });
     const response = await bridge.handle(new Request("http://127.0.0.1/file"));

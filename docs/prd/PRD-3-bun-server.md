@@ -3,16 +3,18 @@
 **Status**: In Progress
 **Author**: Vertebra Team
 **Created**: 2026-01-17
-**Last Updated**: 2026-01-18
+**Last Updated**: 2026-01-19
 **Version**: 1.0
 
 ---
+
+**Note**: IPC between Bun and Python uses the shared-memory C ABI (no sockets/UDS/TCP).
 
 ## Executive Summary
 
 This PRD outlines the design and implementation of Vertebra's high-performance Bun-based HTTP server with multi-protocol support and zero-copy IPC to Python ASGI applications. The primary goal is to outperform leading ASGI servers (e.g., Granian) by leveraging Bun’s performance characteristics, validated through local benchmarks, while maintaining compatibility with existing Litestar and ASGI applications.
 
-The architecture consists of three layers: (1) Bun HTTP server handling TLS termination, HTTP parsing, and protocol negotiation, (2) an IPC bridge using **Unix Domain Sockets on Unix** or **named pipes/TCP on Windows**, and (3) a Python worker pool running Litestar ASGI handlers. This hybrid approach combines Bun's HTTP performance with Python's rich ecosystem and existing application code.
+The architecture consists of three layers: (1) Bun HTTP server handling TLS termination, HTTP parsing, and protocol negotiation, (2) an IPC bridge using **shared-memory ring buffers via C ABI** (no sockets/UDS/TCP), and (3) a Python worker pool running Litestar ASGI handlers. This hybrid approach combines Bun's HTTP performance with Python's rich ecosystem and existing application code.
 
 **Success Criteria**:
 - Throughput exceeding 50,000 requests/second (Granian baseline)
@@ -24,7 +26,7 @@ The architecture consists of three layers: (1) Bun HTTP server handling TLS term
 
 ---
 
-## Progress Update (2026-01-18)
+## Progress Update (2026-01-19)
 
 - Added Bun server scaffolding (`src/ts/src/server`) and router baseline.
 - Implemented Bun server config loader (env + `vertebra.config.ts` via `defineConfig`/`resolveServerConfig`).
@@ -32,16 +34,20 @@ The architecture consists of three layers: (1) Bun HTTP server handling TLS term
 - Added Bun worker manager to spawn Python ASGI workers, restart on exit, and run health checks.
 - Updated ASGI bridge to use pooled IPC with error handling.
 - Wired Python ASGI worker harness and framing tests.
+- Implemented request-body streaming + `http.disconnect` propagation.
+- Added WebSocket upgrade bridging with `websocket.*` IPC frames.
+- Added `/__metrics__` endpoint with prom-client, JSON logging, and trace ID injection.
+- Added `vertebra serve` CLI + "Go Fast" banner and signal forwarding.
 
-**Known Gaps (2026-01-18)**:
-- IPC protocol defaults to MessagePack in the current implementation; Protocol Buffers are not wired yet.
-- Metrics collection for IPC latency/throughput remains unimplemented (documented in Phase 3/4 tasks).
-- WebSocket bridging and bidirectional streaming IPC (SSE + streamed request bodies + `http.disconnect` cancel) are not implemented yet.
+**Known Gaps (2026-01-19)**:
+- IPC protocol defaults to MessagePack in the current implementation; Protocol Buffers are not wired yet (Bun support pending).
+- Unified metrics aggregation (broker + worker stats) and IPC latency/throughput metrics remain unimplemented.
+- Python/Rust supervisor (process manager) is still a Phase 2/5 task.
 - HTTP/2/HTTP/3 support in Bun and h2c upgrade behavior are not yet verified end-to-end (see Protocol Support Notes).
 - Early hints/trailers are accepted over IPC but not surfaced to clients yet (Bun Fetch limitations).
 
-**Protobuf IPC Remaining Work (Spec)**:
-1. **Codegen**: generate TS + Python protobuf bindings from `src/ts/src/proto/asgi.proto` (choose toolchain, add build/docs).
+**Protobuf IPC Remaining Work (Post-MVP)**:
+1. **Codegen**: generate TS + Python protobuf bindings from `src/ts/src/proto/asgi.proto` (Python uses `betterproto`, TS uses `protobuf-es`).
 2. **TS IPC codec**: add protobuf encode/decode path in Bun IPC client + ASGI bridge; include streaming frame envelope; enforce `ipc.protocol === "protobuf"`.
 3. **Python worker**: accept protobuf frames (streaming-aware), decode to ASGI scope, encode protobuf responses.
 4. **Config/compat**: document default + migration between MessagePack and Protobuf, add compatibility tests.
@@ -51,17 +57,19 @@ The architecture consists of three layers: (1) Bun HTTP server handling TLS term
 - HTTP scope includes ASGI version/spec_version, raw_path/query_string, root_path, server/client, extensions, and shared `state`.
 - Lifespan is supported with startup/shutdown lifecycle and shared state.
 - Extensions implemented: `http.response.pathsend`, `http.response.zerocopysend` (file path + optional offset/count; file objects converted to paths).
-- Streaming IPC (response frames + backpressure) implemented for `http.response.start`/`body`.
+- Streaming IPC implemented for `http.request` and `http.response.*` frames with backpressure.
+- `http.disconnect` propagation implemented for client aborts.
+- WebSocket bridging implemented with `websocket.*` IPC frames.
 - Extensions accepted but not surfaced to clients: `http.response.trailers`, `http.response.early_hint`, `http.response.push` (Bun Fetch API limitations).
-- Not yet implemented: request-body streaming (`http.request` frames), disconnect propagation (`http.disconnect`), WebSocket bridging, SSE/long-lived response flow-control improvements.
+- Pending: SSE/long-lived response flow-control improvements.
 
 **Streaming IPC Plan (Spec)**:
 1. Introduce a frame envelope with `{type, request_id, flags, payload}` for streaming. (Implemented for response frames.)
-2. Support request body streaming: `http.request` frames with `body` + `more_body`, plus explicit `http.disconnect` cancel frames tied to Bun abort signals. (Pending.)
+2. Support request body streaming: `http.request` frames with `body` + `more_body`, plus explicit `http.disconnect` cancel frames tied to Bun abort signals. (Implemented.)
 3. Support response streaming: `http.response.start`, chunked `http.response.body`, optional `http.response.trailers` once Bun exposes trailer APIs. (Response frames implemented; trailers not surfaced.)
 4. Add per-connection flow control (credits/low-water marks) to avoid buffering large bodies in memory and to protect worker queues. (Partial: bounded queues + stream backpressure.)
 5. SSE bridging: map long-lived streaming responses to chunked `http.response.body` frames with keep-alive pacing. (Pending.)
-6. WebSocket bridging: bidirectional `websocket.accept` / `websocket.receive` / `websocket.send` frames over the same IPC channel with explicit close codes + reason. (Pending.)
+6. WebSocket bridging: bidirectional `websocket.accept` / `websocket.receive` / `websocket.send` frames over the same IPC channel with explicit close codes + reason. (Implemented.)
 
 ### Verification Steps (local)
 
@@ -96,7 +104,7 @@ Public benchmarks and vendor docs indicate Bun is competitive in microservice wo
 By combining Bun's front-end HTTP performance with Python's ASGI ecosystem, Vertebra aims to:
 
 1. **Maximize throughput**: Bun handles HTTP parsing, TLS termination, and static files at native speed
-2. **Minimize latency**: UDS (Unix) or named pipes (Windows) are expected to reduce IPC latency vs TCP localhost (to be validated)
+2. **Minimize latency**: shared-memory C ABI minimizes IPC overhead (validated via local benchmarks)
 3. **Extend protocols**: JSON-RPC and gRPC support are exploratory; confirm against Bun APIs
 4. **Preserve compatibility**: Existing Litestar apps work without modification
 5. **Enable type safety**: TypeScript code generation from Python routes
@@ -121,7 +129,7 @@ The key challenge is ensuring IPC overhead doesn't negate Bun's performance adva
 
 - **Bun APIs**: rely on `Bun.serve` and `ServerWebSocket` as stable interfaces.
 - **Cross-platform target**: Linux + macOS + Windows at MVP if feasible; Linux-first implementation.
-- **IPC transport**: UDS on Unix, named pipes or TCP on Windows (pluggable transport).
+- **IPC transport**: shared-memory C ABI (no sockets/UDS/TCP).
 - **HTTP/2 and H2C are P0** (user mandate: "100% in scope for MVP"). gRPC is P1 (aspirational MVP).
 
 > **See PRD-0 Cross-PRD Architectural Decisions** for canonical project-wide choices on serialization (Protobuf for gRPC/control plane), Python 3.12+ baseline, and runtime strategy (Bun-first).
@@ -134,9 +142,9 @@ The key challenge is ensuring IPC overhead doesn't negate Bun's performance adva
 
 ### Cross-Platform Transport Strategy
 
-- **Unix**: UDS by default for lowest overhead.
-- **Windows**: named pipes preferred; TCP fallback if necessary.
-- The transport layer is abstracted so Windows/macOS parity can be added without breaking API contracts.
+- Shared-memory ring buffers on Linux/macOS.
+- Windows support via shared-memory mappings (planned).
+- Transport API stays stable while OS backends evolve.
 
 ---
 
@@ -215,10 +223,10 @@ The key challenge is ensuring IPC overhead doesn't negate Bun's performance adva
 #### 2. IPC Bridge
 
 **Responsibilities**:
-- Serialize HTTP requests to MessagePack (current) and optionally Protocol Buffers (planned)
-- Transmit requests to Python workers via IPC transport (UDS or named pipe)
+- Serialize HTTP requests to MessagePack (current; Protobuf deferred)
+- Transmit requests to Python workers via shared-memory rings
 - Manage connection pool to workers
-- Deserialize MessagePack/Protocol Buffer responses
+- Deserialize MessagePack/Arrow responses
 - Handle timeouts and failures
 - Implement backpressure when workers are saturated
 - Maintain bidirectional WebSocket frame forwarding
@@ -321,7 +329,7 @@ This optimization targets file uploads, large JSON payloads, and streaming respo
 
 Each worker is a separate Python process with:
 - Single asyncio event loop
-- IPC transport server listening for worker traffic (UDS or named pipe)
+- Shared-memory control ring + per-client request/response rings
 - ASGI application loaded at startup
 - Request handler coroutine pool
 - Graceful shutdown handler
@@ -329,55 +337,15 @@ Each worker is a separate Python process with:
 **Worker Lifecycle**:
 
 ```python
-async def worker_main(worker_id: int, socket_path: str, app_path: str):
+async def worker_main(worker_id: int, name: str, slot_size: int, slots: int, app_path: str):
     # Load ASGI application
     app = import_app(app_path)  # e.g., "myapp:app"
 
-    # Create IPC transport server (UDS or named pipe)
-    server = await asyncio.start_unix_server(
-        handle_connection,
-        path=socket_path
-    )
+    # Create shared-memory control ring
+    control = ShmRing.create(name=f"/{name}.asgi.{worker_id}.control", slot_size=slot_size, slots=slots)
 
-    async with server:
-        # Register signal handlers
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, graceful_shutdown)
-
-        # Serve requests
-        await server.serve_forever()
-
-async def handle_connection(reader, writer):
-    while True:
-        # Read Protocol Buffer request
-        msg_len = await reader.readexactly(4)
-        length = struct.unpack('>I', msg_len)[0]
-        pb_data = await reader.readexactly(length)
-
-        request = ASGIRequest.FromString(pb_data)
-
-        # Convert to ASGI scope
-        scope = protobuf_to_asgi_scope(request)
-
-        # Invoke ASGI app
-        response_queue = asyncio.Queue()
-        await app(scope, receive, response_queue.put)
-
-        # Serialize response
-        while True:
-            response_msg = await response_queue.get()
-            pb_response = asgi_to_protobuf(response_msg)
-
-            # Write length-prefixed message
-            data = pb_response.SerializeToString()
-            writer.write(struct.pack('>I', len(data)))
-            writer.write(data)
-            await writer.drain()
-
-            if response_msg.get('type') == 'http.response.body' and \
-               not response_msg.get('more_body', False):
-                break
+    # Poll control + client rings and dispatch to ASGI app
+    await serve_forever(app, control)
 ```
 
 **Worker Pool Management**:
@@ -628,11 +596,16 @@ interface VertebraConfig {
   };
 
   ipc: {
-    socketPath?: string;    // default: /tmp/vertebra-{pid}.sock
-    protocol: "protobuf" | "msgpack"; // default: "msgpack" (current impl), "protobuf" planned
+    name: string;           // default: "vertebra-asgi"
+    slotSize: number;       // default: 65536
+    slots: number;          // default: 1024
+    protocol: "msgpack" | "protobuf"; // default: "msgpack" (protobuf deferred)
     poolSize: number;       // default: 2
     poolMax: number;        // default: 10
-    sharedMemoryThreshold?: number; // bytes, default: 1048576 (1MB)
+    timeoutMs: number;      // default: 5000
+    retries?: number;       // default: 1
+    retryDelayMs?: number;  // default: 50
+    acquireTimeoutMs?: number; // default: 5000
   };
 
   monitoring: {
@@ -838,22 +811,20 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 ### Phase 1: Foundation & IPC Protocol Design (2 weeks)
 
 **Objectives**:
-- Define Protocol Buffer schemas for ASGI messages
-- Design IPC transport protocol (UDS on Unix, named pipe/TCP on Windows)
-- Create TypeScript/Python code generation pipeline
+- Define MessagePack/Arrow frame shapes for ASGI messages (Protobuf deferred)
+- Design shared-memory C ABI transport for IPC
+- Create TypeScript/Python codecs for MessagePack frames
 
 **Deliverables**:
-1. `asgi.proto` with ASGI request/response messages
-2. `config.proto` with configuration messages
-3. `metrics.proto` with monitoring messages
-4. TypeScript code generator (using ts-proto or Protobuf-ES)
-5. Python code generator (using protoc)
-6. Build scripts for proto compilation
-7. Unit tests for serialization/deserialization
+1. ASGI frame schema docs (MessagePack)
+2. TypeScript codec helpers + tests
+3. Python codec helpers + tests
+4. Shared-memory IPC integration tests
+5. Protobuf schema placeholders (deferred)
 
 **Success Criteria**:
-- Protocol Buffers compile without errors
-- Round-trip serialization test passes (TS → Python → TS)
+- MessagePack round-trip serialization passes (TS ↔ Python)
+- Shared-memory IPC round-trip passes
 - Type safety verified in TypeScript
 - Documentation for protocol schema
 
@@ -890,9 +861,9 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 - Add request serialization and connection pooling
 
 **Deliverables**:
-1. IPC connection manager (UDS or named pipe)
-2. Protocol Buffer request serializer
-3. Response deserializer
+1. IPC connection manager (shared-memory rings)
+2. MessagePack request serializer
+3. Response deserializer (MessagePack/Arrow)
 4. Connection pool with load balancing
 5. Timeout and retry logic
 6. IPC metrics collection
@@ -900,7 +871,7 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 
 **Success Criteria**:
 - IPC connection established successfully
-- Protocol Buffer serialization < 100μs (p95)
+- MessagePack serialization < 100μs (p95)
 - Connection pooling works (reuse verified)
 - Timeout handling tested
 - IPC overhead measured and documented
@@ -1106,7 +1077,7 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 
 **Parallel Development**:
 - PRD-3 (Bun) can proceed independently of PRD-1 (Rust)
-- Both target the same IPC protocol (Protocol Buffers over IPC transport)
+- Both target the same IPC protocol (MessagePack + shared-memory C ABI; Protobuf deferred)
 - Learnings from PRD-3 can inform PRD-1 design
 
 **Migration Path**:
@@ -1255,10 +1226,10 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 ### Security Considerations
 
 **IPC Transport Security**:
-- Socket file permissions: 0600 (owner only)
-- Socket location: `/tmp/vertebra-{pid}.sock` (unique per instance)
-- Verify socket ownership before connection
-- Clean up socket file on shutdown
+- Shared-memory segment permissions: 0600 (owner only)
+- Control ring name: `/{name}.control` (unique per instance)
+- Verify shared-memory ownership before connect
+- Clean up shared-memory segments on shutdown
 
 **Request Validation**:
 - Header size limits (default: 16KB)
@@ -1338,7 +1309,7 @@ The implementation is divided into 10 phases spanning approximately 16-20 weeks.
 4. Send SIGTERM to workers
 5. Wait for workers to exit (timeout: 30s)
 6. Send SIGKILL to unresponsive workers
-7. Clean up socket files
+7. Clean up shared-memory segments
 8. Exit
 
 **Health Checks**:
@@ -1511,12 +1482,12 @@ Error: Failed to connect to Python worker
 
 Possible causes:
   1. Worker crashed (check logs)
-  2. Socket file missing (/tmp/vertebra-1234.sock)
+  2. Shared-memory control ring missing (/dev/shm)
   3. Permission denied
 
 Suggested actions:
   - Check worker logs: tail -f /var/log/vertebra/worker-1.log
-  - Verify socket file: ls -la /tmp/vertebra-1234.sock
+  - Verify shared memory: ls -la /dev/shm | grep vertebra
   - Restart server: vertebra myapp:app --reload
 ```
 
@@ -1576,10 +1547,10 @@ Suggestion: Ensure user_id is an integer in the request URL
 **Impact**: High (project goal not achieved)
 
 **Mitigation**:
-1. Use UDS on Unix; named pipes on Windows (avoid TCP when possible)
-2. Use Protocol Buffers (faster than JSON/MessagePack)
+1. Use shared-memory C ABI (no sockets)
+2. Use MessagePack + Arrow for serialization
 3. Implement connection pooling (reuse connections)
-4. Add shared memory for large payloads
+4. Keep payloads zero-copy where possible
 5. Benchmark early and often (Phase 3-4)
 6. Profile and optimize hot paths
 7. Consider Rust IPC bridge if TypeScript insufficient (PRD-1)
@@ -1758,47 +1729,36 @@ src/ts/
 ├── package.json
 ├── tsconfig.json
 ├── bun.config.ts
-├── src/
-│   ├── server/
-│   │   ├── index.ts              # Main entry point
-│   │   ├── config.ts             # Configuration loader
-│   │   ├── router.ts             # Request routing
-│   │   ├── worker-pool.ts        # Python worker pool
-│   │   ├── protocols/
-│   │   │   ├── http.ts           # HTTP/1.1 & HTTP/2
-│   │   │   ├── http3.ts          # HTTP/3 (future)
-│   │   │   ├── websocket.ts      # WebSocket
-│   │   │   ├── grpc.ts           # gRPC
-│   │   │   ├── jsonrpc.ts        # JSON-RPC 2.0
-│   │   │   ├── sse.ts            # Server-Sent Events
-│   │   │   └── h2c.ts            # HTTP/2 cleartext
-│   │   ├── bridge/
-│   │   │   ├── index.ts          # IPC bridge interface
-│   │   │   ├── ipc.ts            # IPC transport (UDS/named pipe)
-│   │   │   ├── serializer.ts     # Protobuf serialization
-│   │   │   ├── pool.ts           # Connection pooling
-│   │   │   └── shm.ts            # Shared memory (future)
-│   │   └── monitoring/
-│   │       ├── metrics.ts        # Prometheus metrics
-│   │       ├── health.ts         # Health checks
-│   │       └── tracing.ts        # Request tracing
-│   ├── client/
-│   │   ├── index.ts              # Client factory
-│   │   ├── generator.ts          # Type generation
-│   │   └── types.ts              # Base types
-│   ├── codegen/
-│   │   ├── index.ts              # CLI entry
-│   │   ├── typescript.ts         # TS emitter
-│   │   ├── python.ts             # Python emitter
-│   │   └── protobuf.ts           # Proto generator
-│   └── proto/
-│       ├── asgi.proto            # ASGI messages
-│       ├── config.proto          # Configuration
-│       └── metrics.proto         # Metrics
-└── tests/
+└── src/
     ├── server/
-    ├── bridge/
-    └── protocols/
+    │   ├── index.ts              # Server entry
+    │   ├── config.ts             # Configuration loader
+    │   ├── router.ts             # Request routing
+    │   ├── worker-manager.ts     # Worker supervision
+    │   ├── worker-pool.ts        # Worker IPC pool
+    │   ├── metrics.ts            # Prometheus metrics
+    │   └── unified-metrics.ts    # Broker + worker stats
+    ├── ipc/
+    │   ├── asgi.ts               # ASGI bridge
+    │   └── client.ts             # Shared-memory IPC client
+    ├── broker/
+    │   ├── serve.ts              # Broker process
+    │   ├── scheduler.ts          # Fair scheduler
+    │   ├── client.ts             # Broker client
+    │   └── shm.ts                # bun:ffi shared memory
+    ├── drivers/
+    │   ├── postgres.ts
+    │   ├── mysql.ts
+    │   ├── sqlite.ts
+    │   ├── redis.ts
+    │   └── filesystem.ts
+    ├── mcp/
+    │   ├── ipc-bridge.ts
+    │   └── server.ts
+    ├── protocol/
+    │   └── serialization.ts
+    └── client/
+        └── index.ts
 ```
 
 ---
@@ -1810,18 +1770,29 @@ src/py/vertebra/
 ├── __init__.py
 ├── server/
 │   ├── __init__.py
-│   ├── bridge.py             # IPC bridge (transport server)
 │   ├── worker.py             # Worker process main
-│   ├── asgi.py               # ASGI adapter
-│   └── lifecycle.py          # Startup/shutdown
-├── proto/
+│   └── _test_app.py          # Test ASGI app
+├── resources/
 │   ├── __init__.py
-│   └── generated/
-│       ├── __init__.py
-│       ├── asgi_pb2.py       # Generated from asgi.proto
-│       └── config_pb2.py     # Generated from config.proto
+│   ├── ipc.py                # Shared-memory broker client
+│   ├── pool.py               # Pool helpers + leases
+│   └── provider.py           # Provider host/handlers
+├── drivers/
+│   ├── broker.py             # Broker-backed drivers
+│   ├── postgres.py
+│   ├── mysql.py
+│   ├── sqlite.py
+│   └── redis.py
+├── extensions/
+│   ├── __init__.py
+│   ├── litestar.py
+│   └── sqlspec/
+├── _internal/
+│   ├── shm.py                # CFFI shared-memory bindings
+│   ├── dependencies.py       # Optional deps
+│   └── errors.py             # MissingDependencyError
 ├── cli.py                    # CLI interface
-└── config.py                 # Configuration
+└── app.py                    # Vertebra app container
 ```
 
 ---
@@ -1865,11 +1836,13 @@ export default defineConfig({
   },
 
   ipc: {
-    socketPath: "/tmp/vertebra.sock",
-    protocol: "protobuf",
+    name: "vertebra-asgi",
+    slotSize: 65536,
+    slots: 1024,
+    protocol: "msgpack",
     poolSize: 2,
     poolMax: 10,
-    sharedMemoryThreshold: 1048576, // 1MB
+    timeoutMs: 5000,
   },
 
   monitoring: {

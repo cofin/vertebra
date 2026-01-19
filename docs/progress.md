@@ -1,17 +1,18 @@
 # Vertebra Progress & Next Steps
 
-**Last updated:** 2026-01-18
+**Last updated:** 2026-01-19
 
 ## Current Focus
 
-- PRD-3 Bun server foundations + IPC protocol (in progress).
-- PRD-4 Bun-backed drivers Phase 1 foundation (in progress).
-- Tooling alignment: lint/format pipeline + container runtime abstraction for integration tests.
+- Phase 3 driver ecosystem (SQLSpec proxy + provider host tests, fsspec local tests).
+- MCP integration planning (stdio + SSE + WebSocket).
+- Phase 5 distribution planning (supervisor + broker embedding).
 
 ## Progress (PRD-0)
 
 ### Completed
 
+- Marked legacy driver IPC as deprecated; shared-memory broker supersedes it.
 - Standardized TypeScript/Bun layout to `src/ts` across PRDs and repo layout.
 - Enforced Python 3.12+ baseline in tooling and documentation.
 - Switched Python build backend to `maturin` (PyO3 bindings in `src/rs/vertebra-py`).
@@ -112,6 +113,20 @@
 - Added Bun ⇄ Python IPC integration tests for multi-worker routing + pathsend.
 - Added streaming IPC frames (response.start/body) with backpressure in the ASGI bridge.
 - Wired Bun server router to ASGI bridge helper (`createAsgiServer`).
+- Implemented request-body streaming + `http.disconnect` propagation in the ASGI bridge and worker.
+- Added WebSocket upgrade path with IPC `websocket.*` frames and ASGI websocket scope handling.
+- Added `/__metrics__` endpoint with prom-client metrics and JSON request logging + trace id injection.
+- Added `UnifiedMetricsRegistry` to aggregate broker + worker metrics.
+- Added graceful shutdown with drain timeout for Bun server.
+- Added Bun server entrypoint (`src/ts/src/server/serve.ts`).
+- Added Python CLI `vertebra serve`, Litestar plugin, and Go Fast banner.
+- Added supervisor to launch Bun engine + broker as a single process group.
+- Added SQLSpec-style optional dependency handling and MissingDependencyError pattern.
+
+### Verified
+
+- `make install` completed successfully on 2026-01-19.
+- `bun test` passed on 2026-01-19.
 
 ## Progress (PRD-4)
 
@@ -124,13 +139,12 @@
 - Added Bun runtime guard + IPC client skeleton for driver transport.
 - Added unit tests for driver exceptions, MessagePack codec, IPC guard, and type conversions.
 - Added IPC client retry + pooling and request/response tests.
-- Added Bun SQLite driver server (TCP) and Python SQLite driver/client scaffolding.
-- Added async SQLite driver IPC test harness (mock server).
-- Added Bun Postgres driver server + Python Postgres driver (sync/async) with IPC tests.
+- Added early driver server scaffolding (SQLite/Postgres); superseded by shared-memory broker.
+- Added async SQLite driver IPC test harness (legacy).
 - Added Postgres pool support + transaction context (sync/async) with tests.
 - Added separate Sync/Async driver classes (connections/cursors/pools) for Postgres/MySQL/SQLite/Redis.
 - Added Redis driver server (Bun) and Python Redis driver (sync/async) scaffolding.
-- Added filesystem IPC server (local/S3/GCS) and Python filesystem + cloud storage clients.
+- Added filesystem IPC server (local/S3/GCS); later routed storage through broker shared memory.
 - Added object-store protocol (sync/async) with Local/S3/GCS stores and URL-based registry.
 - Added byte-range reads and list-with-delimiter semantics for storage backends.
 - Added streaming helpers for storage backends (iter_chunks/put_stream + upload/download to path).
@@ -146,11 +160,15 @@
 - Initialized `vertebra-broker` crate and workspace wiring.
 - Added broker config parsing (TOML + env substitution) with unit tests.
 - Added IPC server and pool manager stubs for broker scaffolding.
-- Added broker protocol framing, bincode serialization, and TCP/UDS/named-pipe IPC server.
+- Added broker protocol framing + bincode serialization (legacy; superseded by shared-memory broker).
 - Added broker IPC echo integration test.
 - Added broker JSON logging toggle via VERTEBRA_LOG_JSON.
 - Added Python broker client (msgpack codec) with unit tests.
 - Added broker pool abstraction with async context manager and pooling tests.
+- Added shared-memory C ABI for ring buffers (create/open/send/recv + stats + errors).
+- Added Bun broker with fairness scheduler and shared-memory request loop.
+- Added Bun SQL pools (Postgres/MySQL/SQLite), Redis pool, and storage pools (local/S3/GCS).
+- Added provider registry + routing with Arrow IPC payloads for large results.
 
 ## Progress (PRD-7)
 
@@ -159,27 +177,28 @@
 - Added MCP TypeScript server skeleton with JSON-RPC handler.
 - Added MCP IPC bridge stub for future transport wiring.
 
+## Progress (Phase 3: ORM Extensions)
+
+### Completed
+
+- Added broker-backed SQLSpec adapters (Postgres/MySQL/SQLite).
+- Added broker proxy configs to wrap arbitrary SQLSpec adapters.
+- Added SQLSpec provider host with Arrow IPC encoding and correlation ID propagation.
+- Routed storage clients (filesystem/object store/fsspec) through the broker shared-memory API.
+
 ## Next Steps
+### Phase 3 (ORM + Storage)
 
-### PRD-3
+- Add SQLSpec integration tests (postgres/mysql/sqlite + proxy adapters).
+- Add fsspec compliance tests (local backend default; S3/GCS optional/skip).
+- Add container-based integration tests using `tools/lib/container.py`.
+- Defer SQLAlchemy dialect + Advanced Alchemy until SQLSpec is stable.
 
-- Implement request-body streaming + `http.disconnect` propagation; add SSE/WebSocket IPC bridging frames.
-- Validate Bun protocol coverage (HTTP/2, HTTP/3, h2c upgrade) and document browser TLS constraints; plan ALPN + h2c upgrade behavior.
-- Implement Protobuf IPC support + metrics wiring (MessagePack remains default until codegen/codec added).
-- Add graceful drain/rolling restart + worker health surface metrics.
+### Phase 4 (MCP)
 
-Notes:
-- Protobuf IPC remains unimplemented; PRD-3 now lists the required codegen/codec/test steps explicitly.
+- Implement MCP stdio + SSE + WebSocket transports.
 
-### PRD-4
+### Phase 4 (MCP)
 
-- Add SQLSpec adapter layer + compliance tests.
-- Add fsspec compliance tests + store protocol unit tests.
-- Expand filesystem/storage docs and examples (local/S3/GCS).
-- Add integration test harness using the container runtime abstraction (Docker/Podman, no compose).
-
-### PRD-5/6/7
-
-- Scaffold vertebra-broker crate and IPC client for resource pools.
-- Add integration test harness + docs/benchmarks for cross-language flows.
-- Start MCP server skeleton in `src/ts/src/mcp` with schema registry + transport.
+- Implement stdio + SSE + WebSocket transports.
+- Wire Python registry + tool execution over IPC.

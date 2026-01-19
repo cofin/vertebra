@@ -1,53 +1,41 @@
-# Vertebra Driver Protocol
+# Vertebra Driver Protocol (Shared Memory)
 
-This document defines the Bun-backed driver IPC protocol used between Python drivers and the Bun server.
+This document defines the **shared-memory broker protocol** used between clients
+(Python/Bun) and the central Bun broker. There are **no sockets or TCP** in the data plane.
 
 ## Message Transport
 
-- Framing: 4-byte big-endian length prefix + MessagePack payload.
-- Encoding: MessagePack via msgspec (Python) and @msgpack/msgpack (TypeScript).
-- Transport: UDS on Unix, TCP/named pipe on Windows (configurable).
+- Transport: shared memory ring buffers (SPSC per client).
+- Encoding: MessagePack for control + small results (msgspec in Python).
+- Large results: Arrow IPC stream buffers (zero-copy).
 
 ## Messages
 
-### DriverRequest
+### Request
 
 Fields:
-- `id`: Request identifier.
-- `driver`: Driver name (postgres, mysql, sqlite, etc).
-- `method`: Operation (connect, execute, fetch, close, etc).
-- `params`: Operation-specific payload.
+- `id`: Request identifier (u64).
+- `kind`: Operation (acquire, execute, release, stats, register).
+- `flags`: Bits for Arrow usage, error handling, etc.
+- `payload_len`: Inline payload size.
+- `payload_ref`: Inline offset or buffer index (for Arrow payloads).
 
-### DriverResponse
-
-Fields:
-- `id`: Request identifier.
-- `ok`: Success flag.
-- `result`: Operation result (rows, counts, etc).
-- `error`: Optional error payload.
-
-### StreamChunk
+### Response
 
 Fields:
-- `id`: Request identifier.
-- `index`: Chunk index (monotonic).
-- `done`: Indicates end of stream.
-- `data`: Optional binary payload.
-
-### DriverError
-
-Fields:
-- `code`: Error code string (DB-API compatible).
-- `message`: Human-readable message.
-- `details`: Optional structured metadata.
+- `id`: Request identifier (u64).
+- `status`: ok/error enum.
+- `flags`: Arrow/error bits.
+- `payload_len`: Inline payload size.
+- `payload_ref`: Inline offset or buffer index.
 
 ## Payload Conventions
 
-- Binary payloads are always `bytes` (Python) or `Uint8Array` (TypeScript).
-- JSON payloads use UTF-8 encoded text with JSON semantics.
-- UUIDs are serialized as canonical strings.
+- Small payloads: MessagePack with msgspec buffer protocol.
+- Large payloads: Arrow IPC stream in shared buffer pool.
+- Binary payloads: `bytes` / `Uint8Array` when inline.
 
 ## Versioning
 
-- Protocol versions are embedded by the client in driver `params` and validated by the server.
-- Backward-incompatible changes require a new major protocol version.
+- ABI version is embedded in shared-memory header.
+- Backward-incompatible changes require a new ABI version.

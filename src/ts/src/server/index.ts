@@ -3,13 +3,21 @@ import { createRouter, RequestHandler } from "./router";
 import { WorkerManager } from "./worker-manager";
 import { createWorkerPool, StubWorkerPool, type WorkerPool } from "./worker-pool";
 import { AsgiBridge } from "../ipc";
+import type { WebSocketHandler } from "bun";
+import { createMetrics, trackRequest } from "./metrics";
+import { log } from "./logging";
+import { BrokerClient } from "../broker";
+import { UnifiedMetricsRegistry } from "./unified-metrics";
 
 export class BunServer {
   private server: Server | null = null;
+  private shuttingDown = false;
+  private shutdownAttached = false;
 
   constructor(
     private handler: RequestHandler,
     private config: ResolvedServerConfig["server"],
+    private websocket?: WebSocketHandler,
     private onStop?: () => Promise<void> | void,
   ) {}
 
@@ -21,8 +29,10 @@ export class BunServer {
       hostname: this.config.hostname,
       port: this.config.port,
       reusePort: this.config.reusePort,
-      fetch: this.handler,
+      fetch: (request, server) => this.handler(request, server),
+      websocket: this.websocket,
     });
+    this.attachSignalHandlers();
     return this;
   }
 
@@ -48,6 +58,45 @@ export class BunServer {
     }
     return this.server.url.toString();
   }
+
+  private attachSignalHandlers(): void {
+    if (this.shutdownAttached) {
+      return;
+    }
+    this.shutdownAttached = true;
+    const handler = () => {
+      void this.gracefulShutdown();
+    };
+    process.on("SIGTERM", handler);
+    process.on("SIGINT", handler);
+  }
+
+  private async gracefulShutdown(): Promise<void> {
+    if (this.shuttingDown) {
+      return;
+    }
+    this.shuttingDown = true;
+    const server = this.server;
+    if (!server) {
+      return;
+    }
+    server.stop(false);
+    const drainTimeout = this.config.drainTimeoutMs ?? 5000;
+    const stopPromise = Promise.resolve(this.onStop?.());
+    let completed = false;
+    void stopPromise.finally(() => {
+      completed = true;
+    });
+    await Promise.race([stopPromise, sleep(drainTimeout)]);
+    if (!completed) {
+      server.stop(true);
+    }
+    this.server = null;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function createServer(
@@ -55,13 +104,13 @@ export async function createServer(
   handler: RequestHandler = () => new Response("Not Found", { status: 404 }),
 ): Promise<BunServer> {
   const resolved = await resolveServerConfig(config);
-  return new BunServer(handler, resolved.server);
+  return new BunServer(handler, resolved.server, undefined);
 }
 
 export async function createRouterServer(config: ServerConfig = {}, handler?: RequestHandler): Promise<BunServer> {
   const resolved = await resolveServerConfig(config);
   const router = createRouter({ staticDir: resolved.server.staticDir, apiHandler: handler });
-  return new BunServer(router, resolved.server);
+  return new BunServer(router, resolved.server, undefined);
 }
 
 export async function createAsgiServer(config: ServerConfig = {}, pool?: WorkerPool): Promise<BunServer> {
@@ -75,10 +124,68 @@ export async function createAsgiServer(config: ServerConfig = {}, pool?: WorkerP
     : null;
   manager?.start();
   const bridge = new AsgiBridge({ requester: workerPool });
-  const router = createRouter({ staticDir: resolved.server.staticDir, apiHandler: (request) => bridge.handle(request) });
-  return new BunServer(router, resolved.server, async () => {
+  const metrics = createMetrics();
+  const brokerClient = resolved.broker ? new BrokerClient(resolved.broker) : undefined;
+  const metricsRegistry = new UnifiedMetricsRegistry(metrics, brokerClient, manager);
+  const router = createRouter({
+    staticDir: resolved.server.staticDir,
+    apiHandler: async (request, server) => {
+      const { request: tracedRequest, traceId } = ensureTraceId(request);
+      const url = new URL(tracedRequest.url);
+      if (url.pathname === "/__metrics__") {
+        const finish = trackRequest(metrics, tracedRequest.method);
+        const body = await metricsRegistry.render();
+        finish(200);
+        return new Response(body, { headers: { "content-type": metrics.registry.contentType } });
+      }
+      const finish = trackRequest(metrics, tracedRequest.method);
+      const start = performance.now();
+      try {
+        if (bridge.upgradeWebSocket(tracedRequest, server)) {
+          finish(101);
+          log("info", "request.upgrade", {
+            trace_id: traceId,
+            method: tracedRequest.method,
+            path: url.pathname,
+          });
+          return;
+        }
+        const response = await bridge.handle(tracedRequest);
+        finish(response.status);
+        log("info", "request.complete", {
+          trace_id: traceId,
+          method: tracedRequest.method,
+          path: url.pathname,
+          status: response.status,
+          duration_ms: Number((performance.now() - start).toFixed(3)),
+        });
+        return response;
+      } catch (error) {
+        finish(500);
+        log("error", "request.error", {
+          trace_id: traceId,
+          method: tracedRequest.method,
+          path: url.pathname,
+          error: String(error),
+        });
+        return new Response("Bad Gateway", { status: 502 });
+      }
+    },
+  });
+  const websocket = bridge.createWebSocketHandler();
+  return new BunServer(router, resolved.server, websocket, async () => {
     await Promise.all([workerPool.close(), manager?.stop()]);
   });
+}
+
+function ensureTraceId(request: Request): { request: Request; traceId: string } {
+  const headers = new Headers(request.headers);
+  const existing = headers.get("x-request-id") ?? headers.get("traceparent");
+  const traceId = existing ?? crypto.randomUUID();
+  if (!headers.get("x-request-id")) {
+    headers.set("x-request-id", traceId);
+  }
+  return { request: new Request(request, { headers }), traceId };
 }
 
 export const defaultWorkerPool = new StubWorkerPool();

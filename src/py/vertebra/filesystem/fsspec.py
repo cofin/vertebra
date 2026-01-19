@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 from typing import Any
 
+from vertebra._internal.dependencies import FSSPEC_INSTALLED
+from vertebra._internal.errors import MissingDependencyError
 from vertebra.filesystem.client import FileSystemError
 from vertebra.storage.store import (
     AsyncGCSStore,
@@ -20,13 +22,18 @@ from vertebra.storage.store import (
     store_from_url,
 )
 
-try:  # pragma: no cover - optional dependency
-    from fsspec.spec import AbstractFileSystem
+_FSSPEC_AVAILABLE = FSSPEC_INSTALLED
+_FSSPEC_IMPORT_ERROR: Exception | None = None
 
-    _FSSPEC_AVAILABLE = True
-except ImportError:  # pragma: no cover - optional dependency
+if _FSSPEC_AVAILABLE:
+    try:  # pragma: no cover - optional dependency
+        from fsspec.spec import AbstractFileSystem
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        _FSSPEC_AVAILABLE = False
+        _FSSPEC_IMPORT_ERROR = exc
+
+if not _FSSPEC_AVAILABLE:
     AbstractFileSystem = object  # type: ignore[misc,assignment]
-    _FSSPEC_AVAILABLE = False
 
 
 class _BufferedFile(io.BytesIO):
@@ -61,8 +68,7 @@ class VertebraFileSystem(AbstractFileSystem):  # type: ignore[misc]
         **kwargs: Any,
     ) -> None:
         if not _FSSPEC_AVAILABLE:
-            msg = "fsspec is required for VertebraFileSystem"
-            raise FileSystemError(msg)
+            raise MissingDependencyError(package="fsspec") from _FSSPEC_IMPORT_ERROR
         super().__init__(**kwargs)
         self._backend = backend
         if store is not None:

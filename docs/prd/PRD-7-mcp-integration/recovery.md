@@ -34,7 +34,7 @@ MCP Integration adds a Bun-based MCP server that routes tool/resource calls to P
 MCP Client
    │ JSON-RPC
 Bun MCP Server
-   │ IPC transport (UDS / named pipe)
+   │ Shared-memory IPC (no sockets)
 Python Tool/Resource Handlers
 ```
 
@@ -49,7 +49,7 @@ Python Tool/Resource Handlers
 
 ## Key Decisions
 
-- **IPC transport**: UDS on Unix, named pipes (or TCP fallback) on Windows.
+- **IPC transport**: Shared-memory C ABI (no sockets/UDS/TCP).
 - **Schema generation**: from Python annotations + `Annotated` metadata.
 - **Spec version**: lock per release; update only at decision gate.
 

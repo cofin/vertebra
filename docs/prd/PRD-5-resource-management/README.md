@@ -17,13 +17,13 @@ Cooperative Resource Management enables shared connection pools across Python wo
 ```
 ┌─────────────────────────────────────┐
 │     Vertebra Resource Broker        │
-│   (Rust process, manages pools)     │
+│   (Bun process, manages pools)      │
 ├─────────────────────────────────────┤
 │  PostgreSQL Pool (20 conns)         │
 │  MySQL Pool (10 conns)              │
 │  Redis Pool (5 conns)               │
 └─────────────────────────────────────┘
-         │ IPC transport (UDS / named pipes)
+         │ Shared-memory transport (no sockets)
     ┌────┴────┬────┴────┬────┴────┐
     │Worker 1 │Worker 2 │Worker N │
     └─────────┴─────────┴─────────┘

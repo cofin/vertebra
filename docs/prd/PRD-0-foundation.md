@@ -189,8 +189,8 @@ Hybrid approach by layer to avoid protocol sprawl:
 | gRPC | P1 | Aspirational MVP, enables MCP integration |
 
 #### Cross-Platform IPC
-- **Linux/macOS**: `shm_open`/`mmap` + Unix domain sockets
-- **Windows**: `CreateFileMapping` + Named Pipes
+- **Linux/macOS**: `shm_open`/`mmap` shared memory rings (no sockets)
+- **Windows**: `CreateFileMapping` shared memory rings (no sockets)
 - **Not using**: Mach ports (macOS-only, adds complexity)
 
 #### Bindings Strategy
@@ -1265,7 +1265,7 @@ Vertebra is a **Python-first, high-performance application backbone** designed t
 - Use `mmap` for shared memory regions
 - Protocol Buffers or Cap'n Proto for structured data
 - Direct buffer sharing between Python and Rust (via PyO3)
-- Unix domain sockets for control plane
+- Shared-memory rings for control plane
 
 **Trade-offs:**
 - ✅ Orders of magnitude faster for large data
@@ -1334,7 +1334,7 @@ Vertebra is a **Python-first, high-performance application backbone** designed t
 │  - WebSocket handling                                        │
 │  - Static file serving                                       │
 └────────────────┬────────────────────────────────────────────┘
-                 │ IPC (Unix socket / shared memory)
+                 │ IPC (shared memory)
                  ▼
 ┌─────────────────────────────────────────────────────────────┐
 │               vertebra-core (Rust)                           │
@@ -1398,7 +1398,7 @@ Vertebra is a **Python-first, high-performance application backbone** designed t
 
 **Key Types:**
 - `Message`: Envelope for RPC calls (method, params, id)
-- `Transport`: Abstraction over Unix socket / shared memory
+- `Transport`: Shared-memory transport abstraction
 - `Pool`: Connection pool manager
 - `TypeRegistry`: Runtime type validation
 
@@ -1426,16 +1426,18 @@ impl<T> Pool<T> {
 **Purpose:** Expose Rust functionality to Python.
 
 **Exposed Classes:**
-- `IpcClient`: Async client for calling Bun server
-- `Buffer`: Zero-copy buffer wrapper
-- `PoolManager`: Access shared connection pools
+- `ShmRing`: Shared-memory ring buffer
+- `ShmRegion`: Shared-memory region handle
+- `BrokerClient`: Shared-memory broker client
 
 **Example Usage:**
 ```python
-from vertebra._vertebra import IpcClient
+from vertebra.resources import BrokerClient, BrokerClientConfig
 
-client = IpcClient(socket_path="/tmp/vertebra.sock")
-result = await client.call("users.get", {"id": 123})
+client = BrokerClient(BrokerClientConfig(name="vertebra-broker"))
+token = await client.acquire("postgres")
+result = await client.execute("postgres", token, "SELECT 1")
+await client.release("postgres", token)
 ```
 
 **Implementation Notes:**
@@ -1448,7 +1450,7 @@ result = await client.call("users.get", {"id": 123})
 **Purpose:** Expose Rust functionality to Bun/Node.
 
 **Exposed Functions:**
-- `createTransport(options)`: Create IPC transport
+- `createTransport(options)`: Create shared-memory transport
 - `createPool(config)`: Create connection pool
 - `validateType(schema, value)`: Runtime type checking
 
@@ -1457,7 +1459,7 @@ result = await client.call("users.get", {"id": 123})
 import { createTransport } from "@vertebra/core/bindings";
 
 const transport = createTransport({
-  path: "/tmp/vertebra.sock",
+  name: "vertebra-broker",
   timeout: 5000,
 });
 
@@ -1568,7 +1570,7 @@ const user = await client.users.getUser({ id: 123 });
    ├─ Parse HTTP request
    ├─ Extract procedure name & params
    ├─ Create IPC message
-   └─ Send via Unix socket
+   └─ Send via shared memory
 
 3. vertebra-core (Rust)
    ├─ Deserialize IPC message
@@ -1601,7 +1603,7 @@ const user = await client.users.getUser({ id: 123 });
 **Latency Budget:**
 - Network (client ↔ server): ~10-50ms
 - HTTP overhead: ~1ms
-- IPC (Bun ↔ Rust): <0.1ms (Unix socket)
+- IPC (Bun ↔ Rust): <0.1ms (shared memory)
 - Type validation: <0.1ms
 - Python execution: variable (database query)
 - **Total overhead: ~1-2ms**
@@ -1720,7 +1722,7 @@ type VertebraError = {
 **3. IPC Overhead:**
 - Zero-copy for large payloads (mmap)
 - Batch requests when possible
-- Unix sockets > TCP (lower latency)
+- Shared memory > sockets (lower latency)
 - Protocol Buffers > JSON (smaller size)
 
 **4. Type Validation:**
@@ -1778,7 +1780,7 @@ type VertebraError = {
 - Pydantic models for Python
 
 **3. IPC Security:**
-- Unix socket permissions (0600)
+- Shared memory segment permissions (0600)
 - Process isolation (one Python per worker)
 - Message authentication (HMAC)
 - Rate limiting per client

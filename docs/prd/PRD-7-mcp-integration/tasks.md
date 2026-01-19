@@ -33,8 +33,8 @@
 
 ## Phase 4: IPC Bridge Integration (Weeks 8-9)
 
-- [ ] Implement IPC bridge for tool invocation (UDS on Unix; named pipe/TCP on Windows)
-- [ ] Add request/response serialization (MessagePack or Protobuf)
+- [ ] Implement IPC bridge for tool invocation (shared-memory C ABI; no sockets)
+- [ ] Add request/response serialization (MessagePack; Protobuf optional later)
 - [ ] Add concurrency limits + backpressure
 - [ ] Add IPC metrics (latency, errors, queue depth)
 - [ ] Integration tests: MCP client → Bun → Python tool

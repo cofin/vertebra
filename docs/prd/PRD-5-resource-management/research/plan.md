@@ -123,7 +123,7 @@ mobc          : 165%  (async, multi-runtime)
 
 **Architecture**:
 - Linux shared memory foundation
-- Unix socket for synchronization
+- Shared-memory control ring + file lock for synchronization
 - Zero-copy data transfer
 - Simple API (similar to channels)
 
@@ -186,7 +186,7 @@ shmipc          : 0.5-2 µs
 iceoryx2        : 0.1-0.5 µs
 ```
 
-**Analysis**: shmipc provides 10-30x improvement over Unix sockets, sufficient for Vertebra's < 1ms target.
+**Analysis**: shmipc provides 10-30x improvement over baseline IPC latencies, sufficient for Vertebra's < 1ms target.
 
 ---
 
@@ -371,18 +371,19 @@ async with aiomultiprocess.Pool(
 
 #### Per-Process Initialization
 ```python
-def init_worker_pool(broker_socket):
+def init_worker_pool(broker_name):
     """Called once when worker process starts."""
-    from vertebra.resources import configure_client
+    from vertebra.resources import BrokerClientConfig, BrokerPool
 
-    configure_client(broker_socket=broker_socket)
+    config = BrokerClientConfig(name=broker_name)
+    pool = BrokerPool("postgres", config)
 
     # Pre-warm connection (optional)
-    asyncio.run(get_pool("postgres").warmup())
+    asyncio.run(pool.health())
 
 async with aiomultiprocess.Pool(
     initializer=init_worker_pool,
-    initargs=("/var/run/vertebra/broker.sock",)
+    initargs=("vertebra-broker",)
 ) as pool:
     # Workers have pre-configured Vertebra clients
     await pool.map(process_task, tasks)
@@ -550,13 +551,13 @@ async fn health_check_mysql(conn: &Connection) -> Result<bool> {
 - Restart policy: always
 - Health check via HTTP endpoint
 - Resource constraints (CPU, memory)
-- Volume mounts for IPC socket
+- Shared memory mount (`/dev/shm`)
 
 **Kubernetes** (orchestrated):
 - DaemonSet deployment (one broker per node)
 - Liveness/readiness probes
 - ConfigMap for configuration
-- HostPath volume for IPC socket
+- `emptyDir` memory volume for `/dev/shm`
 
 ### 8.2 Configuration Management
 
@@ -570,7 +571,10 @@ VERTEBRA_LOG_LEVEL=info
 **TOML Configuration** (structured):
 ```toml
 [broker]
-ipc_socket_path = "/var/run/vertebra/broker.sock"
+name = "vertebra-broker"
+control_name = "/vertebra-broker.control"
+slot_size = 65536
+slots = 1024
 
 [[pools.postgres]]
 name = "main"
@@ -836,8 +840,8 @@ if !rate_limiter.check(worker_id) {
 - Expected: Health checks fail, connections purged
 - Workers: Get acquisition timeout errors
 
-**Network Partition**:
-- Test: `iptables` rules blocking broker socket
+**Shared Memory Failure**:
+- Test: remove broker shared-memory segments or unmount `/dev/shm`
 - Expected: IPC timeout, fallback to local
 - Recovery: Reconnect when partition heals
 
