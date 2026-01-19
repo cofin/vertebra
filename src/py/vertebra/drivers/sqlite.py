@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import msgspec
 
 from vertebra.drivers.base import AsyncDriver, SyncDriver
 from vertebra.drivers.broker import (
@@ -16,16 +16,18 @@ from vertebra.drivers.broker import (
 from vertebra.resources import BrokerClient, BrokerClientConfig
 
 
-@dataclass(slots=True)
-class SyncSqliteDriverConfig(BrokerDriverConfig):
+class SyncSqliteDriverConfig(BrokerDriverConfig, frozen=True):
+    """Configuration for synchronous SQLite driver."""
+
     pool: str = "sqlite"
-    client: BrokerClientConfig = BrokerClientConfig()  # noqa: RUF009
+    client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
-@dataclass(slots=True)
-class AsyncSqliteDriverConfig(BrokerDriverConfig):
+class AsyncSqliteDriverConfig(BrokerDriverConfig, frozen=True):
+    """Configuration for asynchronous SQLite driver."""
+
     pool: str = "sqlite"
-    client: BrokerClientConfig = BrokerClientConfig()  # noqa: RUF009
+    client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
 class SyncSqliteDriver(SyncDriver):
@@ -54,9 +56,4 @@ class AsyncSqliteDriver(AsyncDriver):
         return AsyncBrokerPool(self._config.pool, self._config.client, max_clients=max_size)
 
 
-__all__ = (
-    "AsyncSqliteDriver",
-    "AsyncSqliteDriverConfig",
-    "SyncSqliteDriver",
-    "SyncSqliteDriverConfig",
-)
+__all__ = ("AsyncSqliteDriver", "AsyncSqliteDriverConfig", "SyncSqliteDriver", "SyncSqliteDriverConfig")

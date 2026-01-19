@@ -186,6 +186,40 @@
 - Added SQLSpec provider host with Arrow IPC encoding and correlation ID propagation.
 - Routed storage clients (filesystem/object store/fsspec) through the broker shared-memory API.
 
+## Progress (PRD-8: Production Readiness Consolidation)
+
+### Completed
+
+- Refactored TypeScript pool classes in `serve.ts` to extend `BasePoolAdapter`.
+- Unified `PoolStats` type to single source in `base-pool.ts` (removed duplicates from `client.ts` and `serve.ts`).
+- Renamed Python `resources/ipc.py` to `broker.py` and updated all imports (8 files).
+- Added `ChannelHandle` to `vertebra-js` with bidirectional SPSC rings for request/response patterns.
+- Added `createChannelPair()` factory for anonymous paired channels.
+- Added `createNamed()` and `openNamed()` factories for Unix named shared memory.
+- Added `ChannelRole` enum (Client/Server) replacing error-prone string matching.
+- Added `unlink()` lifecycle method for named SHM cleanup.
+- Added public `shm_unlink_named()` function to `vertebra-core/src/shm.rs`.
+
+### Verified
+
+- `cargo check --package vertebra-js` passed on 2026-01-19.
+
+### Supervisor (T1.6.*)
+
+- Implemented process supervisor with full lifecycle management in `src/py/vertebra/supervisor.py`.
+- Added `ProcessState` and `SupervisorState` enums for state machine tracking.
+- Added `RestartPolicy` with exponential backoff (configurable base/max delay, reset period).
+- Added `HealthCheckConfig` for future health check integration.
+- Added process group management (`start_new_session=True`) for clean Unix shutdown.
+- Added signal propagation (SIGTERM, SIGINT, SIGHUP) to all managed processes.
+- Implemented structured shutdown sequencing: drain → wait → force kill.
+- Wired `vertebra serve` to use supervisor with `--drain-timeout` and `--shutdown-timeout` CLI flags.
+- Added 10 unit tests covering restart policy, state transitions, signal propagation, and process lifecycle.
+
+### Verified (Supervisor)
+
+- `uv run pytest src/py/tests/test_supervisor.py` passed on 2026-01-19 (10 tests).
+
 ## Next Steps
 ### Phase 3 (ORM + Storage)
 

@@ -442,6 +442,22 @@ fn validate_name(name: &str) -> Result<(), ShmError> {
     Ok(())
 }
 
+/// Unlink a named shared memory region (Unix only).
+///
+/// This removes the name from the filesystem so no new processes can open it.
+/// Existing mappings remain valid until all processes unmap.
+#[cfg(unix)]
+pub fn shm_unlink_named(name: &str) -> Result<(), ShmError> {
+    validate_name(name)?;
+    let cname = CString::new(name)?;
+    // SAFETY: shm_unlink expects a valid C string name.
+    let result = unsafe { libc::shm_unlink(cname.as_ptr()) };
+    if result < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
 fn align_to_page(size: usize) -> Result<usize, ShmError> {
     let page = page_size()?;
     Ok(size.div_ceil(page) * page)

@@ -2,15 +2,15 @@
 
 import asyncio
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
+
+import msgspec
 
 from vertebra.resources import BrokerClient, BrokerClientConfig, BrokerPool
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
-    from types import TracebackType
 
 
 def _run_sync(coro: "Awaitable[Any]") -> Any:
@@ -22,10 +22,11 @@ def _run_sync(coro: "Awaitable[Any]") -> Any:
     raise RuntimeError(msg)
 
 
-@dataclass(slots=True)
-class BrokerDriverConfig:
+class BrokerDriverConfig(msgspec.Struct, frozen=True):
+    """Configuration for a broker-backed database driver."""
+
     pool: str
-    client: BrokerClientConfig = BrokerClientConfig()  # noqa: RUF009
+    client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
 class SyncBrokerCursor:
@@ -98,17 +99,11 @@ class SyncBrokerConnection:
         self, query: str, params: Sequence[Any] | dict[str, Any], correlation_id: str | None = None
     ) -> dict[str, Any]:
         payload: list[Any] | dict[str, Any]
-        if isinstance(params, dict):
-            payload = params
-        else:
-            payload = list(params)
+        payload = params if isinstance(params, dict) else list(params)
         return _run_sync(self._client.execute(self._pool, self._token, query, payload, correlation_id))
 
     def _execute_many(
-        self,
-        query: str,
-        params: Iterable[Sequence[Any] | dict[str, Any]],
-        correlation_id: str | None = None,
+        self, query: str, params: Iterable[Sequence[Any] | dict[str, Any]], correlation_id: str | None = None
     ) -> dict[str, Any]:
         payload: list[list[Any] | dict[str, Any]] = []
         for param_set in params:
@@ -238,17 +233,11 @@ class AsyncBrokerConnection:
         self, query: str, params: Sequence[Any] | dict[str, Any], correlation_id: str | None = None
     ) -> dict[str, Any]:
         payload: list[Any] | dict[str, Any]
-        if isinstance(params, dict):
-            payload = params
-        else:
-            payload = list(params)
+        payload = params if isinstance(params, dict) else list(params)
         return await self._client.execute(self._pool, self._token, query, payload, correlation_id)
 
     async def _execute_many(
-        self,
-        query: str,
-        params: Iterable[Sequence[Any] | dict[str, Any]],
-        correlation_id: str | None = None,
+        self, query: str, params: Iterable[Sequence[Any] | dict[str, Any]], correlation_id: str | None = None
     ) -> dict[str, Any]:
         payload: list[list[Any] | dict[str, Any]] = []
         for param_set in params:
@@ -268,10 +257,7 @@ class AsyncBrokerTransaction:
         return self
 
     async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
         if exc_type is None:
             await self._connection._client.commit(self._connection._pool, self._connection._token)
@@ -301,11 +287,11 @@ class AsyncBrokerPool:
 
 
 __all__ = (
-    "BrokerDriverConfig",
-    "SyncBrokerCursor",
-    "SyncBrokerConnection",
-    "SyncBrokerPool",
-    "AsyncBrokerCursor",
     "AsyncBrokerConnection",
+    "AsyncBrokerCursor",
     "AsyncBrokerPool",
+    "BrokerDriverConfig",
+    "SyncBrokerConnection",
+    "SyncBrokerCursor",
+    "SyncBrokerPool",
 )

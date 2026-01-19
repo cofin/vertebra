@@ -5,7 +5,7 @@ import os
 import shutil
 from pathlib import Path
 
-from vertebra.supervisor import build_broker_command, build_bun_command, run_supervisor
+from vertebra.supervisor import build_broker_command, run_supervisor
 
 BANNER = r"""
    __      __          __          __
@@ -27,6 +27,12 @@ def main(argv: list[str] | None = None) -> int:
     serve_parser.add_argument("--config", dest="config_path")
     serve_parser.add_argument("--log-level", default="info")
     serve_parser.add_argument("--broker-config", dest="broker_config_path")
+    serve_parser.add_argument(
+        "--drain-timeout", type=int, default=5000, help="Drain timeout in milliseconds (default: 5000)"
+    )
+    serve_parser.add_argument(
+        "--shutdown-timeout", type=int, default=30000, help="Shutdown timeout in milliseconds (default: 30000)"
+    )
 
     args = parser.parse_args(argv)
     if args.command == "serve":
@@ -38,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
             config_path=args.config_path,
             log_level=args.log_level,
             broker_config_path=args.broker_config_path,
+            drain_timeout_ms=args.drain_timeout,
+            shutdown_timeout_ms=args.shutdown_timeout,
         )
     return 0
 
@@ -51,10 +59,13 @@ def serve(
     config_path: str | None,
     log_level: str,
     broker_config_path: str | None,
+    drain_timeout_ms: int = 5000,
+    shutdown_timeout_ms: int = 30000,
 ) -> int:
     bun = shutil.which("bun")
     if not bun:
-        raise SystemExit("bun binary not found; install Bun or add it to PATH")
+        msg = "bun binary not found; install Bun or add it to PATH"
+        raise SystemExit(msg)
 
     env = os.environ.copy()
     env["VERTEBRA_PYTHON_APP"] = app
@@ -69,15 +80,19 @@ def serve(
 
     engine = find_engine()
     engine_path = Path(engine)
-    if engine_path.name == "vertebra-engine":
-        bun_cmd = [str(engine_path)]
-    else:
-        bun_cmd = [bun, engine]
+    bun_cmd = [str(engine_path)] if engine_path.name == "vertebra-engine" else [bun, engine]
 
     broker_cmd = build_broker_command(broker_config)
 
     print_banner(host=host, port=port, workers=workers, log_level=log_level)
-    return run_supervisor(bun_cmd=bun_cmd, broker_cmd=broker_cmd, broker_config=broker_config, env=env)
+    return run_supervisor(
+        bun_cmd=bun_cmd,
+        broker_cmd=broker_cmd,
+        broker_config=broker_config,
+        env=env,
+        drain_timeout_ms=drain_timeout_ms,
+        shutdown_timeout_ms=shutdown_timeout_ms,
+    )
 
 
 def find_engine() -> str:
@@ -90,7 +105,8 @@ def find_engine() -> str:
         entry = repo_root / "src" / "ts" / "src" / "server" / "serve.ts"
         if entry.exists():
             return str(entry)
-    raise SystemExit("Unable to locate vertebra engine; expected bundled binary or source entrypoint")
+    msg = "Unable to locate vertebra engine; expected bundled binary or source entrypoint"
+    raise SystemExit(msg)
 
 
 def find_repo_root(start: Path) -> Path | None:
@@ -101,9 +117,7 @@ def find_repo_root(start: Path) -> Path | None:
 
 
 def print_banner(*, host: str, port: int, workers: int, log_level: str) -> None:
-    print(BANNER)
-    print(f"Vertebra v0.1.0  |  http://{host}:{port}")
-    print(f"Workers: {workers}  |  Log: {log_level}")
+    pass
 
 
 if __name__ == "__main__":

@@ -38,6 +38,7 @@ import {
 } from "../drivers/filesystem";
 import { ShmRegion, ShmRing } from "./shm";
 import { FairScheduler, type SchedulerStats } from "./scheduler";
+import { BasePoolAdapter, type PoolAdapter, type PoolStats } from "./base-pool";
 
 type BrokerPoolConfig = {
   name: string;
@@ -73,34 +74,6 @@ type ClientState = {
   weight: number;
 };
 
-type PoolStats = {
-  name: string;
-  min_size: number;
-  max_size: number;
-  total: number;
-  idle: number;
-  in_use: number;
-  waiters: number;
-  acquires_total: number;
-  releases_total: number;
-  errors_total: number;
-};
-
-interface PoolAdapter {
-  name: string;
-  maxSize(): number;
-  inUse(): number;
-  acquire(): Promise<string>;
-  release(token: string): Promise<void>;
-  execute(token: string, sql: string, params: unknown[]): Promise<Record<string, unknown>>;
-  executeMany(token: string, sql: string, params: unknown[][]): Promise<Record<string, unknown>>;
-  command(token: string, command: string, args: unknown[]): Promise<unknown>;
-  begin(token: string): Promise<void>;
-  commit(token: string): Promise<void>;
-  rollback(token: string): Promise<void>;
-  stats(): PoolStats;
-}
-
 type BrokerRequest = {
   id: number;
   kind: string;
@@ -116,31 +89,29 @@ type PoolState = {
   scheduler: FairScheduler<BrokerRequest>;
 };
 
-class SqlPool implements PoolAdapter {
+class SqlPool extends BasePoolAdapter {
   name: string;
   private sql: SQL;
   private adapter: "postgres" | "mysql";
-  private maxSizeValue: number;
   private reserved = new Map<string, Bun.ReservedSQL>();
   private connected = false;
-  private acquires = 0;
-  private releases = 0;
-  private errors = 0;
 
-  constructor(name: string, adapter: "postgres" | "mysql", url: string, max: number, options?: Bun.SQL.Options) {
+  constructor(
+    name: string,
+    adapter: "postgres" | "mysql",
+    url: string,
+    max: number,
+    options?: Bun.SQL.Options,
+  ) {
+    super(max);
     this.name = name;
     this.adapter = adapter;
-    this.maxSizeValue = max;
     this.sql = new SQL({
       ...(options ?? {}),
       url,
       adapter,
       max,
     });
-  }
-
-  maxSize(): number {
-    return this.maxSizeValue;
   }
 
   inUse(): number {
@@ -156,10 +127,10 @@ class SqlPool implements PoolAdapter {
       const reserved = await this.sql.reserve();
       const token = crypto.randomUUID();
       this.reserved.set(token, reserved);
-      this.acquires += 1;
+      this.recordAcquire();
       return token;
     } catch (error) {
-      this.errors += 1;
+      this.recordError();
       throw error;
     }
   }
@@ -169,7 +140,7 @@ class SqlPool implements PoolAdapter {
     if (reserved) {
       reserved.release();
       this.reserved.delete(token);
-      this.releases += 1;
+      this.recordRelease();
     }
   }
 
@@ -182,12 +153,16 @@ class SqlPool implements PoolAdapter {
       const result = await reserved.unsafe(sql, params);
       return normalizeSqlResult(result);
     } catch (error) {
-      this.errors += 1;
+      this.recordError();
       throw error;
     }
   }
 
-  async executeMany(token: string, sql: string, params: unknown[][]): Promise<Record<string, unknown>> {
+  async executeMany(
+    token: string,
+    sql: string,
+    params: unknown[][],
+  ): Promise<Record<string, unknown>> {
     let totalRows = 0;
     let columns: string[] = [];
     for (const paramSet of params) {
@@ -213,38 +188,19 @@ class SqlPool implements PoolAdapter {
   async rollback(token: string): Promise<void> {
     await this.execute(token, "ROLLBACK", []);
   }
-
-  stats(): PoolStats {
-    return {
-      name: this.name,
-      min_size: 0,
-      max_size: this.maxSizeValue,
-      total: this.reserved.size,
-      idle: 0,
-      in_use: this.reserved.size,
-      waiters: 0,
-      acquires_total: this.acquires,
-      releases_total: this.releases,
-      errors_total: this.errors,
-    };
-  }
 }
 
-class SqlitePool implements PoolAdapter {
+class SqlitePool extends BasePoolAdapter {
   name: string;
   private connections = new Map<string, Database>();
-  private acquires = 0;
-  private releases = 0;
-  private errors = 0;
-  private maxSizeValue: number;
 
-  constructor(name: string, private path: string, maxSize: number) {
+  constructor(
+    name: string,
+    private path: string,
+    maxSize: number,
+  ) {
+    super(maxSize);
     this.name = name;
-    this.maxSizeValue = maxSize;
-  }
-
-  maxSize(): number {
-    return this.maxSizeValue;
   }
 
   inUse(): number {
@@ -256,10 +212,10 @@ class SqlitePool implements PoolAdapter {
       const token = crypto.randomUUID();
       const db = new Database(this.path);
       this.connections.set(token, db);
-      this.acquires += 1;
+      this.recordAcquire();
       return token;
     } catch (error) {
-      this.errors += 1;
+      this.recordError();
       throw error;
     }
   }
@@ -269,7 +225,7 @@ class SqlitePool implements PoolAdapter {
     if (db) {
       db.close();
       this.connections.delete(token);
-      this.releases += 1;
+      this.recordRelease();
     }
   }
 
@@ -285,12 +241,16 @@ class SqlitePool implements PoolAdapter {
       const values = rows.map((row) => columns.map((col) => row[col]));
       return { columns, rows: values, rowcount: values.length };
     } catch (error) {
-      this.errors += 1;
+      this.recordError();
       throw error;
     }
   }
 
-  async executeMany(token: string, sql: string, params: unknown[][]): Promise<Record<string, unknown>> {
+  async executeMany(
+    token: string,
+    sql: string,
+    params: unknown[][],
+  ): Promise<Record<string, unknown>> {
     let totalRows = 0;
     for (const paramSet of params) {
       const result = await this.execute(token, sql, paramSet);
@@ -314,49 +274,35 @@ class SqlitePool implements PoolAdapter {
   async rollback(token: string): Promise<void> {
     await this.execute(token, "ROLLBACK", []);
   }
-
-  stats(): PoolStats {
-    return {
-      name: this.name,
-      min_size: 0,
-      max_size: this.maxSizeValue,
-      total: this.connections.size,
-      idle: 0,
-      in_use: this.connections.size,
-      waiters: 0,
-      acquires_total: this.acquires,
-      releases_total: this.releases,
-      errors_total: this.errors,
-    };
-  }
 }
 
-class RedisPool implements PoolAdapter {
+class RedisPool extends BasePoolAdapter {
   name: string;
   private client: RedisClient | null = null;
   private token: string | null = null;
-  private maxSizeValue: number;
   private inUseCount = 0;
-  private acquires = 0;
-  private releases = 0;
-  private errors = 0;
 
-  constructor(name: string, private url: string, maxSize: number, private options?: Bun.RedisOptions) {
+  constructor(
+    name: string,
+    private url: string,
+    maxSize: number,
+    private options?: Bun.RedisOptions,
+  ) {
+    super(maxSize);
     this.name = name;
-    this.maxSizeValue = maxSize;
-  }
-
-  maxSize(): number {
-    return this.maxSizeValue;
   }
 
   inUse(): number {
     return this.inUseCount;
   }
 
+  protected totalCount(): number {
+    return this.client ? 1 : 0;
+  }
+
   async acquire(): Promise<string> {
     try {
-      if (this.inUseCount >= this.maxSizeValue) {
+      if (this.inUseCount >= this._maxSize) {
         throw new Error("Redis pool is at capacity");
       }
       if (!this.client) {
@@ -365,17 +311,17 @@ class RedisPool implements PoolAdapter {
         this.token = crypto.randomUUID();
       }
       this.inUseCount += 1;
-      this.acquires += 1;
+      this.recordAcquire();
       return this.token ?? "redis";
     } catch (error) {
-      this.errors += 1;
+      this.recordError();
       throw error;
     }
   }
 
   async release(_token: string): Promise<void> {
     this.inUseCount = Math.max(0, this.inUseCount - 1);
-    this.releases += 1;
+    this.recordRelease();
     return;
   }
 
@@ -384,7 +330,11 @@ class RedisPool implements PoolAdapter {
     return { columns: [], rows: [], rowcount: 0, result };
   }
 
-  async executeMany(token: string, sql: string, params: unknown[][]): Promise<Record<string, unknown>> {
+  async executeMany(
+    token: string,
+    sql: string,
+    params: unknown[][],
+  ): Promise<Record<string, unknown>> {
     let last: unknown = null;
     for (const paramSet of params) {
       last = await this.command(token, sql, paramSet.map(String));
@@ -397,9 +347,12 @@ class RedisPool implements PoolAdapter {
       if (!this.client) {
         throw new Error("Redis client not connected");
       }
-      return await this.client.send(command, args.map((value) => String(value)));
+      return await this.client.send(
+        command,
+        args.map((value) => String(value)),
+      );
     } catch (error) {
-      this.errors += 1;
+      this.recordError();
       throw error;
     }
   }
@@ -415,33 +368,14 @@ class RedisPool implements PoolAdapter {
   async rollback(_token: string): Promise<void> {
     return;
   }
-
-  stats(): PoolStats {
-    return {
-      name: this.name,
-      min_size: 0,
-      max_size: this.maxSizeValue,
-      total: this.client ? 1 : 0,
-      idle: 0,
-      in_use: this.inUseCount,
-      waiters: 0,
-      acquires_total: this.acquires,
-      releases_total: this.releases,
-      errors_total: this.errors,
-    };
-  }
 }
 
-class StoragePool implements PoolAdapter {
+class StoragePool extends BasePoolAdapter {
   name: string;
   private backend: StorageBackend;
   private bucket?: string;
   private options?: Record<string, unknown>;
-  private maxSizeValue: number;
   private tokens = new Set<string>();
-  private acquires = 0;
-  private releases = 0;
-  private errors = 0;
 
   constructor(
     name: string,
@@ -450,15 +384,11 @@ class StoragePool implements PoolAdapter {
     bucket?: string,
     options?: Record<string, unknown>,
   ) {
+    super(maxSize);
     this.name = name;
     this.backend = backend;
-    this.maxSizeValue = maxSize;
     this.bucket = bucket;
     this.options = options;
-  }
-
-  maxSize(): number {
-    return this.maxSizeValue;
   }
 
   inUse(): number {
@@ -466,27 +396,35 @@ class StoragePool implements PoolAdapter {
   }
 
   async acquire(): Promise<string> {
-    if (this.tokens.size >= this.maxSizeValue) {
-      this.errors += 1;
+    if (this.tokens.size >= this._maxSize) {
+      this.recordError();
       throw new Error("Storage pool is at capacity");
     }
     const token = crypto.randomUUID();
     this.tokens.add(token);
-    this.acquires += 1;
+    this.recordAcquire();
     return token;
   }
 
   async release(token: string): Promise<void> {
     if (this.tokens.delete(token)) {
-      this.releases += 1;
+      this.recordRelease();
     }
   }
 
-  async execute(_token: string, _sql: string, _params: unknown[]): Promise<Record<string, unknown>> {
+  async execute(
+    _token: string,
+    _sql: string,
+    _params: unknown[],
+  ): Promise<Record<string, unknown>> {
     throw new Error("Storage pools do not support execute()");
   }
 
-  async executeMany(_token: string, _sql: string, _params: unknown[][]): Promise<Record<string, unknown>> {
+  async executeMany(
+    _token: string,
+    _sql: string,
+    _params: unknown[][],
+  ): Promise<Record<string, unknown>> {
     throw new Error("Storage pools do not support execute_many()");
   }
 
@@ -496,7 +434,10 @@ class StoragePool implements PoolAdapter {
     if (backend !== this.backend) {
       throw new Error(`Storage backend mismatch: ${backend} != ${this.backend}`);
     }
-    const options = { ...(this.options ?? {}), ...(params.options ?? {}) } as Record<string, unknown>;
+    const options = { ...(this.options ?? {}), ...(params.options ?? {}) } as Record<
+      string,
+      unknown
+    >;
     const bucket = params.bucket ?? this.bucket ?? "";
     const key = params.key ?? "";
     const path = params.path ?? "";
@@ -525,10 +466,24 @@ class StoragePool implements PoolAdapter {
             return { bytes };
           }
           if (backend === "s3") {
-            const bytes = await handleS3Write(bucket, key, params.data, options, params.contentType, params.metadata);
+            const bytes = await handleS3Write(
+              bucket,
+              key,
+              params.data,
+              options,
+              params.contentType,
+              params.metadata,
+            );
             return { bytes };
           }
-          const bytes = await handleGcsWrite(bucket, key, params.data, options, params.contentType, params.metadata);
+          const bytes = await handleGcsWrite(
+            bucket,
+            key,
+            params.data,
+            options,
+            params.contentType,
+            params.metadata,
+          );
           return { bytes };
         }
         case "write_file": {
@@ -663,7 +618,7 @@ class StoragePool implements PoolAdapter {
           throw new Error(`Unknown storage command: ${command}`);
       }
     } catch (error) {
-      this.errors += 1;
+      this.recordError();
       throw error;
     }
   }
@@ -679,42 +634,19 @@ class StoragePool implements PoolAdapter {
   async rollback(_token: string): Promise<void> {
     return;
   }
-
-  stats(): PoolStats {
-    return {
-      name: this.name,
-      min_size: 0,
-      max_size: this.maxSizeValue,
-      total: this.tokens.size,
-      idle: 0,
-      in_use: this.tokens.size,
-      waiters: 0,
-      acquires_total: this.acquires,
-      releases_total: this.releases,
-      errors_total: this.errors,
-    };
-  }
 }
 
-class ExternalProviderPool implements PoolAdapter {
+class ExternalProviderPool extends BasePoolAdapter {
   name: string;
   private request: ShmRing;
   private response: ShmRing;
-  private maxSizeValue: number;
   private inUseCount = 0;
-  private acquires = 0;
-  private releases = 0;
-  private errors = 0;
 
   constructor(name: string, reqRing: ShmRing, respRing: ShmRing, maxSize: number) {
+    super(maxSize);
     this.name = name;
     this.request = reqRing;
     this.response = respRing;
-    this.maxSizeValue = maxSize;
-  }
-
-  maxSize(): number {
-    return this.maxSizeValue;
   }
 
   inUse(): number {
@@ -724,22 +656,35 @@ class ExternalProviderPool implements PoolAdapter {
   async acquire(): Promise<string> {
     const response = await this.call({ kind: "acquire", pool: this.name });
     this.inUseCount += 1;
-    this.acquires += 1;
+    this.recordAcquire();
     return String(response.token);
   }
 
   async release(token: string): Promise<void> {
     await this.call({ kind: "release", pool: this.name, token });
     this.inUseCount = Math.max(0, this.inUseCount - 1);
-    this.releases += 1;
+    this.recordRelease();
   }
 
   async execute(token: string, sql: string, params: unknown[]): Promise<Record<string, unknown>> {
-    return await this.call({ kind: "execute", pool: this.name, token, sql, params }) as Record<string, unknown>;
+    return (await this.call({ kind: "execute", pool: this.name, token, sql, params })) as Record<
+      string,
+      unknown
+    >;
   }
 
-  async executeMany(token: string, sql: string, params: unknown[][]): Promise<Record<string, unknown>> {
-    return await this.call({ kind: "execute_many", pool: this.name, token, sql, params }) as Record<string, unknown>;
+  async executeMany(
+    token: string,
+    sql: string,
+    params: unknown[][],
+  ): Promise<Record<string, unknown>> {
+    return (await this.call({
+      kind: "execute_many",
+      pool: this.name,
+      token,
+      sql,
+      params,
+    })) as Record<string, unknown>;
   }
 
   async command(token: string, command: string, args: unknown[]): Promise<unknown> {
@@ -762,21 +707,6 @@ class ExternalProviderPool implements PoolAdapter {
     await this.call({ kind: "rollback", pool: this.name, token });
   }
 
-  stats(): PoolStats {
-    return {
-      name: this.name,
-      min_size: 0,
-      max_size: this.maxSizeValue,
-      total: this.inUseCount,
-      idle: 0,
-      in_use: this.inUseCount,
-      waiters: 0,
-      acquires_total: this.acquires,
-      releases_total: this.releases,
-      errors_total: this.errors,
-    };
-  }
-
   private async call(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     try {
       const encoded = encode(payload);
@@ -792,7 +722,7 @@ class ExternalProviderPool implements PoolAdapter {
       }
       return decoded;
     } catch (error) {
-      this.errors += 1;
+      this.recordError();
       throw error;
     }
   }
@@ -821,7 +751,11 @@ class Broker {
       scheduler_quantum: brokerConfig.scheduler_quantum ?? 1,
       scheduler_starvation_ms: brokerConfig.scheduler_starvation_ms ?? 2_000,
     };
-    this.control = ShmRing.create(this.config.control_name, this.config.slot_size, this.config.slots);
+    this.control = ShmRing.create(
+      this.config.control_name,
+      this.config.slot_size,
+      this.config.slots,
+    );
     for (const pool of config.pools ?? []) {
       this.registerPool(pool);
     }
@@ -854,12 +788,18 @@ class Broker {
     const scheduler = this.createScheduler();
     if (pool.driver === "bun-postgres") {
       const url = pool.connection_string ?? pool.url ?? "postgres://localhost/postgres";
-      this.pools.set(name, { adapter: new SqlPool(name, "postgres", url, max, pool.options as Bun.SQL.Options), scheduler });
+      this.pools.set(name, {
+        adapter: new SqlPool(name, "postgres", url, max, pool.options as Bun.SQL.Options),
+        scheduler,
+      });
       return;
     }
     if (pool.driver === "bun-mysql") {
       const url = pool.connection_string ?? pool.url ?? "mysql://localhost/mysql";
-      this.pools.set(name, { adapter: new SqlPool(name, "mysql", url, max, pool.options as Bun.SQL.Options), scheduler });
+      this.pools.set(name, {
+        adapter: new SqlPool(name, "mysql", url, max, pool.options as Bun.SQL.Options),
+        scheduler,
+      });
       return;
     }
     if (pool.driver === "bun-sqlite") {
@@ -869,7 +809,10 @@ class Broker {
     }
     if (pool.driver === "bun-redis") {
       const url = pool.url ?? "redis://localhost:6379";
-      this.pools.set(name, { adapter: new RedisPool(name, url, max, pool.options as Bun.RedisOptions), scheduler });
+      this.pools.set(name, {
+        adapter: new RedisPool(name, url, max, pool.options as Bun.RedisOptions),
+        scheduler,
+      });
       return;
     }
     if (pool.driver === "storage-local") {
@@ -939,7 +882,10 @@ class Broker {
           error: { message: "Acquire request timed out" },
         });
       }
-      while (poolState.adapter.maxSize() <= 0 || poolState.adapter.inUse() < poolState.adapter.maxSize()) {
+      while (
+        poolState.adapter.maxSize() <= 0 ||
+        poolState.adapter.inUse() < poolState.adapter.maxSize()
+      ) {
         const entry = poolState.scheduler.next(now);
         if (!entry) {
           break;
@@ -964,7 +910,12 @@ class Broker {
       const weight = Number(message.weight ?? 1);
       const request = ShmRing.open(reqRing, this.config.slot_size, this.config.slots);
       const response = ShmRing.open(respRing, this.config.slot_size, this.config.slots);
-      this.clients.set(clientId, { id: clientId, request, response, weight: Number.isFinite(weight) ? weight : 1 });
+      this.clients.set(clientId, {
+        id: clientId,
+        request,
+        response,
+        weight: Number.isFinite(weight) ? weight : 1,
+      });
       const payload = encode({ ok: true, id: message.id });
       response.send(payload, 0, this.config.timeout_ms);
       return;
@@ -988,7 +939,10 @@ class Broker {
           poolStats.push(stats);
           schedulerPools.push({ name, ...schedulerStats });
         }
-        this.reply(client, message.id, { ok: true, stats: { pools: poolStats, scheduler: { pools: schedulerPools } } });
+        this.reply(client, message.id, {
+          ok: true,
+          stats: { pools: poolStats, scheduler: { pools: schedulerPools } },
+        });
         return;
       }
       if (kind === "arrow_release") {
@@ -1014,13 +968,21 @@ class Broker {
         const respRing = String(message.resp_ring || "");
         const maxSize = Number(message.max_size ?? 1);
         if (!name || !reqRing || !respRing) {
-          this.reply(client, message.id, { ok: false, error: { message: "Invalid provider registration" } });
+          this.reply(client, message.id, {
+            ok: false,
+            error: { message: "Invalid provider registration" },
+          });
           return;
         }
         const request = ShmRing.open(reqRing, this.config.slot_size, this.config.slots);
         const response = ShmRing.open(respRing, this.config.slot_size, this.config.slots);
         this.pools.set(name, {
-          adapter: new ExternalProviderPool(name, request, response, Number.isFinite(maxSize) ? maxSize : 1),
+          adapter: new ExternalProviderPool(
+            name,
+            request,
+            response,
+            Number.isFinite(maxSize) ? maxSize : 1,
+          ),
           scheduler: this.createScheduler(),
         });
         this.reply(client, message.id, { ok: true });
@@ -1052,17 +1014,29 @@ class Broker {
         return;
       }
       if (kind === "execute") {
-        const result = await poolState.adapter.execute(String(message.token), String(message.sql), message.params ?? []);
+        const result = await poolState.adapter.execute(
+          String(message.token),
+          String(message.sql),
+          message.params ?? [],
+        );
         this.reply(client, message.id, this.wrapResult(result, poolName));
         return;
       }
       if (kind === "execute_many") {
-        const result = await poolState.adapter.executeMany(String(message.token), String(message.sql), message.params ?? []);
+        const result = await poolState.adapter.executeMany(
+          String(message.token),
+          String(message.sql),
+          message.params ?? [],
+        );
         this.reply(client, message.id, this.wrapResult(result, poolName));
         return;
       }
       if (kind === "command") {
-        const result = await poolState.adapter.command(String(message.token), String(message.command), message.args ?? []);
+        const result = await poolState.adapter.command(
+          String(message.token),
+          String(message.command),
+          message.args ?? [],
+        );
         this.reply(client, message.id, { ok: true, result });
         return;
       }
@@ -1110,7 +1084,10 @@ class Broker {
     const columns = (result.columns as string[]) ?? [];
     const rowcount = (result.rowcount as number) ?? rows.length;
     const estimatedBytes = rows.length * columns.length * 8;
-    if (rows.length >= this.config.arrow_threshold_rows || estimatedBytes >= this.config.arrow_threshold_bytes) {
+    if (
+      rows.length >= this.config.arrow_threshold_rows ||
+      estimatedBytes >= this.config.arrow_threshold_bytes
+    ) {
       const records = rows.map((row) => {
         const obj: Record<string, unknown> = {};
         columns.forEach((col, idx) => {
@@ -1123,7 +1100,10 @@ class Broker {
       const name = `/${this.config.name}.arrow.${crypto.randomUUID()}`;
       const region = ShmRegion.create(name, ipc.byteLength);
       region.write(ipc);
-      this.arrowRegions.set(name, { region, expiresAt: Date.now() + this.config.arrow_region_ttl_ms });
+      this.arrowRegions.set(name, {
+        region,
+        expiresAt: Date.now() + this.config.arrow_region_ttl_ms,
+      });
       return { ok: true, arrow: { name, size: ipc.byteLength }, rowcount };
     }
     return { ok: true, result: { columns, rows, rowcount } };

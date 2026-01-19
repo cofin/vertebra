@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import io
-from typing import Any
+from typing import Any, cast
 
 from vertebra._internal.dependencies import FSSPEC_INSTALLED
 from vertebra._internal.errors import MissingDependencyError
-from vertebra.filesystem.client import FileSystemError
+from vertebra.storage.client import FileSystemError
 from vertebra.storage.store import (
     AsyncGCSStore,
     AsyncLocalStore,
@@ -33,7 +33,7 @@ if _FSSPEC_AVAILABLE:
         _FSSPEC_IMPORT_ERROR = exc
 
 if not _FSSPEC_AVAILABLE:
-    AbstractFileSystem = object  # type: ignore[misc,assignment]
+    AbstractFileSystem = object
 
 
 class _BufferedFile(io.BytesIO):
@@ -54,7 +54,7 @@ class _BufferedFile(io.BytesIO):
         super().close()
 
 
-class VertebraFileSystem(AbstractFileSystem):  # type: ignore[misc]
+class SyncVertebraFileSystem(AbstractFileSystem):  # type: ignore[misc]
     protocol = "vertebra"
 
     def __init__(
@@ -88,35 +88,35 @@ class VertebraFileSystem(AbstractFileSystem):  # type: ignore[misc]
         else:
             self._store = LocalStore()
 
-    def ls(self, path: str, **kwargs: Any) -> list[dict[str, Any]]:  # type: ignore[override]
+    def ls(self, path: str, **kwargs: Any) -> list[dict[str, Any]]:
         entries = list(self._store.list(path))
         return [entry.__dict__ for entry in entries]
 
-    def info(self, path: str, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
+    def info(self, path: str, **kwargs: Any) -> dict[str, Any]:
         entry = self._store.head(path)
         return entry.__dict__
 
-    def exists(self, path: str, **kwargs: Any) -> bool:  # type: ignore[override]
+    def exists(self, path: str, **kwargs: Any) -> bool:
         return self._store.exists(path)
 
-    def rm(self, path: str, recursive: bool = False, **kwargs: Any) -> None:  # type: ignore[override]
+    def rm(self, path: str, recursive: bool = False, **kwargs: Any) -> None:
         self._store.delete(path)
 
-    def mkdir(self, path: str, create_parents: bool = True, **kwargs: Any) -> None:  # type: ignore[override]
+    def mkdir(self, path: str, create_parents: bool = True, **kwargs: Any) -> None:
         if hasattr(self._store, "mkdir"):
             self._store.mkdir(path)
         else:
             msg = "mkdir is only supported for local stores"
             raise FileSystemError(msg)
 
-    def rmdir(self, path: str) -> None:  # type: ignore[override]
+    def rmdir(self, path: str) -> None:
         if hasattr(self._store, "rmdir"):
             self._store.rmdir(path, recursive=True)
         else:
             msg = "rmdir is only supported for local stores"
             raise FileSystemError(msg)
 
-    def open(self, path: str, mode: str = "rb", **kwargs: Any) -> io.BytesIO:  # type: ignore[override]
+    def open(self, path: str, mode: str = "rb", **kwargs: Any) -> io.BytesIO:
         if "b" not in mode:
             mode = f"{mode}b"
         return _BufferedFile(self._store, path, mode)
@@ -140,14 +140,14 @@ class AsyncVertebraFileSystem:
             if not bucket:
                 msg = "bucket is required for s3 filesystem"
                 raise FileSystemError(msg)
-            self._store = AsyncS3Store(bucket=bucket, options=options)
+            self._store = cast("AsyncObjectStore", AsyncS3Store(bucket=bucket, options=options))
         elif backend == "gcs":
             if not bucket:
                 msg = "bucket is required for gcs filesystem"
                 raise FileSystemError(msg)
-            self._store = AsyncGCSStore(bucket=bucket, options=options)
+            self._store = cast("AsyncObjectStore", AsyncGCSStore(bucket=bucket, options=options))
         else:
-            self._store = AsyncLocalStore()
+            self._store = cast("AsyncObjectStore", AsyncLocalStore())
 
     async def ls(self, path: str) -> list[ObjectMeta]:
         return [entry async for entry in self._store.list(path)]

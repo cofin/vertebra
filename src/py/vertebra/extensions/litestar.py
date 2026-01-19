@@ -60,14 +60,7 @@ class VertebraPlugin(InitPluginProtocol, CLIPluginProtocol):
             from vertebra.cli import serve
 
             raise SystemExit(
-                serve(
-                    app=app,
-                    host=host,
-                    port=port,
-                    workers=workers,
-                    config_path=config_path,
-                    log_level=log_level,
-                )
+                serve(app=app, host=host, port=port, workers=workers, config_path=config_path, log_level=log_level)
             )
 
         return cli

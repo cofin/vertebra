@@ -5,8 +5,18 @@ import { join, resolve } from "node:path";
 export type ShmLibrary = {
   vtb_last_error_message: () => bigint;
   vtb_ring_capacity: (handle: bigint) => bigint;
-  vtb_ring_create: (name: string, slotSize: number, slots: number, outHandle: BigUint64Array) => number;
-  vtb_ring_open: (name: string, slotSize: number, slots: number, outHandle: BigUint64Array) => number;
+  vtb_ring_create: (
+    name: string,
+    slotSize: number,
+    slots: number,
+    outHandle: BigUint64Array,
+  ) => number;
+  vtb_ring_open: (
+    name: string,
+    slotSize: number,
+    slots: number,
+    outHandle: BigUint64Array,
+  ) => number;
   vtb_ring_send: (
     handle: bigint,
     data: Uint8Array,
@@ -189,7 +199,14 @@ export class ShmRing {
     const buffer = new Uint8Array(this.capacity);
     const outLen = new BigUint64Array(1);
     const outFlags = new Uint32Array(1);
-    const status = this.lib.vtb_ring_recv(this.handle, buffer, buffer.length, outLen, outFlags, timeoutMs);
+    const status = this.lib.vtb_ring_recv(
+      this.handle,
+      buffer,
+      buffer.length,
+      outLen,
+      outFlags,
+      timeoutMs,
+    );
     if (status === STATUS_TIMEOUT || status === STATUS_EMPTY) {
       return null;
     }

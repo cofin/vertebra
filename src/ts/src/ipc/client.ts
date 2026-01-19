@@ -14,7 +14,18 @@ export type IpcClientConfig = {
 };
 
 export type ResolvedIpcConfig = Required<
-  Pick<IpcClientConfig, "name" | "slotSize" | "slots" | "timeoutMs" | "retries" | "retryDelayMs" | "poolSize" | "poolMax" | "acquireTimeoutMs">
+  Pick<
+    IpcClientConfig,
+    | "name"
+    | "slotSize"
+    | "slots"
+    | "timeoutMs"
+    | "retries"
+    | "retryDelayMs"
+    | "poolSize"
+    | "poolMax"
+    | "acquireTimeoutMs"
+  >
 >;
 
 export interface IpcRequester {
@@ -135,7 +146,10 @@ class IpcConnection {
   private seq = 0;
   private clientId = crypto.randomUUID().replaceAll("-", "");
 
-  constructor(private config: ResolvedIpcConfig, private workerId: number) {}
+  constructor(
+    private config: ResolvedIpcConfig,
+    private workerId: number,
+  ) {}
 
   async request<T>(payload: unknown): Promise<T> {
     await this.ensureConnected();
@@ -423,7 +437,10 @@ export class IpcPool implements IpcRequester {
   private total = 0;
   private closed = false;
 
-  constructor(config: IpcClientConfig = {}, private workerId = 0) {
+  constructor(
+    config: IpcClientConfig = {},
+    private workerId = 0,
+  ) {
     this.config = resolveIpcConfig(config);
     const warm = Math.min(this.config.poolSize, this.config.poolMax);
     for (let i = 0; i < warm; i += 1) {
@@ -471,7 +488,12 @@ export class IpcPool implements IpcRequester {
           await sleep(this.config.retryDelayMs);
         }
       } finally {
-        if (!released && !this.closed && !connection.isClosed() && this.connections.has(connection)) {
+        if (
+          !released &&
+          !this.closed &&
+          !connection.isClosed() &&
+          this.connections.has(connection)
+        ) {
           this.release(connection);
         }
       }

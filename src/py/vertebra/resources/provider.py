@@ -1,13 +1,15 @@
 """Shared-memory provider host for external adapters."""
 
 import asyncio
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+import inspect
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 
+from vertebra._internal.serialization import MessagePackCodec
 from vertebra._internal.shm import ShmRing, ShmRingConfig
-from vertebra.resources.ipc import BrokerClient, BrokerClientConfig
+from vertebra.resources.broker import BrokerClient, BrokerClientConfig
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -15,8 +17,9 @@ if TYPE_CHECKING:
 ProviderHandler = Callable[[dict[str, Any]], "dict[str, Any] | Awaitable[dict[str, Any]]"]
 
 
-@dataclass(slots=True)
-class ProviderConfig:
+class ProviderConfig(msgspec.Struct, frozen=True):
+    """Configuration for a shared-memory provider host."""
+
     pool: str
     driver: str
     max_size: int = 10
@@ -31,10 +34,11 @@ class ProviderHost:
     def __init__(self, config: ProviderConfig, handler: ProviderHandler) -> None:
         self._config = config
         self._handler = handler
-        self._encoder = msgspec.msgpack.Encoder()
-        self._decoder = msgspec.msgpack.Decoder()
+        self._codec = MessagePackCodec()
         self._request = ShmRing.create(
-            ShmRingConfig(name=f"/{config.name}.provider.{config.pool}.req", slot_size=config.slot_size, slots=config.slots)
+            ShmRingConfig(
+                name=f"/{config.name}.provider.{config.pool}.req", slot_size=config.slot_size, slots=config.slots
+            )
         )
         self._response = ShmRing.create(
             ShmRingConfig(
@@ -55,14 +59,18 @@ class ProviderHost:
     async def serve(self) -> None:
         while True:
             data, _flags = await asyncio.to_thread(self._request.recv, 5_000)
-            request = self._decoder.decode(data)
-            response = self._handler(request)
-            if asyncio.iscoroutine(response):
-                response = await response
+            decoded = self._codec.decode(data)
+            request: dict[str, Any] = decoded if isinstance(decoded, dict) else {}
+            result = self._handler(request)
+            response: dict[str, Any]
+            if inspect.iscoroutine(result):
+                response = await result
+            else:
+                response = result  # type: ignore[assignment]
             if "id" not in response and "id" in request:
                 response["id"] = request["id"]
-            encoded = self._encoder.encode(response)
+            encoded = self._codec.encode(response)
             self._response.send(encoded, 0, 5_000)
 
 
-__all__ = ("ProviderConfig", "ProviderHost", "ProviderHandler")
+__all__ = ("ProviderConfig", "ProviderHandler", "ProviderHost")

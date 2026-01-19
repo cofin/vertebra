@@ -1,5 +1,14 @@
 import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from "prom-client";
 
+import {
+  BrokerClient,
+  type BrokerStats,
+  type PoolStats,
+  type SchedulerClientStats,
+  type SchedulerPoolStats,
+} from "../broker";
+import type { WorkerManager } from "./worker-manager";
+
 export type ServerMetrics = {
   registry: Registry;
   requestsTotal: Counter;
@@ -143,46 +152,15 @@ export async function renderMetrics(metrics: ServerMetrics): Promise<string> {
   return metrics.registry.metrics();
 }
 
-export function updateWorkerMetrics(metrics: ServerMetrics, active: number, restarts: number): void {
+export function updateWorkerMetrics(
+  metrics: ServerMetrics,
+  active: number,
+  restarts: number,
+): void {
   metrics.workerActive.set(active);
   metrics.workerRestartsTotal.reset();
   metrics.workerRestartsTotal.inc(restarts);
 }
-
-export type BrokerPoolStats = {
-  name: string;
-  min_size: number;
-  max_size: number;
-  total: number;
-  idle: number;
-  in_use: number;
-  waiters: number;
-  acquires_total: number;
-  releases_total: number;
-  errors_total: number;
-};
-
-export type BrokerSchedulerClientStats = {
-  id: string;
-  weight: number;
-  pending: number;
-  oldestMs: number | null;
-  lastServedMs: number | null;
-  requestsTotal: number;
-  waitTimeMsTotal: number;
-  starvationEvents: number;
-};
-
-export type BrokerSchedulerPoolStats = {
-  name: string;
-  pending: number;
-  clients: BrokerSchedulerClientStats[];
-};
-
-export type BrokerStats = {
-  pools: BrokerPoolStats[];
-  scheduler?: { pools: BrokerSchedulerPoolStats[] };
-};
 
 export function updateBrokerMetrics(metrics: ServerMetrics, stats: BrokerStats): void {
   metrics.brokerPoolConnections.reset();
@@ -197,14 +175,23 @@ export function updateBrokerMetrics(metrics: ServerMetrics, stats: BrokerStats):
     metrics.brokerPoolConnections.set({ pool: pool.name, state: "idle" }, pool.idle);
     metrics.brokerPoolConnections.set({ pool: pool.name, state: "in_use" }, pool.in_use);
     metrics.brokerPoolConnections.set({ pool: pool.name, state: "waiters" }, pool.waiters);
-    metrics.brokerPoolOperations.set({ pool: pool.name, operation: "acquire" }, pool.acquires_total);
-    metrics.brokerPoolOperations.set({ pool: pool.name, operation: "release" }, pool.releases_total);
+    metrics.brokerPoolOperations.set(
+      { pool: pool.name, operation: "acquire" },
+      pool.acquires_total,
+    );
+    metrics.brokerPoolOperations.set(
+      { pool: pool.name, operation: "release" },
+      pool.releases_total,
+    );
     metrics.brokerPoolErrors.set({ pool: pool.name }, pool.errors_total);
   }
   for (const pool of stats.scheduler?.pools ?? []) {
     metrics.brokerSchedulerQueueDepth.set({ pool: pool.name }, pool.pending);
     for (const client of pool.clients) {
-      metrics.brokerSchedulerWorkerRequests.set({ pool: pool.name, client: client.id }, client.requestsTotal);
+      metrics.brokerSchedulerWorkerRequests.set(
+        { pool: pool.name, client: client.id },
+        client.requestsTotal,
+      );
       metrics.brokerSchedulerWorkerWaitSeconds.set(
         { pool: pool.name, client: client.id },
         client.waitTimeMsTotal / 1000,
@@ -213,6 +200,43 @@ export function updateBrokerMetrics(metrics: ServerMetrics, stats: BrokerStats):
         { pool: pool.name, client: client.id },
         client.starvationEvents,
       );
+    }
+  }
+}
+
+/**
+ * Unified metrics registry that combines server metrics with broker and worker stats.
+ */
+export class MetricsRegistry {
+  constructor(
+    private metrics: ServerMetrics,
+    private brokerClient?: BrokerClient,
+    private workerManager?: WorkerManager | null,
+  ) {}
+
+  async render(): Promise<string> {
+    await this.refresh();
+    return renderMetrics(this.metrics);
+  }
+
+  async refresh(): Promise<void> {
+    if (this.workerManager) {
+      const stats = this.workerManager.getStats();
+      updateWorkerMetrics(this.metrics, stats.active, stats.restarts);
+    }
+    if (this.brokerClient) {
+      const stats = await this.safeBrokerStats();
+      if (stats) {
+        updateBrokerMetrics(this.metrics, stats);
+      }
+    }
+  }
+
+  private async safeBrokerStats(): Promise<BrokerStats | null> {
+    try {
+      return await this.brokerClient?.stats();
+    } catch {
+      return null;
     }
   }
 }

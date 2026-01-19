@@ -213,7 +213,8 @@ export class AsgiBridge {
             : {
                 id: state.id,
                 type: "websocket.receive",
-                bytes: message instanceof Uint8Array ? message : new Uint8Array(message as ArrayBuffer),
+                bytes:
+                  message instanceof Uint8Array ? message : new Uint8Array(message as ArrayBuffer),
               };
         state.queue.push(frame);
       },
@@ -233,7 +234,12 @@ export class AsgiBridge {
     try {
       const response = await this.requester.request<AsgiResponse>(payload);
       if (response.path) {
-        return await this.fileResponse(response.path, response.status ?? 200, response.headers ?? [], response);
+        return await this.fileResponse(
+          response.path,
+          response.status ?? 200,
+          response.headers ?? [],
+          response,
+        );
       }
       return new Response(response.body ?? new Uint8Array(), {
         status: response.status ?? 502,
@@ -247,7 +253,9 @@ export class AsgiBridge {
   private async handleStream(request: Request, meta: AsgiRequestStartFrame): Promise<Response> {
     const stream = this.createBackpressureStream();
     const responseInfo = this.createResponseInfoPromise();
-    const frames = this.requester.requestStream?.<AsgiIpcFrame>(this.streamRequestFrames(request, meta));
+    const frames = this.requester.requestStream?.<AsgiIpcFrame>(
+      this.streamRequestFrames(request, meta),
+    );
 
     if (!frames) {
       return new Response("Bad Gateway", { status: 502 });
@@ -296,15 +304,24 @@ export class AsgiBridge {
             break;
           }
           case "http.response.pathsend": {
-            responseInfo.resolveFile(frame.path ?? "", startInfo?.status ?? 200, startInfo?.headers ?? []);
+            responseInfo.resolveFile(
+              frame.path ?? "",
+              startInfo?.status ?? 200,
+              startInfo?.headers ?? [],
+            );
             stream.close();
             return;
           }
           case "http.response.zerocopysend": {
-            responseInfo.resolveFile(frame.path ?? "", startInfo?.status ?? 200, startInfo?.headers ?? [], {
-              offset: frame.offset,
-              count: frame.count,
-            });
+            responseInfo.resolveFile(
+              frame.path ?? "",
+              startInfo?.status ?? 200,
+              startInfo?.headers ?? [],
+              {
+                offset: frame.offset,
+                count: frame.count,
+              },
+            );
             stream.close();
             return;
           }
@@ -424,7 +441,8 @@ export class AsgiBridge {
     return {
       promise,
       resolveStream: (status, headers) => resolve({ type: "stream", status, headers }),
-      resolveFile: (path, status, headers, extras) => resolve({ type: "file", path, status, headers, ...extras }),
+      resolveFile: (path, status, headers, extras) =>
+        resolve({ type: "file", path, status, headers, ...extras }),
       reject: (error) => {
         if (resolved || !rejectFn) {
           return;
@@ -518,7 +536,10 @@ export class AsgiBridge {
   }
 
   private selectWebSocketHeaders(state: WebSocketState): HeadersInit | undefined {
-    if (state.connectFrame.type !== "websocket.connect" || !state.connectFrame.subprotocols?.length) {
+    if (
+      state.connectFrame.type !== "websocket.connect" ||
+      !state.connectFrame.subprotocols?.length
+    ) {
       return undefined;
     }
     return { "sec-websocket-protocol": state.connectFrame.subprotocols[0] };
@@ -575,7 +596,11 @@ export class AsgiBridge {
     }
   }
 
-  private async stopWebSocketBridge(ws: ServerWebSocket, _code: number, _reason: string): Promise<void> {
+  private async stopWebSocketBridge(
+    ws: ServerWebSocket,
+    _code: number,
+    _reason: string,
+  ): Promise<void> {
     if (!ws.data) {
       return;
     }
@@ -689,12 +714,24 @@ type BackpressureStream = {
 
 type ResponseInfo =
   | { type: "stream"; status: number; headers: [string, string][] }
-  | { type: "file"; path: string; status: number; headers: [string, string][]; offset?: number; count?: number };
+  | {
+      type: "file";
+      path: string;
+      status: number;
+      headers: [string, string][];
+      offset?: number;
+      count?: number;
+    };
 
 type ResponseInfoController = {
   promise: Promise<ResponseInfo>;
   resolveStream: (status: number, headers: [string, string][]) => void;
-  resolveFile: (path: string, status: number, headers: [string, string][], extras?: { offset?: number; count?: number }) => void;
+  resolveFile: (
+    path: string,
+    status: number,
+    headers: [string, string][],
+    extras?: { offset?: number; count?: number },
+  ) => void;
   reject: (error: unknown) => void;
   isResolved: () => boolean;
 };

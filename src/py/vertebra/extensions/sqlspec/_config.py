@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from sqlspec.config import AsyncDatabaseConfig, ExtensionConfigs, SyncDatabaseConfig
 
 from vertebra.resources import BrokerClientConfig
+
 from ._shared import (
     AsyncBrokerConnection,
     AsyncBrokerPool,
@@ -17,8 +18,6 @@ from ._shared import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from sqlspec.core import StatementConfig
     from sqlspec.observability import ObservabilityConfig
 

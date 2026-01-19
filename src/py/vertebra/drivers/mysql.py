@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import msgspec
 
 from vertebra.drivers.base import AsyncDriver, SyncDriver
 from vertebra.drivers.broker import (
@@ -16,16 +16,18 @@ from vertebra.drivers.broker import (
 from vertebra.resources import BrokerClient, BrokerClientConfig
 
 
-@dataclass(slots=True)
-class SyncMysqlDriverConfig(BrokerDriverConfig):
+class SyncMysqlDriverConfig(BrokerDriverConfig, frozen=True):
+    """Configuration for synchronous MySQL driver."""
+
     pool: str = "mysql"
-    client: BrokerClientConfig = BrokerClientConfig()  # noqa: RUF009
+    client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
-@dataclass(slots=True)
-class AsyncMysqlDriverConfig(BrokerDriverConfig):
+class AsyncMysqlDriverConfig(BrokerDriverConfig, frozen=True):
+    """Configuration for asynchronous MySQL driver."""
+
     pool: str = "mysql"
-    client: BrokerClientConfig = BrokerClientConfig()  # noqa: RUF009
+    client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
 class SyncMysqlDriver(SyncDriver):
@@ -54,9 +56,4 @@ class AsyncMysqlDriver(AsyncDriver):
         return AsyncBrokerPool(self._config.pool, self._config.client, max_clients=max_size)
 
 
-__all__ = (
-    "AsyncMysqlDriver",
-    "AsyncMysqlDriverConfig",
-    "SyncMysqlDriver",
-    "SyncMysqlDriverConfig",
-)
+__all__ = ("AsyncMysqlDriver", "AsyncMysqlDriverConfig", "SyncMysqlDriver", "SyncMysqlDriverConfig")

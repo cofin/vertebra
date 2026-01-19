@@ -11,10 +11,7 @@ from vertebra._internal.shm import ShmRegion, ShmRegionConfig
 from vertebra.resources.provider import ProviderConfig, ProviderHost
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
-
-    import pyarrow
-
+    import pyarrow as pa
     from sqlspec.config import AsyncDatabaseConfig, SyncDatabaseConfig
     from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 
@@ -156,7 +153,8 @@ class SqlSpecProvider:
     def _execute_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":
         state = self._sync_sessions.get(str(request.get("token") or ""))
         if state is None:
-            raise RuntimeError("Unknown provider session")
+            msg = "Unknown provider session"
+            raise RuntimeError(msg)
         sql = str(request.get("sql") or "")
         params = request.get("params")
         if params is None:
@@ -169,7 +167,8 @@ class SqlSpecProvider:
     def _execute_many_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":
         state = self._sync_sessions.get(str(request.get("token") or ""))
         if state is None:
-            raise RuntimeError("Unknown provider session")
+            msg = "Unknown provider session"
+            raise RuntimeError(msg)
         sql = str(request.get("sql") or "")
         params = request.get("params")
         if params is None:
@@ -182,7 +181,8 @@ class SqlSpecProvider:
     def _command_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":
         state = self._sync_sessions.get(str(request.get("token") or ""))
         if state is None:
-            raise RuntimeError("Unknown provider session")
+            msg = "Unknown provider session"
+            raise RuntimeError(msg)
         command = str(request.get("command") or "")
         args = request.get("args")
         if args is None:
@@ -195,28 +195,32 @@ class SqlSpecProvider:
     def _begin_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":
         state = self._sync_sessions.get(str(request.get("token") or ""))
         if state is None:
-            raise RuntimeError("Unknown provider session")
+            msg = "Unknown provider session"
+            raise RuntimeError(msg)
         state.driver.begin()
         return {"ok": True}
 
     def _commit_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":
         state = self._sync_sessions.get(str(request.get("token") or ""))
         if state is None:
-            raise RuntimeError("Unknown provider session")
+            msg = "Unknown provider session"
+            raise RuntimeError(msg)
         state.driver.commit()
         return {"ok": True}
 
     def _rollback_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":
         state = self._sync_sessions.get(str(request.get("token") or ""))
         if state is None:
-            raise RuntimeError("Unknown provider session")
+            msg = "Unknown provider session"
+            raise RuntimeError(msg)
         state.driver.rollback()
         return {"ok": True}
 
     async def _execute_async(self, request: "dict[str, Any]") -> "dict[str, Any]":
         state = self._async_sessions.get(str(request.get("token") or ""))
         if state is None:
-            raise RuntimeError("Unknown provider session")
+            msg = "Unknown provider session"
+            raise RuntimeError(msg)
         sql = str(request.get("sql") or "")
         params = request.get("params")
         if params is None:
@@ -229,7 +233,8 @@ class SqlSpecProvider:
     async def _execute_many_async(self, request: "dict[str, Any]") -> "dict[str, Any]":
         state = self._async_sessions.get(str(request.get("token") or ""))
         if state is None:
-            raise RuntimeError("Unknown provider session")
+            msg = "Unknown provider session"
+            raise RuntimeError(msg)
         sql = str(request.get("sql") or "")
         params = request.get("params")
         if params is None:
@@ -242,7 +247,8 @@ class SqlSpecProvider:
     async def _command_async(self, request: "dict[str, Any]") -> "dict[str, Any]":
         state = self._async_sessions.get(str(request.get("token") or ""))
         if state is None:
-            raise RuntimeError("Unknown provider session")
+            msg = "Unknown provider session"
+            raise RuntimeError(msg)
         command = str(request.get("command") or "")
         args = request.get("args")
         if args is None:
@@ -255,21 +261,24 @@ class SqlSpecProvider:
     async def _begin_async(self, request: "dict[str, Any]") -> "dict[str, Any]":
         state = self._async_sessions.get(str(request.get("token") or ""))
         if state is None:
-            raise RuntimeError("Unknown provider session")
+            msg = "Unknown provider session"
+            raise RuntimeError(msg)
         await state.driver.begin()
         return {"ok": True}
 
     async def _commit_async(self, request: "dict[str, Any]") -> "dict[str, Any]":
         state = self._async_sessions.get(str(request.get("token") or ""))
         if state is None:
-            raise RuntimeError("Unknown provider session")
+            msg = "Unknown provider session"
+            raise RuntimeError(msg)
         await state.driver.commit()
         return {"ok": True}
 
     async def _rollback_async(self, request: "dict[str, Any]") -> "dict[str, Any]":
         state = self._async_sessions.get(str(request.get("token") or ""))
         if state is None:
-            raise RuntimeError("Unknown provider session")
+            msg = "Unknown provider session"
+            raise RuntimeError(msg)
         await state.driver.rollback()
         return {"ok": True}
 
@@ -329,13 +338,13 @@ class SqlSpecProvider:
             import pyarrow as pa
         except Exception:
             return None
-        records = [dict(zip(columns, row)) for row in rows]
+        records = [dict(zip(columns, row, strict=False)) for row in rows]
         table = pa.Table.from_pylist(records)
         payload = self._write_arrow_region(table)
         payload["rowcount"] = rowcount
         return payload
 
-    def _write_arrow_region(self, table: "pyarrow.Table") -> "dict[str, Any]":
+    def _write_arrow_region(self, table: "pa.Table") -> "dict[str, Any]":
         import pyarrow as pa
 
         sink = pa.BufferOutputStream()

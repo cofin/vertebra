@@ -1,13 +1,12 @@
 """Filesystem IPC client helpers."""
 
 import asyncio
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from collections.abc import Awaitable, Coroutine
+from typing import Any, Literal, cast
 
-from vertebra.resources.ipc import BrokerClient, BrokerClientConfig, BrokerClientError
+import msgspec
 
-if TYPE_CHECKING:
-    from collections.abc import Awaitable
+from vertebra.resources.broker import BrokerClient, BrokerClientConfig, BrokerClientError
 
 Backend = Literal["local", "s3", "gcs"]
 
@@ -16,8 +15,9 @@ class FileSystemError(RuntimeError):
     """Raised for filesystem IPC errors."""
 
 
-@dataclass(slots=True)
-class FileEntry:
+class FileEntry(msgspec.Struct, frozen=True, gc=False):
+    """Filesystem entry metadata returned from IPC operations."""
+
     path: str
     is_dir: bool
     size: int | None = None
@@ -35,11 +35,11 @@ class FileEntry:
         )
 
 
-def _run_sync(coro: "Awaitable[Any]") -> Any:
+def _run_sync(coro: Awaitable[Any]) -> Any:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
+        return asyncio.run(cast("Coroutine[Any, Any, Any]", coro))
     msg = "Use AsyncFileSystemClient inside an event loop"
     raise RuntimeError(msg)
 
@@ -77,7 +77,7 @@ def _parse_cloud_path(path: str, default_bucket: str | None, scheme: str) -> "tu
     return default_bucket, path.lstrip("/")
 
 
-class FileSystemClient:
+class SyncFileSystemClient:
     def __init__(
         self,
         backend: Backend = "local",
@@ -200,8 +200,6 @@ class FileSystemClient:
         if acl:
             params["acl"] = acl
         response = self._request("signed_url", params)
-        if not isinstance(response, dict):
-            return None
         if not response.get("supported", False):
             return None
         url = response.get("url")
@@ -348,8 +346,6 @@ class AsyncFileSystemClient:
         if acl:
             params["acl"] = acl
         response = await self._request("signed_url", params)
-        if not isinstance(response, dict):
-            return None
         if not response.get("supported", False):
             return None
         url = response.get("url")
@@ -373,4 +369,4 @@ class AsyncFileSystemClient:
         await self._client.close()
 
 
-__all__ = ("AsyncFileSystemClient", "Backend", "FileEntry", "FileSystemClient", "FileSystemError")
+__all__ = ("AsyncFileSystemClient", "Backend", "FileEntry", "FileSystemError", "SyncFileSystemClient")

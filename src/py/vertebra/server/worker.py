@@ -9,17 +9,18 @@ import importlib
 import os
 import signal
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 import msgspec
 
+from vertebra._internal.serialization import MessagePackCodec
 from vertebra._internal.shm import ShmRing, ShmRingConfig
 
 
-@dataclass(frozen=True, slots=True)
-class WorkerConfig:
+class WorkerConfig(msgspec.Struct, frozen=True):
+    """Configuration for an ASGI worker process."""
+
     name: str = "vertebra-asgi"
     worker_id: str | None = None
     slot_size: int = 65536
@@ -56,8 +57,9 @@ class AsgiResponse(msgspec.Struct):
     count: int | None = None
 
 
-@dataclass(slots=True)
-class RequestMeta:
+class RequestMeta(msgspec.Struct, frozen=True):
+    """HTTP/WebSocket request metadata parsed from IPC messages."""
+
     scope_type: str
     id: str
     method: str
@@ -72,38 +74,41 @@ class RequestMeta:
     server: tuple[str, int | None] | None
     client: tuple[str, int | None] | None
     extensions: dict[str, dict[str, Any]]
-    subprotocols: list[str] = field(default_factory=list)
+    subprotocols: list[str] = msgspec.field(default_factory=list)
 
 
-@dataclass(slots=True)
-class RequestBodyState:
+class RequestBodyState(msgspec.Struct):
+    """Mutable state for tracking request body streaming."""
+
     queue: asyncio.Queue[dict[str, Any]]
     done: bool = False
     disconnected: bool = False
 
 
-@dataclass(slots=True)
-class RequestContext:
+class RequestContext(msgspec.Struct, frozen=True):
+    """Context for an in-flight request."""
+
     meta: RequestMeta
     body: RequestBodyState
     task: asyncio.Task[None]
 
 
-@dataclass(slots=True)
-class ClientState:
+class ClientState(msgspec.Struct, frozen=True):
+    """State for a connected IPC client."""
+
     id: str
     request: ShmRing
     response: ShmRing
 
 
 class ResponseWriter:
-    def __init__(self, ring: ShmRing, encoder: msgspec.msgpack.Encoder, timeout_ms: int) -> None:
+    def __init__(self, ring: ShmRing, codec: MessagePackCodec, timeout_ms: int) -> None:
         self._ring = ring
-        self._encoder = encoder
+        self._codec = codec
         self._timeout_ms = timeout_ms
 
     async def send(self, frame: dict[str, Any]) -> None:
-        payload = self._encoder.encode(frame)
+        payload = self._codec.encode(frame)
         self._ring.send(payload, 0, self._timeout_ms)
 
 
@@ -121,8 +126,7 @@ class AsgiWorker:
     def __init__(self, app: AsgiApp, config: WorkerConfig | None = None) -> None:
         self._app = app
         self._config = config or WorkerConfig()
-        self._encoder = msgspec.msgpack.Encoder()
-        self._decoder = msgspec.msgpack.Decoder()
+        self._codec = MessagePackCodec()
         self._control: ShmRing | None = None
         self._clients: dict[str, "ClientState"] = {}
         self._running = False
@@ -196,7 +200,7 @@ class AsgiWorker:
             ShmRingConfig(name=resp_ring, slot_size=self._config.slot_size, slots=self._config.slots)
         )
         self._clients[client_id] = ClientState(id=client_id, request=request, response=response)
-        response.send(self._encoder.encode({"ok": True, "id": message.get("id")}), 0, int(self._config.timeout * 1000))
+        response.send(self._codec.encode({"ok": True, "id": message.get("id")}), 0, int(self._config.timeout * 1000))
 
     async def _poll_clients(self, contexts: dict[str, RequestContext]) -> None:
         if not self._clients:
@@ -205,7 +209,7 @@ class AsgiWorker:
             message = self._recv_ring(client.request)
             if message is None:
                 continue
-            writer = ResponseWriter(client.response, self._encoder, int(self._config.timeout * 1000))
+            writer = ResponseWriter(client.response, self._codec, int(self._config.timeout * 1000))
             if "type" in message:
                 await self._handle_frame(message, contexts, writer)
             else:
@@ -217,7 +221,7 @@ class AsgiWorker:
         except TimeoutError:
             return None
         try:
-            message = self._decoder.decode(data)
+            message = self._codec.decode(data)
         except Exception:
             return None
         if not isinstance(message, dict):
@@ -413,7 +417,7 @@ class AsgiWorker:
             async def send(message: dict[str, Any]) -> None:
                 await queue.put(message)
 
-            app_task = asyncio.create_task(self._app(scope, receive, send))
+            app_task: asyncio.Task[None] = asyncio.create_task(self._app(scope, receive, send))  # type: ignore[arg-type]  # type: ignore[arg-type]
             try:
                 while True:
                     if app_task.done() and queue.empty():
@@ -479,7 +483,7 @@ class AsgiWorker:
         async def send(message: dict[str, Any]) -> None:
             await queue.put(message)
 
-        app_task = asyncio.create_task(self._app(scope, receive, send))
+        app_task: asyncio.Task[None] = asyncio.create_task(self._app(scope, receive, send))  # type: ignore[arg-type]
         try:
             while True:
                 if app_task.done() and queue.empty():
@@ -564,6 +568,9 @@ class AsgiWorker:
         except TimeoutError as exc:
             msg = "ASGI lifespan startup timed out"
             raise RuntimeError(msg) from exc
+        self._check_lifespan_status()
+
+    def _check_lifespan_status(self) -> None:
         if self._lifespan_supported is False:
             return
         if self._lifespan_failed is not None:
@@ -639,7 +646,8 @@ def _import_app(app_path: str) -> AsgiApp:
     if not callable(target):
         msg = f"ASGI app '{app_path}' is not callable"
         raise TypeError(msg)
-    return target
+    app: AsgiApp = target
+    return app
 
 
 async def _serve_worker(app_path: str, config: WorkerConfig) -> None:

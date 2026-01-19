@@ -4,11 +4,11 @@ import asyncio
 import os
 import pathlib
 import uuid
-from dataclasses import dataclass
 from typing import Any
 
 import msgspec
 
+from vertebra._internal.serialization import MessagePackCodec
 from vertebra._internal.shm import ShmRegion, ShmRegionConfig, ShmRing, ShmRingConfig
 
 
@@ -16,8 +16,9 @@ class BrokerClientError(RuntimeError):
     """Raised for broker IPC errors."""
 
 
-@dataclass(frozen=True, slots=True)
-class BrokerClientConfig:
+class BrokerClientConfig(msgspec.Struct, frozen=True):
+    """Configuration for connecting to the shared-memory broker."""
+
     name: str = "vertebra-broker"
     control_name: str | None = None
     lock_path: str | None = None
@@ -46,8 +47,7 @@ class BrokerClientConfig:
 class BrokerClient:
     def __init__(self, config: BrokerClientConfig | None = None) -> None:
         self._config = config or BrokerClientConfig()
-        self._encoder = msgspec.msgpack.Encoder()
-        self._decoder = msgspec.msgpack.Decoder()
+        self._codec = MessagePackCodec()
         self._control: ShmRing | None = None
         self._request: ShmRing | None = None
         self._response: ShmRing | None = None
@@ -91,7 +91,7 @@ class BrokerClient:
             raise BrokerClientError(msg)
         payload = dict(payload)
         payload["id"] = self._next_id()
-        encoded = self._encoder.encode(payload)
+        encoded = self._codec.encode(payload)
         await asyncio.to_thread(self._request.send, encoded, 0, self._config.timeout_ms)
         return await self._recv_response()
 
@@ -118,7 +118,13 @@ class BrokerClient:
         params: list[Any] | dict[str, Any] | None = None,
         correlation_id: str | None = None,
     ) -> Any:
-        payload = {"kind": "execute", "pool": pool, "token": token, "sql": sql, "params": params if params is not None else []}
+        payload = {
+            "kind": "execute",
+            "pool": pool,
+            "token": token,
+            "sql": sql,
+            "params": params if params is not None else [],
+        }
         if correlation_id:
             payload["correlation_id"] = correlation_id
         response = await self.request(payload)
@@ -162,7 +168,8 @@ class BrokerClient:
     async def stats(self, pool: str | None = None) -> dict[str, Any]:
         response = await self.request({"kind": "stats", "pool": pool})
         data = _assert_ok(response)
-        return data.get("stats", {})
+        stats = data.get("stats")
+        return stats if isinstance(stats, dict) else {}
 
     async def register_provider(self, name: str, driver: str, max_size: int, *, req_ring: str, resp_ring: str) -> bool:
         response = await self.request({
@@ -181,7 +188,7 @@ class BrokerClient:
         if self._control is None:
             msg = "Control ring unavailable"
             raise BrokerClientError(msg)
-        encoded = self._encoder.encode(payload)
+        encoded = self._codec.encode(payload)
         _with_lock(self._config.control_lock(), lambda: self._control.send(encoded, 0, self._config.timeout_ms))
 
     async def _recv_response(self) -> dict[str, Any]:
@@ -189,7 +196,8 @@ class BrokerClient:
             msg = "Response ring unavailable"
             raise BrokerClientError(msg)
         data, _flags = await asyncio.to_thread(self._response.recv, self._config.timeout_ms)
-        return self._decoder.decode(data)
+        result = self._codec.decode(data)
+        return result if isinstance(result, dict) else {}
 
     def _next_id(self) -> int:
         self._seq += 1

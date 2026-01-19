@@ -184,8 +184,18 @@ function mergeNormalized(base: NormalizedConfig, override: NormalizedConfig): No
 }
 
 function mergeConfigs(...configs: Array<ServerConfig | undefined | null>): NormalizedConfig {
-  const empty: NormalizedConfig = { server: {}, static: {}, ipc: {}, workers: {}, python: {}, broker: {} };
-  return configs.reduce((acc, config) => mergeNormalized(acc, normalizeConfig(config ?? undefined)), empty);
+  const empty: NormalizedConfig = {
+    server: {},
+    static: {},
+    ipc: {},
+    workers: {},
+    python: {},
+    broker: {},
+  };
+  return configs.reduce(
+    (acc, config) => mergeNormalized(acc, normalizeConfig(config ?? undefined)),
+    empty,
+  );
 }
 
 function resolveWorkerCount(config: NormalizedConfig): number {
@@ -198,7 +208,7 @@ function resolveWorkerCount(config: NormalizedConfig): number {
     const available =
       typeof Bun !== "undefined" && typeof Bun.availableParallelism === "function"
         ? Bun.availableParallelism()
-        : globalThis.navigator?.hardwareConcurrency ?? 1;
+        : (globalThis.navigator?.hardwareConcurrency ?? 1);
     return Math.max(1, Math.floor(available));
   }
   return 1;

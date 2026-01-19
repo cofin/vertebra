@@ -1,12 +1,13 @@
 """Shared memory CFFI bindings for the Vertebra broker transport."""
 
+import contextlib
 import os
 import sys
-from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import msgspec
 from cffi import FFI
 
 if TYPE_CHECKING:
@@ -87,12 +88,15 @@ def _load_lib() -> "tuple[FFI, object]":
         void* vtb_region_ptr(VtbRegion* handle);
         size_t vtb_region_len(VtbRegion* handle);
         void vtb_region_close(VtbRegion* handle);
+
+        VtbStatus vtb_shm_unlink(const char* name);
         """
     )
     for path in _candidate_paths():
         if path.exists():
             return ffi, ffi.dlopen(str(path))
-    raise ShmError("Unable to locate shared memory C ABI library. Set VERTEBRA_SHM_LIB.")
+    msg = "Unable to locate shared memory C ABI library. Set VERTEBRA_SHM_LIB."
+    raise ShmError(msg)
 
 
 _FFI: FFI | None = None
@@ -119,17 +123,17 @@ def _raise_for_status(status: int) -> None:
         return
     ffi, lib = _get_lib()
     message_ptr = lib.vtb_last_error_message()
-    if message_ptr:
-        message = ffi.string(message_ptr).decode("utf-8", "replace")
-    else:
-        message = "Shared memory operation failed"
+    message = ffi.string(message_ptr).decode("utf-8", "replace") if message_ptr else "Shared memory operation failed"
     if status in (VtbStatus.timeout, VtbStatus.full, VtbStatus.empty):
-        raise TimeoutError(f"{message} (status={int(status)})")
-    raise ShmError(f"{message} (status={int(status)})")
+        msg = f"{message} (status={int(status)})"
+        raise TimeoutError(msg)
+    msg = f"{message} (status={int(status)})"
+    raise ShmError(msg)
 
 
-@dataclass(slots=True)
-class ShmRingConfig:
+class ShmRingConfig(msgspec.Struct, frozen=True, gc=False):
+    """Configuration for creating or opening a shared memory ring buffer."""
+
     name: str
     slot_size: int = 65536
     slots: int = 1024
@@ -177,7 +181,8 @@ class ShmRing:
         buffer = ffi.new("uint8_t[]", self._capacity)
         status = VtbStatus(int(lib.vtb_ring_recv(self._handle, buffer, self._capacity, out_len, out_flags, timeout_ms)))
         if status in (VtbStatus.timeout, VtbStatus.empty):
-            raise TimeoutError("Shared memory receive timed out")
+            msg = "Shared memory receive timed out"
+            raise TimeoutError(msg)
         _raise_for_status(status)
         data = ffi.buffer(buffer, out_len[0])[:]
         return data, int(out_flags[0])
@@ -202,14 +207,13 @@ class ShmRing:
         self._handle = None
 
     def __del__(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.close()
-        except Exception:
-            pass
 
 
-@dataclass(slots=True)
-class ShmRegionConfig:
+class ShmRegionConfig(msgspec.Struct, frozen=True, gc=False):
+    """Configuration for creating or opening a shared memory region."""
+
     name: str
     size: int
 
@@ -248,17 +252,25 @@ class ShmRegion:
         self._handle = None
 
     def __del__(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.close()
-        except Exception:
-            pass
 
 
-__all__ = (
-    "SHM_AVAILABLE",
-    "ShmError",
-    "ShmRing",
-    "ShmRingConfig",
-    "ShmRegion",
-    "ShmRegionConfig",
-)
+def shm_unlink(name: str) -> None:
+    """Unlink a named shared memory region.
+
+    This removes the shared memory from the filesystem so no new processes can open it.
+    Existing mappings remain valid until all handles are closed.
+
+    Args:
+        name: The shared memory name (should start with '/').
+
+    Raises:
+        ShmError: If the unlink operation fails.
+    """
+    ffi, lib = _get_lib()
+    status = lib.vtb_shm_unlink(name.encode("utf-8"))
+    _raise_for_status(VtbStatus(int(status)))
+
+
+__all__ = ("SHM_AVAILABLE", "ShmError", "ShmRegion", "ShmRegionConfig", "ShmRing", "ShmRingConfig", "shm_unlink")

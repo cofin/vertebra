@@ -1,6 +1,9 @@
 import { encode, decode } from "@msgpack/msgpack";
 
 import { ShmRing } from "./shm";
+import type { PoolStats } from "./base-pool";
+
+export type { PoolStats };
 
 export type BrokerClientConfig = {
   name?: string;
@@ -10,19 +13,6 @@ export type BrokerClientConfig = {
   timeoutMs?: number;
   clientId?: string;
   weight?: number;
-};
-
-export type PoolStats = {
-  name: string;
-  min_size: number;
-  max_size: number;
-  total: number;
-  idle: number;
-  in_use: number;
-  waiters: number;
-  acquires_total: number;
-  releases_total: number;
-  errors_total: number;
 };
 
 export type SchedulerClientStats = {
@@ -82,7 +72,11 @@ export class BrokerClient {
     }
     this.control = ShmRing.open(this.config.controlName, this.config.slotSize, this.config.slots);
     this.request = ShmRing.create(this.requestRingName(), this.config.slotSize, this.config.slots);
-    this.response = ShmRing.create(this.responseRingName(), this.config.slotSize, this.config.slots);
+    this.response = ShmRing.create(
+      this.responseRingName(),
+      this.config.slotSize,
+      this.config.slots,
+    );
     await this.sendControl({
       id: this.nextId(),
       kind: "register_client",

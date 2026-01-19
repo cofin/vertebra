@@ -7,8 +7,9 @@ import hashlib
 import types
 import typing
 import warnings
-from dataclasses import dataclass, field
 from typing import Any, get_args, get_origin
+
+import msgspec
 
 from vertebra.types.ir import (
     AnnotatedType,
@@ -29,58 +30,68 @@ if typing.TYPE_CHECKING:
     from pathlib import Path
 
 
-@dataclass(slots=True)
-class CachedAst:
+class CachedAst(msgspec.Struct, frozen=True):
+    """Cached parsed AST with content digest for invalidation."""
+
     digest: str
     tree: ast.AST
 
 
-@dataclass(slots=True)
-class CachedClasses:
+class CachedClasses(msgspec.Struct, frozen=True):
+    """Cached class definitions extracted from AST."""
+
     digest: str
     classes: dict[str, ast.ClassDef]
 
 
-@dataclass(slots=True)
-class CachedImports:
+class CachedImports(msgspec.Struct, frozen=True):
+    """Cached import mappings extracted from AST."""
+
     digest: str
     imports: dict[str, tuple[str, int]]
 
 
-@dataclass(slots=True)
-class CachedTypeVars:
+class CachedTypeVars(msgspec.Struct, frozen=True):
+    """Cached TypeVar definitions with their constraints."""
+
     digest: str
     type_vars: dict[str, TypeNode]
 
 
-@dataclass(slots=True)
-class ResolveContext:
-    path: Path
+class ResolveContext(msgspec.Struct, frozen=True):
+    """Context for resolving forward references during type extraction."""
+
+    path: "Path"
     imports: dict[str, tuple[str, int]]
     local_classes: set[str]
-    search_paths: tuple[Path, ...]
+    search_paths: "tuple[Path, ...]"
 
 
-@dataclass(slots=True)
-class TypeExtractor:
-    ast_cache: dict[Path, CachedAst] = field(default_factory=dict)
-    class_cache: dict[Path, CachedClasses] = field(default_factory=dict)
-    import_cache: dict[Path, CachedImports] = field(default_factory=dict)
-    type_var_cache: dict[Path, CachedTypeVars] = field(default_factory=dict)
-    type_cache: dict[tuple[Path, str], ObjectType] = field(default_factory=dict)
+class TypeExtractor(msgspec.Struct):
+    """Extracts type information from Python source files with caching.
+
+    Note: Not frozen because the caches are updated during extraction.
+    """
+
+    ast_cache: "dict[Path, CachedAst]" = msgspec.field(default_factory=dict)
+    class_cache: "dict[Path, CachedClasses]" = msgspec.field(default_factory=dict)
+    import_cache: "dict[Path, CachedImports]" = msgspec.field(default_factory=dict)
+    type_var_cache: "dict[Path, CachedTypeVars]" = msgspec.field(default_factory=dict)
+    type_cache: "dict[tuple[Path, str], ObjectType]" = msgspec.field(default_factory=dict)
 
     def from_hint(self, annotation: Any) -> TypeNode:  # noqa: PLR0911, PLR0912
+        # Use identity checks or try/except to handle unhashable types (like msgspec IntType)
         if annotation is None or annotation is type(None):
             return PrimitiveType("null")
-        if annotation in (int, float):
+        if annotation is int or annotation is float:
             return PrimitiveType("number")
         if annotation is str:
             return PrimitiveType("string")
         if annotation is bool:
             return PrimitiveType("boolean")
-        if annotation in (bytes, bytearray, memoryview):
+        if annotation is bytes or annotation is bytearray or annotation is memoryview:
             return PrimitiveType("Uint8Array")
-        if annotation in (object, Any):
+        if annotation is object or annotation is Any:
             return UnknownType()
         if isinstance(annotation, typing.TypeVar):
             return RawType(annotation.__name__)
@@ -95,10 +106,10 @@ class TypeExtractor:
             metadata = tuple(args[1:])
             return AnnotatedType(base=base, metadata=metadata)
 
-        if origin in (typing.Union, types.UnionType) or isinstance(annotation, types.UnionType):
+        if origin is typing.Union or origin is types.UnionType or isinstance(annotation, types.UnionType):
             return self._from_union(args)
 
-        if origin in (list, tuple, dict, set):
+        if origin is list or origin is tuple or origin is dict or origin is set:
             return self._from_collection(origin, args)
 
         if origin is typing.Literal:
@@ -268,7 +279,7 @@ class TypeExtractor:
         structs: dict[str, ObjectType] = {}
         for name in struct_names:
             structs[name] = self._build_msgspec_struct(classes[name], struct_names, classes, type_vars, context)
-            self.type_cache[(path, name)] = structs[name]
+            self.type_cache[path, name] = structs[name]
         return structs
 
     def extract_pydantic_models(self, path: Path) -> dict[str, ObjectType]:
@@ -280,7 +291,7 @@ class TypeExtractor:
         models: dict[str, ObjectType] = {}
         for name in model_names:
             models[name] = self._build_pydantic_model(classes[name], model_names, classes, type_vars, context)
-            self.type_cache[(path, name)] = models[name]
+            self.type_cache[path, name] = models[name]
         return models
 
     def extract_dataclasses(self, path: Path) -> dict[str, ObjectType]:
@@ -292,7 +303,7 @@ class TypeExtractor:
         models: dict[str, ObjectType] = {}
         for name in dataclass_names:
             models[name] = self._build_dataclass(classes[name], dataclass_names, classes, type_vars, context)
-            self.type_cache[(path, name)] = models[name]
+            self.type_cache[path, name] = models[name]
         return models
 
     def extract_typeddicts(self, path: Path) -> dict[str, ObjectType]:
@@ -306,7 +317,7 @@ class TypeExtractor:
         models: dict[str, ObjectType] = {}
         for name in typed_dict_names:
             models[name] = self._build_typeddict(classes[name], typed_dict_names, type_vars, context)
-            self.type_cache[(path, name)] = models[name]
+            self.type_cache[path, name] = models[name]
         return models
 
     def merge_msgspec_runtime_metadata(
@@ -656,7 +667,7 @@ class TypeExtractor:
             return self._apply_schema_metadata(node, schema)
         if types == "string":
             return self._apply_schema_metadata(PrimitiveType("string"), schema)
-        if types in ("integer", "number"):
+        if types in {"integer", "number"}:
             return self._apply_schema_metadata(PrimitiveType("number"), schema)
         if types == "boolean":
             return self._apply_schema_metadata(PrimitiveType("boolean"), schema)
@@ -675,7 +686,7 @@ class TypeExtractor:
 
     def _ref_name(self, ref: str) -> str:
         if ref.startswith("#/"):
-            return ref.split("/")[-1]
+            return ref.rsplit("/", maxsplit=1)[-1]
         return ref
 
     def _apply_field_metadata(self, struct: ObjectType, metadata: dict[str, tuple[object, ...]]) -> ObjectType:
@@ -712,7 +723,7 @@ class TypeExtractor:
     def _dataclass_has_default(self, node: ast.AST) -> bool:
         if isinstance(node, ast.Call) and self._base_name(node.func).split(".")[-1] == "field":
             for keyword in node.keywords:
-                if keyword.arg in ("default", "default_factory") and keyword.value is not None:
+                if keyword.arg in {"default", "default_factory"} and keyword.value is not None:
                     return True
         return True
 
@@ -838,11 +849,11 @@ class TypeExtractor:
         type_vars = type_vars or set()
         base = self._base_name(node.value).split(".")[-1]
         args = self._subscript_args(node.slice)
-        if base in ("list", "List"):
+        if base in {"list", "List"}:
             return ArrayType(self._from_annotation_node(args[0], struct_names, type_vars, context))
-        if base in ("set", "Set"):
+        if base in {"set", "Set"}:
             return GenericType("Set", [self._from_annotation_node(args[0], struct_names, type_vars, context)])
-        if base in ("dict", "Dict"):
+        if base in {"dict", "Dict"}:
             key = self._from_annotation_node(args[0], struct_names, type_vars, context)
             value = (
                 self._from_annotation_node(args[1], struct_names, type_vars, context)
@@ -850,22 +861,22 @@ class TypeExtractor:
                 else UnknownType()
             )
             return GenericType("Record", [key, value])
-        if base in ("tuple", "Tuple"):
+        if base in {"tuple", "Tuple"}:
             if len(args) == 2 and isinstance(args[1], ast.Constant) and args[1].value is Ellipsis:
                 return ArrayType(self._from_annotation_node(args[0], struct_names, type_vars, context))
             return TupleType(tuple(self._from_annotation_node(arg, struct_names, type_vars, context) for arg in args))
-        if base in ("Optional",):
+        if base == "Optional":
             inner = self._from_annotation_node(args[0], struct_names, type_vars, context)
             return UnionType([inner, PrimitiveType("null")])
-        if base in ("Union",):
+        if base == "Union":
             return UnionType([self._from_annotation_node(arg, struct_names, type_vars, context) for arg in args])
-        if base in ("Annotated",):
+        if base == "Annotated":
             if not args:
                 return UnknownType()
             base_type = self._from_annotation_node(args[0], struct_names, type_vars, context)
             metadata = tuple(self._metadata_from_node(arg) for arg in args[1:])
             return AnnotatedType(base=base_type, metadata=metadata)
-        if base in ("Literal",):
+        if base == "Literal":
             if len(args) == 1:
                 return LiteralType(self._literal_arg(args[0]))
             return UnionType([LiteralType(self._literal_arg(arg)) for arg in args])

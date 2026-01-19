@@ -4,10 +4,9 @@ import { WorkerManager } from "./worker-manager";
 import { createWorkerPool, StubWorkerPool, type WorkerPool } from "./worker-pool";
 import { AsgiBridge } from "../ipc";
 import type { WebSocketHandler } from "bun";
-import { createMetrics, trackRequest } from "./metrics";
+import { createMetrics, trackRequest, MetricsRegistry } from "./metrics";
 import { log } from "./logging";
 import { BrokerClient } from "../broker";
-import { UnifiedMetricsRegistry } from "./unified-metrics";
 
 export class BunServer {
   private server: Server | null = null;
@@ -107,26 +106,36 @@ export async function createServer(
   return new BunServer(handler, resolved.server, undefined);
 }
 
-export async function createRouterServer(config: ServerConfig = {}, handler?: RequestHandler): Promise<BunServer> {
+export async function createRouterServer(
+  config: ServerConfig = {},
+  handler?: RequestHandler,
+): Promise<BunServer> {
   const resolved = await resolveServerConfig(config);
   const router = createRouter({ staticDir: resolved.server.staticDir, apiHandler: handler });
   return new BunServer(router, resolved.server, undefined);
 }
 
-export async function createAsgiServer(config: ServerConfig = {}, pool?: WorkerPool): Promise<BunServer> {
+export async function createAsgiServer(
+  config: ServerConfig = {},
+  pool?: WorkerPool,
+): Promise<BunServer> {
   const resolved = await resolveServerConfig(config);
   if (resolved.ipc.protocol === "protobuf") {
     throw new Error("Protobuf IPC protocol is not implemented yet");
   }
   const workerPool = pool ?? createWorkerPool({ count: resolved.workers.count, ipc: resolved.ipc });
   const manager = resolved.python.app
-    ? new WorkerManager({ count: resolved.workers.count, ipc: resolved.ipc, python: resolved.python })
+    ? new WorkerManager({
+        count: resolved.workers.count,
+        ipc: resolved.ipc,
+        python: resolved.python,
+      })
     : null;
   manager?.start();
   const bridge = new AsgiBridge({ requester: workerPool });
   const metrics = createMetrics();
   const brokerClient = resolved.broker ? new BrokerClient(resolved.broker) : undefined;
-  const metricsRegistry = new UnifiedMetricsRegistry(metrics, brokerClient, manager);
+  const metricsRegistry = new MetricsRegistry(metrics, brokerClient, manager);
   const router = createRouter({
     staticDir: resolved.server.staticDir,
     apiHandler: async (request, server) => {
@@ -200,5 +209,10 @@ export {
   type ServerIpcConfig,
 } from "./config";
 export { createRouter, type RequestHandler } from "./router";
-export { createWorkerPool, RoundRobinWorkerPool, StubWorkerPool, type WorkerPool } from "./worker-pool";
+export {
+  createWorkerPool,
+  RoundRobinWorkerPool,
+  StubWorkerPool,
+  type WorkerPool,
+} from "./worker-pool";
 export { WorkerManager } from "./worker-manager";

@@ -6,8 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from vertebra.filesystem.client import FileEntry
-from vertebra.storage.store import AsyncLocalStore, ByteRange, LocalStore, PutOptions
+from vertebra.storage import AsyncLocalStore, ByteRange, FileEntry, LocalStore, PutOptions
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator

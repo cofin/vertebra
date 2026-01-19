@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import msgspec
 
 from vertebra._internal.dependencies import WATCHDOG_INSTALLED
 from vertebra._internal.errors import MissingDependencyError
@@ -31,8 +32,9 @@ if not _WATCHDOG_AVAILABLE:
     Observer = None
 
 
-@dataclass(slots=True)
-class WatchOptions:
+class WatchOptions(msgspec.Struct, frozen=True, gc=False):
+    """Configuration for file watching behavior."""
+
     paths: tuple[Path, ...]
     debounce_ms: int = 100
 

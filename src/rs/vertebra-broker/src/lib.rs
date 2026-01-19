@@ -44,7 +44,9 @@ fn map_channel_error(err: ChannelError) -> VtbStatus {
         ChannelError::Empty => VtbStatus::Empty,
         ChannelError::NotReady => VtbStatus::NotReady,
         ChannelError::BufferTooSmall { .. } | ChannelError::InvalidLayout => VtbStatus::Invalid,
-        ChannelError::PayloadTooLarge { .. } | ChannelError::InvalidBufferMeta => VtbStatus::Invalid,
+        ChannelError::PayloadTooLarge { .. } | ChannelError::InvalidBufferMeta => {
+            VtbStatus::Invalid
+        }
         ChannelError::Shm(_) | ChannelError::Buffer(_) | ChannelError::Sync(_) => VtbStatus::Sys,
     }
 }
@@ -143,7 +145,10 @@ pub extern "C" fn vtb_ring_capacity(handle: *const VtbRing) -> usize {
 }
 
 #[no_mangle]
-pub extern "C" fn vtb_ring_stats(handle: *const VtbRing, out_stats: *mut VtbRingStats) -> VtbStatus {
+pub extern "C" fn vtb_ring_stats(
+    handle: *const VtbRing,
+    out_stats: *mut VtbRingStats,
+) -> VtbStatus {
     clear_last_error();
     if handle.is_null() || out_stats.is_null() {
         return VtbStatus::Invalid;
@@ -232,13 +237,15 @@ pub extern "C" fn vtb_ring_open(
             return VtbStatus::Sys;
         }
     };
-    let ring = unsafe { match SpscRing::attach(std::sync::Arc::new(region), layout) {
-        Ok(ring) => ring,
-        Err(err) => {
-            set_last_error(err.to_string());
-            return map_channel_error(err);
+    let ring = unsafe {
+        match SpscRing::attach(std::sync::Arc::new(region), layout) {
+            Ok(ring) => ring,
+            Err(err) => {
+                set_last_error(err.to_string());
+                return map_channel_error(err);
+            }
         }
-    } };
+    };
     let handle = Box::new(VtbRing::new(ring));
     unsafe {
         *out_handle = Box::into_raw(handle);
@@ -406,6 +413,34 @@ pub extern "C" fn vtb_region_close(handle: *mut VtbRegion) {
     }
     unsafe {
         drop(Box::from_raw(handle));
+    }
+}
+
+/// Unlink a named shared memory region.
+///
+/// This removes the shared memory from the filesystem so no new processes can open it.
+/// Existing mappings remain valid until all handles are closed.
+#[no_mangle]
+pub extern "C" fn vtb_shm_unlink(name: *const c_char) -> VtbStatus {
+    clear_last_error();
+    if name.is_null() {
+        set_last_error("null name".to_string());
+        return VtbStatus::Invalid;
+    }
+    let name = unsafe { CStr::from_ptr(name) };
+    let name_str = match name.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(format!("invalid name: {e}"));
+            return VtbStatus::Invalid;
+        }
+    };
+    match vertebra_core::shm::shm_unlink_named(name_str) {
+        Ok(()) => VtbStatus::Ok,
+        Err(e) => {
+            set_last_error(format!("shm_unlink failed: {e}"));
+            VtbStatus::Sys
+        }
     }
 }
 

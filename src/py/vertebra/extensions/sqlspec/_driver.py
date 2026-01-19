@@ -3,16 +3,22 @@
 import contextlib
 from typing import TYPE_CHECKING, Any
 
-from sqlspec.driver import AsyncDataDictionaryBase, AsyncDriverAdapterBase, ExecutionResult, SyncDataDictionaryBase, SyncDriverAdapterBase
+from sqlspec.driver import (
+    AsyncDataDictionaryBase,
+    AsyncDriverAdapterBase,
+    ExecutionResult,
+    SyncDataDictionaryBase,
+    SyncDriverAdapterBase,
+)
 from sqlspec.exceptions import DatabaseError, ImproperConfigurationError, SQLSpecError
 from sqlspec.utils.correlation import CorrelationContext
-
-from ._shared import AsyncBrokerConnection, SyncBrokerConnection
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from sqlspec.core import SQL
+
+    from ._shared import AsyncBrokerConnection, SyncBrokerConnection
 
 
 class BrokerExceptionHandler:
@@ -62,7 +68,7 @@ def _collect_rows(result: "dict[str, Any]") -> "tuple[list[dict[str, Any]], list
             return data, columns, int(table.num_rows)
     columns = list(result.get("columns") or [])
     rows = result.get("rows") or []
-    data = [dict(zip(columns, row)) for row in rows]
+    data = [dict(zip(columns, row, strict=False)) for row in rows]
     rowcount = int(result.get("rowcount") or len(rows))
     return data, columns, rowcount
 
@@ -109,11 +115,7 @@ class BrokerSyncDriverBase(SyncDriverAdapterBase):
         if statement.returns_rows():
             data, columns, rowcount = _collect_rows(result)
             return self.create_execution_result(
-                result,
-                selected_data=data,
-                column_names=columns,
-                data_row_count=rowcount,
-                is_select_result=True,
+                result, selected_data=data, column_names=columns, data_row_count=rowcount, is_select_result=True
             )
         return self.create_execution_result(result, rowcount_override=int(result.get("rowcount") or 0))
 
@@ -132,9 +134,7 @@ class BrokerSyncDriverBase(SyncDriverAdapterBase):
                 is_many_result=True,
             )
         return self.create_execution_result(
-            result,
-            rowcount_override=int(result.get("rowcount") or 0),
-            is_many_result=True,
+            result, rowcount_override=int(result.get("rowcount") or 0), is_many_result=True
         )
 
     def begin(self) -> None:
@@ -191,11 +191,7 @@ class BrokerAsyncDriverBase(AsyncDriverAdapterBase):
         if statement.returns_rows():
             data, columns, rowcount = _collect_rows(result)
             return self.create_execution_result(
-                result,
-                selected_data=data,
-                column_names=columns,
-                data_row_count=rowcount,
-                is_select_result=True,
+                result, selected_data=data, column_names=columns, data_row_count=rowcount, is_select_result=True
             )
         return self.create_execution_result(result, rowcount_override=int(result.get("rowcount") or 0))
 
@@ -214,9 +210,7 @@ class BrokerAsyncDriverBase(AsyncDriverAdapterBase):
                 is_many_result=True,
             )
         return self.create_execution_result(
-            result,
-            rowcount_override=int(result.get("rowcount") or 0),
-            is_many_result=True,
+            result, rowcount_override=int(result.get("rowcount") or 0), is_many_result=True
         )
 
     async def begin(self) -> None:
@@ -242,9 +236,4 @@ class BrokerAsyncDriverBase(AsyncDriverAdapterBase):
         return False
 
 
-__all__ = (
-    "BrokerAsyncDriverBase",
-    "BrokerAsyncExceptionHandler",
-    "BrokerExceptionHandler",
-    "BrokerSyncDriverBase",
-)
+__all__ = ("BrokerAsyncDriverBase", "BrokerAsyncExceptionHandler", "BrokerExceptionHandler", "BrokerSyncDriverBase")

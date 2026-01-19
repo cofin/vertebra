@@ -6,16 +6,18 @@ import io
 import posixpath
 import tempfile
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 
-from vertebra.filesystem.client import AsyncFileSystemClient, FileEntry, FileSystemClient
+import msgspec
+
+from vertebra.storage.client import AsyncFileSystemClient, FileEntry, SyncFileSystemClient
 
 
-@dataclass(frozen=True, slots=True)
-class ByteRange:
+class ByteRange(msgspec.Struct, frozen=True, gc=False):
+    """Byte range for partial reads from object storage."""
+
     offset: int
     length: int | None = None
 
@@ -26,28 +28,36 @@ class ByteRange:
         return start, max(0, int(self.length)) + start
 
 
-@dataclass(frozen=True, slots=True)
-class PutOptions:
+class PutOptions(msgspec.Struct, frozen=True, gc=False):
+    """Options for object put operations."""
+
     content_type: str | None = None
     metadata: dict[str, str] | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class PutResult:
+class PutResult(msgspec.Struct, frozen=True, gc=False):
+    """Result of an object put operation."""
+
     bytes: int
     etag: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ObjectMeta:
+class ObjectMeta(msgspec.Struct, frozen=True, gc=False):
+    """Object metadata returned from storage operations."""
+
     path: str
     size: int | None = None
     modified: str | None = None
     etag: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ListResult:
+class ListResult(msgspec.Struct, frozen=True):
+    """Result of a list operation with objects and common prefixes.
+
+    Note: gc=False is NOT used here because this struct contains
+    references to other Structs (ObjectMeta), forming an object graph.
+    """
+
     objects: list[ObjectMeta]
     prefixes: list[str]
 
@@ -210,7 +220,7 @@ class AsyncStoreWriter:
 
 
 class SyncObjectStoreImpl:
-    def __init__(self, client: FileSystemClient, prefix: str = "", is_local: bool = False) -> None:
+    def __init__(self, client: SyncFileSystemClient, prefix: str = "", is_local: bool = False) -> None:
         self._client = client
         self._prefix = prefix.strip("/")
         self._is_local = is_local
@@ -289,14 +299,14 @@ class SyncObjectStoreImpl:
             return ListResult(objects=objects, prefixes=sorted(prefixes))
 
         objects = list(self.list(prefix))
-        prefixes: set[str] = set()
+        common_prefixes: set[str] = set()
         for obj in objects:
             suffix = obj.path
             if prefix:
                 suffix = suffix[len(self._resolve(prefix)) :].lstrip(delimiter)
             if delimiter in suffix:
-                prefixes.add(suffix.split(delimiter, 1)[0])
-        return ListResult(objects=objects, prefixes=sorted(prefixes))
+                common_prefixes.add(suffix.split(delimiter, 1)[0])
+        return ListResult(objects=objects, prefixes=sorted(common_prefixes))
 
     def open_reader(self, path: str) -> io.BytesIO:
         return io.BytesIO(self.get(path))
@@ -480,7 +490,8 @@ class AsyncObjectStoreImpl:
                 with source.open("rb") as src, destination.open("wb") as dst:
                     return dst.write(src.read())
 
-            return await _run_in_thread(_copy)
+            result = await _run_in_thread(_copy)
+            return int(result)
         return await self._client.read_file(self._resolve(path), local_path)
 
     async def upload_from_path(self, local_path: str, path: str, *, options: PutOptions | None = None) -> PutResult:
@@ -522,8 +533,8 @@ async def _write_chunks_to_temp(chunks: AsyncIterator[bytes]) -> str:
 
 
 class LocalStore(SyncObjectStoreImpl):
-    def __init__(self, root: str = ".", *, client: FileSystemClient | None = None) -> None:
-        super().__init__(client or FileSystemClient(backend="local"), prefix=root, is_local=True)
+    def __init__(self, root: str = ".", *, client: SyncFileSystemClient | None = None) -> None:
+        super().__init__(client or SyncFileSystemClient(backend="local"), prefix=root, is_local=True)
 
     def mkdir(self, path: str) -> None:
         self._client.mkdir(self._resolve(path))
@@ -550,9 +561,9 @@ class S3Store(SyncObjectStoreImpl):
         *,
         prefix: str = "",
         options: dict[str, Any] | None = None,
-        client: FileSystemClient | None = None,
+        client: SyncFileSystemClient | None = None,
     ) -> None:
-        super().__init__(client or FileSystemClient(backend="s3", bucket=bucket, options=options), prefix=prefix)
+        super().__init__(client or SyncFileSystemClient(backend="s3", bucket=bucket, options=options), prefix=prefix)
 
 
 class AsyncS3Store(AsyncObjectStoreImpl):
@@ -574,9 +585,9 @@ class GCSStore(SyncObjectStoreImpl):
         *,
         prefix: str = "",
         options: dict[str, Any] | None = None,
-        client: FileSystemClient | None = None,
+        client: SyncFileSystemClient | None = None,
     ) -> None:
-        super().__init__(client or FileSystemClient(backend="gcs", bucket=bucket, options=options), prefix=prefix)
+        super().__init__(client or SyncFileSystemClient(backend="gcs", bucket=bucket, options=options), prefix=prefix)
 
 
 class AsyncGCSStore(AsyncObjectStoreImpl):
@@ -632,17 +643,17 @@ class StoreRegistry:
 
 
 store_registry = StoreRegistry()
-store_registry.register("file", sync_factory=LocalStore, async_factory=AsyncLocalStore)
-store_registry.register("s3", sync_factory=S3Store, async_factory=AsyncS3Store)
-store_registry.register("gcs", sync_factory=GCSStore, async_factory=AsyncGCSStore)
+store_registry.register("file", sync_factory=LocalStore, async_factory=cast("AsyncStoreFactory", AsyncLocalStore))
+store_registry.register("s3", sync_factory=S3Store, async_factory=cast("AsyncStoreFactory", AsyncS3Store))
+store_registry.register("gcs", sync_factory=GCSStore, async_factory=cast("AsyncStoreFactory", AsyncGCSStore))
 
 
 def store_from_url(url: str, *, options: dict[str, Any] | None = None) -> SyncObjectStore:
-    return store_registry.from_url(url, options=options)
+    return cast("SyncObjectStore", store_registry.from_url(url, options=options))
 
 
 def async_store_from_url(url: str, *, options: dict[str, Any] | None = None) -> AsyncObjectStore:
-    return store_registry.from_url(url, async_=True, options=options)
+    return cast("AsyncObjectStore", store_registry.from_url(url, async_=True, options=options))
 
 
 __all__ = (

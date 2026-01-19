@@ -10,6 +10,8 @@ use napi_derive::napi;
 use vertebra_core::buffer::BufferPool;
 use vertebra_core::buffer::RingLayout;
 use vertebra_core::channel::{BufferChannel, BufferMessage, MpmcRing, SpscRing};
+#[cfg(unix)]
+use vertebra_core::shm::shm_unlink_named;
 use vertebra_core::shm::ShmRegion;
 
 fn map_err(err: impl std::fmt::Display) -> Error {
@@ -63,6 +65,8 @@ mod tests {
         let recv = ring.recv(16).expect("recv");
         assert_eq!(recv.as_ref(), &[1, 2]);
     }
+
+    // Note: ChannelHandle tests require JS runtime (Env), tested via integration tests
 }
 
 #[napi]
@@ -261,6 +265,227 @@ impl MpmcRingHandle {
         let len = self.inner.recv(&mut buffer).map_err(map_err)?;
         buffer.truncate(len);
         Ok(Buffer::from(buffer))
+    }
+}
+
+/// Role in a bidirectional channel.
+#[napi]
+pub enum ChannelRole {
+    Client,
+    Server,
+}
+
+/// Bidirectional channel with paired send/recv rings for request/response patterns.
+///
+/// Use `createChannelPair()` to get two endpoints where one's send goes to the other's recv.
+#[napi]
+pub struct ChannelHandle {
+    send_ring: SpscRing,
+    recv_ring: SpscRing,
+    /// Name for named channels (used for unlink).
+    #[cfg(unix)]
+    channel_name: Option<String>,
+}
+
+/// Create a pair of connected channels. Returns [client, server].
+/// What client sends, server receives, and vice versa.
+#[napi]
+pub fn create_channel_pair(env: Env, slot_size: u32, slots: u32) -> Result<JsObject> {
+    let layout = RingLayout::new(slot_size as usize, slots as usize);
+    let req_region = Arc::new(ShmRegion::create(layout.total_size).map_err(map_err)?);
+    let resp_region = Arc::new(ShmRegion::create(layout.total_size).map_err(map_err)?);
+
+    let req_client =
+        unsafe { SpscRing::initialize(Arc::clone(&req_region), layout, 0, 0) }.map_err(map_err)?;
+    let req_server =
+        unsafe { SpscRing::attach(Arc::clone(&req_region), layout) }.map_err(map_err)?;
+    let resp_client =
+        unsafe { SpscRing::initialize(Arc::clone(&resp_region), layout, 0, 0) }.map_err(map_err)?;
+    let resp_server =
+        unsafe { SpscRing::attach(Arc::clone(&resp_region), layout) }.map_err(map_err)?;
+
+    let client = ChannelHandle {
+        send_ring: req_client,
+        recv_ring: resp_client,
+        #[cfg(unix)]
+        channel_name: None,
+    };
+    let server = ChannelHandle {
+        send_ring: resp_server,
+        recv_ring: req_server,
+        #[cfg(unix)]
+        channel_name: None,
+    };
+
+    let mut obj = env.create_object()?;
+    obj.set("client", client)?;
+    obj.set("server", server)?;
+    Ok(obj)
+}
+
+#[napi]
+impl ChannelHandle {
+    /// Create a named channel (Unix only).
+    #[cfg(unix)]
+    #[napi(factory)]
+    pub fn create_named(
+        name: String,
+        slot_size: u32,
+        slots: u32,
+        role: ChannelRole,
+    ) -> Result<Self> {
+        let layout = RingLayout::new(slot_size as usize, slots as usize);
+        let req_name = format!("{name}.req");
+        let resp_name = format!("{name}.resp");
+        let req_region =
+            Arc::new(ShmRegion::create_named(&req_name, layout.total_size).map_err(map_err)?);
+        let resp_region =
+            Arc::new(ShmRegion::create_named(&resp_name, layout.total_size).map_err(map_err)?);
+        let req_ring = unsafe { SpscRing::initialize(Arc::clone(&req_region), layout, 0, 0) }
+            .map_err(map_err)?;
+        let resp_ring = unsafe { SpscRing::initialize(Arc::clone(&resp_region), layout, 0, 0) }
+            .map_err(map_err)?;
+
+        match role {
+            ChannelRole::Client => Ok(Self {
+                send_ring: req_ring,
+                recv_ring: resp_ring,
+                channel_name: Some(name),
+            }),
+            ChannelRole::Server => Ok(Self {
+                send_ring: resp_ring,
+                recv_ring: req_ring,
+                channel_name: Some(name),
+            }),
+        }
+    }
+
+    /// Open an existing named channel (Unix only).
+    #[cfg(unix)]
+    #[napi(factory)]
+    pub fn open_named(name: String, slot_size: u32, slots: u32, role: ChannelRole) -> Result<Self> {
+        let layout = RingLayout::new(slot_size as usize, slots as usize);
+        let req_name = format!("{name}.req");
+        let resp_name = format!("{name}.resp");
+        let req_region =
+            Arc::new(ShmRegion::open_named(&req_name, layout.total_size).map_err(map_err)?);
+        let resp_region =
+            Arc::new(ShmRegion::open_named(&resp_name, layout.total_size).map_err(map_err)?);
+        let req_ring =
+            unsafe { SpscRing::attach(Arc::clone(&req_region), layout) }.map_err(map_err)?;
+        let resp_ring =
+            unsafe { SpscRing::attach(Arc::clone(&resp_region), layout) }.map_err(map_err)?;
+
+        match role {
+            ChannelRole::Client => Ok(Self {
+                send_ring: req_ring,
+                recv_ring: resp_ring,
+                channel_name: Some(name),
+            }),
+            ChannelRole::Server => Ok(Self {
+                send_ring: resp_ring,
+                recv_ring: req_ring,
+                channel_name: Some(name),
+            }),
+        }
+    }
+
+    /// Get the maximum payload size per message.
+    #[napi]
+    pub fn payload_capacity(&self) -> u32 {
+        self.send_ring.payload_capacity() as u32
+    }
+
+    /// Send data (blocking).
+    #[napi]
+    pub fn send(&self, data: Buffer, flags: u32) -> Result<()> {
+        self.send_ring.send(&data, flags).map_err(map_err)
+    }
+
+    /// Try to send data without blocking. Returns true if sent.
+    #[napi]
+    pub fn try_send(&self, data: Buffer, flags: u32) -> Result<bool> {
+        match self.send_ring.try_send(&data, flags) {
+            Ok(()) => Ok(true),
+            Err(vertebra_core::channel::ChannelError::Full) => Ok(false),
+            Err(err) => Err(map_err(err)),
+        }
+    }
+
+    /// Send with timeout in milliseconds. Returns true if sent.
+    #[napi]
+    pub fn send_timeout(&self, data: Buffer, flags: u32, timeout_ms: u32) -> Result<bool> {
+        self.send_ring
+            .send_timeout(
+                &data,
+                flags,
+                std::time::Duration::from_millis(timeout_ms as u64),
+            )
+            .map_err(map_err)
+    }
+
+    /// Receive data (blocking).
+    #[napi]
+    pub fn recv(&self, max_len: u32) -> Result<Buffer> {
+        let mut buffer = vec![0u8; max_len as usize];
+        let len = self.recv_ring.recv(&mut buffer).map_err(map_err)?;
+        buffer.truncate(len);
+        Ok(Buffer::from(buffer))
+    }
+
+    /// Try to receive data without blocking. Returns null if empty.
+    #[napi]
+    pub fn try_recv(&self, max_len: u32) -> Result<Option<Buffer>> {
+        let mut buffer = vec![0u8; max_len as usize];
+        match self.recv_ring.try_recv(&mut buffer) {
+            Ok(len) => {
+                buffer.truncate(len);
+                Ok(Some(Buffer::from(buffer)))
+            }
+            Err(vertebra_core::channel::ChannelError::Empty) => Ok(None),
+            Err(err) => Err(map_err(err)),
+        }
+    }
+
+    /// Receive with timeout in milliseconds. Returns null if timeout.
+    #[napi]
+    pub fn recv_timeout(&self, max_len: u32, timeout_ms: u32) -> Result<Option<Buffer>> {
+        let mut buffer = vec![0u8; max_len as usize];
+        match self.recv_ring.recv_timeout(
+            &mut buffer,
+            std::time::Duration::from_millis(timeout_ms as u64),
+        ) {
+            Ok(Some(len)) => {
+                buffer.truncate(len);
+                Ok(Some(Buffer::from(buffer)))
+            }
+            Ok(None) => Ok(None), // timeout
+            Err(err) => Err(map_err(err)),
+        }
+    }
+
+    /// Get the channel name (if named).
+    #[cfg(unix)]
+    #[napi(getter)]
+    pub fn name(&self) -> Option<String> {
+        self.channel_name.clone()
+    }
+
+    /// Unlink the named shared memory regions (Unix only).
+    ///
+    /// This removes the names from the filesystem so no new processes can open them.
+    /// Existing mappings remain valid. Only call this once, typically from the creator.
+    #[cfg(unix)]
+    #[napi]
+    pub fn unlink(&self) -> Result<()> {
+        if let Some(ref name) = self.channel_name {
+            let req_name = format!("{name}.req");
+            let resp_name = format!("{name}.resp");
+            // Unlink both regions, ignoring ENOENT if already unlinked
+            let _ = shm_unlink_named(&req_name);
+            let _ = shm_unlink_named(&resp_name);
+        }
+        Ok(())
     }
 }
 

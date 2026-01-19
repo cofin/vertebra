@@ -1,10 +1,7 @@
 """Broker-backed PostgreSQL SQLSpec configuration."""
 
-from typing import TYPE_CHECKING, Any, ClassVar, TypedDict
+from typing import TYPE_CHECKING, Any, ClassVar, NotRequired, TypedDict
 
-from typing_extensions import NotRequired
-
-from sqlspec.config import ExtensionConfigs
 from sqlspec.core import ParameterStyle
 
 from vertebra.extensions.sqlspec._config import BrokerAsyncConfigBase, BrokerSyncConfigBase
@@ -13,9 +10,11 @@ from vertebra.extensions.sqlspec._dictionary import resolve_async_data_dictionar
 from vertebra.extensions.sqlspec.postgres.driver import BrokerPostgresAsyncDriver, BrokerPostgresSyncDriver
 
 if TYPE_CHECKING:
+    from sqlspec.config import ExtensionConfigs
     from sqlspec.core import StatementConfig
     from sqlspec.observability import ObservabilityConfig
-    from vertebra.resources.ipc import BrokerClientConfig
+
+    from vertebra.resources.broker import BrokerClientConfig
 
 
 class PostgresDriverFeatures(TypedDict, total=False):
@@ -118,4 +117,9 @@ class BrokerPostgresAsyncConfig(BrokerAsyncConfigBase):
         )
 
 
-__all__ = ("BrokerPostgresAsyncConfig", "BrokerPostgresSyncConfig", "PostgresDriverFeatures", "default_statement_config")
+__all__ = (
+    "BrokerPostgresAsyncConfig",
+    "BrokerPostgresSyncConfig",
+    "PostgresDriverFeatures",
+    "default_statement_config",
+)

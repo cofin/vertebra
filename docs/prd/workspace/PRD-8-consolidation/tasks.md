@@ -51,11 +51,11 @@
 - [ ] **T1.5.6** Write shutdown sequence test
 
 ### 1.6 Supervisor / Process Manager
-- [ ] **T1.6.1** Create supervisor module (Python/Rust) for Bun + broker lifecycle
-- [ ] **T1.6.2** Wire `vertebra serve` to supervisor (child process management)
-- [ ] **T1.6.3** Add signal propagation + structured shutdown sequencing
-- [ ] **T1.6.4** Add health checks + restart policy hooks
-- [ ] **T1.6.5** Write supervisor integration test
+- [x] **T1.6.1** Create supervisor module (Python/Rust) for Bun + broker lifecycle
+- [x] **T1.6.2** Wire `vertebra serve` to supervisor (child process management)
+- [x] **T1.6.3** Add signal propagation + structured shutdown sequencing
+- [x] **T1.6.4** Add health checks + restart policy hooks
+- [x] **T1.6.5** Write supervisor integration test
 
 ## Phase 2: Resource Management (PRD-5 Gaps)
 
@@ -236,7 +236,7 @@ All execution tunnels through same high-performance IPC bridge to DB Node.
 
 ### Critical Path (Blocks Production)
 1. T1.4.4–T1.4.7 (Unified Metrics Wiring)
-2. T1.6.* (Supervisor / process manager)
+2. ~~T1.6.* (Supervisor / process manager)~~ ✅ Complete
 3. T2.1.* (Pool Fairness)
 
 ### High Priority (Core Functionality)

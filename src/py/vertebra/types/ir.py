@@ -2,49 +2,57 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+import msgspec
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
 
-class TypeNode:
-    """Base class for type IR nodes."""
+class TypeNode(msgspec.Struct, frozen=True, tag_field="_type", tag=True):
+    """Base class for type IR nodes.
+
+    Note: gc=False is NOT used because Type IR nodes form object graphs
+    (e.g., ArrayType contains TypeNode, ObjectType contains dict of TypeNodes).
+    """
 
     def to_typescript(self) -> str:  # pragma: no cover - overridden
         raise NotImplementedError
 
-    def iter_children(self) -> Iterable["TypeNode"]:
+    def iter_children(self) -> "Iterable[TypeNode]":
         return ()
 
 
-@dataclass(frozen=True, slots=True)
-class PrimitiveType(TypeNode):
+class PrimitiveType(TypeNode, tag="primitive"):
+    """Primitive type (string, number, boolean, null, etc.)."""
+
     kind: str
 
     def to_typescript(self) -> str:
         return self.kind
 
 
-@dataclass(frozen=True, slots=True)
-class ArrayType(TypeNode):
+class ArrayType(TypeNode, tag="array"):
+    """Array type wrapping an item type."""
+
     item: TypeNode
 
     def to_typescript(self) -> str:
         return f"{self.item.to_typescript()}[]"
 
-    def iter_children(self) -> Iterable[TypeNode]:
+    def iter_children(self) -> "Iterable[TypeNode]":
         return (self.item,)
 
 
-@dataclass(frozen=True, slots=True)
-class ObjectType(TypeNode):
+class ObjectType(TypeNode, tag="object"):
+    """Object type with named fields."""
+
     fields: dict[str, TypeNode]
     name: str | None = None
-    optional_fields: set[str] = field(default_factory=set)
+    optional_fields: set[str] = msgspec.field(default_factory=set)
     type_params: tuple[str, ...] = ()
-    type_param_constraints: dict[str, TypeNode] = field(default_factory=dict)
+    type_param_constraints: dict[str, TypeNode] = msgspec.field(default_factory=dict)
 
     def to_typescript(self) -> str:
         parts: list[str] = ["{"]
@@ -54,24 +62,26 @@ class ObjectType(TypeNode):
         parts.append("}")
         return " ".join(parts)
 
-    def iter_children(self) -> Iterable[TypeNode]:
+    def iter_children(self) -> "Iterable[TypeNode]":
         yield from self.fields.values()
         yield from self.type_param_constraints.values()
 
 
-@dataclass(frozen=True, slots=True)
-class UnionType(TypeNode):
-    variants: Sequence[TypeNode]
+class UnionType(TypeNode, tag="union"):
+    """Union of multiple type variants."""
+
+    variants: "Sequence[TypeNode]"
 
     def to_typescript(self) -> str:
         return " | ".join(v.to_typescript() for v in self.variants)
 
-    def iter_children(self) -> Iterable[TypeNode]:
+    def iter_children(self) -> "Iterable[TypeNode]":
         return self.variants
 
 
-@dataclass(frozen=True, slots=True)
-class LiteralType(TypeNode):
+class LiteralType(TypeNode, tag="literal"):
+    """Literal type with a specific value."""
+
     value: object
 
     def to_typescript(self) -> str:
@@ -85,60 +95,66 @@ class LiteralType(TypeNode):
         return str(self.value)
 
 
-@dataclass(frozen=True, slots=True)
-class GenericType(TypeNode):
+class GenericType(TypeNode, tag="generic"):
+    """Generic type with type parameters."""
+
     name: str
-    params: Sequence[TypeNode]
+    params: "Sequence[TypeNode]"
 
     def to_typescript(self) -> str:
         inner = ", ".join(param.to_typescript() for param in self.params)
         return f"{self.name}<{inner}>"
 
-    def iter_children(self) -> Iterable[TypeNode]:
+    def iter_children(self) -> "Iterable[TypeNode]":
         return self.params
 
 
-@dataclass(frozen=True, slots=True)
-class TupleType(TypeNode):
-    items: Sequence[TypeNode]
+class TupleType(TypeNode, tag="tuple"):
+    """Tuple type with ordered item types."""
+
+    items: "Sequence[TypeNode]"
 
     def to_typescript(self) -> str:
         inner = ", ".join(item.to_typescript() for item in self.items)
         return f"[{inner}]"
 
-    def iter_children(self) -> Iterable[TypeNode]:
+    def iter_children(self) -> "Iterable[TypeNode]":
         return self.items
 
 
-@dataclass(frozen=True, slots=True)
-class RawType(TypeNode):
+class RawType(TypeNode, tag="raw"):
+    """Raw TypeScript type string."""
+
     typescript: str
 
     def to_typescript(self) -> str:
         return self.typescript
 
 
-@dataclass(frozen=True, slots=True)
-class UnknownType(TypeNode):
+class UnknownType(TypeNode, tag="unknown"):
+    """Unknown or unresolved type."""
+
     def to_typescript(self) -> str:
         return "unknown"
 
 
-@dataclass(frozen=True, slots=True)
-class NamedTypeRef(TypeNode):
+class NamedTypeRef(TypeNode, tag="named_ref"):
+    """Reference to a named type."""
+
     name: str
 
     def to_typescript(self) -> str:
         return self.name
 
 
-@dataclass(frozen=True, slots=True)
-class AnnotatedType(TypeNode):
+class AnnotatedType(TypeNode, tag="annotated"):
+    """Type with additional metadata annotations."""
+
     base: TypeNode
     metadata: tuple[object, ...]
 
     def to_typescript(self) -> str:
         return self.base.to_typescript()
 
-    def iter_children(self) -> Iterable[TypeNode]:
+    def iter_children(self) -> "Iterable[TypeNode]":
         return (self.base,)

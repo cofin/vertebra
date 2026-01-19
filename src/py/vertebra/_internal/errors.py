@@ -11,10 +11,7 @@ class MissingDependencyError(ImportError):
 
     def __str__(self) -> str:
         install = self.install_package or self.package
-        return (
-            f"Missing dependency '{self.package}'. "
-            f"Install with 'pip install {install}' to enable this feature."
-        )
+        return f"Missing dependency '{self.package}'. Install with 'pip install {install}' to enable this feature."
 
 
 __all__ = ("MissingDependencyError",)

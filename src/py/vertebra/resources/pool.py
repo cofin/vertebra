@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from vertebra.resources.ipc import BrokerClient, BrokerClientConfig
+import msgspec
+
+from vertebra.resources.broker import BrokerClient, BrokerClientConfig
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -16,8 +17,9 @@ class BrokerPoolError(RuntimeError):
     """Raised when broker pool operations fail."""
 
 
-@dataclass(slots=True)
-class BrokerLease:
+class BrokerLease(msgspec.Struct, frozen=True):
+    """A lease for a broker connection, usable as an async context manager."""
+
     pool: "BrokerPool"
     client: BrokerClient
     token: str

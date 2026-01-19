@@ -1,6 +1,6 @@
 """Generic broker proxy configs for external SQLSpec adapters."""
 
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from sqlspec.config import AsyncDatabaseConfig, ExtensionConfigs, SyncDatabaseConfig
 from sqlspec.core import get_default_config
@@ -12,7 +12,8 @@ from vertebra.extensions.sqlspec._driver import BrokerAsyncDriverBase, BrokerSyn
 if TYPE_CHECKING:
     from sqlspec.core import StatementConfig
     from sqlspec.observability import ObservabilityConfig
-    from vertebra.resources.ipc import BrokerClientConfig
+
+    from vertebra.resources.broker import BrokerClientConfig
 
 SyncConfigT = TypeVar("SyncConfigT", bound=SyncDatabaseConfig[Any, Any, Any])
 AsyncConfigT = TypeVar("AsyncConfigT", bound=AsyncDatabaseConfig[Any, Any, Any])
@@ -30,7 +31,7 @@ class BrokerProxyAsyncDriver(BrokerAsyncDriverBase):
     dialect: ClassVar[str | None] = None
 
 
-class BrokerProxySyncConfig(BrokerSyncConfigBase, Generic[SyncConfigT]):
+class BrokerProxySyncConfig[SyncConfigT: SyncDatabaseConfig[Any, Any, Any]](BrokerSyncConfigBase):
     """Broker proxy config wrapping a sync SQLSpec adapter."""
 
     driver_type: ClassVar[type[Any]] = BrokerProxySyncDriver
@@ -73,7 +74,7 @@ class BrokerProxySyncConfig(BrokerSyncConfigBase, Generic[SyncConfigT]):
         )
 
 
-class BrokerProxyAsyncConfig(BrokerAsyncConfigBase, Generic[AsyncConfigT]):
+class BrokerProxyAsyncConfig[AsyncConfigT: AsyncDatabaseConfig[Any, Any, Any]](BrokerAsyncConfigBase):
     """Broker proxy config wrapping an async SQLSpec adapter."""
 
     driver_type: ClassVar[type[Any]] = BrokerProxyAsyncDriver
@@ -116,9 +117,4 @@ class BrokerProxyAsyncConfig(BrokerAsyncConfigBase, Generic[AsyncConfigT]):
         )
 
 
-__all__ = (
-    "BrokerProxyAsyncConfig",
-    "BrokerProxyAsyncDriver",
-    "BrokerProxySyncConfig",
-    "BrokerProxySyncDriver",
-)
+__all__ = ("BrokerProxyAsyncConfig", "BrokerProxyAsyncDriver", "BrokerProxySyncConfig", "BrokerProxySyncDriver")

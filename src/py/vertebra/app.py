@@ -41,9 +41,7 @@ class Vertebra:
         **kwargs: Any,
     ) -> ProviderPlugin:
         """Register a provider plugin or plugin factory."""
-        if inspect.isclass(plugin_or_factory):
-            plugin = plugin_or_factory(*args, **kwargs)
-        elif callable(plugin_or_factory) and (args or kwargs):
+        if inspect.isclass(plugin_or_factory) or (callable(plugin_or_factory) and (args or kwargs)):
             plugin = plugin_or_factory(*args, **kwargs)
         else:
             plugin = plugin_or_factory

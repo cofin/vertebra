@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import contextlib
-import json
 from typing import Any, Protocol, runtime_checkable
 
+from vertebra._internal import decode_json, encode_json
 from vertebra.types.extractor import TypeExtractor
 from vertebra.types.ir import NamedTypeRef, ObjectType, TypeNode
 
@@ -84,12 +84,12 @@ class PydanticSerializer:
     def serialize(self, value: Any, type_hint: type | None = None) -> bytes:
         if isinstance(value, self._BaseModel):
             return value.model_dump_json().encode()
-        return json.dumps(value).encode()
+        return encode_json(value, as_bytes=True)
 
     def deserialize(self, data: bytes, type_hint: type | None = None) -> Any:
         if isinstance(type_hint, type) and issubclass(type_hint, self._BaseModel):
             return type_hint.model_validate_json(data)
-        return json.loads(data)
+        return decode_json(data)
 
     def get_type_metadata(self, type_hint: type | None = None) -> TypeNode | None:
         if not isinstance(type_hint, type) or not issubclass(type_hint, self._BaseModel):

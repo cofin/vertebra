@@ -15,10 +15,7 @@ class BrokerMysqlSyncDriver(BrokerSyncDriverBase):
     dialect: ClassVar[str] = "mysql"
 
     def __init__(
-        self,
-        connection: Any,
-        statement_config: Any = None,
-        driver_features: "dict[str, Any] | None" = None,
+        self, connection: Any, statement_config: Any = None, driver_features: "dict[str, Any] | None" = None
     ) -> None:
         super().__init__(
             connection=connection,
@@ -34,10 +31,7 @@ class BrokerMysqlAsyncDriver(BrokerAsyncDriverBase):
     dialect: ClassVar[str] = "mysql"
 
     def __init__(
-        self,
-        connection: Any,
-        statement_config: Any = None,
-        driver_features: "dict[str, Any] | None" = None,
+        self, connection: Any, statement_config: Any = None, driver_features: "dict[str, Any] | None" = None
     ) -> None:
         super().__init__(
             connection=connection,

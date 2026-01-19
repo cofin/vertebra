@@ -1,19 +1,17 @@
 """Data dictionary factories for broker-backed SQLSpec adapters."""
 
-from typing import TYPE_CHECKING, Any, Callable, ClassVar
+from collections.abc import Callable
+from typing import Any, ClassVar
 
 from sqlspec.adapters.aiosqlite.data_dictionary import AiosqliteDataDictionary
 from sqlspec.adapters.asyncmy.data_dictionary import AsyncmyDataDictionary
 from sqlspec.adapters.asyncpg.data_dictionary import AsyncpgDataDictionary
+from sqlspec.adapters.psycopg.data_dictionary import PsycopgSyncDataDictionary
 from sqlspec.adapters.pymysql.data_dictionary import PyMysqlDataDictionary
-from sqlspec.adapters.psycopg.data_dictionary import PsycopgAsyncDataDictionary, PsycopgSyncDataDictionary
 from sqlspec.adapters.sqlite.data_dictionary import SqliteDataDictionary
 from sqlspec.driver import AsyncDataDictionaryBase, SyncDataDictionaryBase
 from sqlspec.exceptions import SQLFileNotFoundError
 from sqlspec.typing import ColumnMetadata, ForeignKeyMetadata, IndexMetadata, TableMetadata, VersionInfo
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable
 
 
 class _GenericSyncDataDictionary(SyncDataDictionaryBase):
@@ -89,7 +87,10 @@ class _GenericSyncDataDictionary(SyncDataDictionaryBase):
         self._log_table_describe(driver, schema_name=schema_name, table_name=table, operation="columns")
         try:
             return driver.select(
-                self.get_query("columns_by_table"), schema_name=schema_name, table_name=table, schema_type=ColumnMetadata
+                self.get_query("columns_by_table"),
+                schema_name=schema_name,
+                table_name=table,
+                schema_type=ColumnMetadata,
             )
         except SQLFileNotFoundError:
             return []
@@ -239,10 +240,7 @@ class _GenericAsyncDataDictionary(AsyncDataDictionaryBase):
         self._log_table_describe(driver, schema_name=schema_name, table_name=table, operation="indexes")
         try:
             return await driver.select(
-                self.get_query("indexes_by_table"),
-                schema_name=schema_name,
-                table_name=table,
-                schema_type=IndexMetadata,
+                self.get_query("indexes_by_table"), schema_name=schema_name, table_name=table, schema_type=IndexMetadata
             )
         except SQLFileNotFoundError:
             return []

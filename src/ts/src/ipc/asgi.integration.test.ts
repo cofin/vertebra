@@ -104,7 +104,9 @@ beforeAll(async () => {
       ...(process.env as Record<string, string>),
       VERTEBRA_WORKER_ID: String(i),
       VERTEBRA_TEST_FILE: testFile,
-      PYTHONPATH: process.env.PYTHONPATH ? `${pythonPath}${pathDelimiter()}${process.env.PYTHONPATH}` : pythonPath,
+      PYTHONPATH: process.env.PYTHONPATH
+        ? `${pythonPath}${pathDelimiter()}${process.env.PYTHONPATH}`
+        : pythonPath,
     };
     const proc = Bun.spawn({
       cmd: [

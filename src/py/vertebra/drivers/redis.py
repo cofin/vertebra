@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import msgspec
 
 from vertebra.drivers.base import AsyncDriver, SyncDriver
 from vertebra.drivers.broker import (
@@ -16,16 +16,18 @@ from vertebra.drivers.broker import (
 from vertebra.resources import BrokerClient, BrokerClientConfig
 
 
-@dataclass(slots=True)
-class SyncRedisDriverConfig(BrokerDriverConfig):
+class SyncRedisDriverConfig(BrokerDriverConfig, frozen=True):
+    """Configuration for synchronous Redis driver."""
+
     pool: str = "redis"
-    client: BrokerClientConfig = BrokerClientConfig()  # noqa: RUF009
+    client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
-@dataclass(slots=True)
-class AsyncRedisDriverConfig(BrokerDriverConfig):
+class AsyncRedisDriverConfig(BrokerDriverConfig, frozen=True):
+    """Configuration for asynchronous Redis driver."""
+
     pool: str = "redis"
-    client: BrokerClientConfig = BrokerClientConfig()  # noqa: RUF009
+    client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
 class SyncRedisDriver(SyncDriver):
@@ -54,9 +56,4 @@ class AsyncRedisDriver(AsyncDriver):
         return AsyncBrokerPool(self._config.pool, self._config.client, max_clients=max_size)
 
 
-__all__ = (
-    "AsyncRedisDriver",
-    "AsyncRedisDriverConfig",
-    "SyncRedisDriver",
-    "SyncRedisDriverConfig",
-)
+__all__ = ("AsyncRedisDriver", "AsyncRedisDriverConfig", "SyncRedisDriver", "SyncRedisDriverConfig")

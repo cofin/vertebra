@@ -5,17 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from vertebra.filesystem import AsyncGCSFileSystem, FileEntry, GCSFileSystem
+from vertebra.storage.client import AsyncFileSystemClient, FileEntry, SyncFileSystemClient
 
 
 @dataclass(slots=True)
 class GCSClient:
     bucket: str
-    _fs: GCSFileSystem
+    _fs: SyncFileSystemClient
 
     def __init__(self, bucket: str, *, options: dict[str, Any] | None = None) -> None:
         self.bucket = bucket
-        self._fs = GCSFileSystem(bucket, options=options)
+        self._fs = SyncFileSystemClient(backend="gcs", bucket=bucket, options=options)
 
     def upload_bytes(
         self, key: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None
@@ -51,7 +51,7 @@ class GCSClient:
 
 class AsyncGCSClient:
     def __init__(self, bucket: str, *, options: dict[str, Any] | None = None) -> None:
-        self._fs = AsyncGCSFileSystem(bucket, options=options)
+        self._fs = AsyncFileSystemClient(backend="gcs", bucket=bucket, options=options)
 
     async def upload_bytes(
         self, key: str, data: bytes, *, content_type: str | None = None, metadata: dict[str, str] | None = None

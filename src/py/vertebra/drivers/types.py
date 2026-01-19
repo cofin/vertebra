@@ -2,22 +2,25 @@
 
 from __future__ import annotations
 
-import json
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from vertebra._internal import decode_json, encode_json
+
 
 def _encode_json(value: Any) -> str:
-    return json.dumps(value, separators=(",", ":"), default=str)
+    """Encode value to compact JSON string."""
+    return encode_json(value, as_bytes=False)
 
 
 def _decode_json(value: Any) -> Any:
+    """Decode JSON from string or bytes."""
     if isinstance(value, (bytes, bytearray, memoryview)):
         value = bytes(value).decode("utf-8")
     if isinstance(value, str):
-        return json.loads(value)
+        return decode_json(value)
     return value
 
 

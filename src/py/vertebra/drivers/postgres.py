@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import msgspec
 
 from vertebra.drivers.base import AsyncDriver, SyncDriver
 from vertebra.drivers.broker import (
@@ -16,16 +16,18 @@ from vertebra.drivers.broker import (
 from vertebra.resources import BrokerClient, BrokerClientConfig
 
 
-@dataclass(slots=True)
-class SyncPostgresDriverConfig(BrokerDriverConfig):
+class SyncPostgresDriverConfig(BrokerDriverConfig, frozen=True):
+    """Configuration for synchronous PostgreSQL driver."""
+
     pool: str = "postgres"
-    client: BrokerClientConfig = BrokerClientConfig()  # noqa: RUF009
+    client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
-@dataclass(slots=True)
-class AsyncPostgresDriverConfig(BrokerDriverConfig):
+class AsyncPostgresDriverConfig(BrokerDriverConfig, frozen=True):
+    """Configuration for asynchronous PostgreSQL driver."""
+
     pool: str = "postgres"
-    client: BrokerClientConfig = BrokerClientConfig()  # noqa: RUF009
+    client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
 class SyncPostgresDriver(SyncDriver):
@@ -54,9 +56,4 @@ class AsyncPostgresDriver(AsyncDriver):
         return AsyncBrokerPool(self._config.pool, self._config.client, max_clients=max_size)
 
 
-__all__ = (
-    "AsyncPostgresDriver",
-    "AsyncPostgresDriverConfig",
-    "SyncPostgresDriver",
-    "SyncPostgresDriverConfig",
-)
+__all__ = ("AsyncPostgresDriver", "AsyncPostgresDriverConfig", "SyncPostgresDriver", "SyncPostgresDriverConfig")

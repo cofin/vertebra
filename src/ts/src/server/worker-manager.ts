@@ -1,7 +1,12 @@
 import { delimiter, join, resolve as resolvePath } from "node:path";
 
 import { type AsgiIpcFrame, type AsgiRequest } from "../ipc/asgi";
-import { IpcClient, resolveIpcConfig, type IpcClientConfig, type ResolvedIpcConfig } from "../ipc/client";
+import {
+  IpcClient,
+  resolveIpcConfig,
+  type IpcClientConfig,
+  type ResolvedIpcConfig,
+} from "../ipc/client";
 import type { PythonConfig, ServerIpcConfig } from "./config";
 
 const HEALTH_PATH = "/__vertebra__/health";

@@ -4,7 +4,6 @@ import { S3Client, type S3Options } from "bun";
 
 export type Backend = "local" | "s3" | "gcs";
 
-
 export type FileEntry = {
   path: string;
   isDir: boolean;
@@ -135,19 +134,21 @@ export async function handleLocalWriteFile(filePath: string, localPath: string):
 
 export async function handleLocalList(dirPath: string): Promise<FileEntry[]> {
   const entries = await fs.readdir(dirPath, { withFileTypes: true });
-  return await Promise.all(entries.map(async (entry) => {
-    const fullPath = path.join(dirPath, entry.name);
-    if (entry.isDirectory()) {
-      return { path: fullPath, isDir: true };
-    }
-    const stat = await fs.stat(fullPath);
-    return {
-      path: fullPath,
-      isDir: false,
-      size: stat.size,
-      modified: stat.mtime.toISOString(),
-    };
-  }));
+  return await Promise.all(
+    entries.map(async (entry) => {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        return { path: fullPath, isDir: true };
+      }
+      const stat = await fs.stat(fullPath);
+      return {
+        path: fullPath,
+        isDir: false,
+        size: stat.size,
+        modified: stat.mtime.toISOString(),
+      };
+    }),
+  );
 }
 
 export async function handleLocalStat(filePath: string): Promise<FileEntry> {
@@ -233,7 +234,11 @@ export async function handleS3WriteFile(
   return stat.size;
 }
 
-export async function handleS3List(bucket: string, prefix: string, options?: Record<string, unknown>): Promise<FileEntry[]> {
+export async function handleS3List(
+  bucket: string,
+  prefix: string,
+  options?: Record<string, unknown>,
+): Promise<FileEntry[]> {
   const client = getS3Client(options, bucket);
   const response = await client.list(prefix ? { prefix } : null);
   return (response.contents ?? []).map((item) => ({
@@ -245,7 +250,11 @@ export async function handleS3List(bucket: string, prefix: string, options?: Rec
   }));
 }
 
-export async function handleS3Stat(bucket: string, key: string, options?: Record<string, unknown>): Promise<FileEntry> {
+export async function handleS3Stat(
+  bucket: string,
+  key: string,
+  options?: Record<string, unknown>,
+): Promise<FileEntry> {
   const client = getS3Client(options, bucket);
   const stat = await client.stat(key);
   return {
@@ -257,12 +266,20 @@ export async function handleS3Stat(bucket: string, key: string, options?: Record
   };
 }
 
-export async function handleS3Exists(bucket: string, key: string, options?: Record<string, unknown>): Promise<boolean> {
+export async function handleS3Exists(
+  bucket: string,
+  key: string,
+  options?: Record<string, unknown>,
+): Promise<boolean> {
   const client = getS3Client(options, bucket);
   return await client.exists(key);
 }
 
-export async function handleS3Delete(bucket: string, key: string, options?: Record<string, unknown>): Promise<void> {
+export async function handleS3Delete(
+  bucket: string,
+  key: string,
+  options?: Record<string, unknown>,
+): Promise<void> {
   const client = getS3Client(options, bucket);
   await client.delete(key);
 }
@@ -360,7 +377,11 @@ export async function handleGcsWriteFile(
   return stat.size;
 }
 
-export async function handleGcsList(bucket: string, prefix: string, options?: Record<string, unknown>): Promise<FileEntry[]> {
+export async function handleGcsList(
+  bucket: string,
+  prefix: string,
+  options?: Record<string, unknown>,
+): Promise<FileEntry[]> {
   const gcs = gcsOptions(options);
   const apiBase = gcs.apiBaseUrl ?? "https://storage.googleapis.com/storage/v1";
   const url = new URL(`${apiBase}/b/${bucket}/o`);
@@ -372,7 +393,12 @@ export async function handleGcsList(bucket: string, prefix: string, options?: Re
     throw new Error(`GCS list failed: ${response.status}`);
   }
   const data = await response.json();
-  const items = (data.items ?? []) as Array<{ name: string; size?: string; updated?: string; etag?: string }>;
+  const items = (data.items ?? []) as Array<{
+    name: string;
+    size?: string;
+    updated?: string;
+    etag?: string;
+  }>;
   return items.map((item) => ({
     path: `gs://${bucket}/${item.name}`,
     isDir: false,
@@ -382,7 +408,11 @@ export async function handleGcsList(bucket: string, prefix: string, options?: Re
   }));
 }
 
-export async function handleGcsStat(bucket: string, key: string, options?: Record<string, unknown>): Promise<FileEntry> {
+export async function handleGcsStat(
+  bucket: string,
+  key: string,
+  options?: Record<string, unknown>,
+): Promise<FileEntry> {
   const gcs = gcsOptions(options);
   const apiBase = gcs.apiBaseUrl ?? "https://storage.googleapis.com/storage/v1";
   const url = `${apiBase}/b/${bucket}/o/${encodeKey(key)}`;
@@ -400,7 +430,11 @@ export async function handleGcsStat(bucket: string, key: string, options?: Recor
   };
 }
 
-export async function handleGcsExists(bucket: string, key: string, options?: Record<string, unknown>): Promise<boolean> {
+export async function handleGcsExists(
+  bucket: string,
+  key: string,
+  options?: Record<string, unknown>,
+): Promise<boolean> {
   try {
     await handleGcsStat(bucket, key, options);
     return true;
@@ -409,7 +443,11 @@ export async function handleGcsExists(bucket: string, key: string, options?: Rec
   }
 }
 
-export async function handleGcsDelete(bucket: string, key: string, options?: Record<string, unknown>): Promise<void> {
+export async function handleGcsDelete(
+  bucket: string,
+  key: string,
+  options?: Record<string, unknown>,
+): Promise<void> {
   const gcs = gcsOptions(options);
   const apiBase = gcs.apiBaseUrl ?? "https://storage.googleapis.com/storage/v1";
   const url = `${apiBase}/b/${bucket}/o/${encodeKey(key)}`;

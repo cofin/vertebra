@@ -1,10 +1,7 @@
 """Broker-backed MySQL SQLSpec configuration."""
 
-from typing import TYPE_CHECKING, Any, ClassVar, TypedDict
+from typing import TYPE_CHECKING, Any, ClassVar, NotRequired, TypedDict
 
-from typing_extensions import NotRequired
-
-from sqlspec.config import ExtensionConfigs
 from sqlspec.core import ParameterStyle
 
 from vertebra.extensions.sqlspec._config import BrokerAsyncConfigBase, BrokerSyncConfigBase
@@ -13,9 +10,11 @@ from vertebra.extensions.sqlspec._dictionary import resolve_async_data_dictionar
 from vertebra.extensions.sqlspec.mysql.driver import BrokerMysqlAsyncDriver, BrokerMysqlSyncDriver
 
 if TYPE_CHECKING:
+    from sqlspec.config import ExtensionConfigs
     from sqlspec.core import StatementConfig
     from sqlspec.observability import ObservabilityConfig
-    from vertebra.resources.ipc import BrokerClientConfig
+
+    from vertebra.resources.broker import BrokerClientConfig
 
 
 class MysqlDriverFeatures(TypedDict, total=False):

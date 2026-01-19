@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import msgspec
 import pytest
@@ -46,9 +45,11 @@ async def test_postgres_driver_async_fetch() -> None:
         data, _flags = await asyncio.to_thread(req_ring.recv, 1000)
         request = decoder.decode(data)
         resp_ring.send(
-            encoder.encode(
-                {"ok": True, "result": {"columns": ["value"], "rows": [[42]], "rowcount": 1}, "id": request["id"]}
-            ),
+            encoder.encode({
+                "ok": True,
+                "result": {"columns": ["value"], "rows": [[42]], "rowcount": 1},
+                "id": request["id"],
+            }),
             0,
             1000,
         )

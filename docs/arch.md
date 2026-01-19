@@ -16,29 +16,51 @@ Vertebra is a Python-first application backbone with Rust IPC primitives and a B
 | PRD | Status | Notes |
 | --- | --- | --- |
 | PRD-0 | Complete | Foundation, build system, docs, repo cleanup |
-| PRD-1 | Complete | Rust IPC core |
+| PRD-1 | Complete | Rust IPC core (SPSC/MPMC, shm, ChannelHandle) |
 | PRD-2 | Complete | Python bindings + type bridge |
-| PRD-3 | In Progress | Bun server + protocol support |
-| PRD-4 | In Progress | Bun-backed Python drivers |
-| PRD-5 | In Progress | Resource management |
-| PRD-6 | Not Started | Integration + docs |
-| PRD-7 | Not Started | MCP integration |
+| PRD-3 | 90% | Bun server + protocol support (WebSocket, SSE pending) |
+| PRD-4 | 75% | Bun-backed Python drivers (SQLSpec adapters complete) |
+| PRD-5 | 60% | Resource management (broker pools, fairness scheduler) |
+| PRD-6 | 5% | Integration + docs |
+| PRD-7 | 10% | MCP integration (skeleton + IPC bridge stub) |
 | PRD-8 | In Progress | Production readiness consolidation |
 
 ## Component Map
 
 ```
 Python (Litestar-style API)
-  └── Type Bridge + Tooling (PRD-2)
-       └── Shared metadata registry / IR
+  ├── Type Bridge + Tooling (PRD-2)
+  │    └── Shared metadata registry / IR / TypeScript generator
+  ├── SQLSpec Extensions (PRD-4)
+  │    └── Broker-backed adapters (Postgres/MySQL/SQLite)
+  ├── Resources (PRD-5)
+  │    └── BrokerClient → shared memory → Bun broker
+  └── Server (PRD-3)
+       └── ASGI worker with IPC framing
 
 Rust (IPC Core)
-  └── Shared memory + channels + sync primitives (PRD-1)
-       └── PyO3 + napi-rs bindings
+  ├── vertebra-core
+  │    ├── Shared memory (ShmRegion, shm_unlink_named)
+  │    ├── SPSC/MPMC ring buffers with timeouts
+  │    └── Sync primitives (futex/ulock/WaitOnAddress)
+  ├── vertebra-js (napi-rs)
+  │    ├── ChannelHandle (bidirectional SPSC pairs)
+  │    ├── ChannelRole enum (Client/Server)
+  │    └── BufferPool, SpscRing, MpmcRing handles
+  └── vertebra-py (PyO3)
+       └── Python bindings for channel/buffer/shm
 
 TypeScript/Bun (Server + Tooling)
-  └── HTTP/2, H2C, WebSocket, JSON-RPC, gRPC (PRD-3)
-       └── Client generation consumes PRD-2 registry
+  ├── Broker (PRD-5)
+  │    ├── Pool implementations (SqlPool, RedisPool, StoragePool)
+  │    ├── BasePoolAdapter (shared counter tracking)
+  │    └── FairnessScheduler
+  ├── Server (PRD-3)
+  │    ├── HTTP server + worker management
+  │    ├── ASGI bridge with streaming
+  │    └── Metrics + graceful shutdown
+  └── MCP (PRD-7)
+       └── JSON-RPC + IPC bridge stub
 ```
 
 ## Cross-PRD Decisions (Canonical)
@@ -56,6 +78,56 @@ TypeScript/Bun (Server + Tooling)
   - Control plane: in-process or shared memory (no TCP)
 - **Runtime strategy**: Bun-first; Node fallback only if parity is proven.
 - **Test infrastructure**: Docker/Podman runtime abstraction for integration tests (no compose required).
+
+## Shared-Memory Broker
+
+The broker is the central resource manager, owning all database and storage pools:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Bun Broker Process                      │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │
+│  │ SqlPool  │  │SqlitePool│  │RedisPool │  │  StoragePool     │ │
+│  │ (PG/MySQL)│ │          │  │          │  │ (Local/S3/GCS)   │ │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────────┬─────────┘ │
+│       └──────────┬──┴───────────┬┴─────────────────┬┘           │
+│                  │              │                  │            │
+│              BasePoolAdapter (counters, stats)                  │
+├─────────────────────────────────────────────────────────────────┤
+│                    FairnessScheduler (FIFO/Weighted/Priority)   │
+├─────────────────────────────────────────────────────────────────┤
+│                    Shared Memory Ring Buffers (SPSC)            │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+              ┌──────────────┼──────────────┐
+              ▼              ▼              ▼
+        Python Worker   Python Worker   Python Worker
+```
+
+### Pool Architecture
+
+All pools extend `BasePoolAdapter` which provides:
+- Counter tracking (acquires, releases, errors)
+- Unified `PoolStats` type for metrics
+- Common lifecycle (acquire/release/getStats)
+
+### ChannelHandle (Bidirectional IPC)
+
+`ChannelHandle` provides paired SPSC rings for request/response patterns:
+
+```typescript
+// TypeScript usage
+const { client, server } = createChannelPair(64, 8);
+client.send(Buffer.from([1, 2, 3]), 0);
+const response = server.recv(1024);
+
+// Named channels for cross-process IPC (Unix)
+const channel = ChannelHandle.createNamed("/my-channel", 64, 8, ChannelRole.Client);
+channel.unlink(); // Explicit cleanup
+```
+
+Methods: `send()`, `trySend()`, `sendTimeout()`, `recv()`, `tryRecv()`, `recvTimeout()`, `unlink()`
 
 ## Performance Strategy
 

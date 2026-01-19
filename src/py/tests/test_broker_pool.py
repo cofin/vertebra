@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 import msgspec
@@ -9,14 +10,24 @@ import pytest
 from vertebra.resources import BrokerClientConfig, BrokerPool
 
 try:
-    from vertebra._internal.shm import SHM_AVAILABLE, ShmRing, ShmRingConfig
+    from vertebra._internal.shm import SHM_AVAILABLE, ShmRing, ShmRingConfig, shm_unlink
 except Exception as exc:  # pragma: no cover
     ShmRing = None  # type: ignore[assignment]
     ShmRingConfig = None  # type: ignore[assignment]
+    shm_unlink = None  # type: ignore[assignment]
     SHM_AVAILABLE = False
     _IMPORT_ERROR = exc
 else:
     _IMPORT_ERROR = None
+
+
+def _cleanup_shm(name: str) -> None:
+    """Clean up shared memory from previous test runs."""
+    if shm_unlink is None:
+        return
+    for suffix in (".control", ".client.test-client.req", ".client.test-client.resp"):
+        with contextlib.suppress(Exception):
+            shm_unlink(f"/{name}{suffix}")
 
 
 @pytest.mark.anyio
@@ -28,6 +39,8 @@ async def test_broker_pool_context_manager() -> None:
     decoder = msgspec.msgpack.Decoder()
 
     name = "vertebra-broker-test"
+    # Clean up any stale shared memory from previous runs
+    _cleanup_shm(name)
     control = ShmRing.create(ShmRingConfig(name=f"/{name}.control", slot_size=4096, slots=64))
 
     async def broker_task() -> None:
@@ -44,9 +57,7 @@ async def test_broker_pool_context_manager() -> None:
             request = decoder.decode(data)
             if request["kind"] == "acquire":
                 response: dict[str, Any] = {"ok": True, "token": "1", "id": request["id"]}
-            elif request["kind"] == "release":
-                response = {"ok": True, "id": request["id"]}
-            elif request["kind"] == "health":
+            elif request["kind"] == "release" or request["kind"] == "health":
                 response = {"ok": True, "id": request["id"]}
             else:
                 response = {"ok": False, "error": {"message": "unknown"}, "id": request["id"]}
@@ -72,3 +83,5 @@ async def test_broker_pool_context_manager() -> None:
     await pool.close()
     await task
     control.close()
+    # Clean up shared memory after test completes
+    _cleanup_shm(name)

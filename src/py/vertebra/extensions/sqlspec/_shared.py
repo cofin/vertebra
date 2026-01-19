@@ -1,14 +1,8 @@
 """Shared SQLSpec broker helpers."""
 
-import contextlib
 from typing import TYPE_CHECKING, Any
 
-from vertebra.drivers.broker import (
-    AsyncBrokerConnection,
-    AsyncBrokerPool,
-    SyncBrokerConnection,
-    SyncBrokerPool,
-)
+from vertebra.drivers.broker import AsyncBrokerConnection, AsyncBrokerPool, SyncBrokerConnection, SyncBrokerPool
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -27,7 +21,9 @@ class BrokerSyncConnectionContext:
         self._connection = self._pool.acquire()
         return self._connection
 
-    def __exit__(self, exc_type: "type[BaseException] | None", exc_val: "BaseException | None", exc_tb: Any) -> "bool | None":
+    def __exit__(
+        self, exc_type: "type[BaseException] | None", exc_val: "BaseException | None", exc_tb: Any
+    ) -> "bool | None":
         if self._connection is not None:
             self._pool.release(self._connection)
             self._connection = None
@@ -60,10 +56,10 @@ class BrokerSyncSessionContext:
         "_connection",
         "_driver",
         "_driver_features",
+        "_driver_type",
         "_prepare_driver",
         "_release_connection",
         "_statement_config",
-        "_driver_type",
     )
 
     def __init__(
@@ -88,13 +84,13 @@ class BrokerSyncSessionContext:
     def __enter__(self) -> Any:
         self._connection = self._acquire_connection()
         self._driver = self._driver_type(
-            connection=self._connection,
-            statement_config=self._statement_config,
-            driver_features=self._driver_features,
+            connection=self._connection, statement_config=self._statement_config, driver_features=self._driver_features
         )
         return self._prepare_driver(self._driver)
 
-    def __exit__(self, exc_type: "type[BaseException] | None", exc_val: "BaseException | None", exc_tb: Any) -> "bool | None":
+    def __exit__(
+        self, exc_type: "type[BaseException] | None", exc_val: "BaseException | None", exc_tb: Any
+    ) -> "bool | None":
         if self._connection is not None:
             self._release_connection(self._connection)
             self._connection = None
@@ -107,10 +103,10 @@ class BrokerAsyncSessionContext:
         "_connection",
         "_driver",
         "_driver_features",
+        "_driver_type",
         "_prepare_driver",
         "_release_connection",
         "_statement_config",
-        "_driver_type",
     )
 
     def __init__(
@@ -135,9 +131,7 @@ class BrokerAsyncSessionContext:
     async def __aenter__(self) -> Any:
         self._connection = await self._acquire_connection()
         self._driver = self._driver_type(
-            connection=self._connection,
-            statement_config=self._statement_config,
-            driver_features=self._driver_features,
+            connection=self._connection, statement_config=self._statement_config, driver_features=self._driver_features
         )
         return self._prepare_driver(self._driver)
 
