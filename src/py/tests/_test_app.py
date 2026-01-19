@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 
-async def app(scope, receive, send) -> None:
+async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
     if scope["type"] == "lifespan":
         while True:
             message = await receive()

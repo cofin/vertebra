@@ -1,4 +1,4 @@
-import { IpcPool, type IpcClientConfig, type IpcRequester } from "../ipc";
+import { type IpcClientConfig, IpcPool, type IpcRequester } from "../ipc";
 
 export interface WorkerPool extends IpcRequester {
   close(): Promise<void>;

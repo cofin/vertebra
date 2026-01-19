@@ -680,11 +680,18 @@ mod tests {
                 .unwrap()
                 .parse()
                 .unwrap();
-            let region = ShmRegion::open_named(&name, size).unwrap();
-            let ptr = region.as_ptr().cast::<SharedMutex<u32>>();
+            let mut region = ShmRegion::open_named(&name, size).unwrap();
+            let ptr = unsafe {
+                region
+                    .as_mut_slice()
+                    .as_mut_ptr()
+                    .cast::<SharedMutex<u32>>()
+            };
             let mutex = unsafe { &*ptr };
-            let mut guard = mutex.lock().unwrap();
-            *guard += 1;
+            {
+                let mut guard = mutex.lock().unwrap();
+                *guard += 1;
+            }
             return;
         }
 
@@ -715,7 +722,7 @@ mod tests {
             .env("VERTEBRA_MUTEX_NAME", &name)
             .env("VERTEBRA_MUTEX_SIZE", size.to_string())
             .arg("--exact")
-            .arg("shared_mutex_multi_process")
+            .arg("sync::tests::shared_mutex_multi_process")
             .arg("--nocapture")
             .status()
             .unwrap();

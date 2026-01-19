@@ -1,3 +1,4 @@
+export { BasePoolAdapter, type PoolAdapter } from "./base-pool";
 export {
   BrokerClient,
   type BrokerClientConfig,
@@ -6,5 +7,3 @@ export {
   type SchedulerClientStats,
   type SchedulerPoolStats,
 } from "./client";
-
-export { BasePoolAdapter, type PoolAdapter } from "./base-pool";

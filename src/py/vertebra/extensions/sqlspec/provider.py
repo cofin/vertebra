@@ -59,7 +59,7 @@ class SqlSpecProvider:
             return await self._handle_async(request)
         return await asyncio.to_thread(self._handle_sync, request)
 
-    def _handle_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    def _handle_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":  # noqa: PLR0911
         kind = str(request.get("kind") or "")
         try:
             if kind == "acquire":
@@ -82,11 +82,11 @@ class SqlSpecProvider:
                 return self._arrow_release(str(request.get("name") or ""))
             if kind == "health":
                 return {"ok": True}
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # noqa: BLE001 - IPC must not propagate exceptions
             return {"ok": False, "error": {"message": str(exc)}}
         return {"ok": False, "error": {"message": f"Unknown provider request: {kind}"}}
 
-    async def _handle_async(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    async def _handle_async(self, request: "dict[str, Any]") -> "dict[str, Any]":  # noqa: PLR0911
         kind = str(request.get("kind") or "")
         try:
             if kind == "acquire":
@@ -109,7 +109,7 @@ class SqlSpecProvider:
                 return self._arrow_release(str(request.get("name") or ""))
             if kind == "health":
                 return {"ok": True}
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # noqa: BLE001 - IPC must not propagate exceptions
             return {"ok": False, "error": {"message": str(exc)}}
         return {"ok": False, "error": {"message": f"Unknown provider request: {kind}"}}
 
@@ -336,7 +336,7 @@ class SqlSpecProvider:
             return None
         try:
             import pyarrow as pa
-        except Exception:
+        except ImportError:
             return None
         records = [dict(zip(columns, row, strict=False)) for row in rows]
         table = pa.Table.from_pylist(records)

@@ -1,2 +1,2 @@
-export * from "./server";
 export * from "./ipc-bridge";
+export * from "./server";

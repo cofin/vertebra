@@ -1,12 +1,11 @@
-import { readFileSync } from "node:fs";
-import { decode, encode } from "@msgpack/msgpack";
-import { parse } from "@iarna/toml";
-import { tableFromJSON, tableToIPC } from "apache-arrow";
 import { Database } from "bun:sqlite";
-import { SQL, RedisClient } from "bun";
+import { readFileSync } from "node:fs";
+import { parse } from "@iarna/toml";
+import { decode, encode } from "@msgpack/msgpack";
+import { tableFromJSON, tableToIPC } from "apache-arrow";
+import { RedisClient, SQL } from "bun";
 
 import {
-  type Backend as StorageBackend,
   type FileSystemParams,
   getS3Client,
   handleGcsDelete,
@@ -35,10 +34,11 @@ import {
   handleS3Stat,
   handleS3Write,
   handleS3WriteFile,
+  type Backend as StorageBackend,
 } from "../drivers/filesystem";
-import { ShmRegion, ShmRing } from "./shm";
-import { FairScheduler, type SchedulerStats } from "./scheduler";
 import { BasePoolAdapter, type PoolAdapter, type PoolStats } from "./base-pool";
+import { FairScheduler, type SchedulerStats } from "./scheduler";
+import { ShmRegion, ShmRing } from "./shm";
 
 type BrokerPoolConfig = {
   name: string;

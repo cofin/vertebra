@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -49,3 +50,42 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 @pytest.fixture(scope="session")
 def anyio_backend() -> str:
     return "asyncio"
+
+
+def _cleanup_shared_memory() -> None:
+    """Clean up any stale shared memory objects from previous test runs."""
+    # Clean up /dev/shm entries (Linux)
+    shm_dir = Path("/dev/shm")
+    if shm_dir.is_dir():
+        patterns = ["test-*", "*vertebra*", "*.control", "*.req", "*.resp"]
+        for pattern in patterns:
+            for path in shm_dir.glob(pattern):
+                with contextlib.suppress(OSError):
+                    path.unlink()
+
+    # Try to unlink named shared memory objects via shm_unlink
+    try:
+        from vertebra._internal.shm import shm_unlink
+    except ImportError:
+        return
+
+    # Common test shm names that might be left over
+    test_names = ["/test-ring", "/test-region", "/vertebra-broker.control"]
+    for name in test_names:
+        with contextlib.suppress(Exception):
+            shm_unlink(name)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_shared_memory_session() -> None:
+    """Clean shared memory at session start and end."""
+    _cleanup_shared_memory()
+    yield  # type: ignore[misc]
+    _cleanup_shared_memory()
+
+
+@pytest.fixture(autouse=True)
+def cleanup_shared_memory_per_test() -> None:
+    """Clean shared memory before each test for crash recovery."""
+    _cleanup_shared_memory()
+    yield  # type: ignore[misc]

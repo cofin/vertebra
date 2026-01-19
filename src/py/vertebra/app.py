@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
+    from vertebra.resources import BrokerClientConfig
+
 
 class ProviderPlugin(Protocol):
     """Protocol for broker plugins that register and serve providers."""

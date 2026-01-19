@@ -58,7 +58,7 @@ specs/
 src/rs/target
 .cargo/
 .tmp
-**/*/bun.lockb 
+**/*/bun.lockb
 tools/scripts/detect_mcp_tools.py
 src/rs/tools/scripts/detect_mcp_tools.py
 .mypy_cache

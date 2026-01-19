@@ -1,7 +1,7 @@
 import { resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { resolveIpcConfig, type IpcClientConfig } from "../ipc/client";
+import { type IpcClientConfig, resolveIpcConfig } from "../ipc/client";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type WorkerCount = number | "auto";

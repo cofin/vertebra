@@ -1,5 +1,5 @@
-import { IpcPool, type IpcClientConfig, type IpcRequester } from "./client";
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun";
+import { type IpcClientConfig, IpcPool, type IpcRequester } from "./client";
 
 export type AsgiRequest = {
   id: string;

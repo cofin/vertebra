@@ -9,7 +9,7 @@ import importlib
 import os
 import signal
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import msgspec
@@ -222,7 +222,7 @@ class AsgiWorker:
             return None
         try:
             message = self._codec.decode(data)
-        except Exception:
+        except Exception:  # noqa: BLE001 - defensive decode, malformed input possible
             return None
         if not isinstance(message, dict):
             return None
@@ -259,7 +259,7 @@ class AsgiWorker:
                 extensions=message.get("extensions") or {},
                 subprotocols=subprotocols,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - defensive parsing of untrusted IPC data
             return None
 
     def _extract_trace_id(self, headers: list[tuple[str, str]]) -> str | None:
@@ -273,7 +273,7 @@ class AsgiWorker:
 
     def _log(self, level: str, message: str, **fields: Any) -> None:
         {
-            "timestamp": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+            "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "level": level,
             "component": "worker",
             "message": message,
@@ -309,7 +309,7 @@ class AsgiWorker:
     ) -> None:
         try:
             request = msgspec.convert(message, AsgiRequest)
-        except Exception:
+        except Exception:  # noqa: BLE001 - defensive conversion of untrusted IPC data
             return
         meta = RequestMeta(
             scope_type="http",
@@ -432,7 +432,7 @@ class AsgiWorker:
             finally:
                 try:
                     await app_task
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - must catch all ASGI app errors
                     trace_id = self._extract_trace_id(meta.headers)
                     self._log(
                         "error", "request.error", trace_id=trace_id, method=meta.method, path=meta.path, error=str(exc)
@@ -496,7 +496,7 @@ class AsgiWorker:
         finally:
             try:
                 await app_task
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - must catch all ASGI app errors
                 trace_id = self._extract_trace_id(meta.headers)
                 self._log("error", "websocket.error", trace_id=trace_id, path=meta.path, error=str(exc))
                 await writer.send({
@@ -506,7 +506,7 @@ class AsgiWorker:
                     "reason": "Internal Server Error",
                 })
 
-    def _format_response_frame(self, request_id: str, message: dict[str, Any]) -> dict[str, Any] | None:
+    def _format_response_frame(self, request_id: str, message: dict[str, Any]) -> dict[str, Any] | None:  # noqa: PLR0911
         message_type = message.get("type")
         if message_type == "http.response.start":
             status = int(message.get("status", 500))

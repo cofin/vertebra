@@ -196,14 +196,13 @@ class Supervisor:
             # Start output reader in background
             if proc.stdout:
                 self._start_output_reader(name, proc)
-
-            return True
-
-        except Exception as e:
-            logger.exception("Failed to start process %s: %s", name, e)
+        except OSError:
+            logger.exception("Failed to start process %s", name)
             handle.state = ProcessState.FAILED
             handle.consecutive_failures += 1
             return False
+        else:
+            return True
 
     def _start_output_reader(self, name: str, proc: subprocess.Popen[bytes]) -> None:
         """Start a thread to read process output."""
@@ -213,11 +212,9 @@ class Supervisor:
             if not proc.stdout:
                 return
             for line in proc.stdout:
-                try:
+                with contextlib.suppress(OSError, ValueError):
                     text = line.decode("utf-8", errors="replace").rstrip()
                     logger.info("[%s] %s", name, text)
-                except Exception:
-                    pass
 
         thread = threading.Thread(target=reader, daemon=True)
         thread.start()
@@ -279,7 +276,7 @@ class Supervisor:
             if handle.proc and handle.proc.poll() is None:
                 logger.warning("Force killing process %s", name)
                 self._send_signal(handle, signal.SIGKILL)
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
                     handle.proc.wait(timeout=5)
                 handle.state = ProcessState.STOPPED
 
@@ -385,7 +382,7 @@ class Supervisor:
     def _restore_signal_handlers(self) -> None:
         """Restore original signal handlers."""
         for sig, handler in self._original_handlers.items():
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(OSError, ValueError):
                 signal.signal(sig, handler)
         self._original_handlers.clear()
 

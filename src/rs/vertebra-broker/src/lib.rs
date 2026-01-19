@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use vertebra_core::buffer::RingLayout;
 use vertebra_core::channel::{ChannelError, RingStats, SpscReceiver, SpscRing, SpscSender};
-use vertebra_core::shm::{ShmError, ShmRegion};
+use vertebra_core::shm::ShmRegion;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

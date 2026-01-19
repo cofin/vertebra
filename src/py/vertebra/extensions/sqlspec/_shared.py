@@ -1,5 +1,6 @@
 """Shared SQLSpec broker helpers."""
 
+from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 from vertebra.drivers.broker import AsyncBrokerConnection, AsyncBrokerPool, SyncBrokerConnection, SyncBrokerPool
@@ -22,12 +23,11 @@ class BrokerSyncConnectionContext:
         return self._connection
 
     def __exit__(
-        self, exc_type: "type[BaseException] | None", exc_val: "BaseException | None", exc_tb: Any
-    ) -> "bool | None":
+        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None
+    ) -> None:
         if self._connection is not None:
             self._pool.release(self._connection)
             self._connection = None
-        return None
 
 
 class BrokerAsyncConnectionContext:
@@ -42,12 +42,11 @@ class BrokerAsyncConnectionContext:
         return self._connection
 
     async def __aexit__(
-        self, exc_type: "type[BaseException] | None", exc_val: "BaseException | None", exc_tb: Any
-    ) -> "bool | None":
+        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None
+    ) -> None:
         if self._connection is not None:
             await self._pool.release(self._connection)
             self._connection = None
-        return None
 
 
 class BrokerSyncSessionContext:
@@ -89,12 +88,11 @@ class BrokerSyncSessionContext:
         return self._prepare_driver(self._driver)
 
     def __exit__(
-        self, exc_type: "type[BaseException] | None", exc_val: "BaseException | None", exc_tb: Any
-    ) -> "bool | None":
+        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None
+    ) -> None:
         if self._connection is not None:
             self._release_connection(self._connection)
             self._connection = None
-        return None
 
 
 class BrokerAsyncSessionContext:
@@ -136,12 +134,11 @@ class BrokerAsyncSessionContext:
         return self._prepare_driver(self._driver)
 
     async def __aexit__(
-        self, exc_type: "type[BaseException] | None", exc_val: "BaseException | None", exc_tb: Any
-    ) -> "bool | None":
+        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None
+    ) -> None:
         if self._connection is not None:
             await self._release_connection(self._connection)
             self._connection = None
-        return None
 
 
 __all__ = (

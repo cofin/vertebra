@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import statistics
 import time
-from typing import Callable
+from typing import TYPE_CHECKING
 
 from vertebra import BufferPool
 from vertebra.ipc.channel import BufferView
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def bench(label: str, fn: Callable[[], None], iterations: int) -> None:
@@ -27,7 +30,6 @@ def run_msgspec(size: int, iterations: int) -> None:
     try:
         import msgspec
     except Exception:
-        print("msgspec not available; skipping msgspec benchmarks")
         return
 
     payload = {"id": 1, "data": "x" * size}
@@ -38,7 +40,6 @@ def run_msgspec(size: int, iterations: int) -> None:
     pool = BufferPool(len(encoded), 1)
     buffer = pool.acquire()
     if buffer is None:
-        print("buffer pool exhausted; skipping buffer benchmarks")
         return
     buffer.write(encoded)
     buffer_view = BufferView(buffer, len(encoded))
@@ -69,23 +70,15 @@ def run_pydantic(size: int, iterations: int) -> None:
     instance = Model(**payload)
     encoded = instance.model_dump_json().encode()
 
-    bench(
-        "pydantic validate_json",
-        lambda: Model.model_validate_json(encoded),
-        iterations,
-    )
-    bench("pydantic dump_json", lambda: instance.model_dump_json(), iterations)
+    bench("pydantic validate_json", lambda: Model.model_validate_json(encoded), iterations)
+    bench("pydantic dump_json", instance.model_dump_json, iterations)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Vertebra serialization benchmarks")
     parser.add_argument("--iterations", type=int, default=1000)
     parser.add_argument(
-        "--sizes",
-        type=int,
-        nargs="+",
-        default=[1024, 10 * 1024, 100 * 1024],
-        help="payload sizes in bytes",
+        "--sizes", type=int, nargs="+", default=[1024, 10 * 1024, 100 * 1024], help="payload sizes in bytes"
     )
     args = parser.parse_args()
 

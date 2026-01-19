@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import datetime
 import enum
+import functools
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, overload
 
 import msgspec
 
 
-def _default_encoder(value: Any) -> Any:
+def _default_encoder(value: Any) -> Any:  # noqa: PLR0911
     """Default encoder for types not natively supported by msgspec.
 
     Handles datetime, date, time, timedelta, enums, and other common types.
@@ -79,16 +80,10 @@ class MessagePackCodec:
         return decoder.decode(data)
 
 
-# Module-level cached codec instance
-_msgpack_codec: MessagePackCodec | None = None
-
-
+@functools.lru_cache(maxsize=1)
 def get_msgpack_codec() -> MessagePackCodec:
     """Get the shared MessagePack codec instance."""
-    global _msgpack_codec
-    if _msgpack_codec is None:
-        _msgpack_codec = MessagePackCodec()
-    return _msgpack_codec
+    return MessagePackCodec()
 
 
 def encode_msgpack(data: Any) -> bytes:
@@ -167,16 +162,10 @@ class JSONCodec:
         return self.decoder.decode(data)
 
 
-# Module-level cached codec instance
-_json_codec: JSONCodec | None = None
-
-
+@functools.lru_cache(maxsize=1)
 def get_json_codec() -> JSONCodec:
     """Get the shared JSON codec instance."""
-    global _json_codec
-    if _json_codec is None:
-        _json_codec = JSONCodec()
-    return _json_codec
+    return JSONCodec()
 
 
 @overload

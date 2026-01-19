@@ -114,7 +114,7 @@ upgrade:                                            ## Upgrade all dependencies 
 .PHONY: clean
 clean:                                              ## Cleanup temporary build artifacts
 	@echo "${INFO} Cleaning working directory..."
-	@rm -rf pytest_cache .ruff_cache .hypothesis build/ -rf dist/ .eggs/ .coverage coverage.xml coverage.json htmlcov/ .pytest_cache src/py/tests/.pytest_cache src/py/tests/**/.pytest_cache .mypy_cache .unasyncd_cache/ .auto_pytabs_cache node_modules src/ts/node_modules src/ts/.bun >/dev/null 2>&1
+	@rm -rf .pytest_cache .ruff_cache .hypothesis build/ dist/ .eggs/ .coverage coverage.xml coverage.json htmlcov/ src/py/tests/.pytest_cache src/py/tests/**/.pytest_cache .mypy_cache .unasyncd_cache/ .auto_pytabs_cache src/ts/node_modules src/ts/.bun .biome/ .cache/ coverage/ >/dev/null 2>&1
 	@find . -name '*.egg-info' -exec rm -rf {} + >/dev/null 2>&1
 	@find . -type f -name '*.egg' -exec rm -f {} + >/dev/null 2>&1
 	@find . -name '*.pyc' -exec rm -f {} + >/dev/null 2>&1
@@ -122,8 +122,11 @@ clean:                                              ## Cleanup temporary build a
 	@find . -name '*~' -exec rm -f {} + >/dev/null 2>&1
 	@find . -name '__pycache__' -exec rm -rf {} + >/dev/null 2>&1
 	@find . -name '.ipynb_checkpoints' -exec rm -rf {} + >/dev/null 2>&1
+	@find . -name '*.so' -path '*/vertebra/*' -exec rm -f {} + >/dev/null 2>&1
+	@find . -name '*.sqlite*' -not -path './.venv/*' -not -path './.cargo/*' -exec rm -f {} + >/dev/null 2>&1
 	@echo "${OK} Working directory cleaned"
 	$(MAKE) docs-clean
+	$(MAKE) rs-clean
 
 .PHONY: destroy
 destroy:                                            ## Destroy the virtual environment
@@ -153,6 +156,8 @@ rs-build:                                           ## Build Rust workspace
 
 .PHONY: rs-test
 rs-test:                                            ## Run Rust tests
+	@echo "${INFO} Cleaning shared memory... 🧹"
+	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
 	@echo "${INFO} Running Rust tests... 🧪"
 	@if [ -f "$(RUST_ENV)" ]; then \
 		. "$(RUST_ENV)"; \
@@ -442,6 +447,8 @@ coverage:                                          ## Run the tests and generate
 
 .PHONY: test
 test:                                              ## Run the tests
+	@echo "${INFO} Cleaning shared memory... 🧹"
+	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
 	@echo "${INFO} Running test cases... 🧪"
 	@uv run pytest src/py/tests
 	@echo "${OK} Tests passed ✨"

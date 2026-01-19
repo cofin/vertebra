@@ -85,13 +85,13 @@ class ShmRingStub:
         raise RuntimeError(msg)
 
     @classmethod
-    def create(cls, config: ShmRingConfigStub) -> ShmRingStub:
+    def create(cls, _config: ShmRingConfigStub) -> ShmRingStub:
         """Create a new shared memory ring buffer."""
         msg = "Shared memory library unavailable"
         raise RuntimeError(msg)
 
     @classmethod
-    def open(cls, config: ShmRingConfigStub) -> ShmRingStub:
+    def open(cls, _config: ShmRingConfigStub) -> ShmRingStub:
         """Open an existing shared memory ring buffer."""
         msg = "Shared memory library unavailable"
         raise RuntimeError(msg)
@@ -126,13 +126,13 @@ class ShmRegionStub:
         raise RuntimeError(msg)
 
     @classmethod
-    def create(cls, config: ShmRegionConfigStub) -> ShmRegionStub:
+    def create(cls, _config: ShmRegionConfigStub) -> ShmRegionStub:
         """Create a new shared memory region."""
         msg = "Shared memory library unavailable"
         raise RuntimeError(msg)
 
     @classmethod
-    def open(cls, config: ShmRegionConfigStub) -> ShmRegionStub:
+    def open(cls, _config: ShmRegionConfigStub) -> ShmRegionStub:
         """Open an existing shared memory region."""
         msg = "Shared memory library unavailable"
         raise RuntimeError(msg)
@@ -145,7 +145,7 @@ class ShmRegionStub:
         """Close the region handle."""
 
 
-class ShmErrorStub(RuntimeError):
+class ShmStubError(RuntimeError):
     """Stub exception for shared memory errors."""
 
 
@@ -155,10 +155,11 @@ class ShmErrorStub(RuntimeError):
 
 _SHM_LOAD_ERROR: Exception | None = None
 
+
 def _shm_unlink_stub(name: str) -> None:
     """Stub for shm_unlink when native library unavailable."""
     msg = "Shared memory library unavailable"
-    raise ShmErrorStub(msg)
+    raise ShmStubError(msg)
 
 
 try:
@@ -184,7 +185,7 @@ except Exception as exc:
     ShmRingConfig = ShmRingConfigStub  # type: ignore[assignment,misc]
     ShmRegion = ShmRegionStub  # type: ignore[assignment,misc]
     ShmRegionConfig = ShmRegionConfigStub  # type: ignore[assignment,misc]
-    ShmError = ShmErrorStub  # type: ignore[assignment,misc]
+    ShmError = ShmStubError  # type: ignore[assignment,misc]
     shm_unlink = _shm_unlink_stub
 
 
@@ -193,15 +194,108 @@ def get_shm_load_error() -> Exception | None:
     return _SHM_LOAD_ERROR
 
 
+# ============================================================================
+# Async Transport Types (PRD-10: Eventfd Async Transport)
+# ============================================================================
+
+_ASYNC_TRANSPORT_LOAD_ERROR: Exception | None = None
+
+
+class AsyncRingStub:
+    """Stub for AsyncRing when PyO3 native library unavailable."""
+
+    def __init__(self, slot_size: int, slots: int) -> None:
+        msg = "AsyncRing not available (vertebra._vertebra not installed)"
+        raise RuntimeError(msg)
+
+    @classmethod
+    def create_named(cls, _name: str, _slot_size: int, _slots: int) -> AsyncRingStub:
+        msg = "AsyncRing not available"
+        raise RuntimeError(msg)
+
+    @classmethod
+    def open_named(cls, _name: str, _slot_size: int, _slots: int) -> AsyncRingStub:
+        msg = "AsyncRing not available"
+        raise RuntimeError(msg)
+
+    def notifier_fd(self) -> int:
+        return -1
+
+    def send(self, data: bytes, flags: int | None = None) -> None:
+        pass
+
+    def try_send(self, data: bytes, flags: int | None = None) -> bool:
+        return False
+
+    def try_recv(self) -> bytes | None:
+        return None
+
+    def clear_notification(self) -> None:
+        pass
+
+
+class AsyncShmTransportStub:
+    """Stub for AsyncShmTransport when async transport unavailable."""
+
+    def __init__(self, ring: Any) -> None:
+        msg = "AsyncShmTransport not available"
+        raise RuntimeError(msg)
+
+    async def send(self, data: bytes, flags: int = 0) -> None:
+        pass
+
+    async def recv(self) -> bytes:
+        return b""
+
+    def try_recv(self) -> bytes | None:
+        return None
+
+    def close(self) -> None:
+        pass
+
+
+try:
+    from vertebra._internal.async_transport import AsyncShmTransport as _AsyncShmTransport
+    from vertebra._internal.async_transport import PollingTransport as _PollingTransport
+    from vertebra._internal.async_transport import create_transport as _create_transport
+    from vertebra._vertebra import AsyncRing as _AsyncRing
+
+    ASYNC_TRANSPORT_AVAILABLE: bool = True
+    AsyncRing = _AsyncRing
+    AsyncShmTransport = _AsyncShmTransport
+    PollingTransport = _PollingTransport
+    create_transport = _create_transport
+except Exception as exc:
+    _ASYNC_TRANSPORT_LOAD_ERROR = exc
+    ASYNC_TRANSPORT_AVAILABLE: bool = False  # type: ignore[no-redef]
+    AsyncRing = AsyncRingStub  # type: ignore[assignment,misc]
+    AsyncShmTransport = AsyncShmTransportStub  # type: ignore[assignment,misc]
+    PollingTransport = AsyncShmTransportStub  # type: ignore[assignment,misc]
+
+    def create_transport(ring: Any, *, prefer_eventfd: bool = True, poll_interval: float = 0.0001) -> Any:
+        msg = "Async transport not available"
+        raise RuntimeError(msg)
+
+
+def get_async_transport_load_error() -> Exception | None:
+    """Return the error that occurred when loading async transport, if any."""
+    return _ASYNC_TRANSPORT_LOAD_ERROR
+
+
 __all__ = (
-    # Availability flag
+    # Availability flags
+    "ASYNC_TRANSPORT_AVAILABLE",
     "SHM_AVAILABLE",
     # Protocols
     "AsyncContextManager",
-    # Real or stub types
+    # Async transport types (PRD-10)
+    "AsyncRing",
+    "AsyncRingStub",
+    "AsyncShmTransport",
+    "AsyncShmTransportStub",
+    "PollingTransport",
+    # CFFI shm types
     "ShmError",
-    # Stubs (for explicit use)
-    "ShmErrorStub",
     "ShmRegion",
     "ShmRegionConfig",
     "ShmRegionConfigStub",
@@ -210,8 +304,11 @@ __all__ = (
     "ShmRingConfig",
     "ShmRingConfigStub",
     "ShmRingStub",
+    "ShmStubError",
     "SyncContextManager",
+    "create_transport",
     # Helpers
+    "get_async_transport_load_error",
     "get_shm_load_error",
     "shm_unlink",
 )

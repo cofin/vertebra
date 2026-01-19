@@ -1,4 +1,4 @@
-import { decodeMessage, encodeMessage, frameMessage, deframeMessage } from "./serialization";
+import { decodeMessage, deframeMessage, encodeMessage, frameMessage } from "./serialization";
 
 const payload = { id: "abc", ok: true, values: [1, 2, 3] };
 

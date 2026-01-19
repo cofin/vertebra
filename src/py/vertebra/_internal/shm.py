@@ -268,7 +268,7 @@ def shm_unlink(name: str) -> None:
     Raises:
         ShmError: If the unlink operation fails.
     """
-    ffi, lib = _get_lib()
+    _ffi, lib = _get_lib()
     status = lib.vtb_shm_unlink(name.encode("utf-8"))
     _raise_for_status(VtbStatus(int(status)))
 

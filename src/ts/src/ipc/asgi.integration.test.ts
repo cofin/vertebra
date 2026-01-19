@@ -1,16 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-
-import { AsgiBridge, type AsgiIpcFrame } from "./asgi";
-import { IpcClient } from "./client";
+import { join } from "node:path";
 import { loadShmLib } from "../broker/shm";
 import { RoundRobinWorkerPool } from "../server/worker-pool";
+import { AsgiBridge, type AsgiIpcFrame } from "./asgi";
+import { IpcClient } from "./client";
 
 const PYTHON_CMD = resolvePythonCommand();
-const APP_PATH = "vertebra.server._test_app:app";
+const APP_PATH = "tests._test_app:app";
 const ASGI_NAME = "vertebra-asgi-test";
 const SLOT_SIZE = 4096;
 const SLOTS = 64;

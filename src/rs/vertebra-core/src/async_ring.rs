@@ -1,0 +1,409 @@
+//! Async-capable ring buffer with notification support.
+//!
+//! This module provides `AsyncRing`, a wrapper around `SpscRing` that integrates
+//! with asyncio via file descriptor notifications. Instead of blocking on futex
+//! waits, consumers can register the notification FD with their event loop and
+//! receive callbacks when data is available.
+//!
+//! # Usage Pattern
+//!
+//! ```ignore
+//! // In Python (via PyO3):
+//! ring = AsyncRing.create("channel", 65536, 1024)
+//! fd = ring.notifier_fd()
+//! loop.add_reader(fd, on_readable)
+//!
+//! # Producer sends data:
+//! ring.send(data)  # Automatically notifies
+//!
+//! # In on_readable callback:
+//! ring.clear_notification()
+//! while (data := ring.try_recv()) is not None:
+//!     process(data)
+//! ```
+
+use std::io;
+use std::sync::Arc;
+
+use crate::buffer::{BufferPool, RingLayout};
+use crate::channel::{ChannelError, SpscRing};
+use crate::notify::Notifier;
+use crate::shm::ShmRegion;
+
+/// Async-capable SPSC ring buffer with notification support.
+///
+/// This struct wraps a `SpscRing` with a `Notifier` to enable integration
+/// with asyncio's event loop via `loop.add_reader()`.
+pub struct AsyncRing {
+    ring: SpscRing,
+    notifier: Notifier,
+    #[allow(dead_code)]
+    region: Arc<ShmRegion>,
+}
+
+// SAFETY: AsyncRing contains only Send types.
+unsafe impl Send for AsyncRing {}
+// SAFETY: SpscRing and Notifier are both Sync.
+unsafe impl Sync for AsyncRing {}
+
+impl AsyncRing {
+    /// Create a new async ring buffer with the given parameters.
+    ///
+    /// # Arguments
+    /// - `slot_size`: Size of each slot in bytes (includes header overhead)
+    /// - `slots`: Number of slots (must be power of 2)
+    ///
+    /// # Returns
+    /// A new `AsyncRing` backed by anonymous shared memory.
+    pub fn new(slot_size: usize, slots: usize) -> Result<Self, AsyncRingError> {
+        let layout = RingLayout::new(slot_size, slots);
+        let region = Arc::new(ShmRegion::create(layout.total_size)?);
+        let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0)? };
+        let notifier = Notifier::new()?;
+
+        Ok(Self {
+            ring,
+            notifier,
+            region,
+        })
+    }
+
+    /// Create a named async ring buffer.
+    ///
+    /// Named rings can be opened by other processes via `open_named()`.
+    #[cfg(unix)]
+    pub fn create_named(
+        name: &str,
+        slot_size: usize,
+        slots: usize,
+    ) -> Result<Self, AsyncRingError> {
+        let layout = RingLayout::new(slot_size, slots);
+        let region = Arc::new(ShmRegion::create_named(name, layout.total_size)?);
+        let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0)? };
+        let notifier = Notifier::new()?;
+
+        Ok(Self {
+            ring,
+            notifier,
+            region,
+        })
+    }
+
+    /// Open an existing named async ring buffer.
+    #[cfg(unix)]
+    pub fn open_named(name: &str, slot_size: usize, slots: usize) -> Result<Self, AsyncRingError> {
+        let layout = RingLayout::new(slot_size, slots);
+        let region = Arc::new(ShmRegion::open_named(name, layout.total_size)?);
+        let ring = unsafe { SpscRing::attach(Arc::clone(&region), layout)? };
+        let notifier = Notifier::new()?;
+
+        Ok(Self {
+            ring,
+            notifier,
+            region,
+        })
+    }
+
+    /// Get the notification file descriptor for asyncio integration.
+    ///
+    /// Register this FD with `loop.add_reader(fd, callback)` to receive
+    /// notifications when data is available.
+    pub fn notifier_fd(&self) -> i32 {
+        self.notifier.as_raw_fd()
+    }
+
+    /// Get the payload capacity per slot.
+    pub fn payload_capacity(&self) -> usize {
+        self.ring.payload_capacity()
+    }
+
+    /// Send data and notify waiters.
+    ///
+    /// This is a blocking send that waits for space if the ring is full.
+    /// After successful send, the notifier is signaled.
+    pub fn send(&self, data: &[u8], flags: u32) -> Result<(), AsyncRingError> {
+        self.ring.send(data, flags)?;
+        self.notifier.notify()?;
+        Ok(())
+    }
+
+    /// Try to send without blocking.
+    ///
+    /// Returns `Ok(true)` if sent, `Ok(false)` if ring is full.
+    pub fn try_send(&self, data: &[u8], flags: u32) -> Result<bool, AsyncRingError> {
+        match self.ring.try_send(data, flags) {
+            Ok(()) => {
+                self.notifier.notify()?;
+                Ok(true)
+            }
+            Err(ChannelError::Full) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Try to receive without blocking.
+    ///
+    /// Returns `Ok(Some(len))` with the data length if available,
+    /// `Ok(None)` if empty.
+    ///
+    /// Call `clear_notification()` after processing all available data.
+    pub fn try_recv(&self, buffer: &mut [u8]) -> Result<Option<usize>, AsyncRingError> {
+        match self.ring.try_recv(buffer) {
+            Ok(len) => Ok(Some(len)),
+            Err(ChannelError::Empty) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Try to receive with flags.
+    ///
+    /// Returns `Ok(Some((len, flags)))` if available, `Ok(None)` if empty.
+    pub fn try_recv_with_flags(
+        &self,
+        buffer: &mut [u8],
+    ) -> Result<Option<(usize, u32)>, AsyncRingError> {
+        match self.ring.try_recv_with_flags(buffer) {
+            Ok((len, flags)) => Ok(Some((len, flags))),
+            Err(ChannelError::Empty) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Clear notification (call after handling all available data).
+    ///
+    /// This should be called:
+    /// 1. At the start of the readable callback
+    /// 2. After draining all messages with `try_recv()`
+    pub fn clear_notification(&self) -> Result<(), AsyncRingError> {
+        self.notifier.clear()?;
+        Ok(())
+    }
+
+    /// Check if there are pending notifications.
+    pub fn has_pending_notification(&self) -> bool {
+        self.notifier.has_pending()
+    }
+
+    /// Get ring statistics.
+    pub fn stats(&self) -> crate::channel::RingStats {
+        self.ring.stats()
+    }
+}
+
+/// Async channel pair for bidirectional communication.
+///
+/// This creates two `AsyncRing` instances - one for requests and one for responses.
+pub struct AsyncChannelPair {
+    /// Ring for sending requests (client) / receiving requests (server)
+    pub request: AsyncRing,
+    /// Ring for receiving responses (client) / sending responses (server)
+    pub response: AsyncRing,
+}
+
+impl AsyncChannelPair {
+    /// Create a new anonymous channel pair.
+    pub fn new(slot_size: usize, slots: usize) -> Result<Self, AsyncRingError> {
+        Ok(Self {
+            request: AsyncRing::new(slot_size, slots)?,
+            response: AsyncRing::new(slot_size, slots)?,
+        })
+    }
+
+    /// Create a named channel pair for IPC.
+    #[cfg(unix)]
+    pub fn create_named(
+        name: &str,
+        slot_size: usize,
+        slots: usize,
+    ) -> Result<Self, AsyncRingError> {
+        let req_name = format!("{name}.req");
+        let resp_name = format!("{name}.resp");
+        Ok(Self {
+            request: AsyncRing::create_named(&req_name, slot_size, slots)?,
+            response: AsyncRing::create_named(&resp_name, slot_size, slots)?,
+        })
+    }
+
+    /// Open an existing named channel pair.
+    #[cfg(unix)]
+    pub fn open_named(name: &str, slot_size: usize, slots: usize) -> Result<Self, AsyncRingError> {
+        let req_name = format!("{name}.req");
+        let resp_name = format!("{name}.resp");
+        Ok(Self {
+            request: AsyncRing::open_named(&req_name, slot_size, slots)?,
+            response: AsyncRing::open_named(&resp_name, slot_size, slots)?,
+        })
+    }
+}
+
+/// Async ring with integrated buffer pool for zero-allocation receives.
+pub struct PooledAsyncRing {
+    ring: AsyncRing,
+    pool: Arc<BufferPool>,
+}
+
+impl PooledAsyncRing {
+    /// Create a new pooled async ring.
+    ///
+    /// # Arguments
+    /// - `slot_size`: Size of each ring slot
+    /// - `slots`: Number of ring slots
+    /// - `pool_size`: Number of pre-allocated receive buffers
+    pub fn new(slot_size: usize, slots: usize, pool_size: usize) -> Result<Self, AsyncRingError> {
+        let ring = AsyncRing::new(slot_size, slots)?;
+        let pool = BufferPool::new(slot_size, pool_size);
+        Ok(Self { ring, pool })
+    }
+
+    /// Get the notification FD.
+    pub fn notifier_fd(&self) -> i32 {
+        self.ring.notifier_fd()
+    }
+
+    /// Send data.
+    pub fn send(&self, data: &[u8], flags: u32) -> Result<(), AsyncRingError> {
+        self.ring.send(data, flags)
+    }
+
+    /// Try to send without blocking.
+    pub fn try_send(&self, data: &[u8], flags: u32) -> Result<bool, AsyncRingError> {
+        self.ring.try_send(data, flags)
+    }
+
+    /// Try to receive into a pooled buffer.
+    ///
+    /// Returns `Some((buffer, len))` on success, `None` if empty.
+    /// The buffer is automatically returned to the pool when dropped.
+    pub fn try_recv(&self) -> Result<Option<PooledRecvResult>, AsyncRingError> {
+        let mut buffer = self
+            .pool
+            .acquire()
+            .map_err(|_| AsyncRingError::PoolExhausted)?;
+
+        match self.ring.try_recv(buffer.as_mut_slice()) {
+            Ok(Some(len)) => Ok(Some(PooledRecvResult { buffer, len })),
+            Ok(None) => {
+                // Return buffer to pool (via drop)
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Clear notification.
+    pub fn clear_notification(&self) -> Result<(), AsyncRingError> {
+        self.ring.clear_notification()
+    }
+
+    /// Get pool statistics.
+    pub fn pool_available(&self) -> usize {
+        self.pool.available()
+    }
+}
+
+/// Result of a pooled receive operation.
+pub struct PooledRecvResult {
+    buffer: crate::buffer::Buffer,
+    len: usize,
+}
+
+impl PooledRecvResult {
+    /// Get the received data.
+    pub fn data(&self) -> &[u8] {
+        &self.buffer.as_slice()[..self.len]
+    }
+
+    /// Get the length of received data.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Check if empty.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+/// Errors from async ring operations.
+#[derive(Debug, thiserror::Error)]
+pub enum AsyncRingError {
+    #[error("channel error: {0}")]
+    Channel(#[from] ChannelError),
+    #[error("shared memory error: {0}")]
+    Shm(#[from] crate::shm::ShmError),
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+    #[error("buffer pool exhausted")]
+    PoolExhausted,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn async_ring_send_recv() {
+        let ring = AsyncRing::new(256, 8).expect("create ring");
+
+        // Initially no notifications
+        assert!(!ring.has_pending_notification());
+
+        // Send data
+        let payload = b"hello async";
+        ring.send(payload, 0).expect("send");
+
+        // Should have notification
+        assert!(ring.has_pending_notification());
+
+        // Receive
+        let mut buf = vec![0u8; 256];
+        let len = ring.try_recv(&mut buf).expect("recv").expect("has data");
+        assert_eq!(&buf[..len], payload);
+
+        // Clear notification
+        ring.clear_notification().expect("clear");
+        assert!(!ring.has_pending_notification());
+    }
+
+    #[test]
+    fn async_ring_try_recv_empty() {
+        let ring = AsyncRing::new(256, 8).expect("create ring");
+        let mut buf = vec![0u8; 256];
+        let result = ring.try_recv(&mut buf).expect("try_recv");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn async_ring_try_send_full() {
+        // Create ring with 2 slots (only 1 usable due to head/tail)
+        let ring = AsyncRing::new(128, 2).expect("create ring");
+
+        let payload = [1u8; 8];
+        assert!(ring.try_send(&payload, 0).expect("first send"));
+        assert!(!ring.try_send(&payload, 0).expect("second send"));
+    }
+
+    #[test]
+    fn pooled_async_ring_basic() {
+        let ring = PooledAsyncRing::new(256, 8, 4).expect("create pooled ring");
+
+        assert_eq!(ring.pool_available(), 4);
+
+        let payload = b"pooled test";
+        ring.send(payload, 0).expect("send");
+
+        let result = ring.try_recv().expect("recv").expect("has data");
+        assert_eq!(result.data(), payload);
+        assert_eq!(ring.pool_available(), 3);
+
+        drop(result);
+        assert_eq!(ring.pool_available(), 4);
+    }
+
+    #[test]
+    fn async_ring_notifier_fd_valid() {
+        let ring = AsyncRing::new(256, 8).expect("create ring");
+        let fd = ring.notifier_fd();
+        assert!(fd >= 0);
+    }
+}

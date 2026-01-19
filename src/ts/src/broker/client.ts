@@ -1,7 +1,6 @@
-import { encode, decode } from "@msgpack/msgpack";
-
-import { ShmRing } from "./shm";
+import { decode, encode } from "@msgpack/msgpack";
 import type { PoolStats } from "./base-pool";
+import { ShmRing } from "./shm";
 
 export type { PoolStats };
 

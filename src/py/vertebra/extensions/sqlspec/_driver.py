@@ -1,6 +1,7 @@
 """Shared SQLSpec driver adapters for the broker-backed transport."""
 
 import contextlib
+from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 from sqlspec.driver import (
@@ -30,7 +31,9 @@ class BrokerExceptionHandler:
     def __enter__(self) -> "BrokerExceptionHandler":
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None
+    ) -> bool:
         if exc_type is None:
             return False
         if isinstance(exc_val, SQLSpecError):
@@ -49,7 +52,9 @@ class BrokerAsyncExceptionHandler:
     async def __aenter__(self) -> "BrokerAsyncExceptionHandler":
         return self
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None
+    ) -> bool:
         if exc_type is None:
             return False
         if isinstance(exc_val, SQLSpecError):
@@ -76,7 +81,7 @@ def _collect_rows(result: "dict[str, Any]") -> "tuple[list[dict[str, Any]], list
 def _correlation_id() -> str | None:
     try:
         return CorrelationContext.get()
-    except Exception:
+    except LookupError:
         return None
 
 

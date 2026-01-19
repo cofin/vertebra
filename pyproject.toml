@@ -18,7 +18,7 @@ description = "Python-first, high-performance application backbone with tRPC-lik
 keywords = ["trpc", "asgi", "ipc", "performance", "bun"]
 license = { text = "Apache" }
 maintainers = [
-  { name = "Cody Fincher", email = "codyfincher@google.com" }, 
+  { name = "Cody Fincher", email = "cody@litestar.dev" },
 ]
 name = "vertebra"
 readme = "README.md"
@@ -32,9 +32,9 @@ vertebra = "vertebra.cli:main"
 documentation = "https://github.com/cofin/vertebra"
 homepage = "https://github.com/cofin/vertebra"
 repository = "https://github.com/cofin/vertebra"
- 
+
 [dependency-groups]
-docs = [ 
+docs = [
 ]
 build = [
     "build>=1.2.2.post1",
@@ -187,7 +187,7 @@ markers = [
   "postgres: mark a test as postgres-dependent",
   "mysql: mark a test as mysql-dependent",
   "redis: mark a test as redis-dependent",
-  "s3: mark a test as s3-dependent", 
+  "s3: mark a test as s3-dependent",
 ]
 anyio_mode = "auto"
 testpaths = ["src/py/tests"]
@@ -290,10 +290,11 @@ max-complexity = 25
 classmethod-decorators = ["classmethod", "pydantic.field_validator", "pydantic.root_validator", "pydantic.validator"]
 
 [tool.ruff.lint.per-file-ignores]
-"**/src/py/tests/**/*.py" = ['S101', 'S105', 'S108', 'S106', 'S404', 'ANN001', 'S608', 'PLW0603'] # Allow assert, hardcoded passwords, temp files, SQL strings, and global statements in tests
+"**/src/py/tests/**/*.py" = ['S101', 'S105', 'S108', 'S106', 'S404', 'ANN001', 'S608', 'PLW0603', 'BLE001'] # Allow assert, hardcoded passwords, temp files, SQL strings, and global statements in tests
 "**/tools/**/*.py" = ['C901', 'A002', 'S105', 'S106', 'S107', 'S607', 'BLE001', 'PLR0911', 'PLR0912'] # Allow hardcoded passwords in database config classes
 "**/tools/**/database.py" = ['S105', 'S106'] # Allow hardcoded passwords in database config classes
 "__init__.py" = ['D104', 'F401']
+"benchmarks/**/*.py" = ['T201','BLE001']
 
 [tool.ruff.lint.isort]
 known-first-party = ['vertebra', 'tests', 'tools']

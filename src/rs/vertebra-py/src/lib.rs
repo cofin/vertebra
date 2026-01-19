@@ -21,6 +21,8 @@ use vertebra_core::buffer::{Buffer, BufferPool, RingLayout};
 use vertebra_core::channel::{BufferChannel, BufferMessage, ChannelError, MpmcRing, SpscRing};
 use vertebra_core::shm::ShmRegion;
 
+mod async_ring;
+
 #[pyclass(name = "ShmRegion")]
 struct PyShmRegion {
     inner: ShmRegion,
@@ -328,7 +330,7 @@ impl PyChannel {
     }
 
     fn send_request(&self, data: &[u8]) -> PyResult<()> {
-        Python::with_gil(|py| py.allow_threads(|| self.send_ring.send(data, 0).map_err(map_err)))
+        Python::attach(|py| py.detach(|| self.send_ring.send(data, 0).map_err(map_err)))
     }
 
     fn try_send_request(&self, data: &[u8]) -> PyResult<bool> {
@@ -340,8 +342,8 @@ impl PyChannel {
     }
 
     fn send_request_timeout(&self, data: &[u8], timeout_ms: u64) -> PyResult<bool> {
-        Python::with_gil(|py| {
-            py.allow_threads(|| {
+        Python::attach(|py| {
+            py.detach(|| {
                 self.send_ring
                     .send_timeout(data, 0, std::time::Duration::from_millis(timeout_ms))
                     .map_err(map_err)
@@ -351,7 +353,7 @@ impl PyChannel {
 
     fn recv_request<'py>(&self, py: Python<'py>, max_len: usize) -> PyResult<Bound<'py, PyBytes>> {
         let mut buffer = vec![0u8; max_len];
-        let len = py.allow_threads(|| self.recv_ring.recv(&mut buffer).map_err(map_err))?;
+        let len = py.detach(|| self.recv_ring.recv(&mut buffer).map_err(map_err))?;
         Ok(PyBytes::new(py, &buffer[..len]))
     }
 
@@ -375,7 +377,7 @@ impl PyChannel {
         timeout_ms: u64,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         let mut buffer = vec![0u8; max_len];
-        let result = py.allow_threads(|| {
+        let result = py.detach(|| {
             self.recv_ring
                 .recv_timeout(&mut buffer, std::time::Duration::from_millis(timeout_ms))
                 .map_err(map_err)
@@ -384,7 +386,7 @@ impl PyChannel {
     }
 
     fn send_response(&self, data: &[u8]) -> PyResult<()> {
-        Python::with_gil(|py| py.allow_threads(|| self.send_ring.send(data, 0).map_err(map_err)))
+        Python::attach(|py| py.detach(|| self.send_ring.send(data, 0).map_err(map_err)))
     }
 
     fn try_send_response(&self, data: &[u8]) -> PyResult<bool> {
@@ -396,8 +398,8 @@ impl PyChannel {
     }
 
     fn send_response_timeout(&self, data: &[u8], timeout_ms: u64) -> PyResult<bool> {
-        Python::with_gil(|py| {
-            py.allow_threads(|| {
+        Python::attach(|py| {
+            py.detach(|| {
                 self.send_ring
                     .send_timeout(data, 0, std::time::Duration::from_millis(timeout_ms))
                     .map_err(map_err)
@@ -407,7 +409,7 @@ impl PyChannel {
 
     fn recv_response<'py>(&self, py: Python<'py>, max_len: usize) -> PyResult<Bound<'py, PyBytes>> {
         let mut buffer = vec![0u8; max_len];
-        let len = py.allow_threads(|| self.recv_ring.recv(&mut buffer).map_err(map_err))?;
+        let len = py.detach(|| self.recv_ring.recv(&mut buffer).map_err(map_err))?;
         Ok(PyBytes::new(py, &buffer[..len]))
     }
 
@@ -431,7 +433,7 @@ impl PyChannel {
         timeout_ms: u64,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         let mut buffer = vec![0u8; max_len];
-        let result = py.allow_threads(|| {
+        let result = py.detach(|| {
             self.recv_ring
                 .recv_timeout(&mut buffer, std::time::Duration::from_millis(timeout_ms))
                 .map_err(map_err)
@@ -642,12 +644,12 @@ impl PyMpmcRing {
     }
 
     fn send(&self, data: &[u8], flags: u32) -> PyResult<()> {
-        Python::with_gil(|py| py.allow_threads(|| self.inner.send(data, flags).map_err(map_err)))
+        Python::attach(|py| py.detach(|| self.inner.send(data, flags).map_err(map_err)))
     }
 
     fn recv<'py>(&self, py: Python<'py>, max_len: usize) -> PyResult<Bound<'py, PyBytes>> {
         let mut buffer = vec![0u8; max_len];
-        let len = py.allow_threads(|| self.inner.recv(&mut buffer).map_err(map_err))?;
+        let len = py.detach(|| self.inner.recv(&mut buffer).map_err(map_err))?;
         Ok(PyBytes::new(py, &buffer[..len]))
     }
 }
@@ -685,14 +687,12 @@ impl PyBufferChannel {
     fn send(&self, buffer: &Bound<'_, PyBuffer>, len: usize, flags: u32) -> PyResult<()> {
         let mut buffer = buffer.borrow_mut();
         let inner = buffer.take_inner()?;
-        Python::with_gil(|py| {
-            py.allow_threads(|| self.sender.send(inner, len, flags).map_err(map_err))
-        })
+        Python::attach(|py| py.detach(|| self.sender.send(inner, len, flags).map_err(map_err)))
     }
 
     fn recv<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let BufferMessage { buffer, len, flags } =
-            py.allow_threads(|| self.receiver.recv().map_err(map_err))?;
+            py.detach(|| self.receiver.recv().map_err(map_err))?;
         let buffer = Py::new(
             py,
             PyBuffer {
@@ -715,6 +715,8 @@ fn _vertebra(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySpscRing>()?;
     m.add_class::<PyMpmcRing>()?;
     m.add_class::<PyBufferChannel>()?;
+    // Register async ring types (PRD-10: eventfd async transport)
+    async_ring::register(m)?;
     Ok(())
 }
 

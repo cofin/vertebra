@@ -1,6 +1,6 @@
-import * as path from "path";
 import { promises as fs } from "node:fs";
 import { S3Client, type S3Options } from "bun";
+import * as path from "path";
 
 export type Backend = "local" | "s3" | "gcs";
 

@@ -141,5 +141,5 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         test_containers = [c for c in containers if c.startswith("vertebra-test-")]
         if test_containers:
             subprocess.run([cmd, "rm", "-f", *test_containers], capture_output=True, check=False)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return

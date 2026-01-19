@@ -1,5 +1,5 @@
-import { decodeMessage, encodeMessage } from "../protocol/serialization";
 import { ShmRing } from "../broker/shm";
+import { decodeMessage, encodeMessage } from "../protocol/serialization";
 
 export type IpcClientConfig = {
   name?: string;

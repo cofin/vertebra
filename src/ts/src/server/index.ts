@@ -1,12 +1,12 @@
-import { resolveServerConfig, type ResolvedServerConfig, type ServerConfig } from "./config";
+import type { WebSocketHandler } from "bun";
+import { BrokerClient } from "../broker";
+import { AsgiBridge } from "../ipc";
+import { type ResolvedServerConfig, resolveServerConfig, type ServerConfig } from "./config";
+import { log } from "./logging";
+import { createMetrics, MetricsRegistry, trackRequest } from "./metrics";
 import { createRouter, RequestHandler } from "./router";
 import { WorkerManager } from "./worker-manager";
 import { createWorkerPool, StubWorkerPool, type WorkerPool } from "./worker-pool";
-import { AsgiBridge } from "../ipc";
-import type { WebSocketHandler } from "bun";
-import { createMetrics, trackRequest, MetricsRegistry } from "./metrics";
-import { log } from "./logging";
-import { BrokerClient } from "../broker";
 
 export class BunServer {
   private server: Server | null = null;
@@ -201,18 +201,18 @@ export const defaultWorkerPool = new StubWorkerPool();
 
 export {
   defineConfig,
-  loadConfig,
-  resolveServerConfig,
   type IpcProtocol,
+  loadConfig,
   type ResolvedServerConfig,
+  resolveServerConfig,
   type ServerConfig,
   type ServerIpcConfig,
 } from "./config";
 export { createRouter, type RequestHandler } from "./router";
+export { WorkerManager } from "./worker-manager";
 export {
   createWorkerPool,
   RoundRobinWorkerPool,
   StubWorkerPool,
   type WorkerPool,
 } from "./worker-pool";
-export { WorkerManager } from "./worker-manager";
