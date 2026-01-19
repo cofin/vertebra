@@ -9,8 +9,8 @@ _SYNC_DICTIONARY_FACTORY = resolve_sync_data_dictionary("sqlite")
 _ASYNC_DICTIONARY_FACTORY = resolve_async_data_dictionary("sqlite")
 
 
-class BrokerSqliteSyncDriver(BrokerSyncDriverBase):
-    """Synchronous broker-backed SQLite driver."""
+class VertebraSqliteSyncDriver(BrokerSyncDriverBase):
+    """Synchronous Vertebra broker-backed SQLite driver."""
 
     dialect: ClassVar[str] = "sqlite"
 
@@ -25,8 +25,8 @@ class BrokerSqliteSyncDriver(BrokerSyncDriverBase):
         )
 
 
-class BrokerSqliteAsyncDriver(BrokerAsyncDriverBase):
-    """Asynchronous broker-backed SQLite driver."""
+class VertebraSqliteAsyncDriver(BrokerAsyncDriverBase):
+    """Asynchronous Vertebra broker-backed SQLite driver."""
 
     dialect: ClassVar[str] = "sqlite"
 
@@ -41,4 +41,4 @@ class BrokerSqliteAsyncDriver(BrokerAsyncDriverBase):
         )
 
 
-__all__ = ("BrokerSqliteAsyncDriver", "BrokerSqliteSyncDriver")
+__all__ = ("VertebraSqliteAsyncDriver", "VertebraSqliteSyncDriver")

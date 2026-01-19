@@ -22,8 +22,8 @@ if TYPE_CHECKING:
     from sqlspec.observability import ObservabilityConfig
 
 
-class BrokerSyncConfigBase(SyncDatabaseConfig[SyncBrokerConnection, SyncBrokerPool, Any]):
-    """Base class for broker-backed sync SQLSpec configs."""
+class VertebraSyncConfigBase(SyncDatabaseConfig[SyncBrokerConnection, SyncBrokerPool, Any]):
+    """Base class for Vertebra broker-backed sync SQLSpec configs."""
 
     driver_type: ClassVar[type[Any]]
     connection_type: ClassVar[type[Any]] = SyncBrokerConnection
@@ -101,8 +101,8 @@ class BrokerSyncConfigBase(SyncDatabaseConfig[SyncBrokerConnection, SyncBrokerPo
         return namespace
 
 
-class BrokerAsyncConfigBase(AsyncDatabaseConfig[AsyncBrokerConnection, AsyncBrokerPool, Any]):
-    """Base class for broker-backed async SQLSpec configs."""
+class VertebraAsyncConfigBase(AsyncDatabaseConfig[AsyncBrokerConnection, AsyncBrokerPool, Any]):
+    """Base class for Vertebra broker-backed async SQLSpec configs."""
 
     driver_type: ClassVar[type[Any]]
     connection_type: ClassVar[type[Any]] = AsyncBrokerConnection
@@ -183,7 +183,7 @@ class BrokerAsyncConfigBase(AsyncDatabaseConfig[AsyncBrokerConnection, AsyncBrok
 class _SyncSessionHandler:
     __slots__ = ("_config",)
 
-    def __init__(self, config: BrokerSyncConfigBase) -> None:
+    def __init__(self, config: VertebraSyncConfigBase) -> None:
         self._config = config
 
     def acquire_connection(self) -> "SyncBrokerConnection":
@@ -198,7 +198,7 @@ class _SyncSessionHandler:
 class _AsyncSessionHandler:
     __slots__ = ("_config",)
 
-    def __init__(self, config: BrokerAsyncConfigBase) -> None:
+    def __init__(self, config: VertebraAsyncConfigBase) -> None:
         self._config = config
 
     async def acquire_connection(self) -> "AsyncBrokerConnection":
@@ -210,4 +210,4 @@ class _AsyncSessionHandler:
         await pool.release(connection)
 
 
-__all__ = ("BrokerAsyncConfigBase", "BrokerSyncConfigBase")
+__all__ = ("VertebraAsyncConfigBase", "VertebraSyncConfigBase")

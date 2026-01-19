@@ -1,18 +1,18 @@
 """Broker-backed MySQL SQLSpec adapters."""
 
 from vertebra.extensions.sqlspec.mysql.config import (
-    BrokerMysqlAsyncConfig,
-    BrokerMysqlSyncConfig,
     MysqlDriverFeatures,
+    VertebraMysqlAsyncConfig,
+    VertebraMysqlSyncConfig,
     default_statement_config,
 )
-from vertebra.extensions.sqlspec.mysql.driver import BrokerMysqlAsyncDriver, BrokerMysqlSyncDriver
+from vertebra.extensions.sqlspec.mysql.driver import VertebraMysqlAsyncDriver, VertebraMysqlSyncDriver
 
 __all__ = (
-    "BrokerMysqlAsyncConfig",
-    "BrokerMysqlAsyncDriver",
-    "BrokerMysqlSyncConfig",
-    "BrokerMysqlSyncDriver",
+    "VertebraMysqlAsyncConfig",
+    "VertebraMysqlAsyncDriver",
+    "VertebraMysqlSyncConfig",
+    "VertebraMysqlSyncDriver",
     "MysqlDriverFeatures",
     "default_statement_config",
 )

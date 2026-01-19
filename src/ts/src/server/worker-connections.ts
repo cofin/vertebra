@@ -1,20 +1,20 @@
 import { type IpcClientConfig, IpcPool, type IpcRequester } from "../ipc";
 
-export interface WorkerPool extends IpcRequester {
+export interface IpcConnectionPool extends IpcRequester {
   close(): Promise<void>;
 }
 
-export type WorkerPoolOptions = {
+export type IpcConnectionPoolOptions = {
   count: number;
   ipc?: IpcClientConfig;
 };
 
-export class RoundRobinWorkerPool implements WorkerPool {
+export class RoundRobinIpcConnectionPool implements IpcConnectionPool {
   private pools: IpcPool[] = [];
   private index = 0;
   private closed = false;
 
-  constructor(options: WorkerPoolOptions) {
+  constructor(options: IpcConnectionPoolOptions) {
     const count = Math.max(1, Math.floor(options.count));
     for (let i = 0; i < count; i += 1) {
       this.pools.push(new IpcPool(options.ipc, i));
@@ -53,7 +53,7 @@ export class RoundRobinWorkerPool implements WorkerPool {
   }
 }
 
-export class StubWorkerPool implements WorkerPool {
+export class StubIpcConnectionPool implements IpcConnectionPool {
   async request<T>(_: unknown): Promise<T> {
     throw new Error("Worker pool not configured");
   }
@@ -67,6 +67,6 @@ export class StubWorkerPool implements WorkerPool {
   }
 }
 
-export function createWorkerPool(options: WorkerPoolOptions): WorkerPool {
-  return new RoundRobinWorkerPool(options);
+export function createIpcConnectionPool(options: IpcConnectionPoolOptions): IpcConnectionPool {
+  return new RoundRobinIpcConnectionPool(options);
 }

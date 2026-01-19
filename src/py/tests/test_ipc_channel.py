@@ -18,16 +18,41 @@ def test_channel_pair_roundtrip() -> None:
 
     client, server = Channel.create_pair(slot_size=2048, slots=8)
 
+    # Thread coordination events
+    ready = threading.Event()
+    shutdown = threading.Event()
+    error: Exception | None = None
+
     def server_loop() -> None:
-        proc_id, params = server.receive_sync(timeout_ms=1000)
-        assert proc_id == "ping"
-        assert params["value"] == 42
-        server.respond_sync(proc_id, {"ok": params["value"]})
+        nonlocal error
+        try:
+            # Signal ready before blocking on receive
+            ready.set()
+            proc_id, params = server.receive_sync(timeout_ms=2000)
+            assert proc_id == "ping"
+            assert params["value"] == 42
+            server.respond_sync(proc_id, {"ok": params["value"]})
+        except Exception as e:
+            error = e
+        finally:
+            shutdown.set()
 
     thread = threading.Thread(target=server_loop, daemon=True)
     thread.start()
-    result = client.send_sync("ping", {"value": 42}, timeout_ms=1000)
+
+    # Wait for server to be ready before sending
+    if not ready.wait(timeout=2.0):
+        pytest.fail("Server thread did not become ready")
+
+    result = client.send_sync("ping", {"value": 42}, timeout_ms=2000)
+
+    # Wait for clean shutdown
+    if not shutdown.wait(timeout=2.0):
+        pytest.fail("Server thread did not shut down cleanly")
+
     thread.join(timeout=2)
+    if error is not None:
+        raise error
     assert result["ok"] == 42
 
 

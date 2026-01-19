@@ -62,3 +62,4 @@ src/rs/target
 tools/scripts/detect_mcp_tools.py
 src/rs/tools/scripts/detect_mcp_tools.py
 .mypy_cache
+AGENTS.md

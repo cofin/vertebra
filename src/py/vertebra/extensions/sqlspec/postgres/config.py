@@ -4,10 +4,10 @@ from typing import TYPE_CHECKING, Any, ClassVar, NotRequired, TypedDict
 
 from sqlspec.core import ParameterStyle
 
-from vertebra.extensions.sqlspec._config import BrokerAsyncConfigBase, BrokerSyncConfigBase
+from vertebra.extensions.sqlspec._config import VertebraAsyncConfigBase, VertebraSyncConfigBase
 from vertebra.extensions.sqlspec._core import build_broker_profile, build_statement_config
 from vertebra.extensions.sqlspec._dictionary import resolve_async_data_dictionary, resolve_sync_data_dictionary
-from vertebra.extensions.sqlspec.postgres.driver import BrokerPostgresAsyncDriver, BrokerPostgresSyncDriver
+from vertebra.extensions.sqlspec.postgres.driver import VertebraPostgresAsyncDriver, VertebraPostgresSyncDriver
 
 if TYPE_CHECKING:
     from sqlspec.config import ExtensionConfigs
@@ -29,10 +29,10 @@ _POSTGRES_PROFILE = build_broker_profile("VertebraPostgres", default_style=Param
 default_statement_config = build_statement_config(_POSTGRES_PROFILE, "postgres")
 
 
-class BrokerPostgresSyncConfig(BrokerSyncConfigBase):
-    """Synchronous broker-backed PostgreSQL configuration."""
+class VertebraPostgresSyncConfig(VertebraSyncConfigBase):
+    """Synchronous Vertebra broker-backed PostgreSQL configuration."""
 
-    driver_type: ClassVar[type[Any]] = BrokerPostgresSyncDriver
+    driver_type: ClassVar[type[Any]] = VertebraPostgresSyncDriver
     default_statement_config: ClassVar["StatementConfig"] = default_statement_config
     default_pool_name: ClassVar[str] = "postgres"
     supports_transactional_ddl: ClassVar[bool] = True
@@ -73,10 +73,10 @@ class BrokerPostgresSyncConfig(BrokerSyncConfigBase):
         )
 
 
-class BrokerPostgresAsyncConfig(BrokerAsyncConfigBase):
-    """Asynchronous broker-backed PostgreSQL configuration."""
+class VertebraPostgresAsyncConfig(VertebraAsyncConfigBase):
+    """Asynchronous Vertebra broker-backed PostgreSQL configuration."""
 
-    driver_type: ClassVar[type[Any]] = BrokerPostgresAsyncDriver
+    driver_type: ClassVar[type[Any]] = VertebraPostgresAsyncDriver
     default_statement_config: ClassVar["StatementConfig"] = default_statement_config
     default_pool_name: ClassVar[str] = "postgres"
     supports_transactional_ddl: ClassVar[bool] = True
@@ -118,8 +118,8 @@ class BrokerPostgresAsyncConfig(BrokerAsyncConfigBase):
 
 
 __all__ = (
-    "BrokerPostgresAsyncConfig",
-    "BrokerPostgresSyncConfig",
+    "VertebraPostgresAsyncConfig",
+    "VertebraPostgresSyncConfig",
     "PostgresDriverFeatures",
     "default_statement_config",
 )

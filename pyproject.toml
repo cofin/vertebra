@@ -15,7 +15,7 @@ dependencies = [
   "msgspec>=0.18.0",
 ]
 description = "Python-first, high-performance application backbone with tRPC-like DX"
-keywords = ["trpc", "asgi", "ipc", "performance", "bun"]
+keywords = ["trpc", "asgi", "ipc", "performance", "bun", "arrow"]
 license = { text = "Apache" }
 maintainers = [
   { name = "Cody Fincher", email = "cody@litestar.dev" },
@@ -57,6 +57,7 @@ test = [
   "pytest-dotenv",
   "pytest-mock>=3.14.0",
   "pytest-sugar>=1.0.0",
+  "pytest-timeout>=2.3.1",
   "pytest-xdist>=3.6.1",
   "time-machine>=2.15.0",
 ]
@@ -191,6 +192,8 @@ markers = [
 ]
 anyio_mode = "auto"
 testpaths = ["src/py/tests"]
+timeout = 30
+timeout_method = "thread"
 
 [tool.ruff]
 exclude = [

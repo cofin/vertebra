@@ -5,9 +5,19 @@ import { type ResolvedServerConfig, resolveServerConfig, type ServerConfig } fro
 import { log } from "./logging";
 import { createMetrics, MetricsRegistry, trackRequest } from "./metrics";
 import { createRouter, RequestHandler } from "./router";
-import { WorkerManager } from "./worker-manager";
-import { createWorkerPool, StubWorkerPool, type WorkerPool } from "./worker-pool";
+import { ProcessManager } from "./process-manager";
+import {
+  createIpcConnectionPool,
+  StubIpcConnectionPool,
+  type IpcConnectionPool,
+} from "./worker-connections";
 
+/**
+ * Bun server entrypoint: HTTP server + ASGI bridge + IPC worker coordination.
+ *
+ * - ProcessManager supervises Python worker processes.
+ * - IpcConnectionPool manages shared-memory IPC connections to workers.
+ */
 export class BunServer {
   private server: Server | null = null;
   private shuttingDown = false;
@@ -117,15 +127,12 @@ export async function createRouterServer(
 
 export async function createAsgiServer(
   config: ServerConfig = {},
-  pool?: WorkerPool,
+  pool?: IpcConnectionPool,
 ): Promise<BunServer> {
   const resolved = await resolveServerConfig(config);
-  if (resolved.ipc.protocol === "protobuf") {
-    throw new Error("Protobuf IPC protocol is not implemented yet");
-  }
-  const workerPool = pool ?? createWorkerPool({ count: resolved.workers.count, ipc: resolved.ipc });
+  const workerPool = pool ?? createIpcConnectionPool({ count: resolved.workers.count, ipc: resolved.ipc });
   const manager = resolved.python.app
-    ? new WorkerManager({
+    ? new ProcessManager({
         count: resolved.workers.count,
         ipc: resolved.ipc,
         python: resolved.python,
@@ -197,7 +204,7 @@ function ensureTraceId(request: Request): { request: Request; traceId: string } 
   return { request: new Request(request, { headers }), traceId };
 }
 
-export const defaultWorkerPool = new StubWorkerPool();
+export const defaultWorkerPool = new StubIpcConnectionPool();
 
 export {
   defineConfig,
@@ -209,10 +216,10 @@ export {
   type ServerIpcConfig,
 } from "./config";
 export { createRouter, type RequestHandler } from "./router";
-export { WorkerManager } from "./worker-manager";
+export { ProcessManager } from "./process-manager";
 export {
-  createWorkerPool,
-  RoundRobinWorkerPool,
-  StubWorkerPool,
-  type WorkerPool,
-} from "./worker-pool";
+  createIpcConnectionPool,
+  RoundRobinIpcConnectionPool,
+  StubIpcConnectionPool,
+  type IpcConnectionPool,
+} from "./worker-connections";

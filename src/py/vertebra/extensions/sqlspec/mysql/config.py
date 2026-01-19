@@ -4,10 +4,10 @@ from typing import TYPE_CHECKING, Any, ClassVar, NotRequired, TypedDict
 
 from sqlspec.core import ParameterStyle
 
-from vertebra.extensions.sqlspec._config import BrokerAsyncConfigBase, BrokerSyncConfigBase
+from vertebra.extensions.sqlspec._config import VertebraAsyncConfigBase, VertebraSyncConfigBase
 from vertebra.extensions.sqlspec._core import build_broker_profile, build_statement_config
 from vertebra.extensions.sqlspec._dictionary import resolve_async_data_dictionary, resolve_sync_data_dictionary
-from vertebra.extensions.sqlspec.mysql.driver import BrokerMysqlAsyncDriver, BrokerMysqlSyncDriver
+from vertebra.extensions.sqlspec.mysql.driver import VertebraMysqlAsyncDriver, VertebraMysqlSyncDriver
 
 if TYPE_CHECKING:
     from sqlspec.config import ExtensionConfigs
@@ -29,10 +29,10 @@ _MYSQL_PROFILE = build_broker_profile("VertebraMysql", default_style=ParameterSt
 default_statement_config = build_statement_config(_MYSQL_PROFILE, "mysql")
 
 
-class BrokerMysqlSyncConfig(BrokerSyncConfigBase):
-    """Synchronous broker-backed MySQL configuration."""
+class VertebraMysqlSyncConfig(VertebraSyncConfigBase):
+    """Synchronous Vertebra broker-backed MySQL configuration."""
 
-    driver_type: ClassVar[type[Any]] = BrokerMysqlSyncDriver
+    driver_type: ClassVar[type[Any]] = VertebraMysqlSyncDriver
     default_statement_config: ClassVar["StatementConfig"] = default_statement_config
     default_pool_name: ClassVar[str] = "mysql"
     supports_transactional_ddl: ClassVar[bool] = False
@@ -73,10 +73,10 @@ class BrokerMysqlSyncConfig(BrokerSyncConfigBase):
         )
 
 
-class BrokerMysqlAsyncConfig(BrokerAsyncConfigBase):
-    """Asynchronous broker-backed MySQL configuration."""
+class VertebraMysqlAsyncConfig(VertebraAsyncConfigBase):
+    """Asynchronous Vertebra broker-backed MySQL configuration."""
 
-    driver_type: ClassVar[type[Any]] = BrokerMysqlAsyncDriver
+    driver_type: ClassVar[type[Any]] = VertebraMysqlAsyncDriver
     default_statement_config: ClassVar["StatementConfig"] = default_statement_config
     default_pool_name: ClassVar[str] = "mysql"
     supports_transactional_ddl: ClassVar[bool] = False
@@ -117,4 +117,4 @@ class BrokerMysqlAsyncConfig(BrokerAsyncConfigBase):
         )
 
 
-__all__ = ("BrokerMysqlAsyncConfig", "BrokerMysqlSyncConfig", "MysqlDriverFeatures", "default_statement_config")
+__all__ = ("VertebraMysqlAsyncConfig", "VertebraMysqlSyncConfig", "MysqlDriverFeatures", "default_statement_config")

@@ -1,18 +1,18 @@
 """Broker-backed PostgreSQL SQLSpec adapters."""
 
 from vertebra.extensions.sqlspec.postgres.config import (
-    BrokerPostgresAsyncConfig,
-    BrokerPostgresSyncConfig,
     PostgresDriverFeatures,
+    VertebraPostgresAsyncConfig,
+    VertebraPostgresSyncConfig,
     default_statement_config,
 )
-from vertebra.extensions.sqlspec.postgres.driver import BrokerPostgresAsyncDriver, BrokerPostgresSyncDriver
+from vertebra.extensions.sqlspec.postgres.driver import VertebraPostgresAsyncDriver, VertebraPostgresSyncDriver
 
 __all__ = (
-    "BrokerPostgresAsyncConfig",
-    "BrokerPostgresAsyncDriver",
-    "BrokerPostgresSyncConfig",
-    "BrokerPostgresSyncDriver",
+    "VertebraPostgresAsyncConfig",
+    "VertebraPostgresAsyncDriver",
+    "VertebraPostgresSyncConfig",
+    "VertebraPostgresSyncDriver",
     "PostgresDriverFeatures",
     "default_statement_config",
 )

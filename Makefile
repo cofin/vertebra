@@ -454,7 +454,7 @@ test:                                              ## Run the tests
 	@echo "${OK} Tests passed ✨"
 
 .PHONY: test-all
-test-all: test js-test rs-test                      ## Run all tests
+test-all: rs-test js-test test                      ## Run all tests (Rust -> TypeScript -> Python)
 	@echo "${OK} All tests passed ✨"
 
 .PHONY: check-all

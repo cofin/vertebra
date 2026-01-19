@@ -9,8 +9,8 @@ _SYNC_DICTIONARY_FACTORY = resolve_sync_data_dictionary("postgres")
 _ASYNC_DICTIONARY_FACTORY = resolve_async_data_dictionary("postgres")
 
 
-class BrokerPostgresSyncDriver(BrokerSyncDriverBase):
-    """Synchronous broker-backed PostgreSQL driver."""
+class VertebraPostgresSyncDriver(BrokerSyncDriverBase):
+    """Synchronous Vertebra broker-backed PostgreSQL driver."""
 
     dialect: ClassVar[str] = "postgres"
 
@@ -25,8 +25,8 @@ class BrokerPostgresSyncDriver(BrokerSyncDriverBase):
         )
 
 
-class BrokerPostgresAsyncDriver(BrokerAsyncDriverBase):
-    """Asynchronous broker-backed PostgreSQL driver."""
+class VertebraPostgresAsyncDriver(BrokerAsyncDriverBase):
+    """Asynchronous Vertebra broker-backed PostgreSQL driver."""
 
     dialect: ClassVar[str] = "postgres"
 
@@ -41,4 +41,4 @@ class BrokerPostgresAsyncDriver(BrokerAsyncDriverBase):
         )
 
 
-__all__ = ("BrokerPostgresAsyncDriver", "BrokerPostgresSyncDriver")
+__all__ = ("VertebraPostgresAsyncDriver", "VertebraPostgresSyncDriver")

@@ -1,4 +1,10 @@
-"""Resource pool client interfaces."""
+"""Internal resource pool clients for broker IPC.
+
+The resources package exposes the internal `BrokerClient` and pool
+abstractions used by the Python runtime to talk to the Bun broker over
+shared-memory IPC. These classes are internal implementation details
+and are separate from the public SQLSpec adapters.
+"""
 
 from __future__ import annotations
 

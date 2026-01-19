@@ -1,18 +1,18 @@
 """Broker-backed SQLite SQLSpec adapters."""
 
 from vertebra.extensions.sqlspec.sqlite.config import (
-    BrokerSqliteAsyncConfig,
-    BrokerSqliteSyncConfig,
     SqliteDriverFeatures,
+    VertebraSqliteAsyncConfig,
+    VertebraSqliteSyncConfig,
     default_statement_config,
 )
-from vertebra.extensions.sqlspec.sqlite.driver import BrokerSqliteAsyncDriver, BrokerSqliteSyncDriver
+from vertebra.extensions.sqlspec.sqlite.driver import VertebraSqliteAsyncDriver, VertebraSqliteSyncDriver
 
 __all__ = (
-    "BrokerSqliteAsyncConfig",
-    "BrokerSqliteAsyncDriver",
-    "BrokerSqliteSyncConfig",
-    "BrokerSqliteSyncDriver",
+    "VertebraSqliteAsyncConfig",
+    "VertebraSqliteAsyncDriver",
+    "VertebraSqliteSyncConfig",
+    "VertebraSqliteSyncDriver",
     "SqliteDriverFeatures",
     "default_statement_config",
 )

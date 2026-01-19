@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 from sqlspec.config import AsyncDatabaseConfig, ExtensionConfigs, SyncDatabaseConfig
 from sqlspec.core import get_default_config
 
-from vertebra.extensions.sqlspec._config import BrokerAsyncConfigBase, BrokerSyncConfigBase
+from vertebra.extensions.sqlspec._config import VertebraAsyncConfigBase, VertebraSyncConfigBase
 from vertebra.extensions.sqlspec._dictionary import resolve_async_data_dictionary, resolve_sync_data_dictionary
 from vertebra.extensions.sqlspec._driver import BrokerAsyncDriverBase, BrokerSyncDriverBase
 
@@ -19,22 +19,22 @@ SyncConfigT = TypeVar("SyncConfigT", bound=SyncDatabaseConfig[Any, Any, Any])
 AsyncConfigT = TypeVar("AsyncConfigT", bound=AsyncDatabaseConfig[Any, Any, Any])
 
 
-class BrokerProxySyncDriver(BrokerSyncDriverBase):
-    """Sync broker proxy driver for external SQLSpec adapters."""
+class VertebraProxySyncDriver(BrokerSyncDriverBase):
+    """Sync Vertebra broker proxy driver for external SQLSpec adapters."""
 
     dialect: ClassVar[str | None] = None
 
 
-class BrokerProxyAsyncDriver(BrokerAsyncDriverBase):
-    """Async broker proxy driver for external SQLSpec adapters."""
+class VertebraProxyAsyncDriver(BrokerAsyncDriverBase):
+    """Async Vertebra broker proxy driver for external SQLSpec adapters."""
 
     dialect: ClassVar[str | None] = None
 
 
-class BrokerProxySyncConfig[SyncConfigT: SyncDatabaseConfig[Any, Any, Any]](BrokerSyncConfigBase):
-    """Broker proxy config wrapping a sync SQLSpec adapter."""
+class VertebraProxySyncConfig[SyncConfigT: SyncDatabaseConfig[Any, Any, Any]](VertebraSyncConfigBase):
+    """Vertebra broker proxy config wrapping a sync SQLSpec adapter."""
 
-    driver_type: ClassVar[type[Any]] = BrokerProxySyncDriver
+    driver_type: ClassVar[type[Any]] = VertebraProxySyncDriver
     default_statement_config: ClassVar["StatementConfig"] = get_default_config()
     default_pool_name: ClassVar[str] = "provider"
 
@@ -74,10 +74,10 @@ class BrokerProxySyncConfig[SyncConfigT: SyncDatabaseConfig[Any, Any, Any]](Brok
         )
 
 
-class BrokerProxyAsyncConfig[AsyncConfigT: AsyncDatabaseConfig[Any, Any, Any]](BrokerAsyncConfigBase):
-    """Broker proxy config wrapping an async SQLSpec adapter."""
+class VertebraProxyAsyncConfig[AsyncConfigT: AsyncDatabaseConfig[Any, Any, Any]](VertebraAsyncConfigBase):
+    """Vertebra broker proxy config wrapping an async SQLSpec adapter."""
 
-    driver_type: ClassVar[type[Any]] = BrokerProxyAsyncDriver
+    driver_type: ClassVar[type[Any]] = VertebraProxyAsyncDriver
     default_statement_config: ClassVar["StatementConfig"] = get_default_config()
     default_pool_name: ClassVar[str] = "provider"
 
@@ -117,4 +117,4 @@ class BrokerProxyAsyncConfig[AsyncConfigT: AsyncDatabaseConfig[Any, Any, Any]](B
         )
 
 
-__all__ = ("BrokerProxyAsyncConfig", "BrokerProxyAsyncDriver", "BrokerProxySyncConfig", "BrokerProxySyncDriver")
+__all__ = ("VertebraProxyAsyncConfig", "VertebraProxyAsyncDriver", "VertebraProxySyncConfig", "VertebraProxySyncDriver")

@@ -21,7 +21,7 @@ type WorkerProcess = {
   restarts: number;
 };
 
-export type WorkerManagerOptions = {
+export type ProcessManagerOptions = {
   count: number;
   ipc: ServerIpcConfig;
   python: PythonConfig;
@@ -31,13 +31,13 @@ export type WorkerManagerOptions = {
   shutdownTimeoutMs?: number;
 };
 
-export class WorkerManager {
+export class ProcessManager {
   private workers = new Map<number, WorkerProcess>();
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
   private restartTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
-  constructor(private options: WorkerManagerOptions) {
+  constructor(private options: ProcessManagerOptions) {
     if (!options.python.app) {
       throw new Error("Python app is required to manage workers");
     }

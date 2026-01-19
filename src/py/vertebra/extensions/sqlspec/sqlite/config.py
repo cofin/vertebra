@@ -4,10 +4,10 @@ from typing import TYPE_CHECKING, Any, ClassVar, NotRequired, TypedDict
 
 from sqlspec.core import ParameterStyle
 
-from vertebra.extensions.sqlspec._config import BrokerAsyncConfigBase, BrokerSyncConfigBase
+from vertebra.extensions.sqlspec._config import VertebraAsyncConfigBase, VertebraSyncConfigBase
 from vertebra.extensions.sqlspec._core import build_broker_profile, build_statement_config
 from vertebra.extensions.sqlspec._dictionary import resolve_async_data_dictionary, resolve_sync_data_dictionary
-from vertebra.extensions.sqlspec.sqlite.driver import BrokerSqliteAsyncDriver, BrokerSqliteSyncDriver
+from vertebra.extensions.sqlspec.sqlite.driver import VertebraSqliteAsyncDriver, VertebraSqliteSyncDriver
 
 if TYPE_CHECKING:
     from sqlspec.config import ExtensionConfigs
@@ -29,10 +29,10 @@ _SQLITE_PROFILE = build_broker_profile("VertebraSqlite", default_style=Parameter
 default_statement_config = build_statement_config(_SQLITE_PROFILE, "sqlite")
 
 
-class BrokerSqliteSyncConfig(BrokerSyncConfigBase):
-    """Synchronous broker-backed SQLite configuration."""
+class VertebraSqliteSyncConfig(VertebraSyncConfigBase):
+    """Synchronous Vertebra broker-backed SQLite configuration."""
 
-    driver_type: ClassVar[type[Any]] = BrokerSqliteSyncDriver
+    driver_type: ClassVar[type[Any]] = VertebraSqliteSyncDriver
     default_statement_config: ClassVar["StatementConfig"] = default_statement_config
     default_pool_name: ClassVar[str] = "sqlite"
     supports_transactional_ddl: ClassVar[bool] = True
@@ -73,10 +73,10 @@ class BrokerSqliteSyncConfig(BrokerSyncConfigBase):
         )
 
 
-class BrokerSqliteAsyncConfig(BrokerAsyncConfigBase):
-    """Asynchronous broker-backed SQLite configuration."""
+class VertebraSqliteAsyncConfig(VertebraAsyncConfigBase):
+    """Asynchronous Vertebra broker-backed SQLite configuration."""
 
-    driver_type: ClassVar[type[Any]] = BrokerSqliteAsyncDriver
+    driver_type: ClassVar[type[Any]] = VertebraSqliteAsyncDriver
     default_statement_config: ClassVar["StatementConfig"] = default_statement_config
     default_pool_name: ClassVar[str] = "sqlite"
     supports_transactional_ddl: ClassVar[bool] = True
@@ -117,4 +117,4 @@ class BrokerSqliteAsyncConfig(BrokerAsyncConfigBase):
         )
 
 
-__all__ = ("BrokerSqliteAsyncConfig", "BrokerSqliteSyncConfig", "SqliteDriverFeatures", "default_statement_config")
+__all__ = ("VertebraSqliteAsyncConfig", "VertebraSqliteSyncConfig", "SqliteDriverFeatures", "default_statement_config")

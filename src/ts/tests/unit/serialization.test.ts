@@ -1,4 +1,10 @@
-import { decodeMessage, deframeMessage, encodeMessage, frameMessage } from "./serialization";
+import { describe, expect, test } from "bun:test";
+import {
+  decodeMessage,
+  deframeMessage,
+  encodeMessage,
+  frameMessage,
+} from "../../src/protocol/serialization";
 
 const payload = { id: "abc", ok: true, values: [1, 2, 3] };
 

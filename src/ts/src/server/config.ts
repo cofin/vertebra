@@ -5,7 +5,7 @@ import { type IpcClientConfig, resolveIpcConfig } from "../ipc/client";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type WorkerCount = number | "auto";
-export type IpcProtocol = "msgpack" | "protobuf";
+export type IpcProtocol = "msgpack";
 
 export interface ServerSettings {
   host?: string;
@@ -218,7 +218,7 @@ function buildResolvedConfig(config: NormalizedConfig): ResolvedServerConfig {
   const workerCount = resolveWorkerCount(config);
   const ipcDefaults = resolveIpcConfig(config.ipc ?? {});
   const ipcProtocol = config.ipc?.protocol ?? "msgpack";
-  if (ipcProtocol !== "msgpack" && ipcProtocol !== "protobuf") {
+  if (ipcProtocol !== "msgpack") {
     throw new Error(`Unsupported IPC protocol: ${ipcProtocol}`);
   }
   const ipc: ServerIpcConfig = {

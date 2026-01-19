@@ -1,66 +1,55 @@
-# Bun-Backed Drivers API
+# Vertebra Drivers & Integrations
 
-This document summarizes the Python-facing driver interfaces provided by Vertebra.
+This document summarizes the Python-facing driver interfaces and ORM integrations provided by Vertebra.
 
-## SyncDriver / AsyncDriver
+## High-Level Integrations
+
+Vertebra provides first-class support for modern Python ORMs and database tools. These integrations are the recommended way to consume Vertebra's shared-memory data plane.
+
+### SQLSpec (Recommended)
+
+Vertebra provides fully compliant SQLSpec adapters that route queries through the shared-memory broker.
+
+*   **Prefix**: `Vertebra*` (e.g., `VertebraPostgresSyncConfig`)
+*   **Package**: `vertebra.extensions.sqlspec`
+
+**Supported Adapters:**
+*   `VertebraPostgresSyncConfig` / `VertebraPostgresAsyncConfig`
+*   `VertebraMysqlSyncConfig` / `VertebraMysqlAsyncConfig`
+*   `VertebraSqliteSyncConfig` / `VertebraSqliteAsyncConfig`
+
+### SQLAlchemy
+
+Native SQLAlchemy Dialects are provided to allow standard `create_engine` usage with Vertebra's pooling and IPC.
+
+*   **Dialects**: `postgresql+vertebra://`, `mysql+vertebra://`, `sqlite+vertebra://`
+*   **Package**: `vertebra.extensions.sqlalchemy`
+
+### Advanced Alchemy
+
+Integration for Advanced Alchemy Repositories and Services, leveraging the SQLAlchemy dialects and Vertebra's storage subsystem.
+
+*   **Package**: `vertebra.extensions.advanced_alchemy`
+
+---
+
+## Low-Level Driver API
+
+The foundation for the above integrations are the Bun-backed drivers. These implement a subset of DB-API 2.0.
+
+### SyncDriver / AsyncDriver
 
 - `SyncDriver.connect()` -> `SyncConnection`
 - `SyncDriver.pool(min_size=1, max_size=10)` -> `SyncPool`
 - `AsyncDriver.connect()` -> `AsyncConnection`
 - `AsyncDriver.pool(min_size=1, max_size=10)` -> `AsyncPool`
 
-## SyncConnection (DB-API 2.0)
+### SyncConnection (DB-API 2.0)
 
 - `cursor()` -> `SyncCursor`
 - `commit()`
 - `rollback()`
 - `close()`
-
-## SyncCursor
-
-- `execute(query, params=None)`
-- `executemany(query, params)`
-- `fetchone()`
-- `fetchmany(size=None)`
-- `fetchall()`
-- `close()`
-
-## AsyncConnection
-
-- `fetch(query, params=None)`
-- `fetchrow(query, params=None)`
-- `fetchval(query, params=None)`
-- `execute(query, params=None)`
-- `executemany(query, params)`
-- `close()`
-
-## SyncPool
-
-- `acquire()`
-- `release(connection)`
-- `close()`
-- `get_size()`
-- `get_idle_size()`
-
-## AsyncPool
-
-- `acquire()`
-- `release(connection)`
-- `close()`
-- `get_size()`
-- `get_idle_size()`
-
-## Exceptions
-
-Vertebra exposes a DB-API compatible exception hierarchy in `vertebra.drivers.exceptions`.
-
-## Backend Registry
-
-Custom backends can be registered for bridge/plugin scenarios:
-
-- `register_driver_backend(name, factory)` registers a backend factory.
-- `available_driver_backends()` lists registered backends.
-- `get_driver_backend(config)` resolves a backend for a `DriverConfig`.
 
 ## SQLite Driver
 

@@ -9,8 +9,8 @@ _SYNC_DICTIONARY_FACTORY = resolve_sync_data_dictionary("mysql")
 _ASYNC_DICTIONARY_FACTORY = resolve_async_data_dictionary("mysql")
 
 
-class BrokerMysqlSyncDriver(BrokerSyncDriverBase):
-    """Synchronous broker-backed MySQL driver."""
+class VertebraMysqlSyncDriver(BrokerSyncDriverBase):
+    """Synchronous Vertebra broker-backed MySQL driver."""
 
     dialect: ClassVar[str] = "mysql"
 
@@ -25,8 +25,8 @@ class BrokerMysqlSyncDriver(BrokerSyncDriverBase):
         )
 
 
-class BrokerMysqlAsyncDriver(BrokerAsyncDriverBase):
-    """Asynchronous broker-backed MySQL driver."""
+class VertebraMysqlAsyncDriver(BrokerAsyncDriverBase):
+    """Asynchronous Vertebra broker-backed MySQL driver."""
 
     dialect: ClassVar[str] = "mysql"
 
@@ -41,4 +41,4 @@ class BrokerMysqlAsyncDriver(BrokerAsyncDriverBase):
         )
 
 
-__all__ = ("BrokerMysqlAsyncDriver", "BrokerMysqlSyncDriver")
+__all__ = ("VertebraMysqlAsyncDriver", "VertebraMysqlSyncDriver")

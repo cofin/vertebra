@@ -7,7 +7,7 @@ import {
   type SchedulerClientStats,
   type SchedulerPoolStats,
 } from "../broker";
-import type { WorkerManager } from "./worker-manager";
+import type { ProcessManager } from "./process-manager";
 
 export type ServerMetrics = {
   registry: Registry;
@@ -211,7 +211,7 @@ export class MetricsRegistry {
   constructor(
     private metrics: ServerMetrics,
     private brokerClient?: BrokerClient,
-    private workerManager?: WorkerManager | null,
+    private workerManager?: ProcessManager | null,
   ) {}
 
   async render(): Promise<string> {

@@ -9,58 +9,57 @@ Vertebra is a Python-first application backbone with Rust IPC primitives and a B
 - tRPC-like developer experience with Python → TypeScript type bridging.
 - Cross-platform parity (Linux/macOS/Windows) for the MVP.
 
-## Project Status
+## Active Specifications & Roadmap
 
-**Overall:** PRD-0/PRD-1/PRD-2 complete; PRD-3/PRD-4/PRD-5/PRD-8 in progress.
+**Vertebra 1.0 Roadmap**
 
-| PRD | Status | Notes |
+| Spec | Focus | Status |
 | --- | --- | --- |
-| PRD-0 | Complete | Foundation, build system, docs, repo cleanup |
-| PRD-1 | Complete | Rust IPC core (SPSC/MPMC, shm, ChannelHandle) |
-| PRD-2 | Complete | Python bindings + type bridge |
-| PRD-3 | 90% | Bun server + protocol support (WebSocket, SSE pending) |
-| PRD-4 | 75% | Bun-backed Python drivers (SQLSpec adapters complete) |
-| PRD-5 | 60% | Resource management (broker pools, fairness scheduler) |
-| PRD-6 | 5% | Integration + docs |
-| PRD-7 | 10% | MCP integration (skeleton + IPC bridge stub) |
-| PRD-8 | In Progress | Production readiness consolidation |
+| **Quality** | Test fixes, API renaming (`Vertebra*`), Type auditing | Active (P0) |
+| **Database** | SQLSpec/SQLAlchemy/AA integration, Serialization | Active |
+| **Server** | MCP Protocol, Pool Health, Observability | Active |
+| **Distribution** | `vertebra init`, `vertebra build`, Rust Supervisor | Active |
+| **Docs** | Integration tests, Benchmarks, Examples | Active |
 
 ## Component Map
 
 ```
 Python (Litestar-style API)
-  ├── Type Bridge + Tooling (PRD-2)
+  ├── Type Bridge + Tooling
   │    └── Shared metadata registry / IR / TypeScript generator
-  ├── SQLSpec Extensions (PRD-4)
-  │    └── Broker-backed adapters (Postgres/MySQL/SQLite)
-  ├── Resources (PRD-5)
+  ├── ORM Extensions
+  │    ├── SQLSpec (Vertebra* adapters)
+  │    ├── SQLAlchemy (Native Dialects)
+  │    └── Advanced Alchemy
+  ├── Resources
   │    └── BrokerClient → shared memory → Bun broker
-  └── Server (PRD-3)
+  ├── MCP
+  │    └── @mcp_tool decorator, schema generation
+  └── Server
        └── ASGI worker with IPC framing
 
-Rust (IPC Core)
+Rust (IPC Core + Supervisor)
   ├── vertebra-core
-  │    ├── Shared memory (ShmRegion, shm_unlink_named)
-  │    ├── SPSC/MPMC ring buffers with timeouts
-  │    └── Sync primitives (futex/ulock/WaitOnAddress)
-  ├── vertebra-js (napi-rs)
-  │    ├── ChannelHandle (bidirectional SPSC pairs)
-  │    ├── ChannelRole enum (Client/Server)
-  │    └── BufferPool, SpscRing, MpmcRing handles
-  └── vertebra-py (PyO3)
-       └── Python bindings for channel/buffer/shm
+  │    ├── Shared memory (ShmRegion)
+  │    ├── Ring Buffers (SPSC/MPMC)
+  │    └── Sync primitives (futex/ulock)
+  ├── vertebra-py
+  │    ├── Python bindings
+  │    └── **Supervisor** (Process lifecycle, GIL-free)
+  └── vertebra-js
+       └── Napi bindings for Bun
 
-TypeScript/Bun (Server + Tooling)
-  ├── Broker (PRD-5)
-  │    ├── Pool implementations (SqlPool, RedisPool, StoragePool)
-  │    ├── BasePoolAdapter (shared counter tracking)
+TypeScript/Bun (Server + Broker)
+  ├── Broker
+  │    ├── Connection Pools (SQL, Redis, Storage)
   │    └── FairnessScheduler
-  ├── Server (PRD-3)
-  │    ├── HTTP server + worker management
-  │    ├── ASGI bridge with streaming
-  │    └── Metrics + graceful shutdown
-  └── MCP (PRD-7)
-       └── JSON-RPC + IPC bridge stub
+  ├── Server
+  │    ├── HTTP/WebSocket server
+  │    ├── ASGI bridge
+  │    └── **Observability** (/__metrics__)
+  └── MCP Server
+       ├── Transports (stdio, SSE, WebSocket)
+       └── IPC Bridge to Python
 ```
 
 ## Cross-PRD Decisions (Canonical)
@@ -111,6 +110,8 @@ All pools extend `BasePoolAdapter` which provides:
 - Counter tracking (acquires, releases, errors)
 - Unified `PoolStats` type for metrics
 - Common lifecycle (acquire/release/getStats)
+- Health checks (periodic validation)
+- Lifecycle hooks (onAcquire, onRelease, onError)
 
 ### ChannelHandle (Bidirectional IPC)
 
@@ -150,8 +151,3 @@ src/
 tools/
   lib/       # Tooling helpers (container runtime abstraction)
 ```
-
-## Future Extensions
-
-- Optional C ABI only if PRD-1 decision checklist triggers it.
-- Additional transports (HTTP/3, WebSocket streaming) per PRD-3/PRD-7.

@@ -1,12 +1,17 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { existsSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadShmLib } from "../broker/shm";
-import { RoundRobinWorkerPool } from "../server/worker-pool";
-import { AsgiBridge, type AsgiIpcFrame } from "./asgi";
-import { IpcClient } from "./client";
+import { IpcClient } from "../../src/ipc/client";
+import { AsgiBridge, type AsgiIpcFrame } from "../../src/ipc/asgi";
+import { RoundRobinIpcConnectionPool } from "../../src/server/worker-connections";
+import {
+  concatChunks,
+  pathDelimiter,
+  resolvePythonCommand,
+  SHM_AVAILABLE,
+  sleep,
+} from "../setup";
 
 const PYTHON_CMD = resolvePythonCommand();
 const APP_PATH = "tests._test_app:app";
@@ -18,39 +23,6 @@ const HEALTH_PATH = "/__vertebra__/health";
 
 const procs: Subprocess[] = [];
 let testFile = "";
-
-function resolvePythonCommand(): string[] {
-  if (process.env.VERTEBRA_PYTHON_BIN) {
-    return [process.env.VERTEBRA_PYTHON_BIN];
-  }
-  const uvBin = Bun.which("uv");
-  if (uvBin) {
-    return [uvBin, "run", "python"];
-  }
-  const venvRoot = process.env.VIRTUAL_ENV ?? join(process.cwd(), ".venv");
-  const venvPython = join(venvRoot, "bin", "python");
-  if (existsSync(venvPython)) {
-    return [venvPython];
-  }
-  const venvPython3 = join(venvRoot, "bin", "python3");
-  if (existsSync(venvPython3)) {
-    return [venvPython3];
-  }
-  return [Bun.which("python") ?? Bun.which("python3") ?? "python"];
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-const SHM_AVAILABLE = (() => {
-  try {
-    loadShmLib();
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
 async function waitForHealth(workerId: number, attempts = 50): Promise<void> {
   const client = new IpcClient({ name: ASGI_NAME, slotSize: SLOT_SIZE, slots: SLOTS }, workerId);
@@ -160,7 +132,7 @@ const test = SHM_AVAILABLE ? it : it.skip;
 
 describe("ASGI IPC integration", () => {
   test("routes across multiple workers via round-robin pool", async () => {
-    const pool = new RoundRobinWorkerPool({
+  const pool = new RoundRobinIpcConnectionPool({
       count: WORKERS,
       ipc: { name: ASGI_NAME, slotSize: SLOT_SIZE, slots: SLOTS },
     });
@@ -198,7 +170,7 @@ describe("ASGI IPC integration", () => {
   });
 
   test("supports pathsend from ASGI worker", async () => {
-    const pool = new RoundRobinWorkerPool({
+    const pool = new RoundRobinIpcConnectionPool({
       count: WORKERS,
       ipc: { name: ASGI_NAME, slotSize: SLOT_SIZE, slots: SLOTS },
     });
@@ -209,21 +181,3 @@ describe("ASGI IPC integration", () => {
     expect(text).toBe("hello");
   });
 });
-
-function pathDelimiter(): string {
-  return Bun.platform === "win32" ? ";" : ":";
-}
-
-function concatChunks(chunks: Uint8Array[]): Uint8Array {
-  if (chunks.length === 0) {
-    return new Uint8Array();
-  }
-  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
-}
