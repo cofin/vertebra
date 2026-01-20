@@ -78,6 +78,27 @@ TypeScript/Bun (Server + Broker)
 - **Runtime strategy**: Bun-first; Node fallback only if parity is proven.
 - **Test infrastructure**: Docker/Podman runtime abstraction for integration tests (no compose required).
 
+## Testing Layout (Python)
+
+Python tests are organized by **unit** vs **integration** to make test cost explicit:
+
+```
+src/py/tests/
+  conftest.py
+  database.py
+  helpers/
+  unit/
+  integration/
+```
+
+- **Unit**: fast, in-memory tests (no external services).
+- **Integration**: tests that rely on shared memory IPC, broker processes, or containerized services.
+
+Commands:
+- Unit-only (default): `uv run pytest src/py/tests`
+- Integration: `uv run pytest src/py/tests -m integration --integration`
+- All tests (Rust + TS + Python unit + integration): `make test-all`
+
 ## Shared-Memory Broker
 
 The broker is the central resource manager, owning all database and storage pools:

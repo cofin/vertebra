@@ -234,7 +234,7 @@ export class MetricsRegistry {
 
   private async safeBrokerStats(): Promise<BrokerStats | null> {
     try {
-      return await this.brokerClient?.stats();
+      return (await this.brokerClient?.stats()) ?? null;
     } catch {
       return null;
     }

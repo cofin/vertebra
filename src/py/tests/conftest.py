@@ -17,6 +17,11 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Ensure src/py is importable so pytest plugins can resolve tests.database.
+TESTS_ROOT = ROOT / "src" / "py"
+if str(TESTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TESTS_ROOT))
+
 pytest_plugins = ["tests.database"]
 
 

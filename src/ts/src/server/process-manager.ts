@@ -1,4 +1,5 @@
 import { delimiter, join, resolve as resolvePath } from "node:path";
+import type { Subprocess } from "bun";
 
 import { type AsgiIpcFrame, type AsgiRequest } from "../ipc/asgi";
 import {
@@ -97,12 +98,13 @@ export class ProcessManager {
     }
     const python = this.resolvePythonExecutable(this.options.python);
     const ipcConfig = this.resolveWorkerIpc(id);
-    const cmd = [
+    // Assertion safe: constructor validates python.app is defined
+    const cmd: string[] = [
       python,
       "-c",
       "from vertebra.server.worker import main; main()",
       "--app",
-      this.options.python.app,
+      this.options.python.app!,
       "--name",
       ipcConfig.name,
       "--worker-id",

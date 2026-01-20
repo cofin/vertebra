@@ -180,7 +180,7 @@ export class AsgiBridge {
     return this.handleUnary(this.buildRequest(meta, body));
   }
 
-  upgradeWebSocket(request: Request, server?: Server): boolean {
+  upgradeWebSocket(request: Request, server?: Server<WebSocketState>): boolean {
     if (!server) {
       return false;
     }
@@ -241,7 +241,7 @@ export class AsgiBridge {
           response,
         );
       }
-      return new Response(response.body ?? new Uint8Array(), {
+      return new Response((response.body ?? new Uint8Array()) as BodyInit, {
         status: response.status ?? 502,
         headers: response.headers ?? [],
       });
@@ -476,7 +476,7 @@ export class AsgiBridge {
       queryString: encoder.encode(queryString),
       rootPath: "",
       server: [url.hostname, Number.isFinite(port) ? port : null],
-      client: null,
+      client: undefined,
       extensions: {
         "http.response.pathsend": {},
         "http.response.zerocopysend": {},
@@ -520,7 +520,7 @@ export class AsgiBridge {
       queryString: encoder.encode(queryString),
       rootPath: "",
       server: [url.hostname, Number.isFinite(port) ? port : null],
-      client: null,
+      client: undefined,
       subprotocols,
       extensions: {
         "websocket.close": {},
@@ -545,7 +545,10 @@ export class AsgiBridge {
     return { "sec-websocket-protocol": state.connectFrame.subprotocols[0] };
   }
 
-  private async startWebSocketBridge(ws: ServerWebSocket, state: WebSocketState): Promise<void> {
+  private async startWebSocketBridge(
+    ws: ServerWebSocket<WebSocketState>,
+    state: WebSocketState,
+  ): Promise<void> {
     const outbound = this.websocketOutbound(state);
     const stream = this.requester.requestStream?.<AsgiIpcFrame>(outbound);
     if (!stream) {
@@ -567,7 +570,7 @@ export class AsgiBridge {
   }
 
   private async handleWebSocketFrame(
-    ws: ServerWebSocket,
+    ws: ServerWebSocket<WebSocketState>,
     state: WebSocketState,
     frame: AsgiIpcFrame,
   ): Promise<void> {
@@ -597,7 +600,7 @@ export class AsgiBridge {
   }
 
   private async stopWebSocketBridge(
-    ws: ServerWebSocket,
+    ws: ServerWebSocket<WebSocketState>,
     _code: number,
     _reason: string,
   ): Promise<void> {

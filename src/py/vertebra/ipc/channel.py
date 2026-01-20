@@ -5,13 +5,10 @@ from __future__ import annotations
 import asyncio
 import struct
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from vertebra import _vertebra
 from vertebra.procedures import ProcedureRegistry, get_serializer
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
 
 _HEADER = struct.Struct("!HI")  # procedure length (u16), payload length (u32)
 _MAX_NAME_LEN = 0xFFFF
@@ -92,15 +89,15 @@ class BufferView:
             raise ChannelError(msg)
         try:
             # Cast to Any because _vertebra.Buffer implements the buffer protocol but mypy doesn't know
-            view = memoryview(cast(Any, self._buffer))[: self._length]
+            view = memoryview(cast("Any", self._buffer))[: self._length]
         except TypeError:
             view_proxy = _BufferProxy(self._buffer, self._length)
             self._view = view_proxy
-            return cast(memoryview, view_proxy)
+            return cast("memoryview", view_proxy)
         if view.readonly:
             view_proxy = _BufferProxy(self._buffer, self._length)
             self._view = view_proxy
-            return cast(memoryview, view_proxy)
+            return cast("memoryview", view_proxy)
         self._view = view
         return view
 
@@ -287,7 +284,7 @@ class Channel:
         except RuntimeError as exc:
             raise ChannelError(str(exc), procedure_id=procedure_id, stage="ipc") from exc
         try:
-            return serializer_impl.deserialize(cast(bytes, response), response_type)
+            return serializer_impl.deserialize(cast("bytes", response), response_type)
         except Exception as exc:  # pragma: no cover - serializer dependent
             raise SerializationError(str(exc), procedure_id=procedure_id, stage="deserialize_response") from exc
 
@@ -330,7 +327,7 @@ class Channel:
                     time.sleep(0.001)
         except RuntimeError as exc:
             raise ChannelError(str(exc), stage="recv_request") from exc
-        assert data is not None  # Guaranteed by the loop logic above
+        assert data is not None  # noqa: S101  # Guaranteed by the loop logic above
         try:
             procedure_id, payload = _decode_message(data)
         except ChannelError as exc:

@@ -367,7 +367,7 @@ class TypeExtractor(msgspec.Struct):
         schema = model_cls.model_json_schema()
         definitions = schema.get("$defs") or schema.get("definitions") or {}
         named_defs: dict[str, ObjectType] = {}
-        for name, defn in cast(dict[str, Any], definitions).items():
+        for name, defn in cast("dict[str, Any]", definitions).items():
             node = self._from_json_schema(defn, definitions, name=name)
             if isinstance(node, ObjectType):
                 named_defs[name] = node
@@ -547,7 +547,7 @@ class TypeExtractor(msgspec.Struct):
         if not fields:
             return {}
         metadata: dict[str, tuple[object, ...]] = {}
-        for field_info in cast(Any, fields):
+        for field_info in cast("Any", fields):
             name = getattr(field_info, "name", None)
             if not name:
                 continue
@@ -572,7 +572,7 @@ class TypeExtractor(msgspec.Struct):
         if not fields:
             return {}, set()
         metadata: dict[str, tuple[object, ...]] = {}
-        for name, info in cast(dict[str, Any], fields).items():
+        for name, info in cast("dict[str, Any]", fields).items():
             items: list[object] = []
             for key in ("description", "alias", "validation_alias", "default"):
                 value = getattr(info, key, None)
@@ -608,7 +608,7 @@ class TypeExtractor(msgspec.Struct):
         if not fields:
             return set()
         optional: set[str] = set()
-        for name, info in cast(dict[str, Any], fields).items():
+        for name, info in cast("dict[str, Any]", fields).items():
             default = getattr(info, "default", None)
             default_factory = getattr(info, "default_factory", None)
             if default is not None or default_factory is not None:
@@ -620,7 +620,7 @@ class TypeExtractor(msgspec.Struct):
         if not fields:
             return set()
         excluded: set[str] = set()
-        for name, info in cast(dict[str, Any], fields).items():
+        for name, info in cast("dict[str, Any]", fields).items():
             if getattr(info, "init", True) is False and name.startswith("_"):
                 excluded.add(name)
         return excluded
@@ -634,12 +634,12 @@ class TypeExtractor(msgspec.Struct):
             return NamedTypeRef(ref_name) if ref_name else UnknownType()
 
         if "enum" in schema:
-            values = cast(list[Any], schema.get("enum") or [])
+            values = cast("list[Any]", schema.get("enum") or [])
             node: TypeNode = UnionType([LiteralType(value) for value in values])
             return self._apply_schema_metadata(node, schema)
 
         if "oneOf" in schema or "anyOf" in schema:
-            variants = cast(list[dict[str, Any]], schema.get("oneOf") or schema.get("anyOf") or [])
+            variants = cast("list[dict[str, Any]]", schema.get("oneOf") or schema.get("anyOf") or [])
             node = UnionType([self._from_json_schema(item, definitions) for item in variants])
             return self._apply_schema_metadata(node, schema)
 
@@ -648,8 +648,8 @@ class TypeExtractor(msgspec.Struct):
             node = UnionType([self._from_json_schema({"type": t}, definitions) for t in types_val])
             return self._apply_schema_metadata(node, schema)
         if types_val == "object":
-            properties = cast(dict[str, Any], schema.get("properties") or {})
-            required = set(cast(list[str], schema.get("required") or []))
+            properties = cast("dict[str, Any]", schema.get("properties") or {})
+            required = set(cast("list[str]", schema.get("required") or []))
             fields: dict[str, TypeNode] = {}
             optional_fields: set[str] = set()
             for prop_name, prop_schema in properties.items():

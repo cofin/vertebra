@@ -23,8 +23,6 @@ if TYPE_CHECKING:
     from sqlspec.core import StatementConfig
     from sqlspec.observability import ObservabilityConfig
 
-    from ._driver import VertebraAsyncDriverBase, VertebraSyncDriverBase
-
 
 class VertebraSyncConfigBase(SyncDatabaseConfig[VertebraSyncConnection, VertebraSyncPool, Any]):
     """Base class for Vertebra broker-backed sync SQLSpec configs."""

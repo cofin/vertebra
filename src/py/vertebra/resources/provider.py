@@ -54,9 +54,7 @@ class ProviderHost:
 
     async def serve(self) -> None:
         while True:
-            data = await asyncio.to_thread(
-                self._request.recv_timeout, self._config.slot_size, 5_000
-            )
+            data = await asyncio.to_thread(self._request.recv_timeout, self._config.slot_size, 5_000)
             if data is None:
                 continue  # Timeout, retry
             decoded = self._codec.decode(data)

@@ -1,7 +1,6 @@
 """Shared SQLSpec driver adapters for the broker-backed transport."""
 
 import contextlib
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Mapping, Sequence
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
 
@@ -16,6 +15,8 @@ from sqlspec.exceptions import ImproperConfigurationError, OperationalError, SQL
 from sqlspec.utils.correlation import CorrelationContext
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Callable, Iterable
+
     from sqlspec.core import SQL, StatementConfig
 
     from ._shared import VertebraAsyncConnection, VertebraSyncConnection
@@ -67,15 +68,15 @@ class VertebraAsyncExceptionHandler:
 
 def _collect_rows(result: "VertebraResult") -> "tuple[list[dict[str, Any]], list[str], int]":
     if "arrow" in result:
-        table = cast(Any, result.get("arrow"))
+        table = cast("Any", result.get("arrow"))
         if table is not None:
-            data = cast(list[dict[str, Any]], table.to_pylist())
-            columns = list(cast(Any, table.schema).names)
-            return data, columns, int(cast(Any, table).num_rows)
-    columns = list(cast(Iterable[str], result.get("columns") or []))
-    rows = cast(Iterable[Iterable[Any]], result.get("rows") or [])
+            data = cast("list[dict[str, Any]]", table.to_pylist())
+            columns = list(cast("Any", table.schema).names)
+            return data, columns, int(cast("Any", table).num_rows)
+    columns = list(cast("Iterable[str]", result.get("columns") or []))
+    rows = cast("Iterable[Iterable[Any]]", result.get("rows") or [])
     data = [dict(zip(columns, row, strict=False)) for row in rows]
-    rowcount = int(cast(Any, result.get("rowcount") or len(data)))
+    rowcount = int(cast("Any", result.get("rowcount") or len(data)))
     return data, columns, rowcount
 
 
@@ -106,10 +107,10 @@ class VertebraSyncDriverBase(SyncDriverAdapterBase):
             raise ImproperConfigurationError(msg)
         super().__init__(
             connection=connection,
-            statement_config=cast(Any, statement_config),  # Base class handles None but typed as required
+            statement_config=cast("Any", statement_config),  # Base class handles None but typed as required
             driver_features=features,
         )
-        self._data_dictionary_factory = cast(Callable[[], SyncDataDictionaryBase], factory)
+        self._data_dictionary_factory = cast("Callable[[], SyncDataDictionaryBase]", factory)
         self._data_dictionary: "SyncDataDictionaryBase | None" = None
 
     @property
@@ -121,20 +122,20 @@ class VertebraSyncDriverBase(SyncDriverAdapterBase):
     def dispatch_execute(self, cursor: "VertebraSyncConnection", statement: "SQL") -> ExecutionResult:
         sql, prepared_parameters = self._get_compiled_sql(statement, self.statement_config)
         correlation_id = _correlation_id()
-        result = cursor._execute(sql, cast(Any, prepared_parameters), correlation_id)
+        result = cursor._execute(sql, cast("Any", prepared_parameters), correlation_id)
         if statement.returns_rows():
-            data, columns, rowcount = _collect_rows(cast(VertebraResult, result))
+            data, columns, rowcount = _collect_rows(cast("VertebraResult", result))
             return self.create_execution_result(
                 result, selected_data=data, column_names=columns, data_row_count=rowcount, is_select_result=True
             )
-        return self.create_execution_result(result, rowcount_override=int(cast(Any, result).get("rowcount") or 0))
+        return self.create_execution_result(result, rowcount_override=int(cast("Any", result).get("rowcount") or 0))
 
     def dispatch_execute_many(self, cursor: "VertebraSyncConnection", statement: "SQL") -> ExecutionResult:
         sql, prepared_parameters = self._get_compiled_sql(statement, self.statement_config)
         correlation_id = _correlation_id()
-        result = cursor._execute_many(sql, cast(Any, prepared_parameters), correlation_id)
+        result = cursor._execute_many(sql, cast("Any", prepared_parameters), correlation_id)
         if statement.returns_rows():
-            data, columns, rowcount = _collect_rows(cast(VertebraResult, result))
+            data, columns, rowcount = _collect_rows(cast("VertebraResult", result))
             return self.create_execution_result(
                 result,
                 selected_data=data,
@@ -144,7 +145,7 @@ class VertebraSyncDriverBase(SyncDriverAdapterBase):
                 is_many_result=True,
             )
         return self.create_execution_result(
-            result, rowcount_override=int(cast(Any, result).get("rowcount") or 0), is_many_result=True
+            result, rowcount_override=int(cast("Any", result).get("rowcount") or 0), is_many_result=True
         )
 
     def begin(self) -> None:
@@ -187,11 +188,9 @@ class VertebraAsyncDriverBase(AsyncDriverAdapterBase):
             msg = "data_dictionary_factory is required for broker-backed SQLSpec drivers"
             raise ImproperConfigurationError(msg)
         super().__init__(
-            connection=connection,
-            statement_config=cast(Any, statement_config),
-            driver_features=features,
+            connection=connection, statement_config=cast("Any", statement_config), driver_features=features
         )
-        self._data_dictionary_factory = cast(Callable[[], AsyncDataDictionaryBase], factory)
+        self._data_dictionary_factory = cast("Callable[[], AsyncDataDictionaryBase]", factory)
         self._data_dictionary: "AsyncDataDictionaryBase | None" = None
 
     @property
@@ -203,20 +202,20 @@ class VertebraAsyncDriverBase(AsyncDriverAdapterBase):
     async def dispatch_execute(self, cursor: "VertebraAsyncConnection", statement: "SQL") -> ExecutionResult:
         sql, prepared_parameters = self._get_compiled_sql(statement, self.statement_config)
         correlation_id = _correlation_id()
-        result = await cursor._execute(sql, cast(Any, prepared_parameters), correlation_id)
+        result = await cursor._execute(sql, cast("Any", prepared_parameters), correlation_id)
         if statement.returns_rows():
-            data, columns, rowcount = _collect_rows(cast(VertebraResult, result))
+            data, columns, rowcount = _collect_rows(cast("VertebraResult", result))
             return self.create_execution_result(
                 result, selected_data=data, column_names=columns, data_row_count=rowcount, is_select_result=True
             )
-        return self.create_execution_result(result, rowcount_override=int(cast(Any, result).get("rowcount") or 0))
+        return self.create_execution_result(result, rowcount_override=int(cast("Any", result).get("rowcount") or 0))
 
     async def dispatch_execute_many(self, cursor: "VertebraAsyncConnection", statement: "SQL") -> ExecutionResult:
         sql, prepared_parameters = self._get_compiled_sql(statement, self.statement_config)
         correlation_id = _correlation_id()
-        result = await cursor._execute_many(sql, cast(Any, prepared_parameters), correlation_id)
+        result = await cursor._execute_many(sql, cast("Any", prepared_parameters), correlation_id)
         if statement.returns_rows():
-            data, columns, rowcount = _collect_rows(cast(VertebraResult, result))
+            data, columns, rowcount = _collect_rows(cast("VertebraResult", result))
             return self.create_execution_result(
                 result,
                 selected_data=data,
@@ -226,7 +225,7 @@ class VertebraAsyncDriverBase(AsyncDriverAdapterBase):
                 is_many_result=True,
             )
         return self.create_execution_result(
-            result, rowcount_override=int(cast(Any, result).get("rowcount") or 0), is_many_result=True
+            result, rowcount_override=int(cast("Any", result).get("rowcount") or 0), is_many_result=True
         )
 
     async def begin(self) -> None:
@@ -245,7 +244,7 @@ class VertebraAsyncDriverBase(AsyncDriverAdapterBase):
         async def _context() -> "AsyncGenerator[VertebraAsyncConnection, None]":
             yield connection
 
-        return cast(contextlib.AbstractAsyncContextManager[VertebraAsyncConnection], _context())
+        return cast("contextlib.AbstractAsyncContextManager[VertebraAsyncConnection]", _context())
 
     def handle_database_exceptions(self) -> "VertebraAsyncExceptionHandler":
         return VertebraAsyncExceptionHandler()

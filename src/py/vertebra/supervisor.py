@@ -323,7 +323,7 @@ class Supervisor:
                     handle.state = ProcessState.STOPPED
 
                     if handle.spec.critical:
-                        return cast(int, exit_code)
+                        return cast("int", exit_code)
 
                     # Non-critical: attempt restart
                     self._maybe_restart(name)
@@ -377,11 +377,11 @@ class Supervisor:
             self.stop(sig)
 
         for sig in (signal.SIGTERM, signal.SIGINT):
-            self._original_handlers[sig] = signal.signal(sig, cast(Any, handler))
+            self._original_handlers[sig] = signal.signal(sig, cast("Any", handler))
 
         if sys.platform != "win32":
             # SIGHUP for reload (future)
-            self._original_handlers[signal.SIGHUP] = signal.signal(signal.SIGHUP, cast(Any, handler))
+            self._original_handlers[signal.SIGHUP] = signal.signal(signal.SIGHUP, cast("Any", handler))
 
     def _restore_signal_handlers(self) -> None:
         """Restore original signal handlers."""

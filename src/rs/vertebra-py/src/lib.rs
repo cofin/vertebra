@@ -147,7 +147,13 @@ impl PyShmRegion {
         }
         let mut region = slf.borrow_mut();
         let inner = region.inner_mut()?;
-        fill_view_from_data(view, flags, unsafe { inner.as_mut_slice() }, slf.into_any(), true)?;
+        fill_view_from_data(
+            view,
+            flags,
+            unsafe { inner.as_mut_slice() },
+            slf.into_any(),
+            true,
+        )?;
         region.exports.fetch_add(1, AtomicOrdering::Relaxed);
         Ok(())
     }

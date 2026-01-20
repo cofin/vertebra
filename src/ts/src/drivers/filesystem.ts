@@ -294,7 +294,9 @@ export async function handleS3ReadFile(
   const file = client.file(key);
   const stream = file.stream();
   await fs.mkdir(path.dirname(localPath), { recursive: true });
-  await Bun.write(localPath, stream);
+  // Convert ReadableStream to ArrayBuffer for Bun.write compatibility
+  const buffer = await new Response(stream).arrayBuffer();
+  await Bun.write(localPath, buffer);
   const stat = await fs.stat(localPath);
   return stat.size;
 }
@@ -342,7 +344,7 @@ export async function handleGcsWrite(
   const response = await fetch(url, {
     method: "POST",
     headers,
-    body: data,
+    body: data as BodyInit,
   });
   if (!response.ok) {
     throw new Error(`GCS write failed: ${response.status}`);
@@ -467,11 +469,13 @@ export async function handleGcsReadFile(
   const baseUrl = gcs.baseUrl ?? "https://storage.googleapis.com";
   const url = `${baseUrl}/${bucket}/${encodeKey(key)}`;
   const response = await fetch(url, { headers: gcsHeaders(gcs) });
-  if (!response.ok || !response.body) {
+  if (!response.ok) {
     throw new Error(`GCS read failed: ${response.status}`);
   }
   await fs.mkdir(path.dirname(localPath), { recursive: true });
-  await Bun.write(localPath, response.body);
+  // Convert response to ArrayBuffer for Bun.write compatibility
+  const buffer = await response.arrayBuffer();
+  await Bun.write(localPath, buffer);
   const stat = await fs.stat(localPath);
   return stat.size;
 }

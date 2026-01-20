@@ -1,4 +1,4 @@
-import type { WebSocketHandler } from "bun";
+import type { Server, WebSocketHandler } from "bun";
 import { BrokerClient } from "../broker";
 import { AsgiBridge } from "../ipc";
 import { type ResolvedServerConfig, resolveServerConfig, type ServerConfig } from "./config";
@@ -19,14 +19,14 @@ import {
  * - IpcConnectionPool manages shared-memory IPC connections to workers.
  */
 export class BunServer {
-  private server: Server | null = null;
+  private server: Server<unknown> | null = null;
   private shuttingDown = false;
   private shutdownAttached = false;
 
   constructor(
     private handler: RequestHandler,
     private config: ResolvedServerConfig["server"],
-    private websocket?: WebSocketHandler,
+    private websocket?: WebSocketHandler<unknown>,
     private onStop?: () => Promise<void> | void,
   ) {}
 
@@ -34,13 +34,19 @@ export class BunServer {
     if (this.server) {
       return this;
     }
-    this.server = Bun.serve({
+    // Build options conditionally to satisfy Bun.serve overload requirements
+    const baseOptions = {
       hostname: this.config.hostname,
       port: this.config.port,
       reusePort: this.config.reusePort,
-      fetch: (request, server) => this.handler(request, server),
-      websocket: this.websocket,
-    });
+      fetch: (request: Request, server: Server<unknown>) => this.handler(request, server),
+    };
+    if (this.websocket) {
+      this.server = Bun.serve({ ...baseOptions, websocket: this.websocket });
+    } else {
+      // Cast needed: Bun.serve overloads require websocket/routes but fetch-only is valid
+      this.server = Bun.serve(baseOptions as Parameters<typeof Bun.serve>[0]);
+    }
     this.attachSignalHandlers();
     return this;
   }

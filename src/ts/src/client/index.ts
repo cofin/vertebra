@@ -9,9 +9,9 @@ export function createClient<TProcedures extends ProcedureMap>(transport: RpcTra
     async call<K extends keyof TProcedures>(
       procedureId: K,
       params: Parameters<TProcedures[K]>[0],
-    ): ReturnType<TProcedures[K]> {
+    ): Promise<Awaited<ReturnType<TProcedures[K]>>> {
       const result = await transport.request(String(procedureId), params);
-      return result as ReturnType<TProcedures[K]>;
+      return result as Awaited<ReturnType<TProcedures[K]>>;
     },
   };
 }

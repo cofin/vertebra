@@ -206,8 +206,8 @@ function resolveWorkerCount(config: NormalizedConfig): number {
   const auto = typeof explicit === "string" && explicit.toLowerCase() === "auto";
   if (auto || explicit === undefined) {
     const available =
-      typeof Bun !== "undefined" && typeof Bun.availableParallelism === "function"
-        ? Bun.availableParallelism()
+      typeof Bun !== "undefined" && typeof Bun.availableParallelism === "number"
+        ? Bun.availableParallelism
         : (globalThis.navigator?.hardwareConcurrency ?? 1);
     return Math.max(1, Math.floor(available));
   }

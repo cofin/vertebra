@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import pathlib
 import uuid
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any
 
 import msgspec
 
 from vertebra._internal.async_transport import AsyncShmTransport, PollingTransport, create_transport
 from vertebra._internal.serialization import MessagePackCodec
 from vertebra._vertebra import AsyncRing, ShmRegion
-
-if TYPE_CHECKING:
-    pass
 
 
 class BrokerClientError(RuntimeError):

@@ -2,8 +2,8 @@ import type { Server } from "bun";
 
 export type RequestHandler = (
   request: Request,
-  server?: Server,
-) => Response | Promise<Response> | void;
+  server?: Server<unknown>,
+) => Response | Promise<Response | undefined> | void;
 
 export interface RouterConfig {
   staticDir?: string;
@@ -21,7 +21,7 @@ export function createRouter(config: RouterConfig): RequestHandler {
   const staticDir = config.staticDir;
   const apiHandler = config.apiHandler;
 
-  return async (request: Request, server?: Server) => {
+  return async (request: Request, server?: Server<unknown>) => {
     const url = new URL(request.url);
     if (staticDir && (request.method === "GET" || request.method === "HEAD")) {
       const path = normalizePath(url.pathname);

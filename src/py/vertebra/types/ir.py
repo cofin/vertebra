@@ -1,4 +1,4 @@
-"Type IR nodes for the Vertebra type bridge."
+"""Type IR nodes for the Vertebra type bridge."""
 
 from __future__ import annotations
 
@@ -152,7 +152,7 @@ class AnnotatedType(TypeNode, frozen=True, tag="annotated"):
     """Type with additional metadata annotations."""
 
     base: TypeNode
-    metadata: tuple[object, ...] 
+    metadata: tuple[object, ...]
 
     def to_typescript(self) -> str:
         return self.base.to_typescript()

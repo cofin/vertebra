@@ -2,7 +2,6 @@
 
 import asyncio
 import uuid
-from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlspec.config import AsyncDatabaseConfig, SyncDatabaseConfig
@@ -129,9 +128,8 @@ class SqlSpecProvider:
         ctx = self._adapter_config.provide_session()
         driver = ctx.__enter__()
         token = uuid.uuid4().hex
-        from sqlspec.driver import SyncDriverAdapterBase
 
-        self._sync_sessions[token] = _SyncSessionState(ctx, cast(SyncDriverAdapterBase, driver))
+        self._sync_sessions[token] = _SyncSessionState(ctx, cast("SyncDriverAdapterBase", driver))
         return {"ok": True, "token": token}
 
     async def _acquire_async(self) -> "dict[str, object]":
@@ -143,9 +141,8 @@ class SqlSpecProvider:
         ctx = self._adapter_config.provide_session()
         driver = await ctx.__aenter__()
         token = uuid.uuid4().hex
-        from sqlspec.driver import AsyncDriverAdapterBase
 
-        self._async_sessions[token] = _AsyncSessionState(ctx, cast(AsyncDriverAdapterBase, driver))
+        self._async_sessions[token] = _AsyncSessionState(ctx, cast("AsyncDriverAdapterBase", driver))
         return {"ok": True, "token": token}
 
     def _release_sync(self, token: str) -> "dict[str, object]":
@@ -187,7 +184,7 @@ class SqlSpecProvider:
             params = []
         correlation_id = request.get("correlation_id")
         with CorrelationContext.context(str(correlation_id) if correlation_id else None):
-            result = state.driver.execute_many(sql, cast(Any, params))
+            result = state.driver.execute_many(sql, cast("Any", params))
         return self._encode_result(result)
 
     def _command_sync(self, request: "dict[str, object]") -> "dict[str, object]":
@@ -253,7 +250,7 @@ class SqlSpecProvider:
             params = []
         correlation_id = request.get("correlation_id")
         with CorrelationContext.context(str(correlation_id) if correlation_id else None):
-            result = await state.driver.execute_many(sql, cast(Any, params))
+            result = await state.driver.execute_many(sql, cast("Any", params))
         return self._encode_result(result)
 
     async def _command_async(self, request: "dict[str, object]") -> "dict[str, object]":
@@ -315,21 +312,20 @@ class SqlSpecProvider:
     def _encode_result(self, result: "SQLResult | ArrowResult") -> "dict[str, object]":
         if isinstance(result, ArrowResult):
             return self._encode_arrow_result(result)
-        if isinstance(result, SQLResult):
-            data = result.data or []
-            columns = list(result.column_names or [])
-            if not columns and data:
-                first = data[0]
-                if isinstance(first, dict):
-                    columns = list(first.keys())
-            rows = self._normalize_rows(data, columns)
-            rowcount = int(result.rows_affected or len(rows))
-            payload = self._maybe_encode_arrow(rows, columns, rowcount)
-            if payload is not None:
-                payload["ok"] = True
-                return payload
-            return {"ok": True, "columns": columns, "rows": rows, "rowcount": rowcount}
-
+        # result is SQLResult after exhaustive ArrowResult check
+        data = result.data or []
+        columns = list(result.column_names or [])
+        if not columns and data:
+            first = data[0]
+            if isinstance(first, dict):
+                columns = list(first.keys())
+        rows = self._normalize_rows(data, columns)
+        rowcount = int(result.rows_affected or len(rows))
+        payload = self._maybe_encode_arrow(rows, columns, rowcount)
+        if payload is not None:
+            payload["ok"] = True
+            return payload
+        return {"ok": True, "columns": columns, "rows": rows, "rowcount": rowcount}
 
     def _encode_arrow_result(self, result: "ArrowResult") -> "dict[str, object]":
         table = result.data
@@ -375,7 +371,7 @@ class SqlSpecProvider:
         rows: list[list[object]] = []
         if not hasattr(data, "__iter__"):
             return rows
-        for row in cast(Any, data):
+        for row in cast("Any", data):
             if isinstance(row, dict):
                 rows.append([row.get(column) for column in columns])
             elif isinstance(row, (list, tuple)):

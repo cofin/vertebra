@@ -1,5 +1,5 @@
 export * from "./filesystem";
-export * from "./mysql";
-export * from "./postgres";
+export { MySQLPool } from "./mysql";
+export { PostgresPool, type SqlResult } from "./postgres";
 export * from "./redis";
-export * from "./sqlite";
+export { SqlitePool } from "./sqlite";

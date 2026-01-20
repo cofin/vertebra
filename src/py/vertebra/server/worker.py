@@ -196,7 +196,9 @@ class AsgiWorker:
         request = SpscRing.open_named(req_ring, self._config.slot_size, self._config.slots)
         response = SpscRing.open_named(resp_ring, self._config.slot_size, self._config.slots)
         self._clients[client_id] = ClientState(id=client_id, request=request, response=response)
-        response.send_timeout(self._codec.encode({"ok": True, "id": message.get("id")}), 0, int(self._config.timeout * 1000))
+        response.send_timeout(
+            self._codec.encode({"ok": True, "id": message.get("id")}), 0, int(self._config.timeout * 1000)
+        )
 
     async def _poll_clients(self, contexts: dict[str, RequestContext]) -> None:
         if not self._clients:
