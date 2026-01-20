@@ -51,6 +51,9 @@ docs/requirements/inputs/*
 .cache/
 .gemini/mcp-tools.txt
 CLAUDE.md
+AGENTS.md
+GEMINI.md
 specs/
 .geminiignore
 .gemini
+tools/scripts/detect_mcp_tools.py
