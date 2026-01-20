@@ -1,38 +1,46 @@
 """Broker-backed PostgreSQL SQLSpec configuration."""
 
-from typing import TYPE_CHECKING, Any, ClassVar, NotRequired, TypedDict
+from typing import TYPE_CHECKING, ClassVar, NotRequired, TypedDict
 
-from sqlspec.core import ParameterStyle
-
-from vertebra.extensions.sqlspec._config import VertebraAsyncConfigBase, VertebraSyncConfigBase
-from vertebra.extensions.sqlspec._core import build_broker_profile, build_statement_config
-from vertebra.extensions.sqlspec._dictionary import resolve_async_data_dictionary, resolve_sync_data_dictionary
+from vertebra.extensions.sqlspec._config import (
+    VertebraAsyncConfigBase,
+    VertebraSyncConfigBase,
+    _AsyncSessionHandler,
+    _SyncSessionHandler,
+)
+from vertebra.extensions.sqlspec.postgres._typing import (
+    VertebraPostgresAsyncSessionContext,
+    VertebraPostgresSyncSessionContext,
+)
+from vertebra.extensions.sqlspec.postgres.core import apply_driver_features, default_statement_config
+from vertebra.extensions.sqlspec.postgres.data_dictionary import (
+    VertebraPostgresAsyncDataDictionary,
+    VertebraPostgresSyncDataDictionary,
+)
 from vertebra.extensions.sqlspec.postgres.driver import VertebraPostgresAsyncDriver, VertebraPostgresSyncDriver
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sqlspec.config import ExtensionConfigs
     from sqlspec.core import StatementConfig
+    from sqlspec.driver import AsyncDataDictionaryBase, SyncDataDictionaryBase
     from sqlspec.observability import ObservabilityConfig
 
+    from vertebra.drivers.broker import AsyncBrokerPool, SyncBrokerPool
     from vertebra.resources.broker import BrokerClientConfig
 
 
 class PostgresDriverFeatures(TypedDict, total=False):
     """Driver features for broker-backed PostgreSQL."""
 
-    data_dictionary_factory: NotRequired["Any"]
-
-
-_POSTGRES_PROFILE = build_broker_profile("VertebraPostgres", default_style=ParameterStyle.NUMERIC, dialect="postgres")
-
-
-default_statement_config = build_statement_config(_POSTGRES_PROFILE, "postgres")
+    data_dictionary_factory: NotRequired["Callable[[], SyncDataDictionaryBase | AsyncDataDictionaryBase]"]
 
 
 class VertebraPostgresSyncConfig(VertebraSyncConfigBase):
     """Synchronous Vertebra broker-backed PostgreSQL configuration."""
 
-    driver_type: ClassVar[type[Any]] = VertebraPostgresSyncDriver
+    driver_type: ClassVar[type[VertebraPostgresSyncDriver]] = VertebraPostgresSyncDriver
     default_statement_config: ClassVar["StatementConfig"] = default_statement_config
     default_pool_name: ClassVar[str] = "postgres"
     supports_transactional_ddl: ClassVar[bool] = True
@@ -47,17 +55,18 @@ class VertebraPostgresSyncConfig(VertebraSyncConfigBase):
         pool: "str | None" = None,
         client_config: "BrokerClientConfig | None" = None,
         max_clients: int = 5,
-        connection_instance: "Any" = None,
-        migration_config: "dict[str, Any] | None" = None,
+        connection_instance: "SyncBrokerPool | None" = None,
+        migration_config: "dict[str, object] | None" = None,
         statement_config: "StatementConfig | None" = None,
-        driver_features: "PostgresDriverFeatures | dict[str, Any] | None" = None,
+        driver_features: "PostgresDriverFeatures | dict[str, object] | None" = None,
         bind_key: "str | None" = None,
         extension_config: "ExtensionConfigs | None" = None,
         observability_config: "ObservabilityConfig | None" = None,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> None:
-        features = dict(driver_features or {})
-        features.setdefault("data_dictionary_factory", resolve_sync_data_dictionary("postgres"))
+        statement_config = statement_config or default_statement_config
+        statement_config, features = apply_driver_features(statement_config, driver_features)
+        features.setdefault("data_dictionary_factory", VertebraPostgresSyncDataDictionary)
         super().__init__(
             pool=pool,
             client_config=client_config,
@@ -70,13 +79,25 @@ class VertebraPostgresSyncConfig(VertebraSyncConfigBase):
             extension_config=extension_config,
             observability_config=observability_config,
             **kwargs,
+        )
+
+    def provide_session(
+        self, *_args: object, statement_config: "StatementConfig | None" = None, **_kwargs: object
+    ) -> "VertebraPostgresSyncSessionContext":
+        handler = _SyncSessionHandler(self)
+        return VertebraPostgresSyncSessionContext(
+            acquire_connection=handler.acquire_connection,
+            release_connection=handler.release_connection,
+            statement_config=statement_config or self.statement_config,
+            driver_features=self.driver_features,
+            prepare_driver=self._prepare_driver,
         )
 
 
 class VertebraPostgresAsyncConfig(VertebraAsyncConfigBase):
     """Asynchronous Vertebra broker-backed PostgreSQL configuration."""
 
-    driver_type: ClassVar[type[Any]] = VertebraPostgresAsyncDriver
+    driver_type: ClassVar[type[VertebraPostgresAsyncDriver]] = VertebraPostgresAsyncDriver
     default_statement_config: ClassVar["StatementConfig"] = default_statement_config
     default_pool_name: ClassVar[str] = "postgres"
     supports_transactional_ddl: ClassVar[bool] = True
@@ -91,17 +112,18 @@ class VertebraPostgresAsyncConfig(VertebraAsyncConfigBase):
         pool: "str | None" = None,
         client_config: "BrokerClientConfig | None" = None,
         max_clients: int = 5,
-        connection_instance: "Any" = None,
-        migration_config: "dict[str, Any] | None" = None,
+        connection_instance: "AsyncBrokerPool | None" = None,
+        migration_config: "dict[str, object] | None" = None,
         statement_config: "StatementConfig | None" = None,
-        driver_features: "PostgresDriverFeatures | dict[str, Any] | None" = None,
+        driver_features: "PostgresDriverFeatures | dict[str, object] | None" = None,
         bind_key: "str | None" = None,
         extension_config: "ExtensionConfigs | None" = None,
         observability_config: "ObservabilityConfig | None" = None,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> None:
-        features = dict(driver_features or {})
-        features.setdefault("data_dictionary_factory", resolve_async_data_dictionary("postgres"))
+        statement_config = statement_config or default_statement_config
+        statement_config, features = apply_driver_features(statement_config, driver_features)
+        features.setdefault("data_dictionary_factory", VertebraPostgresAsyncDataDictionary)
         super().__init__(
             pool=pool,
             client_config=client_config,
@@ -116,10 +138,22 @@ class VertebraPostgresAsyncConfig(VertebraAsyncConfigBase):
             **kwargs,
         )
 
+    def provide_session(
+        self, *_args: object, statement_config: "StatementConfig | None" = None, **_kwargs: object
+    ) -> "VertebraPostgresAsyncSessionContext":
+        handler = _AsyncSessionHandler(self)
+        return VertebraPostgresAsyncSessionContext(
+            acquire_connection=handler.acquire_connection,
+            release_connection=handler.release_connection,
+            statement_config=statement_config or self.statement_config,
+            driver_features=self.driver_features,
+            prepare_driver=self._prepare_driver,
+        )
+
 
 __all__ = (
+    "PostgresDriverFeatures",
     "VertebraPostgresAsyncConfig",
     "VertebraPostgresSyncConfig",
-    "PostgresDriverFeatures",
     "default_statement_config",
 )

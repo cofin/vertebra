@@ -374,6 +374,8 @@ py-install:                                         ## Install Python dependenci
 			exit 1; \
 		fi; \
 		rm -f "$$UV_SYNC_LOG"
+	@echo "${INFO} Building Rust extension... 🦀"
+	@uv run maturin develop --uv >/dev/null 2>&1
 	@echo "${OK} Python dependencies installed ✨"
 
 .PHONY: py-build

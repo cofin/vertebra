@@ -2,7 +2,7 @@
 
 import asyncio
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from sqlspec.core.result import ArrowResult, SQLResult
 from sqlspec.utils.correlation import CorrelationContext
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 class _SyncSessionState:
     __slots__ = ("ctx", "driver")
 
-    def __init__(self, ctx: Any, driver: "SyncDriverAdapterBase") -> None:
+    def __init__(self, ctx: object, driver: "SyncDriverAdapterBase") -> None:
         self.ctx = ctx
         self.driver = driver
 
@@ -27,7 +27,7 @@ class _SyncSessionState:
 class _AsyncSessionState:
     __slots__ = ("ctx", "driver")
 
-    def __init__(self, ctx: Any, driver: "AsyncDriverAdapterBase") -> None:
+    def __init__(self, ctx: object, driver: "AsyncDriverAdapterBase") -> None:
         self.ctx = ctx
         self.driver = driver
 
@@ -37,7 +37,7 @@ class SqlSpecProvider:
 
     def __init__(
         self,
-        adapter_config: "SyncDatabaseConfig[Any, Any, Any] | AsyncDatabaseConfig[Any, Any, Any]",
+        adapter_config: "SyncDatabaseConfig[object, object, object] | AsyncDatabaseConfig[object, object, object]",
         provider_config: ProviderConfig,
     ) -> None:
         self._config = provider_config
@@ -54,12 +54,12 @@ class SqlSpecProvider:
     async def serve(self) -> None:
         await self._host.serve()
 
-    async def _handle(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    async def _handle(self, request: "dict[str, object]") -> "dict[str, object]":
         if self._is_async:
             return await self._handle_async(request)
         return await asyncio.to_thread(self._handle_sync, request)
 
-    def _handle_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":  # noqa: PLR0911
+    def _handle_sync(self, request: "dict[str, object]") -> "dict[str, object]":  # noqa: PLR0911
         kind = str(request.get("kind") or "")
         try:
             if kind == "acquire":
@@ -86,7 +86,7 @@ class SqlSpecProvider:
             return {"ok": False, "error": {"message": str(exc)}}
         return {"ok": False, "error": {"message": f"Unknown provider request: {kind}"}}
 
-    async def _handle_async(self, request: "dict[str, Any]") -> "dict[str, Any]":  # noqa: PLR0911
+    async def _handle_async(self, request: "dict[str, object]") -> "dict[str, object]":  # noqa: PLR0911
         kind = str(request.get("kind") or "")
         try:
             if kind == "acquire":
@@ -120,7 +120,7 @@ class SqlSpecProvider:
             msg = "Provider is at capacity"
             raise RuntimeError(msg)
 
-    def _acquire_sync(self) -> "dict[str, Any]":
+    def _acquire_sync(self) -> "dict[str, object]":
         self._ensure_capacity()
         ctx = self._adapter_config.provide_session()
         driver = ctx.__enter__()
@@ -128,7 +128,7 @@ class SqlSpecProvider:
         self._sync_sessions[token] = _SyncSessionState(ctx, driver)
         return {"ok": True, "token": token}
 
-    async def _acquire_async(self) -> "dict[str, Any]":
+    async def _acquire_async(self) -> "dict[str, object]":
         self._ensure_capacity()
         ctx = self._adapter_config.provide_session()
         driver = await ctx.__aenter__()
@@ -136,21 +136,21 @@ class SqlSpecProvider:
         self._async_sessions[token] = _AsyncSessionState(ctx, driver)
         return {"ok": True, "token": token}
 
-    def _release_sync(self, token: str) -> "dict[str, Any]":
+    def _release_sync(self, token: str) -> "dict[str, object]":
         state = self._sync_sessions.pop(token, None)
         if state is None:
             return {"ok": True}
         state.ctx.__exit__(None, None, None)
         return {"ok": True}
 
-    async def _release_async(self, token: str) -> "dict[str, Any]":
+    async def _release_async(self, token: str) -> "dict[str, object]":
         state = self._async_sessions.pop(token, None)
         if state is None:
             return {"ok": True}
         await state.ctx.__aexit__(None, None, None)
         return {"ok": True}
 
-    def _execute_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    def _execute_sync(self, request: "dict[str, object]") -> "dict[str, object]":
         state = self._sync_sessions.get(str(request.get("token") or ""))
         if state is None:
             msg = "Unknown provider session"
@@ -164,7 +164,7 @@ class SqlSpecProvider:
             result = self._execute_driver_sync(state.driver, sql, params)
         return self._encode_result(result)
 
-    def _execute_many_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    def _execute_many_sync(self, request: "dict[str, object]") -> "dict[str, object]":
         state = self._sync_sessions.get(str(request.get("token") or ""))
         if state is None:
             msg = "Unknown provider session"
@@ -178,7 +178,7 @@ class SqlSpecProvider:
             result = state.driver.execute_many(sql, params)
         return self._encode_result(result)
 
-    def _command_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    def _command_sync(self, request: "dict[str, object]") -> "dict[str, object]":
         state = self._sync_sessions.get(str(request.get("token") or ""))
         if state is None:
             msg = "Unknown provider session"
@@ -192,7 +192,7 @@ class SqlSpecProvider:
             result = self._execute_driver_sync(state.driver, command, args)
         return self._encode_result(result)
 
-    def _begin_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    def _begin_sync(self, request: "dict[str, object]") -> "dict[str, object]":
         state = self._sync_sessions.get(str(request.get("token") or ""))
         if state is None:
             msg = "Unknown provider session"
@@ -200,7 +200,7 @@ class SqlSpecProvider:
         state.driver.begin()
         return {"ok": True}
 
-    def _commit_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    def _commit_sync(self, request: "dict[str, object]") -> "dict[str, object]":
         state = self._sync_sessions.get(str(request.get("token") or ""))
         if state is None:
             msg = "Unknown provider session"
@@ -208,7 +208,7 @@ class SqlSpecProvider:
         state.driver.commit()
         return {"ok": True}
 
-    def _rollback_sync(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    def _rollback_sync(self, request: "dict[str, object]") -> "dict[str, object]":
         state = self._sync_sessions.get(str(request.get("token") or ""))
         if state is None:
             msg = "Unknown provider session"
@@ -216,7 +216,7 @@ class SqlSpecProvider:
         state.driver.rollback()
         return {"ok": True}
 
-    async def _execute_async(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    async def _execute_async(self, request: "dict[str, object]") -> "dict[str, object]":
         state = self._async_sessions.get(str(request.get("token") or ""))
         if state is None:
             msg = "Unknown provider session"
@@ -230,7 +230,7 @@ class SqlSpecProvider:
             result = await self._execute_driver_async(state.driver, sql, params)
         return self._encode_result(result)
 
-    async def _execute_many_async(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    async def _execute_many_async(self, request: "dict[str, object]") -> "dict[str, object]":
         state = self._async_sessions.get(str(request.get("token") or ""))
         if state is None:
             msg = "Unknown provider session"
@@ -244,7 +244,7 @@ class SqlSpecProvider:
             result = await state.driver.execute_many(sql, params)
         return self._encode_result(result)
 
-    async def _command_async(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    async def _command_async(self, request: "dict[str, object]") -> "dict[str, object]":
         state = self._async_sessions.get(str(request.get("token") or ""))
         if state is None:
             msg = "Unknown provider session"
@@ -258,7 +258,7 @@ class SqlSpecProvider:
             result = await self._execute_driver_async(state.driver, command, args)
         return self._encode_result(result)
 
-    async def _begin_async(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    async def _begin_async(self, request: "dict[str, object]") -> "dict[str, object]":
         state = self._async_sessions.get(str(request.get("token") or ""))
         if state is None:
             msg = "Unknown provider session"
@@ -266,7 +266,7 @@ class SqlSpecProvider:
         await state.driver.begin()
         return {"ok": True}
 
-    async def _commit_async(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    async def _commit_async(self, request: "dict[str, object]") -> "dict[str, object]":
         state = self._async_sessions.get(str(request.get("token") or ""))
         if state is None:
             msg = "Unknown provider session"
@@ -274,7 +274,7 @@ class SqlSpecProvider:
         await state.driver.commit()
         return {"ok": True}
 
-    async def _rollback_async(self, request: "dict[str, Any]") -> "dict[str, Any]":
+    async def _rollback_async(self, request: "dict[str, object]") -> "dict[str, object]":
         state = self._async_sessions.get(str(request.get("token") or ""))
         if state is None:
             msg = "Unknown provider session"
@@ -282,7 +282,9 @@ class SqlSpecProvider:
         await state.driver.rollback()
         return {"ok": True}
 
-    def _execute_driver_sync(self, driver: "SyncDriverAdapterBase", sql: str, params: Any) -> "SQLResult | ArrowResult":
+    def _execute_driver_sync(
+        self, driver: "SyncDriverAdapterBase", sql: str, params: object
+    ) -> "SQLResult | ArrowResult":
         if isinstance(params, dict):
             return driver.execute(sql, **params)
         if isinstance(params, (list, tuple)):
@@ -290,7 +292,7 @@ class SqlSpecProvider:
         return driver.execute(sql, params)
 
     async def _execute_driver_async(
-        self, driver: "AsyncDriverAdapterBase", sql: str, params: Any
+        self, driver: "AsyncDriverAdapterBase", sql: str, params: object
     ) -> "SQLResult | ArrowResult":
         if isinstance(params, dict):
             return await driver.execute(sql, **params)
@@ -298,7 +300,7 @@ class SqlSpecProvider:
             return await driver.execute(sql, *params)
         return await driver.execute(sql, params)
 
-    def _encode_result(self, result: "SQLResult | ArrowResult") -> "dict[str, Any]":
+    def _encode_result(self, result: "SQLResult | ArrowResult") -> "dict[str, object]":
         if isinstance(result, ArrowResult):
             return self._encode_arrow_result(result)
         if isinstance(result, SQLResult):
@@ -317,7 +319,7 @@ class SqlSpecProvider:
             return {"ok": True, "columns": columns, "rows": rows, "rowcount": rowcount}
         return {"ok": True, "rowcount": 0}
 
-    def _encode_arrow_result(self, result: "ArrowResult") -> "dict[str, Any]":
+    def _encode_arrow_result(self, result: "ArrowResult") -> "dict[str, object]":
         table = result.data
         if table is None:
             return {"ok": True, "rowcount": int(result.rows_affected or 0)}
@@ -327,8 +329,8 @@ class SqlSpecProvider:
         return payload
 
     def _maybe_encode_arrow(
-        self, rows: "list[list[Any]]", columns: "list[str]", rowcount: int
-    ) -> "dict[str, Any] | None":
+        self, rows: "list[list[object]]", columns: "list[str]", rowcount: int
+    ) -> "dict[str, object] | None":
         if not rows:
             return None
         estimated_bytes = len(rows) * max(1, len(columns)) * 8
@@ -344,7 +346,7 @@ class SqlSpecProvider:
         payload["rowcount"] = rowcount
         return payload
 
-    def _write_arrow_region(self, table: "pa.Table") -> "dict[str, Any]":
+    def _write_arrow_region(self, table: "pa.Table") -> "dict[str, object]":
         import pyarrow as pa
 
         sink = pa.BufferOutputStream()
@@ -357,8 +359,8 @@ class SqlSpecProvider:
         self._arrow_regions[name] = region
         return {"arrow": {"name": name, "size": len(buffer)}}
 
-    def _normalize_rows(self, data: Any, columns: "list[str]") -> "list[list[Any]]":
-        rows: list[list[Any]] = []
+    def _normalize_rows(self, data: object, columns: "list[str]") -> "list[list[object]]":
+        rows: list[list[object]] = []
         for row in data:
             if isinstance(row, dict):
                 rows.append([row.get(column) for column in columns])
@@ -368,7 +370,7 @@ class SqlSpecProvider:
                 rows.append([row])
         return rows
 
-    def _arrow_release(self, name: str) -> "dict[str, Any]":
+    def _arrow_release(self, name: str) -> "dict[str, object]":
         region = self._arrow_regions.pop(name, None)
         if region is None:
             return {"ok": False, "error": {"message": "Arrow region not found"}}

@@ -1,7 +1,7 @@
 """Shared SQLSpec broker helpers."""
 
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from vertebra.drivers.broker import AsyncBrokerConnection, AsyncBrokerPool, SyncBrokerConnection, SyncBrokerPool
 
@@ -9,6 +9,24 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from sqlspec.core import StatementConfig
+
+_T = TypeVar("_T")
+
+
+class SyncSessionContextProtocol(Protocol[_T]):
+    def __enter__(self) -> _T: ...
+
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None
+    ) -> bool | None: ...
+
+
+class AsyncSessionContextProtocol(Protocol[_T]):
+    async def __aenter__(self) -> _T: ...
+
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None
+    ) -> bool | None: ...
 
 
 class BrokerSyncConnectionContext:
@@ -65,11 +83,11 @@ class BrokerSyncSessionContext:
         self,
         *,
         acquire_connection: "Callable[[], SyncBrokerConnection]",
-        release_connection: "Callable[[SyncBrokerConnection], Any]",
+        release_connection: "Callable[[SyncBrokerConnection], None]",
         statement_config: "StatementConfig",
-        driver_features: "dict[str, Any]",
-        prepare_driver: "Callable[[Any], Any]",
-        driver_type: "type[Any]",
+        driver_features: "dict[str, object]",
+        prepare_driver: "Callable[[object], object]",
+        driver_type: "type[object]",
     ) -> None:
         self._acquire_connection = acquire_connection
         self._release_connection = release_connection
@@ -78,9 +96,9 @@ class BrokerSyncSessionContext:
         self._prepare_driver = prepare_driver
         self._driver_type = driver_type
         self._connection: "SyncBrokerConnection | None" = None
-        self._driver: Any = None
+        self._driver: object | None = None
 
-    def __enter__(self) -> Any:
+    def __enter__(self) -> object:
         self._connection = self._acquire_connection()
         self._driver = self._driver_type(
             connection=self._connection, statement_config=self._statement_config, driver_features=self._driver_features
@@ -111,11 +129,11 @@ class BrokerAsyncSessionContext:
         self,
         *,
         acquire_connection: "Callable[[], Awaitable[AsyncBrokerConnection]]",
-        release_connection: "Callable[[AsyncBrokerConnection], Awaitable[Any]]",
+        release_connection: "Callable[[AsyncBrokerConnection], Awaitable[None]]",
         statement_config: "StatementConfig",
-        driver_features: "dict[str, Any]",
-        prepare_driver: "Callable[[Any], Any]",
-        driver_type: "type[Any]",
+        driver_features: "dict[str, object]",
+        prepare_driver: "Callable[[object], object]",
+        driver_type: "type[object]",
     ) -> None:
         self._acquire_connection = acquire_connection
         self._release_connection = release_connection
@@ -124,9 +142,9 @@ class BrokerAsyncSessionContext:
         self._prepare_driver = prepare_driver
         self._driver_type = driver_type
         self._connection: "AsyncBrokerConnection | None" = None
-        self._driver: Any = None
+        self._driver: object | None = None
 
-    async def __aenter__(self) -> Any:
+    async def __aenter__(self) -> object:
         self._connection = await self._acquire_connection()
         self._driver = self._driver_type(
             connection=self._connection, statement_config=self._statement_config, driver_features=self._driver_features
@@ -144,10 +162,12 @@ class BrokerAsyncSessionContext:
 __all__ = (
     "AsyncBrokerConnection",
     "AsyncBrokerPool",
+    "AsyncSessionContextProtocol",
     "BrokerAsyncConnectionContext",
     "BrokerAsyncSessionContext",
     "BrokerSyncConnectionContext",
     "BrokerSyncSessionContext",
     "SyncBrokerConnection",
     "SyncBrokerPool",
+    "SyncSessionContextProtocol",
 )

@@ -1,6 +1,6 @@
 """Generic broker proxy configs for external SQLSpec adapters."""
 
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
+from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 from sqlspec.config import AsyncDatabaseConfig, ExtensionConfigs, SyncDatabaseConfig
 from sqlspec.core import get_default_config
@@ -15,8 +15,8 @@ if TYPE_CHECKING:
 
     from vertebra.resources.broker import BrokerClientConfig
 
-SyncConfigT = TypeVar("SyncConfigT", bound=SyncDatabaseConfig[Any, Any, Any])
-AsyncConfigT = TypeVar("AsyncConfigT", bound=AsyncDatabaseConfig[Any, Any, Any])
+SyncConfigT = TypeVar("SyncConfigT", bound=SyncDatabaseConfig[object, object, object])
+AsyncConfigT = TypeVar("AsyncConfigT", bound=AsyncDatabaseConfig[object, object, object])
 
 
 class VertebraProxySyncDriver(BrokerSyncDriverBase):
@@ -31,10 +31,10 @@ class VertebraProxyAsyncDriver(BrokerAsyncDriverBase):
     dialect: ClassVar[str | None] = None
 
 
-class VertebraProxySyncConfig[SyncConfigT: SyncDatabaseConfig[Any, Any, Any]](VertebraSyncConfigBase):
+class VertebraProxySyncConfig[SyncConfigT: SyncDatabaseConfig[object, object, object]](VertebraSyncConfigBase):
     """Vertebra broker proxy config wrapping a sync SQLSpec adapter."""
 
-    driver_type: ClassVar[type[Any]] = VertebraProxySyncDriver
+    driver_type: ClassVar[type[object]] = VertebraProxySyncDriver
     default_statement_config: ClassVar["StatementConfig"] = get_default_config()
     default_pool_name: ClassVar[str] = "provider"
 
@@ -45,13 +45,13 @@ class VertebraProxySyncConfig[SyncConfigT: SyncDatabaseConfig[Any, Any, Any]](Ve
         pool: "str | None" = None,
         client_config: "BrokerClientConfig | None" = None,
         max_clients: int = 5,
-        migration_config: "dict[str, Any] | None" = None,
+        migration_config: "dict[str, object] | None" = None,
         statement_config: "StatementConfig | None" = None,
-        driver_features: "dict[str, Any] | None" = None,
+        driver_features: "dict[str, object] | None" = None,
         bind_key: "str | None" = None,
         extension_config: "ExtensionConfigs | None" = None,
         observability_config: "ObservabilityConfig | None" = None,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> None:
         self.target_config = config
         effective_statement = statement_config or config.statement_config
@@ -74,10 +74,10 @@ class VertebraProxySyncConfig[SyncConfigT: SyncDatabaseConfig[Any, Any, Any]](Ve
         )
 
 
-class VertebraProxyAsyncConfig[AsyncConfigT: AsyncDatabaseConfig[Any, Any, Any]](VertebraAsyncConfigBase):
+class VertebraProxyAsyncConfig[AsyncConfigT: AsyncDatabaseConfig[object, object, object]](VertebraAsyncConfigBase):
     """Vertebra broker proxy config wrapping an async SQLSpec adapter."""
 
-    driver_type: ClassVar[type[Any]] = VertebraProxyAsyncDriver
+    driver_type: ClassVar[type[object]] = VertebraProxyAsyncDriver
     default_statement_config: ClassVar["StatementConfig"] = get_default_config()
     default_pool_name: ClassVar[str] = "provider"
 
@@ -88,13 +88,13 @@ class VertebraProxyAsyncConfig[AsyncConfigT: AsyncDatabaseConfig[Any, Any, Any]]
         pool: "str | None" = None,
         client_config: "BrokerClientConfig | None" = None,
         max_clients: int = 5,
-        migration_config: "dict[str, Any] | None" = None,
+        migration_config: "dict[str, object] | None" = None,
         statement_config: "StatementConfig | None" = None,
-        driver_features: "dict[str, Any] | None" = None,
+        driver_features: "dict[str, object] | None" = None,
         bind_key: "str | None" = None,
         extension_config: "ExtensionConfigs | None" = None,
         observability_config: "ObservabilityConfig | None" = None,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> None:
         self.target_config = config
         effective_statement = statement_config or config.statement_config

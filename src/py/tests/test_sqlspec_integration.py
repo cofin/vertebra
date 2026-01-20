@@ -6,13 +6,9 @@ and proxy wrappers work correctly.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
-
-if TYPE_CHECKING:
-    pass
 
 # Check if sqlspec is available
 try:
@@ -64,11 +60,7 @@ class TestBrokerConfigBase:
             default_pool_name = "default-pool"
 
         custom_client = BrokerClientConfig(name="custom-broker")
-        config = TestSyncConfig(
-            pool="custom-pool",
-            client_config=custom_client,
-            max_clients=10,
-        )
+        config = TestSyncConfig(pool="custom-pool", client_config=custom_client, max_clients=10)
 
         assert config.pool == "custom-pool"
         assert config.client_config.name == "custom-broker"
@@ -107,10 +99,11 @@ class TestBrokerProxyConfig:
 
         # Create a mock target config
         mock_config = MagicMock(spec=SyncDatabaseConfig)
-        mock_config.statement_config = get_default_config()
+        mock_config.statement_config = get_default_config().replace(dialect="postgres")
         mock_config.driver_features = {}
         mock_config.bind_key = None
         mock_config.migration_config = None
+        mock_config.extension_config = {}
 
         proxy = VertebraProxySyncConfig(mock_config, pool="test-proxy-pool")
 
@@ -125,10 +118,11 @@ class TestBrokerProxyConfig:
         from vertebra.extensions.sqlspec.proxy import VertebraProxyAsyncConfig
 
         mock_config = MagicMock(spec=AsyncDatabaseConfig)
-        mock_config.statement_config = get_default_config()
+        mock_config.statement_config = get_default_config().replace(dialect="postgres")
         mock_config.driver_features = {}
         mock_config.bind_key = None
         mock_config.migration_config = None
+        mock_config.extension_config = {}
 
         proxy = VertebraProxyAsyncConfig(mock_config, pool="async-proxy-pool")
 
@@ -143,10 +137,11 @@ class TestBrokerProxyConfig:
         from vertebra.extensions.sqlspec.proxy import VertebraProxySyncConfig
 
         mock_config = MagicMock(spec=SyncDatabaseConfig)
-        mock_config.statement_config = get_default_config()
+        mock_config.statement_config = get_default_config().replace(dialect="postgres")
         mock_config.driver_features = {}
         mock_config.bind_key = "my-database"
         mock_config.migration_config = None
+        mock_config.extension_config = {}
 
         proxy = VertebraProxySyncConfig(mock_config)
 
@@ -202,16 +197,20 @@ class TestBrokerConnection:
 
     def test_sync_broker_connection_token(self) -> None:
         """Test SyncBrokerConnection stores token correctly."""
-        from vertebra.extensions.sqlspec._shared import SyncBrokerConnection
+        from vertebra.drivers.broker import SyncBrokerConnection
+        from vertebra.resources import BrokerClient, BrokerClientConfig
 
-        conn = SyncBrokerConnection(token="test-token-123")
+        client = BrokerClient(BrokerClientConfig(name="test-broker"))
+        conn = SyncBrokerConnection(pool="test-pool", client=client, token="test-token-123")
         assert conn.token == "test-token-123"
 
     def test_async_broker_connection_token(self) -> None:
         """Test AsyncBrokerConnection stores token correctly."""
-        from vertebra.extensions.sqlspec._shared import AsyncBrokerConnection
+        from vertebra.drivers.broker import AsyncBrokerConnection
+        from vertebra.resources import BrokerClient, BrokerClientConfig
 
-        conn = AsyncBrokerConnection(token="async-token-456")
+        client = BrokerClient(BrokerClientConfig(name="test-broker"))
+        conn = AsyncBrokerConnection(pool="test-pool", client=client, token="async-token-456")
         assert conn.token == "async-token-456"
 
 
@@ -249,11 +248,13 @@ class TestDataDictionaryResolution:
         assert callable(factory)
 
     def test_unknown_dialect_returns_none(self) -> None:
-        """Test unknown dialect returns None."""
+        """Test unknown dialect raises error."""
+        from sqlspec.exceptions import ImproperConfigurationError
+
         from vertebra.extensions.sqlspec._dictionary import resolve_sync_data_dictionary
 
-        factory = resolve_sync_data_dictionary("unknown-dialect")
-        assert factory is None
+        with pytest.raises(ImproperConfigurationError):
+            resolve_sync_data_dictionary("unknown-dialect")
 
 
 @sqlspec_required
@@ -286,7 +287,7 @@ class TestSpecificConfigs:
         from vertebra.extensions.sqlspec.postgres import VertebraPostgresSyncConfig
 
         config = VertebraPostgresSyncConfig()
-        assert config.statement_config.dialect == "postgresql"
+        assert config.statement_config.dialect == "postgres"
 
     def test_mysql_config_dialect(self) -> None:
         """Test MySQL config has correct dialect."""

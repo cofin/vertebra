@@ -2,7 +2,7 @@
 
 import contextlib
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from sqlspec.driver import (
     AsyncDataDictionaryBase,
@@ -11,15 +11,17 @@ from sqlspec.driver import (
     SyncDataDictionaryBase,
     SyncDriverAdapterBase,
 )
-from sqlspec.exceptions import DatabaseError, ImproperConfigurationError, SQLSpecError
+from sqlspec.exceptions import ImproperConfigurationError, OperationalError, SQLSpecError
 from sqlspec.utils.correlation import CorrelationContext
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from sqlspec.core import SQL
+    from sqlspec.core import SQL, StatementConfig
 
     from ._shared import AsyncBrokerConnection, SyncBrokerConnection
+
+BrokerResult = dict[str, object]
 
 
 class BrokerExceptionHandler:
@@ -39,7 +41,7 @@ class BrokerExceptionHandler:
         if isinstance(exc_val, SQLSpecError):
             self.pending_exception = exc_val
             return True
-        self.pending_exception = DatabaseError(str(exc_val))
+        self.pending_exception = OperationalError(str(exc_val))
         return True
 
 
@@ -60,11 +62,11 @@ class BrokerAsyncExceptionHandler:
         if isinstance(exc_val, SQLSpecError):
             self.pending_exception = exc_val
             return True
-        self.pending_exception = DatabaseError(str(exc_val))
+        self.pending_exception = OperationalError(str(exc_val))
         return True
 
 
-def _collect_rows(result: "dict[str, Any]") -> "tuple[list[dict[str, Any]], list[str], int]":
+def _collect_rows(result: "BrokerResult") -> "tuple[list[dict[str, object]], list[str], int]":
     if "arrow" in result:
         table = result.get("arrow")
         if table is not None:
@@ -93,8 +95,8 @@ class BrokerSyncDriverBase(SyncDriverAdapterBase):
     def __init__(
         self,
         connection: "SyncBrokerConnection",
-        statement_config: "Any" = None,
-        driver_features: "dict[str, Any] | None" = None,
+        statement_config: "StatementConfig | None" = None,
+        driver_features: "dict[str, object] | None" = None,
         *,
         data_dictionary_factory: "Callable[[], SyncDataDictionaryBase] | None" = None,
     ) -> None:
@@ -151,7 +153,9 @@ class BrokerSyncDriverBase(SyncDriverAdapterBase):
     def rollback(self) -> None:
         self.connection.rollback()
 
-    def with_cursor(self, connection: "Any") -> "Any":
+    def with_cursor(
+        self, connection: "SyncBrokerConnection"
+    ) -> "contextlib.AbstractContextManager[SyncBrokerConnection]":
         return contextlib.nullcontext(connection)
 
     def handle_database_exceptions(self) -> "BrokerExceptionHandler":
@@ -169,8 +173,8 @@ class BrokerAsyncDriverBase(AsyncDriverAdapterBase):
     def __init__(
         self,
         connection: "AsyncBrokerConnection",
-        statement_config: "Any" = None,
-        driver_features: "dict[str, Any] | None" = None,
+        statement_config: "StatementConfig | None" = None,
+        driver_features: "dict[str, object] | None" = None,
         *,
         data_dictionary_factory: "Callable[[], AsyncDataDictionaryBase] | None" = None,
     ) -> None:
@@ -227,9 +231,11 @@ class BrokerAsyncDriverBase(AsyncDriverAdapterBase):
     async def rollback(self) -> None:
         await self.connection.rollback()
 
-    def with_cursor(self, connection: "Any") -> "Any":
+    def with_cursor(
+        self, connection: "AsyncBrokerConnection"
+    ) -> "contextlib.AbstractAsyncContextManager[AsyncBrokerConnection]":
         @contextlib.asynccontextmanager
-        async def _context() -> "Any":
+        async def _context() -> "AsyncBrokerConnection":
             yield connection
 
         return _context()

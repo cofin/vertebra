@@ -6,7 +6,7 @@ from typing import Any
 import msgspec
 import pytest
 
-from tests.helpers.shm import tracked_shm_cleanup, unique_shm_name
+from tests.helpers.shm import skip_if_shm_unavailable, tracked_shm_cleanup, unique_shm_name
 
 
 def _skip_if_async_ring_unavailable() -> None:
@@ -15,6 +15,7 @@ def _skip_if_async_ring_unavailable() -> None:
         from vertebra._vertebra import AsyncRing  # noqa: F401
     except ImportError:
         pytest.skip("AsyncRing (PyO3) not available")
+    skip_if_shm_unavailable(require_shm_lib=False)
 
 
 @pytest.mark.anyio
@@ -53,7 +54,7 @@ async def test_broker_client_roundtrip() -> None:
                 # Receive registration
                 try:
                     data = await asyncio.wait_for(control_transport.recv(), timeout=10.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pytest.fail("broker_task: control_transport.recv timed out")
                     return
 
@@ -70,13 +71,15 @@ async def test_broker_client_roundtrip() -> None:
                 resp_transport = PollingTransport(resp_ring, poll_interval=0.001)
 
                 # Send registration ack
-                await resp_transport.send(encoder.encode({"ok": True, "id": register["id"]}))
+                await asyncio.wait_for(
+                    resp_transport.send(encoder.encode({"ok": True, "id": register["id"]})), timeout=2.0
+                )
 
                 # Handle 3 requests: acquire, release, health
                 for _ in range(3):
                     try:
                         data = await asyncio.wait_for(req_transport.recv(), timeout=10.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         pytest.fail("broker_task: req_transport.recv timed out")
                         return
 
@@ -87,7 +90,7 @@ async def test_broker_client_roundtrip() -> None:
                         response = {"ok": True, "id": request["id"]}
                     else:
                         response = {"ok": False, "error": {"message": "unknown"}, "id": request["id"]}
-                    await resp_transport.send(encoder.encode(response))
+                    await asyncio.wait_for(resp_transport.send(encoder.encode(response)), timeout=2.0)
 
                 control_transport.close()
                 req_transport.close()

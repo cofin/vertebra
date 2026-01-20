@@ -76,6 +76,8 @@ class BrokerClientConfig(msgspec.Struct, frozen=True):
     timeout_ms: int = 5_000
     client_id: str | None = None
     weight: int = 1
+    use_async_transport: bool | None = None
+    prefer_eventfd: bool = True
 
     def control_ring(self) -> RingConfig:
         name = self.control_name or f"/{self.name}.control"
@@ -101,7 +103,10 @@ class BrokerClient:
         self._codec = MessagePackCodec()
         self._client_id = self._config.client_id or _default_client_id()
         self._seq = 0
-        self._use_async_transport = _USE_ASYNC_TRANSPORT
+        if self._config.use_async_transport is None:
+            self._use_async_transport = _USE_ASYNC_TRANSPORT
+        else:
+            self._use_async_transport = self._config.use_async_transport
 
         # Ring buffers (either CFFI or PyO3-based)
         self._control: Any = None
@@ -137,8 +142,8 @@ class BrokerClient:
         self._response = _AsyncRing.create_named(resp_cfg.name, resp_cfg.slot_size, resp_cfg.slots)
 
         # Wrap in async transports for efficient waiting
-        self._request_transport = _create_transport(self._request)
-        self._response_transport = _create_transport(self._response)
+        self._request_transport = _create_transport(self._request, prefer_eventfd=self._config.prefer_eventfd)
+        self._response_transport = _create_transport(self._response, prefer_eventfd=self._config.prefer_eventfd)
 
         # Register with broker
         payload = {

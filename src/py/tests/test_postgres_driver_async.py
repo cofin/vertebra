@@ -5,6 +5,7 @@ import asyncio
 import msgspec
 import pytest
 
+from tests.helpers.shm import skip_if_shm_unavailable
 from vertebra.drivers.postgres import AsyncPostgresDriver, SyncPostgresDriverConfig
 from vertebra.resources import BrokerClientConfig
 
@@ -24,6 +25,7 @@ async def test_postgres_driver_async_fetch() -> None:
     if ShmRing is None or not SHM_AVAILABLE:
         reason = _IMPORT_ERROR or "shared memory library unavailable"
         pytest.skip(f"Shared memory bindings unavailable: {reason}")
+    skip_if_shm_unavailable()
     encoder = msgspec.msgpack.Encoder()
     decoder = msgspec.msgpack.Decoder()
 

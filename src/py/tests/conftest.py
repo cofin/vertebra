@@ -69,15 +69,7 @@ def _cleanup_shared_memory() -> None:
     shm_dir = Path("/dev/shm")
     if shm_dir.is_dir():
         # Comprehensive patterns to catch all naming conventions
-        patterns = [
-            "test-*",
-            "*vertebra*",
-            "*.control",
-            "*.req",
-            "*.resp",
-            "*asgi*",
-            "*broker*",
-        ]
+        patterns = ["test-*", "*vertebra*", "*.control", "*.req", "*.resp", "*asgi*", "*broker*"]
         for pattern in patterns:
             for path in shm_dir.glob(pattern):
                 with contextlib.suppress(OSError):
@@ -85,7 +77,7 @@ def _cleanup_shared_memory() -> None:
 
     # Try to unlink named shared memory objects via shm_unlink
     try:
-        from vertebra._internal.shm import shm_unlink, SHM_AVAILABLE
+        from vertebra._internal.shm import SHM_AVAILABLE, shm_unlink
     except ImportError:
         return
 

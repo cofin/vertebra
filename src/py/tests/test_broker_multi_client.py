@@ -7,14 +7,10 @@ without interference. Each ring is SPSC (single-producer, single-consumer).
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
 
 import pytest
 
-from tests.helpers.shm import tracked_shm_cleanup, unique_shm_name
-
-if TYPE_CHECKING:
-    pass
+from tests.helpers.shm import skip_if_shm_unavailable, tracked_shm_cleanup, unique_shm_name
 
 pytestmark = pytest.mark.anyio
 
@@ -25,6 +21,7 @@ def _skip_if_async_ring_unavailable() -> None:
         from vertebra._vertebra import AsyncRing  # noqa: F401
     except ImportError:
         pytest.skip("AsyncRing (PyO3) not available")
+    skip_if_shm_unavailable(require_shm_lib=False)
 
 
 async def test_multi_ring_isolation() -> None:
@@ -68,10 +65,7 @@ async def test_concurrent_ring_operations() -> None:
     ring_names = [f"/{unique_shm_name(f'concurrent-{i}')}" for i in range(num_rings)]
 
     with tracked_shm_cleanup(ring_names):
-        rings = [
-            AsyncRing.create_named(name, slot_size=4096, slots=16)
-            for name in ring_names
-        ]
+        rings = [AsyncRing.create_named(name, slot_size=4096, slots=16) for name in ring_names]
 
         async def ring_test(ring_id: int, ring: AsyncRing) -> bool:
             """Test send/recv on a single ring."""
@@ -79,7 +73,7 @@ async def test_concurrent_ring_operations() -> None:
             try:
                 for i in range(messages_per_ring):
                     msg = f"ring-{ring_id}-msg-{i}".encode()
-                    await transport.send(msg)
+                    await asyncio.wait_for(transport.send(msg), timeout=2.0)
                     received = await asyncio.wait_for(transport.recv(), timeout=2.0)
                     if received != msg:
                         return False
@@ -88,10 +82,7 @@ async def test_concurrent_ring_operations() -> None:
                 transport.close()
 
         # Run all ring tests concurrently
-        tasks = [
-            asyncio.create_task(ring_test(i, ring))
-            for i, ring in enumerate(rings)
-        ]
+        tasks = [asyncio.create_task(ring_test(i, ring)) for i, ring in enumerate(rings)]
 
         results = await asyncio.gather(*tasks)
 
@@ -184,7 +175,7 @@ async def test_multiple_messages_ordering() -> None:
             # Send multiple messages
             messages = [f"msg-{i}".encode() for i in range(10)]
             for msg in messages:
-                await transport.send(msg)
+                await asyncio.wait_for(transport.send(msg), timeout=2.0)
 
             # Receive and verify order
             received = []
@@ -216,7 +207,7 @@ async def test_large_message_handling() -> None:
             # Leave some room for header
             large_message = b"X" * (slot_size - 256)
 
-            await transport.send(large_message)
+            await asyncio.wait_for(transport.send(large_message), timeout=2.0)
             received = await asyncio.wait_for(transport.recv(), timeout=2.0)
 
             assert received == large_message

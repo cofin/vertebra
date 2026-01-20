@@ -130,7 +130,8 @@ export async function createAsgiServer(
   pool?: IpcConnectionPool,
 ): Promise<BunServer> {
   const resolved = await resolveServerConfig(config);
-  const workerPool = pool ?? createIpcConnectionPool({ count: resolved.workers.count, ipc: resolved.ipc });
+  const workerPool =
+    pool ?? createIpcConnectionPool({ count: resolved.workers.count, ipc: resolved.ipc });
   const manager = resolved.python.app
     ? new ProcessManager({
         count: resolved.workers.count,

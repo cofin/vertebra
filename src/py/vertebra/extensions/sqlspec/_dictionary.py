@@ -1,7 +1,7 @@
 """Data dictionary factories for broker-backed SQLSpec adapters."""
 
 from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import ClassVar, Protocol, TypeVar
 
 from sqlspec.adapters.aiosqlite.data_dictionary import AiosqliteDataDictionary
 from sqlspec.adapters.asyncmy.data_dictionary import AsyncmyDataDictionary
@@ -10,8 +10,24 @@ from sqlspec.adapters.psycopg.data_dictionary import PsycopgSyncDataDictionary
 from sqlspec.adapters.pymysql.data_dictionary import PyMysqlDataDictionary
 from sqlspec.adapters.sqlite.data_dictionary import SqliteDataDictionary
 from sqlspec.driver import AsyncDataDictionaryBase, SyncDataDictionaryBase
-from sqlspec.exceptions import SQLFileNotFoundError
+from sqlspec.exceptions import ImproperConfigurationError, SQLFileNotFoundError
 from sqlspec.typing import ColumnMetadata, ForeignKeyMetadata, IndexMetadata, TableMetadata, VersionInfo
+
+_T = TypeVar("_T")
+
+
+class _SyncDictionaryDriver(Protocol):
+    def select_value_or_none(self, statement: str, **kwargs: object) -> object | None: ...
+
+    def select(self, statement: str, *, schema_type: "type[_T] | None" = None, **kwargs: object) -> "list[_T]": ...
+
+
+class _AsyncDictionaryDriver(Protocol):
+    async def select_value_or_none(self, statement: str, **kwargs: object) -> object | None: ...
+
+    async def select(
+        self, statement: str, *, schema_type: "type[_T] | None" = None, **kwargs: object
+    ) -> "list[_T]": ...
 
 
 class _GenericSyncDataDictionary(SyncDataDictionaryBase):
@@ -20,7 +36,7 @@ class _GenericSyncDataDictionary(SyncDataDictionaryBase):
     def __init__(self) -> None:
         super().__init__()
 
-    def get_version(self, driver: Any) -> "VersionInfo | None":
+    def get_version(self, driver: _SyncDictionaryDriver) -> "VersionInfo | None":
         driver_id = id(driver)
         if driver_id in self._version_fetch_attempted:
             return self._version_cache.get(driver_id)
@@ -46,11 +62,11 @@ class _GenericSyncDataDictionary(SyncDataDictionaryBase):
         self.cache_version(driver_id, version_info)
         return version_info
 
-    def get_feature_flag(self, driver: Any, feature: str) -> bool:
+    def get_feature_flag(self, driver: _SyncDictionaryDriver, feature: str) -> bool:
         version_info = self.get_version(driver)
         return self.resolve_feature_flag(feature, version_info)
 
-    def get_optimal_type(self, driver: Any, type_category: str) -> str:
+    def get_optimal_type(self, driver: _SyncDictionaryDriver, type_category: str) -> str:
         _ = driver
         config = self.get_dialect_config()
         version_info = self.get_version(driver)
@@ -63,7 +79,7 @@ class _GenericSyncDataDictionary(SyncDataDictionaryBase):
 
         return config.get_optimal_type(type_category)
 
-    def get_tables(self, driver: Any, schema: "str | None" = None) -> "list[TableMetadata]":
+    def get_tables(self, driver: _SyncDictionaryDriver, schema: "str | None" = None) -> "list[TableMetadata]":
         schema_name = self.resolve_schema(schema)
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="tables")
         try:
@@ -72,7 +88,7 @@ class _GenericSyncDataDictionary(SyncDataDictionaryBase):
             return []
 
     def get_columns(
-        self, driver: Any, table: "str | None" = None, schema: "str | None" = None
+        self, driver: _SyncDictionaryDriver, table: "str | None" = None, schema: "str | None" = None
     ) -> "list[ColumnMetadata]":
         schema_name = self.resolve_schema(schema)
         if table is None:
@@ -96,7 +112,7 @@ class _GenericSyncDataDictionary(SyncDataDictionaryBase):
             return []
 
     def get_indexes(
-        self, driver: Any, table: "str | None" = None, schema: "str | None" = None
+        self, driver: _SyncDictionaryDriver, table: "str | None" = None, schema: "str | None" = None
     ) -> "list[IndexMetadata]":
         schema_name = self.resolve_schema(schema)
         if table is None:
@@ -117,7 +133,7 @@ class _GenericSyncDataDictionary(SyncDataDictionaryBase):
             return []
 
     def get_foreign_keys(
-        self, driver: Any, table: "str | None" = None, schema: "str | None" = None
+        self, driver: _SyncDictionaryDriver, table: "str | None" = None, schema: "str | None" = None
     ) -> "list[ForeignKeyMetadata]":
         schema_name = self.resolve_schema(schema)
         if table is None:
@@ -147,7 +163,7 @@ class _GenericAsyncDataDictionary(AsyncDataDictionaryBase):
     def __init__(self) -> None:
         super().__init__()
 
-    async def get_version(self, driver: Any) -> "VersionInfo | None":
+    async def get_version(self, driver: _AsyncDictionaryDriver) -> "VersionInfo | None":
         driver_id = id(driver)
         if driver_id in self._version_fetch_attempted:
             return self._version_cache.get(driver_id)
@@ -173,11 +189,11 @@ class _GenericAsyncDataDictionary(AsyncDataDictionaryBase):
         self.cache_version(driver_id, version_info)
         return version_info
 
-    async def get_feature_flag(self, driver: Any, feature: str) -> bool:
+    async def get_feature_flag(self, driver: _AsyncDictionaryDriver, feature: str) -> bool:
         version_info = await self.get_version(driver)
         return self.resolve_feature_flag(feature, version_info)
 
-    async def get_optimal_type(self, driver: Any, type_category: str) -> str:
+    async def get_optimal_type(self, driver: _AsyncDictionaryDriver, type_category: str) -> str:
         _ = driver
         config = self.get_dialect_config()
         version_info = await self.get_version(driver)
@@ -190,7 +206,7 @@ class _GenericAsyncDataDictionary(AsyncDataDictionaryBase):
 
         return config.get_optimal_type(type_category)
 
-    async def get_tables(self, driver: Any, schema: "str | None" = None) -> "list[TableMetadata]":
+    async def get_tables(self, driver: _AsyncDictionaryDriver, schema: "str | None" = None) -> "list[TableMetadata]":
         schema_name = self.resolve_schema(schema)
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="tables")
         try:
@@ -201,7 +217,7 @@ class _GenericAsyncDataDictionary(AsyncDataDictionaryBase):
             return []
 
     async def get_columns(
-        self, driver: Any, table: "str | None" = None, schema: "str | None" = None
+        self, driver: _AsyncDictionaryDriver, table: "str | None" = None, schema: "str | None" = None
     ) -> "list[ColumnMetadata]":
         schema_name = self.resolve_schema(schema)
         if table is None:
@@ -225,7 +241,7 @@ class _GenericAsyncDataDictionary(AsyncDataDictionaryBase):
             return []
 
     async def get_indexes(
-        self, driver: Any, table: "str | None" = None, schema: "str | None" = None
+        self, driver: _AsyncDictionaryDriver, table: "str | None" = None, schema: "str | None" = None
     ) -> "list[IndexMetadata]":
         schema_name = self.resolve_schema(schema)
         if table is None:
@@ -246,7 +262,7 @@ class _GenericAsyncDataDictionary(AsyncDataDictionaryBase):
             return []
 
     async def get_foreign_keys(
-        self, driver: Any, table: "str | None" = None, schema: "str | None" = None
+        self, driver: _AsyncDictionaryDriver, table: "str | None" = None, schema: "str | None" = None
     ) -> "list[ForeignKeyMetadata]":
         schema_name = self.resolve_schema(schema)
         if table is None:
@@ -292,7 +308,8 @@ def resolve_sync_data_dictionary(dialect: str) -> Callable[[], SyncDataDictionar
         return PyMysqlDataDictionary
     if normalized.startswith("sqlite"):
         return SqliteDataDictionary
-    return _generic_sync_factory(normalized or "generic")
+    msg = f"Unsupported SQLSpec dialect for data dictionary: {dialect!r}"
+    raise ImproperConfigurationError(msg)
 
 
 def resolve_async_data_dictionary(dialect: str) -> Callable[[], AsyncDataDictionaryBase]:
@@ -303,7 +320,8 @@ def resolve_async_data_dictionary(dialect: str) -> Callable[[], AsyncDataDiction
         return AsyncmyDataDictionary
     if normalized.startswith("sqlite"):
         return AiosqliteDataDictionary
-    return _generic_async_factory(normalized or "generic")
+    msg = f"Unsupported SQLSpec dialect for data dictionary: {dialect!r}"
+    raise ImproperConfigurationError(msg)
 
 
 __all__ = ("resolve_async_data_dictionary", "resolve_sync_data_dictionary")

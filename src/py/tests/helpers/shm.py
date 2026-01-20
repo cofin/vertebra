@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import os
+import tempfile
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -32,6 +36,35 @@ def unique_shm_name(prefix: str = "vertebra-test") -> str:
         True
     """
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
+
+
+def skip_if_shm_unavailable(*, require_shm_lib: bool = True) -> None:
+    """Skip tests when shared memory is unavailable or not writable.
+
+    Args:
+        require_shm_lib: When True, require the CFFI shm bindings to be available.
+            When False, only validate /dev/shm access.
+    """
+    if require_shm_lib:
+        try:
+            from vertebra._internal._typing import SHM_AVAILABLE, get_shm_load_error
+        except ImportError as exc:
+            pytest.skip(f"Shared memory bindings unavailable: {exc}")
+        if not SHM_AVAILABLE:
+            reason = get_shm_load_error() or "shared memory library unavailable"
+            pytest.skip(f"Shared memory bindings unavailable: {reason}")
+
+    shm_dir = Path("/dev/shm")
+    if not shm_dir.is_dir():
+        pytest.skip("/dev/shm not available")
+    if not os.access(shm_dir, os.W_OK | os.X_OK):
+        pytest.skip("/dev/shm not writable in this environment")
+
+    try:
+        with tempfile.NamedTemporaryFile(dir=shm_dir, prefix="vertebra-test-", delete=True):
+            pass
+    except OSError as exc:
+        pytest.skip(f"/dev/shm not usable: {exc}")
 
 
 @contextlib.contextmanager
@@ -68,25 +101,26 @@ def tracked_shm_cleanup(initial: "list[str] | None" = None) -> "Generator[list[s
         yield created
     finally:
         # Import late to handle case where bindings unavailable
+        cleanup_available = False
         try:
             from vertebra._internal.shm import SHM_AVAILABLE, shm_unlink
+
+            cleanup_available = SHM_AVAILABLE
         except ImportError:
-            return
+            cleanup_available = False
 
-        if not SHM_AVAILABLE:
-            return
-
-        # Unlink each tracked name
-        for name in created:
-            with contextlib.suppress(Exception):
-                shm_unlink(name)
-
-        # Also clean up any files in /dev/shm that match the names
-        # This handles the case where shm_unlink fails but file exists
-        shm_dir = Path("/dev/shm")
-        if shm_dir.is_dir():
+        if cleanup_available:
+            # Unlink each tracked name
             for name in created:
-                clean_name = name.lstrip("/")
-                for path in shm_dir.glob(f"{clean_name}*"):
-                    with contextlib.suppress(OSError):
-                        path.unlink()
+                with contextlib.suppress(Exception):
+                    shm_unlink(name)
+
+            # Also clean up any files in /dev/shm that match the names
+            # This handles the case where shm_unlink fails but file exists
+            shm_dir = Path("/dev/shm")
+            if shm_dir.is_dir():
+                for name in created:
+                    clean_name = name.lstrip("/")
+                    for path in shm_dir.glob(f"{clean_name}*"):
+                        with contextlib.suppress(OSError):
+                            path.unlink()

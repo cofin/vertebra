@@ -6,7 +6,7 @@ from typing import Any
 import msgspec
 import pytest
 
-from tests.helpers.shm import tracked_shm_cleanup, unique_shm_name
+from tests.helpers.shm import skip_if_shm_unavailable, tracked_shm_cleanup, unique_shm_name
 
 
 def _skip_if_async_ring_unavailable() -> None:
@@ -15,6 +15,7 @@ def _skip_if_async_ring_unavailable() -> None:
         from vertebra._vertebra import AsyncRing  # noqa: F401
     except ImportError:
         pytest.skip("AsyncRing (PyO3) not available")
+    skip_if_shm_unavailable(require_shm_lib=False)
 
 
 @pytest.mark.anyio
@@ -51,7 +52,7 @@ async def test_broker_pool_context_manager() -> None:
 
                 try:
                     data = await asyncio.wait_for(control_transport.recv(), timeout=10.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pytest.fail("broker_task: control_transport.recv timed out")
                     return
 
@@ -67,13 +68,15 @@ async def test_broker_pool_context_manager() -> None:
                 resp_transport = PollingTransport(resp_ring, poll_interval=0.001)
 
                 # Send registration ack
-                await resp_transport.send(encoder.encode({"ok": True, "id": register["id"]}))
+                await asyncio.wait_for(
+                    resp_transport.send(encoder.encode({"ok": True, "id": register["id"]})), timeout=2.0
+                )
 
                 # Handle 3 requests: acquire, release, health
                 for _ in range(3):
                     try:
                         data = await asyncio.wait_for(req_transport.recv(), timeout=10.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         pytest.fail("broker_task: req_transport.recv timed out")
                         return
 
@@ -84,7 +87,7 @@ async def test_broker_pool_context_manager() -> None:
                         response = {"ok": True, "id": request["id"]}
                     else:
                         response = {"ok": False, "error": {"message": "unknown"}, "id": request["id"]}
-                    await resp_transport.send(encoder.encode(response))
+                    await asyncio.wait_for(resp_transport.send(encoder.encode(response)), timeout=2.0)
 
                 control_transport.close()
                 req_transport.close()
@@ -99,20 +102,21 @@ async def test_broker_pool_context_manager() -> None:
 
         pool = BrokerPool(
             pool="default",
-            client_config=BrokerClientConfig(name=name, slot_size=4096, slots=64, client_id="test-client"),
+            client_config=BrokerClientConfig(
+                name=name, slot_size=4096, slots=64, client_id="test-client", prefer_eventfd=False
+            ),
             max_clients=2,
         )
 
-        # Acquire returns a BrokerLease - force CFFI mode on the client
-        lease = await pool.acquire()
-        lease.client._use_async_transport = False  # Force CFFI blocking mode
+        # Acquire returns a BrokerLease
+        lease = await asyncio.wait_for(pool.acquire(), timeout=10.0)
         async with lease as token:
             assert token == "1"
 
-        healthy = await pool.health()
+        healthy = await asyncio.wait_for(pool.health(), timeout=5.0)
         assert healthy is True
 
-        await pool.close()
+        await asyncio.wait_for(pool.close(), timeout=5.0)
         await asyncio.wait_for(task, timeout=10.0)
         if broker_error is not None:
             raise broker_error

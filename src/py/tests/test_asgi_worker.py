@@ -7,8 +7,8 @@ from typing import Any
 import msgspec
 import pytest
 
-from tests.helpers.shm import tracked_shm_cleanup, unique_shm_name
-from vertebra._internal._typing import SHM_AVAILABLE, ShmRing, ShmRingConfig, get_shm_load_error
+from tests.helpers.shm import skip_if_shm_unavailable, tracked_shm_cleanup, unique_shm_name
+from vertebra._internal._typing import ShmRing, ShmRingConfig
 from vertebra.server.worker import AsgiWorker, WorkerConfig
 
 
@@ -21,17 +21,11 @@ async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
 
 
 def _skip_if_missing() -> None:
-    if not SHM_AVAILABLE:
-        reason = get_shm_load_error() or "shared memory library unavailable"
-        pytest.skip(f"Shared memory bindings unavailable: {reason}")
+    skip_if_shm_unavailable()
 
 
 async def _register_client(
-    name: str,
-    worker_id: str,
-    slot_size: int,
-    slots: int,
-    created_names: list[str],
+    name: str, worker_id: str, slot_size: int, slots: int, created_names: list[str]
 ) -> tuple[ShmRing, ShmRing, msgspec.msgpack.Encoder, msgspec.msgpack.Decoder]:
     encoder = msgspec.msgpack.Encoder()
     decoder = msgspec.msgpack.Decoder()
@@ -55,7 +49,7 @@ async def _register_client(
     # Use asyncio.wait_for to prevent indefinite blocking
     try:
         data, _flags = await asyncio.wait_for(asyncio.to_thread(resp_ring.recv, 1000), timeout=5.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pytest.fail("_register_client: resp_ring.recv timed out")
     response = decoder.decode(data)
     assert response.get("ok") is True
@@ -86,9 +80,7 @@ async def test_asgi_worker_roundtrip() -> None:
             if worker._running:
                 break
 
-        req_ring, resp_ring, encoder, decoder = await _register_client(
-            name, worker_id, slot_size, slots, created_names
-        )
+        req_ring, resp_ring, encoder, decoder = await _register_client(name, worker_id, slot_size, slots, created_names)
         payload = {
             "id": "req-1",
             "method": "GET",
@@ -107,7 +99,7 @@ async def test_asgi_worker_roundtrip() -> None:
             # Use asyncio.wait_for to prevent indefinite blocking
             try:
                 data, _flags = await asyncio.wait_for(asyncio.to_thread(resp_ring.recv, 1000), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pytest.fail("test_asgi_worker_roundtrip: resp_ring.recv timed out")
             response = decoder.decode(data)
             if response["type"] == "http.response.start":

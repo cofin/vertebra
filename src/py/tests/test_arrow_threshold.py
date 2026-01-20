@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
+from typing import Any
 
 import pytest
-
-if TYPE_CHECKING:
-    pass
 
 pytestmark = pytest.mark.anyio
 
@@ -20,7 +16,7 @@ class TestArrowThreshold:
     def mock_provider(self) -> Any:
         """Create a minimal mock provider with threshold logic exposed."""
         try:
-            import pyarrow  # noqa: F401
+            import pyarrow as pa  # noqa: F401
         except ImportError:
             pytest.skip("pyarrow not available")
 
@@ -47,7 +43,10 @@ class TestArrowThreshold:
                 if not rows:
                     return None
                 estimated_bytes = len(rows) * max(1, len(columns)) * 8
-                if rowcount < self._config.arrow_threshold_rows and estimated_bytes < self._config.arrow_threshold_bytes:
+                if (
+                    rowcount < self._config.arrow_threshold_rows
+                    and estimated_bytes < self._config.arrow_threshold_bytes
+                ):
                     return None
                 try:
                     import pyarrow as pa
@@ -102,7 +101,7 @@ class TestArrowThreshold:
     def test_at_byte_threshold_boundary(self, mock_provider: Any) -> None:
         """Test just below byte threshold with few rows."""
         # 10 rows, 12 columns = 10 * 12 * 8 = 960 bytes (below 1024)
-        rows = [[j for j in range(12)] for _ in range(10)]
+        rows = [list(range(12)) for _ in range(10)]
         columns = [f"col_{j}" for j in range(12)]
         result = mock_provider._maybe_encode_arrow(rows, columns, 10)
         # Both thresholds not exceeded: 10 < 100 rows, 960 < 1024 bytes
@@ -141,19 +140,14 @@ class TestArrowThresholdConfig:
         """Custom thresholds should be configurable."""
         from vertebra.resources.provider import ProviderConfig
 
-        config = ProviderConfig(
-            pool="test",
-            driver="test",
-            arrow_threshold_rows=500,
-            arrow_threshold_bytes=512_000,
-        )
+        config = ProviderConfig(pool="test", driver="test", arrow_threshold_rows=500, arrow_threshold_bytes=512_000)
         assert config.arrow_threshold_rows == 500
         assert config.arrow_threshold_bytes == 512_000
 
     def test_zero_threshold_always_uses_arrow(self) -> None:
         """Zero threshold should always trigger Arrow for non-empty results."""
         try:
-            import pyarrow  # noqa: F401
+            import pyarrow as pa  # noqa: F401
         except ImportError:
             pytest.skip("pyarrow not available")
 
@@ -177,7 +171,10 @@ class TestArrowThresholdConfig:
                 if not rows:
                     return None
                 estimated_bytes = len(rows) * max(1, len(columns)) * 8
-                if rowcount < self._config.arrow_threshold_rows and estimated_bytes < self._config.arrow_threshold_bytes:
+                if (
+                    rowcount < self._config.arrow_threshold_rows
+                    and estimated_bytes < self._config.arrow_threshold_bytes
+                ):
                     return None
                 return {"arrow": True}  # Simplified return
 
@@ -222,7 +219,8 @@ class TestPyArrowFallback:
 
         def mock_import(name: str, *args: Any, **kwargs: Any) -> Any:
             if name == "pyarrow":
-                raise ImportError("No module named 'pyarrow'")
+                msg = "No module named 'pyarrow'"
+                raise ImportError(msg)
             return original_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", mock_import)
@@ -246,7 +244,10 @@ class TestPyArrowFallback:
                 if not rows:
                     return None
                 estimated_bytes = len(rows) * max(1, len(columns)) * 8
-                if rowcount < self._config.arrow_threshold_rows and estimated_bytes < self._config.arrow_threshold_bytes:
+                if (
+                    rowcount < self._config.arrow_threshold_rows
+                    and estimated_bytes < self._config.arrow_threshold_bytes
+                ):
                     return None
                 try:
                     import pyarrow as pa  # noqa: F401
