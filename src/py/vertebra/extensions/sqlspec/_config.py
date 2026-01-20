@@ -1,34 +1,36 @@
 """Shared SQLSpec broker config helpers."""
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from sqlspec.config import AsyncDatabaseConfig, ExtensionConfigs, SyncDatabaseConfig
 
 from vertebra.resources import BrokerClientConfig
 
 from ._shared import (
-    AsyncBrokerConnection,
-    AsyncBrokerPool,
     AsyncSessionContextProtocol,
-    BrokerAsyncConnectionContext,
-    BrokerAsyncSessionContext,
-    BrokerSyncConnectionContext,
-    BrokerSyncSessionContext,
-    SyncBrokerConnection,
-    SyncBrokerPool,
     SyncSessionContextProtocol,
+    VertebraAsyncConnection,
+    VertebraAsyncConnectionContext,
+    VertebraAsyncPool,
+    VertebraAsyncSessionContext,
+    VertebraSyncConnection,
+    VertebraSyncConnectionContext,
+    VertebraSyncPool,
+    VertebraSyncSessionContext,
 )
 
 if TYPE_CHECKING:
     from sqlspec.core import StatementConfig
     from sqlspec.observability import ObservabilityConfig
 
+    from ._driver import VertebraAsyncDriverBase, VertebraSyncDriverBase
 
-class VertebraSyncConfigBase(SyncDatabaseConfig[SyncBrokerConnection, SyncBrokerPool, object]):
+
+class VertebraSyncConfigBase(SyncDatabaseConfig[VertebraSyncConnection, VertebraSyncPool, Any]):
     """Base class for Vertebra broker-backed sync SQLSpec configs."""
 
-    driver_type: ClassVar[type[object]]
-    connection_type: ClassVar[type[object]] = SyncBrokerConnection
+    driver_type: ClassVar[type[Any]]
+    connection_type: ClassVar[type[object]] = VertebraSyncConnection
     default_statement_config: ClassVar["StatementConfig"]
     default_pool_name: ClassVar[str]
 
@@ -38,7 +40,7 @@ class VertebraSyncConfigBase(SyncDatabaseConfig[SyncBrokerConnection, SyncBroker
         pool: "str | None" = None,
         client_config: "BrokerClientConfig | None" = None,
         max_clients: int = 5,
-        connection_instance: "SyncBrokerPool | None" = None,
+        connection_instance: "VertebraSyncPool | None" = None,
         migration_config: "dict[str, object] | None" = None,
         statement_config: "StatementConfig | None" = None,
         driver_features: "dict[str, object] | None" = None,
@@ -62,20 +64,20 @@ class VertebraSyncConfigBase(SyncDatabaseConfig[SyncBrokerConnection, SyncBroker
             **kwargs,
         )
 
-    def create_connection(self) -> "SyncBrokerConnection":
+    def create_connection(self) -> "VertebraSyncConnection":
         pool = self.provide_pool()
         return pool.acquire()
 
-    def provide_connection(self, *args: object, **kwargs: object) -> "BrokerSyncConnectionContext":
+    def provide_connection(self, *args: object, **kwargs: object) -> "VertebraSyncConnectionContext":
         _ = (args, kwargs)
-        return BrokerSyncConnectionContext(self.provide_pool())
+        return VertebraSyncConnectionContext(self.provide_pool())
 
     def provide_session(
         self, *args: object, statement_config: "StatementConfig | None" = None, **kwargs: object
-    ) -> "SyncSessionContextProtocol[object]":
+    ) -> "SyncSessionContextProtocol[Any]":
         _ = (args, kwargs)
         handler = _SyncSessionHandler(self)
-        return BrokerSyncSessionContext(
+        return VertebraSyncSessionContext(
             acquire_connection=handler.acquire_connection,
             release_connection=handler.release_connection,
             statement_config=statement_config or self.statement_config,
@@ -84,8 +86,8 @@ class VertebraSyncConfigBase(SyncDatabaseConfig[SyncBrokerConnection, SyncBroker
             driver_type=type(self).driver_type,
         )
 
-    def _create_pool(self) -> "SyncBrokerPool":
-        return SyncBrokerPool(self.pool, self.client_config, max_clients=self.max_clients)
+    def _create_pool(self) -> "VertebraSyncPool":
+        return VertebraSyncPool(self.pool, self.client_config, max_clients=self.max_clients)
 
     def _close_pool(self) -> None:
         if self.connection_instance is not None:
@@ -95,19 +97,19 @@ class VertebraSyncConfigBase(SyncDatabaseConfig[SyncBrokerConnection, SyncBroker
         namespace = super().get_signature_namespace()
         namespace.update({
             "BrokerClientConfig": BrokerClientConfig,
-            "BrokerSyncConnectionContext": BrokerSyncConnectionContext,
-            "BrokerSyncSessionContext": BrokerSyncSessionContext,
-            "SyncBrokerConnection": SyncBrokerConnection,
-            "SyncBrokerPool": SyncBrokerPool,
+            "VertebraSyncConnection": VertebraSyncConnection,
+            "VertebraSyncConnectionContext": VertebraSyncConnectionContext,
+            "VertebraSyncPool": VertebraSyncPool,
+            "VertebraSyncSessionContext": VertebraSyncSessionContext,
         })
         return namespace
 
 
-class VertebraAsyncConfigBase(AsyncDatabaseConfig[AsyncBrokerConnection, AsyncBrokerPool, object]):
+class VertebraAsyncConfigBase(AsyncDatabaseConfig[VertebraAsyncConnection, VertebraAsyncPool, Any]):
     """Base class for Vertebra broker-backed async SQLSpec configs."""
 
-    driver_type: ClassVar[type[object]]
-    connection_type: ClassVar[type[object]] = AsyncBrokerConnection
+    driver_type: ClassVar[type[Any]]
+    connection_type: ClassVar[type[object]] = VertebraAsyncConnection
     default_statement_config: ClassVar["StatementConfig"]
     default_pool_name: ClassVar[str]
 
@@ -117,7 +119,7 @@ class VertebraAsyncConfigBase(AsyncDatabaseConfig[AsyncBrokerConnection, AsyncBr
         pool: "str | None" = None,
         client_config: "BrokerClientConfig | None" = None,
         max_clients: int = 5,
-        connection_instance: "AsyncBrokerPool | None" = None,
+        connection_instance: "VertebraAsyncPool | None" = None,
         migration_config: "dict[str, object] | None" = None,
         statement_config: "StatementConfig | None" = None,
         driver_features: "dict[str, object] | None" = None,
@@ -141,20 +143,21 @@ class VertebraAsyncConfigBase(AsyncDatabaseConfig[AsyncBrokerConnection, AsyncBr
             **kwargs,
         )
 
-    async def create_connection(self) -> "AsyncBrokerConnection":
-        pool = self.provide_pool()
+    async def create_connection(self) -> "VertebraAsyncConnection":
+        pool = await self.provide_pool()
         return await pool.acquire()
 
-    def provide_connection(self, *args: object, **kwargs: object) -> "BrokerAsyncConnectionContext":
+    async def provide_connection(self, *args: object, **kwargs: object) -> "VertebraAsyncConnectionContext":  # type: ignore[override]
         _ = (args, kwargs)
-        return BrokerAsyncConnectionContext(self.provide_pool())
+        pool = await self.provide_pool()
+        return VertebraAsyncConnectionContext(pool)
 
     def provide_session(
         self, *args: object, statement_config: "StatementConfig | None" = None, **kwargs: object
-    ) -> "AsyncSessionContextProtocol[object]":
+    ) -> "AsyncSessionContextProtocol[Any]":
         _ = (args, kwargs)
         handler = _AsyncSessionHandler(self)
-        return BrokerAsyncSessionContext(
+        return VertebraAsyncSessionContext(
             acquire_connection=handler.acquire_connection,
             release_connection=handler.release_connection,
             statement_config=statement_config or self.statement_config,
@@ -163,8 +166,8 @@ class VertebraAsyncConfigBase(AsyncDatabaseConfig[AsyncBrokerConnection, AsyncBr
             driver_type=type(self).driver_type,
         )
 
-    def _create_pool(self) -> "AsyncBrokerPool":
-        return AsyncBrokerPool(self.pool, self.client_config, max_clients=self.max_clients)
+    async def _create_pool(self) -> "VertebraAsyncPool":
+        return VertebraAsyncPool(self.pool, self.client_config, max_clients=self.max_clients)
 
     async def _close_pool(self) -> None:
         if self.connection_instance is not None:
@@ -174,10 +177,10 @@ class VertebraAsyncConfigBase(AsyncDatabaseConfig[AsyncBrokerConnection, AsyncBr
         namespace = super().get_signature_namespace()
         namespace.update({
             "BrokerClientConfig": BrokerClientConfig,
-            "BrokerAsyncConnectionContext": BrokerAsyncConnectionContext,
-            "BrokerAsyncSessionContext": BrokerAsyncSessionContext,
-            "AsyncBrokerConnection": AsyncBrokerConnection,
-            "AsyncBrokerPool": AsyncBrokerPool,
+            "VertebraAsyncConnection": VertebraAsyncConnection,
+            "VertebraAsyncConnectionContext": VertebraAsyncConnectionContext,
+            "VertebraAsyncPool": VertebraAsyncPool,
+            "VertebraAsyncSessionContext": VertebraAsyncSessionContext,
         })
         return namespace
 
@@ -188,11 +191,11 @@ class _SyncSessionHandler:
     def __init__(self, config: VertebraSyncConfigBase) -> None:
         self._config = config
 
-    def acquire_connection(self) -> "SyncBrokerConnection":
+    def acquire_connection(self) -> "VertebraSyncConnection":
         pool = self._config.provide_pool()
         return pool.acquire()
 
-    def release_connection(self, connection: "SyncBrokerConnection") -> None:
+    def release_connection(self, connection: "VertebraSyncConnection") -> None:
         pool = self._config.provide_pool()
         pool.release(connection)
 
@@ -203,12 +206,12 @@ class _AsyncSessionHandler:
     def __init__(self, config: VertebraAsyncConfigBase) -> None:
         self._config = config
 
-    async def acquire_connection(self) -> "AsyncBrokerConnection":
-        pool = self._config.provide_pool()
+    async def acquire_connection(self) -> "VertebraAsyncConnection":
+        pool = await self._config.provide_pool()
         return await pool.acquire()
 
-    async def release_connection(self, connection: "AsyncBrokerConnection") -> None:
-        pool = self._config.provide_pool()
+    async def release_connection(self, connection: "VertebraAsyncConnection") -> None:
+        pool = await self._config.provide_pool()
         await pool.release(connection)
 
 

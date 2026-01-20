@@ -1,42 +1,47 @@
 """Shared SQLSpec broker helpers."""
 
 from types import TracebackType
-from typing import TYPE_CHECKING, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
-from vertebra.drivers.broker import AsyncBrokerConnection, AsyncBrokerPool, SyncBrokerConnection, SyncBrokerPool
+from vertebra.drivers.broker import (
+    VertebraAsyncConnection,
+    VertebraAsyncPool,
+    VertebraSyncConnection,
+    VertebraSyncPool,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from sqlspec.core import StatementConfig
 
-_T = TypeVar("_T")
+_T_co = TypeVar("_T_co", covariant=True)
 
 
-class SyncSessionContextProtocol(Protocol[_T]):
-    def __enter__(self) -> _T: ...
+class SyncSessionContextProtocol(Protocol[_T_co]):
+    def __enter__(self) -> _T_co: ...
 
     def __exit__(
         self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None
     ) -> bool | None: ...
 
 
-class AsyncSessionContextProtocol(Protocol[_T]):
-    async def __aenter__(self) -> _T: ...
+class AsyncSessionContextProtocol(Protocol[_T_co]):
+    async def __aenter__(self) -> _T_co: ...
 
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None
     ) -> bool | None: ...
 
 
-class BrokerSyncConnectionContext:
+class VertebraSyncConnectionContext:
     __slots__ = ("_connection", "_pool")
 
-    def __init__(self, pool: "SyncBrokerPool") -> None:
+    def __init__(self, pool: "VertebraSyncPool") -> None:
         self._pool = pool
-        self._connection: "SyncBrokerConnection | None" = None
+        self._connection: "VertebraSyncConnection | None" = None
 
-    def __enter__(self) -> "SyncBrokerConnection":
+    def __enter__(self) -> "VertebraSyncConnection":
         self._connection = self._pool.acquire()
         return self._connection
 
@@ -48,14 +53,14 @@ class BrokerSyncConnectionContext:
             self._connection = None
 
 
-class BrokerAsyncConnectionContext:
+class VertebraAsyncConnectionContext:
     __slots__ = ("_connection", "_pool")
 
-    def __init__(self, pool: "AsyncBrokerPool") -> None:
+    def __init__(self, pool: "VertebraAsyncPool") -> None:
         self._pool = pool
-        self._connection: "AsyncBrokerConnection | None" = None
+        self._connection: "VertebraAsyncConnection | None" = None
 
-    async def __aenter__(self) -> "AsyncBrokerConnection":
+    async def __aenter__(self) -> "VertebraAsyncConnection":
         self._connection = await self._pool.acquire()
         return self._connection
 
@@ -67,7 +72,7 @@ class BrokerAsyncConnectionContext:
             self._connection = None
 
 
-class BrokerSyncSessionContext:
+class VertebraSyncSessionContext:
     __slots__ = (
         "_acquire_connection",
         "_connection",
@@ -82,12 +87,12 @@ class BrokerSyncSessionContext:
     def __init__(
         self,
         *,
-        acquire_connection: "Callable[[], SyncBrokerConnection]",
-        release_connection: "Callable[[SyncBrokerConnection], None]",
+        acquire_connection: "Callable[[], VertebraSyncConnection]",
+        release_connection: "Callable[[VertebraSyncConnection], None]",
         statement_config: "StatementConfig",
         driver_features: "dict[str, object]",
-        prepare_driver: "Callable[[object], object]",
-        driver_type: "type[object]",
+        prepare_driver: "Callable[[Any], Any]",
+        driver_type: "type[Any]",
     ) -> None:
         self._acquire_connection = acquire_connection
         self._release_connection = release_connection
@@ -95,10 +100,10 @@ class BrokerSyncSessionContext:
         self._driver_features = driver_features
         self._prepare_driver = prepare_driver
         self._driver_type = driver_type
-        self._connection: "SyncBrokerConnection | None" = None
-        self._driver: object | None = None
+        self._connection: "VertebraSyncConnection | None" = None
+        self._driver: Any | None = None
 
-    def __enter__(self) -> object:
+    def __enter__(self) -> Any:
         self._connection = self._acquire_connection()
         self._driver = self._driver_type(
             connection=self._connection, statement_config=self._statement_config, driver_features=self._driver_features
@@ -113,7 +118,7 @@ class BrokerSyncSessionContext:
             self._connection = None
 
 
-class BrokerAsyncSessionContext:
+class VertebraAsyncSessionContext:
     __slots__ = (
         "_acquire_connection",
         "_connection",
@@ -128,12 +133,12 @@ class BrokerAsyncSessionContext:
     def __init__(
         self,
         *,
-        acquire_connection: "Callable[[], Awaitable[AsyncBrokerConnection]]",
-        release_connection: "Callable[[AsyncBrokerConnection], Awaitable[None]]",
+        acquire_connection: "Callable[[], Awaitable[VertebraAsyncConnection]]",
+        release_connection: "Callable[[VertebraAsyncConnection], Awaitable[None]]",
         statement_config: "StatementConfig",
         driver_features: "dict[str, object]",
-        prepare_driver: "Callable[[object], object]",
-        driver_type: "type[object]",
+        prepare_driver: "Callable[[Any], Any]",
+        driver_type: "type[Any]",
     ) -> None:
         self._acquire_connection = acquire_connection
         self._release_connection = release_connection
@@ -141,10 +146,10 @@ class BrokerAsyncSessionContext:
         self._driver_features = driver_features
         self._prepare_driver = prepare_driver
         self._driver_type = driver_type
-        self._connection: "AsyncBrokerConnection | None" = None
-        self._driver: object | None = None
+        self._connection: "VertebraAsyncConnection | None" = None
+        self._driver: Any | None = None
 
-    async def __aenter__(self) -> object:
+    async def __aenter__(self) -> Any:
         self._connection = await self._acquire_connection()
         self._driver = self._driver_type(
             connection=self._connection, statement_config=self._statement_config, driver_features=self._driver_features
@@ -160,14 +165,14 @@ class BrokerAsyncSessionContext:
 
 
 __all__ = (
-    "AsyncBrokerConnection",
-    "AsyncBrokerPool",
     "AsyncSessionContextProtocol",
-    "BrokerAsyncConnectionContext",
-    "BrokerAsyncSessionContext",
-    "BrokerSyncConnectionContext",
-    "BrokerSyncSessionContext",
-    "SyncBrokerConnection",
-    "SyncBrokerPool",
     "SyncSessionContextProtocol",
+    "VertebraAsyncConnection",
+    "VertebraAsyncConnectionContext",
+    "VertebraAsyncPool",
+    "VertebraAsyncSessionContext",
+    "VertebraSyncConnection",
+    "VertebraSyncConnectionContext",
+    "VertebraSyncPool",
+    "VertebraSyncSessionContext",
 )

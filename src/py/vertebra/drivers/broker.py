@@ -3,20 +3,20 @@
 import asyncio
 from collections.abc import Iterable, Mapping, Sequence
 from types import TracebackType
-from typing import TYPE_CHECKING, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
 
 import msgspec
 
 from vertebra.resources import BrokerClient, BrokerClientConfig, BrokerPool
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Coroutine
 
 
 T = TypeVar("T")
 
 
-class BrokerResponse(TypedDict, total=False):
+class VertebraResponse(TypedDict, total=False):
     """Response payload from broker-backed driver calls."""
 
     columns: list[str]
@@ -34,20 +34,20 @@ def _run_sync(coro: "Awaitable[T]") -> T:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
+        return asyncio.run(cast("Coroutine[Any, Any, T]", coro))
     msg = "Use async broker connection inside an event loop"
     raise RuntimeError(msg)
 
 
-class BrokerDriverConfig(msgspec.Struct, frozen=True):
+class VertebraDriverConfig(msgspec.Struct, frozen=True):
     """Configuration for a broker-backed database driver."""
 
     pool: str
     client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
-class SyncBrokerCursor:
-    def __init__(self, connection: "SyncBrokerConnection") -> None:
+class VertebraSyncCursor:
+    def __init__(self, connection: "VertebraSyncConnection") -> None:
         self._connection = connection
         self._rows: list[Row] = []
         self._columns: list[str] = []
@@ -91,7 +91,7 @@ class SyncBrokerCursor:
         self._index = 0
 
 
-class SyncBrokerConnection:
+class VertebraSyncConnection:
     def __init__(self, pool: str, client: BrokerClient, token: str) -> None:
         self._pool = pool
         self._client = client
@@ -101,8 +101,8 @@ class SyncBrokerConnection:
     def token(self) -> str:
         return self._token
 
-    def cursor(self) -> SyncBrokerCursor:
-        return SyncBrokerCursor(self)
+    def cursor(self) -> VertebraSyncCursor:
+        return VertebraSyncCursor(self)
 
     def begin(self) -> None:
         _run_sync(self._client.begin(self._pool, self._token))
@@ -116,30 +116,37 @@ class SyncBrokerConnection:
     def close(self) -> None:
         _run_sync(self._client.release(self._pool, self._token))
 
-    def _execute(self, query: str, params: Params, correlation_id: str | None = None) -> BrokerResponse:
+    def _execute(self, query: str, params: Params, correlation_id: str | None = None) -> VertebraResponse:
         payload: list[ParamValue] | dict[str, ParamValue]
         payload = params if isinstance(params, dict) else list(params)
-        return _run_sync(self._client.execute(self._pool, self._token, query, payload, correlation_id))
+        return cast(
+            "VertebraResponse", _run_sync(self._client.execute(self._pool, self._token, query, payload, correlation_id))
+        )
 
-    def _execute_many(self, query: str, params: Iterable[Params], correlation_id: str | None = None) -> BrokerResponse:
+    def _execute_many(
+        self, query: str, params: Iterable[Params], correlation_id: str | None = None
+    ) -> VertebraResponse:
         payload: list[list[ParamValue] | dict[str, ParamValue]] = []
         for param_set in params:
             if isinstance(param_set, dict):
                 payload.append(param_set)
             else:
                 payload.append(list(param_set))
-        return _run_sync(self._client.execute_many(self._pool, self._token, query, payload, correlation_id))
+        return cast(
+            "VertebraResponse",
+            _run_sync(self._client.execute_many(self._pool, self._token, query, payload, correlation_id)),
+        )
 
 
-class SyncBrokerPool:
+class VertebraSyncPool:
     def __init__(self, pool: str, config: BrokerClientConfig, max_clients: int = 5) -> None:
         self._pool = BrokerPool(pool, client_config=config, max_clients=max_clients)
 
-    def acquire(self) -> SyncBrokerConnection:
+    def acquire(self) -> VertebraSyncConnection:
         lease = _run_sync(self._pool.acquire())
-        return SyncBrokerConnection(self._pool._pool_name, lease.client, lease.token)
+        return VertebraSyncConnection(self._pool._pool_name, lease.client, lease.token)
 
-    def release(self, connection: SyncBrokerConnection) -> None:
+    def release(self, connection: VertebraSyncConnection) -> None:
         _run_sync(self._pool.release(connection._client, connection._token))
 
     def close(self) -> None:
@@ -152,8 +159,8 @@ class SyncBrokerPool:
         return 0
 
 
-class AsyncBrokerCursor:
-    def __init__(self, connection: "AsyncBrokerConnection") -> None:
+class VertebraAsyncCursor:
+    def __init__(self, connection: "VertebraAsyncConnection") -> None:
         self._connection = connection
         self._rows: list[Row] = []
         self._columns: list[str] = []
@@ -197,7 +204,7 @@ class AsyncBrokerCursor:
         self._index = 0
 
 
-class AsyncBrokerConnection:
+class VertebraAsyncConnection:
     def __init__(self, pool: str, client: BrokerClient, token: str) -> None:
         self._pool = pool
         self._client = client
@@ -207,8 +214,8 @@ class AsyncBrokerConnection:
     def token(self) -> str:
         return self._token
 
-    def cursor(self) -> AsyncBrokerCursor:
-        return AsyncBrokerCursor(self)
+    def cursor(self) -> VertebraAsyncCursor:
+        return VertebraAsyncCursor(self)
 
     async def begin(self) -> None:
         await self._client.begin(self._pool, self._token)
@@ -219,8 +226,8 @@ class AsyncBrokerConnection:
     async def rollback(self) -> None:
         await self._client.rollback(self._pool, self._token)
 
-    def transaction(self) -> "AsyncBrokerTransaction":
-        return AsyncBrokerTransaction(self)
+    def transaction(self) -> "VertebraAsyncTransaction":
+        return VertebraAsyncTransaction(self)
 
     async def fetch(self, query: str, params: Sequence[ParamValue] | None = None) -> list[Row]:
         result = await self._execute(query, params or [])
@@ -250,28 +257,32 @@ class AsyncBrokerConnection:
     async def close(self) -> None:
         await self._client.release(self._pool, self._token)
 
-    async def _execute(self, query: str, params: Params, correlation_id: str | None = None) -> BrokerResponse:
+    async def _execute(self, query: str, params: Params, correlation_id: str | None = None) -> VertebraResponse:
         payload: list[ParamValue] | dict[str, ParamValue]
         payload = params if isinstance(params, dict) else list(params)
-        return await self._client.execute(self._pool, self._token, query, payload, correlation_id)
+        return cast(
+            "VertebraResponse", await self._client.execute(self._pool, self._token, query, payload, correlation_id)
+        )
 
     async def _execute_many(
         self, query: str, params: Iterable[Params], correlation_id: str | None = None
-    ) -> BrokerResponse:
+    ) -> VertebraResponse:
         payload: list[list[ParamValue] | dict[str, ParamValue]] = []
         for param_set in params:
             if isinstance(param_set, dict):
                 payload.append(param_set)
             else:
                 payload.append(list(param_set))
-        return await self._client.execute_many(self._pool, self._token, query, payload, correlation_id)
+        return cast(
+            "VertebraResponse", await self._client.execute_many(self._pool, self._token, query, payload, correlation_id)
+        )
 
 
-class AsyncBrokerTransaction:
-    def __init__(self, connection: AsyncBrokerConnection) -> None:
+class VertebraAsyncTransaction:
+    def __init__(self, connection: VertebraAsyncConnection) -> None:
         self._connection = connection
 
-    async def __aenter__(self) -> "AsyncBrokerTransaction":
+    async def __aenter__(self) -> "VertebraAsyncTransaction":
         await self._connection._client.begin(self._connection._pool, self._connection._token)
         return self
 
@@ -284,15 +295,15 @@ class AsyncBrokerTransaction:
             await self._connection._client.rollback(self._connection._pool, self._connection._token)
 
 
-class AsyncBrokerPool:
+class VertebraAsyncPool:
     def __init__(self, pool: str, config: BrokerClientConfig, max_clients: int = 5) -> None:
         self._pool = BrokerPool(pool, client_config=config, max_clients=max_clients)
 
-    async def acquire(self) -> AsyncBrokerConnection:
+    async def acquire(self) -> VertebraAsyncConnection:
         lease = await self._pool.acquire()
-        return AsyncBrokerConnection(self._pool._pool_name, lease.client, lease.token)
+        return VertebraAsyncConnection(self._pool._pool_name, lease.client, lease.token)
 
-    async def release(self, connection: AsyncBrokerConnection) -> None:
+    async def release(self, connection: VertebraAsyncConnection) -> None:
         await self._pool.release(connection._client, connection._token)
 
     async def close(self) -> None:
@@ -306,11 +317,12 @@ class AsyncBrokerPool:
 
 
 __all__ = (
-    "AsyncBrokerConnection",
-    "AsyncBrokerCursor",
-    "AsyncBrokerPool",
-    "BrokerDriverConfig",
-    "SyncBrokerConnection",
-    "SyncBrokerCursor",
-    "SyncBrokerPool",
+    "VertebraAsyncConnection",
+    "VertebraAsyncCursor",
+    "VertebraAsyncPool",
+    "VertebraDriverConfig",
+    "VertebraResponse",
+    "VertebraSyncConnection",
+    "VertebraSyncCursor",
+    "VertebraSyncPool",
 )

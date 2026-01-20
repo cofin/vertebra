@@ -25,6 +25,10 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from types import FrameType
 
 logger = logging.getLogger("vertebra.supervisor")
 
@@ -62,7 +66,7 @@ class RestartPolicy:
     def compute_delay(self, attempt: int) -> float:
         """Compute delay in seconds for the given attempt."""
         delay_ms = min(self.max_delay_ms, self.base_delay_ms * (2 ** max(0, attempt - 1)))
-        return delay_ms / 1000.0
+        return float(delay_ms / 1000.0)
 
 
 @dataclass(slots=True)
@@ -122,7 +126,7 @@ class Supervisor:
         self._shutdown_timeout = shutdown_timeout_ms / 1000.0
         self._health_task: asyncio.Task[None] | None = None
         self._shutdown_event = asyncio.Event()
-        self._original_handlers: dict[int, signal.Handlers] = {}
+        self._original_handlers: dict[int, Any] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
 
     @property
@@ -180,13 +184,13 @@ class Supervisor:
             env.update(spec.env)
 
             # Start process in new process group for clean shutdown
-            kwargs: dict[str, object] = {"env": env, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
+            kwargs: dict[str, Any] = {"env": env, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
 
             # Unix: use process groups
             if sys.platform != "win32":
                 kwargs["start_new_session"] = True
 
-            proc = subprocess.Popen(spec.cmd, **kwargs)  # type: ignore[call-overload]
+            proc = subprocess.Popen(spec.cmd, **kwargs)
             handle.proc = proc
             handle.state = ProcessState.RUNNING
             handle.started_at = time.time()
@@ -319,7 +323,7 @@ class Supervisor:
                     handle.state = ProcessState.STOPPED
 
                     if handle.spec.critical:
-                        return exit_code
+                        return cast(int, exit_code)
 
                     # Non-critical: attempt restart
                     self._maybe_restart(name)
@@ -368,16 +372,16 @@ class Supervisor:
     def _install_signal_handlers(self) -> None:
         """Install signal handlers for graceful shutdown."""
 
-        def handler(sig: int, _frame: object) -> None:
+        def handler(sig: int, _frame: FrameType | None) -> None:
             logger.info("Received signal %d, initiating shutdown", sig)
             self.stop(sig)
 
         for sig in (signal.SIGTERM, signal.SIGINT):
-            self._original_handlers[sig] = signal.signal(sig, handler)
+            self._original_handlers[sig] = signal.signal(sig, cast(Any, handler))
 
         if sys.platform != "win32":
             # SIGHUP for reload (future)
-            self._original_handlers[signal.SIGHUP] = signal.signal(signal.SIGHUP, handler)
+            self._original_handlers[signal.SIGHUP] = signal.signal(signal.SIGHUP, cast(Any, handler))
 
     def _restore_signal_handlers(self) -> None:
         """Restore original signal handlers."""

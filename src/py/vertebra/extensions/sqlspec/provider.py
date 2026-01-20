@@ -2,8 +2,10 @@
 
 import asyncio
 import uuid
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable
+from typing import TYPE_CHECKING, Any, cast
 
+from sqlspec.config import AsyncDatabaseConfig, SyncDatabaseConfig
 from sqlspec.core.result import ArrowResult, SQLResult
 from sqlspec.utils.correlation import CorrelationContext
 
@@ -12,14 +14,13 @@ from vertebra.resources.provider import ProviderConfig, ProviderHost
 
 if TYPE_CHECKING:
     import pyarrow as pa
-    from sqlspec.config import AsyncDatabaseConfig, SyncDatabaseConfig
     from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 
 
 class _SyncSessionState:
     __slots__ = ("ctx", "driver")
 
-    def __init__(self, ctx: object, driver: "SyncDriverAdapterBase") -> None:
+    def __init__(self, ctx: Any, driver: "SyncDriverAdapterBase") -> None:
         self.ctx = ctx
         self.driver = driver
 
@@ -27,7 +28,7 @@ class _SyncSessionState:
 class _AsyncSessionState:
     __slots__ = ("ctx", "driver")
 
-    def __init__(self, ctx: object, driver: "AsyncDriverAdapterBase") -> None:
+    def __init__(self, ctx: Any, driver: "AsyncDriverAdapterBase") -> None:
         self.ctx = ctx
         self.driver = driver
 
@@ -37,7 +38,7 @@ class SqlSpecProvider:
 
     def __init__(
         self,
-        adapter_config: "SyncDatabaseConfig[object, object, object] | AsyncDatabaseConfig[object, object, object]",
+        adapter_config: "SyncDatabaseConfig[Any, Any, Any] | AsyncDatabaseConfig[Any, Any, Any]",
         provider_config: ProviderConfig,
     ) -> None:
         self._config = provider_config
@@ -122,18 +123,29 @@ class SqlSpecProvider:
 
     def _acquire_sync(self) -> "dict[str, object]":
         self._ensure_capacity()
+        if not isinstance(self._adapter_config, SyncDatabaseConfig):
+            msg = "Expected SyncDatabaseConfig"
+            raise TypeError(msg)
         ctx = self._adapter_config.provide_session()
         driver = ctx.__enter__()
         token = uuid.uuid4().hex
-        self._sync_sessions[token] = _SyncSessionState(ctx, driver)
+        from sqlspec.driver import SyncDriverAdapterBase
+
+        self._sync_sessions[token] = _SyncSessionState(ctx, cast(SyncDriverAdapterBase, driver))
         return {"ok": True, "token": token}
 
     async def _acquire_async(self) -> "dict[str, object]":
         self._ensure_capacity()
+        if not isinstance(self._adapter_config, AsyncDatabaseConfig):
+            msg = "Expected AsyncDatabaseConfig"
+            raise TypeError(msg)
+        # Note: provide_session itself is sync, but __aenter__ is async
         ctx = self._adapter_config.provide_session()
         driver = await ctx.__aenter__()
         token = uuid.uuid4().hex
-        self._async_sessions[token] = _AsyncSessionState(ctx, driver)
+        from sqlspec.driver import AsyncDriverAdapterBase
+
+        self._async_sessions[token] = _AsyncSessionState(ctx, cast(AsyncDriverAdapterBase, driver))
         return {"ok": True, "token": token}
 
     def _release_sync(self, token: str) -> "dict[str, object]":
@@ -171,11 +183,11 @@ class SqlSpecProvider:
             raise RuntimeError(msg)
         sql = str(request.get("sql") or "")
         params = request.get("params")
-        if params is None:
+        if not isinstance(params, (list, tuple)):
             params = []
         correlation_id = request.get("correlation_id")
         with CorrelationContext.context(str(correlation_id) if correlation_id else None):
-            result = state.driver.execute_many(sql, params)
+            result = state.driver.execute_many(sql, cast(Any, params))
         return self._encode_result(result)
 
     def _command_sync(self, request: "dict[str, object]") -> "dict[str, object]":
@@ -237,11 +249,11 @@ class SqlSpecProvider:
             raise RuntimeError(msg)
         sql = str(request.get("sql") or "")
         params = request.get("params")
-        if params is None:
+        if not isinstance(params, (list, tuple)):
             params = []
         correlation_id = request.get("correlation_id")
         with CorrelationContext.context(str(correlation_id) if correlation_id else None):
-            result = await state.driver.execute_many(sql, params)
+            result = await state.driver.execute_many(sql, cast(Any, params))
         return self._encode_result(result)
 
     async def _command_async(self, request: "dict[str, object]") -> "dict[str, object]":
@@ -317,7 +329,7 @@ class SqlSpecProvider:
                 payload["ok"] = True
                 return payload
             return {"ok": True, "columns": columns, "rows": rows, "rowcount": rowcount}
-        return {"ok": True, "rowcount": 0}
+
 
     def _encode_arrow_result(self, result: "ArrowResult") -> "dict[str, object]":
         table = result.data
@@ -361,7 +373,9 @@ class SqlSpecProvider:
 
     def _normalize_rows(self, data: object, columns: "list[str]") -> "list[list[object]]":
         rows: list[list[object]] = []
-        for row in data:
+        if not hasattr(data, "__iter__"):
+            return rows
+        for row in cast(Any, data):
             if isinstance(row, dict):
                 rows.append([row.get(column) for column in columns])
             elif isinstance(row, (list, tuple)):

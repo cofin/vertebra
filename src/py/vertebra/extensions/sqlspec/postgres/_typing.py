@@ -3,7 +3,7 @@
 from types import TracebackType
 from typing import TYPE_CHECKING
 
-from vertebra.drivers.broker import AsyncBrokerConnection, SyncBrokerConnection
+from vertebra.drivers.broker import VertebraAsyncConnection, VertebraSyncConnection
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -12,11 +12,11 @@ if TYPE_CHECKING:
 
     from vertebra.extensions.sqlspec.postgres.driver import VertebraPostgresAsyncDriver, VertebraPostgresSyncDriver
 
-    type VertebraPostgresSyncConnection = SyncBrokerConnection
-    type VertebraPostgresAsyncConnection = AsyncBrokerConnection
+    type VertebraPostgresSyncConnection = VertebraSyncConnection
+    type VertebraPostgresAsyncConnection = VertebraAsyncConnection
 else:
-    VertebraPostgresSyncConnection = SyncBrokerConnection
-    VertebraPostgresAsyncConnection = AsyncBrokerConnection
+    VertebraPostgresSyncConnection = VertebraSyncConnection
+    VertebraPostgresAsyncConnection = VertebraAsyncConnection
 
 
 class VertebraPostgresSyncSessionContext:
@@ -34,8 +34,8 @@ class VertebraPostgresSyncSessionContext:
 
     def __init__(
         self,
-        acquire_connection: "Callable[[], SyncBrokerConnection]",
-        release_connection: "Callable[[SyncBrokerConnection], None]",
+        acquire_connection: "Callable[[], VertebraSyncConnection]",
+        release_connection: "Callable[[VertebraSyncConnection], None]",
         statement_config: "StatementConfig",
         driver_features: "dict[str, object]",
         prepare_driver: "Callable[[VertebraPostgresSyncDriver], VertebraPostgresSyncDriver]",
@@ -45,7 +45,7 @@ class VertebraPostgresSyncSessionContext:
         self._statement_config = statement_config
         self._driver_features = driver_features
         self._prepare_driver = prepare_driver
-        self._connection: "SyncBrokerConnection | None" = None
+        self._connection: "VertebraSyncConnection | None" = None
         self._driver: "VertebraPostgresSyncDriver | None" = None
 
     def __enter__(self) -> "VertebraPostgresSyncDriver":
@@ -82,8 +82,8 @@ class VertebraPostgresAsyncSessionContext:
 
     def __init__(
         self,
-        acquire_connection: "Callable[[], Awaitable[AsyncBrokerConnection]]",
-        release_connection: "Callable[[AsyncBrokerConnection], Awaitable[None]]",
+        acquire_connection: "Callable[[], Awaitable[VertebraAsyncConnection]]",
+        release_connection: "Callable[[VertebraAsyncConnection], Awaitable[None]]",
         statement_config: "StatementConfig",
         driver_features: "dict[str, object]",
         prepare_driver: "Callable[[VertebraPostgresAsyncDriver], VertebraPostgresAsyncDriver]",
@@ -93,7 +93,7 @@ class VertebraPostgresAsyncSessionContext:
         self._statement_config = statement_config
         self._driver_features = driver_features
         self._prepare_driver = prepare_driver
-        self._connection: "AsyncBrokerConnection | None" = None
+        self._connection: "VertebraAsyncConnection | None" = None
         self._driver: "VertebraPostgresAsyncDriver | None" = None
 
     async def __aenter__(self) -> "VertebraPostgresAsyncDriver":

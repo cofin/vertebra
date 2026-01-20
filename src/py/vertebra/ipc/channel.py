@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import struct
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from vertebra import _vertebra
 from vertebra.procedures import ProcedureRegistry, get_serializer
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 _HEADER = struct.Struct("!HI")  # procedure length (u16), payload length (u32)
 _MAX_NAME_LEN = 0xFFFF
@@ -70,10 +73,10 @@ class BufferView:
     """Zero-copy view into a shared buffer."""
 
     def __init__(self, buffer: _vertebra.Buffer, length: int, flags: int = 0) -> None:
-        self._buffer = buffer
+        self._buffer: _vertebra.Buffer | None = buffer
         self._length = length
         self._flags = flags
-        self._view: memoryview | _BufferProxy | None = None
+        self._view: Any = None
 
     @property
     def length(self) -> int:
@@ -88,22 +91,23 @@ class BufferView:
             msg = "buffer released"
             raise ChannelError(msg)
         try:
-            view = memoryview(self._buffer)[: self._length]
+            # Cast to Any because _vertebra.Buffer implements the buffer protocol but mypy doesn't know
+            view = memoryview(cast(Any, self._buffer))[: self._length]
         except TypeError:
-            view = _BufferProxy(self._buffer, self._length)
-            self._view = view
-            return view
+            view_proxy = _BufferProxy(self._buffer, self._length)
+            self._view = view_proxy
+            return cast(memoryview, view_proxy)
         if view.readonly:
-            view = _BufferProxy(self._buffer, self._length)
-            self._view = view
-            return view
+            view_proxy = _BufferProxy(self._buffer, self._length)
+            self._view = view_proxy
+            return cast(memoryview, view_proxy)
         self._view = view
         return view
 
     def as_bytes(self) -> bytes:
         view = self.as_memoryview()
         if hasattr(view, "tobytes"):
-            return view.tobytes()
+            return cast(bytes, view.tobytes())
         return bytes(view)
 
     def as_msgspec(self, type_hint: type) -> Any:
@@ -112,7 +116,7 @@ class BufferView:
         except Exception as exc:  # pragma: no cover - optional dependency
             msg = "msgspec is not available"
             raise SerializationError(msg) from exc
-        decoder = msgspec.json.Decoder(type_hint)
+        decoder: msgspec.json.Decoder[Any] = msgspec.json.Decoder(type_hint)
         view = self.as_memoryview()
         try:
             return decoder.decode(view)
@@ -178,10 +182,10 @@ class _BufferProxy:
     def __len__(self) -> int:
         return self._length
 
-    def __getitem__(self, key: int | slice) -> int | bytes | bytearray:
+    def __getitem__(self, key: int | slice) -> Any:
         return self._data[key]
 
-    def __setitem__(self, key: int | slice, value: object) -> None:
+    def __setitem__(self, key: int | slice, value: Any) -> None:
         self._data[key] = value
         self._buffer.write(bytes(self._data))
 
@@ -241,7 +245,7 @@ class Channel:
         response_type: type | None = None,
         serializer: str | None = None,
     ) -> Any:
-        self._require_handle()
+        handle = self._require_handle()
         registry = ProcedureRegistry.instance()
         proc = registry.get(procedure_id)
         serializer_impl = get_serializer(serializer or (proc.serializer if proc else None), type_hint=response_type)
@@ -257,14 +261,14 @@ class Channel:
             msg = "payload too large"
             raise ChannelError(msg, procedure_id=procedure_id, stage="send_request")
         try:
-            supports_try = hasattr(self._handle, "try_send_request") and hasattr(self._handle, "try_recv_response")
+            supports_try = hasattr(handle, "try_send_request") and hasattr(handle, "try_recv_response")
             if timeout_ms is None or not supports_try:
-                self._handle.send_request(message)
-                response = self._handle.recv_response(self._max_payload)
+                handle.send_request(message)
+                response = handle.recv_response(self._max_payload)
             else:
                 send_deadline = time.monotonic() + (timeout_ms / 1000.0)
                 while True:
-                    if self._handle.try_send_request(message):
+                    if handle.try_send_request(message):
                         break
                     if time.monotonic() >= send_deadline:
                         msg = "send timeout"
@@ -273,7 +277,7 @@ class Channel:
                 recv_deadline = time.monotonic() + (timeout_ms / 1000.0)
                 response = None
                 while response is None:
-                    response = self._handle.try_recv_response(self._max_payload)
+                    response = handle.try_recv_response(self._max_payload)
                     if response is not None:
                         break
                     if time.monotonic() >= recv_deadline:
@@ -283,7 +287,7 @@ class Channel:
         except RuntimeError as exc:
             raise ChannelError(str(exc), procedure_id=procedure_id, stage="ipc") from exc
         try:
-            return serializer_impl.deserialize(response, response_type)
+            return serializer_impl.deserialize(cast(bytes, response), response_type)
         except Exception as exc:  # pragma: no cover - serializer dependent
             raise SerializationError(str(exc), procedure_id=procedure_id, stage="deserialize_response") from exc
 
@@ -308,16 +312,16 @@ class Channel:
     def receive_sync(
         self, *, timeout_ms: int | None = None, params_type: type | None = None, serializer: str | None = None
     ) -> tuple[str, Any]:
-        self._require_handle()
+        handle = self._require_handle()
         try:
-            supports_try = hasattr(self._handle, "try_recv_request")
+            supports_try = hasattr(handle, "try_recv_request")
             if timeout_ms is None or not supports_try:
-                data = self._handle.recv_request(self._max_payload)
+                data = handle.recv_request(self._max_payload)
             else:
                 deadline = time.monotonic() + (timeout_ms / 1000.0)
                 data = None
                 while data is None:
-                    data = self._handle.try_recv_request(self._max_payload)
+                    data = handle.try_recv_request(self._max_payload)
                     if data is not None:
                         break
                     if time.monotonic() >= deadline:
@@ -349,7 +353,7 @@ class Channel:
     def respond_sync(
         self, procedure_id: str, result: Any, *, response_type: type | None = None, serializer: str | None = None
     ) -> None:
-        self._require_handle()
+        handle = self._require_handle()
         registry = ProcedureRegistry.instance()
         proc = registry.get(procedure_id)
         serializer_impl = get_serializer(serializer or (proc.serializer if proc else None), type_hint=response_type)
@@ -361,7 +365,7 @@ class Channel:
             msg = "payload too large"
             raise ChannelError(msg, procedure_id=procedure_id, stage="send_response")
         try:
-            self._handle.send_response(payload)
+            handle.send_response(payload)
         except RuntimeError as exc:
             raise ChannelError(str(exc), procedure_id=procedure_id, stage="send_response") from exc
 

@@ -28,8 +28,8 @@ if _WATCHDOG_AVAILABLE:
         _WATCHDOG_IMPORT_ERROR = exc
 
 if not _WATCHDOG_AVAILABLE:
-    FileSystemEventHandler = object  # type: ignore[misc,assignment]
-    Observer = None
+    FileSystemEventHandler = object  # type: ignore[assignment,misc]
+    Observer = None  # type: ignore[assignment]
 
 
 class WatchOptions(msgspec.Struct, frozen=True, gc=False):
@@ -58,19 +58,19 @@ class _DebouncedHandler(FileSystemEventHandler):
     def _flush(self) -> None:
         self._bridge.invalidate()
 
-    def on_modified(self, event: Any) -> None:  # type: ignore[override]
+    def on_modified(self, event: Any) -> None:
         if event.is_directory:
             return
         if event.src_path.endswith(".py"):
             self._schedule()
 
-    def on_created(self, event: Any) -> None:  # type: ignore[override]
+    def on_created(self, event: Any) -> None:
         if event.is_directory:
             return
         if event.src_path.endswith(".py"):
             self._schedule()
 
-    def on_moved(self, event: Any) -> None:  # type: ignore[override]
+    def on_moved(self, event: Any) -> None:
         if event.is_directory:
             return
         if event.dest_path.endswith(".py"):
@@ -89,7 +89,7 @@ class TypeBridgeWatcher:
     def __init__(self, bridge: TypeBridge, paths: Iterable[Path], *, debounce_ms: int = 100) -> None:
         self._bridge = bridge
         self._options = WatchOptions(tuple(Path(p) for p in paths), debounce_ms)
-        self._observer = Observer() if Observer else None
+        self._observer: Any = Observer() if Observer else None
         self._handler: _DebouncedHandler | None = None
 
     @property

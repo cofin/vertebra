@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
+
+_ConnectionT_co = TypeVar("_ConnectionT_co", bound="SyncConnection | AsyncConnection", covariant=True)
 
 
 class SyncCursor(Protocol):
@@ -100,13 +102,13 @@ class AsyncConnection(Protocol):
         """Close the connection."""
 
 
-class SyncPool(Protocol):
+class SyncPool(Protocol[_ConnectionT_co]):
     """Connection pool protocol."""
 
-    def acquire(self) -> SyncConnection:
+    def acquire(self) -> _ConnectionT_co:
         """Acquire a connection from the pool."""
 
-    def release(self, connection: SyncConnection) -> None:
+    def release(self, connection: Any) -> None:
         """Release a connection back to the pool."""
 
     def close(self) -> None:
@@ -119,13 +121,13 @@ class SyncPool(Protocol):
         """Idle connection count."""
 
 
-class AsyncPool(Protocol):
+class AsyncPool(Protocol[_ConnectionT_co]):
     """Async connection pool protocol."""
 
-    async def acquire(self) -> AsyncConnection:
+    async def acquire(self) -> _ConnectionT_co:
         """Acquire a connection from the pool asynchronously."""
 
-    async def release(self, connection: AsyncConnection) -> None:
+    async def release(self, connection: Any) -> None:
         """Release a connection back to the pool asynchronously."""
 
     async def close(self) -> None:
@@ -146,7 +148,7 @@ class SyncDriver(ABC):
         """Open a new connection."""
 
     @abstractmethod
-    def pool(self, min_size: int = 1, max_size: int = 10) -> SyncPool:
+    def pool(self, min_size: int = 1, max_size: int = 10) -> SyncPool[SyncConnection]:
         """Create a connection pool."""
 
     def iter_rows(self, cursor: SyncCursor) -> Iterator[Any]:
@@ -167,7 +169,7 @@ class AsyncDriver(ABC):
         """Open a new async connection."""
 
     @abstractmethod
-    async def pool(self, min_size: int = 1, max_size: int = 10) -> AsyncPool:
+    async def pool(self, min_size: int = 1, max_size: int = 10) -> AsyncPool[AsyncConnection]:
         """Create an async connection pool."""
 
 

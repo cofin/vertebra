@@ -1,13 +1,13 @@
 """Broker-backed SQLite SQLSpec drivers."""
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
-from vertebra.drivers.broker import AsyncBrokerCursor, SyncBrokerCursor
+from vertebra.drivers.broker import VertebraAsyncCursor, VertebraSyncCursor
 from vertebra.extensions.sqlspec._driver import (
-    BrokerAsyncDriverBase,
-    BrokerAsyncExceptionHandler,
-    BrokerExceptionHandler,
-    BrokerSyncDriverBase,
+    VertebraAsyncDriverBase,
+    VertebraAsyncExceptionHandler,
+    VertebraExceptionHandler,
+    VertebraSyncDriverBase,
 )
 from vertebra.extensions.sqlspec.sqlite._typing import (
     VertebraSqliteAsyncConnection,
@@ -45,9 +45,9 @@ class VertebraSqliteSyncCursor:
 
     def __init__(self, connection: VertebraSqliteSyncConnection) -> None:
         self.connection = connection
-        self.cursor: SyncBrokerCursor | None = None
+        self.cursor: VertebraSyncCursor | None = None
 
-    def __enter__(self) -> SyncBrokerCursor:
+    def __enter__(self) -> VertebraSyncCursor:
         self.cursor = self.connection.cursor()
         return self.cursor
 
@@ -63,9 +63,9 @@ class VertebraSqliteAsyncCursor:
 
     def __init__(self, connection: VertebraSqliteAsyncConnection) -> None:
         self.connection = connection
-        self.cursor: AsyncBrokerCursor | None = None
+        self.cursor: VertebraAsyncCursor | None = None
 
-    async def __aenter__(self) -> AsyncBrokerCursor:
+    async def __aenter__(self) -> VertebraAsyncCursor:
         self.cursor = self.connection.cursor()
         return self.cursor
 
@@ -74,18 +74,18 @@ class VertebraSqliteAsyncCursor:
             await self.cursor.close()
 
 
-class VertebraSqliteSyncExceptionHandler(BrokerExceptionHandler):
+class VertebraSqliteSyncExceptionHandler(VertebraExceptionHandler):
     """Sync exception handler for broker-backed SQLite."""
 
 
-class VertebraSqliteAsyncExceptionHandler(BrokerAsyncExceptionHandler):
+class VertebraSqliteAsyncExceptionHandler(VertebraAsyncExceptionHandler):
     """Async exception handler for broker-backed SQLite."""
 
 
-class VertebraSqliteSyncDriver(BrokerSyncDriverBase):
+class VertebraSqliteSyncDriver(VertebraSyncDriverBase):
     """Synchronous Vertebra broker-backed SQLite driver."""
 
-    dialect: ClassVar[str] = "sqlite"
+    dialect: str = "sqlite"
 
     def __init__(
         self,
@@ -101,10 +101,10 @@ class VertebraSqliteSyncDriver(BrokerSyncDriverBase):
         )
 
 
-class VertebraSqliteAsyncDriver(BrokerAsyncDriverBase):
+class VertebraSqliteAsyncDriver(VertebraAsyncDriverBase):
     """Asynchronous Vertebra broker-backed SQLite driver."""
 
-    dialect: ClassVar[str] = "sqlite"
+    dialect: str = "sqlite"
 
     def __init__(
         self,

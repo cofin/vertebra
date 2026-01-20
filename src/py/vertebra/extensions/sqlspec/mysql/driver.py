@@ -1,13 +1,13 @@
 """Broker-backed MySQL SQLSpec drivers."""
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
-from vertebra.drivers.broker import AsyncBrokerCursor, SyncBrokerCursor
+from vertebra.drivers.broker import VertebraAsyncCursor, VertebraSyncCursor
 from vertebra.extensions.sqlspec._driver import (
-    BrokerAsyncDriverBase,
-    BrokerAsyncExceptionHandler,
-    BrokerExceptionHandler,
-    BrokerSyncDriverBase,
+    VertebraAsyncDriverBase,
+    VertebraAsyncExceptionHandler,
+    VertebraExceptionHandler,
+    VertebraSyncDriverBase,
 )
 from vertebra.extensions.sqlspec.mysql._typing import (
     VertebraMysqlAsyncConnection,
@@ -45,9 +45,9 @@ class VertebraMysqlSyncCursor:
 
     def __init__(self, connection: VertebraMysqlSyncConnection) -> None:
         self.connection = connection
-        self.cursor: SyncBrokerCursor | None = None
+        self.cursor: VertebraSyncCursor | None = None
 
-    def __enter__(self) -> SyncBrokerCursor:
+    def __enter__(self) -> VertebraSyncCursor:
         self.cursor = self.connection.cursor()
         return self.cursor
 
@@ -63,9 +63,9 @@ class VertebraMysqlAsyncCursor:
 
     def __init__(self, connection: VertebraMysqlAsyncConnection) -> None:
         self.connection = connection
-        self.cursor: AsyncBrokerCursor | None = None
+        self.cursor: VertebraAsyncCursor | None = None
 
-    async def __aenter__(self) -> AsyncBrokerCursor:
+    async def __aenter__(self) -> VertebraAsyncCursor:
         self.cursor = self.connection.cursor()
         return self.cursor
 
@@ -74,18 +74,18 @@ class VertebraMysqlAsyncCursor:
             await self.cursor.close()
 
 
-class VertebraMysqlSyncExceptionHandler(BrokerExceptionHandler):
+class VertebraMysqlSyncExceptionHandler(VertebraExceptionHandler):
     """Sync exception handler for broker-backed MySQL."""
 
 
-class VertebraMysqlAsyncExceptionHandler(BrokerAsyncExceptionHandler):
+class VertebraMysqlAsyncExceptionHandler(VertebraAsyncExceptionHandler):
     """Async exception handler for broker-backed MySQL."""
 
 
-class VertebraMysqlSyncDriver(BrokerSyncDriverBase):
+class VertebraMysqlSyncDriver(VertebraSyncDriverBase):
     """Synchronous Vertebra broker-backed MySQL driver."""
 
-    dialect: ClassVar[str] = "mysql"
+    dialect: str = "mysql"
 
     def __init__(
         self,
@@ -101,10 +101,10 @@ class VertebraMysqlSyncDriver(BrokerSyncDriverBase):
         )
 
 
-class VertebraMysqlAsyncDriver(BrokerAsyncDriverBase):
+class VertebraMysqlAsyncDriver(VertebraAsyncDriverBase):
     """Asynchronous Vertebra broker-backed MySQL driver."""
 
-    dialect: ClassVar[str] = "mysql"
+    dialect: str = "mysql"
 
     def __init__(
         self,

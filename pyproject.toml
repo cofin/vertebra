@@ -376,6 +376,7 @@ module = [
   "google.protobuf.*",
   "jsbeautifier",
   "jsbeautifier.*",
+  "litestar.*",
   "pyarrow.*",
   "googleapiclient",
   "googleapiclient.*",

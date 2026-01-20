@@ -6,7 +6,7 @@ import asyncio
 import os
 import pathlib
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 
@@ -17,8 +17,8 @@ from vertebra._internal.serialization import MessagePackCodec
 
 # Try to import the new async transport (PyO3-based)
 _USE_ASYNC_TRANSPORT = False
-_AsyncRing: type | None = None
-_AsyncShmTransport: type | None = None
+_AsyncRing: Any = None
+_AsyncShmTransport: Any = None
 _create_transport: Any = None
 
 try:
@@ -34,10 +34,10 @@ except ImportError:
     pass
 
 # Fallback to CFFI-based transport for backwards compatibility
-_ShmRing: type | None = None
-_ShmRegion: type | None = None
-_ShmRingConfig: type | None = None
-_ShmRegionConfig: type | None = None
+_ShmRing: Any = None
+_ShmRegion: Any = None
+_ShmRingConfig: Any = None
+_ShmRegionConfig: Any = None
 
 try:
     from vertebra._internal.shm import ShmRegion as _ShmRegionImport

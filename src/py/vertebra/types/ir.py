@@ -1,4 +1,4 @@
-"""Type IR nodes for the Vertebra type bridge."""
+"Type IR nodes for the Vertebra type bridge."
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class TypeNode(msgspec.Struct, frozen=True, tag_field="_type", tag=True):
         return ()
 
 
-class PrimitiveType(TypeNode, tag="primitive"):
+class PrimitiveType(TypeNode, frozen=True, tag="primitive"):
     """Primitive type (string, number, boolean, null, etc.)."""
 
     kind: str
@@ -33,7 +33,7 @@ class PrimitiveType(TypeNode, tag="primitive"):
         return self.kind
 
 
-class ArrayType(TypeNode, tag="array"):
+class ArrayType(TypeNode, frozen=True, tag="array"):
     """Array type wrapping an item type."""
 
     item: TypeNode
@@ -45,7 +45,7 @@ class ArrayType(TypeNode, tag="array"):
         return (self.item,)
 
 
-class ObjectType(TypeNode, tag="object"):
+class ObjectType(TypeNode, frozen=True, tag="object"):
     """Object type with named fields."""
 
     fields: dict[str, TypeNode]
@@ -67,7 +67,7 @@ class ObjectType(TypeNode, tag="object"):
         yield from self.type_param_constraints.values()
 
 
-class UnionType(TypeNode, tag="union"):
+class UnionType(TypeNode, frozen=True, tag="union"):
     """Union of multiple type variants."""
 
     variants: "Sequence[TypeNode]"
@@ -79,7 +79,7 @@ class UnionType(TypeNode, tag="union"):
         return self.variants
 
 
-class LiteralType(TypeNode, tag="literal"):
+class LiteralType(TypeNode, frozen=True, tag="literal"):
     """Literal type with a specific value."""
 
     value: object
@@ -88,6 +88,7 @@ class LiteralType(TypeNode, tag="literal"):
         if self.value is None:
             return "null"
         if isinstance(self.value, str):
+            # manual escaping to avoid syntax errors
             escaped = self.value.replace("\\", "\\\\").replace('"', '\\"')
             return f'"{escaped}"'
         if isinstance(self.value, bool):
@@ -95,7 +96,7 @@ class LiteralType(TypeNode, tag="literal"):
         return str(self.value)
 
 
-class GenericType(TypeNode, tag="generic"):
+class GenericType(TypeNode, frozen=True, tag="generic"):
     """Generic type with type parameters."""
 
     name: str
@@ -109,7 +110,7 @@ class GenericType(TypeNode, tag="generic"):
         return self.params
 
 
-class TupleType(TypeNode, tag="tuple"):
+class TupleType(TypeNode, frozen=True, tag="tuple"):
     """Tuple type with ordered item types."""
 
     items: "Sequence[TypeNode]"
@@ -122,7 +123,7 @@ class TupleType(TypeNode, tag="tuple"):
         return self.items
 
 
-class RawType(TypeNode, tag="raw"):
+class RawType(TypeNode, frozen=True, tag="raw"):
     """Raw TypeScript type string."""
 
     typescript: str
@@ -131,14 +132,14 @@ class RawType(TypeNode, tag="raw"):
         return self.typescript
 
 
-class UnknownType(TypeNode, tag="unknown"):
+class UnknownType(TypeNode, frozen=True, tag="unknown"):
     """Unknown or unresolved type."""
 
     def to_typescript(self) -> str:
         return "unknown"
 
 
-class NamedTypeRef(TypeNode, tag="named_ref"):
+class NamedTypeRef(TypeNode, frozen=True, tag="named_ref"):
     """Reference to a named type."""
 
     name: str
@@ -147,11 +148,11 @@ class NamedTypeRef(TypeNode, tag="named_ref"):
         return self.name
 
 
-class AnnotatedType(TypeNode, tag="annotated"):
+class AnnotatedType(TypeNode, frozen=True, tag="annotated"):
     """Type with additional metadata annotations."""
 
     base: TypeNode
-    metadata: tuple[object, ...]
+    metadata: tuple[object, ...] 
 
     def to_typescript(self) -> str:
         return self.base.to_typescript()

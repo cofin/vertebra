@@ -95,7 +95,7 @@ class TypeBridgeApp:
         scope: dict[str, Any],
         receive: Callable[[], Awaitable[dict[str, Any]]],
         send: Callable[[dict[str, Any]], Awaitable[None]],
-    ) -> None:  # type: ignore[override]
+    ) -> None:
         if scope.get("type") != "http":
             return
         if scope.get("path") != self._route:

@@ -1,13 +1,13 @@
 """Broker-backed PostgreSQL SQLSpec drivers."""
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
-from vertebra.drivers.broker import AsyncBrokerCursor, SyncBrokerCursor
+from vertebra.drivers.broker import VertebraAsyncCursor, VertebraSyncCursor
 from vertebra.extensions.sqlspec._driver import (
-    BrokerAsyncDriverBase,
-    BrokerAsyncExceptionHandler,
-    BrokerExceptionHandler,
-    BrokerSyncDriverBase,
+    VertebraAsyncDriverBase,
+    VertebraAsyncExceptionHandler,
+    VertebraExceptionHandler,
+    VertebraSyncDriverBase,
 )
 from vertebra.extensions.sqlspec.postgres._typing import (
     VertebraPostgresAsyncConnection,
@@ -45,9 +45,9 @@ class VertebraPostgresSyncCursor:
 
     def __init__(self, connection: VertebraPostgresSyncConnection) -> None:
         self.connection = connection
-        self.cursor: SyncBrokerCursor | None = None
+        self.cursor: VertebraSyncCursor | None = None
 
-    def __enter__(self) -> SyncBrokerCursor:
+    def __enter__(self) -> VertebraSyncCursor:
         self.cursor = self.connection.cursor()
         return self.cursor
 
@@ -63,9 +63,9 @@ class VertebraPostgresAsyncCursor:
 
     def __init__(self, connection: VertebraPostgresAsyncConnection) -> None:
         self.connection = connection
-        self.cursor: AsyncBrokerCursor | None = None
+        self.cursor: VertebraAsyncCursor | None = None
 
-    async def __aenter__(self) -> AsyncBrokerCursor:
+    async def __aenter__(self) -> VertebraAsyncCursor:
         self.cursor = self.connection.cursor()
         return self.cursor
 
@@ -74,18 +74,18 @@ class VertebraPostgresAsyncCursor:
             await self.cursor.close()
 
 
-class VertebraPostgresSyncExceptionHandler(BrokerExceptionHandler):
+class VertebraPostgresSyncExceptionHandler(VertebraExceptionHandler):
     """Sync exception handler for broker-backed PostgreSQL."""
 
 
-class VertebraPostgresAsyncExceptionHandler(BrokerAsyncExceptionHandler):
+class VertebraPostgresAsyncExceptionHandler(VertebraAsyncExceptionHandler):
     """Async exception handler for broker-backed PostgreSQL."""
 
 
-class VertebraPostgresSyncDriver(BrokerSyncDriverBase):
+class VertebraPostgresSyncDriver(VertebraSyncDriverBase):
     """Synchronous Vertebra broker-backed PostgreSQL driver."""
 
-    dialect: ClassVar[str] = "postgres"
+    dialect: str = "postgres"
 
     def __init__(
         self,
@@ -101,10 +101,10 @@ class VertebraPostgresSyncDriver(BrokerSyncDriverBase):
         )
 
 
-class VertebraPostgresAsyncDriver(BrokerAsyncDriverBase):
+class VertebraPostgresAsyncDriver(VertebraAsyncDriverBase):
     """Asynchronous Vertebra broker-backed PostgreSQL driver."""
 
-    dialect: ClassVar[str] = "postgres"
+    dialect: str = "postgres"
 
     def __init__(
         self,

@@ -1,7 +1,7 @@
 """Litestar plugin integration for Vertebra."""
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vertebra._internal.dependencies import LITESTAR_INSTALLED
 from vertebra._internal.errors import MissingDependencyError
@@ -9,20 +9,24 @@ from vertebra._internal.errors import MissingDependencyError
 _LITESTAR_AVAILABLE = LITESTAR_INSTALLED
 _LITESTAR_IMPORT_ERROR: Exception | None = None
 
-if _LITESTAR_AVAILABLE:
-    try:  # pragma: no cover - optional dependency
+if TYPE_CHECKING:
+    try:
         from litestar.plugins import CLIPluginProtocol, InitPluginProtocol
-    except ImportError as exc:  # pragma: no cover - optional dependency
-        _LITESTAR_AVAILABLE = False
-        _LITESTAR_IMPORT_ERROR = exc
-
-if not _LITESTAR_AVAILABLE:
-
-    class InitPluginProtocol:  # type: ignore[override]
-        pass
-
-    class CLIPluginProtocol:  # type: ignore[override]
-        pass
+    except ImportError:
+        InitPluginProtocol = object  # type: ignore[assignment,misc]
+        CLIPluginProtocol = object  # type: ignore[assignment,misc]
+else:
+    if _LITESTAR_AVAILABLE:
+        try:  # pragma: no cover - optional dependency
+            from litestar.plugins import CLIPluginProtocol, InitPluginProtocol
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            _LITESTAR_AVAILABLE = False
+            _LITESTAR_IMPORT_ERROR = exc
+            InitPluginProtocol = object
+            CLIPluginProtocol = object
+    else:
+        InitPluginProtocol = object
+        CLIPluginProtocol = object
 
 
 @dataclass(slots=True)
@@ -59,8 +63,18 @@ class VertebraPlugin(InitPluginProtocol, CLIPluginProtocol):
         def _run(app: str, host: str, port: int, workers: int, config_path: str | None, log_level: str) -> None:
             from vertebra.cli import serve
 
+            # broker_config_path is required by serve but not exposed in CLI yet
+            # defaulting to None as it's optional in serve signature but mypy complains
             raise SystemExit(
-                serve(app=app, host=host, port=port, workers=workers, config_path=config_path, log_level=log_level)
+                serve(
+                    app=app,
+                    host=host,
+                    port=port,
+                    workers=workers,
+                    config_path=config_path,
+                    log_level=log_level,
+                    broker_config_path=None,
+                )
             )
 
         return cli

@@ -5,7 +5,7 @@ import os
 import sys
 from enum import IntEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 from cffi import FFI
@@ -50,7 +50,7 @@ def _candidate_paths() -> "Iterator[Path]":
     yield repo_root / "target" / "release" / _lib_name()
 
 
-def _load_lib() -> "tuple[FFI, object]":
+def _load_lib() -> "tuple[FFI, Any]":
     ffi = FFI()
     ffi.cdef(
         """
@@ -100,7 +100,7 @@ def _load_lib() -> "tuple[FFI, object]":
 
 
 _FFI: FFI | None = None
-_LIB: object | None = None
+_LIB: Any = None
 _LOAD_ERROR: Exception | None = None
 
 try:
@@ -111,7 +111,7 @@ except ShmError as exc:
     SHM_AVAILABLE = False
 
 
-def _get_lib() -> "tuple[FFI, object]":
+def _get_lib() -> "tuple[FFI, Any]":
     if not SHM_AVAILABLE or _FFI is None or _LIB is None:
         message = str(_LOAD_ERROR) if _LOAD_ERROR else "Shared memory library unavailable"
         raise ShmError(message)

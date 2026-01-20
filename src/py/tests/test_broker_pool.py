@@ -43,6 +43,9 @@ async def test_broker_pool_context_manager() -> None:
 
         async def broker_task() -> None:
             nonlocal broker_error
+            control_transport = None
+            req_transport = None
+            resp_transport = None
             try:
                 # Use PollingTransport because eventfd notifications don't work
                 # across different AsyncRing handles (each handle has its own eventfd).
@@ -89,11 +92,15 @@ async def test_broker_pool_context_manager() -> None:
                         response = {"ok": False, "error": {"message": "unknown"}, "id": request["id"]}
                     await asyncio.wait_for(resp_transport.send(encoder.encode(response)), timeout=2.0)
 
-                control_transport.close()
-                req_transport.close()
-                resp_transport.close()
             except Exception as e:
                 broker_error = e
+            finally:
+                if control_transport:
+                    control_transport.close()
+                if req_transport:
+                    req_transport.close()
+                if resp_transport:
+                    resp_transport.close()
 
         task = asyncio.create_task(broker_task())
 
@@ -103,7 +110,12 @@ async def test_broker_pool_context_manager() -> None:
         pool = BrokerPool(
             pool="default",
             client_config=BrokerClientConfig(
-                name=name, slot_size=4096, slots=64, client_id="test-client", prefer_eventfd=False
+                name=name,
+                slot_size=4096,
+                slots=64,
+                client_id="test-client",
+                prefer_eventfd=False,
+                use_async_transport=False,
             ),
             max_clients=2,
         )

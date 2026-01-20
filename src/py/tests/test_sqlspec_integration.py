@@ -30,12 +30,12 @@ class TestBrokerConfigBase:
         from sqlspec.core import get_default_config
 
         from vertebra.extensions.sqlspec._config import VertebraSyncConfigBase
-        from vertebra.extensions.sqlspec._driver import BrokerSyncDriverBase
+        from vertebra.extensions.sqlspec._driver import VertebraSyncDriverBase
         from vertebra.resources import BrokerClientConfig
 
         # Create a concrete implementation
         class TestSyncConfig(VertebraSyncConfigBase):
-            driver_type = BrokerSyncDriverBase
+            driver_type = VertebraSyncDriverBase
             default_statement_config = get_default_config()
             default_pool_name = "test-pool"
 
@@ -51,11 +51,11 @@ class TestBrokerConfigBase:
         from sqlspec.core import get_default_config
 
         from vertebra.extensions.sqlspec._config import VertebraSyncConfigBase
-        from vertebra.extensions.sqlspec._driver import BrokerSyncDriverBase
+        from vertebra.extensions.sqlspec._driver import VertebraSyncDriverBase
         from vertebra.resources import BrokerClientConfig
 
         class TestSyncConfig(VertebraSyncConfigBase):
-            driver_type = BrokerSyncDriverBase
+            driver_type = VertebraSyncDriverBase
             default_statement_config = get_default_config()
             default_pool_name = "default-pool"
 
@@ -71,11 +71,11 @@ class TestBrokerConfigBase:
         from sqlspec.core import get_default_config
 
         from vertebra.extensions.sqlspec._config import VertebraAsyncConfigBase
-        from vertebra.extensions.sqlspec._driver import BrokerAsyncDriverBase
+        from vertebra.extensions.sqlspec._driver import VertebraAsyncDriverBase
         from vertebra.resources import BrokerClientConfig
 
         class TestAsyncConfig(VertebraAsyncConfigBase):
-            driver_type = BrokerAsyncDriverBase
+            driver_type = VertebraAsyncDriverBase
             default_statement_config = get_default_config()
             default_pool_name = "async-pool"
 
@@ -196,21 +196,21 @@ class TestBrokerConnection:
     """Test broker connection types."""
 
     def test_sync_broker_connection_token(self) -> None:
-        """Test SyncBrokerConnection stores token correctly."""
-        from vertebra.drivers.broker import SyncBrokerConnection
+        """Test VertebraSyncConnection stores token correctly."""
+        from vertebra.drivers.broker import VertebraSyncConnection
         from vertebra.resources import BrokerClient, BrokerClientConfig
 
         client = BrokerClient(BrokerClientConfig(name="test-broker"))
-        conn = SyncBrokerConnection(pool="test-pool", client=client, token="test-token-123")
+        conn = VertebraSyncConnection(pool="test-pool", client=client, token="test-token-123")
         assert conn.token == "test-token-123"
 
     def test_async_broker_connection_token(self) -> None:
-        """Test AsyncBrokerConnection stores token correctly."""
-        from vertebra.drivers.broker import AsyncBrokerConnection
+        """Test VertebraAsyncConnection stores token correctly."""
+        from vertebra.drivers.broker import VertebraAsyncConnection
         from vertebra.resources import BrokerClient, BrokerClientConfig
 
         client = BrokerClient(BrokerClientConfig(name="test-broker"))
-        conn = AsyncBrokerConnection(pool="test-pool", client=client, token="async-token-456")
+        conn = VertebraAsyncConnection(pool="test-pool", client=client, token="async-token-456")
         assert conn.token == "async-token-456"
 
 
@@ -310,12 +310,12 @@ class TestDriverBase:
 
     def test_sync_driver_base_dialect(self) -> None:
         """Test sync driver base has dialect attribute."""
-        from vertebra.extensions.sqlspec._driver import BrokerSyncDriverBase
+        from vertebra.extensions.sqlspec._driver import VertebraSyncDriverBase
 
-        assert hasattr(BrokerSyncDriverBase, "dialect")
+        assert hasattr(VertebraSyncDriverBase, "dialect")
 
     def test_async_driver_base_dialect(self) -> None:
         """Test async driver base has dialect attribute."""
-        from vertebra.extensions.sqlspec._driver import BrokerAsyncDriverBase
+        from vertebra.extensions.sqlspec._driver import VertebraAsyncDriverBase
 
-        assert hasattr(BrokerAsyncDriverBase, "dialect")
+        assert hasattr(VertebraAsyncDriverBase, "dialect")

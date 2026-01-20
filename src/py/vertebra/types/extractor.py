@@ -7,7 +7,7 @@ import hashlib
 import types
 import typing
 import warnings
-from typing import Any, get_args, get_origin
+from typing import Any, cast, get_args, get_origin
 
 import msgspec
 
@@ -185,7 +185,8 @@ class TypeExtractor(msgspec.Struct):
 
     def collect_imports(self, tree: ast.AST) -> dict[str, tuple[str, int]]:
         imports: dict[str, tuple[str, int]] = {}
-        for node in tree.body:
+        body = getattr(tree, "body", [])
+        for node in body:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     name = alias.asname or alias.name
@@ -194,7 +195,7 @@ class TypeExtractor(msgspec.Struct):
                 for alias in node.names:
                     name = alias.asname or alias.name
                     module_name = node.module or alias.name
-                    imports[name] = (module_name, node.level)
+                    imports[name] = (module_name, node.level or 0)
         return imports
 
     def get_imports(self, path: Path) -> dict[str, tuple[str, int]]:
@@ -213,9 +214,10 @@ class TypeExtractor(msgspec.Struct):
         typevar_calls: list[tuple[str, ast.Call]] = []
         typevar_names: set[str] = set()
 
-        for node in tree.body:
+        body = getattr(tree, "body", [])
+        for node in body:
             call: ast.Call | None = None
-            targets: list[ast.AST] = []
+            targets: list[ast.expr] = []
             if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
                 call = node.value
                 targets = list(node.targets)
@@ -235,9 +237,9 @@ class TypeExtractor(msgspec.Struct):
         for name, call in typevar_calls:
             constraints: list[TypeNode] = []
             for arg in call.args[1:]:
-                node = self._from_annotation_node(arg, class_names, typevar_names, context)
-                if not isinstance(node, UnknownType):
-                    constraints.append(node)
+                node_ir = self._from_annotation_node(arg, class_names, typevar_names, context)
+                if not isinstance(node_ir, UnknownType):
+                    constraints.append(node_ir)
 
             bound: TypeNode | None = None
             for keyword in call.keywords:
@@ -365,7 +367,7 @@ class TypeExtractor(msgspec.Struct):
         schema = model_cls.model_json_schema()
         definitions = schema.get("$defs") or schema.get("definitions") or {}
         named_defs: dict[str, ObjectType] = {}
-        for name, defn in definitions.items():
+        for name, defn in cast(dict[str, Any], definitions).items():
             node = self._from_json_schema(defn, definitions, name=name)
             if isinstance(node, ObjectType):
                 named_defs[name] = node
@@ -418,11 +420,11 @@ class TypeExtractor(msgspec.Struct):
         fields: dict[str, TypeNode] = {}
         optional_fields: set[str] = set()
         type_params, param_constraints = self._generic_params(node, type_vars)
-        type_vars = set(type_params)
+        type_vars_set = set(type_params)
         for stmt in node.body:
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 field_name = stmt.target.id
-                field_type = self._from_annotation_node(stmt.annotation, struct_names, type_vars, context)
+                field_type = self._from_annotation_node(stmt.annotation, struct_names, type_vars_set, context)
                 fields[field_name] = field_type
                 if stmt.value is not None:
                     optional_fields.add(field_name)
@@ -445,11 +447,11 @@ class TypeExtractor(msgspec.Struct):
         fields: dict[str, TypeNode] = {}
         optional_fields: set[str] = set()
         type_params, param_constraints = self._generic_params(node, type_vars)
-        type_vars = set(type_params)
+        type_vars_set = set(type_params)
         for stmt in node.body:
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 field_name = stmt.target.id
-                field_type = self._from_annotation_node(stmt.annotation, model_names, type_vars, context)
+                field_type = self._from_annotation_node(stmt.annotation, model_names, type_vars_set, context)
                 fields[field_name] = field_type
                 if stmt.value is not None:
                     optional_fields.add(field_name)
@@ -472,14 +474,14 @@ class TypeExtractor(msgspec.Struct):
         fields: dict[str, TypeNode] = {}
         optional_fields: set[str] = set()
         type_params, param_constraints = self._generic_params(node, type_vars)
-        type_vars = set(type_params)
+        type_vars_set = set(type_params)
         for stmt in node.body:
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 field_name = stmt.target.id
                 annotation = stmt.annotation
                 if self._is_classvar(annotation) or self._is_initvar(annotation):
                     continue
-                field_type = self._from_annotation_node(annotation, dataclass_names, type_vars, context)
+                field_type = self._from_annotation_node(annotation, dataclass_names, type_vars_set, context)
                 fields[field_name] = field_type
                 if stmt.value is not None and self._dataclass_has_default(stmt.value):
                     optional_fields.add(field_name)
@@ -505,13 +507,13 @@ class TypeExtractor(msgspec.Struct):
         fields: dict[str, TypeNode] = {}
         optional_fields: set[str] = set()
         type_params, param_constraints = self._generic_params(node, type_vars)
-        type_vars = set(type_params)
+        type_vars_set = set(type_params)
         for stmt in node.body:
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 field_name = stmt.target.id
                 annotation = stmt.annotation
                 annotation, required_override = self._unwrap_required(annotation)
-                field_type = self._from_annotation_node(annotation, typed_dict_names, type_vars, context)
+                field_type = self._from_annotation_node(annotation, typed_dict_names, type_vars_set, context)
                 fields[field_name] = field_type
                 if not total:
                     optional_fields.add(field_name)
@@ -545,7 +547,7 @@ class TypeExtractor(msgspec.Struct):
         if not fields:
             return {}
         metadata: dict[str, tuple[object, ...]] = {}
-        for field_info in fields:
+        for field_info in cast(Any, fields):
             name = getattr(field_info, "name", None)
             if not name:
                 continue
@@ -570,7 +572,7 @@ class TypeExtractor(msgspec.Struct):
         if not fields:
             return {}, set()
         metadata: dict[str, tuple[object, ...]] = {}
-        for name, info in fields.items():
+        for name, info in cast(dict[str, Any], fields).items():
             items: list[object] = []
             for key in ("description", "alias", "validation_alias", "default"):
                 value = getattr(info, key, None)
@@ -606,7 +608,7 @@ class TypeExtractor(msgspec.Struct):
         if not fields:
             return set()
         optional: set[str] = set()
-        for name, info in fields.items():
+        for name, info in cast(dict[str, Any], fields).items():
             default = getattr(info, "default", None)
             default_factory = getattr(info, "default_factory", None)
             if default is not None or default_factory is not None:
@@ -618,13 +620,13 @@ class TypeExtractor(msgspec.Struct):
         if not fields:
             return set()
         excluded: set[str] = set()
-        for name, info in fields.items():
+        for name, info in cast(dict[str, Any], fields).items():
             if getattr(info, "init", True) is False and name.startswith("_"):
                 excluded.add(name)
         return excluded
 
     def _from_json_schema(  # noqa: PLR0911, PLR0912
-        self, schema: dict[str, object], definitions: dict[str, dict[str, object]], name: str | None = None
+        self, schema: dict[str, object], definitions: dict[str, Any], name: str | None = None
     ) -> TypeNode:
         ref = schema.get("$ref")
         if isinstance(ref, str):
@@ -632,22 +634,22 @@ class TypeExtractor(msgspec.Struct):
             return NamedTypeRef(ref_name) if ref_name else UnknownType()
 
         if "enum" in schema:
-            values = schema.get("enum") or []
+            values = cast(list[Any], schema.get("enum") or [])
             node: TypeNode = UnionType([LiteralType(value) for value in values])
             return self._apply_schema_metadata(node, schema)
 
         if "oneOf" in schema or "anyOf" in schema:
-            variants = schema.get("oneOf") or schema.get("anyOf") or []
+            variants = cast(list[dict[str, Any]], schema.get("oneOf") or schema.get("anyOf") or [])
             node = UnionType([self._from_json_schema(item, definitions) for item in variants])
             return self._apply_schema_metadata(node, schema)
 
-        types = schema.get("type")
-        if isinstance(types, list):
-            node = UnionType([self._from_json_schema({"type": t}, definitions) for t in types])
+        types_val = schema.get("type")
+        if isinstance(types_val, list):
+            node = UnionType([self._from_json_schema({"type": t}, definitions) for t in types_val])
             return self._apply_schema_metadata(node, schema)
-        if types == "object":
-            properties = schema.get("properties") or {}
-            required = set(schema.get("required") or [])
+        if types_val == "object":
+            properties = cast(dict[str, Any], schema.get("properties") or {})
+            required = set(cast(list[str], schema.get("required") or []))
             fields: dict[str, TypeNode] = {}
             optional_fields: set[str] = set()
             for prop_name, prop_schema in properties.items():
@@ -658,20 +660,20 @@ class TypeExtractor(msgspec.Struct):
                     optional_fields.add(prop_name)
             node = ObjectType(fields=fields, name=name, optional_fields=optional_fields)
             return self._apply_schema_metadata(node, schema)
-        if types == "array":
+        if types_val == "array":
             items = schema.get("items")
             if isinstance(items, dict):
                 node = ArrayType(self._from_json_schema(items, definitions))
             else:
                 node = ArrayType(UnknownType())
             return self._apply_schema_metadata(node, schema)
-        if types == "string":
+        if types_val == "string":
             return self._apply_schema_metadata(PrimitiveType("string"), schema)
-        if types in {"integer", "number"}:
+        if types_val in {"integer", "number"}:
             return self._apply_schema_metadata(PrimitiveType("number"), schema)
-        if types == "boolean":
+        if types_val == "boolean":
             return self._apply_schema_metadata(PrimitiveType("boolean"), schema)
-        if types == "null":
+        if types_val == "null":
             return self._apply_schema_metadata(PrimitiveType("null"), schema)
         return UnknownType()
 

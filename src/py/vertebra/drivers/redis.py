@@ -6,24 +6,24 @@ import msgspec
 
 from vertebra.drivers.base import AsyncDriver, SyncDriver
 from vertebra.drivers.broker import (
-    AsyncBrokerConnection,
-    AsyncBrokerPool,
-    BrokerDriverConfig,
-    SyncBrokerConnection,
-    SyncBrokerPool,
+    VertebraAsyncConnection,
+    VertebraAsyncPool,
+    VertebraDriverConfig,
+    VertebraSyncConnection,
+    VertebraSyncPool,
     _run_sync,
 )
 from vertebra.resources import BrokerClient, BrokerClientConfig
 
 
-class SyncRedisDriverConfig(BrokerDriverConfig, frozen=True):
+class SyncRedisDriverConfig(VertebraDriverConfig, frozen=True):
     """Configuration for synchronous Redis driver."""
 
     pool: str = "redis"
     client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
-class AsyncRedisDriverConfig(BrokerDriverConfig, frozen=True):
+class AsyncRedisDriverConfig(VertebraDriverConfig, frozen=True):
     """Configuration for asynchronous Redis driver."""
 
     pool: str = "redis"
@@ -34,26 +34,26 @@ class SyncRedisDriver(SyncDriver):
     def __init__(self, config: SyncRedisDriverConfig | None = None) -> None:
         self._config = config or SyncRedisDriverConfig()
 
-    def connect(self) -> SyncBrokerConnection:
+    def connect(self) -> VertebraSyncConnection:
         client = BrokerClient(self._config.client)
         token = _run_sync(client.acquire(self._config.pool))
-        return SyncBrokerConnection(self._config.pool, client, token)
+        return VertebraSyncConnection(self._config.pool, client, token)
 
-    def pool(self, min_size: int = 1, max_size: int = 10) -> SyncBrokerPool:
-        return SyncBrokerPool(self._config.pool, self._config.client, max_clients=max_size)
+    def pool(self, min_size: int = 1, max_size: int = 10) -> VertebraSyncPool:
+        return VertebraSyncPool(self._config.pool, self._config.client, max_clients=max_size)
 
 
 class AsyncRedisDriver(AsyncDriver):
     def __init__(self, config: AsyncRedisDriverConfig | None = None) -> None:
         self._config = config or AsyncRedisDriverConfig()
 
-    async def connect(self) -> AsyncBrokerConnection:
+    async def connect(self) -> VertebraAsyncConnection:
         client = BrokerClient(self._config.client)
         token = await client.acquire(self._config.pool)
-        return AsyncBrokerConnection(self._config.pool, client, token)
+        return VertebraAsyncConnection(self._config.pool, client, token)
 
-    async def pool(self, min_size: int = 1, max_size: int = 10) -> AsyncBrokerPool:
-        return AsyncBrokerPool(self._config.pool, self._config.client, max_clients=max_size)
+    async def pool(self, min_size: int = 1, max_size: int = 10) -> VertebraAsyncPool:
+        return VertebraAsyncPool(self._config.pool, self._config.client, max_clients=max_size)
 
 
 __all__ = ("AsyncRedisDriver", "AsyncRedisDriverConfig", "SyncRedisDriver", "SyncRedisDriverConfig")

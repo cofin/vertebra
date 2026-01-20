@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from sqlspec.driver import AsyncDataDictionaryBase, SyncDataDictionaryBase
     from sqlspec.observability import ObservabilityConfig
 
-    from vertebra.drivers.broker import AsyncBrokerPool, SyncBrokerPool
+    from vertebra.drivers.broker import VertebraAsyncPool, VertebraSyncPool
     from vertebra.resources.broker import BrokerClientConfig
 
 
@@ -52,7 +52,7 @@ class VertebraMysqlSyncConfig(VertebraSyncConfigBase):
         pool: "str | None" = None,
         client_config: "BrokerClientConfig | None" = None,
         max_clients: int = 5,
-        connection_instance: "SyncBrokerPool | None" = None,
+        connection_instance: "VertebraSyncPool | None" = None,
         migration_config: "dict[str, object] | None" = None,
         statement_config: "StatementConfig | None" = None,
         driver_features: "MysqlDriverFeatures | dict[str, object] | None" = None,
@@ -109,7 +109,7 @@ class VertebraMysqlAsyncConfig(VertebraAsyncConfigBase):
         pool: "str | None" = None,
         client_config: "BrokerClientConfig | None" = None,
         max_clients: int = 5,
-        connection_instance: "AsyncBrokerPool | None" = None,
+        connection_instance: "VertebraAsyncPool | None" = None,
         migration_config: "dict[str, object] | None" = None,
         statement_config: "StatementConfig | None" = None,
         driver_features: "MysqlDriverFeatures | dict[str, object] | None" = None,

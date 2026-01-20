@@ -1,7 +1,7 @@
 """Data dictionary factories for broker-backed SQLSpec adapters."""
 
 from collections.abc import Callable
-from typing import ClassVar, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeVar
 
 from sqlspec.adapters.aiosqlite.data_dictionary import AiosqliteDataDictionary
 from sqlspec.adapters.asyncmy.data_dictionary import AsyncmyDataDictionary
@@ -13,20 +13,23 @@ from sqlspec.driver import AsyncDataDictionaryBase, SyncDataDictionaryBase
 from sqlspec.exceptions import ImproperConfigurationError, SQLFileNotFoundError
 from sqlspec.typing import ColumnMetadata, ForeignKeyMetadata, IndexMetadata, TableMetadata, VersionInfo
 
+if TYPE_CHECKING:
+    from sqlspec.core import SQL
+
 _T = TypeVar("_T")
 
 
 class _SyncDictionaryDriver(Protocol):
-    def select_value_or_none(self, statement: str, **kwargs: object) -> object | None: ...
+    def select_value_or_none(self, statement: "str | SQL", **kwargs: object) -> object | None: ...
 
-    def select(self, statement: str, *, schema_type: "type[_T] | None" = None, **kwargs: object) -> "list[_T]": ...
+    def select(self, statement: "str | SQL", *, schema_type: "type[_T] | None" = None, **kwargs: object) -> "list[_T]": ...
 
 
 class _AsyncDictionaryDriver(Protocol):
-    async def select_value_or_none(self, statement: str, **kwargs: object) -> object | None: ...
+    async def select_value_or_none(self, statement: "str | SQL", **kwargs: object) -> object | None: ...
 
     async def select(
-        self, statement: str, *, schema_type: "type[_T] | None" = None, **kwargs: object
+        self, statement: "str | SQL", *, schema_type: "type[_T] | None" = None, **kwargs: object
     ) -> "list[_T]": ...
 
 
