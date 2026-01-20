@@ -28,20 +28,43 @@ import sys
 import threading
 import time
 from collections import deque
+from typing import Protocol
 
 
-# Type stub for the Rust extension
-class _AsyncRingProtocol:
+class _AsyncRingProtocol(Protocol):
     """Protocol for AsyncRing from vertebra._vertebra."""
 
-    def notifier_fd(self) -> int: ...
-    def send(self, data: bytes, flags: int | None = None) -> None: ...
-    def try_send(self, data: bytes, flags: int | None = None) -> bool: ...
-    def try_recv(self) -> bytes | None: ...
-    def try_recv_with_flags(self) -> tuple[bytes, int] | None: ...
-    def clear_notification(self) -> None: ...
-    def has_pending_notification(self) -> bool: ...
-    def payload_capacity(self) -> int: ...
+    def notifier_fd(self) -> int:
+        """Return the file descriptor for event loop integration."""
+        ...
+
+    def send(self, data: bytes, flags: int | None = None) -> None:
+        """Send data to the ring buffer."""
+        ...
+
+    def try_send(self, data: bytes, flags: int | None = None) -> bool:
+        """Try to send data, returns True on success."""
+        ...
+
+    def try_recv(self) -> bytes | None:
+        """Try to receive data non-blocking."""
+        ...
+
+    def try_recv_with_flags(self) -> tuple[bytes, int] | None:
+        """Try to receive data with flags."""
+        ...
+
+    def clear_notification(self) -> None:
+        """Clear pending notification."""
+        ...
+
+    def has_pending_notification(self) -> bool:
+        """Check if there's a pending notification."""
+        ...
+
+    def payload_capacity(self) -> int:
+        """Return the capacity of the ring buffer."""
+        ...
 
 
 class AsyncShmTransport:

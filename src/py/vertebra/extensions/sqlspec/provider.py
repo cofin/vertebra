@@ -9,7 +9,7 @@ from sqlspec.config import AsyncDatabaseConfig, SyncDatabaseConfig
 from sqlspec.core.result import ArrowResult, SQLResult
 from sqlspec.utils.correlation import CorrelationContext
 
-from vertebra._internal.shm import ShmRegion, ShmRegionConfig
+from vertebra._vertebra import ShmRegion
 from vertebra.resources.provider import ProviderConfig, ProviderHost
 
 if TYPE_CHECKING:
@@ -366,8 +366,8 @@ class SqlSpecProvider:
             writer.write_table(table)
         buffer = sink.getvalue().to_pybytes()
         name = f"/{self._config.name}.provider.arrow.{uuid.uuid4().hex}"
-        region = ShmRegion.create(ShmRegionConfig(name=name, size=len(buffer)))
-        region.buffer()[: len(buffer)] = buffer
+        region = ShmRegion.create_named(name, len(buffer))
+        memoryview(region)[: len(buffer)] = buffer
         self._arrow_regions[name] = region
         return {"arrow": {"name": name, "size": len(buffer)}}
 

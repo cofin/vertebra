@@ -112,14 +112,9 @@ async def test_broker_client_roundtrip() -> None:
 
         # BrokerClient also uses PollingTransport internally when available.
         # However, since the client creates the response ring and the broker
-        # opens it, the broker's send() won't notify the client's eventfd.
-        # We need to ensure the client uses polling too.
-        #
-        # For now, force CFFI mode which uses blocking recv with timeouts.
-        # This is the correct approach until the architecture supports
-        # cross-handle notification via shared memory futex.
+        # Note: Test broker uses SpscRing while BrokerClient uses AsyncRing.
+        # These should be compatible as they share the same underlying shared memory layout.
         client = BrokerClient(BrokerClientConfig(name=name, slot_size=4096, slots=64, client_id="test-client"))
-        client._use_async_transport = False  # Force CFFI blocking mode for client
 
         token = await client.acquire("default")
         assert token == "1"

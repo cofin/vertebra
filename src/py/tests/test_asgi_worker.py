@@ -8,7 +8,7 @@ import msgspec
 import pytest
 
 from tests.helpers.shm import skip_if_shm_unavailable, tracked_shm_cleanup, unique_shm_name
-from vertebra._internal._typing import ShmRing, ShmRingConfig
+from vertebra._vertebra import SpscRing
 from vertebra.server.worker import AsgiWorker, WorkerConfig
 
 
@@ -26,15 +26,16 @@ def _skip_if_missing() -> None:
 
 async def _register_client(
     name: str, worker_id: str, slot_size: int, slots: int, created_names: list[str]
-) -> tuple[ShmRing, ShmRing, msgspec.msgpack.Encoder, msgspec.msgpack.Decoder]:
+) -> tuple[SpscRing, SpscRing, msgspec.msgpack.Encoder, msgspec.msgpack.Decoder]:
     encoder = msgspec.msgpack.Encoder()
     decoder = msgspec.msgpack.Decoder()
-    control = ShmRing.open(ShmRingConfig(name=f"/{name}.asgi.{worker_id}.control", slot_size=slot_size, slots=slots))
+    control_name = f"/{name}.asgi.{worker_id}.control"
+    control = SpscRing.open_named(control_name, slot_size, slots)
     client_id = "test-client"
     req_name = f"/{name}.asgi.{worker_id}.client.{client_id}.req"
     resp_name = f"/{name}.asgi.{worker_id}.client.{client_id}.resp"
-    req_ring = ShmRing.create(ShmRingConfig(name=req_name, slot_size=slot_size, slots=slots))
-    resp_ring = ShmRing.create(ShmRingConfig(name=resp_name, slot_size=slot_size, slots=slots))
+    req_ring = SpscRing.create_named(req_name, slot_size, slots)
+    resp_ring = SpscRing.create_named(resp_name, slot_size, slots)
     created_names.append(req_name)
     created_names.append(resp_name)
     register = {
@@ -44,13 +45,21 @@ async def _register_client(
         "req_ring": req_name,
         "resp_ring": resp_name,
     }
-    control.send(encoder.encode(register), 0, 1000)
+    control.send_timeout(encoder.encode(register), 0, 1000)
     control.close()
-    # Use asyncio.wait_for to prevent indefinite blocking
-    try:
-        data, _flags = await asyncio.wait_for(asyncio.to_thread(resp_ring.recv, 1000), timeout=5.0)
-    except TimeoutError:
-        pytest.fail("_register_client: resp_ring.recv timed out")
+    # Poll with retry - worker may not have processed registration yet
+    max_len = slot_size
+    data = None
+    for _ in range(50):  # Retry up to 50 times
+        try:
+            data = await asyncio.wait_for(asyncio.to_thread(resp_ring.recv_timeout, max_len, 100), timeout=2.0)
+        except TimeoutError:
+            pass
+        if data is not None:
+            break
+        await asyncio.sleep(0.05)  # Give worker time to poll
+    if data is None:
+        pytest.fail("_register_client: resp_ring.recv returned None after retries")
     response = decoder.decode(data)
     assert response.get("ok") is True
     return req_ring, resp_ring, encoder, decoder
@@ -91,16 +100,23 @@ async def test_asgi_worker_roundtrip() -> None:
             "scheme": "http",
             "httpVersion": "1.1",
         }
-        req_ring.send(encoder.encode(payload), 0, 1000)
+        req_ring.send_timeout(encoder.encode(payload), 0, 1000)
 
         status = None
         body = b""
         while True:
-            # Use asyncio.wait_for to prevent indefinite blocking
-            try:
-                data, _flags = await asyncio.wait_for(asyncio.to_thread(resp_ring.recv, 1000), timeout=5.0)
-            except TimeoutError:
-                pytest.fail("test_asgi_worker_roundtrip: resp_ring.recv timed out")
+            # Poll with retry - worker may not have processed request yet
+            data = None
+            for _ in range(50):
+                try:
+                    data = await asyncio.wait_for(asyncio.to_thread(resp_ring.recv_timeout, slot_size, 100), timeout=2.0)
+                except TimeoutError:
+                    pass
+                if data is not None:
+                    break
+                await asyncio.sleep(0.05)
+            if data is None:
+                pytest.fail("test_asgi_worker_roundtrip: resp_ring.recv returned None after retries")
             response = decoder.decode(data)
             if response["type"] == "http.response.start":
                 status = response["status"]

@@ -115,7 +115,6 @@ async def test_broker_pool_context_manager() -> None:
                 slots=64,
                 client_id="test-client",
                 prefer_eventfd=False,
-                use_async_transport=False,
             ),
             max_clients=2,
         )

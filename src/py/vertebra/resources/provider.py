@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 
 from vertebra._internal.serialization import MessagePackCodec
-from vertebra._internal.shm import ShmRing, ShmRingConfig
+from vertebra._vertebra import SpscRing
 from vertebra.resources.broker import BrokerClient, BrokerClientConfig
 
 if TYPE_CHECKING:
@@ -35,15 +35,11 @@ class ProviderHost:
         self._config = config
         self._handler = handler
         self._codec = MessagePackCodec()
-        self._request = ShmRing.create(
-            ShmRingConfig(
-                name=f"/{config.name}.provider.{config.pool}.req", slot_size=config.slot_size, slots=config.slots
-            )
+        self._request = SpscRing.create_named(
+            f"/{config.name}.provider.{config.pool}.req", config.slot_size, config.slots
         )
-        self._response = ShmRing.create(
-            ShmRingConfig(
-                name=f"/{config.name}.provider.{config.pool}.resp", slot_size=config.slot_size, slots=config.slots
-            )
+        self._response = SpscRing.create_named(
+            f"/{config.name}.provider.{config.pool}.resp", config.slot_size, config.slots
         )
 
     async def register(self, client_config: "BrokerClientConfig | None" = None) -> None:
@@ -58,7 +54,11 @@ class ProviderHost:
 
     async def serve(self) -> None:
         while True:
-            data, _flags = await asyncio.to_thread(self._request.recv, 5_000)
+            data = await asyncio.to_thread(
+                self._request.recv_timeout, self._config.slot_size, 5_000
+            )
+            if data is None:
+                continue  # Timeout, retry
             decoded = self._codec.decode(data)
             request: dict[str, Any] = decoded if isinstance(decoded, dict) else {}
             result = self._handler(request)
@@ -70,7 +70,7 @@ class ProviderHost:
             if "id" not in response and "id" in request:
                 response["id"] = request["id"]
             encoded = self._codec.encode(response)
-            self._response.send(encoded, 0, 5_000)
+            self._response.send_timeout(encoded, 0, 5_000)
 
 
 __all__ = ("ProviderConfig", "ProviderHandler", "ProviderHost")

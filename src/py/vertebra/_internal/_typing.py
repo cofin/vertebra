@@ -163,29 +163,31 @@ def _shm_unlink_stub(name: str) -> None:
 
 
 try:
-    from vertebra._internal.shm import SHM_AVAILABLE as _SHM_AVAILABLE
-    from vertebra._internal.shm import ShmError as _ShmError
-    from vertebra._internal.shm import ShmRegion as _ShmRegion
-    from vertebra._internal.shm import ShmRegionConfig as _ShmRegionConfig
-    from vertebra._internal.shm import ShmRing as _ShmRing
-    from vertebra._internal.shm import ShmRingConfig as _ShmRingConfig
-    from vertebra._internal.shm import shm_unlink as _shm_unlink
+    from vertebra._vertebra import ShmRegion as _ShmRegion
+    from vertebra._vertebra import SpscRing as _SpscRing
+    from vertebra._vertebra import shm_unlink as _shm_unlink
 
-    SHM_AVAILABLE: bool = _SHM_AVAILABLE
-    ShmRing = _ShmRing
-    ShmRingConfig = _ShmRingConfig
+    SHM_AVAILABLE: bool = True
+    # SpscRing replaces the old ShmRing (CFFI). API differs slightly:
+    # - create_named(name, slot_size, slots) instead of create(ShmRingConfig(...))
+    # - send_timeout(data, flags, timeout_ms) instead of send(data, flags, timeout_ms)
+    # - try_recv(max_len) / recv_timeout(max_len, timeout_ms) instead of recv(timeout_ms)
+    SpscRing = _SpscRing
+    ShmRing = _SpscRing  # Alias for backward compatibility
+    ShmRingConfig = ShmRingConfigStub  # Config no longer used; construct rings directly
     ShmRegion = _ShmRegion
-    ShmRegionConfig = _ShmRegionConfig
-    ShmError = _ShmError
+    ShmRegionConfig = ShmRegionConfigStub  # Config no longer used; construct regions directly
+    ShmError = ShmStubError  # PyO3 raises RuntimeError instead
     shm_unlink = _shm_unlink
 except Exception as exc:
     _SHM_LOAD_ERROR = exc
     SHM_AVAILABLE: bool = False  # type: ignore[no-redef]
-    ShmRing = ShmRingStub  # type: ignore[assignment,misc]
-    ShmRingConfig = ShmRingConfigStub  # type: ignore[assignment,misc]
-    ShmRegion = ShmRegionStub  # type: ignore[assignment,misc]
-    ShmRegionConfig = ShmRegionConfigStub  # type: ignore[assignment,misc]
-    ShmError = ShmStubError  # type: ignore[assignment,misc]
+    SpscRing = ShmRingStub  # type: ignore[misc,assignment]
+    ShmRing = ShmRingStub  # type: ignore[misc,assignment]
+    ShmRingConfig = ShmRingConfigStub  # type: ignore[misc]
+    ShmRegion = ShmRegionStub  # type: ignore[misc,assignment]
+    ShmRegionConfig = ShmRegionConfigStub  # type: ignore[misc]
+    ShmError = ShmStubError  # type: ignore[misc]
     shm_unlink = _shm_unlink_stub
 
 

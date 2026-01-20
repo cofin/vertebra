@@ -103,7 +103,7 @@ def tracked_shm_cleanup(initial: "list[str] | None" = None) -> "Generator[list[s
         # Import late to handle case where bindings unavailable
         cleanup_available = False
         try:
-            from vertebra._internal.shm import SHM_AVAILABLE, shm_unlink
+            from vertebra._internal._typing import SHM_AVAILABLE, shm_unlink
 
             cleanup_available = SHM_AVAILABLE
         except ImportError:

@@ -1,36 +1,29 @@
 """Litestar plugin integration for Vertebra."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from vertebra._internal.dependencies import LITESTAR_INSTALLED
 from vertebra._internal.errors import MissingDependencyError
 
-_LITESTAR_AVAILABLE = LITESTAR_INSTALLED
-_LITESTAR_IMPORT_ERROR: Exception | None = None
+try:
+    from litestar.plugins import CLIPluginProtocol, InitPluginProtocol
 
-if TYPE_CHECKING:
-    try:
-        from litestar.plugins import CLIPluginProtocol, InitPluginProtocol
-    except ImportError:
-        InitPluginProtocol = object  # type: ignore[assignment,misc]
-        CLIPluginProtocol = object  # type: ignore[assignment,misc]
-else:
-    if _LITESTAR_AVAILABLE:
-        try:  # pragma: no cover - optional dependency
-            from litestar.plugins import CLIPluginProtocol, InitPluginProtocol
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            _LITESTAR_AVAILABLE = False
-            _LITESTAR_IMPORT_ERROR = exc
-            InitPluginProtocol = object
-            CLIPluginProtocol = object
-    else:
-        InitPluginProtocol = object
-        CLIPluginProtocol = object
+    _LITESTAR_AVAILABLE = True
+    _LITESTAR_IMPORT_ERROR: ImportError | None = None
+except ImportError as exc:
+    _LITESTAR_AVAILABLE = False
+    _LITESTAR_IMPORT_ERROR = exc
+
+    # Provide stub protocols for type checking
+    class CLIPluginProtocol:  # type: ignore[no-redef]
+        pass
+
+    class InitPluginProtocol:  # type: ignore[no-redef]
+        pass
 
 
 @dataclass(slots=True)
-class VertebraPlugin(InitPluginProtocol, CLIPluginProtocol):
+class VertebraPlugin(InitPluginProtocol, CLIPluginProtocol):  # type: ignore[misc]
     """Litestar plugin providing Vertebra integration."""
 
     log_level: str | None = None
@@ -53,7 +46,7 @@ class VertebraPlugin(InitPluginProtocol, CLIPluginProtocol):
         if not callable(command):
             return cli
 
-        @command("run")
+        @command("run")  # type: ignore[untyped-decorator]
         @click.argument("app")
         @click.option("--host", default="127.0.0.1")
         @click.option("--port", default=8000, type=int)

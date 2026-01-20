@@ -94,15 +94,15 @@ class TypeScriptGenerator:
                 rendered.append(name)
             else:
                 rendered.append(f"{name} extends {self._type_ref(constraint)}")
-        return "<{', '.join(rendered)}>"
+        return f"<{', '.join(rendered)}>"
 
     def _render_procedures_namespace(self, procedures: list[ProcedureMetadata]) -> str:
-        tree: dict[str, Any] = {{}}
+        tree: dict[str, Any] = {}
         for procedure in sorted(procedures, key=lambda item: item.procedure_id):
             parts = procedure.procedure_id.split(".")
             cursor = tree
             for part in parts[:-1]:
-                cursor = cursor.setdefault(part, {{}})
+                cursor = cursor.setdefault(part, {})
             procs: list[tuple[str, ProcedureMetadata]] = cursor.setdefault("__procedures__", [])
             procs.append((parts[-1], procedure))
 
@@ -125,7 +125,7 @@ class TypeScriptGenerator:
             lines.append(f"{indent}}}")
 
     def _toposort_named_types(self) -> list[str]:
-        graph: dict[str, set[str]] = {{}}
+        graph: dict[str, set[str]] = {}
         for name, obj in self.declared.items():
             deps = set()
             for node in obj.iter_children():
@@ -161,7 +161,7 @@ class TypeScriptGenerator:
         return deps
 
     def _detect_cycles(self) -> set[str]:
-        graph: dict[str, set[str]] = {{}}
+        graph: dict[str, set[str]] = {}
         for name, obj in self.declared.items():
             deps = set()
             for node in obj.iter_children():

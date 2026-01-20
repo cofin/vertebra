@@ -138,8 +138,8 @@ export function resolveIpcConfig(config: IpcClientConfig = {}): ResolvedIpcConfi
 
 class IpcConnection {
   private control: ShmRing | null = null;
-  private request: ShmRing | null = null;
-  private response: ShmRing | null = null;
+  private requestRing: ShmRing | null = null;
+  private responseRing: ShmRing | null = null;
   private pending: PendingRequest | null = null;
   private connecting: Promise<void> | null = null;
   private closed = false;
@@ -153,7 +153,7 @@ class IpcConnection {
 
   async request<T>(payload: unknown): Promise<T> {
     await this.ensureConnected();
-    if (!this.request || !this.response) {
+    if (!this.requestRing || !this.responseRing) {
       throw new IpcConnectionError("IPC ring unavailable");
     }
     if (this.pending) {
@@ -183,7 +183,7 @@ class IpcConnection {
 
   async *streamRequest<T>(payload: unknown): AsyncGenerator<T> {
     await this.ensureConnected();
-    if (!this.request || !this.response) {
+    if (!this.requestRing || !this.responseRing) {
       throw new IpcConnectionError("IPC ring unavailable");
     }
     if (this.pending) {
@@ -209,13 +209,13 @@ class IpcConnection {
   async close(): Promise<void> {
     this.closed = true;
     this.failPending(new IpcConnectionError("IPC connection closed"));
-    if (this.request) {
-      this.request.close();
-      this.request = null;
+    if (this.requestRing) {
+      this.requestRing.close();
+      this.requestRing = null;
     }
-    if (this.response) {
-      this.response.close();
-      this.response = null;
+    if (this.responseRing) {
+      this.responseRing.close();
+      this.responseRing = null;
     }
   }
 
@@ -224,7 +224,7 @@ class IpcConnection {
   }
 
   private async ensureConnected(): Promise<void> {
-    if (this.request && this.response && !this.closed) {
+    if (this.requestRing && this.responseRing && !this.closed) {
       return;
     }
     if (this.connecting) {
@@ -244,8 +244,8 @@ class IpcConnection {
     const reqName = requestRingName(this.config.name, this.workerId, this.clientId);
     const respName = responseRingName(this.config.name, this.workerId, this.clientId);
 
-    this.request = ShmRing.create(reqName, this.config.slotSize, this.config.slots);
-    this.response = ShmRing.create(respName, this.config.slotSize, this.config.slots);
+    this.requestRing = ShmRing.create(reqName, this.config.slotSize, this.config.slots);
+    this.responseRing = ShmRing.create(respName, this.config.slotSize, this.config.slots);
 
     const control = await this.waitForControl(controlName);
     this.control = control;
@@ -280,12 +280,12 @@ class IpcConnection {
   }
 
   private async waitForResponse(expectedId: string): Promise<Record<string, unknown>> {
-    if (!this.response) {
+    if (!this.responseRing) {
       throw new IpcConnectionError("IPC response ring unavailable");
     }
     const deadline = Date.now() + this.config.timeoutMs;
     while (Date.now() < deadline) {
-      const chunk = this.response.recv(10);
+      const chunk = this.responseRing.recv(10);
       if (!chunk) {
         await sleep(1);
         continue;
@@ -301,11 +301,11 @@ class IpcConnection {
   }
 
   private sendPayload(payload: unknown): void {
-    if (!this.request) {
+    if (!this.requestRing) {
       throw new IpcConnectionError("IPC request ring unavailable");
     }
     const encoded = encodeMessage(payload);
-    this.request.send(encoded, 0, this.config.timeoutMs);
+    this.requestRing.send(encoded, 0, this.config.timeoutMs);
   }
 
   private extractRequestId(payload: unknown): string {

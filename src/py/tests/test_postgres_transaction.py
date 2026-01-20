@@ -11,10 +11,9 @@ from vertebra.drivers.postgres import AsyncPostgresDriver, SyncPostgresDriverCon
 from vertebra.resources import BrokerClientConfig
 
 try:
-    from vertebra._internal.shm import SHM_AVAILABLE, ShmRing, ShmRingConfig
+    from vertebra._internal._typing import SHM_AVAILABLE, SpscRing
 except Exception as exc:  # pragma: no cover
-    ShmRing = None  # type: ignore[assignment]
-    ShmRingConfig = None  # type: ignore[assignment]
+    SpscRing = None  # type: ignore[assignment]
     SHM_AVAILABLE = False
     _IMPORT_ERROR = exc
 else:
@@ -23,7 +22,7 @@ else:
 
 @pytest.mark.anyio
 async def test_postgres_transaction_context() -> None:
-    if ShmRing is None or not SHM_AVAILABLE:
+    if SpscRing is None or not SHM_AVAILABLE:
         reason = _IMPORT_ERROR or "shared memory library unavailable"
         pytest.skip(f"Shared memory bindings unavailable: {reason}")
     from tests.helpers.shm import tracked_shm_cleanup, unique_shm_name
@@ -34,30 +33,36 @@ async def test_postgres_transaction_context() -> None:
     queries: list[str] = []
 
     name = unique_shm_name("vertebra-broker-test")
-    
+    slot_size = 4096
+    slots = 64
+
     with tracked_shm_cleanup() as created_names:
         control_name = f"/{name}.control"
         created_names.append(control_name)
-        control = ShmRing.create(ShmRingConfig(name=control_name, slot_size=4096, slots=64))
+        control = SpscRing.create_named(control_name, slot_size, slots)
 
         async def broker_task() -> None:
             try:
-                data, _flags = await asyncio.to_thread(control.recv, 1000)
+                data = await asyncio.to_thread(control.recv_timeout, slot_size, 1000)
+                if data is None:
+                    return
                 register = decoder.decode(data)
-                
+
                 req_name = register["req_ring"]
                 resp_name = register["resp_ring"]
                 created_names.append(req_name)
                 created_names.append(resp_name)
-                
-                req_ring = ShmRing.open(ShmRingConfig(name=req_name, slot_size=4096, slots=64))
-                resp_ring = ShmRing.open(ShmRingConfig(name=resp_name, slot_size=4096, slots=64))
-                
+
+                req_ring = SpscRing.open_named(req_name, slot_size, slots)
+                resp_ring = SpscRing.open_named(resp_name, slot_size, slots)
+
                 try:
-                    resp_ring.send(encoder.encode({"ok": True, "id": register["id"]}), 0, 1000)
+                    resp_ring.send_timeout(encoder.encode({"ok": True, "id": register["id"]}), 0, 1000)
 
                     for _ in range(5):
-                        data, _flags = await asyncio.to_thread(req_ring.recv, 1000)
+                        data = await asyncio.to_thread(req_ring.recv_timeout, slot_size, 1000)
+                        if data is None:
+                            break
                         request = decoder.decode(data)
                         kind = request.get("kind")
                         if kind == "acquire":
@@ -75,25 +80,23 @@ async def test_postgres_transaction_context() -> None:
                             response = {"ok": True, "id": request["id"]}
                         else:
                             response = {"ok": False, "error": {"message": "unknown"}, "id": request["id"]}
-                        resp_ring.send(encoder.encode(response), 0, 1000)
-                finally:
-                    req_ring.close()
-                    resp_ring.close()
+                        resp_ring.send_timeout(encoder.encode(response), 0, 1000)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
         task = asyncio.create_task(broker_task())
 
         client_config = BrokerClientConfig(
-            name=name, 
-            slot_size=4096, 
-            slots=64, 
+            name=name,
+            slot_size=slot_size,
+            slots=slots,
             client_id="test-client",
-            use_async_transport=False
         )
         config = SyncPostgresDriverConfig(pool="default", client=client_config)
         driver = AsyncPostgresDriver(config)
-        
+
         try:
             conn = await driver.connect()
             try:
@@ -103,7 +106,6 @@ async def test_postgres_transaction_context() -> None:
                 await conn.close()
         finally:
             await task
-            control.close()
 
     assert queries[0] == "BEGIN"
     assert "SELECT 1" in queries

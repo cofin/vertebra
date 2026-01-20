@@ -51,19 +51,34 @@ type BrokerPoolConfig = {
   options?: Record<string, unknown>;
 };
 
+type BrokerConfigBroker = {
+  name?: string;
+  control_name?: string;
+  slot_size?: number;
+  slots?: number;
+  timeout_ms?: number;
+  arrow_threshold_bytes?: number;
+  arrow_threshold_rows?: number;
+  arrow_region_ttl_ms?: number;
+  scheduler_quantum?: number;
+  scheduler_starvation_ms?: number;
+};
+
+type ResolvedBrokerConfig = {
+  name: string;
+  control_name: string;
+  slot_size: number;
+  slots: number;
+  timeout_ms: number;
+  arrow_threshold_bytes: number;
+  arrow_threshold_rows: number;
+  arrow_region_ttl_ms: number;
+  scheduler_quantum: number;
+  scheduler_starvation_ms: number;
+};
+
 type BrokerConfig = {
-  broker?: {
-    name?: string;
-    control_name?: string;
-    slot_size?: number;
-    slots?: number;
-    timeout_ms?: number;
-    arrow_threshold_bytes?: number;
-    arrow_threshold_rows?: number;
-    arrow_region_ttl_ms?: number;
-    scheduler_quantum?: number;
-    scheduler_starvation_ms?: number;
-  };
+  broker?: BrokerConfigBroker;
   pools?: BrokerPoolConfig[];
 };
 
@@ -729,7 +744,7 @@ class ExternalProviderPool extends BasePoolAdapter {
 }
 
 class Broker {
-  private config: Required<BrokerConfig["broker"]>;
+  private config: ResolvedBrokerConfig;
   private control: ShmRing;
   private clients = new Map<string, ClientState>();
   private pools = new Map<string, PoolState>();

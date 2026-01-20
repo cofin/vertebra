@@ -421,7 +421,9 @@ def run_supervisor(
             env=env,
             critical=True,
             restart_policy=RestartPolicy(max_restarts=3),
-            health_check=HealthCheckConfig(enabled=False),  # TODO: broker health endpoint
+            # Broker health is checked via IPC, not HTTP. The broker's Bun server
+            # could expose an HTTP health endpoint if needed for production k8s probes.
+            health_check=HealthCheckConfig(enabled=False),
         ),
         ProcessSpec(
             name="engine",

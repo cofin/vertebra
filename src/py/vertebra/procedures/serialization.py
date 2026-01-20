@@ -32,7 +32,7 @@ class MsgspecSerializer:
 
         self._msgspec = msgspec
         self._encoder = msgspec.json.Encoder()
-        self._decoder_cache: dict[type, msgspec.json.Decoder] = {}
+        self._decoder_cache: dict[type, msgspec.json.Decoder[Any]] = {}
         self._extractor = TypeExtractor()
 
     def serialize(self, value: Any, type_hint: type | None = None) -> bytes:
@@ -118,13 +118,16 @@ def register_serializer(name: str, serializer: Serializer) -> None:
 
 def detect_serializer(type_hint: type | None) -> str:
     if isinstance(type_hint, type):
+        msgspec_module: Any = None
         try:
             import msgspec
+
+            msgspec_module = msgspec
         except ImportError:
-            msgspec = None
-        if msgspec is not None:
+            pass
+        if msgspec_module is not None:
             try:
-                if issubclass(type_hint, msgspec.Struct):
+                if issubclass(type_hint, msgspec_module.Struct):
                     return "msgspec"
             except TypeError:
                 pass

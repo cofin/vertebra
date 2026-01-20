@@ -107,7 +107,7 @@ class BufferView:
     def as_bytes(self) -> bytes:
         view = self.as_memoryview()
         if hasattr(view, "tobytes"):
-            return cast(bytes, view.tobytes())
+            return view.tobytes()
         return bytes(view)
 
     def as_msgspec(self, type_hint: type) -> Any:
@@ -330,8 +330,9 @@ class Channel:
                     time.sleep(0.001)
         except RuntimeError as exc:
             raise ChannelError(str(exc), stage="recv_request") from exc
+        assert data is not None  # Guaranteed by the loop logic above
         try:
-            procedure_id, payload = _decode_message(bytes(data))
+            procedure_id, payload = _decode_message(data)
         except ChannelError as exc:
             raise ChannelError(str(exc), stage="decode_request") from exc
         registry = ProcedureRegistry.instance()

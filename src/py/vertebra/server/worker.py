@@ -15,7 +15,7 @@ from typing import Any
 import msgspec
 
 from vertebra._internal.serialization import MessagePackCodec
-from vertebra._internal.shm import ShmRing, ShmRingConfig
+from vertebra._vertebra import SpscRing
 
 
 class WorkerConfig(msgspec.Struct, frozen=True):
@@ -97,19 +97,19 @@ class ClientState(msgspec.Struct, frozen=True):
     """State for a connected IPC client."""
 
     id: str
-    request: ShmRing
-    response: ShmRing
+    request: SpscRing
+    response: SpscRing
 
 
 class ResponseWriter:
-    def __init__(self, ring: ShmRing, codec: MessagePackCodec, timeout_ms: int) -> None:
+    def __init__(self, ring: SpscRing, codec: MessagePackCodec, timeout_ms: int) -> None:
         self._ring = ring
         self._codec = codec
         self._timeout_ms = timeout_ms
 
     async def send(self, frame: dict[str, Any]) -> None:
         payload = self._codec.encode(frame)
-        self._ring.send(payload, 0, self._timeout_ms)
+        self._ring.send_timeout(payload, 0, self._timeout_ms)
 
 
 AsgiApp = Callable[
@@ -127,7 +127,7 @@ class AsgiWorker:
         self._app = app
         self._config = config or WorkerConfig()
         self._codec = MessagePackCodec()
-        self._control: ShmRing | None = None
+        self._control: SpscRing | None = None
         self._clients: dict[str, "ClientState"] = {}
         self._running = False
         self._lifespan_task: asyncio.Task[None] | None = None
@@ -144,9 +144,7 @@ class AsgiWorker:
             return
         await self._start_lifespan()
         control_name = self._control_ring_name()
-        self._control = ShmRing.create(
-            ShmRingConfig(name=control_name, slot_size=self._config.slot_size, slots=self._config.slots)
-        )
+        self._control = SpscRing.create_named(control_name, self._config.slot_size, self._config.slots)
 
     async def serve_forever(self) -> None:
         await self.start()
@@ -195,12 +193,10 @@ class AsgiWorker:
         resp_ring = str(message.get("resp_ring") or "")
         if not client_id or not req_ring or not resp_ring:
             return
-        request = ShmRing.open(ShmRingConfig(name=req_ring, slot_size=self._config.slot_size, slots=self._config.slots))
-        response = ShmRing.open(
-            ShmRingConfig(name=resp_ring, slot_size=self._config.slot_size, slots=self._config.slots)
-        )
+        request = SpscRing.open_named(req_ring, self._config.slot_size, self._config.slots)
+        response = SpscRing.open_named(resp_ring, self._config.slot_size, self._config.slots)
         self._clients[client_id] = ClientState(id=client_id, request=request, response=response)
-        response.send(self._codec.encode({"ok": True, "id": message.get("id")}), 0, int(self._config.timeout * 1000))
+        response.send_timeout(self._codec.encode({"ok": True, "id": message.get("id")}), 0, int(self._config.timeout * 1000))
 
     async def _poll_clients(self, contexts: dict[str, RequestContext]) -> None:
         if not self._clients:
@@ -213,12 +209,11 @@ class AsgiWorker:
             if "type" in message:
                 await self._handle_frame(message, contexts, writer)
             else:
-                await self._handle_legacy_request(message, contexts, writer)
+                await self._handle_unary_request(message, contexts, writer)
 
-    def _recv_ring(self, ring: ShmRing) -> dict[str, Any] | None:
-        try:
-            data, _flags = ring.recv(0)
-        except TimeoutError:
+    def _recv_ring(self, ring: SpscRing) -> dict[str, Any] | None:
+        data = ring.try_recv(self._config.slot_size)
+        if data is None:
             return None
         try:
             message = self._codec.decode(data)
@@ -304,9 +299,10 @@ class AsgiWorker:
             return
         await self._enqueue_request_frame(context, message)
 
-    async def _handle_legacy_request(
+    async def _handle_unary_request(
         self, message: dict[str, Any], contexts: dict[str, RequestContext], writer: "ResponseWriter"
     ) -> None:
+        """Handle unary request format (single message with inline body)."""
         try:
             request = msgspec.convert(message, AsgiRequest)
         except Exception:  # noqa: BLE001 - defensive conversion of untrusted IPC data

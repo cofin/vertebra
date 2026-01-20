@@ -28,7 +28,6 @@ class TestBrokerClientConfig:
         assert config.timeout_ms == 5_000
         assert config.client_id is None
         assert config.weight == 1
-        assert config.use_async_transport is None
         assert config.prefer_eventfd is True
 
     def test_custom_config_values(self) -> None:
@@ -44,7 +43,6 @@ class TestBrokerClientConfig:
             timeout_ms=10_000,
             client_id="test-client",
             weight=2,
-            use_async_transport=False,
             prefer_eventfd=False,
         )
 
@@ -56,7 +54,6 @@ class TestBrokerClientConfig:
         assert config.timeout_ms == 10_000
         assert config.client_id == "test-client"
         assert config.weight == 2
-        assert config.use_async_transport is False
         assert config.prefer_eventfd is False
 
     def test_control_ring_config_default_name(self) -> None:

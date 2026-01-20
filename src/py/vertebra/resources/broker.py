@@ -10,46 +10,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 
-if TYPE_CHECKING:
-    from vertebra._internal.async_transport import AsyncShmTransport
-
+from vertebra._internal.async_transport import AsyncShmTransport, PollingTransport, create_transport
 from vertebra._internal.serialization import MessagePackCodec
+from vertebra._vertebra import AsyncRing, ShmRegion
 
-# Try to import the new async transport (PyO3-based)
-_USE_ASYNC_TRANSPORT = False
-_AsyncRing: Any = None
-_AsyncShmTransport: Any = None
-_create_transport: Any = None
-
-try:
-    from vertebra._internal.async_transport import AsyncShmTransport as _AsyncShmTransportImport
-    from vertebra._internal.async_transport import create_transport as _create_transport_import
-    from vertebra._vertebra import AsyncRing as _AsyncRingImport
-
-    _AsyncRing = _AsyncRingImport
-    _AsyncShmTransport = _AsyncShmTransportImport
-    _create_transport = _create_transport_import
-    _USE_ASYNC_TRANSPORT = True
-except ImportError:
-    pass
-
-# Fallback to CFFI-based transport for backwards compatibility
-_ShmRing: Any = None
-_ShmRegion: Any = None
-_ShmRingConfig: Any = None
-_ShmRegionConfig: Any = None
-
-try:
-    from vertebra._internal.shm import ShmRegion as _ShmRegionImport
-    from vertebra._internal.shm import ShmRegionConfig as _ShmRegionConfigImport
-    from vertebra._internal.shm import ShmRing as _ShmRingImport
-    from vertebra._internal.shm import ShmRingConfig as _ShmRingConfigImport
-
-    _ShmRing = _ShmRingImport
-    _ShmRegion = _ShmRegionImport
-    _ShmRingConfig = _ShmRingConfigImport
-    _ShmRegionConfig = _ShmRegionConfigImport
-except ImportError:
+if TYPE_CHECKING:
     pass
 
 
@@ -76,7 +41,6 @@ class BrokerClientConfig(msgspec.Struct, frozen=True):
     timeout_ms: int = 5_000
     client_id: str | None = None
     weight: int = 1
-    use_async_transport: bool | None = None
     prefer_eventfd: bool = True
 
     def control_ring(self) -> RingConfig:
@@ -103,47 +67,32 @@ class BrokerClient:
         self._codec = MessagePackCodec()
         self._client_id = self._config.client_id or _default_client_id()
         self._seq = 0
-        if self._config.use_async_transport is None:
-            self._use_async_transport = _USE_ASYNC_TRANSPORT
-        else:
-            self._use_async_transport = self._config.use_async_transport
 
-        # Ring buffers (either CFFI or PyO3-based)
-        self._control: Any = None
-        self._request: Any = None
-        self._response: Any = None
+        # Ring buffers (PyO3-based)
+        self._control: AsyncRing | None = None
+        self._request: AsyncRing | None = None
+        self._response: AsyncRing | None = None
 
-        # Async transport wrappers (only used with PyO3)
-        self._request_transport: AsyncShmTransport | None = None
-        self._response_transport: AsyncShmTransport | None = None
+        # Async transport wrappers
+        self._request_transport: AsyncShmTransport | PollingTransport | None = None
+        self._response_transport: AsyncShmTransport | PollingTransport | None = None
 
     async def connect(self) -> None:
         if self._control is not None:
             return
 
-        if self._use_async_transport:
-            await self._connect_async()
-        else:
-            await self._connect_cffi()
-
-    async def _connect_async(self) -> None:
-        """Connect using the PyO3-based async transport."""
-        if _AsyncRing is None or _create_transport is None:
-            msg = "Async transport not available"
-            raise BrokerClientError(msg)
-
-        # Create rings using the new AsyncRing from PyO3
+        # Create rings using AsyncRing from PyO3
         control_cfg = self._config.control_ring()
         req_cfg = self._config.request_ring(self._client_id)
         resp_cfg = self._config.response_ring(self._client_id)
 
-        self._control = _AsyncRing.open_named(control_cfg.name, control_cfg.slot_size, control_cfg.slots)
-        self._request = _AsyncRing.create_named(req_cfg.name, req_cfg.slot_size, req_cfg.slots)
-        self._response = _AsyncRing.create_named(resp_cfg.name, resp_cfg.slot_size, resp_cfg.slots)
+        self._control = AsyncRing.open_named(control_cfg.name, control_cfg.slot_size, control_cfg.slots)
+        self._request = AsyncRing.create_named(req_cfg.name, req_cfg.slot_size, req_cfg.slots)
+        self._response = AsyncRing.create_named(resp_cfg.name, resp_cfg.slot_size, resp_cfg.slots)
 
         # Wrap in async transports for efficient waiting
-        self._request_transport = _create_transport(self._request, prefer_eventfd=self._config.prefer_eventfd)
-        self._response_transport = _create_transport(self._response, prefer_eventfd=self._config.prefer_eventfd)
+        self._request_transport = create_transport(self._request, prefer_eventfd=self._config.prefer_eventfd)
+        self._response_transport = create_transport(self._response, prefer_eventfd=self._config.prefer_eventfd)
 
         # Register with broker
         payload = {
@@ -160,37 +109,6 @@ class BrokerClient:
         _with_lock(self._config.control_lock(), lambda: self._control.send(encoded, 0))
 
         # Wait for response using the async transport
-        response = await self._recv_response_async()
-        _assert_ok(response)
-
-    async def _connect_cffi(self) -> None:
-        """Connect using the legacy CFFI-based transport."""
-        if _ShmRing is None or _ShmRingConfig is None:
-            msg = "CFFI transport not available"
-            raise BrokerClientError(msg)
-
-        control_cfg = self._config.control_ring()
-        req_cfg = self._config.request_ring(self._client_id)
-        resp_cfg = self._config.response_ring(self._client_id)
-
-        self._control = _ShmRing.open(
-            _ShmRingConfig(name=control_cfg.name, slot_size=control_cfg.slot_size, slots=control_cfg.slots)
-        )
-        self._request = _ShmRing.create(
-            _ShmRingConfig(name=req_cfg.name, slot_size=req_cfg.slot_size, slots=req_cfg.slots)
-        )
-        self._response = _ShmRing.create(
-            _ShmRingConfig(name=resp_cfg.name, slot_size=resp_cfg.slot_size, slots=resp_cfg.slots)
-        )
-        payload = {
-            "id": self._next_id(),
-            "kind": "register_client",
-            "client_id": self._client_id,
-            "req_ring": req_cfg.name,
-            "resp_ring": resp_cfg.name,
-            "weight": self._config.weight,
-        }
-        await asyncio.to_thread(self._send_control, payload)
         response = await self._recv_response()
         _assert_ok(response)
 
@@ -206,20 +124,14 @@ class BrokerClient:
             self._response_transport.close()
             self._response_transport = None
 
-        # Clean up rings (CFFI rings have close(), PyO3 rings don't need explicit cleanup)
-        if self._request and hasattr(self._request, "close"):
-            self._request.close()
-        if self._response and hasattr(self._response, "close"):
-            self._response.close()
-
         self._control = None
         self._request = None
         self._response = None
 
     async def request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._request is None or self._response is None:
+        if self._request_transport is None or self._response_transport is None:
             await self.connect()
-        if self._request is None or self._response is None:
+        if self._request_transport is None or self._response_transport is None:
             msg = "Broker shared memory unavailable"
             raise BrokerClientError(msg)
 
@@ -227,12 +139,7 @@ class BrokerClient:
         payload["id"] = self._next_id()
         encoded = self._codec.encode(payload)
 
-        if self._use_async_transport and self._request_transport:
-            # Use async transport - no thread pool overhead
-            await self._request_transport.send(encoded)
-            return await self._recv_response_async()
-        # Legacy CFFI path
-        await asyncio.to_thread(self._request.send, encoded, 0, self._config.timeout_ms)
+        await self._request_transport.send(encoded)
         return await self._recv_response()
 
     async def acquire(self, pool: str) -> str:
@@ -324,24 +231,8 @@ class BrokerClient:
         data = _assert_ok(response)
         return bool(data.get("ok", True))
 
-    def _send_control(self, payload: dict[str, Any]) -> None:
-        if self._control is None:
-            msg = "Control ring unavailable"
-            raise BrokerClientError(msg)
-        encoded = self._codec.encode(payload)
-        _with_lock(self._config.control_lock(), lambda: self._control.send(encoded, 0, self._config.timeout_ms))
-
     async def _recv_response(self) -> dict[str, Any]:
-        """Receive response using legacy CFFI transport."""
-        if self._response is None:
-            msg = "Response ring unavailable"
-            raise BrokerClientError(msg)
-        data, _flags = await asyncio.to_thread(self._response.recv, self._config.timeout_ms)
-        result = self._codec.decode(data)
-        return result if isinstance(result, dict) else {}
-
-    async def _recv_response_async(self) -> dict[str, Any]:
-        """Receive response using native async transport (no thread pool)."""
+        """Receive response using native async transport."""
         if self._response_transport is None:
             msg = "Response transport unavailable"
             raise BrokerClientError(msg)
@@ -378,29 +269,14 @@ class BrokerClient:
             msg = "pyarrow is required for Arrow IPC results"
             raise BrokerClientError(msg) from exc
 
-        # Use CFFI ShmRegion for Arrow IPC (PyO3 ShmRegion also works)
-        if _ShmRegion is not None and _ShmRegionConfig is not None:
-            region = _ShmRegion.open(_ShmRegionConfig(name=name, size=size))
-            try:
-                buffer = region.buffer()
-                with pa.ipc.open_stream(buffer) as reader:
-                    table = reader.read_all()
-            finally:
-                region.close()
-                await self._release_arrow(str(name))
-            return {"arrow": table}
-        # Fallback: try using the PyO3 ShmRegion
+        # Use PyO3 ShmRegion for Arrow IPC with buffer protocol
+        region = ShmRegion.open_named(name, size)
         try:
-            from vertebra._vertebra import ShmRegion as PyShmRegion
-
-            region = PyShmRegion.open_named(name, size)
-            buffer = region.read(0, size)
-            with pa.ipc.open_stream(buffer) as reader:
+            with pa.ipc.open_stream(memoryview(region)) as reader:
                 table = reader.read_all()
+        finally:
+            region.close()
             await self._release_arrow(str(name))
-        except Exception as exc:
-            msg = "No shared memory region implementation available"
-            raise BrokerClientError(msg) from exc
         return {"arrow": table}
 
 

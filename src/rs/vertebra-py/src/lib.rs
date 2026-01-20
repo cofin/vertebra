@@ -25,7 +25,22 @@ mod async_ring;
 
 #[pyclass(name = "ShmRegion")]
 struct PyShmRegion {
-    inner: ShmRegion,
+    inner: Option<ShmRegion>,
+    exports: AtomicUsize,
+}
+
+impl PyShmRegion {
+    fn inner_ref(&self) -> PyResult<&ShmRegion> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("region is closed"))
+    }
+
+    fn inner_mut(&mut self) -> PyResult<&mut ShmRegion> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("region is closed"))
+    }
 }
 
 #[pymethods]
@@ -33,14 +48,20 @@ impl PyShmRegion {
     #[new]
     fn new(size: usize) -> PyResult<Self> {
         let inner = ShmRegion::create(size).map_err(map_err)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: Some(inner),
+            exports: AtomicUsize::new(0),
+        })
     }
 
     #[cfg(unix)]
     #[classmethod]
     fn create_named(_cls: &Bound<'_, PyType>, name: &str, size: usize) -> PyResult<Self> {
         let inner = ShmRegion::create_named(name, size).map_err(map_err)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: Some(inner),
+            exports: AtomicUsize::new(0),
+        })
     }
 
     #[cfg(not(unix))]
@@ -55,7 +76,10 @@ impl PyShmRegion {
     #[classmethod]
     fn open_named(_cls: &Bound<'_, PyType>, name: &str, size: usize) -> PyResult<Self> {
         let inner = ShmRegion::open_named(name, size).map_err(map_err)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: Some(inner),
+            exports: AtomicUsize::new(0),
+        })
     }
 
     #[cfg(not(unix))]
@@ -66,8 +90,8 @@ impl PyShmRegion {
         ))
     }
 
-    fn len(&self) -> usize {
-        self.inner.len()
+    fn len(&self) -> PyResult<usize> {
+        Ok(self.inner_ref()?.len())
     }
 
     fn read<'py>(
@@ -76,8 +100,9 @@ impl PyShmRegion {
         offset: usize,
         len: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
+        let inner = self.inner_ref()?;
         unsafe {
-            let slice = self.inner.as_slice();
+            let slice = inner.as_slice();
             let end = offset.checked_add(len).ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("invalid read range")
             })?;
@@ -91,8 +116,9 @@ impl PyShmRegion {
     }
 
     fn write(&mut self, offset: usize, data: &[u8]) -> PyResult<()> {
+        let inner = self.inner_mut()?;
         unsafe {
-            let slice = self.inner.as_mut_slice();
+            let slice = inner.as_mut_slice();
             let end = offset.checked_add(data.len()).ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("invalid write range")
             })?;
@@ -103,6 +129,49 @@ impl PyShmRegion {
             }
             slice[offset..end].copy_from_slice(data);
         }
+        Ok(())
+    }
+
+    /// Returns a memoryview exposing the shared memory region.
+    fn as_memoryview<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyMemoryView>> {
+        PyMemoryView::from(slf.as_any())
+    }
+
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: c_int,
+    ) -> PyResult<()> {
+        if view.is_null() {
+            return Err(PyBufferError::new_err("view is null"));
+        }
+        let mut region = slf.borrow_mut();
+        let inner = region.inner_mut()?;
+        fill_view_from_data(view, flags, unsafe { inner.as_mut_slice() }, slf.into_any(), true)?;
+        region.exports.fetch_add(1, AtomicOrdering::Relaxed);
+        Ok(())
+    }
+
+    unsafe fn __releasebuffer__(&self, view: *mut ffi::Py_buffer) {
+        if view.is_null() {
+            return;
+        }
+        if !(*view).format.is_null() {
+            drop(CString::from_raw((*view).format));
+        }
+        self.exports.fetch_sub(1, AtomicOrdering::Release);
+    }
+
+    /// Close the region, releasing the underlying memory.
+    ///
+    /// Raises an error if there are active memoryviews.
+    fn close(&mut self) -> PyResult<()> {
+        if self.exports.load(AtomicOrdering::Acquire) > 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "region has active views",
+            ));
+        }
+        self.inner.take();
         Ok(())
     }
 
@@ -626,6 +695,15 @@ impl PySpscRing {
             .map_err(map_err)?;
         Ok(result.map(|len| PyBytes::new(py, &buffer[..len])))
     }
+
+    /// Close the ring buffer.
+    ///
+    /// Note: This is a no-op; Rust's Drop trait handles cleanup.
+    /// Provided for API compatibility with Python expectations.
+    fn close(&self) -> PyResult<()> {
+        // No-op: Rust handles cleanup via Drop
+        Ok(())
+    }
 }
 
 #[pyclass(name = "MpmcRing")]
@@ -704,6 +782,25 @@ impl PyBufferChannel {
     }
 }
 
+/// Unlink a named shared memory region.
+///
+/// This removes the shared memory name from the filesystem so no new processes
+/// can open it. Existing mappings remain valid until all handles are closed.
+#[cfg(unix)]
+#[pyfunction]
+fn shm_unlink(name: &str) -> PyResult<()> {
+    vertebra_core::shm::shm_unlink_named(name).map_err(map_err)
+}
+
+/// Unlink a named shared memory region (not available on this platform).
+#[cfg(not(unix))]
+#[pyfunction]
+fn shm_unlink(_name: &str) -> PyResult<()> {
+    Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+        "shm_unlink is only supported on Unix",
+    ))
+}
+
 /// Python module initialization.
 #[pymodule]
 fn _vertebra(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -715,6 +812,7 @@ fn _vertebra(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySpscRing>()?;
     m.add_class::<PyMpmcRing>()?;
     m.add_class::<PyBufferChannel>()?;
+    m.add_function(wrap_pyfunction!(shm_unlink, m)?)?;
     // Register async ring types (PRD-10: eventfd async transport)
     async_ring::register(m)?;
     Ok(())

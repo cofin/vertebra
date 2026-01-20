@@ -729,7 +729,7 @@ class TypeExtractor(msgspec.Struct):
                     return True
         return True
 
-    def _unwrap_required(self, annotation: ast.AST) -> tuple[ast.AST, bool | None]:
+    def _unwrap_required(self, annotation: ast.expr) -> tuple[ast.expr, bool | None]:
         if isinstance(annotation, ast.Subscript):
             base = self._base_name(annotation.value).split(".")[-1]
             if base == "Required":
