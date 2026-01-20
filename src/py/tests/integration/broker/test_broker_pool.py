@@ -26,7 +26,7 @@ async def test_broker_pool_context_manager() -> None:
 
     from vertebra._internal.async_transport import PollingTransport
     from vertebra._vertebra import AsyncRing
-    from vertebra.resources import BrokerClientConfig, BrokerPool
+    from vertebra.resources import BrokerClientConfig, AsyncBrokerPool
 
     encoder = msgspec.msgpack.Encoder()
     decoder = msgspec.msgpack.Decoder()
@@ -109,7 +109,7 @@ async def test_broker_pool_context_manager() -> None:
         # Wait for broker to be ready
         await asyncio.wait_for(broker_ready.wait(), timeout=5.0)
 
-        pool = BrokerPool(
+        pool = AsyncBrokerPool(
             pool="default",
             client_config=BrokerClientConfig(
                 name=name, slot_size=4096, slots=64, client_id="test-client", prefer_eventfd=False
@@ -117,7 +117,7 @@ async def test_broker_pool_context_manager() -> None:
             max_clients=2,
         )
 
-        # Acquire returns a BrokerLease
+        # Acquire returns a AsyncBrokerLease
         lease = await asyncio.wait_for(pool.acquire(), timeout=10.0)
         async with lease as token:
             assert token == "1"

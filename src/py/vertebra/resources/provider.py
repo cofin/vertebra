@@ -9,7 +9,7 @@ import msgspec
 
 from vertebra._internal.serialization import MessagePackCodec
 from vertebra._vertebra import SpscRing
-from vertebra.resources.broker import BrokerClient, BrokerClientConfig
+from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -43,7 +43,7 @@ class ProviderHost:
         )
 
     async def register(self, client_config: "BrokerClientConfig | None" = None) -> None:
-        client = BrokerClient(client_config or BrokerClientConfig(name=self._config.name))
+        client = AsyncBrokerClient(client_config or BrokerClientConfig(name=self._config.name))
         await client.register_provider(
             self._config.pool,
             self._config.driver,

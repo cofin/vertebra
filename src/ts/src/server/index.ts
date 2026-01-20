@@ -1,5 +1,5 @@
 import type { Server, WebSocketHandler } from "bun";
-import { BrokerClient } from "../broker";
+import { AsyncBrokerClient } from "../broker";
 import { AsgiBridge } from "../ipc";
 import { type ResolvedServerConfig, resolveServerConfig, type ServerConfig } from "./config";
 import { log } from "./logging";
@@ -148,7 +148,7 @@ export async function createAsgiServer(
   manager?.start();
   const bridge = new AsgiBridge({ requester: workerPool });
   const metrics = createMetrics();
-  const brokerClient = resolved.broker ? new BrokerClient(resolved.broker) : undefined;
+  const brokerClient = resolved.broker ? new AsyncBrokerClient(resolved.broker) : undefined;
   const metricsRegistry = new MetricsRegistry(metrics, brokerClient, manager);
   const router = createRouter({
     staticDir: resolved.server.staticDir,

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import msgspec
 
-from vertebra.resources.broker import BrokerClient, BrokerClientConfig
+from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -17,11 +17,11 @@ class BrokerPoolError(RuntimeError):
     """Raised when broker pool operations fail."""
 
 
-class BrokerLease(msgspec.Struct, frozen=True):
+class AsyncBrokerLease(msgspec.Struct, frozen=True):
     """A lease for a broker connection, usable as an async context manager."""
 
-    pool: "BrokerPool"
-    client: BrokerClient
+    pool: "AsyncBrokerPool"
+    client: AsyncBrokerClient
     token: str
 
     async def __aenter__(self) -> str:
@@ -33,25 +33,25 @@ class BrokerLease(msgspec.Struct, frozen=True):
         await self.pool.release(self.client, self.token)
 
 
-class BrokerClientPool:
+class AsyncBrokerClientPool:
     def __init__(self, config: BrokerClientConfig, max_size: int = 5) -> None:
         self._config = config
         self._max_size = max_size
-        self._pool: asyncio.LifoQueue[BrokerClient] = asyncio.LifoQueue()
+        self._pool: asyncio.LifoQueue[AsyncBrokerClient] = asyncio.LifoQueue()
         self._total = 0
         self._lock = asyncio.Lock()
 
-    async def acquire(self) -> BrokerClient:
+    async def acquire(self) -> AsyncBrokerClient:
         try:
             return self._pool.get_nowait()
         except asyncio.QueueEmpty:
             async with self._lock:
                 if self._total < self._max_size:
                     self._total += 1
-                    return BrokerClient(self._config)
+                    return AsyncBrokerClient(self._config)
             return await self._pool.get()
 
-    async def release(self, client: BrokerClient) -> None:
+    async def release(self, client: AsyncBrokerClient) -> None:
         await self._pool.put(client)
 
     async def close(self) -> None:
@@ -63,17 +63,17 @@ class BrokerClientPool:
             await client.close()
 
 
-class BrokerPool:
+class AsyncBrokerPool:
     def __init__(self, pool: str, client_config: BrokerClientConfig | None = None, max_clients: int = 5) -> None:
         self._pool_name = pool
-        self._client_pool = BrokerClientPool(client_config or BrokerClientConfig(), max_size=max_clients)
+        self._client_pool = AsyncBrokerClientPool(client_config or BrokerClientConfig(), max_size=max_clients)
 
-    async def acquire(self) -> BrokerLease:
+    async def acquire(self) -> AsyncBrokerLease:
         client = await self._client_pool.acquire()
         token = await client.acquire(self._pool_name)
-        return BrokerLease(self, client, token)
+        return AsyncBrokerLease(self, client, token)
 
-    async def release(self, client: BrokerClient, token: str) -> None:
+    async def release(self, client: AsyncBrokerClient, token: str) -> None:
         try:
             await client.release(self._pool_name, token)
         finally:
@@ -90,4 +90,4 @@ class BrokerPool:
         await self._client_pool.close()
 
 
-__all__ = ("BrokerClientPool", "BrokerLease", "BrokerPool", "BrokerPoolError")
+__all__ = ("AsyncBrokerClientPool", "AsyncBrokerLease", "AsyncBrokerPool", "BrokerPoolError")

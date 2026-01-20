@@ -13,7 +13,7 @@ from vertebra.drivers.broker import (
     VertebraSyncPool,
     _run_sync,
 )
-from vertebra.resources import BrokerClient, BrokerClientConfig
+from vertebra.resources import AsyncBrokerClient, BrokerClientConfig
 
 
 class SyncRedisDriverConfig(VertebraDriverConfig, frozen=True):
@@ -35,7 +35,7 @@ class SyncRedisDriver(SyncDriver):
         self._config = config or SyncRedisDriverConfig()
 
     def connect(self) -> VertebraSyncConnection:
-        client = BrokerClient(self._config.client)
+        client = AsyncBrokerClient(self._config.client)
         token = _run_sync(client.acquire(self._config.pool))
         return VertebraSyncConnection(self._config.pool, client, token)
 
@@ -48,7 +48,7 @@ class AsyncRedisDriver(AsyncDriver):
         self._config = config or AsyncRedisDriverConfig()
 
     async def connect(self) -> VertebraAsyncConnection:
-        client = BrokerClient(self._config.client)
+        client = AsyncBrokerClient(self._config.client)
         token = await client.acquire(self._config.pool)
         return VertebraAsyncConnection(self._config.pool, client, token)
 

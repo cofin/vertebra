@@ -32,7 +32,7 @@ Python (Litestar-style API)
   │    ├── SQLAlchemy (Native Dialects)
   │    └── Advanced Alchemy
   ├── Resources
-  │    └── BrokerClient → shared memory → Bun broker
+  │    └── AsyncBrokerClient → shared memory → Bun broker
   ├── MCP
   │    └── @mcp_tool decorator, schema generation
   └── Server

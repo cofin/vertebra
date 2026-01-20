@@ -36,7 +36,7 @@ export type BrokerStats = {
   scheduler?: { pools: SchedulerPoolStats[] };
 };
 
-export class BrokerClient {
+export class AsyncBrokerClient {
   private config: Required<BrokerClientConfig>;
   private control?: ShmRing;
   private request?: ShmRing;

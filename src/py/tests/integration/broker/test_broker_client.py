@@ -26,7 +26,7 @@ async def test_broker_client_roundtrip() -> None:
 
     from vertebra._internal.async_transport import PollingTransport
     from vertebra._vertebra import AsyncRing
-    from vertebra.resources import BrokerClient, BrokerClientConfig
+    from vertebra.resources import AsyncBrokerClient, BrokerClientConfig
 
     encoder = msgspec.msgpack.Encoder()
     decoder = msgspec.msgpack.Decoder()
@@ -116,7 +116,7 @@ async def test_broker_client_roundtrip() -> None:
         # However, since the client creates the response ring and the broker
         # Note: Test broker uses SpscRing while BrokerClient uses AsyncRing.
         # These should be compatible as they share the same underlying shared memory layout.
-        client = BrokerClient(BrokerClientConfig(name=name, slot_size=4096, slots=64, client_id="test-client"))
+        client = AsyncBrokerClient(BrokerClientConfig(name=name, slot_size=4096, slots=64, client_id="test-client"))
 
         token = await client.acquire("default")
         assert token == "1"

@@ -6,7 +6,7 @@ from typing import Any, Literal, cast
 
 import msgspec
 
-from vertebra.resources.broker import BrokerClient, BrokerClientConfig, BrokerClientError
+from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig, BrokerClientError
 
 Backend = Literal["local", "s3", "gcs"]
 
@@ -91,7 +91,7 @@ class SyncFileSystemClient:
         self._bucket = bucket
         self._options = options or {}
         self._pool = pool or f"storage-{backend}"
-        self._client = BrokerClient(client_config or BrokerClientConfig())
+        self._client = AsyncBrokerClient(client_config or BrokerClientConfig())
         self._token: str | None = None
 
     def _ensure_token(self) -> str:
@@ -237,7 +237,7 @@ class AsyncFileSystemClient:
         self._bucket = bucket
         self._options = options or {}
         self._pool = pool or f"storage-{backend}"
-        self._client = BrokerClient(client_config or BrokerClientConfig())
+        self._client = AsyncBrokerClient(client_config or BrokerClientConfig())
         self._token: str | None = None
 
     async def _ensure_token(self) -> str:

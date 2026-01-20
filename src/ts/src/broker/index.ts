@@ -6,7 +6,7 @@
  */
 export { BasePoolAdapter, type PoolAdapter } from "./base-pool";
 export {
-  BrokerClient,
+  AsyncBrokerClient,
   type BrokerClientConfig,
   type BrokerStats,
   type PoolStats,

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
 
 import msgspec
 
-from vertebra.resources import BrokerClient, BrokerClientConfig, BrokerPool
+from vertebra.resources import AsyncBrokerClient, BrokerClientConfig, AsyncBrokerPool
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Coroutine
@@ -92,7 +92,7 @@ class VertebraSyncCursor:
 
 
 class VertebraSyncConnection:
-    def __init__(self, pool: str, client: BrokerClient, token: str) -> None:
+    def __init__(self, pool: str, client: AsyncBrokerClient, token: str) -> None:
         self._pool = pool
         self._client = client
         self._token = token
@@ -140,7 +140,7 @@ class VertebraSyncConnection:
 
 class VertebraSyncPool:
     def __init__(self, pool: str, config: BrokerClientConfig, max_clients: int = 5) -> None:
-        self._pool = BrokerPool(pool, client_config=config, max_clients=max_clients)
+        self._pool = AsyncBrokerPool(pool, client_config=config, max_clients=max_clients)
 
     def acquire(self) -> VertebraSyncConnection:
         lease = _run_sync(self._pool.acquire())
@@ -205,7 +205,7 @@ class VertebraAsyncCursor:
 
 
 class VertebraAsyncConnection:
-    def __init__(self, pool: str, client: BrokerClient, token: str) -> None:
+    def __init__(self, pool: str, client: AsyncBrokerClient, token: str) -> None:
         self._pool = pool
         self._client = client
         self._token = token
@@ -297,7 +297,7 @@ class VertebraAsyncTransaction:
 
 class VertebraAsyncPool:
     def __init__(self, pool: str, config: BrokerClientConfig, max_clients: int = 5) -> None:
-        self._pool = BrokerPool(pool, client_config=config, max_clients=max_clients)
+        self._pool = AsyncBrokerPool(pool, client_config=config, max_clients=max_clients)
 
     async def acquire(self) -> VertebraAsyncConnection:
         lease = await self._pool.acquire()

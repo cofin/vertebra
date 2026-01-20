@@ -62,3 +62,4 @@ src/rs/tools/scripts/detect_mcp_tools.py
 .mypy_cache
 AGENTS.md
 specs/archive
+uv.toml

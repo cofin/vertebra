@@ -57,7 +57,7 @@ class BrokerClientConfig(msgspec.Struct, frozen=True):
         return f"{tempfile.gettempdir()}/{self.name}.control.lock"
 
 
-class BrokerClient:
+class AsyncBrokerClient:
     def __init__(self, config: BrokerClientConfig | None = None) -> None:
         self._config = config or BrokerClientConfig()
         self._codec = MessagePackCodec()
@@ -314,4 +314,4 @@ def _decode_arrow_bytes(payload: bytes) -> dict[str, Any]:
     return {"arrow": table}
 
 
-__all__ = ("BrokerClient", "BrokerClientConfig", "BrokerClientError")
+__all__ = ("AsyncBrokerClient", "AsyncBrokerClientConfig", "AsyncBrokerClientError")
