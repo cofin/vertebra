@@ -52,8 +52,6 @@ docs/requirements/inputs/*
 .cache/
 GEMINI.md
 CLAUDE.md
-specs/
-.geminiignore
 .gemini
 src/rs/target
 .cargo/
@@ -63,3 +61,4 @@ tools/scripts/detect_mcp_tools.py
 src/rs/tools/scripts/detect_mcp_tools.py
 .mypy_cache
 AGENTS.md
+specs/archive
