@@ -10,15 +10,23 @@ import msgspec
 
 from vertebra.serializers.encoders import default_encoder
 
-__all__ = ("JSONCodec", "decode_json", "encode_json", "get_json_codec")
+__all__ = (
+    "JSONCodec",
+    "decode_json",
+    "encode_json",
+    "get_json_codec",
+)
 
 
 @dataclass(slots=True)
 class JSONCodec:
     """Reusable JSON encoder/decoder using msgspec."""
 
-    encoder: msgspec.json.Encoder = field(default_factory=lambda: msgspec.json.Encoder(enc_hook=default_encoder))
-    decoder: msgspec.json.Decoder[Any] = field(default_factory=msgspec.json.Decoder)
+    encoder: msgspec.json.Encoder = field(
+        default_factory=lambda: msgspec.json.Encoder(enc_hook=default_encoder)
+    )
+    _default_decoder: msgspec.json.Decoder[Any] = field(default_factory=msgspec.json.Decoder)
+    _decoder_cache: dict[type, msgspec.json.Decoder[Any]] = field(default_factory=dict)
 
     def encode(self, data: Any, *, as_bytes: bool = False) -> str | bytes:
         """Encode data to JSON.
@@ -33,18 +41,27 @@ class JSONCodec:
         result = self.encoder.encode(data)
         return result if as_bytes else result.decode("utf-8")
 
-    def decode(self, data: str | bytes) -> Any:
+    def decode(self, data: str | bytes, type_hint: type | None = None) -> Any:
         """Decode from JSON.
 
         Args:
             data: JSON string or bytes to decode.
+            type_hint: Optional type for structured decoding.
 
         Returns:
             Decoded Python object.
         """
         if isinstance(data, str):
             data = data.encode("utf-8")
-        return self.decoder.decode(data)
+
+        if type_hint is None:
+            return self._default_decoder.decode(data)
+
+        decoder = self._decoder_cache.get(type_hint)
+        if decoder is None:
+            decoder = msgspec.json.Decoder(type_hint)
+            self._decoder_cache[type_hint] = decoder
+        return decoder.decode(data)
 
 
 @functools.lru_cache(maxsize=1)
@@ -74,13 +91,14 @@ def encode_json(data: Any, *, as_bytes: bool = False) -> str | bytes:
     return get_json_codec().encode(data, as_bytes=as_bytes)
 
 
-def decode_json(data: str | bytes) -> Any:
+def decode_json(data: str | bytes, type_hint: type | None = None) -> Any:
     """Decode from JSON using msgspec.
 
     Args:
         data: JSON string or bytes to decode.
+        type_hint: Optional type for structured decoding.
 
     Returns:
         Decoded Python object.
     """
-    return get_json_codec().decode(data)
+    return get_json_codec().decode(data, type_hint)

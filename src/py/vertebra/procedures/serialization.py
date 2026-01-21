@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from typing import Any, Protocol, runtime_checkable
 
-from vertebra._internal import decode_json, encode_json
+from vertebra.serializers import JSONCodec, decode_json, encode_json, get_json_codec
 from vertebra.types.extractor import TypeExtractor
 from vertebra.types.ir import NamedTypeRef, ObjectType, TypeNode
 
@@ -31,21 +31,15 @@ class MsgspecSerializer:
         import msgspec
 
         self._msgspec = msgspec
-        self._encoder = msgspec.json.Encoder()
-        self._decoder_cache: dict[type, msgspec.json.Decoder[Any]] = {}
+        self._codec: JSONCodec = get_json_codec()
         self._extractor = TypeExtractor()
 
     def serialize(self, value: Any, type_hint: type | None = None) -> bytes:
-        return self._encoder.encode(value)
+        # Procedures expect bytes
+        return self._codec.encode(value, as_bytes=True)  # type: ignore
 
     def deserialize(self, data: bytes, type_hint: type | None = None) -> Any:
-        if type_hint is None:
-            return self._msgspec.json.decode(data)
-        decoder = self._decoder_cache.get(type_hint)
-        if decoder is None:
-            decoder = self._msgspec.json.Decoder(type_hint)
-            self._decoder_cache[type_hint] = decoder
-        return decoder.decode(data)
+        return self._codec.decode(data, type_hint=type_hint)
 
     def get_type_metadata(self, type_hint: type | None = None) -> TypeNode | None:
         if not isinstance(type_hint, type):
@@ -89,7 +83,7 @@ class PydanticSerializer:
     def deserialize(self, data: bytes, type_hint: type | None = None) -> Any:
         if isinstance(type_hint, type) and issubclass(type_hint, self._BaseModel):
             return type_hint.model_validate_json(data)
-        return decode_json(data)
+        return decode_json(data, type_hint=type_hint)
 
     def get_type_metadata(self, type_hint: type | None = None) -> TypeNode | None:
         if not isinstance(type_hint, type) or not issubclass(type_hint, self._BaseModel):
