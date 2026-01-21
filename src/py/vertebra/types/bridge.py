@@ -133,7 +133,7 @@ class TypeBridgeApp:
             return
 
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
-        
+
         # Handle HMR long-polling
         if headers.get("x-vertebra-watch") == "true":
             etag = headers.get("if-none-match")
@@ -161,7 +161,7 @@ class TypeBridgeApp:
         self._bridge.add_callback(notify)
         try:
             await asyncio.wait_for(event.wait(), timeout=30.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         finally:
             self._bridge.remove_callback(notify)

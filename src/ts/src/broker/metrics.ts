@@ -87,7 +87,7 @@ export function updateBrokerMetrics(metrics: BrokerMetrics, stats: BrokerStats):
   metrics.brokerSchedulerWorkerRequests.reset();
   metrics.brokerSchedulerWorkerWaitSeconds.reset();
   metrics.brokerSchedulerWorkerStarvation.reset();
-  
+
   for (const pool of stats.pools) {
     metrics.brokerPoolConnections.set({ pool: pool.name, state: "total" }, pool.total);
     metrics.brokerPoolConnections.set({ pool: pool.name, state: "idle" }, pool.idle);
@@ -103,7 +103,7 @@ export function updateBrokerMetrics(metrics: BrokerMetrics, stats: BrokerStats):
     );
     metrics.brokerPoolErrors.set({ pool: pool.name }, pool.errors_total);
   }
-  
+
   for (const pool of stats.scheduler?.pools ?? []) {
     metrics.brokerSchedulerQueueDepth.set({ pool: pool.name }, pool.pending);
     for (const client of pool.clients) {

@@ -58,17 +58,17 @@ class VertebraSyncCursor:
         if "arrow" in result:
             table = result["arrow"]
             # pyarrow Table
-            self._columns = table.column_names
+            self._columns = table.column_names  # type: ignore[attr-defined]
             # Convert to rows. Using to_pylist() returns list of dicts.
-            self._rows = [tuple(row[col] for col in self._columns) for row in table.to_pylist()]
-            rowcount = table.num_rows
+            self._rows = [tuple(row[col] for col in self._columns) for row in table.to_pylist()]  # type: ignore[attr-defined]
+            rowcount = table.num_rows  # type: ignore[attr-defined]
         else:
             self._columns = list(result.get("columns", []))
             self._rows = [tuple(row) for row in result.get("rows", [])]
             rowcount = result.get("rowcount", 0)
 
         self._index = 0
-        return rowcount
+        return cast("int | None", rowcount)
 
     def executemany(self, query: str, params: Iterable[Sequence[ParamValue]]) -> int:
         total = 0
@@ -123,7 +123,7 @@ class VertebraArrowCursor:
             else:
                 self._table = pa.Table.from_pydict({col: [] for col in columns})
 
-        return self._table.num_rows
+        return cast("int | None", self._table.num_rows)
 
     def fetchall(self) -> Any:
         """Return the pyarrow Table."""
@@ -188,15 +188,15 @@ class VertebraAsyncCursor:
         result = await self._connection._execute(query, params or [])
         if "arrow" in result:
             table = result["arrow"]
-            self._columns = table.column_names
-            self._rows = [tuple(row[col] for col in self._columns) for row in table.to_pylist()]
-            rowcount = table.num_rows
+            self._columns = table.column_names  # type: ignore[attr-defined]
+            self._rows = [tuple(row[col] for col in self._columns) for row in table.to_pylist()]  # type: ignore[attr-defined]
+            rowcount = table.num_rows  # type: ignore[attr-defined]
         else:
             self._columns = list(result.get("columns", []))
             self._rows = [tuple(row) for row in result.get("rows", [])]
             rowcount = result.get("rowcount", 0)
         self._index = 0
-        return rowcount
+        return cast("int | None", rowcount)
 
     async def executemany(self, query: str, params: Iterable[Sequence[ParamValue]]) -> int:
         total = 0
@@ -251,7 +251,7 @@ class VertebraAsyncArrowCursor:
             else:
                 self._table = pa.Table.from_pydict({col: [] for col in columns})
 
-        return self._table.num_rows
+        return cast("int | None", self._table.num_rows)
 
     async def fetchall(self) -> Any:
         return self._table
@@ -289,8 +289,8 @@ class VertebraAsyncConnection:
         result = await self._execute(query, params or [])
         if "arrow" in result:
             table = result["arrow"]
-            columns = table.column_names
-            return [tuple(row[col] for col in columns) for row in table.to_pylist()]
+            columns = table.column_names  # type: ignore[attr-defined]
+            return [tuple(row[col] for col in columns) for row in table.to_pylist()]  # type: ignore[attr-defined]
         return [tuple(row) for row in result.get("rows", [])]
 
     async def fetchrow(self, query: str, params: Sequence[ParamValue] | None = None) -> Row | None:

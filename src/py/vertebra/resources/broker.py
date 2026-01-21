@@ -518,4 +518,4 @@ def _decode_arrow_bytes(payload: bytes) -> dict[str, Any]:
     return {"arrow": table}
 
 
-__all__ = ("AsyncBrokerClient", "AsyncBrokerClientConfig", "AsyncBrokerClientError", "SyncBrokerClient")
+__all__ = ("AsyncBrokerClient", "BrokerClientConfig", "BrokerClientError", "SyncBrokerClient")

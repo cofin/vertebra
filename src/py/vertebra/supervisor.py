@@ -337,11 +337,11 @@ class Supervisor:
 
                         # Check critical
                         if handle.spec.critical:
-                            return code
+                            return cast("int", code)
 
                         # If primary exited
                         if primary and name == primary:
-                            return code
+                            return cast("int", code)
 
                         # Non-critical: attempt restart
                         self._maybe_restart(name)
@@ -351,11 +351,11 @@ class Supervisor:
                 signo = event["signo"]
                 logger.info("Received signal %d via native supervisor", signo)
                 self.stop(signo)
-                return 128 + signo
+                return 128 + cast("int", signo)
 
             # Also check polling for processes not managed by native supervisor (if any)
             # or just as a fallback
-            for name, handle in self._handles.items():
+            for handle in self._handles.values():
                 if handle.proc and handle.proc.poll() is not None:
                     # Logic handled by native exit event usually, but if missed:
                     pass

@@ -48,7 +48,7 @@ export function vertebraTypes(options: VertebraTypesPluginOptions = {}): Plugin 
           await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
           continue;
         }
-        
+
         const changed = await fetchTypes();
         if (changed && isPolling) {
           const mod = server.moduleGraph.getModuleById(RESOLVED_ID);

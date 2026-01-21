@@ -1,9 +1,6 @@
 import { Counter, collectDefaultMetrics, Gauge, Histogram, Registry } from "prom-client";
 
-import {
-  AsyncBrokerClient,
-  type BrokerStats,
-} from "../broker";
+import { AsyncBrokerClient, type BrokerStats } from "../broker";
 import {
   type BrokerMetrics,
   createBrokerMetrics,
