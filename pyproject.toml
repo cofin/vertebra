@@ -12,8 +12,10 @@ classifiers = [
 ]
 dependencies = [
   "cffi>=1.16.0",
+  "click>=8.1.7",
   "msgspec>=0.18.0",
   "nanoarrow>=0.4.0",
+  "rich-click>=1.7.2",
 ]
 description = "Python-first, high-performance application backbone with tRPC-like DX"
 keywords = ["trpc", "asgi", "ipc", "performance", "bun", "arrow"]
