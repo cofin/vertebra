@@ -1,12 +1,18 @@
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Clone, PartialEq, Debug)]
+enum SupervisorEvent {
+    Signal { signo: i32 },
+    Exit { pid: i32, code: i32 },
+    Timeout(),
+}
 
 #[pyclass]
 pub struct NativeSupervisor {
     pids: Arc<Mutex<HashSet<i32>>>,
-    running: Arc<AtomicBool>,
 }
 
 #[pymethods]
@@ -15,7 +21,6 @@ impl NativeSupervisor {
     fn new() -> Self {
         Self {
             pids: Arc::new(Mutex::new(HashSet::new())),
-            running: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -27,100 +32,118 @@ impl NativeSupervisor {
         self.pids.lock().unwrap().remove(&pid);
     }
 
-    fn stop(&self) {
-        self.running.store(false, Ordering::Relaxed);
+    fn propagate_signal(&self, signo: i32) {
+        #[cfg(unix)]
+        {
+            let pids = self.pids.lock().unwrap();
+            for &pid in pids.iter() {
+                unsafe { libc::kill(pid, signo) };
+            }
+        }
     }
 
-    fn run(&self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| {
-            self.run_impl()
-        })
+    fn wait_next_event(&self, py: Python<'_>, timeout_ms: u64) -> PyResult<Py<PyAny>> {
+        let event = py.allow_threads(|| self.wait_impl(timeout_ms))?;
+        let dict = PyDict::new(py);
+        match event {
+            SupervisorEvent::Signal { signo } => {
+                dict.set_item("type", "signal")?;
+                dict.set_item("signo", signo)?;
+            }
+            SupervisorEvent::Exit { pid, code } => {
+                dict.set_item("type", "exit")?;
+                dict.set_item("pid", pid)?;
+                dict.set_item("code", code)?;
+            }
+            SupervisorEvent::Timeout() => {
+                dict.set_item("type", "timeout")?;
+            }
+        }
+        Ok(dict.into())
     }
 }
 
 impl NativeSupervisor {
     #[cfg(unix)]
-    fn run_impl(&self) -> PyResult<()> {
+    fn wait_impl(&self, timeout_ms: u64) -> PyResult<SupervisorEvent> {
         use std::mem::MaybeUninit;
 
-        // Block signals so we can use signalfd
+        // Ensure signals are blocked (should be done once, but idempotent)
         let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
+        let mut old_mask = MaybeUninit::<libc::sigset_t>::uninit();
+        
         let sfd = unsafe {
             libc::sigemptyset(mask.as_mut_ptr());
             let mut mask = mask.assume_init();
             libc::sigaddset(&mut mask, libc::SIGINT);
             libc::sigaddset(&mut mask, libc::SIGTERM);
             libc::sigaddset(&mut mask, libc::SIGCHLD);
-            libc::pthread_sigmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut());
+            libc::pthread_sigmask(libc::SIG_BLOCK, &mask, old_mask.as_mut_ptr());
             
             libc::signalfd(-1, &mask, libc::SFD_CLOEXEC)
         };
         
         if sfd < 0 {
+            // Try to restore mask?
+            unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, old_mask.as_ptr(), std::ptr::null_mut()) };
             return Err(PyErr::new::<pyo3::exceptions::PyOSError, _>("failed to create signalfd"));
         }
 
-        while self.running.load(Ordering::Relaxed) {
-            let mut fds = [libc::pollfd {
-                fd: sfd,
-                events: libc::POLLIN,
-                revents: 0,
-            }];
-            
-            let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, 1000) }; // 1s timeout
-            
-            if ret > 0 {
-                let mut si = MaybeUninit::<libc::signalfd_siginfo>::uninit();
-                let res = unsafe { libc::read(sfd, si.as_mut_ptr() as *mut _, std::mem::size_of::<libc::signalfd_siginfo>()) };
-                if res as usize == std::mem::size_of::<libc::signalfd_siginfo>() {
-                    let si = unsafe { si.assume_init() };
-                    let signo = si.ssi_signo as i32;
-                    
-                    match signo {
-                        libc::SIGINT | libc::SIGTERM => {
-                            self.propagate_signal(signo);
-                            self.running.store(false, Ordering::Relaxed);
-                        }
-                        libc::SIGCHLD => {
-                            self.reap_children();
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            
-            if self.pids.lock().unwrap().is_empty() && !self.running.load(Ordering::Relaxed) {
-                break;
-            }
-        }
+        let mut fds = [libc::pollfd {
+            fd: sfd,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
         
-        unsafe { libc::close(sfd) };
-        Ok(())
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, timeout_ms as i32) };
+        
+        let result = if ret > 0 {
+            // ... (same as before)
+            let mut si = MaybeUninit::<libc::signalfd_siginfo>::uninit();
+            let res = unsafe { libc::read(sfd, si.as_mut_ptr() as *mut _, std::mem::size_of::<libc::signalfd_siginfo>()) };
+            if res as usize == std::mem::size_of::<libc::signalfd_siginfo>() {
+                let si = unsafe { si.assume_init() };
+                let signo = si.ssi_signo as i32;
+                
+                match signo {
+                    libc::SIGINT | libc::SIGTERM => SupervisorEvent::Signal { signo },
+                    libc::SIGCHLD => {
+                        // Reap one child
+                        let mut status: i32 = 0;
+                        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+                        if pid > 0 {
+                            self.remove_child(pid);
+                            // Extract exit code
+                            let code = if libc::WIFEXITED(status) {
+                                libc::WEXITSTATUS(status)
+                            } else if libc::WIFSIGNALED(status) {
+                                -libc::WTERMSIG(status)
+                            } else {
+                                0
+                            };
+                            SupervisorEvent::Exit { pid, code }
+                        } else {
+                            SupervisorEvent::Timeout()
+                        }
+                    }
+                    _ => SupervisorEvent::Timeout(),
+                }
+            } else {
+                SupervisorEvent::Timeout()
+            }
+        } else {
+            SupervisorEvent::Timeout()
+        };
+        
+        unsafe {
+            libc::close(sfd);
+            libc::pthread_sigmask(libc::SIG_SETMASK, old_mask.as_ptr(), std::ptr::null_mut());
+        }
+        Ok(result)
     }
 
     #[cfg(not(unix))]
-    fn run_impl(&self) -> PyResult<()> {
+    fn wait_impl(&self, _timeout_ms: u64) -> PyResult<SupervisorEvent> {
         Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>("Not supported on non-unix"))
-    }
-
-    #[cfg(unix)]
-    fn propagate_signal(&self, signo: i32) {
-        let pids = self.pids.lock().unwrap();
-        for &pid in pids.iter() {
-            unsafe { libc::kill(pid, signo) };
-        }
-    }
-
-    #[cfg(unix)]
-    fn reap_children(&self) {
-        let mut status: i32 = 0;
-        loop {
-            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-            if pid > 0 {
-                self.remove_child(pid);
-            } else {
-                break;
-            }
-        }
     }
 }
