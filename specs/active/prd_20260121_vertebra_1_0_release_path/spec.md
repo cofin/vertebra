@@ -88,6 +88,7 @@ No prior research conducted
 
 **Safe Checkpoints:**
 - **Checkpoint 1:** SQLSpec + Arrow fully working and tested. (Tag: `checkpoint/prd_20260121_vertebra_1_0_release_path/1`)
+- **Checkpoint 2:** Rust Supervisor and Distribution Toolchain. (Tag: `checkpoint/prd_20260121_vertebra_1_0_release_path/2`)
 
 ## Open Questions
 - None currently.

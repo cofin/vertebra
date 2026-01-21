@@ -1561,8 +1561,10 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "cffi" },
+    { name = "click" },
     { name = "msgspec" },
     { name = "nanoarrow" },
+    { name = "rich-click" },
 ]
 
 [package.optional-dependencies]
@@ -1650,6 +1652,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "cffi", specifier = ">=1.16.0" },
+    { name = "click", specifier = ">=8.1.7" },
     { name = "msgspec", specifier = ">=0.18.0" },
     { name = "nanoarrow", specifier = ">=0.4.0" },
     { name = "nanoarrow", marker = "extra == 'arrow'", specifier = ">=0.4.0" },
@@ -1662,6 +1665,7 @@ requires-dist = [
     { name = "polars", marker = "extra == 'polars'", specifier = ">=0.20.0" },
     { name = "pyarrow", marker = "extra == 'arrow'", specifier = ">=14.0.0" },
     { name = "pyarrow", marker = "extra == 'full'", specifier = ">=14.0.0" },
+    { name = "rich-click", specifier = ">=1.7.2" },
 ]
 provides-extras = ["arrow", "numpy", "polars", "pandas", "full"]
 

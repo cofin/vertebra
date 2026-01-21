@@ -24,22 +24,22 @@
 ## Phase 2: Distribution Toolchain & Rust Supervisor
 **Goal:** Deliver a robust process manager and a universal build system capable of producing single-file binaries.
 
-- [ ] Task: Implement Rust Supervisor
-    - [ ] Write unit tests for process lifecycle (spawn, monitor, kill)
-    - [ ] Implement `Supervisor` struct in `src/rs/vertebra-py/src/supervisor.rs`
-    - [ ] Ensure GIL is released during process waits to prevent worker starvation
-    - [ ] Implement Unix signal handling (SIGTERM/SIGINT) for graceful shutdown
-- [ ] Task: Bun Engine Compilation & Target Mapping
-    - [ ] Implement `build-engine.ts` to produce target-specific Bun binaries
-    - [ ] Map targets for Linux/macOS (x64/arm64)
-- [ ] Task: Unified Build CLI (Click + Rich-Click)
-    - [ ] Implement `vertebra build` command structure
-    - [ ] Add support for wheel building and Docker preparation
-- [ ] Task: Single-File Executable Packaging
-    - [ ] Write tests for standalone execution without a local Python environment
-    - [ ] Implement `vertebra build --one-file` using `python-build-standalone`
-    - [ ] Implement resource bundling (Bun binary + Python site-packages + App)
-- [ ] Task: Checkpoint - Verify Phase 2 complete and create recovery point
+- [x] Task: Implement Rust Supervisor
+    - [x] Write unit tests for process lifecycle (spawn, monitor, kill)
+    - [x] Implement `Supervisor` struct in `src/rs/vertebra-py/src/supervisor.rs`
+    - [x] Ensure GIL is released during process waits to prevent worker starvation
+    - [x] Implement Unix signal handling (SIGTERM/SIGINT) for graceful shutdown
+- [x] Task: Bun Engine Compilation & Target Mapping
+    - [x] Implement `build-engine.ts` to produce target-specific Bun binaries
+    - [x] Map targets for Linux/macOS (x64/arm64)
+- [x] Task: Unified Build CLI (Click + Rich-Click)
+    - [x] Implement `vertebra build` command structure
+    - [x] Add support for wheel building and Docker preparation
+- [x] Task: Single-File Executable Packaging
+    - [x] Write tests for standalone execution without a local Python environment
+    - [x] Implement `vertebra build --one-file` using `python-build-standalone`
+    - [x] Implement resource bundling (Bun binary + Python site-packages + App)
+- [x] Task: Checkpoint - Verify Phase 2 complete and create recovery point [checkpoint: 36032f4]
 - [ ] Task: Flow - User Manual Verification 'Phase 2: Distribution' (Protocol in workflow.md)
 
 ## Phase 3: Full-Suite MCP Runtime
