@@ -1,7 +1,0 @@
-{
-  "id": "prd_20260121_fix_supervisor_race",
-  "title": "Fix Supervisor Signal Race",
-  "status": "active",
-  "created_at": "2026-01-21",
-  "patterns_extracted": false
-}
