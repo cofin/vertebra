@@ -1,94 +1,91 @@
 # Vertebra 1.0 Release Path
 
 ## Overview
-This PRD consolidates the final critical path to the Vertebra 1.0 release. It focuses on stabilizing the core data plane (SQLSpec/Arrow), implementing the complete distribution toolchain (including single-file builds), and delivering a full-featured MCP (Model Context Protocol) runtime.
+This PRD consolidates the final critical path to the Vertebra 1.0 release. It focuses on stabilizing the core data plane (SQLSpec/Arrow), implementing the complete distribution toolchain (specifically the User Application Distribution strategy), and delivering a full-featured MCP (Model Context Protocol) runtime.
 
 **Key constraints:**
 - SQLAlchemy and Advanced Alchemy integrations are explicitly **out of scope**.
-- "Bug squashing" is a primary deliverable, with a focus on shared memory safety, process lifecycle, and serialization correctness.
-- Code signing/notarization is out of scope for implementation but the **process must be documented**.
+- "Bug squashing" is a primary deliverable.
+- **User Application Distribution** is a primary goal: Users must be able to build standalone, single-file executables of their applications using `vertebra build`.
+- **Framework Distribution** (PyPI) is separate and follows standard wheel patterns.
 
 ## Research Reference
-No prior research conducted
+- `specs/archive/build-distribution-experience/prd.md` (Source of Truth for Distribution Strategy)
 
 ## Functional Requirements
 
 ### 1. Data Plane Stabilization (SQLSpec + Arrow)
 #### Must Have
-- [ ] **Arrow IPC Integration:** Automatic switch to Arrow serialization for large result sets (> threshold).
-- [ ] **Msgspec Codec Hardening:** Robust encoding/decoding for all core Python types (Date, UUID, Enum, etc.) without corruption.
-- [ ] **Serialization Edge Cases:** Fixes for known/potential issues in msgspec decoding logic.
-- [ ] **Shared Memory Safety:** Zero-leak guarantee for ring buffers during process crashes or test failures.
+- [x] **Arrow IPC Integration:** Automatic switch to Arrow serialization for large result sets (> threshold).
+- [x] **Msgspec Codec Hardening:** Robust encoding/decoding for all core Python types (Date, UUID, Enum, etc.).
+- [x] **Shared Memory Safety:** Zero-leak guarantee for ring buffers.
 
-### 2. Distribution & Packaging
+### 2. Distribution & Packaging (Aligned with PRD-9)
 #### Must Have
-- [ ] **Universal Build Command:** `vertebra build` command handling wheels, Docker prep, and single-file builds.
-- [ ] **Single-File Executable:** `vertebra build --one-file` producing a standalone binary (bundling Python + Bun + App) using `pyembed` or `python-build-standalone`.
+- [ ] **User Application Distribution:** `vertebra build --one-file` must enable users to package their *own* applications into standalone binaries.
+- [ ] **Standalone Runtime Management:**
+    -   Automatic download and caching of `python-build-standalone` releases.
+    -   Support for optimization profiles: `modern` (x86-64-v3), `baseline` (x86-64), and `native`.
+    -   Offline capability: Once cached, builds must work without network access.
+- [ ] **Unified Build Orchestrator:**
+    -   Bundles: Python Runtime (PBS) + Bun Engine + User App + Dependencies + Site-Packages.
+    -   Resolves dependencies offline.
 - [ ] **Rust Supervisor:** Robust process management (GIL-release aware) for spawning Bun and Python workers.
-- [ ] **Process Lifecycle:** Clean signal handling (SIGINT/SIGTERM) and zombie process prevention in both Dev and Prod modes.
-- [ ] **Signing Documentation:** Comprehensive guide on how to sign and notarize the generated binaries for macOS (notarization) and Windows (code signing).
+- [ ] **Signing Documentation:** Comprehensive guide for macOS (notarization) and Windows (code signing).
 
 ### 3. Server Runtime & MCP
 #### Must Have
 - [ ] **MCP Stdio Transport:** For CLI and Claude Desktop integration.
-- [ ] **MCP SSE Transport:** Server-Sent Events for web clients.
-- [ ] **MCP WebSocket Transport:** Full bidirectional streaming for agents.
-- [ ] **Python Decorator API:** `@mcp_tool` and `@mcp_resource` for easy exposure of Python functions.
-- [ ] **Schema Generation:** Automatic JSON schema generation from Python type hints for MCP tools.
-
-## Non-Functional Requirements
-- **Performance:** Arrow serialization must be faster than MessagePack for >1000 rows.
-- **Reliability:** No zombie processes left behind after 100 consecutive start/stop cycles.
-- **Portability:** Single-file builds must work on Linux (x86_64/aarch64) and macOS (x86_64/arm64). Windows is nice-to-have but not blocking.
+- [ ] **MCP SSE/WebSocket Transports:** For web clients and agents.
+- [ ] **Python Decorator API:** `@mcp_tool` and `@mcp_resource`.
+- [ ] **Schema Generation:** Automatic JSON schema from type hints.
 
 ## Technical Approach
 
-### Recommended Implementation
-1.  **Data Plane:** Finish the `Vertebra*` rename refactor (from previous work) and implement the `nanoarrow` based IPC stream in the Python driver.
-2.  **Distribution:** Use `python-build-standalone` for the portable Python runtime. Implement the supervisor in Rust using `pyo3` to manage the lifecycle, releasing the GIL during the "wait" phase to allow the Python web server to run efficiently.
-3.  **MCP:** Implement the Protocol in TypeScript (within the Bun Broker) and bridge it to Python via the existing shared memory ring buffer, treating tool calls as a specialized IPC message type.
+### Distribution Strategy (Refined)
+The "Distribution" phase is split into two distinct workflows:
 
-### Libraries/APIs to Use
-- **Python:** `nanoarrow`, `msgspec`, `click`, `rich-click`.
-- **Rust:** `pyo3`, `pyembed` (optional/investigate), `signal-hook`.
-- **TypeScript:** `zod` (for schema validation), native `Bun.serve` (for HTTP/WS).
+1.  **User Application Distribution (`vertebra build`):**
+    -   **Tooling:** Uses `python-build-standalone` (PBS) to provide a portable Python runtime.
+    -   **Mechanism:** `vertebra.build.standalone` module manages PBS downloads/caching.
+    -   **Bundling:** `vertebra.build.bundler` orchestrates the creation of the final artifact:
+        -   Extracts PBS.
+        -   Installs user dependencies into the bundled site-packages.
+        -   Copies the correct `vertebra-engine` (Bun binary).
+        -   Bundles user code.
+    -   **Profiles:**
+        -   `modern`: Best performance (recent CPUs).
+        -   `baseline`: Max compatibility (older CPUs).
+        -   `native`: Current system python (dev/testing).
+
+2.  **Framework Distribution (PyPI):**
+    -   Standard `cibuildwheel` process to publish `vertebra` wheels to PyPI.
+    -   (Out of scope for this immediate coding task, but contextually important).
+
+### Libraries/APIs
+- **Python:** `httpx` (for PBS downloads), `tarfile`/`zipfile` (extraction), `click` (CLI).
+- **Rust:** `pyo3` (bindings), `signal-hook` (lifecycle).
 
 ### Files to Modify
-- `src/py/vertebra/extensions/sqlspec/` (Driver & Configs)
-- `src/py/vertebra/extensions/serialization/` (Msgspec codecs)
-- `src/rs/vertebra-py/src/supervisor.rs` (New module)
-- `src/ts/src/mcp/` (New module)
-- `src/py/vertebra/cli.py` (Build commands)
+- `src/py/vertebra/build/standalone.py`: Manages `python-build-standalone` versions and downloads.
+- `src/py/vertebra/build/bundler.py`: Core logic for assembling the single-file executable.
+- `src/py/vertebra/build/manager.py`: High-level build coordination.
+- `src/py/vertebra/cli.py`: Expose `vertebra build` commands.
 
 ## Acceptance Criteria
-- [ ] **SQLSpec:** Querying 10k rows returns correct data via Arrow IPC.
-- [ ] **Distribution:** `vertebra build --one-file` produces a binary that runs on a fresh machine without Python installed.
-- [ ] **MCP:** A Python function decorated with `@mcp_tool` can be called from Claude Desktop via the single-file binary.
-- [ ] **Stability:** Test suite passes 50 consecutive runs without hangs or leftover `/dev/shm` files.
-- [ ] **Documentation:** Signing guide for macOS/Windows exists in `docs/distribution/signing.md`.
-
-## Out of Scope
-- SQLAlchemy Integration
-- Advanced Alchemy Integration
-- Actual certificate-based binary signing and notarization (only the process documentation is required).
+- [ ] **Standalone Build:** `vertebra build --one-file` produces a binary that runs on a fresh machine (Docker container) without Python installed.
+- [ ] **Profile Support:** Can build both `modern` and `baseline` targets.
+- [ ] **Offline Mode:** Build works if PBS is already cached, even with network disabled.
+- [ ] **MCP:** Built binary successfully serves MCP tools.
 
 ## Risk Assessment
-### Identified Risks
-| Risk | Likelihood | Impact | Mitigation |
-|------|------------|--------|------------|
-| **Single-File Complexity:** Bundling Python + Bun + Dependencies is notoriously brittle. | High | High | Use `python-build-standalone` and a strictly controlled import path. |
-| **Shared Memory Leaks:** Tests crashing leave `/dev/shm` dirty. | Medium | High | Implement a robust cleanup fixture that runs even on `SIGKILL`. |
-| **MCP Protocol Drift:** The MCP spec is evolving. | Medium | Low | Stick to the stable core (Tools/Resources). |
+| Risk | Mitigation |
+|------|------------|
+| **PBS Download Flakiness** | Implement robust caching and checksum verification. Use `httpx` with retries. |
+| **Binary Size** | Acceptable (~80-150MB). Warn user but prioritize UX/Simplicity. |
+| **Dependency Resolution** | Rely on `uv` or `pip` to resolve deps into the bundle target directory. |
 
-## Recovery Strategy
-**Rollback Trigger:** build command fails to produce working artifacts on CI, or data corruption detected in serialization.
-**Rollback Steps:**
-1. Revert the specific sub-module changes.
-2. Use the standard `pip install` flow as a fallback if single-file builds fail.
-
-**Safe Checkpoints:**
-- **Checkpoint 1:** SQLSpec + Arrow fully working and tested. (Tag: `checkpoint/prd_20260121_vertebra_1_0_release_path/1`)
-- **Checkpoint 2:** Rust Supervisor and Distribution Toolchain. (Tag: `checkpoint/prd_20260121_vertebra_1_0_release_path/2`)
-
-## Open Questions
-- None currently.
+## Safe Checkpoints
+- **Checkpoint 1:** Phase 1 Complete (Done).
+- **Checkpoint 2:** `vertebra.build.standalone` implemented and testing downloading/caching.
+- **Checkpoint 3:** `vertebra.build.bundler` implemented and producing artifacts.

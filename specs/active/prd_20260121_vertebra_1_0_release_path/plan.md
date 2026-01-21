@@ -32,14 +32,21 @@
 - [x] Task: Bun Engine Compilation & Target Mapping
     - [x] Implement `build-engine.ts` to produce target-specific Bun binaries
     - [x] Map targets for Linux/macOS (x64/arm64)
-- [x] Task: Unified Build CLI (Click + Rich-Click)
-    - [x] Implement `vertebra build` command structure
-    - [x] Add support for wheel building and Docker preparation
-- [x] Task: Single-File Executable Packaging
-    - [x] Write tests for standalone execution without a local Python environment
-    - [x] Implement `vertebra build --one-file` using `python-build-standalone`
-    - [x] Implement resource bundling (Bun binary + Python site-packages + App)
-- [x] Task: Checkpoint - Verify Phase 2 complete and create recovery point [checkpoint: 36032f4]
+- [x] Task: Implement PBS Management (`vertebra.build.standalone`)
+    - [x] Create `src/py/vertebra/build/standalone.py`
+    - [x] Implement `download_standalone(target, profile, cache_dir)` using `httpx`
+    - [x] Define `STANDALONE_RELEASES` mapping for x64/arm64/modern/baseline
+    - [x] Add tests for download, caching, and checksum verification
+- [x] Task: Implement Single-File Bundler (`vertebra.build.bundler`)
+    - [x] Create `src/py/vertebra/build/bundler.py`
+    - [x] Implement logic to extract PBS and layout the build directory
+    - [x] Implement dependency resolution (installing user deps into bundle)
+    - [x] Bundle the correct `vertebra-engine` binary
+- [x] Task: Update CLI for Build Commands
+    - [x] Update `src/py/vertebra/cli.py` to add `vertebra build` group
+    - [x] Add `vertebra build --one-file` command
+    - [x] Wire up CLI to `vertebra.build.bundler`
+- [ ] Task: Checkpoint - Verify Phase 2 complete and create recovery point
 - [ ] Task: Flow - User Manual Verification 'Phase 2: Distribution' (Protocol in workflow.md)
 
 ## Phase 3: Full-Suite MCP Runtime
