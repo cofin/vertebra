@@ -658,7 +658,7 @@ impl PySpscRing {
     }
 
     fn send(&self, data: &[u8], flags: u32) -> PyResult<()> {
-        self.inner.send(data, flags).map_err(map_err)
+        Python::attach(|py| py.detach(|| self.inner.send(data, flags).map_err(map_err)))
     }
 
     fn try_send(&self, data: &[u8], flags: u32) -> PyResult<()> {
@@ -666,14 +666,18 @@ impl PySpscRing {
     }
 
     fn send_timeout(&self, data: &[u8], flags: u32, timeout_ms: u64) -> PyResult<bool> {
-        self.inner
-            .send_timeout(data, flags, std::time::Duration::from_millis(timeout_ms))
-            .map_err(map_err)
+        Python::attach(|py| {
+            py.detach(|| {
+                self.inner
+                    .send_timeout(data, flags, std::time::Duration::from_millis(timeout_ms))
+                    .map_err(map_err)
+            })
+        })
     }
 
     fn recv<'py>(&self, py: Python<'py>, max_len: usize) -> PyResult<Bound<'py, PyBytes>> {
         let mut buffer = vec![0u8; max_len];
-        let len = self.inner.recv(&mut buffer).map_err(map_err)?;
+        let len = py.detach(|| self.inner.recv(&mut buffer).map_err(map_err))?;
         Ok(PyBytes::new(py, &buffer[..len]))
     }
 
@@ -696,10 +700,11 @@ impl PySpscRing {
         timeout_ms: u64,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         let mut buffer = vec![0u8; max_len];
-        let result = self
-            .inner
-            .recv_timeout(&mut buffer, std::time::Duration::from_millis(timeout_ms))
-            .map_err(map_err)?;
+        let result = py.detach(|| {
+            self.inner
+                .recv_timeout(&mut buffer, std::time::Duration::from_millis(timeout_ms))
+                .map_err(map_err)
+        })?;
         Ok(result.map(|len| PyBytes::new(py, &buffer[..len])))
     }
 

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
 
 import msgspec
 
-from vertebra.resources import AsyncBrokerClient, BrokerClientConfig, AsyncBrokerPool
+from vertebra.resources import AsyncBrokerClient, BrokerClientConfig, AsyncBrokerPool, SyncBrokerClient, SyncBrokerPool
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Coroutine
@@ -55,10 +55,20 @@ class VertebraSyncCursor:
 
     def execute(self, query: str, params: Sequence[ParamValue] | None = None) -> int | None:
         result = self._connection._execute(query, params or [])
-        self._columns = list(result.get("columns", []))
-        self._rows = [tuple(row) for row in result.get("rows", [])]
+        if "arrow" in result:
+            table = result["arrow"]
+            # pyarrow Table
+            self._columns = table.column_names
+            # Convert to rows. Using to_pylist() returns list of dicts.
+            self._rows = [tuple(row[col] for col in self._columns) for row in table.to_pylist()]
+            rowcount = table.num_rows
+        else:
+            self._columns = list(result.get("columns", []))
+            self._rows = [tuple(row) for row in result.get("rows", [])]
+            rowcount = result.get("rowcount", 0)
+        
         self._index = 0
-        return result.get("rowcount")
+        return rowcount
 
     def executemany(self, query: str, params: Iterable[Sequence[ParamValue]]) -> int:
         total = 0
@@ -91,8 +101,39 @@ class VertebraSyncCursor:
         self._index = 0
 
 
+class VertebraArrowCursor:
+    def __init__(self, connection: "VertebraSyncConnection") -> None:
+        self._connection = connection
+        self._table: Any = None
+
+    def execute(self, query: str, params: Sequence[ParamValue] | None = None) -> int | None:
+        result = self._connection._execute(query, params or [])
+        if "arrow" in result:
+            self._table = result["arrow"]
+        else:
+            rows = result.get("rows", [])
+            columns = result.get("columns", [])
+            import pyarrow as pa
+            if not rows and not columns:
+                 self._table = pa.Table.from_pydict({})
+            elif rows:
+                data = {
+                    col: [row[i] for row in rows] 
+                    for i, col in enumerate(columns)
+                }
+                self._table = pa.Table.from_pydict(data)
+            else:
+                self._table = pa.Table.from_pydict({col: [] for col in columns})
+        
+        return self._table.num_rows
+
+    def fetchall(self) -> Any:
+        """Return the pyarrow Table."""
+        return self._table
+
+
 class VertebraSyncConnection:
-    def __init__(self, pool: str, client: AsyncBrokerClient, token: str) -> None:
+    def __init__(self, pool: str, client: SyncBrokerClient, token: str) -> None:
         self._pool = pool
         self._client = client
         self._token = token
@@ -104,23 +145,26 @@ class VertebraSyncConnection:
     def cursor(self) -> VertebraSyncCursor:
         return VertebraSyncCursor(self)
 
+    def arrow_cursor(self) -> VertebraArrowCursor:
+        return VertebraArrowCursor(self)
+
     def begin(self) -> None:
-        _run_sync(self._client.begin(self._pool, self._token))
+        self._client.begin(self._pool, self._token)
 
     def commit(self) -> None:
-        _run_sync(self._client.commit(self._pool, self._token))
+        self._client.commit(self._pool, self._token)
 
     def rollback(self) -> None:
-        _run_sync(self._client.rollback(self._pool, self._token))
+        self._client.rollback(self._pool, self._token)
 
     def close(self) -> None:
-        _run_sync(self._client.release(self._pool, self._token))
+        self._client.release(self._pool, self._token)
 
     def _execute(self, query: str, params: Params, correlation_id: str | None = None) -> VertebraResponse:
         payload: list[ParamValue] | dict[str, ParamValue]
         payload = params if isinstance(params, dict) else list(params)
         return cast(
-            "VertebraResponse", _run_sync(self._client.execute(self._pool, self._token, query, payload, correlation_id))
+            "VertebraResponse", self._client.execute(self._pool, self._token, query, payload, correlation_id)
         )
 
     def _execute_many(
@@ -134,29 +178,8 @@ class VertebraSyncConnection:
                 payload.append(list(param_set))
         return cast(
             "VertebraResponse",
-            _run_sync(self._client.execute_many(self._pool, self._token, query, payload, correlation_id)),
+            self._client.execute_many(self._pool, self._token, query, payload, correlation_id),
         )
-
-
-class VertebraSyncPool:
-    def __init__(self, pool: str, config: BrokerClientConfig, max_clients: int = 5) -> None:
-        self._pool = AsyncBrokerPool(pool, client_config=config, max_clients=max_clients)
-
-    def acquire(self) -> VertebraSyncConnection:
-        lease = _run_sync(self._pool.acquire())
-        return VertebraSyncConnection(self._pool._pool_name, lease.client, lease.token)
-
-    def release(self, connection: VertebraSyncConnection) -> None:
-        _run_sync(self._pool.release(connection._client, connection._token))
-
-    def close(self) -> None:
-        _run_sync(self._pool.close())
-
-    def get_size(self) -> int:
-        return 0
-
-    def get_idle_size(self) -> int:
-        return 0
 
 
 class VertebraAsyncCursor:
@@ -168,10 +191,17 @@ class VertebraAsyncCursor:
 
     async def execute(self, query: str, params: Sequence[ParamValue] | None = None) -> int | None:
         result = await self._connection._execute(query, params or [])
-        self._columns = list(result.get("columns", []))
-        self._rows = [tuple(row) for row in result.get("rows", [])]
+        if "arrow" in result:
+            table = result["arrow"]
+            self._columns = table.column_names
+            self._rows = [tuple(row[col] for col in self._columns) for row in table.to_pylist()]
+            rowcount = table.num_rows
+        else:
+            self._columns = list(result.get("columns", []))
+            self._rows = [tuple(row) for row in result.get("rows", [])]
+            rowcount = result.get("rowcount", 0)
         self._index = 0
-        return result.get("rowcount")
+        return rowcount
 
     async def executemany(self, query: str, params: Iterable[Sequence[ParamValue]]) -> int:
         total = 0
@@ -204,6 +234,36 @@ class VertebraAsyncCursor:
         self._index = 0
 
 
+class VertebraAsyncArrowCursor:
+    def __init__(self, connection: "VertebraAsyncConnection") -> None:
+        self._connection = connection
+        self._table: Any = None
+
+    async def execute(self, query: str, params: Sequence[ParamValue] | None = None) -> int | None:
+        result = await self._connection._execute(query, params or [])
+        if "arrow" in result:
+            self._table = result["arrow"]
+        else:
+            rows = result.get("rows", [])
+            columns = result.get("columns", [])
+            import pyarrow as pa
+            if not rows and not columns:
+                 self._table = pa.Table.from_pydict({})
+            elif rows:
+                data = {
+                    col: [row[i] for row in rows] 
+                    for i, col in enumerate(columns)
+                }
+                self._table = pa.Table.from_pydict(data)
+            else:
+                self._table = pa.Table.from_pydict({col: [] for col in columns})
+        
+        return self._table.num_rows
+
+    async def fetchall(self) -> Any:
+        return self._table
+
+
 class VertebraAsyncConnection:
     def __init__(self, pool: str, client: AsyncBrokerClient, token: str) -> None:
         self._pool = pool
@@ -216,6 +276,9 @@ class VertebraAsyncConnection:
 
     def cursor(self) -> VertebraAsyncCursor:
         return VertebraAsyncCursor(self)
+
+    def arrow_cursor(self) -> VertebraAsyncArrowCursor:
+        return VertebraAsyncArrowCursor(self)
 
     async def begin(self) -> None:
         await self._client.begin(self._pool, self._token)
@@ -231,6 +294,10 @@ class VertebraAsyncConnection:
 
     async def fetch(self, query: str, params: Sequence[ParamValue] | None = None) -> list[Row]:
         result = await self._execute(query, params or [])
+        if "arrow" in result:
+            table = result["arrow"]
+            columns = table.column_names
+            return [tuple(row[col] for col in columns) for row in table.to_pylist()]
         return [tuple(row) for row in result.get("rows", [])]
 
     async def fetchrow(self, query: str, params: Sequence[ParamValue] | None = None) -> Row | None:
@@ -295,6 +362,27 @@ class VertebraAsyncTransaction:
             await self._connection._client.rollback(self._connection._pool, self._connection._token)
 
 
+class VertebraSyncPool:
+    def __init__(self, pool: str, config: BrokerClientConfig, max_clients: int = 5) -> None:
+        self._pool = SyncBrokerPool(pool, client_config=config, max_clients=max_clients)
+
+    def acquire(self) -> VertebraSyncConnection:
+        lease = self._pool.acquire()
+        return VertebraSyncConnection(self._pool._pool_name, lease.client, lease.token)
+
+    def release(self, connection: VertebraSyncConnection) -> None:
+        self._pool.release(connection._client, connection._token)
+
+    def close(self) -> None:
+        self._pool.close()
+
+    def get_size(self) -> int:
+        return 0
+
+    def get_idle_size(self) -> int:
+        return 0
+
+
 class VertebraAsyncPool:
     def __init__(self, pool: str, config: BrokerClientConfig, max_clients: int = 5) -> None:
         self._pool = AsyncBrokerPool(pool, client_config=config, max_clients=max_clients)
@@ -317,9 +405,11 @@ class VertebraAsyncPool:
 
 
 __all__ = (
+    "VertebraAsyncArrowCursor",
     "VertebraAsyncConnection",
     "VertebraAsyncCursor",
     "VertebraAsyncPool",
+    "VertebraArrowCursor",
     "VertebraDriverConfig",
     "VertebraResponse",
     "VertebraSyncConnection",

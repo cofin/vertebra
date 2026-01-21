@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import queue
+import threading
 from typing import TYPE_CHECKING
 
 import msgspec
 
-from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig
+from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig, SyncBrokerClient
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -90,4 +92,85 @@ class AsyncBrokerPool:
         await self._client_pool.close()
 
 
-__all__ = ("AsyncBrokerClientPool", "AsyncBrokerLease", "AsyncBrokerPool", "BrokerPoolError")
+class SyncBrokerLease(msgspec.Struct, frozen=True):
+    """A lease for a sync broker connection."""
+
+    pool: "SyncBrokerPool"
+    client: SyncBrokerClient
+    token: str
+
+    def __enter__(self) -> str:
+        return self.token
+
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
+    ) -> None:
+        self.pool.release(self.client, self.token)
+
+
+class SyncBrokerClientPool:
+    def __init__(self, config: BrokerClientConfig, max_size: int = 5) -> None:
+        self._config = config
+        self._max_size = max_size
+        self._pool: queue.LifoQueue[SyncBrokerClient] = queue.LifoQueue()
+        self._total = 0
+        self._lock = threading.Lock()
+
+    def acquire(self) -> SyncBrokerClient:
+        try:
+            return self._pool.get_nowait()
+        except queue.Empty:
+            with self._lock:
+                if self._total < self._max_size:
+                    self._total += 1
+                    return SyncBrokerClient(self._config)
+            return self._pool.get()
+
+    def release(self, client: SyncBrokerClient) -> None:
+        self._pool.put(client)
+
+    def close(self) -> None:
+        while True:
+            try:
+                client = self._pool.get_nowait()
+            except queue.Empty:
+                break
+            client.close()
+
+
+class SyncBrokerPool:
+    def __init__(self, pool: str, client_config: BrokerClientConfig | None = None, max_clients: int = 5) -> None:
+        self._pool_name = pool
+        self._client_pool = SyncBrokerClientPool(client_config or BrokerClientConfig(), max_size=max_clients)
+
+    def acquire(self) -> SyncBrokerLease:
+        client = self._client_pool.acquire()
+        token = client.acquire(self._pool_name)
+        return SyncBrokerLease(self, client, token)
+
+    def release(self, client: SyncBrokerClient, token: str) -> None:
+        try:
+            client.release(self._pool_name, token)
+        finally:
+            self._client_pool.release(client)
+
+    def health(self) -> bool:
+        client = self._client_pool.acquire()
+        try:
+            return client.health(self._pool_name)
+        finally:
+            self._client_pool.release(client)
+
+    def close(self) -> None:
+        self._client_pool.close()
+
+
+__all__ = (
+    "AsyncBrokerClientPool",
+    "AsyncBrokerLease",
+    "AsyncBrokerPool",
+    "BrokerPoolError",
+    "SyncBrokerLease",
+    "SyncBrokerClientPool",
+    "SyncBrokerPool",
+)

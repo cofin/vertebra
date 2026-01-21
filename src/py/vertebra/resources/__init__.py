@@ -8,8 +8,21 @@ and are separate from the public SQLSpec adapters.
 
 from __future__ import annotations
 
-from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig, BrokerClientError
-from vertebra.resources.pool import AsyncBrokerClientPool, AsyncBrokerLease, AsyncBrokerPool, BrokerPoolError
+from vertebra.resources.broker import (
+    AsyncBrokerClient,
+    BrokerClientConfig,
+    BrokerClientError,
+    SyncBrokerClient,
+)
+from vertebra.resources.pool import (
+    AsyncBrokerClientPool,
+    AsyncBrokerLease,
+    AsyncBrokerPool,
+    BrokerPoolError,
+    SyncBrokerClientPool,
+    SyncBrokerLease,
+    SyncBrokerPool,
+)
 from vertebra.resources.provider import ProviderConfig, ProviderHandler, ProviderHost
 
 __all__ = (
@@ -23,4 +36,8 @@ __all__ = (
     "ProviderConfig",
     "ProviderHandler",
     "ProviderHost",
+    "SyncBrokerClient",
+    "SyncBrokerClientPool",
+    "SyncBrokerLease",
+    "SyncBrokerPool",
 )
