@@ -3,22 +3,22 @@
 ## Phase 1: Stabilization & Data Plane (SQLSpec/Arrow)
 **Goal:** Ensure the foundation is leak-free, correctly named, and supports high-performance Arrow transport.
 
-- [ ] Task: Finish SQLSpec Public API Rename (Broker* → Vertebra*)
-    - [ ] Rename classes in `_config.py` and `_driver.py`
-    - [ ] Update dialect-specific configs (Postgres, MySQL, SQLite)
-    - [ ] Update all internal and external test imports
-- [ ] Task: Implement Msgspec Codec Hardening
-    - [ ] Write tests for round-trip serialization of Date, UUID, and Enum
-    - [ ] Fix identified edge cases in msgspec encoding/decoding logic
-- [ ] Task: Implement Arrow IPC Integration
-    - [ ] Write tests for threshold-based transport switching (MessagePack vs Arrow)
-    - [ ] Implement Arrow threshold configuration in `_config.py`
-    - [ ] Implement Arrow encoding in `_driver.py` using `nanoarrow`
-    - [ ] Implement Arrow decoding in `_shared.py`
-- [ ] Task: Hardened Shared Memory Cleanup
-    - [ ] Write stress tests that simulate process crashes
-    - [ ] Implement a robust cleanup mechanism in the supervisor/test-fixtures that unlinks SHM even on SIGKILL
-- [ ] Task: Checkpoint - Verify Phase 1 complete and create recovery point
+- [x] Task: Finish SQLSpec Public API Rename (Broker* → Vertebra*)
+    - [x] Rename classes in `_config.py` and `_driver.py`
+    - [x] Update dialect-specific configs (Postgres, MySQL, SQLite)
+    - [x] Update all internal and external test imports
+- [x] Task: Implement Msgspec Codec Hardening
+    - [x] Write tests for round-trip serialization of Date, UUID, and Enum
+    - [x] Fix identified edge cases in msgspec encoding/decoding logic
+- [x] Task: Implement Arrow IPC Integration
+    - [x] Write tests for threshold-based transport switching (MessagePack vs Arrow)
+    - [x] Implement Arrow threshold configuration in `_config.py`
+    - [x] Implement Arrow encoding in `_driver.py` using `nanoarrow`
+    - [x] Implement Arrow decoding in `_shared.py`
+- [x] Task: Hardened Shared Memory Cleanup
+    - [x] Write stress tests that simulate process crashes
+    - [x] Implement a robust cleanup mechanism in the supervisor/test-fixtures that unlinks SHM even on SIGKILL
+- [x] Task: Checkpoint - Verify Phase 1 complete and create recovery point [checkpoint: a7eea60]
 - [ ] Task: Flow - User Manual Verification 'Phase 1: Stabilization' (Protocol in workflow.md)
 
 ## Phase 2: Distribution Toolchain & Rust Supervisor
