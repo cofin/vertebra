@@ -2,15 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
-
-import msgspec
-import pytest
-
 from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig, BrokerClientError
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 class TestBrokerClientConfig:
@@ -27,13 +19,7 @@ class TestBrokerClientConfig:
 
     def test_config_custom(self) -> None:
         """Test BrokerClientConfig accepts custom values."""
-        config = BrokerClientConfig(
-            name="custom-broker",
-            slot_size=4096,
-            slots=64,
-            timeout_ms=1000,
-            weight=10,
-        )
+        config = BrokerClientConfig(name="custom-broker", slot_size=4096, slots=64, timeout_ms=1000, weight=10)
         assert config.name == "custom-broker"
         assert config.slot_size == 4096
         assert config.slots == 64

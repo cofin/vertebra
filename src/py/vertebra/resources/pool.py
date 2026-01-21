@@ -170,7 +170,7 @@ __all__ = (
     "AsyncBrokerLease",
     "AsyncBrokerPool",
     "BrokerPoolError",
-    "SyncBrokerLease",
     "SyncBrokerClientPool",
+    "SyncBrokerLease",
     "SyncBrokerPool",
 )

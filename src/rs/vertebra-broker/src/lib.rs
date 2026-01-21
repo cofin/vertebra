@@ -88,11 +88,7 @@ fn layout_from(slot_size: usize, slots: usize) -> Result<RingLayout, VtbStatus> 
     if slot_size == 0 || slots == 0 {
         return Err(VtbStatus::Invalid);
     }
-    let layout = RingLayout::new(
-        slot_size,
-        slots,
-        vertebra_core::buffer::ChannelMode::Spsc,
-    );
+    let layout = RingLayout::new(slot_size, slots, vertebra_core::buffer::ChannelMode::Spsc);
     if !layout.is_power_of_two() {
         return Err(VtbStatus::Invalid);
     }

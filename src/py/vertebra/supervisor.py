@@ -328,17 +328,17 @@ class Supervisor:
             if event_type == "exit":
                 pid = event["pid"]
                 code = event["code"]
-                
+
                 # Find matching process
                 for name, handle in self._handles.items():
                     if handle.proc and handle.proc.pid == pid:
                         logger.info("Process %s exited with code %d", name, code)
                         handle.state = ProcessState.STOPPED
-                        
+
                         # Check critical
                         if handle.spec.critical:
                             return code
-                        
+
                         # If primary exited
                         if primary and name == primary:
                             return code
@@ -346,7 +346,7 @@ class Supervisor:
                         # Non-critical: attempt restart
                         self._maybe_restart(name)
                         break
-            
+
             elif event_type == "signal":
                 signo = event["signo"]
                 logger.info("Received signal %d via native supervisor", signo)

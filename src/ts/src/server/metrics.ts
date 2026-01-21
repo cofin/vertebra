@@ -1,7 +1,7 @@
 import { Counter, collectDefaultMetrics, Gauge, Histogram, Registry } from "prom-client";
 
 import {
-    AsyncBrokerClient, 
+  AsyncBrokerClient,
   type BrokerStats,
   type PoolStats,
   type SchedulerClientStats,
@@ -210,7 +210,7 @@ export function updateBrokerMetrics(metrics: ServerMetrics, stats: BrokerStats):
 export class MetricsRegistry {
   constructor(
     private metrics: ServerMetrics,
-    private brokerClient?:   AsyncBrokerClient,
+    private brokerClient?: AsyncBrokerClient,
     private workerManager?: ProcessManager | null,
   ) {}
 

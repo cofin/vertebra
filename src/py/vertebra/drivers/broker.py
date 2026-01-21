@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
 
 import msgspec
 
-from vertebra.resources import AsyncBrokerClient, BrokerClientConfig, AsyncBrokerPool, SyncBrokerClient, SyncBrokerPool
+from vertebra.resources import AsyncBrokerClient, AsyncBrokerPool, BrokerClientConfig, SyncBrokerClient, SyncBrokerPool
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Coroutine
@@ -66,7 +66,7 @@ class VertebraSyncCursor:
             self._columns = list(result.get("columns", []))
             self._rows = [tuple(row) for row in result.get("rows", [])]
             rowcount = result.get("rowcount", 0)
-        
+
         self._index = 0
         return rowcount
 
@@ -114,17 +114,15 @@ class VertebraArrowCursor:
             rows = result.get("rows", [])
             columns = result.get("columns", [])
             import pyarrow as pa
+
             if not rows and not columns:
-                 self._table = pa.Table.from_pydict({})
+                self._table = pa.Table.from_pydict({})
             elif rows:
-                data = {
-                    col: [row[i] for row in rows] 
-                    for i, col in enumerate(columns)
-                }
+                data = {col: [row[i] for row in rows] for i, col in enumerate(columns)}
                 self._table = pa.Table.from_pydict(data)
             else:
                 self._table = pa.Table.from_pydict({col: [] for col in columns})
-        
+
         return self._table.num_rows
 
     def fetchall(self) -> Any:
@@ -163,9 +161,7 @@ class VertebraSyncConnection:
     def _execute(self, query: str, params: Params, correlation_id: str | None = None) -> VertebraResponse:
         payload: list[ParamValue] | dict[str, ParamValue]
         payload = params if isinstance(params, dict) else list(params)
-        return cast(
-            "VertebraResponse", self._client.execute(self._pool, self._token, query, payload, correlation_id)
-        )
+        return cast("VertebraResponse", self._client.execute(self._pool, self._token, query, payload, correlation_id))
 
     def _execute_many(
         self, query: str, params: Iterable[Params], correlation_id: str | None = None
@@ -177,8 +173,7 @@ class VertebraSyncConnection:
             else:
                 payload.append(list(param_set))
         return cast(
-            "VertebraResponse",
-            self._client.execute_many(self._pool, self._token, query, payload, correlation_id),
+            "VertebraResponse", self._client.execute_many(self._pool, self._token, query, payload, correlation_id)
         )
 
 
@@ -247,17 +242,15 @@ class VertebraAsyncArrowCursor:
             rows = result.get("rows", [])
             columns = result.get("columns", [])
             import pyarrow as pa
+
             if not rows and not columns:
-                 self._table = pa.Table.from_pydict({})
+                self._table = pa.Table.from_pydict({})
             elif rows:
-                data = {
-                    col: [row[i] for row in rows] 
-                    for i, col in enumerate(columns)
-                }
+                data = {col: [row[i] for row in rows] for i, col in enumerate(columns)}
                 self._table = pa.Table.from_pydict(data)
             else:
                 self._table = pa.Table.from_pydict({col: [] for col in columns})
-        
+
         return self._table.num_rows
 
     async def fetchall(self) -> Any:
@@ -405,11 +398,11 @@ class VertebraAsyncPool:
 
 
 __all__ = (
+    "VertebraArrowCursor",
     "VertebraAsyncArrowCursor",
     "VertebraAsyncConnection",
     "VertebraAsyncCursor",
     "VertebraAsyncPool",
-    "VertebraArrowCursor",
     "VertebraDriverConfig",
     "VertebraResponse",
     "VertebraSyncConnection",

@@ -71,7 +71,7 @@ impl NativeSupervisor {
         // Ensure signals are blocked (should be done once, but idempotent)
         let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
         let mut old_mask = MaybeUninit::<libc::sigset_t>::uninit();
-        
+
         let sfd = unsafe {
             libc::sigemptyset(mask.as_mut_ptr());
             let mut mask = mask.assume_init();
@@ -79,14 +79,18 @@ impl NativeSupervisor {
             libc::sigaddset(&mut mask, libc::SIGTERM);
             libc::sigaddset(&mut mask, libc::SIGCHLD);
             libc::pthread_sigmask(libc::SIG_BLOCK, &mask, old_mask.as_mut_ptr());
-            
+
             libc::signalfd(-1, &mask, libc::SFD_CLOEXEC)
         };
-        
+
         if sfd < 0 {
             // Try to restore mask?
-            unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, old_mask.as_ptr(), std::ptr::null_mut()) };
-            return Err(PyErr::new::<pyo3::exceptions::PyOSError, _>("failed to create signalfd"));
+            unsafe {
+                libc::pthread_sigmask(libc::SIG_SETMASK, old_mask.as_ptr(), std::ptr::null_mut())
+            };
+            return Err(PyErr::new::<pyo3::exceptions::PyOSError, _>(
+                "failed to create signalfd",
+            ));
         }
 
         let mut fds = [libc::pollfd {
@@ -94,17 +98,23 @@ impl NativeSupervisor {
             events: libc::POLLIN,
             revents: 0,
         }];
-        
+
         let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, timeout_ms as i32) };
-        
+
         let result = if ret > 0 {
             // ... (same as before)
             let mut si = MaybeUninit::<libc::signalfd_siginfo>::uninit();
-            let res = unsafe { libc::read(sfd, si.as_mut_ptr() as *mut _, std::mem::size_of::<libc::signalfd_siginfo>()) };
+            let res = unsafe {
+                libc::read(
+                    sfd,
+                    si.as_mut_ptr() as *mut _,
+                    std::mem::size_of::<libc::signalfd_siginfo>(),
+                )
+            };
             if res as usize == std::mem::size_of::<libc::signalfd_siginfo>() {
                 let si = unsafe { si.assume_init() };
                 let signo = si.ssi_signo as i32;
-                
+
                 match signo {
                     libc::SIGINT | libc::SIGTERM => SupervisorEvent::Signal { signo },
                     libc::SIGCHLD => {
@@ -134,7 +144,7 @@ impl NativeSupervisor {
         } else {
             SupervisorEvent::Timeout()
         };
-        
+
         unsafe {
             libc::close(sfd);
             libc::pthread_sigmask(libc::SIG_SETMASK, old_mask.as_ptr(), std::ptr::null_mut());
@@ -144,6 +154,8 @@ impl NativeSupervisor {
 
     #[cfg(not(unix))]
     fn wait_impl(&self, _timeout_ms: u64) -> PyResult<SupervisorEvent> {
-        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>("Not supported on non-unix"))
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "Not supported on non-unix",
+        ))
     }
 }

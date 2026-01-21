@@ -1105,13 +1105,15 @@ class Broker {
       rows.length >= this.config.arrow_threshold_rows ||
       estimatedBytes >= this.config.arrow_threshold_bytes
     ) {
-      const records = raw ?? rows.map((row) => {
-        const obj: Record<string, unknown> = {};
-        columns.forEach((col, idx) => {
-          obj[col] = row[idx];
+      const records =
+        raw ??
+        rows.map((row) => {
+          const obj: Record<string, unknown> = {};
+          columns.forEach((col, idx) => {
+            obj[col] = row[idx];
+          });
+          return obj;
         });
-        return obj;
-      });
       const table = tableFromJSON(records);
       const ipc = tableToIPC(table);
       const name = `/${this.config.name}.arrow.${crypto.randomUUID()}`;

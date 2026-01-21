@@ -11,16 +11,16 @@
 - [x] Task 1.3: Update Python `supervisor.py` to use the native implementation [26ea3f1].
 
 ## Phase 2: Data Plane & Drivers
-- [ ] Task 2.1: Implement Arrow Support in Bun Broker.
-    - [ ] Update `postgres.ts` / `sqlite.ts` to return Arrow RecordBatches for large results.
-    - [ ] Update broker to use `ShmRegion` for Arrow data.
-- [ ] Task 2.2: Implement `SyncBrokerClient` in Python.
-    - [ ] Expose blocking `send`/`recv` from Rust to Python.
-    - [ ] Create `vertebra.resources.broker.SyncBrokerClient`.
-- [ ] Task 2.3: Update Python Drivers.
-    - [ ] Use `SyncBrokerClient` in `SyncDriver`.
-    - [ ] Use `AsyncBrokerClient` in `AsyncDriver`.
-    - [ ] Add `VertebraArrowCursor` for zero-copy result access.
+- [x] Task 2.1: Implement Arrow Support in Bun Broker [d30239b].
+    - [x] Update `postgres.ts` / `sqlite.ts` to return Arrow RecordBatches for large results.
+    - [x] Update broker to use `ShmRegion` for Arrow data.
+- [x] Task 2.2: Implement `SyncBrokerClient` in Python [6287539].
+    - [x] Expose blocking `send`/`recv` from Rust to Python.
+    - [x] Create `vertebra.resources.broker.SyncBrokerClient`.
+- [x] Task 2.3: Update Python Drivers [6287539].
+    - [x] Use `SyncBrokerClient` in `SyncDriver`.
+    - [x] Use `AsyncBrokerClient` in `AsyncDriver`.
+    - [x] Add `VertebraArrowCursor` for zero-copy result access.
 
 ## Phase 3: Observability & DX
 - [ ] Task 3.1: Add Metrics to Bun Broker.

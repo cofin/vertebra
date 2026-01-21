@@ -26,7 +26,7 @@ async def test_broker_pool_context_manager() -> None:
 
     from vertebra._internal.async_transport import PollingTransport
     from vertebra._vertebra import AsyncRing
-    from vertebra.resources import BrokerClientConfig, AsyncBrokerPool
+    from vertebra.resources import AsyncBrokerPool, BrokerClientConfig
 
     encoder = msgspec.msgpack.Encoder()
     decoder = msgspec.msgpack.Decoder()

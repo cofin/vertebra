@@ -343,7 +343,10 @@ mod tests {
         let layout = RingLayout::new(slot_size, slots, ChannelMode::Mpmc);
         let expected_seq_size = slots * core::mem::size_of::<AtomicU64>();
         assert_eq!(layout.seq_size, expected_seq_size);
-        assert_eq!(layout.total_size, layout.header_size + expected_seq_size + (slot_size * slots));
+        assert_eq!(
+            layout.total_size,
+            layout.header_size + expected_seq_size + (slot_size * slots)
+        );
     }
 
     proptest! {

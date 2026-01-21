@@ -740,10 +740,7 @@ impl MpmcRing {
         header_ref.wait_write.0.store(0, Ordering::Relaxed);
 
         // Initialize sequences
-        let sequences = region
-            .as_ptr()
-            .add(layout.seq_offset())
-            .cast::<AtomicU64>();
+        let sequences = region.as_ptr().add(layout.seq_offset()).cast::<AtomicU64>();
         for i in 0..layout.slots {
             (*sequences.add(i)).store(i as u64, Ordering::Relaxed);
         }
@@ -775,10 +772,7 @@ impl MpmcRing {
             return Err(ChannelError::InvalidLayout);
         }
         let header = region.as_ptr().cast::<ShmHeader>();
-        let sequences = region
-            .as_ptr()
-            .add(layout.seq_offset())
-            .cast::<AtomicU64>();
+        let sequences = region.as_ptr().add(layout.seq_offset()).cast::<AtomicU64>();
         let data = region.as_ptr().add(layout.ring_offset());
         Ok(Self {
             region,
@@ -837,8 +831,7 @@ impl MpmcRing {
                     unsafe {
                         self.write_slot(index, payload, flags);
                     }
-                    self.sequence(index)
-                        .store(tail + 1, Ordering::Release);
+                    self.sequence(index).store(tail + 1, Ordering::Release);
                     return Ok(());
                 }
             } else if diff < 0 {

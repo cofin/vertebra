@@ -40,9 +40,10 @@ export class SqlitePool {
       throw new Error("Unknown connection token");
     }
     const stmt = db.query(sql);
-          // biome-ignore lint: SQLite bindings accept any serializable value
-          const rows = stmt.all(...(params as any[])) as Record<string, unknown>[];
-          const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
-          const values = rows.map((row) => columns.map((col) => row[col]));
-          return { columns, rows: values, rowcount: values.length, raw: rows };  }
+    // biome-ignore lint: SQLite bindings accept any serializable value
+    const rows = stmt.all(...(params as any[])) as Record<string, unknown>[];
+    const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+    const values = rows.map((row) => columns.map((col) => row[col]));
+    return { columns, rows: values, rowcount: values.length, raw: rows };
+  }
 }
