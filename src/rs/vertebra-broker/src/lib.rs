@@ -79,8 +79,8 @@ pub struct VtbRegion {
 pub struct VtbRingStats {
     pub slot_size: usize,
     pub slots: usize,
-    pub read_head: u32,
-    pub write_head: u32,
+    pub read_head: u64,
+    pub write_head: u64,
     pub capacity: usize,
 }
 
@@ -88,7 +88,11 @@ fn layout_from(slot_size: usize, slots: usize) -> Result<RingLayout, VtbStatus> 
     if slot_size == 0 || slots == 0 {
         return Err(VtbStatus::Invalid);
     }
-    let layout = RingLayout::new(slot_size, slots);
+    let layout = RingLayout::new(
+        slot_size,
+        slots,
+        vertebra_core::buffer::ChannelMode::Spsc,
+    );
     if !layout.is_power_of_two() {
         return Err(VtbStatus::Invalid);
     }

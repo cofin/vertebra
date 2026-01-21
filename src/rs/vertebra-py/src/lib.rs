@@ -274,7 +274,7 @@ impl PyChannel {
         slot_size: usize,
         slots: usize,
     ) -> PyResult<Bound<'py, PyTuple>> {
-        let layout = RingLayout::new(slot_size, slots);
+        let layout = RingLayout::new(slot_size, slots, vertebra_core::buffer::ChannelMode::Spsc);
         let req_region = Arc::new(ShmRegion::create(layout.total_size).map_err(map_err)?);
         let resp_region = Arc::new(ShmRegion::create(layout.total_size).map_err(map_err)?);
         let req_client = unsafe { SpscRing::initialize(Arc::clone(&req_region), layout, 0, 0) }
@@ -311,7 +311,7 @@ impl PyChannel {
         slots: usize,
         role: &str,
     ) -> PyResult<Self> {
-        let layout = RingLayout::new(slot_size, slots);
+        let layout = RingLayout::new(slot_size, slots, vertebra_core::buffer::ChannelMode::Spsc);
         let req_name = format!("{name}.req");
         let resp_name = format!("{name}.resp");
         let req_region =
@@ -360,7 +360,7 @@ impl PyChannel {
         slots: usize,
         role: &str,
     ) -> PyResult<Self> {
-        let layout = RingLayout::new(slot_size, slots);
+        let layout = RingLayout::new(slot_size, slots, vertebra_core::buffer::ChannelMode::Spsc);
         let req_name = format!("{name}.req");
         let resp_name = format!("{name}.resp");
         let req_region =
@@ -594,7 +594,7 @@ struct PySpscRing {
 impl PySpscRing {
     #[new]
     fn new(slot_size: usize, slots: usize) -> PyResult<Self> {
-        let layout = RingLayout::new(slot_size, slots);
+        let layout = RingLayout::new(slot_size, slots, vertebra_core::buffer::ChannelMode::Spsc);
         let region = Arc::new(ShmRegion::create(layout.total_size).map_err(map_err)?);
         let ring =
             unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0) }.map_err(map_err)?;
@@ -609,7 +609,7 @@ impl PySpscRing {
         slot_size: usize,
         slots: usize,
     ) -> PyResult<Self> {
-        let layout = RingLayout::new(slot_size, slots);
+        let layout = RingLayout::new(slot_size, slots, vertebra_core::buffer::ChannelMode::Spsc);
         let region = Arc::new(ShmRegion::create_named(name, layout.total_size).map_err(map_err)?);
         let ring =
             unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0) }.map_err(map_err)?;
@@ -637,7 +637,7 @@ impl PySpscRing {
         slot_size: usize,
         slots: usize,
     ) -> PyResult<Self> {
-        let layout = RingLayout::new(slot_size, slots);
+        let layout = RingLayout::new(slot_size, slots, vertebra_core::buffer::ChannelMode::Spsc);
         let region = Arc::new(ShmRegion::open_named(name, layout.total_size).map_err(map_err)?);
         let ring = unsafe { SpscRing::attach(Arc::clone(&region), layout) }.map_err(map_err)?;
         Ok(Self { inner: ring })

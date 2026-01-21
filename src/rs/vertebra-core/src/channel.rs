@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use crossbeam_utils::Backoff;
 
 use crate::buffer::{
-    Buffer, BufferError, BufferPool, RegionState, RingLayout, ShmHeader, SlotHeader, ABI_VERSION,
-    MAGIC, SLOT_ALIGN,
+    Buffer, BufferError, BufferPool, ChannelMode, RegionState, RingLayout, ShmHeader, SlotHeader,
+    ABI_VERSION, MAGIC, SLOT_ALIGN,
 };
 use crate::shm::{ShmError, ShmRegion};
 use crate::sync::{self, SyncError};
@@ -38,13 +38,6 @@ pub enum ChannelError {
     Sync(#[from] SyncError),
 }
 
-/// Channel configuration for the shared-memory ring.
-#[derive(Debug, Copy, Clone)]
-pub enum ChannelMode {
-    Spsc,
-    Mpmc,
-}
-
 /// SPSC ring channel backed by a shared memory region.
 #[derive(Debug)]
 pub struct SpscRing {
@@ -53,7 +46,7 @@ pub struct SpscRing {
     header: *mut ShmHeader,
     data: *mut u8,
     layout: RingLayout,
-    mask: u32,
+    mask: u64,
 }
 
 unsafe impl Send for SpscRing {}
@@ -63,8 +56,8 @@ unsafe impl Sync for SpscRing {}
 pub struct RingStats {
     pub slot_size: usize,
     pub slots: usize,
-    pub read_head: u32,
-    pub write_head: u32,
+    pub read_head: u64,
+    pub write_head: u64,
 }
 
 impl SpscRing {
@@ -143,7 +136,7 @@ impl SpscRing {
             header,
             data,
             layout,
-            mask: (layout.slots as u32).wrapping_sub(1),
+            mask: (layout.slots as u64).wrapping_sub(1),
         })
     }
 
@@ -190,7 +183,8 @@ impl SpscRing {
             self.write_slot(tail, payload, flags);
         }
         self.write_head().store(next, Ordering::Release);
-        sync::wake_one(self.write_head())?;
+        self.wait_write_ptr().fetch_add(1, Ordering::Release);
+        sync::wake_one(self.wait_write_ptr())?;
         Ok(())
     }
 
@@ -199,8 +193,15 @@ impl SpscRing {
             match self.try_send(payload, flags) {
                 Ok(()) => return Ok(()),
                 Err(ChannelError::Full) => {
+                    let wait_word = self.wait_read_ptr();
+                    let expected = wait_word.load(Ordering::Acquire);
                     let head = self.read_head().load(Ordering::Acquire);
-                    sync::wait_on_address(self.read_head(), head)?;
+                    let tail = self.write_head().load(Ordering::Acquire);
+                    let next = tail.wrapping_add(1) & self.mask;
+                    if next != head {
+                        continue;
+                    }
+                    sync::wait_on_address(wait_word, expected)?;
                 }
                 Err(err) => return Err(err),
             }
@@ -223,8 +224,15 @@ impl SpscRing {
                         return Ok(false);
                     }
                     let remaining = deadline - now;
+                    let wait_word = self.wait_read_ptr();
+                    let expected = wait_word.load(Ordering::Acquire);
                     let head = self.read_head().load(Ordering::Acquire);
-                    if !sync::wait_on_address_timeout(self.read_head(), head, remaining)? {
+                    let tail = self.write_head().load(Ordering::Acquire);
+                    let next = tail.wrapping_add(1) & self.mask;
+                    if next != head {
+                        continue;
+                    }
+                    if !sync::wait_on_address_timeout(wait_word, expected, remaining)? {
                         return Ok(false);
                     }
                 }
@@ -242,7 +250,8 @@ impl SpscRing {
         let len = unsafe { self.read_slot(head, out)? };
         let next = head.wrapping_add(1) & self.mask;
         self.read_head().store(next, Ordering::Release);
-        sync::wake_one(self.read_head())?;
+        self.wait_read_ptr().fetch_add(1, Ordering::Release);
+        sync::wake_one(self.wait_read_ptr())?;
         Ok(len)
     }
 
@@ -255,7 +264,8 @@ impl SpscRing {
         let (len, flags) = unsafe { self.read_slot_with_flags(head, out)? };
         let next = head.wrapping_add(1) & self.mask;
         self.read_head().store(next, Ordering::Release);
-        sync::wake_one(self.read_head())?;
+        self.wait_read_ptr().fetch_add(1, Ordering::Release);
+        sync::wake_one(self.wait_read_ptr())?;
         Ok((len, flags))
     }
 
@@ -264,8 +274,14 @@ impl SpscRing {
             match self.try_recv(out) {
                 Ok(len) => return Ok(len),
                 Err(ChannelError::Empty) => {
+                    let wait_word = self.wait_write_ptr();
+                    let expected = wait_word.load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::Acquire);
                     let tail = self.write_head().load(Ordering::Acquire);
-                    sync::wait_on_address(self.write_head(), tail)?;
+                    if head != tail {
+                        continue;
+                    }
+                    sync::wait_on_address(wait_word, expected)?;
                 }
                 Err(err) => return Err(err),
             }
@@ -287,8 +303,14 @@ impl SpscRing {
                         return Ok(None);
                     }
                     let remaining = deadline - now;
+                    let wait_word = self.wait_write_ptr();
+                    let expected = wait_word.load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::Acquire);
                     let tail = self.write_head().load(Ordering::Acquire);
-                    if !sync::wait_on_address_timeout(self.write_head(), tail, remaining)? {
+                    if head != tail {
+                        continue;
+                    }
+                    if !sync::wait_on_address_timeout(wait_word, expected, remaining)? {
                         return Ok(None);
                     }
                 }
@@ -302,8 +324,14 @@ impl SpscRing {
             match self.try_recv_with_flags(out) {
                 Ok(result) => return Ok(result),
                 Err(ChannelError::Empty) => {
+                    let wait_word = self.wait_write_ptr();
+                    let expected = wait_word.load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::Acquire);
                     let tail = self.write_head().load(Ordering::Acquire);
-                    sync::wait_on_address(self.write_head(), tail)?;
+                    if head != tail {
+                        continue;
+                    }
+                    sync::wait_on_address(wait_word, expected)?;
                 }
                 Err(err) => return Err(err),
             }
@@ -325,8 +353,14 @@ impl SpscRing {
                         return Ok(None);
                     }
                     let remaining = deadline - now;
+                    let wait_word = self.wait_write_ptr();
+                    let expected = wait_word.load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::Acquire);
                     let tail = self.write_head().load(Ordering::Acquire);
-                    if !sync::wait_on_address_timeout(self.write_head(), tail, remaining)? {
+                    if head != tail {
+                        continue;
+                    }
+                    if !sync::wait_on_address_timeout(wait_word, expected, remaining)? {
                         return Ok(None);
                     }
                 }
@@ -335,20 +369,28 @@ impl SpscRing {
         }
     }
 
-    fn read_head(&self) -> &core::sync::atomic::AtomicU32 {
+    fn read_head(&self) -> &core::sync::atomic::AtomicU64 {
         unsafe { &(*self.header).read_head.0 }
     }
 
-    fn write_head(&self) -> &core::sync::atomic::AtomicU32 {
+    fn write_head(&self) -> &core::sync::atomic::AtomicU64 {
         unsafe { &(*self.header).write_head.0 }
     }
 
-    unsafe fn slot_ptr(&self, index: u32) -> *mut u8 {
+    fn wait_read_ptr(&self) -> &core::sync::atomic::AtomicU32 {
+        unsafe { &(*self.header).wait_read.0 }
+    }
+
+    fn wait_write_ptr(&self) -> &core::sync::atomic::AtomicU32 {
+        unsafe { &(*self.header).wait_write.0 }
+    }
+
+    unsafe fn slot_ptr(&self, index: u64) -> *mut u8 {
         let offset = (index as usize & self.mask as usize) * self.layout.slot_size;
         self.data.add(offset)
     }
 
-    unsafe fn write_slot(&self, index: u32, payload: &[u8], flags: u32) {
+    unsafe fn write_slot(&self, index: u64, payload: &[u8], flags: u32) {
         let slot = self.slot_ptr(index);
         let header = slot.cast::<SlotHeader>();
         (*header).len = payload.len() as u32;
@@ -357,7 +399,7 @@ impl SpscRing {
         ptr::copy_nonoverlapping(payload.as_ptr(), payload_ptr, payload.len());
     }
 
-    unsafe fn read_slot(&self, index: u32, out: &mut [u8]) -> Result<usize, ChannelError> {
+    unsafe fn read_slot(&self, index: u64, out: &mut [u8]) -> Result<usize, ChannelError> {
         let slot = self.slot_ptr(index);
         let header = &*slot.cast::<SlotHeader>();
         let len = header.len as usize;
@@ -374,7 +416,7 @@ impl SpscRing {
 
     unsafe fn read_slot_with_flags(
         &self,
-        index: u32,
+        index: u64,
         out: &mut [u8],
     ) -> Result<(usize, u32), ChannelError> {
         let slot = self.slot_ptr(index);
@@ -632,7 +674,7 @@ impl BufferChannel {
             core::mem::size_of::<SlotHeader>() + slot_payload,
             SLOT_ALIGN,
         );
-        let layout = RingLayout::new(slot_size, slots);
+        let layout = RingLayout::new(slot_size, slots, ChannelMode::Spsc);
         let region = Arc::new(ShmRegion::create(layout.total_size)?);
         let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0)? };
         let ring = Arc::new(ring);
@@ -648,40 +690,127 @@ impl BufferChannel {
 
 #[derive(Debug)]
 pub struct MpmcRing {
-    slot_size: usize,
+    #[allow(dead_code)]
+    region: Arc<ShmRegion>,
+    header: *mut ShmHeader,
+    sequences: *mut AtomicU64,
+    data: *mut u8,
+    layout: RingLayout,
     mask: u64,
-    head: AtomicU64,
-    tail: AtomicU64,
-    sequences: Vec<AtomicU64>,
-    data: core::cell::UnsafeCell<Vec<u8>>,
 }
 
 unsafe impl Send for MpmcRing {}
 unsafe impl Sync for MpmcRing {}
 
 impl MpmcRing {
-    pub fn new(slot_size: usize, slots: usize) -> Result<Self, ChannelError> {
-        if !slots.is_power_of_two() || slot_size < core::mem::size_of::<SlotHeader>() {
+    /// Initialize a shared region in-place and return a ring handle.
+    pub unsafe fn initialize(
+        region: Arc<ShmRegion>,
+        layout: RingLayout,
+        creator_pid: u32,
+        creator_epoch: u64,
+    ) -> Result<Self, ChannelError> {
+        if !layout.is_power_of_two()
+            || layout.slot_size < core::mem::size_of::<SlotHeader>()
+            || layout.mode != ChannelMode::Mpmc
+        {
             return Err(ChannelError::InvalidLayout);
         }
-        let slot_size = align_up(slot_size, SLOT_ALIGN);
-        let total = slot_size * slots;
-        let mut sequences = Vec::with_capacity(slots);
-        for i in 0..slots {
-            sequences.push(AtomicU64::new(i as u64));
+        if region.len() < layout.total_size {
+            return Err(ChannelError::InvalidLayout);
         }
+
+        let header = region.as_ptr().cast::<ShmHeader>();
+        let header_ref = &mut *header;
+        header_ref.magic = MAGIC;
+        header_ref.abi_version = ABI_VERSION;
+        header_ref.flags = 0;
+        header_ref.total_size = layout.total_size as u64;
+        header_ref.ring_offset = layout.ring_offset() as u64;
+        header_ref.ring_size = layout.ring_size as u64;
+        header_ref.generation.store(1, Ordering::Relaxed);
+        header_ref
+            .state
+            .store(RegionState::Ready as u32, Ordering::Release);
+        header_ref.creator_pid = creator_pid;
+        header_ref.creator_epoch = creator_epoch;
+        header_ref.read_head.0.store(0, Ordering::Relaxed);
+        header_ref.write_head.0.store(0, Ordering::Relaxed);
+        header_ref.wait_read.0.store(0, Ordering::Relaxed);
+        header_ref.wait_write.0.store(0, Ordering::Relaxed);
+
+        // Initialize sequences
+        let sequences = region
+            .as_ptr()
+            .add(layout.seq_offset())
+            .cast::<AtomicU64>();
+        for i in 0..layout.slots {
+            (*sequences.add(i)).store(i as u64, Ordering::Relaxed);
+        }
+
+        Self::from_region(region, layout)
+    }
+
+    /// Attach to an existing shared region.
+    pub unsafe fn attach(region: Arc<ShmRegion>, layout: RingLayout) -> Result<Self, ChannelError> {
+        let header = region.as_ptr().cast::<ShmHeader>();
+        let header_ref = &*header;
+        if header_ref.magic != MAGIC || header_ref.abi_version != ABI_VERSION {
+            return Err(ChannelError::NotReady);
+        }
+        if header_ref.state.load(Ordering::Acquire) != RegionState::Ready as u32 {
+            return Err(ChannelError::NotReady);
+        }
+        if layout.mode != ChannelMode::Mpmc {
+            return Err(ChannelError::InvalidLayout);
+        }
+        Self::from_region(region, layout)
+    }
+
+    pub unsafe fn from_region(
+        region: Arc<ShmRegion>,
+        layout: RingLayout,
+    ) -> Result<Self, ChannelError> {
+        if !layout.is_power_of_two() {
+            return Err(ChannelError::InvalidLayout);
+        }
+        let header = region.as_ptr().cast::<ShmHeader>();
+        let sequences = region
+            .as_ptr()
+            .add(layout.seq_offset())
+            .cast::<AtomicU64>();
+        let data = region.as_ptr().add(layout.ring_offset());
         Ok(Self {
-            slot_size,
-            mask: (slots as u64).wrapping_sub(1),
-            head: AtomicU64::new(0),
-            tail: AtomicU64::new(0),
+            region,
+            header,
             sequences,
-            data: core::cell::UnsafeCell::new(vec![0u8; total]),
+            data,
+            layout,
+            mask: (layout.slots as u64).wrapping_sub(1),
         })
     }
 
+    /// Create a new anonymous MPMC ring.
+    pub fn new(slot_size: usize, slots: usize) -> Result<Self, ChannelError> {
+        let layout = RingLayout::new(slot_size, slots, ChannelMode::Mpmc);
+        let region = Arc::new(ShmRegion::create(layout.total_size)?);
+        unsafe { Self::initialize(region, layout, 0, 0) }
+    }
+
     pub fn payload_capacity(&self) -> usize {
-        self.slot_size - core::mem::size_of::<SlotHeader>()
+        self.layout.slot_size - core::mem::size_of::<SlotHeader>()
+    }
+
+    fn head(&self) -> &AtomicU64 {
+        unsafe { &(*self.header).read_head.0 }
+    }
+
+    fn tail(&self) -> &AtomicU64 {
+        unsafe { &(*self.header).write_head.0 }
+    }
+
+    fn sequence(&self, index: usize) -> &AtomicU64 {
+        unsafe { &*self.sequences.add(index) }
     }
 
     pub fn try_send(&self, payload: &[u8], flags: u32) -> Result<(), ChannelError> {
@@ -691,26 +820,33 @@ impl MpmcRing {
                 capacity: self.payload_capacity(),
             });
         }
-        let tail = self.tail.load(Ordering::SeqCst);
-        let index = (tail & self.mask) as usize;
-        let seq = self.sequences[index].load(Ordering::Acquire);
-        let diff = seq as i64 - tail as i64;
-        if diff == 0 {
-            if self
-                .tail
-                .compare_exchange(tail, tail + 1, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                unsafe {
-                    self.write_slot(index, payload, flags);
+
+        let backoff = Backoff::new();
+        loop {
+            let tail = self.tail().load(Ordering::Relaxed);
+            let index = (tail & self.mask) as usize;
+            let seq = self.sequence(index).load(Ordering::Acquire);
+            let diff = seq as i64 - tail as i64;
+
+            if diff == 0 {
+                if self
+                    .tail()
+                    .compare_exchange(tail, tail + 1, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    unsafe {
+                        self.write_slot(index, payload, flags);
+                    }
+                    self.sequence(index)
+                        .store(tail + 1, Ordering::Release);
+                    return Ok(());
                 }
-                self.sequences[index].store(tail + 1, Ordering::Release);
-                return Ok(());
+            } else if diff < 0 {
+                return Err(ChannelError::Full);
+            } else {
+                backoff.snooze();
             }
-        } else if diff < 0 {
-            return Err(ChannelError::Full);
         }
-        Err(ChannelError::Full)
     }
 
     pub fn send(&self, payload: &[u8], flags: u32) -> Result<(), ChannelError> {
@@ -727,24 +863,30 @@ impl MpmcRing {
     }
 
     pub fn try_recv(&self, out: &mut [u8]) -> Result<usize, ChannelError> {
-        let head = self.head.load(Ordering::SeqCst);
-        let index = (head & self.mask) as usize;
-        let seq = self.sequences[index].load(Ordering::Acquire);
-        let diff = seq as i64 - (head + 1) as i64;
-        if diff == 0 {
-            if self
-                .head
-                .compare_exchange(head, head + 1, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                let len = unsafe { self.read_slot(index, out)? };
-                self.sequences[index].store(head + self.mask + 1, Ordering::Release);
-                return Ok(len);
+        let backoff = Backoff::new();
+        loop {
+            let head = self.head().load(Ordering::Relaxed);
+            let index = (head & self.mask) as usize;
+            let seq = self.sequence(index).load(Ordering::Acquire);
+            let diff = seq as i64 - (head + 1) as i64;
+
+            if diff == 0 {
+                if self
+                    .head()
+                    .compare_exchange(head, head + 1, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    let len = unsafe { self.read_slot(index, out)? };
+                    self.sequence(index)
+                        .store(head + self.mask + 1, Ordering::Release);
+                    return Ok(len);
+                }
+            } else if diff < 0 {
+                return Err(ChannelError::Empty);
+            } else {
+                backoff.snooze();
             }
-        } else if diff < 0 {
-            return Err(ChannelError::Empty);
         }
-        Err(ChannelError::Empty)
     }
 
     pub fn recv(&self, out: &mut [u8]) -> Result<usize, ChannelError> {
@@ -759,9 +901,8 @@ impl MpmcRing {
     }
 
     unsafe fn slot_ptr(&self, index: usize) -> *mut u8 {
-        let offset = index * self.slot_size;
-        let data: &Vec<u8> = unsafe { &*self.data.get() };
-        data.as_ptr().add(offset) as *mut u8
+        let offset = index * self.layout.slot_size;
+        self.data.add(offset)
     }
 
     unsafe fn write_slot(&self, index: usize, payload: &[u8], flags: u32) {
@@ -802,7 +943,7 @@ mod tests {
 
     #[test]
     fn spsc_round_trip() {
-        let layout = RingLayout::new(256, 8);
+        let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
@@ -822,7 +963,7 @@ mod tests {
 
     #[test]
     fn spsc_timeouts() {
-        let layout = RingLayout::new(256, 2);
+        let layout = RingLayout::new(256, 2, ChannelMode::Spsc);
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
@@ -849,7 +990,7 @@ mod tests {
 
     #[test]
     fn spsc_full_empty_edges() {
-        let layout = RingLayout::new(128, 2);
+        let layout = RingLayout::new(128, 2, ChannelMode::Spsc);
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
@@ -872,7 +1013,7 @@ mod tests {
 
     #[test]
     fn spsc_multi_threaded() {
-        let layout = RingLayout::new(128, 8);
+        let layout = RingLayout::new(128, 8, ChannelMode::Spsc);
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
@@ -951,7 +1092,7 @@ mod tests {
     proptest! {
         #[test]
         fn spsc_fifo_order(values in proptest::collection::vec(0u8..=255, 1..32)) {
-            let layout = RingLayout::new(64, 64);
+            let layout = RingLayout::new(64, 64, ChannelMode::Spsc);
             let alloc_layout =
                 std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                     .unwrap();
@@ -974,7 +1115,7 @@ mod tests {
 
         #[test]
         fn spsc_lossless(values in proptest::collection::vec(0u8..=255, 1..32)) {
-            let layout = RingLayout::new(64, 64);
+            let layout = RingLayout::new(64, 64, ChannelMode::Spsc);
             let alloc_layout =
                 std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                     .unwrap();

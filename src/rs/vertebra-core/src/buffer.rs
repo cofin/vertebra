@@ -1,6 +1,6 @@
 //! Shared memory layout and ring buffer metadata.
 
-use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicU32, AtomicU64};
 use std::cell::UnsafeCell;
 use std::sync::{Arc, Mutex};
 
@@ -18,7 +18,7 @@ pub const CACHELINE_BYTES: usize = 128;
 pub const CACHELINE_BYTES: usize = 64;
 
 /// ABI version for shared memory layouts.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// Magic marker for validating mapped regions ("VERTEBRA").
 pub const MAGIC: u64 = u64::from_le_bytes(*b"VERTEBRA");
@@ -64,10 +64,17 @@ pub struct ShmHeader {
     pub reserved0: u32,
     pub creator_epoch: u64,
     pub reserved1: [u8; 32],
-    pub read_head: CacheLine<AtomicU32>,
-    pub write_head: CacheLine<AtomicU32>,
+    pub read_head: CacheLine<AtomicU64>,
+    pub write_head: CacheLine<AtomicU64>,
     pub wait_read: CacheLine<AtomicU32>,
     pub wait_write: CacheLine<AtomicU32>,
+}
+
+/// Channel configuration for the shared-memory ring.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ChannelMode {
+    Spsc,
+    Mpmc,
 }
 
 /// Slot header prefix (fixed-size).
@@ -227,24 +234,32 @@ pub fn read_arrow_ipc(buffer: &[u8]) -> Result<Vec<RecordBatch>, ArrowError> {
 /// Describes a ring layout derived from slot size + slot count.
 #[derive(Debug, Copy, Clone)]
 pub struct RingLayout {
+    pub mode: ChannelMode,
     pub slot_size: usize,
     pub slots: usize,
+    pub seq_size: usize,
     pub ring_size: usize,
     pub header_size: usize,
     pub total_size: usize,
 }
 
 impl RingLayout {
-    pub fn new(slot_size: usize, slots: usize) -> Self {
+    pub fn new(slot_size: usize, slots: usize, mode: ChannelMode) -> Self {
+        let seq_size = match mode {
+            ChannelMode::Spsc => 0,
+            ChannelMode::Mpmc => slots * core::mem::size_of::<AtomicU64>(),
+        };
         let ring_size = slot_size * slots;
         let header_size = align_up(
             core::mem::size_of::<ShmHeader>(),
             CACHELINE_BYTES.max(SLOT_ALIGN),
         );
-        let total_size = header_size + ring_size;
+        let total_size = header_size + seq_size + ring_size;
         Self {
+            mode,
             slot_size,
             slots,
+            seq_size,
             ring_size,
             header_size,
             total_size,
@@ -253,6 +268,14 @@ impl RingLayout {
 
     pub fn is_power_of_two(&self) -> bool {
         self.slots.is_power_of_two()
+    }
+
+    pub fn seq_offset(&self) -> usize {
+        self.header_size
+    }
+
+    pub fn ring_offset(&self) -> usize {
+        self.header_size + self.seq_size
     }
 }
 
@@ -311,6 +334,16 @@ mod tests {
             }
         });
         assert_eq!(pool.available(), 4);
+    }
+
+    #[test]
+    fn ring_layout_mpmc_includes_sequences() {
+        let slots = 64;
+        let slot_size = 256;
+        let layout = RingLayout::new(slot_size, slots, ChannelMode::Mpmc);
+        let expected_seq_size = slots * core::mem::size_of::<AtomicU64>();
+        assert_eq!(layout.seq_size, expected_seq_size);
+        assert_eq!(layout.total_size, layout.header_size + expected_seq_size + (slot_size * slots));
     }
 
     proptest! {

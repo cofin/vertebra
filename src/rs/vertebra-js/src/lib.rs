@@ -213,7 +213,11 @@ pub struct SpscRingHandle {
 impl SpscRingHandle {
     #[napi(constructor)]
     pub fn new(slot_size: u32, slots: u32) -> Result<Self> {
-        let layout = RingLayout::new(slot_size as usize, slots as usize);
+        let layout = RingLayout::new(
+            slot_size as usize,
+            slots as usize,
+            vertebra_core::buffer::ChannelMode::Spsc,
+        );
         let region = Arc::new(ShmRegion::create(layout.total_size).map_err(map_err)?);
         let ring =
             unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0) }.map_err(map_err)?;
@@ -291,7 +295,11 @@ pub struct ChannelHandle {
 /// What client sends, server receives, and vice versa.
 #[napi]
 pub fn create_channel_pair(env: Env, slot_size: u32, slots: u32) -> Result<JsObject> {
-    let layout = RingLayout::new(slot_size as usize, slots as usize);
+    let layout = RingLayout::new(
+        slot_size as usize,
+        slots as usize,
+        vertebra_core::buffer::ChannelMode::Spsc,
+    );
     let req_region = Arc::new(ShmRegion::create(layout.total_size).map_err(map_err)?);
     let resp_region = Arc::new(ShmRegion::create(layout.total_size).map_err(map_err)?);
 
@@ -334,7 +342,11 @@ impl ChannelHandle {
         slots: u32,
         role: ChannelRole,
     ) -> Result<Self> {
-        let layout = RingLayout::new(slot_size as usize, slots as usize);
+        let layout = RingLayout::new(
+            slot_size as usize,
+            slots as usize,
+            vertebra_core::buffer::ChannelMode::Spsc,
+        );
         let req_name = format!("{name}.req");
         let resp_name = format!("{name}.resp");
         let req_region =
@@ -364,7 +376,11 @@ impl ChannelHandle {
     #[cfg(unix)]
     #[napi(factory)]
     pub fn open_named(name: String, slot_size: u32, slots: u32, role: ChannelRole) -> Result<Self> {
-        let layout = RingLayout::new(slot_size as usize, slots as usize);
+        let layout = RingLayout::new(
+            slot_size as usize,
+            slots as usize,
+            vertebra_core::buffer::ChannelMode::Spsc,
+        );
         let req_name = format!("{name}.req");
         let resp_name = format!("{name}.resp");
         let req_region =

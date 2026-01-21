@@ -56,7 +56,7 @@ impl AsyncRing {
     /// # Returns
     /// A new `AsyncRing` backed by anonymous shared memory.
     pub fn new(slot_size: usize, slots: usize) -> Result<Self, AsyncRingError> {
-        let layout = RingLayout::new(slot_size, slots);
+        let layout = RingLayout::new(slot_size, slots, crate::buffer::ChannelMode::Spsc);
         let region = Arc::new(ShmRegion::create(layout.total_size)?);
         let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0)? };
         let notifier = Notifier::new()?;
@@ -77,7 +77,7 @@ impl AsyncRing {
         slot_size: usize,
         slots: usize,
     ) -> Result<Self, AsyncRingError> {
-        let layout = RingLayout::new(slot_size, slots);
+        let layout = RingLayout::new(slot_size, slots, crate::buffer::ChannelMode::Spsc);
         let region = Arc::new(ShmRegion::create_named(name, layout.total_size)?);
         let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0)? };
         let notifier = Notifier::new()?;
@@ -92,7 +92,7 @@ impl AsyncRing {
     /// Open an existing named async ring buffer.
     #[cfg(unix)]
     pub fn open_named(name: &str, slot_size: usize, slots: usize) -> Result<Self, AsyncRingError> {
-        let layout = RingLayout::new(slot_size, slots);
+        let layout = RingLayout::new(slot_size, slots, crate::buffer::ChannelMode::Spsc);
         let region = Arc::new(ShmRegion::open_named(name, layout.total_size)?);
         let ring = unsafe { SpscRing::attach(Arc::clone(&region), layout)? };
         let notifier = Notifier::new()?;
