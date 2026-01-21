@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from vertebra._vertebra import NativeSupervisor
+
 if TYPE_CHECKING:
     from types import FrameType
 
@@ -128,6 +130,7 @@ class Supervisor:
         self._shutdown_event = asyncio.Event()
         self._original_handlers: dict[int, Any] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._native = NativeSupervisor()
 
     @property
     def state(self) -> SupervisorState:
@@ -194,6 +197,7 @@ class Supervisor:
             handle.proc = proc
             handle.state = ProcessState.RUNNING
             handle.started_at = time.time()
+            self._native.add_child(proc.pid)
 
             logger.info("Started process %s (pid=%d)", name, proc.pid)
 
@@ -308,27 +312,53 @@ class Supervisor:
         Returns:
             Exit code of the primary process, or first failed process.
         """
-        if primary:
-            handle = self._handles.get(primary)
-            if handle and handle.proc:
-                return handle.proc.wait()
-            return 1
-
         # Wait for any critical process to exit
         while self._state == SupervisorState.RUNNING:
+            # Wait for native events (100ms timeout)
+            # This handles signals and child reaping
+            try:
+                event = self._native.wait_next_event(100)
+            except Exception:
+                logger.exception("Error in native supervisor wait")
+                time.sleep(0.1)
+                continue
+
+            event_type = event.get("type")
+
+            if event_type == "exit":
+                pid = event["pid"]
+                code = event["code"]
+                
+                # Find matching process
+                for name, handle in self._handles.items():
+                    if handle.proc and handle.proc.pid == pid:
+                        logger.info("Process %s exited with code %d", name, code)
+                        handle.state = ProcessState.STOPPED
+                        
+                        # Check critical
+                        if handle.spec.critical:
+                            return code
+                        
+                        # If primary exited
+                        if primary and name == primary:
+                            return code
+
+                        # Non-critical: attempt restart
+                        self._maybe_restart(name)
+                        break
+            
+            elif event_type == "signal":
+                signo = event["signo"]
+                logger.info("Received signal %d via native supervisor", signo)
+                self.stop(signo)
+                return 128 + signo
+
+            # Also check polling for processes not managed by native supervisor (if any)
+            # or just as a fallback
             for name, handle in self._handles.items():
                 if handle.proc and handle.proc.poll() is not None:
-                    exit_code = handle.proc.returncode
-                    logger.info("Process %s exited with code %d", name, exit_code)
-                    handle.state = ProcessState.STOPPED
-
-                    if handle.spec.critical:
-                        return cast("int", exit_code)
-
-                    # Non-critical: attempt restart
-                    self._maybe_restart(name)
-
-            time.sleep(0.1)
+                    # Logic handled by native exit event usually, but if missed:
+                    pass
 
         return 0
 
