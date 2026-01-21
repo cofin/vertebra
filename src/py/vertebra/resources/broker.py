@@ -11,9 +11,9 @@ import msgspec
 
 from vertebra._internal.async_transport import AsyncShmTransport, PollingTransport, create_transport
 from vertebra._internal.module_loader import ensure_pyarrow
-from vertebra._internal.serialization import MessagePackCodec
 from vertebra._vertebra import AsyncRing, ShmRegion, SpscRing
 from vertebra.resources.arrow import decode_arrow_nano
+from vertebra.serializers import MessagePackCodec
 
 
 class BrokerClientError(RuntimeError):

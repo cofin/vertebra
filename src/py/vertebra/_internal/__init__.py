@@ -9,7 +9,7 @@ This module centralizes internal utilities:
 
 from vertebra._internal.dependencies import FSSPEC_INSTALLED, LITESTAR_INSTALLED, SQLSPEC_INSTALLED, WATCHDOG_INSTALLED
 from vertebra._internal.errors import MissingDependencyError
-from vertebra._internal.serialization import (
+from vertebra.serializers import (
     JSONCodec,
     MessagePackCodec,
     decode_json,

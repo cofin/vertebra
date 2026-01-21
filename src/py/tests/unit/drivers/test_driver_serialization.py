@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from vertebra._internal.serialization import MessagePackCodec
+from vertebra.serializers import MessagePackCodec
 
 pytestmark = pytest.mark.unit
 

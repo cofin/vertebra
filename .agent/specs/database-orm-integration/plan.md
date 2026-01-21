@@ -155,7 +155,7 @@
 
 - [ ] **Task 2.1.1**: Create serialization package structure
   - Files: `__init__.py`, `_types.py`, `_encoders.py`, `_decoders.py`
-  - Location: `src/py/vertebra/extensions/serialization/`
+  - Location: `src/py/vertebra/serializers/`
 
 - [ ] **Task 2.1.2**: Implement P0 type encoders (10 types)
   - `datetime`, `date`, `Decimal`, `UUID`, `Enum`
@@ -198,7 +198,7 @@
 - [ ] **Task 2.2.1**: Create `msgpack.py` module
   - Implement `VertebraCodec` class
   - Extend msgspec's `MessagePackCodec`
-  - File: `src/py/vertebra/extensions/serialization/msgpack.py` (NEW)
+  - File: `src/py/vertebra/serializers/msgpack.py` (NEW)
 
 - [ ] **Task 2.2.2**: Register P0 type hooks
   - Register all P0 types with codec
@@ -232,7 +232,7 @@
 **Dependencies**: Task 2.1, 2.2
 
 - [ ] **Task 2.3.1**: Create `litestar.py` module
-  - File: `src/py/vertebra/extensions/serialization/litestar.py` (NEW)
+  - File: `src/py/vertebra/serializers/litestar.py` (NEW)
 
 - [ ] **Task 2.3.2**: Implement `VERTEBRA_TYPE_ENCODERS`
   - Dict mapping types to encoder functions

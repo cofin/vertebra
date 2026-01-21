@@ -14,8 +14,8 @@ from typing import Any
 
 import msgspec
 
-from vertebra._internal.serialization import MessagePackCodec
 from vertebra._vertebra import SpscRing
+from vertebra.serializers import MessagePackCodec
 
 
 class WorkerConfig(msgspec.Struct, frozen=True):

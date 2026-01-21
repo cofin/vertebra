@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vertebra._internal.serialization import MessagePackCodec
 from vertebra._vertebra import SpscRing
 from vertebra.resources.arrow import ArrowRegionPool, encode_arrow_nano, should_use_arrow
 from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig
+from vertebra.serializers import MessagePackCodec
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable

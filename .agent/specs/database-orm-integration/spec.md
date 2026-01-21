@@ -451,7 +451,7 @@ Unified type encoding/decoding for IPC (MessagePack) and HTTP (JSON). This exten
 ### 4.2 File Structure
 
 ```
-src/py/vertebra/extensions/serialization/
+src/py/vertebra/serializers/
 ├── __init__.py           # Unified exports
 ├── _types.py             # Vertebra-specific type definitions
 ├── _encoders.py          # Type encoder hooks
@@ -494,7 +494,7 @@ src/py/vertebra/extensions/serialization/
 ### 4.4 MessagePack Codec
 
 ```python
-# src/py/vertebra/extensions/serialization/msgpack.py
+# src/py/vertebra/serializers/msgpack.py
 
 from msgspec.msgpack import MessagePackCodec
 from datetime import datetime, date, time, timedelta
@@ -542,7 +542,7 @@ class VertebraCodec(MessagePackCodec):
 ### 4.5 Litestar Integration
 
 ```python
-# src/py/vertebra/extensions/serialization/litestar.py
+# src/py/vertebra/serializers/litestar.py
 
 from litestar.serialization import default_serializer
 from typing import Any
@@ -780,7 +780,7 @@ class VertebraAdvancedAlchemyPlugin(AAPlugin):
 # src/py/vertebra/extensions/litestar/_serialization.py
 
 from litestar import Litestar
-from vertebra.extensions.serialization.litestar import (
+from vertebra.serializers.litestar import (
     VERTEBRA_TYPE_ENCODERS,
     VERTEBRA_TYPE_DECODERS,
 )
@@ -1193,13 +1193,13 @@ strategy:
 - `/home/cody/code/c/vertebra/src/py/vertebra/extensions/sqlspec/_storage.py`
 
 **Serialization** (all new):
-- `/home/cody/code/c/vertebra/src/py/vertebra/extensions/serialization/__init__.py`
-- `/home/cody/code/c/vertebra/src/py/vertebra/extensions/serialization/_types.py`
-- `/home/cody/code/c/vertebra/src/py/vertebra/extensions/serialization/_encoders.py`
-- `/home/cody/code/c/vertebra/src/py/vertebra/extensions/serialization/_decoders.py`
-- `/home/cody/code/c/vertebra/src/py/vertebra/extensions/serialization/msgpack.py`
-- `/home/cody/code/c/vertebra/src/py/vertebra/extensions/serialization/json.py`
-- `/home/cody/code/c/vertebra/src/py/vertebra/extensions/serialization/litestar.py`
+- `/home/cody/code/c/vertebra/src/py/vertebra/serializers/__init__.py`
+- `/home/cody/code/c/vertebra/src/py/vertebra/serializers/_types.py`
+- `/home/cody/code/c/vertebra/src/py/vertebra/serializers/_encoders.py`
+- `/home/cody/code/c/vertebra/src/py/vertebra/serializers/_decoders.py`
+- `/home/cody/code/c/vertebra/src/py/vertebra/serializers/msgpack.py`
+- `/home/cody/code/c/vertebra/src/py/vertebra/serializers/json.py`
+- `/home/cody/code/c/vertebra/src/py/vertebra/serializers/litestar.py`
 
 **SQLAlchemy** (all new):
 - `/home/cody/code/c/vertebra/src/py/vertebra/extensions/sqlalchemy/__init__.py`

@@ -25,6 +25,6 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 ## [x] PRD: Test Consolidation + Custom DB Fixture Completion
 *Link: [./test-consolidation/](./test-consolidation/)*
 
-## [ ] PRD: Refactor Serialization to Core Package
+## [~] PRD: Refactor Serialization to Core Package
 *Link: [./refactor-serialization-core/](./refactor-serialization-core/)*
 *Risk Level: [medium]*
