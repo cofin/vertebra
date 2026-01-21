@@ -101,8 +101,9 @@ impl NativeSupervisor {
 
         let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, timeout_ms as i32) };
 
-        let result = if ret > 0 {
-            // ... (same as before)
+        // Read signal if available to clear the buffer
+        let mut signal_received = None;
+        if ret > 0 {
             let mut si = MaybeUninit::<libc::signalfd_siginfo>::uninit();
             let res = unsafe {
                 libc::read(
@@ -113,33 +114,30 @@ impl NativeSupervisor {
             };
             if res as usize == std::mem::size_of::<libc::signalfd_siginfo>() {
                 let si = unsafe { si.assume_init() };
-                let signo = si.ssi_signo as i32;
+                signal_received = Some(si.ssi_signo as i32);
+            }
+        }
 
-                match signo {
-                    libc::SIGINT | libc::SIGTERM => SupervisorEvent::Signal { signo },
-                    libc::SIGCHLD => {
-                        // Reap one child
-                        let mut status: i32 = 0;
-                        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-                        if pid > 0 {
-                            self.remove_child(pid);
-                            // Extract exit code
-                            let code = if libc::WIFEXITED(status) {
-                                libc::WEXITSTATUS(status)
-                            } else if libc::WIFSIGNALED(status) {
-                                -libc::WTERMSIG(status)
-                            } else {
-                                0
-                            };
-                            SupervisorEvent::Exit { pid, code }
-                        } else {
-                            SupervisorEvent::Timeout()
-                        }
-                    }
-                    _ => SupervisorEvent::Timeout(),
-                }
+        // Always check for zombie processes (SIGCHLD might have been missed or consumed)
+        // This is the critical fix for the race condition.
+        let mut status: i32 = 0;
+        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+
+        let result = if pid > 0 {
+            self.remove_child(pid);
+            // Extract exit code
+            let code = if libc::WIFEXITED(status) {
+                libc::WEXITSTATUS(status)
+            } else if libc::WIFSIGNALED(status) {
+                -libc::WTERMSIG(status)
             } else {
-                SupervisorEvent::Timeout()
+                0
+            };
+            SupervisorEvent::Exit { pid, code }
+        } else if let Some(signo) = signal_received {
+            match signo {
+                libc::SIGINT | libc::SIGTERM => SupervisorEvent::Signal { signo },
+                _ => SupervisorEvent::Timeout(),
             }
         } else {
             SupervisorEvent::Timeout()

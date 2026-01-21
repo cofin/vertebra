@@ -25,15 +25,14 @@ This plan outlines the adoption of SQLSpec's typing patterns for optional depend
 - [ ] Task: Create consolidated typing facade
     - [ ] Create `src/py/vertebra/_internal/typing.py`
     - [ ] Re-export arrow types and flags
-    - [ ] Add `NUMPY_INSTALLED`, `PGVECTOR_INSTALLED` flags
+    - [ ] Add `NUMPY_INSTALLED`  flags
     - [ ] Add `NumpyArrayProtocol` stub
     - [ ] Add `__all__` with complete exports
 
 - [ ] Task: Update pyproject.toml
     - [ ] Add `[project.optional-dependencies]` section
     - [ ] Add `arrow = ["pyarrow>=14.0.0"]`
-    - [ ] Add `vector = ["pgvector>=0.2.0"]`
-    - [ ] Add `full = ["pyarrow", "pgvector", "numpy"]`
+    - [ ] Add `full = ["pyarrow",  "numpy"]`
 
 - [ ] Task: Flow - User Manual Verification 'Phase 1: Core Infrastructure'
 
@@ -76,13 +75,11 @@ This plan outlines the adoption of SQLSpec's typing patterns for optional depend
 - [ ] Task: Create DriverFeatures TypedDict
     - [ ] Create `VertebraDriverFeatures` base TypedDict
     - [ ] Add JSON serializer/deserializer options
-    - [ ] Add `enable_json_codecs` flag
-    - [ ] Add `enable_pgvector` flag
+    - [ ] Add `enable_json_codecs` flag 
     - [ ] Add `arrow_threshold_rows` and `arrow_threshold_bytes`
 
 - [ ] Task: Add extension registration hooks
-    - [ ] Create `register_json_codecs()` function
-    - [ ] Create `register_pgvector_support()` function
+    - [ ] Create `register_json_codecs()` function 
     - [ ] Add `_init_connection()` hook in config
 
 - [ ] Task: Flow - User Manual Verification 'Phase 3: SQLSpec Provider Updates'
@@ -159,8 +156,7 @@ def process(table: ArrowTable) -> list[dict[str, Any]]:
 
 # 4. Extension features via TypedDict
 config = VertebraPostgresConfig(
-    driver_features={
-        "enable_pgvector": True,
+    driver_features={ 
         "enable_json_codecs": True,
     }
 )
