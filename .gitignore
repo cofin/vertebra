@@ -63,3 +63,4 @@ src/rs/tools/scripts/detect_mcp_tools.py
 AGENTS.md
 specs/archive
 uv.toml
+.agent/specs/archive
