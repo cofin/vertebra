@@ -10,6 +10,7 @@ export type SqlResult = {
   columns: string[];
   rows: unknown[][];
   rowcount: number;
+  raw?: Record<string, unknown>[];
 };
 
 export class PostgresPool {
@@ -59,5 +60,5 @@ function normalizeSqlResult(result: unknown): SqlResult {
   const rows = result as Record<string, unknown>[];
   const columns = rows.length > 0 ? Object.keys(rows[0] ?? {}) : [];
   const values = rows.map((row) => columns.map((col) => row[col]));
-  return { columns, rows: values, rowcount: values.length };
+  return { columns, rows: values, rowcount: values.length, raw: rows };
 }

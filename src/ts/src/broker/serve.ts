@@ -255,7 +255,7 @@ class SqlitePool extends BasePoolAdapter {
       const rows = stmt.all(...(params as any[])) as Record<string, unknown>[];
       const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
       const values = rows.map((row) => columns.map((col) => row[col]));
-      return { columns, rows: values, rowcount: values.length };
+      return { columns, rows: values, rowcount: values.length, raw: rows };
     } catch (error) {
       this.recordError();
       throw error;
@@ -1098,13 +1098,14 @@ class Broker {
     }
     const rows = (result.rows as unknown[][]) ?? [];
     const columns = (result.columns as string[]) ?? [];
+    const raw = result.raw as Record<string, unknown>[] | undefined;
     const rowcount = (result.rowcount as number) ?? rows.length;
     const estimatedBytes = rows.length * columns.length * 8;
     if (
       rows.length >= this.config.arrow_threshold_rows ||
       estimatedBytes >= this.config.arrow_threshold_bytes
     ) {
-      const records = rows.map((row) => {
+      const records = raw ?? rows.map((row) => {
         const obj: Record<string, unknown> = {};
         columns.forEach((col, idx) => {
           obj[col] = row[idx];
@@ -1138,7 +1139,7 @@ function normalizeSqlResult(result: unknown): Record<string, unknown> {
   const rows = result as Record<string, unknown>[];
   const columns = rows.length > 0 ? Object.keys(rows[0] ?? {}) : [];
   const values = rows.map((row) => columns.map((col) => row[col]));
-  return { columns, rows: values, rowcount: values.length };
+  return { columns, rows: values, rowcount: values.length, raw: rows };
 }
 
 function loadConfig(path?: string): BrokerConfig {
