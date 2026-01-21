@@ -10,13 +10,13 @@
 - [x] Task: Flow - User Manual Verification 'Foundation & PostgreSQL Implementation' (Protocol in workflow.md).
 
 ## Phase 2: SQLite Implementation
-- [ ] Task: Create directory structure for SQLite extensions.
-- [ ] Task: Implement SQLite ADK Store (`sqlspec/sqlite/adk/store.py`).
-- [ ] Task: Implement SQLite Event Store (`sqlspec/sqlite/events/store.py`).
-- [ ] Task: Implement SQLite Litestar Store (`sqlspec/sqlite/litestar/store.py`).
-- [ ] Task: Write tests for SQLite extensions.
-- [ ] Task: Checkpoint - Verify Phase 2 complete and create recovery point.
-- [ ] Task: Flow - User Manual Verification 'SQLite Implementation' (Protocol in workflow.md).
+- [x] Task: Create directory structure for SQLite extensions. [a832ef5]
+- [x] Task: Implement SQLite ADK Store (\`sqlspec/sqlite/adk/store.py\`). [7659038]
+- [x] Task: Implement SQLite Event Store (\`sqlspec/sqlite/events/store.py\`). [7659038]
+- [x] Task: Implement SQLite Litestar Store (\`sqlspec/sqlite/litestar/store.py\`). [7659038]
+- [x] Task: Write tests for SQLite extensions. [7659038]
+- [x] Task: Checkpoint - Verify Phase 2 complete and create recovery point. [checkpoint: 7659038]
+- [x] Task: Flow - User Manual Verification 'SQLite Implementation' (Protocol in workflow.md).
 
 ## Phase 3: MySQL Implementation
 - [ ] Task: Create directory structure for MySQL extensions.

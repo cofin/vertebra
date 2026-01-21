@@ -1,16 +1,16 @@
 # Knowledge Capture: Optimized SQLSpec Extensions for Vertebra Drivers
 
 ## Patterns Discovered
-- **Adapter-First Structure:** Mirroring internal library structure (`sqlspec/adapters/<dialect>/<extension>/store.py`) inside `vertebra/extensions/sqlspec/<dialect>/<extension>/store.py` ensures logical consistency and easier upstream parity.
-- **Vertebra Result Mapping:** `VertebraAsyncConnection.fetchrow` returns a tuple, while `sqlspec` often expects dict-like access. Using `VertebraAsyncDriver.execute` (which uses `_collect_rows` to map results to dicts) or manually mapping tuples to named fields is necessary.
+- **Julian Day Timestamps:** SQLite doesn't have a native timestamp type with timezone support that works well with `julianday()`. Using `REAL` to store Julian Day numbers (as seen in `sqlspec`'s internal adapters) is the most compatible pattern for efficient expiry queries.
+- **SQL Parameter Parity:** PostgreSQL uses `$1, $2`, while SQLite uses `?`. Vertebra's `VertebraAsyncConnection.execute` handles both if passed correctly, but the implementations must be dialect-aware.
 
 ## Lessons Learned
-- **Dependency Awareness:** `sqlspec` has optional extras like `adk` which are required for specific extensions. These must be explicitly added to `pyproject.toml`.
-- **Import Side Effects:** Importing `sqlspec.extensions.adk` triggers imports of `google.adk`, which might be missing if the extra wasn't installed.
+- **SQLite Booleans:** SQLite lacks a native `BOOLEAN` type. Using `INTEGER` (0/1) and explicit conversion helpers (`_to_sqlite_bool`, `_from_sqlite_bool`) ensures consistency across drivers.
+- **JSON as TEXT:** SQLite stores JSON as `TEXT`. Explicit serialization to string before insertion and deserialization after fetching is required.
 
 ## Decisions Made
-- **Manual Tuple Mapping in Litestar Store:** In `PostgresLitestarStore.get`, I manually mapped the tuple indices `row[0]` (data) and `row[1]` (expires_at) to avoid complex wrapper objects while maintaining performance.
-- **Async/Sync Parity:** Implemented both `PostgresADKStore` and `SyncPostgresADKStore` to ensure support for both driver types as requested.
+- **Mirroring Aiosqlite Logic:** Followed the Julian Day conversion logic from `sqlspec.adapters.aiosqlite` to ensure identical behavior when using Vertebra's SQLite driver.
+- **Async/Sync Parity for SQLite:** Implemented both `SqliteADKStore` and `SyncSqliteADKStore`.
 
 ## Reusable Components
 [Code, utilities, or approaches that could be reused]
