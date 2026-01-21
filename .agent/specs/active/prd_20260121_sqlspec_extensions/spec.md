@@ -75,5 +75,5 @@ No prior research conducted (Direct implementation from `sqlspec` internal patte
 **Safe Checkpoints:**
 - After Phase 1: `checkpoint/prd_20260121_sqlspec_extensions/1`
 - After Phase 2: \`checkpoint/prd_20260121_sqlspec_extensions/2\`
-- After Phase 3: [Description of safe state]
+- After Phase 3: \`checkpoint/prd_20260121_sqlspec_extensions/3\`
 - After Phase 4: [Description of safe state]

@@ -1,16 +1,16 @@
 # Knowledge Capture: Optimized SQLSpec Extensions for Vertebra Drivers
 
 ## Patterns Discovered
-- **Julian Day Timestamps:** SQLite doesn't have a native timestamp type with timezone support that works well with `julianday()`. Using `REAL` to store Julian Day numbers (as seen in `sqlspec`'s internal adapters) is the most compatible pattern for efficient expiry queries.
-- **SQL Parameter Parity:** PostgreSQL uses `$1, $2`, while SQLite uses `?`. Vertebra's `VertebraAsyncConnection.execute` handles both if passed correctly, but the implementations must be dialect-aware.
+- **MySQL Procedural DDL:** MySQL doesn't support `IF NOT EXISTS` for indexes. The pattern used in `sqlspec` (and mirrored here) involves checking `information_schema.statistics` using procedural SQL variables and prepared statements.
+- **MySQL Parameter Style:** Uses `%s` consistently across all implementations.
 
 ## Lessons Learned
-- **SQLite Booleans:** SQLite lacks a native `BOOLEAN` type. Using `INTEGER` (0/1) and explicit conversion helpers (`_to_sqlite_bool`, `_from_sqlite_bool`) ensures consistency across drivers.
-- **JSON as TEXT:** SQLite stores JSON as `TEXT`. Explicit serialization to string before insertion and deserialization after fetching is required.
+- **Timezone Naivety:** MySQL `DATETIME` is timezone-naive. Following `sqlspec`'s lead, we store UTC as naive datetime and handle the "awareness" in the Python layer using `.replace(tzinfo=timezone.utc)`.
+- **JSON Type Requirement:** Requires MySQL 5.7.8+ for the native `JSON` column support used in the stores.
 
 ## Decisions Made
-- **Mirroring Aiosqlite Logic:** Followed the Julian Day conversion logic from `sqlspec.adapters.aiosqlite` to ensure identical behavior when using Vertebra's SQLite driver.
-- **Async/Sync Parity for SQLite:** Implemented both `SqliteADKStore` and `SyncSqliteADKStore`.
+- **Mirroring Asyncmy logic:** Used `UTC_TIMESTAMP(6)` for microsecond precision current time in MySQL, consistent with `sqlspec.adapters.asyncmy`.
+- **Async/Sync Parity for MySQL:** Implemented both `MysqlADKStore` and `SyncMysqlADKStore`.
 
 ## Reusable Components
 [Code, utilities, or approaches that could be reused]

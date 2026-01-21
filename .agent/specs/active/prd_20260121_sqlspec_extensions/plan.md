@@ -19,13 +19,13 @@
 - [x] Task: Flow - User Manual Verification 'SQLite Implementation' (Protocol in workflow.md).
 
 ## Phase 3: MySQL Implementation
-- [ ] Task: Create directory structure for MySQL extensions.
-- [ ] Task: Implement MySQL ADK Store (`sqlspec/mysql/adk/store.py`).
-- [ ] Task: Implement MySQL Event Store (`sqlspec/mysql/events/store.py`).
-- [ ] Task: Implement MySQL Litestar Store (`sqlspec/mysql/litestar/store.py`).
-- [ ] Task: Write tests for MySQL extensions.
-- [ ] Task: Checkpoint - Verify Phase 3 complete and create recovery point.
-- [ ] Task: Flow - User Manual Verification 'MySQL Implementation' (Protocol in workflow.md).
+- [x] Task: Create directory structure for MySQL extensions. [f6764d7]
+- [x] Task: Implement MySQL ADK Store (\`sqlspec/mysql/adk/store.py\`). [9142070]
+- [x] Task: Implement MySQL Event Store (\`sqlspec/mysql/events/store.py\`). [9142070]
+- [x] Task: Implement MySQL Litestar Store (\`sqlspec/mysql/litestar/store.py\`). [9142070]
+- [x] Task: Write tests for MySQL extensions. [9142070]
+- [x] Task: Checkpoint - Verify Phase 3 complete and create recovery point. [checkpoint: 9142070]
+- [x] Task: Flow - User Manual Verification 'MySQL Implementation' (Protocol in workflow.md).
 
 ## Phase 4: Finalization
 - [ ] Task: Ensure all `__init__.py` files correctly export the new stores.
