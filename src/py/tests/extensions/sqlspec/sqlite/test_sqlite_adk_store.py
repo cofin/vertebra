@@ -16,8 +16,8 @@ def mock_driver_session():
     
     # Mock execute to return a result object
     mock_result = MagicMock()
-    mock_result.fetchone.return_value = None
-    mock_result.fetchall.return_value = []
+    mock_result.one_or_none.return_value = None
+    mock_result.all.return_value = []
     mock.execute = AsyncMock(return_value=mock_result)
     
     return mock, mock_result
@@ -46,7 +46,7 @@ def mock_config(mock_driver_session, mock_driver_connection):
     # Mock provide_connection context manager
     conn_cm = AsyncMock()
     conn_cm.__aenter__.return_value = mock_driver_connection
-    config.provide_connection.return_value = conn_cm
+    config.provide_connection = AsyncMock(return_value=conn_cm)
     
     return config
 
@@ -76,9 +76,9 @@ async def test_create_session(mock_config, mock_driver_connection, mock_driver_s
     _, mock_result = mock_driver_session
     from vertebra.extensions.sqlspec.sqlite.adk.store import SqliteADKStore
 
-    # Mock fetchrow (which uses execute().fetchone()) to return the created session
+    # Mock one_or_none to return the created session
     # SQLite implementation uses REAL for timestamps, so we mock floats
-    mock_result.fetchone.return_value = {
+    mock_result.one_or_none.return_value = {
         "id": "sess_1",
         "app_name": "app",
         "user_id": "user",

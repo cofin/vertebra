@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, AsyncMock
 
 import pytest
 
 if TYPE_CHECKING:
-    from vertebra.extensions.sqlspec.mysql.litestar.store import MysqlLitestarStore
+    from vertebra.extensions.sqlspec.postgres.litestar.store import PostgresLitestarStore
 
 
 @pytest.fixture
@@ -37,22 +36,22 @@ def mock_config(mock_driver_session, mock_driver_connection):
 
     conn_cm = AsyncMock()
     conn_cm.__aenter__.return_value = mock_driver_connection
-    config.provide_connection.return_value = conn_cm
+    config.provide_connection = AsyncMock(return_value=conn_cm)
     
     return config
 
 
-async def test_mysql_litestar_store_initialization(mock_config):
-    from vertebra.extensions.sqlspec.mysql.litestar.store import MysqlLitestarStore
+async def test_postgres_litestar_store_initialization(mock_config):
+    from vertebra.extensions.sqlspec.postgres.litestar.store import PostgresLitestarStore
 
-    store = MysqlLitestarStore(mock_config)
+    store = PostgresLitestarStore(mock_config)
     assert store.table_name == "test_litestar_sessions"
 
 
 async def test_create_table(mock_config, mock_driver_session):
-    from vertebra.extensions.sqlspec.mysql.litestar.store import MysqlLitestarStore
+    from vertebra.extensions.sqlspec.postgres.litestar.store import PostgresLitestarStore
 
-    store = MysqlLitestarStore(mock_config)
+    store = PostgresLitestarStore(mock_config)
     await store.create_table()
 
     mock_driver_session.execute_script.assert_called_once()
@@ -60,15 +59,14 @@ async def test_create_table(mock_config, mock_driver_session):
 
 
 async def test_get_session(mock_config, mock_driver_connection):
-    from vertebra.extensions.sqlspec.mysql.litestar.store import MysqlLitestarStore
+    from vertebra.extensions.sqlspec.postgres.litestar.store import PostgresLitestarStore
 
     # Mock fetchrow to return a tuple (data, expires_at)
     mock_driver_connection.fetchrow.return_value = (b"session_data", None)
 
-    store = MysqlLitestarStore(mock_config)
+    store = PostgresLitestarStore(mock_config)
     data = await store.get("sess_1")
 
     assert data == b"session_data"
     mock_driver_connection.fetchrow.assert_called_once()
     assert "SELECT data, expires_at" in mock_driver_connection.fetchrow.call_args[0][0]
-    assert "%s" in mock_driver_connection.fetchrow.call_args[0][0]

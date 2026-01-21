@@ -1,21 +1,23 @@
+# ruff: noqa: S608
 """PostgreSQL ADK store for Vertebra."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, cast
 
-from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore, EventRecord, SessionRecord
+from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore, EventRecord, MemoryRecord, SessionRecord
 from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore, BaseSyncADKMemoryStore
+from sqlspec.utils.serializers import from_json, to_json
 
 if TYPE_CHECKING:
     from datetime import datetime
-    from vertebra.extensions.sqlspec.postgres.config import PostgresConfig
+    from vertebra.extensions.sqlspec.postgres.config import VertebraPostgresAsyncConfig, VertebraPostgresSyncConfig
 
 
 __all__ = ("PostgresADKMemoryStore", "PostgresADKStore", "SyncPostgresADKMemoryStore", "SyncPostgresADKStore")
 
 
-class PostgresADKStore(BaseAsyncADKStore["PostgresConfig"]):
+class PostgresADKStore(BaseAsyncADKStore["VertebraPostgresAsyncConfig"]):
     """PostgreSQL ADK store for Vertebra.
 
     Mirrors sqlspec.adapters.asyncpg.adk.store.AsyncpgADKStore but adapted
@@ -32,6 +34,7 @@ class PostgresADKStore(BaseAsyncADKStore["PostgresConfig"]):
         return f"""
         CREATE TABLE IF NOT EXISTS {self._session_table} (
             id VARCHAR(128) PRIMARY KEY,
+            session_id VARCHAR(128) NOT NULL,
             app_name VARCHAR(128) NOT NULL,
             user_id VARCHAR(128) NOT NULL{owner_id_line},
             state JSONB NOT NULL DEFAULT '{{}}'::jsonb,
@@ -92,9 +95,9 @@ class PostgresADKStore(BaseAsyncADKStore["PostgresConfig"]):
         app_name: str,
         user_id: str,
         state: dict[str, Any],
-        owner_id: Any | None = None
+        owner_id: Any | None = None,
     ) -> SessionRecord:
-        async with self.config.provide_connection() as conn:
+        async with (await self.config.provide_connection()) as conn:
             if self._owner_id_column_name:
                 sql = f"""
                 INSERT INTO {self._session_table}
@@ -109,7 +112,11 @@ class PostgresADKStore(BaseAsyncADKStore["PostgresConfig"]):
                 """
                 await conn.execute(sql, [session_id, app_name, user_id, state])
 
-        return await self.get_session(session_id)  # type: ignore[return-value]
+        record = await self.get_session(session_id)
+        if record is None:
+            msg = f"Failed to create session {session_id}"
+            raise RuntimeError(msg)
+        return record
 
     async def get_session(self, session_id: str) -> SessionRecord | None:
         sql = f"""
@@ -120,7 +127,7 @@ class PostgresADKStore(BaseAsyncADKStore["PostgresConfig"]):
 
         async with self.config.provide_session() as driver:
             result = await driver.execute(sql, [session_id])
-            row = result.fetchone()
+            row = result.one_or_none()
 
             if row is None:
                 return None
@@ -141,13 +148,13 @@ class PostgresADKStore(BaseAsyncADKStore["PostgresConfig"]):
         WHERE id = $2
         """
 
-        async with self.config.provide_connection() as conn:
+        async with (await self.config.provide_connection()) as conn:
             await conn.execute(sql, [state, session_id])
 
     async def delete_session(self, session_id: str) -> None:
         sql = f"DELETE FROM {self._session_table} WHERE id = $1"
 
-        async with self.config.provide_connection() as conn:
+        async with (await self.config.provide_connection()) as conn:
             await conn.execute(sql, [session_id])
 
     async def list_sessions(self, app_name: str, user_id: str | None = None) -> list[SessionRecord]:
@@ -170,14 +177,14 @@ class PostgresADKStore(BaseAsyncADKStore["PostgresConfig"]):
 
         async with self.config.provide_session() as driver:
             result = await driver.execute(sql, params)
-            rows = result.fetchall()
+            rows = result.all()
 
             return [
                 SessionRecord(
                     id=row["id"],
                     app_name=row["app_name"],
                     user_id=row["user_id"],
-                    state=row["state"],
+                    state=from_json(row["state"]) if isinstance(row["state"], str) else row["state"],
                     create_time=row["create_time"],
                     update_time=row["update_time"],
                 )
@@ -196,7 +203,7 @@ class PostgresADKStore(BaseAsyncADKStore["PostgresConfig"]):
         )
         """
 
-        async with self.config.provide_connection() as conn:
+        async with (await self.config.provide_connection()) as conn:
             await conn.execute(
                 sql,
                 [
@@ -204,9 +211,9 @@ class PostgresADKStore(BaseAsyncADKStore["PostgresConfig"]):
                     event_record["session_id"],
                     event_record["app_name"],
                     event_record["user_id"],
-                    event_record.get("invocation_id"),
-                    event_record.get("author"),
-                    event_record.get("actions"),
+                    event_record.get("invocation_id") or "",
+                    event_record.get("author") or "",
+                    event_record.get("actions") or b"",
                     event_record.get("long_running_tool_ids_json"),
                     event_record.get("branch"),
                     event_record["timestamp"],
@@ -225,7 +232,7 @@ class PostgresADKStore(BaseAsyncADKStore["PostgresConfig"]):
         self,
         session_id: str,
         after_timestamp: datetime | None = None,
-        limit: int | None = None
+        limit: int | None = None,
     ) -> list[EventRecord]:
         where_clauses = ["session_id = $1"]
         params: list[Any] = [session_id]
@@ -251,7 +258,7 @@ class PostgresADKStore(BaseAsyncADKStore["PostgresConfig"]):
 
         async with self.config.provide_session() as driver:
             result = await driver.execute(sql, params)
-            rows = result.fetchall()
+            rows = result.all()
 
             return [
                 EventRecord(
@@ -261,7 +268,7 @@ class PostgresADKStore(BaseAsyncADKStore["PostgresConfig"]):
                     user_id=row["user_id"],
                     invocation_id=row["invocation_id"],
                     author=row["author"],
-                    actions=bytes(row["actions"]) if row["actions"] else b"",
+                    actions=bytes(cast("bytes", row["actions"])),
                     long_running_tool_ids_json=row["long_running_tool_ids_json"],
                     branch=row["branch"],
                     timestamp=row["timestamp"],
@@ -278,7 +285,7 @@ class PostgresADKStore(BaseAsyncADKStore["PostgresConfig"]):
             ]
 
 
-class PostgresADKMemoryStore(BaseAsyncADKMemoryStore["PostgresConfig"]):
+class PostgresADKMemoryStore(BaseAsyncADKMemoryStore["VertebraPostgresAsyncConfig"]):
     """PostgreSQL ADK memory store for Vertebra."""
 
     __slots__ = ()
@@ -337,7 +344,7 @@ class PostgresADKMemoryStore(BaseAsyncADKMemoryStore["PostgresConfig"]):
             return 0
 
         inserted_count = 0
-        async with self._config.provide_connection() as conn:
+        async with (await self._config.provide_connection()) as conn:
             for entry in entries:
                 if self._owner_id_column_name:
                     sql = f"""
@@ -359,9 +366,9 @@ class PostgresADKMemoryStore(BaseAsyncADKMemoryStore["PostgresConfig"]):
                             entry["author"],
                             owner_id,
                             entry["timestamp"],
-                            entry["content_json"],
+                            to_json(entry["content_json"]),
                             entry["content_text"],
-                            entry["metadata_json"],
+                            to_json(entry["metadata_json"]),
                             entry["inserted_at"],
                         ],
                     )
@@ -383,9 +390,9 @@ class PostgresADKMemoryStore(BaseAsyncADKMemoryStore["PostgresConfig"]):
                             entry["event_id"],
                             entry["author"],
                             entry["timestamp"],
-                            entry["content_json"],
+                            to_json(entry["content_json"]),
                             entry["content_text"],
-                            entry["metadata_json"],
+                            to_json(entry["metadata_json"]),
                             entry["inserted_at"],
                         ],
                     )
@@ -399,7 +406,7 @@ class PostgresADKMemoryStore(BaseAsyncADKMemoryStore["PostgresConfig"]):
         query: str,
         app_name: str,
         user_id: str,
-        limit: int | None = None
+        limit: int | None = None,
     ) -> list[MemoryRecord]:
         if not self._enabled:
             msg = "Memory store is disabled"
@@ -429,7 +436,7 @@ class PostgresADKMemoryStore(BaseAsyncADKMemoryStore["PostgresConfig"]):
 
         async with self._config.provide_session() as driver:
             result = await driver.execute(sql, params)
-            return [dict(row) for row in result.fetchall()]  # type: ignore[return-value]
+            return cast("list[MemoryRecord]", [dict(row) for row in result.all()])
 
     async def delete_entries_by_session(self, session_id: str) -> int:
         if not self._enabled:
@@ -437,8 +444,9 @@ class PostgresADKMemoryStore(BaseAsyncADKMemoryStore["PostgresConfig"]):
             raise RuntimeError(msg)
 
         sql = f"DELETE FROM {self._memory_table} WHERE session_id = $1"
-        async with self.config.provide_connection() as conn:
-            return await conn.execute(sql, [session_id]) or 0
+        async with (await self.config.provide_connection()) as conn:
+            result = await conn.execute(sql, [session_id])
+            return result or 0
 
     async def delete_entries_older_than(self, days: int) -> int:
         if not self._enabled:
@@ -449,17 +457,18 @@ class PostgresADKMemoryStore(BaseAsyncADKMemoryStore["PostgresConfig"]):
         DELETE FROM {self._memory_table}
         WHERE inserted_at < (CURRENT_TIMESTAMP - ($1::int * INTERVAL '1 day'))
         """
-        async with self.config.provide_connection() as conn:
-            return await conn.execute(sql, [days]) or 0
+        async with (await self.config.provide_connection()) as conn:
+            result = await conn.execute(sql, [days])
+            return result or 0
 
 
-class SyncPostgresADKStore(BaseSyncADKStore["PostgresConfig"]):
+class SyncPostgresADKStore(BaseSyncADKStore["VertebraPostgresSyncConfig"]):
     """Synchronous PostgreSQL ADK store for Vertebra."""
 
     __slots__ = ()
 
     def _get_create_sessions_table_sql(self) -> str:
-        # Same SQL as async
+        # Same SQL as async version
         owner_id_line = ""
         if self._owner_id_column_ddl:
             owner_id_line = f",\n            {self._owner_id_column_ddl}"
@@ -527,7 +536,7 @@ class SyncPostgresADKStore(BaseSyncADKStore["PostgresConfig"]):
         app_name: str,
         user_id: str,
         state: dict[str, Any],
-        owner_id: Any | None = None
+        owner_id: Any | None = None,
     ) -> SessionRecord:
         with self.config.provide_connection() as conn:
             if self._owner_id_column_name:
@@ -536,15 +545,19 @@ class SyncPostgresADKStore(BaseSyncADKStore["PostgresConfig"]):
                 (id, app_name, user_id, {self._owner_id_column_name}, state, create_time, update_time)
                 VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """
-                conn.execute(sql, [session_id, app_name, user_id, owner_id, state])
+                conn._execute(sql, [session_id, app_name, user_id, owner_id, state])
             else:
                 sql = f"""
                 INSERT INTO {self._session_table} (id, app_name, user_id, state, create_time, update_time)
                 VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """
-                conn.execute(sql, [session_id, app_name, user_id, state])
+                conn._execute(sql, [session_id, app_name, user_id, state])
 
-        return self.get_session(session_id)  # type: ignore[return-value]
+        record = self.get_session(session_id)
+        if record is None:
+            msg = f"Failed to create session {session_id}"
+            raise RuntimeError(msg)
+        return record
 
     def get_session(self, session_id: str) -> SessionRecord | None:
         sql = f"""
@@ -555,7 +568,7 @@ class SyncPostgresADKStore(BaseSyncADKStore["PostgresConfig"]):
 
         with self.config.provide_session() as driver:
             result = driver.execute(sql, [session_id])
-            row = result.fetchone()
+            row = result.one_or_none()
 
             if row is None:
                 return None
@@ -577,13 +590,13 @@ class SyncPostgresADKStore(BaseSyncADKStore["PostgresConfig"]):
         """
 
         with self.config.provide_connection() as conn:
-            conn.execute(sql, [state, session_id])
+            conn._execute(sql, [state, session_id])
 
     def delete_session(self, session_id: str) -> None:
         sql = f"DELETE FROM {self._session_table} WHERE id = $1"
 
         with self.config.provide_connection() as conn:
-            conn.execute(sql, [session_id])
+            conn._execute(sql, [session_id])
 
     def list_sessions(self, app_name: str, user_id: str | None = None) -> list[SessionRecord]:
         if user_id is None:
@@ -605,14 +618,14 @@ class SyncPostgresADKStore(BaseSyncADKStore["PostgresConfig"]):
 
         with self.config.provide_session() as driver:
             result = driver.execute(sql, params)
-            rows = result.fetchall()
+            rows = result.all()
 
             return [
                 SessionRecord(
                     id=row["id"],
                     app_name=row["app_name"],
                     user_id=row["user_id"],
-                    state=row["state"],
+                    state=from_json(row["state"]) if isinstance(row["state"], str) else row["state"],
                     create_time=row["create_time"],
                     update_time=row["update_time"],
                 )
@@ -642,7 +655,7 @@ class SyncPostgresADKStore(BaseSyncADKStore["PostgresConfig"]):
         """
 
         timestamp = kwargs.get("timestamp")
-        invocation_id = kwargs.get("invocation_id")
+        invocation_id = kwargs.get("invocation_id") or ""
         long_running_tool_ids_json = kwargs.get("long_running_tool_ids_json")
         branch = kwargs.get("branch")
         grounding_metadata = kwargs.get("grounding_metadata")
@@ -654,7 +667,7 @@ class SyncPostgresADKStore(BaseSyncADKStore["PostgresConfig"]):
         error_message = kwargs.get("error_message")
 
         with self.config.provide_connection() as conn:
-            conn.execute(
+            conn._execute(
                 sql,
                 [
                     event_id,
@@ -662,8 +675,8 @@ class SyncPostgresADKStore(BaseSyncADKStore["PostgresConfig"]):
                     app_name,
                     user_id,
                     invocation_id,
-                    author,
-                    actions,
+                    author or "",
+                    actions or b"",
                     long_running_tool_ids_json,
                     branch,
                     timestamp,
@@ -686,11 +699,11 @@ class SyncPostgresADKStore(BaseSyncADKStore["PostgresConfig"]):
             app_name=app_name,
             user_id=user_id,
             invocation_id=invocation_id,
-            author=author,
-            actions=actions,
+            author=author or "",
+            actions=actions or b"",
             long_running_tool_ids_json=long_running_tool_ids_json,
             branch=branch,
-            timestamp=timestamp,
+            timestamp=cast("datetime", timestamp),
             content=content,
             grounding_metadata=grounding_metadata,
             custom_metadata=custom_metadata,
@@ -710,7 +723,7 @@ class SyncPostgresADKStore(BaseSyncADKStore["PostgresConfig"]):
 
         with self.config.provide_session() as driver:
             result = driver.execute(sql, [session_id])
-            rows = result.fetchall()
+            rows = result.all()
 
             return [
                 EventRecord(
@@ -737,7 +750,7 @@ class SyncPostgresADKStore(BaseSyncADKStore["PostgresConfig"]):
             ]
 
 
-class SyncPostgresADKMemoryStore(BaseSyncADKMemoryStore["PostgresConfig"]):
+class SyncPostgresADKMemoryStore(BaseSyncADKMemoryStore["VertebraPostgresSyncConfig"]):
     """Synchronous PostgreSQL ADK memory store for Vertebra."""
 
     __slots__ = ()
@@ -808,7 +821,7 @@ class SyncPostgresADKMemoryStore(BaseSyncADKMemoryStore["PostgresConfig"]):
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     ON CONFLICT (event_id) DO NOTHING
                     """
-                    rowcount = conn.execute(
+                    rowcount = conn._execute(
                         sql,
                         [
                             entry["id"],
@@ -819,9 +832,9 @@ class SyncPostgresADKMemoryStore(BaseSyncADKMemoryStore["PostgresConfig"]):
                             entry["author"],
                             owner_id,
                             entry["timestamp"],
-                            entry["content_json"],
+                            to_json(entry["content_json"]),
                             entry["content_text"],
-                            entry["metadata_json"],
+                            to_json(entry["metadata_json"]),
                             entry["inserted_at"],
                         ],
                     )
@@ -833,7 +846,7 @@ class SyncPostgresADKMemoryStore(BaseSyncADKMemoryStore["PostgresConfig"]):
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     ON CONFLICT (event_id) DO NOTHING
                     """
-                    rowcount = conn.execute(
+                    rowcount = conn._execute(
                         sql,
                         [
                             entry["id"],
@@ -843,14 +856,14 @@ class SyncPostgresADKMemoryStore(BaseSyncADKMemoryStore["PostgresConfig"]):
                             entry["event_id"],
                             entry["author"],
                             entry["timestamp"],
-                            entry["content_json"],
+                            to_json(entry["content_json"]),
                             entry["content_text"],
-                            entry["metadata_json"],
+                            to_json(entry["metadata_json"]),
                             entry["inserted_at"],
                         ],
                     )
                 if rowcount:
-                    inserted_count += rowcount
+                    inserted_count += rowcount.get("rowcount", 0)
 
         return inserted_count
 
@@ -883,7 +896,7 @@ class SyncPostgresADKMemoryStore(BaseSyncADKMemoryStore["PostgresConfig"]):
 
         with self._config.provide_session() as driver:
             result = driver.execute(sql, params)
-            return [dict(row) for row in result.fetchall()]  # type: ignore[return-value]
+            return cast("list[MemoryRecord]", [dict(row) for row in result.all()])
 
     def delete_entries_by_session(self, session_id: str) -> int:
         if not self._enabled:
@@ -892,7 +905,8 @@ class SyncPostgresADKMemoryStore(BaseSyncADKMemoryStore["PostgresConfig"]):
 
         sql = f"DELETE FROM {self._memory_table} WHERE session_id = $1"
         with self.config.provide_connection() as conn:
-            return conn.execute(sql, [session_id]) or 0
+            result = conn._execute(sql, [session_id])
+            return result.get("rowcount", 0)
 
     def delete_entries_older_than(self, days: int) -> int:
         if not self._enabled:
@@ -904,4 +918,5 @@ class SyncPostgresADKMemoryStore(BaseSyncADKMemoryStore["PostgresConfig"]):
         WHERE inserted_at < (CURRENT_TIMESTAMP - ($1::int * INTERVAL '1 day'))
         """
         with self.config.provide_connection() as conn:
-            return conn.execute(sql, [days]) or 0
+            result = conn._execute(sql, [days])
+            return result.get("rowcount", 0)

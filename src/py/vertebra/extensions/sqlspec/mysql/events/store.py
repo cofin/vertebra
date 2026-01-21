@@ -1,3 +1,4 @@
+# ruff: noqa: S608
 """MySQL event queue store for Vertebra."""
 
 from __future__ import annotations
@@ -7,13 +8,13 @@ from typing import TYPE_CHECKING
 from sqlspec.extensions.events import BaseEventQueueStore
 
 if TYPE_CHECKING:
-    from vertebra.extensions.sqlspec.mysql.config import MysqlConfig
+    from vertebra.extensions.sqlspec.mysql.config import VertebraMysqlAsyncConfig
 
 
 __all__ = ("MysqlEventQueueStore",)
 
 
-class MysqlEventQueueStore(BaseEventQueueStore["MysqlConfig"]):
+class MysqlEventQueueStore(BaseEventQueueStore["VertebraMysqlAsyncConfig"]):
     """MySQL event queue store for Vertebra.
 
     Uses JSON for payload/metadata and DATETIME(6) for microsecond timestamps.

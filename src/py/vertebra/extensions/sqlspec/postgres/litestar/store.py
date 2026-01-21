@@ -1,21 +1,22 @@
+# ruff: noqa: S608
 """PostgreSQL session store for Litestar integration in Vertebra."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlspec.extensions.litestar.store import BaseSQLSpecStore
 
 if TYPE_CHECKING:
     from datetime import timedelta
-    from vertebra.extensions.sqlspec.postgres.config import PostgresConfig
+    from vertebra.extensions.sqlspec.postgres.config import VertebraPostgresAsyncConfig
 
 
 __all__ = ("PostgresLitestarStore",)
 
 
-class PostgresLitestarStore(BaseSQLSpecStore["PostgresConfig"]):
+class PostgresLitestarStore(BaseSQLSpecStore["VertebraPostgresAsyncConfig"]):
     """PostgreSQL session store for Litestar in Vertebra.
 
     Mirrors sqlspec.adapters.asyncpg.litestar.store.AsyncpgStore but adapted
@@ -59,7 +60,7 @@ class PostgresLitestarStore(BaseSQLSpecStore["PostgresConfig"]):
         AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
         """
 
-        async with self._config.provide_connection() as conn:
+        async with (await self._config.provide_connection()) as conn:
             row = await conn.fetchrow(sql, [key])
 
             if row is None:
@@ -67,9 +68,9 @@ class PostgresLitestarStore(BaseSQLSpecStore["PostgresConfig"]):
 
             # Vertebra fetchrow returns tuple, but sqlspec expects dict access
             # We'll map it manually here.
-            # Row index 0: data, index 1: expires_at
-            data = row[0]
-            expires_at = row[1]
+            # Row index 0: data (bytes), index 1: expires_at (datetime)
+            data = cast("bytes", row[0])
+            expires_at = cast("datetime | None", row[1])
 
             if renew_for is not None and expires_at is not None:
                 new_expires_at = self._calculate_expires_at(renew_for)
@@ -97,19 +98,19 @@ class PostgresLitestarStore(BaseSQLSpecStore["PostgresConfig"]):
             updated_at = CURRENT_TIMESTAMP
         """
 
-        async with self._config.provide_connection() as conn:
+        async with (await self._config.provide_connection()) as conn:
             await conn.execute(sql, [key, data, expires_at])
 
     async def delete(self, key: str) -> None:
         sql = f"DELETE FROM {self._table_name} WHERE session_id = $1"
 
-        async with self._config.provide_connection() as conn:
+        async with (await self._config.provide_connection()) as conn:
             await conn.execute(sql, [key])
 
     async def delete_all(self) -> None:
         sql = f"DELETE FROM {self._table_name}"
 
-        async with self._config.provide_connection() as conn:
+        async with (await self._config.provide_connection()) as conn:
             await conn.execute(sql)
         self._log_delete_all()
 
@@ -120,7 +121,7 @@ class PostgresLitestarStore(BaseSQLSpecStore["PostgresConfig"]):
         AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
         """
 
-        async with self._config.provide_connection() as conn:
+        async with (await self._config.provide_connection()) as conn:
             result = await conn.fetchval(sql, [key])
             return result is not None
 
@@ -130,8 +131,8 @@ class PostgresLitestarStore(BaseSQLSpecStore["PostgresConfig"]):
         WHERE session_id = $1
         """
 
-        async with self._config.provide_connection() as conn:
-            expires_at = await conn.fetchval(sql, [key])
+        async with (await self._config.provide_connection()) as conn:
+            expires_at = cast("datetime | None", await conn.fetchval(sql, [key]))
 
             if expires_at is None:
                 return None
@@ -146,7 +147,7 @@ class PostgresLitestarStore(BaseSQLSpecStore["PostgresConfig"]):
     async def delete_expired(self) -> int:
         sql = f"DELETE FROM {self._table_name} WHERE expires_at <= CURRENT_TIMESTAMP"
 
-        async with self._config.provide_connection() as conn:
+        async with (await self._config.provide_connection()) as conn:
             rowcount = await conn.execute(sql)
             count = rowcount or 0
             if count > 0:

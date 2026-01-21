@@ -1,17 +1,17 @@
+# ruff: noqa: S608
 """SQLite ADK store for Vertebra."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore, EventRecord, SessionRecord
+from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore, EventRecord, MemoryRecord, SessionRecord
 from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore, BaseSyncADKMemoryStore
 from sqlspec.utils.serializers import from_json, to_json
 
 if TYPE_CHECKING:
-    from vertebra.extensions.sqlspec.sqlite.config import SqliteConfig
-    from sqlspec.extensions.adk import MemoryRecord
+    from vertebra.extensions.sqlspec.sqlite.config import VertebraSqliteAsyncConfig, VertebraSqliteSyncConfig
 
 
 SECONDS_PER_DAY = 86400.0
@@ -46,7 +46,7 @@ def _from_sqlite_bool(value: int | None) -> bool | None:
     return bool(value)
 
 
-class SqliteADKStore(BaseAsyncADKStore["SqliteConfig"]):
+class SqliteADKStore(BaseAsyncADKStore["VertebraSqliteAsyncConfig"]):
     """SQLite ADK store for Vertebra.
 
     Mirrors sqlspec.adapters.aiosqlite.adk.store.AiosqliteADKStore but adapted
@@ -109,11 +109,11 @@ class SqliteADKStore(BaseAsyncADKStore["SqliteConfig"]):
     async def create_session(
         self, session_id: str, app_name: str, user_id: str, state: dict[str, Any], owner_id: Any | None = None
     ) -> SessionRecord:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         now_julian = _datetime_to_julian(now)
         state_json = to_json(state) if state else "{}"
 
-        async with self.config.provide_connection() as conn:
+        async with (await self.config.provide_connection()) as conn:
             if self._owner_id_column_name:
                 sql = f"""
                 INSERT INTO {self._session_table}
@@ -128,7 +128,11 @@ class SqliteADKStore(BaseAsyncADKStore["SqliteConfig"]):
                 """
                 await conn.execute(sql, [session_id, app_name, user_id, state_json, now_julian, now_julian])
 
-        return await self.get_session(session_id)  # type: ignore[return-value]
+        record = await self.get_session(session_id)
+        if record is None:
+            msg = f"Failed to create session {session_id}"
+            raise RuntimeError(msg)
+        return record
 
     async def get_session(self, session_id: str) -> SessionRecord | None:
         sql = f"""
@@ -139,7 +143,7 @@ class SqliteADKStore(BaseAsyncADKStore["SqliteConfig"]):
 
         async with self.config.provide_session() as driver:
             result = await driver.execute(sql, [session_id])
-            row = result.fetchone()
+            row = result.one_or_none()
 
             if row is None:
                 return None
@@ -154,7 +158,7 @@ class SqliteADKStore(BaseAsyncADKStore["SqliteConfig"]):
             )
 
     async def update_session_state(self, session_id: str, state: dict[str, Any]) -> None:
-        now_julian = _datetime_to_julian(datetime.now(timezone.utc))
+        now_julian = _datetime_to_julian(datetime.now(UTC))
         state_json = to_json(state) if state else "{}"
 
         sql = f"""
@@ -163,13 +167,13 @@ class SqliteADKStore(BaseAsyncADKStore["SqliteConfig"]):
         WHERE id = ?
         """
 
-        async with self.config.provide_connection() as conn:
+        async with (await self.config.provide_connection()) as conn:
             await conn.execute(sql, [state_json, now_julian, session_id])
 
     async def delete_session(self, session_id: str) -> None:
         sql = f"DELETE FROM {self._session_table} WHERE id = ?"
 
-        async with self.config.provide_connection() as conn:
+        async with (await self.config.provide_connection()) as conn:
             await conn.execute(sql, [session_id])
 
     async def list_sessions(self, app_name: str, user_id: str | None = None) -> list[SessionRecord]:
@@ -192,7 +196,7 @@ class SqliteADKStore(BaseAsyncADKStore["SqliteConfig"]):
 
         async with self.config.provide_session() as driver:
             result = await driver.execute(sql, params)
-            rows = result.fetchall()
+            rows = result.all()
 
             return [
                 SessionRecord(
@@ -232,7 +236,7 @@ class SqliteADKStore(BaseAsyncADKStore["SqliteConfig"]):
         )
         """
 
-        async with self.config.provide_connection() as conn:
+        async with (await self.config.provide_connection()) as conn:
             await conn.execute(
                 sql,
                 [
@@ -282,7 +286,7 @@ class SqliteADKStore(BaseAsyncADKStore["SqliteConfig"]):
 
         async with self.config.provide_session() as driver:
             result = await driver.execute(sql, params)
-            rows = result.fetchall()
+            rows = result.all()
 
             return [
                 EventRecord(
@@ -292,7 +296,7 @@ class SqliteADKStore(BaseAsyncADKStore["SqliteConfig"]):
                     user_id=row["user_id"],
                     invocation_id=row["invocation_id"],
                     author=row["author"],
-                    actions=bytes(row["actions"]),
+                    actions=bytes(cast("bytes", row["actions"])),
                     long_running_tool_ids_json=row["long_running_tool_ids_json"],
                     branch=row["branch"],
                     timestamp=_julian_to_datetime(row["timestamp"]),
@@ -309,7 +313,7 @@ class SqliteADKStore(BaseAsyncADKStore["SqliteConfig"]):
             ]
 
 
-class SqliteADKMemoryStore(BaseAsyncADKMemoryStore["SqliteConfig"]):
+class SqliteADKMemoryStore(BaseAsyncADKMemoryStore["VertebraSqliteAsyncConfig"]):
     """SQLite ADK memory store for Vertebra."""
 
     __slots__ = ()
@@ -390,7 +394,7 @@ class SqliteADKMemoryStore(BaseAsyncADKMemoryStore["SqliteConfig"]):
             return 0
 
         inserted_count = 0
-        async with self._config.provide_connection() as conn:
+        async with (await self._config.provide_connection()) as conn:
             for entry in entries:
                 params: list[Any]
                 if self._owner_id_column_name:
@@ -455,7 +459,7 @@ class SqliteADKMemoryStore(BaseAsyncADKMemoryStore["SqliteConfig"]):
             sql = f"""
             SELECT m.* FROM {self._memory_table} AS m
             JOIN {self._memory_table}_fts AS fts ON m.rowid = fts.rowid
-            WHERE m.app_name = ? AND m.user_id = ? AND fts.content_text MATCH ?
+            WHERE m.app_name = ? AND user_id = ? AND fts.content_text MATCH ?
             ORDER BY m.timestamp DESC
             LIMIT ?
             """
@@ -472,7 +476,7 @@ class SqliteADKMemoryStore(BaseAsyncADKMemoryStore["SqliteConfig"]):
         async with self._config.provide_session() as driver:
             result = await driver.execute(sql, params)
             records: list[MemoryRecord] = []
-            for row in result.fetchall():
+            for row in result.all():
                 raw = dict(row)
                 raw["timestamp"] = _julian_to_datetime(raw["timestamp"])
                 raw["inserted_at"] = _julian_to_datetime(raw["inserted_at"])
@@ -487,21 +491,23 @@ class SqliteADKMemoryStore(BaseAsyncADKMemoryStore["SqliteConfig"]):
             raise RuntimeError(msg)
 
         sql = f"DELETE FROM {self._memory_table} WHERE session_id = ?"
-        async with self._config.provide_connection() as conn:
-            return await conn.execute(sql, [session_id]) or 0
+        async with (await self._config.provide_connection()) as conn:
+            result = await conn.execute(sql, [session_id])
+            return cast("int", result or 0)
 
     async def delete_entries_older_than(self, days: int) -> int:
         if not self._enabled:
             msg = "Memory store is disabled"
             raise RuntimeError(msg)
 
-        cutoff = _datetime_to_julian(datetime.now(timezone.utc)) - days
+        cutoff = _datetime_to_julian(datetime.now(UTC)) - days
         sql = f"DELETE FROM {self._memory_table} WHERE inserted_at < ?"
-        async with self._config.provide_connection() as conn:
-            return await conn.execute(sql, [cutoff]) or 0
+        async with (await self._config.provide_connection()) as conn:
+            result = await conn.execute(sql, [cutoff])
+            return cast("int", result or 0)
 
 
-class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
+class SyncSqliteADKStore(BaseSyncADKStore["VertebraSqliteSyncConfig"]):
     """Synchronous SQLite ADK store for Vertebra."""
 
     __slots__ = ()
@@ -560,7 +566,7 @@ class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
     def create_session(
         self, session_id: str, app_name: str, user_id: str, state: dict[str, Any], owner_id: Any | None = None
     ) -> SessionRecord:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         now_julian = _datetime_to_julian(now)
         state_json = to_json(state) if state else "{}"
 
@@ -571,15 +577,19 @@ class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
                 (id, app_name, user_id, {self._owner_id_column_name}, state, create_time, update_time)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """
-                conn.execute(sql, [session_id, app_name, user_id, owner_id, state_json, now_julian, now_julian])
+                conn._execute(sql, [session_id, app_name, user_id, owner_id, state_json, now_julian, now_julian])
             else:
                 sql = f"""
                 INSERT INTO {self._session_table} (id, app_name, user_id, state, create_time, update_time)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """
-                conn.execute(sql, [session_id, app_name, user_id, state_json, now_julian, now_julian])
+                conn._execute(sql, [session_id, app_name, user_id, state_json, now_julian, now_julian])
 
-        return self.get_session(session_id)  # type: ignore[return-value]
+        record = self.get_session(session_id)
+        if record is None:
+            msg = f"Failed to create session {session_id}"
+            raise RuntimeError(msg)
+        return record
 
     def get_session(self, session_id: str) -> SessionRecord | None:
         sql = f"""
@@ -590,7 +600,7 @@ class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
 
         with self.config.provide_session() as driver:
             result = driver.execute(sql, [session_id])
-            row = result.fetchone()
+            row = result.one_or_none()
 
             if row is None:
                 return None
@@ -605,7 +615,7 @@ class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
             )
 
     def update_session_state(self, session_id: str, state: dict[str, Any]) -> None:
-        now_julian = _datetime_to_julian(datetime.now(timezone.utc))
+        now_julian = _datetime_to_julian(datetime.now(UTC))
         state_json = to_json(state) if state else "{}"
 
         sql = f"""
@@ -615,13 +625,13 @@ class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
         """
 
         with self.config.provide_connection() as conn:
-            conn.execute(sql, [state_json, now_julian, session_id])
+            conn._execute(sql, [state_json, now_julian, session_id])
 
     def delete_session(self, session_id: str) -> None:
         sql = f"DELETE FROM {self._session_table} WHERE id = ?"
 
         with self.config.provide_connection() as conn:
-            conn.execute(sql, [session_id])
+            conn._execute(sql, [session_id])
 
     def list_sessions(self, app_name: str, user_id: str | None = None) -> list[SessionRecord]:
         if user_id is None:
@@ -643,7 +653,7 @@ class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
 
         with self.config.provide_session() as driver:
             result = driver.execute(sql, params)
-            rows = result.fetchall()
+            rows = result.all()
 
             return [
                 SessionRecord(
@@ -668,7 +678,7 @@ class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
         content: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> EventRecord:
-        timestamp = kwargs.get("timestamp") or datetime.now(timezone.utc)
+        timestamp = kwargs.get("timestamp") or datetime.now(UTC)
         timestamp_julian = _datetime_to_julian(timestamp)
 
         content_json = to_json(content) if content else None
@@ -678,6 +688,7 @@ class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
         partial_int = _to_sqlite_bool(kwargs.get("partial"))
         turn_complete_int = _to_sqlite_bool(kwargs.get("turn_complete"))
         interrupted_int = _to_sqlite_bool(kwargs.get("interrupted"))
+        invocation_id = kwargs.get("invocation_id") or ""
 
         sql = f"""
         INSERT INTO {self._events_table} (
@@ -691,16 +702,16 @@ class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
         """
 
         with self.config.provide_connection() as conn:
-            conn.execute(
+            conn._execute(
                 sql,
                 [
                     event_id,
                     session_id,
                     app_name,
                     user_id,
-                    kwargs.get("invocation_id"),
-                    author,
-                    actions,
+                    invocation_id,
+                    author or "",
+                    actions or b"",
                     kwargs.get("long_running_tool_ids_json"),
                     kwargs.get("branch"),
                     timestamp_julian,
@@ -720,12 +731,12 @@ class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
             session_id=session_id,
             app_name=app_name,
             user_id=user_id,
-            invocation_id=kwargs.get("invocation_id"),
-            author=author,
-            actions=actions,
+            invocation_id=invocation_id,
+            author=author or "",
+            actions=actions or b"",
             long_running_tool_ids_json=kwargs.get("long_running_tool_ids_json"),
             branch=kwargs.get("branch"),
-            timestamp=timestamp,
+            timestamp=cast("datetime", timestamp),
             content=content,
             grounding_metadata=kwargs.get("grounding_metadata"),
             custom_metadata=kwargs.get("custom_metadata"),
@@ -745,7 +756,7 @@ class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
 
         with self.config.provide_session() as driver:
             result = driver.execute(sql, [session_id])
-            rows = result.fetchall()
+            rows = result.all()
 
             return [
                 EventRecord(
@@ -755,7 +766,7 @@ class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
                     user_id=row["user_id"],
                     invocation_id=row["invocation_id"],
                     author=row["author"],
-                    actions=bytes(row["actions"]),
+                    actions=bytes(cast("bytes", row["actions"])),
                     long_running_tool_ids_json=row["long_running_tool_ids_json"],
                     branch=row["branch"],
                     timestamp=_julian_to_datetime(row["timestamp"]),
@@ -772,7 +783,7 @@ class SyncSqliteADKStore(BaseSyncADKStore["SqliteConfig"]):
             ]
 
 
-class SyncSqliteADKMemoryStore(BaseSyncADKMemoryStore["SqliteConfig"]):
+class SyncSqliteADKMemoryStore(BaseSyncADKMemoryStore["VertebraSqliteSyncConfig"]):
     """Synchronous SQLite ADK memory store for Vertebra."""
 
     __slots__ = ()
@@ -899,9 +910,9 @@ class SyncSqliteADKMemoryStore(BaseSyncADKMemoryStore["SqliteConfig"]):
                         to_json(entry["metadata_json"]),
                         _datetime_to_julian(entry["inserted_at"]),
                     ]
-                rowcount = conn.execute(sql, params)
+                rowcount = conn._execute(sql, params)
                 if rowcount:
-                    inserted_count += rowcount
+                    inserted_count += rowcount.get("rowcount", 0)
         return inserted_count
 
     def search_entries(self, query: str, app_name: str, user_id: str, limit: int | None = None) -> list[MemoryRecord]:
@@ -917,7 +928,7 @@ class SyncSqliteADKMemoryStore(BaseSyncADKMemoryStore["SqliteConfig"]):
             sql = f"""
             SELECT m.* FROM {self._memory_table} AS m
             JOIN {self._memory_table}_fts AS fts ON m.rowid = fts.rowid
-            WHERE m.app_name = ? AND m.user_id = ? AND fts.content_text MATCH ?
+            WHERE m.app_name = ? AND user_id = ? AND fts.content_text MATCH ?
             ORDER BY m.timestamp DESC
             LIMIT ?
             """
@@ -934,7 +945,7 @@ class SyncSqliteADKMemoryStore(BaseSyncADKMemoryStore["SqliteConfig"]):
         with self._config.provide_session() as driver:
             result = driver.execute(sql, params)
             records: list[MemoryRecord] = []
-            for row in result.fetchall():
+            for row in result.all():
                 raw = dict(row)
                 raw["timestamp"] = _julian_to_datetime(raw["timestamp"])
                 raw["inserted_at"] = _julian_to_datetime(raw["inserted_at"])
@@ -950,14 +961,16 @@ class SyncSqliteADKMemoryStore(BaseSyncADKMemoryStore["SqliteConfig"]):
 
         sql = f"DELETE FROM {self._memory_table} WHERE session_id = ?"
         with self._config.provide_connection() as conn:
-            return conn.execute(sql, [session_id]) or 0
+            result = conn._execute(sql, [session_id])
+            return result.get("rowcount", 0)
 
     def delete_entries_older_than(self, days: int) -> int:
         if not self._enabled:
             msg = "Memory store is disabled"
             raise RuntimeError(msg)
 
-        cutoff = _datetime_to_julian(datetime.now(timezone.utc)) - days
+        cutoff = _datetime_to_julian(datetime.now(UTC)) - days
         sql = f"DELETE FROM {self._memory_table} WHERE inserted_at < ?"
         with self._config.provide_connection() as conn:
-            return conn.execute(sql, [cutoff]) or 0
+            result = conn._execute(sql, [cutoff])
+            return result.get("rowcount", 0)

@@ -1,3 +1,4 @@
+# ruff: noqa: S608
 """SQLite event queue store for Vertebra."""
 
 from __future__ import annotations
@@ -7,13 +8,13 @@ from typing import TYPE_CHECKING
 from sqlspec.extensions.events import BaseEventQueueStore
 
 if TYPE_CHECKING:
-    from vertebra.extensions.sqlspec.sqlite.config import SqliteConfig
+    from vertebra.extensions.sqlspec.sqlite.config import VertebraSqliteAsyncConfig
 
 
 __all__ = ("SqliteEventQueueStore",)
 
 
-class SqliteEventQueueStore(BaseEventQueueStore["SqliteConfig"]):
+class SqliteEventQueueStore(BaseEventQueueStore["VertebraSqliteAsyncConfig"]):
     """SQLite event queue store for Vertebra.
 
     Uses TEXT for JSON fields and TIMESTAMP for temporal fields.

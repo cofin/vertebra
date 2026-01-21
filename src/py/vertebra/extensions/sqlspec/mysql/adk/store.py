@@ -1,18 +1,18 @@
-"MySQL ADK store for Vertebra."
+# ruff: noqa: S608
+"""MySQL ADK store for Vertebra."""
 
 from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore, EventRecord, SessionRecord
+from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore, EventRecord, MemoryRecord, SessionRecord
 from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore, BaseSyncADKMemoryStore
 from sqlspec.utils.serializers import from_json, to_json
 
 if TYPE_CHECKING:
     from datetime import datetime
-    from vertebra.extensions.sqlspec.mysql.config import MysqlConfig
-    from sqlspec.extensions.adk import MemoryRecord
+    from vertebra.extensions.sqlspec.mysql.config import VertebraMysqlAsyncConfig, VertebraMysqlSyncConfig
 
 
 __all__ = ("MysqlADKMemoryStore", "MysqlADKStore", "SyncMysqlADKMemoryStore", "SyncMysqlADKStore")
@@ -33,7 +33,7 @@ def _parse_owner_id_column_for_mysql(column_ddl: str) -> tuple[str, str]:
     return (col_def, fk_constraint)
 
 
-class MysqlADKStore(BaseAsyncADKStore["MysqlConfig"]):
+class MysqlADKStore(BaseAsyncADKStore["VertebraMysqlAsyncConfig"]):
     """MySQL ADK store for Vertebra.
 
     Mirrors sqlspec.adapters.asyncmy.adk.store.AsyncmyADKStore but adapted
@@ -106,11 +106,11 @@ class MysqlADKStore(BaseAsyncADKStore["MysqlConfig"]):
         app_name: str,
         user_id: str,
         state: dict[str, Any],
-        owner_id: Any | None = None
+        owner_id: Any | None = None,
     ) -> SessionRecord:
         state_json = to_json(state)
 
-        async with self.config.provide_connection() as conn:
+        async with (await self.config.provide_connection()) as conn:
             if self._owner_id_column_name:
                 sql = f"""
                 INSERT INTO {self._session_table} (id, app_name, user_id, {self._owner_id_column_name}, state, create_time, update_time)
@@ -124,7 +124,11 @@ class MysqlADKStore(BaseAsyncADKStore["MysqlConfig"]):
                 """
                 await conn.execute(sql, [session_id, app_name, user_id, state_json])
 
-        return await self.get_session(session_id)  # type: ignore[return-value]
+        record = await self.get_session(session_id)
+        if record is None:
+            msg = f"Failed to create session {session_id}"
+            raise RuntimeError(msg)
+        return record
 
     async def get_session(self, session_id: str) -> SessionRecord | None:
         sql = f"""
@@ -135,7 +139,7 @@ class MysqlADKStore(BaseAsyncADKStore["MysqlConfig"]):
 
         async with self.config.provide_session() as driver:
             result = await driver.execute(sql, [session_id])
-            row = result.fetchone()
+            row = result.one_or_none()
 
             if row is None:
                 return None
@@ -158,13 +162,13 @@ class MysqlADKStore(BaseAsyncADKStore["MysqlConfig"]):
         WHERE id = %s
         """
 
-        async with self.config.provide_connection() as conn:
+        async with (await self.config.provide_connection()) as conn:
             await conn.execute(sql, [state_json, session_id])
 
     async def delete_session(self, session_id: str) -> None:
         sql = f"DELETE FROM {self._session_table} WHERE id = %s"
 
-        async with self.config.provide_connection() as conn:
+        async with (await self.config.provide_connection()) as conn:
             await conn.execute(sql, [session_id])
 
     async def list_sessions(self, app_name: str, user_id: str | None = None) -> list[SessionRecord]:
@@ -187,7 +191,7 @@ class MysqlADKStore(BaseAsyncADKStore["MysqlConfig"]):
 
         async with self.config.provide_session() as driver:
             result = await driver.execute(sql, params)
-            rows = result.fetchall()
+            rows = result.all()
 
             return [
                 SessionRecord(
@@ -221,7 +225,7 @@ class MysqlADKStore(BaseAsyncADKStore["MysqlConfig"]):
         )
         """
 
-        async with self.config.provide_connection() as conn:
+        async with (await self.config.provide_connection()) as conn:
             await conn.execute(
                 sql,
                 [
@@ -229,9 +233,9 @@ class MysqlADKStore(BaseAsyncADKStore["MysqlConfig"]):
                     event_record["session_id"],
                     event_record["app_name"],
                     event_record["user_id"],
-                    event_record["invocation_id"],
-                    event_record["author"],
-                    event_record["actions"],
+                    event_record.get("invocation_id") or "",
+                    event_record.get("author") or "",
+                    event_record.get("actions") or b"",
                     event_record.get("long_running_tool_ids_json"),
                     event_record.get("branch"),
                     event_record["timestamp"],
@@ -250,7 +254,7 @@ class MysqlADKStore(BaseAsyncADKStore["MysqlConfig"]):
         self,
         session_id: str,
         after_timestamp: datetime | None = None,
-        limit: int | None = None
+        limit: int | None = None,
     ) -> list[EventRecord]:
         where_clauses = ["session_id = %s"]
         params: list[Any] = [session_id]
@@ -274,7 +278,7 @@ class MysqlADKStore(BaseAsyncADKStore["MysqlConfig"]):
 
         async with self.config.provide_session() as driver:
             result = await driver.execute(sql, params)
-            rows = result.fetchall()
+            rows = result.all()
 
             return [
                 EventRecord(
@@ -284,7 +288,7 @@ class MysqlADKStore(BaseAsyncADKStore["MysqlConfig"]):
                     user_id=row["user_id"],
                     invocation_id=row["invocation_id"],
                     author=row["author"],
-                    actions=bytes(row["actions"]),
+                    actions=bytes(cast("bytes", row["actions"])),
                     long_running_tool_ids_json=row["long_running_tool_ids_json"],
                     branch=row["branch"],
                     timestamp=row["timestamp"],
@@ -301,7 +305,7 @@ class MysqlADKStore(BaseAsyncADKStore["MysqlConfig"]):
             ]
 
 
-class MysqlADKMemoryStore(BaseAsyncADKMemoryStore["MysqlConfig"]):
+class MysqlADKMemoryStore(BaseAsyncADKMemoryStore["VertebraMysqlAsyncConfig"]):
     """MySQL ADK memory store for Vertebra."""
 
     __slots__ = ()
@@ -372,7 +376,7 @@ class MysqlADKMemoryStore(BaseAsyncADKMemoryStore["MysqlConfig"]):
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
 
-        async with self._config.provide_connection() as conn:
+        async with (await self._config.provide_connection()) as conn:
             for entry in entries:
                 params: list[Any]
                 if self._owner_id_column_name:
@@ -414,7 +418,7 @@ class MysqlADKMemoryStore(BaseAsyncADKMemoryStore["MysqlConfig"]):
         query: str,
         app_name: str,
         user_id: str,
-        limit: int | None = None
+        limit: int | None = None,
     ) -> list[MemoryRecord]:
         if not self._enabled:
             msg = "Memory store is disabled"
@@ -444,7 +448,7 @@ class MysqlADKMemoryStore(BaseAsyncADKMemoryStore["MysqlConfig"]):
 
         async with self._config.provide_session() as driver:
             result = await driver.execute(sql, params)
-            return [cast("MemoryRecord", dict(row)) for row in result.fetchall()]
+            return cast("list[MemoryRecord]", [dict(row) for row in result.all()])
 
     async def delete_entries_by_session(self, session_id: str) -> int:
         if not self._enabled:
@@ -452,8 +456,9 @@ class MysqlADKMemoryStore(BaseAsyncADKMemoryStore["MysqlConfig"]):
             raise RuntimeError(msg)
 
         sql = f"DELETE FROM {self._memory_table} WHERE session_id = %s"
-        async with self._config.provide_connection() as conn:
-            return await conn.execute(sql, [session_id]) or 0
+        async with (await self._config.provide_connection()) as conn:
+            result = await conn.execute(sql, [session_id])
+            return result or 0
 
     async def delete_entries_older_than(self, days: int) -> int:
         if not self._enabled:
@@ -464,11 +469,12 @@ class MysqlADKMemoryStore(BaseAsyncADKMemoryStore["MysqlConfig"]):
         DELETE FROM {self._memory_table}
         WHERE inserted_at < (UTC_TIMESTAMP(6) - INTERVAL %s DAY)
         """
-        async with self._config.provide_connection() as conn:
-            return await conn.execute(sql, [days]) or 0
+        async with (await self._config.provide_connection()) as conn:
+            result = await conn.execute(sql, [days])
+            return result or 0
 
 
-class SyncMysqlADKStore(BaseSyncADKStore["MysqlConfig"]):
+class SyncMysqlADKStore(BaseSyncADKStore["VertebraMysqlSyncConfig"]):
     """Synchronous MySQL ADK store for Vertebra."""
 
     __slots__ = ()
@@ -538,7 +544,7 @@ class SyncMysqlADKStore(BaseSyncADKStore["MysqlConfig"]):
         app_name: str,
         user_id: str,
         state: dict[str, Any],
-        owner_id: Any | None = None
+        owner_id: Any | None = None,
     ) -> SessionRecord:
         state_json = to_json(state)
 
@@ -548,15 +554,19 @@ class SyncMysqlADKStore(BaseSyncADKStore["MysqlConfig"]):
                 INSERT INTO {self._session_table} (id, app_name, user_id, {self._owner_id_column_name}, state, create_time, update_time)
                 VALUES (%s, %s, %s, %s, %s, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
                 """
-                conn.execute(sql, [session_id, app_name, user_id, owner_id, state_json])
+                conn._execute(sql, [session_id, app_name, user_id, owner_id, state_json])
             else:
                 sql = f"""
                 INSERT INTO {self._session_table} (id, app_name, user_id, state, create_time, update_time)
                 VALUES (%s, %s, %s, %s, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
                 """
-                conn.execute(sql, [session_id, app_name, user_id, state_json])
+                conn._execute(sql, [session_id, app_name, user_id, state_json])
 
-        return self.get_session(session_id)  # type: ignore[return-value]
+        record = self.get_session(session_id)
+        if record is None:
+            msg = f"Failed to create session {session_id}"
+            raise RuntimeError(msg)
+        return record
 
     def get_session(self, session_id: str) -> SessionRecord | None:
         sql = f"""
@@ -567,7 +577,7 @@ class SyncMysqlADKStore(BaseSyncADKStore["MysqlConfig"]):
 
         with self.config.provide_session() as driver:
             result = driver.execute(sql, [session_id])
-            row = result.fetchone()
+            row = result.one_or_none()
 
             if row is None:
                 return None
@@ -591,13 +601,13 @@ class SyncMysqlADKStore(BaseSyncADKStore["MysqlConfig"]):
         """
 
         with self.config.provide_connection() as conn:
-            conn.execute(sql, [state_json, session_id])
+            conn._execute(sql, [state_json, session_id])
 
     def delete_session(self, session_id: str) -> None:
         sql = f"DELETE FROM {self._session_table} WHERE id = %s"
 
         with self.config.provide_connection() as conn:
-            conn.execute(sql, [session_id])
+            conn._execute(sql, [session_id])
 
     def list_sessions(self, app_name: str, user_id: str | None = None) -> list[SessionRecord]:
         if user_id is None:
@@ -619,7 +629,7 @@ class SyncMysqlADKStore(BaseSyncADKStore["MysqlConfig"]):
 
         with self.config.provide_session() as driver:
             result = driver.execute(sql, params)
-            rows = result.fetchall()
+            rows = result.all()
 
             return [
                 SessionRecord(
@@ -656,7 +666,7 @@ class SyncMysqlADKStore(BaseSyncADKStore["MysqlConfig"]):
         """
 
         timestamp = kwargs.get("timestamp")
-        invocation_id = kwargs.get("invocation_id")
+        invocation_id = kwargs.get("invocation_id") or ""
         long_running_tool_ids_json = kwargs.get("long_running_tool_ids_json")
         branch = kwargs.get("branch")
         grounding_metadata = kwargs.get("grounding_metadata")
@@ -668,7 +678,7 @@ class SyncMysqlADKStore(BaseSyncADKStore["MysqlConfig"]):
         error_message = kwargs.get("error_message")
 
         with self.config.provide_connection() as conn:
-            conn.execute(
+            conn._execute(
                 sql,
                 [
                     event_id,
@@ -676,8 +686,8 @@ class SyncMysqlADKStore(BaseSyncADKStore["MysqlConfig"]):
                     app_name,
                     user_id,
                     invocation_id,
-                    author,
-                    actions,
+                    author or "",
+                    actions or b"",
                     long_running_tool_ids_json,
                     branch,
                     timestamp,
@@ -698,11 +708,11 @@ class SyncMysqlADKStore(BaseSyncADKStore["MysqlConfig"]):
             app_name=app_name,
             user_id=user_id,
             invocation_id=invocation_id,
-            author=author,
-            actions=actions,
+            author=author or "",
+            actions=actions or b"",
             long_running_tool_ids_json=long_running_tool_ids_json,
             branch=branch,
-            timestamp=timestamp,
+            timestamp=cast("datetime", timestamp),
             content=content,
             grounding_metadata=grounding_metadata,
             custom_metadata=custom_metadata,
@@ -722,7 +732,7 @@ class SyncMysqlADKStore(BaseSyncADKStore["MysqlConfig"]):
 
         with self.config.provide_session() as driver:
             result = driver.execute(sql, [session_id])
-            rows = result.fetchall()
+            rows = result.all()
 
             return [
                 EventRecord(
@@ -732,7 +742,7 @@ class SyncMysqlADKStore(BaseSyncADKStore["MysqlConfig"]):
                     user_id=row["user_id"],
                     invocation_id=row["invocation_id"],
                     author=row["author"],
-                    actions=bytes(row["actions"]),
+                    actions=bytes(cast("bytes", row["actions"])),
                     long_running_tool_ids_json=row["long_running_tool_ids_json"],
                     branch=row["branch"],
                     timestamp=row["timestamp"],
@@ -749,7 +759,7 @@ class SyncMysqlADKStore(BaseSyncADKStore["MysqlConfig"]):
             ]
 
 
-class SyncMysqlADKMemoryStore(BaseSyncADKMemoryStore["MysqlConfig"]):
+class SyncMysqlADKMemoryStore(BaseSyncADKMemoryStore["VertebraMysqlSyncConfig"]):
     """Synchronous MySQL ADK memory store for Vertebra."""
 
     __slots__ = ()
@@ -853,9 +863,9 @@ class SyncMysqlADKMemoryStore(BaseSyncADKMemoryStore["MysqlConfig"]):
                         to_json(entry["metadata_json"]),
                         entry["inserted_at"],
                     ]
-                rowcount = conn.execute(sql, params)
+                rowcount = conn._execute(sql, params)
                 if rowcount:
-                    inserted_count += rowcount
+                    inserted_count += rowcount.get("rowcount", 0)
         return inserted_count
 
     def search_entries(self, query: str, app_name: str, user_id: str, limit: int | None = None) -> list[MemoryRecord]:
@@ -887,7 +897,7 @@ class SyncMysqlADKMemoryStore(BaseSyncADKMemoryStore["MysqlConfig"]):
 
         with self._config.provide_session() as driver:
             result = driver.execute(sql, params)
-            return [cast("MemoryRecord", dict(row)) for row in result.fetchall()]
+            return cast("list[MemoryRecord]", [dict(row) for row in result.all()])
 
     def delete_entries_by_session(self, session_id: str) -> int:
         if not self._enabled:
@@ -896,7 +906,8 @@ class SyncMysqlADKMemoryStore(BaseSyncADKMemoryStore["MysqlConfig"]):
 
         sql = f"DELETE FROM {self._memory_table} WHERE session_id = %s"
         with self._config.provide_connection() as conn:
-            return conn.execute(sql, [session_id]) or 0
+            result = conn._execute(sql, [session_id])
+            return result.get("rowcount", 0)
 
     def delete_entries_older_than(self, days: int) -> int:
         if not self._enabled:
@@ -908,4 +919,5 @@ class SyncMysqlADKMemoryStore(BaseSyncADKMemoryStore["MysqlConfig"]):
         WHERE inserted_at < (UTC_TIMESTAMP(6) - INTERVAL %s DAY)
         """
         with self._config.provide_connection() as conn:
-            return conn.execute(sql, [days]) or 0
+            result = conn._execute(sql, [days])
+            return result.get("rowcount", 0)
