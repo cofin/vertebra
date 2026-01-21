@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import hashlib
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -17,6 +19,8 @@ if TYPE_CHECKING:
 
 DEFAULT_TYPES_ROUTE = "/__vertebra/types.d.ts"
 DEFAULT_COMPRESS_THRESHOLD = 10_000
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,10 +42,21 @@ class TypeBridge:
         self._lock = threading.Lock()
         self._snapshot: TypeBridgeSnapshot | None = None
         self._dirty = True
+        self._callbacks: list[Callable[[], None]] = []
 
     def invalidate(self) -> None:
         with self._lock:
             self._dirty = True
+        self._notify_waiters()
+
+    def add_callback(self, cb: Callable[[], None]) -> None:
+        with self._lock:
+            self._callbacks.append(cb)
+
+    def remove_callback(self, cb: Callable[[], None]) -> None:
+        with self._lock:
+            if cb in self._callbacks:
+                self._callbacks.remove(cb)
 
     def generate(self) -> str:
         generator = TypeScriptGenerator()
@@ -82,6 +97,16 @@ class TypeBridge:
 
         return 200, headers, body
 
+    def _notify_waiters(self) -> None:
+        # Snapshot the callbacks to avoid holding lock while calling them
+        with self._lock:
+            callbacks = list(self._callbacks)
+        for cb in callbacks:
+            try:
+                cb()
+            except Exception:
+                logger.exception("Error in TypeBridge callback")
+
 
 class TypeBridgeApp:
     """ASGI app serving the TypeScript type bridge endpoint."""
@@ -107,7 +132,15 @@ class TypeBridgeApp:
             await send({"type": "http.response.body", "body": b"Not Found"})
             return
 
-        headers = {k.decode(): v.decode() for k, v in scope.get("headers", [])}
+        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        
+        # Handle HMR long-polling
+        if headers.get("x-vertebra-watch") == "true":
+            etag = headers.get("if-none-match")
+            current = self._bridge.get_snapshot().etag
+            if etag and etag == current:
+                await self._wait_for_change()
+
         status, response_headers, body = self._bridge.build_response(
             accept_encoding=headers.get("accept-encoding"), if_none_match=headers.get("if-none-match")
         )
@@ -117,6 +150,21 @@ class TypeBridgeApp:
             "headers": [(k.encode(), v.encode()) for k, v in response_headers.items()],
         })
         await send({"type": "http.response.body", "body": body})
+
+    async def _wait_for_change(self) -> None:
+        loop = asyncio.get_running_loop()
+        event = asyncio.Event()
+
+        def notify() -> None:
+            loop.call_soon_threadsafe(event.set)
+
+        self._bridge.add_callback(notify)
+        try:
+            await asyncio.wait_for(event.wait(), timeout=30.0)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            self._bridge.remove_callback(notify)
 
 
 __all__ = ("TypeBridge", "TypeBridgeApp", "TypeBridgeSnapshot")

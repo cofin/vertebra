@@ -12,25 +12,26 @@ const RESOLVED_ID = "\0vertebra-types";
 
 export function vertebraTypes(options: VertebraTypesPluginOptions = {}): Plugin {
   const endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
-  const pollIntervalMs = options.pollIntervalMs ?? 500;
+  const pollIntervalMs = options.pollIntervalMs ?? 1000; // Used for error backoff
   const moduleId = options.moduleId ?? DEFAULT_MODULE_ID;
 
   let cachedTypes = "// Vertebra types are not available yet\nexport {};\n";
   let cachedEtag = "";
   let server: ViteDevServer | null = null;
-  let timer: ReturnType<typeof setInterval> | null = null;
+  let isPolling = false;
 
   async function fetchTypes(): Promise<boolean> {
     const headers: Record<string, string> = {};
     if (cachedEtag) {
       headers["If-None-Match"] = cachedEtag;
+      headers["X-Vertebra-Watch"] = "true";
     }
     const response = await fetch(endpoint, { headers });
     if (response.status === 304) {
       return false;
     }
     if (!response.ok) {
-      return false;
+      throw new Error(`Failed to fetch types: ${response.statusText}`);
     }
     const text = await response.text();
     const etag = response.headers.get("etag") ?? "";
@@ -39,27 +40,32 @@ export function vertebraTypes(options: VertebraTypesPluginOptions = {}): Plugin 
     return true;
   }
 
-  function schedulePolling(): void {
-    if (timer) {
-      clearInterval(timer);
-    }
-    timer = setInterval(async () => {
-      if (!server) {
-        return;
-      }
+  async function pollLoop(): Promise<void> {
+    isPolling = true;
+    while (isPolling) {
       try {
+        if (!server) {
+          await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+          continue;
+        }
+        
         const changed = await fetchTypes();
-        if (changed) {
+        if (changed && isPolling) {
           const mod = server.moduleGraph.getModuleById(RESOLVED_ID);
           if (mod) {
             server.moduleGraph.invalidateModule(mod);
           }
           server.ws.send({ type: "full-reload" });
         }
+        // If not changed (304), fetchTypes returns false after waiting.
+        // We loop immediately to reconnect.
       } catch {
-        // Ignore polling errors; retry on next interval.
+        // Backoff on error
+        if (isPolling) {
+          await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+        }
       }
-    }, pollIntervalMs);
+    }
   }
 
   return {
@@ -79,14 +85,16 @@ export function vertebraTypes(options: VertebraTypesPluginOptions = {}): Plugin 
     },
     async configureServer(devServer) {
       server = devServer;
-      await fetchTypes();
-      schedulePolling();
+      try {
+        await fetchTypes();
+      } catch {
+        // Ignore initial fetch error
+      }
+      // Start polling loop without awaiting it
+      pollLoop();
     },
     closeBundle() {
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
-      }
+      isPolling = false;
     },
   };
 }
