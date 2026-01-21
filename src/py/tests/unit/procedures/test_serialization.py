@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TypeVar, overload
 
 import pytest
 
@@ -14,6 +14,8 @@ from vertebra.procedures.serialization import (
 from vertebra.types.ir import ObjectType
 
 pytestmark = pytest.mark.unit
+
+T = TypeVar("T")
 
 
 def test_detect_serializer_defaults() -> None:
@@ -59,7 +61,13 @@ def test_serializer_registry_custom() -> None:
         def serialize(self, value: Any, type_hint: type | None = None) -> bytes:
             return b"dummy"
 
-        def deserialize(self, data: bytes, type_hint: type | None = None) -> Any:
+        @overload
+        def deserialize(self, data: bytes, type_hint: type[T]) -> T: ...
+
+        @overload
+        def deserialize(self, data: bytes, type_hint: None = ...) -> Any: ...
+
+        def deserialize(self, data: bytes, type_hint: type[Any] | None = None) -> Any:
             return {"ok": True}
 
         def get_type_metadata(self, type_hint: type | None = None) -> None:

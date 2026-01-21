@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import struct
 import time
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from vertebra import _vertebra
 from vertebra.procedures import ProcedureRegistry, get_serializer
+from vertebra.serializers import get_json_codec
 
 _HEADER = struct.Struct("!HI")  # procedure length (u16), payload length (u32)
 _MAX_NAME_LEN = 0xFFFF
+
+T = TypeVar("T")
 
 
 class ChannelError(RuntimeError):
@@ -107,18 +110,19 @@ class BufferView:
             return view.tobytes()
         return bytes(view)
 
-    def as_msgspec(self, type_hint: type) -> Any:
+    def as_msgspec(self, type_hint: type[T]) -> T:
         try:
-            import msgspec
+            codec = get_json_codec()
         except Exception as exc:  # pragma: no cover - optional dependency
             msg = "msgspec is not available"
             raise SerializationError(msg) from exc
-        decoder: msgspec.json.Decoder[Any] = msgspec.json.Decoder(type_hint)
+        
         view = self.as_memoryview()
         try:
-            return decoder.decode(view)
+            return codec.decode(view, type_hint=type_hint)
         except TypeError:
-            return decoder.decode(self.as_bytes())
+            # Fallback for buffers that don't support direct view decoding
+            return codec.decode(self.as_bytes(), type_hint=type_hint)
 
     def release(self) -> None:
         self._release_view()

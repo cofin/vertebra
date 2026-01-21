@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeVar, overload, runtime_checkable
 
 from vertebra.serializers import JSONCodec, decode_json, encode_json, get_json_codec
 from vertebra.types.extractor import TypeExtractor
 from vertebra.types.ir import NamedTypeRef, ObjectType, TypeNode
+
+T = TypeVar("T")
 
 
 @runtime_checkable
@@ -17,7 +19,13 @@ class Serializer(Protocol):
     def serialize(self, value: Any, type_hint: type | None = None) -> bytes:
         """Serialize a Python value to bytes."""
 
-    def deserialize(self, data: bytes, type_hint: type | None = None) -> Any:
+    @overload
+    def deserialize(self, data: bytes, type_hint: type[T]) -> T: ...
+
+    @overload
+    def deserialize(self, data: bytes, type_hint: None = ...) -> Any: ...
+
+    def deserialize(self, data: bytes, type_hint: type[Any] | None = None) -> Any:
         """Deserialize bytes to a Python value."""
 
     def get_type_metadata(self, type_hint: type | None = None) -> TypeNode | None:
@@ -38,7 +46,13 @@ class MsgspecSerializer:
         # Procedures expect bytes
         return self._codec.encode(value, as_bytes=True)  # type: ignore
 
-    def deserialize(self, data: bytes, type_hint: type | None = None) -> Any:
+    @overload
+    def deserialize(self, data: bytes, type_hint: type[T]) -> T: ...
+
+    @overload
+    def deserialize(self, data: bytes, type_hint: None = ...) -> Any: ...
+
+    def deserialize(self, data: bytes, type_hint: type[Any] | None = None) -> Any:
         return self._codec.decode(data, type_hint=type_hint)
 
     def get_type_metadata(self, type_hint: type | None = None) -> TypeNode | None:
@@ -80,7 +94,13 @@ class PydanticSerializer:
             return value.model_dump_json().encode()
         return encode_json(value, as_bytes=True)
 
-    def deserialize(self, data: bytes, type_hint: type | None = None) -> Any:
+    @overload
+    def deserialize(self, data: bytes, type_hint: type[T]) -> T: ...
+
+    @overload
+    def deserialize(self, data: bytes, type_hint: None = ...) -> Any: ...
+
+    def deserialize(self, data: bytes, type_hint: type[Any] | None = None) -> Any:
         if isinstance(type_hint, type) and issubclass(type_hint, self._BaseModel):
             return type_hint.model_validate_json(data)
         return decode_json(data, type_hint=type_hint)

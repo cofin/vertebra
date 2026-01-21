@@ -44,16 +44,16 @@ class JSONCodec:
         return result if as_bytes else result.decode("utf-8")
 
     @overload
-    def decode(self, data: str | bytes, type_hint: type[T]) -> T: ...
+    def decode(self, data: str | bytes | bytearray | memoryview, type_hint: type[T]) -> T: ...
 
     @overload
-    def decode(self, data: str | bytes, type_hint: None = ...) -> Any: ...
+    def decode(self, data: str | bytes | bytearray | memoryview, type_hint: None = ...) -> Any: ...
 
-    def decode(self, data: str | bytes, type_hint: type[Any] | None = None) -> Any:
+    def decode(self, data: str | bytes | bytearray | memoryview, type_hint: type[Any] | None = None) -> Any:
         """Decode from JSON.
 
         Args:
-            data: JSON string or bytes to decode.
+            data: JSON string, bytes, or memoryview to decode.
             type_hint: Optional type for structured decoding.
 
         Returns:
@@ -100,18 +100,18 @@ def encode_json(data: Any, *, as_bytes: bool = False) -> str | bytes:
 
 
 @overload
-def decode_json(data: str | bytes, type_hint: type[T]) -> T: ...
+def decode_json(data: str | bytes | bytearray | memoryview, type_hint: type[T]) -> T: ...
 
 
 @overload
-def decode_json(data: str | bytes, type_hint: None = ...) -> Any: ...
+def decode_json(data: str | bytes | bytearray | memoryview, type_hint: None = ...) -> Any: ...
 
 
-def decode_json(data: str | bytes, type_hint: type[Any] | None = None) -> Any:
+def decode_json(data: str | bytes | bytearray | memoryview, type_hint: type[Any] | None = None) -> Any:
     """Decode from JSON using msgspec.
 
     Args:
-        data: JSON string or bytes to decode.
+        data: JSON string, bytes, or memoryview to decode.
         type_hint: Optional type for structured decoding.
 
     Returns:

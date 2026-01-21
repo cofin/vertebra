@@ -14,6 +14,7 @@
 - [x] **Task 1.2.2**: Search and replace all internal imports to use `vertebra.serializers`.
 - [x] **Task 1.2.3**: Remove `src/py/vertebra/_internal/serialization.py` once unused.
 - [x] **Task 1.2.4**: Update `src/py/vertebra/procedures/serialization.py` to use `vertebra.serializers` and enhance `JSONCodec`.
+- [x] **Task 1.2.5**: Update `BufferView.as_msgspec` and `JSONCodec.decode` to support generic return types.
 
 ### Task Group 1.3: Update Dependent PRDs
 - [x] **Task 1.3.1**: Update `database-orm-integration` plan.md to reference `vertebra.serializers`.
