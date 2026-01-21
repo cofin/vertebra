@@ -39,6 +39,8 @@ import {
 import { BasePoolAdapter, type PoolAdapter, type PoolStats } from "./base-pool";
 import { FairScheduler, type SchedulerStats } from "./scheduler";
 import { ShmRegion, ShmRing } from "./shm";
+import { createBrokerMetrics, updateBrokerMetrics } from "./metrics";
+import type { BrokerStats, SchedulerPoolStats } from "./client";
 
 type BrokerPoolConfig = {
   name: string;
@@ -62,6 +64,7 @@ type BrokerConfigBroker = {
   arrow_region_ttl_ms?: number;
   scheduler_quantum?: number;
   scheduler_starvation_ms?: number;
+  metrics_port?: number;
 };
 
 type ResolvedBrokerConfig = {
@@ -75,6 +78,7 @@ type ResolvedBrokerConfig = {
   arrow_region_ttl_ms: number;
   scheduler_quantum: number;
   scheduler_starvation_ms: number;
+  metrics_port: number;
 };
 
 type BrokerConfig = {
@@ -766,6 +770,7 @@ class Broker {
       arrow_region_ttl_ms: brokerConfig.arrow_region_ttl_ms ?? 30_000,
       scheduler_quantum: brokerConfig.scheduler_quantum ?? 1,
       scheduler_starvation_ms: brokerConfig.scheduler_starvation_ms ?? 2_000,
+      metrics_port: brokerConfig.metrics_port ?? 9000,
     };
     this.control = ShmRing.create(
       this.config.control_name,
@@ -778,6 +783,7 @@ class Broker {
   }
 
   async run(): Promise<void> {
+    this.startMetricsServer();
     while (true) {
       const controlMessage = this.control.recv(10);
       if (controlMessage) {
@@ -793,6 +799,42 @@ class Broker {
       this.cleanupArrowRegions();
       await Bun.sleep(1);
     }
+  }
+
+  private startMetricsServer(): void {
+    const port = this.config.metrics_port;
+    if (port <= 0) {
+      return;
+    }
+    const metrics = createBrokerMetrics();
+    console.log(`Starting metrics server on port ${port}`);
+    Bun.serve({
+      port,
+      fetch: async (req) => {
+        const url = new URL(req.url);
+        if (url.pathname === "/__metrics__") {
+          updateBrokerMetrics(metrics, this.getStats());
+          const body = await metrics.registry.metrics();
+          return new Response(body, {
+            headers: { "Content-Type": metrics.registry.contentType },
+          });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+  }
+
+  private getStats(): BrokerStats {
+    const poolStats: PoolStats[] = [];
+    const schedulerPools: Array<{ name: string } & SchedulerPoolStats> = [];
+    for (const [name, poolState] of this.pools.entries()) {
+      const stats = poolState.adapter.stats();
+      const schedulerStats = poolState.scheduler.stats();
+      stats.waiters = schedulerStats.pending;
+      poolStats.push(stats);
+      schedulerPools.push({ name, ...schedulerStats });
+    }
+    return { pools: poolStats, scheduler: { pools: schedulerPools } };
   }
 
   private registerPool(pool: BrokerPoolConfig): void {
@@ -946,18 +988,9 @@ class Broker {
     const kind = String(message.kind || "");
     try {
       if (kind === "stats") {
-        const poolStats: PoolStats[] = [];
-        const schedulerPools: Array<{ name: string } & SchedulerStats> = [];
-        for (const [name, poolState] of this.pools.entries()) {
-          const stats = poolState.adapter.stats();
-          const schedulerStats = poolState.scheduler.stats();
-          stats.waiters = schedulerStats.pending;
-          poolStats.push(stats);
-          schedulerPools.push({ name, ...schedulerStats });
-        }
         this.reply(client, message.id, {
           ok: true,
-          stats: { pools: poolStats, scheduler: { pools: schedulerPools } },
+          stats: this.getStats(),
         });
         return;
       }
