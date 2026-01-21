@@ -8,7 +8,7 @@ node_modules/
 
 # Biome cache
 .biome/
-
+!src/py/vertebra/build
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
