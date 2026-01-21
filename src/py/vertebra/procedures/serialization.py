@@ -18,6 +18,7 @@ class Serializer(Protocol):
 
     def serialize(self, value: Any, type_hint: type | None = None) -> bytes:
         """Serialize a Python value to bytes."""
+        ...
 
     @overload
     def deserialize(self, data: bytes, type_hint: type[T]) -> T: ...
