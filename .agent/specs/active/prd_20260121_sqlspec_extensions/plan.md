@@ -2,12 +2,12 @@
 
 ## Phase 1: Foundation & PostgreSQL Implementation
 - [x] Task: Create directory structure for PostgreSQL extensions. [f3b174e]
-- [ ] Task: Implement PostgreSQL ADK Store (`sqlspec/postgres/adk/store.py`).
-- [ ] Task: Implement PostgreSQL Event Store (`sqlspec/postgres/events/store.py`).
-- [ ] Task: Implement PostgreSQL Litestar Store (`sqlspec/postgres/litestar/store.py`).
-- [ ] Task: Write tests for PostgreSQL extensions.
-- [ ] Task: Checkpoint - Verify Phase 1 complete and create recovery point.
-- [ ] Task: Flow - User Manual Verification 'Foundation & PostgreSQL Implementation' (Protocol in workflow.md).
+- [x] Task: Implement PostgreSQL ADK Store (\`sqlspec/postgres/adk/store.py\`). [3e62509]
+- [x] Task: Implement PostgreSQL Event Store (\`sqlspec/postgres/events/store.py\`). [3e62509]
+- [x] Task: Implement PostgreSQL Litestar Store (\`sqlspec/postgres/litestar/store.py\`). [3e62509]
+- [x] Task: Write tests for PostgreSQL extensions. [3e62509]
+- [x] Task: Checkpoint - Verify Phase 1 complete and create recovery point. [checkpoint: 3e62509]
+- [x] Task: Flow - User Manual Verification 'Foundation & PostgreSQL Implementation' (Protocol in workflow.md).
 
 ## Phase 2: SQLite Implementation
 - [ ] Task: Create directory structure for SQLite extensions.
