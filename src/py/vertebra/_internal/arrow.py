@@ -116,11 +116,11 @@ try:
     from pyarrow import Table as ArrowTable  # pyright: ignore[reportMissingImports]
 except ImportError:
     # When pyarrow is not installed, use Protocol stubs
-    ArrowTable = ArrowTableProtocol  # type: ignore[assignment,misc]
-    ArrowRecordBatch = ArrowRecordBatchProtocol  # type: ignore[assignment,misc]
-    ArrowSchema = ArrowSchemaProtocol  # type: ignore[assignment,misc]
-    ArrowField = ArrowFieldProtocol  # type: ignore[assignment,misc]
-    ArrowArray = ArrowArrayProtocol  # type: ignore[assignment,misc]
+    ArrowTable = ArrowTableProtocol  # type: ignore[assignment,misc,unused-ignore]
+    ArrowRecordBatch = ArrowRecordBatchProtocol  # type: ignore[assignment,misc,unused-ignore]
+    ArrowSchema = ArrowSchemaProtocol  # type: ignore[assignment,misc,unused-ignore]
+    ArrowField = ArrowFieldProtocol  # type: ignore[assignment,misc,unused-ignore]
+    ArrowArray = ArrowArrayProtocol  # type: ignore[assignment,misc,unused-ignore]
 
 
 __all__ = (

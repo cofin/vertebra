@@ -6,6 +6,10 @@
 from vertebra import _vertebra as v
 ```
 
+## Optional Dependencies & Typing
+
+Vertebra uses a strict typing pattern for optional dependencies like `pyarrow` and `numpy`. See [Optional Dependencies](optional-dependencies.md) for details on how to use `ArrowTable` and other types safely without requiring the dependencies to be installed.
+
 ## Shared Memory + Named SPSC (Unix)
 
 ```python

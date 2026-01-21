@@ -1,6 +1,5 @@
-"""Broker-backed PostgreSQL SQLSpec configuration."""
-
-from typing import TYPE_CHECKING, ClassVar, NotRequired, TypedDict
+import logging
+from typing import TYPE_CHECKING, Any, ClassVar, NotRequired, TypedDict
 
 from vertebra.extensions.sqlspec._config import (
     VertebraAsyncConfigBase,
@@ -12,7 +11,11 @@ from vertebra.extensions.sqlspec.postgres._typing import (
     VertebraPostgresAsyncSessionContext,
     VertebraPostgresSyncSessionContext,
 )
-from vertebra.extensions.sqlspec.postgres.core import apply_driver_features, default_statement_config
+from vertebra.extensions.sqlspec.postgres.core import (
+    apply_driver_features,
+    default_statement_config,
+    register_json_codecs,
+)
 from vertebra.extensions.sqlspec.postgres.data_dictionary import (
     VertebraPostgresAsyncDataDictionary,
     VertebraPostgresSyncDataDictionary,
@@ -30,11 +33,22 @@ if TYPE_CHECKING:
     from vertebra.drivers.broker import VertebraAsyncPool, VertebraSyncPool
     from vertebra.resources.broker import BrokerClientConfig
 
+logger = logging.getLogger(__name__)
+
 
 class PostgresDriverFeatures(TypedDict, total=False):
     """Driver features for broker-backed PostgreSQL."""
 
     data_dictionary_factory: NotRequired["Callable[[], SyncDataDictionaryBase | AsyncDataDictionaryBase]"]
+    
+    # JSON handling
+    json_serializer: NotRequired["Callable[[Any], str]"]
+    json_deserializer: NotRequired["Callable[[str], Any]"]
+    enable_json_codecs: NotRequired[bool]
+
+    # Broker-specific
+    arrow_threshold_rows: NotRequired[int]
+    arrow_threshold_bytes: NotRequired[int]
 
 
 class VertebraPostgresSyncConfig(VertebraSyncConfigBase):
@@ -148,6 +162,14 @@ class VertebraPostgresAsyncConfig(VertebraAsyncConfigBase):
             statement_config=statement_config or self.statement_config,
             driver_features=self.driver_features,
             prepare_driver=self._prepare_driver,
+        )
+
+
+async def _init_connection(connection: Any, features: PostgresDriverFeatures) -> None:
+    """Initialize connection with codecs and extensions."""
+    if features.get("enable_json_codecs", True):
+        await register_json_codecs(
+            connection, encoder=features.get("json_serializer"), decoder=features.get("json_deserializer")
         )
 
 

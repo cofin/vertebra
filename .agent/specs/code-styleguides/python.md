@@ -116,6 +116,51 @@ class ServiceProvider(Provider):
         return UserService(driver)
 ```
 
+## Optional Dependencies
+
+Use the `vertebra._internal` patterns for handling optional dependencies safely.
+
+### 1. Lazy Availability Flags
+Use `OptionalDependencyFlag` to defer import checks until runtime.
+
+```python
+from vertebra._internal.module_loader import dependency_flag
+
+POLARS_INSTALLED = dependency_flag("polars")
+
+def use_polars():
+    if POLARS_INSTALLED:
+        import polars as pl
+        # ...
+```
+
+### 2. Protocol Stubs
+Define a `Protocol` matching the optional library's API to support static typing without the library installed.
+
+```python
+@runtime_checkable
+class PolarsDataFrameProtocol(Protocol):
+    def to_arrow(self) -> Any: ...
+```
+
+### 3. Conditional Imports & Type Aliases
+Combine real imports and stubs with `type: ignore` to satisfy type checkers in all environments.
+
+```python
+try:
+    from polars import DataFrame as PolarsDataFrame # type: ignore[import-not-found]
+except ImportError:
+    PolarsDataFrame = PolarsDataFrameProtocol # type: ignore[assignment,misc,unused-ignore]
+```
+
+### 4. Ensure Functions
+Provide helper functions that raise clear, actionable errors if a dependency is missing.
+
+```python
+def ensure_polars() -> ModuleType:
+    return ensure_dependency("polars")
+```
+
 ## Service Pattern
 
 ```python

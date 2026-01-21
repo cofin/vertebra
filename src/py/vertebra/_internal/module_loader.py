@@ -121,11 +121,23 @@ def ensure_numpy() -> ModuleType:
     return ensure_dependency("numpy")
 
 
+def ensure_pandas() -> ModuleType:
+    """Ensure pandas is installed, raising MissingDependencyError if not."""
+    return ensure_dependency("pandas")
+
+
+def ensure_polars() -> ModuleType:
+    """Ensure polars is installed, raising MissingDependencyError if not."""
+    return ensure_dependency("polars")
+
+
 __all__ = (
     "OptionalDependencyFlag",
     "dependency_flag",
     "ensure_dependency",
     "ensure_numpy",
+    "ensure_pandas",
+    "ensure_polars",
     "ensure_pyarrow",
     "module_available",
     "reset_dependency_cache",
