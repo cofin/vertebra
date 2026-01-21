@@ -10,6 +10,7 @@ from typing import Any
 import msgspec
 
 from vertebra._internal.async_transport import AsyncShmTransport, PollingTransport, create_transport
+from vertebra._internal.module_loader import ensure_pyarrow
 from vertebra._internal.serialization import MessagePackCodec
 from vertebra._vertebra import AsyncRing, ShmRegion, SpscRing
 
@@ -69,8 +70,10 @@ class AsyncBrokerClient:
         self._request: AsyncRing | None = None
         self._response: AsyncRing | None = None
 
-        # Async transport wrappers
-        self._request_transport: AsyncShmTransport | PollingTransport | None = None
+        # Async transport wrapper for RECEIVING responses only.
+        # NOTE: We send directly via self._request.send() instead of using a transport,
+        # because PollingTransport starts a poll thread that reads from the ring,
+        # which would consume our own sent data before the broker receives it.
         self._response_transport: AsyncShmTransport | PollingTransport | None = None
 
     async def connect(self) -> None:
@@ -86,8 +89,8 @@ class AsyncBrokerClient:
         self._request = AsyncRing.create_named(req_cfg.name, req_cfg.slot_size, req_cfg.slots)
         self._response = AsyncRing.create_named(resp_cfg.name, resp_cfg.slot_size, resp_cfg.slots)
 
-        # Wrap in async transports for efficient waiting
-        self._request_transport = create_transport(self._request, prefer_eventfd=self._config.prefer_eventfd)
+        # Wrap response ring in async transport for efficient waiting.
+        # The request ring is used directly for sending (no transport needed).
         self._response_transport = create_transport(self._response, prefer_eventfd=self._config.prefer_eventfd)
 
         # Register with broker
@@ -112,10 +115,7 @@ class AsyncBrokerClient:
         if self._control is None:
             return
 
-        # Clean up async transports
-        if self._request_transport:
-            self._request_transport.close()
-            self._request_transport = None
+        # Clean up async transport
         if self._response_transport:
             self._response_transport.close()
             self._response_transport = None
@@ -125,9 +125,9 @@ class AsyncBrokerClient:
         self._response = None
 
     async def request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._request_transport is None or self._response_transport is None:
+        if self._request is None or self._response_transport is None:
             await self.connect()
-        if self._request_transport is None or self._response_transport is None:
+        if self._request is None or self._response_transport is None:
             msg = "Broker shared memory unavailable"
             raise BrokerClientError(msg)
 
@@ -135,7 +135,9 @@ class AsyncBrokerClient:
         payload["id"] = self._next_id()
         encoded = self._codec.encode(payload)
 
-        await self._request_transport.send(encoded)
+        # Send directly via ring (not via transport) to avoid PollingTransport's
+        # poll thread consuming the data before the broker receives it.
+        self._request.send(encoded, 0)
         return await self._recv_response()
 
     async def acquire(self, pool: str) -> str:
@@ -259,11 +261,9 @@ class AsyncBrokerClient:
         if not name or size <= 0:
             msg = "Invalid Arrow response"
             raise BrokerClientError(msg)
-        try:
-            import pyarrow as pa
-        except Exception as exc:  # pragma: no cover - optional dependency
-            msg = "pyarrow is required for Arrow IPC results"
-            raise BrokerClientError(msg) from exc
+
+        # Ensure pyarrow is available with clear error message
+        pa = ensure_pyarrow()
 
         # Use PyO3 ShmRegion for Arrow IPC with buffer protocol
         region = ShmRegion.open_named(name, size)
@@ -463,11 +463,9 @@ class SyncBrokerClient:
         if not name or size <= 0:
             msg = "Invalid Arrow response"
             raise BrokerClientError(msg)
-        try:
-            import pyarrow as pa
-        except Exception as exc:  # pragma: no cover - optional dependency
-            msg = "pyarrow is required for Arrow IPC results"
-            raise BrokerClientError(msg) from exc
+
+        # Ensure pyarrow is available with clear error message
+        pa = ensure_pyarrow()
 
         # Use PyO3 ShmRegion for Arrow IPC with buffer protocol
         region = ShmRegion.open_named(name, size)
@@ -508,11 +506,8 @@ def _assert_ok(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def _decode_arrow_bytes(payload: bytes) -> dict[str, Any]:
-    try:
-        import pyarrow as pa
-    except Exception as exc:  # pragma: no cover - optional dependency
-        msg = "pyarrow is required for Arrow IPC results"
-        raise BrokerClientError(msg) from exc
+    # Ensure pyarrow is available with clear error message
+    pa = ensure_pyarrow()
     with pa.ipc.open_stream(payload) as reader:
         table = reader.read_all()
     return {"arrow": table}

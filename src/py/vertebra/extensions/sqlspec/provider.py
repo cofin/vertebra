@@ -1,6 +1,7 @@
 """SQLSpec provider host for broker-registered adapters."""
 
 import asyncio
+import logging
 import uuid
 from typing import TYPE_CHECKING, Any, cast
 
@@ -8,12 +9,15 @@ from sqlspec.config import AsyncDatabaseConfig, SyncDatabaseConfig
 from sqlspec.core.result import ArrowResult, SQLResult
 from sqlspec.utils.correlation import CorrelationContext
 
+from vertebra._internal.typing import PYARROW_INSTALLED
 from vertebra._vertebra import ShmRegion
 from vertebra.resources.provider import ProviderConfig, ProviderHost
 
 if TYPE_CHECKING:
-    import pyarrow as pa
+    import pyarrow as pa  # pyright: ignore[reportMissingImports]
     from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
+
+logger = logging.getLogger(__name__)
 
 
 class _SyncSessionState:
@@ -344,10 +348,14 @@ class SqlSpecProvider:
         estimated_bytes = len(rows) * max(1, len(columns)) * 8
         if rowcount < self._config.arrow_threshold_rows and estimated_bytes < self._config.arrow_threshold_bytes:
             return None
-        try:
-            import pyarrow as pa
-        except ImportError:
+
+        # Use lazy flag check - only import pyarrow if installed
+        if not PYARROW_INSTALLED:
+            logger.debug("pyarrow not installed - falling back to MessagePack encoding")
             return None
+
+        import pyarrow as pa  # pyright: ignore[reportMissingImports]
+
         records = [dict(zip(columns, row, strict=False)) for row in rows]
         table = pa.Table.from_pylist(records)
         payload = self._write_arrow_region(table)
@@ -355,7 +363,7 @@ class SqlSpecProvider:
         return payload
 
     def _write_arrow_region(self, table: "pa.Table") -> "dict[str, object]":
-        import pyarrow as pa
+        import pyarrow as pa  # pyright: ignore[reportMissingImports]
 
         sink = pa.BufferOutputStream()
         with pa.ipc.new_stream(sink, table.schema) as writer:

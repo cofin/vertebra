@@ -243,7 +243,7 @@ class PollingTransport:
     enqueues received data for async consumption.
     """
 
-    __slots__ = ("_loop", "_poll_interval", "_queue", "_ring", "_running", "_thread")
+    __slots__ = ("_buffer", "_buffer_lock", "_loop", "_poll_interval", "_queue", "_ring", "_running", "_thread")
 
     def __init__(
         self,
@@ -261,6 +261,9 @@ class PollingTransport:
         self._running = True
         self._loop: asyncio.AbstractEventLoop | None = None
         self._poll_interval = poll_interval
+        # Buffer for data received before loop is available (prevents silent drops)
+        self._buffer: deque[bytes] = deque()
+        self._buffer_lock = threading.Lock()
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
 
@@ -285,6 +288,10 @@ class PollingTransport:
         """
         if self._loop is None:
             self._loop = asyncio.get_running_loop()
+            # Flush any buffered data that arrived before loop was available
+            with self._buffer_lock:
+                while self._buffer:
+                    self._queue.put_nowait(self._buffer.popleft())
         return await self._queue.get()
 
     def try_recv(self) -> bytes | None:
@@ -295,9 +302,14 @@ class PollingTransport:
         """Background thread that polls for data."""
         while self._running:
             data = self._ring.try_recv()
-            if data is not None and self._loop is not None:
-                # Thread-safe enqueue
-                self._loop.call_soon_threadsafe(self._queue.put_nowait, data)
+            if data is not None:
+                if self._loop is not None:
+                    # Thread-safe enqueue to asyncio queue
+                    self._loop.call_soon_threadsafe(self._queue.put_nowait, data)
+                else:
+                    # Buffer data until loop is available (prevents silent drops)
+                    with self._buffer_lock:
+                        self._buffer.append(data)
             else:
                 time.sleep(self._poll_interval)
 

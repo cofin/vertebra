@@ -448,23 +448,31 @@ coverage:                                          ## Run the tests and generate
 	@echo "${OK} Coverage report generated ✨"
 
 .PHONY: test
-test:                                              ## Run the tests
+test:                                              ## Run unit tests (excludes integration)
 	@echo "${INFO} Cleaning shared memory... 🧹"
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
-	@echo "${INFO} Running test cases... 🧪"
-	@uv run pytest src/py/tests
-	@echo "${OK} Tests passed ✨"
+	@echo "${INFO} Running unit tests... 🧪"
+	@uv run pytest src/py/tests -m "not integration"
+	@echo "${OK} Unit tests passed ✨"
 
 .PHONY: integration-test
-integration-test:                                 ## Run integration tests
+integration-test:                                 ## Run integration tests only
 	@echo "${INFO} Cleaning shared memory... 🧹"
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
 	@echo "${INFO} Running integration tests... 🧪"
-	@uv run pytest src/py/tests -m integration --integration
+	@uv run pytest src/py/tests -m integration
 	@echo "${OK} Integration tests passed ✨"
 
+.PHONY: py-test-all
+py-test-all:                                      ## Run all Python tests (unit + integration)
+	@echo "${INFO} Cleaning shared memory... 🧹"
+	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
+	@echo "${INFO} Running all Python tests... 🧪"
+	@uv run pytest src/py/tests
+	@echo "${OK} Python tests passed ✨"
+
 .PHONY: test-all
-test-all: rs-test js-test test integration-test     ## Run all tests (Rust -> TypeScript -> Python unit -> Python integration)
+test-all: rs-test js-test py-test-all              ## Run all tests (Rust -> TypeScript -> Python)
 	@echo "${OK} All tests passed ✨"
 
 .PHONY: check-all

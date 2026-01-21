@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
 
 import msgspec
 
+from vertebra._internal.module_loader import ensure_pyarrow
+from vertebra._internal.typing import ArrowTable
 from vertebra.resources import AsyncBrokerClient, AsyncBrokerPool, BrokerClientConfig, SyncBrokerClient, SyncBrokerPool
 
 if TYPE_CHECKING:
@@ -104,7 +106,7 @@ class VertebraSyncCursor:
 class VertebraArrowCursor:
     def __init__(self, connection: "VertebraSyncConnection") -> None:
         self._connection = connection
-        self._table: Any = None
+        self._table: ArrowTable | None = None
 
     def execute(self, query: str, params: Sequence[ParamValue] | None = None) -> int | None:
         result = self._connection._execute(query, params or [])
@@ -113,7 +115,8 @@ class VertebraArrowCursor:
         else:
             rows = result.get("rows", [])
             columns = result.get("columns", [])
-            import pyarrow as pa
+            # Ensure pyarrow is available with clear error message
+            pa = ensure_pyarrow()
 
             if not rows and not columns:
                 self._table = pa.Table.from_pydict({})
@@ -123,9 +126,9 @@ class VertebraArrowCursor:
             else:
                 self._table = pa.Table.from_pydict({col: [] for col in columns})
 
-        return cast("int | None", self._table.num_rows)
+        return cast("int | None", self._table.num_rows if self._table else 0)
 
-    def fetchall(self) -> Any:
+    def fetchall(self) -> ArrowTable | None:
         """Return the pyarrow Table."""
         return self._table
 
@@ -232,7 +235,7 @@ class VertebraAsyncCursor:
 class VertebraAsyncArrowCursor:
     def __init__(self, connection: "VertebraAsyncConnection") -> None:
         self._connection = connection
-        self._table: Any = None
+        self._table: ArrowTable | None = None
 
     async def execute(self, query: str, params: Sequence[ParamValue] | None = None) -> int | None:
         result = await self._connection._execute(query, params or [])
@@ -241,7 +244,8 @@ class VertebraAsyncArrowCursor:
         else:
             rows = result.get("rows", [])
             columns = result.get("columns", [])
-            import pyarrow as pa
+            # Ensure pyarrow is available with clear error message
+            pa = ensure_pyarrow()
 
             if not rows and not columns:
                 self._table = pa.Table.from_pydict({})
@@ -251,9 +255,9 @@ class VertebraAsyncArrowCursor:
             else:
                 self._table = pa.Table.from_pydict({col: [] for col in columns})
 
-        return cast("int | None", self._table.num_rows)
+        return cast("int | None", self._table.num_rows if self._table else 0)
 
-    async def fetchall(self) -> Any:
+    async def fetchall(self) -> ArrowTable | None:
         return self._table
 
 

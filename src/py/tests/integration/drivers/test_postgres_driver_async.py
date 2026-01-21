@@ -93,7 +93,11 @@ async def test_postgres_driver_async_fetch() -> None:
 
         task = asyncio.create_task(broker_task())
 
-        client_config = BrokerClientConfig(name=name, slot_size=slot_size, slots=slots, client_id="test-client")
+        # Use prefer_eventfd=False because the mock broker uses SpscRing (no eventfd)
+        # while AsyncBrokerClient would use AsyncShmTransport waiting on eventfd by default.
+        client_config = BrokerClientConfig(
+            name=name, slot_size=slot_size, slots=slots, client_id="test-client", prefer_eventfd=False
+        )
         config = SyncPostgresDriverConfig(pool="default", client=client_config)
         driver = AsyncPostgresDriver(config)
 

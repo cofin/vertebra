@@ -43,7 +43,7 @@ impl NativeSupervisor {
     }
 
     fn wait_next_event(&self, py: Python<'_>, timeout_ms: u64) -> PyResult<Py<PyAny>> {
-        let event = py.allow_threads(|| self.wait_impl(timeout_ms))?;
+        let event = py.detach(|| self.wait_impl(timeout_ms))?;
         let dict = PyDict::new(py);
         match event {
             SupervisorEvent::Signal { signo } => {

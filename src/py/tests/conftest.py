@@ -25,23 +25,12 @@ if str(TESTS_ROOT) not in sys.path:
 pytest_plugins = ["tests.database"]
 
 
-def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption(
-        "--integration", action="store_true", default=False, help="Run integration tests that require external services"
-    )
-
-
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "integration: Execute integration tests (HTTP endpoints with full stack)")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    if not config.getoption("--integration"):
-        skip_integration = pytest.mark.skip(reason="need --integration to run")
-        for item in items:
-            if item.get_closest_marker("integration"):
-                item.add_marker(skip_integration)
-
+    # Group tests by database type for pytest-xdist parallel execution
     for item in items:
         fixturenames = getattr(item, "fixturenames", [])
         if item.get_closest_marker("postgres") or "postgres_service" in fixturenames:
