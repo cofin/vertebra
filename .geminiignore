@@ -1,5 +1,6 @@
 # Allow specs folder
 !specs
+!.agent
 # Keep gemini folder
 !gemini
 

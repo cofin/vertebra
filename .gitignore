@@ -65,3 +65,4 @@ AGENTS.md
 specs/archive
 uv.toml
 .agent/specs/archive
+.agent/archive
