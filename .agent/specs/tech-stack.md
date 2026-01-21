@@ -11,6 +11,7 @@
 - **Zero-Copy Data Plane**: Shared-memory ring buffers (SPSC/MPMC) and Arrow IPC for high-throughput, low-latency data transfer.
 - **IPC Mechanism**: Shared-memory C ABI (no sockets/TCP in the data plane).
 - **Process Model**: Centralized Bun broker managing shared resource pools across Python worker processes.
+- **MCP Runtime**: Model Context Protocol implementation (Stdio, SSE, WebSocket) for AI agent integration.
 
 ## Backend Frameworks
 
@@ -19,6 +20,7 @@
 ## Data & Storage
 
 - **SQLSpec**: Multi-dialect SQL query mapper with broker-backed adapters.
+- **Apache Arrow**: Primary serialization format for large tabular datasets (>1k rows).
 - **SQLAlchemy / Advanced Alchemy**: Native dialects and Repository/Service patterns integrated with the shared-memory broker.
 - **Storage**: Unified object store abstraction compatible with `fsspec`, supporting local, S3, and GCS backends via the broker.
 
@@ -28,3 +30,4 @@
 - **Task Runner**: Makefile for cross-language build, test, and lint orchestration.
 - **Testing**: `pytest` (Python), `bun test` (TS), `cargo test` (Rust).
 - **Linting/Formatting**: `ruff` (Python), `biome` (TypeScript), `rustfmt`/`clippy` (Rust).
+- **Distribution**: `python-build-standalone` (PBS) for portable Python runtimes; `vertebra build` for single-file executables.

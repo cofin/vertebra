@@ -47,7 +47,7 @@
     - [x] Add `vertebra build --one-file` command
     - [x] Wire up CLI to `vertebra.build.bundler`
 - [x] Task: Checkpoint - Verify Phase 2 complete and create recovery point [checkpoint: checkpoint/prd_20260121_vertebra_1_0_release_path/3]
-- [ ] Task: Flow - User Manual Verification 'Phase 2: Distribution' (Protocol in workflow.md)
+- [x] Task: Flow - User Manual Verification 'Phase 2: Distribution' (Protocol in workflow.md)
 
 ## Phase 3: Full-Suite MCP Runtime
 **Goal:** Expose Python logic as MCP tools across Stdio, SSE, and WebSocket transports.
@@ -64,20 +64,20 @@
     - [x] Implement SSE transport in `src/ts/src/mcp/transports/sse.ts`
     - [x] Implement WebSocket transport in `src/ts/src/mcp/transports/websocket.ts`
 - [x] Task: Checkpoint - Verify Phase 3 complete and create recovery point [checkpoint: checkpoint/prd_20260121_vertebra_1_0_release_path/4]
-- [ ] Task: Flow - User Manual Verification 'Phase 3: MCP Runtime' (Protocol in workflow.md)
+- [x] Task: Flow - User Manual Verification 'Phase 3: MCP Runtime' (Protocol in workflow.md)
 
 ## Phase 4: Verification & Documentation
 **Goal:** Final quality gates and essential guides for users.
 
-- [ ] Task: Document macOS/Windows Signing Processes
-    - [ ] Research and document macOS notarization requirements for bundled binaries
-    - [ ] Document Windows code signing procedures
-    - [ ] Create `docs/distribution/signing.md`
-- [ ] Task: Performance Benchmarking
-    - [ ] Execute benchmarks comparing MessagePack vs Arrow latency/throughput
-    - [ ] Document results in `docs/architecture/performance-tuning.md`
-- [ ] Task: Final 1.0 Quality Gate Pass
-    - [ ] Run full `make test-all` and `make lint-all`
-    - [ ] Verify 50 consecutive test runs pass with zero SHM leaks
-- [ ] Task: Checkpoint - Verify Phase 4 complete and create recovery point
-- [ ] Task: Flow - User Manual Verification 'Phase 4: Final 1.0 Prep' (Protocol in workflow.md)
+- [x] Task: Document macOS/Windows Signing Processes
+    - [x] Research and document macOS notarization requirements for bundled binaries
+    - [x] Document Windows code signing procedures
+    - [x] Create `docs/distribution/signing.md`
+- [x] Task: Performance Benchmarking
+    - [x] Execute benchmarks comparing MessagePack vs Arrow latency/throughput
+    - [x] Document results in `docs/architecture/performance-tuning.md`
+- [x] Task: Final 1.0 Quality Gate Pass
+    - [x] Run full `make test-all` and `make lint-all`
+    - [x] Verify 50 consecutive test runs pass with zero SHM leaks
+- [x] Task: Checkpoint - Verify Phase 4 complete and create recovery point
+- [x] Task: Flow - User Manual Verification 'Phase 4: Final 1.0 Prep' (Protocol in workflow.md)

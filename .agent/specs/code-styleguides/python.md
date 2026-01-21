@@ -187,6 +187,25 @@ class UserService:
         return await self.driver.add(user)
 ```
 
+## Command Line Interface (CLI)
+
+Use `click` (via `rich-click` for nicer formatting) and wrap async operations with `asyncio.run()`.
+
+```python
+import asyncio
+import click
+
+@click.command()
+@click.argument("name")
+def sync_command(name: str):
+    """Synchronous command wrapper."""
+    asyncio.run(async_operation(name))
+
+async def async_operation(name: str):
+    """Actual async logic."""
+    ...
+```
+
 ## Import Organization
 
 ```python

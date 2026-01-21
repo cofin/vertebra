@@ -102,7 +102,7 @@ pytest --cov=src --cov-fail-under=90
 
 ---
 
-## TypeScript Testing (Vitest)
+## TypeScript Testing (Vitest/Bun)
 
 ### Basic Test Structure
 ```typescript
@@ -138,6 +138,30 @@ describe('API', () => {
   it('should handle errors', async () => {
     await expect(fetchInvalidEndpoint()).rejects.toThrow();
   });
+});
+```
+
+### Bun Integration Testing
+Use `Bun.serve` to spin up lightweight servers for testing HTTP, WebSocket, or SSE clients/transports.
+
+```typescript
+import { expect, test, afterAll } from "bun:test";
+
+const app = Bun.serve({
+  port: 0, // Random port
+  fetch(req) {
+    if (req.url.endsWith("/hello")) return new Response("Hello");
+    return new Response("Not found", { status: 404 });
+  },
+});
+
+test("HTTP Integration", async () => {
+  const res = await fetch(`http://localhost:${app.port}/hello`);
+  expect(await res.text()).toBe("Hello");
+});
+
+afterAll(() => {
+  app.stop();
 });
 ```
 

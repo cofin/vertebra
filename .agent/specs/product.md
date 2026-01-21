@@ -10,15 +10,19 @@ Vertebra aims to be the definitive foundation for building high-performance, dat
 - **Zero-Copy Data Transfer**: Utilize Arrow and shared-memory ring buffers to eliminate serialization bottlenecks between Python workers and the Bun broker.
 - **Seamless Polyglot Development**: Bridge the gap between Python and TypeScript with automatic type generation, ensuring type safety across the entire stack.
 - **Centralized Resource Management**: Consolidate database connections, caches, and storage pools into a high-performance broker, reducing resource contention and simplifying configuration.
+- **AI-Ready Runtime**: Native support for the Model Context Protocol (MCP), enabling applications to be easily consumed by LLMs and AI agents.
 
 ## Target Audience
 - **Python Developers**: Building data-intensive APIs and backend services who need raw performance without sacrificing Python's developer experience.
 - **System Architects**: Designing low-latency, scalable systems that require efficient inter-process communication between diverse runtime environments.
 - **DevOps Engineers**: Managing the deployment and scaling of polyglot microservices, benefiting from a unified resource management layer.
+- **AI Engineers**: Building tools and resources that need to be exposed to agentic workflows via standard protocols.
 
 ## Key Features
 - **High-Performance IPC**: Rust-powered core primitives for shared memory and ring buffers.
 - **Type-Safe API**: Automatic TypeScript type generation from Python code (Litestar integration).
 - **Centralized Broker**: Bun-based broker for managing database pools (Postgres, Redis, SQLite) and storage.
 - **Unified Tooling**: CLI for project scaffolding, building, and serving applications.
+- **Single-File Distribution**: Build standalone, dependency-free executables (`vertebra build --one-file`) for easy deployment.
+- **MCP Runtime**: Built-in Model Context Protocol server (Stdio, SSE, WebSocket) for exposing Python functions as AI tools.
 - **Observability**: Built-in metrics and monitoring for system health and performance.
