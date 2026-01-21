@@ -12,7 +12,7 @@ def test_native_supervisor_lifecycle() -> None:
     ns = NativeSupervisor()
 
     # Spawn a dummy child process
-    proc = subprocess.Popen(["sleep", "10"])
+    proc = subprocess.Popen(["/bin/sleep", "10"])
     ns.add_child(proc.pid)
 
     # Propagate SIGTERM
@@ -37,8 +37,8 @@ def test_native_supervisor_timeout() -> None:
 @pytest.mark.unit
 def test_native_supervisor_multiple_children() -> None:
     ns = NativeSupervisor()
-    proc1 = subprocess.Popen(["sleep", "10"])
-    proc2 = subprocess.Popen(["sleep", "10"])
+    proc1 = subprocess.Popen(["/bin/sleep", "10"])
+    proc2 = subprocess.Popen(["/bin/sleep", "10"])
     ns.add_child(proc1.pid)
     ns.add_child(proc2.pid)
 

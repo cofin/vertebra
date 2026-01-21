@@ -13,6 +13,7 @@ from vertebra._internal.async_transport import AsyncShmTransport, PollingTranspo
 from vertebra._internal.module_loader import ensure_pyarrow
 from vertebra._internal.serialization import MessagePackCodec
 from vertebra._vertebra import AsyncRing, ShmRegion, SpscRing
+from vertebra.resources.arrow import decode_arrow_nano
 
 
 class BrokerClientError(RuntimeError):
@@ -255,9 +256,11 @@ class AsyncBrokerClient:
         if "arrow_bytes" in data:
             arrow_bytes = data.get("arrow_bytes") or b""
             try:
-                return _decode_arrow_bytes(arrow_bytes)
+                table = _decode_arrow_bytes(arrow_bytes)
             except (ImportError, RuntimeError):
                 return {"arrow": decode_arrow_nano(arrow_bytes)}
+            else:
+                return table
         arrow = data["arrow"] or {}
         name = arrow.get("name")
         size = int(arrow.get("size", 0))
@@ -273,10 +276,11 @@ class AsyncBrokerClient:
                 pa = ensure_pyarrow()
                 with pa.ipc.open_stream(memoryview(region)) as reader:
                     table = reader.read_all()
-                return {"arrow": table}
             except (ImportError, RuntimeError):
                 # Fallback to nanoarrow
                 return {"arrow": decode_arrow_nano(memoryview(region))}
+            else:
+                return {"arrow": table}
         finally:
             region.close()
             await self._release_arrow(str(name))
@@ -463,9 +467,11 @@ class SyncBrokerClient:
         if "arrow_bytes" in data:
             arrow_bytes = data.get("arrow_bytes") or b""
             try:
-                return _decode_arrow_bytes(arrow_bytes)
+                table = _decode_arrow_bytes(arrow_bytes)
             except (ImportError, RuntimeError):
                 return {"arrow": decode_arrow_nano(arrow_bytes)}
+            else:
+                return table
         arrow = data["arrow"] or {}
         name = arrow.get("name")
         size = int(arrow.get("size", 0))
@@ -481,10 +487,11 @@ class SyncBrokerClient:
                 pa = ensure_pyarrow()
                 with pa.ipc.open_stream(memoryview(region)) as reader:
                     table = reader.read_all()
-                return {"arrow": table}
             except (ImportError, RuntimeError):
                 # Fallback to nanoarrow
                 return {"arrow": decode_arrow_nano(memoryview(region))}
+            else:
+                return {"arrow": table}
         finally:
             region.close()
             self._release_arrow(str(name))

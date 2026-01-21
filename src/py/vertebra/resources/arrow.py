@@ -154,6 +154,7 @@ def decode_arrow_nano(data: bytes | memoryview) -> list[dict[str, Any]]:
     """
     import nanoarrow as na
     import nanoarrow.ipc as na_ipc
+    from nanoarrow.iterator import iter_py
 
     # Create input stream
     input_stream = io.BytesIO(data) if isinstance(data, (bytes, bytearray)) else io.BytesIO(bytes(data))
@@ -161,15 +162,12 @@ def decode_arrow_nano(data: bytes | memoryview) -> list[dict[str, Any]]:
     rows = []
     try:
         # Use InputStream.from_readable to wrap the BytesIO
-        with na_ipc.InputStream.from_readable(input_stream) as ipc_stream:
-            with na.c_array_stream(ipc_stream) as stream:
-                for array in stream:
-                    # na.iterator is a module, use iter_py to get python objects
-                    from nanoarrow.iterator import iter_py
-
-                    rows.extend(list(iter_py(array)))
-    except Exception:
-        # Fallback/Debug
+        with na_ipc.InputStream.from_readable(input_stream) as ipc_stream, na.c_array_stream(ipc_stream) as stream:
+            for array in stream:
+                # na.iterator is a module, use iter_py to get python objects
+                rows.extend(list(iter_py(array)))
+    except Exception:  # noqa: BLE001, S110
+        # Fallback/Debug: If Arrow decoding fails, return empty or partial rows.
+        # This is a best-effort decoding path.
         pass
-
     return rows

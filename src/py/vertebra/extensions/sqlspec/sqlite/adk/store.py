@@ -3,16 +3,12 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timezone
-from typing import TYPE_CHECKING, Any, cast
+from datetime import UTC, datetime
+from typing import Any, cast
 
 from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore, EventRecord, MemoryRecord, SessionRecord
 from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore, BaseSyncADKMemoryStore
 from sqlspec.utils.serializers import from_json, to_json
-
-if TYPE_CHECKING:
-    from vertebra.extensions.sqlspec.sqlite.config import VertebraSqliteAsyncConfig, VertebraSqliteSyncConfig
-
 
 SECONDS_PER_DAY = 86400.0
 JULIAN_EPOCH = 2440587.5
@@ -22,8 +18,8 @@ __all__ = ("SqliteADKMemoryStore", "SqliteADKStore", "SyncSqliteADKMemoryStore",
 
 def _datetime_to_julian(dt: datetime) -> float:
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
     delta_days = (dt - epoch).total_seconds() / SECONDS_PER_DAY
     return JULIAN_EPOCH + delta_days
 
@@ -31,7 +27,7 @@ def _datetime_to_julian(dt: datetime) -> float:
 def _julian_to_datetime(julian: float) -> datetime:
     days_since_epoch = julian - JULIAN_EPOCH
     timestamp = days_since_epoch * SECONDS_PER_DAY
-    return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    return datetime.fromtimestamp(timestamp, tz=UTC)
 
 
 def _to_sqlite_bool(value: bool | None) -> int | None:
@@ -113,7 +109,7 @@ class SqliteADKStore(BaseAsyncADKStore["VertebraSqliteAsyncConfig"]):
         now_julian = _datetime_to_julian(now)
         state_json = to_json(state) if state else "{}"
 
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             if self._owner_id_column_name:
                 sql = f"""
                 INSERT INTO {self._session_table}
@@ -167,13 +163,13 @@ class SqliteADKStore(BaseAsyncADKStore["VertebraSqliteAsyncConfig"]):
         WHERE id = ?
         """
 
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             await conn.execute(sql, [state_json, now_julian, session_id])
 
     async def delete_session(self, session_id: str) -> None:
         sql = f"DELETE FROM {self._session_table} WHERE id = ?"
 
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             await conn.execute(sql, [session_id])
 
     async def list_sessions(self, app_name: str, user_id: str | None = None) -> list[SessionRecord]:
@@ -236,7 +232,7 @@ class SqliteADKStore(BaseAsyncADKStore["VertebraSqliteAsyncConfig"]):
         )
         """
 
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             await conn.execute(
                 sql,
                 [
@@ -394,7 +390,7 @@ class SqliteADKMemoryStore(BaseAsyncADKMemoryStore["VertebraSqliteAsyncConfig"])
             return 0
 
         inserted_count = 0
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             for entry in entries:
                 params: list[Any]
                 if self._owner_id_column_name:
@@ -491,7 +487,7 @@ class SqliteADKMemoryStore(BaseAsyncADKMemoryStore["VertebraSqliteAsyncConfig"])
             raise RuntimeError(msg)
 
         sql = f"DELETE FROM {self._memory_table} WHERE session_id = ?"
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             result = await conn.execute(sql, [session_id])
             return cast("int", result or 0)
 
@@ -502,7 +498,7 @@ class SqliteADKMemoryStore(BaseAsyncADKMemoryStore["VertebraSqliteAsyncConfig"])
 
         cutoff = _datetime_to_julian(datetime.now(UTC)) - days
         sql = f"DELETE FROM {self._memory_table} WHERE inserted_at < ?"
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             result = await conn.execute(sql, [cutoff])
             return cast("int", result or 0)
 
@@ -682,7 +678,9 @@ class SyncSqliteADKStore(BaseSyncADKStore["VertebraSqliteSyncConfig"]):
         timestamp_julian = _datetime_to_julian(timestamp)
 
         content_json = to_json(content) if content else None
-        grounding_metadata_json = to_json(kwargs.get("grounding_metadata")) if kwargs.get("grounding_metadata") else None
+        grounding_metadata_json = (
+            to_json(kwargs.get("grounding_metadata")) if kwargs.get("grounding_metadata") else None
+        )
         custom_metadata_json = to_json(kwargs.get("custom_metadata")) if kwargs.get("custom_metadata") else None
 
         partial_int = _to_sqlite_bool(kwargs.get("partial"))

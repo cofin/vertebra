@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 from sqlspec.extensions.litestar.store import BaseSQLSpecStore
 
 if TYPE_CHECKING:
     from datetime import timedelta
-    from vertebra.extensions.sqlspec.sqlite.config import VertebraSqliteAsyncConfig
 
 
 SECONDS_PER_DAY = 86400.0
@@ -46,7 +45,7 @@ class SqliteLitestarStore(BaseSQLSpecStore["VertebraSqliteAsyncConfig"]):
         if dt is None:
             return None
 
-        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        epoch = datetime(1970, 1, 1, tzinfo=UTC)
         delta_days = (dt - epoch).total_seconds() / SECONDS_PER_DAY
         return JULIAN_EPOCH + delta_days
 
@@ -56,7 +55,7 @@ class SqliteLitestarStore(BaseSQLSpecStore["VertebraSqliteAsyncConfig"]):
 
         days_since_epoch = julian - JULIAN_EPOCH
         timestamp = days_since_epoch * SECONDS_PER_DAY
-        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        return datetime.fromtimestamp(timestamp, tz=UTC)
 
     async def create_table(self) -> None:
         sql = self._get_create_table_sql()
@@ -71,7 +70,7 @@ class SqliteLitestarStore(BaseSQLSpecStore["VertebraSqliteAsyncConfig"]):
         AND (expires_at IS NULL OR julianday(expires_at) > julianday('now'))
         """
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             row = await conn.fetchrow(sql, [key])
 
             if row is None:
@@ -103,19 +102,19 @@ class SqliteLitestarStore(BaseSQLSpecStore["VertebraSqliteAsyncConfig"]):
         VALUES (?, ?, ?)
         """
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             await conn.execute(sql, [key, data, expires_at_julian])
 
     async def delete(self, key: str) -> None:
         sql = f"DELETE FROM {self._table_name} WHERE session_id = ?"
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             await conn.execute(sql, [key])
 
     async def delete_all(self) -> None:
         sql = f"DELETE FROM {self._table_name}"
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             await conn.execute(sql)
         self._log_delete_all()
 
@@ -126,7 +125,7 @@ class SqliteLitestarStore(BaseSQLSpecStore["VertebraSqliteAsyncConfig"]):
         AND (expires_at IS NULL OR julianday(expires_at) > julianday('now'))
         """
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             result = await conn.fetchval(sql, [key])
             return result is not None
 
@@ -136,7 +135,7 @@ class SqliteLitestarStore(BaseSQLSpecStore["VertebraSqliteAsyncConfig"]):
         WHERE session_id = ?
         """
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             expires_at_julian = cast("float | None", await conn.fetchval(sql, [key]))
 
             if expires_at_julian is None:
@@ -147,7 +146,7 @@ class SqliteLitestarStore(BaseSQLSpecStore["VertebraSqliteAsyncConfig"]):
             if expires_at is None:
                 return None
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
             if expires_at <= now:
                 return 0
@@ -158,7 +157,7 @@ class SqliteLitestarStore(BaseSQLSpecStore["VertebraSqliteAsyncConfig"]):
     async def delete_expired(self) -> int:
         sql = f"DELETE FROM {self._table_name} WHERE julianday(expires_at) <= julianday('now')"
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             rowcount = await conn.execute(sql)
             count = rowcount or 0
             if count > 0:

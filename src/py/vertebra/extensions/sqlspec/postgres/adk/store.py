@@ -11,7 +11,6 @@ from sqlspec.utils.serializers import from_json, to_json
 
 if TYPE_CHECKING:
     from datetime import datetime
-    from vertebra.extensions.sqlspec.postgres.config import VertebraPostgresAsyncConfig, VertebraPostgresSyncConfig
 
 
 __all__ = ("PostgresADKMemoryStore", "PostgresADKStore", "SyncPostgresADKMemoryStore", "SyncPostgresADKStore")
@@ -90,14 +89,9 @@ class PostgresADKStore(BaseAsyncADKStore["VertebraPostgresAsyncConfig"]):
             await driver.execute_script(await self._get_create_events_table_sql())
 
     async def create_session(
-        self,
-        session_id: str,
-        app_name: str,
-        user_id: str,
-        state: dict[str, Any],
-        owner_id: Any | None = None,
+        self, session_id: str, app_name: str, user_id: str, state: dict[str, Any], owner_id: Any | None = None
     ) -> SessionRecord:
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             if self._owner_id_column_name:
                 sql = f"""
                 INSERT INTO {self._session_table}
@@ -148,13 +142,13 @@ class PostgresADKStore(BaseAsyncADKStore["VertebraPostgresAsyncConfig"]):
         WHERE id = $2
         """
 
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             await conn.execute(sql, [state, session_id])
 
     async def delete_session(self, session_id: str) -> None:
         sql = f"DELETE FROM {self._session_table} WHERE id = $1"
 
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             await conn.execute(sql, [session_id])
 
     async def list_sessions(self, app_name: str, user_id: str | None = None) -> list[SessionRecord]:
@@ -203,7 +197,7 @@ class PostgresADKStore(BaseAsyncADKStore["VertebraPostgresAsyncConfig"]):
         )
         """
 
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             await conn.execute(
                 sql,
                 [
@@ -229,10 +223,7 @@ class PostgresADKStore(BaseAsyncADKStore["VertebraPostgresAsyncConfig"]):
             )
 
     async def get_events(
-        self,
-        session_id: str,
-        after_timestamp: datetime | None = None,
-        limit: int | None = None,
+        self, session_id: str, after_timestamp: datetime | None = None, limit: int | None = None
     ) -> list[EventRecord]:
         where_clauses = ["session_id = $1"]
         params: list[Any] = [session_id]
@@ -344,7 +335,7 @@ class PostgresADKMemoryStore(BaseAsyncADKMemoryStore["VertebraPostgresAsyncConfi
             return 0
 
         inserted_count = 0
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             for entry in entries:
                 if self._owner_id_column_name:
                     sql = f"""
@@ -402,11 +393,7 @@ class PostgresADKMemoryStore(BaseAsyncADKMemoryStore["VertebraPostgresAsyncConfi
         return inserted_count
 
     async def search_entries(
-        self,
-        query: str,
-        app_name: str,
-        user_id: str,
-        limit: int | None = None,
+        self, query: str, app_name: str, user_id: str, limit: int | None = None
     ) -> list[MemoryRecord]:
         if not self._enabled:
             msg = "Memory store is disabled"
@@ -444,7 +431,7 @@ class PostgresADKMemoryStore(BaseAsyncADKMemoryStore["VertebraPostgresAsyncConfi
             raise RuntimeError(msg)
 
         sql = f"DELETE FROM {self._memory_table} WHERE session_id = $1"
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             result = await conn.execute(sql, [session_id])
             return result or 0
 
@@ -457,7 +444,7 @@ class PostgresADKMemoryStore(BaseAsyncADKMemoryStore["VertebraPostgresAsyncConfi
         DELETE FROM {self._memory_table}
         WHERE inserted_at < (CURRENT_TIMESTAMP - ($1::int * INTERVAL '1 day'))
         """
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             result = await conn.execute(sql, [days])
             return result or 0
 
@@ -531,12 +518,7 @@ class SyncPostgresADKStore(BaseSyncADKStore["VertebraPostgresSyncConfig"]):
             driver.execute_script(self._get_create_events_table_sql())
 
     def create_session(
-        self,
-        session_id: str,
-        app_name: str,
-        user_id: str,
-        state: dict[str, Any],
-        owner_id: Any | None = None,
+        self, session_id: str, app_name: str, user_id: str, state: dict[str, Any], owner_id: Any | None = None
     ) -> SessionRecord:
         with self.config.provide_connection() as conn:
             if self._owner_id_column_name:

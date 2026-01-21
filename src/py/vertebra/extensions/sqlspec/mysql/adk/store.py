@@ -12,7 +12,6 @@ from sqlspec.utils.serializers import from_json, to_json
 
 if TYPE_CHECKING:
     from datetime import datetime
-    from vertebra.extensions.sqlspec.mysql.config import VertebraMysqlAsyncConfig, VertebraMysqlSyncConfig
 
 
 __all__ = ("MysqlADKMemoryStore", "MysqlADKStore", "SyncMysqlADKMemoryStore", "SyncMysqlADKStore")
@@ -101,16 +100,11 @@ class MysqlADKStore(BaseAsyncADKStore["VertebraMysqlAsyncConfig"]):
             await driver.execute_script(await self._get_create_events_table_sql())
 
     async def create_session(
-        self,
-        session_id: str,
-        app_name: str,
-        user_id: str,
-        state: dict[str, Any],
-        owner_id: Any | None = None,
+        self, session_id: str, app_name: str, user_id: str, state: dict[str, Any], owner_id: Any | None = None
     ) -> SessionRecord:
         state_json = to_json(state)
 
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             if self._owner_id_column_name:
                 sql = f"""
                 INSERT INTO {self._session_table} (id, app_name, user_id, {self._owner_id_column_name}, state, create_time, update_time)
@@ -162,13 +156,13 @@ class MysqlADKStore(BaseAsyncADKStore["VertebraMysqlAsyncConfig"]):
         WHERE id = %s
         """
 
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             await conn.execute(sql, [state_json, session_id])
 
     async def delete_session(self, session_id: str) -> None:
         sql = f"DELETE FROM {self._session_table} WHERE id = %s"
 
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             await conn.execute(sql, [session_id])
 
     async def list_sessions(self, app_name: str, user_id: str | None = None) -> list[SessionRecord]:
@@ -225,7 +219,7 @@ class MysqlADKStore(BaseAsyncADKStore["VertebraMysqlAsyncConfig"]):
         )
         """
 
-        async with (await self.config.provide_connection()) as conn:
+        async with await self.config.provide_connection() as conn:
             await conn.execute(
                 sql,
                 [
@@ -251,10 +245,7 @@ class MysqlADKStore(BaseAsyncADKStore["VertebraMysqlAsyncConfig"]):
             )
 
     async def get_events(
-        self,
-        session_id: str,
-        after_timestamp: datetime | None = None,
-        limit: int | None = None,
+        self, session_id: str, after_timestamp: datetime | None = None, limit: int | None = None
     ) -> list[EventRecord]:
         where_clauses = ["session_id = %s"]
         params: list[Any] = [session_id]
@@ -292,9 +283,15 @@ class MysqlADKStore(BaseAsyncADKStore["VertebraMysqlAsyncConfig"]):
                     long_running_tool_ids_json=row["long_running_tool_ids_json"],
                     branch=row["branch"],
                     timestamp=row["timestamp"],
-                    content=from_json(row["content"]) if row["content"] and isinstance(row["content"], str) else row["content"],
-                    grounding_metadata=from_json(row["grounding_metadata"]) if row["grounding_metadata"] and isinstance(row["grounding_metadata"], str) else row["grounding_metadata"],
-                    custom_metadata=from_json(row["custom_metadata"]) if row["custom_metadata"] and isinstance(row["custom_metadata"], str) else row["custom_metadata"],
+                    content=from_json(row["content"])
+                    if row["content"] and isinstance(row["content"], str)
+                    else row["content"],
+                    grounding_metadata=from_json(row["grounding_metadata"])
+                    if row["grounding_metadata"] and isinstance(row["grounding_metadata"], str)
+                    else row["grounding_metadata"],
+                    custom_metadata=from_json(row["custom_metadata"])
+                    if row["custom_metadata"] and isinstance(row["custom_metadata"], str)
+                    else row["custom_metadata"],
                     partial=row["partial"],
                     turn_complete=row["turn_complete"],
                     interrupted=row["interrupted"],
@@ -376,7 +373,7 @@ class MysqlADKMemoryStore(BaseAsyncADKMemoryStore["VertebraMysqlAsyncConfig"]):
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             for entry in entries:
                 params: list[Any]
                 if self._owner_id_column_name:
@@ -414,11 +411,7 @@ class MysqlADKMemoryStore(BaseAsyncADKMemoryStore["VertebraMysqlAsyncConfig"]):
         return inserted_count
 
     async def search_entries(
-        self,
-        query: str,
-        app_name: str,
-        user_id: str,
-        limit: int | None = None,
+        self, query: str, app_name: str, user_id: str, limit: int | None = None
     ) -> list[MemoryRecord]:
         if not self._enabled:
             msg = "Memory store is disabled"
@@ -456,7 +449,7 @@ class MysqlADKMemoryStore(BaseAsyncADKMemoryStore["VertebraMysqlAsyncConfig"]):
             raise RuntimeError(msg)
 
         sql = f"DELETE FROM {self._memory_table} WHERE session_id = %s"
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             result = await conn.execute(sql, [session_id])
             return result or 0
 
@@ -469,7 +462,7 @@ class MysqlADKMemoryStore(BaseAsyncADKMemoryStore["VertebraMysqlAsyncConfig"]):
         DELETE FROM {self._memory_table}
         WHERE inserted_at < (UTC_TIMESTAMP(6) - INTERVAL %s DAY)
         """
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             result = await conn.execute(sql, [days])
             return result or 0
 
@@ -539,12 +532,7 @@ class SyncMysqlADKStore(BaseSyncADKStore["VertebraMysqlSyncConfig"]):
             driver.execute_script(self._get_create_events_table_sql())
 
     def create_session(
-        self,
-        session_id: str,
-        app_name: str,
-        user_id: str,
-        state: dict[str, Any],
-        owner_id: Any | None = None,
+        self, session_id: str, app_name: str, user_id: str, state: dict[str, Any], owner_id: Any | None = None
     ) -> SessionRecord:
         state_json = to_json(state)
 

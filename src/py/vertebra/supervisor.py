@@ -302,7 +302,7 @@ class Supervisor:
         except (OSError, ProcessLookupError):
             pass
 
-    def wait(self, primary: str | None = None) -> int:
+    def wait(self, primary: str | None = None) -> int:  # noqa: PLR0912
         """Wait for processes to complete.
 
         Args:

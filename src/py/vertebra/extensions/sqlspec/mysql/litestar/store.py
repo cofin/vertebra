@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 from sqlspec.extensions.litestar.store import BaseSQLSpecStore
 
 if TYPE_CHECKING:
     from datetime import timedelta
-    from vertebra.extensions.sqlspec.mysql.config import VertebraMysqlAsyncConfig
 
 
 __all__ = ("MysqlLitestarStore",)
@@ -56,7 +55,7 @@ class MysqlLitestarStore(BaseSQLSpecStore["VertebraMysqlAsyncConfig"]):
         AND (expires_at IS NULL OR expires_at > UTC_TIMESTAMP(6))
         """
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             row = await conn.fetchrow(sql, [key])
 
             if row is None:
@@ -93,19 +92,19 @@ class MysqlLitestarStore(BaseSQLSpecStore["VertebraMysqlAsyncConfig"]):
             updated_at = UTC_TIMESTAMP(6)
         """
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             await conn.execute(sql, [key, data, naive_expires_at])
 
     async def delete(self, key: str) -> None:
         sql = f"DELETE FROM {self._table_name} WHERE session_id = %s"
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             await conn.execute(sql, [key])
 
     async def delete_all(self) -> None:
         sql = f"DELETE FROM {self._table_name}"
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             await conn.execute(sql)
         self._log_delete_all()
 
@@ -116,7 +115,7 @@ class MysqlLitestarStore(BaseSQLSpecStore["VertebraMysqlAsyncConfig"]):
         AND (expires_at IS NULL OR expires_at > UTC_TIMESTAMP(6))
         """
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             result = await conn.fetchval(sql, [key])
             return result is not None
 
@@ -126,14 +125,14 @@ class MysqlLitestarStore(BaseSQLSpecStore["VertebraMysqlAsyncConfig"]):
         WHERE session_id = %s
         """
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             expires_at_naive = cast("datetime | None", await conn.fetchval(sql, [key]))
 
             if expires_at_naive is None:
                 return None
 
-            expires_at_utc = expires_at_naive.replace(tzinfo=timezone.utc)
-            now = datetime.now(timezone.utc)
+            expires_at_utc = expires_at_naive.replace(tzinfo=UTC)
+            now = datetime.now(UTC)
 
             if expires_at_utc <= now:
                 return 0
@@ -144,7 +143,7 @@ class MysqlLitestarStore(BaseSQLSpecStore["VertebraMysqlAsyncConfig"]):
     async def delete_expired(self) -> int:
         sql = f"DELETE FROM {self._table_name} WHERE expires_at <= UTC_TIMESTAMP(6)"
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             rowcount = await conn.execute(sql)
             count = rowcount or 0
             if count > 0:

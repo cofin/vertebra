@@ -95,7 +95,7 @@ class ProviderHost:
                             "arrow": {"name": region.name, "size": region.size},
                             "rowcount": response.get("rowcount", len(response.get("rows", []))),
                         }
-                    except Exception:
+                    except Exception:  # noqa: BLE001, S110
                         # Fallback to MessagePack if Arrow encoding fails
                         pass
 

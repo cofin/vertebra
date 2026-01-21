@@ -3,13 +3,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from sqlspec.extensions.events import BaseEventQueueStore
-
-if TYPE_CHECKING:
-    from vertebra.extensions.sqlspec.mysql.config import VertebraMysqlAsyncConfig
-
 
 __all__ = ("MysqlEventQueueStore",)
 

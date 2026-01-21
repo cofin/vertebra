@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, cast
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, cast
 
 from sqlspec.extensions.litestar.store import BaseSQLSpecStore
 
 if TYPE_CHECKING:
     from datetime import timedelta
-    from vertebra.extensions.sqlspec.postgres.config import VertebraPostgresAsyncConfig
 
 
 __all__ = ("PostgresLitestarStore",)
@@ -60,7 +59,7 @@ class PostgresLitestarStore(BaseSQLSpecStore["VertebraPostgresAsyncConfig"]):
         AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
         """
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             row = await conn.fetchrow(sql, [key])
 
             if row is None:
@@ -98,19 +97,19 @@ class PostgresLitestarStore(BaseSQLSpecStore["VertebraPostgresAsyncConfig"]):
             updated_at = CURRENT_TIMESTAMP
         """
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             await conn.execute(sql, [key, data, expires_at])
 
     async def delete(self, key: str) -> None:
         sql = f"DELETE FROM {self._table_name} WHERE session_id = $1"
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             await conn.execute(sql, [key])
 
     async def delete_all(self) -> None:
         sql = f"DELETE FROM {self._table_name}"
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             await conn.execute(sql)
         self._log_delete_all()
 
@@ -121,7 +120,7 @@ class PostgresLitestarStore(BaseSQLSpecStore["VertebraPostgresAsyncConfig"]):
         AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
         """
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             result = await conn.fetchval(sql, [key])
             return result is not None
 
@@ -131,13 +130,13 @@ class PostgresLitestarStore(BaseSQLSpecStore["VertebraPostgresAsyncConfig"]):
         WHERE session_id = $1
         """
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             expires_at = cast("datetime | None", await conn.fetchval(sql, [key]))
 
             if expires_at is None:
                 return None
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if expires_at <= now:
                 return 0
 
@@ -147,7 +146,7 @@ class PostgresLitestarStore(BaseSQLSpecStore["VertebraPostgresAsyncConfig"]):
     async def delete_expired(self) -> int:
         sql = f"DELETE FROM {self._table_name} WHERE expires_at <= CURRENT_TIMESTAMP"
 
-        async with (await self._config.provide_connection()) as conn:
+        async with await self._config.provide_connection() as conn:
             rowcount = await conn.execute(sql)
             count = rowcount or 0
             if count > 0:
