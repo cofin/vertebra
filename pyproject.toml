@@ -13,6 +13,7 @@ classifiers = [
 dependencies = [
   "cffi>=1.16.0",
   "click>=8.1.7",
+  "litestar>=2.19.0",
   "msgspec>=0.18.0",
   "nanoarrow>=0.4.0",
   "rich-click>=1.7.2",
@@ -66,7 +67,7 @@ dev = [
 ]
 lint = ["mypy", "pre-commit", "pyright", "ruff", "slotscheck", "types-click", "types-pyyaml", "types-requests"]
 test = [
-  "sqlspec[mypyc,performance,obstore,aiosqlite,asyncpg,msgspec,pydantic]",
+  "sqlspec[mypyc,performance,obstore,aiosqlite,asyncpg,msgspec,pydantic,adk]",
   "anyio",
   "coverage[toml]",
   "filelock>=3.13.1",
