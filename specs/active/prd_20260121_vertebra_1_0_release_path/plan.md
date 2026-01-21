@@ -19,7 +19,7 @@
     - [x] Write stress tests that simulate process crashes
     - [x] Implement a robust cleanup mechanism in the supervisor/test-fixtures that unlinks SHM even on SIGKILL
 - [x] Task: Checkpoint - Verify Phase 1 complete and create recovery point [checkpoint: a7eea60]
-- [ ] Task: Flow - User Manual Verification 'Phase 1: Stabilization' (Protocol in workflow.md)
+- [x] Task: Flow - User Manual Verification 'Phase 1: Stabilization' (Protocol in workflow.md)
 
 ## Phase 2: Distribution Toolchain & Rust Supervisor
 **Goal:** Deliver a robust process manager and a universal build system capable of producing single-file binaries.
