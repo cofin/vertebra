@@ -22,6 +22,7 @@ use vertebra_core::channel::{BufferChannel, BufferMessage, ChannelError, MpmcRin
 use vertebra_core::shm::ShmRegion;
 
 mod async_ring;
+mod supervisor;
 
 #[pyclass(name = "ShmRegion")]
 struct PyShmRegion {
@@ -818,6 +819,7 @@ fn _vertebra(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySpscRing>()?;
     m.add_class::<PyMpmcRing>()?;
     m.add_class::<PyBufferChannel>()?;
+    m.add_class::<supervisor::NativeSupervisor>()?;
     m.add_function(wrap_pyfunction!(shm_unlink, m)?)?;
     // Register async ring types (PRD-10: eventfd async transport)
     async_ring::register(m)?;
