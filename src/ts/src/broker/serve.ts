@@ -37,10 +37,10 @@ import {
   type Backend as StorageBackend,
 } from "../drivers/filesystem";
 import { BasePoolAdapter, type PoolAdapter, type PoolStats } from "./base-pool";
+import type { BrokerStats, SchedulerPoolStats } from "./client";
+import { createBrokerMetrics, updateBrokerMetrics } from "./metrics";
 import { FairScheduler, type SchedulerStats } from "./scheduler";
 import { ShmRegion, ShmRing } from "./shm";
-import { createBrokerMetrics, updateBrokerMetrics } from "./metrics";
-import type { BrokerStats, SchedulerPoolStats } from "./client";
 
 type BrokerPoolConfig = {
   name: string;

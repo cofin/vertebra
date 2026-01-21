@@ -133,7 +133,7 @@ time.sleep(30)
     finally:
         Path(script_path).unlink(missing_ok=True)
         # Ensure stopped if assertion failed
-        if 'supervisor' in locals():
+        if "supervisor" in locals():
             supervisor.stop()
 
 

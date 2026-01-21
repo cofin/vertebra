@@ -63,7 +63,7 @@
     - [x] Write integration tests for SSE streaming and WebSocket bidirectional messaging
     - [x] Implement SSE transport in `src/ts/src/mcp/transports/sse.ts`
     - [x] Implement WebSocket transport in `src/ts/src/mcp/transports/websocket.ts`
-- [ ] Task: Checkpoint - Verify Phase 3 complete and create recovery point
+- [x] Task: Checkpoint - Verify Phase 3 complete and create recovery point [checkpoint: checkpoint/prd_20260121_vertebra_1_0_release_path/4]
 - [ ] Task: Flow - User Manual Verification 'Phase 3: MCP Runtime' (Protocol in workflow.md)
 
 ## Phase 4: Verification & Documentation

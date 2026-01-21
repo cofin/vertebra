@@ -69,4 +69,3 @@ async def register_json_codecs(connection: Any, encoder: Any = None, decoder: An
         schema="pg_catalog",
         format="text",
     )
-

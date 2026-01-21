@@ -40,7 +40,7 @@ class PostgresDriverFeatures(TypedDict, total=False):
     """Driver features for broker-backed PostgreSQL."""
 
     data_dictionary_factory: NotRequired["Callable[[], SyncDataDictionaryBase | AsyncDataDictionaryBase]"]
-    
+
     # JSON handling
     json_serializer: NotRequired["Callable[[Any], str]"]
     json_deserializer: NotRequired["Callable[[str], Any]"]

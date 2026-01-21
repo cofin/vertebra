@@ -113,13 +113,17 @@ except ImportError:
 
 # Conditional imports for pandas
 try:
-    from pandas import DataFrame as PandasDataFrame  # type: ignore[import-not-found,import-untyped,unused-ignore]  # pyright: ignore[reportMissingImports]
+    from pandas import (
+        DataFrame as PandasDataFrame,  # type: ignore[import-not-found,import-untyped,unused-ignore]  # pyright: ignore[reportMissingImports]
+    )
 except ImportError:
     PandasDataFrame = PandasDataFrameProtocol  # type: ignore[assignment,misc,unused-ignore]
 
 # Conditional imports for polars
 try:
-    from polars import DataFrame as PolarsDataFrame  # type: ignore[import-not-found,import-untyped,unused-ignore]  # pyright: ignore[reportMissingImports]
+    from polars import (
+        DataFrame as PolarsDataFrame,  # type: ignore[import-not-found,import-untyped,unused-ignore]  # pyright: ignore[reportMissingImports]
+    )
 except ImportError:
     PolarsDataFrame = PolarsDataFrameProtocol  # type: ignore[assignment,misc,unused-ignore]
 
@@ -131,8 +135,6 @@ __all__ = (
     "NUMPY_INSTALLED",
     # Pandas
     "PANDAS_INSTALLED",
-    "PandasDataFrame",
-    "PandasDataFrameProtocol",
     # Polars
     "POLARS_INSTALLED",
     # Arrow
@@ -150,10 +152,12 @@ __all__ = (
     "ArrowTableProtocol",
     "NumpyArray",
     "NumpyArrayProtocol",
-    "PolarsDataFrame",
-    "PolarsDataFrameProtocol",
     # Core utilities
     "OptionalDependencyFlag",
+    "PandasDataFrame",
+    "PandasDataFrameProtocol",
+    "PolarsDataFrame",
+    "PolarsDataFrameProtocol",
     "dependency_flag",
     "ensure_dependency",
     "ensure_numpy",

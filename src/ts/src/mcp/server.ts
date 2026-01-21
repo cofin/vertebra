@@ -91,7 +91,9 @@ export class McpServer {
 
     try {
       const result = await tool.handler(params.arguments || {});
-      return this.success(request.id, { content: [{ type: "text", text: JSON.stringify(result) }] });
+      return this.success(request.id, {
+        content: [{ type: "text", text: JSON.stringify(result) }],
+      });
     } catch (error) {
       return this.error(request.id, -32000, "Tool execution failed", String(error));
     }

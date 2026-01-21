@@ -75,12 +75,12 @@ This plan outlines the adoption of SQLSpec's typing patterns for optional depend
 - [x] Task: Create DriverFeatures TypedDict
     - [x] Create `VertebraDriverFeatures` base TypedDict
     - [x] Add JSON serializer/deserializer options
-    - [x] Add `enable_json_codecs` flag 
+    - [x] Add `enable_json_codecs` flag
     - [x] Add `arrow_threshold_rows` and `arrow_threshold_bytes`
     - [ ] NOTE: Removed pgvector support due to compatibility concerns (see implementation notes)
 
 - [x] Task: Add extension registration hooks
-    - [x] Create `register_json_codecs()` function 
+    - [x] Create `register_json_codecs()` function
     - [x] Add `_init_connection()` hook in config
 
 - [x] Task: Flow - User Manual Verification 'Phase 3: SQLSpec Provider Updates'
@@ -197,7 +197,7 @@ def process(table: ArrowTable) -> list[dict[str, Any]]:
 
 # 4. Extension features via TypedDict
 config = VertebraPostgresConfig(
-    driver_features={ 
+    driver_features={
         "enable_json_codecs": True,
     }
 )

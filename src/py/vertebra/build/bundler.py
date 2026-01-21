@@ -67,13 +67,13 @@ class Bundler:
         if self.output_dir.exists() and self.clean:
             console.log(f"Cleaning output directory: {self.output_dir}")
             shutil.rmtree(self.output_dir)
-        
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     async def _setup_python_runtime(self) -> Path:
         """Downloads PBS and extracts it to output_dir/python."""
         archive_path = await self.manager.download(self.target, self.profile)
-        
+
         # We extract directly into the output directory
         # PBS usually extracts to a 'python' subdirectory
         python_home = self.manager.extract(archive_path, self.output_dir)
@@ -87,43 +87,43 @@ class Bundler:
         # Site packages location varies by OS, but PBS standardizes this somewhat.
         # On Linux/macOS: lib/python3.x/site-packages
         # On Windows: Lib/site-packages
-        
+
         # For now, assuming POSIX layout for the 'python' dir from PBS
         # We need to find the site-packages dir.
         # A simple heuristic: look for 'site-packages'
-        
+
         site_packages = list(python_dir.rglob("site-packages"))
         if not site_packages:
              # Fallback/Error
              raise RuntimeError("Could not locate site-packages in extracted Python runtime.")
-        
+
         target_site_packages = site_packages[0]
         console.log(f"Installing dependencies to: {target_site_packages}")
 
         # construct requirements source (pyproject.toml or requirements.txt)
         # For this prototype, we assume we can just install the current project path
         # pip install . -t <target>
-        
+
         # Note: In a real offline build, we'd need to have these wheels cached or
         # use a lockfile to fetch them. For now, we allow network access for this step
         # or assume the user has configured their environment.
-        
+
         # We use the SYSTEM 'uv' or 'pip' to install into the target directory.
         # This avoids needing to boot the bundled python just to run pip.
-        
+
         cmd = [
-            "uv", "pip", "install", 
-            ".", 
+            "uv", "pip", "install",
+            ".",
             "--target", str(target_site_packages),
             "--system" # Use system python's uv to install to target
         ]
-        
-        # If uv is not available, fallback to pip? 
+
+        # If uv is not available, fallback to pip?
         # For Vertebra, we assume uv is present per instructions.
-        
+
         console.log(f"Running: {' '.join(cmd)}")
         process = subprocess.run(cmd, cwd=self.project_dir, capture_output=True, text=True)
-        
+
         if process.returncode != 0:
             console.print(f"[red]Dependency installation failed:[/red]\n{process.stderr}")
             raise RuntimeError("Dependency installation failed")
@@ -133,8 +133,8 @@ class Bundler:
         Copies the application code into the bundle.
         Actually, `pip install . --target` above handles this if the project is a package.
         If it's just scripts, we might need manual copying.
-        
-        For Vertebra apps, they are usually packages. 
+
+        For Vertebra apps, they are usually packages.
         So this step might be redundant if Step 3 does `pip install .`
         But we might want to clean up or organize things.
         """

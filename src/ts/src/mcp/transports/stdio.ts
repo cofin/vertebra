@@ -24,7 +24,7 @@ export async function startStdioServer(server: McpServer) {
       try {
         const request = JSON.parse(line) as JsonRpcRequest;
         const response = await server.handle(request);
-        
+
         // Write response followed by newline
         const output = JSON.stringify(response) + "\n";
         process.stdout.write(output);

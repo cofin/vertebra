@@ -82,9 +82,7 @@ class ProviderHost:
                     response["id"] = request["id"]
 
                 # Apply Arrow thresholding
-                if should_use_arrow(
-                    response, self._config.arrow_threshold_rows, self._config.arrow_threshold_bytes
-                ):
+                if should_use_arrow(response, self._config.arrow_threshold_rows, self._config.arrow_threshold_bytes):
                     try:
                         arrow_bytes = encode_arrow_nano(response)
                         region = self._arrow_pool.create_region(len(arrow_bytes))

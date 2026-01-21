@@ -23,7 +23,7 @@ test("McpServer initialization", async () => {
 
 test("McpServer tools flow", async () => {
   const server = new McpServer();
-  
+
   // Register a dummy tool
   server.registerTool({
     name: "hello",
@@ -38,7 +38,7 @@ test("McpServer tools flow", async () => {
   // List tools
   const listReq: JsonRpcRequest = { jsonrpc: "2.0", id: 2, method: "tools/list" };
   const listRes = await server.handle(listReq);
-  
+
   expect(listRes.error).toBeUndefined();
   expect((listRes.result as any).tools).toHaveLength(1);
   expect((listRes.result as any).tools[0].name).toBe("hello");

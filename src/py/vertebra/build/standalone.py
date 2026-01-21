@@ -28,7 +28,7 @@ STANDALONE_RELEASES = {
     # Linux x64
     "linux-x64-baseline": f"cpython-{STANDALONE_PYTHON_VERSION}+{STANDALONE_VERSION}-x86_64-unknown-linux-gnu-install_only.tar.gz",
     "linux-x64-modern": f"cpython-{STANDALONE_PYTHON_VERSION}+{STANDALONE_VERSION}-x86_64_v3-unknown-linux-gnu-install_only.tar.gz",
-    
+
     # Linux ARM64 (no baseline/modern distinction usually, mapping both to same for safety)
     "linux-arm64-baseline": f"cpython-{STANDALONE_PYTHON_VERSION}+{STANDALONE_VERSION}-aarch64-unknown-linux-gnu-install_only.tar.gz",
     "linux-arm64-modern": f"cpython-{STANDALONE_PYTHON_VERSION}+{STANDALONE_VERSION}-aarch64-unknown-linux-gnu-install_only.tar.gz",
@@ -57,7 +57,7 @@ class StandaloneManager:
             # Default to ~/.cache/vertebra/pbs
             # TODO: Respect XDG_CACHE_HOME
             cache_dir = Path.home() / ".cache" / "vertebra" / "pbs"
-        
+
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -70,16 +70,16 @@ class StandaloneManager:
             if "arm64" in target:
                  # Try modern as default for arm64 if exact match fail (though we mapped both above)
                  key = f"{target}-modern"
-            
+
         if key not in STANDALONE_RELEASES:
              raise ValueError(f"No standalone release found for target='{target}' profile='{profile}'")
-        
+
         return STANDALONE_RELEASES[key]
 
     async def download(self, target: str, profile: TargetProfile) -> Path:
         """
         Download the standalone Python distribution.
-        
+
         Returns:
             Path to the downloaded .tar.gz file in the cache.
         """
@@ -93,14 +93,14 @@ class StandaloneManager:
             return destination
 
         console.log(f"[cyan]Downloading standalone Python:[/cyan] {url}")
-        
+
         # Download with httpx
         async with httpx.AsyncClient(follow_redirects=True) as client:
             try:
                 async with client.stream("GET", url) as response:
                     response.raise_for_status()
                     total_size = int(response.headers.get("content-length", 0))
-                    
+
                     with open(destination, "wb") as f:
                         # Simple progress logging
                         downloaded = 0
@@ -108,7 +108,7 @@ class StandaloneManager:
                             f.write(chunk)
                             downloaded += len(chunk)
                             # In a real CLI, we'd update a progress bar here
-                            
+
             except httpx.HTTPError as e:
                 # Cleanup partial download
                 if destination.exists():
@@ -121,20 +121,20 @@ class StandaloneManager:
     def extract(self, archive_path: Path, output_dir: Path) -> Path:
         """
         Extract the standalone distribution.
-        
+
         Returns:
             The path to the extracted 'python' directory.
         """
         console.log(f"[cyan]Extracting:[/cyan] {archive_path}")
-        
+
         # PBS archives usually contain a top-level 'python/' directory
         # We assume tar.gz for now
         with tarfile.open(archive_path, "r:gz") as tar:
             # security check? tarfile.data_filter in newer python versions
             tar.extractall(path=output_dir, filter="data")
-            
+
         extracted_python = output_dir / "python"
         if not extracted_python.exists():
              raise RuntimeError(f"Archive {archive_path} did not contain expected 'python' directory.")
-             
+
         return extracted_python

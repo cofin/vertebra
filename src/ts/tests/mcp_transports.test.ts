@@ -37,9 +37,9 @@ test("SSE Transport Flow", async () => {
     // Read first event (endpoint)
     const { value } = await reader!.read();
     const text = new TextDecoder().decode(value);
-    
+
     expect(text).toContain("event: endpoint");
-    
+
     // Extract sessionId
     const match = text.match(/sessionId=([a-f0-9-]+)/);
     expect(match).not.toBeNull();
@@ -62,7 +62,7 @@ test("SSE Transport Flow", async () => {
     const text2 = new TextDecoder().decode(val2);
     expect(text2).toContain("event: message");
     expect(text2).toContain("vertebra-mcp");
-    
+
     reader!.cancel();
 });
 
@@ -70,9 +70,9 @@ test("WebSocket Transport Flow", async () => {
     // Bun test doesn't have a native WebSocket client yet for tests?
     // Using standard WebSocket if available or skipped if not easy in test env.
     // Assuming Bun environment has WebSocket global.
-    
+
     const ws = new WebSocket(`ws://localhost:${app.port}/ws`);
-    
+
     await new Promise<void>((resolve) => {
         ws.onopen = () => resolve();
     });
@@ -84,16 +84,16 @@ test("WebSocket Transport Flow", async () => {
     ws.send(JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
-        method: "initialize", 
+        method: "initialize",
         params: {}
     }));
 
     const response = await msgPromise;
     const json = JSON.parse(response);
-    
+
     expect(json.result).toBeDefined();
     expect(json.result.serverInfo.name).toBe("vertebra-mcp");
-    
+
     ws.close();
 });
 

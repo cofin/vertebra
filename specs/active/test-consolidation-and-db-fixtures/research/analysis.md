@@ -42,4 +42,3 @@ This PRD targets two related problems:
 3. Replace the `tests.database` stub in Vertebra with the real `src/py/tests/database.py` fixture module (or move it to a real plugin module and import it correctly).
 4. In Accelerator, remove pytest-databases from dependencies, document the custom container fixture system, and ensure CI/dev workflows use it.
 5. Update test docs and PRDs to reflect the new structure and shared fixture strategy.
-

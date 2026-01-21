@@ -40,7 +40,7 @@ def process_data(table: ArrowTable) -> None:
 def load_data() -> ArrowTable:
     # If a feature strictly requires the library, guard it:
     ensure_pyarrow()  # Raises MissingDependencyError if missing
-    
+
     import pyarrow as pa
     return pa.Table.from_pylist([])
 ```

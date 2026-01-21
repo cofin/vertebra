@@ -4,12 +4,12 @@ import { AsgiBridge } from "../ipc";
 import { type ResolvedServerConfig, resolveServerConfig, type ServerConfig } from "./config";
 import { log } from "./logging";
 import { createMetrics, MetricsRegistry, trackRequest } from "./metrics";
-import { createRouter, RequestHandler } from "./router";
 import { ProcessManager } from "./process-manager";
+import { createRouter, RequestHandler } from "./router";
 import {
   createIpcConnectionPool,
-  StubIpcConnectionPool,
   type IpcConnectionPool,
+  StubIpcConnectionPool,
 } from "./worker-connections";
 
 /**
@@ -222,11 +222,11 @@ export {
   type ServerConfig,
   type ServerIpcConfig,
 } from "./config";
-export { createRouter, type RequestHandler } from "./router";
 export { ProcessManager } from "./process-manager";
+export { createRouter, type RequestHandler } from "./router";
 export {
   createIpcConnectionPool,
+  type IpcConnectionPool,
   RoundRobinIpcConnectionPool,
   StubIpcConnectionPool,
-  type IpcConnectionPool,
 } from "./worker-connections";

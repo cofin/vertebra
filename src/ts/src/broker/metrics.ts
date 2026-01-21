@@ -1,4 +1,4 @@
-import { Gauge, Registry, collectDefaultMetrics } from "prom-client";
+import { collectDefaultMetrics, Gauge, Registry } from "prom-client";
 import type { BrokerStats } from "./client";
 
 export type BrokerMetrics = {

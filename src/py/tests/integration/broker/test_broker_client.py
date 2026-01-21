@@ -114,9 +114,9 @@ async def test_broker_client_roundtrip() -> None:
         # eventfd notifications don't work across different AsyncRing handles.
         # Each handle has its own eventfd, so when the broker sends to the client's
         # response ring, it signals its own eventfd, not the client's.
-        client = AsyncBrokerClient(BrokerClientConfig(
-            name=name, slot_size=4096, slots=64, client_id="test-client", prefer_eventfd=False
-        ))
+        client = AsyncBrokerClient(
+            BrokerClientConfig(name=name, slot_size=4096, slots=64, client_id="test-client", prefer_eventfd=False)
+        )
 
         try:
             token = await client.acquire("default")

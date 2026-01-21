@@ -33,11 +33,11 @@ async def test_download_cached(manager, tmp_path):
     target = "linux-x64"
     profile = "modern"
     filename = manager.get_release_filename(target, profile)
-    
+
     # Create dummy cached file
     cached_file = tmp_path / filename
     cached_file.touch()
-    
+
     result = await manager.download(target, profile)
     assert result == cached_file
 
@@ -48,7 +48,7 @@ async def test_download_fetch(mock_client_cls, manager, tmp_path):
     target = "linux-x64"
     profile = "modern"
     filename = manager.get_release_filename(target, profile)
-    
+
     # Mock async iterator for chunks
     async def mock_aiter_bytes():
         yield b"chunk1"
@@ -58,17 +58,17 @@ async def test_download_fetch(mock_client_cls, manager, tmp_path):
     mock_response = MagicMock()
     mock_response.headers = {"content-length": "10"}
     mock_response.aiter_bytes = mock_aiter_bytes
-    
+
     # Async context manager mock setup
     mock_client = mock_client_cls.return_value
     mock_client.__aenter__.return_value = mock_client
     mock_client.__aexit__.return_value = None
-    
+
     mock_client.stream.return_value.__aenter__.return_value = mock_response
     mock_client.stream.return_value.__aexit__.return_value = None
 
     result = await manager.download(target, profile)
-    
+
     assert result == tmp_path / filename
     assert result.exists()
     assert result.read_bytes() == b"chunk1chunk2"

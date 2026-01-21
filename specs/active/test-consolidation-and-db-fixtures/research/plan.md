@@ -323,4 +323,3 @@ This dual path keeps the work scoped to test organization and database fixture s
 - Define migration steps for test file moves, fixture updates, and dependency cleanup.
 - Confirm any needed coordination with the `quality` PRD and update it only if necessary.
 - Execute test and lint commands to validate the new structure once implementation begins.
-

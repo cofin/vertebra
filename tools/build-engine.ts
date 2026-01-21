@@ -21,7 +21,7 @@ async function build() {
   for (const target of targets) {
     console.log(`Building engine for ${target}...`);
     const outFile = join(outDir, `vertebra-engine-${target}${target.includes("windows") ? ".exe" : ""}`);
-    
+
     const result = Bun.build({
       entrypoints: [entry],
       outdir: outDir,
@@ -29,11 +29,11 @@ async function build() {
       naming: `vertebra-engine-${target}.[ext]`,
       minify: true,
     });
-    
-    // Bun.build doesn't yet support standalone binary creation directly for all targets easily via API 
+
+    // Bun.build doesn't yet support standalone binary creation directly for all targets easily via API
     // in the same way `bun build --compile` does for the current platform.
     // We'll use `bun build --compile` via spawn for now to get true standalone binaries.
-    
+
     const compileResult = spawnSync("bun", [
       "build",
       "--compile",

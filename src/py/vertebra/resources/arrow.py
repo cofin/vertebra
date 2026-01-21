@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import io
 import uuid
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import Any
 
 from vertebra._vertebra import ShmRegion
-
-if TYPE_CHECKING:
-    import nanoarrow as na
 
 
 @dataclass(slots=True)
@@ -82,13 +79,13 @@ def should_use_arrow(result: dict[str, Any], threshold_rows: int, threshold_byte
 def _infer_schema(data: dict[str, list[Any]]) -> Any:
     """Infer nanoarrow schema from dictionary data."""
     import nanoarrow as na
-    
+
     fields = {}
     for col, values in data.items():
         if not values:
             fields[col] = na.string()
             continue
-            
+
         val = next((v for v in values if v is not None), None)
         if isinstance(val, bool):
             fields[col] = na.bool_()
@@ -98,7 +95,7 @@ def _infer_schema(data: dict[str, list[Any]]) -> Any:
             fields[col] = na.float64()
         else:
             fields[col] = na.string()
-            
+
     return na.struct(fields)
 
 
@@ -127,27 +124,22 @@ def encode_arrow_nano(result: dict[str, Any]) -> bytes:
 
     # Convert rows to dict of columns for nanoarrow
     data = {col: [row[i] for row in rows] for i, col in enumerate(columns)}
-    
+
     # Infer schema
     schema = _infer_schema(data)
-    
+
     # Create child arrays
     child_arrays = []
-    for i, (col, values) in enumerate(data.items()):
+    for i, (_col, values) in enumerate(data.items()):
         child_arrays.append(na.c_array(values, schema.field(i)))
-        
+
     # Create struct array
-    array = na.c_array_from_buffers(
-        schema,
-        length=len(rows),
-        buffers=[None],
-        children=child_arrays
-    )
-    
+    array = na.c_array_from_buffers(schema, length=len(rows), buffers=[None], children=child_arrays)
+
     out = io.BytesIO()
     with StreamWriter.from_writable(out) as writer:
         writer.write_array(array)
-        
+
     return out.getvalue()
 
 
@@ -162,25 +154,22 @@ def decode_arrow_nano(data: bytes | memoryview) -> list[dict[str, Any]]:
     """
     import nanoarrow as na
     import nanoarrow.ipc as na_ipc
-    
+
     # Create input stream
-    if isinstance(data, (bytes, bytearray)):
-        input_stream = io.BytesIO(data)
-    else:
-        input_stream = io.BytesIO(bytes(data))
-        
+    input_stream = io.BytesIO(data) if isinstance(data, (bytes, bytearray)) else io.BytesIO(bytes(data))
+
     rows = []
     try:
         # Use InputStream.from_readable to wrap the BytesIO
         with na_ipc.InputStream.from_readable(input_stream) as ipc_stream:
-             with na.c_array_stream(ipc_stream) as stream:
+            with na.c_array_stream(ipc_stream) as stream:
                 for array in stream:
                     # na.iterator is a module, use iter_py to get python objects
                     from nanoarrow.iterator import iter_py
+
                     rows.extend(list(iter_py(array)))
-    except Exception as e:
+    except Exception:
         # Fallback/Debug
-        print(f"Nanoarrow decode error: {e}")
         pass
-            
+
     return rows

@@ -5,18 +5,13 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import click
-import rich_click as rich_click
+import rich_click
 
 from vertebra.supervisor import build_broker_command, run_supervisor
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
 
 # Configure rich-click
 rich_click.rich_click.USE_RICH_MARKUP = True
@@ -30,11 +25,12 @@ BANNER = r"""
 /____//_,_/\_,_/\_,_/\__/\_,_/\_,_/_/
 """
 
+
 @click.group()
 @click.version_option(package_name="vertebra")
 def main() -> None:
     """Vertebra: High-performance polyglot application backbone."""
-    pass
+
 
 @main.command()
 @click.argument("app")
@@ -76,14 +72,18 @@ def serve(
 
     engine = find_engine()
     engine_path = Path(engine)
-    
+
     # If the engine is a binary, use it directly. Otherwise use bun to run the source.
-    bun_cmd = [str(engine_path)] if engine_path.suffix in (".exe", "") and os.access(engine_path, os.X_OK) else [bun, str(engine_path)]
+    bun_cmd = (
+        [str(engine_path)]
+        if engine_path.suffix in (".exe", "") and os.access(engine_path, os.X_OK)
+        else [bun, str(engine_path)]
+    )
 
     broker_cmd = build_broker_command(broker_config)
 
     print_banner(host=host, port=port, workers=workers, log_level=log_level)
-    
+
     exit_code = run_supervisor(
         bun_cmd=bun_cmd,
         broker_cmd=broker_cmd,
@@ -94,6 +94,7 @@ def serve(
     )
     sys.exit(exit_code)
 
+
 @main.command()
 @click.argument("app_dir", type=click.Path(exists=True, file_okay=False), default=".")
 @click.option("--one-file", is_flag=True, help="Build a standalone single-file executable")
@@ -101,14 +102,7 @@ def serve(
 @click.option("--profile", type=click.Choice(["baseline", "modern"]), default="modern", help="Optimization profile")
 @click.option("--output", "-o", type=click.Path(), help="Output path")
 @click.option("--clean", is_flag=True, help="Clean output directory before building")
-def build(
-    app_dir: str,
-    one_file: bool,
-    target: str,
-    profile: str,
-    output: str | None,
-    clean: bool,
-) -> None:
+def build(app_dir: str, one_file: bool, target: str, profile: str, output: str | None, clean: bool) -> None:
     """Build Vertebra application artifacts."""
     if not one_file:
         click.secho("Only --one-file builds are currently supported.", fg="yellow")
@@ -124,7 +118,7 @@ def build(
 
     try:
         from vertebra.build.bundler import Bundler
-        
+
         bundler = Bundler(
             project_dir=project_path,
             output_dir=output_path,
@@ -132,15 +126,16 @@ def build(
             profile=profile,  # type: ignore
             clean=clean,
         )
-        
+
         asyncio.run(bundler.build())
-        
+
         click.secho("Build completed successfully.", fg="green")
     except Exception as e:
         click.secho(f"Build failed: {e}", fg="red", err=True)
         if os.environ.get("VERTEBRA_DEBUG"):
             raise
         sys.exit(1)
+
 
 def find_engine() -> str:
     package_root = Path(__file__).resolve().parent
@@ -155,20 +150,23 @@ def find_engine() -> str:
     msg = "Unable to locate vertebra engine; expected bundled binary or source entrypoint"
     raise SystemExit(msg)
 
+
 def find_repo_root(start: Path) -> Path | None:
     for parent in [start, *start.parents]:
         if (parent / "pyproject.toml").exists():
             return parent
     return None
 
+
 def print_banner(*, host: str, port: int, workers: int, log_level: str) -> None:
     click.secho(BANNER, fg="cyan")
-    click.echo(f"  Version: 0.1.0")
+    click.echo("  Version: 0.1.0")
     click.echo(f"  Host: {host}")
     click.echo(f"  Port: {port}")
     click.echo(f"  Workers: {workers}")
     click.echo(f"  Log Level: {log_level}")
     click.echo("-" * 40)
+
 
 if __name__ == "__main__":
     main()
