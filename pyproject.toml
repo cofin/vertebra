@@ -13,6 +13,7 @@ classifiers = [
 dependencies = [
   "cffi>=1.16.0",
   "msgspec>=0.18.0",
+  "nanoarrow>=0.4.0",
 ]
 description = "Python-first, high-performance application backbone with tRPC-like DX"
 keywords = ["trpc", "asgi", "ipc", "performance", "bun", "arrow"]
@@ -26,12 +27,13 @@ requires-python = ">=3.12"
 version = "0.1.0"
 
 [project.optional-dependencies]
-arrow = ["pyarrow>=14.0.0"]
+arrow = ["pyarrow>=14.0.0", "nanoarrow>=0.4.0"]
 numpy = ["numpy>=1.24.0"]
 polars = ["polars>=0.20.0"]
 pandas = ["pandas>=2.0.0"]
 full = [
     "pyarrow>=14.0.0",
+    "nanoarrow>=0.4.0",
     "numpy>=1.24.0",
     "polars>=0.20.0",
     "pandas>=2.0.0",

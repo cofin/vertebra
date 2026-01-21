@@ -254,7 +254,10 @@ class AsyncBrokerClient:
             return data.get("result")
         if "arrow_bytes" in data:
             arrow_bytes = data.get("arrow_bytes") or b""
-            return _decode_arrow_bytes(arrow_bytes)
+            try:
+                return _decode_arrow_bytes(arrow_bytes)
+            except (ImportError, RuntimeError):
+                return {"arrow": decode_arrow_nano(arrow_bytes)}
         arrow = data["arrow"] or {}
         name = arrow.get("name")
         size = int(arrow.get("size", 0))
@@ -262,18 +265,21 @@ class AsyncBrokerClient:
             msg = "Invalid Arrow response"
             raise BrokerClientError(msg)
 
-        # Ensure pyarrow is available with clear error message
-        pa = ensure_pyarrow()
-
         # Use PyO3 ShmRegion for Arrow IPC with buffer protocol
         region = ShmRegion.open_named(name, size)
         try:
-            with pa.ipc.open_stream(memoryview(region)) as reader:
-                table = reader.read_all()
+            try:
+                # Ensure pyarrow is available with clear error message
+                pa = ensure_pyarrow()
+                with pa.ipc.open_stream(memoryview(region)) as reader:
+                    table = reader.read_all()
+                return {"arrow": table}
+            except (ImportError, RuntimeError):
+                # Fallback to nanoarrow
+                return {"arrow": decode_arrow_nano(memoryview(region))}
         finally:
             region.close()
             await self._release_arrow(str(name))
-        return {"arrow": table}
 
 
 class SyncBrokerClient:
@@ -456,7 +462,10 @@ class SyncBrokerClient:
             return data.get("result")
         if "arrow_bytes" in data:
             arrow_bytes = data.get("arrow_bytes") or b""
-            return _decode_arrow_bytes(arrow_bytes)
+            try:
+                return _decode_arrow_bytes(arrow_bytes)
+            except (ImportError, RuntimeError):
+                return {"arrow": decode_arrow_nano(arrow_bytes)}
         arrow = data["arrow"] or {}
         name = arrow.get("name")
         size = int(arrow.get("size", 0))
@@ -464,18 +473,21 @@ class SyncBrokerClient:
             msg = "Invalid Arrow response"
             raise BrokerClientError(msg)
 
-        # Ensure pyarrow is available with clear error message
-        pa = ensure_pyarrow()
-
         # Use PyO3 ShmRegion for Arrow IPC with buffer protocol
         region = ShmRegion.open_named(name, size)
         try:
-            with pa.ipc.open_stream(memoryview(region)) as reader:
-                table = reader.read_all()
+            try:
+                # Ensure pyarrow is available with clear error message
+                pa = ensure_pyarrow()
+                with pa.ipc.open_stream(memoryview(region)) as reader:
+                    table = reader.read_all()
+                return {"arrow": table}
+            except (ImportError, RuntimeError):
+                # Fallback to nanoarrow
+                return {"arrow": decode_arrow_nano(memoryview(region))}
         finally:
             region.close()
             self._release_arrow(str(name))
-        return {"arrow": table}
 
 
 def _default_client_id() -> str:

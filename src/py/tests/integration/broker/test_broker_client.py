@@ -118,13 +118,15 @@ async def test_broker_client_roundtrip() -> None:
             name=name, slot_size=4096, slots=64, client_id="test-client", prefer_eventfd=False
         ))
 
-        token = await client.acquire("default")
-        assert token == "1"
-        ok = await client.release("default", token)
-        assert ok is True
-        healthy = await client.health("default")
-        assert healthy is True
-        await client.close()
+        try:
+            token = await client.acquire("default")
+            assert token == "1"
+            ok = await client.release("default", token)
+            assert ok is True
+            healthy = await client.health("default")
+            assert healthy is True
+        finally:
+            await client.close()
 
         await asyncio.wait_for(task, timeout=10.0)
         if broker_error is not None:

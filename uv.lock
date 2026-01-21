@@ -554,6 +554,44 @@ wheels = [
 ]
 
 [[package]]
+name = "nanoarrow"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c6/40/25d6aa925c997d5bcba6e16ccba1e4f8a08b46318d50941d20132f815cd2/nanoarrow-0.7.0.tar.gz", hash = "sha256:e333e639f02d97c01834c8e3fd25fb945ed53196bdfaeb129dd5a7b9f4233d39", size = 3503862, upload-time = "2025-07-03T17:33:24.422Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/ee/edde47d94e321f3fe560106b92b1f289c461917ea04e4cd8903a5399b69d/nanoarrow-0.7.0-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:83c02bfb419ce9121d9c211fa62a3bbdcb6f0ce1580fa7cad20a299cab2ad971", size = 836673, upload-time = "2025-07-03T17:30:51.657Z" },
+    { url = "https://files.pythonhosted.org/packages/27/2a/c5a5345cb49e34577b202681e32083bd281201b9f8f4581d31dd21ff995e/nanoarrow-0.7.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:892030e161d924bf48f954301b1847166f3885cf1e2c4265892da5941fdf720d", size = 741054, upload-time = "2025-07-03T17:30:39.472Z" },
+    { url = "https://files.pythonhosted.org/packages/d0/f5/160f7eb6020b3a1bf40b1b0c5eb8704e87e2f6b9e40a71f1f633e721f2c1/nanoarrow-0.7.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:9e10543f061047ea27b8c776c784dcbd5915007bcc33911cfe00ec956eb34b89", size = 977280, upload-time = "2025-07-03T17:29:39.773Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/24/460a2d7b2dc5eedb18dedc21943aa19573cfeb025dd85ab5e66cad0a4395/nanoarrow-0.7.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:09473b1254fe6a56106fe83006caae62a38a058c507dd5a461a28f978e783d00", size = 1034596, upload-time = "2025-07-03T17:30:07.018Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/6e/667e5d3168f3057c66ba15b0347ac7c22ea73370aec12b76e42632c5002a/nanoarrow-0.7.0-cp312-cp312-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:cf54f00a9cbc791f845606d7d10bce42ad56327a89e9d5a321734b2a4ef84691", size = 1135579, upload-time = "2025-07-03T17:30:08.345Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/aa/c5c95ac718d502413f6fd23c8cf8d8ca771133ebee5934ea53a2cbf5c73f/nanoarrow-0.7.0-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:e01601448f400c3506b6c6bcaeb82b3af92e6c8dfbb1b3a22f42124a790fc204", size = 1005356, upload-time = "2025-07-03T17:29:41.309Z" },
+    { url = "https://files.pythonhosted.org/packages/67/49/7707c59c894f908ecac9817d3ca6a8cec84e68786b34eff9fc7b27235b80/nanoarrow-0.7.0-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:b305eb56a0133c2af9e6142d98411917e98c76cfa4ea32566bb2ebea56b5c4b6", size = 1161968, upload-time = "2025-07-03T17:30:09.356Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/0b/615aab0d84810b5f6d1c7bf8e83783c19189fb36957611de047900a892cc/nanoarrow-0.7.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:01d406f8c1ca6b8add9b568b2d0a1d5f42bbb77282880b1ac413e70512e3e837", size = 1051949, upload-time = "2025-07-03T17:30:10.593Z" },
+    { url = "https://files.pythonhosted.org/packages/0b/21/0cf58dad645e7d6e8c912680cf7fb75ea38bf9b7423562f95430e10c7f72/nanoarrow-0.7.0-cp312-cp312-win32.whl", hash = "sha256:fa5a8c9639eacdda158d559034469e2bdea28eab3b95321fc4bd0d72dcf579fc", size = 569407, upload-time = "2025-07-03T17:33:19.824Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/07/85b632c516b6dc4f055e481077b86d1ec7b4d9c8355c0addeb0e2daadd48/nanoarrow-0.7.0-cp312-cp312-win_amd64.whl", hash = "sha256:c71732901539e4cab567b4913e726e7496ccdf087a1b6381bca65c9b837a0762", size = 644726, upload-time = "2025-07-03T17:32:08.773Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/2d/f5b1bc8dd00098b278d86139f822bff8f05a3348da0e04543e8df7a122b7/nanoarrow-0.7.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:8aae0f2e43615af00aa448f8bd7a1c85940cd5a604894ef1ffe6024029a0d1d2", size = 832579, upload-time = "2025-07-03T17:30:53.09Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/27/5d0dbec836709cd804f78e7d40d181f367bdb5000e3ee7fbb053bc1fd202/nanoarrow-0.7.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:e2ac5443415c8df4ef64f9f7f8b6e0f920062937e7ca6f0a03a3802cca01773e", size = 737068, upload-time = "2025-07-03T17:30:40.435Z" },
+    { url = "https://files.pythonhosted.org/packages/97/32/8e6a152e0908689c16e97df1cee4edea39890f5b0f1ed242bee309df2ce0/nanoarrow-0.7.0-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:70e3d9fbb26adb9e618548fce0c46f1b3bc769f03525ebafa8b5c79a2860e408", size = 976983, upload-time = "2025-07-03T17:29:42.339Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/76/d2245c8aa94d34fd5133c274e7785861fd667ecf49adb9d603fd8ebbc839/nanoarrow-0.7.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:092afc62040a2fbaa50bd44c6cab72fc543c0ac876534a1b60924ae93e0840c9", size = 1033257, upload-time = "2025-07-03T17:30:11.62Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/9e/0914f5217388546abdbf496bd3e1568ed2551efae9d5be8bf4cf5fa50a01/nanoarrow-0.7.0-cp313-cp313-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:01000657655846913d3565d5776cf002a9a7283e93087bd7817a56ba25d6fd34", size = 1136540, upload-time = "2025-07-03T17:30:12.648Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/db/44af2c22367c12544e4a2df50c2f5d061e9e22b03ad87d826e544eb91ff9/nanoarrow-0.7.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:9b6e8c2adb15669cca1661baa737038b0f5903ee806ce44f43fe0878fdcaaa64", size = 1004103, upload-time = "2025-07-03T17:29:43.462Z" },
+    { url = "https://files.pythonhosted.org/packages/d7/67/9d63142d1835e27024906db28a049c184c98be886d37ac922baa6208f032/nanoarrow-0.7.0-cp313-cp313-musllinux_1_2_i686.whl", hash = "sha256:b028dfcefc3401b3e509027d52a3e2818391dc36f42a1f005e6fa86962ea5746", size = 1160266, upload-time = "2025-07-03T17:30:14.08Z" },
+    { url = "https://files.pythonhosted.org/packages/38/4b/2e054206dceb7bede655f323097b1e796c77442b79e1c0bbfa1bd65ceea4/nanoarrow-0.7.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:e944a8a194ee128eba3845351cfcf25abaf47c5847da6bfda7378f0f1d424147", size = 1052550, upload-time = "2025-07-03T17:30:15.206Z" },
+    { url = "https://files.pythonhosted.org/packages/98/cd/9cea7dba3731872ec4431d8cebbd185d68680d993aeec27ec6b56faaf795/nanoarrow-0.7.0-cp313-cp313-win32.whl", hash = "sha256:27d85c3a408f8cad4cf080afba01e3bc295615c74b5b73d43cfb386b5232d0e5", size = 568057, upload-time = "2025-07-03T17:33:20.849Z" },
+    { url = "https://files.pythonhosted.org/packages/97/15/4ae2da76cbb47ffed3b4616930056856998af196858bdd66eaf62c6cd10f/nanoarrow-0.7.0-cp313-cp313-win_amd64.whl", hash = "sha256:6a5179a57170b0003d2d7e5f4fad8feb74735e0d7d23c9eb34f922cd96b00f82", size = 643854, upload-time = "2025-07-03T17:32:10.29Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/93/5b618219e991fe81de23ec6c374681029b1c536fcf2273ed770091167862/nanoarrow-0.7.0-cp313-cp313t-macosx_10_13_x86_64.whl", hash = "sha256:566bd3769db7af68ebbf3d851ae663d8033719c21b2ca2412b1259c5671dc95a", size = 862885, upload-time = "2025-07-03T17:30:54.527Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/e0/5b5fd58ce35b769ec68d22c25d1e37980153d8849c46caa05f3802270bd5/nanoarrow-0.7.0-cp313-cp313t-macosx_11_0_arm64.whl", hash = "sha256:3ea93097118ef9d347b1e130188430c16b5c35819a87b2080a6d2ee69715f178", size = 783176, upload-time = "2025-07-03T17:30:41.825Z" },
+    { url = "https://files.pythonhosted.org/packages/05/bb/201b1b5a42469f1921bd3ca9f2458f9943da398a6f103c1c65f7d4255c5e/nanoarrow-0.7.0-cp313-cp313t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:f43d11d85dc3ccffbc752640d441a0b098f4020c277ae23dca4cfe9941c291ce", size = 992669, upload-time = "2025-07-03T17:29:45.304Z" },
+    { url = "https://files.pythonhosted.org/packages/59/f2/c14b197378633622f1c06f200448b50ce3743cb4d412dd88908721ff2256/nanoarrow-0.7.0-cp313-cp313t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:ae1064a94a9380d0f70caf01ffdd3284d82142edf17a45e4c73d0abe3780b62b", size = 1040094, upload-time = "2025-07-03T17:30:16.18Z" },
+    { url = "https://files.pythonhosted.org/packages/21/fe/fb8371d428c862b19ad7301a1fbc6e51d8a3e44f1785c490af05c672b12c/nanoarrow-0.7.0-cp313-cp313t-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:111b828da96618838486a2b6873c66c65b501fbf4559d84fce09bb06600b0dfa", size = 1129515, upload-time = "2025-07-03T17:30:17.254Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/f4/a39723cb840764fdedf4c0cb03b4a6751993a1a242e4c8995b705925e0f1/nanoarrow-0.7.0-cp313-cp313t-musllinux_1_2_aarch64.whl", hash = "sha256:c8642d2c9b05c6e0495d75801c18be276f64af5f768d84a64c2ed7628fe85259", size = 1012120, upload-time = "2025-07-03T17:29:46.309Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/30/2eb79c38415e53a54ac1bab360e1ec5cebdd29a1382a5de18f44f55a0e62/nanoarrow-0.7.0-cp313-cp313t-musllinux_1_2_i686.whl", hash = "sha256:d31d9236997ff64af17a4f1410dfc98018086b3e4009fe43d6dc9733869bd927", size = 1144296, upload-time = "2025-07-03T17:30:19.505Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/ff/c954e08e6d56685cb75bfad092f9dd9f82a58710737775785319b17b6b39/nanoarrow-0.7.0-cp313-cp313t-musllinux_1_2_x86_64.whl", hash = "sha256:d2cde74145945faf81849314b32e500d29ab89636e98c55859c666b58c71790c", size = 1049679, upload-time = "2025-07-03T17:30:20.633Z" },
+    { url = "https://files.pythonhosted.org/packages/55/70/cdea36c606a1d414bab5d9afa64e4d16702181d9555a10af11fbebee700a/nanoarrow-0.7.0-cp313-cp313t-win32.whl", hash = "sha256:d6f6fbb82ad4c494ccf6d6f33f4e233aabf6bde948abdfa1e7344fff8115da88", size = 627256, upload-time = "2025-07-03T17:33:22.079Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/22/726aaa4a3419ca75122d732ec251267b4dc21cb902d3d916f48d19a4469c/nanoarrow-0.7.0-cp313-cp313t-win_amd64.whl", hash = "sha256:c6df6649033381b9f9cac42d33fef023954e18f40bfc8ee92ddeae78d0707964", size = 713801, upload-time = "2025-07-03T17:32:11.725Z" },
+]
+
+[[package]]
 name = "nodeenv"
 version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1524,13 +1562,16 @@ source = { editable = "." }
 dependencies = [
     { name = "cffi" },
     { name = "msgspec" },
+    { name = "nanoarrow" },
 ]
 
 [package.optional-dependencies]
 arrow = [
+    { name = "nanoarrow" },
     { name = "pyarrow" },
 ]
 full = [
+    { name = "nanoarrow" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "polars" },
@@ -1610,6 +1651,9 @@ test = [
 requires-dist = [
     { name = "cffi", specifier = ">=1.16.0" },
     { name = "msgspec", specifier = ">=0.18.0" },
+    { name = "nanoarrow", specifier = ">=0.4.0" },
+    { name = "nanoarrow", marker = "extra == 'arrow'", specifier = ">=0.4.0" },
+    { name = "nanoarrow", marker = "extra == 'full'", specifier = ">=0.4.0" },
     { name = "numpy", marker = "extra == 'full'", specifier = ">=1.24.0" },
     { name = "numpy", marker = "extra == 'numpy'", specifier = ">=1.24.0" },
     { name = "pandas", marker = "extra == 'full'", specifier = ">=2.0.0" },

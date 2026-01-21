@@ -9,8 +9,10 @@ This module is the single source of truth for all serialization in Vertebra.
 from __future__ import annotations
 
 import datetime
+import decimal
 import enum
 import functools
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, overload
 
@@ -20,7 +22,7 @@ import msgspec
 def _default_encoder(value: Any) -> Any:  # noqa: PLR0911
     """Default encoder for types not natively supported by msgspec.
 
-    Handles datetime, date, time, timedelta, enums, and other common types.
+    Handles datetime, date, time, timedelta, enums, UUIDs, Decimals and other common types.
 
     Args:
         value: Value to convert.
@@ -43,6 +45,10 @@ def _default_encoder(value: Any) -> Any:  # noqa: PLR0911
         return value.total_seconds()
     if isinstance(value, enum.Enum):
         return value.value
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, decimal.Decimal):
+        return str(value)
     if hasattr(value, "__dict__"):
         return value.__dict__
     return str(value)

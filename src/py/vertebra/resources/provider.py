@@ -9,6 +9,7 @@ import msgspec
 
 from vertebra._internal.serialization import MessagePackCodec
 from vertebra._vertebra import SpscRing
+from vertebra.resources.arrow import ArrowRegionPool, encode_arrow_nano, should_use_arrow
 from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig
 
 if TYPE_CHECKING:
@@ -35,6 +36,7 @@ class ProviderHost:
         self._config = config
         self._handler = handler
         self._codec = MessagePackCodec()
+        self._arrow_pool = ArrowRegionPool(prefix=f"{config.name}.arrow")
         self._request = SpscRing.create_named(
             f"/{config.name}.provider.{config.pool}.req", config.slot_size, config.slots
         )
@@ -53,22 +55,56 @@ class ProviderHost:
         )
 
     async def serve(self) -> None:
-        while True:
-            data = await asyncio.to_thread(self._request.recv_timeout, self._config.slot_size, 5_000)
-            if data is None:
-                continue  # Timeout, retry
-            decoded = self._codec.decode(data)
-            request: dict[str, Any] = decoded if isinstance(decoded, dict) else {}
-            result = self._handler(request)
-            response: dict[str, Any]
-            if inspect.iscoroutine(result):
-                response = await result
-            else:
-                response = result  # type: ignore[assignment]
-            if "id" not in response and "id" in request:
-                response["id"] = request["id"]
-            encoded = self._codec.encode(response)
-            self._response.send_timeout(encoded, 0, 5_000)
+        try:
+            while True:
+                data = await asyncio.to_thread(self._request.recv_timeout, self._config.slot_size, 5_000)
+                if data is None:
+                    continue  # Timeout, retry
+                decoded = self._codec.decode(data)
+                request: dict[str, Any] = decoded if isinstance(decoded, dict) else {}
+
+                # Check for arrow_release
+                if request.get("kind") == "arrow_release":
+                    released = self._arrow_pool.release_region(str(request.get("name", "")))
+                    response = {"ok": released, "id": request.get("id")}
+                    encoded = self._codec.encode(response)
+                    self._response.send_timeout(encoded, 0, 5_000)
+                    continue
+
+                result = self._handler(request)
+                response: dict[str, Any]
+                if inspect.iscoroutine(result):
+                    response = await result
+                else:
+                    response = result  # type: ignore[assignment]
+
+                if "id" not in response and "id" in request:
+                    response["id"] = request["id"]
+
+                # Apply Arrow thresholding
+                if should_use_arrow(
+                    response, self._config.arrow_threshold_rows, self._config.arrow_threshold_bytes
+                ):
+                    try:
+                        arrow_bytes = encode_arrow_nano(response)
+                        region = self._arrow_pool.create_region(len(arrow_bytes))
+                        region.region.write(arrow_bytes)
+
+                        # Replace rows with arrow info
+                        response = {
+                            "ok": True,
+                            "id": response.get("id"),
+                            "arrow": {"name": region.name, "size": region.size},
+                            "rowcount": response.get("rowcount", len(response.get("rows", []))),
+                        }
+                    except Exception:
+                        # Fallback to MessagePack if Arrow encoding fails
+                        pass
+
+                encoded = self._codec.encode(response)
+                self._response.send_timeout(encoded, 0, 5_000)
+        finally:
+            self._arrow_pool.close()
 
 
 __all__ = ("ProviderConfig", "ProviderHandler", "ProviderHost")

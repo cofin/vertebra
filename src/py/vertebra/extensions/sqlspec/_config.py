@@ -38,6 +38,8 @@ class VertebraSyncConfigBase(SyncDatabaseConfig[VertebraSyncConnection, Vertebra
         pool: "str | None" = None,
         client_config: "BrokerClientConfig | None" = None,
         max_clients: int = 5,
+        arrow_threshold_rows: int = 1000,
+        arrow_threshold_bytes: int = 1_048_576,
         connection_instance: "VertebraSyncPool | None" = None,
         migration_config: "dict[str, object] | None" = None,
         statement_config: "StatementConfig | None" = None,
@@ -50,6 +52,8 @@ class VertebraSyncConfigBase(SyncDatabaseConfig[VertebraSyncConnection, Vertebra
         self.pool = pool or type(self).default_pool_name
         self.client_config = client_config or BrokerClientConfig()
         self.max_clients = max_clients
+        self.arrow_threshold_rows = arrow_threshold_rows
+        self.arrow_threshold_bytes = arrow_threshold_bytes
         super().__init__(
             connection_config={"pool": self.pool},
             connection_instance=connection_instance,
@@ -117,6 +121,8 @@ class VertebraAsyncConfigBase(AsyncDatabaseConfig[VertebraAsyncConnection, Verte
         pool: "str | None" = None,
         client_config: "BrokerClientConfig | None" = None,
         max_clients: int = 5,
+        arrow_threshold_rows: int = 1000,
+        arrow_threshold_bytes: int = 1_048_576,
         connection_instance: "VertebraAsyncPool | None" = None,
         migration_config: "dict[str, object] | None" = None,
         statement_config: "StatementConfig | None" = None,
@@ -129,6 +135,8 @@ class VertebraAsyncConfigBase(AsyncDatabaseConfig[VertebraAsyncConnection, Verte
         self.pool = pool or type(self).default_pool_name
         self.client_config = client_config or BrokerClientConfig()
         self.max_clients = max_clients
+        self.arrow_threshold_rows = arrow_threshold_rows
+        self.arrow_threshold_bytes = arrow_threshold_bytes
         super().__init__(
             connection_config={"pool": self.pool},
             connection_instance=connection_instance,

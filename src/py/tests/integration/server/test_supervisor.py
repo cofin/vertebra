@@ -42,15 +42,17 @@ def test_process_start_and_stop() -> None:
     """Verify basic process start and stop."""
     spec = ProcessSpec(name="sleeper", cmd=[sys.executable, "-c", "import time; time.sleep(10)"], critical=True)
     supervisor = Supervisor([spec], drain_timeout_ms=100, shutdown_timeout_ms=1000)
-    supervisor.start()
+    try:
+        supervisor.start()
 
-    stats = supervisor.get_stats()
-    assert "sleeper" in stats
-    assert stats["sleeper"]["state"] == "running"
-    assert stats["sleeper"]["pid"] is not None
-
-    supervisor.stop()
-    assert stats["sleeper"]["state"] in ("stopped", "running")  # depends on timing
+        stats = supervisor.get_stats()
+        assert "sleeper" in stats
+        assert stats["sleeper"]["state"] == "running"
+        assert stats["sleeper"]["pid"] is not None
+    finally:
+        supervisor.stop()
+        stats = supervisor.get_stats()
+        assert stats["sleeper"]["state"] in ("stopped", "running")  # depends on timing
 
 
 def test_process_exit_detection() -> None:
@@ -58,12 +60,14 @@ def test_process_exit_detection() -> None:
     # Create a process that exits immediately
     spec = ProcessSpec(name="exiter", cmd=[sys.executable, "-c", "print('done')"], critical=True)
     supervisor = Supervisor([spec])
-    supervisor.start()
+    try:
+        supervisor.start()
 
-    # Wait should detect exit quickly
-    exit_code = supervisor.wait(primary="exiter")
-    assert exit_code == 0
-    supervisor.stop()
+        # Wait should detect exit quickly
+        exit_code = supervisor.wait(primary="exiter")
+        assert exit_code == 0
+    finally:
+        supervisor.stop()
 
 
 def test_non_critical_process_continues() -> None:
@@ -78,12 +82,14 @@ def test_non_critical_process_continues() -> None:
     # Critical process that runs longer
     critical = ProcessSpec(name="main", cmd=[sys.executable, "-c", "import time; time.sleep(0.5)"], critical=True)
     supervisor = Supervisor([non_critical, critical])
-    supervisor.start()
+    try:
+        supervisor.start()
 
-    # Wait for main to exit
-    exit_code = supervisor.wait(primary="main")
-    assert exit_code == 0
-    supervisor.stop()
+        # Wait for main to exit
+        exit_code = supervisor.wait(primary="main")
+        assert exit_code == 0
+    finally:
+        supervisor.stop()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Process groups not supported on Windows")
@@ -126,6 +132,9 @@ time.sleep(30)
         assert stats["signaler"]["state"] == "stopped"
     finally:
         Path(script_path).unlink(missing_ok=True)
+        # Ensure stopped if assertion failed
+        if 'supervisor' in locals():
+            supervisor.stop()
 
 
 def test_multiple_processes_ordered_start() -> None:
@@ -149,31 +158,33 @@ def test_multiple_processes_ordered_start() -> None:
             ProcessSpec(name="third", cmd=make_cmd("third"), critical=True),
         ]
         supervisor = Supervisor(specs, drain_timeout_ms=100, shutdown_timeout_ms=500)
-        supervisor.start()
+        try:
+            supervisor.start()
 
-        # Wait for markers
-        time.sleep(0.3)
+            # Wait for markers
+            time.sleep(0.3)
 
-        # Check all started
-        for spec in specs:
-            assert (marker_dir / f"{spec.name}.started").exists()
-
-        supervisor.stop()
+            # Check all started
+            for spec in specs:
+                assert (marker_dir / f"{spec.name}.started").exists()
+        finally:
+            supervisor.stop()
 
 
 def test_get_stats_with_uptime() -> None:
     """Verify stats include uptime calculation."""
     spec = ProcessSpec(name="timer", cmd=[sys.executable, "-c", "import time; time.sleep(1)"], critical=True)
     supervisor = Supervisor([spec])
-    supervisor.start()
+    try:
+        supervisor.start()
 
-    time.sleep(0.1)
-    stats = supervisor.get_stats()
+        time.sleep(0.1)
+        stats = supervisor.get_stats()
 
-    assert stats["timer"]["uptime_s"] is not None
-    assert stats["timer"]["uptime_s"] >= 0.1
-
-    supervisor.stop()
+        assert stats["timer"]["uptime_s"] is not None
+        assert stats["timer"]["uptime_s"] >= 0.1
+    finally:
+        supervisor.stop()
 
 
 def test_process_spec_defaults() -> None:

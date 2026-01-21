@@ -116,15 +116,17 @@ async def test_broker_pool_context_manager() -> None:
             max_clients=2,
         )
 
-        # Acquire returns a AsyncBrokerLease
-        lease = await asyncio.wait_for(pool.acquire(), timeout=10.0)
-        async with lease as token:
-            assert token == "1"
+        try:
+            # Acquire returns a AsyncBrokerLease
+            lease = await asyncio.wait_for(pool.acquire(), timeout=10.0)
+            async with lease as token:
+                assert token == "1"
 
-        healthy = await asyncio.wait_for(pool.health(), timeout=5.0)
-        assert healthy is True
+            healthy = await asyncio.wait_for(pool.health(), timeout=5.0)
+            assert healthy is True
+        finally:
+            await asyncio.wait_for(pool.close(), timeout=5.0)
 
-        await asyncio.wait_for(pool.close(), timeout=5.0)
         await asyncio.wait_for(task, timeout=10.0)
         if broker_error is not None:
             raise broker_error

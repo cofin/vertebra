@@ -3,12 +3,6 @@
 from collections.abc import Callable
 from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar
 
-from sqlspec.adapters.aiosqlite.data_dictionary import AiosqliteDataDictionary
-from sqlspec.adapters.asyncmy.data_dictionary import AsyncmyDataDictionary
-from sqlspec.adapters.asyncpg.data_dictionary import AsyncpgDataDictionary
-from sqlspec.adapters.psycopg.data_dictionary import PsycopgSyncDataDictionary
-from sqlspec.adapters.pymysql.data_dictionary import PyMysqlDataDictionary
-from sqlspec.adapters.sqlite.data_dictionary import SqliteDataDictionary
 from sqlspec.driver import AsyncDataDictionaryBase, SyncDataDictionaryBase
 from sqlspec.exceptions import ImproperConfigurationError, SQLFileNotFoundError
 from sqlspec.typing import ColumnMetadata, ForeignKeyMetadata, IndexMetadata, TableMetadata, VersionInfo
@@ -291,16 +285,16 @@ class _GenericAsyncDataDictionary(AsyncDataDictionaryBase):
             return []
 
 
-def _generic_sync_factory(dialect: str) -> Callable[[], SyncDataDictionaryBase]:
+def _generic_sync_factory(dialect_name: str) -> Callable[[], SyncDataDictionaryBase]:
     class _DialectDataDictionary(_GenericSyncDataDictionary):
-        dialect: ClassVar[str] = dialect
+        dialect: ClassVar[str] = dialect_name
 
     return _DialectDataDictionary
 
 
-def _generic_async_factory(dialect: str) -> Callable[[], AsyncDataDictionaryBase]:
+def _generic_async_factory(dialect_name: str) -> Callable[[], AsyncDataDictionaryBase]:
     class _DialectDataDictionary(_GenericAsyncDataDictionary):
-        dialect: ClassVar[str] = dialect
+        dialect: ClassVar[str] = dialect_name
 
     return _DialectDataDictionary
 
@@ -308,11 +302,11 @@ def _generic_async_factory(dialect: str) -> Callable[[], AsyncDataDictionaryBase
 def resolve_sync_data_dictionary(dialect: str) -> Callable[[], SyncDataDictionaryBase]:
     normalized = dialect.lower() if dialect else ""
     if normalized.startswith("postgres"):
-        return PsycopgSyncDataDictionary
+        return _generic_sync_factory("postgres")
     if normalized.startswith("mysql"):
-        return PyMysqlDataDictionary
+        return _generic_sync_factory("mysql")
     if normalized.startswith("sqlite"):
-        return SqliteDataDictionary
+        return _generic_sync_factory("sqlite")
     msg = f"Unsupported SQLSpec dialect for data dictionary: {dialect!r}"
     raise ImproperConfigurationError(msg)
 
@@ -320,11 +314,11 @@ def resolve_sync_data_dictionary(dialect: str) -> Callable[[], SyncDataDictionar
 def resolve_async_data_dictionary(dialect: str) -> Callable[[], AsyncDataDictionaryBase]:
     normalized = dialect.lower() if dialect else ""
     if normalized.startswith("postgres"):
-        return AsyncpgDataDictionary
+        return _generic_async_factory("postgres")
     if normalized.startswith("mysql"):
-        return AsyncmyDataDictionary
+        return _generic_async_factory("mysql")
     if normalized.startswith("sqlite"):
-        return AiosqliteDataDictionary
+        return _generic_async_factory("sqlite")
     msg = f"Unsupported SQLSpec dialect for data dictionary: {dialect!r}"
     raise ImproperConfigurationError(msg)
 
