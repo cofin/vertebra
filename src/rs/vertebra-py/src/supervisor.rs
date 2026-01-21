@@ -80,7 +80,7 @@ impl NativeSupervisor {
             libc::sigaddset(&mut mask, libc::SIGCHLD);
             libc::pthread_sigmask(libc::SIG_BLOCK, &mask, old_mask.as_mut_ptr());
 
-            libc::signalfd(-1, &mask, libc::SFD_CLOEXEC)
+            libc::signalfd(-1, &mask, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK)
         };
 
         if sfd < 0 {

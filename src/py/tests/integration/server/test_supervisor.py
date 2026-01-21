@@ -72,20 +72,21 @@ def test_process_exit_detection() -> None:
 
 def test_non_critical_process_continues() -> None:
     """Verify non-critical process exit doesn't stop supervisor."""
-    # Non-critical process that exits quickly
+    # Non-critical process that exits quickly but not instantly
     non_critical = ProcessSpec(
         name="ephemeral",
-        cmd=[sys.executable, "-c", "print('bye')"],
+        cmd=[sys.executable, "-c", "import time; time.sleep(0.1); print('bye')"],
         critical=False,
         restart_policy=RestartPolicy(max_restarts=0),  # Don't restart
     )
     # Critical process that runs longer
-    critical = ProcessSpec(name="main", cmd=[sys.executable, "-c", "import time; time.sleep(0.5)"], critical=True)
+    critical = ProcessSpec(name="main", cmd=[sys.executable, "-c", "import time; time.sleep(2.0)"], critical=True)
     supervisor = Supervisor([non_critical, critical])
     try:
         supervisor.start()
 
         # Wait for main to exit
+        # This will block until 'main' exits (approx 2s) or timeout
         exit_code = supervisor.wait(primary="main")
         assert exit_code == 0
     finally:
