@@ -1,7 +1,5 @@
 """Procedure registry for Vertebra type bridge."""
 
-from __future__ import annotations
-
 from datetime import UTC, datetime
 from threading import RLock
 from typing import TYPE_CHECKING, Any

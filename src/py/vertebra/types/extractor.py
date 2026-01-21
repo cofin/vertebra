@@ -1,7 +1,5 @@
 """Type extraction utilities for Python annotations."""
 
-from __future__ import annotations
-
 import ast
 import hashlib
 import types
@@ -156,7 +154,7 @@ class TypeExtractor(msgspec.Struct):
             return LiteralType(args[0])
         return UnionType([LiteralType(value) for value in args])
 
-    def from_source_file(self, path: Path) -> ast.AST:
+    def from_source_file(self, path: "Path") -> ast.AST:
         content = path.read_bytes()
         digest = hashlib.sha256(content).hexdigest()
         cached = self.ast_cache.get(path)
@@ -173,7 +171,7 @@ class TypeExtractor(msgspec.Struct):
                 classes[node.name] = node
         return classes
 
-    def get_class_defs(self, path: Path) -> dict[str, ast.ClassDef]:
+    def get_class_defs(self, path: "Path") -> dict[str, ast.ClassDef]:
         tree = self.from_source_file(path)
         digest = self.ast_cache[path].digest
         cached = self.class_cache.get(path)
@@ -198,7 +196,7 @@ class TypeExtractor(msgspec.Struct):
                     imports[name] = (module_name, node.level or 0)
         return imports
 
-    def get_imports(self, path: Path) -> dict[str, tuple[str, int]]:
+    def get_imports(self, path: "Path") -> dict[str, tuple[str, int]]:
         tree = self.from_source_file(path)
         digest = self.ast_cache[path].digest
         cached = self.import_cache.get(path)
@@ -258,7 +256,7 @@ class TypeExtractor(msgspec.Struct):
 
         return type_vars
 
-    def get_type_vars(self, path: Path) -> dict[str, TypeNode]:
+    def get_type_vars(self, path: "Path") -> dict[str, TypeNode]:
         tree = self.from_source_file(path)
         digest = self.ast_cache[path].digest
         cached = self.type_var_cache.get(path)
@@ -272,7 +270,7 @@ class TypeExtractor(msgspec.Struct):
         self.type_var_cache[path] = CachedTypeVars(digest=digest, type_vars=type_vars)
         return type_vars
 
-    def extract_msgspec_structs(self, path: Path) -> dict[str, ObjectType]:
+    def extract_msgspec_structs(self, path: "Path") -> dict[str, ObjectType]:
         classes = self.get_class_defs(path)
         imports = self.get_imports(path)
         type_vars = self.get_type_vars(path)
@@ -284,7 +282,7 @@ class TypeExtractor(msgspec.Struct):
             self.type_cache[path, name] = structs[name]
         return structs
 
-    def extract_pydantic_models(self, path: Path) -> dict[str, ObjectType]:
+    def extract_pydantic_models(self, path: "Path") -> dict[str, ObjectType]:
         classes = self.get_class_defs(path)
         imports = self.get_imports(path)
         type_vars = self.get_type_vars(path)
@@ -296,7 +294,7 @@ class TypeExtractor(msgspec.Struct):
             self.type_cache[path, name] = models[name]
         return models
 
-    def extract_dataclasses(self, path: Path) -> dict[str, ObjectType]:
+    def extract_dataclasses(self, path: "Path") -> dict[str, ObjectType]:
         classes = self.get_class_defs(path)
         imports = self.get_imports(path)
         type_vars = self.get_type_vars(path)
@@ -308,7 +306,7 @@ class TypeExtractor(msgspec.Struct):
             self.type_cache[path, name] = models[name]
         return models
 
-    def extract_typeddicts(self, path: Path) -> dict[str, ObjectType]:
+    def extract_typeddicts(self, path: "Path") -> dict[str, ObjectType]:
         classes = self.get_class_defs(path)
         imports = self.get_imports(path)
         type_vars = self.get_type_vars(path)
@@ -777,8 +775,8 @@ class TypeExtractor(msgspec.Struct):
         return None
 
     def _resolve_import_path(
-        self, current_path: Path, module: str, level: int, search_paths: tuple[Path, ...]
-    ) -> Path | None:
+        self, current_path: "Path", module: str, level: int, search_paths: "tuple[Path, ...]"
+    ) -> "Path | None":
         if level > 0:
             base = current_path.parent
             for _ in range(level - 1):
@@ -792,7 +790,7 @@ class TypeExtractor(msgspec.Struct):
                 return resolved
         return None
 
-    def _module_to_path(self, module_path: Path) -> Path | None:
+    def _module_to_path(self, module_path: "Path") -> "Path | None":
         candidate = module_path.with_suffix(".py")
         if candidate.exists():
             return candidate

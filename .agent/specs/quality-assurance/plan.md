@@ -359,24 +359,25 @@
 
 ### Task Group 4.1: Python Core Module Audit
 
-- [x] **Task 4.1.1**: Fix `_internal/shm.py` type issues
-  - Run: `mypy --strict src/py/vertebra/_internal/shm.py`
-  - Add missing return types
-  - File: `/home/cody/code/c/vertebra/src/py/vertebra/_internal/shm.py`
+> **Note**: The `_internal/` directory was removed during package reorganization.
+> Modules have been moved to new locations:
+> - `_internal/shm.py` → removed (functionality in `vertebra._typing`)
+> - `_internal/serialization.py` → `vertebra.serializers.codecs`
+> - `_internal/dependencies.py` → `vertebra.utils.dependencies`
+> - `_internal/errors.py` → `vertebra.exceptions`
+> - `_internal/module_loader.py` → `vertebra.utils.module_loader`
+> - `_internal/_typing.py` → `vertebra._typing`
+> - `_internal/typing.py` → `vertebra.typing`
+> - `_internal/async_transport.py` → `vertebra.ipc.async_transport`
 
-- [x] **Task 4.1.2**: Fix `_internal/serialization.py` type issues
-  - Run: `mypy --strict src/py/vertebra/_internal/serialization.py`
+- [x] **Task 4.1.1**: Fix `_internal/shm.py` type issues (SUPERSEDED - module removed)
+- [x] **Task 4.1.2**: Fix `_internal/serialization.py` type issues (SUPERSEDED - moved to `vertebra.serializers.codecs`)
+- [x] **Task 4.1.3**: Fix `_internal/dependencies.py` type issues (SUPERSEDED - moved to `vertebra.utils.dependencies`)
+- [x] **Task 4.1.4**: Fix `_internal/errors.py` type issues (SUPERSEDED - moved to `vertebra.exceptions`)
+- [x] **Task 4.1.5**: Verify 0 errors in core modules
+  - Command: `mypy --strict src/py/vertebra/utils/ src/py/vertebra/exceptions.py src/py/vertebra/protocols.py`
 
-- [x] **Task 4.1.3**: Fix `_internal/dependencies.py` type issues
-  - Run: `mypy --strict src/py/vertebra/_internal/dependencies.py`
-
-- [x] **Task 4.1.4**: Fix `_internal/errors.py` type issues
-  - Run: `mypy --strict src/py/vertebra/_internal/errors.py`
-
-- [x] **Task 4.1.5**: Verify 0 errors in `_internal/`
-  - Command: `mypy --strict src/py/vertebra/_internal/`
-
-**Acceptance**: 0 mypy errors in `_internal/` module
+**Acceptance**: 0 mypy errors in core modules
 
 ---
 

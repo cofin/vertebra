@@ -1,7 +1,5 @@
 """High-level IPC channel wrappers."""
 
-from __future__ import annotations
-
 import asyncio
 import struct
 import time
@@ -116,7 +114,7 @@ class BufferView:
         except Exception as exc:  # pragma: no cover - optional dependency
             msg = "msgspec is not available"
             raise SerializationError(msg) from exc
-        
+
         view = self.as_memoryview()
         try:
             return codec.decode(view, type_hint=type_hint)

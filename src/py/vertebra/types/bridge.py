@@ -1,13 +1,12 @@
 """Type bridge HTTP endpoint and cache management."""
 
-from __future__ import annotations
-
 import asyncio
 import gzip
 import hashlib
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -15,7 +14,7 @@ from vertebra.procedures.registry import ProcedureRegistry
 from vertebra.types.typescript import TypeScriptGenerator, format_typescript
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable
 
 DEFAULT_TYPES_ROUTE = "/__vertebra/types.d.ts"
 DEFAULT_COMPRESS_THRESHOLD = 10_000
@@ -118,8 +117,8 @@ class TypeBridgeApp:
     async def __call__(
         self,
         scope: dict[str, Any],
-        receive: Callable[[], Awaitable[dict[str, Any]]],
-        send: Callable[[dict[str, Any]], Awaitable[None]],
+        receive: "Callable[[], Awaitable[dict[str, Any]]]",
+        send: "Callable[[dict[str, Any]], Awaitable[None]]",
     ) -> None:
         if scope.get("type") != "http":
             return

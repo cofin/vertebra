@@ -9,9 +9,9 @@ from sqlspec.config import AsyncDatabaseConfig, SyncDatabaseConfig
 from sqlspec.core.result import ArrowResult, SQLResult
 from sqlspec.utils.correlation import CorrelationContext
 
-from vertebra._internal.typing import PYARROW_INSTALLED
 from vertebra._vertebra import ShmRegion
 from vertebra.resources.provider import ProviderConfig, ProviderHost
+from vertebra.typing import PYARROW_INSTALLED
 
 if TYPE_CHECKING:
     import pyarrow as pa  # pyright: ignore[reportMissingImports]

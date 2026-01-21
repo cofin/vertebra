@@ -1,7 +1,5 @@
 """ASGI worker harness for Bun IPC bridge."""
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import contextlib

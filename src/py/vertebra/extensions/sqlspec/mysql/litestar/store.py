@@ -1,16 +1,13 @@
 # ruff: noqa: S608
 """MySQL session store for Litestar integration in Vertebra."""
 
-from __future__ import annotations
-
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
 from sqlspec.extensions.litestar.store import BaseSQLSpecStore
 
 if TYPE_CHECKING:
-    from datetime import timedelta
-
+    from vertebra.extensions.sqlspec.mysql import VertebraMysqlAsyncConfig  # noqa: F401
 
 __all__ = ("MysqlLitestarStore",)
 

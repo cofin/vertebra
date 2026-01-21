@@ -1,7 +1,5 @@
 """Type IR nodes for the Vertebra type bridge."""
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 import msgspec

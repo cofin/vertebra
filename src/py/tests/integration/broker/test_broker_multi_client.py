@@ -4,8 +4,6 @@ These tests verify that multiple ring buffers can operate concurrently
 without interference. Each ring is SPSC (single-producer, single-consumer).
 """
 
-from __future__ import annotations
-
 import asyncio
 
 import pytest
@@ -57,8 +55,8 @@ async def test_concurrent_ring_operations() -> None:
     """Test that multiple rings can be used concurrently via asyncio tasks."""
     _skip_if_async_ring_unavailable()
 
-    from vertebra._internal.async_transport import PollingTransport
     from vertebra._vertebra import AsyncRing
+    from vertebra.ipc.async_transport import PollingTransport
 
     num_rings = 4
     messages_per_ring = 10
@@ -162,8 +160,8 @@ async def test_multiple_messages_ordering() -> None:
     """Test that messages are received in FIFO order."""
     _skip_if_async_ring_unavailable()
 
-    from vertebra._internal.async_transport import PollingTransport
     from vertebra._vertebra import AsyncRing
+    from vertebra.ipc.async_transport import PollingTransport
 
     ring_name = f"/{unique_shm_name('ordering')}"
 
@@ -192,8 +190,8 @@ async def test_large_message_handling() -> None:
     """Test handling of larger messages up to slot size."""
     _skip_if_async_ring_unavailable()
 
-    from vertebra._internal.async_transport import PollingTransport
     from vertebra._vertebra import AsyncRing
+    from vertebra.ipc.async_transport import PollingTransport
 
     ring_name = f"/{unique_shm_name('large-msg')}"
     slot_size = 8192  # 8KB slots

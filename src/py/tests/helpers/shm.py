@@ -1,7 +1,5 @@
 """Shared memory test helpers for isolation and cleanup."""
 
-from __future__ import annotations
-
 import contextlib
 import os
 import tempfile
@@ -42,17 +40,14 @@ def skip_if_shm_unavailable(*, require_shm_lib: bool = True) -> None:
     """Skip tests when shared memory is unavailable or not writable.
 
     Args:
-        require_shm_lib: When True, require the CFFI shm bindings to be available.
+        require_shm_lib: When True, require the PyO3 shm bindings to be available.
             When False, only validate /dev/shm access.
     """
     if require_shm_lib:
         try:
-            from vertebra._internal._typing import SHM_AVAILABLE, get_shm_load_error
+            from vertebra.typing import SpscRing  # noqa: F401
         except ImportError as exc:
             pytest.skip(f"Shared memory bindings unavailable: {exc}")
-        if not SHM_AVAILABLE:
-            reason = get_shm_load_error() or "shared memory library unavailable"
-            pytest.skip(f"Shared memory bindings unavailable: {reason}")
 
     shm_dir = Path("/dev/shm")
     if not shm_dir.is_dir():
@@ -85,14 +80,14 @@ def tracked_shm_cleanup(initial: "list[str] | None" = None) -> "Generator[list[s
     Example:
         # Pattern 1: Pre-populated names
         with tracked_shm_cleanup(["/test-ring"]) as names:
-            ring = ShmRing.create(config)
+            ring = SpscRing.create_named(...)
             # Test code...
 
         # Pattern 2: Dynamic tracking
         with tracked_shm_cleanup() as names:
-            config = ShmRingConfig(name=f"/{unique_shm_name()}.control", ...)
-            ring = ShmRing.create(config)
-            names.append(config.name)
+            name = f"/{unique_shm_name()}.control"
+            ring = SpscRing.create_named(name, ...)
+            names.append(name)
             # Test code...
         # Ring is automatically unlinked here
     """
@@ -101,26 +96,22 @@ def tracked_shm_cleanup(initial: "list[str] | None" = None) -> "Generator[list[s
         yield created
     finally:
         # Import late to handle case where bindings unavailable
-        cleanup_available = False
         try:
-            from vertebra._internal._typing import SHM_AVAILABLE, shm_unlink
+            from vertebra.typing import shm_unlink
 
-            cleanup_available = SHM_AVAILABLE
-        except ImportError:
-            cleanup_available = False
-
-        if cleanup_available:
             # Unlink each tracked name
             for name in created:
                 with contextlib.suppress(Exception):
                     shm_unlink(name)
+        except ImportError:
+            pass
 
-            # Also clean up any files in /dev/shm that match the names
-            # This handles the case where shm_unlink fails but file exists
-            shm_dir = Path("/dev/shm")
-            if shm_dir.is_dir():
-                for name in created:
-                    clean_name = name.lstrip("/")
-                    for path in shm_dir.glob(f"{clean_name}*"):
-                        with contextlib.suppress(OSError):
-                            path.unlink()
+        # Also clean up any files in /dev/shm that match the names
+        # This handles the case where shm_unlink fails but file exists
+        shm_dir = Path("/dev/shm")
+        if shm_dir.is_dir():
+            for name in created:
+                clean_name = name.lstrip("/")
+                for path in shm_dir.glob(f"{clean_name}*"):
+                    with contextlib.suppress(OSError):
+                        path.unlink()

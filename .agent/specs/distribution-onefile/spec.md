@@ -295,7 +295,7 @@ dist/myapp (standalone executable, ~80-150MB)
 │   └── Selected based on --profile and --target
 ├── Site-packages (ALL dependencies resolved offline)
 │   ├── vertebra (framework)
-│   ├── msgspec, cffi, nanoarrow, etc. (vertebra deps)
+│   ├── msgspec, nanoarrow, etc. (vertebra deps)
 │   ├── User's deps from pyproject.toml
 │   └── Transitive dependencies (fully resolved)
 ├── User's application code (from src/py/<project>/)
@@ -831,7 +831,7 @@ dist/myapp (standalone executable, ~80-150MB)
 │   └── Selected based on --profile and --target
 ├── Site-packages (ALL dependencies resolved offline)
 │   ├── vertebra (framework)
-│   ├── msgspec, cffi, etc. (vertebra deps)
+│   ├── msgspec, etc. (vertebra deps)
 │   ├── User's deps from pyproject.toml
 │   └── Transitive dependencies (fully resolved)
 ├── User's application code (cool_web_app/)

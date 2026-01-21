@@ -1,7 +1,5 @@
 """Procedure decorator for Vertebra type bridge."""
 
-from __future__ import annotations
-
 import inspect
 from functools import wraps
 from pathlib import Path
@@ -19,16 +17,16 @@ _MISSING = object()
 
 
 def procedure(
-    _fn: Callable[..., Any] | None = None,
+    _fn: "Callable[..., Any] | None" = None,
     *,
     name: str | None = None,
-    serializer: str | Serializer | None = "msgspec",
-    metadata: Mapping[str, Any] | None = None,
-    type_overrides: Mapping[str, str] | None = None,
-) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    serializer: "str | Serializer | None" = "msgspec",
+    metadata: "Mapping[str, Any] | None" = None,
+    type_overrides: "Mapping[str, str] | None" = None,
+) -> "Callable[[Callable[..., Any]], Callable[..., Any]]":
     """Register a handler for type extraction and client generation."""
 
-    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+    def decorator(fn: "Callable[..., Any]") -> "Callable[..., Any]":
         registry = ProcedureRegistry.instance()
         extractor = TypeExtractor()
         try:

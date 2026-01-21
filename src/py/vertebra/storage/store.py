@@ -1,7 +1,5 @@
 """Object store protocol and Bun-backed implementations."""
 
-from __future__ import annotations
-
 import io
 import posixpath
 import tempfile

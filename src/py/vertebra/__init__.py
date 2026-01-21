@@ -1,7 +1,5 @@
 """Vertebra core package."""
 
-from __future__ import annotations
-
 from vertebra.procedures import (
     MsgspecSerializer,
     PydanticSerializer,
@@ -30,7 +28,7 @@ __version__ = "0.1.0"
 
 def __getattr__(name: str) -> object:
     if name in {"ProviderPlugin", "Vertebra"}:
-        from vertebra.app import ProviderPlugin, Vertebra
+        from vertebra.main import ProviderPlugin, Vertebra
 
         return {"ProviderPlugin": ProviderPlugin, "Vertebra": Vertebra}[name]
     msg = f"module 'vertebra' has no attribute {name!r}"

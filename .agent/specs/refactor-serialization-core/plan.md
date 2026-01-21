@@ -1,20 +1,24 @@
 # Implementation Plan: Refactor Serialization
 
+## Status: COMPLETED
+
 ## Phase 1: Structure & Implementation
 
 ### Task Group 1.1: Create New Package
 - [x] **Task 1.1.1**: Create `src/py/vertebra/serializers/` directory.
 - [x] **Task 1.1.2**: Create `__init__.py` exporting public API.
-- [x] **Task 1.1.3**: Implement `msgpack.py` (migrating from `_internal` + new features).
-- [x] **Task 1.1.4**: Implement `json.py` (migrating from `_internal`).
-- [x] **Task 1.1.5**: Implement `types.py` for shared type definitions.
+- [x] **Task 1.1.3**: Merged `msgpack.py` and `json.py` into unified `codecs.py`.
+- [x] **Task 1.1.4**: Moved type definitions to `vertebra.protocols`.
 
 ### Task Group 1.2: Consolidate & Clean Up
-- [x] **Task 1.2.1**: Update `src/py/vertebra/_internal/serialization.py` to re-export from new package (deprecation shim).
-- [x] **Task 1.2.2**: Search and replace all internal imports to use `vertebra.serializers`.
-- [x] **Task 1.2.3**: Remove `src/py/vertebra/_internal/serialization.py` once unused.
-- [x] **Task 1.2.4**: Update `src/py/vertebra/procedures/serialization.py` to use `vertebra.serializers` and enhance `JSONCodec`.
-- [x] **Task 1.2.5**: Update `BufferView.as_msgspec` and `JSONCodec.decode` to support generic return types.
+- [x] **Task 1.2.1**: Removed entire `vertebra/_internal/` directory.
+- [x] **Task 1.2.2**: Created `vertebra.utils/` with `module_loader.py`, `dependencies.py`, `encoders.py`.
+- [x] **Task 1.2.3**: Created `vertebra.protocols` with 21 consolidated protocols.
+- [x] **Task 1.2.4**: Created `vertebra.typing` as public typing facade.
+- [x] **Task 1.2.5**: Created `vertebra._typing` for internal native stubs.
+- [x] **Task 1.2.6**: Created `vertebra.exceptions` with `MissingDependencyError`.
+- [x] **Task 1.2.7**: Moved `async_transport.py` to `vertebra.ipc/`.
+- [x] **Task 1.2.8**: Updated all imports across codebase.
 
 ### Task Group 1.3: Update Dependent PRDs
 - [x] **Task 1.3.1**: Update `database-orm-integration` plan.md to reference `vertebra.serializers`.

@@ -1,16 +1,13 @@
 # ruff: noqa: S608
 """SQLite session store for Litestar integration in Vertebra."""
 
-from __future__ import annotations
-
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
 from sqlspec.extensions.litestar.store import BaseSQLSpecStore
 
 if TYPE_CHECKING:
-    from datetime import timedelta
-
+    from vertebra.extensions.sqlspec.sqlite import VertebraSqliteAsyncConfig  # noqa: F401
 
 SECONDS_PER_DAY = 86400.0
 JULIAN_EPOCH = 2440587.5

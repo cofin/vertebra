@@ -1,12 +1,9 @@
 """fsspec integration for Vertebra filesystem clients."""
 
-from __future__ import annotations
-
 import io
 from typing import Any, cast
 
-from vertebra._internal.dependencies import FSSPEC_INSTALLED
-from vertebra._internal.errors import MissingDependencyError
+from vertebra.exceptions import MissingDependencyError
 from vertebra.storage.client import FileSystemError
 from vertebra.storage.store import (
     AsyncGCSStore,
@@ -21,6 +18,7 @@ from vertebra.storage.store import (
     async_store_from_url,
     store_from_url,
 )
+from vertebra.utils.dependencies import FSSPEC_INSTALLED
 
 _FSSPEC_AVAILABLE = FSSPEC_INSTALLED
 _FSSPEC_IMPORT_ERROR: Exception | None = None

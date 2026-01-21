@@ -6,8 +6,6 @@ shared-memory IPC. These classes are internal implementation details
 and are separate from the public SQLSpec adapters.
 """
 
-from __future__ import annotations
-
 from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig, BrokerClientError, SyncBrokerClient
 from vertebra.resources.pool import (
     AsyncBrokerClientPool,

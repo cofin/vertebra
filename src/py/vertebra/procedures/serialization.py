@@ -1,7 +1,5 @@
 """Serialization backends for Vertebra procedures."""
 
-from __future__ import annotations
-
 import contextlib
 from typing import Any, Protocol, TypeVar, overload, runtime_checkable
 

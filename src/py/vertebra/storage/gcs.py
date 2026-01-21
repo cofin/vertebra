@@ -1,7 +1,5 @@
 """GCS client backed by Bun filesystem IPC."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any
 

@@ -1,7 +1,5 @@
 """Shared-memory SQLite driver backed by the Bun broker."""
 
-from __future__ import annotations
-
 import msgspec
 
 from vertebra.drivers.base import AsyncDriver, SyncDriver

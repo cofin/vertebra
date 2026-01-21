@@ -7,7 +7,7 @@ Instead of using asyncio.to_thread() which adds 50-130μs overhead per call,
 this transport uses loop.add_reader() to wait for data without blocking any threads.
 
 Example:
-    from vertebra._internal.async_transport import AsyncShmTransport
+    from vertebra.ipc.async_transport import AsyncShmTransport
     from vertebra._vertebra import AsyncRing
 
     ring = AsyncRing(65536, 1024)
@@ -19,8 +19,6 @@ Example:
     # Receive data (waits via event loop, not thread pool)
     data = await transport.recv()
 """
-
-from __future__ import annotations
 
 import asyncio
 import contextlib

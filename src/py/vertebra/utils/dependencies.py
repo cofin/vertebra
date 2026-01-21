@@ -1,6 +1,6 @@
 """Optional dependency availability flags."""
 
-from vertebra._internal.module_loader import dependency_flag
+from vertebra.utils.module_loader import dependency_flag
 
 FSSPEC_INSTALLED = dependency_flag("fsspec")
 LITESTAR_INSTALLED = dependency_flag("litestar")

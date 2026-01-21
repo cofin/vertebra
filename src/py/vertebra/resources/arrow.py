@@ -1,7 +1,5 @@
 """Arrow shared memory region pool for providers."""
 
-from __future__ import annotations
-
 import io
 import uuid
 from dataclasses import dataclass

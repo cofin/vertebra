@@ -1,7 +1,7 @@
 """SQLSpec integrations for Vertebra."""
 
-from vertebra._internal.dependencies import SQLSPEC_INSTALLED
-from vertebra._internal.errors import MissingDependencyError
+from vertebra.exceptions import MissingDependencyError
+from vertebra.utils.dependencies import SQLSPEC_INSTALLED
 
 if not SQLSPEC_INSTALLED:
     raise MissingDependencyError(package="sqlspec", install_package="vertebra[sqlspec]")

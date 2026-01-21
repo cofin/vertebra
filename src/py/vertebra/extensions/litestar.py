@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Any
 
-from vertebra._internal.errors import MissingDependencyError
+from vertebra.exceptions import MissingDependencyError
 
 try:
     from litestar.plugins import CLIPluginProtocol, InitPluginProtocol

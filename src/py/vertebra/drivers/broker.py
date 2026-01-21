@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
 
 import msgspec
 
-from vertebra._internal.module_loader import ensure_pyarrow
-from vertebra._internal.typing import ArrowTable
 from vertebra.resources import AsyncBrokerClient, AsyncBrokerPool, BrokerClientConfig, SyncBrokerClient, SyncBrokerPool
+from vertebra.typing import ArrowTable
+from vertebra.utils.module_loader import ensure_pyarrow
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Coroutine

@@ -1,18 +1,12 @@
 """Broker pool abstractions with context manager support."""
 
-from __future__ import annotations
-
 import asyncio
 import queue
 import threading
-from typing import TYPE_CHECKING
 
 import msgspec
 
 from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig, SyncBrokerClient
-
-if TYPE_CHECKING:
-    from types import TracebackType
 
 
 class BrokerPoolError(RuntimeError):
@@ -29,9 +23,7 @@ class AsyncBrokerLease(msgspec.Struct, frozen=True):
     async def __aenter__(self) -> str:
         return self.token
 
-    async def __aexit__(
-        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
-    ) -> None:
+    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object) -> None:
         await self.pool.release(self.client, self.token)
 
 
@@ -102,9 +94,7 @@ class SyncBrokerLease(msgspec.Struct, frozen=True):
     def __enter__(self) -> str:
         return self.token
 
-    def __exit__(
-        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
-    ) -> None:
+    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object) -> None:
         self.pool.release(self.client, self.token)
 
 

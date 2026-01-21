@@ -1,7 +1,5 @@
 """Integration-test database containers (Docker/Podman)."""
 
-from __future__ import annotations
-
 import contextlib
 import os
 import subprocess
@@ -71,7 +69,7 @@ def container_manager() -> SessionContainerManager:
 
 
 @pytest.fixture(scope="session")
-def postgres_service(container_manager: SessionContainerManager) -> Generator[PostgreSQLDatabase, None, None]:
+def postgres_service(container_manager: SessionContainerManager) -> "Generator[PostgreSQLDatabase, None, None]":
     config = PostgresDatabaseConfig(
         image=os.getenv("VERTEBRA_TEST_POSTGRES_IMAGE", "postgres:16"),
         container_name=os.getenv("VERTEBRA_TEST_POSTGRES_CONTAINER", "vertebra-test-postgres"),
@@ -86,7 +84,7 @@ def postgres_service(container_manager: SessionContainerManager) -> Generator[Po
 
 
 @pytest.fixture(scope="session")
-def mysql_service(container_manager: SessionContainerManager) -> Generator[MySQLDatabase, None, None]:
+def mysql_service(container_manager: SessionContainerManager) -> "Generator[MySQLDatabase, None, None]":
     config = MySQLDatabaseConfig(
         image=os.getenv("VERTEBRA_TEST_MYSQL_IMAGE", "mysql:8"),
         container_name=os.getenv("VERTEBRA_TEST_MYSQL_CONTAINER", "vertebra-test-mysql"),
@@ -102,7 +100,7 @@ def mysql_service(container_manager: SessionContainerManager) -> Generator[MySQL
 
 
 @pytest.fixture(scope="session")
-def redis_service(container_manager: SessionContainerManager) -> Generator[RedisDatabase, None, None]:
+def redis_service(container_manager: SessionContainerManager) -> "Generator[RedisDatabase, None, None]":
     config = RedisDatabaseConfig(
         image=os.getenv("VERTEBRA_TEST_REDIS_IMAGE", "redis:7"),
         container_name=os.getenv("VERTEBRA_TEST_REDIS_CONTAINER", "vertebra-test-redis"),

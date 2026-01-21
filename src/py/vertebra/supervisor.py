@@ -12,8 +12,6 @@ Features:
 - Signal propagation (SIGTERM, SIGINT, SIGHUP)
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import enum
@@ -415,7 +413,7 @@ class Supervisor:
     def _install_signal_handlers(self) -> None:
         """Install signal handlers for graceful shutdown."""
 
-        def handler(sig: int, _frame: FrameType | None) -> None:
+        def handler(sig: int, _frame: "FrameType | None") -> None:
             logger.info("Received signal %d, initiating shutdown", sig)
             self.stop(sig)
 

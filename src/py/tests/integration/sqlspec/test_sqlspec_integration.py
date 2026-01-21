@@ -4,8 +4,6 @@ These tests verify the broker-backed SQLSpec adapter configuration
 and proxy wrappers work correctly.
 """
 
-from __future__ import annotations
-
 from unittest.mock import MagicMock
 
 import pytest

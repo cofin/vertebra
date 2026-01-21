@@ -1,37 +1,45 @@
 # Refactor Serialization to Core Package
 
+## Status: COMPLETED
+
 ## Overview
-This PRD defines the refactoring of Vertebra's serialization logic. Currently, serialization is either scattered in `_internal` or planned for `extensions`. This is architecturally incorrect as serialization is a core capability. This effort will move serialization to a top-level `vertebra.serializers` package, consolidate existing logic, and implement a clean, unified API.
+This PRD defined the refactoring of Vertebra's serialization logic. Serialization has been moved to a top-level `vertebra.serializers` package with a clean, unified API.
 
 ## Functional Requirements
 ### Must Have
-- [ ] Create `src/py/vertebra/serializers/` package.
-- [ ] Move/Implement `VertebraCodec` (MessagePack) in `vertebra.serializers.msgpack`.
-- [ ] Move/Implement JSON utilities in `vertebra.serializers.json`.
-- [ ] Consolidate `vertebra._internal.serialization` into the new package.
-- [ ] Ensure all 30+ types (Arrow, DateTime, UUID, etc.) are supported in the core serializers.
-- [ ] Update all references in `database-orm-integration` to point to the new location.
+- [x] Create `src/py/vertebra/serializers/` package.
+- [x] Implement `VertebraCodec` (MessagePack) and `JSONCodec` in `vertebra.serializers.codecs`.
+- [x] Consolidate JSON and MessagePack into single `codecs.py` module.
+- [x] Remove `vertebra._internal/` directory entirely.
+- [x] Ensure all 30+ types (Arrow, DateTime, UUID, etc.) are supported in the core serializers.
+- [x] Update all references across codebase to use new locations.
 
 ## Technical Approach
-### Recommended Implementation
-- **New Location:** `src/py/vertebra/serializers/`
+### Final Implementation
+- **Location:** `src/py/vertebra/serializers/`
 - **Structure:**
-    - `__init__.py`: Exports `VertebraCodec`, `encode_json`, `decode_json`.
-    - `msgpack.py`: `msgspec.msgpack` extensions.
-    - `json.py`: `msgspec.json` extensions.
-    - `types.py`: Type definitions and protocols.
-    - `registry.py`: Central registry for type hooks (if dynamic registration is needed).
+    - `__init__.py`: Re-exports from `codecs.py`.
+    - `codecs.py`: Unified `JSONCodec`, `MessagePackCodec`, `VertebraCodec` (alias), and helper functions.
+- **Related modules:**
+    - `vertebra.utils.encoders`: Shared `default_encoder` function for msgspec.
+    - `vertebra.protocols`: `JSONSerializer` and `Serializer` protocols.
+    - `vertebra.typing`: Public typing facade with dependency flags.
 
-### Files to Modify
-- **Delete:** `src/py/vertebra/_internal/serialization.py`
-- **Create:** `src/py/vertebra/serializers/*`
-- **Update:** `src/py/vertebra/extensions/sqlspec/` (imports)
-- **Update:** `src/py/vertebra/mcp/` (imports)
+### Files Modified
+- **Deleted:** `src/py/vertebra/_internal/` (entire directory)
+- **Deleted:** `src/py/vertebra/serializers/json.py`, `msgpack.py`, `encoders.py`, `types.py`
+- **Created:** `src/py/vertebra/serializers/codecs.py`
+- **Created:** `src/py/vertebra/utils/` directory with `module_loader.py`, `dependencies.py`, `encoders.py`
+- **Created:** `src/py/vertebra/protocols.py` (consolidated 21 protocols)
+- **Created:** `src/py/vertebra/typing.py` (public typing facade)
+- **Created:** `src/py/vertebra/_typing.py` (internal native stubs)
+- **Created:** `src/py/vertebra/exceptions.py` (`MissingDependencyError`)
+- **Updated:** All imports across `extensions/`, `drivers/`, `resources/`, `tests/`
 
 ## Acceptance Criteria
-- [ ] `from vertebra.serializers import VertebraCodec` works.
-- [ ] `database-orm-integration` PRD plan is updated.
-- [ ] Tests in `src/py/tests/unit/test_serialization_*.py` pass with new imports.
+- [x] `from vertebra.serializers import VertebraCodec` works.
+- [x] `from vertebra.serializers.codecs import JSONCodec, MessagePackCodec` works.
+- [x] Tests pass with new imports (199 tests passing).
 
 ## Dependencies
 ### Internal Dependencies

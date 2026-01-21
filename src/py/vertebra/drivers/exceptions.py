@@ -1,7 +1,5 @@
 """DB-API 2.0 compatible exception hierarchy."""
 
-from __future__ import annotations
-
 
 class Error(Exception):
     """Base error for all driver exceptions."""

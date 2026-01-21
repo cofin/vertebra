@@ -1,7 +1,5 @@
 """Tests for Arrow IPC threshold selection in the SQLSpec provider."""
 
-from __future__ import annotations
-
 from typing import Any
 
 import pytest

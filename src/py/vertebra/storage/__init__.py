@@ -31,8 +31,6 @@ Example usage::
     data = client.download_bytes("key/to/object")
 """
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING, Any
 
 from vertebra.storage.client import AsyncFileSystemClient, Backend, FileEntry, FileSystemError, SyncFileSystemClient

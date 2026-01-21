@@ -1,7 +1,5 @@
 """Unit tests for broker provider registration and configuration."""
 
-from __future__ import annotations
-
 from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig, BrokerClientError
 
 

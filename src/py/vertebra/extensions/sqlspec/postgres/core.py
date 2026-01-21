@@ -5,9 +5,9 @@ from typing import Any
 
 from sqlspec.core import DriverParameterProfile, ParameterStyle, StatementConfig
 
-from vertebra._internal.typing import MSGSPEC_INSTALLED
 from vertebra.extensions.sqlspec._core import build_broker_profile
 from vertebra.extensions.sqlspec._core import build_statement_config as _build_statement_config
+from vertebra.typing import MSGSPEC_INSTALLED
 
 __all__ = (
     "apply_driver_features",

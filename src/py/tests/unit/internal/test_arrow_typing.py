@@ -1,11 +1,10 @@
 """Tests for Arrow typing protocols and conditional imports."""
 
-from __future__ import annotations
-
 import pytest
 
-from vertebra._internal.arrow import PYARROW_INSTALLED, ArrowTable, ArrowTableProtocol
-from vertebra._internal.module_loader import reset_dependency_cache
+from vertebra.protocols import ArrowTableProtocol
+from vertebra.typing import PYARROW_INSTALLED, ArrowTable
+from vertebra.utils.module_loader import reset_dependency_cache
 
 
 class TestPyarrowInstalledFlag:

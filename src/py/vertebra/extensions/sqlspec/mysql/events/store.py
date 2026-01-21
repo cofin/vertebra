@@ -1,8 +1,6 @@
 # ruff: noqa: S608
 """MySQL event queue store for Vertebra."""
 
-from __future__ import annotations
-
 from sqlspec.extensions.events import BaseEventQueueStore
 
 __all__ = ("MysqlEventQueueStore",)

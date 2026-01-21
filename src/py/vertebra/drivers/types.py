@@ -1,13 +1,11 @@
 """Type conversion helpers for Bun-backed drivers."""
 
-from __future__ import annotations
-
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from vertebra._internal import decode_json, encode_json
+from vertebra.serializers import decode_json, encode_json
 
 
 def _encode_json(value: Any) -> str:

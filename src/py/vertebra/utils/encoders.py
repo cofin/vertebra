@@ -1,7 +1,5 @@
 """Shared encoding utilities for Vertebra serializers."""
 
-from __future__ import annotations
-
 import datetime
 import decimal
 import enum

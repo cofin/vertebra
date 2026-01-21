@@ -118,13 +118,13 @@ class ServiceProvider(Provider):
 
 ## Optional Dependencies
 
-Use the `vertebra._internal` patterns for handling optional dependencies safely.
+Use the `vertebra.utils` and `vertebra.typing` patterns for handling optional dependencies safely.
 
 ### 1. Lazy Availability Flags
 Use `OptionalDependencyFlag` to defer import checks until runtime.
 
 ```python
-from vertebra._internal.module_loader import dependency_flag
+from vertebra.typing import dependency_flag
 
 POLARS_INSTALLED = dependency_flag("polars")
 

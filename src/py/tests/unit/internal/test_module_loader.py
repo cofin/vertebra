@@ -1,13 +1,11 @@
 """Tests for the module_loader optional dependency utilities."""
 
-from __future__ import annotations
-
 from unittest.mock import patch
 
 import pytest
 
-from vertebra._internal.errors import MissingDependencyError
-from vertebra._internal.module_loader import (
+from vertebra.exceptions import MissingDependencyError
+from vertebra.utils.module_loader import (
     OptionalDependencyFlag,
     dependency_flag,
     ensure_dependency,
@@ -131,7 +129,7 @@ class TestEnsurePyarrow:
         """Test that ensure_pyarrow raises with clear install instructions."""
         reset_dependency_cache()
         # Mock find_spec to return None for pyarrow
-        with patch("vertebra._internal.module_loader.find_spec", return_value=None):
+        with patch("vertebra.utils.module_loader.find_spec", return_value=None):
             reset_dependency_cache()  # Clear cache so mock is used
             with pytest.raises(MissingDependencyError) as exc_info:
                 ensure_pyarrow()

@@ -2,20 +2,14 @@
 
 import asyncio
 import inspect
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
+
+from vertebra.protocols import ProviderPlugin
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Callable, Sequence
 
     from vertebra.resources import BrokerClientConfig
-
-
-class ProviderPlugin(Protocol):
-    """Protocol for broker plugins that register and serve providers."""
-
-    def register(self, *args: Any, **kwargs: Any) -> "Awaitable[None]": ...
-
-    def serve(self) -> "Awaitable[None]": ...
 
 
 class Vertebra:
@@ -79,4 +73,4 @@ class Vertebra:
         return tuple(self._plugins)
 
 
-__all__ = ("ProviderPlugin", "Vertebra")
+__all__ = ("Vertebra",)

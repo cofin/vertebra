@@ -19,7 +19,7 @@ This PRD consolidates **all** database and ORM work for Vertebra 1.0 into a sing
 **Completed (✅)**:
 - Shared-memory broker operational (Bun process)
 - Ring buffer IPC primitives (Rust C ABI)
-- Python CFFI bindings to shared memory
+- Python PyO3 bindings to shared memory
 - Basic SQLSpec integration (~85% complete)
 - Connection pool implementations (Postgres, MySQL, SQLite, Redis)
 - Fairness scheduler implementation

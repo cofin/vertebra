@@ -1,15 +1,13 @@
 """File watching helpers for Type Bridge regeneration."""
 
-from __future__ import annotations
-
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vertebra._internal.dependencies import WATCHDOG_INSTALLED
-from vertebra._internal.errors import MissingDependencyError
+from vertebra.exceptions import MissingDependencyError
+from vertebra.utils.dependencies import WATCHDOG_INSTALLED
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -40,7 +38,7 @@ class WatchOptions(msgspec.Struct, frozen=True, gc=False):
 
 
 class _DebouncedHandler(FileSystemEventHandler):
-    def __init__(self, bridge: TypeBridge, debounce_ms: int) -> None:
+    def __init__(self, bridge: "TypeBridge", debounce_ms: int) -> None:
         super().__init__()
         self._bridge = bridge
         self._debounce_ms = debounce_ms
@@ -86,7 +84,7 @@ class _DebouncedHandler(FileSystemEventHandler):
 class TypeBridgeWatcher:
     """Watch Python sources and invalidate the type bridge cache."""
 
-    def __init__(self, bridge: TypeBridge, paths: Iterable[Path], *, debounce_ms: int = 100) -> None:
+    def __init__(self, bridge: "TypeBridge", paths: "Iterable[Path]", *, debounce_ms: int = 100) -> None:
         self._bridge = bridge
         self._options = WatchOptions(tuple(Path(p) for p in paths), debounce_ms)
         self._observer: Any = Observer() if Observer else None

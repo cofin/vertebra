@@ -3,12 +3,10 @@
 Follows SQLSpec's typing pattern for lazy evaluation and caching.
 """
 
-from __future__ import annotations
-
 from importlib.util import find_spec
 from typing import TYPE_CHECKING
 
-from vertebra._internal.errors import MissingDependencyError
+from vertebra.exceptions import MissingDependencyError
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -80,7 +78,7 @@ def dependency_flag(module_name: str) -> OptionalDependencyFlag:
     return OptionalDependencyFlag(module_name)
 
 
-def ensure_dependency(module_name: str, install_package: str | None = None, feature: str | None = None) -> ModuleType:
+def ensure_dependency(module_name: str, install_package: str | None = None, feature: str | None = None) -> "ModuleType":
     """Ensure an optional dependency is installed, raising a clear error if not.
 
     Args:
@@ -104,7 +102,7 @@ def ensure_dependency(module_name: str, install_package: str | None = None, feat
     return importlib.import_module(module_name)
 
 
-def ensure_pyarrow() -> ModuleType:
+def ensure_pyarrow() -> "ModuleType":
     """Ensure pyarrow is installed, raising MissingDependencyError if not.
 
     Returns:
@@ -116,17 +114,17 @@ def ensure_pyarrow() -> ModuleType:
     return ensure_dependency("pyarrow", install_package="arrow")
 
 
-def ensure_numpy() -> ModuleType:
+def ensure_numpy() -> "ModuleType":
     """Ensure numpy is installed, raising MissingDependencyError if not."""
     return ensure_dependency("numpy")
 
 
-def ensure_pandas() -> ModuleType:
+def ensure_pandas() -> "ModuleType":
     """Ensure pandas is installed, raising MissingDependencyError if not."""
     return ensure_dependency("pandas")
 
 
-def ensure_polars() -> ModuleType:
+def ensure_polars() -> "ModuleType":
     """Ensure polars is installed, raising MissingDependencyError if not."""
     return ensure_dependency("polars")
 

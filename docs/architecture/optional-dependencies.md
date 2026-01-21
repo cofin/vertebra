@@ -13,11 +13,11 @@ Vertebra uses a specific pattern (adopted from SQLSpec) to handle optional depen
 
 ### 1. Using Optional Types
 
-Always import types from `vertebra._internal.typing`. This module provides the consolidated facade.
+Always import types from `vertebra.typing`. This module provides the consolidated public facade.
 
 ```python
 from typing import Any
-from vertebra._internal.typing import (
+from vertebra.typing import (
     ArrowTable,
     PYARROW_INSTALLED,
     ensure_pyarrow,
@@ -49,17 +49,22 @@ def load_data() -> ArrowTable:
 
 To add a new optional dependency (e.g., `scipy`):
 
-1.  **Edit `src/py/vertebra/_internal/module_loader.py`**:
+1.  **Edit `src/py/vertebra/utils/module_loader.py`**:
     - Add `ensure_scipy()` function.
 
-2.  **Edit `src/py/vertebra/_internal/typing.py`**:
+2.  **Edit `src/py/vertebra/typing.py`**:
     - Add `SCIPY_INSTALLED = dependency_flag("scipy")`.
+    - Export `SCIPY_INSTALLED` in `__all__`.
+
+3.  **Edit `src/py/vertebra/protocols.py`** (if needed):
     - Define a Protocol stub:
         ```python
         @runtime_checkable
         class ScipyMatrixProtocol(Protocol):
             ...
         ```
+
+4.  **Edit `src/py/vertebra/typing.py`**:
     - Add conditional import:
         ```python
         try:
@@ -67,15 +72,17 @@ To add a new optional dependency (e.g., `scipy`):
         except ImportError:
             ScipyMatrix = ScipyMatrixProtocol # type: ignore[assignment,misc,unused-ignore]
         ```
-    - Export `SCIPY_INSTALLED` and `ScipyMatrix` in `__all__`.
+    - Export `ScipyMatrix` in `__all__`.
 
-3.  **Update `pyproject.toml`**:
+5.  **Update `pyproject.toml`**:
     - Add the dependency to `[project.optional-dependencies]`.
 
 ## Reference
 
-- **`vertebra._internal.module_loader`**: Low-level dependency checking utilities.
-- **`vertebra._internal.typing`**: Public typing facade.
+- **`vertebra.typing`**: Public typing facade (dependency flags, type aliases, ensure functions).
+- **`vertebra.utils.module_loader`**: Low-level dependency checking utilities (`OptionalDependencyFlag`, `dependency_flag()`).
+- **`vertebra.protocols`**: Protocol definitions for optional dependency types.
+- **`vertebra.exceptions`**: `MissingDependencyError` exception.
 - **Supported Optionals**:
     - `arrow` (`pyarrow`)
     - `numpy` (`numpy`)

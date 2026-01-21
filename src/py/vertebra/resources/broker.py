@@ -1,7 +1,5 @@
 """Shared-memory broker client for resource management."""
 
-from __future__ import annotations
-
 import os
 import pathlib
 import uuid
@@ -9,11 +7,11 @@ from typing import Any
 
 import msgspec
 
-from vertebra._internal.async_transport import AsyncShmTransport, PollingTransport, create_transport
-from vertebra._internal.module_loader import ensure_pyarrow
 from vertebra._vertebra import AsyncRing, ShmRegion, SpscRing
+from vertebra.ipc.async_transport import AsyncShmTransport, PollingTransport, create_transport
 from vertebra.resources.arrow import decode_arrow_nano
 from vertebra.serializers import MessagePackCodec
+from vertebra.utils.module_loader import ensure_pyarrow
 
 
 class BrokerClientError(RuntimeError):

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 from typing import Any
 
@@ -24,8 +22,8 @@ def _skip_if_async_ring_unavailable() -> None:
 async def test_broker_pool_context_manager() -> None:
     _skip_if_async_ring_unavailable()
 
-    from vertebra._internal.async_transport import PollingTransport
     from vertebra._vertebra import AsyncRing
+    from vertebra.ipc.async_transport import PollingTransport
     from vertebra.resources import AsyncBrokerPool, BrokerClientConfig
 
     encoder = msgspec.msgpack.Encoder()

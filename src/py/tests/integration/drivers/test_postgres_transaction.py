@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 from typing import Any
 
@@ -13,10 +11,9 @@ from vertebra.resources import BrokerClientConfig
 pytestmark = pytest.mark.integration
 
 try:
-    from vertebra._internal._typing import SHM_AVAILABLE, SpscRing
-except Exception as exc:  # pragma: no cover
+    from vertebra.typing import SpscRing
+except ImportError as exc:  # pragma: no cover
     SpscRing = None  # type: ignore[assignment]
-    SHM_AVAILABLE = False
     _IMPORT_ERROR = exc
 else:
     _IMPORT_ERROR = None
@@ -24,9 +21,8 @@ else:
 
 @pytest.mark.anyio
 async def test_postgres_transaction_context() -> None:
-    if SpscRing is None or not SHM_AVAILABLE:
-        reason = _IMPORT_ERROR or "shared memory library unavailable"
-        pytest.skip(f"Shared memory bindings unavailable: {reason}")
+    if SpscRing is None:
+        pytest.skip(f"Shared memory bindings unavailable: {_IMPORT_ERROR}")
     from tests.helpers.shm import tracked_shm_cleanup, unique_shm_name
 
     skip_if_shm_unavailable()

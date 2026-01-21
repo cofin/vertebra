@@ -1,7 +1,5 @@
 """Test configuration and fixtures for Vertebra."""
 
-from __future__ import annotations
-
 import contextlib
 import os
 import sys
@@ -71,11 +69,8 @@ def _cleanup_shared_memory() -> None:
 
     # Try to unlink named shared memory objects via shm_unlink
     try:
-        from vertebra._internal._typing import SHM_AVAILABLE, shm_unlink
+        from vertebra.typing import shm_unlink
     except ImportError:
-        return
-
-    if not SHM_AVAILABLE:
         return
 
     # Common test shared memory names that might be left over

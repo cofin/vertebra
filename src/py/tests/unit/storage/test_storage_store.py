@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -160,12 +158,12 @@ class _AsyncLocalFsStub(_LocalFsStub):
         return None
 
 
-def _chunk_iter(data: bytes, size: int) -> Iterator[bytes]:
+def _chunk_iter(data: bytes, size: int) -> "Iterator[bytes]":
     for i in range(0, len(data), size):
         yield data[i : i + size]
 
 
-async def _async_chunk_iter(data: bytes, size: int) -> AsyncIterator[bytes]:
+async def _async_chunk_iter(data: bytes, size: int) -> "AsyncIterator[bytes]":
     for i in range(0, len(data), size):
         yield data[i : i + size]
         await asyncio.sleep(0)

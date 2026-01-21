@@ -1,8 +1,6 @@
 # ruff: noqa: S608
 """PostgreSQL ADK store for Vertebra."""
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore, EventRecord, MemoryRecord, SessionRecord
@@ -223,7 +221,7 @@ class PostgresADKStore(BaseAsyncADKStore["VertebraPostgresAsyncConfig"]):
             )
 
     async def get_events(
-        self, session_id: str, after_timestamp: datetime | None = None, limit: int | None = None
+        self, session_id: str, after_timestamp: "datetime | None" = None, limit: int | None = None
     ) -> list[EventRecord]:
         where_clauses = ["session_id = $1"]
         params: list[Any] = [session_id]
