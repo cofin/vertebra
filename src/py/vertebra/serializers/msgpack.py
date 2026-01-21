@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import functools
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar, overload
 
 import msgspec
 
@@ -17,6 +17,8 @@ __all__ = (
     "encode_msgpack",
     "get_msgpack_codec",
 )
+
+T = TypeVar("T")
 
 
 @dataclass(slots=True)
@@ -32,7 +34,13 @@ class MessagePackCodec:
         """Encode a Python value to MessagePack bytes."""
         return self.encoder.encode(value)
 
-    def decode(self, data: bytes | bytearray | memoryview, type_hint: type | None = None) -> Any:
+    @overload
+    def decode(self, data: bytes | bytearray | memoryview, type_hint: type[T]) -> T: ...
+
+    @overload
+    def decode(self, data: bytes | bytearray | memoryview, type_hint: None = ...) -> Any: ...
+
+    def decode(self, data: bytes | bytearray | memoryview, type_hint: type[Any] | None = None) -> Any:
         """Decode MessagePack bytes to Python values.
 
         Args:
@@ -70,7 +78,15 @@ def encode_msgpack(data: Any) -> bytes:
     return get_msgpack_codec().encode(data)
 
 
-def decode_msgpack(data: bytes | bytearray | memoryview, type_hint: type | None = None) -> Any:
+@overload
+def decode_msgpack(data: bytes | bytearray | memoryview, type_hint: type[T]) -> T: ...
+
+
+@overload
+def decode_msgpack(data: bytes | bytearray | memoryview, type_hint: None = ...) -> Any: ...
+
+
+def decode_msgpack(data: bytes | bytearray | memoryview, type_hint: type[Any] | None = None) -> Any:
     """Decode from MessagePack using msgspec.
 
     Args:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import functools
 from dataclasses import dataclass, field
-from typing import Any, Literal, overload
+from typing import Any, Literal, TypeVar, overload
 
 import msgspec
 
@@ -16,6 +16,8 @@ __all__ = (
     "encode_json",
     "get_json_codec",
 )
+
+T = TypeVar("T")
 
 
 @dataclass(slots=True)
@@ -41,7 +43,13 @@ class JSONCodec:
         result = self.encoder.encode(data)
         return result if as_bytes else result.decode("utf-8")
 
-    def decode(self, data: str | bytes, type_hint: type | None = None) -> Any:
+    @overload
+    def decode(self, data: str | bytes, type_hint: type[T]) -> T: ...
+
+    @overload
+    def decode(self, data: str | bytes, type_hint: None = ...) -> Any: ...
+
+    def decode(self, data: str | bytes, type_hint: type[Any] | None = None) -> Any:
         """Decode from JSON.
 
         Args:
@@ -91,7 +99,15 @@ def encode_json(data: Any, *, as_bytes: bool = False) -> str | bytes:
     return get_json_codec().encode(data, as_bytes=as_bytes)
 
 
-def decode_json(data: str | bytes, type_hint: type | None = None) -> Any:
+@overload
+def decode_json(data: str | bytes, type_hint: type[T]) -> T: ...
+
+
+@overload
+def decode_json(data: str | bytes, type_hint: None = ...) -> Any: ...
+
+
+def decode_json(data: str | bytes, type_hint: type[Any] | None = None) -> Any:
     """Decode from JSON using msgspec.
 
     Args:
