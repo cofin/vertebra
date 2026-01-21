@@ -19,7 +19,7 @@
 
 ## Data & Storage
 
-- **SQLSpec**: Multi-dialect SQL query mapper with broker-backed adapters.
+- **SQLSpec**: Multi-dialect SQL query mapper with broker-backed adapters and optimized ADK/Litestar store extensions.
 - **Apache Arrow**: Primary serialization format for large tabular datasets (>1k rows).
 - **SQLAlchemy / Advanced Alchemy**: Native dialects and Repository/Service patterns integrated with the shared-memory broker.
 - **Storage**: Unified object store abstraction compatible with `fsspec`, supporting local, S3, and GCS backends via the broker.
