@@ -36,6 +36,7 @@ todo/
 # Distribution / packaging
 .Python
 build/
+!src/py/vertebra/build/
 dist/
 downloads/
 .python-version
