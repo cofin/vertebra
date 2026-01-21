@@ -46,23 +46,23 @@
     - [x] Update `src/py/vertebra/cli.py` to add `vertebra build` group
     - [x] Add `vertebra build --one-file` command
     - [x] Wire up CLI to `vertebra.build.bundler`
-- [ ] Task: Checkpoint - Verify Phase 2 complete and create recovery point
+- [x] Task: Checkpoint - Verify Phase 2 complete and create recovery point [checkpoint: checkpoint/prd_20260121_vertebra_1_0_release_path/3]
 - [ ] Task: Flow - User Manual Verification 'Phase 2: Distribution' (Protocol in workflow.md)
 
 ## Phase 3: Full-Suite MCP Runtime
 **Goal:** Expose Python logic as MCP tools across Stdio, SSE, and WebSocket transports.
 
-- [ ] Task: MCP Server Foundation (Stdio)
-    - [ ] Implement JSON-RPC over Stdio transport in Bun
-    - [ ] Add `initialize`, `tools/list`, and `tools/call` handlers
-- [ ] Task: Python MCP Bridge (@mcp_tool)
-    - [ ] Write tests for `@mcp_tool` registration and metadata extraction
-    - [ ] Implement automatic JSON schema generation from Python type hints
-    - [ ] Implement the IPC bridge to route tool calls to Python workers via ring buffers
-- [ ] Task: MCP Web Transports (SSE & WebSocket)
-    - [ ] Write integration tests for SSE streaming and WebSocket bidirectional messaging
-    - [ ] Implement SSE transport in `src/ts/src/mcp/transports/sse.ts`
-    - [ ] Implement WebSocket transport in `src/ts/src/mcp/transports/websocket.ts`
+- [x] Task: MCP Server Foundation (Stdio)
+    - [x] Implement JSON-RPC over Stdio transport in Bun
+    - [x] Add `initialize`, `tools/list`, and `tools/call` handlers
+- [x] Task: Python MCP Bridge (@mcp_tool)
+    - [x] Write tests for `@mcp_tool` registration and metadata extraction
+    - [x] Implement automatic JSON schema generation from Python type hints
+    - [x] Implement the IPC bridge to route tool calls to Python workers via ring buffers
+- [x] Task: MCP Web Transports (SSE & WebSocket)
+    - [x] Write integration tests for SSE streaming and WebSocket bidirectional messaging
+    - [x] Implement SSE transport in `src/ts/src/mcp/transports/sse.ts`
+    - [x] Implement WebSocket transport in `src/ts/src/mcp/transports/websocket.ts`
 - [ ] Task: Checkpoint - Verify Phase 3 complete and create recovery point
 - [ ] Task: Flow - User Manual Verification 'Phase 3: MCP Runtime' (Protocol in workflow.md)
 
