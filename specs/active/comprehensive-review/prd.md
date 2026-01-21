@@ -33,9 +33,9 @@ Vertebra aims to be an ultra-performant framework for Python/TypeScript cross-la
 ## 4. Proposed Implementation Plan
 
 ### Phase 1: IPC Core & Infrastructure (Rust)
--   [ ] Implement `MpmcRing` using shared memory and sequence-based synchronization.
--   [ ] Implement native `Supervisor` in Rust, handling SIGTERM/SIGKILL and process groups.
--   [ ] Expose `Supervisor` to Python via `vertebra._vertebra`.
+-   [x] Implement `MpmcRing` using shared memory and sequence-based synchronization.
+-   [x] Implement native `Supervisor` in Rust, handling SIGTERM/SIGKILL and process groups.
+-   [x] Expose `Supervisor` to Python via `vertebra._vertebra`.
 
 ### Phase 2: High-Performance Data Plane
 -   [ ] Update Bun broker to support Arrow RecordBatch serialization for database results.
