@@ -6,6 +6,6 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 
 ---
 
-- [~] **PRD: Optimized SQLSpec Extensions for Vertebra Drivers**
+- [x] **PRD: Optimized SQLSpec Extensions for Vertebra Drivers**
 *Link: [./active/prd_20260121_sqlspec_extensions/](./active/prd_20260121_sqlspec_extensions/)*
 *Risk Level: medium*

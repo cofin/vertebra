@@ -28,8 +28,8 @@
 - [x] Task: Flow - User Manual Verification 'MySQL Implementation' (Protocol in workflow.md).
 
 ## Phase 4: Finalization
-- [ ] Task: Ensure all `__init__.py` files correctly export the new stores.
-- [ ] Task: Run full test suite for all dialects.
-- [ ] Task: Final quality gate check (typing, linting).
-- [ ] Task: Checkpoint - Verify Phase 4 complete and create recovery point.
-- [ ] Task: Flow - User Manual Verification 'Finalization' (Protocol in workflow.md).
+- [x] Task: Ensure all \`__init__.py\` files correctly export the new stores. [b899c40]
+- [x] Task: Run full test suite for all dialects. [b899c40]
+- [x] Task: Final quality gate check (typing, linting). [b899c40]
+- [x] Task: Checkpoint - Verify Phase 4 complete and create recovery point. [checkpoint: b899c40]
+- [x] Task: Flow - User Manual Verification 'Finalization' (Protocol in workflow.md).
