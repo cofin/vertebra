@@ -148,72 +148,64 @@
 
 ## Phase 2: Serialization Module (Week 1-2)
 
-### Task Group 2.1: Type Support Matrix
+### Task Group 2.1: Expand Type Support
 
 **Priority**: P0
-**Dependencies**: None
+**Dependencies**: Refactor Serialization (Completed)
 
-- [ ] **Task 2.1.1**: Create serialization package structure
-  - Files: `__init__.py`, `_types.py`, `_encoders.py`, `_decoders.py`
-  - Location: `src/py/vertebra/serializers/`
+> **Note**: `codecs.py` and `encoders.py` were created in `refactor-serialization-core` PRD. This phase expands them.
 
-- [ ] **Task 2.1.2**: Implement P0 type encoders (10 types)
-  - `datetime`, `date`, `Decimal`, `UUID`, `Enum`
-  - `bytes`, `Pydantic BaseModel`, `msgspec.Struct`
-  - `Arrow Table`, `FileObject`
-  - File: `_encoders.py`
+- [ ] **Task 2.1.1**: Update `src/py/vertebra/serializers/encoders.py`
+  - Implement P0 type encoders:
+    - `bytes` (base64)
+    - `Pydantic BaseModel` (using `model_dump`)
+    - `msgspec.Struct` (using `msgspec.to_builtins`)
+    - `Arrow Table` (using IPC)
+    - `FileObject` (using metadata)
 
-- [ ] **Task 2.1.3**: Implement P0 type decoders
-  - Matching decoders for all P0 types
-  - File: `_decoders.py`
+- [ ] **Task 2.1.2**: Implement P1 type encoders
+  - `Path`, `IPv4Address`, `IPv6Address`
+  - `set`, `frozenset` (to list)
+  - `SecretStr` (masked)
+  - `dataclass` (using `asdict`)
+  - `Postgres Array` (list)
 
-- [ ] **Task 2.1.4**: Implement P1 type encoders (8 types)
-  - `time`, `timedelta`, `Path`, `IPv4/IPv6Address`
-  - `set`, `SecretStr`, `dataclass`, `Postgres Array`
-  - File: `_encoders.py`
+- [ ] **Task 2.1.3**: Implement P2 type encoders
+  - `Pattern` (regex)
+  - `deque` (list)
+  - `attrs` (asdict)
+  - `numpy.ndarray` (list)
 
-- [ ] **Task 2.1.5**: Implement P1 type decoders
-  - Matching decoders for all P1 types
-  - File: `_decoders.py`
-
-- [ ] **Task 2.1.6**: Implement P2 type encoders (remaining types)
-  - `Pattern`, `deque`, `attrs`, `numpy.ndarray`, `MySQL Spatial`
-  - File: `_encoders.py`
-
-- [ ] **Task 2.1.7**: Implement P2 type decoders
-  - Matching decoders for all P2 types
-  - File: `_decoders.py`
+- [ ] **Task 2.1.4**: Create `src/py/vertebra/serializers/decoders.py` (NEW)
+  - Implement matching decoders for all supported types
+  - Register with `codecs.py`
 
 **Acceptance**:
-- All 30+ types have encoder/decoder implementations
+- `encoders.py` supports all 30+ types
+- `decoders.py` implements reconstruction logic
 - Unit tests for each type conversion
 
 ---
 
-### Task Group 2.2: MessagePack Codec
+### Task Group 2.2: MessagePack Codec Hardening
 
 **Priority**: P0
 **Dependencies**: Task 2.1 (type support)
 
-- [ ] **Task 2.2.1**: Create `msgpack.py` module
-  - Implement `VertebraCodec` class
-  - Extend msgspec's `MessagePackCodec`
-  - File: `src/py/vertebra/serializers/msgpack.py` (NEW)
+- [x] **Task 2.2.1**: Create `codecs.py` module
+  - **COMPLETED**: Merged `msgpack.py` and `json.py` into `codecs.py` in previous PRD.
+  - Implements `VertebraCodec` alias.
 
-- [ ] **Task 2.2.2**: Register P0 type hooks
-  - Register all P0 types with codec
-  - Test encoding/decoding round-trip
+- [ ] **Task 2.2.2**: Integrate expanded encoders
+  - Ensure `JSONCodec` and `MessagePackCodec` use the expanded `default_encoder`
+  - Verify `Pydantic` and `Arrow` support works with `VertebraCodec`
 
-- [ ] **Task 2.2.3**: Register P1 type hooks
-  - Register all P1 types with codec
-  - Test encoding/decoding round-trip
+- [ ] **Task 2.2.3**: Implement decoding hooks
+  - Update `MessagePackCodec.decode` to use `decoders.py` logic where appropriate
+  - Or verify that typed decoding handles it automatically via `msgspec`
 
-- [ ] **Task 2.2.4**: Register P2 type hooks
-  - Register all P2 types with codec
-  - Test encoding/decoding round-trip
-
-- [ ] **Task 2.2.5**: Add codec tests
-  - Test each type conversion
+- [ ] **Task 2.2.4**: Add codec tests
+  - Test each type conversion round-trip
   - Test nested structures
   - Test error handling
   - File: `src/py/tests/test_serialization_codec.py` (NEW)
@@ -235,7 +227,7 @@
   - File: `src/py/vertebra/serializers/litestar.py` (NEW)
 
 - [ ] **Task 2.3.2**: Implement `VERTEBRA_TYPE_ENCODERS`
-  - Dict mapping types to encoder functions
+  - Dict mapping types to encoder functions (reusing `encoders.py` logic)
   - All 30+ types
 
 - [ ] **Task 2.3.3**: Implement `VERTEBRA_TYPE_DECODERS`

@@ -48,6 +48,7 @@ PANDAS_INSTALLED = dependency_flag("pandas")
 POLARS_INSTALLED = dependency_flag("polars")
 MSGSPEC_INSTALLED = dependency_flag("msgspec")
 PYDANTIC_INSTALLED = dependency_flag("pydantic")
+ATTRS_INSTALLED = dependency_flag("attrs")
 
 # =============================================================================
 # Optional Data Library Imports
@@ -89,9 +90,35 @@ try:
 except ImportError:
     PolarsDataFrame = PolarsDataFrameProtocol  # type: ignore[assignment,misc]
 
+# Pydantic
+try:
+    from pydantic import BaseModel as PydanticBaseModel  # pyright: ignore[reportMissingImports]
+except ImportError:
+    from typing import Any, Protocol, runtime_checkable
+
+    @runtime_checkable
+    class PydanticBaseModel(Protocol):  # type: ignore[no-redef]
+        """Protocol stub for pydantic.BaseModel when pydantic is not installed."""
+
+        def model_dump(self) -> dict[str, Any]: ...
+        def model_dump_json(self) -> str: ...
+
+# Attrs
+try:
+    from attrs import AttrsInstance  # pyright: ignore[reportMissingImports]
+except ImportError:
+    from typing import Any, ClassVar, Protocol, runtime_checkable
+
+    @runtime_checkable
+    class AttrsInstance(Protocol):  # type: ignore[no-redef]
+        """Protocol stub for attrs instances when attrs is not installed."""
+
+        __attrs_attrs__: ClassVar[tuple[Any, ...]]
+
 
 __all__ = (
     # Dependency flags
+    "ATTRS_INSTALLED",
     "MSGSPEC_INSTALLED",
     "NUMPY_INSTALLED",
     "PANDAS_INSTALLED",
@@ -115,6 +142,7 @@ __all__ = (
     "AsyncRing",
     "AsyncShmTransport",
     # Data library types
+    "AttrsInstance",
     "NumpyArray",
     "NumpyArrayProtocol",
     "PandasDataFrame",
@@ -122,6 +150,7 @@ __all__ = (
     "PolarsDataFrame",
     "PolarsDataFrameProtocol",
     "PollingTransport",
+    "PydanticBaseModel",
     "ShmRegion",
     "SpscRing",
     "SyncContextManager",

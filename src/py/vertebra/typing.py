@@ -11,6 +11,7 @@ For ensure functions, import from utils.module_loader:
 
 from vertebra._typing import (
     # Dependency flags
+    ATTRS_INSTALLED,
     MSGSPEC_INSTALLED,
     NUMPY_INSTALLED,
     PANDAS_INSTALLED,
@@ -34,6 +35,7 @@ from vertebra._typing import (
     AsyncRing,
     AsyncShmTransport,
     # Data library types
+    AttrsInstance,
     NumpyArray,
     NumpyArrayProtocol,
     PandasDataFrame,
@@ -41,6 +43,7 @@ from vertebra._typing import (
     PolarsDataFrame,
     PolarsDataFrameProtocol,
     PollingTransport,
+    PydanticBaseModel,
     ShmRegion,
     SpscRing,
     SyncContextManager,
@@ -50,6 +53,7 @@ from vertebra._typing import (
 
 __all__ = (
     # Dependency flags
+    "ATTRS_INSTALLED",
     "MSGSPEC_INSTALLED",
     "NUMPY_INSTALLED",
     "PANDAS_INSTALLED",
@@ -73,6 +77,7 @@ __all__ = (
     "AsyncRing",
     "AsyncShmTransport",
     # Data library types
+    "AttrsInstance",
     "NumpyArray",
     "NumpyArrayProtocol",
     "PandasDataFrame",
@@ -80,6 +85,7 @@ __all__ = (
     "PolarsDataFrame",
     "PolarsDataFrameProtocol",
     "PollingTransport",
+    "PydanticBaseModel",
     "ShmRegion",
     "SpscRing",
     "SyncContextManager",

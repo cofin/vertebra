@@ -441,24 +441,86 @@ registry.register("postgresql+vertebra", "vertebra.extensions.sqlalchemy.postgre
 
 ### 4.1 Overview
 
-Unified type encoding/decoding for IPC (MessagePack) and HTTP (JSON). This extends both SQLSpec's serialization chain and Litestar's type encoders/decoders.
+Unified type encoding/decoding for IPC (MessagePack) and HTTP (JSON). Follows the `vertebra.typing` pattern for optional dependency handling.
 
 **Motivation**:
 - SQLSpec provides multi-tier serialization (msgspec > orjson > stdlib)
-- Litestar provides type_encoders/type_decoders for common types
-- Vertebra needs to extend both for IPC-specific types
+- Vertebra needs to extend this for IPC-specific types (Arrow, Pydantic, attrs)
+- Type registration for Litestar happens in `VertebraPlugin`, not serializers
 
 ### 4.2 File Structure
 
 ```
 src/py/vertebra/serializers/
 ├── __init__.py           # Unified exports
-├── _types.py             # Vertebra-specific type definitions
-├── _encoders.py          # Type encoder hooks
-├── _decoders.py          # Type decoder hooks
-├── msgpack.py            # MessagePack codec with Vertebra types
-├── json.py               # JSON codec with Vertebra types
-└── litestar.py           # Litestar type_encoders/type_decoders integration
+├── codecs.py             # JSON + MessagePack codecs
+├── encoders.py           # default_encoder hook (uses vertebra.typing)
+└── decoders.py           # Type-specific decoders
+```
+
+**Note**: Type registration for Litestar moved to `vertebra.extensions.litestar._plugin`. Serializers are framework-agnostic.
+
+### 4.2.1 Required Changes to `vertebra/_typing.py`
+
+Add missing dependency flags and type stubs following existing pattern:
+
+```python
+# Add to vertebra/_typing.py
+
+ATTRS_INSTALLED = dependency_flag("attrs")
+
+# Attrs
+try:
+    from attrs import AttrsInstance
+except ImportError:
+    @runtime_checkable
+    class AttrsInstance(Protocol):  # type: ignore[no-redef]
+        __attrs_attrs__: ClassVar[tuple[Any, ...]]
+
+# Pydantic (already have PYDANTIC_INSTALLED flag, add type stub)
+try:
+    from pydantic import BaseModel as PydanticBaseModel
+except ImportError:
+    @runtime_checkable
+    class PydanticBaseModel(Protocol):  # type: ignore[no-redef]
+        def model_dump(self) -> dict[str, Any]: ...
+        def model_dump_json(self) -> str: ...
+```
+
+### 4.2.2 Updated `encoders.py` Pattern
+
+Import from `vertebra.typing`, not inline try/except:
+
+```python
+# src/py/vertebra/serializers/encoders.py
+
+from vertebra.typing import (
+    ATTRS_INSTALLED,
+    NUMPY_INSTALLED,
+    PYARROW_INSTALLED,
+    PYDANTIC_INSTALLED,
+    ArrowTable,
+    AttrsInstance,
+    NumpyArray,
+    PydanticBaseModel,
+)
+
+def default_encoder(value: Any) -> Any:
+    """Default encoder for types not natively supported by msgspec."""
+    # Standard types (no deps)
+    if isinstance(value, datetime.datetime):
+        ...
+
+    # Optional deps - use flags from vertebra.typing
+    if PYDANTIC_INSTALLED and isinstance(value, PydanticBaseModel):
+        return value.model_dump()
+    if ATTRS_INSTALLED and isinstance(value, AttrsInstance):
+        import attrs
+        return attrs.asdict(value)
+    if NUMPY_INSTALLED and isinstance(value, NumpyArray):
+        return value.tolist()
+    if PYARROW_INSTALLED and isinstance(value, ArrowTable):
+        ...
 ```
 
 ### 4.3 Type Support Matrix (30+ Types)
@@ -694,127 +756,159 @@ class Document(UUIDBase):
 
 ## 6. Phase 5: Litestar Plugin Overhaul
 
-### 6.1 Current State
+### 6.1 Overview
 
-Simple plugin in `vertebra.extensions.litestar.py` needs overhaul for multiple ORM support.
+**NO wrapper plugins needed.** Users use Vertebra configs directly with Litestar's native plugins:
+
+- SQLSpec adapters directly (`VertebraPostgresAsyncConfig`)
+- SQLAlchemy dialects directly (`postgresql+vertebra://`)
+- Advanced Alchemy configs directly (`VertebraPostgresAlchemyAsyncConfig`)
+
+The **ONE** `VertebraPlugin` handles type encoder/decoder registration for all of them.
 
 ### 6.2 Required Structure
 
 ```
 src/py/vertebra/extensions/litestar/
-├── __init__.py           # Main exports
-├── _base.py              # Base plugin infrastructure
-├── _serialization.py     # Auto-register Vertebra type encoders/decoders
-├── sqlspec.py            # Integration with Litestar's SQLSpecPlugin
-├── sqlalchemy.py         # Integration with Litestar's SQLAlchemyPlugin
-└── advanced_alchemy.py   # Integration with AA's Litestar plugin
+├── __init__.py           # Exports VertebraPlugin
+└── _plugin.py            # Main VertebraPlugin with type registration
 ```
 
-### 6.3 Plugin Implementations
-
-#### SQLSpec Plugin
+### 6.3 Plugin Implementation
 
 ```python
-# src/py/vertebra/extensions/litestar/sqlspec.py
+# src/py/vertebra/extensions/litestar/_plugin.py
 
-from litestar.plugins.sqlspec import SQLSpecPlugin
-from vertebra.extensions.sqlspec import VertebraPostgresAsyncConfig
+from dataclasses import dataclass
+from typing import Any
 
-class VertebraSQLSpecPlugin(SQLSpecPlugin):
-    """Wraps Litestar's SQLSpecPlugin with Vertebra config."""
+from litestar.plugins import CLIPluginProtocol, InitPluginProtocol
 
-    def __init__(self, config: VertebraPostgresAsyncConfig, **kwargs):
-        super().__init__(config=config, **kwargs)
-
-    def on_app_init(self, app):
-        # Auto-register type encoders/decoders
-        from ._serialization import register_vertebra_types
-        register_vertebra_types(app)
-
-        super().on_app_init(app)
-```
-
-#### SQLAlchemy Plugin
-
-```python
-# src/py/vertebra/extensions/litestar/sqlalchemy.py
-
-from litestar.contrib.sqlalchemy import SQLAlchemyPlugin
-
-class VertebraSQLAlchemyPlugin(SQLAlchemyPlugin):
-    """Wraps Litestar's SQLAlchemyPlugin with Vertebra dialect."""
-
-    def __init__(self, connection_string: str = "postgresql+vertebra://main", **kwargs):
-        super().__init__(connection_string=connection_string, **kwargs)
-
-    def on_app_init(self, app):
-        from ._serialization import register_vertebra_types
-        register_vertebra_types(app)
-
-        super().on_app_init(app)
-```
-
-#### Advanced Alchemy Plugin
-
-```python
-# src/py/vertebra/extensions/litestar/advanced_alchemy.py
-
-from advanced_alchemy.extensions.litestar import SQLAlchemyPlugin as AAPlugin
-
-class VertebraAdvancedAlchemyPlugin(AAPlugin):
-    """Wraps AA's Litestar plugin with Vertebra config."""
-
-    def __init__(self, config, **kwargs):
-        super().__init__(config=config, **kwargs)
-
-    def on_app_init(self, app):
-        from ._serialization import register_vertebra_types
-        register_vertebra_types(app)
-
-        super().on_app_init(app)
-```
-
-### 6.4 Serialization Auto-Registration
-
-```python
-# src/py/vertebra/extensions/litestar/_serialization.py
-
-from litestar import Litestar
-from vertebra.serializers.litestar import (
-    VERTEBRA_TYPE_ENCODERS,
-    VERTEBRA_TYPE_DECODERS,
+from vertebra.serializers import default_encoder
+from vertebra.serializers.decoders import (
+    decode_datetime,
+    decode_date,
+    decode_time,
+    decode_timedelta,
+    decode_uuid,
+    decode_decimal,
+    decode_path,
+    decode_ip,
 )
 
-def register_vertebra_types(app: Litestar):
-    """Auto-register Vertebra type encoders/decoders."""
-    app.type_encoders = {**app.type_encoders, **VERTEBRA_TYPE_ENCODERS}
-    app.type_decoders = app.type_decoders + VERTEBRA_TYPE_DECODERS
+
+@dataclass(slots=True)
+class VertebraPlugin(InitPluginProtocol, CLIPluginProtocol):
+    """Litestar plugin providing Vertebra integration.
+
+    Automatically registers type encoders/decoders for:
+    - datetime, date, time, timedelta
+    - UUID, Decimal, Path
+    - IPv4Address, IPv6Address
+    - Pydantic BaseModel (if installed)
+    - attrs classes (if installed)
+    - Arrow tables (if installed)
+    """
+
+    log_level: str | None = None
+    register_type_encoders: bool = True
+
+    def on_app_init(self, app_config: Any) -> Any:
+        """Register Vertebra with Litestar app."""
+        app_config.state.setdefault("vertebra", self)
+
+        if self.register_type_encoders:
+            self._register_type_encoders(app_config)
+
+        return app_config
+
+    def _register_type_encoders(self, app_config: Any) -> None:
+        """Register Vertebra type encoders/decoders."""
+        import datetime
+        import decimal
+        import ipaddress
+        import pathlib
+        import uuid
+
+        from vertebra.typing import PYDANTIC_INSTALLED
+
+        # Build encoder map - all use default_encoder
+        type_encoders: dict[type, Any] = {
+            datetime.datetime: default_encoder,
+            datetime.date: default_encoder,
+            datetime.time: default_encoder,
+            datetime.timedelta: default_encoder,
+            uuid.UUID: default_encoder,
+            decimal.Decimal: default_encoder,
+            pathlib.Path: default_encoder,
+            pathlib.PurePath: default_encoder,
+            ipaddress.IPv4Address: default_encoder,
+            ipaddress.IPv6Address: default_encoder,
+            ipaddress.IPv4Network: default_encoder,
+            ipaddress.IPv6Network: default_encoder,
+            bytes: default_encoder,
+            set: default_encoder,
+            frozenset: default_encoder,
+        }
+
+        # Optional deps
+        if PYDANTIC_INSTALLED:
+            from pydantic import BaseModel
+            type_encoders[BaseModel] = default_encoder
+
+        # Decoder list - ordered (type, decoder_func) tuples
+        type_decoders: list[tuple[type, Any]] = [
+            (datetime.datetime, decode_datetime),
+            (datetime.date, decode_date),
+            (datetime.time, decode_time),
+            (datetime.timedelta, decode_timedelta),
+            (uuid.UUID, decode_uuid),
+            (decimal.Decimal, decode_decimal),
+            (pathlib.Path, decode_path),
+            (ipaddress.IPv4Address, decode_ip),
+            (ipaddress.IPv6Address, decode_ip),
+        ]
+
+        # Merge with existing
+        existing_encoders = getattr(app_config, 'type_encoders', None) or {}
+        app_config.type_encoders = {**existing_encoders, **type_encoders}
+
+        existing_decoders = getattr(app_config, 'type_decoders', None) or []
+        app_config.type_decoders = list(existing_decoders) + type_decoders
+
+    def on_cli_init(self, cli: Any) -> Any:
+        """Register CLI commands (existing implementation)."""
+        # ... existing CLI code ...
+        return cli
 ```
 
-### 6.5 Usage Examples
+### 6.4 Usage Example
 
 ```python
 from litestar import Litestar
-from vertebra.extensions.litestar import VertebraSQLSpecPlugin
+from litestar.plugins.sqlspec import SQLSpecPlugin  # Litestar's native plugin
+
+from vertebra.extensions.litestar import VertebraPlugin
 from vertebra.extensions.sqlspec.postgres import VertebraPostgresAsyncConfig
 
+# Vertebra configs work with Litestar's native plugins
 app = Litestar(
+    route_handlers=[...],
     plugins=[
-        VertebraSQLSpecPlugin(
-            config=VertebraPostgresAsyncConfig(pool="main"),
-        ),
-    ]
+        VertebraPlugin(),  # Registers type encoders/decoders
+        SQLSpecPlugin(config=VertebraPostgresAsyncConfig(pool="main")),
+    ],
 )
 ```
 
-### 6.6 Acceptance Criteria
+### 6.5 Acceptance Criteria
 
-- `VertebraSQLSpecPlugin` works with Litestar app
-- `VertebraSQLAlchemyPlugin` works with Litestar app
-- `VertebraAdvancedAlchemyPlugin` works with Litestar app
-- DI provides sessions/connections correctly
-- Type encoders/decoders auto-registered
-- Example app works end-to-end
+- `VertebraPlugin` registers type encoders/decoders on app init
+- Vertebra configs work with Litestar's native `SQLSpecPlugin`
+- Vertebra SQLAlchemy dialects work with Litestar's native `SQLAlchemyPlugin`
+- Vertebra AA configs work with AA's native Litestar plugin
+- All 30+ types serializable in route handler responses
+- Optional deps (pydantic, attrs, pyarrow) handled gracefully
 
 ---
 

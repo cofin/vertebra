@@ -4,27 +4,33 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 
 ---
 
+## Active PRDs
+
 ## [ ] PRD: Consolidated Database & ORM Integration
-*Link: [./database-orm-integration/](./database-orm-integration/)*
+*Link: [./specs/database-orm-integration/](./specs/database-orm-integration/)*
 
 ## [ ] PRD: Server & Runtime - MCP, Health Checks, and Observability
-*Link: [./server-runtime/](./server-runtime/)*
+*Link: [./specs/server-runtime/](./specs/server-runtime/)*
 
 ## [ ] PRD: Distribution & Packaging for Vertebra 1.0
-*Link: [./distribution-onefile/](./distribution-onefile/)*
-
-## [ ] PRD: Vertebra 1.0 Release Path
-*Link: [./vertebra-1-0-release/](./vertebra-1-0-release/)*
+*Link: [./specs/distribution-onefile/](./specs/distribution-onefile/)*
 
 ## [ ] PRD: Documentation & Adoption - Vertebra 1.0
-*Link: [./documentation/](./documentation/)*
+*Link: [./specs/documentation/](./specs/documentation/)*
+
+---
+
+## Completed & Archived PRDs
+
+## [x] PRD: Vertebra 1.0 Release Path
+*Link: [./archive/vertebra-1-0-release/](./archive/vertebra-1-0-release/)*
 
 ## [x] PRD: Vertebra Infrastructure & Quality Consolidation
-*Link: [./quality-assurance/](./quality-assurance/)*
+*Link: [./archive/quality-assurance/](./archive/quality-assurance/)*
 
 ## [x] PRD: Test Consolidation + Custom DB Fixture Completion
-*Link: [./test-consolidation/](./test-consolidation/)*
+*Link: [./archive/test-consolidation/](./archive/test-consolidation/)*
 
 ## [x] PRD: Refactor Serialization to Core Package
-*Link: [./refactor-serialization-core/](./refactor-serialization-core/)*
+*Link: [./archive/refactor-serialization-core/](./archive/refactor-serialization-core/)*
 *Risk Level: [medium]*
