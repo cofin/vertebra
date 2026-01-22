@@ -253,30 +253,30 @@
 **Priority**: P0
 **Dependencies**: Phase 2 (serialization)
 
-- [ ] **Task 3.1.1**: Create SQLAlchemy package structure
+- [x] **Task 3.1.1**: Create SQLAlchemy package structure
   - Files: `__init__.py`, `_dbapi.py`, `_base.py`
   - Location: `src/py/vertebra/extensions/sqlalchemy/`
 
-- [ ] **Task 3.1.2**: Implement `Connection` class
+- [x] **Task 3.1.2**: Implement `Connection` class (4816f6d)
   - `cursor()`, `commit()`, `rollback()`, `close()`
   - File: `_dbapi.py`
 
-- [ ] **Task 3.1.3**: Implement `Cursor` class
+- [x] **Task 3.1.3**: Implement `Cursor` class (4816f6d)
   - `execute()`, `executemany()`
   - `fetchone()`, `fetchall()`, `fetchmany()`
   - File: `_dbapi.py`
 
-- [ ] **Task 3.1.4**: Add parameter style handling
+- [x] **Task 3.1.4**: Add parameter style handling (4816f6d)
   - Convert `numeric` style for Postgres
   - Convert `qmark` style for MySQL/SQLite
   - File: `_dbapi.py`
 
-- [ ] **Task 3.1.5**: Add transaction tracking
+- [x] **Task 3.1.5**: Add transaction tracking (4816f6d)
   - Track transaction ID in connection
   - Auto-begin on first execute
   - File: `_dbapi.py`
 
-- [ ] **Task 3.1.6**: Add DBAPI tests
+- [x] **Task 3.1.6**: Add DBAPI tests (4816f6d)
   - Test connection lifecycle
   - Test cursor operations
   - Test transaction handling
