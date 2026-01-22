@@ -357,20 +357,20 @@
 **Priority**: P0
 **Dependencies**: Task 3.1-3.3
 
-- [ ] **Task 3.4.1**: Add transaction commands to broker protocol
+- [x] **Task 3.4.1**: Add transaction commands to broker protocol (ffae925)
   - `BEGIN` - Start transaction, return transaction ID
   - `COMMIT` - Commit transaction by ID
   - `ROLLBACK` - Rollback transaction by ID
   - `SAVEPOINT` - Create savepoint
   - Files: `src/ts/src/broker/serve.ts`, Python client
 
-- [ ] **Task 3.4.2**: Implement transaction lifecycle
+- [x] **Task 3.4.2**: Implement transaction lifecycle (ffae925)
   - Auto-begin on first execute
   - Track transaction state
   - Handle nested transactions (savepoints)
   - File: `_dbapi.py`
 
-- [ ] **Task 3.4.3**: Add transaction tests
+- [x] **Task 3.4.3**: Add transaction tests (ffae925)
   - Test commit/rollback
   - Test nested transactions
   - Test error handling
