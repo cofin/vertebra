@@ -146,7 +146,7 @@
 
 ---
 
-## Phase 2: Serialization Module (Week 1-2)
+## Phase 2: Serialization Module (Week 1-2) [checkpoint: 9887acb]
 
 ### Task Group 2.1: Expand Type Support
 
