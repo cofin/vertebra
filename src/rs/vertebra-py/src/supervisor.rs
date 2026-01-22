@@ -1,18 +1,16 @@
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
-use std::collections::HashSet;
+use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 
-#[derive(Clone, PartialEq, Debug)]
-enum SupervisorEvent {
-    Signal { signo: i32 },
-    Exit { pid: i32, code: i32 },
-    Timeout(),
-}
+#[cfg(unix)]
+use signal_hook::consts::signal::*;
+#[cfg(unix)]
+use signal_hook::iterator::Signals;
 
-#[pyclass]
+#[pyclass(name = "Supervisor")]
 pub struct NativeSupervisor {
-    pids: Arc<Mutex<HashSet<i32>>>,
+    bun_process: Arc<Mutex<Option<Child>>>,
+    workers: Arc<Mutex<Vec<Child>>>,
 }
 
 #[pymethods]
@@ -20,140 +18,125 @@ impl NativeSupervisor {
     #[new]
     fn new() -> Self {
         Self {
-            pids: Arc::new(Mutex::new(HashSet::new())),
+            bun_process: Arc::new(Mutex::new(None)),
+            workers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    fn add_child(&self, pid: i32) {
-        self.pids.lock().unwrap().insert(pid);
+    fn start(
+        &mut self,
+        py: Python,
+        engine_path: &str,
+        engine_args: Vec<String>,
+        python_executable: &str,
+        _config: Py<PyAny>, // Placeholder for now, passed via env/args later
+        workers: usize,
+    ) -> PyResult<()> {
+        let bun_process = self.bun_process.clone();
+        let workers_vec = self.workers.clone();
+        let engine_path = engine_path.to_string();
+        let engine_args = engine_args.clone();
+        let python_executable = python_executable.to_string();
+        
+        // Serialize config if needed, or pass as env vars. For now, we assume basic startup.
+        // In a real implementation, we'd extract values from `config`.
+        
+        py.detach(move || {
+            // Start Bun engine
+            let bun = Command::new(&engine_path)
+                .args(&engine_args)
+                // .env("VERTEBRA_CONFIG", ...) 
+                .spawn()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    format!("Failed to start engine: {}", e)
+                ))?;
+            
+            {
+                let mut guard = bun_process.lock().unwrap();
+                *guard = Some(bun);
+            }
+
+            // Start Python workers
+            let mut new_workers = Vec::new();
+            for _ in 0..workers {
+                let worker = Command::new(&python_executable)
+                    .arg("-m")
+                    .arg("vertebra.server.worker")
+                    // .env(...)
+                    .spawn()
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        format!("Failed to start worker: {}", e)
+                    ))?;
+                new_workers.push(worker);
+            }
+            
+            {
+                let mut guard = workers_vec.lock().unwrap();
+                *guard = new_workers;
+            }
+            
+            Ok(())
+        })
     }
 
-    fn remove_child(&self, pid: i32) {
-        self.pids.lock().unwrap().remove(&pid);
-    }
-
-    fn propagate_signal(&self, signo: i32) {
+    fn wait_for_shutdown(&mut self, py: Python) -> PyResult<i32> {
         #[cfg(unix)]
         {
-            let pids = self.pids.lock().unwrap();
-            for &pid in pids.iter() {
-                unsafe { libc::kill(pid, signo) };
-            }
+            py.detach(|| {
+                let mut signals = Signals::new(&[SIGTERM, SIGINT])
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        format!("Failed to register signals: {}", e)
+                    ))?;
+                
+                // Block until a signal is received
+                if let Some(signal) = signals.forever().next() {
+                    // Signal received, initiate shutdown
+                    self.stop_internal()?;
+                    Ok(signal + 128) // Standard exit code convention for signals
+                } else {
+                    Ok(0)
+                }
+            })
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Windows implementation placeholder
+            // In reality, we'd wait for Ctrl-C or similar via a crate like `ctrlc`
+            // For now, just wait on the bun process
+            py.detach(|| {
+                 let mut guard = self.bun_process.lock().unwrap();
+                 if let Some(ref mut child) = *guard {
+                     let status = child.wait()
+                         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                             format!("Failed to wait for engine: {}", e)
+                         ))?;
+                     Ok(status.code().unwrap_or(0))
+                 } else {
+                     Ok(0)
+                 }
+            })
         }
     }
 
-    fn wait_next_event(&self, py: Python<'_>, timeout_ms: u64) -> PyResult<Py<PyAny>> {
-        let event = py.detach(|| self.wait_impl(timeout_ms))?;
-        let dict = PyDict::new(py);
-        match event {
-            SupervisorEvent::Signal { signo } => {
-                dict.set_item("type", "signal")?;
-                dict.set_item("signo", signo)?;
-            }
-            SupervisorEvent::Exit { pid, code } => {
-                dict.set_item("type", "exit")?;
-                dict.set_item("pid", pid)?;
-                dict.set_item("code", code)?;
-            }
-            SupervisorEvent::Timeout() => {
-                dict.set_item("type", "timeout")?;
-            }
-        }
-        Ok(dict.into())
+    fn stop(&mut self) -> PyResult<()> {
+        self.stop_internal()
     }
 }
 
 impl NativeSupervisor {
-    #[cfg(unix)]
-    fn wait_impl(&self, timeout_ms: u64) -> PyResult<SupervisorEvent> {
-        use std::mem::MaybeUninit;
-
-        // Ensure signals are blocked (should be done once, but idempotent)
-        let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
-        let mut old_mask = MaybeUninit::<libc::sigset_t>::uninit();
-
-        let sfd = unsafe {
-            libc::sigemptyset(mask.as_mut_ptr());
-            let mut mask = mask.assume_init();
-            libc::sigaddset(&mut mask, libc::SIGINT);
-            libc::sigaddset(&mut mask, libc::SIGTERM);
-            libc::sigaddset(&mut mask, libc::SIGCHLD);
-            libc::pthread_sigmask(libc::SIG_BLOCK, &mask, old_mask.as_mut_ptr());
-
-            libc::signalfd(-1, &mask, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK)
-        };
-
-        if sfd < 0 {
-            // Try to restore mask?
-            unsafe {
-                libc::pthread_sigmask(libc::SIG_SETMASK, old_mask.as_ptr(), std::ptr::null_mut())
-            };
-            return Err(PyErr::new::<pyo3::exceptions::PyOSError, _>(
-                "failed to create signalfd",
-            ));
+    fn stop_internal(&self) -> PyResult<()> {
+        let mut bun_guard = self.bun_process.lock().unwrap();
+        if let Some(ref mut bun) = *bun_guard {
+            let _ = bun.kill(); // Ignore errors if already dead
+            let _ = bun.wait();
         }
-
-        let mut fds = [libc::pollfd {
-            fd: sfd,
-            events: libc::POLLIN,
-            revents: 0,
-        }];
-
-        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, timeout_ms as i32) };
-
-        // Read signal if available to clear the buffer
-        let mut signal_received = None;
-        if ret > 0 {
-            let mut si = MaybeUninit::<libc::signalfd_siginfo>::uninit();
-            let res = unsafe {
-                libc::read(
-                    sfd,
-                    si.as_mut_ptr() as *mut _,
-                    std::mem::size_of::<libc::signalfd_siginfo>(),
-                )
-            };
-            if res as usize == std::mem::size_of::<libc::signalfd_siginfo>() {
-                let si = unsafe { si.assume_init() };
-                signal_received = Some(si.ssi_signo as i32);
-            }
+        
+        let mut workers_guard = self.workers.lock().unwrap();
+        for worker in workers_guard.iter_mut() {
+            let _ = worker.kill();
+            let _ = worker.wait();
         }
-
-        // Always check for zombie processes (SIGCHLD might have been missed or consumed)
-        // This is the critical fix for the race condition.
-        let mut status: i32 = 0;
-        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-
-        let result = if pid > 0 {
-            self.remove_child(pid);
-            // Extract exit code
-            let code = if libc::WIFEXITED(status) {
-                libc::WEXITSTATUS(status)
-            } else if libc::WIFSIGNALED(status) {
-                -libc::WTERMSIG(status)
-            } else {
-                0
-            };
-            SupervisorEvent::Exit { pid, code }
-        } else if let Some(signo) = signal_received {
-            match signo {
-                libc::SIGINT | libc::SIGTERM => SupervisorEvent::Signal { signo },
-                _ => SupervisorEvent::Timeout(),
-            }
-        } else {
-            SupervisorEvent::Timeout()
-        };
-
-        unsafe {
-            libc::close(sfd);
-            libc::pthread_sigmask(libc::SIG_SETMASK, old_mask.as_ptr(), std::ptr::null_mut());
-        }
-        Ok(result)
-    }
-
-    #[cfg(not(unix))]
-    fn wait_impl(&self, _timeout_ms: u64) -> PyResult<SupervisorEvent> {
-        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "Not supported on non-unix",
-        ))
+        Ok(())
     }
 }

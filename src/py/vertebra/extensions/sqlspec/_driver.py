@@ -1,6 +1,7 @@
 """Shared SQLSpec driver adapters for the broker-backed transport."""
 
 import contextlib
+import uuid
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
 
@@ -13,6 +14,9 @@ from sqlspec.driver import (
 )
 from sqlspec.exceptions import ImproperConfigurationError, OperationalError, SQLSpecError
 from sqlspec.utils.correlation import CorrelationContext
+
+from vertebra._vertebra import ShmRegion
+from vertebra.typing import PYARROW_INSTALLED
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Iterable
@@ -88,7 +92,13 @@ def _correlation_id() -> str | None:
 
 
 class VertebraSyncDriverBase(SyncDriverAdapterBase):
-    __slots__ = ("_data_dictionary", "_data_dictionary_factory")
+    __slots__ = (
+        "_arrow_regions",
+        "_arrow_threshold_bytes",
+        "_arrow_threshold_rows",
+        "_data_dictionary",
+        "_data_dictionary_factory",
+    )
 
     data_dictionary_factory: "Callable[[], SyncDataDictionaryBase]"
 
@@ -112,6 +122,36 @@ class VertebraSyncDriverBase(SyncDriverAdapterBase):
         )
         self._data_dictionary_factory = cast("Callable[[], SyncDataDictionaryBase]", factory)
         self._data_dictionary: "SyncDataDictionaryBase | None" = None
+        self._arrow_regions: dict[str, ShmRegion] = {}
+        self._arrow_threshold_rows = int(cast("int", features.get("arrow_threshold_rows", 1000)))
+        self._arrow_threshold_bytes = int(cast("int", features.get("arrow_threshold_bytes", 1_048_576)))
+
+    def _should_use_arrow(self, rows: "list[list[Any]]", columns: "list[str]") -> bool:
+        if not PYARROW_INSTALLED:
+            return False
+        rowcount = len(rows)
+        estimated_bytes = rowcount * max(1, len(columns)) * 8
+        return rowcount >= self._arrow_threshold_rows or estimated_bytes >= self._arrow_threshold_bytes
+
+    def _encode_arrow(self, rows: "list[list[Any]]", columns: "list[str]") -> "dict[str, Any]":
+        import pyarrow as pa  # pyright: ignore[reportMissingImports]
+
+        records = [dict(zip(columns, row, strict=False)) for row in rows]
+        table = pa.Table.from_pylist(records)
+        return self._write_arrow_region(table)
+
+    def _write_arrow_region(self, table: "Any") -> "dict[str, Any]":
+        import pyarrow as pa  # pyright: ignore[reportMissingImports]
+
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        buffer = sink.getvalue().to_pybytes()
+        name = f"/vertebra.client.arrow.{uuid.uuid4().hex}"
+        region = ShmRegion.create_named(name, len(buffer))
+        memoryview(region)[: len(buffer)] = buffer
+        self._arrow_regions[name] = region
+        return {"arrow": {"name": name, "size": len(buffer)}}
 
     @property
     def data_dictionary(self) -> "SyncDataDictionaryBase":
@@ -170,7 +210,13 @@ class VertebraSyncDriverBase(SyncDriverAdapterBase):
 
 
 class VertebraAsyncDriverBase(AsyncDriverAdapterBase):
-    __slots__ = ("_data_dictionary", "_data_dictionary_factory")
+    __slots__ = (
+        "_arrow_regions",
+        "_arrow_threshold_bytes",
+        "_arrow_threshold_rows",
+        "_data_dictionary",
+        "_data_dictionary_factory",
+    )
 
     data_dictionary_factory: "Callable[[], AsyncDataDictionaryBase]"
 
@@ -192,6 +238,36 @@ class VertebraAsyncDriverBase(AsyncDriverAdapterBase):
         )
         self._data_dictionary_factory = cast("Callable[[], AsyncDataDictionaryBase]", factory)
         self._data_dictionary: "AsyncDataDictionaryBase | None" = None
+        self._arrow_regions: dict[str, ShmRegion] = {}
+        self._arrow_threshold_rows = int(cast("int", features.get("arrow_threshold_rows", 1000)))
+        self._arrow_threshold_bytes = int(cast("int", features.get("arrow_threshold_bytes", 1_048_576)))
+
+    def _should_use_arrow(self, rows: "list[list[Any]]", columns: "list[str]") -> bool:
+        if not PYARROW_INSTALLED:
+            return False
+        rowcount = len(rows)
+        estimated_bytes = rowcount * max(1, len(columns)) * 8
+        return rowcount >= self._arrow_threshold_rows or estimated_bytes >= self._arrow_threshold_bytes
+
+    def _encode_arrow(self, rows: "list[list[Any]]", columns: "list[str]") -> "dict[str, Any]":
+        import pyarrow as pa  # pyright: ignore[reportMissingImports]
+
+        records = [dict(zip(columns, row, strict=False)) for row in rows]
+        table = pa.Table.from_pylist(records)
+        return self._write_arrow_region(table)
+
+    def _write_arrow_region(self, table: "Any") -> "dict[str, Any]":
+        import pyarrow as pa  # pyright: ignore[reportMissingImports]
+
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        buffer = sink.getvalue().to_pybytes()
+        name = f"/vertebra.client.arrow.{uuid.uuid4().hex}"
+        region = ShmRegion.create_named(name, len(buffer))
+        memoryview(region)[: len(buffer)] = buffer
+        self._arrow_regions[name] = region
+        return {"arrow": {"name": name, "size": len(buffer)}}
 
     @property
     def data_dictionary(self) -> "AsyncDataDictionaryBase":

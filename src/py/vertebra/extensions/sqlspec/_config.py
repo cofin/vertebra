@@ -137,6 +137,11 @@ class VertebraAsyncConfigBase(AsyncDatabaseConfig[VertebraAsyncConnection, Verte
         self.max_clients = max_clients
         self.arrow_threshold_rows = arrow_threshold_rows
         self.arrow_threshold_bytes = arrow_threshold_bytes
+
+        driver_features = driver_features or {}
+        driver_features.setdefault("arrow_threshold_rows", arrow_threshold_rows)
+        driver_features.setdefault("arrow_threshold_bytes", arrow_threshold_bytes)
+
         super().__init__(
             connection_config={"pool": self.pool},
             connection_instance=connection_instance,

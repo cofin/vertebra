@@ -12,15 +12,15 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 ## [ ] PRD: Server & Runtime - MCP, Health Checks, and Observability
 *Link: [./specs/server-runtime/](./specs/server-runtime/)*
 
-## [ ] PRD: Distribution & Packaging for Vertebra 1.0
-*Link: [./specs/distribution-onefile/](./specs/distribution-onefile/)*
-
 ## [ ] PRD: Documentation & Adoption - Vertebra 1.0
 *Link: [./specs/documentation/](./specs/documentation/)*
 
 ---
 
 ## Completed & Archived PRDs
+
+## [x] PRD: Distribution & Packaging for Vertebra 1.0
+*Link: [./archive/prd_20260122_distribution-onefile/](./archive/prd_20260122_distribution-onefile/)*
 
 ## [x] PRD: Vertebra 1.0 Release Path
 *Link: [./archive/vertebra-1-0-release/](./archive/vertebra-1-0-release/)*

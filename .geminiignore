@@ -18,8 +18,9 @@
 **/*.log
 
 # Build Artifacts & Dependencies - General
-dist/
-build/
+/dist/
+/build/
+!src/py/vertebra/build/
 **/*/node_modules/
 
 # Python

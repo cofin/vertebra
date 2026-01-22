@@ -1,94 +1,31 @@
-"""Public typing facade for vertebra.
+"""Public typing facade for Vertebra.
 
-Import types and dependency flags from here:
-
-    from vertebra.typing import SpscRing, ArrowTable, PYARROW_INSTALLED
-
-For ensure functions, import from utils.module_loader:
-
-    from vertebra.utils.module_loader import ensure_pyarrow
+This module re-exports types from _typing and provides dependency flags.
 """
 
-from vertebra._typing import (
-    # Dependency flags
-    ATTRS_INSTALLED,
-    MSGSPEC_INSTALLED,
-    NUMPY_INSTALLED,
-    PANDAS_INSTALLED,
-    POLARS_INSTALLED,
-    PYARROW_INSTALLED,
-    PYDANTIC_INSTALLED,
-    # Arrow types
-    ArrowArray,
-    ArrowArrayProtocol,
-    ArrowField,
-    ArrowFieldProtocol,
-    ArrowRecordBatch,
-    ArrowRecordBatchProtocol,
-    ArrowSchema,
-    ArrowSchemaProtocol,
-    ArrowTable,
-    ArrowTableProtocol,
-    # Context manager protocols
-    AsyncContextManager,
-    # Native shared memory types
-    AsyncRing,
-    AsyncShmTransport,
-    # Data library types
-    AttrsInstance,
-    NumpyArray,
-    NumpyArrayProtocol,
-    PandasDataFrame,
-    PandasDataFrameProtocol,
-    PolarsDataFrame,
-    PolarsDataFrameProtocol,
-    PollingTransport,
-    PydanticBaseModel,
-    ShmRegion,
-    SpscRing,
-    SyncContextManager,
-    create_transport,
-    shm_unlink,
-)
+from typing import TYPE_CHECKING
+
+from vertebra.utils.module_loader import dependency_flag
+
+if TYPE_CHECKING:
+    import pyarrow as pa  # pyright: ignore[reportMissingImports]
+
+# Dependency flags
+PYARROW_INSTALLED = dependency_flag("pyarrow")
+NUMPY_INSTALLED = dependency_flag("numpy")
+PANDAS_INSTALLED = dependency_flag("pandas")
+POLARS_INSTALLED = dependency_flag("polars")
+
+# Type aliases
+if TYPE_CHECKING:
+    ArrowTable = pa.Table
+else:
+    ArrowTable = object
 
 __all__ = (
-    # Dependency flags
-    "ATTRS_INSTALLED",
-    "MSGSPEC_INSTALLED",
     "NUMPY_INSTALLED",
     "PANDAS_INSTALLED",
     "POLARS_INSTALLED",
     "PYARROW_INSTALLED",
-    "PYDANTIC_INSTALLED",
-    # Arrow types
-    "ArrowArray",
-    "ArrowArrayProtocol",
-    "ArrowField",
-    "ArrowFieldProtocol",
-    "ArrowRecordBatch",
-    "ArrowRecordBatchProtocol",
-    "ArrowSchema",
-    "ArrowSchemaProtocol",
     "ArrowTable",
-    "ArrowTableProtocol",
-    # Context manager protocols
-    "AsyncContextManager",
-    # Native shared memory types
-    "AsyncRing",
-    "AsyncShmTransport",
-    # Data library types
-    "AttrsInstance",
-    "NumpyArray",
-    "NumpyArrayProtocol",
-    "PandasDataFrame",
-    "PandasDataFrameProtocol",
-    "PolarsDataFrame",
-    "PolarsDataFrameProtocol",
-    "PollingTransport",
-    "PydanticBaseModel",
-    "ShmRegion",
-    "SpscRing",
-    "SyncContextManager",
-    "create_transport",
-    "shm_unlink",
 )

@@ -1,0 +1,10 @@
+from vertebra import Vertebra
+from vertebra.resources import BrokerClientConfig
+
+app = Vertebra(
+    client_config=BrokerClientConfig(name="{{ project_slug }}-broker")
+)
+
+# Configure pools or plugins here
+# from vertebra.extensions.sqlspec.postgres import VertebraPostgresAsyncConfig
+# app.register_plugin(...)

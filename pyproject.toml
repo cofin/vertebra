@@ -14,6 +14,7 @@ dependencies = [
   "msgspec",
   "nanoarrow",
   "rich-click",
+  "httpx>=0.27.0",
 ]
 description = "Python-first, high-performance application backbone with tRPC-like DX"
 keywords = ["trpc", "asgi", "ipc", "performance", "bun", "arrow"]
@@ -71,7 +72,8 @@ test = [
   "pytest-timeout>=2.3.1",
   "pytest-xdist>=3.6.1",
   "time-machine>=2.15.0",
-  "attrs","cattrs"
+  "attrs","cattrs",
+  "uvloop",
 ]
 
 

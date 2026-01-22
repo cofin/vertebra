@@ -61,34 +61,34 @@
 **Priority**: P0
 **Dependencies**: Task 1.1 (rename)
 
-- [ ] **Task 1.2.1**: Add Arrow threshold config
+- [x] **Task 1.2.1**: Add Arrow threshold config
   - Add `arrow_threshold_rows: int = 1000` to config classes
   - Add `arrow_threshold_bytes: int = 1_048_576` (1MB)
   - File: `_config.py`
 
-- [ ] **Task 1.2.2**: Implement Arrow encoding in driver
+- [x] **Task 1.2.2**: Implement Arrow encoding in driver
   - Add `_should_use_arrow(result) -> bool` method
   - Add `_encode_arrow(result) -> bytes` method
   - Use nanoarrow to create Arrow IPC stream
   - File: `_driver.py`
 
-- [ ] **Task 1.2.3**: Implement Arrow region pool in provider
+- [x] **Task 1.2.3**: Implement Arrow region pool in provider
   - Add `ArrowRegionPool` class
   - Manage shared memory regions for Arrow batches
   - File: `provider.py`
 
-- [ ] **Task 1.2.4**: Add Arrow decoding in connection wrapper
+- [x] **Task 1.2.4**: Add Arrow decoding in connection wrapper
   - Add `_decode_arrow(bytes) -> list[dict]` method
   - Use nanoarrow to parse Arrow IPC stream
   - File: `_shared.py`
 
-- [ ] **Task 1.2.5**: Add automatic threshold detection
+- [x] **Task 1.2.5**: Add automatic threshold detection
   - Estimate result size before encoding
   - Switch to Arrow if > threshold
   - Log threshold switches (debug level)
   - File: `_driver.py`
 
-- [ ] **Task 1.2.6**: Add Arrow serialization tests
+- [x] **Task 1.2.6**: Add Arrow serialization tests
   - Test small results use MessagePack
   - Test large results use Arrow
   - Test threshold switching
@@ -155,7 +155,7 @@
 
 > **Note**: `codecs.py` and `encoders.py` were created in `refactor-serialization-core` PRD. This phase expands them.
 
-- [ ] **Task 2.1.1**: Update `src/py/vertebra/serializers/encoders.py`
+- [x] **Task 2.1.1**: Update `src/py/vertebra/serializers/encoders.py`
   - Implement P0 type encoders:
     - `bytes` (base64)
     - `Pydantic BaseModel` (using `model_dump`)
@@ -163,20 +163,20 @@
     - `Arrow Table` (using IPC)
     - `FileObject` (using metadata)
 
-- [ ] **Task 2.1.2**: Implement P1 type encoders
+- [x] **Task 2.1.2**: Implement P1 type encoders
   - `Path`, `IPv4Address`, `IPv6Address`
   - `set`, `frozenset` (to list)
   - `SecretStr` (masked)
   - `dataclass` (using `asdict`)
   - `Postgres Array` (list)
 
-- [ ] **Task 2.1.3**: Implement P2 type encoders
+- [x] **Task 2.1.3**: Implement P2 type encoders
   - `Pattern` (regex)
   - `deque` (list)
   - `attrs` (asdict)
   - `numpy.ndarray` (list)
 
-- [ ] **Task 2.1.4**: Create `src/py/vertebra/serializers/decoders.py` (NEW)
+- [x] **Task 2.1.4**: Create `src/py/vertebra/serializers/decoders.py` (NEW)
   - Implement matching decoders for all supported types
   - Register with `codecs.py`
 
@@ -196,11 +196,11 @@
   - **COMPLETED**: Merged `msgpack.py` and `json.py` into `codecs.py` in previous PRD.
   - Implements `VertebraCodec` alias.
 
-- [ ] **Task 2.2.2**: Integrate expanded encoders
+- [x] **Task 2.2.2**: Integrate expanded encoders
   - Ensure `JSONCodec` and `MessagePackCodec` use the expanded `default_encoder`
   - Verify `Pydantic` and `Arrow` support works with `VertebraCodec`
 
-- [ ] **Task 2.2.3**: Implement decoding hooks
+- [x] **Task 2.2.3**: Implement decoding hooks
   - Update `MessagePackCodec.decode` to use `decoders.py` logic where appropriate
   - Or verify that typed decoding handles it automatically via `msgspec`
 
@@ -223,14 +223,14 @@
 **Priority**: P1
 **Dependencies**: Task 2.1, 2.2
 
-- [ ] **Task 2.3.1**: Create `litestar.py` module
+- [x] **Task 2.3.1**: Create `litestar.py` module
   - File: `src/py/vertebra/serializers/litestar.py` (NEW)
 
-- [ ] **Task 2.3.2**: Implement `VERTEBRA_TYPE_ENCODERS`
+- [x] **Task 2.3.2**: Implement `VERTEBRA_TYPE_ENCODERS`
   - Dict mapping types to encoder functions (reusing `encoders.py` logic)
   - All 30+ types
 
-- [ ] **Task 2.3.3**: Implement `VERTEBRA_TYPE_DECODERS`
+- [x] **Task 2.3.3**: Implement `VERTEBRA_TYPE_DECODERS`
   - List of (type, decoder_func) tuples
   - All 30+ types
 
