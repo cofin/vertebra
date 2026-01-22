@@ -33,7 +33,8 @@ Example usage::
 
 from typing import TYPE_CHECKING, Any
 
-from vertebra.storage.client import AsyncFileSystemClient, Backend, FileEntry, FileSystemError, SyncFileSystemClient
+from vertebra.exceptions import StorageError
+from vertebra.storage.client import AsyncFileSystemClient, Backend, FileEntry, SyncFileSystemClient
 from vertebra.storage.gcs import AsyncGCSClient, GCSClient
 from vertebra.storage.s3 import AsyncS3Client, S3Client
 from vertebra.storage.store import (
@@ -76,7 +77,6 @@ __all__ = (
     "Backend",
     "ByteRange",
     "FileEntry",
-    "FileSystemError",
     "GCSClient",
     "GCSStore",
     "ListResult",
@@ -86,6 +86,7 @@ __all__ = (
     "PutResult",
     "S3Client",
     "S3Store",
+    "StorageError",
     "StoreRegistry",
     "SyncFileSystemClient",
     "SyncObjectStore",

@@ -8,14 +8,11 @@ from typing import Any
 import msgspec
 
 from vertebra._vertebra import AsyncRing, ShmRegion, SpscRing
+from vertebra.exceptions import BrokerError
 from vertebra.ipc.async_transport import AsyncShmTransport, PollingTransport, create_transport
 from vertebra.resources.arrow import decode_arrow_nano
 from vertebra.serializers import MessagePackCodec
 from vertebra.utils.module_loader import ensure_pyarrow
-
-
-class BrokerClientError(RuntimeError):
-    """Raised for broker IPC errors."""
 
 
 class RingConfig(msgspec.Struct, frozen=True, gc=False):
@@ -128,7 +125,7 @@ class AsyncBrokerClient:
             await self.connect()
         if self._request is None or self._response_transport is None:
             msg = "Broker shared memory unavailable"
-            raise BrokerClientError(msg)
+            raise BrokerError(msg)
 
         payload = dict(payload)
         payload["id"] = self._next_id()
@@ -232,7 +229,7 @@ class AsyncBrokerClient:
         """Receive response using native async transport."""
         if self._response_transport is None:
             msg = "Response transport unavailable"
-            raise BrokerClientError(msg)
+            raise BrokerError(msg)
         data = await self._response_transport.recv()
         result = self._codec.decode(data)
         return result if isinstance(result, dict) else {}
@@ -244,7 +241,7 @@ class AsyncBrokerClient:
     async def _release_arrow(self, name: str) -> None:
         try:
             await self.request({"kind": "arrow_release", "name": name})
-        except BrokerClientError:
+        except BrokerError:
             return
 
     async def _decode_result(self, response: dict[str, Any]) -> Any:
@@ -264,7 +261,7 @@ class AsyncBrokerClient:
         size = int(arrow.get("size", 0))
         if not name or size <= 0:
             msg = "Invalid Arrow response"
-            raise BrokerClientError(msg)
+            raise BrokerError(msg)
 
         # Use PyO3 ShmRegion for Arrow IPC with buffer protocol
         region = ShmRegion.open_named(name, size)
@@ -340,7 +337,7 @@ class SyncBrokerClient:
             self.connect()
         if self._request is None or self._response is None:
             msg = "Broker shared memory unavailable"
-            raise BrokerClientError(msg)
+            raise BrokerError(msg)
 
         payload = dict(payload)
         payload["id"] = self._next_id()
@@ -442,7 +439,7 @@ class SyncBrokerClient:
         """Receive response using blocking SpscRing."""
         if self._response is None:
             msg = "Response ring unavailable"
-            raise BrokerClientError(msg)
+            raise BrokerError(msg)
         # Using a fixed large buffer for now, similar to AsyncTransport
         data = self._response.recv(self._config.slot_size)
         result = self._codec.decode(data)
@@ -455,7 +452,7 @@ class SyncBrokerClient:
     def _release_arrow(self, name: str) -> None:
         try:
             self.request({"kind": "arrow_release", "name": name})
-        except BrokerClientError:
+        except BrokerError:
             return
 
     def _decode_result(self, response: dict[str, Any]) -> Any:
@@ -475,7 +472,7 @@ class SyncBrokerClient:
         size = int(arrow.get("size", 0))
         if not name or size <= 0:
             msg = "Invalid Arrow response"
-            raise BrokerClientError(msg)
+            raise BrokerError(msg)
 
         # Use PyO3 ShmRegion for Arrow IPC with buffer protocol
         region = ShmRegion.open_named(name, size)
@@ -518,7 +515,7 @@ def _assert_ok(response: dict[str, Any]) -> dict[str, Any]:
     if not response.get("ok"):
         error = response.get("error") or {}
         message = error.get("message") or "Broker error"
-        raise BrokerClientError(message)
+        raise BrokerError(message)
     return response
 
 
@@ -530,4 +527,4 @@ def _decode_arrow_bytes(payload: bytes) -> dict[str, Any]:
     return {"arrow": table}
 
 
-__all__ = ("AsyncBrokerClient", "BrokerClientConfig", "BrokerClientError", "SyncBrokerClient")
+__all__ = ("AsyncBrokerClient", "BrokerClientConfig", "BrokerError", "SyncBrokerClient")

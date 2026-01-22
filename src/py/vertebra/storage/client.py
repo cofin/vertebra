@@ -6,13 +6,10 @@ from typing import Any, Literal, cast
 
 import msgspec
 
-from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig, BrokerClientError
+from vertebra.exceptions import BrokerError, StorageError
+from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig
 
 Backend = Literal["local", "s3", "gcs"]
-
-
-class FileSystemError(RuntimeError):
-    """Raised for filesystem IPC errors."""
 
 
 class FileEntry(msgspec.Struct, frozen=True, gc=False):
@@ -73,7 +70,7 @@ def _parse_cloud_path(path: str, default_bucket: str | None, scheme: str) -> "tu
             return bucket, key
     if not default_bucket:
         msg = "Bucket is required for cloud filesystem operations"
-        raise FileSystemError(msg)
+        raise StorageError(msg)
     return default_bucket, path.lstrip("/")
 
 
@@ -110,8 +107,8 @@ class SyncFileSystemClient:
         token = self._ensure_token()
         try:
             result = _run_sync(self._client.command(self._pool, token, method, [params]))
-        except BrokerClientError as exc:
-            raise FileSystemError(str(exc)) from exc
+        except BrokerError as exc:
+            raise StorageError(str(exc)) from exc
         if isinstance(result, dict):
             return result
         return {"result": result}
@@ -256,8 +253,8 @@ class AsyncFileSystemClient:
         token = await self._ensure_token()
         try:
             result = await self._client.command(self._pool, token, method, [params])
-        except BrokerClientError as exc:
-            raise FileSystemError(str(exc)) from exc
+        except BrokerError as exc:
+            raise StorageError(str(exc)) from exc
         if isinstance(result, dict):
             return result
         return {"result": result}
@@ -369,4 +366,4 @@ class AsyncFileSystemClient:
         await self._client.close()
 
 
-__all__ = ("AsyncFileSystemClient", "Backend", "FileEntry", "FileSystemError", "SyncFileSystemClient")
+__all__ = ("AsyncFileSystemClient", "Backend", "FileEntry", "StorageError", "SyncFileSystemClient")

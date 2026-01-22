@@ -6,12 +6,12 @@ shared-memory IPC. These classes are internal implementation details
 and are separate from the public SQLSpec adapters.
 """
 
-from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig, BrokerClientError, SyncBrokerClient
+from vertebra.exceptions import BrokerError, PoolError
+from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig, SyncBrokerClient
 from vertebra.resources.pool import (
     AsyncBrokerClientPool,
     AsyncBrokerLease,
     AsyncBrokerPool,
-    BrokerPoolError,
     SyncBrokerClientPool,
     SyncBrokerLease,
     SyncBrokerPool,
@@ -24,8 +24,8 @@ __all__ = (
     "AsyncBrokerLease",
     "AsyncBrokerPool",
     "BrokerClientConfig",
-    "BrokerClientError",
-    "BrokerPoolError",
+    "BrokerError",
+    "PoolError",
     "ProviderConfig",
     "ProviderHandler",
     "ProviderHost",

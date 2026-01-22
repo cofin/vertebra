@@ -1010,7 +1010,7 @@ wheels = [
 
 [[package]]
 name = "google-genai"
-version = "1.59.0"
+version = "1.60.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1024,9 +1024,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/40/34/c03bcbc759d67ac3d96077838cdc1eac85417de6ea3b65b313fe53043eee/google_genai-1.59.0.tar.gz", hash = "sha256:0b7a2dc24582850ae57294209d8dfc2c4f5fcfde0a3f11d81dc5aca75fb619e2", size = 487374, upload-time = "2026-01-15T20:29:46.619Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0a/3f/a753be0dcee352b7d63bc6d1ba14a72591d63b6391dac0cdff7ac168c530/google_genai-1.60.0.tar.gz", hash = "sha256:9768061775fddfaecfefb0d6d7a6cabefb3952ebd246cd5f65247151c07d33d1", size = 487721, upload-time = "2026-01-21T22:17:30.398Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/aa/53/6d00692fe50d73409b3406ae90c71bc4499c8ae7fac377ba16e283da917c/google_genai-1.59.0-py3-none-any.whl", hash = "sha256:59fc01a225d074fe9d1e626c3433da292f33249dadce4deb34edea698305a6df", size = 719099, upload-time = "2026-01-15T20:29:44.604Z" },
+    { url = "https://files.pythonhosted.org/packages/31/e5/384b1f383917b5f0ae92e28f47bc27b16e3d26cd9bacb25e9f8ecab3c8fe/google_genai-1.60.0-py3-none-any.whl", hash = "sha256:967338378ffecebec19a8ed90cf8797b26818bacbefd7846a9280beb1099f7f3", size = 719431, upload-time = "2026-01-21T22:17:28.086Z" },
 ]
 
 [[package]]
@@ -2784,16 +2784,16 @@ wheels = [
 
 [[package]]
 name = "rich-click"
-version = "1.9.5"
+version = "1.9.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "colorama", marker = "sys_platform == 'win32'" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6b/d1/b60ca6a8745e76800b50c7ee246fd73f08a3be5d8e0b551fc93c19fa1203/rich_click-1.9.5.tar.gz", hash = "sha256:48120531493f1533828da80e13e839d471979ec8d7d0ca7b35f86a1379cc74b6", size = 73927, upload-time = "2025-12-21T14:49:44.167Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4b/50/1497dbc52297d6759451bf5a991e9b2d0a122a5d33ac8cd057f81cb9910a/rich_click-1.9.6.tar.gz", hash = "sha256:463bd3dbef54a812282bfa93dde80c471bce359823fc1301be368eab63391cb2", size = 74777, upload-time = "2026-01-22T02:43:58.374Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/25/0a/d865895e1e5d88a60baee0fc3703eb111c502ee10c8c107516bc7623abf8/rich_click-1.9.5-py3-none-any.whl", hash = "sha256:9b195721a773b1acf0e16ff9ec68cef1e7d237e53471e6e3f7ade462f86c403a", size = 70580, upload-time = "2025-12-21T14:49:42.905Z" },
+    { url = "https://files.pythonhosted.org/packages/47/87/508930def644be9fb86fec63520151921061c152289b98798017a498d678/rich_click-1.9.6-py3-none-any.whl", hash = "sha256:e78d71e3f73a55548e573ccfd964e18503936e2e736a4a1f74c6c29479a2a054", size = 71430, upload-time = "2026-01-22T02:43:56.939Z" },
 ]
 
 [[package]]
@@ -3064,7 +3064,7 @@ wheels = [
 
 [[package]]
 name = "sqlspec"
-version = "0.38.0"
+version = "0.38.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "mypy-extensions" },
@@ -3072,13 +3072,15 @@ dependencies = [
     { name = "sqlglot" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/40/aa/c7c984820e466ac18b667c8f9807216d074e836f0d218622a27b4ff6e28d/sqlspec-0.38.0.tar.gz", hash = "sha256:f651da9fa9afc803600cf2bb032eee00ee891e8f4f6f59a029fcd9e2ebc231d0", size = 1847529, upload-time = "2026-01-17T01:11:55.909Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/15/ec/84558efc2d91653eff6635efea60966ca88cb269841601d33fbc6d8cd19c/sqlspec-0.38.1.tar.gz", hash = "sha256:9bd87050be43eedf45fbd03a72a97a7623bfb428789f5dfa35efef4b07ef4141", size = 1866677, upload-time = "2026-01-22T00:51:34.487Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e7/81/e7b04ac1d048e8fa959efb812aabf380b5218374c9bec05955e791fe21a5/sqlspec-0.38.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0b5e75f2e4fc856748da321276c7a730df4f767aff74f2788eb464fbc37a3790", size = 4033584, upload-time = "2026-01-17T01:11:47.986Z" },
-    { url = "https://files.pythonhosted.org/packages/ca/97/71e15bd422ac53e8c808052a5dec45a10eb7c795a20844946f9915f8ee81/sqlspec-0.38.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e5258cebda0bc4ebf3e953253af3947fdc5d757b0fdbc05dd9bcaa173bd84daf", size = 4204257, upload-time = "2026-01-17T01:11:49.465Z" },
-    { url = "https://files.pythonhosted.org/packages/1c/84/21d9f16bf2cc034a038c5298666894caa4f72eae4ff3426e93edab612820/sqlspec-0.38.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f635bd76a8350b53952954705b5a0129383788f85acf9079215b6bf170664b56", size = 4025252, upload-time = "2026-01-17T01:11:50.913Z" },
-    { url = "https://files.pythonhosted.org/packages/4a/c4/449f6b227bdbe5dc46790ce579d7390879fe913aecdeb276492262b4fb5e/sqlspec-0.38.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:51513de43a1ffff8e62c65a6f99ad5e1d48ccfe1c0716dcedfb7ac3fff5c02a6", size = 4196205, upload-time = "2026-01-17T01:11:52.54Z" },
-    { url = "https://files.pythonhosted.org/packages/88/27/5d22889ef5846eb0d7fbce047bb4062b27af40638009e5e18a1b337609cf/sqlspec-0.38.0-py3-none-any.whl", hash = "sha256:aef1a8f31a182aa642b5a35ee870c068d3ff2e2da1ec8293f861d1f2b28be354", size = 972137, upload-time = "2026-01-17T01:11:54.426Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/29/d9024e9e472d38c814aadf3cbeb5a7d7495bc25c1f24f40151df984bd1e5/sqlspec-0.38.1-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:2b622680c4759303dd442198dd49a10287d92797e9fc442e3bd047c152dda58e", size = 4029436, upload-time = "2026-01-22T00:51:18.464Z" },
+    { url = "https://files.pythonhosted.org/packages/58/b4/879537e87170c42879fcafd8fbf98f7c6ea2a5c4e02288fb98449dcd4f79/sqlspec-0.38.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5f78e2c3551c49eb55c87f837d1c7779f696c292fb6515cd168c21cee614013b", size = 4198716, upload-time = "2026-01-22T00:51:21.964Z" },
+    { url = "https://files.pythonhosted.org/packages/48/43/9f887092b04fc8307505b04cc7bed2072b4cf5275378b270d9610a35f139/sqlspec-0.38.1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:957155966a09dfc5600b304648cc3d153bacb35f3988c28db2bde12c5e856435", size = 4022637, upload-time = "2026-01-22T00:51:24.108Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/4b/509b39fa9b49296e3be8289ef0810c455fb14a3a13d6bc17bb7b0a0bae2d/sqlspec-0.38.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d6f4dc0c6da981b8cb93e263477ec41e524e5955823277fe85a228362f4caaa4", size = 4193594, upload-time = "2026-01-22T00:51:26.054Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/c8/680843b5cfde3b5a7e1f28b331cb08a8aea256cd2f85cc5b1cf1cf56c8a4/sqlspec-0.38.1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:75bc9022c0c8cd9a64619f16058cb2faeb0cdcd15ee8914292dccb7e1931caaa", size = 4056252, upload-time = "2026-01-22T00:51:28.19Z" },
+    { url = "https://files.pythonhosted.org/packages/c0/98/e4ae11071f9c0f88eace0e2b41c560cd4abcf7bea44dd6d7d34465786595/sqlspec-0.38.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5ec494cb2d6e68661e1db9f13ea60ff4a2f5299cb32bcffa267405a5722bd32b", size = 4197065, upload-time = "2026-01-22T00:51:30.041Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/d3/c2621961ab360ad01e09367eec48e1358fa4c83e123e2427d49bf695fc65/sqlspec-0.38.1-py3-none-any.whl", hash = "sha256:54a45421a6264ba221fdacab5b89d0e79e5e90f1fed0b59df6764d88e213a4ba", size = 973033, upload-time = "2026-01-22T00:51:32.508Z" },
 ]
 
 [package.optional-dependencies]
@@ -3330,8 +3332,6 @@ name = "vertebra"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "click" },
-    { name = "litestar" },
     { name = "msgspec" },
     { name = "nanoarrow" },
     { name = "rich-click" },
@@ -3339,14 +3339,6 @@ dependencies = [
 
 [package.optional-dependencies]
 arrow = [
-    { name = "nanoarrow" },
-    { name = "pyarrow" },
-]
-full = [
-    { name = "nanoarrow" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "polars" },
     { name = "pyarrow" },
 ]
 numpy = [
@@ -3372,6 +3364,7 @@ dev = [
     { name = "bump-my-version" },
     { name = "coverage" },
     { name = "filelock" },
+    { name = "litestar" },
     { name = "maturin" },
     { name = "mypy" },
     { name = "pre-commit" },
@@ -3407,6 +3400,7 @@ test = [
     { name = "anyio" },
     { name = "coverage" },
     { name = "filelock" },
+    { name = "litestar" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-dotenv" },
@@ -3421,23 +3415,15 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "click", specifier = ">=8.1.7" },
-    { name = "litestar", specifier = ">=2.19.0" },
-    { name = "msgspec", specifier = ">=0.18.0" },
-    { name = "nanoarrow", specifier = ">=0.4.0" },
-    { name = "nanoarrow", marker = "extra == 'arrow'", specifier = ">=0.4.0" },
-    { name = "nanoarrow", marker = "extra == 'full'", specifier = ">=0.4.0" },
-    { name = "numpy", marker = "extra == 'full'", specifier = ">=1.24.0" },
+    { name = "msgspec" },
+    { name = "nanoarrow" },
     { name = "numpy", marker = "extra == 'numpy'", specifier = ">=1.24.0" },
-    { name = "pandas", marker = "extra == 'full'", specifier = ">=2.0.0" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.0.0" },
-    { name = "polars", marker = "extra == 'full'", specifier = ">=0.20.0" },
     { name = "polars", marker = "extra == 'polars'", specifier = ">=0.20.0" },
     { name = "pyarrow", marker = "extra == 'arrow'", specifier = ">=14.0.0" },
-    { name = "pyarrow", marker = "extra == 'full'", specifier = ">=14.0.0" },
-    { name = "rich-click", specifier = ">=1.7.2" },
+    { name = "rich-click" },
 ]
-provides-extras = ["arrow", "numpy", "polars", "pandas", "full"]
+provides-extras = ["arrow", "numpy", "polars", "pandas"]
 
 [package.metadata.requires-dev]
 build = [
@@ -3452,6 +3438,7 @@ dev = [
     { name = "bump-my-version" },
     { name = "coverage", extras = ["toml"] },
     { name = "filelock", specifier = ">=3.13.1" },
+    { name = "litestar" },
     { name = "maturin", specifier = ">=1.0,<2.0" },
     { name = "mypy" },
     { name = "pre-commit" },
@@ -3488,6 +3475,7 @@ test = [
     { name = "anyio" },
     { name = "coverage", extras = ["toml"] },
     { name = "filelock", specifier = ">=3.13.1" },
+    { name = "litestar" },
     { name = "pytest", specifier = ">=7.4.4" },
     { name = "pytest-cov", specifier = ">=5.0.0" },
     { name = "pytest-dotenv" },

@@ -1,6 +1,7 @@
 """Unit tests for broker provider registration and configuration."""
 
-from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig, BrokerClientError
+from vertebra.exceptions import BrokerError, VertebraError
+from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig
 
 
 class TestBrokerClientConfig:
@@ -60,14 +61,14 @@ class TestAsyncBrokerClient:
         assert client1._client_id != client2._client_id
 
 
-class TestBrokerClientError:
-    """Test BrokerClientError exception."""
+class TestBrokerError:
+    """Test BrokerError exception."""
 
     def test_error_subclass(self) -> None:
-        """Test BrokerClientError is a RuntimeError subclass."""
-        assert issubclass(BrokerClientError, RuntimeError)
+        """Test BrokerError is a VertebraError subclass."""
+        assert issubclass(BrokerError, VertebraError)
 
     def test_error_message(self) -> None:
-        """Test BrokerClientError preserves message."""
-        error = BrokerClientError("Connection failed")
+        """Test BrokerError preserves message."""
+        error = BrokerError("Connection failed")
         assert str(error) == "Connection failed"

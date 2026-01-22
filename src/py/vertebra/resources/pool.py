@@ -6,11 +6,8 @@ import threading
 
 import msgspec
 
+from vertebra.exceptions import PoolError
 from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig, SyncBrokerClient
-
-
-class BrokerPoolError(RuntimeError):
-    """Raised when broker pool operations fail."""
 
 
 class AsyncBrokerLease(msgspec.Struct, frozen=True):
@@ -159,7 +156,7 @@ __all__ = (
     "AsyncBrokerClientPool",
     "AsyncBrokerLease",
     "AsyncBrokerPool",
-    "BrokerPoolError",
+    "PoolError",
     "SyncBrokerClientPool",
     "SyncBrokerLease",
     "SyncBrokerPool",

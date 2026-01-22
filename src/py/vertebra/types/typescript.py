@@ -8,15 +8,12 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from vertebra.exceptions import TypeGenerationError
 from vertebra.procedures.registry import ProcedureMetadata
 from vertebra.types.ir import AnnotatedType, NamedTypeRef, ObjectType, TypeNode
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-
-
-class TypeScriptValidationError(RuntimeError):
-    """Raised when TypeScript validation fails."""
 
 
 @dataclass(slots=True)
@@ -256,7 +253,7 @@ def validate_typescript(output: str) -> bool:
             message = result.stderr.strip() or result.stdout.strip()
             if "This is not the tsc command you are looking for" in message:
                 return False
-            raise TypeScriptValidationError(message)
+            raise TypeGenerationError(message)
     return True
 
 

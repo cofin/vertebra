@@ -6,6 +6,7 @@ import time
 from typing import Any, TypeVar, cast
 
 from vertebra import _vertebra
+from vertebra.exceptions import ChannelError, SerializationError
 from vertebra.procedures import ProcedureRegistry, get_serializer
 from vertebra.serializers import get_json_codec
 
@@ -13,35 +14,6 @@ _HEADER = struct.Struct("!HI")  # procedure length (u16), payload length (u32)
 _MAX_NAME_LEN = 0xFFFF
 
 T = TypeVar("T")
-
-
-class ChannelError(RuntimeError):
-    """Raised when channel operations fail."""
-
-    def __init__(self, message: str, *, procedure_id: str | None = None, stage: str | None = None) -> None:
-        super().__init__(_format_context(message, procedure_id, stage))
-        self.procedure_id = procedure_id
-        self.stage = stage
-
-
-class SerializationError(RuntimeError):
-    """Raised when serialization or deserialization fails."""
-
-    def __init__(self, message: str, *, procedure_id: str | None = None, stage: str | None = None) -> None:
-        super().__init__(_format_context(message, procedure_id, stage))
-        self.procedure_id = procedure_id
-        self.stage = stage
-
-
-def _format_context(message: str, procedure_id: str | None, stage: str | None) -> str:
-    context: list[str] = []
-    if stage:
-        context.append(f"stage={stage}")
-    if procedure_id:
-        context.append(f"procedure_id={procedure_id}")
-    if not context:
-        return message
-    return f"{message} ({', '.join(context)})"
 
 
 def _encode_message(procedure_id: str, payload: bytes) -> bytes:

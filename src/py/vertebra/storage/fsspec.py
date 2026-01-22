@@ -3,8 +3,7 @@
 import io
 from typing import Any, cast
 
-from vertebra.exceptions import MissingDependencyError
-from vertebra.storage.client import FileSystemError
+from vertebra.exceptions import MissingDependencyError, StorageError
 from vertebra.storage.store import (
     AsyncGCSStore,
     AsyncLocalStore,
@@ -76,12 +75,12 @@ class SyncVertebraFileSystem(AbstractFileSystem):  # type: ignore[misc]
         elif backend == "s3":
             if not bucket:
                 msg = "bucket is required for s3 filesystem"
-                raise FileSystemError(msg)
+                raise StorageError(msg)
             self._store = S3Store(bucket=bucket, options=options)
         elif backend == "gcs":
             if not bucket:
                 msg = "bucket is required for gcs filesystem"
-                raise FileSystemError(msg)
+                raise StorageError(msg)
             self._store = GCSStore(bucket=bucket, options=options)
         else:
             self._store = LocalStore()
@@ -105,14 +104,14 @@ class SyncVertebraFileSystem(AbstractFileSystem):  # type: ignore[misc]
             self._store.mkdir(path)
         else:
             msg = "mkdir is only supported for local stores"
-            raise FileSystemError(msg)
+            raise StorageError(msg)
 
     def rmdir(self, path: str) -> None:
         if hasattr(self._store, "rmdir"):
             self._store.rmdir(path, recursive=True)
         else:
             msg = "rmdir is only supported for local stores"
-            raise FileSystemError(msg)
+            raise StorageError(msg)
 
     def open(self, path: str, mode: str = "rb", **kwargs: Any) -> io.BytesIO:
         if "b" not in mode:
@@ -137,12 +136,12 @@ class AsyncVertebraFileSystem:
         elif backend == "s3":
             if not bucket:
                 msg = "bucket is required for s3 filesystem"
-                raise FileSystemError(msg)
+                raise StorageError(msg)
             self._store = cast("AsyncObjectStore", AsyncS3Store(bucket=bucket, options=options))
         elif backend == "gcs":
             if not bucket:
                 msg = "bucket is required for gcs filesystem"
-                raise FileSystemError(msg)
+                raise StorageError(msg)
             self._store = cast("AsyncObjectStore", AsyncGCSStore(bucket=bucket, options=options))
         else:
             self._store = cast("AsyncObjectStore", AsyncLocalStore())
@@ -164,14 +163,14 @@ class AsyncVertebraFileSystem:
             await self._store.mkdir(path)
         else:
             msg = "mkdir is only supported for local stores"
-            raise FileSystemError(msg)
+            raise StorageError(msg)
 
     async def rmdir(self, path: str) -> None:
         if hasattr(self._store, "rmdir"):
             await self._store.rmdir(path, recursive=True)
         else:
             msg = "rmdir is only supported for local stores"
-            raise FileSystemError(msg)
+            raise StorageError(msg)
 
     async def read_bytes(self, path: str) -> bytes:
         return await self._store.get(path)

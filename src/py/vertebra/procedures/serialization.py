@@ -1,34 +1,14 @@
 """Serialization backends for Vertebra procedures."""
 
 import contextlib
-from typing import Any, Protocol, TypeVar, overload, runtime_checkable
+from typing import Any, TypeVar, overload
 
+from vertebra.protocols import Serializer
 from vertebra.serializers import JSONCodec, decode_json, encode_json, get_json_codec
 from vertebra.types.extractor import TypeExtractor
 from vertebra.types.ir import NamedTypeRef, ObjectType, TypeNode
 
 T = TypeVar("T")
-
-
-@runtime_checkable
-class Serializer(Protocol):
-    """Protocol for serialization backends."""
-
-    def serialize(self, value: Any, type_hint: type | None = None) -> bytes:
-        """Serialize a Python value to bytes."""
-        ...
-
-    @overload
-    def deserialize(self, data: bytes, type_hint: type[T]) -> T: ...
-
-    @overload
-    def deserialize(self, data: bytes, type_hint: None = ...) -> Any: ...
-
-    def deserialize(self, data: bytes, type_hint: type[Any] | None = None) -> Any:
-        """Deserialize bytes to a Python value."""
-
-    def get_type_metadata(self, type_hint: type | None = None) -> TypeNode | None:
-        """Extract type metadata for Type IR."""
 
 
 class MsgspecSerializer:
