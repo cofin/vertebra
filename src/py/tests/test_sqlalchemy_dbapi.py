@@ -1,83 +1,116 @@
-"""Tests for SQLAlchemy DBAPI implementation."""
+"""Tests for Vertebra SQLAlchemy DBAPI."""
 
-import sys
-import unittest.mock
-
-# Mock native extension
-mock_vertebra_native = unittest.mock.MagicMock()
-sys.modules["vertebra._vertebra"] = mock_vertebra_native
-mock_vertebra_native.ShmRegion = unittest.mock.MagicMock()
-mock_vertebra_native.AsyncRing = unittest.mock.MagicMock()
-mock_vertebra_native.SpscRing = unittest.mock.MagicMock()
-
-from vertebra.extensions.sqlalchemy._dbapi import Connection, connect
+from unittest.mock import MagicMock, patch
+import pytest
+from vertebra.extensions.sqlalchemy._dbapi import connect, Connection, Cursor, DatabaseError
 
 
-def test_connect() -> None:
-    conn = connect("test_pool")
-    assert isinstance(conn, Connection)
-    assert conn.pool_name == "test_pool"
+class TestDBAPI:
+    @patch("vertebra.extensions.sqlalchemy._dbapi.SyncBrokerClient")
+    def test_connection_lifecycle(self, mock_client_cls):
+        mock_client = mock_client_cls.return_value
+        mock_client.acquire.return_value = "fake-token"
+        
+        conn = connect("test-pool")
+        assert isinstance(conn, Connection)
+        assert conn.pool_name == "test-pool"
+        
+        # Trigger lazy connect
+        _ = conn.connection
+        mock_client.acquire.assert_called_once_with("test-pool")
+        
+        conn.close()
+        assert conn._connection is None
 
+    @patch("vertebra.extensions.sqlalchemy._dbapi.SyncBrokerClient")
+    def test_cursor_execute(self, mock_client_cls):
+        mock_client = mock_client_cls.return_value
+        mock_client.acquire.return_value = "fake-token"
+        
+        # Mock the inner connection and cursor
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        
+        with patch("vertebra.extensions.sqlalchemy._dbapi.VertebraSyncConnection", return_value=mock_conn):
+            conn = connect("test-pool")
+            cursor = conn.cursor()
+            assert isinstance(cursor, Cursor)
+            
+            mock_cursor.execute.return_value = 1
+            mock_cursor._columns = ["id"]
+            
+            cursor.execute("SELECT 1")
+            
+            # Verify auto-begin
+            mock_conn.begin.assert_called_once()
+            assert conn._transaction_in_progress is True
+            
+            mock_cursor.execute.assert_called_once_with("SELECT 1", None)
+            assert cursor.rowcount == 1
+            assert cursor.description == [("id", None, None, None, None, None, None)]
 
-def test_cursor_execution() -> None:
-    conn = connect("test_pool")
+    @patch("vertebra.extensions.sqlalchemy._dbapi.SyncBrokerClient")
+    def test_cursor_execute_numeric_conversion(self, mock_client_cls):
+        mock_client = mock_client_cls.return_value
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        
+        with patch("vertebra.extensions.sqlalchemy._dbapi.VertebraSyncConnection", return_value=mock_conn):
+            # Explicitly set numeric style
+            conn = Connection("test-pool", paramstyle="numeric")
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT * FROM users WHERE id = :1 AND status = :2", [1, "active"])
+            
+            # Should have converted to $1, $2
+            mock_cursor.execute.assert_called_once_with(
+                "SELECT * FROM users WHERE id = $1 AND status = $2", 
+                [1, "active"]
+            )
 
-    # Mock the client
-    mock_client = unittest.mock.MagicMock()
-    mock_client.acquire.return_value = "token"
-    mock_client.execute.return_value = {"ok": True, "result": {"rows": [[1]], "columns": ["id"], "rowcount": 1}}
-    conn._client = mock_client
+    @patch("vertebra.extensions.sqlalchemy._dbapi.SyncBrokerClient")
+    def test_cursor_executemany(self, mock_client_cls):
+        mock_client = mock_client_cls.return_value
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        
+        with patch("vertebra.extensions.sqlalchemy._dbapi.VertebraSyncConnection", return_value=mock_conn):
+            conn = connect("test-pool")
+            cursor = conn.cursor()
+            
+            params = [[1], [2], [3]]
+            mock_cursor.executemany.return_value = 3
+            
+            cursor.executemany("INSERT INTO t VALUES (?)", params)
+            
+            mock_cursor.executemany.assert_called_once_with("INSERT INTO t VALUES (?)", params)
+            assert cursor.rowcount == 3
 
-    cursor = conn.cursor()
+    @patch("vertebra.extensions.sqlalchemy._dbapi.SyncBrokerClient")
+    def test_transaction_commit(self, mock_client_cls):
+        mock_client = mock_client_cls.return_value
+        mock_conn = MagicMock()
+        
+        with patch("vertebra.extensions.sqlalchemy._dbapi.VertebraSyncConnection", return_value=mock_conn):
+            conn = connect("test-pool")
+            conn._transaction_in_progress = True
+            
+            conn.commit()
+            mock_conn.commit.assert_called_once()
+            assert conn._transaction_in_progress is False
 
-    # We need to mock VertebraSyncConnection._execute to return the response directly
-    # because our mock client returns the raw response structure which the connection parses.
-    # Actually Connection uses _execute which calls client.execute which calls _decode_result.
-    # Let's mock _decode_result on the client instance if possible?
-    # Or just mock connection._execute.
-
-    with unittest.mock.patch("vertebra.drivers.broker.VertebraSyncConnection._execute") as mock_exec:
-        mock_exec.return_value = {"rows": [[1]], "columns": ["id"], "rowcount": 1}
-
-        cursor.execute("SELECT 1")
-
-        assert cursor.rowcount == 1
-        assert cursor.fetchone() == (1,)
-
-        # Verify transaction started (lazy begin)
-        assert conn._transaction_in_progress
-        # Verify begin called on underlying connection
-        # We need to check if conn.connection.begin() was called.
-        # But conn.connection creates a new VertebraSyncConnection.
-        # We can't easily access that instance unless we mock VertebraSyncConnection class.
-
-
-def test_transaction_lifecycle() -> None:
-    conn = connect("test_pool")
-    conn._client = unittest.mock.MagicMock()
-    conn._client.acquire.return_value = "token"
-
-    with unittest.mock.patch("vertebra.extensions.sqlalchemy._dbapi.VertebraSyncConnection") as MockConnClass:
-        mock_inner_conn = MockConnClass.return_value
-        # Setup inner cursor
-        mock_inner_cursor = unittest.mock.MagicMock()
-        mock_inner_cursor.execute.return_value = 1
-        mock_inner_conn.cursor.return_value = mock_inner_cursor
-
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-
-        # Check begin called
-        mock_inner_conn.begin.assert_called_once()
-        assert conn._transaction_in_progress
-
-        conn.commit()
-        mock_inner_conn.commit.assert_called_once()
-        assert not conn._transaction_in_progress
-
-        cursor.execute("SELECT 2")
-        mock_inner_conn.begin.call_count == 2
-
-        conn.rollback()
-        mock_inner_conn.rollback.assert_called_once()
-        assert not conn._transaction_in_progress
+    @patch("vertebra.extensions.sqlalchemy._dbapi.SyncBrokerClient")
+    def test_transaction_rollback(self, mock_client_cls):
+        mock_client = mock_client_cls.return_value
+        mock_conn = MagicMock()
+        
+        with patch("vertebra.extensions.sqlalchemy._dbapi.VertebraSyncConnection", return_value=mock_conn):
+            conn = connect("test-pool")
+            conn._transaction_in_progress = True
+            
+            conn.rollback()
+            mock_conn.rollback.assert_called_once()
+            assert conn._transaction_in_progress is False

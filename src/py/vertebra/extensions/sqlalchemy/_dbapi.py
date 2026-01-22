@@ -57,9 +57,10 @@ class NotSupportedError(DatabaseError):
 class Connection:
     """DBAPI Connection."""
 
-    def __init__(self, pool_name: str, client: SyncBrokerClient | None = None) -> None:
+    def __init__(self, pool_name: str, client: SyncBrokerClient | None = None, paramstyle: str = paramstyle) -> None:
         self.pool_name = pool_name
         self._client = client or SyncBrokerClient()
+        self.paramstyle = paramstyle
         self._token: str | None = None
         self._connection: VertebraSyncConnection | None = None
         self._transaction_in_progress = False
@@ -123,6 +124,17 @@ class Cursor:
                 self.connection.connection.begin()
                 self.connection._transaction_in_progress = True
 
+            # Handle parameter style conversion if needed
+            # Postgres (numeric) uses :1, :2 in SQLAlchemy, but many PG drivers expect $1, $2
+            # We check the module level paramstyle of the calling module or just this one.
+            # Actually, we should probably check if it was set to 'numeric'.
+            import re
+            
+            # This is a bit hacky but if paramstyle is 'numeric', we expect :1, :2
+            # We'll convert them to $1, $2 which is standard for Postgres.
+            if getattr(self.connection, "paramstyle", paramstyle) == "numeric" and parameters:
+                operation = re.sub(r":(\d+)", r"$\1", operation)
+
             self.rowcount = self._inner_cursor.execute(operation, parameters) or -1
             # Update description based on columns
             if self._inner_cursor._columns:
@@ -165,4 +177,9 @@ def connect(dsn: str, **kwargs: Any) -> Connection:
 
     dsn: The pool name.
     """
-    return Connection(dsn)
+    # Use global paramstyle from the module where connect is called if possible, 
+    # but since it's imported, we'll just use the one from this module unless passed.
+    # Actually, the most robust way is for the sub-dbapi to pass it or for us to 
+    # detect the calling module's global.
+    style = kwargs.pop("paramstyle", paramstyle)
+    return Connection(dsn, paramstyle=style, **kwargs)
