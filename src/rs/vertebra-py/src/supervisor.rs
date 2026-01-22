@@ -37,20 +37,23 @@ impl NativeSupervisor {
         let engine_path = engine_path.to_string();
         let engine_args = engine_args.clone();
         let python_executable = python_executable.to_string();
-        
+
         // Serialize config if needed, or pass as env vars. For now, we assume basic startup.
         // In a real implementation, we'd extract values from `config`.
-        
+
         py.detach(move || {
             // Start Bun engine
             let bun = Command::new(&engine_path)
                 .args(&engine_args)
-                // .env("VERTEBRA_CONFIG", ...) 
+                // .env("VERTEBRA_CONFIG", ...)
                 .spawn()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    format!("Failed to start engine: {}", e)
-                ))?;
-            
+                .map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to start engine: {}",
+                        e
+                    ))
+                })?;
+
             {
                 let mut guard = bun_process.lock().unwrap();
                 *guard = Some(bun);
@@ -64,17 +67,20 @@ impl NativeSupervisor {
                     .arg("vertebra.server.worker")
                     // .env(...)
                     .spawn()
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                        format!("Failed to start worker: {}", e)
-                    ))?;
+                    .map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "Failed to start worker: {}",
+                            e
+                        ))
+                    })?;
                 new_workers.push(worker);
             }
-            
+
             {
                 let mut guard = workers_vec.lock().unwrap();
                 *guard = new_workers;
             }
-            
+
             Ok(())
         })
     }
@@ -83,11 +89,13 @@ impl NativeSupervisor {
         #[cfg(unix)]
         {
             py.detach(|| {
-                let mut signals = Signals::new(&[SIGTERM, SIGINT])
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                        format!("Failed to register signals: {}", e)
-                    ))?;
-                
+                let mut signals = Signals::new(&[SIGTERM, SIGINT]).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to register signals: {}",
+                        e
+                    ))
+                })?;
+
                 // Block until a signal is received
                 if let Some(signal) = signals.forever().next() {
                     // Signal received, initiate shutdown
@@ -105,16 +113,18 @@ impl NativeSupervisor {
             // In reality, we'd wait for Ctrl-C or similar via a crate like `ctrlc`
             // For now, just wait on the bun process
             py.detach(|| {
-                 let mut guard = self.bun_process.lock().unwrap();
-                 if let Some(ref mut child) = *guard {
-                     let status = child.wait()
-                         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                             format!("Failed to wait for engine: {}", e)
-                         ))?;
-                     Ok(status.code().unwrap_or(0))
-                 } else {
-                     Ok(0)
-                 }
+                let mut guard = self.bun_process.lock().unwrap();
+                if let Some(ref mut child) = *guard {
+                    let status = child.wait().map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "Failed to wait for engine: {}",
+                            e
+                        ))
+                    })?;
+                    Ok(status.code().unwrap_or(0))
+                } else {
+                    Ok(0)
+                }
             })
         }
     }
@@ -131,7 +141,7 @@ impl NativeSupervisor {
             let _ = bun.kill(); // Ignore errors if already dead
             let _ = bun.wait();
         }
-        
+
         let mut workers_guard = self.workers.lock().unwrap();
         for worker in workers_guard.iter_mut() {
             let _ = worker.kill();

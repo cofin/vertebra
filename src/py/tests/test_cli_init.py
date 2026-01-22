@@ -1,6 +1,5 @@
 """Tests for 'vertebra init' command."""
 
-import shutil
 from pathlib import Path
 
 import pytest
@@ -30,7 +29,7 @@ def test_init_default(runner: CliRunner, tmp_path: Path) -> None:
     with runner.isolated_filesystem(temp_dir=tmp_path):
         result = runner.invoke(init, ["my-app"], input="\n")
         assert result.exit_code == 0
-        
+
         project_dir = Path("my-app")
         assert project_dir.exists()
         assert (project_dir / "pyproject.toml").exists()
@@ -40,7 +39,7 @@ def test_init_default(runner: CliRunner, tmp_path: Path) -> None:
 
         content = (project_dir / "pyproject.toml").read_text()
         assert 'name = "my-app"' in content
-        assert '{{ project_slug }}' not in content
+        assert "{{ project_slug }}" not in content
 
 
 def test_init_interactive(runner: CliRunner, tmp_path: Path) -> None:
@@ -48,7 +47,6 @@ def test_init_interactive(runner: CliRunner, tmp_path: Path) -> None:
         # Prompt for name
         result = runner.invoke(init, input="my-interactive-app\n")
         assert result.exit_code == 0
-        
+
         project_dir = Path("my-interactive-app")
         assert project_dir.exists()
-        

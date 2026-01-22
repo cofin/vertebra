@@ -10,6 +10,7 @@ from typing import Any, Literal, TypeVar, overload
 
 import msgspec
 
+from vertebra.serializers.decoders import default_decoder
 from vertebra.serializers.encoders import default_encoder
 
 __all__ = (
@@ -79,7 +80,7 @@ class JSONCodec:
 
         decoder = self._decoder_cache.get(type_hint)
         if decoder is None:
-            decoder = msgspec.json.Decoder(type_hint)
+            decoder = msgspec.json.Decoder(type_hint, dec_hook=default_decoder)
             self._decoder_cache[type_hint] = decoder
         return decoder.decode(data)
 
@@ -165,7 +166,7 @@ class MessagePackCodec:
             return msgspec.msgpack.decode(data)
         decoder = self._decoder_cache.get(type_hint)
         if decoder is None:
-            decoder = msgspec.msgpack.Decoder(type_hint)
+            decoder = msgspec.msgpack.Decoder(type_hint, dec_hook=default_decoder)
             self._decoder_cache[type_hint] = decoder
         return decoder.decode(data)
 

@@ -94,7 +94,7 @@
   - Test threshold switching
   - File: `src/py/tests/test_sqlspec_arrow.py` (NEW)
 
-- [ ] **Task 1.2.7**: Integration test with real database
+- [x] **Task 1.2.7**: Integration test with real database
   - Create table with 10k rows
   - Query all rows, verify Arrow transport used
   - Verify correctness of results
@@ -113,27 +113,27 @@
 **Priority**: P1
 **Dependencies**: None
 
-- [ ] **Task 1.3.1**: Create `_storage.py` module
+- [x] **Task 1.3.1**: Create `_storage.py` module
   - Implement `VertebraObjectStore` class
   - Implement `ObjectStoreBase` protocol methods
   - File: `src/py/vertebra/extensions/sqlspec/_storage.py` (NEW)
 
-- [ ] **Task 1.3.2**: Implement `read_bytes()`
+- [x] **Task 1.3.2**: Implement `read_bytes()`
   - Route to `broker.storage_read(pool, path)`
   - Handle errors gracefully
   - File: `_storage.py`
 
-- [ ] **Task 1.3.3**: Implement `write_bytes()`
+- [x] **Task 1.3.3**: Implement `write_bytes()`
   - Route to `broker.storage_write(pool, path, data)`
   - Handle errors gracefully
   - File: `_storage.py`
 
-- [ ] **Task 1.3.4**: Implement other storage methods
+- [x] **Task 1.3.4**: Implement other storage methods
   - `list_objects()`, `exists()`, `delete()`
   - `copy()`, `move()`, `glob()`
   - File: `_storage.py`
 
-- [ ] **Task 1.3.5**: Add storage integration tests
+- [x] **Task 1.3.5**: Add storage integration tests
   - Test read/write operations
   - Test list/exists/delete operations
   - Test with local filesystem backend
@@ -204,7 +204,7 @@
   - Update `MessagePackCodec.decode` to use `decoders.py` logic where appropriate
   - Or verify that typed decoding handles it automatically via `msgspec`
 
-- [ ] **Task 2.2.4**: Add codec tests
+- [x] **Task 2.2.4**: Add codec tests
   - Test each type conversion round-trip
   - Test nested structures
   - Test error handling
@@ -234,7 +234,7 @@
   - List of (type, decoder_func) tuples
   - All 30+ types
 
-- [ ] **Task 2.3.4**: Add Litestar integration tests
+- [x] **Task 2.3.4**: Add Litestar integration tests
   - Test route handlers returning custom types
   - Test request body parsing with custom types
   - File: `src/py/tests/test_serialization_litestar.py` (NEW)

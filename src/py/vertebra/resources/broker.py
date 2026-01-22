@@ -3,7 +3,7 @@
 import os
 import pathlib
 import uuid
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 
@@ -225,6 +225,42 @@ class AsyncBrokerClient:
         data = _assert_ok(response)
         return bool(data.get("ok", True))
 
+    async def storage_read(self, pool: str, path: str) -> bytes:
+        response = await self.request({"kind": "storage_read", "pool": pool, "path": path})
+        data = _assert_ok(response)
+        return cast("bytes", data.get("data"))
+
+    async def storage_write(self, pool: str, path: str, data: bytes) -> None:
+        response = await self.request({"kind": "storage_write", "pool": pool, "path": path, "data": data})
+        _assert_ok(response)
+
+    async def storage_list(self, pool: str, prefix: str | None = None) -> list[str]:
+        response = await self.request({"kind": "storage_list", "pool": pool, "prefix": prefix})
+        data = _assert_ok(response)
+        return cast("list[str]", data.get("paths", []))
+
+    async def storage_exists(self, pool: str, path: str) -> bool:
+        response = await self.request({"kind": "storage_exists", "pool": pool, "path": path})
+        data = _assert_ok(response)
+        return bool(data.get("exists", False))
+
+    async def storage_delete(self, pool: str, path: str) -> None:
+        response = await self.request({"kind": "storage_delete", "pool": pool, "path": path})
+        _assert_ok(response)
+
+    async def storage_copy(self, pool: str, src: str, dst: str) -> None:
+        response = await self.request({"kind": "storage_copy", "pool": pool, "src": src, "dst": dst})
+        _assert_ok(response)
+
+    async def storage_move(self, pool: str, src: str, dst: str) -> None:
+        response = await self.request({"kind": "storage_move", "pool": pool, "src": src, "dst": dst})
+        _assert_ok(response)
+
+    async def storage_glob(self, pool: str, pattern: str) -> list[str]:
+        response = await self.request({"kind": "storage_glob", "pool": pool, "pattern": pattern})
+        data = _assert_ok(response)
+        return cast("list[str]", data.get("paths", []))
+
     async def _recv_response(self) -> dict[str, Any]:
         """Receive response using native async transport."""
         if self._response_transport is None:
@@ -434,6 +470,42 @@ class SyncBrokerClient:
         })
         data = _assert_ok(response)
         return bool(data.get("ok", True))
+
+    def storage_read(self, pool: str, path: str) -> bytes:
+        response = self.request({"kind": "storage_read", "pool": pool, "path": path})
+        data = _assert_ok(response)
+        return cast("bytes", data.get("data"))
+
+    def storage_write(self, pool: str, path: str, data: bytes) -> None:
+        response = self.request({"kind": "storage_write", "pool": pool, "path": path, "data": data})
+        _assert_ok(response)
+
+    def storage_list(self, pool: str, prefix: str | None = None) -> list[str]:
+        response = self.request({"kind": "storage_list", "pool": pool, "prefix": prefix})
+        data = _assert_ok(response)
+        return cast("list[str]", data.get("paths", []))
+
+    def storage_exists(self, pool: str, path: str) -> bool:
+        response = self.request({"kind": "storage_exists", "pool": pool, "path": path})
+        data = _assert_ok(response)
+        return bool(data.get("exists", False))
+
+    def storage_delete(self, pool: str, path: str) -> None:
+        response = self.request({"kind": "storage_delete", "pool": pool, "path": path})
+        _assert_ok(response)
+
+    def storage_copy(self, pool: str, src: str, dst: str) -> None:
+        response = self.request({"kind": "storage_copy", "pool": pool, "src": src, "dst": dst})
+        _assert_ok(response)
+
+    def storage_move(self, pool: str, src: str, dst: str) -> None:
+        response = self.request({"kind": "storage_move", "pool": pool, "src": src, "dst": dst})
+        _assert_ok(response)
+
+    def storage_glob(self, pool: str, pattern: str) -> list[str]:
+        response = self.request({"kind": "storage_glob", "pool": pool, "pattern": pattern})
+        data = _assert_ok(response)
+        return cast("list[str]", data.get("paths", []))
 
     def _recv_response(self) -> dict[str, Any]:
         """Receive response using blocking SpscRing."""

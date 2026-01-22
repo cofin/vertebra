@@ -39,13 +39,7 @@ class Supervisor:
         """Start the engine and workers."""
         logger.info("Starting supervisor with engine: %s %s", engine_path, engine_args)
         # config passed as Python object, Rust handles it opaque or extracts values
-        self._native.start(
-            engine_path,
-            engine_args,
-            sys.executable,
-            self._config,
-            workers,
-        )
+        self._native.start(engine_path, engine_args, sys.executable, self._config, workers)
         logger.info("Supervisor started")
 
     def wait(self) -> int:
@@ -85,7 +79,7 @@ def run_supervisor(
     os.environ.update(env)
 
     supervisor = Supervisor(config)
-    
+
     try:
         supervisor.start(bun_cmd[0], bun_cmd[1:], workers=workers)
         exit_code = supervisor.wait()
@@ -96,7 +90,7 @@ def run_supervisor(
         logger.exception("Supervisor error")
         supervisor.stop()
         exit_code = 1
-    
+
     return exit_code
 
 
@@ -140,6 +134,6 @@ def build_bun_command(engine: str | None = None, bun: str | None = None) -> list
     if not bun_bin:
         msg = "bun binary not found; install Bun or add it to PATH"
         raise SystemExit(msg)
-    
+
     engine_entry = engine or find_broker_entrypoint()
     return [bun_bin, "run", engine_entry]

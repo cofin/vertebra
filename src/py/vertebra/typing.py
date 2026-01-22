@@ -22,10 +22,4 @@ if TYPE_CHECKING:
 else:
     ArrowTable = object
 
-__all__ = (
-    "NUMPY_INSTALLED",
-    "PANDAS_INSTALLED",
-    "POLARS_INSTALLED",
-    "PYARROW_INSTALLED",
-    "ArrowTable",
-)
+__all__ = ("NUMPY_INSTALLED", "PANDAS_INSTALLED", "POLARS_INSTALLED", "PYARROW_INSTALLED", "ArrowTable")

@@ -38,15 +38,7 @@ def test_build_cli_one_file(runner: CliRunner, tmp_path: Path) -> None:
         mock_instance.build = mock.AsyncMock()
 
         result = runner.invoke(
-            build,
-            [
-                str(tmp_path),
-                "--one-file",
-                "--target",
-                "linux-x64",
-                "--output",
-                str(tmp_path / "dist"),
-            ],
+            build, [str(tmp_path), "--one-file", "--target", "linux-x64", "--output", str(tmp_path / "dist")]
         )
 
         assert result.exit_code == 0

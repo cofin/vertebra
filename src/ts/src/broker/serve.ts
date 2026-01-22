@@ -147,9 +147,15 @@ class SqlPool extends BasePoolAdapter {
       const token = crypto.randomUUID();
       this.reserved.set(token, reserved);
       this.recordAcquire();
+      if (this.hooks.onAcquire) {
+        await this.hooks.onAcquire(reserved);
+      }
       return token;
     } catch (error) {
       this.recordError();
+      if (this.hooks.onError) {
+        await this.hooks.onError(null, error as Error);
+      }
       throw error;
     }
   }
@@ -157,6 +163,9 @@ class SqlPool extends BasePoolAdapter {
   async release(token: string): Promise<void> {
     const reserved = this.reserved.get(token);
     if (reserved) {
+      if (this.hooks.onRelease) {
+        await this.hooks.onRelease(reserved);
+      }
       reserved.release();
       this.reserved.delete(token);
       this.recordRelease();
@@ -173,6 +182,10 @@ class SqlPool extends BasePoolAdapter {
       return normalizeSqlResult(result);
     } catch (error) {
       this.recordError();
+      if (this.hooks.onError) {
+        const reserved = this.reserved.get(token);
+        await this.hooks.onError(reserved, error as Error);
+      }
       throw error;
     }
   }
@@ -232,9 +245,15 @@ class SqlitePool extends BasePoolAdapter {
       const db = new Database(this.path);
       this.connections.set(token, db);
       this.recordAcquire();
+      if (this.hooks.onAcquire) {
+        await this.hooks.onAcquire(db);
+      }
       return token;
     } catch (error) {
       this.recordError();
+      if (this.hooks.onError) {
+        await this.hooks.onError(null, error as Error);
+      }
       throw error;
     }
   }
@@ -242,6 +261,9 @@ class SqlitePool extends BasePoolAdapter {
   async release(token: string): Promise<void> {
     const db = this.connections.get(token);
     if (db) {
+      if (this.hooks.onRelease) {
+        await this.hooks.onRelease(db);
+      }
       db.close();
       this.connections.delete(token);
       this.recordRelease();
@@ -262,6 +284,10 @@ class SqlitePool extends BasePoolAdapter {
       return { columns, rows: values, rowcount: values.length, raw: rows };
     } catch (error) {
       this.recordError();
+      if (this.hooks.onError) {
+        const db = this.connections.get(token);
+        await this.hooks.onError(db, error as Error);
+      }
       throw error;
     }
   }
@@ -332,14 +358,23 @@ class RedisPool extends BasePoolAdapter {
       }
       this.inUseCount += 1;
       this.recordAcquire();
+      if (this.hooks.onAcquire) {
+        await this.hooks.onAcquire(this.client);
+      }
       return this.token ?? "redis";
     } catch (error) {
       this.recordError();
+      if (this.hooks.onError) {
+        await this.hooks.onError(this.client, error as Error);
+      }
       throw error;
     }
   }
 
   async release(_token: string): Promise<void> {
+    if (this.hooks.onRelease) {
+      await this.hooks.onRelease(this.client);
+    }
     this.inUseCount = Math.max(0, this.inUseCount - 1);
     this.recordRelease();
     return;
@@ -373,6 +408,9 @@ class RedisPool extends BasePoolAdapter {
       );
     } catch (error) {
       this.recordError();
+      if (this.hooks.onError) {
+        await this.hooks.onError(this.client, error as Error);
+      }
       throw error;
     }
   }
@@ -418,16 +456,25 @@ class StoragePool extends BasePoolAdapter {
   async acquire(): Promise<string> {
     if (this.tokens.size >= this._maxSize) {
       this.recordError();
+      if (this.hooks.onError) {
+        await this.hooks.onError(null, new Error("Storage pool is at capacity"));
+      }
       throw new Error("Storage pool is at capacity");
     }
     const token = crypto.randomUUID();
     this.tokens.add(token);
     this.recordAcquire();
+    if (this.hooks.onAcquire) {
+      await this.hooks.onAcquire(null);
+    }
     return token;
   }
 
   async release(token: string): Promise<void> {
     if (this.tokens.delete(token)) {
+      if (this.hooks.onRelease) {
+        await this.hooks.onRelease(null);
+      }
       this.recordRelease();
     }
   }
@@ -674,14 +721,28 @@ class ExternalProviderPool extends BasePoolAdapter {
   }
 
   async acquire(): Promise<string> {
-    const response = await this.call({ kind: "acquire", pool: this.name });
-    this.inUseCount += 1;
-    this.recordAcquire();
-    return String(response.token);
+    try {
+      const response = await this.call({ kind: "acquire", pool: this.name });
+      this.inUseCount += 1;
+      this.recordAcquire();
+      if (this.hooks.onAcquire) {
+        await this.hooks.onAcquire(null);
+      }
+      return String(response.token);
+    } catch (error) {
+      this.recordError();
+      if (this.hooks.onError) {
+        await this.hooks.onError(null, error as Error);
+      }
+      throw error;
+    }
   }
 
   async release(token: string): Promise<void> {
     await this.call({ kind: "release", pool: this.name, token });
+    if (this.hooks.onRelease) {
+      await this.hooks.onRelease(null);
+    }
     this.inUseCount = Math.max(0, this.inUseCount - 1);
     this.recordRelease();
   }

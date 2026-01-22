@@ -1,8 +1,5 @@
 /**
  * Base class for pool adapters with shared stats tracking.
- *
- * All pool implementations (SQL, SQLite, Redis, Storage, External) extend this
- * class to eliminate duplicate counter management and stats reporting code.
  */
 
 export type PoolStats = {
@@ -17,6 +14,13 @@ export type PoolStats = {
   releases_total: number;
   errors_total: number;
 };
+
+export interface LifecycleHooks {
+  onAcquire?: (connection: any) => Promise<void>;
+  onRelease?: (connection: any) => Promise<void>;
+  onError?: (connection: any, error: Error) => Promise<void>;
+  onTimeout?: (poolName: string) => Promise<void>;
+}
 
 export interface PoolAdapter {
   name: string;
@@ -40,9 +44,11 @@ export abstract class BasePoolAdapter implements PoolAdapter {
   protected _acquires = 0;
   protected _releases = 0;
   protected _errors = 0;
+  protected hooks: LifecycleHooks;
 
-  constructor(maxSize: number) {
+  constructor(maxSize: number, hooks: LifecycleHooks = {}) {
     this._maxSize = maxSize;
+    this.hooks = hooks;
   }
 
   maxSize(): number {

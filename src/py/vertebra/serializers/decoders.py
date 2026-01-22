@@ -16,6 +16,7 @@ __all__ = (
     "decode_time",
     "decode_timedelta",
     "decode_uuid",
+    "default_decoder",
 )
 
 
@@ -73,3 +74,17 @@ def decode_ip(value: Any) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     if isinstance(value, str):
         return ipaddress.ip_address(value)
     return value  # type: ignore[no-any-return]
+
+
+def default_decoder(type_: type, value: Any) -> Any:
+    """Default decoder hook for msgspec."""
+    if type_ is pathlib.Path or type_ is pathlib.PurePath:
+        return decode_path(value)
+    if type_ is ipaddress.IPv4Address:
+        return ipaddress.IPv4Address(value)
+    if type_ is ipaddress.IPv6Address:
+        return ipaddress.IPv6Address(value)
+    if type_ in (ipaddress.IPv4Interface, ipaddress.IPv6Interface, ipaddress.IPv4Network, ipaddress.IPv6Network):
+        return ipaddress.ip_network(value) if "Network" in str(type_) else ipaddress.ip_interface(value)
+        
+    raise TypeError(f"Objects of type {type_} are not supported")

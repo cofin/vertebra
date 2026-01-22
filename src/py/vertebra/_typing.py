@@ -103,6 +103,7 @@ except ImportError:
         def model_dump(self) -> dict[str, Any]: ...
         def model_dump_json(self) -> str: ...
 
+
 # Attrs
 try:
     from attrs import AttrsInstance  # pyright: ignore[reportMissingImports]
