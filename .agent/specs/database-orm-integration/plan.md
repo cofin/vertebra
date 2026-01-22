@@ -295,25 +295,25 @@
 **Priority**: P0
 **Dependencies**: Task 3.1 (DBAPI)
 
-- [ ] **Task 3.2.1**: Create Postgres dialect structure
+- [x] **Task 3.2.1**: Create Postgres dialect structure (f6baaa9)
   - Files: `postgres/__init__.py`, `postgres/dialect.py`, `postgres/dbapi.py`
 
-- [ ] **Task 3.2.2**: Implement `VertebraPostgresDialect`
+- [x] **Task 3.2.2**: Implement `VertebraPostgresDialect` (f6baaa9)
   - Extend `sqlalchemy.dialects.postgresql.PGDialect`
   - Set `name`, `driver`, `paramstyle`
   - File: `postgres/dialect.py`
 
-- [ ] **Task 3.2.3**: Implement `VertebraPostgresAsyncDialect`
+- [x] **Task 3.2.3**: Implement `VertebraPostgresAsyncDialect` (f6baaa9)
   - Extend `PGDialect_asyncpg`
   - Set async-specific attributes
   - File: `postgres/dialect.py`
 
-- [ ] **Task 3.2.4**: Implement dialect registration
+- [x] **Task 3.2.4**: Implement dialect registration (f6baaa9)
   - Register with `sqlalchemy.dialects.registry`
   - Both sync and async variants
   - File: `postgres/__init__.py`
 
-- [ ] **Task 3.2.5**: Add Postgres dialect tests
+- [x] **Task 3.2.5**: Add Postgres dialect tests (f6baaa9)
   - Test `create_engine("postgresql+vertebra://main")`
   - Test `create_async_engine("postgresql+vertebra://main")`
   - Test basic CRUD operations
@@ -332,15 +332,15 @@
 **Priority**: P0
 **Dependencies**: Task 3.2 (Postgres dialect)
 
-- [ ] **Task 3.3.1**: Implement MySQL dialect (same pattern as Postgres)
+- [x] **Task 3.3.1**: Implement MySQL dialect (same pattern as Postgres) (94d23da)
   - Files: `mysql/dialect.py`, `mysql/dbapi.py`
   - Extend `MySQLDialect` and `MySQLAsyncDialect`
 
-- [ ] **Task 3.3.2**: Implement SQLite dialect (same pattern as Postgres)
+- [x] **Task 3.3.2**: Implement SQLite dialect (same pattern as Postgres) (94d23da)
   - Files: `sqlite/dialect.py`, `sqlite/dbapi.py`
   - Extend `SQLiteDialect` and `SQLiteAsyncDialect`
 
-- [ ] **Task 3.3.3**: Add dialect tests for MySQL and SQLite
+- [x] **Task 3.3.3**: Add dialect tests for MySQL and SQLite (94d23da)
   - Test both sync and async engines
   - Test basic CRUD operations
   - File: `src/py/tests/test_sqlalchemy_dialect.py`
