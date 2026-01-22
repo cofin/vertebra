@@ -220,6 +220,18 @@ class SqlPool extends BasePoolAdapter {
   async rollback(token: string): Promise<void> {
     await this.execute(token, "ROLLBACK", []);
   }
+
+  async savepoint(token: string, name: string): Promise<void> {
+    await this.execute(token, `SAVEPOINT ${name}`, []);
+  }
+
+  async releaseSavepoint(token: string, name: string): Promise<void> {
+    await this.execute(token, `RELEASE SAVEPOINT ${name}`, []);
+  }
+
+  async rollbackSavepoint(token: string, name: string): Promise<void> {
+    await this.execute(token, `ROLLBACK TO SAVEPOINT ${name}`, []);
+  }
 }
 
 class SqlitePool extends BasePoolAdapter {
@@ -319,6 +331,18 @@ class SqlitePool extends BasePoolAdapter {
 
   async rollback(token: string): Promise<void> {
     await this.execute(token, "ROLLBACK", []);
+  }
+
+  async savepoint(token: string, name: string): Promise<void> {
+    await this.execute(token, `SAVEPOINT ${name}`, []);
+  }
+
+  async releaseSavepoint(token: string, name: string): Promise<void> {
+    await this.execute(token, `RELEASE SAVEPOINT ${name}`, []);
+  }
+
+  async rollbackSavepoint(token: string, name: string): Promise<void> {
+    await this.execute(token, `ROLLBACK TO SAVEPOINT ${name}`, []);
   }
 }
 
@@ -788,6 +812,18 @@ class ExternalProviderPool extends BasePoolAdapter {
     await this.call({ kind: "rollback", pool: this.name, token });
   }
 
+  async savepoint(token: string, name: string): Promise<void> {
+    await this.call({ kind: "savepoint", pool: this.name, token, name });
+  }
+
+  async releaseSavepoint(token: string, name: string): Promise<void> {
+    await this.call({ kind: "release_savepoint", pool: this.name, token, name });
+  }
+
+  async rollbackSavepoint(token: string, name: string): Promise<void> {
+    await this.call({ kind: "rollback_savepoint", pool: this.name, token, name });
+  }
+
   private async call(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     try {
       const encoded = encode(payload);
@@ -1163,6 +1199,33 @@ class Broker {
       if (kind === "rollback") {
         await poolState.adapter.rollback(String(message.token));
         this.reply(client, message.id, { ok: true });
+        return;
+      }
+      if (kind === "savepoint") {
+        if ("savepoint" in poolState.adapter) {
+          await (poolState.adapter as any).savepoint(String(message.token), String(message.name));
+          this.reply(client, message.id, { ok: true });
+        } else {
+          this.reply(client, message.id, { ok: false, error: { message: "Pool does not support savepoints" } });
+        }
+        return;
+      }
+      if (kind === "release_savepoint") {
+        if ("releaseSavepoint" in poolState.adapter) {
+          await (poolState.adapter as any).releaseSavepoint(String(message.token), String(message.name));
+          this.reply(client, message.id, { ok: true });
+        } else {
+          this.reply(client, message.id, { ok: false, error: { message: "Pool does not support savepoints" } });
+        }
+        return;
+      }
+      if (kind === "rollback_savepoint") {
+        if ("rollbackSavepoint" in poolState.adapter) {
+          await (poolState.adapter as any).rollbackSavepoint(String(message.token), String(message.name));
+          this.reply(client, message.id, { ok: true });
+        } else {
+          this.reply(client, message.id, { ok: false, error: { message: "Pool does not support savepoints" } });
+        }
         return;
       }
       if (kind === "health") {

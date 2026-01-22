@@ -6,8 +6,9 @@ from sqlalchemy.dialects.mysql.aiomysql import MySQLDialect_aiomysql
 from sqlalchemy.dialects.mysql.base import MySQLDialect
 from sqlalchemy.engine import URL
 
-from .. import _async_dbapi
-from .._base import VertebraDialectBase
+from vertebra.extensions.sqlalchemy import _async_dbapi
+from vertebra.extensions.sqlalchemy._base import VertebraDialectBase
+
 from . import dbapi
 
 

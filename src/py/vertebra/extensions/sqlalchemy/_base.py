@@ -5,8 +5,6 @@ from typing import Any
 from sqlalchemy.engine import URL
 from sqlalchemy.engine.default import DefaultDialect
 
-from ._dbapi import connect
-
 
 class VertebraDialectBase(DefaultDialect):
     """Base dialect for Vertebra broker-backed connections."""
@@ -16,6 +14,7 @@ class VertebraDialectBase(DefaultDialect):
     supports_multivalues_insert = True
     supports_is_distinct_from = True
     supports_native_boolean = True
+    supports_savepoints = True
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -35,3 +34,15 @@ class VertebraDialectBase(DefaultDialect):
         """Check if the error is a disconnect error."""
         # TODO: Implement proper disconnect check based on broker errors
         return False
+
+    def do_savepoint(self, connection: Any, name: str) -> None:
+        """Create a savepoint using native connection method."""
+        connection.connection.savepoint(name)
+
+    def do_release_savepoint(self, connection: Any, name: str) -> None:
+        """Release a savepoint using native connection method."""
+        connection.connection.release_savepoint(name)
+
+    def do_rollback_to_savepoint(self, connection: Any, name: str) -> None:
+        """Rollback to a savepoint using native connection method."""
+        connection.connection.rollback_savepoint(name)

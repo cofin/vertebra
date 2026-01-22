@@ -35,6 +35,12 @@ class Connection:
     def cursor(self) -> "Cursor":
         return Cursor(self)
 
+    async def begin(self) -> None:
+        if not self._transaction_in_progress:
+            conn = await self._get_connection()
+            await conn.begin()
+            self._transaction_in_progress = True
+
     async def commit(self) -> None:
         if self._transaction_in_progress and self._connection:
             await self._connection.commit()
@@ -44,6 +50,18 @@ class Connection:
         if self._transaction_in_progress and self._connection:
             await self._connection.rollback()
             self._transaction_in_progress = False
+
+    async def savepoint(self, name: str) -> None:
+        conn = await self._get_connection()
+        await conn.savepoint(name)
+
+    async def release_savepoint(self, name: str) -> None:
+        conn = await self._get_connection()
+        await conn.release_savepoint(name)
+
+    async def rollback_savepoint(self, name: str) -> None:
+        conn = await self._get_connection()
+        await conn.rollback_savepoint(name)
 
     async def close(self) -> None:
         if self._connection:

@@ -79,6 +79,14 @@ class Connection:
     def cursor(self) -> "Cursor":
         return Cursor(self)
 
+    def begin(self) -> None:
+        if not self._transaction_in_progress:
+            try:
+                self.connection.begin()
+                self._transaction_in_progress = True
+            except Exception as e:
+                raise DatabaseError(str(e)) from e
+
     def commit(self) -> None:
         if self._transaction_in_progress:
             try:
@@ -94,6 +102,24 @@ class Connection:
             except Exception as e:
                 raise DatabaseError(str(e)) from e
             self._transaction_in_progress = False
+
+    def savepoint(self, name: str) -> None:
+        try:
+            self.connection.savepoint(name)
+        except Exception as e:
+            raise DatabaseError(str(e)) from e
+
+    def release_savepoint(self, name: str) -> None:
+        try:
+            self.connection.release_savepoint(name)
+        except Exception as e:
+            raise DatabaseError(str(e)) from e
+
+    def rollback_savepoint(self, name: str) -> None:
+        try:
+            self.connection.rollback_savepoint(name)
+        except Exception as e:
+            raise DatabaseError(str(e)) from e
 
     def close(self) -> None:
         if self._connection:
@@ -129,7 +155,7 @@ class Cursor:
             # We check the module level paramstyle of the calling module or just this one.
             # Actually, we should probably check if it was set to 'numeric'.
             import re
-            
+
             # This is a bit hacky but if paramstyle is 'numeric', we expect :1, :2
             # We'll convert them to $1, $2 which is standard for Postgres.
             if getattr(self.connection, "paramstyle", paramstyle) == "numeric" and parameters:
@@ -177,9 +203,9 @@ def connect(dsn: str, **kwargs: Any) -> Connection:
 
     dsn: The pool name.
     """
-    # Use global paramstyle from the module where connect is called if possible, 
+    # Use global paramstyle from the module where connect is called if possible,
     # but since it's imported, we'll just use the one from this module unless passed.
-    # Actually, the most robust way is for the sub-dbapi to pass it or for us to 
+    # Actually, the most robust way is for the sub-dbapi to pass it or for us to
     # detect the calling module's global.
     style = kwargs.pop("paramstyle", paramstyle)
     return Connection(dsn, paramstyle=style, **kwargs)

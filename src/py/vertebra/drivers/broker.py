@@ -158,6 +158,15 @@ class VertebraSyncConnection:
     def rollback(self) -> None:
         self._client.rollback(self._pool, self._token)
 
+    def savepoint(self, name: str) -> None:
+        self._client.savepoint(self._pool, self._token, name)
+
+    def release_savepoint(self, name: str) -> None:
+        self._client.release_savepoint(self._pool, self._token, name)
+
+    def rollback_savepoint(self, name: str) -> None:
+        self._client.rollback_savepoint(self._pool, self._token, name)
+
     def close(self) -> None:
         self._client.release(self._pool, self._token)
 
@@ -285,6 +294,15 @@ class VertebraAsyncConnection:
 
     async def rollback(self) -> None:
         await self._client.rollback(self._pool, self._token)
+
+    async def savepoint(self, name: str) -> None:
+        await self._client.savepoint(self._pool, self._token, name)
+
+    async def release_savepoint(self, name: str) -> None:
+        await self._client.release_savepoint(self._pool, self._token, name)
+
+    async def rollback_savepoint(self, name: str) -> None:
+        await self._client.rollback_savepoint(self._pool, self._token, name)
 
     def transaction(self) -> "VertebraAsyncTransaction":
         return VertebraAsyncTransaction(self)
