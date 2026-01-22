@@ -2,9 +2,10 @@
 
 from sqlalchemy.dialects import registry
 
-from .dialect import VertebraSqliteAsyncDialect, VertebraSqliteDialect
+# Register dialects
+registry.register("sqlite.vertebra", "vertebra.extensions.sqlalchemy.sqlite.dialect", "VertebraSQLiteAsyncDialect")
+registry.register("sqlite.vertebra_sync", "vertebra.extensions.sqlalchemy.sqlite.dialect", "VertebraSQLiteDialect")
 
-registry.register("sqlite.vertebra", "vertebra.extensions.sqlalchemy.sqlite", "VertebraSqliteDialect")
-registry.register("sqlite.vertebra_async", "vertebra.extensions.sqlalchemy.sqlite", "VertebraSqliteAsyncDialect")
+from .dialect import VertebraSQLiteAsyncDialect, VertebraSQLiteDialect
 
-__all__ = ("VertebraSqliteAsyncDialect", "VertebraSqliteDialect")
+__all__ = ("VertebraSQLiteAsyncDialect", "VertebraSQLiteDialect")

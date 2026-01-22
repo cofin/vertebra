@@ -2,35 +2,50 @@
 
 from typing import Any
 
+from sqlalchemy.dialects.sqlite.aiosqlite import SQLiteDialect_aiosqlite
 from sqlalchemy.dialects.sqlite.base import SQLiteDialect
+from sqlalchemy.engine import URL
+
+from vertebra.extensions.sqlalchemy import _async_dbapi
+from vertebra.extensions.sqlalchemy._base import VertebraDialectBase
 
 from . import dbapi
 
 
-class VertebraSqliteDialect(SQLiteDialect):
+class VertebraSQLiteDialect(VertebraDialectBase, SQLiteDialect):
     """Vertebra SQLite Dialect (Sync)."""
 
-    name = "vertebra_sqlite"
+    name = "sqlite"
     driver = "vertebra"
+    supports_statement_cache = True
 
     @classmethod
     def dbapi(cls) -> Any:
         return dbapi
 
-    def create_connect_args(self, url: Any) -> tuple[list[Any], dict[Any, Any]]:
-        return ([url.host], {})
+    @classmethod
+    def import_dbapi(cls) -> Any:
+        return dbapi
+
+    def create_connect_args(self, url: URL) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        return (url.host,), {}
 
 
-class VertebraSqliteAsyncDialect(SQLiteDialect):
+class VertebraSQLiteAsyncDialect(VertebraDialectBase, SQLiteDialect_aiosqlite):
     """Vertebra SQLite Dialect (Async)."""
 
-    name = "vertebra_sqlite_async"
+    name = "sqlite"
     driver = "vertebra"
     is_async = True
+    supports_statement_cache = True
 
     @classmethod
     def dbapi(cls) -> Any:
-        return dbapi
+        return _async_dbapi
 
-    def create_connect_args(self, url: Any) -> tuple[list[Any], dict[Any, Any]]:
-        return ([url.host], {})
+    @classmethod
+    def import_dbapi(cls) -> Any:
+        return _async_dbapi
+
+    def create_connect_args(self, url: URL) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        return (url.host,), {}

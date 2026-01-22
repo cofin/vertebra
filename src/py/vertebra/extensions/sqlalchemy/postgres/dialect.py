@@ -2,37 +2,52 @@
 
 from typing import Any
 
+from sqlalchemy.dialects.postgresql.asyncpg import PGDialect_asyncpg
 from sqlalchemy.dialects.postgresql.base import PGDialect
+from sqlalchemy.engine import URL
+
+from vertebra.extensions.sqlalchemy import _async_dbapi
+from vertebra.extensions.sqlalchemy._base import VertebraDialectBase
 
 from . import dbapi
 
 
-class VertebraPostgresDialect(PGDialect):
+class VertebraPostgresDialect(VertebraDialectBase, PGDialect):
     """Vertebra Postgres Dialect (Sync)."""
 
-    name = "vertebra_postgres"
+    name = "postgresql"
     driver = "vertebra"
+    supports_statement_cache = True
     supports_transactional_ddl = True
 
     @classmethod
     def dbapi(cls) -> Any:
         return dbapi
 
-    def create_connect_args(self, url: Any) -> tuple[list[Any], dict[Any, Any]]:
-        return ([url.host], {})
+    @classmethod
+    def import_dbapi(cls) -> Any:
+        return dbapi
+
+    def create_connect_args(self, url: URL) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        return (url.host,), {}
 
 
-class VertebraPostgresAsyncDialect(PGDialect):
+class VertebraPostgresAsyncDialect(VertebraDialectBase, PGDialect_asyncpg):
     """Vertebra Postgres Dialect (Async)."""
 
-    name = "vertebra_postgres_async"
+    name = "postgresql"
     driver = "vertebra"
     is_async = True
-    supports_transactional_ddl = True
+    supports_statement_cache = True
 
     @classmethod
     def dbapi(cls) -> Any:
-        return dbapi
+        # PGDialect_asyncpg expects an async-compatible DBAPI
+        return _async_dbapi
 
-    def create_connect_args(self, url: Any) -> tuple[list[Any], dict[Any, Any]]:
-        return ([url.host], {})
+    @classmethod
+    def import_dbapi(cls) -> Any:
+        return _async_dbapi
+
+    def create_connect_args(self, url: URL) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        return (url.host,), {}
