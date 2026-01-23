@@ -10,12 +10,14 @@
 
 - **Zero-Copy Data Plane**: Shared-memory ring buffers (SPSC/MPMC) and Arrow IPC for high-throughput, low-latency data transfer.
 - **IPC Mechanism**: Shared-memory C ABI (no sockets/TCP in the data plane).
-- **Process Model**: Centralized Bun broker managing shared resource pools across Python worker processes.
-- **Native Integration**: Direct execution path for Litestar applications bypassing ASGI for high-performance HTTP/WebSocket handling.
+- **Process Model**: Centralized Bun broker managing shared resource pools across Python worker processes. `ProcessManager` handles worker lifecycle with health checks and exponential backoff restarts.
+- **Authentication**: Bun-first JWT/OAuth2/IAP validation at HTTP ingress with JWKS caching. Claims flow to Python via IPC. Python provides `LazyUserProxy` for deferred user loading and context-based access via `vertebra.auth.state`.
+- **Security Ops**: Password hashing (Argon2/Bcrypt), CSRF signing, and cryptographic random delegated to Bun broker via dedicated opcodes.
+- **Native Integration**: Direct execution path for Litestar applications bypassing ASGI. `PipelineCompiler` pre-compiles guards and DI graphs; `VertebraRequest` provides lazy-loaded headers/JSON.
 - **Router**: Rust-based high-performance router (`matchit`) shared between Bun broker and Python workers.
-- **MCP Runtime**: Model Context Protocol implementation (Stdio, SSE, WebSocket) for AI agent integration.
+- **MCP Runtime**: Model Context Protocol implementation (Stdio, SSE, WebSocket) for AI agent integration. IPC bridge routes tool calls to Python workers.
 - **Observability**: Prometheus-formatted metrics registry with collectors for broker pools, HTTP server, and MCP tool execution.
-- **Native State**: Real-time state synchronization primitive (`NativeState`) with auto-broadcast and JSON Patch support.
+- **Native State**: Real-time state synchronization primitive (`NativeState`) with auto-broadcast and snapshot copying for thread safety.
 
 ## Backend Frameworks
 
