@@ -14,9 +14,19 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 
 *Link: [./specs/documentation/](./specs/documentation/)*
 
+## [ ] PRD: Elite DX & Native Bridging (Shared Memory)
+
+*Link: [./specs/elite-dx-native-bridge/](./specs/elite-dx-native-bridge/)*
+*Risk Level: [medium]*
+
 ---
 
 ## Completed & Archived PRDs
+
+## [x] PRD: Native Litestar Integration (Direct Protocol)
+
+*Link: [./archive/prd_20260123_native-litestar-integration/](./archive/prd_20260123_native-litestar-integration/)*
+*Risk Level: high*
 
 ## [x] PRD: Test Suite Reorganization and Refactoring
 
