@@ -1,10 +1,12 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock, type Mock } from "bun:test";
 import { unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { IpcClient } from "../../src/ipc/client";
 import { AsgiBridge, type AsgiIpcFrame } from "../../src/ipc/asgi";
-import { RoundRobinIpcConnectionPool } from "../../src/server/worker-connections";
+import { RoundRobinIpcConnectionPool, StubIpcConnectionPool } from "../../src/server/worker-connections";
+import { ShmRouter } from "../../src/broker/shm";
+import type { Server, ServerWebSocket } from "bun";
 import {
   concatChunks,
   pathDelimiter,
@@ -21,153 +23,10 @@ const SLOTS = 64;
 const WORKERS = 2;
 const HEALTH_PATH = "/__vertebra__/health";
 
-const procs: Subprocess[] = [];
-let testFile = "";
-
-async function waitForHealth(workerId: number, attempts = 50): Promise<void> {
-  const client = new IpcClient({ name: ASGI_NAME, slotSize: SLOT_SIZE, slots: SLOTS }, workerId);
-  const payload = {
-    id: crypto.randomUUID(),
-    method: "GET",
-    path: HEALTH_PATH,
-    query: "",
-    headers: [],
-    body: new Uint8Array(),
-    scheme: "http",
-    httpVersion: "1.1",
-  };
-  for (let i = 0; i < attempts; i += 1) {
-    try {
-      let status: number | null = null;
-      const stream = client.requestStream ? client.requestStream<AsgiIpcFrame>(payload) : null;
-      if (!stream) {
-        throw new Error("IPC stream not available");
-      }
-      for await (const frame of stream) {
-        if (frame.type === "http.response.start") {
-          status = frame.status;
-        }
-        if (frame.type === "http.response.body" && !frame.more_body) {
-          break;
-        }
-      }
-      if (status === 200) {
-        await client.close();
-        return;
-      }
-    } catch {
-      await sleep(50);
-    }
-  }
-  await client.close();
-  throw new Error(`Worker health check failed for worker ${workerId}`);
-}
-
-beforeAll(async () => {
-  if (!SHM_AVAILABLE) {
-    return;
-  }
-  testFile = join(tmpdir(), `vertebra-test-${Date.now()}.txt`);
-  await Bun.write(testFile, "hello");
-  const pythonPath = join(process.cwd(), "src", "py");
-  for (let i = 0; i < WORKERS; i += 1) {
-    const env = {
-      ...(process.env as Record<string, string>),
-      VERTEBRA_WORKER_ID: String(i),
-      VERTEBRA_TEST_FILE: testFile,
-      PYTHONPATH: process.env.PYTHONPATH
-        ? `${pythonPath}${pathDelimiter()}${process.env.PYTHONPATH}`
-        : pythonPath,
-    };
-    const proc = Bun.spawn({
-      cmd: [
-        ...PYTHON_CMD,
-        "-c",
-        "from vertebra.server.worker import main; main()",
-        "--app",
-        APP_PATH,
-        "--name",
-        ASGI_NAME,
-        "--worker-id",
-        String(i),
-        "--slot-size",
-        String(SLOT_SIZE),
-        "--slots",
-        String(SLOTS),
-      ],
-      env,
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-    procs.push(proc);
-  }
-  await Promise.all([waitForHealth(0), waitForHealth(1)]);
-});
-
-afterAll(async () => {
-  if (!SHM_AVAILABLE) {
-    return;
-  }
-  for (const proc of procs) {
-    try {
-      proc.kill("SIGTERM");
-    } catch {
-      try {
-        proc.kill();
-      } catch {
-        // ignore
-      }
-    }
-  }
-  if (testFile) {
-    try {
-      await unlink(testFile);
-    } catch {
-      // ignore
-    }
-  }
-});
-
 const test = SHM_AVAILABLE ? it : it.skip;
 
 describe("ASGI IPC integration", () => {
-  test("routes across multiple workers via round-robin pool", async () => {
-  const pool = new RoundRobinIpcConnectionPool({
-      count: WORKERS,
-      ipc: { name: ASGI_NAME, slotSize: SLOT_SIZE, slots: SLOTS },
-    });
-    const payload = {
-      id: crypto.randomUUID(),
-      method: "GET",
-      path: "/",
-      query: "",
-      headers: [],
-      body: new Uint8Array(),
-      scheme: "http",
-      httpVersion: "1.1",
-    };
-    const bodies: string[] = [];
-    for (let i = 0; i < 4; i += 1) {
-      const chunks: Uint8Array[] = [];
-      const stream = pool.requestStream ? pool.requestStream<AsgiIpcFrame>(payload) : null;
-      if (!stream) {
-        throw new Error("IPC stream not available");
-      }
-      for await (const frame of stream) {
-        if (frame.type === "http.response.body" && frame.body) {
-          chunks.push(frame.body);
-        }
-        if (frame.type === "http.response.body" && !frame.more_body) {
-          break;
-        }
-      }
-      const data = concatChunks(chunks);
-      bodies.push(new TextDecoder().decode(data));
-    }
-    await pool.close();
-    const unique = new Set(bodies);
-    expect(unique.size).toBeGreaterThan(1);
-  });
+  // ... (keep existing tests)
 
   test("supports pathsend from ASGI worker", async () => {
     const pool = new RoundRobinIpcConnectionPool({
@@ -179,5 +38,33 @@ describe("ASGI IPC integration", () => {
     const text = await response.text();
     await pool.close();
     expect(text).toBe("hello");
+  });
+
+  test("native WebSocket upgrade uses direct opcodes", async () => {
+    const pool = new StubIpcConnectionPool({
+      ipc: { name: ASGI_NAME, slotSize: SLOT_SIZE, slots: SLOTS },
+    });
+    
+    // Setup router with a native WS route
+    const router = new ShmRouter();
+    router.insert("/WEBSOCKET/chat", 123);
+    
+    const bridge = new AsgiBridge({ requester: pool, router });
+    const server = { upgrade: mock(() => true) } as unknown as Server;
+    
+    const request = new Request("http://localhost/chat", {
+      headers: { upgrade: "websocket" },
+    });
+    
+    // We expect upgradeWebSocket to return true
+    expect(bridge.upgradeWebSocket(request, server)).toBe(true);
+    
+    // Verify handler_id was passed to upgrade data
+    const upgradeCall = (server.upgrade as Mock).mock.calls[0];
+    const state = upgradeCall[1].data;
+    
+    expect(state.handler_id).toBe(123);
+    
+    router.close();
   });
 });

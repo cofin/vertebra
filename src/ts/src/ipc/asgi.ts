@@ -153,6 +153,26 @@ export type AsgiIpcFrame =
       id: string;
       type: "websocket.disconnect";
       code?: number;
+    }
+  | {
+      id: string;
+      type: "ws.open";
+      handler_id: number;
+      path: string;
+      query: string;
+      headers: [string, string][];
+    }
+  | {
+      id: string;
+      type: "ws.message";
+      bytes?: Uint8Array;
+      text?: string;
+    }
+  | {
+      id: string;
+      type: "ws.close";
+      code?: number;
+      reason?: string;
     };
 
 export type AsgiBridgeOptions = {
@@ -207,7 +227,16 @@ export class AsgiBridge {
     if (!upgrade || upgrade.toLowerCase() !== "websocket") {
       return false;
     }
+    
+    // Check for native handler
+    const url = new URL(request.url);
+    const handlerId = this.router?.matchPath(`/WEBSOCKET${url.pathname}`);
+    
     const state = this.createWebSocketState(request);
+    if (handlerId !== undefined && handlerId !== null) {
+        state.handler_id = handlerId;
+    }
+    
     const headers = this.selectWebSocketHeaders(state);
     return server.upgrade(request, { data: state, headers });
   }
@@ -626,9 +655,40 @@ export class AsgiBridge {
   }
 
   private async *websocketOutbound(state: WebSocketState): AsyncGenerator<AsgiIpcFrame> {
-    yield state.connectFrame;
+    if (state.handler_id !== undefined) {
+      // Native WebSocket - convert connectFrame to ws.open
+      const { type: _type, extensions: _ext, scheme: _scheme, httpVersion: _ver, rawPath: _raw, queryString: _rawQuery, rootPath: _root, server: _srv, client: _cli, subprotocols: _sub, ...rest } = state.connectFrame as any;
+      yield {
+        ...rest,
+        type: "ws.open",
+        handler_id: state.handler_id,
+      } as AsgiIpcFrame;
+    } else {
+      yield state.connectFrame;
+    }
+    
     for await (const frame of state.queue) {
-      yield frame;
+      if (state.handler_id !== undefined) {
+        // Map standard WS frames to native ones
+        if (frame.type === "websocket.receive") {
+            yield {
+                id: frame.id,
+                type: "ws.message",
+                bytes: frame.bytes,
+                text: frame.text,
+            } as AsgiIpcFrame;
+        } else if (frame.type === "websocket.disconnect") {
+            yield {
+                id: frame.id,
+                type: "ws.close",
+                code: frame.code,
+            } as AsgiIpcFrame;
+        } else {
+            yield frame;
+        }
+      } else {
+        yield frame;
+      }
     }
   }
 
