@@ -8,7 +8,7 @@ This plan outlines the phases to implement a custom, high-performance integratio
 - [x] **Task: Define Route Reflection Logic** [215ca1a]
     - [ ] Write tests for extracting route paths, handler IDs, and metadata from a `Litestar` app instance.
     - [ ] Implement `vertebra.integration.litestar.reflect_routes` to generate a serializable `RouteMap`.
-- [ ] **Task: Implement Rust-Side Router (`matchit`)**
+- [x] **Task: Implement Rust-Side Router (`matchit`)** [c91e0c0]
     - [ ] Write Rust unit tests in `vertebra-core` for path matching and ID retrieval.
     - [ ] Integrate `matchit` crate into `vertebra-core`.
     - [ ] Implement `Router::match_path(&self, path: &str) -> Option<RouteId>`.
