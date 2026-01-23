@@ -13,18 +13,18 @@
 **Priority**: P0 (Core MCP functionality)
 **Dependencies**: None
 
-- [ ] **Task 1.1.1**: Create stdio transport module
+- [x] **Task 1.1.1**: Create stdio transport module
   - Read JSON-RPC from `process.stdin` line-by-line
   - Write responses to `process.stdout`
   - File: `src/ts/src/mcp/transports/stdio.ts` (NEW)
 
-- [ ] **Task 1.1.2**: Implement connection lifecycle
+- [x] **Task 1.1.2**: Implement connection lifecycle
   - Handle startup initialization
   - Handle graceful shutdown
   - Error handling for malformed JSON
   - File: `src/ts/src/mcp/transports/stdio.ts`
 
-- [ ] **Task 1.1.3**: Add stdio transport tests
+- [x] **Task 1.1.3**: Add stdio transport tests
   - Test message parsing
   - Test response formatting
   - Test error handling
@@ -42,21 +42,21 @@
 **Priority**: P0
 **Dependencies**: Task 1.1
 
-- [ ] **Task 1.2.1**: Add `initialize` method handler
+- [x] **Task 1.2.1**: Add `initialize` method handler
   - MCP handshake protocol
   - Return capabilities and protocol version
   - File: `src/ts/src/mcp/server.ts`
 
-- [ ] **Task 1.2.2**: Add `tools/list` method handler
+- [x] **Task 1.2.2**: Add `tools/list` method handler
   - Return registered tools with schemas
   - File: `src/ts/src/mcp/server.ts`
 
-- [ ] **Task 1.2.3**: Add `tools/call` method handler
+- [x] **Task 1.2.3**: Add `tools/call` method handler
   - Invoke tool by name with arguments
   - Return tool result or error
   - File: `src/ts/src/mcp/server.ts`
 
-- [ ] **Task 1.2.4**: Implement MCP error codes
+- [x] **Task 1.2.4**: Implement MCP error codes
   - -32700: Parse error
   - -32600: Invalid request
   - -32601: Method not found
@@ -78,17 +78,17 @@
 **Priority**: P0
 **Dependencies**: None
 
-- [ ] **Task 1.3.1**: Create schema registry module
+- [x] **Task 1.3.1**: Create schema registry module
   - Store tool schemas (name, description, inputSchema)
   - Load schemas from JSON file
   - File: `src/ts/src/mcp/schema-registry.ts` (NEW)
 
-- [ ] **Task 1.3.2**: Implement hot reload
+- [x] **Task 1.3.2**: Implement hot reload
   - Watch schema file for changes
   - Reload schemas without restart
   - File: `src/ts/src/mcp/schema-registry.ts`
 
-- [ ] **Task 1.3.3**: Add schema registry tests
+- [x] **Task 1.3.3**: Add schema registry tests
   - Test schema loading
   - Test hot reload
   - File: `src/ts/tests/unit/schema-registry.test.ts` (NEW)
@@ -105,7 +105,7 @@
 **Priority**: P0
 **Dependencies**: Tasks 1.1, 1.2, 1.3
 
-- [ ] **Task 1.4.1**: Create MCP integration test
+- [x] **Task 1.4.1**: Create MCP integration test
   - Start MCP server with stdio transport
   - Send `initialize` request
   - Send `tools/list` request

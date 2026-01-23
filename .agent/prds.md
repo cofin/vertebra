@@ -6,7 +6,7 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 
 ## Active PRDs
 
-## [ ] PRD: Server & Runtime - MCP, Health Checks, and Observability
+## [~] PRD: Server & Runtime - MCP, Health Checks, and Observability
 
 *Link: [./specs/server-runtime/](./specs/server-runtime/)*
 
