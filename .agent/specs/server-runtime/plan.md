@@ -140,29 +140,29 @@
 **Priority**: P0
 **Dependencies**: Phase 1
 
-- [ ] **Task 2.1.0**: Clean legacy stub
+- [x] **Task 2.1.0**: Clean legacy stub
   - Delete `src/py/vertebra/mcp.py` (if exists) to allow package creation
   - Create package directory `src/py/vertebra/mcp/`
 
-- [ ] **Task 2.1.1**: Create MCP package structure
+- [x] **Task 2.1.1**: Create MCP package structure
   - Files: `__init__.py`, `decorators.py`, `registry.py`
   - Location: `src/py/vertebra/mcp/`
 
-- [ ] **Task 2.1.2**: Implement `@mcp_tool` decorator
+- [x] **Task 2.1.2**: Implement `@mcp_tool` decorator
   - Accept optional `name`, `description` parameters
   - Extract function signature via Type Bridge
   - Register tool in ProcedureRegistry
   - Support async functions
   - File: `src/py/vertebra/mcp/decorators.py` (NEW)
 
-- [ ] **Task 2.1.3**: Implement ProcedureRegistry
+- [x] **Task 2.1.3**: Implement ProcedureRegistry
   - `register_tool(name, handler, params, return_type)` method
   - `get_tool(name) -> Tool` method
   - `list_tools() -> list[Tool]` method
   - Export to JSON for Bun schema registry
   - File: `src/py/vertebra/mcp/registry.py` (NEW)
 
-- [ ] **Task 2.1.4**: Add decorator tests
+- [x] **Task 2.1.4**: Add decorator tests
   - Test tool registration
   - Test metadata extraction
   - Test async function support
@@ -180,24 +180,24 @@
 **Priority**: P0
 **Dependencies**: Task 2.1
 
-- [ ] **Task 2.2.1**: Create schema generator module
+- [~] **Task 2.2.1**: Create schema generator module
   - `MCPSchemaGenerator` class
   - `generate_tool_schema(tool: Tool) -> dict` method
   - File: `src/py/vertebra/mcp/schema.py` (NEW)
 
-- [ ] **Task 2.2.2**: Implement TypeNode to JSON Schema conversion
+- [~] **Task 2.2.2**: Implement TypeNode to JSON Schema conversion
   - Support: str, int, float, bool
   - Support: list, dict
   - Support: Optional, Union, Literal
   - File: `src/py/vertebra/mcp/schema.py`
 
-- [ ] **Task 2.2.3**: Add support for complex types
+- [~] **Task 2.2.3**: Add support for complex types
   - Support: msgspec.Struct
   - Support: pydantic.BaseModel
   - Support: dataclass
   - File: `src/py/vertebra/mcp/schema.py`
 
-- [ ] **Task 2.2.4**: Add schema generation tests
+- [~] **Task 2.2.4**: Add schema generation tests
   - Test basic types
   - Test complex types
   - Test nested types
