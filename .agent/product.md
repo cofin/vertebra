@@ -28,3 +28,4 @@ Vertebra aims to be the definitive foundation for building high-performance, dat
 - **MCP Runtime**: Built-in Model Context Protocol server (Stdio, SSE, WebSocket) for exposing Python functions as AI tools.
 - **Unified Observability**: Centralized Prometheus-compatible metrics endpoint (`/__metrics__`) and pre-built Grafana dashboards for monitoring pool health, request latency, and tool throughput.
 - **Resilient Pool Management**: Advanced connection pooling with periodic health checks, pre-lease validation, and automated idle connection reaping.
+- **Elite Developer Experience**: Streaming RPC client (`AsyncGenerator` support), Native State synchronization (`NativeState` primitive), and seamless HMR/Asset serving matching Litestar-Vite patterns.

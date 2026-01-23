@@ -46,6 +46,11 @@ export interface ServerIpcConfig extends IpcClientConfig {
   protocol?: IpcProtocol;
 }
 
+export interface AssetConfig {
+  manifest?: string;
+  devUrl?: string;
+}
+
 export interface ServerConfig {
   server?: ServerSettings;
   static?: StaticConfig;
@@ -53,20 +58,12 @@ export interface ServerConfig {
   workers?: WorkerConfig;
   python?: PythonConfig;
   broker?: BrokerConfig;
+  assets?: AssetConfig;
   hostname?: string;
   port?: number;
   reusePort?: boolean;
   staticDir?: string;
   logLevel?: LogLevel;
-}
-
-export interface ResolvedServerSettings {
-  hostname: string;
-  port: number;
-  reusePort: boolean;
-  logLevel: LogLevel;
-  staticDir?: string;
-  drainTimeoutMs: number;
 }
 
 export interface ResolvedServerConfig {
@@ -76,6 +73,7 @@ export interface ResolvedServerConfig {
   static: StaticConfig;
   python: PythonConfig;
   broker: BrokerConfig;
+  assets: AssetConfig;
 }
 
 export interface ResolveConfigOptions {
@@ -169,6 +167,9 @@ function normalizeConfig(config: ServerConfig | undefined): NormalizedConfig {
     broker: {
       ...(config?.broker ?? {}),
     },
+    assets: {
+      ...(config?.assets ?? {}),
+    },
   };
 }
 
@@ -180,6 +181,7 @@ function mergeNormalized(base: NormalizedConfig, override: NormalizedConfig): No
     workers: { ...base.workers, ...override.workers },
     python: { ...base.python, ...override.python },
     broker: { ...base.broker, ...override.broker },
+    assets: { ...base.assets, ...override.assets },
   };
 }
 
@@ -191,6 +193,7 @@ function mergeConfigs(...configs: Array<ServerConfig | undefined | null>): Norma
     workers: {},
     python: {},
     broker: {},
+    assets: {},
   };
   return configs.reduce(
     (acc, config) => mergeNormalized(acc, normalizeConfig(config ?? undefined)),
@@ -245,6 +248,10 @@ function buildResolvedConfig(config: NormalizedConfig): ResolvedServerConfig {
       slots: config.broker?.slots ?? 1024,
       timeoutMs: config.broker?.timeoutMs ?? 5_000,
     },
+    assets: {
+      manifest: config.assets?.manifest,
+      devUrl: config.assets?.devUrl,
+    },
   };
 }
 
@@ -276,6 +283,8 @@ function loadEnvConfig(): ServerConfig {
   const envBrokerSlotSize = readEnvNumber(process.env.VERTEBRA_BROKER_SLOT_SIZE);
   const envBrokerSlots = readEnvNumber(process.env.VERTEBRA_BROKER_SLOTS);
   const envBrokerTimeout = readEnvNumber(process.env.VERTEBRA_BROKER_TIMEOUT_MS);
+  const envAssetsManifest = process.env.VERTEBRA_ASSETS_MANIFEST;
+  const envAssetsDevUrl = process.env.VERTEBRA_ASSETS_DEV_URL;
 
   return {
     server: {
@@ -313,6 +322,10 @@ function loadEnvConfig(): ServerConfig {
       slotSize: envBrokerSlotSize ?? undefined,
       slots: envBrokerSlots ?? undefined,
       timeoutMs: envBrokerTimeout ?? undefined,
+    },
+    assets: {
+      manifest: envAssetsManifest ?? undefined,
+      devUrl: envAssetsDevUrl ?? undefined,
     },
   };
 }

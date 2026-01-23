@@ -130,7 +130,11 @@ export async function createRouterServer(
   handler?: RequestHandler,
 ): Promise<BunServer> {
   const resolved = await resolveServerConfig(config);
-  const router = createRouter({ staticDir: resolved.server.staticDir, apiHandler: handler });
+  const router = createRouter({
+    staticDir: resolved.server.staticDir,
+    apiHandler: handler,
+    assets: resolved.assets,
+  });
   return new BunServer(router, resolved.server, undefined);
 }
 
@@ -159,6 +163,7 @@ export async function createAsgiServer(
 
   const router = createRouter({
     staticDir: resolved.server.staticDir,
+    assets: resolved.assets,
     apiHandler: async (request, server) => {
       trackConnection(true); // Increment active connection count (approx)
       const { request: tracedRequest, traceId } = ensureTraceId(request);

@@ -46,8 +46,14 @@ def procedure(
             key: RawType(overrides[key]) if key in overrides else extractor.from_hint(value)
             for key, value in params.items()
         }
+        from vertebra.types.ir import StreamType
+
         return_hint = hints.get("return", _MISSING)
         return_type = RawType(overrides["return"]) if "return" in overrides else extractor.from_hint(return_hint)
+
+        final_metadata = dict(metadata or {})
+        if isinstance(return_type, StreamType):
+            final_metadata["type"] = "subscription"
 
         serializer_value: str | Serializer
         if serializer is None:
@@ -64,7 +70,7 @@ def procedure(
             params=type_params,
             return_type=return_type,
             serializer=serializer_value,
-            metadata=dict(metadata or {}),
+            metadata=final_metadata,
         )
         registry.register(meta)
 
@@ -75,7 +81,7 @@ def procedure(
                 "serializer": serializer_value
                 if isinstance(serializer_value, str)
                 else serializer_value.__class__.__name__,
-                "metadata": dict(metadata or {}),
+                "metadata": final_metadata,
             }
 
         @wraps(fn)

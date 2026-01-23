@@ -5,6 +5,7 @@ import hashlib
 import types
 import typing
 import warnings
+from collections.abc import AsyncGenerator, AsyncIterable, Generator, Iterable, Iterator
 from typing import Any, cast, get_args, get_origin
 
 import msgspec
@@ -18,6 +19,7 @@ from vertebra.types.ir import (
     ObjectType,
     PrimitiveType,
     RawType,
+    StreamType,
     TupleType,
     TypeNode,
     UnionType,
@@ -106,6 +108,20 @@ class TypeExtractor(msgspec.Struct):
 
         if origin is typing.Union or origin is types.UnionType or isinstance(annotation, types.UnionType):
             return self._from_union(args)
+
+        if origin in {
+            AsyncGenerator,
+            AsyncIterable,
+            Generator,
+            Iterable,
+            Iterator,
+            typing.AsyncGenerator,
+            typing.AsyncIterable,
+            typing.Generator,
+            typing.Iterable,
+            typing.Iterator,
+        }:
+            return StreamType(self.from_hint(args[0] if args else Any))
 
         if origin is list or origin is tuple or origin is dict or origin is set:
             return self._from_collection(origin, args)

@@ -157,3 +157,27 @@ class AnnotatedType(TypeNode, frozen=True, tag="annotated"):
 
     def iter_children(self) -> "Iterable[TypeNode]":
         return (self.base,)
+
+
+class SubscriptionType(TypeNode, frozen=True, tag="subscription"):
+    """Represents a subscription to a stream of items."""
+
+    item: TypeNode
+
+    def to_typescript(self) -> str:
+        return f"Subscription<{self.item.to_typescript()}>"
+
+    def iter_children(self) -> "Iterable[TypeNode]":
+        return (self.item,)
+
+
+class StreamType(TypeNode, frozen=True, tag="stream"):
+    """Represents a raw stream of items."""
+
+    item: TypeNode
+
+    def to_typescript(self) -> str:
+        return f"AsyncIterable<{self.item.to_typescript()}>"
+
+    def iter_children(self) -> "Iterable[TypeNode]":
+        return (self.item,)

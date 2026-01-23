@@ -1,6 +1,7 @@
 """Serialization backends for Vertebra procedures."""
 
 import contextlib
+import typing
 from typing import Any, TypeVar, overload
 
 from vertebra.protocols import Serializer
@@ -8,7 +9,24 @@ from vertebra.serializers import JSONCodec, decode_json, encode_json, get_json_c
 from vertebra.types.extractor import TypeExtractor
 from vertebra.types.ir import NamedTypeRef, ObjectType, TypeNode
 
+if typing.TYPE_CHECKING:
+    from collections.abc import AsyncIterable
+
 T = TypeVar("T")
+
+
+class StreamingResponse:
+    """Wraps an AsyncIterable to provide streaming serialization."""
+
+    def __init__(self, iterator: "AsyncIterable[Any]", serializer: Serializer | None = None) -> None:
+        self.iterator = iterator
+        self.serializer = serializer or get_serializer()
+
+    async def stream(self) -> "AsyncIterable[bytes]":
+        """Yield serialized chunks (NDJSON)."""
+        async for item in self.iterator:
+            chunk = self.serializer.serialize(item)
+            yield chunk + b"\n"
 
 
 class MsgspecSerializer:
