@@ -6,7 +6,7 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 
 ## Active PRDs
 
-## [~] PRD: Consolidated Database & ORM Integration
+## [x] PRD: Consolidated Database & ORM Integration
 
 *Link: [./specs/database-orm-integration/](./specs/database-orm-integration/)*
 
