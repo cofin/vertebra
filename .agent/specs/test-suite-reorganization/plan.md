@@ -6,7 +6,7 @@ Establish the new directory structure, configure scoped `conftest.py` files, and
 - [x] Task: Create Root Directory Structure 2972dbb
     - [ ] Create `src/py/tests/unit`
     - [ ] Create `src/py/tests/integration`
-- [ ] Task: Configure Test Fixtures (Conftest Split)
+- [x] Task: Configure Test Fixtures (Conftest Split) 2d69979
     - [ ] Analyze root `src/py/tests/conftest.py`.
     - [ ] Retain truly global fixtures in `src/py/tests/conftest.py`.
     - [ ] Create `src/py/tests/integration/conftest.py` and move database/service-related fixtures there.
