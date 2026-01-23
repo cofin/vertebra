@@ -152,8 +152,8 @@ class AsgiWorker:
         from litestar import Litestar
 
         if native_enabled and isinstance(self._app, Litestar):
-            from vertebra.extensions.litestar.native import reflect_routes
             from vertebra.extensions.litestar.compiler import PipelineCompiler
+            from vertebra.extensions.litestar.native import reflect_routes
 
             routes = reflect_routes(self._app)
             compiler = PipelineCompiler()
@@ -357,10 +357,7 @@ class AsgiWorker:
         await runner(socket)
 
     async def _handle_direct_http(
-        self,
-        message: dict[str, Any],
-        writer: "ResponseWriter",
-        contexts: dict[str, RequestContext] | None = None,
+        self, message: dict[str, Any], writer: "ResponseWriter", contexts: dict[str, RequestContext] | None = None
     ) -> None:
         if contexts is None:
             contexts = {}

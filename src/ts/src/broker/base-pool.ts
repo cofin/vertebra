@@ -87,14 +87,13 @@ export abstract class BasePoolAdapter implements PoolAdapter {
 
   // ... (abstract methods) ...
 
-
   protected _healthCheckInterval?: Timer;
   protected _idleReaperInterval?: Timer;
 
   /** Start periodic health checks for idle connections. */
   startHealthCheckLoop(intervalMs = 30000): void {
     if (this._healthCheckInterval) clearInterval(this._healthCheckInterval);
-    
+
     this._healthCheckInterval = setInterval(async () => {
       await this.runHealthCheck();
     }, intervalMs);
@@ -127,18 +126,24 @@ export abstract class BasePoolAdapter implements PoolAdapter {
 
   protected recordHealthCheck(success: boolean, durationMs: number): void {
     if (success) {
-        this._healthChecksSuccess++;
+      this._healthChecksSuccess++;
     } else {
-        this._healthChecksFailure++;
+      this._healthChecksFailure++;
     }
     // Duration tracking would go to a histogram here if we had one
   }
 
   protected recordRemoval(reason: "health" | "timeout" | "error"): void {
     switch (reason) {
-        case "health": this._removalsHealth++; break;
-        case "timeout": this._removalsTimeout++; break;
-        case "error": this._removalsError++; break;
+      case "health":
+        this._removalsHealth++;
+        break;
+      case "timeout":
+        this._removalsTimeout++;
+        break;
+      case "error":
+        this._removalsError++;
+        break;
     }
   }
 

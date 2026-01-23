@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-import vertebra._vertebra as _vertebra
+from vertebra import _vertebra
 
 if not hasattr(_vertebra, "NativeSupervisor"):
     pytest.skip("NativeSupervisor not available in _vertebra", allow_module_level=True)

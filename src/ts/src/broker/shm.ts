@@ -58,6 +58,7 @@ export type ShmLibrary = {
   ) => number;
   vtb_mpmc_capacity: (handle: number) => bigint;
   vtb_mpmc_close: (handle: number) => void;
+  vtb_shm_unlink: (name: number) => number;
 };
 
 let cached: ShmLibrary | null = null;
@@ -216,6 +217,10 @@ export function loadShmLib(): ShmLibrary {
     vtb_mpmc_close: {
       args: ["ptr"],
       returns: "void",
+    },
+    vtb_shm_unlink: {
+      args: ["ptr"],
+      returns: "i32",
     },
   });
   cached = lib.symbols as unknown as ShmLibrary;
@@ -471,5 +476,12 @@ export class ShmMpmcRing {
 
   close(): void {
     this.lib.vtb_mpmc_close(this.handle);
+  }
+
+  static unlink(name: string): void {
+    const lib = loadShmLib();
+    const namePtr = ptr(Buffer.from(`${name}\0`));
+    // We ignore errors (e.g. ENOENT) for unlink
+    lib.vtb_shm_unlink(namePtr);
   }
 }

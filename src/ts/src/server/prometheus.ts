@@ -32,9 +32,7 @@ function formatLabels(labels?: Record<string, string>): string {
   if (!labels || Object.keys(labels).length === 0) {
     return "";
   }
-  const parts = Object.entries(labels).map(
-    ([k, v]) => `${k}="${escapeLabelValue(v)}"`
-  );
+  const parts = Object.entries(labels).map(([k, v]) => `${k}="${escapeLabelValue(v)}"`);
   return `{${parts.join(", ")}}`;
 }
 

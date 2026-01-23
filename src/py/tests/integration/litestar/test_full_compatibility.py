@@ -7,8 +7,8 @@ from litestar.di import Provide
 from litestar.exceptions import HTTPException
 from litestar.status_codes import HTTP_400_BAD_REQUEST
 
-from vertebra.extensions.litestar.native import reflect_routes
 from vertebra.extensions.litestar.compiler import PipelineCompiler
+from vertebra.extensions.litestar.native import reflect_routes
 
 
 @pytest.mark.integration
@@ -30,7 +30,7 @@ async def test_complex_routing_and_di() -> None:
     router = Router(path="/deep", route_handlers=[handler])
     app = Litestar(
         route_handlers=[router],
-        dependencies={"dep_a": Provide(get_dep_a), "dep_b": Provide(get_dep_b)},
+        dependencies={"dep_a": Provide(get_dep_a, sync_to_thread=False), "dep_b": Provide(get_dep_b)},
         openapi_config=None,
     )
 
@@ -69,10 +69,7 @@ async def test_complex_routing_and_di() -> None:
     result = await runner(ctx)
     if hasattr(result, "body"):
         body = result.body
-        if isinstance(body, (bytes, bytearray, memoryview)):
-            payload = json.loads(body)
-        else:
-            payload = json.loads(bytes(body))
+        payload = json.loads(body) if isinstance(body, (bytes, bytearray, memoryview)) else json.loads(bytes(body))
         assert payload["param"] == 42
         assert payload["dep"] == "AB"
     else:

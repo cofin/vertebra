@@ -35,20 +35,20 @@ export function collectServerMetrics(): Metric[] {
       name: "http_requests_total",
       help: "Total HTTP requests served",
       type: "counter",
-      values: [{ value: requestCount }]
+      values: [{ value: requestCount }],
     },
     {
       name: "http_request_duration_seconds_sum",
       help: "Total duration of all HTTP requests in seconds",
       type: "counter",
-      values: [{ value: requestDurationSum / 1000 }]
+      values: [{ value: requestDurationSum / 1000 }],
     },
     {
       name: "http_connections_active",
       help: "Current active HTTP connections",
       type: "gauge",
-      values: [{ value: activeConnections }]
-    }
+      values: [{ value: activeConnections }],
+    },
   ];
 }
 

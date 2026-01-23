@@ -7,7 +7,7 @@ const toolDuration = new Map<string, number>();
 export function trackToolCall(name: string, durationMs: number, success: boolean) {
   toolCalls.set(name, (toolCalls.get(name) || 0) + 1);
   toolDuration.set(name, (toolDuration.get(name) || 0) + durationMs);
-  
+
   if (!success) {
     toolErrors.set(name, (toolErrors.get(name) || 0) + 1);
   }
@@ -21,9 +21,9 @@ export function collectMcpMetrics(): Metric[] {
     name: "mcp_tool_calls_total",
     help: "Total MCP tool invocations",
     type: "counter",
-    values: []
+    values: [],
   };
-  
+
   for (const [name, count] of toolCalls) {
     callMetric.values.push({ value: count, labels: { tool: name } });
   }
@@ -34,7 +34,7 @@ export function collectMcpMetrics(): Metric[] {
     name: "mcp_tool_duration_seconds_sum",
     help: "Total execution time of MCP tools",
     type: "counter",
-    values: []
+    values: [],
   };
 
   for (const [name, duration] of toolDuration) {
@@ -47,7 +47,7 @@ export function collectMcpMetrics(): Metric[] {
     name: "mcp_tool_errors_total",
     help: "Total MCP tool execution errors",
     type: "counter",
-    values: []
+    values: [],
   };
 
   for (const [name, count] of toolErrors) {

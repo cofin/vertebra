@@ -57,7 +57,7 @@ export function collectBrokerMetrics(): Metric[] {
     // Connections
     metrics[0].values.push(
       { value: stats.idle, labels: { ...labels, state: "idle" } },
-      { value: stats.in_use, labels: { ...labels, state: "in_use" } }
+      { value: stats.in_use, labels: { ...labels, state: "in_use" } },
     );
 
     // Acquires
@@ -68,9 +68,9 @@ export function collectBrokerMetrics(): Metric[] {
 
     // Health Checks (we tracked failures, success count is implicit/missing in base stats currently)
     // We only exposed health_failures_total in stats()
-    metrics[3].values.push({ 
-        value: stats.health_failures_total, 
-        labels: { ...labels, result: "failure" } 
+    metrics[3].values.push({
+      value: stats.health_failures_total,
+      labels: { ...labels, result: "failure" },
     });
 
     // Idle Timeouts

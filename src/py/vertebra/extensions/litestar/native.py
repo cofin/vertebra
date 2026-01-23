@@ -7,7 +7,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from litestar import Litestar
-    from litestar.routes import ASGIRoute, HTTPRoute, WebSocketRoute
 
 
 @dataclass

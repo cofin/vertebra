@@ -11,11 +11,4 @@ def get_registry() -> ProcedureRegistry:
     return ProcedureRegistry.get_instance()
 
 
-__all__ = (
-    "MCPSchemaGenerator",
-    "MCPHandler",
-    "get_registry",
-    "mcp_resource",
-    "mcp_tool",
-    "yield_progress",
-)
+__all__ = ("MCPHandler", "MCPSchemaGenerator", "get_registry", "mcp_resource", "mcp_tool", "yield_progress")

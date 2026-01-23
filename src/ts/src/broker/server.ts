@@ -32,6 +32,8 @@ export class BrokerServer {
   constructor(private config: BrokerConfig) {
     const controlName = config.controlName ?? `/${config.name}.control`;
     try {
+        // Ensure clean state
+        ShmMpmcRing.unlink(controlName);
         // Control ring must be MPMC (Multi-Producer Single-Consumer)
         this.control = ShmMpmcRing.create(controlName, config.slotSize, config.slots);
     } catch (err) {      throw err;
