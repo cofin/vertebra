@@ -15,13 +15,13 @@ This plan outlines the phases to implement a custom, high-performance integratio
 - [x] **Task: Bridge RouteMap at Startup** [27a264f]
     - [ ] Write integration tests for passing the `RouteMap` from Python to Rust during worker initialization.
     - [ ] Update `vertebra-py` and `vertebra-js` bindings to accept and load the routing table.
-- [ ] **Task: Checkpoint - Verify Route Mirroring**
+- [x] **Task: Checkpoint - Verify Route Mirroring** [583c230]
 - [ ] **Task: Flow - User Manual Verification 'Phase 1: Routing Mirror' (Protocol in workflow.md)**
 
-## Phase 2: The Pipeline Compiler
+## Phase 2: The Pipeline Compiler [~]
 **Goal:** Flatten Litestar's layered architecture (guards, dependencies) into optimized Python runner functions.
 
-- [ ] **Task: Implement Guard Flattening**
+- [x] **Task: Implement Guard Flattening** [5ad4e60]
     - [ ] Write tests for a handler with multiple guards (app, controller, and route level).
     - [ ] Implement code generation that inlines guard checks into a single `async` function.
 - [ ] **Task: Implement Dependency Injection Compilation**
