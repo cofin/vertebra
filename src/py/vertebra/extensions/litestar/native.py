@@ -23,12 +23,13 @@ class LitestarRoute:
 class VertebraRequest:
     """A high-performance request object for the native protocol."""
 
-    __slots__ = ("_headers", "_json", "_message")
+    __slots__ = ("_headers", "_json", "_message", "_user")
 
     def __init__(self, message: dict[str, Any]) -> None:
         self._message = message
         self._json = None
         self._headers = None
+        self._user = None
 
     @property
     def method(self) -> str:
@@ -51,6 +52,29 @@ class VertebraRequest:
     @property
     def path_params(self) -> dict[str, str]:
         return self._message.get("path_params", {})
+
+    @property
+    def auth_claims(self) -> dict[str, Any] | None:
+        return self._message.get("auth_claims")
+
+    @property
+    def user(self) -> Any:
+        if self._user is None:
+            claims = self.auth_claims
+            if claims:
+                from vertebra.auth.models import VertebraUserMixin
+                from vertebra.auth.proxy import LazyUserProxy
+
+                # Default to VertebraUserMixin if no specific model is configured
+                # In a real app, this should be configurable.
+                async def noop_fetcher(user_id: str, ctx: Any) -> Any:
+                    return VertebraUserMixin(**claims)
+
+                self._user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher)
+            else:
+                from vertebra.auth.models import AnonymousUser
+                self._user = AnonymousUser()
+        return self._user
 
     def json(self) -> Any:
         if self._json is None:

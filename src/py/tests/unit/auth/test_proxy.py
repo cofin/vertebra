@@ -12,7 +12,7 @@ class User(VertebraUserMixin, msgspec.Struct):
 async def fetch_user(id: str, context: Any = None) -> User:
     return User(id=id, username="fetched", email="fetched@example.com")
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_lazy_proxy_claims():
     claims = {"id": "123", "username": "claim_user"}
     proxy = LazyUserProxy(User, claims, fetch_user)
@@ -25,7 +25,7 @@ async def test_lazy_proxy_claims():
     with pytest.raises(AttributeError, match="not loaded"):
         _ = proxy.email
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_lazy_proxy_load():
     claims = {"id": "123"}
     proxy = LazyUserProxy(User, claims, fetch_user)
@@ -37,7 +37,7 @@ async def test_lazy_proxy_load():
     # ID should match
     assert proxy.id == "123"
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_lazy_proxy_refresh():
     claims = {"id": "123"}
     call_count = 0

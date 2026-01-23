@@ -19,6 +19,7 @@ export type AsgiRequest = {
   server?: [string, number | null];
   client?: [string, number | null];
   extensions?: Record<string, Record<string, unknown>>;
+  auth_claims?: Record<string, any>;
 };
 
 export type AsgiRequestStartFrame = {
@@ -27,10 +28,12 @@ export type AsgiRequestStartFrame = {
   method: string;
   path: string;
   query: string;
+  headers: [string, string][];
   server?: [string, number | null];
   client?: [string, number | null];
   extensions?: Record<string, Record<string, unknown>>;
   path_params?: Record<string, string>;
+  auth_claims?: Record<string, any>;
 };
 
 export type AsgiResponse = {
@@ -193,11 +196,11 @@ export class AsgiBridge {
     this.router = options.router;
   }
 
-  async handle(request: Request): Promise<Response> {
+  async handle(request: Request, authClaims?: Record<string, any> | null): Promise<Response> {
     const url = new URL(request.url);
     const match = this.router?.matchPath(`/${request.method}${url.pathname}`);
 
-    const meta = this.buildRequestMeta(request);
+    const meta = this.buildRequestMeta(request, authClaims);
     if (match) {
       meta.type = "direct.http";
       meta.handler_id = match.id;
@@ -494,7 +497,7 @@ export class AsgiBridge {
     };
   }
 
-  private buildRequestMeta(request: Request): AsgiRequestStartFrame {
+  private buildRequestMeta(request: Request, authClaims?: Record<string, any> | null): AsgiRequestStartFrame {
     const headers: [string, string][] = [];
     request.headers.forEach((value, key) => {
       headers.push([key, value]);
@@ -523,12 +526,13 @@ export class AsgiBridge {
         "http.response.early_hint": {},
         "http.response.trailers": {},
       },
+      auth_claims: authClaims ?? undefined,
     };
   }
 
   private buildRequest(meta: AsgiRequestStartFrame, body: Uint8Array): AsgiRequest {
     const { type: _type, ...rest } = meta;
-    return { ...rest, type: meta.type, body };
+    return { ...rest, type: meta.type, body, auth_claims: meta.auth_claims };
   }
 
   private createWebSocketState(request: Request): WebSocketState {

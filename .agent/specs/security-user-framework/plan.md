@@ -27,11 +27,12 @@
 ## Phase 3: Broker-Centric Authentication (TS & Python)
 **Goal:** Implement the auth validation at the Broker layer and consumption in Python.
 
-- [ ] Task: Update Bun Broker to support JWT and Google IAP header validation.
-    - [ ] Implement JWKS caching for Google/GitHub.
-- [ ] Task: Implement HTTP-only cookie extraction and CSRF validation in the Bun Broker.
-- [ ] Task: Write integration tests for Broker-to-Python claim passing.
-- [ ] Task: Implement `AuthMetadata` extraction in `vertebra.py` to hydrate the `User` object from Broker signals.
+- [x] Task: Update Bun Broker to support JWT and Google IAP header validation.
+    - [x] Implement JWKS caching for Google/GitHub.
+- [x] Task: Implement HTTP-only cookie extraction and CSRF validation in the Bun Broker.
+- [~] Task: Write integration tests for Broker-to-Python claim passing.
+    - *Status:* Integration tests are written (`test_broker_auth.py`) but currently failing with timeouts. Need to debug server startup/communication in test environment.
+- [x] Task: Implement `AuthMetadata` extraction in `vertebra.py` to hydrate the `User` object from Broker signals.
 - [ ] Task: Implement Refresh Token rotation flow in the Broker and Python client.
 - [ ] Task: Checkpoint - Verify Phase 3 complete and create recovery point
 - [ ] Task: Flow - User Manual Verification 'Phase 3: Broker-Centric Authentication' (Protocol in workflow.md)

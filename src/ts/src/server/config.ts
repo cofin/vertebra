@@ -42,6 +42,19 @@ export interface BrokerConfig {
   timeoutMs?: number;
 }
 
+export interface AuthProviderConfig {
+  type: "iap" | "jwt" | "oauth2";
+  audience?: string;
+  issuer?: string;
+  jwksUri?: string;
+  secret?: string;
+}
+
+export interface AuthConfig {
+  providers?: AuthProviderConfig[];
+  cookieName?: string;
+}
+
 export interface ServerIpcConfig extends IpcClientConfig {
   protocol?: IpcProtocol;
 }
@@ -59,6 +72,7 @@ export interface ServerConfig {
   python?: PythonConfig;
   broker?: BrokerConfig;
   assets?: AssetConfig;
+  auth?: AuthConfig;
   hostname?: string;
   port?: number;
   reusePort?: boolean;
@@ -91,6 +105,7 @@ export interface ResolvedServerConfig {
   python: PythonConfig;
   broker: ResolvedBrokerConfig;
   assets: AssetConfig;
+  auth: AuthConfig;
 }
 
 export interface ResolveConfigOptions {
@@ -118,6 +133,7 @@ type NormalizedConfig = {
   python: PythonConfig;
   broker: BrokerConfig;
   assets: AssetConfig;
+  auth: AuthConfig;
 };
 
 function readEnvNumber(value: string | undefined): number | undefined {
@@ -188,19 +204,30 @@ function normalizeConfig(config: ServerConfig | undefined): NormalizedConfig {
     assets: {
       ...(config?.assets ?? {}),
     },
+    auth: {
+      ...(config?.auth ?? {}),
+    },
   };
 }
 
+function deepMerge<T extends Record<string, any>>(base: T, override: T): T {
+  const result = { ...base };
+  for (const key in override) {
+    const val = override[key];
+    if (val === undefined) {
+      continue;
+    }
+    if (val !== null && typeof val === "object" && !Array.isArray(val) && result[key] !== null && typeof result[key] === "object") {
+      result[key] = deepMerge(result[key], val);
+    } else {
+      result[key] = val;
+    }
+  }
+  return result;
+}
+
 function mergeNormalized(base: NormalizedConfig, override: NormalizedConfig): NormalizedConfig {
-  return {
-    server: { ...base.server, ...override.server },
-    static: { ...base.static, ...override.static },
-    ipc: { ...base.ipc, ...override.ipc },
-    workers: { ...base.workers, ...override.workers },
-    python: { ...base.python, ...override.python },
-    broker: { ...base.broker, ...override.broker },
-    assets: { ...base.assets, ...override.assets },
-  };
+  return deepMerge(base, override);
 }
 
 function mergeConfigs(...configs: Array<ServerConfig | undefined | null>): NormalizedConfig {
@@ -212,6 +239,7 @@ function mergeConfigs(...configs: Array<ServerConfig | undefined | null>): Norma
     python: {},
     broker: {},
     assets: {},
+    auth: {},
   };
   return configs.reduce(
     (acc, config) => mergeNormalized(acc, normalizeConfig(config ?? undefined)),
@@ -236,6 +264,7 @@ function resolveWorkerCount(config: NormalizedConfig): number {
 }
 
 function buildResolvedConfig(config: NormalizedConfig): ResolvedServerConfig {
+  console.log(`DEBUG: Resolved port: ${config.server.port}`);
   const workerCount = resolveWorkerCount(config);
   const ipcDefaults = resolveIpcConfig(config.ipc ?? {});
   const ipcProtocol = config.ipc?.protocol ?? "msgpack";
@@ -266,10 +295,8 @@ function buildResolvedConfig(config: NormalizedConfig): ResolvedServerConfig {
       slots: config.broker?.slots ?? 1024,
       timeoutMs: config.broker?.timeoutMs ?? 5_000,
     },
-    assets: {
-      manifest: config.assets?.manifest,
-      devUrl: config.assets?.devUrl,
-    },
+    assets: config.assets ?? {},
+    auth: config.auth ?? {},
   };
 }
 
@@ -362,6 +389,7 @@ async function loadConfigFile(configPath?: string): Promise<ServerConfig | null>
     const resolved = resolvePath(process.cwd(), candidate);
     const file = Bun.file(resolved);
     if (await file.exists()) {
+      console.log(`DEBUG: Loading config from ${resolved}`);
       const module = await import(pathToFileURL(resolved).href);
       const config = module.default ?? module.config ?? module.vertebraConfig;
       if (!config || typeof config !== "object") {

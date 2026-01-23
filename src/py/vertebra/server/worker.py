@@ -43,6 +43,7 @@ class AsgiRequest(msgspec.Struct):
     client: tuple[str, int | None] | None = None
     extensions: dict[str, dict[str, Any]] = msgspec.field(default_factory=dict)
     path_params: dict[str, str] = msgspec.field(default_factory=dict)
+    auth_claims: dict[str, Any] | None = None
 
 
 class AsgiResponse(msgspec.Struct):
@@ -74,6 +75,7 @@ class RequestMeta(msgspec.Struct, frozen=True):
     extensions: dict[str, dict[str, Any]]
     subprotocols: list[str] = msgspec.field(default_factory=list)
     path_params: dict[str, str] = msgspec.field(default_factory=dict)
+    auth_claims: dict[str, Any] | None = None
 
 
 class RequestBodyState(msgspec.Struct):
@@ -443,6 +445,7 @@ class AsgiWorker:
                 extensions=message.get("extensions") or {},
                 subprotocols=subprotocols,
                 path_params=message.get("path_params") or {},
+                auth_claims=message.get("auth_claims"),
             )
         except Exception:  # noqa: BLE001 - defensive parsing of untrusted IPC data
             return None
@@ -483,6 +486,7 @@ class AsgiWorker:
             client=request.client,
             extensions=request.extensions,
             subprotocols=[],
+            auth_claims=request.auth_claims,
         )
         await self._start_request(meta, request.body, contexts, writer)
 
@@ -546,13 +550,118 @@ class AsgiWorker:
                 await writer.send({"id": meta.id, "type": "http.response.body", "body": b"ok", "more_body": False})
                 return
 
+            from vertebra.auth.state import reset_user, set_user
+
+            claims = meta.auth_claims
+            if claims:
+                from vertebra.auth.models import VertebraUserMixin
+                from vertebra.auth.proxy import LazyUserProxy
+
+                async def noop_fetcher(user_id: str, ctx: Any) -> Any:
+                    return VertebraUserMixin(**claims)
+
+                user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher)
+            else:
+                from vertebra.auth.models import AnonymousUser
+                user = AnonymousUser()
+
+            token = set_user(user)
+
+            try:
+                raw_path = meta.raw_path if meta.raw_path is not None else meta.path.encode()
+                query_string = meta.query_string if meta.query_string is not None else meta.query.encode()
+                scope = {
+                    "type": "http",
+                    "asgi": {"version": ASGI_VERSION, "spec_version": ASGI_HTTP_SPEC_VERSION},
+                    "http_version": meta.http_version,
+                    "method": meta.method,
+                    "path": meta.path,
+                    "raw_path": raw_path,
+                    "query_string": query_string,
+                    "headers": [(k.lower().encode(), v.encode()) for k, v in meta.headers],
+                    "scheme": meta.scheme,
+                    "root_path": meta.root_path,
+                    "server": meta.server or (self._config.host, self._config.port),
+                    "client": meta.client or ("127.0.0.1", 0),
+                    "extensions": meta.extensions,
+                    "state": self._lifespan_state,
+                }
+
+                queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+
+                async def receive() -> dict[str, Any]:
+                    return await self._receive_body(body_state)
+
+                async def send(message: dict[str, Any]) -> None:
+                    await queue.put(message)
+
+                app_task: asyncio.Task[None] = asyncio.create_task(self._app(scope, receive, send))  # type: ignore[arg-type]  # type: ignore[arg-type]
+                try:
+                    while True:
+                        if app_task.done() and queue.empty():
+                            break
+                        message = await queue.get()
+                        frame = self._format_response_frame(meta.id, message)
+                        if frame is None:
+                            continue
+                        if frame.get("type") == "http.response.start":
+                            response_started = True
+                        await writer.send(frame)
+                finally:
+                    try:
+                        await app_task
+                    except Exception as exc:  # noqa: BLE001 - must catch all ASGI app errors
+                        trace_id = self._extract_trace_id(meta.headers)
+                        self._log(
+                            "error", "request.error", trace_id=trace_id, method=meta.method, path=meta.path, error=str(exc)
+                        )
+                        if not response_started:
+                            await writer.send({
+                                "id": meta.id,
+                                "type": "http.response.start",
+                                "status": 500,
+                                "headers": [("content-type", "text/plain")],
+                            })
+                            await writer.send({
+                                "id": meta.id,
+                                "type": "http.response.body",
+                                "body": b"Internal Server Error",
+                                "more_body": False,
+                            })
+                        return
+            finally:
+                reset_user(token)
+        finally:
+            contexts.pop(meta.id, None)
+
+    async def _run_websocket_request(
+        self, meta: RequestMeta, body_state: RequestBodyState, writer: "ResponseWriter"
+    ) -> None:
+        from vertebra.auth.state import reset_user, set_user
+
+        claims = meta.auth_claims
+        if claims:
+            from vertebra.auth.models import VertebraUserMixin
+            from vertebra.auth.proxy import LazyUserProxy
+
+            async def noop_fetcher(user_id: str, ctx: Any) -> Any:
+                return VertebraUserMixin(**claims)
+
+            user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher)
+        else:
+            from vertebra.auth.models import AnonymousUser
+            user = AnonymousUser()
+
+        token = set_user(user)
+
+        try:
+            queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
             raw_path = meta.raw_path if meta.raw_path is not None else meta.path.encode()
             query_string = meta.query_string if meta.query_string is not None else meta.query.encode()
             scope = {
-                "type": "http",
+                "type": "websocket",
                 "asgi": {"version": ASGI_VERSION, "spec_version": ASGI_HTTP_SPEC_VERSION},
                 "http_version": meta.http_version,
-                "method": meta.method,
                 "path": meta.path,
                 "raw_path": raw_path,
                 "query_string": query_string,
@@ -561,11 +670,10 @@ class AsgiWorker:
                 "root_path": meta.root_path,
                 "server": meta.server or (self._config.host, self._config.port),
                 "client": meta.client or ("127.0.0.1", 0),
+                "subprotocols": meta.subprotocols,
                 "extensions": meta.extensions,
                 "state": self._lifespan_state,
             }
-
-            queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
 
             async def receive() -> dict[str, Any]:
                 return await self._receive_body(body_state)
@@ -573,7 +681,7 @@ class AsgiWorker:
             async def send(message: dict[str, Any]) -> None:
                 await queue.put(message)
 
-            app_task: asyncio.Task[None] = asyncio.create_task(self._app(scope, receive, send))  # type: ignore[arg-type]  # type: ignore[arg-type]
+            app_task: asyncio.Task[None] = asyncio.create_task(self._app(scope, receive, send))  # type: ignore[arg-type]
             try:
                 while True:
                     if app_task.done() and queue.empty():
@@ -582,85 +690,21 @@ class AsgiWorker:
                     frame = self._format_response_frame(meta.id, message)
                     if frame is None:
                         continue
-                    if frame.get("type") == "http.response.start":
-                        response_started = True
                     await writer.send(frame)
             finally:
                 try:
                     await app_task
                 except Exception as exc:  # noqa: BLE001 - must catch all ASGI app errors
                     trace_id = self._extract_trace_id(meta.headers)
-                    self._log(
-                        "error", "request.error", trace_id=trace_id, method=meta.method, path=meta.path, error=str(exc)
-                    )
-                    if not response_started:
-                        await writer.send({
-                            "id": meta.id,
-                            "type": "http.response.start",
-                            "status": 500,
-                            "headers": [("content-type", "text/plain")],
-                        })
-                        await writer.send({
-                            "id": meta.id,
-                            "type": "http.response.body",
-                            "body": b"Internal Server Error",
-                            "more_body": False,
-                        })
-                    return
+                    self._log("error", "websocket.error", trace_id=trace_id, path=meta.path, error=str(exc))
+                    await writer.send({
+                        "id": meta.id,
+                        "type": "websocket.close",
+                        "code": 1011,
+                        "reason": "Internal Server Error",
+                    })
         finally:
-            contexts.pop(meta.id, None)
-
-    async def _run_websocket_request(
-        self, meta: RequestMeta, body_state: RequestBodyState, writer: "ResponseWriter"
-    ) -> None:
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
-        raw_path = meta.raw_path if meta.raw_path is not None else meta.path.encode()
-        query_string = meta.query_string if meta.query_string is not None else meta.query.encode()
-        scope = {
-            "type": "websocket",
-            "asgi": {"version": ASGI_VERSION, "spec_version": ASGI_HTTP_SPEC_VERSION},
-            "http_version": meta.http_version,
-            "path": meta.path,
-            "raw_path": raw_path,
-            "query_string": query_string,
-            "headers": [(k.lower().encode(), v.encode()) for k, v in meta.headers],
-            "scheme": meta.scheme,
-            "root_path": meta.root_path,
-            "server": meta.server or (self._config.host, self._config.port),
-            "client": meta.client or ("127.0.0.1", 0),
-            "subprotocols": meta.subprotocols,
-            "extensions": meta.extensions,
-            "state": self._lifespan_state,
-        }
-
-        async def receive() -> dict[str, Any]:
-            return await self._receive_body(body_state)
-
-        async def send(message: dict[str, Any]) -> None:
-            await queue.put(message)
-
-        app_task: asyncio.Task[None] = asyncio.create_task(self._app(scope, receive, send))  # type: ignore[arg-type]
-        try:
-            while True:
-                if app_task.done() and queue.empty():
-                    break
-                message = await queue.get()
-                frame = self._format_response_frame(meta.id, message)
-                if frame is None:
-                    continue
-                await writer.send(frame)
-        finally:
-            try:
-                await app_task
-            except Exception as exc:  # noqa: BLE001 - must catch all ASGI app errors
-                trace_id = self._extract_trace_id(meta.headers)
-                self._log("error", "websocket.error", trace_id=trace_id, path=meta.path, error=str(exc))
-                await writer.send({
-                    "id": meta.id,
-                    "type": "websocket.close",
-                    "code": 1011,
-                    "reason": "Internal Server Error",
-                })
+            reset_user(token)
 
     def _format_response_frame(self, request_id: str, message: dict[str, Any]) -> dict[str, Any] | None:  # noqa: PLR0911
         message_type = message.get("type")

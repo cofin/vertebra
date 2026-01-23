@@ -2,6 +2,7 @@ import type { Server, WebSocketHandler } from "bun";
 import { AsyncBrokerClient, BrokerServer } from "../broker";
 import { ShmRouter } from "../broker/shm";
 import { AsgiBridge } from "../ipc";
+import { AuthValidator } from "./auth";
 import { collectBrokerMetrics } from "../broker/metrics";
 import { collectMcpMetrics } from "../mcp/metrics";
 import {
@@ -174,6 +175,9 @@ export async function createAsgiServer(
   const routerInstance = new ShmRouter();
   const bridge = new AsgiBridge({ requester: workerPool, router: routerInstance });
 
+  // Initialize Auth Validator
+  const authValidator = new AuthValidator(resolved.auth);
+
   // Initialize Broker Server
   const broker = new BrokerServer(resolved.broker);
 
@@ -195,18 +199,20 @@ export async function createAsgiServer(
           return await metricsHandler(request);
         }
 
-        const start = performance.now();
-
-        if (bridge.upgradeWebSocket(tracedRequest, server)) {
-          log("info", "request.upgrade", {
-            trace_id: traceId,
-            method: tracedRequest.method,
-            path: url.pathname,
-          });
-          return;
-        }
-        const response = await bridge.handle(tracedRequest);
-
+                const start = performance.now();
+        
+                // Validate Authentication
+                const claims = await authValidator.validate(tracedRequest);
+                
+                if (bridge.upgradeWebSocket(tracedRequest, server)) {
+                  log("info", "request.upgrade", {
+                    trace_id: traceId,
+                    method: tracedRequest.method,
+                    path: url.pathname,
+                  });
+                  return;
+                }
+                const response = await bridge.handle(tracedRequest, claims);
         trackRequest(performance.now() - start);
 
         log("info", "request.complete", {

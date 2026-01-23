@@ -149,85 +149,6 @@ export class BrokerServer {
         let result: unknown;
         let error: string | undefined;
 
-        switch (flags) {
-        case OP_HASH_PASSWORD: {
-          const password = decode(data) as string;
-          result = await Bun.password.hash(password);
-          break;
-        }
-        case OP_VERIFY_PASSWORD: {
-          const [password, hash] = decode(data) as [string, string];
-          result = await Bun.password.verify(password, hash);
-          break;
-        }
-        case OP_GENERATE_RANDOM: {
-          const length = decode(data) as number;
-          // Bun doesn't have a specific random bytes helper that returns array directly better than WebCrypto?
-          // crypto.getRandomValues
-          const buf = new Uint8Array(length);
-          crypto.getRandomValues(buf);
-          result = buf;
-          break;
-        }
-        case OP_CSRF_SIGN: {
-          // Mock or real impl?
-          // "CSRF & CSP: Implement CSRF token generation/verification ... utilizing Bun's native capabilities"
-          // Usually HMAC.
-          const [dataStr, secret] = decode(data) as [string, string];
-          // Simple HMAC-SHA256
-          const key = await crypto.subtle.importKey(
-            "raw",
-            new TextEncoder().encode(secret),
-            { name: "HMAC", hash: "SHA-256" },
-            false,
-            ["sign"],
-          );
-          const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(dataStr));
-          result = Buffer.from(sig).toString("base64");
-          break;
-        }
-        default:
-          // Normal message or unknown op?
-          // If existing AsyncBrokerClient sends payload, it uses flags=0.
-          // We should probably just echo or handle "stats" if it's 0.
-          if (flags === 0) {
-            const payload = decode(data) as Record<string, any>;
-            if (payload.kind === "stats") {
-              // Return stats
-              result = { pools: [] }; // Mock stats for now
-            } else {
-              error = "Unknown command";
-            }
-          } else {
-            error = `Unknown opcode: ${flags}`;
-          }
-      }
-
-      const payload = decode(data) as Record<string, any>; // Extract ID if present?
-      // Wait, for OP_* we decoded specific types.
-      // Does the client wrap it in {id, payload}?
-      // AsyncBrokerClient wraps: {id: ..., ...payload}
-      // But for Opcode optimized calls, we might send raw args?
-      // If we send raw args, we can't extract ID easily unless we enforce a structure.
-
-      // Let's assume standard structure: { id: ..., payload: ... } or just { id: ..., ...args }
-      // BUT, decoding twice is wasteful.
-
-      // OPTIMIZATION:
-      // The Payload for OP_* should be [id, args...]
-      // Or if we stick to `AsyncBrokerClient` pattern, everything is an object with `id`.
-
-      // Let's stick to { id: ..., arg1: ... } pattern for consistency for now,
-      // or just accept that `decode` happened in the switch case.
-
-      // Actually, for HashPassword, if I send just "password" string, I lose the ID.
-      // RPC needs ID to match response.
-
-      // So the payload MUST be an array or object containing the ID.
-      // Let's define the payload as [id, ...args] for Opcodes.
-
-      // Re-implementing switch with [id, ...args]:
-
         // We need to decode first.
         const decoded = decode(data);
         
@@ -237,67 +158,70 @@ export class BrokerServer {
             id = (decoded as any).id;
         }
 
-        // Re-eval result based on decoded data
-      if (!error && result === undefined) {
         switch (flags) {
-                          case OP_HASH_PASSWORD: {
-                              const [_, password] = decoded as [unknown, string];
-                              result = await Bun.password.hash(password, { algorithm: "bcrypt" });
-                              break;
-                          }          case OP_VERIFY_PASSWORD: {
-            const [_, password, hash] = decoded as [unknown, string, string];
-            result = await Bun.password.verify(password, hash);
-            break;
-          }
-          case OP_GENERATE_RANDOM: {
-            const [_, length] = decoded as [unknown, number];
-            const buf = new Uint8Array(length);
-            crypto.getRandomValues(buf);
-            result = buf;
-            break;
-          }
-          case OP_CSRF_SIGN: {
-            const [_, dataStr, secret] = decoded as [unknown, string, string];
-            const key = await crypto.subtle.importKey(
-              "raw",
-              new TextEncoder().encode(secret),
-              { name: "HMAC", hash: "SHA-256" },
-              false,
-              ["sign"],
-            );
-            const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(dataStr));
-            result = Buffer.from(sig).toString("base64");
-            break;
-          }
-          default:
-            if (flags === 0) {
-              const payload = decoded as Record<string, any>;
-              if (payload.kind === "stats") {
-                result = { pools: [] };
-              } else {
-                // Fallback or ignore
-              }
+            case OP_HASH_PASSWORD: {
+                const [_, password] = decoded as [unknown, string];
+                result = await Bun.password.hash(password, { algorithm: "bcrypt" });
+                break;
             }
+            case OP_VERIFY_PASSWORD: {
+                const [_, password, hash] = decoded as [unknown, string, string];
+                result = await Bun.password.verify(password, hash);
+                break;
+            }
+            case OP_GENERATE_RANDOM: {
+                const [_, length] = decoded as [unknown, number];
+                const buf = new Uint8Array(length);
+                crypto.getRandomValues(buf);
+                result = buf;
+                break;
+            }
+            case OP_CSRF_SIGN: {
+                const [_, dataStr, secret] = decoded as [unknown, string, string];
+                const key = await crypto.subtle.importKey(
+                    "raw", 
+                    new TextEncoder().encode(secret),
+                    { name: "HMAC", hash: "SHA-256" },
+                    false,
+                    ["sign"]
+                );
+                const sig = await crypto.subtle.sign(
+                    "HMAC",
+                    key,
+                    new TextEncoder().encode(dataStr)
+                );
+                result = Buffer.from(sig).toString("base64");
+                break;
+            }
+            default:
+                // Check if it's a stats request (flags=0)
+                if (flags === 0) {
+                     const payload = decoded as Record<string, any>;
+                     if (payload.kind === "stats") {
+                         result = { pools: [] };
+                     } else {
+                         error = "Unknown command";
+                     }
+                } else {
+                    error = `Unknown opcode: ${flags}`;
+                }
         }
-      }
 
-      // Send response
-      // Format: { id, result, ok: true } or { id, error, ok: false }
-      const respPayload = error
-        ? { id, ok: false, error: { message: error } }
-        : { id, ok: true, result };
-      client.respRing.send(encode(respPayload), 0, this.config.timeoutMs);
-        } catch (e: any) {
-            console.error("Handler error", e);
-            // Try to send error if we have an ID
-            if (id !== undefined) {
-                 const respPayload = { id, ok: false, error: { message: e.message || String(e) } };
-                 try {
-                    client.respRing.send(encode(respPayload), 0, this.config.timeoutMs);
-                 } catch (sendErr) {
-                     console.error("Failed to send error response", sendErr);
-                 }
-            }
+        // Send response
+        const respPayload = error ? { id, ok: false, error: { message: error } } : { id, ok: true, result };
+        client.respRing.send(encode(respPayload), 0, this.config.timeoutMs);
+
+    } catch (e: any) {
+        console.error("Handler error", e);
+        // Try to send error if we have an ID
+        if (id !== undefined) {
+             const respPayload = { id, ok: false, error: { message: e.message || String(e) } };
+             try {
+                client.respRing.send(encode(respPayload), 0, this.config.timeoutMs);
+             } catch (sendErr) {
+                 console.error("Failed to send error response", sendErr);
+             }
         }
-      }
     }
+  }
+}
