@@ -6,22 +6,9 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 
 ## Active PRDs
 
-## [~] PRD: Server & Runtime - MCP, Health Checks, and Observability
+## [x] PRD: Server & Runtime - MCP, Health Checks, and Observability
 
-*Link: [./specs/server-runtime/](./specs/server-runtime/)*
-
-## [ ] PRD: Documentation & Adoption - Vertebra 1.0
-
-*Link: [./specs/documentation/](./specs/documentation/)*
-
-## [ ] PRD: Elite DX & Native Bridging (Shared Memory)
-
-*Link: [./specs/elite-dx-native-bridge/](./specs/elite-dx-native-bridge/)*
-*Risk Level: [medium]*
-
----
-
-## Completed & Archived PRDs
+*Link: [./archive/prd_20260123_server-runtime/](./archive/prd_20260123_server-runtime/)*
 
 ## [x] PRD: Native Litestar Integration (Direct Protocol)
 
