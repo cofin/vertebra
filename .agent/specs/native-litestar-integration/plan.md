@@ -56,7 +56,7 @@ This plan outlines the phases to implement a custom, high-performance integratio
 - [x] **Task: Bun Broker WebSocket Forwarding** [a1f1a19]
     - [ ] Write Bun unit tests for proxying uWebSockets events into the Ring Buffer.
     - [ ] Implement frame forwarding in the TS Broker logic.
-- [ ] **Task: Python Direct WebSocket Invocation**
+- [x] **Task: Python Direct WebSocket Invocation** [a3b12d6]
     - [ ] Write tests for a Litestar WebSocket handler being called "per-message" by Vertebra.
     - [ ] Implement the Python worker logic to handle streaming opcodes without an internal `while True` loop.
 - [ ] **Task: Checkpoint - Verify Elite WebSockets**
