@@ -9,7 +9,7 @@
 - [x] Task: Implement `GENERATE_RANDOM` and `CSRF_SIGN` handlers in the Bun Broker.
 - [x] Task: Write Python unit tests for the security IPC client.
 - [x] Task: Implement `vertebra.security` Python module using the IPC client to call Bun hooks.
-- [x] Task: Checkpoint - Verify Phase 1 complete and create recovery point
+- [x] Task: Checkpoint - Verify Phase 1 complete and create recovery point [checkpoint: 23a05d2]
 - [ ] Task: Flow - User Manual Verification 'Phase 1: Bun IPC Security Hooks' (Protocol in workflow.md)
 
 ## Phase 2: Core User Framework (Python)
