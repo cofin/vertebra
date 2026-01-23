@@ -252,7 +252,7 @@
 **Priority**: P0
 **Dependencies**: Tasks 2.1, 2.2, 2.3
 
-- [ ] **Task 2.4.1**: Create end-to-end integration test
+- [x] **Task 2.4.1**: Create end-to-end integration test
   - Register test tool with `@mcp_tool`
   - Start Bun MCP server
   - Send tool invocation via stdio
