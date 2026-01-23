@@ -44,7 +44,7 @@ Flatten the `extensions` directory in tests and move remaining root tests to the
     - [ ] Move `src/py/tests/integration/extensions/sqlalchemy` to `src/py/tests/integration/sqlalchemy`.
     - [ ] Move `src/py/tests/integration/extensions/advanced_alchemy` to `src/py/tests/integration/advanced_alchemy`.
     - [ ] Remove `src/py/tests/integration/extensions`.
-- [ ] Task: Flatten Unit Extensions
+- [x] Task: Flatten Unit Extensions 7879a93
     - [ ] Move `src/py/tests/unit/extensions/serialization` to `src/py/tests/unit/serialization`.
     - [ ] Remove `src/py/tests/unit/extensions`.
 - [ ] Task: Migrate SQLSpec Tests
