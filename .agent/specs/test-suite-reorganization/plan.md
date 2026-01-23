@@ -12,7 +12,7 @@ Establish the new directory structure, configure scoped `conftest.py` files, and
     - [ ] Create `src/py/tests/integration/conftest.py` and move database/service-related fixtures there.
     - [ ] Create `src/py/tests/unit/conftest.py` and move unit-test specific mocks there.
     - [ ] Move/Refactor `database.py` and `_test_app.py` to `src/py/tests/integration/helpers/` if they are only used for integration.
-- [ ] Task: Migrate Core Logic Unit Tests
+- [x] Task: Migrate Core Logic Unit Tests 97a50b6
     - [ ] Move `test_cli_init.py` to `src/py/tests/unit/cli/test_init.py` (creating `unit/cli/`)
     - [ ] Move `test_module_loader.py` to `src/py/tests/unit/core/test_module_loader.py`
     - [ ] Move `test_serialization_codec.py` to `src/py/tests/unit/extensions/serialization/test_codec.py`
