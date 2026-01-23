@@ -1,18 +1,27 @@
-import { readFile } from "node:fs/promises";
-import { watch, type FSWatcher } from "node:fs";
-
 export interface ToolSchema {
   name: string;
   description?: string;
   inputSchema?: unknown;
 }
 
+export interface ResourceSchema {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+}
+
 export interface RegistryData {
   tools: ToolSchema[];
+  resources?: ResourceSchema[];
 }
+
+import { readFile } from "node:fs/promises";
+import { watch, type FSWatcher } from "node:fs";
 
 export class SchemaRegistry {
   private tools = new Map<string, ToolSchema>();
+  private resources = new Map<string, ResourceSchema>();
   private watcher?: FSWatcher;
 
   async loadFromFile(path: string): Promise<void> {
@@ -26,9 +35,14 @@ export class SchemaRegistry {
           this.tools.set(tool.name, tool);
         }
       }
+
+      this.resources.clear();
+      if (Array.isArray(data.resources)) {
+        for (const res of data.resources) {
+          this.resources.set(res.uri, res);
+        }
+      }
     } catch (error) {
-      // Gracefully handle errors (invalid JSON, file not found/locked)
-      // In a real app we might want to emit an event
       if (process.env.NODE_ENV !== 'test') {
         console.error(`Failed to load schema from ${path}:`, error);
       }
@@ -36,19 +50,14 @@ export class SchemaRegistry {
   }
 
   async watch(path: string): Promise<void> {
-    // Initial load
     await this.loadFromFile(path);
-
     try {
         this.watcher = watch(path, async (eventType) => {
           if (eventType === "change") {
-            // Simple debounce/retry could go here, but relying on eventual consistency for now
             await this.loadFromFile(path);
           }
         });
-    } catch (e) {
-        // Watch might fail if file doesn't exist
-    }
+    } catch (e) {}
   }
 
   getTool(name: string): ToolSchema | undefined {
@@ -57,6 +66,14 @@ export class SchemaRegistry {
 
   getTools(): ToolSchema[] {
     return Array.from(this.tools.values());
+  }
+
+  getResource(uri: string): ResourceSchema | undefined {
+    return this.resources.get(uri);
+  }
+
+  getResources(): ResourceSchema[] {
+    return Array.from(this.resources.values());
   }
 
   close(): void {

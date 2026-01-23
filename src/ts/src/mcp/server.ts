@@ -24,8 +24,16 @@ export interface McpTool {
   handler: ToolHandler;
 }
 
+export interface McpResource {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+}
+
 export class McpServer {
   private tools = new Map<string, McpTool>();
+  private resources = new Map<string, McpResource>();
   private initialized = false;
 
   constructor(
@@ -37,7 +45,11 @@ export class McpServer {
     this.tools.set(tool.name, tool);
   }
 
-  syncTools(): void {
+  registerResource(resource: McpResource): void {
+    this.resources.set(resource.uri, resource);
+  }
+
+  syncFromRegistry(): void {
     if (!this.registry) return;
     
     for (const schema of this.registry.getTools()) {
@@ -46,11 +58,18 @@ export class McpServer {
         description: schema.description,
         inputSchema: schema.inputSchema,
         handler: async (args) => {
-          if (!this.bridge) {
-            throw new Error("IPC bridge not available");
-          }
+          if (!this.bridge) throw new Error("IPC bridge not available");
           return this.bridge.callTool(schema.name, args);
         }
+      });
+    }
+
+    for (const schema of this.registry.getResources()) {
+      this.registerResource({
+        uri: schema.uri,
+        name: schema.name,
+        description: schema.description,
+        mimeType: schema.mimeType
       });
     }
   }
@@ -70,22 +89,27 @@ export class McpServer {
           return this.handleToolsList(request);
         case "tools/call":
           return await this.handleToolsCall(request);
+        case "resources/list":
+          return this.handleResourcesList(request);
+        case "resources/read":
+          return await this.handleResourcesRead(request);
         case "ping":
           return this.success(request.id, {});
         default:
           return this.error(request.id, -32601, `Method not found: ${request.method}`);
       }
     } catch (error) {
-      return this.error(request.id, -32000, "Internal error", String(error));
+      return this.error(request.id, -32603, "Internal error", String(error));
     }
   }
 
   private handleInitialize(request: JsonRpcRequest): JsonRpcResponse {
     this.initialized = true;
     return this.success(request.id, {
-      protocolVersion: "2024-11-05", // Example version
+      protocolVersion: "2024-11-05",
       capabilities: {
         tools: {},
+        resources: {}
       },
       serverInfo: {
         name: "vertebra-mcp",
@@ -100,7 +124,6 @@ export class McpServer {
       description: t.description,
       inputSchema: t.inputSchema,
     }));
-
     return this.success(request.id, { tools: toolsList });
   }
 
@@ -122,6 +145,38 @@ export class McpServer {
       });
     } catch (error) {
       return this.error(request.id, -32000, "Tool execution failed", String(error));
+    }
+  }
+
+  private handleResourcesList(request: JsonRpcRequest): JsonRpcResponse {
+    const list = Array.from(this.resources.values()).map((r) => ({
+      uri: r.uri,
+      name: r.name,
+      description: r.description,
+      mimeType: r.mimeType
+    }));
+    return this.success(request.id, { resources: list });
+  }
+
+  private async handleResourcesRead(request: JsonRpcRequest): Promise<JsonRpcResponse> {
+    const params = request.params as { uri: string };
+    if (!params || !params.uri) {
+      return this.error(request.id, -32602, "Invalid params: 'uri' is required");
+    }
+
+    if (!this.bridge) {
+        return this.error(request.id, -32603, "IPC bridge not available");
+    }
+
+    try {
+      // In MCP, resources/read returns resource content
+      // We route this through IPC bridge as a special "resource_read" call
+      const result = await this.bridge.callTool("__resource_read__", { uri: params.uri });
+      return this.success(request.id, {
+        contents: [result]
+      });
+    } catch (error) {
+      return this.error(request.id, -32000, "Resource read failed", String(error));
     }
   }
 
