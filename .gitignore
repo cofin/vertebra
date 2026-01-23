@@ -37,6 +37,7 @@ todo/
 .Python
 build/
 !src/py/vertebra/build/
+!src/py/**/*/build/
 dist/
 downloads/
 .python-version
