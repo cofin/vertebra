@@ -7,6 +7,17 @@ from typing import TYPE_CHECKING
 
 from vertebra.utils.module_loader import dependency_flag
 
+# Re-export native types from _typing
+from vertebra._typing import (
+    AsyncRing,
+    AsyncShmTransport,
+    PollingTransport,
+    ShmRegion,
+    SpscRing,
+    create_transport,
+    shm_unlink,
+)
+
 if TYPE_CHECKING:
     import pyarrow as pa  # pyright: ignore[reportMissingImports]
 
@@ -29,11 +40,18 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
 __all__ = (
     "ATTRS_INSTALLED",
+    "ArrowTable",
+    "AsyncRing",
+    "AsyncShmTransport",
     "MSGSPEC_INSTALLED",
     "NUMPY_INSTALLED",
     "PANDAS_INSTALLED",
     "POLARS_INSTALLED",
     "PYARROW_INSTALLED",
     "PYDANTIC_INSTALLED",
-    "ArrowTable",
+    "PollingTransport",
+    "ShmRegion",
+    "SpscRing",
+    "create_transport",
+    "shm_unlink",
 )

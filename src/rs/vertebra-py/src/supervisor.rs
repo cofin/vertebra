@@ -7,7 +7,7 @@ use signal_hook::consts::signal::*;
 #[cfg(unix)]
 use signal_hook::iterator::Signals;
 
-#[pyclass(name = "Supervisor")]
+#[pyclass(name = "NativeSupervisor")]
 pub struct NativeSupervisor {
     bun_process: Arc<Mutex<Option<Child>>>,
     workers: Arc<Mutex<Vec<Child>>>,

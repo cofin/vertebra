@@ -140,18 +140,16 @@ export class BrokerServer {
     }
   }
 
-  private async handleClientMessage(
-    client: ClientContext,
-    msg: { data: Uint8Array; flags: number },
-  ): Promise<void> {
+  private async handleClientMessage(client: ClientContext, msg: { data: Uint8Array; flags: number }): Promise<void> {
     client.lastActive = Date.now();
     const { data, flags } = msg;
+    let id: string | number | undefined;
 
     try {
-      let result: unknown;
-      let error: string | undefined;
+        let result: unknown;
+        let error: string | undefined;
 
-      switch (flags) {
+        switch (flags) {
         case OP_HASH_PASSWORD: {
           const password = decode(data) as string;
           result = await Bun.password.hash(password);
@@ -230,25 +228,23 @@ export class BrokerServer {
 
       // Re-implementing switch with [id, ...args]:
 
-      // We need to decode first.
-      const decoded = decode(data);
-      let id: string | number | undefined;
+        // We need to decode first.
+        const decoded = decode(data);
+        
+        if (Array.isArray(decoded)) {
+            id = decoded[0];
+        } else if (typeof decoded === 'object' && decoded !== null) {
+            id = (decoded as any).id;
+        }
 
-      if (Array.isArray(decoded)) {
-        id = decoded[0];
-      } else if (typeof decoded === "object" && decoded !== null) {
-        id = (decoded as any).id;
-      }
-
-      // Re-eval result based on decoded data
+        // Re-eval result based on decoded data
       if (!error && result === undefined) {
         switch (flags) {
-          case OP_HASH_PASSWORD: {
-            const [_, password] = decoded as [unknown, string];
-            result = await Bun.password.hash(password);
-            break;
-          }
-          case OP_VERIFY_PASSWORD: {
+                          case OP_HASH_PASSWORD: {
+                              const [_, password] = decoded as [unknown, string];
+                              result = await Bun.password.hash(password, { algorithm: "bcrypt" });
+                              break;
+                          }          case OP_VERIFY_PASSWORD: {
             const [_, password, hash] = decoded as [unknown, string, string];
             result = await Bun.password.verify(password, hash);
             break;
@@ -291,10 +287,17 @@ export class BrokerServer {
         ? { id, ok: false, error: { message: error } }
         : { id, ok: true, result };
       client.respRing.send(encode(respPayload), 0, this.config.timeoutMs);
-    } catch (e: any) {
-      console.error("Handler error", e);
-      // Try to send error if possible
-      // We might not have ID if decode failed.
+        } catch (e: any) {
+            console.error("Handler error", e);
+            // Try to send error if we have an ID
+            if (id !== undefined) {
+                 const respPayload = { id, ok: false, error: { message: e.message || String(e) } };
+                 try {
+                    client.respRing.send(encode(respPayload), 0, this.config.timeoutMs);
+                 } catch (sendErr) {
+                     console.error("Failed to send error response", sendErr);
+                 }
+            }
+        }
+      }
     }
-  }
-}

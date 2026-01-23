@@ -378,6 +378,14 @@ py-install:                                         ## Install Python dependenci
 	@uv run maturin develop --uv >/dev/null 2>&1
 	@echo "${OK} Python dependencies installed ✨"
 
+.PHONY: ensure-native
+ensure-native:                                      ## Ensure native extension is built
+	@if ! uv run python -c "import vertebra._vertebra" 2>/dev/null; then \
+		echo "${INFO} Building native extension... 🦀"; \
+		uv run maturin develop --uv >/dev/null 2>&1; \
+		echo "${OK} Native extension built"; \
+	fi
+
 .PHONY: py-build
 py-build:                                           ## Build Python package
 	@echo "${INFO} Building Python package... 📦"
@@ -448,7 +456,7 @@ coverage:                                          ## Run the tests and generate
 	@echo "${OK} Coverage report generated ✨"
 
 .PHONY: test
-test:                                              ## Run unit tests (excludes integration)
+test: ensure-native                                ## Run unit tests (excludes integration)
 	@echo "${INFO} Cleaning shared memory... 🧹"
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
 	@echo "${INFO} Running unit tests... 🧪"
@@ -456,7 +464,7 @@ test:                                              ## Run unit tests (excludes i
 	@echo "${OK} Unit tests passed ✨"
 
 .PHONY: integration-test
-integration-test:                                 ## Run integration tests only
+integration-test: ensure-native                   ## Run integration tests only
 	@echo "${INFO} Cleaning shared memory... 🧹"
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
 	@echo "${INFO} Running integration tests... 🧪"
@@ -464,7 +472,7 @@ integration-test:                                 ## Run integration tests only
 	@echo "${OK} Integration tests passed ✨"
 
 .PHONY: py-test-all
-py-test-all:                                      ## Run all Python tests (unit + integration)
+py-test-all: ensure-native                        ## Run all Python tests (unit + integration)
 	@echo "${INFO} Cleaning shared memory... 🧹"
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
 	@echo "${INFO} Running all Python tests... 🧪"
