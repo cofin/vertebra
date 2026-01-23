@@ -634,7 +634,7 @@
 - Grafana dashboard loads and displays data
 - Integration test validates accuracy
 
----
+**Phase 6 Checkpoint**: [checkpoint: 8bc0ca2]
 
 ## Phase 7: Production Hardening (Week 10-11)
 
@@ -643,12 +643,12 @@
 **Priority**: P0
 **Dependencies**: Phases 1-6
 
-- [ ] **Task 7.1.1**: Audit MCP transport error cases
+- [x] **Task 7.1.1**: Audit MCP transport error cases
   - Review stdio, SSE, WebSocket error handling
   - Add missing error cases
   - Test error recovery scenarios
 
-- [ ] **Task 7.1.2**: Audit pool error propagation
+- [x] **Task 7.1.2**: Audit pool error propagation
   - Ensure errors propagate correctly
   - Add timeout handling everywhere
   - Test error recovery scenarios
@@ -664,20 +664,20 @@
 **Priority**: P1
 **Dependencies**: All phases
 
-- [ ] **Task 7.2.1**: Write MCP integration guide
+- [x] **Task 7.2.1**: Write MCP integration guide
   - Getting started
   - Tool creation with `@mcp_tool`
   - Transport selection
   - Claude Desktop setup
   - File: `docs/mcp/getting-started.md` (NEW)
 
-- [ ] **Task 7.2.2**: Write pool management guide
+- [x] **Task 7.2.2**: Write pool management guide
   - Health check configuration
   - Lifecycle hooks
   - Idle timeout tuning
   - File: `docs/pools/health-checks.md` (NEW)
 
-- [ ] **Task 7.2.3**: Write observability guide
+- [x] **Task 7.2.3**: Write observability guide
   - Metrics reference
   - Grafana setup
   - Alerting rules
@@ -694,11 +694,11 @@
 **Priority**: P1
 **Dependencies**: All phases
 
-- [ ] **Task 7.3.1**: Create MCP tools example
+- [x] **Task 7.3.1**: Create MCP tools example
   - 5-10 useful tools (database query, file search, API call)
   - File: `examples/mcp-tools/` (NEW directory)
 
-- [ ] **Task 7.3.2**: Create health check demo
+- [x] **Task 7.3.2**: Create health check demo
   - App demonstrating pool health features
   - File: `examples/pool-health-demo/` (NEW directory)
 
@@ -712,15 +712,15 @@
 **Priority**: P1
 **Dependencies**: All phases
 
-- [ ] **Task 7.4.1**: Create MCP latency benchmark
+- [x] **Task 7.4.1**: Create MCP latency benchmark
   - Target: <5ms P99 for tool invocation
   - File: `benchmarks/mcp-latency.ts` (NEW)
 
-- [ ] **Task 7.4.2**: Create pool latency benchmark
+- [x] **Task 7.4.2**: Create pool latency benchmark
   - Target: <2ms P99 for acquisition
   - File: `benchmarks/pool-latency.ts` (NEW)
 
-- [ ] **Task 7.4.3**: Run benchmarks and document results
+- [x] **Task 7.4.3**: Run benchmarks and document results
   - Verify targets met
   - Document in performance guide
 
@@ -728,7 +728,7 @@
 - Benchmarks passing targets
 - Performance documented
 
----
+**Phase 7 Checkpoint**: [checkpoint: 5472dae]
 
 ## Summary
 
