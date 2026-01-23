@@ -123,7 +123,7 @@
 **Priority**: P0
 **Dependencies**: None
 
-- [ ] **Task 1.5.1**: Fix router.test.ts FFI symbol mismatch
+- [x] **Task 1.5.1**: Fix router.test.ts FFI symbol mismatch
   - Investigate `vtb_last_error_message` symbol missing in `libvertebra_js.so`
   - Fix build configuration or symbol export in Rust
   - Verify `router.test.ts` passes
