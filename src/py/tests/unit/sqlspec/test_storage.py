@@ -1,16 +1,8 @@
 """Tests for VertebraObjectStore."""
 
-import sys
 import unittest.mock
 
 import pytest
-
-# Mock native extension
-mock_vertebra_native = unittest.mock.MagicMock()
-sys.modules["vertebra._vertebra"] = mock_vertebra_native
-mock_vertebra_native.ShmRegion = unittest.mock.MagicMock()
-mock_vertebra_native.AsyncRing = unittest.mock.MagicMock()
-mock_vertebra_native.SpscRing = unittest.mock.MagicMock()
 
 try:
     from vertebra.extensions.sqlspec._storage import VertebraObjectStore

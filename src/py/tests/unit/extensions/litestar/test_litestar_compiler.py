@@ -1,20 +1,15 @@
 from typing import Any
 
 import pytest
+
+pytest.importorskip("litestar")
+
 from litestar import get
 from litestar.exceptions import NotAuthorizedException
 
-try:
-    from vertebra.integration.litestar.compiler import PipelineCompiler, compile_di, compile_guards
-
-    HAS_COMPILER = True
-except ImportError:
-    HAS_COMPILER = False
-
-# ... existing tests ...
+from vertebra.extensions.litestar.compiler import PipelineCompiler, compile_di, compile_guards
 
 
-@pytest.mark.skipif(not HAS_COMPILER, reason="Compiler not implemented")
 @pytest.mark.anyio
 async def test_pipeline_compiler_end_to_end() -> None:
     from litestar.di import Provide
@@ -50,7 +45,6 @@ async def test_pipeline_compiler_end_to_end() -> None:
         await runner(conn)
 
 
-@pytest.mark.skipif(not HAS_COMPILER, reason="Compiler not implemented")
 @pytest.mark.anyio
 async def test_compile_di_basic() -> None:
     from litestar.di import Provide
@@ -94,7 +88,6 @@ class MockConnection:
         self.headers = headers
 
 
-@pytest.mark.skipif(not HAS_COMPILER, reason="Compiler not implemented")
 @pytest.mark.anyio
 async def test_compile_guards_basic() -> None:
     # Compile two guards into one runner
@@ -115,7 +108,6 @@ async def test_compile_guards_basic() -> None:
         await compiled(conn, None)
 
 
-@pytest.mark.skipif(not HAS_COMPILER, reason="Compiler not implemented")
 @pytest.mark.anyio
 async def test_compile_guards_async() -> None:
     async def async_guard(connection: Any, _: Any) -> None:
@@ -133,7 +125,6 @@ async def test_compile_guards_async() -> None:
         await compiled(conn, None)
 
 
-@pytest.mark.skipif(not HAS_COMPILER, reason="Compiler not implemented")
 @pytest.mark.anyio
 async def test_compile_guards_empty() -> None:
     compiled = compile_guards([])

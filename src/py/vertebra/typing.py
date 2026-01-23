@@ -20,9 +20,11 @@ PANDAS_INSTALLED = dependency_flag("pandas")
 POLARS_INSTALLED = dependency_flag("polars")
 
 # Type aliases
-if TYPE_CHECKING:
+try:
+    import pyarrow as pa  # pyright: ignore[reportMissingImports]
+
     ArrowTable = pa.Table
-else:
+except Exception:  # pragma: no cover - optional dependency fallback
     ArrowTable = object
 
 __all__ = (

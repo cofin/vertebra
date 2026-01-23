@@ -4,8 +4,7 @@ from vertebra.mcp import get_registry, mcp_tool
 def test_mcp_tool_registration() -> None:
     registry = get_registry()
 
-    # Clear registry for test isolation (hacky but works for unit test)
-    registry._tools.clear()
+    registry.clear()
 
     @mcp_tool(description="A test tool")
     def my_tool(x: int, y: str) -> str:
@@ -20,7 +19,7 @@ def test_mcp_tool_registration() -> None:
     assert tool["description"] == "A test tool"
     assert tool["inputSchema"]["type"] == "object"
     assert tool["inputSchema"]["required"] == ["x", "y"]
-    assert tool["inputSchema"]["properties"]["x"]["type"] == "integer"
+    assert tool["inputSchema"]["properties"]["x"]["type"] == "number"
     assert tool["inputSchema"]["properties"]["y"]["type"] == "string"
 
 

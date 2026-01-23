@@ -1,54 +1,54 @@
-import { dlopen, toArrayBuffer } from "bun:ffi";
+import { dlopen, ptr, read, toArrayBuffer } from "bun:ffi";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 export type ShmLibrary = {
-  vtb_last_error_message: () => bigint;
-  vtb_ring_capacity: (handle: bigint) => bigint;
+  vtb_last_error_message: () => number;
+  vtb_ring_capacity: (handle: number) => bigint;
   vtb_ring_create: (
-    name: string,
+    name: number,
     slotSize: number,
     slots: number,
-    outHandle: BigUint64Array,
+    outHandle: number,
   ) => number;
   vtb_ring_open: (
-    name: string,
+    name: number,
     slotSize: number,
     slots: number,
-    outHandle: BigUint64Array,
+    outHandle: number,
   ) => number;
   vtb_ring_send: (
-    handle: bigint,
+    handle: number,
     data: Uint8Array,
     len: number,
     flags: number,
     timeoutMs: number,
   ) => number;
   vtb_ring_recv: (
-    handle: bigint,
+    handle: number,
     out: Uint8Array,
     capacity: number,
-    outLen: BigUint64Array,
+    outLen: number,
     outFlags: Uint32Array,
     timeoutMs: number,
   ) => number;
-  vtb_ring_close: (handle: bigint) => void;
-  vtb_region_create: (name: string, size: number, outHandle: BigUint64Array) => number;
-  vtb_region_open: (name: string, size: number, outHandle: BigUint64Array) => number;
-  vtb_region_ptr: (handle: bigint) => bigint;
-  vtb_region_len: (handle: bigint) => bigint;
-  vtb_region_close: (handle: bigint) => void;
-  vtb_router_new: () => bigint;
-  vtb_router_insert: (handle: bigint, path: string, id: bigint) => number;
+  vtb_ring_close: (handle: number) => void;
+  vtb_region_create: (name: number, size: number, outHandle: number) => number;
+  vtb_region_open: (name: number, size: number, outHandle: number) => number;
+  vtb_region_ptr: (handle: number) => number;
+  vtb_region_len: (handle: number) => bigint;
+  vtb_region_close: (handle: number) => void;
+  vtb_router_new: () => number;
+  vtb_router_insert: (handle: number, path: Uint8Array, id: bigint) => number;
   vtb_router_match: (
-    handle: bigint,
+    handle: number,
     path: Uint8Array,
     outId: BigUint64Array,
     outParamsJson: Uint8Array,
     outParamsCap: number,
     outParamsLen: BigUint64Array,
   ) => number;
-  vtb_router_close: (handle: bigint) => void;
+  vtb_router_close: (handle: number) => void;
 };
 
 let cached: ShmLibrary | null = null;
@@ -58,12 +58,12 @@ const STATUS_TIMEOUT = 3;
 const STATUS_EMPTY = 5;
 
 function readLastError(lib: ShmLibrary): string | null {
-  const ptr = lib.vtb_last_error_message();
-  if (ptr === 0n) {
+  const errPtr = lib.vtb_last_error_message();
+  if (!errPtr) {
     return null;
   }
   const max = 4096;
-  const buffer = new Uint8Array(toArrayBuffer(ptr, 0, max));
+  const buffer = new Uint8Array(toArrayBuffer(errPtr, 0, max));
   const end = buffer.indexOf(0);
   const slice = end === -1 ? buffer : buffer.subarray(0, end);
   const message = new TextDecoder().decode(slice);
@@ -129,11 +129,11 @@ export function loadShmLib(): ShmLibrary {
       returns: "usize",
     },
     vtb_ring_create: {
-      args: ["cstring", "usize", "usize", "ptr"],
+      args: ["ptr", "usize", "usize", "ptr"],
       returns: "i32",
     },
     vtb_ring_open: {
-      args: ["cstring", "usize", "usize", "ptr"],
+      args: ["ptr", "usize", "usize", "ptr"],
       returns: "i32",
     },
     vtb_ring_send: {
@@ -149,11 +149,11 @@ export function loadShmLib(): ShmLibrary {
       returns: "void",
     },
     vtb_region_create: {
-      args: ["cstring", "usize", "ptr"],
+      args: ["ptr", "usize", "ptr"],
       returns: "i32",
     },
     vtb_region_open: {
-      args: ["cstring", "usize", "ptr"],
+      args: ["ptr", "usize", "ptr"],
       returns: "i32",
     },
     vtb_region_ptr: {
@@ -190,11 +190,11 @@ export function loadShmLib(): ShmLibrary {
 }
 
 export class ShmRing {
-  private handle: bigint;
+  private handle: number;
   private capacity: number;
   private lib: ShmLibrary;
 
-  private constructor(handle: bigint, lib: ShmLibrary) {
+  private constructor(handle: number, lib: ShmLibrary) {
     this.handle = handle;
     this.lib = lib;
     this.capacity = Number(lib.vtb_ring_capacity(handle));
@@ -203,21 +203,25 @@ export class ShmRing {
   static create(name: string, slotSize: number, slots: number): ShmRing {
     const lib = loadShmLib();
     const out = new BigUint64Array(1);
-    const status = lib.vtb_ring_create(name, slotSize, slots, out);
+    const namePtr = ptr(Buffer.from(`${name}\0`));
+    const status = lib.vtb_ring_create(namePtr, slotSize, slots, ptr(out));
     if (status !== STATUS_OK) {
       throw new Error(`shm ring create failed: ${formatStatusError(status, lib)}`);
     }
-    return new ShmRing(out[0], lib);
+    const handle = read.ptr(ptr(out));
+    return new ShmRing(handle, lib);
   }
 
   static open(name: string, slotSize: number, slots: number): ShmRing {
     const lib = loadShmLib();
     const out = new BigUint64Array(1);
-    const status = lib.vtb_ring_open(name, slotSize, slots, out);
+    const namePtr = ptr(Buffer.from(`${name}\0`));
+    const status = lib.vtb_ring_open(namePtr, slotSize, slots, ptr(out));
     if (status !== STATUS_OK) {
       throw new Error(`shm ring open failed: ${formatStatusError(status, lib)}`);
     }
-    return new ShmRing(out[0], lib);
+    const handle = read.ptr(ptr(out));
+    return new ShmRing(handle, lib);
   }
 
   send(payload: Uint8Array, flags = 0, timeoutMs = 0): void {
@@ -255,12 +259,12 @@ export class ShmRing {
 }
 
 export class ShmRegion {
-  private handle: bigint;
+  private handle: number;
   private length: number;
   private lib: ShmLibrary;
   private view?: Uint8Array;
 
-  private constructor(handle: bigint, lib: ShmLibrary) {
+  private constructor(handle: number, lib: ShmLibrary) {
     this.handle = handle;
     this.lib = lib;
     this.length = Number(lib.vtb_region_len(handle));
@@ -269,21 +273,25 @@ export class ShmRegion {
   static create(name: string, size: number): ShmRegion {
     const lib = loadShmLib();
     const out = new BigUint64Array(1);
-    const status = lib.vtb_region_create(name, size, out);
+    const namePtr = ptr(Buffer.from(`${name}\0`));
+    const status = lib.vtb_region_create(namePtr, size, ptr(out));
     if (status !== STATUS_OK) {
       throw new Error(`shm region create failed: ${formatStatusError(status, lib)}`);
     }
-    return new ShmRegion(out[0], lib);
+    const handle = read.ptr(ptr(out));
+    return new ShmRegion(handle, lib);
   }
 
   static open(name: string, size: number): ShmRegion {
     const lib = loadShmLib();
     const out = new BigUint64Array(1);
-    const status = lib.vtb_region_open(name, size, out);
+    const namePtr = ptr(Buffer.from(`${name}\0`));
+    const status = lib.vtb_region_open(namePtr, size, ptr(out));
     if (status !== STATUS_OK) {
       throw new Error(`shm region open failed: ${formatStatusError(status, lib)}`);
     }
-    return new ShmRegion(out[0], lib);
+    const handle = read.ptr(ptr(out));
+    return new ShmRegion(handle, lib);
   }
 
   buffer(): Uint8Array {
@@ -307,7 +315,7 @@ export class ShmRegion {
 }
 
 export class ShmRouter {
-  private handle: bigint;
+  private handle: number;
   private lib: ShmLibrary;
 
   constructor() {

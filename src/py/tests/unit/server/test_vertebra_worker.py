@@ -23,7 +23,7 @@ async def test_vertebra_worker_direct_http() -> None:
     worker = AsgiWorker(app, WorkerConfig(worker_id="0"))
 
     # Manually inject a native route for testing
-    from vertebra.integration.litestar.compiler import PipelineCompiler
+    from vertebra.extensions.litestar.compiler import PipelineCompiler
 
     compiler = PipelineCompiler()
     runner = compiler.compile_route(handler)

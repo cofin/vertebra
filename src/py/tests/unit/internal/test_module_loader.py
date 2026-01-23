@@ -136,3 +136,4 @@ class TestEnsurePyarrow:
 
         error_msg = str(exc_info.value)
         assert "vertebra[arrow]" in error_msg
+        reset_dependency_cache()

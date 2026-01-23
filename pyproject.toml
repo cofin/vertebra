@@ -75,7 +75,7 @@ test = [
   "pytest-xdist>=3.6.1",
   "time-machine>=2.15.0",
   "attrs","cattrs",
-  "uvloop",
+  "uvloop","pyarrow",
 ]
 
 

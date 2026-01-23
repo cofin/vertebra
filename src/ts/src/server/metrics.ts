@@ -9,6 +9,9 @@ const CACHE_TTL_MS = 5000;
 
 export function registerCollector(collector: MetricsCollector) {
   collectors.add(collector);
+  // Invalidate cached metrics so newly-registered collectors are reflected immediately.
+  cachedMetrics = null;
+  lastCollectionTime = 0;
 }
 
 // Server Metrics State

@@ -13,7 +13,7 @@ except ImportError:
 
 @pytest.mark.skipif(not HAS_LITESTAR, reason="Litestar not installed")
 def test_reflect_routes_basic() -> None:
-    from vertebra.integration.litestar import reflect_routes
+    from vertebra.extensions.litestar.native import reflect_routes
 
     @get("/hello", sync_to_thread=False)
     def hello_handler() -> str:
@@ -46,7 +46,7 @@ def test_reflect_routes_basic() -> None:
 def test_reflect_routes_nested() -> None:
     from litestar import Controller, Router
 
-    from vertebra.integration.litestar import reflect_routes
+    from vertebra.extensions.litestar.native import reflect_routes
 
     class MyController(Controller):
         path = "/controller"
@@ -73,7 +73,7 @@ def test_reflect_routes_nested() -> None:
 def test_reflect_routes_multiple_methods() -> None:
     from litestar import route
 
-    from vertebra.integration.litestar import reflect_routes
+    from vertebra.extensions.litestar.native import reflect_routes
 
     @route("/multi", http_method=["GET", "POST"], sync_to_thread=False)
     def multi_handler() -> str:
@@ -91,7 +91,7 @@ def test_reflect_routes_multiple_methods() -> None:
 
 @pytest.mark.skipif(not HAS_LITESTAR, reason="Litestar not installed")
 def test_reflect_routes_websockets() -> None:
-    from vertebra.integration.litestar import reflect_routes
+    from vertebra.extensions.litestar.native import reflect_routes
 
     @websocket("/ws")
     async def ws_handler(socket: Any) -> None:
@@ -109,7 +109,7 @@ def test_reflect_routes_websockets() -> None:
 @pytest.mark.skipif(not HAS_LITESTAR, reason="Litestar not installed")
 def test_build_router() -> None:
     from vertebra._vertebra import Router
-    from vertebra.integration.litestar import build_router, reflect_routes
+    from vertebra.extensions.litestar.native import build_router, reflect_routes
 
     @get("/hello/{name:str}", sync_to_thread=False)
     def hello_handler(name: str) -> str:

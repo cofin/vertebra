@@ -1,7 +1,7 @@
 import pytest
 from litestar import post
 
-from vertebra.integration.litestar import VertebraRequest
+from vertebra.extensions.litestar.native import VertebraRequest
 
 
 @pytest.mark.unit
@@ -37,7 +37,7 @@ async def test_vertebra_worker_with_request_object() -> None:
 
     worker = AsgiWorker(MagicMock(), WorkerConfig())
 
-    from vertebra.integration.litestar.compiler import PipelineCompiler
+    from vertebra.extensions.litestar.compiler import PipelineCompiler
 
     compiler = PipelineCompiler()
     # We need to tweak the compiler to use VertebraRequest specifically or
@@ -79,7 +79,7 @@ async def test_vertebra_worker_request_injection() -> None:
         return {"path": request.path}
 
     worker = AsgiWorker(MagicMock(), WorkerConfig())
-    from vertebra.integration.litestar.compiler import PipelineCompiler
+    from vertebra.extensions.litestar.compiler import PipelineCompiler
 
     compiler = PipelineCompiler()
     runner = compiler.compile_route(handler)

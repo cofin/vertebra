@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -6,8 +7,8 @@ from litestar.di import Provide
 from litestar.exceptions import HTTPException
 from litestar.status_codes import HTTP_400_BAD_REQUEST
 
-from vertebra.integration.litestar import reflect_routes
-from vertebra.integration.litestar.compiler import PipelineCompiler
+from vertebra.extensions.litestar.native import reflect_routes
+from vertebra.extensions.litestar.compiler import PipelineCompiler
 
 
 @pytest.mark.integration
@@ -61,10 +62,19 @@ async def test_complex_routing_and_di() -> None:
     }
 
     # Mock VertebraRequest context (since runner expects it)
-    from vertebra.integration.litestar import VertebraRequest
+    from vertebra.extensions.litestar.native import VertebraRequest
 
     ctx = VertebraRequest(msg_success)
 
     result = await runner(ctx)
-    assert result["param"] == 42
-    assert result["dep"] == "AB"
+    if hasattr(result, "body"):
+        body = result.body
+        if isinstance(body, (bytes, bytearray, memoryview)):
+            payload = json.loads(body)
+        else:
+            payload = json.loads(bytes(body))
+        assert payload["param"] == 42
+        assert payload["dep"] == "AB"
+    else:
+        assert result["param"] == 42
+        assert result["dep"] == "AB"

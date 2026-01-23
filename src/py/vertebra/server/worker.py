@@ -128,6 +128,7 @@ class AsgiWorker:
         self._codec = MessagePackCodec()
         self._control: SpscRing | None = None
         self._clients: dict[str, "ClientState"] = {}
+        self._contexts: dict[str, dict[str, RequestContext]] = {}
         self._running = False
         self._lifespan_task: asyncio.Task[None] | None = None
         self._lifespan_queue: asyncio.Queue[dict[str, Any]] | None = None
@@ -151,8 +152,8 @@ class AsgiWorker:
         from litestar import Litestar
 
         if native_enabled and isinstance(self._app, Litestar):
-            from vertebra.integration.litestar import reflect_routes
-            from vertebra.integration.litestar.compiler import PipelineCompiler
+            from vertebra.extensions.litestar.native import reflect_routes
+            from vertebra.extensions.litestar.compiler import PipelineCompiler
 
             routes = reflect_routes(self._app)
             compiler = PipelineCompiler()
@@ -164,28 +165,138 @@ class AsgiWorker:
         control_name = self._control_ring_name()
         self._control = SpscRing.create_named(control_name, self._config.slot_size, self._config.slots)
 
+    async def serve_forever(self) -> None:
+        await self.start()
+        self._running = True
+        try:
+            await self._serve_loop()
+        finally:
+            await self.stop()
+
+    async def stop(self) -> None:
+        if not self._running:
+            return
+        self._running = False
+        for contexts in self._contexts.values():
+            for context in contexts.values():
+                context.task.cancel()
+        self._contexts.clear()
+        for client in self._clients.values():
+            client.request.close()
+            client.response.close()
+        self._clients.clear()
+        if self._control is not None:
+            self._control.close()
+            self._control = None
+        await self._shutdown_lifespan()
+
+    async def _serve_loop(self) -> None:
+        if self._control is None:
+            return
+        slot_size = self._config.slot_size
+        while self._running:
+            did_work = False
+            control_payload = self._control.try_recv(slot_size)
+            if control_payload is not None:
+                did_work = True
+                await self._handle_control_payload(control_payload)
+            for client_id, client in list(self._clients.items()):
+                payload = client.request.try_recv(slot_size)
+                while payload is not None:
+                    did_work = True
+                    await self._handle_client_payload(client_id, client, payload)
+                    payload = client.request.try_recv(slot_size)
+            if not did_work:
+                await asyncio.sleep(0.001)
+
+    async def _handle_control_payload(self, payload: bytes) -> None:
+        try:
+            message = self._codec.decode(payload)
+        except Exception:
+            return
+        if not isinstance(message, dict):
+            return
+        kind = message.get("kind")
+        if kind == "register_client":
+            await self._register_client(message)
+        elif kind == "unregister_client":
+            client_id = message.get("client_id")
+            if isinstance(client_id, str):
+                await self._unregister_client(client_id)
+
+    async def _register_client(self, message: dict[str, Any]) -> None:
+        client_id = message.get("client_id")
+        if not isinstance(client_id, str):
+            return
+        if client_id in self._clients:
+            await self._send_control_ack(message, ok=True)
+            return
+        req_name = message.get("req_ring") or self._request_ring_name(client_id)
+        resp_name = message.get("resp_ring") or self._response_ring_name(client_id)
+        try:
+            request_ring = SpscRing.open_named(str(req_name), self._config.slot_size, self._config.slots)
+            response_ring = SpscRing.open_named(str(resp_name), self._config.slot_size, self._config.slots)
+        except Exception as exc:  # noqa: BLE001 - defensive for IPC setup
+            await self._send_control_ack(message, ok=False, error=str(exc))
+            return
+        self._clients[client_id] = ClientState(id=client_id, request=request_ring, response=response_ring)
+        self._contexts[client_id] = {}
+        await self._send_control_ack(message, ok=True)
+
+    async def _unregister_client(self, client_id: str) -> None:
+        client = self._clients.pop(client_id, None)
+        self._contexts.pop(client_id, None)
+        if client is None:
+            return
+        client.request.close()
+        client.response.close()
+
+    async def _send_control_ack(self, message: dict[str, Any], *, ok: bool, error: str | None = None) -> None:
+        client_id = message.get("client_id")
+        resp_name = message.get("resp_ring")
+        if not isinstance(client_id, str):
+            return
+        response_ring = self._clients.get(client_id).response if client_id in self._clients else None
+        if response_ring is None and isinstance(resp_name, str):
+            with contextlib.suppress(Exception):
+                response_ring = SpscRing.open_named(resp_name, self._config.slot_size, self._config.slots)
+        if response_ring is None:
+            return
+        payload = {"id": message.get("id"), "ok": ok}
+        if error is not None:
+            payload["error"] = error
+        encoded = self._codec.encode(payload)
+        response_ring.send_timeout(encoded, 0, int(self._config.timeout * 1000))
+
+    async def _handle_client_payload(self, client_id: str, client: ClientState, payload: bytes) -> None:
+        try:
+            message = self._codec.decode(payload)
+        except Exception:
+            return
+        if not isinstance(message, dict):
+            return
+        writer = ResponseWriter(client.response, self._codec, int(self._config.timeout * 1000))
+        contexts = self._contexts.setdefault(client_id, {})
+        frame_type = message.get("type")
+        if frame_type is None:
+            await self._handle_unary_request(message, contexts, writer)
+            return
+        await self._handle_frame(message, contexts, writer)
+
     async def _handle_frame(
         self, message: dict[str, Any], contexts: dict[str, RequestContext], writer: "ResponseWriter"
     ) -> None:
         frame_type = message.get("type")
+        if frame_type is None:
+            await self._handle_unary_request(message, contexts, writer)
+            return
         if frame_type == "direct.http":
-            await self._handle_direct_http(message, writer)
+            await self._handle_direct_http(message, writer, contexts)
             return
         if frame_type in ("ws.open", "ws.message", "ws.close"):
             await self._handle_direct_websocket(message, writer)
             return
         if frame_type == "http.request.start":
-            meta = self._parse_request_meta(message, scope_type="http")
-            if meta is None:
-                return
-            await self._start_request(meta, None, contexts, writer)
-            return
-        if frame_type == "websocket.connect":
-            meta = self._parse_request_meta(message, scope_type="websocket")
-            if meta is None:
-                return
-            await self._start_request(meta, None, contexts, writer)
-            return
             meta = self._parse_request_meta(message, scope_type="http")
             if meta is None:
                 return
@@ -204,6 +315,23 @@ class AsgiWorker:
         if context is None:
             return
         await self._enqueue_request_frame(context, message)
+
+    def _worker_id(self) -> str:
+        if self._config.worker_id is not None:
+            return str(self._config.worker_id)
+        return os.environ.get("VERTEBRA_WORKER_ID", "0")
+
+    def _control_ring_name(self) -> str:
+        worker_id = self._worker_id()
+        return f"/{self._config.name}.asgi.{worker_id}.control"
+
+    def _request_ring_name(self, client_id: str) -> str:
+        worker_id = self._worker_id()
+        return f"/{self._config.name}.asgi.{worker_id}.client.{client_id}.req"
+
+    def _response_ring_name(self, client_id: str) -> str:
+        worker_id = self._worker_id()
+        return f"/{self._config.name}.asgi.{worker_id}.client.{client_id}.resp"
 
     async def _handle_direct_websocket(self, message: dict[str, Any], writer: "ResponseWriter") -> None:
         handler_id = message.get("handler_id")
@@ -228,7 +356,14 @@ class AsgiWorker:
         socket = VertebraWebSocket(message, writer)
         await runner(socket)
 
-    async def _handle_direct_http(self, message: dict[str, Any], writer: "ResponseWriter") -> None:
+    async def _handle_direct_http(
+        self,
+        message: dict[str, Any],
+        writer: "ResponseWriter",
+        contexts: dict[str, RequestContext] | None = None,
+    ) -> None:
+        if contexts is None:
+            contexts = {}
         handler_id = message.get("handler_id")
         request_id = message.get("id")
 
@@ -241,7 +376,7 @@ class AsgiWorker:
                 # We don't have a context yet, we'll create one via _start_request
                 # but wait, _handle_frame usually does this.
                 # If we are here, it means it WAS marked as direct but we don't have the runner.
-                await self._start_request(meta, message.get("body"), {}, writer)
+                await self._start_request(meta, message.get("body"), contexts, writer)
                 return
 
             await writer.send({"id": request_id, "type": "http.response.start", "status": 404, "headers": []})
@@ -253,7 +388,7 @@ class AsgiWorker:
             })
             return
 
-        from vertebra.integration.litestar import VertebraRequest
+        from vertebra.extensions.litestar.native import VertebraRequest
 
         conn = VertebraRequest(message)
 

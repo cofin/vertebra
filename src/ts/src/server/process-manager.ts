@@ -228,18 +228,20 @@ export class ProcessManager {
   private async pingWorker(workerId: number): Promise<boolean> {
     const { protocol: _protocol, ...ipc } = this.options.ipc;
     const client = new IpcClient(ipc, workerId);
-    const payload: AsgiRequest = {
-      id: crypto.randomUUID(),
-      method: "GET",
-      path: HEALTH_PATH,
-      query: "",
-      headers: [],
-      body: new Uint8Array(),
-      scheme: "http",
-      httpVersion: "1.1",
-    };
+    const frames = (async function* () {
+      yield {
+        type: "http.request.start",
+        method: "GET",
+        path: HEALTH_PATH,
+        query: "",
+        headers: [],
+        scheme: "http",
+        httpVersion: "1.1",
+      } as AsgiIpcFrame;
+      yield { type: "http.request", body: new Uint8Array(), more_body: false } as AsgiIpcFrame;
+    })();
     try {
-      const status = await this.readStatus(client, payload);
+      const status = await this.readStatus(client, frames);
       return status === 200;
     } catch {
       return false;
@@ -248,7 +250,10 @@ export class ProcessManager {
     }
   }
 
-  private async readStatus(client: IpcClient, payload: AsgiRequest): Promise<number> {
+  private async readStatus(
+    client: IpcClient,
+    payload: AsyncIterable<AsgiIpcFrame>,
+  ): Promise<number> {
     let status: number | null = null;
     for await (const frame of client.requestStream<AsgiIpcFrame>(payload)) {
       if (frame.type === "http.response.start") {

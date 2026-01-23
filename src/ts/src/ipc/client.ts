@@ -328,10 +328,7 @@ class IpcConnection {
   private async sendOutbound(outbound: AsyncIterable<unknown>, requestId: string): Promise<void> {
     for await (const frame of outbound) {
       if (frame && typeof frame === "object") {
-        const payload = { ...(frame as Record<string, unknown>) };
-        if (!payload.id) {
-          payload.id = requestId;
-        }
+        const payload = { ...(frame as Record<string, unknown>), id: requestId };
         this.sendPayload(payload);
       } else {
         this.sendPayload({ id: requestId, payload: frame });

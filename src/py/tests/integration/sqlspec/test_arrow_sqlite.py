@@ -1,50 +1,28 @@
 """Integration tests for SQLSpec Arrow transport."""
 
-import sys
 import unittest.mock
 import uuid
 from typing import Any
 
 import pytest
 
-# Mock the native extension BEFORE any other imports
-mock_vertebra_native = unittest.mock.MagicMock()
-sys.modules["vertebra._vertebra"] = mock_vertebra_native
+pa = pytest.importorskip("pyarrow")
+
+from vertebra.drivers.broker import VertebraAsyncConnection
+from vertebra.extensions.sqlspec.sqlite import VertebraSqliteAsyncConfig
+from vertebra.resources.broker import AsyncBrokerClient
+import vertebra.resources.broker as broker
 
 
-# Define Mock classes
 class MockShmRegion(bytearray):
     def close(self) -> None:
         pass
 
-    @classmethod
-    def open_named(cls, name: str, size: int) -> "MockShmRegion":
-        msg = "Should be patched"
-        raise NotImplementedError(msg)
-
-
-mock_vertebra_native.ShmRegion = MockShmRegion
-mock_vertebra_native.AsyncRing = unittest.mock.MagicMock()
-mock_vertebra_native.SpscRing = unittest.mock.MagicMock()
-
-try:
-    import pyarrow as pa
-
-    from vertebra.drivers.broker import VertebraAsyncConnection
-    from vertebra.extensions.sqlspec.sqlite import VertebraSqliteAsyncConfig
-    from vertebra.resources.broker import AsyncBrokerClient
-
-    PYARROW_INSTALLED = True
-except ImportError:
-    PYARROW_INSTALLED = False
-
 
 @pytest.mark.anyio
-@pytest.mark.skipif(not PYARROW_INSTALLED, reason="pyarrow not installed")
-async def test_sqlspec_arrow_integration_flow() -> None:
+async def test_sqlspec_arrow_integration_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test SQLSpec client Arrow decoding flow."""
     config = VertebraSqliteAsyncConfig(pool="test_pool")
-    import pyarrow as pa
 
     # Prepare Arrow data
     data = [{"id": i, "name": f"row_{i}"} for i in range(1000)]
@@ -60,7 +38,7 @@ async def test_sqlspec_arrow_integration_flow() -> None:
     mock_region_instance[:] = arrow_bytes
 
     mock_open_named = unittest.mock.MagicMock(return_value=mock_region_instance)
-    MockShmRegion.open_named = mock_open_named
+    monkeypatch.setattr(broker.ShmRegion, "open_named", mock_open_named)
 
     # Setup Real Client with Mocked Request
     client = AsyncBrokerClient()

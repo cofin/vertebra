@@ -23,7 +23,7 @@ async def test_vertebra_worker_fallback_logic() -> None:
     worker = AsgiWorker(asgi_app, WorkerConfig())
 
     # Setup one native runner
-    from vertebra.integration.litestar.compiler import PipelineCompiler
+    from vertebra.extensions.litestar.compiler import PipelineCompiler
 
     compiler = PipelineCompiler()
     # Mocking handler object enough for compiler

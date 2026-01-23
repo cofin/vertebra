@@ -62,6 +62,25 @@ class ProcedureRegistry:
     def list_resources(self) -> list[Resource]:
         return list(self._resources.values())
 
+    def get_handler(self, name: str) -> Callable[..., Any] | None:
+        tool = self.get_tool(name)
+        return tool.handler if tool else None
+
+    def get_tools(self) -> list[dict[str, Any]]:
+        from vertebra.mcp.schema import MCPSchemaGenerator
+
+        schemas: list[dict[str, Any]] = []
+        for tool in self._tools.values():
+            if tool.input_schema:
+                schemas.append({
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "inputSchema": tool.input_schema,
+                })
+                continue
+            schemas.append(MCPSchemaGenerator.generate_tool_schema(tool))
+        return schemas
+
     def clear(self) -> None:
         self._tools.clear()
         self._resources.clear()
