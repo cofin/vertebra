@@ -192,7 +192,16 @@ class AsgiWorker:
         
         runner = self._native_runners.get(handler_id)
         if runner is None:
-            # Fallback or error
+            # Fallback to standard ASGI if handler not found in native runners
+            # But we need a RequestMeta for that.
+            meta = self._parse_request_meta(message, scope_type="http")
+            if meta:
+                # We don't have a context yet, we'll create one via _start_request
+                # but wait, _handle_frame usually does this.
+                # If we are here, it means it WAS marked as direct but we don't have the runner.
+                await self._start_request(meta, message.get("body"), {}, writer)
+                return
+
             await writer.send({
                 "id": request_id,
                 "type": "http.response.start",
@@ -213,8 +222,6 @@ class AsgiWorker:
         try:
             result = await runner(conn)
             
-            # TODO: Handle response serialization (JSON, etc.)
-            # For now, assume dict -> JSON
             import json
             body = json.dumps(result).encode()
             
@@ -243,6 +250,52 @@ class AsgiWorker:
                 "body": str(exc).encode(),
                 "more_body": False,
             })
+
+    def _parse_request_meta(self, message: dict[str, Any], scope_type: str = "http") -> RequestMeta | None:
+        try:
+            request_id = message.get("id")
+            if not isinstance(request_id, str):
+                return None
+            headers_raw = message.get("headers", [])
+            headers: list[tuple[str, str]] = []
+            for item in headers_raw:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    continue
+                key, value = item
+                headers.append((str(key), str(value)))
+            subprotocols_raw = message.get("subprotocols", []) or []
+            subprotocols: list[str] = [str(value) for value in subprotocols_raw]
+            return RequestMeta(
+                scope_type=scope_type,
+                id=request_id,
+                method=str(message.get("method", "GET")),
+                path=str(message.get("path", "/")),
+                query=str(message.get("query", "")),
+                headers=headers,
+                scheme=str(message.get("scheme", "http")),
+                http_version=str(message.get("httpVersion") or message.get("http_version") or "1.1"),
+                raw_path=message.get("rawPath"),
+                query_string=message.get("queryString"),
+                root_path=str(message.get("rootPath", "")),
+                server=message.get("server"),
+                client=message.get("client"),
+                extensions=message.get("extensions") or {},
+                subprotocols=subprotocols,
+            )
+        except Exception:  # noqa: BLE001 - defensive parsing of untrusted IPC data
+            return None
+
+    def _extract_trace_id(self, headers: list[tuple[str, str]]) -> str | None:
+        for key, value in headers:
+            lowered = key.lower()
+            if lowered == "x-request-id":
+                return value
+            if lowered == "traceparent":
+                return value
+        return None
+
+    def _log(self, level: str, message: str, **fields: Any) -> None:
+        pass # Placeholder for actual logging implementation
 
     async def _handle_unary_request(
         self, message: dict[str, Any], contexts: dict[str, RequestContext], writer: "ResponseWriter"
