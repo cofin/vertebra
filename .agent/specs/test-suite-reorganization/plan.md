@@ -1,6 +1,6 @@
 # Implementation Plan - Test Suite Reorganization
 
-## Phase 1: Setup and Unit Test Migration
+## Phase 1: Setup and Unit Test Migration [checkpoint: 6593b6f]
 Establish the new directory structure, configure scoped `conftest.py` files, and move purely functional/unit tests.
 
 - [x] Task: Create Root Directory Structure 2972dbb
