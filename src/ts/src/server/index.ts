@@ -151,6 +151,7 @@ export async function createRouterServer(
   const resolved = await resolveServerConfig(config);
   const router = createRouter({
     staticDir: resolved.server.staticDir,
+    staticMounts: resolved.static.mounts,
     apiHandler: handler,
     assets: resolved.assets,
   });
@@ -188,6 +189,7 @@ export async function createAsgiServer(
 
   const router = createRouter({
     staticDir: resolved.server.staticDir,
+    staticMounts: resolved.static.mounts,
     assets: resolved.assets,
     apiHandler: async (request, server) => {
       trackConnection(true); // Increment active connection count (approx)

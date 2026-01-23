@@ -11,6 +11,7 @@ export interface RouterConfig {
   staticDir?: string;
   apiHandler?: RequestHandler;
   assets?: AssetConfig;
+  staticMounts?: Record<string, string>;
 }
 
 function normalizePath(pathname: string): string {
@@ -20,10 +21,16 @@ function normalizePath(pathname: string): string {
   return pathname;
 }
 
-export function createRouter(config: RouterConfig): RequestHandler {
+export interface RouterInstance {
+  handler: RequestHandler;
+  updateMounts: (mounts: Record<string, string>) => void;
+}
+
+export function createRouter(config: RouterConfig): RequestHandler & { updateMounts: (mounts: Record<string, string>) => void } {
   const staticDir = config.staticDir;
   const apiHandler = config.apiHandler;
   const assets = config.assets;
+  let dynamicMounts: Record<string, string> = config.staticMounts || {};
 
   // Load manifest if available
   let manifest: Record<string, any> | undefined;
@@ -47,7 +54,7 @@ export function createRouter(config: RouterConfig): RequestHandler {
     }
   }
 
-  return async (request: Request, server?: Server<unknown>) => {
+  const handler: RequestHandler = async (request: Request, server?: Server<unknown>) => {
     const url = new URL(request.url);
 
     // 1. HMR / Dev Proxy
@@ -88,7 +95,28 @@ export function createRouter(config: RouterConfig): RequestHandler {
       }
     }
 
-    // 2. Static Assets (Production)
+    // 2. Dynamic Static Mounts
+    // Check specific mounts first (e.g. /uploads)
+    // dynamicMounts is { "/url/path": "/local/path" }
+    for (const [urlPrefix, localDir] of Object.entries(dynamicMounts)) {
+      if (url.pathname.startsWith(urlPrefix)) {
+        const relativePath = url.pathname.slice(urlPrefix.length);
+        const path = normalizePath(relativePath);
+        // Prevent directory traversal
+        if (path.includes("..")) continue;
+        
+        const file = Bun.file(join(localDir, path));
+        if (await file.exists()) {
+           return new Response(file, {
+            headers: {
+              "cache-control": "public, max-age=60",
+            },
+          });
+        }
+      }
+    }
+
+    // 3. Static Assets (Production default dir)
     if (staticDir && (request.method === "GET" || request.method === "HEAD")) {
       const path = normalizePath(url.pathname);
       const file = Bun.file(`${staticDir}/${path}`);
@@ -113,4 +141,11 @@ export function createRouter(config: RouterConfig): RequestHandler {
     }
     return new Response("Not Found", { status: 404 });
   };
+
+  const router = handler as RequestHandler & { updateMounts: (mounts: Record<string, string>) => void };
+  router.updateMounts = (mounts: Record<string, string>) => {
+    dynamicMounts = { ...dynamicMounts, ...mounts };
+  };
+  
+  return router;
 }

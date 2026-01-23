@@ -10,6 +10,11 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 *Link: [./security-user-framework/](./security-user-framework/)*
 *Risk Level: [medium]*
 
+## [x] PRD: Native Pipeline Compatibility for Real-World Litestar Apps
+
+*Link: [./archive/prd_20260123_native-pipeline-litestar-compat/](./archive/prd_20260123_native-pipeline-litestar-compat/)*
+*Risk Level: high*
+
 ## [x] PRD: Elite DX & Native Bridging (Shared Memory)
 
 *Link: [./archive/prd_20260123_elite-dx-native-bridge/](./archive/prd_20260123_elite-dx-native-bridge/)*

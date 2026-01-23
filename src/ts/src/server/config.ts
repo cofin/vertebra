@@ -20,6 +20,7 @@ export interface ServerSettings {
 
 export interface StaticConfig {
   dir?: string;
+  mounts?: Record<string, string>;
   maxAge?: number;
 }
 

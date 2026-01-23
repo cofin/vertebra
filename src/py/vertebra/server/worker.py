@@ -155,14 +155,19 @@ class AsgiWorker:
 
         if native_enabled and isinstance(self._app, Litestar):
             from vertebra.extensions.litestar.compiler import PipelineCompiler
-            from vertebra.extensions.litestar.native import reflect_routes
+            from vertebra.extensions.litestar.native import RouteCapability, classify_route, reflect_routes
 
             routes = reflect_routes(self._app)
             compiler = PipelineCompiler()
             for route in routes:
-                if not route.is_websocket:
-                    runner = compiler.compile_route(next(h for h in self._app.route_handlers if h.fn == route.handler))
-                    self._native_runners[route.handler_id] = runner
+                if classify_route(route) == RouteCapability.NATIVE:
+                    # Use the handler object directly from reflection
+                    try:
+                        runner = compiler.compile_route(route.handler)
+                        self._native_runners[route.handler_id] = runner
+                    except Exception:
+                        # Log error but don't crash startup; this route will fallback to ASGI
+                        pass
 
         control_name = self._control_ring_name()
         self._control = SpscRing.create_named(control_name, self._config.slot_size, self._config.slots)
@@ -388,6 +393,7 @@ class AsgiWorker:
             return
 
         from vertebra.extensions.litestar.native import VertebraRequest
+        from litestar.response import Response as LitestarResponse
 
         conn = VertebraRequest(message)
 
@@ -395,14 +401,38 @@ class AsgiWorker:
             result = await runner(conn)
 
             import json
+            
+            status = 200
+            headers = [("content-type", "application/json")]
+            body = b""
 
-            body = json.dumps(result).encode()
+            if isinstance(result, LitestarResponse):
+                status = result.status_code
+                # Copy headers
+                for k, v in result.headers.items():
+                    headers.append((k.lower(), v))
+                
+                # Handle content
+                content = result.content
+                if content is None:
+                    body = b""
+                elif isinstance(content, (bytes, bytearray)):
+                    body = bytes(content)
+                elif isinstance(content, str):
+                    body = content.encode()
+                else:
+                    # Assume JSON serializable (dict, Pydantic, etc)
+                    # We override content-type if it was default
+                    body = json.dumps(content).encode()
+            else:
+                # Default behavior: assume raw data -> JSON 200 OK
+                body = json.dumps(result).encode()
 
             await writer.send({
                 "id": request_id,
                 "type": "http.response.start",
-                "status": 200,
-                "headers": [("content-type", "application/json")],
+                "status": status,
+                "headers": headers,
             })
             await writer.send({"id": request_id, "type": "http.response.body", "body": body, "more_body": False})
         except Exception as exc:
@@ -807,6 +837,20 @@ class AsgiWorker:
                 raise RuntimeError(msg)
             message_type = message.get("type")
             if message_type == "lifespan.startup.complete":
+                # Inject static mounts if available
+                native_enabled = os.environ.get("VERTEBRA_NATIVE", "1") == "1"
+                # Check for Litestar
+                try:
+                    from litestar import Litestar
+                    if native_enabled and isinstance(self._app, Litestar):
+                        from vertebra.extensions.litestar.native import reflect_static_mounts
+                        mounts = reflect_static_mounts(self._app)
+                        if mounts:
+                            extensions = message.setdefault("extensions", {})
+                            extensions["vertebra"] = {"static_mounts": mounts}
+                except ImportError:
+                    pass
+
                 self._lifespan_supported = True
                 self._lifespan_startup.set()
             elif message_type == "lifespan.startup.failed":

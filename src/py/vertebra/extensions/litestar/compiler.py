@@ -136,7 +136,13 @@ class PipelineCompiler:
 
         # We build the final runner function
         func_name = f"runner_{id(handler)}"
-        local_ns = {"compiled_guards": compiled_guards, "compiled_di": compiled_di, "handler_fn": handler.fn}
+        from uuid import UUID
+        local_ns = {
+            "compiled_guards": compiled_guards, 
+            "compiled_di": compiled_di, 
+            "handler_fn": handler.fn,
+            "UUID": UUID
+        }
 
         body = []
         # 1. Run guards
@@ -161,12 +167,18 @@ class PipelineCompiler:
             else:
                 # Try path params
                 body.append(f"    if '{param_name}' in ctx.path_params:")
-                # We need type conversion. For now, assume string or rely on handler to cast if simple.
-                # Litestar handles this. We might need a 'coerce' step.
-                # But for 'str' it's fine. For 'int', we need to check annotation.
+                
                 param_type = sig.parameters[param_name].annotation
                 if param_type is int:
                     body.append(f"        {param_name} = int(ctx.path_params['{param_name}'])")
+                elif param_type is float:
+                    body.append(f"        {param_name} = float(ctx.path_params['{param_name}'])")
+                elif param_type is bool:
+                    # Simple bool conversion matching common API expectations
+                    body.append(f"        val = ctx.path_params['{param_name}'].lower()")
+                    body.append(f"        {param_name} = val in ('true', '1', 'yes', 'on')")
+                elif param_type is UUID:
+                    body.append(f"        {param_name} = UUID(ctx.path_params['{param_name}'])")
                 else:
                     body.append(f"        {param_name} = ctx.path_params['{param_name}']")
                 args.append(f"{param_name}={param_name}")

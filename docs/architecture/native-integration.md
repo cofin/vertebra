@@ -48,3 +48,24 @@ VERTEBRA_NATIVE=0 vertebra serve myapp:app
 Native integration significantly reduces the per-request overhead, particularly for:
 -   **JSON APIs**: Direct parsing and serialization.
 -   **High-Concurrency WebSockets**: Bypassing the `while True: await receive()` loop.
+
+## Compatibility & Fallback
+
+Vertebra employs a **Capability Classifier** at startup to determine which routes are safe for native execution. Routes that require features not yet supported by the native pipeline are automatically marked for **ASGI Fallback**.
+
+**Native Supported (Direct Dispatch):**
+-   Standard JSON APIs (GET, POST, PUT, PATCH, DELETE).
+-   Controller-based and Function-based handlers.
+-   `UUID`, `int`, `float`, `bool`, `str`, `path` path parameters.
+-   Standard `Provide` dependencies.
+-   Pydantic models, `dict`, or `Litestar.Response` return types.
+
+**ASGI Fallback (Standard Proxy):**
+-   **Multipart Uploads**: Routes accepting `RequestEncodingType.MULTI_PART` or `UploadFile` (due to streaming complexity).
+-   **Complex DI**: Routes using `Dependency()` objects or custom injection markers (e.g., Dishka, SQLSpec filters).
+-   **WebSockets**: Currently fallback until full native WS support is stabilized.
+-   **Specialized Responses**: `File`, `Stream`, `Template`, `InertiaRedirect`.
+-   **Static Files**: Served via Bun (if configured) or fallback to ASGI.
+
+This hybrid approach ensures 100% compatibility with the Litestar ecosystem while optimizing the critical path (high-volume API traffic).
+
