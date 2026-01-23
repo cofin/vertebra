@@ -240,6 +240,10 @@
   - Test timeout handling
   - File: `src/ts/tests/unit/ipc-bridge.test.ts` (NEW)
 
+- [x] **Task 2.3.5**: Serialization Audit
+  - Ensure `vertebra.serializers` is used instead of raw `msgspec` in Python handler.
+  - Verify JS/TS interop with map-like structs.
+
 **Acceptance**:
 - Tool calls route to Python via IPC
 - Error handling works
@@ -259,12 +263,7 @@
   - Verify Python handler executed
   - File: `src/py/tests/test_mcp_integration.py` (NEW)
 
-**Acceptance**:
-- Python function with `@mcp_tool` appears in `tools/list`
-- Tool invocation executes Python code
-- End-to-end test passes
-
----
+**Phase 2 Checkpoint**: [checkpoint: a4fb979] (Refactored in 25ea379)
 
 ## Phase 3: Advanced MCP Features (Week 5-6)
 
@@ -273,22 +272,22 @@
 **Priority**: P1
 **Dependencies**: Phase 1
 
-- [ ] **Task 3.1.1**: Create SSE transport module
+- [x] **Task 3.1.1**: Create SSE transport module
   - HTTP endpoint accepting POST for requests
   - EventSource stream for responses
   - File: `src/ts/src/mcp/transports/sse.ts` (NEW)
 
-- [ ] **Task 3.1.2**: Implement keep-alive handling
+- [x] **Task 3.1.2**: Implement keep-alive handling
   - Periodic keep-alive messages
   - Connection timeout handling
   - File: `src/ts/src/mcp/transports/sse.ts`
 
-- [ ] **Task 3.1.3**: Support multiple concurrent clients
+- [x] **Task 3.1.3**: Support multiple concurrent clients
   - Client session management
   - Request routing
   - File: `src/ts/src/mcp/transports/sse.ts`
 
-- [ ] **Task 3.1.4**: Add SSE transport tests
+- [x] **Task 3.1.4**: Add SSE transport tests
   - Test connection lifecycle
   - Test message streaming
   - Test multiple clients
@@ -306,18 +305,18 @@
 **Priority**: P1
 **Dependencies**: Phase 1
 
-- [ ] **Task 3.2.1**: Create WebSocket transport module
+- [x] **Task 3.2.1**: Create WebSocket transport module
   - Bun native WebSocket support
   - JSON-RPC over WebSocket frames
   - File: `src/ts/src/mcp/transports/websocket.ts` (NEW)
 
-- [ ] **Task 3.2.2**: Implement connection lifecycle
+- [x] **Task 3.2.2**: Implement connection lifecycle
   - Connection management
   - Ping/pong keepalive
   - Graceful disconnect
   - File: `src/ts/src/mcp/transports/websocket.ts`
 
-- [ ] **Task 3.2.3**: Add WebSocket transport tests
+- [x] **Task 3.2.3**: Add WebSocket transport tests
   - Test bidirectional messaging
   - Test connection lifecycle
   - File: `src/ts/tests/integration/websocket.test.ts` (NEW)
@@ -334,22 +333,22 @@
 **Priority**: P1
 **Dependencies**: Phase 2
 
-- [ ] **Task 3.3.1**: Create `@mcp_resource` decorator
+- [x] **Task 3.3.1**: Create `@mcp_resource` decorator
   - Accept URI template parameter
   - Register resource in ProcedureRegistry
   - File: `src/py/vertebra/mcp/resources.py` (NEW)
 
-- [ ] **Task 3.3.2**: Implement `resources/list` handler
+- [x] **Task 3.3.2**: Implement `resources/list` handler
   - Return registered resources with URI templates
   - File: `src/ts/src/mcp/server.ts`
 
-- [ ] **Task 3.3.3**: Implement `resources/read` handler
+- [x] **Task 3.3.3**: Implement `resources/read` handler
   - Parse URI and extract parameters
   - Invoke Python resource handler
   - Return resource data
   - File: `src/ts/src/mcp/server.ts`
 
-- [ ] **Task 3.3.4**: Add resource tests
+- [x] **Task 3.3.4**: Add resource tests
   - Test resource registration
   - Test URI parsing
   - Test resource reading
@@ -367,17 +366,17 @@
 **Priority**: P2
 **Dependencies**: Phase 2
 
-- [ ] **Task 3.4.1**: Implement `notifications/progress` method
+- [x] **Task 3.4.1**: Implement `notifications/progress` method
   - Progress token tracking
   - Server-initiated notifications
   - File: `src/ts/src/mcp/server.ts`
 
-- [ ] **Task 3.4.2**: Add Python progress API
+- [x] **Task 3.4.2**: Add Python progress API
   - `yield_progress(token, current, total)` function
   - Integration with IPC handler
   - File: `src/py/vertebra/mcp/handler.py`
 
-- [ ] **Task 3.4.3**: Add progress notification tests
+- [x] **Task 3.4.3**: Add progress notification tests
   - Test progress updates during long operations
   - File: `src/ts/tests/integration/progress.test.ts` (NEW)
 
