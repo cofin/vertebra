@@ -37,7 +37,7 @@ Move and consolidate the heavy SQLAlchemy and DBAPI related tests into the integ
 - [ ] Task: Checkpoint - Verify Phase 2 complete and create recovery point
 - [ ] Task: Flow - User Manual Verification 'Phase 2: Integration Test Migration & Consolidation (SQLAlchemy)' (Protocol in workflow.md)
 
-## Phase 3: Flatten Extensions & Final Migration
+## Phase 3: Flatten Extensions & Final Migration [checkpoint: f266579]
 Flatten the `extensions` directory in tests and move remaining root tests to their appropriate locations.
 
 - [x] Task: Flatten Integration Extensions 3728868
