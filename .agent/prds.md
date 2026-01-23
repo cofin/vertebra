@@ -6,6 +6,11 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 
 ## Active PRDs
 
+## [x] PRD: Elite DX & Native Bridging (Shared Memory)
+
+*Link: [./archive/prd_20260123_elite-dx-native-bridge/](./archive/prd_20260123_elite-dx-native-bridge/)*
+*Risk Level: [medium]*
+
 ## [x] PRD: Server & Runtime - MCP, Health Checks, and Observability
 
 *Link: [./archive/prd_20260123_server-runtime/](./archive/prd_20260123_server-runtime/)*
