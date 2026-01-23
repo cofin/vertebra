@@ -10,7 +10,8 @@ pub mod async_ring;
 pub mod buffer;
 pub mod channel;
 pub mod notify;
-pub mod platform;
+pub(crate) mod platform;
+pub mod router;
 pub mod shm;
 pub mod sync;
 

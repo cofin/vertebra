@@ -10,6 +10,7 @@ description = "Core IPC primitives and shared types for Vertebra"
 [dependencies]
 arrow = { workspace = true }
 crossbeam-utils = { workspace = true }
+matchit = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
