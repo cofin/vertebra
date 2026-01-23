@@ -59,13 +59,13 @@ This plan outlines the phases to implement a custom, high-performance integratio
 - [x] **Task: Python Direct WebSocket Invocation** [a3b12d6]
     - [ ] Write tests for a Litestar WebSocket handler being called "per-message" by Vertebra.
     - [ ] Implement the Python worker logic to handle streaming opcodes without an internal `while True` loop.
-- [ ] **Task: Checkpoint - Verify Elite WebSockets**
+- [x] **Task: Checkpoint - Verify Elite WebSockets** [0a86021]
 - [ ] **Task: Flow - User Manual Verification 'Phase 4: Elite Streaming' (Protocol in workflow.md)**
 
-## Phase 5: Integration, Benchmarking, and Polish
+## Phase 5: Integration, Benchmarking, and Polish [~]
 **Goal:** Ensure 100% compatibility and prove the performance gains.
 
-- [ ] **Task: Full Litestar Compatibility Test Suite**
+- [x] **Task: Full Litestar Compatibility Test Suite** [b79baba]
     - [ ] Run the complete Litestar test suite against a Vertebra-hosted app.
     - [ ] Fix any edge cases in DI or Middleware ordering.
 - [ ] **Task: Performance Benchmarking**
