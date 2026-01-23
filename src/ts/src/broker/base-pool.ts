@@ -107,6 +107,9 @@ export abstract class BasePoolAdapter implements PoolAdapter {
 
   protected abstract reapIdleConnections(timeoutMs: number): Promise<void>;
 
+  /** Validate a connection. Return true if healthy. */
+  protected abstract validateConnection(token: string): Promise<boolean>;
+
   protected async checkHealth(): Promise<void> {
     // Deprecated in favor of runHealthCheck
     await this.runHealthCheck();

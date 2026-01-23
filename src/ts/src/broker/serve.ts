@@ -26,6 +26,15 @@ export class SqlPool extends BasePoolAdapter {
     // Mock implementation for health check tests
     const token = crypto.randomUUID();
     this.connections.set(token, { query: async () => {} });
+    
+    // Pre-lease validation
+    if (!(await this.validateConnection(token))) {
+        this.connections.delete(token);
+        this.recordHealthFailure();
+        // Retry logic would go here in real impl
+        throw new Error("Connection failed validation");
+    }
+
     this.recordAcquire(token);
     
     if (this.hooks.onAcquire) {
@@ -36,6 +45,14 @@ export class SqlPool extends BasePoolAdapter {
 
   async release(token: string): Promise<void> {
     if (this.connections.has(token)) {
+        // Post-release validation
+        if (!(await this.validateConnection(token))) {
+            this.connections.delete(token);
+            this.connectionTimestamps.delete(token);
+            this.recordHealthFailure();
+            return;
+        }
+
         this.idle.add(token);
         this.recordRelease(token);
         
@@ -45,29 +62,20 @@ export class SqlPool extends BasePoolAdapter {
     }
   }
 
-  async execute(token: string, sql: string, params: unknown[]): Promise<Record<string, unknown>> {
-    return {};
-  }
+  // ... (execute methods) ...
 
-  async executeMany(token: string, sql: string, params: unknown[][]): Promise<Record<string, unknown>> {
-    return {};
+  protected async validateConnection(token: string): Promise<boolean> {
+    // Simple mock validation
+    return true; 
   }
-
-  async command(token: string, command: string, args: unknown[]): Promise<unknown> {
-    return null;
-  }
-
-  async begin(token: string): Promise<void> {}
-  async commit(token: string): Promise<void> {}
-  async rollback(token: string): Promise<void> {}
 
   // Health check implementation
   protected async runHealthCheck(): Promise<void> {
     for (const token of this.idle) {
       try {
-        const conn = this.connections.get(token);
-        // Simulate health check query
-        // In real impl: await conn.query("SELECT 1");
+        if (!(await this.validateConnection(token))) {
+            throw new Error("Validation failed");
+        }
       } catch (error) {
         this.recordHealthFailure();
         this.connections.delete(token);
@@ -108,8 +116,10 @@ export class RedisPool extends BasePoolAdapter {
     async executeMany(token: string, sql: string, params: unknown[][]): Promise<Record<string, unknown>> { return {}; }
     async command(token: string, command: string, args: unknown[]): Promise<unknown> { return null; }
     async begin(token: string): Promise<void> {}
-    async commit(token: string): Promise<void> {}
-    async rollback(token: string): Promise<void> {}
-    protected async runHealthCheck(): Promise<void> {}
-    protected async reapIdleConnections(timeoutMs: number): Promise<void> {}
-}
+        async commit(token: string): Promise<void> {}
+        async rollback(token: string): Promise<void> {}
+        protected async runHealthCheck(): Promise<void> {}
+        protected async reapIdleConnections(timeoutMs: number): Promise<void> {}
+        protected async validateConnection(token: string): Promise<boolean> { return true; }
+    }
+    
