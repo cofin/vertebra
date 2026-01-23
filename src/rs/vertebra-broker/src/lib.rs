@@ -7,7 +7,82 @@ use std::time::Duration;
 
 use vertebra_core::buffer::RingLayout;
 use vertebra_core::channel::{ChannelError, RingStats, SpscReceiver, SpscRing, SpscSender};
+use vertebra_core::router::{RouteId, Router};
 use vertebra_core::shm::ShmRegion;
+
+#[repr(C)]
+pub struct VtbRouter {
+    inner: Router,
+}
+
+#[no_mangle]
+pub extern "C" fn vtb_router_new() -> *mut VtbRouter {
+    Box::into_raw(Box::new(VtbRouter {
+        inner: Router::new(),
+    }))
+}
+
+#[no_mangle]
+pub extern "C" fn vtb_router_insert(
+    handle: *mut VtbRouter,
+    path: *const c_char,
+    id: u64,
+) -> VtbStatus {
+    clear_last_error();
+    if handle.is_null() || path.is_null() {
+        return VtbStatus::Invalid;
+    }
+    let handle = unsafe { &mut *handle };
+    let path = unsafe { CStr::from_ptr(path) };
+    let path = match path.to_str() {
+        Ok(value) => value,
+        Err(_) => return VtbStatus::Invalid,
+    };
+    match handle.inner.insert(path, RouteId(id)) {
+        Ok(()) => VtbStatus::Ok,
+        Err(e) => {
+            set_last_error(e.to_string());
+            VtbStatus::Invalid
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vtb_router_match(
+    handle: *const VtbRouter,
+    path: *const c_char,
+    out_id: *mut u64,
+) -> VtbStatus {
+    clear_last_error();
+    if handle.is_null() || path.is_null() || out_id.is_null() {
+        return VtbStatus::Invalid;
+    }
+    let handle = unsafe { &*handle };
+    let path = unsafe { CStr::from_ptr(path) };
+    let path = match path.to_str() {
+        Ok(value) => value,
+        Err(_) => return VtbStatus::Invalid,
+    };
+    match handle.inner.match_path(path) {
+        Some(id) => {
+            unsafe {
+                *out_id = id.0;
+            }
+            VtbStatus::Ok
+        }
+        None => VtbStatus::Empty,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vtb_router_close(handle: *mut VtbRouter) {
+    if handle.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(handle));
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

@@ -1,4 +1,4 @@
-import { toArrayBuffer } from "bun:ffi";
+import { dlopen, toArrayBuffer } from "bun:ffi";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -38,6 +38,10 @@ export type ShmLibrary = {
   vtb_region_ptr: (handle: bigint) => bigint;
   vtb_region_len: (handle: bigint) => bigint;
   vtb_region_close: (handle: bigint) => void;
+  vtb_router_new: () => bigint;
+  vtb_router_insert: (handle: bigint, path: string, id: bigint) => number;
+  vtb_router_match: (handle: bigint, path: string, outId: BigUint64Array) => number;
+  vtb_router_close: (handle: bigint) => void;
 };
 
 let cached: ShmLibrary | null = null;
@@ -103,7 +107,7 @@ export function loadShmLib(): ShmLibrary {
     return cached;
   }
   const path = resolveLibraryPath();
-  const lib = Bun.dlopen(path, {
+  const lib = dlopen(path, {
     vtb_last_error_message: {
       args: [],
       returns: "ptr",
@@ -149,6 +153,22 @@ export function loadShmLib(): ShmLibrary {
       returns: "usize",
     },
     vtb_region_close: {
+      args: ["ptr"],
+      returns: "void",
+    },
+    vtb_router_new: {
+      args: [],
+      returns: "ptr",
+    },
+    vtb_router_insert: {
+      args: ["ptr", "ptr", "u64"],
+      returns: "i32",
+    },
+    vtb_router_match: {
+      args: ["ptr", "ptr", "ptr"],
+      returns: "i32",
+    },
+    vtb_router_close: {
       args: ["ptr"],
       returns: "void",
     },
@@ -271,5 +291,40 @@ export class ShmRegion {
 
   close(): void {
     this.lib.vtb_region_close(this.handle);
+  }
+}
+
+export class ShmRouter {
+  private handle: bigint;
+  private lib: ShmLibrary;
+
+  constructor() {
+    this.lib = loadShmLib();
+    this.handle = this.lib.vtb_router_new();
+  }
+
+  insert(path: string, id: number): void {
+    const pathPtr = Buffer.from(`${path}\0`);
+    const status = this.lib.vtb_router_insert(this.handle, pathPtr as any, BigInt(id));
+    if (status !== STATUS_OK) {
+      throw new Error(`shm router insert failed: ${formatStatusError(status, this.lib)}`);
+    }
+  }
+
+  matchPath(path: string): number | null {
+    const pathPtr = Buffer.from(`${path}\0`);
+    const out = new BigUint64Array(1);
+    const status = this.lib.vtb_router_match(this.handle, pathPtr as any, out);
+    if (status === STATUS_EMPTY) {
+      return null;
+    }
+    if (status !== STATUS_OK) {
+      throw new Error(`shm router match failed: ${formatStatusError(status, this.lib)}`);
+    }
+    return Number(out[0]);
+  }
+
+  close(): void {
+    this.lib.vtb_router_close(this.handle);
   }
 }

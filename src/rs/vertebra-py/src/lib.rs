@@ -19,10 +19,36 @@ use std::sync::Arc;
 
 use vertebra_core::buffer::{Buffer, BufferPool, RingLayout};
 use vertebra_core::channel::{BufferChannel, BufferMessage, ChannelError, MpmcRing, SpscRing};
+use vertebra_core::router::{RouteId, Router};
 use vertebra_core::shm::ShmRegion;
 
 mod async_ring;
 mod supervisor;
+
+#[pyclass(name = "Router")]
+struct PyRouter {
+    inner: Router,
+}
+
+#[pymethods]
+impl PyRouter {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: Router::new(),
+        }
+    }
+
+    fn insert(&mut self, path: &str, id: u64) -> PyResult<()> {
+        self.inner
+            .insert(path, RouteId(id))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
+
+    fn match_path(&self, path: &str) -> Option<u64> {
+        self.inner.match_path(path).map(|id| id.0)
+    }
+}
 
 #[pyclass(name = "ShmRegion")]
 struct PyShmRegion {
@@ -817,6 +843,7 @@ fn shm_unlink(_name: &str) -> PyResult<()> {
 #[pymodule]
 fn _vertebra(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", vertebra_core::VERSION)?;
+    m.add_class::<PyRouter>()?;
     m.add_class::<PyShmRegion>()?;
     m.add_class::<PyBufferPool>()?;
     m.add_class::<PyBuffer>()?;

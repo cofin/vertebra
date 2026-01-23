@@ -10,12 +10,40 @@ use napi_derive::napi;
 use vertebra_core::buffer::BufferPool;
 use vertebra_core::buffer::RingLayout;
 use vertebra_core::channel::{BufferChannel, BufferMessage, MpmcRing, SpscRing};
+use vertebra_core::router::{RouteId, Router};
 #[cfg(unix)]
 use vertebra_core::shm::shm_unlink_named;
 use vertebra_core::shm::ShmRegion;
 
 fn map_err(err: impl std::fmt::Display) -> Error {
     Error::from_reason(err.to_string())
+}
+
+#[napi]
+pub struct RouterHandle {
+    inner: Router,
+}
+
+#[napi]
+impl RouterHandle {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: Router::new(),
+        }
+    }
+
+    #[napi]
+    pub fn insert(&mut self, path: String, id: u32) -> Result<()> {
+        self.inner
+            .insert(&path, RouteId(id as u64))
+            .map_err(|e| map_err(e.to_string()))
+    }
+
+    #[napi]
+    pub fn match_path(&self, path: String) -> Option<u32> {
+        self.inner.match_path(&path).map(|id| id.0 as u32)
+    }
 }
 
 #[napi]

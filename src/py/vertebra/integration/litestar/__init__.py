@@ -65,3 +65,25 @@ def reflect_routes(app: Litestar) -> list[LitestarRoute]:
             ))
             
     return routes
+
+def build_router(routes: list[LitestarRoute]) -> Any:
+    """Build a native Rust router from reflected routes.
+    
+    Returns a vertebra._vertebra.Router instance.
+    """
+    from vertebra._vertebra import Router
+    
+    router = Router()
+    for route in routes:
+        # Convert path from Litestar format to matchit format
+        # Litestar uses {param:type}, matchit uses :param
+        path = route.path
+        import re
+        # Simple regex to convert {param} or {param:type} to :param
+        path = re.sub(r"\{([^:]+)(:[^}]+)?\}", r":\1", path)
+        
+        # We prefix the path with the method to support multiple methods on the same path
+        for method in route.methods:
+            router.insert(f"/{method}{path}", route.handler_id)
+        
+    return router
