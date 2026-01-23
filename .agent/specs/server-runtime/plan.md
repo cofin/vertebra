@@ -455,13 +455,13 @@
 **Priority**: P1
 **Dependencies**: Task 4.1
 
-- [~] **Task 4.3.1**: Add health check metrics
+- [x] **Task 4.3.1**: Add health check metrics
   - `health_checks_total{pool, result="success|failure"}`
   - `connection_removals_total{pool, reason="health_check|timeout|error"}`
   - `health_check_duration_seconds{pool}`
   - File: `src/ts/src/broker/base-pool.ts`
 
-- [~] **Task 4.3.2**: Add integration tests with real database
+- [x] **Task 4.3.2**: Add integration tests with real database
   - Start Postgres container
   - Acquire connection, kill database, verify removal
   - Restart database, verify new connection created
@@ -471,7 +471,7 @@
 - Health metrics exposed
 - Integration test with real database passes
 
----
+**Phase 4 Checkpoint**: [checkpoint: b018c6a]
 
 ## Phase 5: Pool Lifecycle Hooks (Week 8-9)
 
