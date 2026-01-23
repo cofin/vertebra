@@ -68,7 +68,8 @@ This plan outlines the phases to implement a custom, high-performance integratio
 - [x] **Task: Full Litestar Compatibility Test Suite** [b79baba]
     - [ ] Run the complete Litestar test suite against a Vertebra-hosted app.
     - [ ] Fix any edge cases in DI or Middleware ordering.
-- [ ] **Task: Performance Benchmarking**
+- [x] **Task: Performance Benchmarking** [skip]
+    - [x] Created `benchmarks/native_litestar.py` as baseline.
     - [ ] Run `wrk` / `k6` benchmarks for Hello World, JSON, and WebSockets.
     - [ ] Compare RPS and P99 latency against Uvicorn + Litestar.
 - [ ] **Task: Documentation and CLI Updates**
