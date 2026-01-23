@@ -45,15 +45,15 @@ This plan outlines the phases to implement a custom, high-performance integratio
 - [x] **Task: Legacy ASGI Fallback** [8659db5]
     - [ ] Write tests for an app containing both "Native" and "Legacy" routes.
     - [ ] Implement routing logic that switches between Direct Invoker and the standard ASGI adapter based on the route ID.
-- [ ] **Task: Checkpoint - Verify End-to-End HTTP**
+- [x] **Task: Checkpoint - Verify End-to-End HTTP** [3a4f783]
 - [ ] **Task: Flow - User Manual Verification 'Phase 3: Direct HTTP' (Protocol in workflow.md)**
 
-## Phase 4: Elite WebSocket and SSE Support
+## Phase 4: Elite WebSocket and SSE Support [~]
 **Goal:** Implement a direct, non-ASGI path for WebSockets and streaming events.
 
-- [ ] **Task: Define WebSocket/SSE Opcodes**
+- [x] **Task: Define WebSocket/SSE Opcodes** [f8b183f]
     - [ ] Update `vertebra-core` and `vertebra-js` with `WS_OPEN`, `WS_MESSAGE`, `WS_CLOSE`, and `SSE_DATA` opcodes.
-- [ ] **Task: Bun Broker WebSocket Forwarding**
+- [x] **Task: Bun Broker WebSocket Forwarding** [a1f1a19]
     - [ ] Write Bun unit tests for proxying uWebSockets events into the Ring Buffer.
     - [ ] Implement frame forwarding in the TS Broker logic.
 - [ ] **Task: Python Direct WebSocket Invocation**
