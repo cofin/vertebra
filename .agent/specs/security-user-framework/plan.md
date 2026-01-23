@@ -10,18 +10,18 @@
 - [x] Task: Write Python unit tests for the security IPC client.
 - [x] Task: Implement `vertebra.security` Python module using the IPC client to call Bun hooks.
 - [x] Task: Checkpoint - Verify Phase 1 complete and create recovery point [checkpoint: 23a05d2]
-- [ ] Task: Flow - User Manual Verification 'Phase 1: Bun IPC Security Hooks' (Protocol in workflow.md)
+- [x] Task: Flow - User Manual Verification 'Phase 1: Bun IPC Security Hooks' (Protocol in workflow.md)
 
 ## Phase 2: Core User Framework (Python)
 **Goal:** Implement the foundational User models and proxy logic, defaulting to `msgspec`.
 
-- [ ] Task: Implement `VertebraUserMixin` in `vertebra.auth.models` with first-class `msgspec.Struct` support.
-    - [ ] Support for standard fields (`id`, `is_authenticated`, `is_anonymous`).
-- [ ] Task: Implement `AnonymousUser` class with standard defaults (as a `msgspec.Struct`).
-- [ ] Task: Write unit tests for the `LazyUserProxy` using `msgspec` models.
-- [ ] Task: Implement `LazyUserProxy` to handle claim hydration and fetch-on-demand logic.
-- [ ] Task: Implement `contextvars` based global state in `vertebra.auth.state` for universal user access.
-- [ ] Task: Checkpoint - Verify Phase 2 complete and create recovery point
+- [x] Task: Implement `VertebraUserMixin` in `vertebra.auth.models` with first-class `msgspec.Struct` support.
+    - [x] Support for standard fields (`id`, `is_authenticated`, `is_anonymous`).
+- [x] Task: Implement `AnonymousUser` class with standard defaults (as a `msgspec.Struct`).
+- [x] Task: Write unit tests for the `LazyUserProxy` using `msgspec` models.
+- [x] Task: Implement `LazyUserProxy` to handle claim hydration and fetch-on-demand logic.
+- [x] Task: Implement `contextvars` based global state in `vertebra.auth.state` for universal user access.
+- [x] Task: Checkpoint - Verify Phase 2 complete and create recovery point [checkpoint: 654f611]
 - [ ] Task: Flow - User Manual Verification 'Phase 2: Core User Framework' (Protocol in workflow.md)
 
 ## Phase 3: Broker-Centric Authentication (TS & Python)
