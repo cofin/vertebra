@@ -14,6 +14,21 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "advanced-alchemy"
+version = "1.8.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "alembic" },
+    { name = "greenlet" },
+    { name = "sqlalchemy" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/19/db/85cc9777dbd23d1193ae68d27a373358b2c67b7929d860ac9a9c1b42f9d5/advanced_alchemy-1.8.2.tar.gz", hash = "sha256:858c60430558306fb0550e247f1afd473afd49a50b17e84f9cb1cdb7987d57ec", size = 920316, upload-time = "2025-12-13T01:05:47.286Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/43/d6/483192bcf2d9d6addf1fa5df334f5e85c31361fcffae49a20629471dedc9/advanced_alchemy-1.8.2-py3-none-any.whl", hash = "sha256:37d476ba6db4ffea9fea8e0bc3c6356926c0e49291b8508c96bc2c0e6b27ea3f", size = 259812, upload-time = "2025-12-13T01:05:45.359Z" },
+]
+
+[[package]]
 name = "aiosqlite"
 version = "0.22.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3405,6 +3420,7 @@ build = [
     { name = "watchdog" },
 ]
 dev = [
+    { name = "advanced-alchemy" },
     { name = "anyio" },
     { name = "attrs" },
     { name = "build" },
@@ -3446,6 +3462,7 @@ lint = [
     { name = "types-requests" },
 ]
 test = [
+    { name = "advanced-alchemy" },
     { name = "anyio" },
     { name = "attrs" },
     { name = "cattrs" },
@@ -3486,6 +3503,7 @@ build = [
     { name = "watchdog", specifier = ">=4.0.0" },
 ]
 dev = [
+    { name = "advanced-alchemy" },
     { name = "anyio" },
     { name = "attrs" },
     { name = "build", specifier = ">=1.2.2.post1" },
@@ -3528,6 +3546,7 @@ lint = [
     { name = "types-requests" },
 ]
 test = [
+    { name = "advanced-alchemy" },
     { name = "anyio" },
     { name = "attrs" },
     { name = "cattrs" },

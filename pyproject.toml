@@ -60,6 +60,7 @@ lint = ["mypy", "pre-commit", "pyright", "ruff", "slotscheck", "types-click", "t
 test = [
   "sqlspec[mypyc,performance,obstore,aiosqlite,asyncpg,msgspec,pydantic,adk]",
   "litestar",
+  "advanced-alchemy",
   "anyio",
   "coverage[toml]",
   "filelock>=3.13.1",

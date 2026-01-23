@@ -487,16 +487,16 @@
 **Priority**: P1
 **Dependencies**: Phase 3 (SQLAlchemy dialects)
 
-- [ ] **Task 5.1.1**: Create Advanced Alchemy package structure
+- [x] **Task 5.1.1**: Create Advanced Alchemy package structure (082538e)
   - Files: `__init__.py`, `_config.py`, `_engine.py`, `_storage.py`
   - Location: `src/py/vertebra/extensions/advanced_alchemy/`
 
-- [ ] **Task 5.1.2**: Implement `VertebraAsyncAlchemyConfig`
+- [x] **Task 5.1.2**: Implement `VertebraAsyncAlchemyConfig` (ccf88a6)
   - Extend `advanced_alchemy.config.AsyncAlchemyConfig`
   - Use `create_async_engine("postgresql+vertebra://pool")`
   - File: `_config.py`
 
-- [ ] **Task 5.1.3**: Implement `VertebraSyncAlchemyConfig`
+- [x] **Task 5.1.3**: Implement `VertebraSyncAlchemyConfig` (ccf88a6)
   - Extend `advanced_alchemy.config.SyncAlchemyConfig`
   - Use `create_engine("postgresql+vertebra://pool")`
   - File: `_config.py`
@@ -512,17 +512,17 @@
 **Priority**: P1
 **Dependencies**: Task 5.1
 
-- [ ] **Task 5.2.1**: Implement Postgres configs
+- [x] **Task 5.2.1**: Implement Postgres configs (ccf88a6)
   - `VertebraPostgresAlchemySyncConfig`
   - `VertebraPostgresAlchemyAsyncConfig`
   - File: `postgres/config.py` (NEW)
 
-- [ ] **Task 5.2.2**: Implement MySQL configs
+- [x] **Task 5.2.2**: Implement MySQL configs (ccf88a6)
   - `VertebraMysqlAlchemySyncConfig`
   - `VertebraMysqlAlchemyAsyncConfig`
   - File: `mysql/config.py` (NEW)
 
-- [ ] **Task 5.2.3**: Implement SQLite configs
+- [x] **Task 5.2.3**: Implement SQLite configs (ccf88a6)
   - `VertebraSqliteAlchemySyncConfig`
   - `VertebraSqliteAlchemyAsyncConfig`
   - File: `sqlite/config.py` (NEW)
@@ -538,21 +538,21 @@
 **Priority**: P1
 **Dependencies**: Task 5.1
 
-- [ ] **Task 5.3.1**: Implement `VertebraStorageBackend`
+- [x] **Task 5.3.1**: Implement `VertebraStorageBackend` (ccf88a6)
   - Extend `advanced_alchemy.types.file_object.Backend`
   - Route all operations through broker
   - File: `_storage.py`
 
-- [ ] **Task 5.3.2**: Implement storage methods
+- [x] **Task 5.3.2**: Implement storage methods (ccf88a6)
   - `read_bytes()`, `write_bytes()`, `list_objects()`
   - `exists()`, `delete()`, `copy()`, `move()`, `glob()`
   - File: `_storage.py`
 
-- [ ] **Task 5.3.3**: Register backend with AA
+- [x] **Task 5.3.3**: Register backend with AA (ccf88a6)
   - `storages.register_backend(VertebraStorageBackend())`
   - File: `__init__.py`
 
-- [ ] **Task 5.3.4**: Add storage backend tests
+- [x] **Task 5.3.4**: Add storage backend tests (ccf88a6)
   - Test read/write operations
   - Test with AA `StoredObject` type
   - File: `src/py/tests/test_advanced_alchemy.py` (NEW)
@@ -569,12 +569,12 @@
 **Priority**: P1
 **Dependencies**: Task 5.1-5.3
 
-- [ ] **Task 5.4.1**: Test Repository pattern
+- [x] **Task 5.4.1**: Test Repository pattern (ccf88a6)
   - Create sample repository
   - Test CRUD operations
   - File: `src/py/tests/test_advanced_alchemy.py`
 
-- [ ] **Task 5.4.2**: Test Service pattern
+- [x] **Task 5.4.2**: Test Service pattern (ccf88a6)
   - Create sample service
   - Test service methods
   - File: `src/py/tests/test_advanced_alchemy.py`

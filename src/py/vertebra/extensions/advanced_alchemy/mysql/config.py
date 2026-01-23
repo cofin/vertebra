@@ -9,11 +9,11 @@ class VertebraMysqlAlchemyAsyncConfig(VertebraAsyncAlchemyConfig):
     """MySQL Async Config."""
 
     def __init__(self, pool: str, **kwargs: Any) -> None:
-        super().__init__(pool=pool, driver="mysql+vertebra_async", **kwargs)
+        super().__init__(pool=pool, driver="mysql+vertebra", **kwargs)
 
 
 class VertebraMysqlAlchemySyncConfig(VertebraSyncAlchemyConfig):
     """MySQL Sync Config."""
 
     def __init__(self, pool: str, **kwargs: Any) -> None:
-        super().__init__(pool=pool, driver="mysql+vertebra", **kwargs)
+        super().__init__(pool=pool, driver="mysql+vertebra_sync", **kwargs)

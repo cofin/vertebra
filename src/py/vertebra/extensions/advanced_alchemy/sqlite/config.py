@@ -9,11 +9,11 @@ class VertebraSqliteAlchemyAsyncConfig(VertebraAsyncAlchemyConfig):
     """SQLite Async Config."""
 
     def __init__(self, pool: str, **kwargs: Any) -> None:
-        super().__init__(pool=pool, driver="sqlite+vertebra_async", **kwargs)
+        super().__init__(pool=pool, driver="sqlite+vertebra", **kwargs)
 
 
 class VertebraSqliteAlchemySyncConfig(VertebraSyncAlchemyConfig):
     """SQLite Sync Config."""
 
     def __init__(self, pool: str, **kwargs: Any) -> None:
-        super().__init__(pool=pool, driver="sqlite+vertebra", **kwargs)
+        super().__init__(pool=pool, driver="sqlite+vertebra_sync", **kwargs)

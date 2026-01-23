@@ -9,11 +9,11 @@ class VertebraPostgresAlchemyAsyncConfig(VertebraAsyncAlchemyConfig):
     """Postgres Async Config."""
 
     def __init__(self, pool: str, **kwargs: Any) -> None:
-        super().__init__(pool=pool, driver="postgresql+vertebra_async", **kwargs)
+        super().__init__(pool=pool, driver="postgresql+vertebra", **kwargs)
 
 
 class VertebraPostgresAlchemySyncConfig(VertebraSyncAlchemyConfig):
     """Postgres Sync Config."""
 
     def __init__(self, pool: str, **kwargs: Any) -> None:
-        super().__init__(pool=pool, driver="postgresql+vertebra", **kwargs)
+        super().__init__(pool=pool, driver="postgresql+vertebra_sync", **kwargs)
