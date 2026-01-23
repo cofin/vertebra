@@ -1,24 +1,53 @@
-import { type ServerWebSocket } from "bun";
-import { type JsonRpcRequest, type McpServer } from "../server";
+import type { Transport } from "./stdio";
+import type { ServerWebSocket } from "bun";
 
-export class WebSocketTransport {
-  constructor(private server: McpServer) {}
+export type WebSocketData = {
+  sessionId: string;
+};
 
-  async handleMessage(ws: ServerWebSocket<unknown>, message: string | Buffer) {
+export class WebSocketTransport implements Transport {
+  private sockets = new Map<string, ServerWebSocket<WebSocketData>>();
+
+  onmessage?: (message: any, sessionId?: string) => void;
+  onerror?: (error: Error) => void;
+
+  async start(): Promise<void> {}
+
+  async close(): Promise<void> {
+    for (const socket of this.sockets.values()) {
+      socket.close();
+    }
+    this.sockets.clear();
+  }
+
+  async send(message: any, sessionId?: string): Promise<void> {
+    if (!sessionId) {
+      throw new Error("sessionId is required for WebSocket transport");
+    }
+    const socket = this.sockets.get(sessionId);
+    if (!socket) {
+      throw new Error(`Socket session ${sessionId} not found`);
+    }
+
+    socket.send(JSON.stringify(message));
+  }
+
+  handleOpen(ws: ServerWebSocket<WebSocketData>) {
+    const sessionId = ws.data.sessionId;
+    this.sockets.set(sessionId, ws);
+  }
+
+  handleClose(ws: ServerWebSocket<WebSocketData>) {
+    this.sockets.delete(ws.data.sessionId);
+  }
+
+  handleMessage(ws: ServerWebSocket<WebSocketData>, message: string | Buffer) {
     try {
-      const text = typeof message === "string" ? message : new TextDecoder().decode(message);
-      const request = JSON.parse(text) as JsonRpcRequest;
-
-      const response = await this.server.handle(request);
-      ws.send(JSON.stringify(response));
-    } catch (e) {
-      ws.send(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: null,
-          error: { code: -32700, message: "Parse error" },
-        }),
-      );
+      const data = typeof message === "string" ? message : message.toString();
+      const body = JSON.parse(data);
+      this.onmessage?.(body, ws.data.sessionId);
+    } catch (error) {
+      this.onerror?.(new Error(`Invalid JSON: ${error}`));
     }
   }
 }
