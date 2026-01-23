@@ -30,13 +30,13 @@ This plan outlines the phases to implement a custom, high-performance integratio
 - [x] **Task: Implement Specialized Runner Generation** [a36b432]
     - [ ] Write tests for handlers returning different types (JSON, Msgspec, Arrow).
     - [ ] Implement the `PipelineCompiler` to generate the final `runner_{id}` function using `exec` or AST construction.
-- [ ] **Task: Checkpoint - Verify Compiled Pipelines**
+- [x] **Task: Checkpoint - Verify Compiled Pipelines** [f1d1c31]
 - [ ] **Task: Flow - User Manual Verification 'Phase 2: Pipeline Compiler' (Protocol in workflow.md)**
 
-## Phase 3: Direct Invoker Runtime (HTTP)
+## Phase 3: Direct Invoker Runtime (HTTP) [~]
 **Goal:** Implement the high-speed worker loop that executes compiled handlers directly from the Ring Buffer.
 
-- [ ] **Task: Update Worker Opcodes and Loop**
+- [x] **Task: Update Worker Opcodes and Loop** [f8b183f]
     - [ ] Write tests for the `vertebra-py` worker receiving a `DIRECT_HTTP` opcode.
     - [ ] Implement the optimized loop in `vertebra.main` that bypasses ASGI task creation for native routes.
 - [ ] **Task: Direct Data Binding (Rust-to-Python)**
