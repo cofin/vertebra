@@ -30,6 +30,7 @@
 - [x] Task: Update Bun Broker to support JWT and Google IAP header validation.
     - [x] Implement JWKS caching for Google/GitHub.
 - [x] Task: Implement HTTP-only cookie extraction and CSRF validation in the Bun Broker.
+- [x] Task: Fix Supervisor Import Mismatch (ImportError) in `src/py/vertebra/supervisor.py`. [d0a9ab0]
 - [~] Task: Write integration tests for Broker-to-Python claim passing.
     - *Status:* Integration tests are written (`test_broker_auth.py`) but currently failing with timeouts. Need to debug server startup/communication in test environment.
 - [x] Task: Implement `AuthMetadata` extraction in `vertebra.py` to hydrate the `User` object from Broker signals.
