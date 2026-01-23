@@ -206,6 +206,18 @@ class AsyncBrokerClient:
         response = await self.request({"kind": "rollback", "pool": pool, "token": token})
         return await self._decode_result(response)
 
+    async def savepoint(self, pool: str, token: str, name: str) -> Any:
+        response = await self.request({"kind": "savepoint", "pool": pool, "token": token, "name": name})
+        return await self._decode_result(response)
+
+    async def release_savepoint(self, pool: str, token: str, name: str) -> Any:
+        response = await self.request({"kind": "release_savepoint", "pool": pool, "token": token, "name": name})
+        return await self._decode_result(response)
+
+    async def rollback_savepoint(self, pool: str, token: str, name: str) -> Any:
+        response = await self.request({"kind": "rollback_savepoint", "pool": pool, "token": token, "name": name})
+        return await self._decode_result(response)
+
     async def stats(self, pool: str | None = None) -> dict[str, Any]:
         response = await self.request({"kind": "stats", "pool": pool})
         data = _assert_ok(response)
@@ -450,6 +462,18 @@ class SyncBrokerClient:
 
     def rollback(self, pool: str, token: str) -> Any:
         response = self.request({"kind": "rollback", "pool": pool, "token": token})
+        return self._decode_result(response)
+
+    def savepoint(self, pool: str, token: str, name: str) -> Any:
+        response = self.request({"kind": "savepoint", "pool": pool, "token": token, "name": name})
+        return self._decode_result(response)
+
+    def release_savepoint(self, pool: str, token: str, name: str) -> Any:
+        response = self.request({"kind": "release_savepoint", "pool": pool, "token": token, "name": name})
+        return self._decode_result(response)
+
+    def rollback_savepoint(self, pool: str, token: str, name: str) -> Any:
+        response = self.request({"kind": "rollback_savepoint", "pool": pool, "token": token, "name": name})
         return self._decode_result(response)
 
     def stats(self, pool: str | None = None) -> dict[str, Any]:

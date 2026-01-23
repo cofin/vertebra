@@ -56,6 +56,7 @@ class TestJSONCodec:
 
     def test_encode_decode_path(self) -> None:
         import pathlib
+
         codec = JSONCodec()
         p = pathlib.Path("/tmp/foo")
         encoded = codec.encode(p)
@@ -67,6 +68,7 @@ class TestJSONCodec:
 
     def test_encode_decode_ip(self) -> None:
         import ipaddress
+
         codec = JSONCodec()
         ip = ipaddress.IPv4Address("127.0.0.1")
         encoded = codec.encode(ip)
@@ -89,6 +91,7 @@ class TestJSONCodec:
 
     def test_encode_decode_dataclass(self) -> None:
         import dataclasses
+
         @dataclasses.dataclass
         class Point:
             x: int
@@ -99,7 +102,7 @@ class TestJSONCodec:
         encoded = codec.encode(p)
         decoded = codec.decode(encoded)
         assert decoded == {"x": 1, "y": 2}
-        
+
         # Dataclass decoding is not automatic unless we register a hook or use type_hint with struct?
         # msgspec supports dataclasses natively if we use generic functions but here we use Codec.
         # VertebraCodec doesn't auto-decode to dataclass unless we tell it.
@@ -118,6 +121,7 @@ class TestMessagePackCodec:
 
     def test_encode_decode_path(self) -> None:
         import pathlib
+
         codec = MessagePackCodec()
         p = pathlib.Path("/tmp/foo")
         encoded = codec.encode(p)
@@ -130,6 +134,7 @@ class TestMessagePackCodec:
 
     def test_encode_decode_ip(self) -> None:
         import ipaddress
+
         codec = MessagePackCodec()
         ip = ipaddress.IPv4Address("127.0.0.1")
         encoded = codec.encode(ip)

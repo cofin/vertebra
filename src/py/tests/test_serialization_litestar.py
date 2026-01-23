@@ -40,26 +40,19 @@ def test_litestar_serialization() -> None:
 
 @pytest.mark.skipif(not HAS_LITESTAR, reason="Litestar not installed")
 def test_litestar_parsing() -> None:
-    import pathlib
     import ipaddress
+    import pathlib
+
     from litestar import get
 
     from vertebra.serializers.litestar import VERTEBRA_TYPE_DECODERS
 
     @get("/query", sync_to_thread=False)
-    def query_handler(
-        path: pathlib.Path,
-        ip: ipaddress.IPv4Address,
-    ) -> dict[str, Any]:
-        return {
-            "path": str(path),
-            "ip": str(ip),
-        }
+    def query_handler(path: pathlib.Path, ip: ipaddress.IPv4Address) -> dict[str, Any]:
+        return {"path": str(path), "ip": str(ip)}
 
     app = Litestar(
-        route_handlers=[query_handler],
-        type_encoders=VERTEBRA_TYPE_ENCODERS,
-        type_decoders=VERTEBRA_TYPE_DECODERS
+        route_handlers=[query_handler], type_encoders=VERTEBRA_TYPE_ENCODERS, type_decoders=VERTEBRA_TYPE_DECODERS
     )
 
     with TestClient(app) as client:
@@ -67,4 +60,3 @@ def test_litestar_parsing() -> None:
         response = client.get("/query", params={"path": "/tmp/test", "ip": "192.168.1.1"})
         assert response.status_code == HTTP_200_OK, response.text
         assert response.json() == {"path": "/tmp/test", "ip": "192.168.1.1"}
-

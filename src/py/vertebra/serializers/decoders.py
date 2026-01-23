@@ -86,5 +86,6 @@ def default_decoder(type_: type, value: Any) -> Any:
         return ipaddress.IPv6Address(value)
     if type_ in (ipaddress.IPv4Interface, ipaddress.IPv6Interface, ipaddress.IPv4Network, ipaddress.IPv6Network):
         return ipaddress.ip_network(value) if "Network" in str(type_) else ipaddress.ip_interface(value)
-        
-    raise TypeError(f"Objects of type {type_} are not supported")
+
+    msg = f"Objects of type {type_} are not supported"
+    raise TypeError(msg)
