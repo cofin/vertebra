@@ -50,7 +50,11 @@ export abstract class BasePoolAdapter implements PoolAdapter {
   protected _acquires = 0;
   protected _releases = 0;
   protected _errors = 0;
-  protected _healthFailures = 0;
+  protected _healthChecksSuccess = 0;
+  protected _healthChecksFailure = 0;
+  protected _removalsHealth = 0;
+  protected _removalsTimeout = 0;
+  protected _removalsError = 0;
   protected _idleTimeouts = 0;
   public hooks: LifecycleHooks;
 
@@ -63,24 +67,6 @@ export abstract class BasePoolAdapter implements PoolAdapter {
     this._maxSize = maxSize;
     this.hooks = hooks;
   }
-
-  maxSize(): number {
-    return this._maxSize;
-  }
-
-  abstract inUse(): number;
-  abstract acquire(): Promise<string>;
-  abstract release(token: string): Promise<void>;
-  abstract execute(token: string, sql: string, params: unknown[]): Promise<Record<string, unknown>>;
-  abstract executeMany(
-    token: string,
-    sql: string,
-    params: unknown[][],
-  ): Promise<Record<string, unknown>>;
-  abstract command(token: string, command: string, args: unknown[]): Promise<unknown>;
-  abstract begin(token: string): Promise<void>;
-  abstract commit(token: string): Promise<void>;
-  abstract rollback(token: string): Promise<void>;
 
   protected _healthCheckInterval?: Timer;
   protected _idleReaperInterval?: Timer;
@@ -119,6 +105,23 @@ export abstract class BasePoolAdapter implements PoolAdapter {
     // Deprecated in favor of reapIdleConnections
   }
 
+  protected recordHealthCheck(success: boolean, durationMs: number): void {
+    if (success) {
+        this._healthChecksSuccess++;
+    } else {
+        this._healthChecksFailure++;
+    }
+    // Duration tracking would go to a histogram here if we had one
+  }
+
+  protected recordRemoval(reason: "health" | "timeout" | "error"): void {
+    switch (reason) {
+        case "health": this._removalsHealth++; break;
+        case "timeout": this._removalsTimeout++; break;
+        case "error": this._removalsError++; break;
+    }
+  }
+
   /** Record a successful acquire. Call this after acquiring a connection. */
   protected recordAcquire(token: string): void {
     this._acquires += 1;
@@ -143,7 +146,8 @@ export abstract class BasePoolAdapter implements PoolAdapter {
 
   /** Record a health check failure. */
   protected recordHealthFailure(): void {
-    this._healthFailures += 1;
+    // Deprecated, use recordHealthCheck(false)
+    this._healthChecksFailure++;
   }
 
   /**
@@ -174,7 +178,7 @@ export abstract class BasePoolAdapter implements PoolAdapter {
       acquires_total: this._acquires,
       releases_total: this._releases,
       errors_total: this._errors,
-      health_failures_total: this._healthFailures,
+      health_failures_total: this._healthChecksFailure,
       idle_timeouts_total: this._idleTimeouts,
     };
   }

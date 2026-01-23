@@ -1,14 +1,14 @@
-import pytest
-from typing import Any
-from litestar import Litestar, get, Router
-from litestar.di import Provide
-from litestar.status_codes import HTTP_400_BAD_REQUEST
-from litestar.exceptions import HTTPException
+from unittest.mock import MagicMock
 
-from vertebra.server.worker import AsgiWorker, WorkerConfig
+import pytest
+from litestar import Litestar, Router, get
+from litestar.di import Provide
+from litestar.exceptions import HTTPException
+from litestar.status_codes import HTTP_400_BAD_REQUEST
+
+from vertebra.integration.litestar import reflect_routes
 from vertebra.integration.litestar.compiler import PipelineCompiler
-from vertebra.integration.litestar import reflect_routes, build_router
-from unittest.mock import AsyncMock, MagicMock
+
 
 @pytest.mark.integration
 @pytest.mark.anyio
@@ -28,27 +28,27 @@ async def test_complex_routing_and_di() -> None:
 
     router = Router(path="/deep", route_handlers=[handler])
     app = Litestar(
-        route_handlers=[router], 
+        route_handlers=[router],
         dependencies={"dep_a": Provide(get_dep_a), "dep_b": Provide(get_dep_b)},
-        openapi_config=None
+        openapi_config=None,
     )
 
     # 2. Reflect and Compile
     routes = reflect_routes(app)
     # Ensure reflection found the route
     target_route = next(r for r in routes if "/deep/nested/" in r.path)
-    
+
     compiler = PipelineCompiler()
-    
+
     # We can create a mock object that mimics the handler wrapper
     # since PipelineCompiler expects something with resolve_guards/resolve_dependencies
     handler_wrapper = MagicMock()
     handler_wrapper.fn = target_route.handler
     handler_wrapper.resolve_guards.return_value = target_route.guards
     handler_wrapper.resolve_dependencies.return_value = target_route.dependencies
-    
+
     runner = compiler.compile_route(handler_wrapper)
-    
+
     # 3. Execution
     # Success case
     msg_success = {
@@ -57,13 +57,14 @@ async def test_complex_routing_and_di() -> None:
         "method": "GET",
         "headers": [],
         "body": b"",
-        "path_params": {"param": "42"}
+        "path_params": {"param": "42"},
     }
-    
+
     # Mock VertebraRequest context (since runner expects it)
     from vertebra.integration.litestar import VertebraRequest
+
     ctx = VertebraRequest(msg_success)
-    
+
     result = await runner(ctx)
     assert result["param"] == 42
     assert result["dep"] == "AB"

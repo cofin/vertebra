@@ -11,16 +11,16 @@ export class MCPIPCBridge {
     const payload = encode({
       type: "tool_call",
       name,
-      args
+      args,
     });
-    
+
     const responseBytes = await this.transport.send(payload);
     const response = decode(responseBytes) as any;
-    
+
     if (response.error) {
       throw new Error(response.error);
     }
-    
+
     return response.result;
   }
 }

@@ -45,7 +45,7 @@ export class SSETransport implements Transport {
     const stream = new ReadableStream({
       start: (controller) => {
         this.sessions.set(sessionId, controller);
-        
+
         const endpoint = `${url.pathname}?session=${sessionId}`;
         const data = `event: endpoint\ndata: ${endpoint}\n\n`;
         controller.enqueue(new TextEncoder().encode(data));
@@ -63,15 +63,15 @@ export class SSETransport implements Transport {
       },
       cancel: () => {
         this.cleanupSession(sessionId);
-      }
+      },
     });
 
     return new Response(stream, {
       headers: {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-      }
+        Connection: "keep-alive",
+      },
     });
   }
 

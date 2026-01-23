@@ -80,7 +80,8 @@ pub extern "C" fn vtb_router_match(
                 // Serialize params to JSON object
                 // We construct a simple JSON string manually to avoid heavy deps if possible,
                 // or just use serde_json since we have it.
-                let params_map: std::collections::HashMap<&str, &str> = params.into_iter().collect();
+                let params_map: std::collections::HashMap<&str, &str> =
+                    params.into_iter().collect();
                 let json = match serde_json::to_vec(&params_map) {
                     Ok(j) => j,
                     Err(_) => return VtbStatus::Sys,

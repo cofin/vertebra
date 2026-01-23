@@ -380,12 +380,7 @@
   - Test progress updates during long operations
   - File: `src/ts/tests/integration/progress.test.ts` (NEW)
 
-**Acceptance**:
-- Progress notifications sent during long operations
-- Python API integrates with IPC
-- Tests pass
-
----
+**Phase 3 Checkpoint**: [checkpoint: dec698a]
 
 ## Phase 4: Pool Health Checks (Week 7-8)
 
@@ -394,28 +389,28 @@
 **Priority**: P1
 **Dependencies**: None
 
-- [ ] **Task 4.1.1**: Add health check infrastructure to BasePoolAdapter
+- [x] **Task 4.1.1**: Add health check infrastructure to BasePoolAdapter
   - `startHealthCheck(intervalMs)` method
   - Abstract `runHealthCheck()` method
   - Track last health check time per connection
   - File: `src/ts/src/broker/base-pool.ts`
 
-- [ ] **Task 4.1.2**: Implement PostgresHealthChecker
+- [x] **Task 4.1.2**: Implement PostgresHealthChecker
   - Execute `SELECT 1`
   - Return true if successful
   - File: `src/ts/src/broker/serve.ts`
 
-- [ ] **Task 4.1.3**: Implement MySqlHealthChecker
+- [x] **Task 4.1.3**: Implement MySqlHealthChecker
   - Execute `SELECT 1`
   - Return true if successful
   - File: `src/ts/src/broker/serve.ts`
 
-- [ ] **Task 4.1.4**: Implement SqliteHealthChecker
+- [x] **Task 4.1.4**: Implement SqliteHealthChecker
   - Execute `SELECT 1`
   - Return true if successful
   - File: `src/ts/src/broker/serve.ts`
 
-- [ ] **Task 4.1.5**: Implement RedisHealthChecker
+- [x] **Task 4.1.5**: Implement RedisHealthChecker
   - Execute `PING`
   - Return true if response is "PONG"
   - File: `src/ts/src/broker/serve.ts`
@@ -432,18 +427,18 @@
 **Priority**: P1
 **Dependencies**: Task 4.1
 
-- [ ] **Task 4.2.1**: Implement pre-lease validation
+- [x] **Task 4.2.1**: Implement pre-lease validation
   - Quick health check before returning connection
   - Retry with different connection if validation fails
   - Log validation failures
   - File: `src/ts/src/broker/base-pool.ts`
 
-- [ ] **Task 4.2.2**: Implement post-release validation
+- [x] **Task 4.2.2**: Implement post-release validation
   - Validate connection on return to pool
   - Remove and replace if invalid
   - File: `src/ts/src/broker/base-pool.ts`
 
-- [ ] **Task 4.2.3**: Add validation tests
+- [x] **Task 4.2.3**: Add validation tests
   - Test pre-lease validation catches bad connections
   - Test post-release validation removes corrupted connections
   - File: `src/ts/tests/unit/pool-validation.test.ts` (NEW)
@@ -460,13 +455,13 @@
 **Priority**: P1
 **Dependencies**: Task 4.1
 
-- [ ] **Task 4.3.1**: Add health check metrics
+- [~] **Task 4.3.1**: Add health check metrics
   - `health_checks_total{pool, result="success|failure"}`
   - `connection_removals_total{pool, reason="health_check|timeout|error"}`
   - `health_check_duration_seconds{pool}`
   - File: `src/ts/src/broker/base-pool.ts`
 
-- [ ] **Task 4.3.2**: Add integration tests with real database
+- [~] **Task 4.3.2**: Add integration tests with real database
   - Start Postgres container
   - Acquire connection, kill database, verify removal
   - Restart database, verify new connection created

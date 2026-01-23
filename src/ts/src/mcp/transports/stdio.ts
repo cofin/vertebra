@@ -12,7 +12,10 @@ export interface Transport {
 export class StdioTransport implements Transport {
   private rl?: readline.Interface;
 
-  constructor(private input: Readable, private output: Writable) {}
+  constructor(
+    private input: Readable,
+    private output: Writable,
+  ) {}
 
   async start(): Promise<void> {
     this.rl = readline.createInterface({
@@ -28,7 +31,7 @@ export class StdioTransport implements Transport {
         this.onmessage?.(message);
       } catch (error) {
         const parseError = new Error("Parse error");
-        (parseError as any).code = -32700; 
+        (parseError as any).code = -32700;
         this.onerror?.(parseError);
       }
     });

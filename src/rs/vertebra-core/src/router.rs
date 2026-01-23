@@ -44,13 +44,19 @@ mod tests {
         router.insert("/echo", RouteId(2)).unwrap();
         router.insert("/user/:id", RouteId(3)).unwrap();
 
-        assert_eq!(router.match_path("/hello").map(|(id, _)| id), Some(RouteId(1)));
-        assert_eq!(router.match_path("/echo").map(|(id, _)| id), Some(RouteId(2)));
-        
+        assert_eq!(
+            router.match_path("/hello").map(|(id, _)| id),
+            Some(RouteId(1))
+        );
+        assert_eq!(
+            router.match_path("/echo").map(|(id, _)| id),
+            Some(RouteId(2))
+        );
+
         let (id, params) = router.match_path("/user/123").unwrap();
         assert_eq!(id, RouteId(3));
         assert_eq!(params, vec![("id", "123")]);
-        
+
         assert_eq!(router.match_path("/notfound"), None);
     }
 }

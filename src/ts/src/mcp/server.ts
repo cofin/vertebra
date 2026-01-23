@@ -8,6 +8,12 @@ export type JsonRpcRequest = {
   params?: any;
 };
 
+export type JsonRpcNotification = {
+  jsonrpc: "2.0";
+  method: string;
+  params?: any;
+};
+
 export type JsonRpcResponse = {
   jsonrpc: "2.0";
   id: string | number | null;
@@ -36,9 +42,11 @@ export class McpServer {
   private resources = new Map<string, McpResource>();
   private initialized = false;
 
+  onNotification?: (notification: JsonRpcNotification, sessionId?: string) => void;
+
   constructor(
     private registry?: SchemaRegistry,
-    private bridge?: MCPIPCBridge
+    private bridge?: MCPIPCBridge,
   ) {}
 
   registerTool(tool: McpTool): void {
@@ -51,7 +59,7 @@ export class McpServer {
 
   syncFromRegistry(): void {
     if (!this.registry) return;
-    
+
     for (const schema of this.registry.getTools()) {
       this.registerTool({
         name: schema.name,
@@ -60,7 +68,7 @@ export class McpServer {
         handler: async (args) => {
           if (!this.bridge) throw new Error("IPC bridge not available");
           return this.bridge.callTool(schema.name, args);
-        }
+        },
       });
     }
 
@@ -69,12 +77,12 @@ export class McpServer {
         uri: schema.uri,
         name: schema.name,
         description: schema.description,
-        mimeType: schema.mimeType
+        mimeType: schema.mimeType,
       });
     }
   }
 
-  async handle(request: JsonRpcRequest): Promise<JsonRpcResponse> {
+  async handle(request: JsonRpcRequest, sessionId?: string): Promise<JsonRpcResponse | null> {
     try {
       if (request.method === "initialize") {
         return this.handleInitialize(request);
@@ -88,13 +96,17 @@ export class McpServer {
         case "tools/list":
           return this.handleToolsList(request);
         case "tools/call":
-          return await this.handleToolsCall(request);
+          return await this.handleToolsCall(request, sessionId);
         case "resources/list":
           return this.handleResourcesList(request);
         case "resources/read":
           return await this.handleResourcesRead(request);
         case "ping":
           return this.success(request.id, {});
+        case "notifications/progress":
+          // Clients can also send progress notifications if they are long-running?
+          // Usually it's server -> client.
+          return null;
         default:
           return this.error(request.id, -32601, `Method not found: ${request.method}`);
       }
@@ -103,13 +115,28 @@ export class McpServer {
     }
   }
 
+  sendProgress(token: string | number, progress: number, total?: number, sessionId?: string) {
+    this.onNotification?.(
+      {
+        jsonrpc: "2.0",
+        method: "notifications/progress",
+        params: {
+          progressToken: token,
+          progress,
+          total,
+        },
+      },
+      sessionId,
+    );
+  }
+
   private handleInitialize(request: JsonRpcRequest): JsonRpcResponse {
     this.initialized = true;
     return this.success(request.id, {
       protocolVersion: "2024-11-05",
       capabilities: {
         tools: {},
-        resources: {}
+        resources: {},
       },
       serverInfo: {
         name: "vertebra-mcp",
@@ -127,8 +154,15 @@ export class McpServer {
     return this.success(request.id, { tools: toolsList });
   }
 
-  private async handleToolsCall(request: JsonRpcRequest): Promise<JsonRpcResponse> {
-    const params = request.params as { name: string; arguments?: any };
+  private async handleToolsCall(
+    request: JsonRpcRequest,
+    sessionId?: string,
+  ): Promise<JsonRpcResponse> {
+    const params = request.params as {
+      name: string;
+      arguments?: any;
+      _meta?: { progressToken?: string | number };
+    };
     if (!params || !params.name) {
       return this.error(request.id, -32602, "Invalid params: 'name' is required");
     }
@@ -139,6 +173,8 @@ export class McpServer {
     }
 
     try {
+      // If client provided a progress token, we might want to pass it to the handler
+      // or set up a way for the handler to report progress.
       const result = await tool.handler(params.arguments || {});
       return this.success(request.id, {
         content: [{ type: "text", text: JSON.stringify(result) }],
@@ -153,7 +189,7 @@ export class McpServer {
       uri: r.uri,
       name: r.name,
       description: r.description,
-      mimeType: r.mimeType
+      mimeType: r.mimeType,
     }));
     return this.success(request.id, { resources: list });
   }
@@ -165,15 +201,13 @@ export class McpServer {
     }
 
     if (!this.bridge) {
-        return this.error(request.id, -32603, "IPC bridge not available");
+      return this.error(request.id, -32603, "IPC bridge not available");
     }
 
     try {
-      // In MCP, resources/read returns resource content
-      // We route this through IPC bridge as a special "resource_read" call
       const result = await this.bridge.callTool("__resource_read__", { uri: params.uri });
       return this.success(request.id, {
-        contents: [result]
+        contents: [result],
       });
     } catch (error) {
       return this.error(request.id, -32000, "Resource read failed", String(error));

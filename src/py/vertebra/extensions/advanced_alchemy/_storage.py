@@ -20,7 +20,9 @@ if TYPE_CHECKING:
 
 PathLike = str | Path | os.PathLike[Any]
 DataLike = IO[bytes] | Path | bytes | Iterator[bytes] | Iterable[bytes]
-AsyncDataLike = IO[bytes] | Path | bytes | AsyncIterator[bytes] | AsyncIterable[bytes] | Iterator[bytes] | Iterable[bytes]
+AsyncDataLike = (
+    IO[bytes] | Path | bytes | AsyncIterator[bytes] | AsyncIterable[bytes] | Iterator[bytes] | Iterable[bytes]
+)
 
 
 class VertebraStorageBackend(StorageBackend):
@@ -110,11 +112,7 @@ class VertebraStorageBackend(StorageBackend):
                 await self._client.storage_delete(self.pool, str(path))
 
     def sign(
-        self,
-        paths: PathLike | Sequence[PathLike],
-        *,
-        expires_in: int | None = None,
-        for_upload: bool = False,
+        self, paths: PathLike | Sequence[PathLike], *, expires_in: int | None = None, for_upload: bool = False
     ) -> str | list[str]:
         """Generate signed URL(s) - not supported by broker."""
         del paths, expires_in, for_upload  # unused
@@ -122,11 +120,7 @@ class VertebraStorageBackend(StorageBackend):
         raise NotImplementedError(msg)
 
     async def sign_async(
-        self,
-        paths: PathLike | Sequence[PathLike],
-        *,
-        expires_in: int | None = None,
-        for_upload: bool = False,
+        self, paths: PathLike | Sequence[PathLike], *, expires_in: int | None = None, for_upload: bool = False
     ) -> str | list[str]:
         """Generate signed URL(s) - not supported by broker."""
         del paths, expires_in, for_upload  # unused

@@ -7,7 +7,6 @@ import importlib
 import os
 import signal
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 from typing import Any
 
 import msgspec
@@ -144,16 +143,17 @@ class AsgiWorker:
         if self._control is not None:
             return
         await self._start_lifespan()
-        
+
         # Check if native integration is enabled
         native_enabled = os.environ.get("VERTEBRA_NATIVE", "1") == "1"
-        
+
         # If the app is a Litestar instance, we can reflect routes and compile pipelines
         from litestar import Litestar
+
         if native_enabled and isinstance(self._app, Litestar):
             from vertebra.integration.litestar import reflect_routes
             from vertebra.integration.litestar.compiler import PipelineCompiler
-            
+
             routes = reflect_routes(self._app)
             compiler = PipelineCompiler()
             for route in routes:
@@ -208,26 +208,22 @@ class AsgiWorker:
     async def _handle_direct_websocket(self, message: dict[str, Any], writer: "ResponseWriter") -> None:
         handler_id = message.get("handler_id")
         if handler_id is None:
-             return
+            return
 
         runner = self._native_runners.get(handler_id)
         if runner is None:
             return
 
         class VertebraWebSocket:
-            def __init__(self, msg, w):
+            def __init__(self, msg, w) -> None:
                 self._msg = msg
                 self._w = w
-                
+
             def receive_text(self):
                 return self._msg.get("text")
-                
-            async def send_text(self, data):
-                await self._w.send({
-                    "id": self._msg.get("id"),
-                    "type": "ws.message",
-                    "text": data
-                })
+
+            async def send_text(self, data) -> None:
+                await self._w.send({"id": self._msg.get("id"), "type": "ws.message", "text": data})
 
         socket = VertebraWebSocket(message, writer)
         await runner(socket)
@@ -235,7 +231,7 @@ class AsgiWorker:
     async def _handle_direct_http(self, message: dict[str, Any], writer: "ResponseWriter") -> None:
         handler_id = message.get("handler_id")
         request_id = message.get("id")
-        
+
         runner = self._native_runners.get(handler_id)
         if runner is None:
             # Fallback to standard ASGI if handler not found in native runners
@@ -248,12 +244,7 @@ class AsgiWorker:
                 await self._start_request(meta, message.get("body"), {}, writer)
                 return
 
-            await writer.send({
-                "id": request_id,
-                "type": "http.response.start",
-                "status": 404,
-                "headers": [],
-            })
+            await writer.send({"id": request_id, "type": "http.response.start", "status": 404, "headers": []})
             await writer.send({
                 "id": request_id,
                 "type": "http.response.body",
@@ -263,33 +254,25 @@ class AsgiWorker:
             return
 
         from vertebra.integration.litestar import VertebraRequest
+
         conn = VertebraRequest(message)
-        
+
         try:
             result = await runner(conn)
-            
+
             import json
+
             body = json.dumps(result).encode()
-            
+
             await writer.send({
                 "id": request_id,
                 "type": "http.response.start",
                 "status": 200,
                 "headers": [("content-type", "application/json")],
             })
-            await writer.send({
-                "id": request_id,
-                "type": "http.response.body",
-                "body": body,
-                "more_body": False,
-            })
+            await writer.send({"id": request_id, "type": "http.response.body", "body": body, "more_body": False})
         except Exception as exc:
-            await writer.send({
-                "id": request_id,
-                "type": "http.response.start",
-                "status": 500,
-                "headers": [],
-            })
+            await writer.send({"id": request_id, "type": "http.response.start", "status": 500, "headers": []})
             await writer.send({
                 "id": request_id,
                 "type": "http.response.body",
@@ -342,7 +325,7 @@ class AsgiWorker:
         return None
 
     def _log(self, level: str, message: str, **fields: Any) -> None:
-        pass # Placeholder for actual logging implementation
+        pass  # Placeholder for actual logging implementation
 
     async def _handle_unary_request(
         self, message: dict[str, Any], contexts: dict[str, RequestContext], writer: "ResponseWriter"

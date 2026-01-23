@@ -28,7 +28,7 @@ export class SchemaRegistry {
     try {
       const content = await readFile(path, "utf-8");
       const data = JSON.parse(content) as RegistryData;
-      
+
       this.tools.clear();
       if (Array.isArray(data.tools)) {
         for (const tool of data.tools) {
@@ -43,7 +43,7 @@ export class SchemaRegistry {
         }
       }
     } catch (error) {
-      if (process.env.NODE_ENV !== 'test') {
+      if (process.env.NODE_ENV !== "test") {
         console.error(`Failed to load schema from ${path}:`, error);
       }
     }
@@ -52,11 +52,11 @@ export class SchemaRegistry {
   async watch(path: string): Promise<void> {
     await this.loadFromFile(path);
     try {
-        this.watcher = watch(path, async (eventType) => {
-          if (eventType === "change") {
-            await this.loadFromFile(path);
-          }
-        });
+      this.watcher = watch(path, async (eventType) => {
+        if (eventType === "change") {
+          await this.loadFromFile(path);
+        }
+      });
     } catch (e) {}
   }
 

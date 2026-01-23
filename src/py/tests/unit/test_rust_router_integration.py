@@ -1,5 +1,5 @@
-import pytest
 from vertebra._vertebra import Router
+
 
 def test_rust_router_basic() -> None:
     router = Router()
@@ -11,6 +11,7 @@ def test_rust_router_basic() -> None:
     assert router.match_path("/echo") == 2
     assert router.match_path("/user/123") == 3
     assert router.match_path("/notfound") is None
+
 
 def test_rust_router_invalid_path() -> None:
     router = Router()

@@ -5,9 +5,11 @@ import pytest
 try:
     from litestar import Litestar, get, post, websocket
     from litestar.handlers import WebsocketListener
+
     HAS_LITESTAR = True
 except ImportError:
     HAS_LITESTAR = False
+
 
 @pytest.mark.skipif(not HAS_LITESTAR, reason="Litestar not installed")
 def test_reflect_routes_basic() -> None:
@@ -22,9 +24,9 @@ def test_reflect_routes_basic() -> None:
         return data
 
     app = Litestar(route_handlers=[hello_handler, echo_handler], openapi_config=None)
-    
+
     routes = reflect_routes(app)
-    
+
     # We check that our handlers are present
     hello_route = next((r for r in routes if r.path == "/hello"), None)
     assert hello_route is not None
@@ -39,9 +41,11 @@ def test_reflect_routes_basic() -> None:
     assert echo_route.handler == echo_handler.fn
     assert echo_route.handler_id != hello_route.handler_id
 
+
 @pytest.mark.skipif(not HAS_LITESTAR, reason="Litestar not installed")
 def test_reflect_routes_nested() -> None:
     from litestar import Controller, Router
+
     from vertebra.integration.litestar import reflect_routes
 
     class MyController(Controller):
@@ -59,15 +63,17 @@ def test_reflect_routes_nested() -> None:
     app = Litestar(route_handlers=[MyController, router], openapi_config=None)
 
     routes = reflect_routes(app)
-    
+
     paths = {r.path for r in routes}
     assert "/controller/hello" in paths
     assert "/router/hello" in paths
 
+
 @pytest.mark.skipif(not HAS_LITESTAR, reason="Litestar not installed")
 def test_reflect_routes_multiple_methods() -> None:
-    from vertebra.integration.litestar import reflect_routes
     from litestar import route
+
+    from vertebra.integration.litestar import reflect_routes
 
     @route("/multi", http_method=["GET", "POST"], sync_to_thread=False)
     def multi_handler() -> str:
@@ -75,12 +81,13 @@ def test_reflect_routes_multiple_methods() -> None:
 
     app = Litestar(route_handlers=[multi_handler], openapi_config=None)
     routes = reflect_routes(app)
-    
+
     multi_route = next((r for r in routes if r.path == "/multi"), None)
     assert multi_route is not None
     assert "GET" in multi_route.methods
     assert "POST" in multi_route.methods
     assert len(multi_route.methods) == 2
+
 
 @pytest.mark.skipif(not HAS_LITESTAR, reason="Litestar not installed")
 def test_reflect_routes_websockets() -> None:
@@ -94,14 +101,15 @@ def test_reflect_routes_websockets() -> None:
 
     app = Litestar(route_handlers=[ws_handler])
     routes = reflect_routes(app)
-    
+
     ws_route = next(r for r in routes if r.path == "/ws")
     assert ws_route.is_websocket is True
 
+
 @pytest.mark.skipif(not HAS_LITESTAR, reason="Litestar not installed")
 def test_build_router() -> None:
-    from vertebra.integration.litestar import reflect_routes, build_router
     from vertebra._vertebra import Router
+    from vertebra.integration.litestar import build_router, reflect_routes
 
     @get("/hello/{name:str}", sync_to_thread=False)
     def hello_handler(name: str) -> str:
@@ -110,6 +118,6 @@ def test_build_router() -> None:
     app = Litestar(route_handlers=[hello_handler], openapi_config=None)
     routes = reflect_routes(app)
     router = build_router(routes)
-    
+
     assert isinstance(router, Router)
     assert router.match_path("/GET/hello/world") == id(hello_handler.fn)

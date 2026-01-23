@@ -1,7 +1,7 @@
 import asyncio
 import logging
+from collections.abc import Callable
 from contextvars import ContextVar
-from typing import Callable
 
 import msgspec
 

@@ -30,12 +30,14 @@ export class SqlPool extends BasePoolAdapter {
     // Pre-lease validation
     if (!(await this.validateConnection(token))) {
         this.connections.delete(token);
-        this.recordHealthFailure();
+        this.recordHealthCheck(false, 0); // Validation failed instantly
+        this.recordRemoval("health");
         // Retry logic would go here in real impl
         throw new Error("Connection failed validation");
     }
 
     this.recordAcquire(token);
+    this.recordHealthCheck(true, 0);
     
     if (this.hooks.onAcquire) {
       await this.hooks.onAcquire(this.connections.get(token));
@@ -49,9 +51,11 @@ export class SqlPool extends BasePoolAdapter {
         if (!(await this.validateConnection(token))) {
             this.connections.delete(token);
             this.connectionTimestamps.delete(token);
-            this.recordHealthFailure();
+            this.recordHealthCheck(false, 0);
+            this.recordRemoval("health");
             return;
         }
+        this.recordHealthCheck(true, 0);
 
         this.idle.add(token);
         this.recordRelease(token);
@@ -69,17 +73,19 @@ export class SqlPool extends BasePoolAdapter {
     return true; 
   }
 
-  // Health check implementation
   protected async runHealthCheck(): Promise<void> {
     for (const token of this.idle) {
+      const start = Date.now();
       try {
         if (!(await this.validateConnection(token))) {
             throw new Error("Validation failed");
         }
+        this.recordHealthCheck(true, Date.now() - start);
       } catch (error) {
-        this.recordHealthFailure();
+        this.recordHealthCheck(false, Date.now() - start);
         this.connections.delete(token);
         this.idle.delete(token);
+        this.recordRemoval("health");
         
         if (this.hooks.onError) {
             await this.hooks.onError(null, error as Error);
@@ -97,6 +103,7 @@ export class SqlPool extends BasePoolAdapter {
         this.connections.delete(token);
         this.idle.delete(token);
         this.connectionTimestamps.delete(token);
+        this.recordRemoval("timeout");
         
         if (this.hooks.onTimeout) {
             await this.hooks.onTimeout(this.name);
