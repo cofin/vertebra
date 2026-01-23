@@ -42,7 +42,7 @@ This plan outlines the phases to implement a custom, high-performance integratio
 - [x] **Task: Direct Data Binding (Rust-to-Python)** [1be3fd2]
     - [ ] Write tests for passing JSON payloads directly into handler `**kwargs`.
     - [ ] Optimize the shared-memory-to-Python-primitive mapping in `vertebra-py`.
-- [ ] **Task: Legacy ASGI Fallback**
+- [x] **Task: Legacy ASGI Fallback** [8659db5]
     - [ ] Write tests for an app containing both "Native" and "Legacy" routes.
     - [ ] Implement routing logic that switches between Direct Invoker and the standard ASGI adapter based on the route ID.
 - [ ] **Task: Checkpoint - Verify End-to-End HTTP**
