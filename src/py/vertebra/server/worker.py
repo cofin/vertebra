@@ -166,7 +166,21 @@ class AsgiWorker:
         if frame_type == "direct.http":
             await self._handle_direct_http(message, writer)
             return
+        if frame_type in ("ws.open", "ws.message", "ws.close"):
+            await self._handle_direct_websocket(message, writer)
+            return
         if frame_type == "http.request.start":
+            meta = self._parse_request_meta(message, scope_type="http")
+            if meta is None:
+                return
+            await self._start_request(meta, None, contexts, writer)
+            return
+        if frame_type == "websocket.connect":
+            meta = self._parse_request_meta(message, scope_type="websocket")
+            if meta is None:
+                return
+            await self._start_request(meta, None, contexts, writer)
+            return
             meta = self._parse_request_meta(message, scope_type="http")
             if meta is None:
                 return
@@ -185,6 +199,33 @@ class AsgiWorker:
         if context is None:
             return
         await self._enqueue_request_frame(context, message)
+
+    async def _handle_direct_websocket(self, message: dict[str, Any], writer: "ResponseWriter") -> None:
+        handler_id = message.get("handler_id")
+        if handler_id is None:
+             return
+
+        runner = self._native_runners.get(handler_id)
+        if runner is None:
+            return
+
+        class VertebraWebSocket:
+            def __init__(self, msg, w):
+                self._msg = msg
+                self._w = w
+                
+            def receive_text(self):
+                return self._msg.get("text")
+                
+            async def send_text(self, data):
+                await self._w.send({
+                    "id": self._msg.get("id"),
+                    "type": "ws.message",
+                    "text": data
+                })
+
+        socket = VertebraWebSocket(message, writer)
+        await runner(socket)
 
     async def _handle_direct_http(self, message: dict[str, Any], writer: "ResponseWriter") -> None:
         handler_id = message.get("handler_id")
