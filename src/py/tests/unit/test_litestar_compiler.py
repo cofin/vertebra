@@ -4,10 +4,47 @@ from litestar import Litestar, get
 from litestar.exceptions import NotAuthorizedException
 
 try:
-    from vertebra.integration.litestar.compiler import compile_guards, compile_di
+    from vertebra.integration.litestar.compiler import compile_guards, compile_di, PipelineCompiler
     HAS_COMPILER = True
 except ImportError:
     HAS_COMPILER = False
+
+# ... existing tests ...
+
+@pytest.mark.skipif(not HAS_COMPILER, reason="Compiler not implemented")
+@pytest.mark.anyio
+async def test_pipeline_compiler_end_to_end() -> None:
+    from litestar.di import Provide
+    from litestar.exceptions import NotAuthorizedException
+
+    def guard(connection: Any, _: Any) -> None:
+        if connection.headers.get("x-auth") != "secret":
+            raise NotAuthorizedException()
+
+    def get_user(connection: Any) -> str:
+        return "cody"
+
+    @get("/hello")
+    def handler(user: str) -> dict[str, str]:
+        return {"hello": user}
+
+    # Setup dependencies as Litestar would
+    handler.resolve_guards = lambda: [guard]
+    handler.resolve_dependencies = lambda: {"user": Provide(get_user)}
+
+    compiler = PipelineCompiler()
+    runner = compiler.compile_route(handler)
+    
+    # Test successful run
+    conn = MockConnection({"x-auth": "secret"})
+    # The runner expects a connection/scope-like object
+    result = await runner(conn)
+    assert result == {"hello": "cody"}
+    
+    # Test guard failure
+    conn = MockConnection({"x-auth": "wrong"})
+    with pytest.raises(NotAuthorizedException):
+        await runner(conn)
 
 @pytest.mark.skipif(not HAS_COMPILER, reason="Compiler not implemented")
 @pytest.mark.anyio

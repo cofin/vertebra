@@ -108,3 +108,51 @@ def compile_di(dependencies: dict[str, Any], handler: Callable) -> Callable[[dic
     source = f"async def {func_name}(ctx):\n" + "\n".join(body)
     exec(source, local_ns)
     return local_ns[func_name]
+
+class PipelineCompiler:
+    """Compiles Litestar route handlers into optimized runner functions."""
+    
+    def compile_route(self, handler: Any) -> Callable[[Any], Awaitable[Any]]:
+        """Compile a single Litestar route handler into an optimized runner."""
+        # Extract guards and dependencies from the handler
+        # Litestar handlers have resolve_guards and resolve_dependencies methods
+        guards = handler.resolve_guards()
+        dependencies = handler.resolve_dependencies()
+        
+        compiled_guards = compile_guards(guards)
+        compiled_di = compile_di(dependencies, handler.fn)
+        
+        # We build the final runner function
+        func_name = f"runner_{id(handler)}"
+        local_ns = {
+            "compiled_guards": compiled_guards,
+            "compiled_di": compiled_di,
+            "handler_fn": handler.fn,
+        }
+        
+        body = []
+        # 1. Run guards
+        body.append("    await compiled_guards(ctx, handler_fn)")
+        
+        # 2. Resolve dependencies
+        body.append("    deps = await compiled_di(ctx)")
+        
+        # 3. Call the handler with dependencies
+        # Filter deps to only those needed by handler
+        sig = inspect.signature(handler.fn)
+        args = []
+        for param_name in sig.parameters:
+            if param_name in dependencies:
+                args.append(f"{param_name}=deps['{param_name}']")
+            elif param_name in ("connection", "scope", "request"):
+                args.append(f"{param_name}=ctx")
+                
+        args_str = ", ".join(args)
+        if inspect.iscoroutinefunction(handler.fn):
+            body.append(f"    return await handler_fn({args_str})")
+        else:
+            body.append(f"    return handler_fn({args_str})")
+            
+        source = f"async def {func_name}(ctx):\n" + "\n".join(body)
+        exec(source, local_ns)
+        return local_ns[func_name]
