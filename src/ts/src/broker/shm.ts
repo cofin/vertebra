@@ -40,7 +40,14 @@ export type ShmLibrary = {
   vtb_region_close: (handle: bigint) => void;
   vtb_router_new: () => bigint;
   vtb_router_insert: (handle: bigint, path: string, id: bigint) => number;
-  vtb_router_match: (handle: bigint, path: string, outId: BigUint64Array) => number;
+  vtb_router_match: (
+    handle: bigint,
+    path: Uint8Array,
+    outId: BigUint64Array,
+    outParamsJson: Uint8Array,
+    outParamsCap: number,
+    outParamsLen: BigUint64Array,
+  ) => number;
   vtb_router_close: (handle: bigint) => void;
 };
 
@@ -165,7 +172,7 @@ export function loadShmLib(): ShmLibrary {
       returns: "i32",
     },
     vtb_router_match: {
-      args: ["ptr", "ptr", "ptr"],
+      args: ["ptr", "ptr", "ptr", "ptr", "usize", "ptr"],
       returns: "i32",
     },
     vtb_router_close: {
@@ -311,17 +318,40 @@ export class ShmRouter {
     }
   }
 
-  matchPath(path: string): number | null {
+  matchPath(path: string): { id: number; params: Record<string, string> } | null {
     const pathPtr = Buffer.from(`${path}\0`);
-    const out = new BigUint64Array(1);
-    const status = this.lib.vtb_router_match(this.handle, pathPtr as any, out);
+    const outId = new BigUint64Array(1);
+    const paramsCap = 4096;
+    const outParamsJson = new Uint8Array(paramsCap);
+    const outParamsLen = new BigUint64Array(1);
+
+    const status = this.lib.vtb_router_match(
+      this.handle,
+      pathPtr as any,
+      outId,
+      outParamsJson,
+      paramsCap,
+      outParamsLen,
+    );
     if (status === STATUS_EMPTY) {
       return null;
     }
     if (status !== STATUS_OK) {
       throw new Error(`shm router match failed: ${formatStatusError(status, this.lib)}`);
     }
-    return Number(out[0]);
+
+    const len = Number(outParamsLen[0]);
+    let params = {};
+    if (len > 0) {
+      const jsonStr = new TextDecoder().decode(outParamsJson.subarray(0, len));
+      try {
+        params = JSON.parse(jsonStr);
+      } catch {
+        // ignore parse error
+      }
+    }
+
+    return { id: Number(outId[0]), params };
   }
 
   close(): void {

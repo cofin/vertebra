@@ -9,9 +9,9 @@ describe("ShmRouter", () => {
       router.insert("/echo", 2);
       router.insert("/user/:id", 3);
 
-      expect(router.matchPath("/hello")).toBe(1);
-      expect(router.matchPath("/echo")).toBe(2);
-      expect(router.matchPath("/user/123")).toBe(3);
+      expect(router.matchPath("/hello")).toEqual({ id: 1, params: {} });
+      expect(router.matchPath("/echo")).toEqual({ id: 2, params: {} });
+      expect(router.matchPath("/user/123")).toEqual({ id: 3, params: { id: "123" } });
       expect(router.matchPath("/notfound")).toBeNull();
     } finally {
       router.close();

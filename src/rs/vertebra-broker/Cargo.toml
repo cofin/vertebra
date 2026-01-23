@@ -6,8 +6,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[lib]
-crate-type = ["cdylib", "rlib"]
-
 [dependencies]
 vertebra-core = { path = "../vertebra-core" }
+serde_json = { workspace = true }
+
+[lib]
+crate-type = ["cdylib", "rlib"]

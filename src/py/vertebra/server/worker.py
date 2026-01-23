@@ -43,6 +43,7 @@ class AsgiRequest(msgspec.Struct):
     server: tuple[str, int | None] | None = None
     client: tuple[str, int | None] | None = None
     extensions: dict[str, dict[str, Any]] = msgspec.field(default_factory=dict)
+    path_params: dict[str, str] = msgspec.field(default_factory=dict)
 
 
 class AsgiResponse(msgspec.Struct):
@@ -73,6 +74,7 @@ class RequestMeta(msgspec.Struct, frozen=True):
     client: tuple[str, int | None] | None
     extensions: dict[str, dict[str, Any]]
     subprotocols: list[str] = msgspec.field(default_factory=list)
+    path_params: dict[str, str] = msgspec.field(default_factory=dict)
 
 
 class RequestBodyState(msgspec.Struct):
@@ -322,6 +324,7 @@ class AsgiWorker:
                 client=message.get("client"),
                 extensions=message.get("extensions") or {},
                 subprotocols=subprotocols,
+                path_params=message.get("path_params") or {},
             )
         except Exception:  # noqa: BLE001 - defensive parsing of untrusted IPC data
             return None

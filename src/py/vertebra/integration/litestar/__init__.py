@@ -44,6 +44,10 @@ class VertebraRequest:
     def body(self) -> bytes:
         return self._message.get("body", b"")
 
+    @property
+    def path_params(self) -> dict[str, str]:
+        return self._message.get("path_params", {})
+
     def json(self) -> Any:
         if self._json is None:
             import json

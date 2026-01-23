@@ -52,9 +52,17 @@ pub extern "C" fn vtb_router_match(
     handle: *const VtbRouter,
     path: *const c_char,
     out_id: *mut u64,
+    out_params_json: *mut u8,
+    out_params_cap: usize,
+    out_params_len: *mut usize,
 ) -> VtbStatus {
     clear_last_error();
-    if handle.is_null() || path.is_null() || out_id.is_null() {
+    if handle.is_null()
+        || path.is_null()
+        || out_id.is_null()
+        || out_params_json.is_null()
+        || out_params_len.is_null()
+    {
         return VtbStatus::Invalid;
     }
     let handle = unsafe { &*handle };
@@ -64,9 +72,28 @@ pub extern "C" fn vtb_router_match(
         Err(_) => return VtbStatus::Invalid,
     };
     match handle.inner.match_path(path) {
-        Some(id) => {
+        Some((id, params)) => {
             unsafe {
                 *out_id = id.0;
+            }
+            if !params.is_empty() {
+                // Serialize params to JSON object
+                // We construct a simple JSON string manually to avoid heavy deps if possible,
+                // or just use serde_json since we have it.
+                let params_map: std::collections::HashMap<&str, &str> = params.into_iter().collect();
+                let json = match serde_json::to_vec(&params_map) {
+                    Ok(j) => j,
+                    Err(_) => return VtbStatus::Sys,
+                };
+                if json.len() > out_params_cap {
+                    return VtbStatus::Invalid; // Buffer too small
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(json.as_ptr(), out_params_json, json.len());
+                    *out_params_len = json.len();
+                }
+            } else {
+                unsafe { *out_params_len = 0 };
             }
             VtbStatus::Ok
         }

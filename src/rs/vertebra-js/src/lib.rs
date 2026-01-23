@@ -41,9 +41,21 @@ impl RouterHandle {
     }
 
     #[napi]
-    pub fn match_path(&self, path: String) -> Option<u32> {
-        self.inner.match_path(&path).map(|id| id.0 as u32)
+    pub fn match_path(&self, path: String) -> Option<MatchResult> {
+        self.inner.match_path(&path).map(|(id, params)| MatchResult {
+            id: id.0 as u32,
+            params: params
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        })
     }
+}
+
+#[napi(object)]
+pub struct MatchResult {
+    pub id: u32,
+    pub params: std::collections::HashMap<String, String>,
 }
 
 #[napi]

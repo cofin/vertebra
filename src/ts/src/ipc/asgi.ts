@@ -27,16 +27,10 @@ export type AsgiRequestStartFrame = {
   method: string;
   path: string;
   query: string;
-  headers: [string, string][];
-  handler_id?: number;
-  scheme?: string;
-  httpVersion?: string;
-  rawPath?: Uint8Array;
-  queryString?: Uint8Array;
-  rootPath?: string;
   server?: [string, number | null];
   client?: [string, number | null];
-  extensions?: Record<string, Record<string, unknown>>;
+  extensions?: Record<string, Record<string, unknown>>; 
+  path_params?: Record<string, string>;
 };
 
 export type AsgiResponse = {
@@ -201,12 +195,13 @@ export class AsgiBridge {
 
   async handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const handlerId = this.router?.matchPath(`/${request.method}${url.pathname}`);
+    const match = this.router?.matchPath(`/${request.method}${url.pathname}`);
 
     const meta = this.buildRequestMeta(request);
-    if (handlerId !== undefined && handlerId !== null) {
+    if (match) {
       meta.type = "direct.http";
-      meta.handler_id = handlerId;
+      meta.handler_id = match.id;
+      meta.path_params = match.params;
     }
 
     if (this.requester.requestStream) {
@@ -230,11 +225,11 @@ export class AsgiBridge {
     
     // Check for native handler
     const url = new URL(request.url);
-    const handlerId = this.router?.matchPath(`/WEBSOCKET${url.pathname}`);
+    const match = this.router?.matchPath(`/WEBSOCKET${url.pathname}`);
     
     const state = this.createWebSocketState(request);
-    if (handlerId !== undefined && handlerId !== null) {
-        state.handler_id = handlerId;
+    if (match) {
+        state.handler_id = match.id;
     }
     
     const headers = this.selectWebSocketHeaders(state);

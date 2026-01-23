@@ -150,6 +150,18 @@ class PipelineCompiler:
                 args.append("data=data")
             elif param_name in ("connection", "scope", "request"):
                 args.append(f"{param_name}=ctx")
+            else:
+                # Try path params
+                body.append(f"    if '{param_name}' in ctx.path_params:")
+                # We need type conversion. For now, assume string or rely on handler to cast if simple.
+                # Litestar handles this. We might need a 'coerce' step.
+                # But for 'str' it's fine. For 'int', we need to check annotation.
+                param_type = sig.parameters[param_name].annotation
+                if param_type is int:
+                    body.append(f"        {param_name} = int(ctx.path_params['{param_name}'])")
+                else:
+                    body.append(f"        {param_name} = ctx.path_params['{param_name}']")
+                args.append(f"{param_name}={param_name}")
                 
         args_str = ", ".join(args)
         if inspect.iscoroutinefunction(handler.fn):

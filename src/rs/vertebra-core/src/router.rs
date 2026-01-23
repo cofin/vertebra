@@ -19,8 +19,17 @@ impl Router {
         self.inner.insert(path, id)
     }
 
-    pub fn match_path(&self, path: &str) -> Option<RouteId> {
-        self.inner.at(path).ok().map(|m| *m.value)
+    pub fn match_path<'k, 'v>(
+        &'k self,
+        path: &'v str,
+    ) -> Option<(RouteId, Vec<(&'k str, &'v str)>)> {
+        match self.inner.at(path) {
+            Ok(m) => {
+                let params = m.params.iter().collect();
+                Some((*m.value, params))
+            }
+            Err(_) => None,
+        }
     }
 }
 
@@ -35,9 +44,13 @@ mod tests {
         router.insert("/echo", RouteId(2)).unwrap();
         router.insert("/user/:id", RouteId(3)).unwrap();
 
-        assert_eq!(router.match_path("/hello"), Some(RouteId(1)));
-        assert_eq!(router.match_path("/echo"), Some(RouteId(2)));
-        assert_eq!(router.match_path("/user/123"), Some(RouteId(3)));
+        assert_eq!(router.match_path("/hello").map(|(id, _)| id), Some(RouteId(1)));
+        assert_eq!(router.match_path("/echo").map(|(id, _)| id), Some(RouteId(2)));
+        
+        let (id, params) = router.match_path("/user/123").unwrap();
+        assert_eq!(id, RouteId(3));
+        assert_eq!(params, vec![("id", "123")]);
+        
         assert_eq!(router.match_path("/notfound"), None);
     }
 }

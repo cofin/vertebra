@@ -46,7 +46,7 @@ impl PyRouter {
     }
 
     fn match_path(&self, path: &str) -> Option<u64> {
-        self.inner.match_path(path).map(|id| id.0)
+        self.inner.match_path(path).map(|(id, _)| id.0)
     }
 }
 
