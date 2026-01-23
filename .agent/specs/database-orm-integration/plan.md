@@ -246,7 +246,7 @@
 
 ---
 
-## Phase 3: SQLAlchemy Integration (Week 2-3)
+## Phase 3: SQLAlchemy Integration (Week 2-3) [checkpoint: d0b92a7]
 
 ### Task Group 3.1: DBAPI Module
 
