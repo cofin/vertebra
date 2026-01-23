@@ -4,10 +4,39 @@ from litestar import Litestar, get
 from litestar.exceptions import NotAuthorizedException
 
 try:
-    from vertebra.integration.litestar.compiler import compile_guards
+    from vertebra.integration.litestar.compiler import compile_guards, compile_di
     HAS_COMPILER = True
 except ImportError:
     HAS_COMPILER = False
+
+@pytest.mark.skipif(not HAS_COMPILER, reason="Compiler not implemented")
+@pytest.mark.anyio
+async def test_compile_di_basic() -> None:
+    from litestar.di import Provide
+
+    def dep_1() -> str:
+        return "val1"
+
+    async def dep_2(d1: str) -> str:
+        return f"{d1}-val2"
+
+    dependencies = {
+        "d1": Provide(dep_1),
+        "d2": Provide(dep_2),
+    }
+    
+    # We need a dummy handler to know which dependencies it actually needs
+    def handler(d2: str) -> None:
+        pass
+
+    compiled = compile_di(dependencies, handler)
+    
+    # Executing the compiled DI resolver
+    ctx = {}
+    resolved = await compiled(ctx)
+    
+    assert resolved["d2"] == "val1-val2"
+    assert "d1" in resolved # even if not directly requested by handler, it's a sub-dep
 
 def guard_1(connection: Any, _: Any) -> None:
     if connection.headers.get("x-auth") != "secret":
