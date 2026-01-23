@@ -6,6 +6,8 @@ export type BrokerMetrics = {
   brokerPoolConnections: Gauge;
   brokerPoolOperations: Gauge;
   brokerPoolErrors: Gauge;
+  brokerPoolHealthFailures: Gauge;
+  brokerPoolIdleTimeouts: Gauge;
   brokerSchedulerQueueDepth: Gauge;
   brokerSchedulerWorkerRequests: Gauge;
   brokerSchedulerWorkerWaitSeconds: Gauge;
@@ -35,6 +37,20 @@ export function createBrokerMetrics(registry?: Registry): BrokerMetrics {
   const brokerPoolErrors = new Gauge({
     name: "vertebra_broker_pool_errors_total",
     help: "Broker pool errors",
+    labelNames: ["pool"],
+    registers: [reg],
+  });
+
+  const brokerPoolHealthFailures = new Gauge({
+    name: "vertebra_broker_pool_health_failures_total",
+    help: "Broker pool health check failures",
+    labelNames: ["pool"],
+    registers: [reg],
+  });
+
+  const brokerPoolIdleTimeouts = new Gauge({
+    name: "vertebra_broker_pool_idle_timeouts_total",
+    help: "Broker pool idle connection timeouts",
     labelNames: ["pool"],
     registers: [reg],
   });
@@ -72,6 +88,8 @@ export function createBrokerMetrics(registry?: Registry): BrokerMetrics {
     brokerPoolConnections,
     brokerPoolOperations,
     brokerPoolErrors,
+    brokerPoolHealthFailures,
+    brokerPoolIdleTimeouts,
     brokerSchedulerQueueDepth,
     brokerSchedulerWorkerRequests,
     brokerSchedulerWorkerWaitSeconds,
@@ -102,6 +120,8 @@ export function updateBrokerMetrics(metrics: BrokerMetrics, stats: BrokerStats):
       pool.releases_total,
     );
     metrics.brokerPoolErrors.set({ pool: pool.name }, pool.errors_total);
+    metrics.brokerPoolHealthFailures.set({ pool: pool.name }, pool.health_failures_total);
+    metrics.brokerPoolIdleTimeouts.set({ pool: pool.name }, pool.idle_timeouts_total);
   }
 
   for (const pool of stats.scheduler?.pools ?? []) {

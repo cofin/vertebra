@@ -9,10 +9,12 @@
 - **Breaking Changes**: None (improved error messages only)
 
 ### Similar Features Referenced
-1. `vertebra/extensions/litestar/plugin.py` - Current best pattern with try/except + stubs
-2. `vertebra/extensions/advanced_alchemy/_config.py` - Problematic object fallback pattern
-3. `vertebra/serializers/litestar.py` - Correct conditional feature enhancement
+1. `vertebra/extensions/litestar/_plugin.py` - Active implementation with direct imports (needs ensure_dependency)
+2. `vertebra/extensions/advanced_alchemy/_config.py` - Object fallback pattern (needs refactoring)
+3. `vertebra/serializers/litestar.py` - Correct conditional feature enhancement (keep as-is)
 4. `vertebra/utils/module_loader.py` - Core dependency infrastructure
+5. `vertebra/extensions/sqlalchemy/_base.py` - Direct SQLAlchemy imports (natural failure OK)
+6. `vertebra/extensions/sqlalchemy/_async_dbapi.py` - Async DBAPI implementation
 
 ### Patterns to Follow
 - **ensure_dependency()**: Use at extension entry points for clear error messages
@@ -70,10 +72,10 @@ Vertebra's extension modules currently handle optional dependencies inconsistent
 - [ ] Flags are re-exported through `vertebra._typing.py`
 
 #### FR-2: Litestar Extension Refactoring
-- [ ] `vertebra/extensions/litestar/plugin.py` uses `ensure_dependency("litestar")` at module top
-- [ ] All try/except + stub class patterns are removed
+- [ ] `vertebra/extensions/litestar/_plugin.py` - Add `ensure_dependency("litestar")` at module top (currently has direct imports with NO guards!)
 - [ ] MissingDependencyError includes install instructions: `pip install vertebra[litestar]`
-- [ ] TYPE_CHECKING blocks used for type-only imports
+- [ ] TYPE_CHECKING blocks used for type-only imports where needed
+- [ ] Delete `vertebra/extensions/litestar/plugin.py` (unused duplicate implementation)
 
 #### FR-3: Advanced Alchemy Extension Refactoring
 - [ ] `vertebra/extensions/advanced_alchemy/_config.py` uses `ensure_dependency()` for both dependencies
@@ -83,8 +85,14 @@ Vertebra's extension modules currently handle optional dependencies inconsistent
 
 #### FR-4: SQLSpec Compound Dependencies
 - [ ] `vertebra/extensions/sqlspec/*/litestar/__init__.py` adds `ensure_dependency("litestar")`
-- [ ] `vertebra/extensions/sqlspec/*/adk/__init__.py` adds appropriate dependency check
+- [ ] `vertebra/extensions/sqlspec/*/adk/__init__.py` adds appropriate dependency check (if ADK is external)
 - [ ] Core sqlspec files (`_driver.py`, `_config.py`) remain unchanged (natural import failure is acceptable)
+
+#### FR-4b: SQLAlchemy Extension (NEW)
+- [ ] `vertebra/extensions/sqlalchemy/_base.py` - Direct imports from sqlalchemy (acceptable - natural failure)
+- [ ] `vertebra/extensions/sqlalchemy/_async_dbapi.py` - Direct imports (acceptable - natural failure)
+- [ ] `vertebra/extensions/sqlalchemy/{postgres,mysql,sqlite}/__init__.py` - Register dialects on import (keep as-is)
+- [ ] Consider: Add `ensure_dependency("sqlalchemy")` to `__init__.py` files for better error messages
 
 #### FR-5: Type Checking Compatibility
 - [ ] All refactored files pass type checking with `make lint-all`

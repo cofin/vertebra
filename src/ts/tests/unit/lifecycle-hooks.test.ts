@@ -39,4 +39,26 @@ describe("Lifecycle Hooks", () => {
     expect(onRelease).toHaveBeenCalled();
     expect(onRelease).toHaveBeenCalledWith("conn");
   });
+
+  test("calls onError hook", async () => {
+    const onError = mock(async () => {});
+    const pool = new TestPool(10, { onError });
+    
+    // Simulate error by calling hooks.onError directly since it's public
+    const err = new Error("test error");
+    await pool.hooks.onError?.("conn", err);
+    
+    expect(onError).toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith("conn", err);
+  });
+
+  test("calls onTimeout hook", async () => {
+    const onTimeout = mock(async () => {});
+    const pool = new TestPool(10, { onTimeout });
+    
+    await pool.hooks.onTimeout?.("test");
+    
+    expect(onTimeout).toHaveBeenCalled();
+    expect(onTimeout).toHaveBeenCalledWith("test");
+  });
 });

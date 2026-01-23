@@ -8,8 +8,8 @@
 
 ## Phase 2: Litestar Extension Refactoring
 
-- [ ] 4. Refactor `vertebra/extensions/litestar/plugin.py` - remove try/except + stubs, use ensure_dependency
-- [ ] 5. Refactor `vertebra/extensions/litestar/_plugin.py` - same pattern as plugin.py
+- [ ] 4. Refactor `vertebra/extensions/litestar/_plugin.py` - add ensure_dependency("litestar") at top (currently has direct imports with NO guards)
+- [ ] 5. Delete `vertebra/extensions/litestar/plugin.py` (unused duplicate implementation)
 - [ ] 6. Update tests for litestar extension import behavior
 
 ## Phase 3: Advanced Alchemy Extension Refactoring
@@ -23,14 +23,19 @@
 - [ ] 10. Add ensure_dependency("litestar") to `vertebra/extensions/sqlspec/postgres/litestar/__init__.py`
 - [ ] 11. Add ensure_dependency("litestar") to `vertebra/extensions/sqlspec/mysql/litestar/__init__.py`
 - [ ] 12. Add ensure_dependency("litestar") to `vertebra/extensions/sqlspec/sqlite/litestar/__init__.py`
-- [ ] 13. Review and update ADK submodules if needed
+- [ ] 13. Review ADK submodules - determine if ADK is external dependency requiring guard
 - [ ] 14. Write tests for compound dependency import behavior
+
+## Phase 4b: SQLAlchemy Extension (Optional - Natural Failure OK)
+
+- [ ] 15. (Optional) Add ensure_dependency("sqlalchemy") to `vertebra/extensions/sqlalchemy/__init__.py` for better error message
+- [ ] 16. Review `_base.py` and `_async_dbapi.py` - confirm natural import failure is acceptable
 
 ## Phase 5: Validation & Documentation
 
-- [ ] 15. Run full test suite (`make test`) and fix any failures
-- [ ] 16. Run linting and type checks (`make lint-all`) and fix any issues
-- [ ] 17. Update extension docstrings to document required dependencies
+- [ ] 17. Run full test suite (`make test`) and fix any failures
+- [ ] 18. Run linting and type checks (`make lint-all`) and fix any issues
+- [ ] 19. Update extension docstrings to document required dependencies
 
 ## Task Estimates
 

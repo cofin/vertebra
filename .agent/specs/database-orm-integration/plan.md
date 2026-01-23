@@ -391,29 +391,29 @@
 **Priority**: P1
 **Dependencies**: None (enhances existing pools)
 
-- [ ] **Task 4.1.1**: Create `health.ts` module
+- [x] **Task 4.1.1**: Create `health.ts` module (d0b92a7)
   - File: `src/ts/src/broker/health.ts` (NEW)
 
-- [ ] **Task 4.1.2**: Implement `HealthChecker` interface
+- [x] **Task 4.1.2**: Implement `HealthChecker` interface (d0b92a7)
   - `check(connection): Promise<boolean>`
 
-- [ ] **Task 4.1.3**: Implement `PostgresHealthChecker`
+- [x] **Task 4.1.3**: Implement `PostgresHealthChecker` (d0b92a7)
   - Execute `SELECT 1`
   - Return true if successful
 
-- [ ] **Task 4.1.4**: Implement `RedisHealthChecker`
+- [x] **Task 4.1.4**: Implement `RedisHealthChecker` (d0b92a7)
   - Execute `PING`
   - Return true if response is "PONG"
 
-- [ ] **Task 4.1.5**: Implement `MySqlHealthChecker`
+- [x] **Task 4.1.5**: Implement `MySqlHealthChecker` (d0b92a7)
   - Execute `SELECT 1`
   - Return true if successful
 
-- [ ] **Task 4.1.6**: Implement `SqliteHealthChecker`
+- [x] **Task 4.1.6**: Implement `SqliteHealthChecker` (d0b92a7)
   - Execute `SELECT 1`
   - Return true if successful
 
-- [ ] **Task 4.1.7**: Add health check loop to `BasePoolAdapter`
+- [x] **Task 4.1.7**: Add health check loop to `BasePoolAdapter` (d0b92a7)
   - Run every 30s (configurable)
   - Check idle connections
   - Remove unhealthy connections
@@ -432,17 +432,17 @@
 **Priority**: P1
 **Dependencies**: None
 
-- [ ] **Task 4.2.1**: Define `LifecycleHooks` interface
+- [x] **Task 4.2.1**: Define `LifecycleHooks` interface (d0b92a7)
   - `onAcquire`, `onRelease`, `onError`, `onTimeout`
   - File: `src/ts/src/broker/base-pool.ts`
 
-- [ ] **Task 4.2.2**: Wire hooks into pool adapter
+- [x] **Task 4.2.2**: Wire hooks into pool adapter (d0b92a7)
   - Call `onAcquire` after acquiring connection
   - Call `onRelease` before releasing connection
   - Call `onError` on connection error
   - Call `onTimeout` on acquire timeout
 
-- [ ] **Task 4.2.3**: Add hook tests
+- [x] **Task 4.2.3**: Add hook tests (d0b92a7)
   - Test each hook type
   - Test hook execution order
   - File: `src/ts/tests/unit/lifecycle-hooks.test.ts` (NEW)
@@ -459,16 +459,16 @@
 **Priority**: P1
 **Dependencies**: None
 
-- [ ] **Task 4.3.1**: Add idle timeout tracking
+- [x] **Task 4.3.1**: Add idle timeout tracking (d0b92a7)
   - Track last-used timestamp per connection
   - Default: 5 minutes
 
-- [ ] **Task 4.3.2**: Implement idle reaper
+- [x] **Task 4.3.2**: Implement idle reaper (d0b92a7)
   - Run every 60s
   - Remove connections idle > timeout
   - File: `src/ts/src/broker/base-pool.ts`
 
-- [ ] **Task 4.3.3**: Add idle metrics
+- [x] **Task 4.3.3**: Add idle metrics (d0b92a7)
   - Track idle timeouts
   - Track connection lifetime
   - File: `src/ts/src/broker/serve.ts`

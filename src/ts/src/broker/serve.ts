@@ -40,6 +40,13 @@ import { BasePoolAdapter, type PoolAdapter, type PoolStats } from "./base-pool";
 import type { BrokerStats, SchedulerPoolStats } from "./client";
 import { createBrokerMetrics, updateBrokerMetrics } from "./metrics";
 import { FairScheduler, type SchedulerStats } from "./scheduler";
+import {
+  type HealthChecker,
+  PostgresHealthChecker,
+  MySqlHealthChecker,
+  RedisHealthChecker,
+  SqliteHealthChecker,
+} from "./health";
 import { ShmRegion, ShmRing } from "./shm";
 
 type BrokerPoolConfig = {
@@ -131,6 +138,7 @@ class SqlPool extends BasePoolAdapter {
       adapter,
       max,
     });
+    this.healthChecker = adapter === "postgres" ? new PostgresHealthChecker() : new MySqlHealthChecker();
   }
 
   inUse(): number {
@@ -146,7 +154,7 @@ class SqlPool extends BasePoolAdapter {
       const reserved = await this.sql.reserve();
       const token = crypto.randomUUID();
       this.reserved.set(token, reserved);
-      this.recordAcquire();
+      this.recordAcquire(token);
       if (this.hooks.onAcquire) {
         await this.hooks.onAcquire(reserved);
       }
@@ -168,7 +176,7 @@ class SqlPool extends BasePoolAdapter {
       }
       reserved.release();
       this.reserved.delete(token);
-      this.recordRelease();
+      this.recordRelease(token);
     }
   }
 
@@ -178,6 +186,7 @@ class SqlPool extends BasePoolAdapter {
       if (!reserved) {
         throw new Error("Unknown connection token");
       }
+      this.recordUse(token);
       const result = await reserved.unsafe(sql, params);
       return normalizeSqlResult(result);
     } catch (error) {
@@ -188,6 +197,26 @@ class SqlPool extends BasePoolAdapter {
       }
       throw error;
     }
+  }
+
+  protected async checkHealth(): Promise<void> {
+    if (!this.healthChecker) return;
+    for (const [token, reserved] of this.reserved.entries()) {
+      const lastUsed = this.connectionTimestamps.get(token) || 0;
+      if (Date.now() - lastUsed > this.healthCheckInterval / 2) {
+        const healthy = await this.healthChecker.check(reserved);
+        if (!healthy) {
+          console.warn(`Pool ${this.name}: Removing unhealthy connection ${token}`);
+          this.recordHealthFailure();
+          await this.release(token);
+        }
+      }
+    }
+  }
+
+  protected async reapIdle(token: string): Promise<void> {
+    console.info(`Pool ${this.name}: Reaping idle connection ${token}`);
+    await this.release(token);
   }
 
   async executeMany(
@@ -245,6 +274,7 @@ class SqlitePool extends BasePoolAdapter {
   ) {
     super(maxSize);
     this.name = name;
+    this.healthChecker = new SqliteHealthChecker();
   }
 
   inUse(): number {
@@ -256,7 +286,7 @@ class SqlitePool extends BasePoolAdapter {
       const token = crypto.randomUUID();
       const db = new Database(this.path);
       this.connections.set(token, db);
-      this.recordAcquire();
+      this.recordAcquire(token);
       if (this.hooks.onAcquire) {
         await this.hooks.onAcquire(db);
       }
@@ -278,7 +308,7 @@ class SqlitePool extends BasePoolAdapter {
       }
       db.close();
       this.connections.delete(token);
-      this.recordRelease();
+      this.recordRelease(token);
     }
   }
 
@@ -288,6 +318,7 @@ class SqlitePool extends BasePoolAdapter {
       if (!db) {
         throw new Error("Unknown connection token");
       }
+      this.recordUse(token);
       const stmt = db.query(sql);
       // biome-ignore lint: SQLite bindings accept any serializable value
       const rows = stmt.all(...(params as any[])) as Record<string, unknown>[];
@@ -302,6 +333,26 @@ class SqlitePool extends BasePoolAdapter {
       }
       throw error;
     }
+  }
+
+  protected async checkHealth(): Promise<void> {
+    if (!this.healthChecker) return;
+    for (const [token, db] of this.connections.entries()) {
+      const lastUsed = this.connectionTimestamps.get(token) || 0;
+      if (Date.now() - lastUsed > this.healthCheckInterval / 2) {
+        const healthy = await this.healthChecker.check(db);
+        if (!healthy) {
+          console.warn(`Pool ${this.name}: Removing unhealthy connection ${token}`);
+          this.recordHealthFailure();
+          await this.release(token);
+        }
+      }
+    }
+  }
+
+  protected async reapIdle(token: string): Promise<void> {
+    console.info(`Pool ${this.name}: Reaping idle connection ${token}`);
+    await this.release(token);
   }
 
   async executeMany(
@@ -360,6 +411,7 @@ class RedisPool extends BasePoolAdapter {
   ) {
     super(maxSize);
     this.name = name;
+    this.healthChecker = new RedisHealthChecker();
   }
 
   inUse(): number {
@@ -381,11 +433,12 @@ class RedisPool extends BasePoolAdapter {
         this.token = crypto.randomUUID();
       }
       this.inUseCount += 1;
-      this.recordAcquire();
+      const token = this.token ?? "redis";
+      this.recordAcquire(token);
       if (this.hooks.onAcquire) {
         await this.hooks.onAcquire(this.client);
       }
-      return this.token ?? "redis";
+      return token;
     } catch (error) {
       this.recordError();
       if (this.hooks.onError) {
@@ -395,16 +448,17 @@ class RedisPool extends BasePoolAdapter {
     }
   }
 
-  async release(_token: string): Promise<void> {
+  async release(token: string): Promise<void> {
     if (this.hooks.onRelease) {
       await this.hooks.onRelease(this.client);
     }
     this.inUseCount = Math.max(0, this.inUseCount - 1);
-    this.recordRelease();
+    this.recordRelease(token);
     return;
   }
 
   async execute(token: string, sql: string, params: unknown[]): Promise<Record<string, unknown>> {
+    this.recordUse(token);
     const result = await this.command(token, sql, params.map(String));
     return { columns: [], rows: [], rowcount: 0, result };
   }
@@ -414,6 +468,7 @@ class RedisPool extends BasePoolAdapter {
     sql: string,
     params: unknown[][],
   ): Promise<Record<string, unknown>> {
+    this.recordUse(token);
     let last: unknown = null;
     for (const paramSet of params) {
       last = await this.command(token, sql, paramSet.map(String));
@@ -421,7 +476,8 @@ class RedisPool extends BasePoolAdapter {
     return { columns: [], rows: [], rowcount: 0, result: last };
   }
 
-  async command(_token: string, command: string, args: unknown[]): Promise<unknown> {
+  async command(token: string, command: string, args: unknown[]): Promise<unknown> {
+    this.recordUse(token);
     try {
       if (!this.client) {
         throw new Error("Redis client not connected");
@@ -449,6 +505,19 @@ class RedisPool extends BasePoolAdapter {
 
   async rollback(_token: string): Promise<void> {
     return;
+  }
+
+  protected async checkHealth(): Promise<void> {
+    if (!this.healthChecker || !this.client) return;
+    const healthy = await this.healthChecker.check(this.client);
+    if (!healthy) {
+      console.warn(`Pool ${this.name}: Redis client is unhealthy`);
+      this.recordHealthFailure();
+    }
+  }
+
+  protected async reapIdle(token: string): Promise<void> {
+    // Redis pool currently holds one client shared. 
   }
 }
 
@@ -487,7 +556,7 @@ class StoragePool extends BasePoolAdapter {
     }
     const token = crypto.randomUUID();
     this.tokens.add(token);
-    this.recordAcquire();
+    this.recordAcquire(token);
     if (this.hooks.onAcquire) {
       await this.hooks.onAcquire(null);
     }
@@ -499,7 +568,7 @@ class StoragePool extends BasePoolAdapter {
       if (this.hooks.onRelease) {
         await this.hooks.onRelease(null);
       }
-      this.recordRelease();
+      this.recordRelease(token);
     }
   }
 
@@ -519,7 +588,8 @@ class StoragePool extends BasePoolAdapter {
     throw new Error("Storage pools do not support execute_many()");
   }
 
-  async command(_token: string, command: string, args: unknown[]): Promise<unknown> {
+  async command(token: string, command: string, args: unknown[]): Promise<unknown> {
+    this.recordUse(token);
     const params = (args[0] ?? {}) as FileSystemParams;
     const backend = params.backend ?? this.backend;
     if (backend !== this.backend) {
@@ -748,11 +818,12 @@ class ExternalProviderPool extends BasePoolAdapter {
     try {
       const response = await this.call({ kind: "acquire", pool: this.name });
       this.inUseCount += 1;
-      this.recordAcquire();
+      const token = String(response.token);
+      this.recordAcquire(token);
       if (this.hooks.onAcquire) {
         await this.hooks.onAcquire(null);
       }
-      return String(response.token);
+      return token;
     } catch (error) {
       this.recordError();
       if (this.hooks.onError) {
@@ -768,10 +839,11 @@ class ExternalProviderPool extends BasePoolAdapter {
       await this.hooks.onRelease(null);
     }
     this.inUseCount = Math.max(0, this.inUseCount - 1);
-    this.recordRelease();
+    this.recordRelease(token);
   }
 
   async execute(token: string, sql: string, params: unknown[]): Promise<Record<string, unknown>> {
+    this.recordUse(token);
     return (await this.call({ kind: "execute", pool: this.name, token, sql, params })) as Record<
       string,
       unknown
@@ -783,6 +855,7 @@ class ExternalProviderPool extends BasePoolAdapter {
     sql: string,
     params: unknown[][],
   ): Promise<Record<string, unknown>> {
+    this.recordUse(token);
     return (await this.call({
       kind: "execute_many",
       pool: this.name,
@@ -793,6 +866,7 @@ class ExternalProviderPool extends BasePoolAdapter {
   }
 
   async command(token: string, command: string, args: unknown[]): Promise<unknown> {
+    this.recordUse(token);
     return await this.call({ kind: "command", pool: this.name, token, command, args });
   }
 
@@ -801,26 +875,32 @@ class ExternalProviderPool extends BasePoolAdapter {
   }
 
   async begin(token: string): Promise<void> {
+    this.recordUse(token);
     await this.call({ kind: "begin", pool: this.name, token });
   }
 
   async commit(token: string): Promise<void> {
+    this.recordUse(token);
     await this.call({ kind: "commit", pool: this.name, token });
   }
 
   async rollback(token: string): Promise<void> {
+    this.recordUse(token);
     await this.call({ kind: "rollback", pool: this.name, token });
   }
 
   async savepoint(token: string, name: string): Promise<void> {
+    this.recordUse(token);
     await this.call({ kind: "savepoint", pool: this.name, token, name });
   }
 
   async releaseSavepoint(token: string, name: string): Promise<void> {
+    this.recordUse(token);
     await this.call({ kind: "release_savepoint", pool: this.name, token, name });
   }
 
   async rollbackSavepoint(token: string, name: string): Promise<void> {
+    this.recordUse(token);
     await this.call({ kind: "rollback_savepoint", pool: this.name, token, name });
   }
 
@@ -881,6 +961,10 @@ class Broker {
 
   async run(): Promise<void> {
     this.startMetricsServer();
+    for (const poolState of this.pools.values()) {
+      poolState.adapter.startHealthCheckLoop();
+      poolState.adapter.startIdleReaper();
+    }
     while (true) {
       const controlMessage = this.control.recv(10);
       if (controlMessage) {
@@ -1032,6 +1116,9 @@ class Broker {
     for (const poolState of this.pools.values()) {
       const expired = poolState.scheduler.collectExpired(now);
       for (const entry of expired) {
+        if (poolState.adapter.hooks.onTimeout) {
+          poolState.adapter.hooks.onTimeout(poolState.adapter.name);
+        }
         this.reply(entry.item.client, entry.item.id, {
           ok: false,
           error: { message: "Acquire request timed out" },

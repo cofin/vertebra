@@ -57,8 +57,8 @@ src/py/vertebra/_typing.py             # Re-export framework flags
 
 ### Phase 2: Litestar Extension
 ```
-src/py/vertebra/extensions/litestar/plugin.py   # Remove try/except + stubs
-src/py/vertebra/extensions/litestar/_plugin.py  # Same refactoring
+src/py/vertebra/extensions/litestar/_plugin.py  # Add ensure_dependency (currently has direct imports with NO guards!)
+src/py/vertebra/extensions/litestar/plugin.py   # DELETE (unused duplicate)
 ```
 
 ### Phase 3: Advanced Alchemy Extension
@@ -72,6 +72,13 @@ src/py/vertebra/extensions/advanced_alchemy/_storage.py  # Same refactoring
 src/py/vertebra/extensions/sqlspec/postgres/litestar/__init__.py  # Add ensure_dependency
 src/py/vertebra/extensions/sqlspec/mysql/litestar/__init__.py     # Add ensure_dependency
 src/py/vertebra/extensions/sqlspec/sqlite/litestar/__init__.py    # Add ensure_dependency
+```
+
+### Phase 4b: SQLAlchemy Extension (Optional)
+```
+src/py/vertebra/extensions/sqlalchemy/__init__.py   # Consider adding ensure_dependency for better error
+src/py/vertebra/extensions/sqlalchemy/_base.py      # Direct imports (natural failure OK)
+src/py/vertebra/extensions/sqlalchemy/_async_dbapi.py  # Direct imports (natural failure OK)
 ```
 
 ## Key Decisions Made

@@ -2,6 +2,8 @@
  * Base class for pool adapters with shared stats tracking.
  */
 
+import type { HealthChecker } from "./health";
+
 export type PoolStats = {
   name: string;
   min_size: number;
@@ -13,6 +15,8 @@ export type PoolStats = {
   acquires_total: number;
   releases_total: number;
   errors_total: number;
+  health_failures_total: number;
+  idle_timeouts_total: number;
 };
 
 export interface LifecycleHooks {
@@ -35,6 +39,8 @@ export interface PoolAdapter {
   commit(token: string): Promise<void>;
   rollback(token: string): Promise<void>;
   stats(): PoolStats;
+  startHealthCheckLoop(): void;
+  startIdleReaper(): void;
 }
 
 export abstract class BasePoolAdapter implements PoolAdapter {
@@ -44,7 +50,14 @@ export abstract class BasePoolAdapter implements PoolAdapter {
   protected _acquires = 0;
   protected _releases = 0;
   protected _errors = 0;
-  protected hooks: LifecycleHooks;
+  protected _healthFailures = 0;
+  protected _idleTimeouts = 0;
+  public hooks: LifecycleHooks;
+
+  protected healthCheckInterval = 30000; // 30s
+  protected idleTimeout = 300000; // 5min
+  protected healthChecker: HealthChecker | null = null;
+  protected connectionTimestamps = new Map<string, number>();
 
   constructor(maxSize: number, hooks: LifecycleHooks = {}) {
     this._maxSize = maxSize;
@@ -69,19 +82,61 @@ export abstract class BasePoolAdapter implements PoolAdapter {
   abstract commit(token: string): Promise<void>;
   abstract rollback(token: string): Promise<void>;
 
+  /** Start periodic health checks for idle connections. */
+  startHealthCheckLoop(): void {
+    if (!this.healthChecker) return;
+
+    setInterval(async () => {
+      await this.checkHealth();
+    }, this.healthCheckInterval);
+  }
+
+  /** Start periodic reaping of idle connections. */
+  startIdleReaper(): void {
+    setInterval(async () => {
+      const now = Date.now();
+      for (const [token, lastUsed] of this.connectionTimestamps.entries()) {
+        if (now - lastUsed > this.idleTimeout) {
+          await this.reapIdle(token);
+        }
+      }
+    }, 60000); // Check every minute
+  }
+
+  protected async checkHealth(): Promise<void> {
+    // Override in sub-classes
+  }
+
+  protected async reapIdle(token: string): Promise<void> {
+    // Override in sub-classes
+    this._idleTimeouts += 1;
+  }
+
   /** Record a successful acquire. Call this after acquiring a connection. */
-  protected recordAcquire(): void {
+  protected recordAcquire(token: string): void {
     this._acquires += 1;
+    this.connectionTimestamps.set(token, Date.now());
   }
 
   /** Record a successful release. Call this after releasing a connection. */
-  protected recordRelease(): void {
+  protected recordRelease(token: string): void {
     this._releases += 1;
+    this.connectionTimestamps.delete(token);
+  }
+
+  /** Update last used timestamp. */
+  protected recordUse(token: string): void {
+    this.connectionTimestamps.set(token, Date.now());
   }
 
   /** Record an error. Call this when an operation fails. */
   protected recordError(): void {
     this._errors += 1;
+  }
+
+  /** Record a health check failure. */
+  protected recordHealthFailure(): void {
+    this._healthFailures += 1;
   }
 
   /**
@@ -112,6 +167,8 @@ export abstract class BasePoolAdapter implements PoolAdapter {
       acquires_total: this._acquires,
       releases_total: this._releases,
       errors_total: this._errors,
+      health_failures_total: this._healthFailures,
+      idle_timeouts_total: this._idleTimeouts,
     };
   }
 }
