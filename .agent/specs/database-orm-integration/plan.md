@@ -599,7 +599,7 @@
 **Priority**: P1
 **Dependencies**: Phases 1-5
 
-- [ ] **Task 6.1.1**: Create Litestar package structure
+- [~] **Task 6.1.1**: Create Litestar package structure
   - Files: `__init__.py`, `_base.py`, `_serialization.py`
   - Location: `src/py/vertebra/extensions/litestar/`
 

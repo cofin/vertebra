@@ -11,13 +11,20 @@ from sqlalchemy.pool import NullPool
 from vertebra.utils.module_loader import dependency_flag
 
 if TYPE_CHECKING:
-    from advanced_alchemy.config import SQLAlchemyAsyncConfig, SQLAlchemySyncConfig
+    try:
+        from advanced_alchemy.extensions.litestar import SQLAlchemyAsyncConfig, SQLAlchemySyncConfig
+    except ImportError:
+        from advanced_alchemy.config import SQLAlchemyAsyncConfig, SQLAlchemySyncConfig
 else:
     try:
-        from advanced_alchemy.config import SQLAlchemyAsyncConfig, SQLAlchemySyncConfig
+        # Prefer Litestar-compatible configs if available
+        from advanced_alchemy.extensions.litestar import SQLAlchemyAsyncConfig, SQLAlchemySyncConfig
     except ImportError:
-        SQLAlchemyAsyncConfig = object
-        SQLAlchemySyncConfig = object
+        try:
+            from advanced_alchemy.config import SQLAlchemyAsyncConfig, SQLAlchemySyncConfig
+        except ImportError:
+            SQLAlchemyAsyncConfig = object
+            SQLAlchemySyncConfig = object
 
 ADVANCED_ALCHEMY_INSTALLED = dependency_flag("advanced_alchemy")
 
@@ -33,9 +40,15 @@ class VertebraAsyncAlchemyConfig(SQLAlchemyAsyncConfig):
         self.pool = pool
         engine = create_async_engine(f"{driver}://{pool}", poolclass=NullPool)
         
-        # Use SQLAlchemyAsyncConfig's __init__ directly to avoid any issues with super() 
-        # and ensure we pass the correct field names.
-        SQLAlchemyAsyncConfig.__init__(self, engine_instance=engine, **kwargs)
+        # Call the base class __init__ correctly
+        # Most AA configs are dataclasses, but some might have custom __init__
+        if hasattr(SQLAlchemyAsyncConfig, "__init__"):
+            SQLAlchemyAsyncConfig.__init__(self, engine_instance=engine, **kwargs)
+        else:
+            # Fallback for object or pure dataclass without init
+            self.engine_instance = engine
+            for key, value in kwargs.items():
+                setattr(self, key, value)
 
 
 class VertebraSyncAlchemyConfig(SQLAlchemySyncConfig):
@@ -49,4 +62,9 @@ class VertebraSyncAlchemyConfig(SQLAlchemySyncConfig):
         self.pool = pool
         engine = create_engine(f"{driver}://{pool}", poolclass=NullPool)
         
-        SQLAlchemySyncConfig.__init__(self, engine_instance=engine, **kwargs)
+        if hasattr(SQLAlchemySyncConfig, "__init__"):
+            SQLAlchemySyncConfig.__init__(self, engine_instance=engine, **kwargs)
+        else:
+            self.engine_instance = engine
+            for key, value in kwargs.items():
+                setattr(self, key, value)

@@ -11,6 +11,9 @@ if TYPE_CHECKING:
     import pyarrow as pa  # pyright: ignore[reportMissingImports]
 
 # Dependency flags
+MSGSPEC_INSTALLED = dependency_flag("msgspec")
+PYDANTIC_INSTALLED = dependency_flag("pydantic")
+ATTRS_INSTALLED = dependency_flag("attrs")
 PYARROW_INSTALLED = dependency_flag("pyarrow")
 NUMPY_INSTALLED = dependency_flag("numpy")
 PANDAS_INSTALLED = dependency_flag("pandas")
@@ -22,4 +25,13 @@ if TYPE_CHECKING:
 else:
     ArrowTable = object
 
-__all__ = ("NUMPY_INSTALLED", "PANDAS_INSTALLED", "POLARS_INSTALLED", "PYARROW_INSTALLED", "ArrowTable")
+__all__ = (
+    "ATTRS_INSTALLED",
+    "MSGSPEC_INSTALLED",
+    "NUMPY_INSTALLED",
+    "PANDAS_INSTALLED",
+    "POLARS_INSTALLED",
+    "PYARROW_INSTALLED",
+    "PYDANTIC_INSTALLED",
+    "ArrowTable",
+)
