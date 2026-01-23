@@ -4,8 +4,8 @@ import * as readline from "node:readline";
 export interface Transport {
   start(): Promise<void>;
   close(): Promise<void>;
-  send(message: any): Promise<void>;
-  onmessage?: (message: any) => void;
+  send(message: any, sessionId?: string): Promise<void>;
+  onmessage?: (message: any, sessionId?: string) => void;
   onerror?: (error: Error) => void;
 }
 
@@ -17,7 +17,7 @@ export class StdioTransport implements Transport {
   async start(): Promise<void> {
     this.rl = readline.createInterface({
       input: this.input,
-      output: undefined, // We don't want to echo input to output
+      output: undefined,
       terminal: false,
     });
 
@@ -27,7 +27,6 @@ export class StdioTransport implements Transport {
         const message = JSON.parse(line);
         this.onmessage?.(message);
       } catch (error) {
-        // Construct a specific error object that matches what we expect for parse errors
         const parseError = new Error("Parse error");
         (parseError as any).code = -32700; 
         this.onerror?.(parseError);
