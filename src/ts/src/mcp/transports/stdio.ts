@@ -1,43 +1,50 @@
-import { type JsonRpcRequest, type McpServer } from "../server";
+import { Readable, Writable } from "node:stream";
+import * as readline from "node:readline";
 
-/**
- * Starts the MCP server using Stdio transport.
- * Reads newline-delimited JSON from stdin and writes JSON to stdout.
- */
-export async function startStdioServer(server: McpServer) {
-  // Bun's stdin iterator reads chunks, but we need line-delimited JSON.
-  // We'll buffer chunks and split by newline.
-  let buffer = "";
+export interface Transport {
+  start(): Promise<void>;
+  close(): Promise<void>;
+  send(message: any): Promise<void>;
+  onmessage?: (message: any) => void;
+  onerror?: (error: Error) => void;
+}
 
-  for await (const chunk of Bun.stdin.stream()) {
-    const text = new TextDecoder().decode(chunk);
-    buffer += text;
+export class StdioTransport implements Transport {
+  private rl?: readline.Interface;
 
-    let newlineIndex: number;
-    // biome-ignore lint/suspicious/noAssignInExpressions: loop condition
-    while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
-      const line = buffer.slice(0, newlineIndex).trim();
-      buffer = buffer.slice(newlineIndex + 1);
+  constructor(private input: Readable, private output: Writable) {}
 
-      if (!line) continue;
+  async start(): Promise<void> {
+    this.rl = readline.createInterface({
+      input: this.input,
+      output: undefined, // We don't want to echo input to output
+      terminal: false,
+    });
 
+    this.rl.on("line", (line) => {
       try {
-        const request = JSON.parse(line) as JsonRpcRequest;
-        const response = await server.handle(request);
-
-        // Write response followed by newline
-        const output = JSON.stringify(response) + "\n";
-        process.stdout.write(output);
+        if (!line.trim()) return;
+        const message = JSON.parse(line);
+        this.onmessage?.(message);
       } catch (error) {
-        console.error("Failed to parse/handle request:", error);
-        // Write parse error
-        const errorResponse = {
-          jsonrpc: "2.0",
-          id: null,
-          error: { code: -32700, message: "Parse error" },
-        };
-        process.stdout.write(JSON.stringify(errorResponse) + "\n");
+        // Construct a specific error object that matches what we expect for parse errors
+        const parseError = new Error("Parse error");
+        (parseError as any).code = -32700; 
+        this.onerror?.(parseError);
       }
-    }
+    });
+
+    this.rl.on("error", (error) => {
+      this.onerror?.(error);
+    });
+  }
+
+  async close(): Promise<void> {
+    this.rl?.close();
+  }
+
+  async send(message: any): Promise<void> {
+    const json = JSON.stringify(message);
+    this.output.write(json + "\n");
   }
 }
