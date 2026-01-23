@@ -72,7 +72,7 @@ This plan outlines the phases to implement a custom, high-performance integratio
     - [x] Created `benchmarks/native_litestar.py` as baseline.
     - [ ] Run `wrk` / `k6` benchmarks for Hello World, JSON, and WebSockets.
     - [ ] Compare RPS and P99 latency against Uvicorn + Litestar.
-- [ ] **Task: Documentation and CLI Updates**
+- [x] **Task: Documentation and CLI Updates** [67ca78b]
     - [ ] Update `docs/` with details on the Direct Protocol.
     - [ ] Update `vertebra serve` to enable/disable native integration via flag.
 - [ ] **Task: Checkpoint - Final Review**
