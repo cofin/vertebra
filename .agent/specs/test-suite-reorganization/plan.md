@@ -41,28 +41,28 @@ Move and consolidate the heavy SQLAlchemy and DBAPI related tests into the integ
 Flatten the `extensions` directory in tests and move remaining root tests to their appropriate locations.
 
 - [x] Task: Flatten Integration Extensions 3728868
-    - [ ] Move `src/py/tests/integration/extensions/sqlalchemy` to `src/py/tests/integration/sqlalchemy`.
-    - [ ] Move `src/py/tests/integration/extensions/advanced_alchemy` to `src/py/tests/integration/advanced_alchemy`.
-    - [ ] Remove `src/py/tests/integration/extensions`.
+    - [x] Move `src/py/tests/integration/extensions/sqlalchemy` to `src/py/tests/integration/sqlalchemy`.
+    - [x] Move `src/py/tests/integration/extensions/advanced_alchemy` to `src/py/tests/integration/advanced_alchemy`.
+    - [x] Remove `src/py/tests/integration/extensions`.
 - [x] Task: Flatten Unit Extensions 7879a93
-    - [ ] Move `src/py/tests/unit/extensions/serialization` to `src/py/tests/unit/serialization`.
-    - [ ] Remove `src/py/tests/unit/extensions`.
+    - [x] Move `src/py/tests/unit/extensions/serialization` to `src/py/tests/unit/serialization`.
+    - [x] Remove `src/py/tests/unit/extensions`.
 - [x] Task: Migrate SQLSpec Tests b5bbcb8
-    - [ ] Move `test_sqlspec_arrow.py` to `src/py/tests/unit/sqlspec/test_arrow.py`.
-    - [ ] Move `test_sqlspec_storage.py` to `src/py/tests/unit/sqlspec/test_storage.py`.
-    - [ ] Move `test_sqlspec_integration.py` to `src/py/tests/integration/sqlspec/test_arrow_sqlite.py`.
-    - [ ] Consolidate any other sqlspec tests.
+    - [x] Move `test_sqlspec_arrow.py` to `src/py/tests/unit/sqlspec/test_arrow.py`.
+    - [x] Move `test_sqlspec_storage.py` to `src/py/tests/unit/sqlspec/test_storage.py`.
+    - [x] Move `test_sqlspec_integration.py` to `src/py/tests/integration/sqlspec/test_arrow_sqlite.py`.
+    - [x] Consolidate any other sqlspec tests.
 - [x] Task: Migrate Litestar Tests 12e14d9
-    - [ ] Create `src/py/tests/integration/litestar`.
-    - [ ] Move `test_litestar_plugin.py` to `src/py/tests/integration/litestar/test_plugin.py`.
-    - [ ] Move `test_serialization_litestar.py` to `src/py/tests/integration/litestar/test_serialization.py`.
+    - [x] Create `src/py/tests/integration/litestar`.
+    - [x] Move `test_litestar_plugin.py` to `src/py/tests/integration/litestar/test_plugin.py`.
+    - [x] Move `test_serialization_litestar.py` to `src/py/tests/integration/litestar/test_serialization.py`.
 - [x] Task: Migrate Remaining Tests 6545783
-    - [ ] Move `test_standalone.py` to `src/py/tests/integration/build/test_standalone.py`.
-    - [ ] Create `src/py/tests/unit/supervisor`.
-    - [ ] Move `test_supervisor_eventloop.py` to `src/py/tests/unit/supervisor/test_eventloop.py`.
-- [ ] Task: Cleanup
-    - [ ] Remove old empty directories in `src/py/tests/`.
-- [ ] Task: Final Verification
-    - [ ] Run `pytest src/py/tests/` (full suite) to ensure comprehensive passing.
+    - [x] Move `test_standalone.py` to `src/py/tests/integration/build/test_standalone.py`.
+    - [x] Create `src/py/tests/unit/supervisor`.
+    - [x] Move `test_supervisor_eventloop.py` to `src/py/tests/unit/supervisor/test_eventloop.py`.
+- [x] Task: Cleanup
+    - [x] Remove old empty directories in `src/py/tests/`.
+- [x] Task: Final Verification
+    - [x] Run `pytest src/py/tests/` (full suite) to ensure comprehensive passing.
 - [ ] Task: Checkpoint - Verify Phase 3 complete and create recovery point
 - [ ] Task: Flow - User Manual Verification 'Phase 3: Flatten Extensions & Final Migration' (Protocol in workflow.md)
