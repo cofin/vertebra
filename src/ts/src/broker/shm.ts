@@ -99,7 +99,12 @@ function resolveLibraryPath(): string {
     resolve(process.cwd(), "src/rs/target/release", name),
     resolve(process.cwd(), "target/debug", name),
     resolve(process.cwd(), "target/release", name),
-    join(import.meta.dir, "..", "..", name),
+    // Relative if running from src/ts
+    resolve(process.cwd(), "../rs/target/debug", name),
+    resolve(process.cwd(), "../rs/target/release", name),
+    // Relative to this file
+    join(import.meta.dir, "..", "..", "..", "..", "src", "rs", "target", "debug", name),
+    join(import.meta.dir, "..", "..", "..", "..", "src", "rs", "target", "release", name),
   ];
   for (const candidate of candidates) {
     if (existsSync(candidate)) {
