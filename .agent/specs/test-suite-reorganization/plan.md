@@ -56,7 +56,7 @@ Flatten the `extensions` directory in tests and move remaining root tests to the
     - [ ] Create `src/py/tests/integration/litestar`.
     - [ ] Move `test_litestar_plugin.py` to `src/py/tests/integration/litestar/test_plugin.py`.
     - [ ] Move `test_serialization_litestar.py` to `src/py/tests/integration/litestar/test_serialization.py`.
-- [ ] Task: Migrate Remaining Tests
+- [x] Task: Migrate Remaining Tests 6545783
     - [ ] Move `test_standalone.py` to `src/py/tests/integration/build/test_standalone.py`.
     - [ ] Create `src/py/tests/unit/supervisor`.
     - [ ] Move `test_supervisor_eventloop.py` to `src/py/tests/unit/supervisor/test_eventloop.py`.
