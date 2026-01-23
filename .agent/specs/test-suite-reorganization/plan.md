@@ -3,7 +3,7 @@
 ## Phase 1: Setup and Unit Test Migration
 Establish the new directory structure, configure scoped `conftest.py` files, and move purely functional/unit tests.
 
-- [ ] Task: Create Root Directory Structure
+- [x] Task: Create Root Directory Structure 2972dbb
     - [ ] Create `src/py/tests/unit`
     - [ ] Create `src/py/tests/integration`
 - [ ] Task: Configure Test Fixtures (Conftest Split)
