@@ -1,5 +1,6 @@
 import type { Server, WebSocketHandler } from "bun";
 import { AsyncBrokerClient } from "../broker";
+import { ShmRouter } from "../broker/shm";
 import { AsgiBridge } from "../ipc";
 import { type ResolvedServerConfig, resolveServerConfig, type ServerConfig } from "./config";
 import { log } from "./logging";
@@ -146,7 +147,8 @@ export async function createAsgiServer(
       })
     : null;
   manager?.start();
-  const bridge = new AsgiBridge({ requester: workerPool });
+  const routerInstance = new ShmRouter();
+  const bridge = new AsgiBridge({ requester: workerPool, router: routerInstance });
   const metrics = createMetrics();
   const brokerClient = resolved.broker ? new AsyncBrokerClient(resolved.broker) : undefined;
   const metricsRegistry = new MetricsRegistry(metrics, brokerClient, manager);

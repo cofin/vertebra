@@ -1,13 +1,16 @@
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun";
 import { type IpcClientConfig, IpcPool, type IpcRequester } from "./client";
+import { ShmRouter } from "../broker/shm";
 
 export type AsgiRequest = {
   id: string;
+  type?: string;
   method: string;
   path: string;
   query: string;
   headers: [string, string][];
   body: Uint8Array;
+  handler_id?: number;
   scheme?: string;
   httpVersion?: string;
   rawPath?: Uint8Array;
@@ -20,11 +23,12 @@ export type AsgiRequest = {
 
 export type AsgiRequestStartFrame = {
   id: string;
-  type: "http.request.start";
+  type: "http.request.start" | "direct.http";
   method: string;
   path: string;
   query: string;
   headers: [string, string][];
+  handler_id?: number;
   scheme?: string;
   httpVersion?: string;
   rawPath?: Uint8Array;
@@ -154,6 +158,7 @@ export type AsgiIpcFrame =
 export type AsgiBridgeOptions = {
   ipc?: IpcClientConfig;
   requester?: IpcRequester;
+  router?: ShmRouter;
 };
 
 type WebSocketState = {
@@ -162,17 +167,28 @@ type WebSocketState = {
   queue: AsyncFrameQueue<AsgiIpcFrame>;
   accepted: boolean;
   closed: boolean;
+  handler_id?: number;
 };
 
 export class AsgiBridge {
   private requester: IpcRequester;
+  private router?: ShmRouter;
 
   constructor(options: AsgiBridgeOptions = {}) {
     this.requester = options.requester ?? new IpcPool(options.ipc);
+    this.router = options.router;
   }
 
   async handle(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const handlerId = this.router?.matchPath(`/${request.method}${url.pathname}`);
+
     const meta = this.buildRequestMeta(request);
+    if (handlerId !== undefined && handlerId !== null) {
+      meta.type = "direct.http";
+      meta.handler_id = handlerId;
+    }
+
     if (this.requester.requestStream) {
       return this.handleStream(request, meta);
     }
@@ -488,7 +504,7 @@ export class AsgiBridge {
 
   private buildRequest(meta: AsgiRequestStartFrame, body: Uint8Array): AsgiRequest {
     const { type: _type, ...rest } = meta;
-    return { ...rest, body };
+    return { ...rest, type: meta.type, body };
   }
 
   private createWebSocketState(request: Request): WebSocketState {
