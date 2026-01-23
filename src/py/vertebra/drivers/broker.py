@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import Iterable, Mapping, Sequence
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Self, TypedDict, TypeVar, cast
 
 import msgspec
 
@@ -364,7 +364,7 @@ class VertebraAsyncTransaction:
     def __init__(self, connection: VertebraAsyncConnection) -> None:
         self._connection = connection
 
-    async def __aenter__(self) -> "VertebraAsyncTransaction":
+    async def __aenter__(self) -> Self:
         await self._connection._client.begin(self._connection._pool, self._connection._token)
         return self
 

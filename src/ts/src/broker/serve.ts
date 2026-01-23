@@ -138,7 +138,8 @@ class SqlPool extends BasePoolAdapter {
       adapter,
       max,
     });
-    this.healthChecker = adapter === "postgres" ? new PostgresHealthChecker() : new MySqlHealthChecker();
+    this.healthChecker =
+      adapter === "postgres" ? new PostgresHealthChecker() : new MySqlHealthChecker();
   }
 
   inUse(): number {
@@ -517,7 +518,7 @@ class RedisPool extends BasePoolAdapter {
   }
 
   protected async reapIdle(token: string): Promise<void> {
-    // Redis pool currently holds one client shared. 
+    // Redis pool currently holds one client shared.
   }
 }
 
@@ -1293,25 +1294,40 @@ class Broker {
           await (poolState.adapter as any).savepoint(String(message.token), String(message.name));
           this.reply(client, message.id, { ok: true });
         } else {
-          this.reply(client, message.id, { ok: false, error: { message: "Pool does not support savepoints" } });
+          this.reply(client, message.id, {
+            ok: false,
+            error: { message: "Pool does not support savepoints" },
+          });
         }
         return;
       }
       if (kind === "release_savepoint") {
         if ("releaseSavepoint" in poolState.adapter) {
-          await (poolState.adapter as any).releaseSavepoint(String(message.token), String(message.name));
+          await (poolState.adapter as any).releaseSavepoint(
+            String(message.token),
+            String(message.name),
+          );
           this.reply(client, message.id, { ok: true });
         } else {
-          this.reply(client, message.id, { ok: false, error: { message: "Pool does not support savepoints" } });
+          this.reply(client, message.id, {
+            ok: false,
+            error: { message: "Pool does not support savepoints" },
+          });
         }
         return;
       }
       if (kind === "rollback_savepoint") {
         if ("rollbackSavepoint" in poolState.adapter) {
-          await (poolState.adapter as any).rollbackSavepoint(String(message.token), String(message.name));
+          await (poolState.adapter as any).rollbackSavepoint(
+            String(message.token),
+            String(message.name),
+          );
           this.reply(client, message.id, { ok: true });
         } else {
-          this.reply(client, message.id, { ok: false, error: { message: "Pool does not support savepoints" } });
+          this.reply(client, message.id, {
+            ok: false,
+            error: { message: "Pool does not support savepoints" },
+          });
         }
         return;
       }

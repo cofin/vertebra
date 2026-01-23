@@ -3,9 +3,13 @@
 from dataclasses import dataclass
 from typing import Any
 
-from litestar.plugins import CLIPluginProtocol, InitPluginProtocol
+from vertebra.utils.module_loader import ensure_dependency
 
-from vertebra.serializers.litestar import VERTEBRA_TYPE_DECODERS, VERTEBRA_TYPE_ENCODERS
+ensure_dependency("litestar")
+
+from litestar.plugins import CLIPluginProtocol, InitPluginProtocol  # noqa: E402
+
+from vertebra.serializers.litestar import VERTEBRA_TYPE_DECODERS, VERTEBRA_TYPE_ENCODERS  # noqa: E402
 
 
 @dataclass(slots=True, frozen=True)

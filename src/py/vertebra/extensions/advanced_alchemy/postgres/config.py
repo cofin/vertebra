@@ -5,14 +5,14 @@ from typing import Any
 from vertebra.extensions.advanced_alchemy._config import VertebraAsyncAlchemyConfig, VertebraSyncAlchemyConfig
 
 
-class VertebraPostgresAlchemyAsyncConfig(VertebraAsyncAlchemyConfig):
+class VertebraPostgresAsyncConfig(VertebraAsyncAlchemyConfig):
     """Postgres Async Config."""
 
     def __init__(self, pool: str, **kwargs: Any) -> None:
         super().__init__(pool=pool, driver="postgresql+vertebra", **kwargs)
 
 
-class VertebraPostgresAlchemySyncConfig(VertebraSyncAlchemyConfig):
+class VertebraPostgresSyncConfig(VertebraSyncAlchemyConfig):
     """Postgres Sync Config."""
 
     def __init__(self, pool: str, **kwargs: Any) -> None:

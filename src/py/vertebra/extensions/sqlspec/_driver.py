@@ -3,7 +3,7 @@
 import contextlib
 import uuid
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 
 from sqlspec.driver import (
     AsyncDataDictionaryBase,
@@ -34,7 +34,7 @@ class VertebraExceptionHandler:
     def __init__(self) -> None:
         self.pending_exception: Exception | None = None
 
-    def __enter__(self) -> "VertebraExceptionHandler":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
@@ -55,7 +55,7 @@ class VertebraAsyncExceptionHandler:
     def __init__(self) -> None:
         self.pending_exception: Exception | None = None
 
-    async def __aenter__(self) -> "VertebraAsyncExceptionHandler":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(

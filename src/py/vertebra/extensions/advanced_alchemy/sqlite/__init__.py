@@ -1,5 +1,5 @@
 """Vertebra SQLite Advanced Alchemy integration."""
 
-from .config import VertebraSqliteAlchemyAsyncConfig, VertebraSqliteAlchemySyncConfig
+from .config import VertebraSqliteAsyncConfig, VertebraSqliteSyncConfig
 
-__all__ = ("VertebraSqliteAlchemyAsyncConfig", "VertebraSqliteAlchemySyncConfig")
+__all__ = ("VertebraSqliteAsyncConfig", "VertebraSqliteSyncConfig")

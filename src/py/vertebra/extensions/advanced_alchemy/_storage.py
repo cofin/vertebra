@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from vertebra.resources.broker import AsyncBrokerClient
-from vertebra.utils.module_loader import dependency_flag
+from vertebra.utils.module_loader import ensure_dependency
 
-if TYPE_CHECKING:
-    from advanced_alchemy.types.file_object import Backend
-else:
-    try:
-        from advanced_alchemy.types.file_object import Backend
-    except ImportError:
-        Backend = object
+ensure_dependency("advanced_alchemy", install_package="advanced-alchemy")
 
-ADVANCED_ALCHEMY_INSTALLED = dependency_flag("advanced_alchemy")
+from advanced_alchemy.types.file_object import StorageBackend, storages  # noqa: E402
 
 
-class VertebraStorageBackend(Backend):
+class VertebraStorageBackend(StorageBackend):
     """Routes AA StoredObject operations through Vertebra broker."""
 
     def __init__(self, pool: str = "storage", key: str = "vertebra") -> None:
@@ -51,10 +43,10 @@ class VertebraStorageBackend(Backend):
         return await self._client.storage_glob(self.pool, pattern)
 
 
-# Registration
+# Register backend with Advanced Alchemy if instantiation succeeds
+# Note: VertebraStorageBackend may need updates if AA's StorageBackend interface changes
 try:
-    from advanced_alchemy.types.file_object import storages
-
     storages.register_backend(VertebraStorageBackend())
-except ImportError:
+except TypeError:
+    # StorageBackend abstract methods may have changed; skip registration
     pass

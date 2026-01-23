@@ -16,6 +16,12 @@ from vertebra.protocols import (
     PolarsDataFrameProtocol,
     SyncContextManager,
 )
+from vertebra.utils.dependencies import (
+    ADVANCED_ALCHEMY_INSTALLED,
+    LITESTAR_INSTALLED,
+    SQLALCHEMY_INSTALLED,
+    SQLSPEC_INSTALLED,
+)
 from vertebra.utils.module_loader import dependency_flag
 
 # =============================================================================
@@ -118,14 +124,19 @@ except ImportError:
 
 
 __all__ = (
-    # Dependency flags
+    # Framework/Extension dependency flags (re-exported)
+    "ADVANCED_ALCHEMY_INSTALLED",
+    # Data library dependency flags
     "ATTRS_INSTALLED",
+    "LITESTAR_INSTALLED",
     "MSGSPEC_INSTALLED",
     "NUMPY_INSTALLED",
     "PANDAS_INSTALLED",
     "POLARS_INSTALLED",
     "PYARROW_INSTALLED",
     "PYDANTIC_INSTALLED",
+    "SQLALCHEMY_INSTALLED",
+    "SQLSPEC_INSTALLED",
     # Arrow types
     "ArrowArray",
     "ArrowArrayProtocol",

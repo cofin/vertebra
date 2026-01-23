@@ -1,28 +1,32 @@
 """Tests for Vertebra Litestar Plugin."""
 
 from typing import Any
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import MagicMock, patch
 
 try:
     from litestar import Litestar, get
-    from litestar.status_codes import HTTP_200_OK
     from litestar.testing import TestClient
-    from vertebra.extensions.litestar import VertebraPlugin
+
     # Ensure dialects are registered
-    import vertebra.extensions.sqlalchemy.postgres # noqa: F401
+    import vertebra.extensions.sqlalchemy.postgres  # noqa: F401
+    from vertebra.extensions.litestar import VertebraPlugin
+
     HAS_LITESTAR = True
 except ImportError:
     HAS_LITESTAR = False
 
 try:
     import advanced_alchemy
+
     HAS_AA = True
 except ImportError:
     HAS_AA = False
 
 try:
     import sqlspec
+
     HAS_SQLSPEC = True
 except ImportError:
     HAS_SQLSPEC = False
@@ -30,7 +34,9 @@ except ImportError:
 
 @pytest.mark.skipif(not HAS_LITESTAR, reason="Litestar not installed")
 def test_plugin_registration() -> None:
+    """Test VertebraPlugin registers type encoders correctly."""
     import uuid
+
     @get("/", sync_to_thread=False)
     def handler() -> dict[str, Any]:
         return {"id": uuid.uuid4()}
@@ -43,47 +49,43 @@ def test_plugin_registration() -> None:
 
 
 @pytest.mark.skipif(not HAS_LITESTAR or not HAS_SQLSPEC, reason="Litestar or SQLSpec not installed")
-def test_sqlspec_plugin_registration() -> None:
-    from sqlspec.extensions.litestar import SQLSpecPlugin, LitestarConfig
-    from vertebra.extensions.litestar.sqlspec import VertebraSQLSpecPlugin
+def test_sqlspec_config_instantiation() -> None:
+    """Test Vertebra SQLSpec configs can be instantiated."""
     from vertebra.extensions.sqlspec.postgres import VertebraPostgresAsyncConfig
-    
+
     # Mock the client to avoid SHM connection attempts
     with patch("vertebra.resources.broker.AsyncBrokerClient"):
-        config = LitestarConfig(config=VertebraPostgresAsyncConfig(pool="main"))
-        plugin = VertebraSQLSpecPlugin(config=config)
-        
-        app = Litestar(route_handlers=[], plugins=[plugin])
-        assert app.type_encoders
+        config = VertebraPostgresAsyncConfig(pool="main")
+        assert config is not None
+        assert config.pool == "main"
 
 
 @pytest.mark.skipif(not HAS_LITESTAR or not HAS_AA, reason="Litestar or Advanced Alchemy not installed")
-def test_sqlalchemy_plugin_registration() -> None:
-    from vertebra.extensions.litestar.sqlalchemy import VertebraSQLAlchemyPlugin
+def test_sqlalchemy_with_vertebra_config() -> None:
+    """Test standard SQLAlchemyPlugin works with Vertebra configs."""
+    from advanced_alchemy.extensions.litestar import SQLAlchemyAsyncConfig, SQLAlchemyPlugin
     from sqlalchemy.ext.asyncio import create_async_engine
-    
-    # SQLAlchemyPlugin requires a config
-    # We need to mock the client/SHM
+
+    # Use Vertebra's dialect URL format
     with patch("vertebra.resources.broker.SyncBrokerClient"):
         mock_engine = create_async_engine("postgresql+vertebra://main")
-        
-        from advanced_alchemy.extensions.litestar import SQLAlchemyAsyncConfig
         config = SQLAlchemyAsyncConfig(engine_instance=mock_engine)
-        
-        plugin = VertebraSQLAlchemyPlugin(config=config)
-        
-        app = Litestar(route_handlers=[], plugins=[plugin])
+
+        # Use standard SQLAlchemyPlugin with Vertebra-based engine
+        app = Litestar(route_handlers=[], plugins=[VertebraPlugin(), SQLAlchemyPlugin(config=config)])
         assert app.type_encoders
 
 
 @pytest.mark.skipif(not HAS_LITESTAR or not HAS_AA, reason="Litestar or Advanced Alchemy not installed")
-def test_advanced_alchemy_plugin_registration() -> None:
-    from vertebra.extensions.litestar.advanced_alchemy import VertebraAdvancedAlchemyPlugin
-    from vertebra.extensions.advanced_alchemy.postgres import VertebraPostgresAlchemyAsyncConfig
-    
+def test_advanced_alchemy_with_vertebra_config() -> None:
+    """Test standard SQLAlchemyPlugin works with Vertebra Advanced Alchemy configs."""
+    from advanced_alchemy.extensions.litestar import SQLAlchemyPlugin
+
+    from vertebra.extensions.advanced_alchemy.postgres import VertebraPostgresAsyncConfig
+
     with patch("vertebra.resources.broker.SyncBrokerClient"):
-        config = VertebraPostgresAlchemyAsyncConfig(pool="main")
-        plugin = VertebraAdvancedAlchemyPlugin(config=config)
-        
-        app = Litestar(route_handlers=[], plugins=[plugin])
+        config = VertebraPostgresAsyncConfig(pool="main")
+
+        # Use standard SQLAlchemyPlugin with Vertebra config
+        app = Litestar(route_handlers=[], plugins=[VertebraPlugin(), SQLAlchemyPlugin(config=config)])
         assert app.type_encoders

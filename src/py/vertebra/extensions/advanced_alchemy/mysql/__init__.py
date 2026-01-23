@@ -1,5 +1,5 @@
 """Vertebra MySQL Advanced Alchemy integration."""
 
-from .config import VertebraMysqlAlchemyAsyncConfig, VertebraMysqlAlchemySyncConfig
+from .config import VertebraMysqlAsyncConfig, VertebraMysqlSyncConfig
 
-__all__ = ("VertebraMysqlAlchemyAsyncConfig", "VertebraMysqlAlchemySyncConfig")
+__all__ = ("VertebraMysqlAsyncConfig", "VertebraMysqlSyncConfig")

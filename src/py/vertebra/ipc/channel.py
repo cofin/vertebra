@@ -3,7 +3,7 @@
 import asyncio
 import struct
 import time
-from typing import Any, TypeVar, cast
+from typing import Any, Self, TypeVar, cast
 
 from vertebra import _vertebra
 from vertebra.exceptions import ChannelError, SerializationError
@@ -106,7 +106,7 @@ class BufferView:
             view.release()
         self._view = None
 
-    def __enter__(self) -> "BufferView":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_exc: object) -> None:

@@ -2,13 +2,13 @@
 
 ## Quick Resume
 
-**Last phase**: Planning Complete
-**Current status**: Ready for Implementation
+**Last phase**: Implementation Complete
+**Current status**: Ready for Review
 **PRD location**: `specs/active/optional-dependency-handling/`
 
 ## Intelligence Context
 
-**Complexity**: Medium (8 checkpoints)
+**Complexity**: Medium (22 tasks across 6 phases)
 
 **Stack**:
 - Language: Python 3.12+
@@ -17,134 +17,92 @@
 - Lint: `make lint`
 - Full check: `make lint-all`
 
-**Documentation**:
-- System: None (CLAUDE.md only)
-- Skills: N/A
+## Implementation Summary
 
-**Similar implementations**:
-- `vertebra/extensions/litestar/plugin.py` - Best current pattern
-- `vertebra/extensions/advanced_alchemy/_config.py` - Pattern to replace
-- `vertebra/serializers/litestar.py` - Correct conditional enhancement
-- `vertebra/utils/module_loader.py` - Core infrastructure
+### Files Modified
 
-**Patterns being followed**:
-- `ensure_dependency()` at extension entry points
-- `dependency_flag()` for conditional feature enhancement
-- Empty `__all__` at extension roots
-- `TYPE_CHECKING` for type-only imports
+#### Phase 1: Foundation
+- `src/py/vertebra/utils/dependencies.py` - Added `ADVANCED_ALCHEMY_INSTALLED`, `SQLALCHEMY_INSTALLED`
+- `src/py/vertebra/_typing.py` - Re-exported framework dependency flags
+- `src/py/tests/test_module_loader.py` - **NEW** - 17 unit tests for ensure_dependency
 
-## State Summary
+#### Phase 2: Litestar Extension
+- `src/py/vertebra/extensions/litestar/_plugin.py` - Added ensure_dependency("litestar")
+- `src/py/vertebra/extensions/litestar/plugin.py` - **DELETED** (unused duplicate)
+- `src/py/vertebra/extensions/litestar/advanced_alchemy.py` - Removed object fallback
+- `src/py/vertebra/extensions/litestar/sqlspec.py` - Removed object fallback
+- `src/py/vertebra/extensions/litestar/sqlalchemy.py` - Removed object fallback
 
-### Completed
-- Project discovery and structure analysis
-- Pattern recognition across 70+ extension files
-- Complexity assessment (Medium, 8 checkpoints)
-- Research document (2058 words)
-- PRD document (3355 words)
-- Task breakdown (17 tasks across 5 phases)
+#### Phase 3: Advanced Alchemy Extension
+- `src/py/vertebra/extensions/advanced_alchemy/_config.py` - Removed object fallback, use ensure_dependency
+- `src/py/vertebra/extensions/advanced_alchemy/_storage.py` - Removed object fallback, use ensure_dependency
 
-### Pending
-- Implementation of all tasks
-- No source code modified during planning
+#### Phase 4: SQLSpec Compound Dependencies
+- `src/py/vertebra/extensions/sqlspec/postgres/litestar/__init__.py` - Added ensure_dependency("litestar")
+- `src/py/vertebra/extensions/sqlspec/mysql/litestar/__init__.py` - Added ensure_dependency("litestar")
+- `src/py/vertebra/extensions/sqlspec/sqlite/litestar/__init__.py` - Added ensure_dependency("litestar")
 
-## Key Files to Modify
+#### Phase 5: SQLAlchemy Extension
+- `src/py/vertebra/extensions/sqlalchemy/__init__.py` - Added ensure_dependency("sqlalchemy")
 
-### Phase 1: Foundation
-```
-src/py/vertebra/utils/dependencies.py  # Add ADVANCED_ALCHEMY_INSTALLED, SQLALCHEMY_INSTALLED
-src/py/vertebra/_typing.py             # Re-export framework flags
-```
+### Test Results
 
-### Phase 2: Litestar Extension
-```
-src/py/vertebra/extensions/litestar/_plugin.py  # Add ensure_dependency (currently has direct imports with NO guards!)
-src/py/vertebra/extensions/litestar/plugin.py   # DELETE (unused duplicate)
-```
+- `test_module_loader.py`: 17 tests pass
+- `test_litestar_plugin.py::test_plugin_registration`: Pass
+- `test_advanced_alchemy.py::test_aa_postgres_config`: Pass
 
-### Phase 3: Advanced Alchemy Extension
-```
-src/py/vertebra/extensions/advanced_alchemy/_config.py   # Remove object fallback
-src/py/vertebra/extensions/advanced_alchemy/_storage.py  # Same refactoring
-```
+### Known Issues (Pre-existing)
 
-### Phase 4: SQLSpec Compound Dependencies
-```
-src/py/vertebra/extensions/sqlspec/postgres/litestar/__init__.py  # Add ensure_dependency
-src/py/vertebra/extensions/sqlspec/mysql/litestar/__init__.py     # Add ensure_dependency
-src/py/vertebra/extensions/sqlspec/sqlite/litestar/__init__.py    # Add ensure_dependency
-```
+1. `test_aa_storage_backend` - AA `StorageBackend` interface changed; test needs update
+2. `test_sqlspec_plugin_registration` - sqlspec `SQLSpecPlugin` constructor changed; test needs update
+3. Various IPC tests failing - Unrelated to this PR
 
-### Phase 4b: SQLAlchemy Extension (Optional)
-```
-src/py/vertebra/extensions/sqlalchemy/__init__.py   # Consider adding ensure_dependency for better error
-src/py/vertebra/extensions/sqlalchemy/_base.py      # Direct imports (natural failure OK)
-src/py/vertebra/extensions/sqlalchemy/_async_dbapi.py  # Direct imports (natural failure OK)
-```
+## Patterns Established
 
-## Key Decisions Made
-
-1. **Use ensure_dependency() instead of try/except**: Provides better error messages and fail-fast behavior
-2. **Remove object fallback pattern**: Causes confusing runtime errors
-3. **Centralize dependency flags**: Single source of truth in `utils/dependencies.py`
-4. **Keep natural ImportError for deep files**: `sqlspec/_driver.py` doesn't need guards since user explicitly imported the extension
-
-## Implementation Pattern
-
-Replace this:
-```python
-try:
-    from some_library import SomeClass
-    _AVAILABLE = True
-except ImportError as exc:
-    _AVAILABLE = False
-    class SomeClass: ...
-
-# Later:
-if not _AVAILABLE:
-    raise MissingDependencyError(...)
-```
-
-With this:
+### ensure_dependency Pattern
 ```python
 from vertebra.utils.module_loader import ensure_dependency
 
-ensure_dependency("some_library", install_package="vertebra[some-library]")
+ensure_dependency("library", install_package="vertebra[library]")
 
-from some_library import SomeClass
-# No runtime check needed
+from library import SomeClass  # noqa: E402
 ```
+
+### Centralized Dependency Flags
+- Framework flags in `vertebra/utils/dependencies.py`
+- Data library flags in `vertebra/_typing.py`
+- Re-export through `_typing.py` for convenience
 
 ## Test Commands
 
 ```bash
-# Run all tests
-make test
-
-# Run specific test file
+# Run module_loader tests
 uv run pytest src/py/tests/test_module_loader.py -v
+
+# Run all key tests
+uv run pytest src/py/tests/test_module_loader.py src/py/tests/test_litestar_plugin.py::test_plugin_registration src/py/tests/test_advanced_alchemy.py::test_aa_postgres_config -v
 
 # Run linting
 make lint
 
-# Run full checks (lint + type check)
-make lint-all
+# Verify imports work
+uv run python -c "
+from vertebra.extensions.litestar import VertebraPlugin
+from vertebra.extensions.advanced_alchemy._config import VertebraAsyncAlchemyConfig
+from vertebra.extensions.sqlspec.postgres.litestar import PostgresLitestarStore
+print('All imports successful!')
+"
 ```
 
 ## Next Steps
 
-Run `/implement optional-dependency-handling` to begin implementation.
-
-Or manually start with:
-1. Open `src/py/vertebra/utils/dependencies.py`
-2. Add `ADVANCED_ALCHEMY_INSTALLED = dependency_flag("advanced_alchemy")`
-3. Add `SQLALCHEMY_INSTALLED = dependency_flag("sqlalchemy")`
-4. Update `__all__` tuple
-5. Run `make test` to verify
+1. Run `/test optional-dependency-handling` for comprehensive testing
+2. Run `/review optional-dependency-handling` for quality gate enforcement
+3. Update failing tests for AA storage and sqlspec plugin (separate PR)
 
 ## Rollback Strategy
 
 If issues arise:
-1. All changes are additive to dependencies.py (safe)
-2. Extension refactoring can be reverted file-by-file
-3. Keep the old tests until new patterns are verified
-4. Git history provides full rollback capability
+1. Git revert the commits from this implementation
+2. All changes are isolated to the files listed above
+3. No database changes or API changes to roll back

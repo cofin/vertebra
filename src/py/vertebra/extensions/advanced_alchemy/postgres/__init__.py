@@ -1,5 +1,5 @@
 """Vertebra Postgres Advanced Alchemy integration."""
 
-from .config import VertebraPostgresAlchemyAsyncConfig, VertebraPostgresAlchemySyncConfig
+from .config import VertebraPostgresAsyncConfig, VertebraPostgresSyncConfig
 
-__all__ = ("VertebraPostgresAlchemyAsyncConfig", "VertebraPostgresAlchemySyncConfig")
+__all__ = ("VertebraPostgresAsyncConfig", "VertebraPostgresSyncConfig")
