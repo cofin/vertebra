@@ -52,7 +52,7 @@ Flatten the `extensions` directory in tests and move remaining root tests to the
     - [ ] Move `test_sqlspec_storage.py` to `src/py/tests/unit/sqlspec/test_storage.py`.
     - [ ] Move `test_sqlspec_integration.py` to `src/py/tests/integration/sqlspec/test_arrow_sqlite.py`.
     - [ ] Consolidate any other sqlspec tests.
-- [ ] Task: Migrate Litestar Tests
+- [x] Task: Migrate Litestar Tests 12e14d9
     - [ ] Create `src/py/tests/integration/litestar`.
     - [ ] Move `test_litestar_plugin.py` to `src/py/tests/integration/litestar/test_plugin.py`.
     - [ ] Move `test_serialization_litestar.py` to `src/py/tests/integration/litestar/test_serialization.py`.
