@@ -384,7 +384,7 @@
 
 ---
 
-## Phase 4: Pool Health Checks (Week 3)
+## Phase 4: Pool Health Checks (Week 3) [checkpoint: ccf88a6]
 
 ### Task Group 4.1: Health Check Implementation
 
