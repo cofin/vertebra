@@ -39,7 +39,7 @@ This plan outlines the phases to implement a custom, high-performance integratio
 - [x] **Task: Update Worker Opcodes and Loop** [f8b183f]
     - [ ] Write tests for the `vertebra-py` worker receiving a `DIRECT_HTTP` opcode.
     - [ ] Implement the optimized loop in `vertebra.main` that bypasses ASGI task creation for native routes.
-- [ ] **Task: Direct Data Binding (Rust-to-Python)**
+- [x] **Task: Direct Data Binding (Rust-to-Python)** [1be3fd2]
     - [ ] Write tests for passing JSON payloads directly into handler `**kwargs`.
     - [ ] Optimize the shared-memory-to-Python-primitive mapping in `vertebra-py`.
 - [ ] **Task: Legacy ASGI Fallback**
