@@ -12,7 +12,7 @@ This plan outlines the phases to implement a custom, high-performance integratio
     - [ ] Write Rust unit tests in `vertebra-core` for path matching and ID retrieval.
     - [ ] Integrate `matchit` crate into `vertebra-core`.
     - [ ] Implement `Router::match_path(&self, path: &str) -> Option<RouteId>`.
-- [ ] **Task: Bridge RouteMap at Startup**
+- [x] **Task: Bridge RouteMap at Startup** [27a264f]
     - [ ] Write integration tests for passing the `RouteMap` from Python to Rust during worker initialization.
     - [ ] Update `vertebra-py` and `vertebra-js` bindings to accept and load the routing table.
 - [ ] **Task: Checkpoint - Verify Route Mirroring**
