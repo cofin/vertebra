@@ -6,10 +6,6 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 
 ## Active PRDs
 
-## [x] PRD: Consolidated Database & ORM Integration
-
-*Link: [./specs/database-orm-integration/](./specs/database-orm-integration/)*
-
 ## [ ] PRD: Server & Runtime - MCP, Health Checks, and Observability
 
 *Link: [./specs/server-runtime/](./specs/server-runtime/)*
@@ -21,6 +17,10 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 ---
 
 ## Completed & Archived PRDs
+
+## [x] PRD: Consolidated Database & ORM Integration
+
+*Link: [./archive/prd_20260122_database-orm-integration/](./archive/prd_20260122_database-orm-integration/)*
 
 ## [x] PRD: Distribution & Packaging for Vertebra 1.0
 
