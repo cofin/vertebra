@@ -118,7 +118,20 @@
 - Claude Desktop can connect via stdio
 - Tool invocation completes in <10ms
 
+### Task Group 1.5: Stability Fixes
+
+**Priority**: P0
+**Dependencies**: None
+
+- [ ] **Task 1.5.1**: Fix router.test.ts FFI symbol mismatch
+  - Investigate `vtb_last_error_message` symbol missing in `libvertebra_js.so`
+  - Fix build configuration or symbol export in Rust
+  - Verify `router.test.ts` passes
+  - File: `src/rs/vertebra-js/src/lib.rs` (likely)
+
 ---
+
+**Phase 1 Checkpoint**: [checkpoint: 4c4f712]
 
 ## Phase 2: Python Integration (Week 3-4)
 
