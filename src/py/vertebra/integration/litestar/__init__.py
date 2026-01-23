@@ -17,6 +17,39 @@ class LitestarRoute:
     guards: list[Callable] = field(default_factory=list)
     dependencies: dict[str, Any] = field(default_factory=dict)
 
+class VertebraRequest:
+    """A high-performance request object for the native protocol."""
+    __slots__ = ("_message", "_json", "_headers")
+
+    def __init__(self, message: dict[str, Any]):
+        self._message = message
+        self._json = None
+        self._headers = None
+
+    @property
+    def method(self) -> str:
+        return self._message.get("method", "GET")
+
+    @property
+    def path(self) -> str:
+        return self._message.get("path", "/")
+
+    @property
+    def headers(self) -> dict[str, str]:
+        if self._headers is None:
+            self._headers = dict(self._message.get("headers", []))
+        return self._headers
+
+    @property
+    def body(self) -> bytes:
+        return self._message.get("body", b"")
+
+    def json(self) -> Any:
+        if self._json is None:
+            import json
+            self._json = json.loads(self.body)
+        return self._json
+
 def reflect_routes(app: Litestar) -> list[LitestarRoute]:
     """Reflect all routes from a Litestar application.
     

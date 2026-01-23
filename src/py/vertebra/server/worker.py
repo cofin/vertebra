@@ -207,16 +207,8 @@ class AsgiWorker:
             })
             return
 
-        # Create a mock connection object that the runner expects
-        # In a real implementation, this would be a specialized VertebraRequest
-        class NativeConnection:
-            def __init__(self, msg):
-                self.headers = dict(msg.get("headers", []))
-                self.path = msg.get("path")
-                self.method = msg.get("method")
-                self.body = msg.get("body", b"")
-
-        conn = NativeConnection(message)
+        from vertebra.integration.litestar import VertebraRequest
+        conn = VertebraRequest(message)
         
         try:
             result = await runner(conn)

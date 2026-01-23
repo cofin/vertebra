@@ -144,6 +144,10 @@ class PipelineCompiler:
         for param_name in sig.parameters:
             if param_name in dependencies:
                 args.append(f"{param_name}=deps['{param_name}']")
+            elif param_name == "data":
+                # Inject parsed data from request
+                body.append("    data = ctx.json()")
+                args.append("data=data")
             elif param_name in ("connection", "scope", "request"):
                 args.append(f"{param_name}=ctx")
                 
