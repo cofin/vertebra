@@ -480,18 +480,18 @@
 **Priority**: P1
 **Dependencies**: None
 
-- [ ] **Task 5.1.1**: Define lifecycle hook interface
+- [x] **Task 5.1.1**: Define lifecycle hook interface
   - `onAcquire(token: string) -> Promise<void>`
   - `onRelease(token: string) -> Promise<void>`
   - `onError(token: string, error: Error) -> Promise<void>`
   - `onTimeout(token: string) -> Promise<void>`
   - File: `src/ts/src/broker/base-pool.ts`
 
-- [ ] **Task 5.1.2**: Add hook registration methods
+- [x] **Task 5.1.2**: Add hook registration methods
   - `setOnAcquire(fn)`, `setOnRelease(fn)`, etc.
   - File: `src/ts/src/broker/base-pool.ts`
 
-- [ ] **Task 5.1.3**: Wire hooks into pool lifecycle
+- [x] **Task 5.1.3**: Wire hooks into pool lifecycle
   - Call `onAcquire` after acquiring connection
   - Call `onRelease` before releasing connection
   - Call `onError` on connection error
@@ -509,18 +509,18 @@
 **Priority**: P1
 **Dependencies**: None
 
-- [ ] **Task 5.2.1**: Add idle timeout tracking
+- [x] **Task 5.2.1**: Add idle timeout tracking
   - Track `last_used` timestamp per connection
   - Update on acquire and release
   - File: `src/ts/src/broker/serve.ts`
 
-- [ ] **Task 5.2.2**: Implement idle reaper
+- [x] **Task 5.2.2**: Implement idle reaper
   - `startIdleReaper(timeoutMs)` method
   - Periodic scan (every 60s)
   - Close connections idle >5 minutes
   - File: `src/ts/src/broker/base-pool.ts`
 
-- [ ] **Task 5.2.3**: Add idle metrics
+- [x] **Task 5.2.3**: Add idle metrics
   - `idle_timeouts_total{pool}`
   - `connection_lease_duration_seconds{pool}` (histogram)
   - File: `src/ts/src/broker/base-pool.ts`
@@ -536,12 +536,12 @@
 **Priority**: P1
 **Dependencies**: Tasks 5.1, 5.2
 
-- [ ] **Task 5.3.1**: Add lifecycle hook unit tests
+- [x] **Task 5.3.1**: Add lifecycle hook unit tests
   - Test each hook is called at correct time
   - Test hook execution order
   - File: `src/ts/tests/unit/lifecycle-hooks.test.ts` (NEW)
 
-- [ ] **Task 5.3.2**: Add idle reaper tests
+- [x] **Task 5.3.2**: Add idle reaper tests
   - Test idle connections removed after timeout
   - Test metrics updated correctly
   - File: `src/ts/tests/unit/idle-reaper.test.ts` (NEW)
