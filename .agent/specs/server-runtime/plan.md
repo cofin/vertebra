@@ -180,24 +180,24 @@
 **Priority**: P0
 **Dependencies**: Task 2.1
 
-- [~] **Task 2.2.1**: Create schema generator module
+- [x] **Task 2.2.1**: Create schema generator module
   - `MCPSchemaGenerator` class
   - `generate_tool_schema(tool: Tool) -> dict` method
   - File: `src/py/vertebra/mcp/schema.py` (NEW)
 
-- [~] **Task 2.2.2**: Implement TypeNode to JSON Schema conversion
+- [x] **Task 2.2.2**: Implement TypeNode to JSON Schema conversion
   - Support: str, int, float, bool
   - Support: list, dict
   - Support: Optional, Union, Literal
   - File: `src/py/vertebra/mcp/schema.py`
 
-- [~] **Task 2.2.3**: Add support for complex types
+- [x] **Task 2.2.3**: Add support for complex types
   - Support: msgspec.Struct
   - Support: pydantic.BaseModel
   - Support: dataclass
   - File: `src/py/vertebra/mcp/schema.py`
 
-- [~] **Task 2.2.4**: Add schema generation tests
+- [x] **Task 2.2.4**: Add schema generation tests
   - Test basic types
   - Test complex types
   - Test nested types
@@ -215,26 +215,26 @@
 **Priority**: P0
 **Dependencies**: Tasks 2.1, 2.2
 
-- [ ] **Task 2.3.1**: Create IPC bridge module (TypeScript)
+- [~] **Task 2.3.1**: Create IPC bridge module (TypeScript)
   - `MCPIPCBridge` class
   - `callTool(name: string, args: unknown) -> Promise<unknown>`
   - Serialize to MessagePack, send via shared memory
   - File: `src/ts/src/mcp/ipc-bridge.ts` (NEW)
 
-- [ ] **Task 2.3.2**: Create IPC handler module (Python)
+- [~] **Task 2.3.2**: Create IPC handler module (Python)
   - Listen for tool invocation requests
   - Look up tool in registry
   - Invoke handler with deserialized arguments
   - Serialize result and send back
   - File: `src/py/vertebra/mcp/handler.py` (NEW)
 
-- [ ] **Task 2.3.3**: Add error handling
+- [~] **Task 2.3.3**: Add error handling
   - Handle tool not found
   - Handle execution timeout
   - Handle serialization errors
   - Files: `ipc-bridge.ts`, `handler.py`
 
-- [ ] **Task 2.3.4**: Add IPC bridge tests
+- [~] **Task 2.3.4**: Add IPC bridge tests
   - Test successful invocation
   - Test error handling
   - Test timeout handling
