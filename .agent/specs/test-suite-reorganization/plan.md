@@ -47,7 +47,7 @@ Flatten the `extensions` directory in tests and move remaining root tests to the
 - [x] Task: Flatten Unit Extensions 7879a93
     - [ ] Move `src/py/tests/unit/extensions/serialization` to `src/py/tests/unit/serialization`.
     - [ ] Remove `src/py/tests/unit/extensions`.
-- [ ] Task: Migrate SQLSpec Tests
+- [x] Task: Migrate SQLSpec Tests b5bbcb8
     - [ ] Move `test_sqlspec_arrow.py` to `src/py/tests/unit/sqlspec/test_arrow.py`.
     - [ ] Move `test_sqlspec_storage.py` to `src/py/tests/unit/sqlspec/test_storage.py`.
     - [ ] Move `test_sqlspec_integration.py` to `src/py/tests/integration/sqlspec/test_arrow_sqlite.py`.
