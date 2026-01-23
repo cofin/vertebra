@@ -1,3 +1,6 @@
+import type { SchemaRegistry } from "./schema-registry";
+import type { MCPIPCBridge } from "./ipc-bridge";
+
 export type JsonRpcRequest = {
   jsonrpc: "2.0";
   id: string | number | null;
@@ -25,8 +28,31 @@ export class McpServer {
   private tools = new Map<string, McpTool>();
   private initialized = false;
 
+  constructor(
+    private registry?: SchemaRegistry,
+    private bridge?: MCPIPCBridge
+  ) {}
+
   registerTool(tool: McpTool): void {
     this.tools.set(tool.name, tool);
+  }
+
+  syncTools(): void {
+    if (!this.registry) return;
+    
+    for (const schema of this.registry.getTools()) {
+      this.registerTool({
+        name: schema.name,
+        description: schema.description,
+        inputSchema: schema.inputSchema,
+        handler: async (args) => {
+          if (!this.bridge) {
+            throw new Error("IPC bridge not available");
+          }
+          return this.bridge.callTool(schema.name, args);
+        }
+      });
+    }
   }
 
   async handle(request: JsonRpcRequest): Promise<JsonRpcResponse> {
