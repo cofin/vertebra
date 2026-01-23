@@ -1,10 +1,16 @@
 import type { Server, WebSocketHandler } from "bun";
-import { AsyncBrokerClient } from "../broker";
+import { AsyncBrokerClient, BrokerServer } from "../broker";
 import { ShmRouter } from "../broker/shm";
 import { AsgiBridge } from "../ipc";
 import { collectBrokerMetrics } from "../broker/metrics";
 import { collectMcpMetrics } from "../mcp/metrics";
-import { collectServerMetrics, metricsHandler, registerCollector, trackConnection, trackRequest } from "./metrics";
+import {
+  collectServerMetrics,
+  metricsHandler,
+  registerCollector,
+  trackConnection,
+  trackRequest,
+} from "./metrics";
 import { type ResolvedServerConfig, resolveServerConfig, type ServerConfig } from "./config";
 import { log } from "./logging";
 import { ProcessManager } from "./process-manager";
@@ -31,12 +37,18 @@ export class BunServer {
     private config: ResolvedServerConfig["server"],
     private websocket?: WebSocketHandler<unknown>,
     private onStop?: () => Promise<void> | void,
+    private broker?: BrokerServer,
   ) {}
 
   start(): this {
     if (this.server) {
       return this;
     }
+    // Start Broker Server if configured
+    if (this.broker) {
+      this.broker.start();
+    }
+
     // Build options conditionally to satisfy Bun.serve overload requirements
     const baseOptions = {
       hostname: this.config.hostname,
@@ -60,6 +72,9 @@ export class BunServer {
     }
     this.server.stop(closeConnections);
     this.server = null;
+    if (this.broker) {
+      this.broker.stop();
+    }
     if (this.onStop) {
       const result = this.onStop();
       if (result && typeof (result as Promise<void>).catch === "function") {
@@ -99,6 +114,9 @@ export class BunServer {
       return;
     }
     server.stop(false);
+    if (this.broker) {
+      this.broker.stop();
+    }
     const drainTimeout = this.config.drainTimeoutMs ?? 5000;
     const stopPromise = Promise.resolve(this.onStop?.());
     let completed = false;
@@ -122,7 +140,7 @@ export async function createServer(
   handler: RequestHandler = () => new Response("Not Found", { status: 404 }),
 ): Promise<BunServer> {
   const resolved = await resolveServerConfig(config);
-  return new BunServer(handler, resolved.server, undefined);
+  return new BunServer(handler, resolved.server, undefined, undefined, undefined);
 }
 
 export async function createRouterServer(
@@ -135,7 +153,7 @@ export async function createRouterServer(
     apiHandler: handler,
     assets: resolved.assets,
   });
-  return new BunServer(router, resolved.server, undefined);
+  return new BunServer(router, resolved.server, undefined, undefined, undefined);
 }
 
 export async function createAsgiServer(
@@ -155,7 +173,10 @@ export async function createAsgiServer(
   manager?.start();
   const routerInstance = new ShmRouter();
   const bridge = new AsgiBridge({ requester: workerPool, router: routerInstance });
-  
+
+  // Initialize Broker Server
+  const broker = new BrokerServer(resolved.broker);
+
   // Register metrics collectors
   registerCollector(collectServerMetrics);
   registerCollector(collectBrokerMetrics);
@@ -168,14 +189,14 @@ export async function createAsgiServer(
       trackConnection(true); // Increment active connection count (approx)
       const { request: tracedRequest, traceId } = ensureTraceId(request);
       const url = new URL(tracedRequest.url);
-      
+
       try {
         if (url.pathname === "/__metrics__") {
           return await metricsHandler(request);
         }
 
         const start = performance.now();
-        
+
         if (bridge.upgradeWebSocket(tracedRequest, server)) {
           log("info", "request.upgrade", {
             trace_id: traceId,
@@ -185,9 +206,9 @@ export async function createAsgiServer(
           return;
         }
         const response = await bridge.handle(tracedRequest);
-        
+
         trackRequest(performance.now() - start);
-        
+
         log("info", "request.complete", {
           trace_id: traceId,
           method: tracedRequest.method,
@@ -197,7 +218,7 @@ export async function createAsgiServer(
         });
         return response;
       } catch (error) {
-        trackRequest(performance.now() - (performance.now())); // Count as request even if error?
+        trackRequest(performance.now() - performance.now()); // Count as request even if error?
         log("error", "request.error", {
           trace_id: traceId,
           method: tracedRequest.method,
@@ -211,9 +232,15 @@ export async function createAsgiServer(
     },
   });
   const websocket = bridge.createWebSocketHandler();
-  return new BunServer(router, resolved.server, websocket, async () => {
-    await Promise.all([workerPool.close(), manager?.stop()]);
-  });
+  return new BunServer(
+    router,
+    resolved.server,
+    websocket,
+    async () => {
+      await Promise.all([workerPool.close(), manager?.stop()]);
+    },
+    broker,
+  );
 }
 
 function ensureTraceId(request: Request): { request: Request; traceId: string } {

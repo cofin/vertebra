@@ -17,6 +17,14 @@ pub enum Opcode {
     WsClose = 6,
     /// Server-Sent Events data
     SseData = 7,
+    /// Hash a password (Bun Native)
+    HashPassword = 8,
+    /// Verify a password (Bun Native)
+    VerifyPassword = 9,
+    /// Generate random bytes (Bun Native)
+    GenerateRandom = 10,
+    /// Sign a CSRF token (Bun Native)
+    CsrfSign = 11,
 }
 
 impl From<u32> for Opcode {
@@ -29,6 +37,10 @@ impl From<u32> for Opcode {
             5 => Opcode::WsMessage,
             6 => Opcode::WsClose,
             7 => Opcode::SseData,
+            8 => Opcode::HashPassword,
+            9 => Opcode::VerifyPassword,
+            10 => Opcode::GenerateRandom,
+            11 => Opcode::CsrfSign,
             _ => Opcode::AsgiHttp, // Default/fallback
         }
     }

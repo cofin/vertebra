@@ -13,3 +13,4 @@ export {
   type SchedulerClientStats,
   type SchedulerPoolStats,
 } from "./client";
+export { BrokerServer, type BrokerConfig } from "./server";

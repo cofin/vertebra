@@ -759,6 +759,72 @@ impl PyMpmcRing {
         })
     }
 
+    #[cfg(unix)]
+    #[classmethod]
+    fn create_named(
+        _cls: &Bound<'_, PyType>,
+        name: &str,
+        slot_size: usize,
+        slots: usize,
+    ) -> PyResult<Self> {
+        let layout = RingLayout::new(slot_size, slots, vertebra_core::buffer::ChannelMode::Mpmc);
+        let region = Arc::new(ShmRegion::create_named(name, layout.total_size).map_err(map_err)?);
+        let ring = unsafe {
+            MpmcRing::initialize(
+                Arc::clone(&region),
+                layout,
+                std::process::id(),
+                0, // Epoch 0 for now or implement epoch logic
+            )
+        }
+        .map_err(map_err)?;
+        Ok(Self {
+            inner: Arc::new(ring),
+        })
+    }
+
+    #[cfg(not(unix))]
+    #[classmethod]
+    fn create_named(
+        _cls: &Bound<'_, PyType>,
+        _name: &str,
+        _slot_size: usize,
+        _slots: usize,
+    ) -> PyResult<Self> {
+        Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "named channels are only supported on Unix",
+        ))
+    }
+
+    #[cfg(unix)]
+    #[classmethod]
+    fn open_named(
+        _cls: &Bound<'_, PyType>,
+        name: &str,
+        slot_size: usize,
+        slots: usize,
+    ) -> PyResult<Self> {
+        let layout = RingLayout::new(slot_size, slots, vertebra_core::buffer::ChannelMode::Mpmc);
+        let region = Arc::new(ShmRegion::open_named(name, layout.total_size).map_err(map_err)?);
+        let ring = unsafe { MpmcRing::attach(Arc::clone(&region), layout) }.map_err(map_err)?;
+        Ok(Self {
+            inner: Arc::new(ring),
+        })
+    }
+
+    #[cfg(not(unix))]
+    #[classmethod]
+    fn open_named(
+        _cls: &Bound<'_, PyType>,
+        _name: &str,
+        _slot_size: usize,
+        _slots: usize,
+    ) -> PyResult<Self> {
+        Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "named channels are only supported on Unix",
+        ))
+    }
+
     fn send(&self, data: &[u8], flags: u32) -> PyResult<()> {
         Python::attach(|py| py.detach(|| self.inner.send(data, flags).map_err(map_err)))
     }

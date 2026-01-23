@@ -66,13 +66,30 @@ export interface ServerConfig {
   logLevel?: LogLevel;
 }
 
+export interface ResolvedServerSettings {
+  hostname: string;
+  port: number;
+  reusePort: boolean;
+  logLevel: LogLevel;
+  drainTimeoutMs: number;
+  staticDir?: string;
+}
+
+export interface ResolvedBrokerConfig {
+  name: string;
+  controlName?: string;
+  slotSize: number;
+  slots: number;
+  timeoutMs: number;
+}
+
 export interface ResolvedServerConfig {
   server: ResolvedServerSettings;
   ipc: ServerIpcConfig;
   workers: { count: number };
   static: StaticConfig;
   python: PythonConfig;
-  broker: BrokerConfig;
+  broker: ResolvedBrokerConfig;
   assets: AssetConfig;
 }
 
@@ -100,6 +117,7 @@ type NormalizedConfig = {
   workers: WorkerConfig;
   python: PythonConfig;
   broker: BrokerConfig;
+  assets: AssetConfig;
 };
 
 function readEnvNumber(value: string | undefined): number | undefined {

@@ -6,6 +6,10 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 
 ## Active PRDs
 
+- [~] **PRD: Security & User Framework**
+*Link: [./security-user-framework/](./security-user-framework/)*
+*Risk Level: [medium]*
+
 ## [x] PRD: Elite DX & Native Bridging (Shared Memory)
 
 *Link: [./archive/prd_20260123_elite-dx-native-bridge/](./archive/prd_20260123_elite-dx-native-bridge/)*

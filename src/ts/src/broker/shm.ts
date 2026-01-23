@@ -5,18 +5,8 @@ import { join, resolve } from "node:path";
 export type ShmLibrary = {
   vtb_last_error_message: () => number;
   vtb_ring_capacity: (handle: number) => bigint;
-  vtb_ring_create: (
-    name: number,
-    slotSize: number,
-    slots: number,
-    outHandle: number,
-  ) => number;
-  vtb_ring_open: (
-    name: number,
-    slotSize: number,
-    slots: number,
-    outHandle: number,
-  ) => number;
+  vtb_ring_create: (name: number, slotSize: number, slots: number, outHandle: number) => number;
+  vtb_ring_open: (name: number, slotSize: number, slots: number, outHandle: number) => number;
   vtb_ring_send: (
     handle: number,
     data: Uint8Array,
@@ -49,6 +39,25 @@ export type ShmLibrary = {
     outParamsLen: BigUint64Array,
   ) => number;
   vtb_router_close: (handle: number) => void;
+  vtb_mpmc_create: (name: number, slotSize: number, slots: number, outHandle: number) => number;
+  vtb_mpmc_open: (name: number, slotSize: number, slots: number, outHandle: number) => number;
+  vtb_mpmc_send: (
+    handle: number,
+    data: Uint8Array,
+    len: number,
+    flags: number,
+    timeoutMs: number,
+  ) => number;
+  vtb_mpmc_recv: (
+    handle: number,
+    out: Uint8Array,
+    capacity: number,
+    outLen: number,
+    outFlags: Uint32Array,
+    timeoutMs: number,
+  ) => number;
+  vtb_mpmc_capacity: (handle: number) => bigint;
+  vtb_mpmc_close: (handle: number) => void;
 };
 
 let cached: ShmLibrary | null = null;
@@ -181,6 +190,30 @@ export function loadShmLib(): ShmLibrary {
       returns: "i32",
     },
     vtb_router_close: {
+      args: ["ptr"],
+      returns: "void",
+    },
+    vtb_mpmc_create: {
+      args: ["ptr", "usize", "usize", "ptr"],
+      returns: "i32",
+    },
+    vtb_mpmc_open: {
+      args: ["ptr", "usize", "usize", "ptr"],
+      returns: "i32",
+    },
+    vtb_mpmc_send: {
+      args: ["ptr", "ptr", "usize", "u32", "u32"],
+      returns: "i32",
+    },
+    vtb_mpmc_recv: {
+      args: ["ptr", "ptr", "usize", "ptr", "ptr", "u32"],
+      returns: "i32",
+    },
+    vtb_mpmc_capacity: {
+      args: ["ptr"],
+      returns: "usize",
+    },
+    vtb_mpmc_close: {
       args: ["ptr"],
       returns: "void",
     },
@@ -369,5 +402,74 @@ export class ShmRouter {
 
   close(): void {
     this.lib.vtb_router_close(this.handle);
+  }
+}
+
+export class ShmMpmcRing {
+  private handle: number;
+  private capacity: number;
+  private lib: ShmLibrary;
+
+  private constructor(handle: number, lib: ShmLibrary) {
+    this.handle = handle;
+    this.lib = lib;
+    this.capacity = Number(lib.vtb_mpmc_capacity(handle));
+  }
+
+  static create(name: string, slotSize: number, slots: number): ShmMpmcRing {
+    const lib = loadShmLib();
+    const out = new BigUint64Array(1);
+    const namePtr = ptr(Buffer.from(`${name}\0`));
+    const status = lib.vtb_mpmc_create(namePtr, slotSize, slots, ptr(out));
+    if (status !== STATUS_OK) {
+      throw new Error(`shm mpmc create failed: ${formatStatusError(status, lib)}`);
+    }
+    const handle = read.ptr(ptr(out));
+    return new ShmMpmcRing(handle, lib);
+  }
+
+  static open(name: string, slotSize: number, slots: number): ShmMpmcRing {
+    const lib = loadShmLib();
+    const out = new BigUint64Array(1);
+    const namePtr = ptr(Buffer.from(`${name}\0`));
+    const status = lib.vtb_mpmc_open(namePtr, slotSize, slots, ptr(out));
+    if (status !== STATUS_OK) {
+      throw new Error(`shm mpmc open failed: ${formatStatusError(status, lib)}`);
+    }
+    const handle = read.ptr(ptr(out));
+    return new ShmMpmcRing(handle, lib);
+  }
+
+  send(payload: Uint8Array, flags = 0, timeoutMs = 0): void {
+    const status = this.lib.vtb_mpmc_send(this.handle, payload, payload.length, flags, timeoutMs);
+    if (status !== STATUS_OK) {
+      throw new Error(`shm mpmc send failed: ${formatStatusError(status, this.lib)}`);
+    }
+  }
+
+  recv(timeoutMs = 0): { data: Uint8Array; flags: number } | null {
+    const buffer = new Uint8Array(this.capacity);
+    const outLen = new BigUint64Array(1);
+    const outFlags = new Uint32Array(1);
+    const status = this.lib.vtb_mpmc_recv(
+      this.handle,
+      buffer,
+      buffer.length,
+      outLen,
+      outFlags,
+      timeoutMs,
+    );
+    if (status === STATUS_TIMEOUT || status === STATUS_EMPTY) {
+      return null;
+    }
+    if (status !== STATUS_OK) {
+      throw new Error(`shm mpmc recv failed: ${formatStatusError(status, this.lib)}`);
+    }
+    const len = Number(outLen[0]);
+    return { data: buffer.subarray(0, len), flags: outFlags[0] };
+  }
+
+  close(): void {
+    this.lib.vtb_mpmc_close(this.handle);
   }
 }

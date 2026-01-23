@@ -1,0 +1,63 @@
+# Implementation Plan: Security & User Framework
+
+## Phase 1: Bun IPC Security Hooks (Rust & TS/JS)
+**Goal:** Expose Bun's native password hashing and crypto utilities to Python via the IPC Broker.
+
+- [x] Task: Define Security Command IDs in shared protocol definitions.
+- [x] Task: Implement `HASH_PASSWORD` and `VERIFY_PASSWORD` handlers in the Bun Broker (`src/ts/src/broker`).
+    - [x] Use `Bun.password.hash` and `Bun.password.verify`.
+- [x] Task: Implement `GENERATE_RANDOM` and `CSRF_SIGN` handlers in the Bun Broker.
+- [x] Task: Write Python unit tests for the security IPC client.
+- [x] Task: Implement `vertebra.security` Python module using the IPC client to call Bun hooks.
+- [x] Task: Checkpoint - Verify Phase 1 complete and create recovery point
+- [ ] Task: Flow - User Manual Verification 'Phase 1: Bun IPC Security Hooks' (Protocol in workflow.md)
+
+## Phase 2: Core User Framework (Python)
+**Goal:** Implement the foundational User models and proxy logic, defaulting to `msgspec`.
+
+- [ ] Task: Implement `VertebraUserMixin` in `vertebra.auth.models` with first-class `msgspec.Struct` support.
+    - [ ] Support for standard fields (`id`, `is_authenticated`, `is_anonymous`).
+- [ ] Task: Implement `AnonymousUser` class with standard defaults (as a `msgspec.Struct`).
+- [ ] Task: Write unit tests for the `LazyUserProxy` using `msgspec` models.
+- [ ] Task: Implement `LazyUserProxy` to handle claim hydration and fetch-on-demand logic.
+- [ ] Task: Implement `contextvars` based global state in `vertebra.auth.state` for universal user access.
+- [ ] Task: Checkpoint - Verify Phase 2 complete and create recovery point
+- [ ] Task: Flow - User Manual Verification 'Phase 2: Core User Framework' (Protocol in workflow.md)
+
+## Phase 3: Broker-Centric Authentication (TS & Python)
+**Goal:** Implement the auth validation at the Broker layer and consumption in Python.
+
+- [ ] Task: Update Bun Broker to support JWT and Google IAP header validation.
+    - [ ] Implement JWKS caching for Google/GitHub.
+- [ ] Task: Implement HTTP-only cookie extraction and CSRF validation in the Bun Broker.
+- [ ] Task: Write integration tests for Broker-to-Python claim passing.
+- [ ] Task: Implement `AuthMetadata` extraction in `vertebra.py` to hydrate the `User` object from Broker signals.
+- [ ] Task: Implement Refresh Token rotation flow in the Broker and Python client.
+- [ ] Task: Checkpoint - Verify Phase 3 complete and create recovery point
+- [ ] Task: Flow - User Manual Verification 'Phase 3: Broker-Centric Authentication' (Protocol in workflow.md)
+
+## Phase 4: Permissions & Scopes
+**Goal:** Add granular authorization capabilities.
+
+- [ ] Task: Implement Scope and Permission check logic in `VertebraUserMixin`.
+    - [ ] `has_scope(scope: str)` and `has_perm(perm: str)`.
+- [ ] Task: Write tests for Granular Permissions.
+- [ ] Task: Checkpoint - Verify Phase 4 complete and create recovery point
+- [ ] Task: Flow - User Manual Verification 'Phase 4: Permissions & Scopes' (Protocol in workflow.md)
+
+## Phase 5: Vertebra Native Integration
+**Goal:** Plug the security framework into the Vertebra Native runtime.
+
+- [ ] Task: Implement `NativeAuthMiddleware` for Vertebra Native mode.
+- [ ] Task: Implement `current_user` utility/dependency for Native handlers.
+- [ ] Task: Write end-to-end tests for a "Protected Route" in Native mode.
+- [ ] Task: Checkpoint - Verify Phase 5 complete and create recovery point
+- [ ] Task: Flow - User Manual Verification 'Phase 5: Vertebra Native Integration' (Protocol in workflow.md)
+
+## Phase 6: Quality & Documentation
+**Goal:** Finalize the PRD with documentation and benchmarks.
+
+- [ ] Task: Benchmark IPC Hashing vs. Native Python `argon2-cffi`.
+- [ ] Task: Update `docs/architecture/` with the new Security Framework details.
+- [ ] Task: Checkpoint - Verify Phase 6 complete and create recovery point
+- [ ] Task: Flow - User Manual Verification 'Phase 6: Quality & Documentation' (Protocol in workflow.md)

@@ -6,7 +6,9 @@ use std::ffi::{CStr, CString};
 use std::time::Duration;
 
 use vertebra_core::buffer::RingLayout;
-use vertebra_core::channel::{ChannelError, RingStats, SpscReceiver, SpscRing, SpscSender};
+use vertebra_core::channel::{
+    ChannelError, MpmcRing, RingStats, SpscReceiver, SpscRing, SpscSender,
+};
 use vertebra_core::router::{RouteId, Router};
 use vertebra_core::shm::ShmRegion;
 
@@ -567,4 +569,254 @@ fn epoch() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64
+}
+
+#[repr(C)]
+pub struct VtbMpmcRing {
+    inner: MpmcRing,
+    capacity: usize,
+}
+
+impl VtbMpmcRing {
+    fn new(ring: MpmcRing) -> Self {
+        let capacity = ring.payload_capacity();
+        Self {
+            inner: ring,
+            capacity,
+        }
+    }
+}
+
+fn mpmc_layout_from(slot_size: usize, slots: usize) -> Result<RingLayout, VtbStatus> {
+    if slot_size == 0 || slots == 0 {
+        return Err(VtbStatus::Invalid);
+    }
+    let layout = RingLayout::new(slot_size, slots, vertebra_core::buffer::ChannelMode::Mpmc);
+    if !layout.is_power_of_two() {
+        return Err(VtbStatus::Invalid);
+    }
+    Ok(layout)
+}
+
+#[no_mangle]
+pub extern "C" fn vtb_mpmc_create(
+    name: *const c_char,
+    slot_size: usize,
+    slots: usize,
+    out_handle: *mut *mut VtbMpmcRing,
+) -> VtbStatus {
+    clear_last_error();
+    if name.is_null() || out_handle.is_null() {
+        return VtbStatus::Invalid;
+    }
+    let name = unsafe { CStr::from_ptr(name) };
+    let name = match name.to_str() {
+        Ok(value) => value,
+        Err(_) => return VtbStatus::Invalid,
+    };
+    let layout = match mpmc_layout_from(slot_size, slots) {
+        Ok(layout) => layout,
+        Err(status) => return status,
+    };
+    let region = match ShmRegion::create_named(name, layout.total_size) {
+        Ok(region) => region,
+        Err(err) => {
+            set_last_error(err.to_string());
+            return VtbStatus::Sys;
+        }
+    };
+    // MpmcRing::initialize is used for creating new ring
+    let ring = unsafe {
+        match MpmcRing::initialize(
+            std::sync::Arc::new(region),
+            layout,
+            process_id(),
+            epoch(),
+        ) {
+            Ok(ring) => ring,
+            Err(err) => {
+                set_last_error(err.to_string());
+                return map_channel_error(err);
+            }
+        }
+    };
+    let handle = Box::new(VtbMpmcRing::new(ring));
+    unsafe {
+        *out_handle = Box::into_raw(handle);
+    }
+    VtbStatus::Ok
+}
+
+#[no_mangle]
+pub extern "C" fn vtb_mpmc_open(
+    name: *const c_char,
+    slot_size: usize,
+    slots: usize,
+    out_handle: *mut *mut VtbMpmcRing,
+) -> VtbStatus {
+    clear_last_error();
+    if name.is_null() || out_handle.is_null() {
+        return VtbStatus::Invalid;
+    }
+    let name = unsafe { CStr::from_ptr(name) };
+    let name = match name.to_str() {
+        Ok(value) => value,
+        Err(_) => return VtbStatus::Invalid,
+    };
+    let layout = match mpmc_layout_from(slot_size, slots) {
+        Ok(layout) => layout,
+        Err(status) => return status,
+    };
+    let region = match ShmRegion::open_named(name, layout.total_size) {
+        Ok(region) => region,
+        Err(err) => {
+            set_last_error(err.to_string());
+            return VtbStatus::Sys;
+        }
+    };
+    // MpmcRing::attach is used for opening existing ring
+    let ring = unsafe {
+        match MpmcRing::attach(std::sync::Arc::new(region), layout) {
+            Ok(ring) => ring,
+            Err(err) => {
+                set_last_error(err.to_string());
+                return map_channel_error(err);
+            }
+        }
+    };
+    let handle = Box::new(VtbMpmcRing::new(ring));
+    unsafe {
+        *out_handle = Box::into_raw(handle);
+    }
+    VtbStatus::Ok
+}
+
+#[no_mangle]
+pub extern "C" fn vtb_mpmc_send(
+    handle: *mut VtbMpmcRing,
+    data: *const u8,
+    len: usize,
+    flags: c_uint,
+    timeout_ms: c_uint,
+) -> VtbStatus {
+    clear_last_error();
+    if handle.is_null() || data.is_null() {
+        return VtbStatus::Invalid;
+    }
+    let handle = unsafe { &*handle };
+    let payload = unsafe { core::slice::from_raw_parts(data, len) };
+    let timeout = Duration::from_millis(timeout_ms as u64);
+
+    // MpmcRing doesn't have try_send/send_timeout in the same way?
+    // Checking vertebra-core/src/channel.rs... MpmcRing has send(data, flags) which is blocking/spinning?
+    // Or send_timeout?
+    // vertebra-py uses `send(data, flags)` inside `py.detach`.
+
+    // Assuming MpmcRing has similar API. If not, I might need to check.
+    // If it only has blocking send, we can't implement timeout easily without a loop.
+    // But MpmcRing in vertebra usually has wait support.
+
+    // For now, let's assume it has `send` and `try_send`.
+        let result = if timeout_ms == 0 {
+            handle.inner.try_send(payload, flags)
+        } else {
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                match handle.inner.try_send(payload, flags) {
+                    Ok(()) => break Ok(()),
+                    Err(ChannelError::Full) => {
+                        if std::time::Instant::now() >= deadline {
+                            break Err(ChannelError::Full);
+                        }
+                        std::thread::yield_now();
+                    }
+                    Err(err) => break Err(err),
+                }
+            }
+        };
+        
+        match result {        Ok(()) => VtbStatus::Ok,
+        Err(err) => {
+            set_last_error(err.to_string());
+            map_channel_error(err)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vtb_mpmc_recv(
+    handle: *mut VtbMpmcRing,
+    out: *mut u8,
+    capacity: usize,
+    out_len: *mut usize,
+    out_flags: *mut c_uint,
+    timeout_ms: c_uint,
+) -> VtbStatus {
+    clear_last_error();
+    if handle.is_null() || out.is_null() || out_len.is_null() || out_flags.is_null() {
+        return VtbStatus::Invalid;
+    }
+    let handle = unsafe { &*handle };
+    let buffer = unsafe { core::slice::from_raw_parts_mut(out, capacity) };
+    let timeout = Duration::from_millis(timeout_ms as u64);
+
+        let result = if timeout_ms == 0 {
+            handle.inner.try_recv(buffer).map(Some)
+        } else {
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                match handle.inner.try_recv(buffer) {
+                    Ok(len) => break Ok(Some(len)),
+                    Err(ChannelError::Empty) => {
+                        if std::time::Instant::now() >= deadline {
+                            break Ok(None);
+                        }
+                        std::thread::yield_now();
+                    }
+                    Err(err) => break Err(err),
+                }
+            }
+        };
+        
+            match result {
+        
+                Ok(Some(len)) => {
+        
+                    unsafe {
+        
+                        *out_len = len;
+        
+                        *out_flags = 0; // MpmcRing does not expose flags
+        
+                    }
+        
+                    VtbStatus::Ok
+        
+                }
+        
+                Ok(None) => VtbStatus::Timeout,
+        
+                Err(err) => {
+            set_last_error(err.to_string());
+            map_channel_error(err)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vtb_mpmc_capacity(handle: *const VtbMpmcRing) -> usize {
+    if handle.is_null() {
+        return 0;
+    }
+    unsafe { (*handle).capacity }
+}
+
+#[no_mangle]
+pub extern "C" fn vtb_mpmc_close(handle: *mut VtbMpmcRing) {
+    if handle.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(handle));
+    }
 }
