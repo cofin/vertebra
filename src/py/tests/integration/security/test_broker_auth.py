@@ -14,7 +14,7 @@ async def test_broker_jwt_auth_integration():
     config_content = f"""
 export default {{
   server: {{
-    port: 8081,
+    port: 8085,
   }},
   python: {{
     app: "tmp.auth_test_app:app",
@@ -36,19 +36,76 @@ export default {{
     with open(config_path, "w") as f:
         f.write(config_content)
 
+    # Create dummy app
+    app_content = """
+from typing import Any
+from litestar import Litestar, get, Request
+
+@get("/me")
+async def me_handler(request: Request) -> dict[str, Any]:
+    try:
+        user = request.scope.get("user")
+        
+        is_auth = False
+        uid = None
+        username = None
+        
+        if user:
+            # Check if it has attributes or is dict
+            if hasattr(user, "is_authenticated"):
+                is_auth = user.is_authenticated
+            elif isinstance(user, dict):
+                 is_auth = user.get("is_authenticated", False)
+            
+            if is_auth:
+                if hasattr(user, "id"):
+                    uid = user.id
+                    username = getattr(user, "username", None)
+                elif isinstance(user, dict):
+                    uid = user.get("id")
+                    username = user.get("username")
+        
+        return {
+            "is_authenticated": is_auth,
+            "id": uid,
+            "username": username
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e), "trace": traceback.format_exc()}
+
+app = Litestar(route_handlers=[me_handler])
+"""
+    app_path = os.path.abspath("tmp/auth_test_app.py")
+    init_path = os.path.abspath("tmp/__init__.py")
+    
+    with open(app_path, "w") as f:
+        f.write(app_content)
+    
+    created_init = False
+    if not os.path.exists(init_path):
+        with open(init_path, "w") as f:
+            f.write("")
+        created_init = True
+
     # Start Bun server
     env = os.environ.copy()
     env["VERTEBRA_CONFIG"] = config_path
+    env["VERTEBRA_NATIVE"] = "0"
     
     # Need to make sure PYTHONPATH includes current dir for tmp.auth_test_app
     env["PYTHONPATH"] = f"{os.getcwd()}:{env.get('PYTHONPATH', '')}"
     
+    stdout_file = open("tmp/broker.stdout", "w")
+    stderr_file = open("tmp/broker.stderr", "w")
+
     proc = subprocess.Popen(
         ["bun", "run", "src/server/serve.ts"],
         cwd="src/ts",
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=stdout_file,
+        stderr=stderr_file,
         text=True
     )
 
@@ -69,7 +126,7 @@ export default {{
             algorithm="HS256"
         )
 
-        async with httpx.AsyncClient(base_url="http://localhost:8081", timeout=10.0) as client:
+        async with httpx.AsyncClient(base_url="http://localhost:8085", timeout=10.0) as client:
             # 1. No auth
             print("Requesting /me without auth...")
             resp = await client.get("/me")
@@ -102,17 +159,29 @@ export default {{
         print("Stopping broker...")
         proc.terminate()
         try:
-            stdout, stderr = proc.communicate(timeout=2)
+            proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             print("Broker did not terminate, killing...")
             proc.kill()
-            stdout, stderr = proc.communicate()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                print("Broker process stuck even after kill")
         
-        print("\n--- BROKER STDOUT ---")
-        print(stdout)
-        print("--- BROKER STDERR ---")
-        print(stderr)
+        stdout_file.close()
+        stderr_file.close()
+        
+        with open("tmp/broker.stdout", "r") as f:
+            print("\n--- BROKER STDOUT ---")
+            print(f.read())
+        with open("tmp/broker.stderr", "r") as f:
+            print("--- BROKER STDERR ---")
+            print(f.read())
         
         # Cleanup
         if os.path.exists(config_path):
             os.remove(config_path)
+        if os.path.exists(app_path):
+            os.remove(app_path)
+        if created_init and os.path.exists(init_path):
+            os.remove(init_path)

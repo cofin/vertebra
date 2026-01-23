@@ -60,6 +60,7 @@ export class AuthValidator {
         });
       }
     } catch (e) {
+      console.error("Auth validation failed:", e);
       // Individual provider failure shouldn't crash the whole validation
       return null;
     }

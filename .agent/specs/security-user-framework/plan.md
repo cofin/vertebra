@@ -32,6 +32,7 @@
 - [x] Task: Implement HTTP-only cookie extraction and CSRF validation in the Bun Broker.
 - [x] Task: Fix Supervisor Import Mismatch (ImportError) in `src/py/vertebra/supervisor.py`. [d0a9ab0]
 - [~] Task: Write integration tests for Broker-to-Python claim passing.
+    - *Status:* Tests run but fail assertion (`is_authenticated=False`). Broker is responding but claims are not propagating or validation failing. Also experiencing SHM `File exists` errors on re-runs. Fixed `Supervisor` import and Litestar compatibility in test env.
     - *Status:* Integration tests are written (`test_broker_auth.py`) but currently failing with timeouts. Need to debug server startup/communication in test environment.
 - [x] Task: Implement `AuthMetadata` extraction in `vertebra.py` to hydrate the `User` object from Broker signals.
 - [ ] Task: Implement Refresh Token rotation flow in the Broker and Python client.
