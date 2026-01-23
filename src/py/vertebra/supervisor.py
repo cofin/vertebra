@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from vertebra._vertebra import Supervisor as NativeSupervisor
+from vertebra._vertebra import NativeSupervisor
 
 logger = logging.getLogger("vertebra.supervisor")
 
