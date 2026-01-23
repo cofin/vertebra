@@ -27,7 +27,7 @@ This plan outlines the phases to implement a custom, high-performance integratio
 - [x] **Task: Implement Dependency Injection Compilation** [067790c]
     - [ ] Write tests for handlers with nested dependencies.
     - [ ] Implement a "DI Resolver" that pre-calculates the resolution order and generates code to fetch/instantiate dependencies.
-- [ ] **Task: Implement Specialized Runner Generation**
+- [x] **Task: Implement Specialized Runner Generation** [a36b432]
     - [ ] Write tests for handlers returning different types (JSON, Msgspec, Arrow).
     - [ ] Implement the `PipelineCompiler` to generate the final `runner_{id}` function using `exec` or AST construction.
 - [ ] **Task: Checkpoint - Verify Compiled Pipelines**
