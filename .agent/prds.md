@@ -14,14 +14,14 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 
 *Link: [./specs/documentation/](./specs/documentation/)*
 
-## [x] PRD: Test Suite Reorganization and Refactoring
-
-*Link: [./specs/test-suite-reorganization/](./specs/test-suite-reorganization/)*
-*Risk Level: medium*
-
 ---
 
 ## Completed & Archived PRDs
+
+## [x] PRD: Test Suite Reorganization and Refactoring
+
+*Link: [./archive/prd_20260123_test-suite-reorganization/](./archive/prd_20260123_test-suite-reorganization/)*
+*Risk Level: medium*
 
 ## [x] PRD: Consolidated Database & ORM Integration
 
