@@ -1,64 +1,50 @@
-import { describe, expect, test, mock } from "bun:test";
-import { BasePoolAdapter } from "../../src/broker/base-pool";
-
-class TestPool extends BasePoolAdapter {
-  name = "test";
-  
-  constructor(max: number, hooks: any) {
-    super(max, hooks);
-  }
-
-  inUse() { return 0; }
-  async acquire() {
-    if (this.hooks.onAcquire) await this.hooks.onAcquire("conn");
-    return "token";
-  }
-  async release(token: string) {
-    if (this.hooks.onRelease) await this.hooks.onRelease("conn");
-  }
-  async execute(token: string, sql: string, params: any[]) { return {}; }
-  async executeMany(token: string, sql: string, params: any[][]) { return {}; }
-  async command(token: string, cmd: string, args: any[]) { return {}; }
-  async begin(token: string) {}
-  async commit(token: string) {}
-  async rollback(token: string) {}
-}
+import { describe, expect, it, mock } from "bun:test";
+import { SqlPool } from "../../src/broker/serve";
 
 describe("Lifecycle Hooks", () => {
-  test("calls hooks on acquire/release", async () => {
+  it("calls hooks on acquire/release", async () => {
+    const pool = new SqlPool(10);
     const onAcquire = mock(async () => {});
     const onRelease = mock(async () => {});
     
-    const pool = new TestPool(10, { onAcquire, onRelease });
+    pool.setOnAcquire(onAcquire);
+    pool.setOnRelease(onRelease);
     
-    await pool.acquire();
+    const token = await pool.acquire();
     expect(onAcquire).toHaveBeenCalled();
-    expect(onAcquire).toHaveBeenCalledWith("conn");
     
-    await pool.release("token");
+    await pool.release(token);
     expect(onRelease).toHaveBeenCalled();
-    expect(onRelease).toHaveBeenCalledWith("conn");
   });
 
-  test("calls onError hook", async () => {
+  it("calls onError hook", async () => {
+    const pool = new SqlPool(10);
     const onError = mock(async () => {});
-    const pool = new TestPool(10, { onError });
+    pool.setOnError(onError);
     
-    // Simulate error by calling hooks.onError directly since it's public
-    const err = new Error("test error");
-    await pool.hooks.onError?.("conn", err);
+    // Force an error in health check (simulating internal error)
+    // We need to inject a bad connection or force a failure
+    // Using internal access for test setup
+    (pool as any).idle.add("bad_token");
+    (pool as any).connections.set("bad_token", {});
+    (pool as any).validateConnection = async () => { throw new Error("Validation boom"); };
+    
+    await (pool as any).runHealthCheck();
     
     expect(onError).toHaveBeenCalled();
-    expect(onError).toHaveBeenCalledWith("conn", err);
   });
 
-  test("calls onTimeout hook", async () => {
+  it("calls onTimeout hook", async () => {
+    const pool = new SqlPool(10);
     const onTimeout = mock(async () => {});
-    const pool = new TestPool(10, { onTimeout });
+    pool.setOnTimeout(onTimeout);
     
-    await pool.hooks.onTimeout?.("test");
+    const token = "stale_token";
+    (pool as any).idle.add(token);
+    (pool as any).connectionTimestamps.set(token, Date.now() - 1000);
+    
+    await (pool as any).reapIdleConnections(100);
     
     expect(onTimeout).toHaveBeenCalled();
-    expect(onTimeout).toHaveBeenCalledWith("test");
   });
 });

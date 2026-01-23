@@ -68,6 +68,26 @@ export abstract class BasePoolAdapter implements PoolAdapter {
     this.hooks = hooks;
   }
 
+  // Hook Registration
+  setOnAcquire(fn: (connection: any) => Promise<void>): void {
+    this.hooks.onAcquire = fn;
+  }
+
+  setOnRelease(fn: (connection: any) => Promise<void>): void {
+    this.hooks.onRelease = fn;
+  }
+
+  setOnError(fn: (connection: any, error: Error) => Promise<void>): void {
+    this.hooks.onError = fn;
+  }
+
+  setOnTimeout(fn: (poolName: string) => Promise<void>): void {
+    this.hooks.onTimeout = fn;
+  }
+
+  // ... (abstract methods) ...
+
+
   protected _healthCheckInterval?: Timer;
   protected _idleReaperInterval?: Timer;
 
