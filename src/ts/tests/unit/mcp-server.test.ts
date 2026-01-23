@@ -1,5 +1,7 @@
 import { describe, expect, it, mock } from "bun:test";
 import { McpServer, type McpTool } from "../../src/mcp/server";
+import { SchemaRegistry } from "../../src/mcp/schema-registry";
+import { MCPIPCBridge } from "../../src/mcp/ipc-bridge";
 
 describe("McpServer", () => {
   it("should handle initialize request", async () => {
@@ -136,5 +138,38 @@ describe("McpServer", () => {
     expect(response.error).toBeDefined();
     expect(response.error?.code).toBe(-32000);
     expect(response.error?.message).toContain("Tool execution failed");
+  });
+
+  it("should sync tools from registry", async () => {
+    // Mock registry
+    const registry = {
+        getTools: () => [{ name: "remote_tool", description: "Remote", inputSchema: {} }]
+    } as any;
+    
+    // Mock bridge
+    const bridge = {
+        callTool: mock(async () => "remote_result")
+    } as any;
+
+    const server = new McpServer(registry, bridge);
+    await server.handle({ jsonrpc: "2.0", id: 1, method: "initialize" });
+    
+    server.syncTools();
+    
+    // Check list
+    const listRes = await server.handle({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+    const tools = (listRes.result as any).tools;
+    expect(tools).toHaveLength(1);
+    expect(tools[0].name).toBe("remote_tool");
+    
+    // Check call
+    const callRes = await server.handle({
+        jsonrpc: "2.0", id: 3, method: "tools/call",
+        params: { name: "remote_tool", arguments: { foo: "bar" } }
+    });
+    
+    expect(bridge.callTool).toHaveBeenCalled();
+    expect(bridge.callTool.mock.calls[0]).toEqual(["remote_tool", { foo: "bar" }]);
+    expect((callRes.result as any).content[0].text).toContain("remote_result");
   });
 });

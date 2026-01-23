@@ -5,12 +5,12 @@ from vertebra.mcp.registry import ProcedureRegistry
 
 logger = logging.getLogger(__name__)
 
-class ToolCall(msgspec.Struct):
+class ToolCall(msgspec.Struct, array_like=False):
     type: str
     name: str
     args: dict | None = None
 
-class ToolResult(msgspec.Struct):
+class ToolResult(msgspec.Struct, array_like=False):
     result: object = None
     error: str | None = None
 
@@ -22,6 +22,8 @@ class MCPHandler:
         try:
             req = msgspec.msgpack.decode(payload, type=ToolCall)
         except msgspec.DecodeError as e:
+            # Try to decode as map to return structured error? 
+            # Or just return generic error.
             return msgspec.msgpack.encode(ToolResult(error=f"Invalid request: {e}"))
 
         if req.type != "tool_call":
