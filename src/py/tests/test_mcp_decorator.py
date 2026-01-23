@@ -1,17 +1,17 @@
-import pytest
 import asyncio
+
+import pytest
+
 from vertebra.mcp.decorators import mcp_tool
 from vertebra.mcp.registry import ProcedureRegistry
 
+
 @pytest.fixture
-def registry():
+def registry() -> ProcedureRegistry:
     return ProcedureRegistry()
 
-# Hack: Reset singleton for testing if necessary, or pass registry to decorator
-# For now, assuming global registry, but let's see how implementation goes.
-# Ideally we can inspect the global registry.
 
-def test_mcp_tool_registration():
+def test_mcp_tool_registration() -> None:
     registry = ProcedureRegistry.get_instance()
     registry.clear()  # Ensure clean state
 
@@ -26,12 +26,13 @@ def test_mcp_tool_registration():
     assert tool.description == "A simple tool."
     assert tool.handler == simple_tool
 
-def test_mcp_tool_custom_name():
+
+def test_mcp_tool_custom_name() -> None:
     registry = ProcedureRegistry.get_instance()
     registry.clear()
 
     @mcp_tool(name="custom_name", description="Custom desc")
-    def my_tool():
+    def my_tool() -> None:
         pass
 
     tool = registry.get_tool("custom_name")
@@ -39,8 +40,8 @@ def test_mcp_tool_custom_name():
     assert tool.name == "custom_name"
     assert tool.description == "Custom desc"
 
-@pytest.mark.asyncio
-async def test_async_tool_execution():
+
+async def test_async_tool_execution() -> None:
     registry = ProcedureRegistry.get_instance()
     registry.clear()
 
@@ -54,14 +55,15 @@ async def test_async_tool_execution():
     result = await tool.handler("hello")
     assert result == "hello"
 
-def test_metadata_extraction():
+
+def test_metadata_extraction() -> None:
     registry = ProcedureRegistry.get_instance()
     registry.clear()
 
     @mcp_tool()
     def complex_tool(a: int, b: str = "default") -> bool:
         pass
-    
+
     tool = registry.get_tool("complex_tool")
     # We expect the TypeExtractor to populate params/return_type in the future
     # For now just checking registration matches

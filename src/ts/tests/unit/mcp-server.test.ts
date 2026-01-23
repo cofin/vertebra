@@ -143,7 +143,8 @@ describe("McpServer", () => {
   it("should sync tools from registry", async () => {
     // Mock registry
     const registry = {
-        getTools: () => [{ name: "remote_tool", description: "Remote", inputSchema: {} }]
+        getTools: () => [{ name: "remote_tool", description: "Remote", inputSchema: {} }],
+        getResources: () => []
     } as any;
     
     // Mock bridge
@@ -154,7 +155,7 @@ describe("McpServer", () => {
     const server = new McpServer(registry, bridge);
     await server.handle({ jsonrpc: "2.0", id: 1, method: "initialize" });
     
-    server.syncTools();
+    server.syncFromRegistry();
     
     // Check list
     const listRes = await server.handle({ jsonrpc: "2.0", id: 2, method: "tools/list" });

@@ -1,13 +1,15 @@
-import pytest
-from vertebra.mcp.resources import mcp_resource
-from vertebra.mcp.registry import ProcedureRegistry
+from typing import Any
 
-def test_mcp_resource_registration():
+from vertebra.mcp.registry import ProcedureRegistry
+from vertebra.mcp.resources import mcp_resource
+
+
+def test_mcp_resource_registration() -> None:
     registry = ProcedureRegistry.get_instance()
     registry.clear()
 
     @mcp_resource("users://{user_id}/profile", name="User Profile")
-    def get_user_profile(user_id: int):
+    def get_user_profile(user_id: int) -> dict[str, Any]:
         """Get user profile."""
         return {"id": user_id, "name": "Test User"}
 
@@ -17,12 +19,13 @@ def test_mcp_resource_registration():
     assert resource.description == "Get user profile."
     assert resource.handler == get_user_profile
 
-def test_mcp_resource_list():
+
+def test_mcp_resource_list() -> None:
     registry = ProcedureRegistry.get_instance()
     registry.clear()
 
     @mcp_resource("config://settings")
-    def get_settings():
+    def get_settings() -> None:
         pass
 
     resources = registry.list_resources()

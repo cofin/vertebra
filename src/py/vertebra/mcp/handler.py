@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from contextvars import ContextVar
-from typing import Optional
+from typing import Callable
 
 import msgspec
 
@@ -11,11 +11,12 @@ from vertebra.serializers import decode_msgpack, encode_msgpack
 logger = logging.getLogger(__name__)
 
 # Context variable to store the current progress callback
-_progress_callback: ContextVar[Optional[callable]] = ContextVar("_progress_callback", default=None)
+_progress_callback: ContextVar[Callable | None] = ContextVar("_progress_callback", default=None)
 
-def yield_progress(current: float, total: Optional[float] = None):
+
+def yield_progress(current: float, total: float | None = None) -> None:
     """Yield progress information for the current tool execution.
-    
+
     Args:
         current: Current progress value.
         total: Total progress value (optional).
@@ -24,15 +25,18 @@ def yield_progress(current: float, total: Optional[float] = None):
     if callback:
         callback(current, total)
 
+
 class ToolCall(msgspec.Struct, array_like=False):
     type: str
     name: str
     args: dict | None = None
     progress_token: str | int | None = None
 
+
 class ToolResult(msgspec.Struct, array_like=False):
     result: object = None
     error: str | None = None
+
 
 class ProgressNotification(msgspec.Struct, array_like=False):
     type: str = "progress"
@@ -40,11 +44,11 @@ class ProgressNotification(msgspec.Struct, array_like=False):
     current: float = 0
     total: float | None = None
 
+
 class MCPHandler:
-    def __init__(self, send_side_channel: Optional[callable] = None):
-        """
-        Args:
-            send_side_channel: Callback to send unsolicited messages (like progress) back to TS.
+    def __init__(self, send_side_channel: Callable | None = None) -> None:
+        """Args:
+        send_side_channel: Callback to send unsolicited messages (like progress) back to TS.
         """
         self.registry = ProcedureRegistry.get_instance()
         self.send_side_channel = send_side_channel
@@ -64,14 +68,14 @@ class MCPHandler:
 
         # Setup progress callback if token and side channel are available
         token = req.progress_token
-        
-        def report_progress(current, total):
+
+        def report_progress(current: float, total: float | None) -> None:
             if self.send_side_channel and token is not None:
                 notification = ProgressNotification(token=token, current=current, total=total)
                 self.send_side_channel(encode_msgpack(notification))
 
         token_reset = _progress_callback.set(report_progress)
-        
+
         try:
             args = req.args or {}
             if asyncio.iscoroutinefunction(tool.handler):
@@ -81,7 +85,7 @@ class MCPHandler:
 
             return encode_msgpack(ToolResult(result=result))
         except Exception as e:
-            logger.exception(f"Tool execution failed: {req.name}")
+            logger.exception("Tool execution failed: %s", req.name)
             return encode_msgpack(ToolResult(error=str(e)))
         finally:
             _progress_callback.reset(token_reset)
