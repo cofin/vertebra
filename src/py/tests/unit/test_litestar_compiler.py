@@ -24,13 +24,13 @@ async def test_pipeline_compiler_end_to_end() -> None:
     def get_user(connection: Any) -> str:
         return "cody"
 
-    @get("/hello")
+    @get("/hello", sync_to_thread=False)
     def handler(user: str) -> dict[str, str]:
         return {"hello": user}
 
     # Setup dependencies as Litestar would
     handler.resolve_guards = lambda: [guard]
-    handler.resolve_dependencies = lambda: {"user": Provide(get_user)}
+    handler.resolve_dependencies = lambda: {"user": Provide(get_user, sync_to_thread=False)}
 
     compiler = PipelineCompiler()
     runner = compiler.compile_route(handler)
@@ -58,7 +58,7 @@ async def test_compile_di_basic() -> None:
         return f"{d1}-val2"
 
     dependencies = {
-        "d1": Provide(dep_1),
+        "d1": Provide(dep_1, sync_to_thread=False),
         "d2": Provide(dep_2),
     }
     

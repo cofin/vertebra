@@ -16,8 +16,5 @@ pub mod router;
 pub mod shm;
 pub mod sync;
 
-/// Placeholder for IPC protocol types (PRD-2+).
-pub mod ipc {}
-
 /// Placeholder for type bridge utilities (PRD-2+).
 pub mod types {}
