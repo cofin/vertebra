@@ -549,7 +549,7 @@
 **Acceptance**:
 - All lifecycle tests pass
 
----
+**Phase 5 Checkpoint**: [checkpoint: 8faf09c]
 
 ## Phase 6: Unified Observability (Week 9-10)
 
@@ -558,18 +558,18 @@
 **Priority**: P1
 **Dependencies**: Phases 4, 5
 
-- [ ] **Task 6.1.1**: Create metrics endpoint handler
+- [x] **Task 6.1.1**: Create metrics endpoint handler
   - `GET /__metrics__` route
   - Collect metrics from broker, server, MCP
   - File: `src/ts/src/server/metrics.ts` (NEW)
 
-- [ ] **Task 6.1.2**: Implement Prometheus formatter
+- [x] **Task 6.1.2**: Implement Prometheus formatter
   - Format gauge, counter, histogram metrics
   - Include HELP and TYPE comments
   - Handle label encoding
   - File: `src/ts/src/server/prometheus.ts` (NEW)
 
-- [ ] **Task 6.1.3**: Add metrics caching
+- [x] **Task 6.1.3**: Add metrics caching
   - Cache for 5s to reduce overhead
   - File: `src/ts/src/server/metrics.ts`
 
@@ -585,19 +585,19 @@
 **Priority**: P1
 **Dependencies**: Task 6.1
 
-- [ ] **Task 6.2.1**: Create broker metrics collector
+- [x] **Task 6.2.1**: Create broker metrics collector
   - Pool-level metrics (connections, acquisition latency, errors)
   - Fairness scheduler metrics (worker wait time, queue length)
   - Health check metrics
   - File: `src/ts/src/broker/metrics.ts` (NEW)
 
-- [ ] **Task 6.2.2**: Create server metrics collector
+- [x] **Task 6.2.2**: Create server metrics collector
   - HTTP request count, latency, status codes
   - Active connections
   - Request body size histogram
   - File: `src/ts/src/server/metrics.ts`
 
-- [ ] **Task 6.2.3**: Create MCP metrics collector
+- [x] **Task 6.2.3**: Create MCP metrics collector
   - Tool invocation count by tool name
   - Tool execution duration (histogram)
   - Tool errors by tool name
@@ -615,7 +615,7 @@
 **Priority**: P2
 **Dependencies**: Task 6.2
 
-- [ ] **Task 6.3.1**: Create Grafana dashboard JSON
+- [x] **Task 6.3.1**: Create Grafana dashboard JSON
   - Pool utilization panel
   - Acquisition latency panel
   - Tool invocation rate panel
@@ -623,7 +623,7 @@
   - Error rate panel
   - File: `docs/grafana/vertebra-dashboard.json` (NEW)
 
-- [ ] **Task 6.3.2**: Add metrics integration test
+- [x] **Task 6.3.2**: Add metrics integration test
   - Generate load (tool calls, pool usage)
   - Query `/__metrics__`
   - Verify Prometheus format
