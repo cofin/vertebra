@@ -11,6 +11,8 @@
 - **Zero-Copy Data Plane**: Shared-memory ring buffers (SPSC/MPMC) and Arrow IPC for high-throughput, low-latency data transfer.
 - **IPC Mechanism**: Shared-memory C ABI (no sockets/TCP in the data plane).
 - **Process Model**: Centralized Bun broker managing shared resource pools across Python worker processes.
+- **Native Integration**: Direct execution path for Litestar applications bypassing ASGI for high-performance HTTP/WebSocket handling.
+- **Router**: Rust-based high-performance router (`matchit`) shared between Bun broker and Python workers.
 - **MCP Runtime**: Model Context Protocol implementation (Stdio, SSE, WebSocket) for AI agent integration.
 
 ## Backend Frameworks
