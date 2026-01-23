@@ -24,7 +24,7 @@ This plan outlines the phases to implement a custom, high-performance integratio
 - [x] **Task: Implement Guard Flattening** [5ad4e60]
     - [ ] Write tests for a handler with multiple guards (app, controller, and route level).
     - [ ] Implement code generation that inlines guard checks into a single `async` function.
-- [ ] **Task: Implement Dependency Injection Compilation**
+- [x] **Task: Implement Dependency Injection Compilation** [067790c]
     - [ ] Write tests for handlers with nested dependencies.
     - [ ] Implement a "DI Resolver" that pre-calculates the resolution order and generates code to fetch/instantiate dependencies.
 - [ ] **Task: Implement Specialized Runner Generation**
