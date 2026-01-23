@@ -136,149 +136,36 @@ class AsgiWorker:
         self._lifespan_failed: str | None = None
         self._lifespan_receive_called = False
         self._lifespan_supported: bool | None = None
+        self._native_runners: dict[int, Callable] = {}
 
     async def start(self) -> None:
         if self._control is not None:
             return
         await self._start_lifespan()
+        
+        # If the app is a Litestar instance, we can reflect routes and compile pipelines
+        from litestar import Litestar
+        if isinstance(self._app, Litestar):
+            from vertebra.integration.litestar import reflect_routes
+            from vertebra.integration.litestar.compiler import PipelineCompiler
+            
+            routes = reflect_routes(self._app)
+            compiler = PipelineCompiler()
+            for route in routes:
+                if not route.is_websocket:
+                    runner = compiler.compile_route(next(h for h in self._app.route_handlers if h.fn == route.handler))
+                    self._native_runners[route.handler_id] = runner
+
         control_name = self._control_ring_name()
         self._control = SpscRing.create_named(control_name, self._config.slot_size, self._config.slots)
-
-    async def serve_forever(self) -> None:
-        await self.start()
-        if self._control is None:
-            msg = "ASGI worker failed to start"
-            raise RuntimeError(msg)
-        self._running = True
-        contexts: dict[str, RequestContext] = {}
-        while self._running:
-            await self._poll_control(contexts)
-            await self._poll_clients(contexts)
-            await asyncio.sleep(0)
-
-    async def stop(self) -> None:
-        self._running = False
-        if self._control is None:
-            return
-        self._control.close()
-        self._control = None
-        for client in self._clients.values():
-            client.request.close()
-            client.response.close()
-        self._clients = {}
-        await self._shutdown_lifespan()
-
-    def _control_ring_name(self) -> str:
-        return f"/{self._config.name}.asgi.{self._worker_id()}.control"
-
-    def _client_ring_name(self, client_id: str, suffix: str) -> str:
-        return f"/{self._config.name}.asgi.{self._worker_id()}.client.{client_id}.{suffix}"
-
-    def _worker_id(self) -> str:
-        return self._config.worker_id or os.environ.get("VERTEBRA_WORKER_ID", "0")
-
-    async def _poll_control(self, contexts: dict[str, RequestContext]) -> None:
-        if self._control is None:
-            return
-        message = self._recv_ring(self._control)
-        if message is None:
-            return
-        kind = message.get("kind")
-        if kind != "register_client":
-            return
-        client_id = str(message.get("client_id") or "")
-        req_ring = str(message.get("req_ring") or "")
-        resp_ring = str(message.get("resp_ring") or "")
-        if not client_id or not req_ring or not resp_ring:
-            return
-        request = SpscRing.open_named(req_ring, self._config.slot_size, self._config.slots)
-        response = SpscRing.open_named(resp_ring, self._config.slot_size, self._config.slots)
-        self._clients[client_id] = ClientState(id=client_id, request=request, response=response)
-        response.send_timeout(
-            self._codec.encode({"ok": True, "id": message.get("id")}), 0, int(self._config.timeout * 1000)
-        )
-
-    async def _poll_clients(self, contexts: dict[str, RequestContext]) -> None:
-        if not self._clients:
-            return
-        for client in list(self._clients.values()):
-            message = self._recv_ring(client.request)
-            if message is None:
-                continue
-            writer = ResponseWriter(client.response, self._codec, int(self._config.timeout * 1000))
-            if "type" in message:
-                await self._handle_frame(message, contexts, writer)
-            else:
-                await self._handle_unary_request(message, contexts, writer)
-
-    def _recv_ring(self, ring: SpscRing) -> dict[str, Any] | None:
-        data = ring.try_recv(self._config.slot_size)
-        if data is None:
-            return None
-        try:
-            message = self._codec.decode(data)
-        except Exception:  # noqa: BLE001 - defensive decode, malformed input possible
-            return None
-        if not isinstance(message, dict):
-            return None
-        return message
-
-    def _parse_request_meta(self, message: dict[str, Any], scope_type: str = "http") -> RequestMeta | None:
-        try:
-            request_id = message.get("id")
-            if not isinstance(request_id, str):
-                return None
-            headers_raw = message.get("headers", [])
-            headers: list[tuple[str, str]] = []
-            for item in headers_raw:
-                if not isinstance(item, (list, tuple)) or len(item) != 2:
-                    continue
-                key, value = item
-                headers.append((str(key), str(value)))
-            subprotocols_raw = message.get("subprotocols", []) or []
-            subprotocols: list[str] = [str(value) for value in subprotocols_raw]
-            return RequestMeta(
-                scope_type=scope_type,
-                id=request_id,
-                method=str(message.get("method", "GET")),
-                path=str(message.get("path", "/")),
-                query=str(message.get("query", "")),
-                headers=headers,
-                scheme=str(message.get("scheme", "http")),
-                http_version=str(message.get("httpVersion") or message.get("http_version") or "1.1"),
-                raw_path=message.get("rawPath"),
-                query_string=message.get("queryString"),
-                root_path=str(message.get("rootPath", "")),
-                server=message.get("server"),
-                client=message.get("client"),
-                extensions=message.get("extensions") or {},
-                subprotocols=subprotocols,
-            )
-        except Exception:  # noqa: BLE001 - defensive parsing of untrusted IPC data
-            return None
-
-    def _extract_trace_id(self, headers: list[tuple[str, str]]) -> str | None:
-        for key, value in headers:
-            lowered = key.lower()
-            if lowered == "x-request-id":
-                return value
-            if lowered == "traceparent":
-                return value
-        return None
-
-    def _log(self, level: str, message: str, **fields: Any) -> None:
-        {
-            "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            "level": level,
-            "component": "worker",
-            "message": message,
-            **fields,
-        }
 
     async def _handle_frame(
         self, message: dict[str, Any], contexts: dict[str, RequestContext], writer: "ResponseWriter"
     ) -> None:
         frame_type = message.get("type")
+        if frame_type == "direct.http":
+            await self._handle_direct_http(message, writer)
+            return
         if frame_type == "http.request.start":
             meta = self._parse_request_meta(message, scope_type="http")
             if meta is None:
@@ -298,6 +185,72 @@ class AsgiWorker:
         if context is None:
             return
         await self._enqueue_request_frame(context, message)
+
+    async def _handle_direct_http(self, message: dict[str, Any], writer: "ResponseWriter") -> None:
+        handler_id = message.get("handler_id")
+        request_id = message.get("id")
+        
+        runner = self._native_runners.get(handler_id)
+        if runner is None:
+            # Fallback or error
+            await writer.send({
+                "id": request_id,
+                "type": "http.response.start",
+                "status": 404,
+                "headers": [],
+            })
+            await writer.send({
+                "id": request_id,
+                "type": "http.response.body",
+                "body": b"Native runner not found",
+                "more_body": False,
+            })
+            return
+
+        # Create a mock connection object that the runner expects
+        # In a real implementation, this would be a specialized VertebraRequest
+        class NativeConnection:
+            def __init__(self, msg):
+                self.headers = dict(msg.get("headers", []))
+                self.path = msg.get("path")
+                self.method = msg.get("method")
+                self.body = msg.get("body", b"")
+
+        conn = NativeConnection(message)
+        
+        try:
+            result = await runner(conn)
+            
+            # TODO: Handle response serialization (JSON, etc.)
+            # For now, assume dict -> JSON
+            import json
+            body = json.dumps(result).encode()
+            
+            await writer.send({
+                "id": request_id,
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [("content-type", "application/json")],
+            })
+            await writer.send({
+                "id": request_id,
+                "type": "http.response.body",
+                "body": body,
+                "more_body": False,
+            })
+        except Exception as exc:
+            await writer.send({
+                "id": request_id,
+                "type": "http.response.start",
+                "status": 500,
+                "headers": [],
+            })
+            await writer.send({
+                "id": request_id,
+                "type": "http.response.body",
+                "body": str(exc).encode(),
+                "more_body": False,
+            })
 
     async def _handle_unary_request(
         self, message: dict[str, Any], contexts: dict[str, RequestContext], writer: "ResponseWriter"
