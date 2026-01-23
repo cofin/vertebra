@@ -145,9 +145,12 @@ class AsgiWorker:
             return
         await self._start_lifespan()
         
+        # Check if native integration is enabled
+        native_enabled = os.environ.get("VERTEBRA_NATIVE", "1") == "1"
+        
         # If the app is a Litestar instance, we can reflect routes and compile pipelines
         from litestar import Litestar
-        if isinstance(self._app, Litestar):
+        if native_enabled and isinstance(self._app, Litestar):
             from vertebra.integration.litestar import reflect_routes
             from vertebra.integration.litestar.compiler import PipelineCompiler
             

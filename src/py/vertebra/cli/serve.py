@@ -25,6 +25,7 @@ BANNER = r"""
 @click.option("--log-level", default="info", help="Log level")
 @click.option("--drain-timeout", type=int, default=5000, help="Drain timeout in milliseconds")
 @click.option("--shutdown-timeout", type=int, default=30000, help="Shutdown timeout in milliseconds")
+@click.option("--native/--no-native", default=True, help="Enable/disable native Litestar integration")
 def serve(
     app: str,
     host: str,
@@ -34,6 +35,7 @@ def serve(
     log_level: str,
     drain_timeout: int,
     shutdown_timeout: int,
+    native: bool,
 ) -> None:
     """Run the Bun-backed ASGI server."""
     # Configure logging
@@ -45,6 +47,7 @@ def serve(
     env["VERTEBRA_PORT"] = str(port)
     env["VERTEBRA_WORKERS"] = str(workers)
     env["VERTEBRA_LOG_LEVEL"] = log_level
+    env["VERTEBRA_NATIVE"] = str(int(native))
     if config_path:
         env["VERTEBRA_CONFIG"] = config_path
 
