@@ -18,7 +18,7 @@ Establish the new directory structure, configure scoped `conftest.py` files, and
     - [ ] Move `test_serialization_codec.py` to `src/py/tests/unit/extensions/serialization/test_codec.py`
     - [ ] Move `test_build.py` to `src/py/tests/unit/tools/test_build.py`
     - [ ] Update imports in migrated files to ensure they can locate helpers/fixtures.
-- [ ] Task: Verify Unit Tests
+- [x] Task: Verify Unit Tests e1ca2ff
     - [ ] Run `pytest src/py/tests/unit` to ensure unit tests pass with the new fixture setup.
 - [ ] Task: Checkpoint - Verify Phase 1 complete and create recovery point
 - [ ] Task: Flow - User Manual Verification 'Phase 1: Setup and Unit Test Migration' (Protocol in workflow.md)
