@@ -26,13 +26,13 @@ Establish the new directory structure, configure scoped `conftest.py` files, and
 ## Phase 2: Integration Test Migration & Consolidation (SQLAlchemy)
 Move and consolidate the heavy SQLAlchemy and DBAPI related tests into the integration suite.
 
-- [ ] Task: Migrate SQLAlchemy Tests
-    - [ ] Create `src/py/tests/integration/extensions/sqlalchemy/`
-    - [ ] Consolidate `test_sqlalchemy_dialect.py` and `test_sqlalchemy_dbapi.py` into `src/py/tests/integration/extensions/sqlalchemy/test_dialect.py` and `test_dbapi.py`.
-    - [ ] Move `test_sqlalchemy_integration.py` to `src/py/tests/integration/extensions/sqlalchemy/test_integration.py`.
-- [ ] Task: Migrate Advanced Alchemy Tests
-    - [ ] Move `test_advanced_alchemy.py` to `src/py/tests/integration/extensions/advanced_alchemy/test_plugin.py`.
-- [ ] Task: Verify SQLAlchemy Integration Tests
+- [x] Task: Migrate SQLAlchemy Tests
+    - [x] Create `src/py/tests/integration/extensions/sqlalchemy/`
+    - [x] Consolidate `test_sqlalchemy_dialect.py` and `test_sqlalchemy_dbapi.py` into `src/py/tests/integration/extensions/sqlalchemy/test_dialect.py` and `test_dbapi.py`.
+    - [x] Move `test_sqlalchemy_integration.py` to `src/py/tests/integration/extensions/sqlalchemy/test_integration.py`.
+- [x] Task: Migrate Advanced Alchemy Tests
+    - [x] Move `test_advanced_alchemy.py` to `src/py/tests/integration/extensions/advanced_alchemy/test_plugin.py`.
+- [x] Task: Verify SQLAlchemy Integration Tests 1aa3765
     - [ ] Run `pytest src/py/tests/integration/extensions/sqlalchemy` to confirm DB tests pass with the new `integration/conftest.py`.
 - [ ] Task: Checkpoint - Verify Phase 2 complete and create recovery point
 - [ ] Task: Flow - User Manual Verification 'Phase 2: Integration Test Migration & Consolidation (SQLAlchemy)' (Protocol in workflow.md)
