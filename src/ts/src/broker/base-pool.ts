@@ -82,34 +82,38 @@ export abstract class BasePoolAdapter implements PoolAdapter {
   abstract commit(token: string): Promise<void>;
   abstract rollback(token: string): Promise<void>;
 
-  /** Start periodic health checks for idle connections. */
-  startHealthCheckLoop(): void {
-    if (!this.healthChecker) return;
+  protected _healthCheckInterval?: Timer;
+  protected _idleReaperInterval?: Timer;
 
-    setInterval(async () => {
-      await this.checkHealth();
-    }, this.healthCheckInterval);
+  /** Start periodic health checks for idle connections. */
+  startHealthCheckLoop(intervalMs = 30000): void {
+    if (this._healthCheckInterval) clearInterval(this._healthCheckInterval);
+    
+    this._healthCheckInterval = setInterval(async () => {
+      await this.runHealthCheck();
+    }, intervalMs);
   }
+
+  protected abstract runHealthCheck(): Promise<void>;
 
   /** Start periodic reaping of idle connections. */
-  startIdleReaper(): void {
-    setInterval(async () => {
-      const now = Date.now();
-      for (const [token, lastUsed] of this.connectionTimestamps.entries()) {
-        if (now - lastUsed > this.idleTimeout) {
-          await this.reapIdle(token);
-        }
-      }
-    }, 60000); // Check every minute
+  startIdleReaper(timeoutMs = 300000, checkIntervalMs = 60000): void {
+    if (this._idleReaperInterval) clearInterval(this._idleReaperInterval);
+
+    this._idleReaperInterval = setInterval(async () => {
+      await this.reapIdleConnections(timeoutMs);
+    }, checkIntervalMs);
   }
 
+  protected abstract reapIdleConnections(timeoutMs: number): Promise<void>;
+
   protected async checkHealth(): Promise<void> {
-    // Override in sub-classes
+    // Deprecated in favor of runHealthCheck
+    await this.runHealthCheck();
   }
 
   protected async reapIdle(token: string): Promise<void> {
-    // Override in sub-classes
-    this._idleTimeouts += 1;
+    // Deprecated in favor of reapIdleConnections
   }
 
   /** Record a successful acquire. Call this after acquiring a connection. */
