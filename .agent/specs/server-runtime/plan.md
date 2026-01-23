@@ -215,26 +215,26 @@
 **Priority**: P0
 **Dependencies**: Tasks 2.1, 2.2
 
-- [~] **Task 2.3.1**: Create IPC bridge module (TypeScript)
+- [x] **Task 2.3.1**: Create IPC bridge module (TypeScript)
   - `MCPIPCBridge` class
   - `callTool(name: string, args: unknown) -> Promise<unknown>`
   - Serialize to MessagePack, send via shared memory
   - File: `src/ts/src/mcp/ipc-bridge.ts` (NEW)
 
-- [~] **Task 2.3.2**: Create IPC handler module (Python)
+- [x] **Task 2.3.2**: Create IPC handler module (Python)
   - Listen for tool invocation requests
   - Look up tool in registry
   - Invoke handler with deserialized arguments
   - Serialize result and send back
   - File: `src/py/vertebra/mcp/handler.py` (NEW)
 
-- [~] **Task 2.3.3**: Add error handling
+- [x] **Task 2.3.3**: Add error handling
   - Handle tool not found
   - Handle execution timeout
   - Handle serialization errors
   - Files: `ipc-bridge.ts`, `handler.py`
 
-- [~] **Task 2.3.4**: Add IPC bridge tests
+- [x] **Task 2.3.4**: Add IPC bridge tests
   - Test successful invocation
   - Test error handling
   - Test timeout handling
