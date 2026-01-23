@@ -92,13 +92,23 @@ async def test_aa_service() -> None:
 @pytest.mark.skipif(not HAS_AA, reason="advanced-alchemy not installed")
 @pytest.mark.anyio
 async def test_aa_storage_backend() -> None:
+    from advanced_alchemy.types.file_object import FileObject
+
     from vertebra.extensions.advanced_alchemy._storage import VertebraStorageBackend
 
-    backend = VertebraStorageBackend(pool="test_storage")
+    backend = VertebraStorageBackend(key="test", pool="test_storage")
 
     # Mock client
-    backend._client.storage_read = unittest.mock.AsyncMock(return_value=b"data")  # type: ignore
+    backend._client.storage_read = unittest.mock.AsyncMock(return_value=b"data")  # type: ignore[method-assign]
+    backend._client.storage_write = unittest.mock.AsyncMock()  # type: ignore[method-assign]
 
-    data = await backend.read_bytes("path")
+    # Test get_content_async
+    data = await backend.get_content_async("path/to/file")
     assert data == b"data"
-    backend._client.storage_read.assert_called_with("test_storage", "path")
+    backend._client.storage_read.assert_called_with("test_storage", "path/to/file")
+
+    # Test save_object_async with FileObject
+    file_obj = FileObject(backend="test", filename="test.txt")
+    result = await backend.save_object_async(file_obj, b"content")
+    assert result.size == 7
+    backend._client.storage_write.assert_called_with("test_storage", file_obj.path, b"content")
