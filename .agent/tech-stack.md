@@ -14,6 +14,7 @@
 - **Native Integration**: Direct execution path for Litestar applications bypassing ASGI for high-performance HTTP/WebSocket handling.
 - **Router**: Rust-based high-performance router (`matchit`) shared between Bun broker and Python workers.
 - **MCP Runtime**: Model Context Protocol implementation (Stdio, SSE, WebSocket) for AI agent integration.
+- **Observability**: Prometheus-formatted metrics registry with collectors for broker pools, HTTP server, and MCP tool execution.
 
 ## Backend Frameworks
 

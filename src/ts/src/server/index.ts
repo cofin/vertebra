@@ -2,9 +2,11 @@ import type { Server, WebSocketHandler } from "bun";
 import { AsyncBrokerClient } from "../broker";
 import { ShmRouter } from "../broker/shm";
 import { AsgiBridge } from "../ipc";
+import { collectBrokerMetrics } from "../broker/metrics";
+import { collectMcpMetrics } from "../mcp/metrics";
+import { collectServerMetrics, metricsHandler, registerCollector, trackConnection, trackRequest } from "./metrics";
 import { type ResolvedServerConfig, resolveServerConfig, type ServerConfig } from "./config";
 import { log } from "./logging";
-import { createMetrics, MetricsRegistry, trackRequest } from "./metrics";
 import { ProcessManager } from "./process-manager";
 import { createRouter, RequestHandler } from "./router";
 import {
@@ -149,25 +151,27 @@ export async function createAsgiServer(
   manager?.start();
   const routerInstance = new ShmRouter();
   const bridge = new AsgiBridge({ requester: workerPool, router: routerInstance });
-  const metrics = createMetrics();
-  const brokerClient = resolved.broker ? new AsyncBrokerClient(resolved.broker) : undefined;
-  const metricsRegistry = new MetricsRegistry(metrics, brokerClient, manager);
+  
+  // Register metrics collectors
+  registerCollector(collectServerMetrics);
+  registerCollector(collectBrokerMetrics);
+  registerCollector(collectMcpMetrics);
+
   const router = createRouter({
     staticDir: resolved.server.staticDir,
     apiHandler: async (request, server) => {
+      trackConnection(true); // Increment active connection count (approx)
       const { request: tracedRequest, traceId } = ensureTraceId(request);
       const url = new URL(tracedRequest.url);
-      if (url.pathname === "/__metrics__") {
-        const finish = trackRequest(metrics, tracedRequest.method);
-        const body = await metricsRegistry.render();
-        finish(200);
-        return new Response(body, { headers: { "content-type": metrics.registry.contentType } });
-      }
-      const finish = trackRequest(metrics, tracedRequest.method);
-      const start = performance.now();
+      
       try {
+        if (url.pathname === "/__metrics__") {
+          return await metricsHandler(request);
+        }
+
+        const start = performance.now();
+        
         if (bridge.upgradeWebSocket(tracedRequest, server)) {
-          finish(101);
           log("info", "request.upgrade", {
             trace_id: traceId,
             method: tracedRequest.method,
@@ -176,7 +180,9 @@ export async function createAsgiServer(
           return;
         }
         const response = await bridge.handle(tracedRequest);
-        finish(response.status);
+        
+        trackRequest(performance.now() - start);
+        
         log("info", "request.complete", {
           trace_id: traceId,
           method: tracedRequest.method,
@@ -186,7 +192,7 @@ export async function createAsgiServer(
         });
         return response;
       } catch (error) {
-        finish(500);
+        trackRequest(performance.now() - (performance.now())); // Count as request even if error?
         log("error", "request.error", {
           trace_id: traceId,
           method: tracedRequest.method,
@@ -194,6 +200,8 @@ export async function createAsgiServer(
           error: String(error),
         });
         return new Response("Bad Gateway", { status: 502 });
+      } finally {
+        trackConnection(false); // Decrement active connection
       }
     },
   });

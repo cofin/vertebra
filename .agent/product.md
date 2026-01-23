@@ -26,4 +26,5 @@ Vertebra aims to be the definitive foundation for building high-performance, dat
 - **Unified Tooling**: CLI for project scaffolding, building, and serving applications.
 - **Single-File Distribution**: Build standalone, dependency-free executables (`vertebra build --one-file`) for easy deployment.
 - **MCP Runtime**: Built-in Model Context Protocol server (Stdio, SSE, WebSocket) for exposing Python functions as AI tools.
-- **Observability**: Built-in metrics and monitoring for system health and performance.
+- **Unified Observability**: Centralized Prometheus-compatible metrics endpoint (`/__metrics__`) and pre-built Grafana dashboards for monitoring pool health, request latency, and tool throughput.
+- **Resilient Pool Management**: Advanced connection pooling with periodic health checks, pre-lease validation, and automated idle connection reaping.
