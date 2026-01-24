@@ -24,7 +24,10 @@ export class AuthValidator {
     return null;
   }
 
-  private async validateProvider(request: Request, provider: AuthProviderConfig): Promise<AuthClaims | null> {
+  private async validateProvider(
+    request: Request,
+    provider: AuthProviderConfig,
+  ): Promise<AuthClaims | null> {
     try {
       if (provider.type === "iap") {
         const token = request.headers.get("x-goog-iap-jwt-assertion");
@@ -39,7 +42,7 @@ export class AuthValidator {
 
       if (provider.type === "jwt" || provider.type === "oauth2") {
         let token = this.extractBearerToken(request);
-        
+
         if (!token && this.config.cookieName) {
           token = this.extractCookieToken(request, this.config.cookieName);
         }
@@ -78,7 +81,7 @@ export class AuthValidator {
     const cookieHeader = request.headers.get("cookie");
     if (!cookieHeader) return null;
 
-    const cookies = cookieHeader.split(";").map(c => c.trim());
+    const cookies = cookieHeader.split(";").map((c) => c.trim());
     for (const cookie of cookies) {
       if (cookie.startsWith(`${cookieName}=`)) {
         return cookie.substring(cookieName.length + 1);
@@ -87,7 +90,11 @@ export class AuthValidator {
     return null;
   }
 
-  private async verifyJwt(token: string, jwksUri: string, options: { issuer?: string; audience?: string }): Promise<AuthClaims | null> {
+  private async verifyJwt(
+    token: string,
+    jwksUri: string,
+    options: { issuer?: string; audience?: string },
+  ): Promise<AuthClaims | null> {
     let jwks = this.jwksCache.get(jwksUri);
     if (!jwks) {
       jwks = createRemoteJWKSet(new URL(jwksUri));
@@ -102,7 +109,11 @@ export class AuthValidator {
     return payload;
   }
 
-  private async verifyJwtSymmetric(token: string, secret: string, options: { issuer?: string; audience?: string }): Promise<AuthClaims | null> {
+  private async verifyJwtSymmetric(
+    token: string,
+    secret: string,
+    options: { issuer?: string; audience?: string },
+  ): Promise<AuthClaims | null> {
     const secretKey = new TextEncoder().encode(secret);
     const { payload } = await jwtVerify(token, secretKey, {
       issuer: options.issuer,

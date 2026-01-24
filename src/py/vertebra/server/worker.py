@@ -219,7 +219,7 @@ class AsgiWorker:
     async def _handle_control_payload(self, payload: bytes) -> None:
         try:
             message = self._codec.decode(payload)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return
         if not isinstance(message, dict):
             return
@@ -278,7 +278,7 @@ class AsgiWorker:
     async def _handle_client_payload(self, client_id: str, client: ClientState, payload: bytes) -> None:
         try:
             message = self._codec.decode(payload)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return
         if not isinstance(message, dict):
             return
@@ -300,7 +300,7 @@ class AsgiWorker:
         if frame_type == "direct.http":
             await self._handle_direct_http(message, writer, contexts)
             return
-        if frame_type in ("ws.open", "ws.message", "ws.close"):
+        if frame_type in {"ws.open", "ws.message", "ws.close"}:
             await self._handle_direct_websocket(message, writer)
             return
         if frame_type == "http.request.start":
@@ -392,8 +392,9 @@ class AsgiWorker:
             })
             return
 
-        from vertebra.extensions.litestar.native import VertebraRequest
         from litestar.response import Response as LitestarResponse
+
+        from vertebra.extensions.litestar.native import VertebraRequest
 
         conn = VertebraRequest(message)
 
@@ -401,7 +402,7 @@ class AsgiWorker:
             result = await runner(conn)
 
             import json
-            
+
             status = 200
             headers = [("content-type", "application/json")]
             body = b""
@@ -411,7 +412,7 @@ class AsgiWorker:
                 # Copy headers
                 for k, v in result.headers.items():
                     headers.append((k.lower(), v))
-                
+
                 # Handle content
                 content = result.content
                 if content is None:
@@ -428,14 +429,9 @@ class AsgiWorker:
                 # Default behavior: assume raw data -> JSON 200 OK
                 body = json.dumps(result).encode()
 
-            await writer.send({
-                "id": request_id,
-                "type": "http.response.start",
-                "status": status,
-                "headers": headers,
-            })
+            await writer.send({"id": request_id, "type": "http.response.start", "status": status, "headers": headers})
             await writer.send({"id": request_id, "type": "http.response.body", "body": body, "more_body": False})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             await writer.send({"id": request_id, "type": "http.response.start", "status": 500, "headers": []})
             await writer.send({
                 "id": request_id,
@@ -593,6 +589,7 @@ class AsgiWorker:
                 user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher)
             else:
                 from vertebra.auth.models import AnonymousUser
+
                 user = AnonymousUser()
 
             token = set_user(user)
@@ -643,7 +640,12 @@ class AsgiWorker:
                     except Exception as exc:  # noqa: BLE001 - must catch all ASGI app errors
                         trace_id = self._extract_trace_id(meta.headers)
                         self._log(
-                            "error", "request.error", trace_id=trace_id, method=meta.method, path=meta.path, error=str(exc)
+                            "error",
+                            "request.error",
+                            trace_id=trace_id,
+                            method=meta.method,
+                            path=meta.path,
+                            error=str(exc),
                         )
                         if not response_started:
                             await writer.send({
@@ -680,6 +682,7 @@ class AsgiWorker:
             user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher)
         else:
             from vertebra.auth.models import AnonymousUser
+
             user = AnonymousUser()
 
         token = set_user(user)
@@ -842,8 +845,10 @@ class AsgiWorker:
                 # Check for Litestar
                 try:
                     from litestar import Litestar
+
                     if native_enabled and isinstance(self._app, Litestar):
                         from vertebra.extensions.litestar.native import reflect_static_mounts
+
                         mounts = reflect_static_mounts(self._app)
                         if mounts:
                             extensions = message.setdefault("extensions", {})

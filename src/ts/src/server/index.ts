@@ -1,10 +1,12 @@
 import type { Server, WebSocketHandler } from "bun";
 import { AsyncBrokerClient, BrokerServer } from "../broker";
+import { collectBrokerMetrics } from "../broker/metrics";
 import { ShmRouter } from "../broker/shm";
 import { AsgiBridge } from "../ipc";
-import { AuthValidator } from "./auth";
-import { collectBrokerMetrics } from "../broker/metrics";
 import { collectMcpMetrics } from "../mcp/metrics";
+import { AuthValidator } from "./auth";
+import { type ResolvedServerConfig, resolveServerConfig, type ServerConfig } from "./config";
+import { log } from "./logging";
 import {
   collectServerMetrics,
   metricsHandler,
@@ -12,8 +14,6 @@ import {
   trackConnection,
   trackRequest,
 } from "./metrics";
-import { type ResolvedServerConfig, resolveServerConfig, type ServerConfig } from "./config";
-import { log } from "./logging";
 import { ProcessManager } from "./process-manager";
 import { createRouter, RequestHandler } from "./router";
 import {
@@ -201,20 +201,20 @@ export async function createAsgiServer(
           return await metricsHandler(request);
         }
 
-                const start = performance.now();
-        
-                // Validate Authentication
-                const claims = await authValidator.validate(tracedRequest);
-                
-                if (bridge.upgradeWebSocket(tracedRequest, server)) {
-                  log("info", "request.upgrade", {
-                    trace_id: traceId,
-                    method: tracedRequest.method,
-                    path: url.pathname,
-                  });
-                  return;
-                }
-                const response = await bridge.handle(tracedRequest, claims);
+        const start = performance.now();
+
+        // Validate Authentication
+        const claims = await authValidator.validate(tracedRequest);
+
+        if (bridge.upgradeWebSocket(tracedRequest, server)) {
+          log("info", "request.upgrade", {
+            trace_id: traceId,
+            method: tracedRequest.method,
+            path: url.pathname,
+          });
+          return;
+        }
+        const response = await bridge.handle(tracedRequest, claims);
         trackRequest(performance.now() - start);
 
         log("info", "request.complete", {

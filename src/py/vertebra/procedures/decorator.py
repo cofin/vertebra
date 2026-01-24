@@ -1,32 +1,79 @@
 """Procedure decorator for Vertebra type bridge."""
 
 import inspect
+from collections.abc import Callable, Coroutine, Mapping
 from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, get_type_hints
+from typing import Any, ParamSpec, Protocol, TypeVar, get_type_hints, overload
 
 from vertebra.procedures.registry import ProcedureMetadata, ProcedureRegistry
-from vertebra.procedures.serialization import Serializer, detect_serializer
+from vertebra.procedures.serialization import detect_serializer
+from vertebra.protocols import Serializer
 from vertebra.types.extractor import TypeExtractor
 from vertebra.types.ir import RawType
 
-if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
-
 _MISSING = object()
 
+P = ParamSpec("P")
+R = TypeVar("R")
 
+
+class _ProcedureDecorator(Protocol):
+    """Protocol for decorator returned by procedure() with arguments."""
+
+    @overload
+    def __call__(self, fn: Callable[P, Coroutine[Any, Any, R]]) -> Callable[P, Coroutine[Any, Any, R]]: ...
+
+    @overload
+    def __call__(self, fn: Callable[P, R]) -> Callable[P, R]: ...
+
+    def __call__(self, fn: Callable[P, R]) -> Callable[P, R]: ...
+
+
+@overload
+def procedure[**P, R](
+    _fn: Callable[P, Coroutine[Any, Any, R]],
+    *,
+    name: str | None = ...,
+    serializer: str | Serializer | None = ...,
+    metadata: Mapping[str, Any] | None = ...,
+    type_overrides: Mapping[str, str] | None = ...,
+) -> Callable[P, Coroutine[Any, Any, R]]: ...
+
+
+@overload
+def procedure[**P, R](
+    _fn: Callable[P, R],
+    *,
+    name: str | None = ...,
+    serializer: str | Serializer | None = ...,
+    metadata: Mapping[str, Any] | None = ...,
+    type_overrides: Mapping[str, str] | None = ...,
+) -> Callable[P, R]: ...
+
+
+@overload
 def procedure(
-    _fn: "Callable[..., Any] | None" = None,
+    _fn: None = ...,
+    *,
+    name: str | None = ...,
+    serializer: str | Serializer | None = ...,
+    metadata: Mapping[str, Any] | None = ...,
+    type_overrides: Mapping[str, str] | None = ...,
+) -> _ProcedureDecorator: ...
+
+
+def procedure[**P, R](
+    _fn: Callable[P, R] | None = None,
     *,
     name: str | None = None,
-    serializer: "str | Serializer | None" = "msgspec",
-    metadata: "Mapping[str, Any] | None" = None,
-    type_overrides: "Mapping[str, str] | None" = None,
-) -> "Callable[[Callable[..., Any]], Callable[..., Any]]":
+    serializer: str | Serializer | None = "msgspec",
+    metadata: Mapping[str, Any] | None = None,
+    type_overrides: Mapping[str, str] | None = None,
+) -> Callable[P, R] | _ProcedureDecorator:
     """Register a handler for type extraction and client generation."""
 
-    def decorator(fn: "Callable[..., Any]") -> "Callable[..., Any]":
+    def decorator(fn: Callable[P, R]) -> Callable[P, R]:
         registry = ProcedureRegistry.instance()
         extractor = TypeExtractor()
         try:
@@ -85,7 +132,7 @@ def procedure(
             }
 
         @wraps(fn)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             return fn(*args, **kwargs)
 
         setattr(wrapper, "__vertebra_procedure__", meta)
@@ -93,4 +140,4 @@ def procedure(
 
     if _fn is not None:
         return decorator(_fn)
-    return decorator
+    return decorator  # type: ignore[return-value]

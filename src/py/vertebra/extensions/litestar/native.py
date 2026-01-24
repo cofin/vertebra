@@ -76,6 +76,7 @@ class VertebraRequest:
                 self._user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher)
             else:
                 from vertebra.auth.models import AnonymousUser
+
                 self._user = AnonymousUser()
         return self._user
 
@@ -165,15 +166,13 @@ def reflect_static_mounts(app: Litestar) -> dict[str, str]:
 
     Returns a dict of {path_prefix: directory_path}.
     """
-    from litestar.static_files import StaticFiles
-    from litestar.routes import ASGIRoute
-    
+
     mounts = {}
-    
+
     # This is a heuristic. Litestar stores static handlers in the route tree.
     # We look for ASGIRoutes that look like static file handlers.
     # Actually, Litestar 2.x often handles static files via `static_files_config`.
-    
+
     # Check app.static_files_config
     if hasattr(app, "static_files_config"):
         # It's a list of StaticFilesConfig
@@ -181,11 +180,12 @@ def reflect_static_mounts(app: Litestar) -> dict[str, str]:
             for dir_path in config.directories:
                 # config.path is the url path
                 mounts[config.path] = str(dir_path)
-                
+
     return mounts
 
 
 from enum import Enum, auto
+
 
 class RouteCapability(Enum):
     NATIVE = auto()
@@ -199,11 +199,12 @@ def classify_route(route: LitestarRoute) -> RouteCapability:
         RouteCapability: NATIVE if safe for direct dispatch, ASGI_FALLBACK otherwise.
     """
     import inspect
-    from typing import get_origin, get_args, Annotated
+    from typing import Annotated, get_args, get_origin
+
     from litestar.di import Provide
-    from litestar.params import BodyKwarg, DependencyKwarg
     from litestar.enums import RequestEncodingType
-    from litestar.response import File, Stream, Template, Redirect
+    from litestar.params import BodyKwarg
+    from litestar.response import File, Redirect, Stream, Template
 
     # 1. ASGI Routes and WebSockets are fallback for now (until WS supported)
     if route.is_asgi or route.is_websocket:
@@ -211,21 +212,21 @@ def classify_route(route: LitestarRoute) -> RouteCapability:
 
     # 2. Check dependencies for unsupported types
     # Unsupported: 'Dependency()' objects (dynamic), 'Inject' markers from extensions
-    for name, dep in route.dependencies.items():
+    for dep in route.dependencies.values():
         if not isinstance(dep, Provide):
             # If it's not a Provide (e.g. it's a Dependency object or other), fallback
             return RouteCapability.ASGI_FALLBACK
-            
+
     # 3. Check for specific parameter types that imply unsupported bodies (Multipart)
     # We inspect the handler object (HTTPRouteHandler)
     handler = route.handler
     # Check resolved_data_dto or logic? Litestar handlers usually have 'media_type' or 'encoding' in Body.
     # We can check handler.resolve_request_encoding()? No, that's internal.
     # But we can inspect the function parameters for Body(media_type=RequestEncodingType.MULTI_PART)
-    
+
     fn = route.handler_fn or handler.fn
     sig = inspect.signature(fn)
-    
+
     for param in sig.parameters.values():
         # Check for Body info in metadata
         # Litestar uses Annotated[T, Body(...)]
@@ -233,10 +234,9 @@ def classify_route(route: LitestarRoute) -> RouteCapability:
         if get_origin(param.annotation) is Annotated:
             args = get_args(param.annotation)
             for arg in args:
-                if isinstance(arg, BodyKwarg):
-                    if arg.media_type == RequestEncodingType.MULTI_PART:
-                        return RouteCapability.ASGI_FALLBACK
-        
+                if isinstance(arg, BodyKwarg) and arg.media_type == RequestEncodingType.MULTI_PART:
+                    return RouteCapability.ASGI_FALLBACK
+
         # Check for 'dependency' marker usage in params that wasn't caught by route.dependencies?
         # route.dependencies covers it usually.
 
@@ -248,7 +248,6 @@ def classify_route(route: LitestarRoute) -> RouteCapability:
         # We unwrap generic Response[T] -> Response
         origin = get_origin(ret)
         if origin:
-            # e.g. Response[User]
             if issubclass(origin, (File, Stream, Template, Redirect)):
                 return RouteCapability.ASGI_FALLBACK
         elif isinstance(ret, type):

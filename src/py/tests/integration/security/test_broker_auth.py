@@ -1,14 +1,17 @@
+import contextlib
 import os
-import time
 import subprocess
+import time
+from pathlib import Path
+
 import httpx
 import jwt
 import pytest
-import signal
+
 
 @pytest.mark.anyio
 @pytest.mark.integration
-async def test_broker_jwt_auth_integration():
+async def test_broker_jwt_auth_integration() -> None:
     # Setup config
     secret = "test-secret"
     config_content = f"""
@@ -32,9 +35,11 @@ export default {{
   }}
 }};
 """
-    config_path = os.path.abspath("tmp/vertebra.config.ts")
-    with open(config_path, "w") as f:
-        f.write(config_content)
+    tmp_dir = Path("tmp")
+    tmp_dir.mkdir(exist_ok=True)
+
+    config_path = (tmp_dir / "vertebra.config.ts").resolve()
+    config_path.write_text(config_content)
 
     # Create dummy app
     app_content = """
@@ -45,18 +50,18 @@ from litestar import Litestar, get, Request
 async def me_handler(request: Request) -> dict[str, Any]:
     try:
         user = request.scope.get("user")
-        
+
         is_auth = False
         uid = None
         username = None
-        
+
         if user:
             # Check if it has attributes or is dict
             if hasattr(user, "is_authenticated"):
                 is_auth = user.is_authenticated
             elif isinstance(user, dict):
                  is_auth = user.get("is_authenticated", False)
-            
+
             if is_auth:
                 if hasattr(user, "id"):
                     uid = user.id
@@ -64,7 +69,7 @@ async def me_handler(request: Request) -> dict[str, Any]:
                 elif isinstance(user, dict):
                     uid = user.get("id")
                     username = user.get("username")
-        
+
         return {
             "is_authenticated": is_auth,
             "id": uid,
@@ -77,42 +82,39 @@ async def me_handler(request: Request) -> dict[str, Any]:
 
 app = Litestar(route_handlers=[me_handler])
 """
-    app_path = os.path.abspath("tmp/auth_test_app.py")
-    init_path = os.path.abspath("tmp/__init__.py")
-    
-    with open(app_path, "w") as f:
-        f.write(app_content)
-    
+    app_path = (tmp_dir / "auth_test_app.py").resolve()
+    init_path = (tmp_dir / "__init__.py").resolve()
+
+    app_path.write_text(app_content)
+
     created_init = False
-    if not os.path.exists(init_path):
-        with open(init_path, "w") as f:
-            f.write("")
+    if not init_path.exists():
+        init_path.write_text("")
         created_init = True
 
     # Start Bun server
     env = os.environ.copy()
-    env["VERTEBRA_CONFIG"] = config_path
+    env["VERTEBRA_CONFIG"] = str(config_path)
     env["VERTEBRA_NATIVE"] = "0"
-    
-    # Need to make sure PYTHONPATH includes current dir for tmp.auth_test_app
-    env["PYTHONPATH"] = f"{os.getcwd()}:{env.get('PYTHONPATH', '')}"
-    
-    stdout_file = open("tmp/broker.stdout", "w")
-    stderr_file = open("tmp/broker.stderr", "w")
 
+    # Need to make sure PYTHONPATH includes current dir for tmp.auth_test_app
+    env["PYTHONPATH"] = f"{Path.cwd()}:{env.get('PYTHONPATH', '')}"
+
+    stdout_file = (tmp_dir / "broker.stdout").open("w")
+    stderr_file = (tmp_dir / "broker.stderr").open("w")
+
+    # ASYNC220: Ideally we should use asyncio.create_subprocess_exec but for integration tests
+    # launching a persistent background process, Popen is often used.
+    # To fix strictly, we'd need to rewrite this test to use asyncio.
+    # For now, we accept Popen here but suppress the warning or acknowledge it.
     proc = subprocess.Popen(
-        ["bun", "run", "src/server/serve.ts"],
-        cwd="src/ts",
-        env=env,
-        stdout=stdout_file,
-        stderr=stderr_file,
-        text=True
+        ["bun", "run", "src/server/serve.ts"], cwd="src/ts", env=env, stdout=stdout_file, stderr=stderr_file, text=True
     )
 
     try:
-        # Wait for start
-        time.sleep(5)
-        
+        # Wait for start - ASYNC251
+        await asyncio.sleep(5)
+
         # Generate JWT
         token = jwt.encode(
             {
@@ -120,24 +122,20 @@ app = Litestar(route_handlers=[me_handler])
                 "username": "jdoe",
                 "iss": "test-issuer",
                 "aud": "test-audience",
-                "exp": int(time.time()) + 3600
+                "exp": int(time.time()) + 3600,
             },
             secret,
-            algorithm="HS256"
+            algorithm="HS256",
         )
 
         async with httpx.AsyncClient(base_url="http://localhost:8085", timeout=10.0) as client:
             # 1. No auth
-            print("Requesting /me without auth...")
             resp = await client.get("/me")
-            print(f"Response: {resp.status_code} {resp.text}")
             assert resp.status_code == 200
             assert resp.json()["is_authenticated"] is False
 
             # 2. Valid JWT
-            print("Requesting /me with valid JWT...")
             resp = await client.get("/me", headers={"Authorization": f"Bearer {token}"})
-            print(f"Response: {resp.status_code} {resp.text}")
             assert resp.status_code == 200
             data = resp.json()
             assert data["is_authenticated"] is True
@@ -145,43 +143,32 @@ app = Litestar(route_handlers=[me_handler])
             assert data["username"] == "jdoe"
 
             # 3. Invalid JWT
-            print("Requesting /me with invalid JWT...")
             resp = await client.get("/me", headers={"Authorization": "Bearer invalid"})
-            print(f"Response: {resp.status_code} {resp.text}")
             assert resp.status_code == 200
             assert resp.json()["is_authenticated"] is False
 
-    except Exception as e:
-        print(f"TEST FAILURE: {e}")
-        raise
     finally:
         # Stop broker
-        print("Stopping broker...")
         proc.terminate()
         try:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            print("Broker did not terminate, killing...")
             proc.kill()
-            try:
+            with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                print("Broker process stuck even after kill")
-        
+
         stdout_file.close()
         stderr_file.close()
-        
-        with open("tmp/broker.stdout", "r") as f:
-            print("\n--- BROKER STDOUT ---")
-            print(f.read())
-        with open("tmp/broker.stderr", "r") as f:
-            print("--- BROKER STDERR ---")
-            print(f.read())
-        
+
+        with (tmp_dir / "broker.stdout").open("r"):
+            pass
+        with (tmp_dir / "broker.stderr").open("r"):
+            pass
+
         # Cleanup
-        if os.path.exists(config_path):
-            os.remove(config_path)
-        if os.path.exists(app_path):
-            os.remove(app_path)
-        if created_init and os.path.exists(init_path):
-            os.remove(init_path)
+        if config_path.exists():
+            config_path.unlink()
+        if app_path.exists():
+            app_path.unlink()
+        if created_init and init_path.exists():
+            init_path.unlink()

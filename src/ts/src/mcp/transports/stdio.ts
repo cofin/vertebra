@@ -1,5 +1,5 @@
-import { Readable, Writable } from "node:stream";
 import * as readline from "node:readline";
+import { Readable, Writable } from "node:stream";
 
 export interface Transport {
   start(): Promise<void>;

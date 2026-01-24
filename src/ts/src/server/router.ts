@@ -1,5 +1,5 @@
-import type { Server } from "bun";
 import { join } from "node:path";
+import type { Server } from "bun";
 import type { AssetConfig } from "./config";
 
 export type RequestHandler = (
@@ -26,7 +26,9 @@ export interface RouterInstance {
   updateMounts: (mounts: Record<string, string>) => void;
 }
 
-export function createRouter(config: RouterConfig): RequestHandler & { updateMounts: (mounts: Record<string, string>) => void } {
+export function createRouter(
+  config: RouterConfig,
+): RequestHandler & { updateMounts: (mounts: Record<string, string>) => void } {
   const staticDir = config.staticDir;
   const apiHandler = config.apiHandler;
   const assets = config.assets;
@@ -104,10 +106,10 @@ export function createRouter(config: RouterConfig): RequestHandler & { updateMou
         const path = normalizePath(relativePath);
         // Prevent directory traversal
         if (path.includes("..")) continue;
-        
+
         const file = Bun.file(join(localDir, path));
         if (await file.exists()) {
-           return new Response(file, {
+          return new Response(file, {
             headers: {
               "cache-control": "public, max-age=60",
             },
@@ -142,10 +144,12 @@ export function createRouter(config: RouterConfig): RequestHandler & { updateMou
     return new Response("Not Found", { status: 404 });
   };
 
-  const router = handler as RequestHandler & { updateMounts: (mounts: Record<string, string>) => void };
+  const router = handler as RequestHandler & {
+    updateMounts: (mounts: Record<string, string>) => void;
+  };
   router.updateMounts = (mounts: Record<string, string>) => {
     dynamicMounts = { ...dynamicMounts, ...mounts };
   };
-  
+
   return router;
 }

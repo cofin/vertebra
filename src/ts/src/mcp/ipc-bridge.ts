@@ -1,4 +1,4 @@
-import { encode, decode } from "@msgpack/msgpack";
+import { decode, encode } from "@msgpack/msgpack";
 
 export interface IPCTransport {
   send(payload: Uint8Array): Promise<Uint8Array>;

@@ -16,8 +16,8 @@ export interface RegistryData {
   resources?: ResourceSchema[];
 }
 
+import { type FSWatcher, watch } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { watch, type FSWatcher } from "node:fs";
 
 export class SchemaRegistry {
   private tools = new Map<string, ToolSchema>();

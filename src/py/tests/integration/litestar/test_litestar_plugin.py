@@ -18,14 +18,14 @@ except ImportError:
     HAS_LITESTAR = False
 
 try:
-    import advanced_alchemy
+    import advanced_alchemy  # noqa: F401
 
     HAS_AA = True
 except ImportError:
     HAS_AA = False
 
 try:
-    import sqlspec
+    import sqlspec  # noqa: F401
 
     HAS_SQLSPEC = True
 except ImportError:

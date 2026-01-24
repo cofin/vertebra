@@ -1,5 +1,5 @@
-import { BasePoolAdapter } from "./base-pool";
 import type { LifecycleHooks, PoolStats } from "./base-pool";
+import { BasePoolAdapter } from "./base-pool";
 
 export class SqlPool extends BasePoolAdapter {
   name = "sql";

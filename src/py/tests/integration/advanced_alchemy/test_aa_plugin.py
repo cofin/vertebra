@@ -5,7 +5,7 @@ import unittest.mock
 import pytest
 
 try:
-    import advanced_alchemy
+    import advanced_alchemy  # noqa: F401
 
     import vertebra.extensions.sqlalchemy.postgres  # noqa: F401
 

@@ -33,8 +33,8 @@ profile = "modern"
 
 
 def test_build_cli_one_file(runner: CliRunner, tmp_path: Path) -> None:
-    with mock.patch("vertebra.build.bundler.Bundler") as MockBundler:
-        mock_instance = MockBundler.return_value
+    with mock.patch("vertebra.build.bundler.Bundler") as mock_bundler_cls:
+        mock_instance = mock_bundler_cls.return_value
         mock_instance.build = mock.AsyncMock()
 
         result = runner.invoke(

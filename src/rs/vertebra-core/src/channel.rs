@@ -704,6 +704,10 @@ unsafe impl Sync for MpmcRing {}
 
 impl MpmcRing {
     /// Initialize a shared region in-place and return a ring handle.
+    ///
+    /// # Safety
+    /// Caller must ensure exclusive initialization (single writer) and that
+    /// the region is at least `layout.total_size` bytes.
     pub unsafe fn initialize(
         region: Arc<ShmRegion>,
         layout: RingLayout,
@@ -749,6 +753,9 @@ impl MpmcRing {
     }
 
     /// Attach to an existing shared region.
+    ///
+    /// # Safety
+    /// Caller must ensure the region stays mapped for the lifetime of the ring.
     pub unsafe fn attach(region: Arc<ShmRegion>, layout: RingLayout) -> Result<Self, ChannelError> {
         let header = region.as_ptr().cast::<ShmHeader>();
         let header_ref = &*header;
@@ -764,6 +771,10 @@ impl MpmcRing {
         Self::from_region(region, layout)
     }
 
+    /// Create a ring without initializing the header.
+    ///
+    /// # Safety
+    /// Caller must ensure the region is already initialized correctly.
     pub unsafe fn from_region(
         region: Arc<ShmRegion>,
         layout: RingLayout,

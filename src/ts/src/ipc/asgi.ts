@@ -1,6 +1,6 @@
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun";
-import { type IpcClientConfig, IpcPool, type IpcRequester } from "./client";
 import { ShmRouter } from "../broker/shm";
+import { type IpcClientConfig, IpcPool, type IpcRequester } from "./client";
 
 export type AsgiRequest = {
   id: string;
@@ -497,7 +497,10 @@ export class AsgiBridge {
     };
   }
 
-  private buildRequestMeta(request: Request, authClaims?: Record<string, any> | null): AsgiRequestStartFrame {
+  private buildRequestMeta(
+    request: Request,
+    authClaims?: Record<string, any> | null,
+  ): AsgiRequestStartFrame {
     const headers: [string, string][] = [];
     request.headers.forEach((value, key) => {
       headers.push([key, value]);

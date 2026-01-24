@@ -8,7 +8,7 @@ import pytest
 
 try:
     from litestar import Litestar, get
-    from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
+    from litestar.status_codes import HTTP_200_OK
     from litestar.testing import TestClient
 
     from vertebra.serializers.litestar import VERTEBRA_TYPE_ENCODERS

@@ -39,7 +39,7 @@ def compile_guards(guards: list[Callable]) -> Callable[[Any, Any], Awaitable[Non
     source = f"async def {func_name}(connection, handler):\n" + "\n".join(body)
 
     # Execute the source to define the function
-    exec(source, local_ns)
+    exec(source, local_ns)  # noqa: S102
     return local_ns[func_name]
 
 
@@ -117,7 +117,7 @@ def compile_di(
     body.append("    return results")
 
     source = f"async def {func_name}(ctx):\n" + "\n".join(body)
-    exec(source, local_ns)
+    exec(source, local_ns)  # noqa: S102
     return local_ns[func_name]
 
 
@@ -137,11 +137,12 @@ class PipelineCompiler:
         # We build the final runner function
         func_name = f"runner_{id(handler)}"
         from uuid import UUID
+
         local_ns = {
-            "compiled_guards": compiled_guards, 
-            "compiled_di": compiled_di, 
+            "compiled_guards": compiled_guards,
+            "compiled_di": compiled_di,
             "handler_fn": handler.fn,
-            "UUID": UUID
+            "UUID": UUID,
         }
 
         body = []
@@ -167,7 +168,7 @@ class PipelineCompiler:
             else:
                 # Try path params
                 body.append(f"    if '{param_name}' in ctx.path_params:")
-                
+
                 param_type = sig.parameters[param_name].annotation
                 if param_type is int:
                     body.append(f"        {param_name} = int(ctx.path_params['{param_name}'])")
@@ -190,5 +191,5 @@ class PipelineCompiler:
             body.append(f"    return handler_fn({args_str})")
 
         source = f"async def {func_name}(ctx):\n" + "\n".join(body)
-        exec(source, local_ns)
+        exec(source, local_ns)  # noqa: S102
         return local_ns[func_name]

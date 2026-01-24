@@ -218,7 +218,13 @@ function deepMerge<T extends Record<string, any>>(base: T, override: T): T {
     if (val === undefined) {
       continue;
     }
-    if (val !== null && typeof val === "object" && !Array.isArray(val) && result[key] !== null && typeof result[key] === "object") {
+    if (
+      val !== null &&
+      typeof val === "object" &&
+      !Array.isArray(val) &&
+      result[key] !== null &&
+      typeof result[key] === "object"
+    ) {
       result[key] = deepMerge(result[key], val);
     } else {
       result[key] = val;

@@ -1,5 +1,6 @@
 """Integration tests for Vertebra SQLAlchemy transactions."""
 
+from typing import Never
 from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine, text
@@ -64,8 +65,12 @@ class TestSQLAlchemyTransactions:
                     with conn.begin_nested():
                         mock_conn.savepoint.assert_called()
                         savepoint_name = mock_conn.savepoint.call_args[0][0]
-                        msg = "force rollback"
-                        raise ValueError(msg)
+
+                        def _trigger_rollback() -> Never:
+                            msg = "force rollback"
+                            raise ValueError(msg)
+
+                        _trigger_rollback()
                 except ValueError:
                     pass
 

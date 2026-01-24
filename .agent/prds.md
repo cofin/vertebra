@@ -10,7 +10,7 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 *Link: [./security-user-framework/](./security-user-framework/)*
 *Risk Level: [medium]*
 
-- [~] **PRD: Fix Supervisor Signature Mismatch**
+- [x] **PRD: Fix Supervisor Signature Mismatch**
 *Link: [./fix-supervisor-signature-mismatch/](./fix-supervisor-signature-mismatch/)*
 *Risk Level: [low]*
 

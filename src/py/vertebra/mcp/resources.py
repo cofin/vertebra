@@ -1,26 +1,52 @@
-from collections.abc import Callable
+import asyncio
+from collections.abc import Callable, Coroutine
 from functools import wraps
-from typing import Any
+from typing import Any, ParamSpec, Protocol, TypeVar, overload
 
 from vertebra.mcp.registry import ProcedureRegistry
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+class _McpResourceDecorator(Protocol):
+    """Protocol for decorator returned by mcp_resource()."""
+
+    @overload
+    def __call__(self, func: Callable[P, Coroutine[Any, Any, R]]) -> Callable[P, Coroutine[Any, Any, R]]: ...
+
+    @overload
+    def __call__(self, func: Callable[P, R]) -> Callable[P, R]: ...
+
+    def __call__(self, func: Callable[P, R]) -> Callable[P, R]: ...
 
 
 def mcp_resource(
     uri_template: str, name: str | None = None, description: str | None = None, mime_type: str | None = None
-) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+) -> _McpResourceDecorator:
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
         res_name = name or func.__name__
         res_description = description or (func.__doc__.strip() if func.__doc__ else None)
 
-        @wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
+        if asyncio.iscoroutinefunction(func):
+
+            @wraps(func)
+            async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+                return await func(*args, **kwargs)  # type: ignore[no-any-return]
+
+            wrapper: Callable[P, R] = async_wrapper  # type: ignore[assignment]
+        else:
+
+            @wraps(func)
+            def sync_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+                return func(*args, **kwargs)
+
+            wrapper = sync_wrapper
 
         registry = ProcedureRegistry.get_instance()
         registry.register_resource(
             uri_template, wrapper, name=res_name, description=res_description, mime_type=mime_type
         )
-
         return wrapper
 
     return decorator

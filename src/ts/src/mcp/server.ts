@@ -1,5 +1,5 @@
-import type { SchemaRegistry } from "./schema-registry";
 import type { MCPIPCBridge } from "./ipc-bridge";
+import type { SchemaRegistry } from "./schema-registry";
 
 export type JsonRpcRequest = {
   jsonrpc: "2.0";

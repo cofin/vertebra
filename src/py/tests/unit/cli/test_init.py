@@ -1,5 +1,6 @@
 """Tests for 'vertebra init' command."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -20,9 +21,6 @@ def clean_cwd(tmp_path: Path) -> Path:
     os.chdir(tmp_path)
     yield tmp_path
     os.chdir(cwd)
-
-
-import os
 
 
 def test_init_default(runner: CliRunner, tmp_path: Path) -> None:

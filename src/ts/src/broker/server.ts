@@ -1,6 +1,6 @@
 import { decode, encode } from "@msgpack/msgpack";
-import { ShmMpmcRing, ShmRing } from "./shm";
 import { log } from "../server/logging";
+import { ShmMpmcRing, ShmRing } from "./shm";
 
 // Opcode constants matched with Rust
 const OP_HASH_PASSWORD = 8;
@@ -32,11 +32,12 @@ export class BrokerServer {
   constructor(private config: BrokerConfig) {
     const controlName = config.controlName ?? `/${config.name}.control`;
     try {
-        // Ensure clean state
-        ShmMpmcRing.unlink(controlName);
-        // Control ring must be MPMC (Multi-Producer Single-Consumer)
-        this.control = ShmMpmcRing.create(controlName, config.slotSize, config.slots);
-    } catch (err) {      throw err;
+      // Ensure clean state
+      ShmMpmcRing.unlink(controlName);
+      // Control ring must be MPMC (Multi-Producer Single-Consumer)
+      this.control = ShmMpmcRing.create(controlName, config.slotSize, config.slots);
+    } catch (err) {
+      throw err;
     }
   }
 
@@ -140,88 +141,88 @@ export class BrokerServer {
     }
   }
 
-  private async handleClientMessage(client: ClientContext, msg: { data: Uint8Array; flags: number }): Promise<void> {
+  private async handleClientMessage(
+    client: ClientContext,
+    msg: { data: Uint8Array; flags: number },
+  ): Promise<void> {
     client.lastActive = Date.now();
     const { data, flags } = msg;
     let id: string | number | undefined;
 
     try {
-        let result: unknown;
-        let error: string | undefined;
+      let result: unknown;
+      let error: string | undefined;
 
-        // We need to decode first.
-        const decoded = decode(data);
-        
-        if (Array.isArray(decoded)) {
-            id = decoded[0];
-        } else if (typeof decoded === 'object' && decoded !== null) {
-            id = (decoded as any).id;
+      // We need to decode first.
+      const decoded = decode(data);
+
+      if (Array.isArray(decoded)) {
+        id = decoded[0];
+      } else if (typeof decoded === "object" && decoded !== null) {
+        id = (decoded as any).id;
+      }
+
+      switch (flags) {
+        case OP_HASH_PASSWORD: {
+          const [_, password] = decoded as [unknown, string];
+          result = await Bun.password.hash(password, { algorithm: "bcrypt" });
+          break;
         }
-
-        switch (flags) {
-            case OP_HASH_PASSWORD: {
-                const [_, password] = decoded as [unknown, string];
-                result = await Bun.password.hash(password, { algorithm: "bcrypt" });
-                break;
-            }
-            case OP_VERIFY_PASSWORD: {
-                const [_, password, hash] = decoded as [unknown, string, string];
-                result = await Bun.password.verify(password, hash);
-                break;
-            }
-            case OP_GENERATE_RANDOM: {
-                const [_, length] = decoded as [unknown, number];
-                const buf = new Uint8Array(length);
-                crypto.getRandomValues(buf);
-                result = buf;
-                break;
-            }
-            case OP_CSRF_SIGN: {
-                const [_, dataStr, secret] = decoded as [unknown, string, string];
-                const key = await crypto.subtle.importKey(
-                    "raw", 
-                    new TextEncoder().encode(secret),
-                    { name: "HMAC", hash: "SHA-256" },
-                    false,
-                    ["sign"]
-                );
-                const sig = await crypto.subtle.sign(
-                    "HMAC",
-                    key,
-                    new TextEncoder().encode(dataStr)
-                );
-                result = Buffer.from(sig).toString("base64");
-                break;
-            }
-            default:
-                // Check if it's a stats request (flags=0)
-                if (flags === 0) {
-                     const payload = decoded as Record<string, any>;
-                     if (payload.kind === "stats") {
-                         result = { pools: [] };
-                     } else {
-                         error = "Unknown command";
-                     }
-                } else {
-                    error = `Unknown opcode: ${flags}`;
-                }
+        case OP_VERIFY_PASSWORD: {
+          const [_, password, hash] = decoded as [unknown, string, string];
+          result = await Bun.password.verify(password, hash);
+          break;
         }
+        case OP_GENERATE_RANDOM: {
+          const [_, length] = decoded as [unknown, number];
+          const buf = new Uint8Array(length);
+          crypto.getRandomValues(buf);
+          result = buf;
+          break;
+        }
+        case OP_CSRF_SIGN: {
+          const [_, dataStr, secret] = decoded as [unknown, string, string];
+          const key = await crypto.subtle.importKey(
+            "raw",
+            new TextEncoder().encode(secret),
+            { name: "HMAC", hash: "SHA-256" },
+            false,
+            ["sign"],
+          );
+          const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(dataStr));
+          result = Buffer.from(sig).toString("base64");
+          break;
+        }
+        default:
+          // Check if it's a stats request (flags=0)
+          if (flags === 0) {
+            const payload = decoded as Record<string, any>;
+            if (payload.kind === "stats") {
+              result = { pools: [] };
+            } else {
+              error = "Unknown command";
+            }
+          } else {
+            error = `Unknown opcode: ${flags}`;
+          }
+      }
 
-        // Send response
-        const respPayload = error ? { id, ok: false, error: { message: error } } : { id, ok: true, result };
-        client.respRing.send(encode(respPayload), 0, this.config.timeoutMs);
-
+      // Send response
+      const respPayload = error
+        ? { id, ok: false, error: { message: error } }
+        : { id, ok: true, result };
+      client.respRing.send(encode(respPayload), 0, this.config.timeoutMs);
     } catch (e: any) {
-        console.error("Handler error", e);
-        // Try to send error if we have an ID
-        if (id !== undefined) {
-             const respPayload = { id, ok: false, error: { message: e.message || String(e) } };
-             try {
-                client.respRing.send(encode(respPayload), 0, this.config.timeoutMs);
-             } catch (sendErr) {
-                 console.error("Failed to send error response", sendErr);
-             }
+      console.error("Handler error", e);
+      // Try to send error if we have an ID
+      if (id !== undefined) {
+        const respPayload = { id, ok: false, error: { message: e.message || String(e) } };
+        try {
+          client.respRing.send(encode(respPayload), 0, this.config.timeoutMs);
+        } catch (sendErr) {
+          console.error("Failed to send error response", sendErr);
         }
+      }
     }
   }
 }

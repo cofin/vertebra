@@ -4,7 +4,6 @@ import pytest
 
 try:
     from litestar import Litestar, get, post, websocket
-    from litestar.handlers import WebsocketListener
 
     HAS_LITESTAR = True
 except ImportError:

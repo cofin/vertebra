@@ -1,5 +1,5 @@
-import type { Transport } from "./stdio";
 import type { ServerWebSocket } from "bun";
+import type { Transport } from "./stdio";
 
 export type WebSocketData = {
   sessionId: string;
