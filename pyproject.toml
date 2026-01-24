@@ -17,9 +17,10 @@ dependencies = [
   "httpx>=0.27.0",
   "jinja2",
   "pyjwt>=2.10.1",
+  "flatbuffers"
 ]
 description = "Python-first, high-performance application backbone with tRPC-like DX"
-keywords = ["trpc", "asgi", "ipc", "performance", "bun", "arrow"]
+keywords = ["trpc", "asgi", "ipc", "performance", "bun", "arrow", "flatbuffers"]
 license = { text = "Apache" }
 maintainers = [
   { name = "Cody Fincher", email = "cody@litestar.dev" },
