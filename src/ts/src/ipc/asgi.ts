@@ -36,6 +36,11 @@ export type AsgiRequestStartFrame = {
   path: string;
   query: string;
   headers: [string, string][];
+  scheme?: string;
+  httpVersion?: string;
+  rawPath?: Uint8Array;
+  queryString?: Uint8Array;
+  rootPath?: string;
   server?: [string, number | null];
   client?: [string, number | null];
   extensions?: Record<string, Record<string, unknown>>;
@@ -103,6 +108,26 @@ export type AsgiIpcFrame =
       server?: [string, number | null];
       client?: [string, number | null];
       extensions?: Record<string, Record<string, unknown>>;
+      auth_claims?: Record<string, any>;
+    }
+  | {
+      id: string;
+      type: "direct.http";
+      method: string;
+      path: string;
+      query: string;
+      headers: [string, string][];
+      scheme?: string;
+      httpVersion?: string;
+      rawPath?: Uint8Array;
+      queryString?: Uint8Array;
+      rootPath?: string;
+      server?: [string, number | null];
+      client?: [string, number | null];
+      extensions?: Record<string, Record<string, unknown>>;
+      handler_id?: number;
+      path_params?: Record<string, string>;
+      auth_claims?: Record<string, any>;
     }
   | {
       id: string;

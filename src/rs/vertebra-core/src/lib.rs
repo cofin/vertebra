@@ -12,6 +12,7 @@ pub mod channel;
 pub mod ipc;
 pub mod notify;
 pub(crate) mod platform;
+pub mod protocol;
 pub mod router;
 pub mod shm;
 pub mod sync;

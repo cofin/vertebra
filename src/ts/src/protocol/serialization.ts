@@ -1,4 +1,11 @@
 import { decode, encode } from "@msgpack/msgpack";
+import {
+  HEADER_SIZE,
+  Flags,
+  ResponseFlags,
+  RequestHeader,
+  ResponseHeader,
+} from "./headers";
 
 export type MessagePayload = Uint8Array | ArrayBuffer;
 
@@ -11,25 +18,100 @@ export function decodeMessage<T = unknown>(payload: MessagePayload): T {
   return decode(buffer) as T;
 }
 
-export function frameMessage(payload: Uint8Array): Uint8Array {
-  const header = new Uint8Array(4);
-  const view = new DataView(header.buffer);
-  view.setUint32(0, payload.length, false);
-  const framed = new Uint8Array(4 + payload.length);
-  framed.set(header, 0);
-  framed.set(payload, 4);
-  return framed;
+/**
+ * Encode a request message with protocol header.
+ *
+ * Wire format: [RequestHeader 16 bytes][MessagePack payload]
+ */
+export function encodeRequest(
+  value: unknown,
+  correlationId: bigint = 0n,
+  flags: number = Flags.NONE,
+): Uint8Array {
+  const payload = encode(value);
+  const header = new RequestHeader(correlationId, flags, payload.length);
+  const message = new Uint8Array(HEADER_SIZE + payload.length);
+  header.writeTo(message, 0);
+  message.set(payload, HEADER_SIZE);
+  return message;
 }
 
-export function deframeMessage(payload: Uint8Array): Uint8Array {
-  if (payload.length < 4) {
-    throw new Error("Frame too small");
+/**
+ * Decoded request result.
+ */
+export type DecodedRequest<T = unknown> = {
+  correlationId: bigint;
+  flags: number;
+  payload: T;
+};
+
+/**
+ * Decode a request message with protocol header.
+ *
+ * @param data Raw message bytes
+ * @returns Decoded request with correlation ID, flags, and payload
+ */
+export function decodeRequest<T = unknown>(data: Uint8Array): DecodedRequest<T> {
+  if (data.length < HEADER_SIZE) {
+    throw new Error(`Request too small: got ${data.length} bytes, need ${HEADER_SIZE}`);
   }
-  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  const size = view.getUint32(0, false);
-  const body = payload.subarray(4);
-  if (body.length !== size) {
-    throw new Error("Frame size mismatch");
+  const header = RequestHeader.fromBytes(data, 0);
+  const payloadBytes = data.subarray(HEADER_SIZE, HEADER_SIZE + header.payloadLen);
+  const payload = decode(payloadBytes) as T;
+  return {
+    correlationId: header.id,
+    flags: header.flags,
+    payload,
+  };
+}
+
+/**
+ * Encode a response message with protocol header.
+ *
+ * Wire format: [ResponseHeader 16 bytes][MessagePack payload]
+ */
+export function encodeResponse(
+  value: unknown,
+  correlationId: bigint = 0n,
+  flags: number = ResponseFlags.OK,
+): Uint8Array {
+  const payload = encode(value);
+  const header = new ResponseHeader(correlationId, flags, payload.length);
+  const message = new Uint8Array(HEADER_SIZE + payload.length);
+  header.writeTo(message, 0);
+  message.set(payload, HEADER_SIZE);
+  return message;
+}
+
+/**
+ * Decoded response result.
+ */
+export type DecodedResponse<T = unknown> = {
+  correlationId: bigint;
+  flags: number;
+  isOk: boolean;
+  isError: boolean;
+  payload: T;
+};
+
+/**
+ * Decode a response message with protocol header.
+ *
+ * @param data Raw message bytes
+ * @returns Decoded response with correlation ID, flags, status, and payload
+ */
+export function decodeResponse<T = unknown>(data: Uint8Array): DecodedResponse<T> {
+  if (data.length < HEADER_SIZE) {
+    throw new Error(`Response too small: got ${data.length} bytes, need ${HEADER_SIZE}`);
   }
-  return body;
+  const header = ResponseHeader.fromBytes(data, 0);
+  const payloadBytes = data.subarray(HEADER_SIZE, HEADER_SIZE + header.payloadLen);
+  const payload = decode(payloadBytes) as T;
+  return {
+    correlationId: header.id,
+    flags: header.flags,
+    isOk: header.isOk,
+    isError: header.isError,
+    payload,
+  };
 }

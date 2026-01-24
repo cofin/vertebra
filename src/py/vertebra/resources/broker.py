@@ -1,5 +1,8 @@
 """Shared-memory broker client for resource management."""
 
+from __future__ import annotations
+
+import asyncio
 import os
 import pathlib
 import uuid
@@ -10,6 +13,8 @@ import msgspec
 from vertebra._vertebra import AsyncRing, ShmRegion, SpscRing
 from vertebra.exceptions import BrokerError
 from vertebra.ipc.async_transport import AsyncShmTransport, PollingTransport, create_transport
+from vertebra.ipc.channel import encode_request, decode_response
+from vertebra.protocol import Flags, ResponseFlags
 from vertebra.resources.arrow import decode_arrow_nano
 from vertebra.serializers import MessagePackCodec
 from vertebra.utils.module_loader import ensure_pyarrow
@@ -35,6 +40,8 @@ class BrokerClientConfig(msgspec.Struct, frozen=True):
     client_id: str | None = None
     weight: int = 1
     prefer_eventfd: bool = True
+    max_concurrent_requests: int = 64
+    """Maximum number of concurrent in-flight requests."""
 
     def control_ring(self) -> RingConfig:
         name = self.control_name or f"/{self.name}.control"
@@ -54,12 +61,23 @@ class BrokerClientConfig(msgspec.Struct, frozen=True):
         return f"{tempfile.gettempdir()}/{self.name}.control.lock"
 
 
+class _PendingRequest:
+    """Represents a pending request awaiting response."""
+
+    __slots__ = ("future", "timeout_handle")
+
+    def __init__(self) -> None:
+        self.future: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+        self.timeout_handle: asyncio.TimerHandle | None = None
+
+
 class AsyncBrokerClient:
     def __init__(self, config: BrokerClientConfig | None = None) -> None:
         self._config = config or BrokerClientConfig()
         self._codec = MessagePackCodec()
         self._client_id = self._config.client_id or _default_client_id()
         self._seq = 0
+        self._correlation_seq = 0  # Protocol-level correlation ID
 
         # Ring buffers (PyO3-based)
         self._control: AsyncRing | None = None
@@ -67,10 +85,11 @@ class AsyncBrokerClient:
         self._response: AsyncRing | None = None
 
         # Async transport wrapper for RECEIVING responses only.
-        # NOTE: We send directly via self._request.send() instead of using a transport,
-        # because PollingTransport starts a poll thread that reads from the ring,
-        # which would consume our own sent data before the broker receives it.
         self._response_transport: AsyncShmTransport | PollingTransport | None = None
+
+        # Multiplexing support
+        self._pending: dict[int, _PendingRequest] = {}
+        self._response_loop_task: asyncio.Task[None] | None = None
 
     async def connect(self) -> None:
         if self._control is not None:
@@ -86,7 +105,6 @@ class AsyncBrokerClient:
         self._response = AsyncRing.create_named(resp_cfg.name, resp_cfg.slot_size, resp_cfg.slots)
 
         # Wrap response ring in async transport for efficient waiting.
-        # The request ring is used directly for sending (no transport needed).
         self._response_transport = create_transport(self._response, prefer_eventfd=self._config.prefer_eventfd)
 
         # Register with broker
@@ -103,13 +121,33 @@ class AsyncBrokerClient:
         encoded = self._codec.encode(payload)
         _with_lock(self._config.control_lock(), lambda: self._control.send(encoded, 0))
 
-        # Wait for response using the async transport
-        response = await self._recv_response()
+        # Wait for response using legacy path for registration
+        response = await self._recv_response_legacy()
         _assert_ok(response)
+
+        # Start response loop for multiplexing
+        self._response_loop_task = asyncio.create_task(self._run_response_loop())
 
     async def close(self) -> None:
         if self._control is None:
             return
+
+        # Cancel response loop
+        if self._response_loop_task:
+            self._response_loop_task.cancel()
+            try:
+                await self._response_loop_task
+            except asyncio.CancelledError:
+                pass
+            self._response_loop_task = None
+
+        # Fail all pending requests
+        for pending in self._pending.values():
+            if pending.timeout_handle:
+                pending.timeout_handle.cancel()
+            if not pending.future.done():
+                pending.future.set_exception(BrokerError("Connection closed"))
+        self._pending.clear()
 
         # Clean up async transport
         if self._response_transport:
@@ -126,15 +164,38 @@ class AsyncBrokerClient:
         if self._request is None or self._response_transport is None:
             msg = "Broker shared memory unavailable"
             raise BrokerError(msg)
+        if len(self._pending) >= self._config.max_concurrent_requests:
+            msg = "Too many concurrent requests"
+            raise BrokerError(msg)
 
         payload = dict(payload)
         payload["id"] = self._next_id()
-        encoded = self._codec.encode(payload)
+        correlation_id = self._next_correlation_id()
 
-        # Send directly via ring (not via transport) to avoid PollingTransport's
-        # poll thread consuming the data before the broker receives it.
-        self._request.send(encoded, 0)
-        return await self._recv_response()
+        # Create pending request
+        pending = _PendingRequest()
+        self._pending[correlation_id] = pending
+
+        # Set timeout
+        loop = asyncio.get_event_loop()
+        pending.timeout_handle = loop.call_later(
+            self._config.timeout_ms / 1000.0,
+            self._timeout_request,
+            correlation_id,
+        )
+
+        # Encode with protocol header and send
+        encoded = self._codec.encode(payload)
+        message = encode_request("broker.request", encoded, correlation_id=correlation_id)
+        self._request.send(message, 0)
+
+        try:
+            return await pending.future
+        finally:
+            # Clean up
+            if pending.timeout_handle:
+                pending.timeout_handle.cancel()
+            self._pending.pop(correlation_id, None)
 
     async def acquire(self, pool: str) -> str:
         response = await self.request({"kind": "acquire", "pool": pool, "timeout_ms": self._config.timeout_ms})
@@ -273,8 +334,8 @@ class AsyncBrokerClient:
         data = _assert_ok(response)
         return cast("list[str]", data.get("paths", []))
 
-    async def _recv_response(self) -> dict[str, Any]:
-        """Receive response using native async transport."""
+    async def _recv_response_legacy(self) -> dict[str, Any]:
+        """Receive response using native async transport (legacy, for registration)."""
         if self._response_transport is None:
             msg = "Response transport unavailable"
             raise BrokerError(msg)
@@ -282,9 +343,48 @@ class AsyncBrokerClient:
         result = self._codec.decode(data)
         return result if isinstance(result, dict) else {}
 
+    async def _run_response_loop(self) -> None:
+        """Background task that dispatches responses to pending requests."""
+        while self._response_transport is not None:
+            try:
+                data = await self._response_transport.recv()
+                correlation_id, flags, payload = decode_response(data)
+                decoded = self._codec.decode(payload)
+
+                pending = self._pending.get(correlation_id)
+                if pending is None:
+                    # Response for unknown correlation ID (may have timed out)
+                    continue
+
+                if pending.timeout_handle:
+                    pending.timeout_handle.cancel()
+
+                if flags & Flags.ERROR:
+                    pending.future.set_exception(BrokerError("Remote error"))
+                elif isinstance(decoded, dict):
+                    pending.future.set_result(decoded)
+                else:
+                    pending.future.set_result({})
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                # Log but continue processing
+                continue
+
+    def _timeout_request(self, correlation_id: int) -> None:
+        """Handle request timeout."""
+        pending = self._pending.pop(correlation_id, None)
+        if pending and not pending.future.done():
+            pending.future.set_exception(BrokerError("Request timed out"))
+
     def _next_id(self) -> int:
         self._seq += 1
         return self._seq
+
+    def _next_correlation_id(self) -> int:
+        self._correlation_seq += 1
+        return self._correlation_seq
 
     async def _release_arrow(self, name: str) -> None:
         try:

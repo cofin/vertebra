@@ -1,5 +1,11 @@
 import { ShmRing } from "../broker/shm";
-import { decodeMessage, encodeMessage } from "../protocol/serialization";
+import {
+  encodeRequest,
+  decodeResponse,
+  encodeMessage,
+  decodeMessage,
+} from "../protocol/serialization";
+import { Flags, ResponseFlags } from "../protocol/headers";
 
 export type IpcClientConfig = {
   name?: string;
@@ -11,6 +17,8 @@ export type IpcClientConfig = {
   poolSize?: number;
   poolMax?: number;
   acquireTimeoutMs?: number;
+  /** Maximum concurrent in-flight requests per connection (default: 64) */
+  maxConcurrentRequests?: number;
 };
 
 export type ResolvedIpcConfig = Required<
@@ -25,6 +33,7 @@ export type ResolvedIpcConfig = Required<
     | "poolSize"
     | "poolMax"
     | "acquireTimeoutMs"
+    | "maxConcurrentRequests"
   >
 >;
 
@@ -68,6 +77,7 @@ const DEFAULT_RETRIES = 1;
 const DEFAULT_RETRY_DELAY_MS = 50;
 const DEFAULT_POOL_SIZE = 2;
 const DEFAULT_POOL_MAX = 10;
+const DEFAULT_MAX_CONCURRENT_REQUESTS = 64;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -122,6 +132,7 @@ export function resolveIpcConfig(config: IpcClientConfig = {}): ResolvedIpcConfi
   const retries = config.retries ?? DEFAULT_RETRIES;
   const retryDelayMs = config.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
   const acquireTimeoutMs = config.acquireTimeoutMs ?? timeoutMs;
+  const maxConcurrentRequests = config.maxConcurrentRequests ?? DEFAULT_MAX_CONCURRENT_REQUESTS;
 
   return {
     name,
@@ -133,6 +144,7 @@ export function resolveIpcConfig(config: IpcClientConfig = {}): ResolvedIpcConfi
     poolSize,
     poolMax,
     acquireTimeoutMs,
+    maxConcurrentRequests,
   };
 }
 
@@ -140,10 +152,12 @@ class IpcConnection {
   private control: ShmRing | null = null;
   private requestRing: ShmRing | null = null;
   private responseRing: ShmRing | null = null;
-  private pending: PendingRequest | null = null;
+  private pendingRequests: Map<bigint, PendingRequest> = new Map();
+  private responseLoopRunning = false;
   private connecting: Promise<void> | null = null;
   private closed = false;
   private seq = 0;
+  private correlationSeq = 0n; // Protocol-level correlation ID counter
   private clientId = crypto.randomUUID().replaceAll("-", "");
 
   constructor(
@@ -156,28 +170,29 @@ class IpcConnection {
     if (!this.requestRing || !this.responseRing) {
       throw new IpcConnectionError("IPC ring unavailable");
     }
-    if (this.pending) {
-      throw new IpcConnectionError("IPC connection is busy");
+    if (this.pendingRequests.size >= this.config.maxConcurrentRequests) {
+      throw new IpcError("Too many concurrent requests");
     }
     const message = this.ensureId(payload);
-    const id = String((message as Record<string, unknown>).id);
+    const correlationId = this.nextCorrelationId();
+
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.failPending(new IpcTimeoutError("IPC request timed out"));
+        this.failRequest(correlationId, new IpcTimeoutError("IPC request timed out"));
       }, this.config.timeoutMs) as unknown as number;
-      this.pending = {
+
+      this.pendingRequests.set(correlationId, {
         resolve: (value) => resolve(value as T),
         reject,
         timer,
-      };
+      });
+
       try {
-        this.sendPayload(message);
+        this.sendPayload(message, correlationId);
+        this.ensureResponseLoop();
       } catch (error) {
-        this.failPending(error);
+        this.failRequest(correlationId, error);
       }
-      void this.waitForResponse(id)
-        .then((response) => this.resolvePending(response))
-        .catch((error) => this.failPending(error));
     });
   }
 
@@ -186,9 +201,7 @@ class IpcConnection {
     if (!this.requestRing || !this.responseRing) {
       throw new IpcConnectionError("IPC ring unavailable");
     }
-    if (this.pending) {
-      throw new IpcConnectionError("IPC connection is busy");
-    }
+    // Streaming uses payload-level IDs for matching, not correlation IDs
     const requestId = this.extractRequestId(payload);
     const outbound = this.normalizeOutbound(payload, requestId);
     const sendTask = this.sendOutbound(outbound, requestId);
@@ -208,7 +221,7 @@ class IpcConnection {
 
   async close(): Promise<void> {
     this.closed = true;
-    this.failPending(new IpcConnectionError("IPC connection closed"));
+    this.failAllPending(new IpcConnectionError("IPC connection closed"));
     if (this.requestRing) {
       this.requestRing.close();
       this.requestRing = null;
@@ -258,7 +271,8 @@ class IpcConnection {
       req_ring: reqName,
       resp_ring: respName,
     };
-    this.control.send(encodeMessage(registerMessage), 0, this.config.timeoutMs);
+    const correlationId = this.nextCorrelationId();
+    this.control.send(encodeRequest(registerMessage, correlationId, Flags.NONE), 0, this.config.timeoutMs);
     const response = await this.waitForResponse(String(registerId));
     if (!response || !(response as Record<string, unknown>).ok) {
       throw new IpcConnectionError("IPC registration failed");
@@ -279,7 +293,50 @@ class IpcConnection {
     throw new IpcConnectionError("IPC control ring unavailable", { cause: lastError });
   }
 
+  private ensureResponseLoop(): void {
+    if (this.responseLoopRunning) {
+      return;
+    }
+    this.responseLoopRunning = true;
+    void this.runResponseLoop();
+  }
+
+  private async runResponseLoop(): Promise<void> {
+    while (!this.closed && this.pendingRequests.size > 0) {
+      if (!this.responseRing) {
+        break;
+      }
+      const chunk = this.responseRing.recv(10);
+      if (!chunk) {
+        await sleep(1);
+        continue;
+      }
+      try {
+        const response = decodeResponse<Record<string, unknown>>(chunk.data);
+        const pending = this.pendingRequests.get(response.correlationId);
+        if (!pending) {
+          // Response for unknown correlation ID - possibly already timed out
+          continue;
+        }
+        this.pendingRequests.delete(response.correlationId);
+        if (pending.timer !== null) {
+          clearTimeout(pending.timer);
+        }
+        if (response.isError) {
+          pending.reject(new IpcError("Remote error", { cause: response.payload }));
+        } else {
+          pending.resolve(response.payload);
+        }
+      } catch (error) {
+        // Decoding error - log but continue processing
+        console.error("Failed to decode IPC response:", error);
+      }
+    }
+    this.responseLoopRunning = false;
+  }
+
   private async waitForResponse(expectedId: string): Promise<Record<string, unknown>> {
+    // Legacy method for streaming - waits for a specific payload ID
     if (!this.responseRing) {
       throw new IpcConnectionError("IPC response ring unavailable");
     }
@@ -290,22 +347,27 @@ class IpcConnection {
         await sleep(1);
         continue;
       }
-      const decoded = decodeMessage<Record<string, unknown>>(chunk.data);
-      const id = decoded?.id;
+      const response = decodeResponse<Record<string, unknown>>(chunk.data);
+      if (response.isError) {
+        throw new IpcError("Remote error", { cause: response.payload });
+      }
+      const id = response.payload?.id;
       if (String(id) !== expectedId) {
         continue;
       }
-      return decoded;
+      return response.payload;
     }
     throw new IpcTimeoutError("IPC response timed out");
   }
 
-  private sendPayload(payload: unknown): void {
+  private sendPayload(payload: unknown, correlationId?: bigint): bigint {
     if (!this.requestRing) {
       throw new IpcConnectionError("IPC request ring unavailable");
     }
-    const encoded = encodeMessage(payload);
+    const corrId = correlationId ?? this.nextCorrelationId();
+    const encoded = encodeRequest(payload, corrId, Flags.NONE);
     this.requestRing.send(encoded, 0, this.config.timeoutMs);
+    return corrId;
   }
 
   private extractRequestId(payload: unknown): string {
@@ -347,33 +409,37 @@ class IpcConnection {
     return { id: nextId(), payload };
   }
 
-  private resolvePending(value: unknown): void {
-    if (!this.pending) {
+  private failRequest(correlationId: bigint, reason: unknown): void {
+    const pending = this.pendingRequests.get(correlationId);
+    if (!pending) {
       return;
     }
-    if (this.pending.timer !== null) {
-      clearTimeout(this.pending.timer);
+    this.pendingRequests.delete(correlationId);
+    if (pending.timer !== null) {
+      clearTimeout(pending.timer);
     }
-    const resolve = this.pending.resolve;
-    this.pending = null;
-    resolve(value);
+    pending.reject(reason);
   }
 
-  private failPending(reason: unknown): void {
-    if (!this.pending) {
-      return;
+  private failAllPending(reason: unknown): void {
+    for (const [correlationId, pending] of this.pendingRequests) {
+      if (pending.timer !== null) {
+        clearTimeout(pending.timer);
+      }
+      pending.reject(reason);
     }
-    if (this.pending.timer !== null) {
-      clearTimeout(this.pending.timer);
-    }
-    const reject = this.pending.reject;
-    this.pending = null;
-    reject(reason);
+    this.pendingRequests.clear();
   }
 
   private nextSeq(): number {
     this.seq += 1;
     return this.seq;
+  }
+
+  private nextCorrelationId(): bigint {
+    const id = this.correlationSeq;
+    this.correlationSeq += 1n;
+    return id;
   }
 }
 

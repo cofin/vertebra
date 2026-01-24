@@ -6,8 +6,12 @@ export class SqlPool extends BasePoolAdapter {
   private connections = new Map<string, any>();
   private idle = new Set<string>();
 
-  constructor(maxSize: number, hooks: LifecycleHooks = {}) {
-    super(maxSize, hooks);
+  constructor(maxPoolSize: number, hooks: LifecycleHooks = {}) {
+    super(maxPoolSize, hooks);
+  }
+
+  maxSize(): number {
+    return this._maxSize;
   }
 
   inUse(): number {
@@ -66,7 +70,40 @@ export class SqlPool extends BasePoolAdapter {
     }
   }
 
-  // ... (execute methods) ...
+  // Execute methods (mock implementations)
+  async execute(token: string, sql: string, params: unknown[]): Promise<Record<string, unknown>> {
+    this.recordUse(token);
+    const conn = this.connections.get(token);
+    if (conn?.query) {
+      return await conn.query(sql, params);
+    }
+    return {};
+  }
+
+  async executeMany(token: string, sql: string, params: unknown[][]): Promise<Record<string, unknown>> {
+    this.recordUse(token);
+    for (const p of params) {
+      await this.execute(token, sql, p);
+    }
+    return {};
+  }
+
+  async command(token: string, command: string, args: unknown[]): Promise<unknown> {
+    this.recordUse(token);
+    return null;
+  }
+
+  async begin(token: string): Promise<void> {
+    this.recordUse(token);
+  }
+
+  async commit(token: string): Promise<void> {
+    this.recordUse(token);
+  }
+
+  async rollback(token: string): Promise<void> {
+    this.recordUse(token);
+  }
 
   protected async validateConnection(token: string): Promise<boolean> {
     // Simple mock validation
@@ -116,6 +153,11 @@ export class SqlPool extends BasePoolAdapter {
 // Mock other pools if necessary for compilation, or leave them as stub
 export class RedisPool extends BasePoolAdapter {
   name = "redis";
+
+  maxSize(): number {
+    return this._maxSize;
+  }
+
   inUse(): number {
     return 0;
   }

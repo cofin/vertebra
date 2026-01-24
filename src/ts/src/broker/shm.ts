@@ -2,6 +2,19 @@ import { dlopen, ptr, read, toArrayBuffer } from "bun:ffi";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+/**
+ * Create a null-terminated C string as Uint8Array.
+ * This avoids TypeScript type issues with Buffer.from().
+ */
+function cString(s: string): Uint8Array {
+  const encoder = new TextEncoder();
+  const encoded = encoder.encode(s);
+  const result = new Uint8Array(encoded.length + 1);
+  result.set(encoded);
+  result[encoded.length] = 0; // null terminator
+  return result;
+}
+
 export type ShmLibrary = {
   vtb_last_error_message: () => number;
   vtb_ring_capacity: (handle: number) => bigint;
@@ -18,7 +31,7 @@ export type ShmLibrary = {
     handle: number,
     out: Uint8Array,
     capacity: number,
-    outLen: number,
+    outLen: BigUint64Array,
     outFlags: Uint32Array,
     timeoutMs: number,
   ) => number;
@@ -52,7 +65,7 @@ export type ShmLibrary = {
     handle: number,
     out: Uint8Array,
     capacity: number,
-    outLen: number,
+    outLen: BigUint64Array,
     outFlags: Uint32Array,
     timeoutMs: number,
   ) => number;
@@ -241,7 +254,7 @@ export class ShmRing {
   static create(name: string, slotSize: number, slots: number): ShmRing {
     const lib = loadShmLib();
     const out = new BigUint64Array(1);
-    const namePtr = ptr(Buffer.from(`${name}\0`));
+    const namePtr = ptr(cString(name));
     const status = lib.vtb_ring_create(namePtr, slotSize, slots, ptr(out));
     if (status !== STATUS_OK) {
       throw new Error(`shm ring create failed: ${formatStatusError(status, lib)}`);
@@ -253,7 +266,7 @@ export class ShmRing {
   static open(name: string, slotSize: number, slots: number): ShmRing {
     const lib = loadShmLib();
     const out = new BigUint64Array(1);
-    const namePtr = ptr(Buffer.from(`${name}\0`));
+    const namePtr = ptr(cString(name));
     const status = lib.vtb_ring_open(namePtr, slotSize, slots, ptr(out));
     if (status !== STATUS_OK) {
       throw new Error(`shm ring open failed: ${formatStatusError(status, lib)}`);
@@ -269,8 +282,20 @@ export class ShmRing {
     }
   }
 
-  recv(timeoutMs = 0): { data: Uint8Array; flags: number } | null {
-    const buffer = new Uint8Array(this.capacity);
+  /**
+   * Receive a message from the ring buffer.
+   *
+   * @param timeoutMs Timeout in milliseconds (0 = non-blocking)
+   * @param pool Optional buffer pool for zero-allocation receives
+   * @returns Message data and flags, or null if empty/timeout
+   *
+   * When a BufferPool is provided, the returned buffer comes from the pool
+   * and MUST be released back via pool.release(result.data) after use.
+   * This eliminates per-message allocations in hot paths.
+   */
+  recv(timeoutMs = 0, pool?: BufferPool): { data: Uint8Array; flags: number } | null {
+    // Use pooled buffer if available, otherwise allocate
+    const buffer = pool?.acquire() ?? new Uint8Array(this.capacity);
     const outLen = new BigUint64Array(1);
     const outFlags = new Uint32Array(1);
     const status = this.lib.vtb_ring_recv(
@@ -282,9 +307,17 @@ export class ShmRing {
       timeoutMs,
     );
     if (status === STATUS_TIMEOUT || status === STATUS_EMPTY) {
+      // Release buffer back to pool if we acquired from pool
+      if (pool) {
+        pool.release(buffer);
+      }
       return null;
     }
     if (status !== STATUS_OK) {
+      // Release buffer back to pool on error
+      if (pool) {
+        pool.release(buffer);
+      }
       throw new Error(`shm ring recv failed: ${formatStatusError(status, this.lib)}`);
     }
     const len = Number(outLen[0]);
@@ -311,7 +344,7 @@ export class ShmRegion {
   static create(name: string, size: number): ShmRegion {
     const lib = loadShmLib();
     const out = new BigUint64Array(1);
-    const namePtr = ptr(Buffer.from(`${name}\0`));
+    const namePtr = ptr(cString(name));
     const status = lib.vtb_region_create(namePtr, size, ptr(out));
     if (status !== STATUS_OK) {
       throw new Error(`shm region create failed: ${formatStatusError(status, lib)}`);
@@ -323,7 +356,7 @@ export class ShmRegion {
   static open(name: string, size: number): ShmRegion {
     const lib = loadShmLib();
     const out = new BigUint64Array(1);
-    const namePtr = ptr(Buffer.from(`${name}\0`));
+    const namePtr = ptr(cString(name));
     const status = lib.vtb_region_open(namePtr, size, ptr(out));
     if (status !== STATUS_OK) {
       throw new Error(`shm region open failed: ${formatStatusError(status, lib)}`);
@@ -362,7 +395,7 @@ export class ShmRouter {
   }
 
   insert(path: string, id: number): void {
-    const pathPtr = Buffer.from(`${path}\0`);
+    const pathPtr = cString(path);
     const status = this.lib.vtb_router_insert(this.handle, pathPtr as any, BigInt(id));
     if (status !== STATUS_OK) {
       throw new Error(`shm router insert failed: ${formatStatusError(status, this.lib)}`);
@@ -370,7 +403,7 @@ export class ShmRouter {
   }
 
   matchPath(path: string): { id: number; params: Record<string, string> } | null {
-    const pathPtr = Buffer.from(`${path}\0`);
+    const pathPtr = cString(path);
     const outId = new BigUint64Array(1);
     const paramsCap = 4096;
     const outParamsJson = new Uint8Array(paramsCap);
@@ -410,6 +443,92 @@ export class ShmRouter {
   }
 }
 
+/**
+ * Pre-allocated buffer pool for zero-allocation recv() operations.
+ *
+ * The pool pre-allocates a fixed number of Uint8Array buffers at construction.
+ * Instead of allocating a new buffer on every recv(), callers acquire() from
+ * the pool and release() when done processing the data.
+ *
+ * This eliminates GC pressure and provides consistent latency in hot paths.
+ *
+ * @example
+ * ```typescript
+ * const pool = new BufferPool(64, 65536); // 64 buffers of 64KB each
+ *
+ * // In recv loop:
+ * const result = ring.recv(0, pool);
+ * if (result) {
+ *   processData(result.data);
+ *   pool.release(result.data);
+ * }
+ * ```
+ */
+export class BufferPool {
+  private readonly buffers: Uint8Array[];
+  private readonly available: Uint8Array[];
+  private readonly capacity: number;
+  private readonly poolSize: number;
+
+  /**
+   * Create a new buffer pool.
+   *
+   * @param poolSize Number of buffers to pre-allocate
+   * @param bufferCapacity Size of each buffer in bytes
+   */
+  constructor(poolSize: number, bufferCapacity: number) {
+    this.poolSize = poolSize;
+    this.capacity = bufferCapacity;
+    this.buffers = [];
+    this.available = [];
+
+    // Pre-allocate all buffers at construction time
+    for (let i = 0; i < poolSize; i++) {
+      const buf = new Uint8Array(bufferCapacity);
+      this.buffers.push(buf);
+      this.available.push(buf);
+    }
+  }
+
+  /**
+   * Acquire a buffer from the pool.
+   *
+   * Returns null if the pool is exhausted. Callers should either:
+   * - Wait and retry
+   * - Fall back to allocation (not recommended for hot paths)
+   * - Treat as backpressure signal
+   */
+  acquire(): Uint8Array | null {
+    const buf = this.available.pop();
+    return buf ?? null;
+  }
+
+  /**
+   * Release a buffer back to the pool.
+   *
+   * The buffer must have been acquired from this pool.
+   * Releasing a buffer that wasn't acquired from this pool is a logic error.
+   */
+  release(buffer: Uint8Array): void {
+    // Only accept buffers that belong to this pool
+    if (this.buffers.includes(buffer)) {
+      this.available.push(buffer);
+    }
+  }
+
+  /**
+   * Get pool statistics.
+   */
+  stats(): { total: number; available: number; inUse: number; capacity: number } {
+    return {
+      total: this.poolSize,
+      available: this.available.length,
+      inUse: this.poolSize - this.available.length,
+      capacity: this.capacity,
+    };
+  }
+}
+
 export class ShmMpmcRing {
   private handle: number;
   private capacity: number;
@@ -424,7 +543,7 @@ export class ShmMpmcRing {
   static create(name: string, slotSize: number, slots: number): ShmMpmcRing {
     const lib = loadShmLib();
     const out = new BigUint64Array(1);
-    const namePtr = ptr(Buffer.from(`${name}\0`));
+    const namePtr = ptr(cString(name));
     const status = lib.vtb_mpmc_create(namePtr, slotSize, slots, ptr(out));
     if (status !== STATUS_OK) {
       throw new Error(`shm mpmc create failed: ${formatStatusError(status, lib)}`);
@@ -436,7 +555,7 @@ export class ShmMpmcRing {
   static open(name: string, slotSize: number, slots: number): ShmMpmcRing {
     const lib = loadShmLib();
     const out = new BigUint64Array(1);
-    const namePtr = ptr(Buffer.from(`${name}\0`));
+    const namePtr = ptr(cString(name));
     const status = lib.vtb_mpmc_open(namePtr, slotSize, slots, ptr(out));
     if (status !== STATUS_OK) {
       throw new Error(`shm mpmc open failed: ${formatStatusError(status, lib)}`);
@@ -452,8 +571,15 @@ export class ShmMpmcRing {
     }
   }
 
-  recv(timeoutMs = 0): { data: Uint8Array; flags: number } | null {
-    const buffer = new Uint8Array(this.capacity);
+  /**
+   * Receive a message from the MPMC ring buffer.
+   *
+   * @param timeoutMs Timeout in milliseconds (0 = non-blocking)
+   * @param pool Optional buffer pool for zero-allocation receives
+   * @returns Message data and flags, or null if empty/timeout
+   */
+  recv(timeoutMs = 0, pool?: BufferPool): { data: Uint8Array; flags: number } | null {
+    const buffer = pool?.acquire() ?? new Uint8Array(this.capacity);
     const outLen = new BigUint64Array(1);
     const outFlags = new Uint32Array(1);
     const status = this.lib.vtb_mpmc_recv(
@@ -465,9 +591,15 @@ export class ShmMpmcRing {
       timeoutMs,
     );
     if (status === STATUS_TIMEOUT || status === STATUS_EMPTY) {
+      if (pool) {
+        pool.release(buffer);
+      }
       return null;
     }
     if (status !== STATUS_OK) {
+      if (pool) {
+        pool.release(buffer);
+      }
       throw new Error(`shm mpmc recv failed: ${formatStatusError(status, this.lib)}`);
     }
     const len = Number(outLen[0]);
@@ -480,7 +612,7 @@ export class ShmMpmcRing {
 
   static unlink(name: string): void {
     const lib = loadShmLib();
-    const namePtr = ptr(Buffer.from(`${name}\0`));
+    const namePtr = ptr(cString(name));
     // We ignore errors (e.g. ENOENT) for unlink
     lib.vtb_shm_unlink(namePtr);
   }

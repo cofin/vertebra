@@ -228,8 +228,10 @@ export class ProcessManager {
   private async pingWorker(workerId: number): Promise<boolean> {
     const { protocol: _protocol, ...ipc } = this.options.ipc;
     const client = new IpcClient(ipc, workerId);
+    const requestId = crypto.randomUUID();
     const frames = (async function* () {
       yield {
+        id: requestId,
         type: "http.request.start",
         method: "GET",
         path: HEALTH_PATH,
@@ -238,7 +240,7 @@ export class ProcessManager {
         scheme: "http",
         httpVersion: "1.1",
       } as AsgiIpcFrame;
-      yield { type: "http.request", body: new Uint8Array(), more_body: false } as AsgiIpcFrame;
+      yield { id: requestId, type: "http.request", body: new Uint8Array(), more_body: false } as AsgiIpcFrame;
     })();
     try {
       const status = await this.readStatus(client, frames);

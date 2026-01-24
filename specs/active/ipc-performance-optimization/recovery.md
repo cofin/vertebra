@@ -2,8 +2,8 @@
 
 ## Quick Resume
 
-- **Last Phase**: Planning Complete
-- **Current Status**: Ready for Implementation
+- **Last Phase**: Phase 4 Complete (All Tasks)
+- **Current Status**: Multiplexing support added to TypeScript and Python clients
 - **PRD Location**: `specs/active/ipc-performance-optimization/`
 
 ## Intelligence Context
@@ -62,12 +62,34 @@ High - Multi-language architecture change across Python, Rust, and TypeScript
 - [x] Task breakdown (24 tasks, 4 phases)
 - [x] World-class targets defined (p99 less than 10us, greater than 1M msg/sec)
 
+### In Progress
+
+- [x] Phase 1: Zero-Copy Foundation + FD Inheritance ✓
+  - [x] Task 1.1: Add InheritableNotifier to notify.rs ✓
+  - [x] Task 1.2: Modify NativeSupervisor for FD creation before fork ✓
+  - [x] Task 1.3: Add BufferPool class to shm.ts ✓
+  - [x] Task 1.4: Remove _BufferProxy from channel.py ✓
+
+- [x] Phase 2: Event-Driven Wakeups ✓
+  - [x] Task 2.1: Replace setInterval polling in BrokerServer ✓
+  - [x] Task 2.2: Optimize Python Channel sync methods with Rust-level timeouts ✓
+
+- [x] Phase 3: Zero-Parse-Cost Headers ✓
+  - [x] Task 3.1: Create Rust protocol module (`src/rs/vertebra-core/src/protocol/`) ✓
+    - Implemented as hand-written `#[repr(C)]` structs (simpler than FlatBuffers codegen)
+  - [x] Task 3.2: Create Python protocol module (`src/py/vertebra/protocol/`) ✓
+  - [x] Task 3.3: Create TypeScript protocol module (`src/ts/src/protocol/headers.ts`) ✓
+  - [x] Task 3.5.1: Update Python Channel to use protocol headers ✓
+  - [x] Task 3.5.2: Add request/response encoding to TypeScript serialization ✓
+  - [x] Task 3.5.3: Update TypeScript IPC Client to use protocol headers ✓
+  - [x] Task 3.5.4: Remove deprecated framing functions ✓
+
+- [x] Phase 4: Request Multiplexing + Polish ✓
+  - [x] Task 4.1: Add multiplexing support to TypeScript IPC Client ✓
+  - [x] Task 4.2: Add multiplexing support to Python broker client ✓
+
 ### Pending
 
-- [ ] Phase 1: Zero-Copy Foundation + FD Inheritance
-- [ ] Phase 2: Event-Driven Wakeups
-- [ ] Phase 3: FlatBuffers Control Plane
-- [ ] Phase 4: Request Multiplexing + Polish
 - [ ] Benchmark validation
 - [ ] Documentation updates
 
@@ -89,18 +111,19 @@ High - Multi-language architecture change across Python, Rust, and TypeScript
 
 **Rationale**:
 - User explicitly required sync support
-- Sync path uses direct select.select(), not thread pool
-- Async path uses asyncio.add_reader()
+- Sync path uses Rust-level blocking with timeout (no Python polling)
+- Async path uses asyncio.to_thread() with efficient underlying sync
 - Both achieve sub-10us p99
 
-### 3. FlatBuffers for Control Plane Only
+### 3. Hand-Written Protocol Headers
 
-**Decision**: Use FlatBuffers for headers, keep MessagePack for dynamic payloads.
+**Decision**: Use `#[repr(C)]` structs instead of FlatBuffers code generation.
 
 **Rationale**:
-- Control plane schema is known at compile time
-- Dynamic payloads (user data, SQL results) have unknown schema
-- Hybrid approach gives best of both worlds
+- Simpler and equally performant as FlatBuffers for fixed-size headers
+- 16-byte fixed headers with zero-copy reads from shared memory
+- No build-time dependencies on external codegen tools
+- Same wire format compatibility across Rust, Python, TypeScript
 
 ### 4. Zero Allocations in Hot Path
 
@@ -113,25 +136,29 @@ High - Multi-language architecture change across Python, Rust, and TypeScript
 
 ## Critical Files
 
-### Must Modify
+### Completed Modifications
 
-| File | Change | Priority |
-|------|--------|----------|
-| `src/rs/vertebra-core/src/notify.rs` | Add InheritableNotifier | Phase 1 |
-| `src/rs/vertebra-py/src/supervisor.rs` | Create FDs before fork | Phase 1 |
-| `src/ts/src/broker/shm.ts` | Add BufferPool | Phase 1 |
-| `src/ts/src/broker/server.ts:53-55` | Remove setInterval | Phase 2 |
-| `src/py/vertebra/server/worker.py:232` | Remove asyncio.sleep | Phase 2 |
-| `src/py/vertebra/ipc/channel.py` | Optimize sync methods | Phase 2 |
+| File | Change | Status |
+|------|--------|--------|
+| `src/rs/vertebra-core/src/notify.rs` | Add InheritableNotifier | ✓ |
+| `src/rs/vertebra-py/src/supervisor.rs` | Create FDs before fork | ✓ |
+| `src/ts/src/broker/shm.ts` | Add BufferPool | ✓ |
+| `src/ts/src/broker/server.ts` | Replace setInterval with adaptive backoff | ✓ |
+| `src/py/vertebra/ipc/channel.py` | Protocol headers with correlation IDs | ✓ |
+| `src/ts/src/protocol/serialization.ts` | Add encodeRequest/decodeResponse | ✓ |
+| `src/ts/src/ipc/client.ts` | Multiplexing with Map<bigint, PendingRequest> | ✓ |
+| `src/py/vertebra/resources/broker.py` | Multiplexing with response loop | ✓ |
 
-### Must Create
+### New Files Created
 
-| File | Purpose | Priority |
-|------|---------|----------|
-| `src/schema/ipc.fbs` | FlatBuffers schema | Phase 3 |
-| `src/rs/vertebra-core/src/protocol/` | Rust FlatBuffers | Phase 3 |
-| `src/py/vertebra/protocol/flatbuffers/` | Python FlatBuffers | Phase 3 |
-| `src/ts/src/protocol/flatbuffers/` | TS FlatBuffers | Phase 3 |
+| File | Purpose | Status |
+|------|---------|--------|
+| `src/rs/vertebra-core/src/protocol/mod.rs` | Rust protocol headers | ✓ |
+| `src/py/vertebra/protocol/__init__.py` | Python protocol headers | ✓ |
+| `src/py/tests/unit/protocol/test_headers.py` | Python protocol tests | ✓ |
+| `src/ts/src/protocol/headers.ts` | TypeScript protocol headers | ✓ |
+| `src/ts/tests/unit/protocol/headers.test.ts` | TypeScript protocol tests | ✓ |
+| `src/ts/tests/unit/protocol/serialization.test.ts` | TypeScript serialization tests | ✓ |
 
 ## Performance Targets
 
@@ -148,15 +175,14 @@ High - Multi-language architecture change across Python, Rust, and TypeScript
 |------|------------|
 | FD inheritance complexity | Test with strace on Linux |
 | Bun event loop integration | NAPI TSFN fallback available |
-| FlatBuffers effort | Schema-first design |
 | Platform parity | Linux primary, others fallback |
 
 ## Next Steps
 
-Run `/implement ipc-performance-optimization` to begin implementation.
-
-Alternatively, implement manually starting with Phase 1:
-1. Modify `notify.rs` to add `InheritableNotifier`
-2. Modify `supervisor.rs` to create FDs before fork
-3. Add `BufferPool` to `shm.ts`
-4. Run `make test-all` to verify no regressions
+1. Proceed to Phase 4: Request Multiplexing
+   - Add correlation ID tracking in TypeScript IPC client
+   - Add multiplexing support in Python broker client
+   - Support 64+ concurrent in-flight requests
+2. Run full test suite: `make test-all`
+3. Create benchmark suite for performance validation
+4. Update documentation

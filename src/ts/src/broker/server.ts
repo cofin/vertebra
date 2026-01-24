@@ -1,6 +1,6 @@
 import { decode, encode } from "@msgpack/msgpack";
 import { log } from "../server/logging";
-import { ShmMpmcRing, ShmRing } from "./shm";
+import { BufferPool, ShmMpmcRing, ShmRing } from "./shm";
 
 // Opcode constants matched with Rust
 const OP_HASH_PASSWORD = 8;
@@ -8,12 +8,19 @@ const OP_VERIFY_PASSWORD = 9;
 const OP_GENERATE_RANDOM = 10;
 const OP_CSRF_SIGN = 11;
 
+// Polling strategy constants
+const SPIN_ITERATIONS = 100; // Hot spin before backing off
+const BACKOFF_MIN_MS = 0; // Start with setImmediate
+const BACKOFF_MAX_MS = 1; // Max backoff = 1ms (was the original interval)
+
 export type BrokerConfig = {
   name: string;
   controlName?: string;
   slotSize: number;
   slots: number;
   timeoutMs: number;
+  /** Number of buffers to pre-allocate for zero-copy recv */
+  bufferPoolSize?: number;
 };
 
 type ClientContext = {
@@ -27,7 +34,13 @@ export class BrokerServer {
   private control: ShmMpmcRing;
   private clients = new Map<string, ClientContext>();
   private stopped = false;
-  private timer: Timer | null = null;
+  private pollTimer: Timer | null = null;
+  private pollImmediate: boolean = false;
+  private backoffMs: number = BACKOFF_MIN_MS;
+  private consecutiveEmptyPolls: number = 0;
+  private readonly bufferPool: BufferPool;
+  /** Inherited notify FD from supervisor (if available) */
+  private readonly notifyFd: number | null;
 
   constructor(private config: BrokerConfig) {
     const controlName = config.controlName ?? `/${config.name}.control`;
@@ -39,28 +52,32 @@ export class BrokerServer {
     } catch (err) {
       throw err;
     }
+
+    // Pre-allocate buffer pool for zero-copy operations
+    const poolSize = config.bufferPoolSize ?? 64;
+    this.bufferPool = new BufferPool(poolSize, config.slotSize);
+
+    // Check for inherited notify FD from supervisor
+    const fdEnv = process.env.VERTEBRA_NOTIFY_FD;
+    this.notifyFd = fdEnv ? parseInt(fdEnv, 10) : null;
+    if (this.notifyFd !== null && !isNaN(this.notifyFd)) {
+      log("info", "broker.notify_fd_inherited", { fd: this.notifyFd });
+    }
   }
 
   start(): void {
-    if (this.timer) return;
-
-    // Main event loop
-    // Since JS is single-threaded, we can use a timer or setImmediate to poll rings.
-    // For high performance, we might want a tighter loop or blocking call in a worker?
-    // But Bun is single threaded.
-    // We'll use a polling interval for now (e.g. 1ms or 0ms/nextTick)
-
-    this.timer = setInterval(() => {
-      this.poll();
-    }, 1);
+    if (this.pollTimer || this.pollImmediate) return;
+    this.stopped = false;
+    this.schedulePoll();
   }
 
   stop(): void {
     this.stopped = true;
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = null;
     }
+    this.pollImmediate = false;
     this.control.close();
     for (const client of this.clients.values()) {
       client.reqRing.close();
@@ -69,25 +86,88 @@ export class BrokerServer {
     this.clients.clear();
   }
 
-  private poll(): void {
+  /**
+   * Schedule the next poll iteration with adaptive backoff.
+   *
+   * When there's work to do, we poll immediately (setImmediate).
+   * When idle, we gradually back off to reduce CPU usage.
+   * This provides both low latency (when busy) and low CPU (when idle).
+   */
+  private schedulePoll(): void {
     if (this.stopped) return;
 
-    // 1. Poll Control Ring
+    if (this.backoffMs === 0) {
+      // Use setImmediate for minimal latency when active
+      this.pollImmediate = true;
+      setImmediate(() => {
+        this.pollImmediate = false;
+        this.pollWithBackoff();
+      });
+    } else {
+      // Use setTimeout for backoff when idle
+      this.pollTimer = setTimeout(() => {
+        this.pollTimer = null;
+        this.pollWithBackoff();
+      }, this.backoffMs);
+    }
+  }
+
+  /**
+   * Poll with adaptive backoff strategy.
+   *
+   * If we processed any messages, reset backoff to 0 (hot path).
+   * If we're idle for multiple iterations, gradually increase backoff.
+   */
+  private pollWithBackoff(): void {
+    const processed = this.poll();
+
+    if (processed > 0) {
+      // Work was done - reset to hot path
+      this.consecutiveEmptyPolls = 0;
+      this.backoffMs = BACKOFF_MIN_MS;
+    } else {
+      // No work - increase backoff gradually
+      this.consecutiveEmptyPolls++;
+      if (this.consecutiveEmptyPolls > SPIN_ITERATIONS) {
+        this.backoffMs = Math.min(this.backoffMs + 0.1, BACKOFF_MAX_MS);
+      }
+    }
+
+    this.schedulePoll();
+  }
+
+  /**
+   * Poll all rings for messages.
+   *
+   * @returns Number of messages processed
+   */
+  private poll(): number {
+    if (this.stopped) return 0;
+
+    let processed = 0;
+
+    // 1. Poll Control Ring (using buffer pool for zero-copy)
     try {
-      const msg = this.control.recv(0); // Non-blocking
+      const msg = this.control.recv(0, this.bufferPool);
       if (msg) {
+        processed++;
         this.handleControlMessage(msg.data);
+        // Release buffer back to pool after processing
+        this.bufferPool.release(msg.data);
       }
     } catch (e) {
       console.error("Broker control poll error", e);
     }
 
-    // 2. Poll Clients
+    // 2. Poll Clients (using buffer pool for zero-copy)
     for (const [clientId, client] of this.clients) {
       try {
-        const msg = client.reqRing.recv(0);
+        const msg = client.reqRing.recv(0, this.bufferPool);
         if (msg) {
+          processed++;
           this.handleClientMessage(client, msg);
+          // Release buffer back to pool after processing
+          this.bufferPool.release(msg.data);
         }
       } catch (e) {
         console.error(`Broker client ${clientId} poll error`, e);
@@ -95,6 +175,8 @@ export class BrokerServer {
         this.clients.delete(clientId);
       }
     }
+
+    return processed;
   }
 
   private handleControlMessage(data: Uint8Array): void {

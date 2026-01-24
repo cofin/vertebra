@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from vertebra.ipc.channel import Channel, SerializationError, _encode_message
+from vertebra.ipc.channel import Channel, SerializationError, encode_request
 from vertebra.procedures import ProcedureRegistry, procedure
 
 pytestmark = pytest.mark.unit
@@ -107,7 +107,7 @@ def test_integration_invalid_payload() -> None:
     if not ready.wait(timeout=2.0):
         pytest.fail("Server thread did not become ready")
 
-    client._handle.send_request(_encode_message("bad.payload", b"not-json"))
+    client._handle.send_request(encode_request("bad.payload", b"not-json"))
 
     # Wait for clean shutdown
     if not shutdown.wait(timeout=2.0):

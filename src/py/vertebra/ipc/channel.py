@@ -1,5 +1,7 @@
 """High-level IPC channel wrappers."""
 
+from __future__ import annotations
+
 import asyncio
 import struct
 import time
@@ -8,35 +10,78 @@ from typing import Any, Self, TypeVar, cast
 from vertebra import _vertebra
 from vertebra.exceptions import ChannelError, SerializationError
 from vertebra.procedures import ProcedureRegistry, get_serializer
+from vertebra.protocol import HEADER_SIZE, Flags, RequestHeader, ResponseHeader
 from vertebra.serializers import get_json_codec
 
-_HEADER = struct.Struct("!HI")  # procedure length (u16), payload length (u32)
-_MAX_NAME_LEN = 0xFFFF
+# Procedure ID encoding: length (u16) + bytes
+_PROC_LEN = struct.Struct("<H")  # Little-endian u16
+_MAX_PROC_LEN = 0xFFFF
 
 T = TypeVar("T")
 
 
-def _encode_message(procedure_id: str, payload: bytes) -> bytes:
-    encoded = procedure_id.encode("utf-8")
-    if len(encoded) > _MAX_NAME_LEN:
+def encode_request(
+    procedure_id: str,
+    payload: bytes,
+    *,
+    correlation_id: int = 0,
+    flags: int = 0,
+) -> bytes:
+    """Encode a request message.
+
+    Wire format:
+        [RequestHeader 16 bytes][procedure_id_len u16][procedure_id][payload]
+    """
+    proc_bytes = procedure_id.encode("utf-8")
+    if len(proc_bytes) > _MAX_PROC_LEN:
         msg = "procedure_id too long"
         raise ChannelError(msg)
-    return _HEADER.pack(len(encoded), len(payload)) + encoded + payload
+    body = _PROC_LEN.pack(len(proc_bytes)) + proc_bytes + payload
+    header = RequestHeader(id=correlation_id, flags=flags, payload_len=len(body))
+    return header.to_bytes() + body
 
 
-def _decode_message(data: bytes) -> tuple[str, bytes]:
-    if len(data) < _HEADER.size:
-        msg = "payload too small"
+def decode_request(data: bytes | memoryview) -> tuple[int, int, str, bytes]:
+    """Decode a request message.
+
+    Returns: (correlation_id, flags, procedure_id, payload)
+    """
+    if len(data) < HEADER_SIZE + _PROC_LEN.size:
+        msg = f"request too small: got {len(data)} bytes"
         raise ChannelError(msg)
-    name_len, payload_len = _HEADER.unpack_from(data)
-    start = _HEADER.size
-    end = start + name_len
-    if len(data) < end + payload_len:
-        msg = "payload truncated"
+    header = RequestHeader.from_bytes(data[:HEADER_SIZE])
+    body = data[HEADER_SIZE:]
+    proc_len = _PROC_LEN.unpack_from(body)[0]
+    if len(body) < _PROC_LEN.size + proc_len:
+        msg = "request truncated"
         raise ChannelError(msg)
-    procedure_id = data[start:end].decode("utf-8")
-    payload = data[end : end + payload_len]
-    return procedure_id, payload
+    procedure_id = bytes(body[_PROC_LEN.size : _PROC_LEN.size + proc_len]).decode("utf-8")
+    payload = bytes(body[_PROC_LEN.size + proc_len :])
+    return header.id, header.flags, procedure_id, payload
+
+
+def encode_response(payload: bytes, *, correlation_id: int = 0, flags: int = 0) -> bytes:
+    """Encode a response message.
+
+    Wire format: [ResponseHeader 16 bytes][payload]
+    """
+    header = ResponseHeader(id=correlation_id, flags=flags, payload_len=len(payload))
+    return header.to_bytes() + payload
+
+
+def decode_response(data: bytes | memoryview) -> tuple[int, int, bytes]:
+    """Decode a response message.
+
+    Returns: (correlation_id, flags, payload)
+    """
+    if len(data) < HEADER_SIZE:
+        msg = f"response too small: got {len(data)} bytes"
+        raise ChannelError(msg)
+    header = ResponseHeader.from_bytes(data[:HEADER_SIZE])
+    payload = bytes(data[HEADER_SIZE:])
+    return header.id, header.flags, payload
+
+
 
 
 class BufferView:
@@ -57,20 +102,26 @@ class BufferView:
         return self._flags
 
     def as_memoryview(self) -> memoryview:
+        """Get a zero-copy memoryview into the buffer.
+
+        Raises:
+            ChannelError: If the buffer is released, doesn't support memoryview,
+                          or only provides a read-only view.
+        """
         if self._buffer is None:
             msg = "buffer released"
             raise ChannelError(msg)
         try:
             # Cast to Any because _vertebra.Buffer implements the buffer protocol but mypy doesn't know
             view = memoryview(cast("Any", self._buffer))[: self._length]
-        except TypeError:
-            view_proxy = _BufferProxy(self._buffer, self._length)
-            self._view = view_proxy
-            return cast("memoryview", view_proxy)
+        except TypeError as exc:
+            # Buffer doesn't support the buffer protocol - fail fast
+            msg = "buffer does not support memoryview; zero-copy requires buffer protocol support"
+            raise ChannelError(msg) from exc
         if view.readonly:
-            view_proxy = _BufferProxy(self._buffer, self._length)
-            self._view = view_proxy
-            return cast("memoryview", view_proxy)
+            # Read-only buffers can't be used for zero-copy writes
+            msg = "buffer is read-only; zero-copy requires writable buffers"
+            raise ChannelError(msg)
         self._view = view
         return view
 
@@ -141,38 +192,19 @@ class ZeroCopyChannel:
         return BufferView(buffer, length, flags)
 
 
-class _BufferProxy:
-    """Mutable fallback view for buffers without writable memoryview support."""
-
-    def __init__(self, buffer: _vertebra.Buffer, length: int) -> None:
-        self._buffer = buffer
-        self._length = length
-        payload = buffer.read()
-        self._data = bytearray(payload[:length])
-
-    def __len__(self) -> int:
-        return self._length
-
-    def __getitem__(self, key: int | slice) -> Any:
-        return self._data[key]
-
-    def __setitem__(self, key: int | slice, value: Any) -> None:
-        self._data[key] = value
-        self._buffer.write(bytes(self._data))
-
-    def __bytes__(self) -> bytes:
-        return bytes(self._data)
-
-    def tobytes(self) -> bytes:
-        return bytes(self._data)
-
-
 class Channel:
     """High-level request/response channel."""
 
     def __init__(self, handle: _vertebra.Channel, max_payload: int | None = None) -> None:
         self._handle: _vertebra.Channel | None = handle
         self._max_payload = max_payload or handle.payload_capacity()
+        self._seq = 0  # Correlation ID counter
+
+    def _next_seq(self) -> int:
+        """Generate next correlation ID."""
+        seq = self._seq
+        self._seq = (self._seq + 1) & 0xFFFFFFFFFFFFFFFF  # Wrap at u64 max
+        return seq
 
     @property
     def payload_capacity(self) -> int:
@@ -207,7 +239,7 @@ class Channel:
             raise ChannelError(msg, stage="closed")
         return handle
 
-    def send_sync(  # noqa: PLR0912
+    def send_sync(
         self,
         procedure_id: str,
         params: dict[str, Any],
@@ -216,50 +248,74 @@ class Channel:
         response_type: type | None = None,
         serializer: str | None = None,
     ) -> Any:
+        """Send a request and wait for response synchronously."""
         handle = self._require_handle()
+        correlation_id = self._next_seq()
+
+        # Serialize params
         registry = ProcedureRegistry.instance()
         proc = registry.get(procedure_id)
         serializer_impl = get_serializer(serializer or (proc.serializer if proc else None), type_hint=response_type)
         try:
             payload = serializer_impl.serialize(params, dict)
-        except Exception as exc:  # pragma: no cover - serializer dependent
+        except Exception as exc:
             raise SerializationError(str(exc), procedure_id=procedure_id, stage="serialize_params") from exc
+
+        # Encode request with protocol header
         try:
-            message = _encode_message(procedure_id, payload)
+            message = encode_request(procedure_id, payload, correlation_id=correlation_id)
         except ChannelError as exc:
-            raise ChannelError(str(exc), procedure_id=procedure_id, stage="encode_message") from exc
+            raise ChannelError(str(exc), procedure_id=procedure_id, stage="encode_request") from exc
+
         if len(message) > self._max_payload:
             msg = "payload too large"
             raise ChannelError(msg, procedure_id=procedure_id, stage="send_request")
+
+        # Send and receive
         try:
-            supports_try = hasattr(handle, "try_send_request") and hasattr(handle, "try_recv_response")
-            if timeout_ms is None or not supports_try:
+            has_timeout_fns = hasattr(handle, "send_request_timeout") and hasattr(handle, "recv_response_timeout")
+            if timeout_ms is not None and has_timeout_fns:
+                if not handle.send_request_timeout(message, timeout_ms):
+                    msg = "send timeout"
+                    raise ChannelError(msg, procedure_id=procedure_id, stage="send_request")
+                result = handle.recv_response_timeout(self._max_payload, timeout_ms)
+                if result is None:
+                    msg = "response timeout"
+                    raise ChannelError(msg, procedure_id=procedure_id, stage="recv_response")
+                response_data = result
+            elif timeout_ms is None:
                 handle.send_request(message)
-                response = handle.recv_response(self._max_payload)
+                response_data = handle.recv_response(self._max_payload)
             else:
                 send_deadline = time.monotonic() + (timeout_ms / 1000.0)
-                while True:
-                    if handle.try_send_request(message):
-                        break
+                while not handle.try_send_request(message):
                     if time.monotonic() >= send_deadline:
                         msg = "send timeout"
                         raise ChannelError(msg, procedure_id=procedure_id, stage="send_request")
                     time.sleep(0.001)
                 recv_deadline = time.monotonic() + (timeout_ms / 1000.0)
-                response = None
-                while response is None:
-                    response = handle.try_recv_response(self._max_payload)
-                    if response is not None:
-                        break
-                    if time.monotonic() >= recv_deadline:
+                response_data = None
+                while response_data is None:
+                    response_data = handle.try_recv_response(self._max_payload)
+                    if response_data is None and time.monotonic() >= recv_deadline:
                         msg = "response timeout"
                         raise ChannelError(msg, procedure_id=procedure_id, stage="recv_response")
-                    time.sleep(0.001)
+                    if response_data is None:
+                        time.sleep(0.001)
         except RuntimeError as exc:
             raise ChannelError(str(exc), procedure_id=procedure_id, stage="ipc") from exc
+
+        # Decode response
+        resp_id, resp_flags, resp_payload = decode_response(cast("bytes", response_data))
+
+        # Check response flags for errors
+        if resp_flags & Flags.ERROR:
+            msg = "remote error"
+            raise ChannelError(msg, procedure_id=procedure_id, stage="response")
+
         try:
-            return serializer_impl.deserialize(cast("bytes", response), response_type)
-        except Exception as exc:  # pragma: no cover - serializer dependent
+            return serializer_impl.deserialize(resp_payload, response_type)
+        except Exception as exc:
             raise SerializationError(str(exc), procedure_id=procedure_id, stage="deserialize_response") from exc
 
     async def send(
@@ -283,36 +339,50 @@ class Channel:
     def receive_sync(
         self, *, timeout_ms: int | None = None, params_type: type | None = None, serializer: str | None = None
     ) -> tuple[str, Any]:
+        """Receive a request synchronously."""
         handle = self._require_handle()
+
+        # Receive raw message
         try:
-            supports_try = hasattr(handle, "try_recv_request")
-            if timeout_ms is None or not supports_try:
+            if timeout_ms is not None and hasattr(handle, "recv_request_timeout"):
+                result = handle.recv_request_timeout(self._max_payload, timeout_ms)
+                if result is None:
+                    msg = "receive timeout"
+                    raise ChannelError(msg, stage="recv_request")
+                data = result
+            elif timeout_ms is None:
                 data = handle.recv_request(self._max_payload)
             else:
                 deadline = time.monotonic() + (timeout_ms / 1000.0)
                 data = None
                 while data is None:
                     data = handle.try_recv_request(self._max_payload)
-                    if data is not None:
-                        break
-                    if time.monotonic() >= deadline:
+                    if data is None and time.monotonic() >= deadline:
                         msg = "receive timeout"
                         raise ChannelError(msg, stage="recv_request")
-                    time.sleep(0.001)
+                    if data is None:
+                        time.sleep(0.001)
         except RuntimeError as exc:
             raise ChannelError(str(exc), stage="recv_request") from exc
-        assert data is not None  # noqa: S101  # Guaranteed by the loop logic above
+
+        # Decode request with protocol header
         try:
-            procedure_id, payload = _decode_message(data)
+            correlation_id, flags, procedure_id, payload = decode_request(data)
         except ChannelError as exc:
             raise ChannelError(str(exc), stage="decode_request") from exc
+
+        # Store correlation ID for response (will be used by respond_sync)
+        self._last_correlation_id = correlation_id
+
+        # Deserialize params
         registry = ProcedureRegistry.instance()
         proc = registry.get(procedure_id)
         serializer_impl = get_serializer(serializer or (proc.serializer if proc else None), type_hint=params_type)
         try:
             params = serializer_impl.deserialize(payload, params_type)
-        except Exception as exc:  # pragma: no cover - serializer dependent
+        except Exception as exc:
             raise SerializationError(str(exc), procedure_id=procedure_id, stage="deserialize_params") from exc
+
         return procedure_id, params
 
     async def receive(
@@ -325,6 +395,7 @@ class Channel:
     def respond_sync(
         self, procedure_id: str, result: Any, *, response_type: type | None = None, serializer: str | None = None
     ) -> None:
+        """Send a response synchronously."""
         handle = self._require_handle()
         registry = ProcedureRegistry.instance()
         proc = registry.get(procedure_id)
@@ -333,11 +404,19 @@ class Channel:
             payload = serializer_impl.serialize(result, response_type)
         except Exception as exc:  # pragma: no cover - serializer dependent
             raise SerializationError(str(exc), procedure_id=procedure_id, stage="serialize_response") from exc
-        if len(payload) > self._max_payload:
+
+        # Encode response with protocol header using stored correlation ID
+        correlation_id = getattr(self, "_last_correlation_id", 0)
+        try:
+            message = encode_response(payload, correlation_id=correlation_id, flags=Flags.OK)
+        except ChannelError as exc:
+            raise ChannelError(str(exc), procedure_id=procedure_id, stage="encode_response") from exc
+
+        if len(message) > self._max_payload:
             msg = "payload too large"
             raise ChannelError(msg, procedure_id=procedure_id, stage="send_response")
         try:
-            handle.send_response(payload)
+            handle.send_response(message)
         except RuntimeError as exc:
             raise ChannelError(str(exc), procedure_id=procedure_id, stage="send_response") from exc
 

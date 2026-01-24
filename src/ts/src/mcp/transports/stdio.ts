@@ -11,6 +11,8 @@ export interface Transport {
 
 export class StdioTransport implements Transport {
   private rl?: readline.Interface;
+  onmessage?: (message: any, sessionId?: string) => void;
+  onerror?: (error: Error) => void;
 
   constructor(
     private input: Readable,
