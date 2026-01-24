@@ -1,5 +1,52 @@
 # Python IPC Guide
 
+## High-Level Channel API
+
+The recommended way to use Vertebra IPC is through the high-level `Channel` class which provides protocol headers, correlation IDs, and automatic serialization.
+
+```python
+from vertebra.ipc.channel import Channel
+
+# Create a channel pair (client + server)
+client, server = Channel.create_pair(slot_size=4096, slots=64)
+
+# Server: receive and respond
+procedure_id, params = server.receive_sync(timeout_ms=5000)
+server.respond_sync(procedure_id, {"result": "ok"})
+
+# Client: send and receive
+result = client.send_sync("my.procedure", {"key": "value"}, timeout_ms=5000)
+```
+
+## Protocol Headers
+
+All IPC messages use a fixed 16-byte header for zero-parse-cost multiplexing:
+
+```python
+from vertebra.protocol import RequestHeader, ResponseHeader, Flags, HEADER_SIZE
+
+# Create a request header
+header = RequestHeader(id=42, flags=Flags.NONE, payload_len=128)
+header_bytes = header.to_bytes()  # 16 bytes, little-endian
+
+# Parse from bytes
+parsed = RequestHeader.from_bytes(data)
+print(f"Correlation ID: {parsed.id}, Payload: {parsed.payload_len} bytes")
+```
+
+Wire format:
+
+```
+┌─────────────────────┬─────────────────────┐
+│  Header (16 bytes)  │  MessagePack Payload │
+└─────────────────────┴─────────────────────┘
+
+Header layout (little-endian):
+- id:          u64 (8 bytes) - Correlation ID for multiplexing
+- flags:       u32 (4 bytes) - PRIORITY, COMPRESSED, ERROR, etc.
+- payload_len: u32 (4 bytes) - Length of payload
+```
+
 ## Import the Extension
 
 ```python

@@ -306,7 +306,7 @@ class Channel:
             raise ChannelError(str(exc), procedure_id=procedure_id, stage="ipc") from exc
 
         # Decode response
-        resp_id, resp_flags, resp_payload = decode_response(cast("bytes", response_data))
+        _resp_id, resp_flags, resp_payload = decode_response(cast("bytes", response_data))
 
         # Check response flags for errors
         if resp_flags & Flags.ERROR:
@@ -367,7 +367,7 @@ class Channel:
 
         # Decode request with protocol header
         try:
-            correlation_id, flags, procedure_id, payload = decode_request(data)
+            correlation_id, _flags, procedure_id, payload = decode_request(data)
         except ChannelError as exc:
             raise ChannelError(str(exc), stage="decode_request") from exc
 

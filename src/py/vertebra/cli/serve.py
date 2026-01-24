@@ -10,14 +10,8 @@ from typing import Any
 
 import click
 
+from vertebra.cli.banner import render_banner
 from vertebra.supervisor import build_bun_command, run_supervisor
-
-BANNER = r"""
-   __      __          __          __
-  / /   __/ /____ ____/ /____ ____/ /_
- / /__ / _  / _ `/ _  / __/ _ `/ _  / /
-/____//_,_/\_,_/\_,_/\__/\_,_/\_,_/_/
-"""
 
 
 @click.command()
@@ -30,6 +24,7 @@ BANNER = r"""
 @click.option("--drain-timeout", type=int, default=5000, help="Drain timeout in milliseconds")
 @click.option("--shutdown-timeout", type=int, default=30000, help="Shutdown timeout in milliseconds")
 @click.option("--native/--no-native", default=True, help="Enable/disable native Litestar integration")
+@click.option("--no-banner", is_flag=True, help="Disable startup banner")
 def serve(
     app: str,
     host: str,
@@ -40,6 +35,7 @@ def serve(
     drain_timeout: int,
     shutdown_timeout: int,
     native: bool,
+    no_banner: bool,
 ) -> None:
     """Run the Bun-backed ASGI server."""
     # Configure logging
@@ -64,7 +60,15 @@ def serve(
         click.secho(str(e), fg="red", err=True)
         sys.exit(1)
 
-    print_banner(host=host, port=port, workers=workers, log_level=log_level)
+    # Render startup banner (unless disabled)
+    if not no_banner:
+        render_banner(
+            mode="serve",
+            host=host,
+            port=port,
+            workers=workers,
+            log_level=log_level,
+        )
 
     exit_code = run_supervisor(
         bun_cmd=bun_cmd,
@@ -75,16 +79,6 @@ def serve(
         config=config_data,
     )
     sys.exit(exit_code)
-
-
-def print_banner(*, host: str, port: int, workers: int, log_level: str) -> None:
-    click.secho(BANNER, fg="cyan")
-    click.echo("  Version: 0.1.0")
-    click.echo(f"  Host: {host}")
-    click.echo(f"  Port: {port}")
-    click.echo(f"  Workers: {workers}")
-    click.echo(f"  Log Level: {log_level}")
-    click.echo("-" * 40)
 
 
 def load_config(path: Path) -> dict[str, Any]:

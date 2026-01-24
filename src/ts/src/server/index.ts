@@ -14,6 +14,7 @@ import {
   trackConnection,
   trackRequest,
 } from "./metrics";
+import { createStatusHandler } from "./status";
 import { ProcessManager } from "./process-manager";
 import { createRouter, RequestHandler } from "./router";
 import {
@@ -199,6 +200,12 @@ export async function createAsgiServer(
       try {
         if (url.pathname === "/__metrics__") {
           return await metricsHandler(request);
+        }
+
+        // Internal status endpoint for banner display
+        if (url.pathname === "/internal/status") {
+          const statusHandler = createStatusHandler(broker, workerPool);
+          return await statusHandler(request);
         }
 
         const start = performance.now();

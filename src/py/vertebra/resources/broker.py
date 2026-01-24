@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import pathlib
 import uuid
@@ -13,8 +14,8 @@ import msgspec
 from vertebra._vertebra import AsyncRing, ShmRegion, SpscRing
 from vertebra.exceptions import BrokerError
 from vertebra.ipc.async_transport import AsyncShmTransport, PollingTransport, create_transport
-from vertebra.ipc.channel import encode_request, decode_response
-from vertebra.protocol import Flags, ResponseFlags
+from vertebra.ipc.channel import decode_response, encode_request
+from vertebra.protocol import Flags
 from vertebra.resources.arrow import decode_arrow_nano
 from vertebra.serializers import MessagePackCodec
 from vertebra.utils.module_loader import ensure_pyarrow
@@ -135,10 +136,8 @@ class AsyncBrokerClient:
         # Cancel response loop
         if self._response_loop_task:
             self._response_loop_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._response_loop_task
-            except asyncio.CancelledError:
-                pass
             self._response_loop_task = None
 
         # Fail all pending requests
@@ -368,8 +367,8 @@ class AsyncBrokerClient:
 
             except asyncio.CancelledError:
                 break
-            except Exception:
-                # Log but continue processing
+            except (OSError, ValueError, RuntimeError):
+                # Decoding errors - continue processing other responses
                 continue
 
     def _timeout_request(self, correlation_id: int) -> None:

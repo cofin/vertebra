@@ -59,3 +59,54 @@ app = Vertebra(
 ```
 
 For extremely high-throughput workloads sending massive payloads, consider increasing `slot_size`. Note that this increases total memory usage (`slot_size * slots`).
+
+## IPC Protocol Optimization
+
+Vertebra uses zero-parse-cost protocol headers for minimal latency.
+
+### Protocol Headers
+
+All IPC messages include a 16-byte header:
+
+```
+┌─────────────────────┬─────────────────────┐
+│  Header (16 bytes)  │  Serialized Payload  │
+└─────────────────────┴─────────────────────┘
+```
+
+Header fields (little-endian):
+- `id` (u64): Correlation ID for request/response matching
+- `flags` (u32): Message flags (PRIORITY, COMPRESSED, ERROR)
+- `payload_len` (u32): Payload length in bytes
+
+### Multiplexing
+
+The IPC client supports concurrent in-flight requests via correlation ID tracking:
+
+```python
+from vertebra.resources.broker import BrokerClientConfig, AsyncBrokerClient
+
+config = BrokerClientConfig(
+    max_concurrent_requests=64,  # Default: 64 concurrent requests
+    timeout_ms=5000,
+)
+client = AsyncBrokerClient(config)
+```
+
+### Performance Targets
+
+| Metric | Target | Notes |
+|--------|--------|-------|
+| p99 latency | <10µs | Protocol layer achieves this |
+| Throughput | >1M/sec | Requires batching for full throughput |
+| Hot path allocations | Zero | Pre-allocated buffers |
+
+### Running Benchmarks
+
+```bash
+# Python benchmark
+uv run python benchmarks/ipc_performance.py --iterations 10000
+
+# TypeScript benchmark
+bun run benchmarks/ipc_performance.ts
+```
