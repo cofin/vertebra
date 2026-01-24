@@ -79,7 +79,7 @@ class TypeExtractor(msgspec.Struct):
     type_var_cache: "dict[Path, CachedTypeVars]" = msgspec.field(default_factory=dict)
     type_cache: "dict[tuple[Path, str], ObjectType]" = msgspec.field(default_factory=dict)
 
-    def from_hint(self, annotation: Any) -> TypeNode:  # noqa: PLR0911, PLR0912
+    def from_hint(self, annotation: Any) -> TypeNode:  # noqa: PLR0911
         # Use identity checks or try/except to handle unhashable types (like msgspec IntType)
         if annotation is None or annotation is type(None):
             return PrimitiveType("null")
@@ -222,9 +222,7 @@ class TypeExtractor(msgspec.Struct):
         self.import_cache[path] = CachedImports(digest=digest, imports=imports)
         return imports
 
-    def collect_type_vars(  # noqa: PLR0912
-        self, tree: ast.AST, class_names: set[str], context: ResolveContext
-    ) -> dict[str, TypeNode]:
+    def collect_type_vars(self, tree: ast.AST, class_names: set[str], context: ResolveContext) -> dict[str, TypeNode]:
         typevar_calls: list[tuple[str, ast.Call]] = []
         typevar_names: set[str] = set()
 
@@ -639,7 +637,7 @@ class TypeExtractor(msgspec.Struct):
                 excluded.add(name)
         return excluded
 
-    def _from_json_schema(  # noqa: PLR0911, PLR0912
+    def _from_json_schema(  # noqa: PLR0911
         self, schema: dict[str, object], definitions: dict[str, Any], name: str | None = None
     ) -> TypeNode:
         ref = schema.get("$ref")
@@ -815,7 +813,7 @@ class TypeExtractor(msgspec.Struct):
             return init_file
         return None
 
-    def _from_annotation_node(  # noqa: PLR0911, PLR0912
+    def _from_annotation_node(  # noqa: PLR0911
         self,
         node: ast.AST,
         struct_names: set[str],

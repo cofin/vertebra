@@ -1,9 +1,11 @@
-"""Color scheme and character definitions for banner rendering.
+"""Centralized theme definitions for Vertebra CLI.
 
-The color scheme follows Litestar branding guidelines:
-- Primary: Deep slate blue (#1e3a5f)
-- Accent: Gold (#d4af37) - used sparingly for version and [DEV] badge only
-- Status colors: Green (ready), Yellow (warning), Red (error)
+This module is the single source of truth for all CLI styling:
+- Colors (RGB tuples, 256-color codes, basic ANSI, and hex strings)
+- Characters (Unicode with ASCII fallbacks)
+- Terminal capability detection
+
+The banner system and all CLI commands import from here.
 """
 
 from __future__ import annotations
@@ -16,6 +18,35 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from typing import Literal
+
+__all__ = [
+    # Character sets
+    "CHARS",
+    "CHARS_ASCII",
+    # Hex color dict for rich-click
+    "COLORS",
+    "COLORS_256",
+    "COLORS_BASIC",
+    # RGB/256/basic color dicts
+    "COLORS_RGB",
+    # Terminal capabilities
+    "TerminalCaps",
+    # Color utilities
+    "apply_color",
+    "color_256",
+    "color_rgb",
+    "detect_terminal_capabilities",
+    "get_chars",
+    "get_status_color",
+]
+
+# =============================================================================
+# Color Definitions
+# =============================================================================
+# The color scheme follows Litestar branding guidelines:
+# - Primary: Deep slate blue (#1e3a5f)
+# - Accent: Gold (#d4af37) - used sparingly for version and [DEV] badge only
+# - Status colors: Green (ready), Yellow (warning), Red (error)
 
 # RGB color tuples for 24-bit true color terminals
 COLORS_RGB: dict[str, tuple[int, int, int]] = {
@@ -56,6 +87,14 @@ COLORS_BASIC: dict[str, str] = {
     "dim": "white",
 }
 
+# Hex color strings for rich-click compatibility
+# Example: (30, 58, 95) -> "#1e3a5f"
+COLORS: dict[str, str] = {name: f"#{r:02x}{g:02x}{b:02x}" for name, (r, g, b) in COLORS_RGB.items()}
+
+# =============================================================================
+# Character Definitions
+# =============================================================================
+
 # Unicode characters for rendering
 CHARS: dict[str, str] = {
     # Status indicators
@@ -77,6 +116,10 @@ CHARS_ASCII: dict[str, str] = {
     "line_light": "-",
     "dots": ".",
 }
+
+# =============================================================================
+# Terminal Capability Detection
+# =============================================================================
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +191,11 @@ def get_chars(caps: TerminalCaps) -> dict[str, str]:
     if caps.supports_unicode:
         return CHARS
     return CHARS_ASCII
+
+
+# =============================================================================
+# Color Application Utilities
+# =============================================================================
 
 
 def color_rgb(text: str, r: int, g: int, b: int) -> str:

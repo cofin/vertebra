@@ -1,6 +1,5 @@
 """Serve command."""
 
-import json
 import logging
 import os
 import sys
@@ -11,6 +10,8 @@ from typing import Any
 import click
 
 from vertebra.cli.banner import render_banner
+from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
+from vertebra.serializers import decode_json
 from vertebra.supervisor import build_bun_command, run_supervisor
 
 
@@ -57,18 +58,15 @@ def serve(
     try:
         bun_cmd = build_bun_command()
     except SystemExit as e:
-        click.secho(str(e), fg="red", err=True)
-        sys.exit(1)
+        raise CLIError(
+            str(e),
+            hint="Ensure Bun is installed and the vertebra-engine entrypoint is available.",
+            exit_code=EXIT_CONFIG_ERROR,
+        ) from e
 
     # Render startup banner (unless disabled)
     if not no_banner:
-        render_banner(
-            mode="serve",
-            host=host,
-            port=port,
-            workers=workers,
-            log_level=log_level,
-        )
+        render_banner(mode="serve", host=host, port=port, workers=workers, log_level=log_level)
 
     exit_code = run_supervisor(
         bun_cmd=bun_cmd,
@@ -90,7 +88,6 @@ def load_config(path: Path) -> dict[str, Any]:
         with path.open("rb") as f:
             return tomllib.load(f)
     if path.suffix == ".json":
-        with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+        return decode_json(path.read_bytes(), type_hint=dict[str, Any])
     msg = f"Unsupported config format: {path.suffix}"
     raise ValueError(msg)

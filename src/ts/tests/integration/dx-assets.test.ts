@@ -6,15 +6,15 @@ describe("DX Asset Serving", () => {
     // Create a dummy file
     const staticDir = "/tmp/vertebra-test-assets";
     await Bun.write(`${staticDir}/test.txt`, "hello world");
-    
+
     const router = createRouter({
       staticDir,
       assets: {}
     });
-    
+
     const req = new Request("http://localhost/test.txt");
     const res = await router(req);
-    
+
     expect(res).toBeDefined();
     if (res) {
         expect(res.status).toBe(200);
@@ -30,20 +30,20 @@ describe("DX Asset Serving", () => {
         return new Response("dev server content");
       }
     });
-    
+
     const router = createRouter({
       assets: { devUrl: `http://localhost:${devServer.port}` }
     });
-    
+
     const req = new Request("http://localhost/assets/main.js");
     const res = await router(req);
-    
+
     expect(res).toBeDefined();
     if (res) {
         expect(res.status).toBe(200);
         expect(await res.text()).toBe("dev server content");
     }
-    
+
     devServer.stop();
   });
 });

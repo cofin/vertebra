@@ -146,7 +146,7 @@ describe("McpServer", () => {
         getTools: () => [{ name: "remote_tool", description: "Remote", inputSchema: {} }],
         getResources: () => []
     } as any;
-    
+
     // Mock bridge
     const bridge = {
         callTool: mock(async () => "remote_result")
@@ -154,21 +154,21 @@ describe("McpServer", () => {
 
     const server = new McpServer(registry, bridge);
     await server.handle({ jsonrpc: "2.0", id: 1, method: "initialize" });
-    
+
     server.syncFromRegistry();
-    
+
     // Check list
     const listRes = await server.handle({ jsonrpc: "2.0", id: 2, method: "tools/list" });
     const tools = (listRes.result as any).tools;
     expect(tools).toHaveLength(1);
     expect(tools[0].name).toBe("remote_tool");
-    
+
     // Check call
     const callRes = await server.handle({
         jsonrpc: "2.0", id: 3, method: "tools/call",
         params: { name: "remote_tool", arguments: { foo: "bar" } }
     });
-    
+
     expect(bridge.callTool).toHaveBeenCalled();
     expect(bridge.callTool.mock.calls[0]).toEqual(["remote_tool", { foo: "bar" }]);
     expect((callRes.result as any).content[0].text).toContain("remote_result");

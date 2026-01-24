@@ -48,7 +48,9 @@ async def test_vertebra_worker_fallback_logic() -> None:
     await worker._handle_frame(native_message, {}, writer)
 
     body_args = writer.send.call_args_list[1][0][0]
-    assert body_args["body"] == b'{"type": "native"}'
+    import json
+
+    assert json.loads(body_args["body"]) == {"type": "native"}
 
     # 2. Test Legacy Fallback Path
     # The broker would send a standard http.request.start if it doesn't have a handler_id

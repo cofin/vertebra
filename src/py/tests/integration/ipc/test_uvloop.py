@@ -15,6 +15,7 @@ import pytest
 
 if TYPE_CHECKING:
     from vertebra._vertebra import AsyncRing
+    from vertebra.ipc.async_transport import AsyncShmTransport
 
 # Skip on Windows where uvloop is not supported
 pytestmark = [
@@ -24,7 +25,7 @@ pytestmark = [
 
 
 @pytest.fixture
-def uvloop_policy():
+def uvloop_policy() -> None:
     """Set up uvloop event loop policy for the test."""
     try:
         import uvloop
@@ -38,16 +39,18 @@ def uvloop_policy():
 
 
 @pytest.fixture
-def async_ring():
+def async_ring() -> "AsyncRing":
     """Create an AsyncRing for testing."""
     from vertebra._vertebra import AsyncRing
+
     return AsyncRing(4096, 64)
 
 
 @pytest.fixture
-def transport(async_ring):
+def transport(async_ring: "AsyncRing") -> "AsyncShmTransport":
     """Create an AsyncShmTransport."""
     from vertebra.ipc.async_transport import AsyncShmTransport
+
     transport = AsyncShmTransport(async_ring, spin_duration_us=5)
     yield transport
     transport.close()
@@ -57,7 +60,7 @@ class TestUvloopCompatibility:
     """Test AsyncShmTransport with uvloop."""
 
     @pytest.mark.asyncio
-    async def test_basic_send_recv(self, uvloop_policy, async_ring, transport):
+    async def test_basic_send_recv(self, uvloop_policy, async_ring, transport) -> None:
         """Test basic send/recv works with uvloop."""
         # Send data
         test_data = b"hello uvloop"
@@ -68,7 +71,7 @@ class TestUvloopCompatibility:
         assert received == test_data
 
     @pytest.mark.asyncio
-    async def test_immediate_data_latency(self, uvloop_policy, async_ring, transport):
+    async def test_immediate_data_latency(self, uvloop_policy, async_ring, transport) -> None:
         """Test that immediate data is captured in spin phase (sub-20µs)."""
         test_data = b"latency test"
         latencies = []
@@ -85,35 +88,34 @@ class TestUvloopCompatibility:
             latencies.append(elapsed)
 
         p50 = sorted(latencies)[50]
-        p99 = sorted(latencies)[99]
+        sorted(latencies)[99]
 
         # Target: p99 < 20µs for immediate data
         assert p50 < 50, f"p50 latency {p50:.1f}µs exceeds 50µs"
         # Note: In CI, latencies may be higher due to virtualization
-        print(f"uvloop latency: p50={p50:.1f}µs, p99={p99:.1f}µs")
 
     @pytest.mark.asyncio
-    async def test_high_frequency_cycling(self, uvloop_policy, async_ring, transport):
+    async def test_high_frequency_cycling(self, uvloop_policy, async_ring, transport) -> None:
         """Test high-frequency add_reader/remove_reader cycling doesn't cause issues."""
         test_data = b"x" * 64
 
         # This test exercises the add_reader/remove_reader path rapidly
         # to catch any edge cases in uvloop's FD handling
-        async def producer():
+        async def producer() -> None:
             for i in range(1000):
                 async_ring.send(test_data, 0)
                 # Small delay to simulate realistic workload
                 if i % 100 == 0:
                     await asyncio.sleep(0.0001)
 
-        async def consumer():
+        async def consumer() -> int:
             count = 0
             while count < 1000:
                 try:
                     data = await asyncio.wait_for(transport.recv(), timeout=1.0)
                     assert len(data) == 64
                     count += 1
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pytest.fail(f"Timeout after receiving {count} messages")
             return count
 
@@ -125,7 +127,7 @@ class TestUvloopCompatibility:
         assert count == 1000
 
     @pytest.mark.asyncio
-    async def test_concurrent_receivers(self, uvloop_policy):
+    async def test_concurrent_receivers(self, uvloop_policy) -> None:
         """Test multiple concurrent transports don't interfere."""
         from vertebra._vertebra import AsyncRing
         from vertebra.ipc.async_transport import AsyncShmTransport
@@ -134,7 +136,8 @@ class TestUvloopCompatibility:
         transports = [AsyncShmTransport(r, spin_duration_us=5) for r in rings]
 
         try:
-            async def send_recv(idx: int):
+
+            async def send_recv(idx: int) -> None:
                 ring = rings[idx]
                 transport = transports[idx]
 
@@ -151,7 +154,7 @@ class TestUvloopCompatibility:
                 t.close()
 
     @pytest.mark.asyncio
-    async def test_spin_phase_captures_immediate(self, uvloop_policy, async_ring, transport):
+    async def test_spin_phase_captures_immediate(self, uvloop_policy, async_ring, transport) -> None:
         """Verify spin phase captures data without falling back to add_reader."""
         # Pre-fill the ring
         test_data = b"spin test"
@@ -168,10 +171,11 @@ class TestUvloopCompatibility:
         assert transport._registered == initial_registered
 
     @pytest.mark.asyncio
-    async def test_fallback_to_add_reader(self, uvloop_policy, async_ring, transport):
+    async def test_fallback_to_add_reader(self, uvloop_policy, async_ring, transport) -> None:
         """Test that slow path correctly falls back to add_reader."""
+
         # Don't pre-fill - data will arrive after spin phase
-        async def delayed_send():
+        async def delayed_send() -> None:
             await asyncio.sleep(0.01)  # 10ms - well beyond spin phase
             async_ring.send(b"delayed", 0)
 
@@ -188,7 +192,7 @@ class TestPollingTransportUvloop:
     """Test PollingTransport with uvloop (fallback path)."""
 
     @pytest.mark.asyncio
-    async def test_polling_transport(self, uvloop_policy, async_ring):
+    async def test_polling_transport(self, uvloop_policy, async_ring) -> None:
         """Test PollingTransport works with uvloop."""
         from vertebra.ipc.async_transport import PollingTransport
 

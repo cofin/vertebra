@@ -68,7 +68,7 @@ class TestSQLAlchemyTransactions:
 
                         def _trigger_rollback() -> Never:
                             msg = "force rollback"
-                            raise ValueError(msg)
+                            raise ValueError(msg)  # noqa: TRY301
 
                         _trigger_rollback()
                 except ValueError:

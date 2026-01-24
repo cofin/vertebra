@@ -174,15 +174,14 @@ class AsgiWorker:
 
                 routes = reflect_routes(self._app)
                 compiler = PipelineCompiler()
+                logger = logging.getLogger("vertebra.worker")
                 for route in routes:
                     if classify_route(route) == RouteCapability.NATIVE:
-                        # Use the handler object directly from reflection
                         try:
                             runner = compiler.compile_route(route.handler)
                             self._native_runners[route.handler_id] = runner
-                        except Exception:
-                            # Log error but don't crash startup; this route will fallback to ASGI
-                            pass
+                        except (TypeError, ValueError, AttributeError) as exc:
+                            logger.debug("Route %s will use ASGI fallback: %s", route.path, exc)
 
         control_name = self._control_ring_name()
         self._control = SpscRing.create_named(control_name, self._config.slot_size, self._config.slots)
@@ -605,7 +604,7 @@ class AsgiWorker:
                 async def noop_fetcher(user_id: str, ctx: Any) -> Any:
                     return VertebraUserMixin(**claims)
 
-                user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher, context=request)
+                user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher, context=meta)
             else:
                 from vertebra.auth.models import AnonymousUser
 
@@ -698,7 +697,7 @@ class AsgiWorker:
             async def noop_fetcher(user_id: str, ctx: Any) -> Any:
                 return VertebraUserMixin(**claims)
 
-            user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher, context=request)
+            user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher, context=meta)
         else:
             from vertebra.auth.models import AnonymousUser
 
@@ -758,7 +757,7 @@ class AsgiWorker:
         finally:
             reset_user(token)
 
-    def _format_response_frame(self, request_id: str, message: dict[str, Any]) -> dict[str, Any] | None:  # noqa: PLR0911
+    def _format_response_frame(self, request_id: str, message: dict[str, Any]) -> dict[str, Any] | None:
         message_type = message.get("type")
         if message_type == "http.response.start":
             status = int(message.get("status", 500))

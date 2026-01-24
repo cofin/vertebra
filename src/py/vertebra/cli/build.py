@@ -2,10 +2,13 @@
 
 import asyncio
 import os
-import sys
 from pathlib import Path
 
 import click
+
+from vertebra.cli.components import console, section_header
+from vertebra.cli.errors import EXIT_INTERNAL_ERROR, CLIError
+from vertebra.cli.theme import COLORS
 
 
 @click.command()
@@ -18,16 +21,18 @@ import click
 def build(app_dir: str, one_file: bool, target: str, profile: str, output: str | None, clean: bool) -> None:
     """Build Vertebra application artifacts."""
     if not one_file:
-        click.secho("Only --one-file builds are currently supported.", fg="yellow")
+        console.print(f"[{COLORS['warning']}]Only --one-file builds are currently supported.[/]")
         return
 
     output_path = Path(output) if output else Path("dist/standalone")
     project_path = Path(app_dir).resolve()
 
-    click.echo(f"Building single-file executable for {project_path}")
-    click.echo(f"  Target:  {target}")
-    click.echo(f"  Profile: {profile}")
-    click.echo(f"  Output:  {output_path}")
+    section_header("Build Configuration")
+    console.print(f"  Project: {project_path}")
+    console.print(f"  Target:  {target}")
+    console.print(f"  Profile: {profile}")
+    console.print(f"  Output:  {output_path}")
+    console.print()
 
     try:
         from vertebra.build.bundler import Bundler
@@ -36,15 +41,15 @@ def build(app_dir: str, one_file: bool, target: str, profile: str, output: str |
             project_dir=project_path,
             output_dir=output_path,
             target=target,
-            profile=profile,  # type: ignore
+            profile=profile,  # type: ignore[arg-type]
             clean=clean,
         )
 
         asyncio.run(bundler.build())
 
-        click.secho("Build completed successfully.", fg="green")
+        console.print(f"[{COLORS['success']}]Build completed successfully.[/]")
     except Exception as e:
-        click.secho(f"Build failed: {e}", fg="red", err=True)
         if os.environ.get("VERTEBRA_DEBUG"):
             raise
-        sys.exit(1)
+        msg = f"Build failed: {e}"
+        raise CLIError(msg, hint="Set VERTEBRA_DEBUG=1 for full traceback.", exit_code=EXIT_INTERNAL_ERROR) from e

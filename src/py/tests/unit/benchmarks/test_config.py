@@ -357,9 +357,7 @@ def test_category_3_all_asgi_interface() -> None:
 @pytest.mark.unit
 def test_native_interfaces() -> None:
     """Test that native interface servers are properly marked."""
-    native_servers = [
-        config for config in ALL_SERVERS.values() if config.interface == InterfaceType.NATIVE
-    ]
+    native_servers = [config for config in ALL_SERVERS.values() if config.interface == InterfaceType.NATIVE]
 
     # Should have at least Robyn and Spikard as native
     native_names = [config.name for config in native_servers]

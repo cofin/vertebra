@@ -18,8 +18,11 @@ class Error(Exception):
     """Base class for all other error exceptions."""
 
 
-class Warning(Exception):  # noqa: A001
-    """Exception raised for important warnings like data truncations."""
+class DBAPIWarning(Exception):
+    """Exception raised for important warnings like data truncations (PEP 249)."""
+
+
+Warning = DBAPIWarning  # PEP 249 requires this name
 
 
 class InterfaceError(Error):

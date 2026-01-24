@@ -37,7 +37,7 @@ describe("SSETransport", () => {
 
   it("should send responses to specific session", async () => {
     const transport = new SSETransport();
-    
+
     const res1 = await transport.handleConnect(new Request("http://localhost/mcp?session=c1"));
     const reader1 = res1.body?.getReader();
     await reader1?.read();
@@ -68,7 +68,7 @@ describe("SSETransport", () => {
     const { value } = await reader?.read() || {};
     const text = new TextDecoder().decode(value);
     expect(text).toBe(": keep-alive\n\n");
-    
+
     transport.close();
   });
 });

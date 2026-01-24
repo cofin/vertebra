@@ -58,12 +58,22 @@ class VertebraSyncCursor:
     def execute(self, query: str, params: Sequence[ParamValue] | None = None) -> int | None:
         result = self._connection._execute(query, params or [])
         if "arrow" in result:
-            table = result["arrow"]
-            # pyarrow Table
-            self._columns = table.column_names  # type: ignore[attr-defined]
-            # Convert to rows. Using to_pylist() returns list of dicts.
-            self._rows = [tuple(row[col] for col in self._columns) for row in table.to_pylist()]  # type: ignore[attr-defined]
-            rowcount = table.num_rows  # type: ignore[attr-defined]
+            arrow_data = result["arrow"]
+            # nanoarrow returns list[dict], pyarrow returns Table
+            if isinstance(arrow_data, list):
+                # nanoarrow decoded: list of dicts
+                if arrow_data:
+                    self._columns = list(arrow_data[0].keys())
+                    self._rows = [tuple(row[col] for col in self._columns) for row in arrow_data]
+                else:
+                    self._columns = []
+                    self._rows = []
+                rowcount = len(arrow_data)
+            else:
+                # pyarrow Table
+                self._columns = arrow_data.column_names  # type: ignore[attr-defined]
+                self._rows = [tuple(row[col] for col in self._columns) for row in arrow_data.to_pylist()]  # type: ignore[attr-defined]
+                rowcount = arrow_data.num_rows  # type: ignore[attr-defined]
         else:
             self._columns = list(result.get("columns", []))
             self._rows = [tuple(row) for row in result.get("rows", [])]
@@ -104,19 +114,28 @@ class VertebraSyncCursor:
 
 
 class VertebraArrowCursor:
+    """Cursor that returns pyarrow Tables. Requires pyarrow optional dependency."""
+
     def __init__(self, connection: "VertebraSyncConnection") -> None:
         self._connection = connection
         self._table: ArrowTable | None = None
 
     def execute(self, query: str, params: Sequence[ParamValue] | None = None) -> int | None:
+        # Ensure pyarrow is available with clear error message
+        pa = ensure_pyarrow()
+
         result = self._connection._execute(query, params or [])
         if "arrow" in result:
-            self._table = result["arrow"]
+            arrow_data = result["arrow"]
+            # nanoarrow returns list[dict], convert to Table
+            if isinstance(arrow_data, list):
+                self._table = pa.Table.from_pylist(arrow_data) if arrow_data else pa.Table.from_pydict({})
+            else:
+                # Already a pyarrow Table
+                self._table = arrow_data
         else:
             rows = result.get("rows", [])
             columns = result.get("columns", [])
-            # Ensure pyarrow is available with clear error message
-            pa = ensure_pyarrow()
 
             if not rows and not columns:
                 self._table = pa.Table.from_pydict({})

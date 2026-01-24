@@ -2,14 +2,7 @@
 
 import pytest
 
-from vertebra.protocol import (
-    HEADER_SIZE,
-    ControlMessageKind,
-    Flags,
-    RequestHeader,
-    ResponseFlags,
-    ResponseHeader,
-)
+from vertebra.protocol import HEADER_SIZE, ControlMessageKind, Flags, RequestHeader, ResponseFlags, ResponseHeader
 
 
 class TestRequestHeader:
@@ -21,11 +14,7 @@ class TestRequestHeader:
 
     def test_roundtrip(self) -> None:
         """Header should serialize and deserialize correctly."""
-        header = RequestHeader(
-            id=42,
-            flags=Flags.PRIORITY | Flags.COMPRESSED,
-            payload_len=1024,
-        )
+        header = RequestHeader(id=42, flags=Flags.PRIORITY | Flags.COMPRESSED, payload_len=1024)
         data = header.to_bytes()
         assert len(data) == 16
 
@@ -74,11 +63,7 @@ class TestResponseHeader:
 
     def test_roundtrip(self) -> None:
         """Header should serialize and deserialize correctly."""
-        header = ResponseHeader(
-            id=99,
-            flags=ResponseFlags.OK,
-            payload_len=512,
-        )
+        header = ResponseHeader(id=99, flags=ResponseFlags.OK, payload_len=512)
         data = header.to_bytes()
         restored = ResponseHeader.from_bytes(data)
 

@@ -13,19 +13,19 @@ describe("Error Handling Audit", () => {
       const transport = new StdioTransport(input, output);
       const errors: Error[] = [];
       transport.onerror = (err) => errors.push(err);
-      
+
       await transport.start();
-      
+
       input.push('{"jsonrpc": "2.0"');
       input.push(', "method": "test"}\n');
-      
-      input.push('{"partial":'); 
+
+      input.push('{"partial":');
       await new Promise(r => setTimeout(r, 10));
-      expect(errors.length).toBe(0); 
-      
+      expect(errors.length).toBe(0);
+
       input.push('"value"}\n');
       await new Promise(r => setTimeout(r, 10));
-      
+
       input.push('INVALID\n');
       await new Promise(r => setTimeout(r, 10));
       expect(errors.length).toBeGreaterThan(0);
@@ -38,12 +38,12 @@ describe("Error Handling Audit", () => {
       const transport = new SSETransport();
       // Connect first to establish session
       await transport.handleConnect(new Request("http://localhost/mcp?session=123"));
-      
+
       const req = new Request("http://localhost/mcp?session=123", {
         method: "POST",
         body: "invalid-json"
       });
-      
+
       const res = await transport.handleMessage(req);
       expect(res.status).toBe(400);
     });
@@ -52,16 +52,16 @@ describe("Error Handling Audit", () => {
   describe("Pool Error Propagation", () => {
     it("should propagate acquire timeout errors", async () => {
       const pool = new SqlPool(1);
-      await pool.acquire(); 
-      
+      await pool.acquire();
+
       const onError = mock(async () => {});
       pool.setOnError(onError);
-      
+
       const error = new Error("Timeout");
       if (pool.hooks.onError) {
           await pool.hooks.onError(null, error);
       }
-      
+
       expect(onError).toHaveBeenCalledWith(null, error);
     });
   });

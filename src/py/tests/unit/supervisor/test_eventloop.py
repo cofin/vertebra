@@ -27,7 +27,7 @@ def test_supervisor_with_uvloop() -> None:
         supervisor = Supervisor()
         supervisor.start("bun", ["run", "server.ts"])
 
-        MockNative.assert_called_once()
+        mock_native_cls.assert_called_once()
         mock_native_instance.start.assert_called_once()
 
         # Verify arguments passed to native start

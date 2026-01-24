@@ -149,35 +149,30 @@ src/py/vertebra/cli/
 
 ### Pattern Reference: Theme Module
 
-Following the accelerator pattern with Vertebra branding:
+**NOTE:** The color scheme is already defined in `banner/styles.py` and should be preserved:
 
 ```python
-# theme.py
-from dataclasses import dataclass
+# Existing colors in banner/styles.py (DO NOT CHANGE)
+COLORS_RGB = {
+    "slate": (30, 58, 95),      # #1e3a5f - primary deep blue
+    "gold": (212, 175, 55),     # #d4af37 - accent gold
+    "success": (74, 222, 128),  # #4ade80 - green
+    "warning": (250, 204, 21),  # #facc15 - yellow
+    "error": (248, 113, 113),   # #f87171 - red
+    "muted": (148, 163, 184),   # #94a3b8 - gray
+    "text": (241, 245, 249),    # #f1f5f9 - light text
+    "dim": (100, 116, 139),     # #64748b - dim text
+}
+```
 
-@dataclass(frozen=True, slots=True)
-class Colors:
-    """Vertebra CLI color palette."""
-    # Brand
-    PRIMARY = "#6366f1"       # Indigo
-    PRIMARY_LIGHT = "#818cf8"
-    PRIMARY_DARK = "#4f46e5"
-    ACCENT = "#d4af37"        # Gold
+The theme.py module will re-export these colors as hex strings for rich-click compatibility:
 
-    # Semantic
-    SUCCESS = "#4ade80"
-    WARNING = "#facc15"
-    ERROR = "#f87171"
-    INFO = "#60a5fa"
+```python
+# theme.py - re-exports banner colors as hex for rich-click
+from vertebra.cli.banner.styles import COLORS_RGB
 
-    # Neutral
-    TEXT = "#f1f5f9"
-    MUTED = "#94a3b8"
-    DIM = "#64748b"
-    SURFACE = "#1e293b"
-
-
-COLORS = Colors()
+# Convert RGB tuples to hex strings for rich-click
+COLORS = {name: f"#{r:02x}{g:02x}{b:02x}" for name, (r, g, b) in COLORS_RGB.items()}
 ```
 
 ### Pattern Reference: rich-click Configuration
@@ -185,18 +180,19 @@ COLORS = Colors()
 ```python
 # config.py
 import rich_click as click
+from vertebra.cli.theme import COLORS
 
 # Enable rich features
 click.rich_click.USE_RICH_MARKUP = True
 click.rich_click.USE_MARKDOWN = True
 
-# Style definitions
-click.rich_click.STYLE_COMMAND = f"bold {COLORS.PRIMARY}"
-click.rich_click.STYLE_OPTION = f"bold {COLORS.SUCCESS}"
+# Style definitions using existing banner colors
+click.rich_click.STYLE_COMMAND = f"bold {COLORS['slate']}"      # #1e3a5f
+click.rich_click.STYLE_OPTION = f"bold {COLORS['success']}"     # #4ade80
 click.rich_click.STYLE_ARGUMENT = "bold cyan"
-click.rich_click.STYLE_METAVAR = f"{COLORS.ACCENT}"
-click.rich_click.STYLE_ERRORS_PANEL_BORDER = COLORS.ERROR
-click.rich_click.STYLE_OPTIONS_PANEL_BORDER = f"dim {COLORS.PRIMARY}"
+click.rich_click.STYLE_METAVAR = f"{COLORS['gold']}"            # #d4af37
+click.rich_click.STYLE_ERRORS_PANEL_BORDER = COLORS['error']    # #f87171
+click.rich_click.STYLE_OPTIONS_PANEL_BORDER = f"dim {COLORS['slate']}"
 
 # Command groups
 click.rich_click.COMMAND_GROUPS = {

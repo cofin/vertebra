@@ -15,7 +15,7 @@ async function runBenchmark() {
   const input = new Readable({ read() {} });
   const output = new Writable({ write(c, e, cb) { cb(); } });
   const transport = new StdioTransport(input, output);
-  
+
   // Wire up manually for direct bench
   transport.onmessage = async (msg) => {
     const start = performance.now();
@@ -25,7 +25,7 @@ async function runBenchmark() {
   await transport.start();
 
   console.log(`Running ${iterations} iterations...`);
-  
+
   for (let i = 0; i < iterations; i++) {
     input.push(JSON.stringify({ jsonrpc: "2.0", id: i, method: "tools/call", params: { name: "noop" } }) + "\n");
     // Yield to allow processing
@@ -35,7 +35,7 @@ async function runBenchmark() {
   latencies.sort((a, b) => a - b);
   const p50 = latencies[Math.floor(iterations * 0.5)];
   const p99 = latencies[Math.floor(iterations * 0.99)];
-  
+
   console.log(`P50: ${p50.toFixed(3)}ms`);
   console.log(`P99: ${p99.toFixed(3)}ms`);
 }

@@ -11,12 +11,7 @@ class LazyUserProxy[UserT: VertebraUserMixin]:
     """Lazy-loading proxy for User models."""
 
     def __init__(
-        self,
-        model_cls: type[UserT],
-        claims: dict[str, Any],
-        fetcher: Fetcher[UserT],
-        *,
-        context: Any | None = None,
+        self, model_cls: type[UserT], claims: dict[str, Any], fetcher: Fetcher[UserT], *, context: Any | None = None
     ) -> None:
         self._model_cls = model_cls
         self._claims = claims

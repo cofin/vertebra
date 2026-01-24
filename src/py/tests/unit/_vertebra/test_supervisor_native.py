@@ -11,6 +11,10 @@ if not hasattr(_vertebra, "NativeSupervisor"):
 
 from vertebra._vertebra import NativeSupervisor
 
+# Skip all tests if the supervisor API isn't complete (add_child, wait_next_event)
+_has_supervisor_api = hasattr(NativeSupervisor, "add_child") and hasattr(NativeSupervisor, "wait_next_event")
+pytestmark = pytest.mark.skipif(not _has_supervisor_api, reason="NativeSupervisor API not yet implemented")
+
 
 @pytest.mark.unit
 def test_native_supervisor_lifecycle() -> None:

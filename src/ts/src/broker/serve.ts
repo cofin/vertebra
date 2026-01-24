@@ -80,7 +80,11 @@ export class SqlPool extends BasePoolAdapter {
     return {};
   }
 
-  async executeMany(token: string, sql: string, params: unknown[][]): Promise<Record<string, unknown>> {
+  async executeMany(
+    token: string,
+    sql: string,
+    params: unknown[][],
+  ): Promise<Record<string, unknown>> {
     this.recordUse(token);
     for (const p of params) {
       await this.execute(token, sql, p);

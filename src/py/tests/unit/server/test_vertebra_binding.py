@@ -62,7 +62,9 @@ async def test_vertebra_worker_with_request_object() -> None:
 
     assert writer.send.call_count == 2
     body_args = writer.send.call_args_list[1][0][0]
-    assert body_args["body"] == b'{"key": "value"}'
+    import json
+
+    assert json.loads(body_args["body"]) == {"key": "value"}
 
 
 @pytest.mark.unit
@@ -99,4 +101,6 @@ async def test_vertebra_worker_request_injection() -> None:
     await worker._handle_direct_http(message, writer)
 
     body_args = writer.send.call_args_list[1][0][0]
-    assert body_args["body"] == b'{"path": "/actual-path"}'
+    import json
+
+    assert json.loads(body_args["body"]) == {"path": "/actual-path"}

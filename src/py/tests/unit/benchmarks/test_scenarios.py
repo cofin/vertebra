@@ -49,11 +49,7 @@ def test_scenario_dataclass() -> None:
 @pytest.mark.unit
 def test_scenario_get_url() -> None:
     """Test Scenario.get_url() constructs correct URL."""
-    scenario = Scenario(
-        name="hello",
-        endpoint="/hello",
-        description="Test",
-    )
+    scenario = Scenario(name="hello", endpoint="/hello", description="Test")
 
     url = scenario.get_url(port=8000)
     assert url == "http://127.0.0.1:8000/hello"
@@ -82,11 +78,7 @@ def test_scenario_with_post_body() -> None:
 @pytest.mark.unit
 def test_scenario_frozen() -> None:
     """Test that Scenario is frozen (immutable)."""
-    scenario = Scenario(
-        name="hello",
-        endpoint="/hello",
-        description="Test",
-    )
+    scenario = Scenario(name="hello", endpoint="/hello", description="Test")
 
     with pytest.raises(AttributeError):
         scenario.name = "changed"  # type: ignore[misc]

@@ -16,13 +16,7 @@ import click
 
 from vertebra.cli.banner.hooks import get_registry
 from vertebra.cli.banner.logos import get_logo_lines, get_logo_variant
-from vertebra.cli.banner.styles import (
-    TerminalCaps,
-    apply_color,
-    detect_terminal_capabilities,
-    get_chars,
-    get_status_color,
-)
+from vertebra.cli.theme import TerminalCaps, apply_color, detect_terminal_capabilities, get_chars, get_status_color
 
 if TYPE_CHECKING:
     from vertebra.cli.banner.collector import ServerStatus
@@ -51,11 +45,7 @@ class BaseRenderer(ABC):
         self.chars = get_chars(caps)
 
     @abstractmethod
-    def render(
-        self,
-        config: BannerConfig,
-        status: ServerStatus | None = None,
-    ) -> None:
+    def render(self, config: BannerConfig, status: ServerStatus | None = None) -> None:
         """Render the banner to stdout.
 
         Args:
@@ -67,11 +57,7 @@ class BaseRenderer(ABC):
 class TTYRenderer(BaseRenderer):
     """Rich terminal renderer with colors and Unicode art."""
 
-    def render(
-        self,
-        config: BannerConfig,
-        status: ServerStatus | None = None,
-    ) -> None:
+    def render(self, config: BannerConfig, status: ServerStatus | None = None) -> None:
         """Render full banner with logo, sections, and status."""
         width = self.caps.width
         variant = get_logo_variant(width)
@@ -84,11 +70,7 @@ class TTYRenderer(BaseRenderer):
         else:
             self._render_full(config, status)
 
-    def _render_full(
-        self,
-        config: BannerConfig,
-        status: ServerStatus | None,
-    ) -> None:
+    def _render_full(self, config: BannerConfig, status: ServerStatus | None) -> None:
         """Render full-width layout (>= 100 columns)."""
         # Logo with version
         logo_lines = get_logo_lines("full")
@@ -134,11 +116,7 @@ class TTYRenderer(BaseRenderer):
         # User extension sections
         self._render_extensions(config.mode)
 
-    def _render_compact(
-        self,
-        config: BannerConfig,
-        status: ServerStatus | None,
-    ) -> None:
+    def _render_compact(self, config: BannerConfig, status: ServerStatus | None) -> None:
         """Render compact layout (60-99 columns)."""
         logo_lines = get_logo_lines("compact")
         version_text = f"v{VERSION}"
@@ -153,10 +131,7 @@ class TTYRenderer(BaseRenderer):
 
         # Server info on one line
         click.echo("Server")
-        info_line = (
-            f"  http://{config.host}:{config.port} | "
-            f"{config.workers} workers | {config.log_level}"
-        )
+        info_line = f"  http://{config.host}:{config.port} | {config.workers} workers | {config.log_level}"
         click.echo(info_line)
         click.echo()
 
@@ -167,19 +142,13 @@ class TTYRenderer(BaseRenderer):
         broker_status = self._get_status_text(status, "broker")
 
         click.echo(
-            f"  {self._status_indicator(bun_status)} Bun {self.chars['dots']*5} {bun_status}   "
-            f"{self._status_indicator(ipc_status)} IPC {self.chars['dots']*5} {ipc_status}"
+            f"  {self._status_indicator(bun_status)} Bun {self.chars['dots'] * 5} {bun_status}   "
+            f"{self._status_indicator(ipc_status)} IPC {self.chars['dots'] * 5} {ipc_status}"
         )
-        click.echo(
-            f"  {self._status_indicator(broker_status)} Broker {self.chars['dots']*2} {broker_status}"
-        )
+        click.echo(f"  {self._status_indicator(broker_status)} Broker {self.chars['dots'] * 2} {broker_status}")
         click.echo()
 
-    def _render_minimal(
-        self,
-        config: BannerConfig,
-        status: ServerStatus | None,
-    ) -> None:
+    def _render_minimal(self, config: BannerConfig, status: ServerStatus | None) -> None:
         """Render minimal layout (< 60 columns)."""
         logo = get_logo_lines("minimal")[0]
         version_text = f"VERTEBRA v{VERSION}"
@@ -207,12 +176,7 @@ class TTYRenderer(BaseRenderer):
         arrow = self.chars["arrow"]
         click.echo(f"  {arrow} {key:<12} {value}")
 
-    def _render_component_status(
-        self,
-        name: str,
-        status: ServerStatus | None,
-        component: str,
-    ) -> None:
+    def _render_component_status(self, name: str, status: ServerStatus | None, component: str) -> None:
         """Render a component status line with leader dots."""
         status_text = self._get_status_text(status, component)
         details = self._get_status_details(status, component)
@@ -243,7 +207,7 @@ class TTYRenderer(BaseRenderer):
         if component_data is None:
             return "unknown"
 
-        return component_data.status
+        return str(component_data.status)
 
     def _get_status_details(self, status: ServerStatus | None, component: str) -> str:
         """Extract additional status details for a component."""
@@ -255,7 +219,7 @@ class TTYRenderer(BaseRenderer):
             return ""
 
         if component == "bun" and component_data.version:
-            return component_data.version
+            return str(component_data.version)
         if component == "ipc":
             channels = getattr(component_data, "channels", None)
             if channels is not None:
@@ -277,7 +241,7 @@ class TTYRenderer(BaseRenderer):
         for component in ["bun", "ipc", "broker"]:
             component_data = getattr(status, component, None)
             if component_data and component_data.status != "ready":
-                return component_data.status
+                return str(component_data.status)
 
         return "ready"
 
@@ -296,11 +260,7 @@ class TTYRenderer(BaseRenderer):
 class BasicRenderer(BaseRenderer):
     """Plain text / JSON renderer for non-TTY environments."""
 
-    def render(
-        self,
-        config: BannerConfig,
-        status: ServerStatus | None = None,
-    ) -> None:
+    def render(self, config: BannerConfig, status: ServerStatus | None = None) -> None:
         """Render banner as JSON log entry."""
         # Build structured log entry
         log_entry: dict[str, Any] = {
@@ -321,11 +281,7 @@ class BasicRenderer(BaseRenderer):
                 "broker": status.broker.status if status.broker else "unknown",
             }
         else:
-            log_entry["components"] = {
-                "bun": "starting",
-                "ipc": "starting",
-                "broker": "starting",
-            }
+            log_entry["components"] = {"bun": "starting", "ipc": "starting", "broker": "starting"}
 
         # Collect user extensions
         registry = get_registry()
@@ -362,12 +318,7 @@ def render_banner(
     """
     caps = detect_terminal_capabilities()
     config = BannerConfig(
-        mode=mode,
-        host=host,
-        port=port,
-        workers=workers,
-        log_level=log_level,
-        watched_paths=watched_paths,
+        mode=mode, host=host, port=port, workers=workers, log_level=log_level, watched_paths=watched_paths
     )
 
     # Choose renderer based on TTY detection

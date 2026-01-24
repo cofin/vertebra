@@ -1,6 +1,5 @@
 """Shared-memory broker client for resource management."""
-
-from __future__ import annotations
+# ruff: noqa: PLR0904
 
 import asyncio
 import contextlib
@@ -16,9 +15,8 @@ from vertebra.exceptions import BrokerError
 from vertebra.ipc.async_transport import AsyncShmTransport, PollingTransport, create_transport
 from vertebra.ipc.channel import decode_response, encode_request
 from vertebra.protocol import Flags
-from vertebra.resources.arrow import decode_arrow_nano
+from vertebra.resources.arrow import decode_arrow
 from vertebra.serializers import MessagePackCodec
-from vertebra.utils.module_loader import ensure_pyarrow
 
 
 class RingConfig(msgspec.Struct, frozen=True, gc=False):
@@ -178,9 +176,7 @@ class AsyncBrokerClient:
         # Set timeout
         loop = asyncio.get_event_loop()
         pending.timeout_handle = loop.call_later(
-            self._config.timeout_ms / 1000.0,
-            self._timeout_request,
-            correlation_id,
+            self._config.timeout_ms / 1000.0, self._timeout_request, correlation_id
         )
 
         # Encode with protocol header and send
@@ -397,12 +393,7 @@ class AsyncBrokerClient:
             return data.get("result")
         if "arrow_bytes" in data:
             arrow_bytes = data.get("arrow_bytes") or b""
-            try:
-                table = _decode_arrow_bytes(arrow_bytes)
-            except (ImportError, RuntimeError):
-                return {"arrow": decode_arrow_nano(arrow_bytes)}
-            else:
-                return table
+            return {"arrow": decode_arrow(arrow_bytes)}
         arrow = data["arrow"] or {}
         name = arrow.get("name")
         size = int(arrow.get("size", 0))
@@ -413,16 +404,7 @@ class AsyncBrokerClient:
         # Use PyO3 ShmRegion for Arrow IPC with buffer protocol
         region = ShmRegion.open_named(name, size)
         try:
-            try:
-                # Ensure pyarrow is available with clear error message
-                pa = ensure_pyarrow()
-                with pa.ipc.open_stream(memoryview(region)) as reader:
-                    table = reader.read_all()
-            except (ImportError, RuntimeError):
-                # Fallback to nanoarrow
-                return {"arrow": decode_arrow_nano(memoryview(region))}
-            else:
-                return {"arrow": table}
+            return {"arrow": decode_arrow(memoryview(region))}
         finally:
             region.close()
             await self._release_arrow(str(name))
@@ -656,12 +638,7 @@ class SyncBrokerClient:
             return data.get("result")
         if "arrow_bytes" in data:
             arrow_bytes = data.get("arrow_bytes") or b""
-            try:
-                table = _decode_arrow_bytes(arrow_bytes)
-            except (ImportError, RuntimeError):
-                return {"arrow": decode_arrow_nano(arrow_bytes)}
-            else:
-                return table
+            return {"arrow": decode_arrow(arrow_bytes)}
         arrow = data["arrow"] or {}
         name = arrow.get("name")
         size = int(arrow.get("size", 0))
@@ -672,16 +649,7 @@ class SyncBrokerClient:
         # Use PyO3 ShmRegion for Arrow IPC with buffer protocol
         region = ShmRegion.open_named(name, size)
         try:
-            try:
-                # Ensure pyarrow is available with clear error message
-                pa = ensure_pyarrow()
-                with pa.ipc.open_stream(memoryview(region)) as reader:
-                    table = reader.read_all()
-            except (ImportError, RuntimeError):
-                # Fallback to nanoarrow
-                return {"arrow": decode_arrow_nano(memoryview(region))}
-            else:
-                return {"arrow": table}
+            return {"arrow": decode_arrow(memoryview(region))}
         finally:
             region.close()
             self._release_arrow(str(name))
@@ -712,14 +680,6 @@ def _assert_ok(response: dict[str, Any]) -> dict[str, Any]:
         message = error.get("message") or "Broker error"
         raise BrokerError(message)
     return response
-
-
-def _decode_arrow_bytes(payload: bytes) -> dict[str, Any]:
-    # Ensure pyarrow is available with clear error message
-    pa = ensure_pyarrow()
-    with pa.ipc.open_stream(payload) as reader:
-        table = reader.read_all()
-    return {"arrow": table}
 
 
 __all__ = ("AsyncBrokerClient", "BrokerClientConfig", "BrokerError", "SyncBrokerClient")

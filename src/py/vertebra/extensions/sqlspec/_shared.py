@@ -4,7 +4,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 from vertebra.drivers.broker import VertebraAsyncConnection, VertebraAsyncPool, VertebraSyncConnection, VertebraSyncPool
-from vertebra.resources.arrow import decode_arrow_nano
+from vertebra.resources.arrow import decode_arrow
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -17,13 +17,13 @@ _T_co = TypeVar("_T_co", covariant=True)
 def _decode_arrow(data: Any) -> list[dict[str, Any]]:
     """Decode Arrow data to list of dicts.
 
-    Handles both pyarrow Table and raw bytes/memoryview using nanoarrow.
+    Handles both pyarrow Table and raw bytes/memoryview.
     """
     if hasattr(data, "to_pylist"):
         return cast("list[dict[str, Any]]", data.to_pylist())
 
     if isinstance(data, (bytes, bytearray, memoryview)):
-        return decode_arrow_nano(data)
+        return decode_arrow(data)
 
     return []
 

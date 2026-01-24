@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -8,7 +9,7 @@ from vertebra.security import OP_HASH_PASSWORD, SecurityClient
 
 
 @pytest.fixture
-def mock_vertebra():
+def mock_vertebra() -> Generator[MagicMock, None, None]:
     with patch("vertebra.security._vertebra") as m:
         # Mock MpmcRing
         m.MpmcRing.open_named.return_value = MagicMock()

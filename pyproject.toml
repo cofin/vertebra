@@ -12,12 +12,11 @@ classifiers = [
 ]
 dependencies = [
   "msgspec",
-  "pyarrow",
+  "nanoarrow",
+  "rich",
   "rich-click",
   "httpx>=0.27.0",
   "jinja2",
-  "pyjwt>=2.10.1",
-  "flatbuffers"
 ]
 description = "Python-first, high-performance application backbone with tRPC-like DX"
 keywords = ["trpc", "asgi", "ipc", "performance", "bun", "arrow", "flatbuffers"]
@@ -30,13 +29,15 @@ readme = "README.md"
 requires-python = ">=3.12"
 version = "0.1.0"
 
-[project.optional-dependencies] 
+[project.optional-dependencies]
 numpy = ["numpy>=1.24.0"]
 polars = ["polars>=0.20.0"]
 pandas = ["pandas>=2.0.0"]
+sqlspec = ["pyarrow"]
 
 [project.scripts]
-vertebra = "vertebra.cli:main"
+vertebra = "vertebra.cli:cli"
+vtb = "vertebra.cli:cli"
 
 [project.urls]
 documentation = "https://github.com/cofin/vertebra"
@@ -297,11 +298,15 @@ ignore = [
 [tool.ruff.lint.mccabe]
 max-complexity = 25
 
+[tool.ruff.lint.pylint]
+max-branches = 15
+max-returns = 10
+
 [tool.ruff.lint.pep8-naming]
 classmethod-decorators = ["classmethod", "pydantic.field_validator", "pydantic.root_validator", "pydantic.validator"]
 
 [tool.ruff.lint.per-file-ignores]
-"**/src/py/tests/**/*.py" = ['S101', 'S105', 'S108', 'S106', 'S404', 'ANN001', 'S608', 'PLW0603', 'BLE001'] # Allow assert, hardcoded passwords, temp files, SQL strings, and global statements in tests
+"**/src/py/tests/**/*.py" = ['S101', 'S105', 'S108', 'S106', 'S404', 'ANN001', 'S608', 'PLW0603', 'BLE001', 'ASYNC220'] # Allow assert, hardcoded passwords, temp files, SQL strings, global statements, and blocking subprocess in tests
 "**/tools/**/*.py" = ['C901', 'A002', 'S105', 'S106', 'S107', 'S607', 'BLE001', 'PLR0911', 'PLR0912'] # Allow hardcoded passwords in database config classes
 "**/tools/**/database.py" = ['S105', 'S106'] # Allow hardcoded passwords in database config classes
 "__init__.py" = ['D104', 'F401']

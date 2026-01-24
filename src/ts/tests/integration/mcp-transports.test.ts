@@ -15,7 +15,7 @@ describe("MCP Transports Integration", () => {
 
     const res = await transport.handleConnect(new Request("http://localhost/mcp?session=s1"));
     const reader = res.body?.getReader();
-    
+
     const { value: v1 } = await reader?.read() || {};
     expect(new TextDecoder().decode(v1)).toContain("event: endpoint");
 
@@ -28,7 +28,7 @@ describe("MCP Transports Integration", () => {
     const text2 = new TextDecoder().decode(v2);
     expect(text2).toContain("event: message");
     expect(text2).toContain('"id":1');
-    
+
     await transport.close();
   });
 
@@ -61,7 +61,7 @@ describe("MCP Transports Integration", () => {
     const lastCall = (mockWs.send as any).mock.calls[0][0];
     const res = JSON.parse(lastCall);
     expect(res.id).toBe(1);
-    
+
     await transport.close();
   });
 });

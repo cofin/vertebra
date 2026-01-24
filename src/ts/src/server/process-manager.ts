@@ -240,7 +240,12 @@ export class ProcessManager {
         scheme: "http",
         httpVersion: "1.1",
       } as AsgiIpcFrame;
-      yield { id: requestId, type: "http.request", body: new Uint8Array(), more_body: false } as AsgiIpcFrame;
+      yield {
+        id: requestId,
+        type: "http.request",
+        body: new Uint8Array(),
+        more_body: false,
+      } as AsgiIpcFrame;
     })();
     try {
       const status = await this.readStatus(client, frames);

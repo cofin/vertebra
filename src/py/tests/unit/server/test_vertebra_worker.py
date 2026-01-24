@@ -61,4 +61,6 @@ async def test_vertebra_worker_direct_http() -> None:
     body_args = writer.send.call_args_list[1][0][0]
     assert body_args["id"] == "req-1"
     assert body_args["type"] == "http.response.body"
-    assert body_args["body"] == b'{"hello": "world"}'
+    import json
+
+    assert json.loads(body_args["body"]) == {"hello": "world"}

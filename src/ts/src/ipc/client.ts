@@ -1,6 +1,6 @@
 import { ShmRing } from "../broker/shm";
-import { encodeRequest, decodeResponse } from "../protocol/serialization";
 import { Flags } from "../protocol/headers";
+import { decodeResponse, encodeRequest } from "../protocol/serialization";
 
 export type IpcClientConfig = {
   name?: string;
@@ -267,7 +267,11 @@ class IpcConnection {
       resp_ring: respName,
     };
     const correlationId = this.nextCorrelationId();
-    this.control.send(encodeRequest(registerMessage, correlationId, Flags.NONE), 0, this.config.timeoutMs);
+    this.control.send(
+      encodeRequest(registerMessage, correlationId, Flags.NONE),
+      0,
+      this.config.timeoutMs,
+    );
     const response = await this.waitForResponse(String(registerId));
     if (!response || !(response as Record<string, unknown>).ok) {
       throw new IpcConnectionError("IPC registration failed");

@@ -33,7 +33,7 @@ def test_build_command_one_file(runner, tmp_path) -> None:
         )
 
         assert result.exit_code == 0
-        assert "Building single-file executable" in result.output
+        assert "Build completed successfully" in result.output
 
         mock_bundler.assert_called_once()
         call_kwargs = mock_bundler.call_args[1]

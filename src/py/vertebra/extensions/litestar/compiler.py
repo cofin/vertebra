@@ -123,7 +123,7 @@ def compile_di(
 class PipelineCompiler:
     """Compiles Litestar route handlers into optimized runner functions."""
 
-    def compile_route(self, handler: Any) -> Callable[[Any], Awaitable[Any]]:
+    def compile_route(self, handler: Any) -> Callable[[Any], Awaitable[Any]]:  # noqa: C901
         """Compile a single Litestar route handler into an optimized runner."""
         # Extract guards and dependencies from the handler
         # Litestar handlers have resolve_guards and resolve_dependencies methods
@@ -135,9 +135,9 @@ class PipelineCompiler:
 
         # We build the final runner function
         func_name = f"runner_{id(handler)}"
-        from uuid import UUID
-        from typing import Annotated, Union, get_args, get_origin
         import types
+        from typing import Annotated, Union, get_args, get_origin
+        from uuid import UUID
 
         def unwrap_annotation(annotation: Any) -> Any:
             if get_origin(annotation) is Annotated:
@@ -170,16 +170,20 @@ class PipelineCompiler:
             if annotation is float:
                 return float, False
             if annotation is bool:
+
                 def _bool(value: Any) -> bool:
                     if isinstance(value, bool):
                         return value
                     return str(value).lower() in ("true", "1", "yes", "on")
+
                 return _bool, False
             if annotation is UUID:
+
                 def _uuid(value: Any) -> UUID:
                     if isinstance(value, UUID):
                         return value
                     return UUID(str(value))
+
                 return _uuid, False
             return None, False
 
@@ -210,9 +214,13 @@ class PipelineCompiler:
 
         # 3. Call the handler with dependencies + request params
         sig = inspect.signature(handler.fn)
-        if any(param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD, inspect.Parameter.POSITIONAL_ONLY)
-               for param in sig.parameters.values()):
-            raise ValueError("Native runner does not support positional-only or varargs parameters.")
+        if any(
+            param.kind
+            in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD, inspect.Parameter.POSITIONAL_ONLY)
+            for param in sig.parameters.values()
+        ):
+            msg = "Native runner does not support positional-only or varargs parameters."
+            raise ValueError(msg)
 
         body.append("    params = {}")
         for param_name, param in sig.parameters.items():
@@ -234,14 +242,10 @@ class PipelineCompiler:
 
             body.append(f"    if '{param_name}' in ctx.path_params:")
             body.append(f"        raw = ctx.path_params['{param_name}']")
-            body.append(
-                f"        params['{param_name}'] = coerce_value(raw, {converter_key}, {list_key})"
-            )
+            body.append(f"        params['{param_name}'] = coerce_value(raw, {converter_key}, {list_key})")
             body.append(f"    elif '{param_name}' in ctx.query_params:")
             body.append(f"        raw = ctx.query_params['{param_name}']")
-            body.append(
-                f"        params['{param_name}'] = coerce_value(raw, {converter_key}, {list_key})"
-            )
+            body.append(f"        params['{param_name}'] = coerce_value(raw, {converter_key}, {list_key})")
 
         if inspect.iscoroutinefunction(handler.fn):
             body.append("    return await handler_fn(**params)")

@@ -53,7 +53,7 @@ class TestMySQLDialect:
             # Simple stateful mock
             state = {"version_done": False}
 
-            def side_effect():
+            def side_effect() -> tuple[str]:
                 if not state["version_done"]:
                     state["version_done"] = True
                     return ("8.0.30",)

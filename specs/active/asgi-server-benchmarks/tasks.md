@@ -102,24 +102,43 @@
 **Validation**: Run with Uvicorn, all endpoints work ✓
 
 ### Task 1.7: Create Test Applications (Category 2 - Native Runtimes)
-- [ ] Create `benchmarks/servers/app/robyn_app.py` for Robyn
-- [ ] Create `benchmarks/servers/app/sanic_app.py` for Sanic standalone
-- [ ] Create `benchmarks/servers/app/spikard_app.py` for Spikard
-- [ ] Each app mirrors the same endpoints as raw ASGI
+- [x] Create `benchmarks/servers/app/robyn_app.py` for Robyn
+- [x] Create `benchmarks/servers/app/sanic_app.py` for Sanic standalone
+- [x] Create `benchmarks/servers/app/spikard_app.py` for Spikard
+- [x] Each app mirrors the same endpoints as raw ASGI
 
-**Validation**: Each runtime app starts and responds correctly
-**Status**: Deferred - Optional for runtimes that require native apps
+**Validation**: Each runtime app starts and responds correctly ✓
 
 ### Task 1.8: Create Test Applications (Category 3 - Frameworks)
-- [ ] Create `benchmarks/servers/app/starlette_app.py` for Starlette
-- [ ] Create `benchmarks/servers/app/fastapi_app.py` for FastAPI
-- [ ] Create `benchmarks/servers/app/blacksheep_app.py` for BlackSheep
-- [ ] Create `benchmarks/servers/app/litestar_app.py` for Litestar
-- [ ] Create `benchmarks/servers/app/sanic_asgi_app.py` for Sanic ASGI
-- [ ] Each app mirrors the same endpoints as raw ASGI
+- [x] Create `benchmarks/servers/app/starlette_app.py` for Starlette
+- [x] Create `benchmarks/servers/app/fastapi_app.py` for FastAPI
+- [x] Create `benchmarks/servers/app/blacksheep_app.py` for BlackSheep
+- [x] Create `benchmarks/servers/app/litestar_app.py` for Litestar
+- [x] Sanic uses `sanic_app.py` for both standalone and ASGI modes
+- [x] Each app mirrors the same endpoints as raw ASGI
 
-**Validation**: All framework apps work on Uvicorn
-**Status**: Deferred - Optional for framework comparison tests
+**Validation**: All framework apps created ✓
+
+### Task 1.9: Cross-Server Framework Testing (Added)
+- [x] Add `litestar_uvicorn` - Litestar on Uvicorn httptools
+- [x] Add `litestar_granian` - Litestar on Granian Rust runtime
+- [x] Add `vertebra_asgi_litestar` - Litestar through Vertebra ASGI bridge
+- [x] Add `vertebra_native_litestar` - Litestar with Vertebra native Rust router
+- [x] Add `fastapi_uvicorn` - FastAPI on Uvicorn httptools
+- [x] Add `fastapi_granian` - FastAPI on Granian Rust runtime
+- [x] Add `vertebra_fastapi` - FastAPI through Vertebra ASGI bridge
+
+**Validation**: 21 total server configurations ✓
+
+### Task 1.10: Isolated Benchmark Environment (Added)
+- [x] Create `benchmarks/servers/venv_manager.py` for isolated venv
+- [x] Add `benchmarks/.venv/` to `.gitignore`
+- [x] Update `utils.py` with `use_bench_venv` parameter
+- [x] Add `--no-venv` CLI flag to runner
+- [x] Add `make bench-setup` and `make bench-clean` targets
+- [x] Update README with isolated venv documentation
+
+**Validation**: Benchmark dependencies isolated from main project ✓
 
 ---
 
@@ -265,16 +284,20 @@ After implementation, verify:
 
 - [x] `make bench-servers-quick` completes (requires oha installed)
 - [x] Category 1: All 6 ASGI servers configured (or gracefully skipped)
-- [x] Category 2: All 4 integrated runtimes configured
-- [x] Category 3: All 6 frameworks configured
+- [x] Category 2: All 7 integrated runtimes configured (vertebra, vertebra_asgi_litestar, vertebra_native_litestar, vertebra_fastapi, robyn, sanic_standalone, spikard)
+- [x] Category 3: All 8 frameworks configured (raw_asgi, starlette, fastapi_uvicorn, fastapi_granian, blacksheep, litestar_uvicorn, litestar_granian, sanic_asgi)
 - [x] JSON results file created with category groupings
 - [x] Markdown report with separate sections per category
 - [x] No server processes left running (atexit cleanup)
 - [x] Report tables properly formatted
 - [x] CLI help is accurate
 - [x] README documentation is complete
-- [ ] No lint errors (`make lint-all`)
-- [ ] Vertebra included in Category 2 comparisons
+- [x] No lint errors (`ruff check benchmarks/`)
+- [x] Vertebra included in Category 2 comparisons
+- [x] Cross-server Litestar comparison (Uvicorn, Granian, Vertebra ASGI, Vertebra Native)
+- [x] Cross-server FastAPI comparison (Uvicorn, Granian, Vertebra)
+- [x] Isolated benchmark venv to avoid dependency pollution
+- [x] oha binary detection for ~/.cargo/bin/
 
 ---
 

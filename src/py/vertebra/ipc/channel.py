@@ -7,17 +7,17 @@ import struct
 import time
 from typing import Any, Self, TypeVar, cast
 
-# Default spin duration in microseconds for hybrid wait.
-# Read from VERTEBRA_SPIN_US environment variable (default: 5).
-# Lower values (2-3) = lower latency, higher CPU
-# Higher values (10+) = higher latency, lower CPU
-DEFAULT_SPIN_US: int = int(os.environ.get("VERTEBRA_SPIN_US", "5"))
-
 from vertebra import _vertebra
 from vertebra.exceptions import ChannelError, SerializationError
 from vertebra.procedures import ProcedureRegistry, get_serializer
 from vertebra.protocol import HEADER_SIZE, Flags, RequestHeader, ResponseHeader
 from vertebra.serializers import get_json_codec
+
+# Default spin duration in microseconds for hybrid wait.
+# Read from VERTEBRA_SPIN_US environment variable (default: 5).
+# Lower values (2-3) = lower latency, higher CPU
+# Higher values (10+) = higher latency, lower CPU
+DEFAULT_SPIN_US: int = int(os.environ.get("VERTEBRA_SPIN_US", "5"))
 
 # Procedure ID encoding: length (u16) + bytes
 _PROC_LEN = struct.Struct("<H")  # Little-endian u16
@@ -26,13 +26,7 @@ _MAX_PROC_LEN = 0xFFFF
 T = TypeVar("T")
 
 
-def encode_request(
-    procedure_id: str,
-    payload: bytes,
-    *,
-    correlation_id: int = 0,
-    flags: int = 0,
-) -> bytes:
+def encode_request(procedure_id: str, payload: bytes, *, correlation_id: int = 0, flags: int = 0) -> bytes:
     """Encode a request message.
 
     Wire format:
@@ -86,8 +80,6 @@ def decode_response(data: bytes | memoryview) -> tuple[int, int, bytes]:
     header = ResponseHeader.from_bytes(data[:HEADER_SIZE])
     payload = bytes(data[HEADER_SIZE:])
     return header.id, header.flags, payload
-
-
 
 
 class BufferView:
@@ -245,6 +237,50 @@ class Channel:
             raise ChannelError(msg, stage="closed")
         return handle
 
+    def _send_with_polling(self, handle: _vertebra.Channel, message: bytes, timeout_ms: int, procedure_id: str) -> None:
+        """Send message with polling fallback when native timeout not available."""
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+        while not handle.try_send_request(message):
+            if time.monotonic() >= deadline:
+                msg = "send timeout"
+                raise ChannelError(msg, procedure_id=procedure_id, stage="send_request")
+            time.sleep(0.001)
+
+    def _recv_with_polling(self, handle: _vertebra.Channel, timeout_ms: int, procedure_id: str) -> bytes:
+        """Receive response with polling fallback when native timeout not available."""
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+        while True:
+            response_data = handle.try_recv_response(self._max_payload)
+            if response_data is not None:
+                return response_data
+            if time.monotonic() >= deadline:
+                msg = "response timeout"
+                raise ChannelError(msg, procedure_id=procedure_id, stage="recv_response")
+            time.sleep(0.001)
+
+    def _do_send_recv(
+        self, handle: _vertebra.Channel, message: bytes, timeout_ms: int | None, procedure_id: str
+    ) -> bytes:
+        """Execute send/receive with appropriate timeout strategy."""
+        has_native_timeout = hasattr(handle, "send_request_timeout") and hasattr(handle, "recv_response_timeout")
+
+        if timeout_ms is None:
+            handle.send_request(message)
+            return handle.recv_response(self._max_payload)
+
+        if has_native_timeout:
+            if not handle.send_request_timeout(message, timeout_ms):
+                msg = "send timeout"
+                raise ChannelError(msg, procedure_id=procedure_id, stage="send_request")
+            result = handle.recv_response_timeout(self._max_payload, timeout_ms)
+            if result is None:
+                msg = "response timeout"
+                raise ChannelError(msg, procedure_id=procedure_id, stage="recv_response")
+            return result
+
+        self._send_with_polling(handle, message, timeout_ms, procedure_id)
+        return self._recv_with_polling(handle, timeout_ms, procedure_id)
+
     def send_sync(
         self,
         procedure_id: str,
@@ -279,35 +315,7 @@ class Channel:
 
         # Send and receive
         try:
-            has_timeout_fns = hasattr(handle, "send_request_timeout") and hasattr(handle, "recv_response_timeout")
-            if timeout_ms is not None and has_timeout_fns:
-                if not handle.send_request_timeout(message, timeout_ms):
-                    msg = "send timeout"
-                    raise ChannelError(msg, procedure_id=procedure_id, stage="send_request")
-                result = handle.recv_response_timeout(self._max_payload, timeout_ms)
-                if result is None:
-                    msg = "response timeout"
-                    raise ChannelError(msg, procedure_id=procedure_id, stage="recv_response")
-                response_data = result
-            elif timeout_ms is None:
-                handle.send_request(message)
-                response_data = handle.recv_response(self._max_payload)
-            else:
-                send_deadline = time.monotonic() + (timeout_ms / 1000.0)
-                while not handle.try_send_request(message):
-                    if time.monotonic() >= send_deadline:
-                        msg = "send timeout"
-                        raise ChannelError(msg, procedure_id=procedure_id, stage="send_request")
-                    time.sleep(0.001)
-                recv_deadline = time.monotonic() + (timeout_ms / 1000.0)
-                response_data = None
-                while response_data is None:
-                    response_data = handle.try_recv_response(self._max_payload)
-                    if response_data is None and time.monotonic() >= recv_deadline:
-                        msg = "response timeout"
-                        raise ChannelError(msg, procedure_id=procedure_id, stage="recv_response")
-                    if response_data is None:
-                        time.sleep(0.001)
+            response_data = self._do_send_recv(handle, message, timeout_ms, procedure_id)
         except RuntimeError as exc:
             raise ChannelError(str(exc), procedure_id=procedure_id, stage="ipc") from exc
 

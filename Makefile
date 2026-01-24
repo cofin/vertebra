@@ -529,10 +529,21 @@ docs-linkcheck-full:                               ## Run the full link check on
 BENCH_VENV := benchmarks/.venv
 BENCH_PYTHON := $(BENCH_VENV)/bin/python
 
+# Helper to find oha binary (checks PATH and common cargo install locations)
+define check_oha
+	@if ! command -v oha >/dev/null 2>&1 && [ ! -x "$$HOME/.cargo/bin/oha" ]; then \
+		echo "${ERROR} oha not found. Run 'make bench-setup' first."; \
+		exit 1; \
+	fi
+endef
+
 .PHONY: bench-setup
 bench-setup:                                        ## Create benchmark venv and install dependencies
 	@echo "${INFO} Setting up benchmark environment... 📦"
-	@command -v oha >/dev/null 2>&1 || { echo "${INFO} Installing oha..."; cargo install oha; }
+	@if ! command -v oha >/dev/null 2>&1 && [ ! -x "$$HOME/.cargo/bin/oha" ]; then \
+		echo "${INFO} Installing oha..."; \
+		cargo install oha; \
+	fi
 	@uv run python -m benchmarks.servers.venv_manager create
 	@uv run python -m benchmarks.servers.venv_manager install
 	@echo "${OK} Benchmark environment ready at $(BENCH_VENV)"
@@ -540,7 +551,7 @@ bench-setup:                                        ## Create benchmark venv and
 .PHONY: bench-servers
 bench-servers:                                      ## Run ASGI server benchmarks (uses benchmark venv)
 	@echo "${INFO} Running ASGI server benchmarks... 📊"
-	@command -v oha >/dev/null 2>&1 || { echo "${ERROR} oha not found. Run 'make bench-setup' first."; exit 1; }
+	$(check_oha)
 	@if [ ! -d "$(BENCH_VENV)" ]; then echo "${WARN} Benchmark venv not found. Run 'make bench-setup' first, or use --no-venv."; fi
 	@uv run python -m benchmarks.servers.runner
 	@echo "${OK} Results saved to benchmarks/results/"
@@ -548,14 +559,21 @@ bench-servers:                                      ## Run ASGI server benchmark
 .PHONY: bench-servers-quick
 bench-servers-quick:                                ## Quick server benchmark (reduced duration)
 	@echo "${INFO} Running quick server benchmarks... 📊"
-	@command -v oha >/dev/null 2>&1 || { echo "${ERROR} oha not found. Run 'make bench-setup' first."; exit 1; }
+	$(check_oha)
 	@uv run python -m benchmarks.servers.runner --quick
+	@echo "${OK} Results saved to benchmarks/results/"
+
+.PHONY: bench-fastest
+bench-fastest:                                      ## Benchmark only the fastest servers (Granian, Uvicorn httptools, Litestar/Granian)
+	@echo "${INFO} Running fastest server benchmarks... 🚀"
+	$(check_oha)
+	@uv run python -m benchmarks.servers.runner --quick --servers granian,uvicorn_httptools,litestar_granian
 	@echo "${OK} Results saved to benchmarks/results/"
 
 .PHONY: bench-vertebra
 bench-vertebra:                                     ## Benchmark only Vertebra (uses current venv)
 	@echo "${INFO} Running Vertebra benchmarks... 📊"
-	@command -v oha >/dev/null 2>&1 || { echo "${ERROR} oha not found. Run 'make bench-setup' first."; exit 1; }
+	$(check_oha)
 	@uv run python -m benchmarks.servers.runner --servers vertebra --no-venv
 	@echo "${OK} Results saved to benchmarks/results/"
 

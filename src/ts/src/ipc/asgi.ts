@@ -5,8 +5,8 @@ import {
   type IpcClientConfig,
   IpcPool,
   type IpcRequester,
-  resolveIpcConfig,
   type ResolvedIpcConfig,
+  resolveIpcConfig,
 } from "./client";
 
 export type AsgiRequest = {

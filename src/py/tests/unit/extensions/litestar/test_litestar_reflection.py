@@ -30,14 +30,14 @@ def test_reflect_routes_basic() -> None:
     hello_route = next((r for r in routes if r.path == "/hello"), None)
     assert hello_route is not None
     assert "GET" in hello_route.methods
-    assert hello_route.handler == hello_handler.fn
+    assert hello_route.handler_fn == hello_handler.fn
     assert isinstance(hello_route.handler_id, int)
 
     # Check echo_handler
     echo_route = next((r for r in routes if r.path == "/echo"), None)
     assert echo_route is not None
     assert "POST" in echo_route.methods
-    assert echo_route.handler == echo_handler.fn
+    assert echo_route.handler_fn == echo_handler.fn
     assert echo_route.handler_id != hello_route.handler_id
 
 
@@ -108,7 +108,7 @@ def test_reflect_routes_websockets() -> None:
 @pytest.mark.skipif(not HAS_LITESTAR, reason="Litestar not installed")
 def test_build_router() -> None:
     from vertebra._vertebra import Router
-    from vertebra.extensions.litestar.native import build_router, reflect_routes
+    from vertebra.extensions.litestar.native import RouteCapability, build_router, classify_route, reflect_routes
 
     @get("/hello/{name:str}", sync_to_thread=False)
     def hello_handler(name: str) -> str:
@@ -119,4 +119,8 @@ def test_build_router() -> None:
     router = build_router(routes)
 
     assert isinstance(router, Router)
-    assert router.match_path("/GET/hello/world") == id(hello_handler.fn)
+
+    # Find the native route's handler_id (Litestar creates internal handler objects)
+    hello_route = next((r for r in routes if "/hello/" in r.path and classify_route(r) == RouteCapability.NATIVE), None)
+    assert hello_route is not None
+    assert router.match_path("/GET/hello/world") == hello_route.handler_id

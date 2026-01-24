@@ -1,27 +1,32 @@
 """Command line interface for Vertebra."""
 
 import click
-import rich_click
+
+# Import config module for side effects (rich-click configuration)
+from vertebra.cli import config as _config
 
 from .build import build
 from .init import init
 from .serve import serve
 
-# Configure rich-click
-rich_click.rich_click.USE_RICH_MARKUP = True
-rich_click.rich_click.SHOW_ARGUMENTS = True
-rich_click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
+__all__ = ["cli", "main"]
 
 
 @click.group()
-@click.version_option(package_name="vertebra")
-def main() -> None:
-    """Vertebra: High-performance polyglot application backbone."""
+@click.version_option(package_name="vertebra")  # type: ignore[call-arg]
+def cli() -> None:
+    """Vertebra: High-performance polyglot application backbone.
+
+    Python-first architecture with Rust IPC and Bun server layer.
+    """
 
 
-main.add_command(serve)
-main.add_command(build)
-main.add_command(init)
+cli.add_command(serve)
+cli.add_command(build)
+cli.add_command(init)
+
+# Alias for backwards compatibility
+main = cli
 
 if __name__ == "__main__":
-    main()
+    cli()

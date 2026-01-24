@@ -41,7 +41,7 @@ def test_environment_info_detect() -> None:
     assert env.python_version.count(".") == 2  # major.minor.micro
     assert env.oha_version == "1.4.0"
     # Timestamp should be valid ISO format
-    datetime.fromisoformat(env.timestamp.replace("Z", "+00:00"))
+    datetime.fromisoformat(env.timestamp)
 
 
 @pytest.mark.unit
@@ -278,10 +278,7 @@ def test_benchmark_suite_add_error() -> None:
     suite = BenchmarkSuite(environment=env)
 
     suite.add_error(
-        server="broken_server",
-        scenario="hello",
-        error="Failed to start server",
-        extra_info="Port 8000 already in use",
+        server="broken_server", scenario="hello", error="Failed to start server", extra_info="Port 8000 already in use"
     )
 
     assert len(suite.errors) == 1

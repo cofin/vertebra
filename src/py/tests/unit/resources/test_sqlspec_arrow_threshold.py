@@ -1,6 +1,6 @@
 import pytest
 
-from vertebra.resources.arrow import decode_arrow_nano, encode_arrow_nano, should_use_arrow
+from vertebra.resources.arrow import decode_arrow, encode_arrow, should_use_arrow
 
 
 @pytest.mark.unit
@@ -19,14 +19,14 @@ def test_should_use_arrow() -> None:
 
 
 @pytest.mark.unit
-def test_arrow_roundtrip_nano() -> None:
+def test_arrow_roundtrip() -> None:
     data = {"columns": ["id", "name", "active"], "rows": [[1, "Alice", True], [2, "Bob", False], [3, "Charlie", True]]}
 
-    encoded = encode_arrow_nano(data)
+    encoded = encode_arrow(data)
     assert isinstance(encoded, bytes)
     assert len(encoded) > 0
 
-    decoded = decode_arrow_nano(encoded)
+    decoded = decode_arrow(encoded)
     assert len(decoded) == 3
     assert decoded[0] == {"id": 1, "name": "Alice", "active": True}
     assert decoded[1] == {"id": 2, "name": "Bob", "active": False}
@@ -36,6 +36,6 @@ def test_arrow_roundtrip_nano() -> None:
 @pytest.mark.unit
 def test_arrow_empty_result() -> None:
     data = {"columns": ["id"], "rows": []}
-    encoded = encode_arrow_nano(data)
-    decoded = decode_arrow_nano(encoded)
+    encoded = encode_arrow(data)
+    decoded = decode_arrow(encoded)
     assert decoded == []

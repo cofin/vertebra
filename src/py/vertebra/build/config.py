@@ -27,7 +27,7 @@ class BuildConfig:
             data = tomllib.load(f)
 
         tool = data.get("tool", {}).get("vertebra", {})
-        
+
         targets = {}
         for name, cfg in tool.get("build", {}).get("targets", {}).items():
             targets[name] = TargetConfig(profile=cfg.get("profile"))

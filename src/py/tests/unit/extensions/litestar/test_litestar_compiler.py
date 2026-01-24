@@ -155,8 +155,8 @@ async def test_pipeline_compiler_query_params_defaults() -> None:
     def handler(limit: int = 10) -> dict[str, int]:
         return {"limit": limit}
 
-    handler.resolve_guards = lambda: []
-    handler.resolve_dependencies = lambda: {}
+    handler.resolve_guards = list
+    handler.resolve_dependencies = dict
 
     compiler = PipelineCompiler()
     runner = compiler.compile_route(handler)

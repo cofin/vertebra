@@ -408,4 +408,4 @@ def create_transport(
     return PollingTransport(ring, poll_interval=poll_interval)
 
 
-__all__ = ("AsyncShmTransport", "DEFAULT_SPIN_US", "PollingTransport", "create_transport")
+__all__ = ("DEFAULT_SPIN_US", "AsyncShmTransport", "PollingTransport", "create_transport")

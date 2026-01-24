@@ -97,7 +97,7 @@ def _infer_schema(data: dict[str, list[Any]]) -> Any:
     return na.struct(fields)
 
 
-def encode_arrow_nano(result: dict[str, Any]) -> bytes:
+def encode_arrow(result: dict[str, Any]) -> bytes:
     """Encode a result to Arrow IPC using nanoarrow.
 
     Args:
@@ -141,7 +141,7 @@ def encode_arrow_nano(result: dict[str, Any]) -> bytes:
     return out.getvalue()
 
 
-def decode_arrow_nano(data: bytes | memoryview) -> list[dict[str, Any]]:
+def decode_arrow(data: bytes | memoryview) -> list[dict[str, Any]]:
     """Decode Arrow IPC stream to list of dicts using nanoarrow.
 
     Args:
@@ -157,15 +157,11 @@ def decode_arrow_nano(data: bytes | memoryview) -> list[dict[str, Any]]:
     # Create input stream
     input_stream = io.BytesIO(data) if isinstance(data, (bytes, bytearray)) else io.BytesIO(bytes(data))
 
-    rows = []
+    rows: list[dict[str, Any]] = []
     try:
-        # Use InputStream.from_readable to wrap the BytesIO
         with na_ipc.InputStream.from_readable(input_stream) as ipc_stream, na.c_array_stream(ipc_stream) as stream:
             for array in stream:
-                # na.iterator is a module, use iter_py to get python objects
                 rows.extend(list(iter_py(array)))
     except Exception:  # noqa: BLE001, S110
-        # Fallback/Debug: If Arrow decoding fails, return empty or partial rows.
-        # This is a best-effort decoding path.
         pass
     return rows

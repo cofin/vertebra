@@ -186,13 +186,7 @@ def test_parse_oha_output_v0_format() -> None:
         "latencyMin": 0.001,
         "totalBytes": 1000000,
         "bytesPerSec": 500000.0,
-        "latencyDistribution": {
-            "p50": 0.002,
-            "p75": 0.0028,
-            "p90": 0.0035,
-            "p95": 0.004,
-            "p99": 0.0055,
-        },
+        "latencyDistribution": {"p50": 0.002, "p75": 0.0028, "p90": 0.0035, "p95": 0.004, "p99": 0.0055},
     }
 
     json_str = json.dumps(sample_output)
@@ -238,10 +232,7 @@ def test_parse_oha_output_with_failures() -> None:
             "average": 0.01,
             "slowest": 0.1,
             "fastest": 0.001,
-            "latencyDistribution": {
-                "50": 0.008,
-                "99": 0.05,
-            },
+            "latencyDistribution": {"50": 0.008, "99": 0.05},
         }
     }
 
@@ -326,10 +317,7 @@ def test_parse_oha_output_already_in_ms() -> None:
             "average": 1500.0,  # Already in ms (large value)
             "slowest": 5000.0,  # Already in ms
             "fastest": 100.0,  # Already in ms
-            "latencyDistribution": {
-                "50": 1200.0,
-                "99": 4000.0,
-            },
+            "latencyDistribution": {"50": 1200.0, "99": 4000.0},
         }
     }
 

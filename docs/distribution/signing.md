@@ -118,4 +118,3 @@ Both workflows can be automated in GitHub Actions.
     echo "${{ secrets.APPLE_CERT_P12_BASE64 }}" | base64 --decode > cert.p12
     rcodesign sign ... --p12-file cert.p12 ...
 ```
-

@@ -1,10 +1,10 @@
-"""Tests for banner styles module."""
+"""Tests for CLI theme module."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from vertebra.cli.banner.styles import (
+from vertebra.cli.theme import (
     CHARS,
     CHARS_ASCII,
     COLORS_256,
@@ -67,41 +67,25 @@ class TestTerminalCaps:
 
     def test_color_mode_none_when_not_tty(self) -> None:
         caps = TerminalCaps(
-            is_tty=False,
-            supports_unicode=True,
-            supports_256_color=True,
-            supports_true_color=True,
-            width=120,
+            is_tty=False, supports_unicode=True, supports_256_color=True, supports_true_color=True, width=120
         )
         assert caps.color_mode == "none"
 
     def test_color_mode_true_when_true_color_supported(self) -> None:
         caps = TerminalCaps(
-            is_tty=True,
-            supports_unicode=True,
-            supports_256_color=True,
-            supports_true_color=True,
-            width=120,
+            is_tty=True, supports_unicode=True, supports_256_color=True, supports_true_color=True, width=120
         )
         assert caps.color_mode == "true"
 
     def test_color_mode_256_when_only_256_supported(self) -> None:
         caps = TerminalCaps(
-            is_tty=True,
-            supports_unicode=True,
-            supports_256_color=True,
-            supports_true_color=False,
-            width=120,
+            is_tty=True, supports_unicode=True, supports_256_color=True, supports_true_color=False, width=120
         )
         assert caps.color_mode == "256"
 
     def test_color_mode_basic_when_minimal_support(self) -> None:
         caps = TerminalCaps(
-            is_tty=True,
-            supports_unicode=False,
-            supports_256_color=False,
-            supports_true_color=False,
-            width=80,
+            is_tty=True, supports_unicode=False, supports_256_color=False, supports_true_color=False, width=80
         )
         assert caps.color_mode == "basic"
 
@@ -152,22 +136,14 @@ class TestGetChars:
 
     def test_returns_unicode_chars_when_supported(self) -> None:
         caps = TerminalCaps(
-            is_tty=True,
-            supports_unicode=True,
-            supports_256_color=True,
-            supports_true_color=False,
-            width=80,
+            is_tty=True, supports_unicode=True, supports_256_color=True, supports_true_color=False, width=80
         )
         chars = get_chars(caps)
         assert chars == CHARS
 
     def test_returns_ascii_chars_when_unicode_not_supported(self) -> None:
         caps = TerminalCaps(
-            is_tty=True,
-            supports_unicode=False,
-            supports_256_color=True,
-            supports_true_color=False,
-            width=80,
+            is_tty=True, supports_unicode=False, supports_256_color=True, supports_true_color=False, width=80
         )
         chars = get_chars(caps)
         assert chars == CHARS_ASCII
@@ -186,22 +162,14 @@ class TestColorFunctions:
 
     def test_apply_color_returns_plain_text_when_no_color(self) -> None:
         caps = TerminalCaps(
-            is_tty=False,
-            supports_unicode=True,
-            supports_256_color=True,
-            supports_true_color=True,
-            width=80,
+            is_tty=False, supports_unicode=True, supports_256_color=True, supports_true_color=True, width=80
         )
         result = apply_color("test", "gold", caps)
         assert result == "test"
 
     def test_apply_color_uses_true_color_when_supported(self) -> None:
         caps = TerminalCaps(
-            is_tty=True,
-            supports_unicode=True,
-            supports_256_color=True,
-            supports_true_color=True,
-            width=80,
+            is_tty=True, supports_unicode=True, supports_256_color=True, supports_true_color=True, width=80
         )
         result = apply_color("test", "gold", caps)
         # Should contain RGB escape sequence
@@ -209,11 +177,7 @@ class TestColorFunctions:
 
     def test_apply_color_uses_256_color_when_true_not_supported(self) -> None:
         caps = TerminalCaps(
-            is_tty=True,
-            supports_unicode=True,
-            supports_256_color=True,
-            supports_true_color=False,
-            width=80,
+            is_tty=True, supports_unicode=True, supports_256_color=True, supports_true_color=False, width=80
         )
         result = apply_color("test", "gold", caps)
         # Should contain 256-color escape sequence

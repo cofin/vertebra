@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 
 from vertebra._vertebra import SpscRing
-from vertebra.resources.arrow import ArrowRegionPool, encode_arrow_nano, should_use_arrow
+from vertebra.resources.arrow import ArrowRegionPool, encode_arrow, should_use_arrow
 from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig
 from vertebra.serializers import MessagePackCodec
 
@@ -84,7 +84,7 @@ class ProviderHost:
                 # Apply Arrow thresholding
                 if should_use_arrow(response, self._config.arrow_threshold_rows, self._config.arrow_threshold_bytes):
                     try:
-                        arrow_bytes = encode_arrow_nano(response)
+                        arrow_bytes = encode_arrow(response)
                         region = self._arrow_pool.create_region(len(arrow_bytes))
                         region.region.write(arrow_bytes)
 

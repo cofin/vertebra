@@ -46,15 +46,17 @@ def install_deps(packages: list[str] | None = None) -> None:
         # Default benchmark dependencies
         packages = [
             "httpx",  # For health checks
+            "rich",  # For pretty output
             "uvicorn[standard]",  # Uvicorn with uvloop + httptools
             "granian",  # Rust ASGI server
-            "hypercorn[uvloop]",  # HTTP/2 capable server
-            "daphne",  # Django Channels server
+            "socketify",  # C++ uSockets backend
             "starlette",  # Minimal framework
             "fastapi",  # Feature-rich framework
             "blacksheep",  # High-performance framework
             "litestar",  # msgspec-powered framework
             "sanic",  # Standalone + ASGI modes
+            "robyn",  # Rust Actix runtime
+            "spikard",  # Rust Tower-HTTP runtime
         ]
 
     print(f"Installing packages: {', '.join(packages)}")

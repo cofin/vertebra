@@ -14,9 +14,9 @@ import {
   trackConnection,
   trackRequest,
 } from "./metrics";
-import { createStatusHandler } from "./status";
 import { ProcessManager } from "./process-manager";
 import { createRouter, RequestHandler } from "./router";
+import { createStatusHandler } from "./status";
 import {
   createIpcConnectionPool,
   type IpcConnectionPool,
@@ -175,7 +175,11 @@ export async function createAsgiServer(
     : null;
   manager?.start();
   const routerInstance = new ShmRouter();
-  const bridge = new AsgiBridge({ requester: workerPool, router: routerInstance, ipc: resolved.ipc });
+  const bridge = new AsgiBridge({
+    requester: workerPool,
+    router: routerInstance,
+    ipc: resolved.ipc,
+  });
 
   // Initialize Auth Validator
   const authValidator = new AuthValidator(resolved.auth);

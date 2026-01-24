@@ -186,17 +186,6 @@ pub enum ControlMessageKind {
 }
 
 impl ControlMessageKind {
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "connect" => Some(Self::Connect),
-            "disconnect" => Some(Self::Disconnect),
-            "heartbeat" => Some(Self::Heartbeat),
-            "shutdown" => Some(Self::Shutdown),
-            _ => None,
-        }
-    }
-
     /// Convert to string.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -204,6 +193,20 @@ impl ControlMessageKind {
             Self::Disconnect => "disconnect",
             Self::Heartbeat => "heartbeat",
             Self::Shutdown => "shutdown",
+        }
+    }
+}
+
+impl std::str::FromStr for ControlMessageKind {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "connect" => Ok(Self::Connect),
+            "disconnect" => Ok(Self::Disconnect),
+            "heartbeat" => Ok(Self::Heartbeat),
+            "shutdown" => Ok(Self::Shutdown),
+            _ => Err(()),
         }
     }
 }
@@ -252,10 +255,10 @@ mod tests {
     fn test_control_message_kind() {
         assert_eq!(ControlMessageKind::Connect.as_str(), "connect");
         assert_eq!(
-            ControlMessageKind::from_str("disconnect"),
-            Some(ControlMessageKind::Disconnect)
+            "disconnect".parse::<ControlMessageKind>(),
+            Ok(ControlMessageKind::Disconnect)
         );
-        assert_eq!(ControlMessageKind::from_str("invalid"), None);
+        assert!("invalid".parse::<ControlMessageKind>().is_err());
     }
 
     #[test]

@@ -49,11 +49,7 @@ class HookRegistry:
     _sections: list[BannerSection] = field(default_factory=list)
 
     def register(
-        self,
-        name: str,
-        callback: SectionCallback,
-        order: int = 100,
-        mode: Literal["all", "serve", "dev"] = "all",
+        self, name: str, callback: SectionCallback, order: int = 100, mode: Literal["all", "serve", "dev"] = "all"
     ) -> None:
         """Register a new banner section.
 
@@ -67,9 +63,7 @@ class HookRegistry:
         # Keep sections sorted by order
         self._sections.sort(key=lambda s: s.order)
 
-    def collect(
-        self, mode: str = "serve", timeout: float = 1.0
-    ) -> list[tuple[str, dict[str, str]]]:
+    def collect(self, mode: str = "serve", timeout: float = 1.0) -> list[tuple[str, dict[str, str]]]:
         """Collect all registered sections for the given mode.
 
         Args:
@@ -107,10 +101,7 @@ _registry = HookRegistry()
 
 
 def banner_section(
-    name: str,
-    *,
-    order: int = 100,
-    mode: Literal["all", "serve", "dev"] = "all",
+    name: str, *, order: int = 100, mode: Literal["all", "serve", "dev"] = "all"
 ) -> Callable[[SectionCallback], SectionCallback]:
     """Decorator to register a function as a banner section.
 

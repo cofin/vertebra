@@ -39,9 +39,7 @@ async def test_storage_operations() -> None:
     client.storage_write.assert_called_with("test_storage", "path", b"data")
 
     # List
-    items = []
-    async for item in store.list_objects("prefix"):
-        items.append(item)
+    items = [item async for item in store.list_objects("prefix")]
     assert items == ["a", "b"]
     client.storage_list.assert_called_with("test_storage", "prefix")
 
@@ -62,8 +60,6 @@ async def test_storage_operations() -> None:
     client.storage_move.assert_called_with("test_storage", "src", "dst")
 
     # Glob
-    glob_items = []
-    async for item in store.glob("*.txt"):
-        glob_items.append(item)
+    glob_items = [item async for item in store.glob("*.txt")]
     assert glob_items == ["foo.txt"]
     client.storage_glob.assert_called_with("test_storage", "*.txt")

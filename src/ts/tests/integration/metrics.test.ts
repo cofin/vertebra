@@ -36,7 +36,7 @@ describe("Metrics Integration", () => {
     // Register a dummy MCP metric source if needed, or check if collectMcpMetrics returns empty list gracefully
     // collectMcpMetrics returns 3 metrics even if empty maps (with empty values list), so they might not appear in output if formatPrometheus skips empty values.
     // formatPrometheus: if (metric.values.length === 0) continue;
-    
+
     // So we need to trigger an MCP tool call or mock trackToolCall to see MCP metrics.
     const { trackToolCall } = await import("../../src/mcp/metrics");
     trackToolCall("dummy_tool", 100, true);
@@ -48,10 +48,10 @@ describe("Metrics Integration", () => {
 
     const { metricsHandler } = await import("../../src/server/metrics");
     const res = await metricsHandler(new Request("http://localhost/__metrics__"));
-    
+
     expect(res.status).toBe(200);
     const text = await res.text();
-    
+
     expect(text).toContain("integration_test_metric");
     expect(text).toContain("http_requests_total");
     expect(text).toContain("pool_connections_total");

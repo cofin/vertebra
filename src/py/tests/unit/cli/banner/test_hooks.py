@@ -15,12 +15,7 @@ class TestBannerSection:
         assert section.mode == "all"
 
     def test_custom_values(self) -> None:
-        section = BannerSection(
-            name="Custom",
-            callback=dict,
-            order=50,
-            mode="dev",
-        )
+        section = BannerSection(name="Custom", callback=dict, order=50, mode="dev")
         assert section.name == "Custom"
         assert section.order == 50
         assert section.mode == "dev"

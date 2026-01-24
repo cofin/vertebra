@@ -53,7 +53,7 @@ describe("SchemaRegistry", () => {
 
     const registry = new SchemaRegistry();
     await registry.watch(TEMP_FILE);
-    
+
     // Initial load check
     expect(registry.getTool("tool1")).toBeDefined();
 
@@ -64,10 +64,10 @@ describe("SchemaRegistry", () => {
         { name: "tool2", inputSchema: {} }
       ]
     };
-    
+
     // Add delay to ensure mtime differs enough for some FS watchers
     await new Promise(resolve => setTimeout(resolve, 100));
-    
+
     writeFileSync(TEMP_FILE, JSON.stringify(newSchemas));
 
     // Wait for watcher to trigger

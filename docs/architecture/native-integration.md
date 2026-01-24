@@ -68,4 +68,3 @@ Vertebra employs a **Capability Classifier** at startup to determine which route
 -   **Static Files**: Served via Bun (if configured) or fallback to ASGI.
 
 This hybrid approach ensures 100% compatibility with the Litestar ecosystem while optimizing the critical path (high-volume API traffic).
-

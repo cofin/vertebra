@@ -17,7 +17,7 @@ async function runBenchmark() {
   latencies.sort((a, b) => a - b);
   const p50 = latencies[Math.floor(iterations * 0.5)];
   const p99 = latencies[Math.floor(iterations * 0.99)];
-  
+
   console.log(`P50: ${p50.toFixed(3)}ms`);
   console.log(`P99: ${p99.toFixed(3)}ms`);
 }

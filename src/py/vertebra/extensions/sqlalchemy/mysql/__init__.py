@@ -2,10 +2,9 @@
 
 from sqlalchemy.dialects import registry
 
-# Register dialects
+from .dialect import VertebraMySQLAsyncDialect, VertebraMySQLDialect
+
 registry.register("mysql.vertebra", "vertebra.extensions.sqlalchemy.mysql.dialect", "VertebraMySQLAsyncDialect")
 registry.register("mysql.vertebra_sync", "vertebra.extensions.sqlalchemy.mysql.dialect", "VertebraMySQLDialect")
-
-from .dialect import VertebraMySQLAsyncDialect, VertebraMySQLDialect
 
 __all__ = ("VertebraMySQLAsyncDialect", "VertebraMySQLDialect")

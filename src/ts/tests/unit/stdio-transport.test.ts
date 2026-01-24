@@ -24,13 +24,13 @@ describe("StdioTransport", () => {
 
     // Push a complete JSON message
     input.push(JSON.stringify({ jsonrpc: "2.0", method: "test" }) + "\n");
-    
+
     // Wait for processing (microtask)
     await new Promise(resolve => setTimeout(resolve, 0));
 
     expect(messages).toHaveLength(1);
     expect(messages[0]).toEqual({ jsonrpc: "2.0", method: "test" });
-    
+
     await transport.close();
   });
 
@@ -58,22 +58,22 @@ describe("StdioTransport", () => {
   it("should handle malformed JSON gracefully", async () => {
     const input = new Readable({ read() {} });
     const output = new Writable({ write(c, e, cb) { cb(); } });
-    
+
     const transport = new StdioTransport(input, output);
     const errors: any[] = [];
-    
+
     transport.onerror = (err) => errors.push(err);
-    
+
     await transport.start();
-    
+
     // Push invalid JSON
     input.push("{ invalid json }\n");
-    
+
     await new Promise(resolve => setTimeout(resolve, 0));
-    
+
     expect(errors).toHaveLength(1);
     expect(errors[0].message).toContain("Parse error");
-    
+
     await transport.close();
   });
 });

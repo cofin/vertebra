@@ -167,9 +167,9 @@ class TestStatusCollectorAsync:
 
         # Mock the import to raise ImportError
         import sys
-        with patch.dict(sys.modules, {"httpx": None}):
-            with patch("builtins.__import__", side_effect=ImportError):
-                result = await collector.fetch_async()
+
+        with patch.dict(sys.modules, {"httpx": None}), patch("builtins.__import__", side_effect=ImportError):
+            result = await collector.fetch_async()
 
         assert result is None
 
@@ -260,9 +260,9 @@ class TestStatusCollectorGetClient:
 
         # Mock the import to raise ImportError
         import sys
-        with patch.dict(sys.modules, {"httpx": None}):
-            with patch("builtins.__import__", side_effect=ImportError):
-                client = collector._get_client()
+
+        with patch.dict(sys.modules, {"httpx": None}), patch("builtins.__import__", side_effect=ImportError):
+            client = collector._get_client()
 
         assert client is None
 

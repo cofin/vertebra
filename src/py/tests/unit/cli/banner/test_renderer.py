@@ -10,7 +10,7 @@ import pytest
 from vertebra.cli.banner.collector import ComponentStatus, ServerStatus
 from vertebra.cli.banner.hooks import get_registry
 from vertebra.cli.banner.renderer import VERSION, BannerConfig, BasicRenderer, TTYRenderer, render_banner
-from vertebra.cli.banner.styles import TerminalCaps
+from vertebra.cli.theme import TerminalCaps
 
 
 @pytest.fixture(autouse=True)
@@ -23,13 +23,7 @@ class TestBannerConfig:
     """Test BannerConfig dataclass."""
 
     def test_serve_mode_config(self) -> None:
-        config = BannerConfig(
-            mode="serve",
-            host="127.0.0.1",
-            port=8000,
-            workers=4,
-            log_level="info",
-        )
+        config = BannerConfig(mode="serve", host="127.0.0.1", port=8000, workers=4, log_level="info")
         assert config.mode == "serve"
         assert config.host == "127.0.0.1"
         assert config.port == 8000
@@ -56,22 +50,12 @@ class TestBasicRenderer:
     @pytest.fixture
     def caps(self) -> TerminalCaps:
         return TerminalCaps(
-            is_tty=False,
-            supports_unicode=False,
-            supports_256_color=False,
-            supports_true_color=False,
-            width=80,
+            is_tty=False, supports_unicode=False, supports_256_color=False, supports_true_color=False, width=80
         )
 
     @pytest.fixture
     def config(self) -> BannerConfig:
-        return BannerConfig(
-            mode="serve",
-            host="127.0.0.1",
-            port=8000,
-            workers=4,
-            log_level="info",
-        )
+        return BannerConfig(mode="serve", host="127.0.0.1", port=8000, workers=4, log_level="info")
 
     def test_outputs_json(self, caps: TerminalCaps, config: BannerConfig) -> None:
         renderer = BasicRenderer(caps)
@@ -85,9 +69,7 @@ class TestBasicRenderer:
         assert data["event"] == "server.startup"
         assert data["version"] == VERSION
 
-    def test_includes_config_in_json(
-        self, caps: TerminalCaps, config: BannerConfig
-    ) -> None:
+    def test_includes_config_in_json(self, caps: TerminalCaps, config: BannerConfig) -> None:
         renderer = BasicRenderer(caps)
 
         with patch("click.echo") as mock_echo:
@@ -101,9 +83,7 @@ class TestBasicRenderer:
         assert data["log_level"] == "info"
         assert data["mode"] == "serve"
 
-    def test_includes_starting_components_without_status(
-        self, caps: TerminalCaps, config: BannerConfig
-    ) -> None:
+    def test_includes_starting_components_without_status(self, caps: TerminalCaps, config: BannerConfig) -> None:
         renderer = BasicRenderer(caps)
 
         with patch("click.echo") as mock_echo:
@@ -115,9 +95,7 @@ class TestBasicRenderer:
         assert data["components"]["ipc"] == "starting"
         assert data["components"]["broker"] == "starting"
 
-    def test_includes_component_status(
-        self, caps: TerminalCaps, config: BannerConfig
-    ) -> None:
+    def test_includes_component_status(self, caps: TerminalCaps, config: BannerConfig) -> None:
         renderer = BasicRenderer(caps)
         status = ServerStatus(
             bun=ComponentStatus(status="ready", version="1.1.38"),
@@ -141,46 +119,26 @@ class TestTTYRenderer:
     @pytest.fixture
     def caps_full(self) -> TerminalCaps:
         return TerminalCaps(
-            is_tty=True,
-            supports_unicode=True,
-            supports_256_color=True,
-            supports_true_color=False,
-            width=120,
+            is_tty=True, supports_unicode=True, supports_256_color=True, supports_true_color=False, width=120
         )
 
     @pytest.fixture
     def caps_compact(self) -> TerminalCaps:
         return TerminalCaps(
-            is_tty=True,
-            supports_unicode=True,
-            supports_256_color=True,
-            supports_true_color=False,
-            width=80,
+            is_tty=True, supports_unicode=True, supports_256_color=True, supports_true_color=False, width=80
         )
 
     @pytest.fixture
     def caps_minimal(self) -> TerminalCaps:
         return TerminalCaps(
-            is_tty=True,
-            supports_unicode=True,
-            supports_256_color=True,
-            supports_true_color=False,
-            width=50,
+            is_tty=True, supports_unicode=True, supports_256_color=True, supports_true_color=False, width=50
         )
 
     @pytest.fixture
     def config(self) -> BannerConfig:
-        return BannerConfig(
-            mode="serve",
-            host="127.0.0.1",
-            port=8000,
-            workers=4,
-            log_level="info",
-        )
+        return BannerConfig(mode="serve", host="127.0.0.1", port=8000, workers=4, log_level="info")
 
-    def test_full_width_includes_logo(
-        self, caps_full: TerminalCaps, config: BannerConfig
-    ) -> None:
+    def test_full_width_includes_logo(self, caps_full: TerminalCaps, config: BannerConfig) -> None:
         renderer = TTYRenderer(caps_full)
         output_lines: list[str] = []
 
@@ -191,9 +149,7 @@ class TestTTYRenderer:
         # Logo should contain block characters
         assert "█" in output or "▀" in output
 
-    def test_full_width_includes_sections(
-        self, caps_full: TerminalCaps, config: BannerConfig
-    ) -> None:
+    def test_full_width_includes_sections(self, caps_full: TerminalCaps, config: BannerConfig) -> None:
         renderer = TTYRenderer(caps_full)
         output_lines: list[str] = []
 
@@ -204,9 +160,7 @@ class TestTTYRenderer:
         assert "Server" in output
         assert "Components" in output
 
-    def test_full_width_shows_url(
-        self, caps_full: TerminalCaps, config: BannerConfig
-    ) -> None:
+    def test_full_width_shows_url(self, caps_full: TerminalCaps, config: BannerConfig) -> None:
         renderer = TTYRenderer(caps_full)
         output_lines: list[str] = []
 
@@ -216,9 +170,7 @@ class TestTTYRenderer:
         output = "\n".join(str(line) for line in output_lines)
         assert "http://127.0.0.1:8000" in output
 
-    def test_compact_width_layout(
-        self, caps_compact: TerminalCaps, config: BannerConfig
-    ) -> None:
+    def test_compact_width_layout(self, caps_compact: TerminalCaps, config: BannerConfig) -> None:
         renderer = TTYRenderer(caps_compact)
         output_lines: list[str] = []
 
@@ -229,9 +181,7 @@ class TestTTYRenderer:
         # Should still have URL but in compact format
         assert "127.0.0.1:8000" in output
 
-    def test_minimal_width_layout(
-        self, caps_minimal: TerminalCaps, config: BannerConfig
-    ) -> None:
+    def test_minimal_width_layout(self, caps_minimal: TerminalCaps, config: BannerConfig) -> None:
         renderer = TTYRenderer(caps_minimal)
         output_lines: list[str] = []
 
@@ -245,12 +195,7 @@ class TestTTYRenderer:
 
     def test_dev_mode_shows_dev_badge(self, caps_full: TerminalCaps) -> None:
         config = BannerConfig(
-            mode="dev",
-            host="127.0.0.1",
-            port=8000,
-            workers=1,
-            log_level="debug",
-            watched_paths=["src/"],
+            mode="dev", host="127.0.0.1", port=8000, workers=1, log_level="debug", watched_paths=["src/"]
         )
         renderer = TTYRenderer(caps_full)
         output_lines: list[str] = []
@@ -263,12 +208,7 @@ class TestTTYRenderer:
 
     def test_dev_mode_shows_development_section(self, caps_full: TerminalCaps) -> None:
         config = BannerConfig(
-            mode="dev",
-            host="127.0.0.1",
-            port=8000,
-            workers=1,
-            log_level="debug",
-            watched_paths=["src/"],
+            mode="dev", host="127.0.0.1", port=8000, workers=1, log_level="debug", watched_paths=["src/"]
         )
         renderer = TTYRenderer(caps_full)
         output_lines: list[str] = []
@@ -280,9 +220,7 @@ class TestTTYRenderer:
         assert "Development" in output
         assert "__debug__" in output
 
-    def test_shows_component_status(
-        self, caps_full: TerminalCaps, config: BannerConfig
-    ) -> None:
+    def test_shows_component_status(self, caps_full: TerminalCaps, config: BannerConfig) -> None:
         renderer = TTYRenderer(caps_full)
         status = ServerStatus(
             bun=ComponentStatus(status="ready", version="1.1.38"),
@@ -310,18 +248,14 @@ class TestRenderBanner:
             render_banner(host="127.0.0.1", port=8000)
             mock_render.assert_called_once()
 
-    def test_uses_basic_renderer_when_not_tty(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_uses_basic_renderer_when_not_tty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.stdout.isatty", lambda: False)
 
         with patch.object(BasicRenderer, "render") as mock_render:
             render_banner(host="127.0.0.1", port=8000)
             mock_render.assert_called_once()
 
-    def test_passes_config_to_renderer(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_passes_config_to_renderer(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.stdout.isatty", lambda: False)
 
         with patch.object(BasicRenderer, "render") as mock_render:
@@ -347,22 +281,12 @@ class TestTTYRendererEdgeCases:
     @pytest.fixture
     def caps(self) -> TerminalCaps:
         return TerminalCaps(
-            is_tty=True,
-            supports_unicode=True,
-            supports_256_color=True,
-            supports_true_color=False,
-            width=120,
+            is_tty=True, supports_unicode=True, supports_256_color=True, supports_true_color=False, width=120
         )
 
     @pytest.fixture
     def config(self) -> BannerConfig:
-        return BannerConfig(
-            mode="serve",
-            host="127.0.0.1",
-            port=8000,
-            workers=4,
-            log_level="info",
-        )
+        return BannerConfig(mode="serve", host="127.0.0.1", port=8000, workers=4, log_level="info")
 
     def test_shows_broker_with_pools(self, caps: TerminalCaps, config: BannerConfig) -> None:
         renderer = TTYRenderer(caps)
@@ -449,19 +373,9 @@ class TestTTYRendererEdgeCases:
 
     def test_compact_layout_with_dev_mode(self, config: BannerConfig) -> None:
         caps = TerminalCaps(
-            is_tty=True,
-            supports_unicode=True,
-            supports_256_color=True,
-            supports_true_color=False,
-            width=80,
+            is_tty=True, supports_unicode=True, supports_256_color=True, supports_true_color=False, width=80
         )
-        dev_config = BannerConfig(
-            mode="dev",
-            host="127.0.0.1",
-            port=8000,
-            workers=1,
-            log_level="debug",
-        )
+        dev_config = BannerConfig(mode="dev", host="127.0.0.1", port=8000, workers=1, log_level="debug")
         renderer = TTYRenderer(caps)
         output_lines: list[str] = []
 
@@ -473,19 +387,9 @@ class TestTTYRendererEdgeCases:
 
     def test_minimal_layout_with_dev_mode(self) -> None:
         caps = TerminalCaps(
-            is_tty=True,
-            supports_unicode=True,
-            supports_256_color=True,
-            supports_true_color=False,
-            width=50,
+            is_tty=True, supports_unicode=True, supports_256_color=True, supports_true_color=False, width=50
         )
-        dev_config = BannerConfig(
-            mode="dev",
-            host="127.0.0.1",
-            port=8000,
-            workers=1,
-            log_level="debug",
-        )
+        dev_config = BannerConfig(mode="dev", host="127.0.0.1", port=8000, workers=1, log_level="debug")
         renderer = TTYRenderer(caps)
         output_lines: list[str] = []
 
@@ -515,22 +419,12 @@ class TestBasicRendererExtensions:
     @pytest.fixture
     def caps(self) -> TerminalCaps:
         return TerminalCaps(
-            is_tty=False,
-            supports_unicode=False,
-            supports_256_color=False,
-            supports_true_color=False,
-            width=80,
+            is_tty=False, supports_unicode=False, supports_256_color=False, supports_true_color=False, width=80
         )
 
     @pytest.fixture
     def config(self) -> BannerConfig:
-        return BannerConfig(
-            mode="serve",
-            host="127.0.0.1",
-            port=8000,
-            workers=4,
-            log_level="info",
-        )
+        return BannerConfig(mode="serve", host="127.0.0.1", port=8000, workers=4, log_level="info")
 
     def test_includes_extensions_in_json(self, caps: TerminalCaps, config: BannerConfig) -> None:
         renderer = BasicRenderer(caps)

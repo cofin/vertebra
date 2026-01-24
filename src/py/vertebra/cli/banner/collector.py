@@ -49,12 +49,7 @@ class StatusCollector:
     component health information for display in the banner.
     """
 
-    def __init__(
-        self,
-        host: str = "127.0.0.1",
-        port: int = 8000,
-        timeout: float = 1.0,
-    ) -> None:
+    def __init__(self, host: str = "127.0.0.1", port: int = 8000, timeout: float = 1.0) -> None:
         """Initialize the status collector.
 
         Args:

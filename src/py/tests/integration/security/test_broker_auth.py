@@ -1,5 +1,7 @@
+import asyncio
 import contextlib
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -103,12 +105,17 @@ app = Litestar(route_handlers=[me_handler])
     stdout_file = (tmp_dir / "broker.stdout").open("w")
     stderr_file = (tmp_dir / "broker.stderr").open("w")
 
-    # ASYNC220: Ideally we should use asyncio.create_subprocess_exec but for integration tests
-    # launching a persistent background process, Popen is often used.
-    # To fix strictly, we'd need to rewrite this test to use asyncio.
-    # For now, we accept Popen here but suppress the warning or acknowledge it.
+    bun_path = shutil.which("bun")
+    if bun_path is None:
+        pytest.skip("bun not found in PATH")
+
     proc = subprocess.Popen(
-        ["bun", "run", "src/server/serve.ts"], cwd="src/ts", env=env, stdout=stdout_file, stderr=stderr_file, text=True
+        [bun_path, "run", "src/server/serve.ts"],
+        cwd="src/ts",
+        env=env,
+        stdout=stdout_file,
+        stderr=stderr_file,
+        text=True,
     )
 
     try:

@@ -17,7 +17,7 @@ describe("Router Static Mounts", () => {
     // Request matching mount
     const req = new Request("http://localhost/assets/test.txt");
     const res = await router(req);
-    
+
     expect(res).toBeDefined();
     expect(res?.status).toBe(200);
     expect(await res?.text()).toBe("content");
@@ -35,7 +35,7 @@ describe("Router Static Mounts", () => {
 
     const req = new Request("http://localhost/assets/missing.txt");
     const res = await router(req);
-    
+
     // Should fall through to API handler or return 404 if no handler
     // Since no apiHandler provided, it returns 404
     expect(res).toBeDefined();

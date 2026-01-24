@@ -153,7 +153,8 @@ def run_oha(
         f"{duration_seconds}s",
         "-c",
         str(concurrency),
-        "-j",  # JSON output
+        "--output-format",
+        "json",  # JSON output (--output-format in v1.x, was -j in older versions)
         "--no-tui",  # No terminal UI
         "--latency-correction",  # Coordinated omission correction
         "-m",
@@ -209,48 +210,32 @@ def parse_oha_output(json_output: str) -> OhaResult:
         msg = f"Failed to parse oha output: {e}"
         raise OhaError(msg) from e
 
-    # Extract summary stats
-    summary = data.get("summary", data)  # oha v1.x vs v0.x format
+    summary = data.get("summary") or {}
+    percentiles = data.get("latencyPercentiles") or {}
 
-    # Handle different oha versions
-    # v1.x uses "requestsPerSec", v0.x uses "rps"
-    rps = summary.get("requestsPerSec", summary.get("rps", 0.0))
+    if not summary:
+        msg = f"Missing summary in oha output: {json_output[:200]}"
+        raise OhaError(msg)
 
-    # Success rate calculation
-    total = summary.get("total", summary.get("totalRequests", 0))
-    succeeded = summary.get("succeeded", summary.get("successfulRequests", total))
+    # Helper to get value with default (handles explicit null)
+    def get(d: dict, key: str, default: float = 0.0) -> float:
+        val = d.get(key)
+        return val if val is not None else default
+
+    # RPS and duration
+    rps = get(summary, "requestsPerSec")
+    duration = get(summary, "total", 1.0)
+    success_rate_ratio = get(summary, "successRate", 1.0)
+    success_rate = success_rate_ratio * 100
+
+    # Calculate request counts
+    total = int(rps * duration) if rps else 0
+    succeeded = int(total * success_rate_ratio)
     failed = total - succeeded
-    success_rate = (succeeded / total * 100) if total > 0 else 0.0
 
-    # Latency distribution - convert seconds to milliseconds
-    # oha reports latencies in seconds
-    latency_dist = summary.get("latencyDistribution", {})
-
-    def to_ms(key: str, default: float = 0.0) -> float:
-        """Convert seconds to milliseconds."""
-        val = latency_dist.get(key, summary.get(key, default))
-        # If value looks like seconds (< 1000), convert to ms
-        # If already in ms (> 1000), keep as is
-        if isinstance(val, (int, float)) and val < 100:
-            return val * 1000
-        return float(val) if val else default
-
-    # Extract latency percentiles
-    latency_avg = summary.get("average", summary.get("latencyAvg", 0))
-    if latency_avg < 100:  # Seconds, convert to ms
-        latency_avg *= 1000
-
-    latency_max = summary.get("slowest", summary.get("latencyMax", 0))
-    if latency_max < 1000:  # Seconds, convert to ms
-        latency_max *= 1000
-
-    latency_min = summary.get("fastest", summary.get("latencyMin", 0))
-    if latency_min < 100:  # Seconds, convert to ms
-        latency_min *= 1000
-
-    # Transfer stats
-    total_data = summary.get("totalData", summary.get("totalBytes", 0))
-    bps = summary.get("sizePerSec", summary.get("bytesPerSec", 0))
+    # Latencies (seconds -> milliseconds)
+    def to_ms(key: str, d: dict = summary) -> float:
+        return get(d, key) * 1000
 
     return OhaResult(
         total_requests=total,
@@ -258,16 +243,16 @@ def parse_oha_output(json_output: str) -> OhaResult:
         failed_requests=failed,
         rps=rps,
         success_rate=success_rate,
-        latency_avg_ms=latency_avg,
-        latency_p50_ms=to_ms("50", to_ms("p50")),
-        latency_p75_ms=to_ms("75", to_ms("p75")),
-        latency_p90_ms=to_ms("90", to_ms("p90")),
-        latency_p95_ms=to_ms("95", to_ms("p95")),
-        latency_p99_ms=to_ms("99", to_ms("p99")),
-        latency_max_ms=latency_max,
-        latency_min_ms=latency_min,
-        total_data_bytes=total_data,
-        bytes_per_second=bps,
+        latency_avg_ms=to_ms("average"),
+        latency_p50_ms=to_ms("p50", percentiles),
+        latency_p75_ms=to_ms("p75", percentiles),
+        latency_p90_ms=to_ms("p90", percentiles),
+        latency_p95_ms=to_ms("p95", percentiles),
+        latency_p99_ms=to_ms("p99", percentiles),
+        latency_max_ms=to_ms("slowest"),
+        latency_min_ms=to_ms("fastest"),
+        total_data_bytes=int(get(summary, "totalData")),
+        bytes_per_second=get(summary, "sizePerSec"),
         raw_data=data,
     )
 

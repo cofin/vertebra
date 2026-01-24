@@ -48,7 +48,7 @@ async def download_standalone(target: str, profile: str, cache_dir: Path) -> Pat
 
     logger.info("Downloading standalone runtime: %s", url)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    
+
     async with httpx.AsyncClient(follow_redirects=True) as client:
         async with client.stream("GET", url) as response:
             response.raise_for_status()

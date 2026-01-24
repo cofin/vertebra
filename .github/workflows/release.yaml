@@ -30,7 +30,7 @@ jobs:
           CIBW_ARCHS_WINDOWS: AMD64
           CIBW_SKIP: "pp*"
           # Environment variables for build
-          VERTEBRA_BUILD_PROFILE: "baseline" 
+          VERTEBRA_BUILD_PROFILE: "baseline"
 
       # Code signing (macOS)
       - name: Sign macOS wheels
@@ -65,13 +65,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       # Pre-cache PBS to simulate "cached" state
       - name: Pre-cache runtime
         run: |
           pip install httpx
           python -c "import sys; sys.path.append('src/py'); from vertebra.build.standalone import download_standalone; import asyncio; from pathlib import Path; asyncio.run(download_standalone('linux-x64', 'modern', Path('.cache/vertebra/pbs')))"
-      
+
       # Run build with network disabled
       - name: Build offline
         run: |

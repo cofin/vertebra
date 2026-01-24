@@ -23,7 +23,7 @@ describe("MCP Integration", () => {
       const response = await server.handle(msg);
       await transport.send(response);
     };
-    
+
     await transport.start();
 
     // 1. Initialize

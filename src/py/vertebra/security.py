@@ -1,3 +1,4 @@
+import logging
 import uuid
 from typing import Any
 
@@ -5,6 +6,8 @@ import msgspec
 
 from vertebra import _vertebra
 from vertebra.exceptions import ChannelError
+
+logger = logging.getLogger(__name__)
 
 # Opcode constants matched with Rust/TS
 OP_HASH_PASSWORD = 8
@@ -128,22 +131,10 @@ class SecurityClient:
         return msgspec.msgpack.decode(buf)
 
     def close(self) -> None:
+        """Clean up shared memory resources."""
         if self.request:
-            # We should unlink named rings when done?
-            # Or assume process exit handles cleanup via OS?
-            # ShmRegion doesn't unlink on close/drop.
-            # We should unlink.
             try:
                 _vertebra.shm_unlink(self.req_name)
-                _vertebra.shm_unlink(self.req_name + ".req")  # No, implementation details
-                # SpscRing.create_named creates ONE region with that name?
-                # No, vertebra-broker client creates .req and .resp.
-                # But here we create one ring with one name.
-                # Wait, TS AsyncBrokerClient creates `req_ring` and `resp_ring` with distinct names.
-                # Here we do the same.
-
-                # We need to unlink the names we passed to create_named.
-                _vertebra.shm_unlink(self.req_name)
                 _vertebra.shm_unlink(self.resp_name)
-            except Exception:
-                pass
+            except OSError as e:
+                logger.debug("Failed to unlink shared memory: %s", e)

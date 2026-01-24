@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -65,10 +66,7 @@ class VertebraRequest:
             query = self._message.get("query")
             if not query:
                 raw_query = self._message.get("queryString")
-                if isinstance(raw_query, (bytes, bytearray)):
-                    query = raw_query.decode()
-                else:
-                    query = ""
+                query = raw_query.decode() if isinstance(raw_query, (bytes, bytearray)) else ""
             self._query_params = parse_qs(str(query), keep_blank_values=True)
         return self._query_params
 
@@ -200,15 +198,12 @@ def reflect_static_mounts(app: Litestar) -> dict[str, str]:
     return mounts
 
 
-from enum import Enum, auto
-
-
 class RouteCapability(Enum):
     NATIVE = auto()
     ASGI_FALLBACK = auto()
 
 
-def classify_route(route: LitestarRoute) -> RouteCapability:
+def classify_route(route: LitestarRoute) -> RouteCapability:  # noqa: C901
     """Classify a route's capability to be served via the native pipeline.
 
     Returns:
@@ -219,11 +214,11 @@ def classify_route(route: LitestarRoute) -> RouteCapability:
     from collections.abc import Iterable
     from typing import Annotated, Union, get_args, get_origin
 
+    from litestar.datastructures import UploadFile
     from litestar.di import Provide
     from litestar.enums import RequestEncodingType
     from litestar.params import BodyKwarg
     from litestar.response import File, Redirect, Stream, Template
-    from litestar.datastructures import UploadFile
 
     def is_multipart_media(value: Any) -> bool:
         if value is None:
@@ -234,9 +229,7 @@ def classify_route(route: LitestarRoute) -> RouteCapability:
             return "multipart/form-data" in value.lower()
         # Enum-like objects
         enum_value = getattr(value, "value", None)
-        if isinstance(enum_value, str) and "multipart/form-data" in enum_value.lower():
-            return True
-        return False
+        return bool(isinstance(enum_value, str) and "multipart/form-data" in enum_value.lower())
 
     def unwrap_annotation(annotation: Any) -> Any:
         if get_origin(annotation) is Annotated:
@@ -271,9 +264,7 @@ def classify_route(route: LitestarRoute) -> RouteCapability:
             return True
         if isinstance(ret, type) and issubclass(ret, (File, Stream, Template, Redirect)):
             return True
-        if isinstance(ret, type) and ret.__name__ == "InertiaRedirect":
-            return True
-        return False
+        return bool(isinstance(ret, type) and ret.__name__ == "InertiaRedirect")
 
     # 1. ASGI Routes and WebSockets are fallback for now (until WS supported)
     if route.is_asgi or route.is_websocket:

@@ -25,14 +25,7 @@ from dataclasses import dataclass
 from enum import IntFlag
 from typing import Self
 
-__all__ = [
-    "RequestHeader",
-    "ResponseHeader",
-    "Flags",
-    "ResponseFlags",
-    "ControlMessageKind",
-    "HEADER_SIZE",
-]
+__all__ = ["HEADER_SIZE", "ControlMessageKind", "Flags", "RequestHeader", "ResponseFlags", "ResponseHeader"]
 
 # Header format: little-endian u64 + u32 + u32 = 16 bytes
 _HEADER_STRUCT = struct.Struct("<QII")

@@ -183,10 +183,7 @@ def _run_vertebra(
     _print_banner(host=host, port=port, workers=workers, log_level=log_level)
 
     exit_code = run_supervisor(
-        bun_cmd=bun_cmd,
-        env=env,
-        drain_timeout_ms=drain_timeout,
-        shutdown_timeout_ms=shutdown_timeout,
+        bun_cmd=bun_cmd, env=env, drain_timeout_ms=drain_timeout, shutdown_timeout_ms=shutdown_timeout
     )
     sys.exit(exit_code)
 

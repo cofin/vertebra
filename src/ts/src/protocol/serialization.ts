@@ -1,11 +1,5 @@
 import { decode, encode } from "@msgpack/msgpack";
-import {
-  HEADER_SIZE,
-  Flags,
-  ResponseFlags,
-  RequestHeader,
-  ResponseHeader,
-} from "./headers";
+import { Flags, HEADER_SIZE, RequestHeader, ResponseFlags, ResponseHeader } from "./headers";
 
 export type MessagePayload = Uint8Array | ArrayBuffer;
 

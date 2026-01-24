@@ -10,7 +10,7 @@ describe("MCPIPCBridge", () => {
         const req = decode(payload) as any;
         expect(req.type).toBe("tool_call");
         expect(req.name).toBe("test_tool");
-        
+
         return encode({ result: "success" });
       })
     };
@@ -30,7 +30,7 @@ describe("MCPIPCBridge", () => {
     };
 
     const bridge = new MCPIPCBridge(mockTransport);
-    
+
     let error;
     try {
         await bridge.callTool("test_tool", {});
@@ -49,7 +49,7 @@ describe("MCPIPCBridge", () => {
     };
 
     const bridge = new MCPIPCBridge(mockTransport);
-    
+
     let error;
     try {
         await bridge.callTool("test_tool", {});

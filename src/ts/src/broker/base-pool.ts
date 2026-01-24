@@ -91,7 +91,11 @@ export abstract class BasePoolAdapter implements PoolAdapter {
   abstract acquire(): Promise<string>;
   abstract release(token: string): Promise<void>;
   abstract execute(token: string, sql: string, params: unknown[]): Promise<Record<string, unknown>>;
-  abstract executeMany(token: string, sql: string, params: unknown[][]): Promise<Record<string, unknown>>;
+  abstract executeMany(
+    token: string,
+    sql: string,
+    params: unknown[][],
+  ): Promise<Record<string, unknown>>;
   abstract command(token: string, command: string, args: unknown[]): Promise<unknown>;
   abstract begin(token: string): Promise<void>;
   abstract commit(token: string): Promise<void>;
