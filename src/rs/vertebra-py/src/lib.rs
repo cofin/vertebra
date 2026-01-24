@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use vertebra_core::buffer::{Buffer, BufferPool, RingLayout};
-use vertebra_core::channel::{BufferChannel, BufferMessage, ChannelError, MpmcRing, SpscRing};
+use vertebra_core::channel::{BufferChannel, BufferMessage, ChannelError, MpmcRing, SlotView, SpscRing};
 use vertebra_core::router::{RouteId, Router};
 use vertebra_core::shm::ShmRegion;
 
@@ -283,6 +283,129 @@ impl PyBuffer {
         self.inner
             .take()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("buffer is closed"))
+    }
+}
+
+/// Zero-copy view into a ring buffer slot.
+///
+/// This provides direct access to the ring buffer data without copying.
+/// The slot is automatically released when the view is dropped or when
+/// `release()` is called.
+#[pyclass(name = "SlotView")]
+struct PySlotView {
+    inner: Option<SlotView>,
+    exports: AtomicUsize,
+}
+
+#[pymethods]
+impl PySlotView {
+    /// Get the length of the payload.
+    fn __len__(&self) -> PyResult<usize> {
+        match &self.inner {
+            Some(view) => Ok(view.len()),
+            None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "slot view is released",
+            )),
+        }
+    }
+
+    /// Get the payload length.
+    #[getter]
+    fn length(&self) -> PyResult<usize> {
+        self.__len__()
+    }
+
+    /// Get the message flags.
+    #[getter]
+    fn flags(&self) -> PyResult<u32> {
+        match &self.inner {
+            Some(view) => Ok(view.flags()),
+            None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "slot view is released",
+            )),
+        }
+    }
+
+    /// Copy the data to bytes.
+    fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        match &self.inner {
+            Some(view) => Ok(PyBytes::new(py, view.as_slice())),
+            None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "slot view is released",
+            )),
+        }
+    }
+
+    /// Get a zero-copy memoryview into the slot data.
+    fn as_memoryview<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyMemoryView>> {
+        PyMemoryView::from(slf.as_any())
+    }
+
+    /// Release the slot back to the ring buffer.
+    ///
+    /// Raises an error if there are active memoryviews.
+    fn release(&mut self) -> PyResult<()> {
+        if self.exports.load(AtomicOrdering::Acquire) > 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "slot has active views",
+            ));
+        }
+        self.inner.take();
+        Ok(())
+    }
+
+    /// Check if the slot view is still valid.
+    #[getter]
+    fn is_valid(&self) -> bool {
+        self.inner.is_some()
+    }
+
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: c_int,
+    ) -> PyResult<()> {
+        if view.is_null() {
+            return Err(PyBufferError::new_err("view is null"));
+        }
+        let slot = slf.borrow();
+        let inner = slot
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("slot is released"))?;
+
+        let data = inner.as_slice();
+        // SlotView data is read-only (we don't own it, just borrowing)
+        fill_view_from_data(view, flags, data, slf.into_any(), false)?;
+        slot.exports.fetch_add(1, AtomicOrdering::Relaxed);
+        Ok(())
+    }
+
+    unsafe fn __releasebuffer__(&self, view: *mut ffi::Py_buffer) {
+        if view.is_null() {
+            return;
+        }
+        if !(*view).format.is_null() {
+            drop(CString::from_raw((*view).format));
+        }
+        self.exports.fetch_sub(1, AtomicOrdering::Release);
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<Py<PyAny>>,
+        _exc: Option<Py<PyAny>>,
+        _tb: Option<Py<PyAny>>,
+    ) -> PyResult<bool> {
+        // Release on context exit, but don't raise if already released
+        if self.exports.load(AtomicOrdering::Acquire) == 0 {
+            self.inner.take();
+        }
+        Ok(false)
     }
 }
 
@@ -614,7 +737,7 @@ impl PyBuffer {
 
 #[pyclass(name = "SpscRing")]
 struct PySpscRing {
-    inner: SpscRing,
+    inner: Arc<SpscRing>,
 }
 
 #[pymethods]
@@ -625,7 +748,9 @@ impl PySpscRing {
         let region = Arc::new(ShmRegion::create(layout.total_size).map_err(map_err)?);
         let ring =
             unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0) }.map_err(map_err)?;
-        Ok(Self { inner: ring })
+        Ok(Self {
+            inner: Arc::new(ring),
+        })
     }
 
     #[cfg(unix)]
@@ -640,7 +765,9 @@ impl PySpscRing {
         let region = Arc::new(ShmRegion::create_named(name, layout.total_size).map_err(map_err)?);
         let ring =
             unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0) }.map_err(map_err)?;
-        Ok(Self { inner: ring })
+        Ok(Self {
+            inner: Arc::new(ring),
+        })
     }
 
     #[cfg(not(unix))]
@@ -667,7 +794,9 @@ impl PySpscRing {
         let layout = RingLayout::new(slot_size, slots, vertebra_core::buffer::ChannelMode::Spsc);
         let region = Arc::new(ShmRegion::open_named(name, layout.total_size).map_err(map_err)?);
         let ring = unsafe { SpscRing::attach(Arc::clone(&region), layout) }.map_err(map_err)?;
-        Ok(Self { inner: ring })
+        Ok(Self {
+            inner: Arc::new(ring),
+        })
     }
 
     #[cfg(not(unix))]
@@ -732,6 +861,67 @@ impl PySpscRing {
                 .map_err(map_err)
         })?;
         Ok(result.map(|len| PyBytes::new(py, &buffer[..len])))
+    }
+
+    /// Receive a message as a zero-copy view.
+    ///
+    /// Returns a SlotView that provides direct access to the ring buffer data.
+    /// The slot is automatically released when the view is dropped.
+    fn try_recv_view<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PySlotView>>> {
+        match self.inner.try_recv_view() {
+            Ok(view) => {
+                let py_view = Py::new(
+                    py,
+                    PySlotView {
+                        inner: Some(view),
+                        exports: AtomicUsize::new(0),
+                    },
+                )?;
+                Ok(Some(py_view.into_bound(py)))
+            }
+            Err(ChannelError::Empty) | Err(ChannelError::SlotBorrowed) => Ok(None),
+            Err(e) => Err(map_err(e)),
+        }
+    }
+
+    /// Receive a message as a zero-copy view, blocking until data is available.
+    fn recv_view<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PySlotView>> {
+        let view = py.detach(|| self.inner.recv_view().map_err(map_err))?;
+        let py_view = Py::new(
+            py,
+            PySlotView {
+                inner: Some(view),
+                exports: AtomicUsize::new(0),
+            },
+        )?;
+        Ok(py_view.into_bound(py))
+    }
+
+    /// Receive a message as a zero-copy view with timeout.
+    #[pyo3(signature = (timeout_ms=1000))]
+    fn recv_view_timeout<'py>(
+        &self,
+        py: Python<'py>,
+        timeout_ms: u64,
+    ) -> PyResult<Option<Bound<'py, PySlotView>>> {
+        let result = py.detach(|| {
+            self.inner
+                .recv_view_timeout(std::time::Duration::from_millis(timeout_ms))
+                .map_err(map_err)
+        })?;
+        match result {
+            Some(view) => {
+                let py_view = Py::new(
+                    py,
+                    PySlotView {
+                        inner: Some(view),
+                        exports: AtomicUsize::new(0),
+                    },
+                )?;
+                Ok(Some(py_view.into_bound(py)))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Close the ring buffer.
@@ -913,6 +1103,7 @@ fn _vertebra(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyShmRegion>()?;
     m.add_class::<PyBufferPool>()?;
     m.add_class::<PyBuffer>()?;
+    m.add_class::<PySlotView>()?;
     m.add_class::<PyChannel>()?;
     m.add_class::<PySpscRing>()?;
     m.add_class::<PyMpmcRing>()?;

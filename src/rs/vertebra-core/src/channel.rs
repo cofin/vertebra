@@ -30,12 +30,96 @@ pub enum ChannelError {
     BufferTooSmall { len: usize, capacity: usize },
     #[error("buffer metadata invalid")]
     InvalidBufferMeta,
+    #[error("slot already borrowed")]
+    SlotBorrowed,
     #[error("buffer error: {0}")]
     Buffer(#[from] BufferError),
     #[error("shared memory error: {0}")]
     Shm(#[from] ShmError),
     #[error("sync failure: {0}")]
     Sync(#[from] SyncError),
+}
+
+/// Zero-copy view into a ring buffer slot.
+///
+/// This struct holds a reference to the data in the ring buffer without copying.
+/// The slot is released (read cursor advanced) when the SlotView is dropped.
+///
+/// # Safety
+/// The SlotView borrows data from the ring buffer. The ring must outlive the view.
+pub struct SlotView {
+    ring: Arc<SpscRing>,
+    slot_index: u64,
+    data_ptr: *const u8,
+    length: usize,
+    flags: u32,
+    released: bool,
+}
+
+// SAFETY: SlotView holds an Arc to the ring, ensuring the underlying memory is valid.
+// The data pointer points into the ring's shared memory which is thread-safe.
+unsafe impl Send for SlotView {}
+unsafe impl Sync for SlotView {}
+
+impl SlotView {
+    /// Get the payload data as a byte slice (zero-copy).
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: data_ptr points to valid memory in the ring buffer,
+        // and the ring is kept alive by Arc.
+        unsafe { std::slice::from_raw_parts(self.data_ptr, self.length) }
+    }
+
+    /// Get the payload length.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.length
+    }
+
+    /// Check if payload is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+
+    /// Get the message flags.
+    #[inline]
+    pub fn flags(&self) -> u32 {
+        self.flags
+    }
+
+    /// Explicitly release the slot back to the ring buffer.
+    ///
+    /// This is called automatically on drop, but can be called early.
+    pub fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+
+        // Advance read head to release the slot
+        let next = self.slot_index.wrapping_add(1) & self.ring.mask;
+        self.ring.read_head().store(next, Ordering::Release);
+        self.ring.wait_read_ptr().fetch_add(1, Ordering::Release);
+        let _ = crate::sync::wake_one(self.ring.wait_read_ptr());
+
+        // Clear the borrowed flag to allow new borrows
+        self.ring
+            .slot_borrowed
+            .store(false, Ordering::Release);
+    }
+}
+
+impl Drop for SlotView {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl AsRef<[u8]> for SlotView {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
 }
 
 /// SPSC ring channel backed by a shared memory region.
@@ -47,6 +131,8 @@ pub struct SpscRing {
     data: *mut u8,
     layout: RingLayout,
     mask: u64,
+    /// Tracks if a SlotView is currently borrowing data (prevents concurrent borrows).
+    slot_borrowed: std::sync::atomic::AtomicBool,
 }
 
 unsafe impl Send for SpscRing {}
@@ -137,6 +223,7 @@ impl SpscRing {
             data,
             layout,
             mask: (layout.slots as u64).wrapping_sub(1),
+            slot_borrowed: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -338,6 +425,96 @@ impl SpscRing {
         }
     }
 
+    /// Try to receive a message as a zero-copy view.
+    ///
+    /// Returns a `SlotView` that provides direct access to the ring buffer data.
+    /// The slot is released when the view is dropped.
+    ///
+    /// # Note
+    /// Only one SlotView can be active at a time per ring. The next recv will
+    /// return `SlotBorrowed` until the current SlotView is released.
+    pub fn try_recv_view(self: &Arc<Self>) -> Result<SlotView, ChannelError> {
+        // Check if a slot is already borrowed
+        if self
+            .slot_borrowed
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(ChannelError::SlotBorrowed);
+        }
+
+        let head = self.read_head().load(Ordering::Acquire);
+        let tail = self.write_head().load(Ordering::Acquire);
+        if head == tail {
+            // Release the borrow since there's no data
+            self.slot_borrowed.store(false, Ordering::Release);
+            return Err(ChannelError::Empty);
+        }
+
+        // Get slot data without advancing the cursor
+        let (data_ptr, length, flags) = unsafe { self.peek_slot(head) };
+
+        Ok(SlotView {
+            ring: Arc::clone(self),
+            slot_index: head,
+            data_ptr,
+            length,
+            flags,
+            released: false,
+        })
+    }
+
+    /// Receive a message as a zero-copy view, blocking until data is available.
+    pub fn recv_view(self: &Arc<Self>) -> Result<SlotView, ChannelError> {
+        loop {
+            match self.try_recv_view() {
+                Ok(view) => return Ok(view),
+                Err(ChannelError::Empty) => {
+                    let wait_word = self.wait_write_ptr();
+                    let expected = wait_word.load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::Acquire);
+                    let tail = self.write_head().load(Ordering::Acquire);
+                    if head != tail {
+                        continue;
+                    }
+                    sync::wait_on_address(wait_word, expected)?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    /// Receive a message as a zero-copy view with timeout.
+    pub fn recv_view_timeout(
+        self: &Arc<Self>,
+        timeout: Duration,
+    ) -> Result<Option<SlotView>, ChannelError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.try_recv_view() {
+                Ok(view) => return Ok(Some(view)),
+                Err(ChannelError::Empty) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Ok(None);
+                    }
+                    let remaining = deadline - now;
+                    let wait_word = self.wait_write_ptr();
+                    let expected = wait_word.load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::Acquire);
+                    let tail = self.write_head().load(Ordering::Acquire);
+                    if head != tail {
+                        continue;
+                    }
+                    if !sync::wait_on_address_timeout(wait_word, expected, remaining)? {
+                        return Ok(None);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     pub fn recv_timeout_with_flags(
         &self,
         out: &mut [u8],
@@ -431,6 +608,21 @@ impl SpscRing {
         let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
         ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
         Ok((len, header.flags))
+    }
+
+    /// Peek at a slot without copying or advancing the cursor.
+    ///
+    /// Returns (data_ptr, length, flags).
+    ///
+    /// # Safety
+    /// Caller must ensure the index is valid (head <= index < tail).
+    unsafe fn peek_slot(&self, index: u64) -> (*const u8, usize, u32) {
+        let slot = self.slot_ptr(index);
+        let header = &*slot.cast::<SlotHeader>();
+        let len = header.len as usize;
+        let flags = header.flags;
+        let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+        (payload_ptr, len, flags)
     }
 }
 
@@ -1140,6 +1332,97 @@ mod tests {
             unsafe {
                 std::alloc::dealloc(ptr, alloc_layout);
             }
+        }
+    }
+
+    #[test]
+    fn slot_view_zero_copy() {
+        let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
+        let alloc_layout =
+            std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
+                .unwrap();
+        let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        assert!(!ptr.is_null());
+        let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        let ring =
+            Arc::new(unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() });
+
+        // Send a message
+        let payload = b"hello zero-copy";
+        ring.send(payload, 42).unwrap();
+
+        // Receive as SlotView (zero-copy)
+        let view = ring.try_recv_view().unwrap();
+        assert_eq!(view.as_slice(), payload);
+        assert_eq!(view.len(), payload.len());
+        assert_eq!(view.flags(), 42);
+
+        // While view is held, slot is borrowed
+        assert!(matches!(
+            ring.try_recv_view(),
+            Err(ChannelError::SlotBorrowed)
+        ));
+
+        // Drop view to release slot
+        drop(view);
+
+        // Now ring is truly empty
+        assert!(matches!(ring.try_recv_view(), Err(ChannelError::Empty)));
+
+        unsafe {
+            std::alloc::dealloc(ptr, alloc_layout);
+        }
+    }
+
+    #[test]
+    fn slot_view_as_ref() {
+        let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
+        let alloc_layout =
+            std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
+                .unwrap();
+        let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        let ring =
+            Arc::new(unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() });
+
+        ring.send(b"test", 0).unwrap();
+        let view = ring.try_recv_view().unwrap();
+
+        // Test AsRef<[u8]> implementation
+        let slice: &[u8] = view.as_ref();
+        assert_eq!(slice, b"test");
+
+        unsafe {
+            std::alloc::dealloc(ptr, alloc_layout);
+        }
+    }
+
+    #[test]
+    fn slot_view_explicit_release() {
+        let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
+        let alloc_layout =
+            std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
+                .unwrap();
+        let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        let ring =
+            Arc::new(unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() });
+
+        ring.send(b"msg1", 0).unwrap();
+        ring.send(b"msg2", 0).unwrap();
+
+        let mut view1 = ring.try_recv_view().unwrap();
+        assert_eq!(view1.as_slice(), b"msg1");
+
+        // Explicitly release
+        view1.release();
+
+        // Now we can get the next message
+        let view2 = ring.try_recv_view().unwrap();
+        assert_eq!(view2.as_slice(), b"msg2");
+
+        unsafe {
+            std::alloc::dealloc(ptr, alloc_layout);
         }
     }
 }

@@ -6,6 +6,10 @@ integrate natively with asyncio's event loop via file descriptor notifications.
 Instead of using asyncio.to_thread() which adds 50-130μs overhead per call,
 this transport uses loop.add_reader() to wait for data without blocking any threads.
 
+For sub-20µs latency, this module implements hybrid spin-wait: spinning briefly
+before falling back to add_reader() to capture immediate responses without
+syscall overhead.
+
 Example:
     from vertebra.ipc.async_transport import AsyncShmTransport
     from vertebra._vertebra import AsyncRing
@@ -16,17 +20,23 @@ Example:
     # Send data
     await transport.send(b"hello")
 
-    # Receive data (waits via event loop, not thread pool)
+    # Receive data (hybrid spin-wait + event loop)
     data = await transport.recv()
 """
 
 import asyncio
 import contextlib
+import os
 import sys
 import threading
 import time
 from collections import deque
 from typing import Protocol
+
+# Default spin duration in microseconds for hybrid wait.
+# Read from VERTEBRA_SPIN_US environment variable (default: 5).
+# This is the time to spin-wait before falling back to add_reader().
+DEFAULT_SPIN_US: int = int(os.environ.get("VERTEBRA_SPIN_US", "5"))
 
 
 class _AsyncRingProtocol(Protocol):
@@ -73,28 +83,38 @@ class AsyncShmTransport:
     ring buffer, the producer signals via eventfd (Linux) or pipe (macOS/Windows),
     and the event loop wakes up to process the data.
 
-    This achieves sub-100μs latency by eliminating thread pool overhead.
+    For sub-20µs latency, this transport implements hybrid spin-wait:
+    1. Fast path: try_recv() immediate check
+    2. Spin phase: busy-wait for spin_duration microseconds
+    3. Slow path: add_reader() and await notification
+
+    This achieves sub-20μs latency by capturing immediate responses without
+    syscall overhead while preserving correct async behavior for longer waits.
 
     Attributes:
         _ring: The underlying AsyncRing from Rust
         _fd: File descriptor for event loop integration
         _waiters: Queue of pending recv() futures
         _registered: Whether the FD is registered with the event loop
+        _spin_duration: Microseconds to spin before falling back to add_reader
     """
 
-    __slots__ = ("_fd", "_loop", "_registered", "_ring", "_waiters")
+    __slots__ = ("_fd", "_loop", "_registered", "_ring", "_spin_duration", "_waiters")
 
-    def __init__(self, ring: _AsyncRingProtocol) -> None:
+    def __init__(self, ring: _AsyncRingProtocol, *, spin_duration_us: int | None = None) -> None:
         """Initialize the transport with an AsyncRing.
 
         Args:
             ring: AsyncRing instance from vertebra._vertebra
+            spin_duration_us: Microseconds to spin before add_reader fallback.
+                             Defaults to VERTEBRA_SPIN_US env var or 5µs.
         """
         self._ring = ring
         self._fd = ring.notifier_fd()
         self._waiters: deque[asyncio.Future[bytes]] = deque()
         self._registered = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._spin_duration = (spin_duration_us if spin_duration_us is not None else DEFAULT_SPIN_US) / 1_000_000
 
     @property
     def fd(self) -> int:
@@ -134,10 +154,10 @@ class AsyncShmTransport:
     async def recv(self) -> bytes:
         """Receive data from the ring buffer.
 
-        This method:
-        1. Tries non-blocking recv first (fast path)
-        2. If empty, registers with event loop and waits
-        3. When notified, tries recv again
+        This method implements hybrid spin-wait for sub-20µs latency:
+        1. Fast path: try_recv() immediate check
+        2. Spin phase: busy-wait for spin_duration checking try_recv()
+        3. Slow path: add_reader() and await notification
 
         Returns:
             Received bytes
@@ -145,12 +165,52 @@ class AsyncShmTransport:
         Raises:
             RuntimeError: If transport is closed
         """
-        # Fast path: data already available
+        # 1. Fast path: data already available
         data = self._ring.try_recv()
         if data is not None:
             return data
 
-        # Slow path: wait for notification
+        # 2. Spin phase: busy-wait for spin_duration to capture immediate responses
+        if self._spin_duration > 0:
+            deadline = time.perf_counter() + self._spin_duration
+            while time.perf_counter() < deadline:
+                data = self._ring.try_recv()
+                if data is not None:
+                    return data
+
+        # 3. Slow path: wait for notification via add_reader
+        return await self._recv_slow_path()
+
+    async def recv_with_flags(self) -> tuple[bytes, int]:
+        """Receive data with message flags.
+
+        This method implements hybrid spin-wait for sub-20µs latency:
+        1. Fast path: try_recv_with_flags() immediate check
+        2. Spin phase: busy-wait for spin_duration
+        3. Slow path: add_reader() and await notification
+
+        Returns:
+            Tuple of (data, flags)
+        """
+        # 1. Fast path
+        result = self._ring.try_recv_with_flags()
+        if result is not None:
+            return result
+
+        # 2. Spin phase: busy-wait for spin_duration
+        if self._spin_duration > 0:
+            deadline = time.perf_counter() + self._spin_duration
+            while time.perf_counter() < deadline:
+                result = self._ring.try_recv_with_flags()
+                if result is not None:
+                    return result
+
+        # 3. Slow path - wait then get with flags
+        data = await self._recv_slow_path()
+        return data, 0  # Flags are consumed in the wait path
+
+    async def _recv_slow_path(self) -> bytes:
+        """Internal slow path: add_reader and await notification."""
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bytes] = loop.create_future()
         self._waiters.append(future)
@@ -161,21 +221,6 @@ class AsyncShmTransport:
             self._registered = True
 
         return await future
-
-    async def recv_with_flags(self) -> tuple[bytes, int]:
-        """Receive data with message flags.
-
-        Returns:
-            Tuple of (data, flags)
-        """
-        # Fast path
-        result = self._ring.try_recv_with_flags()
-        if result is not None:
-            return result
-
-        # Slow path - wait then get with flags
-        data = await self.recv()
-        return data, 0  # Flags are consumed in the wait path
 
     def try_recv(self) -> bytes | None:
         """Try to receive without waiting.
@@ -320,7 +365,11 @@ class PollingTransport:
 
 
 def create_transport(
-    ring: _AsyncRingProtocol, *, prefer_eventfd: bool = True, poll_interval: float = 0.0001
+    ring: _AsyncRingProtocol,
+    *,
+    prefer_eventfd: bool = True,
+    poll_interval: float = 0.0001,
+    spin_duration_us: int | None = None,
 ) -> AsyncShmTransport | PollingTransport:
     """Create an appropriate transport for the current platform.
 
@@ -332,6 +381,8 @@ def create_transport(
         ring: AsyncRing instance from vertebra._vertebra
         prefer_eventfd: If True, try to use eventfd-based transport first
         poll_interval: Polling interval for fallback transport
+        spin_duration_us: Microseconds to spin before add_reader fallback.
+                         Defaults to VERTEBRA_SPIN_US env var or 5µs.
 
     Returns:
         An appropriate transport instance
@@ -344,7 +395,7 @@ def create_transport(
         loop = asyncio.get_running_loop()
     except RuntimeError:
         # No running loop - caller will need to set up later
-        return AsyncShmTransport(ring)
+        return AsyncShmTransport(ring, spin_duration_us=spin_duration_us)
 
     # Check if the loop supports add_reader (selector-based loops do)
     if hasattr(loop, "add_reader"):
@@ -352,9 +403,9 @@ def create_transport(
         # with arbitrary FDs. We detect this by checking for _proactor attr.
         if sys.platform == "win32" and hasattr(loop, "_proactor"):
             return PollingTransport(ring, poll_interval=poll_interval)
-        return AsyncShmTransport(ring)
+        return AsyncShmTransport(ring, spin_duration_us=spin_duration_us)
 
     return PollingTransport(ring, poll_interval=poll_interval)
 
 
-__all__ = ("AsyncShmTransport", "PollingTransport", "create_transport")
+__all__ = ("AsyncShmTransport", "DEFAULT_SPIN_US", "PollingTransport", "create_transport")

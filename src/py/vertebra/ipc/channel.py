@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
+import os
 import struct
 import time
 from typing import Any, Self, TypeVar, cast
+
+# Default spin duration in microseconds for hybrid wait.
+# Read from VERTEBRA_SPIN_US environment variable (default: 5).
+# Lower values (2-3) = lower latency, higher CPU
+# Higher values (10+) = higher latency, lower CPU
+DEFAULT_SPIN_US: int = int(os.environ.get("VERTEBRA_SPIN_US", "5"))
 
 from vertebra import _vertebra
 from vertebra.exceptions import ChannelError, SerializationError
@@ -318,24 +324,6 @@ class Channel:
         except Exception as exc:
             raise SerializationError(str(exc), procedure_id=procedure_id, stage="deserialize_response") from exc
 
-    async def send(
-        self,
-        procedure_id: str,
-        params: dict[str, Any],
-        *,
-        timeout_ms: int | None = None,
-        response_type: type | None = None,
-        serializer: str | None = None,
-    ) -> Any:
-        return await asyncio.to_thread(
-            self.send_sync,
-            procedure_id,
-            params,
-            timeout_ms=timeout_ms,
-            response_type=response_type,
-            serializer=serializer,
-        )
-
     def receive_sync(
         self, *, timeout_ms: int | None = None, params_type: type | None = None, serializer: str | None = None
     ) -> tuple[str, Any]:
@@ -385,13 +373,6 @@ class Channel:
 
         return procedure_id, params
 
-    async def receive(
-        self, *, timeout_ms: int | None = None, params_type: type | None = None, serializer: str | None = None
-    ) -> tuple[str, Any]:
-        return await asyncio.to_thread(
-            self.receive_sync, timeout_ms=timeout_ms, params_type=params_type, serializer=serializer
-        )
-
     def respond_sync(
         self, procedure_id: str, result: Any, *, response_type: type | None = None, serializer: str | None = None
     ) -> None:
@@ -419,10 +400,3 @@ class Channel:
             handle.send_response(message)
         except RuntimeError as exc:
             raise ChannelError(str(exc), procedure_id=procedure_id, stage="send_response") from exc
-
-    async def respond(
-        self, procedure_id: str, result: Any, *, response_type: type | None = None, serializer: str | None = None
-    ) -> None:
-        await asyncio.to_thread(
-            self.respond_sync, procedure_id, result, response_type=response_type, serializer=serializer
-        )

@@ -1,15 +1,15 @@
 //! Async-capable ring buffer with notification support.
 //!
 //! This module provides `AsyncRing`, a wrapper around `SpscRing` that integrates
-//! with asyncio via file descriptor notifications. Instead of blocking on futex
-//! waits, consumers can register the notification FD with their event loop and
-//! receive callbacks when data is available.
+//! with asyncio via file descriptor notifications. Consumers can register the
+//! notification FD with their event loop and receive callbacks when data is
+//! available, or use hybrid spin-wait for sub-10us latency.
 //!
 //! # Usage Pattern
 //!
 //! ```ignore
 //! // In Python (via PyO3):
-//! ring = AsyncRing.create("channel", 65536, 1024)
+//! ring = AsyncRing(65536, 1024)
 //! fd = ring.notifier_fd()
 //! loop.add_reader(fd, on_readable)
 //!
@@ -20,6 +20,9 @@
 //! ring.clear_notification()
 //! while (data := ring.try_recv()) is not None:
 //!     process(data)
+//!
+//! # Or use hybrid spin-wait for low-latency sync path:
+//! data = ring.recv_hybrid(spin_us=5, timeout_ms=1000)
 //! ```
 
 use std::io;
@@ -33,7 +36,8 @@ use crate::shm::ShmRegion;
 /// Async-capable SPSC ring buffer with notification support.
 ///
 /// This struct wraps a `SpscRing` with a `Notifier` to enable integration
-/// with asyncio's event loop via `loop.add_reader()`.
+/// with asyncio's event loop via `loop.add_reader()`. Also provides
+/// `recv_hybrid()` for low-latency synchronous receives.
 pub struct AsyncRing {
     ring: SpscRing,
     notifier: Notifier,
@@ -169,6 +173,51 @@ impl AsyncRing {
         }
     }
 
+    /// Receive with hybrid spin-wait for low-latency.
+    ///
+    /// Spins for `spin_us` microseconds checking for data, then falls back to
+    /// blocking wait. This captures immediate responses without syscall overhead.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - Output buffer for received data
+    /// * `spin_us` - Microseconds to spin before blocking (typically 2-10)
+    /// * `timeout_ms` - Total timeout in milliseconds (-1 for infinite)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(len))` - Data received, returns length
+    /// * `Ok(None)` - Timeout expired
+    /// * `Err` - Error during receive
+    pub fn recv_hybrid(
+        &self,
+        buffer: &mut [u8],
+        spin_us: u64,
+        timeout_ms: i32,
+    ) -> Result<Option<usize>, AsyncRingError> {
+        // First try without waiting (data might already be available)
+        match self.ring.try_recv(buffer) {
+            Ok(len) => return Ok(Some(len)),
+            Err(ChannelError::Empty) => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        // Hybrid spin-wait on notifier
+        if !self.notifier.spin_wait_or_park(spin_us, timeout_ms)? {
+            return Ok(None); // Timeout
+        }
+
+        // Clear notification before receiving
+        self.notifier.clear()?;
+
+        // Try to receive after notification
+        match self.ring.try_recv(buffer) {
+            Ok(len) => Ok(Some(len)),
+            Err(ChannelError::Empty) => Ok(None), // Spurious wakeup
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Clear notification (call after handling all available data).
     ///
     /// This should be called:
@@ -282,10 +331,7 @@ impl PooledAsyncRing {
 
         match self.ring.try_recv(buffer.as_mut_slice()) {
             Ok(Some(len)) => Ok(Some(PooledRecvResult { buffer, len })),
-            Ok(None) => {
-                // Return buffer to pool (via drop)
-                Ok(None)
-            }
+            Ok(None) => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -405,5 +451,83 @@ mod tests {
         let ring = AsyncRing::new(256, 8).expect("create ring");
         let fd = ring.notifier_fd();
         assert!(fd >= 0);
+    }
+
+    #[test]
+    fn async_ring_recv_hybrid_immediate() {
+        // Test: recv_hybrid returns immediately when data is already available
+        let ring = AsyncRing::new(256, 8).expect("create ring");
+
+        // Pre-send data
+        let payload = b"immediate data";
+        ring.send(payload, 0).expect("send");
+
+        let mut buf = vec![0u8; 256];
+        let start = std::time::Instant::now();
+        let len = ring
+            .recv_hybrid(&mut buf, 100, 1000)
+            .expect("recv_hybrid")
+            .expect("has data");
+        let elapsed = start.elapsed();
+
+        assert_eq!(&buf[..len], payload);
+        // Should return very quickly during spin phase
+        assert!(
+            elapsed.as_micros() < 500,
+            "immediate data should return fast: {}us",
+            elapsed.as_micros()
+        );
+    }
+
+    #[test]
+    fn async_ring_recv_hybrid_timeout() {
+        // Test: recv_hybrid times out correctly
+        let ring = AsyncRing::new(256, 8).expect("create ring");
+
+        let mut buf = vec![0u8; 256];
+        let start = std::time::Instant::now();
+        let result = ring
+            .recv_hybrid(&mut buf, 5, 10) // 5us spin, 10ms timeout
+            .expect("recv_hybrid");
+        let elapsed = start.elapsed();
+
+        assert!(result.is_none(), "should return None on timeout");
+        assert!(
+            elapsed.as_millis() >= 8,
+            "should wait ~10ms, got {}ms",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    fn async_ring_recv_hybrid_wakeup() {
+        // Test: recv_hybrid wakes up on notification
+        use std::sync::Arc;
+        use std::thread;
+
+        let ring = Arc::new(AsyncRing::new(256, 8).expect("create ring"));
+        let ring_clone = Arc::clone(&ring);
+
+        // Spawn thread to send after a delay
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(5));
+            ring_clone.send(b"delayed data", 0).expect("send");
+        });
+
+        let mut buf = vec![0u8; 256];
+        let start = std::time::Instant::now();
+        let len = ring
+            .recv_hybrid(&mut buf, 5, 100) // 5us spin, 100ms timeout
+            .expect("recv_hybrid")
+            .expect("should receive data");
+        let elapsed = start.elapsed();
+
+        assert_eq!(&buf[..len], b"delayed data");
+        // Should complete faster than timeout
+        assert!(
+            elapsed.as_millis() < 50,
+            "should wake before timeout: {}ms",
+            elapsed.as_millis()
+        );
     }
 }

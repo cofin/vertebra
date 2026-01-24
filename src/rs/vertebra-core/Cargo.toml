@@ -39,3 +39,7 @@ harness = false
 [[bench]]
 name = "mpmc"
 harness = false
+
+[[bench]]
+name = "spin_wait"
+harness = false

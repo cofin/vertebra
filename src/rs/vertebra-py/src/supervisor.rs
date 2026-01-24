@@ -7,7 +7,7 @@ use signal_hook::consts::signal::*;
 #[cfg(unix)]
 use signal_hook::iterator::Signals;
 
-use vertebra_core::notify::InheritableNotifier;
+use vertebra_core::notify::Notifier;
 
 /// FD information for cross-process IPC.
 #[derive(Default)]
@@ -23,9 +23,9 @@ struct InheritedFds {
 pub struct NativeSupervisor {
     bun_process: Arc<Mutex<Option<Child>>>,
     workers: Arc<Mutex<Vec<Child>>>,
-    /// Inheritable notifier for event-driven IPC wakeups.
-    /// Created BEFORE spawning children so FD is inherited.
-    notifier: Arc<Mutex<Option<InheritableNotifier>>>,
+    /// Notifier for event-driven IPC wakeups.
+    /// Created BEFORE spawning children so FD is inherited (no CLOEXEC).
+    notifier: Arc<Mutex<Option<Notifier>>>,
     /// FD numbers for passing to children.
     fds: Arc<Mutex<InheritedFds>>,
 }
@@ -64,9 +64,9 @@ impl NativeSupervisor {
         let engine_args = engine_args.clone();
         let python_executable = python_executable.to_string();
 
-        // Create InheritableNotifier BEFORE spawning children.
-        // This allows the FD to be inherited by forked processes.
-        let notifier = InheritableNotifier::new().map_err(|e| {
+        // Create Notifier BEFORE spawning children.
+        // FDs are inheritable (no CLOEXEC), allowing forked processes to receive them.
+        let notifier = Notifier::new().map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to create notifier: {}",
                 e
@@ -93,8 +93,15 @@ impl NativeSupervisor {
         py.detach(move || {
             // Start Bun engine with inherited FDs via environment variables.
             let mut cmd = Command::new(&engine_path);
+            // Read spin config from environment or use default
+            let spin_us = std::env::var("VERTEBRA_SPIN_US")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(5);
+
             cmd.args(&engine_args)
-                .env("VERTEBRA_NOTIFY_FD", notify_fd.to_string());
+                .env("VERTEBRA_NOTIFY_FD", notify_fd.to_string())
+                .env("VERTEBRA_SPIN_US", spin_us.to_string());
             #[cfg(not(target_os = "linux"))]
             {
                 cmd.env("VERTEBRA_NOTIFY_WRITE_FD", notify_write_fd.to_string());
@@ -118,7 +125,8 @@ impl NativeSupervisor {
                 let mut cmd = Command::new(&python_executable);
                 cmd.arg("-m")
                     .arg("vertebra.server.worker")
-                    .env("VERTEBRA_NOTIFY_FD", notify_fd.to_string());
+                    .env("VERTEBRA_NOTIFY_FD", notify_fd.to_string())
+                    .env("VERTEBRA_SPIN_US", spin_us.to_string());
                 #[cfg(not(target_os = "linux"))]
                 {
                     cmd.env("VERTEBRA_NOTIFY_WRITE_FD", notify_write_fd.to_string());

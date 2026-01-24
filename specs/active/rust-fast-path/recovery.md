@@ -56,6 +56,7 @@ High - Multi-language optimization across Python and Rust with careful lifetime 
 - [x] Research document (2500+ words)
 - [x] PRD document (3400+ words)
 - [x] Task breakdown (18 tasks, 4 phases)
+- [x] Benchmark suite created (`benchmarks/ipc_fast_path.py`)
 
 ### In Progress
 
@@ -87,9 +88,9 @@ High - Multi-language optimization across Python and Rust with careful lifetime 
 
 ### Pending
 
-- [ ] Benchmark suite creation
+- [x] Benchmark suite creation (done)
 - [ ] Documentation updates
-- [ ] Performance validation
+- [ ] Performance validation (after each phase)
 
 ## Key Design Decisions
 
@@ -135,13 +136,13 @@ High - Multi-language optimization across Python and Rust with careful lifetime 
 
 ## Performance Targets
 
-| Metric | Current | Target |
-|--------|---------|--------|
-| Sync p99 (immediate) | ~55us | <10us |
-| Sync p99 (blocked) | ~55us | <15us |
-| Async p99 | ~55us | <20us |
-| Hot path allocations | 1.8 bytes/msg | 0 |
-| 64x concurrent p99 | N/A | <20us |
+| Metric | Baseline (Measured) | Target |
+|--------|---------------------|--------|
+| Sync p99 (immediate) | 2.0us | <10us (PASS) |
+| Sync p99 (blocked) | 62us | <15us |
+| Async p99 (to_thread) | 200us | <20us |
+| Hot path allocations | 35 bytes/msg | 0 |
+| 64x concurrent p99 | 5750us | <20us |
 
 ## Risks and Mitigations
 
@@ -164,13 +165,13 @@ High - Multi-language optimization across Python and Rust with careful lifetime 
 | `src/py/vertebra/ipc/channel.py` | Add recv_fast, recv_to_view |
 | `src/py/vertebra/resources/broker.py` | Use add_reader pattern |
 
-### Files to Create
+### Files Created
 
-| File | Purpose |
-|------|---------|
-| `benchmarks/ipc_fast_path.py` | Fast path benchmark suite |
-| `src/py/tests/unit/ipc/test_fast_path.py` | Fast path unit tests |
-| `src/py/tests/integration/ipc/test_uvloop.py` | uvloop integration tests |
+| File | Purpose | Status |
+|------|---------|--------|
+| `benchmarks/ipc_fast_path.py` | Fast path benchmark suite | Done |
+| `src/py/tests/unit/ipc/test_fast_path.py` | Fast path unit tests | Pending |
+| `src/py/tests/integration/ipc/test_uvloop.py` | uvloop integration tests | Pending |
 
 ## Consensus Summary
 
