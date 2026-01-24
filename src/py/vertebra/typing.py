@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from vertebra._typing import (
     AsyncRing,
     AsyncShmTransport,
+    LitestarResponse,
     PollingTransport,
     ShmRegion,
     SpscRing,
@@ -28,6 +29,7 @@ PYARROW_INSTALLED = dependency_flag("pyarrow")
 NUMPY_INSTALLED = dependency_flag("numpy")
 PANDAS_INSTALLED = dependency_flag("pandas")
 POLARS_INSTALLED = dependency_flag("polars")
+LITESTAR_INSTALLED = dependency_flag("litestar")
 
 # Type aliases
 try:
@@ -39,6 +41,7 @@ except Exception:  # noqa: BLE001  # pragma: no cover - optional dependency fall
 
 __all__ = (
     "ATTRS_INSTALLED",
+    "LITESTAR_INSTALLED",
     "MSGSPEC_INSTALLED",
     "NUMPY_INSTALLED",
     "PANDAS_INSTALLED",
@@ -48,6 +51,7 @@ __all__ = (
     "ArrowTable",
     "AsyncRing",
     "AsyncShmTransport",
+    "LitestarResponse",
     "PollingTransport",
     "ShmRegion",
     "SpscRing",

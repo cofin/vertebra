@@ -12,8 +12,8 @@ from typing import Any
 import msgspec
 
 from vertebra._vertebra import SpscRing
-from vertebra.serializers import MessagePackCodec
-from vertebra.utils.dependencies import LITESTAR_INSTALLED
+from vertebra.serializers import MessagePackCodec, encode_json
+from vertebra.typing import LITESTAR_INSTALLED, LitestarResponse
 
 
 class WorkerConfig(msgspec.Struct, frozen=True):
@@ -395,16 +395,17 @@ class AsgiWorker:
             })
             return
 
-        from litestar.response import Response as LitestarResponse
+        # Ensure Litestar is available if we have a native runner (which implies Litestar)
+        if LITESTAR_INSTALLED:
+            from vertebra.extensions.litestar.native import VertebraRequest
 
-        from vertebra.extensions.litestar.native import VertebraRequest
-
-        conn = VertebraRequest(message)
+            conn = VertebraRequest(message)
+        else:
+            # Should be unreachable if _native_runners is populated correctly
+            return
 
         try:
             result = await runner(conn)
-
-            import json
 
             status = 200
             headers = [("content-type", "application/json")]
@@ -427,10 +428,10 @@ class AsgiWorker:
                 else:
                     # Assume JSON serializable (dict, Pydantic, etc)
                     # We override content-type if it was default
-                    body = json.dumps(content).encode()
+                    body = encode_json(content, as_bytes=True)
             else:
                 # Default behavior: assume raw data -> JSON 200 OK
-                body = json.dumps(result).encode()
+                body = encode_json(result, as_bytes=True)
 
             await writer.send({"id": request_id, "type": "http.response.start", "status": status, "headers": headers})
             await writer.send({"id": request_id, "type": "http.response.body", "body": body, "more_body": False})

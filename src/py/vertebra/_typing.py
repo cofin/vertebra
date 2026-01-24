@@ -123,6 +123,13 @@ except ImportError:
         __attrs_attrs__: ClassVar[tuple[Any, ...]]
 
 
+# Litestar
+try:
+    from litestar.response import Response as LitestarResponse  # pyright: ignore[reportMissingImports]
+except ImportError:
+    LitestarResponse = object  # type: ignore[assignment,misc]
+
+
 __all__ = (
     # Framework/Extension dependency flags (re-exported)
     "ADVANCED_ALCHEMY_INSTALLED",
@@ -155,6 +162,7 @@ __all__ = (
     "AsyncShmTransport",
     # Data library types
     "AttrsInstance",
+    "LitestarResponse",
     "NumpyArray",
     "NumpyArrayProtocol",
     "PandasDataFrame",
