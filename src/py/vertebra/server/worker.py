@@ -13,6 +13,7 @@ import msgspec
 
 from vertebra._vertebra import SpscRing
 from vertebra.serializers import MessagePackCodec
+from vertebra.utils.dependencies import LITESTAR_INSTALLED
 
 
 class WorkerConfig(msgspec.Struct, frozen=True):
@@ -113,6 +114,18 @@ class ResponseWriter:
         self._ring.send_timeout(payload, 0, self._timeout_ms)
 
 
+class VertebraWebSocket:
+    def __init__(self, msg: dict[str, Any], writer: "ResponseWriter") -> None:
+        self._msg = msg
+        self._w = writer
+
+    def receive_text(self) -> str | None:
+        return self._msg.get("text")
+
+    async def send_text(self, data: str) -> None:
+        await self._w.send({"id": self._msg.get("id"), "type": "ws.message", "text": data})
+
+
 AsgiApp = Callable[
     [dict[str, Any], Callable[[], Awaitable[dict[str, Any]]], Callable[[dict[str, Any]], Awaitable[None]]],
     Awaitable[None],
@@ -151,23 +164,24 @@ class AsgiWorker:
         native_enabled = os.environ.get("VERTEBRA_NATIVE", "1") == "1"
 
         # If the app is a Litestar instance, we can reflect routes and compile pipelines
-        from litestar import Litestar
+        if native_enabled and LITESTAR_INSTALLED:
+            from litestar import Litestar
 
-        if native_enabled and isinstance(self._app, Litestar):
-            from vertebra.extensions.litestar.compiler import PipelineCompiler
-            from vertebra.extensions.litestar.native import RouteCapability, classify_route, reflect_routes
+            if isinstance(self._app, Litestar):
+                from vertebra.extensions.litestar.compiler import PipelineCompiler
+                from vertebra.extensions.litestar.native import RouteCapability, classify_route, reflect_routes
 
-            routes = reflect_routes(self._app)
-            compiler = PipelineCompiler()
-            for route in routes:
-                if classify_route(route) == RouteCapability.NATIVE:
-                    # Use the handler object directly from reflection
-                    try:
-                        runner = compiler.compile_route(route.handler)
-                        self._native_runners[route.handler_id] = runner
-                    except Exception:
-                        # Log error but don't crash startup; this route will fallback to ASGI
-                        pass
+                routes = reflect_routes(self._app)
+                compiler = PipelineCompiler()
+                for route in routes:
+                    if classify_route(route) == RouteCapability.NATIVE:
+                        # Use the handler object directly from reflection
+                        try:
+                            runner = compiler.compile_route(route.handler)
+                            self._native_runners[route.handler_id] = runner
+                        except Exception:
+                            # Log error but don't crash startup; this route will fallback to ASGI
+                            pass
 
         control_name = self._control_ring_name()
         self._control = SpscRing.create_named(control_name, self._config.slot_size, self._config.slots)
@@ -348,17 +362,6 @@ class AsgiWorker:
         runner = self._native_runners.get(handler_id)
         if runner is None:
             return
-
-        class VertebraWebSocket:
-            def __init__(self, msg, w) -> None:
-                self._msg = msg
-                self._w = w
-
-            def receive_text(self):
-                return self._msg.get("text")
-
-            async def send_text(self, data) -> None:
-                await self._w.send({"id": self._msg.get("id"), "type": "ws.message", "text": data})
 
         socket = VertebraWebSocket(message, writer)
         await runner(socket)
