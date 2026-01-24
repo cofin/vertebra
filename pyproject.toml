@@ -305,7 +305,7 @@ classmethod-decorators = ["classmethod", "pydantic.field_validator", "pydantic.r
 "**/tools/**/*.py" = ['C901', 'A002', 'S105', 'S106', 'S107', 'S607', 'BLE001', 'PLR0911', 'PLR0912'] # Allow hardcoded passwords in database config classes
 "**/tools/**/database.py" = ['S105', 'S106'] # Allow hardcoded passwords in database config classes
 "__init__.py" = ['D104', 'F401']
-"benchmarks/**/*.py" = ['T201','BLE001']
+"benchmarks/**/*.py" = ['T201', 'BLE001', 'ANN', 'S101', 'S110', 'S404', 'S603', 'S607', 'SIM105', 'PERF401', 'PTH123', 'PLR0911', 'PLR0912', 'PLW0603', 'TRY300', 'PLW1509']  # Benchmarks: optional deps, subprocess, asserts, globals
 
 [tool.ruff.lint.isort]
 known-first-party = ['vertebra', 'tests', 'tools']
@@ -328,6 +328,7 @@ exclude = '''(?x)(
 |^dist/
 |^.venv/
 |^node_modules/
+|^benchmarks/
 )
 '''
 implicit_reexport = false

@@ -271,16 +271,16 @@ impl PyAsyncChannel {
         let name = format!("/vb_pair_{id}");
 
         // Create named channels - these create the shared memory regions
-        let req_ring = AsyncRing::create_named(&format!("{name}_req"), slot_size, slots)
-            .map_err(map_err)?;
-        let resp_ring = AsyncRing::create_named(&format!("{name}_resp"), slot_size, slots)
-            .map_err(map_err)?;
+        let req_ring =
+            AsyncRing::create_named(&format!("{name}_req"), slot_size, slots).map_err(map_err)?;
+        let resp_ring =
+            AsyncRing::create_named(&format!("{name}_resp"), slot_size, slots).map_err(map_err)?;
 
         // Open the same rings for server (swapped perspective)
-        let req_ring_server = AsyncRing::open_named(&format!("{name}_req"), slot_size, slots)
-            .map_err(map_err)?;
-        let resp_ring_server = AsyncRing::open_named(&format!("{name}_resp"), slot_size, slots)
-            .map_err(map_err)?;
+        let req_ring_server =
+            AsyncRing::open_named(&format!("{name}_req"), slot_size, slots).map_err(map_err)?;
+        let resp_ring_server =
+            AsyncRing::open_named(&format!("{name}_resp"), slot_size, slots).map_err(map_err)?;
 
         // Client: sends on request, receives on response
         let client = PyAsyncChannel {
@@ -722,7 +722,9 @@ impl PyFastChannel {
 
         match result {
             Some(len) => Ok(PyBytes::new(py, &buffer[..len])),
-            None => Err(pyo3::exceptions::PyTimeoutError::new_err("response timeout")),
+            None => Err(pyo3::exceptions::PyTimeoutError::new_err(
+                "response timeout",
+            )),
         }
     }
 

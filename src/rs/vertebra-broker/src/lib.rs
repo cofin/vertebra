@@ -148,6 +148,7 @@ fn map_channel_error(err: ChannelError) -> VtbStatus {
         ChannelError::Full => VtbStatus::Full,
         ChannelError::Empty => VtbStatus::Empty,
         ChannelError::NotReady => VtbStatus::NotReady,
+        ChannelError::SlotBorrowed => VtbStatus::NotReady, // Slot is being read via SlotView
         ChannelError::BufferTooSmall { .. } | ChannelError::InvalidLayout => VtbStatus::Invalid,
         ChannelError::PayloadTooLarge { .. } | ChannelError::InvalidBufferMeta => {
             VtbStatus::Invalid
@@ -627,12 +628,7 @@ pub extern "C" fn vtb_mpmc_create(
     };
     // MpmcRing::initialize is used for creating new ring
     let ring = unsafe {
-        match MpmcRing::initialize(
-            std::sync::Arc::new(region),
-            layout,
-            process_id(),
-            epoch(),
-        ) {
+        match MpmcRing::initialize(std::sync::Arc::new(region), layout, process_id(), epoch()) {
             Ok(ring) => ring,
             Err(err) => {
                 set_last_error(err.to_string());
@@ -717,25 +713,26 @@ pub extern "C" fn vtb_mpmc_send(
     // But MpmcRing in vertebra usually has wait support.
 
     // For now, let's assume it has `send` and `try_send`.
-        let result = if timeout_ms == 0 {
-            handle.inner.try_send(payload, flags)
-        } else {
-            let deadline = std::time::Instant::now() + timeout;
-            loop {
-                match handle.inner.try_send(payload, flags) {
-                    Ok(()) => break Ok(()),
-                    Err(ChannelError::Full) => {
-                        if std::time::Instant::now() >= deadline {
-                            break Err(ChannelError::Full);
-                        }
-                        std::thread::yield_now();
+    let result = if timeout_ms == 0 {
+        handle.inner.try_send(payload, flags)
+    } else {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match handle.inner.try_send(payload, flags) {
+                Ok(()) => break Ok(()),
+                Err(ChannelError::Full) => {
+                    if std::time::Instant::now() >= deadline {
+                        break Err(ChannelError::Full);
                     }
-                    Err(err) => break Err(err),
+                    std::thread::yield_now();
                 }
+                Err(err) => break Err(err),
             }
-        };
-        
-        match result {        Ok(()) => VtbStatus::Ok,
+        }
+    };
+
+    match result {
+        Ok(()) => VtbStatus::Ok,
         Err(err) => {
             set_last_error(err.to_string());
             map_channel_error(err)
@@ -760,43 +757,38 @@ pub extern "C" fn vtb_mpmc_recv(
     let buffer = unsafe { core::slice::from_raw_parts_mut(out, capacity) };
     let timeout = Duration::from_millis(timeout_ms as u64);
 
-        let result = if timeout_ms == 0 {
-            handle.inner.try_recv(buffer).map(Some)
-        } else {
-            let deadline = std::time::Instant::now() + timeout;
-            loop {
-                match handle.inner.try_recv(buffer) {
-                    Ok(len) => break Ok(Some(len)),
-                    Err(ChannelError::Empty) => {
-                        if std::time::Instant::now() >= deadline {
-                            break Ok(None);
-                        }
-                        std::thread::yield_now();
+    let result = if timeout_ms == 0 {
+        handle.inner.try_recv(buffer).map(Some)
+    } else {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match handle.inner.try_recv(buffer) {
+                Ok(len) => break Ok(Some(len)),
+                Err(ChannelError::Empty) => {
+                    if std::time::Instant::now() >= deadline {
+                        break Ok(None);
                     }
-                    Err(err) => break Err(err),
+                    std::thread::yield_now();
                 }
+                Err(err) => break Err(err),
             }
-        };
-        
-            match result {
-        
-                Ok(Some(len)) => {
-        
-                    unsafe {
-        
-                        *out_len = len;
-        
-                        *out_flags = 0; // MpmcRing does not expose flags
-        
-                    }
-        
-                    VtbStatus::Ok
-        
-                }
-        
-                Ok(None) => VtbStatus::Timeout,
-        
-                Err(err) => {
+        }
+    };
+
+    match result {
+        Ok(Some(len)) => {
+            unsafe {
+                *out_len = len;
+
+                *out_flags = 0; // MpmcRing does not expose flags
+            }
+
+            VtbStatus::Ok
+        }
+
+        Ok(None) => VtbStatus::Timeout,
+
+        Err(err) => {
             set_last_error(err.to_string());
             map_channel_error(err)
         }

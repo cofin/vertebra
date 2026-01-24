@@ -74,9 +74,8 @@ impl RequestHeader {
         if bytes.len() < Self::SIZE {
             return false;
         }
-        let src = unsafe {
-            std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE)
-        };
+        let src =
+            unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) };
         bytes[..Self::SIZE].copy_from_slice(src);
         true
     }
@@ -135,9 +134,8 @@ impl ResponseHeader {
         if bytes.len() < Self::SIZE {
             return false;
         }
-        let src = unsafe {
-            std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE)
-        };
+        let src =
+            unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) };
         bytes[..Self::SIZE].copy_from_slice(src);
         true
     }

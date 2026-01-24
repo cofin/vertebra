@@ -18,7 +18,9 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use vertebra_core::buffer::{Buffer, BufferPool, RingLayout};
-use vertebra_core::channel::{BufferChannel, BufferMessage, ChannelError, MpmcRing, SlotView, SpscRing};
+use vertebra_core::channel::{
+    BufferChannel, BufferMessage, ChannelError, MpmcRing, SlotView, SpscRing,
+};
 use vertebra_core::router::{RouteId, Router};
 use vertebra_core::shm::ShmRegion;
 

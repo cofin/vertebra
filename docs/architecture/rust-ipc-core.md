@@ -33,15 +33,69 @@ Slot payloads use a fixed-size prefix (`SlotHeader`) with `len + flags`.
 using cacheline-aligned head/tail atomics. Backpressure is applied via
 `wait_on_address` primitives.
 
+**Receive Methods:**
+
+| Method | Latency | Use Case |
+|--------|---------|----------|
+| `try_recv()` | ~100ns | Non-blocking poll |
+| `recv()` | ~3-5µs | Simple blocking |
+| `recv_timeout()` | ~3-5µs | Blocking with timeout |
+| `recv_hybrid()` | **~0.8µs** | Spin-then-block for lowest latency |
+
+`recv_hybrid(out, spin_us, timeout)` implements a three-phase strategy:
+1. **Immediate**: Check if data is available (atomic load)
+2. **Spin**: Busy-wait checking `has_data()` for `spin_us` microseconds
+3. **Park**: Fall back to futex `wait_on_address` if data doesn't arrive
+
+The spin phase uses `has_data()` which performs 2x `Relaxed` atomic loads (~2ns/iteration), allowing ~2500 iterations in a 5µs spin window without any syscalls.
+
 ### MPMC
 
 `MpmcRing` implements a bounded multi-producer/multi-consumer queue using
 per-slot sequence numbers (epoch-style ABA mitigation).
 
+### AsyncRing
+
+`AsyncRing` wraps `SpscRing` with an eventfd-based `Notifier` for asyncio integration.
+The eventfd provides a pollable file descriptor that can be added to Python's asyncio
+event loop via `loop.add_reader()`.
+
+**Receive Methods:**
+
+| Method | Latency | Use Case |
+|--------|---------|----------|
+| `try_recv()` | ~100ns | Non-blocking poll |
+| `recv()` | ~5-10µs | Blocking with eventfd wait |
+| `recv_hybrid()` | **~1.6µs** | Spin-then-eventfd for asyncio |
+
+`recv_hybrid()` uses the same three-phase strategy as `SpscRing::recv_hybrid()`,
+but falls back to eventfd polling instead of futex. This is slightly slower (~1.6µs
+vs ~0.8µs) but integrates with asyncio's event loop.
+
+**When to use which:**
+- **SpscRing**: Direct Rust-to-Rust IPC, sync Python, blocking workers
+- **AsyncRing**: Python asyncio code that needs `add_reader()` integration
+
 ### Buffer Channel
 
 `BufferChannel` sends buffer metadata (index + length + flags) over an SPSC ring.
 Buffers live in a shared `BufferPool`, enabling zero-copy transfers.
+
+## Notification
+
+`notify.rs` provides `Notifier`, an eventfd-based notification mechanism for
+cross-process wakeups. Key methods:
+
+- `notify()`: Signal the notifier (write to eventfd)
+- `wait(timeout_ms)`: Block until signaled (poll on eventfd)
+- `clear()`: Consume pending notification (read from eventfd)
+- `spin_wait_or_park(spin_us, timeout_ms)`: Hybrid spin-then-park using `poll(0)`
+- `spin_wait_or_park_with(spin_us, timeout_ms, has_data)`: Hybrid with custom check
+
+The `spin_wait_or_park_with()` variant takes a closure for data-availability checking,
+which is critical for performance. Using a ring-buffer's `head != tail` check
+(~2ns/iteration) instead of `poll(fd, 0)` (~300ns/iteration) provides 150x faster
+spin loops.
 
 ## Synchronization
 

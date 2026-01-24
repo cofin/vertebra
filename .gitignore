@@ -68,3 +68,6 @@ specs/archive
 uv.toml
 .agent/specs/archive
 .agent/archive
+
+# Benchmark virtual environment
+benchmarks/.venv/

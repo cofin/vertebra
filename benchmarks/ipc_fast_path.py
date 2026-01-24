@@ -32,12 +32,9 @@ import time
 import tracemalloc
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from vertebra.ipc.channel import Channel
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 
 class FastPathPhase(Enum):
@@ -190,9 +187,7 @@ def get_spin_us() -> int:
 
 
 def benchmark_sync_immediate(
-    iterations: int = 10000,
-    warmup: int = 1000,
-    phase: FastPathPhase = FastPathPhase.BASELINE,
+    iterations: int = 10000, warmup: int = 1000, phase: FastPathPhase = FastPathPhase.BASELINE
 ) -> FastPathResult:
     """Benchmark sync receive when data is already available.
 
@@ -242,9 +237,7 @@ def benchmark_sync_immediate(
             start = time.perf_counter()
 
             # Use hybrid recv if available (Phase 1+)
-            if phase.value >= FastPathPhase.HYBRID_SPIN.value and hasattr(
-                client._handle, "recv_request_hybrid"
-            ):
+            if phase.value >= FastPathPhase.HYBRID_SPIN.value and hasattr(client._handle, "recv_request_hybrid"):
                 spin_us = get_spin_us()
                 client._handle.recv_request_hybrid(4096, spin_us, 1000)
             else:
@@ -281,9 +274,7 @@ def benchmark_sync_immediate(
 
 
 def benchmark_sync_blocked(
-    iterations: int = 10000,
-    warmup: int = 1000,
-    phase: FastPathPhase = FastPathPhase.BASELINE,
+    iterations: int = 10000, warmup: int = 1000, phase: FastPathPhase = FastPathPhase.BASELINE
 ) -> FastPathResult:
     """Benchmark sync receive when client must wait for data.
 
@@ -349,9 +340,7 @@ def benchmark_sync_blocked(
 
 
 async def benchmark_async_transport_hybrid(
-    iterations: int = 10000,
-    warmup: int = 1000,
-    phase: FastPathPhase = FastPathPhase.BASELINE,
+    iterations: int = 10000, warmup: int = 1000, phase: FastPathPhase = FastPathPhase.BASELINE
 ) -> FastPathResult:
     """Benchmark AsyncShmTransport with hybrid spin-wait.
 
@@ -359,7 +348,7 @@ async def benchmark_async_transport_hybrid(
     Target: p99 < 20µs for immediate data, < 50µs for delayed data.
     """
     from vertebra._vertebra import AsyncRing
-    from vertebra.ipc.async_transport import AsyncShmTransport, DEFAULT_SPIN_US
+    from vertebra.ipc.async_transport import DEFAULT_SPIN_US, AsyncShmTransport
 
     ring = AsyncRing(4096, 64)
     transport = AsyncShmTransport(ring, spin_duration_us=get_spin_us())
@@ -375,7 +364,7 @@ async def benchmark_async_transport_hybrid(
         loop = asyncio.get_running_loop()
         start_total = time.perf_counter()
 
-        for i in range(iterations):
+        for _i in range(iterations):
             # Send data first (so it's immediately available)
             ring.send(test_data, 0)
 
@@ -398,11 +387,7 @@ async def benchmark_async_transport_hybrid(
         total_time_s=total_time,
         latencies_us=latencies,
         target_us=20.0,
-        metadata={
-            "spin_us": get_spin_us(),
-            "default_spin_us": DEFAULT_SPIN_US,
-            "event_loop": type(loop).__name__,
-        },
+        metadata={"spin_us": get_spin_us(), "default_spin_us": DEFAULT_SPIN_US, "event_loop": type(loop).__name__},
     )
 
 
@@ -412,10 +397,7 @@ async def benchmark_async_transport_hybrid(
 
 
 async def benchmark_multiplexed(
-    iterations: int = 1000,
-    concurrency: int = 64,
-    warmup: int = 100,
-    phase: FastPathPhase = FastPathPhase.BASELINE,
+    iterations: int = 1000, concurrency: int = 64, warmup: int = 100, phase: FastPathPhase = FastPathPhase.BASELINE
 ) -> FastPathResult:
     """Benchmark concurrent request handling with hybrid spin-wait.
 
@@ -460,10 +442,8 @@ async def benchmark_multiplexed(
     try:
         start_total = time.perf_counter()
 
-        for batch in range(iterations):
-            batch_latencies = await asyncio.gather(
-                *[single_request(i) for i in range(concurrency)]
-            )
+        for _batch in range(iterations):
+            batch_latencies = await asyncio.gather(*[single_request(i) for i in range(concurrency)])
             with lock:
                 latencies.extend(batch_latencies)
 
@@ -489,10 +469,7 @@ async def benchmark_multiplexed(
 # -----------------------------------------------------------------------------
 
 
-def benchmark_allocations(
-    iterations: int = 1000,
-    phase: FastPathPhase = FastPathPhase.BASELINE,
-) -> FastPathResult:
+def benchmark_allocations(iterations: int = 1000, phase: FastPathPhase = FastPathPhase.BASELINE) -> FastPathResult:
     """Measure memory allocations in the hot path.
 
     Target: 0 bytes/msg in the fast path (requires Phase 2 zero-copy)
@@ -504,7 +481,7 @@ def benchmark_allocations(
     def server_loop() -> None:
         while not stop_event.is_set():
             try:
-                proc_id, params = server.receive_sync(timeout_ms=100)
+                proc_id, _params = server.receive_sync(timeout_ms=100)
                 server.respond_sync(proc_id, {"ok": True})
             except Exception:
                 if stop_event.is_set():
@@ -599,20 +576,14 @@ def print_summary(results: list[FastPathResult]) -> None:
 
     for result in latency_results:
         status = "PASS" if result.passes_target else "FAIL"
-        print(
-            f"[{status}] {result.name:40} "
-            f"p99={result.p99_us:>8.2f}µs (target: <{result.target_us}µs)"
-        )
+        print(f"[{status}] {result.name:40} p99={result.p99_us:>8.2f}µs (target: <{result.target_us}µs)")
 
     if alloc_results:
         print("\nAllocation metrics:")
         for result in alloc_results:
             target = result.metadata.get("target_bytes_per_msg", 0)
             status = "PASS" if result.allocations_per_msg <= target else "WARN"
-            print(
-                f"[{status}] {result.name:40} "
-                f"{result.allocations_per_msg:.1f} bytes/msg (target: <={target:.0f})"
-            )
+            print(f"[{status}] {result.name:40} {result.allocations_per_msg:.1f} bytes/msg (target: <={target:.0f})")
 
     print()
     if passed == total:
@@ -622,44 +593,27 @@ def print_summary(results: list[FastPathResult]) -> None:
 
 
 async def run_benchmarks(
-    phase: FastPathPhase,
-    iterations: int,
-    warmup: int,
-    skip_async: bool = False,
-    skip_alloc: bool = False,
+    phase: FastPathPhase, iterations: int, warmup: int, skip_async: bool = False, skip_alloc: bool = False
 ) -> list[FastPathResult]:
     """Run all benchmarks for a given phase."""
     results: list[FastPathResult] = []
 
     print("Running sync immediate benchmark...")
-    results.append(
-        benchmark_sync_immediate(iterations=iterations, warmup=warmup, phase=phase)
-    )
+    results.append(benchmark_sync_immediate(iterations=iterations, warmup=warmup, phase=phase))
     results[-1].print_summary()
 
     print("\nRunning sync blocked benchmark...")
-    results.append(
-        benchmark_sync_blocked(iterations=iterations, warmup=warmup, phase=phase)
-    )
+    results.append(benchmark_sync_blocked(iterations=iterations, warmup=warmup, phase=phase))
     results[-1].print_summary()
 
     if not skip_async:
         print("\nRunning async benchmark...")
-        results.append(
-            await benchmark_async_transport_hybrid(
-                iterations=iterations, warmup=warmup, phase=phase
-            )
-        )
+        results.append(await benchmark_async_transport_hybrid(iterations=iterations, warmup=warmup, phase=phase))
         results[-1].print_summary()
 
         print("\nRunning multiplexed benchmark...")
         results.append(
-            await benchmark_multiplexed(
-                iterations=iterations // 10,
-                concurrency=64,
-                warmup=warmup // 10,
-                phase=phase,
-            )
+            await benchmark_multiplexed(iterations=iterations // 10, concurrency=64, warmup=warmup // 10, phase=phase)
         )
         results[-1].print_summary()
 
@@ -690,16 +644,10 @@ Examples:
     VERTEBRA_SPIN_US=3 uv run python benchmarks/ipc_fast_path.py
         """,
     )
-    parser.add_argument(
-        "--iterations", type=int, default=10000, help="Iterations per benchmark"
-    )
+    parser.add_argument("--iterations", type=int, default=10000, help="Iterations per benchmark")
     parser.add_argument("--warmup", type=int, default=1000, help="Warmup iterations")
-    parser.add_argument(
-        "--baseline", action="store_true", help="Force baseline (Phase 0)"
-    )
-    parser.add_argument(
-        "--phase", type=int, choices=[0, 1, 2, 3, 4], help="Force specific phase"
-    )
+    parser.add_argument("--baseline", action="store_true", help="Force baseline (Phase 0)")
+    parser.add_argument("--phase", type=int, choices=[0, 1, 2, 3, 4], help="Force specific phase")
     parser.add_argument("--skip-async", action="store_true", help="Skip async benchmarks")
     parser.add_argument("--skip-alloc", action="store_true", help="Skip allocation benchmark")
     args = parser.parse_args()

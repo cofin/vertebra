@@ -521,3 +521,50 @@ docs-linkcheck-full:                               ## Run the full link check on
 	@echo "${INFO} Running full link check... 🔗"
 	@uv run sphinx-build -b linkcheck ./docs ./docs/_build -D linkcheck_anchors=0 >/dev/null 2>&1
 	@echo "${OK} Full link check complete"
+
+
+# =============================================================================
+# Server Benchmarks
+# =============================================================================
+BENCH_VENV := benchmarks/.venv
+BENCH_PYTHON := $(BENCH_VENV)/bin/python
+
+.PHONY: bench-setup
+bench-setup:                                        ## Create benchmark venv and install dependencies
+	@echo "${INFO} Setting up benchmark environment... 📦"
+	@command -v oha >/dev/null 2>&1 || { echo "${INFO} Installing oha..."; cargo install oha; }
+	@uv run python -m benchmarks.servers.venv_manager create
+	@uv run python -m benchmarks.servers.venv_manager install
+	@echo "${OK} Benchmark environment ready at $(BENCH_VENV)"
+
+.PHONY: bench-servers
+bench-servers:                                      ## Run ASGI server benchmarks (uses benchmark venv)
+	@echo "${INFO} Running ASGI server benchmarks... 📊"
+	@command -v oha >/dev/null 2>&1 || { echo "${ERROR} oha not found. Run 'make bench-setup' first."; exit 1; }
+	@if [ ! -d "$(BENCH_VENV)" ]; then echo "${WARN} Benchmark venv not found. Run 'make bench-setup' first, or use --no-venv."; fi
+	@uv run python -m benchmarks.servers.runner
+	@echo "${OK} Results saved to benchmarks/results/"
+
+.PHONY: bench-servers-quick
+bench-servers-quick:                                ## Quick server benchmark (reduced duration)
+	@echo "${INFO} Running quick server benchmarks... 📊"
+	@command -v oha >/dev/null 2>&1 || { echo "${ERROR} oha not found. Run 'make bench-setup' first."; exit 1; }
+	@uv run python -m benchmarks.servers.runner --quick
+	@echo "${OK} Results saved to benchmarks/results/"
+
+.PHONY: bench-vertebra
+bench-vertebra:                                     ## Benchmark only Vertebra (uses current venv)
+	@echo "${INFO} Running Vertebra benchmarks... 📊"
+	@command -v oha >/dev/null 2>&1 || { echo "${ERROR} oha not found. Run 'make bench-setup' first."; exit 1; }
+	@uv run python -m benchmarks.servers.runner --servers vertebra --no-venv
+	@echo "${OK} Results saved to benchmarks/results/"
+
+.PHONY: bench-install-deps
+bench-install-deps: bench-setup                     ## Alias for bench-setup (backwards compatibility)
+	@echo "${OK} Benchmark dependencies installed"
+
+.PHONY: bench-clean
+bench-clean:                                        ## Remove benchmark venv
+	@echo "${INFO} Removing benchmark venv..."
+	@rm -rf $(BENCH_VENV)
+	@echo "${OK} Benchmark venv removed"

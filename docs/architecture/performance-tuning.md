@@ -62,7 +62,40 @@ For extremely high-throughput workloads sending massive payloads, consider incre
 
 ## IPC Protocol Optimization
 
-Vertebra uses zero-parse-cost protocol headers for minimal latency.
+Vertebra uses zero-parse-cost protocol headers and hybrid spin-wait for minimal latency.
+
+### Hybrid Spin-Wait
+
+The IPC layer uses a three-phase receive strategy to achieve sub-microsecond latency:
+
+1. **Immediate Check**: Try non-blocking receive first (data may already be available)
+2. **Spin Phase**: Spin checking ring buffer for `VERTEBRA_SPIN_US` microseconds (default: 5µs)
+3. **Park Phase**: Fall back to kernel-level blocking (futex on Linux)
+
+This approach captures immediate responses without syscall overhead while still allowing efficient blocking for longer waits.
+
+```bash
+# Configure spin duration (microseconds)
+export VERTEBRA_SPIN_US=5  # Default: 5µs, range: 0-50µs
+
+# Lower values = lower latency, higher CPU usage during wait
+# Higher values = higher latency ceiling, lower CPU usage
+```
+
+**When to adjust:**
+- **Latency-critical (trading, gaming)**: Use 2-3µs for tighter response capture
+- **Throughput-focused (batch processing)**: Use 0µs to skip spinning entirely
+- **Mixed workloads**: Default 5µs balances both
+
+### Rust vs Python Receive Methods
+
+| Method | Wait Mechanism | Use Case | Typical Latency |
+|--------|---------------|----------|-----------------|
+| `SpscRing::recv_hybrid()` | Futex | Pure sync, Rust code | ~0.8µs |
+| `AsyncRing::recv_hybrid()` | Eventfd + poll | Python asyncio (add_reader) | ~1.6µs |
+| `Channel.recv_fast()` | Hybrid spin + asyncio | High-level Python async | ~2.0µs |
+
+The futex path is faster but doesn't integrate with asyncio's event loop. Use `AsyncRing` when you need `loop.add_reader()` compatibility.
 
 ### Protocol Headers
 
@@ -95,18 +128,31 @@ client = AsyncBrokerClient(config)
 
 ### Performance Targets
 
-| Metric | Target | Notes |
-|--------|--------|-------|
-| p99 latency | <10µs | Protocol layer achieves this |
-| Throughput | >1M/sec | Requires batching for full throughput |
-| Hot path allocations | Zero | Pre-allocated buffers |
+| Metric | Target | Achieved | Notes |
+|--------|--------|----------|-------|
+| Sync p99 (immediate) | <10µs | **1.15µs** | Data already in ring buffer |
+| Sync p99 (blocked) | <15µs | **0.8µs** | Futex wakeup latency |
+| Async p99 | <20µs | **2.0µs** | With asyncio integration |
+| Multiplexed (64x) | <20µs | **1.7µs** | Concurrent correlation tracking |
+| Throughput | >1M/sec | ✓ | Requires batching for full throughput |
 
 ### Running Benchmarks
 
 ```bash
-# Python benchmark
-uv run python benchmarks/ipc_performance.py --iterations 10000
+# Python IPC fast path benchmark
+uv run python benchmarks/ipc_fast_path.py
 
-# TypeScript benchmark
-bun run benchmarks/ipc_performance.ts
+# Rust benchmarks (recommended for accurate latency measurement)
+cd src/rs && cargo bench --package vertebra-core --bench spsc
+
+# Key Rust benchmarks:
+# - spsc_recv_hybrid_immediate: Data already available (~1.1µs)
+# - spsc_recv_hybrid_pure_wakeup: True wakeup latency (~0.8µs)
+# - spsc_recv_hybrid_wakeup: With thread spawn overhead (~100µs)
 ```
+
+### Understanding Benchmark Results
+
+The "wakeup" benchmarks may show higher latencies (~100µs) due to thread spawn/join overhead per iteration. This is **not** actual IPC latency. The `pure_wakeup` benchmark uses a persistent sender thread to measure true IPC wakeup latency (~0.8µs).
+
+In production, worker threads are persistent, so the `pure_wakeup` benchmark reflects real-world performance.

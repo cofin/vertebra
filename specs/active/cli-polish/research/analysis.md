@@ -33,35 +33,32 @@
 
 ### Phase 3: Enhancement Opportunities
 
-**Beyond Accelerator - TUI Runtime Mode:**
-1. **Textual dashboard** - Live server status during `vertebra serve`
-2. **Real-time metrics** - Request rate, latency, memory usage
-3. **Worker status** - Show Python worker health
-4. **Log viewer** - Scrollable, filterable log output
-5. **Interactive controls** - Restart workers, change log level
+**Future Enhancement (Deferred - TUI Runtime Mode):**
+1. Textual dashboard - Live server status during `vertebra serve`
+2. Real-time metrics - Request rate, latency, memory usage
+3. Worker status - Show Python worker health
+4. Log viewer - Scrollable, filterable log output
+5. Interactive controls - Restart workers, change log level
 
 ### Phase 4: Technical Requirements
 
 **Dependencies to Add:**
 - `rich>=13.0.0` (explicit, not just via rich-click)
-- `textual>=1.0.0` (for TUI runtime)
 
 **Components to Create:**
 1. **Theme System** - Centralized color and style definitions
 2. **CLI Configuration** - rich-click styling module
 3. **Progress Components** - Reusable spinners, progress bars
-4. **Error Handling** - CLIError with hints, exit codes
-5. **TUI Dashboard** - Textual-based live server view
-6. **Widget Library** - Reusable status indicators, tables
+4. **Error Handling** - CLIError with hints, exit codes, global handler
+5. **Component Library** - Reusable status indicators, tables
 
 ### Phase 5: Complexity Assessment
 
-**Complexity Level: COMPLEX**
-- Multiple interacting systems (CLI + TUI)
-- New dependency integration (Textual)
+**Complexity Level: MEDIUM-COMPLEX**
+- Rich styling across all commands
 - Architectural changes (theme system, error handling)
-- 10+ files to create/modify
-- Estimated tasks: 12+ checkpoints
+- 7+ files to create/modify
+- Estimated tasks: 13 checkpoints
 
 ## Key Patterns from Accelerator
 
@@ -123,7 +120,9 @@ COLORS = {
 }
 ```
 
-### TUI Architecture
+### TUI Architecture (Deferred to Future Phase)
+
+The following TUI design is preserved for future implementation if Rich styling proves insufficient:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -147,41 +146,36 @@ COLORS = {
 └─────────────────────────────────────────────────────────┘
 ```
 
-## Files to Create/Modify
+## Files to Create/Modify (Current Phase)
 
 ### New Files
 1. `src/py/vertebra/cli/theme.py` - Centralized theme definitions
 2. `src/py/vertebra/cli/config.py` - rich-click configuration
 3. `src/py/vertebra/cli/errors.py` - CLIError and error handling
 4. `src/py/vertebra/cli/components.py` - Reusable UI components
-5. `src/py/vertebra/cli/tui/__init__.py` - TUI package
-6. `src/py/vertebra/cli/tui/app.py` - Main Textual application
-7. `src/py/vertebra/cli/tui/widgets.py` - Custom TUI widgets
-8. `src/py/vertebra/cli/tui/screens.py` - TUI screens
 
 ### Modified Files
-1. `src/py/vertebra/cli/__init__.py` - Import config, add command groups
-2. `src/py/vertebra/cli/serve.py` - Add TUI mode, improve error handling
+1. `src/py/vertebra/cli/__init__.py` - Import config, add global exception handler
+2. `src/py/vertebra/cli/serve.py` - Improve error handling, use components
 3. `src/py/vertebra/cli/build.py` - Add progress bar, improve output
 4. `src/py/vertebra/cli/init.py` - Add styled prompts, progress
 5. `src/py/vertebra/cli/banner/styles.py` - Integrate with theme
 6. `src/py/vertebra/cli/banner/renderer.py` - Use new components
-7. `pyproject.toml` - Add dependencies
+7. `pyproject.toml` - Add rich dependency
 
-## Decision: Textual vs Pure Rich
+## Decision: Rich-Only (Textual Deferred)
 
-**Recommendation: Hybrid Approach**
+**Current Approach: Pure Rich for static output**
 
-1. **CLI Mode (default)** - Pure Rich for static output
-   - Fast startup
-   - No extra dependencies in basic usage
-   - Compatible with CI/CD pipelines
-   - Works in all terminals
+- Fast startup
+- No extra dependencies beyond rich/rich-click
+- Compatible with CI/CD pipelines
+- Works in all terminals
+- Global exception handler for professional error display
 
-2. **TUI Mode (--tui flag)** - Textual for live dashboard
-   - `vertebra serve --tui` activates dashboard
-   - Requires TTY terminal
-   - Optional dependency (textual in extras)
-   - Full interactivity
+**Future Phase (if needed):** TUI Mode with Textual for live dashboard
+- Would add `vertebra serve --tui` to activate interactive dashboard
+- Would require TTY terminal
+- Would be optional dependency (textual in extras)
 
-This allows users to choose their experience level while keeping the core CLI fast and lightweight.
+This keeps the core CLI fast and lightweight while leaving room to add interactivity later if Rich styling proves insufficient.

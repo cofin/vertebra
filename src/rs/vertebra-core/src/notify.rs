@@ -336,15 +336,58 @@ impl Notifier {
     ///
     /// For delayed data:
     /// - Falls back to efficient poll() after spin deadline
+    ///
+    /// # Note
+    ///
+    /// This method uses `poll(0)` syscall during spin, which adds ~200-500ns per
+    /// iteration. For ring buffer scenarios, prefer `spin_wait_or_park_with()`
+    /// which accepts a custom data-availability check function.
     pub fn spin_wait_or_park(&self, spin_us: u64, timeout_ms: i32) -> io::Result<bool> {
+        self.spin_wait_or_park_with(spin_us, timeout_ms, || self.has_pending())
+    }
+
+    /// Hybrid spin-then-park wait with custom data-availability check.
+    ///
+    /// This variant is optimized for ring buffers where data availability can be
+    /// checked with a pure atomic memory read (head != tail) rather than a syscall.
+    ///
+    /// # Arguments
+    ///
+    /// * `spin_us` - Maximum microseconds to spin before blocking (typically 2-10)
+    /// * `timeout_ms` - Total timeout in milliseconds (includes spin time)
+    /// * `has_data` - Closure that returns `true` if data is available
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` - Data available or notification received
+    /// * `Ok(false)` - Timeout expired
+    /// * `Err` - System error during wait
+    ///
+    /// # Performance
+    ///
+    /// With ring-buffer check (atomic load, ~1ns per iteration):
+    /// - Spin phase captures immediate data in ~1-3µs
+    /// - ~5000 iterations per 5µs spin duration
+    ///
+    /// With poll-based check (syscall, ~200-500ns per iteration):
+    /// - ~10-25 iterations per 5µs spin duration
+    pub fn spin_wait_or_park_with<F>(
+        &self,
+        spin_us: u64,
+        timeout_ms: i32,
+        has_data: F,
+    ) -> io::Result<bool>
+    where
+        F: Fn() -> bool,
+    {
         use std::time::{Duration, Instant};
 
         let start = Instant::now();
         let spin_deadline = start + Duration::from_micros(spin_us);
 
-        // Spin phase: tight loop checking for pending data
+        // Spin phase: tight loop checking for data with provided closure
         while Instant::now() < spin_deadline {
-            if self.has_pending() {
+            if has_data() {
                 return Ok(true);
             }
             std::hint::spin_loop();

@@ -2,7 +2,7 @@
 
 ## Overview
 
-**Complexity:** Medium-Complex (13 tasks across 6 phases)
+**Complexity:** Medium-Complex (14 tasks across 6 phases)
 **PRD Location:** `specs/active/cli-polish/prd.md`
 **Research Location:** `specs/active/cli-polish/research/`
 
@@ -53,11 +53,16 @@
 - [ ] Create `print_cli_error()` utility function
 - [ ] Create `raise_cli_error()` helper
 - [ ] Add hint mapping for common exceptions
+- [ ] Create `global_exception_handler()` decorator for CLI entry point
 - [ ] Add unit test `tests/unit/cli/test_errors.py`
+
+The global exception handler ensures ALL unhandled exceptions display professionally,
+not just those explicitly caught. This wraps the main CLI group.
 
 **Files:**
 - NEW: `src/py/vertebra/cli/errors.py`
 - NEW: `src/py/tests/unit/cli/test_errors.py`
+- MODIFY: `src/py/vertebra/cli/__init__.py` (apply global handler)
 
 ---
 
@@ -183,6 +188,24 @@
 **Files:**
 - Various fixes as needed
 
+### Task 14: Add `vtb` Command Alias
+- [ ] Add `vtb` entry point in pyproject.toml `[project.scripts]`
+- [ ] Both `vertebra` and `vtb` should invoke the same CLI
+- [ ] Test both commands work identically
+- [ ] Update help text to mention both command names
+
+This allows testing the shorter `vtb` name while keeping `vertebra` available.
+The plan is to eventually standardize on `vtb` if it feels right.
+
+**Files:**
+- MODIFY: `pyproject.toml`
+
+```toml
+[project.scripts]
+vertebra = "vertebra.cli:cli"
+vtb = "vertebra.cli:cli"
+```
+
 ---
 
 ## Task Summary
@@ -194,9 +217,9 @@
 | 3. UI Components | 1 task | Not Started |
 | 4. Banner Enhancement | 2 tasks | Not Started |
 | 5. Command Updates | 3 tasks | Not Started |
-| 6. Testing & Docs | 4 tasks | Not Started |
+| 6. Testing & Docs | 5 tasks | Not Started |
 
-**Total: 13 tasks**
+**Total: 14 tasks**
 
 ---
 

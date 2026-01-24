@@ -1,11 +1,6 @@
 import { ShmRing } from "../broker/shm";
-import {
-  encodeRequest,
-  decodeResponse,
-  encodeMessage,
-  decodeMessage,
-} from "../protocol/serialization";
-import { Flags, ResponseFlags } from "../protocol/headers";
+import { encodeRequest, decodeResponse } from "../protocol/serialization";
+import { Flags } from "../protocol/headers";
 
 export type IpcClientConfig = {
   name?: string;

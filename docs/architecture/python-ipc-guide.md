@@ -18,6 +18,50 @@ server.respond_sync(procedure_id, {"result": "ok"})
 result = client.send_sync("my.procedure", {"key": "value"}, timeout_ms=5000)
 ```
 
+## Fast Path Receive (Sub-Microsecond Latency)
+
+For latency-critical code, use the hybrid spin-wait receive methods that achieve sub-microsecond latency:
+
+```python
+from vertebra import _vertebra as v
+import os
+
+# Configure spin duration (default: 5µs)
+spin_us = int(os.environ.get("VERTEBRA_SPIN_US", "5"))
+
+# Create a ring with hybrid recv support
+ring = v.SpscRing.create_named("/vb-fast", 256, 64)
+
+# Hybrid receive: spin for spin_us, then block with timeout
+# Returns bytes on success, None on timeout
+data = ring.recv_hybrid(spin_us=5, timeout_ms=1000)
+if data is not None:
+    process(data)
+```
+
+### Performance Characteristics
+
+| Method | Typical p99 | Best For |
+|--------|-------------|----------|
+| `recv_hybrid()` | ~0.8-1.5µs | Latency-critical sync code |
+| `recv()` | ~3-5µs | Simple blocking receive |
+| `try_recv()` | ~0.1µs | Non-blocking polling |
+
+### Async Fast Path
+
+For asyncio code, use `AsyncChannel.recv_fast()`:
+
+```python
+from vertebra.ipc.channel import AsyncChannel
+
+async def handle_requests(channel: AsyncChannel):
+    while True:
+        # Hybrid spin-wait integrated with asyncio
+        data = await channel.recv_fast(spin_us=5, timeout_ms=1000)
+        if data:
+            await process(data)
+```
+
 ## Protocol Headers
 
 All IPC messages use a fixed 16-byte header for zero-parse-cost multiplexing:

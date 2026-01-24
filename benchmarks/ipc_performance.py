@@ -98,10 +98,7 @@ class BenchmarkResult:
 
 
 def benchmark_roundtrip_latency(
-    iterations: int = 10000,
-    warmup: int = 1000,
-    slot_size: int = 4096,
-    slots: int = 64,
+    iterations: int = 10000, warmup: int = 1000, slot_size: int = 4096, slots: int = 64
 ) -> BenchmarkResult:
     """Benchmark round-trip latency (send + receive + respond)."""
     client, server = Channel.create_pair(slot_size=slot_size, slots=slots)
@@ -150,18 +147,12 @@ def benchmark_roundtrip_latency(
         server.close()
 
     return BenchmarkResult(
-        name="Round-trip Latency",
-        iterations=iterations,
-        total_time_s=total_time,
-        latencies_us=latencies,
+        name="Round-trip Latency", iterations=iterations, total_time_s=total_time, latencies_us=latencies
     )
 
 
 def benchmark_throughput(
-    iterations: int = 100000,
-    warmup: int = 1000,
-    slot_size: int = 4096,
-    slots: int = 256,
+    iterations: int = 100000, warmup: int = 1000, slot_size: int = 4096, slots: int = 256
 ) -> BenchmarkResult:
     """Benchmark maximum throughput."""
     client, server = Channel.create_pair(slot_size=slot_size, slots=slots)
@@ -172,7 +163,7 @@ def benchmark_throughput(
     def server_loop() -> None:
         while not stop_event.is_set():
             try:
-                proc_id, params = server.receive_sync(timeout_ms=100)
+                proc_id, _params = server.receive_sync(timeout_ms=100)
                 server.respond_sync(proc_id, {"ok": True})
             except Exception:
                 if stop_event.is_set():
@@ -204,12 +195,7 @@ def benchmark_throughput(
         client.close()
         server.close()
 
-    return BenchmarkResult(
-        name="Throughput",
-        iterations=iterations,
-        total_time_s=total_time,
-        latencies_us=latencies,
-    )
+    return BenchmarkResult(name="Throughput", iterations=iterations, total_time_s=total_time, latencies_us=latencies)
 
 
 def benchmark_allocation(iterations: int = 1000) -> dict[str, Any]:
@@ -221,7 +207,7 @@ def benchmark_allocation(iterations: int = 1000) -> dict[str, Any]:
     def server_loop() -> None:
         while not stop_event.is_set():
             try:
-                proc_id, params = server.receive_sync(timeout_ms=100)
+                proc_id, _params = server.receive_sync(timeout_ms=100)
                 server.respond_sync(proc_id, {"ok": True})
             except Exception:
                 if stop_event.is_set():
@@ -280,18 +266,12 @@ def main() -> None:
 
     # Run latency benchmark
     print("Running latency benchmark...")
-    latency_result = benchmark_roundtrip_latency(
-        iterations=args.iterations,
-        warmup=args.warmup,
-    )
+    latency_result = benchmark_roundtrip_latency(iterations=args.iterations, warmup=args.warmup)
     latency_result.print_summary()
 
     # Run throughput benchmark
     print("\nRunning throughput benchmark...")
-    throughput_result = benchmark_throughput(
-        iterations=args.throughput_iterations,
-        warmup=args.warmup,
-    )
+    throughput_result = benchmark_throughput(iterations=args.throughput_iterations, warmup=args.warmup)
     throughput_result.print_summary()
 
     # Run allocation benchmark

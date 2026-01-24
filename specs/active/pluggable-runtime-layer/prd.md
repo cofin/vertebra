@@ -23,12 +23,67 @@
 4. `src/ts/src/server/index.ts` - Current Bun server (to be supplemented)
 5. `src/ts/src/ipc/asgi.ts` - ASGI bridge patterns
 
+### Dependencies on Other Specs
+
+| Spec | Dependency | Status |
+|------|------------|--------|
+| `rust-fast-path` | IPC p99 < 10µs for sync, < 20µs for async | **MET** ✅ |
+
+**Achieved IPC Latencies (Jan 2026):**
+| Scenario | Result | Target |
+|----------|--------|--------|
+| Sync Immediate | 1.15µs | < 10µs ✅ |
+| Pure Wakeup (futex) | 0.8µs | < 15µs ✅ |
+| AsyncRing Immediate | 1.64µs | < 10µs ✅ |
+
+**Fix Applied:** Added `recv_hybrid()` to `SpscRing` using futex-based wait, plus `has_data()` fast atomic check. Eliminated poll() syscalls from spin loop.
+
 ### Patterns to Follow
 
 - **Zero-Copy First**: Hyper `Bytes` → ring buffer without clone
 - **Tokio Runtime**: Async HTTP handling with existing sync ring primitives
 - **RFC 8441**: WebSocket over HTTP/2 via extended CONNECT
 - **Industry Precedent**: Cloudflare Pingora, high-frequency trading systems
+
+### Scope & Non-Goals (per Codex Review)
+
+**In Scope:**
+- HTTP/1.1 and HTTP/2 (h2c) server using Hyper
+- WebSocket over HTTP/2 (RFC 8441)
+- gRPC transport layer
+- Zero-copy ring buffer integration
+- ASGI proxy for Python workers
+- Elite DX (Streaming RPC, NativeState, Framework Adapters)
+
+**Non-Goals (MVP):**
+- HTTP/3 support (future roadmap)
+- Data-plane sockets (shared memory only)
+- Replacement of Bun broker/pools (Bun continues for DB/S3/Redis/crypto)
+- tokio-uring integration (0.x API, NOT production ready)
+
+### Compatibility Contracts
+
+The following integrations MUST continue working when Rust replaces Bun for HTTP:
+
+| Integration | Requirement |
+|-------------|-------------|
+| **Type Bridge** | `/__vertebra/types.d.ts` proxied to ASGI unchanged |
+| **Vite HMR** | Long-poll with `X-Vertebra-Watch: true` up to 30s |
+| **ETag Caching** | `If-None-Match`/`ETag` headers preserved for 304 |
+| **Litestar Plugin** | All ASGI semantics preserved |
+
+### Gating Strategy (per Codex Review)
+
+Implementation follows strict gates—each gate's tests must pass before advancing:
+
+| Gate | Focus | Must Pass Before |
+|------|-------|------------------|
+| **G1** | Type bridge + health endpoints | Phase 2 (H2C) |
+| **G2** | H2C + backpressure | Phase 3 (Zero-Copy) |
+| **G3** | Zero-copy verification | Phase 4 (Shutdown) |
+| **G4** | Graceful shutdown + metrics | Phase 5 (WebSocket) |
+| **G5** | RFC 8441 WebSocket | Phase 6 (gRPC) |
+| **G6** | gRPC transport | Phase 7 (PyO3/CLI) |
 
 ### Detected Stack and Commands
 
@@ -47,7 +102,9 @@
 
 ### User Problem Being Solved
 
-Vertebra's product guidelines mandate **"Elite Performance & Design"** with **"Zero-Copy First"** architecture. The current Bun-based HTTP layer has limitations:
+Vertebra's product guidelines mandate **"Elite Performance & Design"** with **"Zero-Copy First"** architecture. Beyond the HTTP layer limitations, the current developer experience falls short of the "Elite DX" vision:
+
+**HTTP Layer Limitations (Solved by Rust Hyper):**
 
 1. **No H2C Support**: Google Cloud Run requires HTTP/2 cleartext (h2c) for end-to-end HTTP/2. Bun's h2c support is undocumented/unreliable.
 
@@ -56,6 +113,16 @@ Vertebra's product guidelines mandate **"Elite Performance & Design"** with **"Z
 3. **FFI Overhead**: Current flow requires: `Bun HTTP → Serialization → bun:ffi → Ring Buffer`. Each boundary adds latency.
 
 4. **No Native gRPC**: Users building microservices must bolt on gRPC separately, losing shared-memory benefits.
+
+**Developer Experience Limitations (Solved by Elite DX Bridge):**
+
+5. **Polling-Based Type Updates**: Current `/__vertebra/types.d.ts` uses HTTP long-polling. Should be instant WebSocket/SSE push.
+
+6. **No Streaming RPC**: `@procedure` only supports request/response. No `AsyncGenerator` → `Subscription<T>` support for real-time data.
+
+7. **No Native State Sync**: No way to have Python objects automatically push state changes to frontend stores (JSON Patch).
+
+8. **No Framework Adapters**: Missing `useVertebraState()` for React, Svelte stores, Vue signals—the "Inertia Killer" pattern.
 
 ### Multi-Model Consensus Conclusion
 
@@ -82,10 +149,19 @@ After consulting Gemini 3 Pro and Gemini 3 Flash (devil's advocate), both models
 |--------|--------|-------------|
 | H2C works with Cloud Run | Pass | `curl --http2-prior-knowledge` |
 | WebSocket over HTTP/2 | Pass | RFC 8441 compliance test |
-| Request latency p99 | < 1ms | Benchmark suite |
+| IPC latency p50 | < 5µs | Ring buffer round-trip benchmark |
+| IPC latency p99 | < 10µs | Ring buffer round-trip benchmark |
+| IPC latency p999 | < 50µs | Ring buffer round-trip benchmark |
+| HTTP request overhead | < 100µs | End-to-end request benchmark |
+| Throughput | > 1M msg/sec | Sustained throughput test |
 | Zero-copy verification | Pass | No `memcpy` in hot path |
-| gRPC unary latency | < 2ms | grpcurl benchmark |
+| gRPC unary latency | < 100µs | grpcurl benchmark (excluding network) |
 | Bun still works for dev | Pass | `vertebra serve --dev` |
+
+**Performance Philosophy (from Product Guidelines):**
+- "Elite Performance & Design" — extreme performance is mandatory, not optional
+- "Zero-Copy First" — eliminate serialization overhead at every boundary
+- "Efficiency over Simplicity" — complex zero-copy implementations beat simple slow ones
 
 ---
 
@@ -107,6 +183,38 @@ After consulting Gemini 3 Pro and Gemini 3 Flash (devil's advocate), both models
 - [ ] Use Hyper's `Bytes` (reference-counted) without cloning
 - [ ] Response bodies read from ring buffers without copy
 - [ ] Backpressure handling when workers are slow
+
+#### FR-2b: IPC Protocol Layout (Gap from Gemini Review)
+
+- [ ] Define binary header format using `zerocopy` derives
+- [ ] Implement compact encoding for common headers (Content-Type, Accept, etc.)
+- [ ] Use integer enums for HTTP methods and common header names
+- [ ] Pre-allocate scratch space for header serialization
+- [ ] Headers must precede body pointer in ring buffer slot
+
+```rust
+// src/rs/vertebra-core/src/server/bridge/header.rs
+use zerocopy::{AsBytes, FromBytes, FromZeroes};
+
+#[derive(AsBytes, FromBytes, FromZeroes)]
+#[repr(C, packed)]
+pub struct IpcRequestHeader {
+    pub method: u8,           // GET=0, POST=1, PUT=2, etc.
+    pub path_len: u16,        // Length of path string
+    pub header_count: u8,     // Number of headers
+    pub body_len: u32,        // Body length (0 for no body)
+    pub request_id: u64,      // Correlation ID
+    // Followed by: path bytes, then header entries, then body pointer
+}
+```
+
+#### FR-2c: Worker Load Balancing (Gap from Gemini Review)
+
+- [ ] Implement dispatcher abstraction for ring buffer selection
+- [ ] Support Round-Robin dispatch (baseline)
+- [ ] Support Least-Loaded dispatch (prefer ring with most free slots)
+- [ ] Track ring buffer queue depth per worker
+- [ ] Configuration option: `--dispatch-strategy [round-robin|least-loaded]`
 
 #### FR-3: WebSocket over HTTP/2 (RFC 8441)
 
@@ -136,21 +244,139 @@ After consulting Gemini 3 Pro and Gemini 3 Flash (devil's advocate), both models
 - [ ] Handle Cloud Run's load balancer behavior
 - [ ] Documentation with Terraform/YAML examples
 
-#### FR-7: Bun Compatibility Mode
+#### FR-7: Bun Compatibility Mode (ADDITIVE, NOT REPLACEMENT)
 
+**Architecture:** Rust HTTP server is an ADDITION to the existing Bun path, not a replacement. Components are mix-and-match:
+
+| Component | Options | Default |
+|-----------|---------|---------|
+| HTTP Server | `rust` / `bun` | `rust` (prod), `bun` (dev) |
+| Database Pools | Bun only | Bun |
+| Redis Client | Bun only | Bun |
+| S3/Storage | Bun only | Bun |
+| Crypto (password) | Bun only | Bun |
+| Static Assets | Both | Bun (dev), Rust (prod) |
+
+**Mix-and-Match Supported:**
+- `--server rust` + Bun database drivers = **SUPPORTED** (production recommended)
+- `--server bun` + all Bun services = **SUPPORTED** (development default)
+- `--server rust` + Bun S3/crypto = **SUPPORTED**
+
+**Compatibility Requirements:**
 - [ ] Bun remains default for `--dev` mode
-- [ ] Bun continues to handle: database drivers, S3, crypto, static assets
+- [ ] Bun continues to handle: database drivers, S3, crypto
 - [ ] Clear migration path for existing Bun-based deployments
-- [ ] Runtime selection via environment variable or CLI flag
+- [ ] Runtime selection via `--server [rust|bun]` or `VERTEBRA_SERVER` env var
+- [ ] **Warning emitted** when mixing components with known limitations
+- [ ] Existing Bun code paths are NOT modified, only new Rust paths added
+
+#### FR-8: Elite DX - Streaming RPC (The "tRPC-Style" Client)
+
+- [ ] Extend Type Bridge IR to support `SubscriptionType` and `StreamType`
+- [ ] Update `@procedure` decorator to detect `AsyncGenerator[T, None]` return types
+- [ ] Generate `Subscription<T>` types in TypeScript
+- [ ] Implement `StreamingResponse` serializer (NDJSON or SSE-style framing)
+- [ ] WebSocket transport for subscriptions (via Rust server or shared memory)
+
+```python
+# Python: Streaming procedure
+@procedure
+async def chat_messages(room_id: str) -> AsyncGenerator[Message, None]:
+    async for msg in message_stream(room_id):
+        yield msg
+```
+
+```typescript
+// TypeScript: Generated subscription type
+client.chat.messages.subscribe("room-1", (msg) => console.log(msg));
+```
+
+#### FR-9: Elite DX - NativeState (Real-Time Sync)
+
+- [ ] Implement `NativeState` base class (extends `msgspec.Struct`)
+- [ ] Auto-generate subscription endpoints for NativeState instances
+- [ ] Implement JSON Patch diff generation on state mutation
+- [ ] Stream format: `{ type: 'init', state: ... }` then `{ type: 'patch', ops: [...] }`
+- [ ] Auto-reconnecting subscriptions with state rehydration
+
+```python
+# Python: NativeState primitive
+class Counter(NativeState):
+    count: int = 0
+
+    def increment(self):
+        self.count += 1  # Auto-pushes patch to subscribers
+```
+
+#### FR-10: Elite DX - Framework Adapters
+
+- [ ] React: `useVertebraState<T>(key)` hook
+- [ ] Svelte: Vertebra store adapter
+- [ ] Vue: Composable with reactive refs
+- [ ] Solid: Signal-based adapter
+- [ ] All adapters apply JSON Patches and trigger reactivity
+
+```typescript
+// React: Zero-latency state sync
+function Counter() {
+    const counter = useVertebraState<Counter>("counter");
+    return <div>{counter.count}</div>;  // Auto-updates on Python mutation
+}
+```
+
+#### FR-11: Elite DX - Vite/Litestar Integration Preservation
+
+- [ ] Rust server exposes `/__vertebra/types.d.ts` endpoint (replacing Bun)
+- [ ] WebSocket channel for instant type updates (not polling)
+- [ ] Vite HMR proxy support in development mode
+- [ ] Asset serving from Vite manifest (`manifest.json`)
+- [ ] Static file serving for `/static`, `/assets` paths
+- [ ] Preserve Litestar native pipeline compatibility matrix
 
 ### Non-Functional Requirements
 
-#### NFR-1: Performance
+#### NFR-1: Performance (Tiered World-Class Targets)
 
-- [ ] Request latency p50 < 500µs, p99 < 1ms
-- [ ] Throughput > 100k req/s on 4-core machine
+**Multi-Model Consensus:** Gemini Pro (9/10) + Gemini Flash (6/10) validated these targets with caveats for Cloud Run production.
+
+**IPC Layer (Ring Buffer) - BENCHMARK TARGETS (achievable):**
+- [ ] IPC latency p50 < 5µs
+- [ ] IPC latency p99 < 10µs
+- [ ] IPC latency p999 < 50µs
+- [ ] Throughput > 1M msg/sec sustained
+- [ ] Header serialization < 100ns (zerocopy guarantees this)
+
+**HTTP Layer (Hyper + IPC) - BENCHMARK TARGETS:**
+- [ ] HTTP overhead < 100µs (Hyper parsing + ring buffer write)
+- [ ] End-to-end p99 < 200µs (HTTP receive to Python worker ACK)
+- [ ] Throughput > 500k req/s on 4-core machine
+
+**PRODUCTION TARGETS (Cloud Run gen2 with CPU always-allocated):**
+- [ ] End-to-end p99 < 2ms (10x relaxed for GIL + virtualization)
+- [ ] End-to-end p999 < 5ms (Cloud Run scheduling noise)
+- [ ] Throughput > 100k req/s with low latency (latency vs throughput tradeoff)
+
+**Elite DX (Streaming/State) - BENCHMARK:**
+- [ ] RPC call overhead < 50µs
+- [ ] State patch latency < 100µs (Python mutation to JS callback)
+- [ ] Subscription setup < 1ms
+
+**Elite DX - PRODUCTION (network physics included):**
+- [ ] RPC call overhead < 500µs (includes TCP/browser event loop)
+- [ ] State patch latency < 1ms (realistic for WebSocket delivery)
+- [ ] Type HMR push < 50ms (delivery only, not Python reload)
+
+**Resource Efficiency:**
 - [ ] Memory overhead < 10MB for server component
 - [ ] No GC pauses (Rust has no GC)
+- [ ] CPU utilization < 50% at 100k req/s
+
+**Critical Mitigations (from Consensus):**
+1. Use multi-process workers (1 per core) to avoid Python GIL contention
+2. Cloud Run: Enable "CPU allocation: always allocated" in gen2
+3. Implement batch ring buffer drains to amortize Python wake cost
+4. Release GIL in Rust while waiting on ring buffer
+5. Pre-allocate all ring buffer slots (no dynamic allocation in hot path)
 
 #### NFR-2: Zero-Copy Verification
 
@@ -164,11 +390,21 @@ After consulting Gemini 3 Pro and Gemini 3 Flash (devil's advocate), both models
 - [ ] macOS: Full support (development)
 - [ ] Windows: Basic support (may use fallback paths)
 
+#### NFR-4: Feature Parity Testing (Gap from Gemini Review)
+
+- [ ] Integration test suite runs against BOTH Rust and Bun servers
+- [ ] CI pipeline validates feature parity on every PR
+- [ ] Document any intentional behavioral differences
+- [ ] Warn developers when using dev-only features
+- [ ] Vite types.d.ts endpoint works identically (304 caching, ETag passthrough)
+
 ---
 
 ## Technical Approach
 
-### Architecture Overview
+### Architecture Overview (Additive Design)
+
+**Key Point:** Rust HTTP server ADDS to the existing Bun infrastructure. Bun continues running for database/S3/crypto. Components communicate via shared memory ring buffers.
 
 ```
                     ┌─────────────────────────────────────────┐
@@ -182,7 +418,7 @@ After consulting Gemini 3 Pro and Gemini 3 Flash (devil's advocate), both models
          ▼                            ▼                            ▼
 ┌─────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
 │    Rust Server      │    │     Bun Broker      │    │   Python Workers    │
-│    (Production)     │    │   (Dev + Services)  │    │      (ASGI)         │
+│    (NEW - HTTP)     │    │   (EXISTING - DB)   │    │      (ASGI)         │
 │                     │    │                     │    │                     │
 │  • Hyper HTTP/1+2   │    │  • PostgreSQL pool  │    │  • Litestar app     │
 │  • H2C (Cloud Run)  │    │  • MySQL pool       │    │  • Business logic   │
@@ -203,7 +439,63 @@ After consulting Gemini 3 Pro and Gemini 3 Flash (devil's advocate), both models
                            │  Already exists in  │
                            │  vertebra-core!     │
                            └─────────────────────┘
+
+Mix-and-Match Example:
+  --server rust  →  Rust handles HTTP  →  Ring Buffer  →  Python worker
+       ↓                                                        ↓
+  Bun Broker ←──────────── Ring Buffer ←─────────── DB query via Broker
 ```
+
+### ASGI Proxy Architecture (per Codex Review)
+
+The Rust server acts as a **transparent ASGI proxy**—it does NOT special-case any endpoints:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         ASGI PROXY FLOW                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  HTTP Request (including /__vertebra/types.d.ts)                            │
+│     └─→ Rust Server receives via Hyper                                      │
+│         └─→ Encode to ring envelope:                                        │
+│             - request_id: u64                                               │
+│             - method: u8 (GET=0, POST=1, etc.)                              │
+│             - path: length-prefixed bytes                                   │
+│             - headers: Vec<(id, len, value)>  ← preserves ALL headers       │
+│             - body: Stream<Bytes>                                           │
+│                                                                             │
+│  Ring Buffer (SPSC)                                                         │
+│     └─→ Python worker reads envelope                                        │
+│         └─→ ASGI app processes (TypeBridgeApp, Litestar, etc.)             │
+│             └─→ May block 30s for long-poll (X-Vertebra-Watch)             │
+│             └─→ Writes response envelope:                                   │
+│                 - request_id: u64                                           │
+│                 - status: u16 (200, 304, etc.)                              │
+│                 - headers: Vec<(name, value)>  ← preserves ETag, etc.       │
+│                 - body: Vec<u8> (empty for 304)                             │
+│                                                                             │
+│  HTTP Response                                                              │
+│     └─→ Rust Server decodes envelope                                        │
+│         └─→ Sends via Hyper (preserving status + ALL headers)               │
+│                                                                             │
+│  CRITICAL: Type bridge logic stays in Python, Rust is transparent proxy    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Header Pass-Through Requirements
+
+| Header | Direction | Purpose | MUST Preserve |
+|--------|-----------|---------|---------------|
+| `If-None-Match` | Request | Cache validation | ✓ |
+| `ETag` | Response | Cache identifier | ✓ |
+| `X-Vertebra-Watch` | Request | HMR long-poll trigger | ✓ |
+| `X-TypeScript-Version` | Response | Type version tracking | ✓ |
+| `Accept-Encoding` | Request | Compression negotiation | ✓ |
+| `Content-Encoding` | Response | Compression indicator | ✓ |
+| `Cache-Control` | Response | Caching policy | ✓ |
+
+**Strip only hop-by-hop headers:** `Connection`, `Keep-Alive`, `Transfer-Encoding`
 
 ### Data Flow: Zero-Copy Path
 
@@ -464,19 +756,147 @@ impl VertebraServer {
 }
 ```
 
-### File Structure
+### Elite DX Architecture: Real-Time Bridge
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                        ELITE DX: REAL-TIME BRIDGE                            │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  PYTHON BACKEND                           FRONTEND (React/Vue/Svelte)        │
+│  ══════════════                           ═══════════════════════════        │
+│                                                                              │
+│  ┌─────────────────┐                      ┌─────────────────────────┐       │
+│  │  @procedure     │───RPC Call──────────▶│  client.todos.add()     │       │
+│  │  def add_todo() │                      │                         │       │
+│  └─────────────────┘                      │  // Type-safe, instant  │       │
+│                                           └─────────────────────────┘       │
+│  ┌─────────────────┐                      ┌─────────────────────────┐       │
+│  │  @procedure     │                      │  client.chat.subscribe( │       │
+│  │  async def chat │───Subscription──────▶│    msg => render(msg)   │       │
+│  │  () -> AsyncGen │    (WebSocket)       │  )                      │       │
+│  └─────────────────┘                      └─────────────────────────┘       │
+│                                                                              │
+│  ┌─────────────────┐                      ┌─────────────────────────┐       │
+│  │  class Counter  │                      │  useVertebraState(      │       │
+│  │  (NativeState): │───JSON Patch────────▶│    "counter"            │       │
+│  │    count: int   │    (Auto-Push)       │  ) // Auto-reactive     │       │
+│  └─────────────────┘                      └─────────────────────────┘       │
+│                                                                              │
+│  TRANSPORT: WebSocket over HTTP/2 (RFC 8441) or Shared Memory Channel       │
+│  LATENCY TARGET: < 50µs for RPC overhead, < 100µs for state patches         │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### NativeState Implementation
+
+```python
+# src/py/vertebra/state.py
+
+from msgspec import Struct
+from vertebra.procedures import procedure
+import json_patch
+
+class NativeState(Struct):
+    """Base class for auto-syncing state objects."""
+
+    _subscribers: list[Callable] = []
+    _previous_state: bytes = b""
+
+    def __setattr__(self, name, value):
+        super().__setattr__(name, value)
+        if not name.startswith("_"):
+            self._push_patch()
+
+    def _push_patch(self):
+        """Generate and push JSON Patch to all subscribers."""
+        current = msgspec.json.encode(self)
+        if self._previous_state:
+            patch = json_patch.make_patch(
+                msgspec.json.decode(self._previous_state),
+                msgspec.json.decode(current)
+            )
+            for subscriber in self._subscribers:
+                subscriber({"type": "patch", "ops": patch.to_string()})
+        self._previous_state = current
+
+    @classmethod
+    def create_subscription(cls, instance_key: str):
+        """Auto-generate subscription endpoint for this state."""
+        @procedure
+        async def subscribe() -> AsyncGenerator[dict, None]:
+            instance = get_state_instance(instance_key)
+            # Initial state
+            yield {"type": "init", "state": msgspec.json.decode(msgspec.json.encode(instance))}
+            # Patches
+            queue = asyncio.Queue()
+            instance._subscribers.append(queue.put_nowait)
+            try:
+                while True:
+                    patch = await queue.get()
+                    yield patch
+            finally:
+                instance._subscribers.remove(queue.put_nowait)
+        return subscribe
+```
+
+### Type Bridge Extensions for Streams
+
+```python
+# src/py/vertebra/types/ir.py additions
+
+@dataclass
+class SubscriptionType(TypeNode):
+    """Represents AsyncGenerator[T, None] → Subscription<T>"""
+    yield_type: TypeNode
+
+@dataclass
+class StreamType(TypeNode):
+    """Represents Iterator[T] → Stream<T>"""
+    item_type: TypeNode
+```
+
+```typescript
+// Generated TypeScript
+interface Subscription<T> {
+    subscribe(callback: (value: T) => void): () => void;  // Returns unsubscribe
+    [Symbol.asyncIterator](): AsyncIterator<T>;
+}
+
+// Usage
+const unsub = client.chat.messages.subscribe(msg => console.log(msg));
+// Or async iteration
+for await (const msg of client.chat.messages) {
+    console.log(msg);
+}
+```
+
+### File Structure (Updated per Gemini Review)
 
 ```
 src/rs/vertebra-core/
-├── Cargo.toml                    # Add: hyper, http-body-util, tokio-tungstenite
+├── Cargo.toml                    # Add: hyper, http-body-util, tokio-tungstenite 0.28
 ├── src/
 │   ├── lib.rs                    # Add: pub mod server;
 │   ├── server/
-│   │   ├── mod.rs               # NEW: VertebraServer, serve_h2c()
-│   │   ├── handler.rs           # NEW: Request handling, routing
-│   │   ├── websocket.rs         # NEW: RFC 8441 WebSocket/H2
-│   │   ├── grpc.rs              # NEW: gRPC frame handling
-│   │   └── health.rs            # NEW: Health check endpoint
+│   │   ├── mod.rs               # NEW: VertebraServer, ServerConfig
+│   │   ├── listener.rs          # NEW: TCP/Unix socket binding and accept loop
+│   │   ├── dispatcher.rs        # NEW: Load balancing for ring selection
+│   │   │
+│   │   ├── protocol/            # Protocol implementations
+│   │   │   ├── mod.rs
+│   │   │   ├── http1.rs         # NEW: HTTP/1.1 Hyper service
+│   │   │   ├── h2c.rs           # NEW: HTTP/2 cleartext service
+│   │   │   ├── websocket.rs     # NEW: RFC 8441 WebSocket upgrade
+│   │   │   └── grpc.rs          # NEW: gRPC frame detection
+│   │   │
+│   │   └── bridge/              # IPC Integration
+│   │       ├── mod.rs
+│   │       ├── header.rs        # NEW: Zerocopy header serialization
+│   │       ├── body.rs          # NEW: Zero-copy Bytes handling
+│   │       └── response.rs      # NEW: Response assembly from ring buffer
+│   │
 │   ├── channel.rs               # EXISTING: SPSC ring buffers
 │   ├── async_ring.rs            # EXISTING: Async wrappers
 │   └── ...
@@ -492,6 +912,30 @@ src/py/vertebra/
 │   └── rust.py                  # NEW: Python wrapper for Rust server
 ├── cli/
 │   └── serve.py                 # MODIFY: Add --server rust flag
+├── state.py                     # NEW: NativeState base class
+├── types/
+│   ├── ir.py                    # MODIFY: Add SubscriptionType, StreamType
+│   ├── extractor.py             # MODIFY: Handle AsyncGenerator
+│   └── typescript.py            # MODIFY: Generate Subscription<T>
+├── procedures/
+│   ├── decorator.py             # MODIFY: Detect AsyncGenerator
+│   └── serialization.py         # NEW: StreamingResponse serializer
+
+src/ts/
+├── packages/
+│   └── vertebra-client/         # NEW: TypeScript RPC client package
+│       ├── src/
+│       │   ├── index.ts         # Client factory
+│       │   ├── transport.ts     # WebSocket/fetch transport
+│       │   ├── subscription.ts  # Subscription<T> implementation
+│       │   └── state.ts         # State sync utilities
+│       └── package.json
+├── react/                       # NEW: React adapter
+│   └── useVertebraState.ts
+├── svelte/                      # NEW: Svelte adapter
+│   └── vertebraStore.ts
+├── vue/                         # NEW: Vue adapter
+│   └── useVertebraState.ts
 
 src/schema/                       # NEW: Proto definitions
 ├── services/
@@ -595,7 +1039,7 @@ oha -z 10s -c 256 http://localhost:8080/echo
 - [ ] Add memory instrumentation for verification
 - [ ] Benchmark latency improvements
 
-**Validation:** No `memcpy` in hot path, p99 < 1ms.
+**Validation:** No `memcpy` in hot path, IPC p99 < 10µs, HTTP overhead < 100µs.
 
 ### Phase 3: WebSocket over HTTP/2 (Priority: HIGH)
 
@@ -633,6 +1077,45 @@ oha -z 10s -c 256 http://localhost:8080/echo
 - [ ] Documentation
 
 **Validation:** Full production deployment succeeds.
+
+### Phase 6: Elite DX - Streaming RPC (Priority: HIGH)
+
+**Goal:** tRPC-style subscriptions with AsyncGenerator support.
+
+- [ ] Extend Type Bridge IR with `SubscriptionType`, `StreamType`
+- [ ] Update `@procedure` to detect `AsyncGenerator` return types
+- [ ] Implement NDJSON/SSE streaming serializer
+- [ ] Add WebSocket subscription transport to Rust server
+- [ ] Create `vertebra-client` TypeScript package
+- [ ] Generate `Subscription<T>` types from Python
+
+**Validation:** JS client receives stream from Python AsyncGenerator.
+
+### Phase 7: Elite DX - NativeState (Priority: HIGH)
+
+**Goal:** Real-time Python → Frontend state sync.
+
+- [ ] Implement `NativeState` base class
+- [ ] Auto-generate subscription endpoints for state instances
+- [ ] Implement JSON Patch generation on mutation
+- [ ] Create React `useVertebraState<T>()` hook
+- [ ] Create Svelte store adapter
+- [ ] Create Vue composable
+- [ ] Auto-reconnect with state rehydration
+
+**Validation:** Python state mutation triggers React component re-render.
+
+### Phase 8: Elite DX - Vite Integration (Priority: MEDIUM)
+
+**Goal:** Seamless frontend tooling integration.
+
+- [ ] Rust server serves `/__vertebra/types.d.ts`
+- [ ] WebSocket channel for instant type HMR (replace polling)
+- [ ] Vite HMR proxy in development mode
+- [ ] Asset serving from Vite manifest
+- [ ] Preserve Litestar native pipeline compatibility
+
+**Validation:** Type changes trigger instant HMR without polling.
 
 ---
 
@@ -731,20 +1214,19 @@ Roadmap item for Linux-specific elite mode.
 
 ## Dependencies
 
-### New Rust Crates
+### New Rust Crates (Updated per 2026 API Review)
 
 ```toml
 # src/rs/vertebra-core/Cargo.toml
 [dependencies]
-hyper = { version = "1.4", features = ["http1", "http2", "server"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
-tokio-tungstenite = "0.24"
-zerocopy = { version = "0.8", features = ["derive"] }  # Zero-copy struct parsing
+hyper = { version = "1.8", features = ["http1", "http2", "server"] }
+hyper-util = { version = "0.1.19", features = ["tokio"] }
+http-body-util = "0.1.3"
+tokio-tungstenite = "0.28"  # Significant perf improvements since 0.26
+zerocopy = { version = "0.8", features = ["derive"] }  # Formally verified
 
-# Optional: evaluate for future
-# ipmpsc = "0.2"  # Zero-copy shared memory IPC
-# tokio-uring = "0.5"  # Linux io_uring (feature-gated)
+# Optional: experimental only (NOT production ready)
+# tokio-uring = { version = "0.5", optional = true }  # 0.x API, Linux only
 ```
 
 ### New Python Dependencies

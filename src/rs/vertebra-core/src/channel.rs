@@ -104,9 +104,7 @@ impl SlotView {
         let _ = crate::sync::wake_one(self.ring.wait_read_ptr());
 
         // Clear the borrowed flag to allow new borrows
-        self.ring
-            .slot_borrowed
-            .store(false, Ordering::Release);
+        self.ring.slot_borrowed.store(false, Ordering::Release);
     }
 }
 
@@ -238,6 +236,18 @@ impl SpscRing {
             read_head: self.read_head().load(Ordering::Acquire),
             write_head: self.write_head().load(Ordering::Acquire),
         }
+    }
+
+    /// Check if data is available in the ring buffer.
+    ///
+    /// This is a fast check using Relaxed ordering - suitable for spin loops
+    /// where the actual recv will use proper Acquire ordering.
+    #[inline]
+    pub fn has_data(&self) -> bool {
+        // Use Relaxed for spin loop efficiency - try_recv uses Acquire
+        let head = self.read_head().load(Ordering::Relaxed);
+        let tail = self.write_head().load(Ordering::Relaxed);
+        head != tail
     }
 
     /// Split the ring into sender/receiver handles.
@@ -402,6 +412,93 @@ impl SpscRing {
                     }
                 }
                 Err(err) => return Err(err),
+            }
+        }
+    }
+
+    /// Receive with hybrid spin-wait for low-latency sync scenarios.
+    ///
+    /// Spins checking for data availability for `spin_us` microseconds before
+    /// falling back to futex-based blocking. This captures immediate responses
+    /// with minimal overhead while still allowing efficient blocking for longer
+    /// waits.
+    ///
+    /// # Arguments
+    ///
+    /// * `out` - Output buffer for received data
+    /// * `spin_us` - Microseconds to spin before blocking (typically 2-10)
+    /// * `timeout` - Total timeout (includes spin time)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(len))` - Data received, returns length
+    /// * `Ok(None)` - Timeout expired
+    /// * `Err` - Error during receive
+    ///
+    /// # Performance
+    ///
+    /// For immediate data (common case):
+    /// - Returns in ~1-3µs without syscall
+    ///
+    /// For delayed data arriving during spin:
+    /// - Returns in ~spin_us without syscall
+    ///
+    /// For delayed data arriving after spin:
+    /// - Falls back to futex wait (~5-10µs wakeup latency)
+    pub fn recv_hybrid(
+        &self,
+        out: &mut [u8],
+        spin_us: u64,
+        timeout: Duration,
+    ) -> Result<Option<usize>, ChannelError> {
+        use std::time::Instant;
+
+        // Fast path: data already available
+        match self.try_recv(out) {
+            Ok(len) => return Ok(Some(len)),
+            Err(ChannelError::Empty) => {}
+            Err(e) => return Err(e),
+        }
+
+        let start = Instant::now();
+        let spin_deadline = start + Duration::from_micros(spin_us);
+        let timeout_deadline = start + timeout;
+
+        // Spin phase: tight loop checking for data
+        while Instant::now() < spin_deadline {
+            if self.has_data() {
+                match self.try_recv(out) {
+                    Ok(len) => return Ok(Some(len)),
+                    Err(ChannelError::Empty) => {} // Spurious, retry
+                    Err(e) => return Err(e),
+                }
+            }
+            std::hint::spin_loop();
+        }
+
+        // Park phase: fall back to futex-based wait
+        loop {
+            match self.try_recv(out) {
+                Ok(len) => return Ok(Some(len)),
+                Err(ChannelError::Empty) => {
+                    let now = Instant::now();
+                    if now >= timeout_deadline {
+                        return Ok(None);
+                    }
+                    let remaining = timeout_deadline - now;
+                    let wait_word = self.wait_write_ptr();
+                    let expected = wait_word.load(Ordering::Acquire);
+
+                    // Double-check for data before blocking
+                    if self.has_data() {
+                        continue;
+                    }
+
+                    if !sync::wait_on_address_timeout(wait_word, expected, remaining)? {
+                        return Ok(None);
+                    }
+                }
+                Err(e) => return Err(e),
             }
         }
     }
@@ -1249,6 +1346,90 @@ mod tests {
         assert_eq!(msg.len, 4);
         assert_eq!(msg.flags, 7);
         assert_eq!(&msg.buffer.as_slice()[..4], b"ping");
+    }
+
+    #[test]
+    fn spsc_recv_hybrid_immediate() {
+        let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
+        let alloc_layout =
+            std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
+                .unwrap();
+        let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        assert!(!ptr.is_null());
+        let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
+
+        // Pre-fill with data
+        let payload = b"hello";
+        ring.send(payload, 0).unwrap();
+
+        // recv_hybrid should return immediately
+        let mut out = [0u8; 32];
+        let len = ring
+            .recv_hybrid(&mut out, 5, std::time::Duration::from_millis(100))
+            .unwrap()
+            .expect("should receive immediately");
+        assert_eq!(&out[..len], payload);
+
+        unsafe {
+            std::alloc::dealloc(ptr, alloc_layout);
+        }
+    }
+
+    #[test]
+    fn spsc_recv_hybrid_wakeup() {
+        let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
+        let alloc_layout =
+            std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
+                .unwrap();
+        let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        assert!(!ptr.is_null());
+        let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        let ring =
+            Arc::new(unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() });
+
+        let ring_clone = Arc::clone(&ring);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            ring_clone.send(b"delayed", 0).unwrap();
+        });
+
+        // recv_hybrid should spin briefly then block, then wake on send
+        let mut out = [0u8; 32];
+        let len = ring
+            .recv_hybrid(&mut out, 5, std::time::Duration::from_millis(100))
+            .unwrap()
+            .expect("should wake up on send");
+        assert_eq!(&out[..len], b"delayed");
+
+        handle.join().unwrap();
+
+        unsafe {
+            std::alloc::dealloc(ptr, alloc_layout);
+        }
+    }
+
+    #[test]
+    fn spsc_recv_hybrid_timeout() {
+        let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
+        let alloc_layout =
+            std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
+                .unwrap();
+        let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        assert!(!ptr.is_null());
+        let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
+
+        // recv_hybrid should timeout with no data
+        let mut out = [0u8; 32];
+        let result = ring
+            .recv_hybrid(&mut out, 5, std::time::Duration::from_millis(10))
+            .unwrap();
+        assert!(result.is_none());
+
+        unsafe {
+            std::alloc::dealloc(ptr, alloc_layout);
+        }
     }
 
     #[test]

@@ -189,6 +189,12 @@ impl AsyncRing {
     /// * `Ok(Some(len))` - Data received, returns length
     /// * `Ok(None)` - Timeout expired
     /// * `Err` - Error during receive
+    ///
+    /// # Performance
+    ///
+    /// The spin phase uses a ring-buffer-aware check (atomic head/tail comparison)
+    /// rather than poll() syscall, achieving ~1ns per iteration vs ~200-500ns.
+    /// This allows ~5000 iterations in a 5µs spin vs ~10-25 with poll().
     pub fn recv_hybrid(
         &self,
         buffer: &mut [u8],
@@ -197,13 +203,21 @@ impl AsyncRing {
     ) -> Result<Option<usize>, AsyncRingError> {
         // First try without waiting (data might already be available)
         match self.ring.try_recv(buffer) {
-            Ok(len) => return Ok(Some(len)),
+            Ok(len) => {
+                // Clear any pending notification to prevent spurious wakeups next time
+                let _ = self.notifier.clear();
+                return Ok(Some(len));
+            }
             Err(ChannelError::Empty) => {}
             Err(e) => return Err(e.into()),
         }
 
-        // Hybrid spin-wait on notifier
-        if !self.notifier.spin_wait_or_park(spin_us, timeout_ms)? {
+        // Hybrid spin-wait using ring-aware data check (2x Relaxed atomic loads, ~2ns)
+        // instead of poll() syscall (~200-500ns per iteration)
+        if !self
+            .notifier
+            .spin_wait_or_park_with(spin_us, timeout_ms, || self.ring.has_data())?
+        {
             return Ok(None); // Timeout
         }
 
