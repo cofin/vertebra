@@ -59,6 +59,8 @@ def run_supervisor(
     env: dict[str, str],
     workers: int = 1,
     config: dict[str, Any] | None = None,
+    drain_timeout_ms: int = 5000,
+    shutdown_timeout_ms: int = 30000,
 ) -> int:
     """Run the supervisor.
 
@@ -67,6 +69,8 @@ def run_supervisor(
         env: Environment variables (currently set in process, TODO: pass to supervisor).
         workers: Number of Python workers.
         config: Runtime config.
+        drain_timeout_ms: Drain timeout in milliseconds before shutdown.
+        shutdown_timeout_ms: Shutdown timeout in milliseconds.
 
     Returns:
         Exit code.
@@ -76,7 +80,10 @@ def run_supervisor(
         raise ValueError(msg)
 
     # Set env vars for now (Rust supervisor TODO: support env passing)
-    os.environ.update(env)
+    env_update = dict(env)
+    env_update["VERTEBRA_DRAIN_TIMEOUT_MS"] = str(drain_timeout_ms)
+    env_update["VERTEBRA_SHUTDOWN_TIMEOUT_MS"] = str(shutdown_timeout_ms)
+    os.environ.update(env_update)
 
     supervisor = Supervisor(config)
 
