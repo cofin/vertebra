@@ -39,7 +39,13 @@ from .parsers import OhaError, OhaNotFoundError, detect_oha_version, run_oha
 from .reports import format_vertebra_report, generate_markdown_report, generate_vertebra_analysis
 from .results import BenchmarkResult, BenchmarkSuite, EnvironmentInfo
 from .scenarios import Scenario, get_concurrency, get_durations, get_scenarios
-from .utils import ServerStartupError, is_port_in_use, start_server, stop_server
+from .utils import (
+    ServerStartupError,
+    cleanup_orphaned_vertebra_processes,
+    is_port_in_use,
+    start_server,
+    stop_server,
+)
 
 if TYPE_CHECKING:
     import subprocess
@@ -107,6 +113,9 @@ class BenchmarkRunner:
         original_sigint = signal.signal(signal.SIGINT, self._handle_interrupt)
         original_sigterm = signal.signal(signal.SIGTERM, self._handle_interrupt)
 
+        # Clean up any orphaned processes from previous runs
+        cleanup_orphaned_vertebra_processes()
+
         try:
             self._print_header()
 
@@ -131,6 +140,9 @@ class BenchmarkRunner:
 
             if self._current_process is not None:
                 stop_server(self._current_process)
+
+            # Final cleanup of any orphaned processes
+            cleanup_orphaned_vertebra_processes()
 
         return self.suite
 

@@ -41,6 +41,8 @@ export class BrokerServer {
   private readonly bufferPool: BufferPool;
   /** Inherited notify FD from supervisor (if available) */
   private readonly notifyFd: number | null;
+  /** Server start time for uptime calculation */
+  private readonly startTime: number = performance.now();
 
   constructor(private config: BrokerConfig) {
     const controlName = config.controlName ?? `/${config.name}.control`;
@@ -281,6 +283,8 @@ export class BrokerServer {
             const payload = decoded as Record<string, any>;
             if (payload.kind === "stats") {
               result = { pools: [] };
+            } else if (payload.kind === "status") {
+              result = this.buildStatusResponse();
             } else {
               error = "Unknown command";
             }
@@ -306,5 +310,34 @@ export class BrokerServer {
         }
       }
     }
+  }
+
+  /**
+   * Build status response for IPC status queries.
+   *
+   * Returns component health information for CLI banner rendering.
+   */
+  private buildStatusResponse(): {
+    bun: { status: string; version: string; uptime_ms: number };
+    broker: { status: string; clients: number; pools: Record<string, number> };
+    ipc: { status: string; channels: number };
+  } {
+    const uptimeMs = Math.round(performance.now() - this.startTime);
+    return {
+      bun: {
+        status: "ready",
+        version: Bun.version,
+        uptime_ms: uptimeMs,
+      },
+      broker: {
+        status: "ready",
+        clients: this.clients.size,
+        pools: {},
+      },
+      ipc: {
+        status: "ready",
+        channels: this.clients.size,
+      },
+    };
   }
 }

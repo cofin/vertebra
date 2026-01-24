@@ -1,5 +1,4 @@
 """Shared-memory broker client for resource management."""
-# ruff: noqa: PLR0904
 
 import asyncio
 import contextlib

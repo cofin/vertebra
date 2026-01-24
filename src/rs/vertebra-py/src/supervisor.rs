@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 
@@ -6,8 +7,38 @@ use std::sync::{Arc, Mutex};
 use signal_hook::consts::signal::*;
 #[cfg(unix)]
 use signal_hook::iterator::Signals;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use vertebra_core::notify::Notifier;
+
+/// Clean up stale shared memory files from previous runs.
+///
+/// Removes any files in /dev/shm/ that match the given prefix.
+/// This is a defensive measure to handle crashed processes that
+/// didn't clean up their shared memory regions.
+#[cfg(unix)]
+fn cleanup_stale_shm(prefix: &str) {
+    let shm_dir = Path::new("/dev/shm");
+    if !shm_dir.exists() {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(shm_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with(prefix) {
+                // Best-effort removal - ignore errors (may be in use)
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn cleanup_stale_shm(_prefix: &str) {
+    // No-op on non-Unix platforms (Windows uses different shm mechanism)
+}
 
 /// FD information for cross-process IPC.
 #[derive(Default)]
@@ -91,6 +122,9 @@ impl NativeSupervisor {
         }
 
         py.detach(move || {
+            // Clean up any stale shared memory files from previous runs
+            cleanup_stale_shm("vertebra-");
+
             let app_path = std::env::var("VERTEBRA_PYTHON_APP").map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                     "VERTEBRA_PYTHON_APP must be set to start Python workers",
@@ -112,10 +146,22 @@ impl NativeSupervisor {
 
             cmd.args(&engine_args)
                 .env("VERTEBRA_NOTIFY_FD", notify_fd.to_string())
+                .env("VERTEBRA_SKIP_PROCESS_MANAGER", "1")
                 .env("VERTEBRA_SPIN_US", spin_us.to_string());
             #[cfg(not(target_os = "linux"))]
             {
                 cmd.env("VERTEBRA_NOTIFY_WRITE_FD", notify_write_fd.to_string());
+            }
+
+            // Set up parent death signal so child dies when supervisor dies.
+            // This prevents orphaned Bun processes if the parent is killed unexpectedly.
+            #[cfg(target_os = "linux")]
+            unsafe {
+                cmd.pre_exec(|| {
+                    // PR_SET_PDEATHSIG tells the kernel to send SIGTERM when parent dies
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    Ok(())
+                });
             }
 
             let bun = cmd.spawn().map_err(|e| {
@@ -149,6 +195,15 @@ impl NativeSupervisor {
                 #[cfg(not(target_os = "linux"))]
                 {
                     cmd.env("VERTEBRA_NOTIFY_WRITE_FD", notify_write_fd.to_string());
+                }
+
+                // Set up parent death signal so worker dies when supervisor dies.
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    cmd.pre_exec(|| {
+                        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                        Ok(())
+                    });
                 }
 
                 let worker = cmd.spawn().map_err(|e| {

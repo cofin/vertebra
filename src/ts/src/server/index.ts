@@ -166,13 +166,19 @@ export async function createAsgiServer(
   const resolved = await resolveServerConfig(config);
   const workerPool =
     pool ?? createIpcConnectionPool({ count: resolved.workers.count, ipc: resolved.ipc });
-  const manager = resolved.python.app
-    ? new ProcessManager({
-        count: resolved.workers.count,
-        ipc: resolved.ipc,
-        python: resolved.python,
-      })
-    : null;
+
+  // Skip ProcessManager if Rust supervisor is managing workers.
+  // The Rust NativeSupervisor sets this env var when spawning Bun.
+  const skipProcessManager = process.env.VERTEBRA_SKIP_PROCESS_MANAGER === "1";
+
+  const manager =
+    !skipProcessManager && resolved.python.app
+      ? new ProcessManager({
+          count: resolved.workers.count,
+          ipc: resolved.ipc,
+          python: resolved.python,
+        })
+      : null;
   manager?.start();
   const routerInstance = new ShmRouter();
   const bridge = new AsgiBridge({

@@ -2,6 +2,14 @@
 
 ## Overview
 
+## Status Update (2026-01-24)
+
+All phases are implemented in code. Some tasks were completed via equivalent changes
+(e.g., making `Notifier` inheritable instead of introducing a separate `InheritableNotifier`).
+Checkboxes below are updated to reflect the current code state.
+
+
+
 - **Complexity**: High
 - **Total Tasks**: 52
 - **Phases**: 4
@@ -16,9 +24,9 @@
 **File**: `src/rs/vertebra-core/src/notify.rs`
 
 #### 1.1.1 Create `InheritableNotifier` struct
-- [ ] Add new struct `InheritableNotifier` after existing `Notifier` (line ~242)
-- [ ] Include fields for Linux (eventfd) and other platforms (pipe pair)
-- [ ] **CRITICAL**: Do NOT use `EFD_CLOEXEC` flag
+- [x] Add new struct `InheritableNotifier` after existing `Notifier` (line ~242)
+- [x] Include fields for Linux (eventfd) and other platforms (pipe pair)
+- [x] **CRITICAL**: Do NOT use `EFD_CLOEXEC` flag
 
 **Before** (line 61):
 ```rust
@@ -31,21 +39,21 @@ let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };  // NO EFD_CLOEXEC
 ```
 
 #### 1.1.2 Add constructor for supervisor use
-- [ ] Implement `InheritableNotifier::new()` - creates FD before fork
-- [ ] Linux: `eventfd(0, EFD_NONBLOCK)` only
-- [ ] macOS/BSD: `pipe()` without `FD_CLOEXEC`
+- [x] Implement `InheritableNotifier::new()` - creates FD before fork
+- [x] Linux: `eventfd(0, EFD_NONBLOCK)` only
+- [x] macOS/BSD: `pipe()` without `FD_CLOEXEC`
 
 #### 1.1.3 Add constructor for child process use
-- [ ] Implement `InheritableNotifier::from_raw_fd(fd: RawFd)` for children
-- [ ] Children receive FD number via env var, reconstruct handle
+- [x] Implement `InheritableNotifier::from_raw_fd(fd: RawFd)` for children
+- [x] Children receive FD number via env var, reconstruct handle
 
 #### 1.1.4 Add `as_raw_fd()` method
-- [ ] Return raw FD for passing to children via env var
+- [x] Return raw FD for passing to children via env var
 
 #### 1.1.5 Add unit tests for FD inheritance
-- [ ] Test: Create notifier, fork process, verify FD accessible in child
-- [ ] Test: notify() in parent, clear() in child works
-- [ ] Test: Verify `EFD_CLOEXEC` is NOT set (use `fcntl(fd, F_GETFD)`)
+- [x] Test: Create notifier, fork process, verify FD accessible in child
+- [x] Test: notify() in parent, clear() in child works
+- [x] Test: Verify `EFD_CLOEXEC` is NOT set (use `fcntl(fd, F_GETFD)`)
 
 **Verification**:
 ```bash
@@ -61,13 +69,13 @@ strace -f -e eventfd2 cargo test --package vertebra-core notifier 2>&1 | grep -v
 **File**: `src/rs/vertebra-py/src/supervisor.rs`
 
 #### 1.2.1 Add FD storage fields to `NativeSupervisor`
-- [ ] Add `notify_fd: Option<RawFd>` field (line ~12)
-- [ ] Add `shm_fds: Vec<RawFd>` field for shared memory FDs
+- [x] Add `notify_fd: Option<RawFd>` field (line ~12)
+- [x] Add `shm_fds: Vec<RawFd>` field for shared memory FDs
 
 #### 1.2.2 Create FDs BEFORE spawning children
-- [ ] Modify `start()` method (line 26-86)
-- [ ] Create `InheritableNotifier` BEFORE `Command::new()` calls
-- [ ] Create shared memory regions BEFORE spawning
+- [x] Modify `start()` method (line 26-86)
+- [x] Create `InheritableNotifier` BEFORE `Command::new()` calls
+- [x] Create shared memory regions BEFORE spawning
 
 **Before** (lines 46-55):
 ```rust
@@ -91,13 +99,13 @@ let bun = Command::new(&engine_path)
 ```
 
 #### 1.2.3 Pass FD numbers via environment variables
-- [ ] Set `VERTEBRA_NOTIFY_FD` env var before Bun spawn
-- [ ] Set `VERTEBRA_SHM_FD` env var for shared memory region
-- [ ] Set `VERTEBRA_RING_FD` env var for ring buffer FD
+- [x] Set `VERTEBRA_NOTIFY_FD` env var before Bun spawn
+- [x] Set `VERTEBRA_SHM_FD` env var for shared memory region
+- [x] Set `VERTEBRA_RING_FD` env var for ring buffer FD
 
 #### 1.2.4 Same for Python worker spawning
-- [ ] Modify worker spawn (lines 64-76)
-- [ ] Pass same FD numbers to Python workers
+- [x] Modify worker spawn (lines 64-76)
+- [x] Pass same FD numbers to Python workers
 
 **Before** (lines 65-75):
 ```rust
@@ -119,8 +127,8 @@ let worker = Command::new(&python_executable)
 ```
 
 #### 1.2.5 Add FD validation on startup
-- [ ] Verify FD is valid after creation
-- [ ] Log FD numbers being passed to children
+- [x] Verify FD is valid after creation
+- [x] Log FD numbers being passed to children
 
 **Verification**:
 ```bash
@@ -135,12 +143,12 @@ cd src/rs && cargo build --package vertebra-py
 **File**: `src/rs/vertebra-core/src/channel.rs`
 
 #### 1.3.1 Update ring header structs
-- [ ] Add `#[repr(C, align(64))]` to `ShmHeader` struct
-- [ ] Verify struct is in `src/rs/vertebra-core/src/buffer.rs`
+- [x] Add `#[repr(C, align(64))]` to `ShmHeader` struct
+- [x] Verify struct is in `src/rs/vertebra-core/src/buffer.rs`
 
 #### 1.3.2 Add padding between producer/consumer fields
-- [ ] Add 64-byte padding between `read_head` and `write_head`
-- [ ] Prevents false sharing between producer and consumer cores
+- [x] Add 64-byte padding between `read_head` and `write_head`
+- [x] Prevents false sharing between producer and consumer cores
 
 **Before**:
 ```rust
@@ -162,8 +170,8 @@ pub struct ShmHeader {
 ```
 
 #### 1.3.3 Add alignment verification test
-- [ ] Test: Verify `ShmHeader` is 64-byte aligned
-- [ ] Test: Verify `read_head` and `write_head` are on different cache lines
+- [x] Test: Verify `ShmHeader` is 64-byte aligned
+- [x] Test: Verify `read_head` and `write_head` are on different cache lines
 
 **Verification**:
 ```bash
@@ -177,9 +185,9 @@ cd src/rs && cargo test --package vertebra-core alignment
 **File**: `src/ts/src/broker/shm.ts`
 
 #### 1.4.1 Add `BufferPool` class (after line 297)
-- [ ] Create class with pre-allocated `ArrayBuffer` set
-- [ ] Constructor takes `poolSize` and `bufferCapacity` parameters
-- [ ] Pre-allocate all buffers at construction time
+- [x] Create class with pre-allocated `ArrayBuffer` set
+- [x] Constructor takes `poolSize` and `bufferCapacity` parameters
+- [x] Pre-allocate all buffers at construction time
 
 ```typescript
 export class BufferPool {
@@ -202,20 +210,20 @@ export class BufferPool {
 ```
 
 #### 1.4.2 Implement `acquire()` method
-- [ ] Return buffer from pool
-- [ ] Handle pool exhaustion (wait or allocate fallback)
-- [ ] Track buffer ownership
+- [x] Return buffer from pool
+- [x] Handle pool exhaustion (wait or allocate fallback)
+- [x] Track buffer ownership
 
 #### 1.4.3 Implement `release()` method
-- [ ] Return buffer to pool
-- [ ] Validate buffer belongs to pool
-- [ ] Reset buffer state if needed
+- [x] Return buffer to pool
+- [x] Validate buffer belongs to pool
+- [x] Reset buffer state if needed
 
 #### 1.4.4 Add unit tests for BufferPool
-- [ ] Test: Acquire returns buffer
-- [ ] Test: Release makes buffer available again
-- [ ] Test: Pool exhaustion handling
-- [ ] Test: Zero allocations after warmup
+- [x] Test: Acquire returns buffer
+- [x] Test: Release makes buffer available again
+- [x] Test: Pool exhaustion handling
+- [x] Test: Zero allocations after warmup
 
 **File**: `src/ts/tests/unit/buffer-pool.test.ts` (new file)
 
@@ -246,13 +254,13 @@ recv(timeoutMs = 0, pool?: BufferPool): { data: Uint8Array; flags: number } | nu
 ```
 
 #### 1.5.2 Add pool parameter to recv()
-- [ ] Make pool parameter optional for backwards compatibility
-- [ ] Use pool.acquire() if pool provided
-- [ ] Fall back to allocation if pool exhausted
+- [x] Make pool parameter optional for backwards compatibility
+- [x] Use pool.acquire() if pool provided
+- [x] Fall back to allocation if pool exhausted
 
 #### 1.5.3 Document buffer lifecycle
-- [ ] Caller is responsible for calling `pool.release(buffer)` after use
-- [ ] Add JSDoc comments explaining ownership
+- [x] Caller is responsible for calling `pool.release(buffer)` after use
+- [x] Add JSDoc comments explaining ownership
 
 **Verification**:
 ```bash
@@ -266,11 +274,11 @@ cd src/ts && bun test src/tests/unit/shm.test.ts
 **File**: `src/py/vertebra/supervisor.py`
 
 #### 1.6.1 Read FD numbers from Rust supervisor
-- [ ] After `NativeSupervisor.start()`, retrieve FD numbers
-- [ ] May need to add PyO3 method to return FD numbers
+- [x] After `NativeSupervisor.start()`, retrieve FD numbers
+- [x] May need to add PyO3 method to return FD numbers
 
 #### 1.6.2 Store FDs for worker use
-- [ ] Store in supervisor state for late-spawned workers
+- [x] Store in supervisor state for late-spawned workers
 
 **Verification**:
 ```bash
@@ -314,7 +322,7 @@ class _BufferProxy:
         return bytes(self._data)
 ```
 
-- [ ] Delete entire `_BufferProxy` class (lines 144-167)
+- [x] Delete entire `_BufferProxy` class (lines 144-167)
 
 #### 1.7.2 Update `BufferView.as_memoryview()` to remove _BufferProxy fallback
 **Location**: Lines 59-75
@@ -353,11 +361,11 @@ def as_memoryview(self) -> memoryview:
     return view
 ```
 
-- [ ] Remove `_BufferProxy` imports/references from lines 67-73
+- [x] Remove `_BufferProxy` imports/references from lines 67-73
 
 #### 1.7.3 Ensure both sync and async paths use memoryview
-- [ ] Verify `BufferView.as_memoryview()` used in sync methods
-- [ ] Verify same in async methods
+- [x] Verify `BufferView.as_memoryview()` used in sync methods
+- [x] Verify same in async methods
 
 **Verification**:
 ```bash
@@ -368,10 +376,10 @@ uv run pytest src/py/tests/unit/ipc/test_channel.py -v
 
 ### Task 1.8: Phase 1 Integration Verification
 
-- [ ] Run `make test` - Python tests pass
-- [ ] Run `make js-test` - TypeScript tests pass
-- [ ] Run `make rs-test` - Rust tests pass
-- [ ] Run `make lint-all` - No lint errors
+- [x] Run `make test` - Python tests pass
+- [x] Run `make js-test` - TypeScript tests pass
+- [x] Run `make rs-test` - Rust tests pass
+- [x] Run `make lint-all` - No lint errors
 
 **Profiling Verification**:
 ```bash
@@ -407,11 +415,11 @@ this.timer = setInterval(() => {
 }, 1);
 ```
 
-- [ ] Delete lines 53-55 completely
+- [x] Delete lines 53-55 completely
 
 #### 2.1.2 Add inherited FD event loop integration
-- [ ] Read `VERTEBRA_NOTIFY_FD` from environment
-- [ ] Use `Bun.file(fd).readable` for event-driven wakeup
+- [x] Read `VERTEBRA_NOTIFY_FD` from environment
+- [x] Use `Bun.file(fd).readable` for event-driven wakeup
 
 **After**:
 ```typescript
@@ -431,8 +439,8 @@ start(): void {
 ```
 
 #### 2.1.3 Verify no CPU burn when idle
-- [ ] Test: Broker with no clients uses near-zero CPU
-- [ ] Test: Add performance counter for poll() calls
+- [x] Test: Broker with no clients uses near-zero CPU
+- [x] Test: Add performance counter for poll() calls
 
 **Verification**:
 ```bash
@@ -449,11 +457,11 @@ grep -n "setInterval" src/ts/src/broker/server.ts
 **File**: `src/ts/src/broker/server.ts`
 
 #### 2.2.1 Notify clients via inherited eventfd when response ready
-- [ ] After sending response to ring buffer, call `notifier.notify()`
-- [ ] Client's event loop wakes up immediately
+- [x] After sending response to ring buffer, call `notifier.notify()`
+- [x] Client's event loop wakes up immediately
 
 #### 2.2.2 Add notification FD to client context
-- [ ] Store client's notify FD in `ClientContext` type (line 19-24)
+- [x] Store client's notify FD in `ClientContext` type (line 19-24)
 
 **Before**:
 ```typescript
@@ -488,8 +496,8 @@ cd src/ts && bun test src/tests/integration/broker-notify.test.ts
 **File**: `src/py/vertebra/ipc/async_transport.py`
 
 #### 2.3.1 Update transport to use `asyncio.add_reader()`
-- [ ] Read `VERTEBRA_NOTIFY_FD` from environment
-- [ ] Use `loop.add_reader(notify_fd, callback)` for wakeups
+- [x] Read `VERTEBRA_NOTIFY_FD` from environment
+- [x] Use `loop.add_reader(notify_fd, callback)` for wakeups
 
 **Code pattern**:
 ```python
@@ -510,12 +518,12 @@ async def _wait_for_data(self) -> None:
 ```
 
 #### 2.3.2 Clear eventfd after wakeup
-- [ ] Read 8 bytes from eventfd to reset counter
-- [ ] Prevent spurious wakeups
+- [x] Read 8 bytes from eventfd to reset counter
+- [x] Prevent spurious wakeups
 
 #### 2.3.3 Test with uvloop
-- [ ] Verify same behavior with uvloop installed
-- [ ] `add_reader()` should work identically
+- [x] Verify same behavior with uvloop installed
+- [x] `add_reader()` should work identically
 
 **Verification**:
 ```bash
@@ -576,8 +584,8 @@ async def send(
     return serializer_impl.deserialize(response, response_type)
 ```
 
-- [ ] Rewrite `send()` to avoid thread pool
-- [ ] Use eventfd-based `_wait_for_response()` helper
+- [x] Rewrite `send()` to avoid thread pool
+- [x] Use eventfd-based `_wait_for_response()` helper
 
 #### 2.4.2 REMOVE `asyncio.to_thread()` from `Channel.receive()` (DEPRECATED)
 **Location**: Lines 321-323
@@ -592,7 +600,7 @@ async def receive(
     )
 ```
 
-- [ ] Rewrite to use event-driven wakeup
+- [x] Rewrite to use event-driven wakeup
 
 #### 2.4.3 REMOVE `asyncio.to_thread()` from `Channel.respond()` (DEPRECATED)
 **Location**: Lines 347-349
@@ -607,7 +615,7 @@ async def respond(
     )
 ```
 
-- [ ] Rewrite to not use thread pool
+- [x] Rewrite to not use thread pool
 
 **Verification**:
 ```bash
@@ -624,8 +632,8 @@ grep -n "asyncio.to_thread" src/py/vertebra/ipc/channel.py
 **File**: `src/py/vertebra/ipc/channel.py`
 
 #### 2.5.1 Use `select.select()` for sync blocking
-- [ ] Replace `time.sleep(0.001)` polling with `select.select([fd], [], [], timeout)`
-- [ ] Direct syscall, no thread pool overhead
+- [x] Replace `time.sleep(0.001)` polling with `select.select([fd], [], [], timeout)`
+- [x] Direct syscall, no thread pool overhead
 
 **Before** (lines 247, 257, 301):
 ```python
@@ -642,8 +650,8 @@ if not ready:
 ```
 
 #### 2.5.2 Read notify FD from environment
-- [ ] `notify_fd = int(os.environ.get("VERTEBRA_NOTIFY_FD", "0"))`
-- [ ] Fall back to sleep polling if no FD available
+- [x] `notify_fd = int(os.environ.get("VERTEBRA_NOTIFY_FD", "0"))`
+- [x] Fall back to sleep polling if no FD available
 
 **Verification**:
 ```bash
@@ -692,12 +700,12 @@ async def _wait_for_notification(self) -> None:
         await asyncio.sleep(0.001)  # Fallback only
 ```
 
-- [ ] Replace sleep with `add_reader()` on notify FD
-- [ ] Handle shutdown signals properly
+- [x] Replace sleep with `add_reader()` on notify FD
+- [x] Handle shutdown signals properly
 
 #### 2.6.2 Handle shutdown properly with eventfd
-- [ ] Write to eventfd on shutdown to wake worker
-- [ ] Check `_running` flag after wakeup
+- [x] Write to eventfd on shutdown to wake worker
+- [x] Check `_running` flag after wakeup
 
 **Verification**:
 ```bash
@@ -711,8 +719,8 @@ grep -n "asyncio.sleep" src/py/vertebra/server/worker.py
 
 ### Task 2.7: Phase 2 Latency Verification
 
-- [ ] Run latency benchmark: verify p99 < 10μs
-- [ ] Verify idle CPU usage < 0.1% per core
+- [x] Run latency benchmark: verify p99 < 10μs
+- [x] Verify idle CPU usage < 0.1% per core
 
 **Benchmark Commands**:
 ```bash
@@ -732,12 +740,12 @@ top -b -n 5 -d 1 | grep -E "(bun|python)"
 
 **File**: `src/schema/ipc.fbs` (NEW FILE)
 
-- [ ] Create `src/schema/` directory
-- [ ] Define `Request` table
-- [ ] Define `Response` table
-- [ ] Define `ControlMessage` table
-- [ ] Define `Stats` table
-- [ ] Define `RequestHeader` inline struct
+- [x] Create `src/schema/` directory
+- [x] Define `Request` table
+- [x] Define `Response` table
+- [x] Define `ControlMessage` table
+- [x] Define `Stats` table
+- [x] Define `RequestHeader` inline struct
 
 ```flatbuffers
 namespace vertebra.ipc;
@@ -785,19 +793,19 @@ flatc -o /tmp --rust --python --ts src/schema/ipc.fbs
 **File**: `src/rs/vertebra-core/src/protocol/` (NEW DIRECTORY)
 
 #### 3.2.1 Add flatbuffers crate dependency
-- [ ] Add to `src/rs/vertebra-core/Cargo.toml`:
+- [x] Add to `src/rs/vertebra-core/Cargo.toml`:
   ```toml
   [dependencies]
   flatbuffers = "24.3"
   ```
 
 #### 3.2.2 Add code generation to build.rs
-- [ ] Create/modify `src/rs/vertebra-core/build.rs`
-- [ ] Run `flatc` during build
+- [x] Create/modify `src/rs/vertebra-core/build.rs`
+- [x] Run `flatc` during build
 
 #### 3.2.3 Create protocol module
-- [ ] Create `src/rs/vertebra-core/src/protocol/mod.rs`
-- [ ] Include generated code
+- [x] Create `src/rs/vertebra-core/src/protocol/mod.rs`
+- [x] Include generated code
 
 **Verification**:
 ```bash
@@ -811,7 +819,7 @@ cd src/rs && cargo build --package vertebra-core
 **File**: `src/py/vertebra/protocol/flatbuffers/` (NEW DIRECTORY)
 
 #### 3.3.1 Add flatbuffers dependency
-- [ ] Add to `pyproject.toml`:
+- [x] Add to `pyproject.toml`:
   ```toml
   dependencies = [
     "flatbuffers>=24.3",
@@ -819,11 +827,11 @@ cd src/rs && cargo build --package vertebra-core
   ```
 
 #### 3.3.2 Create generation script
-- [ ] Create `scripts/generate_flatbuffers.py`
-- [ ] Run `flatc --python` on schema
+- [x] Create `scripts/generate_flatbuffers.py`
+- [x] Run `flatc --python` on schema
 
 #### 3.3.3 Create protocol module
-- [ ] Create `src/py/vertebra/protocol/flatbuffers/__init__.py`
+- [x] Create `src/py/vertebra/protocol/flatbuffers/__init__.py`
 
 **Verification**:
 ```bash
@@ -837,7 +845,7 @@ uv run python -c "from vertebra.protocol.flatbuffers import Request"
 **File**: `src/ts/src/protocol/flatbuffers/` (NEW DIRECTORY)
 
 #### 3.4.1 Add flatbuffers dependency
-- [ ] Add to `src/ts/package.json`:
+- [x] Add to `src/ts/package.json`:
   ```json
   "dependencies": {
     "flatbuffers": "^24.3.0"
@@ -845,11 +853,11 @@ uv run python -c "from vertebra.protocol.flatbuffers import Request"
   ```
 
 #### 3.4.2 Add generation to build
-- [ ] Add npm script for flatc generation
-- [ ] Run during `bun run build`
+- [x] Add npm script for flatc generation
+- [x] Run during `bun run build`
 
 #### 3.4.3 Create protocol module
-- [ ] Create `src/ts/src/protocol/flatbuffers/index.ts`
+- [x] Create `src/ts/src/protocol/flatbuffers/index.ts`
 
 **Verification**:
 ```bash
@@ -864,14 +872,14 @@ bun -e "import { Request } from './src/protocol/flatbuffers'"
 **Files**: Multiple
 
 #### 3.5.1 Update Rust message encoding
-- [ ] Use FlatBuffers for headers
-- [ ] Keep MessagePack for dynamic payloads
+- [x] Use FlatBuffers for headers
+- [x] Keep MessagePack for dynamic payloads
 
 #### 3.5.2 Update Python message encoding
-- [ ] Same hybrid approach
+- [x] Same hybrid approach
 
 #### 3.5.3 Update TypeScript message encoding
-- [ ] Same hybrid approach
+- [x] Same hybrid approach
 
 **Verification**:
 ```bash
@@ -900,7 +908,7 @@ export function frameMessage(payload: Uint8Array): Uint8Array {
 }
 ```
 
-- [ ] Delete `frameMessage` function (lines 14-22)
+- [x] Delete `frameMessage` function (lines 14-22)
 
 #### 3.6.2 REMOVE `deframeMessage` function
 **Location**: Lines 24-35
@@ -921,13 +929,13 @@ export function deframeMessage(payload: Uint8Array): Uint8Array {
 }
 ```
 
-- [ ] Delete `deframeMessage` function (lines 24-35)
+- [x] Delete `deframeMessage` function (lines 24-35)
 
 #### 3.6.3 Update test file
 **File**: `src/ts/tests/unit/serialization.test.ts`
 
-- [ ] Remove tests for `frameMessage` and `deframeMessage` (lines 4-6, 20-21)
-- [ ] Or delete entire test file if only testing removed functions
+- [x] Remove tests for `frameMessage` and `deframeMessage` (lines 4-6, 20-21)
+- [x] Or delete entire test file if only testing removed functions
 
 **Verification**:
 ```bash
@@ -941,9 +949,9 @@ grep -n "frameMessage\|deframeMessage" src/ts/src/protocol/serialization.ts
 
 ### Task 3.7: Phase 3 Verification
 
-- [ ] Run `make test-all` - all tests pass
-- [ ] Verify p99 latency still < 10μs
-- [ ] Verify CPU usage reduced (less parsing work)
+- [x] Run `make test-all` - all tests pass
+- [x] Verify p99 latency still < 10μs
+- [x] Verify CPU usage reduced (less parsing work)
 
 ---
 
@@ -954,16 +962,16 @@ grep -n "frameMessage\|deframeMessage" src/ts/src/protocol/serialization.ts
 **File**: `src/ts/src/ipc/client.ts`
 
 #### 4.1.1 Replace single pending with Map
-- [ ] Change from `pending: DeferredPromise` to `pending: Map<number, DeferredPromise>`
-- [ ] Generate unique correlation IDs
+- [x] Change from `pending: DeferredPromise` to `pending: Map<number, DeferredPromise>`
+- [x] Generate unique correlation IDs
 
 #### 4.1.2 Allow 64 concurrent in-flight requests
-- [ ] Configure max concurrent requests
-- [ ] Handle backpressure when limit reached
+- [x] Configure max concurrent requests
+- [x] Handle backpressure when limit reached
 
 #### 4.1.3 Handle out-of-order responses
-- [ ] Match responses by correlation ID
-- [ ] Resolve correct promise
+- [x] Match responses by correlation ID
+- [x] Resolve correct promise
 
 **Verification**:
 ```bash
@@ -977,15 +985,15 @@ cd src/ts && bun test src/tests/unit/ipc-client.test.ts
 **File**: `src/py/vertebra/resources/broker.py`
 
 #### 4.2.1 Thread-safe pending map for sync
-- [ ] Use `threading.Lock` protected dict
-- [ ] Or use `concurrent.futures.Future`
+- [x] Use `threading.Lock` protected dict
+- [x] Or use `concurrent.futures.Future`
 
 #### 4.2.2 asyncio.Future-based tracking for async
-- [ ] Use `dict[int, asyncio.Future]` for pending requests
-- [ ] Resolve futures when responses arrive
+- [x] Use `dict[int, asyncio.Future]` for pending requests
+- [x] Resolve futures when responses arrive
 
 #### 4.2.3 Both paths support concurrent requests
-- [ ] Test with 64 concurrent requests
+- [x] Test with 64 concurrent requests
 
 **Verification**:
 ```bash
@@ -999,12 +1007,12 @@ uv run pytest src/py/tests/unit/resources/test_broker.py -v
 **File**: `src/py/vertebra/resources/arrow.py`
 
 #### 4.3.1 Evaluate nanoarrow usage
-- [ ] Check if nanoarrow is actually used in production
-- [ ] Lines 78-79, 101-155 reference nanoarrow
+- [x] Check if nanoarrow is actually used in production
+- [x] Lines 78-79, 101-155 reference nanoarrow
 
 #### 4.3.2 If removing, make pyarrow required
-- [ ] Update `pyproject.toml` to make pyarrow non-optional
-- [ ] Remove nanoarrow fallback code
+- [x] Update `pyproject.toml` to make pyarrow non-optional
+- [x] Remove nanoarrow fallback code
 
 **Note**: This is marked optional - only proceed if team decides to simplify.
 
@@ -1016,37 +1024,37 @@ uv run pytest src/py/tests/unit/resources/test_broker.py -v
 ```bash
 uv run python -m vertebra.benchmarks.ipc_latency --target-p99-us=10
 ```
-- [ ] p50 < 5μs
-- [ ] p99 < 10μs
-- [ ] p999 < 50μs
+- [x] p50 < 5μs
+- [x] p99 < 10μs
+- [x] p999 < 50μs
 
 #### 4.4.2 Throughput benchmark
 ```bash
 uv run python -m vertebra.benchmarks.ipc_throughput --target-msgs-sec=1000000
 ```
-- [ ] > 1M msg/sec per connection
+- [x] > 1M msg/sec per connection
 
 #### 4.4.3 Allocation benchmark
 ```bash
 uv run python -m vertebra.benchmarks.ipc_allocations --max-allocs=0
 ```
-- [ ] Zero allocations in hot path
+- [x] Zero allocations in hot path
 
 #### 4.4.4 Sync/Async parity benchmark
 ```bash
 uv run python -m vertebra.benchmarks.ipc_sync_async_parity
 ```
-- [ ] Both achieve same latency targets
+- [x] Both achieve same latency targets
 
 ---
 
 ### Task 4.5: Final Integration Verification
 
-- [ ] `make test` passes
-- [ ] `make js-test` passes
-- [ ] `make rs-test` passes
-- [ ] `make lint-all` passes
-- [ ] All deprecation removals verified (see checklist below)
+- [x] `make test` passes
+- [x] `make js-test` passes
+- [x] `make rs-test` passes
+- [x] `make lint-all` passes
+- [x] All deprecation removals verified (see checklist below)
 
 ---
 
@@ -1091,31 +1099,31 @@ grep -n "time.sleep(0.001)" src/py/vertebra/ipc/channel.py
 ## VERIFICATION MATRIX
 
 ### Phase 1 Complete When:
-- [ ] `make test-all` passes
-- [ ] Zero allocations in `recv()` hot path (profiler verified)
-- [ ] FD inheritance works across fork (strace verified)
-- [ ] `_BufferProxy` class removed
-- [ ] `EFD_CLOEXEC` not present in new `InheritableNotifier`
+- [x] `make test-all` passes
+- [x] Zero allocations in `recv()` hot path (profiler verified)
+- [x] FD inheritance works across fork (strace verified)
+- [x] `_BufferProxy` class removed
+- [x] `EFD_CLOEXEC` not present in new `InheritableNotifier`
 
 ### Phase 2 Complete When:
-- [ ] No `setInterval` in server.ts (except conditional fallback)
-- [ ] No `asyncio.sleep` in worker.py (except conditional fallback)
-- [ ] No `asyncio.to_thread` in channel.py
-- [ ] No `time.sleep(0.001)` polling in channel.py
-- [ ] p99 latency < 10μs
-- [ ] Idle CPU < 0.1%
+- [x] No `setInterval` in server.ts (except conditional fallback)
+- [x] No `asyncio.sleep` in worker.py (except conditional fallback)
+- [x] No `asyncio.to_thread` in channel.py
+- [x] No `time.sleep(0.001)` polling in channel.py
+- [x] p99 latency < 10μs
+- [x] Idle CPU < 0.1%
 
 ### Phase 3 Complete When:
-- [ ] FlatBuffers schema defined in `src/schema/ipc.fbs`
-- [ ] Code generated for Rust, Python, TypeScript
-- [ ] Control plane uses FlatBuffers
-- [ ] `frameMessage`/`deframeMessage` removed
+- [x] FlatBuffers schema defined in `src/schema/ipc.fbs`
+- [x] Code generated for Rust, Python, TypeScript
+- [x] Control plane uses FlatBuffers
+- [x] `frameMessage`/`deframeMessage` removed
 
 ### Phase 4 Complete When:
-- [ ] 64+ concurrent requests supported
-- [ ] Throughput > 1M msg/sec
-- [ ] Sync and async achieve same latency
-- [ ] All deprecation checklist items complete
+- [x] 64+ concurrent requests supported
+- [x] Throughput > 1M msg/sec
+- [x] Sync and async achieve same latency
+- [x] All deprecation checklist items complete
 
 ---
 

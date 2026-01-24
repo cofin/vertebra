@@ -226,13 +226,13 @@
 **Validation**: JSON file is valid and complete ✓
 
 ### Task 3.3: Add Historical Results Tracking (Optional)
-- [ ] Create timestamped subdirectories in results/
+- [x] Create timestamped subdirectories in results/
 - [ ] Symlink `latest` to most recent run
-- [ ] Optionally compare to previous run
-- [ ] Highlight regressions if detected
+- [x] Optionally compare to previous run
+- [x] Highlight regressions if detected
 
 **Validation**: Historical results preserved
-**Status**: Deferred - Optional enhancement
+**Status**: Implemented (timestamped files in `benchmarks/results/runs/`; no `latest` symlink)
 
 ### Task 3.4: Add Vertebra-Specific Metrics
 - [ ] Add IPC latency breakdown (if measurable)
@@ -245,14 +245,14 @@
 **Status**: Deferred - Optional enhancement
 
 ### Task 3.5: Add CI Workflow (Optional)
-- [ ] Create `.github/workflows/benchmark.yml`
-- [ ] Schedule weekly runs
-- [ ] Upload artifacts (results/)
-- [ ] Cache oha installation
-- [ ] Set up Python and server dependencies
+- [x] Create `.github/workflows/benchmark.yml`
+- [x] Schedule weekly runs
+- [x] Upload artifacts (results/)
+- [x] Cache oha installation
+- [x] Set up Python and server dependencies
 
 **Validation**: Workflow runs on push to branch
-**Status**: Deferred - Optional enhancement
+**Status**: Implemented
 
 ### Task 3.6: Final Documentation Polish
 - [x] Update CLAUDE.md with benchmark commands

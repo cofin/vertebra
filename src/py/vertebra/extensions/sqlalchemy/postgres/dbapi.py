@@ -1,5 +1,6 @@
 """Postgres-specific DBAPI."""
 
+# ruff: noqa: A004
 from typing import Any
 
 from vertebra.extensions.sqlalchemy._dbapi import (
@@ -7,7 +8,6 @@ from vertebra.extensions.sqlalchemy._dbapi import (
     Cursor,
     DatabaseError,
     DataError,
-    DBAPIWarning,
     Error,
     IntegrityError,
     InterfaceError,
@@ -15,11 +15,10 @@ from vertebra.extensions.sqlalchemy._dbapi import (
     NotSupportedError,
     OperationalError,
     ProgrammingError,
+    Warning,
     apilevel,
     threadsafety,
 )
-
-Warning = DBAPIWarning  # PEP 249 requires this name
 
 __all__ = (
     "Connection",

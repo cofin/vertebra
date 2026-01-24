@@ -112,12 +112,31 @@ impl ShmRegion {
     }
 
     /// Create a named shared memory region (Unix only).
+    ///
+    /// Uses unlink-before-create strategy: any existing region with the same name
+    /// is unlinked first, then a new one is created with O_EXCL for atomicity.
+    /// This handles stale files from previous crashed runs.
     #[cfg(unix)]
     pub fn create_named(name: &str, size: usize) -> Result<Self, ShmError> {
         validate_name(name)?;
         let size = align_to_page(size)?;
         let cname = CString::new(name)?;
+
+        // Unlink any existing region first (ignore ENOENT if it doesn't exist).
+        // This handles stale files from crashed previous runs.
+        unsafe {
+            let result = libc::shm_unlink(cname.as_ptr());
+            if result < 0 {
+                let err = io::Error::last_os_error();
+                // ENOENT is expected if the file doesn't exist
+                if err.raw_os_error() != Some(libc::ENOENT) {
+                    // Log but don't fail - we'll try to create anyway
+                }
+            }
+        }
+
         // SAFETY: shm_open expects a valid C string, we validated name.
+        // Use O_EXCL to ensure atomic creation (race-safe after unlink).
         let fd = unsafe {
             libc::shm_open(
                 cname.as_ptr(),

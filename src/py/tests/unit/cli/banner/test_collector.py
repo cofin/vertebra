@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -55,27 +55,32 @@ class TestServerStatus:
 class TestStatusCollector:
     """Test StatusCollector class."""
 
-    def test_init_sets_base_url(self) -> None:
-        collector = StatusCollector(host="localhost", port=3000)
-        assert collector.base_url == "http://localhost:3000"
+    def test_init_sets_timeout(self) -> None:
+        collector = StatusCollector(host="localhost", port=3000, timeout=2.0)
+        assert collector.timeout == 2.0
 
     def test_init_default_timeout(self) -> None:
         collector = StatusCollector()
         assert collector.timeout == 1.0
 
-    def test_fetch_returns_none_on_connection_error(self) -> None:
+    def test_fetch_returns_none_on_ipc_error(self) -> None:
         collector = StatusCollector()
 
-        with patch.object(collector, "_get_client") as mock_client:
-            mock_client.return_value.get.side_effect = OSError("Connection refused")
+        with patch.object(collector, "_get_status_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.query_status.side_effect = OSError("IPC error")
+            mock_get_client.return_value = mock_client
             result = collector.fetch()
 
         assert result is None
 
-    def test_fetch_returns_none_without_httpx(self) -> None:
+    def test_fetch_returns_none_when_status_client_returns_none(self) -> None:
         collector = StatusCollector()
 
-        with patch.object(collector, "_get_client", return_value=None):
+        with patch.object(collector, "_get_status_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.query_status.return_value = None
+            mock_get_client.return_value = mock_client
             result = collector.fetch()
 
         assert result is None
@@ -83,16 +88,15 @@ class TestStatusCollector:
     def test_fetch_parses_response(self) -> None:
         collector = StatusCollector()
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
+        mock_status_data = {
             "bun": {"status": "ready", "version": "1.1.38"},
             "broker": {"status": "ready", "clients": 3},
             "ipc": {"status": "ready", "channels": 4},
         }
 
-        with patch.object(collector, "_get_client") as mock_get_client:
+        with patch.object(collector, "_get_status_client") as mock_get_client:
             mock_client = MagicMock()
-            mock_client.get.return_value = mock_response
+            mock_client.query_status.return_value = mock_status_data
             mock_get_client.return_value = mock_client
 
             result = collector.fetch()
@@ -106,15 +110,15 @@ class TestStatusCollector:
 
     def test_context_manager(self) -> None:
         with StatusCollector() as collector:
-            assert collector.base_url == "http://127.0.0.1:8000"
+            assert collector.timeout == 1.0
 
-    def test_close_clears_client(self) -> None:
+    def test_close_clears_status_client(self) -> None:
         collector = StatusCollector()
-        collector._client = MagicMock()
+        collector._status_client = MagicMock()
 
         collector.close()
 
-        assert collector._client is None
+        assert collector._status_client is None
 
 
 class TestStatusCollectorParseComponent:
@@ -162,128 +166,80 @@ class TestStatusCollectorAsync:
     """Test async methods of StatusCollector."""
 
     @pytest.mark.anyio
-    async def test_fetch_async_returns_none_without_httpx(self) -> None:
+    async def test_fetch_async_delegates_to_fetch(self) -> None:
+        """fetch_async now delegates to synchronous fetch."""
         collector = StatusCollector()
 
-        # Mock the import to raise ImportError
-        import sys
-
-        with patch.dict(sys.modules, {"httpx": None}), patch("builtins.__import__", side_effect=ImportError):
-            result = await collector.fetch_async()
-
-        assert result is None
-
-    @pytest.mark.anyio
-    async def test_fetch_async_returns_none_on_connection_error(self) -> None:
-        # Import httpx here to patch it
-        import httpx
-
-        collector = StatusCollector()
-
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value.get.side_effect = OSError("Connection refused")
-
-        with patch.object(httpx, "AsyncClient", return_value=mock_client):
-            result = await collector.fetch_async()
-
-        assert result is None
-
-    @pytest.mark.anyio
-    async def test_fetch_async_parses_response(self) -> None:
-        # Import httpx here to patch it
-        import httpx
-
-        collector = StatusCollector()
-
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
+        mock_status_data = {
             "bun": {"status": "ready", "version": "1.1.38"},
             "broker": {"status": "ready", "clients": 3},
             "ipc": {"status": "ready", "channels": 4},
         }
 
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value.get.return_value = mock_response
+        with patch.object(collector, "_get_status_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.query_status.return_value = mock_status_data
+            mock_get_client.return_value = mock_client
 
-        with patch.object(httpx, "AsyncClient", return_value=mock_client):
             result = await collector.fetch_async()
 
         assert result is not None
         assert result.bun.status == "ready"
         assert result.bun.version == "1.1.38"
-        assert result.broker.status == "ready"
-        assert result.ipc.status == "ready"
-        assert result.ipc.channels == 4
 
     @pytest.mark.anyio
-    async def test_fetch_async_handles_json_error(self) -> None:
-        # Import httpx here to patch it
-        import httpx
-
+    async def test_fetch_async_returns_none_on_error(self) -> None:
         collector = StatusCollector()
 
-        mock_response = MagicMock()
-        mock_response.json.side_effect = ValueError("Invalid JSON")
+        with patch.object(collector, "_get_status_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.query_status.side_effect = RuntimeError("IPC failure")
+            mock_get_client.return_value = mock_client
 
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value.get.return_value = mock_response
-
-        with patch.object(httpx, "AsyncClient", return_value=mock_client):
             result = await collector.fetch_async()
 
         assert result is None
 
 
-class TestStatusCollectorGetClient:
-    """Test _get_client method."""
+class TestStatusCollectorGetStatusClient:
+    """Test _get_status_client method."""
 
-    def test_get_client_caches_client(self) -> None:
-        # Import httpx here to patch it
-        import httpx
-
+    def test_get_status_client_caches_client(self) -> None:
         collector = StatusCollector()
 
-        with patch.object(httpx, "Client") as mock_client_class:
-            mock_client = MagicMock()
-            mock_client_class.return_value = mock_client
+        with patch("vertebra.cli.banner.collector.StatusClient") as mock_class:
+            mock_instance = MagicMock()
+            mock_class.return_value = mock_instance
 
             # First call should create client
-            client1 = collector._get_client()
+            client1 = collector._get_status_client()
             # Second call should return cached client
-            client2 = collector._get_client()
+            client2 = collector._get_status_client()
 
             assert client1 is client2
-            assert mock_client_class.call_count == 1
+            assert mock_class.call_count == 1
 
-    def test_get_client_returns_none_without_httpx(self) -> None:
+    def test_fetch_handles_runtime_error(self) -> None:
         collector = StatusCollector()
 
-        # Mock the import to raise ImportError
-        import sys
-
-        with patch.dict(sys.modules, {"httpx": None}), patch("builtins.__import__", side_effect=ImportError):
-            client = collector._get_client()
-
-        assert client is None
-
-    def test_fetch_handles_value_error(self) -> None:
-        collector = StatusCollector()
-
-        with patch.object(collector, "_get_client") as mock_client:
-            mock_client.return_value.get.return_value.json.side_effect = ValueError("Bad JSON")
+        with patch.object(collector, "_get_status_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.query_status.side_effect = RuntimeError("Broker unavailable")
+            mock_get_client.return_value = mock_client
             result = collector.fetch()
 
         assert result is None
 
-    def test_fetch_handles_key_error(self) -> None:
+    def test_fetch_handles_empty_data(self) -> None:
         collector = StatusCollector()
 
-        with patch.object(collector, "_get_client") as mock_client:
-            # Return malformed data that will cause KeyError during parsing
-            mock_client.return_value.get.return_value.json.return_value = {"bad": "data"}
-            # This should not raise, just return None
+        with patch.object(collector, "_get_status_client") as mock_get_client:
+            mock_client = MagicMock()
+            # Return data that will cause KeyError during parsing
+            mock_client.query_status.return_value = {"bad": "data"}
+            mock_get_client.return_value = mock_client
+            # Should not raise, returns partial result with defaults
             result = collector.fetch()
 
-        # Should handle the error and return None or a partial result
-        # Based on the implementation, it should return a ServerStatus with defaults
+        # Should return a ServerStatus with default/unknown values
         assert result is not None

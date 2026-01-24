@@ -159,6 +159,32 @@ def stop_server(proc: subprocess.Popen, graceful_timeout: float = 5.0) -> None:
         _spawned_processes.remove(proc)
 
 
+def cleanup_orphaned_vertebra_processes() -> None:
+    """Kill any orphaned vertebra processes that escaped normal cleanup.
+
+    This is a safety net for edge cases where process group cleanup fails.
+    Should be called at the start and end of benchmark runs.
+    """
+    with contextlib.suppress(Exception):
+        # Kill any orphaned vertebra workers
+        subprocess.run(
+            ["pkill", "-9", "-f", "vertebra.server.worker"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    with contextlib.suppress(Exception):
+        # Clean up stale shared memory files
+        shm_dir = "/dev/shm"
+        if os.path.exists(shm_dir):
+            for name in os.listdir(shm_dir):
+                if name.startswith("vertebra-"):
+                    try:
+                        os.remove(os.path.join(shm_dir, name))
+                    except OSError:
+                        pass
+
+
 def wait_for_health(port: int, timeout: float = 30.0, initial_delay: float = 1.0, poll_interval: float = 0.1) -> None:
     """Wait for server to respond to health check.
 

@@ -1,5 +1,6 @@
 """PEP 249 DBAPI implementation for Vertebra broker."""
 
+# ruff: noqa: A001
 import contextlib
 from collections.abc import Sequence
 from typing import Any
@@ -18,11 +19,11 @@ class Error(Exception):
     """Base class for all other error exceptions."""
 
 
-class DBAPIWarning(Exception):
+class DBAPIError(Exception):
     """Exception raised for important warnings like data truncations (PEP 249)."""
 
 
-Warning = DBAPIWarning  # PEP 249 requires this name
+Warning = DBAPIError  # PEP 249 requires this name
 
 
 class InterfaceError(Error):

@@ -564,10 +564,10 @@ bench-servers-quick:                                ## Quick server benchmark (r
 	@echo "${OK} Results saved to benchmarks/results/"
 
 .PHONY: bench-fastest
-bench-fastest: bench-setup                          ## Benchmark Vertebra vs native runtime peers (Robyn, Granian)
+bench-fastest: bench-setup                          ## Benchmark native runtime peers (Robyn, Granian) - Vertebra disabled pending IPC fixes
 	@echo "${INFO} Running native runtime benchmarks... 🚀"
 	$(check_oha)
-	@uv run python -m benchmarks.servers.runner --quick --servers vertebra,vertebra_native_litestar,robyn,granian
+	@uv run python -m benchmarks.servers.runner --quick --servers robyn,granian
 	@echo "${OK} Results saved to benchmarks/results/"
 
 .PHONY: bench-vertebra

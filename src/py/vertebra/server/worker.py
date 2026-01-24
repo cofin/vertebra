@@ -133,6 +133,7 @@ AsgiApp = Callable[
 ]
 
 HEALTH_PATH = "/__vertebra__/health"
+PING_SCOPE_TYPE = "vertebra.ping"
 ASGI_VERSION = "3.0"
 ASGI_HTTP_SPEC_VERSION = "2.5"
 
@@ -311,6 +312,10 @@ class AsgiWorker:
         if frame_type is None:
             await self._handle_unary_request(message, contexts, writer)
             return
+        # Handle ping requests for health checks (no ASGI app invocation)
+        if frame_type == PING_SCOPE_TYPE:
+            await self._handle_ping(message, writer)
+            return
         if frame_type == "direct.http":
             await self._handle_direct_http(message, writer, contexts)
             return
@@ -336,6 +341,11 @@ class AsgiWorker:
         if context is None:
             return
         await self._enqueue_request_frame(context, message)
+
+    async def _handle_ping(self, message: dict[str, Any], writer: "ResponseWriter") -> None:
+        """Handle ping requests for health checks. Returns immediate success without invoking ASGI app."""
+        request_id = message.get("id")
+        await writer.send({"id": request_id, "ok": True, "type": "vertebra.pong"})
 
     def _worker_id(self) -> str:
         if self._config.worker_id is not None:

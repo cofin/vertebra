@@ -1,8 +1,8 @@
 """Status collection from Bun server.
 
-The StatusCollector fetches component status from the Bun server's
-/internal/status endpoint. This provides real-time health information
-for the banner display.
+The StatusCollector fetches component status from the broker via IPC.
+This provides real-time health information for the banner display
+without requiring httpx or any network dependencies.
 """
 
 from __future__ import annotations
@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any, Literal, Self
+
+from vertebra.resources.status_client import StatusClient
 
 logger = logging.getLogger(__name__)
 
@@ -43,77 +45,61 @@ class ServerStatus:
 
 
 class StatusCollector:
-    """Collects status from the Bun server.
+    """Collects status from the Bun server via IPC.
 
-    Makes HTTP requests to the /internal/status endpoint to gather
-    component health information for display in the banner.
+    Uses shared-memory IPC to query the broker for component health
+    information to display in the banner. No network dependencies required.
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8000, timeout: float = 1.0) -> None:
         """Initialize the status collector.
 
         Args:
-            host: Server host address
-            port: Server port number
+            host: Server host address (unused, kept for API compatibility)
+            port: Server port number (unused, kept for API compatibility)
             timeout: Request timeout in seconds
         """
-        self.base_url = f"http://{host}:{port}"
+        # host/port kept for backwards compatibility but not used with IPC
+        self._host = host
+        self._port = port
         self.timeout = timeout
-        self._client: Any = None
+        self._status_client: StatusClient | None = None
 
-    def _get_client(self) -> Any:
-        """Lazily import and create httpx client."""
-        if self._client is None:
-            try:
-                import httpx
-
-                self._client = httpx.Client(timeout=self.timeout)
-            except ImportError:
-                logger.debug("httpx not available for status collection")
-                return None
-        return self._client
+    def _get_status_client(self) -> StatusClient:
+        """Get or create the IPC status client."""
+        if self._status_client is None:
+            self._status_client = StatusClient()
+        return self._status_client
 
     def fetch(self) -> ServerStatus | None:
-        """Fetch server status synchronously.
+        """Fetch server status via IPC.
 
         Returns:
             ServerStatus if successful, None on failure
         """
-        client = self._get_client()
-        if client is None:
-            return None
-
         try:
-            response = client.get(f"{self.base_url}/internal/status")
-            response.raise_for_status()
-            data = response.json()
+            client = self._get_status_client()
+            timeout_ms = int(self.timeout * 1000)
+            data = client.query_status(timeout_ms=timeout_ms)
+            if data is None:
+                return None
             return self._parse_status(data)
-        except (OSError, ValueError, TypeError, KeyError):
-            # OSError: connection failures, ValueError/TypeError/KeyError: JSON parsing issues
-            logger.debug("Failed to fetch server status", exc_info=True)
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            logger.debug("Failed to fetch server status via IPC", exc_info=True)
             return None
 
     async def fetch_async(self) -> ServerStatus | None:
         """Fetch server status asynchronously.
 
+        Note: Uses synchronous IPC under the hood since the status query
+        is very fast (< 1ms). The async interface is kept for API compatibility.
+
         Returns:
             ServerStatus if successful, None on failure
         """
-        try:
-            import httpx
-
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(f"{self.base_url}/internal/status")
-                response.raise_for_status()
-                data = response.json()
-                return self._parse_status(data)
-        except ImportError:
-            logger.debug("httpx not available for async status collection")
-            return None
-        except (OSError, ValueError, TypeError, KeyError):
-            # OSError: connection failures, ValueError/TypeError/KeyError: JSON parsing issues
-            logger.debug("Failed to fetch server status async", exc_info=True)
-            return None
+        # Status queries are fast enough that we can use sync IPC
+        # wrapped in run_in_executor would add more overhead than benefit
+        return self.fetch()
 
     def _parse_status(self, data: dict[str, Any]) -> ServerStatus:
         """Parse raw status response into ServerStatus object."""
@@ -137,10 +123,9 @@ class StatusCollector:
         )
 
     def close(self) -> None:
-        """Close the HTTP client."""
-        if self._client is not None:
-            self._client.close()
-            self._client = None
+        """Clean up resources (no-op for IPC client)."""
+        # StatusClient is stateless, no cleanup needed
+        self._status_client = None
 
     def __enter__(self) -> Self:
         return self

@@ -1,10 +1,9 @@
 """Standalone Python runtime management."""
-
+import asyncio
 import logging
-from pathlib import Path
 import tarfile
-
-import httpx
+import urllib.request
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +48,16 @@ async def download_standalone(target: str, profile: str, cache_dir: Path) -> Pat
     logger.info("Downloading standalone runtime: %s", url)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        async with client.stream("GET", url) as response:
-            response.raise_for_status()
-            with dest.open("wb") as f:
-                async for chunk in response.aiter_bytes():
-                    f.write(chunk)
+    # Use urllib from standard library to avoid httpx dependency
+    # This is a build-time operation so blocking is acceptable
+ 
+
+    def _download_sync() -> None:
+        with urllib.request.urlopen(url, timeout=300) as response, dest.open("wb") as f:  # noqa: S310
+            while chunk := response.read(8192):
+                f.write(chunk)
+
+    await asyncio.to_thread(_download_sync)
 
     return dest
 
