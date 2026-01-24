@@ -49,13 +49,13 @@ def install_deps(packages: list[str] | None = None) -> None:
             "rich",  # For pretty output
             "uvicorn[standard]",  # Uvicorn with uvloop + httptools
             "granian",  # Rust ASGI server
-            "socketify",  # C++ uSockets backend
             "starlette",  # Minimal framework
             "fastapi",  # Feature-rich framework
             "blacksheep",  # High-performance framework
             "litestar",  # msgspec-powered framework
             "sanic",  # Standalone + ASGI modes
-            "robyn",  # Rust Actix runtime
+            "socketify",  # C++ uSockets ASGI server
+            "robyn",  # Rust Actix-web runtime
             "spikard",  # Rust Tower-HTTP runtime
         ]
 

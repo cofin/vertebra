@@ -1,6 +1,6 @@
 """Spikard benchmark application.
 
-Spikard app for integrated runtime testing (Rust Tower-HTTP runtime).
+Spikard app for integrated runtime testing (Rust Axum/Tower-HTTP runtime).
 
 Based on: https://github.com/Goldziher/spikard
 """
@@ -10,13 +10,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-try:
-    from spikard import Handler, Request, Response, run_server
-except ImportError:
-    import sys
-
-    print("Spikard not installed. Install with: cargo install spikard-cli && spikard init", file=sys.stderr)
-    sys.exit(1)
+from spikard import Request, Response, Spikard, get, post
 
 # Pre-computed response bodies
 BODY_10B = b"0123456789"
@@ -36,75 +30,81 @@ JSON_DATA = {
     "metadata": {"version": "1.0", "benchmark": True},
 }
 
+app = Spikard()
 
-@Handler("/health")
-async def health(request: Request) -> Response:
+
+@get("/health")
+async def health(request: Request) -> dict:
     """Health check endpoint."""
-    return Response({"status": "ok"})
+    return {"status": "ok"}
 
 
-@Handler("/hello")
-async def hello(request: Request) -> Response:
+@get("/hello")
+async def hello(request: Request) -> dict:
     """Minimal JSON response."""
-    return Response({"hello": "world"})
+    return {"hello": "world"}
 
 
-@Handler("/b10")
+@get("/b10")
 async def body_10b(request: Request) -> Response:
     """10-byte response."""
-    return Response(BODY_10B, content_type="application/octet-stream")
+    return Response(content=BODY_10B, media_type="application/octet-stream")
 
 
-@Handler("/b1k")
+@get("/b1k")
 async def body_1k(request: Request) -> Response:
     """1KB response."""
-    return Response(BODY_1K, content_type="application/octet-stream")
+    return Response(content=BODY_1K, media_type="application/octet-stream")
 
 
-@Handler("/b10k")
+@get("/b10k")
 async def body_10k(request: Request) -> Response:
     """10KB response."""
-    return Response(BODY_10K, content_type="application/octet-stream")
+    return Response(content=BODY_10K, media_type="application/octet-stream")
 
 
-@Handler("/b100k")
+@get("/b100k")
 async def body_100k(request: Request) -> Response:
     """100KB response."""
-    return Response(BODY_100K, content_type="application/octet-stream")
+    return Response(content=BODY_100K, media_type="application/octet-stream")
 
 
-@Handler("/echo", methods=["POST"])
+@post("/echo")
 async def echo(request: Request) -> Response:
     """Echo POST body."""
-    return Response(request.body, content_type="application/octet-stream")
+    body = await request.body()
+    return Response(content=body, media_type="application/octet-stream")
 
 
-@Handler("/io10")
-async def io_10ms(request: Request) -> Response:
+@get("/io10")
+async def io_10ms(request: Request) -> dict:
     """Simulate 10ms I/O."""
     await asyncio.sleep(0.01)
-    return Response({"waited": 10})
+    return {"waited": 10}
 
 
-@Handler("/io100")
-async def io_100ms(request: Request) -> Response:
+@get("/io100")
+async def io_100ms(request: Request) -> dict:
     """Simulate 100ms I/O."""
     await asyncio.sleep(0.1)
-    return Response({"waited": 100})
+    return {"waited": 100}
 
 
-@Handler("/file")
+@get("/file")
 async def file_response(request: Request) -> Response:
     """Static file response."""
-    return Response(FILE_CONTENT, content_type="application/octet-stream")
+    return Response(content=FILE_CONTENT, media_type="application/octet-stream")
 
 
-@Handler("/json")
-async def json_response(request: Request) -> Response:
+@get("/json")
+async def json_response(request: Request) -> dict:
     """JSON serialization test."""
-    return Response(JSON_DATA)
+    return JSON_DATA
+
+
+# Register routes with app
+app.register([health, hello, body_10b, body_1k, body_10k, body_100k, echo, io_10ms, io_100ms, file_response, json_response])
 
 
 if __name__ == "__main__":
-    # Run the Spikard Tower-HTTP server
-    run_server(host="127.0.0.1", port=8012)
+    app.run(host="127.0.0.1", port=8012)

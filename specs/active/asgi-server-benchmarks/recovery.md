@@ -3,7 +3,7 @@
 ## Quick Resume
 
 **Last Phase**: Implementation Complete
-**Current Status**: Ready for Final Review
+**Current Status**: All 19 servers configured and ready
 **PRD Location**: `specs/active/asgi-server-benchmarks/`
 
 ---
@@ -17,7 +17,7 @@
 
 ### Stack
 - **Languages**: Python 3.12+, TypeScript (Bun), Rust
-- **Primary Tool**: `oha` (Rust HTTP load generator)
+- **Primary Tool**: `oha` (Rust HTTP load generator, v1.12+ with `--output-format json`)
 - **Total Servers**: 19 configurations across 3 categories
 
 ### Commands
@@ -45,10 +45,10 @@
 - [x] Isolated benchmark venv
 - [x] oha binary detection for ~/.cargo/bin/
 
-### ⏸️ Deferred (Optional Enhancements)
-- [ ] Historical results tracking
-- [ ] Vertebra-specific metrics breakdown
-- [ ] CI workflow for automated runs
+### ✅ Tracking & CI
+- [x] Historical results tracking (`benchmarks/results/runs/`)
+- [x] Vertebra-specific metrics breakdown (ASGI vs Native, overhead analysis)
+- [x] CI workflow for Vertebra benchmarks only (`.github/workflows/benchmark.yml`)
 
 ---
 
@@ -96,7 +96,7 @@
 benchmarks/servers/
 ├── __init__.py
 ├── runner.py              # Main orchestrator
-├── config.py              # 21 server configurations
+├── config.py              # 19 server configurations
 ├── scenarios.py           # 10 test scenarios
 ├── parsers.py             # oha output parsing + cargo bin detection
 ├── results.py             # Result dataclasses
@@ -143,6 +143,25 @@ benchmarks/results/
 - Checks `~/.cargo/bin/oha` (cargo install location)
 - Checks common system paths
 - No more "oha not found" errors when installed via cargo
+
+### 5. Historical Results Tracking
+- Saves runs to `benchmarks/results/runs/<timestamp>.json`
+- Compares current run against previous for Vertebra servers
+- Detects regressions (>5% RPS decrease)
+- `--list-history` flag to view past runs
+
+### 6. Vertebra Metrics Breakdown
+- Native vs ASGI Router comparison (Litestar)
+- IPC transport overhead estimation
+- Framework overhead breakdown
+- Displayed in both terminal and markdown reports
+
+### 7. CI Workflow
+- `.github/workflows/benchmark.yml`
+- Runs only Vertebra variants (respectful of external projects)
+- Weekly scheduled runs + manual triggers
+- Commits history to track regression over time
+- Comments on PRs if regression detected
 
 ---
 

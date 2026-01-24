@@ -32,69 +32,69 @@ app = Robyn(__file__)
 
 
 @app.get("/health")
-async def health(request: Request) -> dict:
+async def health(request: Request):
     """Health check endpoint."""
     return {"status": "ok"}
 
 
 @app.get("/hello")
-async def hello(request: Request) -> dict:
+async def hello(request: Request):
     """Minimal JSON response."""
     return {"hello": "world"}
 
 
 @app.get("/b10")
-async def body_10b(request: Request) -> bytes:
+async def body_10b(request: Request):
     """10-byte response."""
     return BODY_10B
 
 
 @app.get("/b1k")
-async def body_1k(request: Request) -> bytes:
+async def body_1k(request: Request):
     """1KB response."""
     return BODY_1K
 
 
 @app.get("/b10k")
-async def body_10k(request: Request) -> bytes:
+async def body_10k(request: Request):
     """10KB response."""
     return BODY_10K
 
 
 @app.get("/b100k")
-async def body_100k(request: Request) -> bytes:
+async def body_100k(request: Request):
     """100KB response."""
     return BODY_100K
 
 
 @app.post("/echo")
-async def echo(request: Request) -> bytes:
+async def echo(request: Request):
     """Echo POST body."""
     return request.body
 
 
 @app.get("/io10")
-async def io_10ms(request: Request) -> dict:
+async def io_10ms(request: Request):
     """Simulate 10ms I/O."""
     await asyncio.sleep(0.01)
     return {"waited": 10}
 
 
 @app.get("/io100")
-async def io_100ms(request: Request) -> dict:
+async def io_100ms(request: Request):
     """Simulate 100ms I/O."""
     await asyncio.sleep(0.1)
     return {"waited": 100}
 
 
 @app.get("/file")
-async def file_response(request: Request) -> bytes:
+async def file_response(request: Request):
     """Static file response."""
     return FILE_CONTENT
 
 
 @app.get("/json")
-async def json_response(request: Request) -> dict:
+async def json_response(request: Request):
     """JSON serialization test."""
     return JSON_DATA
 

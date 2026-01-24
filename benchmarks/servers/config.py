@@ -49,7 +49,7 @@ class ServerConfig:
 # Category 1: Raw ASGI Server Performance
 # =============================================================================
 # Same minimal ASGI application on different servers.
-# Isolates HTTP parsing, connection handling, and event loop efficiency.
+# Isolates HTTP parsing, connection handling, and event loop efficiency (3 servers).
 
 CATEGORY_1_SERVERS: dict[str, ServerConfig] = {
     "uvicorn_h11": ServerConfig(
@@ -100,7 +100,7 @@ CATEGORY_1_SERVERS: dict[str, ServerConfig] = {
     ),
     "granian": ServerConfig(
         name="granian",
-        display_name="Granian",
+        display_name="Granian (ASGI)",
         category=BenchmarkCategory.SERVER,
         command=(
             "granian",
@@ -123,29 +123,31 @@ CATEGORY_1_SERVERS: dict[str, ServerConfig] = {
         requires_install=("granian",),
         notes="Rust runtime with PyO3",
     ),
-    "socketify": ServerConfig(
-        name="socketify",
-        display_name="Socketify",
-        category=BenchmarkCategory.SERVER,
-        command=(
-            "python",
-            "-c",
-            "from socketify import ASGI; "
-            "from benchmarks.servers.app.asgi import app; "
-            "ASGI(app).listen(8007, lambda config: print('Socketify started')).run()",
-        ),
-        port=8007,
-        startup_delay=3.0,  # Socketify needs a bit more time
-        requires_install=("socketify",),
-        notes="C++ uSockets backend, custom event loop",
-    ),
+    # NOTE: Socketify has startup issues on some systems (silent failure).
+    # Uncomment when fixed upstream.
+    # "socketify": ServerConfig(
+    #     name="socketify",
+    #     display_name="Socketify (ASGI)",
+    #     category=BenchmarkCategory.SERVER,
+    #     command=(
+    #         "python",
+    #         "-c",
+    #         "from socketify import ASGI; "
+    #         "from benchmarks.servers.app.asgi import app; "
+    #         "ASGI(app).listen(8007, lambda c: None).run()",
+    #     ),
+    #     port=8007,
+    #     startup_delay=2.0,
+    #     requires_install=("socketify",),
+    #     notes="C++ uSockets backend",
+    # ),
 }
 
 # =============================================================================
 # Category 2: Integrated Runtime Performance
 # =============================================================================
 # Each runtime runs its native application format.
-# Server and framework are inseparable.
+# Server and framework are inseparable (6 servers).
 
 CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
     "vertebra": ServerConfig(
@@ -227,29 +229,6 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
         startup_delay=3.0,  # Bun + Rust + Python startup
         notes="FastAPI through Vertebra ASGI bridge (native mode is Litestar-only)",
     ),
-    "robyn": ServerConfig(
-        name="robyn",
-        display_name="Robyn",
-        category=BenchmarkCategory.RUNTIME,
-        command=(
-            "python",
-            "-m",
-            "robyn",
-            "benchmarks.servers.app.robyn_app:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "8010",
-            "--workers",
-            "1",
-            "--processes",
-            "1",
-        ),
-        port=8010,
-        interface=InterfaceType.NATIVE,
-        requires_install=("robyn",),
-        notes="Rust Actix + Tokio runtime, native interface",
-    ),
     "sanic_standalone": ServerConfig(
         name="sanic_standalone",
         display_name="Sanic (standalone)",
@@ -268,23 +247,43 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
         requires_install=("sanic",),
         notes="Built-in uvloop-optimized server",
     ),
-    "spikard": ServerConfig(
-        name="spikard",
-        display_name="Spikard",
+    "robyn": ServerConfig(
+        name="robyn",
+        display_name="Robyn",
         category=BenchmarkCategory.RUNTIME,
-        command=("python", "benchmarks/servers/app/spikard_app.py"),
-        port=8012,
+        command=(
+            "python",
+            "-m",
+            "benchmarks.servers.app.robyn_app",
+        ),
+        port=8010,
         interface=InterfaceType.NATIVE,
-        requires_install=("spikard",),
-        notes="Rust Tower-HTTP runtime with zero-copy PyO3",
+        requires_install=("robyn",),
+        notes="Rust Actix-web runtime with Python handlers",
     ),
+    # NOTE: Spikard has upstream bug (NameError in ServerConfig class).
+    # Uncomment when fixed upstream.
+    # "spikard": ServerConfig(
+    #     name="spikard",
+    #     display_name="Spikard",
+    #     category=BenchmarkCategory.RUNTIME,
+    #     command=(
+    #         "python",
+    #         "-m",
+    #         "benchmarks.servers.app.spikard_app",
+    #     ),
+    #     port=8012,
+    #     interface=InterfaceType.NATIVE,
+    #     requires_install=("spikard",),
+    #     notes="Rust Tower-HTTP runtime",
+    # ),
 }
 
 # =============================================================================
 # Category 3: Framework Overhead Comparison
 # =============================================================================
 # Same server (Uvicorn httptools), different frameworks.
-# Isolates framework routing, middleware, and serialization overhead.
+# Isolates framework routing, middleware, and serialization overhead (8 servers).
 
 CATEGORY_3_FRAMEWORKS: dict[str, ServerConfig] = {
     "raw_asgi": ServerConfig(

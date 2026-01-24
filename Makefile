@@ -564,17 +564,24 @@ bench-servers-quick:                                ## Quick server benchmark (r
 	@echo "${OK} Results saved to benchmarks/results/"
 
 .PHONY: bench-fastest
-bench-fastest:                                      ## Benchmark only the fastest servers (Granian, Uvicorn httptools, Litestar/Granian)
-	@echo "${INFO} Running fastest server benchmarks... 🚀"
+bench-fastest: bench-setup                          ## Benchmark Vertebra vs native runtime peers (Robyn, Granian)
+	@echo "${INFO} Running native runtime benchmarks... 🚀"
 	$(check_oha)
-	@uv run python -m benchmarks.servers.runner --quick --servers granian,uvicorn_httptools,litestar_granian
+	@uv run python -m benchmarks.servers.runner --quick --servers vertebra,vertebra_native_litestar,robyn,granian
 	@echo "${OK} Results saved to benchmarks/results/"
 
 .PHONY: bench-vertebra
-bench-vertebra:                                     ## Benchmark only Vertebra (uses current venv)
+bench-vertebra:                                     ## Benchmark all Vertebra variants (uses current venv)
 	@echo "${INFO} Running Vertebra benchmarks... 📊"
 	$(check_oha)
-	@uv run python -m benchmarks.servers.runner --servers vertebra --no-venv
+	@uv run python -m benchmarks.servers.runner --quick --servers vertebra,vertebra_asgi_litestar,vertebra_native_litestar,vertebra_fastapi --no-venv
+	@echo "${OK} Results saved to benchmarks/results/"
+
+.PHONY: bench-vertebra-full
+bench-vertebra-full:                                ## Full Vertebra benchmark (longer duration, saves history)
+	@echo "${INFO} Running full Vertebra benchmarks... 📊"
+	$(check_oha)
+	@uv run python -m benchmarks.servers.runner --servers vertebra,vertebra_asgi_litestar,vertebra_native_litestar,vertebra_fastapi --no-venv
 	@echo "${OK} Results saved to benchmarks/results/"
 
 .PHONY: bench-install-deps

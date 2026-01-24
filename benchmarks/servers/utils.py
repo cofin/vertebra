@@ -66,14 +66,21 @@ def start_server(
     env = os.environ.copy()
     env.update(config.env)
 
-    # Use benchmark venv if requested and available
-    if use_bench_venv:
+    # Determine if we should use benchmark venv
+    # Skip bench venv for project-specific servers (no requires_install)
+    should_use_bench_venv = use_bench_venv and config.requires_install
+
+    if should_use_bench_venv:
         try:
-            from .venv_manager import BENCH_VENV_DIR, venv_exists
+            from .venv_manager import BENCH_VENV_DIR, BENCH_VENV_PYTHON, venv_exists
 
             if venv_exists():
                 env["VIRTUAL_ENV"] = str(BENCH_VENV_DIR)
                 env["PATH"] = f"{BENCH_VENV_DIR / 'bin'}:{env.get('PATH', '')}"
+
+                # Replace 'python' with the benchmark venv's python
+                if cmd[0] == "python":
+                    cmd[0] = str(BENCH_VENV_PYTHON)
         except ImportError:
             pass  # venv_manager not available, use current env
 

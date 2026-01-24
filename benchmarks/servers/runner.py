@@ -34,8 +34,9 @@ from .config import (
     BenchmarkCategory,
     get_available_servers,
 )
+from .history import BenchmarkHistory, format_comparison_table, get_git_sha
 from .parsers import OhaError, OhaNotFoundError, detect_oha_version, run_oha
-from .reports import generate_markdown_report
+from .reports import format_vertebra_report, generate_markdown_report, generate_vertebra_analysis
 from .results import BenchmarkResult, BenchmarkSuite, EnvironmentInfo
 from .scenarios import Scenario, get_concurrency, get_durations, get_scenarios
 from .utils import ServerStartupError, is_port_in_use, start_server, stop_server
@@ -65,6 +66,8 @@ class BenchmarkRunner:
         verbose: bool = False,
         workers: int = 1,
         use_bench_venv: bool = True,
+        save_history: bool = True,
+        compare: bool = True,
     ) -> None:
         self.servers = servers or ALL_SERVERS
         self.scenarios = scenarios or get_scenarios(quick=quick)
@@ -74,6 +77,8 @@ class BenchmarkRunner:
         self.verbose = verbose
         self.workers = workers
         self.use_bench_venv = use_bench_venv
+        self.save_history = save_history
+        self.compare = compare
 
         # Get durations
         self.primer_duration, self.warmup_duration, self.measure_duration = get_durations(quick=quick)
@@ -85,6 +90,10 @@ class BenchmarkRunner:
             raise OhaNotFoundError(msg)
 
         self.suite = BenchmarkSuite(environment=EnvironmentInfo.detect(oha_version=oha_version))
+
+        # History tracking
+        self.history = BenchmarkHistory()
+        self.git_sha = get_git_sha()
 
         # Track current process for cleanup
         self._current_process: subprocess.Popen | None = None
@@ -252,8 +261,14 @@ class BenchmarkRunner:
         info.add_row("CPU", env.cpu)
         info.add_row("Workers", str(self.workers))
         info.add_row("Mode", "quick" if self.quick else "standard")
-        info.add_row("Servers", str(len(self.servers)))
-        info.add_row("Scenarios", str(len(self.scenarios)))
+
+        # List servers
+        server_names = [self.servers[s].display_name for s in self.servers]
+        info.add_row("Servers", ", ".join(server_names))
+
+        # List scenarios
+        scenario_names = list(self.scenarios.keys())
+        info.add_row("Scenarios", ", ".join(scenario_names))
 
         console.print(Panel(info, title="[bold]ASGI Server Benchmarks[/]", border_style="blue"))
 
@@ -326,11 +341,68 @@ class BenchmarkRunner:
             console.print(table)
             console.print()
 
+        # Vertebra-specific analysis
+        self._print_vertebra_analysis()
+
         # Errors
         if self.suite.errors:
             console.print(f"[red]Errors: {len(self.suite.errors)}[/]")
             for error in self.suite.errors[:5]:
                 console.print(f"  [red]•[/] {error['server']}/{error['scenario']}: {error['error']}")
+
+    def _print_vertebra_analysis(self) -> None:
+        """Print Vertebra-specific metrics breakdown."""
+        # Check if we have vertebra results
+        vertebra_results = [r for r in self.suite.results if r.server.startswith("vertebra")]
+        if not vertebra_results:
+            return
+
+        analysis = generate_vertebra_analysis(self.suite)
+
+        # Native vs ASGI comparison
+        native_vs_asgi = analysis.get("native_vs_asgi", {})
+        if native_vs_asgi:
+            console.print()
+            console.rule("[bold magenta]Vertebra Native vs ASGI[/]", style="magenta")
+
+            table = Table(show_header=True, header_style="bold")
+            table.add_column("Scenario")
+            table.add_column("ASGI RPS", justify="right")
+            table.add_column("Native RPS", justify="right")
+            table.add_column("Speedup", justify="right")
+
+            for scenario, data in native_vs_asgi.items():
+                speedup = data["speedup_percent"]
+                style = "[green]" if speedup > 0 else "[red]"
+                table.add_row(
+                    scenario,
+                    f"{data['asgi_rps']:,.0f}",
+                    f"{data['native_rps']:,.0f}",
+                    f"{style}{speedup:+.1f}%[/]",
+                )
+
+            console.print(table)
+
+        # Overhead breakdown
+        overhead = analysis.get("overhead_breakdown", {})
+        if overhead:
+            console.print()
+            console.rule("[bold magenta]Vertebra Overhead Analysis[/]", style="magenta")
+
+            for scenario, data in overhead.items():
+                console.print(f"\n[cyan]{scenario}[/]")
+                console.print(f"  Uvicorn baseline:     {data['uvicorn_raw_rps']:>10,.0f} RPS")
+                console.print(f"  Vertebra raw ASGI:    {data['vertebra_raw_rps']:>10,.0f} RPS")
+
+                ipc_overhead = data["ipc_transport_overhead_percent"]
+                ipc_style = "[yellow]" if ipc_overhead > 10 else "[dim]"
+                console.print(f"  IPC transport:        {ipc_style}{ipc_overhead:>10.1f}% overhead[/]")
+
+                if "framework_overhead_percent" in data:
+                    fw_overhead = data["framework_overhead_percent"]
+                    fw_style = "[yellow]" if fw_overhead > 20 else "[dim]"
+                    console.print(f"  Vertebra + Litestar:  {data['litestar_rps']:>10,.0f} RPS")
+                    console.print(f"  Framework overhead:   {fw_style}{fw_overhead:>10.1f}%[/]")
 
     def _save_results(self) -> None:
         """Save results to files."""
@@ -344,6 +416,65 @@ class BenchmarkRunner:
         report_path.write_text(report)
 
         console.print(f"\n[dim]Results saved to:[/] {self.output_dir}")
+
+        # Save to history
+        if self.save_history:
+            history_path = self.history.save(self.suite, git_sha=self.git_sha)
+            console.print(f"[dim]History saved to:[/] {history_path}")
+
+        # Show comparison with previous run
+        if self.compare:
+            self._print_comparison()
+
+    def _print_comparison(self) -> None:
+        """Print comparison with previous benchmark run."""
+        comparisons = self.history.get_vertebra_comparisons(self.suite)
+
+        if not comparisons:
+            return
+
+        console.print()
+        console.rule("[bold cyan]Vertebra vs Previous Run[/]", style="cyan")
+
+        # Build comparison table
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Server", style="cyan")
+        table.add_column("Scenario")
+        table.add_column("Current RPS", justify="right")
+        table.add_column("Previous", justify="right", style="dim")
+        table.add_column("Delta", justify="right")
+        table.add_column("Change", justify="right")
+
+        has_regression = False
+        for c in sorted(comparisons, key=lambda x: (x.server, x.scenario)):
+            # Color the delta based on direction
+            if c.is_regression:
+                delta_style = "[red]"
+                change_style = "[red]"
+                indicator = "⬇"
+                has_regression = True
+            elif c.is_improvement:
+                delta_style = "[green]"
+                change_style = "[green]"
+                indicator = "⬆"
+            else:
+                delta_style = "[dim]"
+                change_style = "[dim]"
+                indicator = "─"
+
+            table.add_row(
+                c.server,
+                c.scenario,
+                f"{c.current_rps:,.0f}",
+                f"{c.previous_rps:,.0f}",
+                f"{delta_style}{c.delta_rps:+,.0f}[/]",
+                f"{change_style}{c.delta_percent:+.1f}% {indicator}[/]",
+            )
+
+        console.print(table)
+
+        if has_regression:
+            console.print("\n[yellow]Warning:[/] Performance regression detected (>5% decrease)")
 
     def _handle_interrupt(self, signum: int, frame: object) -> None:
         """Handle interrupt signal."""
@@ -368,8 +499,11 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, help="Output directory")
     parser.add_argument("--verbose", action="store_true", help="Show server output")
     parser.add_argument("--no-venv", action="store_true", help="Don't use benchmark venv")
+    parser.add_argument("--no-history", action="store_true", help="Don't save to history")
+    parser.add_argument("--no-compare", action="store_true", help="Don't compare to previous run")
     parser.add_argument("--list-servers", action="store_true", help="List available servers")
     parser.add_argument("--list-scenarios", action="store_true", help="List available scenarios")
+    parser.add_argument("--list-history", action="store_true", help="List historical runs")
 
     args = parser.parse_args()
 
@@ -383,6 +517,29 @@ def main() -> int:
     if args.list_scenarios:
         for name, scenario in get_scenarios().items():
             console.print(f"  {name:15} {scenario.description}")
+        return 0
+
+    if args.list_history:
+        history = BenchmarkHistory()
+        runs = history.list_runs(limit=20)
+        if not runs:
+            console.print("[yellow]No historical runs found[/]")
+            return 0
+
+        table = Table(title="Historical Benchmark Runs", show_header=True, header_style="bold")
+        table.add_column("Timestamp", style="cyan")
+        table.add_column("Git SHA", style="dim")
+        table.add_column("Servers")
+        table.add_column("Results", justify="right")
+
+        for entry in runs:
+            sha = entry.git_sha or "—"
+            servers = ", ".join(entry.servers_tested[:3])
+            if len(entry.servers_tested) > 3:
+                servers += f" (+{len(entry.servers_tested) - 3})"
+            table.add_row(entry.timestamp, sha, servers, str(entry.total_results))
+
+        console.print(table)
         return 0
 
     # Parse servers
@@ -413,6 +570,8 @@ def main() -> int:
             verbose=args.verbose,
             workers=args.workers,
             use_bench_venv=not args.no_venv,
+            save_history=not args.no_history,
+            compare=not args.no_compare,
         )
         runner.run()
         return 0

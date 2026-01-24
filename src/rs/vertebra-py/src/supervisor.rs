@@ -91,6 +91,17 @@ impl NativeSupervisor {
         }
 
         py.detach(move || {
+            let app_path = std::env::var("VERTEBRA_PYTHON_APP").map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "VERTEBRA_PYTHON_APP must be set to start Python workers",
+                )
+            })?;
+            let host = std::env::var("VERTEBRA_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+            let port = std::env::var("VERTEBRA_PORT")
+                .ok()
+                .and_then(|value| value.parse::<u16>().ok())
+                .unwrap_or(8000);
+
             // Start Bun engine with inherited FDs via environment variables.
             let mut cmd = Command::new(&engine_path);
             // Read spin config from environment or use default
@@ -121,10 +132,18 @@ impl NativeSupervisor {
 
             // Start Python workers with inherited FDs.
             let mut new_workers = Vec::new();
-            for _ in 0..workers {
+            for worker_id in 0..workers {
                 let mut cmd = Command::new(&python_executable);
                 cmd.arg("-m")
                     .arg("vertebra.server.worker")
+                    .arg("--app")
+                    .arg(&app_path)
+                    .arg("--host")
+                    .arg(&host)
+                    .arg("--port")
+                    .arg(port.to_string())
+                    .arg("--worker-id")
+                    .arg(worker_id.to_string())
                     .env("VERTEBRA_NOTIFY_FD", notify_fd.to_string())
                     .env("VERTEBRA_SPIN_US", spin_us.to_string());
                 #[cfg(not(target_os = "linux"))]
