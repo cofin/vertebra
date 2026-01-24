@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import contextlib
 import importlib
+import logging
 import os
 import signal
 from collections.abc import Awaitable, Callable
@@ -490,7 +491,21 @@ class AsgiWorker:
         return None
 
     def _log(self, level: str, message: str, **fields: Any) -> None:
-        pass  # Placeholder for actual logging implementation
+        logger = logging.getLogger("vertebra.worker")
+        level_map = {
+            "debug": logging.DEBUG,
+            "info": logging.INFO,
+            "warning": logging.WARNING,
+            "error": logging.ERROR,
+            "critical": logging.CRITICAL,
+        }
+        log_level = level_map.get(level, logging.INFO)
+        if not logger.isEnabledFor(log_level):
+            return
+        if fields:
+            logger.log(log_level, "%s %s", message, fields)
+        else:
+            logger.log(log_level, "%s", message)
 
     async def _handle_unary_request(
         self, message: dict[str, Any], contexts: dict[str, RequestContext], writer: "ResponseWriter"
@@ -590,7 +605,7 @@ class AsgiWorker:
                 async def noop_fetcher(user_id: str, ctx: Any) -> Any:
                     return VertebraUserMixin(**claims)
 
-                user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher)
+                user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher, context=request)
             else:
                 from vertebra.auth.models import AnonymousUser
 
@@ -683,7 +698,7 @@ class AsgiWorker:
             async def noop_fetcher(user_id: str, ctx: Any) -> Any:
                 return VertebraUserMixin(**claims)
 
-            user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher)
+            user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher, context=request)
         else:
             from vertebra.auth.models import AnonymousUser
 

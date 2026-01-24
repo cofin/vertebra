@@ -115,15 +115,6 @@ export abstract class BasePoolAdapter implements PoolAdapter {
   /** Validate a connection. Return true if healthy. */
   protected abstract validateConnection(token: string): Promise<boolean>;
 
-  protected async checkHealth(): Promise<void> {
-    // Deprecated in favor of runHealthCheck
-    await this.runHealthCheck();
-  }
-
-  protected async reapIdle(token: string): Promise<void> {
-    // Deprecated in favor of reapIdleConnections
-  }
-
   protected recordHealthCheck(success: boolean, durationMs: number): void {
     if (success) {
       this._healthChecksSuccess++;
@@ -167,12 +158,6 @@ export abstract class BasePoolAdapter implements PoolAdapter {
   /** Record an error. Call this when an operation fails. */
   protected recordError(): void {
     this._errors += 1;
-  }
-
-  /** Record a health check failure. */
-  protected recordHealthFailure(): void {
-    // Deprecated, use recordHealthCheck(false)
-    this._healthChecksFailure++;
   }
 
   /**

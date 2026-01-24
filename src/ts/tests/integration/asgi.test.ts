@@ -168,7 +168,7 @@ describe("ASGI IPC integration", () => {
       count: WORKERS,
       ipc: { name: ASGI_NAME, slotSize: SLOT_SIZE, slots: SLOTS },
     });
-    const bridge = new AsgiBridge({ requester: pool });
+    const bridge = new AsgiBridge({ requester: pool, ipc: { name: ASGI_NAME, slotSize: SLOT_SIZE, slots: SLOTS } });
     const response = await bridge.handle(new Request("http://127.0.0.1/file"));
     const text = await response.text();
     await pool.close();
@@ -184,7 +184,11 @@ describe("ASGI IPC integration", () => {
     const router = new ShmRouter();
     router.insert("/WEBSOCKET/chat", 123);
 
-    const bridge = new AsgiBridge({ requester: pool, router });
+    const bridge = new AsgiBridge({
+      requester: pool,
+      router,
+      ipc: { name: ASGI_NAME, slotSize: SLOT_SIZE, slots: SLOTS },
+    });
     const server = { upgrade: mock(() => true) } as unknown as Server;
 
     const request = new Request("http://localhost/chat", {

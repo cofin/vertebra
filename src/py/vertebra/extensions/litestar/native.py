@@ -26,12 +26,13 @@ class LitestarRoute:
 class VertebraRequest:
     """A high-performance request object for the native protocol."""
 
-    __slots__ = ("_headers", "_json", "_message", "_user")
+    __slots__ = ("_headers", "_json", "_message", "_query_params", "_user")
 
     def __init__(self, message: dict[str, Any]) -> None:
         self._message = message
         self._json = None
         self._headers = None
+        self._query_params = None
         self._user = None
 
     @property
@@ -57,6 +58,21 @@ class VertebraRequest:
         return self._message.get("path_params", {})
 
     @property
+    def query_params(self) -> dict[str, list[str]]:
+        if self._query_params is None:
+            from urllib.parse import parse_qs
+
+            query = self._message.get("query")
+            if not query:
+                raw_query = self._message.get("queryString")
+                if isinstance(raw_query, (bytes, bytearray)):
+                    query = raw_query.decode()
+                else:
+                    query = ""
+            self._query_params = parse_qs(str(query), keep_blank_values=True)
+        return self._query_params
+
+    @property
     def auth_claims(self) -> dict[str, Any] | None:
         return self._message.get("auth_claims")
 
@@ -73,7 +89,7 @@ class VertebraRequest:
                 async def noop_fetcher(user_id: str, ctx: Any) -> Any:
                     return VertebraUserMixin(**claims)
 
-                self._user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher)
+                self._user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher, context=self)
             else:
                 from vertebra.auth.models import AnonymousUser
 
@@ -199,12 +215,65 @@ def classify_route(route: LitestarRoute) -> RouteCapability:
         RouteCapability: NATIVE if safe for direct dispatch, ASGI_FALLBACK otherwise.
     """
     import inspect
-    from typing import Annotated, get_args, get_origin
+    import types
+    from collections.abc import Iterable
+    from typing import Annotated, Union, get_args, get_origin
 
     from litestar.di import Provide
     from litestar.enums import RequestEncodingType
     from litestar.params import BodyKwarg
     from litestar.response import File, Redirect, Stream, Template
+    from litestar.datastructures import UploadFile
+
+    def is_multipart_media(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, RequestEncodingType):
+            return value == RequestEncodingType.MULTI_PART
+        if isinstance(value, str):
+            return "multipart/form-data" in value.lower()
+        # Enum-like objects
+        enum_value = getattr(value, "value", None)
+        if isinstance(enum_value, str) and "multipart/form-data" in enum_value.lower():
+            return True
+        return False
+
+    def unwrap_annotation(annotation: Any) -> Any:
+        if get_origin(annotation) is Annotated:
+            args = get_args(annotation)
+            if args:
+                return args[0]
+        return annotation
+
+    def contains_upload_file(annotation: Any) -> bool:
+        annotation = unwrap_annotation(annotation)
+        if annotation is inspect.Signature.empty:
+            return False
+        if isinstance(annotation, type) and issubclass(annotation, UploadFile):
+            return True
+        origin = get_origin(annotation)
+        if origin in (list, set, tuple, Iterable):
+            return any(contains_upload_file(arg) for arg in get_args(annotation))
+        if origin in (Union, types.UnionType):
+            return any(contains_upload_file(arg) for arg in get_args(annotation))
+        if origin is None:
+            return False
+        return any(contains_upload_file(arg) for arg in get_args(annotation))
+
+    def return_falls_back(ret: Any) -> bool:
+        ret = unwrap_annotation(ret)
+        if ret is inspect.Signature.empty:
+            return False
+        origin = get_origin(ret)
+        if origin in (Union, types.UnionType):
+            return any(return_falls_back(arg) for arg in get_args(ret))
+        if isinstance(origin, type) and issubclass(origin, (File, Stream, Template, Redirect)):
+            return True
+        if isinstance(ret, type) and issubclass(ret, (File, Stream, Template, Redirect)):
+            return True
+        if isinstance(ret, type) and ret.__name__ == "InertiaRedirect":
+            return True
+        return False
 
     # 1. ASGI Routes and WebSockets are fallback for now (until WS supported)
     if route.is_asgi or route.is_websocket:
@@ -217,45 +286,34 @@ def classify_route(route: LitestarRoute) -> RouteCapability:
             # If it's not a Provide (e.g. it's a Dependency object or other), fallback
             return RouteCapability.ASGI_FALLBACK
 
-    # 3. Check for specific parameter types that imply unsupported bodies (Multipart)
-    # We inspect the handler object (HTTPRouteHandler)
+    # 3. Check for multipart signals on handler or parameters
     handler = route.handler
-    # Check resolved_data_dto or logic? Litestar handlers usually have 'media_type' or 'encoding' in Body.
-    # We can check handler.resolve_request_encoding()? No, that's internal.
-    # But we can inspect the function parameters for Body(media_type=RequestEncodingType.MULTI_PART)
-
     fn = route.handler_fn or handler.fn
     sig = inspect.signature(fn)
 
+    handler_media = [
+        getattr(handler, "media_type", None),
+        getattr(handler, "request_encoding", None),
+        getattr(handler, "request_media_type", None),
+        getattr(handler, "content_type", None),
+    ]
+    if any(is_multipart_media(value) for value in handler_media):
+        return RouteCapability.ASGI_FALLBACK
+
     for param in sig.parameters.values():
-        # Check for Body info in metadata
-        # Litestar uses Annotated[T, Body(...)]
-        # Note: Annotated is special, get_origin returns Annotated itself (if imported from typing)
         if get_origin(param.annotation) is Annotated:
             args = get_args(param.annotation)
             for arg in args:
-                if isinstance(arg, BodyKwarg) and arg.media_type == RequestEncodingType.MULTI_PART:
+                if isinstance(arg, BodyKwarg) and is_multipart_media(arg.media_type):
                     return RouteCapability.ASGI_FALLBACK
-
-        # Check for 'dependency' marker usage in params that wasn't caught by route.dependencies?
-        # route.dependencies covers it usually.
+        if contains_upload_file(param.annotation):
+            return RouteCapability.ASGI_FALLBACK
 
     # 4. Check return annotations for unsupported response types
     # e.g. File, Stream, Template, InertiaRedirect (which inherits from Response or similar)
     ret = sig.return_annotation
-    if ret is not inspect.Signature.empty:
-        # Check if return type is a class that we fallback for
-        # We unwrap generic Response[T] -> Response
-        origin = get_origin(ret)
-        if origin:
-            if issubclass(origin, (File, Stream, Template, Redirect)):
-                return RouteCapability.ASGI_FALLBACK
-        elif isinstance(ret, type):
-            if issubclass(ret, (File, Stream, Template, Redirect)):
-                return RouteCapability.ASGI_FALLBACK
-            # Check for InertiaRedirect by name if we don't import it?
-            if ret.__name__ == "InertiaRedirect":
-                return RouteCapability.ASGI_FALLBACK
+    if return_falls_back(ret):
+        return RouteCapability.ASGI_FALLBACK
 
     # 5. Check handler module for built-in static handlers
     # Litestar's static file handler is usually in litestar.static_files or similar

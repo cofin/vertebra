@@ -16,7 +16,6 @@ const { values } = parseArgs({
   allowPositionals: true,
 });
 
-// Ensure outdir exists
 const outdir = resolve(process.cwd(), values.outdir as string);
 mkdirSync(outdir, { recursive: true });
 

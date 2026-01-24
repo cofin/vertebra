@@ -32,7 +32,18 @@ class VertebraDialectBase(DefaultDialect):
 
     def is_disconnect(self, e: Exception, connection: Any, cursor: Any) -> bool:
         """Check if the error is a disconnect error."""
-        # TODO: Implement proper disconnect check based on broker errors
+        from vertebra.exceptions import BrokerError, IPCError
+        from . import _dbapi
+
+        if isinstance(e, (BrokerError, IPCError)):
+            return True
+        if isinstance(e, (ConnectionError, OSError, EOFError, BrokenPipeError)):
+            return True
+        if isinstance(e, (_dbapi.InterfaceError, _dbapi.OperationalError)):
+            return True
+        message = str(e).lower()
+        if "connection" in message and any(token in message for token in ("closed", "broken", "reset", "lost")):
+            return True
         return False
 
     def do_savepoint(self, connection: Any, name: str) -> None:

@@ -10,10 +10,18 @@ Fetcher = Callable[[str, Any], Coroutine[Any, Any, UserT]]
 class LazyUserProxy[UserT: VertebraUserMixin]:
     """Lazy-loading proxy for User models."""
 
-    def __init__(self, model_cls: type[UserT], claims: dict[str, Any], fetcher: Fetcher[UserT]) -> None:
+    def __init__(
+        self,
+        model_cls: type[UserT],
+        claims: dict[str, Any],
+        fetcher: Fetcher[UserT],
+        *,
+        context: Any | None = None,
+    ) -> None:
         self._model_cls = model_cls
         self._claims = claims
         self._fetcher = fetcher
+        self._context = context
         self._wrapped: UserT | None = None
 
     @property
@@ -39,8 +47,7 @@ class LazyUserProxy[UserT: VertebraUserMixin]:
         """Fetch the full user object."""
         if self._wrapped is None:
             user_id = self._claims.get("id")
-            # TODO: Pass context/request if needed
-            self._wrapped = await self._fetcher(user_id, None)
+            self._wrapped = await self._fetcher(user_id, self._context)
         return self._wrapped
 
     async def refresh(self) -> UserT:

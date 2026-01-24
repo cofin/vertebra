@@ -174,7 +174,7 @@ export async function createAsgiServer(
     : null;
   manager?.start();
   const routerInstance = new ShmRouter();
-  const bridge = new AsgiBridge({ requester: workerPool, router: routerInstance });
+  const bridge = new AsgiBridge({ requester: workerPool, router: routerInstance, ipc: resolved.ipc });
 
   // Initialize Auth Validator
   const authValidator = new AuthValidator(resolved.auth);

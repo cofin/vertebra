@@ -1,8 +1,12 @@
 """Serve command."""
 
+import json
 import logging
 import os
 import sys
+import tomllib
+from pathlib import Path
+from typing import Any
 
 import click
 
@@ -48,8 +52,10 @@ def serve(
     env["VERTEBRA_WORKERS"] = str(workers)
     env["VERTEBRA_LOG_LEVEL"] = log_level
     env["VERTEBRA_NATIVE"] = str(int(native))
+    config_data: dict[str, Any] | None = None
     if config_path:
         env["VERTEBRA_CONFIG"] = config_path
+        config_data = load_config(Path(config_path))
 
     # Build the bun command (automatically finds 'bun' and entrypoint)
     try:
@@ -66,7 +72,7 @@ def serve(
         workers=workers,
         drain_timeout_ms=drain_timeout,
         shutdown_timeout_ms=shutdown_timeout,
-        # TODO: Load config object from config_path if needed for supervisor
+        config=config_data,
     )
     sys.exit(exit_code)
 
@@ -79,3 +85,18 @@ def print_banner(*, host: str, port: int, workers: int, log_level: str) -> None:
     click.echo(f"  Workers: {workers}")
     click.echo(f"  Log Level: {log_level}")
     click.echo("-" * 40)
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    """Load a Vertebra config file into a dict for supervisor use."""
+    if not path.exists():
+        msg = f"Config file not found: {path}"
+        raise FileNotFoundError(msg)
+    if path.suffix in {".toml", ".tml"}:
+        with path.open("rb") as f:
+            return tomllib.load(f)
+    if path.suffix == ".json":
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    msg = f"Unsupported config format: {path.suffix}"
+    raise ValueError(msg)

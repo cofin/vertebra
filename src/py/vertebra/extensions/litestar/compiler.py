@@ -104,7 +104,6 @@ def compile_di(
         for param_name in sig.parameters:
             if param_name in dependencies:
                 args.append(f"results['{param_name}']")
-            # TODO: handle special types like 'connection', 'scope', etc.
             elif param_name in ("connection", "scope", "request"):
                 args.append("ctx")
 
@@ -137,12 +136,69 @@ class PipelineCompiler:
         # We build the final runner function
         func_name = f"runner_{id(handler)}"
         from uuid import UUID
+        from typing import Annotated, Union, get_args, get_origin
+        import types
+
+        def unwrap_annotation(annotation: Any) -> Any:
+            if get_origin(annotation) is Annotated:
+                args = get_args(annotation)
+                if args:
+                    return args[0]
+            return annotation
+
+        def resolve_union(annotation: Any) -> Any:
+            origin = get_origin(annotation)
+            if origin in (Union, types.UnionType):
+                for arg in get_args(annotation):
+                    if arg is type(None):
+                        continue
+                    return arg
+            return annotation
+
+        def make_converter(annotation: Any) -> tuple[Callable[[Any], Any] | None, bool]:
+            annotation = resolve_union(unwrap_annotation(annotation))
+            if annotation is inspect.Signature.empty:
+                return None, False
+            origin = get_origin(annotation)
+            if origin in (list, set, tuple):
+                args = get_args(annotation)
+                item_type = args[0] if args else None
+                converter, _ = make_converter(item_type)
+                return converter, True
+            if annotation is int:
+                return int, False
+            if annotation is float:
+                return float, False
+            if annotation is bool:
+                def _bool(value: Any) -> bool:
+                    if isinstance(value, bool):
+                        return value
+                    return str(value).lower() in ("true", "1", "yes", "on")
+                return _bool, False
+            if annotation is UUID:
+                def _uuid(value: Any) -> UUID:
+                    if isinstance(value, UUID):
+                        return value
+                    return UUID(str(value))
+                return _uuid, False
+            return None, False
+
+        def coerce_value(value: Any, converter: Callable[[Any], Any] | None, is_list: bool) -> Any:
+            if is_list:
+                values = value if isinstance(value, list) else [value]
+                if converter:
+                    return [converter(item) for item in values]
+                return values
+            scalar = value[0] if isinstance(value, list) else value
+            if converter:
+                return converter(scalar)
+            return scalar
 
         local_ns = {
             "compiled_guards": compiled_guards,
             "compiled_di": compiled_di,
             "handler_fn": handler.fn,
-            "UUID": UUID,
+            "coerce_value": coerce_value,
         }
 
         body = []
@@ -152,43 +208,45 @@ class PipelineCompiler:
         # 2. Resolve dependencies
         body.append("    deps = await compiled_di(ctx)")
 
-        # 3. Call the handler with dependencies
-        # Filter deps to only those needed by handler
+        # 3. Call the handler with dependencies + request params
         sig = inspect.signature(handler.fn)
-        args = []
-        for param_name in sig.parameters:
+        if any(param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD, inspect.Parameter.POSITIONAL_ONLY)
+               for param in sig.parameters.values()):
+            raise ValueError("Native runner does not support positional-only or varargs parameters.")
+
+        body.append("    params = {}")
+        for param_name, param in sig.parameters.items():
             if param_name in dependencies:
-                args.append(f"{param_name}=deps['{param_name}']")
-            elif param_name == "data":
-                # Inject parsed data from request
-                body.append("    data = ctx.json()")
-                args.append("data=data")
-            elif param_name in ("connection", "scope", "request"):
-                args.append(f"{param_name}=ctx")
-            else:
-                # Try path params
-                body.append(f"    if '{param_name}' in ctx.path_params:")
+                body.append(f"    params['{param_name}'] = deps['{param_name}']")
+                continue
+            if param_name == "data":
+                body.append("    params['data'] = ctx.json()")
+                continue
+            if param_name in ("connection", "scope", "request"):
+                body.append(f"    params['{param_name}'] = ctx")
+                continue
 
-                param_type = sig.parameters[param_name].annotation
-                if param_type is int:
-                    body.append(f"        {param_name} = int(ctx.path_params['{param_name}'])")
-                elif param_type is float:
-                    body.append(f"        {param_name} = float(ctx.path_params['{param_name}'])")
-                elif param_type is bool:
-                    # Simple bool conversion matching common API expectations
-                    body.append(f"        val = ctx.path_params['{param_name}'].lower()")
-                    body.append(f"        {param_name} = val in ('true', '1', 'yes', 'on')")
-                elif param_type is UUID:
-                    body.append(f"        {param_name} = UUID(ctx.path_params['{param_name}'])")
-                else:
-                    body.append(f"        {param_name} = ctx.path_params['{param_name}']")
-                args.append(f"{param_name}={param_name}")
+            converter, is_list = make_converter(param.annotation)
+            converter_key = f"converter_{param_name}"
+            list_key = f"is_list_{param_name}"
+            local_ns[converter_key] = converter
+            local_ns[list_key] = is_list
 
-        args_str = ", ".join(args)
+            body.append(f"    if '{param_name}' in ctx.path_params:")
+            body.append(f"        raw = ctx.path_params['{param_name}']")
+            body.append(
+                f"        params['{param_name}'] = coerce_value(raw, {converter_key}, {list_key})"
+            )
+            body.append(f"    elif '{param_name}' in ctx.query_params:")
+            body.append(f"        raw = ctx.query_params['{param_name}']")
+            body.append(
+                f"        params['{param_name}'] = coerce_value(raw, {converter_key}, {list_key})"
+            )
+
         if inspect.iscoroutinefunction(handler.fn):
-            body.append(f"    return await handler_fn({args_str})")
+            body.append("    return await handler_fn(**params)")
         else:
-            body.append(f"    return handler_fn({args_str})")
+            body.append("    return handler_fn(**params)")
 
         source = f"async def {func_name}(ctx):\n" + "\n".join(body)
         exec(source, local_ns)  # noqa: S102

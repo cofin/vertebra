@@ -1,4 +1,25 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+
+type EngineSource = { root: string; entry: string };
+
+function resolveEngineSource(): EngineSource {
+  const override = process.env.VERTEBRA_ENGINE_SOURCE_DIR;
+  if (override) {
+    const entry = join(override, "src", "server", "index.ts");
+    if (existsSync(entry)) {
+      return { root: override, entry };
+    }
+  }
+
+  const repoRoot = process.cwd();
+  const repoEntry = join(repoRoot, "src", "ts", "src", "server", "index.ts");
+  if (existsSync(repoEntry)) {
+    return { root: join(repoRoot, "src", "ts"), entry: repoEntry };
+  }
+
+  throw new Error("Unable to locate Vertebra engine source entrypoint");
+}
 
 export interface BuildOptions {
   target: string;
@@ -31,19 +52,32 @@ export function getBunTarget(target: string, profile: string): string {
 
 export async function buildEngine(options: BuildOptions): Promise<string> {
   const bunTarget = getBunTarget(options.target, options.profile);
-  const entry = join(import.meta.dir, "..", "src", "ts", "src", "server", "index.ts");
-  
-  // Extension handling for Windows
+  const source = resolveEngineSource();
+
   const ext = options.target.includes("windows") ? ".exe" : "";
   const outfile = join(options.outdir, `vertebra-engine${ext}`);
 
   console.log(`Building engine for ${options.target} (${options.profile})...`);
-  console.log(`Entry: ${entry}`);
+  console.log(`Entry: ${source.entry}`);
   console.log(`Outfile: ${outfile}`);
   console.log(`Target: ${bunTarget}`);
 
+  if (!existsSync(join(source.root, "node_modules"))) {
+    console.log("Installing engine dependencies...");
+    const install = Bun.spawn({
+      cmd: ["bun", "install"],
+      cwd: source.root,
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    const exitCode = await install.exited;
+    if (exitCode !== 0) {
+      throw new Error(`bun install failed with exit code ${exitCode}`);
+    }
+  }
+
   const result = await Bun.build({
-    entrypoints: [entry],
+    entrypoints: [source.entry],
     compile: true,
     outfile,
     target: bunTarget as any,
@@ -55,7 +89,7 @@ export async function buildEngine(options: BuildOptions): Promise<string> {
   });
 
   console.log(`Success: ${result.success}`);
-  console.log(`Outputs: ${result.outputs.map(o => o.path).join(", ")}`);
+  console.log(`Outputs: ${result.outputs.map((o) => o.path).join(", ")}`);
 
   if (!result.success) {
     throw new Error(`Build failed: ${result.logs.join("\n")}`);

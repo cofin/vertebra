@@ -1,8 +1,8 @@
 """Standalone Python runtime management."""
 
-import hashlib
 import logging
 from pathlib import Path
+import tarfile
 
 import httpx
 
@@ -22,22 +22,22 @@ STANDALONE_RELEASES = {
 }
 
 
-async def download_standalone(target: str, profile: str, cache_dir: Path) -> Path:
-    """Download python-build-standalone release for target platform."""
+def get_release_filename(target: str, profile: str) -> str:
     key = target
     if "x64" in target and profile != "native":
         key = f"{target}-{profile}"
-        if key not in STANDALONE_RELEASES:
-            pass
-
-    if key not in STANDALONE_RELEASES:
-        if "x64" in target:
-            key = f"{target}-modern"
-        
+    if key not in STANDALONE_RELEASES and "x64" in target:
+        key = f"{target}-modern"
     filename = STANDALONE_RELEASES.get(key)
     if not filename:
         msg = f"Unsupported target/profile: {target}/{profile}"
         raise ValueError(msg)
+    return filename
+
+
+async def download_standalone(target: str, profile: str, cache_dir: Path) -> Path:
+    """Download python-build-standalone release for target platform."""
+    filename = get_release_filename(target, profile)
 
     url = f"{STANDALONE_BASE_URL}/{filename}"
     dest = cache_dir / filename
@@ -68,3 +68,37 @@ class StandaloneManager:
     async def get(self, target: str, profile: str) -> Path:
         """Get or download the requested runtime."""
         return await download_standalone(target, profile, self.cache_dir)
+
+    def get_release_filename(self, target: str, profile: str) -> str:
+        """Resolve a target/profile into a PBS release filename."""
+        return get_release_filename(target, profile)
+
+    async def download(self, target: str, profile: str) -> Path:
+        """Download runtime archive (cached)."""
+        return await download_standalone(target, profile, self.cache_dir)
+
+    def extract(self, archive_path: Path, output_dir: Path) -> Path:
+        """Extract PBS archive into output_dir/python and return python home."""
+        python_root = output_dir / "python"
+        if python_root.exists():
+            return python_root
+        python_root.mkdir(parents=True, exist_ok=True)
+
+        if not archive_path.exists():
+            msg = f"Standalone archive missing: {archive_path}"
+            raise FileNotFoundError(msg)
+
+        if archive_path.suffixes[-2:] != [".tar", ".gz"]:
+            msg = f"Unsupported archive format: {archive_path}"
+            raise ValueError(msg)
+
+        with tarfile.open(archive_path, "r:gz") as tar:
+            for member in tar.getmembers():
+                member_path = python_root / member.name
+                if not member_path.resolve().is_relative_to(python_root.resolve()):
+                    msg = f"Blocked unsafe path in archive: {member.name}"
+                    raise ValueError(msg)
+            tar.extractall(python_root)
+
+        extracted = python_root / "python"
+        return extracted if extracted.exists() else python_root

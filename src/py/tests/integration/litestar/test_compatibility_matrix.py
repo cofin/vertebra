@@ -2,6 +2,7 @@ from typing import Annotated
 
 import pytest
 from litestar import Controller, Litestar, get, post
+from litestar.datastructures import UploadFile
 from litestar.di import Provide
 from litestar.enums import RequestEncodingType
 from litestar.params import Body, Dependency
@@ -50,6 +51,20 @@ async def test_fallback_patterns() -> None:
         async def upload(self, data: Annotated[bytes, Body(media_type=RequestEncodingType.MULTI_PART)]) -> dict:
             return {"size": len(data)}
 
+    class MultipartStringController(Controller):
+        path = "/multipart-string"
+
+        @post("/", media_type="multipart/form-data")
+        async def upload(self, data: Annotated[bytes, Body(media_type="multipart/form-data")]) -> dict:
+            return {"size": len(data)}
+
+    class UploadFileController(Controller):
+        path = "/uploadfile"
+
+        @post("/")
+        async def upload(self, file: UploadFile) -> dict:
+            return {"filename": file.filename}
+
     # 2. Dynamic Dependency (simulating create_filter_dependencies)
     class DynamicDepController(Controller):
         path = "/dynamic"
@@ -69,6 +84,8 @@ async def test_fallback_patterns() -> None:
     app = Litestar(
         route_handlers=[
             MultipartController,
+            MultipartStringController,
+            UploadFileController,
             DynamicDepController,
             FileController,
             create_static_files_router(path="/static", directories=["/tmp"]),
@@ -83,9 +100,31 @@ async def test_fallback_patterns() -> None:
     multipart_route = next(r for r in routes if "/multipart" in r.path and "POST" in r.methods)
     assert classify_route(multipart_route) == RouteCapability.ASGI_FALLBACK, "Multipart route should be FALLBACK"
 
+    multipart_string_route = next(r for r in routes if "/multipart-string" in r.path and "POST" in r.methods)
+    assert classify_route(multipart_string_route) == RouteCapability.ASGI_FALLBACK
+
+    upload_file_route = next(r for r in routes if "/uploadfile" in r.path and "POST" in r.methods)
+    assert classify_route(upload_file_route) == RouteCapability.ASGI_FALLBACK
+
     # The static route is usually an ASGIRoute
     static_route = next(r for r in routes if "/static" in r.path)
     assert classify_route(static_route) == RouteCapability.ASGI_FALLBACK, "Static route should be FALLBACK"
+
+
+@pytest.mark.integration
+async def test_union_return_does_not_crash() -> None:
+    class UnionController(Controller):
+        path = "/union"
+
+        @get("/")
+        async def handler(self) -> File | None:
+            return None
+
+    app = Litestar(route_handlers=[UnionController])
+    routes = reflect_routes(app)
+    route = next(r for r in routes if "/union" in r.path)
+
+    assert classify_route(route) == RouteCapability.ASGI_FALLBACK
 
 
 @pytest.mark.integration

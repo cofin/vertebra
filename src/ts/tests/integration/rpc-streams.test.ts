@@ -8,12 +8,20 @@ class MockTransport implements RpcTransport {
     return null;
   }
 
-  subscribe(procedureId: string, payload: unknown, onData: (data: unknown) => void) {
+  subscribe(
+    procedureId: string,
+    payload: unknown,
+    onData: (data: unknown) => void,
+    handlers?: { onError?: (error: unknown) => void; onClose?: () => void },
+  ) {
     if (procedureId === "counter") {
       let count = 0;
       const interval = setInterval(() => {
         onData(count++);
-        if (count > 3) clearInterval(interval);
+        if (count > 3) {
+          clearInterval(interval);
+          handlers?.onClose?.();
+        }
       }, 10);
       return () => clearInterval(interval);
     }
@@ -42,6 +50,17 @@ describe("Vertebra Client RPC & Streams", () => {
     });
     expect(received).toEqual([0, 1, 2]);
   });
-  
-  // Async iterator test would go here once implemented fully
+
+  it("should support async iterator subscriptions", async () => {
+    const received: number[] = [];
+    const iterator = client.counter({})[Symbol.asyncIterator]();
+    for await (const value of iterator) {
+      received.push(value);
+      if (received.length === 3) {
+        await iterator.return?.();
+        break;
+      }
+    }
+    expect(received).toEqual([0, 1, 2]);
+  });
 });

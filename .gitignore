@@ -45,6 +45,7 @@ downloads/
 .mypy-cache**
 **/*/.mypy-cache
 src/py/dma/domain/web/static/
+src/py/vertebra/bin/
 docs/requirements/inputs/*
 .cursor/
 .zed/

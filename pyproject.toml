@@ -12,7 +12,7 @@ classifiers = [
 ]
 dependencies = [
   "msgspec",
-  "nanoarrow",
+  "pyarrow",
   "rich-click",
   "httpx>=0.27.0",
   "jinja2",
@@ -29,8 +29,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 version = "0.1.0"
 
-[project.optional-dependencies]
-arrow = ["pyarrow>=14.0.0"]
+[project.optional-dependencies] 
 numpy = ["numpy>=1.24.0"]
 polars = ["polars>=0.20.0"]
 pandas = ["pandas>=2.0.0"]
@@ -106,17 +105,19 @@ packages = ["src/py/vertebra"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/py/vertebra"]
 artifacts = [
-  "*.j2",
-  "*.sql",
-  "*.ini",
-  "*.ico",
-  "*.png",
-  "*.svg",
-  "*.css",
-  "*.js",
-  "*.html",
-  "*.txt",
-  "*.json",
+  "src/py/vertebra/**/*.j2",
+  "src/py/vertebra/**/*.sql",
+  "src/py/vertebra/**/*.ini",
+  "src/py/vertebra/**/*.ico",
+  "src/py/vertebra/**/*.png",
+  "src/py/vertebra/**/*.svg",
+  "src/py/vertebra/**/*.css",
+  "src/py/vertebra/**/*.js",
+  "src/py/vertebra/**/*.ts",
+  "src/py/vertebra/**/*.html",
+  "src/py/vertebra/**/*.txt",
+  "src/py/vertebra/**/*.json",
+  "src/py/vertebra/**/vertebra-engine*",
 ]
 
 [tool.hatch.build.targets.binary]
@@ -186,18 +187,7 @@ omit = ["tests/*"]
 
 [tool.pytest.ini_options]
 addopts = ["-q", "-ra"]
-filterwarnings = [
-  "ignore::DeprecationWarning:aiosql.*",
-  "ignore::DeprecationWarning:google.*",
-  "ignore::DeprecationWarning:passlib.*",
-  "ignore::DeprecationWarning:pkg_resources",
-  "ignore::DeprecationWarning:rich_click.*",
-  "ignore::DeprecationWarning:litestar.*",
-  "ignore::DeprecationWarning:httpx.*",
-  "ignore::PendingDeprecationWarning:rich_click.*",
-  "ignore:.*uvloop.install\\(\\) is deprecated.*:DeprecationWarning:uvloop.*",
-  "ignore:the \\(type, exc, tb\\) signature of throw\\(\\) is deprecated.*:DeprecationWarning",
-]
+filterwarnings = []
 markers = [
   "unit: Execute unit tests",
   "integration: Execute integration tests (HTTP endpoints with full ASGI stack)",

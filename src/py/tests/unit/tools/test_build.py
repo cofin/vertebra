@@ -42,5 +42,5 @@ def test_build_cli_one_file(runner: CliRunner, tmp_path: Path) -> None:
         )
 
         assert result.exit_code == 0
-        MockBundler.assert_called_once()
+        mock_bundler_cls.assert_called_once()
         mock_instance.build.assert_called_once()

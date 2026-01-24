@@ -1,6 +1,13 @@
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun";
 import { ShmRouter } from "../broker/shm";
-import { type IpcClientConfig, IpcPool, type IpcRequester } from "./client";
+import { encodeMessage } from "../protocol/serialization";
+import {
+  type IpcClientConfig,
+  IpcPool,
+  type IpcRequester,
+  resolveIpcConfig,
+  type ResolvedIpcConfig,
+} from "./client";
 
 export type AsgiRequest = {
   id: string;
@@ -190,8 +197,10 @@ type WebSocketState = {
 export class AsgiBridge {
   private requester: IpcRequester;
   private router?: ShmRouter;
+  private ipcConfig: ResolvedIpcConfig;
 
   constructor(options: AsgiBridgeOptions = {}) {
+    this.ipcConfig = resolveIpcConfig(options.ipc ?? {});
     this.requester = options.requester ?? new IpcPool(options.ipc);
     this.router = options.router;
   }
@@ -200,18 +209,73 @@ export class AsgiBridge {
     const url = new URL(request.url);
     const match = this.router?.matchPath(`/${request.method}${url.pathname}`);
 
-    const meta = this.buildRequestMeta(request, authClaims);
-    if (match) {
-      meta.type = "direct.http";
-      meta.handler_id = match.id;
-      meta.path_params = match.params;
+    const baseMeta = this.buildRequestMeta(request, authClaims);
+    const directMeta = match
+      ? {
+          ...baseMeta,
+          type: "direct.http" as const,
+          handler_id: match.id,
+          path_params: match.params,
+        }
+      : null;
+
+    const contentType = request.headers.get("content-type")?.toLowerCase() ?? "";
+    const isMultipart = contentType.includes("multipart/form-data");
+    const transferEncoding = request.headers.get("transfer-encoding")?.toLowerCase() ?? "";
+    const isChunked = transferEncoding.includes("chunked");
+    const lengthHeader = request.headers.get("content-length");
+    const contentLength = lengthHeader ? Number.parseInt(lengthHeader, 10) : Number.NaN;
+    const lengthKnown = Number.isFinite(contentLength);
+    const hasBody = request.body !== null;
+
+    if (!this.requester.requestStream && isMultipart) {
+      return new Response("Unsupported Media Type", { status: 415 });
+    }
+
+    if (directMeta) {
+      const maxBody = this.maxUnaryBodySize(directMeta);
+      if (isMultipart) {
+        if (this.requester.requestStream) {
+          return this.handleStream(request, baseMeta);
+        }
+        return new Response("Unsupported Media Type", { status: 415 });
+      }
+      if (hasBody && (!lengthKnown || isChunked)) {
+        if (this.requester.requestStream) {
+          return this.handleStream(request, baseMeta);
+        }
+        return new Response("Payload Too Large", { status: 413 });
+      }
+      if (hasBody && lengthKnown && contentLength > maxBody) {
+        if (this.requester.requestStream) {
+          return this.handleStream(request, baseMeta);
+        }
+        return new Response("Payload Too Large", { status: 413 });
+      }
+
+      const body = new Uint8Array(await request.arrayBuffer());
+      if (body.byteLength > maxBody) {
+        return new Response("Payload Too Large", { status: 413 });
+      }
+      return this.handleUnary(this.buildRequest(directMeta, body));
     }
 
     if (this.requester.requestStream) {
-      return this.handleStream(request, meta);
+      return this.handleStream(request, baseMeta);
+    }
+
+    const maxBody = this.maxUnaryBodySize(baseMeta);
+    if (hasBody && (!lengthKnown || isChunked)) {
+      return new Response("Payload Too Large", { status: 413 });
+    }
+    if (hasBody && lengthKnown && contentLength > maxBody) {
+      return new Response("Payload Too Large", { status: 413 });
     }
     const body = new Uint8Array(await request.arrayBuffer());
-    return this.handleUnary(this.buildRequest(meta, body));
+    if (body.byteLength > maxBody) {
+      return new Response("Payload Too Large", { status: 413 });
+    }
+    return this.handleUnary(this.buildRequest(baseMeta, body));
   }
 
   upgradeWebSocket(request: Request, server?: Server<WebSocketState>): boolean {
@@ -495,6 +559,14 @@ export class AsgiBridge {
       },
       isResolved: () => resolved,
     };
+  }
+
+  private maxUnaryBodySize(meta: AsgiRequestStartFrame): number {
+    const payload = this.buildRequest(meta, new Uint8Array());
+    const encoded = encodeMessage(payload);
+    const overhead = encoded.byteLength;
+    const margin = 32;
+    return Math.max(0, this.ipcConfig.slotSize - overhead - margin);
   }
 
   private buildRequestMeta(

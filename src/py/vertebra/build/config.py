@@ -13,6 +13,7 @@ class TargetConfig:
 
 @dataclass
 class BuildConfig:
+    app: str | None = None
     profile: str = "modern"
     targets: dict[str, TargetConfig] = field(default_factory=dict)
 
@@ -32,6 +33,7 @@ class BuildConfig:
             targets[name] = TargetConfig(profile=cfg.get("profile"))
 
         return cls(
+            app=tool.get("app"),
             profile=tool.get("profile", "modern"),
             targets=targets,
         )

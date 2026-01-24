@@ -6,12 +6,89 @@ export interface RpcTransport {
     procedureId: string,
     payload: unknown,
     onData: (data: unknown) => void,
+    handlers?: { onError?: (error: unknown) => void; onClose?: () => void },
   ) => () => void;
 }
 
 export interface Subscription<T> {
-  subscribe(onData: (data: T) => void): () => void;
+  subscribe(
+    onData: (data: T) => void,
+    handlers?: { onError?: (error: unknown) => void; onClose?: () => void },
+  ): () => void;
   [Symbol.asyncIterator](): AsyncIterator<T>;
+}
+
+function createAsyncIterator<T>(
+  subscribe: (
+    onData: (data: T) => void,
+    handlers?: { onError?: (error: unknown) => void; onClose?: () => void },
+  ) => () => void,
+): AsyncIterator<T> {
+  const queue: T[] = [];
+  let resolveNext: ((value: IteratorResult<T>) => void) | null = null;
+  let rejectNext: ((error: unknown) => void) | null = null;
+  let done = false;
+  let failure: unknown = null;
+
+  const onData = (data: T) => {
+    queue.push(data);
+    if (resolveNext) {
+      const resolve = resolveNext;
+      resolveNext = null;
+      rejectNext = null;
+      resolve({ value: queue.shift() as T, done: false });
+    }
+  };
+
+  const onError = (error: unknown) => {
+    failure = error;
+    if (rejectNext) {
+      const reject = rejectNext;
+      resolveNext = null;
+      rejectNext = null;
+      reject(error);
+    }
+  };
+
+  const onClose = () => {
+    done = true;
+    if (resolveNext) {
+      const resolve = resolveNext;
+      resolveNext = null;
+      rejectNext = null;
+      resolve({ value: undefined as T, done: true });
+    }
+  };
+
+  const unsubscribe = subscribe(onData, { onError, onClose });
+
+  return {
+    async next() {
+      if (queue.length > 0) {
+        return { value: queue.shift() as T, done: false };
+      }
+      if (failure) {
+        throw failure;
+      }
+      if (done) {
+        return { value: undefined as T, done: true };
+      }
+      return await new Promise<IteratorResult<T>>((resolve, reject) => {
+        resolveNext = resolve;
+        rejectNext = reject;
+      });
+    },
+    async return() {
+      unsubscribe();
+      done = true;
+      return { value: undefined as T, done: true };
+    },
+    async throw(error) {
+      unsubscribe();
+      failure = error;
+      throw error;
+    },
+  };
 }
 
 export function createClient<TProcedures extends ProcedureMap>(transport: RpcTransport) {
@@ -25,73 +102,37 @@ export function createClient<TProcedures extends ProcedureMap>(transport: RpcTra
 
       const procedureId = String(prop);
       return (params: any) => {
-        // Return an object that looks like a Promise but also has subscribe capability if it's a stream?
-        // Or check return type? We can't check return type at runtime easily without metadata.
+        let unaryPromise: Promise<unknown> | null = null;
+        const requestUnary = () => {
+          if (!unaryPromise) {
+            unaryPromise = transport.request(procedureId, params);
+          }
+          return unaryPromise;
+        };
 
-        // However, if the return type is Subscription<T>, the user will call .subscribe() on the result.
-        // So we can return a "Subscription-like" object that also functions as a Promise if it's a regular call?
-        // No, Promise and Subscription are distinct.
-
-        // Approach: Return a hybrid object or rely on how it's called.
-        // If it's a subscription, the transport handles it.
-        // But how do we know?
-
-        // If we want `await client.procedure(params)` for unary
-        // AND `client.stream(params).subscribe(...)` for streams.
-
-        // We can return an object that has .then (Promise) AND .subscribe (Subscription).
-        // If .then is called, we do a unary request.
-        // If .subscribe is called, we do a subscription request.
+        const subscribe = (
+          onData: (data: any) => void,
+          handlers?: { onError?: (error: unknown) => void; onClose?: () => void },
+        ) => {
+          if (!transport.subscribe) {
+            throw new Error("Transport does not support subscriptions");
+          }
+          return transport.subscribe(procedureId, params, onData, handlers);
+        };
 
         return {
           then(resolve: (value: any) => void, reject: (reason: any) => void) {
-            transport.request(procedureId, params).then(resolve, reject);
+            return requestUnary().then(resolve, reject);
           },
-          subscribe(onData: (data: any) => void) {
-            if (!transport.subscribe) {
-              throw new Error("Transport does not support subscriptions");
-            }
-            return transport.subscribe(procedureId, params, onData);
+          catch(reject: (reason: any) => void) {
+            return requestUnary().catch(reject);
           },
+          finally(callback: () => void) {
+            return requestUnary().finally(callback);
+          },
+          subscribe,
           [Symbol.asyncIterator]() {
-            // Adapt subscription to async iterator
-            if (!transport.subscribe) {
-              throw new Error("Transport does not support subscriptions");
-            }
-            const queue: any[] = [];
-            let resolveNext: (() => void) | null = null;
-            let done = false;
-            let error: any = null;
-
-            const unsubscribe = transport.subscribe(procedureId, params, (data) => {
-              queue.push(data);
-              if (resolveNext) {
-                resolveNext();
-                resolveNext = null;
-              }
-            });
-
-            // TODO: Handle close/error events from transport if available
-
-            return {
-              async next() {
-                if (queue.length > 0) {
-                  return { value: queue.shift(), done: false };
-                }
-                if (done) return { value: undefined, done: true };
-                if (error) throw error;
-
-                await new Promise<void>((resolve) => {
-                  resolveNext = resolve;
-                });
-                return { value: queue.shift(), done: false };
-              },
-              async return() {
-                unsubscribe();
-                done = true;
-                return { value: undefined, done: true };
-              },
-            };
+            return createAsyncIterator(subscribe);
           },
         };
       };

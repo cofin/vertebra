@@ -54,8 +54,6 @@ class Supervisor:
 def run_supervisor(
     *,
     bun_cmd: list[str],
-    # broker_cmd is deprecated/merged into bun_cmd in new architecture but kept for compat if needed
-    # We assume bun_cmd starts the Engine/Broker
     env: dict[str, str],
     workers: int = 1,
     config: dict[str, Any] | None = None,
@@ -66,7 +64,7 @@ def run_supervisor(
 
     Args:
         bun_cmd: Command to start the Bun engine.
-        env: Environment variables (currently set in process, TODO: pass to supervisor).
+        env: Environment variables for the supervised processes.
         workers: Number of Python workers.
         config: Runtime config.
         drain_timeout_ms: Drain timeout in milliseconds before shutdown.
@@ -79,7 +77,7 @@ def run_supervisor(
         msg = "bun_cmd must not be empty"
         raise ValueError(msg)
 
-    # Set env vars for now (Rust supervisor TODO: support env passing)
+    # Apply env vars to current process for supervisor inheritance.
     env_update = dict(env)
     env_update["VERTEBRA_DRAIN_TIMEOUT_MS"] = str(drain_timeout_ms)
     env_update["VERTEBRA_SHUTDOWN_TIMEOUT_MS"] = str(shutdown_timeout_ms)

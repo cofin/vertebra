@@ -1,6 +1,7 @@
 """
 Orchestrates the creation of single-file executables for Vertebra applications.
 """
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -57,8 +58,7 @@ class Bundler:
         self._copy_app_code(python_dir)
 
         # 5. Bundle the Engine (Bun binary)
-        # TODO: This requires the build-engine.ts output or a pre-built asset
-        # await self._bundle_engine(python_dir)
+        await self._bundle_engine(python_dir)
 
         console.log(f"[bold green]Build complete:[/bold green] {self.output_dir}")
         return self.output_dir
@@ -94,8 +94,7 @@ class Bundler:
 
         site_packages = list(python_dir.rglob("site-packages"))
         if not site_packages:
-             # Fallback/Error
-             raise RuntimeError("Could not locate site-packages in extracted Python runtime.")
+            raise RuntimeError("Could not locate site-packages in extracted Python runtime.")
 
         target_site_packages = site_packages[0]
         console.log(f"Installing dependencies to: {target_site_packages}")
@@ -112,17 +111,24 @@ class Bundler:
         # This avoids needing to boot the bundled python just to run pip.
 
         cmd = [
-            "uv", "pip", "install",
+            "uv",
+            "pip",
+            "install",
             ".",
-            "--target", str(target_site_packages),
-            "--system" # Use system python's uv to install to target
+            "--target",
+            str(target_site_packages),
+            "--system",  # Use system python's uv to install to target
         ]
 
         # If uv is not available, fallback to pip?
         # For Vertebra, we assume uv is present per instructions.
 
         console.log(f"Running: {' '.join(cmd)}")
-        process = subprocess.run(cmd, cwd=self.project_dir, capture_output=True, text=True)
+        env = os.environ.copy()
+        source_dir = self.project_dir / "src" / "ts"
+        if source_dir.exists():
+            env["VERTEBRA_ENGINE_SOURCE_DIR"] = str(source_dir)
+        process = subprocess.run(cmd, cwd=self.project_dir, capture_output=True, text=True, env=env)
 
         if process.returncode != 0:
             console.print(f"[red]Dependency installation failed:[/red]\n{process.stderr}")
@@ -138,4 +144,63 @@ class Bundler:
         So this step might be redundant if Step 3 does `pip install .`
         But we might want to clean up or organize things.
         """
-        pass
+        src_root = self.project_dir / "src" / "py"
+        if not src_root.exists():
+            return
+
+        site_packages = list(python_dir.rglob("site-packages"))
+        if not site_packages:
+            raise RuntimeError("Could not locate site-packages for app copy.")
+
+        target_site_packages = site_packages[0]
+        console.log(f"Copying app code from {src_root} to {target_site_packages}")
+
+        for item in src_root.iterdir():
+            if item.name in {"__pycache__", "tests"}:
+                continue
+            dest = target_site_packages / item.name
+            if dest.exists():
+                if dest.is_dir():
+                    shutil.rmtree(dest)
+                else:
+                    dest.unlink()
+            if item.is_dir():
+                shutil.copytree(item, dest)
+            else:
+                shutil.copy2(item, dest)
+
+    async def _bundle_engine(self, python_dir: Path) -> None:
+        """Build and bundle the Bun engine binary into the distribution."""
+        outdir = self.output_dir / "engine"
+        outdir.mkdir(parents=True, exist_ok=True)
+
+        build_cli = Path(__file__).resolve().parent / "tools" / "build-cli.ts"
+        cmd = [
+            "bun",
+            "run",
+            str(build_cli),
+            "--target",
+            self.target,
+            "--profile",
+            self.profile,
+            "--outdir",
+            str(outdir),
+        ]
+
+        console.log(f"Building engine: {' '.join(cmd)}")
+        env = os.environ.copy()
+        source_dir = self.project_dir / "src" / "ts"
+        if source_dir.exists():
+            env["VERTEBRA_ENGINE_SOURCE_DIR"] = str(source_dir)
+        process = subprocess.run(cmd, cwd=self.project_dir, capture_output=True, text=True, env=env)
+        if process.returncode != 0:
+            console.print(f"[red]Engine build failed:[/red]\n{process.stderr}")
+            raise RuntimeError("Engine build failed")
+
+        engine_path = outdir / ("vertebra-engine.exe" if "windows" in self.target else "vertebra-engine")
+        if not engine_path.exists():
+            raise RuntimeError("Engine binary not found after build")
+
+        bin_dir = python_dir / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(engine_path, bin_dir / engine_path.name)

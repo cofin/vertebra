@@ -88,6 +88,23 @@ class MockConnection:
         self.headers = headers
 
 
+class MockRequest:
+    def __init__(
+        self,
+        headers: dict[str, str] | None = None,
+        path_params: dict[str, str] | None = None,
+        query_params: dict[str, list[str]] | None = None,
+        body: bytes | None = None,
+    ) -> None:
+        self.headers = headers or {}
+        self.path_params = path_params or {}
+        self.query_params = query_params or {}
+        self._body = body or b"{}"
+
+    def json(self) -> dict[str, Any]:
+        return {}
+
+
 @pytest.mark.anyio
 async def test_compile_guards_basic() -> None:
     # Compile two guards into one runner
@@ -130,3 +147,22 @@ async def test_compile_guards_empty() -> None:
     compiled = compile_guards([])
     conn = MockConnection({})
     await compiled(conn, None)  # Should just pass
+
+
+@pytest.mark.anyio
+async def test_pipeline_compiler_query_params_defaults() -> None:
+    @get("/items", sync_to_thread=False)
+    def handler(limit: int = 10) -> dict[str, int]:
+        return {"limit": limit}
+
+    handler.resolve_guards = lambda: []
+    handler.resolve_dependencies = lambda: {}
+
+    compiler = PipelineCompiler()
+    runner = compiler.compile_route(handler)
+
+    result = await runner(MockRequest())
+    assert result == {"limit": 10}
+
+    result = await runner(MockRequest(query_params={"limit": ["25"]}))
+    assert result == {"limit": 25}

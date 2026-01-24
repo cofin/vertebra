@@ -152,7 +152,7 @@ def _run_vertebra(
     import shutil
     from pathlib import Path
 
-    from vertebra.supervisor import build_broker_command, run_supervisor
+    from vertebra.supervisor import run_supervisor
 
     bun = shutil.which("bun")
     if not bun:
@@ -180,14 +180,10 @@ def _run_vertebra(
         else [bun, str(engine_path)]
     )
 
-    broker_cmd = build_broker_command(broker_config)
-
     _print_banner(host=host, port=port, workers=workers, log_level=log_level)
 
     exit_code = run_supervisor(
         bun_cmd=bun_cmd,
-        broker_cmd=broker_cmd,
-        broker_config=broker_config,
         env=env,
         drain_timeout_ms=drain_timeout,
         shutdown_timeout_ms=shutdown_timeout,
@@ -203,6 +199,9 @@ def _find_engine() -> str:
     bundled = package_root / "bin" / "vertebra-engine"
     if bundled.exists():
         return str(bundled)
+    bundled_exe = package_root / "bin" / "vertebra-engine.exe"
+    if bundled_exe.exists():
+        return str(bundled_exe)
     repo_root = _find_repo_root(package_root)
     if repo_root:
         entry = repo_root / "src" / "ts" / "src" / "server" / "serve.ts"
