@@ -10,6 +10,14 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 *Link: [./security-user-framework/](./security-user-framework/)*
 *Risk Level: [medium]*
 
+- [ ] **PRD: Fix Supervisor Signature Mismatch**
+*Link: [./fix-supervisor-signature-mismatch/](./fix-supervisor-signature-mismatch/)*
+*Risk Level: [low]*
+
+---
+
+## Archived PRDs
+
 ## [x] PRD: Native Pipeline Compatibility for Real-World Litestar Apps
 
 *Link: [./archive/prd_20260123_native-pipeline-litestar-compat/](./archive/prd_20260123_native-pipeline-litestar-compat/)*
