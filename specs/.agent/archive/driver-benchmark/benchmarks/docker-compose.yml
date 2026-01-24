@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: benchmark
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: benchmark_db
+    tmpfs:
+      - /var/lib/postgresql/data:size=1G
+    command: -c 'max_connections=1000' -c 'shared_buffers=512MB'
+
+  mysql:
+    image: mysql:8.0
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: benchmark_db
+      MYSQL_USER: benchmark
+      MYSQL_PASSWORD: password
+    command: --max_connections=1000 --innodb_buffer_pool_size=512M
