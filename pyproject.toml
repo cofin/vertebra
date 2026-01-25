@@ -18,7 +18,7 @@ dependencies = [
   "jinja2",
 ]
 description = "Python-first, high-performance application backbone with tRPC-like DX"
-keywords = ["trpc", "asgi", "ipc", "performance", "bun", "arrow", "flatbuffers"]
+keywords = ["trpc", "asgi", "ipc", "performance", "bun", "arrow"]
 license = { text = "Apache" }
 maintainers = [
   { name = "Cody Fincher", email = "cody@litestar.dev" },
@@ -92,6 +92,9 @@ python-source = "src/py"
 module-name = "vertebra._vertebra"
 features = ["pyo3/extension-module"]
 bindings = "pyo3"
+
+[tool.uv.workspace]
+members = ["src/wasm/py"]
 
 [tool.hatch.metadata]
 # direct dependency references, e.g `pip @ git+https://github.com/pypa/pip.git@master`

@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
+
+import msgspec
 
 from vertebra.protocol.state import StateDelta, StateOpcode, decode_delta
 
 
-@dataclass(frozen=True, slots=True)
-class ShadowField:
+class ShadowField(msgspec.Struct, frozen=True):
     timestamp_ns: int
     value: Any
     deleted: bool = False
