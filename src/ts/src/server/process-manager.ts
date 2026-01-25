@@ -1,6 +1,8 @@
+import { readdirSync, existsSync } from "node:fs";
 import { delimiter, join, resolve as resolvePath } from "node:path";
 import type { Subprocess } from "bun";
 
+import { ShmRing } from "../broker/shm";
 import { type AsgiIpcFrame, type AsgiRequest } from "../ipc/asgi";
 import {
   IpcClient,
@@ -47,6 +49,32 @@ export class ProcessManager {
     }
   }
 
+  /**
+   * Clean up orphaned shared memory regions from previous runs.
+   * Scans /dev/shm for regions matching our naming pattern.
+   */
+  static cleanupOrphanedShm(name: string): void {
+    const shmDir = "/dev/shm";
+    if (!existsSync(shmDir)) {
+      return; // Not a Linux system or no /dev/shm
+    }
+    try {
+      const files = readdirSync(shmDir);
+      const prefix = name;
+      for (const file of files) {
+        if (file.startsWith(prefix)) {
+          try {
+            ShmRing.unlink(`/${file}`);
+          } catch {
+            // Ignore errors - may be in use or already cleaned up
+          }
+        }
+      }
+    } catch {
+      // Ignore errors reading /dev/shm
+    }
+  }
+
   start(): void {
     if (this.stopping) {
       return;
@@ -54,6 +82,8 @@ export class ProcessManager {
     if (this.healthTimer) {
       return;
     }
+    // Clean up orphaned SHM from previous runs before spawning workers
+    ProcessManager.cleanupOrphanedShm(this.options.ipc.name ?? "vertebra-asgi");
     for (const worker of this.workers.values()) {
       this.spawnWorker(worker.id);
     }
@@ -172,6 +202,16 @@ export class ProcessManager {
     }
     worker.proc = null;
     worker.restarts += 1;
+
+    // Clean up the crashed worker's SHM region to prevent /dev/shm leakage
+    const ipcName = this.options.ipc.name ?? "vertebra-asgi";
+    const controlRingName = `/${ipcName}.asgi.${id}.control`;
+    try {
+      ShmRing.unlink(controlRingName);
+    } catch {
+      // Ignore errors - SHM may already be cleaned up or never created
+    }
+
     const delay = this.computeRestartDelay(worker.restarts);
     const timer = setTimeout(() => {
       this.restartTimers.delete(id);

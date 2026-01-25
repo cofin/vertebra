@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import atexit
 import contextlib
 import importlib
 import logging
@@ -13,7 +14,7 @@ from typing import Any
 
 import msgspec
 
-from vertebra._vertebra import AsyncRing
+from vertebra._vertebra import AsyncRing, shm_unlink
 from vertebra.protocol import HEADER_SIZE, Flags, RequestHeader, ResponseHeader
 from vertebra.serializers import MessagePackCodec, encode_json
 from vertebra.typing import LITESTAR_INSTALLED, LitestarResponse
@@ -196,6 +197,14 @@ class AsgiWorker:
         control_name = self._control_ring_name()
         self._control = AsyncRing.create_named(control_name, self._config.slot_size, self._config.slots)
 
+        # Register atexit handler to clean up SHM on unexpected exit
+        def cleanup_shm() -> None:
+            # PyO3 raises RuntimeError for syscall failures, not OSError
+            with contextlib.suppress(OSError, RuntimeError):
+                shm_unlink(control_name)
+
+        atexit.register(cleanup_shm)
+
     async def serve_forever(self) -> None:
         print(f"Worker {self._worker_id()} starting...", file=sys.stderr)
         await self.start()
@@ -221,7 +230,14 @@ class AsgiWorker:
         self._contexts.clear()
         # Clear clients - rings are released when objects go out of scope
         self._clients.clear()
+
+        # Clean up shared memory to prevent /dev/shm leakage
+        control_name = self._control_ring_name()
         self._control = None
+        # PyO3 raises RuntimeError for syscall failures, not OSError
+        with contextlib.suppress(OSError, RuntimeError):
+            shm_unlink(control_name)
+
         await self._shutdown_lifespan()
 
     async def _serve_loop(self) -> None:

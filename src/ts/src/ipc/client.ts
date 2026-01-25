@@ -164,6 +164,9 @@ class IpcConnection {
   private seq = 0;
   private correlationSeq = 0n; // Protocol-level correlation ID counter
   private clientId = crypto.randomUUID().replaceAll("-", "");
+  // Track SHM names for cleanup on close
+  private requestRingName: string | null = null;
+  private responseRingName: string | null = null;
 
   constructor(
     private config: ResolvedIpcConfig,
@@ -236,6 +239,15 @@ class IpcConnection {
       this.responseRing.close();
       this.responseRing = null;
     }
+    // Clean up shared memory regions to prevent /dev/shm leakage
+    if (this.requestRingName) {
+      ShmRing.unlink(this.requestRingName);
+      this.requestRingName = null;
+    }
+    if (this.responseRingName) {
+      ShmRing.unlink(this.responseRingName);
+      this.responseRingName = null;
+    }
   }
 
   isClosed(): boolean {
@@ -262,6 +274,10 @@ class IpcConnection {
     const controlName = controlRingName(this.config.name, this.workerId);
     const reqName = requestRingName(this.config.name, this.workerId, this.clientId);
     const respName = responseRingName(this.config.name, this.workerId, this.clientId);
+
+    // Store names for cleanup on close
+    this.requestRingName = reqName;
+    this.responseRingName = respName;
 
     this.requestRing = ShmRing.create(reqName, this.config.slotSize, this.config.slots);
     this.responseRing = ShmRing.create(respName, this.config.slotSize, this.config.slots);

@@ -90,3 +90,34 @@ The polling fallback was masking the performance problem. By removing it entirel
 - Unsupported platforms fail fast with clear errors
 - No silent degradation to unusable performance
 - Forces proper eventfd/pipe notification usage
+
+## [2026-01-25] - SHM Cleanup Infrastructure (vertebra-b5l)
+
+### Changes Made
+
+1. **ShmRing.unlink() Added (shm.ts):**
+   - Added static `unlink(name)` method to ShmRing class
+   - Mirrors existing `ShmMpmcRing.unlink()` implementation
+   - Wraps `vtb_shm_unlink()` C ABI function, ignores ENOENT
+
+2. **IpcConnection.close() Cleanup (client.ts):**
+   - Tracks `requestRingName` and `responseRingName` during open()
+   - Calls `ShmRing.unlink()` on both during close()
+
+3. **Python Worker SHM Cleanup (worker.py):**
+   - Added `shm_unlink()` call in `stop()` for graceful shutdown
+   - Registered `atexit` handler for crash safety
+   - **Gotcha:** PyO3 raises `RuntimeError` not `OSError` for syscall failures
+   - Fixed: `contextlib.suppress(OSError, RuntimeError)` catches both
+
+4. **ProcessManager SHM Cleanup (process-manager.ts):**
+   - Added `cleanupOrphanedShm()` static method - scans /dev/shm on startup
+   - Calls cleanup before spawning any workers
+   - Added cleanup to `handleExit()` for individual crashed workers
+   - Control ring name pattern: `/${name}.asgi.${workerId}.control`
+
+### PyO3 Error Handling Gotcha
+When a Rust function exposed via PyO3 encounters a system error:
+- It raises Python `RuntimeError`, NOT `OSError`
+- Error message format: "system call failed: {description} (os error {code})"
+- Must catch `RuntimeError` in addition to `OSError` for robust cleanup

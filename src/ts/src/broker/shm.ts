@@ -374,6 +374,21 @@ export class ShmRing {
   close(): void {
     this.lib.vtb_ring_close(this.handle);
   }
+
+  /**
+   * Unlink (remove) a named shared memory region.
+   *
+   * This removes the name from /dev/shm so new processes cannot open it.
+   * Existing handles remain valid until closed.
+   *
+   * @param name The SHM name (e.g., "/vertebra-asgi.0.control")
+   */
+  static unlink(name: string): void {
+    const lib = loadShmLib();
+    const namePtr = ptr(cString(name));
+    // Ignore errors (e.g. ENOENT) - region may not exist
+    lib.vtb_shm_unlink(namePtr);
+  }
 }
 
 export class ShmRegion {
