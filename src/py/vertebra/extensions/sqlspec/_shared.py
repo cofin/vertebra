@@ -23,7 +23,10 @@ def _decode_arrow(data: Any) -> list[dict[str, Any]]:
         return cast("list[dict[str, Any]]", data.to_pylist())
 
     if isinstance(data, (bytes, bytearray, memoryview)):
-        return decode_arrow(data)
+        decoded = decode_arrow(data)
+        if hasattr(decoded, "to_pylist"):
+            return cast("list[dict[str, Any]]", decoded.to_pylist())
+        return cast("list[dict[str, Any]]", decoded)
 
     return []
 

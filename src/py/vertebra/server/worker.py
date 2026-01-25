@@ -860,8 +860,9 @@ class AsgiWorker:
         await self._lifespan_queue.put({"type": "lifespan.shutdown"})
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self._lifespan_shutdown.wait(), timeout=self._config.timeout)
-        self._lifespan_task.cancel()
-        self._lifespan_task = None
+        if self._lifespan_task is not None:
+            self._lifespan_task.cancel()
+            self._lifespan_task = None
 
     async def _run_lifespan(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
         scope = {

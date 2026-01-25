@@ -67,11 +67,21 @@ async def test_complex_routing_and_di() -> None:
     ctx = VertebraRequest(msg_success)
 
     result = await runner(ctx)
+    raw_payload = None
     if hasattr(result, "body"):
-        body = result.body
-        payload = json.loads(body) if isinstance(body, (bytes, bytearray, memoryview)) else json.loads(bytes(body))
-        assert payload["param"] == 42
-        assert payload["dep"] == "AB"
+        raw_payload = result.body
+    if raw_payload is None and hasattr(result, "content"):
+        raw_payload = result.content
+    if raw_payload is None:
+        raw_payload = result
+
+    if isinstance(raw_payload, (bytes, bytearray, memoryview)):
+        payload = json.loads(bytes(raw_payload))
+    elif isinstance(raw_payload, str):
+        payload = json.loads(raw_payload)
     else:
-        assert result["param"] == 42
-        assert result["dep"] == "AB"
+        payload = raw_payload
+
+    assert isinstance(payload, dict)
+    assert payload["param"] == 42
+    assert payload["dep"] == "AB"

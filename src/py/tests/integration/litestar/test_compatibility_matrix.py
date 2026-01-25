@@ -107,7 +107,7 @@ async def test_fallback_patterns() -> None:
     assert classify_route(upload_file_route) == RouteCapability.ASGI_FALLBACK
 
     # The static route is usually an ASGIRoute
-    static_route = next(r for r in routes if "/static" in r.path)
+    static_route = next(r for r in routes if "/static" in r.path and "GET" in r.methods)
     assert classify_route(static_route) == RouteCapability.ASGI_FALLBACK, "Static route should be FALLBACK"
 
 

@@ -3,6 +3,12 @@ import pytest
 from vertebra.resources.arrow import decode_arrow, encode_arrow, should_use_arrow
 
 
+def _rows(decoded: object) -> list[dict[str, object]]:
+    if hasattr(decoded, "to_pylist"):
+        return decoded.to_pylist()
+    return decoded  # type: ignore[return-value]
+
+
 @pytest.mark.unit
 def test_should_use_arrow() -> None:
     # Small result
@@ -27,10 +33,11 @@ def test_arrow_roundtrip() -> None:
     assert len(encoded) > 0
 
     decoded = decode_arrow(encoded)
-    assert len(decoded) == 3
-    assert decoded[0] == {"id": 1, "name": "Alice", "active": True}
-    assert decoded[1] == {"id": 2, "name": "Bob", "active": False}
-    assert decoded[2] == {"id": 3, "name": "Charlie", "active": True}
+    rows = _rows(decoded)
+    assert len(rows) == 3
+    assert rows[0] == {"id": 1, "name": "Alice", "active": True}
+    assert rows[1] == {"id": 2, "name": "Bob", "active": False}
+    assert rows[2] == {"id": 3, "name": "Charlie", "active": True}
 
 
 @pytest.mark.unit
@@ -38,4 +45,5 @@ def test_arrow_empty_result() -> None:
     data = {"columns": ["id"], "rows": []}
     encoded = encode_arrow(data)
     decoded = decode_arrow(encoded)
-    assert decoded == []
+    rows = _rows(decoded)
+    assert rows == []

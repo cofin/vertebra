@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import os
 import shutil
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -11,15 +12,40 @@ import jwt
 import pytest
 
 
+async def _wait_for_broker_ready(proc: subprocess.Popen[str], client: httpx.AsyncClient, timeout: float = 20.0) -> None:
+    start = time.monotonic()
+    while True:
+        if proc.poll() is not None:
+            msg = "Broker process exited before becoming ready."
+            raise RuntimeError(msg)
+        try:
+            resp = await client.get("/me", timeout=2.0)
+            if resp.status_code == 200:
+                return
+        except httpx.HTTPError:
+            pass
+        if time.monotonic() - start >= timeout:
+            msg = "Broker did not become ready in time."
+            raise TimeoutError(msg)
+        await asyncio.sleep(0.5)
+
+
+def _get_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 @pytest.mark.anyio
 @pytest.mark.integration
 async def test_broker_jwt_auth_integration() -> None:
     # Setup config
     secret = "test-secret"
+    port = _get_free_port()
     config_content = f"""
 export default {{
   server: {{
-    port: 8085,
+    port: {port},
   }},
   python: {{
     app: "tmp.auth_test_app:app",
@@ -119,23 +145,22 @@ app = Litestar(route_handlers=[me_handler])
     )
 
     try:
-        # Wait for start - ASYNC251
-        await asyncio.sleep(5)
+        async with httpx.AsyncClient(base_url=f"http://localhost:{port}", timeout=10.0) as client:
+            await _wait_for_broker_ready(proc, client)
 
-        # Generate JWT
-        token = jwt.encode(
-            {
-                "id": "user-123",
-                "username": "jdoe",
-                "iss": "test-issuer",
-                "aud": "test-audience",
-                "exp": int(time.time()) + 3600,
-            },
-            secret,
-            algorithm="HS256",
-        )
+            # Generate JWT
+            token = jwt.encode(
+                {
+                    "id": "user-123",
+                    "username": "jdoe",
+                    "iss": "test-issuer",
+                    "aud": "test-audience",
+                    "exp": int(time.time()) + 3600,
+                },
+                secret,
+                algorithm="HS256",
+            )
 
-        async with httpx.AsyncClient(base_url="http://localhost:8085", timeout=10.0) as client:
             # 1. No auth
             resp = await client.get("/me")
             assert resp.status_code == 200
