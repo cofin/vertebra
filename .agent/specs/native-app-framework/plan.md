@@ -84,12 +84,12 @@
 - [x] Expose via PyO3 bindings
 - [x] Write unit tests and benchmarks
 
-### Task 3.3: Middleware Chain
-- [ ] Create `src/py/vertebra/middleware/__init__.py`
-- [ ] Implement middleware protocol (before/after hooks)
-- [ ] Middleware DI injection support
-- [ ] Middleware ordering and priority
-- [ ] Write unit tests for middleware
+### Task 3.3: Middleware Chain [c53d31e]
+- [x] Create `src/py/vertebra/middleware/__init__.py`
+- [x] Implement middleware protocol (before/after hooks)
+- [x] Middleware DI injection support
+- [x] Middleware ordering and priority
+- [x] Write unit tests for middleware
 
 ### Task 3.4: Checkpoint - Verify Phase 3 Complete
 - [ ] Guards execute before handlers
