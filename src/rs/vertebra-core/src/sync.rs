@@ -647,11 +647,13 @@ mod tests {
         let cond = SharedCondvar::new();
         std::thread::scope(|s| {
             s.spawn(|| {
+                let mut guard = mutex.lock().unwrap();
+                *guard = true;
                 let _ = cond.notify_one();
             });
             let guard = mutex.lock().unwrap();
-            let guard = cond.wait(guard).unwrap();
-            drop(guard);
+            let guard = cond.wait_while(guard, |ready| !*ready).unwrap();
+            assert!(*guard);
         });
     }
 
