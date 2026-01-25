@@ -184,7 +184,7 @@
 - [x] Write unit tests
 
 ### Task 6.2: Event System
-### Task 6.2: Event System [35206e8]
+### Task 6.2: Event System [ddeb974]
 - [x] Create `src/py/vertebra/events/__init__.py`
 - [x] Implement pub/sub event dispatcher
 - [x] Event DI injection support
