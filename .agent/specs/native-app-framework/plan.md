@@ -101,11 +101,11 @@
 
 ## Phase 4: State Synchronization
 
-### Task 4.1: Opcode Protocol Definition
-- [ ] Define opcodes in shared header (Rust/Python/TypeScript)
-- [ ] Implement MessagePack encoding for deltas
-- [ ] Define state ID and field ID schemes
-- [ ] Write protocol documentation
+### Task 4.1: Opcode Protocol Definition [48eca22]
+- [x] Define opcodes in shared header (Rust/Python/TypeScript)
+- [x] Implement MessagePack encoding for deltas
+- [x] Define state ID and field ID schemes
+- [x] Write protocol documentation
 
 ### Task 4.2: NativeState Delta Tracking
 - [ ] Extend `src/py/vertebra/state.py`
