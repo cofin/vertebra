@@ -60,7 +60,7 @@
 - [x] Support event handler context
 - [x] Write integration tests
 
-### Task 2.5: Checkpoint - Verify Phase 2 Complete
+### Task 2.5: Checkpoint - Verify Phase 2 Complete [4b83761]
 - [x] DI works in controllers [73a2ff4]
 - [x] AOT compilation reduces overhead to ~0 [4b83761]
 - [x] All scopes (singleton, request, transient) function correctly [4b83761]
