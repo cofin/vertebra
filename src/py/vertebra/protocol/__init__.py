@@ -25,7 +25,20 @@ from dataclasses import dataclass
 from enum import IntFlag
 from typing import Self
 
-__all__ = ["HEADER_SIZE", "ControlMessageKind", "Flags", "RequestHeader", "ResponseFlags", "ResponseHeader"]
+__all__ = [
+    "HEADER_SIZE",
+    "ControlMessageKind",
+    "Flags",
+    "RequestHeader",
+    "ResponseFlags",
+    "ResponseHeader",
+    "StateDelta",
+    "StateOpcode",
+    "decode_delta",
+    "encode_delta",
+    "field_id",
+    "state_id",
+]
 
 # Header format: little-endian u64 + u32 + u32 = 16 bytes
 _HEADER_STRUCT = struct.Struct("<QII")
@@ -175,3 +188,6 @@ class ControlMessageKind:
     def is_valid(cls, kind: str) -> bool:
         """Check if kind is a valid control message type."""
         return kind in cls._VALID
+
+
+from .state import StateDelta, StateOpcode, decode_delta, encode_delta, field_id, state_id  # noqa: E402

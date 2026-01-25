@@ -185,6 +185,8 @@ pub enum ControlMessageKind {
     Shutdown,
 }
 
+pub mod state;
+
 impl ControlMessageKind {
     /// Convert to string.
     pub fn as_str(&self) -> &'static str {
