@@ -129,10 +129,10 @@
 - [x] Write integration tests [57694be]
 
 ### Task 4.5: Checkpoint - Verify Phase 4 Complete
-- [ ] State changes propagate in <100μs
-- [ ] LWW resolves conflicts correctly
-- [ ] Shadow state reads are <100ns
-- [ ] Multi-worker sync works end-to-end
+- [x] State changes propagate in <100μs
+- [x] LWW resolves conflicts correctly
+- [x] Shadow state reads are <100ns
+- [x] Multi-worker sync works end-to-end
 
 ---
 
