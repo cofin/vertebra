@@ -16,7 +16,7 @@ StateT = TypeVar("StateT", bound=NativeState)
 LifecycleHook = Callable[[], Any | Awaitable[Any]]
 
 
-class App:
+class Vertex:
     """Native application container for routing, state, and lifecycle hooks."""
 
     __slots__ = (
@@ -76,7 +76,7 @@ class App:
     def states(self) -> MappingProxyType[type[NativeState], NativeState]:
         return MappingProxyType(self._states)
 
-    def register(self, target: Router | type[Controller] | Controller) -> Any:
+    def register(self, target: Router | type[Controller] | Controller | Callable[..., Any]) -> Any:
         if isinstance(target, Router):
             self._routers.append(target)
             self._routes.extend(target.routes)
@@ -88,14 +88,21 @@ class App:
         elif isinstance(target, Controller):
             controller_cls = target.__class__
 
-        if controller_cls is None:
-            raise TypeError("register expects a Router or Controller")
+        if controller_cls:
+            self._controllers.append(controller_cls)
+            controller_routes = controller_cls.controller_routes()
+            self._controller_routes.extend(controller_routes)
+            self._routes.extend(route.route for route in controller_routes)
+            return target
+        
+        # Check if it's a handler function with route metadata
+        if callable(target):
+            routes = getattr(target, "__vertebra_routes__", None)
+            if routes:
+                self._routes.extend(routes)
+                return target
 
-        self._controllers.append(controller_cls)
-        controller_routes = controller_cls.controller_routes()
-        self._controller_routes.extend(controller_routes)
-        self._routes.extend(route.route for route in controller_routes)
-        return target
+        raise TypeError("register expects a Router, Controller, or decorated handler")
 
     def state(self, state_cls: type[StateT], *, name: str | None = None, **kwargs: Any) -> StateT:
         if not issubclass(state_cls, NativeState):
@@ -142,6 +149,10 @@ class App:
         await _run_hooks(self._shutdown_hooks)
 
 
+# Alias for backward compatibility
+App = Vertex
+
+
 async def _run_hooks(hooks: list[LifecycleHook]) -> None:
     for hook in hooks:
         result = hook()
@@ -149,4 +160,4 @@ async def _run_hooks(hooks: list[LifecycleHook]) -> None:
             await result
 
 
-__all__ = ("App",)
+__all__ = ("App", "Vertex")
