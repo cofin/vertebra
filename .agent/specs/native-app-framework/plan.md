@@ -53,12 +53,12 @@
 - [x] Cache compiled runners
 - [x] Write tests for compilation correctness
 
-### Task 2.4: VertebraContext Abstraction
-- [ ] Create context wrapper for all entry points
-- [ ] Support HTTP request context
-- [ ] Support CLI context
-- [ ] Support event handler context
-- [ ] Write integration tests
+### Task 2.4: VertebraContext Abstraction [f3236a7]
+- [x] Create context wrapper for all entry points
+- [x] Support HTTP request context
+- [x] Support CLI context
+- [x] Support event handler context
+- [x] Write integration tests
 
 ### Task 2.5: Checkpoint - Verify Phase 2 Complete
 - [ ] DI works in controllers
