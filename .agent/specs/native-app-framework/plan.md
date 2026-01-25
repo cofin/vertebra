@@ -91,11 +91,11 @@
 - [x] Middleware ordering and priority
 - [x] Write unit tests for middleware
 
-### Task 3.4: Checkpoint - Verify Phase 3 Complete
-- [ ] Guards execute before handlers
-- [ ] Rust guards perform <10μs
-- [ ] Middleware chain executes in correct order
-- [ ] DI works in guards and middleware
+### Task 3.4: Checkpoint - Verify Phase 3 Complete [67bd6be]
+- [x] Guards execute before handlers
+- [x] Rust guards perform <10μs
+- [x] Middleware chain executes in correct order
+- [x] DI works in guards and middleware
 
 ---
 
