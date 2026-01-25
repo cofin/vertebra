@@ -14,3 +14,4 @@ export {
   type SchedulerPoolStats,
 } from "./client";
 export { type BrokerConfig, BrokerServer } from "./server";
+export { StateHub, type StateHubOptions } from "./state-hub";
