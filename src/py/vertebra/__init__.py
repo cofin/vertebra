@@ -33,6 +33,7 @@ from vertebra.procedures import (
 )
 
 __all__ = (
+    "App",
     "MsgspecSerializer",
     "ProviderPlugin",
     "PydanticSerializer",
@@ -55,10 +56,15 @@ __version__ = "0.1.0"
 
 
 def __getattr__(name: str) -> object:
-    if name in {"ProviderPlugin", "Vertebra"}:
+    if name in {"App", "ProviderPlugin", "Vertebra"}:
+        from vertebra.app import App
         from vertebra.main import ProviderPlugin, Vertebra
 
-        return {"ProviderPlugin": ProviderPlugin, "Vertebra": Vertebra}[name]
+        return {
+            "App": App,
+            "ProviderPlugin": ProviderPlugin,
+            "Vertebra": Vertebra,
+        }[name]
     if name == "ShadowState":
         from vertebra.state_shadow import ShadowState
 

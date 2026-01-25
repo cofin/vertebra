@@ -13,6 +13,12 @@ resolution-markers = [
     "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
+[manifest]
+members = [
+    "vertebra",
+    "vertebra-wasm",
+]
+
 [[package]]
 name = "advanced-alchemy"
 version = "1.8.2"
@@ -3427,6 +3433,7 @@ polars = [
 ]
 sqlspec = [
     { name = "pyarrow" },
+    { name = "sqlspec" },
 ]
 
 [package.dev-dependencies]
@@ -3516,6 +3523,7 @@ requires-dist = [
     { name = "pyarrow", marker = "extra == 'sqlspec'" },
     { name = "rich" },
     { name = "rich-click" },
+    { name = "sqlspec", marker = "extra == 'sqlspec'" },
 ]
 provides-extras = ["numpy", "polars", "pandas", "sqlspec"]
 
@@ -3594,6 +3602,21 @@ test = [
     { name = "sqlspec", extras = ["mypyc", "performance", "obstore", "aiosqlite", "asyncpg", "msgspec", "pydantic", "adk"] },
     { name = "time-machine", specifier = ">=2.15.0" },
     { name = "uvloop" },
+]
+
+[[package]]
+name = "vertebra-wasm"
+version = "0.1.0"
+source = { editable = "src/wasm" }
+dependencies = [
+    { name = "msgspec" },
+    { name = "nanoarrow" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "msgspec", specifier = ">=0.18.0" },
+    { name = "nanoarrow", specifier = ">=0.4.0" },
 ]
 
 [[package]]

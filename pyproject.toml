@@ -17,8 +17,8 @@ dependencies = [
   "rich-click",
   "jinja2",
 ]
-description = "Python-first, high-performance application backbone with tRPC-like DX"
-keywords = ["trpc", "asgi", "ipc", "performance", "bun", "arrow"]
+description = "Python-first, high-performance application backbone"
+keywords = [ "ipc", "performance", "arrow"]
 license = { text = "Apache" }
 maintainers = [
   { name = "Cody Fincher", email = "cody@litestar.dev" },
@@ -32,7 +32,7 @@ version = "0.1.0"
 numpy = ["numpy>=1.24.0"]
 polars = ["polars>=0.20.0"]
 pandas = ["pandas>=2.0.0"]
-sqlspec = ["pyarrow"]
+sqlspec = ["sqlspec","pyarrow"]
 
 [project.scripts]
 vertebra = "vertebra.cli:cli"
@@ -94,7 +94,7 @@ features = ["pyo3/extension-module"]
 bindings = "pyo3"
 
 [tool.uv.workspace]
-members = ["src/wasm/py"]
+members = ["src/wasm"]
 
 [tool.hatch.metadata]
 # direct dependency references, e.g `pip @ git+https://github.com/pypa/pip.git@master`
