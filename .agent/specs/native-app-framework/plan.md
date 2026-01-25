@@ -77,12 +77,12 @@
 - [x] Guard result caching per request
 - [x] Write unit tests for guards
 
-### Task 3.2: Native Guards in Rust
-- [ ] Create `src/rs/vertebra-core/src/guards.rs`
-- [ ] Implement JWT validation guard
-- [ ] Implement rate limiting guard
-- [ ] Expose via PyO3 bindings
-- [ ] Write unit tests and benchmarks
+### Task 3.2: Native Guards in Rust [2bfe0a1]
+- [x] Create `src/rs/vertebra-core/src/guards.rs`
+- [x] Implement JWT validation guard
+- [x] Implement rate limiting guard
+- [x] Expose via PyO3 bindings
+- [x] Write unit tests and benchmarks
 
 ### Task 3.3: Middleware Chain
 - [ ] Create `src/py/vertebra/middleware/__init__.py`
