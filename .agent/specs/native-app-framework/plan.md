@@ -146,11 +146,12 @@
 - [x] Write integration tests [9bebd17]
 
 ### Task 5.2: WebSocket Support
-- [ ] Create `src/ts/src/server/websocket.ts`
-- [ ] Bidirectional state sync
-- [ ] Connection upgrade handling
-- [ ] Heartbeat and reconnection
-- [ ] Write integration tests
+### Task 5.2: WebSocket Support [d3f64a4]
+- [x] Create `src/ts/src/server/websocket.ts` [d3f64a4]
+- [x] Bidirectional state sync [d3f64a4]
+- [x] Connection upgrade handling [d3f64a4]
+- [x] Heartbeat and reconnection [d3f64a4]
+- [x] Write integration tests [d3f64a4]
 
 ### Task 5.3: Long-Polling Fallback
 - [ ] Implement long-polling endpoint
