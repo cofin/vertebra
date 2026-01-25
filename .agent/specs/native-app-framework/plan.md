@@ -2,19 +2,19 @@
 
 ## Phase 1: Core Routing Infrastructure
 
-### Task 1.1: Rust Router Wrapper
-- [~] Create `src/rs/vertebra-core/src/router.rs`
-- [~] Wrap `matchit::Router` with FFI-friendly API
-- [~] Support path parameters with type hints (`{id:int}`, `{name:str}`)
-- [~] Expose via PyO3 and napi-rs bindings
-- [~] Write unit tests for route matching
+### Task 1.1: Rust Router Wrapper [872e08f]
+- [x] Create `src/rs/vertebra-core/src/router.rs`
+- [x] Wrap `matchit::Router` with FFI-friendly API
+- [x] Support path parameters with type hints (`{id:int}`, `{name:str}`)
+- [x] Expose via PyO3 and napi-rs bindings
+- [x] Write unit tests for route matching
 
-### Task 1.2: Python Routing Layer
-- [ ] Create `src/py/vertebra/routing/__init__.py`
-- [ ] Implement `Router` class for route grouping
-- [ ] Implement route decorators (`@get`, `@post`, `@put`, `@delete`, `@patch`)
-- [ ] Path parameter extraction and type coercion
-- [ ] Write unit tests for routing
+### Task 1.2: Python Routing Layer [cbfe335]
+- [x] Create `src/py/vertebra/routing/__init__.py`
+- [x] Implement `Router` class for route grouping
+- [x] Implement route decorators (`@get`, `@post`, `@put`, `@delete`, `@patch`)
+- [x] Path parameter extraction and type coercion
+- [x] Write unit tests for routing
 
 ### Task 1.3: Controller Base Class
 - [ ] Create `src/py/vertebra/controllers/__init__.py`
