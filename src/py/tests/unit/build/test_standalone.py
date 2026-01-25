@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from vertebra.build.standalone import StandaloneManager, STANDALONE_RELEASES
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def test_get_release_filename_invalid(manager):
     with pytest.raises(ValueError):
         manager.get_release_filename("invalid-target", "modern")
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_download_cached(manager, tmp_path):
     """Test that download returns immediately if file exists."""
     target = "linux-x64"
@@ -41,31 +41,28 @@ async def test_download_cached(manager, tmp_path):
     result = await manager.download(target, profile)
     assert result == cached_file
 
-@pytest.mark.asyncio
-@patch("vertebra.build.standalone.httpx.AsyncClient")
-async def test_download_fetch(mock_client_cls, manager, tmp_path):
+@pytest.mark.anyio
+@patch("vertebra.build.standalone.urllib.request.urlopen")
+async def test_download_fetch(mock_urlopen, manager, tmp_path):
     """Test actual download logic (mocked)."""
     target = "linux-x64"
     profile = "modern"
     filename = manager.get_release_filename(target, profile)
 
-    # Mock async iterator for chunks
-    async def mock_aiter_bytes():
-        yield b"chunk1"
-        yield b"chunk2"
+    class DummyResponse:
+        def __init__(self, chunks):
+            self._chunks = list(chunks)
 
-    # Mock httpx response
-    mock_response = MagicMock()
-    mock_response.headers = {"content-length": "10"}
-    mock_response.aiter_bytes = mock_aiter_bytes
+        def read(self, _size=8192):
+            return self._chunks.pop(0) if self._chunks else b""
 
-    # Async context manager mock setup
-    mock_client = mock_client_cls.return_value
-    mock_client.__aenter__.return_value = mock_client
-    mock_client.__aexit__.return_value = None
+        def __enter__(self):
+            return self
 
-    mock_client.stream.return_value.__aenter__.return_value = mock_response
-    mock_client.stream.return_value.__aexit__.return_value = None
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    mock_urlopen.return_value = DummyResponse([b"chunk1", b"chunk2"])
 
     result = await manager.download(target, profile)
 

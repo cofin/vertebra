@@ -15,7 +15,7 @@ def bundler(tmp_path, mock_standalone_manager):
     output_dir = tmp_path / "dist"
     return Bundler(project_dir, output_dir, target="linux-x64")
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_bundler_flow(bundler, mock_standalone_manager, tmp_path):
     """Test the main build flow."""
     # Mock manager behavior
@@ -32,6 +32,10 @@ async def test_bundler_flow(bundler, mock_standalone_manager, tmp_path):
     with patch("vertebra.build.bundler.subprocess.run") as mock_run:
         mock_run.return_value.returncode = 0
 
+        engine_dir = bundler.output_dir / "engine"
+        engine_dir.mkdir(parents=True, exist_ok=True)
+        (engine_dir / "vertebra-engine").write_bytes(b"")
+
         output_path = await bundler.build()
 
         assert output_path == bundler.output_dir
@@ -41,13 +45,13 @@ async def test_bundler_flow(bundler, mock_standalone_manager, tmp_path):
 
         # Verify install called
         assert mock_run.called
-        cmd = mock_run.call_args[0][0]
-        assert "uv" in cmd
-        assert "pip" in cmd
-        assert "install" in cmd
-        assert str(fake_site_packages) in cmd
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        assert any("uv" in cmd for cmd in commands)
+        assert any("pip" in cmd for cmd in commands)
+        assert any("install" in cmd for cmd in commands)
+        assert any(str(fake_site_packages) in cmd for cmd in commands)
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_bundler_install_fail(bundler, mock_standalone_manager, tmp_path):
     """Test failure during dependency installation."""
     manager_instance = mock_standalone_manager.return_value
