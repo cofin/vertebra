@@ -61,7 +61,7 @@
 - [x] Write integration tests
 
 ### Task 2.5: Checkpoint - Verify Phase 2 Complete
-- [ ] DI works in controllers
+- [x] DI works in controllers [73a2ff4]
 - [ ] AOT compilation reduces overhead to ~0
 - [ ] All scopes (singleton, request, transient) function correctly
 
