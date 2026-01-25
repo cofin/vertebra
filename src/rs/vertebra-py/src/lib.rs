@@ -21,6 +21,7 @@ use vertebra_core::buffer::{Buffer, BufferPool, RingLayout};
 use vertebra_core::channel::{
     BufferChannel, BufferMessage, ChannelError, MpmcRing, SlotView, SpscRing,
 };
+use vertebra_core::guards::{validate_jwt as validate_jwt_core, RateLimiter};
 use vertebra_core::router::{RouteId, Router};
 use vertebra_core::shm::ShmRegion;
 
@@ -50,6 +51,30 @@ impl PyRouter {
     fn match_path(&self, path: &str) -> Option<u64> {
         self.inner.match_path(path).map(|(id, _)| id.0)
     }
+}
+
+#[pyclass(name = "RateLimiter")]
+struct PyRateLimiter {
+    inner: RateLimiter,
+}
+
+#[pymethods]
+impl PyRateLimiter {
+    #[new]
+    fn new(max_tokens: f64, refill_per_second: f64) -> Self {
+        Self {
+            inner: RateLimiter::new(max_tokens, refill_per_second),
+        }
+    }
+
+    fn allow(&self, key: &str) -> bool {
+        self.inner.allow(key)
+    }
+}
+
+#[pyfunction(name = "validate_jwt")]
+fn validate_jwt_py(token: &str, secret: &str, issuer: Option<&str>, audience: Option<&str>) -> PyResult<bool> {
+    Ok(validate_jwt_core(token, secret, issuer, audience).is_ok())
 }
 
 #[pyclass(name = "ShmRegion")]
@@ -1112,6 +1137,7 @@ fn shm_unlink(_name: &str) -> PyResult<()> {
 fn _vertebra(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", vertebra_core::VERSION)?;
     m.add_class::<PyRouter>()?;
+    m.add_class::<PyRateLimiter>()?;
     m.add_class::<PyShmRegion>()?;
     m.add_class::<PyBufferPool>()?;
     m.add_class::<PyBuffer>()?;
@@ -1121,6 +1147,7 @@ fn _vertebra(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMpmcRing>()?;
     m.add_class::<PyBufferChannel>()?;
     m.add_class::<supervisor::NativeSupervisor>()?;
+    m.add_function(wrap_pyfunction!(validate_jwt_py, m)?)?;
     m.add_function(wrap_pyfunction!(shm_unlink, m)?)?;
     // Register async ring types (PRD-10: eventfd async transport)
     async_ring::register(m)?;

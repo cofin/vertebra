@@ -9,6 +9,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod async_ring;
 pub mod buffer;
 pub mod channel;
+pub mod guards;
 pub mod ipc;
 pub mod notify;
 pub(crate) mod platform;
