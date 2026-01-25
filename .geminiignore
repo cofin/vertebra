@@ -10,7 +10,7 @@
 # IDEs and Editors
 .vscode/
 .idea/
-.claude/
+!.claude/
 *.iml
 .DS_Store
 

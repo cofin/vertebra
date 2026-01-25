@@ -72,3 +72,4 @@ uv.toml
 # Benchmark virtual environment
 benchmarks/.venv/
 benchmarks/results/
+.geminiignore
