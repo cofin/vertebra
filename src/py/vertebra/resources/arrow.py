@@ -141,21 +141,45 @@ def encode_arrow(result: dict[str, Any]) -> bytes:
     return out.getvalue()
 
 
-def decode_arrow(data: bytes | memoryview) -> list[dict[str, Any]]:
-    """Decode Arrow IPC stream to list of dicts using nanoarrow.
+def decode_arrow(data: bytes | memoryview) -> Any:
+    """Decode Arrow IPC stream to a table-like object.
 
     Args:
         data: Arrow IPC stream bytes or memoryview.
 
     Returns:
-        List of dictionaries (rows).
+        A table-like object (pyarrow.Table when available), or a lightweight
+        wrapper that provides ``to_pylist`` and ``to_pydict``.
     """
+    buffer = data if isinstance(data, (bytes, bytearray)) else bytes(data)
+
+    try:
+        import pyarrow as pa
+
+        reader = pa.ipc.RecordBatchStreamReader(pa.BufferReader(buffer))
+        return reader.read_all()
+    except Exception:  # noqa: BLE001
+        pass
+
     import nanoarrow as na
     import nanoarrow.ipc as na_ipc
     from nanoarrow.iterator import iter_py
 
+    class ArrowRows:
+        __slots__ = ("_rows", "column_names")
+
+        def __init__(self, rows: list[dict[str, Any]]) -> None:
+            self._rows = rows
+            self.column_names = list(rows[0].keys()) if rows else []
+
+        def to_pylist(self) -> list[dict[str, Any]]:
+            return list(self._rows)
+
+        def to_pydict(self) -> dict[str, Any]:
+            return {col: [row.get(col) for row in self._rows] for col in self.column_names}
+
     # Create input stream
-    input_stream = io.BytesIO(data) if isinstance(data, (bytes, bytearray)) else io.BytesIO(bytes(data))
+    input_stream = io.BytesIO(buffer)
 
     rows: list[dict[str, Any]] = []
     try:
@@ -164,4 +188,4 @@ def decode_arrow(data: bytes | memoryview) -> list[dict[str, Any]]:
                 rows.extend(list(iter_py(array)))
     except Exception:  # noqa: BLE001, S110
         pass
-    return rows
+    return ArrowRows(rows)

@@ -6,6 +6,7 @@ import pytest
 
 from tests.helpers.shm import skip_if_shm_unavailable
 from vertebra.drivers.postgres import AsyncPostgresDriver, SyncPostgresDriverConfig
+from vertebra.ipc.channel import decode_request, encode_response
 from vertebra.resources import BrokerClientConfig
 
 pytestmark = pytest.mark.integration
@@ -61,7 +62,8 @@ async def test_postgres_transaction_context() -> None:
                         data = await asyncio.to_thread(req_ring.recv_timeout, slot_size, 1000)
                         if data is None:
                             break
-                        request = decoder.decode(data)
+                        correlation_id, _flags, _procedure, payload = decode_request(data)
+                        request = decoder.decode(payload)
                         kind = request.get("kind")
                         if kind == "acquire":
                             response: dict[str, Any] = {"ok": True, "token": "token", "id": request["id"]}
@@ -82,7 +84,11 @@ async def test_postgres_transaction_context() -> None:
                             response = {"ok": True, "id": request["id"]}
                         else:
                             response = {"ok": False, "error": {"message": "unknown"}, "id": request["id"]}
-                        resp_ring.send_timeout(encoder.encode(response), 0, 1000)
+                        resp_ring.send_timeout(
+                            encode_response(encoder.encode(response), correlation_id=correlation_id),
+                            0,
+                            1000,
+                        )
                 except Exception:  # noqa: S110
                     pass
             except Exception:  # noqa: S110

@@ -5,6 +5,7 @@ import pytest
 
 from tests.helpers.shm import skip_if_shm_unavailable
 from vertebra.drivers.postgres import AsyncPostgresDriver, SyncPostgresDriverConfig
+from vertebra.ipc.channel import decode_request, encode_response
 from vertebra.resources import BrokerClientConfig
 
 pytestmark = pytest.mark.integration
@@ -59,19 +60,25 @@ async def test_postgres_driver_async_fetch() -> None:
                     data = await asyncio.to_thread(req_ring.recv_timeout, slot_size, 1000)
                     if data is None:
                         return
-                    request = decoder.decode(data)
-                    resp_ring.send_timeout(encoder.encode({"ok": True, "token": "token", "id": request["id"]}), 0, 1000)
+                    correlation_id, _flags, _procedure, payload = decode_request(data)
+                    request = decoder.decode(payload)
+                    resp_ring.send_timeout(
+                        encode_response(encoder.encode({"ok": True, "token": "token", "id": request["id"]}), correlation_id=correlation_id),
+                        0,
+                        1000,
+                    )
                     # execute
                     data = await asyncio.to_thread(req_ring.recv_timeout, slot_size, 1000)
                     if data is None:
                         return
-                    request = decoder.decode(data)
+                    correlation_id, _flags, _procedure, payload = decode_request(data)
+                    request = decoder.decode(payload)
                     resp_ring.send_timeout(
-                        encoder.encode({
+                        encode_response(encoder.encode({
                             "ok": True,
                             "result": {"columns": ["value"], "rows": [[42]], "rowcount": 1},
                             "id": request["id"],
-                        }),
+                        }), correlation_id=correlation_id),
                         0,
                         1000,
                     )
@@ -79,8 +86,13 @@ async def test_postgres_driver_async_fetch() -> None:
                     data = await asyncio.to_thread(req_ring.recv_timeout, slot_size, 1000)
                     if data is None:
                         return
-                    request = decoder.decode(data)
-                    resp_ring.send_timeout(encoder.encode({"ok": True, "id": request["id"]}), 0, 1000)
+                    correlation_id, _flags, _procedure, payload = decode_request(data)
+                    request = decoder.decode(payload)
+                    resp_ring.send_timeout(
+                        encode_response(encoder.encode({"ok": True, "id": request["id"]}), correlation_id=correlation_id),
+                        0,
+                        1000,
+                    )
 
                 except Exception:  # noqa: S110
                     pass

@@ -78,7 +78,7 @@ def test_category_1_servers_structure() -> None:
     assert len(CATEGORY_1_SERVERS) > 0
 
     # Check expected servers
-    expected_servers = ["uvicorn_h11", "uvicorn_httptools", "granian", "hypercorn", "daphne", "socketify"]
+    expected_servers = ["uvicorn_h11", "uvicorn_httptools", "granian"]
     for server_name in expected_servers:
         assert server_name in CATEGORY_1_SERVERS
 
@@ -96,7 +96,14 @@ def test_category_2_runtimes_structure() -> None:
     assert len(CATEGORY_2_RUNTIMES) > 0
 
     # Check expected runtimes
-    expected_runtimes = ["vertebra", "robyn", "sanic_standalone", "spikard"]
+    expected_runtimes = [
+        "vertebra",
+        "vertebra_asgi_litestar",
+        "vertebra_native_litestar",
+        "vertebra_fastapi",
+        "sanic_standalone",
+        "robyn",
+    ]
     for runtime_name in expected_runtimes:
         assert runtime_name in CATEGORY_2_RUNTIMES
 
@@ -113,7 +120,16 @@ def test_category_3_frameworks_structure() -> None:
     assert len(CATEGORY_3_FRAMEWORKS) > 0
 
     # Check expected frameworks
-    expected_frameworks = ["raw_asgi", "starlette", "fastapi", "blacksheep", "litestar", "sanic_asgi"]
+    expected_frameworks = [
+        "raw_asgi",
+        "starlette",
+        "fastapi_uvicorn",
+        "fastapi_granian",
+        "blacksheep",
+        "litestar_uvicorn",
+        "litestar_granian",
+        "sanic_asgi",
+    ]
     for framework_name in expected_frameworks:
         assert framework_name in CATEGORY_3_FRAMEWORKS
 
@@ -180,7 +196,7 @@ def test_granian_config() -> None:
     config = CATEGORY_1_SERVERS["granian"]
 
     assert config.name == "granian"
-    assert config.display_name == "Granian"
+    assert config.display_name == "Granian (ASGI)"
     assert config.category == BenchmarkCategory.SERVER
     assert config.port == 8004
     assert "granian" in config.command
@@ -223,10 +239,10 @@ def test_raw_asgi_config() -> None:
 @pytest.mark.unit
 def test_fastapi_config() -> None:
     """Test FastAPI framework configuration."""
-    config = CATEGORY_3_FRAMEWORKS["fastapi"]
+    config = CATEGORY_3_FRAMEWORKS["fastapi_uvicorn"]
 
-    assert config.name == "fastapi"
-    assert config.display_name == "FastAPI"
+    assert config.name == "fastapi_uvicorn"
+    assert config.display_name == "FastAPI (Uvicorn)"
     assert config.category == BenchmarkCategory.FRAMEWORK
     assert "uvicorn" in config.command
 
@@ -359,7 +375,7 @@ def test_native_interfaces() -> None:
     """Test that native interface servers are properly marked."""
     native_servers = [config for config in ALL_SERVERS.values() if config.interface == InterfaceType.NATIVE]
 
-    # Should have at least Robyn and Spikard as native
+    # Should have at least Robyn and Sanic standalone as native
     native_names = [config.name for config in native_servers]
     assert "robyn" in native_names
-    assert "spikard" in native_names
+    assert "sanic_standalone" in native_names

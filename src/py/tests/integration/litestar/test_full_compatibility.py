@@ -44,7 +44,7 @@ async def test_complex_routing_and_di() -> None:
     # We can create a mock object that mimics the handler wrapper
     # since PipelineCompiler expects something with resolve_guards/resolve_dependencies
     handler_wrapper = MagicMock()
-    handler_wrapper.fn = target_route.handler
+    handler_wrapper.fn = target_route.handler_fn or target_route.handler.fn
     handler_wrapper.resolve_guards.return_value = target_route.guards
     handler_wrapper.resolve_dependencies.return_value = target_route.dependencies
 

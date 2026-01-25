@@ -5,6 +5,7 @@ import msgspec
 import pytest
 
 from tests.helpers.shm import skip_if_shm_unavailable, tracked_shm_cleanup, unique_shm_name
+from vertebra.ipc.channel import decode_request, encode_response
 
 pytestmark = pytest.mark.integration
 
@@ -85,7 +86,8 @@ async def test_broker_client_roundtrip() -> None:
                         pytest.fail("broker_task: req_transport.recv timed out")
                         return
 
-                    request = decoder.decode(data)
+                    correlation_id, _flags, _procedure, payload = decode_request(data)
+                    request = decoder.decode(payload)
                     if request["kind"] == "acquire":
                         response: dict[str, Any] = {"ok": True, "token": "1", "id": request["id"]}
                     elif request["kind"] == "release" or request["kind"] == "health":
@@ -93,7 +95,7 @@ async def test_broker_client_roundtrip() -> None:
                     else:
                         response = {"ok": False, "error": {"message": "unknown"}, "id": request["id"]}
                     # Send response directly (not via transport)
-                    resp_ring.send(encoder.encode(response), 0)
+                    resp_ring.send(encode_response(encoder.encode(response), correlation_id=correlation_id), 0)
 
             except Exception as e:
                 broker_error = e

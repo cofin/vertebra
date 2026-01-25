@@ -2,15 +2,36 @@
 
 from __future__ import annotations
 
+import io
 import json
 from unittest.mock import patch
 
 import pytest
+from rich.console import Console
 
 from vertebra.cli.banner.collector import ComponentStatus, ServerStatus
 from vertebra.cli.banner.hooks import get_registry
 from vertebra.cli.banner.renderer import VERSION, BannerConfig, BasicRenderer, TTYRenderer, render_banner
 from vertebra.cli.theme import TerminalCaps
+
+
+def _render_tty(renderer: TTYRenderer, config: BannerConfig, status: ServerStatus | None = None) -> str:
+    output_lines: list[str] = []
+    buffer = io.StringIO()
+    test_console = Console(file=buffer, force_terminal=False, color_system=None, width=renderer.caps.width)
+
+    with (
+        patch("vertebra.cli.banner.renderer.console", test_console),
+        patch("vertebra.cli.components.console", test_console),
+        patch("click.echo", side_effect=lambda x="": output_lines.append(x)),
+    ):
+        renderer.render(config, status=status)
+
+    text = "\n".join(str(line) for line in output_lines)
+    console_text = buffer.getvalue()
+    if console_text:
+        text = f"{text}\n{console_text}" if text else console_text
+    return text
 
 
 @pytest.fixture(autouse=True)
@@ -140,55 +161,30 @@ class TestTTYRenderer:
 
     def test_full_width_includes_logo(self, caps_full: TerminalCaps, config: BannerConfig) -> None:
         renderer = TTYRenderer(caps_full)
-        output_lines: list[str] = []
-
-        with patch("click.echo", side_effect=lambda x="": output_lines.append(x)):
-            renderer.render(config)
-
-        output = "\n".join(str(line) for line in output_lines)
+        output = _render_tty(renderer, config)
         # Logo should contain block characters
         assert "█" in output or "▀" in output
 
     def test_full_width_includes_sections(self, caps_full: TerminalCaps, config: BannerConfig) -> None:
         renderer = TTYRenderer(caps_full)
-        output_lines: list[str] = []
-
-        with patch("click.echo", side_effect=lambda x="": output_lines.append(x)):
-            renderer.render(config)
-
-        output = "\n".join(str(line) for line in output_lines)
+        output = _render_tty(renderer, config)
         assert "Server" in output
         assert "Components" in output
 
     def test_full_width_shows_url(self, caps_full: TerminalCaps, config: BannerConfig) -> None:
         renderer = TTYRenderer(caps_full)
-        output_lines: list[str] = []
-
-        with patch("click.echo", side_effect=lambda x="": output_lines.append(x)):
-            renderer.render(config)
-
-        output = "\n".join(str(line) for line in output_lines)
+        output = _render_tty(renderer, config)
         assert "http://127.0.0.1:8000" in output
 
     def test_compact_width_layout(self, caps_compact: TerminalCaps, config: BannerConfig) -> None:
         renderer = TTYRenderer(caps_compact)
-        output_lines: list[str] = []
-
-        with patch("click.echo", side_effect=lambda x="": output_lines.append(x)):
-            renderer.render(config)
-
-        output = "\n".join(str(line) for line in output_lines)
+        output = _render_tty(renderer, config)
         # Should still have URL but in compact format
         assert "127.0.0.1:8000" in output
 
     def test_minimal_width_layout(self, caps_minimal: TerminalCaps, config: BannerConfig) -> None:
         renderer = TTYRenderer(caps_minimal)
-        output_lines: list[str] = []
-
-        with patch("click.echo", side_effect=lambda x="": output_lines.append(x)):
-            renderer.render(config)
-
-        output = "\n".join(str(line) for line in output_lines)
+        output = _render_tty(renderer, config)
         # Should show VERTEBRA text
         assert "VERTEBRA" in output
         assert "127.0.0.1:8000" in output
@@ -198,12 +194,7 @@ class TestTTYRenderer:
             mode="dev", host="127.0.0.1", port=8000, workers=1, log_level="debug", watched_paths=["src/"]
         )
         renderer = TTYRenderer(caps_full)
-        output_lines: list[str] = []
-
-        with patch("click.echo", side_effect=lambda x="": output_lines.append(x)):
-            renderer.render(config)
-
-        output = "\n".join(str(line) for line in output_lines)
+        output = _render_tty(renderer, config)
         assert "[DEV]" in output
 
     def test_dev_mode_shows_development_section(self, caps_full: TerminalCaps) -> None:
@@ -211,12 +202,7 @@ class TestTTYRenderer:
             mode="dev", host="127.0.0.1", port=8000, workers=1, log_level="debug", watched_paths=["src/"]
         )
         renderer = TTYRenderer(caps_full)
-        output_lines: list[str] = []
-
-        with patch("click.echo", side_effect=lambda x="": output_lines.append(x)):
-            renderer.render(config)
-
-        output = "\n".join(str(line) for line in output_lines)
+        output = _render_tty(renderer, config)
         assert "Development" in output
         assert "__debug__" in output
 
@@ -227,12 +213,7 @@ class TestTTYRenderer:
             broker=ComponentStatus(status="ready"),
             ipc=ComponentStatus(status="ready", channels=4),
         )
-        output_lines: list[str] = []
-
-        with patch("click.echo", side_effect=lambda x="": output_lines.append(x)):
-            renderer.render(config, status=status)
-
-        output = "\n".join(str(line) for line in output_lines)
+        output = _render_tty(renderer, config, status=status)
         assert "ready" in output
         assert "1.1.38" in output
 
@@ -295,12 +276,7 @@ class TestTTYRendererEdgeCases:
             broker=ComponentStatus(status="ready", pools={"sql": 10, "redis": 5}),
             ipc=ComponentStatus(status="ready"),
         )
-        output_lines: list[str] = []
-
-        with patch("click.echo", side_effect=lambda x="": output_lines.append(x)):
-            renderer.render(config, status=status)
-
-        output = "\n".join(str(line) for line in output_lines)
+        output = _render_tty(renderer, config, status=status)
         # Should show pool counts
         assert "sql" in output.lower() or "10" in output
 
@@ -311,12 +287,7 @@ class TestTTYRendererEdgeCases:
             broker=ComponentStatus(status="ready"),
             ipc=ComponentStatus(status="ready", channels=8),
         )
-        output_lines: list[str] = []
-
-        with patch("click.echo", side_effect=lambda x="": output_lines.append(x)):
-            renderer.render(config, status=status)
-
-        output = "\n".join(str(line) for line in output_lines)
+        output = _render_tty(renderer, config, status=status)
         # Should show channel count
         assert "8" in output or "channels" in output.lower()
 

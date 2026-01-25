@@ -122,7 +122,7 @@ async def test_union_return_does_not_crash() -> None:
 
     app = Litestar(route_handlers=[UnionController])
     routes = reflect_routes(app)
-    route = next(r for r in routes if "/union" in r.path)
+    route = next(r for r in routes if "/union" in r.path and "GET" in r.methods)
 
     assert classify_route(route) == RouteCapability.ASGI_FALLBACK
 

@@ -199,7 +199,7 @@ class AsgiWorker:
             await self.stop()
 
     async def stop(self) -> None:
-        if not self._running:
+        if not self._running and self._control is None and self._lifespan_task is None:
             return
         self._running = False
         for contexts in self._contexts.values():
@@ -650,6 +650,7 @@ class AsgiWorker:
                     "client": meta.client or ("127.0.0.1", 0),
                     "extensions": meta.extensions,
                     "state": self._lifespan_state,
+                    "user": user,
                 }
 
                 queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
@@ -744,6 +745,7 @@ class AsgiWorker:
                 "subprotocols": meta.subprotocols,
                 "extensions": meta.extensions,
                 "state": self._lifespan_state,
+                "user": user,
             }
 
             async def receive() -> dict[str, Any]:
