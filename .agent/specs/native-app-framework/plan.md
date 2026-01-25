@@ -46,12 +46,12 @@
 - [x] Support async factory functions
 - [x] Write tests for registration patterns
 
-### Task 2.3: AOT Dependency Graph Compilation
-- [ ] Build dependency graph at startup
-- [ ] Topological sort for initialization order
-- [ ] Compile linear execution sequences for hot paths
-- [ ] Cache compiled runners
-- [ ] Write tests for compilation correctness
+### Task 2.3: AOT Dependency Graph Compilation [2575940]
+- [x] Build dependency graph at startup
+- [x] Topological sort for initialization order
+- [x] Compile linear execution sequences for hot paths
+- [x] Cache compiled runners
+- [x] Write tests for compilation correctness
 
 ### Task 2.4: VertebraContext Abstraction
 - [ ] Create context wrapper for all entry points
