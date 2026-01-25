@@ -138,12 +138,12 @@
 
 ## Phase 5: Frontend Sync Protocols
 
-### Task 5.1: SSE Streaming
-- [ ] Create `src/ts/src/server/sse.ts`
-- [ ] Implement SSE connection management
-- [ ] State delta broadcasting to clients
-- [ ] Reconnection with last-event-id
-- [ ] Write integration tests
+### Task 5.1: SSE Streaming [9bebd17]
+- [x] Create `src/ts/src/server/sse.ts` [9bebd17]
+- [x] Implement SSE connection management [9bebd17]
+- [x] State delta broadcasting to clients [9bebd17]
+- [x] Reconnection with last-event-id [9bebd17]
+- [x] Write integration tests [9bebd17]
 
 ### Task 5.2: WebSocket Support
 - [ ] Create `src/ts/src/server/websocket.ts`
