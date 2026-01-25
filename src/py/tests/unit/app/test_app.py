@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from vertebra.app import Vertebra
+from vertebra.app import App
 from vertebra.controllers import Controller
 from vertebra.procedures import ProcedureRegistry
 from vertebra.routing import Router, get
@@ -34,7 +34,7 @@ def test_app_registers_router_and_controller() -> None:
 
     router.register(ping)
 
-    app = Vertebra()
+    app = App()
     app.register(router)
     app.register(HealthController)
 
@@ -51,7 +51,7 @@ def test_app_state_initialization_registers_once() -> None:
     registry = ProcedureRegistry.instance()
     registry.clear()
 
-    app = Vertebra()
+    app = App()
     state = app.state(ExampleState, name="state.example")
     assert state is app.state(ExampleState)
 
@@ -61,7 +61,7 @@ def test_app_state_initialization_registers_once() -> None:
 
 @pytest.mark.anyio
 async def test_app_lifecycle_hooks_run_in_order() -> None:
-    app = Vertebra()
+    app = App()
     calls: list[str] = []
 
     @app.on_startup
