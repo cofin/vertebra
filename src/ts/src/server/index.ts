@@ -292,6 +292,7 @@ export {
 export { ProcessManager } from "./process-manager";
 export { createRouter, type RequestHandler } from "./router";
 export { StateWebSocketServer, type StateWebSocketOptions } from "./websocket";
+export { StateLongPollServer, type LongPollOptions } from "./long-poll";
 export {
   createIpcConnectionPool,
   type IpcConnectionPool,
