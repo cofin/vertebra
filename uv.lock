@@ -15,7 +15,7 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "vertebra",
+    "vertebra-core",
     "vertebra-wasm",
 ]
 
@@ -3410,7 +3410,7 @@ wheels = [
 ]
 
 [[package]]
-name = "vertebra"
+name = "vertebra-core"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

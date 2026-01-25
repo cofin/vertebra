@@ -1,7 +1,7 @@
-//! FlatBuffers protocol definitions for IPC control plane.
+//! Protocol definitions for IPC control plane.
 //!
-//! This module provides zero-parse-cost message headers using FlatBuffers.
-//! The control plane (headers, metadata) uses FlatBuffers for random-access reads,
+//! This module provides zero-parse-cost message headers using fixed-size C-compatible structs.
+//! The control plane (headers, metadata) uses these structs for random-access reads,
 //! while dynamic payloads remain MessagePack-encoded for flexibility.
 //!
 //! # Wire Format
@@ -9,7 +9,7 @@
 //! Messages are structured as:
 //! ```text
 //! ┌─────────────────────┬─────────────────────┐
-//! │  FlatBuffer Header  │  MessagePack Payload │
+//! │    Fixed Header     │  MessagePack Payload │
 //! │     (16 bytes)      │    (variable len)    │
 //! └─────────────────────┴─────────────────────┘
 //! ```
