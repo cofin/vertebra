@@ -68,7 +68,7 @@ specs/archive
 uv.toml
 .agent/specs/archive
 .agent/archive
-
+.beads/
 # Benchmark virtual environment
 benchmarks/.venv/
 benchmarks/results/
