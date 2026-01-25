@@ -82,6 +82,8 @@ export function createStatusHandler(
     let ipcChannels = 0;
     let ipcLatencyUs: number | undefined;
 
+    console.log("Checking IPC status, pool:", !!pool);
+
     if (pool) {
       try {
         const start = performance.now();
@@ -147,7 +149,8 @@ async function pingWorkerViaIpc(pool: IpcConnectionPool): Promise<{ ok: boolean 
       id: crypto.randomUUID(),
     });
     return { ok: response?.ok !== false };
-  } catch {
+  } catch (error) {
+    console.error("IPC Ping failed:", error);
     return { ok: false };
   }
 }

@@ -7,6 +7,7 @@ import importlib
 import logging
 import os
 import signal
+import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -188,7 +189,9 @@ class AsgiWorker:
         self._control = SpscRing.create_named(control_name, self._config.slot_size, self._config.slots)
 
     async def serve_forever(self) -> None:
+        print(f"Worker {self._worker_id()} starting...", file=sys.stderr)
         await self.start()
+        print(f"Worker {self._worker_id()} started control ring: {self._control_ring_name()}", file=sys.stderr)
         self._running = True
         try:
             await self._serve_loop()
@@ -216,7 +219,13 @@ class AsgiWorker:
         if self._control is None:
             return
         slot_size = self._config.slot_size
+        last_print = 0.0
         while self._running:
+            import time
+            now = time.time()
+            if now - last_print > 1.0:
+                print(f"Worker stats: {self._control.stats()}", file=sys.stderr)
+                last_print = now
             did_work = False
             control_payload = self._control.try_recv(slot_size)
             if control_payload is not None:
@@ -234,6 +243,7 @@ class AsgiWorker:
     async def _handle_control_payload(self, payload: bytes) -> None:
         try:
             message = self._codec.decode(payload)
+            print(f"Worker received control message: {message}", file=sys.stderr)
         except Exception:  # noqa: BLE001
             return
         if not isinstance(message, dict):
@@ -913,13 +923,65 @@ class AsgiWorker:
             self._lifespan_shutdown.set()
 
 
+def _is_file_path(path: str) -> bool:
+    """Check if the path looks like a file path rather than a module path."""
+    return os.path.sep in path or (os.path.altsep and os.path.altsep in path) or path.endswith(".py")
+
+
 def _import_app(app_path: str) -> AsgiApp:
+    """Import an ASGI application from a module path or file path.
+
+    Supports both formats:
+    - Module path: "mypackage.module:app" or "mypackage.module:factory()"
+    - File path: "path/to/app.py:app" or "path/to/app.py" (auto-detects app/application)
+    """
     module_path, _, attr_path = app_path.partition(":")
-    module = importlib.import_module(module_path)
+
+    # Handle file paths (contain / or \ or end with .py)
+    if _is_file_path(module_path):
+        # Resolve to absolute path and normalize
+        file_path = os.path.abspath(module_path)
+
+        # Handle .py extension
+        if file_path.endswith(".py"):
+            if not os.path.isfile(file_path):
+                msg = f"Application file not found: {file_path}"
+                raise FileNotFoundError(msg)
+        else:
+            # Try adding .py extension
+            if os.path.isfile(file_path + ".py"):
+                file_path = file_path + ".py"
+            elif not os.path.isfile(file_path):
+                msg = f"Application file not found: {file_path}"
+                raise FileNotFoundError(msg)
+
+        # Add parent directory to sys.path for imports within the app
+        parent_dir = os.path.dirname(file_path)
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
+
+        # Convert to module name (strip .py extension)
+        module_name = os.path.splitext(os.path.basename(file_path))[0]
+        module = importlib.import_module(module_name)
+    else:
+        # Standard module path import
+        module = importlib.import_module(module_path)
+
+    # Get the target attribute
     target: Any = module
     if attr_path:
         for attr in attr_path.split("."):
             target = getattr(target, attr)
+    else:
+        # No attribute specified - try common ASGI app names
+        for default_attr in ("app", "application", "create_app"):
+            if hasattr(module, default_attr):
+                target = getattr(module, default_attr)
+                # If it's a factory function, call it
+                if default_attr == "create_app" and callable(target):
+                    target = target()
+                break
+
     if not callable(target):
         msg = f"ASGI app '{app_path}' is not callable"
         raise TypeError(msg)

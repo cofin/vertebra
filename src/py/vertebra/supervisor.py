@@ -114,7 +114,7 @@ def find_broker_entrypoint() -> str:
     if repo_root:
         # Check for compiled engine first (future PRD)
         # Check source
-        entry = repo_root / "src" / "ts" / "src" / "server" / "index.ts"
+        entry = repo_root / "src" / "ts" / "src" / "server" / "serve.ts"
         if entry.exists():
             return str(entry)
     msg = "Unable to locate server entrypoint for Bun engine"

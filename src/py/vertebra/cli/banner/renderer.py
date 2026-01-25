@@ -16,7 +16,8 @@ import click
 
 from vertebra.cli.banner.hooks import get_registry
 from vertebra.cli.banner.logos import get_logo_lines, get_logo_variant
-from vertebra.cli.theme import TerminalCaps, apply_color, detect_terminal_capabilities, get_chars, get_status_color
+from vertebra.cli.components import console, key_value, section_header, status_indicator
+from vertebra.cli.theme import TerminalCaps, apply_color, detect_terminal_capabilities, get_chars
 
 if TYPE_CHECKING:
     from vertebra.cli.banner.collector import ServerStatus
@@ -78,7 +79,7 @@ class TTYRenderer(BaseRenderer):
         if config.mode == "dev":
             version_text += " " + apply_color("[DEV]", "gold", self.caps)
 
-        # Print logo
+        # Print logo (preserve existing styling)
         for i, line in enumerate(logo_lines):
             if i == len(logo_lines) - 1:
                 # Add version on last line
@@ -88,26 +89,26 @@ class TTYRenderer(BaseRenderer):
         click.echo()
 
         # Server section
-        self._render_section_header("Server")
-        self._render_kv("Listening", f"http://{config.host}:{config.port}")
+        section_header("Server")
+        console.print(key_value("Listening", f"http://{config.host}:{config.port}"))
         worker_text = f"{config.workers} process{'es' if config.workers > 1 else ''}"
         if config.mode == "dev":
             worker_text += " (auto-reload)"
-        self._render_kv("Workers", worker_text)
-        self._render_kv("Log Level", config.log_level)
+        console.print(key_value("Workers", worker_text))
+        console.print(key_value("Log Level", config.log_level))
         click.echo()
 
         # Development section (dev mode only)
         if config.mode == "dev":
-            self._render_section_header("Development")
+            section_header("Development")
             watched = ", ".join(config.watched_paths or ["src/", "app/"])
-            self._render_kv("Hot Reload", f"enabled (watching: {watched})")
-            self._render_kv("Debug UI", f"http://{config.host}:{config.port}/__debug__")
-            self._render_kv("Reload", f"http://{config.host}:{config.port}/__reload__")
+            console.print(key_value("Hot Reload", f"enabled (watching: {watched})"))
+            console.print(key_value("Debug UI", f"http://{config.host}:{config.port}/__debug__"))
+            console.print(key_value("Reload", f"http://{config.host}:{config.port}/__reload__"))
             click.echo()
 
         # Components section
-        self._render_section_header("Components")
+        section_header("Components")
         self._render_component_status("Bun Engine", status, "bun")
         self._render_component_status("Rust IPC", status, "ipc")
         self._render_component_status("Broker", status, "broker")
@@ -141,11 +142,12 @@ class TTYRenderer(BaseRenderer):
         ipc_status = self._get_status_text(status, "ipc")
         broker_status = self._get_status_text(status, "broker")
 
-        click.echo(
-            f"  {self._status_indicator(bun_status)} Bun {self.chars['dots'] * 5} {bun_status}   "
-            f"{self._status_indicator(ipc_status)} IPC {self.chars['dots'] * 5} {ipc_status}"
+        # Use rich console for markup
+        console.print(
+            f"  {status_indicator(bun_status)} Bun {self.chars['dots'] * 5} {bun_status}   "
+            f"{status_indicator(ipc_status)} IPC {self.chars['dots'] * 5} {ipc_status}"
         )
-        click.echo(f"  {self._status_indicator(broker_status)} Broker {self.chars['dots'] * 2} {broker_status}")
+        console.print(f"  {status_indicator(broker_status)} Broker {self.chars['dots'] * 2} {broker_status}")
         click.echo()
 
     def _render_minimal(self, config: BannerConfig, status: ServerStatus | None) -> None:
@@ -160,21 +162,9 @@ class TTYRenderer(BaseRenderer):
 
         # Overall status indicator
         overall = self._get_overall_status(status)
-        click.echo(f"{config.workers} workers | {self._status_indicator(overall)} {overall}")
+        # Use console.print for colored indicator
+        console.print(f"{config.workers} workers | {status_indicator(overall)} {overall}")
         click.echo()
-
-    def _render_section_header(self, title: str) -> None:
-        """Render a section header with underline."""
-        # Calculate line length to fill width
-        line_char = self.chars["line_heavy"]
-        line_width = max(self.caps.width - len(title) - 2, 20)
-        header_line = f"{title} {line_char * line_width}"
-        click.echo(header_line)
-
-    def _render_kv(self, key: str, value: str) -> None:
-        """Render a key-value pair with arrow prefix."""
-        arrow = self.chars["arrow"]
-        click.echo(f"  {arrow} {key:<12} {value}")
 
     def _render_component_status(self, name: str, status: ServerStatus | None, component: str) -> None:
         """Render a component status line with leader dots."""
@@ -182,21 +172,21 @@ class TTYRenderer(BaseRenderer):
         details = self._get_status_details(status, component)
 
         # Calculate leader dots
-        indicator = self._status_indicator(status_text)
+        # status_indicator returns rich markup, visually 1 char
+        indicator = status_indicator(status_text)
+        
+        # Visual length calculation (approximate for dots)
+        base_len = 2 + 1 + 1 + len(name) + 1  # "  * Name "
+        suffix_len = 1 + len(status_text) + (len(details) + 3 if details else 0)
+        
         base_text = f"  {indicator} {name} "
         suffix = f" {status_text} ({details})" if details else f" {status_text}"
 
         # Fill with dots
-        available = self.caps.width - len(base_text) - len(suffix) - 2
+        available = self.caps.width - base_len - suffix_len - 2
         dots = self.chars["dots"] * max(available, 3)
 
-        click.echo(f"{base_text}{dots}{suffix}")
-
-    def _status_indicator(self, status: str) -> str:
-        """Get colored status indicator character."""
-        indicator = self.chars["status_ready"]
-        color = get_status_color(status)
-        return apply_color(indicator, color, self.caps)
+        console.print(f"{base_text}{dots}{suffix}")
 
     def _get_status_text(self, status: ServerStatus | None, component: str) -> str:
         """Extract status text for a component."""
@@ -251,9 +241,9 @@ class TTYRenderer(BaseRenderer):
         sections = registry.collect(mode=mode)
 
         for name, data in sections:
-            self._render_section_header(name)
+            section_header(name)
             for key, value in data.items():
-                self._render_kv(key, value)
+                console.print(key_value(key, value))
             click.echo()
 
 

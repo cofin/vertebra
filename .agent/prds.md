@@ -23,6 +23,12 @@ Integration tests, benchmarks, examples, migration guides, and documentation for
 ### [ ] Fix Startup Module Import and Polish CLI
 *Link: [./fix-startup-module-import-and-polish-cli/](./fix-startup-module-import-and-polish-cli/)*
 
+### [ ] Native App Framework
+*Link: [./specs/native-app-framework/](./specs/native-app-framework/)*
+*Risk Level: high*
+
+Native Vertebra App framework with route decorators and real-time state synchronization via opcode-based field deltas over SPSC rings. Litestar-aligned patterns (Router, Controller, Guards) with universal DI and extreme performance targets.
+
 ---
 
 ## Specs in .agent/specs/
@@ -34,6 +40,7 @@ Integration tests, benchmarks, examples, migration guides, and documentation for
 | `cli-polish` | Active | CLI UX improvements |
 | `ipc-performance-optimization` | Active | IPC latency optimizations |
 | `ipc-startup-fix` | Active | Startup race conditions |
+| `native-app-framework` | Planned | Native app with opcode-based state sync |
 | `native-multipart-fallback` | Active | Multipart request handling |
 | `optional-dependency-handling` | Active | Optional dependency patterns |
 | `packaging-distribution` | Active | Package distribution |

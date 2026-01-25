@@ -1,0 +1,40 @@
+{
+  "id": "native-app-framework",
+  "title": "Native Vertebra App Framework",
+  "type": "feature",
+  "status": "planned",
+  "risk_level": "high",
+  "created": "2026-01-25",
+  "phases": 8,
+  "estimated_tasks": 35,
+  "dependencies": [
+    "vertebra-core",
+    "vertebra-py",
+    "vertebra-js",
+    "matchit"
+  ],
+  "tags": [
+    "native",
+    "routing",
+    "state-sync",
+    "dependency-injection",
+    "performance"
+  ],
+  "performance_targets": {
+    "ipc_latency_us": 100,
+    "throughput_simple_rps": 200000,
+    "throughput_with_sync_rps": 150000,
+    "memory_allocation_mbs": 1,
+    "state_read_ns": 100,
+    "baseline_comparison": "Granian ASGI ~70-100K req/s"
+  },
+  "consensus": {
+    "models": ["gemini-3-pro-preview", "gemini-3-flash-preview"],
+    "confidence": "9-10/10",
+    "key_decisions": [
+      "Opcode-based Field Deltas over SPSC Rings",
+      "AOT DI Compilation",
+      "Hybrid Rust/Bun/Python architecture"
+    ]
+  }
+}

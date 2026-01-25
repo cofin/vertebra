@@ -865,6 +865,16 @@ impl PySpscRing {
         Ok(result.map(|len| PyBytes::new(py, &buffer[..len])))
     }
 
+    fn stats(&self) -> PyResult<std::collections::HashMap<String, usize>> {
+        let stats = self.inner.stats();
+        let mut result = std::collections::HashMap::new();
+        result.insert("slot_size".to_string(), stats.slot_size);
+        result.insert("slots".to_string(), stats.slots);
+        result.insert("read_head".to_string(), stats.read_head as usize);
+        result.insert("write_head".to_string(), stats.write_head as usize);
+        Ok(result)
+    }
+
     /// Receive a message as a zero-copy view.
     ///
     /// Returns a SlotView that provides direct access to the ring buffer data.

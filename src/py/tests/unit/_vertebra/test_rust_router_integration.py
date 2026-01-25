@@ -5,7 +5,7 @@ def test_rust_router_basic() -> None:
     router = Router()
     router.insert("/hello", 1)
     router.insert("/echo", 2)
-    router.insert("/user/:id", 3)
+    router.insert("/user/{id:int}", 3)
 
     assert router.match_path("/hello") == 1
     assert router.match_path("/echo") == 2

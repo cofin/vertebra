@@ -48,6 +48,22 @@ Comprehensive documentation, integration tests, benchmarks, examples, and migrat
 
 ---
 
+### [ ] Native App Framework
+*Link: [./specs/native-app-framework/](./specs/native-app-framework/)*
+*Status: Planned*
+*Risk Level: high*
+
+Native Vertebra App framework bypassing ASGI for extreme performance. Features Litestar-aligned patterns (Router, Controller, Guards, Events) with universal DI via clean `Inject[T]` syntax. Real-time state synchronization via opcode-based field deltas over SPSC rings with LWW resolution.
+
+**Key Features:**
+- Rust-based routing with `matchit` for O(1) matching
+- AOT DI compilation eliminating runtime container lookups
+- State sync: <100μs propagation, <100ns local reads
+- SSE + WebSocket + Long-polling for frontend sync
+- Universal DI across controllers, guards, middleware, events, CLI
+
+---
+
 ## Migrated from .agent/specs/
 
 The following specs were previously in `.agent/specs/` and remain active:
