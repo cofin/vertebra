@@ -199,10 +199,11 @@
 - [x] Write integration tests
 
 ### Task 6.4: CLI Integration
-- [ ] Extend `vertebra serve` for native apps
-- [ ] Support `vertebra run` for background tasks
-- [ ] DI context in CLI commands
-- [ ] Write integration tests
+### Task 6.4: CLI Integration [97ab1b0]
+- [x] Merge `serve`/`run` into a single command
+- [x] Add `--asgi` flag to toggle ASGI vs native
+- [x] DI context in CLI commands
+- [x] Write integration tests
 
 ### Task 6.5: Checkpoint - Verify Phase 6 Complete
 - [ ] App starts and shuts down cleanly
