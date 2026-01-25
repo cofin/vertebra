@@ -30,7 +30,10 @@ async def test_native_supported_patterns() -> None:
         async def create_resource(self, data: dict, dep: str) -> dict:
             return {"data": data, "dep": dep}
 
-    app = Litestar(route_handlers=[NativeController], dependencies={"dep": Provide(dependency_fn)})
+    app = Litestar(
+        route_handlers=[NativeController],
+        dependencies={"dep": Provide(dependency_fn, sync_to_thread=False)},
+    )
 
     routes = reflect_routes(app)
 
@@ -90,7 +93,7 @@ async def test_fallback_patterns() -> None:
             FileController,
             create_static_files_router(path="/static", directories=["/tmp"]),
         ],
-        dependencies={"dep": Provide(lambda: "dep")},
+        dependencies={"dep": Provide(lambda: "dep", sync_to_thread=False)},
     )
 
     routes = reflect_routes(app)

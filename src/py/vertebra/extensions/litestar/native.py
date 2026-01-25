@@ -181,19 +181,47 @@ def reflect_static_mounts(app: Litestar) -> dict[str, str]:
     Returns a dict of {path_prefix: directory_path}.
     """
 
-    mounts = {}
+    mounts: dict[str, str] = {}
 
-    # This is a heuristic. Litestar stores static handlers in the route tree.
-    # We look for ASGIRoutes that look like static file handlers.
-    # Actually, Litestar 2.x often handles static files via `static_files_config`.
-
-    # Check app.static_files_config
-    if hasattr(app, "static_files_config"):
-        # It's a list of StaticFilesConfig
-        for config in app.static_files_config:
+    # Prefer the internal config attribute to avoid deprecated property access.
+    static_configs = getattr(app, "_static_files_config", None)
+    if static_configs:
+        for config in static_configs:
             for dir_path in config.directories:
-                # config.path is the url path
                 mounts[config.path] = str(dir_path)
+
+    def add_mount(route_path: str, directories: list[Any]) -> None:
+        if not directories:
+            return
+        mount_path = route_path
+        if "/{file_path:path}" in mount_path:
+            mount_path = mount_path.split("/{file_path:path}")[0]
+        mount_path = mount_path.rstrip("/") or "/"
+        if mount_path in mounts:
+            return
+        for dir_path in directories:
+            mounts[mount_path] = str(dir_path)
+
+    # Fallback: infer from create_static_files_router handlers in the route tree.
+    from litestar.routes import HTTPRoute
+
+    for route in app.routes:
+        if not isinstance(route, HTTPRoute):
+            continue
+        for handler_tuple in route.route_handler_map.values():
+            handler = handler_tuple[0]
+            fn = getattr(handler, "fn", None)
+            qualname = getattr(fn, "__qualname__", "")
+            if not fn or not qualname.startswith("create_static_files_router.<locals>."):
+                continue
+            directories = []
+            for cell in fn.__closure__ or ():
+                cell_value = cell.cell_contents
+                cell_dirs = getattr(cell_value, "directories", None)
+                if cell_dirs:
+                    directories = list(cell_dirs)
+                    break
+            add_mount(route.path, directories)
 
     return mounts
 

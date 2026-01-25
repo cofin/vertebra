@@ -1,5 +1,6 @@
 """Tests for Supervisor compatibility with custom event loops (uvloop)."""
 
+import asyncio
 import sys
 import unittest.mock
 
@@ -16,28 +17,32 @@ from vertebra.supervisor import Supervisor
 @pytest.mark.skipif(uvloop is None, reason="uvloop not installed")
 def test_supervisor_with_uvloop() -> None:
     """Verify Supervisor instantiates correctly when uvloop is active."""
-    # Install uvloop
+    # Activate uvloop without deprecated install() usage.
+    original_policy = asyncio.get_event_loop_policy()
     if uvloop:
-        uvloop.install()
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
-    # Mock the native supervisor to avoid spawning actual processes
-    with unittest.mock.patch("vertebra.supervisor.NativeSupervisor") as mock_native_cls:
-        mock_native_instance = mock_native_cls.return_value
+    try:
+        # Mock the native supervisor to avoid spawning actual processes
+        with unittest.mock.patch("vertebra.supervisor.NativeSupervisor") as mock_native_cls:
+            mock_native_instance = mock_native_cls.return_value
 
-        supervisor = Supervisor()
-        supervisor.start("bun", ["run", "server.ts"])
+            supervisor = Supervisor()
+            supervisor.start("bun", ["run", "server.ts"])
 
-        mock_native_cls.assert_called_once()
-        mock_native_instance.start.assert_called_once()
+            mock_native_cls.assert_called_once()
+            mock_native_instance.start.assert_called_once()
 
-        # Verify arguments passed to native start
-        # engine_path, engine_args, python_executable, config, workers
-        args = mock_native_instance.start.call_args[0]
-        assert args[0] == "bun"
-        assert args[1] == ["run", "server.ts"]
-        assert args[2] == sys.executable
-        assert args[3] == {}  # config
-        assert args[4] == 1  # workers
+            # Verify arguments passed to native start
+            # engine_path, engine_args, python_executable, config, workers
+            args = mock_native_instance.start.call_args[0]
+            assert args[0] == "bun"
+            assert args[1] == ["run", "server.ts"]
+            assert args[2] == sys.executable
+            assert args[3] == {}  # config
+            assert args[4] == 1  # workers
+    finally:
+        asyncio.set_event_loop_policy(original_policy)
 
 
 def test_supervisor_args_passing() -> None:
