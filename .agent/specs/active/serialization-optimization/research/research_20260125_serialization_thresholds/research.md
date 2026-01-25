@@ -5,6 +5,7 @@
 -   **Arrow Threshold:** The current threshold of **1000 rows** is actually **optimistic** given the current Python implementation. `msgspec` (MessagePack) is significantly faster at serialization (~5x faster at 1000 rows) because `encode_arrow` incurs a heavy Python-side cost to pivot row-oriented data to column-oriented arrays.
 -   **Optimization Opportunity:** To lower the threshold and realize Arrow's zero-copy benefits for smaller payloads, we must optimize the row-to-column conversion. Moving this logic to **Rust** (via `vertebra-py`) would likely eliminate the bottleneck, potentially bringing the crossover point down to ~100 rows.
 -   **CBOR2 vs MsgPack:** `cbor2` is **5x-10x slower** than `msgspec`. There is no performance justification for switching. `msgspec` remains the optimal choice for small/row-oriented payloads.
+    -   *Verification:* We confirmed the benchmark utilized the `_cbor2` C extension. `msgspec`'s performance advantage is intrinsic.
 -   **Arrow Adoption:** We should focus on optimizing the *producer* side (Python encoding) before expanding adoption to other small-payload areas.
 
 ## Benchmark Analysis

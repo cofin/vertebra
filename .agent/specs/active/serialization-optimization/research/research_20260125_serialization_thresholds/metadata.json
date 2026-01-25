@@ -6,5 +6,5 @@
   "created_at": "2026-01-25T12:30:00Z",
   "libraries_researched": ["msgspec", "nanoarrow", "cbor2"],
   "files_analyzed": ["benchmarks/research_threshold.py", "src/py/vertebra/resources/arrow.py"],
-  "linked_prd": null
+  "linked_flow": "rust-arrow-encoder"
 }

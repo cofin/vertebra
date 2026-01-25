@@ -1,14 +1,23 @@
-import random
 import time
-import uuid
-from typing import Any
-
-import cbor2
 import msgspec
+import cbor2
+import json
+import uuid
+import random
+from typing import Any
 from rich.console import Console
 from rich.table import Table
-
 from vertebra.resources.arrow import encode_arrow
+
+# Ensure C implementation of cbor2 is used
+try:
+    import _cbor2
+    if cbor2.dumps is not _cbor2.dumps:
+        print("WARNING: cbor2 is using Pure Python implementation (dumps identity mismatch)!")
+    else:
+        print("INFO: cbor2 is using C implementation.")
+except ImportError:
+    print("WARNING: _cbor2 module not found. Using Pure Python cbor2!")
 
 console = Console()
 

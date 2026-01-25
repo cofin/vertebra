@@ -40,8 +40,8 @@
 - [x] Write unit tests for DI primitives
 
 ### Task 2.2: Simplified Provider Registration [f7476c5]
-- [x] Implement `app.provide(ServiceClass)` auto-discovery
-- [x] Implement `@app.provide` decorator for factories
+- [x] Implement `vertex.provide(ServiceClass)` auto-discovery (Renamed from `app`)
+- [x] Implement `@vertex.provide` decorator for factories
 - [x] Infer dependencies from `__init__` type hints
 - [x] Support async factory functions
 - [x] Write tests for registration patterns
@@ -172,18 +172,19 @@
 
 ---
 
-## Phase 6: Application Lifecycle
+## Phase 6: Application Lifecycle & Unification
 
-### Task 6.1: VertebraApp Class [f0ac69e]
-- [x] Create `src/py/vertebra/app.py`
+### Task 6.1: Vertex Class (Unified Config) [f0ac69e]
+- [x] Create `src/py/vertebra/vertex.py` replacing `app.py`
+- [x] Implement `Vertex` class consolidating App/Config responsibilities
 - [x] Implement lifecycle hooks (`on_startup`, `on_shutdown`)
-- [x] Router and controller registration
+- [x] Router and controller registration on `Vertex`
 - [x] State initialization
-- [x] Write unit tests
+- [x] Write unit tests verifying `Vertex` as single source of truth
 
 ### Task 6.2: Event System [ddeb974]
 - [x] Create `src/py/vertebra/events/__init__.py`
-- [x] Implement pub/sub event dispatcher
+- [x] Implement pub/sub event dispatcher attached to `Vertex`
 - [x] Event DI injection support
 - [x] Async event handlers
 - [x] Write unit tests
@@ -194,26 +195,23 @@
 - [x] Task cancellation and cleanup
 - [x] Write integration tests
 
-### Task 6.4: CLI Integration [97ab1b0]
-- [x] Merge `serve`/`run` into a single command
-- [x] Add `--asgi` flag for running legacy/external ASGI apps
-- [x] DI context in CLI commands
-- [x] Write integration tests
+### Task 6.4: Litestar CLI Integration [97ab1b0]
+- [x] Enhance `VertebraPlugin` in `src/py/vertebra/extensions/litestar/_plugin.py`
+- [x] Ensure `run_command` in `src/py/vertebra/extensions/litestar/cli.py` correctly overrides `litestar run`
+- [x] Verify plugin launches Vertebra Supervisor when `VertebraPlugin` is present in `Litestar(plugins=[...])`
+- [x] Add tests for CLI overrides
 
 ### Task 6.5: Checkpoint - Verify Phase 6 Complete
-### Task 6.5: Checkpoint - Verify Phase 6 Complete [dc6365c]
-- [x] App starts and shuts down cleanly
-- [x] Events dispatch to handlers
-- [x] Background tasks run with DI
-- [x] CLI commands have DI access
-- [ ] `--asgi` flag correctly mounts external ASGI app
+- [ ] `Vertex` successfully configures native apps
+- [ ] `litestar run` launches Vertebra Supervisor for Litestar apps
+- [ ] Events and background tasks function in both modes
 
 ---
 
 ## Phase 7: Optimization and Cleanup (Clean Break)
 
 ### Task 7.1: Port Arrow Encoder to Rust
-- [ ] Implement `encode_arrow_rows` in `vertebra-py` (Rust)
+- [~] Implement `encode_arrow_rows` in `vertebra-py` (Rust)
 - [ ] Accept `List[Tuple]` from Python
 - [ ] Pivot to Arrow Columnar Memory in Rust
 - [ ] Replace Python implementation in `vertebra.resources.arrow`
@@ -225,7 +223,7 @@
 - [ ] Remove any residual JSON or non-framed IPC paths
 
 ### Task 7.3: Legacy Removal & Adapter Modernization
-- [ ] Remove any *deprecated* pre-Vertebra code
+- [ ] Remove any deprecated pre-Vertebra `App` classes not aliased to `Vertex`
 - [ ] Update `src/py/vertebra/asgi.py` adapter to use new `RequestHeader` + `msgspec` protocol
 - [ ] Ensure ASGI adapter can co-exist with Native Routes in the same worker pool
 - [ ] Remove any deprecated flatbuffers generated code
@@ -245,7 +243,7 @@
 - [ ] Generate API reference docs
 
 ### Task 8.2: User Guides
-- [ ] Getting started guide
+- [ ] Getting started guide: Native (`Vertex`) vs Litestar (`VertebraPlugin`)
 - [ ] Controller and routing guide
 - [ ] State synchronization guide
 - [ ] Dependency injection guide
@@ -253,12 +251,12 @@
 - [ ] **Dual Mode Guide:** Mixing Native and ASGI apps
 
 ### Task 8.3: Example Applications
-- [ ] Basic CRUD example
+- [ ] Basic CRUD example (Native)
+- [ ] Litestar Hybrid Example (Litestar Controller + Native Events)
 - [ ] Real-time dashboard example
 - [ ] Multi-user game example
-- [ ] Hybrid App (Native API + ASGI Admin Panel)
 
 ### Task 8.4: Checkpoint - Verify Phase 8 Complete
 - [ ] All documentation complete
 - [ ] Examples run successfully
-- [ ] Docs clear on Native vs. ASGI tradeoffs
+- [ ] Docs clear on Native vs. Hybrid tradeoffs

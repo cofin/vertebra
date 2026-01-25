@@ -1,0 +1,12 @@
+{
+  "flow_id": "rust-arrow-encoder",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-01-25T00:00:00Z",
+  "updated_at": "2026-01-25T00:00:00Z",
+  "description": "Rust-Based Arrow Encoder (Optimization)",
+  "research_id": "research_20260125_serialization_thresholds",
+  "risk_level": "medium",
+  "recovery_tested": false,
+  "patterns_extracted": false
+}
