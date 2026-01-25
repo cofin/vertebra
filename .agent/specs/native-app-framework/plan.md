@@ -107,12 +107,12 @@
 - [x] Define state ID and field ID schemes
 - [x] Write protocol documentation
 
-### Task 4.2: NativeState Delta Tracking
-- [ ] Extend `src/py/vertebra/state.py`
-- [ ] Implement `__setattr__` with opcode generation
-- [ ] Immutable replace for nested objects
-- [ ] Timestamp generation for LWW
-- [ ] Write unit tests for delta generation
+### Task 4.2: NativeState Delta Tracking [51261f9]
+- [x] Extend `src/py/vertebra/state.py` [51261f9]
+- [x] Implement `__setattr__` with opcode generation [51261f9]
+- [x] Immutable replace for nested objects [51261f9]
+- [x] Timestamp generation for LWW [51261f9]
+- [x] Write unit tests for delta generation [51261f9]
 
 ### Task 4.3: Bun State Hub
 - [ ] Create `src/ts/src/broker/state-hub.ts`
