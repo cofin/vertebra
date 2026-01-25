@@ -149,13 +149,27 @@ def encode_arrow(result: dict[str, Any]) -> bytes:
     """
     columns = result.get("columns", [])
     rows = result.get("rows", [])
+    types = result.get("types")
+    if types is not None and not isinstance(types, list):
+        types = None
+    batch_size = result.get("arrow_batch_size")
+    if not isinstance(batch_size, int) or batch_size <= 0:
+        batch_size = None
 
     try:
         from vertebra._vertebra import encode_arrow_rows
     except Exception:  # noqa: BLE001
         return _encode_arrow_python(result)
 
-    return encode_arrow_rows(rows, columns)
+    if types is None and batch_size is None:
+        return encode_arrow_rows(rows, columns)
+
+    kwargs: dict[str, Any] = {}
+    if types is not None:
+        kwargs["types"] = types
+    if batch_size is not None:
+        kwargs["batch_size"] = batch_size
+    return encode_arrow_rows(rows, columns, **kwargs)
 
 
 def decode_arrow(data: bytes | memoryview) -> Any:

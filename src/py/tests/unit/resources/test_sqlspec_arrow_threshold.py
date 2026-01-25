@@ -61,3 +61,39 @@ def test_rust_arrow_roundtrip() -> None:
         {"id": 1, "name": "Alice", "active": True},
         {"id": 2, "name": "Bob", "active": False},
     ]
+
+
+@pytest.mark.unit
+def test_rust_arrow_promotes_int_to_float() -> None:
+    rows = [[1], [2.5]]
+    columns = ["value"]
+    encoded = native.encode_arrow_rows(rows, columns)
+    decoded = decode_arrow(encoded)
+    output = _rows(decoded)
+    assert output[0]["value"] == 1.0
+    assert output[1]["value"] == 2.5
+
+
+@pytest.mark.unit
+def test_rust_arrow_types_hint() -> None:
+    rows = [[1, "2"], [3, "4"]]
+    columns = ["id", "value"]
+    types = ["int64", "string"]
+    encoded = native.encode_arrow_rows(rows, columns, types=types)
+    decoded = decode_arrow(encoded)
+    output = _rows(decoded)
+    assert output[0] == {"id": 1, "value": "2"}
+    assert output[1] == {"id": 3, "value": "4"}
+
+
+@pytest.mark.unit
+def test_rust_arrow_batching() -> None:
+    rows = [[1, "a"], [2, "b"], [3, "c"]]
+    columns = ["id", "label"]
+    encoded = native.encode_arrow_rows(rows, columns, batch_size=2)
+    decoded = decode_arrow(encoded)
+    assert _rows(decoded) == [
+        {"id": 1, "label": "a"},
+        {"id": 2, "label": "b"},
+        {"id": 3, "label": "c"},
+    ]

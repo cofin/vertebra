@@ -222,6 +222,11 @@
 - [ ] Accept `List[Tuple]` from Python
 - [ ] Pivot to Arrow Columnar Memory in Rust
 - [ ] Replace Python implementation in `vertebra.resources.arrow`
+- [ ] Single-pass row-major inference + validation (avoid column-major scan)
+- [ ] Type promotion (bool/int/float) and optional schema hint
+- [ ] Reduce string allocations (avoid `to_string` copies)
+- [ ] Batch RecordBatches when writing Arrow IPC streams
+- [ ] Add benchmark script for Arrow encoder (benchmarks/arrow_encoder.py)
 - [ ] Benchmark to confirm 5x speedup
 
 ### Task 7.2: Zero-Copy Header Enforcement
