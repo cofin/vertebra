@@ -176,7 +176,7 @@
 
 ## Phase 6: Application Lifecycle
 
-### Task 6.1: VertebraApp Class [a374e61]
+### Task 6.1: VertebraApp Class [f0ac69e]
 - [x] Create `src/py/vertebra/app.py`
 - [x] Implement lifecycle hooks (`on_startup`, `on_shutdown`)
 - [x] Router and controller registration
