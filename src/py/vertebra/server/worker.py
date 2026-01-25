@@ -122,7 +122,7 @@ class ResponseWriter:
         header = ResponseHeader(id=self._correlation_id, flags=Flags.NONE, payload_len=len(payload))
         message = header.to_bytes() + payload
         # AsyncRing.send() automatically notifies waiters
-        self._ring.send(message)
+        self._ring.send(message, 0)
 
 
 class VertebraWebSocket:
@@ -259,7 +259,11 @@ class AsgiWorker:
         external_notify_fd = self._config.notify_read_fd
 
         def on_control_readable() -> None:
-            """Callback when control ring has data available."""
+            """Callback when notification fd has data available.
+
+            In supervisor mode (external_notify_fd set), ONE fd is used for ALL rings.
+            So we must drain control ring AND all client request rings.
+            """
             if self._control is None:
                 return
             # Clear notification - use external notifier if available
@@ -269,12 +273,24 @@ class AsgiWorker:
                     os.read(external_notify_fd, 8)
             else:
                 self._control.clear_notification()
+
+            # Drain control ring
             while True:
                 payload = self._control.try_recv()
                 if payload is None:
                     break
                 # Schedule coroutine for control message handling
                 asyncio.create_task(self._handle_control_payload(payload))
+
+            # In supervisor mode, also drain all client request rings
+            # (they share the same notification fd)
+            if external_notify_fd is not None:
+                for client_id, client in list(self._clients.items()):
+                    while True:
+                        payload = client.request.try_recv()
+                        if payload is None:
+                            break
+                        asyncio.create_task(self._handle_client_payload(client_id, client, payload))
 
         # Register notification FD with the event loop
         # Use external notifier fd from ProcessManager if provided, otherwise ring's internal
@@ -330,20 +346,12 @@ class AsgiWorker:
         self._clients[client_id] = client
         self._contexts[client_id] = {}
 
-        # Register client request FD with event loop for notification-driven processing
-        if self._loop is not None:
-            fd = request_ring.notifier_fd()
-
-            def on_client_readable() -> None:
-                request_ring.clear_notification()
-                while True:
-                    payload = request_ring.try_recv()
-                    if payload is None:
-                        break
-                    asyncio.create_task(self._handle_client_payload(client_id, client, payload))
-
-            self._loop.add_reader(fd, on_client_readable)
-            self._client_callbacks[client_id] = (fd, on_client_readable)
+        # Store client for polling in _drain_all_rings().
+        # When using external notifier (supervisor mode), all rings share one notification fd,
+        # so we poll all client rings when ANY notification arrives.
+        # The external notifier is already registered in _serve_loop() for control ring.
+        # No need to add_reader for each client ring - they all share the same fd.
+        self._client_callbacks[client_id] = (0, lambda: None)  # Placeholder, not used in supervisor mode
 
         await self._send_control_ack(message, ok=True, correlation_id=correlation_id)
 
@@ -379,7 +387,7 @@ class AsgiWorker:
         header = ResponseHeader(id=correlation_id, flags=Flags.NONE, payload_len=len(encoded))
         message_bytes = header.to_bytes() + encoded
         # AsyncRing.send() automatically notifies waiters
-        response_ring.send(message_bytes)
+        response_ring.send(message_bytes, 0)
 
     async def _handle_client_payload(self, client_id: str, client: ClientState, payload: bytes) -> None:
         if len(payload) < HEADER_SIZE:
@@ -1099,6 +1107,23 @@ async def _serve_worker(app_path: str, config: WorkerConfig) -> None:
     await worker.stop()
 
 
+def _resolve_notify_fd(cli_value: int | None, env_name: str) -> int | None:
+    """Resolve notify fd from CLI arg or environment variable.
+
+    Priority: CLI arg > env var
+    Supports both ProcessManager (CLI args) and Rust supervisor (env vars).
+    """
+    if cli_value is not None:
+        return cli_value
+    env_value = os.environ.get(env_name)
+    if env_value:
+        try:
+            return int(env_value)
+        except ValueError:
+            pass
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Vertebra ASGI worker process")
     parser.add_argument("--app", required=True, help="ASGI app path (module:attr)")
@@ -1109,10 +1134,14 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--timeout", type=float, default=5.0)
-    # External notifier fds inherited from ProcessManager
+    # External notifier fds inherited from ProcessManager or Rust supervisor
     parser.add_argument("--notify-read-fd", type=int, default=None)
     parser.add_argument("--notify-write-fd", type=int, default=None)
     args = parser.parse_args()
+
+    # Resolve notify fds: CLI args take priority, then env vars (for Rust supervisor)
+    notify_read_fd = _resolve_notify_fd(args.notify_read_fd, "VERTEBRA_NOTIFY_FD")
+    notify_write_fd = _resolve_notify_fd(args.notify_write_fd, "VERTEBRA_NOTIFY_WRITE_FD")
 
     config = WorkerConfig(
         name=args.name,
@@ -1122,8 +1151,8 @@ def main() -> None:
         host=args.host,
         port=args.port,
         timeout=args.timeout,
-        notify_read_fd=args.notify_read_fd,
-        notify_write_fd=args.notify_write_fd,
+        notify_read_fd=notify_read_fd,
+        notify_write_fd=notify_write_fd,
     )
     asyncio.run(_serve_worker(args.app, config))
 

@@ -1,7 +1,7 @@
 import type { Server, WebSocketHandler } from "bun";
 import { AsyncBrokerClient, BrokerServer } from "../broker";
 import { collectBrokerMetrics } from "../broker/metrics";
-import { ShmRouter } from "../broker/shm";
+import { ShmNotifier, ShmRouter } from "../broker/shm";
 import { AsgiBridge } from "../ipc";
 import { collectMcpMetrics } from "../mcp/metrics";
 import { AuthValidator } from "./auth";
@@ -14,6 +14,7 @@ import {
   trackConnection,
   trackRequest,
 } from "./metrics";
+import { setSupervisorNotifier } from "./notifier-registry";
 import { ProcessManager } from "./process-manager";
 import { createRouter, RequestHandler } from "./router";
 import { createStatusHandler } from "./status";
@@ -171,6 +172,24 @@ export async function createAsgiServer(
   // The Rust NativeSupervisor sets this env var when spawning Bun.
   const skipProcessManager = process.env.VERTEBRA_SKIP_PROCESS_MANAGER === "1";
 
+  // When running under Rust supervisor, initialize the inherited notifier
+  if (skipProcessManager) {
+    const notifyFdStr = process.env.VERTEBRA_NOTIFY_FD;
+    const notifyWriteFdStr = process.env.VERTEBRA_NOTIFY_WRITE_FD;
+    if (notifyFdStr) {
+      const notifyFd = parseInt(notifyFdStr, 10);
+      // On Linux, eventfd is used so read and write fd are the same
+      const notifyWriteFd = notifyWriteFdStr ? parseInt(notifyWriteFdStr, 10) : notifyFd;
+      try {
+        const notifier = ShmNotifier.fromFds(notifyFd, notifyWriteFd);
+        setSupervisorNotifier(notifier);
+        log("info", "broker.notify_fd_inherited", { fd: notifyFd });
+      } catch (error) {
+        log("error", "broker.notify_fd_inherit_failed", { fd: notifyFd, error: String(error) });
+      }
+    }
+  }
+
   const manager =
     !skipProcessManager && resolved.python.app
       ? new ProcessManager({
@@ -301,7 +320,9 @@ export {
 } from "./worker-connections";
 export {
   beginBatch,
+  getSupervisorNotifier,
   notifyWorker,
   notifyWorkerIfNotBatched,
   type NotificationBatch,
+  setSupervisorNotifier,
 } from "./notifier-registry";
