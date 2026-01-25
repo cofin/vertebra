@@ -192,10 +192,11 @@
 - [x] Write unit tests
 
 ### Task 6.3: Background Tasks
-- [ ] Implement background task scheduling
-- [ ] DI access in background tasks
-- [ ] Task cancellation and cleanup
-- [ ] Write integration tests
+### Task 6.3: Background Tasks [4977732]
+- [x] Implement background task scheduling
+- [x] DI access in background tasks
+- [x] Task cancellation and cleanup
+- [x] Write integration tests
 
 ### Task 6.4: CLI Integration
 - [ ] Extend `vertebra serve` for native apps
