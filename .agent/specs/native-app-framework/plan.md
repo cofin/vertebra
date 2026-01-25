@@ -39,12 +39,12 @@
 - [x] Support scopes: `singleton`, `request`, `transient`
 - [x] Write unit tests for DI primitives
 
-### Task 2.2: Simplified Provider Registration
-- [ ] Implement `app.provide(ServiceClass)` auto-discovery
-- [ ] Implement `@app.provide` decorator for factories
-- [ ] Infer dependencies from `__init__` type hints
-- [ ] Support async factory functions
-- [ ] Write tests for registration patterns
+### Task 2.2: Simplified Provider Registration [f7476c5]
+- [x] Implement `app.provide(ServiceClass)` auto-discovery
+- [x] Implement `@app.provide` decorator for factories
+- [x] Infer dependencies from `__init__` type hints
+- [x] Support async factory functions
+- [x] Write tests for registration patterns
 
 ### Task 2.3: AOT Dependency Graph Compilation
 - [ ] Build dependency graph at startup
