@@ -1,6 +1,8 @@
 import { ShmRing } from "../broker/shm";
 import { Flags } from "../protocol/headers";
-import { decodeResponse, encodeRequest } from "../protocol/serialization";
+import { decodeMessage, decodeResponse, encodeMessage, encodeRequest } from "../protocol/serialization";
+
+export type IpcWireProtocol = "msgpack" | "framed";
 
 export type IpcClientConfig = {
   name?: string;
@@ -14,6 +16,7 @@ export type IpcClientConfig = {
   acquireTimeoutMs?: number;
   /** Maximum concurrent in-flight requests per connection (default: 64) */
   maxConcurrentRequests?: number;
+  protocol?: IpcWireProtocol;
 };
 
 export type ResolvedIpcConfig = Required<
@@ -29,6 +32,7 @@ export type ResolvedIpcConfig = Required<
     | "poolMax"
     | "acquireTimeoutMs"
     | "maxConcurrentRequests"
+    | "protocol"
   >
 >;
 
@@ -73,6 +77,7 @@ const DEFAULT_RETRY_DELAY_MS = 50;
 const DEFAULT_POOL_SIZE = 2;
 const DEFAULT_POOL_MAX = 10;
 const DEFAULT_MAX_CONCURRENT_REQUESTS = 64;
+const DEFAULT_PROTOCOL: IpcWireProtocol = "msgpack";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -128,6 +133,7 @@ export function resolveIpcConfig(config: IpcClientConfig = {}): ResolvedIpcConfi
   const retryDelayMs = config.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
   const acquireTimeoutMs = config.acquireTimeoutMs ?? timeoutMs;
   const maxConcurrentRequests = config.maxConcurrentRequests ?? DEFAULT_MAX_CONCURRENT_REQUESTS;
+  const protocol = config.protocol ?? DEFAULT_PROTOCOL;
 
   return {
     name,
@@ -140,6 +146,7 @@ export function resolveIpcConfig(config: IpcClientConfig = {}): ResolvedIpcConfi
     poolMax,
     acquireTimeoutMs,
     maxConcurrentRequests,
+    protocol,
   };
 }
 
@@ -147,7 +154,7 @@ class IpcConnection {
   private control: ShmRing | null = null;
   private requestRing: ShmRing | null = null;
   private responseRing: ShmRing | null = null;
-  private pendingRequests: Map<bigint, PendingRequest> = new Map();
+  private pendingRequests: Map<string, PendingRequest> = new Map();
   private responseLoopRunning = false;
   private connecting: Promise<void> | null = null;
   private closed = false;
@@ -170,13 +177,17 @@ class IpcConnection {
     }
     const message = this.ensureId(payload);
     const correlationId = this.nextCorrelationId();
+    const requestKey =
+      this.config.protocol === "msgpack"
+        ? String((message as Record<string, unknown>).id)
+        : correlationId.toString();
 
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.failRequest(correlationId, new IpcTimeoutError("IPC request timed out"));
+        this.failRequest(requestKey, new IpcTimeoutError("IPC request timed out"));
       }, this.config.timeoutMs) as unknown as number;
 
-      this.pendingRequests.set(correlationId, {
+      this.pendingRequests.set(requestKey, {
         resolve: (value) => resolve(value as T),
         reject,
         timer,
@@ -186,7 +197,7 @@ class IpcConnection {
         this.sendPayload(message, correlationId);
         this.ensureResponseLoop();
       } catch (error) {
-        this.failRequest(correlationId, error);
+        this.failRequest(requestKey, error);
       }
     });
   }
@@ -267,11 +278,11 @@ class IpcConnection {
       resp_ring: respName,
     };
     const correlationId = this.nextCorrelationId();
-    this.control.send(
-      encodeRequest(registerMessage, correlationId, Flags.NONE),
-      0,
-      this.config.timeoutMs,
-    );
+    const registerPayload =
+      this.config.protocol === "msgpack"
+        ? encodeMessage(registerMessage)
+        : encodeRequest(registerMessage, correlationId, Flags.NONE);
+    this.control.send(registerPayload, 0, this.config.timeoutMs);
     const response = await this.waitForResponse(String(registerId));
     if (!response || !(response as Record<string, unknown>).ok) {
       throw new IpcConnectionError("IPC registration failed");
@@ -311,20 +322,35 @@ class IpcConnection {
         continue;
       }
       try {
-        const response = decodeResponse<Record<string, unknown>>(chunk.data);
-        const pending = this.pendingRequests.get(response.correlationId);
-        if (!pending) {
-          // Response for unknown correlation ID - possibly already timed out
-          continue;
-        }
-        this.pendingRequests.delete(response.correlationId);
-        if (pending.timer !== null) {
-          clearTimeout(pending.timer);
-        }
-        if (response.isError) {
-          pending.reject(new IpcError("Remote error", { cause: response.payload }));
+        if (this.config.protocol === "msgpack") {
+          const payload = decodeMessage<Record<string, unknown>>(chunk.data);
+          const key = String(payload?.id ?? "");
+          const pending = this.pendingRequests.get(key);
+          if (!pending) {
+            continue;
+          }
+          this.pendingRequests.delete(key);
+          if (pending.timer !== null) {
+            clearTimeout(pending.timer);
+          }
+          pending.resolve(payload);
         } else {
-          pending.resolve(response.payload);
+          const response = decodeResponse<Record<string, unknown>>(chunk.data);
+          const key = response.correlationId.toString();
+          const pending = this.pendingRequests.get(key);
+          if (!pending) {
+            // Response for unknown correlation ID - possibly already timed out
+            continue;
+          }
+          this.pendingRequests.delete(key);
+          if (pending.timer !== null) {
+            clearTimeout(pending.timer);
+          }
+          if (response.isError) {
+            pending.reject(new IpcError("Remote error", { cause: response.payload }));
+          } else {
+            pending.resolve(response.payload);
+          }
         }
       } catch (error) {
         // Decoding error - log but continue processing
@@ -346,6 +372,14 @@ class IpcConnection {
         await sleep(1);
         continue;
       }
+      if (this.config.protocol === "msgpack") {
+        const payload = decodeMessage<Record<string, unknown>>(chunk.data);
+        const id = payload?.id;
+        if (String(id) !== expectedId) {
+          continue;
+        }
+        return payload;
+      }
       const response = decodeResponse<Record<string, unknown>>(chunk.data);
       if (response.isError) {
         throw new IpcError("Remote error", { cause: response.payload });
@@ -364,7 +398,10 @@ class IpcConnection {
       throw new IpcConnectionError("IPC request ring unavailable");
     }
     const corrId = correlationId ?? this.nextCorrelationId();
-    const encoded = encodeRequest(payload, corrId, Flags.NONE);
+    const encoded =
+      this.config.protocol === "msgpack"
+        ? encodeMessage(payload)
+        : encodeRequest(payload, corrId, Flags.NONE);
     this.requestRing.send(encoded, 0, this.config.timeoutMs);
     return corrId;
   }
@@ -408,12 +445,12 @@ class IpcConnection {
     return { id: nextId(), payload };
   }
 
-  private failRequest(correlationId: bigint, reason: unknown): void {
-    const pending = this.pendingRequests.get(correlationId);
+  private failRequest(requestKey: string, reason: unknown): void {
+    const pending = this.pendingRequests.get(requestKey);
     if (!pending) {
       return;
     }
-    this.pendingRequests.delete(correlationId);
+    this.pendingRequests.delete(requestKey);
     if (pending.timer !== null) {
       clearTimeout(pending.timer);
     }
@@ -421,7 +458,7 @@ class IpcConnection {
   }
 
   private failAllPending(reason: unknown): void {
-    for (const [correlationId, pending] of this.pendingRequests) {
+    for (const [requestKey, pending] of this.pendingRequests) {
       if (pending.timer !== null) {
         clearTimeout(pending.timer);
       }

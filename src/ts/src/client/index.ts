@@ -88,6 +88,9 @@ function createAsyncIterator<T>(
       failure = error;
       throw error;
     },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
   };
 }
 

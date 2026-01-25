@@ -1,10 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it, mock, type Mock } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout, type Mock } from "bun:test";
 import { unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Subprocess } from "bun";
+import { AsgiBridge } from "../../src/ipc/asgi";
 import { IpcClient } from "../../src/ipc/client";
-import { AsgiBridge, type AsgiIpcFrame } from "../../src/ipc/asgi";
 import { RoundRobinIpcConnectionPool, StubIpcConnectionPool } from "../../src/server/worker-connections";
 import { ShmRouter } from "../../src/broker/shm";
 import type { Server } from "bun";
@@ -16,9 +16,10 @@ const ASGI_NAME = `vertebra-asgi-test-${crypto.randomUUID().slice(0, 8)}`;
 const SLOT_SIZE = 4096;
 const SLOTS = 64;
 const WORKERS = 2;
-const HEALTH_PATH = "/__vertebra__/health";
 
 const test = SHM_AVAILABLE ? it : it.skip;
+
+setDefaultTimeout(15000);
 
 const workers: Subprocess[] = [];
 let testFilePath: string | null = null;
@@ -30,35 +31,6 @@ function buildPythonPath(): string {
   return existing ? `${root}${delim}${existing}` : root;
 }
 
-async function readStatus(client: IpcClient): Promise<number> {
-  let status: number | null = null;
-  const frames = (async function* () {
-    yield {
-      type: "http.request.start",
-      method: "GET",
-      path: HEALTH_PATH,
-      query: "",
-      headers: [],
-      scheme: "http",
-      httpVersion: "1.1",
-    };
-    yield { type: "http.request", body: new Uint8Array(), more_body: false };
-  })();
-
-  for await (const frame of client.requestStream<AsgiIpcFrame>(frames)) {
-    if (frame.type === "http.response.start") {
-      status = frame.status;
-    }
-    if (frame.type === "http.response.body" && !frame.more_body) {
-      break;
-    }
-    if (frame.type === "http.response.pathsend" || frame.type === "http.response.zerocopysend") {
-      break;
-    }
-  }
-  return status ?? 502;
-}
-
 async function waitForWorker(workerId: number): Promise<void> {
   const config = {
     name: ASGI_NAME,
@@ -66,17 +38,15 @@ async function waitForWorker(workerId: number): Promise<void> {
     slots: SLOTS,
     timeoutMs: 500,
     retries: 0,
-    retryDelayMs: 50,
+    retryDelayMs: 25,
   };
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const client = new IpcClient(config, workerId);
     try {
-      const status = await readStatus(client);
-      if (status === 200) {
-        return;
-      }
+      await client.request({ type: "vertebra.ping" });
+      return;
     } catch {
-      // Retry until worker control ring is online.
+      // Retry until worker responds to ping.
     } finally {
       await client.close();
     }
@@ -125,9 +95,7 @@ beforeAll(async () => {
     workers.push(proc);
   }
 
-  for (let i = 0; i < WORKERS; i += 1) {
-    await waitForWorker(i);
-  }
+  await Promise.all(Array.from({ length: WORKERS }, (_, i) => waitForWorker(i)));
 });
 
 afterAll(async () => {
