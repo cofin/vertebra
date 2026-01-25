@@ -145,7 +145,6 @@
 - [x] Reconnection with last-event-id [9bebd17]
 - [x] Write integration tests [9bebd17]
 
-### Task 5.2: WebSocket Support
 ### Task 5.2: WebSocket Support [d3f64a4]
 - [x] Create `src/ts/src/server/websocket.ts` [d3f64a4]
 - [x] Bidirectional state sync [d3f64a4]
@@ -159,7 +158,6 @@
 - [x] Timeout and retry logic [1e05168]
 - [x] Write integration tests [1e05168]
 
-### Task 5.4: Python Client Helpers
 ### Task 5.4: Python Client Helpers [95f2393]
 - [x] Create `src/py/vertebra/sync/__init__.py` [95f2393]
 - [x] Helper decorators for SSE/WS endpoints [95f2393]
@@ -183,7 +181,6 @@
 - [x] State initialization
 - [x] Write unit tests
 
-### Task 6.2: Event System
 ### Task 6.2: Event System [ddeb974]
 - [x] Create `src/py/vertebra/events/__init__.py`
 - [x] Implement pub/sub event dispatcher
@@ -191,55 +188,52 @@
 - [x] Async event handlers
 - [x] Write unit tests
 
-### Task 6.3: Background Tasks
 ### Task 6.3: Background Tasks [4977732]
 - [x] Implement background task scheduling
 - [x] DI access in background tasks
 - [x] Task cancellation and cleanup
 - [x] Write integration tests
 
-### Task 6.4: CLI Integration
 ### Task 6.4: CLI Integration [97ab1b0]
 - [x] Merge `serve`/`run` into a single command
-- [x] Add `--asgi` flag to toggle ASGI vs native
+- [x] Add `--asgi` flag for running legacy/external ASGI apps
 - [x] DI context in CLI commands
 - [x] Write integration tests
 
 ### Task 6.5: Checkpoint - Verify Phase 6 Complete
-- [ ] App starts and shuts down cleanly
-- [ ] Events dispatch to handlers
-- [ ] Background tasks run with DI
-- [ ] CLI commands have DI access
+### Task 6.5: Checkpoint - Verify Phase 6 Complete [dc6365c]
+- [x] App starts and shuts down cleanly
+- [x] Events dispatch to handlers
+- [x] Background tasks run with DI
+- [x] CLI commands have DI access
+- [ ] `--asgi` flag correctly mounts external ASGI app
 
 ---
 
-## Phase 7: Integration and Performance
+## Phase 7: Optimization and Cleanup (Clean Break)
 
-### Task 7.1: End-to-End Integration Tests
-- [ ] Full app lifecycle tests
-- [ ] Multi-worker state sync tests
-- [ ] Frontend sync protocol tests
-- [ ] Guard and middleware chain tests
-- [ ] Write comprehensive test suite
+### Task 7.1: Port Arrow Encoder to Rust
+- [ ] Implement `encode_arrow_rows` in `vertebra-py` (Rust)
+- [ ] Accept `List[Tuple]` from Python
+- [ ] Pivot to Arrow Columnar Memory in Rust
+- [ ] Replace Python implementation in `vertebra.resources.arrow`
+- [ ] Benchmark to confirm 5x speedup
 
-### Task 7.2: Performance Benchmarks
-- [ ] Route matching benchmark (target: O(1))
-- [ ] DI resolution benchmark (target: ~0 overhead)
-- [ ] State sync latency (target: <100μs)
-- [ ] Throughput benchmark (target: >50K req/s)
-- [ ] Memory allocation rate (target: <1MB/s)
+### Task 7.2: Zero-Copy Header Enforcement
+- [ ] Audit `src/ts/src/ipc` to ensure `RequestHeader` is used
+- [ ] Audit `src/py/vertebra/ipc` to ensure `RequestHeader` is used
+- [ ] Remove any residual JSON or non-framed IPC paths
 
-### Task 7.3: Performance Optimization
-- [ ] Profile and identify bottlenecks
-- [ ] Optimize hot paths based on benchmarks
-- [ ] Reduce FFI boundary crossings
-- [ ] Batch operations where possible
+### Task 7.3: Legacy Removal & Adapter Modernization
+- [ ] Remove any *deprecated* pre-Vertebra code
+- [ ] Update `src/py/vertebra/asgi.py` adapter to use new `RequestHeader` + `msgspec` protocol
+- [ ] Ensure ASGI adapter can co-exist with Native Routes in the same worker pool
+- [ ] Remove any deprecated flatbuffers generated code
 
-### Task 7.4: Checkpoint - Verify Phase 7 Complete
-- [ ] All integration tests pass
-- [ ] Performance targets met
-- [ ] No memory leaks under load
-- [ ] >90% test coverage
+### Task 7.4: Performance Validation
+- [ ] Profile full stack with `flamegraph`
+- [ ] Verify Memory Allocation < 1MB/s
+- [ ] Verify Throughput > 200K req/s
 
 ---
 
@@ -256,54 +250,15 @@
 - [ ] State synchronization guide
 - [ ] Dependency injection guide
 - [ ] Guards and middleware guide
+- [ ] **Dual Mode Guide:** Mixing Native and ASGI apps
 
 ### Task 8.3: Example Applications
 - [ ] Basic CRUD example
 - [ ] Real-time dashboard example
 - [ ] Multi-user game example
-- [ ] CLI tool with DI example
+- [ ] Hybrid App (Native API + ASGI Admin Panel)
 
-### Task 8.4: Migration Guide
-- [ ] Litestar to Vertebra Native migration
-- [ ] ASGI to Native migration
-- [ ] Common patterns and differences
-
-### Task 8.5: Checkpoint - Verify Phase 8 Complete
+### Task 8.4: Checkpoint - Verify Phase 8 Complete
 - [ ] All documentation complete
 - [ ] Examples run successfully
-- [ ] Migration guide covers common cases
-
----
-
-## Success Metrics
-
-| Metric | Target | Measurement |
-|--------|--------|-------------|
-| Route matching | O(1) | Benchmark suite |
-| DI overhead | ~0 | Benchmark vs direct call |
-| State sync | <100μs | Integration test timing |
-| Throughput (simple) | >200K req/s | Load test (no state sync) |
-| Throughput (with sync) | >150K req/s | Load test (with state deltas) |
-| Test coverage | >90% | pytest-cov |
-| Memory allocation | <1MB/s | heaptrack under load |
-
-**Baseline comparison:** Granian ASGI ~70-100K req/s. Native must exceed by 2-3x to justify the complexity.
-
-## Dependencies Between Phases
-
-```
-Phase 1 (Routing) ──┐
-                    ├──> Phase 3 (Guards) ──┐
-Phase 2 (DI) ───────┘                       │
-                                            ├──> Phase 6 (Lifecycle) ──> Phase 7 (Integration)
-Phase 4 (State) ────────────────────────────┤
-                                            │
-Phase 5 (Frontend Sync) ────────────────────┘
-```
-
-- Phase 1 and 2 can run in parallel
-- Phase 3 depends on Phase 1 and 2
-- Phase 4 and 5 can run in parallel with Phase 3
-- Phase 6 depends on all previous phases
-- Phase 7 integrates everything
-- Phase 8 can start after Phase 6
+- [ ] Docs clear on Native vs. ASGI tradeoffs
