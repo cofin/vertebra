@@ -291,6 +291,7 @@ export {
 } from "./config";
 export { ProcessManager } from "./process-manager";
 export { createRouter, type RequestHandler } from "./router";
+export { StateWebSocketServer, type StateWebSocketOptions } from "./websocket";
 export {
   createIpcConnectionPool,
   type IpcConnectionPool,
