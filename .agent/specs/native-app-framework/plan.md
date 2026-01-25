@@ -153,11 +153,11 @@
 - [x] Heartbeat and reconnection [d3f64a4]
 - [x] Write integration tests [d3f64a4]
 
-### Task 5.3: Long-Polling Fallback
-- [ ] Implement long-polling endpoint
-- [ ] State versioning for catch-up
-- [ ] Timeout and retry logic
-- [ ] Write integration tests
+### Task 5.3: Long-Polling Fallback [1e05168]
+- [x] Implement long-polling endpoint [1e05168]
+- [x] State versioning for catch-up [1e05168]
+- [x] Timeout and retry logic [1e05168]
+- [x] Write integration tests [1e05168]
 
 ### Task 5.4: Python Client Helpers
 - [ ] Create `src/py/vertebra/sync/__init__.py`
