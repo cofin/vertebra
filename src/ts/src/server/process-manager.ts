@@ -2,7 +2,7 @@ import { readdirSync, existsSync } from "node:fs";
 import { delimiter, join, resolve as resolvePath } from "node:path";
 import type { Subprocess } from "bun";
 
-import { ShmRing } from "../broker/shm";
+import { ShmNotifier, ShmRing } from "../broker/shm";
 import { type AsgiIpcFrame, type AsgiRequest } from "../ipc/asgi";
 import {
   IpcClient,
@@ -11,6 +11,8 @@ import {
   resolveIpcConfig,
 } from "../ipc/client";
 import type { PythonConfig, ServerIpcConfig } from "./config";
+
+import { registerWorkerNotifier, unregisterWorkerNotifier } from "./notifier-registry";
 
 const HEALTH_PATH = "/__vertebra__/health";
 const DEFAULT_HEALTH_INTERVAL_MS = 5000;
@@ -21,6 +23,7 @@ const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 type WorkerProcess = {
   id: number;
   proc: Subprocess | null;
+  notifier: ShmNotifier | null;
   restarts: number;
 };
 
@@ -45,7 +48,7 @@ export class ProcessManager {
       throw new Error("Python app is required to manage workers");
     }
     for (let i = 0; i < Math.max(1, options.count); i += 1) {
-      this.workers.set(i, { id: i, proc: null, restarts: 0 });
+      this.workers.set(i, { id: i, proc: null, notifier: null, restarts: 0 });
     }
   }
 
@@ -126,6 +129,13 @@ export class ProcessManager {
     if (!worker || worker.proc || this.stopping) {
       return;
     }
+
+    // Create notifier BEFORE spawning - fd is inherited by child process
+    const notifier = new ShmNotifier();
+    worker.notifier = notifier;
+    // Register in module-level map so IpcConnection can access it
+    registerWorkerNotifier(id, notifier);
+
     const python = this.resolvePythonExecutable(this.options.python);
     const ipcConfig = this.resolveWorkerIpc(id);
     // Assertion safe: constructor validates python.app is defined
@@ -143,6 +153,11 @@ export class ProcessManager {
       String(ipcConfig.slotSize),
       "--slots",
       String(ipcConfig.slots),
+      // Pass notifier fds - child inherits them automatically
+      "--notify-read-fd",
+      String(notifier.fd),
+      "--notify-write-fd",
+      String(notifier.writeFd),
     ];
     if (this.options.python.timeout) {
       cmd.push("--timeout", String(this.options.python.timeout));
@@ -168,6 +183,19 @@ export class ProcessManager {
     }
     const proc = worker.proc;
     worker.proc = null;
+
+    // Close the notifier - this also signals the worker to stop waiting
+    if (worker.notifier) {
+      // Unregister from module-level map first
+      unregisterWorkerNotifier(worker.id);
+      try {
+        worker.notifier.close();
+      } catch {
+        // Ignore errors closing notifier
+      }
+      worker.notifier = null;
+    }
+
     try {
       proc.kill("SIGTERM");
     } catch {
@@ -202,6 +230,18 @@ export class ProcessManager {
     }
     worker.proc = null;
     worker.restarts += 1;
+
+    // Close the notifier for the crashed worker
+    if (worker.notifier) {
+      // Unregister from module-level map first
+      unregisterWorkerNotifier(id);
+      try {
+        worker.notifier.close();
+      } catch {
+        // Ignore errors closing notifier
+      }
+      worker.notifier = null;
+    }
 
     // Clean up the crashed worker's SHM region to prevent /dev/shm leakage
     const ipcName = this.options.ipc.name ?? "vertebra-asgi";

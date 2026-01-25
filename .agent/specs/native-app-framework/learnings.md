@@ -121,3 +121,47 @@ When a Rust function exposed via PyO3 encounters a system error:
 - It raises Python `RuntimeError`, NOT `OSError`
 - Error message format: "system call failed: {description} (os error {code})"
 - Must catch `RuntimeError` in addition to `OSError` for robust cleanup
+
+## [2026-01-25] - ProcessManager Notifier Lifecycle (vertebra-adh)
+
+### Problem
+When TypeScript sends data to Python via shared-memory rings:
+1. Python creates `AsyncRing.create_named()` which creates an INTERNAL notifier
+2. TypeScript opens `ShmRing.open()` - same ring but NO notifier
+3. Python waits on `add_reader(internal_fd)` but TypeScript never signals it
+4. Result: Python never wakes up to process requests
+
+### Solution
+1. ProcessManager creates `ShmNotifier` BEFORE spawning each worker
+2. Passes notifier fds via CLI: `--notify-read-fd` and `--notify-write-fd`
+3. Python worker uses external fd for `add_reader()` instead of ring's internal
+4. TypeScript calls `notifyWorker(workerId)` after every send
+5. Module-level registry (`notifier-registry.ts`) avoids circular deps
+
+### Files Changed
+
+1. **notifier-registry.ts (NEW):**
+   - Module-level `Map<number, ShmNotifier>` registry
+   - `registerWorkerNotifier()` / `unregisterWorkerNotifier()`
+   - `notifyWorker(workerId)` - called by IpcConnection after send
+
+2. **process-manager.ts:**
+   - Import from notifier-registry
+   - `spawnWorker()`: Create notifier, register, pass fds via CLI
+   - `stopWorker()` / `handleExit()`: Unregister and close notifier
+
+3. **client.ts (IpcConnection):**
+   - Import `notifyWorker` from notifier-registry
+   - Call `notifyWorker(this.workerId)` after `control.send()` and `requestRing.send()`
+
+4. **worker.py:**
+   - Add `notify_read_fd` / `notify_write_fd` to `WorkerConfig`
+   - Add `--notify-read-fd` / `--notify-write-fd` CLI args
+   - `_serve_loop()`: Use external fd for `add_reader()` when provided
+   - Clear external eventfd via `os.read(fd, 8)` instead of ring's clear_notification()
+
+### Key Insight: FD Inheritance
+Unix file descriptors are automatically inherited by child processes. No special IPC needed:
+1. Parent creates eventfd/pipe
+2. Parent passes fd NUMBER via CLI arg (just an integer)
+3. Child opens same fd by number - it's already open in the process

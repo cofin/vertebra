@@ -30,6 +30,9 @@ class WorkerConfig(msgspec.Struct, frozen=True):
     timeout: float = 5.0
     host: str = "127.0.0.1"
     port: int = 8000
+    # External notifier fds passed from ProcessManager (for shared notification)
+    notify_read_fd: int | None = None
+    notify_write_fd: int | None = None
 
 
 class AsgiRequest(msgspec.Struct):
@@ -252,11 +255,20 @@ class AsgiWorker:
         self._loop = asyncio.get_running_loop()
         self._stop_event = asyncio.Event()
 
+        # Use external notifier fd if provided (from ProcessManager), otherwise use ring's internal
+        external_notify_fd = self._config.notify_read_fd
+
         def on_control_readable() -> None:
             """Callback when control ring has data available."""
             if self._control is None:
                 return
-            self._control.clear_notification()
+            # Clear notification - use external notifier if available
+            if external_notify_fd is not None:
+                # External eventfd is cleared by reading 8 bytes (u64 counter)
+                with contextlib.suppress(OSError):
+                    os.read(external_notify_fd, 8)
+            else:
+                self._control.clear_notification()
             while True:
                 payload = self._control.try_recv()
                 if payload is None:
@@ -264,8 +276,9 @@ class AsgiWorker:
                 # Schedule coroutine for control message handling
                 asyncio.create_task(self._handle_control_payload(payload))
 
-        # Register control ring FD with the event loop
-        control_fd = self._control.notifier_fd()
+        # Register notification FD with the event loop
+        # Use external notifier fd from ProcessManager if provided, otherwise ring's internal
+        control_fd = external_notify_fd if external_notify_fd is not None else self._control.notifier_fd()
         self._loop.add_reader(control_fd, on_control_readable)
 
         try:
@@ -1096,6 +1109,9 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--timeout", type=float, default=5.0)
+    # External notifier fds inherited from ProcessManager
+    parser.add_argument("--notify-read-fd", type=int, default=None)
+    parser.add_argument("--notify-write-fd", type=int, default=None)
     args = parser.parse_args()
 
     config = WorkerConfig(
@@ -1106,6 +1122,8 @@ def main() -> None:
         host=args.host,
         port=args.port,
         timeout=args.timeout,
+        notify_read_fd=args.notify_read_fd,
+        notify_write_fd=args.notify_write_fd,
     )
     asyncio.run(_serve_worker(args.app, config))
 

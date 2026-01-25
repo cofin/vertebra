@@ -1,6 +1,7 @@
 import { ShmRing } from "../broker/shm";
 import { Flags } from "../protocol/headers";
 import { decodeResponse, encodeRequest } from "../protocol/serialization";
+import { notifyWorker } from "../server/notifier-registry";
 
 export type IpcClientConfig = {
   name?: string;
@@ -296,6 +297,8 @@ class IpcConnection {
     const correlationId = this.nextCorrelationId();
     const registerPayload = encodeRequest(registerMessage, correlationId, Flags.NONE);
     this.control.send(registerPayload, 0, this.config.timeoutMs);
+    // Notify worker that data is available on control ring
+    notifyWorker(this.workerId);
     const response = await this.waitForResponse(String(registerId));
     if (!response || !(response as Record<string, unknown>).ok) {
       throw new IpcConnectionError("IPC registration failed");
@@ -391,6 +394,8 @@ class IpcConnection {
     const corrId = correlationId ?? this.nextCorrelationId();
     const encoded = encodeRequest(payload, corrId, Flags.NONE);
     this.requestRing.send(encoded, 0, this.config.timeoutMs);
+    // Notify worker that data is available on request ring
+    notifyWorker(this.workerId);
     return corrId;
   }
 
