@@ -299,3 +299,9 @@ export {
   RoundRobinIpcConnectionPool,
   StubIpcConnectionPool,
 } from "./worker-connections";
+export {
+  beginBatch,
+  notifyWorker,
+  notifyWorkerIfNotBatched,
+  type NotificationBatch,
+} from "./notifier-registry";

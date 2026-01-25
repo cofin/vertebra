@@ -165,3 +165,45 @@ Unix file descriptors are automatically inherited by child processes. No special
 1. Parent creates eventfd/pipe
 2. Parent passes fd NUMBER via CLI arg (just an integer)
 3. Child opens same fd by number - it's already open in the process
+
+## [2026-01-25] - Notification Batching (vertebra-a6w)
+
+### Optimizations Implemented
+
+1. **Coalesced Notification (`hasPending` check):**
+   - Before calling `notify()`, check if notifier already has a pending signal
+   - If pending, skip the redundant syscall - worker will drain all messages anyway
+   - Reduces syscall overhead under high load
+
+2. **Batch Context API:**
+   - `beginBatch(workerId)` - start a batch, returns commit/abort methods
+   - Individual sends within batch skip notification
+   - `commit()` sends single notification for all batched messages
+   - Nested batches supported - only outermost commit triggers notify
+
+3. **Streaming Send Batching:**
+   - `sendOutbound()` wraps multi-frame sends in batch context
+   - Single notification at end of stream instead of per-frame
+
+### API Added to notifier-registry.ts
+
+```typescript
+// Coalesced single notify
+notifyWorker(workerId)  // Skips if already pending
+
+// Batch API
+const batch = beginBatch(workerId);
+try {
+  for (const msg of messages) ring.send(msg);
+  batch.commit();  // Single notification
+} catch { batch.abort(); }
+
+// Batch-aware notify (used by IpcConnection)
+notifyWorkerIfNotBatched(workerId)  // No-op during active batch
+```
+
+### Performance Impact
+- Reduces eventfd writes from N (per-message) to 1 (per-batch)
+- Each eventfd write is a syscall (~1µs overhead)
+- For 100-message batch: ~99µs saved per batch
+- Critical for achieving >200K RPS target

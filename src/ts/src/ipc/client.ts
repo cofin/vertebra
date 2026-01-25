@@ -1,7 +1,7 @@
 import { ShmRing } from "../broker/shm";
 import { Flags } from "../protocol/headers";
 import { decodeResponse, encodeRequest } from "../protocol/serialization";
-import { notifyWorker } from "../server/notifier-registry";
+import { beginBatch, notifyWorkerIfNotBatched } from "../server/notifier-registry";
 
 export type IpcClientConfig = {
   name?: string;
@@ -298,7 +298,7 @@ class IpcConnection {
     const registerPayload = encodeRequest(registerMessage, correlationId, Flags.NONE);
     this.control.send(registerPayload, 0, this.config.timeoutMs);
     // Notify worker that data is available on control ring
-    notifyWorker(this.workerId);
+    notifyWorkerIfNotBatched(this.workerId);
     const response = await this.waitForResponse(String(registerId));
     if (!response || !(response as Record<string, unknown>).ok) {
       throw new IpcConnectionError("IPC registration failed");
@@ -395,7 +395,7 @@ class IpcConnection {
     const encoded = encodeRequest(payload, corrId, Flags.NONE);
     this.requestRing.send(encoded, 0, this.config.timeoutMs);
     // Notify worker that data is available on request ring
-    notifyWorker(this.workerId);
+    notifyWorkerIfNotBatched(this.workerId);
     return corrId;
   }
 
@@ -417,13 +417,21 @@ class IpcConnection {
   }
 
   private async sendOutbound(outbound: AsyncIterable<unknown>, requestId: string): Promise<void> {
-    for await (const frame of outbound) {
-      if (frame && typeof frame === "object") {
-        const payload = { ...(frame as Record<string, unknown>), id: requestId };
-        this.sendPayload(payload);
-      } else {
-        this.sendPayload({ id: requestId, payload: frame });
+    // Use batch notification for streaming sends - single notify at end
+    const batch = beginBatch(this.workerId);
+    try {
+      for await (const frame of outbound) {
+        if (frame && typeof frame === "object") {
+          const payload = { ...(frame as Record<string, unknown>), id: requestId };
+          this.sendPayload(payload);
+        } else {
+          this.sendPayload({ id: requestId, payload: frame });
+        }
       }
+      batch.commit();
+    } catch (error) {
+      batch.abort();
+      throw error;
     }
   }
 
