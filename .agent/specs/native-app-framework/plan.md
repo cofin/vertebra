@@ -174,17 +174,17 @@
 
 ## Phase 6: Application Lifecycle & Unification
 
-### Task 6.1: Vertex Class (Unified Config) [f0ac69e]
-- [x] Create `src/py/vertebra/vertex.py` replacing `app.py`
-- [x] Implement `Vertex` class consolidating App/Config responsibilities
+### Task 6.1: Vertebra Class (Unified Config) [f0ac69e]
+- [x] Keep `src/py/vertebra/app.py` (or `main.py`) as the unified container
+- [x] Implement `Vertebra` class consolidating app/config responsibilities
 - [x] Implement lifecycle hooks (`on_startup`, `on_shutdown`)
-- [x] Router and controller registration on `Vertex`
+- [x] Router and controller registration on `Vertebra`
 - [x] State initialization
-- [x] Write unit tests verifying `Vertex` as single source of truth
+- [x] Write unit tests verifying `Vertebra` as single source of truth
 
 ### Task 6.2: Event System [ddeb974]
 - [x] Create `src/py/vertebra/events/__init__.py`
-- [x] Implement pub/sub event dispatcher attached to `Vertex`
+- [x] Implement pub/sub event dispatcher attached to `Vertebra`
 - [x] Event DI injection support
 - [x] Async event handlers
 - [x] Write unit tests
@@ -201,10 +201,17 @@
 - [x] Verify plugin launches Vertebra Supervisor when `VertebraPlugin` is present in `Litestar(plugins=[...])`
 - [x] Add tests for CLI overrides
 
-### Task 6.5: Checkpoint - Verify Phase 6 Complete
-- [ ] `Vertex` successfully configures native apps
+### Task 6.5: Checkpoint - Verify Phase 6 Complete [dc6365c]
+- [x] `Vertebra` successfully configures native apps
 - [ ] `litestar run` launches Vertebra Supervisor for Litestar apps
 - [ ] Events and background tasks function in both modes
+
+### Task 6.6: Vertebra Unification (Single Entry Point)
+- [ ] Merge native app container with broker plugin container into a single `Vertebra` class
+- [ ] Ensure broker configs register via `Vertebra` (plugin/config hook)
+- [ ] Ensure ASGI servers register via `Vertebra` (mount/adapter hook)
+- [ ] Update templates/docs to reference unified `Vertebra`
+- [ ] Add tests for unified entrypoint wiring
 
 ---
 

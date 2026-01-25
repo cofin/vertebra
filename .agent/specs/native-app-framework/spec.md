@@ -23,7 +23,7 @@ A high-performance native application framework for Vertebra that bypasses ASGI 
 ### Must Have
 
 #### Native App & Routing
-- [ ] `Vertex` class as the single unified application entry point and configuration hub (replaces `VertebraApp`/`App`).
+- [ ] `Vertebra` class as the single unified application entry point and configuration hub (replaces `VertebraApp`/`App`).
 - [ ] **Dual Routing:**
     - [ ] Native Routes: Resolved by Rust `matchit` -> Native Controller (Bypasses ASGI)
     - [ ] ASGI Mounts: Resolved by Rust `matchit` -> ASGI Adapter (Legacy/Compat)
@@ -110,7 +110,7 @@ A high-performance native application framework for Vertebra that bypasses ASGI 
 ├─────────────────────────────────────────────────────────────┤
 │  RUST CORE         │  BUN IO LAYER      │  PYTHON LOGIC     │
 │  ───────────────   │  ──────────────    │  ─────────────    │
-│  • Router(matchit) │  • HTTP/WS server  │  • Vertex (Config)│
+│  • Router(matchit) │  • HTTP/WS server  │  • Vertebra (Config)│
 │  • Custom Header   │  • SSE broadcast   │  • Controllers    │
 │  • Native Guards   │  • Long-polling    │  • Domain logic   │
 │  • Dep Graph Cache │  • Static assets   │  • Inject[T]      │

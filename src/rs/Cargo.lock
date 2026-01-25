@@ -1792,6 +1792,7 @@ dependencies = [
 name = "vertebra-py"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "libc",
  "pyo3",
  "rustix 0.38.44",

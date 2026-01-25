@@ -26,6 +26,7 @@ use vertebra_core::router::{RouteId, Router};
 use vertebra_core::shm::ShmRegion;
 
 mod async_ring;
+mod arrow;
 mod supervisor;
 
 #[pyclass(name = "Router")]
@@ -1148,13 +1149,14 @@ fn _vertebra(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBufferChannel>()?;
     m.add_class::<supervisor::NativeSupervisor>()?;
     m.add_function(wrap_pyfunction!(validate_jwt_py, m)?)?;
+    m.add_function(wrap_pyfunction!(arrow::encode_arrow_rows, m)?)?;
     m.add_function(wrap_pyfunction!(shm_unlink, m)?)?;
     // Register async ring types (PRD-10: eventfd async transport)
     async_ring::register(m)?;
     Ok(())
 }
 
-fn map_err<E: std::fmt::Display>(err: E) -> PyErr {
+pub(crate) fn map_err<E: std::fmt::Display>(err: E) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err.to_string())
 }
 

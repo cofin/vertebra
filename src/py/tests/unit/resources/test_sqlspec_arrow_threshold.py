@@ -1,6 +1,7 @@
 import pytest
 
 from vertebra.resources.arrow import decode_arrow, encode_arrow, should_use_arrow
+import vertebra._vertebra as native
 
 
 def _rows(decoded: object) -> list[dict[str, object]]:
@@ -47,3 +48,16 @@ def test_arrow_empty_result() -> None:
     decoded = decode_arrow(encoded)
     rows = _rows(decoded)
     assert rows == []
+
+
+@pytest.mark.unit
+def test_rust_arrow_roundtrip() -> None:
+    rows = [[1, "Alice", True], [2, "Bob", False]]
+    columns = ["id", "name", "active"]
+    encoded = native.encode_arrow_rows(rows, columns)
+    assert isinstance(encoded, (bytes, bytearray))
+    decoded = decode_arrow(encoded)
+    assert _rows(decoded) == [
+        {"id": 1, "name": "Alice", "active": True},
+        {"id": 2, "name": "Bob", "active": False},
+    ]

@@ -97,7 +97,7 @@ def _infer_schema(data: dict[str, list[Any]]) -> Any:
     return na.struct(fields)
 
 
-def encode_arrow(result: dict[str, Any]) -> bytes:
+def _encode_arrow_python(result: dict[str, Any]) -> bytes:
     """Encode a result to Arrow IPC using nanoarrow.
 
     Args:
@@ -139,6 +139,23 @@ def encode_arrow(result: dict[str, Any]) -> bytes:
         writer.write_array(array)
 
     return out.getvalue()
+
+
+def encode_arrow(result: dict[str, Any]) -> bytes:
+    """Encode a result to Arrow IPC.
+
+    Prefer the native Rust encoder when available, with a nanoarrow fallback
+    for environments without compiled bindings.
+    """
+    columns = result.get("columns", [])
+    rows = result.get("rows", [])
+
+    try:
+        from vertebra._vertebra import encode_arrow_rows
+    except Exception:  # noqa: BLE001
+        return _encode_arrow_python(result)
+
+    return encode_arrow_rows(rows, columns)
 
 
 def decode_arrow(data: bytes | memoryview) -> Any:
