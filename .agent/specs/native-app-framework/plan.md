@@ -16,12 +16,12 @@
 - [x] Path parameter extraction and type coercion
 - [x] Write unit tests for routing
 
-### Task 1.3: Controller Base Class
-- [ ] Create `src/py/vertebra/controllers/__init__.py`
-- [ ] Implement `Controller` base class with `path` attribute
-- [ ] Controller-level guards and middleware
-- [ ] Route method discovery via reflection
-- [ ] Write unit tests for controllers
+### Task 1.3: Controller Base Class [48f35e5]
+- [x] Create `src/py/vertebra/controllers/__init__.py`
+- [x] Implement `Controller` base class with `path` attribute
+- [x] Controller-level guards and middleware
+- [x] Route method discovery via reflection
+- [x] Write unit tests for controllers
 
 ### Task 1.4: Checkpoint - Verify Phase 1 Complete
 - [ ] All routing tests pass
