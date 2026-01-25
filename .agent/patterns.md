@@ -27,6 +27,7 @@
 - **Opcode-based Dispatch**: Use integer opcodes (matched between Rust/TS/Python) for high-frequency operations (hashing, signing) - avoids JSON/MsgPack serialization overhead for method names
 - **Eventfd over Polling**: Linux uses eventfd for zero-overhead async notification; macOS/Windows use polling fallback
 - **Buffer Pools**: Pre-allocated buffers eliminate allocation churn (target: <1MB/s vs 650MB/s without)
+ - **State Sync IDs**: Use FNV-1a 64-bit for `state_id` (state class name) and FNV-1a 32-bit for `field_id` (field name); MessagePack arrays for deltas with BigInt64 enabled in TS for 64-bit IDs/timestamps
 
 ### Data Loading
 - **Lazy User Hydration**: `LazyUserProxy` pattern - `request.user` is available immediately with JWT claims, database fetch deferred until missing attribute accessed
