@@ -56,7 +56,7 @@ async def test_concurrent_ring_operations() -> None:
     _skip_if_async_ring_unavailable()
 
     from vertebra._vertebra import AsyncRing
-    from vertebra.ipc.async_transport import PollingTransport
+    from vertebra.ipc.async_transport import AsyncShmTransport
 
     num_rings = 4
     messages_per_ring = 10
@@ -67,7 +67,7 @@ async def test_concurrent_ring_operations() -> None:
 
         async def ring_test(ring_id: int, ring: AsyncRing) -> bool:
             """Test send/recv on a single ring."""
-            transport = PollingTransport(ring, poll_interval=0.001)
+            transport = AsyncShmTransport(ring)
             try:
                 for i in range(messages_per_ring):
                     msg = f"ring-{ring_id}-msg-{i}".encode()
@@ -161,13 +161,13 @@ async def test_multiple_messages_ordering() -> None:
     _skip_if_async_ring_unavailable()
 
     from vertebra._vertebra import AsyncRing
-    from vertebra.ipc.async_transport import PollingTransport
+    from vertebra.ipc.async_transport import AsyncShmTransport
 
     ring_name = f"/{unique_shm_name('ordering')}"
 
     with tracked_shm_cleanup([ring_name]):
         ring = AsyncRing.create_named(ring_name, slot_size=4096, slots=16)
-        transport = PollingTransport(ring, poll_interval=0.001)
+        transport = AsyncShmTransport(ring)
 
         try:
             # Send multiple messages
@@ -191,14 +191,14 @@ async def test_large_message_handling() -> None:
     _skip_if_async_ring_unavailable()
 
     from vertebra._vertebra import AsyncRing
-    from vertebra.ipc.async_transport import PollingTransport
+    from vertebra.ipc.async_transport import AsyncShmTransport
 
     ring_name = f"/{unique_shm_name('large-msg')}"
     slot_size = 8192  # 8KB slots
 
     with tracked_shm_cleanup([ring_name]):
         ring = AsyncRing.create_named(ring_name, slot_size=slot_size, slots=4)
-        transport = PollingTransport(ring, poll_interval=0.001)
+        transport = AsyncShmTransport(ring)
 
         try:
             # Create a message that uses most of the slot

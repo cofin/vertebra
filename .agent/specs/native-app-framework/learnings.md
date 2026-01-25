@@ -64,3 +64,29 @@ def _on_ring_readable():
 1. **IpcConnection.open() (client.ts:250-257):** Creates ShmRing.create() but no shm_unlink on failure
 2. **ProcessManager.handleExit() (process-manager.ts:165):** Doesn't clean up SHM when workers crash
 3. **No orphan cleanup:** Server startup should scan /dev/shm/vertebra-* and clean stale regions
+
+## [2026-01-25] - Legacy Polling Code Removal
+
+### Changes Made
+
+1. **PollingTransport Removed:**
+   - Deleted entire `PollingTransport` class from `async_transport.py`
+   - Added `UnsupportedPlatformError` for explicit failure on Windows ProactorEventLoop
+   - `create_transport()` now only returns `AsyncShmTransport`
+
+2. **Channel.py Polling Fallbacks Removed:**
+   - Deleted `_send_with_polling()` and `_recv_with_polling()` methods
+   - `_do_send_recv()` now requires native timeout methods
+   - `receive_sync()` now requires native timeout methods
+   - Clear error messages when native methods unavailable
+
+3. **Test Updates:**
+   - Updated broker tests to use `AsyncShmTransport` instead of `PollingTransport`
+   - Removed `prefer_eventfd=False` parameter from all `BrokerClientConfig` usages
+   - Deleted `TestPollingTransportUvloop` class from uvloop tests
+
+### Key Insight
+The polling fallback was masking the performance problem. By removing it entirely:
+- Unsupported platforms fail fast with clear errors
+- No silent degradation to unusable performance
+- Forces proper eventfd/pipe notification usage

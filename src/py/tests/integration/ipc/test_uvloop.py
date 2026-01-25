@@ -188,22 +188,3 @@ class TestUvloopCompatibility:
 
         await sender
         assert received == b"delayed"
-
-
-class TestPollingTransportUvloop:
-    """Test PollingTransport with uvloop (fallback path)."""
-
-    @pytest.mark.anyio
-    async def test_polling_transport(self, uvloop_policy, async_ring) -> None:
-        """Test PollingTransport works with uvloop."""
-        from vertebra.ipc.async_transport import PollingTransport
-
-        transport = PollingTransport(async_ring, poll_interval=0.0001)
-        try:
-            test_data = b"polling test"
-            async_ring.send(test_data, 0)
-
-            received = await asyncio.wait_for(transport.recv(), timeout=1.0)
-            assert received == test_data
-        finally:
-            transport.close()

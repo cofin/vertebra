@@ -24,7 +24,7 @@ async def test_broker_client_roundtrip() -> None:
     _skip_if_async_ring_unavailable()
 
     from vertebra._vertebra import AsyncRing
-    from vertebra.ipc.async_transport import PollingTransport
+    from vertebra.ipc.async_transport import AsyncShmTransport
     from vertebra.resources import AsyncBrokerClient, BrokerClientConfig
 
     encoder = msgspec.msgpack.Encoder()
@@ -47,10 +47,8 @@ async def test_broker_client_roundtrip() -> None:
             control_transport = None
             req_transport = None
             try:
-                # Use PollingTransport because eventfd notifications don't work
-                # across different AsyncRing handles (each handle has its own eventfd).
-                # When the client sends to control, it signals client's eventfd, not ours.
-                control_transport = PollingTransport(control, poll_interval=0.001)
+                # Use AsyncShmTransport for notification-based IPC
+                control_transport = AsyncShmTransport(control)
 
                 broker_ready.set()
 
@@ -68,12 +66,9 @@ async def test_broker_client_roundtrip() -> None:
                 created_names.append(resp_name)
 
                 # Open client's rings
-                # IMPORTANT: Only use PollingTransport for RECEIVING (request ring).
-                # For SENDING (response ring), send directly via the ring to avoid
-                # the transport's poll thread consuming what we send.
                 req_ring = AsyncRing.open_named(req_name, 4096, 64)
                 resp_ring = AsyncRing.open_named(resp_name, 4096, 64)
-                req_transport = PollingTransport(req_ring, poll_interval=0.001)
+                req_transport = AsyncShmTransport(req_ring)
 
                 # Send registration ack directly (not via transport)
                 resp_ring.send(encoder.encode({"ok": True, "id": register["id"]}), 0)
@@ -110,12 +105,8 @@ async def test_broker_client_roundtrip() -> None:
         # Wait for broker to be ready
         await asyncio.wait_for(broker_ready.wait(), timeout=5.0)
 
-        # BrokerClient must use PollingTransport (prefer_eventfd=False) because
-        # eventfd notifications don't work across different AsyncRing handles.
-        # Each handle has its own eventfd, so when the broker sends to the client's
-        # response ring, it signals its own eventfd, not the client's.
         client = AsyncBrokerClient(
-            BrokerClientConfig(name=name, slot_size=4096, slots=64, client_id="test-client", prefer_eventfd=False)
+            BrokerClientConfig(name=name, slot_size=4096, slots=64, client_id="test-client")
         )
 
         try:
