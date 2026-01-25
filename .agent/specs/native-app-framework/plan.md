@@ -166,11 +166,11 @@
 - [x] State subscription management [95f2393]
 - [x] Write unit tests [95f2393]
 
-### Task 5.5: Checkpoint - Verify Phase 5 Complete
-- [ ] SSE delivers state updates to browser
-- [ ] WebSocket bidirectional sync works
-- [ ] Long-polling works in restricted environments
-- [ ] All frontend sync tests pass
+### Task 5.5: Checkpoint - Verify Phase 5 Complete [7680d89]
+- [x] SSE delivers state updates to browser
+- [x] WebSocket bidirectional sync works
+- [x] Long-polling works in restricted environments
+- [x] All frontend sync tests pass
 
 ---
 
