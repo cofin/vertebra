@@ -1,3 +1,5 @@
+import pytest
+
 from vertebra.state import NativeState
 
 
@@ -5,6 +7,7 @@ class Counter(NativeState):
     count: int = 0
 
 
+@pytest.mark.anyio
 async def test_native_state_sync() -> None:
     counter = Counter()
 
