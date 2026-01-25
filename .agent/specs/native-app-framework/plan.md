@@ -160,10 +160,11 @@
 - [x] Write integration tests [1e05168]
 
 ### Task 5.4: Python Client Helpers
-- [ ] Create `src/py/vertebra/sync/__init__.py`
-- [ ] Helper decorators for SSE/WS endpoints
-- [ ] State subscription management
-- [ ] Write unit tests
+### Task 5.4: Python Client Helpers [95f2393]
+- [x] Create `src/py/vertebra/sync/__init__.py` [95f2393]
+- [x] Helper decorators for SSE/WS endpoints [95f2393]
+- [x] State subscription management [95f2393]
+- [x] Write unit tests [95f2393]
 
 ### Task 5.5: Checkpoint - Verify Phase 5 Complete
 - [ ] SSE delivers state updates to browser
