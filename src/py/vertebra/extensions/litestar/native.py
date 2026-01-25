@@ -117,6 +117,10 @@ def reflect_routes(app: Litestar) -> list[LitestarRoute]:
         if isinstance(route, HTTPRoute):
             for method, handler_tuple in route.route_handler_map.items():
                 handler = handler_tuple[0]
+                if method == "OPTIONS":
+                    handler_fn = getattr(handler, "fn", None)
+                    if handler_fn and getattr(handler_fn, "__name__", "") == "options_handler":
+                        continue
                 # In Litestar, the handler object itself is what we want.
                 # The handler_id should be stable. We can use hash of the handler or id().
                 # For now, we'll use id() but in a real app we might want something more stable across restarts if possible.
