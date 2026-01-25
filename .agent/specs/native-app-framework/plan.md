@@ -128,7 +128,7 @@
 - [x] Nanosecond read performance [57694be]
 - [x] Write integration tests [57694be]
 
-### Task 4.5: Checkpoint - Verify Phase 4 Complete
+### Task 4.5: Checkpoint - Verify Phase 4 Complete [86bbad4]
 - [x] State changes propagate in <100μs
 - [x] LWW resolves conflicts correctly
 - [x] Shadow state reads are <100ns
