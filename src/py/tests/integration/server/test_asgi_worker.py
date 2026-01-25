@@ -8,6 +8,7 @@ import pytest
 from tests.helpers.shm import skip_if_shm_unavailable, tracked_shm_cleanup, unique_shm_name
 from vertebra._vertebra import SpscRing
 from vertebra.server.worker import AsgiWorker, WorkerConfig
+from vertebra.protocol import HEADER_SIZE, RequestHeader, ResponseHeader, Flags
 
 pytestmark = pytest.mark.integration
 
@@ -45,7 +46,9 @@ async def _register_client(
         "req_ring": req_name,
         "resp_ring": resp_name,
     }
-    control.send_timeout(encoder.encode(register), 0, 1000)
+    encoded_reg = encoder.encode(register)
+    header = RequestHeader(id=1, flags=Flags.NONE, payload_len=len(encoded_reg))
+    control.send_timeout(header.to_bytes() + encoded_reg, 0, 1000)
     control.close()
     # Poll with retry - worker may not have processed registration yet
     max_len = slot_size
@@ -58,7 +61,10 @@ async def _register_client(
         await asyncio.sleep(0.05)  # Give worker time to poll
     if data is None:
         pytest.fail("_register_client: resp_ring.recv returned None after retries")
-    response = decoder.decode(data)
+    
+    assert len(data) > HEADER_SIZE
+    header = ResponseHeader.from_bytes(data[:HEADER_SIZE])
+    response = decoder.decode(data[HEADER_SIZE:])
     assert response.get("ok") is True
     return req_ring, resp_ring, encoder, decoder
 
@@ -98,7 +104,9 @@ async def test_asgi_worker_roundtrip() -> None:
             "scheme": "http",
             "httpVersion": "1.1",
         }
-        req_ring.send_timeout(encoder.encode(payload), 0, 1000)
+        encoded_payload = encoder.encode(payload)
+        header = RequestHeader(id=1, flags=Flags.NONE, payload_len=len(encoded_payload))
+        req_ring.send_timeout(header.to_bytes() + encoded_payload, 0, 1000)
 
         status = None
         body = b""
@@ -115,7 +123,10 @@ async def test_asgi_worker_roundtrip() -> None:
                 await asyncio.sleep(0.05)
             if data is None:
                 pytest.fail("test_asgi_worker_roundtrip: resp_ring.recv returned None after retries")
-            response = decoder.decode(data)
+            
+            assert len(data) > HEADER_SIZE
+            header = ResponseHeader.from_bytes(data[:HEADER_SIZE])
+            response = decoder.decode(data[HEADER_SIZE:])
             if response["type"] == "http.response.start":
                 status = response["status"]
             elif response["type"] == "http.response.body":

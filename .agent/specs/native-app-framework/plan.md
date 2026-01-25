@@ -219,20 +219,20 @@
 
 ### Task 7.1: Port Arrow Encoder to Rust
 - [~] Implement `encode_arrow_rows` in `vertebra-py` (Rust)
-- [ ] Accept `List[Tuple]` from Python
-- [ ] Pivot to Arrow Columnar Memory in Rust
-- [ ] Replace Python implementation in `vertebra.resources.arrow`
-- [ ] Single-pass row-major inference + validation (avoid column-major scan)
-- [ ] Type promotion (bool/int/float) and optional schema hint
-- [ ] Reduce string allocations (avoid `to_string` copies)
-- [ ] Batch RecordBatches when writing Arrow IPC streams
-- [ ] Add benchmark script for Arrow encoder (benchmarks/arrow_encoder.py)
-- [ ] Benchmark to confirm 5x speedup
+- [x] Accept `List[Tuple]` from Python [1cd43d1]
+- [x] Pivot to Arrow Columnar Memory in Rust [1cd43d1]
+- [x] Replace Python implementation in `vertebra.resources.arrow` [1cd43d1]
+- [x] Single-pass row-major inference + validation (avoid column-major scan) [1cd43d1]
+- [x] Type promotion (bool/int/float) and optional schema hint [1cd43d1]
+- [x] Reduce string allocations (avoid `to_string` copies) [1cd43d1]
+- [x] Batch RecordBatches when writing Arrow IPC streams [1cd43d1]
+- [x] Add benchmark script for Arrow encoder (benchmarks/arrow_encoder.py) [931c5da]
+- [ ] Benchmark to confirm 5x speedup (current 1.7x @ 1000 rows)
 
 ### Task 7.2: Zero-Copy Header Enforcement
-- [ ] Audit `src/ts/src/ipc` to ensure `RequestHeader` is used
-- [ ] Audit `src/py/vertebra/ipc` to ensure `RequestHeader` is used
-- [ ] Remove any residual JSON or non-framed IPC paths
+- [x] Audit `src/ts/src/ipc` to ensure `RequestHeader` is used
+- [x] Audit `src/py/vertebra/ipc` to ensure `RequestHeader` is used
+- [x] Remove any residual JSON or non-framed IPC paths
 
 ### Task 7.3: Legacy Removal & Adapter Modernization
 - [ ] Remove any deprecated pre-Vertebra `App` classes not aliased to `Vertex`

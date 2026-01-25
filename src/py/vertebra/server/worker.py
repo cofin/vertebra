@@ -14,6 +14,7 @@ from typing import Any
 import msgspec
 
 from vertebra._vertebra import SpscRing
+from vertebra.protocol import HEADER_SIZE, Flags, RequestHeader, ResponseHeader
 from vertebra.serializers import MessagePackCodec, encode_json
 from vertebra.typing import LITESTAR_INSTALLED, LitestarResponse
 
@@ -106,14 +107,17 @@ class ClientState(msgspec.Struct, frozen=True):
 
 
 class ResponseWriter:
-    def __init__(self, ring: SpscRing, codec: MessagePackCodec, timeout_ms: int) -> None:
+    def __init__(self, ring: SpscRing, codec: MessagePackCodec, timeout_ms: int, correlation_id: int = 0) -> None:
         self._ring = ring
         self._codec = codec
         self._timeout_ms = timeout_ms
+        self._correlation_id = correlation_id
 
     async def send(self, frame: dict[str, Any]) -> None:
         payload = self._codec.encode(frame)
-        self._ring.send_timeout(payload, 0, self._timeout_ms)
+        header = ResponseHeader(id=self._correlation_id, flags=Flags.NONE, payload_len=len(payload))
+        message = header.to_bytes() + payload
+        self._ring.send_timeout(message, 0, self._timeout_ms)
 
 
 class VertebraWebSocket:
@@ -241,8 +245,11 @@ class AsgiWorker:
                 await asyncio.sleep(0.001)
 
     async def _handle_control_payload(self, payload: bytes) -> None:
+        if len(payload) < HEADER_SIZE:
+            return
+        header = RequestHeader.from_bytes(payload[:HEADER_SIZE])
         try:
-            message = self._codec.decode(payload)
+            message = self._codec.decode(payload[HEADER_SIZE:])
             print(f"Worker received control message: {message}", file=sys.stderr)
         except Exception:  # noqa: BLE001
             return
@@ -250,18 +257,18 @@ class AsgiWorker:
             return
         kind = message.get("kind")
         if kind == "register_client":
-            await self._register_client(message)
+            await self._register_client(message, header.id)
         elif kind == "unregister_client":
             client_id = message.get("client_id")
             if isinstance(client_id, str):
                 await self._unregister_client(client_id)
 
-    async def _register_client(self, message: dict[str, Any]) -> None:
+    async def _register_client(self, message: dict[str, Any], correlation_id: int) -> None:
         client_id = message.get("client_id")
         if not isinstance(client_id, str):
             return
         if client_id in self._clients:
-            await self._send_control_ack(message, ok=True)
+            await self._send_control_ack(message, ok=True, correlation_id=correlation_id)
             return
         req_name = message.get("req_ring") or self._request_ring_name(client_id)
         resp_name = message.get("resp_ring") or self._response_ring_name(client_id)
@@ -269,11 +276,11 @@ class AsgiWorker:
             request_ring = SpscRing.open_named(str(req_name), self._config.slot_size, self._config.slots)
             response_ring = SpscRing.open_named(str(resp_name), self._config.slot_size, self._config.slots)
         except Exception as exc:  # noqa: BLE001 - defensive for IPC setup
-            await self._send_control_ack(message, ok=False, error=str(exc))
+            await self._send_control_ack(message, ok=False, error=str(exc), correlation_id=correlation_id)
             return
         self._clients[client_id] = ClientState(id=client_id, request=request_ring, response=response_ring)
         self._contexts[client_id] = {}
-        await self._send_control_ack(message, ok=True)
+        await self._send_control_ack(message, ok=True, correlation_id=correlation_id)
 
     async def _unregister_client(self, client_id: str) -> None:
         client = self._clients.pop(client_id, None)
@@ -283,7 +290,9 @@ class AsgiWorker:
         client.request.close()
         client.response.close()
 
-    async def _send_control_ack(self, message: dict[str, Any], *, ok: bool, error: str | None = None) -> None:
+    async def _send_control_ack(
+        self, message: dict[str, Any], *, ok: bool, correlation_id: int, error: str | None = None
+    ) -> None:
         client_id = message.get("client_id")
         resp_name = message.get("resp_ring")
         if not isinstance(client_id, str):
@@ -298,16 +307,23 @@ class AsgiWorker:
         if error is not None:
             payload["error"] = error
         encoded = self._codec.encode(payload)
-        response_ring.send_timeout(encoded, 0, int(self._config.timeout * 1000))
+        header = ResponseHeader(id=correlation_id, flags=Flags.NONE, payload_len=len(encoded))
+        message_bytes = header.to_bytes() + encoded
+        response_ring.send_timeout(message_bytes, 0, int(self._config.timeout * 1000))
 
     async def _handle_client_payload(self, client_id: str, client: ClientState, payload: bytes) -> None:
+        if len(payload) < HEADER_SIZE:
+            return
+        header = RequestHeader.from_bytes(payload[:HEADER_SIZE])
         try:
-            message = self._codec.decode(payload)
+            message = self._codec.decode(payload[HEADER_SIZE:])
         except Exception:  # noqa: BLE001
             return
         if not isinstance(message, dict):
             return
-        writer = ResponseWriter(client.response, self._codec, int(self._config.timeout * 1000))
+        writer = ResponseWriter(
+            client.response, self._codec, int(self._config.timeout * 1000), correlation_id=header.id
+        )
         contexts = self._contexts.setdefault(client_id, {})
         frame_type = message.get("type")
         if frame_type is None:
