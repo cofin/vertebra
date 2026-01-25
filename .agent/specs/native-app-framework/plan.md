@@ -32,12 +32,12 @@
 
 ## Phase 2: Dependency Injection System
 
-### Task 2.1: Inject Type and Provider Protocol
-- [ ] Create `src/py/vertebra/di/__init__.py`
-- [ ] Implement `Inject[T]` type annotation
-- [ ] Define `Provider` protocol for registration
-- [ ] Support scopes: `singleton`, `request`, `transient`
-- [ ] Write unit tests for DI primitives
+### Task 2.1: Inject Type and Provider Protocol [4afa5d6]
+- [x] Create `src/py/vertebra/di/__init__.py`
+- [x] Implement `Inject[T]` type annotation
+- [x] Define `Provider` protocol for registration
+- [x] Support scopes: `singleton`, `request`, `transient`
+- [x] Write unit tests for DI primitives
 
 ### Task 2.2: Simplified Provider Registration
 - [ ] Implement `app.provide(ServiceClass)` auto-discovery
