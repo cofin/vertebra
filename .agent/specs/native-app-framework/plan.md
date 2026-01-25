@@ -69,13 +69,13 @@
 
 ## Phase 3: Guards and Middleware
 
-### Task 3.1: Guard System
-- [ ] Create `src/py/vertebra/guards/__init__.py`
-- [ ] Implement `Guard` base class/protocol
-- [ ] Implement `requires()` decorator pattern
-- [ ] Guard DI injection support
-- [ ] Guard result caching per request
-- [ ] Write unit tests for guards
+### Task 3.1: Guard System [27e87c1]
+- [x] Create `src/py/vertebra/guards/__init__.py`
+- [x] Implement `Guard` base class/protocol
+- [x] Implement `requires()` decorator pattern
+- [x] Guard DI injection support
+- [x] Guard result caching per request
+- [x] Write unit tests for guards
 
 ### Task 3.2: Native Guards in Rust
 - [ ] Create `src/rs/vertebra-core/src/guards.rs`
