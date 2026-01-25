@@ -23,11 +23,11 @@ class VertebraContext(msgspec.Struct, frozen=True):
         return cls(kind="http", request=request, state=state)
 
     @classmethod
-    def cli(cls, cli: Any, **state: Any) -> "VertebraContext":
+    def from_cli(cls, cli: Any, **state: Any) -> "VertebraContext":
         return cls(kind="cli", cli=cli, state=state)
 
     @classmethod
-    def event(cls, event: Any, **state: Any) -> "VertebraContext":
+    def from_event(cls, event: Any, **state: Any) -> "VertebraContext":
         return cls(kind="event", event=event, state=state)
 
     @property

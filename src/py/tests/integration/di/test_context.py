@@ -30,7 +30,7 @@ def test_http_context_supports_request_and_state() -> None:
 @pytest.mark.integration
 def test_cli_context_supports_command_and_state() -> None:
     cli = DummyCli("serve")
-    ctx = VertebraContext.cli(cli, dry_run=True)
+    ctx = VertebraContext.from_cli(cli, dry_run=True)
 
     assert ctx.kind == "cli"
     assert ctx.cli is cli
@@ -41,7 +41,7 @@ def test_cli_context_supports_command_and_state() -> None:
 
 @pytest.mark.integration
 def test_event_context_supports_event_payloads() -> None:
-    ctx = VertebraContext.event("startup", payload={"mode": "native"})
+    ctx = VertebraContext.from_event("startup", payload={"mode": "native"})
 
     assert ctx.kind == "event"
     assert ctx.event == "startup"
