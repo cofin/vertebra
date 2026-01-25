@@ -166,6 +166,42 @@ Unix file descriptors are automatically inherited by child processes. No special
 2. Parent passes fd NUMBER via CLI arg (just an integer)
 3. Child opens same fd by number - it's already open in the process
 
+## [2026-01-25] - Supervisor Mode Notification Fix
+
+### Problem
+When running via `vertebra run` (Rust NativeSupervisor mode), the server returned 502 Bad Gateway:
+1. Rust supervisor creates ONE shared eventfd, passes to Bun via `VERTEBRA_NOTIFY_FD` env var
+2. Rust sets `VERTEBRA_SKIP_PROCESS_MANAGER=1` so Bun doesn't create its own notifiers
+3. Python worker expected CLI args (`--notify-read-fd`) but only received env var
+4. Bun's notifier registry was empty (no ProcessManager ran)
+5. Python request rings used internal notifiers that TypeScript couldn't signal
+
+### Solution
+1. **Python fallback to env var:**
+   - `_resolve_notify_fd()` helper: CLI arg > env var fallback
+   - Supports both ProcessManager (CLI) and supervisor (env var) modes
+
+2. **Bun inherits supervisor notifier:**
+   - On startup, if `SKIP_PROCESS_MANAGER=1`, read `VERTEBRA_NOTIFY_FD`
+   - Create `ShmNotifier.fromFds()` and call `setSupervisorNotifier()`
+   - `notifyWorker()` falls back to supervisor notifier
+
+3. **Python drains ALL rings on notification:**
+   - In supervisor mode, ONE fd is used for ALL rings
+   - `on_control_readable()` now drains control ring AND all client request rings
+   - No per-ring notifier registration needed
+
+### Key Insight: Two Operation Modes
+1. **ProcessManager Mode** (Bun as entry point):
+   - Each worker has own notifier created by ProcessManager
+   - Notifier fds passed via CLI args
+   - Per-ring notification registration
+
+2. **Supervisor Mode** (Python CLI entry point):
+   - Single shared notifier inherited from Rust
+   - Notifier fd via env var `VERTEBRA_NOTIFY_FD`
+   - All rings share one notification fd
+
 ## [2026-01-25] - Notification Batching (vertebra-a6w)
 
 ### Optimizations Implemented
