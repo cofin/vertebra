@@ -184,11 +184,12 @@
 - [x] Write unit tests
 
 ### Task 6.2: Event System
-- [ ] Create `src/py/vertebra/events/__init__.py`
-- [ ] Implement pub/sub event dispatcher
-- [ ] Event DI injection support
-- [ ] Async event handlers
-- [ ] Write unit tests
+### Task 6.2: Event System [35206e8]
+- [x] Create `src/py/vertebra/events/__init__.py`
+- [x] Implement pub/sub event dispatcher
+- [x] Event DI injection support
+- [x] Async event handlers
+- [x] Write unit tests
 
 ### Task 6.3: Background Tasks
 - [ ] Implement background task scheduling
