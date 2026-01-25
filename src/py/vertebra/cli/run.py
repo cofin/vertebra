@@ -1,4 +1,4 @@
-"""Serve command."""
+"""Run command."""
 
 import logging
 import os
@@ -24,9 +24,9 @@ from vertebra.supervisor import build_bun_command, run_supervisor
 @click.option("--log-level", default="info", help="Log level")
 @click.option("--drain-timeout", type=int, default=5000, help="Drain timeout in milliseconds")
 @click.option("--shutdown-timeout", type=int, default=30000, help="Shutdown timeout in milliseconds")
-@click.option("--native/--no-native", default=True, help="Enable/disable native Litestar integration")
+@click.option("--asgi", is_flag=True, default=False, help="Run in ASGI mode (disable native pipeline)")
 @click.option("--no-banner", is_flag=True, help="Disable startup banner")
-def serve(
+def run(
     app: str,
     host: str,
     port: int,
@@ -35,10 +35,10 @@ def serve(
     log_level: str,
     drain_timeout: int,
     shutdown_timeout: int,
-    native: bool,
+    asgi: bool,
     no_banner: bool,
 ) -> None:
-    """Run the Bun-backed ASGI server."""
+    """Run the Vertebra server."""
     # Configure logging
     logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO))
 
@@ -48,7 +48,7 @@ def serve(
     env["VERTEBRA_PORT"] = str(port)
     env["VERTEBRA_WORKERS"] = str(workers)
     env["VERTEBRA_LOG_LEVEL"] = log_level
-    env["VERTEBRA_NATIVE"] = str(int(native))
+    env["VERTEBRA_NATIVE"] = "0" if asgi else "1"
     config_data: dict[str, Any] | None = None
     if config_path:
         env["VERTEBRA_CONFIG"] = config_path

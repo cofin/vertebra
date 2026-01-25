@@ -47,12 +47,12 @@ click.rich_click.APPEND_METAVARS_HELP = False
 # Command groups for organized help output
 click.rich_click.COMMAND_GROUPS = {
     "vertebra": [
-        {"name": "Server", "commands": ["serve"]},
+        {"name": "Server", "commands": ["run"]},
         {"name": "Build", "commands": ["build"]},
         {"name": "Project", "commands": ["init"]},
     ],
     "vtb": [
-        {"name": "Server", "commands": ["serve"]},
+        {"name": "Server", "commands": ["run"]},
         {"name": "Build", "commands": ["build"]},
         {"name": "Project", "commands": ["init"]},
     ],

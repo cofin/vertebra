@@ -7,7 +7,7 @@ from vertebra.cli import config as _config
 
 from .build import build
 from .init import init
-from .serve import serve
+from .run import run
 
 __all__ = ["cli", "main"]
 
@@ -21,7 +21,7 @@ def cli() -> None:
     """
 
 
-cli.add_command(serve)
+cli.add_command(run)
 cli.add_command(build)
 cli.add_command(init)
 

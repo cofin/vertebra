@@ -92,11 +92,11 @@ def get_install_command(pm: str) -> str:
 
 def get_run_command(pm: str, slug: str) -> str:
     if pm == "uv":
-        return f"uv run vertebra serve {slug}.app:app"
+        return f"uv run vertebra run {slug}.app:app"
     if pm == "poetry":
-        return f"poetry run vertebra serve {slug}.app:app"
+        return f"poetry run vertebra run {slug}.app:app"
     if pm == "hatch":
-        return f"hatch run vertebra serve {slug}.app:app"
+        return f"hatch run vertebra run {slug}.app:app"
     if pm == "pdm":
-        return f"pdm run vertebra serve {slug}.app:app"
-    return f"vertebra serve {slug}.app:app"
+        return f"pdm run vertebra run {slug}.app:app"
+    return f"vertebra run {slug}.app:app"
