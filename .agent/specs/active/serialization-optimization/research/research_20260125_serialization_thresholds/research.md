@@ -34,9 +34,17 @@ The user suspected 1000 rows was too high. **Our data suggests the opposite for 
 -   For a Browser/WASM client, this trade-off is likely worth it (JS parsing is slow).
 -   For Server-to-Server, `msgspec` might still win at 1000 rows.
 
-**Recommendation:**
-Keep the default at 1000 *until* we optimize the encoder.
-**Future Optimization:** Implement `encode_arrow_rows` in Rust (in `vertebra-py`). This would allow us to pass the `list[tuple]` directly to Rust, which can pivot and write Arrow IPC memory significantly faster than Python.
+## Post-Implementation Note (2026-01-25)
+
+We attempted to implement the recommended optimization (Task 7.1 in Native App Framework) by porting the Arrow encoder to Rust via PyO3.
+
+**Results:**
+-   **Rust Naive Iteration:** ~174ms (vs 62ms for Python/nanoarrow).
+-   **Rust Hybrid (Msgspec -> Rust):** ~302ms.
+-   **Verdict:** The overhead of PyO3 object iteration (`get_item`) is too high. `nanoarrow`'s C-extension iteration is significantly faster for `list[tuple]` data.
+
+**Updated Recommendation:**
+Abandon the Rust-based row-to-column pivot for Python objects. Stick with `nanoarrow` and keep the Arrow threshold at **1000 rows**. Any lower would likely result in a performance regression compared to pure `msgspec`.
 
 ## CBOR2 Evaluation
 

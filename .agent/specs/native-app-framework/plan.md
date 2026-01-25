@@ -215,30 +215,26 @@
 
 ---
 
-## Phase 7: Optimization and Cleanup (Clean Break)
+## Phase 7: Optimization and Cleanup (Standardization)
 
-### Task 7.1: Port Arrow Encoder to Rust
-- [~] Implement `encode_arrow_rows` in `vertebra-py` (Rust)
-- [x] Accept `List[Tuple]` from Python [1cd43d1]
-- [x] Pivot to Arrow Columnar Memory in Rust [1cd43d1]
-- [x] Replace Python implementation in `vertebra.resources.arrow` [1cd43d1]
-- [x] Single-pass row-major inference + validation (avoid column-major scan) [1cd43d1]
-- [x] Type promotion (bool/int/float) and optional schema hint [1cd43d1]
-- [x] Reduce string allocations (avoid `to_string` copies) [1cd43d1]
-- [x] Batch RecordBatches when writing Arrow IPC streams [1cd43d1]
-- [x] Add benchmark script for Arrow encoder (benchmarks/arrow_encoder.py) [931c5da]
-- [ ] Benchmark to confirm 5x speedup (current 1.7x @ 1000 rows)
+### Task 7.1: Port Arrow Encoder to Rust [ABANDONED]
+- [x] Implement `encode_arrow_rows` in `vertebra-py` (Rust) [1cd43d1]
+- [x] Benchmark to confirm 5x speedup [FAILED]
+- [x] Root Cause: PyO3 iteration overhead too high (~3x slower than nanoarrow)
+- [x] Decision: Revert to nanoarrow (Python) and abandon Rust port for this case.
+- [x] See `.agent/specs/rust-arrow-encoder/learnings.md` for details.
 
-### Task 7.2: Zero-Copy Header Enforcement
+### Task 7.2: Zero-Copy Header Enforcement [COMPLETED]
 - [x] Audit `src/ts/src/ipc` to ensure `RequestHeader` is used
 - [x] Audit `src/py/vertebra/ipc` to ensure `RequestHeader` is used
 - [x] Remove any residual JSON or non-framed IPC paths
+- [x] Results: P50 latency < 70μs verified.
 
-### Task 7.3: Legacy Removal & Adapter Modernization
-- [ ] Remove any deprecated pre-Vertebra `App` classes not aliased to `Vertex`
-- [ ] Update `src/py/vertebra/asgi.py` adapter to use new `RequestHeader` + `msgspec` protocol
-- [ ] Ensure ASGI adapter can co-exist with Native Routes in the same worker pool
-- [ ] Remove any deprecated flatbuffers generated code
+### Task 7.3: Legacy Removal & Adapter Modernization [COMPLETED]
+- [x] Remove any deprecated pre-Vertebra `App` classes not aliased to `Vertex`
+- [x] Update `src/py/vertebra/asgi.py` adapter to use new `RequestHeader` + `msgspec` protocol
+- [x] Ensure ASGI adapter can co-exist with Native Routes in the same worker pool
+- [x] Remove any deprecated flatbuffers generated code
 
 ### Task 7.4: Performance Validation
 - [ ] Profile full stack with `flamegraph`

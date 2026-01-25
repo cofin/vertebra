@@ -1,12 +1,5 @@
-## [2026-01-25 20:20] - Phase 7 Task 7.2: Zero-Copy Header Enforcement
-
-- **Implemented:** Enforced `RequestHeader` usage in `AsgiWorker` (Python) and `IpcClient` (TypeScript).
-- **Files changed:**
-  - `src/py/vertebra/server/worker.py`: Added header parsing and correlation ID propagation.
-  - `src/ts/src/ipc/client.ts`: Removed legacy "msgpack" protocol support; default is now "framed".
-  - `src/py/tests/integration/server/test_asgi_worker.py`: Updated to use headers in IPC exchanges.
-  - `src/py/tests/unit/server/test_ipc_headers.py`: New unit tests for worker header handling.
-- **Learnings:**
-  - **Gotcha:** `AsgiWorker` was silently assuming pure MsgPack payloads. Changing this required careful updates to all integration tests that manually write to rings.
-  - **Pattern:** When mocking `SpscRing` in tests, always use `RequestHeader` + `payload` if the consumer expects it.
-  - **Protocol:** The "msgpack" protocol (legacy) in `vertebra-js` was the default; this was unsafe as it bypassed the 16-byte header requirement for routing.
+## [2026-01-25 20:45] - Task 7.3: Legacy Removal & Adapter Modernization
+- **Files changed:** `src/py/vertebra/app.py`, `src/py/vertebra/__init__.py`, `src/py/vertebra/asgi.py`
+- **Learning:** Renamed `App` to `Vertex` to distinguish the native app container from `Vertebra` (plugin container) and `Litestar` (ASGI app).
+- **Pattern:** Created `VertebraAdapter` (`src/py/vertebra/asgi.py`) to bridge `Vertex` apps to the ASGI protocol, enabling compatibility with standard servers and fallback paths.
+- **Gotcha:** `Vertex.register` didn't support bare handlers; updated it to delegate to `Router` logic for better ergonomics.
