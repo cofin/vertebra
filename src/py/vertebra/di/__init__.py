@@ -104,18 +104,19 @@ class DependencyGraph:
 class ProviderCompiler:
     """Compile provider graphs into linear runner functions."""
 
-    __slots__ = ("_providers", "_cache")
+    __slots__ = ("_providers", "_cache", "_singletons")
 
     def __init__(self, providers: dict[type[Any], ProviderSpec[Any]]) -> None:
         self._providers = providers
-        self._cache: dict[type[Any], Callable[[], Awaitable[Any]]] = {}
+        self._cache: dict[type[Any], Callable[[dict[type[Any], Any] | None], Awaitable[Any]]] = {}
+        self._singletons: dict[type[Any], Any] = {}
 
-    def compile(self, target: type[Any]) -> Callable[[], Awaitable[Any]]:
+    def compile(self, target: type[Any]) -> Callable[[dict[type[Any], Any] | None], Awaitable[Any]]:
         if target in self._cache:
             return self._cache[target]
         graph = DependencyGraph(self._providers)
         order = graph.resolve_order((target,))
-        runner = _compile_runner(order, target)
+        runner = _compile_runner(order, target, self._singletons)
         self._cache[target] = runner
         return runner
 
@@ -237,15 +238,22 @@ def _unwrap_inject(annotation: Any) -> type[Any] | None:
 def _compile_runner(
     order: list[ProviderSpec[Any]],
     target: type[Any],
-) -> Callable[[], Awaitable[Any]]:
-    local_ns: dict[str, Any] = {"target_type": target}
-    body = ["    resolved = {}"]
+    singleton_cache: dict[type[Any], Any],
+) -> Callable[[dict[type[Any], Any] | None], Awaitable[Any]]:
+    local_ns: dict[str, Any] = {"target_type": target, "singleton_cache": singleton_cache}
+    body = [
+        "    if request_cache is None:",
+        "        request_cache = {}",
+        "    resolved = {}",
+    ]
 
     for index, spec in enumerate(order):
         factory_key = f"factory_{index}"
         type_key = f"type_{index}"
+        scope_key = f"scope_{index}"
         local_ns[factory_key] = spec.factory
         local_ns[type_key] = spec.provides
+        local_ns[scope_key] = spec.scope
 
         args = []
         for dep_index, dependency in enumerate(spec.dependencies):
@@ -258,10 +266,20 @@ def _compile_runner(
             call_expr = f"await {factory_key}({args_str})"
         else:
             call_expr = f"{factory_key}({args_str})"
-        body.append(f"    resolved[{type_key}] = {call_expr}")
+
+        body.append(f"    if {scope_key} == 'singleton' and {type_key} in singleton_cache:")
+        body.append(f"        resolved[{type_key}] = singleton_cache[{type_key}]")
+        body.append(f"    elif {scope_key} == 'request' and {type_key} in request_cache:")
+        body.append(f"        resolved[{type_key}] = request_cache[{type_key}]")
+        body.append("    else:")
+        body.append(f"        resolved[{type_key}] = {call_expr}")
+        body.append(f"        if {scope_key} == 'singleton':")
+        body.append(f"            singleton_cache[{type_key}] = resolved[{type_key}]")
+        body.append(f"        elif {scope_key} == 'request':")
+        body.append(f"            request_cache[{type_key}] = resolved[{type_key}]")
 
     body.append("    return resolved[target_type]")
-    source = "async def runner():\n" + "\n".join(body)
+    source = "async def runner(request_cache=None):\n" + "\n".join(body)
     exec(source, local_ns)  # noqa: S102
     return local_ns["runner"]
 

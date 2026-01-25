@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+import vertebra.di as di
 from vertebra.di import DependencyError, ProviderRegistry
 
 
@@ -98,3 +99,23 @@ def test_compiler_detects_cycles() -> None:
     compiler = registry.compile()
     with pytest.raises(DependencyError):
         compiler.compile(CycleA)
+
+
+def test_compiled_runner_avoids_runtime_introspection(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = ProviderRegistry()
+
+    @registry.provide
+    def config() -> Config:
+        return Config()
+
+    compiler = registry.compile()
+    runner = compiler.compile(Config)
+
+    def boom(*_: object, **__: object) -> None:
+        raise AssertionError("runtime introspection should not occur")
+
+    monkeypatch.setattr(di.inspect, "signature", boom)
+    monkeypatch.setattr(di.inspect, "iscoroutinefunction", boom)
+
+    result = asyncio.run(runner())
+    assert isinstance(result, Config)
