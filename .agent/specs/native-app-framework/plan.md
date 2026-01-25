@@ -114,12 +114,12 @@
 - [x] Timestamp generation for LWW [51261f9]
 - [x] Write unit tests for delta generation [51261f9]
 
-### Task 4.3: Bun State Hub
-- [ ] Create `src/ts/src/broker/state-hub.ts`
-- [ ] Implement LWW conflict resolution
-- [ ] Broadcast deltas to subscribed workers
-- [ ] State persistence and recovery
-- [ ] Write unit tests for state hub
+### Task 4.3: Bun State Hub [7c9957c]
+- [x] Create `src/ts/src/broker/state-hub.ts` [7c9957c]
+- [x] Implement LWW conflict resolution [7c9957c]
+- [x] Broadcast deltas to subscribed workers [7c9957c]
+- [x] State persistence and recovery [7c9957c]
+- [x] Write unit tests for state hub [7c9957c]
 
 ### Task 4.4: Python Shadow State
 - [ ] Implement local shadow state in workers
