@@ -80,6 +80,16 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+/**
+ * Yield to the event loop without adding artificial delay.
+ * Uses setImmediate for minimal latency yielding.
+ */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
 function controlRingName(name: string, workerId: number): string {
   return `/${name}.asgi.${workerId}.control`;
 }
@@ -305,7 +315,7 @@ class IpcConnection {
       }
       const chunk = this.responseRing.recv(10);
       if (!chunk) {
-        await sleep(1);
+        await yieldToEventLoop();
         continue;
       }
       try {
@@ -342,7 +352,7 @@ class IpcConnection {
     while (Date.now() < deadline) {
       const chunk = this.responseRing.recv(10);
       if (!chunk) {
-        await sleep(1);
+        await yieldToEventLoop();
         continue;
       }
       const response = decodeResponse<Record<string, unknown>>(chunk.data);

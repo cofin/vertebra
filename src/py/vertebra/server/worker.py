@@ -13,7 +13,7 @@ from typing import Any
 
 import msgspec
 
-from vertebra._vertebra import SpscRing
+from vertebra._vertebra import AsyncRing
 from vertebra.protocol import HEADER_SIZE, Flags, RequestHeader, ResponseHeader
 from vertebra.serializers import MessagePackCodec, encode_json
 from vertebra.typing import LITESTAR_INSTALLED, LitestarResponse
@@ -102,12 +102,12 @@ class ClientState(msgspec.Struct, frozen=True):
     """State for a connected IPC client."""
 
     id: str
-    request: SpscRing
-    response: SpscRing
+    request: AsyncRing
+    response: AsyncRing
 
 
 class ResponseWriter:
-    def __init__(self, ring: SpscRing, codec: MessagePackCodec, timeout_ms: int, correlation_id: int = 0) -> None:
+    def __init__(self, ring: AsyncRing, codec: MessagePackCodec, timeout_ms: int, correlation_id: int = 0) -> None:
         self._ring = ring
         self._codec = codec
         self._timeout_ms = timeout_ms
@@ -117,7 +117,8 @@ class ResponseWriter:
         payload = self._codec.encode(frame)
         header = ResponseHeader(id=self._correlation_id, flags=Flags.NONE, payload_len=len(payload))
         message = header.to_bytes() + payload
-        self._ring.send_timeout(message, 0, self._timeout_ms)
+        # AsyncRing.send() automatically notifies waiters
+        self._ring.send(message)
 
 
 class VertebraWebSocket:
@@ -148,10 +149,13 @@ class AsgiWorker:
         self._app = app
         self._config = config or WorkerConfig()
         self._codec = MessagePackCodec()
-        self._control: SpscRing | None = None
+        self._control: AsyncRing | None = None
         self._clients: dict[str, "ClientState"] = {}
         self._contexts: dict[str, dict[str, RequestContext]] = {}
         self._running = False
+        self._stop_event: asyncio.Event | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._client_callbacks: dict[str, tuple[int, Callable[[], None]]] = {}
         self._lifespan_task: asyncio.Task[None] | None = None
         self._lifespan_queue: asyncio.Queue[dict[str, Any]] | None = None
         self._lifespan_state: dict[str, Any] = {}
@@ -190,7 +194,7 @@ class AsgiWorker:
                             logger.debug("Route %s will use ASGI fallback: %s", route.path, exc)
 
         control_name = self._control_ring_name()
-        self._control = SpscRing.create_named(control_name, self._config.slot_size, self._config.slots)
+        self._control = AsyncRing.create_named(control_name, self._config.slot_size, self._config.slots)
 
     async def serve_forever(self) -> None:
         print(f"Worker {self._worker_id()} starting...", file=sys.stderr)
@@ -206,43 +210,57 @@ class AsgiWorker:
         if not self._running and self._control is None and self._lifespan_task is None:
             return
         self._running = False
+
+        # Signal the serve loop to exit
+        if self._stop_event is not None:
+            self._stop_event.set()
+
         for contexts in self._contexts.values():
             for context in contexts.values():
                 context.task.cancel()
         self._contexts.clear()
-        for client in self._clients.values():
-            client.request.close()
-            client.response.close()
+        # Clear clients - rings are released when objects go out of scope
         self._clients.clear()
-        if self._control is not None:
-            self._control.close()
-            self._control = None
+        self._control = None
         await self._shutdown_lifespan()
 
     async def _serve_loop(self) -> None:
+        """Main event loop using reactor pattern with add_reader().
+
+        Instead of polling with asyncio.sleep(), we register notification FDs
+        with the event loop. The loop wakes us when data arrives (3-10us latency).
+        """
         if self._control is None:
             return
-        slot_size = self._config.slot_size
-        last_print = 0.0
-        while self._running:
-            import time
-            now = time.time()
-            if now - last_print > 1.0:
-                print(f"Worker stats: {self._control.stats()}", file=sys.stderr)
-                last_print = now
-            did_work = False
-            control_payload = self._control.try_recv(slot_size)
-            if control_payload is not None:
-                did_work = True
-                await self._handle_control_payload(control_payload)
-            for client_id, client in list(self._clients.items()):
-                payload = client.request.try_recv(slot_size)
-                while payload is not None:
-                    did_work = True
-                    await self._handle_client_payload(client_id, client, payload)
-                    payload = client.request.try_recv(slot_size)
-            if not did_work:
-                await asyncio.sleep(0.001)
+
+        self._loop = asyncio.get_running_loop()
+        self._stop_event = asyncio.Event()
+
+        def on_control_readable() -> None:
+            """Callback when control ring has data available."""
+            if self._control is None:
+                return
+            self._control.clear_notification()
+            while True:
+                payload = self._control.try_recv()
+                if payload is None:
+                    break
+                # Schedule coroutine for control message handling
+                asyncio.create_task(self._handle_control_payload(payload))
+
+        # Register control ring FD with the event loop
+        control_fd = self._control.notifier_fd()
+        self._loop.add_reader(control_fd, on_control_readable)
+
+        try:
+            # Wait until stop is signaled via event
+            await self._stop_event.wait()
+        finally:
+            # Clean up: remove all FD readers
+            self._loop.remove_reader(control_fd)
+            for _, (fd, _) in list(self._client_callbacks.items()):
+                self._loop.remove_reader(fd)
+            self._client_callbacks.clear()
 
     async def _handle_control_payload(self, payload: bytes) -> None:
         if len(payload) < HEADER_SIZE:
@@ -273,22 +291,44 @@ class AsgiWorker:
         req_name = message.get("req_ring") or self._request_ring_name(client_id)
         resp_name = message.get("resp_ring") or self._response_ring_name(client_id)
         try:
-            request_ring = SpscRing.open_named(str(req_name), self._config.slot_size, self._config.slots)
-            response_ring = SpscRing.open_named(str(resp_name), self._config.slot_size, self._config.slots)
+            request_ring = AsyncRing.open_named(str(req_name), self._config.slot_size, self._config.slots)
+            response_ring = AsyncRing.open_named(str(resp_name), self._config.slot_size, self._config.slots)
         except Exception as exc:  # noqa: BLE001 - defensive for IPC setup
             await self._send_control_ack(message, ok=False, error=str(exc), correlation_id=correlation_id)
             return
-        self._clients[client_id] = ClientState(id=client_id, request=request_ring, response=response_ring)
+
+        client = ClientState(id=client_id, request=request_ring, response=response_ring)
+        self._clients[client_id] = client
         self._contexts[client_id] = {}
+
+        # Register client request FD with event loop for notification-driven processing
+        if self._loop is not None:
+            fd = request_ring.notifier_fd()
+
+            def on_client_readable() -> None:
+                request_ring.clear_notification()
+                while True:
+                    payload = request_ring.try_recv()
+                    if payload is None:
+                        break
+                    asyncio.create_task(self._handle_client_payload(client_id, client, payload))
+
+            self._loop.add_reader(fd, on_client_readable)
+            self._client_callbacks[client_id] = (fd, on_client_readable)
+
         await self._send_control_ack(message, ok=True, correlation_id=correlation_id)
 
     async def _unregister_client(self, client_id: str) -> None:
-        client = self._clients.pop(client_id, None)
+        # Remove FD reader before releasing rings
+        if self._loop is not None:
+            callback_info = self._client_callbacks.pop(client_id, None)
+            if callback_info is not None:
+                fd, _ = callback_info
+                self._loop.remove_reader(fd)
+
+        # Ring objects released when client goes out of scope
+        self._clients.pop(client_id, None)
         self._contexts.pop(client_id, None)
-        if client is None:
-            return
-        client.request.close()
-        client.response.close()
 
     async def _send_control_ack(
         self, message: dict[str, Any], *, ok: bool, correlation_id: int, error: str | None = None
@@ -300,7 +340,7 @@ class AsgiWorker:
         response_ring = self._clients.get(client_id).response if client_id in self._clients else None
         if response_ring is None and isinstance(resp_name, str):
             with contextlib.suppress(Exception):
-                response_ring = SpscRing.open_named(resp_name, self._config.slot_size, self._config.slots)
+                response_ring = AsyncRing.open_named(resp_name, self._config.slot_size, self._config.slots)
         if response_ring is None:
             return
         payload = {"id": message.get("id"), "ok": ok}
@@ -309,7 +349,8 @@ class AsgiWorker:
         encoded = self._codec.encode(payload)
         header = ResponseHeader(id=correlation_id, flags=Flags.NONE, payload_len=len(encoded))
         message_bytes = header.to_bytes() + encoded
-        response_ring.send_timeout(message_bytes, 0, int(self._config.timeout * 1000))
+        # AsyncRing.send() automatically notifies waiters
+        response_ring.send(message_bytes)
 
     async def _handle_client_payload(self, client_id: str, client: ClientState, payload: bytes) -> None:
         if len(payload) < HEADER_SIZE:

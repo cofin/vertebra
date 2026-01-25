@@ -11,7 +11,7 @@ import msgspec
 
 from vertebra._vertebra import AsyncRing, ShmRegion, SpscRing
 from vertebra.exceptions import BrokerError
-from vertebra.ipc.async_transport import AsyncShmTransport, PollingTransport, create_transport
+from vertebra.ipc.async_transport import AsyncShmTransport, create_transport
 from vertebra.ipc.channel import decode_response, encode_request
 from vertebra.protocol import Flags
 from vertebra.resources.arrow import decode_arrow
@@ -37,7 +37,6 @@ class BrokerClientConfig(msgspec.Struct, frozen=True):
     timeout_ms: int = 5_000
     client_id: str | None = None
     weight: int = 1
-    prefer_eventfd: bool = True
     max_concurrent_requests: int = 64
     """Maximum number of concurrent in-flight requests."""
 
@@ -83,7 +82,7 @@ class AsyncBrokerClient:
         self._response: AsyncRing | None = None
 
         # Async transport wrapper for RECEIVING responses only.
-        self._response_transport: AsyncShmTransport | PollingTransport | None = None
+        self._response_transport: AsyncShmTransport | None = None
 
         # Multiplexing support
         self._pending: dict[int, _PendingRequest] = {}
@@ -103,7 +102,7 @@ class AsyncBrokerClient:
         self._response = AsyncRing.create_named(resp_cfg.name, resp_cfg.slot_size, resp_cfg.slots)
 
         # Wrap response ring in async transport for efficient waiting.
-        self._response_transport = create_transport(self._response, prefer_eventfd=self._config.prefer_eventfd)
+        self._response_transport = create_transport(self._response)
 
         # Register with broker
         payload = {

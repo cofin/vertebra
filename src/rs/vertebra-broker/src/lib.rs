@@ -1,6 +1,6 @@
 //! Shared-memory C ABI for the Vertebra broker transport.
 
-use core::ffi::{c_char, c_uint, c_void};
+use core::ffi::{c_char, c_int, c_uint, c_void};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::time::Duration;
@@ -9,6 +9,7 @@ use vertebra_core::buffer::RingLayout;
 use vertebra_core::channel::{
     ChannelError, MpmcRing, RingStats, SpscReceiver, SpscRing, SpscSender,
 };
+use vertebra_core::notify::Notifier;
 use vertebra_core::router::{RouteId, Router};
 use vertebra_core::shm::ShmRegion;
 
@@ -805,6 +806,190 @@ pub extern "C" fn vtb_mpmc_capacity(handle: *const VtbMpmcRing) -> usize {
 
 #[no_mangle]
 pub extern "C" fn vtb_mpmc_close(handle: *mut VtbMpmcRing) {
+    if handle.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(handle));
+    }
+}
+
+// =============================================================================
+// Notifier C ABI - Cross-process notification primitives (eventfd/pipe)
+// =============================================================================
+
+#[repr(C)]
+pub struct VtbNotifier {
+    inner: Notifier,
+}
+
+/// Create a new notifier for cross-process signaling.
+///
+/// On Linux, this creates an eventfd with EFD_NONBLOCK.
+/// On macOS/Windows, this creates a non-blocking pipe.
+/// FDs are inheritable to support cross-process IPC.
+#[no_mangle]
+pub extern "C" fn vtb_notifier_new(out_handle: *mut *mut VtbNotifier) -> VtbStatus {
+    clear_last_error();
+    if out_handle.is_null() {
+        return VtbStatus::Invalid;
+    }
+    match Notifier::new() {
+        Ok(inner) => {
+            let handle = Box::new(VtbNotifier { inner });
+            unsafe {
+                *out_handle = Box::into_raw(handle);
+            }
+            VtbStatus::Ok
+        }
+        Err(err) => {
+            set_last_error(err.to_string());
+            VtbStatus::Sys
+        }
+    }
+}
+
+/// Get the notification file descriptor for event loop integration.
+///
+/// Register this FD with your event loop (poll/epoll/kqueue) to be notified
+/// when data is available. On Linux this is the eventfd; on other platforms
+/// it's the read end of a pipe.
+#[no_mangle]
+pub extern "C" fn vtb_notifier_fd(handle: *const VtbNotifier) -> c_int {
+    if handle.is_null() {
+        return -1;
+    }
+    let handle = unsafe { &*handle };
+    handle.inner.as_raw_fd()
+}
+
+/// Get the write file descriptor (for pipe-based platforms).
+///
+/// On Linux (eventfd), this returns the same value as vtb_notifier_fd().
+/// On macOS/Windows (pipe), this is the write end.
+#[no_mangle]
+pub extern "C" fn vtb_notifier_write_fd(handle: *const VtbNotifier) -> c_int {
+    if handle.is_null() {
+        return -1;
+    }
+    let handle = unsafe { &*handle };
+    handle.inner.write_fd()
+}
+
+/// Signal that data is available (non-blocking).
+///
+/// On Linux, increments the eventfd counter.
+/// On other platforms, writes a single byte to the pipe.
+/// Safe to call multiple times; notifications coalesce.
+#[no_mangle]
+pub extern "C" fn vtb_notifier_notify(handle: *const VtbNotifier) -> VtbStatus {
+    clear_last_error();
+    if handle.is_null() {
+        return VtbStatus::Invalid;
+    }
+    let handle = unsafe { &*handle };
+    match handle.inner.notify() {
+        Ok(()) => VtbStatus::Ok,
+        Err(err) => {
+            set_last_error(err.to_string());
+            VtbStatus::Sys
+        }
+    }
+}
+
+/// Clear pending notifications (call after handling data).
+///
+/// On Linux, reads and discards the eventfd counter.
+/// On other platforms, drains the pipe.
+#[no_mangle]
+pub extern "C" fn vtb_notifier_clear(handle: *const VtbNotifier) -> VtbStatus {
+    clear_last_error();
+    if handle.is_null() {
+        return VtbStatus::Invalid;
+    }
+    let handle = unsafe { &*handle };
+    match handle.inner.clear() {
+        Ok(()) => VtbStatus::Ok,
+        Err(err) => {
+            set_last_error(err.to_string());
+            VtbStatus::Sys
+        }
+    }
+}
+
+/// Check if the notifier has pending notifications (non-blocking).
+///
+/// Returns 1 if pending, 0 if not.
+#[no_mangle]
+pub extern "C" fn vtb_notifier_has_pending(handle: *const VtbNotifier) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let handle = unsafe { &*handle };
+    if handle.inner.has_pending() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Wait for a notification with timeout.
+///
+/// Returns VtbStatus::Ok if notification received, VtbStatus::Timeout on timeout.
+/// Use timeout_ms=-1 for infinite wait.
+#[no_mangle]
+pub extern "C" fn vtb_notifier_wait(handle: *const VtbNotifier, timeout_ms: c_int) -> VtbStatus {
+    clear_last_error();
+    if handle.is_null() {
+        return VtbStatus::Invalid;
+    }
+    let handle = unsafe { &*handle };
+    match handle.inner.wait(timeout_ms) {
+        Ok(true) => VtbStatus::Ok,
+        Ok(false) => VtbStatus::Timeout,
+        Err(err) => {
+            set_last_error(err.to_string());
+            VtbStatus::Sys
+        }
+    }
+}
+
+/// Reconstruct a notifier from inherited file descriptor(s).
+///
+/// On Linux, only read_fd is used (eventfd).
+/// On macOS/Windows, both read_fd and write_fd are needed (pipe).
+/// For portability, always pass both FDs.
+///
+/// # Safety
+///
+/// The FDs must be valid, open file descriptors from a notifier
+/// created in the parent process.
+#[no_mangle]
+pub extern "C" fn vtb_notifier_from_fds(
+    read_fd: c_int,
+    write_fd: c_int,
+    out_handle: *mut *mut VtbNotifier,
+) -> VtbStatus {
+    clear_last_error();
+    if out_handle.is_null() {
+        return VtbStatus::Invalid;
+    }
+    #[cfg(target_os = "linux")]
+    let inner = unsafe { Notifier::from_raw_fd(read_fd) };
+    #[cfg(not(target_os = "linux"))]
+    let inner = unsafe { Notifier::from_raw_fds(read_fd, write_fd) };
+    // Suppress unused warning on Linux
+    let _ = write_fd;
+    let handle = Box::new(VtbNotifier { inner });
+    unsafe {
+        *out_handle = Box::into_raw(handle);
+    }
+    VtbStatus::Ok
+}
+
+/// Close a notifier handle.
+#[no_mangle]
+pub extern "C" fn vtb_notifier_close(handle: *mut VtbNotifier) {
     if handle.is_null() {
         return;
     }

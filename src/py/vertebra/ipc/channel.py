@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import struct
-import time
 from typing import Any, Self, TypeVar, cast
 
 from vertebra import _vertebra
@@ -237,49 +236,30 @@ class Channel:
             raise ChannelError(msg, stage="closed")
         return handle
 
-    def _send_with_polling(self, handle: _vertebra.Channel, message: bytes, timeout_ms: int, procedure_id: str) -> None:
-        """Send message with polling fallback when native timeout not available."""
-        deadline = time.monotonic() + (timeout_ms / 1000.0)
-        while not handle.try_send_request(message):
-            if time.monotonic() >= deadline:
-                msg = "send timeout"
-                raise ChannelError(msg, procedure_id=procedure_id, stage="send_request")
-            time.sleep(0.001)
-
-    def _recv_with_polling(self, handle: _vertebra.Channel, timeout_ms: int, procedure_id: str) -> bytes:
-        """Receive response with polling fallback when native timeout not available."""
-        deadline = time.monotonic() + (timeout_ms / 1000.0)
-        while True:
-            response_data = handle.try_recv_response(self._max_payload)
-            if response_data is not None:
-                return response_data
-            if time.monotonic() >= deadline:
-                msg = "response timeout"
-                raise ChannelError(msg, procedure_id=procedure_id, stage="recv_response")
-            time.sleep(0.001)
-
     def _do_send_recv(
         self, handle: _vertebra.Channel, message: bytes, timeout_ms: int | None, procedure_id: str
     ) -> bytes:
-        """Execute send/receive with appropriate timeout strategy."""
-        has_native_timeout = hasattr(handle, "send_request_timeout") and hasattr(handle, "recv_response_timeout")
+        """Execute send/receive with native timeout methods.
 
+        Requires native timeout methods on the channel handle. Raises ChannelError
+        if native timeout methods are not available.
+        """
         if timeout_ms is None:
             handle.send_request(message)
             return handle.recv_response(self._max_payload)
 
-        if has_native_timeout:
-            if not handle.send_request_timeout(message, timeout_ms):
-                msg = "send timeout"
-                raise ChannelError(msg, procedure_id=procedure_id, stage="send_request")
-            result = handle.recv_response_timeout(self._max_payload, timeout_ms)
-            if result is None:
-                msg = "response timeout"
-                raise ChannelError(msg, procedure_id=procedure_id, stage="recv_response")
-            return result
+        if not hasattr(handle, "send_request_timeout") or not hasattr(handle, "recv_response_timeout"):
+            msg = "Native timeout methods required. Polling fallback has been removed."
+            raise ChannelError(msg, procedure_id=procedure_id, stage="send_recv")
 
-        self._send_with_polling(handle, message, timeout_ms, procedure_id)
-        return self._recv_with_polling(handle, timeout_ms, procedure_id)
+        if not handle.send_request_timeout(message, timeout_ms):
+            msg = "send timeout"
+            raise ChannelError(msg, procedure_id=procedure_id, stage="send_request")
+        result = handle.recv_response_timeout(self._max_payload, timeout_ms)
+        if result is None:
+            msg = "response timeout"
+            raise ChannelError(msg, procedure_id=procedure_id, stage="recv_response")
+        return result
 
     def send_sync(
         self,
@@ -338,26 +318,19 @@ class Channel:
         """Receive a request synchronously."""
         handle = self._require_handle()
 
-        # Receive raw message
+        # Receive raw message (requires native timeout methods)
         try:
-            if timeout_ms is not None and hasattr(handle, "recv_request_timeout"):
+            if timeout_ms is None:
+                data = handle.recv_request(self._max_payload)
+            elif hasattr(handle, "recv_request_timeout"):
                 result = handle.recv_request_timeout(self._max_payload, timeout_ms)
                 if result is None:
                     msg = "receive timeout"
                     raise ChannelError(msg, stage="recv_request")
                 data = result
-            elif timeout_ms is None:
-                data = handle.recv_request(self._max_payload)
             else:
-                deadline = time.monotonic() + (timeout_ms / 1000.0)
-                data = None
-                while data is None:
-                    data = handle.try_recv_request(self._max_payload)
-                    if data is None and time.monotonic() >= deadline:
-                        msg = "receive timeout"
-                        raise ChannelError(msg, stage="recv_request")
-                    if data is None:
-                        time.sleep(0.001)
+                msg = "Native timeout methods required. Polling fallback has been removed."
+                raise ChannelError(msg, stage="recv_request")
         except RuntimeError as exc:
             raise ChannelError(str(exc), stage="recv_request") from exc
 

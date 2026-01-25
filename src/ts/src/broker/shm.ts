@@ -72,6 +72,16 @@ export type ShmLibrary = {
   vtb_mpmc_capacity: (handle: number) => bigint;
   vtb_mpmc_close: (handle: number) => void;
   vtb_shm_unlink: (name: number) => number;
+  // Notifier functions for event-driven IPC
+  vtb_notifier_new: (outHandle: number) => number;
+  vtb_notifier_fd: (handle: number) => number;
+  vtb_notifier_write_fd: (handle: number) => number;
+  vtb_notifier_notify: (handle: number) => number;
+  vtb_notifier_clear: (handle: number) => number;
+  vtb_notifier_has_pending: (handle: number) => number;
+  vtb_notifier_wait: (handle: number, timeoutMs: number) => number;
+  vtb_notifier_from_fds: (readFd: number, writeFd: number, outHandle: number) => number;
+  vtb_notifier_close: (handle: number) => void;
 };
 
 let cached: ShmLibrary | null = null;
@@ -234,6 +244,43 @@ export function loadShmLib(): ShmLibrary {
     vtb_shm_unlink: {
       args: ["ptr"],
       returns: "i32",
+    },
+    // Notifier functions for event-driven IPC
+    vtb_notifier_new: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    vtb_notifier_fd: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    vtb_notifier_write_fd: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    vtb_notifier_notify: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    vtb_notifier_clear: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    vtb_notifier_has_pending: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    vtb_notifier_wait: {
+      args: ["ptr", "i32"],
+      returns: "i32",
+    },
+    vtb_notifier_from_fds: {
+      args: ["i32", "i32", "ptr"],
+      returns: "i32",
+    },
+    vtb_notifier_close: {
+      args: ["ptr"],
+      returns: "void",
     },
   });
   cached = lib.symbols as unknown as ShmLibrary;
@@ -615,5 +662,113 @@ export class ShmMpmcRing {
     const namePtr = ptr(cString(name));
     // We ignore errors (e.g. ENOENT) for unlink
     lib.vtb_shm_unlink(namePtr);
+  }
+}
+
+/**
+ * Cross-platform notification primitive for event-driven IPC.
+ *
+ * Uses eventfd on Linux (3-10µs latency) or pipe on macOS/Windows.
+ * Register the `fd` with your event loop to be notified when data arrives.
+ *
+ * @example
+ * ```typescript
+ * const notifier = new ShmNotifier();
+ * const fd = notifier.fd;
+ *
+ * // Producer signals data available
+ * notifier.notify();
+ *
+ * // Consumer waits for notification (can use poll/epoll/kqueue)
+ * notifier.wait(1000); // 1 second timeout
+ * notifier.clear();
+ * // Now try_recv() from the ring
+ * ```
+ */
+export class ShmNotifier {
+  private handle: number;
+  private lib: ShmLibrary;
+
+  constructor() {
+    this.lib = loadShmLib();
+    const out = new BigUint64Array(1);
+    const status = this.lib.vtb_notifier_new(ptr(out));
+    if (status !== STATUS_OK) {
+      throw new Error(`notifier create failed: ${formatStatusError(status, this.lib)}`);
+    }
+    this.handle = read.ptr(ptr(out));
+  }
+
+  /**
+   * Create a notifier from inherited file descriptors.
+   *
+   * Used by child processes that inherit FDs from their parent.
+   * On Linux, only readFd is used (eventfd). For portability, pass both.
+   */
+  static fromFds(readFd: number, writeFd: number): ShmNotifier {
+    const lib = loadShmLib();
+    const out = new BigUint64Array(1);
+    const status = lib.vtb_notifier_from_fds(readFd, writeFd, ptr(out));
+    if (status !== STATUS_OK) {
+      throw new Error(`notifier from_fds failed: ${formatStatusError(status, lib)}`);
+    }
+    const handle = read.ptr(ptr(out));
+    const notifier = Object.create(ShmNotifier.prototype) as ShmNotifier;
+    notifier.handle = handle;
+    notifier.lib = lib;
+    return notifier;
+  }
+
+  /** Get the notification FD for event loop registration. */
+  get fd(): number {
+    return this.lib.vtb_notifier_fd(this.handle);
+  }
+
+  /** Get the write FD (same as fd on Linux, different on macOS). */
+  get writeFd(): number {
+    return this.lib.vtb_notifier_write_fd(this.handle);
+  }
+
+  /** Signal that data is available (non-blocking). */
+  notify(): void {
+    const status = this.lib.vtb_notifier_notify(this.handle);
+    if (status !== STATUS_OK) {
+      throw new Error(`notifier notify failed: ${formatStatusError(status, this.lib)}`);
+    }
+  }
+
+  /** Clear pending notifications. Call after handling data. */
+  clear(): void {
+    const status = this.lib.vtb_notifier_clear(this.handle);
+    if (status !== STATUS_OK) {
+      throw new Error(`notifier clear failed: ${formatStatusError(status, this.lib)}`);
+    }
+  }
+
+  /** Check if there are pending notifications (non-blocking). */
+  hasPending(): boolean {
+    return this.lib.vtb_notifier_has_pending(this.handle) !== 0;
+  }
+
+  /**
+   * Wait for a notification with timeout.
+   *
+   * @param timeoutMs Timeout in milliseconds (-1 for infinite)
+   * @returns true if notification received, false on timeout
+   */
+  wait(timeoutMs: number): boolean {
+    const status = this.lib.vtb_notifier_wait(this.handle, timeoutMs);
+    if (status === STATUS_OK) {
+      return true;
+    }
+    if (status === STATUS_TIMEOUT) {
+      return false;
+    }
+    throw new Error(`notifier wait failed: ${formatStatusError(status, this.lib)}`);
+  }
+
+  /** Close the notifier. */
+  close(): void {
+    this.lib.vtb_notifier_close(this.handle);
   }
 }

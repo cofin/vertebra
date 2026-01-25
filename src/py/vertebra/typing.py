@@ -10,9 +10,9 @@ from vertebra._typing import (
     AsyncRing,
     AsyncShmTransport,
     LitestarResponse,
-    PollingTransport,
     ShmRegion,
     SpscRing,
+    UnsupportedPlatformError,
     create_transport,
     shm_unlink,
 )
@@ -52,9 +52,9 @@ __all__ = (
     "AsyncRing",
     "AsyncShmTransport",
     "LitestarResponse",
-    "PollingTransport",
     "ShmRegion",
     "SpscRing",
+    "UnsupportedPlatformError",
     "create_transport",
     "shm_unlink",
 )

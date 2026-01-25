@@ -28,7 +28,6 @@ import asyncio
 import contextlib
 import os
 import sys
-import threading
 import time
 from collections import deque
 from typing import Protocol
@@ -275,121 +274,31 @@ class AsyncShmTransport:
             self.close()
 
 
-class PollingTransport:
-    """Fallback transport using a single polling thread.
-
-    This is used on platforms where eventfd is not available or when
-    the event loop doesn't support add_reader() (e.g., ProactorEventLoop
-    on Windows).
-
-    The polling thread checks for data at a configurable interval and
-    enqueues received data for async consumption.
-    """
-
-    __slots__ = ("_buffer", "_buffer_lock", "_loop", "_poll_interval", "_queue", "_ring", "_running", "_thread")
-
-    def __init__(
-        self,
-        ring: _AsyncRingProtocol,
-        poll_interval: float = 0.0001,  # 100μs default
-    ) -> None:
-        """Initialize the polling transport.
-
-        Args:
-            ring: AsyncRing instance from vertebra._vertebra
-            poll_interval: Polling interval in seconds (default 100μs)
-        """
-        self._ring = ring
-        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
-        self._running = True
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._poll_interval = poll_interval
-        # Buffer for data received before loop is available (prevents silent drops)
-        self._buffer: deque[bytes] = deque()
-        self._buffer_lock = threading.Lock()
-        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
-        self._thread.start()
-
-    @property
-    def payload_capacity(self) -> int:
-        """Get the maximum payload size per message."""
-        return self._ring.payload_capacity()
-
-    async def send(self, data: bytes, flags: int = 0) -> None:
-        """Send data to the ring buffer."""
-        self._ring.send(data, flags)
-
-    def try_send(self, data: bytes, flags: int = 0) -> bool:
-        """Try to send without blocking."""
-        return self._ring.try_send(data, flags)
-
-    async def recv(self) -> bytes:
-        """Receive data from the ring buffer.
-
-        Returns:
-            Received bytes
-        """
-        if self._loop is None:
-            self._loop = asyncio.get_running_loop()
-            # Flush any buffered data that arrived before loop was available
-            with self._buffer_lock:
-                while self._buffer:
-                    self._queue.put_nowait(self._buffer.popleft())
-        return await self._queue.get()
-
-    def try_recv(self) -> bytes | None:
-        """Try to receive without waiting."""
-        return self._ring.try_recv()
-
-    def _poll_loop(self) -> None:
-        """Background thread that polls for data."""
-        while self._running:
-            data = self._ring.try_recv()
-            if data is not None:
-                if self._loop is not None:
-                    # Thread-safe enqueue to asyncio queue
-                    self._loop.call_soon_threadsafe(self._queue.put_nowait, data)
-                else:
-                    # Buffer data until loop is available (prevents silent drops)
-                    with self._buffer_lock:
-                        self._buffer.append(data)
-            else:
-                time.sleep(self._poll_interval)
-
-    def close(self) -> None:
-        """Stop the polling thread and clean up."""
-        self._running = False
-        if self._thread.is_alive():
-            self._thread.join(timeout=1.0)
-        self._loop = None
+class UnsupportedPlatformError(RuntimeError):
+    """Raised when the platform doesn't support notification-based IPC."""
 
 
 def create_transport(
     ring: _AsyncRingProtocol,
     *,
-    prefer_eventfd: bool = True,
-    poll_interval: float = 0.0001,
     spin_duration_us: int | None = None,
-) -> AsyncShmTransport | PollingTransport:
-    """Create an appropriate transport for the current platform.
+) -> AsyncShmTransport:
+    """Create the notification-based transport for shared-memory IPC.
 
-    On Linux with a selector-based event loop, uses AsyncShmTransport
-    which integrates via add_reader(). On other platforms or with
-    ProactorEventLoop, falls back to PollingTransport.
+    Uses AsyncShmTransport which integrates via add_reader() for
+    notification-driven, low-latency operation.
 
     Args:
         ring: AsyncRing instance from vertebra._vertebra
-        prefer_eventfd: If True, try to use eventfd-based transport first
-        poll_interval: Polling interval for fallback transport
         spin_duration_us: Microseconds to spin before add_reader fallback.
                          Defaults to VERTEBRA_SPIN_US env var or 5µs.
 
     Returns:
-        An appropriate transport instance
-    """
-    if not prefer_eventfd:
-        return PollingTransport(ring, poll_interval=poll_interval)
+        AsyncShmTransport instance
 
+    Raises:
+        UnsupportedPlatformError: If the platform doesn't support add_reader()
+    """
     # Check if we can use add_reader()
     try:
         loop = asyncio.get_running_loop()
@@ -400,12 +309,20 @@ def create_transport(
     # Check if the loop supports add_reader (selector-based loops do)
     if hasattr(loop, "add_reader"):
         # On Windows, ProactorEventLoop has add_reader but it doesn't work
-        # with arbitrary FDs. We detect this by checking for _proactor attr.
+        # with arbitrary FDs
         if sys.platform == "win32" and hasattr(loop, "_proactor"):
-            return PollingTransport(ring, poll_interval=poll_interval)
+            msg = (
+                "Windows ProactorEventLoop does not support notification-based IPC. "
+                "Use SelectorEventLoop or run on Linux/macOS."
+            )
+            raise UnsupportedPlatformError(msg)
         return AsyncShmTransport(ring, spin_duration_us=spin_duration_us)
 
-    return PollingTransport(ring, poll_interval=poll_interval)
+    msg = (
+        "Event loop does not support add_reader(). "
+        "Notification-based IPC requires a selector-based event loop."
+    )
+    raise UnsupportedPlatformError(msg)
 
 
-__all__ = ("DEFAULT_SPIN_US", "AsyncShmTransport", "PollingTransport", "create_transport")
+__all__ = ("DEFAULT_SPIN_US", "AsyncShmTransport", "UnsupportedPlatformError", "create_transport")

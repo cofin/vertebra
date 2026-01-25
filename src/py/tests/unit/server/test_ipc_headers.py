@@ -52,10 +52,10 @@ async def test_worker_encodes_response_header() -> None:
     
     # Send a response
     await writer.send({"id": "req-1", "ok": True})
-    
-    # Verify resp_ring.send_timeout called with header + payload
-    assert resp_ring.send_timeout.call_count == 1
-    sent_bytes = resp_ring.send_timeout.call_args[0][0]
+
+    # Verify resp_ring.send called with header + payload (AsyncRing uses send, not send_timeout)
+    assert resp_ring.send.call_count == 1
+    sent_bytes = resp_ring.send.call_args[0][0]
     
     assert len(sent_bytes) > HEADER_SIZE, "Payload too short to contain header"
     

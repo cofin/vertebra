@@ -17,18 +17,18 @@ Python Wrappers:
     BufferView - Zero-copy view into a shared buffer
 
 Async Transport:
-    AsyncShmTransport - Async transport using eventfd/kqueue
-    PollingTransport - Fallback polling-based transport
-    create_transport - Factory for creating appropriate transport
+    AsyncShmTransport - Async transport using eventfd/kqueue notifications
+    create_transport - Factory for creating the transport
 
 Exceptions:
     ChannelError - Channel operation failures
     SerializationError - Serialization/deserialization failures
+    UnsupportedPlatformError - Platform doesn't support notification-based IPC
 """
 
 from vertebra import _vertebra
 from vertebra.exceptions import ChannelError, SerializationError
-from vertebra.ipc.async_transport import AsyncShmTransport, PollingTransport, create_transport
+from vertebra.ipc.async_transport import AsyncShmTransport, UnsupportedPlatformError, create_transport
 from vertebra.ipc.channel import BufferView, Channel, ZeroCopyChannel
 
 ShmRegion = _vertebra.ShmRegion
@@ -52,11 +52,11 @@ __all__ = (
     "ChannelError",
     "ChannelHandle",
     "MpmcRing",
-    "PollingTransport",
     "SerializationError",
     # Native types (Rust core)
     "ShmRegion",
     "SpscRing",
+    "UnsupportedPlatformError",
     "ZeroCopyChannel",
     "create_transport",
 )

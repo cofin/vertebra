@@ -42,7 +42,7 @@ except ImportError as exc:
 # Async Transport (depends on native extension + Python wrapper)
 # =============================================================================
 
-from vertebra.ipc.async_transport import AsyncShmTransport, PollingTransport, create_transport
+from vertebra.ipc.async_transport import AsyncShmTransport, UnsupportedPlatformError, create_transport
 
 # =============================================================================
 # Dependency Flags
@@ -169,11 +169,11 @@ __all__ = (
     "PandasDataFrameProtocol",
     "PolarsDataFrame",
     "PolarsDataFrameProtocol",
-    "PollingTransport",
     "PydanticBaseModel",
     "ShmRegion",
     "SpscRing",
     "SyncContextManager",
+    "UnsupportedPlatformError",
     "create_transport",
     "shm_unlink",
 )

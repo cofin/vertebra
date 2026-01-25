@@ -10,6 +10,7 @@ use napi_derive::napi;
 use vertebra_core::buffer::BufferPool;
 use vertebra_core::buffer::RingLayout;
 use vertebra_core::channel::{BufferChannel, BufferMessage, MpmcRing, SpscRing};
+use vertebra_core::notify::Notifier;
 use vertebra_core::router::{RouteId, Router};
 #[cfg(unix)]
 use vertebra_core::shm::shm_unlink_named;
@@ -17,6 +18,133 @@ use vertebra_core::shm::ShmRegion;
 
 fn map_err(err: impl std::fmt::Display) -> Error {
     Error::from_reason(err.to_string())
+}
+
+/// Cross-platform notification handle for async IPC signaling.
+///
+/// Uses eventfd on Linux (3-10µs latency) or pipe on macOS/Windows.
+/// Register the `fd` with your event loop to get notified when data is available.
+///
+/// Usage in Bun:
+/// ```typescript
+/// const notifier = new NotifierHandle();
+/// const fd = notifier.fd;
+/// // Use with Bun.file(fd).readable or polling
+/// notifier.notify();  // Signal from producer
+/// notifier.clear();   // Clear after handling
+/// ```
+#[napi]
+pub struct NotifierHandle {
+    inner: Notifier,
+}
+
+#[napi]
+impl NotifierHandle {
+    /// Create a new notification handle.
+    ///
+    /// On Linux, this creates an eventfd with `EFD_NONBLOCK` (no CLOEXEC).
+    /// On other platforms, this creates a pipe with non-blocking mode.
+    /// FDs are inheritable to support cross-process IPC via fork.
+    #[napi(constructor)]
+    pub fn new() -> Result<Self> {
+        let inner = Notifier::new().map_err(map_err)?;
+        Ok(Self { inner })
+    }
+
+    /// Get the file descriptor for polling (read end).
+    ///
+    /// Register this FD with your event loop to be notified when data is available.
+    /// On Linux this is the eventfd; on other platforms it's the read end of a pipe.
+    #[napi(getter)]
+    pub fn fd(&self) -> i32 {
+        self.inner.as_raw_fd()
+    }
+
+    /// Get the write file descriptor (for non-Linux platforms).
+    ///
+    /// On Linux, eventfd uses a single FD for both read and write, so this
+    /// returns the same value as `fd`. On macOS/Windows, this is the write
+    /// end of the pipe and may differ from the read FD.
+    #[napi(getter)]
+    pub fn write_fd(&self) -> i32 {
+        self.inner.write_fd()
+    }
+
+    /// Signal that data is available.
+    ///
+    /// This is a non-blocking operation. On Linux, it increments the eventfd
+    /// counter. On other platforms, it writes a single byte to the pipe.
+    /// Safe to call multiple times; notifications coalesce.
+    #[napi]
+    pub fn notify(&self) -> Result<()> {
+        self.inner.notify().map_err(map_err)
+    }
+
+    /// Clear pending notifications.
+    ///
+    /// Call this after the event loop indicates the FD is readable and before
+    /// attempting to receive data. This prevents spurious wakeups.
+    #[napi]
+    pub fn clear(&self) -> Result<()> {
+        self.inner.clear().map_err(map_err)
+    }
+
+    /// Check if the notifier has pending notifications without blocking.
+    ///
+    /// Returns `true` if there are pending notifications, `false` otherwise.
+    #[napi]
+    pub fn has_pending(&self) -> bool {
+        self.inner.has_pending()
+    }
+
+    /// Wait for a notification with timeout.
+    ///
+    /// Returns `true` if notification received, `false` on timeout.
+    /// Use -1 for infinite timeout.
+    #[napi]
+    pub fn wait(&self, timeout_ms: i32) -> Result<bool> {
+        self.inner.wait(timeout_ms).map_err(map_err)
+    }
+
+    /// Hybrid spin-then-park wait for low-latency notification.
+    ///
+    /// Spins checking for notifications for `spin_us` microseconds before
+    /// falling back to blocking wait. This captures immediate responses
+    /// without syscall overhead while still allowing efficient blocking.
+    ///
+    /// @param spin_us - Maximum microseconds to spin before blocking (typically 2-10)
+    /// @param timeout_ms - Total timeout in milliseconds (includes spin time), -1 for infinite
+    /// @returns true if notification received, false on timeout
+    #[napi]
+    pub fn spin_wait_or_park(&self, spin_us: u32, timeout_ms: i32) -> Result<bool> {
+        self.inner
+            .spin_wait_or_park(spin_us as u64, timeout_ms)
+            .map_err(map_err)
+    }
+
+    /// Reconstruct a notifier from inherited file descriptor(s).
+    ///
+    /// This is used by child processes that inherit FDs from their parent.
+    /// The FD numbers are typically passed via environment variables or CLI args.
+    ///
+    /// On Linux, only `read_fd` is used (eventfd is a single FD).
+    /// On macOS/Windows, both `read_fd` and `write_fd` are needed (pipe ends).
+    /// For portability, always pass both FDs - on Linux just pass the same FD twice.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the FD(s) are valid, open file descriptors
+    /// created by `NotifierHandle::new()` in the parent process.
+    #[napi(factory)]
+    pub fn from_raw_fds(read_fd: i32, write_fd: i32) -> Self {
+        #[cfg(target_os = "linux")]
+        let inner = unsafe { Notifier::from_raw_fd(read_fd) };
+        #[cfg(not(target_os = "linux"))]
+        let inner = unsafe { Notifier::from_raw_fds(read_fd, write_fd) };
+        // Suppress unused warning on Linux where write_fd isn't needed
+        let _ = write_fd;
+        Self { inner }
+    }
 }
 
 #[napi]
@@ -72,6 +200,58 @@ mod tests {
     #[test]
     fn version_matches_core() {
         assert_eq!(get_version(), vertebra_core::VERSION.to_string());
+    }
+
+    #[test]
+    fn notifier_roundtrip() {
+        let notifier = NotifierHandle::new().expect("create notifier");
+        assert!(!notifier.has_pending());
+
+        notifier.notify().expect("notify");
+        assert!(notifier.has_pending());
+
+        notifier.clear().expect("clear");
+        assert!(!notifier.has_pending());
+    }
+
+    #[test]
+    fn notifier_fd_valid() {
+        let notifier = NotifierHandle::new().expect("create notifier");
+        let fd = notifier.fd();
+        assert!(fd >= 0, "FD should be non-negative");
+    }
+
+    #[test]
+    fn notifier_wait_timeout() {
+        let notifier = NotifierHandle::new().expect("create notifier");
+
+        // Wait with short timeout, should return false (no notification)
+        let result = notifier.wait(1).expect("wait");
+        assert!(!result, "should timeout without notification");
+
+        // Notify and wait, should return true
+        notifier.notify().expect("notify");
+        let result = notifier.wait(10).expect("wait");
+        assert!(result, "should receive notification");
+    }
+
+    #[test]
+    fn notifier_spin_wait_immediate() {
+        let notifier = NotifierHandle::new().expect("create notifier");
+
+        // Pre-notify so data is immediately available
+        notifier.notify().expect("notify");
+
+        let start = std::time::Instant::now();
+        let result = notifier.spin_wait_or_park(100, 1000).expect("spin_wait");
+        let elapsed = start.elapsed();
+
+        assert!(result, "should return true when pending");
+        assert!(
+            elapsed.as_micros() < 1000,
+            "immediate should be fast: {}us",
+            elapsed.as_micros()
+        );
     }
 
     #[test]
