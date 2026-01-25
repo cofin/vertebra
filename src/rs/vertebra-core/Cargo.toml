@@ -43,3 +43,7 @@ harness = false
 [[bench]]
 name = "spin_wait"
 harness = false
+
+[[bench]]
+name = "router"
+harness = false
