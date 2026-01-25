@@ -121,12 +121,12 @@
 - [x] State persistence and recovery [7c9957c]
 - [x] Write unit tests for state hub [7c9957c]
 
-### Task 4.4: Python Shadow State
-- [ ] Implement local shadow state in workers
-- [ ] Subscribe to broker delta broadcasts
-- [ ] Apply deltas to shadow state
-- [ ] Nanosecond read performance
-- [ ] Write integration tests
+### Task 4.4: Python Shadow State [57694be]
+- [x] Implement local shadow state in workers [57694be]
+- [x] Subscribe to broker delta broadcasts [57694be]
+- [x] Apply deltas to shadow state [57694be]
+- [x] Nanosecond read performance [57694be]
+- [x] Write integration tests [57694be]
 
 ### Task 4.5: Checkpoint - Verify Phase 4 Complete
 - [ ] State changes propagate in <100μs
