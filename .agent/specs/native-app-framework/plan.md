@@ -23,10 +23,10 @@
 - [x] Route method discovery via reflection
 - [x] Write unit tests for controllers
 
-### Task 1.4: Checkpoint - Verify Phase 1 Complete
-- [ ] All routing tests pass
-- [ ] Rust router benchmarks meet O(1) target
-- [ ] Controller registration works end-to-end
+### Task 1.4: Checkpoint - Verify Phase 1 Complete [565b489]
+- [x] All routing tests pass
+- [x] Rust router benchmarks meet O(1) target
+- [x] Controller registration works end-to-end
 
 ---
 
