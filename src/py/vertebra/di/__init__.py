@@ -62,6 +62,64 @@ class DependencySpec(msgspec.Struct, frozen=True):
     dependency: type[Any]
 
 
+class DependencyError(RuntimeError):
+    """Raised when the dependency graph cannot be resolved."""
+
+
+class DependencyGraph:
+    """Resolve provider dependencies into a topological execution order."""
+
+    __slots__ = ("_providers",)
+
+    def __init__(self, providers: dict[type[Any], ProviderSpec[Any]]) -> None:
+        self._providers = providers
+
+    def resolve_order(self, targets: tuple[type[Any], ...]) -> list[ProviderSpec[Any]]:
+        order: list[ProviderSpec[Any]] = []
+        visiting: set[type[Any]] = set()
+        visited: set[type[Any]] = set()
+
+        def resolve(target: type[Any]) -> None:
+            if target in visited:
+                return
+            if target in visiting:
+                raise DependencyError(f"cycle detected at {target!r}")
+            spec = self._providers.get(target)
+            if spec is None:
+                raise DependencyError(f"missing provider for {target!r}")
+
+            visiting.add(target)
+            for dependency in spec.dependencies:
+                resolve(dependency.dependency)
+            visiting.remove(target)
+            visited.add(target)
+            order.append(spec)
+
+        for target in targets:
+            resolve(target)
+
+        return order
+
+
+class ProviderCompiler:
+    """Compile provider graphs into linear runner functions."""
+
+    __slots__ = ("_providers", "_cache")
+
+    def __init__(self, providers: dict[type[Any], ProviderSpec[Any]]) -> None:
+        self._providers = providers
+        self._cache: dict[type[Any], Callable[[], Awaitable[Any]]] = {}
+
+    def compile(self, target: type[Any]) -> Callable[[], Awaitable[Any]]:
+        if target in self._cache:
+            return self._cache[target]
+        graph = DependencyGraph(self._providers)
+        order = graph.resolve_order((target,))
+        runner = _compile_runner(order, target)
+        self._cache[target] = runner
+        return runner
+
+
 class ProviderRegistry:
     """Register provider factories and infer dependency metadata."""
 
@@ -96,6 +154,9 @@ class ProviderRegistry:
             return provider
 
         raise TypeError("provider must be a class or callable")
+
+    def compile(self) -> ProviderCompiler:
+        return ProviderCompiler(self._providers)
 
     def _register_class(self, provider: type[T], *, scope: Scope) -> ProviderSpec[T]:
         dependencies = _collect_dependencies(provider.__init__, skip_first=True)
@@ -173,11 +234,46 @@ def _unwrap_inject(annotation: Any) -> type[Any] | None:
     return annotation if isinstance(annotation, type) else None
 
 
+def _compile_runner(
+    order: list[ProviderSpec[Any]],
+    target: type[Any],
+) -> Callable[[], Awaitable[Any]]:
+    local_ns: dict[str, Any] = {"target_type": target}
+    body = ["    resolved = {}"]
+
+    for index, spec in enumerate(order):
+        factory_key = f"factory_{index}"
+        type_key = f"type_{index}"
+        local_ns[factory_key] = spec.factory
+        local_ns[type_key] = spec.provides
+
+        args = []
+        for dep_index, dependency in enumerate(spec.dependencies):
+            dep_key = f"dep_{index}_{dep_index}"
+            local_ns[dep_key] = dependency.dependency
+            args.append(f"resolved[{dep_key}]")
+
+        args_str = ", ".join(args)
+        if inspect.iscoroutinefunction(spec.factory):
+            call_expr = f"await {factory_key}({args_str})"
+        else:
+            call_expr = f"{factory_key}({args_str})"
+        body.append(f"    resolved[{type_key}] = {call_expr}")
+
+    body.append("    return resolved[target_type]")
+    source = "async def runner():\n" + "\n".join(body)
+    exec(source, local_ns)  # noqa: S102
+    return local_ns["runner"]
+
+
 __all__ = (
-    "Inject",
+    "DependencyError",
+    "DependencyGraph",
     "DependencySpec",
+    "Inject",
     "Provider",
     "ProviderFactory",
+    "ProviderCompiler",
     "ProviderRegistry",
     "ProviderSpec",
     "SCOPES",
