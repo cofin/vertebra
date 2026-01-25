@@ -6,11 +6,12 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 
 ## Active PRDs
 
-### [ ] Rust-Based Arrow Encoder (Optimization)
+### [x] Rust-Based Arrow Encoder (Optimization)
 *Link: [./specs/rust-arrow-encoder/](./specs/rust-arrow-encoder/)*
 *Risk Level: medium*
+*Status: CLOSED - Not viable*
 
-Implement a high-performance Arrow IPC encoder in Rust (vertebra-py) to replace Python row-to-column pivot logic, targeting >5x speedup for 1000+ rows.
+Attempted Rust Arrow encoder was 3x slower than nanoarrow due to PyO3 iteration overhead. Sticking with nanoarrow C extension. See learnings.md for analysis.
 
 ### [~] Security & User Framework
 *Link: [./specs/security-user-framework/](./specs/security-user-framework/)*

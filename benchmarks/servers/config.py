@@ -156,7 +156,7 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
         category=BenchmarkCategory.RUNTIME,
         command=(
             "vertebra",
-            "serve",
+            "run",
             "benchmarks.servers.app.asgi:app",
             "--host",
             "127.0.0.1",
@@ -175,7 +175,7 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
         category=BenchmarkCategory.RUNTIME,
         command=(
             "vertebra",
-            "serve",
+            "run",
             "benchmarks.servers.app.litestar_app:app",
             "--host",
             "127.0.0.1",
@@ -183,7 +183,7 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
             "8008",
             "--workers",
             "1",
-            "--no-native",
+            "--asgi",
         ),
         port=8008,
         startup_delay=3.0,  # Bun + Rust + Python startup
@@ -195,7 +195,7 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
         category=BenchmarkCategory.RUNTIME,
         command=(
             "vertebra",
-            "serve",
+            "run",
             "benchmarks.servers.app.litestar_app:app",
             "--host",
             "127.0.0.1",
@@ -203,7 +203,6 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
             "8009",
             "--workers",
             "1",
-            "--native",
         ),
         port=8009,
         startup_delay=3.0,  # Bun + Rust + Python startup
@@ -215,7 +214,7 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
         category=BenchmarkCategory.RUNTIME,
         command=(
             "vertebra",
-            "serve",
+            "run",
             "benchmarks.servers.app.fastapi_app:app",
             "--host",
             "127.0.0.1",
@@ -223,7 +222,7 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
             "8013",
             "--workers",
             "1",
-            "--no-native",
+            "--asgi",
         ),
         port=8013,
         startup_delay=3.0,  # Bun + Rust + Python startup

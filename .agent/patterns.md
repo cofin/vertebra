@@ -27,7 +27,8 @@
 - **Opcode-based Dispatch**: Use integer opcodes (matched between Rust/TS/Python) for high-frequency operations (hashing, signing) - avoids JSON/MsgPack serialization overhead for method names
 - **Eventfd over Polling**: Linux uses eventfd for zero-overhead async notification; macOS/Windows use polling fallback
 - **Buffer Pools**: Pre-allocated buffers eliminate allocation churn (target: <1MB/s vs 650MB/s without)
- - **State Sync IDs**: Use FNV-1a 64-bit for `state_id` (state class name) and FNV-1a 32-bit for `field_id` (field name); MessagePack arrays for deltas with BigInt64 enabled in TS for 64-bit IDs/timestamps
+- **State Sync IDs**: Use FNV-1a 64-bit for `state_id` (state class name) and FNV-1a 32-bit for `field_id` (field name); MessagePack arrays for deltas with BigInt64 enabled in TS for 64-bit IDs/timestamps
+- **IPC Health Check**: Sending a special "ping" scope/message type (`vertebra.ping`) that bypasses the ASGI app allows for extremely fast health checks without app overhead
 
 ### Data Loading
 - **Lazy User Hydration**: `LazyUserProxy` pattern - `request.user` is available immediately with JWT claims, database fetch deferred until missing attribute accessed
@@ -47,6 +48,21 @@
 - **Cleanup Required**: Named shared memory regions must be explicitly unlinked - use `ShmMpmcRing.unlink` to prevent "File exists" errors on server restarts
 - **Stale Objects**: Clean `/dev/shm/test-* /dev/shm/*vertebra*` before test runs if experiencing hangs
 - **FD Leaks**: Ensure `close()` is called on transports; add `__del__` cleanup
+- **O_EXCL for Atomic Shm**: Using `shm_unlink` followed by `shm_open(..., O_CREAT | O_EXCL)` is a robust way to handle stale shared memory files from crashed processes
+
+### Performance Anti-Patterns
+- **PyO3 Iteration Overhead**: Safe PyO3 wrappers (`PyList`, `PyTuple`, `PyAny::extract`) incur significant C-API overhead per cell. For Arrow encoding, `nanoarrow` (C extension with raw pointers) is 3x faster than naive Rust iteration
+- **asyncio.sleep() Polling Floor**: `await asyncio.sleep(0.001)` introduces a minimum 1ms latency floor per poll, capping throughput. High-performance IPC must use `eventfd` (Linux) or blocking/signaling mechanisms for immediate wake on data arrival
+- **NEVER Use Polling as Fallback**: Current polling implementation yields ~66 RPS - it is non-functional for production. eventfd/pipe notification is mandatory, not optional
+
+### IPC Notification Pattern (Consensus: Gemini 3 Pro + Flash, 9/10)
+- **Linux**: Use `eventfd(2)` for cross-process notification (3-10μs latency)
+- **macOS/Windows**: Use `os.pipe()` as fallback (same add_reader() integration)
+- **asyncio Integration**: Register fd with `loop.add_reader(notify_fd, callback)` - zero polling
+- **Reactor Pattern**: Replace `while` loops with callback-based event handling
+- **FD Inheritance**: Create eventfd in parent, pass fd number via CLI arg to child process
+- **Batching**: Signal once per batch of writes to avoid syscall overhead at high RPS
+- **Cleanup**: ProcessManager owns shm_unlink via SIGCHLD handler; use atexit in workers
 
 ### Bun FFI
 - When adding new Rust functions to `vertebra-broker`, rebuild the Rust library (`make rs-build`) **and** ensure the Bun FFI definition in `shm.ts` matches exactly - runtime symbol lookup errors otherwise

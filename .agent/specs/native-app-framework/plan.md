@@ -236,21 +236,122 @@
 - [x] Ensure ASGI adapter can co-exist with Native Routes in the same worker pool
 - [x] Remove any deprecated flatbuffers generated code
 
-### Task 7.4: Performance Validation
-- [ ] Profile full stack with `flamegraph`
-- [ ] Verify Memory Allocation < 1MB/s
-- [ ] Verify Throughput > 200K req/s
+### Task 7.4: Performance Validation [COMPLETED]
+- [x] Profile full stack with `flamegraph`
+- [x] Verify Memory Allocation < 1MB/s
+- [x] Verify Throughput > 200K req/s [FAILED]
+    *   **Result:** ~60 RPS. P99 Latency ~1s.
+    *   **Root Cause:** Polling-based IPC (`asyncio.sleep(0.001)`) limits throughput.
+    *   **Next Step:** Migration to `eventfd` / Async Ring (Task for next flow).
 
 ---
 
-## Phase 8: Documentation and Examples
+## Phase 8: Async IPC Notification (Performance Fix) [CRITICAL]
 
-### Task 8.1: API Documentation
+> **Root Cause:** Polling-based IPC with `asyncio.sleep(0.001)` creates 1ms latency floor, capping throughput at ~66 RPS.
+> **Solution:** Replace polling with eventfd-based notification (Linux) + pipe() fallback (macOS/Windows).
+> **Target:** >200K RPS, <100μs P99 latency.
+> **Consensus:** Gemini 3 Pro + Flash both agree (9/10 confidence each).
+
+### Task 8.1: Rust eventfd Primitives [COMPLETE - vertebra-eap]
+- [x] Notifier already existed in `src/rs/vertebra-core/src/notify.rs`
+- [x] EventFd + Pipe implementations already present (cross-platform)
+- [x] PyO3 bindings already exposed via `AsyncRing`
+- [x] Added napi-rs bindings in `vertebra-js` (NotifierHandle)
+- [x] Added C ABI bindings in `vertebra-broker` for bun:ffi
+
+### Task 8.2: Integrate Notifier with SpscRing (Rust) [COMPLETE - vertebra-2ba]
+- [x] AsyncRing already integrates notifier with SpscRing
+- [x] `send()` calls `notifier.notify()` automatically
+- [x] `notifier_fd()` exposed for `add_reader()` integration
+- [x] `recv_hybrid()` provides spin-wait pattern
+
+### Task 8.3: Python Worker Reactor Pattern [COMPLETE - vertebra-ufk]
+- [x] Replaced polling with `loop.add_reader()` reactor pattern
+- [x] Removed `asyncio.sleep(0.001)` from worker.py
+- [x] Worker now waits on `_stop_event` instead of polling loop
+- [x] Client FDs registered/unregistered with event loop
+- [x] Graceful shutdown removes all readers
+
+### Task 8.4: TypeScript IPC Client Notification [COMPLETE - vertebra-nk0]
+- [x] Removed `sleep(1)` from `runResponseLoop()` and `waitForResponse()`
+- [x] Replaced with `yieldToEventLoop()` using `setImmediate`
+- [x] Added `ShmNotifier` class in shm.ts (bun:ffi)
+- [x] Added C ABI notifier functions to vertebra-broker
+- [ ] TODO: Full eventfd integration requires protocol changes to pass FDs
+
+### Task 8.5: ProcessManager Notifier Lifecycle
+- [ ] Create notifier fds in `ProcessManager.spawnWorker()` before spawning
+- [ ] Pass notifier fd to worker via CLI argument or env var
+- [ ] Ensure fd is inherited by subprocess (not closed on exec)
+- [ ] Track notifier fds per worker in `WorkerProcess` struct
+- [ ] Close notifier fds on worker termination
+- [ ] Add SIGCHLD handler to clean up notifiers on unexpected worker death
+- [ ] Update `ProcessManager.stop()` to close all notifier fds
+- [ ] Write tests for notifier lifecycle across worker restarts
+
+### Task 8.6: Shared Memory Cleanup Infrastructure
+- [ ] Add `shm_unlink()` call to `IpcConnection.close()` (client.ts:218-229)
+- [ ] Add `shm_unlink()` to `ProcessManager.handleExit()` for crashed workers
+- [ ] Track all SHM names created per worker in ProcessManager
+- [ ] Implement `cleanupOrphanedShm()` on server startup (scan /dev/shm/vertebra-*)
+- [ ] Add `atexit` handler in Python worker to unlink owned SHM regions
+- [ ] Add `finally` block cleanup in `AsgiWorker.serve_forever()` (worker.py:203)
+- [ ] Implement UUID-based SHM naming to prevent collisions
+- [ ] Write tests for cleanup on normal shutdown
+- [ ] Write tests for cleanup on crash/SIGKILL
+
+### Task 8.7: Remove All Legacy Polling Code [COMPLETE - vertebra-1lz]
+- [x] Removed `PollingTransport` class from async_transport.py
+- [x] Removed `_send_with_polling` and `_recv_with_polling` from channel.py
+- [x] Updated `create_transport()` to fail explicitly on unsupported platforms
+- [x] Removed `prefer_eventfd` config option (no polling fallback exists)
+- [x] Added `UnsupportedPlatformError` for clear failure on Windows ProactorEventLoop
+- [x] Removed polling from `receive_sync()` in channel.py
+- [x] Cleaned up exports in __init__.py, typing.py, _typing.py
+- [x] TypeScript: replaced `sleep(1)` with `yieldToEventLoop()`
+
+### Task 8.8: Notification Batching for High Throughput
+- [ ] Implement coalesced notification: signal once per batch of writes
+- [ ] Add `batch_send()` method to SpscRing for multiple messages
+- [ ] Signal only after final message in batch
+- [ ] Add configurable batch timeout (e.g., 100μs max coalesce window)
+- [ ] Implement "notify on empty" optimization (only signal if consumer was idle)
+- [ ] Benchmark batching impact on throughput at 200K+ RPS
+- [ ] Write tests for batch notification semantics
+
+### Task 8.9: Platform Detection and Notification Strategy
+- [ ] Implement runtime platform detection in Rust (`cfg!(target_os)`)
+- [ ] Linux: use eventfd (primary, required for production)
+- [ ] macOS: use pipe() with kqueue-compatible semantics (dev/CI only)
+- [ ] Windows: use pipe() or named event (dev/CI only)
+- [ ] **NO POLLING FALLBACK** - current polling code is non-functional (~66 RPS)
+- [ ] Fail fast with clear error if notification unavailable
+- [ ] Log notification strategy at startup
+- [ ] Write platform-specific tests (Linux eventfd, macOS pipe)
+- [ ] Document platform differences in code comments
+
+### Task 8.10: Checkpoint - Verify Phase 8 Complete
+- [ ] All polling code removed (grep confirms no asyncio.sleep in IPC)
+- [ ] eventfd notification working on Linux
+- [ ] pipe() fallback working on macOS
+- [ ] Throughput benchmark: >50K RPS minimum (stretch: >200K)
+- [ ] P99 latency: <1ms (stretch: <100μs)
+- [ ] No SHM leakage after 1000 worker restarts
+- [ ] No fd leakage after 1000 connections
+- [ ] All tests pass on Linux and macOS
+- [ ] Memory allocation rate <1MB/s under load
+
+---
+
+## Phase 9: Documentation and Examples
+
+### Task 9.1: API Documentation
 - [ ] Docstrings for all public APIs
 - [ ] Type hints complete and accurate
 - [ ] Generate API reference docs
 
-### Task 8.2: User Guides
+### Task 9.2: User Guides
 - [ ] Getting started guide: Native (`Vertex`) vs Litestar (`VertebraPlugin`)
 - [ ] Controller and routing guide
 - [ ] State synchronization guide
@@ -258,13 +359,13 @@
 - [ ] Guards and middleware guide
 - [ ] **Dual Mode Guide:** Mixing Native and ASGI apps
 
-### Task 8.3: Example Applications
+### Task 9.3: Example Applications
 - [ ] Basic CRUD example (Native)
 - [ ] Litestar Hybrid Example (Litestar Controller + Native Events)
 - [ ] Real-time dashboard example
 - [ ] Multi-user game example
 
-### Task 8.4: Checkpoint - Verify Phase 8 Complete
+### Task 9.4: Checkpoint - Verify Phase 9 Complete
 - [ ] All documentation complete
 - [ ] Examples run successfully
 - [ ] Docs clear on Native vs. Hybrid tradeoffs
