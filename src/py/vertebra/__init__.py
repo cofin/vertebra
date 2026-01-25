@@ -40,6 +40,8 @@ __all__ = (
     "Serializer",
     # Core
     "Vertebra",
+    # State
+    "ShadowState",
     # Version
     "__version__",
     "detect_serializer",
@@ -57,6 +59,10 @@ def __getattr__(name: str) -> object:
         from vertebra.main import ProviderPlugin, Vertebra
 
         return {"ProviderPlugin": ProviderPlugin, "Vertebra": Vertebra}[name]
+    if name == "ShadowState":
+        from vertebra.state_shadow import ShadowState
+
+        return ShadowState
     msg = f"module 'vertebra' has no attribute {name!r}"
     raise AttributeError(msg)
 
