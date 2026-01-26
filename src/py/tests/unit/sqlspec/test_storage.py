@@ -6,7 +6,7 @@ import pytest
 
 try:
     from vertebra.extensions.sqlspec._storage import VertebraObjectStore
-    from vertebra.resources.broker import AsyncBrokerClient
+    from vertebra.messaging.broker import AsyncBrokerClient
 
     HAS_STORAGE = True
 except ImportError:

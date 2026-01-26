@@ -6,7 +6,7 @@ from typing import Any
 
 import msgspec
 
-from vertebra.protocol.state import StateDelta, StateOpcode, decode_delta
+from vertebra.messaging.protocol.state import StateDelta, StateOpcode, decode_delta
 
 
 class ShadowField(msgspec.Struct, frozen=True):

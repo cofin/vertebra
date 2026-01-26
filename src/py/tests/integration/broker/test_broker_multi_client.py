@@ -56,7 +56,7 @@ async def test_concurrent_ring_operations() -> None:
     _skip_if_async_ring_unavailable()
 
     from vertebra._vertebra import AsyncRing
-    from vertebra.ipc.async_transport import AsyncShmTransport
+    from vertebra.messaging.transport.async_transport import AsyncShmTransport
 
     num_rings = 4
     messages_per_ring = 10
@@ -161,7 +161,7 @@ async def test_multiple_messages_ordering() -> None:
     _skip_if_async_ring_unavailable()
 
     from vertebra._vertebra import AsyncRing
-    from vertebra.ipc.async_transport import AsyncShmTransport
+    from vertebra.messaging.transport.async_transport import AsyncShmTransport
 
     ring_name = f"/{unique_shm_name('ordering')}"
 
@@ -191,7 +191,7 @@ async def test_large_message_handling() -> None:
     _skip_if_async_ring_unavailable()
 
     from vertebra._vertebra import AsyncRing
-    from vertebra.ipc.async_transport import AsyncShmTransport
+    from vertebra.messaging.transport.async_transport import AsyncShmTransport
 
     ring_name = f"/{unique_shm_name('large-msg')}"
     slot_size = 8192  # 8KB slots

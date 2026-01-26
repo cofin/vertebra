@@ -42,7 +42,7 @@ except ImportError as exc:
 # Async Transport (depends on native extension + Python wrapper)
 # =============================================================================
 
-from vertebra.ipc.async_transport import AsyncShmTransport, UnsupportedPlatformError, create_transport
+from vertebra.messaging.transport.async_transport import AsyncShmTransport, UnsupportedPlatformError, create_transport
 
 # =============================================================================
 # Dependency Flags

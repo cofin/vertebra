@@ -28,8 +28,8 @@ Exceptions:
 
 from vertebra import _vertebra
 from vertebra.common.exceptions import ChannelError, SerializationError
-from vertebra.ipc.async_transport import AsyncShmTransport, UnsupportedPlatformError, create_transport
-from vertebra.ipc.channel import BufferView, Channel, ZeroCopyChannel
+from vertebra.messaging.transport.async_transport import AsyncShmTransport, UnsupportedPlatformError, create_transport
+from vertebra.messaging.transport.channel import BufferView, Channel, ZeroCopyChannel
 
 ShmRegion = _vertebra.ShmRegion
 BufferPool = _vertebra.BufferPool

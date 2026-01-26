@@ -1,6 +1,6 @@
 import pytest
 
-from vertebra.protocol.state import StateDelta, StateOpcode, field_id, state_id
+from vertebra.messaging.protocol.state import StateDelta, StateOpcode, field_id, state_id
 from vertebra.state_shadow import ShadowState
 
 
@@ -46,7 +46,7 @@ async def test_shadow_state_apply_payload() -> None:
     payload = StateDelta(opcode=StateOpcode.FIELD_SET, state_id=state, field_id=field, timestamp_ns=5, value=42)
     encoded = payload  # reuse StateDelta for encoding
 
-    from vertebra.protocol.state import encode_delta
+    from vertebra.messaging.protocol.state import encode_delta
 
     shadow.apply_payload(encode_delta(encoded))
 

@@ -3,7 +3,7 @@
 from collections.abc import AsyncIterator
 from typing import Protocol, runtime_checkable
 
-from vertebra.resources.broker import AsyncBrokerClient
+from vertebra.messaging.broker import AsyncBrokerClient
 
 
 @runtime_checkable

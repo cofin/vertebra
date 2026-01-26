@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from sqlspec.observability import ObservabilityConfig
 
     from vertebra.database.backends.broker import VertebraAsyncPool, VertebraSyncPool
-    from vertebra.resources.broker import BrokerClientConfig
+    from vertebra.messaging.broker import BrokerClientConfig
 
 
 class SqliteDriverFeatures(TypedDict, total=False):

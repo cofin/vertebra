@@ -9,7 +9,7 @@ ensure_dependency("litestar")
 
 from litestar.plugins import CLIPluginProtocol, InitPluginProtocol  # noqa: E402
 
-from vertebra.common.serializers.litestar import VERTEBRA_TYPE_DECODERS, VERTEBRA_TYPE_ENCODERS  # noqa: E402
+from vertebra.extensions.litestar.serializers import VERTEBRA_TYPE_DECODERS, VERTEBRA_TYPE_ENCODERS  # noqa: E402
 
 
 @dataclass(slots=True, frozen=True)

@@ -10,7 +10,7 @@ from vertebra.database.backends.broker import (
     VertebraSyncConnection,
     VertebraSyncPool,
 )
-from vertebra.resources import AsyncBrokerClient, BrokerClientConfig, SyncBrokerClient
+from vertebra.messaging.broker import AsyncBrokerClient, BrokerClientConfig, SyncBrokerClient
 
 
 class SyncRedisDriverConfig(VertebraDriverConfig, frozen=True):

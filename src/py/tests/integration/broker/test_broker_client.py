@@ -5,7 +5,7 @@ import msgspec
 import pytest
 
 from tests.helpers.shm import skip_if_shm_unavailable, tracked_shm_cleanup, unique_shm_name
-from vertebra.ipc.channel import decode_request, encode_response
+from vertebra.messaging.transport.channel import decode_request, encode_response
 
 pytestmark = pytest.mark.integration
 
@@ -24,8 +24,8 @@ async def test_broker_client_roundtrip() -> None:
     _skip_if_async_ring_unavailable()
 
     from vertebra._vertebra import AsyncRing
-    from vertebra.ipc.async_transport import AsyncShmTransport
-    from vertebra.resources import AsyncBrokerClient, BrokerClientConfig
+    from vertebra.messaging.broker import AsyncBrokerClient, BrokerClientConfig
+    from vertebra.messaging.transport.async_transport import AsyncShmTransport
 
     encoder = msgspec.msgpack.Encoder()
     decoder = msgspec.msgpack.Decoder()

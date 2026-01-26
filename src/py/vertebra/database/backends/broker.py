@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Any, Self, TypedDict, TypeVar, cast
 
 import msgspec
 
-from vertebra.resources import AsyncBrokerClient, AsyncBrokerPool, BrokerClientConfig, SyncBrokerClient, SyncBrokerPool
+from vertebra.messaging.broker import AsyncBrokerClient, BrokerClientConfig, SyncBrokerClient
+from vertebra.resources.pool import AsyncBrokerPool, SyncBrokerPool
 from vertebra.typing import ArrowTable
 from vertebra.utils.module_loader import ensure_pyarrow
 

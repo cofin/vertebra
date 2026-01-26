@@ -15,7 +15,7 @@ import pytest
 
 if TYPE_CHECKING:
     from vertebra._vertebra import AsyncRing
-    from vertebra.ipc.async_transport import AsyncShmTransport
+    from vertebra.messaging.transport.async_transport import AsyncShmTransport
 
 # Skip on Windows where uvloop is not supported
 pytestmark = [
@@ -49,7 +49,7 @@ def async_ring() -> "AsyncRing":
 @pytest.fixture
 def transport(async_ring: "AsyncRing") -> "AsyncShmTransport":
     """Create an AsyncShmTransport."""
-    from vertebra.ipc.async_transport import AsyncShmTransport
+    from vertebra.messaging.transport.async_transport import AsyncShmTransport
 
     transport = AsyncShmTransport(async_ring, spin_duration_us=5)
     yield transport
@@ -132,7 +132,7 @@ class TestUvloopCompatibility:
     async def test_concurrent_receivers(self, uvloop_policy) -> None:
         """Test multiple concurrent transports don't interfere."""
         from vertebra._vertebra import AsyncRing
-        from vertebra.ipc.async_transport import AsyncShmTransport
+        from vertebra.messaging.transport.async_transport import AsyncShmTransport
 
         rings = [AsyncRing(4096, 64) for _ in range(4)]
         transports = [AsyncShmTransport(r, spin_duration_us=5) for r in rings]

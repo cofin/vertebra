@@ -31,7 +31,7 @@ class TestBrokerConfigBase:
 
         from vertebra.extensions.sqlspec._config import VertebraSyncConfigBase
         from vertebra.extensions.sqlspec._driver import VertebraSyncDriverBase
-        from vertebra.resources import BrokerClientConfig
+        from vertebra.messaging.broker import BrokerClientConfig
 
         # Create a concrete implementation
         class TestSyncConfig(VertebraSyncConfigBase):
@@ -52,7 +52,7 @@ class TestBrokerConfigBase:
 
         from vertebra.extensions.sqlspec._config import VertebraSyncConfigBase
         from vertebra.extensions.sqlspec._driver import VertebraSyncDriverBase
-        from vertebra.resources import BrokerClientConfig
+        from vertebra.messaging.broker import BrokerClientConfig
 
         class TestSyncConfig(VertebraSyncConfigBase):
             driver_type = VertebraSyncDriverBase
@@ -72,7 +72,7 @@ class TestBrokerConfigBase:
 
         from vertebra.extensions.sqlspec._config import VertebraAsyncConfigBase
         from vertebra.extensions.sqlspec._driver import VertebraAsyncDriverBase
-        from vertebra.resources import BrokerClientConfig
+        from vertebra.messaging.broker import BrokerClientConfig
 
         class TestAsyncConfig(VertebraAsyncConfigBase):
             driver_type = VertebraAsyncDriverBase
@@ -198,7 +198,7 @@ class TestBrokerConnection:
     def test_sync_broker_connection_token(self) -> None:
         """Test VertebraSyncConnection stores token correctly."""
         from vertebra.database.backends.broker import VertebraSyncConnection
-        from vertebra.resources import AsyncBrokerClient, BrokerClientConfig
+        from vertebra.messaging.broker import AsyncBrokerClient, BrokerClientConfig
 
         client = AsyncBrokerClient(BrokerClientConfig(name="test-broker"))
         conn = VertebraSyncConnection(pool="test-pool", client=client, token="test-token-123")
@@ -207,7 +207,7 @@ class TestBrokerConnection:
     def test_async_broker_connection_token(self) -> None:
         """Test VertebraAsyncConnection stores token correctly."""
         from vertebra.database.backends.broker import VertebraAsyncConnection
-        from vertebra.resources import AsyncBrokerClient, BrokerClientConfig
+        from vertebra.messaging.broker import AsyncBrokerClient, BrokerClientConfig
 
         client = AsyncBrokerClient(BrokerClientConfig(name="test-broker"))
         conn = VertebraAsyncConnection(pool="test-pool", client=client, token="async-token-456")

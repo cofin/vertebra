@@ -1,6 +1,6 @@
 import base64
 
-from vertebra.protocol.state import StateDelta, StateOpcode, encode_delta, field_id, state_id
+from vertebra.messaging.protocol.state import StateDelta, StateOpcode, encode_delta, field_id, state_id
 from vertebra.sync import StateSubscription, decode_sse_event, decode_state_payload
 
 

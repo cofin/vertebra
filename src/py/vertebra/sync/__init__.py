@@ -7,7 +7,7 @@ from typing import Any
 
 import msgspec
 
-from vertebra.protocol.state import StateDelta, decode_delta
+from vertebra.messaging.protocol.state import StateDelta, decode_delta
 from vertebra.state_shadow import ShadowState
 
 __all__ = [

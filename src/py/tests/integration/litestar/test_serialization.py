@@ -11,7 +11,7 @@ try:
     from litestar.status_codes import HTTP_200_OK
     from litestar.testing import TestClient
 
-    from vertebra.common.serializers.litestar import VERTEBRA_TYPE_ENCODERS
+    from vertebra.extensions.litestar.serializers import VERTEBRA_TYPE_ENCODERS
 
     HAS_LITESTAR = True
 except ImportError:
@@ -45,7 +45,7 @@ def test_litestar_parsing() -> None:
 
     from litestar import get
 
-    from vertebra.common.serializers.litestar import VERTEBRA_TYPE_DECODERS
+    from vertebra.extensions.litestar.serializers import VERTEBRA_TYPE_DECODERS
 
     @get("/query", sync_to_thread=False)
     def query_handler(path: pathlib.Path, ip: ipaddress.IPv4Address) -> dict[str, Any]:

@@ -7,7 +7,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator, Se
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, cast
 
-from vertebra.resources.broker import AsyncBrokerClient
+from vertebra.messaging.broker import AsyncBrokerClient
 from vertebra.utils.module_loader import ensure_dependency
 
 ensure_dependency("advanced_alchemy", install_package="advanced-alchemy")

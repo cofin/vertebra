@@ -2,7 +2,14 @@ from uuid import UUID
 
 import pytest
 
-from vertebra.database.backends import decode_mysql, decode_postgres, decode_sqlite, encode_mysql, encode_postgres, encode_sqlite
+from vertebra.database.backends import (
+    decode_mysql,
+    decode_postgres,
+    decode_sqlite,
+    encode_mysql,
+    encode_postgres,
+    encode_sqlite,
+)
 
 pytestmark = pytest.mark.unit
 

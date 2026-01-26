@@ -2,7 +2,14 @@
 
 import pytest
 
-from vertebra.protocol import HEADER_SIZE, ControlMessageKind, Flags, RequestHeader, ResponseFlags, ResponseHeader
+from vertebra.messaging.protocol import (
+    HEADER_SIZE,
+    ControlMessageKind,
+    Flags,
+    RequestHeader,
+    ResponseFlags,
+    ResponseHeader,
+)
 
 
 class TestRequestHeader:

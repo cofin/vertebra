@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from sqlspec.core import StatementConfig
     from sqlspec.observability import ObservabilityConfig
 
-    from vertebra.resources.broker import BrokerClientConfig
+    from vertebra.messaging.broker import BrokerClientConfig
 
 SyncConfigT = TypeVar("SyncConfigT", bound=SyncDatabaseConfig[Any, Any, Any])
 AsyncConfigT = TypeVar("AsyncConfigT", bound=AsyncDatabaseConfig[Any, Any, Any])

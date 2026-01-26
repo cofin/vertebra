@@ -3,7 +3,7 @@ import asyncio
 import msgspec
 import pytest
 
-from vertebra.protocol.state import StateOpcode, decode_delta, field_id, state_id
+from vertebra.messaging.protocol.state import StateOpcode, decode_delta, field_id, state_id
 from vertebra.state import NativeState
 
 

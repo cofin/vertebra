@@ -1,7 +1,7 @@
 """Unit tests for broker provider registration and configuration."""
 
 from vertebra.common.exceptions import BrokerError, VertebraError
-from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig
+from vertebra.messaging.broker import AsyncBrokerClient, BrokerClientConfig
 
 
 class TestBrokerClientConfig:

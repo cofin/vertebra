@@ -7,7 +7,7 @@ from typing import Any, TypeVar
 
 import msgspec
 
-from vertebra.protocol.state import StateDelta, StateOpcode, encode_delta, field_id, state_id
+from vertebra.messaging.protocol.state import StateDelta, StateOpcode, encode_delta, field_id, state_id
 
 T = TypeVar("T", bound="NativeState")
 

@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from vertebra.database.backends.broker import VertebraSyncConnection, VertebraSyncCursor
-from vertebra.resources.broker import SyncBrokerClient
+from vertebra.messaging.broker import SyncBrokerClient
 
 # DBAPI Globals
 apilevel = "2.0"

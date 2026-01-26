@@ -28,9 +28,9 @@
 - [x] Task: Checkpoint - Verify Phase 2 complete 5df459a
 
 ### Phase 3: Core Infrastructure (DB, Msg, State)
-- [ ] Task: Create `vertebra.database` package
-- [ ] Task: Move `drivers/` to `vertebra.database.backends`
-- [ ] Task: Move `extensions/sqlspec` to `vertebra.database.interfaces`
+- [x] Task: Create `vertebra.database` package
+- [x] Task: Move `drivers/` to `vertebra.database.backends`
+- [x] Task: Keep `extensions/sqlspec` in extensions (third-party integrations stay at top level)
 - [ ] Task: Create `vertebra.messaging` package
 - [ ] Task: Move `resources/broker.py` to `vertebra.messaging.broker`
 - [ ] Task: Move `ipc/` to `vertebra.messaging.transport`

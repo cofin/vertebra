@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from vertebra.ipc.channel import BufferView, Channel, ChannelError, ZeroCopyChannel
+from vertebra.messaging.transport.channel import BufferView, Channel, ChannelError, ZeroCopyChannel
 from vertebra.procedures import ProcedureRegistry, procedure
 
 pytestmark = pytest.mark.unit
@@ -57,7 +57,7 @@ def test_channel_pair_roundtrip() -> None:
 
 
 def test_buffer_view_memoryview() -> None:
-    from vertebra.ipc import BufferPool
+    from vertebra.messaging.transport import BufferPool
 
     pool = BufferPool(16, 1)
     buffer = pool.acquire()
@@ -73,7 +73,7 @@ def test_buffer_view_memoryview() -> None:
 def test_buffer_view_msgspec() -> None:
     msgspec = pytest.importorskip("msgspec")
 
-    from vertebra.ipc import BufferPool
+    from vertebra.messaging.transport import BufferPool
 
     class User(msgspec.Struct):
         id: int

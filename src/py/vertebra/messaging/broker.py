@@ -12,10 +12,10 @@ import msgspec
 from vertebra._vertebra import AsyncRing, ShmRegion, SpscRing
 from vertebra.common.exceptions import BrokerError
 from vertebra.common.serializers import MessagePackCodec
-from vertebra.ipc.async_transport import AsyncShmTransport, create_transport
-from vertebra.ipc.channel import decode_response, encode_request
-from vertebra.protocol import Flags
-from vertebra.resources.arrow import decode_arrow
+from vertebra.common.serializers.arrow import decode_arrow
+from vertebra.messaging.protocol import Flags
+from vertebra.messaging.transport.async_transport import AsyncShmTransport, create_transport
+from vertebra.messaging.transport.channel import decode_response, encode_request
 
 
 class RingConfig(msgspec.Struct, frozen=True, gc=False):

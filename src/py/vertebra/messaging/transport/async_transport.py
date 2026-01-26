@@ -11,7 +11,7 @@ before falling back to add_reader() to capture immediate responses without
 syscall overhead.
 
 Example:
-    from vertebra.ipc.async_transport import AsyncShmTransport
+    from vertebra.messaging.transport.async_transport import AsyncShmTransport
     from vertebra._vertebra import AsyncRing
 
     ring = AsyncRing(65536, 1024)

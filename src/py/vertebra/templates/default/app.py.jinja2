@@ -1,5 +1,5 @@
 from vertebra import Vertebra
-from vertebra.resources import BrokerClientConfig
+from vertebra.messaging.broker import BrokerClientConfig
 
 app = Vertebra(
     client_config=BrokerClientConfig(name="{{ project_slug }}-broker")

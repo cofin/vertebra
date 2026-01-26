@@ -9,7 +9,7 @@ from vertebra.common.protocols import ProviderPlugin
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from vertebra.resources import BrokerClientConfig
+    from vertebra.messaging.broker import BrokerClientConfig
 
 
 class Vertebra:
@@ -21,7 +21,7 @@ class Vertebra:
         plugins: "Sequence[ProviderPlugin | type[ProviderPlugin]] | None" = None,
     ) -> None:
         if client_config is None:
-            from vertebra.resources import BrokerClientConfig as _BrokerClientConfig
+            from vertebra.messaging.broker import BrokerClientConfig as _BrokerClientConfig
 
             self._client_config = _BrokerClientConfig()
         else:

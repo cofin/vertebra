@@ -7,7 +7,7 @@ import threading
 import msgspec
 
 from vertebra.common.exceptions import PoolError
-from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig, SyncBrokerClient
+from vertebra.messaging.broker import AsyncBrokerClient, BrokerClientConfig, SyncBrokerClient
 
 
 class AsyncBrokerLease(msgspec.Struct, frozen=True):

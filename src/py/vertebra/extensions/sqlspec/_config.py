@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from sqlspec.config import AsyncDatabaseConfig, ExtensionConfigs, SyncDatabaseConfig
 
-from vertebra.resources import BrokerClientConfig
+from vertebra.messaging.broker import BrokerClientConfig
 
 from ._shared import (
     AsyncSessionContextProtocol,

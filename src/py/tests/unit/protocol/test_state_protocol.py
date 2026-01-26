@@ -1,6 +1,6 @@
 import msgspec
 
-from vertebra.protocol.state import StateDelta, StateOpcode, decode_delta, encode_delta, field_id, state_id
+from vertebra.messaging.protocol.state import StateDelta, StateOpcode, decode_delta, encode_delta, field_id, state_id
 
 
 def test_state_id_hashing() -> None:

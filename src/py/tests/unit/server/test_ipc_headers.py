@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vertebra.common.serializers import MessagePackCodec
-from vertebra.protocol import HEADER_SIZE, RequestHeader, ResponseHeader
+from vertebra.messaging.protocol import HEADER_SIZE, RequestHeader, ResponseHeader
 from vertebra.server.worker import AsgiWorker, ClientState, WorkerConfig
 
 

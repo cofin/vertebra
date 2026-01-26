@@ -9,8 +9,8 @@ import msgspec
 
 from vertebra._vertebra import SpscRing
 from vertebra.common.serializers import MessagePackCodec
-from vertebra.resources.arrow import ArrowRegionPool, encode_arrow, should_use_arrow
-from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig
+from vertebra.common.serializers.arrow import ArrowRegionPool, encode_arrow, should_use_arrow
+from vertebra.messaging.broker import AsyncBrokerClient, BrokerClientConfig
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable

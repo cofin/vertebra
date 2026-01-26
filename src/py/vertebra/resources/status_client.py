@@ -14,7 +14,7 @@ from vertebra._vertebra import SpscRing
 from vertebra.common.serializers import MessagePackCodec
 
 if TYPE_CHECKING:
-    from vertebra.resources.broker import BrokerClientConfig
+    from vertebra.messaging.broker import BrokerClientConfig
 
 
 class StatusClient:
@@ -32,7 +32,7 @@ class StatusClient:
             config: Broker configuration. Uses defaults if not provided.
         """
         if config is None:
-            from vertebra.resources.broker import BrokerClientConfig
+            from vertebra.messaging.broker import BrokerClientConfig
 
             config = BrokerClientConfig()
         self._config = config

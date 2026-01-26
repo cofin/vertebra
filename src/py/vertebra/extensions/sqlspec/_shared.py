@@ -3,8 +3,13 @@
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
-from vertebra.database.backends.broker import VertebraAsyncConnection, VertebraAsyncPool, VertebraSyncConnection, VertebraSyncPool
-from vertebra.resources.arrow import decode_arrow
+from vertebra.common.serializers.arrow import decode_arrow
+from vertebra.database.backends.broker import (
+    VertebraAsyncConnection,
+    VertebraAsyncPool,
+    VertebraSyncConnection,
+    VertebraSyncPool,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

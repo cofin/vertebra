@@ -5,8 +5,8 @@ import pytest
 
 from tests.helpers.shm import skip_if_shm_unavailable
 from vertebra.database.backends.sqlite import AsyncSqliteDriver, SyncSqliteDriverConfig
-from vertebra.ipc.channel import decode_request, encode_response
-from vertebra.resources import BrokerClientConfig
+from vertebra.messaging.broker import BrokerClientConfig
+from vertebra.messaging.transport.channel import decode_request, encode_response
 
 pytestmark = pytest.mark.integration
 

@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from vertebra.database.backends.broker import VertebraAsyncConnection, VertebraAsyncCursor
-from vertebra.resources.broker import AsyncBrokerClient
+from vertebra.messaging.broker import AsyncBrokerClient
 
 # DBAPI Globals
 apilevel = "2.0"
