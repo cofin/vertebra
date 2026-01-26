@@ -1,5 +1,4 @@
-import * as net from "node:net";
-import { ShmAsyncBridge, ShmNotifier, ShmRing } from "../broker/shm";
+import { ShmNotifier, ShmRing } from "../broker/shm";
 import { Flags } from "../protocol/headers";
 import { decodeResponse, encodeRequest } from "../protocol/serialization";
 import { beginBatch, notifyWorkerIfNotBatched } from "../server/notifier-registry";
@@ -160,8 +159,7 @@ class IpcConnection {
   private requestRing: ShmRing | null = null;
   private responseRing: ShmRing | null = null;
   private responseNotifier: ShmNotifier | null = null;
-  private asyncBridge: ShmAsyncBridge | null = null;
-  private pipeSocket: net.Socket | null = null;
+  private responseLoopRunning = false;
   private pendingRequests: Map<string, PendingRequest> = new Map();
   private connecting: Promise<void> | null = null;
   private closed = false;
@@ -202,7 +200,8 @@ class IpcConnection {
 
       try {
         this.sendPayload(message, correlationId);
-        // Response handling is event-driven via pipeSocket 'readable'
+        // Start response polling loop if not running
+        this.ensureResponseLoop();
       } catch (error) {
         this.failRequest(requestKey, error);
       }
@@ -234,19 +233,8 @@ class IpcConnection {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.responseLoopRunning = false;
     this.failAllPending(new IpcConnectionError("IPC connection closed"));
-
-    // Clean up event-driven response handling
-    if (this.pipeSocket) {
-      this.pipeSocket.removeAllListeners();
-      this.pipeSocket.destroy();
-      this.pipeSocket = null;
-    }
-    if (this.asyncBridge) {
-      this.asyncBridge.stop();
-      this.asyncBridge.close();
-      this.asyncBridge = null;
-    }
 
     if (this.requestRing) {
       this.requestRing.close();
@@ -331,21 +319,8 @@ class IpcConnection {
       throw new IpcConnectionError("IPC registration failed");
     }
 
-    // Set up event-driven response handling via async bridge
-    // Bridge watches responseNotifier.fd (eventfd) and signals a pipe
-    // when Python sends responses - Bun watches the pipe via net.Socket
-    this.asyncBridge = new ShmAsyncBridge(this.responseNotifier.fd);
-    this.asyncBridge.start();
-
-    // Wrap pipe fd in net.Socket for Bun event loop integration
-    this.pipeSocket = new net.Socket({ fd: this.asyncBridge.pipeFd });
-    this.pipeSocket.on("readable", () => this.drainResponses());
-    this.pipeSocket.on("error", (err) => {
-      // Pipe errors during shutdown are expected, ignore them
-      if (!this.closed) {
-        console.error("IPC pipe socket error:", err);
-      }
-    });
+    // Response handling is done via polling loop started when requests are made
+    // This avoids issues with Bun's event loop not properly watching pipe fds
   }
 
   private async waitForControl(name: string): Promise<ShmRing> {
@@ -363,21 +338,59 @@ class IpcConnection {
   }
 
   /**
-   * Drain all available responses from the ring buffer.
-   *
-   * Called by pipeSocket 'readable' event when Python signals via eventfd.
-   * This is the hot path for response processing - no async, no yielding.
+   * Start the response polling loop if not already running.
+   * Uses tight polling with setImmediate for minimum latency.
    */
-  private drainResponses(): void {
-    if (this.closed || !this.responseRing) {
+  private ensureResponseLoop(): void {
+    if (this.responseLoopRunning) {
       return;
     }
+    this.responseLoopRunning = true;
+    void this.runResponseLoop();
+  }
 
-    // Drain pipe (1 byte per notification, may be multiple)
-    if (this.pipeSocket) {
-      // Read and discard - we only care that there's data, not its content
-      this.pipeSocket.read();
+  /**
+   * High-frequency polling loop for draining responses.
+   * Uses a hybrid approach: tight spin for first few iterations, then yields.
+   */
+  private async runResponseLoop(): Promise<void> {
+    let spinCount = 0;
+    const maxSpins = 100; // Spin up to 100 times before yielding
+
+    while (this.responseLoopRunning && !this.closed && this.pendingRequests.size > 0) {
+      // Drain all available responses
+      const hadResponses = this.drainResponses();
+
+      if (hadResponses) {
+        // Reset spin count when we get responses
+        spinCount = 0;
+      } else {
+        spinCount++;
+        if (spinCount >= maxSpins) {
+          // Yield to event loop after maxSpins empty polls
+          spinCount = 0;
+          await yieldToEventLoop();
+        }
+        // Otherwise keep spinning (busy-wait)
+      }
     }
+    this.responseLoopRunning = false;
+  }
+
+  /**
+   * Drain all available responses from the ring buffer.
+   *
+   * Called by runResponseLoop when polling.
+   * This is the hot path for response processing - no async, no yielding.
+   *
+   * @returns true if at least one response was processed
+   */
+  private drainResponses(): boolean {
+    if (this.closed || !this.responseRing) {
+      return false;
+    }
+
+    let processed = false;
 
     // Drain all available responses from ring (non-blocking)
     while (true) {
@@ -385,6 +398,7 @@ class IpcConnection {
       if (!chunk) {
         break;
       }
+      processed = true;
       try {
         const response = decodeResponse<Record<string, unknown>>(chunk.data);
         const key = response.correlationId.toString();
@@ -407,6 +421,7 @@ class IpcConnection {
         console.error("Failed to decode IPC response:", error);
       }
     }
+    return processed;
   }
 
   private async waitForResponse(expectedId: string): Promise<Record<string, unknown>> {
