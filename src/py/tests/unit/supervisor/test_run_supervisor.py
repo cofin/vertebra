@@ -13,7 +13,7 @@ def test_run_supervisor_extra_args() -> None:
     env = {"TEST_VAR": "value"}
 
     # We mock Supervisor to avoid starting actual processes
-    with patch("vertebra.supervisor.Supervisor") as mock_supervisor_cls:
+    with patch("vertebra.core.supervisor.Supervisor") as mock_supervisor_cls:
         mock_instance = mock_supervisor_cls.return_value
         mock_instance.wait.return_value = 0
 

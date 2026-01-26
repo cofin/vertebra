@@ -11,7 +11,7 @@ pa = pytest.importorskip("pyarrow")
 from vertebra.database.backends.broker import VertebraAsyncConnection  # noqa: E402
 from vertebra.extensions.sqlspec.sqlite import VertebraSqliteAsyncConfig  # noqa: E402
 from vertebra.messaging.broker import AsyncBrokerClient  # noqa: E402
-from vertebra.resources import broker  # noqa: E402
+from vertebra.messaging import broker  # noqa: E402
 
 
 class MockShmRegion(bytearray):

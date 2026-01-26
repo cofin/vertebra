@@ -3,6 +3,8 @@
 Core Exports:
     Vertebra - Application container for broker-managed plugins
     ProviderPlugin - Protocol for broker plugins
+    Vertex - Native application class
+    App - Alias for Vertex
 
 Procedures:
     procedure - Decorator for registering type-bridged handlers
@@ -15,13 +17,18 @@ Serialization:
     get_serializer - Get a serializer instance by name
     register_serializer - Register a custom serializer
 
+State:
+    ShadowState - Shadow state for tracking remote state
+
 For IPC and typing, see:
     vertebra.typing - Type aliases and dependency flags
-    vertebra.ipc - IPC channel wrappers
-    vertebra.serializers - JSON/MessagePack codecs
-    vertebra.exceptions - Exception hierarchy
+    vertebra.messaging.transport - IPC channel wrappers
+    vertebra.common.serializers - JSON/MessagePack codecs
+    vertebra.common.exceptions - Exception hierarchy
 """
 
+from vertebra.core.entrypoint import ProviderPlugin, Vertebra
+from vertebra.core.lifecycle import App, Vertex
 from vertebra.procedures import (
     MsgspecSerializer,
     PydanticSerializer,
@@ -31,48 +38,22 @@ from vertebra.procedures import (
     procedure,
     register_serializer,
 )
+from vertebra.state.shadow import ShadowState
 
 __all__ = (
     "App",
     "MsgspecSerializer",
     "ProviderPlugin",
     "PydanticSerializer",
-    # Serialization
     "Serializer",
-    # State
     "ShadowState",
-    # Core
     "Vertebra",
     "Vertex",
-    # Version
     "__version__",
     "detect_serializer",
     "get_serializer",
-    # Procedures
     "procedure",
     "register_serializer",
 )
 
 __version__ = "0.1.0"
-
-
-def __getattr__(name: str) -> object:
-    if name in {"App", "Vertex", "ProviderPlugin", "Vertebra"}:
-        from vertebra.core.entrypoint import ProviderPlugin, Vertebra
-        from vertebra.core.lifecycle import App, Vertex
-
-        return {"App": App, "Vertex": Vertex, "ProviderPlugin": ProviderPlugin, "Vertebra": Vertebra}[name]
-    if name == "ShadowState":
-        from vertebra.state.shadow import ShadowState
-
-        return ShadowState
-    if name == "supervisor":
-        from vertebra.core import supervisor
-
-        return supervisor
-    msg = f"module 'vertebra' has no attribute {name!r}"
-    raise AttributeError(msg)
-
-
-def __dir__() -> "list[str]":
-    return sorted(set(__all__))

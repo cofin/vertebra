@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Literal, Self
 
-from vertebra.resources.status_client import StatusClient
+from vertebra.messaging.status_client import StatusClient
 
 logger = logging.getLogger(__name__)
 

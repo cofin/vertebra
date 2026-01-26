@@ -24,7 +24,7 @@ def test_supervisor_with_uvloop() -> None:
 
     try:
         # Mock the native supervisor to avoid spawning actual processes
-        with unittest.mock.patch("vertebra.supervisor.NativeSupervisor") as mock_native_cls:
+        with unittest.mock.patch("vertebra.core.supervisor.NativeSupervisor") as mock_native_cls:
             mock_native_instance = mock_native_cls.return_value
 
             supervisor = Supervisor()
@@ -47,7 +47,7 @@ def test_supervisor_with_uvloop() -> None:
 
 def test_supervisor_args_passing() -> None:
     """Verify arguments are passed correctly to native supervisor."""
-    with unittest.mock.patch("vertebra.supervisor.NativeSupervisor") as mock_native_cls:
+    with unittest.mock.patch("vertebra.core.supervisor.NativeSupervisor") as mock_native_cls:
         mock_native_instance = mock_native_cls.return_value
 
         config = {"foo": "bar"}

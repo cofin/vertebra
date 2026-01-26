@@ -10,7 +10,7 @@ from sqlspec.core.result import ArrowResult, SQLResult
 from sqlspec.utils.correlation import CorrelationContext
 
 from vertebra._vertebra import ShmRegion
-from vertebra.resources.provider import ProviderConfig, ProviderHost
+from vertebra.messaging.provider import ProviderConfig, ProviderHost
 from vertebra.typing import PYARROW_INSTALLED
 
 if TYPE_CHECKING:

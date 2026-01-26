@@ -153,7 +153,7 @@ class TestProviderConfig:
 
     def test_provider_config_defaults(self) -> None:
         """Test ProviderConfig has correct defaults."""
-        from vertebra.resources.provider import ProviderConfig
+        from vertebra.messaging.provider import ProviderConfig
 
         config = ProviderConfig(pool="test-pool", driver="test-driver")
 
@@ -168,7 +168,7 @@ class TestProviderConfig:
 
     def test_provider_config_custom_values(self) -> None:
         """Test ProviderConfig accepts custom values."""
-        from vertebra.resources.provider import ProviderConfig
+        from vertebra.messaging.provider import ProviderConfig
 
         config = ProviderConfig(
             pool="custom-pool",

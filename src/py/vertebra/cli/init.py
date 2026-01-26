@@ -39,7 +39,7 @@ def init(name: str | None, package_manager: str) -> None:
     src_dir.mkdir(parents=True, exist_ok=True)
 
     # Render templates
-    templates_dir = Path(__file__).parent.parent / "templates" / "default"
+    templates_dir = Path(__file__).parent / "templates" / "default"
 
     context = {"project_name": name, "project_slug": slug}
 

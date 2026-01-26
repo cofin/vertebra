@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from vertebra.di import Inject, ProviderRegistry
-from vertebra.events import EventBus, EventHandler
+from vertebra.core.events import EventBus, EventHandler
 
 pytestmark = pytest.mark.unit
 

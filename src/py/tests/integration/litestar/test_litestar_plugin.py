@@ -54,7 +54,7 @@ def test_sqlspec_config_instantiation() -> None:
     from vertebra.extensions.sqlspec.postgres import VertebraPostgresAsyncConfig
 
     # Mock the client to avoid SHM connection attempts
-    with patch("vertebra.resources.broker.AsyncBrokerClient"):
+    with patch("vertebra.messaging.broker.AsyncBrokerClient"):
         config = VertebraPostgresAsyncConfig(pool="main")
         assert config is not None
         assert config.pool == "main"
@@ -67,7 +67,7 @@ def test_sqlalchemy_with_vertebra_config() -> None:
     from sqlalchemy.ext.asyncio import create_async_engine
 
     # Use Vertebra's dialect URL format
-    with patch("vertebra.resources.broker.SyncBrokerClient"):
+    with patch("vertebra.messaging.broker.SyncBrokerClient"):
         mock_engine = create_async_engine("postgresql+vertebra://main")
         config = SQLAlchemyAsyncConfig(engine_instance=mock_engine)
 
@@ -83,7 +83,7 @@ def test_advanced_alchemy_with_vertebra_config() -> None:
 
     from vertebra.extensions.advanced_alchemy.postgres import VertebraPostgresAsyncConfig
 
-    with patch("vertebra.resources.broker.SyncBrokerClient"):
+    with patch("vertebra.messaging.broker.SyncBrokerClient"):
         config = VertebraPostgresAsyncConfig(pool="main")
 
         # Use standard SQLAlchemyPlugin with Vertebra config

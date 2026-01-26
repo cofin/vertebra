@@ -6,13 +6,23 @@ Provides:
 - context: Request context and context variables
 - worker: ASGI worker implementation
 - entrypoint: CLI entrypoint and main function
+- tasks: Background task scheduling
+- events: Event bus pub/sub
 """
 
 from vertebra.core.context import ContextKind, VertebraContext
+from vertebra.core.events import EventBus, EventError, EventHandler
 from vertebra.core.lifecycle import Vertex
+from vertebra.core.tasks import BackgroundTaskError, BackgroundTaskHandle, BackgroundTasks
 
 __all__ = [
+    "BackgroundTaskError",
+    "BackgroundTaskHandle",
+    "BackgroundTasks",
     "ContextKind",
+    "EventBus",
+    "EventError",
+    "EventHandler",
     "VertebraContext",
     "Vertex",
 ]

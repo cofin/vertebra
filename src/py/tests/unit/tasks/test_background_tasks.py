@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from vertebra.di import Inject, ProviderRegistry
-from vertebra.tasks import BackgroundTaskError, BackgroundTasks
+from vertebra.core.tasks import BackgroundTaskError, BackgroundTasks
 
 pytestmark = pytest.mark.unit
 

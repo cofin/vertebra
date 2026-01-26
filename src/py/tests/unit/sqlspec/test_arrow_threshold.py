@@ -18,7 +18,7 @@ class TestArrowThreshold:
         except ImportError:
             pytest.skip("pyarrow not available")
 
-        from vertebra.resources.provider import ProviderConfig
+        from vertebra.messaging.provider import ProviderConfig
 
         # Create a config with known thresholds for testing
         config = ProviderConfig(
@@ -128,7 +128,7 @@ class TestArrowThresholdConfig:
 
     def test_default_thresholds(self) -> None:
         """Default thresholds should be 1000 rows and 1MB."""
-        from vertebra.resources.provider import ProviderConfig
+        from vertebra.messaging.provider import ProviderConfig
 
         config = ProviderConfig(pool="test", driver="test")
         assert config.arrow_threshold_rows == 1_000
@@ -136,7 +136,7 @@ class TestArrowThresholdConfig:
 
     def test_custom_thresholds(self) -> None:
         """Custom thresholds should be configurable."""
-        from vertebra.resources.provider import ProviderConfig
+        from vertebra.messaging.provider import ProviderConfig
 
         config = ProviderConfig(pool="test", driver="test", arrow_threshold_rows=500, arrow_threshold_bytes=512_000)
         assert config.arrow_threshold_rows == 500
@@ -149,7 +149,7 @@ class TestArrowThresholdConfig:
         except ImportError:
             pytest.skip("pyarrow not available")
 
-        from vertebra.resources.provider import ProviderConfig
+        from vertebra.messaging.provider import ProviderConfig
 
         config = ProviderConfig(
             pool="test",
@@ -223,7 +223,7 @@ class TestPyArrowFallback:
 
         monkeypatch.setattr(builtins, "__import__", mock_import)
 
-        from vertebra.resources.provider import ProviderConfig
+        from vertebra.messaging.provider import ProviderConfig
 
         config = ProviderConfig(
             pool="test",
