@@ -72,3 +72,10 @@
 - [x] Task: Run full test suite - all pass
 - [x] Task: Flow - User Manual Verification 'Tooling & Final Cleanup' (skipped - tests pass)
 - [x] Task: Checkpoint - Verify Phase 5 complete
+
+### Phase 6: Consensus-Driven Cleanup (Added per Gemini-3-pro & GPT-5.2)
+- [x] Task: Dissolve resources/ into messaging/ fd59b6c
+- [x] Task: Move templates/ to cli/templates/ fd59b6c
+- [x] Task: Move tasks/ and events/ into core/ fd59b6c
+- [x] Task: Update all imports for Phase 6 moves fd59b6c
+- [x] Task: Checkpoint - Verify Phase 6 complete fd59b6c
