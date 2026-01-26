@@ -12,7 +12,7 @@ from vertebra.utils.dependencies import WATCHDOG_INSTALLED
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from vertebra.codegen.bridge import TypeBridge
+    from vertebra.core.codegen.bridge import TypeBridge
 
 _WATCHDOG_AVAILABLE = WATCHDOG_INSTALLED
 _WATCHDOG_IMPORT_ERROR: Exception | None = None

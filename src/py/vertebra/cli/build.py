@@ -35,7 +35,7 @@ def build(app_dir: str, one_file: bool, target: str, profile: str, output: str |
     console.print()
 
     try:
-        from vertebra.build.bundler import Bundler
+        from vertebra.core.build.bundler import Bundler
 
         bundler = Bundler(
             project_dir=project_path,

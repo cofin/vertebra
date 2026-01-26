@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
 
-    from vertebra.codegen.ir import TypeNode
+    from vertebra.core.codegen.ir import TypeNode
     from vertebra.core.procedures.serialization import Serializer
 
 

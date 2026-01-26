@@ -5,7 +5,7 @@ from unittest import mock
 
 import pytest
 
-from vertebra.build.standalone import STANDALONE_RELEASES, download_standalone
+from vertebra.core.build.standalone import STANDALONE_RELEASES, download_standalone
 
 
 @pytest.mark.anyio

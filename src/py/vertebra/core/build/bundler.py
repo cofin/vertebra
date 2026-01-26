@@ -9,7 +9,7 @@ from typing import Literal
 
 from rich.console import Console
 
-from vertebra.build.standalone import StandaloneManager
+from vertebra.core.build.standalone import StandaloneManager
 
 console = Console()
 

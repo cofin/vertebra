@@ -5,8 +5,8 @@ from typing import Literal
 
 import pytest
 
-from vertebra.codegen.extractor import TypeExtractor
-from vertebra.codegen.ir import (
+from vertebra.core.codegen.extractor import TypeExtractor
+from vertebra.core.codegen.ir import (
     AnnotatedType,
     ArrayType,
     LiteralType,
@@ -18,7 +18,7 @@ from vertebra.codegen.ir import (
     UnionType,
     UnknownType,
 )
-from vertebra.codegen.typescript import TypeScriptGenerator, format_typescript, validate_typescript
+from vertebra.core.codegen.typescript import TypeScriptGenerator, format_typescript, validate_typescript
 from vertebra.core.procedures.registry import ProcedureMetadata
 
 pytestmark = pytest.mark.unit

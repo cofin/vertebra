@@ -1,11 +1,11 @@
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, AsyncMock
-from vertebra.build.bundler import Bundler
+from vertebra.core.build.bundler import Bundler
 
 @pytest.fixture
 def mock_standalone_manager():
-    with patch("vertebra.build.bundler.StandaloneManager") as mock:
+    with patch("vertebra.core.build.bundler.StandaloneManager") as mock:
         yield mock
 
 @pytest.fixture
@@ -29,7 +29,7 @@ async def test_bundler_flow(bundler, mock_standalone_manager, tmp_path):
     manager_instance.extract.return_value = fake_python_home
 
     # Mock subprocess.run
-    with patch("vertebra.build.bundler.subprocess.run") as mock_run:
+    with patch("vertebra.core.build.bundler.subprocess.run") as mock_run:
         mock_run.return_value.returncode = 0
 
         engine_dir = bundler.output_dir / "engine"
@@ -62,7 +62,7 @@ async def test_bundler_install_fail(bundler, mock_standalone_manager, tmp_path):
     fake_site_packages.mkdir(parents=True)
     manager_instance.extract.return_value = fake_python_home
 
-    with patch("vertebra.build.bundler.subprocess.run") as mock_run:
+    with patch("vertebra.core.build.bundler.subprocess.run") as mock_run:
         mock_run.return_value.returncode = 1
         mock_run.return_value.stderr = "Installation failed"
 

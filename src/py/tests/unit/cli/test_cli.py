@@ -13,7 +13,7 @@ def runner() -> CliRunner:
 
 def test_build_command_one_file(runner, tmp_path) -> None:
     """Test standard build command invocation."""
-    with patch("vertebra.build.bundler.Bundler") as mock_bundler:
+    with patch("vertebra.core.build.bundler.Bundler") as mock_bundler:
         instance = mock_bundler.return_value
         instance.build = AsyncMock()
 

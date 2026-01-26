@@ -1,7 +1,7 @@
 import pytest
 from pathlib import Path
 from unittest.mock import patch
-from vertebra.build.standalone import StandaloneManager, STANDALONE_RELEASES
+from vertebra.core.build.standalone import StandaloneManager, STANDALONE_RELEASES
 
 @pytest.fixture
 def manager(tmp_path):
@@ -42,7 +42,7 @@ async def test_download_cached(manager, tmp_path):
     assert result == cached_file
 
 @pytest.mark.anyio
-@patch("vertebra.build.standalone.urllib.request.urlopen")
+@patch("vertebra.core.build.standalone.urllib.request.urlopen")
 async def test_download_fetch(mock_urlopen, manager, tmp_path):
     """Test actual download logic (mocked)."""
     target = "linux-x64"

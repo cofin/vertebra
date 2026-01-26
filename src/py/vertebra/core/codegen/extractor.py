@@ -10,7 +10,7 @@ from typing import Any, cast, get_args, get_origin
 
 import msgspec
 
-from vertebra.codegen.ir import (
+from vertebra.core.codegen.ir import (
     AnnotatedType,
     ArrayType,
     GenericType,

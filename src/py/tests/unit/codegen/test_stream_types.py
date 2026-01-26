@@ -1,8 +1,8 @@
 from collections.abc import AsyncGenerator, Iterator
 
-from vertebra.codegen.extractor import TypeExtractor
-from vertebra.codegen.ir import StreamType
-from vertebra.codegen.typescript import TypeScriptGenerator
+from vertebra.core.codegen.extractor import TypeExtractor
+from vertebra.core.codegen.ir import StreamType
+from vertebra.core.codegen.typescript import TypeScriptGenerator
 from vertebra.core.procedures.registry import ProcedureMetadata
 
 

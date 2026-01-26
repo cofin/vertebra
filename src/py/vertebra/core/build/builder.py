@@ -6,9 +6,9 @@ import os
 import subprocess
 from pathlib import Path
 
-from vertebra.build.bundler import Bundler
-from vertebra.build.config import BuildConfig
-from vertebra.codegen.bridge import TypeBridge
+from vertebra.core.build.bundler import Bundler
+from vertebra.core.build.config import BuildConfig
+from vertebra.core.codegen.bridge import TypeBridge
 
 
 class Builder:

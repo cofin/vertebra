@@ -6,7 +6,7 @@ from unittest import mock
 import pytest
 from click.testing import CliRunner
 
-from vertebra.build.config import BuildConfig
+from vertebra.core.build.config import BuildConfig
 from vertebra.cli import build
 
 
@@ -22,7 +22,7 @@ def test_build_config_load(tmp_path: Path) -> None:
 [tool.vertebra]
 profile = "baseline"
 
-[tool.vertebra.build.targets.linux-x64]
+[tool.vertebra.core.build.targets.linux-x64]
 profile = "modern"
 """
     )
@@ -33,7 +33,7 @@ profile = "modern"
 
 
 def test_build_cli_one_file(runner: CliRunner, tmp_path: Path) -> None:
-    with mock.patch("vertebra.build.bundler.Bundler") as mock_bundler_cls:
+    with mock.patch("vertebra.core.build.bundler.Bundler") as mock_bundler_cls:
         mock_instance = mock_bundler_cls.return_value
         mock_instance.build = mock.AsyncMock()
 

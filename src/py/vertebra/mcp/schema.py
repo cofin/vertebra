@@ -2,8 +2,8 @@ import dataclasses
 import inspect
 from typing import Any, get_type_hints
 
-from vertebra.codegen.extractor import TypeExtractor
-from vertebra.codegen.ir import (
+from vertebra.core.codegen.extractor import TypeExtractor
+from vertebra.core.codegen.ir import (
     AnnotatedType,
     ArrayType,
     GenericType,
