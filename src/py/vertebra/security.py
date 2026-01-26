@@ -5,7 +5,7 @@ from typing import Any
 import msgspec
 
 from vertebra import _vertebra
-from vertebra.exceptions import ChannelError
+from vertebra.common.exceptions import ChannelError
 
 logger = logging.getLogger(__name__)
 

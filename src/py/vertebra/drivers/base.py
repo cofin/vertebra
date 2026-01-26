@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 
-from vertebra.protocols import AsyncConnection, AsyncCursor, AsyncPool, SyncConnection, SyncCursor, SyncPool
+from vertebra.common.protocols import AsyncConnection, AsyncCursor, AsyncPool, SyncConnection, SyncCursor, SyncPool
 
 
 class SyncDriver(ABC):

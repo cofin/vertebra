@@ -4,7 +4,7 @@ This module handles all try/except import logic for optional and native dependen
 Users should import from `vertebra.typing` (the public facade), not directly from here.
 """
 
-from vertebra.protocols import (
+from vertebra.common.protocols import (
     ArrowArrayProtocol,
     ArrowFieldProtocol,
     ArrowRecordBatchProtocol,

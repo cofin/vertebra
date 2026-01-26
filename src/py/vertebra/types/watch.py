@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vertebra.exceptions import MissingDependencyError
+from vertebra.common.exceptions import MissingDependencyError
 from vertebra.utils.dependencies import WATCHDOG_INSTALLED
 
 if TYPE_CHECKING:

@@ -11,7 +11,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from vertebra._vertebra import SpscRing
-from vertebra.serializers import MessagePackCodec
+from vertebra.common.serializers import MessagePackCodec
 
 if TYPE_CHECKING:
     from vertebra.resources.broker import BrokerClientConfig

@@ -6,9 +6,9 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, ParamSpec, Protocol, TypeVar, get_type_hints, overload
 
+from vertebra.common.protocols import Serializer
 from vertebra.procedures.registry import ProcedureMetadata, ProcedureRegistry
 from vertebra.procedures.serialization import detect_serializer
-from vertebra.protocols import Serializer
 from vertebra.types.extractor import TypeExtractor
 from vertebra.types.ir import RawType
 

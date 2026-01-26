@@ -3,7 +3,7 @@
 import io
 from typing import Any, cast
 
-from vertebra.exceptions import MissingDependencyError, StorageError
+from vertebra.common.exceptions import MissingDependencyError, StorageError
 from vertebra.storage.store import (
     AsyncGCSStore,
     AsyncLocalStore,

@@ -7,10 +7,10 @@ import struct
 from typing import Any, Self, TypeVar, cast
 
 from vertebra import _vertebra
-from vertebra.exceptions import ChannelError, SerializationError
+from vertebra.common.exceptions import ChannelError, SerializationError
+from vertebra.common.serializers import get_json_codec
 from vertebra.procedures import ProcedureRegistry, get_serializer
 from vertebra.protocol import HEADER_SIZE, Flags, RequestHeader, ResponseHeader
-from vertebra.serializers import get_json_codec
 
 # Default spin duration in microseconds for hybrid wait.
 # Read from VERTEBRA_SPIN_US environment variable (default: 5).

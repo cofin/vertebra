@@ -11,7 +11,7 @@ import click
 
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
-from vertebra.serializers import decode_json
+from vertebra.common.serializers import decode_json
 from vertebra.supervisor import build_bun_command, run_supervisor
 
 

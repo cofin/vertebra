@@ -33,7 +33,7 @@ Example usage::
 
 from typing import TYPE_CHECKING, Any
 
-from vertebra.exceptions import StorageError
+from vertebra.common.exceptions import StorageError
 from vertebra.storage.client import AsyncFileSystemClient, Backend, FileEntry, SyncFileSystemClient
 from vertebra.storage.gcs import AsyncGCSClient, GCSClient
 from vertebra.storage.s3 import AsyncS3Client, S3Client

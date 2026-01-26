@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 
 from vertebra._vertebra import SpscRing
+from vertebra.common.serializers import MessagePackCodec
 from vertebra.resources.arrow import ArrowRegionPool, encode_arrow, should_use_arrow
 from vertebra.resources.broker import AsyncBrokerClient, BrokerClientConfig
-from vertebra.serializers import MessagePackCodec
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable

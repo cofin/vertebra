@@ -27,7 +27,7 @@ Exceptions:
 """
 
 from vertebra import _vertebra
-from vertebra.exceptions import ChannelError, SerializationError
+from vertebra.common.exceptions import ChannelError, SerializationError
 from vertebra.ipc.async_transport import AsyncShmTransport, UnsupportedPlatformError, create_transport
 from vertebra.ipc.channel import BufferView, Channel, ZeroCopyChannel
 

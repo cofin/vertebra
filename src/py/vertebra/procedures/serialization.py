@@ -4,8 +4,8 @@ import contextlib
 import typing
 from typing import Any, TypeVar, overload
 
-from vertebra.protocols import Serializer
-from vertebra.serializers import JSONCodec, decode_json, encode_json, get_json_codec
+from vertebra.common.protocols import Serializer
+from vertebra.common.serializers import JSONCodec, decode_json, encode_json, get_json_codec
 from vertebra.types.extractor import TypeExtractor
 from vertebra.types.ir import NamedTypeRef, ObjectType, TypeNode
 

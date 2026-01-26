@@ -8,7 +8,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from vertebra.exceptions import TypeGenerationError
+from vertebra.common.exceptions import TypeGenerationError
 from vertebra.procedures.registry import ProcedureMetadata
 from vertebra.types.ir import AnnotatedType, NamedTypeRef, ObjectType, TypeNode
 
