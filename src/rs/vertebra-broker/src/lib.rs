@@ -3,8 +3,10 @@
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
+use std::os::fd::RawFd;
 use std::time::Duration;
 
+use vertebra_core::async_notifier::AsyncNotifierBridge;
 use vertebra_core::buffer::RingLayout;
 use vertebra_core::channel::{
     ChannelError, MpmcRing, RingStats, SpscReceiver, SpscRing, SpscSender,
@@ -990,6 +992,129 @@ pub extern "C" fn vtb_notifier_from_fds(
 /// Close a notifier handle.
 #[no_mangle]
 pub extern "C" fn vtb_notifier_close(handle: *mut VtbNotifier) {
+    if handle.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(handle));
+    }
+}
+
+// =============================================================================
+// AsyncNotifierBridge C ABI - Bridges eventfd to pipe for Bun event loop
+// =============================================================================
+
+#[repr(C)]
+pub struct VtbAsyncBridge {
+    inner: AsyncNotifierBridge,
+}
+
+/// Create a new async notifier bridge.
+///
+/// The bridge watches `source_fd` (an eventfd) on a background thread and
+/// signals a pipe when data is ready. The pipe can be watched by Bun's
+/// event loop via net.Socket.
+///
+/// # Arguments
+///
+/// * `source_fd` - The eventfd to watch (must remain valid for bridge lifetime)
+/// * `out_handle` - Output: pointer to the created handle
+///
+/// # Returns
+///
+/// VtbStatus::Ok on success, error status otherwise.
+#[no_mangle]
+pub extern "C" fn vtb_async_bridge_new(
+    source_fd: c_int,
+    out_handle: *mut *mut VtbAsyncBridge,
+) -> VtbStatus {
+    clear_last_error();
+    if out_handle.is_null() {
+        return VtbStatus::Invalid;
+    }
+    if source_fd < 0 {
+        set_last_error("invalid source_fd".to_string());
+        return VtbStatus::Invalid;
+    }
+    match AsyncNotifierBridge::new(source_fd as RawFd) {
+        Ok(inner) => {
+            let handle = Box::new(VtbAsyncBridge { inner });
+            unsafe {
+                *out_handle = Box::into_raw(handle);
+            }
+            VtbStatus::Ok
+        }
+        Err(err) => {
+            set_last_error(err.to_string());
+            VtbStatus::Sys
+        }
+    }
+}
+
+/// Get the pipe file descriptor for Bun event loop integration.
+///
+/// Register this fd with net.Socket to be notified when the source eventfd
+/// was signaled. Returns -1 if handle is null.
+#[no_mangle]
+pub extern "C" fn vtb_async_bridge_pipe_fd(handle: *const VtbAsyncBridge) -> c_int {
+    if handle.is_null() {
+        return -1;
+    }
+    let handle = unsafe { &*handle };
+    handle.inner.pipe_fd()
+}
+
+/// Start the background watcher thread.
+///
+/// The thread will block on the source eventfd and write to the pipe
+/// when notifications arrive. Safe to call multiple times (no-op if running).
+#[no_mangle]
+pub extern "C" fn vtb_async_bridge_start(handle: *mut VtbAsyncBridge) -> VtbStatus {
+    clear_last_error();
+    if handle.is_null() {
+        return VtbStatus::Invalid;
+    }
+    let handle = unsafe { &mut *handle };
+    handle.inner.start();
+    VtbStatus::Ok
+}
+
+/// Stop the background watcher thread.
+///
+/// Signals shutdown via eventfd for instant wake (no polling delay).
+/// Blocks until the thread exits. Safe to call multiple times.
+#[no_mangle]
+pub extern "C" fn vtb_async_bridge_stop(handle: *mut VtbAsyncBridge) -> VtbStatus {
+    clear_last_error();
+    if handle.is_null() {
+        return VtbStatus::Invalid;
+    }
+    let handle = unsafe { &mut *handle };
+    handle.inner.stop();
+    VtbStatus::Ok
+}
+
+/// Check if the watcher thread is running.
+///
+/// Returns 1 if running, 0 if not (or if handle is null).
+#[no_mangle]
+pub extern "C" fn vtb_async_bridge_is_running(handle: *const VtbAsyncBridge) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let handle = unsafe { &*handle };
+    if handle.inner.is_running() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Close the async bridge handle.
+///
+/// Stops the watcher thread if running and frees resources.
+#[no_mangle]
+pub extern "C" fn vtb_async_bridge_close(handle: *mut VtbAsyncBridge) {
     if handle.is_null() {
         return;
     }

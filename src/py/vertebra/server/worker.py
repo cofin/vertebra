@@ -108,14 +108,35 @@ class ClientState(msgspec.Struct, frozen=True):
     id: str
     request: AsyncRing
     response: AsyncRing
+    # Response notifier fd from TypeScript for bidirectional notification
+    # When set, we signal this fd after sending responses so TypeScript wakes immediately
+    resp_notify_fd: int | None = None
 
 
 class ResponseWriter:
-    def __init__(self, ring: AsyncRing, codec: MessagePackCodec, timeout_ms: int, correlation_id: int = 0) -> None:
+    """Writer that sends responses to TypeScript via shared memory ring.
+
+    Implements notification suppression: only signals TypeScript when the ring
+    was previously empty (transition from empty→non-empty). This batches
+    notifications and reduces syscall overhead from O(n) to O(1) per batch.
+    """
+
+    # Track pending notification per fd to implement suppression
+    _pending_notifications: dict[int, bool] = {}
+
+    def __init__(
+        self,
+        ring: AsyncRing,
+        codec: MessagePackCodec,
+        timeout_ms: int,
+        correlation_id: int = 0,
+        resp_notify_fd: int | None = None,
+    ) -> None:
         self._ring = ring
         self._codec = codec
         self._timeout_ms = timeout_ms
         self._correlation_id = correlation_id
+        self._resp_notify_fd = resp_notify_fd
 
     async def send(self, frame: dict[str, Any]) -> None:
         payload = self._codec.encode(frame)
@@ -123,6 +144,22 @@ class ResponseWriter:
         message = header.to_bytes() + payload
         # AsyncRing.send() automatically notifies waiters
         self._ring.send(message, 0)
+        # Signal TypeScript that response is ready (notification suppression)
+        # Only signal if we haven't already signaled (batches multiple responses)
+        if self._resp_notify_fd is not None:
+            already_pending = ResponseWriter._pending_notifications.get(self._resp_notify_fd, False)
+            if not already_pending:
+                try:
+                    # eventfd signal: write 8-byte u64 counter (value 1)
+                    os.write(self._resp_notify_fd, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+                    ResponseWriter._pending_notifications[self._resp_notify_fd] = True
+                except OSError:
+                    pass  # Ignore errors - client may have disconnected
+
+    @classmethod
+    def clear_pending(cls, fd: int) -> None:
+        """Mark notification as consumed. Called by TypeScript after draining ring."""
+        cls._pending_notifications.pop(fd, None)
 
 
 class VertebraWebSocket:
@@ -335,6 +372,10 @@ class AsgiWorker:
             return
         req_name = message.get("req_ring") or self._request_ring_name(client_id)
         resp_name = message.get("resp_ring") or self._response_ring_name(client_id)
+        # Get response notifier fd for bidirectional notification
+        resp_notify_fd = message.get("resp_notify_fd")
+        if resp_notify_fd is not None and not isinstance(resp_notify_fd, int):
+            resp_notify_fd = None
         try:
             request_ring = AsyncRing.open_named(str(req_name), self._config.slot_size, self._config.slots)
             response_ring = AsyncRing.open_named(str(resp_name), self._config.slot_size, self._config.slots)
@@ -342,7 +383,7 @@ class AsgiWorker:
             await self._send_control_ack(message, ok=False, error=str(exc), correlation_id=correlation_id)
             return
 
-        client = ClientState(id=client_id, request=request_ring, response=response_ring)
+        client = ClientState(id=client_id, request=request_ring, response=response_ring, resp_notify_fd=resp_notify_fd)
         self._clients[client_id] = client
         self._contexts[client_id] = {}
 
@@ -374,7 +415,9 @@ class AsgiWorker:
         resp_name = message.get("resp_ring")
         if not isinstance(client_id, str):
             return
-        response_ring = self._clients.get(client_id).response if client_id in self._clients else None
+        client = self._clients.get(client_id)
+        response_ring = client.response if client is not None else None
+        resp_notify_fd = client.resp_notify_fd if client is not None else None
         if response_ring is None and isinstance(resp_name, str):
             with contextlib.suppress(Exception):
                 response_ring = AsyncRing.open_named(resp_name, self._config.slot_size, self._config.slots)
@@ -388,6 +431,12 @@ class AsgiWorker:
         message_bytes = header.to_bytes() + encoded
         # AsyncRing.send() automatically notifies waiters
         response_ring.send(message_bytes, 0)
+        # Signal TypeScript that response is ready (bidirectional notification)
+        if resp_notify_fd is not None:
+            try:
+                os.write(resp_notify_fd, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+            except OSError:
+                pass
 
     async def _handle_client_payload(self, client_id: str, client: ClientState, payload: bytes) -> None:
         if len(payload) < HEADER_SIZE:
@@ -400,7 +449,11 @@ class AsgiWorker:
         if not isinstance(message, dict):
             return
         writer = ResponseWriter(
-            client.response, self._codec, int(self._config.timeout * 1000), correlation_id=header.id
+            client.response,
+            self._codec,
+            int(self._config.timeout * 1000),
+            correlation_id=header.id,
+            resp_notify_fd=client.resp_notify_fd,
         )
         contexts = self._contexts.setdefault(client_id, {})
         frame_type = message.get("type")

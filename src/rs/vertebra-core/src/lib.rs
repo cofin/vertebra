@@ -6,6 +6,7 @@
 /// Version constant synchronized with Python package.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod async_notifier;
 pub mod async_ring;
 pub mod buffer;
 pub mod channel;

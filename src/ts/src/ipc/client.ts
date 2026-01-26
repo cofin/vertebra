@@ -1,4 +1,5 @@
-import { ShmRing } from "../broker/shm";
+import * as net from "node:net";
+import { ShmAsyncBridge, ShmNotifier, ShmRing } from "../broker/shm";
 import { Flags } from "../protocol/headers";
 import { decodeResponse, encodeRequest } from "../protocol/serialization";
 import { beginBatch, notifyWorkerIfNotBatched } from "../server/notifier-registry";
@@ -158,8 +159,10 @@ class IpcConnection {
   private control: ShmRing | null = null;
   private requestRing: ShmRing | null = null;
   private responseRing: ShmRing | null = null;
+  private responseNotifier: ShmNotifier | null = null;
+  private asyncBridge: ShmAsyncBridge | null = null;
+  private pipeSocket: net.Socket | null = null;
   private pendingRequests: Map<string, PendingRequest> = new Map();
-  private responseLoopRunning = false;
   private connecting: Promise<void> | null = null;
   private closed = false;
   private seq = 0;
@@ -199,7 +202,7 @@ class IpcConnection {
 
       try {
         this.sendPayload(message, correlationId);
-        this.ensureResponseLoop();
+        // Response handling is event-driven via pipeSocket 'readable'
       } catch (error) {
         this.failRequest(requestKey, error);
       }
@@ -232,6 +235,19 @@ class IpcConnection {
   async close(): Promise<void> {
     this.closed = true;
     this.failAllPending(new IpcConnectionError("IPC connection closed"));
+
+    // Clean up event-driven response handling
+    if (this.pipeSocket) {
+      this.pipeSocket.removeAllListeners();
+      this.pipeSocket.destroy();
+      this.pipeSocket = null;
+    }
+    if (this.asyncBridge) {
+      this.asyncBridge.stop();
+      this.asyncBridge.close();
+      this.asyncBridge = null;
+    }
+
     if (this.requestRing) {
       this.requestRing.close();
       this.requestRing = null;
@@ -239,6 +255,11 @@ class IpcConnection {
     if (this.responseRing) {
       this.responseRing.close();
       this.responseRing = null;
+    }
+    // Close response notifier
+    if (this.responseNotifier) {
+      this.responseNotifier.close();
+      this.responseNotifier = null;
     }
     // Clean up shared memory regions to prevent /dev/shm leakage
     if (this.requestRingName) {
@@ -283,6 +304,10 @@ class IpcConnection {
     this.requestRing = ShmRing.create(reqName, this.config.slotSize, this.config.slots);
     this.responseRing = ShmRing.create(respName, this.config.slotSize, this.config.slots);
 
+    // Create response notifier for bidirectional notification
+    // Python will signal this fd after sending responses
+    this.responseNotifier = new ShmNotifier();
+
     const control = await this.waitForControl(controlName);
     this.control = control;
 
@@ -293,6 +318,8 @@ class IpcConnection {
       client_id: this.clientId,
       req_ring: reqName,
       resp_ring: respName,
+      // Pass response notifier fd so Python can signal us when responses are ready
+      resp_notify_fd: this.responseNotifier.writeFd,
     };
     const correlationId = this.nextCorrelationId();
     const registerPayload = encodeRequest(registerMessage, correlationId, Flags.NONE);
@@ -303,6 +330,22 @@ class IpcConnection {
     if (!response || !(response as Record<string, unknown>).ok) {
       throw new IpcConnectionError("IPC registration failed");
     }
+
+    // Set up event-driven response handling via async bridge
+    // Bridge watches responseNotifier.fd (eventfd) and signals a pipe
+    // when Python sends responses - Bun watches the pipe via net.Socket
+    this.asyncBridge = new ShmAsyncBridge(this.responseNotifier.fd);
+    this.asyncBridge.start();
+
+    // Wrap pipe fd in net.Socket for Bun event loop integration
+    this.pipeSocket = new net.Socket({ fd: this.asyncBridge.pipeFd });
+    this.pipeSocket.on("readable", () => this.drainResponses());
+    this.pipeSocket.on("error", (err) => {
+      // Pipe errors during shutdown are expected, ignore them
+      if (!this.closed) {
+        console.error("IPC pipe socket error:", err);
+      }
+    });
   }
 
   private async waitForControl(name: string): Promise<ShmRing> {
@@ -319,23 +362,28 @@ class IpcConnection {
     throw new IpcConnectionError("IPC control ring unavailable", { cause: lastError });
   }
 
-  private ensureResponseLoop(): void {
-    if (this.responseLoopRunning) {
+  /**
+   * Drain all available responses from the ring buffer.
+   *
+   * Called by pipeSocket 'readable' event when Python signals via eventfd.
+   * This is the hot path for response processing - no async, no yielding.
+   */
+  private drainResponses(): void {
+    if (this.closed || !this.responseRing) {
       return;
     }
-    this.responseLoopRunning = true;
-    void this.runResponseLoop();
-  }
 
-  private async runResponseLoop(): Promise<void> {
-    while (!this.closed && this.pendingRequests.size > 0) {
-      if (!this.responseRing) {
-        break;
-      }
-      const chunk = this.responseRing.recv(10);
+    // Drain pipe (1 byte per notification, may be multiple)
+    if (this.pipeSocket) {
+      // Read and discard - we only care that there's data, not its content
+      this.pipeSocket.read();
+    }
+
+    // Drain all available responses from ring (non-blocking)
+    while (true) {
+      const chunk = this.responseRing.recv(0); // Non-blocking
       if (!chunk) {
-        await yieldToEventLoop();
-        continue;
+        break;
       }
       try {
         const response = decodeResponse<Record<string, unknown>>(chunk.data);
@@ -359,7 +407,6 @@ class IpcConnection {
         console.error("Failed to decode IPC response:", error);
       }
     }
-    this.responseLoopRunning = false;
   }
 
   private async waitForResponse(expectedId: string): Promise<Record<string, unknown>> {
@@ -368,21 +415,35 @@ class IpcConnection {
       throw new IpcConnectionError("IPC response ring unavailable");
     }
     const deadline = Date.now() + this.config.timeoutMs;
+
     while (Date.now() < deadline) {
-      const chunk = this.responseRing.recv(10);
-      if (!chunk) {
+      // Check if notification is pending (non-blocking)
+      if (this.responseNotifier?.hasPending()) {
+        this.responseNotifier.clear();
+      }
+
+      // Drain responses looking for our expected ID
+      let found = false;
+      while (true) {
+        const chunk = this.responseRing.recv(0); // Non-blocking
+        if (!chunk) {
+          break;
+        }
+        found = true;
+        const response = decodeResponse<Record<string, unknown>>(chunk.data);
+        if (response.isError) {
+          throw new IpcError("Remote error", { cause: response.payload });
+        }
+        const id = response.payload?.id;
+        if (String(id) === expectedId) {
+          return response.payload;
+        }
+      }
+
+      // Yield to event loop then check again (zero delay for max throughput)
+      if (!found) {
         await yieldToEventLoop();
-        continue;
       }
-      const response = decodeResponse<Record<string, unknown>>(chunk.data);
-      if (response.isError) {
-        throw new IpcError("Remote error", { cause: response.payload });
-      }
-      const id = response.payload?.id;
-      if (String(id) !== expectedId) {
-        continue;
-      }
-      return response.payload;
     }
     throw new IpcTimeoutError("IPC response timed out");
   }

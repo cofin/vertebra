@@ -82,6 +82,13 @@ export type ShmLibrary = {
   vtb_notifier_wait: (handle: number, timeoutMs: number) => number;
   vtb_notifier_from_fds: (readFd: number, writeFd: number, outHandle: number) => number;
   vtb_notifier_close: (handle: number) => void;
+  // AsyncNotifierBridge functions for bridging eventfd to pipe for Bun event loop
+  vtb_async_bridge_new: (sourceFd: number, outHandle: number) => number;
+  vtb_async_bridge_pipe_fd: (handle: number) => number;
+  vtb_async_bridge_start: (handle: number) => number;
+  vtb_async_bridge_stop: (handle: number) => number;
+  vtb_async_bridge_is_running: (handle: number) => number;
+  vtb_async_bridge_close: (handle: number) => void;
 };
 
 let cached: ShmLibrary | null = null;
@@ -279,6 +286,31 @@ export function loadShmLib(): ShmLibrary {
       returns: "i32",
     },
     vtb_notifier_close: {
+      args: ["ptr"],
+      returns: "void",
+    },
+    // AsyncNotifierBridge functions for bridging eventfd to pipe
+    vtb_async_bridge_new: {
+      args: ["i32", "ptr"],
+      returns: "i32",
+    },
+    vtb_async_bridge_pipe_fd: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    vtb_async_bridge_start: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    vtb_async_bridge_stop: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    vtb_async_bridge_is_running: {
+      args: ["ptr"],
+      returns: "i32",
+    },
+    vtb_async_bridge_close: {
       args: ["ptr"],
       returns: "void",
     },
@@ -785,5 +817,115 @@ export class ShmNotifier {
   /** Close the notifier. */
   close(): void {
     this.lib.vtb_notifier_close(this.handle);
+  }
+}
+
+/**
+ * Async notifier bridge that watches an eventfd on a background thread
+ * and signals a pipe when data is ready.
+ *
+ * This bridges Linux eventfd (which Bun can't efficiently watch) to a pipe
+ * fd that can be registered with Bun's event loop via net.Socket.
+ *
+ * Use this for high-throughput IPC where polling would bottleneck:
+ * - Python worker sends response, signals eventfd
+ * - Background Rust thread wakes, writes to pipe
+ * - Bun event loop wakes on pipe readable
+ * - Bun drains response ring (non-blocking)
+ *
+ * @example
+ * ```typescript
+ * import * as net from "node:net";
+ *
+ * const bridge = new ShmAsyncBridge(notifier.fd);
+ * bridge.start();
+ *
+ * // Wrap pipe fd for event loop integration
+ * const socket = new net.Socket({ fd: bridge.pipeFd });
+ * socket.on("readable", () => {
+ *   socket.read(); // Drain pipe
+ *   while (true) {
+ *     const msg = ring.recv(0);
+ *     if (!msg) break;
+ *     processMessage(msg);
+ *   }
+ * });
+ *
+ * // Cleanup
+ * socket.destroy();
+ * bridge.stop();
+ * bridge.close();
+ * ```
+ */
+export class ShmAsyncBridge {
+  private handle: number;
+  private lib: ShmLibrary;
+
+  /**
+   * Create a new async notifier bridge.
+   *
+   * @param sourceFd The eventfd to watch (e.g., from ShmNotifier.fd)
+   * @throws Error if bridge creation fails
+   */
+  constructor(sourceFd: number) {
+    this.lib = loadShmLib();
+    const out = new BigUint64Array(1);
+    const status = this.lib.vtb_async_bridge_new(sourceFd, ptr(out));
+    if (status !== STATUS_OK) {
+      throw new Error(`async bridge create failed: ${formatStatusError(status, this.lib)}`);
+    }
+    this.handle = read.ptr(ptr(out));
+  }
+
+  /**
+   * Get the pipe fd for Bun event loop integration.
+   *
+   * Register this fd with net.Socket to be notified when the source
+   * eventfd was signaled (responses are ready to drain).
+   */
+  get pipeFd(): number {
+    return this.lib.vtb_async_bridge_pipe_fd(this.handle);
+  }
+
+  /**
+   * Start the background watcher thread.
+   *
+   * The thread will block on the source eventfd (0% CPU idle) and
+   * write to the pipe when notifications arrive. Safe to call
+   * multiple times (no-op if already running).
+   */
+  start(): void {
+    const status = this.lib.vtb_async_bridge_start(this.handle);
+    if (status !== STATUS_OK) {
+      throw new Error(`async bridge start failed: ${formatStatusError(status, this.lib)}`);
+    }
+  }
+
+  /**
+   * Stop the background watcher thread.
+   *
+   * Uses a shutdown eventfd for instant wake (no polling delay).
+   * Blocks until the thread exits. Safe to call multiple times.
+   */
+  stop(): void {
+    const status = this.lib.vtb_async_bridge_stop(this.handle);
+    if (status !== STATUS_OK) {
+      throw new Error(`async bridge stop failed: ${formatStatusError(status, this.lib)}`);
+    }
+  }
+
+  /** Check if the watcher thread is running. */
+  isRunning(): boolean {
+    return this.lib.vtb_async_bridge_is_running(this.handle) !== 0;
+  }
+
+  /**
+   * Close the async bridge handle.
+   *
+   * Stops the watcher thread if running and frees resources.
+   * Call this when the bridge is no longer needed.
+   */
+  close(): void {
+    this.lib.vtb_async_bridge_close(this.handle);
   }
 }
