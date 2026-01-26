@@ -31,13 +31,15 @@
 - [x] Task: Create `vertebra.database` package
 - [x] Task: Move `drivers/` to `vertebra.database.backends`
 - [x] Task: Keep `extensions/sqlspec` in extensions (third-party integrations stay at top level)
-- [ ] Task: Create `vertebra.messaging` package
-- [ ] Task: Move `resources/broker.py` to `vertebra.messaging.broker`
-- [ ] Task: Move `ipc/` to `vertebra.messaging.transport`
-- [ ] Task: Move `protocol/` to `vertebra.messaging.protocol`
+- [x] Task: Create `vertebra.messaging` package 1c298f0
+- [x] Task: Move `resources/broker.py` to `vertebra.messaging.broker` 1c298f0
+- [x] Task: Move `ipc/` to `vertebra.messaging.transport` 1c298f0
+- [x] Task: Move `protocol/` to `vertebra.messaging.protocol` 1c298f0
+- [x] Task: Move `resources/arrow.py` to `common/serializers/arrow.py` 1c298f0
+- [x] Task: Move `common/serializers/litestar.py` to `extensions/litestar/serializers.py` 1c298f0
 - [ ] Task: Create `vertebra.state` package
 - [ ] Task: Consolidate `state.py`, `state_shadow.py`, `sync/` into `vertebra.state`
-- [ ] Task: Update imports for all Phase 3 moves
+- [x] Task: Update imports for all Phase 3 moves 1c298f0
 - [ ] Task: Flow - User Manual Verification 'Core Infrastructure' (Protocol in workflow.md)
 - [ ] Task: Checkpoint - Verify Phase 3 complete and create recovery point
 

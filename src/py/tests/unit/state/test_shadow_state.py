@@ -1,7 +1,7 @@
 import pytest
 
 from vertebra.messaging.protocol.state import StateDelta, StateOpcode, field_id, state_id
-from vertebra.state_shadow import ShadowState
+from vertebra.state.shadow import ShadowState
 
 
 def test_shadow_state_lww() -> None:

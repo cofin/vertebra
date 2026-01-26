@@ -63,7 +63,7 @@ def __getattr__(name: str) -> object:
 
         return {"App": App, "Vertex": Vertex, "ProviderPlugin": ProviderPlugin, "Vertebra": Vertebra}[name]
     if name == "ShadowState":
-        from vertebra.state_shadow import ShadowState
+        from vertebra.state.shadow import ShadowState
 
         return ShadowState
     msg = f"module 'vertebra' has no attribute {name!r}"

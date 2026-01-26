@@ -1,7 +1,7 @@
 import base64
 
 from vertebra.messaging.protocol.state import StateDelta, StateOpcode, encode_delta, field_id, state_id
-from vertebra.sync import StateSubscription, decode_sse_event, decode_state_payload
+from vertebra.state.sync import StateSubscription, decode_sse_event, decode_state_payload
 
 
 def test_decode_sse_event() -> None:

@@ -8,7 +8,7 @@ from typing import Any
 import msgspec
 
 from vertebra.messaging.protocol.state import StateDelta, decode_delta
-from vertebra.state_shadow import ShadowState
+from vertebra.state.shadow import ShadowState
 
 __all__ = [
     "ShadowState",
