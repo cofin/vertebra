@@ -11,7 +11,7 @@ try:
 except ImportError:
     uvloop = None
 
-from vertebra.supervisor import Supervisor
+from vertebra.core.supervisor import Supervisor
 
 
 @pytest.mark.skipif(uvloop is None, reason="uvloop not installed")

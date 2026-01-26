@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vertebra.common.serializers import MessagePackCodec
+from vertebra.core.worker import AsgiWorker, ClientState, WorkerConfig
 from vertebra.messaging.protocol import HEADER_SIZE, RequestHeader, ResponseHeader
-from vertebra.server.worker import AsgiWorker, ClientState, WorkerConfig
 
 
 @pytest.mark.unit
@@ -48,7 +48,7 @@ async def test_worker_encodes_response_header() -> None:
     resp_ring = MagicMock()
 
     # Use ResponseWriter directly
-    from vertebra.server.worker import ResponseWriter
+    from vertebra.core.worker import ResponseWriter
 
     writer = ResponseWriter(resp_ring, worker._codec, 5000)
 

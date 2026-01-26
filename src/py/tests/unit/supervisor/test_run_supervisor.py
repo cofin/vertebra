@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
-from vertebra.supervisor import run_supervisor
+from vertebra.core.supervisor import run_supervisor
 
 
 @pytest.mark.unit

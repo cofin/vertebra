@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 
-from vertebra.context import VertebraContext
+from vertebra.core.context import VertebraContext
 from vertebra.di import Inject, ProviderRegistry
-from vertebra.middleware import compile_middleware, middleware
+from vertebra.web.middleware import compile_middleware, middleware
 
 
 class Token:

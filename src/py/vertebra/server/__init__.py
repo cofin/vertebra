@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from vertebra.server.worker import AsgiWorker, WorkerConfig
+    from vertebra.core.worker import AsgiWorker, WorkerConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +35,7 @@ def get_server_backend() -> ServerBackend:
 
 def __getattr__(name: str) -> Any:
     if name in {"AsgiWorker", "WorkerConfig"}:
-        from vertebra.server.worker import AsgiWorker, WorkerConfig
+        from vertebra.core.worker import AsgiWorker, WorkerConfig
 
         return AsgiWorker if name == "AsgiWorker" else WorkerConfig
     raise AttributeError(name)

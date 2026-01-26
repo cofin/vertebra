@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from vertebra.app import Vertex
 from vertebra.asgi import VertebraAdapter
-from vertebra.routing import get
+from vertebra.core.lifecycle import Vertex
+from vertebra.web.routing import get
 
 
 @get("/hello")

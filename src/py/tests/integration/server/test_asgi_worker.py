@@ -7,8 +7,8 @@ import pytest
 
 from tests.helpers.shm import skip_if_shm_unavailable, tracked_shm_cleanup, unique_shm_name
 from vertebra._vertebra import SpscRing
+from vertebra.core.worker import AsgiWorker, WorkerConfig
 from vertebra.messaging.protocol import HEADER_SIZE, Flags, RequestHeader, ResponseHeader
-from vertebra.server.worker import AsgiWorker, WorkerConfig
 
 pytestmark = pytest.mark.integration
 

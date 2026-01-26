@@ -4,9 +4,9 @@ import asyncio
 
 import pytest
 
-from vertebra.context import VertebraContext
+from vertebra.core.context import VertebraContext
 from vertebra.di import Inject, ProviderRegistry
-from vertebra.guards import GuardDenied, compile_guards, requires
+from vertebra.web.guards import GuardDenied, compile_guards, requires
 
 
 class Token:

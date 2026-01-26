@@ -7,12 +7,12 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from vertebra.routing import extract_path_params
+from vertebra.web.routing import extract_path_params
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from vertebra.app import Vertex
+    from vertebra.core.lifecycle import Vertex
 
 _logger = logging.getLogger(__name__)
 

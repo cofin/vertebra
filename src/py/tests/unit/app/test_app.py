@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from vertebra.app import App
-from vertebra.controllers import Controller
+from vertebra.core.lifecycle import App
 from vertebra.procedures import ProcedureRegistry
-from vertebra.routing import Router, get
 from vertebra.state import NativeState
+from vertebra.web.controllers import Controller
+from vertebra.web.routing import Router, get
 
 pytestmark = pytest.mark.unit
 

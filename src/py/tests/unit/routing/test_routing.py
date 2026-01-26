@@ -4,7 +4,7 @@ from uuid import UUID
 
 import pytest
 
-from vertebra.routing import RouteDef, Router, delete, extract_path_params, get, patch, post
+from vertebra.web.routing import RouteDef, Router, delete, extract_path_params, get, patch, post
 
 
 @get("/items/{item_id:int}")

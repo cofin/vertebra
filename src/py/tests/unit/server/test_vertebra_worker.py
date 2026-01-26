@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from litestar import get
 
-from vertebra.server.worker import AsgiWorker, WorkerConfig, _import_app
+from vertebra.core.worker import AsgiWorker, WorkerConfig, _import_app
 
 
 @pytest.mark.unit
@@ -144,7 +144,7 @@ def test_import_app_with_module_path() -> None:
     """Test that _import_app still works with standard module paths."""
     # This should work as before: module.path:attr
     # Use a known module from the project
-    app = _import_app("vertebra.server.worker:WorkerConfig")
+    app = _import_app("vertebra.core.worker:WorkerConfig")
     # WorkerConfig is a class (callable)
     assert callable(app)
 

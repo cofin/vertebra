@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from litestar import get
 
-from vertebra.server.worker import AsgiWorker, WorkerConfig
+from vertebra.core.worker import AsgiWorker, WorkerConfig
 
 
 @pytest.mark.unit

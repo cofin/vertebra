@@ -58,8 +58,8 @@ __version__ = "0.1.0"
 
 def __getattr__(name: str) -> object:
     if name in {"App", "Vertex", "ProviderPlugin", "Vertebra"}:
-        from vertebra.app import App, Vertex
-        from vertebra.main import ProviderPlugin, Vertebra
+        from vertebra.core.entrypoint import ProviderPlugin, Vertebra
+        from vertebra.core.lifecycle import App, Vertex
 
         return {"App": App, "Vertex": Vertex, "ProviderPlugin": ProviderPlugin, "Vertebra": Vertebra}[name]
     if name == "ShadowState":

@@ -7,10 +7,10 @@ from collections.abc import Awaitable, Callable
 from types import MappingProxyType
 from typing import Any, TypeVar
 
-from vertebra.controllers import Controller, ControllerRoute
 from vertebra.di import ProviderCompiler, ProviderRegistry, Scope
-from vertebra.routing import RouteDef, Router
 from vertebra.state import NativeState, register_state
+from vertebra.web.controllers import Controller, ControllerRoute
+from vertebra.web.routing import RouteDef, Router
 
 StateT = TypeVar("StateT", bound=NativeState)
 LifecycleHook = Callable[[], Any | Awaitable[Any]]

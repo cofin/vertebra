@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from vertebra.context import VertebraContext
+from vertebra.core.context import VertebraContext
 
 
 class DummyRequest:

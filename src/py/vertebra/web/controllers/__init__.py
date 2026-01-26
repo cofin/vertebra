@@ -9,7 +9,7 @@ import msgspec
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from vertebra.routing import RouteDef
+    from vertebra.web.routing import RouteDef
 
 
 class ControllerRoute(msgspec.Struct, frozen=True, array_like=True):

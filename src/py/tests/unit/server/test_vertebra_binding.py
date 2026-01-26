@@ -29,7 +29,7 @@ async def test_vertebra_worker_with_request_object() -> None:
     # and can pass its data to handlers.
     from unittest.mock import AsyncMock, MagicMock
 
-    from vertebra.server.worker import AsgiWorker, WorkerConfig
+    from vertebra.core.worker import AsgiWorker, WorkerConfig
 
     @post("/echo", sync_to_thread=False)
     def handler(data: dict) -> dict:
@@ -74,7 +74,7 @@ async def test_vertebra_worker_request_injection() -> None:
 
     from litestar import get
 
-    from vertebra.server.worker import AsgiWorker, WorkerConfig
+    from vertebra.core.worker import AsgiWorker, WorkerConfig
 
     @get("/path", sync_to_thread=False)
     def handler(request: VertebraRequest) -> dict:

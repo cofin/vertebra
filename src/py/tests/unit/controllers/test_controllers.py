@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from vertebra.controllers import Controller, ControllerRoute
-from vertebra.routing import get, post
+from vertebra.web.controllers import Controller, ControllerRoute
+from vertebra.web.routing import get, post
 
 
 class UserController(Controller):

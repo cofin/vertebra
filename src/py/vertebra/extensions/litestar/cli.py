@@ -152,7 +152,7 @@ def _run_vertebra(
     import shutil
     from pathlib import Path
 
-    from vertebra.supervisor import run_supervisor
+    from vertebra.core.supervisor import run_supervisor
 
     bun = shutil.which("bun")
     if not bun:

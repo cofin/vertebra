@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 from litestar import Controller, Litestar, get
 
-from vertebra.server.worker import AsgiWorker
+from vertebra.core.worker import AsgiWorker
 
 
 @pytest.mark.integration
