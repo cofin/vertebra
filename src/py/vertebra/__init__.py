@@ -66,6 +66,10 @@ def __getattr__(name: str) -> object:
         from vertebra.state.shadow import ShadowState
 
         return ShadowState
+    if name == "supervisor":
+        from vertebra.core import supervisor
+
+        return supervisor
     msg = f"module 'vertebra' has no attribute {name!r}"
     raise AttributeError(msg)
 
