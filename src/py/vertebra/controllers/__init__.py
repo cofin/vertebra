@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vertebra.routing import RouteDef
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from vertebra.routing import RouteDef
 
 
 class ControllerRoute(msgspec.Struct, frozen=True, array_like=True):
@@ -31,10 +33,7 @@ class Controller:
     def controller_routes(cls) -> tuple[ControllerRoute, ...]:
         guards = tuple(cls.guards)
         middleware = tuple(cls.middleware)
-        return tuple(
-            ControllerRoute(route=route, guards=guards, middleware=middleware)
-            for route in cls.routes()
-        )
+        return tuple(ControllerRoute(route=route, guards=guards, middleware=middleware) for route in cls.routes())
 
 
 def _collect_routes(controller_cls: type[Controller]) -> list[RouteDef]:

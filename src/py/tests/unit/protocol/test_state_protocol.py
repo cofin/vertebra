@@ -1,13 +1,6 @@
 import msgspec
 
-from vertebra.protocol.state import (
-    StateDelta,
-    StateOpcode,
-    decode_delta,
-    encode_delta,
-    field_id,
-    state_id,
-)
+from vertebra.protocol.state import StateDelta, StateOpcode, decode_delta, encode_delta, field_id, state_id
 
 
 def test_state_id_hashing() -> None:
@@ -35,10 +28,7 @@ def test_encode_decode_field_set() -> None:
 
 def test_encode_decode_field_delete() -> None:
     delta = StateDelta(
-        opcode=StateOpcode.FIELD_DELETE,
-        state_id=state_id("GameState"),
-        field_id=field_id("score"),
-        timestamp_ns=999,
+        opcode=StateOpcode.FIELD_DELETE, state_id=state_id("GameState"), field_id=field_id("score"), timestamp_ns=999
     )
 
     encoded = encode_delta(delta)

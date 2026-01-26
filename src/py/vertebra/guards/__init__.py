@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
 import inspect
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, Any, Protocol, TypeVar, get_args, get_origin, get_type_hints
 
 from vertebra.di import Inject, ProviderCompiler
@@ -15,11 +15,10 @@ GuardCallable = Callable[..., GuardResult | Awaitable[GuardResult]]
 class Guard(Protocol):
     """Protocol for guard callables."""
 
-    def __call__(self, *args: Any, **kwargs: Any) -> GuardResult | Awaitable[GuardResult]:
-        ...
+    def __call__(self, *args: Any, **kwargs: Any) -> GuardResult | Awaitable[GuardResult]: ...
 
 
-class GuardDenied(RuntimeError):
+class GuardDeniedError(RuntimeError):
     """Raised when a guard denies access."""
 
 
@@ -41,9 +40,7 @@ def requires(*guards: GuardCallable) -> Callable[[GuardCallable], GuardCallable]
 
 
 def compile_guards(
-    guards: Sequence[GuardCallable],
-    *,
-    compiler: ProviderCompiler | None = None,
+    guards: Sequence[GuardCallable], *, compiler: ProviderCompiler | None = None
 ) -> Callable[[Any], Awaitable[None]]:
     """Compile guards into a single async runner with per-request caching."""
     specs = [_build_guard_spec(guard, compiler) for guard in guards]
@@ -54,7 +51,8 @@ def compile_guards(
         for spec in specs:
             if spec.guard in cache:
                 if not cache[spec.guard]:
-                    raise GuardDenied("guard denied (cached)")
+                    msg = "guard denied (cached)"
+                    raise GuardDeniedError(msg)
                 continue
             args = []
             for kind, payload in spec.args:
@@ -69,13 +67,14 @@ def compile_guards(
             allowed = bool(result)
             cache[spec.guard] = allowed
             if not allowed:
-                raise GuardDenied("guard denied")
+                msg = "guard denied"
+                raise GuardDeniedError(msg)
 
     return runner
 
 
 class _GuardSpec:
-    __slots__ = ("guard", "args")
+    __slots__ = ("args", "guard")
 
     def __init__(self, guard: GuardCallable, args: list[tuple[str, Any]]) -> None:
         self.guard = guard
@@ -107,7 +106,8 @@ def _build_guard_spec(guard: GuardCallable, compiler: ProviderCompiler | None) -
 def _signature_for_guard(guard: GuardCallable) -> inspect.Signature:
     if inspect.isfunction(guard):
         return inspect.signature(guard)
-    call = getattr(guard, "__call__", guard)
+    # Get __call__ method for signature inspection (not testing callability)
+    call = getattr(guard, "__call__", guard)  # noqa: B004
     return inspect.signature(call)
 
 
@@ -128,11 +128,7 @@ def _unwrap_guard_inject(annotation: Any) -> type[Any] | None:
 
 def _safe_type_hints(callable_obj: Callable[..., Any]) -> dict[str, Any]:
     try:
-        return get_type_hints(
-            callable_obj,
-            globalns=getattr(callable_obj, "__globals__", None),
-            include_extras=True,
-        )
+        return get_type_hints(callable_obj, globalns=getattr(callable_obj, "__globals__", None), include_extras=True)
     except (TypeError, NameError, AttributeError):
         return {}
 
@@ -140,8 +136,7 @@ def _safe_type_hints(callable_obj: Callable[..., Any]) -> dict[str, Any]:
 def _get_guard_cache(ctx: Any) -> dict[GuardCallable, bool]:
     state = getattr(ctx, "state", None)
     if isinstance(state, dict):
-        cache = state.setdefault(_CACHE_KEY, {})
-        return cache
+        return state.setdefault(_CACHE_KEY, {})
     cache = getattr(ctx, _CACHE_KEY, None)
     if cache is None:
         cache = {}
@@ -152,8 +147,7 @@ def _get_guard_cache(ctx: Any) -> dict[GuardCallable, bool]:
 def _get_request_cache(ctx: Any) -> dict[type[Any], Any]:
     state = getattr(ctx, "state", None)
     if isinstance(state, dict):
-        cache = state.setdefault(_REQUEST_CACHE_KEY, {})
-        return cache
+        return state.setdefault(_REQUEST_CACHE_KEY, {})
     cache = getattr(ctx, _REQUEST_CACHE_KEY, None)
     if cache is None:
         cache = {}
@@ -165,4 +159,7 @@ def _is_awaitable(value: Any) -> bool:
     return inspect.isawaitable(value)
 
 
-__all__ = ("Guard", "GuardDenied", "GuardResult", "compile_guards", "requires")
+__all__ = ("Guard", "GuardDeniedError", "GuardResult", "compile_guards", "requires")
+
+# Backwards compatibility alias
+GuardDenied = GuardDeniedError

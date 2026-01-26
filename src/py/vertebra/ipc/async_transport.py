@@ -278,11 +278,7 @@ class UnsupportedPlatformError(RuntimeError):
     """Raised when the platform doesn't support notification-based IPC."""
 
 
-def create_transport(
-    ring: _AsyncRingProtocol,
-    *,
-    spin_duration_us: int | None = None,
-) -> AsyncShmTransport:
+def create_transport(ring: _AsyncRingProtocol, *, spin_duration_us: int | None = None) -> AsyncShmTransport:
     """Create the notification-based transport for shared-memory IPC.
 
     Uses AsyncShmTransport which integrates via add_reader() for
@@ -318,10 +314,7 @@ def create_transport(
             raise UnsupportedPlatformError(msg)
         return AsyncShmTransport(ring, spin_duration_us=spin_duration_us)
 
-    msg = (
-        "Event loop does not support add_reader(). "
-        "Notification-based IPC requires a selector-based event loop."
-    )
+    msg = "Event loop does not support add_reader(). Notification-based IPC requires a selector-based event loop."
     raise UnsupportedPlatformError(msg)
 
 

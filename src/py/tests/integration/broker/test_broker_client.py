@@ -105,9 +105,7 @@ async def test_broker_client_roundtrip() -> None:
         # Wait for broker to be ready
         await asyncio.wait_for(broker_ready.wait(), timeout=5.0)
 
-        client = AsyncBrokerClient(
-            BrokerClientConfig(name=name, slot_size=4096, slots=64, client_id="test-client")
-        )
+        client = AsyncBrokerClient(BrokerClientConfig(name=name, slot_size=4096, slots=64, client_id="test-client"))
 
         try:
             token = await client.acquire("default")

@@ -174,11 +174,11 @@ class TTYRenderer(BaseRenderer):
         # Calculate leader dots
         # status_indicator returns rich markup, visually 1 char
         indicator = status_indicator(status_text)
-        
+
         # Visual length calculation (approximate for dots)
         base_len = 2 + 1 + 1 + len(name) + 1  # "  * Name "
         suffix_len = 1 + len(status_text) + (len(details) + 3 if details else 0)
-        
+
         base_text = f"  {indicator} {name} "
         suffix = f" {status_text} ({details})" if details else f" {status_text}"
 

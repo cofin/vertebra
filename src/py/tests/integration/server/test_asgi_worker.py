@@ -7,8 +7,8 @@ import pytest
 
 from tests.helpers.shm import skip_if_shm_unavailable, tracked_shm_cleanup, unique_shm_name
 from vertebra._vertebra import SpscRing
+from vertebra.protocol import HEADER_SIZE, Flags, RequestHeader, ResponseHeader
 from vertebra.server.worker import AsgiWorker, WorkerConfig
-from vertebra.protocol import HEADER_SIZE, RequestHeader, ResponseHeader, Flags
 
 pytestmark = pytest.mark.integration
 
@@ -61,7 +61,7 @@ async def _register_client(
         await asyncio.sleep(0.05)  # Give worker time to poll
     if data is None:
         pytest.fail("_register_client: resp_ring.recv returned None after retries")
-    
+
     assert len(data) > HEADER_SIZE
     header = ResponseHeader.from_bytes(data[:HEADER_SIZE])
     response = decoder.decode(data[HEADER_SIZE:])
@@ -123,7 +123,7 @@ async def test_asgi_worker_roundtrip() -> None:
                 await asyncio.sleep(0.05)
             if data is None:
                 pytest.fail("test_asgi_worker_roundtrip: resp_ring.recv returned None after retries")
-            
+
             assert len(data) > HEADER_SIZE
             header = ResponseHeader.from_bytes(data[:HEADER_SIZE])
             response = decoder.decode(data[HEADER_SIZE:])

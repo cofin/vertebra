@@ -19,7 +19,10 @@ impl fmt::Display for RouterError {
             RouterError::InvalidParam { segment } => {
                 write!(f, "invalid typed param segment: {segment}")
             }
-            RouterError::InvalidParamType { segment, param_type } => write!(
+            RouterError::InvalidParamType {
+                segment,
+                param_type,
+            } => write!(
                 f,
                 "invalid typed param type '{param_type}' in segment: {segment}"
             ),

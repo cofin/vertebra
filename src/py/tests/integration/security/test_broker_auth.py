@@ -12,7 +12,7 @@ import jwt
 import pytest
 
 
-async def _wait_for_broker_ready(proc: subprocess.Popen[str], client: httpx.AsyncClient, timeout: float = 20.0) -> None:
+async def _wait_for_broker_ready(proc: subprocess.Popen[str], client: httpx.AsyncClient, timeout: float = 20.0) -> None:  # noqa: ASYNC109
     start = time.monotonic()
     while True:
         if proc.poll() is not None:

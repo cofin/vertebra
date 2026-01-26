@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-import vertebra.di as di
+from vertebra import di
 from vertebra.di import DependencyError, ProviderRegistry
 
 
@@ -112,7 +112,8 @@ def test_compiled_runner_avoids_runtime_introspection(monkeypatch: pytest.Monkey
     runner = compiler.compile(Config)
 
     def boom(*_: object, **__: object) -> None:
-        raise AssertionError("runtime introspection should not occur")
+        msg = "runtime introspection should not occur"
+        raise AssertionError(msg)
 
     monkeypatch.setattr(di.inspect, "signature", boom)
     monkeypatch.setattr(di.inspect, "iscoroutinefunction", boom)

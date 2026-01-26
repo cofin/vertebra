@@ -27,17 +27,14 @@ async def test_asgi_adapter_http_flow() -> None:
     adapter = VertebraAdapter(app)
 
     # Test GET /hello
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": "/hello",
-    }
-    
+    scope = {"type": "http", "method": "GET", "path": "/hello"}
+
     events = []
-    async def receive():
+
+    async def receive() -> dict[str, str]:
         return {"type": "http.request"}
-    
-    async def send(message):
+
+    async def send(message) -> None:
         events.append(message)
 
     await adapter(scope, receive, send)
@@ -51,9 +48,9 @@ async def test_asgi_adapter_http_flow() -> None:
     # Test GET /echo/test
     events.clear()
     scope["path"] = "/echo/test"
-    
+
     await adapter(scope, receive, send)
-    
+
     assert len(events) == 2
     assert events[0]["type"] == "http.response.start"
     assert events[0]["status"] == 200
@@ -66,20 +63,16 @@ async def test_asgi_adapter_404() -> None:
     app = Vertex()
     adapter = VertebraAdapter(app)
 
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": "/not-found",
-    }
+    scope = {"type": "http", "method": "GET", "path": "/not-found"}
     events = []
-    
-    async def receive():
+
+    async def receive() -> dict[str, str]:
         return {}
 
-    async def send(m):
+    async def send(m) -> None:
         events.append(m)
-    
+
     await adapter(scope, receive, send)
-    
+
     assert len(events) >= 1
     assert events[0]["status"] == 404

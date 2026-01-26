@@ -4,16 +4,7 @@ from uuid import UUID
 
 import pytest
 
-from vertebra.routing import (
-    RouteDef,
-    Router,
-    delete,
-    extract_path_params,
-    get,
-    patch,
-    post,
-    put,
-)
+from vertebra.routing import RouteDef, Router, delete, extract_path_params, get, patch, post
 
 
 @get("/items/{item_id:int}")
@@ -40,12 +31,7 @@ def test_router_groups_routes_with_prefix() -> None:
     router.register(item_handler)
 
     paths = [route.path for route in router.routes]
-    assert paths == [
-        "/api/items",
-        "/api/items/{item_id:int}",
-        "/api/items/{item_id:int}",
-        "/api/items/{item_id:int}",
-    ]
+    assert paths == ["/api/items", "/api/items/{item_id:int}", "/api/items/{item_id:int}", "/api/items/{item_id:int}"]
 
     methods = [route.method for route in router.routes]
     assert methods == ["POST", "GET", "PATCH", "DELETE"]
@@ -56,11 +42,7 @@ def test_extract_path_params_and_coercion() -> None:
         "/users/{user_id:int}/tokens/{token_id:uuid}/active/{active:bool}",
         "/users/42/tokens/550e8400-e29b-41d4-a716-446655440000/active/true",
     )
-    assert params == {
-        "user_id": 42,
-        "token_id": UUID("550e8400-e29b-41d4-a716-446655440000"),
-        "active": True,
-    }
+    assert params == {"user_id": 42, "token_id": UUID("550e8400-e29b-41d4-a716-446655440000"), "active": True}
 
 
 def test_extract_path_params_rejects_mismatch() -> None:

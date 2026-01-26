@@ -106,9 +106,7 @@ async def test_broker_pool_context_manager() -> None:
 
         pool = AsyncBrokerPool(
             pool="default",
-            client_config=BrokerClientConfig(
-                name=name, slot_size=4096, slots=64, client_id="test-client"
-            ),
+            client_config=BrokerClientConfig(name=name, slot_size=4096, slots=64, client_id="test-client"),
             max_clients=2,
         )
 

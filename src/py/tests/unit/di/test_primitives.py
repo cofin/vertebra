@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import get_args, get_origin
 
-from vertebra.di import Inject, Provider, ProviderSpec, SCOPES, Scope
+from vertebra.di import SCOPES, Inject, Provider, ProviderSpec, Scope
 
 
 class ExampleService:

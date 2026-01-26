@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 import inspect
+from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, get_args, get_origin, get_type_hints
 
 import msgspec
@@ -27,7 +27,7 @@ class EventHandler(msgspec.Struct, frozen=True, array_like=True):
 class EventBus:
     """Simple pub/sub event dispatcher with optional DI support."""
 
-    __slots__ = ("_handlers", "_compiler")
+    __slots__ = ("_compiler", "_handlers")
 
     def __init__(self, *, compiler: ProviderCompiler | None = None) -> None:
         self._handlers: dict[type[Any], list[EventHandler]] = {}
@@ -80,15 +80,10 @@ class EventBus:
             msg = "async event handler used with publish(); use publish_async()"
             raise EventError(msg)
 
-    async def _dispatch_async(
-        self,
-        handler: EventHandler,
-        event: Any,
-        request_cache: dict[type[Any], Any],
-    ) -> None:
-        args = [event]
+    async def _dispatch_async(self, handler: EventHandler, event: Any, request_cache: dict[type[Any], Any]) -> None:
+        args: list[Any] = [event]
         for runner in handler.dependency_runners:
-            args.append(await runner(request_cache))
+            args.append(await runner(request_cache))  # noqa: PERF401 - async calls must be sequential
         result = handler.handler(*args)
         if inspect.isawaitable(result):
             await result
@@ -109,7 +104,8 @@ def _collect_dependencies(handler: EventHandlerFunc, event_type: type[Any]) -> t
         annotation = hints.get(name, param.annotation)
         dependency = _unwrap_inject(annotation)
         if dependency is None:
-            raise EventError(f"handler for {event_type.__name__} must use Inject[] for dependencies")
+            msg = f"handler for {event_type.__name__} must use Inject[] for dependencies"
+            raise EventError(msg)
         dependencies.append(dependency)
 
     return tuple(dependencies)
@@ -130,11 +126,7 @@ def _unwrap_inject(annotation: Any) -> type[Any] | None:
 
 def _safe_type_hints(handler: EventHandlerFunc) -> dict[str, Any]:
     try:
-        return get_type_hints(
-            handler,
-            globalns=getattr(handler, "__globals__", None),
-            include_extras=True,
-        )
+        return get_type_hints(handler, globalns=getattr(handler, "__globals__", None), include_extras=True)
     except (NameError, TypeError, AttributeError):
         return {}
 

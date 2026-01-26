@@ -1,7 +1,7 @@
 import pytest
 
-from vertebra.resources.arrow import decode_arrow, encode_arrow, should_use_arrow
 import vertebra._vertebra as native
+from vertebra.resources.arrow import decode_arrow, encode_arrow, should_use_arrow
 
 
 def _rows(decoded: object) -> list[dict[str, object]]:
@@ -57,10 +57,7 @@ def test_rust_arrow_roundtrip() -> None:
     encoded = native.encode_arrow_rows(rows, columns)
     assert isinstance(encoded, (bytes, bytearray))
     decoded = decode_arrow(encoded)
-    assert _rows(decoded) == [
-        {"id": 1, "name": "Alice", "active": True},
-        {"id": 2, "name": "Bob", "active": False},
-    ]
+    assert _rows(decoded) == [{"id": 1, "name": "Alice", "active": True}, {"id": 2, "name": "Bob", "active": False}]
 
 
 @pytest.mark.unit
@@ -92,8 +89,4 @@ def test_rust_arrow_batching() -> None:
     columns = ["id", "label"]
     encoded = native.encode_arrow_rows(rows, columns, batch_size=2)
     decoded = decode_arrow(encoded)
-    assert _rows(decoded) == [
-        {"id": 1, "label": "a"},
-        {"id": 2, "label": "b"},
-        {"id": 3, "label": "c"},
-    ]
+    assert _rows(decoded) == [{"id": 1, "label": "a"}, {"id": 2, "label": "b"}, {"id": 3, "label": "c"}]

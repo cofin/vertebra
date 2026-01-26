@@ -6,10 +6,7 @@ fn bench_router_match(c: &mut Criterion) {
     router.insert("/hello", RouteId(1)).unwrap();
     router.insert("/users/{id:int}", RouteId(2)).unwrap();
     router
-        .insert(
-            "/users/{id:int}/posts/{post_id:uuid}",
-            RouteId(3),
-        )
+        .insert("/users/{id:int}/posts/{post_id:uuid}", RouteId(3))
         .unwrap();
 
     let mut group = c.benchmark_group("router_match");

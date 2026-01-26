@@ -99,7 +99,10 @@ export class StateWebSocketServer {
     this.cleanupSession(ws.data.sessionId);
   }
 
-  handleMessage(ws: ServerWebSocket<StateWebSocketData>, message: string | Buffer | Uint8Array): void {
+  handleMessage(
+    ws: ServerWebSocket<StateWebSocketData>,
+    message: string | Buffer | Uint8Array,
+  ): void {
     const text = typeof message === "string" ? message : Buffer.from(message).toString("utf8");
     let payload: IncomingMessage;
     try {

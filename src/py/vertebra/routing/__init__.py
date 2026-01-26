@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import msgspec
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 
 class ParamSpec(msgspec.Struct, frozen=True, array_like=True):
@@ -27,10 +29,7 @@ class RouteDef(msgspec.Struct, frozen=True, array_like=True):
             return self
         new_path = f"{normalized_prefix}{normalized_path}"
         return RouteDef(
-            method=self.method,
-            path=new_path,
-            handler=self.handler,
-            segments=_compile_path_template(new_path),
+            method=self.method, path=new_path, handler=self.handler, segments=_compile_path_template(new_path)
         )
 
 
@@ -127,9 +126,11 @@ def _compile_path_template(path: str) -> tuple[str | ParamSpec, ...]:
         name, param_type = param
         param_type = param_type.lower()
         if param_type not in _SUPPORTED_PARAM_TYPES:
-            raise ValueError(f"unsupported param type: {param_type}")
+            msg = f"unsupported param type: {param_type}"
+            raise ValueError(msg)
         if param_type == "path" and index != len(template_segments) - 1:
-            raise ValueError("path parameters must be the final segment")
+            msg = "path parameters must be the final segment"
+            raise ValueError(msg)
         compiled.append(ParamSpec(name=name, param_type=param_type))
 
     return tuple(compiled)
@@ -141,7 +142,8 @@ def _parse_param_segment(segment: str) -> tuple[str, str] | None:
 
     inner = segment[1:-1].strip()
     if not inner:
-        raise ValueError("empty parameter segment")
+        msg = "empty parameter segment"
+        raise ValueError(msg)
 
     if ":" in inner:
         name, param_type = inner.split(":", 1)
@@ -151,15 +153,13 @@ def _parse_param_segment(segment: str) -> tuple[str, str] | None:
         name, param_type = inner, "str"
 
     if not name:
-        raise ValueError("empty parameter name")
+        msg = "empty parameter name"
+        raise ValueError(msg)
 
     return name, (param_type or "str")
 
 
-def _extract_params_from_segments(
-    segments: tuple[str | ParamSpec, ...],
-    path: str,
-) -> dict[str, Any]:
+def _extract_params_from_segments(segments: tuple[str | ParamSpec, ...], path: str) -> dict[str, Any]:
     path_segments = _split_path(path)
     params: dict[str, Any] = {}
     seg_index = 0
@@ -167,25 +167,29 @@ def _extract_params_from_segments(
     for segment in segments:
         if isinstance(segment, str):
             if seg_index >= len(path_segments) or path_segments[seg_index] != segment:
-                raise ValueError("path does not match template")
+                msg = "path does not match template"
+                raise ValueError(msg)
             seg_index += 1
             continue
 
         if segment.param_type == "path":
             remainder = "/".join(path_segments[seg_index:])
             if remainder == "" and seg_index < len(path_segments):
-                raise ValueError("path does not match template")
+                msg = "path does not match template"
+                raise ValueError(msg)
             params[segment.name] = remainder
             return params
 
         if seg_index >= len(path_segments):
-            raise ValueError("path does not match template")
+            msg = "path does not match template"
+            raise ValueError(msg)
 
         params[segment.name] = _coerce_param(segment.param_type, path_segments[seg_index])
         seg_index += 1
 
     if seg_index != len(path_segments):
-        raise ValueError("path does not match template")
+        msg = "path does not match template"
+        raise ValueError(msg)
 
     return params
 
@@ -201,7 +205,8 @@ def _coerce_param(param_type: str, value: str) -> Any:
         return _parse_bool(value)
     if param_type == "uuid":
         return UUID(value)
-    raise ValueError(f"unsupported param type: {param_type}")
+    msg = f"unsupported param type: {param_type}"
+    raise ValueError(msg)
 
 
 def _parse_bool(value: str) -> bool:
@@ -210,30 +215,10 @@ def _parse_bool(value: str) -> bool:
         return True
     if value in {"false", "0", "no", "n", "f"}:
         return False
-    raise ValueError("invalid boolean value")
+    msg = "invalid boolean value"
+    raise ValueError(msg)
 
 
-_SUPPORTED_PARAM_TYPES = {
-    "str",
-    "string",
-    "int",
-    "i64",
-    "u64",
-    "float",
-    "f64",
-    "bool",
-    "uuid",
-    "path",
-}
+_SUPPORTED_PARAM_TYPES = {"str", "string", "int", "i64", "u64", "float", "f64", "bool", "uuid", "path"}
 
-__all__ = (
-    "ParamSpec",
-    "RouteDef",
-    "Router",
-    "delete",
-    "extract_path_params",
-    "get",
-    "patch",
-    "post",
-    "put",
-)
+__all__ = ("ParamSpec", "RouteDef", "Router", "delete", "extract_path_params", "get", "patch", "post", "put")

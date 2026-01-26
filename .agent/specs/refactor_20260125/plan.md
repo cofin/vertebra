@@ -3,15 +3,14 @@
 ## Phases
 
 ### Phase 1: Base & Utilities
-- [x] Task: Create `vertebra.common` package and sub-packages (`types`, `utils`, `exceptions`, `protocols`) 7d01447
-- [~] Task: Move `types/` → `vertebra.codegen` (decision: keep TypeBridge separate from common)
-- [x] Task: Move `utils/` content to `vertebra.common.utils` 7d01447
+- [x] Task: Create `vertebra.common` package (exceptions, protocols, serializers) 7d01447
 - [x] Task: Move `exceptions.py` to `vertebra.common.exceptions` 7d01447
 - [x] Task: Move `protocols.py` to `vertebra.common.protocols` 7d01447
 - [x] Task: Move `serializers/` to `vertebra.common.serializers` 7d01447
+- [x] Task: Keep `utils/`, `typing.py`, `_typing.py` at top level 40eb33f
 - [x] Task: Update imports in moved files to reflect new locations 7d01447
-- [ ] Task: Update imports in rest of codebase to point to `vertebra.common`
-- [ ] Task: Move `di/` to `vertebra.di` (ensure it uses `common`)
+- [x] Task: Backwards-compatible re-exports for existing code 7d01447
+- [x] Task: `di/` already at `vertebra.di` (no move needed, self-contained)
 - [ ] Task: Flow - User Manual Verification 'Base & Utilities' (Protocol in workflow.md)
 - [ ] Task: Checkpoint - Verify Phase 1 complete and create recovery point
 

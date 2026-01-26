@@ -165,7 +165,9 @@ pub fn encode_delta(delta: &StateDelta) -> Result<Vec<u8>, rmp_serde::encode::Er
 pub fn decode_delta(data: &[u8]) -> Result<StateDelta, StateDeltaError> {
     let raw: Vec<Value> = rmp_serde::from_slice(data)?;
     if raw.len() < 2 {
-        return Err(StateDeltaError::InvalidWire("delta must have at least 2 elements"));
+        return Err(StateDeltaError::InvalidWire(
+            "delta must have at least 2 elements",
+        ));
     }
 
     let opcode_value = value_to_u64(&raw[0])?;
@@ -175,7 +177,9 @@ pub fn decode_delta(data: &[u8]) -> Result<StateDelta, StateDeltaError> {
     match opcode {
         StateOpcode::FieldSet | StateOpcode::ObjectReplace => {
             if raw.len() != 5 {
-                return Err(StateDeltaError::InvalidWire("field update delta must have 5 elements"));
+                return Err(StateDeltaError::InvalidWire(
+                    "field update delta must have 5 elements",
+                ));
             }
             let field_id = value_to_u32(&raw[2])?;
             let timestamp_ns = value_to_u64(&raw[3])?;
@@ -198,7 +202,9 @@ pub fn decode_delta(data: &[u8]) -> Result<StateDelta, StateDeltaError> {
         }
         StateOpcode::FieldDelete => {
             if raw.len() != 4 {
-                return Err(StateDeltaError::InvalidWire("field delete delta must have 4 elements"));
+                return Err(StateDeltaError::InvalidWire(
+                    "field delete delta must have 4 elements",
+                ));
             }
             Ok(StateDelta::FieldDelete {
                 state_id,
@@ -208,13 +214,17 @@ pub fn decode_delta(data: &[u8]) -> Result<StateDelta, StateDeltaError> {
         }
         StateOpcode::SyncRequest => {
             if raw.len() != 2 {
-                return Err(StateDeltaError::InvalidWire("sync request delta must have 2 elements"));
+                return Err(StateDeltaError::InvalidWire(
+                    "sync request delta must have 2 elements",
+                ));
             }
             Ok(StateDelta::SyncRequest { state_id })
         }
         StateOpcode::SyncResponse => {
             if raw.len() != 3 {
-                return Err(StateDeltaError::InvalidWire("sync response delta must have 3 elements"));
+                return Err(StateDeltaError::InvalidWire(
+                    "sync response delta must have 3 elements",
+                ));
             }
             Ok(StateDelta::SyncResponse {
                 state_id,

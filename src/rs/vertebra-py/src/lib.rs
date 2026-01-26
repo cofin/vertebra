@@ -73,7 +73,12 @@ impl PyRateLimiter {
 }
 
 #[pyfunction(name = "validate_jwt")]
-fn validate_jwt_py(token: &str, secret: &str, issuer: Option<&str>, audience: Option<&str>) -> PyResult<bool> {
+fn validate_jwt_py(
+    token: &str,
+    secret: &str,
+    issuer: Option<&str>,
+    audience: Option<&str>,
+) -> PyResult<bool> {
     Ok(validate_jwt_core(token, secret, issuer, audience).is_ok())
 }
 

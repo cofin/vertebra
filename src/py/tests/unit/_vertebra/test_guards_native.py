@@ -15,14 +15,7 @@ def test_rate_limiter_allows_and_blocks() -> None:
 def test_validate_jwt_hs256() -> None:
     secret = "secret"
     token = jwt.encode(
-        {
-            "sub": "user",
-            "iss": "issuer",
-            "aud": "audience",
-            "exp": int(time.time()) + 300,
-        },
-        secret,
-        algorithm="HS256",
+        {"sub": "user", "iss": "issuer", "aud": "audience", "exp": int(time.time()) + 300}, secret, algorithm="HS256"
     )
 
     assert validate_jwt(token, secret, "issuer", "audience")

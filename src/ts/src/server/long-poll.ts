@@ -34,13 +34,13 @@ export class StateLongPollServer {
     const sinceParam = url.searchParams.get("since");
     const since = sinceParam ? Number.parseInt(sinceParam, 10) : 0;
 
-    const pending = this.history.filter(event => event.id > since);
+    const pending = this.history.filter((event) => event.id > since);
     if (pending.length > 0) {
       return this.buildResponse(pending[pending.length - 1]);
     }
 
     const waiterId = crypto.randomUUID();
-    const payload = await new Promise<Uint8Array | null>(resolve => {
+    const payload = await new Promise<Uint8Array | null>((resolve) => {
       this.waiters.set(waiterId, resolve);
       setTimeout(() => {
         this.waiters.delete(waiterId);

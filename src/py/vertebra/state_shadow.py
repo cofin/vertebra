@@ -52,11 +52,7 @@ class ShadowState:
         if existing and existing.timestamp_ns >= delta.timestamp_ns:
             return False
 
-        fields[delta.field_id] = ShadowField(
-            timestamp_ns=delta.timestamp_ns,
-            value=delta.value,
-            deleted=False,
-        )
+        fields[delta.field_id] = ShadowField(timestamp_ns=delta.timestamp_ns, value=delta.value, deleted=False)
         return True
 
     def _apply_delete_delta(self, delta: StateDelta) -> bool:
@@ -69,9 +65,5 @@ class ShadowState:
         if existing and existing.timestamp_ns >= delta.timestamp_ns:
             return False
 
-        fields[delta.field_id] = ShadowField(
-            timestamp_ns=delta.timestamp_ns,
-            value=None,
-            deleted=True,
-        )
+        fields[delta.field_id] = ShadowField(timestamp_ns=delta.timestamp_ns, value=None, deleted=True)
         return True

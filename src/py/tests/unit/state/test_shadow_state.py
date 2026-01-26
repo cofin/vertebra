@@ -9,20 +9,8 @@ def test_shadow_state_lww() -> None:
     state = state_id("GameState")
     field = field_id("score")
 
-    newer = StateDelta(
-        opcode=StateOpcode.FIELD_SET,
-        state_id=state,
-        field_id=field,
-        timestamp_ns=2,
-        value=10,
-    )
-    older = StateDelta(
-        opcode=StateOpcode.FIELD_SET,
-        state_id=state,
-        field_id=field,
-        timestamp_ns=1,
-        value=1,
-    )
+    newer = StateDelta(opcode=StateOpcode.FIELD_SET, state_id=state, field_id=field, timestamp_ns=2, value=10)
+    older = StateDelta(opcode=StateOpcode.FIELD_SET, state_id=state, field_id=field, timestamp_ns=1, value=1)
 
     assert shadow.apply_delta(newer) is True
     assert shadow.apply_delta(older) is False
@@ -38,23 +26,10 @@ def test_shadow_state_delete() -> None:
     field = field_id("score")
 
     shadow.apply_delta(
-        StateDelta(
-            opcode=StateOpcode.FIELD_SET,
-            state_id=state,
-            field_id=field,
-            timestamp_ns=1,
-            value=3,
-        )
+        StateDelta(opcode=StateOpcode.FIELD_SET, state_id=state, field_id=field, timestamp_ns=1, value=3)
     )
 
-    shadow.apply_delta(
-        StateDelta(
-            opcode=StateOpcode.FIELD_DELETE,
-            state_id=state,
-            field_id=field,
-            timestamp_ns=2,
-        )
-    )
+    shadow.apply_delta(StateDelta(opcode=StateOpcode.FIELD_DELETE, state_id=state, field_id=field, timestamp_ns=2))
 
     entry = shadow.get_field(state, field)
     assert entry is not None
@@ -68,13 +43,7 @@ async def test_shadow_state_apply_payload() -> None:
     state = state_id("GameState")
     field = field_id("score")
 
-    payload = StateDelta(
-        opcode=StateOpcode.FIELD_SET,
-        state_id=state,
-        field_id=field,
-        timestamp_ns=5,
-        value=42,
-    )
+    payload = StateDelta(opcode=StateOpcode.FIELD_SET, state_id=state, field_id=field, timestamp_ns=5, value=42)
     encoded = payload  # reuse StateDelta for encoding
 
     from vertebra.protocol.state import encode_delta

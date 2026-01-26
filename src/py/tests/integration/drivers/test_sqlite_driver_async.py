@@ -63,7 +63,10 @@ async def test_sqlite_driver_async_fetch() -> None:
                     correlation_id, _flags, _procedure, payload = decode_request(data)
                     request = decoder.decode(payload)
                     resp_ring.send_timeout(
-                        encode_response(encoder.encode({"ok": True, "token": "token", "id": request["id"]}), correlation_id=correlation_id),
+                        encode_response(
+                            encoder.encode({"ok": True, "token": "token", "id": request["id"]}),
+                            correlation_id=correlation_id,
+                        ),
                         0,
                         1000,
                     )
@@ -74,11 +77,14 @@ async def test_sqlite_driver_async_fetch() -> None:
                     correlation_id, _flags, _procedure, payload = decode_request(data)
                     request = decoder.decode(payload)
                     resp_ring.send_timeout(
-                        encode_response(encoder.encode({
-                            "ok": True,
-                            "result": {"columns": ["value"], "rows": [[1], [2]], "rowcount": 2},
-                            "id": request["id"],
-                        }), correlation_id=correlation_id),
+                        encode_response(
+                            encoder.encode({
+                                "ok": True,
+                                "result": {"columns": ["value"], "rows": [[1], [2]], "rowcount": 2},
+                                "id": request["id"],
+                            }),
+                            correlation_id=correlation_id,
+                        ),
                         0,
                         1000,
                     )
@@ -89,7 +95,9 @@ async def test_sqlite_driver_async_fetch() -> None:
                     correlation_id, _flags, _procedure, payload = decode_request(data)
                     request = decoder.decode(payload)
                     resp_ring.send_timeout(
-                        encode_response(encoder.encode({"ok": True, "id": request["id"]}), correlation_id=correlation_id),
+                        encode_response(
+                            encoder.encode({"ok": True, "id": request["id"]}), correlation_id=correlation_id
+                        ),
                         0,
                         1000,
                     )
@@ -100,9 +108,7 @@ async def test_sqlite_driver_async_fetch() -> None:
 
         task = asyncio.create_task(broker_task())
 
-        client_config = BrokerClientConfig(
-            name=name, slot_size=slot_size, slots=slots, client_id="test-client"
-        )
+        client_config = BrokerClientConfig(name=name, slot_size=slot_size, slots=slots, client_id="test-client")
         config = SyncSqliteDriverConfig(pool="default", client=client_config)
         driver = AsyncSqliteDriver(config)
 

@@ -103,8 +103,8 @@ class TestUvloopCompatibility:
         # to catch any edge cases in uvloop's FD handling
         async def producer() -> None:
             for i in range(1000):
-                # Avoid blocking the event loop if the ring is full.
-                while not async_ring.try_send(test_data, 0):
+                # Avoid blocking the event loop if the ring is full (intentional busy-wait for test).
+                while not async_ring.try_send(test_data, 0):  # noqa: ASYNC110
                     await asyncio.sleep(0)
                 # Small delay to simulate realistic workload
                 if i % 100 == 0:

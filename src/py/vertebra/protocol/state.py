@@ -8,14 +8,7 @@ from typing import Any
 
 import msgspec
 
-__all__ = [
-    "StateOpcode",
-    "StateDelta",
-    "decode_delta",
-    "encode_delta",
-    "field_id",
-    "state_id",
-]
+__all__ = ["StateDelta", "StateOpcode", "decode_delta", "encode_delta", "field_id", "state_id"]
 
 
 class StateOpcode(IntEnum):
@@ -107,23 +100,12 @@ def decode_delta(data: bytes | bytearray | memoryview) -> StateDelta:
         if len(raw) != 5:
             msg = "Field update delta must have 5 elements"
             raise ValueError(msg)
-        return StateDelta(
-            opcode=opcode,
-            state_id=state,
-            field_id=int(raw[2]),
-            timestamp_ns=int(raw[3]),
-            value=raw[4],
-        )
+        return StateDelta(opcode=opcode, state_id=state, field_id=int(raw[2]), timestamp_ns=int(raw[3]), value=raw[4])
     if opcode is StateOpcode.FIELD_DELETE:
         if len(raw) != 4:
             msg = "Field delete delta must have 4 elements"
             raise ValueError(msg)
-        return StateDelta(
-            opcode=opcode,
-            state_id=state,
-            field_id=int(raw[2]),
-            timestamp_ns=int(raw[3]),
-        )
+        return StateDelta(opcode=opcode, state_id=state, field_id=int(raw[2]), timestamp_ns=int(raw[3]))
     if opcode is StateOpcode.SYNC_REQUEST:
         if len(raw) != 2:
             msg = "Sync request delta must have 2 elements"

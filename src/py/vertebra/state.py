@@ -1,7 +1,7 @@
 """Native State primitive for Vertebra."""
 
-import time
 import asyncio
+import time
 from collections.abc import AsyncGenerator
 from typing import Any, TypeVar
 
@@ -31,11 +31,7 @@ class NativeState(msgspec.Struct):
 
     def _snapshot(self) -> "NativeState":
         return msgspec.structs.replace(
-            self,
-            _subscribers=set(),
-            _delta_subscribers=set(),
-            _initialized=True,
-            _state_id=self._state_id,
+            self, _subscribers=set(), _delta_subscribers=set(), _initialized=True, _state_id=self._state_id
         )
 
     @staticmethod
@@ -104,11 +100,7 @@ class NativeState(msgspec.Struct):
 
         opcode = StateOpcode.OBJECT_REPLACE if self._is_object_replace(value) else StateOpcode.FIELD_SET
         delta = StateDelta(
-            opcode=opcode,
-            state_id=self._state_id,
-            field_id=field_id(name),
-            timestamp_ns=time.time_ns(),
-            value=value,
+            opcode=opcode, state_id=self._state_id, field_id=field_id(name), timestamp_ns=time.time_ns(), value=value
         )
         if hasattr(self, "_delta_subscribers"):
             self.broadcast_delta(delta)

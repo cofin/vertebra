@@ -20,12 +20,12 @@ class Vertex:
     """Native application container for routing, state, and lifecycle hooks."""
 
     __slots__ = (
-        "_controllers",
         "_controller_routes",
+        "_controllers",
         "_provider_compiler",
         "_providers",
-        "_routes",
         "_routers",
+        "_routes",
         "_shutdown_hooks",
         "_startup_hooks",
         "_states",
@@ -42,12 +42,7 @@ class Vertex:
         self._startup_hooks: list[LifecycleHook] = []
         self._shutdown_hooks: list[LifecycleHook] = []
 
-    def provide(
-        self,
-        provider: type[Any] | Callable[..., Any] | None = None,
-        *,
-        scope: Scope = "singleton",
-    ) -> Any:
+    def provide(self, provider: type[Any] | Callable[..., Any] | None = None, *, scope: Scope = "singleton") -> Any:
         return self._providers.provide(provider, scope=scope)
 
     @property
@@ -94,7 +89,7 @@ class Vertex:
             self._controller_routes.extend(controller_routes)
             self._routes.extend(route.route for route in controller_routes)
             return target
-        
+
         # Check if it's a handler function with route metadata
         if callable(target):
             routes = getattr(target, "__vertebra_routes__", None)
@@ -102,11 +97,13 @@ class Vertex:
                 self._routes.extend(routes)
                 return target
 
-        raise TypeError("register expects a Router, Controller, or decorated handler")
+        msg = "register expects a Router, Controller, or decorated handler"
+        raise TypeError(msg)
 
     def state(self, state_cls: type[StateT], *, name: str | None = None, **kwargs: Any) -> StateT:
         if not issubclass(state_cls, NativeState):
-            raise TypeError("state_cls must be a NativeState subclass")
+            msg = "state_cls must be a NativeState subclass"
+            raise TypeError(msg)
 
         existing = self._states.get(state_cls)
         if existing is not None:

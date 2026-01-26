@@ -50,13 +50,7 @@ class VertebraContext(msgspec.Struct, frozen=True):
             return self
         next_state = dict(self.state)
         next_state.update(updates)
-        return VertebraContext(
-            kind=self.kind,
-            request=self.request,
-            cli=self.cli,
-            event=self.event,
-            state=next_state,
-        )
+        return VertebraContext(kind=self.kind, request=self.request, cli=self.cli, event=self.event, state=next_state)
 
 
 __all__ = ("ContextKind", "VertebraContext")

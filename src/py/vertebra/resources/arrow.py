@@ -1,11 +1,14 @@
 """Arrow shared memory region pool for providers."""
 
 import io
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from vertebra._vertebra import ShmRegion
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -190,7 +193,7 @@ def decode_arrow(data: bytes | memoryview) -> Any:
         reader = pa.ipc.RecordBatchStreamReader(pa.BufferReader(buffer))
         return reader.read_all()
     except Exception:  # noqa: BLE001
-        pass
+        _logger.debug("PyArrow decode failed, falling back to nanoarrow")
 
     import nanoarrow as na
     import nanoarrow.ipc as na_ipc

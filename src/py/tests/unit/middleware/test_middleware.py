@@ -58,8 +58,7 @@ def test_middleware_di_injection_uses_request_cache() -> None:
         seen.append(token)
 
     before_runner, after_runner = compile_middleware(
-        [middleware(before=before, after=after)],
-        compiler=registry.compile(),
+        [middleware(before=before, after=after)], compiler=registry.compile()
     )
     ctx = VertebraContext.http({"path": "/"})
     asyncio.run(before_runner(ctx))

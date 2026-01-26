@@ -85,9 +85,7 @@ async def test_postgres_transaction_context() -> None:
                         else:
                             response = {"ok": False, "error": {"message": "unknown"}, "id": request["id"]}
                         resp_ring.send_timeout(
-                            encode_response(encoder.encode(response), correlation_id=correlation_id),
-                            0,
-                            1000,
+                            encode_response(encoder.encode(response), correlation_id=correlation_id), 0, 1000
                         )
                 except Exception:  # noqa: S110
                     pass
@@ -96,9 +94,7 @@ async def test_postgres_transaction_context() -> None:
 
         task = asyncio.create_task(broker_task())
 
-        client_config = BrokerClientConfig(
-            name=name, slot_size=slot_size, slots=slots, client_id="test-client"
-        )
+        client_config = BrokerClientConfig(name=name, slot_size=slot_size, slots=slots, client_id="test-client")
         config = SyncPostgresDriverConfig(pool="default", client=client_config)
         driver = AsyncPostgresDriver(config)
 

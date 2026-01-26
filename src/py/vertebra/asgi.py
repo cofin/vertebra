@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import inspect
 import json
-from collections.abc import Awaitable, Callable
-from typing import Any
+import logging
+from typing import TYPE_CHECKING, Any
 
-from vertebra.app import Vertex
 from vertebra.routing import extract_path_params
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from vertebra.app import Vertex
+
+_logger = logging.getLogger(__name__)
 
 
 class VertebraAdapter:
@@ -74,7 +81,7 @@ class VertebraAdapter:
 
             # Found match
             handler = route.handler
-            
+
             # Simple dependency injection resolution (subset of full compiler)
             # This is a naive implementation; real implementation should use ProviderCompiler
             try:
@@ -84,13 +91,16 @@ class VertebraAdapter:
                     result = await handler(**params)
                 else:
                     result = handler(**params)
-                
-                await self._send_result(send, result)
-                return
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
+            except (TypeError, ValueError, KeyError):
+                _logger.exception("Handler error")
                 await self._send_response(send, 500, b"Internal Server Error")
+                return
+            except Exception:
+                _logger.exception("Unexpected handler error")
+                await self._send_response(send, 500, b"Internal Server Error")
+                return
+            else:
+                await self._send_result(send, result)
                 return
 
         await self._send_response(send, 404, b"Not Found")
@@ -101,9 +111,7 @@ class VertebraAdapter:
             await self._send_response(send, 200, body)
         elif isinstance(result, dict):
             body = json.dumps(result).encode("utf-8")
-            await self._send_response(
-                send, 200, body, headers=[(b"content-type", b"application/json")]
-            )
+            await self._send_response(send, 200, body, headers=[(b"content-type", b"application/json")])
         else:
             # Fallback
             body = str(result).encode("utf-8")
@@ -118,15 +126,6 @@ class VertebraAdapter:
     ) -> None:
         if headers is None:
             headers = [(b"content-type", b"text/plain")]
-        
-        await send({
-            "type": "http.response.start",
-            "status": status,
-            "headers": headers,
-        })
-        await send({
-            "type": "http.response.body",
-            "body": body,
-        })
 
-import inspect
+        await send({"type": "http.response.start", "status": status, "headers": headers})
+        await send({"type": "http.response.body", "body": body})

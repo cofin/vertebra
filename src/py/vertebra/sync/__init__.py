@@ -11,14 +11,14 @@ from vertebra.protocol.state import StateDelta, decode_delta
 from vertebra.state_shadow import ShadowState
 
 __all__ = [
+    "ShadowState",
     "SseEvent",
     "StateSubscription",
     "decode_sse_event",
     "decode_state_payload",
     "parse_state_stream",
-    "ShadowState",
-    "ws_endpoint",
     "sse_endpoint",
+    "ws_endpoint",
 ]
 
 
@@ -34,8 +34,7 @@ class StateSubscription(msgspec.Struct):
 
     def apply_payload(self, payload: str | bytes) -> bool:
         delta = decode_state_payload(payload)
-        applied = self.shadow.apply_delta(delta)
-        return applied
+        return self.shadow.apply_delta(delta)
 
     def apply_sse_event(self, raw: str) -> bool:
         event = decode_sse_event(raw)
@@ -95,7 +94,7 @@ def decode_state_payload(payload: str | bytes) -> StateDelta:
         return decode_delta(raw)
     try:
         return decode_delta(payload)
-    except Exception:
+    except Exception:  # noqa: BLE001 - Try raw first, fallback to base64 decode
         raw = base64.b64decode(payload)
         return decode_delta(raw)
 

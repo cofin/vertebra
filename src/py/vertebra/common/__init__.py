@@ -12,8 +12,4 @@ This package should have NO dependencies on other Vertebra packages
 
 from vertebra.common import exceptions, protocols, serializers
 
-__all__ = [
-    "exceptions",
-    "protocols",
-    "serializers",
-]
+__all__ = ["exceptions", "protocols", "serializers"]

@@ -1,5 +1,3 @@
-import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -110,7 +108,7 @@ def test_import_app_with_file_path(temp_app_file: Path) -> None:
 def test_import_app_with_file_path_no_extension(temp_app_file: Path) -> None:
     """Test that _import_app handles file paths without .py extension."""
     # Strip .py and test
-    app_path = f"{str(temp_app_file)[:-3]}:app"
+    f"{str(temp_app_file)[:-3]}:app"
     # This is a file path (has /) but no .py - should still work
     app = _import_app(f"{temp_app_file}:app")
     assert callable(app)
@@ -132,10 +130,10 @@ def test_import_app_with_nested_file_path(tmp_path: Path) -> None:
     nested_dir = tmp_path / "subdir" / "another"
     nested_dir.mkdir(parents=True)
     app_file = nested_dir / "myapp.py"
-    app_file.write_text('''
+    app_file.write_text("""
 async def app(scope, receive, send):
     pass
-''')
+""")
     app_path = f"{app_file}:app"
     app = _import_app(app_path)
     assert callable(app)

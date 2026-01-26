@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 import inspect
+from collections.abc import Awaitable, Callable
 from typing import (
     Annotated,
     Any,
@@ -26,7 +26,7 @@ SCOPES: tuple[Scope, ...] = ("singleton", "request", "transient")
 ProviderFactory = Callable[..., T | Awaitable[T]]
 
 
-class Inject(Generic[T]):
+class Inject[T]:
     """Marker type for injectable dependencies."""
 
     __slots__ = ()
@@ -39,8 +39,7 @@ class Provider(Protocol[T]):
     provides: type[T]
     scope: Scope
 
-    def __call__(self, *args: Any, **kwargs: Any) -> T | Awaitable[T]:
-        ...
+    def __call__(self, *args: Any, **kwargs: Any) -> T | Awaitable[T]: ...
 
 
 class ProviderSpec(msgspec.Struct, frozen=True):
@@ -83,10 +82,12 @@ class DependencyGraph:
             if target in visited:
                 return
             if target in visiting:
-                raise DependencyError(f"cycle detected at {target!r}")
+                msg = f"cycle detected at {target!r}"
+                raise DependencyError(msg)
             spec = self._providers.get(target)
             if spec is None:
-                raise DependencyError(f"missing provider for {target!r}")
+                msg = f"missing provider for {target!r}"
+                raise DependencyError(msg)
 
             visiting.add(target)
             for dependency in spec.dependencies:
@@ -104,7 +105,7 @@ class DependencyGraph:
 class ProviderCompiler:
     """Compile provider graphs into linear runner functions."""
 
-    __slots__ = ("_providers", "_cache", "_singletons")
+    __slots__ = ("_cache", "_providers", "_singletons")
 
     def __init__(self, providers: dict[type[Any], ProviderSpec[Any]]) -> None:
         self._providers = providers
@@ -134,10 +135,7 @@ class ProviderRegistry:
         return self._providers
 
     def provide(
-        self,
-        provider: type[T] | ProviderFactory[T] | None = None,
-        *,
-        scope: Scope = "singleton",
+        self, provider: type[T] | ProviderFactory[T] | None = None, *, scope: Scope = "singleton"
     ) -> ProviderSpec[T] | Callable[[ProviderFactory[T]], ProviderFactory[T]]:
         if provider is None:
 
@@ -154,7 +152,8 @@ class ProviderRegistry:
             self._register_factory(provider, scope=scope)
             return provider
 
-        raise TypeError("provider must be a class or callable")
+        msg = "provider must be a class or callable"
+        raise TypeError(msg)
 
     def compile(self) -> ProviderCompiler:
         return ProviderCompiler(self._providers)
@@ -177,18 +176,16 @@ def _resolve_return_type(factory: ProviderFactory[Any]) -> type[Any]:
     hints = _safe_type_hints(factory)
     return_annotation = hints.get("return", inspect.Signature.empty)
     if return_annotation is inspect.Signature.empty:
-        raise ValueError("provider factories must declare a return type")
+        msg = "provider factories must declare a return type"
+        raise ValueError(msg)
     dependency = _unwrap_inject(return_annotation)
     if dependency is None:
-        raise ValueError("provider factories must declare a concrete return type")
+        msg = "provider factories must declare a concrete return type"
+        raise ValueError(msg)
     return dependency
 
 
-def _collect_dependencies(
-    callable_obj: Callable[..., Any],
-    *,
-    skip_first: bool = False,
-) -> tuple[DependencySpec, ...]:
+def _collect_dependencies(callable_obj: Callable[..., Any], *, skip_first: bool = False) -> tuple[DependencySpec, ...]:
     signature = inspect.signature(callable_obj)
     hints = _safe_type_hints(callable_obj)
     dependencies: list[DependencySpec] = []
@@ -209,11 +206,7 @@ def _collect_dependencies(
 
 def _safe_type_hints(callable_obj: Callable[..., Any]) -> dict[str, Any]:
     try:
-        return get_type_hints(
-            callable_obj,
-            globalns=getattr(callable_obj, "__globals__", None),
-            include_extras=True,
-        )
+        return get_type_hints(callable_obj, globalns=getattr(callable_obj, "__globals__", None), include_extras=True)
     except (TypeError, NameError, AttributeError):
         return {}
 
@@ -236,16 +229,10 @@ def _unwrap_inject(annotation: Any) -> type[Any] | None:
 
 
 def _compile_runner(
-    order: list[ProviderSpec[Any]],
-    target: type[Any],
-    singleton_cache: dict[type[Any], Any],
+    order: list[ProviderSpec[Any]], target: type[Any], singleton_cache: dict[type[Any], Any]
 ) -> Callable[[dict[type[Any], Any] | None], Awaitable[Any]]:
     local_ns: dict[str, Any] = {"target_type": target, "singleton_cache": singleton_cache}
-    body = [
-        "    if request_cache is None:",
-        "        request_cache = {}",
-        "    resolved = {}",
-    ]
+    body = ["    if request_cache is None:", "        request_cache = {}", "    resolved = {}"]
 
     for index, spec in enumerate(order):
         factory_key = f"factory_{index}"
@@ -285,15 +272,15 @@ def _compile_runner(
 
 
 __all__ = (
+    "SCOPES",
     "DependencyError",
     "DependencyGraph",
     "DependencySpec",
     "Inject",
     "Provider",
-    "ProviderFactory",
     "ProviderCompiler",
+    "ProviderFactory",
     "ProviderRegistry",
     "ProviderSpec",
-    "SCOPES",
     "Scope",
 )

@@ -10,6 +10,7 @@ import os
 import signal
 import sys
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 import msgspec
@@ -246,9 +247,7 @@ class AsgiWorker:
         atexit.register(cleanup_shm)
 
     async def serve_forever(self) -> None:
-        print(f"Worker {self._worker_id()} starting...", file=sys.stderr)
         await self.start()
-        print(f"Worker {self._worker_id()} started control ring: {self._control_ring_name()}", file=sys.stderr)
         self._running = True
         try:
             await self._serve_loop()
@@ -350,7 +349,6 @@ class AsgiWorker:
         header = RequestHeader.from_bytes(payload[:HEADER_SIZE])
         try:
             message = self._codec.decode(payload[HEADER_SIZE:])
-            print(f"Worker received control message: {message}", file=sys.stderr)
         except Exception:  # noqa: BLE001
             return
         if not isinstance(message, dict):
@@ -433,10 +431,8 @@ class AsgiWorker:
         response_ring.send(message_bytes, 0)
         # Signal TypeScript that response is ready (bidirectional notification)
         if resp_notify_fd is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.write(resp_notify_fd, b"\x01\x00\x00\x00\x00\x00\x00\x00")
-            except OSError:
-                pass
 
     async def _handle_client_payload(self, client_id: str, client: ClientState, payload: bytes) -> None:
         if len(payload) < HEADER_SIZE:
@@ -1090,28 +1086,27 @@ def _import_app(app_path: str) -> AsgiApp:
     # Handle file paths (contain / or \ or end with .py)
     if _is_file_path(module_path):
         # Resolve to absolute path and normalize
-        file_path = os.path.abspath(module_path)
+        resolved_path = Path(module_path).resolve()
 
         # Handle .py extension
-        if file_path.endswith(".py"):
-            if not os.path.isfile(file_path):
-                msg = f"Application file not found: {file_path}"
+        if resolved_path.suffix == ".py":
+            if not resolved_path.is_file():
+                msg = f"Application file not found: {resolved_path}"
                 raise FileNotFoundError(msg)
-        else:
-            # Try adding .py extension
-            if os.path.isfile(file_path + ".py"):
-                file_path = file_path + ".py"
-            elif not os.path.isfile(file_path):
-                msg = f"Application file not found: {file_path}"
-                raise FileNotFoundError(msg)
+        # Try adding .py extension
+        elif resolved_path.with_suffix(".py").is_file():
+            resolved_path = resolved_path.with_suffix(".py")
+        elif not resolved_path.is_file():
+            msg = f"Application file not found: {resolved_path}"
+            raise FileNotFoundError(msg)
 
         # Add parent directory to sys.path for imports within the app
-        parent_dir = os.path.dirname(file_path)
+        parent_dir = str(resolved_path.parent)
         if parent_dir not in sys.path:
             sys.path.insert(0, parent_dir)
 
         # Convert to module name (strip .py extension)
-        module_name = os.path.splitext(os.path.basename(file_path))[0]
+        module_name = resolved_path.stem
         module = importlib.import_module(module_name)
     else:
         # Standard module path import

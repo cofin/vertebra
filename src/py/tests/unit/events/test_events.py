@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from vertebra.di import Inject, ProviderRegistry
@@ -72,7 +70,8 @@ def test_event_bus_raises_on_missing_dependency() -> None:
 
         @bus.on(Ping)
         def handle(event: Ping, dep: Inject[Dependency]) -> None:
-            raise AssertionError("handler should not run")
+            msg = "handler should not run"
+            raise AssertionError(msg)
 
 
 @pytest.mark.anyio

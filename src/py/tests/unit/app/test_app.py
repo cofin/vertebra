@@ -83,9 +83,4 @@ async def test_app_lifecycle_hooks_run_in_order() -> None:
     await app.startup()
     await app.shutdown()
 
-    assert calls == [
-        "startup-sync",
-        "startup-async",
-        "shutdown-async",
-        "shutdown-sync",
-    ]
+    assert calls == ["startup-sync", "startup-async", "shutdown-async", "shutdown-sync"]

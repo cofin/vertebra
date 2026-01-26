@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 import asyncio
 import inspect
+from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, get_args, get_origin, get_type_hints
 
 from vertebra.di import Inject, ProviderCompiler
@@ -39,7 +39,7 @@ class BackgroundTaskHandle:
 class BackgroundTasks:
     """Schedule and manage background tasks with optional DI support."""
 
-    __slots__ = ("_tasks", "_compiler")
+    __slots__ = ("_compiler", "_tasks")
 
     def __init__(self, *, compiler: ProviderCompiler | None = None) -> None:
         self._tasks: set[asyncio.Task[None]] = set()
@@ -82,11 +82,7 @@ def _unwrap_inject(annotation: Any) -> type[Any] | None:
 
 def _safe_type_hints(handler: TaskHandler) -> dict[str, Any]:
     try:
-        return get_type_hints(
-            handler,
-            globalns=getattr(handler, "__globals__", None),
-            include_extras=True,
-        )
+        return get_type_hints(handler, globalns=getattr(handler, "__globals__", None), include_extras=True)
     except (NameError, TypeError, AttributeError):
         return {}
 

@@ -31,8 +31,7 @@ async def test_native_supported_patterns() -> None:
             return {"data": data, "dep": dep}
 
     app = Litestar(
-        route_handlers=[NativeController],
-        dependencies={"dep": Provide(dependency_fn, sync_to_thread=False)},
+        route_handlers=[NativeController], dependencies={"dep": Provide(dependency_fn, sync_to_thread=False)}
     )
 
     routes = reflect_routes(app)

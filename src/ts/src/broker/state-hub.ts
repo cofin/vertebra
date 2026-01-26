@@ -49,8 +49,7 @@ export class StateHub {
       return false;
     }
 
-    const payload =
-      deltaOrPayload instanceof Uint8Array ? deltaOrPayload : encodeDelta(decoded);
+    const payload = deltaOrPayload instanceof Uint8Array ? deltaOrPayload : encodeDelta(decoded);
     for (const callback of this.subscribers.values()) {
       callback(payload);
     }
