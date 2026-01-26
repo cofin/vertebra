@@ -1,20 +1,13 @@
-"""Vertebra utility modules.
+"""Backwards-compatible re-export from vertebra.common.utils.
 
-Dependency Detection:
-    module_available - Check if a module is available
-    dependency_flag - Create lazy-evaluated availability flag
-    ensure_dependency - Ensure dependency is installed or raise error
-    ensure_pyarrow, ensure_numpy, etc. - Specific dependency checks
-
-Dependency Flags:
-    OptionalDependencyFlag - Lazy-evaluated flag class
-    FSSPEC_INSTALLED, LITESTAR_INSTALLED, etc. - Pre-defined flags
-
-For serialization utilities, see vertebra.serializers.
+This module is deprecated. Import from vertebra.common.utils instead.
 """
 
-from vertebra.utils.dependencies import FSSPEC_INSTALLED, LITESTAR_INSTALLED, SQLSPEC_INSTALLED, WATCHDOG_INSTALLED
-from vertebra.utils.module_loader import (
+from vertebra.common.utils import (
+    FSSPEC_INSTALLED,
+    LITESTAR_INSTALLED,
+    SQLSPEC_INSTALLED,
+    WATCHDOG_INSTALLED,
     OptionalDependencyFlag,
     dependency_flag,
     ensure_dependency,
@@ -27,12 +20,10 @@ from vertebra.utils.module_loader import (
 )
 
 __all__ = (
-    # Dependency flags
     "FSSPEC_INSTALLED",
     "LITESTAR_INSTALLED",
     "SQLSPEC_INSTALLED",
     "WATCHDOG_INSTALLED",
-    # Module loader
     "OptionalDependencyFlag",
     "dependency_flag",
     "ensure_dependency",
