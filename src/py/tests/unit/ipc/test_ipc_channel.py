@@ -3,7 +3,7 @@ import threading
 import pytest
 
 from vertebra.messaging.transport.channel import BufferView, Channel, ChannelError, ZeroCopyChannel
-from vertebra.procedures import ProcedureRegistry, procedure
+from vertebra.core.procedures import ProcedureRegistry, procedure
 
 pytestmark = pytest.mark.unit
 

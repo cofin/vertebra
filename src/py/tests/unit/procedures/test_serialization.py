@@ -3,7 +3,7 @@ from typing import Any, TypeVar, overload
 import pytest
 
 from vertebra.codegen.ir import ObjectType
-from vertebra.procedures.serialization import (
+from vertebra.core.procedures.serialization import (
     MsgspecSerializer,
     PydanticSerializer,
     detect_serializer,

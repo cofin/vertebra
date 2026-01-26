@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from vertebra.core.lifecycle import App
-from vertebra.procedures import ProcedureRegistry
+from vertebra.core.procedures import ProcedureRegistry
 from vertebra.state import NativeState
 from vertebra.web.controllers import Controller
 from vertebra.web.routing import Router, get

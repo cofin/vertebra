@@ -19,7 +19,7 @@ from vertebra.codegen.ir import (
     UnknownType,
 )
 from vertebra.codegen.typescript import TypeScriptGenerator, format_typescript, validate_typescript
-from vertebra.procedures.registry import ProcedureMetadata
+from vertebra.core.procedures.registry import ProcedureMetadata
 
 pytestmark = pytest.mark.unit
 

@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from vertebra.codegen.ir import TypeNode
-    from vertebra.procedures.serialization import Serializer
+    from vertebra.core.procedures.serialization import Serializer
 
 
 class ProcedureMetadata(msgspec.Struct, frozen=True):

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vertebra.codegen.typescript import TypeScriptGenerator, format_typescript
-from vertebra.procedures.registry import ProcedureRegistry
+from vertebra.core.procedures.registry import ProcedureRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable

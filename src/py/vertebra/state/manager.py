@@ -109,7 +109,7 @@ class NativeState(msgspec.Struct):
 
 def register_state(state: NativeState, name: str) -> None:
     """Register a NativeState instance as a procedure."""
-    from vertebra.procedures.decorator import procedure
+    from vertebra.core.procedures.decorator import procedure
 
     # We define the handler with correct type hint so extraction works
 

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from vertebra.codegen.ir import AnnotatedType, NamedTypeRef, ObjectType, TypeNode
 from vertebra.common.exceptions import TypeGenerationError
-from vertebra.procedures.registry import ProcedureMetadata
+from vertebra.core.procedures.registry import ProcedureMetadata
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

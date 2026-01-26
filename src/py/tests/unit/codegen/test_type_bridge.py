@@ -5,7 +5,7 @@ import pytest
 
 from vertebra.codegen.bridge import TypeBridge
 from vertebra.codegen.ir import PrimitiveType
-from vertebra.procedures.registry import ProcedureMetadata, ProcedureRegistry
+from vertebra.core.procedures.registry import ProcedureMetadata, ProcedureRegistry
 
 pytestmark = pytest.mark.unit
 

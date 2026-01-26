@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from vertebra.procedures.decorator import procedure
-from vertebra.procedures.registry import ProcedureMetadata, ProcedureRegistry
-from vertebra.procedures.serialization import (
+from vertebra.core.procedures.decorator import procedure
+from vertebra.core.procedures.registry import ProcedureMetadata, ProcedureRegistry
+from vertebra.core.procedures.serialization import (
     MsgspecSerializer,
     PydanticSerializer,
     Serializer,

@@ -3,7 +3,7 @@ from collections.abc import AsyncGenerator, Iterator
 from vertebra.codegen.extractor import TypeExtractor
 from vertebra.codegen.ir import StreamType
 from vertebra.codegen.typescript import TypeScriptGenerator
-from vertebra.procedures.registry import ProcedureMetadata
+from vertebra.core.procedures.registry import ProcedureMetadata
 
 
 def test_async_generator_extraction() -> None:

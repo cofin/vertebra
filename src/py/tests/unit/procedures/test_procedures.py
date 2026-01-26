@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from vertebra.codegen.ir import PrimitiveType
-from vertebra.procedures import ProcedureMetadata, ProcedureRegistry, procedure
+from vertebra.core.procedures import ProcedureMetadata, ProcedureRegistry, procedure
 
 pytestmark = pytest.mark.unit
 

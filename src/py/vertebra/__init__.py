@@ -29,7 +29,7 @@ For IPC and typing, see:
 
 from vertebra.core.entrypoint import ProviderPlugin, Vertebra
 from vertebra.core.lifecycle import App, Vertex
-from vertebra.procedures import (
+from vertebra.core.procedures import (
     MsgspecSerializer,
     PydanticSerializer,
     Serializer,
