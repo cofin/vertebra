@@ -31,3 +31,18 @@
     5. Update imports in rest of codebase (can be done gradually)
 
 ---
+
+## [2026-01-26 13:00] - Phase 1 Refinement: Remove Re-exports
+
+- **Decision:** User decided to skip backwards-compatible re-exports and migrate all imports at once
+- **Files deleted:**
+  - `src/py/vertebra/exceptions.py` (re-export shim)
+  - `src/py/vertebra/protocols.py` (re-export shim)
+  - `src/py/vertebra/serializers/` (entire directory)
+- **Files updated:** 41 files with import path changes
+- **Commit:** c972930
+- **Learnings:**
+  - **Pattern: Atomic Migration Over Gradual**: For internal codebases, a single atomic migration (update all imports at once) is cleaner than maintaining re-export shims. Use re-exports only for public APIs where external consumers need deprecation periods.
+  - **Pattern: Keep utils at top level**: `utils/`, `typing.py`, `_typing.py` remain at package root for convenience and PyO3 compatibility. Only "foundational" modules like exceptions/protocols/serializers go into `common/`.
+
+---

@@ -9,7 +9,7 @@
 - [x] Task: Move `serializers/` to `vertebra.common.serializers` 7d01447
 - [x] Task: Keep `utils/`, `typing.py`, `_typing.py` at top level 40eb33f
 - [x] Task: Update imports in moved files to reflect new locations 7d01447
-- [x] Task: Backwards-compatible re-exports for existing code 7d01447
+- [x] Task: Remove backwards-compatible re-exports, update all imports c972930
 - [x] Task: `di/` already at `vertebra.di` (no move needed, self-contained)
 - [ ] Task: Flow - User Manual Verification 'Base & Utilities' (Protocol in workflow.md)
 - [ ] Task: Checkpoint - Verify Phase 1 complete and create recovery point
