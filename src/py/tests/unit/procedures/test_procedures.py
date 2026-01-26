@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from vertebra.codegen.ir import PrimitiveType
 from vertebra.procedures import ProcedureMetadata, ProcedureRegistry, procedure
-from vertebra.types.ir import PrimitiveType
 
 pytestmark = pytest.mark.unit
 

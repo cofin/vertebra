@@ -2,6 +2,7 @@ from typing import Any, TypeVar, overload
 
 import pytest
 
+from vertebra.codegen.ir import ObjectType
 from vertebra.procedures.serialization import (
     MsgspecSerializer,
     PydanticSerializer,
@@ -9,7 +10,6 @@ from vertebra.procedures.serialization import (
     get_serializer,
     register_serializer,
 )
-from vertebra.types.ir import ObjectType
 
 pytestmark = pytest.mark.unit
 

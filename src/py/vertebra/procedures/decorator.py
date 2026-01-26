@@ -6,11 +6,11 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, ParamSpec, Protocol, TypeVar, get_type_hints, overload
 
+from vertebra.codegen.extractor import TypeExtractor
+from vertebra.codegen.ir import RawType
 from vertebra.common.protocols import Serializer
 from vertebra.procedures.registry import ProcedureMetadata, ProcedureRegistry
 from vertebra.procedures.serialization import detect_serializer
-from vertebra.types.extractor import TypeExtractor
-from vertebra.types.ir import RawType
 
 _MISSING = object()
 
@@ -93,7 +93,7 @@ def procedure[**P, R](
             key: RawType(overrides[key]) if key in overrides else extractor.from_hint(value)
             for key, value in params.items()
         }
-        from vertebra.types.ir import StreamType
+        from vertebra.codegen.ir import StreamType
 
         return_hint = hints.get("return", _MISSING)
         return_type = RawType(overrides["return"]) if "return" in overrides else extractor.from_hint(return_hint)

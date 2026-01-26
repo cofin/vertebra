@@ -10,8 +10,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
 
+    from vertebra.codegen.ir import TypeNode
     from vertebra.procedures.serialization import Serializer
-    from vertebra.types.ir import TypeNode
 
 
 class ProcedureMetadata(msgspec.Struct, frozen=True):

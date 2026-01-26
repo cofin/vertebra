@@ -4,10 +4,10 @@ import contextlib
 import typing
 from typing import Any, TypeVar, overload
 
+from vertebra.codegen.extractor import TypeExtractor
+from vertebra.codegen.ir import NamedTypeRef, ObjectType, TypeNode
 from vertebra.common.protocols import Serializer
 from vertebra.common.serializers import JSONCodec, decode_json, encode_json, get_json_codec
-from vertebra.types.extractor import TypeExtractor
-from vertebra.types.ir import NamedTypeRef, ObjectType, TypeNode
 
 if typing.TYPE_CHECKING:
     from collections.abc import AsyncIterable

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from vertebra.build.bundler import Bundler
 from vertebra.build.config import BuildConfig
-from vertebra.types.bridge import TypeBridge
+from vertebra.codegen.bridge import TypeBridge
 
 
 class Builder:

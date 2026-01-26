@@ -10,8 +10,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from vertebra.codegen.typescript import TypeScriptGenerator, format_typescript
 from vertebra.procedures.registry import ProcedureRegistry
-from vertebra.types.typescript import TypeScriptGenerator, format_typescript
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable

@@ -2,9 +2,8 @@ import dataclasses
 import inspect
 from typing import Any, get_type_hints
 
-from vertebra.mcp.registry import Tool
-from vertebra.types.extractor import TypeExtractor
-from vertebra.types.ir import (
+from vertebra.codegen.extractor import TypeExtractor
+from vertebra.codegen.ir import (
     AnnotatedType,
     ArrayType,
     GenericType,
@@ -16,6 +15,7 @@ from vertebra.types.ir import (
     UnionType,
     UnknownType,
 )
+from vertebra.mcp.registry import Tool
 
 
 class MCPSchemaGenerator:
