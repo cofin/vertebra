@@ -20,7 +20,7 @@ from vertebra.common.serializers.decoders import (
     decode_uuid,
 )
 from vertebra.common.serializers.encoders import default_encoder
-from vertebra.common.utils.module_loader import dependency_flag
+from vertebra.utils.module_loader import dependency_flag
 
 # Build VERTEBRA_TYPE_ENCODERS
 VERTEBRA_TYPE_ENCODERS: dict[type, Any] = {

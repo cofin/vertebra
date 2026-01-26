@@ -14,7 +14,7 @@ from typing import Any
 
 import msgspec
 
-from vertebra.common.utils.module_loader import dependency_flag
+from vertebra.utils.module_loader import dependency_flag
 
 # Dependency flags
 PYDANTIC_INSTALLED = dependency_flag("pydantic")
