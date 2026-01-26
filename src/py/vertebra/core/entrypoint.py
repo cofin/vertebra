@@ -4,7 +4,7 @@ import asyncio
 import inspect
 from typing import TYPE_CHECKING, Any
 
-from vertebra.common.protocols import ProviderPlugin
+from vertebra.core.protocols import ProviderPlugin
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

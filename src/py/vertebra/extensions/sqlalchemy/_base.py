@@ -32,7 +32,7 @@ class VertebraDialectBase(DefaultDialect):
 
     def is_disconnect(self, e: Exception, connection: Any, cursor: Any) -> bool:
         """Check if the error is a disconnect error."""
-        from vertebra.common.exceptions import BrokerError, IPCError
+        from vertebra.core.exceptions import BrokerError, IPCError
 
         from . import _dbapi
 

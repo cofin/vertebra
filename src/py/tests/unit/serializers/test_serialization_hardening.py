@@ -5,7 +5,7 @@ import uuid
 
 import pytest
 
-from vertebra.common.serializers import decode_json, decode_msgpack, encode_json, encode_msgpack
+from vertebra.core.serializers import decode_json, decode_msgpack, encode_json, encode_msgpack
 
 
 class Color(enum.Enum):

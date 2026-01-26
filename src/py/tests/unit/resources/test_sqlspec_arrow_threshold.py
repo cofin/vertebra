@@ -1,7 +1,7 @@
 import pytest
 
 import vertebra._vertebra as native
-from vertebra.common.serializers.arrow import decode_arrow, encode_arrow, should_use_arrow
+from vertebra.core.serializers.arrow import decode_arrow, encode_arrow, should_use_arrow
 
 
 def _rows(decoded: object) -> list[dict[str, object]]:

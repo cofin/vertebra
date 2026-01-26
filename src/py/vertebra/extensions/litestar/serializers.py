@@ -9,7 +9,7 @@ from typing import Any
 
 import msgspec
 
-from vertebra.common.serializers.decoders import (
+from vertebra.core.serializers.decoders import (
     decode_date,
     decode_datetime,
     decode_decimal,
@@ -19,7 +19,7 @@ from vertebra.common.serializers.decoders import (
     decode_timedelta,
     decode_uuid,
 )
-from vertebra.common.serializers.encoders import default_encoder
+from vertebra.core.serializers.encoders import default_encoder
 from vertebra.utils.module_loader import dependency_flag
 
 # Build VERTEBRA_TYPE_ENCODERS

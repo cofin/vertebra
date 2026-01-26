@@ -6,7 +6,7 @@ import threading
 
 import msgspec
 
-from vertebra.common.exceptions import PoolError
+from vertebra.core.exceptions import PoolError
 from vertebra.messaging.broker import AsyncBrokerClient, BrokerClientConfig, SyncBrokerClient
 
 

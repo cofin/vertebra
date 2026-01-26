@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 
-from vertebra.common.exceptions import ChannelError
+from vertebra.core.exceptions import ChannelError
 from vertebra.security import SecurityClient
 from vertebra.security.client import OP_HASH_PASSWORD
 

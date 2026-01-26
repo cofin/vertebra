@@ -8,7 +8,7 @@ from typing import Any, ParamSpec, Protocol, TypeVar, get_type_hints, overload
 
 from vertebra.codegen.extractor import TypeExtractor
 from vertebra.codegen.ir import RawType
-from vertebra.common.protocols import Serializer
+from vertebra.core.protocols import Serializer
 from vertebra.core.procedures.registry import ProcedureMetadata, ProcedureRegistry
 from vertebra.core.procedures.serialization import detect_serializer
 

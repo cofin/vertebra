@@ -1,6 +1,6 @@
 import pytest
 
-from vertebra.common.serializers import MessagePackCodec
+from vertebra.core.serializers import MessagePackCodec
 
 pytestmark = pytest.mark.unit
 

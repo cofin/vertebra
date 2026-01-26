@@ -5,7 +5,7 @@ from contextvars import ContextVar
 
 import msgspec
 
-from vertebra.common.serializers import decode_msgpack, encode_msgpack
+from vertebra.core.serializers import decode_msgpack, encode_msgpack
 from vertebra.mcp.registry import ProcedureRegistry
 
 logger = logging.getLogger(__name__)

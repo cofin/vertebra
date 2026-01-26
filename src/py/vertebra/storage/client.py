@@ -6,7 +6,7 @@ from typing import Any, Literal, cast
 
 import msgspec
 
-from vertebra.common.exceptions import BrokerError, StorageError
+from vertebra.core.exceptions import BrokerError, StorageError
 from vertebra.messaging.broker import AsyncBrokerClient, BrokerClientConfig
 
 Backend = Literal["local", "s3", "gcs"]

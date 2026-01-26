@@ -16,7 +16,7 @@ from typing import Any
 import msgspec
 
 from vertebra._vertebra import AsyncRing, shm_unlink
-from vertebra.common.serializers import MessagePackCodec, encode_json
+from vertebra.core.serializers import MessagePackCodec, encode_json
 from vertebra.messaging.protocol import HEADER_SIZE, Flags, RequestHeader, ResponseHeader
 from vertebra.typing import LITESTAR_INSTALLED, LitestarResponse
 

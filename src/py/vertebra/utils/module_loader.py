@@ -6,7 +6,7 @@ Follows SQLSpec's typing pattern for lazy evaluation and caching.
 from importlib.util import find_spec
 from typing import TYPE_CHECKING
 
-from vertebra.common.exceptions import MissingDependencyError
+from vertebra.core.exceptions import MissingDependencyError
 
 if TYPE_CHECKING:
     from types import ModuleType

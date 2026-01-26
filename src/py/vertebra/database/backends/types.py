@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from vertebra.common.serializers import decode_json, encode_json
+from vertebra.core.serializers import decode_json, encode_json
 
 
 def _encode_json(value: Any) -> str:

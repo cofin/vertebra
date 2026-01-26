@@ -21,8 +21,8 @@ Encoding Utilities:
         (datetime, date, time, timedelta, enums, UUIDs, Decimals)
 """
 
-from vertebra.common.protocols import JSONSerializer
-from vertebra.common.serializers.codecs import (
+from vertebra.core.protocols import JSONSerializer
+from vertebra.core.serializers.codecs import (
     JSONCodec,
     MessagePackCodec,
     VertebraCodec,
@@ -33,7 +33,7 @@ from vertebra.common.serializers.codecs import (
     get_json_codec,
     get_msgpack_codec,
 )
-from vertebra.common.serializers.encoders import default_encoder
+from vertebra.core.serializers.encoders import default_encoder
 
 __all__ = (
     # JSON

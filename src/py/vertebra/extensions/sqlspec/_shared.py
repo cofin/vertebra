@@ -3,7 +3,7 @@
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
-from vertebra.common.serializers.arrow import decode_arrow
+from vertebra.core.serializers.arrow import decode_arrow
 from vertebra.database.backends.broker import (
     VertebraAsyncConnection,
     VertebraAsyncPool,

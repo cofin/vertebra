@@ -23,8 +23,8 @@ State:
 For IPC and typing, see:
     vertebra.typing - Type aliases and dependency flags
     vertebra.messaging.transport - IPC channel wrappers
-    vertebra.common.serializers - JSON/MessagePack codecs
-    vertebra.common.exceptions - Exception hierarchy
+    vertebra.core.serializers - JSON/MessagePack codecs
+    vertebra.core.exceptions - Exception hierarchy
 """
 
 from vertebra.core.entrypoint import ProviderPlugin, Vertebra

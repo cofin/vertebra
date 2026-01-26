@@ -7,8 +7,8 @@ import struct
 from typing import Any, Self, TypeVar, cast
 
 from vertebra import _vertebra
-from vertebra.common.exceptions import ChannelError, SerializationError
-from vertebra.common.serializers import get_json_codec
+from vertebra.core.exceptions import ChannelError, SerializationError
+from vertebra.core.serializers import get_json_codec
 from vertebra.messaging.protocol import HEADER_SIZE, Flags, RequestHeader, ResponseHeader
 from vertebra.core.procedures import ProcedureRegistry, get_serializer
 

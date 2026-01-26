@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 
 from vertebra._vertebra import SpscRing
-from vertebra.common.serializers import MessagePackCodec
-from vertebra.common.serializers.arrow import ArrowRegionPool, encode_arrow, should_use_arrow
+from vertebra.core.serializers import MessagePackCodec
+from vertebra.core.serializers.arrow import ArrowRegionPool, encode_arrow, should_use_arrow
 from vertebra.messaging.broker import AsyncBrokerClient, BrokerClientConfig
 
 if TYPE_CHECKING:

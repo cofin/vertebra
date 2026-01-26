@@ -6,7 +6,7 @@ import uuid
 
 import msgspec
 
-from vertebra.common.serializers import JSONCodec, MessagePackCodec
+from vertebra.core.serializers import JSONCodec, MessagePackCodec
 
 
 class TestJSONCodec:

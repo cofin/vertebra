@@ -10,9 +10,9 @@ from typing import Any, cast
 import msgspec
 
 from vertebra._vertebra import AsyncRing, ShmRegion, SpscRing
-from vertebra.common.exceptions import BrokerError
-from vertebra.common.serializers import MessagePackCodec
-from vertebra.common.serializers.arrow import decode_arrow
+from vertebra.core.exceptions import BrokerError
+from vertebra.core.serializers import MessagePackCodec
+from vertebra.core.serializers.arrow import decode_arrow
 from vertebra.messaging.protocol import Flags
 from vertebra.messaging.transport.async_transport import AsyncShmTransport, create_transport
 from vertebra.messaging.transport.channel import decode_response, encode_request

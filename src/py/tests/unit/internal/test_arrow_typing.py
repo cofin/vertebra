@@ -2,7 +2,7 @@
 
 import pytest
 
-from vertebra.common.protocols import ArrowTableProtocol
+from vertebra.core.protocols import ArrowTableProtocol
 from vertebra.typing import PYARROW_INSTALLED, ArrowTable
 from vertebra.utils.module_loader import reset_dependency_cache
 

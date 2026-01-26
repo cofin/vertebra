@@ -10,8 +10,8 @@ from typing import Any, Literal, TypeVar, overload
 
 import msgspec
 
-from vertebra.common.serializers.decoders import default_decoder
-from vertebra.common.serializers.encoders import default_encoder
+from vertebra.core.serializers.decoders import default_decoder
+from vertebra.core.serializers.encoders import default_encoder
 
 __all__ = (
     # JSON

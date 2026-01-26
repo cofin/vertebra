@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from vertebra.common.exceptions import MissingDependencyError
+from vertebra.core.exceptions import MissingDependencyError
 from vertebra.utils.module_loader import (
     OptionalDependencyFlag,
     dependency_flag,
