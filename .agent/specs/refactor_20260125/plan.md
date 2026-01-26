@@ -3,13 +3,13 @@
 ## Phases
 
 ### Phase 1: Base & Utilities
-- [ ] Task: Create `vertebra.common` package and sub-packages (`types`, `utils`, `exceptions`, `protocols`)
-- [ ] Task: Move `types/` content and `typing.py` to `vertebra.common.types`
-- [ ] Task: Move `utils/` content to `vertebra.common.utils`
-- [ ] Task: Move `exceptions.py` to `vertebra.common.exceptions`
-- [ ] Task: Move `protocols.py` to `vertebra.common.protocols`
-- [ ] Task: Move `serializers/` to `vertebra.common.serializers`
-- [ ] Task: Update imports in moved files to reflect new locations
+- [x] Task: Create `vertebra.common` package and sub-packages (`types`, `utils`, `exceptions`, `protocols`) 7d01447
+- [~] Task: Move `types/` → `vertebra.codegen` (decision: keep TypeBridge separate from common)
+- [x] Task: Move `utils/` content to `vertebra.common.utils` 7d01447
+- [x] Task: Move `exceptions.py` to `vertebra.common.exceptions` 7d01447
+- [x] Task: Move `protocols.py` to `vertebra.common.protocols` 7d01447
+- [x] Task: Move `serializers/` to `vertebra.common.serializers` 7d01447
+- [x] Task: Update imports in moved files to reflect new locations 7d01447
 - [ ] Task: Update imports in rest of codebase to point to `vertebra.common`
 - [ ] Task: Move `di/` to `vertebra.di` (ensure it uses `common`)
 - [ ] Task: Flow - User Manual Verification 'Base & Utilities' (Protocol in workflow.md)
@@ -61,6 +61,7 @@
 ### Phase 5: Tooling & Final Cleanup
 - [ ] Task: Move `cli/` to `vertebra.cli`
 - [ ] Task: Move `build/` to `vertebra.build`
+- [ ] Task: Rename `types/` → `vertebra.codegen` (TypeBridge feature)
 - [ ] Task: Audit `extensions/` to ensure it only contains integrations.
   - [ ] Task: Retain `extensions/sqlalchemy`
   - [ ] Task: Retain `extensions/advanced_alchemy`
