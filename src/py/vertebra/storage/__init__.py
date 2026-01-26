@@ -31,7 +31,7 @@ Example usage::
     data = client.download_bytes("key/to/object")
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from vertebra.core.exceptions import StorageError
 from vertebra.storage.client import AsyncFileSystemClient, Backend, FileEntry, SyncFileSystemClient
@@ -57,9 +57,7 @@ from vertebra.storage.store import (
     store_registry,
 )
 
-if TYPE_CHECKING:
-    from vertebra.storage.fsspec import AsyncVertebraFileSystem, SyncVertebraFileSystem
-
+from vertebra.storage.fsspec import AsyncVertebraFileSystem, SyncVertebraFileSystem
 
 __all__ = (
     # Filesystem clients
@@ -72,7 +70,7 @@ __all__ = (
     "AsyncObjectStore",
     "AsyncS3Client",
     "AsyncS3Store",
-    # fsspec integration (lazy)
+    # fsspec integration
     "AsyncVertebraFileSystem",
     "Backend",
     "ByteRange",
@@ -95,13 +93,3 @@ __all__ = (
     "store_from_url",
     "store_registry",
 )
-
-
-def __getattr__(name: str) -> Any:
-    if name in {"AsyncVertebraFileSystem", "SyncVertebraFileSystem"}:
-        from vertebra.storage.fsspec import AsyncVertebraFileSystem, SyncVertebraFileSystem
-
-        return {"AsyncVertebraFileSystem": AsyncVertebraFileSystem, "SyncVertebraFileSystem": SyncVertebraFileSystem}[
-            name
-        ]
-    raise AttributeError(name)
