@@ -2,7 +2,7 @@
 
 from typing import TYPE_CHECKING
 
-from vertebra.drivers.broker import VertebraAsyncCursor, VertebraSyncCursor
+from vertebra.database.backends.broker import VertebraAsyncCursor, VertebraSyncCursor
 from vertebra.extensions.sqlspec._driver import (
     VertebraAsyncDriverBase,
     VertebraAsyncExceptionHandler,

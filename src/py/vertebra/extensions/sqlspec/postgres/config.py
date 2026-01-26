@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from sqlspec.driver import AsyncDataDictionaryBase, SyncDataDictionaryBase
     from sqlspec.observability import ObservabilityConfig
 
-    from vertebra.drivers.broker import VertebraAsyncPool, VertebraSyncPool
+    from vertebra.database.backends.broker import VertebraAsyncPool, VertebraSyncPool
     from vertebra.resources.broker import BrokerClientConfig
 
 logger = logging.getLogger(__name__)

@@ -1,6 +1,6 @@
 import pytest
 
-from vertebra.drivers import (
+from vertebra.database.backends import (
     ERROR_CODE_MAP,
     DatabaseError,
     DataError,
@@ -14,7 +14,7 @@ from vertebra.drivers import (
     format_error_message,
     map_error_code,
 )
-from vertebra.drivers import Warning as DriverWarning
+from vertebra.database.backends import Warning as DriverWarning
 
 pytestmark = pytest.mark.unit
 

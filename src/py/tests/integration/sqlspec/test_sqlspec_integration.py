@@ -197,7 +197,7 @@ class TestBrokerConnection:
 
     def test_sync_broker_connection_token(self) -> None:
         """Test VertebraSyncConnection stores token correctly."""
-        from vertebra.drivers.broker import VertebraSyncConnection
+        from vertebra.database.backends.broker import VertebraSyncConnection
         from vertebra.resources import AsyncBrokerClient, BrokerClientConfig
 
         client = AsyncBrokerClient(BrokerClientConfig(name="test-broker"))
@@ -206,7 +206,7 @@ class TestBrokerConnection:
 
     def test_async_broker_connection_token(self) -> None:
         """Test VertebraAsyncConnection stores token correctly."""
-        from vertebra.drivers.broker import VertebraAsyncConnection
+        from vertebra.database.backends.broker import VertebraAsyncConnection
         from vertebra.resources import AsyncBrokerClient, BrokerClientConfig
 
         client = AsyncBrokerClient(BrokerClientConfig(name="test-broker"))

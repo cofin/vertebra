@@ -4,7 +4,7 @@ import contextlib
 from collections.abc import Sequence
 from typing import Any
 
-from vertebra.drivers.broker import VertebraAsyncConnection, VertebraAsyncCursor
+from vertebra.database.backends.broker import VertebraAsyncConnection, VertebraAsyncCursor
 from vertebra.resources.broker import AsyncBrokerClient
 
 # DBAPI Globals

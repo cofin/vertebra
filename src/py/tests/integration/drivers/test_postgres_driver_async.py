@@ -4,7 +4,7 @@ import msgspec
 import pytest
 
 from tests.helpers.shm import skip_if_shm_unavailable
-from vertebra.drivers.postgres import AsyncPostgresDriver, SyncPostgresDriverConfig
+from vertebra.database.backends.postgres import AsyncPostgresDriver, SyncPostgresDriverConfig
 from vertebra.ipc.channel import decode_request, encode_response
 from vertebra.resources import BrokerClientConfig
 

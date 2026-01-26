@@ -1,9 +1,9 @@
-"""Shared-memory PostgreSQL driver backed by the Bun broker."""
+"""Shared-memory SQLite driver backed by the Bun broker."""
 
 import msgspec
 
-from vertebra.drivers.base import AsyncDriver, SyncDriver
-from vertebra.drivers.broker import (
+from vertebra.database.backends.base import AsyncDriver, SyncDriver
+from vertebra.database.backends.broker import (
     VertebraAsyncConnection,
     VertebraAsyncPool,
     VertebraDriverConfig,
@@ -13,23 +13,23 @@ from vertebra.drivers.broker import (
 from vertebra.resources import AsyncBrokerClient, BrokerClientConfig, SyncBrokerClient
 
 
-class SyncPostgresDriverConfig(VertebraDriverConfig, frozen=True):
-    """Configuration for synchronous PostgreSQL driver."""
+class SyncSqliteDriverConfig(VertebraDriverConfig, frozen=True):
+    """Configuration for synchronous SQLite driver."""
 
-    pool: str = "postgres"
+    pool: str = "sqlite"
     client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
-class AsyncPostgresDriverConfig(VertebraDriverConfig, frozen=True):
-    """Configuration for asynchronous PostgreSQL driver."""
+class AsyncSqliteDriverConfig(VertebraDriverConfig, frozen=True):
+    """Configuration for asynchronous SQLite driver."""
 
-    pool: str = "postgres"
+    pool: str = "sqlite"
     client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
-class SyncPostgresDriver(SyncDriver):
-    def __init__(self, config: SyncPostgresDriverConfig | None = None) -> None:
-        self._config = config or SyncPostgresDriverConfig()
+class SyncSqliteDriver(SyncDriver):
+    def __init__(self, config: SyncSqliteDriverConfig | None = None) -> None:
+        self._config = config or SyncSqliteDriverConfig()
 
     def connect(self) -> VertebraSyncConnection:
         client = SyncBrokerClient(self._config.client)
@@ -40,9 +40,9 @@ class SyncPostgresDriver(SyncDriver):
         return VertebraSyncPool(self._config.pool, self._config.client, max_clients=max_size)
 
 
-class AsyncPostgresDriver(AsyncDriver):
-    def __init__(self, config: AsyncPostgresDriverConfig | None = None) -> None:
-        self._config = config or AsyncPostgresDriverConfig()
+class AsyncSqliteDriver(AsyncDriver):
+    def __init__(self, config: AsyncSqliteDriverConfig | None = None) -> None:
+        self._config = config or AsyncSqliteDriverConfig()
 
     async def connect(self) -> VertebraAsyncConnection:
         client = AsyncBrokerClient(self._config.client)
@@ -53,4 +53,4 @@ class AsyncPostgresDriver(AsyncDriver):
         return VertebraAsyncPool(self._config.pool, self._config.client, max_clients=max_size)
 
 
-__all__ = ("AsyncPostgresDriver", "AsyncPostgresDriverConfig", "SyncPostgresDriver", "SyncPostgresDriverConfig")
+__all__ = ("AsyncSqliteDriver", "AsyncSqliteDriverConfig", "SyncSqliteDriver", "SyncSqliteDriverConfig")

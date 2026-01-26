@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from vertebra.drivers.base import (
+from vertebra.database.backends.base import (
     AsyncConnection,
     AsyncCursor,
     AsyncDriver,
@@ -14,7 +14,7 @@ from vertebra.drivers.base import (
     SyncDriver,
     SyncPool,
 )
-from vertebra.drivers.exceptions import (
+from vertebra.database.backends.exceptions import (
     ERROR_CODE_MAP,
     DatabaseError,
     DataError,
@@ -28,17 +28,17 @@ from vertebra.drivers.exceptions import (
     format_error_message,
     map_error_code,
 )
-from vertebra.drivers.exceptions import Warning as DriverWarning
-from vertebra.drivers.mysql import AsyncMysqlDriver, AsyncMysqlDriverConfig, SyncMysqlDriver, SyncMysqlDriverConfig
-from vertebra.drivers.postgres import (
+from vertebra.database.backends.exceptions import Warning as DriverWarning
+from vertebra.database.backends.mysql import AsyncMysqlDriver, AsyncMysqlDriverConfig, SyncMysqlDriver, SyncMysqlDriverConfig
+from vertebra.database.backends.postgres import (
     AsyncPostgresDriver,
     AsyncPostgresDriverConfig,
     SyncPostgresDriver,
     SyncPostgresDriverConfig,
 )
-from vertebra.drivers.redis import AsyncRedisDriver, AsyncRedisDriverConfig, SyncRedisDriver, SyncRedisDriverConfig
-from vertebra.drivers.sqlite import AsyncSqliteDriver, AsyncSqliteDriverConfig, SyncSqliteDriver, SyncSqliteDriverConfig
-from vertebra.drivers.types import (
+from vertebra.database.backends.redis import AsyncRedisDriver, AsyncRedisDriverConfig, SyncRedisDriver, SyncRedisDriverConfig
+from vertebra.database.backends.sqlite import AsyncSqliteDriver, AsyncSqliteDriverConfig, SyncSqliteDriver, SyncSqliteDriverConfig
+from vertebra.database.backends.types import (
     decode_mysql,
     decode_postgres,
     decode_sqlite,

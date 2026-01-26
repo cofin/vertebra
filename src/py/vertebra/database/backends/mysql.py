@@ -1,9 +1,9 @@
-"""Shared-memory Redis driver backed by the Bun broker."""
+"""Shared-memory MySQL driver backed by the Bun broker."""
 
 import msgspec
 
-from vertebra.drivers.base import AsyncDriver, SyncDriver
-from vertebra.drivers.broker import (
+from vertebra.database.backends.base import AsyncDriver, SyncDriver
+from vertebra.database.backends.broker import (
     VertebraAsyncConnection,
     VertebraAsyncPool,
     VertebraDriverConfig,
@@ -13,23 +13,23 @@ from vertebra.drivers.broker import (
 from vertebra.resources import AsyncBrokerClient, BrokerClientConfig, SyncBrokerClient
 
 
-class SyncRedisDriverConfig(VertebraDriverConfig, frozen=True):
-    """Configuration for synchronous Redis driver."""
+class SyncMysqlDriverConfig(VertebraDriverConfig, frozen=True):
+    """Configuration for synchronous MySQL driver."""
 
-    pool: str = "redis"
+    pool: str = "mysql"
     client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
-class AsyncRedisDriverConfig(VertebraDriverConfig, frozen=True):
-    """Configuration for asynchronous Redis driver."""
+class AsyncMysqlDriverConfig(VertebraDriverConfig, frozen=True):
+    """Configuration for asynchronous MySQL driver."""
 
-    pool: str = "redis"
+    pool: str = "mysql"
     client: BrokerClientConfig = msgspec.field(default_factory=BrokerClientConfig)
 
 
-class SyncRedisDriver(SyncDriver):
-    def __init__(self, config: SyncRedisDriverConfig | None = None) -> None:
-        self._config = config or SyncRedisDriverConfig()
+class SyncMysqlDriver(SyncDriver):
+    def __init__(self, config: SyncMysqlDriverConfig | None = None) -> None:
+        self._config = config or SyncMysqlDriverConfig()
 
     def connect(self) -> VertebraSyncConnection:
         client = SyncBrokerClient(self._config.client)
@@ -40,9 +40,9 @@ class SyncRedisDriver(SyncDriver):
         return VertebraSyncPool(self._config.pool, self._config.client, max_clients=max_size)
 
 
-class AsyncRedisDriver(AsyncDriver):
-    def __init__(self, config: AsyncRedisDriverConfig | None = None) -> None:
-        self._config = config or AsyncRedisDriverConfig()
+class AsyncMysqlDriver(AsyncDriver):
+    def __init__(self, config: AsyncMysqlDriverConfig | None = None) -> None:
+        self._config = config or AsyncMysqlDriverConfig()
 
     async def connect(self) -> VertebraAsyncConnection:
         client = AsyncBrokerClient(self._config.client)
@@ -53,4 +53,4 @@ class AsyncRedisDriver(AsyncDriver):
         return VertebraAsyncPool(self._config.pool, self._config.client, max_clients=max_size)
 
 
-__all__ = ("AsyncRedisDriver", "AsyncRedisDriverConfig", "SyncRedisDriver", "SyncRedisDriverConfig")
+__all__ = ("AsyncMysqlDriver", "AsyncMysqlDriverConfig", "SyncMysqlDriver", "SyncMysqlDriverConfig")

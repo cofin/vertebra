@@ -3,7 +3,7 @@
 from types import TracebackType
 from typing import TYPE_CHECKING
 
-from vertebra.drivers.broker import VertebraAsyncConnection, VertebraSyncConnection
+from vertebra.database.backends.broker import VertebraAsyncConnection, VertebraSyncConnection
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

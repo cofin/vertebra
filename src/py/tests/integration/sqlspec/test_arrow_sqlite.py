@@ -8,7 +8,7 @@ import pytest
 
 pa = pytest.importorskip("pyarrow")
 
-from vertebra.drivers.broker import VertebraAsyncConnection  # noqa: E402
+from vertebra.database.backends.broker import VertebraAsyncConnection  # noqa: E402
 from vertebra.extensions.sqlspec.sqlite import VertebraSqliteAsyncConfig  # noqa: E402
 from vertebra.resources import broker  # noqa: E402
 from vertebra.resources.broker import AsyncBrokerClient  # noqa: E402

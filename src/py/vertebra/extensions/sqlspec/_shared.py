@@ -3,7 +3,7 @@
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
-from vertebra.drivers.broker import VertebraAsyncConnection, VertebraAsyncPool, VertebraSyncConnection, VertebraSyncPool
+from vertebra.database.backends.broker import VertebraAsyncConnection, VertebraAsyncPool, VertebraSyncConnection, VertebraSyncPool
 from vertebra.resources.arrow import decode_arrow
 
 if TYPE_CHECKING:
