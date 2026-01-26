@@ -3,8 +3,8 @@ from typing import Any
 import msgspec
 import pytest
 
-from vertebra.auth.models import VertebraUserMixin
-from vertebra.auth.proxy import LazyUserProxy
+from vertebra.security.auth.models import VertebraUserMixin
+from vertebra.security.auth.proxy import LazyUserProxy
 
 
 class User(VertebraUserMixin, msgspec.Struct):

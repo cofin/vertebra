@@ -757,19 +757,19 @@ class AsgiWorker:
                 await writer.send({"id": meta.id, "type": "http.response.body", "body": b"ok", "more_body": False})
                 return
 
-            from vertebra.auth.state import reset_user, set_user
+            from vertebra.security.auth.state import reset_user, set_user
 
             claims = meta.auth_claims
             if claims:
-                from vertebra.auth.models import VertebraUserMixin
-                from vertebra.auth.proxy import LazyUserProxy
+                from vertebra.security.auth.models import VertebraUserMixin
+                from vertebra.security.auth.proxy import LazyUserProxy
 
                 async def noop_fetcher(user_id: str, ctx: Any) -> Any:
                     return VertebraUserMixin(**claims)
 
                 user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher, context=meta)
             else:
-                from vertebra.auth.models import AnonymousUser
+                from vertebra.security.auth.models import AnonymousUser
 
                 user = AnonymousUser()
 
@@ -851,19 +851,19 @@ class AsgiWorker:
     async def _run_websocket_request(
         self, meta: RequestMeta, body_state: RequestBodyState, writer: "ResponseWriter"
     ) -> None:
-        from vertebra.auth.state import reset_user, set_user
+        from vertebra.security.auth.state import reset_user, set_user
 
         claims = meta.auth_claims
         if claims:
-            from vertebra.auth.models import VertebraUserMixin
-            from vertebra.auth.proxy import LazyUserProxy
+            from vertebra.security.auth.models import VertebraUserMixin
+            from vertebra.security.auth.proxy import LazyUserProxy
 
             async def noop_fetcher(user_id: str, ctx: Any) -> Any:
                 return VertebraUserMixin(**claims)
 
             user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher, context=meta)
         else:
-            from vertebra.auth.models import AnonymousUser
+            from vertebra.security.auth.models import AnonymousUser
 
             user = AnonymousUser()
 

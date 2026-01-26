@@ -1,6 +1,6 @@
 from contextvars import ContextVar, Token
 
-from vertebra.auth.models import AnonymousUser, VertebraUserMixin
+from vertebra.security.auth.models import AnonymousUser, VertebraUserMixin
 
 _user_ctx: ContextVar[VertebraUserMixin | None] = ContextVar("vertebra_user", default=None)
 

@@ -5,12 +5,13 @@ import msgspec
 import pytest
 
 from vertebra.common.exceptions import ChannelError
-from vertebra.security import OP_HASH_PASSWORD, SecurityClient
+from vertebra.security import SecurityClient
+from vertebra.security.client import OP_HASH_PASSWORD
 
 
 @pytest.fixture
 def mock_vertebra() -> Generator[MagicMock, None, None]:
-    with patch("vertebra.security._vertebra") as m:
+    with patch("vertebra.security.client._vertebra") as m:
         # Mock MpmcRing
         m.MpmcRing.open_named.return_value = MagicMock()
 

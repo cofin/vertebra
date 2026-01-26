@@ -1,6 +1,6 @@
 import msgspec
 
-from vertebra.auth.models import AnonymousUser, VertebraUserMixin
+from vertebra.security.auth.models import AnonymousUser, VertebraUserMixin
 
 
 class User(VertebraUserMixin, msgspec.Struct):

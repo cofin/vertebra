@@ -1,7 +1,7 @@
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
-from vertebra.auth.models import VertebraUserMixin
+from vertebra.security.auth.models import VertebraUserMixin
 
 UserT = TypeVar("UserT", bound=VertebraUserMixin)
 Fetcher = Callable[[str, Any], Coroutine[Any, Any, UserT]]

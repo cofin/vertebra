@@ -79,8 +79,8 @@ class VertebraRequest:
         if self._user is None:
             claims = self.auth_claims
             if claims:
-                from vertebra.auth.models import VertebraUserMixin
-                from vertebra.auth.proxy import LazyUserProxy
+                from vertebra.security.auth.models import VertebraUserMixin
+                from vertebra.security.auth.proxy import LazyUserProxy
 
                 # Default to VertebraUserMixin if no specific model is configured
                 # In a real app, this should be configurable.
@@ -89,7 +89,7 @@ class VertebraRequest:
 
                 self._user = LazyUserProxy(VertebraUserMixin, claims, noop_fetcher, context=self)
             else:
-                from vertebra.auth.models import AnonymousUser
+                from vertebra.security.auth.models import AnonymousUser
 
                 self._user = AnonymousUser()
         return self._user
