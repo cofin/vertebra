@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from vertebra.asgi import VertebraAdapter
+from vertebra.core.asgi import VertebraAdapter
 from vertebra.core.lifecycle import Vertex
 from vertebra.web.routing import get
 
