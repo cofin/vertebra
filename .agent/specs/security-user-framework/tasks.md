@@ -38,7 +38,7 @@
 - [x] Task: Implement `AuthMetadata` extraction in `vertebra.py` to hydrate the `User` object from Broker signals.
 - [x] Task: Implement Refresh Token rotation flow in the Broker and Python client. [7d2fe5c]
 - [x] Task: Checkpoint - Verify Phase 3 complete and create recovery point [checkpoint: f9d4aa4]
-- [ ] Task: Flow - User Manual Verification 'Phase 3: Broker-Centric Authentication' (Protocol in workflow.md)
+- [x] Task: Flow - User Manual Verification 'Phase 3: Broker-Centric Authentication' (Protocol in workflow.md)
 
 ## Phase 4: Permissions & Scopes
 **Goal:** Add granular authorization capabilities.
