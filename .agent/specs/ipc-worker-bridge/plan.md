@@ -1,7 +1,7 @@
 # Plan: IPC Worker Bridge
 
 ## Phase 1: Worker Manager Structure
-- [ ] **Task: Scaffold `WorkerManager` in `vertebra-server`**
+- [~] **Task: Scaffold `WorkerManager` in `vertebra-server`**
     - Create `src/rs/vertebra-server/src/worker.rs`.
     - Define `WorkerManager` struct.
     - Add dependency on `vertebra-core` (path).
