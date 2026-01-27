@@ -171,10 +171,20 @@ class Bundler:
         bin_dir = python_dir / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
 
+        # Locate Cargo.toml
+        manifest_path = self.project_dir / "src" / "rs" / "Cargo.toml"
+        if not manifest_path.exists():
+            if (self.project_dir / "Cargo.toml").exists():
+                manifest_path = self.project_dir / "Cargo.toml"
+            else:
+                raise RuntimeError("Could not locate Cargo.toml in src/rs or root")
+
         cmd = [
             "cargo",
             "build",
             "--release",
+            "--manifest-path",
+            str(manifest_path),
             "-p",
             "vertebra-server",
         ]
@@ -192,12 +202,18 @@ class Bundler:
             raise RuntimeError("Server build failed")
 
         # Locate the binary
-        target_dir = self.project_dir / "target" / "release"
+        # Target directory is typically relative to the workspace root (where Cargo.toml is)
+        target_dir = manifest_path.parent / "target" / "release"
         binary_name = "vertebra-server.exe" if "windows" in self.target else "vertebra-server"
         binary_path = target_dir / binary_name
 
         if not binary_path.exists():
-            raise RuntimeError(f"Server binary not found at {binary_path}")
+             # Check project root target as fallback?
+             fallback_path = self.project_dir / "target" / "release" / binary_name
+             if fallback_path.exists():
+                 binary_path = fallback_path
+             else:
+                 raise RuntimeError(f"Server binary not found at {binary_path} or {fallback_path}")
 
         console.log(f"Copying binary from {binary_path} to {bin_dir}")
         shutil.copy2(binary_path, bin_dir / binary_name)
