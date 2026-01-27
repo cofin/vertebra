@@ -16,7 +16,12 @@ reqwest = { version = "0.11", features = ["json"] }
 clap = { version = "4.4", features = ["derive", "env"] }
 tokio-stream = { version = "0.1.18", features = ["net"] }
 futures-util = "0.3.31"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 
 [[bin]]
 name = "vertebra-server"
 path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3.24.0"

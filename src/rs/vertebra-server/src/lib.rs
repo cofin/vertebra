@@ -75,26 +75,29 @@ pub struct ServerState {
     pub pool_manager: Arc<PoolManager>,
     pub scheduler: Arc<FairScheduler<()>>,
     pub worker_manager: WorkerManager,
+    pub asset_manager: AssetManager,
 }
 
 pub async fn serve(config: ServerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr_str = format!("{}:{}", config.host, config.port);
     let addr: SocketAddr = addr_str.parse()?;
 
-    let worker_manager = WorkerManager::new(config.workers, &config.app_path, &config.python_path);
+    let mut worker_manager = WorkerManager::new(config.workers, &config.app_path, &config.python_path);
     let pool_manager = Arc::new(PoolManager::new());
     let scheduler = Arc::new(FairScheduler::new(10.0));
+    let asset_manager = AssetManager::new(".", None); // Serve current dir for now
 
-    let mut state = ServerState {
-        pool_manager,
-        scheduler,
-        worker_manager,
-    };
-    
-    if let Err(e) = state.worker_manager.start() {
+    if let Err(e) = worker_manager.start() {
         eprintln!("WARNING: Failed to start workers: {}", e);
         // Continue serving even if workers fail (for testing/dev)
     }
+
+    let state = Arc::new(ServerState {
+        pool_manager,
+        scheduler,
+        worker_manager,
+        asset_manager,
+    });
 
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on http://{}", addr);
@@ -117,11 +120,35 @@ pub async fn serve(config: ServerConfig) -> Result<(), Box<dyn std::error::Error
         };
 
         let io = TokioIo::new(stream);
+        let state = state.clone();
 
         tokio::task::spawn(async move {
             let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
             
-            if let Err(err) = builder.serve_connection(io, service_fn(hello)).await {
+            let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+                let state = state.clone();
+                async move {
+                    // Try assets first (includes index.html)
+                    let path = req.uri().path();
+                    if path == "/" || path == "/index.html" || path.starts_with("/assets/") {
+                         // Adapt response body type
+                         let resp = state.asset_manager.serve(req).await;
+                         match resp {
+                             Ok(r) => Ok::<_, Infallible>(r.map(|b| b.map_err(|_| unreachable!()).boxed())),
+                             Err(_) => {
+                                 // Return 500 if asset serving failed internally
+                                 let body = Full::new(Bytes::from("Internal Server Error"))
+                                     .map_err(|_: Infallible| unreachable!()).boxed();
+                                 Ok(Response::builder().status(500).body(body).unwrap())
+                             }
+                         }
+                    } else {
+                        hello(req).await
+                    }
+                }
+            });
+
+            if let Err(err) = builder.serve_connection(io, service).await {
                 eprintln!("Error serving connection: {:?}", err);
             }
         });

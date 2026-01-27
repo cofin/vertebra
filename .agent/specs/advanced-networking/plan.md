@@ -19,9 +19,9 @@
     - Subscribe to a broadcast channel from the Python workers.
 
 ## Phase 4: Advanced Asset Delivery
-- [ ] **Task: Manifest Parser**
+- [x] **Task: Manifest Parser**
     - Implement logic to read `dist/manifest.json`.
     - Map requested paths to hashed filenames.
-- [ ] **Task: Early Hints**
+- [x] **Task: Early Hints**
     - When serving `index.html`, look up imports in manifest.
     - Send 103 Early Hints response before the body.
