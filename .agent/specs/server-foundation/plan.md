@@ -1,12 +1,12 @@
 # Plan: Server Foundation
 
 ## Phase 1: Cleanup
-- [~] **Task: Remove Legacy JS Bindings**
+- [x] **Task: Remove Legacy JS Bindings** 9493217
     - `rm -rf src/rs/vertebra-js`
     - Remove `vertebra-js` from `src/rs/Cargo.toml` workspace members.
 
 ## Phase 2: Rust Server Crate
-- [ ] **Task: Scaffold `vertebra-server`**
+- [~] **Task: Scaffold `vertebra-server`**
     - Create `src/rs/vertebra-server/Cargo.toml`.
     - Add deps: `tokio` (full), `hyper` (full), `http-body-util`, `hyper-util`.
     - Add to workspace `src/rs/Cargo.toml`.
