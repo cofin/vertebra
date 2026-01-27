@@ -1,6 +1,6 @@
-## [ ] Flow: server-foundation
-*Link: [./specs/server-foundation/](./specs/server-foundation/)*
-*Beads: Pending*
+## [x] Flow: server-foundation
+*Link: [./archive/server-foundation/](./archive/server-foundation/)*
+*Beads: Closed*
 
 ## [ ] Flow: ipc-worker-bridge
 *Link: [./specs/ipc-worker-bridge/](./specs/ipc-worker-bridge/)*
