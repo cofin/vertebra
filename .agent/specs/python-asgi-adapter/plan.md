@@ -7,7 +7,7 @@
     - Ensure `shm_unlink` is NOT called by the worker on exit (Server owns the shm).
 
 ## Phase 2: Protocol Validation
-- [~] **Task: Verify Header Parsing**
+- [x] **Task: Verify Header Parsing** 755505e
     - Review `RequestHeader` struct in `vertebra-core` vs `worker.py`.
     - Ensure byte alignment matches.
 - [~] **Task: ASGI Scope Construction**
