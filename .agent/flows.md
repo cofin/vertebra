@@ -14,9 +14,9 @@
 *Link: [./archive/rust-broker-resources/](./archive/rust-broker-resources/)*
 *Beads: Closed*
 
-## [ ] Flow: frontend-native-bridge
-*Link: [./specs/frontend-native-bridge/](./specs/frontend-native-bridge/)*
-*Beads: Pending*
+## [x] Flow: frontend-native-bridge
+*Link: [./archive/frontend-native-bridge/](./archive/frontend-native-bridge/)*
+*Beads: Closed*
 
 ## [ ] Flow: advanced-networking
 *Link: [./specs/advanced-networking/](./specs/advanced-networking/)*
