@@ -10,13 +10,13 @@
     - Create `src/rs/vertebra-server/Cargo.toml`.
     - Add deps: `tokio` (full), `hyper` (full), `http-body-util`, `hyper-util`.
     - Add to workspace `src/rs/Cargo.toml`.
-- [~] **Task: Implement Basic Hyper Server**
+- [x] **Task: Implement Basic Hyper Server** 3ad0c76
     - `src/rs/vertebra-server/src/lib.rs`: `pub async fn serve(host: &str, port: u16)`.
     - Implement `service_fn` returning "Hello from Vertebra".
     - Implement `tokio::signal::ctrl_c` handler.
 
 ## Phase 3: Python Bindings
-- [ ] **Task: Link `vertebra-server` to `vertebra-py`**
+- [~] **Task: Link `vertebra-server` to `vertebra-py`**
     - Update `src/rs/vertebra-py/Cargo.toml`: Add `vertebra-server = { path = "../vertebra-server" }`.
 - [ ] **Task: Expose `start_http_server`**
     - `src/rs/vertebra-py/src/lib.rs`: Add `start_http_server`.
