@@ -17,7 +17,7 @@ TargetProfile = Literal["baseline", "modern"]
 
 class Bundler:
     """
-    Bundles a Python application, the Vertebra engine (Bun), and a portable Python runtime
+    Bundles a Python application, the Vertebra engine (Rust), and a portable Python runtime
     into a standalone executable (or distribution folder).
     """
 
@@ -57,8 +57,8 @@ class Bundler:
         # 4. Copy application code
         self._copy_app_code(python_dir)
 
-        # 5. Bundle the Engine (Bun binary)
-        await self._bundle_engine(python_dir)
+        # 5. Bundle the Engine (Rust binary)
+        await self._bundle_server(python_dir)
 
         console.log(f"[bold green]Build complete:[/bold green] {self.output_dir}")
         return self.output_dir
@@ -125,9 +125,6 @@ class Bundler:
 
         console.log(f"Running: {' '.join(cmd)}")
         env = os.environ.copy()
-        source_dir = self.project_dir / "src" / "ts"
-        if source_dir.exists():
-            env["VERTEBRA_ENGINE_SOURCE_DIR"] = str(source_dir)
         process = subprocess.run(cmd, cwd=self.project_dir, capture_output=True, text=True, env=env)
 
         if process.returncode != 0:
@@ -169,38 +166,38 @@ class Bundler:
             else:
                 shutil.copy2(item, dest)
 
-    async def _bundle_engine(self, python_dir: Path) -> None:
-        """Build and bundle the Bun engine binary into the distribution."""
-        outdir = self.output_dir / "engine"
-        outdir.mkdir(parents=True, exist_ok=True)
-
-        build_cli = Path(__file__).resolve().parent / "tools" / "build-cli.ts"
-        cmd = [
-            "bun",
-            "run",
-            str(build_cli),
-            "--target",
-            self.target,
-            "--profile",
-            self.profile,
-            "--outdir",
-            str(outdir),
-        ]
-
-        console.log(f"Building engine: {' '.join(cmd)}")
-        env = os.environ.copy()
-        source_dir = self.project_dir / "src" / "ts"
-        if source_dir.exists():
-            env["VERTEBRA_ENGINE_SOURCE_DIR"] = str(source_dir)
-        process = subprocess.run(cmd, cwd=self.project_dir, capture_output=True, text=True, env=env)
-        if process.returncode != 0:
-            console.print(f"[red]Engine build failed:[/red]\n{process.stderr}")
-            raise RuntimeError("Engine build failed")
-
-        engine_path = outdir / ("vertebra-engine.exe" if "windows" in self.target else "vertebra-engine")
-        if not engine_path.exists():
-            raise RuntimeError("Engine binary not found after build")
-
+    async def _bundle_server(self, python_dir: Path) -> None:
+        """Build and bundle the Rust server binary into the distribution."""
         bin_dir = python_dir / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(engine_path, bin_dir / engine_path.name)
+
+        cmd = [
+            "cargo",
+            "build",
+            "--release",
+            "-p",
+            "vertebra-server",
+        ]
+
+        console.log(f"Building server: {' '.join(cmd)}")
+        env = os.environ.copy()
+
+        if not shutil.which("cargo"):
+            raise RuntimeError("Cargo not found. Please install Rust.")
+
+        process = subprocess.run(cmd, cwd=self.project_dir, capture_output=True, text=True, env=env)
+
+        if process.returncode != 0:
+            console.print(f"[red]Server build failed:[/red]\n{process.stderr}")
+            raise RuntimeError("Server build failed")
+
+        # Locate the binary
+        target_dir = self.project_dir / "target" / "release"
+        binary_name = "vertebra-server.exe" if "windows" in self.target else "vertebra-server"
+        binary_path = target_dir / binary_name
+
+        if not binary_path.exists():
+            raise RuntimeError(f"Server binary not found at {binary_path}")
+
+        console.log(f"Copying binary from {binary_path} to {bin_dir}")
+        shutil.copy2(binary_path, bin_dir / binary_name)
