@@ -1,7 +1,7 @@
 # Plan: Frontend Native Bridge
 
 ## Phase 1: Rust Asset Serving
-- [ ] **Task: Implement `AssetManager` in `vertebra-server`**
+- [~] **Task: Implement `AssetManager` in `vertebra-server`**
     - Add `tower-http` (ServeDir) dependency.
     - Implement static file serving for production mode.
     - Implement a basic HTTP proxy for dev mode (using `hyper` client).

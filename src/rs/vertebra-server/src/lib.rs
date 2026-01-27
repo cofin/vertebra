@@ -14,7 +14,9 @@ use vertebra_broker::pool::PoolManager;
 use vertebra_broker::scheduler::FairScheduler;
 
 pub mod worker;
+pub mod assets;
 use worker::WorkerManager;
+use assets::AssetManager;
 
 async fn hello(_: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
     Ok(Response::new(Full::new(Bytes::from("Hello from Vertebra Rust"))))
