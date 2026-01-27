@@ -1,7 +1,7 @@
 # Plan: Server Foundation
 
 ## Phase 1: Cleanup
-- [ ] **Task: Remove Legacy JS Bindings**
+- [~] **Task: Remove Legacy JS Bindings**
     - `rm -rf src/rs/vertebra-js`
     - Remove `vertebra-js` from `src/rs/Cargo.toml` workspace members.
 
