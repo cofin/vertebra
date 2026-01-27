@@ -16,6 +16,13 @@
     - Methods to register/unregister pools.
 
 ## Phase 3: Integration
-- [~] **Task: Wire into `vertebra-server`**
+- [x] **Task: Wire into `vertebra-server`** bc0c793
     - `VertebraServer` should initialize the `Scheduler` and `PoolManager`.
     - Incoming IPC requests for "resource.acquire" should be enqueued in the scheduler.
+
+## Phase 4: Completion
+- [ ] **Task: Run Test Suite & Checkpoint**
+    - `make test-all`
+    - Create tag `checkpoint/rust-broker-resources/phase-4`
+- [ ] **Task: Archive Flow**
+    - Move to `.agent/archive/`
