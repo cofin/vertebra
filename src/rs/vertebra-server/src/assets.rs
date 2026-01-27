@@ -31,8 +31,9 @@ impl AssetManager {
             match self.client.get(&url).send().await {
                 Ok(resp) => {
                     let status = resp.status();
+                    let status_code = StatusCode::from_u16(status.as_u16())?;
                     let bytes = resp.bytes().await?;
-                    let mut builder = Response::builder().status(status);
+                    let mut builder = Response::builder().status(status_code);
                     // Copy basic headers? For now just body
                     Ok(builder.body(Full::new(bytes))?)
                 }

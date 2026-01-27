@@ -7,14 +7,14 @@
     - Implement a basic HTTP proxy for dev mode (using `hyper` client).
 
 ## Phase 2: CLI Build Integration
-- [~] **Task: Update `vertebra build`**
+- [x] **Task: Update `vertebra build`** bd5a273
     - In `src/py/vertebra/cli/build.py`:
     - Add logic to detect `package.json`.
     - If found, run `npm install` and `npm run build`.
     - Ensure output goes to a standard location (e.g., `dist/public`).
 
 ## Phase 3: Dev Server Orchestration
-- [ ] **Task: Update `NativeSupervisor`**
+- [~] **Task: Update `NativeSupervisor`**
     - Add ability to spawn a frontend dev command (e.g., `npm run dev`).
     - Pass the dev server port to the Rust server so it knows where to proxy.
 
