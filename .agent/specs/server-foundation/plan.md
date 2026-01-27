@@ -18,13 +18,13 @@
 ## Phase 3: Python Bindings
 - [x] **Task: Link `vertebra-server` to `vertebra-py`** e9f412c
     - Update `src/rs/vertebra-py/Cargo.toml`: Add `vertebra-server = { path = "../vertebra-server" }`.
-- [~] **Task: Expose `start_http_server`**
+- [x] **Task: Expose `start_http_server`** 222678a
     - `src/rs/vertebra-py/src/lib.rs`: Add `start_http_server`.
     - Initialize Tokio runtime inside the PyFunction.
     - Block on `runtime.block_on(server.serve(...))`.
 
 ## Phase 4: Validation
-- [ ] **Task: Python Verification Script**
+- [~] **Task: Python Verification Script**
     - Create `tools/test_server_boot.py`.
     - Call `_vertebra.start_http_server("127.0.0.1", 3000)`.
     - Validate with `curl http://127.0.0.1:3000`.
