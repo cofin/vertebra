@@ -6,11 +6,11 @@
     - Remove `vertebra-js` from `src/rs/Cargo.toml` workspace members.
 
 ## Phase 2: Rust Server Crate
-- [~] **Task: Scaffold `vertebra-server`**
+- [x] **Task: Scaffold `vertebra-server`** 9b2a637
     - Create `src/rs/vertebra-server/Cargo.toml`.
     - Add deps: `tokio` (full), `hyper` (full), `http-body-util`, `hyper-util`.
     - Add to workspace `src/rs/Cargo.toml`.
-- [ ] **Task: Implement Basic Hyper Server**
+- [~] **Task: Implement Basic Hyper Server**
     - `src/rs/vertebra-server/src/lib.rs`: `pub async fn serve(host: &str, port: u16)`.
     - Implement `service_fn` returning "Hello from Vertebra".
     - Implement `tokio::signal::ctrl_c` handler.
