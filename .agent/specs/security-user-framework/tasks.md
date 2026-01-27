@@ -52,10 +52,11 @@
 ## Phase 5: Vertebra Native Integration
 **Goal:** Plug the security framework into the Vertebra Native runtime.
 
-- [ ] Task: Implement `NativeAuthMiddleware` for Vertebra Native mode.
-- [ ] Task: Implement `current_user` utility/dependency for Native handlers.
-- [ ] Task: Write end-to-end tests for a "Protected Route" in Native mode.
-- [ ] Task: Checkpoint - Verify Phase 5 complete and create recovery point
+- [x] Task: Implement `NativeAuthMiddleware` for Vertebra Native mode. [999d213]
+    - *Note:* Satisfied by `VertebraRequest` lazy user hydration and `PipelineCompiler` DI support. No separate middleware needed.
+- [x] Task: Implement `current_user` utility/dependency for Native handlers. [999d213]
+- [x] Task: Write end-to-end tests for a "Protected Route" in Native mode. [999d213]
+- [x] Task: Checkpoint - Verify Phase 5 complete and create recovery point [checkpoint: 999d213]
 - [ ] Task: Flow - User Manual Verification 'Phase 5: Vertebra Native Integration' (Protocol in workflow.md)
 
 ## Phase 6: Quality & Documentation
