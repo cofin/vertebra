@@ -1,14 +1,14 @@
 # Plan: Rust Broker Resources
 
 ## Phase 1: Fairness Scheduler
-- [~] **Task: Port `FairScheduler` to Rust**
+- [x] **Task: Port `FairScheduler` to Rust** 1dcb642
     - Create `src/rs/vertebra-broker/src/scheduler.rs`.
     - Implement DRR algorithm (Deficit Round Robin).
     - Ensure thread-safety (Arc/Mutex if needed, or lock-free).
     - Unit tests to verify fairness (port TS tests).
 
 ## Phase 2: Pool Architecture (Abstract Only)
-- [ ] **Task: Define `PoolAdapter` Trait**
+- [~] **Task: Define `PoolAdapter` Trait**
     - Create `src/rs/vertebra-broker/src/pool.rs`.
     - Define trait for `acquire`, `release`, `stats`.
 - [ ] **Task: Implement `PoolManager`**

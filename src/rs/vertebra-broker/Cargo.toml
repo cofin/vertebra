@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 vertebra-core = { path = "../vertebra-core" }
 serde_json = { workspace = true }
+async-trait = "0.1"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

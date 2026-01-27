@@ -16,6 +16,7 @@ use vertebra_core::router::{RouteId, Router};
 use vertebra_core::shm::ShmRegion;
 
 pub mod scheduler;
+pub mod pool;
 
 #[repr(C)]
 pub struct VtbRouter {
