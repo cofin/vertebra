@@ -33,19 +33,19 @@ Each flow has its own detailed spec and plan in its respective folder.
 *Link: [./archive/rust-arrow-encoder/](./archive/rust-arrow-encoder/)*
 *Beads: Closed (Abandoned)*
 
+## [x] Flow: advanced-networking
+*Link: [./archive/advanced-networking/](./archive/advanced-networking/)*
+*Beads: Closed*
+
+## [x] Flow: packaging-distribution
+*Link: [./archive/packaging-distribution/](./archive/packaging-distribution/)*
+*Beads: Closed*
+
 ---
 
 ## [ ] Flow: vertebra-v2-rewrite
 *Link: [./specs/vertebra-v2-rewrite/](./specs/vertebra-v2-rewrite/)*
 *Status: ACTIVE - Master Plan for Rust Migration*
-
-## [ ] Flow: advanced-networking
-*Link: [./specs/advanced-networking/](./specs/advanced-networking/)*
-*Status: ACTIVE - HTTP/2, gRPC Support*
-
-## [ ] Flow: packaging-distribution
-*Link: [./specs/packaging-distribution/](./specs/packaging-distribution/)*
-*Status: ACTIVE*
 
 ## [ ] Flow: rust-native-router
 *Link: [./specs/rust-native-router/](./specs/rust-native-router/)*

@@ -25,6 +25,8 @@ For IPC and typing, see:
     vertebra.core.exceptions - Exception hierarchy
 """
 
+__version__ = "0.1.0"
+
 from vertebra.core import App
 from vertebra.core.entrypoint import ProviderPlugin, Vertebra
 from vertebra.core.procedures import (
@@ -46,6 +48,7 @@ __all__ = (
     "Serializer",
     "ShadowState",
     "Vertebra",
+    "__version__",
     "detect_serializer",
     "get_serializer",
     "procedure",

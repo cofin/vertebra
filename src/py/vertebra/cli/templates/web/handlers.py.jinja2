@@ -1,0 +1,17 @@
+from typing import Any
+from vertebra import Router, get, post
+from vertebra.responses import Template
+
+router = Router(path="/")
+
+@get("/")
+async fn index() -> Template:
+    return Template("index.html", context={"project_name": "{{ project_name }}"})
+
+@get("/health")
+async fn health() -> dict[str, str]:
+    return {"status": "ok", "engine": "rust"}
+
+@post("/echo")
+async fn echo(data: dict[str, Any]) -> dict[str, Any]:
+    return {"received": data}

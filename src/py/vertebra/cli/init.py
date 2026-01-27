@@ -12,12 +12,18 @@ from vertebra.utils.text import to_identifier
 @click.command()
 @click.argument("name", required=False)
 @click.option(
+    "--template",
+    type=click.Choice(["default", "web"]),
+    default="default",
+    help="Template to use for the new project",
+)
+@click.option(
     "--package-manager",
     type=click.Choice(["uv", "poetry", "hatch", "pdm", "pip"]),
     default="uv",
     help="Package manager to use",
 )
-def init(name: str | None, package_manager: str) -> None:
+def init(name: str | None, template: str, package_manager: str) -> None:
     """Initialize a new Vertebra project."""
     if not name:
         name = click.prompt("Project name", default="my-vertebra-app")
@@ -38,16 +44,37 @@ def init(name: str | None, package_manager: str) -> None:
     src_dir = project_dir / "src" / "py" / slug
     src_dir.mkdir(parents=True, exist_ok=True)
 
-    # Render templates
-    templates_dir = Path(__file__).parent / "templates" / "default"
+    from vertebra import __version__ as vertebra_version
 
-    context = {"project_name": name, "project_slug": slug}
+    # Render templates
+    templates_dir = Path(__file__).parent / "templates" / template
+
+    context = {
+        "project_name": name,
+        "project_slug": slug,
+        "vertebra_version": vertebra_version,
+    }
 
     # pyproject.toml
     render_template(templates_dir / "pyproject.toml.jinja2", project_dir / "pyproject.toml", context)
 
     # app.py
     render_template(templates_dir / "app.py.jinja2", src_dir / "app.py", context)
+
+    if template == "web":
+        # handlers.py
+        render_template(templates_dir / "handlers.py.jinja2", src_dir / "handlers.py", context)
+        
+        # static/ and templates/
+        (project_dir / "static").mkdir(exist_ok=True)
+        (project_dir / "templates").mkdir(exist_ok=True)
+        
+        if (templates_dir / "templates" / "index.html.jinja2").exists():
+            render_template(
+                templates_dir / "templates" / "index.html.jinja2",
+                project_dir / "templates" / "index.html",
+                context
+            )
 
     # __init__.py
     (src_dir / "__init__.py").touch()

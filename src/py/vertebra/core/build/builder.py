@@ -33,45 +33,70 @@ class Builder:
         types_path.write_text(output, encoding="utf-8")
         return types_path
 
-    async def compile_engine(self, target: str) -> Path:
-        """Compile Bun engine binary for target platform."""
+    async def compile_server(self, target: str) -> Path:
+        """Compile Rust server binary for target platform."""
         package_root = self.project_dir / "src" / "py" / "vertebra"
         outdir = package_root / "bin"
         outdir.mkdir(parents=True, exist_ok=True)
 
-        profile = self.config.targets.get(target, None)
-        profile_value = profile.profile if profile and profile.profile else self.config.profile
+        # Locate Cargo.toml
+        manifest_path = self.project_dir / "src" / "rs" / "Cargo.toml"
+        if not manifest_path.exists():
+            if (self.project_dir / "Cargo.toml").exists():
+                manifest_path = self.project_dir / "Cargo.toml"
+            else:
+                raise RuntimeError("Could not locate Cargo.toml in src/rs or root")
 
-        build_cli = Path(__file__).resolve().parent / "tools" / "build-cli.ts"
         cmd = [
-            "bun",
-            "run",
-            str(build_cli),
-            "--target",
-            target,
-            "--profile",
-            profile_value,
-            "--outdir",
-            str(outdir),
+            "cargo",
+            "build",
+            "--release",
+            "--manifest-path",
+            str(manifest_path),
+            "-p",
+            "vertebra-server",
         ]
 
+        if "windows" in target:
+            cmd.extend(["--target", "x86_64-pc-windows-msvc"])
+        elif "darwin" in target:
+            if "arm64" in target:
+                cmd.extend(["--target", "aarch64-apple-darwin"])
+            else:
+                cmd.extend(["--target", "x86_64-apple-darwin"])
+
         env = os.environ.copy()
-        source_dir = self.project_dir / "src" / "ts"
-        if source_dir.exists():
-            env["VERTEBRA_ENGINE_SOURCE_DIR"] = str(source_dir)
         result = subprocess.run(cmd, cwd=self.project_dir, capture_output=True, text=True, env=env)
         if result.returncode != 0:
-            raise RuntimeError(f"Engine build failed: {result.stderr.strip()}")
+            raise RuntimeError(f"Server build failed: {result.stderr.strip()}")
 
-        engine_name = "vertebra-engine.exe" if "windows" in target else "vertebra-engine"
-        engine_path = outdir / engine_name
-        if not engine_path.exists():
-            raise FileNotFoundError(f"Engine binary not found: {engine_path}")
-        return engine_path
+        # Locate the binary
+        binary_name = "vertebra-server.exe" if "windows" in target else "vertebra-server"
+        
+        # Check workspace target or root target
+        target_dir = manifest_path.parent / "target" / "release"
+        if "--target" in cmd:
+            idx = cmd.index("--target")
+            target_triple = cmd[idx + 1]
+            target_dir = manifest_path.parent / "target" / target_triple / "release"
+
+        binary_path = target_dir / binary_name
+        if not binary_path.exists():
+             # Fallback to root target
+             fallback_path = self.project_dir / "target" / "release" / binary_name
+             if fallback_path.exists():
+                 binary_path = fallback_path
+             else:
+                 raise FileNotFoundError(f"Server binary not found: {binary_path}")
+
+        dest_path = outdir / binary_name
+        import shutil
+        shutil.copy2(binary_path, dest_path)
+        return dest_path
 
     async def build_wheel(self) -> Path:
-        """Build Python wheel with embedded engine."""
-        await self.compile_engine(target="native")
+        """Build Python wheel with embedded server."""
+        await self.compile_server(target="native")
         dist_dir = self.project_dir / "dist"
         dist_dir.mkdir(parents=True, exist_ok=True)
 
@@ -89,11 +114,11 @@ class Builder:
         self, output: Path, target: str, profile: str, clean: bool = False
     ) -> None:
         """Build standalone single-file executable."""
-        bundler = Bundler(
+        from vertebra.core.build.onefile import OneFileBuilder
+        builder = OneFileBuilder(
             project_dir=self.project_dir,
-            output_dir=output,
+            output_path=output,
             target=target,
             profile=profile,
-            clean=clean,
         )
-        await bundler.build()
+        await builder.build()
