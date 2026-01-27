@@ -240,7 +240,8 @@ export async function createAsgiServer(
         const start = performance.now();
 
         // Validate Authentication
-        const claims = await authValidator.validate(tracedRequest);
+        const authResult = await authValidator.validate(tracedRequest);
+        const claims = authResult?.claims ?? null;
 
         if (bridge.upgradeWebSocket(tracedRequest, server)) {
           log("info", "request.upgrade", {
@@ -251,6 +252,21 @@ export async function createAsgiServer(
           return;
         }
         const response = await bridge.handle(tracedRequest, claims);
+        
+        // Inject rotated tokens if available
+        if (authResult?.newTokens && response) {
+            const { accessToken, refreshToken } = authResult.newTokens;
+            const cookieName = resolved.auth.cookieName || "access_token";
+            // Append Set-Cookie headers
+            response.headers.append("Set-Cookie", `${cookieName}=${accessToken}; Path=/; HttpOnly; SameSite=Lax`);
+            
+            if (refreshToken && resolved.auth.refreshTokenCookieName) {
+                response.headers.append("Set-Cookie", `${resolved.auth.refreshTokenCookieName}=${refreshToken}; Path=/; HttpOnly; SameSite=Lax`);
+            }
+            
+            log("info", "auth.tokens_rotated", { trace_id: traceId });
+        }
+
         trackRequest(performance.now() - start);
 
         log("info", "request.complete", {

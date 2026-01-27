@@ -1,23 +1,28 @@
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createRemoteJWKSet, jwtVerify, SignJWT, errors } from "jose";
 import type { AuthConfig, AuthProviderConfig } from "./config";
 
 export type AuthClaims = Record<string, any>;
+
+export type AuthResult = {
+  claims: AuthClaims;
+  newTokens?: { accessToken: string; refreshToken?: string };
+};
 
 export class AuthValidator {
   private jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
   constructor(private config: AuthConfig) {}
 
-  async validate(request: Request): Promise<AuthClaims | null> {
+  async validate(request: Request): Promise<AuthResult | null> {
     const providers = this.config.providers;
     if (!providers || providers.length === 0) {
       return null;
     }
 
     for (const provider of providers) {
-      const claims = await this.validateProvider(request, provider);
-      if (claims) {
-        return claims;
+      const result = await this.validateProvider(request, provider);
+      if (result) {
+        return result;
       }
     }
 
@@ -27,17 +32,18 @@ export class AuthValidator {
   private async validateProvider(
     request: Request,
     provider: AuthProviderConfig,
-  ): Promise<AuthClaims | null> {
+  ): Promise<AuthResult | null> {
     try {
       if (provider.type === "iap") {
         const token = request.headers.get("x-goog-iap-jwt-assertion");
         if (!token) return null;
 
         const jwksUri = "https://www.gstatic.com/iap/verify/public_key-jwk";
-        return await this.verifyJwt(token, jwksUri, {
+        const claims = await this.verifyJwt(token, jwksUri, {
           issuer: "https://cloud.google.com/iap",
           audience: provider.audience,
         });
+        return claims ? { claims } : null;
       }
 
       if (provider.type === "jwt" || provider.type === "oauth2") {
@@ -50,20 +56,17 @@ export class AuthValidator {
         if (!token) return null;
 
         if (provider.secret) {
-          return await this.verifyJwtSymmetric(token, provider.secret, {
-            issuer: provider.issuer,
-            audience: provider.audience,
-          });
+          return await this.verifyJwtSymmetric(token, provider, request);
         }
 
         if (!provider.jwksUri) return null;
-        return await this.verifyJwt(token, provider.jwksUri, {
+        const claims = await this.verifyJwt(token, provider.jwksUri, {
           issuer: provider.issuer,
           audience: provider.audience,
         });
+        return claims ? { claims } : null;
       }
     } catch (e) {
-      console.error("Auth validation failed:", e);
       // Individual provider failure shouldn't crash the whole validation
       return null;
     }
@@ -111,14 +114,82 @@ export class AuthValidator {
 
   private async verifyJwtSymmetric(
     token: string,
-    secret: string,
-    options: { issuer?: string; audience?: string },
-  ): Promise<AuthClaims | null> {
-    const secretKey = new TextEncoder().encode(secret);
-    const { payload } = await jwtVerify(token, secretKey, {
-      issuer: options.issuer,
-      audience: options.audience,
-    });
-    return payload;
+    provider: AuthProviderConfig,
+    request: Request,
+  ): Promise<AuthResult | null> {
+    if (!provider.secret) return null;
+    const secretKey = new TextEncoder().encode(provider.secret);
+    
+    try {
+      const { payload } = await jwtVerify(token, secretKey, {
+        issuer: provider.issuer,
+        audience: provider.audience,
+      });
+      return { claims: payload };
+    } catch (e) {
+      if (e instanceof errors.JWTExpired) {
+        // Handle Refresh Token Rotation
+        if (this.config.refreshTokenCookieName && provider.refreshSecret) {
+           return await this.rotateTokens(request, provider);
+        }
+      }
+      throw e;
+    }
+  }
+
+  private async rotateTokens(
+    request: Request,
+    provider: AuthProviderConfig,
+  ): Promise<AuthResult | null> {
+    if (!this.config.refreshTokenCookieName || !provider.refreshSecret || !provider.secret) {
+        return null;
+    }
+
+    const refreshToken = this.extractCookieToken(request, this.config.refreshTokenCookieName);
+    if (!refreshToken) return null;
+
+    try {
+        const refreshSecretKey = new TextEncoder().encode(provider.refreshSecret);
+        const { payload } = await jwtVerify(refreshToken, refreshSecretKey, {
+            issuer: provider.issuer,
+            audience: provider.audience,
+        });
+
+        // Ensure it's a refresh token (optional claim check)
+        // if (payload.token_type !== 'refresh') return null;
+
+        // Generate new tokens
+        // Access Token: 1 hour expiration (default)
+        const secretKey = new TextEncoder().encode(provider.secret);
+        const newAccessToken = await new SignJWT(payload)
+            .setProtectedHeader({ alg: 'HS256' })
+            .setIssuedAt()
+            .setIssuer(provider.issuer || '')
+            .setAudience(provider.audience || '')
+            .setExpirationTime('1h')
+            .sign(secretKey);
+
+        // Refresh Token: 24h expiration (default) - Rotate it
+        // We reuse the claims from the old refresh token (user id, etc)
+        const newRefreshToken = await new SignJWT(payload)
+            .setProtectedHeader({ alg: 'HS256' })
+            .setIssuedAt()
+            .setIssuer(provider.issuer || '')
+            .setAudience(provider.audience || '')
+            .setExpirationTime('24h')
+            .sign(refreshSecretKey);
+
+        return {
+            claims: payload,
+            newTokens: {
+                accessToken: newAccessToken,
+                refreshToken: newRefreshToken
+            }
+        };
+
+    } catch (e) {
+        // Refresh token invalid or expired
+        return null;
+    }
   }
 }

@@ -49,11 +49,13 @@ export interface AuthProviderConfig {
   issuer?: string;
   jwksUri?: string;
   secret?: string;
+  refreshSecret?: string;
 }
 
 export interface AuthConfig {
   providers?: AuthProviderConfig[];
   cookieName?: string;
+  refreshTokenCookieName?: string;
 }
 
 export interface ServerIpcConfig extends IpcClientConfig {
