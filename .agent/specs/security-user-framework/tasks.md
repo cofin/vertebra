@@ -62,7 +62,7 @@
 ## Phase 6: Quality & Documentation
 **Goal:** Finalize the PRD with documentation and benchmarks.
 
-- [ ] Task: Benchmark IPC Hashing vs. Native Python `argon2-cffi`.
-- [ ] Task: Update `docs/architecture/` with the new Security Framework details.
-- [ ] Task: Checkpoint - Verify Phase 6 complete and create recovery point
-- [ ] Task: Flow - User Manual Verification 'Phase 6: Quality & Documentation' (Protocol in workflow.md)
+- [x] Task: Benchmark IPC Hashing vs. Native Python `argon2-cffi`. [3bb41c3]
+- [x] Task: Update `docs/architecture/` with the new Security Framework details. [3bb41c3]
+- [x] Task: Checkpoint - Verify Phase 6 complete and create recovery point [checkpoint: 3bb41c3]
+- [x] Task: Flow - User Manual Verification 'Phase 6: Quality & Documentation' (Protocol in workflow.md)
