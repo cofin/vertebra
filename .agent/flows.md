@@ -6,9 +6,9 @@
 *Link: [./archive/ipc-worker-bridge/](./archive/ipc-worker-bridge/)*
 *Beads: Closed*
 
-## [ ] Flow: python-asgi-adapter
-*Link: [./specs/python-asgi-adapter/](./specs/python-asgi-adapter/)*
-*Beads: Pending*
+## [x] Flow: python-asgi-adapter
+*Link: [./archive/python-asgi-adapter/](./archive/python-asgi-adapter/)*
+*Beads: Closed*
 
 ## [ ] Flow: rust-broker-resources
 *Link: [./specs/rust-broker-resources/](./specs/rust-broker-resources/)*
