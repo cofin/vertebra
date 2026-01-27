@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from vertebra.core.asgi import VertebraAdapter
-from vertebra.core.lifecycle import Vertex
+from vertebra.core.lifecycle import App
 from vertebra.web.routing import get
 
 
@@ -21,7 +23,7 @@ async def echo_handler(message: str) -> dict[str, str]:
 
 @pytest.mark.anyio
 async def test_asgi_adapter_http_flow() -> None:
-    app = Vertex()
+    app = App()
     app.register(hello_handler)
     app.register(echo_handler)
     adapter = VertebraAdapter(app)
@@ -31,10 +33,10 @@ async def test_asgi_adapter_http_flow() -> None:
 
     events = []
 
-    async def receive() -> dict[str, str]:
+    async def receive() -> dict[str, Any]:
         return {"type": "http.request"}
 
-    async def send(message) -> None:
+    async def send(message: dict[str, Any]) -> None:
         events.append(message)
 
     await adapter(scope, receive, send)
@@ -60,16 +62,16 @@ async def test_asgi_adapter_http_flow() -> None:
 
 @pytest.mark.anyio
 async def test_asgi_adapter_404() -> None:
-    app = Vertex()
+    app = App()
     adapter = VertebraAdapter(app)
 
     scope = {"type": "http", "method": "GET", "path": "/not-found"}
     events = []
 
-    async def receive() -> dict[str, str]:
+    async def receive() -> dict[str, Any]:
         return {}
 
-    async def send(m) -> None:
+    async def send(m: dict[str, Any]) -> None:
         events.append(m)
 
     await adapter(scope, receive, send)

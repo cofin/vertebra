@@ -12,19 +12,19 @@ from vertebra.web.routing import extract_path_params
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from vertebra.core.lifecycle import Vertex
+    from vertebra.core.lifecycle import App
 
 _logger = logging.getLogger(__name__)
 
 
 class VertebraAdapter:
-    """Adapts a Vertex native app to the ASGI protocol.
+    """Adapts a Vertebra native app to the ASGI protocol.
 
     This allows running Vertebra apps with standard ASGI servers (Uvicorn, etc.)
     and serves as a compatibility layer.
     """
 
-    def __init__(self, app: Vertex) -> None:
+    def __init__(self, app: App) -> None:
         self.app = app
 
     async def __call__(

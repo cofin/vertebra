@@ -66,6 +66,14 @@
 
 ### Bun FFI
 - When adding new Rust functions to `vertebra-broker`, rebuild the Rust library (`make rs-build`) **and** ensure the Bun FFI definition in `shm.ts` matches exactly - runtime symbol lookup errors otherwise
+- **Critical Discovery: Bun FD Watching Limitations**: Bun's `node:net` module is a compatibility shim and does NOT properly integrate arbitrary file descriptors with its event loop. `net.Socket({ fd })` and similar patterns that work in Node.js will NOT fire events in Bun. High-performance IPC in Bun requires hybrid polling loops or Unix sockets.
+
+### PyO3 and C-API Overhead
+- **Naive PyO3 Iteration is Slow**: Safe PyO3 wrappers (`PyList`, `PyTuple`, `PyAny::extract`) incur significant C-API overhead (refcounting, bounds checking) per cell. For Arrow encoding, an optimized C extension like `nanoarrow` using raw pointers is ~3x faster than safe Rust iteration.
+- **Serialization Tradeoffs**: Serializing Python objects to bytes (msgpack/json) just to decode them in Rust for speed is often a net loss due to the cost of the initial serialization pass in Python.
+
+### Self-Pipe / Eventfd Shutdown
+- **Thread Shutdown**: Use a dedicated `eventfd` (or pipe) as a second poll target to wake a blocked thread instantly. This allows for infinite timeouts (0% CPU idle) while maintaining instant shutdown capabilities.
 
 ### Testing
 - **Test Timeouts**: Integration tests with `subprocess` and network calls are prone to timeouts - ensure correct `PYTHONPATH`, `VERTEBRA_CONFIG` environment variables and absolute paths

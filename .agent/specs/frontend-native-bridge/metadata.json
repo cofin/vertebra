@@ -1,0 +1,10 @@
+{
+  "flow_id": "frontend-native-bridge",
+  "type": "feature",
+  "status": "planned",
+  "parent_prd": "vertebra-v2-rewrite",
+  "beads_epic_id": "vertebra-yco.5",
+  "created_at": "2026-01-27T00:00:00Z",
+  "updated_at": "2026-01-27T00:00:00Z",
+  "description": "Native integration with Rspack/Vite for asset bundling."
+}

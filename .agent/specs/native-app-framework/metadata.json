@@ -38,7 +38,7 @@
       "Custom Zero-Copy Headers (16-byte)",
       "MsgPack Payloads (msgspec)",
       "Rust-based Arrow Encoder",
-      "Unified Vertex Config Class",
+      "Unified App Config Class",
       "Litestar CLI Override Plugin"
     ]
   }

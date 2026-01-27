@@ -40,8 +40,8 @@
 - [x] Write unit tests for DI primitives
 
 ### Task 2.2: Simplified Provider Registration [f7476c5]
-- [x] Implement `vertex.provide(ServiceClass)` auto-discovery (Renamed from `app`)
-- [x] Implement `@vertex.provide` decorator for factories
+- [x] Implement `app.provide(ServiceClass)` auto-discovery (Renamed from `app`)
+- [x] Implement `@app.provide` decorator for factories
 - [x] Infer dependencies from `__init__` type hints
 - [x] Support async factory functions
 - [x] Write tests for registration patterns
@@ -231,7 +231,7 @@
 - [x] Results: P50 latency < 70μs verified.
 
 ### Task 7.3: Legacy Removal & Adapter Modernization [COMPLETED]
-- [x] Remove any deprecated pre-Vertebra `App` classes not aliased to `Vertex`
+- [x] Remove any deprecated pre-Vertebra `App` classes 
 - [x] Update `src/py/vertebra/asgi.py` adapter to use new `RequestHeader` + `msgspec` protocol
 - [x] Ensure ASGI adapter can co-exist with Native Routes in the same worker pool
 - [x] Remove any deprecated flatbuffers generated code
@@ -352,7 +352,7 @@
 - [ ] Generate API reference docs
 
 ### Task 9.2: User Guides
-- [ ] Getting started guide: Native (`Vertex`) vs Litestar (`VertebraPlugin`)
+- [ ] Getting started guide: Native (`App`) vs Litestar (`VertebraPlugin`)
 - [ ] Controller and routing guide
 - [ ] State synchronization guide
 - [ ] Dependency injection guide

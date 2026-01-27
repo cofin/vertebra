@@ -12,10 +12,11 @@ Provides:
 
 from vertebra.core.context import ContextKind, VertebraContext
 from vertebra.core.events import EventBus, EventError, EventHandler
-from vertebra.core.lifecycle import Vertex
+from vertebra.core.lifecycle import App
 from vertebra.core.tasks import BackgroundTaskError, BackgroundTaskHandle, BackgroundTasks
 
 __all__ = [
+    "App",
     "BackgroundTaskError",
     "BackgroundTaskHandle",
     "BackgroundTasks",
@@ -24,5 +25,4 @@ __all__ = [
     "EventError",
     "EventHandler",
     "VertebraContext",
-    "Vertex",
 ]

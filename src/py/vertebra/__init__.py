@@ -3,9 +3,7 @@
 Core Exports:
     Vertebra - Application container for broker-managed plugins
     ProviderPlugin - Protocol for broker plugins
-    Vertex - Native application class
-    App - Alias for Vertex
-
+    App - Native application class
 Procedures:
     procedure - Decorator for registering type-bridged handlers
 
@@ -27,8 +25,8 @@ For IPC and typing, see:
     vertebra.core.exceptions - Exception hierarchy
 """
 
+from vertebra.core import App
 from vertebra.core.entrypoint import ProviderPlugin, Vertebra
-from vertebra.core.lifecycle import App, Vertex
 from vertebra.core.procedures import (
     MsgspecSerializer,
     PydanticSerializer,
@@ -48,12 +46,8 @@ __all__ = (
     "Serializer",
     "ShadowState",
     "Vertebra",
-    "Vertex",
-    "__version__",
     "detect_serializer",
     "get_serializer",
     "procedure",
     "register_serializer",
 )
-
-__version__ = "0.1.0"

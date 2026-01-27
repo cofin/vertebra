@@ -1,0 +1,10 @@
+{
+  "flow_id": "advanced-networking",
+  "type": "feature",
+  "status": "planned",
+  "parent_prd": "vertebra-v2-rewrite",
+  "beads_epic_id": "vertebra-yco.6",
+  "created_at": "2026-01-27T00:00:00Z",
+  "updated_at": "2026-01-27T00:00:00Z",
+  "description": "Implement modern web protocols: HTTP/2, HTTP/3, gRPC, SSE."
+}

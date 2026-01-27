@@ -16,7 +16,7 @@ StateT = TypeVar("StateT", bound=NativeState)
 LifecycleHook = Callable[[], Any | Awaitable[Any]]
 
 
-class Vertex:
+class App:
     """Native application container for routing, state, and lifecycle hooks."""
 
     __slots__ = (
@@ -146,10 +146,6 @@ class Vertex:
         await _run_hooks(self._shutdown_hooks)
 
 
-# Alias for backward compatibility
-App = Vertex
-
-
 async def _run_hooks(hooks: list[LifecycleHook]) -> None:
     for hook in hooks:
         result = hook()
@@ -157,4 +153,4 @@ async def _run_hooks(hooks: list[LifecycleHook]) -> None:
             await result
 
 
-__all__ = ("App", "Vertex")
+__all__ = ("App",)

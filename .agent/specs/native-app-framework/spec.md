@@ -189,7 +189,7 @@ Python Worker A                    Bun Broker                    Python Worker B
 ### Files to Modify/Create
 
 **New Files:**
-- `src/py/vertebra/vertex.py` - Vertex class (Unified Config Entry Point)
+- `src/py/vertebra/core/lifecycle.py` - App class (Unified Config Entry Point)
 - `src/py/vertebra/routing/` - Router, Route, decorators
 - `src/py/vertebra/controllers/` - Controller base class
 - `src/py/vertebra/di/` - Inject, Provider, AOT compiler
@@ -210,7 +210,7 @@ Python Worker A                    Bun Broker                    Python Worker B
 
 ## Acceptance Criteria
 
-- [ ] `Vertex` class handles both Native Routes and ASGI Mounts
+- [ ] `App` class handles both Native Routes and ASGI Mounts
 - [ ] `VertebraPlugin` correctly overrides `litestar run` to launch Vertebra Runtime
 - [ ] Routes resolve in O(1) time via Rust matchit
 - [ ] State changes propagate to all workers in <100μs using Custom Header protocol
