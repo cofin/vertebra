@@ -22,6 +22,6 @@
 *Link: [./specs/advanced-networking/](./specs/advanced-networking/)*
 *Beads: Pending*
 
-## [ ] Flow: cleanup-and-packaging
-*Link: [./specs/cleanup-and-packaging/](./specs/cleanup-and-packaging/)*
-*Beads: Pending*
+## [x] Flow: cleanup-and-packaging
+*Link: [./archive/cleanup-and-packaging/](./archive/cleanup-and-packaging/)*
+*Beads: Closed*
