@@ -8,6 +8,7 @@ use vertebra_core::protocol::{RequestHeader, flags};
 use crate::worker::Worker;
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AsgiRequest {
     id: String,
     method: String,
@@ -17,14 +18,16 @@ struct AsgiRequest {
     #[serde(with = "serde_bytes")]
     body: Vec<u8>,
     scheme: String,
+    /// HTTP version (e.g., "1.1", "2")
+    http_version: String,
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AsgiResponse {
-    id: String,
     status: u16,
     headers: Vec<(String, String)>,
-    #[serde(with = "serde_bytes")]
+    #[serde(with = "serde_bytes", default)]
     body: Vec<u8>,
 }
 
@@ -37,6 +40,15 @@ pub async fn dispatch(
     
     let id = uuid::Uuid::new_v4().to_string();
     
+    let http_version = match parts.version {
+        hyper::Version::HTTP_09 => "0.9",
+        hyper::Version::HTTP_10 => "1.0",
+        hyper::Version::HTTP_11 => "1.1",
+        hyper::Version::HTTP_2 => "2",
+        hyper::Version::HTTP_3 => "3",
+        _ => "1.1",
+    }.to_string();
+
     let asgi_req = AsgiRequest {
         id: id.clone(),
         method: parts.method.as_str().to_string(),
@@ -47,9 +59,10 @@ pub async fn dispatch(
             .collect(),
         body: body_bytes.to_vec(),
         scheme: "http".to_string(),
+        http_version,
     };
     
-    let payload = rmp_serde::to_vec(&asgi_req)?;
+    let payload = rmp_serde::to_vec_named(&asgi_req)?;
     
     let header = RequestHeader::new(
         0, 
@@ -61,7 +74,7 @@ pub async fn dispatch(
     message.extend_from_slice(&header.to_bytes());
     message.extend_from_slice(&payload);
     
-    let mut worker = worker.lock().await;
+    let worker = worker.lock().await;
     
 use vertebra_core::channel::ChannelError;
 

@@ -40,7 +40,12 @@ class WorkerConfig(msgspec.Struct, frozen=True):
     shm_size: int | None = None
 
 
-class AsgiRequest(msgspec.Struct):
+class AsgiRequest(msgspec.Struct, rename="camel"):
+    """ASGI HTTP request deserialized from IPC.
+
+    Uses camelCase wire format for cross-language compatibility with Rust server.
+    Single-word fields (id, method, path, etc.) are identical in both formats.
+    """
     id: str
     method: str
     path: str
@@ -48,10 +53,10 @@ class AsgiRequest(msgspec.Struct):
     headers: list[tuple[str, str]]
     body: bytes = b""
     scheme: str = "http"
-    http_version: str = msgspec.field(default="1.1", name="httpVersion")
-    raw_path: bytes | None = msgspec.field(default=None, name="rawPath")
-    query_string: bytes | None = msgspec.field(default=None, name="queryString")
-    root_path: str = msgspec.field(default="", name="rootPath")
+    http_version: str = "1.1"
+    raw_path: bytes | None = None
+    query_string: bytes | None = None
+    root_path: str = ""
     server: tuple[str, int | None] | None = None
     client: tuple[str, int | None] | None = None
     extensions: dict[str, dict[str, Any]] = msgspec.field(default_factory=dict)
@@ -59,7 +64,11 @@ class AsgiRequest(msgspec.Struct):
     auth_claims: dict[str, Any] | None = None
 
 
-class AsgiResponse(msgspec.Struct):
+class AsgiResponse(msgspec.Struct, rename="camel"):
+    """ASGI HTTP response serialized for IPC.
+
+    Uses camelCase wire format for cross-language compatibility with Rust server.
+    """
     id: str
     status: int
     headers: list[tuple[str, str]]
@@ -136,14 +145,34 @@ class ResponseWriter:
         timeout_ms: int,
         correlation_id: int = 0,
         resp_notify_fd: int | None = None,
+        *,
+        managed_mode: bool = False,
     ) -> None:
         self._ring = ring
         self._codec = codec
         self._timeout_ms = timeout_ms
         self._correlation_id = correlation_id
         self._resp_notify_fd = resp_notify_fd
+        self._managed_mode = managed_mode
+        # Aggregation state for managed mode (Rust server expects single AsgiResponse)
+        self._agg_status: int = 200
+        self._agg_headers: list[tuple[str, str]] = []
+        self._agg_body_parts: list[bytes] = []
+        self._agg_request_id: str = ""
 
     async def send(self, frame: dict[str, Any]) -> None:
+        """Send a response frame.
+
+        In managed mode (Rust server), frames are aggregated and sent as a single
+        AsgiResponse when the response is complete (more_body=False).
+        """
+        if self._managed_mode:
+            await self._send_managed(frame)
+        else:
+            await self._send_frame(frame)
+
+    async def _send_frame(self, frame: dict[str, Any]) -> None:
+        """Send a single ASGI frame (legacy mode for TypeScript broker)."""
         payload = self._codec.encode(frame)
         header = ResponseHeader(id=self._correlation_id, flags=Flags.NONE, payload_len=len(payload))
         message = header.to_bytes() + payload
@@ -160,6 +189,57 @@ class ResponseWriter:
                     ResponseWriter._pending_notifications[self._resp_notify_fd] = True
                 except OSError:
                     pass  # Ignore errors - client may have disconnected
+
+    async def _send_managed(self, frame: dict[str, Any]) -> None:
+        """Aggregate ASGI frames and send as single AsgiResponse (managed mode).
+
+        Rust server expects a single aggregated response, not multiple ASGI frames.
+        We buffer http.response.start and http.response.body frames, then send
+        a complete AsgiResponse when more_body=False.
+        """
+        frame_type = frame.get("type")
+        self._agg_request_id = frame.get("id", self._agg_request_id)
+
+        if frame_type == "http.response.start":
+            self._agg_status = frame.get("status", 200)
+            # ASGI headers are [[b"name", b"value"], ...], convert to [(str, str), ...]
+            raw_headers = frame.get("headers", [])
+            self._agg_headers = [
+                (
+                    h[0].decode() if isinstance(h[0], bytes) else h[0],
+                    h[1].decode() if isinstance(h[1], bytes) else h[1],
+                )
+                for h in raw_headers
+            ]
+        elif frame_type == "http.response.body":
+            body = frame.get("body")
+            if body:
+                self._agg_body_parts.append(body if isinstance(body, bytes) else body.encode())
+
+            # Send aggregated response when complete
+            if not frame.get("more_body", False):
+                response = AsgiResponse(
+                    id=self._agg_request_id,
+                    status=self._agg_status,
+                    headers=self._agg_headers,
+                    body=b"".join(self._agg_body_parts) if self._agg_body_parts else None,
+                )
+                payload = self._codec.encode(response)
+                header = ResponseHeader(id=self._correlation_id, flags=Flags.NONE, payload_len=len(payload))
+                message = header.to_bytes() + payload
+                self._ring.send(message, 0)
+
+                # Signal Rust server
+                if self._resp_notify_fd is not None:
+                    try:
+                        os.write(self._resp_notify_fd, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+                    except OSError:
+                        pass
+
+                # Reset aggregation state
+                self._agg_status = 200
+                self._agg_headers = []
+                self._agg_body_parts = []
 
     @classmethod
     def clear_pending(cls, fd: int) -> None:
@@ -329,7 +409,12 @@ class AsgiWorker:
 
                 # Manually register "server" client
                 client_id = "server"
-                client = ClientState(id=client_id, request=req_ring, response=resp_ring, resp_notify_fd=None)
+                client = ClientState(
+                    id=client_id,
+                    request=req_ring,
+                    response=resp_ring,
+                    resp_notify_fd=self._config.notify_write_fd,
+                )
                 self._clients[client_id] = client
                 self._contexts[client_id] = {}
 
@@ -552,23 +637,36 @@ class AsgiWorker:
                 os.write(resp_notify_fd, b"\x01\x00\x00\x00\x00\x00\x00\x00")
 
     async def _handle_client_payload(self, client_id: str, client: ClientState, payload: bytes) -> None:
+        print(f"DEBUG: _handle_client_payload len={len(payload)}", flush=True)
         if len(payload) < HEADER_SIZE:
             return
         header = RequestHeader.from_bytes(payload[:HEADER_SIZE])
+        print(f"DEBUG: Header id={header.id} flags={header.flags} len={header.payload_len}", flush=True)
         try:
             message = self._codec.decode(payload[HEADER_SIZE:])
-        except Exception:  # noqa: BLE001
+            msg_type = message.get("type") if isinstance(message, dict) else type(message)
+            print(f"DEBUG: Decoded message type={msg_type}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"DEBUG: Decode error: {e}", flush=True)
             return
-        if not isinstance(message, dict):
-            return
+        
         writer = ResponseWriter(
             client.response,
             self._codec,
             int(self._config.timeout * 1000),
             correlation_id=header.id,
             resp_notify_fd=client.resp_notify_fd,
+            managed_mode=True,  # Rust server expects aggregated AsgiResponse
         )
         contexts = self._contexts.setdefault(client_id, {})
+
+        if isinstance(message, list):
+            await self._handle_unary_request(message, contexts, writer)
+            return
+
+        if not isinstance(message, dict):
+            return
+        
         frame_type = message.get("type")
         if frame_type is None:
             await self._handle_unary_request(message, contexts, writer)
@@ -787,12 +885,15 @@ class AsgiWorker:
             logger.log(log_level, "%s", message)
 
     async def _handle_unary_request(
-        self, message: dict[str, Any], contexts: dict[str, RequestContext], writer: "ResponseWriter"
+        self, message: Any, contexts: dict[str, RequestContext], writer: "ResponseWriter"
     ) -> None:
         """Handle unary request format (single message with inline body)."""
         try:
             request = msgspec.convert(message, AsgiRequest)
-        except Exception:  # noqa: BLE001 - defensive conversion of untrusted IPC data
+        except Exception as e:  # noqa: BLE001 - defensive conversion of untrusted IPC data
+            logging.getLogger("vertebra.worker").error(
+                "Failed to convert IPC message to AsgiRequest: %s (message type: %s)", e, type(message)
+            )
             return
         meta = RequestMeta(
             scope_type="http",
@@ -1310,6 +1411,9 @@ def main() -> None:
     # Resolve notify fds: CLI args take priority, then env vars (for Rust supervisor)
     notify_read_fd = _resolve_notify_fd(args.notify_read_fd, "VERTEBRA_NOTIFY_FD")
     notify_write_fd = _resolve_notify_fd(args.notify_write_fd, "VERTEBRA_NOTIFY_WRITE_FD")
+    # If write fd is not set but read fd is (and we are in managed mode), default write to read (same eventfd)
+    if notify_write_fd is None and notify_read_fd is not None:
+        notify_write_fd = notify_read_fd
 
     # Resolve SHM FDs (managed mode)
     req_shm_fd = _resolve_notify_fd(None, "VERTEBRA_REQ_SHM_FD")
