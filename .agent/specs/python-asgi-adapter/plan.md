@@ -1,7 +1,7 @@
 # Plan: Python ASGI Adapter
 
 ## Phase 1: Worker Startup Logic
-- [ ] **Task: Update `AsgiWorker.start`**
+- [~] **Task: Update `AsgiWorker.start`**
     - Detect if running under `vertebra-server` (e.g. check for `VERTEBRA_SHM_PREFIX` or specific env var).
     - If managed: `AsyncRing.open_named` instead of `create_named`.
     - Ensure `shm_unlink` is NOT called by the worker on exit (Server owns the shm).

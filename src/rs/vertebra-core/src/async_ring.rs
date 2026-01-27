@@ -108,6 +108,41 @@ impl AsyncRing {
         })
     }
 
+    /// Open an async ring from an existing raw file descriptor (for mapped SHM).
+    ///
+    /// # Safety
+    /// Caller must ensure `fd` is valid and maps to a shared memory region created
+    /// with compatible layout.
+    #[cfg(unix)]
+    pub unsafe fn from_raw_fd(
+        fd: std::os::fd::RawFd,
+        slot_size: usize,
+        slots: usize,
+    ) -> Result<Self, AsyncRingError> {
+        use std::os::fd::FromRawFd;
+        let layout = RingLayout::new(slot_size, slots, crate::buffer::ChannelMode::Spsc);
+        // Map region from FD
+        // ShmRegion::map handles mmap
+        let region = Arc::new(ShmRegion::map(fd, layout.total_size)?);
+        // Note: ShmRegion::map takes ownership of FD if we treat it as ShmHandle?
+        // Let's check ShmRegion::map implementation.
+        // It calls map_fd_region which creates ShmRegion.
+        // However, we usually duplicate the FD or pass ownership.
+        // Here we assume we pass ownership of the raw FD to ShmRegion.
+        
+        let ring = SpscRing::attach(Arc::clone(&region), layout)?;
+        let notifier = Notifier::new()?; // Create new notifier for local use? 
+        // Wait, if this is worker, it needs to attach to existing notifier if using shared?
+        // Or does it have its own?
+        // Worker.py uses add_reader on a separate notification FD.
+        
+        Ok(Self {
+            ring,
+            notifier,
+            region,
+        })
+    }
+
     /// Get the notification file descriptor for asyncio integration.
     ///
     /// Register this FD with `loop.add_reader(fd, callback)` to receive

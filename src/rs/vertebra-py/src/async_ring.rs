@@ -112,6 +112,33 @@ impl PyAsyncRing {
         self.inner.notifier_fd()
     }
 
+    /// Open an async ring from raw file descriptors (for managed mode).
+    #[classmethod]
+    fn from_raw_fd_handle(
+        _cls: &Bound<'_, PyType>,
+        fd: i32,
+        slot_size: usize,
+        slots: usize,
+    ) -> PyResult<Self> {
+        // SAFETY: We trust the Python caller to pass a valid FD from the supervisor.
+        // We MUST use `unsafe` here as we are creating a Safe wrapper from a Raw FD.
+        // The core implementation `AsyncRing::from_raw_fd` handles mapping.
+        #[cfg(unix)]
+        {
+            let inner = unsafe { 
+                AsyncRing::from_raw_fd(fd, slot_size, slots)
+                    .map_err(map_err)? 
+            };
+            Ok(Self { inner })
+        }
+        #[cfg(not(unix))]
+        {
+            Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "from_raw_fd_handle is only supported on Unix",
+            ))
+        }
+    }
+
     /// Get the payload capacity per slot.
     fn payload_capacity(&self) -> usize {
         self.inner.payload_capacity()
