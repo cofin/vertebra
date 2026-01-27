@@ -8,14 +8,14 @@
     - Unit tests to verify fairness (port TS tests).
 
 ## Phase 2: Pool Architecture (Abstract Only)
-- [~] **Task: Define `PoolAdapter` Trait**
+- [x] **Task: Define `PoolAdapter` Trait** 6f2dbeb
     - Create `src/rs/vertebra-broker/src/pool.rs`.
     - Define trait for `acquire`, `release`, `stats`.
-- [ ] **Task: Implement `PoolManager`**
+- [x] **Task: Implement `PoolManager`** 6f2dbeb
     - Manages a collection of named pools (`HashMap<String, Box<dyn PoolAdapter>>`).
     - Methods to register/unregister pools.
 
 ## Phase 3: Integration
-- [ ] **Task: Wire into `vertebra-server`**
+- [~] **Task: Wire into `vertebra-server`**
     - `VertebraServer` should initialize the `Scheduler` and `PoolManager`.
     - Incoming IPC requests for "resource.acquire" should be enqueued in the scheduler.

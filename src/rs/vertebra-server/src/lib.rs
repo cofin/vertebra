@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -8,6 +9,9 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
+
+use vertebra_broker::pool::PoolManager;
+use vertebra_broker::scheduler::FairScheduler;
 
 pub mod worker;
 use worker::WorkerManager;
@@ -24,13 +28,27 @@ pub struct ServerConfig {
     pub workers: usize,
 }
 
+pub struct ServerState {
+    pub pool_manager: Arc<PoolManager>,
+    pub scheduler: Arc<FairScheduler<()>>,
+    pub worker_manager: WorkerManager,
+}
+
 pub async fn serve(config: ServerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr_str = format!("{}:{}", config.host, config.port);
     let addr: SocketAddr = addr_str.parse()?;
 
-    let mut worker_manager = WorkerManager::new(config.workers, &config.app_path, &config.python_path);
+    let worker_manager = WorkerManager::new(config.workers, &config.app_path, &config.python_path);
+    let pool_manager = Arc::new(PoolManager::new());
+    let scheduler = Arc::new(FairScheduler::new(10.0));
+
+    let mut state = ServerState {
+        pool_manager,
+        scheduler,
+        worker_manager,
+    };
     
-    if let Err(e) = worker_manager.start() {
+    if let Err(e) = state.worker_manager.start() {
         eprintln!("Failed to start workers: {}", e);
         return Err(e);
     }
