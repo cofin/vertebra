@@ -12,7 +12,7 @@ import click
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
 from vertebra.core.serializers import decode_json
-from vertebra.core.supervisor import build_bun_command, run_supervisor
+from vertebra.core.supervisor import build_server_command, run_supervisor
 
 
 @click.command()
@@ -54,13 +54,13 @@ def run(
         env["VERTEBRA_CONFIG"] = config_path
         config_data = load_config(Path(config_path))
 
-    # Build the bun command (automatically finds 'bun' and entrypoint)
+    # Build the server command (automatically finds 'vertebra-server' binary)
     try:
-        bun_cmd = build_bun_command()
+        server_cmd = build_server_command()
     except SystemExit as e:
         raise CLIError(
             str(e),
-            hint="Ensure Bun is installed and the vertebra-engine entrypoint is available.",
+            hint="Ensure vertebra-server binary is available/built.",
             exit_code=EXIT_CONFIG_ERROR,
         ) from e
 
@@ -69,7 +69,7 @@ def run(
         render_banner(mode="serve", host=host, port=port, workers=workers, log_level=log_level)
 
     exit_code = run_supervisor(
-        bun_cmd=bun_cmd,
+        server_cmd=server_cmd,
         env=env,
         workers=workers,
         drain_timeout_ms=drain_timeout,

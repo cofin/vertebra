@@ -53,7 +53,7 @@ class Supervisor:
 
 def run_supervisor(
     *,
-    bun_cmd: list[str],
+    server_cmd: list[str],
     env: dict[str, str],
     workers: int = 1,
     config: dict[str, Any] | None = None,
@@ -63,7 +63,7 @@ def run_supervisor(
     """Run the supervisor.
 
     Args:
-        bun_cmd: Command to start the Bun engine.
+        server_cmd: Command to start the server engine.
         env: Environment variables for the supervised processes.
         workers: Number of Python workers.
         config: Runtime config.
@@ -73,8 +73,8 @@ def run_supervisor(
     Returns:
         Exit code.
     """
-    if not bun_cmd:
-        msg = "bun_cmd must not be empty"
+    if not server_cmd:
+        msg = "server_cmd must not be empty"
         raise ValueError(msg)
 
     # Apply env vars to current process for supervisor inheritance.
@@ -86,7 +86,7 @@ def run_supervisor(
     supervisor = Supervisor(config)
 
     try:
-        supervisor.start(bun_cmd[0], bun_cmd[1:], workers=workers)
+        supervisor.start(server_cmd[0], server_cmd[1:], workers=workers)
         exit_code = supervisor.wait()
     except KeyboardInterrupt:
         supervisor.stop()
@@ -107,38 +107,43 @@ def find_repo_root(start: Path) -> Path | None:
     return None
 
 
-def find_broker_entrypoint() -> str:
-    """Find the broker TypeScript entrypoint."""
-    package_root = Path(__file__).resolve().parent
-    repo_root = find_repo_root(package_root)
+def find_server_binary() -> str:
+    """Find the vertebra-server binary."""
+    # 1. Check environment override
+    if env_path := os.getenv("VERTEBRA_SERVER_BINARY"):
+        return env_path
+
+    # 2. Check adjacent to this file (installed package layout)
+    # Expected: vertebra/bin/vertebra-server
+    pkg_bin = Path(__file__).resolve().parent.parent / "bin" / "vertebra-server"
+    if pkg_bin.exists():
+        return str(pkg_bin)
+    
+    # Windows extension check
+    pkg_bin_exe = pkg_bin.with_suffix(".exe")
+    if pkg_bin_exe.exists():
+        return str(pkg_bin_exe)
+
+    # 3. Check repo target (dev mode)
+    repo_root = find_repo_root(Path(__file__).resolve())
     if repo_root:
-        # Check for compiled engine first (future PRD)
-        # Check source
-        entry = repo_root / "src" / "ts" / "src" / "server" / "serve.ts"
-        if entry.exists():
-            return str(entry)
-    msg = "Unable to locate server entrypoint for Bun engine"
+        # Check common target locations
+        candidates = [
+            repo_root / "target" / "release" / "vertebra-server",
+            repo_root / "src" / "rs" / "target" / "release" / "vertebra-server",
+             # Debug fallback
+            repo_root / "target" / "debug" / "vertebra-server",
+            repo_root / "src" / "rs" / "target" / "debug" / "vertebra-server",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+    
+    msg = "Unable to locate vertebra-server binary. Please set VERTEBRA_SERVER_BINARY."
     raise SystemExit(msg)
 
 
-def shutil_which(name: str) -> str | None:
-    """Find executable in PATH."""
-    path = os.getenv("PATH")
-    if not path:
-        return None
-    for entry in path.split(os.pathsep):
-        candidate = Path(entry) / name
-        if candidate.exists():
-            return str(candidate)
-    return None
-
-
-def build_bun_command(engine: str | None = None, bun: str | None = None) -> list[str]:
-    """Build command to start the Bun engine."""
-    bun_bin = bun or shutil_which("bun")
-    if not bun_bin:
-        msg = "bun binary not found; install Bun or add it to PATH"
-        raise SystemExit(msg)
-
-    engine_entry = engine or find_broker_entrypoint()
-    return [bun_bin, "run", engine_entry]
+def build_server_command(binary: str | None = None) -> list[str]:
+    """Build command to start the Rust server."""
+    server_bin = binary or find_server_binary()
+    return [server_bin]
