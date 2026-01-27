@@ -1,13 +1,13 @@
 # Plan: IPC Worker Bridge
 
 ## Phase 1: Worker Manager Structure
-- [~] **Task: Scaffold `WorkerManager` in `vertebra-server`**
+- [x] **Task: Scaffold `WorkerManager` in `vertebra-server`** 3f0e18a
     - Create `src/rs/vertebra-server/src/worker.rs`.
     - Define `WorkerManager` struct.
     - Add dependency on `vertebra-core` (path).
 
 ## Phase 2: IPC Setup logic
-- [ ] **Task: Implement Ring Creation**
+- [~] **Task: Implement Ring Creation**
     - In `WorkerManager::start()`, loop `N` times (for N workers).
     - For each worker, create `SpscRing` pair (Request/Response) using `ShmRegion`.
     - Store the server-side handles (`SpscSender` / `SpscReceiver`).

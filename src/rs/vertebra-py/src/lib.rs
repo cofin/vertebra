@@ -1138,15 +1138,21 @@ fn shm_unlink(_name: &str) -> PyResult<()> {
 }
 
 #[pyfunction]
-fn start_http_server(py: Python, host: &str, port: u16) -> PyResult<()> {
-    let host = host.to_string();
+fn start_http_server(py: Python, host: &str, port: u16, app_path: &str, python_path: &str, workers: usize) -> PyResult<()> {
+    let config = vertebra_server::ServerConfig {
+        host: host.to_string(),
+        port,
+        app_path: app_path.to_string(),
+        python_path: python_path.to_string(),
+        workers,
+    };
     py.detach(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(map_err)?;
 
-        rt.block_on(vertebra_server::serve(&host, port))
+        rt.block_on(vertebra_server::serve(config))
             .map_err(map_err)
     })
 }
