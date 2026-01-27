@@ -22,7 +22,7 @@ from vertebra.cli.theme import COLORS
 def build(app_dir: str, onefile: bool, target: str | None, profile: str, output: str | None, clean: bool) -> None:
     """Build Vertebra application artifacts."""
     project_path = Path(app_dir).resolve()
-    
+
     # 1. Build Frontend if present
     package_json = project_path / "package.json"
     if package_json.exists():
@@ -32,25 +32,23 @@ def build(app_dir: str, onefile: bool, target: str | None, profile: str, output:
             if not (project_path / "node_modules").exists():
                 console.print(f"[{COLORS['info']}]Installing frontend dependencies...[/]")
                 subprocess.run(["npm", "install"], cwd=project_path, check=True)
-            
+
             console.print(f"[{COLORS['info']}]Building frontend assets...[/]")
             subprocess.run(["npm", "run", "build"], cwd=project_path, check=True)
             console.print(f"[{COLORS['success']}]Frontend build complete.[/]")
         except Exception as e:
             console.print(f"[{COLORS['error']}]Frontend build failed: {e}[/]")
-            # Don't fail the whole build? Or should we?
-            # For now, let's fail to ensure correctness.
             raise CLIError(str(e), exit_code=1) from e
 
-    # 2. Build Backend (Standalone)
+    # 2. Build Backend
     if onefile:
         if not target:
-             console.print(f"[{COLORS['error']}]--target is required for --onefile builds[/]")
-             return
+            msg = "--target is required for --onefile builds"
+            raise CLIError(msg, exit_code=1)
 
         output_path = Path(output) if output else Path("dist/standalone")
 
-        section_header("Build Configuration")
+        section_header("Build Configuration (One-File)")
         console.print(f"  Project: {project_path}")
         console.print(f"  Target:  {target}")
         console.print(f"  Profile: {profile}")
@@ -60,12 +58,7 @@ def build(app_dir: str, onefile: bool, target: str | None, profile: str, output:
         try:
             from vertebra.core.build.onefile import OneFileBuilder
 
-            builder = OneFileBuilder(
-                project_dir=project_path,
-                output_path=output_path,
-                target=target,
-                profile=profile,
-            )
+            builder = OneFileBuilder(project_dir=project_path, output_path=output_path, target=target, profile=profile)
 
             asyncio.run(builder.build())
 

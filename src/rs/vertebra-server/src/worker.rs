@@ -1,11 +1,11 @@
-use std::sync::Arc;
-use std::process::Command;
+use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
-use std::os::fd::AsRawFd;
+use std::process::Command;
+use std::sync::Arc;
 
-use vertebra_core::buffer::{RingLayout, ChannelMode};
-use vertebra_core::channel::{SpscRing, SpscSender, SpscReceiver};
+use vertebra_core::buffer::{ChannelMode, RingLayout};
+use vertebra_core::channel::{SpscReceiver, SpscRing, SpscSender};
 use vertebra_core::notify::Notifier;
 use vertebra_core::shm::ShmRegion;
 
@@ -23,7 +23,7 @@ pub struct WorkerManager {
     python_path: String,
     worker_handles: Vec<Worker>,
     // We keep notifiers alive here so FDs remain valid in parent
-    notifiers: Vec<Notifier>, 
+    notifiers: Vec<Notifier>,
 }
 
 impl WorkerManager {
@@ -37,8 +37,19 @@ impl WorkerManager {
         }
     }
 
+    pub fn worker_count(&self) -> usize {
+        self.workers
+    }
+
+    pub fn into_workers(self) -> Vec<Worker> {
+        self.worker_handles
+    }
+
     pub fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("Starting {} workers for app: {}", self.workers, self.app_path);
+        println!(
+            "Starting {} workers for app: {}",
+            self.workers, self.app_path
+        );
 
         let layout = RingLayout::new(1024 * 64, 128, ChannelMode::Spsc); // 64KB slots, 128 slots
 
@@ -57,11 +68,13 @@ impl WorkerManager {
             // Create Notifier for this worker
             let notifier = Notifier::new()?;
             let notify_fd = notifier.as_raw_fd();
-            
+
             // Get Shm FDs
             // Note: On Linux/Unix, handle() returns Some(RawFd)
             let req_fd = req_region.handle().ok_or("No handle for request region")?;
-            let resp_fd = resp_region.handle().ok_or("No handle for response region")?;
+            let resp_fd = resp_region
+                .handle()
+                .ok_or("No handle for response region")?;
 
             let mut cmd = Command::new(&self.python_path);
             cmd.arg("-m")
@@ -95,7 +108,7 @@ impl WorkerManager {
             });
             self.notifiers.push(notifier);
         }
-        
+
         Ok(())
     }
 }

@@ -50,7 +50,7 @@ async def download_standalone(target: str, profile: str, cache_dir: Path) -> Pat
 
     # Use urllib from standard library to avoid httpx dependency
     # This is a build-time operation so blocking is acceptable
- 
+
 
     def _download_sync() -> None:
         with urllib.request.urlopen(url, timeout=300) as response, dest.open("wb") as f:  # noqa: S310

@@ -8,9 +8,9 @@ from typing import Any, ParamSpec, Protocol, TypeVar, get_type_hints, overload
 
 from vertebra.core.codegen.extractor import TypeExtractor
 from vertebra.core.codegen.ir import RawType
-from vertebra.core.protocols import Serializer
 from vertebra.core.procedures.registry import ProcedureMetadata, ProcedureRegistry
 from vertebra.core.procedures.serialization import detect_serializer
+from vertebra.core.protocols import Serializer
 
 _MISSING = object()
 

@@ -129,13 +129,13 @@ impl AsyncRing {
         // It calls map_fd_region which creates ShmRegion.
         // However, we usually duplicate the FD or pass ownership.
         // Here we assume we pass ownership of the raw FD to ShmRegion.
-        
+
         let ring = SpscRing::attach(Arc::clone(&region), layout)?;
-        let notifier = Notifier::new()?; // Create new notifier for local use? 
-        // Wait, if this is worker, it needs to attach to existing notifier if using shared?
-        // Or does it have its own?
-        // Worker.py uses add_reader on a separate notification FD.
-        
+        let notifier = Notifier::new()?; // Create new notifier for local use?
+                                         // Wait, if this is worker, it needs to attach to existing notifier if using shared?
+                                         // Or does it have its own?
+                                         // Worker.py uses add_reader on a separate notification FD.
+
         Ok(Self {
             ring,
             notifier,

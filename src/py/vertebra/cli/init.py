@@ -12,10 +12,7 @@ from vertebra.utils.text import to_identifier
 @click.command()
 @click.argument("name", required=False)
 @click.option(
-    "--template",
-    type=click.Choice(["default", "web"]),
-    default="default",
-    help="Template to use for the new project",
+    "--template", type=click.Choice(["default", "web"]), default="default", help="Template to use for the new project"
 )
 @click.option(
     "--package-manager",
@@ -49,11 +46,7 @@ def init(name: str | None, template: str, package_manager: str) -> None:
     # Render templates
     templates_dir = Path(__file__).parent / "templates" / template
 
-    context = {
-        "project_name": name,
-        "project_slug": slug,
-        "vertebra_version": vertebra_version,
-    }
+    context = {"project_name": name, "project_slug": slug, "vertebra_version": vertebra_version}
 
     # pyproject.toml
     render_template(templates_dir / "pyproject.toml.jinja2", project_dir / "pyproject.toml", context)
@@ -64,16 +57,14 @@ def init(name: str | None, template: str, package_manager: str) -> None:
     if template == "web":
         # handlers.py
         render_template(templates_dir / "handlers.py.jinja2", src_dir / "handlers.py", context)
-        
+
         # static/ and templates/
         (project_dir / "static").mkdir(exist_ok=True)
         (project_dir / "templates").mkdir(exist_ok=True)
-        
+
         if (templates_dir / "templates" / "index.html.jinja2").exists():
             render_template(
-                templates_dir / "templates" / "index.html.jinja2",
-                project_dir / "templates" / "index.html",
-                context
+                templates_dir / "templates" / "index.html.jinja2", project_dir / "templates" / "index.html", context
             )
 
     # __init__.py

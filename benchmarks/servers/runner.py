@@ -34,18 +34,12 @@ from .config import (
     BenchmarkCategory,
     get_available_servers,
 )
-from .history import BenchmarkHistory, format_comparison_table, get_git_sha
+from .history import BenchmarkHistory, get_git_sha
 from .parsers import OhaError, OhaNotFoundError, detect_oha_version, run_oha
-from .reports import format_vertebra_report, generate_markdown_report, generate_vertebra_analysis
+from .reports import generate_markdown_report, generate_vertebra_analysis
 from .results import BenchmarkResult, BenchmarkSuite, EnvironmentInfo
 from .scenarios import Scenario, get_concurrency, get_durations, get_scenarios
-from .utils import (
-    ServerStartupError,
-    cleanup_orphaned_vertebra_processes,
-    is_port_in_use,
-    start_server,
-    stop_server,
-)
+from .utils import ServerStartupError, cleanup_orphaned_vertebra_processes, is_port_in_use, start_server, stop_server
 
 if TYPE_CHECKING:
     import subprocess
@@ -387,10 +381,7 @@ class BenchmarkRunner:
                 speedup = data["speedup_percent"]
                 style = "[green]" if speedup > 0 else "[red]"
                 table.add_row(
-                    scenario,
-                    f"{data['asgi_rps']:,.0f}",
-                    f"{data['native_rps']:,.0f}",
-                    f"{style}{speedup:+.1f}%[/]",
+                    scenario, f"{data['asgi_rps']:,.0f}", f"{data['native_rps']:,.0f}", f"{style}{speedup:+.1f}%[/]"
                 )
 
             console.print(table)

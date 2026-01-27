@@ -118,7 +118,7 @@ def find_server_binary() -> str:
     pkg_bin = Path(__file__).resolve().parent.parent / "bin" / "vertebra-server"
     if pkg_bin.exists():
         return str(pkg_bin)
-    
+
     # Windows extension check
     pkg_bin_exe = pkg_bin.with_suffix(".exe")
     if pkg_bin_exe.exists():
@@ -131,14 +131,14 @@ def find_server_binary() -> str:
         candidates = [
             repo_root / "target" / "release" / "vertebra-server",
             repo_root / "src" / "rs" / "target" / "release" / "vertebra-server",
-             # Debug fallback
+            # Debug fallback
             repo_root / "target" / "debug" / "vertebra-server",
             repo_root / "src" / "rs" / "target" / "debug" / "vertebra-server",
         ]
         for candidate in candidates:
             if candidate.exists():
                 return str(candidate)
-    
+
     msg = "Unable to locate vertebra-server binary. Please set VERTEBRA_SERVER_BINARY."
     raise SystemExit(msg)
 

@@ -211,9 +211,9 @@ def parse_oha_output(json_output: str) -> OhaResult:
         raise OhaError(msg) from e
 
     summary = data.get("summary") or {}
-    percentiles = data.get("latencyPercentiles") or summary.get("latencyDistribution") or data.get(
-        "latencyDistribution"
-    ) or {}
+    percentiles = (
+        data.get("latencyPercentiles") or summary.get("latencyDistribution") or data.get("latencyDistribution") or {}
+    )
 
     if not summary and "totalRequests" not in data:
         msg = f"Missing summary in oha output: {json_output[:200]}"
@@ -264,11 +264,10 @@ def parse_oha_output(json_output: str) -> OhaResult:
         success_rate_ratio = summary_value("successRate")
         success_rate = success_rate_ratio * 100 if total_requests else 0.0
         succeeded = int(total_requests * (success_rate / 100.0)) if total_requests else 0
+    elif total_requests > 0:
+        success_rate = (int(succeeded or 0) / total_requests) * 100
     else:
-        if total_requests > 0:
-            success_rate = (int(succeeded or 0) / total_requests) * 100
-        else:
-            success_rate = 0.0
+        success_rate = 0.0
 
     failed = max(int(total_requests or 0) - int(succeeded or 0), 0)
 

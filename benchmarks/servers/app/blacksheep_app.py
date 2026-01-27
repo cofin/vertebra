@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from blacksheep import Application, Request, Response, json, get, post
+from blacksheep import Application, Request, Response, get, json, post
 
 # Pre-computed response bodies
 BODY_10B = b"0123456789"

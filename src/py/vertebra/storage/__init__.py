@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 
 from vertebra.core.exceptions import StorageError
 from vertebra.storage.client import AsyncFileSystemClient, Backend, FileEntry, SyncFileSystemClient
+from vertebra.storage.fsspec import AsyncVertebraFileSystem, SyncVertebraFileSystem
 from vertebra.storage.gcs import AsyncGCSClient, GCSClient
 from vertebra.storage.s3 import AsyncS3Client, S3Client
 from vertebra.storage.store import (
@@ -56,8 +57,6 @@ from vertebra.storage.store import (
     store_from_url,
     store_registry,
 )
-
-from vertebra.storage.fsspec import AsyncVertebraFileSystem, SyncVertebraFileSystem
 
 __all__ = (
     # Filesystem clients

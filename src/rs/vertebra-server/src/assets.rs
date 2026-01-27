@@ -1,11 +1,11 @@
-use std::path::PathBuf;
-use tower_http::services::ServeDir;
-use reqwest::Client;
-use hyper::{Request, Response, StatusCode};
 use http_body_util::Full;
 use hyper::body::Bytes;
-use std::collections::HashMap;
+use hyper::{Request, Response, StatusCode};
+use reqwest::Client;
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use tower_http::services::ServeDir;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ManifestEntry {
@@ -46,27 +46,31 @@ impl AssetManager {
     fn load_manifest(static_dir: &PathBuf) -> Option<Manifest> {
         let p1 = static_dir.join(".vite/manifest.json"); // Vite 5+ location
         let p2 = static_dir.join("manifest.json"); // Vite 4- location
-        
+
         let path = if p1.exists() { p1 } else { p2 };
 
         if let Ok(content) = std::fs::read_to_string(path) {
-             return serde_json::from_str(&content).ok();
+            return serde_json::from_str(&content).ok();
         }
         None
     }
 
     pub fn resolve_entry(&self, entry: &str) -> Option<String> {
-        self.manifest.as_ref()
+        self.manifest
+            .as_ref()
             .and_then(|m| m.get(entry))
             .map(|e| e.file.clone())
     }
 
-    pub async fn serve(&self, req: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn serve(
+        &self,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>, Box<dyn std::error::Error + Send + Sync>> {
         if let Some(proxy_url) = &self.dev_proxy_url {
             // Proxy to dev server
             let path = req.uri().path();
             let url = format!("{}{}", proxy_url, path);
-            
+
             // Simple proxy logic (simplified for prototype)
             // In real impl, we'd stream the body and copy headers carefully
             match self.client.get(&url).send().await {
@@ -78,17 +82,15 @@ impl AssetManager {
                     // Copy basic headers? For now just body
                     Ok(builder.body(Full::new(bytes))?)
                 }
-                Err(_) => {
-                    Ok(Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(Full::new(Bytes::from("Dev server unavailable")))?)
-                }
+                Err(_) => Ok(Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(Full::new(Bytes::from("Dev server unavailable")))?),
             }
         } else {
             // Serve static files
             let path_str = req.uri().path().trim_start_matches('/');
             let path = self.static_dir.join(path_str);
-            
+
             // Handle root as index.html
             let (is_index, effective_path) = if path_str == "" || path_str == "index.html" {
                 (true, self.static_dir.join("index.html"))
@@ -116,13 +118,14 @@ impl AssetManager {
                                     builder = builder.header("Link", link);
                                 }
                             }
-                            
+
                             // Preload Imports (Chunks)
                             if let Some(imports) = &entry.imports {
                                 for import_key in imports {
                                     // Resolve chunk file from key
                                     if let Some(chunk) = manifest.get(import_key) {
-                                        let link = format!("</{}>; rel=preload; as=script", chunk.file);
+                                        let link =
+                                            format!("</{}>; rel=preload; as=script", chunk.file);
                                         builder = builder.header("Link", link);
                                     }
                                 }
@@ -163,7 +166,9 @@ mod tests {
 
         let manager = AssetManager::new(dir.path().to_str().unwrap(), None);
         assert!(manager.manifest.is_some());
-        assert_eq!(manager.resolve_entry("src/main.ts"), Some("assets/main.123456.js".to_string()));
+        assert_eq!(
+            manager.resolve_entry("src/main.ts"),
+            Some("assets/main.123456.js".to_string())
+        );
     }
 }
-

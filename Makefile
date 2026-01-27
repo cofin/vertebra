@@ -32,7 +32,7 @@ RUST_ENV := $(HOME)/.cargo/env
 
 .PHONY: help
 help:                                               ## Display this help text for Makefile
-	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z0-9_-]+:.*?##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST) 
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z0-9_-]+:.*?##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
 
 # =============================================================================
@@ -357,10 +357,9 @@ coverage:                                          ## Run the tests and generate
 test: ensure-native                                ## Run unit tests (excludes integration)
 	@echo "${INFO} Cleaning shared memory... 🧹"
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
-	@echo "${INFO} Running unit tests... 🧪"
-	@uv run pytest src/py/tests -m \"not integration\"
-	@echo "${OK} Unit tests passed ✨"
-
+	        @echo "${INFO} Running unit tests... 🧪"
+	        @uv run pytest src/py/tests -m "not integration"
+	        @echo "${OK} Unit tests passed ✨"
 .PHONY: integration-test
 integration-test: ensure-native                   ## Run integration tests only
 	@echo "${INFO} Cleaning shared memory... 🧹"

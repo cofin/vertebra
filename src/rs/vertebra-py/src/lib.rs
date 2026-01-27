@@ -1138,7 +1138,14 @@ fn shm_unlink(_name: &str) -> PyResult<()> {
 }
 
 #[pyfunction]
-fn start_http_server(py: Python, host: &str, port: u16, app_path: &str, python_path: &str, workers: usize) -> PyResult<()> {
+fn start_http_server(
+    py: Python,
+    host: &str,
+    port: u16,
+    app_path: &str,
+    python_path: &str,
+    workers: usize,
+) -> PyResult<()> {
     let config = vertebra_server::ServerConfig {
         host: host.to_string(),
         port,
@@ -1152,8 +1159,7 @@ fn start_http_server(py: Python, host: &str, port: u16, app_path: &str, python_p
             .build()
             .map_err(map_err)?;
 
-        rt.block_on(vertebra_server::serve(config))
-            .map_err(map_err)
+        rt.block_on(vertebra_server::serve(config)).map_err(map_err)
     })
 }
 

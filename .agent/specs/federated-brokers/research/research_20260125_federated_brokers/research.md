@@ -30,7 +30,7 @@ A framework for high-performance transport of large datasets over network interf
 -   **DoAction:** Execute commands (useful for control plane sync).
 
 ### **Rust vs. Node/Bun Implementation:**
--   **Rust (`arrow-flight` crate):** 
+-   **Rust (`arrow-flight` crate):**
     -   *Pros:* Zero-copy integration with `vertebra-core` SHM regions; rigorous thread safety; high performance.
     -   *Cons:* Requires bridging to Bun Broker.
 -   **Node/Bun (`apache-arrow`):**
@@ -76,4 +76,3 @@ A framework for high-performance transport of large datasets over network interf
 ## Open Questions
 -   **Auth:** Should we implementation mTLS or simple Token auth for the MVP? (Suggestion: Token/Shared Secret for MVP).
 -   **Consistency:** Eventual consistency is implied. Is strict ordering required for any `StateHub` fields?
-

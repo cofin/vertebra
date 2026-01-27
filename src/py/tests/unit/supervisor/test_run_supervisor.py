@@ -9,7 +9,7 @@ from vertebra.core.supervisor import run_supervisor
 @pytest.mark.unit
 def test_run_supervisor_extra_args() -> None:
     """Test that run_supervisor accepts drain_timeout_ms and shutdown_timeout_ms."""
-    bun_cmd = ["bun", "run", "index.ts"]
+    server_cmd = ["vertebra-server", "--host", "127.0.0.1"]
     env = {"TEST_VAR": "value"}
 
     # We mock Supervisor to avoid starting actual processes
@@ -19,7 +19,7 @@ def test_run_supervisor_extra_args() -> None:
 
         # This call should currently fail with TypeError
         exit_code = run_supervisor(
-            bun_cmd=bun_cmd, env=env, workers=1, drain_timeout_ms=5000, shutdown_timeout_ms=30000
+            server_cmd=server_cmd, env=env, workers=1, drain_timeout_ms=5000, shutdown_timeout_ms=30000
         )
 
         assert exit_code == 0

@@ -63,4 +63,3 @@ Given the high fixed cost of producing Arrow messages currently (~600us minimum)
 We **should** use Arrow for:
 -   **Bulk Metrics:** If `src/ts/src/broker/metrics.ts` aggregates thousands of data points, sending them as Arrow columns would be efficient (and easy to create in JS).
 -   **Log Batches:** If we implement a centralized log collector.
-

@@ -70,11 +70,11 @@ from my_app.types import User
 
 async def main():
     client = Client("http://localhost:8000")
-    
+
     # RPC Call (JSON)
     user = await client.rpc("get_user", {"id": 1}, response_type=User)
     print(f"Hello {user.name}")
-    
+
     # Data Call (Arrow)
     # Returns a nanoarrow.ArrayStream
     arrow_stream = await client.fetch_arrow("get_large_dataset")

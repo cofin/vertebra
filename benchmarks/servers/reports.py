@@ -203,18 +203,13 @@ def generate_vertebra_analysis(suite: BenchmarkSuite) -> dict[str, object]:
 
     for scenario in scenarios:
         # Get results for this scenario
-        scenario_vertebra = {
-            server: r for server, r in vertebra_results.items() if r.scenario == scenario
-        }
-        scenario_baselines = {
-            server: r for server, r in baseline_results.items() if r.scenario == scenario
-        }
+        scenario_vertebra = {server: r for server, r in vertebra_results.items() if r.scenario == scenario}
+        scenario_baselines = {server: r for server, r in baseline_results.items() if r.scenario == scenario}
 
         # Vertebra variants comparison
         if len(scenario_vertebra) > 1:
             analysis["vertebra_variants"][scenario] = {
-                server: {"rps": r.rps, "p99_ms": r.latency_p99_ms}
-                for server, r in scenario_vertebra.items()
+                server: {"rps": r.rps, "p99_ms": r.latency_p99_ms} for server, r in scenario_vertebra.items()
             }
 
         # Native vs ASGI comparison (Litestar)
@@ -259,10 +254,7 @@ def generate_vertebra_analysis(suite: BenchmarkSuite) -> dict[str, object]:
             analysis["baseline_comparison"][scenario] = {
                 "vertebra_rps": raw_vertebra.rps,
                 **{
-                    server: {
-                        "rps": r.rps,
-                        "ratio": raw_vertebra.rps / r.rps if r.rps > 0 else 0,
-                    }
+                    server: {"rps": r.rps, "ratio": raw_vertebra.rps / r.rps if r.rps > 0 else 0}
                     for server, r in scenario_baselines.items()
                 },
             }

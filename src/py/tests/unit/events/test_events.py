@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from vertebra.di import Inject, ProviderRegistry
 from vertebra.core.events import EventBus, EventHandler
+from vertebra.di import Inject, ProviderRegistry
 
 pytestmark = pytest.mark.unit
 

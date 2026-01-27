@@ -2,7 +2,7 @@ import argparse
 import random
 import time
 import uuid
-from typing import Callable
+from collections.abc import Callable
 
 from vertebra.resources.arrow import _encode_arrow_python, encode_arrow
 

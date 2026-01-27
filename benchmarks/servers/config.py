@@ -250,11 +250,7 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
         name="robyn",
         display_name="Robyn",
         category=BenchmarkCategory.RUNTIME,
-        command=(
-            "python",
-            "-m",
-            "benchmarks.servers.app.robyn_app",
-        ),
+        command=("python", "-m", "benchmarks.servers.app.robyn_app"),
         port=8010,
         interface=InterfaceType.NATIVE,
         requires_install=("robyn",),

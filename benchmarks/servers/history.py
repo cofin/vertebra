@@ -7,7 +7,7 @@ Results are saved as timestamped JSON files in benchmarks/results/runs/.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -222,9 +222,7 @@ def get_git_sha() -> str | None:
     import subprocess
 
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5, check=False
-        )
+        result = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5, check=False)
         if result.returncode == 0:
             return result.stdout.strip()[:12]
     except (FileNotFoundError, subprocess.TimeoutExpired):

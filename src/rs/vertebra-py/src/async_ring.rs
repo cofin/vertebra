@@ -125,10 +125,7 @@ impl PyAsyncRing {
         // The core implementation `AsyncRing::from_raw_fd` handles mapping.
         #[cfg(unix)]
         {
-            let inner = unsafe { 
-                AsyncRing::from_raw_fd(fd, slot_size, slots)
-                    .map_err(map_err)? 
-            };
+            let inner = unsafe { AsyncRing::from_raw_fd(fd, slot_size, slots).map_err(map_err)? };
             Ok(Self { inner })
         }
         #[cfg(not(unix))]

@@ -2,8 +2,8 @@ import threading
 
 import pytest
 
-from vertebra.messaging.transport.channel import Channel, SerializationError, encode_request
 from vertebra.core.procedures import ProcedureRegistry, procedure
+from vertebra.messaging.transport.channel import Channel, SerializationError, encode_request
 
 pytestmark = pytest.mark.unit
 

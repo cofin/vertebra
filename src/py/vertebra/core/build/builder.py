@@ -72,7 +72,7 @@ class Builder:
 
         # Locate the binary
         binary_name = "vertebra-server.exe" if "windows" in target else "vertebra-server"
-        
+
         # Check workspace target or root target
         target_dir = manifest_path.parent / "target" / "release"
         if "--target" in cmd:

@@ -103,7 +103,19 @@ async def json_response(request: Request) -> dict:
 
 
 # Register routes with app
-app.register([health, hello, body_10b, body_1k, body_10k, body_100k, echo, io_10ms, io_100ms, file_response, json_response])
+app.register([
+    health,
+    hello,
+    body_10b,
+    body_1k,
+    body_10k,
+    body_100k,
+    echo,
+    io_10ms,
+    io_100ms,
+    file_response,
+    json_response,
+])
 
 
 if __name__ == "__main__":

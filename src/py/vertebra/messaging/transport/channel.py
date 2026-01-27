@@ -8,9 +8,9 @@ from typing import Any, Self, TypeVar, cast
 
 from vertebra import _vertebra
 from vertebra.core.exceptions import ChannelError, SerializationError
+from vertebra.core.procedures import ProcedureRegistry, get_serializer
 from vertebra.core.serializers import get_json_codec
 from vertebra.messaging.protocol import HEADER_SIZE, Flags, RequestHeader, ResponseHeader
-from vertebra.core.procedures import ProcedureRegistry, get_serializer
 
 # Default spin duration in microseconds for hybrid wait.
 # Read from VERTEBRA_SPIN_US environment variable (default: 5).

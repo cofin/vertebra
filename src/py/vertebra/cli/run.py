@@ -59,9 +59,7 @@ def run(
         server_cmd = build_server_command()
     except SystemExit as e:
         raise CLIError(
-            str(e),
-            hint="Ensure vertebra-server binary is available/built.",
-            exit_code=EXIT_CONFIG_ERROR,
+            str(e), hint="Ensure vertebra-server binary is available/built.", exit_code=EXIT_CONFIG_ERROR
         ) from e
 
     # Render startup banner (unless disabled)

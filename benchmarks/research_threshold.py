@@ -1,17 +1,19 @@
-import time
-import msgspec
-import cbor2
-import json
-import uuid
 import random
+import time
+import uuid
 from typing import Any
+
+import cbor2
+import msgspec
 from rich.console import Console
 from rich.table import Table
+
 from vertebra.resources.arrow import encode_arrow
 
 # Ensure C implementation of cbor2 is used
 try:
     import _cbor2
+
     if cbor2.dumps is not _cbor2.dumps:
         print("WARNING: cbor2 is using Pure Python implementation (dumps identity mismatch)!")
     else:

@@ -17,7 +17,7 @@ def runner() -> CliRunner:
 
 def test_run_command_sets_native_default(runner) -> None:
     with (
-        patch("vertebra.cli.run.build_bun_command", return_value=["bun", "serve.ts"]) as build_cmd,
+        patch("vertebra.cli.run.build_server_command", return_value=["vertebra-server"]) as build_cmd,
         patch("vertebra.cli.run.run_supervisor", return_value=0) as run_supervisor,
         patch("vertebra.cli.run.render_banner"),
     ):
@@ -33,7 +33,7 @@ def test_run_command_sets_native_default(runner) -> None:
 
 def test_run_command_asgi_flag_disables_native(runner) -> None:
     with (
-        patch("vertebra.cli.run.build_bun_command", return_value=["bun", "serve.ts"]),
+        patch("vertebra.cli.run.build_server_command", return_value=["vertebra-server"]),
         patch("vertebra.cli.run.run_supervisor", return_value=0) as run_supervisor,
         patch("vertebra.cli.run.render_banner"),
     ):

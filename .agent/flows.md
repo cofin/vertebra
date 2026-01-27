@@ -41,23 +41,23 @@ Each flow has its own detailed spec and plan in its respective folder.
 *Link: [./archive/packaging-distribution/](./archive/packaging-distribution/)*
 *Beads: Closed*
 
+## [x] Flow: rust-native-router
+*Link: [./archive/rust-native-router/](./archive/rust-native-router/)*
+*Beads: Closed*
+
+## [x] Flow: rust-broker-introspection
+*Link: [./archive/rust-broker-introspection/](./archive/rust-broker-introspection/)*
+*Beads: Closed*
+
+## [x] Flow: rust-multipart-streaming
+*Link: [./archive/rust-multipart-streaming/](./archive/rust-multipart-streaming/)*
+*Beads: Closed*
+
 ---
 
 ## [ ] Flow: vertebra-v2-rewrite
 *Link: [./specs/vertebra-v2-rewrite/](./specs/vertebra-v2-rewrite/)*
 *Status: ACTIVE - Master Plan for Rust Migration*
-
-## [ ] Flow: rust-native-router
-*Link: [./specs/rust-native-router/](./specs/rust-native-router/)*
-*Status: PLANNED - Replaces native-app-framework*
-
-## [ ] Flow: rust-broker-introspection
-*Link: [./specs/rust-broker-introspection/](./specs/rust-broker-introspection/)*
-*Status: PLANNED - Replaces cli-broker-status-ipc*
-
-## [ ] Flow: rust-multipart-streaming
-*Link: [./specs/rust-multipart-streaming/](./specs/rust-multipart-streaming/)*
-*Status: PLANNED - Replaces native-multipart-fallback*
 
 ---
 
