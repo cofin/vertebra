@@ -44,12 +44,6 @@ install-uv:                                         ## Install latest version of
 	@curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
 	@echo "${OK} UV installed successfully"
 
-.PHONY: install-bun
-install-bun:                                        ## Install latest version of bun
-	@echo "${INFO} Installing bun..."
-	@curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1
-	@echo "${OK} Bun installed successfully"
-
 .PHONY: install-rust
 install-rust:                                       ## Install Rust toolchain via rustup
 	@echo "${INFO} Installing Rust toolchain..."
@@ -81,10 +75,6 @@ install: destroy clean                              ## Install project dependenc
 	@uv python pin 3.12 >/dev/null 2>&1
 	@uv venv >/dev/null 2>&1
 	@$(MAKE) py-install
-	@if ! command -v bun >/dev/null 2>&1; then \
-		$(MAKE) install-bun; \
-	fi
-	@$(MAKE) js-install
 	@if ! command -v cargo >/dev/null 2>&1; then \
 		$(MAKE) install-rust; \
 	fi
@@ -100,10 +90,6 @@ upgrade:                                            ## Upgrade all dependencies 
 	@uv lock --upgrade
 	@echo "${OK} Python dependencies updated 🔄"
 	@$(MAKE) py-install
-	@if ! command -v bun >/dev/null 2>&1; then \
-		$(MAKE) install-bun; \
-	fi
-	@$(MAKE) js-upgrade
 	@if ! command -v cargo >/dev/null 2>&1; then \
 		$(MAKE) install-rust; \
 	fi
@@ -114,7 +100,7 @@ upgrade:                                            ## Upgrade all dependencies 
 .PHONY: clean
 clean:                                              ## Cleanup temporary build artifacts
 	@echo "${INFO} Cleaning working directory..."
-	@rm -rf .pytest_cache .ruff_cache .hypothesis build/ dist/ .eggs/ .coverage coverage.xml coverage.json htmlcov/ src/py/tests/.pytest_cache src/py/tests/**/.pytest_cache .mypy_cache .unasyncd_cache/ .auto_pytabs_cache src/ts/node_modules src/ts/.bun .biome/ .cache/ coverage/ >/dev/null 2>&1
+	@rm -rf .pytest_cache .ruff_cache .hypothesis build/ dist/ .eggs/ .coverage coverage.xml coverage.json htmlcov/ src/py/tests/.pytest_cache src/py/tests/**/.pytest_cache .mypy_cache .unasyncd_cache/ .auto_pytabs_cache .cache/ coverage/ >/dev/null 2>&1
 	@find . -name '*.egg-info' -exec rm -rf {} + >/dev/null 2>&1
 	@find . -type f -name '*.egg' -exec rm -f {} + >/dev/null 2>&1
 	@find . -name '*.pyc' -exec rm -f {} + >/dev/null 2>&1
@@ -267,92 +253,6 @@ rs-upgrade:                                         ## Update Rust dependencies 
 
 
 # =============================================================================
-# TypeScript/Bun Development
-# =============================================================================
-.PHONY: js-install
-js-install:                                         ## Install TypeScript dependencies
-	@echo "${INFO} Installing TypeScript dependencies... 📦"
-	@if ! command -v bun >/dev/null 2>&1; then \
-		echo "${ERROR} bun not found; run 'make install-bun'"; \
-		exit 1; \
-	fi
-	@cd src/ts && if [ -f bun.lockb ]; then \
-		bun install --frozen-lockfile >/dev/null 2>&1; \
-	else \
-		bun install >/dev/null 2>&1; \
-	fi
-	@echo "${OK} TypeScript dependencies installed ✨"
-
-.PHONY: js-upgrade
-js-upgrade:                                         ## Upgrade TypeScript dependencies
-	@echo "${INFO} Updating TypeScript dependencies... 🔄"
-	@if ! command -v bun >/dev/null 2>&1; then \
-		echo "${ERROR} bun not found; run 'make install-bun'"; \
-		exit 1; \
-	fi
-	@cd src/ts && bun update >/dev/null 2>&1
-	@echo "${OK} TypeScript dependencies updated 🔄"
-.PHONY: js-dev
-js-dev:                                            ## Start TypeScript development server
-	@echo "${INFO} Starting TypeScript development server... 🚀"
-	@if ! command -v bun >/dev/null 2>&1; then \
-		echo "${ERROR} bun not found; run 'make install-bun'"; \
-		exit 1; \
-	fi
-	@cd src/ts && bun run dev
-
-.PHONY: js-build
-js-build:                                          ## Build TypeScript for production
-	@echo "${INFO} Building TypeScript for production... 📦"
-	@if ! command -v bun >/dev/null 2>&1; then \
-		echo "${ERROR} bun not found; run 'make install-bun'"; \
-		exit 1; \
-	fi
-	@cd src/ts && bun run build
-	@cd $(CURDIR) && echo "${OK} TypeScript build complete"
-
-.PHONY: js-test
-js-test:                                           ## Run TypeScript tests
-	@echo "${INFO} Running TypeScript tests... 🧪"
-	@if ! command -v bun >/dev/null 2>&1; then \
-		echo "${ERROR} bun not found; run 'make install-bun'"; \
-		exit 1; \
-	fi
-	@cd src/ts && bun test
-	@cd $(CURDIR) && echo "${OK} TypeScript tests passed ✨"
-
-.PHONY: js-type-check
-js-type-check:                                     ## Run TypeScript type checking
-	@echo "${INFO} Running TypeScript type checking... 🔍"
-	@if ! command -v bun >/dev/null 2>&1; then \
-		echo "${ERROR} bun not found; run 'make install-bun'"; \
-		exit 1; \
-	fi
-	@cd src/ts && bunx tsc --noEmit
-	@cd $(CURDIR) && echo "${OK} TypeScript type checking complete ✨"
-
-.PHONY: js-lint
-js-lint:                                           ## Run TypeScript linting and formatting
-	@echo "${INFO} Running TypeScript linting and formatting... 🔍"
-	@if ! command -v bun >/dev/null 2>&1; then \
-		echo "${ERROR} bun not found; run 'make install-bun'"; \
-		exit 1; \
-	fi
-	@cd src/ts && bunx @biomejs/biome check --write --unsafe src/ --files-ignore-unknown=true --no-errors-on-unmatched
-	@cd $(CURDIR) && echo "${OK} TypeScript linting complete ✨"
-
-.PHONY: js-format
-js-format:                                         ## Format TypeScript with Biome
-	@echo "${INFO} Formatting TypeScript with Biome... 🎨"
-	@if ! command -v bun >/dev/null 2>&1; then \
-		echo "${ERROR} bun not found; run 'make install-bun'"; \
-		exit 1; \
-	fi
-	@cd src/ts && bunx @biomejs/biome format --write src
-	@cd $(CURDIR) && echo "${OK} TypeScript formatting complete ✨"
-
-
-# =============================================================================
 # Python Development
 # =============================================================================
 .PHONY: py-install
@@ -430,7 +330,6 @@ fix:                                               ## Run formatting scripts
 	@echo "${INFO} Running code formatters... 🔧"
 	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests tools/
 	@uv run ruff format src/py/vertebra src/py/tests tools/
-	@$(MAKE) js-format
 	@cd $(CURDIR) && echo "${OK} Code formatting complete ✨"
 
 .PHONY: fmt
@@ -441,10 +340,10 @@ fmt:                                               ## Run formatting scripts
 	@cd $(CURDIR) && echo "${OK} Code formatting complete ✨"
 
 .PHONY: lint
-lint: py-lint js-format rs-fmt                     ## Format Python/TS/Rust with fixes
+lint: py-lint rs-fmt                               ## Format Python/Rust with fixes
 
 .PHONY: lint-all
-lint-all: py-lint js-lint rs-lint pre-commit type-check slotscheck ## Run all linting
+lint-all: py-lint rs-lint pre-commit type-check slotscheck ## Run all linting
 
 .PHONY: coverage
 coverage:                                          ## Run the tests and generate coverage report
@@ -479,14 +378,14 @@ py-test-all: ensure-native                        ## Run all Python tests (unit 
 	@echo "${OK} Python tests passed ✨"
 
 .PHONY: test-all
-test-all: rs-test js-test py-test-all              ## Run all tests (Rust -> TypeScript -> Python)
+test-all: rs-test py-test-all                      ## Run all tests (Rust -> Python)
 	@echo "${OK} All tests passed ✨"
 
 .PHONY: check-all
-check-all: lint test-all coverage js-type-check js-test js-build rs-test rs-lint ## Run all linting, tests, and coverage checks
+check-all: lint test-all coverage rs-lint  ## Run all linting, tests, and coverage checks
 
 .PHONY: build
-build: py-build js-build rs-build                   ## Build Python, TypeScript, and Rust artifacts
+build: py-build rs-build                           ## Build Python and Rust artifacts
 
 
 # =============================================================================

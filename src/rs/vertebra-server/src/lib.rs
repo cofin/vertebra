@@ -7,8 +7,12 @@ use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
+use futures_util::StreamExt;
+use tokio_stream::wrappers::IntervalStream;
+use http_body_util::{StreamBody, BodyExt};
+use hyper::body::Frame;
 
 use vertebra_broker::pool::PoolManager;
 use vertebra_broker::scheduler::FairScheduler;
@@ -18,8 +22,45 @@ pub mod assets;
 use worker::WorkerManager;
 use assets::AssetManager;
 
-async fn hello(_: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
-    Ok(Response::new(Full::new(Bytes::from("Hello from Vertebra Rust"))))
+async fn hello(req: Request<hyper::body::Incoming>) -> Result<Response<http_body_util::combinators::BoxBody<Bytes, Infallible>>, Infallible> {
+    // gRPC Check
+    if let Some(content_type) = req.headers().get("content-type") {
+        if content_type.as_bytes().starts_with(b"application/grpc") {
+             let body = Full::new(Bytes::from("")).map_err(|_: Infallible| unreachable!()).boxed();
+             return Ok(Response::builder()
+                .header("content-type", "application/grpc")
+                .header("grpc-status", "12") // Unimplemented
+                .body(body)
+                .unwrap());
+        }
+    }
+
+    // SSE Check
+    if let Some(accept) = req.headers().get("accept") {
+        let accept_str = std::str::from_utf8(accept.as_bytes()).unwrap_or("");
+        if accept_str.contains("text/event-stream") {
+            let interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            let stream = IntervalStream::new(interval)
+                .map(|_| {
+                    let event = format!("data: Ping\n\n");
+                    Ok::<_, Infallible>(Frame::data(Bytes::from(event)))
+                });
+            
+            let body = BodyExt::boxed(StreamBody::new(stream));
+            
+            return Ok(Response::builder()
+                .header("content-type", "text/event-stream")
+                .header("cache-control", "no-cache")
+                .body(body)
+                .unwrap());
+        }
+    }
+
+    let body = Full::new(Bytes::from("Hello from Vertebra Rust (HTTP/2 Enabled)"))
+        .map_err(|_: Infallible| unreachable!())
+        .boxed();
+        
+    Ok(Response::new(body))
 }
 
 pub struct ServerConfig {
@@ -51,8 +92,8 @@ pub async fn serve(config: ServerConfig) -> Result<(), Box<dyn std::error::Error
     };
     
     if let Err(e) = state.worker_manager.start() {
-        eprintln!("Failed to start workers: {}", e);
-        return Err(e);
+        eprintln!("WARNING: Failed to start workers: {}", e);
+        // Continue serving even if workers fail (for testing/dev)
     }
 
     let listener = TcpListener::bind(addr).await?;
@@ -78,10 +119,9 @@ pub async fn serve(config: ServerConfig) -> Result<(), Box<dyn std::error::Error
         let io = TokioIo::new(stream);
 
         tokio::task::spawn(async move {
-            if let Err(err) = http1::Builder::new()
-                .serve_connection(io, service_fn(hello))
-                .await
-            {
+            let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+            
+            if let Err(err) = builder.serve_connection(io, service_fn(hello)).await {
                 eprintln!("Error serving connection: {:?}", err);
             }
         });

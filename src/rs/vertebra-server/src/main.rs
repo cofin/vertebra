@@ -4,7 +4,7 @@ use vertebra_server::{serve, ServerConfig};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(short, long, default_value = "127.0.0.1", env = "VERTEBRA_HOST")]
+    #[arg(long, default_value = "127.0.0.1", env = "VERTEBRA_HOST")]
     host: String,
 
     #[arg(short, long, default_value_t = 8000, env = "VERTEBRA_PORT")]

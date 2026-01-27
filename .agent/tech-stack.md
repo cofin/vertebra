@@ -3,8 +3,8 @@
 ## Languages & Runtimes
 
 - **Python 3.12+**: Primary application and business logic layer. Managed via `uv`.
-- **Rust 2021**: Core performance layer for IPC primitives and shared memory management. Uses PyO3 for Python bindings.
-- **TypeScript / Bun / Node.js**: Frontend integration and tooling.
+- **Rust 2021**: Core performance layer for HTTP server, IPC primitives, and shared memory management. Primary server runtime.
+- **TypeScript / Bun / Node.js**: Frontend integration, optional legacy server runtime, and tooling.
 
 ## Core Architecture
 
