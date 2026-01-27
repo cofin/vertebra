@@ -27,8 +27,8 @@
     - Create a test that starts `VertebraServer`, which spawns a "dummy" Python worker (simple script) that verifies it received the FDs.
 
 ## Phase 5: Completion
-- [ ] **Task: Run Test Suite & Checkpoint**
+- [x] **Task: Run Test Suite & Checkpoint**
     - `make test-all`
-    - Create tag `checkpoint/ipc-worker-bridge/phase-4`
-- [ ] **Task: Archive Flow**
+    - Create tag `checkpoint/ipc-worker-bridge/phase-4` (1d8eb51)
+- [x] **Task: Archive Flow**
     - Move to `.agent/archive/`
