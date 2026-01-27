@@ -10,9 +10,9 @@
 *Link: [./archive/python-asgi-adapter/](./archive/python-asgi-adapter/)*
 *Beads: Closed*
 
-## [ ] Flow: rust-broker-resources
-*Link: [./specs/rust-broker-resources/](./specs/rust-broker-resources/)*
-*Beads: Pending*
+## [x] Flow: rust-broker-resources
+*Link: [./archive/rust-broker-resources/](./archive/rust-broker-resources/)*
+*Beads: Closed*
 
 ## [ ] Flow: frontend-native-bridge
 *Link: [./specs/frontend-native-bridge/](./specs/frontend-native-bridge/)*
