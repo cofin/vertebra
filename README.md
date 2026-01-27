@@ -4,7 +4,7 @@ Vertebra is a **Python-first, high-performance application backbone** that combi
 
 - Python developer experience with type-safe APIs.
 - Rust IPC primitives for zero-copy data transfer.
-- Bun/TypeScript server tooling for high-throughput networking.
+- Rust-native server layer for high-throughput networking.
 
 ## Quickstart
 
@@ -27,10 +27,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 ```bash
 make rs-build      # Build Rust workspace
 make rs-test       # Run Rust tests
-make js-test       # Run TypeScript tests
-make js-type-check # Run TypeScript type checks
 make test          # Run Python tests
-make lint          # Format Python/TS/Rust (ruff + biome + rustfmt)
+make lint          # Format Python/Rust (ruff + rustfmt)
 make lint-all      # Run full lint + type checks + pre-commit
 ```
 
@@ -40,7 +38,6 @@ make lint-all      # Run full lint + type checks + pre-commit
 src/
   py/   # Python package
   rs/   # Rust workspace
-  ts/   # Bun/TypeScript workspace
 ```
 
 ## Documentation

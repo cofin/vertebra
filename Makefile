@@ -32,7 +32,7 @@ RUST_ENV := $(HOME)/.cargo/env
 
 .PHONY: help
 help:                                               ## Display this help text for Makefile
-	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z0-9_-]+:.*?##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z0-9_-]+:.*?##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST) 
 
 
 # =============================================================================
@@ -438,7 +438,6 @@ fmt:                                               ## Run formatting scripts
 	@echo "${INFO} Running code formatters... 🔧"
 	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests tools/
 	@uv run ruff format src/py/vertebra src/py/tests tools/
-	@$(MAKE) js-format
 	@cd $(CURDIR) && echo "${OK} Code formatting complete ✨"
 
 .PHONY: lint
@@ -460,7 +459,7 @@ test: ensure-native                                ## Run unit tests (excludes i
 	@echo "${INFO} Cleaning shared memory... 🧹"
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
 	@echo "${INFO} Running unit tests... 🧪"
-	@uv run pytest src/py/tests -m "not integration"
+	@uv run pytest src/py/tests -m \"not integration\"
 	@echo "${OK} Unit tests passed ✨"
 
 .PHONY: integration-test
