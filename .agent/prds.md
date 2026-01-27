@@ -13,13 +13,6 @@ This file tracks all PRDs (Product Requirements Documents) for the project. Each
 
 Attempted Rust Arrow encoder was 3x slower than nanoarrow due to PyO3 iteration overhead. Sticking with nanoarrow C extension. See learnings.md for analysis.
 
-### [~] Security & User Framework
-*Link: [./specs/security-user-framework/](./specs/security-user-framework/)*
-*Risk Level: medium*
-*Status: Phase 2 complete, Phase 3 in progress*
-
-Comprehensive security and user management framework with broker-first authentication.
-
 ### [ ] Documentation & Adoption
 *Link: [./specs/documentation-adoption/](./specs/documentation-adoption/)*
 *Risk Level: low*
@@ -58,6 +51,12 @@ Native Vertebra App framework with route decorators and real-time state synchron
 ## Archived PRDs
 
 See `specs/archive/README.md` for historical reference.
+
+### [x] Security & User Framework
+*Link: [./archive/security-user-framework/](./archive/security-user-framework/)*
+*Status: Completed*
+
+Comprehensive security and user management framework with broker-first authentication.
 
 **Completed:**
 - PRD-0: Foundation
