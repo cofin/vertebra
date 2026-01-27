@@ -54,7 +54,7 @@ async def test_sqlspec_arrow_integration_flow(monkeypatch: pytest.MonkeyPatch) -
     fake_conn = VertebraAsyncConnection("test_pool", client, "fake_token")
 
     # Patch the pool acquire to return our connection
-    with unittest.mock.patch("vertebra.drivers.broker.VertebraAsyncPool.acquire", return_value=fake_conn):
+    with unittest.mock.patch("vertebra.database.backends.broker.VertebraAsyncPool.acquire", return_value=fake_conn):
         async with config.provide_session() as session:
             rows = await session.select("SELECT * FROM large_table")
 

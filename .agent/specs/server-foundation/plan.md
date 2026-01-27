@@ -24,7 +24,14 @@
     - Block on `runtime.block_on(server.serve(...))`.
 
 ## Phase 4: Validation
-- [~] **Task: Python Verification Script**
+- [x] **Task: Python Verification Script** 31a9e21
     - Create `tools/test_server_boot.py`.
     - Call `_vertebra.start_http_server("127.0.0.1", 3000)`.
     - Validate with `curl http://127.0.0.1:3000`.
+
+## Phase 5: Completion
+- [ ] **Task: Run Test Suite & Checkpoint**
+    - `make test-all`
+    - Create tag `checkpoint/server-foundation/phase-4`
+- [ ] **Task: Archive Flow**
+    - Move to `.agent/archive/`

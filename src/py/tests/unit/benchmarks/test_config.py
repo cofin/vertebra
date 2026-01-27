@@ -212,7 +212,7 @@ def test_vertebra_config() -> None:
     assert config.category == BenchmarkCategory.RUNTIME
     assert config.port == 8001
     assert "vertebra" in config.command
-    assert "serve" in config.command
+    assert "run" in config.command
 
 
 @pytest.mark.unit

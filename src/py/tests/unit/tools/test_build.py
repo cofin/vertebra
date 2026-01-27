@@ -22,7 +22,7 @@ def test_build_config_load(tmp_path: Path) -> None:
 [tool.vertebra]
 profile = "baseline"
 
-[tool.vertebra.core.build.targets.linux-x64]
+[tool.vertebra.build.targets.linux-x64]
 profile = "modern"
 """
     )
