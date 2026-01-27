@@ -1,7 +1,7 @@
 # Plan: Rust Broker Resources
 
 ## Phase 1: Fairness Scheduler
-- [ ] **Task: Port `FairScheduler` to Rust**
+- [~] **Task: Port `FairScheduler` to Rust**
     - Create `src/rs/vertebra-broker/src/scheduler.rs`.
     - Implement DRR algorithm (Deficit Round Robin).
     - Ensure thread-safety (Arc/Mutex if needed, or lock-free).
