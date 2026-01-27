@@ -30,8 +30,8 @@
     - Validate with `curl http://127.0.0.1:3000`.
 
 ## Phase 5: Completion
-- [ ] **Task: Run Test Suite & Checkpoint**
+- [x] **Task: Run Test Suite & Checkpoint**
     - `make test-all`
-    - Create tag `checkpoint/server-foundation/phase-4`
-- [ ] **Task: Archive Flow**
+    - Create tag `checkpoint/server-foundation/phase-4` (2f318dc)
+- [x] **Task: Archive Flow**
     - Move to `.agent/archive/`
