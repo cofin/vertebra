@@ -26,7 +26,8 @@ These specs contain valuable features that need to be ported to the Rust archite
     - Action: Investigate `mule` or `axum_extra::extract::Multipart` integration.
 
 ## Phase 3: Final Cleanup
-- [ ] **Task: Verify `src/ts` Deletion**
+- [x] **Task: Verify `src/ts` Deletion**
     - Ensure no stray TS files remain.
+    - [verified] Directory is gone.
 - [x] **Task: Update `flows.md`**
     - Remove the "STALE" section.

@@ -72,3 +72,7 @@ Each flow has its own detailed spec and plan in its respective folder.
 - [ ] **documentation-adoption**: [./specs/documentation-adoption/](./specs/documentation-adoption/)
 - [ ] **fix-startup-module-import-and-polish-cli**: [./specs/fix-startup-module-import-and-polish-cli/](./specs/fix-startup-module-import-and-polish-cli/)
 - [ ] **cli-polish**: [./specs/cli-polish/](./specs/cli-polish/)
+
+## [ ] Flow: fix-benchmarks-ipc
+*Link: [./specs/fix-benchmarks-ipc/](./specs/fix-benchmarks-ipc/)*
+*Status: ACTIVE - Fix IPC return path & BlackSheep*

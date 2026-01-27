@@ -9,12 +9,12 @@ use vertebra_core::channel::{SpscReceiver, SpscRing, SpscSender};
 use vertebra_core::notify::Notifier;
 use vertebra_core::shm::ShmRegion;
 
-#[derive(Debug)]
 pub struct Worker {
     pub req_tx: SpscSender,
     pub resp_rx: SpscReceiver,
     pub pid: u32,
     pub process: std::process::Child,
+    pub notifier: Notifier,
 }
 
 pub struct WorkerManager {
@@ -22,8 +22,6 @@ pub struct WorkerManager {
     app_path: String,
     python_path: String,
     worker_handles: Vec<Worker>,
-    // We keep notifiers alive here so FDs remain valid in parent
-    notifiers: Vec<Notifier>,
 }
 
 impl WorkerManager {
@@ -33,7 +31,6 @@ impl WorkerManager {
             app_path: app_path.to_string(),
             python_path: python_path.to_string(),
             worker_handles: Vec::new(),
-            notifiers: Vec::new(),
         }
     }
 
@@ -76,6 +73,19 @@ impl WorkerManager {
                 .handle()
                 .ok_or("No handle for response region")?;
 
+            // Clear FD_CLOEXEC so child inherits them
+            #[cfg(target_os = "linux")]
+            unsafe {
+                let flags = libc::fcntl(notify_fd, libc::F_GETFD);
+                libc::fcntl(notify_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                
+                let flags = libc::fcntl(req_fd, libc::F_GETFD);
+                libc::fcntl(req_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                
+                let flags = libc::fcntl(resp_fd, libc::F_GETFD);
+                libc::fcntl(resp_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+            }
+
             let mut cmd = Command::new(&self.python_path);
             cmd.arg("-m")
                 .arg("vertebra.server.worker")
@@ -83,10 +93,15 @@ impl WorkerManager {
                 .arg(&self.app_path)
                 .arg("--worker-id")
                 .arg(i.to_string())
+                .arg("--slots")
+                .arg(layout.slots.to_string())
+                .arg("--slot-size")
+                .arg(layout.slot_size.to_string())
                 .env("VERTEBRA_NOTIFY_FD", notify_fd.to_string())
                 .env("VERTEBRA_REQ_SHM_FD", req_fd.to_string())
                 .env("VERTEBRA_RESP_SHM_FD", resp_fd.to_string())
-                .env("VERTEBRA_SHM_SIZE", layout.total_size.to_string());
+                .env("VERTEBRA_SHM_SIZE", layout.total_size.to_string())
+                .env("PYTHONUNBUFFERED", "1");
 
             #[cfg(target_os = "linux")]
             unsafe {
@@ -98,15 +113,15 @@ impl WorkerManager {
             }
 
             let child = cmd.spawn()?;
-            println!("Spawned worker {} (PID: {})", i, child.id());
+            println!("Spawned worker {} (PID: {}) notify_fd: {}", i, child.id(), notify_fd);
 
             self.worker_handles.push(Worker {
                 req_tx,
                 resp_rx,
                 pid: child.id(),
                 process: child,
+                notifier,
             });
-            self.notifiers.push(notifier);
         }
 
         Ok(())

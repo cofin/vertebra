@@ -415,11 +415,8 @@ class AsgiWorker:
         external_notify_fd = self._config.notify_read_fd
 
         def on_control_readable() -> None:
-            """Callback when notification fd has data available.
-
-            In supervisor mode (external_notify_fd set), ONE fd is used for ALL rings.
-            So we must drain control ring AND all client request rings.
-            """
+            """Callback when notification fd has data available."""
+            print("DEBUG: on_control_readable called", flush=True)
             # Clear notification - use external notifier if available
             if external_notify_fd is not None:
                 # External eventfd is cleared by reading 8 bytes (u64 counter)
@@ -450,6 +447,7 @@ class AsgiWorker:
         # Register notification FD with the event loop
         # Use external notifier fd from ProcessManager if provided, otherwise ring's internal
         control_fd = external_notify_fd if external_notify_fd is not None else self._control.notifier_fd()
+        print(f"DEBUG: Registering reader on control_fd: {control_fd}", flush=True)
         self._loop.add_reader(control_fd, on_control_readable)
 
         try:
@@ -1280,6 +1278,8 @@ def _resolve_notify_fd(cli_value: int | None, env_name: str) -> int | None:
     Priority: CLI arg > env var
     Supports both ProcessManager (CLI args) and Rust supervisor (env vars).
     """
+    env_val = os.environ.get(env_name)
+    print(f"DEBUG: Resolving {env_name}: CLI={cli_value}, ENV={env_val}", flush=True)
     if cli_value is not None:
         return cli_value
     env_value = os.environ.get(env_name)
@@ -1292,6 +1292,7 @@ def _resolve_notify_fd(cli_value: int | None, env_name: str) -> int | None:
 
 
 def main() -> None:
+    print("DEBUG: Worker starting...", flush=True)
     parser = argparse.ArgumentParser(description="Vertebra ASGI worker process")
     parser.add_argument("--app", required=True, help="ASGI app path (module:attr)")
     parser.add_argument("--name", default="vertebra-asgi")

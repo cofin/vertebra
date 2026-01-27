@@ -63,15 +63,34 @@ pub async fn dispatch(
     
     let mut worker = worker.lock().await;
     
+use vertebra_core::channel::ChannelError;
+
+// ...
+
     // Send
     worker.req_tx.send(&message, 0)?;
+    worker.notifier.notify()?;
     
-    // Receive (Blocking)
-    let mut resp_buffer = vec![0u8; 65536]; // 64KB
-    
-    // Use block_in_place to avoid blocking the reactor
-    let len = tokio::task::block_in_place(|| {
-        worker.resp_rx.recv(&mut resp_buffer)
+    // Receive (Manual spin with debug)
+    let mut resp_buffer = vec![0u8; 65536];
+    let len = tokio::task::block_in_place(|| -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let mut retries = 0;
+        loop {
+            match worker.resp_rx.try_recv(&mut resp_buffer) {
+                Ok(n) => return Ok(n),
+                Err(ChannelError::Empty) => {
+                    retries += 1;
+                    if retries % 10000000 == 0 {
+                        println!("DEBUG: Waiting for response... {}", retries);
+                    }
+                    std::thread::yield_now();
+                    if retries > 200000000 { // ~few seconds
+                        return Err("Timeout waiting for Python response".into());
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
     })?;
     
     if len < RequestHeader::SIZE {

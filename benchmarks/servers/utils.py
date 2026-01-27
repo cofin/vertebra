@@ -168,6 +168,8 @@ def cleanup_orphaned_vertebra_processes() -> None:
     with contextlib.suppress(Exception):
         # Kill any orphaned vertebra workers
         subprocess.run(["pkill", "-9", "-f", "vertebra.server.worker"], capture_output=True, timeout=5, check=False)
+        # Kill any orphaned Rust servers
+        subprocess.run(["pkill", "-9", "vertebra-server"], capture_output=True, timeout=5, check=False)
     with contextlib.suppress(Exception):
         # Clean up stale shared memory files
         shm_dir = "/dev/shm"

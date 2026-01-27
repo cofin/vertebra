@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from blacksheep import Application, Request, Response, get, json, post
+from blacksheep import Application, Content, Request, Response, get, json, post
 
 # Pre-computed response bodies
 BODY_10B = b"0123456789"
@@ -31,6 +31,15 @@ JSON_DATA = {
 app = Application(show_error_details=False)
 
 
+def raw_response(body: bytes) -> Response:
+    """Create a raw response with explicit Content-Length."""
+    return Response(
+        200,
+        headers=[(b"content-length", str(len(body)).encode())],
+        content=Content(b"application/octet-stream", body),
+    )
+
+
 @get("/health")
 async def health() -> Response:
     """Health check endpoint."""
@@ -46,32 +55,32 @@ async def hello() -> Response:
 @get("/b10")
 async def body_10b() -> Response:
     """10-byte response."""
-    return Response(200, content=BODY_10B).with_content_type(b"application/octet-stream")
+    return raw_response(BODY_10B)
 
 
 @get("/b1k")
 async def body_1k() -> Response:
     """1KB response."""
-    return Response(200, content=BODY_1K).with_content_type(b"application/octet-stream")
+    return raw_response(BODY_1K)
 
 
 @get("/b10k")
 async def body_10k() -> Response:
     """10KB response."""
-    return Response(200, content=BODY_10K).with_content_type(b"application/octet-stream")
+    return raw_response(BODY_10K)
 
 
 @get("/b100k")
 async def body_100k() -> Response:
     """100KB response."""
-    return Response(200, content=BODY_100K).with_content_type(b"application/octet-stream")
+    return raw_response(BODY_100K)
 
 
 @post("/echo")
 async def echo(request: Request) -> Response:
     """Echo request body."""
     body = await request.read()
-    return Response(200, content=body).with_content_type(b"application/octet-stream")
+    return raw_response(body)
 
 
 @get("/io10")
@@ -91,7 +100,7 @@ async def io_100ms() -> Response:
 @get("/file")
 async def file_response() -> Response:
     """50KB file response."""
-    return Response(200, content=FILE_CONTENT).with_content_type(b"application/octet-stream")
+    return raw_response(FILE_CONTENT)
 
 
 @get("/json")

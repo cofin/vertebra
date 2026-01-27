@@ -86,7 +86,7 @@ Each runtime runs its native application format. Server and framework are insepa
 
 | Runtime | Notes |
 |---------|-------|
-| Vertebra | Bun HTTP + Rust IPC + Python ASGI (raw) |
+| Vertebra | Rust HTTP + Rust IPC + Python ASGI (raw) |
 | Vertebra ASGI (Litestar) | Litestar via standard ASGI bridge (`--no-native`) |
 | Vertebra Native (Litestar) | Litestar with Rust router bypass (`--native`) |
 | Vertebra (FastAPI) | FastAPI through Vertebra ASGI bridge |

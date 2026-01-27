@@ -166,8 +166,8 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
             "1",
         ),
         port=8001,
-        startup_delay=3.0,  # Bun + Rust + Python startup
-        notes="Bun HTTP + Rust IPC + Python ASGI (raw)",
+        startup_delay=1.0,  # Rust + Python startup
+        notes="Rust HTTP + Rust IPC + Python ASGI (raw)",
     ),
     "vertebra_asgi_litestar": ServerConfig(
         name="vertebra_asgi_litestar",
@@ -186,7 +186,7 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
             "--asgi",
         ),
         port=8008,
-        startup_delay=3.0,  # Bun + Rust + Python startup
+        startup_delay=1.0,  # Rust + Python startup
         notes="Litestar as standard ASGI app through Vertebra (--no-native)",
     ),
     "vertebra_native_litestar": ServerConfig(
@@ -205,7 +205,7 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
             "1",
         ),
         port=8009,
-        startup_delay=3.0,  # Bun + Rust + Python startup
+        startup_delay=1.0,  # Rust + Python startup
         notes="Litestar with Vertebra native Rust router (--native, default)",
     ),
     "vertebra_fastapi": ServerConfig(
@@ -225,7 +225,7 @@ CATEGORY_2_RUNTIMES: dict[str, ServerConfig] = {
             "--asgi",
         ),
         port=8013,
-        startup_delay=3.0,  # Bun + Rust + Python startup
+        startup_delay=1.0,  # Rust + Python startup
         notes="FastAPI through Vertebra ASGI bridge (native mode is Litestar-only)",
     ),
     "sanic_standalone": ServerConfig(
