@@ -16,6 +16,26 @@ class VertebraUserMixin(msgspec.Struct):
         """Return True if the user is anonymous."""
         return False
 
+    def has_scope(self, scope: str) -> bool:
+        """Check if the user has a specific scope.
+
+        Looks for a 'scopes' attribute (list/set/tuple) on the model.
+        """
+        scopes = getattr(self, "scopes", None)
+        if scopes and isinstance(scopes, (list, tuple, set)):
+            return scope in scopes
+        return False
+
+    def has_perm(self, perm: str) -> bool:
+        """Check if the user has a specific permission.
+
+        Looks for a 'permissions' attribute (list/set/tuple) on the model.
+        """
+        perms = getattr(self, "permissions", None)
+        if perms and isinstance(perms, (list, tuple, set)):
+            return perm in perms
+        return False
+
 
 class AnonymousUser(VertebraUserMixin):
     """Represents an unauthenticated user."""
