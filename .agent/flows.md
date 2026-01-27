@@ -2,9 +2,9 @@
 *Link: [./archive/server-foundation/](./archive/server-foundation/)*
 *Beads: Closed*
 
-## [ ] Flow: ipc-worker-bridge
-*Link: [./specs/ipc-worker-bridge/](./specs/ipc-worker-bridge/)*
-*Beads: Pending*
+## [x] Flow: ipc-worker-bridge
+*Link: [./archive/ipc-worker-bridge/](./archive/ipc-worker-bridge/)*
+*Beads: Closed*
 
 ## [ ] Flow: python-asgi-adapter
 *Link: [./specs/python-asgi-adapter/](./specs/python-asgi-adapter/)*
