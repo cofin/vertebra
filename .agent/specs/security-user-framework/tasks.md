@@ -57,7 +57,7 @@
 - [x] Task: Implement `current_user` utility/dependency for Native handlers. [999d213]
 - [x] Task: Write end-to-end tests for a "Protected Route" in Native mode. [999d213]
 - [x] Task: Checkpoint - Verify Phase 5 complete and create recovery point [checkpoint: 999d213]
-- [ ] Task: Flow - User Manual Verification 'Phase 5: Vertebra Native Integration' (Protocol in workflow.md)
+- [x] Task: Flow - User Manual Verification 'Phase 5: Vertebra Native Integration' (Protocol in workflow.md)
 
 ## Phase 6: Quality & Documentation
 **Goal:** Finalize the PRD with documentation and benchmarks.
