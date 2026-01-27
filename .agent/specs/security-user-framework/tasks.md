@@ -43,10 +43,10 @@
 ## Phase 4: Permissions & Scopes
 **Goal:** Add granular authorization capabilities.
 
-- [ ] Task: Implement Scope and Permission check logic in `VertebraUserMixin`.
-    - [ ] `has_scope(scope: str)` and `has_perm(perm: str)`.
-- [ ] Task: Write tests for Granular Permissions.
-- [ ] Task: Checkpoint - Verify Phase 4 complete and create recovery point
+- [x] Task: Implement Scope and Permission check logic in `VertebraUserMixin`. [4e726b1]
+    - [x] `has_scope(scope: str)` and `has_perm(perm: str)`.
+- [x] Task: Write tests for Granular Permissions. [4e726b1]
+- [x] Task: Checkpoint - Verify Phase 4 complete and create recovery point [checkpoint: 4e726b1]
 - [ ] Task: Flow - User Manual Verification 'Phase 4: Permissions & Scopes' (Protocol in workflow.md)
 
 ## Phase 5: Vertebra Native Integration
