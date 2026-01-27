@@ -48,7 +48,7 @@ export default {{
     port: {port},
   }},
   python: {{
-    app: "tmp.auth_test_app:app",
+    app: "_test_pkg.auth_test_app:app",
     venv: "../../.venv"
   }},
   auth: {{
@@ -63,7 +63,7 @@ export default {{
   }}
 }};
 """
-    tmp_dir = Path("tmp")
+    tmp_dir = Path("_test_pkg")
     tmp_dir.mkdir(exist_ok=True)
 
     config_path = (tmp_dir / "vertebra.config.ts").resolve()

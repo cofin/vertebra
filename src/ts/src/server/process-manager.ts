@@ -138,6 +138,18 @@ export class ProcessManager {
 
     const python = this.resolvePythonExecutable(this.options.python);
     const ipcConfig = this.resolveWorkerIpc(id);
+
+    // Pass notifier FDs via stdio to ensure they are inherited (Bun/Node spawn closes others by default)
+    // stdio: [stdin, stdout, stderr, notifyReadFd, notifyWriteFd?]
+    const stdio: any[] = ["inherit", "inherit", "inherit", notifier.fd];
+    let notifyReadFd = 3;
+    let notifyWriteFd = 3;
+
+    if (notifier.writeFd !== notifier.fd) {
+      stdio.push(notifier.writeFd);
+      notifyWriteFd = 4;
+    }
+
     // Assertion safe: constructor validates python.app is defined
     const cmd: string[] = [
       python,
@@ -153,11 +165,11 @@ export class ProcessManager {
       String(ipcConfig.slotSize),
       "--slots",
       String(ipcConfig.slots),
-      // Pass notifier fds - child inherits them automatically
+      // Pass mapped FD numbers
       "--notify-read-fd",
-      String(notifier.fd),
+      String(notifyReadFd),
       "--notify-write-fd",
-      String(notifier.writeFd),
+      String(notifyWriteFd),
     ];
     if (this.options.python.timeout) {
       cmd.push("--timeout", String(this.options.python.timeout));
@@ -168,8 +180,7 @@ export class ProcessManager {
       cmd,
       env,
       cwd: process.cwd(),
-      stdout: "inherit",
-      stderr: "inherit",
+      stdio,
     });
     worker.proc = proc;
     void proc.exited.then((code) => {
@@ -283,7 +294,25 @@ export class ProcessManager {
   private buildWorkerEnv(workerId: number): Record<string, string> {
     const env: Record<string, string> = { ...(process.env as Record<string, string>) };
     env.VERTEBRA_WORKER_ID = String(workerId);
-    const pythonPath = resolvePath(process.cwd(), "src", "py");
+    
+    // Resolve src/py path. Try relative to cwd first, then relative to this file.
+    let pythonPath = resolvePath(process.cwd(), "src", "py");
+    if (!existsSync(pythonPath)) {
+        // If we are in src/ts, try ../src/py
+        const parentPath = resolvePath(process.cwd(), "..", "src", "py");
+        if (existsSync(parentPath)) {
+            pythonPath = parentPath;
+        } else {
+             // Fallback to relative to this file (src/ts/src/server/process-manager.ts -> src/py)
+             // import.meta.dir is src/ts/src/server. Go up 3 levels to src/ts/src/server -> src/ts/src -> src/ts -> src -> py?
+             // No, src/ts/src/server -> src/ts/src -> src/ts -> root -> src/py
+             // root/src/ts/src/server/process-manager.ts
+             // root/src/py
+             // relative: ../../../py
+             pythonPath = resolvePath(import.meta.dir, "..", "..", "..", "py");
+        }
+    }
+
     if (env.PYTHONPATH) {
       env.PYTHONPATH = `${pythonPath}${delimiter}${env.PYTHONPATH}`;
     } else {
