@@ -3,14 +3,14 @@
 ## Languages & Runtimes
 
 - **Python 3.12+**: Primary application and business logic layer. Managed via `uv`.
-- **Rust 2021**: Core performance layer for IPC primitives and shared memory management. Uses PyO3 for Python bindings and Napi-rs for JS/TS bindings.
-- **TypeScript / Bun / Node.js**: High-performance networking, broker logic, and frontend integration.
+- **Rust 2021**: Core performance layer for IPC primitives and shared memory management. Uses PyO3 for Python bindings.
+- **TypeScript / Bun / Node.js**: Frontend integration and tooling.
 
 ## Core Architecture
 
 - **Zero-Copy Data Plane**: Shared-memory ring buffers (SPSC/MPMC) and **Apache Arrow** for high-throughput, low-latency data transfer.
 - **IPC Mechanism**: Shared-memory C ABI (no sockets/TCP in the data plane).
-- **Process Model**: Centralized Broker managing shared resource pools across Python worker processes. `ProcessManager` handles worker lifecycle with health checks and exponential backoff restarts.
+- **Process Model**: Centralized Broker (Rust) managing shared resource pools across Python worker processes. `ProcessManager` handles worker lifecycle with health checks and exponential backoff restarts.
 - **Authentication**: Broker-first JWT/OAuth2/IAP validation at HTTP ingress with JWKS caching. Claims flow to Python via IPC.
 - **Native Integration**: Direct execution path for **Litestar** applications bypassing ASGI. `PipelineCompiler` pre-compiles guards and DI graphs; `VertebraRequest` provides lazy-loaded headers/JSON.
 - **Router**: Rust-based high-performance router (`matchit`) shared between Broker and Python workers.
@@ -41,6 +41,6 @@
 
 - **Dependency Management**: `uv` (Python), `bun` (TypeScript/JS), `cargo` (Rust).
 - **Task Runner**: Makefile for cross-language build, test, and lint orchestration.
-- **Testing**: `pytest` (Python), `bun test` (TS), `cargo test` (Rust).
+- **Testing**: `pytest` (Python), `cargo test` (Rust).
 - **Linting/Formatting**: `ruff` (Python), `biome` (TypeScript), `rustfmt`/`clippy` (Rust).
 - **Distribution**: `python-build-standalone` (PBS) for portable Python runtimes; `vertebra build` for single-file executables.
