@@ -20,6 +20,13 @@
     - *Decision:* Stick to native Vertebra protocol for now to keep "Zero-Copy" ring buffer logic consistent.
 
 ## Phase 4: Testing
-- [~] **Task: Mock Server Test**
+- [x] **Task: Mock Server Test** 3e2e0be
     - Create a Python script that simulates the `vertebra-server` (creates rings, spawns worker).
     - Verify worker attaches and processes a request.
+
+## Phase 5: Completion
+- [ ] **Task: Run Test Suite & Checkpoint**
+    - `make test-all`
+    - Create tag `checkpoint/python-asgi-adapter/phase-4`
+- [ ] **Task: Archive Flow**
+    - Move to `.agent/archive/`
