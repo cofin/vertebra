@@ -58,6 +58,7 @@ COLORS_RGB: dict[str, tuple[int, int, int]] = {
     "warning": (250, 204, 21),  # #facc15 - yellow
     "error": (248, 113, 113),  # #f87171 - red
     "muted": (148, 163, 184),  # #94a3b8 - gray
+    "info": (56, 189, 248),    # #38bdf8 - sky blue
     # Text colors
     "text": (241, 245, 249),  # #f1f5f9 - light text
     "dim": (100, 116, 139),  # #64748b - dim text
@@ -71,6 +72,7 @@ COLORS_256: dict[str, int] = {
     "warning": 220,  # closest to #facc15
     "error": 203,  # closest to #f87171
     "muted": 145,  # closest to #94a3b8
+    "info": 75,    # closest to #38bdf8
     "text": 255,  # white
     "dim": 102,  # gray
 }
@@ -83,6 +85,7 @@ COLORS_BASIC: dict[str, str] = {
     "warning": "yellow",
     "error": "red",
     "muted": "white",
+    "info": "blue",
     "text": "white",
     "dim": "white",
 }
