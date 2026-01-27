@@ -23,5 +23,12 @@
 - [x] **Task: Expose to `VertebraServer`** edb35f8
     - Integrate `WorkerManager` into `VertebraServer` struct.
     - Ensure `VertebraServer::serve()` starts the workers.
-- [~] **Task: Verify Worker Startup**
+- [x] **Task: Verify Worker Startup** e2494b9
     - Create a test that starts `VertebraServer`, which spawns a "dummy" Python worker (simple script) that verifies it received the FDs.
+
+## Phase 5: Completion
+- [ ] **Task: Run Test Suite & Checkpoint**
+    - `make test-all`
+    - Create tag `checkpoint/ipc-worker-bridge/phase-4`
+- [ ] **Task: Archive Flow**
+    - Move to `.agent/archive/`
