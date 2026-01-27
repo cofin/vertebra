@@ -130,6 +130,7 @@ async with create_channel_pair() as (tx, rx):
 ### Security
 - **Bcrypt Default**: Switched to `bcrypt` for password hashing in the Broker (standard, widely supported) though Argon2 is also available
 - **Symmetric JWT**: Added support for symmetric key JWT verification for simple shared-secret setups alongside asymmetric (JWKS) flows
+- **Refresh Token Strategy**: Implemented rotation for Symmetric JWTs only. External providers (OAuth2/IAP) manage their own rotation. Broker injects `Set-Cookie` headers for updated tokens.
 
 ### Performance Targets
 | Metric | Target |
@@ -194,6 +195,12 @@ When mixing `libc::waitpid` (Rust) and `subprocess.Popen.poll()` (Python):
 
 ### Windows Support
 Job Object support is enabled but needs implementation to ensure child processes are killed when parent dies.
+
+### Bun Spawn & FD Inheritance
+Bun's `spawn` implementation (via `posix_spawn`) respects `O_CLOEXEC` strictly. To pass specific FDs (like eventfds for IPC) to a child process, they must be explicitly included in the `stdio` array (e.g., `stdio: ["inherit", "inherit", "inherit", fd]`). Passing them merely as CLI args causes `OSError: Bad file descriptor` in the child.
+
+### PYTHONPATH Relative Resolution
+When spawning Python from TypeScript (via `ProcessManager`), resolving `src/py` relative to `process.cwd()` is fragile if the runner CWD varies (e.g., `src/ts` during dev vs root during prod). Use robust existence checks or fallback to `import.meta.dir` relative paths to ensure `PYTHONPATH` is correct.
 
 ## Build & Distribution
 

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout, type Mock } from "bun:test";
+import { existsSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,7 +26,12 @@ const workers: Subprocess[] = [];
 let testFilePath: string | null = null;
 
 function buildPythonPath(): string {
-  const root = join(process.cwd(), "src", "py");
+  const cwd = process.cwd();
+  let root = join(cwd, "src", "py");
+  // If running from src/ts, src/py is at ../../src/py
+  if (!existsSync(root)) {
+    root = join(cwd, "../../src/py");
+  }
   const existing = process.env.PYTHONPATH;
   const delim = pathDelimiter();
   return existing ? `${root}${delim}${existing}` : root;
