@@ -10,16 +10,16 @@
 - [x] **Task: Verify Header Parsing** 755505e
     - Review `RequestHeader` struct in `vertebra-core` vs `worker.py`.
     - Ensure byte alignment matches.
-- [~] **Task: ASGI Scope Construction**
+- [x] **Task: ASGI Scope Construction** 7203ed2
     - Ensure `vertebra-server` sends all necessary HTTP headers/metadata for valid ASGI scope.
     - Update `RequestMeta` if new fields are needed (e.g., `http_version` from Hyper).
 
 ## Phase 3: RSGI Support (Optimization)
-- [ ] **Task: Evaluate RSGI**
+- [x] **Task: Evaluate RSGI**
     - If `vertebra-server` can speak RSGI-over-IPC, implement `RsgiWorker` or add RSGI support to `AsgiWorker`.
     - *Decision:* Stick to native Vertebra protocol for now to keep "Zero-Copy" ring buffer logic consistent.
 
 ## Phase 4: Testing
-- [ ] **Task: Mock Server Test**
+- [~] **Task: Mock Server Test**
     - Create a Python script that simulates the `vertebra-server` (creates rings, spawns worker).
     - Verify worker attaches and processes a request.
