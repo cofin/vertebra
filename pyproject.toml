@@ -48,7 +48,7 @@ docs = [
 ]
 build = [
     "build>=1.2.2.post1",
-    "maturin>=1.0,<2.0",
+    "maturin[patchelf]>=1.0,<2.0",
     "watchdog>=4.0.0",
     "bump-my-version",
 ]
