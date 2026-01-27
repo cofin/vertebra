@@ -16,9 +16,9 @@
     - Implement `tokio::signal::ctrl_c` handler.
 
 ## Phase 3: Python Bindings
-- [~] **Task: Link `vertebra-server` to `vertebra-py`**
+- [x] **Task: Link `vertebra-server` to `vertebra-py`** e9f412c
     - Update `src/rs/vertebra-py/Cargo.toml`: Add `vertebra-server = { path = "../vertebra-server" }`.
-- [ ] **Task: Expose `start_http_server`**
+- [~] **Task: Expose `start_http_server`**
     - `src/rs/vertebra-py/src/lib.rs`: Add `start_http_server`.
     - Initialize Tokio runtime inside the PyFunction.
     - Block on `runtime.block_on(server.serve(...))`.

@@ -1137,6 +1137,20 @@ fn shm_unlink(_name: &str) -> PyResult<()> {
     ))
 }
 
+#[pyfunction]
+fn start_http_server(py: Python, host: &str, port: u16) -> PyResult<()> {
+    let host = host.to_string();
+    py.detach(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(map_err)?;
+
+        rt.block_on(vertebra_server::serve(&host, port))
+            .map_err(map_err)
+    })
+}
+
 /// Python module initialization.
 #[pymodule]
 fn _vertebra(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1154,6 +1168,7 @@ fn _vertebra(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<supervisor::NativeSupervisor>()?;
     m.add_function(wrap_pyfunction!(validate_jwt_py, m)?)?;
     m.add_function(wrap_pyfunction!(shm_unlink, m)?)?;
+    m.add_function(wrap_pyfunction!(start_http_server, m)?)?;
     // Register async ring types (PRD-10: eventfd async transport)
     async_ring::register(m)?;
     Ok(())

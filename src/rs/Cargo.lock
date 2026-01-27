@@ -1951,7 +1951,9 @@ dependencies = [
  "pyo3",
  "rustix 0.38.44",
  "signal-hook",
+ "tokio",
  "vertebra-core",
+ "vertebra-server",
  "windows",
 ]
 
