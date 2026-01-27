@@ -47,7 +47,7 @@
     - [x] `has_scope(scope: str)` and `has_perm(perm: str)`.
 - [x] Task: Write tests for Granular Permissions. [4e726b1]
 - [x] Task: Checkpoint - Verify Phase 4 complete and create recovery point [checkpoint: 4e726b1]
-- [ ] Task: Flow - User Manual Verification 'Phase 4: Permissions & Scopes' (Protocol in workflow.md)
+- [x] Task: Flow - User Manual Verification 'Phase 4: Permissions & Scopes' (Protocol in workflow.md)
 
 ## Phase 5: Vertebra Native Integration
 **Goal:** Plug the security framework into the Vertebra Native runtime.
