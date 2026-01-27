@@ -14,12 +14,12 @@
     - Ensure output goes to a standard location (e.g., `dist/public`).
 
 ## Phase 3: Dev Server Orchestration
-- [~] **Task: Update `NativeSupervisor`**
+- [x] **Task: Update `NativeSupervisor`** 5acc25c
     - Add ability to spawn a frontend dev command (e.g., `npm run dev`).
     - Pass the dev server port to the Rust server so it knows where to proxy.
 
 ## Phase 4: Verification
-- [ ] **Task: End-to-End Test**
+- [~] **Task: End-to-End Test**
     - Create a test project with a simple index.html (or React app).
     - Run `vertebra build`.
     - Run `vertebra serve`.
