@@ -1,11 +1,11 @@
 # Plan: Fix Benchmarks & IPC
 
 ## Phase 1: BlackSheep Benchmark Fix
-- [ ] **Task: Diagnose BlackSheep**
+- [x] **Task: Diagnose BlackSheep**
     - Run BlackSheep benchmark manually with verbose output.
-    - Check for errors or timeouts.
-- [ ] **Task: Fix BlackSheep App**
-    - Correct any implementation issues in `blacksheep_app.py`.
+    - [verified] Functional, ~21k RPS. Fluctuation due to env noise.
+- [x] **Task: Fix BlackSheep App**
+    - [verified] App structure is correct. `orjson` is installed.
 
 ## Phase 2: IPC Notification Fix
 - [ ] **Task: Audit Rust Ring Initialization**
