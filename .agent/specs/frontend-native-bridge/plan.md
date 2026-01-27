@@ -26,8 +26,8 @@
     - Verify `localhost:8000` serves the index.html.
 
 ## Phase 5: Completion
-- [ ] **Task: Run Test Suite & Checkpoint**
+- [x] **Task: Run Test Suite & Checkpoint**
     - `make test-all`
-    - Create tag `checkpoint/frontend-native-bridge/phase-4`
-- [ ] **Task: Archive Flow**
+    - Create tag `checkpoint/frontend-native-bridge/phase-4` (ed6a1eb)
+- [x] **Task: Archive Flow**
     - Move to `.agent/archive/`
