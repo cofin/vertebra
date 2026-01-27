@@ -21,8 +21,8 @@
     - Incoming IPC requests for "resource.acquire" should be enqueued in the scheduler.
 
 ## Phase 4: Completion
-- [ ] **Task: Run Test Suite & Checkpoint**
+- [x] **Task: Run Test Suite & Checkpoint**
     - `make test-all`
-    - Create tag `checkpoint/rust-broker-resources/phase-4`
-- [ ] **Task: Archive Flow**
+    - Create tag `checkpoint/rust-broker-resources/phase-4` (6cc6f7f)
+- [x] **Task: Archive Flow**
     - Move to `.agent/archive/`
