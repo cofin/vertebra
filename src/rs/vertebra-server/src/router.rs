@@ -18,7 +18,7 @@ impl Router {
     pub fn lookup<'a>(
         &'a self,
         path: &'a str,
-    ) -> Result<matchit::Match<'a, 'a, &String>, matchit::MatchError> {
+    ) -> Result<matchit::Match<'a, 'a, &'a String>, matchit::MatchError> {
         self.inner.at(path)
     }
 }

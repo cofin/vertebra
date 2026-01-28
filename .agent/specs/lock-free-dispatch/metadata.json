@@ -1,0 +1,10 @@
+{
+  "flow_id": "lock-free-dispatch",
+  "type": "feature",
+  "status": "planned",
+  "parent_prd": "async-ipc-pipelining",
+  "beads_epic_id": "vertebra-k4k.3",
+  "created_at": "2026-01-27T00:00:00Z",
+  "updated_at": "2026-01-27T00:00:00Z",
+  "description": "Remove Arc<Mutex<Worker>> serialization, implement least-pending dispatch, enable concurrent requests per worker"
+}

@@ -2,17 +2,13 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use futures_util::StreamExt;
 use http_body_util::Full;
-use http_body_util::{BodyExt, StreamBody};
+use http_body_util::BodyExt;
 use hyper::body::Bytes;
-use hyper::body::Frame;
-use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
-use tokio_stream::wrappers::IntervalStream;
 
 use vertebra_broker::pool::PoolManager;
 use vertebra_broker::scheduler::FairScheduler;
@@ -24,13 +20,15 @@ pub mod introspection;
 pub mod multipart;
 pub mod dispatcher;
 pub mod bridge;
+pub mod response_router;
 use worker::WorkerManager;
 use assets::AssetManager;
 use router::Router;
 use introspection::handle_status;
 use multipart::handle_multipart;
-use dispatcher::{Dispatcher, RoundRobinDispatcher};
+use dispatcher::{Dispatcher, LeastPendingDispatcher};
 use bridge::dispatch;
+use response_router::spawn_response_router;
 
 async fn handle_request(req: Request<hyper::body::Incoming>, state: Arc<ServerState>) -> Result<Response<http_body_util::combinators::BoxBody<Bytes, Infallible>>, Infallible> {
     let path = req.uri().path();
@@ -98,11 +96,6 @@ async fn handle_request(req: Request<hyper::body::Incoming>, state: Arc<ServerSt
     }
 }
 
-async fn hello(req: Request<hyper::body::Incoming>) -> Result<Response<http_body_util::combinators::BoxBody<Bytes, Infallible>>, Infallible> {
-    // Legacy - Unused
-    Ok(Response::new(Full::new(Bytes::from("Hello")).map_err(|_| unreachable!()).boxed()))
-}
-
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -135,7 +128,13 @@ pub async fn serve(config: ServerConfig) -> Result<(), Box<dyn std::error::Error
         eprintln!("WARNING: Failed to start workers: {}", e);
     }
     
-    let dispatcher = Arc::new(RoundRobinDispatcher::new(worker_manager.into_workers()));
+    let dispatcher = Arc::new(LeastPendingDispatcher::new(worker_manager.into_workers()));
+
+    // Spawn response router tasks for each worker
+    for worker in dispatcher.workers() {
+        spawn_response_router(worker.clone());
+    }
+    println!("Spawned {} response router tasks", dispatcher.worker_count());
 
     let state = Arc::new(ServerState {
         pool_manager,

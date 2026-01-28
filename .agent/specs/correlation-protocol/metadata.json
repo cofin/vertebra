@@ -1,0 +1,10 @@
+{
+  "flow_id": "correlation-protocol",
+  "type": "feature",
+  "status": "planned",
+  "parent_prd": "async-ipc-pipelining",
+  "beads_epic_id": "vertebra-k4k.2",
+  "created_at": "2026-01-27T00:00:00Z",
+  "updated_at": "2026-01-27T00:00:00Z",
+  "description": "Request/response correlation using u64 sequence IDs and DashMap for pending request tracking"
+}

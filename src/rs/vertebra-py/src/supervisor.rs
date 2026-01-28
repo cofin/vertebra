@@ -43,11 +43,12 @@ fn cleanup_stale_shm(_prefix: &str) {
 /// FD information for cross-process IPC.
 #[derive(Default)]
 struct InheritedFds {
-    /// Notify FD for event-driven wakeups (eventfd on Linux, pipe read end on others).
-    notify_fd: Option<i32>,
-    /// Write FD for notifications (same as notify_fd on Linux, pipe write end on others).
-    #[cfg(not(target_os = "linux"))]
-    notify_write_fd: Option<i32>,
+    /// Request notify FD (Rust→Python direction): signals when request is available.
+    req_notify_fd: Option<i32>,
+    /// Response notify FD (Python→Rust direction): signals when response is ready.
+    /// On Linux this is the same as req_notify_fd (eventfd is bidirectional).
+    /// On other platforms this is the pipe write end.
+    resp_notify_fd: Option<i32>,
 }
 
 #[pyclass(name = "NativeSupervisor")]
@@ -73,9 +74,14 @@ impl NativeSupervisor {
         }
     }
 
-    /// Get the notify FD for Python to use with asyncio.add_reader().
-    fn notify_fd(&self) -> Option<i32> {
-        self.fds.lock().unwrap().notify_fd
+    /// Get the request notify FD for Python to use with asyncio.add_reader().
+    fn req_notify_fd(&self) -> Option<i32> {
+        self.fds.lock().unwrap().req_notify_fd
+    }
+
+    /// Get the response notify FD for Python to write to after sending responses.
+    fn resp_notify_fd(&self) -> Option<i32> {
+        self.fds.lock().unwrap().resp_notify_fd
     }
 
     fn start(
@@ -103,9 +109,13 @@ impl NativeSupervisor {
                 e
             ))
         })?;
-        let notify_fd = notifier.as_raw_fd();
+        let req_notify_fd = notifier.as_raw_fd();
+        // On Linux, eventfd is bidirectional (same FD for read/write).
+        // On other platforms, Notifier uses pipe (separate read/write FDs).
+        #[cfg(target_os = "linux")]
+        let resp_notify_fd = req_notify_fd;
         #[cfg(not(target_os = "linux"))]
-        let notify_write_fd = notifier.write_fd();
+        let resp_notify_fd = notifier.write_fd();
 
         // Store notifier and FD numbers for later access.
         {
@@ -114,11 +124,8 @@ impl NativeSupervisor {
         }
         {
             let mut fds = fds_arc.lock().unwrap();
-            fds.notify_fd = Some(notify_fd);
-            #[cfg(not(target_os = "linux"))]
-            {
-                fds.notify_write_fd = Some(notify_write_fd);
-            }
+            fds.req_notify_fd = Some(req_notify_fd);
+            fds.resp_notify_fd = Some(resp_notify_fd);
         }
 
         py.detach(move || {
@@ -145,13 +152,10 @@ impl NativeSupervisor {
                 .unwrap_or(5);
 
             cmd.args(&engine_args)
-                .env("VERTEBRA_NOTIFY_FD", notify_fd.to_string())
+                .env("VERTEBRA_REQ_NOTIFY_FD", req_notify_fd.to_string())
+                .env("VERTEBRA_RESP_NOTIFY_FD", resp_notify_fd.to_string())
                 .env("VERTEBRA_SKIP_PROCESS_MANAGER", "1")
                 .env("VERTEBRA_SPIN_US", spin_us.to_string());
-            #[cfg(not(target_os = "linux"))]
-            {
-                cmd.env("VERTEBRA_NOTIFY_WRITE_FD", notify_write_fd.to_string());
-            }
 
             // Set up parent death signal so child dies when supervisor dies.
             // This prevents orphaned Bun processes if the parent is killed unexpectedly.
@@ -190,12 +194,9 @@ impl NativeSupervisor {
                     .arg(port.to_string())
                     .arg("--worker-id")
                     .arg(worker_id.to_string())
-                    .env("VERTEBRA_NOTIFY_FD", notify_fd.to_string())
+                    .env("VERTEBRA_REQ_NOTIFY_FD", req_notify_fd.to_string())
+                    .env("VERTEBRA_RESP_NOTIFY_FD", resp_notify_fd.to_string())
                     .env("VERTEBRA_SPIN_US", spin_us.to_string());
-                #[cfg(not(target_os = "linux"))]
-                {
-                    cmd.env("VERTEBRA_NOTIFY_WRITE_FD", notify_write_fd.to_string());
-                }
 
                 // Set up parent death signal so worker dies when supervisor dies.
                 #[cfg(target_os = "linux")]

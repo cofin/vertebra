@@ -501,7 +501,6 @@ class AsgiWorker:
 
         def on_control_readable() -> None:
             """Callback when notification fd has data available."""
-            print("DEBUG: on_control_readable called", flush=True)
             # Clear notification - use external notifier if available
             if external_notify_fd is not None:
                 # External eventfd is cleared by reading 8 bytes (u64 counter)
@@ -532,7 +531,6 @@ class AsgiWorker:
         # Register notification FD with the event loop
         # Use external notifier fd from ProcessManager if provided, otherwise ring's internal
         control_fd = external_notify_fd if external_notify_fd is not None else self._control.notifier_fd()
-        print(f"DEBUG: Registering reader on control_fd: {control_fd}", flush=True)
         self._loop.add_reader(control_fd, on_control_readable)
 
         try:
@@ -637,17 +635,12 @@ class AsgiWorker:
                 os.write(resp_notify_fd, b"\x01\x00\x00\x00\x00\x00\x00\x00")
 
     async def _handle_client_payload(self, client_id: str, client: ClientState, payload: bytes) -> None:
-        print(f"DEBUG: _handle_client_payload len={len(payload)}", flush=True)
         if len(payload) < HEADER_SIZE:
             return
         header = RequestHeader.from_bytes(payload[:HEADER_SIZE])
-        print(f"DEBUG: Header id={header.id} flags={header.flags} len={header.payload_len}", flush=True)
         try:
             message = self._codec.decode(payload[HEADER_SIZE:])
-            msg_type = message.get("type") if isinstance(message, dict) else type(message)
-            print(f"DEBUG: Decoded message type={msg_type}", flush=True)
-        except Exception as e:  # noqa: BLE001
-            print(f"DEBUG: Decode error: {e}", flush=True)
+        except Exception:  # noqa: BLE001
             return
         
         writer = ResponseWriter(
@@ -1379,21 +1372,20 @@ def _resolve_notify_fd(cli_value: int | None, env_name: str) -> int | None:
     Priority: CLI arg > env var
     Supports both ProcessManager (CLI args) and Rust supervisor (env vars).
     """
-    env_val = os.environ.get(env_name)
-    print(f"DEBUG: Resolving {env_name}: CLI={cli_value}, ENV={env_val}", flush=True)
     if cli_value is not None:
         return cli_value
+
     env_value = os.environ.get(env_name)
     if env_value:
         try:
             return int(env_value)
         except ValueError:
             pass
+
     return None
 
 
 def main() -> None:
-    print("DEBUG: Worker starting...", flush=True)
     parser = argparse.ArgumentParser(description="Vertebra ASGI worker process")
     parser.add_argument("--app", required=True, help="ASGI app path (module:attr)")
     parser.add_argument("--name", default="vertebra-asgi")
@@ -1409,11 +1401,10 @@ def main() -> None:
     args = parser.parse_args()
 
     # Resolve notify fds: CLI args take priority, then env vars (for Rust supervisor)
-    notify_read_fd = _resolve_notify_fd(args.notify_read_fd, "VERTEBRA_NOTIFY_FD")
-    notify_write_fd = _resolve_notify_fd(args.notify_write_fd, "VERTEBRA_NOTIFY_WRITE_FD")
-    # If write fd is not set but read fd is (and we are in managed mode), default write to read (same eventfd)
-    if notify_write_fd is None and notify_read_fd is not None:
-        notify_write_fd = notify_read_fd
+    # VERTEBRA_REQ_NOTIFY_FD: Rust→Python request notification (Python reads this)
+    # VERTEBRA_RESP_NOTIFY_FD: Python→Rust response notification (Python writes this)
+    notify_read_fd = _resolve_notify_fd(args.notify_read_fd, "VERTEBRA_REQ_NOTIFY_FD")
+    notify_write_fd = _resolve_notify_fd(args.notify_write_fd, "VERTEBRA_RESP_NOTIFY_FD")
 
     # Resolve SHM FDs (managed mode)
     req_shm_fd = _resolve_notify_fd(None, "VERTEBRA_REQ_SHM_FD")

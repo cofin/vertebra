@@ -119,7 +119,6 @@ impl AsyncRing {
         slot_size: usize,
         slots: usize,
     ) -> Result<Self, AsyncRingError> {
-        use std::os::fd::FromRawFd;
         let layout = RingLayout::new(slot_size, slots, crate::buffer::ChannelMode::Spsc);
         // Map region from FD
         // ShmRegion::map handles mmap

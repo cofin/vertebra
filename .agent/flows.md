@@ -76,3 +76,16 @@ Each flow has its own detailed spec and plan in its respective folder.
 ## [ ] Flow: fix-benchmarks-ipc
 *Link: [./specs/fix-benchmarks-ipc/](./specs/fix-benchmarks-ipc/)*
 *Status: ACTIVE - Fix IPC return path & BlackSheep*
+
+---
+
+## [ ] PRD: Async IPC Pipelining
+*Link: [./specs/async-ipc-pipelining/](./specs/async-ipc-pipelining/)*
+*Beads: vertebra-k4k*
+*Status: PLANNING*
+
+### Chapters:
+- [ ] **async-eventfd**: [./specs/async-eventfd/](./specs/async-eventfd/) - *Beads: vertebra-k4k.1*
+- [ ] **correlation-protocol**: [./specs/correlation-protocol/](./specs/correlation-protocol/) - *Beads: vertebra-k4k.2*
+- [ ] **lock-free-dispatch**: [./specs/lock-free-dispatch/](./specs/lock-free-dispatch/) - *Beads: vertebra-k4k.3* - blocked by correlation-protocol
+- [ ] **python-concurrent**: [./specs/python-concurrent/](./specs/python-concurrent/) - *Beads: vertebra-k4k.4* - blocked by correlation-protocol

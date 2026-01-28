@@ -41,12 +41,14 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 /// ```ignore
 /// // Parent (supervisor):
 /// let notifier = Notifier::new()?;
-/// env::set_var("VERTEBRA_NOTIFY_FD", notifier.as_raw_fd().to_string());
+/// env::set_var("VERTEBRA_REQ_NOTIFY_FD", notifier.as_raw_fd().to_string());
+/// env::set_var("VERTEBRA_RESP_NOTIFY_FD", notifier.as_raw_fd().to_string()); // Same FD on Linux
 /// fork_child();
 ///
 /// // Child:
-/// let fd = env::var("VERTEBRA_NOTIFY_FD")?.parse()?;
-/// let notifier = unsafe { Notifier::from_raw_fd(fd) };
+/// let req_fd = env::var("VERTEBRA_REQ_NOTIFY_FD")?.parse()?;
+/// let resp_fd = env::var("VERTEBRA_RESP_NOTIFY_FD")?.parse()?;
+/// let notifier = unsafe { Notifier::from_raw_fd(req_fd) };
 /// ```
 pub struct Notifier {
     #[cfg(target_os = "linux")]

@@ -5,7 +5,6 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tower_http::services::ServeDir;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ManifestEntry {
@@ -78,7 +77,7 @@ impl AssetManager {
                     let status = resp.status();
                     let status_code = StatusCode::from_u16(status.as_u16())?;
                     let bytes = resp.bytes().await?;
-                    let mut builder = Response::builder().status(status_code);
+                    let builder = Response::builder().status(status_code);
                     // Copy basic headers? For now just body
                     Ok(builder.body(Full::new(bytes))?)
                 }

@@ -23,6 +23,7 @@ multer = "3.1.0"
 rmp-serde.workspace = true
 uuid = { version = "1.20.0", features = ["v4"] }
 serde_bytes = "0.11.19"
+dashmap = "6"
 
 [[bin]]
 name = "vertebra-server"
