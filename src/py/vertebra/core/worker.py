@@ -162,6 +162,50 @@ class ResponseHolder:
         return self._done and self.empty()
 
 
+class LazyHeaders:
+    """Lazy ASGI headers that defer encoding until first iteration.
+
+    PERF: Avoids creating 2N string objects per request when headers are not accessed.
+    Many ASGI apps (especially API frameworks) never iterate over headers at all.
+
+    The headers are encoded on first iteration and cached for subsequent access.
+    ASGI spec requires headers as list of (bytes, bytes) tuples.
+    """
+
+    __slots__ = ("_encoded", "_raw_headers")
+
+    def __init__(self, raw_headers: list[tuple[str, str]]) -> None:
+        """Initialize with raw (str, str) header tuples from IPC."""
+        self._raw_headers = raw_headers
+        self._encoded: list[tuple[bytes, bytes]] | None = None
+
+    def _encode(self) -> list[tuple[bytes, bytes]]:
+        """Encode headers on first access (lazy evaluation)."""
+        if self._encoded is None:
+            self._encoded = [(k.lower().encode(), v.encode()) for k, v in self._raw_headers]
+        return self._encoded
+
+    def __iter__(self) -> "LazyHeaders":
+        """Return iterator over encoded headers."""
+        return iter(self._encode())  # type: ignore[return-value]
+
+    def __len__(self) -> int:
+        """Return number of headers (no encoding required)."""
+        return len(self._raw_headers)
+
+    def __getitem__(self, index: int) -> tuple[bytes, bytes]:
+        """Get header at index (triggers encoding)."""
+        return self._encode()[index]
+
+    def __contains__(self, item: tuple[bytes, bytes]) -> bool:
+        """Check if header exists (triggers encoding)."""
+        return item in self._encode()
+
+    def __repr__(self) -> str:
+        """String representation showing encoded headers."""
+        return f"LazyHeaders({self._encode()!r})"
+
+
 class RequestContext(msgspec.Struct, frozen=True):
     """Context for an in-flight request."""
 
@@ -986,6 +1030,7 @@ class AsgiWorker:
                 raw_path = meta.raw_path if meta.raw_path is not None else meta.path.encode()
                 query_string = meta.query_string if meta.query_string is not None else meta.query.encode()
                 # PERF: Scope template pattern - reuse constant keys from template
+                # PERF: LazyHeaders defers encoding until first iteration
                 scope = {
                     **_HTTP_SCOPE_TEMPLATE,
                     "http_version": meta.http_version,
@@ -993,7 +1038,7 @@ class AsgiWorker:
                     "path": meta.path,
                     "raw_path": raw_path,
                     "query_string": query_string,
-                    "headers": [(k.lower().encode(), v.encode()) for k, v in meta.headers],
+                    "headers": LazyHeaders(meta.headers),
                     "scheme": meta.scheme,
                     "root_path": meta.root_path,
                     "server": meta.server or (self._config.host, self._config.port),
@@ -1087,13 +1132,14 @@ class AsgiWorker:
             raw_path = meta.raw_path if meta.raw_path is not None else meta.path.encode()
             query_string = meta.query_string if meta.query_string is not None else meta.query.encode()
             # PERF: Scope template pattern - reuse constant keys from template
+            # PERF: LazyHeaders defers encoding until first iteration
             scope = {
                 **_WEBSOCKET_SCOPE_TEMPLATE,
                 "http_version": meta.http_version,
                 "path": meta.path,
                 "raw_path": raw_path,
                 "query_string": query_string,
-                "headers": [(k.lower().encode(), v.encode()) for k, v in meta.headers],
+                "headers": LazyHeaders(meta.headers),
                 "scheme": meta.scheme,
                 "root_path": meta.root_path,
                 "server": meta.server or (self._config.host, self._config.port),

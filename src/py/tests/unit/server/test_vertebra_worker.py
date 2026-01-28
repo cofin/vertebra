@@ -306,3 +306,83 @@ def test_scope_template_creates_new_dict() -> None:
     # Verify template keys are present
     assert scope["type"] == "http"
     assert scope["asgi"]["version"] == "3.0"
+
+
+# --- Tests for LazyHeaders ---
+
+
+@pytest.mark.unit
+def test_lazy_headers_deferred_encoding() -> None:
+    """Test that LazyHeaders defers encoding until iteration."""
+    from vertebra.core.worker import LazyHeaders
+
+    raw_headers = [("Content-Type", "application/json"), ("X-Custom", "value")]
+    headers = LazyHeaders(raw_headers)
+
+    # Before iteration, _encoded should be None
+    assert headers._encoded is None
+
+    # len() should work without encoding
+    assert len(headers) == 2
+    assert headers._encoded is None  # Still not encoded
+
+    # Iteration triggers encoding
+    encoded_list = list(headers)
+    assert len(encoded_list) == 2
+    assert headers._encoded is not None  # Now encoded
+
+
+@pytest.mark.unit
+def test_lazy_headers_caches_result() -> None:
+    """Test that LazyHeaders caches encoded result."""
+    from vertebra.core.worker import LazyHeaders
+
+    raw_headers = [("Content-Type", "text/plain")]
+    headers = LazyHeaders(raw_headers)
+
+    # First iteration encodes
+    list(headers)
+    first_encoded = headers._encoded
+
+    # Second iteration uses cache
+    list(headers)
+    assert headers._encoded is first_encoded  # Same object
+
+
+@pytest.mark.unit
+def test_lazy_headers_encoding_format() -> None:
+    """Test that LazyHeaders produces correct ASGI format."""
+    from vertebra.core.worker import LazyHeaders
+
+    raw_headers = [("Content-Type", "application/json"), ("X-Request-ID", "abc123")]
+    headers = LazyHeaders(raw_headers)
+
+    encoded = list(headers)
+    assert encoded == [
+        (b"content-type", b"application/json"),  # Lowercased
+        (b"x-request-id", b"abc123"),
+    ]
+
+
+@pytest.mark.unit
+def test_lazy_headers_getitem() -> None:
+    """Test LazyHeaders indexing."""
+    from vertebra.core.worker import LazyHeaders
+
+    raw_headers = [("Content-Type", "text/html"), ("Cache-Control", "no-cache")]
+    headers = LazyHeaders(raw_headers)
+
+    assert headers[0] == (b"content-type", b"text/html")
+    assert headers[1] == (b"cache-control", b"no-cache")
+
+
+@pytest.mark.unit
+def test_lazy_headers_contains() -> None:
+    """Test LazyHeaders membership testing."""
+    from vertebra.core.worker import LazyHeaders
+
+    raw_headers = [("Content-Type", "text/plain")]
+    headers = LazyHeaders(raw_headers)
+
+    assert (b"content-type", b"text/plain") in headers
+    assert (b"x-missing", b"value") not in headers
