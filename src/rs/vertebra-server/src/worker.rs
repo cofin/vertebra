@@ -127,7 +127,7 @@ impl WorkerManager {
         self.worker_handles
     }
 
-    pub fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!(
             "Starting {} workers for app: {}",
             self.workers, self.app_path
@@ -167,17 +167,12 @@ impl WorkerManager {
             // Clear FD_CLOEXEC so child inherits them
             #[cfg(target_os = "linux")]
             unsafe {
-                let flags = libc::fcntl(req_notify_fd, libc::F_GETFD);
-                libc::fcntl(req_notify_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-
-                let flags = libc::fcntl(resp_notify_fd, libc::F_GETFD);
-                libc::fcntl(resp_notify_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-
-                let flags = libc::fcntl(req_fd, libc::F_GETFD);
-                libc::fcntl(req_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-
-                let flags = libc::fcntl(resp_fd, libc::F_GETFD);
-                libc::fcntl(resp_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                for fd in [req_notify_fd, resp_notify_fd, req_fd, resp_fd] {
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags != -1 {
+                        libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                    }
+                }
             }
 
             let mut cmd = Command::new(&self.python_path);
@@ -199,7 +194,14 @@ impl WorkerManager {
                 .env("VERTEBRA_REQ_SHM_FD", req_fd.to_string())
                 .env("VERTEBRA_RESP_SHM_FD", resp_fd.to_string())
                 .env("VERTEBRA_SHM_SIZE", req_layout.total_size.to_string())
-                .env("PYTHONUNBUFFERED", "1");
+                .env("PYTHONUNBUFFERED", "1")
+                // Ensure PYTHONPATH includes cwd so app modules can be found
+                .env(
+                    "PYTHONPATH",
+                    std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                );
 
             #[cfg(target_os = "linux")]
             unsafe {
@@ -212,12 +214,30 @@ impl WorkerManager {
 
             let child = cmd.spawn()?;
             println!(
-                "Spawned worker {} (PID: {}) req_notify_fd: {} resp_notify_fd: {}",
+                "Spawned worker {} (PID: {})",
                 i,
-                child.id(),
-                req_notify_fd,
-                resp_notify_fd
+                child.id()
             );
+
+            // Wait for worker ready signal with timeout (IPC handshake)
+            // The Python worker writes 0xFFFFFFFFFFFFFFFF to resp_notify_fd when ready
+            // This prevents accepting HTTP connections before workers can process them
+            let ready_timeout = std::time::Duration::from_secs(30);
+            match tokio::time::timeout(ready_timeout, resp_notifier.wait_readable()).await {
+                Ok(Ok(())) => {
+                    // Clear the ready signal so it doesn't interfere with response routing
+                    let _ = resp_notifier.clear();
+                    println!("Worker {} ready", i);
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Worker {} ready signal error: {}", i, e);
+                    return Err(format!("Worker {} failed to signal ready: {}", i, e).into());
+                }
+                Err(_) => {
+                    eprintln!("Worker {} startup timeout after {:?}", i, ready_timeout);
+                    return Err(format!("Worker {} startup timeout after {:?}", i, ready_timeout).into());
+                }
+            }
 
             self.worker_handles.push(WorkerConnection {
                 req_ring: Arc::new(req_ring),

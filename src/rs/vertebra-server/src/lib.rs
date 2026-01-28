@@ -130,7 +130,7 @@ pub async fn serve(config: ServerConfig) -> Result<(), Box<dyn std::error::Error
     let mut router = Router::new();
     router.insert("/api/native", "native_handler".to_string())?;
 
-    if let Err(e) = worker_manager.start() {
+    if let Err(e) = worker_manager.start().await {
         eprintln!("WARNING: Failed to start workers: {}", e);
     }
 

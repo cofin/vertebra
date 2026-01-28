@@ -573,6 +573,17 @@ class AsgiWorker:
         control_fd = external_notify_fd if external_notify_fd is not None else self._control.notifier_fd()
         self._loop.add_reader(control_fd, on_control_readable)
 
+        # Signal ready to Rust supervisor (IPC handshake)
+        # This prevents the HTTP server from accepting connections before workers are ready
+        if self._config.notify_write_fd is not None:
+            try:
+                # Write ready signal: eventfd counter increment (1)
+                # eventfd requires 8-byte little-endian u64, value must be <= 0xFFFFFFFFFFFFFFFE
+                # The Rust supervisor waits for this before binding the HTTP port
+                os.write(self._config.notify_write_fd, (1).to_bytes(8, "little"))
+            except OSError:
+                pass  # Best effort - supervisor may have already exited
+
         try:
             # Wait until stop is signaled via event
             await self._stop_event.wait()

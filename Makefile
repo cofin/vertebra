@@ -128,7 +128,7 @@ destroy:                                            ## Destroy the virtual envir
 # Rust Development
 # =============================================================================
 .PHONY: rs-build
-rs-build:                                           ## Build Rust workspace
+rs-build:                                           ## Build Rust workspace (release)
 	@echo "${INFO} Building Rust components... 🦀"
 	@if [ -f "$(RUST_ENV)" ]; then \
 		. "$(RUST_ENV)"; \
@@ -137,8 +137,10 @@ rs-build:                                           ## Build Rust workspace
 		echo "${ERROR} cargo not found; run 'make install-rust'"; \
 		exit 1; \
 	fi
-	@cd src/rs && cargo build
-	@echo "${OK} Rust build complete"
+	@cargo build --release --manifest-path $(CURDIR)/src/rs/Cargo.toml
+	@mkdir -p $(CURDIR)/src/py/vertebra/bin
+	@cp $(CURDIR)/src/rs/target/release/vertebra-server $(CURDIR)/src/py/vertebra/bin/vertebra-server
+	@echo "${OK} Rust build complete (binary: src/py/vertebra/bin/vertebra-server)"
 
 .PHONY: rs-test
 rs-test:                                            ## Run Rust tests
