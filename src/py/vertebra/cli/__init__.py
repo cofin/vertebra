@@ -13,7 +13,7 @@ __all__ = ["cli", "main"]
 
 
 @click.group()
-@click.version_option(package_name="vertebra")  # type: ignore[call-arg]
+@click.version_option(package_name="vertebra-core")  # type: ignore[call-arg]
 def cli() -> None:
     """Vertebra: High-performance polyglot application backbone.
 
