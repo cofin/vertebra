@@ -10,9 +10,6 @@ use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
-use vertebra_broker::pool::PoolManager;
-use vertebra_broker::scheduler::FairScheduler;
-
 pub mod assets;
 pub mod bridge;
 pub mod dispatcher;
@@ -117,8 +114,6 @@ pub struct ServerConfig {
 }
 
 pub struct ServerState {
-    pub pool_manager: Arc<PoolManager>,
-    pub scheduler: Arc<FairScheduler<()>>,
     pub asset_manager: AssetManager,
     pub router: Router,
     pub dispatcher: Arc<dyn Dispatcher>,
@@ -130,8 +125,6 @@ pub async fn serve(config: ServerConfig) -> Result<(), Box<dyn std::error::Error
 
     let mut worker_manager =
         WorkerManager::new(config.workers, &config.app_path, &config.python_path);
-    let pool_manager = Arc::new(PoolManager::new());
-    let scheduler = Arc::new(FairScheduler::new(10.0));
     let asset_manager = AssetManager::new(".", None);
 
     let mut router = Router::new();
@@ -153,8 +146,6 @@ pub async fn serve(config: ServerConfig) -> Result<(), Box<dyn std::error::Error
     );
 
     let state = Arc::new(ServerState {
-        pool_manager,
-        scheduler,
         asset_manager,
         router,
         dispatcher,

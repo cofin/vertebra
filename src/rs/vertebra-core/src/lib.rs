@@ -20,6 +20,3 @@ pub mod protocol;
 pub mod router;
 pub mod shm;
 pub mod sync;
-
-/// Placeholder for type bridge utilities (PRD-2+).
-pub mod types {}

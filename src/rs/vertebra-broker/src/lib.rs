@@ -15,9 +15,6 @@ use vertebra_core::notify::Notifier;
 use vertebra_core::router::{RouteId, Router};
 use vertebra_core::shm::ShmRegion;
 
-pub mod pool;
-pub mod scheduler;
-
 #[repr(C)]
 pub struct VtbRouter {
     inner: Router,
