@@ -52,13 +52,20 @@ The spin phase uses `has_data()` which performs 2x `Relaxed` atomic loads (~2ns/
 ### MPMC
 
 `MpmcRing` implements a bounded multi-producer/multi-consumer queue using
-per-slot sequence numbers (epoch-style ABA mitigation).
+per-slot sequence numbers (epoch-style ABA mitigation). It is used for the
+**Request Channel** (Broker → Worker) to allow lock-free concurrent dispatching
+from multiple broker tasks.
 
 ### AsyncRing
 
 `AsyncRing` wraps `SpscRing` with an eventfd-based `Notifier` for asyncio integration.
 The eventfd provides a pollable file descriptor that can be added to Python's asyncio
 event loop via `loop.add_reader()`.
+
+### AsyncMpmcRing
+
+`AsyncMpmcRing` wraps `MpmcRing` with a `Notifier`. It is used by Python workers
+to receive requests from the MPMC request channel.
 
 **Receive Methods:**
 
@@ -73,8 +80,9 @@ but falls back to eventfd polling instead of futex. This is slightly slower (~1.
 vs ~0.8µs) but integrates with asyncio's event loop.
 
 **When to use which:**
-- **SpscRing**: Direct Rust-to-Rust IPC, sync Python, blocking workers
-- **AsyncRing**: Python asyncio code that needs `add_reader()` integration
+- **SpscRing**: Response channel (Worker -> Broker), 1:1, max throughput
+- **MpmcRing**: Request channel (Broker -> Worker), N:1, lock-free concurrency
+- **AsyncRing / AsyncMpmcRing**: Python-side wrappers for asyncio integration
 
 ### Buffer Channel
 

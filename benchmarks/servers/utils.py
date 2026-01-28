@@ -90,8 +90,8 @@ def start_server(
     try:
         proc = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE if not verbose else None,
-            stderr=subprocess.PIPE if not verbose else None,
+            stdout=subprocess.DEVNULL if not verbose else None,
+            stderr=subprocess.DEVNULL if not verbose else None,
             env=env,
             preexec_fn=os.setsid if hasattr(os, "setsid") else None,
         )

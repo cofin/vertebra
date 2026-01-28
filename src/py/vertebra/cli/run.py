@@ -57,6 +57,8 @@ def run(
     # Build the server command (automatically finds 'vertebra-server' binary)
     try:
         server_cmd = build_server_command()
+        # Pass current python executable to the Rust server to ensure it finds the correct environment
+        server_cmd.extend(["--python", sys.executable])
     except SystemExit as e:
         raise CLIError(
             str(e), hint="Ensure vertebra-server binary is available/built.", exit_code=EXIT_CONFIG_ERROR
@@ -69,7 +71,9 @@ def run(
     exit_code = run_supervisor(
         server_cmd=server_cmd,
         env=env,
-        workers=workers,
+        # Pass 0 workers to NativeSupervisor so it doesn't spawn duplicate workers
+        # The Rust server (vertebra-server) will manage workers itself via VERTEBRA_WORKERS env
+        workers=0,
         drain_timeout_ms=drain_timeout,
         shutdown_timeout_ms=shutdown_timeout,
         config=config_data,

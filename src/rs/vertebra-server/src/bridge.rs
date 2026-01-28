@@ -27,10 +27,14 @@ struct AsgiRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AsgiResponse {
+    id: String,
     status: u16,
     headers: Vec<(String, String)>,
     #[serde(with = "serde_bytes", default)]
     body: Vec<u8>,
+    path: Option<String>,
+    offset: Option<u64>,
+    count: Option<u64>,
 }
 
 /// Request timeout in seconds

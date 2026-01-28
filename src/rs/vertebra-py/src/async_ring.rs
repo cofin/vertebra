@@ -6,7 +6,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple, PyType};
 
-use vertebra_core::async_ring::{AsyncChannelPair, AsyncRing, AsyncRingError, PooledAsyncRing};
+use vertebra_core::async_ring::{AsyncChannelPair, AsyncMpmcRing, AsyncRing, AsyncRingError, PooledAsyncRing};
 
 /// Python wrapper for AsyncRing with notification-based async support.
 ///
@@ -251,6 +251,187 @@ impl PyAsyncRing {
     ///
     /// Returns:
     ///     Dict with slot_size, slots, read_head, write_head
+    fn stats(&self) -> PyResult<std::collections::HashMap<String, usize>> {
+        let stats = self.inner.stats();
+        let mut result = std::collections::HashMap::new();
+        result.insert("slot_size".to_string(), stats.slot_size);
+        result.insert("slots".to_string(), stats.slots);
+        result.insert("read_head".to_string(), stats.read_head as usize);
+        result.insert("write_head".to_string(), stats.write_head as usize);
+        Ok(result)
+    }
+}
+
+/// Python wrapper for AsyncMpmcRing with notification-based async support.
+///
+/// This provides a lock-free MPMC ring buffer that integrates with asyncio.
+/// Ideal for high-throughput many-to-one scenarios (e.g. Broker -> Worker).
+#[pyclass(name = "AsyncMpmcRing")]
+pub struct PyAsyncMpmcRing {
+    inner: AsyncMpmcRing,
+}
+
+#[pymethods]
+impl PyAsyncMpmcRing {
+    /// Create a new anonymous async MPMC ring buffer.
+    #[new]
+    fn new(slot_size: usize, slots: usize) -> PyResult<Self> {
+        let inner = AsyncMpmcRing::new(slot_size, slots).map_err(map_err)?;
+        Ok(Self { inner })
+    }
+
+    /// Create a named async MPMC ring buffer.
+    #[cfg(unix)]
+    #[classmethod]
+    fn create_named(
+        _cls: &Bound<'_, PyType>,
+        name: &str,
+        slot_size: usize,
+        slots: usize,
+    ) -> PyResult<Self> {
+        let inner = AsyncMpmcRing::create_named(name, slot_size, slots).map_err(map_err)?;
+        Ok(Self { inner })
+    }
+
+    #[cfg(not(unix))]
+    #[classmethod]
+    fn create_named(
+        _cls: &Bound<'_, PyType>,
+        _name: &str,
+        _slot_size: usize,
+        _slots: usize,
+    ) -> PyResult<Self> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "named async rings are only supported on Unix",
+        ))
+    }
+
+    /// Open an existing named async MPMC ring buffer.
+    #[cfg(unix)]
+    #[classmethod]
+    fn open_named(
+        _cls: &Bound<'_, PyType>,
+        name: &str,
+        slot_size: usize,
+        slots: usize,
+    ) -> PyResult<Self> {
+        let inner = AsyncMpmcRing::open_named(name, slot_size, slots).map_err(map_err)?;
+        Ok(Self { inner })
+    }
+
+    #[cfg(not(unix))]
+    #[classmethod]
+    fn open_named(
+        _cls: &Bound<'_, PyType>,
+        _name: &str,
+        _slot_size: usize,
+        _slots: usize,
+    ) -> PyResult<Self> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "named async rings are only supported on Unix",
+        ))
+    }
+
+    /// Open an async MPMC ring from raw file descriptors.
+    #[classmethod]
+    fn from_raw_fd_handle(
+        _cls: &Bound<'_, PyType>,
+        fd: i32,
+        slot_size: usize,
+        slots: usize,
+    ) -> PyResult<Self> {
+        #[cfg(unix)]
+        {
+            let inner = unsafe { AsyncMpmcRing::from_raw_fd(fd, slot_size, slots).map_err(map_err)? };
+            Ok(Self { inner })
+        }
+        #[cfg(not(unix))]
+        {
+            Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "from_raw_fd_handle is only supported on Unix",
+            ))
+        }
+    }
+
+    fn notifier_fd(&self) -> i32 {
+        self.inner.notifier_fd()
+    }
+
+    fn payload_capacity(&self) -> usize {
+        self.inner.payload_capacity()
+    }
+
+    #[pyo3(signature = (data, flags=None))]
+    fn send(&self, py: Python<'_>, data: &[u8], flags: Option<u32>) -> PyResult<()> {
+        let flags = flags.unwrap_or(0);
+        py.detach(|| self.inner.send(data, flags).map_err(map_err))
+    }
+
+    #[pyo3(signature = (data, flags=None))]
+    fn try_send(&self, data: &[u8], flags: Option<u32>) -> PyResult<bool> {
+        let flags = flags.unwrap_or(0);
+        self.inner.try_send(data, flags).map_err(map_err)
+    }
+
+    fn try_recv<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let capacity = self.inner.payload_capacity();
+        let mut buffer = vec![0u8; capacity];
+
+        match self.inner.try_recv(&mut buffer) {
+            Ok(Some(len)) => Ok(Some(PyBytes::new(py, &buffer[..len]))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(map_err(e)),
+        }
+    }
+
+    fn try_recv_with_flags<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        let capacity = self.inner.payload_capacity();
+        let mut buffer = vec![0u8; capacity];
+
+        match self.inner.try_recv_with_flags(&mut buffer) {
+            Ok(Some((len, flags))) => {
+                let data = PyBytes::new(py, &buffer[..len]);
+                Ok(Some(PyTuple::new(
+                    py,
+                    vec![data.as_any(), flags.into_pyobject(py)?.as_any()],
+                )?))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(map_err(e)),
+        }
+    }
+
+    #[pyo3(signature = (spin_us=5, timeout_ms=1000))]
+    fn recv_hybrid<'py>(
+        &self,
+        py: Python<'py>,
+        spin_us: u64,
+        timeout_ms: i32,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let capacity = self.inner.payload_capacity();
+        let mut buffer = vec![0u8; capacity];
+
+        #[allow(deprecated)]
+        let result = py.allow_threads(|| {
+            self.inner
+                .recv_hybrid(&mut buffer, spin_us, timeout_ms)
+                .map_err(map_err)
+        })?;
+
+        match result {
+            Some(len) => Ok(Some(PyBytes::new(py, &buffer[..len]))),
+            None => Ok(None),
+        }
+    }
+
+    fn clear_notification(&self) -> PyResult<()> {
+        self.inner.clear_notification().map_err(map_err)
+    }
+
+    fn has_pending_notification(&self) -> bool {
+        self.inner.has_pending_notification()
+    }
+
     fn stats(&self) -> PyResult<std::collections::HashMap<String, usize>> {
         let stats = self.inner.stats();
         let mut result = std::collections::HashMap::new();
@@ -761,6 +942,7 @@ impl PyFastChannel {
 /// Register async ring types with the Python module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAsyncRing>()?;
+    m.add_class::<PyAsyncMpmcRing>()?;
     m.add_class::<PyAsyncChannel>()?;
     m.add_class::<PyPooledAsyncRing>()?;
     m.add_class::<PyFastChannel>()?;

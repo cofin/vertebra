@@ -1095,6 +1095,25 @@ impl MpmcRing {
         self.layout.slot_size - core::mem::size_of::<SlotHeader>()
     }
 
+    pub fn stats(&self) -> RingStats {
+        RingStats {
+            slot_size: self.layout.slot_size,
+            slots: self.layout.slots,
+            read_head: self.head().load(Ordering::Acquire),
+            write_head: self.tail().load(Ordering::Acquire),
+        }
+    }
+
+    /// Check if data is available in the ring buffer.
+    ///
+    /// This is a fast check using Relaxed ordering - suitable for spin loops.
+    #[inline]
+    pub fn has_data(&self) -> bool {
+        let head = self.head().load(Ordering::Relaxed);
+        let tail = self.tail().load(Ordering::Relaxed);
+        head != tail
+    }
+
     fn head(&self) -> &AtomicU64 {
         unsafe { &(*self.header).read_head.0 }
     }
@@ -1115,31 +1134,30 @@ impl MpmcRing {
             });
         }
 
-        let backoff = Backoff::new();
-        loop {
-            let tail = self.tail().load(Ordering::Relaxed);
-            let index = (tail & self.mask) as usize;
-            let seq = self.sequence(index).load(Ordering::Acquire);
-            let diff = seq as i64 - tail as i64;
+        let tail = self.tail().load(Ordering::Relaxed);
+        let index = (tail & self.mask) as usize;
+        let seq = self.sequence(index).load(Ordering::Acquire);
+        let diff = seq as i64 - tail as i64;
 
-            if diff == 0 {
-                if self
-                    .tail()
-                    .compare_exchange(tail, tail + 1, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    unsafe {
-                        self.write_slot(index, payload, flags);
-                    }
-                    self.sequence(index).store(tail + 1, Ordering::Release);
-                    return Ok(());
+        if diff == 0 {
+            if self
+                .tail()
+                .compare_exchange(tail, tail + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                unsafe {
+                    self.write_slot(index, payload, flags);
                 }
-            } else if diff < 0 {
-                return Err(ChannelError::Full);
-            } else {
-                backoff.snooze();
+                self.sequence(index).store(tail + 1, Ordering::Release);
+                return Ok(());
             }
+        } else if diff < 0 {
+            return Err(ChannelError::Full);
         }
+        
+        // If we lost race or state changed, return Full/Busy. 
+        // For simplicity in non-blocking mode, treat as Full/Busy retry.
+        Err(ChannelError::Full)
     }
 
     pub fn send(&self, payload: &[u8], flags: u32) -> Result<(), ChannelError> {
@@ -1156,30 +1174,47 @@ impl MpmcRing {
     }
 
     pub fn try_recv(&self, out: &mut [u8]) -> Result<usize, ChannelError> {
-        let backoff = Backoff::new();
-        loop {
-            let head = self.head().load(Ordering::Relaxed);
-            let index = (head & self.mask) as usize;
-            let seq = self.sequence(index).load(Ordering::Acquire);
-            let diff = seq as i64 - (head + 1) as i64;
+        let head = self.head().load(Ordering::Relaxed);
+        let index = (head & self.mask) as usize;
+        let seq = self.sequence(index).load(Ordering::Acquire);
+        let diff = seq as i64 - (head + 1) as i64;
 
-            if diff == 0 {
-                if self
-                    .head()
-                    .compare_exchange(head, head + 1, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    let len = unsafe { self.read_slot(index, out)? };
-                    self.sequence(index)
-                        .store(head + self.mask + 1, Ordering::Release);
-                    return Ok(len);
-                }
-            } else if diff < 0 {
-                return Err(ChannelError::Empty);
-            } else {
-                backoff.snooze();
+        if diff == 0 {
+            if self
+                .head()
+                .compare_exchange(head, head + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                let len = unsafe { self.read_slot(index, out)? };
+                self.sequence(index)
+                    .store(head + self.mask + 1, Ordering::Release);
+                return Ok(len);
             }
         }
+        
+        Err(ChannelError::Empty)
+    }
+
+    pub fn try_recv_with_flags(&self, out: &mut [u8]) -> Result<(usize, u32), ChannelError> {
+        let head = self.head().load(Ordering::Relaxed);
+        let index = (head & self.mask) as usize;
+        let seq = self.sequence(index).load(Ordering::Acquire);
+        let diff = seq as i64 - (head + 1) as i64;
+
+        if diff == 0 {
+            if self
+                .head()
+                .compare_exchange(head, head + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                let (len, flags) = unsafe { self.read_slot_with_flags(index, out)? };
+                self.sequence(index)
+                    .store(head + self.mask + 1, Ordering::Release);
+                return Ok((len, flags));
+            }
+        }
+
+        Err(ChannelError::Empty)
     }
 
     pub fn recv(&self, out: &mut [u8]) -> Result<usize, ChannelError> {
@@ -1220,6 +1255,25 @@ impl MpmcRing {
         let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
         ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
         Ok(len)
+    }
+
+    unsafe fn read_slot_with_flags(
+        &self,
+        index: usize,
+        out: &mut [u8],
+    ) -> Result<(usize, u32), ChannelError> {
+        let slot = self.slot_ptr(index);
+        let header = &*slot.cast::<SlotHeader>();
+        let len = header.len as usize;
+        if len > out.len() {
+            return Err(ChannelError::BufferTooSmall {
+                len,
+                capacity: out.len(),
+            });
+        }
+        let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+        ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
+        Ok((len, header.flags))
     }
 }
 

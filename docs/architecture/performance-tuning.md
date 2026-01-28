@@ -73,6 +73,7 @@ The IPC layer uses a three-phase receive strategy to achieve sub-microsecond lat
 3. **Park Phase**: Fall back to kernel-level blocking (futex on Linux)
 
 This approach captures immediate responses without syscall overhead while still allowing efficient blocking for longer waits.
+This is implemented for both SPSC (response channel) and MPMC (request channel) rings.
 
 ```bash
 # Configure spin duration (microseconds)

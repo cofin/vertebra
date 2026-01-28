@@ -29,7 +29,7 @@ use std::io;
 use std::sync::Arc;
 
 use crate::buffer::{BufferPool, RingLayout};
-use crate::channel::{ChannelError, SpscRing};
+use crate::channel::{ChannelError, MpmcRing, SpscRing};
 use crate::notify::Notifier;
 use crate::shm::ShmRegion;
 
@@ -271,6 +271,192 @@ impl AsyncRing {
     /// This should be called:
     /// 1. At the start of the readable callback
     /// 2. After draining all messages with `try_recv()`
+    pub fn clear_notification(&self) -> Result<(), AsyncRingError> {
+        self.notifier.clear()?;
+        Ok(())
+    }
+
+    /// Check if there are pending notifications.
+    pub fn has_pending_notification(&self) -> bool {
+        self.notifier.has_pending()
+    }
+
+    /// Get ring statistics.
+    pub fn stats(&self) -> crate::channel::RingStats {
+        self.ring.stats()
+    }
+}
+
+/// Async-capable MPMC ring buffer with notification support.
+///
+/// This struct wraps a `MpmcRing` with a `Notifier` to enable integration
+/// with asyncio's event loop via `loop.add_reader()`. Also provides
+/// `recv_hybrid()` for low-latency synchronous receives.
+pub struct AsyncMpmcRing {
+    ring: MpmcRing,
+    notifier: Notifier,
+    #[allow(dead_code)]
+    region: Arc<ShmRegion>,
+}
+
+// SAFETY: AsyncMpmcRing contains only Send types.
+unsafe impl Send for AsyncMpmcRing {}
+// SAFETY: MpmcRing and Notifier are both Sync.
+unsafe impl Sync for AsyncMpmcRing {}
+
+impl AsyncMpmcRing {
+    /// Create a new async MPMC ring buffer.
+    pub fn new(slot_size: usize, slots: usize) -> Result<Self, AsyncRingError> {
+        let layout = RingLayout::new(slot_size, slots, crate::buffer::ChannelMode::Mpmc);
+        let region = Arc::new(ShmRegion::create(layout.total_size)?);
+        let ring = unsafe { MpmcRing::initialize(Arc::clone(&region), layout, 0, 0)? };
+        let notifier = Notifier::new()?;
+
+        Ok(Self {
+            ring,
+            notifier,
+            region,
+        })
+    }
+
+    /// Create a named async MPMC ring buffer.
+    #[cfg(unix)]
+    pub fn create_named(
+        name: &str,
+        slot_size: usize,
+        slots: usize,
+    ) -> Result<Self, AsyncRingError> {
+        let layout = RingLayout::new(slot_size, slots, crate::buffer::ChannelMode::Mpmc);
+        let region = Arc::new(ShmRegion::create_named(name, layout.total_size)?);
+        let ring = unsafe { MpmcRing::initialize(Arc::clone(&region), layout, 0, 0)? };
+        let notifier = Notifier::new()?;
+
+        Ok(Self {
+            ring,
+            notifier,
+            region,
+        })
+    }
+
+    /// Open an existing named async MPMC ring buffer.
+    #[cfg(unix)]
+    pub fn open_named(name: &str, slot_size: usize, slots: usize) -> Result<Self, AsyncRingError> {
+        let layout = RingLayout::new(slot_size, slots, crate::buffer::ChannelMode::Mpmc);
+        let region = Arc::new(ShmRegion::open_named(name, layout.total_size)?);
+        let ring = unsafe { MpmcRing::attach(Arc::clone(&region), layout)? };
+        let notifier = Notifier::new()?;
+
+        Ok(Self {
+            ring,
+            notifier,
+            region,
+        })
+    }
+
+    /// Open an async MPMC ring from an existing raw file descriptor.
+    #[cfg(unix)]
+    pub unsafe fn from_raw_fd(
+        fd: std::os::fd::RawFd,
+        slot_size: usize,
+        slots: usize,
+    ) -> Result<Self, AsyncRingError> {
+        let layout = RingLayout::new(slot_size, slots, crate::buffer::ChannelMode::Mpmc);
+        let region = Arc::new(ShmRegion::map(fd, layout.total_size)?);
+        let ring = MpmcRing::attach(Arc::clone(&region), layout)?;
+        let notifier = Notifier::new()?;
+
+        Ok(Self {
+            ring,
+            notifier,
+            region,
+        })
+    }
+
+    /// Get the notification file descriptor.
+    pub fn notifier_fd(&self) -> i32 {
+        self.notifier.as_raw_fd()
+    }
+
+    /// Get the payload capacity per slot.
+    pub fn payload_capacity(&self) -> usize {
+        self.ring.payload_capacity()
+    }
+
+    /// Send data and notify waiters.
+    pub fn send(&self, data: &[u8], flags: u32) -> Result<(), AsyncRingError> {
+        self.ring.send(data, flags)?;
+        self.notifier.notify()?;
+        Ok(())
+    }
+
+    /// Try to send without blocking.
+    pub fn try_send(&self, data: &[u8], flags: u32) -> Result<bool, AsyncRingError> {
+        match self.ring.try_send(data, flags) {
+            Ok(()) => {
+                self.notifier.notify()?;
+                Ok(true)
+            }
+            Err(ChannelError::Full) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Try to receive without blocking.
+    pub fn try_recv(&self, buffer: &mut [u8]) -> Result<Option<usize>, AsyncRingError> {
+        match self.ring.try_recv(buffer) {
+            Ok(len) => Ok(Some(len)),
+            Err(ChannelError::Empty) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Try to receive with flags.
+    pub fn try_recv_with_flags(
+        &self,
+        buffer: &mut [u8],
+    ) -> Result<Option<(usize, u32)>, AsyncRingError> {
+        match self.ring.try_recv_with_flags(buffer) {
+            Ok((len, flags)) => Ok(Some((len, flags))),
+            Err(ChannelError::Empty) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Receive with hybrid spin-wait.
+    pub fn recv_hybrid(
+        &self,
+        buffer: &mut [u8],
+        spin_us: u64,
+        timeout_ms: i32,
+    ) -> Result<Option<usize>, AsyncRingError> {
+        // Fast path
+        match self.ring.try_recv(buffer) {
+            Ok(len) => {
+                let _ = self.notifier.clear();
+                return Ok(Some(len));
+            }
+            Err(ChannelError::Empty) => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        // Spin wait
+        if !self
+            .notifier
+            .spin_wait_or_park_with(spin_us, timeout_ms, || self.ring.has_data())?
+        {
+            return Ok(None);
+        }
+
+        self.notifier.clear()?;
+
+        match self.ring.try_recv(buffer) {
+            Ok(len) => Ok(Some(len)),
+            Err(ChannelError::Empty) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Clear notification.
     pub fn clear_notification(&self) -> Result<(), AsyncRingError> {
         self.notifier.clear()?;
         Ok(())

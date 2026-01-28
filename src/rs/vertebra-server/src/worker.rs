@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
 use vertebra_core::buffer::{ChannelMode, RingLayout};
-use vertebra_core::channel::{ChannelError, SpscReceiver, SpscRing, SpscSender};
+use vertebra_core::channel::{ChannelError, SpscReceiver, SpscRing, MpmcRing};
 use vertebra_core::shm::ShmRegion;
 use vertebra_core::AsyncNotifier;
 
@@ -21,13 +21,12 @@ pub type ResponseSender = oneshot::Sender<Vec<u8>>;
 /// sequence ID, and responses are routed back to the correct waiter.
 ///
 /// Thread-safety:
-/// - `req_tx` is wrapped in a Mutex to serialize sends (SPSC requirement)
+/// - `req_ring` is MPMC, allowing lock-free concurrent sends
 /// - `pending_count` uses AtomicU32 for fast load balancing queries
 /// - `pending` DashMap handles concurrent insert/remove
 pub struct WorkerConnection {
-    /// Request sender - wrapped in Mutex to enforce SPSC single-producer invariant.
-    /// The critical section is small (just memcpy into ring buffer).
-    req_tx: Mutex<SpscSender>,
+    /// Request ring - MPMC for lock-free concurrent access.
+    req_ring: Arc<MpmcRing>,
     pub resp_rx: SpscReceiver,
     /// Notifier for Rust→Python direction (request ready)
     pub req_notifier: AsyncNotifier,
@@ -65,11 +64,29 @@ impl WorkerConnection {
         self.pending_count.fetch_sub(1, Ordering::Relaxed)
     }
 
-    /// Send a request to the Python worker (mutex-protected for SPSC safety).
+    /// Send a request to the Python worker (lock-free).
     /// The critical section is minimal - just the memcpy into the ring buffer.
     pub async fn send_request(&self, data: &[u8], flags: u32) -> Result<(), ChannelError> {
-        let tx = self.req_tx.lock().await;
-        tx.send(data, flags)
+        let start = std::time::Instant::now();
+        loop {
+            match self.req_ring.try_send(data, flags) {
+                Ok(()) => break,
+                Err(ChannelError::Full) => {
+                    // Ring full - yield to executor to let other tasks run
+                    if start.elapsed() > std::time::Duration::from_secs(5) {
+                        eprintln!("WARN: send_request timed out waiting for ring space (worker {})", self.pid);
+                        return Err(ChannelError::Full);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_micros(10)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        // Manually notify the Python worker via eventfd
+        self.req_notifier
+            .notify()
+            .map_err(|e| ChannelError::Sync(vertebra_core::sync::SyncError::Syscall(e)))?;
+        Ok(())
     }
 }
 
@@ -104,18 +121,19 @@ impl WorkerManager {
             self.workers, self.app_path
         );
 
-        let layout = RingLayout::new(1024 * 64, 128, ChannelMode::Spsc); // 64KB slots, 128 slots
+        let req_layout = RingLayout::new(1024 * 64, 128, ChannelMode::Mpmc); // 64KB slots, 128 slots, MPMC
+        let resp_layout = RingLayout::new(1024 * 64, 128, ChannelMode::Spsc); // 64KB slots, 128 slots, SPSC
 
         for i in 0..self.workers {
-            let req_region = Arc::new(ShmRegion::create(layout.total_size)?);
-            let resp_region = Arc::new(ShmRegion::create(layout.total_size)?);
+            let req_region = Arc::new(ShmRegion::create(req_layout.total_size)?);
+            let resp_region = Arc::new(ShmRegion::create(resp_layout.total_size)?);
 
-            // Server side: Req Sender, Resp Receiver
-            // Worker side: Req Receiver, Resp Sender
-            let req_ring = unsafe { SpscRing::initialize(req_region.clone(), layout, 0, 0) }?;
-            let resp_ring = unsafe { SpscRing::initialize(resp_region.clone(), layout, 0, 0) }?;
+            // Server side: Req Sender (MPMC), Resp Receiver (SPSC)
+            // Worker side: Req Receiver (MPMC), Resp Sender (SPSC)
+            let req_ring = unsafe { MpmcRing::initialize(req_region.clone(), req_layout, 0, 0) }?;
+            let resp_ring = unsafe { SpscRing::initialize(resp_region.clone(), resp_layout, 0, 0) }?;
 
-            let (req_tx, _req_rx) = req_ring.split();
+            // MpmcRing is shared (Arc), SpscRing is split
             let (_resp_tx, resp_rx) = resp_ring.split();
 
             // Create separate notifiers for each direction
@@ -157,9 +175,9 @@ impl WorkerManager {
                 .arg("--worker-id")
                 .arg(i.to_string())
                 .arg("--slots")
-                .arg(layout.slots.to_string())
+                .arg(req_layout.slots.to_string())
                 .arg("--slot-size")
-                .arg(layout.slot_size.to_string())
+                .arg(req_layout.slot_size.to_string())
                 // Dual notification FDs - separate for each direction
                 // VERTEBRA_REQ_NOTIFY_FD: Rust→Python (Python reads from this when requests arrive)
                 // VERTEBRA_RESP_NOTIFY_FD: Python→Rust (Python writes to this after sending response)
@@ -167,7 +185,7 @@ impl WorkerManager {
                 .env("VERTEBRA_RESP_NOTIFY_FD", resp_notify_fd.to_string())
                 .env("VERTEBRA_REQ_SHM_FD", req_fd.to_string())
                 .env("VERTEBRA_RESP_SHM_FD", resp_fd.to_string())
-                .env("VERTEBRA_SHM_SIZE", layout.total_size.to_string())
+                .env("VERTEBRA_SHM_SIZE", req_layout.total_size.to_string())
                 .env("PYTHONUNBUFFERED", "1");
 
             #[cfg(target_os = "linux")]
@@ -189,7 +207,7 @@ impl WorkerManager {
             );
 
             self.worker_handles.push(WorkerConnection {
-                req_tx: Mutex::new(req_tx),
+                req_ring: Arc::new(req_ring),
                 resp_rx,
                 req_notifier,
                 resp_notifier,

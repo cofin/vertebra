@@ -163,18 +163,9 @@ impl AsyncNotifier {
     ///
     /// This method is cancel-safe. If the future is dropped, no data is lost.
     pub async fn wait_readable(&self) -> io::Result<()> {
-        loop {
-            let mut guard = self.async_fd.readable().await?;
-
-            // Check if actually readable (might be spurious wake)
-            if self.has_pending() {
-                guard.clear_ready();
-                return Ok(());
-            }
-
-            // Spurious wake, clear and wait again
-            guard.clear_ready();
-        }
+        let mut guard = self.async_fd.readable().await?;
+        guard.clear_ready();
+        Ok(())
     }
 
     /// Wait for the notifier with a timeout.

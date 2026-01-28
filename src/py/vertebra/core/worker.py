@@ -40,7 +40,7 @@ class WorkerConfig(msgspec.Struct, frozen=True):
     shm_size: int | None = None
 
 
-class AsgiRequest(msgspec.Struct, rename="camel"):
+class AsgiRequest(msgspec.Struct, rename="camel", dict=True):
     """ASGI HTTP request deserialized from IPC.
 
     Uses camelCase wire format for cross-language compatibility with Rust server.
@@ -64,7 +64,7 @@ class AsgiRequest(msgspec.Struct, rename="camel"):
     auth_claims: dict[str, Any] | None = None
 
 
-class AsgiResponse(msgspec.Struct, rename="camel"):
+class AsgiResponse(msgspec.Struct, rename="camel", dict=True):
     """ASGI HTTP response serialized for IPC.
 
     Uses camelCase wire format for cross-language compatibility with Rust server.
@@ -232,6 +232,7 @@ class ResponseWriter:
                 # Signal Rust server
                 if self._resp_notify_fd is not None:
                     try:
+                        # print(f"DEBUG: Python notifying Rust on fd {self._resp_notify_fd}", file=sys.stderr)
                         os.write(self._resp_notify_fd, b"\x01\x00\x00\x00\x00\x00\x00\x00")
                     except OSError:
                         pass
@@ -322,92 +323,23 @@ class AsgiWorker:
         # Managed mode: Rust supervisor provides rings via FDs/env
         if self._config.req_shm_fd is not None and self._config.resp_shm_fd is not None:
             # We are managed by Rust supervisor.
-            # We need to map the rings from FDs.
             if hasattr(AsyncRing, "from_raw_fd_handle"):
-                # This path handles FDs passed from supervisor
-                # Note: We need separate rings for Request and Response if managed this way?
-                # Wait, worker.py assumes ONE control ring for everything if simple.
-                # BUT ipc-worker-bridge created separate req_ring and resp_ring.
-                # And passed VERTEBRA_REQ_SHM_FD and VERTEBRA_RESP_SHM_FD.
+                try:
+                    from vertebra._vertebra import AsyncMpmcRing
+                except ImportError:
+                    # Fallback or error if bindings not updated
+                    raise ImportError("AsyncMpmcRing not available in vertebra._vertebra") from None
 
-                # The worker logic in `_register_client` handles creating per-client rings.
-                # But the MAIN control ring is what `self._control` is.
-                # In V2, is the "control ring" separate? Or is the worker just given a pair of rings to talk to server?
-
-                # If server spawns worker, server acts as the "Client" in IPC terms (Server sends Req, Worker Recv Req).
-                # So `self._control` might not be the right abstraction if it expects to be a "Broker Control Ring".
-
-                # Current `worker.py` design assumes it talks to a Broker via a Control Ring to REGISTER itself.
-                # Then clients connect.
-
-                # In V2 Server-Worker model:
-                # Server spawns Worker. Server HAS the connection.
-                # Server just sends requests to Worker via the Ring pair it created.
-                # Worker doesn't need to "register" with a broker.
-                # It just needs to service the Ring pair it was given.
-
-                # So we need to adapt `AsgiWorker` to support "Direct Mode" where it services a pre-existing Ring pair
-                # instead of connecting to a Broker Control Ring.
-
-                # Let's map the FDs to rings.
                 req_fd = self._config.req_shm_fd
                 resp_fd = self._config.resp_shm_fd
 
-                # Create AsyncRings from FDs
-                # Note: SpscRing is unidirectional.
-                # Server: Req Sender, Resp Receiver.
-                # Worker: Req Receiver, Resp Sender.
+                # Request Ring is MPMC (Broker -> Worker)
+                req_ring = AsyncMpmcRing.from_raw_fd_handle(req_fd, self._config.slot_size, self._config.slots)
 
-                # We need to expose `AsyncRing` that wraps these.
-                # AsyncRing in python wraps `SpscRing`.
-                # But `SpscRing` is single direction? No, it has `sender` and `receiver` halves.
-                # `AsyncRing` in Rust wraps `SpscRing` which is the shared memory structure.
-                # It can send AND receive if you have access to both heads.
-
-                # Wait, `SpscRing` is Single Producer Single Consumer.
-                # If Server is Producer (Req), Worker is Consumer (Req).
-                # That's ONE ring.
-                # We need ANOTHER ring for Resp (Worker Producer, Server Consumer).
-
-                # `AsyncRing` struct in Rust wraps ONE `SpscRing`.
-                # `worker.py` `AsyncRing` usage:
-                # self._control = AsyncRing.create_named(...)
-                # It treats `AsyncRing` as a bidirectional channel?
-                # Let's check `AsyncRing` impl in `async_ring.rs`.
-                # It wraps `SpscRing`.
-                # `SpscRing` has `send` and `recv`.
-                # So `AsyncRing` is ONE ring.
-
-                # If `worker.py` uses `self._control` for bidirectional, it implies `SpscRing` is being used bidirectionally?
-                # SPSC means Single Producer. You can't have both sides sending on same ring unless they coordinate?
-                # No, SPSC usually implies unidirectional data flow.
-                # Check `SpscRing` impl: `read_head`, `write_head`.
-                # If Server writes to `write_head` and Worker reads from `read_head`, that works.
-                # But if Worker wants to send back? It writes to `write_head`?
-                # Race condition if Server is also writing.
-
-                # `worker.py` seems to use `_control` for BOTH receiving "register_client" messages AND sending "ack".
-                # This implies `AsyncRing` allows bidirectional usage or `worker.py` is using it wrong, OR `AsyncRing` is actually MPMC?
-                # `AsyncRing::new` uses `ChannelMode::Spsc`.
-
-                # If `worker.py` uses `self._control` bidirectionally with a Broker, it relies on the Broker NOT writing while Worker writes?
-                # Or maybe `worker.py` is the ONLY writer to `_control`?
-                # "Worker creates named ring". Broker opens it.
-                # If Worker creates it, Worker is likely the "Server" of that ring?
-                # Actually, usually Control Ring is for Worker to receive commands.
-
-                # In V2, we have Explicit Req Ring and Resp Ring.
-                # We should wrap them in a `ClientState` and put it in `self._clients`?
-                # Or just use them directly.
-
-                # Let's create a "Server" client in `self._clients` that represents the Rust Server.
-                # And we don't need `self._control` loop to register clients.
-                # We just manually register the "Server" client.
-
-                req_ring = AsyncRing.from_raw_fd_handle(req_fd, self._config.slot_size, self._config.slots)
+                # Response Ring is SPSC (Worker -> Broker)
                 resp_ring = AsyncRing.from_raw_fd_handle(resp_fd, self._config.slot_size, self._config.slots)
 
-                # Manually register "server" client
+                # Register "server" client directly
                 client_id = "server"
                 client = ClientState(
                     id=client_id,
@@ -417,25 +349,6 @@ class AsgiWorker:
                 )
                 self._clients[client_id] = client
                 self._contexts[client_id] = {}
-
-                # We still need to run the loop to process requests from this client.
-                # _serve_loop iterates over clients if external_notify_fd is set.
-                # So we just need to ensure `self._control` is not None to enter loop?
-                # Or refactor `_serve_loop` to support no control ring.
-
-                # Hack: Set `self._control` to `req_ring` just to satisfy checks, but we won't read from it as control?
-                # Or better, refactor `start()` and `_serve_loop`.
-
-                # If I set `self._control = req_ring`, then `_serve_loop` will try to read control messages from it.
-                # But `req_ring` will contain HTTP requests, not control messages.
-                # `_handle_control_payload` expects `register_client` etc.
-                # HTTP requests have different format?
-
-                # We need to distinguish Control Messages vs Request Messages.
-                # In V2, we skip the "Control" phase. The Server sends Requests directly.
-
-                # So we should NOT set `self._control`.
-                # We should modify `_serve_loop` to handle "Managed Mode" where it only polls clients.
 
         control_name = self._control_ring_name()
         if self._config.req_shm_fd is None:
