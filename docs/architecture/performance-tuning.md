@@ -69,24 +69,34 @@ Vertebra uses zero-parse-cost protocol headers and hybrid spin-wait for minimal 
 The IPC layer uses a three-phase receive strategy to achieve sub-microsecond latency:
 
 1. **Immediate Check**: Try non-blocking receive first (data may already be available)
-2. **Spin Phase**: Spin checking ring buffer for `VERTEBRA_SPIN_US` microseconds (default: 5µs)
+2. **Spin Phase**: Spin checking ring buffer (iteration-based in Python, time-based in Rust)
 3. **Park Phase**: Fall back to kernel-level blocking (futex on Linux)
 
 This approach captures immediate responses without syscall overhead while still allowing efficient blocking for longer waits.
 This is implemented for both SPSC (response channel) and MPMC (request channel) rings.
 
+**Python Configuration (iteration-based):**
+
 ```bash
-# Configure spin duration (microseconds)
-export VERTEBRA_SPIN_US=5  # Default: 5µs, range: 0-50µs
+# Configure spin iterations for Python AsyncShmTransport
+export VERTEBRA_SPIN_ITERS=50  # Default: 50 iterations (~5µs)
 
 # Lower values = lower latency, higher CPU usage during wait
 # Higher values = higher latency ceiling, lower CPU usage
 ```
 
+Python uses iteration-based spin to avoid `time.perf_counter()` overhead (~100-300ns per call).
+~50 iterations ≈ 5µs on typical hardware.
+
+**Rust Configuration (time-based):**
+
+The Rust layer (`recv_hybrid()`) accepts a `spin_us` parameter for time-based spin-wait.
+This is suitable for low-level Rust code where timer overhead is negligible.
+
 **When to adjust:**
-- **Latency-critical (trading, gaming)**: Use 2-3µs for tighter response capture
-- **Throughput-focused (batch processing)**: Use 0µs to skip spinning entirely
-- **Mixed workloads**: Default 5µs balances both
+- **Latency-critical (trading, gaming)**: Use 30-50 iterations (or 2-3µs in Rust)
+- **Throughput-focused (batch processing)**: Use 0 to skip spinning entirely
+- **Mixed workloads**: Default 50 iterations balances both
 
 ### Rust vs Python Receive Methods
 

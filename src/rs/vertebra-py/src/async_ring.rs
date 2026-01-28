@@ -457,6 +457,28 @@ impl PyAsyncMpmcRing {
         self.inner.has_pending_notification()
     }
 
+    /// Drain up to `max` messages without blocking.
+    ///
+    /// More efficient than calling `try_recv` in a loop because it amortizes
+    /// the Python/Rust boundary crossing overhead.
+    ///
+    /// Args:
+    ///     max: Maximum number of messages to receive (default 64)
+    ///
+    /// Returns:
+    ///     List of (bytes, flags) tuples. Empty list if ring is empty.
+    #[pyo3(signature = (max=64))]
+    fn try_recv_batch<'py>(&self, py: Python<'py>, max: usize) -> PyResult<Bound<'py, PyList>> {
+        let batch = self.inner.try_recv_batch(max);
+        let list = PyList::empty(py);
+        for (payload, flags) in batch {
+            let data = PyBytes::new(py, &payload);
+            let tuple = PyTuple::new(py, vec![data.as_any(), flags.into_pyobject(py)?.as_any()])?;
+            list.append(tuple)?;
+        }
+        Ok(list)
+    }
+
     fn stats(&self) -> PyResult<std::collections::HashMap<String, usize>> {
         let stats = self.inner.stats();
         let mut result = std::collections::HashMap::new();

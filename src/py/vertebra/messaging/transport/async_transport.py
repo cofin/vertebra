@@ -85,7 +85,7 @@ class AsyncShmTransport:
 
     For sub-20µs latency, this transport implements hybrid spin-wait:
     1. Fast path: try_recv() immediate check
-    2. Spin phase: busy-wait for spin_duration microseconds
+    2. Spin phase: iteration-based busy-wait (spin_iters iterations)
     3. Slow path: add_reader() and await notification
 
     This achieves sub-20μs latency by capturing immediate responses without

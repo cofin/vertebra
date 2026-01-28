@@ -176,9 +176,13 @@ def detect_available_phase() -> FastPathPhase:
     return FastPathPhase.BASELINE
 
 
-def get_spin_us() -> int:
-    """Get spin duration from environment or default."""
-    return int(os.environ.get("VERTEBRA_SPIN_US", "5"))
+def get_spin_iters() -> int:
+    """Get spin iteration count from environment or default.
+
+    Note: Python uses iteration-based spin to avoid time.perf_counter() overhead.
+    ~50 iterations ≈ 5µs on typical hardware.
+    """
+    return int(os.environ.get("VERTEBRA_SPIN_ITERS", "50"))
 
 
 # -----------------------------------------------------------------------------
@@ -238,8 +242,8 @@ def benchmark_sync_immediate(
 
             # Use hybrid recv if available (Phase 1+)
             if phase.value >= FastPathPhase.HYBRID_SPIN.value and hasattr(client._handle, "recv_request_hybrid"):
-                spin_us = get_spin_us()
-                client._handle.recv_request_hybrid(4096, spin_us, 1000)
+                spin_iters = get_spin_iters()
+                client._handle.recv_request_hybrid(4096, spin_iters, 1000)
             else:
                 # Baseline: use try_recv or receive_sync with 0 timeout
                 try:
@@ -264,7 +268,7 @@ def benchmark_sync_immediate(
         total_time_s=total_time,
         latencies_us=latencies,
         target_us=10.0,
-        metadata={"spin_us": get_spin_us() if phase.value >= FastPathPhase.HYBRID_SPIN.value else 0},
+        metadata={"spin_iters": get_spin_iters() if phase.value >= FastPathPhase.HYBRID_SPIN.value else 0},
     )
 
 
@@ -330,7 +334,7 @@ def benchmark_sync_blocked(
         total_time_s=total_time,
         latencies_us=latencies,
         target_us=15.0,
-        metadata={"spin_us": get_spin_us() if phase.value >= FastPathPhase.HYBRID_SPIN.value else 0},
+        metadata={"spin_iters": get_spin_iters() if phase.value >= FastPathPhase.HYBRID_SPIN.value else 0},
     )
 
 
@@ -348,10 +352,10 @@ async def benchmark_async_transport_hybrid(
     Target: p99 < 20µs for immediate data, < 50µs for delayed data.
     """
     from vertebra._vertebra import AsyncRing
-    from vertebra.ipc.async_transport import DEFAULT_SPIN_US, AsyncShmTransport
+    from vertebra.messaging.transport.async_transport import DEFAULT_SPIN_ITERS, AsyncShmTransport
 
     ring = AsyncRing(4096, 64)
-    transport = AsyncShmTransport(ring, spin_duration_us=get_spin_us())
+    transport = AsyncShmTransport(ring, spin_iters=get_spin_iters())
     latencies: list[float] = []
 
     # Pre-fill for immediate data benchmark
@@ -387,7 +391,7 @@ async def benchmark_async_transport_hybrid(
         total_time_s=total_time,
         latencies_us=latencies,
         target_us=20.0,
-        metadata={"spin_us": get_spin_us(), "default_spin_us": DEFAULT_SPIN_US, "event_loop": type(loop).__name__},
+        metadata={"spin_iters": get_spin_iters(), "default_spin_iters": DEFAULT_SPIN_ITERS, "event_loop": type(loop).__name__},
     )
 
 
@@ -406,12 +410,12 @@ async def benchmark_multiplexed(
     Target: p99 < 20µs with 64 concurrent requests
     """
     from vertebra._vertebra import AsyncRing
-    from vertebra.ipc.async_transport import AsyncShmTransport
+    from vertebra.messaging.transport.async_transport import AsyncShmTransport
 
     # Create separate ring+transport pairs for each concurrent worker
     # This matches real-world usage where each coroutine has its own transport
     rings = [AsyncRing(4096, 64) for _ in range(concurrency)]
-    transports = [AsyncShmTransport(r, spin_duration_us=get_spin_us()) for r in rings]
+    transports = [AsyncShmTransport(r, spin_iters=get_spin_iters()) for r in rings]
 
     latencies: list[float] = []
     lock = threading.Lock()
@@ -460,7 +464,7 @@ async def benchmark_multiplexed(
         total_time_s=total_time,
         latencies_us=latencies,
         target_us=20.0,
-        metadata={"concurrency": concurrency, "batches": iterations, "spin_us": get_spin_us()},
+        metadata={"concurrency": concurrency, "batches": iterations, "spin_iters": get_spin_iters()},
     )
 
 
@@ -555,7 +559,7 @@ def print_header(phase: FastPathPhase) -> None:
     print("=" * 70)
     print(f"Python {sys.version}")
     print(f"Detected Phase: {phase.value} ({phase.name})")
-    print(f"VERTEBRA_SPIN_US: {get_spin_us()}")
+    print(f"VERTEBRA_SPIN_ITERS: {get_spin_iters()}")
     print()
 
 
@@ -640,8 +644,8 @@ Examples:
     # Run with specific phase (for testing)
     uv run python benchmarks/ipc_fast_path.py --phase 1
 
-    # Adjust spin duration
-    VERTEBRA_SPIN_US=3 uv run python benchmarks/ipc_fast_path.py
+    # Adjust spin iterations (Python uses iteration-based spin)
+    VERTEBRA_SPIN_ITERS=30 uv run python benchmarks/ipc_fast_path.py
         """,
     )
     parser.add_argument("--iterations", type=int, default=10000, help="Iterations per benchmark")

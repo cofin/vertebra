@@ -2,6 +2,9 @@
 
 This module provides unified codec implementations using msgspec as the
 backend for both JSON and MessagePack serialization.
+
+Performance optimization: Pre-created decoders for common types avoid
+the ~1-2us overhead of creating msgspec.Decoder instances per decode call.
 """
 
 import functools
@@ -28,6 +31,36 @@ __all__ = (
 )
 
 T = TypeVar("T")
+
+
+# ============================================================================
+# Pre-created Decoders for Common Types
+# ============================================================================
+# Creating msgspec.Decoder instances has ~1-2us overhead per instantiation.
+# Pre-creating decoders for common types at module load time eliminates this
+# cost for frequently used type hints.
+
+# JSON decoders for common types
+_JSON_DECODERS: dict[type, msgspec.json.Decoder[Any]] = {
+    dict: msgspec.json.Decoder(dict),
+    list: msgspec.json.Decoder(list),
+    str: msgspec.json.Decoder(str),
+    int: msgspec.json.Decoder(int),
+    float: msgspec.json.Decoder(float),
+    bool: msgspec.json.Decoder(bool),
+    bytes: msgspec.json.Decoder(bytes),
+}
+
+# MessagePack decoders for common types
+_MSGPACK_DECODERS: dict[type, msgspec.msgpack.Decoder[Any]] = {
+    dict: msgspec.msgpack.Decoder(dict),
+    list: msgspec.msgpack.Decoder(list),
+    str: msgspec.msgpack.Decoder(str),
+    int: msgspec.msgpack.Decoder(int),
+    float: msgspec.msgpack.Decoder(float),
+    bool: msgspec.msgpack.Decoder(bool),
+    bytes: msgspec.msgpack.Decoder(bytes),
+}
 
 
 # ============================================================================
@@ -78,8 +111,14 @@ class JSONCodec:
         if type_hint is None:
             return self._default_decoder.decode(data)
 
+        # Try pre-created decoders first (fastest path)
+        if type_hint in _JSON_DECODERS:
+            return _JSON_DECODERS[type_hint].decode(data)
+
+        # Check instance cache next
         decoder = self._decoder_cache.get(type_hint)
         if decoder is None:
+            # Fallback to dynamic creation for unknown types
             decoder = msgspec.json.Decoder(type_hint, dec_hook=default_decoder)
             self._decoder_cache[type_hint] = decoder
         return decoder.decode(data)
@@ -164,8 +203,15 @@ class MessagePackCodec:
         """
         if type_hint is None:
             return msgspec.msgpack.decode(data)
+
+        # Try pre-created decoders first (fastest path)
+        if type_hint in _MSGPACK_DECODERS:
+            return _MSGPACK_DECODERS[type_hint].decode(data)
+
+        # Check instance cache next
         decoder = self._decoder_cache.get(type_hint)
         if decoder is None:
+            # Fallback to dynamic creation for unknown types
             decoder = msgspec.msgpack.Decoder(type_hint, dec_hook=default_decoder)
             self._decoder_cache[type_hint] = decoder
         return decoder.decode(data)

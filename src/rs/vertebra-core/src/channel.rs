@@ -123,7 +123,9 @@ impl AsRef<[u8]> for SlotView {
 /// SPSC ring channel backed by a shared memory region.
 #[derive(Debug)]
 pub struct SpscRing {
-    #[allow(dead_code)]
+    /// Keeps the shared memory region alive for the lifetime of the ring.
+    /// Not accessed directly after construction, but the Arc prevents deallocation.
+    #[allow(dead_code)] // Intentional: Arc kept alive for memory lifetime, not accessed
     region: Arc<ShmRegion>,
     header: *mut ShmHeader,
     data: *mut u8,
@@ -1038,7 +1040,9 @@ fn decode_buffer_meta(bytes: &[u8]) -> Result<BufferMeta, ChannelError> {
 #[derive(Debug)]
 pub struct BufferSender {
     ring: Arc<SpscRing>,
-    #[allow(dead_code)]
+    /// Keeps the buffer pool alive. The sender owns buffers but doesn't
+    /// directly access the pool after sending (receiver reclaims them).
+    #[allow(dead_code)] // Intentional: Arc kept for pool lifetime symmetry with receiver
     pool: Arc<BufferPool>,
 }
 
@@ -1172,7 +1176,9 @@ impl BufferChannel {
 
 #[derive(Debug)]
 pub struct MpmcRing {
-    #[allow(dead_code)]
+    /// Keeps the shared memory region alive for the lifetime of the ring.
+    /// Not accessed directly after construction, but the Arc prevents deallocation.
+    #[allow(dead_code)] // Intentional: Arc kept alive for memory lifetime, not accessed
     region: Arc<ShmRegion>,
     header: *mut ShmHeader,
     sequences: *mut AtomicU64,
@@ -1374,17 +1380,16 @@ impl MpmcRing {
         let seq = self.sequence(index).load(Ordering::Acquire);
         let diff = seq as i64 - (head + 1) as i64;
 
-        if diff == 0 {
-            if self
+        if diff == 0
+            && self
                 .head()
                 .compare_exchange(head, head + 1, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
-            {
-                let len = unsafe { self.read_slot(index, out)? };
-                self.sequence(index)
-                    .store(head + self.mask + 1, Ordering::Release);
-                return Ok(len);
-            }
+        {
+            let len = unsafe { self.read_slot(index, out)? };
+            self.sequence(index)
+                .store(head + self.mask + 1, Ordering::Release);
+            return Ok(len);
         }
 
         Err(ChannelError::Empty)
@@ -1396,17 +1401,16 @@ impl MpmcRing {
         let seq = self.sequence(index).load(Ordering::Acquire);
         let diff = seq as i64 - (head + 1) as i64;
 
-        if diff == 0 {
-            if self
+        if diff == 0
+            && self
                 .head()
                 .compare_exchange(head, head + 1, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
-            {
-                let (len, flags) = unsafe { self.read_slot_with_flags(index, out)? };
-                self.sequence(index)
-                    .store(head + self.mask + 1, Ordering::Release);
-                return Ok((len, flags));
-            }
+        {
+            let (len, flags) = unsafe { self.read_slot_with_flags(index, out)? };
+            self.sequence(index)
+                .store(head + self.mask + 1, Ordering::Release);
+            return Ok((len, flags));
         }
 
         Err(ChannelError::Empty)
@@ -1469,6 +1473,36 @@ impl MpmcRing {
         let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
         ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
         Ok((len, header.flags))
+    }
+
+    /// Drain up to `max` messages without blocking.
+    ///
+    /// For MPMC rings, this uses a loop of CAS operations internally,
+    /// but amortizes the Vec allocations and Python/Rust boundary crossings.
+    ///
+    /// # Arguments
+    ///
+    /// * `max` - Maximum number of messages to receive
+    ///
+    /// # Returns
+    ///
+    /// Vector of `(payload, flags)` tuples. Returns empty Vec if ring is empty.
+    pub fn try_recv_batch(&self, max: usize) -> Vec<(Vec<u8>, u32)> {
+        let mut results = Vec::with_capacity(max.min(self.layout.slots));
+        let capacity = self.payload_capacity();
+        let mut buffer = vec![0u8; capacity];
+
+        for _ in 0..max {
+            match self.try_recv_with_flags(&mut buffer) {
+                Ok((len, flags)) => {
+                    results.push((buffer[..len].to_vec(), flags));
+                }
+                Err(ChannelError::Empty) => break,
+                Err(_) => break, // Stop on any error
+            }
+        }
+
+        results
     }
 }
 
@@ -1969,5 +2003,61 @@ mod tests {
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
+    }
+
+    #[test]
+    fn mpmc_try_recv_batch_empty() {
+        let ring = MpmcRing::new(64, 8).unwrap();
+
+        // Empty ring returns empty Vec
+        let batch = ring.try_recv_batch(10);
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn mpmc_try_recv_batch_partial() {
+        let ring = MpmcRing::new(64, 8).unwrap();
+
+        // Send 3 messages
+        ring.send(b"msg1", 1).unwrap();
+        ring.send(b"msg2", 2).unwrap();
+        ring.send(b"msg3", 3).unwrap();
+
+        // Request max 2 - should get partial drain
+        let batch = ring.try_recv_batch(2);
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].0, b"msg1");
+        assert_eq!(batch[0].1, 1);
+        assert_eq!(batch[1].0, b"msg2");
+        assert_eq!(batch[1].1, 2);
+
+        // Third message should still be available
+        let batch = ring.try_recv_batch(10);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].0, b"msg3");
+        assert_eq!(batch[0].1, 3);
+    }
+
+    #[test]
+    fn mpmc_try_recv_batch_full_drain() {
+        let ring = MpmcRing::new(64, 8).unwrap();
+
+        // Send 5 messages
+        for i in 0..5 {
+            ring.send(&[i], i as u32).unwrap();
+        }
+
+        // Batch receive all messages
+        let batch = ring.try_recv_batch(100);
+        assert_eq!(batch.len(), 5);
+
+        // Verify all messages received with correct flags
+        for (i, (payload, flags)) in batch.iter().enumerate() {
+            assert_eq!(payload, &[i as u8]);
+            assert_eq!(*flags, i as u32);
+        }
+
+        // Ring should now be empty
+        assert!(ring.try_recv_batch(1).is_empty());
     }
 }

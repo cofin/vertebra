@@ -60,6 +60,8 @@ pub struct NativeSupervisor {
     notifier: Arc<Mutex<Option<Notifier>>>,
     /// FD numbers for passing to children.
     fds: Arc<Mutex<InheritedFds>>,
+    /// Optional dev server process (e.g., npm run dev).
+    dev_server: Arc<Mutex<Option<Child>>>,
 }
 
 #[pymethods]
@@ -71,6 +73,7 @@ impl NativeSupervisor {
             workers: Arc::new(Mutex::new(Vec::new())),
             notifier: Arc::new(Mutex::new(None)),
             fds: Arc::new(Mutex::new(InheritedFds::default())),
+            dev_server: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -145,11 +148,17 @@ impl NativeSupervisor {
 
             // Start Bun engine with inherited FDs via environment variables.
             let mut cmd = Command::new(&engine_path);
-            // Read spin config from environment or use default
+            // Read spin config from environment or use default.
+            // Bun/Rust use time-based spin (VERTEBRA_SPIN_US in microseconds).
+            // Python uses iteration-based spin (VERTEBRA_SPIN_ITERS, ~50 iters ≈ 5µs).
             let spin_us = std::env::var("VERTEBRA_SPIN_US")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(5);
+            let spin_iters = std::env::var("VERTEBRA_SPIN_ITERS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(50); // Default: ~50 iterations ≈ 5µs
 
             cmd.args(&engine_args)
                 .env("VERTEBRA_REQ_NOTIFY_FD", req_notify_fd.to_string())
@@ -196,7 +205,7 @@ impl NativeSupervisor {
                     .arg(worker_id.to_string())
                     .env("VERTEBRA_REQ_NOTIFY_FD", req_notify_fd.to_string())
                     .env("VERTEBRA_RESP_NOTIFY_FD", resp_notify_fd.to_string())
-                    .env("VERTEBRA_SPIN_US", spin_us.to_string());
+                    .env("VERTEBRA_SPIN_ITERS", spin_iters.to_string());
 
                 // Set up parent death signal so worker dies when supervisor dies.
                 #[cfg(target_os = "linux")]
@@ -314,6 +323,8 @@ impl NativeSupervisor {
         command: Vec<String>,
         cwd: Option<String>,
     ) -> PyResult<()> {
+        let dev_server_arc = self.dev_server.clone();
+
         py.detach(move || {
             if command.is_empty() {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -328,32 +339,18 @@ impl NativeSupervisor {
                 cmd.current_dir(dir);
             }
 
-            // We don't track the dev server process strongly in `self.workers`
-            // because it's managed separately, but maybe we should for cleanup?
-            // For now, let's just spawn it and let it run.
-            // In a real implementation, we'd want to capture stdout/stderr or pipe it.
-
-            // TODO: Track this process for cleanup in stop_internal
-            // Ideally add a `dev_server: Arc<Mutex<Option<Child>>>` field.
-            // For this iteration, we spawn and detach (not ideal but fits current struct)
-            // OR we reuse the workers list?
-
-            // Let's rely on standard process spawning for now without struct changes to NativeSupervisor
-            // to avoid breaking existing ABI/struct layout if not necessary.
-            // But wait, we need to kill it on shutdown.
-
-            // Since we can't easily modify the struct fields without breaking existing users
-            // (unless we do it carefully), let's just spawn it.
-            // Actually, we are in `vertebra-py`, so we CAN modify struct.
-
-            let _child = cmd.spawn().map_err(|e| {
+            let child = cmd.spawn().map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                     "Failed to start dev server: {}",
                     e
                 ))
             })?;
 
-            // TODO: Store child handle
+            // Store the child handle for cleanup in stop_internal
+            {
+                let mut guard = dev_server_arc.lock().unwrap();
+                *guard = Some(child);
+            }
 
             Ok(())
         })
@@ -362,12 +359,22 @@ impl NativeSupervisor {
 
 impl NativeSupervisor {
     fn stop_internal(&self) -> PyResult<()> {
+        // Stop dev server if running
+        let mut dev_server_guard = self.dev_server.lock().unwrap();
+        if let Some(ref mut dev) = *dev_server_guard {
+            let _ = dev.kill(); // Ignore errors if already dead
+            let _ = dev.wait();
+        }
+        *dev_server_guard = None;
+
+        // Stop bun process
         let mut bun_guard = self.bun_process.lock().unwrap();
         if let Some(ref mut bun) = *bun_guard {
             let _ = bun.kill(); // Ignore errors if already dead
             let _ = bun.wait();
         }
 
+        // Stop workers
         let mut workers_guard = self.workers.lock().unwrap();
         for worker in workers_guard.iter_mut() {
             let _ = worker.kill();

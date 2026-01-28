@@ -41,7 +41,9 @@ use crate::shm::ShmRegion;
 pub struct AsyncRing {
     ring: SpscRing,
     notifier: Notifier,
-    #[allow(dead_code)]
+    /// Keeps the shared memory region alive for the lifetime of the async ring.
+    /// Not accessed directly after construction, but the Arc prevents deallocation.
+    #[allow(dead_code)] // Intentional: Arc kept alive for memory lifetime, not accessed
     region: Arc<ShmRegion>,
 }
 
@@ -111,8 +113,14 @@ impl AsyncRing {
     /// Open an async ring from an existing raw file descriptor (for mapped SHM).
     ///
     /// # Safety
-    /// Caller must ensure `fd` is valid and maps to a shared memory region created
-    /// with compatible layout.
+    ///
+    /// The caller must ensure:
+    /// - `fd` is a valid, open file descriptor for a shared memory region
+    /// - The shared memory was created with a compatible layout (matching `slot_size` and `slots`)
+    /// - The shared memory region has been properly initialized by a prior `create_named()` call
+    /// - The file descriptor remains valid for the lifetime of the returned `AsyncRing`
+    /// - The caller is responsible for closing the fd after the AsyncRing is dropped,
+    ///   or the fd ownership is transferred to `ShmRegion::map()`
     #[cfg(unix)]
     pub unsafe fn from_raw_fd(
         fd: std::os::fd::RawFd,
@@ -312,7 +320,9 @@ impl AsyncRing {
 pub struct AsyncMpmcRing {
     ring: MpmcRing,
     notifier: Notifier,
-    #[allow(dead_code)]
+    /// Keeps the shared memory region alive for the lifetime of the async ring.
+    /// Not accessed directly after construction, but the Arc prevents deallocation.
+    #[allow(dead_code)] // Intentional: Arc kept alive for memory lifetime, not accessed
     region: Arc<ShmRegion>,
 }
 
@@ -371,6 +381,14 @@ impl AsyncMpmcRing {
     }
 
     /// Open an async MPMC ring from an existing raw file descriptor.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure:
+    /// - `fd` is a valid, open file descriptor for a shared memory region
+    /// - The shared memory was created with a compatible MPMC layout (matching `slot_size` and `slots`)
+    /// - The shared memory region has been properly initialized by a prior `create_named()` call
+    /// - The file descriptor remains valid for the lifetime of the returned `AsyncMpmcRing`
     #[cfg(unix)]
     pub unsafe fn from_raw_fd(
         fd: std::os::fd::RawFd,
@@ -487,6 +505,22 @@ impl AsyncMpmcRing {
     /// Get ring statistics.
     pub fn stats(&self) -> crate::channel::RingStats {
         self.ring.stats()
+    }
+
+    /// Drain up to `max` messages without blocking.
+    ///
+    /// More efficient than calling `try_recv` in a loop because it amortizes
+    /// the Python/Rust boundary crossing overhead.
+    ///
+    /// # Arguments
+    ///
+    /// * `max` - Maximum number of messages to receive
+    ///
+    /// # Returns
+    ///
+    /// Vector of `(payload, flags)` tuples. Returns empty Vec if ring is empty.
+    pub fn try_recv_batch(&self, max: usize) -> Vec<(Vec<u8>, u32)> {
+        self.ring.try_recv_batch(max)
     }
 }
 

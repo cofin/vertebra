@@ -1,4 +1,15 @@
 //! Shared-memory C ABI for the Vertebra broker transport.
+//!
+//! # Safety
+//!
+//! This crate provides C ABI functions for FFI. All functions that accept raw pointers
+//! are marked `unsafe` and require the caller to ensure:
+//! - Pointers are valid and properly aligned
+//! - Pointed-to memory is initialized and valid for the operation
+//! - Concurrent access is properly synchronized
+//!
+//! Functions perform null checks and return `VtbStatus::Invalid` for null pointers,
+//! but callers must still ensure pointers are valid (not dangling).
 
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use std::cell::RefCell;
@@ -27,8 +38,14 @@ pub extern "C" fn vtb_router_new() -> *mut VtbRouter {
     }))
 }
 
+/// Insert a route into the router.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from `vtb_router_new()`
+/// - `path` must be a valid null-terminated C string
 #[no_mangle]
-pub extern "C" fn vtb_router_insert(
+pub unsafe extern "C" fn vtb_router_insert(
     handle: *mut VtbRouter,
     path: *const c_char,
     id: u64,
@@ -37,8 +54,8 @@ pub extern "C" fn vtb_router_insert(
     if handle.is_null() || path.is_null() {
         return VtbStatus::Invalid;
     }
-    let handle = unsafe { &mut *handle };
-    let path = unsafe { CStr::from_ptr(path) };
+    let handle = &mut *handle;
+    let path = CStr::from_ptr(path);
     let path = match path.to_str() {
         Ok(value) => value,
         Err(_) => return VtbStatus::Invalid,
@@ -52,8 +69,16 @@ pub extern "C" fn vtb_router_insert(
     }
 }
 
+/// Match a path against the router.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from `vtb_router_new()`
+/// - `path` must be a valid null-terminated C string
+/// - `out_id`, `out_params_json`, `out_params_len` must be valid writable pointers
+/// - `out_params_json` must point to a buffer of at least `out_params_cap` bytes
 #[no_mangle]
-pub extern "C" fn vtb_router_match(
+pub unsafe extern "C" fn vtb_router_match(
     handle: *const VtbRouter,
     path: *const c_char,
     out_id: *mut u64,
@@ -70,17 +95,15 @@ pub extern "C" fn vtb_router_match(
     {
         return VtbStatus::Invalid;
     }
-    let handle = unsafe { &*handle };
-    let path = unsafe { CStr::from_ptr(path) };
+    let handle = &*handle;
+    let path = CStr::from_ptr(path);
     let path = match path.to_str() {
         Ok(value) => value,
         Err(_) => return VtbStatus::Invalid,
     };
     match handle.inner.match_path(path) {
         Some((id, params)) => {
-            unsafe {
-                *out_id = id.0;
-            }
+            *out_id = id.0;
             if !params.is_empty() {
                 // Serialize params to JSON object
                 // We construct a simple JSON string manually to avoid heavy deps if possible,
@@ -94,12 +117,10 @@ pub extern "C" fn vtb_router_match(
                 if json.len() > out_params_cap {
                     return VtbStatus::Invalid; // Buffer too small
                 }
-                unsafe {
-                    std::ptr::copy_nonoverlapping(json.as_ptr(), out_params_json, json.len());
-                    *out_params_len = json.len();
-                }
+                std::ptr::copy_nonoverlapping(json.as_ptr(), out_params_json, json.len());
+                *out_params_len = json.len();
             } else {
-                unsafe { *out_params_len = 0 };
+                *out_params_len = 0;
             }
             VtbStatus::Ok
         }
@@ -107,14 +128,18 @@ pub extern "C" fn vtb_router_match(
     }
 }
 
+/// Close and free a router handle.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from `vtb_router_new()` or null
+/// - After this call, `handle` is invalid and must not be used
 #[no_mangle]
-pub extern "C" fn vtb_router_close(handle: *mut VtbRouter) {
+pub unsafe extern "C" fn vtb_router_close(handle: *mut VtbRouter) {
     if handle.is_null() {
         return;
     }
-    unsafe {
-        drop(Box::from_raw(handle));
-    }
+    drop(Box::from_raw(handle));
 }
 
 #[repr(C)]
@@ -204,8 +229,13 @@ fn layout_from(slot_size: usize, slots: usize) -> Result<RingLayout, VtbStatus> 
     Ok(layout)
 }
 
+/// Convenience function to create a ring and return the handle directly.
+///
+/// # Safety
+///
+/// - `name` must be a valid null-terminated C string
 #[no_mangle]
-pub extern "C" fn vtb_ring_create_handle(
+pub unsafe extern "C" fn vtb_ring_create_handle(
     name: *const c_char,
     slot_size: usize,
     slots: usize,
@@ -219,8 +249,14 @@ pub extern "C" fn vtb_ring_create_handle(
     }
 }
 
+/// Convenience function to open a ring and return the handle directly.
+///
+/// # Safety
+///
+/// - `name` must be a valid null-terminated C string
+/// - The named ring must have been created with matching layout parameters
 #[no_mangle]
-pub extern "C" fn vtb_ring_open_handle(
+pub unsafe extern "C" fn vtb_ring_open_handle(
     name: *const c_char,
     slot_size: usize,
     slots: usize,
@@ -245,16 +281,27 @@ pub extern "C" fn vtb_last_error_message() -> *const c_char {
     })
 }
 
+/// Get the payload capacity of a ring buffer.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from ring creation or null
 #[no_mangle]
-pub extern "C" fn vtb_ring_capacity(handle: *const VtbRing) -> usize {
+pub unsafe extern "C" fn vtb_ring_capacity(handle: *const VtbRing) -> usize {
     if handle.is_null() {
         return 0;
     }
-    unsafe { (*handle).capacity }
+    (*handle).capacity
 }
 
+/// Get ring buffer statistics.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from ring creation
+/// - `out_stats` must be a valid writable pointer
 #[no_mangle]
-pub extern "C" fn vtb_ring_stats(
+pub unsafe extern "C" fn vtb_ring_stats(
     handle: *const VtbRing,
     out_stats: *mut VtbRingStats,
 ) -> VtbStatus {
@@ -262,22 +309,26 @@ pub extern "C" fn vtb_ring_stats(
     if handle.is_null() || out_stats.is_null() {
         return VtbStatus::Invalid;
     }
-    let handle = unsafe { &*handle };
+    let handle = &*handle;
     let stats: RingStats = handle.sender.stats();
-    unsafe {
-        *out_stats = VtbRingStats {
-            slot_size: stats.slot_size,
-            slots: stats.slots,
-            read_head: stats.read_head,
-            write_head: stats.write_head,
-            capacity: handle.capacity,
-        };
-    }
+    *out_stats = VtbRingStats {
+        slot_size: stats.slot_size,
+        slots: stats.slots,
+        read_head: stats.read_head,
+        write_head: stats.write_head,
+        capacity: handle.capacity,
+    };
     VtbStatus::Ok
 }
 
+/// Create a named SPSC ring buffer.
+///
+/// # Safety
+///
+/// - `name` must be a valid null-terminated C string
+/// - `out_handle` must be a valid writable pointer
 #[no_mangle]
-pub extern "C" fn vtb_ring_create(
+pub unsafe extern "C" fn vtb_ring_create(
     name: *const c_char,
     slot_size: usize,
     slots: usize,
@@ -287,7 +338,7 @@ pub extern "C" fn vtb_ring_create(
     if name.is_null() || out_handle.is_null() {
         return VtbStatus::Invalid;
     }
-    let name = unsafe { CStr::from_ptr(name) };
+    let name = CStr::from_ptr(name);
     let name = match name.to_str() {
         Ok(value) => value,
         Err(_) => return VtbStatus::Invalid,
@@ -303,24 +354,28 @@ pub extern "C" fn vtb_ring_create(
             return VtbStatus::Sys;
         }
     };
-    let ring = unsafe {
-        match SpscRing::initialize(std::sync::Arc::new(region), layout, process_id(), epoch()) {
-            Ok(ring) => ring,
-            Err(err) => {
-                set_last_error(err.to_string());
-                return map_channel_error(err);
-            }
+    let ring = match SpscRing::initialize(std::sync::Arc::new(region), layout, process_id(), epoch())
+    {
+        Ok(ring) => ring,
+        Err(err) => {
+            set_last_error(err.to_string());
+            return map_channel_error(err);
         }
     };
     let handle = Box::new(VtbRing::new(ring));
-    unsafe {
-        *out_handle = Box::into_raw(handle);
-    }
+    *out_handle = Box::into_raw(handle);
     VtbStatus::Ok
 }
 
+/// Open an existing named SPSC ring buffer.
+///
+/// # Safety
+///
+/// - `name` must be a valid null-terminated C string
+/// - `out_handle` must be a valid writable pointer
+/// - The named ring must have been created with matching layout parameters
 #[no_mangle]
-pub extern "C" fn vtb_ring_open(
+pub unsafe extern "C" fn vtb_ring_open(
     name: *const c_char,
     slot_size: usize,
     slots: usize,
@@ -330,7 +385,7 @@ pub extern "C" fn vtb_ring_open(
     if name.is_null() || out_handle.is_null() {
         return VtbStatus::Invalid;
     }
-    let name = unsafe { CStr::from_ptr(name) };
+    let name = CStr::from_ptr(name);
     let name = match name.to_str() {
         Ok(value) => value,
         Err(_) => return VtbStatus::Invalid,
@@ -346,24 +401,26 @@ pub extern "C" fn vtb_ring_open(
             return VtbStatus::Sys;
         }
     };
-    let ring = unsafe {
-        match SpscRing::attach(std::sync::Arc::new(region), layout) {
-            Ok(ring) => ring,
-            Err(err) => {
-                set_last_error(err.to_string());
-                return map_channel_error(err);
-            }
+    let ring = match SpscRing::attach(std::sync::Arc::new(region), layout) {
+        Ok(ring) => ring,
+        Err(err) => {
+            set_last_error(err.to_string());
+            return map_channel_error(err);
         }
     };
     let handle = Box::new(VtbRing::new(ring));
-    unsafe {
-        *out_handle = Box::into_raw(handle);
-    }
+    *out_handle = Box::into_raw(handle);
     VtbStatus::Ok
 }
 
+/// Send data to a ring buffer.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from ring creation
+/// - `data` must be a valid pointer to `len` bytes
 #[no_mangle]
-pub extern "C" fn vtb_ring_send(
+pub unsafe extern "C" fn vtb_ring_send(
     handle: *mut VtbRing,
     data: *const u8,
     len: usize,
@@ -374,8 +431,8 @@ pub extern "C" fn vtb_ring_send(
     if handle.is_null() || data.is_null() {
         return VtbStatus::Invalid;
     }
-    let handle = unsafe { &*handle };
-    let payload = unsafe { core::slice::from_raw_parts(data, len) };
+    let handle = &*handle;
+    let payload = core::slice::from_raw_parts(data, len);
     let timeout = Duration::from_millis(timeout_ms as u64);
     let result = if timeout_ms == 0 {
         handle.sender.try_send(payload, flags)
@@ -395,8 +452,15 @@ pub extern "C" fn vtb_ring_send(
     }
 }
 
+/// Receive data from a ring buffer.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from ring creation
+/// - `out` must be a valid pointer to a buffer of at least `capacity` bytes
+/// - `out_len` and `out_flags` must be valid writable pointers
 #[no_mangle]
-pub extern "C" fn vtb_ring_recv(
+pub unsafe extern "C" fn vtb_ring_recv(
     handle: *mut VtbRing,
     out: *mut u8,
     capacity: usize,
@@ -408,8 +472,8 @@ pub extern "C" fn vtb_ring_recv(
     if handle.is_null() || out.is_null() || out_len.is_null() || out_flags.is_null() {
         return VtbStatus::Invalid;
     }
-    let handle = unsafe { &*handle };
-    let buffer = unsafe { core::slice::from_raw_parts_mut(out, capacity) };
+    let handle = &*handle;
+    let buffer = core::slice::from_raw_parts_mut(out, capacity);
     let timeout = Duration::from_millis(timeout_ms as u64);
     let result = if timeout_ms == 0 {
         handle.receiver.try_recv_with_flags(buffer).map(Some)
@@ -418,12 +482,8 @@ pub extern "C" fn vtb_ring_recv(
     };
     match result {
         Ok(Some((len, flags))) => {
-            unsafe {
-                *out_len = len;
-            }
-            unsafe {
-                *out_flags = flags;
-            }
+            *out_len = len;
+            *out_flags = flags;
             VtbStatus::Ok
         }
         Ok(None) => VtbStatus::Timeout,
@@ -434,18 +494,28 @@ pub extern "C" fn vtb_ring_recv(
     }
 }
 
+/// Close and free a ring buffer handle.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from ring creation or null
+/// - After this call, `handle` is invalid and must not be used
 #[no_mangle]
-pub extern "C" fn vtb_ring_close(handle: *mut VtbRing) {
+pub unsafe extern "C" fn vtb_ring_close(handle: *mut VtbRing) {
     if handle.is_null() {
         return;
     }
-    unsafe {
-        drop(Box::from_raw(handle));
-    }
+    drop(Box::from_raw(handle));
 }
 
+/// Create a named shared memory region.
+///
+/// # Safety
+///
+/// - `name` must be a valid null-terminated C string
+/// - `out_handle` must be a valid writable pointer
 #[no_mangle]
-pub extern "C" fn vtb_region_create(
+pub unsafe extern "C" fn vtb_region_create(
     name: *const c_char,
     size: usize,
     out_handle: *mut *mut VtbRegion,
@@ -454,7 +524,7 @@ pub extern "C" fn vtb_region_create(
     if name.is_null() || out_handle.is_null() {
         return VtbStatus::Invalid;
     }
-    let name = unsafe { CStr::from_ptr(name) };
+    let name = CStr::from_ptr(name);
     let name = match name.to_str() {
         Ok(value) => value,
         Err(_) => return VtbStatus::Invalid,
@@ -467,12 +537,19 @@ pub extern "C" fn vtb_region_create(
         }
     };
     let handle = Box::new(VtbRegion { region });
-    unsafe { *out_handle = Box::into_raw(handle) };
+    *out_handle = Box::into_raw(handle);
     VtbStatus::Ok
 }
 
+/// Open an existing named shared memory region.
+///
+/// # Safety
+///
+/// - `name` must be a valid null-terminated C string
+/// - `out_handle` must be a valid writable pointer
+/// - The named region must exist with at least `size` bytes
 #[no_mangle]
-pub extern "C" fn vtb_region_open(
+pub unsafe extern "C" fn vtb_region_open(
     name: *const c_char,
     size: usize,
     out_handle: *mut *mut VtbRegion,
@@ -481,7 +558,7 @@ pub extern "C" fn vtb_region_open(
     if name.is_null() || out_handle.is_null() {
         return VtbStatus::Invalid;
     }
-    let name = unsafe { CStr::from_ptr(name) };
+    let name = CStr::from_ptr(name);
     let name = match name.to_str() {
         Ok(value) => value,
         Err(_) => return VtbStatus::Invalid,
@@ -494,49 +571,67 @@ pub extern "C" fn vtb_region_open(
         }
     };
     let handle = Box::new(VtbRegion { region });
-    unsafe { *out_handle = Box::into_raw(handle) };
+    *out_handle = Box::into_raw(handle);
     VtbStatus::Ok
 }
 
+/// Get a pointer to the shared memory region's data.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from region creation or null
 #[no_mangle]
-pub extern "C" fn vtb_region_ptr(handle: *mut VtbRegion) -> *mut c_void {
+pub unsafe extern "C" fn vtb_region_ptr(handle: *mut VtbRegion) -> *mut c_void {
     if handle.is_null() {
         return core::ptr::null_mut();
     }
-    let handle = unsafe { &mut *handle };
+    let handle = &mut *handle;
     handle.region.as_ptr().cast::<c_void>()
 }
 
+/// Get the length of a shared memory region.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from region creation or null
 #[no_mangle]
-pub extern "C" fn vtb_region_len(handle: *mut VtbRegion) -> usize {
+pub unsafe extern "C" fn vtb_region_len(handle: *mut VtbRegion) -> usize {
     if handle.is_null() {
         return 0;
     }
-    unsafe { (*handle).region.len() }
+    (*handle).region.len()
 }
 
+/// Close and free a shared memory region handle.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from region creation or null
+/// - After this call, `handle` is invalid and must not be used
 #[no_mangle]
-pub extern "C" fn vtb_region_close(handle: *mut VtbRegion) {
+pub unsafe extern "C" fn vtb_region_close(handle: *mut VtbRegion) {
     if handle.is_null() {
         return;
     }
-    unsafe {
-        drop(Box::from_raw(handle));
-    }
+    drop(Box::from_raw(handle));
 }
 
 /// Unlink a named shared memory region.
 ///
 /// This removes the shared memory from the filesystem so no new processes can open it.
 /// Existing mappings remain valid until all handles are closed.
+///
+/// # Safety
+///
+/// - `name` must be a valid null-terminated C string or null
 #[no_mangle]
-pub extern "C" fn vtb_shm_unlink(name: *const c_char) -> VtbStatus {
+pub unsafe extern "C" fn vtb_shm_unlink(name: *const c_char) -> VtbStatus {
     clear_last_error();
     if name.is_null() {
         set_last_error("null name".to_string());
         return VtbStatus::Invalid;
     }
-    let name = unsafe { CStr::from_ptr(name) };
+    let name = CStr::from_ptr(name);
     let name_str = match name.to_str() {
         Ok(s) => s,
         Err(e) => {
@@ -553,14 +648,18 @@ pub extern "C" fn vtb_shm_unlink(name: *const c_char) -> VtbStatus {
     }
 }
 
+/// Free memory allocated by this library.
+///
+/// # Safety
+///
+/// - `ptr` must be a valid pointer allocated by this library or null
+/// - After this call, `ptr` is invalid and must not be used
 #[no_mangle]
-pub extern "C" fn vtb_free(ptr: *mut c_void) {
+pub unsafe extern "C" fn vtb_free(ptr: *mut c_void) {
     if ptr.is_null() {
         return;
     }
-    unsafe {
-        drop(Box::from_raw(ptr.cast::<u8>()));
-    }
+    drop(Box::from_raw(ptr.cast::<u8>()));
 }
 
 fn process_id() -> u32 {
@@ -602,8 +701,14 @@ fn mpmc_layout_from(slot_size: usize, slots: usize) -> Result<RingLayout, VtbSta
     Ok(layout)
 }
 
+/// Create a named MPMC ring buffer.
+///
+/// # Safety
+///
+/// - `name` must be a valid null-terminated C string
+/// - `out_handle` must be a valid writable pointer
 #[no_mangle]
-pub extern "C" fn vtb_mpmc_create(
+pub unsafe extern "C" fn vtb_mpmc_create(
     name: *const c_char,
     slot_size: usize,
     slots: usize,
@@ -613,7 +718,7 @@ pub extern "C" fn vtb_mpmc_create(
     if name.is_null() || out_handle.is_null() {
         return VtbStatus::Invalid;
     }
-    let name = unsafe { CStr::from_ptr(name) };
+    let name = CStr::from_ptr(name);
     let name = match name.to_str() {
         Ok(value) => value,
         Err(_) => return VtbStatus::Invalid,
@@ -630,24 +735,28 @@ pub extern "C" fn vtb_mpmc_create(
         }
     };
     // MpmcRing::initialize is used for creating new ring
-    let ring = unsafe {
+    let ring =
         match MpmcRing::initialize(std::sync::Arc::new(region), layout, process_id(), epoch()) {
             Ok(ring) => ring,
             Err(err) => {
                 set_last_error(err.to_string());
                 return map_channel_error(err);
             }
-        }
-    };
+        };
     let handle = Box::new(VtbMpmcRing::new(ring));
-    unsafe {
-        *out_handle = Box::into_raw(handle);
-    }
+    *out_handle = Box::into_raw(handle);
     VtbStatus::Ok
 }
 
+/// Open an existing named MPMC ring buffer.
+///
+/// # Safety
+///
+/// - `name` must be a valid null-terminated C string
+/// - `out_handle` must be a valid writable pointer
+/// - The named ring must have been created with matching layout parameters
 #[no_mangle]
-pub extern "C" fn vtb_mpmc_open(
+pub unsafe extern "C" fn vtb_mpmc_open(
     name: *const c_char,
     slot_size: usize,
     slots: usize,
@@ -657,7 +766,7 @@ pub extern "C" fn vtb_mpmc_open(
     if name.is_null() || out_handle.is_null() {
         return VtbStatus::Invalid;
     }
-    let name = unsafe { CStr::from_ptr(name) };
+    let name = CStr::from_ptr(name);
     let name = match name.to_str() {
         Ok(value) => value,
         Err(_) => return VtbStatus::Invalid,
@@ -674,24 +783,26 @@ pub extern "C" fn vtb_mpmc_open(
         }
     };
     // MpmcRing::attach is used for opening existing ring
-    let ring = unsafe {
-        match MpmcRing::attach(std::sync::Arc::new(region), layout) {
-            Ok(ring) => ring,
-            Err(err) => {
-                set_last_error(err.to_string());
-                return map_channel_error(err);
-            }
+    let ring = match MpmcRing::attach(std::sync::Arc::new(region), layout) {
+        Ok(ring) => ring,
+        Err(err) => {
+            set_last_error(err.to_string());
+            return map_channel_error(err);
         }
     };
     let handle = Box::new(VtbMpmcRing::new(ring));
-    unsafe {
-        *out_handle = Box::into_raw(handle);
-    }
+    *out_handle = Box::into_raw(handle);
     VtbStatus::Ok
 }
 
+/// Send data to an MPMC ring buffer.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from MPMC ring creation
+/// - `data` must be a valid pointer to `len` bytes
 #[no_mangle]
-pub extern "C" fn vtb_mpmc_send(
+pub unsafe extern "C" fn vtb_mpmc_send(
     handle: *mut VtbMpmcRing,
     data: *const u8,
     len: usize,
@@ -702,20 +813,12 @@ pub extern "C" fn vtb_mpmc_send(
     if handle.is_null() || data.is_null() {
         return VtbStatus::Invalid;
     }
-    let handle = unsafe { &*handle };
-    let payload = unsafe { core::slice::from_raw_parts(data, len) };
+    let handle = &*handle;
+    let payload = core::slice::from_raw_parts(data, len);
     let timeout = Duration::from_millis(timeout_ms as u64);
 
-    // MpmcRing doesn't have try_send/send_timeout in the same way?
-    // Checking vertebra-core/src/channel.rs... MpmcRing has send(data, flags) which is blocking/spinning?
-    // Or send_timeout?
-    // vertebra-py uses `send(data, flags)` inside `py.detach`.
-
-    // Assuming MpmcRing has similar API. If not, I might need to check.
-    // If it only has blocking send, we can't implement timeout easily without a loop.
-    // But MpmcRing in vertebra usually has wait support.
-
-    // For now, let's assume it has `send` and `try_send`.
+    // MpmcRing uses spinning with backoff for contention handling.
+    // For timeout support, we implement a deadline-based loop.
     let result = if timeout_ms == 0 {
         handle.inner.try_send(payload, flags)
     } else {
@@ -743,8 +846,15 @@ pub extern "C" fn vtb_mpmc_send(
     }
 }
 
+/// Receive data from an MPMC ring buffer.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from MPMC ring creation
+/// - `out` must be a valid pointer to a buffer of at least `capacity` bytes
+/// - `out_len` and `out_flags` must be valid writable pointers
 #[no_mangle]
-pub extern "C" fn vtb_mpmc_recv(
+pub unsafe extern "C" fn vtb_mpmc_recv(
     handle: *mut VtbMpmcRing,
     out: *mut u8,
     capacity: usize,
@@ -756,8 +866,8 @@ pub extern "C" fn vtb_mpmc_recv(
     if handle.is_null() || out.is_null() || out_len.is_null() || out_flags.is_null() {
         return VtbStatus::Invalid;
     }
-    let handle = unsafe { &*handle };
-    let buffer = unsafe { core::slice::from_raw_parts_mut(out, capacity) };
+    let handle = &*handle;
+    let buffer = core::slice::from_raw_parts_mut(out, capacity);
     let timeout = Duration::from_millis(timeout_ms as u64);
 
     let result = if timeout_ms == 0 {
@@ -780,17 +890,11 @@ pub extern "C" fn vtb_mpmc_recv(
 
     match result {
         Ok(Some(len)) => {
-            unsafe {
-                *out_len = len;
-
-                *out_flags = 0; // MpmcRing does not expose flags
-            }
-
+            *out_len = len;
+            *out_flags = 0; // MpmcRing does not expose flags in try_recv
             VtbStatus::Ok
         }
-
         Ok(None) => VtbStatus::Timeout,
-
         Err(err) => {
             set_last_error(err.to_string());
             map_channel_error(err)
@@ -798,22 +902,31 @@ pub extern "C" fn vtb_mpmc_recv(
     }
 }
 
+/// Get the payload capacity of an MPMC ring buffer.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from MPMC ring creation or null
 #[no_mangle]
-pub extern "C" fn vtb_mpmc_capacity(handle: *const VtbMpmcRing) -> usize {
+pub unsafe extern "C" fn vtb_mpmc_capacity(handle: *const VtbMpmcRing) -> usize {
     if handle.is_null() {
         return 0;
     }
-    unsafe { (*handle).capacity }
+    (*handle).capacity
 }
 
+/// Close and free an MPMC ring buffer handle.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from MPMC ring creation or null
+/// - After this call, `handle` is invalid and must not be used
 #[no_mangle]
-pub extern "C" fn vtb_mpmc_close(handle: *mut VtbMpmcRing) {
+pub unsafe extern "C" fn vtb_mpmc_close(handle: *mut VtbMpmcRing) {
     if handle.is_null() {
         return;
     }
-    unsafe {
-        drop(Box::from_raw(handle));
-    }
+    drop(Box::from_raw(handle));
 }
 
 // =============================================================================
@@ -830,8 +943,12 @@ pub struct VtbNotifier {
 /// On Linux, this creates an eventfd with EFD_NONBLOCK.
 /// On macOS/Windows, this creates a non-blocking pipe.
 /// FDs are inheritable to support cross-process IPC.
+///
+/// # Safety
+///
+/// - `out_handle` must be a valid writable pointer
 #[no_mangle]
-pub extern "C" fn vtb_notifier_new(out_handle: *mut *mut VtbNotifier) -> VtbStatus {
+pub unsafe extern "C" fn vtb_notifier_new(out_handle: *mut *mut VtbNotifier) -> VtbStatus {
     clear_last_error();
     if out_handle.is_null() {
         return VtbStatus::Invalid;
@@ -839,9 +956,7 @@ pub extern "C" fn vtb_notifier_new(out_handle: *mut *mut VtbNotifier) -> VtbStat
     match Notifier::new() {
         Ok(inner) => {
             let handle = Box::new(VtbNotifier { inner });
-            unsafe {
-                *out_handle = Box::into_raw(handle);
-            }
+            *out_handle = Box::into_raw(handle);
             VtbStatus::Ok
         }
         Err(err) => {
@@ -856,12 +971,16 @@ pub extern "C" fn vtb_notifier_new(out_handle: *mut *mut VtbNotifier) -> VtbStat
 /// Register this FD with your event loop (poll/epoll/kqueue) to be notified
 /// when data is available. On Linux this is the eventfd; on other platforms
 /// it's the read end of a pipe.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from notifier creation or null
 #[no_mangle]
-pub extern "C" fn vtb_notifier_fd(handle: *const VtbNotifier) -> c_int {
+pub unsafe extern "C" fn vtb_notifier_fd(handle: *const VtbNotifier) -> c_int {
     if handle.is_null() {
         return -1;
     }
-    let handle = unsafe { &*handle };
+    let handle = &*handle;
     handle.inner.as_raw_fd()
 }
 
@@ -869,12 +988,16 @@ pub extern "C" fn vtb_notifier_fd(handle: *const VtbNotifier) -> c_int {
 ///
 /// On Linux (eventfd), this returns the same value as vtb_notifier_fd().
 /// On macOS/Windows (pipe), this is the write end.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from notifier creation or null
 #[no_mangle]
-pub extern "C" fn vtb_notifier_write_fd(handle: *const VtbNotifier) -> c_int {
+pub unsafe extern "C" fn vtb_notifier_write_fd(handle: *const VtbNotifier) -> c_int {
     if handle.is_null() {
         return -1;
     }
-    let handle = unsafe { &*handle };
+    let handle = &*handle;
     handle.inner.write_fd()
 }
 
@@ -883,13 +1006,17 @@ pub extern "C" fn vtb_notifier_write_fd(handle: *const VtbNotifier) -> c_int {
 /// On Linux, increments the eventfd counter.
 /// On other platforms, writes a single byte to the pipe.
 /// Safe to call multiple times; notifications coalesce.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from notifier creation
 #[no_mangle]
-pub extern "C" fn vtb_notifier_notify(handle: *const VtbNotifier) -> VtbStatus {
+pub unsafe extern "C" fn vtb_notifier_notify(handle: *const VtbNotifier) -> VtbStatus {
     clear_last_error();
     if handle.is_null() {
         return VtbStatus::Invalid;
     }
-    let handle = unsafe { &*handle };
+    let handle = &*handle;
     match handle.inner.notify() {
         Ok(()) => VtbStatus::Ok,
         Err(err) => {
@@ -903,13 +1030,17 @@ pub extern "C" fn vtb_notifier_notify(handle: *const VtbNotifier) -> VtbStatus {
 ///
 /// On Linux, reads and discards the eventfd counter.
 /// On other platforms, drains the pipe.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from notifier creation
 #[no_mangle]
-pub extern "C" fn vtb_notifier_clear(handle: *const VtbNotifier) -> VtbStatus {
+pub unsafe extern "C" fn vtb_notifier_clear(handle: *const VtbNotifier) -> VtbStatus {
     clear_last_error();
     if handle.is_null() {
         return VtbStatus::Invalid;
     }
-    let handle = unsafe { &*handle };
+    let handle = &*handle;
     match handle.inner.clear() {
         Ok(()) => VtbStatus::Ok,
         Err(err) => {
@@ -922,30 +1053,34 @@ pub extern "C" fn vtb_notifier_clear(handle: *const VtbNotifier) -> VtbStatus {
 /// Check if the notifier has pending notifications (non-blocking).
 ///
 /// Returns 1 if pending, 0 if not.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from notifier creation or null
 #[no_mangle]
-pub extern "C" fn vtb_notifier_has_pending(handle: *const VtbNotifier) -> c_int {
+pub unsafe extern "C" fn vtb_notifier_has_pending(handle: *const VtbNotifier) -> c_int {
     if handle.is_null() {
         return 0;
     }
-    let handle = unsafe { &*handle };
-    if handle.inner.has_pending() {
-        1
-    } else {
-        0
-    }
+    let handle = &*handle;
+    if handle.inner.has_pending() { 1 } else { 0 }
 }
 
 /// Wait for a notification with timeout.
 ///
 /// Returns VtbStatus::Ok if notification received, VtbStatus::Timeout on timeout.
 /// Use timeout_ms=-1 for infinite wait.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from notifier creation
 #[no_mangle]
-pub extern "C" fn vtb_notifier_wait(handle: *const VtbNotifier, timeout_ms: c_int) -> VtbStatus {
+pub unsafe extern "C" fn vtb_notifier_wait(handle: *const VtbNotifier, timeout_ms: c_int) -> VtbStatus {
     clear_last_error();
     if handle.is_null() {
         return VtbStatus::Invalid;
     }
-    let handle = unsafe { &*handle };
+    let handle = &*handle;
     match handle.inner.wait(timeout_ms) {
         Ok(true) => VtbStatus::Ok,
         Ok(false) => VtbStatus::Timeout,
@@ -964,10 +1099,11 @@ pub extern "C" fn vtb_notifier_wait(handle: *const VtbNotifier, timeout_ms: c_in
 ///
 /// # Safety
 ///
-/// The FDs must be valid, open file descriptors from a notifier
-/// created in the parent process.
+/// - The FDs must be valid, open file descriptors from a notifier
+///   created in the parent process.
+/// - `out_handle` must be a valid writable pointer
 #[no_mangle]
-pub extern "C" fn vtb_notifier_from_fds(
+pub unsafe extern "C" fn vtb_notifier_from_fds(
     read_fd: c_int,
     write_fd: c_int,
     out_handle: *mut *mut VtbNotifier,
@@ -977,27 +1113,28 @@ pub extern "C" fn vtb_notifier_from_fds(
         return VtbStatus::Invalid;
     }
     #[cfg(target_os = "linux")]
-    let inner = unsafe { Notifier::from_raw_fd(read_fd) };
+    let inner = Notifier::from_raw_fd(read_fd);
     #[cfg(not(target_os = "linux"))]
-    let inner = unsafe { Notifier::from_raw_fds(read_fd, write_fd) };
+    let inner = Notifier::from_raw_fds(read_fd, write_fd);
     // Suppress unused warning on Linux
     let _ = write_fd;
     let handle = Box::new(VtbNotifier { inner });
-    unsafe {
-        *out_handle = Box::into_raw(handle);
-    }
+    *out_handle = Box::into_raw(handle);
     VtbStatus::Ok
 }
 
 /// Close a notifier handle.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from notifier creation or null
+/// - After this call, `handle` is invalid and must not be used
 #[no_mangle]
-pub extern "C" fn vtb_notifier_close(handle: *mut VtbNotifier) {
+pub unsafe extern "C" fn vtb_notifier_close(handle: *mut VtbNotifier) {
     if handle.is_null() {
         return;
     }
-    unsafe {
-        drop(Box::from_raw(handle));
-    }
+    drop(Box::from_raw(handle));
 }
 
 // =============================================================================
@@ -1020,11 +1157,16 @@ pub struct VtbAsyncBridge {
 /// * `source_fd` - The eventfd to watch (must remain valid for bridge lifetime)
 /// * `out_handle` - Output: pointer to the created handle
 ///
+/// # Safety
+///
+/// - `source_fd` must be a valid eventfd that remains open for the bridge lifetime
+/// - `out_handle` must be a valid writable pointer
+///
 /// # Returns
 ///
 /// VtbStatus::Ok on success, error status otherwise.
 #[no_mangle]
-pub extern "C" fn vtb_async_bridge_new(
+pub unsafe extern "C" fn vtb_async_bridge_new(
     source_fd: c_int,
     out_handle: *mut *mut VtbAsyncBridge,
 ) -> VtbStatus {
@@ -1039,9 +1181,7 @@ pub extern "C" fn vtb_async_bridge_new(
     match AsyncNotifierBridge::new(source_fd as RawFd) {
         Ok(inner) => {
             let handle = Box::new(VtbAsyncBridge { inner });
-            unsafe {
-                *out_handle = Box::into_raw(handle);
-            }
+            *out_handle = Box::into_raw(handle);
             VtbStatus::Ok
         }
         Err(err) => {
@@ -1055,12 +1195,16 @@ pub extern "C" fn vtb_async_bridge_new(
 ///
 /// Register this fd with net.Socket to be notified when the source eventfd
 /// was signaled. Returns -1 if handle is null.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from bridge creation or null
 #[no_mangle]
-pub extern "C" fn vtb_async_bridge_pipe_fd(handle: *const VtbAsyncBridge) -> c_int {
+pub unsafe extern "C" fn vtb_async_bridge_pipe_fd(handle: *const VtbAsyncBridge) -> c_int {
     if handle.is_null() {
         return -1;
     }
-    let handle = unsafe { &*handle };
+    let handle = &*handle;
     handle.inner.pipe_fd()
 }
 
@@ -1068,13 +1212,17 @@ pub extern "C" fn vtb_async_bridge_pipe_fd(handle: *const VtbAsyncBridge) -> c_i
 ///
 /// The thread will block on the source eventfd and write to the pipe
 /// when notifications arrive. Safe to call multiple times (no-op if running).
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from bridge creation
 #[no_mangle]
-pub extern "C" fn vtb_async_bridge_start(handle: *mut VtbAsyncBridge) -> VtbStatus {
+pub unsafe extern "C" fn vtb_async_bridge_start(handle: *mut VtbAsyncBridge) -> VtbStatus {
     clear_last_error();
     if handle.is_null() {
         return VtbStatus::Invalid;
     }
-    let handle = unsafe { &mut *handle };
+    let handle = &mut *handle;
     handle.inner.start();
     VtbStatus::Ok
 }
@@ -1083,13 +1231,17 @@ pub extern "C" fn vtb_async_bridge_start(handle: *mut VtbAsyncBridge) -> VtbStat
 ///
 /// Signals shutdown via eventfd for instant wake (no polling delay).
 /// Blocks until the thread exits. Safe to call multiple times.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from bridge creation
 #[no_mangle]
-pub extern "C" fn vtb_async_bridge_stop(handle: *mut VtbAsyncBridge) -> VtbStatus {
+pub unsafe extern "C" fn vtb_async_bridge_stop(handle: *mut VtbAsyncBridge) -> VtbStatus {
     clear_last_error();
     if handle.is_null() {
         return VtbStatus::Invalid;
     }
-    let handle = unsafe { &mut *handle };
+    let handle = &mut *handle;
     handle.inner.stop();
     VtbStatus::Ok
 }
@@ -1097,28 +1249,31 @@ pub extern "C" fn vtb_async_bridge_stop(handle: *mut VtbAsyncBridge) -> VtbStatu
 /// Check if the watcher thread is running.
 ///
 /// Returns 1 if running, 0 if not (or if handle is null).
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from bridge creation or null
 #[no_mangle]
-pub extern "C" fn vtb_async_bridge_is_running(handle: *const VtbAsyncBridge) -> c_int {
+pub unsafe extern "C" fn vtb_async_bridge_is_running(handle: *const VtbAsyncBridge) -> c_int {
     if handle.is_null() {
         return 0;
     }
-    let handle = unsafe { &*handle };
-    if handle.inner.is_running() {
-        1
-    } else {
-        0
-    }
+    let handle = &*handle;
+    if handle.inner.is_running() { 1 } else { 0 }
 }
 
 /// Close the async bridge handle.
 ///
 /// Stops the watcher thread if running and frees resources.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer from bridge creation or null
+/// - After this call, `handle` is invalid and must not be used
 #[no_mangle]
-pub extern "C" fn vtb_async_bridge_close(handle: *mut VtbAsyncBridge) {
+pub unsafe extern "C" fn vtb_async_bridge_close(handle: *mut VtbAsyncBridge) {
     if handle.is_null() {
         return;
     }
-    unsafe {
-        drop(Box::from_raw(handle));
-    }
+    drop(Box::from_raw(handle));
 }

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import struct
 from typing import Any, Self, TypeVar, cast
 
@@ -12,11 +11,6 @@ from vertebra.core.procedures import ProcedureRegistry, get_serializer
 from vertebra.core.serializers import get_json_codec
 from vertebra.messaging.protocol import HEADER_SIZE, Flags, RequestHeader, ResponseHeader
 
-# Default spin duration in microseconds for hybrid wait.
-# Read from VERTEBRA_SPIN_US environment variable (default: 5).
-# Lower values (2-3) = lower latency, higher CPU
-# Higher values (10+) = higher latency, lower CPU
-DEFAULT_SPIN_US: int = int(os.environ.get("VERTEBRA_SPIN_US", "5"))
 
 # Procedure ID encoding: length (u16) + bytes
 _PROC_LEN = struct.Struct("<H")  # Little-endian u16

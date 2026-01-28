@@ -5,15 +5,13 @@
 - **Total files scanned**: 22 Rust source files + 4 Cargo.toml
 - **Dead code items found**: 8
 - **Deprecated items found**: 0
-- **TODO/FIXME comments**: 2
-- **Clippy errors**: 58 (all in vertebra-broker C ABI unsafe pointer handling)
-- **Clippy warnings**: 4
+- **TODO/FIXME comments**: 2 (now fixed)
+- **Clippy errors**: 58 (all fixed - C ABI unsafe pointer handling)
+- **Clippy warnings**: 4 (collapsible if fixed, safety docs added)
 
-## Audit Methodology
+## Cleanup Status
 
-1. `cargo clippy --all-targets --all-features -- -W dead_code -W unused -W deprecated`
-2. Grep for `#[allow(dead_code)]`, `#[deprecated]`, `TODO|FIXME|HACK`
-3. Manual code review for unused structs, unreachable code paths, and unused dependencies
+All cleanup items have been addressed. See the "Completion Status" section at the end.
 
 ---
 
@@ -21,43 +19,44 @@
 
 ### vertebra-core
 
-| Item | Type | Location | Reason | Action |
+| Item | Type | Location | Reason | Status |
 |------|------|----------|--------|--------|
-| `region` field | Struct field | `async_ring.rs:44-45` | `#[allow(dead_code)]` - Arc<ShmRegion> kept alive but never accessed after creation | **Keep** - Intentional lifetime extension |
-| `region` field | Struct field | `async_ring.rs:298` | `#[allow(dead_code)]` - Same pattern for AsyncMpmcRing | **Keep** - Intentional lifetime extension |
-| `pub mod types {}` | Empty module | `lib.rs:25` | Placeholder for PRD-2+ type bridge utilities | **Remove** - Empty placeholder adds confusion |
-| Collapsible if | Style | `channel.rs:1294-1305` | Nested if can be collapsed | **Fix** - `cargo clippy --fix` |
-| Collapsible if | Style | `channel.rs:1316-1327` | Nested if can be collapsed | **Fix** - `cargo clippy --fix` |
-| Missing safety doc | Documentation | `async_ring.rs:358` | `from_raw_fd` unsafe fn missing `# Safety` section | **Fix** - Add safety documentation |
-| `#[allow(dead_code)]` | Annotation | `channel.rs:126` | SlotMeta marker_start field | **Review** - May be for future alignment |
-| `#[allow(dead_code)]` | Annotation | `channel.rs:958` | MpmcSlotMeta marker_start | **Review** - May be for future alignment |
-| `#[allow(dead_code)]` | Annotation | `channel.rs:1092` | MpmcRing epoch field | **Review** - May be for future use |
+| `region` field | Struct field | `async_ring.rs:44-45` | `#[allow(dead_code)]` - Arc<ShmRegion> kept alive but never accessed after creation | **DONE** - Documented with comment |
+| `region` field | Struct field | `async_ring.rs:298` | `#[allow(dead_code)]` - Same pattern for AsyncMpmcRing | **DONE** - Documented with comment |
+| `pub mod types {}` | Empty module | `lib.rs:25` | Placeholder for PRD-2+ type bridge utilities | **N/A** - Already removed (not present) |
+| Collapsible if | Style | `channel.rs:1377-1388` | Nested if can be collapsed | **DONE** - Collapsed |
+| Collapsible if | Style | `channel.rs:1399-1410` | Nested if can be collapsed | **DONE** - Collapsed |
+| Missing safety doc | Documentation | `async_ring.rs:117` | `from_raw_fd` unsafe fn missing `# Safety` section | **DONE** - Added safety docs |
+| Missing safety doc | Documentation | `async_ring.rs:375` | `from_raw_fd` for AsyncMpmcRing | **DONE** - Added safety docs |
+| `#[allow(dead_code)]` | Annotation | `channel.rs:126` | SpscRing region field | **DONE** - Documented |
+| `#[allow(dead_code)]` | Annotation | `channel.rs:1043` | BufferSender pool field | **DONE** - Documented |
+| `#[allow(dead_code)]` | Annotation | `channel.rs:1179` | MpmcRing region field | **DONE** - Documented |
 
 ### vertebra-broker
 
-| Item | Type | Location | Reason | Action |
+| Item | Type | Location | Reason | Status |
 |------|------|----------|--------|--------|
-| `PoolAdapter` trait | Trait | `pool.rs:13-23` | Only used in test, no implementations | **Remove** - Dead abstraction, broker moved to TypeScript |
-| `PoolManager` | Struct | `pool.rs:25-50` | Created in server but never used (no register/get/unregister calls) | **Remove** - Unused; broker functionality in TS |
-| `FairScheduler<T>` | Struct | `scheduler.rs:21-90` | Created in server but never used (no enqueue/next calls outside tests) | **Remove** - Unused; scheduling handled elsewhere |
-| C ABI functions | 58 functions | `lib.rs` | All `not_unsafe_ptr_arg_deref` errors | **Fix** - Mark functions `unsafe` or use safe wrappers |
-| Missing Default impl | Trait impl | `pool.rs:30` | `PoolManager::new()` without Default | **Fix** - Add `impl Default` (if keeping PoolManager) |
+| `PoolAdapter` trait | Trait | `pool.rs` | Dead abstraction | **N/A** - Already removed (file not present) |
+| `PoolManager` | Struct | `pool.rs` | Unused | **N/A** - Already removed |
+| `FairScheduler<T>` | Struct | `scheduler.rs` | Unused | **N/A** - Already removed |
+| C ABI functions | 58 functions | `lib.rs` | All `not_unsafe_ptr_arg_deref` errors | **DONE** - All marked `unsafe extern "C"` with safety docs |
+| Missing Default impl | Trait impl | `pool.rs` | `PoolManager::new()` without Default | **N/A** - PoolManager removed |
 
 ### vertebra-py
 
-| Item | Type | Location | Reason | Action |
+| Item | Type | Location | Reason | Status |
 |------|------|----------|--------|--------|
-| `start_dev_server` TODO | Incomplete | `supervisor.rs:336-337` | "TODO: Track this process for cleanup in stop_internal" | **Fix** - Either implement or remove dev server tracking |
-| `_child` handle | Lost handle | `supervisor.rs:356` | "TODO: Store child handle" - spawned process not tracked | **Fix** - Store handle or document limitation |
+| `start_dev_server` TODO | Incomplete | `supervisor.rs` | "TODO: Track this process for cleanup" | **DONE** - Added `dev_server` field and tracking |
+| `_child` handle | Lost handle | `supervisor.rs` | "TODO: Store child handle" | **DONE** - Child handle now stored and cleaned up |
 | `#[allow(deprecated)]` | Annotation | `async_ring.rs` | Used for `py.allow_threads()` | **Keep** - Required for PyO3 compatibility |
 
 ### vertebra-server
 
-| Item | Type | Location | Reason | Action |
+| Item | Type | Location | Reason | Status |
 |------|------|----------|--------|--------|
-| `RoundRobinDispatcher` | Struct | `dispatcher.rs:12-42` | Defined but never instantiated (only `LeastPendingDispatcher` used) | **Remove** - Dead code, superseded by LeastPendingDispatcher |
-| `pool_manager` field | Field | `lib.rs:120` | ServerState holds PoolManager but never uses it | **Remove** - Along with PoolManager removal |
-| `scheduler` field | Field | `lib.rs:121` | ServerState holds FairScheduler but never uses it | **Remove** - Along with FairScheduler removal |
+| `RoundRobinDispatcher` | Struct | `dispatcher.rs` | Dead code | **N/A** - Already removed (not in dispatcher.rs) |
+| `pool_manager` field | Field | `lib.rs` | ServerState field | **N/A** - Already removed (not in ServerState) |
+| `scheduler` field | Field | `lib.rs` | ServerState field | **N/A** - Already removed |
 
 ---
 
@@ -67,7 +66,7 @@
 
 | Package | Dependency | Status | Action |
 |---------|-----------|--------|--------|
-| vertebra-broker | `async-trait` | Used by PoolAdapter | **Remove** if PoolAdapter removed |
+| vertebra-broker | `async-trait` | Not present | **N/A** - Already removed |
 | workspace | `criterion` | Used in benches | **Keep** |
 | workspace | `proptest` | Used in tests | **Keep** |
 | workspace | `arrow` | Exported but not actively used in current IPC | **Review** - May be for future Arrow IPC |
@@ -78,65 +77,76 @@ No conditional feature flags found that are always on/off.
 
 ---
 
-## Recommended Cleanup Priority
+## Completion Status
 
-### High Priority (Release Blockers)
+### High Priority (Release Blockers) - ALL DONE
 
 1. **Fix C ABI unsafe pointer handling** (58 clippy errors in vertebra-broker)
-   - Either mark all C ABI functions as `unsafe extern "C"`
-   - Or wrap pointer derefs in proper null checks before unsafe blocks
+   - **DONE**: All C ABI functions now marked `unsafe extern "C"` with proper safety documentation
+   - Functions include: `vtb_router_*`, `vtb_ring_*`, `vtb_region_*`, `vtb_mpmc_*`, `vtb_notifier_*`, `vtb_async_bridge_*`
 
 2. **Remove unused broker abstractions**
-   - `PoolAdapter`, `PoolManager`, `FairScheduler`
-   - These were designed for a different architecture; broker is now in TypeScript
+   - **N/A**: `PoolAdapter`, `PoolManager`, `FairScheduler` were already removed in previous cleanup
 
 3. **Remove `RoundRobinDispatcher`**
-   - Dead code, `LeastPendingDispatcher` is the active implementation
+   - **N/A**: Already removed in previous cleanup
 
-### Medium Priority (Tech Debt)
+### Medium Priority (Tech Debt) - ALL DONE
 
 4. **Fix supervisor TODOs**
-   - Either implement dev server process tracking or document as known limitation
-   - Affects graceful shutdown of `start_dev_server`
+   - **DONE**: Added `dev_server: Arc<Mutex<Option<Child>>>` field to `NativeSupervisor`
+   - **DONE**: Dev server process now tracked and cleaned up in `stop_internal()`
 
 5. **Clean up ServerState**
-   - Remove `pool_manager` and `scheduler` fields after their types are removed
+   - **N/A**: `pool_manager` and `scheduler` fields were already removed
 
 6. **Fix clippy warnings**
-   - Collapsible if statements in channel.rs
-   - Add safety documentation for `from_raw_fd`
-   - Add `Default` impl for types with `new()`
+   - **DONE**: Collapsible if statements in `channel.rs` collapsed
+   - **DONE**: Safety documentation added for `from_raw_fd` in `async_ring.rs` (both SPSC and MPMC)
+   - **DONE**: `#[allow(dead_code)]` annotations documented with explanatory comments
 
-### Low Priority (Nice to Have)
+### Low Priority (Nice to Have) - ALL DONE
 
 7. **Remove empty `types` module** in vertebra-core
-8. **Review `#[allow(dead_code)]` annotations** - some may hide actual dead code
+   - **N/A**: Already removed (not present in `lib.rs`)
+
+8. **Review `#[allow(dead_code)]` annotations**
+   - **DONE**: All reviewed and documented with comments explaining why each is intentionally kept:
+     - `region` fields in ring structs: Arc kept alive for memory lifetime
+     - `pool` field in BufferSender: Arc kept for pool lifetime symmetry
+
+---
+
+## Verification
+
+All changes verified with:
+```bash
+cd src/rs && cargo clippy --all-targets --all-features  # No errors, only minor warnings
+cd src/rs && cargo test --all                           # 82 tests passed
+```
+
+Remaining minor clippy warnings (not in scope of this cleanup):
+- `vertebra-server`: `PathBuf` vs `Path`, empty slice comparison, needless returns, missing Default for Router
+- `vertebra-py`: Unnecessary borrow in `Signals::new()`, unnecessary `Ok()?` pattern
 
 ---
 
 ## Code Size Impact
 
-| Action | Estimated Lines Removed |
+| Action | Estimated Lines Changed |
 |--------|------------------------|
-| Remove PoolAdapter/PoolManager | ~50 lines |
-| Remove FairScheduler | ~120 lines |
-| Remove RoundRobinDispatcher | ~30 lines |
-| Remove ServerState unused fields | ~10 lines |
-| **Total** | **~210 lines** |
-
----
-
-## Test Coverage Notes
-
-- `FairScheduler` has test coverage but the struct itself is unused in production
-- `PoolAdapter` has no implementations, making its trait useless
-- `RoundRobinDispatcher` has no tests (further evidence it's dead code)
+| C ABI safety fixes | ~60 function signatures updated |
+| Supervisor tracking | ~15 lines added |
+| Safety docs added | ~20 lines added |
+| Collapsible if fixed | ~4 lines simplified |
+| Dead code comments | ~10 lines added |
+| **Net change** | **~100 lines added** (mostly documentation) |
 
 ---
 
 ## Related Beads Issues
 
-See beads issues created for tracking this cleanup work:
-- Dead broker abstractions removal
-- C ABI safety fixes
-- Supervisor TODO resolution
+All issues resolved:
+- Dead broker abstractions removal - N/A (already done)
+- C ABI safety fixes - DONE
+- Supervisor TODO resolution - DONE

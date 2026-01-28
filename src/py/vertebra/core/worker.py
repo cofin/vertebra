@@ -426,30 +426,30 @@ class AsgiWorker:
             elif self._control is not None:
                 self._control.clear_notification()
 
-            # Drain control ring if it exists
+            # Drain control ring if it exists using batch API
+            # PERF: try_recv_batch() amortizes Python/Rust boundary crossings
             if self._control is not None:
-                while True:
-                    payload = self._control.try_recv()
-                    if payload is None:
-                        break
-                    # Schedule coroutine for control message handling
+                batch = self._control.try_recv_batch(max_batch_size)
+                for payload, _flags in batch:
                     asyncio.create_task(self._handle_control_payload(payload))
 
             # In supervisor mode, also drain all client request rings
             # (they share the same notification fd)
-            # PERF: Batch collection reduces per-iteration overhead
+            # PERF: Batch receive reduces per-message overhead
             if external_notify_fd is not None:
-                batch: list[tuple[str, ClientState, bytes]] = []
+                tasks: list[tuple[str, ClientState, bytes]] = []
                 for client_id, client in list(self._clients.items()):
-                    while len(batch) < max_batch_size:
-                        payload = client.request.try_recv()
-                        if payload is None:
-                            break
-                        batch.append((client_id, client, payload))
+                    # Use try_recv_batch for efficient batch receive
+                    remaining = max_batch_size - len(tasks)
+                    if remaining <= 0:
+                        break
+                    batch = client.request.try_recv_batch(remaining)
+                    for payload, _flags in batch:
+                        tasks.append((client_id, client, payload))
 
                 # PERF: Create all tasks at once after batch collection
                 # This reduces per-task overhead vs creating in the inner loop
-                for client_id, client, payload in batch:
+                for client_id, client, payload in tasks:
                     asyncio.create_task(self._handle_client_payload(client_id, client, payload))
 
         # Register notification FD with the event loop

@@ -204,3 +204,174 @@ class TestTypedDecoding:
         decoded = codec.decode(encoded, type_hint=CustomStruct)
         assert decoded == data
         assert isinstance(decoded, CustomStruct)
+
+
+class TestPreCreatedDecoders:
+    """Test pre-created decoder optimization for common types."""
+
+    def test_json_decode_with_dict_type_hint(self) -> None:
+        """Test that dict type hint uses pre-created decoder."""
+        codec = JSONCodec()
+        data = {"key": "value", "number": 42}
+        encoded = codec.encode(data)
+        decoded = codec.decode(encoded, type_hint=dict)
+        assert decoded == data
+        assert isinstance(decoded, dict)
+
+    def test_json_decode_with_list_type_hint(self) -> None:
+        """Test that list type hint uses pre-created decoder."""
+        codec = JSONCodec()
+        data = [1, 2, 3, "four", 5.0]
+        encoded = codec.encode(data)
+        decoded = codec.decode(encoded, type_hint=list)
+        assert decoded == data
+        assert isinstance(decoded, list)
+
+    def test_json_decode_with_str_type_hint(self) -> None:
+        """Test that str type hint uses pre-created decoder."""
+        codec = JSONCodec()
+        data = "hello world"
+        encoded = codec.encode(data)
+        decoded = codec.decode(encoded, type_hint=str)
+        assert decoded == data
+        assert isinstance(decoded, str)
+
+    def test_json_decode_with_int_type_hint(self) -> None:
+        """Test that int type hint uses pre-created decoder."""
+        codec = JSONCodec()
+        data = 12345
+        encoded = codec.encode(data)
+        decoded = codec.decode(encoded, type_hint=int)
+        assert decoded == data
+        assert isinstance(decoded, int)
+
+    def test_json_decode_with_float_type_hint(self) -> None:
+        """Test that float type hint uses pre-created decoder."""
+        codec = JSONCodec()
+        data = 3.14159
+        encoded = codec.encode(data)
+        decoded = codec.decode(encoded, type_hint=float)
+        assert decoded == data
+        assert isinstance(decoded, float)
+
+    def test_json_decode_with_bool_type_hint(self) -> None:
+        """Test that bool type hint uses pre-created decoder."""
+        codec = JSONCodec()
+        for data in [True, False]:
+            encoded = codec.encode(data)
+            decoded = codec.decode(encoded, type_hint=bool)
+            assert decoded == data
+            assert isinstance(decoded, bool)
+
+    def test_msgpack_decode_with_dict_type_hint(self) -> None:
+        """Test that dict type hint uses pre-created decoder for msgpack."""
+        codec = MessagePackCodec()
+        data = {"key": "value", "number": 42}
+        encoded = codec.encode(data)
+        decoded = codec.decode(encoded, type_hint=dict)
+        assert decoded == data
+        assert isinstance(decoded, dict)
+
+    def test_msgpack_decode_with_list_type_hint(self) -> None:
+        """Test that list type hint uses pre-created decoder for msgpack."""
+        codec = MessagePackCodec()
+        data = [1, 2, 3, "four", 5.0]
+        encoded = codec.encode(data)
+        decoded = codec.decode(encoded, type_hint=list)
+        assert decoded == data
+        assert isinstance(decoded, list)
+
+    def test_msgpack_decode_with_str_type_hint(self) -> None:
+        """Test that str type hint uses pre-created decoder for msgpack."""
+        codec = MessagePackCodec()
+        data = "hello world"
+        encoded = codec.encode(data)
+        decoded = codec.decode(encoded, type_hint=str)
+        assert decoded == data
+        assert isinstance(decoded, str)
+
+    def test_msgpack_decode_with_int_type_hint(self) -> None:
+        """Test that int type hint uses pre-created decoder for msgpack."""
+        codec = MessagePackCodec()
+        data = 12345
+        encoded = codec.encode(data)
+        decoded = codec.decode(encoded, type_hint=int)
+        assert decoded == data
+        assert isinstance(decoded, int)
+
+    def test_msgpack_decode_with_float_type_hint(self) -> None:
+        """Test that float type hint uses pre-created decoder for msgpack."""
+        codec = MessagePackCodec()
+        data = 3.14159
+        encoded = codec.encode(data)
+        decoded = codec.decode(encoded, type_hint=float)
+        assert decoded == data
+        assert isinstance(decoded, float)
+
+    def test_msgpack_decode_with_bool_type_hint(self) -> None:
+        """Test that bool type hint uses pre-created decoder for msgpack."""
+        codec = MessagePackCodec()
+        for data in [True, False]:
+            encoded = codec.encode(data)
+            decoded = codec.decode(encoded, type_hint=bool)
+            assert decoded == data
+            assert isinstance(decoded, bool)
+
+    def test_msgpack_decode_with_bytes_type_hint(self) -> None:
+        """Test that bytes type hint uses pre-created decoder for msgpack."""
+        codec = MessagePackCodec()
+        data = b"binary data"
+        encoded = codec.encode(data)
+        decoded = codec.decode(encoded, type_hint=bytes)
+        assert decoded == data
+        assert isinstance(decoded, bytes)
+
+    def test_fallback_to_cached_decoder(self) -> None:
+        """Test that unknown types fall back to cached decoder creation."""
+        import dataclasses
+
+        @dataclasses.dataclass
+        class CustomData:
+            name: str
+            value: int
+
+        codec = JSONCodec()
+        # First decode creates and caches the decoder
+        encoded = codec.encode({"name": "test", "value": 123})
+        decoded1 = codec.decode(encoded, type_hint=CustomData)
+        assert decoded1.name == "test"
+        assert decoded1.value == 123
+
+        # Second decode should use cached decoder
+        encoded2 = codec.encode({"name": "test2", "value": 456})
+        decoded2 = codec.decode(encoded2, type_hint=CustomData)
+        assert decoded2.name == "test2"
+        assert decoded2.value == 456
+
+        # Verify decoder was cached
+        assert CustomData in codec._decoder_cache
+
+    def test_msgpack_fallback_to_cached_decoder(self) -> None:
+        """Test that unknown types fall back to cached decoder for msgpack."""
+        import dataclasses
+
+        @dataclasses.dataclass
+        class CustomMsgData:
+            name: str
+            count: int
+
+        codec = MessagePackCodec()
+        # First decode creates and caches the decoder
+        encoded = codec.encode({"name": "test", "count": 99})
+        decoded1 = codec.decode(encoded, type_hint=CustomMsgData)
+        assert decoded1.name == "test"
+        assert decoded1.count == 99
+
+        # Second decode should use cached decoder
+        encoded2 = codec.encode({"name": "test2", "count": 200})
+        decoded2 = codec.decode(encoded2, type_hint=CustomMsgData)
+        assert decoded2.name == "test2"
+        assert decoded2.count == 200
+
+        # Verify decoder was cached
+        assert CustomMsgData in codec._decoder_cache

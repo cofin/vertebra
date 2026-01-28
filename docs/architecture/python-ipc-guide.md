@@ -20,24 +20,42 @@ result = client.send_sync("my.procedure", {"key": "value"}, timeout_ms=5000)
 
 ## Fast Path Receive (Sub-Microsecond Latency)
 
-For latency-critical code, use the hybrid spin-wait receive methods that achieve sub-microsecond latency:
+For latency-critical code, use the hybrid spin-wait receive methods that achieve sub-microsecond latency.
+
+**AsyncShmTransport (Python asyncio):**
+
+```python
+from vertebra._vertebra import AsyncRing
+from vertebra.messaging.transport.async_transport import AsyncShmTransport
+import os
+
+# Configure spin iterations (default: 50 ≈ 5µs)
+spin_iters = int(os.environ.get("VERTEBRA_SPIN_ITERS", "50"))
+
+ring = AsyncRing(4096, 64)
+transport = AsyncShmTransport(ring, spin_iters=spin_iters)
+
+# Hybrid receive: spin for iterations, then fall back to add_reader
+data = await transport.recv()
+```
+
+**Rust SpscRing (via PyO3 bindings):**
 
 ```python
 from vertebra import _vertebra as v
-import os
-
-# Configure spin duration (default: 5µs)
-spin_us = int(os.environ.get("VERTEBRA_SPIN_US", "5"))
 
 # Create a ring with hybrid recv support
 ring = v.SpscRing.create_named("/vb-fast", 256, 64)
 
-# Hybrid receive: spin for spin_us, then block with timeout
+# Hybrid receive: spin for spin_us microseconds, then block with timeout
 # Returns bytes on success, None on timeout
 data = ring.recv_hybrid(spin_us=5, timeout_ms=1000)
 if data is not None:
     process(data)
 ```
+
+Note: Python's `AsyncShmTransport` uses iteration-based spin to avoid `time.perf_counter()` overhead.
+The Rust `recv_hybrid()` method uses time-based spin (`spin_us`) since timer overhead is negligible in Rust.
 
 ### Performance Characteristics
 
@@ -49,17 +67,23 @@ if data is not None:
 
 ### Async Fast Path
 
-For asyncio code, use `AsyncChannel.recv_fast()`:
+For asyncio code, use `AsyncShmTransport`:
 
 ```python
-from vertebra.ipc.channel import AsyncChannel
+from vertebra._vertebra import AsyncRing
+from vertebra.messaging.transport.async_transport import AsyncShmTransport
 
-async def handle_requests(channel: AsyncChannel):
+async def handle_requests():
+    ring = AsyncRing(4096, 64)
+    transport = AsyncShmTransport(ring, spin_iters=50)
+
     while True:
         # Hybrid spin-wait integrated with asyncio
-        data = await channel.recv_fast(spin_us=5, timeout_ms=1000)
+        data = await transport.recv()
         if data:
             await process(data)
+
+    transport.close()
 ```
 
 ## Protocol Headers
