@@ -179,12 +179,176 @@ If changes cause issues:
 2. **Git revert:** Each task should be a separate commit
 3. **Binary switch:** Keep old binary for A/B testing
 
+## Python-Side Performance Analysis (2026-01-28)
+
+### Executive Summary
+
+Deep investigation identified **6 major bottleneck categories** in the Python-side code, accounting for approximately **30-50us** of the ~90us per-request overhead. The Rust IPC layer is fast (17ns ping-pong), but Python asyncio overhead dominates.
+
+### Detailed Bottleneck Breakdown (Per Request)
+
+| Category | Location | Current Cost | Optimized Cost | Savings |
+|----------|----------|--------------|----------------|---------|
+| asyncio.create_task() | worker.py:436-442 | 2-5us | 0.02-0.05us* | 98% |
+| asyncio.Queue creation | worker.py:923 | 5-10us | 0.5-1us* | 90% |
+| Scope dict creation | worker.py:905-921 | 2-3us | 0.5-1us | 67% |
+| Header encoding | worker.py:913 | 3-5us | 0.3-0.5us | 90% |
+| Spin loop timing | async_transport.py:173-178 | 1-7us | 0.5-1us | 75% |
+| Future creation (slow path) | async_transport.py:214 | 1-2us | 0.1-0.2us | 90% |
+| **Total Python overhead** | | **14-32us** | **1.9-3.8us** | **88%** |
+
+*With batch size of 100
+
+### Critical Code Paths
+
+**1. asyncio.create_task() per request (worker.py:436-442)**
+```python
+# Current: Creates task for EVERY message
+for client_id, client in list(self._clients.items()):
+    while True:
+        payload = client.request.try_recv()
+        if payload is None:
+            break
+        asyncio.create_task(self._handle_client_payload(...))  # 2-5us each!
+```
+
+**2. asyncio.Queue per request (worker.py:923)**
+```python
+# Current: Creates Queue object for every HTTP request
+queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)  # 5-10us!
+```
+
+**3. Header encoding (worker.py:913)**
+```python
+# Current: Creates 2N string objects per request (N = number of headers)
+headers = [(k.lower().encode(), v.encode()) for k, v in meta.headers]  # 3-5us!
+```
+
+**4. time.perf_counter() in spin loop (async_transport.py:173-178)**
+```python
+# Current: ~100-300ns per call, called 10-25 times per 5us spin
+deadline = time.perf_counter() + self._spin_duration
+while time.perf_counter() < deadline:  # Each call costs!
+    data = self._ring.try_recv()
+```
+
+### Proposed Solutions
+
+**P0-PY.1: Request Batching**
+```python
+# Proposed: Drain batch, process with single gather()
+batch = []
+for client_id, client in list(self._clients.items()):
+    while len(batch) < MAX_BATCH_SIZE:
+        payload = client.request.try_recv()
+        if payload is None:
+            break
+        batch.append((client_id, client, payload))
+
+if batch:
+    tasks = [self._handle_client_payload(cid, c, p) for cid, c, p in batch]
+    await asyncio.gather(*tasks, return_exceptions=True)
+```
+
+**P0-PY.2: Queue Bypass for Simple Responses**
+```python
+# Proposed: Use response holder list instead of Queue
+response_holder = [None, None]  # [start_frame, body_frame]
+
+async def send(message: dict[str, Any]) -> None:
+    if message["type"] == "http.response.start":
+        response_holder[0] = message
+    elif message["type"] == "http.response.body" and not message.get("more_body"):
+        response_holder[1] = message
+
+await self._app(scope, receive, send)
+if response_holder[0] and response_holder[1]:
+    await writer.send_aggregated(response_holder[0], response_holder[1])
+```
+
+**P0-PY.3: Iteration-based Spin**
+```python
+# Proposed: Avoid perf_counter in tight loop
+SPIN_ITERATIONS = 50  # Calibrated to ~5us on target hardware
+
+for _ in range(SPIN_ITERATIONS):
+    data = self._ring.try_recv()
+    if data is not None:
+        return data
+```
+
+**P1-PY.1: Scope Template Pattern**
+```python
+# Proposed: Pre-create immutable parts
+_SCOPE_TEMPLATE = types.MappingProxyType({
+    "type": "http",
+    "asgi": types.MappingProxyType({"version": ASGI_VERSION, "spec_version": ASGI_HTTP_SPEC_VERSION}),
+})
+
+# Per-request: overlay mutable fields
+scope = {**_SCOPE_TEMPLATE, "method": meta.method, "path": meta.path, ...}
+```
+
+**P1-PY.2: Lazy Header Encoding**
+```python
+# Proposed: Defer encoding until iteration
+class LazyHeaders:
+    __slots__ = ('_raw', '_cached')
+
+    def __init__(self, raw: list[tuple[str, str]]):
+        self._raw = raw
+        self._cached: list[tuple[bytes, bytes]] | None = None
+
+    def __iter__(self):
+        if self._cached is None:
+            self._cached = [(k.lower().encode(), v.encode()) for k, v in self._raw]
+        return iter(self._cached)
+```
+
+### Expert Validation Notes
+
+The Gemini expert analysis confirmed:
+1. `asyncio.gather` creates internal futures - consider TaskGroup (Python 3.11+) or fire-and-forget pattern
+2. PyBytes::new in recv_request copies data - should return memoryview from ring buffer
+3. Scope dict creation can use lazy `__getitem__` to avoid upfront allocation
+4. GIL contention on send_aggregated path needs verification
+5. Batching needs backpressure limits to avoid starving ResponseWriter
+
+### Expected Combined Impact
+
+| Phase | RPS Target | Cumulative Improvement |
+|-------|------------|------------------------|
+| Baseline | 11K | 1x |
+| P0-Rust (done) | 11K* | 1x (server notify issue) |
+| P0-Python | 22K | 2x |
+| P1-Python | 33K | 3x |
+| P2-Python | 43K | 4x |
+| + Multi-worker | 130K+ | 12x |
+
+*Note: P0-Rust optimization impact was limited by vertebra-server unconditional notify issue
+
+### Beads Issues Created
+
+See `bd list --tag=python-perf` for tracking:
+- P0-PY.1: Request Batching in Worker
+- P0-PY.2: Queue Bypass for Single-Message Responses
+- P0-PY.3: Iteration-based Spin
+- P1-PY.1: Scope Template Pattern
+- P1-PY.2: Lazy Header Encoding
+- P1-PY.3: recv_batch Python Bindings
+- P1-PY.4: Pre-create MessagePack Decoders
+- P2-PY.1: ResponseWriter Flush Batching
+- P2-PY.2: Zero-Copy Header View from Rust
+- P2-PY.3: Fast Path Bypass for Native Runners
+
 ## Next Steps
 
-1. ~~Run `/implement performance-100k-rps` to begin implementation~~ ✅ Done
-2. ~~Start with Task 0.1 (add wait_count)~~ ✅ Done
-3. Run benchmarks to validate P0 improvement (expected: 3-5x → 40-60K RPS)
-4. Proceed to P1 implementation (batching + memory ordering)
+1. ~~Run `/implement performance-100k-rps` to begin implementation~~ Done
+2. ~~Start with Task 0.1 (add wait_count)~~ Done
+3. ~~Run benchmarks to validate P0 improvement~~ Done (see findings above)
+4. **FIX VERTEBRA-SERVER NOTIFY** - Critical blocker for Rust P0 gains
+5. Proceed to P0-Python implementation (batching)
+6. Proceed to P1 implementation (scope template, lazy headers)
 
 ## Contact Points
 
