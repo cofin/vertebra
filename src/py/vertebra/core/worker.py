@@ -412,6 +412,10 @@ class AsgiWorker:
         # Use external notifier fd if provided (from ProcessManager), otherwise use ring's internal
         external_notify_fd = self._config.notify_read_fd
 
+        # PERF: Maximum batch size for request processing.
+        # Limits memory usage while enabling efficient batching.
+        max_batch_size = 64
+
         def on_control_readable() -> None:
             """Callback when notification fd has data available."""
             # Clear notification - use external notifier if available
@@ -433,13 +437,20 @@ class AsgiWorker:
 
             # In supervisor mode, also drain all client request rings
             # (they share the same notification fd)
+            # PERF: Batch collection reduces per-iteration overhead
             if external_notify_fd is not None:
+                batch: list[tuple[str, ClientState, bytes]] = []
                 for client_id, client in list(self._clients.items()):
-                    while True:
+                    while len(batch) < max_batch_size:
                         payload = client.request.try_recv()
                         if payload is None:
                             break
-                        asyncio.create_task(self._handle_client_payload(client_id, client, payload))
+                        batch.append((client_id, client, payload))
+
+                # PERF: Create all tasks at once after batch collection
+                # This reduces per-task overhead vs creating in the inner loop
+                for client_id, client, payload in batch:
+                    asyncio.create_task(self._handle_client_payload(client_id, client, payload))
 
         # Register notification FD with the event loop
         # Use external notifier fd from ProcessManager if provided, otherwise ring's internal

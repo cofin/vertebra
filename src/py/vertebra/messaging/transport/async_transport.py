@@ -28,14 +28,15 @@ import asyncio
 import contextlib
 import os
 import sys
-import time
 from collections import deque
 from typing import Protocol
 
-# Default spin duration in microseconds for hybrid wait.
-# Read from VERTEBRA_SPIN_US environment variable (default: 5).
-# This is the time to spin-wait before falling back to add_reader().
-DEFAULT_SPIN_US: int = int(os.environ.get("VERTEBRA_SPIN_US", "5"))
+# Default spin iterations for hybrid wait.
+# PERF: Using iteration count instead of time.perf_counter() saves ~1-7µs per recv().
+# perf_counter() costs ~100-300ns per call; with 10-25 iterations that adds up.
+# Read from VERTEBRA_SPIN_ITERS environment variable (default: 50).
+# ~50 iterations ≈ 5µs on typical hardware (calibrate for your target).
+DEFAULT_SPIN_ITERS: int = int(os.environ.get("VERTEBRA_SPIN_ITERS", "50"))
 
 
 class _AsyncRingProtocol(Protocol):
@@ -95,25 +96,26 @@ class AsyncShmTransport:
         _fd: File descriptor for event loop integration
         _waiters: Queue of pending recv() futures
         _registered: Whether the FD is registered with the event loop
-        _spin_duration: Microseconds to spin before falling back to add_reader
+        _spin_iters: Number of spin iterations before falling back to add_reader
     """
 
-    __slots__ = ("_fd", "_loop", "_registered", "_ring", "_spin_duration", "_waiters")
+    __slots__ = ("_fd", "_loop", "_registered", "_ring", "_spin_iters", "_waiters")
 
-    def __init__(self, ring: _AsyncRingProtocol, *, spin_duration_us: int | None = None) -> None:
+    def __init__(self, ring: _AsyncRingProtocol, *, spin_iters: int | None = None) -> None:
         """Initialize the transport with an AsyncRing.
 
         Args:
             ring: AsyncRing instance from vertebra._vertebra
-            spin_duration_us: Microseconds to spin before add_reader fallback.
-                             Defaults to VERTEBRA_SPIN_US env var or 5µs.
+            spin_iters: Number of spin iterations before add_reader fallback.
+                       Defaults to VERTEBRA_SPIN_ITERS env var or 50.
+                       Set to 0 to disable spin-wait entirely.
         """
         self._ring = ring
         self._fd = ring.notifier_fd()
         self._waiters: deque[asyncio.Future[bytes]] = deque()
         self._registered = False
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._spin_duration = (spin_duration_us if spin_duration_us is not None else DEFAULT_SPIN_US) / 1_000_000
+        self._spin_iters = spin_iters if spin_iters is not None else DEFAULT_SPIN_ITERS
 
     @property
     def fd(self) -> int:
@@ -155,8 +157,11 @@ class AsyncShmTransport:
 
         This method implements hybrid spin-wait for sub-20µs latency:
         1. Fast path: try_recv() immediate check
-        2. Spin phase: busy-wait for spin_duration checking try_recv()
+        2. Spin phase: iteration-based busy-wait checking try_recv()
         3. Slow path: add_reader() and await notification
+
+        PERF: Uses iteration count instead of time.perf_counter() to avoid
+        ~100-300ns syscall overhead per timer check.
 
         Returns:
             Received bytes
@@ -169,13 +174,12 @@ class AsyncShmTransport:
         if data is not None:
             return data
 
-        # 2. Spin phase: busy-wait for spin_duration to capture immediate responses
-        if self._spin_duration > 0:
-            deadline = time.perf_counter() + self._spin_duration
-            while time.perf_counter() < deadline:
-                data = self._ring.try_recv()
-                if data is not None:
-                    return data
+        # 2. Spin phase: iteration-based busy-wait to capture immediate responses
+        # PERF: Avoids time.perf_counter() overhead (~100-300ns per call)
+        for _ in range(self._spin_iters):
+            data = self._ring.try_recv()
+            if data is not None:
+                return data
 
         # 3. Slow path: wait for notification via add_reader
         return await self._recv_slow_path()
@@ -185,8 +189,10 @@ class AsyncShmTransport:
 
         This method implements hybrid spin-wait for sub-20µs latency:
         1. Fast path: try_recv_with_flags() immediate check
-        2. Spin phase: busy-wait for spin_duration
+        2. Spin phase: iteration-based busy-wait
         3. Slow path: add_reader() and await notification
+
+        PERF: Uses iteration count instead of time.perf_counter().
 
         Returns:
             Tuple of (data, flags)
@@ -196,13 +202,11 @@ class AsyncShmTransport:
         if result is not None:
             return result
 
-        # 2. Spin phase: busy-wait for spin_duration
-        if self._spin_duration > 0:
-            deadline = time.perf_counter() + self._spin_duration
-            while time.perf_counter() < deadline:
-                result = self._ring.try_recv_with_flags()
-                if result is not None:
-                    return result
+        # 2. Spin phase: iteration-based busy-wait
+        for _ in range(self._spin_iters):
+            result = self._ring.try_recv_with_flags()
+            if result is not None:
+                return result
 
         # 3. Slow path - wait then get with flags
         data = await self._recv_slow_path()
@@ -278,7 +282,7 @@ class UnsupportedPlatformError(RuntimeError):
     """Raised when the platform doesn't support notification-based IPC."""
 
 
-def create_transport(ring: _AsyncRingProtocol, *, spin_duration_us: int | None = None) -> AsyncShmTransport:
+def create_transport(ring: _AsyncRingProtocol, *, spin_iters: int | None = None) -> AsyncShmTransport:
     """Create the notification-based transport for shared-memory IPC.
 
     Uses AsyncShmTransport which integrates via add_reader() for
@@ -286,8 +290,8 @@ def create_transport(ring: _AsyncRingProtocol, *, spin_duration_us: int | None =
 
     Args:
         ring: AsyncRing instance from vertebra._vertebra
-        spin_duration_us: Microseconds to spin before add_reader fallback.
-                         Defaults to VERTEBRA_SPIN_US env var or 5µs.
+        spin_iters: Number of spin iterations before add_reader fallback.
+                   Defaults to VERTEBRA_SPIN_ITERS env var or 50.
 
     Returns:
         AsyncShmTransport instance
@@ -300,7 +304,7 @@ def create_transport(ring: _AsyncRingProtocol, *, spin_duration_us: int | None =
         loop = asyncio.get_running_loop()
     except RuntimeError:
         # No running loop - caller will need to set up later
-        return AsyncShmTransport(ring, spin_duration_us=spin_duration_us)
+        return AsyncShmTransport(ring, spin_iters=spin_iters)
 
     # Check if the loop supports add_reader (selector-based loops do)
     if hasattr(loop, "add_reader"):
@@ -312,10 +316,10 @@ def create_transport(ring: _AsyncRingProtocol, *, spin_duration_us: int | None =
                 "Use SelectorEventLoop or run on Linux/macOS."
             )
             raise UnsupportedPlatformError(msg)
-        return AsyncShmTransport(ring, spin_duration_us=spin_duration_us)
+        return AsyncShmTransport(ring, spin_iters=spin_iters)
 
     msg = "Event loop does not support add_reader(). Notification-based IPC requires a selector-based event loop."
     raise UnsupportedPlatformError(msg)
 
 
-__all__ = ("DEFAULT_SPIN_US", "AsyncShmTransport", "UnsupportedPlatformError", "create_transport")
+__all__ = ("DEFAULT_SPIN_ITERS", "AsyncShmTransport", "UnsupportedPlatformError", "create_transport")

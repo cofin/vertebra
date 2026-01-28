@@ -51,7 +51,8 @@ def transport(async_ring: "AsyncRing") -> "AsyncShmTransport":
     """Create an AsyncShmTransport."""
     from vertebra.messaging.transport.async_transport import AsyncShmTransport
 
-    transport = AsyncShmTransport(async_ring, spin_duration_us=5)
+    # Use 50 iterations ≈ 5µs spin duration
+    transport = AsyncShmTransport(async_ring, spin_iters=50)
     yield transport
     transport.close()
 
@@ -135,7 +136,7 @@ class TestUvloopCompatibility:
         from vertebra.messaging.transport.async_transport import AsyncShmTransport
 
         rings = [AsyncRing(4096, 64) for _ in range(4)]
-        transports = [AsyncShmTransport(r, spin_duration_us=5) for r in rings]
+        transports = [AsyncShmTransport(r, spin_iters=50) for r in rings]
 
         try:
 
