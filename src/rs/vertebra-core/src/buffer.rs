@@ -68,6 +68,12 @@ pub struct ShmHeader {
     pub write_head: CacheLine<AtomicU64>,
     pub wait_read: CacheLine<AtomicU32>,
     pub wait_write: CacheLine<AtomicU32>,
+    /// Number of threads blocked waiting to send (ring full).
+    /// Used for conditional wake optimization - only wake if waiters > 0.
+    pub send_waiters: CacheLine<AtomicU32>,
+    /// Number of threads blocked waiting to recv (ring empty).
+    /// Used for conditional wake optimization - only wake if waiters > 0.
+    pub recv_waiters: CacheLine<AtomicU32>,
 }
 
 /// Channel configuration for the shared-memory ring.

@@ -6,7 +6,9 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple, PyType};
 
-use vertebra_core::async_ring::{AsyncChannelPair, AsyncMpmcRing, AsyncRing, AsyncRingError, PooledAsyncRing};
+use vertebra_core::async_ring::{
+    AsyncChannelPair, AsyncMpmcRing, AsyncRing, AsyncRingError, PooledAsyncRing,
+};
 
 /// Python wrapper for AsyncRing with notification-based async support.
 ///
@@ -342,7 +344,8 @@ impl PyAsyncMpmcRing {
     ) -> PyResult<Self> {
         #[cfg(unix)]
         {
-            let inner = unsafe { AsyncMpmcRing::from_raw_fd(fd, slot_size, slots).map_err(map_err)? };
+            let inner =
+                unsafe { AsyncMpmcRing::from_raw_fd(fd, slot_size, slots).map_err(map_err)? };
             Ok(Self { inner })
         }
         #[cfg(not(unix))]

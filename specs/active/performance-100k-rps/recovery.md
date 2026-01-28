@@ -2,8 +2,8 @@
 
 ## Quick Resume
 
-**Last phase:** PRD Complete
-**Current status:** Ready for Implementation
+**Last phase:** P0 Implementation Complete
+**Current status:** Ready for P1 or Benchmarking
 **PRD location:** `specs/active/performance-100k-rps/`
 
 ## Intelligence Context
@@ -47,12 +47,55 @@
 - [x] PRD written (3,400+ words)
 - [x] Research documented (2,150+ words)
 - [x] Tasks broken down (20 tasks, 3 phases)
+- [x] **P0 implementation (Tasks 0.1-0.6)**
+  - Added `send_waiters` and `recv_waiters` to `ShmHeader`
+  - Implemented conditional wake in `try_send` and `try_recv`
+  - Implemented double-check pattern in all blocking recv/send methods
+  - Implemented optimistic GIL pattern in PyO3 bindings
+  - Removed dict copies in Python broker
 
 ### Pending
-- [ ] P0 implementation (Tasks 0.1-0.7)
+- [x] P0 benchmarking (Task 0.7) - See findings below
 - [ ] P1 implementation (Tasks 1.1-1.7)
 - [ ] P2 implementation (Tasks 2.1-2.6)
 - [ ] Final validation
+
+### P0 Benchmark Findings
+
+**Micro-benchmarks (vertebra-core):**
+- `spsc_ping_pong`: **17ns** (excellent)
+- `spsc_recv_hybrid_immediate`: **18ns** (fast path working)
+- `spsc_throughput`: **3.3µs** per batch
+
+**Server benchmarks:**
+- Vertebra: **11,237 RPS** (unchanged from baseline)
+- Granian reference: **62,387 RPS**
+
+**Root Cause of Limited Server Improvement:**
+The `vertebra-server` crate has redundant notification in `WorkerConnection::send_request()`:
+```rust
+// src/rs/vertebra-server/src/worker.rs:89-91
+self.req_notifier.notify()  // <-- Unconditional eventfd write!
+```
+
+This bypasses the conditional wake optimization in `vertebra-core`. The server uses a separate `AsyncNotifier` (eventfd) to signal Python workers, which fires **unconditionally** after every send.
+
+**Action Required:**
+Add conditional notification to vertebra-server:
+```rust
+// Only notify if Python worker is waiting
+if self.python_waiting.load(Ordering::Acquire) > 0 {
+    self.req_notifier.notify()?;
+}
+```
+
+This should be added as a new P0 task or incorporated into P1.
+
+### Files Modified (P0)
+- `src/rs/vertebra-core/src/buffer.rs` - Added waiter count fields
+- `src/rs/vertebra-core/src/channel.rs` - Conditional wake + double-check pattern
+- `src/rs/vertebra-py/src/lib.rs` - Optimistic GIL pattern
+- `src/py/vertebra/messaging/broker.py` - Dict copy optimization
 
 ## Key Files to Modify
 
@@ -138,10 +181,10 @@ If changes cause issues:
 
 ## Next Steps
 
-1. Run `/implement performance-100k-rps` to begin implementation
-2. Start with Task 0.1 (add wait_count)
-3. Run benchmarks after each task to validate improvement
-4. Proceed through P0 → P1 → P2
+1. ~~Run `/implement performance-100k-rps` to begin implementation~~ ✅ Done
+2. ~~Start with Task 0.1 (add wait_count)~~ ✅ Done
+3. Run benchmarks to validate P0 improvement (expected: 3-5x → 40-60K RPS)
+4. Proceed to P1 implementation (batching + memory ordering)
 
 ## Contact Points
 

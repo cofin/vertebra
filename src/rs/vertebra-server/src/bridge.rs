@@ -27,14 +27,22 @@ struct AsgiRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AsgiResponse {
-    id: String,
+    /// Request ID for correlation (protocol field, not used in response building).
+    #[serde(rename = "id")]
+    _id: String,
     status: u16,
     headers: Vec<(String, String)>,
     #[serde(with = "serde_bytes", default)]
     body: Vec<u8>,
-    path: Option<String>,
-    offset: Option<u64>,
-    count: Option<u64>,
+    /// File serving path (protocol field, not used in current implementation).
+    #[serde(rename = "path")]
+    _path: Option<String>,
+    /// File serving offset (protocol field, not used in current implementation).
+    #[serde(rename = "offset")]
+    _offset: Option<u64>,
+    /// File serving count (protocol field, not used in current implementation).
+    #[serde(rename = "count")]
+    _count: Option<u64>,
 }
 
 /// Request timeout in seconds
@@ -75,12 +83,7 @@ pub async fn dispatch(
         headers: parts
             .headers
             .iter()
-            .map(|(k, v)| {
-                (
-                    k.as_str().to_string(),
-                    v.to_str().unwrap_or("").to_string(),
-                )
-            })
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
             .collect(),
         body: body_bytes.to_vec(),
         scheme: "http".to_string(),
@@ -139,19 +142,15 @@ pub async fn dispatch(
             // Timeout - cleanup
             worker.pending.remove(&request_id);
             worker.decrement_pending();
-            return Err(format!(
-                "Timeout waiting for response ({}s)",
-                REQUEST_TIMEOUT_SECS
-            )
-            .into());
+            return Err(format!("Timeout waiting for response ({}s)", REQUEST_TIMEOUT_SECS).into());
         }
     };
 
     // Parse response
     if response_data.len() < ResponseHeader::SIZE {
-        return Ok(Response::builder()
-            .status(500)
-            .body(Full::new(Bytes::from("Invalid response length from worker")))?);
+        return Ok(Response::builder().status(500).body(Full::new(Bytes::from(
+            "Invalid response length from worker",
+        )))?);
     }
 
     let payload = &response_data[ResponseHeader::SIZE..];

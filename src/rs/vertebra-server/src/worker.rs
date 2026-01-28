@@ -7,7 +7,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 use vertebra_core::buffer::{ChannelMode, RingLayout};
-use vertebra_core::channel::{ChannelError, SpscReceiver, SpscRing, MpmcRing};
+use vertebra_core::channel::{ChannelError, MpmcRing, SpscReceiver, SpscRing};
 use vertebra_core::shm::ShmRegion;
 use vertebra_core::AsyncNotifier;
 
@@ -68,13 +68,21 @@ impl WorkerConnection {
     /// The critical section is minimal - just the memcpy into the ring buffer.
     pub async fn send_request(&self, data: &[u8], flags: u32) -> Result<(), ChannelError> {
         let start = std::time::Instant::now();
+
+        // PERF: Check if ring was empty before sending. If it had data,
+        // Python is already awake processing - no need to notify.
+        let was_empty = !self.req_ring.has_data();
+
         loop {
             match self.req_ring.try_send(data, flags) {
                 Ok(()) => break,
                 Err(ChannelError::Full) => {
                     // Ring full - yield to executor to let other tasks run
                     if start.elapsed() > std::time::Duration::from_secs(5) {
-                        eprintln!("WARN: send_request timed out waiting for ring space (worker {})", self.pid);
+                        eprintln!(
+                            "WARN: send_request timed out waiting for ring space (worker {})",
+                            self.pid
+                        );
                         return Err(ChannelError::Full);
                     }
                     tokio::time::sleep(std::time::Duration::from_micros(10)).await;
@@ -82,10 +90,14 @@ impl WorkerConnection {
                 Err(e) => return Err(e),
             }
         }
-        // Manually notify the Python worker via eventfd
-        self.req_notifier
-            .notify()
-            .map_err(|e| ChannelError::Sync(vertebra_core::sync::SyncError::Syscall(e)))?;
+
+        // PERF: Conditional notification - only notify if ring was empty.
+        // This eliminates ~1µs syscall overhead when worker is actively processing.
+        if was_empty {
+            self.req_notifier
+                .notify()
+                .map_err(|e| ChannelError::Sync(vertebra_core::sync::SyncError::Syscall(e)))?;
+        }
         Ok(())
     }
 }
@@ -131,7 +143,8 @@ impl WorkerManager {
             // Server side: Req Sender (MPMC), Resp Receiver (SPSC)
             // Worker side: Req Receiver (MPMC), Resp Sender (SPSC)
             let req_ring = unsafe { MpmcRing::initialize(req_region.clone(), req_layout, 0, 0) }?;
-            let resp_ring = unsafe { SpscRing::initialize(resp_region.clone(), resp_layout, 0, 0) }?;
+            let resp_ring =
+                unsafe { SpscRing::initialize(resp_region.clone(), resp_layout, 0, 0) }?;
 
             // MpmcRing is shared (Arc), SpscRing is split
             let (_resp_tx, resp_rx) = resp_ring.split();

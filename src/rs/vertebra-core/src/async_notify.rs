@@ -171,10 +171,7 @@ impl AsyncNotifier {
     /// Wait for the notifier with a timeout.
     ///
     /// Returns `Ok(true)` if signaled, `Ok(false)` on timeout.
-    pub async fn wait_readable_timeout(
-        &self,
-        timeout: std::time::Duration,
-    ) -> io::Result<bool> {
+    pub async fn wait_readable_timeout(&self, timeout: std::time::Duration) -> io::Result<bool> {
         match tokio::time::timeout(timeout, self.wait_readable()).await {
             Ok(Ok(())) => Ok(true),
             Ok(Err(e)) => Err(e),

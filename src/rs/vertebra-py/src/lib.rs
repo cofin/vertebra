@@ -586,7 +586,17 @@ impl PyChannel {
         self.send_ring.payload_capacity()
     }
 
+    /// Send request with optimistic GIL pattern.
+    /// Tries non-blocking first (fast path, no GIL toggle), falls back to blocking.
     fn send_request(&self, data: &[u8]) -> PyResult<()> {
+        // PERF: Optimistic GIL - try non-blocking first to avoid GIL toggle overhead.
+        // If ring has space, this completes in <1µs without releasing GIL.
+        match self.send_ring.try_send(data, 0) {
+            Ok(()) => return Ok(()),
+            Err(ChannelError::Full) => {} // Fall through to slow path
+            Err(err) => return Err(map_err(err)),
+        }
+        // Slow path: release GIL for potentially blocking send
         Python::attach(|py| py.detach(|| self.send_ring.send(data, 0).map_err(map_err)))
     }
 
@@ -599,6 +609,12 @@ impl PyChannel {
     }
 
     fn send_request_timeout(&self, data: &[u8], timeout_ms: u64) -> PyResult<bool> {
+        // PERF: Optimistic GIL - try non-blocking first
+        match self.send_ring.try_send(data, 0) {
+            Ok(()) => return Ok(true),
+            Err(ChannelError::Full) => {} // Fall through to slow path
+            Err(err) => return Err(map_err(err)),
+        }
         Python::attach(|py| {
             py.detach(|| {
                 self.send_ring
@@ -608,8 +624,18 @@ impl PyChannel {
         })
     }
 
+    /// Receive request with optimistic GIL pattern.
+    /// Tries non-blocking first (fast path, no GIL toggle), falls back to blocking.
     fn recv_request<'py>(&self, py: Python<'py>, max_len: usize) -> PyResult<Bound<'py, PyBytes>> {
         let mut buffer = vec![0u8; max_len];
+        // PERF: Optimistic GIL - try non-blocking first to avoid GIL toggle overhead.
+        // If data is available, this completes in <1µs without releasing GIL.
+        match self.recv_ring.try_recv(&mut buffer) {
+            Ok(len) => return Ok(PyBytes::new(py, &buffer[..len])),
+            Err(ChannelError::Empty) => {} // Fall through to slow path
+            Err(err) => return Err(map_err(err)),
+        }
+        // Slow path: release GIL for potentially blocking recv
         let len = py.detach(|| self.recv_ring.recv(&mut buffer).map_err(map_err))?;
         Ok(PyBytes::new(py, &buffer[..len]))
     }
@@ -634,6 +660,12 @@ impl PyChannel {
         timeout_ms: u64,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         let mut buffer = vec![0u8; max_len];
+        // PERF: Optimistic GIL - try non-blocking first
+        match self.recv_ring.try_recv(&mut buffer) {
+            Ok(len) => return Ok(Some(PyBytes::new(py, &buffer[..len]))),
+            Err(ChannelError::Empty) => {} // Fall through to slow path
+            Err(err) => return Err(map_err(err)),
+        }
         let result = py.detach(|| {
             self.recv_ring
                 .recv_timeout(&mut buffer, std::time::Duration::from_millis(timeout_ms))
@@ -642,7 +674,14 @@ impl PyChannel {
         Ok(result.map(|len| PyBytes::new(py, &buffer[..len])))
     }
 
+    /// Send response with optimistic GIL pattern.
     fn send_response(&self, data: &[u8]) -> PyResult<()> {
+        // PERF: Optimistic GIL - try non-blocking first
+        match self.send_ring.try_send(data, 0) {
+            Ok(()) => return Ok(()),
+            Err(ChannelError::Full) => {} // Fall through to slow path
+            Err(err) => return Err(map_err(err)),
+        }
         Python::attach(|py| py.detach(|| self.send_ring.send(data, 0).map_err(map_err)))
     }
 
@@ -655,6 +694,12 @@ impl PyChannel {
     }
 
     fn send_response_timeout(&self, data: &[u8], timeout_ms: u64) -> PyResult<bool> {
+        // PERF: Optimistic GIL - try non-blocking first
+        match self.send_ring.try_send(data, 0) {
+            Ok(()) => return Ok(true),
+            Err(ChannelError::Full) => {} // Fall through to slow path
+            Err(err) => return Err(map_err(err)),
+        }
         Python::attach(|py| {
             py.detach(|| {
                 self.send_ring
@@ -664,8 +709,15 @@ impl PyChannel {
         })
     }
 
+    /// Receive response with optimistic GIL pattern.
     fn recv_response<'py>(&self, py: Python<'py>, max_len: usize) -> PyResult<Bound<'py, PyBytes>> {
         let mut buffer = vec![0u8; max_len];
+        // PERF: Optimistic GIL - try non-blocking first
+        match self.recv_ring.try_recv(&mut buffer) {
+            Ok(len) => return Ok(PyBytes::new(py, &buffer[..len])),
+            Err(ChannelError::Empty) => {} // Fall through to slow path
+            Err(err) => return Err(map_err(err)),
+        }
         let len = py.detach(|| self.recv_ring.recv(&mut buffer).map_err(map_err))?;
         Ok(PyBytes::new(py, &buffer[..len]))
     }
@@ -690,6 +742,12 @@ impl PyChannel {
         timeout_ms: u64,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         let mut buffer = vec![0u8; max_len];
+        // PERF: Optimistic GIL - try non-blocking first
+        match self.recv_ring.try_recv(&mut buffer) {
+            Ok(len) => return Ok(Some(PyBytes::new(py, &buffer[..len]))),
+            Err(ChannelError::Empty) => {} // Fall through to slow path
+            Err(err) => return Err(map_err(err)),
+        }
         let result = py.detach(|| {
             self.recv_ring
                 .recv_timeout(&mut buffer, std::time::Duration::from_millis(timeout_ms))

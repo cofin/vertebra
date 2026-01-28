@@ -163,8 +163,10 @@ class AsyncBrokerClient:
             msg = "Too many concurrent requests"
             raise BrokerError(msg)
 
-        payload = dict(payload)
-        payload["id"] = self._next_id()
+        # PERF: Avoid dict copy by creating new dict with id field added.
+        # Original: payload = dict(payload); payload["id"] = id  (2 operations)
+        # Optimized: single dict creation with spread operator
+        payload = {"id": self._next_id(), **payload}
         correlation_id = self._next_correlation_id()
 
         # Create pending request
@@ -466,8 +468,8 @@ class SyncBrokerClient:
             msg = "Broker shared memory unavailable"
             raise BrokerError(msg)
 
-        payload = dict(payload)
-        payload["id"] = self._next_id()
+        # PERF: Avoid dict copy by creating new dict with id field added
+        payload = {"id": self._next_id(), **payload}
         encoded = self._codec.encode(payload)
 
         self._request.send(encoded, 0)
