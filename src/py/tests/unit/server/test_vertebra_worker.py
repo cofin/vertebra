@@ -155,3 +155,106 @@ def test_import_app_file_not_found(tmp_path: Path) -> None:
     missing_file = tmp_path / "nonexistent.py"
     with pytest.raises((FileNotFoundError, ModuleNotFoundError)):
         _import_app(f"{missing_file}:app")
+
+
+# --- Tests for ResponseHolder (Queue bypass optimization) ---
+
+
+@pytest.mark.unit
+@pytest.mark.anyio
+async def test_response_holder_single_shot() -> None:
+    """Test ResponseHolder handles typical single-shot HTTP responses."""
+    from vertebra.core.worker import ResponseHolder
+
+    holder = ResponseHolder()
+
+    # Simulate ASGI app sending http.response.start + http.response.body
+    holder.put_nowait({"type": "http.response.start", "status": 200})
+    holder.put_nowait({"type": "http.response.body", "body": b"OK", "more_body": False})
+
+    # Get messages
+    msg1 = await holder.get()
+    assert msg1["type"] == "http.response.start"
+    assert msg1["status"] == 200
+
+    msg2 = await holder.get()
+    assert msg2["type"] == "http.response.body"
+    assert msg2["body"] == b"OK"
+    assert not msg2["more_body"]
+
+    # Holder should be empty and done
+    assert holder.empty()
+    assert holder.is_done
+
+
+@pytest.mark.unit
+@pytest.mark.anyio
+async def test_response_holder_streaming() -> None:
+    """Test ResponseHolder handles streaming responses with more_body=True."""
+    from vertebra.core.worker import ResponseHolder
+
+    holder = ResponseHolder()
+
+    # Simulate streaming response
+    holder.put_nowait({"type": "http.response.start", "status": 200})
+    holder.put_nowait({"type": "http.response.body", "body": b"chunk1", "more_body": True})
+    holder.put_nowait({"type": "http.response.body", "body": b"chunk2", "more_body": True})
+    holder.put_nowait({"type": "http.response.body", "body": b"", "more_body": False})
+
+    # Should detect streaming
+    msg1 = await holder.get()
+    assert msg1["type"] == "http.response.start"
+
+    msg2 = await holder.get()
+    assert msg2["body"] == b"chunk1"
+    assert msg2["more_body"]
+
+    msg3 = await holder.get()
+    assert msg3["body"] == b"chunk2"
+    assert msg3["more_body"]
+
+    msg4 = await holder.get()
+    assert not msg4["more_body"]
+
+    assert holder.empty()
+    assert holder.is_done
+
+
+@pytest.mark.unit
+@pytest.mark.anyio
+async def test_response_holder_empty_check() -> None:
+    """Test ResponseHolder.empty() returns correct state."""
+    from vertebra.core.worker import ResponseHolder
+
+    holder = ResponseHolder()
+    assert holder.empty()
+
+    holder.put_nowait({"type": "http.response.start"})
+    assert not holder.empty()
+
+    await holder.get()
+    assert holder.empty()
+
+
+@pytest.mark.unit
+@pytest.mark.anyio
+async def test_response_holder_async_wait() -> None:
+    """Test ResponseHolder.get() properly waits for messages."""
+    import asyncio
+
+    from vertebra.core.worker import ResponseHolder
+
+    holder = ResponseHolder()
+
+    async def delayed_put() -> None:
+        await asyncio.sleep(0.01)  # Small delay
+        holder.put_nowait({"type": "http.response.start", "status": 200})
+
+    # Start delayed put
+    task = asyncio.create_task(delayed_put())
+
+    # This should wait until message arrives
+    msg = await holder.get()
+    assert msg["status"] == 200
+
+    await task
