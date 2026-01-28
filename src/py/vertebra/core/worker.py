@@ -324,6 +324,23 @@ PING_SCOPE_TYPE = "vertebra.ping"
 ASGI_VERSION = "3.0"
 ASGI_HTTP_SPEC_VERSION = "2.5"
 
+# Pre-created ASGI scope templates with constant keys.
+# PERF: Avoids creating 15-20 dict keys per request; only 8-10 mutable keys created.
+# Each template uses frozen dict to share across all requests.
+_ASGI_DICT = {"version": ASGI_VERSION, "spec_version": ASGI_HTTP_SPEC_VERSION}
+_HTTP_SCOPE_TEMPLATE: dict[str, Any] = {
+    "type": "http",
+    "asgi": _ASGI_DICT,
+}
+_WEBSOCKET_SCOPE_TEMPLATE: dict[str, Any] = {
+    "type": "websocket",
+    "asgi": _ASGI_DICT,
+}
+_LIFESPAN_SCOPE_TEMPLATE: dict[str, Any] = {
+    "type": "lifespan",
+    "asgi": {"version": ASGI_VERSION, "spec_version": "2.0"},  # Different spec version
+}
+
 
 class AsgiWorker:
     def __init__(self, app: AsgiApp, config: WorkerConfig | None = None) -> None:
@@ -968,9 +985,9 @@ class AsgiWorker:
             try:
                 raw_path = meta.raw_path if meta.raw_path is not None else meta.path.encode()
                 query_string = meta.query_string if meta.query_string is not None else meta.query.encode()
+                # PERF: Scope template pattern - reuse constant keys from template
                 scope = {
-                    "type": "http",
-                    "asgi": {"version": ASGI_VERSION, "spec_version": ASGI_HTTP_SPEC_VERSION},
+                    **_HTTP_SCOPE_TEMPLATE,
                     "http_version": meta.http_version,
                     "method": meta.method,
                     "path": meta.path,
@@ -1069,9 +1086,9 @@ class AsgiWorker:
             holder = ResponseHolder()
             raw_path = meta.raw_path if meta.raw_path is not None else meta.path.encode()
             query_string = meta.query_string if meta.query_string is not None else meta.query.encode()
+            # PERF: Scope template pattern - reuse constant keys from template
             scope = {
-                "type": "websocket",
-                "asgi": {"version": ASGI_VERSION, "spec_version": ASGI_HTTP_SPEC_VERSION},
+                **_WEBSOCKET_SCOPE_TEMPLATE,
                 "http_version": meta.http_version,
                 "path": meta.path,
                 "raw_path": raw_path,
@@ -1204,9 +1221,9 @@ class AsgiWorker:
             self._lifespan_task = None
 
     async def _run_lifespan(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        # PERF: Scope template pattern - reuse constant keys from template
         scope = {
-            "type": "lifespan",
-            "asgi": {"version": ASGI_VERSION, "spec_version": "2.0"},
+            **_LIFESPAN_SCOPE_TEMPLATE,
             "state": self._lifespan_state,
         }
 

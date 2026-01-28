@@ -258,3 +258,51 @@ async def test_response_holder_async_wait() -> None:
     assert msg["status"] == 200
 
     await task
+
+
+# --- Tests for Scope Template Pattern ---
+
+
+@pytest.mark.unit
+def test_scope_templates_exist() -> None:
+    """Test that ASGI scope templates are defined correctly."""
+    from vertebra.core.worker import (
+        _ASGI_DICT,
+        _HTTP_SCOPE_TEMPLATE,
+        _LIFESPAN_SCOPE_TEMPLATE,
+        _WEBSOCKET_SCOPE_TEMPLATE,
+    )
+
+    # HTTP template
+    assert _HTTP_SCOPE_TEMPLATE["type"] == "http"
+    assert _HTTP_SCOPE_TEMPLATE["asgi"] is _ASGI_DICT
+
+    # WebSocket template
+    assert _WEBSOCKET_SCOPE_TEMPLATE["type"] == "websocket"
+    assert _WEBSOCKET_SCOPE_TEMPLATE["asgi"] is _ASGI_DICT
+
+    # Lifespan template
+    assert _LIFESPAN_SCOPE_TEMPLATE["type"] == "lifespan"
+    assert _LIFESPAN_SCOPE_TEMPLATE["asgi"]["spec_version"] == "2.0"
+
+    # ASGI dict shared
+    assert _ASGI_DICT["version"] == "3.0"
+    assert _ASGI_DICT["spec_version"] == "2.5"
+
+
+@pytest.mark.unit
+def test_scope_template_creates_new_dict() -> None:
+    """Test that using ** creates a new dict, not a reference."""
+    from vertebra.core.worker import _HTTP_SCOPE_TEMPLATE
+
+    # Create scope using template
+    scope = {**_HTTP_SCOPE_TEMPLATE, "path": "/test"}
+
+    # Verify it's a new dict
+    assert scope is not _HTTP_SCOPE_TEMPLATE
+    assert "path" in scope
+    assert "path" not in _HTTP_SCOPE_TEMPLATE
+
+    # Verify template keys are present
+    assert scope["type"] == "http"
+    assert scope["asgi"]["version"] == "3.0"
