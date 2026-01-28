@@ -4,7 +4,7 @@
 //! with Python's asyncio event loop via file descriptor notifications.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyTuple, PyType};
+use pyo3::types::{PyBytes, PyList, PyTuple, PyType};
 
 use vertebra_core::async_ring::{
     AsyncChannelPair, AsyncMpmcRing, AsyncRing, AsyncRingError, PooledAsyncRing,
@@ -199,6 +199,28 @@ impl PyAsyncRing {
             Ok(None) => Ok(None),
             Err(e) => Err(map_err(e)),
         }
+    }
+
+    /// Drain up to `max` messages without blocking.
+    ///
+    /// More efficient than calling `try_recv` in a loop because atomic
+    /// operations and wake syscalls are amortized across the batch.
+    ///
+    /// Args:
+    ///     max: Maximum number of messages to receive (default 64)
+    ///
+    /// Returns:
+    ///     List of (bytes, flags) tuples. Empty list if ring is empty.
+    #[pyo3(signature = (max=64))]
+    fn try_recv_batch<'py>(&self, py: Python<'py>, max: usize) -> PyResult<Bound<'py, PyList>> {
+        let batch = self.inner.try_recv_batch(max);
+        let list = PyList::empty(py);
+        for (payload, flags) in batch {
+            let data = PyBytes::new(py, &payload);
+            let tuple = PyTuple::new(py, vec![data.as_any(), flags.into_pyobject(py)?.as_any()])?;
+            list.append(tuple)?;
+        }
+        Ok(list)
     }
 
     /// Receive with hybrid spin-wait for low-latency (releases GIL during wait).

@@ -207,6 +207,23 @@ impl AsyncRing {
         }
     }
 
+    /// Drain up to `max` messages from the ring without blocking.
+    ///
+    /// This is more efficient than calling `try_recv` in a loop because:
+    /// 1. Only one atomic read_head store at the end (amortized)
+    /// 2. Only one conditional wake check at the end
+    ///
+    /// # Arguments
+    ///
+    /// * `max` - Maximum number of messages to receive
+    ///
+    /// # Returns
+    ///
+    /// Vector of `(payload, flags)` tuples. Returns empty Vec if ring is empty.
+    pub fn try_recv_batch(&self, max: usize) -> Vec<(Vec<u8>, u32)> {
+        self.ring.try_recv_batch(max)
+    }
+
     /// Receive with hybrid spin-wait for low-latency.
     ///
     /// Spins for `spin_us` microseconds checking for data, then falls back to

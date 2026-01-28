@@ -743,6 +743,71 @@ impl SpscRing {
         }
     }
 
+    /// Drain up to `max` messages from the ring without blocking.
+    ///
+    /// This is more efficient than calling `try_recv` in a loop because:
+    /// 1. Only one atomic read_head store at the end (amortized)
+    /// 2. Only one conditional wake check at the end
+    ///
+    /// # Arguments
+    ///
+    /// * `max` - Maximum number of messages to receive
+    ///
+    /// # Returns
+    ///
+    /// Vector of `(payload, flags)` tuples. Returns empty Vec if ring is empty.
+    ///
+    /// # Performance
+    ///
+    /// For N messages: O(1) atomic stores instead of O(N).
+    /// Wake syscall amortized across batch.
+    pub fn try_recv_batch(&self, max: usize) -> Vec<(Vec<u8>, u32)> {
+        let mut results = Vec::with_capacity(max.min(self.layout.slots));
+
+        let mut head = self.read_head().load(Ordering::Acquire);
+        let tail = self.write_head().load(Ordering::Acquire);
+
+        // Drain available messages up to max
+        let mut count = 0;
+        while head != tail && count < max {
+            // Read slot data (safe: head < tail means slot is written)
+            let (payload, flags) = unsafe { self.read_slot_to_vec(head) };
+            results.push((payload, flags));
+            head = head.wrapping_add(1) & self.mask;
+            count += 1;
+        }
+
+        if count > 0 {
+            // Single atomic store for all reads
+            self.read_head().store(head, Ordering::Release);
+            self.wait_read_ptr().fetch_add(count as u32, Ordering::Release);
+
+            // PERF: Single conditional wake for entire batch
+            if self.send_waiters().load(Ordering::Acquire) > 0 {
+                // Wake all waiting senders since we freed multiple slots
+                let _ = sync::wake_all(self.wait_read_ptr());
+            }
+        }
+
+        results
+    }
+
+    /// Helper to read a slot into a new Vec without requiring a pre-allocated buffer.
+    ///
+    /// # Safety
+    /// Caller must ensure the slot at `index` contains valid data.
+    unsafe fn read_slot_to_vec(&self, index: u64) -> (Vec<u8>, u32) {
+        let slot = self.slot_ptr(index);
+        let header = &*slot.cast::<SlotHeader>();
+        let len = header.len as usize;
+        let flags = header.flags;
+        let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+
+        let mut payload = vec![0u8; len];
+        ptr::copy_nonoverlapping(payload_ptr, payload.as_mut_ptr(), len);
+        (payload, flags)
+    }
+
     fn read_head(&self) -> &core::sync::atomic::AtomicU64 {
         unsafe { &(*self.header).read_head.0 }
     }
@@ -1767,6 +1832,121 @@ mod tests {
         // Now we can get the next message
         let view2 = ring.try_recv_view().unwrap();
         assert_eq!(view2.as_slice(), b"msg2");
+
+        unsafe {
+            std::alloc::dealloc(ptr, alloc_layout);
+        }
+    }
+
+    #[test]
+    fn spsc_try_recv_batch_empty() {
+        let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
+        let alloc_layout =
+            std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
+                .unwrap();
+        let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        assert!(!ptr.is_null());
+        let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
+
+        // Empty ring returns empty Vec
+        let batch = ring.try_recv_batch(10);
+        assert!(batch.is_empty());
+
+        unsafe {
+            std::alloc::dealloc(ptr, alloc_layout);
+        }
+    }
+
+    #[test]
+    fn spsc_try_recv_batch_partial() {
+        let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
+        let alloc_layout =
+            std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
+                .unwrap();
+        let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        assert!(!ptr.is_null());
+        let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
+
+        // Send 3 messages
+        ring.send(b"msg1", 1).unwrap();
+        ring.send(b"msg2", 2).unwrap();
+        ring.send(b"msg3", 3).unwrap();
+
+        // Request max 2 - should get partial drain
+        let batch = ring.try_recv_batch(2);
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].0, b"msg1");
+        assert_eq!(batch[0].1, 1);
+        assert_eq!(batch[1].0, b"msg2");
+        assert_eq!(batch[1].1, 2);
+
+        // Third message should still be available
+        let batch = ring.try_recv_batch(10);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].0, b"msg3");
+        assert_eq!(batch[0].1, 3);
+
+        unsafe {
+            std::alloc::dealloc(ptr, alloc_layout);
+        }
+    }
+
+    #[test]
+    fn spsc_try_recv_batch_full_drain() {
+        let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
+        let alloc_layout =
+            std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
+                .unwrap();
+        let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        assert!(!ptr.is_null());
+        let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
+
+        // Send 5 messages
+        for i in 0..5 {
+            ring.send(&[i as u8], i as u32).unwrap();
+        }
+
+        // Request more than available - should drain all
+        let batch = ring.try_recv_batch(100);
+        assert_eq!(batch.len(), 5);
+        for (i, (payload, flags)) in batch.iter().enumerate() {
+            assert_eq!(payload, &[i as u8]);
+            assert_eq!(*flags, i as u32);
+        }
+
+        // Ring should now be empty
+        assert!(ring.try_recv_batch(1).is_empty());
+
+        unsafe {
+            std::alloc::dealloc(ptr, alloc_layout);
+        }
+    }
+
+    #[test]
+    fn spsc_try_recv_batch_preserves_order() {
+        let layout = RingLayout::new(256, 16, ChannelMode::Spsc);
+        let alloc_layout =
+            std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
+                .unwrap();
+        let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        assert!(!ptr.is_null());
+        let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
+
+        // Send messages with increasing values
+        for i in 0u8..10 {
+            ring.send(&[i], 0).unwrap();
+        }
+
+        // Batch receive should preserve FIFO order
+        let batch = ring.try_recv_batch(10);
+        assert_eq!(batch.len(), 10);
+        for (i, (payload, _)) in batch.iter().enumerate() {
+            assert_eq!(payload, &[i as u8], "Message {} out of order", i);
+        }
 
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);

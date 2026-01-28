@@ -1,4 +1,44 @@
-from _vertebra import Buffer, BufferChannel, BufferPool, Channel, MpmcRing, ShmRegion, SpscRing
+from _vertebra import (
+    AsyncChannel,
+    AsyncMpmcRing,
+    AsyncRing,
+    Buffer,
+    BufferChannel,
+    BufferPool,
+    Channel,
+    FastChannel,
+    MpmcRing,
+    NativeSupervisor,
+    PooledAsyncRing,
+    RateLimiter,
+    Router,
+    ShmRegion,
+    SlotView,
+    SpscRing,
+    shm_unlink,
+    start_http_server,
+    validate_jwt,
+)
 
 # Re-export the extension symbols under the package namespace.
-__all__ = ("Buffer", "BufferChannel", "BufferPool", "Channel", "MpmcRing", "ShmRegion", "SpscRing")
+__all__ = (
+    "AsyncChannel",
+    "AsyncMpmcRing",
+    "AsyncRing",
+    "Buffer",
+    "BufferChannel",
+    "BufferPool",
+    "Channel",
+    "FastChannel",
+    "MpmcRing",
+    "NativeSupervisor",
+    "PooledAsyncRing",
+    "RateLimiter",
+    "Router",
+    "ShmRegion",
+    "SlotView",
+    "SpscRing",
+    "shm_unlink",
+    "start_http_server",
+    "validate_jwt",
+)
