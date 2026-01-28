@@ -272,8 +272,10 @@ impl SpscRing {
                 capacity: self.payload_capacity(),
             });
         }
-        let head = self.read_head().load(Ordering::Acquire);
-        let tail = self.write_head().load(Ordering::Acquire);
+        // PERF: Relaxed loads for availability check - just testing if full.
+        // The Release store on write_head ensures slot data is visible to receivers.
+        let head = self.read_head().load(Ordering::Relaxed);
+        let tail = self.write_head().load(Ordering::Relaxed);
         let next = tail.wrapping_add(1) & self.mask;
         if next == head {
             return Err(ChannelError::Full);
@@ -281,6 +283,7 @@ impl SpscRing {
         unsafe {
             self.write_slot(tail, payload, flags);
         }
+        // Release ensures all slot writes are visible before advancing tail
         self.write_head().store(next, Ordering::Release);
         self.wait_write_ptr().fetch_add(1, Ordering::Release);
         // PERF: Conditional wake - only syscall if receivers are actually waiting.
@@ -366,11 +369,15 @@ impl SpscRing {
     }
 
     pub fn try_recv(&self, out: &mut [u8]) -> Result<usize, ChannelError> {
-        let head = self.read_head().load(Ordering::Acquire);
-        let tail = self.write_head().load(Ordering::Acquire);
+        // PERF: Relaxed loads for availability check - just testing if empty.
+        let head = self.read_head().load(Ordering::Relaxed);
+        let tail = self.write_head().load(Ordering::Relaxed);
         if head == tail {
             return Err(ChannelError::Empty);
         }
+        // CRITICAL: Acquire fence ensures we see all writes sender made to slot
+        // before we read the payload. This synchronizes with sender's Release store.
+        std::sync::atomic::fence(Ordering::Acquire);
         let len = unsafe { self.read_slot(head, out)? };
         let next = head.wrapping_add(1) & self.mask;
         self.read_head().store(next, Ordering::Release);
@@ -384,11 +391,14 @@ impl SpscRing {
     }
 
     pub fn try_recv_with_flags(&self, out: &mut [u8]) -> Result<(usize, u32), ChannelError> {
-        let head = self.read_head().load(Ordering::Acquire);
-        let tail = self.write_head().load(Ordering::Acquire);
+        // PERF: Relaxed loads for availability check
+        let head = self.read_head().load(Ordering::Relaxed);
+        let tail = self.write_head().load(Ordering::Relaxed);
         if head == tail {
             return Err(ChannelError::Empty);
         }
+        // CRITICAL: Acquire fence before reading slot data
+        std::sync::atomic::fence(Ordering::Acquire);
         let (len, flags) = unsafe { self.read_slot_with_flags(head, out)? };
         let next = head.wrapping_add(1) & self.mask;
         self.read_head().store(next, Ordering::Release);
@@ -764,8 +774,16 @@ impl SpscRing {
     pub fn try_recv_batch(&self, max: usize) -> Vec<(Vec<u8>, u32)> {
         let mut results = Vec::with_capacity(max.min(self.layout.slots));
 
-        let mut head = self.read_head().load(Ordering::Acquire);
-        let tail = self.write_head().load(Ordering::Acquire);
+        // PERF: Relaxed loads for availability check
+        let mut head = self.read_head().load(Ordering::Relaxed);
+        let tail = self.write_head().load(Ordering::Relaxed);
+
+        if head == tail {
+            return results; // Empty - fast return
+        }
+
+        // CRITICAL: Acquire fence before reading any slot data
+        std::sync::atomic::fence(Ordering::Acquire);
 
         // Drain available messages up to max
         let mut count = 0;
