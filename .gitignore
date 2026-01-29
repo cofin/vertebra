@@ -73,3 +73,7 @@ uv.toml
 benchmarks/.venv/
 benchmarks/results/
 .geminiignore
+.agent/beads.db
+.agent/.agent/beads.db
+.agent/.agent/daemon.lock
+.agent/.agent/daemon-error

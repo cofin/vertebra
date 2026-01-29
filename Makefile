@@ -79,7 +79,23 @@ install: destroy clean                              ## Install project dependenc
 		$(MAKE) install-rust; \
 	fi
 	@$(MAKE) rs-build
+	@$(MAKE) beads-install
 	@cd $(CURDIR) && echo "${OK} Installation complete! 🎉"
+
+.PHONY: beads-install
+beads-install:                                      ## Install and configure beads
+	@echo "${INFO} Setting up beads... 📿"
+	@if ! command -v bd >/dev/null 2>&1; then \
+		echo "${INFO} Installing beads-cli..."; \
+		curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash; \
+	fi
+	@if [ ! -f .beads/config.yaml ]; then \
+		echo "${INFO} Initializing beads config..."; \
+		bd init --stealth >/dev/null 2>&1 || true; \
+	fi
+	@bd config set db .agent/beads.db >/dev/null 2>&1
+	@bd config set sync-branch beads-sync >/dev/null 2>&1
+	@echo "${OK} Beads setup complete"
 
 .PHONY: upgrade
 upgrade:                                            ## Upgrade all dependencies to the latest stable versions
