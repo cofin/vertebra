@@ -73,6 +73,18 @@ impl hyper::service::Service<Request<Incoming>> for EmbeddedService {
             
             // Acquire GIL to map request and spawn python task
             let py_future = Python::with_gil(|py| -> Result<_, EmbeddedError> {
+                // Ensure asyncio loop exists on this thread
+                let asyncio = py.import("asyncio")?;
+                // We use generic try/catch pattern via helper? 
+                // Or just check if get_event_loop works? 
+                // get_event_loop might create one or return one.
+                // But get_running_loop is preferred.
+                
+                if asyncio.call_method0("get_running_loop").is_err() {
+                     let loop_obj = asyncio.call_method0("new_event_loop")?;
+                     asyncio.call_method1("set_event_loop", (loop_obj,))?;
+                }
+
                 // Reconstruct request with empty body for mapping
                 let req_head = Request::from_parts(parts, ());
                 let scope = executor.request_to_scope(py, &req_head, "http")?;
