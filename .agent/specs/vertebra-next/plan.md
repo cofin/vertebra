@@ -3,23 +3,23 @@
 ## Phase 1: Foundation (The Litecore Port)
 **Goal:** Establish the IPC/Worker foundation using `litecore` as the reference implementation. This creates the "Slow Path" infrastructure.
 
-- [ ] Task: Scaffold `vertebra-engine` crate
+- [x] Task: Scaffold `vertebra-engine` crate [commit: HEAD]
     - Initialize Rust crate.
     - Add dependencies: `tokio`, `hyper`, `libc`, `thiserror`, `crossbeam-utils`, `pyo3`.
-- [ ] Task: Port `litecore::shm`
+- [x] Task: Port `litecore::shm` [commit: HEAD]
     - Implement `ShmRegion` for Linux (`memfd_create`) and Unix (`shm_open`).
     - Verify memory mapping and sealing logic.
-- [ ] Task: Port `litecore::buffer`
+- [x] Task: Port `litecore::buffer` [commit: HEAD]
     - Define `RingLayout`, `SlotHeader`, `ShmHeader` structs.
     - Ensure alignment matches Python `struct` expectations.
-- [ ] Task: Port `litecore::sync`
+- [x] Task: Port `litecore::sync` [commit: HEAD]
     - Implement Futex-based synchronization (`wait`, `wake`).
     - Ensure cross-platform compatibility (parking_lot fallback if needed).
-- [ ] Task: Port `litecore::channel`
+- [x] Task: Port `litecore::channel` [commit: HEAD]
     - Implement `SpscRing` (Single-Producer Single-Consumer).
     - Implement `MpmcRing` (Multi-Producer Multi-Consumer).
     - Implement `SlotView` for zero-copy access.
-- [ ] Task: Port `litecore::worker`
+- [x] Task: Port `litecore::worker` [commit: HEAD]
     - Implement `WorkerConfig` and `WorkerManager`.
     - Implement process spawning with FD passing (`Command::pre_exec`).
     - Implement health checks and heartbeat monitoring.
@@ -77,3 +77,12 @@
     - Create Rolldown plugin to serve `virtual:vertebra-types`.
     - Connect `TypeBridgeWatcher` updates to Rolldown invalidation.
 - [ ] Task: Flow - User Manual Verification 'Phase 4: Frontend & Type Bridge' (Protocol in workflow.md)
+
+## Phase 5: Cleanup & Migration
+**Goal:** Remove legacy components replaced by the new architecture.
+
+- [ ] Task: Audit and Remove `vertebra-server` (Legacy Supervisor)
+- [ ] Task: Audit and Remove `vertebra-broker` (Legacy Broker)
+- [ ] Task: Remove Legacy Python IPC Code (`vertebra.core.supervisor` / `vertebra.transport`)
+- [ ] Task: Clean up Workspace (`Cargo.toml`, `.gitignore`)
+- [ ] Task: Flow - User Manual Verification 'Phase 5: Cleanup & Migration' (Protocol in workflow.md)

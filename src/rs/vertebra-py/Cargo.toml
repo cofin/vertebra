@@ -12,7 +12,7 @@ name = "_vertebra"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { workspace = true }
+pyo3 = { workspace = true, features = ["extension-module"] }
 vertebra-core = { path = "../vertebra-core" }
 vertebra-server = { path = "../vertebra-server" }
 tokio = { workspace = true }
