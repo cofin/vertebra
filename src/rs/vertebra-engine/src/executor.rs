@@ -1,13 +1,114 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyBytes};
 use hyper::Request;
-use hyper::body::{Incoming, Body};
+use hyper::body::{Incoming, Body, Frame};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot, mpsc};
 use http_body_util::BodyExt; // For collect/frame
 use bytes::Bytes;
+use hyper::{StatusCode, header::{HeaderName, HeaderValue, HeaderMap}};
 
 use crate::embedded::EmbeddedError;
+
+/// Info extracted from http.response.start
+#[derive(Debug)]
+pub struct ResponseInfo {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+}
+
+/// A Python-compatible callable that handles ASGI `send` messages.
+#[pyclass]
+pub struct ResponseSender {
+    // We use Arc<Mutex<Option<...>>> to safely handle the one-time start channel
+    start_tx: Arc<Mutex<Option<oneshot::Sender<ResponseInfo>>>>,
+    // Channel for streaming body chunks
+    body_tx: mpsc::Sender<Result<Frame<Bytes>, hyper::Error>>,
+}
+
+#[pymethods]
+impl ResponseSender {
+    fn __call__<'p>(&self, py: Python<'p>, message: Bound<'p, PyDict>) -> PyResult<Bound<'p, PyAny>> {
+        let start_tx = self.start_tx.clone();
+        let body_tx = self.body_tx.clone();
+        
+        // Extract data immediately while we have the GIL
+        let msg_type: String = message.get_item("type")?.ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Missing type"))?.extract()?;
+        
+        // Prepare data for async block
+        let mut status_code = None;
+        let mut headers_vec = None;
+        let mut body_bytes = None;
+        let mut _more_body = false;
+
+        if msg_type == "http.response.start" {
+            status_code = Some(message.get_item("status")?.ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Missing status"))?.extract::<u16>()?);
+            // Extract headers
+            if let Some(headers) = message.get_item("headers")? {
+                let h_list: Bound<'_, PyList> = headers.extract()?;
+                let mut vec = Vec::new();
+                for item in h_list.iter() {
+                    let tuple: Bound<'_, pyo3::types::PyTuple> = item.extract()?;
+                    let k: Vec<u8> = tuple.get_item(0)?.extract()?;
+                    let v: Vec<u8> = tuple.get_item(1)?.extract()?;
+                    vec.push((k, v));
+                }
+                headers_vec = Some(vec);
+            }
+        } else if msg_type == "http.response.body" {
+            let bytes_obj = message.get_item("body")?.ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Missing body"))?;
+            body_bytes = Some(bytes_obj.extract::<Vec<u8>>()?); // TODO: Avoid copy?
+            if let Some(mb) = message.get_item("more_body")? {
+                _more_body = mb.extract::<bool>()?;
+            }
+        }
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if msg_type == "http.response.start" {
+                let mut guard = start_tx.lock().await;
+                if let Some(tx) = guard.take() {
+                    let mut headers = HeaderMap::new();
+                    if let Some(h_vec) = headers_vec {
+                        for (k, v) in h_vec {
+                            if let (Ok(n), Ok(val)) = (HeaderName::from_bytes(&k), HeaderValue::from_bytes(&v)) {
+                                headers.append(n, val);
+                            }
+                        }
+                    }
+                    
+                    let info = ResponseInfo {
+                        status: StatusCode::from_u16(status_code.unwrap()).unwrap_or(StatusCode::OK),
+                        headers,
+                    };
+                    let _ = tx.send(info); // Ignore error if receiver dropped
+                } else {
+                    // Already sent start?
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("http.response.start already sent"));
+                }
+            } else if msg_type == "http.response.body" {
+                if let Some(bytes) = body_bytes {
+                     let frame = Frame::data(Bytes::from(bytes));
+                     if body_tx.send(Ok(frame)).await.is_err() {
+                         return Err(PyErr::new::<pyo3::exceptions::PyIOError, _>("Response receiver closed"));
+                     }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+impl ResponseSender {
+    pub fn new(
+        start_tx: oneshot::Sender<ResponseInfo>,
+        body_tx: mpsc::Sender<Result<Frame<Bytes>, hyper::Error>>
+    ) -> Self {
+        Self {
+            start_tx: Arc::new(Mutex::new(Some(start_tx))),
+            body_tx,
+        }
+    }
+}
 
 pub struct DirectExecutor;
 
@@ -162,7 +263,8 @@ impl ZeroCopyBody {
 mod tests {
     use super::*;
     use hyper::Request;
-    
+    use hyper::StatusCode;
+
     #[test]
     fn test_scope_mapping() {
         pyo3::prepare_freethreaded_python();
@@ -172,7 +274,7 @@ mod tests {
             .uri("/api/v1/users?limit=10")
             .header("host", "example.com")
             .header("content-type", "application/json")
-            .body(()) // Empty body for testing scope mapping
+            .body(()) // Use empty body for scope mapping test
             .unwrap();
             
         let executor = DirectExecutor::new();
@@ -187,7 +289,8 @@ mod tests {
             assert_eq!(scope.get_item("scheme").unwrap().unwrap().extract::<String>().unwrap(), "http");
             
             // Query string (bytes)
-            let qs: Vec<u8> = scope.get_item("query_string").unwrap().unwrap().extract().unwrap();
+            let binding = scope.get_item("query_string").unwrap().unwrap();
+            let qs: Vec<u8> = binding.extract().unwrap();
             assert_eq!(qs, b"limit=10");
             
             // Headers
@@ -201,5 +304,43 @@ mod tests {
             let ct = headers.iter().find(|(k, _)| k == b"content-type").expect("Content-Type missing");
             assert_eq!(ct.1, b"application/json");
         });
+    }
+
+    #[tokio::test]
+    async fn test_response_sender_integration() {
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+        let (body_tx, mut body_rx) = tokio::sync::mpsc::channel(1);
+        let sender = ResponseSender::new(start_tx, body_tx);
+
+        // Spawn thread to run Python
+        let handle = std::thread::spawn(move || {
+             // Ensure initialized
+             pyo3::prepare_freethreaded_python();
+             Python::with_gil(|py| {
+                 let sender = Py::new(py, sender).unwrap();
+                 let code = c"
+import asyncio
+async def worker(sender):
+    await sender({'type': 'http.response.start', 'status': 201, 'headers': [(b'x-foo', b'bar')]})
+    await sender({'type': 'http.response.body', 'body': b'hello'})
+
+def run(sender):
+    asyncio.run(worker(sender))
+";
+                 let module = PyModule::from_code(py, code, c"test.py", c"test").unwrap();
+                 module.getattr("run").unwrap().call1((sender,)).unwrap();
+             });
+        });
+        
+        // Verify start
+        let info = start_rx.await.unwrap();
+        assert_eq!(info.status, StatusCode::CREATED);
+        assert_eq!(info.headers.get("x-foo").unwrap(), "bar");
+        
+        // Verify body
+        let frame = body_rx.recv().await.unwrap().unwrap();
+        assert_eq!(frame.into_data().unwrap(), Bytes::from("hello"));
+        
+        handle.join().unwrap();
     }
 }
