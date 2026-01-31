@@ -1,9 +1,0 @@
-{
-  "flow_id": "refactor_20260125",
-  "beads_epic": "vertebra-csp",
-  "current_phase": 1,
-  "current_task": 8,
-  "last_commit": "c972930",
-  "started_at": "2026-01-26T12:00:00Z",
-  "notes": "Phase 1 implementation complete. Removed backwards-compatible re-exports, updated all imports. Ready for verification checkpoint."
-}

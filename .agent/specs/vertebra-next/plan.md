@@ -1,72 +1,79 @@
 # Plan: Vertebra Next Implementation
 
-## Phase 1: The Engine Foundation
-**Goal:** Create the standalone `vertebra` binary (Rust) that replaces the current `vertebra-server` + Supervisor.
-- [ ] **Task 1.1:** Scaffold `vertebra-engine` crate.
-    -   Hyper 1.0 / Tokio / Tower setup.
-    -   Config parsing (`pyproject.toml` support).
-    -   Process lifecycle (spawn `uv run python ...`).
-- [ ] **Task 1.2:** Implement "Optimistic Router" in Rust.
-    -   Port `matchit` logic.
-    -   Define "Route Manifest" protocol (Python sends route table to Rust at startup).
-- [ ] **Task 1.3:** Static Asset "Reflink" Cache.
-    -   Implement `mmap` / `sendfile` serving.
-    -   Global CAS cache logic (inspired by `uv`).
+## Phase 1: Foundation (The Litecore Port)
+**Goal:** Establish the IPC/Worker foundation using `litecore` as the reference implementation. This creates the "Slow Path" infrastructure.
 
-## Phase 2: The Data Plane (Zero-Copy IPC)
-**Goal:** Implement the "Phantom IPC" layer where Python maps Rust memory.
-- [ ] **Task 2.1:** Redefine Shared Memory Layout.
-    -   Header: `Magic`, `Version`, `State`.
-    -   Data: `Arrow Buffer Region` (Aligned).
-    -   Rings: Control + Data rings.
-- [ ] **Task 2.2:** Rust `Arrow` Integration.
-    -   Implement `polars-arrow` or `arrow-rs` conversion for SQL results.
-- [ ] **Task 2.3:** Python `Arrow` Mapping.
-    -   Use `pyarrow.RecordBatch.from_address` (or similar C-API hook) to map SHM without copy.
+- [ ] Task: Scaffold `vertebra-engine` crate
+    - Initialize Rust crate.
+    - Add dependencies: `tokio`, `hyper`, `libc`, `thiserror`, `crossbeam-utils`, `pyo3`.
+- [ ] Task: Port `litecore::shm`
+    - Implement `ShmRegion` for Linux (`memfd_create`) and Unix (`shm_open`).
+    - Verify memory mapping and sealing logic.
+- [ ] Task: Port `litecore::buffer`
+    - Define `RingLayout`, `SlotHeader`, `ShmHeader` structs.
+    - Ensure alignment matches Python `struct` expectations.
+- [ ] Task: Port `litecore::sync`
+    - Implement Futex-based synchronization (`wait`, `wake`).
+    - Ensure cross-platform compatibility (parking_lot fallback if needed).
+- [ ] Task: Port `litecore::channel`
+    - Implement `SpscRing` (Single-Producer Single-Consumer).
+    - Implement `MpmcRing` (Multi-Producer Multi-Consumer).
+    - Implement `SlotView` for zero-copy access.
+- [ ] Task: Port `litecore::worker`
+    - Implement `WorkerConfig` and `WorkerManager`.
+    - Implement process spawning with FD passing (`Command::pre_exec`).
+    - Implement health checks and heartbeat monitoring.
+- [ ] Task: Flow - User Manual Verification 'Phase 1: Foundation' (Protocol in workflow.md)
 
-## Phase 3: The Python SDK (Thin Wrapper)
-**Goal:** Rewrite `src/py/vertebra` to be a lightweight logic adapter.
-- [ ] **Task 3.1:** `VertebraRequest` object backed by `memoryview`.
-    -   Lazy header parsing.
-    -   Zero-copy body access.
-- [ ] **Task 3.2:** `VertebraResponse` builder.
-    -   Direct write to SHM slot.
-- [ ] **Task 3.3:** Remove legacy `asyncio` loop handling?
-    -   *Decision point:* Do we need `uvloop` if we are just processing logic? Maybe yes for `async def` compatibility.
+## Phase 2: The Embedded Executor (Hybrid Layer)
+**Goal:** Add the "Fast Path" using PyO3 to run Python code directly in the Rust process.
 
-## Phase 4: Integrations & Polish
-- [ ] **Task 4.1:** SQLSpec Adapter (Arrow Mode).
-- [ ] **Task 4.2:** Litestar "Native" Adapter vNext.
-- [ ] **Task 4.3:** `uv` Integration (auto-install Python/deps).
+- [ ] Task: Initialize Embedded Python
+    - Configure `pyo3` to initialize the interpreter.
+    - Set up `sys.path` to include user application.
+- [ ] Task: Implement `EmbeddedWorker`
+    - Create a Rust struct that holds the PyO3 application reference.
+    - Implement a thread-safe wrapper (GIL handling).
+- [ ] Task: Implement `DirectExecutor` (Request Mapping)
+    - Map `hyper::Request<Incoming>` to ASGI Scope (`PyDict`).
+    - Implement `ZeroCopyBody` for request body streaming.
+- [ ] Task: Implement `DirectExecutor` (Response Mapping)
+    - Implement ASGI `send` callable in Rust.
+    - Map ASGI response messages to `hyper::Response`.
+- [ ] Task: Verify GIL Behavior
+    - Benchmark simple "Hello World" to ensure it matches Granian performance.
+    - Stress test to ensure Rust async runtime is not blocked by Python GC.
+- [ ] Task: Flow - User Manual Verification 'Phase 2: Embedded Executor' (Protocol in workflow.md)
 
-## Phase 5: Frontend Engine & Bundling
-**Goal:** Implement the "One File" experience.
-- [ ] **Task 5.1:** Frontend Executor & Proxy.
-    -   `FrontendExecutor` Trait definition.
-    -   Port Discovery: Find free TCP port.
-    -   Env Injection: Pass `VERTEBRA_FRONTEND_PORT` to child process.
-    -   Rust `hyper` reverse proxy to the assigned port.
-    -   WebSocket forwarding for HMR.
-- [ ] **Task 5.2:** Rolldown Integration.
-    -   Integrate `rolldown` crate for in-process JS/TS bundling.
-    -   Implement "Zero-Node" build step (reading from `node_modules`).
-    -   Logic to compress and embed assets into the Rust binary (or adjacent `.pak` file).
-- [ ] **Task 5.3:** Prod Asset Server.
-    -   Serve embedded/reflinking assets with aggressive caching headers.
+## Phase 3: Router & Integration
+**Goal:** Unified routing between Fast and Slow paths.
 
-## Phase 6: Node.js Integration (Middleware Mode)
-**Goal:** Run Vertebra inside Next.js / Express.
-- [ ] **Task 6.1:** `vertebra-node` NAPI Crate.
-    -   Expose `Engine` struct to Node via NAPI-RS.
-    -   Implement `engine.dispatch(req_buffer)` -> Ring Buffer -> Python.
-- [ ] **Task 6.2:** Middleware Adapters.
-    -   `createMiddleware()` helper for Express/Connect.
-    -   Next.js API Route handler wrapper.
+- [ ] Task: Implement `OptimisticRouter`
+    - Port `matchit` router logic.
+    - Define `RouteManifest` struct for config.
+- [ ] Task: Configuration Parsing
+    - Implement `vertebra.toml` or `pyproject.toml` parser.
+    - Allow routes to be tagged as `embedded` or `worker`.
+- [ ] Task: Implement Dispatcher
+    - Create `Dispatcher` service in Hyper.
+    - Route requests to either `DirectExecutor` or `WorkerManager`.
+    - Implement "Spillover" logic (optional: send to worker if GIL saturated).
+- [ ] Task: Unified Response Handling
+    - Ensure both paths return compatible `hyper::Response` types.
+- [ ] Task: Flow - User Manual Verification 'Phase 3: Router & Integration' (Protocol in workflow.md)
 
-## Risks & Mitigations
-*   **Risk:** Python `memoryview` safety.
-    *   *Mitigation:* Strict Reference Counting in Rust. Python holds a "Lease" token.
-*   **Risk:** Arrow complexity for simple users.
-    *   *Mitigation:* Transparent fallback to `dict` (MsgPack) for small queries. Arrow is opt-in or transparent optimization.
-*   **Risk:** Node.js dependency for frontend.
-    *   *Mitigation:* Use `uv` to manage Node via plugins (if possible) or strictly check environment. Long term: Move to Rust-based bundlers (Rspack) managed by the Engine.
+## Phase 4: Frontend & Type Bridge
+**Goal:** Native "Zero-Node" asset bundling and real-time type synchronization.
+
+- [ ] Task: Implement `RolldownExecutor`
+    - Integrate `rolldown` crate.
+    - Implement `DevEngine` startup and lifecycle.
+    - Wire `HmrOptions` for WebSocket HMR.
+- [ ] Task: Port `TypeBridge` Extractor
+    - Port AST extraction logic from `vertebra`.
+    - Add support for `attrs` classes (per research).
+    - Implement `TypeBridgeWatcher` for file changes.
+- [ ] Task: Implement `VirtualModuleLoader`
+    - Create Rolldown plugin to serve `virtual:vertebra-types`.
+    - Connect `TypeBridgeWatcher` updates to Rolldown invalidation.
+- [ ] Task: Flow - User Manual Verification 'Phase 4: Frontend & Type Bridge' (Protocol in workflow.md)

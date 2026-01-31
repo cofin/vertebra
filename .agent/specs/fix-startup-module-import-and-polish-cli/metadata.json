@@ -1,8 +1,0 @@
-{
-  "prd_id": "fix-startup-module-import-and-polish-cli",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2026-01-25T12:00:00Z",
-  "updated_at": "2026-01-25T12:00:00Z",
-  "description": "Fix startup ModuleNotFoundError when running examples and polish CLI diagnostics"
-}

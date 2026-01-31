@@ -64,14 +64,8 @@ Each flow has its own detailed spec and plan in its respective folder.
 ## [ ] Flow: Requires Review / Integration
 
 - [ ] **federated-brokers**: [./specs/federated-brokers/](./specs/federated-brokers/)
-- [ ] **serialization-optimization**: [./specs/serialization-optimization/](./specs/serialization-optimization/)
-- [ ] **pyclient-sdk_20260125**: [./specs/pyclient-sdk_20260125/](./specs/pyclient-sdk_20260125/)
-- [ ] **refactor_20260125**: [./specs/refactor_20260125/](./specs/refactor_20260125/)
-- [ ] **async_notifier_bridge_20260126**: [./specs/async_notifier_bridge_20260126/](./specs/async_notifier_bridge_20260126/)
 - [ ] **optional-dependency-handling**: [./specs/optional-dependency-handling/](./specs/optional-dependency-handling/)
 - [ ] **documentation-adoption**: [./specs/documentation-adoption/](./specs/documentation-adoption/)
-- [ ] **fix-startup-module-import-and-polish-cli**: [./specs/fix-startup-module-import-and-polish-cli/](./specs/fix-startup-module-import-and-polish-cli/)
-- [ ] **cli-polish**: [./specs/cli-polish/](./specs/cli-polish/)
 
 ## [ ] Flow: fix-benchmarks-ipc
 *Link: [./specs/fix-benchmarks-ipc/](./specs/fix-benchmarks-ipc/)*
@@ -85,7 +79,22 @@ Each flow has its own detailed spec and plan in its respective folder.
 *Status: PLANNING*
 
 ### Chapters:
-- [ ] **async-eventfd**: [./specs/async-eventfd/](./specs/async-eventfd/) - *Beads: vertebra-k4k.1*
 - [ ] **correlation-protocol**: [./specs/correlation-protocol/](./specs/correlation-protocol/) - *Beads: vertebra-k4k.2*
 - [ ] **lock-free-dispatch**: [./specs/lock-free-dispatch/](./specs/lock-free-dispatch/) - *Beads: vertebra-k4k.3* - blocked by correlation-protocol
 - [ ] **python-concurrent**: [./specs/python-concurrent/](./specs/python-concurrent/) - *Beads: vertebra-k4k.4* - blocked by correlation-protocol
+
+
+## [ ] Flow: Discovered Specs
+
+- [ ] **vertebra-next**: [./specs/vertebra-next/](./specs/vertebra-next/)
+
+
+## Recently Archived
+- [x] **v2-alignment**: [./archive/v2-alignment/](./archive/v2-alignment/)
+- [x] **fix-benchmarks-ipc**: [./archive/fix-benchmarks-ipc/](./archive/fix-benchmarks-ipc/)
+- [x] **async-eventfd**: [./archive/async-eventfd/](./archive/async-eventfd/)
+
+## Recently Archived (Round 2)
+- [x] **refactor_20260125**: [./archive/refactor_20260125/](./archive/refactor_20260125/)
+- [x] **pyclient-sdk_20260125**: [./archive/pyclient-sdk_20260125/](./archive/pyclient-sdk_20260125/)
+- [x] **fix-startup-module-import-and-polish-cli**: [./archive/fix-startup-module-import-and-polish-cli/](./archive/fix-startup-module-import-and-polish-cli/)
