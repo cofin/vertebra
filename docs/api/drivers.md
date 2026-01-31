@@ -35,7 +35,7 @@ Integration for Advanced Alchemy Repositories and Services, leveraging the SQLAl
 
 ## Low-Level Driver API
 
-The foundation for the above integrations are the Bun-backed drivers. These implement a subset of DB-API 2.0.
+The foundation for the above integrations are the shared-memory drivers. These implement a subset of DB-API 2.0.
 
 ### SyncDriver / AsyncDriver
 
@@ -53,21 +53,21 @@ The foundation for the above integrations are the Bun-backed drivers. These impl
 
 ## SQLite Driver
 
-`vertebra.drivers.sqlite.SyncSqliteDriver` provides a Bun-backed SQLite interface over IPC. Configure with `SyncSqliteDriverConfig` (database path + IPC config). Use `SyncSqliteDriver.connect()` for sync connections and `AsyncSqliteDriver.connect()` for async connections.
+`vertebra.drivers.sqlite.SyncSqliteDriver` provides a shared-memory SQLite interface over IPC. Configure with `SyncSqliteDriverConfig` (database path + IPC config). Use `SyncSqliteDriver.connect()` for sync connections and `AsyncSqliteDriver.connect()` for async connections.
 
 ## PostgreSQL Driver
 
-`vertebra.drivers.postgres.SyncPostgresDriver` provides a Bun-backed PostgreSQL interface over IPC. Configure with `SyncPostgresDriverConfig` (connection string + IPC config). Use `SyncPostgresDriver.connect()` for sync connections and `AsyncPostgresDriver.connect()` for async connections.
+`vertebra.drivers.postgres.SyncPostgresDriver` provides a shared-memory PostgreSQL interface over IPC. Configure with `SyncPostgresDriverConfig` (connection string + IPC config). Use `SyncPostgresDriver.connect()` for sync connections and `AsyncPostgresDriver.connect()` for async connections.
 
 Transactions are available via `connection.transaction()` / `async_connection.transaction()` with optional isolation levels. The sync context is exposed as `SyncPostgresTransaction` to parallel `AsyncPostgresTransaction`.
 
 ## MySQL Driver
 
-`vertebra.drivers.mysql.SyncMySQLDriver` provides a Bun-backed MySQL interface over IPC. Configure with `SyncMySQLDriverConfig` (connection string + IPC config). Use `SyncMySQLDriver.connect()` for sync connections and `AsyncMySQLDriver.connect()` for async connections.
+`vertebra.drivers.mysql.SyncMySQLDriver` provides a shared-memory MySQL interface over IPC. Configure with `SyncMySQLDriverConfig` (connection string + IPC config). Use `SyncMySQLDriver.connect()` for sync connections and `AsyncMySQLDriver.connect()` for async connections.
 
 ## Redis Driver
 
-`vertebra.drivers.redis.SyncRedisDriver` provides a Bun-backed Redis interface over IPC. Configure with `SyncRedisDriverConfig` (URL + IPC config). Use `SyncRedisDriver.connect()` for sync connections and `AsyncRedisDriver.connect()` for async connections.
+`vertebra.drivers.redis.SyncRedisDriver` provides a shared-memory Redis interface over IPC. Configure with `SyncRedisDriverConfig` (URL + IPC config). Use `SyncRedisDriver.connect()` for sync connections and `AsyncRedisDriver.connect()` for async connections.
 
 ## Type Conversions
 

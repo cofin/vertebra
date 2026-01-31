@@ -6,7 +6,7 @@ Vertebra implements a comprehensive security and user management framework desig
 
 The security architecture follows a **Broker-Centric** model:
 
-1.  **Ingress Validation**: The Vertebra Broker (Bun/Rust) intercepts all incoming requests and validates authentication credentials (JWT, OAuth2, IAP) *before* the request reaches the Python worker.
+1.  **Ingress Validation**: The Vertebra Broker (Rust) intercepts all incoming requests and validates authentication credentials (JWT, OAuth2, IAP) *before* the request reaches the Python worker.
 2.  **Claim Propagation**: Validated claims (User ID, scopes, etc.) are passed to the Python worker via high-performance IPC (Shared Memory).
 3.  **Lazy Hydration**: The Python worker hydrates a `User` object lazily. Basic claims are available immediately; database lookup happens only when accessing other attributes.
 
@@ -14,26 +14,13 @@ The security architecture follows a **Broker-Centric** model:
 
 ### Configuration
 
-Authentication is configured in `vertebra.config.ts`:
+Authentication is configured via environment variables or the `ServerConfig` passed to the Rust broker.
 
-```typescript
-export default {
-  auth: {
-    cookieName: "access_token",
-    refreshTokenCookieName: "refresh_token", // Enable rotation
-    providers: [
-      {
-        type: "jwt",
-        secret: "your-secret-key",
-        refreshSecret: "refresh-secret", // For rotation
-        issuer: "your-issuer",
-        audience: "your-audience",
-      },
-      // ... other providers (IAP, OAuth2)
-    ]
-  }
-}
-```
+- `VERTEBRA_AUTH_COOKIE`: Name of the access token cookie.
+- `VERTEBRA_AUTH_REFRESH_COOKIE`: Name of the refresh token cookie.
+- `VERTEBRA_AUTH_JWT_SECRET`: Secret key for JWT validation.
+- `VERTEBRA_AUTH_JWT_ISSUER`: Expected issuer claim.
+- `VERTEBRA_AUTH_JWT_AUDIENCE`: Expected audience claim.
 
 ### Refresh Token Rotation
 
@@ -103,7 +90,7 @@ async def handler(request: Request) -> dict:
 
 ## IPC Security Utilities
 
-The `vertebra.security.SecurityClient` provides access to high-performance cryptographic operations implemented in the Broker (Rust/Bun), avoiding Python overhead for compute-intensive tasks.
+The `vertebra.security.SecurityClient` provides access to high-performance cryptographic operations implemented in the Broker (Rust), avoiding Python overhead for compute-intensive tasks.
 
 - `hash_password(password: str) -> str`: Bcrypt hashing.
 - `verify_password(password: str, hash: str) -> bool`: Bcrypt verification.

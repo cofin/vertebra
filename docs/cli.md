@@ -11,9 +11,10 @@ pip install vertebra
 This single command installs the complete framework, including:
 - Python library
 - Rust extensions (pre-compiled wheels)
-- Embedded Bun engine (platform-specific binary)
-
-No external dependencies (like Node.js, Bun, or Rust) are required on the user's machine.
+- Embedded Rust engine (platform-specific binary)
+- **Zero Dependency**: The CLI is a single file (zipapp) or standard wheel.
+  No external dependencies (like Node.js or Bun) are required on the user's machine.
+- **Offline Capable**: Bundles all dependencies (Python runtime, libs, Rust engine).
 
 ## CLI Commands
 
@@ -50,7 +51,7 @@ vertebra serve app:app
 ```
 
 - Starts the Rust Supervisor
-- Launches the Bun Broker and Engine
+- Launches the Rust Broker and Engine
 - Spawns Python workers
 - Manages shared memory lifecycle
 

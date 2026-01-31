@@ -1,7 +1,7 @@
 # Vertebra Driver Protocol (Shared Memory)
 
 This document defines the **shared-memory broker protocol** used between clients
-(Python/Bun) and the central Bun broker. There are **no sockets or TCP** in the data plane.
+(Python) and the central Rust broker. There are **no sockets or TCP** in the data plane.
 
 ## Message Transport
 
@@ -33,7 +33,7 @@ Fields:
 
 - Small payloads: MessagePack with msgspec buffer protocol.
 - Large payloads: Arrow IPC stream in shared buffer pool.
-- Binary payloads: `bytes` / `Uint8Array` when inline.
+- Binary payloads: `bytes` when inline.
 
 ## Transaction Commands
 

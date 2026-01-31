@@ -39,7 +39,7 @@ Lowering this threshold favors Arrow for smaller datasets, which is beneficial i
 
 ## Shared Memory Tuning
 
-Vertebra uses a shared memory ring buffer for IPC between the Bun engine and Python workers.
+Vertebra uses a shared memory ring buffer for IPC between the Rust engine and Python workers.
 
 -   **Slot Size:** Controls the maximum size of a single message.
 -   **Ring Size:** Controls the number of messages in the buffer.

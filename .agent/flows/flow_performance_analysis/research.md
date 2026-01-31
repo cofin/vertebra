@@ -10,9 +10,10 @@ Vertebra achieves **14,444 RPS** while Granian achieves **62,364 RPS** (4.3x fas
 |--------|-----|-------------|-----|-----|
 | **Granian** | 62,364 | 1.02ms | 0.99ms | 1.47ms |
 | **Vertebra** | 14,444 | 4.42ms | 4.07ms | 36.9ms |
-| **Uvicorn** | ~11,106 | - | - | - |
+| **Uvicorn (h11)** | ~11,106 | - | - | - |
+| **Uvicorn (httptools)** | ~28,400 | - | - | - |
 
-**Key observation**: Vertebra's P99 latency (36.9ms) is 25x higher than Granian's (1.47ms), indicating significant tail latency from IPC coordination.
+**Key observation**: Vertebra's P99 latency (36.9ms) is 25x higher than Granian's (1.47ms). While Vertebra beats Uvicorn's pure-Python H11 implementation, it currently trails the optimized `httptools` implementation by ~50%.
 
 ## Architecture Comparison
 
@@ -278,7 +279,7 @@ IPC provides benefits that may justify lower RPS:
 **Long-term**: Accept architectural trade-off
 - Document IPC overhead clearly
 - Position Vertebra for reliability/isolation, not raw speed
-- Compare against Uvicorn (14K vs 11K = 30% faster already)
+- Compare against Uvicorn H11 (14K vs 11K = 30% faster already) and target httptools parity
 
 ## Conclusion
 
@@ -287,6 +288,6 @@ The **100K-200K RPS target is not achievable** with the current IPC architecture
 However:
 1. **14K → 30K** is achievable with optimization (2x improvement)
 2. **30K → 50K** may be achievable with hybrid PyO3 mode
-3. Vertebra already **beats Uvicorn** by 30% while providing process isolation
+3. Vertebra already **beats Uvicorn (h11)** by 30%, but trails **Uvicorn (httptools)** by 50%, while providing process isolation
 
 The question becomes: Is process isolation worth the ~2x performance penalty vs Granian?

@@ -1,0 +1,15 @@
+{
+  "research_id": "research_20260129_socketify_vs_vertebra",
+  "topic": "Performance Analysis: socketify.py and spikard vs Vertebra",
+  "type": "Performance/Architecture",
+  "status": "complete",
+  "created_at": "2026-01-29T00:00:00Z",
+  "libraries_researched": ["socketify.py", "spikard", "vertebra"],
+  "files_analyzed": [
+    "src/rs/vertebra-py/src/lib.rs",
+    "src/rs/vertebra-py/src/async_ring.rs",
+    "docs/arch.md",
+    "benchmarks/ipc_performance.py"
+  ],
+  "linked_prd": null
+}

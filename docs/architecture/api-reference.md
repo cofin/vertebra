@@ -17,11 +17,6 @@
 - `BufferChannel`
   - `acquire()`, `send(buffer, len, flags)`, `recv()`
 
-## JS/Bun (napi)
-
-Bindings mirror the Python surface with `ShmRegion`, `SpscRing`, `MpmcRing`,
-`BufferPool`, `BufferChannel`, and `PoolBuffer` classes.
-
 ## C ABI
 
 Optional C ABI is intentionally not implemented unless required by the PRD-1

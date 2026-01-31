@@ -16,10 +16,10 @@ By leveraging Vertebra's shared-memory architecture and Litestar's introspection
 When a worker starts, it inspects the Litestar application instance:
 -   Extracts all routes (HTTP and WebSocket).
 -   Compiles a `RouteMap` mapping paths to handler IDs.
--   Sends this map to the Rust core and Bun broker.
+-   Sends this map to the Rust broker.
 
-### 2. The Router (Rust/Bun)
-The Bun broker uses a high-performance Rust router (via `matchit`) to match incoming URLs.
+### 2. The Router (Rust)
+The Rust broker uses a high-performance router (via `matchit`) to match incoming URLs.
 -   If a match is found, the broker sends a `direct.http` (or `ws.open`) opcode to the worker.
 -   If no match is found (or for middleware that requires it), it falls back to standard ASGI.
 
@@ -65,6 +65,6 @@ Vertebra employs a **Capability Classifier** at startup to determine which route
 -   **Complex DI**: Routes using `Dependency()` objects or custom injection markers (e.g., Dishka, SQLSpec filters).
 -   **WebSockets**: Currently fallback until full native WS support is stabilized.
 -   **Specialized Responses**: `File`, `Stream`, `Template`, `InertiaRedirect`.
--   **Static Files**: Served via Bun (if configured) or fallback to ASGI.
+-   **Static Files**: Served via Rust (if configured) or fallback to ASGI.
 
 This hybrid approach ensures 100% compatibility with the Litestar ecosystem while optimizing the critical path (high-volume API traffic).

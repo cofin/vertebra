@@ -2,11 +2,10 @@
 
 ## Overview
 
-Vertebra is a Python-first application backbone with Rust IPC primitives and a Bun
-(TypeScript) server/runtime layer. The core goals are:
+Vertebra is a Python-first application backbone with a high-performance Rust Broker and IPC primitives. The core goals are:
 
 - Zero-copy IPC for high-throughput workloads.
-- tRPC-like developer experience with Python → TypeScript type bridging.
+- Resilient multi-process architecture (Broker + Workers).
 - Cross-platform parity (Linux/macOS/Windows) for the MVP.
 
 ## Active Specifications & Roadmap
@@ -26,46 +25,36 @@ Vertebra is a Python-first application backbone with Rust IPC primitives and a B
 ```
 Python (Litestar-style API)
   ├── Type Bridge + Tooling
-  │    └── Shared metadata registry / IR / TypeScript generator
+  │    └── Shared metadata registry
   ├── ORM Extensions
   │    ├── SQLSpec (Vertebra* adapters)
   │    ├── SQLAlchemy (Native Dialects)
   │    └── Advanced Alchemy
   ├── Resources
-  │    └── AsyncBrokerClient → shared memory → Bun broker
+  │    └── AsyncBrokerClient → shared memory → Rust broker
   ├── MCP
   │    └── @mcp_tool decorator, schema generation
   └── Server
        └── ASGI worker with IPC framing
 
-Rust (IPC Core + Supervisor)
+Rust (IPC Core + Broker)
   ├── vertebra-core
   │    ├── Shared memory (ShmRegion)
   │    ├── Ring Buffers (SPSC/MPMC)
   │    └── Sync primitives (futex/ulock)
   ├── vertebra-py
-  │    ├── Python bindings
-  │    └── **Supervisor** (Process lifecycle, GIL-free)
-  └── vertebra-js
-       └── Napi bindings for Bun
-
-TypeScript/Bun (Server + Broker)
-  ├── Broker
-  │    ├── Connection Pools (SQL, Redis, Storage)
-  │    └── FairnessScheduler
-  ├── Server
-  │    ├── HTTP/WebSocket server
-  │    ├── ASGI bridge
-  │    └── **Observability** (/__metrics__)
-  └── MCP Server
-       ├── Transports (stdio, SSE, WebSocket)
-       └── IPC Bridge to Python
+  │    ├── Python bindings (PyO3)
+  │    └── Supervisor (Process lifecycle, GIL-free)
+  └── vertebra-server (Broker)
+       ├── HTTP/WebSocket server (Hyper/Tokio)
+       ├── Connection Pools
+       ├── Dispatcher (LeastPending)
+       └── Observability
 ```
 
 ## Cross-PRD Decisions (Canonical)
 
 - **Python version**: 3.12+.
-- **Directory layout**: `src/ts/` for TypeScript/Bun code.
 - **Serialization**:
   - Python codec: msgspec
   - MCP/gRPC control plane: Protobuf
@@ -75,7 +64,7 @@ TypeScript/Bun (Server + Broker)
 - **IPC transport**:
   - Driver/broker data plane: shared memory ring buffers (no sockets)
   - Control plane: in-process or shared memory (no TCP)
-- **Runtime strategy**: Bun-first; Node fallback only if parity is proven.
+- **Runtime strategy**: Rust-first Broker (vertebra-server).
 - **Test infrastructure**: Docker/Podman runtime abstraction for integration tests (no compose required).
 
 ## Testing Layout (Python)
@@ -97,15 +86,15 @@ src/py/tests/
 Commands:
 - Unit-only (default): `uv run pytest src/py/tests`
 - Integration: `uv run pytest src/py/tests -m integration --integration`
-- All tests (Rust + TS + Python unit + integration): `make test-all`
+- All tests (Rust + Python unit + integration): `make test-all`
 
-## Shared-Memory Broker
+## Shared-Memory Broker (vertebra-server)
 
-The broker is the central resource manager, owning all database and storage pools:
+The broker is the central resource manager, owning all database and storage pools, and dispatching requests to Python workers.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         Bun Broker Process                      │
+│                    Rust Broker Process (Hyper)                  │
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │
 │  │ SqlPool  │  │SqlitePool│  │RedisPool │  │  StoragePool     │ │
@@ -115,9 +104,9 @@ The broker is the central resource manager, owning all database and storage pool
 │                  │              │                  │            │
 │              BasePoolAdapter (counters, stats)                  │
 ├─────────────────────────────────────────────────────────────────┤
-│                    FairnessScheduler (FIFO/Weighted/Priority)   │
+│             LeastPendingDispatcher (Load Balancing)             │
 ├─────────────────────────────────────────────────────────────────┤
-│                    Shared Memory Ring Buffers (SPSC)            │
+│             Shared Memory Ring Buffers (SPSC/MPMC)              │
 └────────────────────────────┬────────────────────────────────────┘
                              │
               ┌──────────────┼──────────────┐
@@ -125,37 +114,23 @@ The broker is the central resource manager, owning all database and storage pool
         Python Worker   Python Worker   Python Worker
 ```
 
-### Pool Architecture
+### Dispatcher Architecture
 
-All pools extend `BasePoolAdapter` which provides:
-- Counter tracking (acquires, releases, errors)
-- Unified `PoolStats` type for metrics
-- Common lifecycle (acquire/release/getStats)
-- Health checks (periodic validation)
-- Lifecycle hooks (onAcquire, onRelease, onError)
+The `Dispatcher` trait allows different load balancing strategies. The default `LeastPendingDispatcher`:
+- Tracks active request counts for each worker.
+- Routes new requests to the worker with the lowest pending count.
+- Uses lock-free atomic counters for low overhead.
 
 ### ChannelHandle (Bidirectional IPC)
 
-`ChannelHandle` provides paired SPSC rings for request/response patterns:
-
-```typescript
-// TypeScript usage
-const { client, server } = createChannelPair(64, 8);
-client.send(Buffer.from([1, 2, 3]), 0);
-const response = server.recv(1024);
-
-// Named channels for cross-process IPC (Unix)
-const channel = ChannelHandle.createNamed("/my-channel", 64, 8, ChannelRole.Client);
-channel.unlink(); // Explicit cleanup
-```
-
-Methods: `send()`, `trySend()`, `sendTimeout()`, `recv()`, `tryRecv()`, `recvTimeout()`, `unlink()`
+`ChannelHandle` provides paired SPSC rings for request/response patterns between the Rust Broker and Python Workers.
 
 ## Performance Strategy
 
 - Use shared memory for zero-copy transfer where possible.
 - Favor small, structured IPC messages; reserve Arrow for large, columnar data.
 - Maintain backpressure and bounded queues to preserve tail latency.
+- **Optimistic GIL**: Python workers attempt non-blocking IPC operations first, only releasing the GIL if they must wait.
 
 ## Cross-Platform Notes
 
@@ -167,8 +142,7 @@ behind trait/abstraction boundaries so macOS and Windows parity remains viable.
 ```
 src/
   py/        # Python package (vertebra)
-  rs/        # Rust workspace
-  ts/        # Bun/TypeScript workspace
+  rs/        # Rust workspace (core, py-bindings, server)
 tools/
   lib/       # Tooling helpers (container runtime abstraction)
 ```

@@ -133,7 +133,6 @@ data path stays lock-free while backpressure waits are handled by the OS.
 Bindings are exposed through:
 
 - `vertebra-py` (PyO3) for Python integration
-- `vertebra-js` (napi-rs) for Bun/Node integration
 
 ## Cross-Platform Notes
 
