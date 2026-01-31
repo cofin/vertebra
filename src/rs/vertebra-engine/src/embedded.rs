@@ -6,7 +6,7 @@
 //! - Managing the Global Interpreter Lock (GIL) for the main thread
 
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyList, PyDict};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -76,12 +76,15 @@ impl EmbeddedWorker {
     }
 
     /// Execute the ASGI application with the given scope.
-    ///
-    /// This is a placeholder for the actual execution logic (Phase 2 Task 3).
-    /// For now, it just proves we can hold the app safely.
-    pub async fn execute(&self) -> Result<(), EmbeddedError> {
-        // TODO: Implement actual execution
-        Err(EmbeddedError::Path("Not implemented".into()))
+    pub fn execute<'py>(
+        &self,
+        py: Python<'py>,
+        scope: Bound<'py, PyDict>,
+        receive: Bound<'py, PyAny>,
+        send: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let app = self.app.bind(py);
+        app.call1((scope, receive, send))
     }
 }
 

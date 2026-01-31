@@ -7,14 +7,115 @@ use tokio::sync::{Mutex, oneshot, mpsc};
 use http_body_util::BodyExt; // For collect/frame
 use bytes::Bytes;
 use hyper::{StatusCode, header::{HeaderName, HeaderValue, HeaderMap}};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::future::Future;
 
-use crate::embedded::EmbeddedError;
+use crate::embedded::{EmbeddedError, EmbeddedWorker};
 
 /// Info extracted from http.response.start
 #[derive(Debug)]
 pub struct ResponseInfo {
     pub status: StatusCode,
     pub headers: HeaderMap,
+}
+
+/// A response body that streams from an MPSC channel.
+pub struct ResponseBody {
+    rx: mpsc::Receiver<Result<Frame<Bytes>, hyper::Error>>,
+}
+
+impl Body for ResponseBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        self.rx.poll_recv(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        // We don't know if it's end until channel closes
+        false 
+    }
+}
+
+/// The Hyper Service that bridges requests to the EmbeddedWorker.
+#[derive(Clone)]
+pub struct EmbeddedService {
+    worker: EmbeddedWorker,
+}
+
+impl EmbeddedService {
+    pub fn new(worker: EmbeddedWorker) -> Self {
+        Self { worker }
+    }
+}
+
+impl hyper::service::Service<Request<Incoming>> for EmbeddedService {
+    type Response = hyper::Response<ResponseBody>;
+    type Error = EmbeddedError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn call(&self, req: Request<Incoming>) -> Self::Future {
+        let worker = self.worker.clone();
+        let executor = DirectExecutor::new();
+        
+        Box::pin(async move {
+            let (parts, body) = req.into_parts();
+            let zero_copy_body = ZeroCopyBody::from_body(body);
+            
+            let (start_tx, start_rx) = oneshot::channel();
+            let (body_tx, body_rx) = mpsc::channel(1);
+            let sender = ResponseSender::new(start_tx, body_tx);
+            
+            // Acquire GIL to map request and spawn python task
+            let py_future = Python::with_gil(|py| -> Result<_, EmbeddedError> {
+                // Reconstruct request with empty body for mapping
+                let req_head = Request::from_parts(parts, ());
+                let scope = executor.request_to_scope(py, &req_head, "http")?;
+                
+                let receive_callable = Py::new(py, zero_copy_body)?;
+                let send_callable = Py::new(py, sender)?;
+                
+                let coroutine = worker.execute(
+                    py, 
+                    scope, 
+                    receive_callable.bind(py).clone().into_any(), 
+                    send_callable.bind(py).clone().into_any()
+                )?;
+                
+                // Convert to Rust future
+                let fut = pyo3_async_runtimes::tokio::into_future(coroutine)?;
+                Ok(fut)
+            })?;
+            
+            // Spawn the python execution
+            tokio::spawn(async move {
+                if let Err(e) = py_future.await {
+                    eprintln!("Python execution error: {:?}", e);
+                    // We can't easily signal error to response if headers already sent
+                    // If headers not sent, start_rx will drop and we handle it below
+                }
+            });
+            
+            // Wait for start signal
+            let info = start_rx.await.map_err(|_| EmbeddedError::Path("Application did not send http.response.start".into()))?;
+            
+            let mut builder = hyper::Response::builder()
+                .status(info.status);
+            
+            *builder.headers_mut().unwrap() = info.headers;
+            
+            let response = builder
+                .body(ResponseBody { rx: body_rx })
+                .map_err(|e| EmbeddedError::Path(e.to_string()))?;
+                
+            Ok(response)
+        })
+    }
 }
 
 /// A Python-compatible callable that handles ASGI `send` messages.
