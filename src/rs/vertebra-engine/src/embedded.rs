@@ -8,6 +8,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Errors that can occur during embedded Python operations.
 #[derive(Debug, thiserror::Error)]
@@ -52,6 +53,38 @@ pub fn init_python(extra_paths: &[&str]) -> Result<(), EmbeddedError> {
     Ok(())
 }
 
+/// A worker that executes Python code directly in the embedding process.
+///
+/// Wraps a PyObject (the ASGI app) and handles GIL acquisition.
+#[derive(Clone)]
+pub struct EmbeddedWorker {
+    // Wrap in Arc to ensure Clone is cheap and thread-safe
+    app: Arc<Py<PyAny>>,
+}
+
+impl EmbeddedWorker {
+    /// Create a new embedded worker with the given ASGI application.
+    pub fn new(app: Bound<'_, PyAny>) -> Self {
+        Self {
+            app: Arc::new(app.unbind()),
+        }
+    }
+
+    /// Get a reference to the underlying ASGI application.
+    pub fn get_app<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
+        self.app.bind(py).clone()
+    }
+
+    /// Execute the ASGI application with the given scope.
+    ///
+    /// This is a placeholder for the actual execution logic (Phase 2 Task 3).
+    /// For now, it just proves we can hold the app safely.
+    pub async fn execute(&self) -> Result<(), EmbeddedError> {
+        // TODO: Implement actual execution
+        Err(EmbeddedError::Path("Not implemented".into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +122,36 @@ mod tests {
                 }
             }
             assert!(found, "sys.path missing injected path");
+        });
+    }
+
+    #[test]
+    fn test_embedded_worker_lifecycle() {
+        init_python(&[]).unwrap();
+        
+        let app_code = r#"
+async def app(scope, receive, send):
+    pass
+"#;
+        let app_code_c = std::ffi::CString::new(app_code).unwrap();
+        let file_name_c = std::ffi::CString::new("test_app.py").unwrap();
+        let module_name_c = std::ffi::CString::new("test_app").unwrap();
+
+        Python::with_gil(|py| {
+            // Use PyModule::from_code (Bound API in 0.27+)
+            let app_module = PyModule::from_code(
+                py, 
+                &app_code_c, 
+                &file_name_c, 
+                &module_name_c
+            ).unwrap();
+            let app_func = app_module.getattr("app").unwrap();
+            
+            let worker = EmbeddedWorker::new(app_func);
+            
+            // Verify we can get the app back and it's the same object
+            let retrieved_app = worker.get_app(py);
+            assert!(retrieved_app.is_callable());
         });
     }
 }
