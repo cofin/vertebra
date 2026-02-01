@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyDict, IntoPyDict};
 use pyo3::IntoPyObjectExt;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 /// Errors that can occur during embedded Python operations.
 #[derive(Debug, thiserror::Error)]
@@ -20,16 +20,16 @@ pub enum EmbeddedError {
     Path(String),
 }
 
-static BACKGROUND_LOOP: OnceLock<Py<PyAny>> = OnceLock::new();
-
 /// Initialize the embedded Python interpreter and configure sys.path.
+///
+/// Returns the background loop object.
 ///
 /// # Arguments
 /// * `extra_paths` - List of paths to add to sys.path (e.g. project root)
-pub fn init_python(extra_paths: &[&str]) -> Result<(), EmbeddedError> {
+pub fn init_python(extra_paths: &[&str]) -> Result<Py<PyAny>, EmbeddedError> {
     // pyo3::prepare_freethreaded_python(); // Auto-init feature handles this
 
-    Python::with_gil(|py| -> PyResult<()> {
+    let loop_obj = Python::with_gil(|py| -> Result<Py<PyAny>, EmbeddedError> {
         let sys = py.import("sys")?;
         // Use downcast_into -> cast_as (PyO3 0.21+) or just extract
         // In 0.27 (Bound API), downcast_into is deprecated for cast_into??
@@ -51,40 +51,36 @@ pub fn init_python(extra_paths: &[&str]) -> Result<(), EmbeddedError> {
         path.insert(0, cwd.to_string_lossy().as_ref())?;
 
         // Initialize Background Loop
-        if BACKGROUND_LOOP.get().is_none() {
-            let asyncio = py.import("asyncio")?;
-            let threading = py.import("threading")?;
-            
-            let loop_obj = asyncio.call_method0("new_event_loop")?;
-            
-            // Define run_loop function
-            let run_loop_code = c"
+        let asyncio = py.import("asyncio")?;
+        let threading = py.import("threading")?;
+        
+        let loop_obj = asyncio.call_method0("new_event_loop")?;
+        
+        // Define run_loop function
+        let run_loop_code = c"
 def run_background_loop(loop):
     import asyncio
     asyncio.set_event_loop(loop)
     loop.run_forever()
 ";
-            let module = PyModule::from_code(py, run_loop_code, c"background_loop.py", c"background_loop")?;
-            let run_loop_func = module.getattr("run_background_loop")?;
-            
-            // Start thread
-            // Args must be a tuple, but we are constructing a dict for kwargs/args
-            // kwargs: target=func, args=(loop,)
-            let kwargs = [
-                ("target", run_loop_func.into_any()), 
-                ("args", (loop_obj.clone(),).into_py_any(py)?.bind(py).clone())
-            ].into_py_dict(py)?;
-            
-            let thread = threading.getattr("Thread")?.call((), Some(&kwargs))?;
-            thread.call_method0("start")?;
-            
-            let _ = BACKGROUND_LOOP.set(loop_obj.unbind());
-        }
-
-        Ok(())
+        let module = PyModule::from_code(py, run_loop_code, c"background_loop.py", c"background_loop")?;
+        let run_loop_func = module.getattr("run_background_loop")?;
+        
+        // Start thread
+        // Args must be a tuple, but we are constructing a dict for kwargs/args
+        // kwargs: target=func, args=(loop,)
+        let kwargs = [
+            ("target", run_loop_func.into_any()), 
+            ("args", (loop_obj.clone(),).into_py_any(py)?.bind(py).clone())
+        ].into_py_dict(py)?;
+        
+        let thread = threading.getattr("Thread")?.call((), Some(&kwargs))?;
+        thread.call_method0("start")?;
+        
+        Ok(loop_obj.unbind())
     })?;
 
-    Ok(())
+    Ok(loop_obj)
 }
 
 /// A worker that executes Python code directly in the embedding process.
@@ -94,13 +90,15 @@ def run_background_loop(loop):
 pub struct EmbeddedWorker {
     // Wrap in Arc to ensure Clone is cheap and thread-safe
     app: Arc<Py<PyAny>>,
+    loop_obj: Arc<Py<PyAny>>,
 }
 
 impl EmbeddedWorker {
     /// Create a new embedded worker with the given ASGI application.
-    pub fn new(app: Bound<'_, PyAny>) -> Self {
+    pub fn new(app: Bound<'_, PyAny>, loop_obj: Py<PyAny>) -> Self {
         Self {
             app: Arc::new(app.unbind()),
+            loop_obj: Arc::new(loop_obj),
         }
     }
 
@@ -120,9 +118,7 @@ impl EmbeddedWorker {
         let app = self.app.bind(py);
         let coroutine = app.call1((scope, receive, send))?;
         
-        let loop_obj = BACKGROUND_LOOP.get()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Background loop not initialized"))?
-            .bind(py);
+        let loop_obj = self.loop_obj.bind(py);
             
         let asyncio = py.import("asyncio")?;
         let future = asyncio.call_method1("run_coroutine_threadsafe", (coroutine, loop_obj))?;
@@ -171,33 +167,64 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_embedded_worker_lifecycle() {
-        init_python(&[]).unwrap();
-        
-        let app_code = r#"
-async def app(scope, receive, send):
-    pass
-"#;
-        let app_code_c = std::ffi::CString::new(app_code).unwrap();
-        let file_name_c = std::ffi::CString::new("test_app.py").unwrap();
-        let module_name_c = std::ffi::CString::new("test_app").unwrap();
+        #[test]
 
-        Python::with_gil(|py| {
-            // Use PyModule::from_code (Bound API in 0.27+)
-            let app_module = PyModule::from_code(
-                py, 
-                &app_code_c, 
-                &file_name_c, 
-                &module_name_c
-            ).unwrap();
-            let app_func = app_module.getattr("app").unwrap();
+        fn test_embedded_worker_lifecycle() {
+
+            let loop_obj = init_python(&[]).unwrap();
+
             
-            let worker = EmbeddedWorker::new(app_func);
-            
-            // Verify we can get the app back and it's the same object
-            let retrieved_app = worker.get_app(py);
-            assert!(retrieved_app.is_callable());
-        });
+
+            let app_code = r#"
+
+    async def app(scope, receive, send):
+
+        pass
+
+    "#;
+
+            let app_code_c = std::ffi::CString::new(app_code).unwrap();
+
+            let file_name_c = std::ffi::CString::new("test_app.py").unwrap();
+
+            let module_name_c = std::ffi::CString::new("test_app").unwrap();
+
+    
+
+            Python::with_gil(|py| {
+
+                // Use PyModule::from_code (Bound API in 0.27+)
+
+                let app_module = PyModule::from_code(
+
+                    py, 
+
+                    &app_code_c, 
+
+                    &file_name_c, 
+
+                    &module_name_c
+
+                ).unwrap();
+
+                let app_func = app_module.getattr("app").unwrap();
+
+                
+
+                let worker = EmbeddedWorker::new(app_func, loop_obj.clone());
+
+                
+
+                // Verify we can get the app back and it's the same object
+
+                let retrieved_app = worker.get_app(py);
+
+                assert!(retrieved_app.is_callable());
+
+            });
+
+        }
+
     }
-}
+
+    

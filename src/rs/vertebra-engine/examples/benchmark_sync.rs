@@ -5,7 +5,7 @@ use pyo3::types::{IntoPyDict, PyDict};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize without background loop for raw sync test
-    init_python(&[])?;
+    let loop_obj = init_python(&[])?;
 
     let app_code = c"
 async def app(scope, receive, send):
@@ -20,7 +20,7 @@ def sync_wrapper(scope):
          let module = PyModule::from_code(py, app_code, c"app.py", c"app")?;
          let app = module.getattr("app")?;
          let wrapper = module.getattr("sync_wrapper")?;
-         Ok((EmbeddedWorker::new(app), wrapper.unbind()))
+         Ok((EmbeddedWorker::new(app, loop_obj), wrapper.unbind()))
     })?;
 
     println!("Starting raw PyO3 sync benchmark...");

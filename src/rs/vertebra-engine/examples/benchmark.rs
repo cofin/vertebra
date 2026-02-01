@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_python(&[])?;
+    let loop_obj = init_python(&[])?;
 
     let app_code = c"
 async def app(scope, receive, send):
@@ -19,7 +19,7 @@ async def app(scope, receive, send):
     let worker = Python::with_gil(|py| -> PyResult<EmbeddedWorker> {
          let module = PyModule::from_code(py, app_code, c"app.py", c"app")?;
          let app = module.getattr("app")?;
-         Ok(EmbeddedWorker::new(app))
+         Ok(EmbeddedWorker::new(app, loop_obj))
     })?;
 
     let service = EmbeddedService::new(worker);
