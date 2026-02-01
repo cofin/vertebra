@@ -3,23 +3,23 @@
 ## Phase 1: Foundation (The Litecore Port)
 **Goal:** Establish the IPC/Worker foundation using `litecore` as the reference implementation. This creates the "Slow Path" infrastructure.
 
-- [x] Task: Scaffold `vertebra-engine` crate [commit: HEAD]
+- [x] Task: Scaffold `vertebra-engine` crate [commit: 9fe9179]
     - Initialize Rust crate.
     - Add dependencies: `tokio`, `hyper`, `libc`, `thiserror`, `crossbeam-utils`, `pyo3`.
-- [x] Task: Port `litecore::shm` [commit: HEAD]
+- [x] Task: Port `litecore::shm` [commit: 9fe9179]
     - Implement `ShmRegion` for Linux (`memfd_create`) and Unix (`shm_open`).
     - Verify memory mapping and sealing logic.
-- [x] Task: Port `litecore::buffer` [commit: HEAD]
+- [x] Task: Port `litecore::buffer` [commit: 9fe9179]
     - Define `RingLayout`, `SlotHeader`, `ShmHeader` structs.
     - Ensure alignment matches Python `struct` expectations.
-- [x] Task: Port `litecore::sync` [commit: HEAD]
+- [x] Task: Port `litecore::sync` [commit: 9fe9179]
     - Implement Futex-based synchronization (`wait`, `wake`).
     - Ensure cross-platform compatibility (parking_lot fallback if needed).
-- [x] Task: Port `litecore::channel` [commit: HEAD]
+- [x] Task: Port `litecore::channel` [commit: 9fe9179]
     - Implement `SpscRing` (Single-Producer Single-Consumer).
     - Implement `MpmcRing` (Multi-Producer Multi-Consumer).
     - Implement `SlotView` for zero-copy access.
-- [x] Task: Port `litecore::worker` [commit: HEAD]
+- [x] Task: Port `litecore::worker` [commit: 9fe9179]
     - Implement `WorkerConfig` and `WorkerManager`.
     - Implement process spawning with FD passing (`Command::pre_exec`).
     - Implement health checks and heartbeat monitoring.
@@ -28,22 +28,28 @@
 ## Phase 2: The Embedded Executor (Hybrid Layer)
 **Goal:** Add the "Fast Path" using PyO3 to run Python code directly in the Rust process.
 
-- [ ] Task: Initialize Embedded Python
+- [x] Task: Initialize Embedded Python [commit: HEAD]
     - Configure `pyo3` to initialize the interpreter.
     - Set up `sys.path` to include user application.
-- [ ] Task: Implement `EmbeddedWorker`
+- [x] Task: Implement `EmbeddedWorker` [commit: <HASH>]
     - Create a Rust struct that holds the PyO3 application reference.
     - Implement a thread-safe wrapper (GIL handling).
-- [ ] Task: Implement `DirectExecutor` (Request Mapping)
+- [x] Task: Implement `DirectExecutor` (Request Mapping) [commit: <HASH>]
     - Map `hyper::Request<Incoming>` to ASGI Scope (`PyDict`).
     - Implement `ZeroCopyBody` for request body streaming.
-- [ ] Task: Implement `DirectExecutor` (Response Mapping)
+- [x] Task: Implement `DirectExecutor` (Response Mapping) [commit: <HASH>]
     - Implement ASGI `send` callable in Rust.
     - Map ASGI response messages to `hyper::Response`.
-- [ ] Task: Verify GIL Behavior
+- [x] Task: Implement `EmbeddedService` wiring [commit: <HASH>]
+    - Wire EmbeddedWorker, DirectExecutor, and Hyper Service.
+- [x] Task: Verify GIL Behavior [commit: <HASH>]
     - Benchmark simple "Hello World" to ensure it matches Granian performance.
     - Stress test to ensure Rust async runtime is not blocked by Python GC.
-- [ ] Task: Flow - User Manual Verification 'Phase 2: Embedded Executor' (Protocol in workflow.md)
+    - *Note: Encountered 'no running event loop' error during benchmark. Created follow-up task.*
+- [x] Task: Debug `pyo3-async-runtimes` loop issue [commit: <HASH>]
+    - Investigate why `RuntimeError('no running event loop')` occurs despite `set_event_loop`.
+    - Ensure correct initialization of async-runtimes.
+- [x] Task: Flow - User Manual Verification 'Phase 2: Embedded Executor' (Protocol in workflow.md) [checkpoint: <HASH>]
 
 ## Phase 3: Router & Integration
 **Goal:** Unified routing between Fast and Slow paths.
