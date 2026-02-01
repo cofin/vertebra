@@ -72,19 +72,7 @@ impl hyper::service::Service<Request<Incoming>> for EmbeddedService {
             let sender = ResponseSender::new(start_tx, body_tx);
             
             // Acquire GIL to map request and spawn python task
-            let py_future = Python::with_gil(|py| -> Result<_, EmbeddedError> {
-                // Ensure asyncio loop exists on this thread
-                let asyncio = py.import("asyncio")?;
-                // We use generic try/catch pattern via helper? 
-                // Or just check if get_event_loop works? 
-                // get_event_loop might create one or return one.
-                // But get_running_loop is preferred.
-                
-                if asyncio.call_method0("get_running_loop").is_err() {
-                     let loop_obj = asyncio.call_method0("new_event_loop")?;
-                     asyncio.call_method1("set_event_loop", (loop_obj,))?;
-                }
-
+            let py_future_obj = Python::with_gil(|py| -> Result<Py<PyAny>, EmbeddedError> {
                 // Reconstruct request with empty body for mapping
                 let req_head = Request::from_parts(parts, ());
                 let scope = executor.request_to_scope(py, &req_head, "http")?;
@@ -92,24 +80,43 @@ impl hyper::service::Service<Request<Incoming>> for EmbeddedService {
                 let receive_callable = Py::new(py, zero_copy_body)?;
                 let send_callable = Py::new(py, sender)?;
                 
-                let coroutine = worker.execute(
+                // execute now returns concurrent.futures.Future (wrapped in Py<PyAny>)
+                let future = worker.execute(
                     py, 
                     scope, 
                     receive_callable.bind(py).clone().into_any(), 
                     send_callable.bind(py).clone().into_any()
                 )?;
                 
-                // Convert to Rust future
-                let fut = pyo3_async_runtimes::tokio::into_future(coroutine)?;
-                Ok(fut)
+                Ok(future)
             })?;
             
-            // Spawn the python execution
+            // Bridge concurrent.futures.Future to Rust Future
+            let (done_tx, done_rx) = oneshot::channel::<Result<(), String>>();
+            
+            // Register callback
+            Python::with_gil(|py| -> Result<(), EmbeddedError> {
+                let future = py_future_obj.bind(py);
+                
+                // Helper callback
+                // We need a thread-safe callback that sends to done_tx
+                // Since done_tx is Send but not Copy, we wrap in Arc<Mutex<Option>> 
+                // BUT PyO3 callbacks are tricky with closures. 
+                // A simpler way: Poll the future from Rust? No, that blocks.
+                // Best way: Create a PyClass callback that holds the sender.
+                
+                let callback = Py::new(py, FutureCallback { tx: Arc::new(Mutex::new(Some(done_tx))) })?;
+                future.call_method1("add_done_callback", (callback,))?;
+                Ok(())
+            })?;
+            
+            // Wait for completion (or start signal which comes first)
+            // We launch a background task to await completion to log errors
             tokio::spawn(async move {
-                if let Err(e) = py_future.await {
-                    eprintln!("Python execution error: {:?}", e);
-                    // We can't easily signal error to response if headers already sent
-                    // If headers not sent, start_rx will drop and we handle it below
+                match done_rx.await {
+                    Ok(Ok(())) => {}, // Success
+                    Ok(Err(e)) => eprintln!("Python execution failed: {}", e),
+                    Err(_) => {}, // Sender dropped
                 }
             });
             
@@ -127,6 +134,34 @@ impl hyper::service::Service<Request<Incoming>> for EmbeddedService {
                 
             Ok(response)
         })
+    }
+}
+
+#[pyclass]
+struct FutureCallback {
+    tx: Arc<Mutex<Option<oneshot::Sender<Result<(), String>>>>>,
+}
+
+#[pymethods]
+impl FutureCallback {
+    fn __call__(&self, future: Bound<'_, PyAny>) {
+        let result = if let Ok(exc) = future.call_method0("exception") {
+             if !exc.is_none() {
+                 Err(exc.to_string())
+             } else {
+                 Ok(())
+             }
+        } else {
+             Err("Failed to get exception".into())
+        };
+
+        let tx = self.tx.clone();
+        tokio::task::spawn(async move {
+            let mut guard = tx.lock().await;
+            if let Some(sender) = guard.take() {
+                let _ = sender.send(result);
+            }
+        });
     }
 }
 

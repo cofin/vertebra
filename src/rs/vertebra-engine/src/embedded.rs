@@ -6,9 +6,10 @@
 //! - Managing the Global Interpreter Lock (GIL) for the main thread
 
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyDict};
+use pyo3::types::{PyList, PyDict, IntoPyDict};
+use pyo3::IntoPyObjectExt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Errors that can occur during embedded Python operations.
 #[derive(Debug, thiserror::Error)]
@@ -18,6 +19,8 @@ pub enum EmbeddedError {
     #[error("invalid path: {0}")]
     Path(String),
 }
+
+static BACKGROUND_LOOP: OnceLock<Py<PyAny>> = OnceLock::new();
 
 /// Initialize the embedded Python interpreter and configure sys.path.
 ///
@@ -46,6 +49,37 @@ pub fn init_python(extra_paths: &[&str]) -> Result<(), EmbeddedError> {
         let cwd = std::env::current_dir()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         path.insert(0, cwd.to_string_lossy().as_ref())?;
+
+        // Initialize Background Loop
+        if BACKGROUND_LOOP.get().is_none() {
+            let asyncio = py.import("asyncio")?;
+            let threading = py.import("threading")?;
+            
+            let loop_obj = asyncio.call_method0("new_event_loop")?;
+            
+            // Define run_loop function
+            let run_loop_code = c"
+def run_background_loop(loop):
+    import asyncio
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+";
+            let module = PyModule::from_code(py, run_loop_code, c"background_loop.py", c"background_loop")?;
+            let run_loop_func = module.getattr("run_background_loop")?;
+            
+            // Start thread
+            // Args must be a tuple, but we are constructing a dict for kwargs/args
+            // kwargs: target=func, args=(loop,)
+            let kwargs = [
+                ("target", run_loop_func.into_any()), 
+                ("args", (loop_obj.clone(),).into_py_any(py)?.bind(py).clone())
+            ].into_py_dict(py)?;
+            
+            let thread = threading.getattr("Thread")?.call((), Some(&kwargs))?;
+            thread.call_method0("start")?;
+            
+            let _ = BACKGROUND_LOOP.set(loop_obj.unbind());
+        }
 
         Ok(())
     })?;
@@ -82,9 +116,18 @@ impl EmbeddedWorker {
         scope: Bound<'py, PyDict>,
         receive: Bound<'py, PyAny>,
         send: Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    ) -> PyResult<Py<PyAny>> {
         let app = self.app.bind(py);
-        app.call1((scope, receive, send))
+        let coroutine = app.call1((scope, receive, send))?;
+        
+        let loop_obj = BACKGROUND_LOOP.get()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Background loop not initialized"))?
+            .bind(py);
+            
+        let asyncio = py.import("asyncio")?;
+        let future = asyncio.call_method1("run_coroutine_threadsafe", (coroutine, loop_obj))?;
+        
+        Ok(future.unbind())
     }
 }
 
