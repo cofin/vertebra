@@ -51,7 +51,24 @@
     - Ensure correct initialization of async-runtimes.
 - [x] Task: Flow - User Manual Verification 'Phase 2: Embedded Executor' (Protocol in workflow.md) [checkpoint: <HASH>]
 
-## Phase 3: Router & Integration
+## Phase 3: Performance Deep Dive & Optimization
+**Goal:** Diagnose and fix the 1600 RPS bottleneck. Target >20k RPS minimum.
+
+- [ ] Task: Research Granian Loop Architecture
+    - Analyze how Granian manages the event loop and threads.
+    - Determine if we are missing a critical initialization step or architecture pattern.
+- [ ] Task: Experiment - Raw PyO3 Overhead
+    - Benchmark `EmbeddedWorker` using synchronous `call1` (no `asyncio`) to establish a baseline.
+    - Measure the cost of `run_coroutine_threadsafe` vs `call_method1`.
+- [ ] Task: Experiment - Multi-Threaded Embedded Workers
+    - Implement a `WorkerPool` in Rust that holds multiple `EmbeddedWorker` instances (each with a dedicated thread/loop).
+    - Dispatch Hyper requests to the pool (round-robin or channel).
+- [ ] Task: Optimize "Hello World"
+    - Implement the winning strategy from experiments.
+    - Verify performance exceeds 20k RPS in release mode.
+- [ ] Task: Flow - User Manual Verification 'Phase 3: Performance Deep Dive' (Protocol in workflow.md)
+
+## Phase 4: Router & Integration
 **Goal:** Unified routing between Fast and Slow paths.
 
 - [ ] Task: Implement `OptimisticRouter`
@@ -66,9 +83,9 @@
     - Implement "Spillover" logic (optional: send to worker if GIL saturated).
 - [ ] Task: Unified Response Handling
     - Ensure both paths return compatible `hyper::Response` types.
-- [ ] Task: Flow - User Manual Verification 'Phase 3: Router & Integration' (Protocol in workflow.md)
+- [ ] Task: Flow - User Manual Verification 'Phase 4: Router & Integration' (Protocol in workflow.md)
 
-## Phase 4: Frontend & Type Bridge
+## Phase 5: Frontend & Type Bridge
 **Goal:** Native "Zero-Node" asset bundling and real-time type synchronization.
 
 - [ ] Task: Implement `RolldownExecutor`
@@ -82,13 +99,13 @@
 - [ ] Task: Implement `VirtualModuleLoader`
     - Create Rolldown plugin to serve `virtual:vertebra-types`.
     - Connect `TypeBridgeWatcher` updates to Rolldown invalidation.
-- [ ] Task: Flow - User Manual Verification 'Phase 4: Frontend & Type Bridge' (Protocol in workflow.md)
+- [ ] Task: Flow - User Manual Verification 'Phase 5: Frontend & Type Bridge' (Protocol in workflow.md)
 
-## Phase 5: Cleanup & Migration
+## Phase 6: Cleanup & Migration
 **Goal:** Remove legacy components replaced by the new architecture.
 
 - [ ] Task: Audit and Remove `vertebra-server` (Legacy Supervisor)
 - [ ] Task: Audit and Remove `vertebra-broker` (Legacy Broker)
 - [ ] Task: Remove Legacy Python IPC Code (`vertebra.core.supervisor` / `vertebra.transport`)
 - [ ] Task: Clean up Workspace (`Cargo.toml`, `.gitignore`)
-- [ ] Task: Flow - User Manual Verification 'Phase 5: Cleanup & Migration' (Protocol in workflow.md)
+- [ ] Task: Flow - User Manual Verification 'Phase 6: Cleanup & Migration' (Protocol in workflow.md)
