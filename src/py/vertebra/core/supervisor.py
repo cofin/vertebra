@@ -7,28 +7,20 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import sys
-import threading
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("vertebra.supervisor")
-
-_NATIVE_AVAILABLE: bool
-try:
-    from vertebra._vertebra import NativeSupervisor as _NativeSupervisor  # noqa: F401
-
-    _NATIVE_AVAILABLE = True
-except ImportError:
-    _NATIVE_AVAILABLE = False
 
 
 class Supervisor:
     """Process supervisor backed by Rust NativeSupervisor."""
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
-        self._native = _NativeSupervisor()
+        from vertebra._vertebra import NativeSupervisor
+
+        self._native = NativeSupervisor()
         self._config = config or {}
 
     def start(self, engine_path: str, engine_args: list[str], workers: int = 1) -> None:
@@ -40,50 +32,6 @@ class Supervisor:
 
     def stop(self) -> None:
         self._native.stop()
-
-
-class PurePythonSupervisor:
-    """Fallback supervisor using subprocess.Popen.
-
-    Used when the native Rust extension (vertebra._vertebra) is not available.
-    """
-
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
-        self._config = config or {}
-        self._proc: subprocess.Popen[bytes] | None = None
-        self._exit_code: int = 0
-        self._done = threading.Event()
-
-    def start(self, engine_path: str, engine_args: list[str], workers: int = 1) -> None:
-        cmd = [engine_path, *engine_args]
-        logger.info("PurePythonSupervisor: spawning %s", cmd)
-        self._proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, close_fds=True)
-        watcher = threading.Thread(target=self._watch, daemon=True)
-        watcher.start()
-
-    def _watch(self) -> None:
-        if self._proc is not None:
-            self._exit_code = self._proc.wait()
-        self._done.set()
-
-    def wait(self) -> int:
-        self._done.wait()
-        return self._exit_code
-
-    def stop(self) -> None:
-        if self._proc is not None and self._proc.poll() is None:
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-
-
-def make_supervisor(config: dict[str, Any] | None = None) -> Supervisor | PurePythonSupervisor:
-    """Factory that returns the best available supervisor implementation."""
-    if _NATIVE_AVAILABLE:
-        return Supervisor(config)
-    return PurePythonSupervisor(config)
 
 
 def run_supervisor(
@@ -105,7 +53,7 @@ def run_supervisor(
     env_update["VERTEBRA_SHUTDOWN_TIMEOUT_MS"] = str(shutdown_timeout_ms)
     os.environ.update(env_update)
 
-    supervisor = make_supervisor(config)
+    supervisor = Supervisor(config)
 
     try:
         supervisor.start(server_cmd[0], server_cmd[1:], workers=workers)
@@ -165,10 +113,8 @@ def build_server_command(binary: str | None = None) -> list[str]:
 
 
 __all__ = (
-    "PurePythonSupervisor",
     "Supervisor",
     "build_server_command",
     "find_server_binary",
-    "make_supervisor",
     "run_supervisor",
 )
