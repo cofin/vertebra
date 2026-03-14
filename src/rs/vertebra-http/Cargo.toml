@@ -4,9 +4,55 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+description = "Native HTTP server, router, and batch collector for Vertebra"
+
+[[bin]]
+name = "vertebra-server"
+path = "src/main.rs"
 
 [dependencies]
 vertebra-core = { path = "../vertebra-core" }
+
+# HTTP stack
+hyper          = { version = "1", features = ["full"] }
+hyper-util     = { version = "0.1", features = ["full"] }
+http           = "1"
+http-body-util = "0.1"
+
+# Async runtime
+tokio = { workspace = true }
+
+# Routing
+matchit = { workspace = true }
+
+# TLS (optional feature)
+rustls          = { version = "0.23", optional = true, features = ["ring"] }
+tokio-rustls    = { version = "0.26", optional = true }
+rustls-pemfile  = { version = "2", optional = true }
+
+# Utilities
+thiserror  = { workspace = true }
+tracing    = "0.1"
+fnv        = "1.0"
+bytes      = "1"
+parking_lot = "0.12"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = []
+tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pemfile"]
+
+[dev-dependencies]
+tokio-test    = "0.4"
+criterion     = { workspace = true }
+reqwest       = { version = "0.12", features = ["json", "http2", "blocking"] }
+tempfile      = "3"
+rustls-pemfile = "2"
+rcgen         = "0.13"
+
+[[bench]]
+name = "server_throughput"
+harness = false
 
 [lib]
 name = "vertebra_http"
