@@ -55,15 +55,16 @@ docs/requirements/inputs/*
 .cache/
 GEMINI.md
 CLAUDE.md
+AGENTS.md
 .gemini
+.geminiignore
 src/rs/target
 .cargo/
-.tmp
 **/*/bun.lockb
 tools/scripts/detect_mcp_tools.py
 src/rs/tools/scripts/detect_mcp_tools.py
 .mypy_cache
-AGENTS.md
+specs/
 specs/archive
 uv.toml
 .agent/specs/archive
@@ -72,7 +73,6 @@ uv.toml
 # Benchmark virtual environment
 benchmarks/.venv/
 benchmarks/results/
-.geminiignore
 .agent/beads.db
 .agent/.agent/beads.db
 .agent/.agent/daemon.lock
