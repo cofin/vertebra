@@ -1,1 +1,0 @@
-# Spec: federated-brokers\n\nTODO: Define requirements.

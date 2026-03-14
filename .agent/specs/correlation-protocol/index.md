@@ -1,1 +1,0 @@
-# Flow correlation-protocol Context\n- [Spec](./spec.md)\n- [Plan](./plan.md)\n
