@@ -1,0 +1,13 @@
+[package]
+name = "vertebra-http"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+vertebra-core = { path = "../vertebra-core" }
+
+[lib]
+name = "vertebra_http"
+crate-type = ["lib"]

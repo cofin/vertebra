@@ -1,0 +1,10 @@
+[package]
+name = "vertebra-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name = "vertebra_core"
+crate-type = ["lib"]

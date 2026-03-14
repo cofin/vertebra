@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "vertebra-core",
+    "vertebra-http",
+    "vertebra-py",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Vertebra Contributors"]
+license = "MIT"
+repository = "https://github.com/vertebra-io/vertebra"
+
+[workspace.dependencies]
+# Shared dependency versions — pin here, reference with { workspace = true } in crates
+pyo3 = { version = "0.21", features = ["extension-module"] }
