@@ -67,16 +67,8 @@ src/rs/tools/scripts/detect_mcp_tools.py
 specs/
 specs/archive
 uv.toml
-.agent/specs/archive
-.agent/archive
+.agent/
 .beads/
-# Benchmark virtual environment
-benchmarks/.venv/
-benchmarks/results/
-.agent/beads.db
-.agent/.agent/beads.db
-.agent/.agent/daemon.lock
-.agent/.agent/daemon-error
 
 # POC archive — local reference only
 scratch/

@@ -1,20 +1,29 @@
-//! vertebra-core — IPC primitives, ring buffers, and arena allocators.
+//! Core IPC primitives and shared types for Vertebra.
 //!
-//! This crate is a stub. Implementation arrives in the `ipc-substrate` chapter.
+//! This crate provides foundational types and protocols used across the
+//! Vertebra ecosystem for zero-copy inter-process communication.
 
-pub mod placeholder {
-    /// Placeholder to confirm the crate compiles.
-    pub fn version() -> &'static str {
-        env!("CARGO_PKG_VERSION")
-    }
-}
+/// Version constant synchronized with Python package.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[cfg(test)]
-mod tests {
-    use super::placeholder;
+pub mod async_notifier;
+pub mod async_notify;
+pub use async_notify::AsyncNotifier;
+pub mod async_ring;
+pub mod batch;
+pub mod buffer;
+pub mod channel;
+pub mod cleanup;
+pub mod guards;
+pub mod ipc;
+pub mod notify;
+pub(crate) mod platform;
+pub mod protocol;
+pub mod proxy;
+pub mod router;
+pub mod shm;
+pub mod sync;
 
-    #[test]
-    fn version_is_set() {
-        assert_eq!(placeholder::version(), "0.1.0");
-    }
-}
+// Re-exports for ergonomics
+pub use batch::{BatchArena, BatchError, BatchNode};
+pub use proxy::{HttpMethod, RequestInfo, ResponseInfo};
