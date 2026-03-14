@@ -77,3 +77,6 @@ benchmarks/results/
 .agent/.agent/beads.db
 .agent/.agent/daemon.lock
 .agent/.agent/daemon-error
+
+# POC archive — local reference only
+scratch/

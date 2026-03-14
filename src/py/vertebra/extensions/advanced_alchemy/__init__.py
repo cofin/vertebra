@@ -1,1 +1,0 @@
-"""SQLSpec integrations for Vertebra."""
