@@ -4,7 +4,59 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+description = "Core IPC primitives and shared types for Vertebra"
 
 [lib]
 name = "vertebra_core"
 crate-type = ["lib"]
+
+[dependencies]
+arrow = { workspace = true }
+crossbeam-utils = { workspace = true }
+matchit = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+jsonwebtoken = { workspace = true }
+rmp-serde = { workspace = true }
+
+[features]
+default = []
+macos-ulock = []
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+rustix = { workspace = true, features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+tokio-test = "0.4"
+
+[[bench]]
+name = "spsc"
+harness = false
+
+[[bench]]
+name = "mpmc"
+harness = false
+
+[[bench]]
+name = "spin_wait"
+harness = false
+
+[[bench]]
+name = "router"
+harness = false
+
+[[bench]]
+name = "guards"
+harness = false
+
+[[bench]]
+name = "ring_throughput"
+harness = false
