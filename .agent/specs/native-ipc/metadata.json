@@ -1,0 +1,104 @@
+{
+  "beads_id": "vertebra-w4i.4",
+  "flow_id": "native-ipc",
+  "title": "Chapter 4: Native IPC Substrate",
+  "status": "ready",
+  "created": "2026-03-14",
+  "crate": "vertebra-core",
+  "crate_path": "src/rs/vertebra-core",
+  "depends_on": ["scaffold-base"],
+  "consumed_by": [
+    "http-server-h2",
+    "native-routing",
+    "batch-collector",
+    "pyo3-request-proxy",
+    "vectorized-ffi-api",
+    "supervisor-lifecycle"
+  ],
+  "saga": "Saga 3: Native Core (Rust)",
+  "final_gate": "cd src/rs && cargo test --package vertebra-core && cargo clippy --package vertebra-core -- -D warnings",
+  "performance_targets": {
+    "spsc_ping_pong_256b": ">1M ops/s",
+    "mpmc_4p4c_256b": ">500k ops/s",
+    "conditional_wake_single_thread": "0 syscalls"
+  },
+  "phases": [
+    {
+      "id": 1,
+      "name": "Shared Memory Management",
+      "tasks": [
+        { "id": "1.1", "description": "Verify src/shm.rs completeness", "status": "complete" },
+        { "id": "1.2", "description": "Implement src/cleanup.rs", "status": "pending" }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Ring Buffers",
+      "tasks": [
+        { "id": "2.1", "description": "Verify SpscRing completeness", "status": "complete" },
+        { "id": "2.2", "description": "Verify MpmcRing completeness", "status": "complete" },
+        { "id": "2.3", "description": "Verify Notifier conditional-wake path", "status": "pending" }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Batch Arenas and Proxy Structs",
+      "tasks": [
+        { "id": "3.1", "description": "Implement src/batch.rs (BatchArena, BatchNode)", "status": "pending" },
+        { "id": "3.2", "description": "Implement src/proxy.rs (RequestInfo, ResponseInfo, HttpMethod)", "status": "pending" }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "Integration Tests",
+      "tasks": [
+        { "id": "4.1", "description": "tests/test_shm.rs", "status": "pending" },
+        { "id": "4.2", "description": "tests/test_ring.rs", "status": "pending" },
+        { "id": "4.3", "description": "tests/test_mpmc.rs", "status": "pending" },
+        { "id": "4.4", "description": "tests/test_batch.rs", "status": "pending" },
+        { "id": "4.5", "description": "benches/ring_throughput.rs", "status": "pending" }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "Module Wiring",
+      "tasks": [
+        { "id": "5.1", "description": "Update src/lib.rs re-exports and Cargo.toml bench entry", "status": "pending" }
+      ]
+    }
+  ],
+  "files_already_complete": [
+    "src/shm.rs",
+    "src/sync.rs",
+    "src/notify.rs",
+    "src/buffer.rs",
+    "src/channel.rs",
+    "src/async_ring.rs",
+    "src/async_notifier.rs",
+    "src/async_notify.rs",
+    "src/guards.rs",
+    "src/router.rs",
+    "src/ipc.rs",
+    "src/platform/",
+    "src/protocol/",
+    "benches/spsc.rs",
+    "benches/mpmc.rs",
+    "benches/spin_wait.rs",
+    "benches/router.rs",
+    "benches/guards.rs"
+  ],
+  "files_to_create": [
+    "src/cleanup.rs",
+    "src/batch.rs",
+    "src/proxy.rs",
+    "tests/test_shm.rs",
+    "tests/test_ring.rs",
+    "tests/test_mpmc.rs",
+    "tests/test_batch.rs",
+    "benches/ring_throughput.rs"
+  ],
+  "files_to_modify": [
+    "src/lib.rs",
+    "Cargo.toml"
+  ]
+}

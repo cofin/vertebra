@@ -13,22 +13,26 @@
 
 Beads provides persistent cross-session memory. Initialized in stealth mode during setup.
 
+**Note:** `br` is non-invasive and never executes git commands. After `br sync --flush-only`, you must manually run `git add .beads/ && git commit`.
+
 ### Session Protocol
 
 **Session Start:**
 
 ```bash
-bd prime        # Load AI-optimized context
-bd ready        # List unblocked tasks (dependency-aware)
+br prime        # Load AI-optimized context
+br ready        # List unblocked tasks (dependency-aware)
 ```
 
 **Session End:**
 
 ```bash
-bd sync         # Sync notes locally
+br sync --flush-only
+git add .beads/
+git commit -m "sync beads"
 ```
 
-> If `bd` is unavailable, workflow degrades gracefully to git-only tracking.
+> If `br` is unavailable, workflow degrades gracefully to git-only tracking.
 
 ### When to Track in Beads
 
@@ -43,15 +47,15 @@ bd sync         # Sync notes locally
 **Why this matters:**
 
 - Notes survive context compaction - critical for multi-session work
-- `bd ready` finds unblocked work automatically
+- `br ready` finds unblocked work automatically
 - If resuming in 2 weeks would be hard without context, use Beads
 
 ### Creating Issues with Full Context
 
-**CRITICAL: Always include `--description` and `--notes` with `bd create`:**
+**CRITICAL: Always include `--description` and `--notes` with `br create`:**
 
 ```bash
-bd create "Task name" --parent {epic_id} -p 2 \
+br create "Task name" --parent {epic_id} -p 2 \
   --description="WHY this issue exists and WHAT needs to be done" \
   --notes="CONTEXT: files affected, dependencies, origin command, timestamp"
 ```
@@ -66,11 +70,11 @@ All tasks follow a strict lifecycle:
 
 ### Standard Task Workflow
 
-1. **Select Task:** Choose the next available task from `plan.md` in sequential order, or use `bd ready` for dependency-aware selection
+1. **Select Task:** Choose the next available task from `plan.md` in sequential order, or use `br ready` for dependency-aware selection
 
 2. **Mark In Progress:**
    - Edit `plan.md`: change `[ ]` to `[~]`
-   - Sync to Beads: `bd update <id> --status in_progress`
+   - Sync to Beads: `br update <id> --status in_progress`
 
 3. **Write Failing Tests (Red Phase):**
    - Create a new test file for the feature or bug fix.
@@ -106,7 +110,7 @@ All tasks follow a strict lifecycle:
    - **Step 9.1: Get Commit Hash:** Obtain the hash of the *just-completed commit* (`git log -1 --format="%h"`).
    - **Step 9.2: Update Plan:** Read `plan.md`, find the line for the completed task, update its status from `[~]` to `[x]`, and append the commit hash.
    - **Step 9.3: Write Plan:** Write the updated content back to `plan.md`.
-   - **Step 9.4: Close in Beads:** `bd close <id> --reason "commit: <sha>"`
+   - **Step 9.4: Close in Beads:** `br close <id> --reason "commit: <sha>"`
 
 10. **Commit Plan Update:**
     - **Action:** Stage the modified `plan.md` file.
@@ -114,7 +118,7 @@ All tasks follow a strict lifecycle:
 
 11. **Log Learnings:**
     - Append discoveries to track's `learnings.md`
-    - Sync to Beads: `bd update <id> --notes "pattern: ..."`
+    - Sync to Beads: `br update <id> --notes "pattern: ..."`
     - Elevate reusable patterns to `.agent/patterns.md` at phase completion
 
 ### Knowledge Flywheel (Ralph-style)
@@ -194,7 +198,7 @@ All tasks follow a strict lifecycle:
     -   Perform the commit with a clear and concise message (e.g., `flow(checkpoint): Checkpoint end of Phase X`).
 
 7.  **Record Verification in Beads:**
-    -   Update the epic with verification summary: `bd update <epic_id> --append-notes "Phase N verified: tests passed, manual verification confirmed by user"`
+    -   Update the epic with verification summary: `br update <epic_id> --append-notes "Phase N verified: tests passed, manual verification confirmed by user"`
 
 8.  **Get and Record Phase Checkpoint SHA:**
     -   **Step 8.1: Get Commit Hash:** Obtain the hash of the *just-created checkpoint commit* (`git log -1 --format="%h"`).
@@ -345,7 +349,7 @@ A task is complete when:
 6. Works beautifully on mobile (if applicable)
 7. Implementation notes added to `plan.md`
 8. Changes committed with proper message
-9. Task closed in Beads with commit reference: `bd close <id> --reason "commit: <sha>"`
+9. Task closed in Beads with commit reference: `br close <id> --reason "commit: <sha>"`
 
 ## Emergency Procedures
 

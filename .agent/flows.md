@@ -55,38 +55,38 @@ Each flow has its own detailed spec and plan in its respective folder.
 
 ---
 
-## [ ] Flow: vertebra-v2-rewrite
+## [x] Flow: vertebra-v2-rewrite
 *Link: [./specs/vertebra-v2-rewrite/](./specs/vertebra-v2-rewrite/)*
-*Status: ACTIVE - Master Plan for Rust Migration*
+*Status: SUPERSEDED by PRD: Vertebra 0.1.0 Ghost Framework Rewrite*
 
 ---
 
-## [ ] Flow: Requires Review / Integration
-
-- [ ] **federated-brokers**: [./specs/federated-brokers/](./specs/federated-brokers/)
-- [ ] **optional-dependency-handling**: [./specs/optional-dependency-handling/](./specs/optional-dependency-handling/)
-- [ ] **documentation-adoption**: [./specs/documentation-adoption/](./specs/documentation-adoption/)
-
-## [ ] Flow: fix-benchmarks-ipc
-*Link: [./specs/fix-benchmarks-ipc/](./specs/fix-benchmarks-ipc/)*
-*Status: ACTIVE - Fix IPC return path & BlackSheep*
-
----
-
-## [ ] PRD: Async IPC Pipelining
-*Link: [./specs/async-ipc-pipelining/](./specs/async-ipc-pipelining/)*
-*Beads: vertebra-k4k*
-*Status: PLANNING*
+## [ ] PRD: Vertebra 0.1.0 — Ghost Framework Rewrite
+*Link: [./specs/vertebra-010-rewrite/](./specs/vertebra-010-rewrite/)*
+*Beads: vertebra-w4i*
+*Status: PLANNED — 9 chapters, all specs complete*
 
 ### Chapters:
-- [ ] **correlation-protocol**: [./specs/correlation-protocol/](./specs/correlation-protocol/) - *Beads: vertebra-k4k.2*
-- [ ] **lock-free-dispatch**: [./specs/lock-free-dispatch/](./specs/lock-free-dispatch/) - *Beads: vertebra-k4k.3* - blocked by correlation-protocol
-- [ ] **python-concurrent**: [./specs/python-concurrent/](./specs/python-concurrent/) - *Beads: vertebra-k4k.4* - blocked by correlation-protocol
+- [ ] **Ch1: wipe-slate**: [./specs/wipe-slate/](./specs/wipe-slate/) - *Beads: vertebra-w4i.1*
+- [ ] **Ch2: scaffold-base**: [./specs/scaffold-base/](./specs/scaffold-base/) - *Beads: vertebra-w4i.2* - blocked by Ch1
+- [ ] **Ch3: project-buildout**: [./specs/project-buildout/](./specs/project-buildout/) - *Beads: vertebra-w4i.3* - blocked by Ch2
+- [ ] **Ch4: native-ipc**: [./specs/native-ipc/](./specs/native-ipc/) - *Beads: vertebra-w4i.4* - blocked by Ch2
+- [ ] **Ch5: native-http**: [./specs/native-http/](./specs/native-http/) - *Beads: vertebra-w4i.5* - blocked by Ch4
+- [ ] **Ch6: native-ffi**: [./specs/native-ffi/](./specs/native-ffi/) - *Beads: vertebra-w4i.6* - blocked by Ch4, Ch5
+- [ ] **Ch7: wsgi-adapter**: [./specs/wsgi-adapter/](./specs/wsgi-adapter/) - *Beads: vertebra-w4i.7* - blocked by Ch6
+- [ ] **Ch8: asgi-adapter**: [./specs/asgi-adapter/](./specs/asgi-adapter/) - *Beads: vertebra-w4i.8* - blocked by Ch6
+- [ ] **Ch9: frontend-integration**: [./specs/frontend-integration/](./specs/frontend-integration/) - *Beads: vertebra-w4i.9* - blocked by Ch3, Ch6
 
+---
 
-## [ ] Flow: Discovered Specs
+## Superseded / Absorbed (by Ghost Framework Rewrite)
 
-- [ ] **vertebra-next**: [./specs/vertebra-next/](./specs/vertebra-next/)
+- [x] **vertebra-next**: [./specs/vertebra-next/](./specs/vertebra-next/) — *absorbed into PRD*
+- [x] **async-ipc-pipelining**: [./specs/async-ipc-pipelining/](./specs/async-ipc-pipelining/) — *absorbed into Ch4*
+- [x] **fix-benchmarks-ipc**: [./specs/fix-benchmarks-ipc/](./specs/fix-benchmarks-ipc/) — *superseded by clean slate*
+- [x] **federated-brokers**: [./specs/federated-brokers/](./specs/federated-brokers/) — *deferred*
+- [x] **optional-dependency-handling**: [./specs/optional-dependency-handling/](./specs/optional-dependency-handling/) — *deferred*
+- [x] **documentation-adoption**: [./specs/documentation-adoption/](./specs/documentation-adoption/) — *deferred*
 
 
 ## Recently Archived

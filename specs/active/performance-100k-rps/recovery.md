@@ -329,7 +329,7 @@ The Gemini expert analysis confirmed:
 
 ### Beads Issues Created
 
-See `bd list --tag=python-perf` for tracking:
+See `br list --tag=python-perf` for tracking:
 - P0-PY.1: Request Batching in Worker
 - P0-PY.2: Queue Bypass for Single-Message Responses
 - P0-PY.3: Iteration-based Spin

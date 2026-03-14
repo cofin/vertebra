@@ -85,16 +85,14 @@ install: destroy clean                              ## Install project dependenc
 .PHONY: beads-install
 beads-install:                                      ## Install and configure beads
 	@echo "${INFO} Setting up beads... 📿"
-	@if ! command -v bd >/dev/null 2>&1; then \
-		echo "${INFO} Installing beads-cli..."; \
-		curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash; \
+	@if ! command -v br >/dev/null 2>&1; then \
+		echo "${INFO} Installing beads_rust..."; \
+		curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh | bash; \
 	fi
 	@if [ ! -f .beads/config.yaml ]; then \
 		echo "${INFO} Initializing beads config..."; \
-		bd init --stealth >/dev/null 2>&1 || true; \
+		br init --prefix mogemma || true; \
 	fi
-	@bd config set db .agent/beads.db >/dev/null 2>&1
-	@bd config set sync-branch beads-sync >/dev/null 2>&1
 	@echo "${OK} Beads setup complete"
 
 .PHONY: upgrade
