@@ -28,6 +28,8 @@
     "dist": false,
     ".dmypy.json": true,
     ".claude": true,
+    ".beads": true,
+    ".gemini": true,
     "**/*/tsconfig.tsbuildinfo": true,
     ".cargo": true
   },
