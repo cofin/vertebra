@@ -1,0 +1,63 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "vertebra"
+version = "0.1.0"
+description = "Python-first application backbone with Rust IPC primitives"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "msgspec>=0.18",
+    "anyio>=4.0",
+    "rich>=13.0",
+    "rich-click>=1.7",
+]
+
+[project.scripts]
+vertebra = "vertebra.cli:cli"
+vtb = "vertebra.cli:cli"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-anyio>=0.0.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-anyio>=0.0.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[tool.maturin]
+python-source = "src/py"
+module-name = "vertebra._vertebra"
+manifest-path = "src/rs/vertebra-py/Cargo.toml"
+features = ["pyo3/extension-module"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src/py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["vertebra"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/py/tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/py/vertebra"]

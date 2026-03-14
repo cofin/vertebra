@@ -1,0 +1,1 @@
+# Spec: documentation-adoption\n\nTODO: Define requirements.

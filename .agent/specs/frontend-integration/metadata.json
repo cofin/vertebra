@@ -1,0 +1,72 @@
+{
+  "flow_id": "frontend-integration",
+  "beads_id": "vertebra-w4i.9",
+  "title": "Chapter 9: Frontend Integration",
+  "type": "Frontend / Tooling",
+  "status": "planned",
+  "depends_on": ["project-buildout", "native-ffi"],
+  "consolidates": [
+    "frontend-integration_20260314",
+    "build-orchestrator_20260314",
+    "type-bridge-codegen_20260314",
+    "hmr-dx-experience_20260314"
+  ],
+  "created": "2026-03-14",
+  "phases": [
+    {
+      "id": "phase-1",
+      "name": "Build Orchestrator",
+      "status": "planned",
+      "files": [
+        "src/py/vertebra/core/build/config.py",
+        "src/py/vertebra/core/build/orchestrator.py",
+        "src/py/vertebra/core/build/plugins/__init__.py",
+        "src/py/vertebra/core/build/plugins/rolldown.py",
+        "src/py/vertebra/core/build/plugins/vite.py",
+        "src/py/vertebra/core/build/__init__.py"
+      ]
+    },
+    {
+      "id": "phase-2",
+      "name": "Type Bridge and Codegen Emitters",
+      "status": "planned",
+      "files": [
+        "src/py/vertebra/core/codegen/emitters/__init__.py",
+        "src/py/vertebra/core/codegen/emitters/typescript.py",
+        "src/py/vertebra/core/codegen/emitters/zod.py",
+        "src/py/vertebra/core/codegen/manifest.py"
+      ]
+    },
+    {
+      "id": "phase-3",
+      "name": "HMR Signaling",
+      "status": "planned",
+      "files": [
+        "src/rs/vertebra-server/src/hmr.rs",
+        "src/py/vertebra/core/codegen/watch.py"
+      ]
+    },
+    {
+      "id": "phase-4",
+      "name": "pyproject.toml Integration",
+      "status": "planned",
+      "files": [
+        "src/py/vertebra/core/build/config.py"
+      ]
+    }
+  ],
+  "tests": [
+    "src/py/tests/unit/build/__init__.py",
+    "src/py/tests/unit/build/test_build_orchestrator.py",
+    "src/py/tests/unit/codegen/test_codegen_extractor.py",
+    "src/py/tests/unit/codegen/test_codegen_typescript.py",
+    "src/py/tests/unit/codegen/test_codegen_zod.py",
+    "src/py/tests/unit/codegen/test_codegen_manifest.py",
+    "src/py/tests/unit/codegen/test_codegen_watch.py"
+  ],
+  "test_count": {
+    "python": 37,
+    "rust": 2
+  },
+  "gate": "make lint && make test && make rs-test"
+}

@@ -1,0 +1,38 @@
+{
+  "beads_id": "vertebra-w4i.2",
+  "flow_id": "scaffold-base",
+  "title": "Scaffold Base 0.1.0",
+  "chapter": 2,
+  "saga": "Saga 1: Clean Slate & Foundation",
+  "type": "Project Initialization",
+  "status": "planned",
+  "depends_on": ["wipe-slate"],
+  "created": "2026-03-14",
+  "author": "prd-agent",
+  "spec_path": ".agent/specs/scaffold-base/spec.md",
+  "deliverables": [
+    "pyproject.toml",
+    "Makefile",
+    "src/py/vertebra/__init__.py",
+    "src/py/vertebra/py.typed",
+    "src/py/tests/__init__.py",
+    "src/py/tests/conftest.py",
+    "src/rs/Cargo.toml",
+    "src/rs/vertebra-core/Cargo.toml",
+    "src/rs/vertebra-core/src/lib.rs",
+    "src/rs/vertebra-http/Cargo.toml",
+    "src/rs/vertebra-http/src/lib.rs",
+    "src/rs/vertebra-py/Cargo.toml",
+    "src/rs/vertebra-py/src/lib.rs"
+  ],
+  "verification_gates": [
+    "make install",
+    "make lint",
+    "make test",
+    "cd src/rs && cargo test",
+    "python -c \"import vertebra; print(vertebra.__version__)\"",
+    "uv run mypy src/py",
+    "cd src/rs && cargo clippy -- -D warnings"
+  ],
+  "next_chapter": "cli-entrypoints"
+}

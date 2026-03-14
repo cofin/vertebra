@@ -1,0 +1,27 @@
+{
+  "research_id": "research_20260314_vertebra_http2_http3_feasibility",
+  "topic": "feasibility of proper HTTP/2 and HTTP/3 support in Vertebra, including what Rust can do now and what multiplexing work transfers from prior art",
+  "type": "Integration / Performance / Architecture",
+  "status": "complete",
+  "created_at": "2026-03-14T19:58:55Z",
+  "libraries_researched": [
+    "hyper",
+    "hyper-util",
+    "tokio-rustls",
+    "rustls",
+    "quinn",
+    "h3"
+  ],
+  "files_analyzed": [
+    "src/rs/vertebra-server/Cargo.toml",
+    "src/rs/vertebra-server/src/lib.rs",
+    "src/rs/vertebra-server/src/bridge.rs",
+    "src/rs/vertebra-server/src/worker.rs",
+    "src/rs/vertebra-core/src/protocol/mod.rs",
+    "src/rs/vertebra-engine/Cargo.toml",
+    "src/rs/vertebra-engine/src/executor.rs",
+    "src/py/vertebra/core/worker.py",
+    ".agent/research/research_20260314_bungi_http_protocols/research.md"
+  ],
+  "linked_prd": null
+}

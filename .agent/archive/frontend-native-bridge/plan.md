@@ -1,0 +1,33 @@
+# Plan: Frontend Native Bridge
+
+## Phase 1: Rust Asset Serving
+- [x] **Task: Implement `AssetManager` in `vertebra-server`** 55348c5
+    - Add `tower-http` (ServeDir) dependency.
+    - Implement static file serving for production mode.
+    - Implement a basic HTTP proxy for dev mode (using `hyper` client).
+
+## Phase 2: CLI Build Integration
+- [x] **Task: Update `vertebra build`** bd5a273
+    - In `src/py/vertebra/cli/build.py`:
+    - Add logic to detect `package.json`.
+    - If found, run `npm install` and `npm run build`.
+    - Ensure output goes to a standard location (e.g., `dist/public`).
+
+## Phase 3: Dev Server Orchestration
+- [x] **Task: Update `NativeSupervisor`** 5acc25c
+    - Add ability to spawn a frontend dev command (e.g., `npm run dev`).
+    - Pass the dev server port to the Rust server so it knows where to proxy.
+
+## Phase 4: Verification
+- [x] **Task: End-to-End Test** 214b63d
+    - Create a test project with a simple index.html (or React app).
+    - Run `vertebra build`.
+    - Run `vertebra serve`.
+    - Verify `localhost:8000` serves the index.html.
+
+## Phase 5: Completion
+- [x] **Task: Run Test Suite & Checkpoint**
+    - `make test-all`
+    - Create tag `checkpoint/frontend-native-bridge/phase-4` (ed6a1eb)
+- [x] **Task: Archive Flow**
+    - Move to `.agent/archive/`

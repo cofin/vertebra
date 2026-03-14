@@ -1,0 +1,104 @@
+{
+  "id": "wipe-slate",
+  "beads_id": "vertebra-w4i.1",
+  "title": "Clean Slate Wipe",
+  "chapter": 1,
+  "saga": 1,
+  "saga_title": "Clean Slate & Foundation",
+  "flow_id": "wipe-slate",
+  "status": "active",
+  "created_at": "2026-03-14",
+  "updated_at": "2026-03-14",
+  "parent_plan": ".agent/plans/ghost-framework-rewrite.md",
+  "spec_path": ".agent/specs/wipe-slate/spec.md",
+  "previous_stub": ".agent/specs/wipe-slate_20260314/spec.md",
+  "next_chapter": "scaffold-base",
+  "phases": [
+    {
+      "id": 1,
+      "name": "Create Archive Root",
+      "tasks": ["1.1"],
+      "status": "pending"
+    },
+    {
+      "id": 2,
+      "name": "Archive Python Source",
+      "tasks": ["2.1"],
+      "status": "pending"
+    },
+    {
+      "id": 3,
+      "name": "Archive Rust Source",
+      "tasks": ["3.1"],
+      "status": "pending"
+    },
+    {
+      "id": 4,
+      "name": "Archive TypeScript/Bun Source",
+      "tasks": ["4.1", "4.2", "4.3"],
+      "status": "pending"
+    },
+    {
+      "id": 5,
+      "name": "Archive Support Directories",
+      "tasks": ["5.1", "5.2", "5.3", "5.4", "5.5", "5.6", "5.7"],
+      "status": "pending"
+    },
+    {
+      "id": 6,
+      "name": "Archive Root-Level Config and Build Files",
+      "tasks": ["6.1", "6.2", "6.3", "6.4", "6.5", "6.6"],
+      "status": "pending"
+    },
+    {
+      "id": 7,
+      "name": "Verification",
+      "tasks": ["7.1", "7.2", "7.3"],
+      "status": "pending"
+    },
+    {
+      "id": 8,
+      "name": "Commit",
+      "tasks": ["8.1"],
+      "status": "pending"
+    }
+  ],
+  "items_archived": [
+    "src/py",
+    "src/rs",
+    "src/ts",
+    "src/wasm",
+    "benchmarks",
+    "tools",
+    "examples",
+    "docs",
+    "specs",
+    "dist",
+    "tmp",
+    "Makefile",
+    "pyproject.toml",
+    "uv.lock",
+    "Cargo.toml",
+    "Cargo.lock",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "GEMINI.md",
+    "server.log",
+    "server_multi.log",
+    "server_release.log"
+  ],
+  "items_preserved": [
+    ".agent",
+    ".beads",
+    ".claude",
+    ".gemini",
+    ".github",
+    ".gitignore",
+    ".pre-commit-config.yaml",
+    ".python-version",
+    "LICENSE",
+    "README.md"
+  ],
+  "gate": "structural — verification script exits 0; no make lint or make test applicable",
+  "tags": ["chore", "archive", "foundation", "ghost-framework"]
+}

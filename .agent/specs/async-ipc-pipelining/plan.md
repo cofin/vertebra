@@ -1,0 +1,1 @@
+# Plan: async-ipc-pipelining\n\n## Phase 1: Implementation\n- [ ] Task: Initial Scope\n

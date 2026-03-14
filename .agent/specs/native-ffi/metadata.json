@@ -1,0 +1,42 @@
+{
+  "id": "vertebra-w4i.6",
+  "flow_id": "native-ffi",
+  "title": "Chapter 6: Native FFI & Batch Runner",
+  "description": "PyO3 bridge between Rust HTTP server and Python business logic. Zero-object request proxy, vectorized batch API, and Python-side batch runner loop.",
+  "status": "active",
+  "created": "2026-03-14",
+  "chapter": 6,
+  "saga": 4,
+  "depends_on": [
+    "vertebra-w4i.4",
+    "vertebra-w4i.5"
+  ],
+  "consolidates": [
+    "pyo3-request-proxy_20260314",
+    "vectorized-ffi-api_20260314",
+    "python-batch-runner_20260314",
+    "native-core_20260314 Phase 3"
+  ],
+  "performance_gate": "200k+ req/s through full Rust -> Python -> Rust pipeline",
+  "files": {
+    "rust": [
+      "src/rs/vertebra-py/src/request.rs",
+      "src/rs/vertebra-py/src/headers.rs",
+      "src/rs/vertebra-py/src/response.rs",
+      "src/rs/vertebra-py/src/api.rs",
+      "src/rs/vertebra-py/src/lib.rs"
+    ],
+    "python": [
+      "src/py/vertebra/core/runner.py",
+      "src/py/vertebra/core/worker.py",
+      "src/py/vertebra/_vertebra.pyi"
+    ],
+    "tests": [
+      "src/rs/vertebra-py/tests/test_request_proxy.rs",
+      "src/rs/vertebra-py/tests/test_batch_api.rs",
+      "src/py/tests/test_ffi.py",
+      "src/py/tests/test_runner.py"
+    ]
+  },
+  "tags": ["pyo3", "ffi", "performance", "batch", "zero-copy", "proxy"]
+}

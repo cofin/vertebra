@@ -1,0 +1,59 @@
+# Allow specs folder
+!specs
+!.agent
+# Keep gemini folder
+!gemini
+
+# Version Control
+.git/
+
+# IDEs and Editors
+.vscode/
+.idea/
+!.claude/
+*.iml
+.DS_Store
+
+# Logs
+**/*.log
+
+# Build Artifacts & Dependencies - General
+/dist/
+/build/
+!src/py/vertebra/build/
+**/*/node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.*
+.venv/
+venv/
+env/
+.dmypy.json
+
+# Rust
+.cargo/
+target/
+src/rs/target/
+**/*.so
+
+# JavaScript/TypeScript
+.biome/
+.turbo/
+
+# Databases
+**/*.sqlite
+**/*.sqlite*
+
+# Documentation
+/docs/_build/
+
+# Temporary Files
+tmp/
+.tmp/

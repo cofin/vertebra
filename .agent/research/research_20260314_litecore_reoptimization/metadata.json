@@ -1,0 +1,39 @@
+{
+  "research_id": "research_20260314_litecore_reoptimization",
+  "topic": "Litecore branch review, Vertebra re-optimization targets, and unfinished implementation audit",
+  "type": "Codebase, Prior Art, and Performance Architecture Analysis",
+  "status": "complete",
+  "created_at": "2026-03-14T00:00:00Z",
+  "libraries_researched": [
+    "PyO3",
+    "Hyper",
+    "notify",
+    "notify-debouncer-mini"
+  ],
+  "files_analyzed": [
+    "/home/cody/code/c/litecore/README.md",
+    "/home/cody/code/c/litecore/docs/mintlify/pages/internals/architecture.mdx",
+    "/home/cody/code/c/litecore/docs/assets/type-bridge-v2.md",
+    "/home/cody/code/c/litecore/src/rs/Cargo.toml",
+    "/home/cody/code/c/litecore/src/rs/litecore-http/src/lib.rs",
+    "/home/cody/code/c/litecore/src/rs/litecore-http/src/router.rs",
+    "/home/cody/code/c/litecore/src/rs/litecore-bundler/src/lib.rs",
+    "/home/cody/code/c/litecore/src/rs/litecore-bundler/src/bundler.rs",
+    "/home/cody/code/c/litecore/src/rs/litecore-bundler/src/hmr.rs",
+    "/home/cody/code/c/litecore/src/py/litecore/framework/codegen/_bridge.py",
+    "/home/cody/code/c/litecore/src/py/litecore/framework/bundler/plugin.py",
+    "/home/cody/code/c/litecore/src/py/litecore/framework/dev/_watcher.py",
+    "/home/cody/code/c/litecore/src/py/litecore/framework/dev/_middleware.py",
+    "/home/cody/code/c/litecore/src/py/litecore/framework/dev/_module_server.py",
+    "/home/cody/code/c/litecore/src/py/litecore/framework/bundler/build_orchestrator.py",
+    "/home/cody/code/c/litecore/src/py/litecore/framework/plugins/sqlspec/storage.py",
+    "/home/cody/code/c/litecore/src/py/litecore/server/_native_import.py",
+    "/home/cody/code/c/litecore/src/py/litecore/cli/js/assets.py",
+    "/home/cody/code/c/litecore/src/rs/litecore-js/src/modules/loader.rs",
+    "/home/cody/code/c/litecore/src/rs/litecore-js/src/ops/console.rs",
+    "/home/cody/code/c/vertebra/docs/arch.md",
+    "/home/cody/code/c/vertebra/docs/architecture/native-integration.md",
+    "/home/cody/code/c/vertebra/docs/architecture/rust-ipc-core.md"
+  ],
+  "linked_prd": null
+}

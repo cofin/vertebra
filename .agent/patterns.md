@@ -1,0 +1,218 @@
+# Project Patterns
+
+> Consolidated learnings and patterns from all tracks.
+> This file is the single source of truth for project conventions.
+
+## Code Conventions
+
+### Naming
+- **Pool**: Reserved for broker/database pools (`BasePoolAdapter`, SQL pools, Redis pools)
+- **IpcConnectionPool**: ASGI worker IPC connection pooling (`worker-connections.ts`)
+- **ProcessManager**: Python worker process supervision (`process-manager.ts`)
+- **Public SQLSpec APIs**: Use the `Vertebra*` prefix (configs/drivers/proxies)
+- **Internal broker IPC**: Keep the `Broker*` prefix (`BrokerClient`, `BrokerClientConfig`)
+
+### Imports
+- **PyO3 vs CFFI**: Prefer PyO3 with `allow_threads()` over CFFI (CFFI holds GIL during blocking calls)
+- **Native imports**: Import from `vertebra._vertebra` for Rust bindings
+
+### Error Handling
+- Use `MissingDependencyError` from `vertebra.exceptions` for optional dependencies
+- Use `dependency_flag()` from `vertebra.typing` for feature detection
+
+## Architecture Patterns
+
+### IPC Patterns
+- **MPMC Control Rings**: Use Multi-Producer Multi-Consumer rings for the "control" channel - allows multiple Python workers to register with a single Broker thread without lock contention
+- **Opcode-based Dispatch**: Use integer opcodes (matched between Rust/TS/Python) for high-frequency operations (hashing, signing) - avoids JSON/MsgPack serialization overhead for method names
+- **Eventfd over Polling**: Linux uses eventfd for zero-overhead async notification; macOS/Windows use polling fallback
+- **Buffer Pools**: Pre-allocated buffers eliminate allocation churn (target: <1MB/s vs 650MB/s without)
+- **State Sync IDs**: Use FNV-1a 64-bit for `state_id` (state class name) and FNV-1a 32-bit for `field_id` (field name); MessagePack arrays for deltas with BigInt64 enabled in TS for 64-bit IDs/timestamps
+- **IPC Health Check**: Sending a special "ping" scope/message type (`vertebra.ping`) that bypasses the ASGI app allows for extremely fast health checks without app overhead
+
+### Data Loading
+- **Lazy User Hydration**: `LazyUserProxy` pattern - `request.user` is available immediately with JWT claims, database fetch deferred until missing attribute accessed
+
+### Serialization Contexts
+| Context | Codec |
+|---------|-------|
+| Python internal | msgspec |
+| Driver data plane (small) | MessagePack |
+| Driver data plane (large) | Arrow IPC |
+| MCP/gRPC control plane | Protobuf |
+| Rust internal IPC | bincode |
+
+## Gotchas & Warnings
+
+### Shared Memory
+- **Cleanup Required**: Named shared memory regions must be explicitly unlinked - use `ShmMpmcRing.unlink` to prevent "File exists" errors on server restarts
+- **Stale Objects**: Clean `/dev/shm/test-* /dev/shm/*vertebra*` before test runs if experiencing hangs
+- **FD Leaks**: Ensure `close()` is called on transports; add `__del__` cleanup
+- **O_EXCL for Atomic Shm**: Using `shm_unlink` followed by `shm_open(..., O_CREAT | O_EXCL)` is a robust way to handle stale shared memory files from crashed processes
+
+### Performance Anti-Patterns
+- **PyO3 Iteration Overhead**: Safe PyO3 wrappers (`PyList`, `PyTuple`, `PyAny::extract`) incur significant C-API overhead per cell. For Arrow encoding, `nanoarrow` (C extension with raw pointers) is 3x faster than naive Rust iteration
+- **asyncio.sleep() Polling Floor**: `await asyncio.sleep(0.001)` introduces a minimum 1ms latency floor per poll, capping throughput. High-performance IPC must use `eventfd` (Linux) or blocking/signaling mechanisms for immediate wake on data arrival
+- **NEVER Use Polling as Fallback**: Current polling implementation yields ~66 RPS - it is non-functional for production. eventfd/pipe notification is mandatory, not optional
+
+### IPC Notification Pattern (Consensus: Gemini 3 Pro + Flash, 9/10)
+- **Linux**: Use `eventfd(2)` for cross-process notification (3-10μs latency)
+- **macOS/Windows**: Use `os.pipe()` as fallback (same add_reader() integration)
+- **asyncio Integration**: Register fd with `loop.add_reader(notify_fd, callback)` - zero polling
+- **Reactor Pattern**: Replace `while` loops with callback-based event handling
+- **FD Inheritance**: Create eventfd in parent, pass fd number via CLI arg to child process
+- **Batching**: Signal once per batch of writes to avoid syscall overhead at high RPS
+- **Cleanup**: ProcessManager owns shm_unlink via SIGCHLD handler; use atexit in workers
+
+### Bun FFI
+- When adding new Rust functions to `vertebra-broker`, rebuild the Rust library (`make rs-build`) **and** ensure the Bun FFI definition in `shm.ts` matches exactly - runtime symbol lookup errors otherwise
+- **Critical Discovery: Bun FD Watching Limitations**: Bun's `node:net` module is a compatibility shim and does NOT properly integrate arbitrary file descriptors with its event loop. `net.Socket({ fd })` and similar patterns that work in Node.js will NOT fire events in Bun. High-performance IPC in Bun requires hybrid polling loops or Unix sockets.
+
+### PyO3 and C-API Overhead
+- **Naive PyO3 Iteration is Slow**: Safe PyO3 wrappers (`PyList`, `PyTuple`, `PyAny::extract`) incur significant C-API overhead (refcounting, bounds checking) per cell. For Arrow encoding, an optimized C extension like `nanoarrow` using raw pointers is ~3x faster than safe Rust iteration.
+- **Serialization Tradeoffs**: Serializing Python objects to bytes (msgpack/json) just to decode them in Rust for speed is often a net loss due to the cost of the initial serialization pass in Python.
+
+### Self-Pipe / Eventfd Shutdown
+- **Thread Shutdown**: Use a dedicated `eventfd` (or pipe) as a second poll target to wake a blocked thread instantly. This allows for infinite timeouts (0% CPU idle) while maintaining instant shutdown capabilities.
+
+### Testing
+- **Test Timeouts**: Integration tests with `subprocess` and network calls are prone to timeouts - ensure correct `PYTHONPATH`, `VERTEBRA_CONFIG` environment variables and absolute paths
+- **Pytest Markers**: Use `@pytest.mark.anyio` for async tests (not `pytest-asyncio` markers) - anyio is the configured backend
+- **Non-unique SHM Names**: Use uuid-based unique naming for shared memory in tests to avoid collisions
+
+### Dependencies
+- Adding Bun dependencies (like `jose`) requires ensuring the test environment (CI or local `make test`) installs them
+
+## Testing Patterns
+
+### Shared Memory Test Cleanup
+```python
+@pytest.fixture(autouse=True)
+async def cleanup_shm():
+    """Clean up shared memory after each test."""
+    yield
+    # Cleanup code
+```
+
+### UUID-based Unique Naming
+```python
+import uuid
+shm_name = f"test-{uuid.uuid4().hex[:8]}"
+```
+
+### Context Managers for Resource Tracking
+```python
+async with create_channel_pair() as (tx, rx):
+    # Use channels
+# Automatic cleanup on exit
+```
+
+## Context for AI Assistants
+
+### Key Architecture Points
+- **Python is always the entry point**: Rust and Bun are acceleration layers
+- **No sockets in data plane**: Shared memory only for broker communication
+- **Bun-only drivers**: Raise explicit errors under Node
+
+### Recovery Patterns
+- Clean stale shared memory: `rm -rf /dev/shm/test-* /dev/shm/*vertebra*`
+- Verify tests pass: `make test`
+- Rebuild PyO3 bindings after Rust changes: `cd src/rs/vertebra-py && maturin develop`
+
+### Mitigation Strategies (from Production Readiness)
+- If broker integration is blocked: Implement in smaller slices (internal providers first)
+- If SQLSpec APIs shift: Update adapter to latest stable API, don't drop support
+- If Bun streaming shows instability: Fix IPC/backpressure issues, add diagnostics
+- If Protobuf IPC unsupported: Keep MessagePack for MVP, track Protobuf post-MVP
+
+## Decisions Made
+
+### Security
+- **Bcrypt Default**: Switched to `bcrypt` for password hashing in the Broker (standard, widely supported) though Argon2 is also available
+- **Symmetric JWT**: Added support for symmetric key JWT verification for simple shared-secret setups alongside asymmetric (JWKS) flows
+- **Refresh Token Strategy**: Implemented rotation for Symmetric JWTs only. External providers (OAuth2/IAP) manage their own rotation. Broker injects `Set-Cookie` headers for updated tokens.
+
+### Performance Targets
+| Metric | Target |
+|--------|--------|
+| IPC latency | <100μs |
+| Allocation rate | <1MB/s |
+| Throughput | >50K req/s |
+
+## Reusable Components
+
+- `SecurityClient` (Python): Standalone client for Broker security functions via IPC
+- `AuthValidator` (TS): Reusable JWT/IAP token validation class
+- `LazyUserProxy` (Python): Generic proxy for lazy-loading models
+- `BasePoolAdapter` (TS): Abstract class for all pool types in broker
+- `PipelineCompiler` (Python): Adaptable for other frameworks by changing reflection logic
+- `VertebraRequest` (Python): High-performance request wrapper with lazy-loaded data
+- `ShmRouter` (Rust): FFI-friendly wrapper around `matchit`
+- `VertebraCodec` (Python): MessagePack/JSON codec supporting 30+ Python types
+- `NativeState` (Python): Base class for synchronizable state (`msgspec.Struct` with `__setattr__` hook)
+- `StreamingResponse` (Python): Generic wrapper for `AsyncIterable` to NDJSON
+
+## SQLSpec Integration Patterns
+
+### Adapter Structure
+Mirror `sqlspec/adapters/<dialect>/` inside `vertebra/extensions/sqlspec/<dialect>/` for logical consistency.
+
+### Result Handling
+- `VertebraAsyncConnection.fetchrow` returns tuples
+- Use `_collect_rows` for dict mapping or `Driver.execute` with `result.one_or_none()`/`result.all()`
+
+### Async Context Pattern
+```python
+# Correct: await the provider, then use async with
+async with (await self.config.provide_connection()) as conn:
+    ...
+```
+
+### Database-Specific Notes
+- **MySQL**: No `IF NOT EXISTS` for indexes; check `information_schema.statistics`
+- **SQLite**: Use `REAL` Julian Day numbers for timezone-compatible timestamps
+- **MySQL DATETIME**: Timezone-naive; store UTC as naive, handle in Python layer
+
+## Native Integration Patterns
+
+### Dynamic Compilation
+Use `exec` to generate Python functions for hot paths (removes stack frames, faster than `functools.partial`).
+
+### Hybrid Routing
+Use `matchit` (Rust) for performance with standard ASGI fallback for safe, incremental adoption.
+
+### Bun FFI String Handling
+Passing strings to C ABI via Bun `dlopen` requires:
+- Manual null-termination: `Buffer.from(s + '\0')` for `ptr` type
+- Or use `cstring` type (may be flaky)
+
+## Process Supervision
+
+### Dual Reaping Race
+When mixing `libc::waitpid` (Rust) and `subprocess.Popen.poll()` (Python):
+- Both compete to reap child processes
+- **Solution**: Python actively handles exits from `poll()` as fallback for Rust supervisor
+
+### Windows Support
+Job Object support is enabled but needs implementation to ensure child processes are killed when parent dies.
+
+### Bun Spawn & FD Inheritance
+Bun's `spawn` implementation (via `posix_spawn`) respects `O_CLOEXEC` strictly. To pass specific FDs (like eventfds for IPC) to a child process, they must be explicitly included in the `stdio` array (e.g., `stdio: ["inherit", "inherit", "inherit", fd]`). Passing them merely as CLI args causes `OSError: Bad file descriptor` in the child.
+
+### PYTHONPATH Relative Resolution
+When spawning Python from TypeScript (via `ProcessManager`), resolving `src/py` relative to `process.cwd()` is fragile if the runner CWD varies (e.g., `src/ts` during dev vs root during prod). Use robust existence checks or fallback to `import.meta.dir` relative paths to ensure `PYTHONPATH` is correct.
+
+## Build & Distribution
+
+### PyO3 GIL Release
+Use `py.detach` (not deprecated `py.allow_threads`).
+
+### Bun.build Output
+Native builds (`target: "bun"`) ignore `outfile` option; require post-processing move for specific output locations.
+
+### CLI Composition
+Split large `click` CLI into modules (`serve.py`, `build.py`, `init.py`) and aggregate in `__init__.py`.
+
+---
+
+*See `.agent/archive/historical-decisions.md` for full historical context from archived PRDs.*

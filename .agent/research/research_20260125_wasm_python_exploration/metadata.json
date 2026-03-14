@@ -1,0 +1,24 @@
+{
+  "research_id": "research_20260125_wasm_python_exploration",
+  "topic": "WASM for Python (PyScript), Pingora, and Workerd feasibility & integration",
+  "type": "Architecture & Feature Exploration",
+  "status": "complete",
+  "created_at": "2026-01-25T12:00:00Z",
+  "libraries_researched": [
+    "PyScript",
+    "Pyodide",
+    "Nanoarrow",
+    "Pingora",
+    "Workerd",
+    "Apache Arrow",
+    "msgspec",
+    "pydantic",
+    "attrs"
+  ],
+  "files_analyzed": [
+    "docs/arch.md",
+    "docs/architecture/type-bridge.md",
+    "docs/architecture/rust-ipc-core.md"
+  ],
+  "linked_prd": null
+}

@@ -8,7 +8,7 @@ node_modules/
 
 # Biome cache
 .biome/
-
+!src/py/vertebra/build
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -25,6 +25,7 @@ __pycache__/
 .ruff_cache
 /docs/_build/
 coverage.*
+coverage/
 setup.py
 tmp/
 *.log
@@ -35,6 +36,8 @@ todo/
 # Distribution / packaging
 .Python
 build/
+!src/py/vertebra/build/
+!src/py/**/*/build/
 dist/
 downloads/
 .python-version
@@ -42,6 +45,7 @@ downloads/
 .mypy-cache**
 **/*/.mypy-cache
 src/py/dma/domain/web/static/
+src/py/vertebra/bin/
 docs/requirements/inputs/*
 .cursor/
 .zed/
@@ -49,11 +53,30 @@ docs/requirements/inputs/*
 .idea/
 .claude/
 .cache/
-.gemini/mcp-tools.txt
+GEMINI.md
 CLAUDE.md
 AGENTS.md
-GEMINI.md
-specs/
-.geminiignore
 .gemini
+.geminiignore
+src/rs/target
+.cargo/
+**/*/bun.lockb
 tools/scripts/detect_mcp_tools.py
+src/rs/tools/scripts/detect_mcp_tools.py
+.mypy_cache
+specs/
+specs/archive
+uv.toml
+.agent/specs/archive
+.agent/archive
+.beads/
+# Benchmark virtual environment
+benchmarks/.venv/
+benchmarks/results/
+.agent/beads.db
+.agent/.agent/beads.db
+.agent/.agent/daemon.lock
+.agent/.agent/daemon-error
+
+# POC archive — local reference only
+scratch/

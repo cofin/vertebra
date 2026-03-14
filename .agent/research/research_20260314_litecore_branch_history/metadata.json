@@ -1,0 +1,15 @@
+{
+  "research_id": "research_20260314_litecore_branch_history",
+  "topic": "Litecore branch history, architectural pivots, and the C++/CFFI experiment",
+  "type": "Codebase and Prior Art Analysis",
+  "status": "complete",
+  "created_at": "2026-03-14T00:00:00Z",
+  "libraries_researched": [],
+  "files_analyzed": [
+    "/home/cody/code/c/litecore/README.md",
+    "/home/cody/code/c/litecore/docs/mintlify/pages/internals/architecture.mdx",
+    "/home/cody/code/c/litecore/src/py/litecore/framework/bundler/native.py",
+    "/home/cody/code/c/litecore/src/rs/Cargo.toml"
+  ],
+  "linked_prd": null
+}
