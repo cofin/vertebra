@@ -9,12 +9,10 @@ SHELL := /bin/bash
 MAKEFLAGS += --no-print-directory
 SHELLFLAGS := -e -o pipefail -c
 
-# Silence output if VERBOSE is not set
 ifndef VERBOSE
 .SILENT:
 endif
 
-# Define colors and formatting
 BLUE := $(shell printf "\033[1;34m")
 GREEN := $(shell printf "\033[1;32m")
 RED := $(shell printf "\033[1;31m")
@@ -32,274 +30,187 @@ help:                                               ## Display this help text fo
 
 
 # =============================================================================
-# Developer Utils
+# Setup
 # =============================================================================
-.PHONY: install-uv
-install-uv:                                         ## Install latest version of uv
-	@echo "${INFO} Installing uv..."
-	@curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
-	@echo "${OK} UV installed successfully"
-
-.PHONY: install-rust
-install-rust:                                       ## Install Rust toolchain via rustup
-	@echo "${INFO} Installing Rust toolchain..."
-	@if command -v cargo >/dev/null 2>&1; then \
-		echo "${OK} Rust toolchain already installed"; \
-		exit 0; \
-	fi
-	@if command -v rustup >/dev/null 2>&1; then \
-		rustup toolchain install stable; \
-	else \
-		curl -fsSL https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1; \
-	fi
-	@if [ -f "$(RUST_ENV)" ]; then \
-		. "$(RUST_ENV)"; \
-	fi
-	@if command -v cargo >/dev/null 2>&1; then \
-		echo "${OK} Rust toolchain installed"; \
-	else \
-		echo "${ERROR} Rust toolchain install failed; ensure rustup is available"; \
-		exit 1; \
-	fi
-
 .PHONY: install
-install: clean                                      ## Install project dependencies for local development
+install: clean ts-install dev                       ## Install everything (Python + Rust + TS + native extension)
 	@echo "${INFO} Starting installation..."
 	@if ! command -v uv >/dev/null 2>&1; then \
-		$(MAKE) install-uv; \
+		curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1; \
 	fi
 	@uv python pin 3.12 >/dev/null 2>&1
 	@uv venv >/dev/null 2>&1
-	@$(MAKE) py-install
+	@uv sync --all-extras --dev
 	@if ! command -v cargo >/dev/null 2>&1; then \
-		$(MAKE) install-rust; \
+		curl -fsSL https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1; \
 	fi
-	@$(MAKE) rs-build
-	@cd $(CURDIR) && echo "${OK} Installation complete!"
-
-.PHONY: upgrade
-upgrade:                                            ## Upgrade all dependencies to the latest stable versions
-	@echo "${INFO} Updating all dependencies..."
-	@if ! command -v uv >/dev/null 2>&1; then \
-		$(MAKE) install-uv; \
-	fi
-	@uv lock --upgrade
-	@echo "${OK} Python dependencies updated"
-	@$(MAKE) py-install
-	@if ! command -v cargo >/dev/null 2>&1; then \
-		$(MAKE) install-rust; \
-	fi
-	@$(MAKE) rs-upgrade
+	@echo "${OK} Installation complete"
 
 .PHONY: clean
-clean:                                              ## Cleanup temporary build artifacts
-	@echo "${INFO} Cleaning working directory..."
-	@rm -rf .pytest_cache .ruff_cache .hypothesis build/ dist/ .eggs/ .coverage coverage.xml coverage.json htmlcov/ src/py/tests/.pytest_cache src/py/tests/**/.pytest_cache .mypy_cache .cache/ coverage/ >/dev/null 2>&1
-	@find . -name '*.egg-info' -exec rm -rf {} + >/dev/null 2>&1
-	@find . -type f -name '*.egg' -exec rm -f {} + >/dev/null 2>&1
-	@find . -name '*.pyc' -exec rm -f {} + >/dev/null 2>&1
-	@find . -name '*.pyo' -exec rm -f {} + >/dev/null 2>&1
-	@find . -name '*~' -exec rm -f {} + >/dev/null 2>&1
-	@find . -name '__pycache__' -exec rm -rf {} + >/dev/null 2>&1
-	@find . -name '.ipynb_checkpoints' -exec rm -rf {} + >/dev/null 2>&1
+clean:                                              ## Remove build artifacts and caches
+	@echo "${INFO} Cleaning..."
+	@# Python caches and artifacts
+	@rm -rf .pytest_cache .ruff_cache .mypy_cache .cache .hypothesis .coverage coverage.xml coverage.json htmlcov .sqlspec >/dev/null 2>&1
+	@find . -name '*.egg-info' -o -name '*.pyc' -o -name '*.pyo' -o -name '__pycache__' | xargs rm -rf 2>/dev/null || true
 	@find . -name '*.so' -path '*/vertebra/*' -exec rm -f {} + >/dev/null 2>&1
-	@echo "${OK} Working directory cleaned"
+	@rm -rf build/ dist/ >/dev/null 2>&1
+	@# Rust artifacts
+	@rm -rf src/rs/target src/rs/target-ft >/dev/null 2>&1
+	@# TypeScript/JS artifacts
+	@rm -rf src/ts/vertebra-client/dist .biome src/py/vertebra/server/_js/bundle/ >/dev/null 2>&1
+	@echo "${OK} Clean"
 
 .PHONY: destroy
-destroy:                                            ## Destroy the virtual environment
-	@echo "${INFO} Destroying virtual environment..."
-	@rm -rf .venv
-	@echo "${OK} Virtual environment destroyed"
+destroy:                                            ## Destroy virtual environment
+	@rm -rf .venv && echo "${OK} Virtual environment destroyed"
+
+.PHONY: upgrade
+upgrade:                                            ## Upgrade all dependencies (Python, Rust, TS, CI)
+	@echo "${INFO} Upgrading Python dependencies (uv)..."
+	@uv lock --upgrade && uv sync --all-extras --dev
+	@echo "${INFO} Upgrading Rust dependencies (cargo)..."
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@cd $(CURDIR)/src/rs && cargo update
+	@echo "${INFO} Upgrading TS dependencies (bun)..."
+	@cd $(CURDIR)/src/ts/vertebra-client && bun update
+	@echo "${INFO} Upgrading CI hooks (pre-commit)..."
+	@uv run pre-commit autoupdate
+	@echo "${OK} All dependencies upgraded"
+
+
+.PHONY: ts-install
+ts-install:                                         ## Install TS dependencies
+	@echo "${INFO} Installing TS dependencies (Bun)..."
+	@cd src/ts/vertebra-client && bun install
+	@echo "${OK} TS installation complete"
+
+.PHONY: ts-build
+ts-build:                                           ## Build TS client package
+	@echo "${INFO} Building @vertebra/client..."
+	@cd src/ts/vertebra-client && bun run build
+	@echo "${OK} TS build complete"
+
+.PHONY: ts-test
+ts-test:                                            ## Run TS unit tests
+	@echo "${INFO} Running TS tests (Vitest)..."
+	@cd src/ts/vertebra-client && bun run test
+	@echo "${OK} TS tests passed"
+
+.PHONY: ts-lint
+ts-lint:                                            ## Lint TS package with auto-fixes
+	@echo "${INFO} Linting TS package (Biome)..."
+	@cd src/ts/vertebra-client && bun run lint:fix
+	@echo "${OK} TS lint complete"
+
+.PHONY: dev
+dev:                                                ## Install native extension in debug mode for development
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@uv run maturin develop --uv 2>&1 | grep -E "Compiling|Finished|Built wheel|Installed|error\[" | tail -3
+
+# =============================================================================
+# Build
+# =============================================================================
+.PHONY: build
+build: ts-build                                     ## Build optimized release binaries + native extension + TS client
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@cd $(CURDIR)/src/rs && cargo build --workspace --exclude vertebra-py --release
+	@uv run maturin develop --uv -r 2>&1 | grep -E "Compiling|Finished|Built wheel|Installed|error\[" | tail -3
+	@uv build
+	@echo "${OK} Build complete"
 
 
 # =============================================================================
-# Rust Development
+# Test
 # =============================================================================
-.PHONY: rs-build
-rs-build:                                           ## Build Rust workspace
-	@echo "${INFO} Building Rust components..."
-	@if [ -f "$(RUST_ENV)" ]; then \
-		. "$(RUST_ENV)"; \
-	fi
-	@if ! command -v cargo >/dev/null 2>&1; then \
-		echo "${ERROR} cargo not found; run 'make install-rust'"; \
-		exit 1; \
-	fi
-	@cargo build --manifest-path $(CURDIR)/src/rs/Cargo.toml
-	@echo "${OK} Rust build complete"
+.PHONY: test
+test: dev                                           ## Run Python tests
+	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
+	@uv run pytest src/py/tests -v
+	@echo "${OK} Tests passed"
 
 .PHONY: rs-test
 rs-test:                                            ## Run Rust tests
-	@echo "${INFO} Cleaning shared memory..."
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
-	@echo "${INFO} Running Rust tests..."
-	@if [ -f "$(RUST_ENV)" ]; then \
-		. "$(RUST_ENV)"; \
-	fi
-	@if ! command -v cargo >/dev/null 2>&1; then \
-		echo "${ERROR} cargo not found; run 'make install-rust'"; \
-		exit 1; \
-	fi
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@cd src/rs && cargo test
 	@echo "${OK} Rust tests passed"
 
-.PHONY: rs-miri
-rs-miri:                                            ## Run Miri on Rust code
-	@echo "${INFO} Running Miri UB detection..."
-	@if [ -f "$(RUST_ENV)" ]; then \
-		. "$(RUST_ENV)"; \
-	fi
-	@cd src/rs && cargo +nightly miri test
-	@echo "${OK} Miri checks passed"
-
-.PHONY: rs-bench
-rs-bench:                                           ## Run Rust benchmarks
-	@echo "${INFO} Running Rust benchmarks..."
-	@if [ -f "$(RUST_ENV)" ]; then \
-		. "$(RUST_ENV)"; \
-	fi
-	@cd src/rs && cargo bench
-	@echo "${OK} Benchmarks complete"
-
-.PHONY: rs-fmt
-rs-fmt:                                             ## Format Rust code
-	@echo "${INFO} Formatting Rust code..."
-	@if [ -f "$(RUST_ENV)" ]; then \
-		. "$(RUST_ENV)"; \
-	fi
-	@cd src/rs && cargo fmt
-	@echo "${OK} Rust formatting complete"
-
-.PHONY: rs-lint
-rs-lint:                                            ## Run Rust linting
-	@echo "${INFO} Running Rust linting..."
-	@if [ -f "$(RUST_ENV)" ]; then \
-		. "$(RUST_ENV)"; \
-	fi
-	@cd src/rs && cargo clippy --all-targets --all-features -- -D warnings
-	@echo "${OK} Rust linting complete"
-
-.PHONY: rs-clean
-rs-clean:                                           ## Clean Rust build artifacts
-	@echo "${INFO} Cleaning Rust artifacts..."
-	@if [ -f "$(RUST_ENV)" ]; then \
-		. "$(RUST_ENV)"; \
-	fi
-	@if command -v cargo >/dev/null 2>&1; then \
-		cd src/rs && cargo clean; \
-	else \
-		echo "${WARN} cargo not found; skipping Rust clean"; \
-	fi
-	@echo "${OK} Rust artifacts cleaned"
-
-.PHONY: rs-upgrade
-rs-upgrade:                                         ## Update Rust dependencies (Cargo.lock)
-	@echo "${INFO} Updating Rust dependencies..."
-	@if [ -f "$(RUST_ENV)" ]; then \
-		. "$(RUST_ENV)"; \
-	fi
-	@if command -v cargo >/dev/null 2>&1; then \
-		cd src/rs && cargo update; \
-		echo "${OK} Rust dependencies updated"; \
-	else \
-		echo "${WARN} cargo not found; skipping Rust dependency update"; \
-	fi
-
-
-# =============================================================================
-# Python Development
-# =============================================================================
-.PHONY: py-install
-py-install:                                         ## Install Python dependencies
-	@echo "${INFO} Installing Python dependencies..."
-	@if ! command -v uv >/dev/null 2>&1; then \
-		$(MAKE) install-uv; \
-	fi
-	@uv sync --all-extras --dev
-	@echo "${OK} Python dependencies installed"
-
-.PHONY: ensure-native
-ensure-native:                                      ## Ensure native extension is built
-	@if ! uv run python -c "import vertebra._vertebra" 2>/dev/null; then \
-		echo "${INFO} Building native extension..."; \
-		uv run maturin develop --uv >/dev/null 2>&1; \
-		echo "${OK} Native extension built"; \
-	fi
-
-.PHONY: py-build
-py-build:                                           ## Build Python package
-	@echo "${INFO} Building Python package..."
-	@uv build
-	@echo "${OK} Python package build complete"
-
-.PHONY: py-lint
-py-lint:                                            ## Run Python linting and formatting
-	@echo "${INFO} Running Python linting and formatting..."
-	@uv run ruff check --fix src/py/vertebra src/py/tests
-	@uv run ruff format src/py/vertebra src/py/tests
-	@echo "${OK} Python linting complete"
-
-.PHONY: mypy
-mypy:                                               ## Run mypy
-	@echo "${INFO} Running mypy..."
-	@uv run mypy src/py/vertebra
-	@echo "${OK} Mypy checks passed"
-
-.PHONY: type-check
-type-check: mypy                                    ## Run all type checking
-
-.PHONY: pre-commit
-pre-commit:                                         ## Runs pre-commit hooks
-	@echo "${INFO} Running pre-commit checks..."
-	@uv run pre-commit run --color=always --all-files
-	@echo "${OK} Pre-commit checks passed"
-
-.PHONY: fix
-fix:                                                ## Run formatting scripts
-	@echo "${INFO} Running code formatters..."
-	@uv run ruff check --fix src/py/vertebra src/py/tests
-	@uv run ruff format src/py/vertebra src/py/tests
-	@cd $(CURDIR) && echo "${OK} Code formatting complete"
-
-.PHONY: fmt
-fmt: fix                                            ## Alias for fix
-
-.PHONY: lint
-lint: py-lint rs-fmt                                ## Format Python/Rust with fixes
-
-.PHONY: lint-all
-lint-all: py-lint rs-lint pre-commit type-check     ## Run all linting
+.PHONY: test-all
+test-all: rs-test test                              ## Run all tests (Rust then Python)
 
 .PHONY: coverage
-coverage:                                           ## Run the tests and generate coverage report
-	@echo "${INFO} Running tests with coverage..."
+coverage:                                           ## Run tests with coverage report
 	@uv run pytest src/py/tests --cov --quiet
 	@uv run coverage html >/dev/null 2>&1
-	@uv run coverage xml >/dev/null 2>&1
-	@echo "${OK} Coverage report generated"
+	@echo "${OK} Coverage report: htmlcov/index.html"
 
-.PHONY: test
-test:                                               ## Run unit tests (excludes integration)
-	@echo "${INFO} Cleaning shared memory..."
-	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
-	@echo "${INFO} Running unit tests..."
-	@uv run pytest src/py/tests -v
-	@echo "${OK} Unit tests passed"
 
-.PHONY: integration-test
-integration-test:                                   ## Run integration tests only
-	@echo "${INFO} Cleaning shared memory..."
-	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
-	@echo "${INFO} Running integration tests..."
-	@uv run pytest src/py/tests -m integration
-	@echo "${OK} Integration tests passed"
+# =============================================================================
+# Lint & Format
+# =============================================================================
+.PHONY: lint
+lint: ts-lint                                       ## Format and lint everything with auto-fixes (Python, Rust, TS, Markdown)
+	@echo "${INFO} Linting and fixing Python (Ruff)..."
+	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests
+	@uv run ruff format src/py/vertebra src/py/tests
+	@echo "${INFO} Linting and fixing Rust (Fmt & Clippy)..."
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@cd $(CURDIR)/src/rs && cargo fmt
+	@cd $(CURDIR)/src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --exclude vertebra-py --all-targets -- -D warnings >/dev/null 2>&1
+	@echo "${OK} Lint complete"
 
-.PHONY: test-all
-test-all: rs-test test                              ## Run all tests (Rust -> Python)
-	@echo "${OK} All tests passed"
+.PHONY: lint-all
+lint-all: lint                                      ## Full lint + type checks
+	@echo "${INFO} Running type checks (Mypy)..."
+	@uv run mypy src/py/vertebra
+	@echo "${INFO} Running pre-commit hooks..."
+	@uv run pre-commit run --color=always --all-files
+	@echo "${OK} All checks passed"
 
 .PHONY: check-all
-check-all: lint test-all coverage rs-lint           ## Run all linting, tests, and coverage checks
+check-all: lint-all test-all coverage               ## Everything: lint, type check, all tests, coverage
 
-.PHONY: build
-build: py-build rs-build                            ## Build Python and Rust artifacts
+
+# =============================================================================
+# Benchmarks
+# =============================================================================
+.PHONY: bench
+bench: build                                        ## Run benchmarks (use TARGETS= and SCENARIOS= to customize)
+	@echo "${INFO} Running benchmarks..."
+	@uv run python -m tools.benchmarks run \
+		-t $${TARGETS:-vtb} \
+		-s $${SCENARIOS:-default} \
+		$${BENCH_ARGS:-}
+	@echo "${OK} Benchmarks complete"
+
+.PHONY: bench-all
+bench-all: build                                    ## Run ALL benchmarks (all targets, all scenarios)
+	@echo "${INFO} Running full benchmark suite..."
+	@uv run python -m tools.benchmarks run \
+		-t all \
+		-s full \
+		$${BENCH_ARGS:-}
+	@echo "${OK} Full benchmarks complete"
+
+.PHONY: bench-ft
+bench-ft:                                           ## Benchmark with Python 3.14t free-threaded (auto-installs + builds)
+	@echo "${INFO} Installing Python 3.14t..."
+	@uv python install 3.14t 2>/dev/null || true
+	@echo "${INFO} Preparing .venv-ft with 3.14t dependencies..."
+	@UV_PROJECT_ENVIRONMENT=.venv-ft uv sync --python 3.14t --no-dev --extra framework 2>&1 | tail -3
+	@echo "${INFO} Building server binary linked against libpython3.14t..."
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@PYO3_PYTHON=$$(uv python find 3.14t) cargo build \
+		--manifest-path src/rs/Cargo.toml \
+		--release --target-dir src/rs/target-ft 2>&1 | tail -3
+	@echo "${INFO} Running free-threaded benchmarks..."
+	@uv run python -m tools.benchmarks run -t freethreaded -s $${SCENARIOS:-multiworker} $${BENCH_ARGS:-}
+	@echo "${OK} Free-threaded benchmarks complete"
+
+.PHONY: bench-report
+bench-report:                                       ## Show latest benchmark report
+	@uv run python -m tools.benchmarks report
+
+.PHONY: bench-diff
+bench-diff:                                         ## Compare latest benchmark run vs previous
+	@uv run python -m tools.benchmarks compare

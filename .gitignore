@@ -67,8 +67,18 @@ src/rs/tools/scripts/detect_mcp_tools.py
 specs/
 specs/archive
 uv.toml
-.agent/
+.agents/
 .beads/
+
+# Benchmark results (DuckDB, JSONL)
+tools/benchmarks/results/*.jsonl
+tools/benchmarks/results/*.duckdb
+tools/benchmarks/results/*.duckdb.wal
+
+# Free-threaded benchmark venv and build artifacts
+.venv-ft/
+src/rs/target-ft/
 
 # POC archive — local reference only
 scratch/
+src/py/vertebra/server/_js/bundle/

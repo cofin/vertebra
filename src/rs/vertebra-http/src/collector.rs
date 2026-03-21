@@ -20,6 +20,8 @@ pub struct PendingRequest {
     pub handler_id: u64,
     /// HTTP method as a compact byte tag (1 byte).
     pub method_tag: u8,
+    /// HTTP version tag (0=1.0, 1=1.1, 2=2, 3=3).
+    pub http_version_tag: u8,
     /// Request URI path.
     pub path: String,
     /// Query string, if present.
@@ -125,9 +127,20 @@ impl BatchCollector {
                                 deadline = Some(Instant::now() + timeout);
                             }
                             pending.push(req);
-                            trace!(depth = pending.len(), "queued request");
 
-                            if pending.len() >= self.policy.batch_size() {
+                            // Eagerly drain any buffered requests (try_recv loop).
+                            while pending.len() < self.policy.batch_size() {
+                                match self.rx.try_recv() {
+                                    Ok(r) => pending.push(r),
+                                    Err(_) => break,
+                                }
+                            }
+
+                            trace!(depth = pending.len(), "queued request(s)");
+
+                            if pending.len() >= self.policy.batch_size()
+                                || self.policy.matches_preferred(pending.len())
+                            {
                                 self.drain(&mut pending).await;
                                 deadline = None;
                             }
@@ -151,7 +164,7 @@ impl BatchCollector {
         let batch = Batch {
             requests: std::mem::replace(pending, Vec::with_capacity(self.policy.batch_size())),
         };
-        self.dispatcher.dispatch(batch).await;
+        self.dispatcher.dispatch(batch);
         self.policy.adapt(count);
     }
 }

@@ -1,0 +1,826 @@
+//!              (arena+slab reset after snapshot)
+//! ```
+
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Tagged enum for supported transport backends.
+pub enum Backend {
+    /// In-process MPMC channel (used by embedded workers).
+    InProcess(crossbeam_channel::Receiver<Arc<BatchSnapshot>>),
+    /// Cross-process shared memory ring (reserved for future multi-process scaling).
+    SharedMemory,
+}
+
+/// Primary abstraction for request batch delivery.
+///
+/// Enables Python workers to poll for batches without knowing whether they
+/// are running in the same process as the broker or in a separate process.
+pub struct Transport {
+    backend: Backend,
+}
+
+impl Transport {
+    /// Create a new in-process transport.
+    pub fn new_in_process(rx: crossbeam_channel::Receiver<Arc<BatchSnapshot>>) -> Self {
+        Self {
+            backend: Backend::InProcess(rx),
+        }
+    }
+
+    /// Poll for the next batch snapshot.
+    ///
+    /// This is the primary entry point for Python worker loops.
+    pub fn poll_batch(&self, timeout: Duration) -> Option<Arc<BatchSnapshot>> {
+        match &self.backend {
+            Backend::InProcess(rx) => rx.recv_timeout(timeout).ok(),
+            Backend::SharedMemory => {
+                // Shared memory batching not yet implemented.
+                None
+            }
+        }
+    }
+}
+
+/// Error type for transport operations.
+#[derive(Debug, thiserror::Error)]
+pub enum TransportError {
+    #[error("transport arena full (capacity: {0})")]
+    ArenaFull(usize),
+    #[error("transport slab full (capacity: {0} bytes)")]
+    SlabFull(usize),
+    #[error("no requests to seal")]
+    EmptyBatch,
+    #[error("transport channel disconnected")]
+    Disconnected,
+}
+
+/// Compact request descriptor with slab offsets (no raw pointers).
+///
+/// All variable-length data (path, query, headers, body) lives in a
+/// [`DataSlab`]. This struct holds only u32 offsets and lengths.
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct TransportNode {
+    /// HTTP method as a compact byte tag (0=GET, 1=POST, …).
+    pub method_tag: u8,
+    /// HTTP version tag (0=1.0, 1=1.1, 2=2, 3=3).
+    pub http_version_tag: u8,
+    pub _pad: [u8; 2],
+    /// Handler ID from the native router (FNV-1a hash).
+    pub handler_id: u64,
+    /// Monotonic correlation ID for request/response matching.
+    pub correlation_id: u64,
+    /// Offset of path bytes in the data slab.
+    pub path_offset: u32,
+    /// Length of path bytes.
+    pub path_len: u32,
+    /// Offset of query string bytes in the data slab.
+    pub query_offset: u32,
+    /// Length of query string bytes (0 = no query).
+    pub query_len: u32,
+    /// Offset of encoded header bytes in the data slab.
+    pub headers_offset: u32,
+    /// Length of encoded header bytes.
+    pub headers_len: u32,
+    /// Offset of body bytes in the data slab.
+    pub body_offset: u32,
+    /// Length of body bytes.
+    pub body_len: u32,
+}
+
+impl TransportNode {
+    /// Convert the method tag to its string representation.
+    pub fn method_name(&self) -> &'static str {
+        match self.method_tag {
+            0 => "GET",
+            1 => "POST",
+            2 => "PUT",
+            3 => "DELETE",
+            4 => "PATCH",
+            5 => "HEAD",
+            6 => "OPTIONS",
+            7 => "TRACE",
+            8 => "CONNECT",
+            _ => "UNKNOWN",
+        }
+    }
+
+    /// Convert the HTTP version tag to its string representation.
+    pub fn http_version(&self) -> &'static str {
+        match self.http_version_tag {
+            0 => "1.0",
+            1 => "1.1",
+            2 => "2",
+            3 => "3",
+            _ => "1.1",
+        }
+    }
+}
+
+/// Bump-allocated byte slab for variable-length request data.
+///
+/// Thread-safety: single writer (HTTP dispatcher), reader only after seal.
+/// The atomic offset ensures correct ordering between writer and reader.
+pub struct DataSlab {
+    data: UnsafeCell<Vec<u8>>,
+    capacity: usize,
+    offset: AtomicUsize,
+}
+
+// SAFETY: Single writer (dispatcher), reader only after batch is sealed.
+// The atomic offset provides the necessary synchronization.
+unsafe impl Send for DataSlab {}
+unsafe impl Sync for DataSlab {}
+
+impl DataSlab {
+    /// Create a new data slab with the given capacity in bytes.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            data: UnsafeCell::new(vec![0u8; capacity]),
+            capacity,
+            offset: AtomicUsize::new(0),
+        }
+    }
+
+    /// Write bytes into the slab. Returns `(offset, len)` on success.
+    ///
+    /// Empty writes return `(0, 0)` without consuming slab space.
+    pub fn write(&self, bytes: &[u8]) -> Result<(u32, u32), TransportError> {
+        if bytes.is_empty() {
+            return Ok((0, 0));
+        }
+        let len = bytes.len();
+        let off = self.offset.fetch_add(len, Ordering::AcqRel);
+        if off + len > self.capacity {
+            self.offset.fetch_sub(len, Ordering::AcqRel);
+            return Err(TransportError::SlabFull(self.capacity));
+        }
+        // SAFETY: offset is unique per write (atomic fetch_add), single writer.
+        unsafe {
+            let data = &mut *self.data.get();
+            data[off..off + len].copy_from_slice(bytes);
+        }
+        Ok((off as u32, len as u32))
+    }
+
+    /// Snapshot the used portion of the slab into an owned `Vec`.
+    pub fn snapshot(&self) -> Vec<u8> {
+        let used = self.offset.load(Ordering::Acquire);
+        self.snapshot_used(used)
+    }
+
+    /// Snapshot exactly `used` bytes into an owned `Vec`.
+    pub fn snapshot_used(&self, used: usize) -> Vec<u8> {
+        // SAFETY: no concurrent writes after seal_batch().
+        let data = unsafe { &*self.data.get() };
+        data[..used].to_vec()
+    }
+
+    /// Reset the slab for reuse.
+    pub fn reset(&self) {
+        self.offset.store(0, Ordering::Release);
+    }
+
+    /// Current usage in bytes.
+    pub fn used(&self) -> usize {
+        self.offset.load(Ordering::Acquire)
+    }
+
+    /// Take the internal buffer and replace it with `replacement`.
+    ///
+    /// Returns the previous buffer (truncated to `used` bytes).
+    /// Resets the offset to 0. The caller must hold the batch write lock.
+    ///
+    /// This is O(1) — a pointer swap, not a copy.
+    pub fn take_and_replace(&self, replacement: Vec<u8>) -> Vec<u8> {
+        let used = self.offset.load(Ordering::Acquire);
+        // SAFETY: caller holds exclusive write lock; no concurrent readers
+        // until the next seal.
+        let data = unsafe { &mut *self.data.get() };
+        let mut taken = std::mem::replace(data, replacement);
+        taken.truncate(used);
+        self.offset.store(0, Ordering::Release);
+        taken
+    }
+}
+
+/// Fixed-capacity arena for [`TransportNode`] entries.
+///
+/// Thread-safety: single writer (dispatcher), reader only after seal.
+pub struct TransportArena {
+    nodes: UnsafeCell<Vec<TransportNode>>,
+    capacity: usize,
+    len: AtomicU32,
+}
+
+// SAFETY: Single writer (dispatcher), reader only after batch is sealed.
+unsafe impl Send for TransportArena {}
+unsafe impl Sync for TransportArena {}
+
+impl TransportArena {
+    /// Create a new arena with the given node capacity.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            nodes: UnsafeCell::new(vec![TransportNode::default(); capacity]),
+            capacity,
+            len: AtomicU32::new(0),
+        }
+    }
+
+    /// Push a node into the arena. Returns the node index.
+    pub fn push(&self, node: TransportNode) -> Result<u32, TransportError> {
+        let idx = self.len.fetch_add(1, Ordering::AcqRel);
+        if idx as usize >= self.capacity {
+            self.len.fetch_sub(1, Ordering::AcqRel);
+            return Err(TransportError::ArenaFull(self.capacity));
+        }
+        // SAFETY: idx is unique (atomic fetch_add), single writer.
+        unsafe {
+            let nodes = &mut *self.nodes.get();
+            nodes[idx as usize] = node;
+        }
+        Ok(idx)
+    }
+
+    /// Snapshot all written nodes into an owned `Vec`.
+    pub fn snapshot(&self) -> Vec<TransportNode> {
+        let len = self.len.load(Ordering::Acquire) as usize;
+        self.snapshot_len(len)
+    }
+
+    /// Snapshot exactly `len` nodes into an owned `Vec`.
+    pub fn snapshot_len(&self, len: usize) -> Vec<TransportNode> {
+        let nodes = unsafe { &*self.nodes.get() };
+        nodes[..len].to_vec()
+    }
+
+    /// Reset the arena for reuse.
+    pub fn reset(&self) {
+        self.len.store(0, Ordering::Release);
+    }
+
+    /// Current node count.
+    pub fn len(&self) -> u32 {
+        self.len.load(Ordering::Acquire)
+    }
+
+    /// Returns `true` if no nodes have been pushed.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Take the internal node buffer and replace it with `replacement`.
+    ///
+    /// Returns the previous buffer (truncated to `len` nodes).
+    /// Resets the length to 0. The caller must hold the batch write lock.
+    ///
+    /// This is O(1) — a pointer swap, not a copy.
+    pub fn take_and_replace(&self, replacement: Vec<TransportNode>) -> Vec<TransportNode> {
+        let len = self.len.load(Ordering::Acquire) as usize;
+        // SAFETY: caller holds exclusive write lock; no concurrent readers
+        // until the next seal.
+        let nodes = unsafe { &mut *self.nodes.get() };
+        let mut taken = std::mem::replace(nodes, replacement);
+        taken.truncate(len);
+        self.len.store(0, Ordering::Release);
+        taken
+    }
+}
+
+/// Pre-allocated pool of buffer pairs for zero-copy batch sealing.
+///
+/// The pool holds `capacity` pairs of `(Vec<u8>, Vec<TransportNode>)`.
+/// On seal, the bridge takes a fresh pair from the pool and swaps it
+/// into the arena/slab (O(1) pointer swap). When the `BatchSnapshot`
+/// is dropped, the buffers return to the pool for reuse.
+pub struct BufferPool {
+    pairs: std::sync::Mutex<Vec<(Vec<u8>, Vec<TransportNode>)>>,
+    slab_capacity: usize,
+    arena_capacity: usize,
+}
+
+impl BufferPool {
+    /// Create a pool with `count` pre-allocated buffer pairs.
+    pub fn new(count: usize, slab_capacity: usize, arena_capacity: usize) -> Self {
+        let mut pairs = Vec::with_capacity(count);
+        for _ in 0..count {
+            pairs.push((
+                vec![0u8; slab_capacity],
+                vec![TransportNode::default(); arena_capacity],
+            ));
+        }
+        Self {
+            pairs: std::sync::Mutex::new(pairs),
+            slab_capacity,
+            arena_capacity,
+        }
+    }
+
+    /// Take a buffer pair from the pool, or allocate a fresh one if empty.
+    pub fn take(&self) -> (Vec<u8>, Vec<TransportNode>) {
+        self.pairs.lock().unwrap().pop().unwrap_or_else(|| {
+            (
+                vec![0u8; self.slab_capacity],
+                vec![TransportNode::default(); self.arena_capacity],
+            )
+        })
+    }
+
+    /// Return a buffer pair to the pool for reuse.
+    ///
+    /// Buffers are restored to full length without zeroing — the slab is
+    /// write-before-read (request data is serialized into it via
+    /// `copy_from_slice`), so stale bytes beyond the write offset are
+    /// never read.  Skipping the zeroing saves ~136KB per batch cycle.
+    pub fn return_pair(&self, mut slab: Vec<u8>, mut nodes: Vec<TransportNode>) {
+        // SAFETY: Both Vecs were originally allocated at full capacity and
+        // filled with initialized bytes. `take_and_replace` may have
+        // truncated them, but the backing memory up to `capacity()` is
+        // still initialized (truncate doesn't deallocate or uninitialize).
+        // `set_len` restores the length so `DataSlab::write()` can index
+        // into the full range.
+        unsafe {
+            slab.set_len(self.slab_capacity.min(slab.capacity()));
+        }
+        // TransportNode is Copy + has no Drop, so restoring length is safe.
+        unsafe {
+            nodes.set_len(self.arena_capacity.min(nodes.capacity()));
+        }
+        self.pairs.lock().unwrap().push((slab, nodes));
+    }
+}
+
+impl std::fmt::Debug for BufferPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self.pairs.lock().map(|p| p.len()).unwrap_or(0);
+        f.debug_struct("BufferPool")
+            .field("available", &count)
+            .field("slab_capacity", &self.slab_capacity)
+            .field("arena_capacity", &self.arena_capacity)
+            .finish()
+    }
+}
+
+/// Immutable batch snapshot for zero-object request proxies.
+///
+/// Created by `poll_batch()` and shared via `Arc` across all
+/// `VertebraRequest` instances in a batch. Fields are read lazily
+/// from the slab bytes — unused fields are never materialized.
+///
+/// When pool-backed, dropping the snapshot returns the buffers to the
+/// pool for reuse (zero allocation on steady-state).
+pub struct BatchSnapshot {
+    slab: Vec<u8>,
+    nodes: Vec<TransportNode>,
+    pool: Option<std::sync::Arc<BufferPool>>,
+}
+
+impl std::fmt::Debug for BatchSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchSnapshot")
+            .field("slab_len", &self.slab.len())
+            .field("nodes_len", &self.nodes.len())
+            .field("pooled", &self.pool.is_some())
+            .finish()
+    }
+}
+
+impl Drop for BatchSnapshot {
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool.take() {
+            let slab = std::mem::take(&mut self.slab);
+            let nodes = std::mem::take(&mut self.nodes);
+            pool.return_pair(slab, nodes);
+        }
+    }
+}
+
+impl BatchSnapshot {
+    /// Create a new snapshot from slab data and transport nodes (no pool).
+    pub fn new(slab: Vec<u8>, nodes: Vec<TransportNode>) -> Self {
+        Self {
+            slab,
+            nodes,
+            pool: None,
+        }
+    }
+
+    /// Create a pool-backed snapshot. Buffers return to the pool on drop.
+    pub fn new_pooled(
+        slab: Vec<u8>,
+        nodes: Vec<TransportNode>,
+        pool: std::sync::Arc<BufferPool>,
+    ) -> Self {
+        Self {
+            slab,
+            nodes,
+            pool: Some(pool),
+        }
+    }
+
+    /// Number of requests in this batch.
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Returns `true` if the batch is empty.
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    /// Get the transport node at the given index.
+    pub fn node(&self, index: usize) -> &TransportNode {
+        &self.nodes[index]
+    }
+
+    /// Read path bytes for the request at `index`.
+    pub fn path_bytes(&self, index: usize) -> &[u8] {
+        let n = &self.nodes[index];
+        if n.path_len == 0 {
+            return &[];
+        }
+        &self.slab[n.path_offset as usize..(n.path_offset + n.path_len) as usize]
+    }
+
+    /// Read path as a UTF-8 string.
+    pub fn path(&self, index: usize) -> &str {
+        std::str::from_utf8(self.path_bytes(index)).unwrap_or("")
+    }
+
+    /// Read query bytes (None if no query string).
+    pub fn query_bytes(&self, index: usize) -> Option<&[u8]> {
+        let n = &self.nodes[index];
+        if n.query_len == 0 {
+            return None;
+        }
+        Some(&self.slab[n.query_offset as usize..(n.query_offset + n.query_len) as usize])
+    }
+
+    /// Read query as a UTF-8 string.
+    pub fn query(&self, index: usize) -> Option<&str> {
+        self.query_bytes(index)
+            .map(|b| std::str::from_utf8(b).unwrap_or(""))
+    }
+
+    /// Read raw encoded header bytes.
+    pub fn headers_raw(&self, index: usize) -> &[u8] {
+        let n = &self.nodes[index];
+        if n.headers_len == 0 {
+            return &[];
+        }
+        &self.slab[n.headers_offset as usize..(n.headers_offset + n.headers_len) as usize]
+    }
+
+    /// Read body bytes.
+    pub fn body(&self, index: usize) -> &[u8] {
+        let n = &self.nodes[index];
+        if n.body_len == 0 {
+            return &[];
+        }
+        &self.slab[n.body_offset as usize..(n.body_offset + n.body_len) as usize]
+    }
+}
+
+/// Decode headers from the compact binary format.
+///
+/// Format per header: `[name_len: u8][name: bytes][value_len: u16 LE][value: bytes]`
+pub fn decode_headers_raw(data: &[u8]) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    let mut pos = 0;
+    while pos < data.len() {
+        let name_len = data[pos] as usize;
+        pos += 1;
+        if pos + name_len > data.len() {
+            break;
+        }
+        let name = String::from_utf8_lossy(&data[pos..pos + name_len]).to_string();
+        pos += name_len;
+
+        if pos + 2 > data.len() {
+            break;
+        }
+        let value_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        if pos + value_len > data.len() {
+            break;
+        }
+        let value = String::from_utf8_lossy(&data[pos..pos + value_len]).to_string();
+        pos += value_len;
+
+        headers.push((name, value));
+    }
+    headers
+}
+
+// Compile-time layout assertions. If TransportNode's size or alignment changes,
+// the pure-Python ring_reader.py parser will break — these catch drift at build time.
+const _: () = {
+    assert!(std::mem::size_of::<TransportNode>() == 56);
+    assert!(std::mem::align_of::<TransportNode>() == 8);
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_node_layout_matches_ring_reader() {
+        // Must match ring_reader.py _NODE_SIZE and _NODE_FMT
+        assert_eq!(std::mem::size_of::<TransportNode>(), 56);
+        assert_eq!(std::mem::align_of::<TransportNode>(), 8);
+
+        // Verify field offsets via a zeroed node with known values
+        let node = TransportNode {
+            method_tag: 1,
+            http_version_tag: 2,
+            _pad: [0; 2],
+            handler_id: 0x_DEAD_BEEF_CAFE_BABE,
+            correlation_id: 0x_1234_5678_9ABC_DEF0,
+            path_offset: 100,
+            path_len: 200,
+            query_offset: 300,
+            query_len: 400,
+            headers_offset: 500,
+            headers_len: 600,
+            body_offset: 700,
+            body_len: 800,
+        };
+
+        let bytes: [u8; 56] = unsafe { std::mem::transmute::<TransportNode, [u8; 56]>(node) };
+
+        // method_tag at offset 0
+        assert_eq!(bytes[0], 1);
+        // http_version_tag at offset 1
+        assert_eq!(bytes[1], 2);
+        // handler_id at offset 8 (LE)
+        assert_eq!(
+            u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            0x_DEAD_BEEF_CAFE_BABE
+        );
+        // correlation_id at offset 16
+        assert_eq!(
+            u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            0x_1234_5678_9ABC_DEF0
+        );
+        // path_offset at offset 24
+        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 100);
+    }
+
+    // --- DataSlab tests ---
+
+    #[test]
+    fn slab_write_and_snapshot() {
+        let slab = DataSlab::new(1024);
+        let (off, len) = slab.write(b"hello").unwrap();
+        assert_eq!(off, 0);
+        assert_eq!(len, 5);
+
+        let snap = slab.snapshot();
+        assert_eq!(&snap, b"hello");
+    }
+
+    #[test]
+    fn slab_write_multiple() {
+        let slab = DataSlab::new(1024);
+        let (off1, _) = slab.write(b"hello").unwrap();
+        let (off2, _) = slab.write(b"world").unwrap();
+        assert_eq!(off1, 0);
+        assert_eq!(off2, 5);
+
+        let snap = slab.snapshot();
+        assert_eq!(&snap, b"helloworld");
+    }
+
+    #[test]
+    fn slab_full_returns_error() {
+        let slab = DataSlab::new(4);
+        slab.write(b"abc").unwrap();
+        let err = slab.write(b"de").unwrap_err();
+        assert!(matches!(err, TransportError::SlabFull(4)));
+    }
+
+    #[test]
+    fn slab_reset_allows_reuse() {
+        let slab = DataSlab::new(8);
+        slab.write(b"12345678").unwrap();
+        slab.reset();
+        slab.write(b"abcd").unwrap();
+        let snap = slab.snapshot();
+        assert_eq!(&snap, b"abcd");
+    }
+
+    #[test]
+    fn slab_empty_write_returns_zero() {
+        let slab = DataSlab::new(8);
+        let (off, len) = slab.write(b"").unwrap();
+        assert_eq!(off, 0);
+        assert_eq!(len, 0);
+        assert_eq!(slab.used(), 0);
+    }
+
+    // --- TransportArena tests ---
+
+    #[test]
+    fn arena_push_and_snapshot() {
+        let arena = TransportArena::new(4);
+        let node = TransportNode {
+            handler_id: 42,
+            correlation_id: 1,
+            path_len: 5,
+            ..Default::default()
+        };
+        let idx = arena.push(node).unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(arena.len(), 1);
+
+        let snap = arena.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].handler_id, 42);
+    }
+
+    #[test]
+    fn arena_full_returns_error() {
+        let arena = TransportArena::new(2);
+        arena.push(TransportNode::default()).unwrap();
+        arena.push(TransportNode::default()).unwrap();
+        let err = arena.push(TransportNode::default()).unwrap_err();
+        assert!(matches!(err, TransportError::ArenaFull(2)));
+    }
+
+    #[test]
+    fn arena_reset_allows_reuse() {
+        let arena = TransportArena::new(2);
+        arena.push(TransportNode::default()).unwrap();
+        arena.push(TransportNode::default()).unwrap();
+        arena.reset();
+        assert!(arena.is_empty());
+        arena
+            .push(TransportNode {
+                handler_id: 99,
+                ..Default::default()
+            })
+            .unwrap();
+        let snap = arena.snapshot();
+        assert_eq!(snap[0].handler_id, 99);
+    }
+
+    // --- TransportNode tests ---
+
+    #[test]
+    fn transport_node_method_names() {
+        for (tag, name) in [
+            (0, "GET"),
+            (1, "POST"),
+            (2, "PUT"),
+            (3, "DELETE"),
+            (4, "PATCH"),
+            (5, "HEAD"),
+            (6, "OPTIONS"),
+            (7, "TRACE"),
+            (8, "CONNECT"),
+            (255, "UNKNOWN"),
+        ] {
+            let node = TransportNode {
+                method_tag: tag,
+                ..Default::default()
+            };
+            assert_eq!(node.method_name(), name);
+        }
+    }
+
+    #[test]
+    fn transport_node_http_versions() {
+        for (tag, version) in [(0, "1.0"), (1, "1.1"), (2, "2"), (3, "3"), (255, "1.1")] {
+            let node = TransportNode {
+                http_version_tag: tag,
+                ..Default::default()
+            };
+            assert_eq!(node.http_version(), version);
+        }
+    }
+
+    // --- BatchSnapshot tests ---
+
+    #[test]
+    fn snapshot_accessors() {
+        let mut slab = Vec::new();
+        slab.extend_from_slice(b"/hello"); // 0..6
+        slab.extend_from_slice(b"q=1"); // 6..9
+        slab.extend_from_slice(b"raw-headers"); // 9..20
+        slab.extend_from_slice(b"body data"); // 20..29
+
+        let nodes = vec![TransportNode {
+            method_tag: 0,
+            http_version_tag: 1,
+            _pad: [0; 2],
+            handler_id: 42,
+            correlation_id: 1,
+            path_offset: 0,
+            path_len: 6,
+            query_offset: 6,
+            query_len: 3,
+            headers_offset: 9,
+            headers_len: 11,
+            body_offset: 20,
+            body_len: 9,
+        }];
+
+        let snapshot = BatchSnapshot::new(slab, nodes);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot.path(0), "/hello");
+        assert_eq!(snapshot.query(0), Some("q=1"));
+        assert_eq!(snapshot.headers_raw(0), b"raw-headers");
+        assert_eq!(snapshot.body(0), b"body data");
+        assert_eq!(snapshot.node(0).handler_id, 42);
+        assert_eq!(snapshot.node(0).method_name(), "GET");
+    }
+
+    #[test]
+    fn snapshot_empty_fields() {
+        let nodes = vec![TransportNode::default()];
+        let snapshot = BatchSnapshot::new(Vec::new(), nodes);
+        assert_eq!(snapshot.path(0), "");
+        assert_eq!(snapshot.query(0), None);
+        assert_eq!(snapshot.headers_raw(0), &[] as &[u8]);
+        assert_eq!(snapshot.body(0), &[] as &[u8]);
+    }
+
+    #[test]
+    fn snapshot_multiple_nodes() {
+        let mut slab = Vec::new();
+        slab.extend_from_slice(b"/a"); // 0..2
+        slab.extend_from_slice(b"/b"); // 2..4
+
+        let nodes = vec![
+            TransportNode {
+                correlation_id: 1,
+                path_offset: 0,
+                path_len: 2,
+                ..Default::default()
+            },
+            TransportNode {
+                correlation_id: 2,
+                path_offset: 2,
+                path_len: 2,
+                ..Default::default()
+            },
+        ];
+
+        let snapshot = BatchSnapshot::new(slab, nodes);
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot.path(0), "/a");
+        assert_eq!(snapshot.path(1), "/b");
+    }
+
+    // --- decode_headers_raw tests ---
+
+    #[test]
+    fn decode_empty_headers() {
+        assert!(decode_headers_raw(&[]).is_empty());
+    }
+
+    #[test]
+    fn decode_single_header() {
+        let mut buf = Vec::new();
+        let name = b"host";
+        let value = b"localhost";
+        buf.push(name.len() as u8);
+        buf.extend_from_slice(name);
+        buf.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        buf.extend_from_slice(value);
+
+        let headers = decode_headers_raw(&buf);
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0], ("host".to_string(), "localhost".to_string()));
+    }
+
+    #[test]
+    fn decode_multiple_headers() {
+        let mut buf = Vec::new();
+        for (name, value) in &[("host", "example.com"), ("content-type", "text/plain")] {
+            buf.push(name.len() as u8);
+            buf.extend_from_slice(name.as_bytes());
+            buf.extend_from_slice(&(value.len() as u16).to_le_bytes());
+            buf.extend_from_slice(value.as_bytes());
+        }
+
+        let headers = decode_headers_raw(&buf);
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0], ("host".to_string(), "example.com".to_string()));
+        assert_eq!(
+            headers[1],
+            ("content-type".to_string(), "text/plain".to_string())
+        );
+    }
+
+    #[test]
+    fn decode_truncated_header_is_safe() {
+        // Name length says 10 but only 3 bytes available
+        let buf = vec![10u8, b'a', b'b', b'c'];
+        let headers = decode_headers_raw(&buf);
+        assert!(headers.is_empty());
+    }
+}

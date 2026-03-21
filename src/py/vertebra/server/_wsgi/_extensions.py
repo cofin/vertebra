@@ -1,0 +1,152 @@
+"""WSGI framework extensions — shared utilities + Django/Flask integrations."""
+
+import importlib
+import logging
+import os
+from collections.abc import Callable, Iterable
+from typing import Any
+
+__all__ = [
+    "DjangoWsgiApp",
+    "FlaskWsgiApp",
+    "LargeBodyBypass",
+    "configure_django",
+    "create_flask_app",
+    "wrap_with_error_handler",
+]
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Shared utilities
+# ---------------------------------------------------------------------------
+
+_LARGE_BODY_THRESHOLD = 16 * 1024 * 1024
+
+
+class LargeBodyBypass:
+    """Context manager that flags oversized request bodies."""
+
+    __slots__ = ("_environ", "_patched")
+
+    def __init__(self, environ: dict[str, Any]) -> None:
+        self._environ = environ
+        self._patched = False
+
+    def __enter__(self) -> dict[str, Any]:
+        content_length_str = self._environ.get("CONTENT_LENGTH", "")
+        try:
+            content_length = int(content_length_str)
+        except (ValueError, TypeError):
+            content_length = 0
+        if content_length > _LARGE_BODY_THRESHOLD:
+            self._patched = True
+            log.debug("LargeBodyBypass active: Content-Length=%d", content_length)
+        return self._environ
+
+    def __exit__(self, *args: object) -> None:
+        if self._patched:
+            log.debug("LargeBodyBypass exiting.")
+
+
+def wrap_with_error_handler(
+    app: Callable[..., Iterable[bytes]],
+    *,
+    logger: logging.Logger | None = None,
+) -> Callable[..., Iterable[bytes]]:
+    """Decorator that wraps a WSGI app with structured exception logging."""
+    _log = logger or log
+
+    def _wrapped(
+        environ: dict[str, Any],
+        start_response: Callable[..., None],
+    ) -> Iterable[bytes]:
+        try:
+            return app(environ, start_response)
+        except Exception:
+            _log.exception(
+                "Unhandled exception in WSGI app: method=%s path=%s",
+                environ.get("REQUEST_METHOD", "?"),
+                environ.get("PATH_INFO", "?"),
+            )
+            raise
+
+    return _wrapped
+
+
+# ---------------------------------------------------------------------------
+# Django integration
+# ---------------------------------------------------------------------------
+
+
+def configure_django(settings_module: str) -> None:
+    """Set DJANGO_SETTINGS_MODULE if not already set."""
+    current = os.environ.get("DJANGO_SETTINGS_MODULE")
+    if current and current != settings_module:
+        log.warning("DJANGO_SETTINGS_MODULE already set to %r; ignoring %r.", current, settings_module)
+        return
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", settings_module)
+
+
+class DjangoWsgiApp:
+    """Lazy WSGI wrapper for a Django application."""
+
+    __slots__ = ("_settings_module", "_handler")
+
+    def __init__(self, settings_module: str | None = None) -> None:
+        self._settings_module: str | None = settings_module
+        self._handler: Callable[..., Iterable[bytes]] | None = None
+
+    def _get_handler(self) -> Callable[..., Iterable[bytes]]:
+        if self._handler is None:
+            try:
+                from django.core.wsgi import get_wsgi_application  # type: ignore[import-untyped]
+            except ImportError as exc:
+                raise ImportError("Django is not installed. Install it with: uv add django") from exc
+            if self._settings_module is not None:
+                configure_django(self._settings_module)
+            self._handler = get_wsgi_application()
+            log.info("Django WSGIHandler initialized.")
+        return self._handler
+
+    def __call__(self, environ: dict[str, Any], start_response: Callable[..., None]) -> Iterable[bytes]:
+        return self._get_handler()(environ, start_response)
+
+
+# ---------------------------------------------------------------------------
+# Flask integration
+# ---------------------------------------------------------------------------
+
+_FlaskFactory = Callable[[], Any]
+
+
+class FlaskWsgiApp:
+    """WSGI wrapper for a Flask application (instance or factory)."""
+
+    __slots__ = ("_app_or_factory", "_app")
+
+    def __init__(self, app_or_factory: Any) -> None:
+        self._app_or_factory: Any = app_or_factory
+        if hasattr(app_or_factory, "wsgi_app"):
+            self._app: Any = app_or_factory
+        else:
+            self._app = None
+
+    def _get_app(self) -> Any:
+        if self._app is None:
+            try:
+                self._app = self._app_or_factory()
+            except Exception as exc:
+                raise RuntimeError("Flask app factory raised an exception.") from exc
+            log.info("Flask application initialized via factory.")
+        return self._app
+
+    def __call__(self, environ: dict[str, Any], start_response: Callable[..., None]) -> Iterable[bytes]:
+        return self._get_app()(environ, start_response)
+
+
+def create_flask_app(module_path: str, factory_name: str = "create_app") -> FlaskWsgiApp:
+    """Import a Flask application factory from a module path."""
+    module = importlib.import_module(module_path)
+    factory: _FlaskFactory = getattr(module, factory_name)
+    return FlaskWsgiApp(factory)

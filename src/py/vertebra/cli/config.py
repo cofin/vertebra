@@ -1,7 +1,5 @@
 """Rich-click configuration for Vertebra CLI styling."""
 
-from __future__ import annotations
-
 import rich_click as click
 
 click.rich_click.USE_RICH_MARKUP = True

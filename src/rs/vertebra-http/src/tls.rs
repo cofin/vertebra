@@ -21,9 +21,7 @@ impl TlsAcceptor {
     /// Build a `TlsAcceptor` from a `TlsConfig`.
     ///
     /// ALPN is configured to advertise `h2` first, then `http/1.1`.
-    pub fn from_config(
-        cfg: &TlsConfig,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn from_config(cfg: &TlsConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let cert_file = std::fs::File::open(&cfg.cert_path)?;
         let key_file = std::fs::File::open(&cfg.key_path)?;
 
@@ -43,10 +41,7 @@ impl TlsAcceptor {
     }
 
     /// Perform the TLS handshake on an accepted TCP stream.
-    pub async fn accept(
-        &self,
-        stream: TcpStream,
-    ) -> Result<TlsStream<TcpStream>, std::io::Error> {
+    pub async fn accept(&self, stream: TcpStream) -> Result<TlsStream<TcpStream>, std::io::Error> {
         self.inner.accept(stream).await
     }
 }

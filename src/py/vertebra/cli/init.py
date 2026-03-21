@@ -1,7 +1,5 @@
 """Init command for project scaffolding."""
 
-from __future__ import annotations
-
 import click
 
 

@@ -21,6 +21,8 @@ pub struct ServerConfig {
     pub keepalive_timeout: Duration,
     /// Maximum number of concurrent connections (0 = unlimited).
     pub max_connections: usize,
+    /// Enable dev-only control surfaces such as HMR.
+    pub dev_mode: bool,
 }
 
 /// TLS configuration.
@@ -42,7 +44,34 @@ impl Default for ServerConfig {
             tls: None,
             keepalive_timeout: Duration::from_secs(75),
             max_connections: 0,
+            dev_mode: false,
         }
+    }
+}
+
+impl ServerConfig {
+    /// Build config from environment variables, falling back to defaults.
+    ///
+    /// Reads `VERTEBRA_HOST` and `VERTEBRA_PORT` to construct the bind address.
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+
+        let host = std::env::var("VERTEBRA_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let port = std::env::var("VERTEBRA_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(8000);
+
+        if let Ok(addr) = format!("{host}:{port}").parse() {
+            config.bind = addr;
+        }
+
+        config.dev_mode = matches!(
+            std::env::var("VERTEBRA_DEV").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("True")
+        );
+
+        config
     }
 }
 

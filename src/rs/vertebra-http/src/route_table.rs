@@ -62,3 +62,25 @@ impl RouteTable {
         self.entries
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handler_id_reference_values() {
+        // Reference values for cross-language verification.
+        let id1 = handler_id("GET", "/hello");
+        let id2 = handler_id("POST", "/api/users");
+        let id3 = handler_id("GET", "/");
+        let id4 = handler_id("DELETE", "/items/{id}");
+        eprintln!("GET /hello = {id1}");
+        eprintln!("POST /api/users = {id2}");
+        eprintln!("GET / = {id3}");
+        eprintln!("DELETE /items/{{id}} = {id4}");
+        // Just verify they are non-zero and stable.
+        assert_ne!(id1, 0);
+        assert_ne!(id2, 0);
+        assert_ne!(id1, id2);
+    }
+}

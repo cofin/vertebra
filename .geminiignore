@@ -1,6 +1,6 @@
 # Allow specs folder
 !specs
-!.agent
+!.agents
 # Keep gemini folder
 !gemini
 
@@ -33,6 +33,7 @@ __pycache__/
 .coverage
 coverage.*
 .venv/
+.venv-ft/
 venv/
 env/
 .dmypy.json
@@ -41,6 +42,7 @@ env/
 .cargo/
 target/
 src/rs/target/
+src/rs/target-ft/
 **/*.so
 
 # JavaScript/TypeScript

@@ -1,0 +1,98 @@
+{
+  "name": "@vertebra/client",
+  "version": "0.1.0",
+  "description": "Full-stack type-safe client for Vertebra Ghost Framework",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./vite": {
+      "types": "./dist/vite/index.d.ts",
+      "import": "./dist/vite/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    },
+    "./vue": {
+      "types": "./dist/vue/index.d.ts",
+      "import": "./dist/vue/index.js"
+    },
+    "./svelte": {
+      "types": "./dist/svelte/index.d.ts",
+      "import": "./dist/svelte/index.js"
+    },
+    "./angular": {
+      "types": "./dist/angular/index.d.ts",
+      "import": "./dist/angular/index.js"
+    },
+    "./htmx": {
+      "types": "./dist/htmx/index.d.ts",
+      "import": "./dist/htmx/index.js"
+    },
+    "./store": {
+      "types": "./dist/store/index.d.ts",
+      "import": "./dist/store/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write --unsafe .",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@inertiajs/react": "^3.0.0",
+    "@inertiajs/vue3": "^3.0.0",
+    "@inertiajs/svelte": "^3.0.0",
+    "react": "^19.0.0",
+    "vue": "^3.5.0",
+    "@angular/core": "^21.0.0",
+    "vite": "^7.3.1"
+  },
+  "peerDependenciesMeta": {
+    "@inertiajs/react": {
+      "optional": true
+    },
+    "@inertiajs/vue3": {
+      "optional": true
+    },
+    "@inertiajs/svelte": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "vue": {
+      "optional": true
+    },
+    "@angular/core": {
+      "optional": true
+    },
+    "vite": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@angular/core": "^21.0.0",
+    "@biomejs/biome": "2.4.8",
+    "@types/node": "^20.11.0",
+
+    "@types/react": "^19.2.14",
+    "react": "^19.2.4",
+    "typescript": "^5.9.3",
+    "tsup": "^8.5.1",
+    "vitest": "^3.2.4",
+    "vue": "^3.5.30",
+    "svelte": "^5.54.1"
+  }
+}

@@ -1,7 +1,8 @@
 //! Hyper/Tokio accept loop.
 //!
-//! Supports both HTTP/1.1 and HTTP/2 via `hyper_util::server::conn::auto::Builder`.
-//! When TLS is configured, ALPN determines the protocol; without TLS, only HTTP/1.1.
+//! Supports HTTP/1.1 (with pipeline_flush for throughput) and HTTP/2 via
+//! `hyper_util::server::conn::auto::Builder`. When TLS is configured, ALPN
+//! determines the protocol; without TLS, only HTTP/1.1.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,6 +18,7 @@ use tracing::{debug, error, info};
 use crate::collector::PendingRequest;
 use crate::config::ServerConfig;
 use crate::dispatcher::Dispatcher;
+use crate::hmr::HmrState;
 use crate::response::handle;
 use crate::router::NativeRouter;
 
@@ -29,6 +31,7 @@ pub struct ServerState {
     pub dispatcher: Arc<Dispatcher>,
     pub config: Arc<ServerConfig>,
     pub collector_tx: tokio::sync::mpsc::Sender<PendingRequest>,
+    pub hmr: Arc<HmrState>,
 }
 
 /// Run the HTTP server with a collector channel until the shutdown signal resolves.
@@ -47,6 +50,7 @@ pub async fn run_with_collector(
         dispatcher: Arc::clone(&dispatcher),
         config: Arc::clone(&config),
         collector_tx,
+        hmr: Arc::new(HmrState::default()),
     });
 
     #[cfg(feature = "tls")]
@@ -109,8 +113,14 @@ async fn serve_plain(
     let io = TokioIo::new(stream);
     let state = Arc::clone(&state);
 
-    AutoBuilder::new(TokioExecutor::new())
-        .serve_connection(
+    // Use HTTP/1 builder with pipeline_flush for improved throughput.
+    // pipeline_flush flushes response bytes eagerly, reducing per-response
+    // latency and improving keep-alive connection throughput.
+    let mut builder = AutoBuilder::new(TokioExecutor::new());
+    builder.http1().pipeline_flush(true);
+
+    builder
+        .serve_connection_with_upgrades(
             io,
             service_fn(move |req: Request<Incoming>| {
                 let state = Arc::clone(&state);
@@ -134,7 +144,7 @@ async fn serve_tls(
     let state = Arc::clone(&state);
 
     AutoBuilder::new(TokioExecutor::new())
-        .serve_connection(
+        .serve_connection_with_upgrades(
             io,
             service_fn(move |req: Request<Incoming>| {
                 let state = Arc::clone(&state);

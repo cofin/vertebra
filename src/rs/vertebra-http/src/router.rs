@@ -65,12 +65,13 @@ impl NativeRouter {
         path: &'r str,
     ) -> Result<RouteMatch<'r>, RouterError> {
         let method_upper = method.to_ascii_uppercase();
-        let mr = self.per_method.get(method_upper.as_str()).ok_or_else(|| {
-            RouterError::NotFound {
-                method: method_upper.clone(),
-                path: path.to_owned(),
-            }
-        })?;
+        let mr =
+            self.per_method
+                .get(method_upper.as_str())
+                .ok_or_else(|| RouterError::NotFound {
+                    method: method_upper.clone(),
+                    path: path.to_owned(),
+                })?;
 
         let matched = mr.at(path).map_err(|_| RouterError::NotFound {
             method: method_upper,

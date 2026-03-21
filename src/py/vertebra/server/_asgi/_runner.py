@@ -1,0 +1,54 @@
+"""AsgiRunner: integrates AsgiAdapter with the native batch runner."""
+
+import asyncio
+import logging
+from typing import Any
+
+from vertebra.server._asgi._adapter import AsgiAdapter
+from vertebra.server._asgi._queues import AsgiResponse
+
+__all__ = ["AsgiRunner"]
+
+log = logging.getLogger(__name__)
+
+
+class AsgiRunner:
+    """Synchronous batch runner wrapper around AsgiAdapter."""
+
+    __slots__ = ("_adapter", "_loop", "_owns_loop", "_scheduler")
+
+    def __init__(
+        self,
+        app: Any,
+        mount_prefix: str = "",
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> None:
+        self._adapter = AsgiAdapter(app, mount_prefix=mount_prefix)
+        self._scheduler: Any = None
+        if loop is not None:
+            self._loop = loop
+            self._owns_loop = False
+        else:
+            from vertebra.server._native import CallbackScheduler
+
+            self._scheduler = CallbackScheduler()
+            self._loop = self._scheduler.loop
+            self._owns_loop = True
+
+    def __call__(self, requests: list[Any]) -> list[AsgiResponse]:
+        """Process a batch of requests synchronously."""
+        if self._scheduler:
+            import concurrent.futures
+
+            fut = self._scheduler.schedule(self._adapter.run_batch(requests))
+            concurrent.futures.wait([fut])
+            return fut.result()
+
+        return self._loop.run_until_complete(self._adapter.run_batch(requests))
+
+    def close(self) -> None:
+        """Shut down the event loop (only if we created it)."""
+        if self._scheduler:
+            self._scheduler.stop()
+        elif self._owns_loop:
+            self._loop.close()

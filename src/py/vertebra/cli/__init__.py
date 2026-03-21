@@ -3,8 +3,9 @@
 import click
 
 from vertebra.cli import config as _config  # noqa: F401
-from vertebra.cli.build import build
+from vertebra.cli.dev import dev
 from vertebra.cli.init import init
+from vertebra.cli.js import js
 from vertebra.cli.run import run
 
 __all__ = ["cli", "main"]
@@ -20,7 +21,8 @@ def cli() -> None:
 
 
 cli.add_command(run)
-cli.add_command(build)
+cli.add_command(dev)
+cli.add_command(js)
 cli.add_command(init)
 
 vtb = cli

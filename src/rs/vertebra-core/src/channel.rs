@@ -800,7 +800,8 @@ impl SpscRing {
         if count > 0 {
             // Single atomic store for all reads
             self.read_head().store(head, Ordering::Release);
-            self.wait_read_ptr().fetch_add(count as u32, Ordering::Release);
+            self.wait_read_ptr()
+                .fetch_add(count as u32, Ordering::Release);
 
             // PERF: Single conditional wake for entire batch
             if self.send_waiters().load(Ordering::Acquire) > 0 {

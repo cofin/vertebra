@@ -1,115 +1,238 @@
-//! Dispatcher: writes filled batches into the ring buffer for Python workers.
+//! Dispatcher: routes filled batches to either the direct channel or the
+//! arena-backed BatchBridge.
 //!
-//! In Chapter 5 the "ring buffer" is simulated by `tokio::sync::mpsc`.
-//! Chapter 6 replaces this with the real shared-memory MPMC ring.
+//! Two dispatch modes:
+//! - **Direct**: batch sent via `tokio::sync::mpsc`, responses via oneshot on
+//!   each `PendingRequest`. No bridge, no arena, no correlation IDs.
+//! - **Bridge**: requests written into the arena/slab, responses polled from
+//!   the bridge channel. Uses correlation IDs for request/response matching.
 
-use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-use tokio::sync::oneshot;
+use dashmap::DashMap;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error};
+
+use vertebra_core::bridge::{BatchBridge, WriteRequest};
 
 use crate::collector::{Batch, PendingResponse};
 
-/// Dispatcher state shared between the write task and the response router.
-struct Inner {
-    /// In-flight correlation ID -> reply channel.
-    pending: Mutex<HashMap<u64, oneshot::Sender<PendingResponse>>>,
-    /// Next monotonic correlation ID.
-    next_id: std::sync::atomic::AtomicU64,
+/// How batches are dispatched to workers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchMode {
+    /// Direct: batch sent via channel, responses via oneshot (fast path).
+    Direct,
+    /// Bridge: batch written to arena/slab, responses via bridge channel (data-intensive).
+    Bridge,
 }
 
-/// A batch serialised to bytes, ready to write to the ring buffer.
-pub struct SerializedBatch {
-    pub correlation_ids: Vec<u64>,
-    pub payload: bytes::Bytes,
+/// A batch with its requests, ready for the direct dispatch worker.
+pub struct DirectBatch {
+    pub requests: Vec<DirectRequest>,
+}
+
+/// A single request in the direct dispatch path — carries the oneshot reply channel.
+pub struct DirectRequest {
+    pub handler_id: u64,
+    pub method_tag: u8,
+    pub http_version_tag: u8,
+    pub path: String,
+    pub query: Option<String>,
+    pub headers_mp: bytes::Bytes,
+    pub body: bytes::Bytes,
+    pub reply: oneshot::Sender<PendingResponse>,
+}
+
+/// Dispatcher state shared between the write task and the response router.
+struct Inner {
+    /// In-flight correlation ID -> reply channel (bridge mode only).
+    pending: DashMap<u64, oneshot::Sender<PendingResponse>>,
+    /// Next monotonic correlation ID (bridge mode only).
+    next_id: AtomicU64,
+    /// Direct dispatch channel (Some if direct mode).
+    direct_tx: Option<mpsc::Sender<DirectBatch>>,
+    /// Dispatch mode.
+    mode: DispatchMode,
 }
 
 /// The dispatcher.
 ///
-/// In Chapter 5 the "ring buffer" is a `tokio::sync::mpsc`. Chapter 6 replaces
-/// this with the real shared-memory MPMC ring from `vertebra-core`.
+/// Manages in-flight request tracking and dispatches batches to workers
+/// via either the direct channel path or the arena-backed `BatchBridge`.
 pub struct Dispatcher {
     inner: Arc<Inner>,
-    /// Channel to the ring-writer task. Bounded to apply back-pressure.
-    ring_tx: tokio::sync::mpsc::Sender<SerializedBatch>,
+}
+
+impl Default for Dispatcher {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Dispatcher {
-    /// Create a dispatcher and return both the dispatcher and the ring-reader.
-    pub fn new(ring_capacity: usize) -> (Self, tokio::sync::mpsc::Receiver<SerializedBatch>) {
-        let (ring_tx, ring_rx) = tokio::sync::mpsc::channel(ring_capacity);
-        let dispatcher = Self {
+    /// Create a new dispatcher in bridge mode (default).
+    pub fn new() -> Self {
+        Self {
             inner: Arc::new(Inner {
-                pending: Mutex::new(HashMap::new()),
-                next_id: std::sync::atomic::AtomicU64::new(1),
+                pending: DashMap::new(),
+                next_id: AtomicU64::new(1),
+                direct_tx: None,
+                mode: DispatchMode::Bridge,
             }),
-            ring_tx,
-        };
-        (dispatcher, ring_rx)
-    }
-
-    /// Dispatch a batch to the ring buffer.
-    ///
-    /// Assigns a correlation ID to each request, serialises the batch, and
-    /// sends it to the ring-writer task.
-    pub async fn dispatch(&self, batch: Batch) {
-        let serialized = self.serialize_batch(batch);
-
-        if let Err(e) = self.ring_tx.try_send(serialized) {
-            error!(error = %e, "ring buffer full, dropping batch");
         }
     }
 
-    /// Synchronous serialization — keeps the MutexGuard out of the async future.
-    fn serialize_batch(&self, batch: Batch) -> SerializedBatch {
-        use std::sync::atomic::Ordering;
+    /// Create a new dispatcher in direct mode.
+    ///
+    /// Returns the dispatcher and a receiver for direct batches.
+    pub fn new_direct(channel_capacity: usize) -> (Self, mpsc::Receiver<DirectBatch>) {
+        let (tx, rx) = mpsc::channel(channel_capacity);
+        let dispatcher = Self {
+            inner: Arc::new(Inner {
+                pending: DashMap::new(),
+                next_id: AtomicU64::new(1),
+                direct_tx: Some(tx),
+                mode: DispatchMode::Direct,
+            }),
+        };
+        (dispatcher, rx)
+    }
 
-        let mut ids = Vec::with_capacity(batch.requests.len());
-        let mut pending = self.inner.pending.lock();
+    /// Dispatch a batch to workers.
+    ///
+    /// In direct mode, sends the batch through the channel with oneshot reply
+    /// channels still attached. In bridge mode, writes into the arena/slab.
+    pub fn dispatch(&self, batch: Batch) {
+        if self.inner.mode == DispatchMode::Direct {
+            self.dispatch_direct(batch);
+        } else {
+            self.dispatch_bridge(batch);
+        }
+    }
 
-        let mut payload_parts: Vec<bytes::Bytes> = Vec::new();
+    /// Direct dispatch: send batch through channel, responses flow back via oneshot.
+    fn dispatch_direct(&self, batch: Batch) {
+        let tx = match &self.inner.direct_tx {
+            Some(tx) => tx,
+            None => {
+                error!("direct dispatch channel not configured");
+                return;
+            }
+        };
+
+        let requests = batch
+            .requests
+            .into_iter()
+            .map(|req| DirectRequest {
+                handler_id: req.handler_id,
+                method_tag: req.method_tag,
+                http_version_tag: req.http_version_tag,
+                path: req.path,
+                query: req.query,
+                headers_mp: req.headers_mp,
+                body: req.body,
+                reply: req.reply,
+            })
+            .collect();
+
+        if tx.try_send(DirectBatch { requests }).is_err() {
+            error!("direct dispatch channel full or closed, dropping batch");
+        }
+    }
+
+    /// Bridge dispatch: write into arena/slab, seal, and track correlation IDs.
+    fn dispatch_bridge(&self, batch: Batch) {
+        let bridge = match BatchBridge::get() {
+            Some(b) => b,
+            None => {
+                error!("batch bridge not initialized, dropping batch");
+                return;
+            }
+        };
+        let writer = bridge.batch_writer();
 
         for req in batch.requests {
             let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-            ids.push(id);
 
-            pending.insert(id, req.reply);
+            self.inner.pending.insert(id, req.reply);
 
-            let mut header = [0u8; 16];
-            header[0..8].copy_from_slice(&id.to_le_bytes());
-            header[8..12].copy_from_slice(&0u32.to_le_bytes());
-            let body_len = req.body.len() as u32;
-            header[12..16].copy_from_slice(&body_len.to_le_bytes());
-
-            payload_parts.push(bytes::Bytes::copy_from_slice(&header));
-            payload_parts.push(req.body);
+            if let Err(e) = writer.push_request(&WriteRequest {
+                method_tag: req.method_tag,
+                http_version_tag: req.http_version_tag,
+                handler_id: req.handler_id,
+                correlation_id: id,
+                path: req.path.as_bytes(),
+                query: req.query.as_ref().map(|q| q.as_bytes()),
+                headers_raw: &req.headers_mp,
+                body: &req.body,
+            }) {
+                error!(error = %e, "transport push failed, dropping request");
+                self.inner.pending.remove(&id);
+            }
         }
 
-        drop(pending);
-
-        let payload = payload_parts
-            .into_iter()
-            .fold(bytes::BytesMut::new(), |mut acc, b| {
-                acc.extend_from_slice(&b);
-                acc
-            })
-            .freeze();
-
-        SerializedBatch {
-            correlation_ids: ids,
-            payload,
+        if let Err(e) = writer.seal() {
+            error!(error = %e, "transport seal failed");
         }
     }
 
-    /// Complete a request with a response from a Python worker.
+    /// Complete a request with a response from a Python worker (bridge mode).
     pub fn complete(&self, correlation_id: u64, response: PendingResponse) {
-        let mut pending = self.inner.pending.lock();
-        if let Some(tx) = pending.remove(&correlation_id) {
+        if let Some((_, tx)) = self.inner.pending.remove(&correlation_id) {
             let _ = tx.send(response);
         } else {
             debug!(id = correlation_id, "no pending request for correlation ID");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatcher_creates_with_empty_state() {
+        let d = Dispatcher::new();
+        assert!(d.inner.pending.is_empty());
+    }
+
+    #[test]
+    fn complete_with_no_pending_is_noop() {
+        let d = Dispatcher::new();
+        d.complete(
+            999,
+            PendingResponse {
+                status: 200,
+                headers_mp: bytes::Bytes::new(),
+                body: bytes::Bytes::from_static(b"ok"),
+            },
+        );
+        // Should not panic
+    }
+
+    #[tokio::test]
+    async fn direct_mode_sends_batch() {
+        let (d, mut rx) = Dispatcher::new_direct(16);
+        let (reply_tx, _reply_rx) = oneshot::channel();
+
+        let batch = Batch {
+            requests: vec![crate::collector::PendingRequest {
+                handler_id: 1,
+                method_tag: 0,
+                http_version_tag: 1,
+                path: "/test".to_owned(),
+                query: None,
+                headers_mp: bytes::Bytes::new(),
+                body: bytes::Bytes::new(),
+                reply: reply_tx,
+            }],
+        };
+
+        d.dispatch(batch);
+
+        let direct_batch = rx.recv().await.expect("should receive direct batch");
+        assert_eq!(direct_batch.requests.len(), 1);
+        assert_eq!(direct_batch.requests[0].path, "/test");
     }
 }

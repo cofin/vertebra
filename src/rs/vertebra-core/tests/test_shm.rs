@@ -1,6 +1,6 @@
 //! Integration tests for `vertebra_core::shm`.
 
-use vertebra_core::shm::{ShmRegion, ShmError};
+use vertebra_core::shm::{ShmError, ShmRegion};
 
 #[test]
 fn create_anonymous_region() {
@@ -72,11 +72,7 @@ fn stale_region_replaced_on_create_named() {
     // Manually unlink to simulate what the OS would leave behind
     unsafe {
         let cname = std::ffi::CString::new(name.as_str()).unwrap();
-        libc::shm_open(
-            cname.as_ptr(),
-            libc::O_RDWR,
-            0o600,
-        );
+        libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0o600);
     }
     let second = ShmRegion::create_named(&name, 4096).expect("create_named with stale name");
     drop(second);
@@ -86,5 +82,9 @@ fn stale_region_replaced_on_create_named() {
 fn region_size_is_page_aligned() {
     // Request 1 byte; should get at least a page back.
     let region = ShmRegion::create(1).expect("create failed");
-    assert!(region.len() >= 4096, "size should be page-aligned, got {}", region.len());
+    assert!(
+        region.len() >= 4096,
+        "size should be page-aligned, got {}",
+        region.len()
+    );
 }

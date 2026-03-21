@@ -77,7 +77,7 @@ jobs:
         run: |
           # Use unshare to disable network (Linux only)
           if command -v unshare >/dev/null; then
-            unshare --net --map-root-user uv run vertebra build --one-file --target linux-x64 --output dist/offline-test
+            unshare --net --map-root-user uv run vtb build --one-file --target linux-x64 --output dist/offline-test
           else
             echo "unshare not available, skipping strict offline check"
           fi

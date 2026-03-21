@@ -50,7 +50,7 @@ fn bench_validate_jwt(c: &mut Criterion) {
                 Some("issuer"),
                 Some("audience"),
             );
-            black_box(result);
+            let _ = black_box(result);
         })
     });
 }

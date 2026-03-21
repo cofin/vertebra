@@ -31,7 +31,10 @@ fn spsc_empty_returns_error() {
     let (_region, ring) = make_spsc(16, 256);
     let mut buf = [0u8; 256];
     let err = ring.try_recv(&mut buf).unwrap_err();
-    assert!(matches!(err, ChannelError::Empty), "expected Empty, got {err:?}");
+    assert!(
+        matches!(err, ChannelError::Empty),
+        "expected Empty, got {err:?}"
+    );
 }
 
 #[test]
@@ -44,7 +47,10 @@ fn spsc_full_returns_error() {
         ring.try_send(&payload, 0).expect("send should succeed");
     }
     let err = ring.try_send(&payload, 0).unwrap_err();
-    assert!(matches!(err, ChannelError::Full), "expected Full, got {err:?}");
+    assert!(
+        matches!(err, ChannelError::Full),
+        "expected Full, got {err:?}"
+    );
 }
 
 #[test]

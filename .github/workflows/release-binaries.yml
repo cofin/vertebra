@@ -47,7 +47,7 @@ jobs:
         run: uv sync
 
       - name: Build Binary
-        run: uv run vertebra build --onefile --target ${{ matrix.target }} --output dist/vertebra-${{ matrix.target }}
+        run: uv run vtb build --onefile --target ${{ matrix.target }} --output dist/vertebra-${{ matrix.target }}
         env:
           VERTEBRA_DEBUG: 1
 

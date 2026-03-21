@@ -12,15 +12,13 @@ use vertebra_core::shm::ShmRegion;
 /// Allocate a SPSC ring backed by heap memory (not SHM) for benchmarking.
 fn make_spsc_heap(slots: usize, slot_size: usize) -> (std::mem::ManuallyDrop<Vec<u8>>, SpscRing) {
     let layout = RingLayout::new(slots, slot_size, ChannelMode::Spsc);
-    let alloc =
-        std::alloc::Layout::from_size_align(layout.total_size, CACHELINE_BYTES).unwrap();
+    let alloc = std::alloc::Layout::from_size_align(layout.total_size, CACHELINE_BYTES).unwrap();
     let raw_ptr = unsafe { std::alloc::alloc(alloc) };
     assert!(!raw_ptr.is_null());
     let region = Arc::new(unsafe { ShmRegion::from_raw(raw_ptr, layout.total_size) });
     let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
-    let sentinel = std::mem::ManuallyDrop::new(unsafe {
-        Vec::from_raw_parts(raw_ptr, 0, layout.total_size)
-    });
+    let sentinel =
+        std::mem::ManuallyDrop::new(unsafe { Vec::from_raw_parts(raw_ptr, 0, layout.total_size) });
     (sentinel, ring)
 }
 
@@ -89,5 +87,10 @@ fn bench_mpmc_baseline(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_spsc_1m_ops, bench_spsc_burst, bench_mpmc_baseline);
+criterion_group!(
+    benches,
+    bench_spsc_1m_ops,
+    bench_spsc_burst,
+    bench_mpmc_baseline
+);
 criterion_main!(benches);

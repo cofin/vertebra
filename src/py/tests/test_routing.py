@@ -1,12 +1,10 @@
 """Tests for routing decorators and path parameter extraction."""
 
-from __future__ import annotations
-
 from uuid import UUID
 
 import pytest
 
-from vertebra.web.routing import (
+from vertebra.framework._router import (
     Router,
     delete,
     extract_path_params,

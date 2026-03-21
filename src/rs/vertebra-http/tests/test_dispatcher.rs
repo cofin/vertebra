@@ -1,13 +1,31 @@
 //! Unit tests for the dispatcher.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
+use vertebra_core::bridge::BatchBridge;
 use vertebra_http::{
     collector::{Batch, PendingRequest, PendingResponse},
     dispatcher::Dispatcher,
 };
+
+/// Serialize dispatcher tests to prevent global bridge interference.
+static TEST_LOCK: std::sync::LazyLock<StdMutex<()>> =
+    std::sync::LazyLock::new(|| StdMutex::new(()));
+
+/// Ensure the global bridge is initialized (idempotent).
+fn ensure_bridge() {
+    let _ = BatchBridge::init(256, 1_048_576, 4, 1);
+}
+
+/// Drain stale batches from the bridge.
+fn drain_stale() {
+    if let Some(bridge) = BatchBridge::get() {
+        while bridge.poll_batch(Duration::from_millis(1)).is_some() {}
+        while bridge.try_recv_responses().is_some() {}
+    }
+}
 
 fn make_batch(count: usize) -> (Batch, Vec<oneshot::Receiver<PendingResponse>>) {
     let mut requests = Vec::new();
@@ -17,6 +35,7 @@ fn make_batch(count: usize) -> (Batch, Vec<oneshot::Receiver<PendingResponse>>) 
         requests.push(PendingRequest {
             handler_id: i,
             method_tag: 0,
+            http_version_tag: 1,
             path: "/".to_owned(),
             query: None,
             headers_mp: bytes::Bytes::new(),
@@ -29,33 +48,39 @@ fn make_batch(count: usize) -> (Batch, Vec<oneshot::Receiver<PendingResponse>>) 
 }
 
 #[tokio::test]
-async fn test_dispatch_roundtrip() {
-    let (dispatcher, mut ring_rx) = Dispatcher::new(16);
-    let dispatcher = Arc::new(dispatcher);
+async fn test_dispatch_sends_to_bridge() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_bridge();
+    drain_stale();
+
+    let dispatcher = Arc::new(Dispatcher::new());
 
     let (batch, _receivers) = make_batch(2);
-    dispatcher.dispatch(batch).await;
+    dispatcher.dispatch(batch);
 
-    let serialized = tokio::time::timeout(Duration::from_millis(100), ring_rx.recv())
-        .await
-        .expect("dispatch did not produce ring entry")
-        .unwrap();
-
-    assert_eq!(serialized.correlation_ids.len(), 2);
-    // Each request produces a 16-byte header + 0-byte body.
-    assert_eq!(serialized.payload.len(), 2 * 16);
+    let bridge = BatchBridge::get().unwrap();
+    let received = bridge
+        .poll_batch(Duration::from_millis(100))
+        .expect("dispatch did not produce bridge batch");
+    assert_eq!(received.len(), 2);
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_complete_unblocks_hyper() {
-    let (dispatcher, mut ring_rx) = Dispatcher::new(16);
-    let dispatcher = Arc::new(dispatcher);
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_bridge();
+    drain_stale();
+
+    let dispatcher = Arc::new(Dispatcher::new());
 
     let (batch, mut receivers) = make_batch(1);
-    dispatcher.dispatch(batch).await;
+    dispatcher.dispatch(batch);
 
-    let serialized = ring_rx.recv().await.unwrap();
-    let id = serialized.correlation_ids[0];
+    // Read the batch from the bridge to get the correlation_id
+    let bridge = BatchBridge::get().unwrap();
+    let received = bridge.poll_batch(Duration::from_millis(100)).unwrap();
+    let id = received.node(0).correlation_id;
 
     dispatcher.complete(
         id,
@@ -76,19 +101,19 @@ async fn test_complete_unblocks_hyper() {
 }
 
 #[tokio::test]
-async fn test_back_pressure() {
-    // Ring channel of capacity 1.
-    let (dispatcher, _ring_rx) = Dispatcher::new(1);
-    let dispatcher = Arc::new(dispatcher);
+async fn test_complete_unknown_id_is_noop() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_bridge();
+    drain_stale();
 
-    // First dispatch fills the channel.
-    let (batch1, _) = make_batch(1);
-    dispatcher.dispatch(batch1).await;
-
-    // Second dispatch should log and drop, NOT panic.
-    let (batch2, _) = make_batch(1);
-    // Use a timeout so we don't hang if the channel blocks.
-    tokio::time::timeout(Duration::from_millis(200), dispatcher.dispatch(batch2))
-        .await
-        .expect("dispatch should not hang on full channel");
+    let dispatcher = Dispatcher::new();
+    // Should not panic.
+    dispatcher.complete(
+        999999,
+        PendingResponse {
+            status: 200,
+            headers_mp: bytes::Bytes::new(),
+            body: bytes::Bytes::new(),
+        },
+    );
 }

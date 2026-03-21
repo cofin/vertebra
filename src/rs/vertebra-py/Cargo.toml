@@ -4,10 +4,21 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "PyO3 bindings for Vertebra native extension"
 
 [dependencies]
 vertebra-core = { path = "../vertebra-core" }
 pyo3 = { workspace = true }
+
+[build-dependencies]
+pyo3-build-config = { version = "0.28.2", features = ["resolve-config"] }
+
+[features]
+default = []
+# Use "extension-module" when building as a standalone .so (maturin develop).
+# Omit this feature when linking as rlib into the server binary.
+extension-module = ["pyo3/extension-module"]
 
 [lib]
 name = "_vertebra"

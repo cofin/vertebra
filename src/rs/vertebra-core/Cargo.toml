@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Core IPC primitives and shared types for Vertebra"
 
 [lib]
@@ -12,6 +13,7 @@ crate-type = ["lib"]
 
 [dependencies]
 arrow = { workspace = true }
+crossbeam-channel = { workspace = true }
 crossbeam-utils = { workspace = true }
 matchit = { workspace = true }
 serde = { workspace = true }

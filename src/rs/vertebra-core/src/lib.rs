@@ -11,6 +11,7 @@ pub mod async_notify;
 pub use async_notify::AsyncNotifier;
 pub mod async_ring;
 pub mod batch;
+pub mod bridge;
 pub mod buffer;
 pub mod channel;
 pub mod cleanup;
@@ -18,12 +19,17 @@ pub mod guards;
 pub mod ipc;
 pub mod notify;
 pub(crate) mod platform;
+pub mod process;
 pub mod protocol;
 pub mod proxy;
 pub mod router;
 pub mod shm;
 pub mod sync;
+pub mod tiered_ring;
+pub mod transport;
 
 // Re-exports for ergonomics
 pub use batch::{BatchArena, BatchError, BatchNode};
+pub use bridge::{BatchBridge, BridgeResponse, WriteRequest};
 pub use proxy::{HttpMethod, RequestInfo, ResponseInfo};
+pub use transport::{BatchSnapshot, TransportError, TransportNode};

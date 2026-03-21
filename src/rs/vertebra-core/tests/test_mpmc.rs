@@ -1,6 +1,9 @@
 //! Integration tests for `vertebra_core::channel::MpmcRing`.
 
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
 use vertebra_core::channel::MpmcRing;
 
 #[test]
@@ -66,7 +69,7 @@ fn mpmc_4p_4c_message_counts() {
                     Ok(_) => {
                         local_count += 1;
                         // Periodically flush count
-                        if local_count % 100 == 0 {
+                        if local_count.is_multiple_of(100) {
                             received.fetch_add(local_count, Ordering::AcqRel);
                             local_count = 0;
                         }
@@ -94,11 +97,8 @@ fn mpmc_4p_4c_message_counts() {
 
     // Drain any remaining after all threads join
     let mut buf = [0u8; 256];
-    loop {
-        match ring.try_recv(&mut buf) {
-            Ok(_) => { received.fetch_add(1, Ordering::AcqRel); }
-            Err(_) => break,
-        }
+    while ring.try_recv(&mut buf).is_ok() {
+        received.fetch_add(1, Ordering::AcqRel);
     }
 
     assert_eq!(

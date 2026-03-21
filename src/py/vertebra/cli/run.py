@@ -1,7 +1,5 @@
 """Run command."""
 
-from __future__ import annotations
-
 import logging
 import os
 import sys
@@ -13,8 +11,8 @@ import click
 
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
-from vertebra.core.serializers import decode_json
-from vertebra.core.supervisor import build_server_command, run_supervisor
+from vertebra.supervisor._supervisor import build_server_command, run_supervisor
+from vertebra.utils.serializers import from_json
 
 
 @click.command()
@@ -44,20 +42,29 @@ def run(
     logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO))
 
     env = os.environ.copy()
-    env["VERTEBRA_PYTHON_APP"] = app
+    env["VERTEBRA_APP"] = app
+
+    # Ensure the CWD is importable (for app paths like "tools.benchmarks.apps.foo:bar")
+    cwd = os.getcwd()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{cwd}{os.pathsep}{existing}" if existing else cwd
     env["VERTEBRA_HOST"] = host
     env["VERTEBRA_PORT"] = str(port)
     env["VERTEBRA_WORKERS"] = str(workers)
     env["VERTEBRA_LOG_LEVEL"] = log_level
     env["VERTEBRA_NATIVE"] = "0" if asgi else "1"
-    config_data: dict[str, Any] | None = None
+
+    # Set static dir for production frontend serving if available
+    static_dir = _resolve_static_dir(Path.cwd())
+    if static_dir:
+        env["VERTEBRA_STATIC_DIR"] = str(static_dir)
+
     if config_path:
         env["VERTEBRA_CONFIG"] = config_path
-        config_data = load_config(Path(config_path))
+        load_config(Path(config_path))
 
     try:
         server_cmd = build_server_command()
-        server_cmd.extend(["--python", sys.executable])
     except SystemExit as e:
         raise CLIError(
             str(e), hint="Ensure vertebra-server binary is available/built.", exit_code=EXIT_CONFIG_ERROR
@@ -69,12 +76,32 @@ def run(
     exit_code = run_supervisor(
         server_cmd=server_cmd,
         env=env,
-        workers=0,
         drain_timeout_ms=drain_timeout,
         shutdown_timeout_ms=shutdown_timeout,
-        config=config_data,
     )
     sys.exit(exit_code)
+
+
+def _resolve_static_dir(project_dir: Path) -> Path | None:
+    """Resolve the static assets directory for production frontend serving."""
+    try:
+        from vertebra.builder._config import BuildConfig
+
+        config = BuildConfig.load(project_dir)
+        if config.outdir:
+            candidate = project_dir / config.outdir
+            if candidate.is_dir():
+                return candidate
+    except Exception:
+        pass
+
+    # Fallback: check common static directories
+    for name in ("dist/static", "dist"):
+        candidate = project_dir / name
+        if candidate.is_dir():
+            return candidate
+
+    return None
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -86,6 +113,6 @@ def load_config(path: Path) -> dict[str, Any]:
         with path.open("rb") as f:
             return tomllib.load(f)
     if path.suffix == ".json":
-        return decode_json(path.read_bytes(), type_hint=dict[str, Any])
+        return from_json(path.read_bytes(), type_hint=dict[str, Any])
     msg = f"Unsupported config format: {path.suffix}"
     raise ValueError(msg)
