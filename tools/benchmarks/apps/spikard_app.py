@@ -74,6 +74,8 @@ async def health() -> Response:
 
 
 if __name__ == "__main__":
+    from spikard import ServerConfig
     host = os.environ.get("SPIKARD_HOST", "127.0.0.1")
     port = int(os.environ.get("SPIKARD_PORT", "8005"))
-    app.run(host=host, port=port)
+    config = ServerConfig(host=host, port=port)
+    app.run(config=config)

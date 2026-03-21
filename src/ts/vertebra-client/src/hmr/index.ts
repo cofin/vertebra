@@ -27,6 +27,7 @@ export class VertebraHmrClient {
   private reconnectAttempts = 0;
   private reconnectTimer: any = null;
   private pingTimer: any = null;
+  private connected = false;
   private hmrPath: string;
 
   constructor(hmrPath = DEFAULT_HMR_PATH) {
