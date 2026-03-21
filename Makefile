@@ -70,9 +70,9 @@ upgrade:                                            ## Upgrade all dependencies 
 	@uv lock --upgrade && uv sync --all-extras --dev
 	@echo "${INFO} Upgrading Rust dependencies (cargo)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@cd $(CURDIR)/src/rs && cargo update
+	@(cd src/rs && cargo update)
 	@echo "${INFO} Upgrading TS dependencies (bun)..."
-	@cd $(CURDIR)/src/ts/vertebra-client && bun update
+	@(cd src/ts/vertebra-client && bun update)
 	@echo "${INFO} Upgrading CI hooks (pre-commit)..."
 	@uv run pre-commit autoupdate
 	@echo "${OK} All dependencies upgraded"
@@ -105,6 +105,7 @@ ts-lint:                                            ## Lint TS package with auto
 .PHONY: dev
 dev:                                                ## Install native extension in debug mode for development
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@(cd src/rs && cargo build --workspace --exclude vertebra-py)
 	@uv run maturin develop --uv 2>&1 | grep -E "Compiling|Finished|Built wheel|Installed|error\[" | tail -3
 
 # =============================================================================
@@ -113,7 +114,7 @@ dev:                                                ## Install native extension 
 .PHONY: build
 build: ts-build                                     ## Build optimized release binaries + native extension + TS client
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@cd $(CURDIR)/src/rs && cargo build --workspace --exclude vertebra-py --release
+	@(cd src/rs && cargo build --workspace --exclude vertebra-py --release)
 	@uv run maturin develop --uv -r 2>&1 | grep -E "Compiling|Finished|Built wheel|Installed|error\[" | tail -3
 	@uv build
 	@echo "${OK} Build complete"
@@ -155,8 +156,8 @@ lint: ts-lint                                       ## Format and lint everythin
 	@uv run ruff format src/py/vertebra src/py/tests
 	@echo "${INFO} Linting and fixing Rust (Fmt & Clippy)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@cd $(CURDIR)/src/rs && cargo fmt
-	@cd $(CURDIR)/src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --exclude vertebra-py --all-targets -- -D warnings >/dev/null 2>&1
+	@(cd src/rs && cargo fmt)
+	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --exclude vertebra-py --all-targets -- -D warnings >/dev/null 2>&1)
 	@echo "${OK} Lint complete"
 
 .PHONY: lint-all

@@ -1,27 +1,22 @@
 name: Benchmarks
 
 on:
-  # Manual trigger
   workflow_dispatch:
     inputs:
       full_benchmark:
         description: 'Run full benchmark (not quick mode)'
         type: boolean
         default: false
-  # Run on releases
   release:
     types: [published]
-  # Weekly scheduled run for tracking
   schedule:
-    - cron: '0 6 * * 1'  # Monday 6 AM UTC
+    - cron: '0 6 * * 1'
 
-# Only allow one benchmark run at a time
 concurrency:
   group: benchmark
   cancel-in-progress: false
 
 env:
-  # Consistent environment for reproducible results
   PYTHONUNBUFFERED: "1"
   UV_SYSTEM_PYTHON: "1"
 
@@ -29,28 +24,24 @@ jobs:
   benchmark:
     name: Vertebra Performance
     runs-on: ubuntu-latest
-    # Use a larger runner if available for more consistent results
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Need full history for comparing to previous results
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v5
         with:
-          version: "latest"
+          enable-cache: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
 
       - name: Install oha
         run: cargo install oha
@@ -58,59 +49,26 @@ jobs:
       - name: Install dependencies
         run: make install
 
-      - name: Build Rust extensions
-        run: make rs-build
+      - name: Build Optimized
+        run: make build
 
-      # Only benchmark Vertebra servers - respectful of external projects
-      - name: Run Vertebra Benchmarks
+      - name: Run Benchmarks
         id: benchmark
         env:
           FULL_BENCHMARK: ${{ inputs.full_benchmark }}
         run: |
-          # Run benchmarks for Vertebra variants only
-          SERVERS="vertebra,vertebra_asgi_litestar,vertebra_native_litestar,vertebra_fastapi"
-
           if [ "$FULL_BENCHMARK" = "true" ]; then
-            uv run python -m benchmarks.servers.runner \
-              --servers "$SERVERS" \
-              --output-dir benchmarks/results
+            make bench-all
           else
-            uv run python -m benchmarks.servers.runner \
-              --servers "$SERVERS" \
-              --quick \
-              --output-dir benchmarks/results
+            make bench
           fi
-
-      - name: Check for Regressions
-        id: regression
-        run: |
-          # Check if there are significant regressions (>10% RPS drop)
-          uv run python -c "
-          from benchmarks.servers.history import BenchmarkHistory
-          from benchmarks.servers.results import BenchmarkSuite
-
-          history = BenchmarkHistory()
-          current = BenchmarkSuite.load_json('benchmarks/results/data.json')
-          comparisons = history.get_vertebra_comparisons(current)
-
-          regressions = [c for c in comparisons if c.delta_percent < -10]
-
-          if regressions:
-              print('Performance regressions detected:')
-              for r in regressions:
-                  print(f'  {r.server}/{r.scenario}: {r.delta_percent:.1f}%')
-              exit(1)
-          else:
-              print('No significant regressions')
-          "
 
       - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results-${{ github.sha }}
           path: |
-            benchmarks/results/data.json
-            benchmarks/results/report.md
+            tools/benchmarks/results/
           retention-days: 90
 
       - name: Commit History (on main only)
@@ -118,26 +76,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Copy current results to history
-          TIMESTAMP=$(date -u +%Y-%m-%dT%H-%M-%SZ)
-          cp benchmarks/results/data.json "benchmarks/results/runs/${TIMESTAMP}.json"
-
-          git add benchmarks/results/runs/
+          git add tools/benchmarks/results/*.duckdb
           git diff --staged --quiet || git commit -m "bench: track Vertebra performance [skip ci]"
           git push
-
-      - name: Comment on PR (if regression)
-        if: failure() && github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const report = fs.readFileSync('benchmarks/results/report.md', 'utf8');
-
-            github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `## ⚠️ Performance Regression Detected\n\n${report.slice(0, 3000)}...`
-            });

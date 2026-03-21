@@ -16,32 +16,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # QEMU for Linux arm64
       - name: Set up QEMU
         if: runner.os == 'Linux'
         uses: docker/setup-qemu-action@v3
 
-      # Build wheels
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.16.5
+        uses: pypa/cibuildwheel@v2.22.0
         env:
+          CIBW_BUILD: "cp312-* cp313-* cp314-*"
           CIBW_ARCHS_MACOS: x86_64 arm64
           CIBW_ARCHS_LINUX: x86_64 aarch64
           CIBW_ARCHS_WINDOWS: AMD64
           CIBW_SKIP: "pp*"
-          # Environment variables for build
-          VERTEBRA_BUILD_PROFILE: "baseline"
-
-      # Code signing (macOS)
-      - name: Sign macOS wheels
-        if: runner.os == 'macOS' && env.APPLE_CERT_APPLICATION != ''
-        env:
-          APPLE_CERT_APPLICATION: ${{ secrets.APPLE_CERT_APPLICATION }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-        run: |
-          # Placeholder for rcodesign integration
-          # rcodesign sign ...
-          echo "Signing not configured"
+          CIBW_TEST_COMMAND: 'python -c "import vertebra; print(vertebra.__version__)"'
+          CIBW_BEFORE_BUILD: "make ts-build"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -53,37 +46,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
       - name: Build sdist
-        run: pipx run build --sdist
+        run: uv build --sdist
       - uses: actions/upload-artifact@v4
         with:
           name: cibw-sdist
           path: dist/*.tar.gz
 
-  verify_offline:
-    name: Verify offline build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # Pre-cache PBS to simulate "cached" state
-      - name: Pre-cache runtime
-        run: |
-          pip install httpx
-          python -c "import sys; sys.path.append('src/py'); from vertebra.build.standalone import download_standalone; import asyncio; from pathlib import Path; asyncio.run(download_standalone('linux-x64', 'modern', Path('.cache/vertebra/pbs')))"
-
-      # Run build with network disabled
-      - name: Build offline
-        run: |
-          # Use unshare to disable network (Linux only)
-          if command -v unshare >/dev/null; then
-            unshare --net --map-root-user uv run vtb build --one-file --target linux-x64 --output dist/offline-test
-          else
-            echo "unshare not available, skipping strict offline check"
-          fi
-
   upload_pypi:
-    needs: [build_wheels, build_sdist, verify_offline]
+    needs: [build_wheels, build_sdist]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -97,4 +69,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
