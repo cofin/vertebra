@@ -165,6 +165,159 @@ impl SupervisorRingFactory {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Worker Lifecycle Management
+// ---------------------------------------------------------------------------
+
+/// State of a managed worker process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerState {
+    Running,
+    Dead,
+    Respawning,
+}
+
+/// Tracks a single worker's lifecycle for crash detection and respawn.
+pub struct WorkerLifecycle {
+    pub child: Option<std::process::Child>,
+    #[cfg(target_os = "linux")]
+    pub pidfd: Option<std::os::fd::OwnedFd>,
+    pub ring_pair: Arc<RingPair>,
+    pub state: WorkerState,
+    pub crash_count: u32,
+    pub last_crash: Option<std::time::Instant>,
+    pub last_spawn: Option<std::time::Instant>,
+    pub worker_id: usize,
+}
+
+impl WorkerLifecycle {
+    /// Create a new lifecycle tracker for a just-spawned worker.
+    pub fn new(
+        child: std::process::Child,
+        ring_pair: Arc<RingPair>,
+        worker_id: usize,
+    ) -> Self {
+        #[cfg(target_os = "linux")]
+        let pidfd = {
+            use vertebra_core::platform::linux::pidfd_open;
+            pidfd_open(child.id() as i32).ok()
+        };
+
+        Self {
+            child: Some(child),
+            #[cfg(target_os = "linux")]
+            pidfd,
+            ring_pair,
+            state: WorkerState::Running,
+            crash_count: 0,
+            last_crash: None,
+            last_spawn: Some(std::time::Instant::now()),
+            worker_id,
+        }
+    }
+
+    /// Check if the worker process has exited (non-blocking).
+    pub fn check_alive(&mut self) -> bool {
+        if let Some(ref mut child) = self.child {
+            match child.try_wait() {
+                Ok(Some(_status)) => {
+                    self.state = WorkerState::Dead;
+                    false
+                }
+                Ok(None) => true, // still running
+                Err(_) => {
+                    self.state = WorkerState::Dead;
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Record a crash and update backoff state.
+    pub fn record_crash(&mut self) {
+        let now = std::time::Instant::now();
+
+        // If worker ran for > 60s before crashing, reset crash count (not a crash loop)
+        if let Some(spawn_time) = self.last_spawn {
+            if now.duration_since(spawn_time) > std::time::Duration::from_secs(60) {
+                self.crash_count = 0;
+            }
+        }
+
+        self.crash_count += 1;
+        self.last_crash = Some(now);
+        self.state = WorkerState::Dead;
+    }
+
+    /// Compute the respawn delay based on crash count (exponential backoff).
+    ///
+    /// 1s, 2s, 4s, 8s, 16s, 32s max. Resets if worker ran > 60s.
+    pub fn respawn_delay(&self) -> std::time::Duration {
+        let exponent = self.crash_count.saturating_sub(1).min(5);
+        std::time::Duration::from_secs(1u64 << exponent)
+    }
+
+    /// Check if the circuit breaker has tripped (> 10 crashes in 5 minutes).
+    pub fn circuit_breaker_tripped(&self) -> bool {
+        if self.crash_count <= 10 {
+            return false;
+        }
+        // Check if crashes are within 5 minutes
+        if let Some(first_crash) = self.last_crash {
+            let window = std::time::Duration::from_secs(300);
+            if first_crash.elapsed() < window {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stale SHM Cleanup
+// ---------------------------------------------------------------------------
+
+/// Clean up stale shared memory regions from previous crashed supervisors.
+///
+/// Scans `/dev/shm/` for files matching `vertebra-*` and unlinks them.
+/// Only affects named regions — memfd regions don't appear in `/dev/shm/`.
+#[cfg(unix)]
+pub fn cleanup_stale_shm() {
+    use std::fs;
+
+    let shm_dir = std::path::Path::new("/dev/shm");
+    if !shm_dir.exists() {
+        return;
+    }
+
+    match fs::read_dir(shm_dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with("vertebra-") || name.starts_with("vertebra_") {
+                        tracing::warn!(name, "cleaning up stale SHM region");
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "could not scan /dev/shm for stale regions");
+        }
+    }
+}
+
+/// Install panic hook that calls `cleanup_all()` for SHM cleanup.
+pub fn install_panic_cleanup_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        vertebra_core::cleanup::cleanup_all();
+        default_hook(info);
+    }));
+}
+
 /// Errors from supervisor operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SupervisorError {
@@ -224,6 +377,73 @@ mod tests {
             .try_recv(&mut buf)
             .expect("recv");
         assert_eq!(&buf[..len], b"for-worker-0");
+    }
+
+    #[test]
+    fn worker_lifecycle_respawn_delay() {
+        let pair = Arc::new(RingPair::create(RingPairConfig::default()).unwrap());
+        let child = std::process::Command::new("true").spawn().unwrap();
+        let mut lifecycle = WorkerLifecycle::new(child, pair, 0);
+
+        // First crash: 1s delay
+        lifecycle.record_crash();
+        assert_eq!(lifecycle.respawn_delay(), std::time::Duration::from_secs(1));
+
+        // Second crash: 2s delay
+        lifecycle.record_crash();
+        assert_eq!(lifecycle.respawn_delay(), std::time::Duration::from_secs(2));
+
+        // Third: 4s
+        lifecycle.record_crash();
+        assert_eq!(lifecycle.respawn_delay(), std::time::Duration::from_secs(4));
+
+        // Caps at 32s
+        for _ in 0..10 {
+            lifecycle.record_crash();
+        }
+        assert_eq!(lifecycle.respawn_delay(), std::time::Duration::from_secs(32));
+    }
+
+    #[test]
+    fn circuit_breaker_trips_after_10_crashes() {
+        let pair = Arc::new(RingPair::create(RingPairConfig::default()).unwrap());
+        let child = std::process::Command::new("true").spawn().unwrap();
+        let mut lifecycle = WorkerLifecycle::new(child, pair, 0);
+
+        for _ in 0..10 {
+            lifecycle.record_crash();
+        }
+        assert!(!lifecycle.circuit_breaker_tripped(), "10 crashes should not trip");
+
+        lifecycle.record_crash(); // 11th
+        assert!(lifecycle.circuit_breaker_tripped(), "11 crashes should trip");
+    }
+
+    #[test]
+    fn ring_pair_reclaim_resets_state() {
+        let pair = RingPair::create(RingPairConfig::default()).unwrap();
+
+        // Write some data to the request ring
+        pair.request_ring.try_send(b"test data", 0).expect("send");
+
+        // Reclaim (simulating worker death)
+        unsafe { pair.reclaim(); }
+
+        // Ring should be empty after reclaim
+        let mut buf = vec![0u8; 1024];
+        assert!(pair.request_ring.try_recv(&mut buf).is_err(), "ring should be empty after reclaim");
+
+        // Ring should be usable for new data
+        pair.request_ring.try_send(b"new data", 0).expect("send after reclaim");
+        let len = pair.request_ring.try_recv(&mut buf).expect("recv after reclaim");
+        assert_eq!(&buf[..len], b"new data");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_shm_cleanup_is_safe() {
+        // Just verify it doesn't crash — we don't want to create actual /dev/shm files in tests
+        cleanup_stale_shm();
     }
 
     #[cfg(unix)]

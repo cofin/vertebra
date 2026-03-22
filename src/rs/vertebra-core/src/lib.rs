@@ -18,7 +18,7 @@ pub mod cleanup;
 pub mod guards;
 pub mod ipc;
 pub mod notify;
-pub(crate) mod platform;
+pub mod platform;
 pub mod process;
 pub mod protocol;
 pub mod proxy;

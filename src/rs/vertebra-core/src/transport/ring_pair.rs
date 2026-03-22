@@ -377,6 +377,27 @@ impl RingPair {
         })
     }
 
+    /// Reclaim this ring pair after a worker death.
+    ///
+    /// Resets all ring heads to zero and drains notifier counters so the
+    /// ring pair can be reused by a replacement worker process.
+    ///
+    /// # Safety
+    /// The dead worker must no longer be accessing these rings. Typically
+    /// called after `waitpid` confirms the child has exited.
+    pub unsafe fn reclaim(&self) {
+        // Reset request ring
+        self.request_ring.reset();
+        // Reset all response tier rings
+        self.response_rings.small.reset();
+        self.response_rings.medium.reset();
+        self.response_rings.large.reset();
+        self.response_rings.xlarge.reset();
+        // Drain notifier counters
+        let _ = self.request_notifier.clear();
+        let _ = self.response_notifier.clear();
+    }
+
     /// Get the request ring's SHM handle for FD inheritance.
     #[cfg(unix)]
     pub fn request_ring_handle(&self) -> Option<RawFd> {

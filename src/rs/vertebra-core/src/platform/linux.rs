@@ -1,10 +1,28 @@
-//! Linux-specific wait/wake primitives (futex).
+//! Linux-specific wait/wake primitives (futex) and process management (pidfd).
 
 use core::sync::atomic::AtomicU32;
 use std::io;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::time::Duration;
 
 use crate::sync::SyncError;
+
+/// Open a process file descriptor for monitoring process lifetime.
+///
+/// Returns a pollable FD that becomes readable when the process exits.
+/// Available on Linux 5.3+ (kernel 5.3 added `pidfd_open(2)`).
+///
+/// Register the returned FD with epoll/`AsyncFd` to detect worker death
+/// without polling or signal handlers.
+pub fn pidfd_open(pid: i32) -> io::Result<OwnedFd> {
+    // SYS_pidfd_open = 434 on x86_64, 434 on aarch64
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: pidfd_open returns a valid FD on success.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
 
 pub(crate) fn wait_on_address(word: &AtomicU32, expected: u32) -> Result<(), SyncError> {
     let addr = word as *const AtomicU32 as *const u32;

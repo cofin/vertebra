@@ -837,6 +837,26 @@ impl SpscRing {
         (payload, flags)
     }
 
+    /// Reset the ring to empty state. Used for reclaiming rings from dead workers.
+    ///
+    /// # Safety
+    /// Caller must ensure no other thread is reading or writing to this ring.
+    /// Typically called after a worker process has died and before respawning.
+    pub unsafe fn reset(&self) {
+        self.read_head().store(0, Ordering::Release);
+        self.write_head().store(0, Ordering::Release);
+        self.wait_read_ptr().store(0, Ordering::Release);
+        self.wait_write_ptr().store(0, Ordering::Release);
+        self.send_waiters().store(0, Ordering::Release);
+        self.recv_waiters().store(0, Ordering::Release);
+        self.slot_borrowed.store(false, Ordering::Release);
+        // Bump generation to invalidate any stale references
+        let header = &*self.header;
+        header
+            .generation
+            .fetch_add(1, Ordering::Release);
+    }
+
     fn read_head(&self) -> &core::sync::atomic::AtomicU64 {
         unsafe { &(*self.header).read_head.0 }
     }
