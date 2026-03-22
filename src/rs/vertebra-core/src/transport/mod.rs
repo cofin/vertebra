@@ -1,5 +1,4 @@
-//!              (arena+slab reset after snapshot)
-//! ```
+//! (arena+slab reset after snapshot)
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
