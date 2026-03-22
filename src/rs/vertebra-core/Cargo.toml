@@ -70,3 +70,7 @@ harness = false
 name = "codec"
 harness = false
 required-features = ["compression"]
+
+[[bench]]
+name = "shm_transport"
+harness = false

@@ -106,7 +106,7 @@ pub struct TieredRingSet {
 
 impl TieredRingSet {
     /// Create a new tiered ring set with freshly allocated shared memory regions.
-    fn create(config: &TieredRingConfig) -> Result<Self, RingPairError> {
+    pub fn create(config: &TieredRingConfig) -> Result<Self, RingPairError> {
         let small = Self::create_tier_ring(&config.small)?;
         let medium = Self::create_tier_ring(&config.medium)?;
         let large = Self::create_tier_ring(&config.large)?;
