@@ -132,9 +132,13 @@ rs-test:                                            ## Run Rust tests (all featu
 	@cd src/rs && cargo test --workspace --features tls,compression
 	@echo "${OK} Rust tests passed"
 
-.PHONY: test
-test: dev rs-test ts-test                           ## Run all tests (Rust, Python, TypeScript)
+.PHONY: py-test
+py-test: dev                                        ## Run Python tests
 	@uv run pytest src/py/tests -v
+	@echo "${OK} Python tests passed"
+
+.PHONY: test
+test: rs-test py-test ts-test                       ## Run all tests (Rust, Python, TypeScript)
 	@echo "${OK} All tests passed"
 
 .PHONY: coverage
