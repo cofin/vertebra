@@ -10,8 +10,6 @@ use std::time::Duration;
 pub enum Backend {
     /// In-process MPMC channel (used by embedded workers).
     InProcess(crossbeam_channel::Receiver<Arc<BatchSnapshot>>),
-    /// Cross-process shared memory ring (reserved for future multi-process scaling).
-    SharedMemory,
 }
 
 /// Primary abstraction for request batch delivery.
@@ -36,10 +34,6 @@ impl Transport {
     pub fn poll_batch(&self, timeout: Duration) -> Option<Arc<BatchSnapshot>> {
         match &self.backend {
             Backend::InProcess(rx) => rx.recv_timeout(timeout).ok(),
-            Backend::SharedMemory => {
-                // Shared memory batching not yet implemented.
-                None
-            }
         }
     }
 }
