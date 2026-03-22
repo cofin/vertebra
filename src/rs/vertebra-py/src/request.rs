@@ -65,6 +65,12 @@ impl VertebraRequest {
         self.batch.node(self.index).handler_id
     }
 
+    /// Protocol flags for this request's batch.
+    #[getter]
+    fn flags(&self) -> u32 {
+        self.batch.flags()
+    }
+
     #[getter]
     fn request_id(&self) -> u64 {
         self.batch.node(self.index).correlation_id
