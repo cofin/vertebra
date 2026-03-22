@@ -262,7 +262,7 @@ mod tests {
             slab: DataSlab::new(65536),
             write_lock: Mutex::new(()),
             batch_tx,
-            batch_rx,
+            transport: Transport::new_in_process(batch_rx),
             buffer_pool: Arc::new(BufferPool::new(8, 65536, 64)),
             resp_tx,
             resp_rx: tokio::sync::Mutex::new(resp_rx),

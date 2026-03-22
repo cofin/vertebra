@@ -185,6 +185,7 @@ pub enum ControlMessageKind {
     Shutdown,
 }
 
+pub mod codec;
 pub mod state;
 
 impl ControlMessageKind {
