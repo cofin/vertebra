@@ -233,6 +233,14 @@ impl SpscRing {
         self.layout.slot_size - core::mem::size_of::<SlotHeader>()
     }
 
+    /// Get the underlying shared memory region's handle (FD on Unix).
+    ///
+    /// Used for FD inheritance across process boundaries.
+    #[cfg(unix)]
+    pub fn region_handle(&self) -> Option<std::os::fd::RawFd> {
+        self.region.handle()
+    }
+
     pub fn stats(&self) -> RingStats {
         RingStats {
             slot_size: self.layout.slot_size,

@@ -1,14 +1,21 @@
 //! (arena+slab reset after snapshot)
 
+pub mod ring_pair;
+
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use self::ring_pair::{RingPair, RingPairError, ResponseData};
+use crate::channel::ChannelError;
+
 /// Tagged enum for supported transport backends.
 pub enum Backend {
     /// In-process MPMC channel (used by embedded workers).
     InProcess(crossbeam_channel::Receiver<Arc<BatchSnapshot>>),
+    /// Cross-process SPSC ring pair (used by forked workers).
+    SharedMemory(Arc<RingPair>),
 }
 
 /// Primary abstraction for request batch delivery.
@@ -27,12 +34,65 @@ impl Transport {
         }
     }
 
+    /// Create a new shared-memory transport backed by a ring pair.
+    pub fn new_shared_memory(ring_pair: Arc<RingPair>) -> Self {
+        Self {
+            backend: Backend::SharedMemory(ring_pair),
+        }
+    }
+
     /// Poll for the next batch snapshot.
     ///
     /// This is the primary entry point for Python worker loops.
+    /// Works transparently for both in-process and shared-memory backends.
     pub fn poll_batch(&self, timeout: Duration) -> Option<Arc<BatchSnapshot>> {
         match &self.backend {
             Backend::InProcess(rx) => rx.recv_timeout(timeout).ok(),
+            Backend::SharedMemory(ring_pair) => {
+                let mut buf = vec![0u8; ring_pair.request_ring.payload_capacity()];
+                match ring_pair.request_ring.recv_timeout(&mut buf, timeout) {
+                    Ok(Some(len)) => BatchSnapshot::deserialize_from(&buf[..len]).ok(),
+                    Ok(None) => None,
+                    Err(_) => None,
+                }
+            }
+        }
+    }
+
+    /// Send a response back through the transport.
+    ///
+    /// Only meaningful for `Backend::SharedMemory` — routes to the tiered
+    /// response ring. For `Backend::InProcess`, this is a no-op (responses
+    /// flow through oneshot channels in the dispatcher).
+    pub fn send_response(
+        &self,
+        correlation_id: u64,
+        status: u16,
+        headers_raw: &[u8],
+        body: &[u8],
+    ) -> Result<(), TransportError> {
+        match &self.backend {
+            Backend::InProcess(_) => Ok(()), // no-op
+            Backend::SharedMemory(ring_pair) => ring_pair
+                .response_rings
+                .send_response(correlation_id, status, headers_raw, body)
+                .map_err(|e| match e {
+                    RingPairError::ResponseTooLarge(_) => TransportError::ResponseTooLarge,
+                    RingPairError::Channel(ChannelError::Full) => TransportError::RingFull,
+                    _ => TransportError::Disconnected,
+                }),
+        }
+    }
+
+    /// Try to receive a response from the shared-memory transport.
+    ///
+    /// Returns `None` if no response is available or if using in-process backend.
+    pub fn try_recv_response(&self) -> Option<ResponseData> {
+        match &self.backend {
+            Backend::InProcess(_) => None,
+            Backend::SharedMemory(ring_pair) => {
+                ring_pair.response_rings.try_recv_response().ok().flatten()
+            }
         }
     }
 }
@@ -48,6 +108,12 @@ pub enum TransportError {
     EmptyBatch,
     #[error("transport channel disconnected")]
     Disconnected,
+    #[error("ring full")]
+    RingFull,
+    #[error("response too large")]
+    ResponseTooLarge,
+    #[error("batch deserialization failed: {0}")]
+    DeserializeFailed(&'static str),
 }
 
 /// Compact request descriptor with slab offsets (no raw pointers).
@@ -548,7 +614,109 @@ impl BatchSnapshot {
         let slab = self.slab_bytes();
         &slab[n.body_offset as usize..(n.body_offset + n.body_len) as usize]
     }
+
+    /// Compute the serialized size for ring slot allocation.
+    ///
+    /// Wire format: `[flags:u32][node_count:u32][slab_len:u32][pad:u32][nodes...][slab...]`
+    pub fn serialized_size(&self) -> usize {
+        let node_bytes = self.nodes.len() * core::mem::size_of::<TransportNode>();
+        BATCH_HEADER_SIZE + node_bytes + self.slab.len()
+    }
+
+    /// Serialize this batch snapshot into a ring slot buffer.
+    ///
+    /// Returns the number of bytes written. The caller must ensure `slot`
+    /// is at least `serialized_size()` bytes.
+    ///
+    /// # Panics
+    /// Panics if the slot is too small.
+    pub fn serialize_into(&self, slot: &mut [u8]) -> usize {
+        let size = self.serialized_size();
+        assert!(
+            slot.len() >= size,
+            "slot too small: {} < {}",
+            slot.len(),
+            size
+        );
+
+        let mut offset = 0;
+
+        // Header: flags, node_count, slab_len, padding
+        slot[offset..offset + 4].copy_from_slice(&self.flags.to_le_bytes());
+        offset += 4;
+        slot[offset..offset + 4].copy_from_slice(&(self.nodes.len() as u32).to_le_bytes());
+        offset += 4;
+        slot[offset..offset + 4].copy_from_slice(&(self.slab.len() as u32).to_le_bytes());
+        offset += 4;
+        slot[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes()); // padding
+        offset += 4;
+
+        // Nodes: memcpy TransportNode array (repr(C), Copy)
+        let node_bytes = self.nodes.len() * core::mem::size_of::<TransportNode>();
+        if node_bytes > 0 {
+            // SAFETY: TransportNode is #[repr(C)], Copy, and contains only primitive types.
+            // The source slice is valid for node_bytes, and offset-based (no pointers).
+            let src = self.nodes.as_ptr() as *const u8;
+            unsafe {
+                core::ptr::copy_nonoverlapping(src, slot[offset..].as_mut_ptr(), node_bytes);
+            }
+            offset += node_bytes;
+        }
+
+        // Slab data
+        slot[offset..offset + self.slab.len()].copy_from_slice(&self.slab);
+        offset += self.slab.len();
+
+        offset
+    }
+
+    /// Deserialize a batch snapshot from ring slot data.
+    ///
+    /// Copies nodes and slab from the slot into owned `Vec`s. For V1, this
+    /// is a full copy — zero-copy borrowing from `SlotView` lifetime is a
+    /// future optimization.
+    pub fn deserialize_from(data: &[u8]) -> Result<Arc<Self>, TransportError> {
+        if data.len() < BATCH_HEADER_SIZE {
+            return Err(TransportError::DeserializeFailed("too short"));
+        }
+
+        let flags = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        let node_count = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+        let slab_len = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+        // data[12..16] is padding
+
+        let node_size = core::mem::size_of::<TransportNode>();
+        let node_bytes = node_count * node_size;
+        let expected = BATCH_HEADER_SIZE + node_bytes + slab_len;
+        if data.len() < expected {
+            return Err(TransportError::DeserializeFailed("truncated"));
+        }
+
+        // Read nodes via memcpy
+        let mut nodes = vec![TransportNode::default(); node_count];
+        if node_count > 0 {
+            // SAFETY: TransportNode is #[repr(C)], all-primitive fields.
+            // Source data was written by serialize_into with the same layout.
+            let dst = nodes.as_mut_ptr() as *mut u8;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data[BATCH_HEADER_SIZE..].as_ptr(),
+                    dst,
+                    node_bytes,
+                );
+            }
+        }
+
+        // Read slab
+        let slab_start = BATCH_HEADER_SIZE + node_bytes;
+        let slab = data[slab_start..slab_start + slab_len].to_vec();
+
+        Ok(Arc::new(Self::new_with_flags(slab, nodes, flags)))
+    }
 }
+
+/// Fixed header size for batch snapshot wire format.
+const BATCH_HEADER_SIZE: usize = 16; // flags(4) + node_count(4) + slab_len(4) + pad(4)
 
 /// Decode headers from the compact binary format.
 ///
@@ -888,5 +1056,211 @@ mod tests {
         let buf = vec![10u8, b'a', b'b', b'c'];
         let headers = decode_headers_raw(&buf);
         assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn batch_snapshot_serialize_empty() {
+        let snap = BatchSnapshot::new(vec![], vec![]);
+        assert_eq!(snap.serialized_size(), BATCH_HEADER_SIZE);
+
+        let mut buf = vec![0u8; snap.serialized_size()];
+        let written = snap.serialize_into(&mut buf);
+        assert_eq!(written, BATCH_HEADER_SIZE);
+
+        let deserialized = BatchSnapshot::deserialize_from(&buf).expect("deserialize");
+        assert_eq!(deserialized.len(), 0);
+        assert!(deserialized.is_empty());
+    }
+
+    #[test]
+    fn batch_snapshot_serialize_single_node() {
+        let slab = b"GET /hello HTTP/1.1\r\n".to_vec();
+        let node = TransportNode {
+            method_tag: 0,
+            http_version_tag: 1,
+            _pad: [0; 2],
+            handler_id: 42,
+            correlation_id: 99,
+            path_offset: 4,
+            path_len: 6,
+            query_offset: 0,
+            query_len: 0,
+            headers_offset: 0,
+            headers_len: 0,
+            body_offset: 0,
+            body_len: 0,
+        };
+
+        let snap = BatchSnapshot::new(slab.clone(), vec![node]);
+        let size = snap.serialized_size();
+        assert_eq!(size, BATCH_HEADER_SIZE + 56 + slab.len());
+
+        let mut buf = vec![0u8; size];
+        snap.serialize_into(&mut buf);
+
+        let deserialized = BatchSnapshot::deserialize_from(&buf).expect("deserialize");
+        assert_eq!(deserialized.len(), 1);
+        assert_eq!(deserialized.node(0).handler_id, 42);
+        assert_eq!(deserialized.node(0).correlation_id, 99);
+        assert_eq!(deserialized.node(0).method_tag, 0);
+        assert_eq!(deserialized.node(0).path_offset, 4);
+        assert_eq!(deserialized.node(0).path_len, 6);
+        assert_eq!(deserialized.path(0), "/hello");
+    }
+
+    #[test]
+    fn batch_snapshot_serialize_with_flags() {
+        let snap = BatchSnapshot::new_with_flags(vec![0; 10], vec![], 0x42);
+        let mut buf = vec![0u8; snap.serialized_size()];
+        snap.serialize_into(&mut buf);
+
+        let deserialized = BatchSnapshot::deserialize_from(&buf).expect("deserialize");
+        assert_eq!(deserialized.flags(), 0x42);
+    }
+
+    #[test]
+    fn batch_snapshot_serialize_multi_node() {
+        let slab = vec![0u8; 256];
+        let nodes: Vec<TransportNode> = (0..64)
+            .map(|i| TransportNode {
+                method_tag: 0,
+                http_version_tag: 1,
+                _pad: [0; 2],
+                handler_id: i as u64,
+                correlation_id: i as u64 + 1000,
+                path_offset: 0,
+                path_len: 0,
+                query_offset: 0,
+                query_len: 0,
+                headers_offset: 0,
+                headers_len: 0,
+                body_offset: 0,
+                body_len: 0,
+            })
+            .collect();
+
+        let snap = BatchSnapshot::new(slab, nodes);
+        assert_eq!(snap.len(), 64);
+
+        let mut buf = vec![0u8; snap.serialized_size()];
+        snap.serialize_into(&mut buf);
+
+        let deserialized = BatchSnapshot::deserialize_from(&buf).expect("deserialize");
+        assert_eq!(deserialized.len(), 64);
+        for i in 0..64 {
+            assert_eq!(deserialized.node(i).handler_id, i as u64);
+            assert_eq!(deserialized.node(i).correlation_id, i as u64 + 1000);
+        }
+    }
+
+    #[test]
+    fn batch_snapshot_deserialize_too_short() {
+        let buf = vec![0u8; 8]; // less than BATCH_HEADER_SIZE
+        assert!(BatchSnapshot::deserialize_from(&buf).is_err());
+    }
+
+    #[test]
+    fn batch_snapshot_deserialize_truncated() {
+        // Valid header claiming 10 nodes, but no node data
+        let mut buf = vec![0u8; BATCH_HEADER_SIZE];
+        buf[4..8].copy_from_slice(&10u32.to_le_bytes()); // node_count = 10
+        assert!(BatchSnapshot::deserialize_from(&buf).is_err());
+    }
+
+    #[test]
+    fn backend_parity_same_data() {
+        use crate::transport::ring_pair::RingPairConfig;
+        // Create a batch snapshot
+        let slab = b"/api/users".to_vec();
+        let node = TransportNode {
+            method_tag: 0,
+            http_version_tag: 1,
+            _pad: [0; 2],
+            handler_id: 7,
+            correlation_id: 100,
+            path_offset: 0,
+            path_len: 10,
+            query_offset: 0,
+            query_len: 0,
+            headers_offset: 0,
+            headers_len: 0,
+            body_offset: 0,
+            body_len: 0,
+        };
+        let snap = Arc::new(BatchSnapshot::new(slab, vec![node]));
+
+        // InProcess path
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        let transport_in = Transport::new_in_process(rx);
+        tx.send(Arc::clone(&snap)).unwrap();
+        let result_in = transport_in
+            .poll_batch(Duration::from_millis(100))
+            .expect("inprocess should receive");
+        assert_eq!(result_in.len(), 1);
+        assert_eq!(result_in.path(0), "/api/users");
+        assert_eq!(result_in.node(0).handler_id, 7);
+
+        // SharedMemory path
+        let pair = crate::transport::ring_pair::RingPair::create(RingPairConfig::default())
+            .expect("create pair");
+        // Serialize into request ring
+        let mut slot_buf = vec![0u8; snap.serialized_size()];
+        snap.serialize_into(&mut slot_buf);
+        pair.request_ring.try_send(&slot_buf, 0).expect("send");
+
+        let transport_shm = Transport::new_shared_memory(Arc::new(pair));
+        let result_shm = transport_shm
+            .poll_batch(Duration::from_millis(100))
+            .expect("shm should receive");
+
+        // Verify parity
+        assert_eq!(result_shm.len(), result_in.len());
+        assert_eq!(result_shm.path(0), result_in.path(0));
+        assert_eq!(result_shm.node(0).handler_id, result_in.node(0).handler_id);
+        assert_eq!(
+            result_shm.node(0).correlation_id,
+            result_in.node(0).correlation_id
+        );
+    }
+
+    #[test]
+    fn batch_snapshot_stress_10k_round_trips() {
+        use crate::transport::ring_pair::{RingPair, RingPairConfig};
+
+        let pair = RingPair::create(RingPairConfig::default()).expect("create");
+
+        for i in 0..10_000u64 {
+            let slab = format!("/path/{i}").into_bytes();
+            let path_len = slab.len() as u32;
+            let node = TransportNode {
+                method_tag: (i % 9) as u8,
+                http_version_tag: 1,
+                _pad: [0; 2],
+                handler_id: i,
+                correlation_id: i + 1_000_000,
+                path_offset: 0,
+                path_len,
+                query_offset: 0,
+                query_len: 0,
+                headers_offset: 0,
+                headers_len: 0,
+                body_offset: 0,
+                body_len: 0,
+            };
+
+            let snap = BatchSnapshot::new(slab, vec![node]);
+            let mut buf = vec![0u8; snap.serialized_size()];
+            snap.serialize_into(&mut buf);
+
+            pair.request_ring.try_send(&buf, 0).expect("send");
+            let mut recv_buf = vec![0u8; pair.request_ring.payload_capacity()];
+            let len = pair.request_ring.try_recv(&mut recv_buf).expect("recv");
+
+            let deserialized =
+                BatchSnapshot::deserialize_from(&recv_buf[..len]).expect("deserialize");
+            assert_eq!(deserialized.node(0).handler_id, i);
+            assert_eq!(deserialized.node(0).correlation_id, i + 1_000_000);
+            assert_eq!(deserialized.path(0), format!("/path/{i}"));
+        }
     }
 }
