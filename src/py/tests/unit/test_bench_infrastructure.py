@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 # Ensure repo root is on sys.path so `tools.benchmarks` is importable.
-_REPO_ROOT = str(Path(__file__).resolve().parents[3])
+_REPO_ROOT = str(Path(__file__).resolve().parents[4])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
