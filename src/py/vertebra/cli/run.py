@@ -25,6 +25,8 @@ from vertebra.utils.serializers import from_json
 @click.option("--drain-timeout", type=int, default=5000, help="Drain timeout in milliseconds")
 @click.option("--shutdown-timeout", type=int, default=30000, help="Shutdown timeout in milliseconds")
 @click.option("--asgi", is_flag=True, default=False, help="Run in ASGI mode (disable native pipeline)")
+@click.option("--tls-cert", type=click.Path(exists=True), help="Path to PEM certificate for HTTPS")
+@click.option("--tls-key", type=click.Path(exists=True), help="Path to PEM private key for HTTPS")
 @click.option("--no-banner", is_flag=True, help="Disable startup banner")
 def run(
     app: str,
@@ -36,6 +38,8 @@ def run(
     drain_timeout: int,
     shutdown_timeout: int,
     asgi: bool,
+    tls_cert: str | None,
+    tls_key: str | None,
     no_banner: bool,
 ) -> None:
     """Run the Vertebra server."""
@@ -53,6 +57,12 @@ def run(
     env["VERTEBRA_WORKERS"] = str(workers)
     env["VERTEBRA_LOG_LEVEL"] = log_level
     env["VERTEBRA_NATIVE"] = "0" if asgi else "1"
+
+    if tls_cert and tls_key:
+        env["VERTEBRA_TLS_CERT"] = str(Path(tls_cert).resolve())
+        env["VERTEBRA_TLS_KEY"] = str(Path(tls_key).resolve())
+    elif tls_cert or tls_key:
+        raise CLIError("Both --tls-cert and --tls-key must be provided together", exit_code=EXIT_CONFIG_ERROR)
 
     # Set static dir for production frontend serving if available
     static_dir = _resolve_static_dir(Path.cwd())
