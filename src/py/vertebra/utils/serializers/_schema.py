@@ -142,7 +142,7 @@ def _dump_pydantic(value: Any, *, exclude_unset: bool) -> dict[str, Any]:
 
 
 def _dump_attrs(value: Any) -> dict[str, Any]:
-    return attrs_asdict(value, recurse=True)
+    return attrs_asdict(value, recurse=True)  # type: ignore[no-any-return]
 
 
 def _dump_dict_attr(value: Any) -> dict[str, Any]:

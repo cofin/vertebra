@@ -55,7 +55,7 @@ def main() -> None:
 
     app = _import_app(app_path)
 
-    from vertebra._vertebra import init_transport  # type: ignore[import-untyped]
+    from vertebra._vertebra import init_transport
 
     if transport_mode == "shm":
         init_transport(mode="shm")

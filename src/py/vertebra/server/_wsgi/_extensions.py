@@ -100,7 +100,7 @@ class DjangoWsgiApp:
     def _get_handler(self) -> Callable[..., Iterable[bytes]]:
         if self._handler is None:
             try:
-                from django.core.wsgi import get_wsgi_application  # type: ignore[import-untyped]
+                from django.core.wsgi import get_wsgi_application
             except ImportError as exc:
                 raise ImportError("Django is not installed. Install it with: uv add django") from exc
             if self._settings_module is not None:
@@ -142,7 +142,7 @@ class FlaskWsgiApp:
         return self._app
 
     def __call__(self, environ: dict[str, Any], start_response: Callable[..., None]) -> Iterable[bytes]:
-        return self._get_app()(environ, start_response)
+        return self._get_app()(environ, start_response)  # type: ignore[no-any-return]
 
 
 def create_flask_app(module_path: str, factory_name: str = "create_app") -> FlaskWsgiApp:

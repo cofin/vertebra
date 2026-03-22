@@ -1,3 +1,4 @@
+# mypy: warn-unused-ignores=false
 # ruff: noqa: RUF100, PLR0913, A002, DOC201, PLR6301, PLR0917, ARG004, ARG002, ARG001
 """Internal cross-cutting type aliases and library shims for Vertebra.
 
@@ -151,11 +152,11 @@ class BaseModelStub:
 
 # Try to import real implementations at runtime
 try:
-    from pydantic import BaseModel as _RealBaseModel  # type: ignore[unresolved-import]
+    from pydantic import BaseModel as _RealBaseModel
 
     BaseModel = _RealBaseModel
 except ImportError:
-    BaseModel = BaseModelStub  # type: ignore[assignment,misc]
+    BaseModel = BaseModelStub  # type: ignore[assignment]
 
 
 @dataclass_transform()
@@ -179,9 +180,9 @@ except ImportError:
 
 
 try:
-    import orjson  # type: ignore[unresolved-import]  # noqa: F401
+    import orjson  # noqa: F401
 except ImportError:
-    orjson = None  # type: ignore[assignment]
+    orjson = None  # type: ignore[assignment]  # noqa: F841
 
 
 @dataclass_transform()
@@ -202,15 +203,15 @@ def attrs_asdict_stub(*args: Any, **kwargs: Any) -> dict[str, Any]:
 
 
 try:
-    from attrs import AttrsInstance as _RealAttrsInstance  # type: ignore[unresolved-import]
-    from attrs import asdict as _real_attrs_asdict  # type: ignore[unresolved-import]
-    from attrs import has as _real_attrs_has  # type: ignore[unresolved-import]
+    from attrs import AttrsInstance as _RealAttrsInstance
+    from attrs import asdict as _real_attrs_asdict
+    from attrs import has as _real_attrs_has
 
     AttrsInstance = _RealAttrsInstance
     attrs_asdict = _real_attrs_asdict
     attrs_has = _real_attrs_has
 except ImportError:
-    AttrsInstance = AttrsInstanceStub  # type: ignore[misc]
+    AttrsInstance = AttrsInstanceStub  # type: ignore[assignment]
     attrs_asdict = attrs_asdict_stub
 
     def attrs_has(obj: Any) -> bool:
@@ -225,9 +226,9 @@ class NumpyArrayStub(Protocol):
 
 
 try:
-    from numpy import ndarray as NumpyArray  # type: ignore[unresolved-import]
+    from numpy import ndarray as NumpyArray
 except ImportError:
-    NumpyArray = NumpyArrayStub  # type: ignore[assignment,misc]
+    NumpyArray = NumpyArrayStub  # type: ignore[assignment]
 
 
 class OffsetPagination[T]:

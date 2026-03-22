@@ -274,7 +274,7 @@ class InertiaMiddleware:
 
     def is_inertia_request(self, request: Any) -> bool:
         """Return ``True`` when the request carries ``X-Inertia: true``."""
-        value = request.headers.get("X-Inertia", "")
+        value: str = request.headers.get("X-Inertia", "")
         return value.lower() == "true"
 
     def check_version(self, request: Any) -> str | None:

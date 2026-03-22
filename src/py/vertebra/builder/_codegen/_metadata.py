@@ -1,7 +1,6 @@
 """Route metadata collection for frontend codegen."""
 
 import inspect
-import typing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,24 +35,7 @@ class RouteCollector:
 
     def _from_route(self, route: RouteDef) -> RouteMetadata:
         handler = route.handler
-        signature = inspect.signature(handler)
-        closure = inspect.getclosurevars(handler)
-        localns = dict(handler.__globals__)
-        localns.update(closure.nonlocals)
-        try:
-            hints = typing.get_type_hints(handler, globalns=handler.__globals__, localns=localns, include_extras=True)
-        except Exception:
-            hints = getattr(handler, "__annotations__", {})
-
-        params: dict[str, TypeNode] = {}
-        for name, parameter in signature.parameters.items():
-            if name in {"self", "cls"}:
-                continue
-            annotation = hints.get(name, parameter.annotation)
-            params[name] = self._extractor.from_hint(annotation)
-
-        return_annotation = hints.get("return", signature.return_annotation)
-        return_type = self._extractor.from_hint(return_annotation)
+        params, return_type = self._extractor.extract(handler)
         handler_name = getattr(handler, "__name__", getattr(handler, "__qualname__", "handler"))
         source_file = Path(inspect.getsourcefile(handler) or "<unknown>")
 

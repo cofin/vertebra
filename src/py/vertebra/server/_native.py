@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
-    from vertebra._vertebra import VertebraRequest, VertebraResponse
+    from vertebra._vertebra import VertebraBatch, VertebraRequest, VertebraResponse
 
 _RUNNING = True
 
@@ -49,9 +49,9 @@ class CallbackScheduler:
             self._thread.join(timeout=5.0)
             self._loop.close()
 
-    def schedule(self, coro: "Coroutine[Any, Any, Any]") -> concurrent.futures.Future:
+    def schedule(self, coro: "Coroutine[Any, Any, Any]") -> "concurrent.futures.Future[Any]":
         """Schedule a coroutine onto the event loop and return a Future."""
-        future: concurrent.futures.Future = concurrent.futures.Future()
+        future: concurrent.futures.Future[Any] = concurrent.futures.Future()
 
         def _callback() -> None:
             async def _wrap() -> None:
@@ -69,7 +69,7 @@ class CallbackScheduler:
     def schedule_batch(
         self,
         coros: "list[Coroutine[Any, Any, Any]]",
-    ) -> list[concurrent.futures.Future]:
+    ) -> "list[concurrent.futures.Future[Any]]":
         """Schedule multiple coroutines and return their Futures."""
         return [self.schedule(c) for c in coros]
 
@@ -145,7 +145,7 @@ class _PartitionedBatch:
 
 
 def _partition_batch(
-    batch: list[Any],
+    batch: "list[Any] | VertebraBatch",
     handlers: dict[int, Any],
     mount_runners: list[tuple[str, Any, str]],
 ) -> _PartitionedBatch:
@@ -342,8 +342,8 @@ def run_worker(
     """
     import os
 
-    from vertebra._vertebra import VertebraResponse as VR  # type: ignore[import-untyped]
-    from vertebra._vertebra import get_batch, init_transport, submit_results  # type: ignore[import-untyped]
+    from vertebra._vertebra import VertebraResponse as VR
+    from vertebra._vertebra import get_batch, init_transport, submit_results
 
     _install_signal_handlers()
 
@@ -440,7 +440,7 @@ def run_worker(
 def _is_free_threaded() -> bool:
     """Check if the current Python build is free-threaded."""
     try:
-        from vertebra._vertebra import FREE_THREADED  # type: ignore[import-untyped]
+        from vertebra._vertebra import FREE_THREADED
 
         return FREE_THREADED
     except ImportError:
@@ -506,8 +506,8 @@ def _call_handler(handler: Any, request: Any, *, loop: "asyncio.AbstractEventLoo
 def _coerce_response(raw: Any, request_id: int, vr_cls: type) -> Any:
     """Turn a handler return value into a VertebraResponse."""
     if isinstance(raw, vr_cls):
-        if raw.request_id == 0:
-            return vr_cls(status=raw.status, body=bytes(raw.body), request_id=request_id)
+        if raw.request_id == 0:  # type: ignore[attr-defined]
+            return vr_cls(status=raw.status, body=bytes(raw.body), request_id=request_id)  # type: ignore[attr-defined]
         return raw
     # Handler returned a primitive — wrap it.
     if isinstance(raw, bytes):
@@ -522,7 +522,7 @@ def _coerce_response(raw: Any, request_id: int, vr_cls: type) -> Any:
 
 
 def _internal_error(request_id: int) -> "VertebraResponse":
-    from vertebra._vertebra import VertebraResponse as VR  # type: ignore[import-untyped]
+    from vertebra._vertebra import VertebraResponse as VR
 
     return VR(status=500, body=b"internal server error", request_id=request_id)
 

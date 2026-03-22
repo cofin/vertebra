@@ -58,9 +58,10 @@ def _read_pyproject(project_dir: Path) -> tuple[str, dict[str, Any]]:
 
 def _get_js_section(data: dict[str, Any]) -> dict[str, Any]:
     """Get the [tool.vtb.js] section, creating if needed."""
-    tool = data.setdefault("tool", {})
-    vtb = tool.setdefault("vtb", {})
-    return vtb.setdefault("js", {})
+    tool: dict[str, Any] = data.setdefault("tool", {})
+    vtb: dict[str, Any] = tool.setdefault("vtb", {})
+    js: dict[str, Any] = vtb.setdefault("js", {})
+    return js
 
 
 def _write_pyproject_js(project_dir: Path, js_data: dict[str, Any]) -> None:
@@ -78,22 +79,22 @@ def _write_pyproject_js(project_dir: Path, js_data: dict[str, Any]) -> None:
 
         if "tool" not in doc:
             doc["tool"] = tomlkit.table()
-        tool_section = doc["tool"]  # type: ignore[index]
+        tool_section = doc["tool"]
         if "vtb" not in tool_section:
-            tool_section["vtb"] = tomlkit.table()  # type: ignore[index]
-        vtb_section = tool_section["vtb"]  # type: ignore[index]
+            tool_section["vtb"] = tomlkit.table()
+        vtb_section = tool_section["vtb"]
         if "js" not in vtb_section:
-            vtb_section["js"] = tomlkit.table()  # type: ignore[index]
-        js_toml = vtb_section["js"]  # type: ignore[index]
+            vtb_section["js"] = tomlkit.table()
+        js_toml = vtb_section["js"]
 
         for key in ("dependencies", "dev-dependencies"):
             if key in js_data and js_data[key]:
                 arr = tomlkit.array()
                 arr.extend(js_data[key])
                 arr.multiline(True)
-                js_toml[key] = arr  # type: ignore[index]
+                js_toml[key] = arr
             elif key in js_toml:
-                del js_toml[key]  # type: ignore[arg-type]
+                del js_toml[key]
 
         pyproject.write_text(tomlkit.dumps(doc), encoding="utf-8")
     except ImportError:

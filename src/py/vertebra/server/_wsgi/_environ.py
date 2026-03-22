@@ -91,7 +91,7 @@ def _header_to_cgi(name: str) -> str:
     return _HTTP_PREFIX + upper
 
 
-class WsgiEnviron(Mapping):
+class WsgiEnviron(Mapping[str, Any]):
     """Lazy read-only WSGI environ mapping backed by a VertebraRequest."""
 
     __slots__ = ("_req", "_server_name", "_server_port", "_url_scheme", "_cache")

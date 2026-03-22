@@ -31,7 +31,7 @@ class WsgiAdapter:
         server_port: int = 8000,
     ) -> Any:
         """Run the WSGI app against *request* and return a response."""
-        from vertebra._vertebra import VertebraResponse  # type: ignore[import-untyped]
+        from vertebra._vertebra import VertebraResponse
 
         environ = WsgiEnviron(
             request,

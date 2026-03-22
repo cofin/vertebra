@@ -42,7 +42,7 @@ class AsgiRunner:
 
             fut = self._scheduler.schedule(self._adapter.run_batch(requests))
             concurrent.futures.wait([fut])
-            return fut.result()
+            return fut.result()  # type: ignore[no-any-return]
 
         return self._loop.run_until_complete(self._adapter.run_batch(requests))
 

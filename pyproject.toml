@@ -82,3 +82,23 @@ testpaths = ["src/py/tests"]
 python_version = "3.12"
 strict = true
 files = ["src/py/vertebra"]
+
+[[tool.mypy.overrides]]
+module = [
+    "pydantic.*",
+    "orjson",
+    "attrs",
+    "numpy",
+    "numpy.*",
+    "pyarrow",
+    "pyarrow.*",
+    "tomlkit",
+    "fastapi",
+    "fastapi.*",
+    "litestar",
+    "litestar.*",
+    "django.*",
+    "_bundler",
+    "concurrent.interpreters",
+]
+ignore_missing_imports = true

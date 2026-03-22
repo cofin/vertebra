@@ -59,6 +59,8 @@ class VertebraResponse:
     ) -> None: ...
 
 def init_transport(
+    *,
+    mode: str = "inprocess",
     ring_name: str = "default",
     slot_size: int = 4096,
     slots: int = 64,

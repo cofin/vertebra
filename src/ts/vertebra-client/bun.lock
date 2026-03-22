@@ -18,18 +18,12 @@
       },
       "peerDependencies": {
         "@angular/core": "^21.0.0",
-        "@inertiajs/react": "^3.0.0",
-        "@inertiajs/svelte": "^3.0.0",
-        "@inertiajs/vue3": "^3.0.0",
         "react": "^19.0.0",
         "vite": "^7.3.1",
         "vue": "^3.5.0",
       },
       "optionalPeers": [
         "@angular/core",
-        "@inertiajs/react",
-        "@inertiajs/svelte",
-        "@inertiajs/vue3",
         "react",
         "vite",
         "vue",

@@ -35,7 +35,7 @@ class AsgiScope(dict):  # type: ignore[type-arg]
             super().__setitem__("headers", value)
         return value
 
-    def get(self, key: str, default: Any = None) -> Any:  # type: ignore[override]
+    def get(self, key: str, default: Any = None) -> Any:
         try:
             return self[key]
         except KeyError:

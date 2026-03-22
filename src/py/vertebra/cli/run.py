@@ -123,6 +123,7 @@ def load_config(path: Path) -> dict[str, Any]:
         with path.open("rb") as f:
             return tomllib.load(f)
     if path.suffix == ".json":
-        return from_json(path.read_bytes(), type_hint=dict[str, Any])
+        data: dict[str, Any] = from_json(path.read_bytes())
+        return data
     msg = f"Unsupported config format: {path.suffix}"
     raise ValueError(msg)

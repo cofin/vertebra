@@ -178,7 +178,7 @@ class MsgspecSerializer(BaseJSONSerializer):
         from msgspec.json import Decoder, Encoder
 
         self._encoder: Final[Encoder] = Encoder(enc_hook=_normalize_supported_value)
-        self._decoder: Final[Decoder] = Decoder()
+        self._decoder: Final[Decoder[Any]] = Decoder()
 
     def encode(self, data: Any, *, as_bytes: bool = False) -> str | bytes:
         try:
@@ -237,7 +237,7 @@ class OrjsonSerializer(BaseJSONSerializer):
                 unsupported_msg = "unsupported JSON value"
                 raise TypeError(unsupported_msg) from exc
             raise
-        return encoded if as_bytes else encoded.decode("utf-8")
+        return encoded if as_bytes else encoded.decode("utf-8")  # type: ignore[no-any-return]
 
     def decode(self, data: str | bytes, *, decode_bytes: bool = True) -> Any:
         from orjson import loads as orjson_loads

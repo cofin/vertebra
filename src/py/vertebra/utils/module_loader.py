@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 __all__ = (
+    "MissingDependencyError",
     "dependency_flag",
     "ensure_advanced_alchemy",
     "ensure_msgspec",

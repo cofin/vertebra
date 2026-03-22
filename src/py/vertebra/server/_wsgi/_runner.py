@@ -38,7 +38,7 @@ class WsgiRunner:
 
     @staticmethod
     def _default_error(*_args: Any) -> Any:
-        from vertebra._vertebra import VertebraResponse  # type: ignore[import-untyped]
+        from vertebra._vertebra import VertebraResponse
 
         return VertebraResponse(status=500, body=b"Internal Server Error")
 
@@ -55,7 +55,7 @@ class WsgiRunner:
 
     def run(self) -> None:
         """Enter the main batch processing loop."""
-        from vertebra._vertebra import get_batch, submit_results  # type: ignore[import-untyped]
+        from vertebra._vertebra import get_batch, submit_results
 
         self._running = True
         self._handle_signals()

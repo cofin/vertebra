@@ -160,6 +160,32 @@ class TypeExtractor:
         finally:
             self._building.remove(model)
 
+    def extract(self, handler: Any) -> tuple[dict[str, TypeNode], TypeNode]:
+        """Extract parameter types and return type from a route handler.
+
+        Returns (params, return_type) where params maps parameter names
+        to their TypeNode representations (excluding self/cls).
+        """
+        signature = inspect.signature(handler)
+        closure = inspect.getclosurevars(handler)
+        localns = dict(handler.__globals__)
+        localns.update(closure.nonlocals)
+        try:
+            hints = typing.get_type_hints(handler, globalns=handler.__globals__, localns=localns, include_extras=True)
+        except Exception:
+            hints = getattr(handler, "__annotations__", {})
+
+        params: dict[str, TypeNode] = {}
+        for name, parameter in signature.parameters.items():
+            if name in {"self", "cls"}:
+                continue
+            annotation = hints.get(name, parameter.annotation)
+            params[name] = self.from_hint(annotation)
+
+        return_annotation = hints.get("return", signature.return_annotation)
+        return_type = self.from_hint(return_annotation)
+        return params, return_type
+
     def _is_msgspec_struct(self, annotation: type[Any]) -> bool:
         return issubclass(annotation, msgspec.Struct)
 

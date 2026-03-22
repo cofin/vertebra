@@ -43,7 +43,7 @@ class DevMiddleware:
         self.type_bridge = type_bridge
         # Wire type_bridge invalidation to HMR broadcast
         self._original_invalidate = type_bridge.invalidate
-        type_bridge.invalidate = self._invalidate_and_broadcast
+        type_bridge.invalidate = self._invalidate_and_broadcast  # type: ignore[method-assign]
 
     def _invalidate_and_broadcast(self) -> None:
         """Clear type cache and notify all HMR clients."""

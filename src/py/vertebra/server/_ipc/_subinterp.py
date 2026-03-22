@@ -27,7 +27,7 @@ def interpreters_available() -> bool:
     if sys.version_info < (3, 14):
         return False
     try:
-        from concurrent import interpreters  # noqa: F401
+        from concurrent import interpreters  # type: ignore[attr-defined]  # noqa: F401
 
         return True
     except ImportError:

@@ -91,7 +91,7 @@ def _route(method: str, path: str) -> "Callable[[Callable[..., Any]], Callable[.
         routes: list[RouteDef] = getattr(handler, "__vertebra_routes__", [])
         route = RouteDef(method=method, path=normalized_path, handler=handler, segments=segments)
         routes.append(route)
-        handler.__vertebra_routes__ = routes
+        handler.__vertebra_routes__ = routes  # type: ignore[attr-defined]
         return handler
 
     return decorator
