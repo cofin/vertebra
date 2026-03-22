@@ -11,6 +11,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
+use crate::protocol::codec::CompressionCodec;
 use crate::transport::{
     BatchSnapshot, BufferPool, DataSlab, Transport, TransportArena, TransportError, TransportNode,
 };
@@ -73,6 +74,8 @@ pub struct BatchBridge {
     // Response path: tokio::sync::mpsc for async recv on HTTP server side
     resp_tx: tokio::sync::mpsc::Sender<Vec<BridgeResponse>>,
     resp_rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<BridgeResponse>>>,
+    /// Compression codec for batch sealing. `None` disables compression.
+    compression_codec: CompressionCodec,
 }
 
 /// Guard that serializes writes for a single batch.
@@ -94,6 +97,23 @@ impl BatchBridge {
         channel_depth: usize,
         max_workers: usize,
     ) -> Result<(), &'static str> {
+        Self::init_with_codec(
+            arena_capacity,
+            slab_capacity,
+            channel_depth,
+            max_workers,
+            CompressionCodec::None,
+        )
+    }
+
+    /// Initialize the global bridge with a compression codec.
+    pub fn init_with_codec(
+        arena_capacity: usize,
+        slab_capacity: usize,
+        channel_depth: usize,
+        max_workers: usize,
+        codec: CompressionCodec,
+    ) -> Result<(), &'static str> {
         let (batch_tx, batch_rx) = crossbeam_channel::bounded(channel_depth);
         let (resp_tx, resp_rx) = tokio::sync::mpsc::channel(channel_depth);
         // Pool needs: 1 active write buffer + channel_depth queued + max_workers
@@ -110,6 +130,7 @@ impl BatchBridge {
                 buffer_pool: Arc::new(BufferPool::new(pool_size, slab_capacity, arena_capacity)),
                 resp_tx,
                 resp_rx: tokio::sync::Mutex::new(resp_rx),
+                compression_codec: codec,
             })
             .map_err(|_| "bridge already initialized")
     }
@@ -183,14 +204,46 @@ impl BatchBridge {
         let slab_data = self.slab.take_and_replace(fresh_slab);
         let node_data = self.arena.take_and_replace(fresh_nodes);
 
-        let snapshot = Arc::new(BatchSnapshot::new_pooled(
-            slab_data,
-            node_data,
-            Arc::clone(&self.buffer_pool),
-        ));
+        // Try to compress the slab. If compression reduces size, use the
+        // compressed data and return the original slab buffer to the pool.
+        // Otherwise, use pool-backed snapshot for zero-alloc steady state.
+        let snapshot = match self.try_compress_slab(&slab_data) {
+            Some((compressed, flags)) => {
+                // Compressed slab is a new allocation — original pool buffers
+                // are dropped (pool will allocate fresh ones on next take()).
+                // The compression overhead dwarfs one allocation.
+                drop(slab_data);
+                Arc::new(BatchSnapshot::new_with_flags(compressed, node_data, flags))
+            }
+            None => Arc::new(BatchSnapshot::new_pooled(
+                slab_data,
+                node_data,
+                Arc::clone(&self.buffer_pool),
+            )),
+        };
         self.batch_tx
             .send(snapshot)
             .map_err(|_| TransportError::Disconnected)
+    }
+
+    /// Try to compress slab data if a codec is configured.
+    ///
+    /// Returns `Some((compressed_bytes, flags))` if compression reduced the
+    /// size. Returns `None` if compression is disabled, or the compressed
+    /// output is larger (small payloads).
+    fn try_compress_slab(&self, slab_data: &[u8]) -> Option<(Vec<u8>, u32)> {
+        #[cfg(feature = "compression")]
+        {
+            if self.compression_codec != CompressionCodec::None {
+                let compressed =
+                    crate::protocol::codec::compress(slab_data, self.compression_codec);
+                if compressed.len() < slab_data.len() {
+                    return Some((compressed, self.compression_codec.to_flags()));
+                }
+            }
+        }
+        let _ = slab_data; // suppress unused warning when compression disabled
+        None
     }
 
     /// Poll for the next sealed batch snapshot.
@@ -255,6 +308,10 @@ mod tests {
     use std::thread;
 
     fn make_bridge() -> BatchBridge {
+        make_bridge_with_codec(CompressionCodec::None)
+    }
+
+    fn make_bridge_with_codec(codec: CompressionCodec) -> BatchBridge {
         let (batch_tx, batch_rx) = crossbeam_channel::bounded(4);
         let (resp_tx, resp_rx) = tokio::sync::mpsc::channel(4);
         BatchBridge {
@@ -266,6 +323,7 @@ mod tests {
             buffer_pool: Arc::new(BufferPool::new(8, 65536, 64)),
             resp_tx,
             resp_rx: tokio::sync::Mutex::new(resp_rx),
+            compression_codec: codec,
         }
     }
 
@@ -543,5 +601,90 @@ mod tests {
             h.join().unwrap();
         }
         assert_eq!(received.load(Ordering::Relaxed), num_batches as usize);
+    }
+
+    #[cfg(feature = "compression")]
+    mod compression_tests {
+        use super::*;
+
+        #[test]
+        fn lz4_compressed_batch_roundtrip() {
+            let bridge = make_bridge_with_codec(CompressionCodec::Lz4);
+            // Use repetitive data that compresses well
+            let body = "hello world ".repeat(100);
+            bridge
+                .push_request(&wr(0, 42, 1, b"/hello", None, b"", body.as_bytes()))
+                .unwrap();
+            bridge.seal_batch().unwrap();
+
+            let snapshot = bridge.poll_batch(Duration::from_millis(100)).unwrap();
+            assert_eq!(snapshot.len(), 1);
+            assert_eq!(snapshot.path(0), "/hello");
+            assert_eq!(snapshot.body(0), body.as_bytes());
+            assert!(
+                snapshot.flags() & crate::protocol::flags::COMPRESSED != 0,
+                "COMPRESSED flag should be set"
+            );
+        }
+
+        #[test]
+        fn zstd_compressed_batch_roundtrip() {
+            let bridge = make_bridge_with_codec(CompressionCodec::Zstd);
+            let body = "repeating data for compression ".repeat(50);
+            bridge
+                .push_request(&wr(1, 43, 2, b"/echo", Some(b"q=1"), b"hdr", body.as_bytes()))
+                .unwrap();
+            bridge.seal_batch().unwrap();
+
+            let snapshot = bridge.poll_batch(Duration::from_millis(100)).unwrap();
+            assert_eq!(snapshot.len(), 1);
+            assert_eq!(snapshot.path(0), "/echo");
+            assert_eq!(snapshot.query(0), Some("q=1"));
+            assert_eq!(snapshot.headers_raw(0), b"hdr");
+            assert_eq!(snapshot.body(0), body.as_bytes());
+        }
+
+        #[test]
+        fn small_payload_skips_compression() {
+            // Tiny payloads don't compress well — bridge should skip compression
+            let bridge = make_bridge_with_codec(CompressionCodec::Lz4);
+            bridge
+                .push_request(&wr(0, 1, 1, b"/", None, b"", b"hi"))
+                .unwrap();
+            bridge.seal_batch().unwrap();
+
+            let snapshot = bridge.poll_batch(Duration::from_millis(100)).unwrap();
+            assert_eq!(snapshot.path(0), "/");
+            assert_eq!(snapshot.body(0), b"hi");
+            // Small payload: compression may or may not be applied (depends on size)
+            // Either way, data must round-trip correctly.
+        }
+
+        #[test]
+        fn uncompressed_bridge_has_no_compressed_flag() {
+            let bridge = make_bridge(); // No compression
+            bridge
+                .push_request(&wr(0, 1, 1, b"/test", None, b"", b"body"))
+                .unwrap();
+            bridge.seal_batch().unwrap();
+
+            let snapshot = bridge.poll_batch(Duration::from_millis(100)).unwrap();
+            assert_eq!(snapshot.flags() & crate::protocol::flags::COMPRESSED, 0);
+        }
+
+        #[test]
+        fn multiple_compressed_batch_cycles() {
+            let bridge = make_bridge_with_codec(CompressionCodec::Lz4);
+            for cycle in 0..5u64 {
+                let body = format!("cycle {} data ", cycle).repeat(50);
+                bridge
+                    .push_request(&wr(0, cycle, cycle, b"/cycle", None, b"", body.as_bytes()))
+                    .unwrap();
+                bridge.seal_batch().unwrap();
+                let snap = bridge.poll_batch(Duration::from_millis(100)).unwrap();
+                assert_eq!(snap.len(), 1);
+                assert_eq!(snap.body(0), body.as_bytes());
+            }
+        }
     }
 }

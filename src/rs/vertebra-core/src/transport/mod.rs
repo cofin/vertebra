@@ -370,6 +370,12 @@ pub struct BatchSnapshot {
     slab: Vec<u8>,
     nodes: Vec<TransportNode>,
     pool: Option<std::sync::Arc<BufferPool>>,
+    /// Protocol flags for this batch (carries compression codec info).
+    flags: u32,
+    /// Lazily decompressed slab data. Populated on first access when
+    /// the COMPRESSED flag is set.
+    #[cfg(feature = "compression")]
+    decompressed_slab: std::sync::OnceLock<Vec<u8>>,
 }
 
 impl std::fmt::Debug for BatchSnapshot {
@@ -378,6 +384,7 @@ impl std::fmt::Debug for BatchSnapshot {
             .field("slab_len", &self.slab.len())
             .field("nodes_len", &self.nodes.len())
             .field("pooled", &self.pool.is_some())
+            .field("flags", &self.flags)
             .finish()
     }
 }
@@ -399,6 +406,21 @@ impl BatchSnapshot {
             slab,
             nodes,
             pool: None,
+            flags: 0,
+            #[cfg(feature = "compression")]
+            decompressed_slab: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Create a new snapshot with protocol flags (no pool).
+    pub fn new_with_flags(slab: Vec<u8>, nodes: Vec<TransportNode>, flags: u32) -> Self {
+        Self {
+            slab,
+            nodes,
+            pool: None,
+            flags,
+            #[cfg(feature = "compression")]
+            decompressed_slab: std::sync::OnceLock::new(),
         }
     }
 
@@ -412,6 +434,26 @@ impl BatchSnapshot {
             slab,
             nodes,
             pool: Some(pool),
+            flags: 0,
+            #[cfg(feature = "compression")]
+            decompressed_slab: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Create a pool-backed snapshot with protocol flags.
+    pub fn new_pooled_with_flags(
+        slab: Vec<u8>,
+        nodes: Vec<TransportNode>,
+        pool: std::sync::Arc<BufferPool>,
+        flags: u32,
+    ) -> Self {
+        Self {
+            slab,
+            nodes,
+            pool: Some(pool),
+            flags,
+            #[cfg(feature = "compression")]
+            decompressed_slab: std::sync::OnceLock::new(),
         }
     }
 
@@ -425,6 +467,33 @@ impl BatchSnapshot {
         self.nodes.is_empty()
     }
 
+    /// Protocol flags for this batch.
+    pub fn flags(&self) -> u32 {
+        self.flags
+    }
+
+    /// Get the effective slab bytes, decompressing lazily if needed.
+    ///
+    /// When the COMPRESSED flag is set, this decompresses on first call and
+    /// caches the result. Subsequent calls return the cached decompressed data.
+    /// When not compressed, returns the raw slab directly.
+    fn slab_bytes(&self) -> &[u8] {
+        #[cfg(feature = "compression")]
+        {
+            use crate::protocol::codec::CompressionCodec;
+            use crate::protocol::flags;
+
+            if self.flags & flags::COMPRESSED != 0 {
+                return self.decompressed_slab.get_or_init(|| {
+                    let codec = CompressionCodec::from_flags(self.flags);
+                    crate::protocol::codec::decompress(&self.slab, codec)
+                        .expect("batch slab decompression should not fail")
+                });
+            }
+        }
+        &self.slab
+    }
+
     /// Get the transport node at the given index.
     pub fn node(&self, index: usize) -> &TransportNode {
         &self.nodes[index]
@@ -436,7 +505,8 @@ impl BatchSnapshot {
         if n.path_len == 0 {
             return &[];
         }
-        &self.slab[n.path_offset as usize..(n.path_offset + n.path_len) as usize]
+        let slab = self.slab_bytes();
+        &slab[n.path_offset as usize..(n.path_offset + n.path_len) as usize]
     }
 
     /// Read path as a UTF-8 string.
@@ -450,7 +520,8 @@ impl BatchSnapshot {
         if n.query_len == 0 {
             return None;
         }
-        Some(&self.slab[n.query_offset as usize..(n.query_offset + n.query_len) as usize])
+        let slab = self.slab_bytes();
+        Some(&slab[n.query_offset as usize..(n.query_offset + n.query_len) as usize])
     }
 
     /// Read query as a UTF-8 string.
@@ -465,7 +536,8 @@ impl BatchSnapshot {
         if n.headers_len == 0 {
             return &[];
         }
-        &self.slab[n.headers_offset as usize..(n.headers_offset + n.headers_len) as usize]
+        let slab = self.slab_bytes();
+        &slab[n.headers_offset as usize..(n.headers_offset + n.headers_len) as usize]
     }
 
     /// Read body bytes.
@@ -474,7 +546,8 @@ impl BatchSnapshot {
         if n.body_len == 0 {
             return &[];
         }
-        &self.slab[n.body_offset as usize..(n.body_offset + n.body_len) as usize]
+        let slab = self.slab_bytes();
+        &slab[n.body_offset as usize..(n.body_offset + n.body_len) as usize]
     }
 }
 
