@@ -125,12 +125,6 @@ build: ts-build                                     ## Build optimized release b
 # =============================================================================
 # Test
 # =============================================================================
-.PHONY: test
-test: dev                                           ## Run Python tests
-	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
-	@uv run pytest src/py/tests -v
-	@echo "${OK} Tests passed"
-
 .PHONY: rs-test
 rs-test:                                            ## Run Rust tests (all features)
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
@@ -138,8 +132,10 @@ rs-test:                                            ## Run Rust tests (all featu
 	@cd src/rs && cargo test --workspace --features tls,compression
 	@echo "${OK} Rust tests passed"
 
-.PHONY: test-all
-test-all: rs-test test ts-test                      ## Run all tests (Rust, Python, TypeScript)
+.PHONY: test
+test: dev rs-test ts-test                           ## Run all tests (Rust, Python, TypeScript)
+	@uv run pytest src/py/tests -v
+	@echo "${OK} All tests passed"
 
 .PHONY: coverage
 coverage:                                           ## Run tests with coverage report
@@ -152,7 +148,7 @@ coverage:                                           ## Run tests with coverage r
 # Lint & Format
 # =============================================================================
 .PHONY: lint
-lint: ts-lint                                       ## Format and lint everything with auto-fixes (Python, Rust, TS, Markdown)
+lint: ts-lint                                       ## Format and lint everything with auto-fixes (Python, Rust, TS)
 	@echo "${INFO} Linting and fixing Python (Ruff)..."
 	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests
 	@uv run ruff format src/py/vertebra src/py/tests
@@ -160,18 +156,12 @@ lint: ts-lint                                       ## Format and lint everythin
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo fmt)
 	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --exclude vertebra-py --all-targets -- -D warnings >/dev/null 2>&1)
-	@echo "${OK} Lint complete"
-
-.PHONY: lint-all
-lint-all: lint                                      ## Full lint + type checks
 	@echo "${INFO} Running type checks (Mypy)..."
 	@uv run mypy src/py/vertebra
-	@echo "${INFO} Running pre-commit hooks..."
-	@uv run pre-commit run --color=always --all-files
-	@echo "${OK} All checks passed"
+	@echo "${OK} Lint complete"
 
-.PHONY: check-all
-check-all: lint-all test-all coverage               ## Everything: lint, type check, all tests, coverage
+.PHONY: check
+check: lint test coverage                           ## Everything: lint, type check, all tests, coverage
 
 
 # =============================================================================
