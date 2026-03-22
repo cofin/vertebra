@@ -38,6 +38,7 @@ fn dummy_request(handler_id: u64) -> (PendingRequest, oneshot::Receiver<PendingR
         handler_id,
         method_tag: 0,
         http_version_tag: 1,
+        flags: 0,
         path: "/hello".to_owned(),
         query: None,
         headers_mp: bytes::Bytes::new(),

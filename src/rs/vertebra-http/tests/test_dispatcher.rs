@@ -36,6 +36,7 @@ fn make_batch(count: usize) -> (Batch, Vec<oneshot::Receiver<PendingResponse>>) 
             handler_id: i,
             method_tag: 0,
             http_version_tag: 1,
+            flags: 0,
             path: "/".to_owned(),
             query: None,
             headers_mp: bytes::Bytes::new(),
