@@ -128,6 +128,8 @@ impl BatchCollector {
                             if deadline.is_none() {
                                 deadline = Some(Instant::now() + timeout);
                             }
+                            let has_priority =
+                                req.flags & vertebra_core::protocol::flags::PRIORITY != 0;
                             pending.push(req);
 
                             // Eagerly drain any buffered requests (try_recv loop).
@@ -140,7 +142,11 @@ impl BatchCollector {
 
                             trace!(depth = pending.len(), "queued request(s)");
 
-                            if pending.len() >= self.policy.batch_size()
+                            // PRIORITY: drain immediately — don't wait for batch
+                            // size or timeout. The priority request (and any
+                            // already-accumulated requests) go out in one batch.
+                            if has_priority
+                                || pending.len() >= self.policy.batch_size()
                                 || self.policy.matches_preferred(pending.len())
                             {
                                 self.drain(&mut pending).await;

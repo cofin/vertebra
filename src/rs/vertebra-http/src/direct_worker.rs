@@ -84,8 +84,12 @@ pub async fn run_adaptive_worker(
         }
 
         // Phase 2: Adaptive linger — under high load, wait briefly for more arrivals.
+        // Skip linger if any request has the PRIORITY flag (low-latency path).
+        let has_priority = accumulated
+            .iter()
+            .any(|r| r.flags & vertebra_core::protocol::flags::PRIORITY != 0);
         let target = compute_target_batch_size(&config, ewma_batch_size);
-        if accumulated.len() < target && ewma_batch_size >= config.load_threshold {
+        if !has_priority && accumulated.len() < target && ewma_batch_size >= config.load_threshold {
             let deadline = Instant::now() + config.max_linger;
             while accumulated.len() < target && Instant::now() < deadline {
                 tokio::task::yield_now().await;
