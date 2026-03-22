@@ -1,4 +1,4 @@
-import type { Plugin } from "vite";
+import type { Plugin, ViteDevServer } from "vite";
 
 export interface VertebraPluginOptions {
   /**
@@ -25,12 +25,43 @@ export interface VertebraPluginOptions {
  * 1. Virtual module resolution for types fetched from Python.
  * 2. Automatic polling for type updates in dev mode.
  * 3. HMR integration for type changes.
+ * 4. Immediate type poll when .py files change.
  */
 export default function vertebraPlugin(options: VertebraPluginOptions = {}): Plugin {
   const { serverUrl = "http://localhost:8000", hmr = true, virtualModuleName = "virtual:vertebra-types" } = options;
 
   const resolvedVirtualModuleId = `\0${virtualModuleName}`;
   let lastVersion = "";
+  let devServer: ViteDevServer | null = null;
+
+  const pollTypes = async () => {
+    if (!devServer) return;
+    try {
+      const response = await fetch(`${serverUrl}/__vertebra/types/version`);
+      if (!response.ok) return;
+      const version = await response.text();
+
+      if (lastVersion && version !== lastVersion) {
+        console.log("[vertebra] Types updated, triggering HMR");
+
+        // Invalidate virtual module
+        const mod = devServer.moduleGraph.getModuleById(resolvedVirtualModuleId);
+        if (mod) {
+          devServer.moduleGraph.invalidateModule(mod);
+        }
+
+        // Broadcast update to client
+        devServer.ws.send({
+          type: "custom",
+          event: "vertebra:types-update",
+          data: { version },
+        });
+      }
+      lastVersion = version;
+    } catch {
+      // Server might be down, ignore
+    }
+  };
 
   return {
     name: "vite-plugin-vertebra",
@@ -57,46 +88,19 @@ export default function vertebraPlugin(options: VertebraPluginOptions = {}): Plu
     },
 
     configureServer(server) {
+      devServer = server;
       if (!hmr) return;
-
-      // Type update polling
-      const pollTypes = async () => {
-        try {
-          const response = await fetch(`${serverUrl}/__vertebra/types/version`);
-          if (!response.ok) return;
-          const version = await response.text();
-
-          if (lastVersion && version !== lastVersion) {
-            console.log("[vertebra] Types updated, triggering HMR");
-
-            // Invalidate virtual module
-            const mod = server.moduleGraph.getModuleById(resolvedVirtualModuleId);
-            if (mod) {
-              server.moduleGraph.invalidateModule(mod);
-            }
-
-            // Broadcast update to client
-            server.ws.send({
-              type: "custom",
-              event: "vertebra:types-update",
-              data: { version },
-            });
-          }
-          lastVersion = version;
-        } catch {
-          // Server might be down, ignore
-        }
-      };
 
       const interval = setInterval(pollTypes, 1000);
       server.httpServer?.once("close", () => clearInterval(interval));
     },
 
     handleHotUpdate({ file }) {
-      // If we detect changes in python files, we could trigger type polling immediately
       if (file.endsWith(".py")) {
-        // This logic is mostly handled by the Python watcher and the polling above,
-        // but we could explicitly trigger a check here if we share the same project root.
+        // Python file changed — trigger immediate type poll instead of
+        // waiting for the next 1s interval. The Python watcher will have
+        // regenerated types by the time this fires.
+        pollTypes();
       }
     },
   };
