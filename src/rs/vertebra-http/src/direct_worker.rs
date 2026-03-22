@@ -150,7 +150,10 @@ pub async fn run_adaptive_worker_simple<F>(
         Box::new(move |requests| {
             for req in requests {
                 let response = handler_fn(&req);
-                let _ = req.reply.send(response);
+                // F&F requests have no reply channel — just drop the response.
+                if let Some(reply) = req.reply {
+                    let _ = reply.send(response);
+                }
             }
         }),
     )
@@ -230,7 +233,8 @@ mod tests {
                 query: None,
                 headers_mp: Bytes::new(),
                 body: Bytes::new(),
-                reply: reply_tx,
+                flags: 0,
+                reply: Some(reply_tx),
             }],
         })
         .await
@@ -282,7 +286,8 @@ mod tests {
                     query: None,
                     headers_mp: Bytes::new(),
                     body: Bytes::new(),
-                    reply: reply_tx,
+                    flags: 0,
+                reply: Some(reply_tx),
                 }],
             })
             .await
@@ -298,11 +303,13 @@ mod tests {
                 let count = requests.len();
                 batch_sizes_clone.lock().unwrap().push(count);
                 for req in requests {
-                    let _ = req.reply.send(PendingResponse {
-                        status: 200,
-                        headers_mp: Bytes::new(),
-                        body: Bytes::from_static(b"ok"),
-                    });
+                    if let Some(reply) = req.reply {
+                        let _ = reply.send(PendingResponse {
+                            status: 200,
+                            headers_mp: Bytes::new(),
+                            body: Bytes::from_static(b"ok"),
+                        });
+                    }
                     processed_clone.fetch_add(1, Ordering::Relaxed);
                 }
             }),

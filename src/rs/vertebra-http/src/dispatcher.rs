@@ -37,11 +37,14 @@ pub struct DirectRequest {
     pub handler_id: u64,
     pub method_tag: u8,
     pub http_version_tag: u8,
+    /// Protocol flags (see `vertebra_core::protocol::flags`).
+    pub flags: u32,
     pub path: String,
     pub query: Option<String>,
     pub headers_mp: bytes::Bytes,
     pub body: bytes::Bytes,
-    pub reply: oneshot::Sender<PendingResponse>,
+    /// Reply channel. `None` for fire-and-forget requests.
+    pub reply: Option<oneshot::Sender<PendingResponse>>,
 }
 
 /// Dispatcher state shared between the write task and the response router.
@@ -113,6 +116,8 @@ impl Dispatcher {
 
     /// Direct dispatch: send batch through channel, responses flow back via oneshot.
     fn dispatch_direct(&self, batch: Batch) {
+        use vertebra_core::protocol::flags;
+
         let tx = match &self.inner.direct_tx {
             Some(tx) => tx,
             None => {
@@ -124,15 +129,20 @@ impl Dispatcher {
         let requests = batch
             .requests
             .into_iter()
-            .map(|req| DirectRequest {
-                handler_id: req.handler_id,
-                method_tag: req.method_tag,
-                http_version_tag: req.http_version_tag,
-                path: req.path,
-                query: req.query,
-                headers_mp: req.headers_mp,
-                body: req.body,
-                reply: req.reply,
+            .map(|req| {
+                let is_fnf = req.flags & flags::FIRE_AND_FORGET != 0;
+                DirectRequest {
+                    handler_id: req.handler_id,
+                    method_tag: req.method_tag,
+                    http_version_tag: req.http_version_tag,
+                    flags: req.flags,
+                    path: req.path,
+                    query: req.query,
+                    headers_mp: req.headers_mp,
+                    body: req.body,
+                    // F&F: no reply channel needed — caller won't wait for response.
+                    reply: if is_fnf { None } else { Some(req.reply) },
+                }
             })
             .collect();
 
@@ -143,6 +153,8 @@ impl Dispatcher {
 
     /// Bridge dispatch: write into arena/slab, seal, and track correlation IDs.
     fn dispatch_bridge(&self, batch: Batch) {
+        use vertebra_core::protocol::flags;
+
         let bridge = match BatchBridge::get() {
             Some(b) => b,
             None => {
@@ -154,8 +166,12 @@ impl Dispatcher {
 
         for req in batch.requests {
             let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+            let is_fnf = req.flags & flags::FIRE_AND_FORGET != 0;
 
-            self.inner.pending.insert(id, req.reply);
+            // F&F: skip pending tracking — no response expected.
+            if !is_fnf {
+                self.inner.pending.insert(id, req.reply);
+            }
 
             if let Err(e) = writer.push_request(&WriteRequest {
                 method_tag: req.method_tag,
@@ -168,7 +184,9 @@ impl Dispatcher {
                 body: &req.body,
             }) {
                 error!(error = %e, "transport push failed, dropping request");
-                self.inner.pending.remove(&id);
+                if !is_fnf {
+                    self.inner.pending.remove(&id);
+                }
             }
         }
 
@@ -235,5 +253,35 @@ mod tests {
         let direct_batch = rx.recv().await.expect("should receive direct batch");
         assert_eq!(direct_batch.requests.len(), 1);
         assert_eq!(direct_batch.requests[0].path, "/test");
+        assert!(direct_batch.requests[0].reply.is_some());
+    }
+
+    #[tokio::test]
+    async fn direct_mode_fnf_has_no_reply() {
+        let (d, mut rx) = Dispatcher::new_direct(16);
+        let (reply_tx, _reply_rx) = oneshot::channel();
+
+        let batch = Batch {
+            requests: vec![crate::collector::PendingRequest {
+                handler_id: 1,
+                method_tag: 0,
+                http_version_tag: 1,
+                flags: vertebra_core::protocol::flags::FIRE_AND_FORGET,
+                path: "/fire".to_owned(),
+                query: None,
+                headers_mp: bytes::Bytes::new(),
+                body: bytes::Bytes::new(),
+                reply: reply_tx,
+            }],
+        };
+
+        d.dispatch(batch);
+
+        let direct_batch = rx.recv().await.expect("should receive direct batch");
+        assert_eq!(direct_batch.requests.len(), 1);
+        assert!(
+            direct_batch.requests[0].reply.is_none(),
+            "F&F request should have no reply channel"
+        );
     }
 }
