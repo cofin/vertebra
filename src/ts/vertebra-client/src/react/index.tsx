@@ -1,7 +1,8 @@
 import type React from "react";
-import { createContext, use, useContext, useMemo, useState } from "react";
+import { createContext, use, useCallback, useContext, useMemo, useState } from "react";
 import { VertebraClient } from "../client/client";
 import type { VertebraConfig } from "../client/types";
+import { QueryCache, queryCache } from "./cache";
 
 const VertebraContext = createContext<VertebraClient | null>(null);
 
@@ -24,33 +25,38 @@ export function useVertebraClient() {
 }
 
 /**
- * React 19 compatible query hook.
- * Uses Suspense-ready 'use()' for data fetching.
+ * React 19 compatible query hook with cache support.
+ *
+ * Uses Suspense-ready `use()` for data fetching. Cached results avoid
+ * redundant fetches for the same key. In-flight requests are deduplicated.
  */
 export function useQuery<TInput = any, TOutput = any>(
   method: string,
   path: string,
   input?: TInput,
-  options: { timeout?: number; enabled?: boolean } = {},
+  options: { timeout?: number; enabled?: boolean; staleTime?: number } = {},
 ) {
   const client = useVertebraClient();
-  const { enabled = true } = options;
+  const { enabled = true, staleTime = 0 } = options;
 
-  // In a real implementation, we'd use a cache/resource manager here
-  // to avoid redundant fetches and handle invalidation.
   const promise = useMemo(() => {
     if (!enabled) return Promise.resolve(null);
-    return client.call<TInput, TOutput>(method, path, input, options);
-  }, [client, method, path, input, options, enabled]);
+    const key = QueryCache.stableKey(method, path, input);
+    return queryCache.getOrCreate(key, staleTime, () =>
+      client.call<TInput, TOutput>(method, path, input, options),
+    );
+  }, [client, method, path, JSON.stringify(input), enabled, staleTime]);
 
-  // React 19 'use()' unwraps the promise and integrates with Suspense
   const data = use(promise);
 
-  return { data };
+  return { data } as { data: TOutput | null };
 }
 
 /**
  * Mutation hook for data modifications.
+ *
+ * After a successful mutation, invalidates all query cache entries
+ * to ensure fresh data on next render.
  */
 export function useMutation<TInput = any, TOutput = any>(method: string, path: string) {
   const client = useVertebraClient();
@@ -62,6 +68,7 @@ export function useMutation<TInput = any, TOutput = any>(method: string, path: s
     setError(null);
     try {
       const result = await client.call<TInput, TOutput>(method, path, input);
+      queryCache.invalidate();
       return result;
     } catch (err: any) {
       setError(err);
@@ -73,3 +80,17 @@ export function useMutation<TInput = any, TOutput = any>(method: string, path: s
 
   return { mutate, loading, error };
 }
+
+/**
+ * Hook to manually invalidate query cache entries.
+ *
+ * @param pattern Optional prefix pattern — only matching keys are invalidated.
+ *                Omit to invalidate all entries.
+ */
+export function useInvalidateQueries() {
+  return useCallback((pattern?: string) => {
+    queryCache.invalidate(pattern);
+  }, []);
+}
+
+export { queryCache, QueryCache };
