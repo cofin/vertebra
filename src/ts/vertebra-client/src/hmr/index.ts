@@ -3,6 +3,8 @@
  *
  * Provides WebSocket-based hot-reloading for CSS and full-page reload for other assets.
  * Integrated with the Vertebra Python dev server.
+ *
+ * When imported as a script tag, auto-connects and exposes `window.__vertebra_hmr`.
  */
 
 export type ServerMessage =
@@ -22,16 +24,86 @@ const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
 const PING_TIMEOUT_MS = 45_000;
 
+// ---------------------------------------------------------------------------
+// Error Overlay
+// ---------------------------------------------------------------------------
+
+let overlayElement: HTMLDivElement | null = null;
+
+function showErrorOverlay(error: Error, filePath: string): void {
+  if (typeof document === "undefined") return;
+  hideErrorOverlay();
+
+  const overlay = document.createElement("div");
+  overlay.id = "__vertebra_error_overlay";
+  overlay.style.cssText = [
+    "position:fixed",
+    "inset:0",
+    "z-index:99999",
+    "background:rgba(0,0,0,0.85)",
+    "color:#ff5555",
+    "font-family:monospace",
+    "font-size:14px",
+    "padding:32px",
+    "overflow:auto",
+    "white-space:pre-wrap",
+  ].join(";");
+
+  const container = document.createElement("div");
+  container.style.cssText = "max-width:960px;margin:0 auto";
+
+  const title = document.createElement("h2");
+  title.style.cssText = "color:#ff7777;margin:0 0 16px";
+  title.textContent = "[HMR] Update failed";
+  container.appendChild(title);
+
+  const modInfo = document.createElement("p");
+  modInfo.style.cssText = "color:#aaa;margin:0 0 8px";
+  modInfo.textContent = `File: ${filePath}`;
+  container.appendChild(modInfo);
+
+  const pre = document.createElement("pre");
+  pre.style.cssText = "color:#ff5555;margin:0";
+  pre.textContent = `${error.message}\n\n${error.stack ?? ""}`;
+  container.appendChild(pre);
+
+  const hint = document.createElement("p");
+  hint.style.cssText = "color:#666;margin:16px 0 0;font-size:12px";
+  hint.textContent = "Click to dismiss";
+  container.appendChild(hint);
+
+  overlay.appendChild(container);
+  overlay.addEventListener("click", () => hideErrorOverlay());
+  document.body.appendChild(overlay);
+  overlayElement = overlay;
+}
+
+function hideErrorOverlay(): void {
+  if (overlayElement) {
+    overlayElement.remove();
+    overlayElement = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HMR Client
+// ---------------------------------------------------------------------------
+
 export class VertebraHmrClient {
   private ws: WebSocket | null = null;
   private reconnectAttempts = 0;
   private reconnectTimer: any = null;
   private pingTimer: any = null;
-  private connected = false;
+  private _connected = false;
   private hmrPath: string;
 
   constructor(hmrPath = DEFAULT_HMR_PATH) {
     this.hmrPath = hmrPath;
+  }
+
+  /** Whether the WebSocket is currently connected. */
+  isConnected(): boolean {
+    return this._connected;
   }
 
   /** Open the WebSocket connection. */
@@ -68,13 +140,13 @@ export class VertebraHmrClient {
       this.ws = null;
     }
     this.reconnectAttempts = 0;
-    this.connected = false;
+    this._connected = false;
   }
 
   private onOpen(): void {
     console.log("[vertebra] HMR connected");
     this.reconnectAttempts = 0;
-    this.connected = true;
+    this._connected = true;
     this.resetPingTimer();
   }
 
@@ -108,7 +180,6 @@ export class VertebraHmrClient {
 
       case "types-update":
         console.log(`[vertebra] types updated: ${msg.version}`);
-        // Dispatch custom event for Vite plugin to consume
         window.dispatchEvent(new CustomEvent("vertebra:types-update", { detail: msg }));
         break;
 
@@ -119,7 +190,7 @@ export class VertebraHmrClient {
 
   private onClose(event: CloseEvent): void {
     this.ws = null;
-    this.connected = false;
+    this._connected = false;
     this.clearPingTimer();
     if (event.code !== 1000) {
       this.scheduleReconnect();
@@ -132,12 +203,18 @@ export class VertebraHmrClient {
 
   private handleUpdate(updates: Array<{ path: string; timestamp: number }>): void {
     for (const { path } of updates) {
-      if (path.endsWith(".css")) {
-        this.hotSwapCss(path);
-      } else {
-        console.log(`[vertebra] file changed: ${path}`);
-        window.location.reload();
-        return;
+      try {
+        if (path.endsWith(".css")) {
+          this.hotSwapCss(path);
+        } else {
+          console.log(`[vertebra] file changed: ${path}`);
+          window.location.reload();
+          return;
+        }
+        hideErrorOverlay();
+      } catch (err) {
+        console.error(`[vertebra] HMR update failed for ${path}:`, err);
+        showErrorOverlay(err instanceof Error ? err : new Error(String(err)), path);
       }
     }
   }
@@ -186,4 +263,20 @@ export class VertebraHmrClient {
       this.connect();
     }, delay);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Window global + auto-connect
+// ---------------------------------------------------------------------------
+
+declare global {
+  interface Window {
+    __vertebra_hmr: VertebraHmrClient;
+  }
+}
+
+if (typeof window !== "undefined") {
+  const client = new VertebraHmrClient();
+  client.connect();
+  window.__vertebra_hmr = client;
 }

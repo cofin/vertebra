@@ -30,12 +30,3 @@ export interface RouteResponse<T = any> {
   /** Unique request correlation ID. */
   requestId: number;
 }
-
-/**
- * Message types for the HMR WebSocket.
- */
-export type HmrMessage =
-  | { type: "connected"; version: string }
-  | { type: "update"; path: string; version: string }
-  | { type: "full-reload" }
-  | { type: "error"; message: string };
