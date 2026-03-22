@@ -194,27 +194,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let router = Arc::new(NativeRouter::from_entries(table.into_entries())?);
     info!("route table built");
 
-    // --- Collector + Dispatcher ---
-    let dispatcher = Arc::new(Dispatcher::new());
-    let (collector, collector_tx) =
-        BatchCollector::new(Arc::clone(&dispatcher), DrainPolicy::default_fixed(), 1024);
-    tokio::spawn(collector.run());
-
-    // --- Response reader ---
-    spawn_response_reader(Arc::clone(&dispatcher));
-
-    // --- Worker spawning ---
+    // --- Worker spawning + Dispatcher setup ---
     #[cfg(all(feature = "python", unix))]
     let mut shm_children: Option<Vec<std::process::Child>> = None;
+
+    #[cfg(all(feature = "python", unix))]
+    let shm_shutdown: Option<tokio_util::sync::CancellationToken> = None;
+
+    let dispatcher;
 
     #[cfg(feature = "python")]
     {
         if config.workers.count > 0 {
-            // Multi-process mode: spawn forked workers with SHM ring pairs
+            // Multi-process mode: SHM dispatcher + response reader
             #[cfg(unix)]
             {
                 use vertebra_core::transport::ring_pair::RingPairConfig;
                 use vertebra_http::supervisor::SupervisorRingFactory;
+                use vertebra_http::response_reader;
 
                 let factory = SupervisorRingFactory::new(
                     config.workers.count,
@@ -227,22 +224,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     "spawning multi-process workers with SHM transport"
                 );
 
+                // Create SHM dispatcher with ring pairs
+                let ring_pairs: Vec<Arc<vertebra_core::transport::ring_pair::RingPair>> =
+                    factory.all_ring_pairs().to_vec();
+                dispatcher = Arc::new(Dispatcher::new_shm(ring_pairs.clone(), 65536));
+
+                // Spawn response reader
+                let shutdown_token = tokio_util::sync::CancellationToken::new();
+                #[allow(unused_assignments)]
+                { let _ = &shm_shutdown; } // suppress warning
+                tokio::spawn(response_reader::run_response_reader(
+                    ring_pairs,
+                    Arc::clone(&dispatcher),
+                    shutdown_token.clone(),
+                ));
+
+                // Spawn worker processes
                 let children = factory
                     .spawn_all(&app_path, &config.workers.python_bin)
                     .expect("failed to spawn workers");
 
                 shm_children = Some(children);
-                // TODO(Ch3): Register factory.all_ring_pairs() with SHM dispatcher
+            }
+
+            #[cfg(not(unix))]
+            {
+                dispatcher = Arc::new(Dispatcher::new());
+                spawn_response_reader(Arc::clone(&dispatcher));
             }
         } else {
-            // In-process mode: spawn Python worker thread
+            // In-process mode: bridge dispatcher + bridge response reader
+            dispatcher = Arc::new(Dispatcher::new());
+            spawn_response_reader(Arc::clone(&dispatcher));
             spawn_python_worker(app_path.clone());
         }
         info!(app = %app_path, bind = %config.bind, "vertebra-server starting");
     }
 
     #[cfg(not(feature = "python"))]
-    info!(bind = %config.bind, "vertebra-server starting (no python)");
+    {
+        dispatcher = Arc::new(Dispatcher::new());
+        spawn_response_reader(Arc::clone(&dispatcher));
+        info!(bind = %config.bind, "vertebra-server starting (no python)");
+    }
+
+    // --- Collector ---
+    let (collector, collector_tx) =
+        BatchCollector::new(Arc::clone(&dispatcher), DrainPolicy::default_fixed(), 1024);
+    tokio::spawn(collector.run());
 
     // --- Start server ---
     let shutdown = async {
