@@ -132,14 +132,14 @@ test: dev                                           ## Run Python tests
 	@echo "${OK} Tests passed"
 
 .PHONY: rs-test
-rs-test:                                            ## Run Rust tests
+rs-test:                                            ## Run Rust tests (all features)
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@cd src/rs && cargo test
+	@cd src/rs && cargo test --workspace --features tls,compression
 	@echo "${OK} Rust tests passed"
 
 .PHONY: test-all
-test-all: rs-test test                              ## Run all tests (Rust then Python)
+test-all: rs-test test ts-test                      ## Run all tests (Rust, Python, TypeScript)
 
 .PHONY: coverage
 coverage:                                           ## Run tests with coverage report
