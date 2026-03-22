@@ -336,6 +336,7 @@ impl RingPair {
     /// All FDs must be valid, open file descriptors that were created by a
     /// corresponding `RingPair::create()` call.
     #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn from_inherited(
         config: RingPairConfig,
         req_ring_fd: RawFd,

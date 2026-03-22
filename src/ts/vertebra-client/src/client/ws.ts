@@ -79,8 +79,9 @@ export class VertebraWebSocket {
       this.ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data as string);
-          if (msg.channel && this.subscriptions.has(msg.channel)) {
-            for (const cb of this.subscriptions.get(msg.channel)!) {
+          const subs = msg.channel ? this.subscriptions.get(msg.channel) : undefined;
+          if (subs) {
+            for (const cb of subs) {
               cb(msg.data);
             }
           }

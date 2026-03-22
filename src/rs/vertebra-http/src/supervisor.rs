@@ -15,7 +15,6 @@ use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig, RingPairErro
 /// Creates and manages SPSC ring pairs for multi-process workers.
 pub struct SupervisorRingFactory {
     pairs: Vec<Arc<RingPair>>,
-    config: RingPairConfig,
 }
 
 impl SupervisorRingFactory {
@@ -40,7 +39,7 @@ impl SupervisorRingFactory {
             pairs.push(Arc::new(pair));
         }
 
-        Ok(Self { pairs, config })
+        Ok(Self { pairs })
     }
 
     /// Get the ring pair for a specific worker.
@@ -192,11 +191,7 @@ pub struct WorkerLifecycle {
 
 impl WorkerLifecycle {
     /// Create a new lifecycle tracker for a just-spawned worker.
-    pub fn new(
-        child: std::process::Child,
-        ring_pair: Arc<RingPair>,
-        worker_id: usize,
-    ) -> Self {
+    pub fn new(child: std::process::Child, ring_pair: Arc<RingPair>, worker_id: usize) -> Self {
         #[cfg(target_os = "linux")]
         let pidfd = {
             use vertebra_core::platform::linux::pidfd_open;
@@ -401,7 +396,10 @@ mod tests {
         for _ in 0..10 {
             lifecycle.record_crash();
         }
-        assert_eq!(lifecycle.respawn_delay(), std::time::Duration::from_secs(32));
+        assert_eq!(
+            lifecycle.respawn_delay(),
+            std::time::Duration::from_secs(32)
+        );
     }
 
     #[test]
@@ -413,10 +411,16 @@ mod tests {
         for _ in 0..10 {
             lifecycle.record_crash();
         }
-        assert!(!lifecycle.circuit_breaker_tripped(), "10 crashes should not trip");
+        assert!(
+            !lifecycle.circuit_breaker_tripped(),
+            "10 crashes should not trip"
+        );
 
         lifecycle.record_crash(); // 11th
-        assert!(lifecycle.circuit_breaker_tripped(), "11 crashes should trip");
+        assert!(
+            lifecycle.circuit_breaker_tripped(),
+            "11 crashes should trip"
+        );
     }
 
     #[test]
@@ -427,15 +431,25 @@ mod tests {
         pair.request_ring.try_send(b"test data", 0).expect("send");
 
         // Reclaim (simulating worker death)
-        unsafe { pair.reclaim(); }
+        unsafe {
+            pair.reclaim();
+        }
 
         // Ring should be empty after reclaim
         let mut buf = vec![0u8; 1024];
-        assert!(pair.request_ring.try_recv(&mut buf).is_err(), "ring should be empty after reclaim");
+        assert!(
+            pair.request_ring.try_recv(&mut buf).is_err(),
+            "ring should be empty after reclaim"
+        );
 
         // Ring should be usable for new data
-        pair.request_ring.try_send(b"new data", 0).expect("send after reclaim");
-        let len = pair.request_ring.try_recv(&mut buf).expect("recv after reclaim");
+        pair.request_ring
+            .try_send(b"new data", 0)
+            .expect("send after reclaim");
+        let len = pair
+            .request_ring
+            .try_recv(&mut buf)
+            .expect("recv after reclaim");
         assert_eq!(&buf[..len], b"new data");
     }
 

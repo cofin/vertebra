@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 from vertebra.builder._fallback import ViteDevServer, run_vite_build
 
-
 # ---------------------------------------------------------------------------
 # ViteDevServer
 # ---------------------------------------------------------------------------

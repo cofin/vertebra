@@ -6,7 +6,6 @@ from vertebra._vertebra import (  # type: ignore[import-untyped]
     VertebraResponse,
 )
 
-
 # -- VertebraResponse --------------------------------------------------------
 
 

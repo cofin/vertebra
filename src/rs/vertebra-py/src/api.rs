@@ -62,7 +62,7 @@ pub fn init_transport(
                 ))
             }
         }
-        "inprocess" | _ => {
+        _ => {
             let _ = ring_name;
             let slab_capacity = slot_size * slots;
             let arena_capacity = batch_size;

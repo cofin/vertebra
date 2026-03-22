@@ -56,9 +56,6 @@ pub struct DirectRequest {
 /// Per-worker state for SHM dispatch.
 struct WorkerState {
     ring_pair: Arc<RingPair>,
-    /// Shadow tail index — locally cached to avoid cross-core cache invalidation.
-    /// Only refreshed when the ring appears full.
-    shadow_tail: AtomicU64,
 }
 
 /// SharedMemory dispatcher with round-robin routing and O(1) correlation.
@@ -73,10 +70,7 @@ impl ShmDispatcher {
     pub fn new(ring_pairs: Vec<Arc<RingPair>>, max_inflight: usize) -> Self {
         let workers: Vec<WorkerState> = ring_pairs
             .into_iter()
-            .map(|rp| WorkerState {
-                ring_pair: rp,
-                shadow_tail: AtomicU64::new(0),
-            })
+            .map(|rp| WorkerState { ring_pair: rp })
             .collect();
 
         Self {
@@ -105,22 +99,11 @@ impl ShmDispatcher {
         for req in batch.requests {
             let is_fnf = req.flags & flags::FIRE_AND_FORGET != 0;
 
-            // Build the transport node first (borrows req fields)
-            // We need to extract reply before moving req fields
-            let reply = req.reply;
             let req_flags = req.flags;
 
-            // Build a single-request BatchSnapshot
-            let (slab_data, mut node) = build_transport_node_from_parts(
-                req.handler_id,
-                req.method_tag,
-                req.http_version_tag,
-                &req.path,
-                req.query.as_deref(),
-                &req.headers_mp,
-                &req.body,
-                0, // correlation_id set below
-            );
+            // Build a single-request BatchSnapshot (borrows req)
+            let (slab_data, mut node) = build_transport_node(&req, 0);
+            let reply = req.reply;
 
             // Allocate correlation ID (unless F&F)
             let correlation_id = if is_fnf {
@@ -201,21 +184,15 @@ impl ShmDispatcher {
     }
 }
 
-/// Build a TransportNode + slab data from request parts.
-fn build_transport_node_from_parts(
-    handler_id: u64,
-    method_tag: u8,
-    http_version_tag: u8,
-    path: &str,
-    query: Option<&str>,
-    headers_mp: &[u8],
-    body: &[u8],
+/// Build a TransportNode + slab data from a pending request.
+fn build_transport_node(
+    req: &crate::collector::PendingRequest,
     correlation_id: u64,
 ) -> (Vec<u8>, TransportNode) {
-    let path_bytes = path.as_bytes();
-    let query_bytes = query.map(|q| q.as_bytes());
-    let headers_bytes = headers_mp;
-    let body_bytes = body;
+    let path_bytes = req.path.as_bytes();
+    let query_bytes = req.query.as_ref().map(|q| q.as_bytes());
+    let headers_bytes = &req.headers_mp[..];
+    let body_bytes = &req.body[..];
 
     // Build slab: path + query + headers + body
     let mut slab = Vec::with_capacity(
@@ -244,10 +221,10 @@ fn build_transport_node_from_parts(
     let body_len = body_bytes.len() as u32;
 
     let node = TransportNode {
-        method_tag,
-        http_version_tag,
+        method_tag: req.method_tag,
+        http_version_tag: req.http_version_tag,
         _pad: [0; 2],
-        handler_id,
+        handler_id: req.handler_id,
         correlation_id,
         path_offset,
         path_len,

@@ -46,7 +46,7 @@ def _make_mock_ssr_client(*, fail: bool = False) -> object:
     class _MockSsrClient:
         def __init__(self) -> None:
             self.fail = fail
-            self.last_page: "dict | None" = None
+            self.last_page: dict | None = None
 
         def render(self, page: dict) -> SsrResult:
             self.last_page = page

@@ -236,9 +236,12 @@ def test_parse_batch_from_slot_single_request_round_trip():
         100,  # correlation_id
         path_off,
         len(path),
-        0, 0,  # no query
-        0, 0,  # no headers
-        0, 0,  # no body
+        0,
+        0,  # no query
+        0,
+        0,  # no headers
+        0,
+        0,  # no body
     )
 
     # Build slot
@@ -262,15 +265,23 @@ def test_parse_batch_from_slot_multi_request_batch():
         path = f"/item/{i}".encode()
         path_off = len(slab)
         slab.extend(path)
-        nodes.extend(struct.pack(
-            _NODE_FMT,
-            1,  # POST
-            1,  # HTTP/1.1
-            i + 10,
-            i + 200,
-            path_off, len(path),
-            0, 0, 0, 0, 0, 0,
-        ))
+        nodes.extend(
+            struct.pack(
+                _NODE_FMT,
+                1,  # POST
+                1,  # HTTP/1.1
+                i + 10,
+                i + 200,
+                path_off,
+                len(path),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+        )
 
     header = struct.pack("<IIII", 0, 5, len(slab), 0)
     slot = header + bytes(nodes) + bytes(slab)
@@ -298,11 +309,18 @@ def test_parse_batch_from_slot_with_body_and_headers():
 
     node = struct.pack(
         _NODE_FMT,
-        1, 1, 99, 500,
-        path_off, len(path),
-        0, 0,
-        hdr_off, len(headers_raw),
-        body_off, len(body),
+        1,
+        1,
+        99,
+        500,
+        path_off,
+        len(path),
+        0,
+        0,
+        hdr_off,
+        len(headers_raw),
+        body_off,
+        len(body),
     )
 
     header = struct.pack("<IIII", 0, 1, len(slab), 0)

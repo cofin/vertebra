@@ -5,7 +5,6 @@ import json
 from vertebra.builder._config import JsConfig
 from vertebra.builder._import_map import generate_import_map, parse_package_spec, write_import_map
 
-
 # ---------------------------------------------------------------------------
 # ParsePackageSpec
 # ---------------------------------------------------------------------------

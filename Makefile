@@ -99,7 +99,7 @@ ts-test:                                            ## Run TS unit tests
 .PHONY: ts-lint
 ts-lint:                                            ## Lint TS package with auto-fixes
 	@echo "${INFO} Linting TS package (Biome)..."
-	@cd src/ts/vertebra-client && bun run lint:fix
+	@cd src/ts/vertebra-client && bunx biome check --write --unsafe .
 	@echo "${OK} TS lint complete"
 
 .PHONY: dev

@@ -29,9 +29,9 @@ class ShmAsyncTransport:
 
     def __init__(
         self,
-        notify_fd_fn: "Callable[[], int]",
-        clear_fn: "Callable[[], None]",
-        try_get_fn: "Callable[[], Any | None]",
+        notify_fd_fn: Callable[[], int],
+        clear_fn: Callable[[], None],
+        try_get_fn: Callable[[], Any | None],
     ) -> None:
         self._notify_fd_fn = notify_fd_fn
         self._clear_fn = clear_fn

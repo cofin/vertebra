@@ -282,9 +282,7 @@ def test_concurrent_dispatch_async_handlers_concurrent(scheduler):
     elapsed_ms = (time.monotonic() - start) * 1000
 
     # Should be ~20ms (concurrent), NOT 100ms (sequential)
-    assert elapsed_ms < sleep_ms * 2, (
-        f"Async handlers took {elapsed_ms:.0f}ms — expected ~{sleep_ms}ms (concurrent)"
-    )
+    assert elapsed_ms < sleep_ms * 2, f"Async handlers took {elapsed_ms:.0f}ms — expected ~{sleep_ms}ms (concurrent)"
     assert len(results) == n_handlers
     assert all(r.status == 200 for r in results)
 
@@ -344,7 +342,7 @@ def test_concurrent_dispatch_sync_handlers_sequential(scheduler):
     """Sync handlers still run sequentially with no concurrency overhead."""
     from vertebra.server._native import _dispatch_batch, _partition_batch
 
-    call_order: "list[int]" = []
+    call_order: list[int] = []
 
     def sync_a(req: Any) -> bytes:
         call_order.append(1)
@@ -535,8 +533,7 @@ def test_hybrid_dispatch_async_handlers_amortize_io(scheduler):
 
     # All 5 sleeps gathered concurrently: ~30ms, not 150ms.
     assert elapsed_ms < sleep_ms * 2, (
-        f"Async dispatch took {elapsed_ms:.0f}ms — expected ~{sleep_ms}ms (gathered), "
-        f"not {sleep_ms * n}ms (sequential)"
+        f"Async dispatch took {elapsed_ms:.0f}ms — expected ~{sleep_ms}ms (gathered), not {sleep_ms * n}ms (sequential)"
     )
     assert len(results) == n
     assert all(r.status == 200 for r in results)
@@ -585,7 +582,7 @@ def test_thread_safety_concurrent_sync_handlers_no_data_corruption(scheduler):
 
     from vertebra.server._native import _dispatch_batch, _partition_batch
 
-    seen_threads: "set[int]" = set()
+    seen_threads: set[int] = set()
     lock = threading.Lock()
 
     def sync_h(req: Any) -> bytes:

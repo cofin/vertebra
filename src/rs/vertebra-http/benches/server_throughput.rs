@@ -66,11 +66,13 @@ fn bench_direct_dispatch(c: &mut Criterion) {
         tokio::spawn(async move {
             while let Some(batch) = direct_rx.recv().await {
                 for req in batch.requests {
-                    let _ = req.reply.send(PendingResponse {
-                        status: 200,
-                        headers_mp: bytes::Bytes::new(),
-                        body: bytes::Bytes::from_static(b"ok"),
-                    });
+                    if let Some(reply) = req.reply {
+                        let _ = reply.send(PendingResponse {
+                            status: 200,
+                            headers_mp: bytes::Bytes::new(),
+                            body: bytes::Bytes::from_static(b"ok"),
+                        });
+                    }
                 }
             }
         });

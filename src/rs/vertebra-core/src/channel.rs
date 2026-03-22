@@ -852,9 +852,7 @@ impl SpscRing {
         self.slot_borrowed.store(false, Ordering::Release);
         // Bump generation to invalidate any stale references
         let header = &*self.header;
-        header
-            .generation
-            .fetch_add(1, Ordering::Release);
+        header.generation.fetch_add(1, Ordering::Release);
     }
 
     fn read_head(&self) -> &core::sync::atomic::AtomicU64 {

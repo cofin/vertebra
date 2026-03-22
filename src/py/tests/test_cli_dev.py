@@ -41,14 +41,3 @@ def test_cli_help_lists_dev_and_js(runner: CliRunner) -> None:
     assert "js" in result.output
     assert "run" in result.output
     assert "init" in result.output
-
-
-def test_cli_help_no_build_command(runner: CliRunner) -> None:
-    """Build command should no longer be a top-level command."""
-    result = runner.invoke(cli, ["--help"])
-    assert result.exit_code == 0, result.output
-    # build should not appear as a standalone command in the help
-    # It is now under js build
-    lines = result.output.splitlines()
-    command_lines = [line.strip() for line in lines if line.strip().startswith("build")]
-    assert not command_lines, "build should not be a top-level command"

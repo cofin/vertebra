@@ -4,6 +4,7 @@ AnyIO is the async backend — no pytest-asyncio. Use @pytest.mark.anyio
 for async tests. All async tests run under asyncio by default.
 """
 
+import contextlib
 import uuid
 from pathlib import Path
 from typing import Any
@@ -11,10 +12,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # AnyIO configuration
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(params=["asyncio"])
 def anyio_backend(request: pytest.FixtureRequest) -> str:
@@ -25,6 +26,7 @@ def anyio_backend(request: pytest.FixtureRequest) -> str:
 # ---------------------------------------------------------------------------
 # Shared path fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def project_dir(tmp_path: Path) -> Path:
@@ -49,6 +51,7 @@ def codegen_dir(tmp_path: Path) -> Path:
 # Shared memory cleanup
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def shm_name() -> str:
     """Unique shared memory name to avoid test collisions."""
@@ -64,15 +67,14 @@ def _cleanup_shm() -> Any:
 
     for pattern in ("/dev/shm/test-*", "/dev/shm/*vertebra*"):
         for path in glob.glob(pattern):
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(path)
-            except OSError:
-                pass
 
 
 # ---------------------------------------------------------------------------
 # ASGI test helpers
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def mock_asgi_app() -> AsyncMock:

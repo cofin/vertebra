@@ -5,7 +5,6 @@ import pytest
 from vertebra.framework._app import HandlerInfo, VertebraApp, _make_handler_id
 from vertebra.framework._router import handler_id
 
-
 # ---------------------------------------------------------------------------
 # HandlerIdStability
 # ---------------------------------------------------------------------------

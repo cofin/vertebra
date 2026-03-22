@@ -41,17 +41,27 @@ describe("VertebraClient", () => {
   });
 
   it("throws TimeoutError on abort", async () => {
+    // Disable retries so abort throws immediately
+    const noRetryClient = new VertebraClient({
+      baseURL: "http://api.test",
+      retry: { maxAttempts: 0 },
+    });
     const mockFetch = vi.mocked(fetch);
-    mockFetch.mockImplementationOnce(() => {
+    mockFetch.mockImplementation(() => {
       const error = new Error("Abort");
       error.name = "AbortError";
       return Promise.reject(error);
     });
 
-    await expect(client.call("GET", "/slow")).rejects.toThrow(TimeoutError);
+    await expect(noRetryClient.call("GET", "/slow")).rejects.toThrow(TimeoutError);
   });
 
   it("handles non-JSON error responses", async () => {
+    // Disable retries — 500 is retryable by default
+    const noRetryClient = new VertebraClient({
+      baseURL: "http://api.test",
+      retry: { maxAttempts: 0 },
+    });
     const mockFetch = vi.mocked(fetch);
     mockFetch.mockResolvedValueOnce(
       new Response("Server Error", {
@@ -60,6 +70,38 @@ describe("VertebraClient", () => {
       }),
     );
 
-    await expect(client.call("GET", "/error")).rejects.toThrow("Internal Server Error");
+    await expect(noRetryClient.call("GET", "/error")).rejects.toThrow("Internal Server Error");
+  });
+
+  it("retries on retryable status codes", async () => {
+    const mockFetch = vi.mocked(fetch);
+    // First call: 503, second call: 200
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 503 })).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    const result = await client.call("GET", "/flaky");
+    expect(result).toEqual({ ok: true });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry non-retryable status codes", async () => {
+    const noRetryClient = new VertebraClient({
+      baseURL: "http://api.test",
+      retry: { maxAttempts: 0 },
+    });
+    const mockFetch = vi.mocked(fetch);
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ message: "Forbidden" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await expect(noRetryClient.call("GET", "/forbidden")).rejects.toThrow("Forbidden");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 });
