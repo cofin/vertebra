@@ -100,6 +100,28 @@ jobs:
       - name: Run Rust tests
         run: make rs-test
 
+  test-rust-features:
+    needs: [changes]
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            features: tls,compression
+          - os: macos-latest
+            features: tls,compression,macos-ulock
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test with feature flags
+        working-directory: src/rs
+        env:
+          CARGO_FEATURES: ${{ matrix.features }}
+        run: cargo test --workspace --features "$CARGO_FEATURES"
+
   test-typescript:
     runs-on: ubuntu-latest
     timeout-minutes: 10
