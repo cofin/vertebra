@@ -8,7 +8,7 @@ import pytest
 
 
 class MockHeaders:
-    def __init__(self, headers: dict[str, str] | None = None):
+    def __init__(self, headers: "dict[str, str] | None" = None):
         self._headers = {k.lower(): v for k, v in (headers or {}).items()}
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -50,366 +50,372 @@ class MockRequest:
 # --- Scope ---
 
 
-class TestBuildScope:
-    def test_type_is_http(self) -> None:
-        from vertebra.server._asgi._scope import build_scope
+def test_build_scope_type_is_http() -> None:
+    from vertebra.server._asgi._scope import build_scope
 
-        scope = build_scope(MockRequest())
-        assert scope["type"] == "http"
+    scope = build_scope(MockRequest())
+    assert scope["type"] == "http"
 
-    def test_asgi_version(self) -> None:
-        from vertebra.server._asgi._scope import build_scope
 
-        scope = build_scope(MockRequest())
-        assert scope["asgi"] == {"version": "3.0", "spec_version": "2.3"}
+def test_build_scope_asgi_version() -> None:
+    from vertebra.server._asgi._scope import build_scope
 
-    def test_method_uppercase(self) -> None:
-        from vertebra.server._asgi._scope import build_scope
+    scope = build_scope(MockRequest())
+    assert scope["asgi"] == {"version": "3.0", "spec_version": "2.3"}
 
-        scope = build_scope(MockRequest(method="get"))
-        assert scope["method"] == "GET"
 
-    def test_headers_lazy(self) -> None:
-        from vertebra.server._asgi._scope import _UNBUILT, build_scope
+def test_build_scope_method_uppercase() -> None:
+    from vertebra.server._asgi._scope import build_scope
 
-        scope = build_scope(MockRequest(headers={"accept": "text/html"}))
-        assert dict.__getitem__(scope, "headers") is _UNBUILT
-        headers = scope["headers"]
-        assert isinstance(headers, list)
-        assert all(isinstance(h, tuple) for h in headers)
+    scope = build_scope(MockRequest(method="get"))
+    assert scope["method"] == "GET"
 
-    def test_query_string_bytes(self) -> None:
-        from vertebra.server._asgi._scope import build_scope
 
-        scope = build_scope(MockRequest(query="a=1"))
-        assert scope["query_string"] == b"a=1"
+def test_build_scope_headers_lazy() -> None:
+    from vertebra.server._asgi._scope import _UNBUILT, build_scope
 
-    def test_query_string_empty(self) -> None:
-        from vertebra.server._asgi._scope import build_scope
+    scope = build_scope(MockRequest(headers={"accept": "text/html"}))
+    assert dict.__getitem__(scope, "headers") is _UNBUILT
+    headers = scope["headers"]
+    assert isinstance(headers, list)
+    assert all(isinstance(h, tuple) for h in headers)
 
-        scope = build_scope(MockRequest())
-        assert scope["query_string"] == b""
 
-    def test_raw_path_bytes(self) -> None:
-        from vertebra.server._asgi._scope import build_scope
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("a=1", b"a=1"),
+        (None, b""),
+    ],
+    ids=["present", "empty"],
+)
+def test_build_scope_query_string(query: "str | None", expected: bytes) -> None:
+    from vertebra.server._asgi._scope import build_scope
 
-        scope = build_scope(MockRequest(path="/hello"))
-        assert scope["raw_path"] == b"/hello"
+    scope = build_scope(MockRequest(query=query))
+    assert scope["query_string"] == expected
 
-    def test_state_is_fresh_dict(self) -> None:
-        from vertebra.server._asgi._scope import build_scope
 
-        s1 = build_scope(MockRequest())
-        s2 = build_scope(MockRequest())
-        assert s1["state"] is not s2["state"]
+def test_build_scope_raw_path_bytes() -> None:
+    from vertebra.server._asgi._scope import build_scope
 
-    def test_all_required_keys(self) -> None:
-        from vertebra.server._asgi._scope import build_scope
+    scope = build_scope(MockRequest(path="/hello"))
+    assert scope["raw_path"] == b"/hello"
 
-        scope = build_scope(MockRequest())
-        required = {
-            "type",
-            "asgi",
-            "http_version",
-            "method",
-            "headers",
-            "path",
-            "raw_path",
-            "query_string",
-            "root_path",
-            "scheme",
-            "server",
-            "client",
-            "state",
-            "extensions",
-        }
-        assert required.issubset(set(scope.keys()))
 
-    def test_root_path(self) -> None:
-        from vertebra.server._asgi._scope import build_scope
+def test_build_scope_state_is_fresh_dict() -> None:
+    from vertebra.server._asgi._scope import build_scope
 
-        scope = build_scope(MockRequest(), root_path="/api")
-        assert scope["root_path"] == "/api"
+    s1 = build_scope(MockRequest())
+    s2 = build_scope(MockRequest())
+    assert s1["state"] is not s2["state"]
+
+
+def test_build_scope_all_required_keys() -> None:
+    from vertebra.server._asgi._scope import build_scope
+
+    scope = build_scope(MockRequest())
+    required = {
+        "type",
+        "asgi",
+        "http_version",
+        "method",
+        "headers",
+        "path",
+        "raw_path",
+        "query_string",
+        "root_path",
+        "scheme",
+        "server",
+        "client",
+        "state",
+        "extensions",
+    }
+    assert required.issubset(set(scope.keys()))
+
+
+def test_build_scope_root_path() -> None:
+    from vertebra.server._asgi._scope import build_scope
+
+    scope = build_scope(MockRequest(), root_path="/api")
+    assert scope["root_path"] == "/api"
 
 
 # --- Queues ---
 
 
-class TestReceiveChannel:
-    @pytest.mark.anyio
-    async def test_first_call_returns_body(self) -> None:
-        from vertebra.server._asgi._queues import ReceiveChannel
+@pytest.mark.anyio
+async def test_receive_channel_first_call_returns_body() -> None:
+    from vertebra.server._asgi._queues import ReceiveChannel
 
-        rc = ReceiveChannel(MockRequest(body=b"hello"))
-        msg = await rc()
-        assert msg["type"] == "http.request"
-        assert msg["body"] == b"hello"
-        assert msg["more_body"] is False
+    rc = ReceiveChannel(MockRequest(body=b"hello"))
+    msg = await rc()
+    assert msg["type"] == "http.request"
+    assert msg["body"] == b"hello"
+    assert msg["more_body"] is False
 
-    @pytest.mark.anyio
-    async def test_second_call_disconnect(self) -> None:
-        from vertebra.server._asgi._queues import ReceiveChannel
 
-        rc = ReceiveChannel(MockRequest())
-        await rc()
+@pytest.mark.anyio
+async def test_receive_channel_second_call_disconnect() -> None:
+    from vertebra.server._asgi._queues import ReceiveChannel
+
+    rc = ReceiveChannel(MockRequest())
+    await rc()
+    msg = await rc()
+    assert msg["type"] == "http.disconnect"
+
+
+@pytest.mark.anyio
+async def test_receive_channel_subsequent_calls_disconnect() -> None:
+    from vertebra.server._asgi._queues import ReceiveChannel
+
+    rc = ReceiveChannel(MockRequest())
+    await rc()
+    for _ in range(5):
         msg = await rc()
         assert msg["type"] == "http.disconnect"
 
-    @pytest.mark.anyio
-    async def test_subsequent_calls_disconnect(self) -> None:
-        from vertebra.server._asgi._queues import ReceiveChannel
 
-        rc = ReceiveChannel(MockRequest())
-        await rc()
-        for _ in range(5):
-            msg = await rc()
-            assert msg["type"] == "http.disconnect"
+@pytest.mark.anyio
+async def test_send_collector_captures_status() -> None:
+    from vertebra.server._asgi._queues import SendCollector
+
+    sc = SendCollector()
+    await sc({"type": "http.response.start", "status": 200, "headers": []})
+    await sc({"type": "http.response.body", "body": b"ok"})
+    r = sc.response
+    assert r.status == 200
+    assert r.body == b"ok"
 
 
-class TestSendCollector:
-    @pytest.mark.anyio
-    async def test_captures_status(self) -> None:
-        from vertebra.server._asgi._queues import SendCollector
+@pytest.mark.anyio
+async def test_send_collector_accumulates_chunks() -> None:
+    from vertebra.server._asgi._queues import SendCollector
 
-        sc = SendCollector()
-        await sc({"type": "http.response.start", "status": 200, "headers": []})
-        await sc({"type": "http.response.body", "body": b"ok"})
-        r = sc.response
-        assert r.status == 200
-        assert r.body == b"ok"
+    sc = SendCollector()
+    await sc({"type": "http.response.start", "status": 200, "headers": []})
+    await sc({"type": "http.response.body", "body": b"abc", "more_body": True})
+    await sc({"type": "http.response.body", "body": b"de", "more_body": False})
+    assert sc.response.body == b"abcde"
 
-    @pytest.mark.anyio
-    async def test_accumulates_chunks(self) -> None:
-        from vertebra.server._asgi._queues import SendCollector
 
-        sc = SendCollector()
-        await sc({"type": "http.response.start", "status": 200, "headers": []})
-        await sc({"type": "http.response.body", "body": b"abc", "more_body": True})
-        await sc({"type": "http.response.body", "body": b"de", "more_body": False})
-        assert sc.response.body == b"abcde"
+@pytest.mark.anyio
+async def test_send_collector_response_before_start_raises() -> None:
+    from vertebra.server._asgi._queues import SendCollector
 
-    @pytest.mark.anyio
-    async def test_response_before_start_raises(self) -> None:
-        from vertebra.server._asgi._queues import SendCollector
+    sc = SendCollector()
+    with pytest.raises(RuntimeError, match="http.response.start"):
+        _ = sc.response
 
-        sc = SendCollector()
-        with pytest.raises(RuntimeError, match="http.response.start"):
-            _ = sc.response
 
-    @pytest.mark.anyio
-    async def test_unknown_type_raises(self) -> None:
-        from vertebra.server._asgi._queues import SendCollector
+@pytest.mark.anyio
+async def test_send_collector_unknown_type_raises() -> None:
+    from vertebra.server._asgi._queues import SendCollector
 
-        sc = SendCollector()
-        with pytest.raises(RuntimeError, match="unexpected"):
-            await sc({"type": "http.weirdmessage"})
+    sc = SendCollector()
+    with pytest.raises(RuntimeError, match="unexpected"):
+        await sc({"type": "http.weirdmessage"})
 
-    @pytest.mark.anyio
-    async def test_header_conversion(self) -> None:
-        from vertebra.server._asgi._queues import SendCollector
 
-        sc = SendCollector()
-        await sc(
-            {
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [(b"content-type", b"text/html")],
-            }
-        )
-        await sc({"type": "http.response.body", "body": b""})
-        r = sc.response
-        assert r.headers == [("content-type", "text/html")]
+@pytest.mark.anyio
+async def test_send_collector_header_conversion() -> None:
+    from vertebra.server._asgi._queues import SendCollector
+
+    sc = SendCollector()
+    await sc(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"text/html")],
+        }
+    )
+    await sc({"type": "http.response.body", "body": b""})
+    r = sc.response
+    assert r.headers == [("content-type", "text/html")]
 
 
 # --- Adapter ---
 
 
-class TestAsgiAdapter:
-    @pytest.mark.anyio
-    async def test_simple_app(self) -> None:
-        from vertebra.server._asgi._adapter import AsgiAdapter
+@pytest.mark.anyio
+async def test_asgi_adapter_simple_app() -> None:
+    from vertebra.server._asgi._adapter import AsgiAdapter
 
-        async def app(scope, receive, send):
-            await send({"type": "http.response.start", "status": 200, "headers": []})
-            await send({"type": "http.response.body", "body": b"ok"})
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
 
-        adapter = AsgiAdapter(app)
-        results = await adapter.run_batch([MockRequest()])
-        assert len(results) == 1
+    adapter = AsgiAdapter(app)
+    results = await adapter.run_batch([MockRequest()])
+    assert len(results) == 1
+    assert results[0].status == 200
+    assert results[0].body == b"ok"
+
+
+@pytest.mark.anyio
+async def test_asgi_adapter_batch_of_five() -> None:
+    from vertebra.server._asgi._adapter import AsgiAdapter
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        body = scope["path"].encode()
+        await send({"type": "http.response.body", "body": body})
+
+    adapter = AsgiAdapter(app)
+    requests = [MockRequest(path=f"/p{i}") for i in range(5)]
+    results = await adapter.run_batch(requests)
+    assert len(results) == 5
+    for i, r in enumerate(results):
+        assert r.status == 200
+        assert r.body == f"/p{i}".encode()
+
+
+@pytest.mark.anyio
+async def test_asgi_adapter_failing_task_returns_500() -> None:
+    from vertebra.server._asgi._adapter import AsgiAdapter
+
+    async def app(scope, receive, send):
+        if scope["path"] == "/fail":
+            raise ValueError("boom")
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    adapter = AsgiAdapter(app)
+    requests = [MockRequest(path="/ok"), MockRequest(path="/fail"), MockRequest(path="/ok2")]
+    results = await adapter.run_batch(requests)
+    assert results[0].status == 200
+    assert results[1].status == 500
+    assert results[2].status == 200
+
+
+def test_asgi_runner_synchronous_interface() -> None:
+    from vertebra.server._asgi._runner import AsgiRunner
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"sync"})
+
+    runner = AsgiRunner(app)
+    try:
+        results = runner([MockRequest()])
         assert results[0].status == 200
-        assert results[0].body == b"ok"
-
-    @pytest.mark.anyio
-    async def test_batch_of_five(self) -> None:
-        from vertebra.server._asgi._adapter import AsgiAdapter
-
-        async def app(scope, receive, send):
-            await send({"type": "http.response.start", "status": 200, "headers": []})
-            body = scope["path"].encode()
-            await send({"type": "http.response.body", "body": body})
-
-        adapter = AsgiAdapter(app)
-        requests = [MockRequest(path=f"/p{i}") for i in range(5)]
-        results = await adapter.run_batch(requests)
-        assert len(results) == 5
-        for i, r in enumerate(results):
-            assert r.status == 200
-            assert r.body == f"/p{i}".encode()
-
-    @pytest.mark.anyio
-    async def test_failing_task_returns_500(self) -> None:
-        from vertebra.server._asgi._adapter import AsgiAdapter
-
-        async def app(scope, receive, send):
-            if scope["path"] == "/fail":
-                raise ValueError("boom")
-            await send({"type": "http.response.start", "status": 200, "headers": []})
-            await send({"type": "http.response.body", "body": b"ok"})
-
-        adapter = AsgiAdapter(app)
-        requests = [MockRequest(path="/ok"), MockRequest(path="/fail"), MockRequest(path="/ok2")]
-        results = await adapter.run_batch(requests)
-        assert results[0].status == 200
-        assert results[1].status == 500
-        assert results[2].status == 200
-
-
-class TestAsgiRunner:
-    def test_synchronous_interface(self) -> None:
-        from vertebra.server._asgi._runner import AsgiRunner
-
-        async def app(scope, receive, send):
-            await send({"type": "http.response.start", "status": 200, "headers": []})
-            await send({"type": "http.response.body", "body": b"sync"})
-
-        runner = AsgiRunner(app)
-        try:
-            results = runner([MockRequest()])
-            assert results[0].status == 200
-            assert results[0].body == b"sync"
-        finally:
-            runner.close()
+        assert results[0].body == b"sync"
+    finally:
+        runner.close()
 
 
 # --- Extensions ---
 
 
-class TestAsgiExtensions:
-    def test_compile_guard_pattern(self) -> None:
-        from vertebra.server._asgi._extensions import compile_guard_pattern
+def test_asgi_extensions_compile_guard_pattern() -> None:
+    from vertebra.server._asgi._extensions import compile_guard_pattern
 
-        pat = compile_guard_pattern("/items/{item_id}")
-        assert pat.match("/items/42")
-        assert pat.match("/items/abc")
-        assert not pat.match("/items/42/sub")
+    pat = compile_guard_pattern("/items/{item_id}")
+    assert pat.match("/items/42")
+    assert pat.match("/items/abc")
+    assert not pat.match("/items/42/sub")
 
-    def test_is_static_route(self) -> None:
-        from vertebra.server._asgi._extensions import is_static_route
 
-        assert is_static_route("/hello")
-        assert not is_static_route("/items/{id}")
-        assert not is_static_route("/items/:id")
+def test_asgi_extensions_is_static_route() -> None:
+    from vertebra.server._asgi._extensions import is_static_route
 
-    def test_header_filter(self) -> None:
-        from vertebra.server._asgi._extensions import HeaderFilter
+    assert is_static_route("/hello")
+    assert not is_static_route("/items/{id}")
+    assert not is_static_route("/items/:id")
 
-        f = HeaderFilter("content-type", "application/json")
-        assert f.matches([(b"content-type", b"application/json")])
-        assert not f.matches([(b"content-type", b"text/html")])
 
-    def test_register_and_get_extensions(self) -> None:
-        from vertebra.server._asgi._extensions import _EXTENSIONS, get_extensions, register_extension
+def test_asgi_extensions_header_filter() -> None:
+    from vertebra.server._asgi._extensions import HeaderFilter
 
-        orig_len = len(_EXTENSIONS)
-        sentinel = object()
-        register_extension(sentinel)
-        exts = get_extensions()
-        assert sentinel in exts
-        _EXTENSIONS.pop()  # cleanup
-        assert len(_EXTENSIONS) == orig_len
+    f = HeaderFilter("content-type", "application/json")
+    assert f.matches([(b"content-type", b"application/json")])
+    assert not f.matches([(b"content-type", b"text/html")])
+
+
+def test_asgi_extensions_register_and_get_extensions() -> None:
+    from vertebra.server._asgi._extensions import _EXTENSIONS, get_extensions, register_extension
+
+    orig_len = len(_EXTENSIONS)
+    sentinel = object()
+    register_extension(sentinel)
+    exts = get_extensions()
+    assert sentinel in exts
+    _EXTENSIONS.pop()  # cleanup
+    assert len(_EXTENSIONS) == orig_len
 
 
 # --- Ch2: ASGI fast-path optimizations ---
 
 
-class TestAsgiScopeOptimizations:
-    """Verify scope construction optimizations (Ch2: asgi-fast-path)."""
+def test_asgi_scope_optimizations_asgi_version_shared_across_scopes() -> None:
+    """The asgi version dict should be the same object (not copied)."""
+    from vertebra.server._asgi._scope import build_scope
 
-    def test_asgi_version_shared_across_scopes(self) -> None:
-        """The asgi version dict should be the same object (not copied)."""
-        from vertebra.server._asgi._scope import build_scope
-
-        s1 = build_scope(MockRequest())
-        s2 = build_scope(MockRequest())
-        assert s1["asgi"] is s2["asgi"]
-
-    def test_server_none_when_no_host(self) -> None:
-        from vertebra.server._asgi._scope import build_scope
-
-        scope = build_scope(MockRequest())
-        assert scope["server"] is None
-
-    def test_client_none_when_no_host(self) -> None:
-        from vertebra.server._asgi._scope import build_scope
-
-        scope = build_scope(MockRequest())
-        assert scope["client"] is None
+    s1 = build_scope(MockRequest())
+    s2 = build_scope(MockRequest())
+    assert s1["asgi"] is s2["asgi"]
 
 
-class TestSendCollectorFastPath:
-    """Verify SendCollector single-chunk optimization."""
+@pytest.mark.parametrize(
+    "key",
+    ["server", "client"],
+)
+def test_asgi_scope_optimizations_none_when_no_host(key: str) -> None:
+    from vertebra.server._asgi._scope import build_scope
 
-    @pytest.mark.anyio
-    async def test_single_chunk_no_list(self) -> None:
-        """Single-chunk response should not allocate _extra_chunks list."""
-        from vertebra.server._asgi._queues import SendCollector
-
-        c = SendCollector()
-        await c({"type": "http.response.start", "status": 200, "headers": []})
-        await c({"type": "http.response.body", "body": b"hello"})
-        assert c._extra_chunks is None  # noqa: SLF001
-        assert c.response.body == b"hello"
-
-    @pytest.mark.anyio
-    async def test_multi_chunk_joins(self) -> None:
-        """Multiple chunks should accumulate and join correctly."""
-        from vertebra.server._asgi._queues import SendCollector
-
-        c = SendCollector()
-        await c({"type": "http.response.start", "status": 200, "headers": []})
-        await c({"type": "http.response.body", "body": b"abc"})
-        await c({"type": "http.response.body", "body": b"de"})
-        assert c._extra_chunks is not None  # noqa: SLF001
-        assert c.response.body == b"abcde"
+    scope = build_scope(MockRequest())
+    assert scope[key] is None
 
 
-class TestGatherAdapter:
-    """Verify gather()-based adapter preserves error isolation."""
+@pytest.mark.anyio
+async def test_send_collector_fast_path_single_chunk_no_list() -> None:
+    """Single-chunk response should not allocate _extra_chunks list."""
+    from vertebra.server._asgi._queues import SendCollector
 
-    @pytest.mark.anyio
-    async def test_one_failure_does_not_cancel_others(self) -> None:
-        from vertebra.server._asgi._adapter import AsgiAdapter
+    c = SendCollector()
+    await c({"type": "http.response.start", "status": 200, "headers": []})
+    await c({"type": "http.response.body", "body": b"hello"})
+    assert c._extra_chunks is None  # noqa: SLF001
+    assert c.response.body == b"hello"
 
-        call_count = 0
 
-        async def app(scope, receive, send):
-            nonlocal call_count
-            call_count += 1
-            if scope["path"] == "/fail":
-                msg = "boom"
-                raise RuntimeError(msg)
-            await send({"type": "http.response.start", "status": 200, "headers": []})
-            await send({"type": "http.response.body", "body": b"ok"})
+@pytest.mark.anyio
+async def test_send_collector_fast_path_multi_chunk_joins() -> None:
+    """Multiple chunks should accumulate and join correctly."""
+    from vertebra.server._asgi._queues import SendCollector
 
-        adapter = AsgiAdapter(app)
-        reqs = [
-            MockRequest(path="/ok", request_id=1),
-            MockRequest(path="/fail", request_id=2),
-            MockRequest(path="/ok", request_id=3),
-        ]
-        results = await adapter.run_batch(reqs)
+    c = SendCollector()
+    await c({"type": "http.response.start", "status": 200, "headers": []})
+    await c({"type": "http.response.body", "body": b"abc"})
+    await c({"type": "http.response.body", "body": b"de"})
+    assert c._extra_chunks is not None  # noqa: SLF001
+    assert c.response.body == b"abcde"
 
-        assert call_count == 3
-        assert results[0].status == 200
-        assert results[1].status == 500
-        assert results[2].status == 200
+
+@pytest.mark.anyio
+async def test_gather_adapter_one_failure_does_not_cancel_others() -> None:
+    from vertebra.server._asgi._adapter import AsgiAdapter
+
+    call_count = 0
+
+    async def app(scope, receive, send):
+        nonlocal call_count
+        call_count += 1
+        if scope["path"] == "/fail":
+            msg = "boom"
+            raise RuntimeError(msg)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    adapter = AsgiAdapter(app)
+    reqs = [
+        MockRequest(path="/ok", request_id=1),
+        MockRequest(path="/fail", request_id=2),
+        MockRequest(path="/ok", request_id=3),
+    ]
+    results = await adapter.run_batch(reqs)
+
+    assert call_count == 3
+    assert results[0].status == 200
+    assert results[1].status == 500
+    assert results[2].status == 200
