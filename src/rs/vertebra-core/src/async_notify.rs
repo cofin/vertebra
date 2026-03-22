@@ -38,7 +38,7 @@ use tokio::io::Interest;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// let notifier = AsyncNotifier::new()?;
 ///
 /// // Producer side (sync)

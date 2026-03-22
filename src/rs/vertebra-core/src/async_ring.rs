@@ -7,8 +7,8 @@
 //!
 //! # Usage Pattern
 //!
-//! ```ignore
-//! // In Python (via PyO3):
+//! ```python
+//! # In Python (via PyO3):
 //! ring = AsyncRing(65536, 1024)
 //! fd = ring.notifier_fd()
 //! loop.add_reader(fd, on_readable)

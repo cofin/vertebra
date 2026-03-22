@@ -25,29 +25,30 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 ///
 /// # Usage
 ///
-/// ```ignore
-/// let notifier = Notifier::new()?;
+/// ```no_run
+/// use vertebra_core::notify::Notifier;
+/// use std::os::fd::AsRawFd;
+///
+/// let notifier = Notifier::new().unwrap();
 /// let fd = notifier.as_raw_fd();  // Register with event loop
 ///
 /// // Producer side:
-/// notifier.notify()?;
+/// notifier.notify().unwrap();
 ///
 /// // Consumer side (after poll returns readable):
-/// notifier.clear()?;
+/// notifier.clear().unwrap();
 /// ```
 ///
 /// # Cross-Process IPC
 ///
-/// ```ignore
+/// ```text
 /// // Parent (supervisor):
 /// let notifier = Notifier::new()?;
 /// env::set_var("VERTEBRA_REQ_NOTIFY_FD", notifier.as_raw_fd().to_string());
-/// env::set_var("VERTEBRA_RESP_NOTIFY_FD", notifier.as_raw_fd().to_string()); // Same FD on Linux
 /// fork_child();
 ///
 /// // Child:
 /// let req_fd = env::var("VERTEBRA_REQ_NOTIFY_FD")?.parse()?;
-/// let resp_fd = env::var("VERTEBRA_RESP_NOTIFY_FD")?.parse()?;
 /// let notifier = unsafe { Notifier::from_raw_fd(req_fd) };
 /// ```
 pub struct Notifier {
