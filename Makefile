@@ -103,10 +103,11 @@ ts-lint:                                            ## Lint TS package with auto
 	@echo "${OK} TS lint complete"
 
 .PHONY: dev
-dev:                                                ## Install native extension in debug mode for development
+dev:                                                ## Install native extensions in debug mode for development
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && cargo build --workspace --exclude vertebra-py)
+	@(cd src/rs && cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler)
 	@uv run maturin develop --uv 2>&1 | grep -E "Compiling|Finished|Built wheel|Installed|error\[" | tail -3
+	@uv run maturin develop --uv -m src/rs/vertebra-bundler/Cargo.toml 2>&1 | grep -E "Compiling|Finished|Built wheel|Installed|error\[" | tail -3
 
 # =============================================================================
 # Build
@@ -114,8 +115,9 @@ dev:                                                ## Install native extension 
 .PHONY: build
 build: ts-build                                     ## Build optimized release binaries + native extension + TS client
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && cargo build --workspace --exclude vertebra-py --release)
+	@(cd src/rs && cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --release)
 	@uv run maturin develop --uv -r 2>&1 | grep -E "Compiling|Finished|Built wheel|Installed|error\[" | tail -3
+	@uv run maturin develop --uv -r -m src/rs/vertebra-bundler/Cargo.toml 2>&1 | grep -E "Compiling|Finished|Built wheel|Installed|error\[" | tail -3
 	@uv build
 	@echo "${OK} Build complete"
 
