@@ -1,8 +1,10 @@
 import { NetworkError, TimeoutError, throwParsedError } from "./errors";
 import type { RouteResponse, VertebraConfig } from "./types";
+import { VertebraWebSocket } from "./ws";
 
 export class VertebraClient {
   private config: Required<VertebraConfig>;
+  private ws: VertebraWebSocket | null = null;
 
   constructor(config: VertebraConfig) {
     this.config = {
@@ -107,6 +109,17 @@ export class VertebraClient {
     }
 
     throw lastError ?? new NetworkError("Request failed after retries");
+  }
+
+  /**
+   * Subscribe to a WebSocket channel. Returns an unsubscribe function.
+   * Lazy-creates the WebSocket connection on first subscription.
+   */
+  subscribe<T>(channel: string, callback: (data: T) => void): () => void {
+    if (!this.ws) {
+      this.ws = new VertebraWebSocket(this.config.wsURL);
+    }
+    return this.ws.subscribe(channel, callback);
   }
 
   /**
