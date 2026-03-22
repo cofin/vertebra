@@ -29,9 +29,6 @@ export default defineConfig({
     "svelte",
     "@angular/core",
     "vite",
-    "@inertiajs/react",
-    "@inertiajs/vue3",
-    "@inertiajs/svelte",
   ],
   async onSuccess() {
     // Custom hook to sync the build to the Python package bundle folder
