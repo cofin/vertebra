@@ -21,10 +21,13 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 jsonwebtoken = { workspace = true }
+lz4_flex = { workspace = true, optional = true }
 rmp-serde = { workspace = true }
+zstd = { workspace = true, optional = true }
 
 [features]
-default = []
+default = ["compression"]
+compression = ["dep:lz4_flex", "dep:zstd"]
 macos-ulock = []
 
 [target.'cfg(unix)'.dependencies]
