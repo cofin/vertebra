@@ -221,6 +221,7 @@ mod tests {
                 handler_id: 1,
                 method_tag: 0,
                 http_version_tag: 1,
+                flags: 0,
                 path: "/test".to_owned(),
                 query: None,
                 headers_mp: bytes::Bytes::new(),

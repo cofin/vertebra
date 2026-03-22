@@ -22,6 +22,8 @@ pub struct PendingRequest {
     pub method_tag: u8,
     /// HTTP version tag (0=1.0, 1=1.1, 2=2, 3=3).
     pub http_version_tag: u8,
+    /// Protocol flags (see `vertebra_core::protocol::flags`).
+    pub flags: u32,
     /// Request URI path.
     pub path: String,
     /// Query string, if present.

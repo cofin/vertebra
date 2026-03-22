@@ -78,6 +78,7 @@ pub async fn handle(
         handler_id,
         method_tag: method_tag(&method),
         http_version_tag: version_tag(parts.version),
+        flags: vertebra_core::protocol::flags::NONE,
         path: path.to_owned(),
         query: uri.query().map(str::to_owned),
         headers_mp,
