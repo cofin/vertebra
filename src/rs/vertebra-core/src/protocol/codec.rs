@@ -236,5 +236,101 @@ mod tests {
             let out = decompress(data, CompressionCodec::None).unwrap();
             assert_eq!(out, data);
         }
+
+        #[test]
+        fn double_compress_roundtrips() {
+            // Compressing already-compressed data should still round-trip
+            let data = b"double compress test data ".repeat(10);
+            for codec in [CompressionCodec::Lz4, CompressionCodec::Zstd] {
+                let first = compress(&data, codec);
+                let second = compress(&first, codec);
+                let d1 = decompress(&second, codec).unwrap();
+                let d2 = decompress(&d1, codec).unwrap();
+                assert_eq!(d2, data, "double compress roundtrip failed for {codec:?}");
+            }
+        }
+    }
+
+    // --- Combined flag tests ---
+
+    #[test]
+    fn priority_plus_compressed_flags() {
+        let f = flags::PRIORITY | CompressionCodec::Zstd.to_flags();
+        assert!(f & flags::PRIORITY != 0);
+        assert!(f & flags::COMPRESSED != 0);
+        assert_eq!(CompressionCodec::from_flags(f), CompressionCodec::Zstd);
+    }
+
+    #[test]
+    fn fnf_plus_priority_flags() {
+        let f = flags::FIRE_AND_FORGET | flags::PRIORITY;
+        assert!(f & flags::FIRE_AND_FORGET != 0);
+        assert!(f & flags::PRIORITY != 0);
+        assert!(f & flags::COMPRESSED == 0);
+        assert_eq!(CompressionCodec::from_flags(f), CompressionCodec::None);
+    }
+
+    #[test]
+    fn all_custom_flags_combined() {
+        let f = flags::PRIORITY
+            | flags::FIRE_AND_FORGET
+            | CompressionCodec::Lz4.to_flags();
+        assert!(f & flags::PRIORITY != 0);
+        assert!(f & flags::FIRE_AND_FORGET != 0);
+        assert!(f & flags::COMPRESSED != 0);
+        assert_eq!(CompressionCodec::from_flags(f), CompressionCodec::Lz4);
+        // Existing flags (BATCH, OK, ERROR) should not be set
+        assert!(f & flags::BATCH == 0);
+        assert!(f & flags::OK == 0);
+        assert!(f & flags::ERROR == 0);
+    }
+
+    #[test]
+    fn codec_to_flags_does_not_set_other_flags() {
+        let f = CompressionCodec::Zstd.to_flags();
+        assert!(f & flags::PRIORITY == 0);
+        assert!(f & flags::FIRE_AND_FORGET == 0);
+        assert!(f & flags::BATCH == 0);
+    }
+
+    // --- Property tests ---
+
+    #[cfg(feature = "compression")]
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn lz4_arbitrary_roundtrip(data in proptest::collection::vec(any::<u8>(), 0..8192)) {
+                let compressed = compress(&data, CompressionCodec::Lz4);
+                let decompressed = decompress(&compressed, CompressionCodec::Lz4).unwrap();
+                prop_assert_eq!(decompressed, data);
+            }
+
+            #[test]
+            fn zstd_arbitrary_roundtrip(data in proptest::collection::vec(any::<u8>(), 0..8192)) {
+                let compressed = compress(&data, CompressionCodec::Zstd);
+                let decompressed = decompress(&compressed, CompressionCodec::Zstd).unwrap();
+                prop_assert_eq!(decompressed, data);
+            }
+
+            #[test]
+            fn flag_roundtrip_preserves_codec(codec_bits in 0u32..4) {
+                let codec = match codec_bits {
+                    0 => CompressionCodec::None,
+                    1 => CompressionCodec::Lz4,
+                    2 => CompressionCodec::Zstd,
+                    _ => CompressionCodec::Lz4, // unknown defaults to lz4
+                };
+                let flags = codec.to_flags();
+                if codec == CompressionCodec::None {
+                    prop_assert_eq!(flags, 0);
+                } else {
+                    let recovered = CompressionCodec::from_flags(flags);
+                    prop_assert_eq!(recovered, codec);
+                }
+            }
+        }
     }
 }

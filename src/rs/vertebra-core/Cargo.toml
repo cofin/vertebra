@@ -65,3 +65,8 @@ harness = false
 [[bench]]
 name = "ring_throughput"
 harness = false
+
+[[bench]]
+name = "codec"
+harness = false
+required-features = ["compression"]
