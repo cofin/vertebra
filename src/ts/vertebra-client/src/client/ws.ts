@@ -51,8 +51,8 @@ export class VertebraWebSocket {
     }
 
     return () => {
-      subs!.delete(callback as Callback);
-      if (subs!.size === 0) {
+      subs?.delete(callback as Callback);
+      if (subs?.size === 0) {
         this.subscriptions.delete(channel);
       }
       // Last subscription removed — disconnect
@@ -125,10 +125,7 @@ export class VertebraWebSocket {
   private scheduleReconnect(): void {
     if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) return;
 
-    const delay = Math.min(
-      RECONNECT_BASE_MS * 2 ** this.reconnectAttempts + Math.random() * 1000,
-      RECONNECT_MAX_MS,
-    );
+    const delay = Math.min(RECONNECT_BASE_MS * 2 ** this.reconnectAttempts + Math.random() * 1000, RECONNECT_MAX_MS);
     this.reconnectAttempts++;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;

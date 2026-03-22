@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -24,10 +25,8 @@ def broadcast_hmr_event(event: dict[str, Any]) -> None:
     queues are full (non-blocking).
     """
     for queue in _ws_clients.copy():
-        try:
+        with contextlib.suppress(asyncio.QueueFull):
             queue.put_nowait(event)
-        except asyncio.QueueFull:
-            pass
 
 
 class DevMiddleware:
@@ -205,9 +204,7 @@ class DevMiddleware:
                                 await send(
                                     {
                                         "type": "websocket.send",
-                                        "text": json.dumps(
-                                            {"type": "pong", "timestamp": time.time()}
-                                        ),
+                                        "text": json.dumps({"type": "pong", "timestamp": time.time()}),
                                     }
                                 )
                         except (json.JSONDecodeError, TypeError):

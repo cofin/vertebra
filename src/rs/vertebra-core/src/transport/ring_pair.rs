@@ -60,9 +60,9 @@ impl ResponseData {
         }
 
         let headers_raw = data[RESPONSE_HEADER_SIZE..RESPONSE_HEADER_SIZE + headers_len].to_vec();
-        let body =
-            data[RESPONSE_HEADER_SIZE + headers_len..RESPONSE_HEADER_SIZE + headers_len + body_len]
-                .to_vec();
+        let body = data
+            [RESPONSE_HEADER_SIZE + headers_len..RESPONSE_HEADER_SIZE + headers_len + body_len]
+            .to_vec();
 
         Ok(Self {
             correlation_id,

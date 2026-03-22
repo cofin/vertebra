@@ -42,10 +42,8 @@ export function useQuery<TInput = any, TOutput = any>(
   const promise = useMemo(() => {
     if (!enabled) return Promise.resolve(null);
     const key = QueryCache.stableKey(method, path, input);
-    return queryCache.getOrCreate(key, staleTime, () =>
-      client.call<TInput, TOutput>(method, path, input, options),
-    );
-  }, [client, method, path, JSON.stringify(input), enabled, staleTime]);
+    return queryCache.getOrCreate(key, staleTime, () => client.call<TInput, TOutput>(method, path, input, options));
+  }, [client, method, path, enabled, staleTime, input, options]);
 
   const data = use(promise);
 
@@ -93,4 +91,4 @@ export function useInvalidateQueries() {
   }, []);
 }
 
-export { queryCache, QueryCache };
+export { QueryCache, queryCache };

@@ -122,7 +122,5 @@ class TestHandleWs:
         await middleware.handle_ws({}, receive, send)
 
         calls = [c.args[0] for c in send.call_args_list]
-        pong_calls = [
-            c for c in calls if c.get("type") == "websocket.send" and "pong" in c.get("text", "")
-        ]
+        pong_calls = [c for c in calls if c.get("type") == "websocket.send" and "pong" in c.get("text", "")]
         assert len(pong_calls) == 1

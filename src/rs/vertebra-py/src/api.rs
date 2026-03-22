@@ -83,8 +83,7 @@ pub fn init_transport(
 pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<VertebraBatch>> {
     // SHM path: poll from SPSC ring
     if let Some(transport) = SHM_TRANSPORT.get() {
-        let snapshot =
-            py.detach(|| transport.poll_batch(Duration::from_millis(timeout_ms)));
+        let snapshot = py.detach(|| transport.poll_batch(Duration::from_millis(timeout_ms)));
         return Ok(snapshot.map(|s| VertebraBatch { snapshot: s }));
     }
 
@@ -150,6 +149,53 @@ pub fn submit_results(py: Python<'_>, responses: Vec<Py<VertebraResponse>>) -> P
     })?;
 
     Ok(())
+}
+
+/// Get the request notification FD for asyncio `loop.add_reader()`.
+///
+/// Only available in SHM mode. Returns -1 if not in SHM mode.
+#[pyfunction]
+#[pyo3(name = "get_request_notify_fd")]
+pub fn get_request_notify_fd() -> i32 {
+    #[cfg(unix)]
+    {
+        if let Some(transport) = SHM_TRANSPORT.get() {
+            if let vertebra_core::transport::Backend::SharedMemory(rp) = transport.backend() {
+                return rp.request_notifier.as_raw_fd();
+            }
+        }
+    }
+    -1
+}
+
+/// Clear the request notification counter after an `add_reader` callback.
+///
+/// Must be called after reading from the request ring in async mode
+/// to prevent spurious wakeups.
+#[pyfunction]
+#[pyo3(name = "clear_request_notification")]
+pub fn clear_request_notification() -> PyResult<()> {
+    if let Some(transport) = SHM_TRANSPORT.get() {
+        if let vertebra_core::transport::Backend::SharedMemory(rp) = transport.backend() {
+            rp.request_notifier.clear().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("clear failed: {e}"))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Non-blocking poll for the next batch (for use in `add_reader` callbacks).
+///
+/// Returns `None` immediately if no data is available.
+#[pyfunction]
+#[pyo3(name = "try_get_batch")]
+pub fn try_get_batch() -> PyResult<Option<VertebraBatch>> {
+    if let Some(transport) = SHM_TRANSPORT.get() {
+        let snapshot = transport.poll_batch(Duration::ZERO);
+        return Ok(snapshot.map(|s| VertebraBatch { snapshot: s }));
+    }
+    Ok(None)
 }
 
 /// Encode headers into Vertebra's compact binary format.

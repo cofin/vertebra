@@ -126,8 +126,7 @@ impl ShmDispatcher {
             let correlation_id = if is_fnf {
                 0
             } else {
-                let worker_idx =
-                    self.next_worker.load(Ordering::Relaxed) % worker_count;
+                let worker_idx = self.next_worker.load(Ordering::Relaxed) % worker_count;
                 let mut slab = self.correlation.lock().unwrap();
                 match slab.insert(reply, worker_idx as u32) {
                     Some(id) => id,
@@ -195,7 +194,10 @@ impl ShmDispatcher {
 
     /// Get all ring pairs (for the response reader).
     pub fn ring_pairs(&self) -> Vec<Arc<RingPair>> {
-        self.workers.iter().map(|w| Arc::clone(&w.ring_pair)).collect()
+        self.workers
+            .iter()
+            .map(|w| Arc::clone(&w.ring_pair))
+            .collect()
     }
 }
 
@@ -437,7 +439,10 @@ impl Dispatcher {
                 if let Some(shm) = &self.inner.shm_dispatcher {
                     let mut slab = shm.correlation().lock().unwrap();
                     if !slab.complete(correlation_id, response) {
-                        debug!(id = correlation_id, "no pending SHM request for correlation ID");
+                        debug!(
+                            id = correlation_id,
+                            "no pending SHM request for correlation ID"
+                        );
                     }
                 }
             }
@@ -569,7 +574,10 @@ mod tests {
                 count += 1;
             }
             total += count;
-            assert!(count >= 1 && count <= 3, "worker got {count} requests, expected ~2");
+            assert!(
+                (1..=3).contains(&count),
+                "worker got {count} requests, expected ~2"
+            );
         }
         assert_eq!(total, 8);
     }

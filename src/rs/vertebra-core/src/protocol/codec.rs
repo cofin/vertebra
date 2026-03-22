@@ -91,10 +91,8 @@ pub fn decompress(data: &[u8], codec: CompressionCodec) -> Result<Vec<u8>, Codec
         CompressionCodec::Lz4 => {
             lz4_flex::decompress_size_prepended(data).map_err(|e| CodecError::Lz4(e.to_string()))
         }
-        CompressionCodec::Zstd => {
-            zstd::bulk::decompress(data, MAX_DECOMPRESS_SIZE)
-                .map_err(|e| CodecError::Zstd(e.to_string()))
-        }
+        CompressionCodec::Zstd => zstd::bulk::decompress(data, MAX_DECOMPRESS_SIZE)
+            .map_err(|e| CodecError::Zstd(e.to_string())),
     }
 }
 
@@ -157,7 +155,10 @@ mod tests {
     fn apply_to_flags_preserves_other_bits() {
         let existing = flags::PRIORITY | flags::BATCH;
         let result = CompressionCodec::Zstd.apply_to_flags(existing);
-        assert!(result & flags::PRIORITY != 0, "PRIORITY should be preserved");
+        assert!(
+            result & flags::PRIORITY != 0,
+            "PRIORITY should be preserved"
+        );
         assert!(result & flags::BATCH != 0, "BATCH should be preserved");
         assert!(result & flags::COMPRESSED != 0, "COMPRESSED should be set");
         assert_eq!(CompressionCodec::from_flags(result), CompressionCodec::Zstd);
@@ -167,8 +168,14 @@ mod tests {
     fn apply_none_clears_compression_bits() {
         let existing = flags::PRIORITY | CompressionCodec::Lz4.to_flags();
         let result = CompressionCodec::None.apply_to_flags(existing);
-        assert!(result & flags::COMPRESSED == 0, "COMPRESSED should be cleared");
-        assert!(result & flags::PRIORITY != 0, "PRIORITY should be preserved");
+        assert!(
+            result & flags::COMPRESSED == 0,
+            "COMPRESSED should be cleared"
+        );
+        assert!(
+            result & flags::PRIORITY != 0,
+            "PRIORITY should be preserved"
+        );
     }
 
     // --- Compress/decompress round-trips ---
@@ -202,7 +209,11 @@ mod tests {
 
         #[test]
         fn roundtrip_empty_payload() {
-            for codec in [CompressionCodec::None, CompressionCodec::Lz4, CompressionCodec::Zstd] {
+            for codec in [
+                CompressionCodec::None,
+                CompressionCodec::Lz4,
+                CompressionCodec::Zstd,
+            ] {
                 let compressed = compress(b"", codec);
                 let decompressed = decompress(&compressed, codec).unwrap();
                 assert_eq!(decompressed, b"", "empty roundtrip failed for {codec:?}");
@@ -272,9 +283,7 @@ mod tests {
 
     #[test]
     fn all_custom_flags_combined() {
-        let f = flags::PRIORITY
-            | flags::FIRE_AND_FORGET
-            | CompressionCodec::Lz4.to_flags();
+        let f = flags::PRIORITY | flags::FIRE_AND_FORGET | CompressionCodec::Lz4.to_flags();
         assert!(f & flags::PRIORITY != 0);
         assert!(f & flags::FIRE_AND_FORGET != 0);
         assert!(f & flags::COMPRESSED != 0);

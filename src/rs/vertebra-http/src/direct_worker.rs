@@ -291,7 +291,7 @@ mod tests {
                     headers_mp: Bytes::new(),
                     body: Bytes::new(),
                     flags: 0,
-                reply: Some(reply_tx),
+                    reply: Some(reply_tx),
                 }],
             })
             .await

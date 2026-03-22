@@ -44,7 +44,10 @@ fn tls_acceptor_from_valid_config() {
     };
 
     let acceptor = TlsAcceptor::from_config(&config);
-    assert!(acceptor.is_ok(), "TlsAcceptor should build from valid PEM files");
+    assert!(
+        acceptor.is_ok(),
+        "TlsAcceptor should build from valid PEM files"
+    );
 }
 
 #[test]

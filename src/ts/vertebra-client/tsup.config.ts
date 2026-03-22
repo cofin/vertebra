@@ -23,13 +23,7 @@ export default defineConfig({
   sourcemap: true,
   minify: false,
   treeshake: true,
-  external: [
-    "react",
-    "vue",
-    "svelte",
-    "@angular/core",
-    "vite",
-  ],
+  external: ["react", "vue", "svelte", "@angular/core", "vite"],
   async onSuccess() {
     // Custom hook to sync the build to the Python package bundle folder
     // This allows distributing the library within the Python package.

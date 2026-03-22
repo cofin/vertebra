@@ -632,7 +632,15 @@ mod tests {
             let bridge = make_bridge_with_codec(CompressionCodec::Zstd);
             let body = "repeating data for compression ".repeat(50);
             bridge
-                .push_request(&wr(1, 43, 2, b"/echo", Some(b"q=1"), b"hdr", body.as_bytes()))
+                .push_request(&wr(
+                    1,
+                    43,
+                    2,
+                    b"/echo",
+                    Some(b"q=1"),
+                    b"hdr",
+                    body.as_bytes(),
+                ))
                 .unwrap();
             bridge.seal_batch().unwrap();
 

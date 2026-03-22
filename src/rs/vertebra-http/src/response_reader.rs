@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, RawFd};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
@@ -54,7 +54,10 @@ pub async fn run_response_reader(
         return;
     }
 
-    debug!(workers = workers.len(), "response reader started (AsyncFd mode)");
+    debug!(
+        workers = workers.len(),
+        "response reader started (AsyncFd mode)"
+    );
 
     // Register each worker's response notification FD with Tokio
     let mut async_fds: Vec<(usize, AsyncFd<NotifierFd>)> = Vec::with_capacity(workers.len());
@@ -203,7 +206,10 @@ pub async fn run_response_reader(
         return;
     }
 
-    debug!(workers = workers.len(), "response reader started (polling mode)");
+    debug!(
+        workers = workers.len(),
+        "response reader started (polling mode)"
+    );
     let poll_interval = Duration::from_micros(100);
 
     loop {

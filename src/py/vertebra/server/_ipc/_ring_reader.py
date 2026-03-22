@@ -166,6 +166,32 @@ def decode_headers(raw: bytes) -> list[tuple[str, str]]:
     return headers
 
 
+def parse_batch_from_slot(slot_data: "bytes | memoryview") -> list[RawRequest]:
+    """Parse a BatchSnapshot from the ring slot wire format.
+
+    Wire format (defined in vertebra-core/src/transport/mod.rs):
+        [batch_flags: u32]          — protocol flags
+        [node_count:  u32]          — number of TransportNodes
+        [slab_len:    u32]          — length of DataSlab bytes
+        [_pad:        u32]          — alignment padding
+        [nodes: TransportNode × N]  — fixed-size, offset-based
+        [slab_data: u8 × slab_len] — variable-length request data
+    """
+    if len(slot_data) < 16:
+        return []
+
+    _batch_flags, node_count, slab_len, _pad = struct.unpack_from("<IIII", slot_data)
+    header_size = 16
+    nodes_size = node_count * _NODE_SIZE
+
+    if len(slot_data) < header_size + nodes_size + slab_len:
+        return []
+
+    node_buf = slot_data[header_size : header_size + nodes_size]
+    slab_buf = slot_data[header_size + nodes_size : header_size + nodes_size + slab_len]
+    return parse_batch(node_buf, node_count, slab_buf)
+
+
 # Expose NODE_SIZE for external consumers
 NODE_SIZE = _NODE_SIZE
 
@@ -174,5 +200,6 @@ __all__ = (
     "RawRequest",
     "decode_headers",
     "parse_batch",
+    "parse_batch_from_slot",
     "parse_node",
 )

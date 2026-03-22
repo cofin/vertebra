@@ -42,10 +42,18 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(api::get_batch, m)?)?;
     m.add_function(wrap_pyfunction!(api::submit_results, m)?)?;
 
+    // SHM async helpers
+    m.add_function(wrap_pyfunction!(api::get_request_notify_fd, m)?)?;
+    m.add_function(wrap_pyfunction!(api::clear_request_notification, m)?)?;
+    m.add_function(wrap_pyfunction!(api::try_get_batch, m)?)?;
+
     // Protocol flags
     m.add("FLAGS_NONE", vertebra_core::protocol::flags::NONE)?;
     m.add("FLAGS_PRIORITY", vertebra_core::protocol::flags::PRIORITY)?;
-    m.add("FLAGS_COMPRESSED", vertebra_core::protocol::flags::COMPRESSED)?;
+    m.add(
+        "FLAGS_COMPRESSED",
+        vertebra_core::protocol::flags::COMPRESSED,
+    )?;
     m.add(
         "FLAGS_FIRE_AND_FORGET",
         vertebra_core::protocol::flags::FIRE_AND_FORGET,

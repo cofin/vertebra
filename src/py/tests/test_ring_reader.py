@@ -6,6 +6,7 @@ from vertebra.server._ipc._ring_reader import (
     NODE_SIZE,
     decode_headers,
     parse_batch,
+    parse_batch_from_slot,
     parse_node,
 )
 
@@ -190,3 +191,121 @@ class TestDecodeHeaders:
     def test_truncated_is_safe(self):
         buf = bytes([10, ord("a"), ord("b")])  # name_len=10 but only 2 bytes
         assert decode_headers(buf) == []
+
+
+class TestParseBatchFromSlot:
+    """Tests for the ring slot wire format parser."""
+
+    def test_empty_slot_too_short(self):
+        assert parse_batch_from_slot(b"") == []
+        assert parse_batch_from_slot(b"\x00" * 10) == []
+
+    def test_single_request_round_trip(self):
+        """Build a slot matching the Rust wire format and parse it."""
+        # Wire format: [flags:u32][node_count:u32][slab_len:u32][pad:u32][nodes][slab]
+        path = b"/api/users"
+        slab = bytearray()
+        path_off = len(slab)
+        slab.extend(path)
+
+        node = struct.pack(
+            _NODE_FMT,
+            0,  # GET
+            1,  # HTTP/1.1
+            42,  # handler_id
+            100,  # correlation_id
+            path_off,
+            len(path),
+            0, 0,  # no query
+            0, 0,  # no headers
+            0, 0,  # no body
+        )
+
+        # Build slot
+        header = struct.pack("<IIII", 0, 1, len(slab), 0)  # flags=0, 1 node
+        slot = header + node + bytes(slab)
+
+        requests = parse_batch_from_slot(slot)
+        assert len(requests) == 1
+        assert requests[0].path == "/api/users"
+        assert requests[0].handler_id == 42
+        assert requests[0].correlation_id == 100
+        assert requests[0].method == "GET"
+
+    def test_multi_request_batch(self):
+        """Multiple requests in a single slot."""
+        slab = bytearray()
+        nodes = bytearray()
+
+        for i in range(5):
+            path = f"/item/{i}".encode()
+            path_off = len(slab)
+            slab.extend(path)
+            nodes.extend(struct.pack(
+                _NODE_FMT,
+                1,  # POST
+                1,  # HTTP/1.1
+                i + 10,
+                i + 200,
+                path_off, len(path),
+                0, 0, 0, 0, 0, 0,
+            ))
+
+        header = struct.pack("<IIII", 0, 5, len(slab), 0)
+        slot = header + bytes(nodes) + bytes(slab)
+
+        requests = parse_batch_from_slot(slot)
+        assert len(requests) == 5
+        assert requests[2].path == "/item/2"
+        assert requests[2].handler_id == 12
+        assert all(r.method == "POST" for r in requests)
+
+    def test_with_body_and_headers(self):
+        """Slot with headers and body data."""
+        path = b"/upload"
+        headers_raw = b"\x0ccontent-type\x10\x00application/json"
+        body = b'{"data":"test"}'
+
+        slab = bytearray()
+        path_off = len(slab)
+        slab.extend(path)
+        hdr_off = len(slab)
+        slab.extend(headers_raw)
+        body_off = len(slab)
+        slab.extend(body)
+
+        node = struct.pack(
+            _NODE_FMT,
+            1, 1, 99, 500,
+            path_off, len(path),
+            0, 0,
+            hdr_off, len(headers_raw),
+            body_off, len(body),
+        )
+
+        header = struct.pack("<IIII", 0, 1, len(slab), 0)
+        slot = header + node + bytes(slab)
+
+        requests = parse_batch_from_slot(slot)
+        assert len(requests) == 1
+        assert requests[0].path == "/upload"
+        assert requests[0].body == body
+        assert requests[0].headers_raw == headers_raw
+
+    def test_truncated_slot_is_safe(self):
+        """Slot claims more data than available — should return empty."""
+        # Header claims 100 nodes but slot is too short
+        header = struct.pack("<IIII", 0, 100, 1000, 0)
+        assert parse_batch_from_slot(header) == []
+
+    def test_memoryview_input(self):
+        """Should accept memoryview for zero-copy from ring slots."""
+        path = b"/mv"
+        slab = bytearray(path)
+        node = struct.pack(_NODE_FMT, 0, 1, 1, 1, 0, len(path), 0, 0, 0, 0, 0, 0)
+        header = struct.pack("<IIII", 0, 1, len(slab), 0)
+        slot = header + node + bytes(slab)
+
+        requests = parse_batch_from_slot(memoryview(slot))
+        assert len(requests) == 1
+        assert requests[0].path == "/mv"

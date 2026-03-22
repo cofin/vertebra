@@ -210,14 +210,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             #[cfg(unix)]
             {
                 use vertebra_core::transport::ring_pair::RingPairConfig;
-                use vertebra_http::supervisor::SupervisorRingFactory;
                 use vertebra_http::response_reader;
+                use vertebra_http::supervisor::SupervisorRingFactory;
 
-                let factory = SupervisorRingFactory::new(
-                    config.workers.count,
-                    RingPairConfig::default(),
-                )
-                .expect("failed to create supervisor ring factory");
+                let factory =
+                    SupervisorRingFactory::new(config.workers.count, RingPairConfig::default())
+                        .expect("failed to create supervisor ring factory");
 
                 info!(
                     workers = config.workers.count,
@@ -232,7 +230,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 // Spawn response reader
                 let shutdown_token = tokio_util::sync::CancellationToken::new();
                 #[allow(unused_assignments)]
-                { let _ = &shm_shutdown; } // suppress warning
+                {
+                    let _ = &shm_shutdown;
+                } // suppress warning
                 tokio::spawn(response_reader::run_response_reader(
                     ring_pairs,
                     Arc::clone(&dispatcher),
@@ -294,10 +294,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use vertebra_http::supervisor::SupervisorRingFactory;
 
         info!("shutting down multi-process workers");
-        SupervisorRingFactory::shutdown_workers(
-            children,
-            std::time::Duration::from_secs(5),
-        );
+        SupervisorRingFactory::shutdown_workers(children, std::time::Duration::from_secs(5));
     }
 
     Ok(())

@@ -89,11 +89,7 @@ impl SupervisorRingFactory {
         process::set_parent_death_signal(&mut cmd);
 
         let child = cmd.spawn().map_err(SupervisorError::Spawn)?;
-        info!(
-            worker_id,
-            pid = child.id(),
-            "spawned worker process"
-        );
+        info!(worker_id, pid = child.id(), "spawned worker process");
 
         Ok(child)
     }

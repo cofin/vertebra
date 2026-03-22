@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use self::ring_pair::{RingPair, RingPairError, ResponseData};
+use self::ring_pair::{ResponseData, RingPair, RingPairError};
 use crate::channel::ChannelError;
 
 /// Tagged enum for supported transport backends.
@@ -27,6 +27,11 @@ pub struct Transport {
 }
 
 impl Transport {
+    /// Access the backend enum (for FD extraction in PyO3 layer).
+    pub fn backend(&self) -> &Backend {
+        &self.backend
+    }
+
     /// Create a new in-process transport.
     pub fn new_in_process(rx: crossbeam_channel::Receiver<Arc<BatchSnapshot>>) -> Self {
         Self {
@@ -699,11 +704,7 @@ impl BatchSnapshot {
             // Source data was written by serialize_into with the same layout.
             let dst = nodes.as_mut_ptr() as *mut u8;
             unsafe {
-                core::ptr::copy_nonoverlapping(
-                    data[BATCH_HEADER_SIZE..].as_ptr(),
-                    dst,
-                    node_bytes,
-                );
+                core::ptr::copy_nonoverlapping(data[BATCH_HEADER_SIZE..].as_ptr(), dst, node_bytes);
             }
         }
 
