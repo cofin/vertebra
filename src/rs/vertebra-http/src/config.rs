@@ -23,6 +23,29 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// Enable dev-only control surfaces such as HMR.
     pub dev_mode: bool,
+    /// Multi-process worker configuration.
+    pub workers: WorkerConfig,
+}
+
+/// Configuration for multi-process workers.
+#[derive(Debug, Clone)]
+pub struct WorkerConfig {
+    /// Number of worker processes (0 = in-process only, default).
+    pub count: usize,
+    /// Path to Python interpreter.
+    pub python_bin: String,
+    /// App import path (e.g. "myapp:app").
+    pub app_path: String,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            python_bin: "python3".to_string(),
+            app_path: String::new(),
+        }
+    }
 }
 
 /// TLS configuration.
@@ -45,6 +68,7 @@ impl Default for ServerConfig {
             keepalive_timeout: Duration::from_secs(75),
             max_connections: 0,
             dev_mode: false,
+            workers: WorkerConfig::default(),
         }
     }
 }
@@ -70,6 +94,35 @@ impl ServerConfig {
             std::env::var("VERTEBRA_DEV").as_deref(),
             Ok("1") | Ok("true") | Ok("TRUE") | Ok("True")
         );
+
+        // TLS config
+        let tls_cert = std::env::var("VERTEBRA_TLS_CERT").ok();
+        let tls_key = std::env::var("VERTEBRA_TLS_KEY").ok();
+        match (tls_cert, tls_key) {
+            (Some(cert), Some(key)) => {
+                config.tls = Some(TlsConfig {
+                    cert_path: cert.into(),
+                    key_path: key.into(),
+                });
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                eprintln!("[vertebra] warning: both VERTEBRA_TLS_CERT and VERTEBRA_TLS_KEY must be set for TLS");
+            }
+            _ => {}
+        }
+
+        // Worker config
+        if let Ok(count) = std::env::var("VERTEBRA_WORKERS") {
+            if let Ok(n) = count.parse::<usize>() {
+                config.workers.count = n;
+            }
+        }
+        if let Ok(python) = std::env::var("VERTEBRA_PYTHON_BIN") {
+            config.workers.python_bin = python;
+        }
+        if let Ok(app) = std::env::var("VERTEBRA_APP") {
+            config.workers.app_path = app;
+        }
 
         config
     }

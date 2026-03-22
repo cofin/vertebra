@@ -203,10 +203,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // --- Response reader ---
     spawn_response_reader(Arc::clone(&dispatcher));
 
-    // --- Python worker ---
+    // --- Worker spawning ---
+    #[cfg(all(feature = "python", unix))]
+    let mut shm_children: Option<Vec<std::process::Child>> = None;
+
     #[cfg(feature = "python")]
     {
-        spawn_python_worker(app_path.clone());
+        if config.workers.count > 0 {
+            // Multi-process mode: spawn forked workers with SHM ring pairs
+            #[cfg(unix)]
+            {
+                use vertebra_core::transport::ring_pair::RingPairConfig;
+                use vertebra_http::supervisor::SupervisorRingFactory;
+
+                let factory = SupervisorRingFactory::new(
+                    config.workers.count,
+                    RingPairConfig::default(),
+                )
+                .expect("failed to create supervisor ring factory");
+
+                info!(
+                    workers = config.workers.count,
+                    "spawning multi-process workers with SHM transport"
+                );
+
+                let children = factory
+                    .spawn_all(&app_path, &config.workers.python_bin)
+                    .expect("failed to spawn workers");
+
+                shm_children = Some(children);
+                // TODO(Ch3): Register factory.all_ring_pairs() with SHM dispatcher
+            }
+        } else {
+            // In-process mode: spawn Python worker thread
+            spawn_python_worker(app_path.clone());
+        }
         info!(app = %app_path, bind = %config.bind, "vertebra-server starting");
     }
 
@@ -219,7 +250,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("ctrl-c received");
     };
 
-    server::run_with_collector(config, router, dispatcher, collector_tx, shutdown).await?;
+    server::run_with_collector(
+        Arc::clone(&config),
+        router,
+        dispatcher,
+        collector_tx,
+        shutdown,
+    )
+    .await?;
+
+    // --- Graceful shutdown of SHM workers ---
+    #[cfg(all(feature = "python", unix))]
+    if let Some(ref mut children) = shm_children {
+        use vertebra_http::supervisor::SupervisorRingFactory;
+
+        info!("shutting down multi-process workers");
+        SupervisorRingFactory::shutdown_workers(
+            children,
+            std::time::Duration::from_secs(5),
+        );
+    }
 
     Ok(())
 }

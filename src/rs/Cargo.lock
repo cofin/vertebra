@@ -3971,6 +3971,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "matchit",
  "parking_lot",
  "pyo3",

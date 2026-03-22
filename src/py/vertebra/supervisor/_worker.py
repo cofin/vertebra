@@ -2,15 +2,25 @@
 
 This module is the entry point for each Python worker process. It is
 invoked by the Rust supervisor with environment variables that describe
-the shared-memory channel to connect to.
+the transport channel to connect to.
+
+Transport modes:
+    inprocess (default): Uses BatchBridge (crossbeam channels) for in-process workers.
+    shm: Uses SPSC ring pairs via inherited FDs for forked workers.
 
 Environment variables (set by supervisor):
+    VERTEBRA_TRANSPORT_MODE: "inprocess" or "shm" (default: "inprocess")
+    VERTEBRA_APP:            App import path (e.g. "myapp:app")
+    VERTEBRA_WORKER_ID:      Integer worker index (for logging)
+
+    # In-process mode:
     VERTEBRA_RING_NAME:   Named MPMC ring to connect to
     VERTEBRA_SLOT_SIZE:   Ring slot size in bytes
     VERTEBRA_SLOTS:       Number of ring slots
     VERTEBRA_BATCH_SIZE:  Maximum batch size (default 64)
-    VERTEBRA_APP:         App import path (e.g. "myapp:app")
-    VERTEBRA_WORKER_ID:   Integer worker index (for logging)
+
+    # SHM mode (FDs inherited from supervisor):
+    VERTEBRA_REQ_RING_FD, VERTEBRA_REQ_RING_SIZE, etc.
 """
 
 import importlib
@@ -34,15 +44,12 @@ def _import_app(app_path: str) -> Any:
 
 def main() -> None:
     """Initialize a worker process and start the batch runner loop."""
-    ring_name = os.environ["VERTEBRA_RING_NAME"]
-    slot_size = int(os.environ["VERTEBRA_SLOT_SIZE"])
-    slots = int(os.environ["VERTEBRA_SLOTS"])
-    batch_size = int(os.environ.get("VERTEBRA_BATCH_SIZE", "64"))
+    transport_mode = os.environ.get("VERTEBRA_TRANSPORT_MODE", "inprocess")
     app_path = os.environ["VERTEBRA_APP"]
     worker_id = int(os.environ.get("VERTEBRA_WORKER_ID", "0"))
 
     print(  # noqa: T201
-        f"[vertebra worker {worker_id}] starting, app={app_path!r}, ring={ring_name!r}",
+        f"[vertebra worker {worker_id}] starting, app={app_path!r}, mode={transport_mode}",
         file=sys.stderr,
     )
 
@@ -50,17 +57,28 @@ def main() -> None:
 
     from vertebra._vertebra import init_transport  # type: ignore[import-untyped]
 
-    init_transport(
-        ring_name=ring_name,
-        slot_size=slot_size,
-        slots=slots,
-        batch_size=batch_size,
-    )
-
-    print(  # noqa: T201
-        f"[vertebra worker {worker_id}] connected to ring {ring_name!r}",
-        file=sys.stderr,
-    )
+    if transport_mode == "shm":
+        init_transport(mode="shm")
+        print(  # noqa: T201
+            f"[vertebra worker {worker_id}] connected via shared memory",
+            file=sys.stderr,
+        )
+    else:
+        ring_name = os.environ.get("VERTEBRA_RING_NAME", "default")
+        slot_size = int(os.environ.get("VERTEBRA_SLOT_SIZE", "4096"))
+        slots = int(os.environ.get("VERTEBRA_SLOTS", "64"))
+        batch_size = int(os.environ.get("VERTEBRA_BATCH_SIZE", "64"))
+        init_transport(
+            mode="inprocess",
+            ring_name=ring_name,
+            slot_size=slot_size,
+            slots=slots,
+            batch_size=batch_size,
+        )
+        print(  # noqa: T201
+            f"[vertebra worker {worker_id}] connected to ring {ring_name!r}",
+            file=sys.stderr,
+        )
 
     handlers = app._handlers  # noqa: SLF001
     mounts = list(app.mounts) if hasattr(app, "mounts") else []

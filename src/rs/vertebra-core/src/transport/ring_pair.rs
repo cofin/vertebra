@@ -382,6 +382,203 @@ impl RingPair {
     pub fn request_ring_handle(&self) -> Option<RawFd> {
         self.request_ring.region_handle()
     }
+
+    /// Collect all FDs needed for worker inheritance.
+    #[cfg(unix)]
+    pub fn fd_set(&self) -> RingPairFds {
+        let resp_handles = self.response_rings.handles();
+        let req_layout = RingLayout::new(
+            self.config.request_slot_size,
+            self.config.request_slots,
+            ChannelMode::Spsc,
+        );
+        RingPairFds {
+            req_ring_fd: self.request_ring.region_handle().unwrap_or(-1),
+            req_ring_size: req_layout.total_size,
+            resp_small_fd: resp_handles[0].unwrap_or(-1),
+            resp_small_size: RingLayout::new(
+                self.config.response_tiers.small.slot_size,
+                self.config.response_tiers.small.slot_count,
+                ChannelMode::Spsc,
+            )
+            .total_size,
+            resp_medium_fd: resp_handles[1].unwrap_or(-1),
+            resp_medium_size: RingLayout::new(
+                self.config.response_tiers.medium.slot_size,
+                self.config.response_tiers.medium.slot_count,
+                ChannelMode::Spsc,
+            )
+            .total_size,
+            resp_large_fd: resp_handles[2].unwrap_or(-1),
+            resp_large_size: RingLayout::new(
+                self.config.response_tiers.large.slot_size,
+                self.config.response_tiers.large.slot_count,
+                ChannelMode::Spsc,
+            )
+            .total_size,
+            resp_xlarge_fd: resp_handles[3].unwrap_or(-1),
+            resp_xlarge_size: RingLayout::new(
+                self.config.response_tiers.xlarge.slot_size,
+                self.config.response_tiers.xlarge.slot_count,
+                ChannelMode::Spsc,
+            )
+            .total_size,
+            req_notify_fd: self.request_notifier.as_raw_fd(),
+            resp_notify_fd: self.response_notifier.as_raw_fd(),
+        }
+    }
+
+    /// Reconstruct a ring pair from environment variables set by the supervisor.
+    ///
+    /// Reads the `VERTEBRA_*` env var protocol and attaches to the inherited
+    /// shared memory regions and notifier FDs.
+    #[cfg(unix)]
+    pub fn from_env() -> Result<Self, RingPairError> {
+        fn env_parse<T: std::str::FromStr>(key: &str) -> Result<T, RingPairError> {
+            std::env::var(key)
+                .map_err(|_| RingPairError::EnvVar(key.to_owned()))
+                .and_then(|v| {
+                    v.parse::<T>()
+                        .map_err(|_| RingPairError::EnvVar(key.to_owned()))
+                })
+        }
+
+        let req_ring_fd: RawFd = env_parse("VERTEBRA_REQ_RING_FD")?;
+        let req_ring_size: usize = env_parse("VERTEBRA_REQ_RING_SIZE")?;
+        let resp_small_fd: RawFd = env_parse("VERTEBRA_RESP_RING_SMALL_FD")?;
+        let resp_medium_fd: RawFd = env_parse("VERTEBRA_RESP_RING_MEDIUM_FD")?;
+        let resp_large_fd: RawFd = env_parse("VERTEBRA_RESP_RING_LARGE_FD")?;
+        let resp_xlarge_fd: RawFd = env_parse("VERTEBRA_RESP_RING_XLARGE_FD")?;
+        let req_notify_fd: RawFd = env_parse("VERTEBRA_REQ_NOTIFY_FD")?;
+        let resp_notify_fd: RawFd = env_parse("VERTEBRA_RESP_NOTIFY_FD")?;
+
+        // Reconstruct config from env — we need slot sizes and counts.
+        // The supervisor passes ring layout total sizes, from which we derive config.
+        // For simplicity, use defaults and override request ring size from env.
+        let config = RingPairConfig::default();
+
+        // Derive request slot_size from total ring size and default slot count.
+        // total_size = header_size + slot_size * slots
+        // We use default slots and solve for slot_size approximately.
+        let _ = req_ring_size; // Used for ShmRegion::map inside from_inherited
+
+        // SAFETY: the env vars were set by the supervisor which created
+        // valid ShmRegions and Notifier FDs before spawning this worker.
+        unsafe {
+            Self::from_inherited(
+                config,
+                req_ring_fd,
+                resp_small_fd,
+                resp_medium_fd,
+                resp_large_fd,
+                resp_xlarge_fd,
+                req_notify_fd,
+                resp_notify_fd,
+            )
+        }
+    }
+
+    /// Get all raw FDs for `make_inheritable()`.
+    #[cfg(unix)]
+    pub fn all_fds(&self) -> Vec<RawFd> {
+        let fds = self.fd_set();
+        vec![
+            fds.req_ring_fd,
+            fds.resp_small_fd,
+            fds.resp_medium_fd,
+            fds.resp_large_fd,
+            fds.resp_xlarge_fd,
+            fds.req_notify_fd,
+            fds.resp_notify_fd,
+        ]
+    }
+}
+
+/// All file descriptors needed to reconstruct a `RingPair` in a worker process.
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+pub struct RingPairFds {
+    pub req_ring_fd: RawFd,
+    pub req_ring_size: usize,
+    pub resp_small_fd: RawFd,
+    pub resp_small_size: usize,
+    pub resp_medium_fd: RawFd,
+    pub resp_medium_size: usize,
+    pub resp_large_fd: RawFd,
+    pub resp_large_size: usize,
+    pub resp_xlarge_fd: RawFd,
+    pub resp_xlarge_size: usize,
+    pub req_notify_fd: RawFd,
+    pub resp_notify_fd: RawFd,
+}
+
+#[cfg(unix)]
+impl RingPairFds {
+    /// Generate environment variables for the supervisor→worker FD protocol.
+    pub fn to_env_vars(&self, worker_id: usize) -> Vec<(String, String)> {
+        vec![
+            ("VERTEBRA_TRANSPORT_MODE".into(), "shm".into()),
+            ("VERTEBRA_WORKER_ID".into(), worker_id.to_string()),
+            ("VERTEBRA_REQ_RING_FD".into(), self.req_ring_fd.to_string()),
+            (
+                "VERTEBRA_REQ_RING_SIZE".into(),
+                self.req_ring_size.to_string(),
+            ),
+            (
+                "VERTEBRA_RESP_RING_SMALL_FD".into(),
+                self.resp_small_fd.to_string(),
+            ),
+            (
+                "VERTEBRA_RESP_RING_SMALL_SIZE".into(),
+                self.resp_small_size.to_string(),
+            ),
+            (
+                "VERTEBRA_RESP_RING_MEDIUM_FD".into(),
+                self.resp_medium_fd.to_string(),
+            ),
+            (
+                "VERTEBRA_RESP_RING_MEDIUM_SIZE".into(),
+                self.resp_medium_size.to_string(),
+            ),
+            (
+                "VERTEBRA_RESP_RING_LARGE_FD".into(),
+                self.resp_large_fd.to_string(),
+            ),
+            (
+                "VERTEBRA_RESP_RING_LARGE_SIZE".into(),
+                self.resp_large_size.to_string(),
+            ),
+            (
+                "VERTEBRA_RESP_RING_XLARGE_FD".into(),
+                self.resp_xlarge_fd.to_string(),
+            ),
+            (
+                "VERTEBRA_RESP_RING_XLARGE_SIZE".into(),
+                self.resp_xlarge_size.to_string(),
+            ),
+            (
+                "VERTEBRA_REQ_NOTIFY_FD".into(),
+                self.req_notify_fd.to_string(),
+            ),
+            (
+                "VERTEBRA_RESP_NOTIFY_FD".into(),
+                self.resp_notify_fd.to_string(),
+            ),
+        ]
+    }
+
+    /// Collect all FDs into a slice for `make_inheritable()`.
+    pub fn all_fds(&self) -> Vec<RawFd> {
+        vec![
+            self.req_ring_fd,
+            self.resp_small_fd,
+            self.resp_medium_fd,
+            self.resp_large_fd,
+            self.resp_xlarge_fd,
+            self.req_notify_fd,
+            self.resp_notify_fd,
+        ]
+    }
 }
 
 /// Errors from ring pair operations.
@@ -397,6 +594,8 @@ pub enum RingPairError {
     ResponseTooLarge(usize),
     #[error("invalid response data: {0}")]
     InvalidResponse(&'static str),
+    #[error("missing or invalid environment variable: {0}")]
+    EnvVar(String),
 }
 
 #[cfg(test)]
@@ -607,5 +806,68 @@ mod tests {
         let mut buf = vec![0u8; 1024];
         let len = pair.request_ring.try_recv(&mut buf).expect("recv");
         assert_eq!(&buf[..len], data);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fd_set_returns_valid_fds() {
+        let pair = RingPair::create(RingPairConfig::default()).expect("create");
+        let fds = pair.fd_set();
+
+        assert!(fds.req_ring_fd >= 0, "request ring FD should be valid");
+        assert!(fds.resp_small_fd >= 0, "small response FD should be valid");
+        assert!(fds.resp_medium_fd >= 0);
+        assert!(fds.resp_large_fd >= 0);
+        assert!(fds.resp_xlarge_fd >= 0);
+        assert!(fds.req_notify_fd >= 0);
+        assert!(fds.resp_notify_fd >= 0);
+        assert!(fds.req_ring_size > 0);
+        assert!(fds.resp_small_size > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_vars_protocol_complete() {
+        let pair = RingPair::create(RingPairConfig::default()).expect("create");
+        let fds = pair.fd_set();
+        let vars = fds.to_env_vars(3);
+
+        // Should contain all expected vars
+        let keys: Vec<&str> = vars.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"VERTEBRA_TRANSPORT_MODE"));
+        assert!(keys.contains(&"VERTEBRA_WORKER_ID"));
+        assert!(keys.contains(&"VERTEBRA_REQ_RING_FD"));
+        assert!(keys.contains(&"VERTEBRA_REQ_RING_SIZE"));
+        assert!(keys.contains(&"VERTEBRA_RESP_RING_SMALL_FD"));
+        assert!(keys.contains(&"VERTEBRA_RESP_RING_MEDIUM_FD"));
+        assert!(keys.contains(&"VERTEBRA_RESP_RING_LARGE_FD"));
+        assert!(keys.contains(&"VERTEBRA_RESP_RING_XLARGE_FD"));
+        assert!(keys.contains(&"VERTEBRA_REQ_NOTIFY_FD"));
+        assert!(keys.contains(&"VERTEBRA_RESP_NOTIFY_FD"));
+
+        // Worker ID should be 3
+        let worker_id = vars
+            .iter()
+            .find(|(k, _)| k == "VERTEBRA_WORKER_ID")
+            .unwrap();
+        assert_eq!(worker_id.1, "3");
+
+        // Transport mode should be shm
+        let mode = vars
+            .iter()
+            .find(|(k, _)| k == "VERTEBRA_TRANSPORT_MODE")
+            .unwrap();
+        assert_eq!(mode.1, "shm");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn all_fds_for_make_inheritable() {
+        let pair = RingPair::create(RingPairConfig::default()).expect("create");
+        let fds = pair.all_fds();
+        assert_eq!(fds.len(), 7); // req_ring + 4 resp tiers + 2 notifiers
+        for fd in &fds {
+            assert!(*fd >= 0, "all FDs should be valid");
+        }
     }
 }

@@ -11,6 +11,7 @@ pub mod response;
 pub mod route_table;
 pub mod router;
 pub mod server;
+pub mod supervisor;
 
 #[cfg(feature = "tls")]
 pub mod tls;

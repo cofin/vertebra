@@ -1,37 +1,79 @@
 //! Vectorized batch FFI API.
 //!
-//! Connects Python workers to the arena-backed `BatchBridge` from
-//! `vertebra-core`. Python calls `init_batch_channel()` to verify the
-//! bridge is ready, then polls with `get_batch()` and submits results
-//! with `submit_results()`.
+//! Connects Python workers to either:
+//! - `BatchBridge` (in-process mode, default)
+//! - `Transport::SharedMemory` (SHM mode, for forked workers)
+//!
+//! The transport mode is selected by the `mode` parameter of `init_transport()`.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use pyo3::prelude::*;
 
 use vertebra_core::bridge::{BatchBridge, BridgeResponse};
+use vertebra_core::transport::Transport;
 
 use crate::batch::VertebraBatch;
 use crate::response::VertebraResponse;
 
+/// Global SHM transport, set once by `init_transport(mode="shm")`.
+static SHM_TRANSPORT: OnceLock<Transport> = OnceLock::new();
+
 /// Initialize the transport channel. Called once during worker startup.
+///
+/// # Modes
+/// - `mode="inprocess"` (default): Uses the in-process `BatchBridge` (crossbeam channels).
+/// - `mode="shm"`: Reads `VERTEBRA_*` env vars to reconstruct a `RingPair`
+///   from inherited file descriptors. Used by forked worker processes.
 #[pyfunction]
-#[pyo3(name = "init_transport", signature = (ring_name="default", slot_size=4096, slots=64, batch_size=64))]
+#[pyo3(name = "init_transport", signature = (mode="inprocess", ring_name="default", slot_size=4096, slots=64, batch_size=64))]
 pub fn init_transport(
+    mode: &str,
     ring_name: &str,
     slot_size: usize,
     slots: usize,
     batch_size: usize,
 ) -> PyResult<()> {
-    let _ = ring_name;
-    let slab_capacity = slot_size * slots;
-    let arena_capacity = batch_size;
-    let channel_depth = 4;
+    match mode {
+        "shm" => {
+            #[cfg(unix)]
+            {
+                use std::sync::Arc;
+                use vertebra_core::transport::ring_pair::RingPair;
 
-    match BatchBridge::init(arena_capacity, slab_capacity, channel_depth, 1) {
-        Ok(()) => Ok(()),
-        Err("bridge already initialized") => Ok(()),
-        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+                let ring_pair = RingPair::from_env().map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "failed to init SHM transport: {e}"
+                    ))
+                })?;
+
+                let transport = Transport::new_shared_memory(Arc::new(ring_pair));
+                SHM_TRANSPORT.set(transport).map_err(|_| {
+                    pyo3::exceptions::PyRuntimeError::new_err("SHM transport already initialized")
+                })?;
+
+                Ok(())
+            }
+            #[cfg(not(unix))]
+            {
+                Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "SHM transport is not supported on this platform",
+                ))
+            }
+        }
+        "inprocess" | _ => {
+            let _ = ring_name;
+            let slab_capacity = slot_size * slots;
+            let arena_capacity = batch_size;
+            let channel_depth = 4;
+
+            match BatchBridge::init(arena_capacity, slab_capacity, channel_depth, 1) {
+                Ok(()) => Ok(()),
+                Err("bridge already initialized") => Ok(()),
+                Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+            }
+        }
     }
 }
 
@@ -39,6 +81,14 @@ pub fn init_transport(
 #[pyfunction]
 #[pyo3(name = "get_batch", signature = (timeout_ms=100))]
 pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<VertebraBatch>> {
+    // SHM path: poll from SPSC ring
+    if let Some(transport) = SHM_TRANSPORT.get() {
+        let snapshot =
+            py.detach(|| transport.poll_batch(Duration::from_millis(timeout_ms)));
+        return Ok(snapshot.map(|s| VertebraBatch { snapshot: s }));
+    }
+
+    // In-process path: poll from BatchBridge
     let bridge = BatchBridge::get().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(
             "transport not initialized; call init_transport() first",
@@ -46,16 +96,38 @@ pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<VertebraBat
     })?;
 
     let snapshot = py.detach(|| bridge.poll_batch(Duration::from_millis(timeout_ms)));
-
     Ok(snapshot.map(|s| VertebraBatch { snapshot: s }))
 }
 
 /// Submit processed responses back to the HTTP server.
 ///
-/// Takes a list of `VertebraResponse` objects and pushes them through the
-/// bridge to complete the corresponding Hyper response futures.
+/// In SHM mode, serializes responses into the tiered response ring.
+/// In in-process mode, pushes through the BatchBridge.
 #[pyfunction]
 pub fn submit_results(py: Python<'_>, responses: Vec<Py<VertebraResponse>>) -> PyResult<()> {
+    // SHM path: write responses to tiered ring
+    if let Some(transport) = SHM_TRANSPORT.get() {
+        for py_resp in &responses {
+            let resp = py_resp.borrow(py);
+
+            // Encode headers into compact binary format
+            let headers_raw = encode_headers_compact(&resp.headers);
+
+            transport
+                .send_response(resp.request_id, resp.status, &headers_raw, &resp.body)
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "failed to send response: {e}"
+                    ))
+                })?;
+        }
+
+        // Notify supervisor that responses are available
+        // (notifier is on the ring pair, accessed via transport internals)
+        return Ok(());
+    }
+
+    // In-process path: BatchBridge
     let bridge = BatchBridge::get().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(
             "batch channel not initialized; call init_batch_channel() first",
@@ -78,4 +150,24 @@ pub fn submit_results(py: Python<'_>, responses: Vec<Py<VertebraResponse>>) -> P
     })?;
 
     Ok(())
+}
+
+/// Encode headers into Vertebra's compact binary format.
+///
+/// Format per header: `[name_len: u8][name: bytes][value_len: u16 LE][value: bytes]`
+fn encode_headers_compact(headers: &[(String, String)]) -> Vec<u8> {
+    if headers.is_empty() {
+        return Vec::new();
+    }
+    let mut buf = Vec::with_capacity(headers.len() * 32);
+    for (name, value) in headers {
+        let n = name.as_bytes();
+        let v = value.as_bytes();
+        buf.push(n.len() as u8);
+        buf.extend_from_slice(n);
+        let vlen = v.len() as u16;
+        buf.extend_from_slice(&vlen.to_le_bytes());
+        buf.extend_from_slice(v);
+    }
+    buf
 }

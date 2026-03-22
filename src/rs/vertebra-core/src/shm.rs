@@ -97,6 +97,28 @@ impl ShmRegion {
         Err(ShmError::InvalidSize)
     }
 
+    /// Map an existing file descriptor into this process (safe wrapper).
+    ///
+    /// Used by worker processes to attach to shared memory regions created
+    /// by the supervisor and inherited across fork/spawn. The FD must point
+    /// to a valid shared memory region of at least `size` bytes.
+    ///
+    /// Does not take ownership of the FD — the caller is responsible for
+    /// closing it when no longer needed.
+    #[cfg(unix)]
+    pub fn from_fd(fd: RawFd, size: usize) -> Result<Self, ShmError> {
+        if fd < 0 {
+            return Err(ShmError::InvalidName);
+        }
+        if size == 0 {
+            return Err(ShmError::InvalidSize);
+        }
+        // SAFETY: caller guarantees fd is a valid, open file descriptor
+        // pointing to a shared memory region of at least `size` bytes.
+        // This is the documented contract for inherited FDs from the supervisor.
+        unsafe { Self::map(fd, size) }
+    }
+
     /// Open an existing named region (Unix only).
     #[cfg(unix)]
     pub fn open_named(name: &str, size: usize) -> Result<Self, ShmError> {
