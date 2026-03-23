@@ -53,10 +53,7 @@ pub async fn run_response_reader(
         return;
     }
 
-    debug!(
-        workers = workers.len(),
-        "response reader started"
-    );
+    debug!(workers = workers.len(), "response reader started");
 
     let mut set = JoinSet::new();
 
@@ -121,10 +118,10 @@ async fn run_worker_reader_async(
                 // IMPORTANT: The sequence here is critical to avoid race conditions.
                 // 1. Clear the eventfd/pipe (read 8 bytes) to consume the signal.
                 let _ = worker.response_notifier.clear();
-                
+
                 // 2. Call clear_ready() to tell Tokio to re-poll later.
-                // We do this BEFORE draining so that if a new notification arrives 
-                // while we are draining, the FD will be marked readable again 
+                // We do this BEFORE draining so that if a new notification arrives
+                // while we are draining, the FD will be marked readable again
                 // for the next iteration.
                 guard.clear_ready();
 

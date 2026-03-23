@@ -7,6 +7,7 @@ Batches are partitioned into sync (sequential), async (gathered), and mount
 
 import asyncio
 import concurrent.futures
+import contextlib
 import functools
 import inspect
 import logging
@@ -363,31 +364,27 @@ async def _shm_worker_loop(
         ready_event.set()
 
     loop.add_reader(notify_fd, _on_readable)
+    ready_event.set()
 
     try:
         while _RUNNING:
+            # Wait for next notification or small timeout
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(ready_event.wait(), timeout=batch_timeout_ms / 1000.0)
+            ready_event.clear()
+
+            # Clear the notification BEFORE draining to avoid TOCTOU race conditions
+            clear_request_notification()
+
             # Drain all available batches
-            any_processed = False
             while True:
                 batch = try_get_batch()
                 if batch is None:
                     break
 
-                any_processed = True
                 partitioned = _partition_batch(batch, handlers, active_mounts)
                 results = _dispatch_batch(partitioned, handlers, active_mounts, VR, scheduler)
                 submit_results(results)
-
-            if any_processed:
-                # Clear the notification after draining
-                clear_request_notification()
-
-            # Wait for next notification or small timeout
-            try:
-                await asyncio.wait_for(ready_event.wait(), timeout=batch_timeout_ms / 1000.0)
-            except asyncio.TimeoutError:
-                pass
-            ready_event.clear()
     finally:
         loop.remove_reader(notify_fd)
 
@@ -419,6 +416,8 @@ def run_worker(
     _RUNNING = True
 
     # Initialize the transport channel.
+    is_shm = get_request_notify_fd() > -1
+
     if is_shm:
         init_transport(mode="shm")
     else:
@@ -428,7 +427,6 @@ def run_worker(
     scheduler = CallbackScheduler()
     cpu_count = worker_count or (os.cpu_count() or 1)
 
-    is_shm = get_request_notify_fd() > -1
     if is_shm:
         cpu_count = 1
 

@@ -1,7 +1,7 @@
 //! Integration tests for `vertebra_core::channel::MpmcRing`.
 
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
     Arc,
 };
 use vertebra_core::channel::MpmcRing;
@@ -26,14 +26,14 @@ fn mpmc_4p_4c_message_counts() {
 
     let ring = Arc::new(MpmcRing::new(256, 1024).expect("new failed"));
     let received = Arc::new(AtomicU64::new(0));
-    let producers_done = Arc::new(AtomicBool::new(false));
+    let producers_active = Arc::new(std::sync::atomic::AtomicUsize::new(PRODUCERS));
 
     let mut handles = Vec::new();
 
     // Spawn producers
     for p in 0..PRODUCERS {
         let ring = Arc::clone(&ring);
-        let producers_done = Arc::clone(&producers_done);
+        let producers_active = Arc::clone(&producers_active);
         handles.push(std::thread::spawn(move || {
             let payload = (p as u64).to_le_bytes();
             for _ in 0..MESSAGES_PER_PRODUCER {
@@ -44,15 +44,7 @@ fn mpmc_4p_4c_message_counts() {
                     }
                 }
             }
-            // Last producer to finish signals done
-            // (we use a simple flag; any producer finishing means some messages are done,
-            // but we only care that all producers finish eventually)
-            if p == PRODUCERS - 1 {
-                // Wait for other producers by just setting done after this one finishes.
-                // All producers will finish before consumers stop because consumers
-                // check producers_done + drain remaining.
-            }
-            producers_done.store(true, Ordering::Release);
+            producers_active.fetch_sub(1, Ordering::Release);
         }));
     }
 
@@ -60,7 +52,7 @@ fn mpmc_4p_4c_message_counts() {
     for _ in 0..CONSUMERS {
         let ring = Arc::clone(&ring);
         let received = Arc::clone(&received);
-        let producers_done = Arc::clone(&producers_done);
+        let producers_active = Arc::clone(&producers_active);
         handles.push(std::thread::spawn(move || {
             let mut buf = [0u8; 256];
             let mut local_count = 0u64;
@@ -75,7 +67,7 @@ fn mpmc_4p_4c_message_counts() {
                         }
                     }
                     Err(_) => {
-                        if producers_done.load(Ordering::Acquire) {
+                        if producers_active.load(Ordering::Acquire) == 0 {
                             // Producers done; try one more drain pass
                             match ring.try_recv(&mut buf) {
                                 Ok(_) => local_count += 1,

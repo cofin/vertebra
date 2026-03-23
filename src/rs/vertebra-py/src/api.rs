@@ -180,9 +180,9 @@ pub fn get_request_notify_fd() -> i32 {
 #[pyo3(name = "clear_request_notification")]
 pub fn clear_request_notification() -> PyResult<()> {
     if let Some(transport) = SHM_TRANSPORT.get() {
-        transport.clear_request().map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("clear failed: {e}"))
-        })?;
+        transport
+            .clear_request()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("clear failed: {e}")))?;
     }
     Ok(())
 }
