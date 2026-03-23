@@ -40,9 +40,10 @@ pub fn init_transport(
             #[cfg(unix)]
             {
                 use std::sync::Arc;
-                use vertebra_core::transport::ring_pair::RingPair;
+                use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
 
-                let ring_pair = RingPair::from_env().map_err(|e| {
+                let config = RingPairConfig::default();
+                let ring_pair = RingPair::from_env(config).map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
                         "failed to init SHM transport: {e}"
                     ))
@@ -106,6 +107,10 @@ pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<VertebraBat
 pub fn submit_results(py: Python<'_>, responses: Vec<Py<VertebraResponse>>) -> PyResult<()> {
     // SHM path: write responses to tiered ring
     if let Some(transport) = SHM_TRANSPORT.get() {
+        if responses.is_empty() {
+            return Ok(());
+        }
+
         for py_resp in &responses {
             let resp = py_resp.borrow(py);
 
@@ -122,7 +127,10 @@ pub fn submit_results(py: Python<'_>, responses: Vec<Py<VertebraResponse>>) -> P
         }
 
         // Notify supervisor that responses are available
-        // (notifier is on the ring pair, accessed via transport internals)
+        transport.notify_response().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("failed to notify supervisor: {e}"))
+        })?;
+
         return Ok(());
     }
 
@@ -168,31 +176,22 @@ pub fn get_request_notify_fd() -> i32 {
     -1
 }
 
-/// Clear the request notification counter after an `add_reader` callback.
-///
-/// Must be called after reading from the request ring in async mode
-/// to prevent spurious wakeups.
 #[pyfunction]
 #[pyo3(name = "clear_request_notification")]
 pub fn clear_request_notification() -> PyResult<()> {
     if let Some(transport) = SHM_TRANSPORT.get() {
-        if let vertebra_core::transport::Backend::SharedMemory(rp) = transport.backend() {
-            rp.request_notifier.clear().map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("clear failed: {e}"))
-            })?;
-        }
+        transport.clear_request().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("clear failed: {e}"))
+        })?;
     }
     Ok(())
 }
 
-/// Non-blocking poll for the next batch (for use in `add_reader` callbacks).
-///
-/// Returns `None` immediately if no data is available.
 #[pyfunction]
 #[pyo3(name = "try_get_batch")]
 pub fn try_get_batch() -> PyResult<Option<VertebraBatch>> {
     if let Some(transport) = SHM_TRANSPORT.get() {
-        let snapshot = transport.poll_batch(Duration::ZERO);
+        let snapshot = transport.poll_batch_async();
         return Ok(snapshot.map(|s| VertebraBatch { snapshot: s }));
     }
     Ok(None)

@@ -9,6 +9,7 @@ import asyncio
 import concurrent.futures
 import functools
 import inspect
+import logging
 import signal
 import sys
 import threading
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
 
     from vertebra._vertebra import VertebraBatch, VertebraRequest, VertebraResponse
 
+log = logging.getLogger(__name__)
 _RUNNING = True
 
 
@@ -272,7 +274,7 @@ def _dispatch_batch(
 
     # 1. Sync native handlers — sequential, zero overhead for trivial handlers.
     for idx, request, handler in partitioned.sync_native:
-        response = _call_handler(handler, request, loop=None)
+        response = _call_handler(handler, request, loop=scheduler.loop if partitioned.async_native else None)
         results[idx] = _coerce_response(response, request.request_id, vr_cls)
 
     # 2. Async native handlers — scheduled onto persistent loop.
@@ -324,6 +326,72 @@ def _dispatch_batch(
     return results
 
 
+async def _shm_worker_loop(
+    handlers: dict[int, Any],
+    resolved_mounts: list[tuple[str, Any, str]],
+    scheduler: CallbackScheduler,
+    batch_timeout_ms: int,
+) -> None:
+    """Asyncio-driven SHM worker loop using eventfd notifications."""
+    from vertebra._vertebra import (
+        VertebraResponse as VR,
+    )
+    from vertebra._vertebra import (
+        clear_request_notification,
+        get_request_notify_fd,
+        submit_results,
+        try_get_batch,
+    )
+
+    loop = asyncio.get_running_loop()
+    notify_fd = get_request_notify_fd()
+    ready_event = asyncio.Event()
+
+    # Create mount adapters once
+    active_mounts = []
+    for prefix, app, protocol in resolved_mounts:
+        if protocol == "asgi":
+            from vertebra.server._asgi._runner import AsgiRunner
+
+            active_mounts.append((prefix, AsgiRunner(app, mount_prefix=prefix, loop=loop), "asgi"))
+        elif protocol == "wsgi":
+            from vertebra.server._wsgi._adapter import WsgiAdapter
+
+            active_mounts.append((prefix, WsgiAdapter(app), "wsgi"))
+
+    def _on_readable() -> None:
+        ready_event.set()
+
+    loop.add_reader(notify_fd, _on_readable)
+
+    try:
+        while _RUNNING:
+            # Drain all available batches
+            any_processed = False
+            while True:
+                batch = try_get_batch()
+                if batch is None:
+                    break
+
+                any_processed = True
+                partitioned = _partition_batch(batch, handlers, active_mounts)
+                results = _dispatch_batch(partitioned, handlers, active_mounts, VR, scheduler)
+                submit_results(results)
+
+            if any_processed:
+                # Clear the notification after draining
+                clear_request_notification()
+
+            # Wait for next notification or small timeout
+            try:
+                await asyncio.wait_for(ready_event.wait(), timeout=batch_timeout_ms / 1000.0)
+            except asyncio.TimeoutError:
+                pass
+            ready_event.clear()
+    finally:
+        loop.remove_reader(notify_fd)
+
+
 def run_worker(
     handlers: "dict[int, Callable[[VertebraRequest], VertebraResponse]]",
     *,
@@ -343,7 +411,7 @@ def run_worker(
     import os
 
     from vertebra._vertebra import VertebraResponse as VR
-    from vertebra._vertebra import get_batch, init_transport, submit_results
+    from vertebra._vertebra import get_batch, get_request_notify_fd, init_transport, submit_results
 
     _install_signal_handlers()
 
@@ -351,11 +419,18 @@ def run_worker(
     _RUNNING = True
 
     # Initialize the transport channel.
-    init_transport()
+    if is_shm:
+        init_transport(mode="shm")
+    else:
+        init_transport()
 
     # 1. Shared Infrastructure
     scheduler = CallbackScheduler()
     cpu_count = worker_count or (os.cpu_count() or 1)
+
+    is_shm = get_request_notify_fd() > -1
+    if is_shm:
+        cpu_count = 1
 
     global _wsgi_executor  # noqa: PLW0603
     _wsgi_executor = ThreadPoolExecutor(
@@ -414,6 +489,16 @@ def run_worker(
             pass
 
     # 3. Spawn Hybrid Workers
+    if is_shm:
+        # SHM mode: Run event-driven loop in main thread
+        try:
+            asyncio.run(_shm_worker_loop(handlers, resolved_mounts, scheduler, batch_timeout_ms))
+        finally:
+            _RUNNING = False
+            scheduler.stop()
+            _wsgi_executor.shutdown(wait=False)
+        return
+
     threads: list[threading.Thread] = []
 
     # One IO Multiplexer

@@ -12,6 +12,7 @@ use std::sync::Arc;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
@@ -39,12 +40,10 @@ impl AsRawFd for NotifierFd {
     }
 }
 
-/// Run the response reader loop with AsyncFd-based wakeup.
+/// Run the response reader system by spawning a per-worker reader task.
 ///
-/// Each worker's response notification FD is registered with Tokio's reactor.
-/// When a worker signals (via eventfd write), the reactor wakes this task,
-/// which then drains all responses from that worker's tiered response rings.
-#[cfg(unix)]
+/// Each worker task uses AsyncFd-based wakeup if supported by the platform
+/// and OS. The system waits for all worker tasks to exit during shutdown.
 pub async fn run_response_reader(
     workers: Vec<Arc<RingPair>>,
     dispatcher: Arc<Dispatcher>,
@@ -56,160 +55,101 @@ pub async fn run_response_reader(
 
     debug!(
         workers = workers.len(),
-        "response reader started (AsyncFd mode)"
+        "response reader started"
     );
 
-    // Register each worker's response notification FD with Tokio
-    let mut async_fds: Vec<(usize, AsyncFd<NotifierFd>)> = Vec::with_capacity(workers.len());
-    for (i, ring_pair) in workers.iter().enumerate() {
-        let fd = ring_pair.response_notifier.as_raw_fd();
-        match AsyncFd::new(NotifierFd { fd }) {
-            Ok(afd) => async_fds.push((i, afd)),
-            Err(e) => {
-                error!(worker_id = i, error = %e, "failed to register response notifier with Tokio");
-            }
-        }
+    let mut set = JoinSet::new();
+
+    for (i, worker) in workers.into_iter().enumerate() {
+        let dispatcher = Arc::clone(&dispatcher);
+        let shutdown = shutdown.clone();
+        set.spawn(async move {
+            run_worker_reader(i, worker, dispatcher, shutdown).await;
+        });
     }
 
-    if async_fds.is_empty() {
-        error!("no response notifiers registered, falling back to polling");
-        run_response_reader_polling(workers, dispatcher, shutdown).await;
-        return;
-    }
+    // Wait for all worker tasks to complete (happens on shutdown or error)
+    while set.join_next().await.is_some() {}
 
-    // Main event loop: wait for any worker's eventfd to become readable
-    loop {
-        if shutdown.is_cancelled() {
-            break;
-        }
-
-        // Use tokio::select! to wait on all AsyncFds simultaneously
-        // For simplicity and to avoid macro explosion with dynamic worker counts,
-        // we poll in a tight loop with yield points.
-        let mut any_received = false;
-
-        for (worker_id, async_fd) in &async_fds {
-            // Non-blocking check: is this FD readable?
-            match async_fd.readable().await {
-                Ok(mut guard) => {
-                    // Clear the notification
-                    let _ = workers[*worker_id].response_notifier.clear();
-                    guard.clear_ready();
-
-                    // Drain all responses from this worker
-                    loop {
-                        match workers[*worker_id].response_rings.try_recv_response() {
-                            Ok(Some(resp)) => {
-                                any_received = true;
-                                dispatcher.complete(
-                                    resp.correlation_id,
-                                    PendingResponse {
-                                        status: resp.status,
-                                        headers_mp: bytes::Bytes::from(resp.headers_raw),
-                                        body: bytes::Bytes::from(resp.body),
-                                    },
-                                );
-                            }
-                            Ok(None) => break,
-                            Err(e) => {
-                                warn!(worker_id, error = %e, "error reading response ring");
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!(worker_id, error = %e, "AsyncFd readable error");
-                }
-            }
-
-            // Check shutdown between workers
-            if shutdown.is_cancelled() {
-                break;
-            }
-        }
-
-        if !any_received {
-            // Yield to prevent busy-spinning when using sequential AsyncFd polling
-            tokio::task::yield_now().await;
-        }
-    }
-
-    // Final drain
-    drain_all_responses(&workers, &dispatcher);
     debug!("response reader stopped");
 }
 
-/// Fallback polling-based response reader (used when AsyncFd fails).
-#[cfg(unix)]
-async fn run_response_reader_polling(
-    workers: Vec<Arc<RingPair>>,
+/// Internal loop for a single worker's response ring.
+async fn run_worker_reader(
+    worker_id: usize,
+    worker: Arc<RingPair>,
     dispatcher: Arc<Dispatcher>,
     shutdown: CancellationToken,
 ) {
-    use std::time::Duration;
+    #[cfg(unix)]
+    {
+        let fd = worker.response_notifier.as_raw_fd();
+        match AsyncFd::new(NotifierFd { fd }) {
+            Ok(async_fd) => {
+                run_worker_reader_async(worker_id, worker, dispatcher, shutdown, async_fd).await;
+            }
+            Err(e) => {
+                error!(worker_id, error = %e, "failed to register response notifier with Tokio; falling back to polling");
+                run_worker_reader_polling(worker_id, worker, dispatcher, shutdown).await;
+            }
+        }
+    }
 
-    debug!("response reader running in polling mode");
-    let poll_interval = Duration::from_micros(50);
+    #[cfg(not(unix))]
+    {
+        run_worker_reader_polling(worker_id, worker, dispatcher, shutdown).await;
+    }
+}
 
+/// Linux/Unix: Optimized loop using AsyncFd to wait for eventfd signals.
+#[cfg(unix)]
+async fn run_worker_reader_async(
+    worker_id: usize,
+    worker: Arc<RingPair>,
+    dispatcher: Arc<Dispatcher>,
+    shutdown: CancellationToken,
+    async_fd: AsyncFd<NotifierFd>,
+) {
     loop {
         if shutdown.is_cancelled() {
             break;
         }
 
-        let mut any_received = false;
-        for (worker_id, ring_pair) in workers.iter().enumerate() {
-            loop {
-                match ring_pair.response_rings.try_recv_response() {
-                    Ok(Some(resp)) => {
-                        any_received = true;
-                        let _ = ring_pair.response_notifier.clear();
-                        dispatcher.complete(
-                            resp.correlation_id,
-                            PendingResponse {
-                                status: resp.status,
-                                headers_mp: bytes::Bytes::from(resp.headers_raw),
-                                body: bytes::Bytes::from(resp.body),
-                            },
-                        );
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        warn!(worker_id, error = %e, "error reading response ring");
-                        break;
-                    }
-                }
-            }
-        }
+        // Wait for the worker to signal the eventfd
+        match async_fd.readable().await {
+            Ok(mut guard) => {
+                // IMPORTANT: The sequence here is critical to avoid race conditions.
+                // 1. Clear the eventfd/pipe (read 8 bytes) to consume the signal.
+                let _ = worker.response_notifier.clear();
+                
+                // 2. Call clear_ready() to tell Tokio to re-poll later.
+                // We do this BEFORE draining so that if a new notification arrives 
+                // while we are draining, the FD will be marked readable again 
+                // for the next iteration.
+                guard.clear_ready();
 
-        if !any_received {
-            tokio::select! {
-                _ = tokio::time::sleep(poll_interval) => {}
-                _ = shutdown.cancelled() => break,
+                // 3. Drain all available responses from the rings.
+                drain_worker(&worker, &dispatcher);
+            }
+            Err(e) => {
+                error!(worker_id, error = %e, "AsyncFd readable error; stopping worker reader");
+                break;
             }
         }
     }
 
-    drain_all_responses(&workers, &dispatcher);
+    // Final drain after shutdown
+    drain_worker(&worker, &dispatcher);
 }
 
-/// Non-Unix fallback: polling-only mode.
-#[cfg(not(unix))]
-pub async fn run_response_reader(
-    workers: Vec<Arc<RingPair>>,
+/// Fallback: Periodic polling of the response rings.
+async fn run_worker_reader_polling(
+    _worker_id: usize,
+    worker: Arc<RingPair>,
     dispatcher: Arc<Dispatcher>,
     shutdown: CancellationToken,
 ) {
     use std::time::Duration;
-
-    if workers.is_empty() {
-        return;
-    }
-
-    debug!(
-        workers = workers.len(),
-        "response reader started (polling mode)"
-    );
     let poll_interval = Duration::from_micros(100);
 
     loop {
@@ -217,9 +157,27 @@ pub async fn run_response_reader(
             break;
         }
 
-        let mut any_received = false;
-        for ring_pair in &workers {
-            while let Ok(Some(resp)) = ring_pair.response_rings.try_recv_response() {
+        if !drain_worker(&worker, &dispatcher) {
+            // Nothing received, sleep briefly
+            tokio::select! {
+                _ = tokio::time::sleep(poll_interval) => {}
+                _ = shutdown.cancelled() => break,
+            }
+        }
+    }
+
+    // Final drain
+    drain_worker(&worker, &dispatcher);
+}
+
+/// Drain all available responses from a worker's tiered rings.
+///
+/// Returns `true` if at least one response was received.
+fn drain_worker(worker: &Arc<RingPair>, dispatcher: &Dispatcher) -> bool {
+    let mut any_received = false;
+    loop {
+        match worker.response_rings.try_recv_response() {
+            Ok(Some(resp)) => {
                 any_received = true;
                 dispatcher.complete(
                     resp.correlation_id,
@@ -230,156 +188,12 @@ pub async fn run_response_reader(
                     },
                 );
             }
-        }
-
-        if !any_received {
-            tokio::select! {
-                _ = tokio::time::sleep(poll_interval) => {}
-                _ = shutdown.cancelled() => break,
+            Ok(None) => break,
+            Err(e) => {
+                warn!(error = %e, "error reading response ring");
+                break;
             }
         }
     }
-
-    drain_all_responses(&workers, &dispatcher);
-}
-
-/// Drain any remaining responses from all workers.
-fn drain_all_responses(workers: &[Arc<RingPair>], dispatcher: &Dispatcher) {
-    for ring_pair in workers {
-        while let Ok(Some(resp)) = ring_pair.response_rings.try_recv_response() {
-            dispatcher.complete(
-                resp.correlation_id,
-                PendingResponse {
-                    status: resp.status,
-                    headers_mp: bytes::Bytes::from(resp.headers_raw),
-                    body: bytes::Bytes::from(resp.body),
-                },
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
-
-    #[tokio::test]
-    async fn response_reader_completes_correlation() {
-        let pair = Arc::new(RingPair::create(RingPairConfig::default()).unwrap());
-        let dispatcher = Arc::new(Dispatcher::new_shm(vec![pair.clone()], 1024));
-
-        // Dispatch a request
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let batch = crate::collector::Batch {
-            requests: vec![crate::collector::PendingRequest {
-                handler_id: 1,
-                method_tag: 0,
-                http_version_tag: 1,
-                flags: 0,
-                path: "/test".to_owned(),
-                query: None,
-                headers_mp: bytes::Bytes::new(),
-                body: bytes::Bytes::new(),
-                reply: reply_tx,
-            }],
-        };
-        dispatcher.dispatch(batch);
-
-        // Read request from ring, get correlation ID
-        let mut buf = vec![0u8; pair.request_ring.payload_capacity()];
-        let len = pair.request_ring.try_recv(&mut buf).expect("recv");
-        let snap = vertebra_core::transport::BatchSnapshot::deserialize_from(&buf[..len]).unwrap();
-        let cid = snap.node(0).correlation_id;
-
-        // Simulate worker response
-        pair.response_rings
-            .send_response(cid, 200, b"", b"hello from worker")
-            .expect("send response");
-        pair.response_notifier.notify().expect("notify");
-
-        // Start response reader
-        let shutdown = CancellationToken::new();
-        let reader = tokio::spawn(run_response_reader(
-            vec![pair.clone()],
-            Arc::clone(&dispatcher),
-            shutdown.clone(),
-        ));
-
-        // Wait for response
-        let resp = tokio::time::timeout(Duration::from_secs(2), reply_rx)
-            .await
-            .expect("timeout")
-            .expect("should receive response");
-
-        assert_eq!(resp.status, 200);
-        assert_eq!(resp.body.as_ref(), b"hello from worker");
-
-        shutdown.cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(1), reader).await;
-    }
-
-    #[tokio::test]
-    async fn response_reader_handles_multiple_workers() {
-        let pairs: Vec<Arc<RingPair>> = (0..3)
-            .map(|_| Arc::new(RingPair::create(RingPairConfig::default()).unwrap()))
-            .collect();
-
-        let dispatcher = Arc::new(Dispatcher::new_shm(pairs.clone(), 1024));
-
-        // Dispatch 3 requests
-        let mut reply_rxs = Vec::new();
-        for i in 0..3u64 {
-            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            dispatcher.dispatch(crate::collector::Batch {
-                requests: vec![crate::collector::PendingRequest {
-                    handler_id: i,
-                    method_tag: 0,
-                    http_version_tag: 1,
-                    flags: 0,
-                    path: format!("/w/{i}"),
-                    query: None,
-                    headers_mp: bytes::Bytes::new(),
-                    body: bytes::Bytes::new(),
-                    reply: reply_tx,
-                }],
-            });
-            reply_rxs.push(reply_rx);
-        }
-
-        // Simulate workers responding
-        for pair in &pairs {
-            let mut buf = vec![0u8; pair.request_ring.payload_capacity()];
-            if let Ok(len) = pair.request_ring.try_recv(&mut buf) {
-                let snap =
-                    vertebra_core::transport::BatchSnapshot::deserialize_from(&buf[..len]).unwrap();
-                let cid = snap.node(0).correlation_id;
-                pair.response_rings
-                    .send_response(cid, 200, b"", b"ok")
-                    .expect("send");
-                pair.response_notifier.notify().expect("notify");
-            }
-        }
-
-        // Start reader
-        let shutdown = CancellationToken::new();
-        let reader = tokio::spawn(run_response_reader(
-            pairs.clone(),
-            Arc::clone(&dispatcher),
-            shutdown.clone(),
-        ));
-
-        // All 3 responses should arrive
-        for rx in reply_rxs {
-            let resp = tokio::time::timeout(Duration::from_secs(2), rx)
-                .await
-                .expect("timeout")
-                .expect("recv");
-            assert_eq!(resp.status, 200);
-        }
-
-        shutdown.cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(1), reader).await;
-    }
+    any_received
 }

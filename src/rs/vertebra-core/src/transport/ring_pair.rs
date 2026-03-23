@@ -455,7 +455,7 @@ impl RingPair {
     /// Reads the `VERTEBRA_*` env var protocol and attaches to the inherited
     /// shared memory regions and notifier FDs.
     #[cfg(unix)]
-    pub fn from_env() -> Result<Self, RingPairError> {
+    pub fn from_env(config: RingPairConfig) -> Result<Self, RingPairError> {
         fn env_parse<T: std::str::FromStr>(key: &str) -> Result<T, RingPairError> {
             std::env::var(key)
                 .map_err(|_| RingPairError::EnvVar(key.to_owned()))
@@ -466,23 +466,13 @@ impl RingPair {
         }
 
         let req_ring_fd: RawFd = env_parse("VERTEBRA_REQ_RING_FD")?;
-        let req_ring_size: usize = env_parse("VERTEBRA_REQ_RING_SIZE")?;
+        let _req_ring_size: usize = env_parse("VERTEBRA_REQ_RING_SIZE")?;
         let resp_small_fd: RawFd = env_parse("VERTEBRA_RESP_RING_SMALL_FD")?;
         let resp_medium_fd: RawFd = env_parse("VERTEBRA_RESP_RING_MEDIUM_FD")?;
         let resp_large_fd: RawFd = env_parse("VERTEBRA_RESP_RING_LARGE_FD")?;
         let resp_xlarge_fd: RawFd = env_parse("VERTEBRA_RESP_RING_XLARGE_FD")?;
         let req_notify_fd: RawFd = env_parse("VERTEBRA_REQ_NOTIFY_FD")?;
         let resp_notify_fd: RawFd = env_parse("VERTEBRA_RESP_NOTIFY_FD")?;
-
-        // Reconstruct config from env — we need slot sizes and counts.
-        // The supervisor passes ring layout total sizes, from which we derive config.
-        // For simplicity, use defaults and override request ring size from env.
-        let config = RingPairConfig::default();
-
-        // Derive request slot_size from total ring size and default slot count.
-        // total_size = header_size + slot_size * slots
-        // We use default slots and solve for slot_size approximately.
-        let _ = req_ring_size; // Used for ShmRegion::map inside from_inherited
 
         // SAFETY: the env vars were set by the supervisor which created
         // valid ShmRegions and Notifier FDs before spawning this worker.

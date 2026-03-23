@@ -17,7 +17,7 @@ use tracing::{debug, error, warn};
 
 use vertebra_core::bridge::{BatchBridge, WriteRequest};
 use vertebra_core::transport::ring_pair::RingPair;
-use vertebra_core::transport::{BatchSnapshot, TransportNode};
+use vertebra_core::transport::{BatchSnapshot, Transport, TransportNode};
 
 use crate::collector::{Batch, PendingResponse};
 use crate::correlation::CorrelationSlab;
@@ -56,6 +56,7 @@ pub struct DirectRequest {
 /// Per-worker state for SHM dispatch.
 struct WorkerState {
     ring_pair: Arc<RingPair>,
+    transport: Transport,
 }
 
 /// SharedMemory dispatcher with round-robin routing and O(1) correlation.
@@ -70,7 +71,10 @@ impl ShmDispatcher {
     pub fn new(ring_pairs: Vec<Arc<RingPair>>, max_inflight: usize) -> Self {
         let workers: Vec<WorkerState> = ring_pairs
             .into_iter()
-            .map(|rp| WorkerState { ring_pair: rp })
+            .map(|rp| WorkerState {
+                transport: Transport::new_shared_memory(Arc::clone(&rp)),
+                ring_pair: rp,
+            })
             .collect();
 
         Self {
@@ -137,7 +141,7 @@ impl ShmDispatcher {
                 match worker.ring_pair.request_ring.try_send(&buf, 0) {
                     Ok(()) => {
                         // Notify worker
-                        let _ = worker.ring_pair.request_notifier.notify();
+                        let _ = worker.transport.notify_request();
                         dispatched = true;
                         break;
                     }

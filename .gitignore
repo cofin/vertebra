@@ -69,7 +69,7 @@ specs/archive
 uv.toml
 .agents/
 .beads/
-
+.agent/
 # Benchmark results (DuckDB, JSONL)
 tools/benchmarks/results/*.jsonl
 tools/benchmarks/results/*.duckdb

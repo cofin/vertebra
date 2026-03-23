@@ -18,6 +18,32 @@ pub enum Backend {
     SharedMemory(Arc<RingPair>),
 }
 
+impl Backend {
+    /// Signal the response notifier (SharedMemory only).
+    pub fn notify_response(&self) -> Result<(), std::io::Error> {
+        match self {
+            Backend::InProcess(_) => Ok(()),
+            Backend::SharedMemory(ring_pair) => ring_pair.response_notifier.notify(),
+        }
+    }
+
+    /// Clear the request notifier (SharedMemory only).
+    pub fn clear_request(&self) -> Result<(), std::io::Error> {
+        match self {
+            Backend::InProcess(_) => Ok(()),
+            Backend::SharedMemory(ring_pair) => ring_pair.request_notifier.clear(),
+        }
+    }
+
+    /// Signal the request notifier (SharedMemory only).
+    pub fn notify_request(&self) -> Result<(), std::io::Error> {
+        match self {
+            Backend::InProcess(_) => Ok(()),
+            Backend::SharedMemory(ring_pair) => ring_pair.request_notifier.notify(),
+        }
+    }
+}
+
 /// Primary abstraction for request batch delivery.
 ///
 /// Enables Python workers to poll for batches without knowing whether they
@@ -64,6 +90,20 @@ impl Transport {
         }
     }
 
+    /// Poll for the next batch without blocking.
+    pub fn poll_batch_async(&self) -> Option<Arc<BatchSnapshot>> {
+        match &self.backend {
+            Backend::InProcess(rx) => rx.try_recv().ok(),
+            Backend::SharedMemory(ring_pair) => {
+                let mut buf = vec![0u8; ring_pair.request_ring.payload_capacity()];
+                match ring_pair.request_ring.try_recv(&mut buf) {
+                    Ok(len) => BatchSnapshot::deserialize_from(&buf[..len]).ok(),
+                    Err(_) => None,
+                }
+            }
+        }
+    }
+
     /// Send a response back through the transport.
     ///
     /// Only meaningful for `Backend::SharedMemory` — routes to the tiered
@@ -99,6 +139,32 @@ impl Transport {
                 ring_pair.response_rings.try_recv_response().ok().flatten()
             }
         }
+    }
+
+    /// Signal that one or more responses have been written to the rings.
+    ///
+    /// This should be called by the worker after one or more `send_response`
+    /// calls to wake up the supervisor.
+    pub fn notify_response(&self) -> Result<(), TransportError> {
+        self.backend
+            .notify_response()
+            .map_err(|_| TransportError::Disconnected)
+    }
+
+    /// Clear the request notification signal.
+    ///
+    /// Should be called after receiving a batch in async mode.
+    pub fn clear_request(&self) -> Result<(), TransportError> {
+        self.backend
+            .clear_request()
+            .map_err(|_| TransportError::Disconnected)
+    }
+
+    /// Signal that a new batch is available in the request ring.
+    pub fn notify_request(&self) -> Result<(), TransportError> {
+        self.backend
+            .notify_request()
+            .map_err(|_| TransportError::Disconnected)
     }
 }
 
