@@ -1,5 +1,9 @@
 """Tests for the native FFI bridge (Ch6)."""
 
+import runpy
+import sys
+from types import ModuleType, SimpleNamespace
+
 import pytest
 
 from vertebra._vertebra import (  # type: ignore[import-untyped]
@@ -105,3 +109,102 @@ def test_worker_import_app_invalid_format() -> None:
 
     with pytest.raises(ValueError, match="module:attr"):
         _import_app("invalid_no_colon")
+
+
+def test_worker_main_shm_transport_initialized_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SHM workers must not initialize the native transport twice."""
+    from vertebra.server import _native as native_module
+    from vertebra.supervisor import _worker as worker_module
+
+    init_calls: list[str] = []
+    state = {"mode": "inprocess", "shm_loop_calls": 0}
+
+    fake_ext = ModuleType("vertebra._vertebra")
+
+    class FakeVertebraResponse:
+        def __init__(self, status: int = 200, body: bytes = b"", request_id: int = 0) -> None:
+            self.status = status
+            self.body = body
+            self.request_id = request_id
+            self.headers: list[tuple[str, str]] = []
+
+    def fake_init_transport(*, mode: str = "inprocess", **_: object) -> None:
+        init_calls.append(mode)
+        if len(init_calls) > 1:
+            msg = "transport initialized twice"
+            raise RuntimeError(msg)
+        state["mode"] = mode
+
+    def fake_get_request_notify_fd() -> int:
+        return 11 if state["mode"] == "shm" else -1
+
+    fake_ext.VertebraResponse = FakeVertebraResponse
+    fake_ext.init_transport = fake_init_transport
+    fake_ext.get_request_notify_fd = fake_get_request_notify_fd
+    fake_ext.get_batch = lambda timeout_ms=100: None
+    fake_ext.submit_results = lambda responses: None
+
+    class FakeScheduler:
+        def __init__(self) -> None:
+            self.loop = object()
+
+        def stop(self) -> None:
+            return None
+
+    class FakeExecutor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def shutdown(self, wait: bool = False) -> None:  # noqa: FBT001, ARG002
+            return None
+
+    async def fake_shm_worker_loop(*args: object, **kwargs: object) -> None:
+        state["shm_loop_calls"] += 1
+
+    fake_app = SimpleNamespace(_handlers={}, mounts=[])
+
+    monkeypatch.setitem(sys.modules, "vertebra._vertebra", fake_ext)
+    monkeypatch.setattr(worker_module, "_import_app", lambda app_path: fake_app)
+    monkeypatch.setattr(native_module, "_install_signal_handlers", lambda: None)
+    monkeypatch.setattr(native_module, "CallbackScheduler", FakeScheduler)
+    monkeypatch.setattr(native_module, "ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(native_module, "_shm_worker_loop", fake_shm_worker_loop)
+    monkeypatch.setenv("VERTEBRA_TRANSPORT_MODE", "shm")
+    monkeypatch.setenv("VERTEBRA_APP", "fake.module:app")
+    monkeypatch.setenv("VERTEBRA_WORKERS", "1")
+
+    worker_module.main()
+
+    assert init_calls == ["shm"]
+    assert state["shm_loop_calls"] == 1
+
+
+def test_worker_module_executes_main_when_run_as_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    """python -m vertebra.supervisor._worker must invoke main()."""
+    from vertebra.server import _native as native_module
+
+    fake_ext = ModuleType("vertebra._vertebra")
+    fake_ext.init_transport = lambda *args, **kwargs: None
+
+    fake_app = SimpleNamespace(_handlers={}, mounts=[])
+    fake_app_module = ModuleType("fake_worker_app")
+    fake_app_module.app = fake_app
+
+    run_worker_calls: list[tuple[object, dict[str, object]]] = []
+
+    monkeypatch.setitem(sys.modules, "vertebra._vertebra", fake_ext)
+    monkeypatch.setitem(sys.modules, "fake_worker_app", fake_app_module)
+    monkeypatch.delitem(sys.modules, "vertebra.supervisor._worker", raising=False)
+    monkeypatch.setattr(
+        native_module,
+        "run_worker",
+        lambda handlers, **kwargs: run_worker_calls.append((handlers, kwargs)),
+    )
+    monkeypatch.setenv("VERTEBRA_TRANSPORT_MODE", "shm")
+    monkeypatch.setenv("VERTEBRA_APP", "fake_worker_app:app")
+    monkeypatch.setenv("VERTEBRA_WORKERS", "1")
+
+    runpy.run_module("vertebra.supervisor._worker", run_name="__main__")
+
+    assert len(run_worker_calls) == 1
+    assert run_worker_calls[0][0] == {}

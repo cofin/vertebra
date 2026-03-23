@@ -129,6 +129,28 @@ impl Transport {
         }
     }
 
+    /// Send a response back through the transport, blocking until the selected
+    /// response ring has space if it is currently full.
+    pub fn send_response_blocking(
+        &self,
+        correlation_id: u64,
+        status: u16,
+        headers_raw: &[u8],
+        body: &[u8],
+    ) -> Result<(), TransportError> {
+        match &self.backend {
+            Backend::InProcess(_) => Ok(()),
+            Backend::SharedMemory(ring_pair) => ring_pair
+                .response_rings
+                .send_response_blocking(correlation_id, status, headers_raw, body)
+                .map_err(|e| match e {
+                    RingPairError::ResponseTooLarge(_) => TransportError::ResponseTooLarge,
+                    RingPairError::Channel(ChannelError::Full) => TransportError::RingFull,
+                    _ => TransportError::Disconnected,
+                }),
+        }
+    }
+
     /// Try to receive a response from the shared-memory transport.
     ///
     /// Returns `None` if no response is available or if using in-process backend.

@@ -8,6 +8,7 @@
 //! - **SharedMemory**: requests serialized into per-worker SPSC rings,
 //!   responses read from tiered response rings. Uses O(1) `CorrelationSlab`.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -59,6 +60,34 @@ struct WorkerState {
     transport: Transport,
 }
 
+struct PendingShmDispatchBatch {
+    flags: u32,
+    slab: Vec<u8>,
+    nodes: Vec<TransportNode>,
+    correlation_ids: Vec<u64>,
+}
+
+impl PendingShmDispatchBatch {
+    fn new(flags: u32) -> Self {
+        Self {
+            flags,
+            slab: Vec::new(),
+            nodes: Vec::new(),
+            correlation_ids: Vec::new(),
+        }
+    }
+}
+
+struct TransportRequestView<'a> {
+    handler_id: u64,
+    method_tag: u8,
+    http_version_tag: u8,
+    path: &'a str,
+    query: Option<&'a str>,
+    headers_mp: &'a bytes::Bytes,
+    body: &'a bytes::Bytes,
+}
+
 /// SharedMemory dispatcher with round-robin routing and O(1) correlation.
 pub struct ShmDispatcher {
     workers: Vec<WorkerState>,
@@ -87,10 +116,10 @@ impl ShmDispatcher {
     /// Dispatch a batch to workers via SPSC rings.
     ///
     /// Each request in the batch is:
-    /// 1. Given a correlation ID from the slab
-    /// 2. Serialized as a single-request BatchSnapshot
-    /// 3. Written to the next available worker's request ring (round-robin)
-    /// 4. Worker notified via eventfd
+    /// 1. Assigned to a worker in round-robin order
+    /// 2. Appended to a per-worker, per-flags `BatchSnapshot`
+    /// 3. Correlation IDs allocated from the slab
+    /// 4. Flushed into the worker request ring with one notify per snapshot
     pub fn dispatch_shm(&self, batch: Batch) {
         use vertebra_core::protocol::flags;
 
@@ -100,77 +129,113 @@ impl ShmDispatcher {
             return;
         }
 
-        for req in batch.requests {
-            let is_fnf = req.flags & flags::FIRE_AND_FORGET != 0;
+        let start = self
+            .next_worker
+            .fetch_add(batch.requests.len().max(1), Ordering::Relaxed);
+        let mut pending_batches: HashMap<(usize, u32), PendingShmDispatchBatch> = HashMap::new();
 
-            let req_flags = req.flags;
+        for (offset, req) in batch.requests.into_iter().enumerate() {
+            let crate::collector::PendingRequest {
+                handler_id,
+                method_tag,
+                http_version_tag,
+                flags: req_flags,
+                path,
+                query,
+                headers_mp,
+                body,
+                reply,
+            } = req;
+            let request_view = TransportRequestView {
+                handler_id,
+                method_tag,
+                http_version_tag,
+                path: &path,
+                query: query.as_deref(),
+                headers_mp: &headers_mp,
+                body: &body,
+            };
+            let is_fnf = req_flags & flags::FIRE_AND_FORGET != 0;
+            let mut reply = Some(reply);
 
-            // Build a single-request BatchSnapshot (borrows req)
-            let (slab_data, mut node) = build_transport_node(&req, 0);
-            let reply = req.reply;
+            let preferred_worker = (start + offset) % worker_count;
+            let worker_idx = if pending_batches.contains_key(&(preferred_worker, req_flags)) {
+                Some(preferred_worker)
+            } else {
+                (0..worker_count)
+                    .map(|attempt| (preferred_worker + attempt) % worker_count)
+                    .find(|&idx| worker_ring_has_capacity(&self.workers[idx]))
+            };
+
+            let Some(worker_idx) = worker_idx else {
+                warn!("all worker rings full, responding with 503");
+                if !is_fnf {
+                    if let Some(reply) = reply.take() {
+                        let _ = reply.send(service_unavailable_response());
+                    }
+                }
+                continue;
+            };
+
+            let batch_key = (worker_idx, req_flags);
+            let max_payload = self.workers[worker_idx]
+                .ring_pair
+                .request_ring
+                .payload_capacity();
+            if let Some(pending) = pending_batches.get(&batch_key) {
+                if !batch_can_fit_request(pending, &request_view, max_payload) {
+                    let flushed = pending_batches
+                        .remove(&batch_key)
+                        .expect("pending SHM batch should exist");
+                    self.flush_shm_dispatch_batch(worker_idx, flushed);
+                }
+            }
+
+            if batch_snapshot_serialized_size(1, request_slab_size(&request_view)) > max_payload {
+                warn!(
+                    worker = worker_idx,
+                    "request batch too large for SHM slot, responding with 503"
+                );
+                if !is_fnf {
+                    if let Some(reply) = reply.take() {
+                        let _ = reply.send(service_unavailable_response());
+                    }
+                }
+                continue;
+            }
 
             // Allocate correlation ID (unless F&F)
             let correlation_id = if is_fnf {
                 0
             } else {
-                let worker_idx = self.next_worker.load(Ordering::Relaxed) % worker_count;
                 let mut slab = self.correlation.lock().unwrap();
-                match slab.insert(reply, worker_idx as u32) {
-                    Some(id) => id,
-                    None => {
-                        error!("correlation slab full, dropping request");
-                        continue;
+                if slab.in_flight() >= slab.capacity() {
+                    drop(slab);
+                    warn!("correlation slab full, responding with 503");
+                    if let Some(reply) = reply.take() {
+                        let _ = reply.send(service_unavailable_response());
                     }
+                    continue;
                 }
+                slab.insert(
+                    reply.take().expect("reply must be present"),
+                    worker_idx as u32,
+                )
+                .expect("correlation slot should be available after capacity check")
             };
 
-            node.correlation_id = correlation_id;
-
-            let snap = BatchSnapshot::new_with_flags(slab_data, vec![node], req_flags);
-            let mut buf = vec![0u8; snap.serialized_size()];
-            snap.serialize_into(&mut buf);
-
-            // Round-robin worker selection with shadow-index backpressure
-            let start = self.next_worker.fetch_add(1, Ordering::Relaxed);
-            let mut dispatched = false;
-
-            for attempt in 0..worker_count {
-                let idx = (start + attempt) % worker_count;
-                let worker = &self.workers[idx];
-
-                match worker.ring_pair.request_ring.try_send(&buf, 0) {
-                    Ok(()) => {
-                        // Notify worker
-                        let _ = worker.transport.notify_request();
-                        dispatched = true;
-                        break;
-                    }
-                    Err(vertebra_core::channel::ChannelError::Full) => {
-                        // Ring full — try next worker
-                        debug!(worker = idx, "request ring full, trying next worker");
-                        continue;
-                    }
-                    Err(e) => {
-                        error!(worker = idx, error = %e, "ring send error");
-                        continue;
-                    }
-                }
+            let pending = pending_batches
+                .entry(batch_key)
+                .or_insert_with(|| PendingShmDispatchBatch::new(req_flags));
+            let node = append_transport_node(&request_view, correlation_id, &mut pending.slab);
+            pending.nodes.push(node);
+            if !is_fnf {
+                pending.correlation_ids.push(correlation_id);
             }
+        }
 
-            if !dispatched {
-                warn!("all worker rings full, responding with 503");
-                if !is_fnf {
-                    let mut slab = self.correlation.lock().unwrap();
-                    slab.complete(
-                        correlation_id,
-                        PendingResponse {
-                            status: 503,
-                            headers_mp: bytes::Bytes::new(),
-                            body: bytes::Bytes::from_static(b"Service Unavailable"),
-                        },
-                    );
-                }
-            }
+        for ((worker_idx, _flags), pending) in pending_batches {
+            self.flush_shm_dispatch_batch(worker_idx, pending);
         }
     }
 
@@ -186,25 +251,68 @@ impl ShmDispatcher {
             .map(|w| Arc::clone(&w.ring_pair))
             .collect()
     }
+
+    fn flush_shm_dispatch_batch(&self, worker_idx: usize, pending: PendingShmDispatchBatch) {
+        let worker = &self.workers[worker_idx];
+        let snap = BatchSnapshot::new_with_flags(pending.slab, pending.nodes, pending.flags);
+        let mut buf = vec![0u8; snap.serialized_size()];
+        snap.serialize_into(&mut buf);
+
+        match worker.ring_pair.request_ring.try_send(&buf, 0) {
+            Ok(()) => {
+                let _ = worker.transport.notify_request();
+            }
+            Err(vertebra_core::channel::ChannelError::Full) => {
+                debug!(worker = worker_idx, "request ring became full before send");
+                if !pending.correlation_ids.is_empty() {
+                    let mut slab = self.correlation.lock().unwrap();
+                    for correlation_id in pending.correlation_ids {
+                        slab.complete(correlation_id, service_unavailable_response());
+                    }
+                }
+            }
+            Err(e) => {
+                error!(worker = worker_idx, error = %e, "ring send error");
+                if !pending.correlation_ids.is_empty() {
+                    let mut slab = self.correlation.lock().unwrap();
+                    for correlation_id in pending.correlation_ids {
+                        slab.complete(correlation_id, service_unavailable_response());
+                    }
+                }
+            }
+        }
+    }
 }
 
-/// Build a TransportNode + slab data from a pending request.
-fn build_transport_node(
-    req: &crate::collector::PendingRequest,
+fn request_slab_size(req: &TransportRequestView<'_>) -> usize {
+    req.path.len() + req.query.map_or(0, str::len) + req.headers_mp.len() + req.body.len()
+}
+
+fn batch_snapshot_serialized_size(node_count: usize, slab_len: usize) -> usize {
+    const BATCH_HEADER_SIZE: usize = 16;
+    BATCH_HEADER_SIZE + node_count * std::mem::size_of::<TransportNode>() + slab_len
+}
+
+fn batch_can_fit_request(
+    pending: &PendingShmDispatchBatch,
+    req: &TransportRequestView<'_>,
+    max_payload: usize,
+) -> bool {
+    let next_nodes = pending.nodes.len() + 1;
+    let next_slab = pending.slab.len() + request_slab_size(req);
+    batch_snapshot_serialized_size(next_nodes, next_slab) <= max_payload
+}
+
+/// Append a pending request to a shared slab and return its TransportNode.
+fn append_transport_node(
+    req: &TransportRequestView<'_>,
     correlation_id: u64,
-) -> (Vec<u8>, TransportNode) {
+    slab: &mut Vec<u8>,
+) -> TransportNode {
     let path_bytes = req.path.as_bytes();
-    let query_bytes = req.query.as_ref().map(|q| q.as_bytes());
+    let query_bytes = req.query.map(str::as_bytes);
     let headers_bytes = &req.headers_mp[..];
     let body_bytes = &req.body[..];
-
-    // Build slab: path + query + headers + body
-    let mut slab = Vec::with_capacity(
-        path_bytes.len()
-            + query_bytes.map_or(0, |q| q.len())
-            + headers_bytes.len()
-            + body_bytes.len(),
-    );
 
     let path_offset = slab.len() as u32;
     slab.extend_from_slice(path_bytes);
@@ -224,7 +332,7 @@ fn build_transport_node(
     slab.extend_from_slice(body_bytes);
     let body_len = body_bytes.len() as u32;
 
-    let node = TransportNode {
+    TransportNode {
         method_tag: req.method_tag,
         http_version_tag: req.http_version_tag,
         _pad: [0; 2],
@@ -238,9 +346,22 @@ fn build_transport_node(
         headers_len,
         body_offset,
         body_len,
-    };
+    }
+}
 
-    (slab, node)
+fn service_unavailable_response() -> PendingResponse {
+    PendingResponse {
+        status: 503,
+        headers_mp: bytes::Bytes::new(),
+        body: bytes::Bytes::from_static(b"Service Unavailable"),
+    }
+}
+
+fn worker_ring_has_capacity(worker: &WorkerState) -> bool {
+    let stats = worker.ring_pair.request_ring.stats();
+    let mask = (stats.slots as u64).wrapping_sub(1);
+    let next = stats.write_head.wrapping_add(1) & mask;
+    next != stats.read_head
 }
 
 /// Dispatcher state shared between the write task and the response router.
@@ -432,6 +553,34 @@ impl Dispatcher {
                     let _ = tx.send(response);
                 } else {
                     debug!(id = correlation_id, "no pending request for correlation ID");
+                }
+            }
+        }
+    }
+
+    /// Complete multiple requests with a single pass through the tracking state.
+    pub fn complete_many(&self, responses: Vec<(u64, PendingResponse)>) {
+        match self.inner.mode {
+            DispatchMode::SharedMemory => {
+                if let Some(shm) = &self.inner.shm_dispatcher {
+                    let mut slab = shm.correlation().lock().unwrap();
+                    for (correlation_id, response) in responses {
+                        if !slab.complete(correlation_id, response) {
+                            debug!(
+                                id = correlation_id,
+                                "no pending SHM request for correlation ID"
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {
+                for (correlation_id, response) in responses {
+                    if let Some((_, tx)) = self.inner.pending.remove(&correlation_id) {
+                        let _ = tx.send(response);
+                    } else {
+                        debug!(id = correlation_id, "no pending request for correlation ID");
+                    }
                 }
             }
         }

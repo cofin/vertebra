@@ -172,18 +172,19 @@ async fn run_worker_reader_polling(
 /// Returns `true` if at least one response was received.
 fn drain_worker(worker: &Arc<RingPair>, dispatcher: &Dispatcher) -> bool {
     let mut any_received = false;
+    let mut completions = Vec::new();
     loop {
         match worker.response_rings.try_recv_response() {
             Ok(Some(resp)) => {
                 any_received = true;
-                dispatcher.complete(
+                completions.push((
                     resp.correlation_id,
                     PendingResponse {
                         status: resp.status,
                         headers_mp: bytes::Bytes::from(resp.headers_raw),
                         body: bytes::Bytes::from(resp.body),
                     },
-                );
+                ));
             }
             Ok(None) => break,
             Err(e) => {
@@ -191,6 +192,9 @@ fn drain_worker(worker: &Arc<RingPair>, dispatcher: &Dispatcher) -> bool {
                 break;
             }
         }
+    }
+    if !completions.is_empty() {
+        dispatcher.complete_many(completions);
     }
     any_received
 }

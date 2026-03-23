@@ -223,6 +223,42 @@ impl TieredRingSet {
         ring.try_send(&buf, 0).map_err(RingPairError::Channel)
     }
 
+    /// Send a response through the appropriate tier ring, blocking until
+    /// space is available if the ring is currently full.
+    pub fn send_response_blocking(
+        &self,
+        correlation_id: u64,
+        status: u16,
+        headers_raw: &[u8],
+        body: &[u8],
+    ) -> Result<(), RingPairError> {
+        let total_size = RESPONSE_HEADER_SIZE + headers_raw.len() + body.len();
+        let ring = self
+            .select_ring(total_size)
+            .ok_or(RingPairError::ResponseTooLarge(total_size))?;
+
+        let mut buf = vec![0u8; total_size];
+        let mut offset = 0;
+
+        buf[offset..offset + 4].copy_from_slice(&RESPONSE_MAGIC.to_le_bytes());
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&correlation_id.to_le_bytes());
+        offset += 8;
+        buf[offset..offset + 2].copy_from_slice(&status.to_le_bytes());
+        offset += 2;
+        let headers_len = headers_raw.len() as u16;
+        buf[offset..offset + 2].copy_from_slice(&headers_len.to_le_bytes());
+        offset += 2;
+        let body_len = body.len() as u32;
+        buf[offset..offset + 4].copy_from_slice(&body_len.to_le_bytes());
+        offset += 4;
+        buf[offset..offset + headers_raw.len()].copy_from_slice(headers_raw);
+        offset += headers_raw.len();
+        buf[offset..offset + body.len()].copy_from_slice(body);
+
+        ring.send(&buf, 0).map_err(RingPairError::Channel)
+    }
+
     /// Try to receive a response from any tier (checks small → xlarge).
     ///
     /// Returns `None` if no response is available on any tier.

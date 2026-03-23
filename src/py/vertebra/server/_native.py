@@ -415,11 +415,16 @@ def run_worker(
     global _RUNNING  # noqa: PLW0603
     _RUNNING = True
 
-    # Initialize the transport channel.
-    is_shm = get_request_notify_fd() > -1
+    # Initialize the transport channel once. SHM workers may already have
+    # initialized the transport in the process entrypoint before delegating
+    # here, so we must not call init_transport(mode="shm") twice.
+    transport_mode = os.environ.get("VERTEBRA_TRANSPORT_MODE", "inprocess")
+    notify_fd = get_request_notify_fd()
+    is_shm = transport_mode == "shm" or notify_fd > -1
 
     if is_shm:
-        init_transport(mode="shm")
+        if notify_fd <= -1:
+            init_transport(mode="shm")
     else:
         init_transport()
 

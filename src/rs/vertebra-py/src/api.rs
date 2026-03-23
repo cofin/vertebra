@@ -12,7 +12,7 @@ use std::time::Duration;
 use pyo3::prelude::*;
 
 use vertebra_core::bridge::{BatchBridge, BridgeResponse};
-use vertebra_core::transport::Transport;
+use vertebra_core::transport::{Transport, TransportError};
 
 use crate::batch::VertebraBatch;
 use crate::response::VertebraResponse;
@@ -111,23 +111,24 @@ pub fn submit_results(py: Python<'_>, responses: Vec<Py<VertebraResponse>>) -> P
             return Ok(());
         }
 
+        let mut pending_notification = false;
         for py_resp in &responses {
             let resp = py_resp.borrow(py);
-
-            // Encode headers into compact binary format
             let headers_raw = encode_headers_compact(&resp.headers);
-
-            transport
-                .send_response(resp.request_id, resp.status, &headers_raw, &resp.body)
-                .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "failed to send response: {e}"
-                    ))
-                })?;
+            send_shm_response_with_backpressure(
+                transport,
+                &mut pending_notification,
+                resp.request_id,
+                resp.status,
+                &headers_raw,
+                &resp.body,
+            )
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("failed to send response: {e}"))
+            })?;
         }
 
-        // Notify supervisor that responses are available
-        transport.notify_response().map_err(|e| {
+        flush_shm_response_notification(transport, &mut pending_notification).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("failed to notify supervisor: {e}"))
         })?;
 
@@ -215,4 +216,123 @@ fn encode_headers_compact(headers: &[(String, String)]) -> Vec<u8> {
         buf.extend_from_slice(v);
     }
     buf
+}
+
+fn flush_shm_response_notification(
+    transport: &Transport,
+    pending_notification: &mut bool,
+) -> Result<(), TransportError> {
+    if *pending_notification {
+        transport.notify_response()?;
+        *pending_notification = false;
+    }
+    Ok(())
+}
+
+fn send_shm_response_with_backpressure(
+    transport: &Transport,
+    pending_notification: &mut bool,
+    request_id: u64,
+    status: u16,
+    headers_raw: &[u8],
+    body: &[u8],
+) -> Result<(), TransportError> {
+    match transport.send_response(request_id, status, headers_raw, body) {
+        Ok(()) => {
+            *pending_notification = true;
+            Ok(())
+        }
+        Err(TransportError::RingFull) => {
+            // Wake the supervisor before waiting so previously queued responses
+            // can drain and make room for the current one.
+            transport.notify_response()?;
+            *pending_notification = false;
+
+            transport.send_response_blocking(request_id, status, headers_raw, body)?;
+
+            *pending_notification = true;
+            Ok(())
+        }
+        Err(err) => {
+            flush_shm_response_notification(transport, pending_notification)?;
+            Err(err)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+
+    use super::*;
+
+    #[test]
+    fn shm_submit_notifies_and_recovers_from_mid_batch_ring_full() {
+        let mut config = RingPairConfig::default();
+        config.response_tiers.small.slot_count = 2;
+
+        let pair = Arc::new(RingPair::create(config).expect("create ring pair"));
+        let transport = Transport::new_shared_memory(Arc::clone(&pair));
+
+        let drained_ids = Arc::new(Mutex::new(Vec::new()));
+        let drained_ids_reader = Arc::clone(&drained_ids);
+        let pair_reader = Arc::clone(&pair);
+        let reader = std::thread::spawn(move || loop {
+            if drained_ids_reader.lock().expect("lock ids").len() >= 2 {
+                break;
+            }
+
+            assert!(
+                pair_reader
+                    .response_notifier
+                    .wait(100)
+                    .expect("wait for response notification"),
+                "response notification should arrive"
+            );
+            pair_reader
+                .response_notifier
+                .clear()
+                .expect("clear response notifier");
+
+            while let Some(resp) = pair_reader
+                .response_rings
+                .try_recv_response()
+                .expect("drain response ring")
+            {
+                drained_ids_reader
+                    .lock()
+                    .expect("lock ids")
+                    .push(resp.correlation_id);
+            }
+        });
+
+        let mut pending_notification = false;
+        send_shm_response_with_backpressure(
+            &transport,
+            &mut pending_notification,
+            1,
+            200,
+            b"",
+            b"first",
+        )
+        .expect("send first response");
+        send_shm_response_with_backpressure(
+            &transport,
+            &mut pending_notification,
+            2,
+            200,
+            b"",
+            b"second",
+        )
+        .expect("recover from ring full");
+        flush_shm_response_notification(&transport, &mut pending_notification)
+            .expect("flush final notification");
+
+        reader.join().expect("reader thread should exit");
+
+        let drained_ids = drained_ids.lock().expect("lock ids");
+        assert_eq!(drained_ids.as_slice(), &[1, 2]);
+    }
 }
