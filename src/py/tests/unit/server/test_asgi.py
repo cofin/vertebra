@@ -304,6 +304,41 @@ def test_asgi_runner_synchronous_interface() -> None:
         runner.close()
 
 
+def test_asgi_runner_shared_running_loop_uses_threadsafe_submission() -> None:
+    import asyncio
+    import threading
+
+    from vertebra.server._asgi._runner import AsgiRunner
+
+    ready = threading.Event()
+    holder: dict[str, asyncio.AbstractEventLoop] = {}
+
+    def run_loop() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        holder["loop"] = loop
+        ready.set()
+        loop.run_forever()
+        loop.close()
+
+    thread = threading.Thread(target=run_loop, daemon=True)
+    thread.start()
+    assert ready.wait(timeout=1.0)
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"shared"})
+
+    runner = AsgiRunner(app, loop=holder["loop"])
+    try:
+        results = runner([MockRequest()])
+        assert results[0].status == 200
+        assert results[0].body == b"shared"
+    finally:
+        holder["loop"].call_soon_threadsafe(holder["loop"].stop)
+        thread.join(timeout=1.0)
+
+
 # --- Extensions ---
 
 

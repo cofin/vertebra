@@ -179,6 +179,53 @@ def test_worker_main_shm_transport_initialized_once(monkeypatch: pytest.MonkeyPa
     assert state["shm_loop_calls"] == 1
 
 
+def test_worker_main_clears_wsgi_executor_on_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Worker shutdown must not leak the module-global WSGI executor."""
+    from vertebra.server import _native as native_module
+    from vertebra.supervisor import _worker as worker_module
+
+    fake_ext = ModuleType("vertebra._vertebra")
+    fake_ext.init_transport = lambda *args, **kwargs: None
+    fake_ext.get_request_notify_fd = lambda: -1
+    fake_ext.get_batch = lambda timeout_ms=100: None
+    fake_ext.submit_results = lambda responses: None
+    fake_ext.VertebraResponse = object
+
+    class FakeScheduler:
+        def __init__(self) -> None:
+            self.loop = object()
+
+        def stop(self) -> None:
+            return None
+
+    class FakeExecutor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def shutdown(self, wait: bool = False) -> None:  # noqa: FBT001, ARG002
+            return None
+
+    async def fake_shm_worker_loop(*args: object, **kwargs: object) -> None:
+        return None
+
+    fake_app = SimpleNamespace(_handlers={}, mounts=[])
+
+    monkeypatch.setitem(sys.modules, "vertebra._vertebra", fake_ext)
+    monkeypatch.setattr(worker_module, "_import_app", lambda app_path: fake_app)
+    monkeypatch.setattr(native_module, "_install_signal_handlers", lambda: None)
+    monkeypatch.setattr(native_module, "CallbackScheduler", FakeScheduler)
+    monkeypatch.setattr(native_module, "ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(native_module, "_shm_worker_loop", fake_shm_worker_loop)
+    monkeypatch.setenv("VERTEBRA_TRANSPORT_MODE", "shm")
+    monkeypatch.setenv("VERTEBRA_APP", "fake.module:app")
+    monkeypatch.setenv("VERTEBRA_WORKERS", "1")
+
+    native_module._wsgi_executor = None
+    worker_module.main()
+
+    assert native_module._wsgi_executor is None
+
+
 def test_worker_module_executes_main_when_run_as_script(monkeypatch: pytest.MonkeyPatch) -> None:
     """python -m vertebra.supervisor._worker must invoke main()."""
     from vertebra.server import _native as native_module

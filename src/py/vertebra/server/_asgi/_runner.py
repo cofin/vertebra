@@ -1,13 +1,17 @@
 """AsgiRunner: integrates AsgiAdapter with the native batch runner."""
 
 import asyncio
+import concurrent.futures
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vertebra.server._asgi._adapter import AsgiAdapter
 from vertebra.server._asgi._queues import AsgiResponse
 
 __all__ = ["AsgiRunner"]
+
+if TYPE_CHECKING:
+    from vertebra.server._native import CallbackScheduler
 
 log = logging.getLogger(__name__)
 
@@ -24,25 +28,27 @@ class AsgiRunner:
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         self._adapter = AsgiAdapter(app, mount_prefix=mount_prefix)
-        self._scheduler: Any = None
+        self._scheduler: CallbackScheduler | None = None
         if loop is not None:
             self._loop = loop
             self._owns_loop = False
         else:
-            from vertebra.server._native import CallbackScheduler
+            from vertebra.server._native import CallbackScheduler as _CallbackScheduler
 
-            self._scheduler = CallbackScheduler()
+            self._scheduler = _CallbackScheduler()
             self._loop = self._scheduler.loop
             self._owns_loop = True
 
     def __call__(self, requests: list[Any]) -> list[AsgiResponse]:
         """Process a batch of requests synchronously."""
         if self._scheduler:
-            import concurrent.futures
-
             fut = self._scheduler.schedule(self._adapter.run_batch(requests))
             concurrent.futures.wait([fut])
-            return fut.result()  # type: ignore[no-any-return]
+            return fut.result()
+
+        if self._loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(self._adapter.run_batch(requests), self._loop)
+            return future.result()
 
         return self._loop.run_until_complete(self._adapter.run_batch(requests))
 

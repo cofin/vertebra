@@ -16,7 +16,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 _RUNNING = True
+_T = TypeVar("_T")
 
 
 class CallbackScheduler:
@@ -52,9 +53,9 @@ class CallbackScheduler:
             self._thread.join(timeout=5.0)
             self._loop.close()
 
-    def schedule(self, coro: "Coroutine[Any, Any, Any]") -> "concurrent.futures.Future[Any]":
+    def schedule(self, coro: "Coroutine[Any, Any, _T]") -> "concurrent.futures.Future[_T]":
         """Schedule a coroutine onto the event loop and return a Future."""
-        future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+        future: concurrent.futures.Future[_T] = concurrent.futures.Future()
 
         def _callback() -> None:
             async def _wrap() -> None:
@@ -71,8 +72,8 @@ class CallbackScheduler:
 
     def schedule_batch(
         self,
-        coros: "list[Coroutine[Any, Any, Any]]",
-    ) -> "list[concurrent.futures.Future[Any]]":
+        coros: "list[Coroutine[Any, Any, _T]]",
+    ) -> "list[concurrent.futures.Future[_T]]":
         """Schedule multiple coroutines and return their Futures."""
         return [self.schedule(c) for c in coros]
 
@@ -349,12 +350,15 @@ async def _shm_worker_loop(
     ready_event = asyncio.Event()
 
     # Create mount adapters once
-    active_mounts = []
+    active_mounts: list[tuple[str, Any, str]] = []
     for prefix, app, protocol in resolved_mounts:
         if protocol == "asgi":
             from vertebra.server._asgi._runner import AsgiRunner
 
-            active_mounts.append((prefix, AsgiRunner(app, mount_prefix=prefix, loop=loop), "asgi"))
+            # AsgiRunner is a synchronous batch interface, so it must submit
+            # onto the scheduler's off-thread loop rather than re-enter the
+            # currently running SHM event loop.
+            active_mounts.append((prefix, AsgiRunner(app, mount_prefix=prefix, loop=scheduler.loop), "asgi"))
         elif protocol == "wsgi":
             from vertebra.server._wsgi._adapter import WsgiAdapter
 
@@ -499,7 +503,9 @@ def run_worker(
         finally:
             _RUNNING = False
             scheduler.stop()
-            _wsgi_executor.shutdown(wait=False)
+            if _wsgi_executor is not None:
+                _wsgi_executor.shutdown(wait=False)
+                _wsgi_executor = None
         return
 
     threads: list[threading.Thread] = []
@@ -520,7 +526,9 @@ def run_worker(
     finally:
         _RUNNING = False
         scheduler.stop()
-        _wsgi_executor.shutdown(wait=False)
+        if _wsgi_executor is not None:
+            _wsgi_executor.shutdown(wait=False)
+            _wsgi_executor = None
         for t in threads:
             t.join(timeout=2.0)
 

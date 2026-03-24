@@ -93,7 +93,9 @@ ts-build:                                           ## Build TS client package
 .PHONY: ts-test
 ts-test:                                            ## Run TS unit tests
 	@echo "${INFO} Running TS tests (Vitest)..."
-	@cd src/ts/vertebra-client && bun run test
+	@cd src/ts/vertebra-client && \
+		NODE_OPTIONS="$${NODE_OPTIONS:+$${NODE_OPTIONS} }--localstorage-file=$${TMPDIR:-/tmp}/vertebra-vitest-localstorage" \
+		bun run test
 	@echo "${OK} TS tests passed"
 
 .PHONY: ts-lint
