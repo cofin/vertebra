@@ -116,6 +116,7 @@ pub fn submit_results(py: Python<'_>, responses: Vec<Py<VertebraResponse>>) -> P
             let resp = py_resp.borrow(py);
             let headers_raw = encode_headers_compact(&resp.headers);
             send_shm_response_with_backpressure(
+                py,
                 transport,
                 &mut pending_notification,
                 resp.request_id,
@@ -156,6 +157,58 @@ pub fn submit_results(py: Python<'_>, responses: Vec<Py<VertebraResponse>>) -> P
     bridge.submit_responses(bridge_responses).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("failed to submit responses: {e}"))
     })?;
+
+    Ok(())
+}
+
+/// Submit a single processed response back to the HTTP server.
+///
+/// This is used for fire-and-forget asynchronous completion.
+#[pyfunction]
+pub fn submit_response(py: Python<'_>, py_resp: Py<VertebraResponse>) -> PyResult<()> {
+    let resp = py_resp.borrow(py);
+
+    // SHM path: write response to tiered ring
+    if let Some(transport) = SHM_TRANSPORT.get() {
+        let mut pending_notification = false;
+        let headers_raw = encode_headers_compact(&resp.headers);
+        send_shm_response_with_backpressure(
+            py,
+            transport,
+            &mut pending_notification,
+            resp.request_id,
+            resp.status,
+            &headers_raw,
+            &resp.body,
+        )
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("failed to send response: {e}"))
+        })?;
+
+        flush_shm_response_notification(transport, &mut pending_notification).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("failed to notify supervisor: {e}"))
+        })?;
+
+        return Ok(());
+    }
+
+    // In-process path: BatchBridge
+    let bridge = BatchBridge::get().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "batch channel not initialized; call init_batch_channel() first",
+        )
+    })?;
+
+    bridge
+        .submit_responses(vec![BridgeResponse {
+            request_id: resp.request_id,
+            status: resp.status,
+            headers: resp.headers.clone(),
+            body: resp.body.clone(),
+        }])
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("failed to submit response: {e}"))
+        })?;
 
     Ok(())
 }
@@ -230,6 +283,7 @@ fn flush_shm_response_notification(
 }
 
 fn send_shm_response_with_backpressure(
+    py: Python<'_>,
     transport: &Transport,
     pending_notification: &mut bool,
     request_id: u64,
@@ -248,7 +302,10 @@ fn send_shm_response_with_backpressure(
             transport.notify_response()?;
             *pending_notification = false;
 
-            transport.send_response_blocking(request_id, status, headers_raw, body)?;
+            // Release the GIL while blocking on the ring buffer
+            py.detach(|| {
+                transport.send_response_blocking(request_id, status, headers_raw, body)
+            })?;
 
             *pending_notification = true;
             Ok(())
@@ -309,24 +366,28 @@ mod tests {
         });
 
         let mut pending_notification = false;
-        send_shm_response_with_backpressure(
-            &transport,
-            &mut pending_notification,
-            1,
-            200,
-            b"",
-            b"first",
-        )
-        .expect("send first response");
-        send_shm_response_with_backpressure(
-            &transport,
-            &mut pending_notification,
-            2,
-            200,
-            b"",
-            b"second",
-        )
-        .expect("recover from ring full");
+        pyo3::Python::with_gil(|py| {
+            send_shm_response_with_backpressure(
+                py,
+                &transport,
+                &mut pending_notification,
+                1,
+                200,
+                b"",
+                b"first",
+            )
+            .expect("send first response");
+            send_shm_response_with_backpressure(
+                py,
+                &transport,
+                &mut pending_notification,
+                2,
+                200,
+                b"",
+                b"second",
+            )
+            .expect("recover from ring full");
+        });
         flush_shm_response_notification(&transport, &mut pending_notification)
             .expect("flush final notification");
 

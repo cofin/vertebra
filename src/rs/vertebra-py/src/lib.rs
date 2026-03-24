@@ -41,6 +41,7 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(api::init_transport, m)?)?;
     m.add_function(wrap_pyfunction!(api::get_batch, m)?)?;
     m.add_function(wrap_pyfunction!(api::submit_results, m)?)?;
+    m.add_function(wrap_pyfunction!(api::submit_response, m)?)?;
 
     // SHM async helpers
     m.add_function(wrap_pyfunction!(api::get_request_notify_fd, m)?)?;
