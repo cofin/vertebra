@@ -35,10 +35,11 @@ class CallbackScheduler:
     enabling continuous IO overlap across batch boundaries.
     """
 
-    __slots__ = ("_loop", "_thread")
+    __slots__ = ("_loop", "_thread", "_tasks")
 
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
+        self._tasks: set[asyncio.Task[Any]] = set()
         self._thread = threading.Thread(
             target=self._loop.run_forever,
             name="vertebra-event-loop",
@@ -48,10 +49,30 @@ class CallbackScheduler:
 
     def stop(self) -> None:
         """Stop the event loop and wait for the thread to exit."""
-        if self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            self._thread.join(timeout=5.0)
-            self._loop.close()
+        if not self._loop.is_running():
+            return
+
+        def _shutdown() -> None:
+            async def _wait_tasks() -> None:
+                if self._tasks:
+                    await asyncio.wait(list(self._tasks), timeout=2.0)
+                self._loop.stop()
+
+            self._loop.create_task(_wait_tasks())
+
+        self._loop.call_soon_threadsafe(_shutdown)
+        self._thread.join(timeout=5.0)
+        self._loop.close()
+
+    def spawn(self, coro: "Coroutine[Any, Any, Any]") -> None:
+        """Schedule a coroutine onto the event loop without blocking."""
+
+        def _callback() -> None:
+            task = self._loop.create_task(coro)
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+        self._loop.call_soon_threadsafe(_callback)
 
     def schedule(self, coro: "Coroutine[Any, Any, _T]") -> "concurrent.futures.Future[_T]":
         """Schedule a coroutine onto the event loop and return a Future."""
@@ -257,75 +278,131 @@ def _dispatch_batch(
     mount_runners: list[tuple[str, Any, str]],
     vr_cls: type,
     scheduler: CallbackScheduler,
-) -> list[Any]:
+    *,
+    async_mode: bool = False,
+) -> list[Any] | None:
     """Dispatch a partitioned batch with concurrent execution.
 
-    Sync native handlers run sequentially (zero overhead for trivial handlers).
-    Async native handlers run concurrently via CallbackScheduler.
-    WSGI mounts run concurrently via ThreadPoolExecutor.
-    ASGI mounts run concurrently via the persistent event loop.
-    Returns responses in original batch order.
+    In blocking mode (default), returns responses in original batch order.
+    In async mode, spawns fire-and-forget tasks and returns None.
     """
-    total = (
-        len(partitioned.sync_native)
-        + len(partitioned.async_native)
-        + sum(len(v) for v in partitioned.mounts.values())
-        + len(partitioned.unmatched)
-    )
-    results: list[Any] = [None] * total
+    from vertebra._vertebra import submit_response
 
-    # 1. Sync native handlers — sequential, zero overhead for trivial handlers.
-    for idx, request, handler in partitioned.sync_native:
-        response = _call_handler(handler, request, loop=scheduler.loop if partitioned.async_native else None)
-        results[idx] = _coerce_response(response, request.request_id, vr_cls)
+    if not async_mode:
+        total = (
+            len(partitioned.sync_native)
+            + len(partitioned.async_native)
+            + sum(len(v) for v in partitioned.mounts.values())
+            + len(partitioned.unmatched)
+        )
+        results: list[Any] = [None] * total
 
-    # 2. Async native handlers — scheduled onto persistent loop.
-    if partitioned.async_native:
-        coros = []
-        for _idx, request, handler in partitioned.async_native:
-            has_params, _ = _handler_meta(handler)
-            if has_params:
-                coros.append(handler(*_resolve_handler_args(handler, request)))
-            else:
-                coros.append(handler())
+        # 1. Sync native handlers — sequential, zero overhead for trivial handlers.
+        for idx, request, handler in partitioned.sync_native:
+            response = _call_handler(handler, request, loop=scheduler.loop if partitioned.async_native else None)
+            results[idx] = _coerce_response(response, request.request_id, vr_cls)
 
-        futures = scheduler.schedule_batch(coros)
-        concurrent.futures.wait(futures)
+        # 2. Async native handlers — scheduled onto persistent loop.
+        if partitioned.async_native:
+            coros = []
+            for _idx, request, handler in partitioned.async_native:
+                has_params, _ = _handler_meta(handler)
+                if has_params:
+                    coros.append(handler(*_resolve_handler_args(handler, request)))
+                else:
+                    coros.append(handler())
 
-        for (idx, request, _handler), fut in zip(partitioned.async_native, futures, strict=True):
+            futures = scheduler.schedule_batch(coros)
+            concurrent.futures.wait(futures)
+
+            for (idx, request, _handler), fut in zip(partitioned.async_native, futures, strict=True):
+                try:
+                    raw = fut.result()
+                    results[idx] = _coerce_response(raw, request.request_id, vr_cls)
+                except Exception as e:
+                    print(f"[vertebra] async handler error: {e}", file=sys.stderr)  # noqa: T201
+                    results[idx] = vr_cls(
+                        status=500,
+                        body=b"internal server error",
+                        request_id=request.request_id,
+                    )
+
+        # 3. Mounts — batched per prefix.
+        mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in mount_runners}
+        for prefix, entries in partitioned.mounts.items():
+            adapter, protocol = mount_lookup[prefix]
+            if protocol == "asgi":
+                requests_list = [req for _idx, req in entries]
+                responses = adapter(requests_list)
+                for (idx, request), resp in zip(entries, responses, strict=True):
+                    results[idx] = vr_cls(
+                        status=resp.status,
+                        body=resp.body,
+                        headers=getattr(resp, "headers", []),
+                        request_id=request.request_id,
+                    )
+            elif protocol == "wsgi":
+                _dispatch_wsgi_concurrent(adapter, entries, results, vr_cls)
+
+        # 4. Unmatched — 404.
+        for idx, request in partitioned.unmatched:
+            results[idx] = vr_cls(status=404, body=b"not found", request_id=request.request_id)
+
+        return results
+
+    # ASYNC MODE: Fire and forget
+    # 1. Sync native handlers
+    for _idx, request, handler in partitioned.sync_native:
+        response = _call_handler(handler, request, loop=scheduler.loop)
+        submit_response(_coerce_response(response, request.request_id, vr_cls))
+
+    # 2. Async native handlers
+    for _idx, request, handler in partitioned.async_native:
+
+        async def _dispatch_async(req=request, h=handler) -> None:
             try:
-                raw = fut.result()
-                results[idx] = _coerce_response(raw, request.request_id, vr_cls)
+                has_params, _ = _handler_meta(h)
+                if has_params:
+                    raw = await h(*_resolve_handler_args(h, req))
+                else:
+                    raw = await h()
+                submit_response(_coerce_response(raw, req.request_id, vr_cls))
             except Exception as e:
                 print(f"[vertebra] async handler error: {e}", file=sys.stderr)  # noqa: T201
-                results[idx] = vr_cls(
-                    status=500,
-                    body=b"internal server error",
-                    request_id=request.request_id,
+                submit_response(
+                    vr_cls(
+                        status=500,
+                        body=b"internal server error",
+                        request_id=req.request_id,
+                    )
                 )
 
-    # 3. Mounts — batched per prefix.
+        scheduler.spawn(_dispatch_async())
+
+    # 3. Mounts
     mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in mount_runners}
     for prefix, entries in partitioned.mounts.items():
         adapter, protocol = mount_lookup[prefix]
         if protocol == "asgi":
-            requests_list = [req for _idx, req in entries]
-            responses = adapter(requests_list)
-            for (idx, request), resp in zip(entries, responses, strict=True):
-                results[idx] = vr_cls(
-                    status=resp.status,
-                    body=resp.body,
-                    headers=getattr(resp, "headers", []),
-                    request_id=request.request_id,
-                )
+            for _idx, request in entries:
+                adapter.spawn_single(request)
         elif protocol == "wsgi":
-            _dispatch_wsgi_concurrent(adapter, entries, results, vr_cls)
+            # WSGI still uses thread pool but each result is submitted individually
+            for _idx, request in entries:
 
-    # 4. Unmatched — 404.
-    for idx, request in partitioned.unmatched:
-        results[idx] = vr_cls(status=404, body=b"not found", request_id=request.request_id)
+                def _dispatch_wsgi(req=request, a=adapter) -> None:
+                    try:
+                        submit_response(a(req))
+                    except Exception:
+                        submit_response(vr_cls(status=500, body=b"internal server error", request_id=req.request_id))
 
-    return results
+                _get_wsgi_executor().submit(_dispatch_wsgi)
+
+    # 4. Unmatched
+    for _idx, request in partitioned.unmatched:
+        submit_response(vr_cls(status=404, body=b"not found", request_id=request.request_id))
+
+    return None
 
 
 async def _shm_worker_loop(
@@ -387,8 +464,7 @@ async def _shm_worker_loop(
                     break
 
                 partitioned = _partition_batch(batch, handlers, active_mounts)
-                results = _dispatch_batch(partitioned, handlers, active_mounts, VR, scheduler)
-                submit_results(results)
+                _dispatch_batch(partitioned, handlers, active_mounts, VR, scheduler, async_mode=True)
     finally:
         loop.remove_reader(notify_fd)
 
@@ -465,9 +541,8 @@ def run_worker(
                     continue
 
                 partitioned = _partition_batch(batch, handlers, io_mounts)
-                # Only dispatch async native and ASGI mounts
-                results = _dispatch_batch(partitioned, handlers, io_mounts, VR, scheduler)
-                submit_results(results)
+                # Only dispatch async native and ASGI mounts in fire-and-forget mode
+                _dispatch_batch(partitioned, handlers, io_mounts, VR, scheduler, async_mode=True)
         finally:
             # Note: scheduler stopped by main thread
             pass

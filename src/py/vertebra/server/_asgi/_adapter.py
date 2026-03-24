@@ -21,6 +21,36 @@ class AsgiAdapter:
         self._app = app
         self._mount_prefix = mount_prefix
 
+    async def run_single(self, request: Any) -> AsgiResponse:
+        """Run the ASGI app for a single request."""
+        collector = SendCollector()
+        scope = build_scope(request, root_path=self._mount_prefix)
+        receive = ReceiveChannel(request)
+        req_id = getattr(request, "request_id", 0)
+
+        try:
+            await self._app(scope, receive, collector)
+            try:
+                resp = collector.response
+                resp.request_id = req_id
+                return resp
+            except RuntimeError:
+                log.error("ASGI app for request %d never sent http.response.start", req_id)
+                return AsgiResponse(
+                    status=500,
+                    headers=[("content-type", "text/plain"), ("content-length", "21")],
+                    body=b"Internal Server Error",
+                    request_id=req_id,
+                )
+        except Exception:
+            log.exception("ASGI app raised unhandled exception for request %d", req_id)
+            return AsgiResponse(
+                status=500,
+                headers=[("content-type", "text/plain"), ("content-length", "21")],
+                body=b"Internal Server Error",
+                request_id=req_id,
+            )
+
     async def run_batch(self, requests: list[Any]) -> list[AsgiResponse]:
         """Run the ASGI app for every request in the batch concurrently."""
         n = len(requests)

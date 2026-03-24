@@ -52,6 +52,28 @@ class AsgiRunner:
 
         return self._loop.run_until_complete(self._adapter.run_batch(requests))
 
+    def spawn_single(self, request: Any) -> None:
+        """Process a single request asynchronously and submit its response."""
+        from vertebra._vertebra import submit_response
+        from vertebra._vertebra import VertebraResponse as VR
+
+        async def _dispatch() -> None:
+            resp = await self._adapter.run_single(request)
+            # Individual submission immediately notifies supervisor
+            submit_response(
+                VR(
+                    status=resp.status,
+                    body=resp.body,
+                    headers=getattr(resp, "headers", []),
+                    request_id=request.request_id,
+                )
+            )
+
+        if self._scheduler:
+            self._scheduler.spawn(_dispatch())
+        else:
+            self._loop.create_task(_dispatch())
+
     def close(self) -> None:
         """Shut down the event loop (only if we created it)."""
         if self._scheduler:
