@@ -71,7 +71,10 @@ class AsgiRunner:
 
         if self._scheduler:
             self._scheduler.spawn(_dispatch())
+        elif self._loop.is_running():
+            self._loop.call_soon_threadsafe(lambda: self._loop.create_task(_dispatch()))
         else:
+            # Fallback for synchronous startup if loop not yet running
             self._loop.create_task(_dispatch())
 
     def close(self) -> None:
