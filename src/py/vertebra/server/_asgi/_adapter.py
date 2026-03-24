@@ -53,47 +53,5 @@ class AsgiAdapter:
 
     async def run_batch(self, requests: list[Any]) -> list[AsgiResponse]:
         """Run the ASGI app for every request in the batch concurrently."""
-        n = len(requests)
-        collectors: list[SendCollector] = [SendCollector() for _ in range(n)]
-        scopes = [build_scope(req, root_path=self._mount_prefix) for req in requests]
-        receives = [ReceiveChannel(req) for req in requests]
+        return await asyncio.gather(*(self.run_single(req) for req in requests))
 
-        raw_results = await asyncio.gather(
-            *(self._app(scopes[i], receives[i], collectors[i]) for i in range(n)),
-            return_exceptions=True,
-        )
-
-        results: list[AsgiResponse] = []
-        for i in range(n):
-            req_id = getattr(requests[i], "request_id", 0)
-            if isinstance(raw_results[i], BaseException):
-                log.exception(
-                    "ASGI app raised unhandled exception for request %d",
-                    i,
-                    exc_info=raw_results[i],
-                )
-                results.append(
-                    AsgiResponse(
-                        status=500,
-                        headers=[("content-type", "text/plain"), ("content-length", "21")],
-                        body=b"Internal Server Error",
-                        request_id=req_id,
-                    )
-                )
-            else:
-                try:
-                    resp = collectors[i].response
-                    resp.request_id = req_id
-                    results.append(resp)
-                except RuntimeError:
-                    log.error("ASGI app for request %d never sent http.response.start", i)
-                    results.append(
-                        AsgiResponse(
-                            status=500,
-                            headers=[("content-type", "text/plain"), ("content-length", "21")],
-                            body=b"Internal Server Error",
-                            request_id=req_id,
-                        )
-                    )
-
-        return results

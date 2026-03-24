@@ -46,8 +46,20 @@ impl VertebraRequest {
     }
 
     #[getter]
+    fn raw_path<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        let path = self.batch.path(self.index).as_bytes();
+        PyBytes::new(py, path)
+    }
+
+    #[getter]
     fn query<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyString>> {
         self.batch.query(self.index).map(|q| PyString::new(py, q))
+    }
+
+    #[getter]
+    fn raw_query<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        let query = self.batch.query(self.index).unwrap_or("");
+        PyBytes::new(py, query.as_bytes())
     }
 
     #[getter]

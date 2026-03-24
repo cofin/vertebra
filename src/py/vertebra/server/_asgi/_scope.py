@@ -44,8 +44,9 @@ class AsgiScope(dict):  # type: ignore[type-arg]
 
 def build_scope(request: Any, *, root_path: str = "") -> AsgiScope:
     """Build an ASGI 3.0 HTTP connection scope from a VertebraRequest."""
-    path: str = request.path
-    query_str: str = request.query or ""
+    # Use zero-copy raw bytes directly from Rust to avoid str -> bytes re-encoding
+    raw_path: bytes = request.raw_path
+    query_string: bytes = request.raw_query
 
     base: dict[str, Any] = {
         "type": _SCOPE_TYPE,
@@ -53,9 +54,9 @@ def build_scope(request: Any, *, root_path: str = "") -> AsgiScope:
         "http_version": getattr(request, "http_version", "1.1"),
         "method": request.method.upper(),
         "headers": _UNBUILT,
-        "path": path,
-        "raw_path": path.encode("latin-1"),
-        "query_string": query_str.encode("latin-1"),
+        "path": request.path,
+        "raw_path": raw_path,
+        "query_string": query_string,
         "root_path": root_path,
         "scheme": getattr(request, "scheme", "http"),
         "server": None,
