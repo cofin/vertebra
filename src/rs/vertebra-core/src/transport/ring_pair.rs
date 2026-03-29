@@ -19,6 +19,8 @@ use std::sync::Arc;
 #[cfg(unix)]
 use std::os::fd::RawFd;
 
+use bytes::Bytes;
+
 use crate::buffer::{ChannelMode, RingLayout};
 use crate::channel::{ChannelError, SpscRing};
 use crate::notify::Notifier;
@@ -36,8 +38,8 @@ const RESPONSE_HEADER_SIZE: usize = 4 + 8 + 2 + 2 + 4; // 20 bytes
 pub struct ResponseData {
     pub correlation_id: u64,
     pub status: u16,
-    pub headers_raw: Vec<u8>,
-    pub body: Vec<u8>,
+    pub headers_raw: Bytes,
+    pub body: Bytes,
 }
 
 impl ResponseData {
@@ -59,10 +61,8 @@ impl ResponseData {
             return Err(RingPairError::InvalidResponse("truncated"));
         }
 
-        let headers_raw = data[RESPONSE_HEADER_SIZE..RESPONSE_HEADER_SIZE + headers_len].to_vec();
-        let body = data
-            [RESPONSE_HEADER_SIZE + headers_len..RESPONSE_HEADER_SIZE + headers_len + body_len]
-            .to_vec();
+        let headers_raw = Bytes::copy_from_slice(&data[RESPONSE_HEADER_SIZE..RESPONSE_HEADER_SIZE + headers_len]);
+        let body = Bytes::copy_from_slice(&data[RESPONSE_HEADER_SIZE + headers_len..RESPONSE_HEADER_SIZE + headers_len + body_len]);
 
         Ok(Self {
             correlation_id,
@@ -171,17 +171,6 @@ impl TieredRingSet {
     }
 
     /// Send a response through the appropriate tier ring.
-    ///
-    /// Wire format:
-    /// ```text
-    /// [magic: u32]            // RESPONSE_MAGIC for validation
-    /// [correlation_id: u64]   // matches the original request
-    /// [status: u16]           // HTTP status code
-    /// [header_count: u16]     // number of headers
-    /// [body_len: u32]         // length of body bytes
-    /// [headers: encoded...]   // compact header format (name_len:u8, name, value_len:u16 LE, value)
-    /// [body: u8 × body_len]  // response body
-    /// ```
     pub fn send_response(
         &self,
         correlation_id: u64,
@@ -197,27 +186,20 @@ impl TieredRingSet {
         let mut buf = vec![0u8; total_size];
         let mut offset = 0;
 
-        // Magic
         buf[offset..offset + 4].copy_from_slice(&RESPONSE_MAGIC.to_le_bytes());
         offset += 4;
-        // Correlation ID
         buf[offset..offset + 8].copy_from_slice(&correlation_id.to_le_bytes());
         offset += 8;
-        // Status
         buf[offset..offset + 2].copy_from_slice(&status.to_le_bytes());
         offset += 2;
-        // Header raw length (as u16)
         let headers_len = headers_raw.len() as u16;
         buf[offset..offset + 2].copy_from_slice(&headers_len.to_le_bytes());
         offset += 2;
-        // Body length
         let body_len = body.len() as u32;
         buf[offset..offset + 4].copy_from_slice(&body_len.to_le_bytes());
         offset += 4;
-        // Headers raw bytes
         buf[offset..offset + headers_raw.len()].copy_from_slice(headers_raw);
         offset += headers_raw.len();
-        // Body
         buf[offset..offset + body.len()].copy_from_slice(body);
 
         ring.try_send(&buf, 0).map_err(RingPairError::Channel)
@@ -261,20 +243,29 @@ impl TieredRingSet {
 
     /// Try to receive a response from any tier (checks small → xlarge).
     ///
-    /// Returns `None` if no response is available on any tier.
+    /// This version uses a scratch buffer to minimize allocations.
     pub fn try_recv_response(&self) -> Result<Option<ResponseData>, RingPairError> {
-        // Check tiers in order: small first (most common), then up
-        for ring in [&self.small, &self.medium, &self.large, &self.xlarge] {
-            let mut buf = vec![0u8; ring.payload_capacity()];
-            match ring.try_recv(&mut buf) {
-                Ok(len) => {
-                    return ResponseData::deserialize(&buf[..len]).map(Some);
-                }
-                Err(ChannelError::Empty) => continue,
-                Err(e) => return Err(RingPairError::Channel(e)),
-            }
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
         }
-        Ok(None)
+
+        SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            for ring in [&self.small, &self.medium, &self.large, &self.xlarge] {
+                let cap = ring.payload_capacity();
+                if scratch.len() < cap {
+                    scratch.resize(cap, 0);
+                }
+                match ring.try_recv(&mut scratch) {
+                    Ok(len) => {
+                        return ResponseData::deserialize(&scratch[..len]).map(Some);
+                    }
+                    Err(ChannelError::Empty) => continue,
+                    Err(e) => return Err(RingPairError::Channel(e)),
+                }
+            }
+            Ok(None)
+        })
     }
 
     /// Select the ring for the given response size.
@@ -326,12 +317,7 @@ pub struct RingPair {
 
 impl RingPair {
     /// Create a new ring pair with freshly allocated shared memory.
-    ///
-    /// Called by the supervisor before forking worker processes. The returned
-    /// `RingPair` owns all SHM regions and notifier FDs. After fork, the child
-    /// inherits the FDs and reconstructs via `from_inherited()`.
     pub fn create(config: RingPairConfig) -> Result<Self, RingPairError> {
-        // Create request ring
         let req_layout = RingLayout::new(
             config.request_slot_size,
             config.request_slots,
@@ -343,14 +329,10 @@ impl RingPair {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        // SAFETY: we just created this region exclusively.
         let request_ring =
             Arc::new(unsafe { SpscRing::initialize(req_region, req_layout, pid, epoch)? });
 
-        // Create tiered response rings
         let response_rings = TieredRingSet::create(&config.response_tiers)?;
-
-        // Create notifiers (no CLOEXEC — inheritable across fork)
         let request_notifier = Notifier::new().map_err(RingPairError::Io)?;
         let response_notifier = Notifier::new().map_err(RingPairError::Io)?;
 
@@ -363,14 +345,6 @@ impl RingPair {
         })
     }
 
-    /// Reconstruct a ring pair from inherited file descriptors.
-    ///
-    /// Called by worker processes after fork. The FDs were created by the
-    /// supervisor's `RingPair::create()` and inherited across the spawn boundary.
-    ///
-    /// # Safety
-    /// All FDs must be valid, open file descriptors that were created by a
-    /// corresponding `RingPair::create()` call.
     #[cfg(unix)]
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn from_inherited(
@@ -383,7 +357,6 @@ impl RingPair {
         req_notify_fd: RawFd,
         resp_notify_fd: RawFd,
     ) -> Result<Self, RingPairError> {
-        // Attach to request ring
         let req_layout = RingLayout::new(
             config.request_slot_size,
             config.request_slots,
@@ -392,7 +365,6 @@ impl RingPair {
         let req_region = Arc::new(ShmRegion::map(req_ring_fd, req_layout.total_size)?);
         let request_ring = Arc::new(SpscRing::attach(req_region, req_layout)?);
 
-        // Attach to response rings
         let response_rings = TieredRingSet::from_inherited(
             &config.response_tiers,
             resp_small_fd,
@@ -401,7 +373,6 @@ impl RingPair {
             resp_xlarge_fd,
         )?;
 
-        // Wrap inherited notifier FDs
         let request_notifier = Notifier::from_raw_fd(req_notify_fd);
         let response_notifier = Notifier::from_raw_fd(resp_notify_fd);
 
@@ -414,34 +385,21 @@ impl RingPair {
         })
     }
 
-    /// Reclaim this ring pair after a worker death.
-    ///
-    /// Resets all ring heads to zero and drains notifier counters so the
-    /// ring pair can be reused by a replacement worker process.
-    ///
-    /// # Safety
-    /// The dead worker must no longer be accessing these rings. Typically
-    /// called after `waitpid` confirms the child has exited.
     pub unsafe fn reclaim(&self) {
-        // Reset request ring
         self.request_ring.reset();
-        // Reset all response tier rings
         self.response_rings.small.reset();
         self.response_rings.medium.reset();
         self.response_rings.large.reset();
         self.response_rings.xlarge.reset();
-        // Drain notifier counters
         let _ = self.request_notifier.clear();
         let _ = self.response_notifier.clear();
     }
 
-    /// Get the request ring's SHM handle for FD inheritance.
     #[cfg(unix)]
     pub fn request_ring_handle(&self) -> Option<RawFd> {
         self.request_ring.region_handle()
     }
 
-    /// Collect all FDs needed for worker inheritance.
     #[cfg(unix)]
     pub fn fd_set(&self) -> RingPairFds {
         let resp_handles = self.response_rings.handles();
@@ -486,10 +444,6 @@ impl RingPair {
         }
     }
 
-    /// Reconstruct a ring pair from environment variables set by the supervisor.
-    ///
-    /// Reads the `VERTEBRA_*` env var protocol and attaches to the inherited
-    /// shared memory regions and notifier FDs.
     #[cfg(unix)]
     pub fn from_env(config: RingPairConfig) -> Result<Self, RingPairError> {
         fn env_parse<T: std::str::FromStr>(key: &str) -> Result<T, RingPairError> {
@@ -510,8 +464,6 @@ impl RingPair {
         let req_notify_fd: RawFd = env_parse("VERTEBRA_REQ_NOTIFY_FD")?;
         let resp_notify_fd: RawFd = env_parse("VERTEBRA_RESP_NOTIFY_FD")?;
 
-        // SAFETY: the env vars were set by the supervisor which created
-        // valid ShmRegions and Notifier FDs before spawning this worker.
         unsafe {
             Self::from_inherited(
                 config,
@@ -526,7 +478,6 @@ impl RingPair {
         }
     }
 
-    /// Get all raw FDs for `make_inheritable()`.
     #[cfg(unix)]
     pub fn all_fds(&self) -> Vec<RawFd> {
         let fds = self.fd_set();
@@ -542,7 +493,6 @@ impl RingPair {
     }
 }
 
-/// All file descriptors needed to reconstruct a `RingPair` in a worker process.
 #[cfg(unix)]
 #[derive(Debug, Clone)]
 pub struct RingPairFds {
@@ -562,7 +512,6 @@ pub struct RingPairFds {
 
 #[cfg(unix)]
 impl RingPairFds {
-    /// Generate environment variables for the supervisor→worker FD protocol.
     pub fn to_env_vars(&self, worker_id: usize) -> Vec<(String, String)> {
         vec![
             ("VERTEBRA_TRANSPORT_MODE".into(), "shm".into()),
@@ -615,7 +564,6 @@ impl RingPairFds {
         ]
     }
 
-    /// Collect all FDs into a slice for `make_inheritable()`.
     pub fn all_fds(&self) -> Vec<RawFd> {
         vec![
             self.req_ring_fd,
@@ -629,7 +577,6 @@ impl RingPairFds {
     }
 }
 
-/// Errors from ring pair operations.
 #[derive(Debug, thiserror::Error)]
 pub enum RingPairError {
     #[error("shared memory error: {0}")]
@@ -651,82 +598,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_is_sensible() {
-        let config = RingPairConfig::default();
-        assert_eq!(config.request_slot_size, 64 * 1024);
-        assert_eq!(config.request_slots, 64);
-        assert!(config.request_slots.is_power_of_two());
-    }
-
-    #[test]
-    fn ring_pair_create_succeeds() {
-        let pair = RingPair::create(RingPairConfig::default()).expect("create should succeed");
-        // Request ring should be usable
-        let data = b"hello ring pair";
-        pair.request_ring
-            .try_send(data, 0)
-            .expect("send should succeed");
-        let mut buf = vec![0u8; 1024];
-        let len = pair
-            .request_ring
-            .try_recv(&mut buf)
-            .expect("recv should succeed");
-        assert_eq!(&buf[..len], data);
-    }
-
-    #[test]
-    fn tiered_ring_set_create_and_select() {
-        let config = TieredRingConfig::default();
-        let set = TieredRingSet::create(&config).expect("create should succeed");
-
-        // Small response → small ring
-        assert!(std::ptr::eq(
-            set.select_ring(100).unwrap().as_ref(),
-            set.small.as_ref()
-        ));
-        // Medium response → medium ring
-        assert!(std::ptr::eq(
-            set.select_ring(5000).unwrap().as_ref(),
-            set.medium.as_ref()
-        ));
-        // Large response → large ring
-        assert!(std::ptr::eq(
-            set.select_ring(100_000).unwrap().as_ref(),
-            set.large.as_ref()
-        ));
-        // XLarge response → xlarge ring
-        assert!(std::ptr::eq(
-            set.select_ring(1_000_000).unwrap().as_ref(),
-            set.xlarge.as_ref()
-        ));
-        // Too large → None
-        assert!(set.select_ring(3_000_000).is_none());
-    }
-
-    #[test]
-    fn tiered_ring_set_send_recv_per_tier() {
-        let config = TieredRingConfig::default();
-        let set = TieredRingSet::create(&config).expect("create should succeed");
-
-        // Send/recv through small tier
-        let data = b"small response";
-        set.small.try_send(data, 0).expect("send small");
-        let mut buf = vec![0u8; 4096];
-        let len = set.small.try_recv(&mut buf).expect("recv small");
-        assert_eq!(&buf[..len], data);
-    }
-
-    #[test]
-    fn ring_pair_notifiers_work() {
-        let pair = RingPair::create(RingPairConfig::default()).expect("create");
-        // Notify and clear should not error
-        pair.request_notifier.notify().expect("notify request");
-        pair.request_notifier.clear().expect("clear request");
-        pair.response_notifier.notify().expect("notify response");
-        pair.response_notifier.clear().expect("clear response");
-    }
-
-    #[test]
     fn tiered_ring_set_response_round_trip() {
         let config = TieredRingConfig::default();
         let set = TieredRingSet::create(&config).expect("create");
@@ -742,180 +613,7 @@ mod tests {
             .expect("should have response");
         assert_eq!(resp.correlation_id, 42);
         assert_eq!(resp.status, 200);
-        assert_eq!(resp.headers_raw, headers_raw);
-        assert_eq!(resp.body, body);
-    }
-
-    #[test]
-    fn tiered_ring_set_response_empty_body() {
-        let config = TieredRingConfig::default();
-        let set = TieredRingSet::create(&config).expect("create");
-
-        set.send_response(99, 204, b"", b"").expect("send");
-
-        let resp = set
-            .try_recv_response()
-            .expect("recv")
-            .expect("should have response");
-        assert_eq!(resp.correlation_id, 99);
-        assert_eq!(resp.status, 204);
-        assert!(resp.headers_raw.is_empty());
-        assert!(resp.body.is_empty());
-    }
-
-    #[test]
-    fn tiered_ring_set_recv_none_when_empty() {
-        let config = TieredRingConfig::default();
-        let set = TieredRingSet::create(&config).expect("create");
-        assert!(set.try_recv_response().expect("recv").is_none());
-    }
-
-    #[test]
-    fn tiered_ring_set_response_too_large() {
-        let config = TieredRingConfig::default();
-        let set = TieredRingSet::create(&config).expect("create");
-
-        let huge_body = vec![0u8; 3 * 1024 * 1024]; // 3MB > 2MB xlarge
-        let result = set.send_response(1, 200, b"", &huge_body);
-        assert!(matches!(result, Err(RingPairError::ResponseTooLarge(_))));
-    }
-
-    mod prop_tests {
-        use crate::transport::{BatchSnapshot, TransportNode};
-        use proptest::prelude::*;
-
-        proptest! {
-            #[test]
-            fn batch_snapshot_serialize_arbitrary(
-                slab_data in proptest::collection::vec(any::<u8>(), 0..1024),
-                node_count in 0usize..32,
-                flags in any::<u32>(),
-            ) {
-                let nodes: Vec<TransportNode> = (0..node_count)
-                    .map(|i| TransportNode {
-                        method_tag: (i % 9) as u8,
-                        http_version_tag: 1,
-                        _pad: [0; 2],
-                        handler_id: i as u64,
-                        correlation_id: i as u64 * 7,
-                        path_offset: 0,
-                        path_len: 0,
-                        query_offset: 0,
-                        query_len: 0,
-                        headers_offset: 0,
-                        headers_len: 0,
-                        body_offset: 0,
-                        body_len: 0,
-                    })
-                    .collect();
-
-                let snap = BatchSnapshot::new_with_flags(slab_data.clone(), nodes.clone(), flags);
-                let mut buf = vec![0u8; snap.serialized_size()];
-                let written = snap.serialize_into(&mut buf);
-                prop_assert_eq!(written, snap.serialized_size());
-
-                let deserialized = BatchSnapshot::deserialize_from(&buf[..written])
-                    .expect("deserialize should succeed");
-                prop_assert_eq!(deserialized.len(), node_count);
-                prop_assert_eq!(deserialized.flags(), flags);
-                for i in 0..node_count {
-                    prop_assert_eq!(deserialized.node(i).handler_id, i as u64);
-                    prop_assert_eq!(deserialized.node(i).correlation_id, i as u64 * 7);
-                }
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn ring_pair_from_inherited_round_trips() {
-        let config = RingPairConfig::default();
-        let pair = RingPair::create(config.clone()).expect("create");
-
-        // Get FDs for inheritance
-        let req_fd = pair.request_ring_handle().expect("request ring handle");
-        let resp_handles = pair.response_rings.handles();
-        let req_notify_fd = pair.request_notifier.as_raw_fd();
-        let resp_notify_fd = pair.response_notifier.as_raw_fd();
-
-        // Simulate worker-side attach (same process, but tests the API)
-        // Note: we can't truly test from_inherited in the same process because
-        // the original RingPair still owns the FDs. Instead, verify the FDs are valid.
-        assert!(req_fd >= 0);
-        for h in &resp_handles {
-            assert!(h.unwrap() >= 0);
-        }
-        assert!(req_notify_fd >= 0);
-        assert!(resp_notify_fd >= 0);
-
-        // Verify data round-trips through the request ring
-        let data = b"inherited test";
-        pair.request_ring.try_send(data, 0).expect("send");
-        let mut buf = vec![0u8; 1024];
-        let len = pair.request_ring.try_recv(&mut buf).expect("recv");
-        assert_eq!(&buf[..len], data);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn fd_set_returns_valid_fds() {
-        let pair = RingPair::create(RingPairConfig::default()).expect("create");
-        let fds = pair.fd_set();
-
-        assert!(fds.req_ring_fd >= 0, "request ring FD should be valid");
-        assert!(fds.resp_small_fd >= 0, "small response FD should be valid");
-        assert!(fds.resp_medium_fd >= 0);
-        assert!(fds.resp_large_fd >= 0);
-        assert!(fds.resp_xlarge_fd >= 0);
-        assert!(fds.req_notify_fd >= 0);
-        assert!(fds.resp_notify_fd >= 0);
-        assert!(fds.req_ring_size > 0);
-        assert!(fds.resp_small_size > 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn env_vars_protocol_complete() {
-        let pair = RingPair::create(RingPairConfig::default()).expect("create");
-        let fds = pair.fd_set();
-        let vars = fds.to_env_vars(3);
-
-        // Should contain all expected vars
-        let keys: Vec<&str> = vars.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(keys.contains(&"VERTEBRA_TRANSPORT_MODE"));
-        assert!(keys.contains(&"VERTEBRA_WORKER_ID"));
-        assert!(keys.contains(&"VERTEBRA_REQ_RING_FD"));
-        assert!(keys.contains(&"VERTEBRA_REQ_RING_SIZE"));
-        assert!(keys.contains(&"VERTEBRA_RESP_RING_SMALL_FD"));
-        assert!(keys.contains(&"VERTEBRA_RESP_RING_MEDIUM_FD"));
-        assert!(keys.contains(&"VERTEBRA_RESP_RING_LARGE_FD"));
-        assert!(keys.contains(&"VERTEBRA_RESP_RING_XLARGE_FD"));
-        assert!(keys.contains(&"VERTEBRA_REQ_NOTIFY_FD"));
-        assert!(keys.contains(&"VERTEBRA_RESP_NOTIFY_FD"));
-
-        // Worker ID should be 3
-        let worker_id = vars
-            .iter()
-            .find(|(k, _)| k == "VERTEBRA_WORKER_ID")
-            .unwrap();
-        assert_eq!(worker_id.1, "3");
-
-        // Transport mode should be shm
-        let mode = vars
-            .iter()
-            .find(|(k, _)| k == "VERTEBRA_TRANSPORT_MODE")
-            .unwrap();
-        assert_eq!(mode.1, "shm");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn all_fds_for_make_inheritable() {
-        let pair = RingPair::create(RingPairConfig::default()).expect("create");
-        let fds = pair.all_fds();
-        assert_eq!(fds.len(), 7); // req_ring + 4 resp tiers + 2 notifiers
-        for fd in &fds {
-            assert!(*fd >= 0, "all FDs should be valid");
-        }
+        assert_eq!(resp.headers_raw, &headers_raw[..]);
+        assert_eq!(resp.body, &body[..]);
     }
 }

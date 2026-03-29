@@ -17,6 +17,7 @@ repository = "https://github.com/vertebra-io/vertebra"
 [workspace.dependencies]
 # Shared dependency versions — pin here, reference with { workspace = true } in crates
 arrow = "53.0"
+bytes = "1.6"
 criterion = { version = "0.5", features = ["async_tokio"] }
 crossbeam-channel = "0.5"
 crossbeam-utils = "0.8"

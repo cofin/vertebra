@@ -3940,6 +3940,7 @@ name = "vertebra-core"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "bytes",
  "criterion",
  "crossbeam-channel",
  "crossbeam-utils",

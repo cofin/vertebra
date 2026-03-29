@@ -20,6 +20,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+bytes = { workspace = true }
 jsonwebtoken = { workspace = true }
 lz4_flex = { workspace = true, optional = true }
 rmp-serde = { workspace = true }
