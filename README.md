@@ -40,6 +40,22 @@ src/
   rs/   # Rust workspace
 ```
 
+## Runtime Topologies
+
+Vertebra supports two primary execution modes, selectable via the `--topology` flag:
+
+### 1. Embedded Topology (Default)
+- **Select with**: `--topology embedded` (or `--workers 0`)
+- **Use Case**: Development and high-performance production on free-threaded Python (3.13t+).
+- **Mechanism**: The Rust HTTP server and Python application run within the same process. Python is embedded via PyO3.
+- **Benefits**: Zero IPC overhead, lowest possible latency, shared memory address space.
+
+### 2. SHM Topology (Scale-out)
+- **Select with**: `--topology shm`
+- **Use Case**: Extreme scale-out, process isolation, or legacy multi-core support on non-free-threaded Python.
+- **Mechanism**: The Rust HTTP server spawns independent Python worker processes. Requests and responses are transferred via high-speed Shared Memory (SHM) ring buffers with eventfd signaling.
+- **Benefits**: Fault isolation, bypasses GIL bottlenecks on older Python versions, scales across many OS processes.
+
 ## Documentation
 
 - Architecture: `docs/arch.md`

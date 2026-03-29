@@ -1,5 +1,7 @@
 """CLI smoke tests."""
 
+from typing import Any
+
 import pytest
 from click.testing import CliRunner
 
@@ -44,18 +46,53 @@ def test_dev_help_shows_options(runner: CliRunner) -> None:
         assert option in result.output, f"Expected {option!r} in help output"
 
 
+def test_run_sets_topology_env(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    """vtb run should set VERTEBRA_TOPOLOGY and resolve workers."""
+    import importlib
+
+    run_module = importlib.import_module("vertebra.cli.run")
+
+    captured: dict[str, Any] = {}
+
+    def fake_build_server_command() -> list[str]:
+        return ["vertebra-server"]
+
+    def fake_run_supervisor(**kwargs: Any) -> int:
+        captured["env"] = kwargs["env"]
+        return 0
+
+    monkeypatch.setattr(run_module, "build_server_command", fake_build_server_command)
+    monkeypatch.setattr(run_module, "run_supervisor", fake_run_supervisor)
+    monkeypatch.setattr(run_module, "render_banner", lambda **kwargs: None)
+
+    # 1. Default (embedded)
+    runner.invoke(cli, ["run", "sample_app:app", "--no-banner"])
+    assert captured["env"]["VERTEBRA_TOPOLOGY"] == "embedded"
+    assert captured["env"]["VERTEBRA_WORKERS"] == "0"
+
+    # 2. Explicit SHM
+    runner.invoke(cli, ["run", "sample_app:app", "--topology", "shm", "--no-banner"])
+    assert captured["env"]["VERTEBRA_TOPOLOGY"] == "shm"
+    assert captured["env"]["VERTEBRA_WORKERS"] == "1"
+
+    # 3. Explicit workers with embedded
+    runner.invoke(cli, ["run", "sample_app:app", "--workers", "4", "--no-banner"])
+    assert captured["env"]["VERTEBRA_TOPOLOGY"] == "embedded"
+    assert captured["env"]["VERTEBRA_WORKERS"] == "4"
+
+
 def test_dev_sets_vertebra_dev_env(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     """vtb dev should set VERTEBRA_DEV=1 and start with single worker."""
     import importlib
 
     dev_module = importlib.import_module("vertebra.cli.dev")
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def fake_build_server_command() -> list[str]:
         return ["vertebra-server"]
 
-    def fake_run_supervisor(**kwargs: object) -> int:
+    def fake_run_supervisor(**kwargs: Any) -> int:
         captured["env"] = kwargs["env"]
         return 0
 

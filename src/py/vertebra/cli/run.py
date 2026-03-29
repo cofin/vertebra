@@ -19,7 +19,13 @@ from vertebra.utils.serializers import from_json
 @click.argument("app")
 @click.option("--host", default="127.0.0.1", help="Host to bind to")
 @click.option("--port", type=int, default=8000, help="Port to bind to")
-@click.option("--workers", type=int, default=1, help="Number of worker processes")
+@click.option("--workers", type=int, default=None, help="Number of worker processes")
+@click.option(
+    "--topology",
+    type=click.Choice(["embedded", "shm"], case_sensitive=False),
+    default="embedded",
+    help="Runtime topology",
+)
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Path to application config")
 @click.option("--log-level", default="info", help="Log level")
 @click.option("--drain-timeout", type=int, default=5000, help="Drain timeout in milliseconds")
@@ -32,7 +38,8 @@ def run(
     app: str,
     host: str,
     port: int,
-    workers: int,
+    workers: int | None,
+    topology: str,
     config_path: str | None,
     log_level: str,
     drain_timeout: int,
@@ -45,6 +52,10 @@ def run(
     """Run the Vertebra server."""
     logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO))
 
+    # Resolve workers based on topology if not explicitly provided
+    if workers is None:
+        workers = 1 if topology.lower() == "shm" else 0
+
     env = os.environ.copy()
     env["VERTEBRA_APP"] = app
 
@@ -55,6 +66,7 @@ def run(
     env["VERTEBRA_HOST"] = host
     env["VERTEBRA_PORT"] = str(port)
     env["VERTEBRA_WORKERS"] = str(workers)
+    env["VERTEBRA_TOPOLOGY"] = topology.lower()
     env["VERTEBRA_LOG_LEVEL"] = log_level
     env["VERTEBRA_NATIVE"] = "0" if asgi else "1"
 

@@ -147,14 +147,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let config = Arc::new(ServerConfig::from_env());
 
-    let worker_count: usize = std::env::var("VERTEBRA_WORKERS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1);
-
     // --- Initialize bridge ---
     // arena_capacity=256 nodes, slab_capacity=1MB, channel_depth=4
-    BatchBridge::init(256, 1_048_576, 4, worker_count).expect("failed to initialize batch bridge");
+    // Multi-process SHM uses its own transport, but we still initialize the
+    // bridge singleton for in-process compatibility.
+    BatchBridge::init(256, 1_048_576, 4, config.workers.count).expect("failed to initialize batch bridge");
 
     // --- Register the _vertebra extension module before Python starts ---
     // This ensures embedded Python shares the same BatchBridge singleton
@@ -198,14 +195,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(all(feature = "python", unix))]
     let mut shm_children: Option<Vec<std::process::Child>> = None;
 
-    #[cfg(all(feature = "python", unix))]
-    let shm_shutdown: Option<tokio_util::sync::CancellationToken> = None;
-
     let dispatcher;
 
     #[cfg(feature = "python")]
     {
-        if config.workers.count > 0 {
+        if config.topology == vertebra_http::config::Topology::Shm {
             // Multi-process mode: SHM dispatcher + response reader
             #[cfg(unix)]
             {
@@ -213,12 +207,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 use vertebra_http::response_reader;
                 use vertebra_http::supervisor::SupervisorRingFactory;
 
+                let worker_count = if config.workers.count > 0 {
+                    config.workers.count
+                } else {
+                    1
+                };
+
                 let factory =
-                    SupervisorRingFactory::new(config.workers.count, RingPairConfig::default())
+                    SupervisorRingFactory::new(worker_count, RingPairConfig::default())
                         .expect("failed to create supervisor ring factory");
 
                 info!(
-                    workers = config.workers.count,
+                    workers = worker_count,
                     "spawning multi-process workers with SHM transport"
                 );
 
@@ -229,10 +229,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
                 // Spawn response reader
                 let shutdown_token = tokio_util::sync::CancellationToken::new();
-                #[allow(unused_assignments)]
-                {
-                    let _ = &shm_shutdown;
-                } // suppress warning
                 tokio::spawn(response_reader::run_response_reader(
                     ring_pairs,
                     Arc::clone(&dispatcher),
@@ -258,7 +254,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             spawn_response_reader(Arc::clone(&dispatcher));
             spawn_python_worker(app_path.clone());
         }
-        info!(app = %app_path, bind = %config.bind, "vertebra-server starting");
+        info!(app = %app_path, bind = %config.bind, topology = ?config.topology, "vertebra-server starting");
     }
 
     #[cfg(not(feature = "python"))]

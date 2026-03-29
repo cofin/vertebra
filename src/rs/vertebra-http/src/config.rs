@@ -23,8 +23,37 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// Enable dev-only control surfaces such as HMR.
     pub dev_mode: bool,
+    /// Runtime topology (embedded or shm).
+    pub topology: Topology,
     /// Multi-process worker configuration.
     pub workers: WorkerConfig,
+}
+
+/// Runtime topology for Vertebra.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Topology {
+    /// Single-process, Python in-process via PyO3.
+    Embedded,
+    /// Multi-process, Python workers via SHM IPC.
+    Shm,
+}
+
+impl Default for Topology {
+    fn default() -> Self {
+        Self::Embedded
+    }
+}
+
+impl std::str::FromStr for Topology {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "embedded" => Ok(Self::Embedded),
+            "shm" => Ok(Self::Shm),
+            _ => Err(format!("invalid topology: {s}")),
+        }
+    }
 }
 
 /// Configuration for multi-process workers.
@@ -68,6 +97,7 @@ impl Default for ServerConfig {
             keepalive_timeout: Duration::from_secs(75),
             max_connections: 0,
             dev_mode: false,
+            topology: Topology::default(),
             workers: WorkerConfig::default(),
         }
     }
@@ -111,10 +141,22 @@ impl ServerConfig {
             _ => {}
         }
 
+        // Topology config
+        if let Ok(top) = std::env::var("VERTEBRA_TOPOLOGY") {
+            if let Ok(t) = top.parse::<Topology>() {
+                config.topology = t;
+            }
+        }
+
         // Worker config
         if let Ok(count) = std::env::var("VERTEBRA_WORKERS") {
             if let Ok(n) = count.parse::<usize>() {
                 config.workers.count = n;
+                // If workers > 0 and topology was not explicitly set to Embedded,
+                // assume SHM for backward compatibility.
+                if n > 0 && std::env::var("VERTEBRA_TOPOLOGY").is_err() {
+                    config.topology = Topology::Shm;
+                }
             }
         }
         if let Ok(python) = std::env::var("VERTEBRA_PYTHON_BIN") {
