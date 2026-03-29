@@ -418,7 +418,6 @@ async def _shm_worker_loop(
     from vertebra._vertebra import (
         clear_request_notification,
         get_request_notify_fd,
-        submit_results,
         try_get_batch,
     )
 

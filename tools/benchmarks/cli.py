@@ -147,6 +147,7 @@ def run(
                         timestamp = datetime.now(tz=UTC).isoformat()
                         result_row: dict[str, Any] = {
                             "target": target.name,
+                            "topology": target.topology,
                             "scenario": scenario_name,
                             "concurrency": conc,
                             "duration": duration,
@@ -221,12 +222,13 @@ def list_targets() -> None:
     """List available benchmark targets."""
     table = Table(title="Available Targets", show_lines=True)
     table.add_column("Name", style="cyan")
+    table.add_column("Topology", style="yellow")
     table.add_column("Category", style="magenta")
     table.add_column("Port", justify="right")
     table.add_column("Description")
 
     for name, target in ALL_TARGETS.items():
-        table.add_row(name, target.category, str(target.port), target.description)
+        table.add_row(name, target.topology, target.category, str(target.port), target.description)
 
     console.print(table)
 

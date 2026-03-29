@@ -40,6 +40,7 @@ def print_summary_table(results: list[dict[str, Any]]) -> None:
     """Print a Rich table summarizing benchmark results."""
     table = Table(title="Benchmark Results", show_lines=True)
     table.add_column("Target", style="cyan", no_wrap=True)
+    table.add_column("Topology", style="yellow")
     table.add_column("Scenario", style="magenta")
     table.add_column("Conc", justify="right")
     table.add_column("RPS", justify="right")
@@ -58,6 +59,7 @@ def print_summary_table(results: list[dict[str, Any]]) -> None:
 
         table.add_row(
             r.get("target", ""),
+            r.get("topology", "unknown"),
             r.get("scenario", ""),
             str(r.get("concurrency", "")),
             _fmt_rps(r.get("rps", 0.0)),

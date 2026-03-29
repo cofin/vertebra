@@ -54,4 +54,3 @@ class AsgiAdapter:
     async def run_batch(self, requests: list[Any]) -> list[AsgiResponse]:
         """Run the ASGI app for every request in the batch concurrently."""
         return await asyncio.gather(*(self.run_single(req) for req in requests))
-

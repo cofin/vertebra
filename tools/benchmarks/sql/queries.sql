@@ -16,7 +16,7 @@ LIMIT $1;
 
 -- name: select_run_results
 SELECT
-    target, scenario, concurrency, duration_s,
+    target, topology, scenario, concurrency, duration_s,
     rps, latency_mean_ms, latency_p50_ms, latency_p99_ms, latency_max_ms,
     total_requests, errors, url, timestamp
 FROM benchmark_results

@@ -4,6 +4,17 @@ import os
 import shutil
 import sys
 from dataclasses import dataclass, field
+from enum import StrEnum
+
+
+class Topology(StrEnum):
+    """Runtime topologies for Vertebra."""
+
+    NATIVE = "native"  # Direct Rust handlers
+    EMBEDDED = "embedded"  # Python in-process (PyO3)
+    SHM = "shm"  # Multi-process shared memory
+    FREE_THREADED = "free-threaded"  # Python 3.14t in-process
+    BASELINE = "baseline"  # External baseline (granian, etc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,6 +23,7 @@ class Target:
 
     name: str
     cmd: list[str]
+    topology: Topology
     host: str = "127.0.0.1"
     port: int = 8000
     env: dict[str, str] = field(default_factory=dict)
@@ -89,76 +101,67 @@ def _ft_run(*args: str) -> list[str]:
 
 
 # Port assignments:
-#   8000-8002  - vertebra single-worker (native/asgi/wsgi)
+#   8000-8002  - vertebra single-worker embedded (native/asgi/wsgi)
 #   8003-8005  - baselines (granian/uvicorn/spikard)
-#   8010-8013  - vertebra multi-worker (current Python)
+#   8010-8013  - vertebra multi-process SHM
 #   8020-8023  - vertebra free-threaded 3.14t
 
 ALL_TARGETS: dict[str, Target] = {
-    # ── Single-worker (default) ─────────────────────────────────────────
-    "vertebra-native": Target(
-        name="vertebra-native",
+    # ── Embedded (Single-process, in-process Python) ───────────────────
+    "vtb-embedded-native": Target(
+        name="vtb-embedded-native",
+        topology=Topology.EMBEDDED,
         cmd=_vertebra_run("tools.benchmarks.apps.vertebra_app:native_app", "--host", "127.0.0.1", "--port", "8000"),
         port=8000,
-        description="Vertebra native (single worker)",
+        description="Vertebra embedded, native handlers",
     ),
-    "vertebra-asgi": Target(
-        name="vertebra-asgi",
+    "vtb-embedded-asgi": Target(
+        name="vtb-embedded-asgi",
+        topology=Topology.EMBEDDED,
         cmd=_vertebra_run(
             "tools.benchmarks.apps.vertebra_app:asgi_app", "--asgi", "--host", "127.0.0.1", "--port", "8001"
         ),
         port=8001,
-        description="Vertebra ASGI adapter",
+        description="Vertebra embedded, ASGI adapter",
     ),
-    "vertebra-wsgi": Target(
-        name="vertebra-wsgi",
+    "vtb-embedded-wsgi": Target(
+        name="vtb-embedded-wsgi",
+        topology=Topology.EMBEDDED,
         cmd=_vertebra_run("tools.benchmarks.apps.vertebra_app:wsgi_app", "--host", "127.0.0.1", "--port", "8002"),
         port=8002,
-        description="Vertebra WSGI adapter",
+        description="Vertebra embedded, WSGI adapter",
     ),
-    # ── Multi-worker (current Python) ───────────────────────────────────
-    "vertebra-native-4w": Target(
-        name="vertebra-native-4w",
+    # ── SHM (Multi-process, shared-memory IPC) ──────────────────────────
+    "vtb-shm-native-4w": Target(
+        name="vtb-shm-native-4w",
+        topology=Topology.SHM,
         cmd=_vertebra_run("tools.benchmarks.apps.vertebra_app:native_app", "--host", "127.0.0.1", "--port", "8011"),
         port=8011,
         env={"VERTEBRA_WORKERS": "4"},
-        description="Vertebra native, 4 workers",
+        description="Vertebra SHM, native handlers, 4 workers",
     ),
-    "vertebra-asgi-4w": Target(
-        name="vertebra-asgi-4w",
+    "vtb-shm-asgi-4w": Target(
+        name="vtb-shm-asgi-4w",
+        topology=Topology.SHM,
         cmd=_vertebra_run(
             "tools.benchmarks.apps.vertebra_app:asgi_app", "--asgi", "--host", "127.0.0.1", "--port", "8012"
         ),
         port=8012,
         env={"VERTEBRA_WORKERS": "4"},
-        description="Vertebra ASGI, 4 workers",
+        description="Vertebra SHM, ASGI, 4 workers",
     ),
-    "vertebra-wsgi-4w": Target(
-        name="vertebra-wsgi-4w",
+    "vtb-shm-wsgi-4w": Target(
+        name="vtb-shm-wsgi-4w",
+        topology=Topology.SHM,
         cmd=_vertebra_run("tools.benchmarks.apps.vertebra_app:wsgi_app", "--host", "127.0.0.1", "--port", "8013"),
         port=8013,
         env={"VERTEBRA_WORKERS": "4"},
-        description="Vertebra WSGI, 4 workers",
+        description="Vertebra SHM, WSGI, 4 workers",
     ),
     # ── Free-threaded Python 3.14t ──────────────────────────────────────
-    # These use a separate server binary linked against libpython3.14t,
-    # built by `make bench-ft`. The _ft_env() provides LD_LIBRARY_PATH
-    # and PYTHONPATH so the binary finds the right runtime and modules.
-    "vertebra-ft-1w": Target(
-        name="vertebra-ft-1w",
-        cmd=_ft_run(),
-        port=8020,
-        env={
-            **_ft_env(),
-            "VERTEBRA_APP": "tools.benchmarks.apps.vertebra_app:native_app",
-            "VERTEBRA_HOST": "127.0.0.1",
-            "VERTEBRA_PORT": "8020",
-        },
-        description="Vertebra native, 1w, Python 3.14t",
-        category="freethreaded",
-    ),
-    "vertebra-ft-4w": Target(
-        name="vertebra-ft-4w",
+    "vtb-ft-native-4w": Target(
+        name="vtb-ft-native-4w",
+        topology=Topology.FREE_THREADED,
         cmd=_ft_run(),
         port=8022,
         env={
@@ -166,42 +169,16 @@ ALL_TARGETS: dict[str, Target] = {
             "VERTEBRA_APP": "tools.benchmarks.apps.vertebra_app:native_app",
             "VERTEBRA_HOST": "127.0.0.1",
             "VERTEBRA_PORT": "8022",
-            "VERTEBRA_WORKERS": "4",
+            "VERTEBRA_WORKERS": "0",  # In-process
+            "VERTEBRA_CPU_COUNT": "4",  # Custom env for FT threading
         },
-        description="Vertebra native, 4w, Python 3.14t",
-        category="freethreaded",
-    ),
-    "vertebra-ft-asgi-4w": Target(
-        name="vertebra-ft-asgi-4w",
-        cmd=_ft_run(),
-        port=8021,
-        env={
-            **_ft_env(),
-            "VERTEBRA_APP": "tools.benchmarks.apps.vertebra_app:asgi_app",
-            "VERTEBRA_HOST": "127.0.0.1",
-            "VERTEBRA_PORT": "8021",
-            "VERTEBRA_WORKERS": "4",
-        },
-        description="Vertebra ASGI, 4w, Python 3.14t",
-        category="freethreaded",
-    ),
-    "vertebra-ft-wsgi-4w": Target(
-        name="vertebra-ft-wsgi-4w",
-        cmd=_ft_run(),
-        port=8023,
-        env={
-            **_ft_env(),
-            "VERTEBRA_APP": "tools.benchmarks.apps.vertebra_app:wsgi_app",
-            "VERTEBRA_HOST": "127.0.0.1",
-            "VERTEBRA_PORT": "8023",
-            "VERTEBRA_WORKERS": "4",
-        },
-        description="Vertebra WSGI, 4w, Python 3.14t",
+        description="Vertebra FT, native handlers, 4 threads",
         category="freethreaded",
     ),
     # ── Baselines ───────────────────────────────────────────────────────
     "granian-asgi": Target(
         name="granian-asgi",
+        topology=Topology.BASELINE,
         cmd=_py(
             "-m",
             "granian",
@@ -219,6 +196,7 @@ ALL_TARGETS: dict[str, Target] = {
     ),
     "uvicorn-httptools": Target(
         name="uvicorn-httptools",
+        topology=Topology.BASELINE,
         cmd=_py(
             "-m",
             "uvicorn",
@@ -238,6 +216,7 @@ ALL_TARGETS: dict[str, Target] = {
     ),
     "spikard": Target(
         name="spikard",
+        topology=Topology.BASELINE,
         cmd=_py("-m", "tools.benchmarks.apps.spikard_app"),
         port=8005,
         env={"SPIKARD_HOST": "127.0.0.1", "SPIKARD_PORT": "8005"},

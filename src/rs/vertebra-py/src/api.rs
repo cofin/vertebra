@@ -303,9 +303,7 @@ fn send_shm_response_with_backpressure(
             *pending_notification = false;
 
             // Release the GIL while blocking on the ring buffer
-            py.detach(|| {
-                transport.send_response_blocking(request_id, status, headers_raw, body)
-            })?;
+            py.detach(|| transport.send_response_blocking(request_id, status, headers_raw, body))?;
 
             *pending_notification = true;
             Ok(())

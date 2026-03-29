@@ -108,6 +108,7 @@ class BenchmarkStore:
             [
                 run_id,
                 result["target"],
+                result.get("topology", "unknown"),
                 result["scenario"],
                 result["concurrency"],
                 result["duration"],

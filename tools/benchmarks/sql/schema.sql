@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS benchmark_results (
     id              INTEGER PRIMARY KEY DEFAULT nextval('bench_result_seq'),
     run_id          VARCHAR NOT NULL REFERENCES benchmark_runs(run_id),
     target          VARCHAR,
+    topology        VARCHAR,
     scenario        VARCHAR,
     concurrency     INTEGER,
     duration_s      INTEGER,

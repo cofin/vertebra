@@ -54,8 +54,8 @@ class AsgiRunner:
 
     def spawn_single(self, request: Any) -> None:
         """Process a single request asynchronously and submit its response."""
-        from vertebra._vertebra import submit_response
         from vertebra._vertebra import VertebraResponse as VR
+        from vertebra._vertebra import submit_response
 
         async def _dispatch() -> None:
             resp = await self._adapter.run_single(request)
