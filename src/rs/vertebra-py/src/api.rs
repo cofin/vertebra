@@ -364,7 +364,7 @@ mod tests {
         });
 
         let mut pending_notification = false;
-        pyo3::Python::with_gil(|py| {
+        pyo3::Python::attach(|py| {
             send_shm_response_with_backpressure(
                 py,
                 &transport,
