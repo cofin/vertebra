@@ -353,8 +353,16 @@ def _dispatch_batch(
     # ASYNC MODE: Fire and forget
     # 1. Sync native handlers
     for _idx, request, handler in partitioned.sync_native:
-        response = _call_handler(handler, request, loop=scheduler.loop)
-        submit_response(_coerce_response(response, request.request_id, vr_cls))
+
+        def _dispatch_sync(req=request, h=handler) -> None:
+            try:
+                response = _call_handler(h, req, loop=scheduler.loop)
+                submit_response(_coerce_response(response, req.request_id, vr_cls))
+            except Exception as e:
+                print(f"[vertebra] sync handler error: {e}", file=sys.stderr)  # noqa: T201
+                submit_response(vr_cls(status=500, body=b"internal server error", request_id=req.request_id))
+
+        _get_wsgi_executor().submit(_dispatch_sync)
 
     # 2. Async native handlers
     for _idx, request, handler in partitioned.async_native:
@@ -509,10 +517,11 @@ def run_worker(
 
     # 1. Shared Infrastructure
     scheduler = CallbackScheduler()
-    cpu_count = worker_count or (os.cpu_count() or 1)
 
-    if is_shm:
-        cpu_count = 1
+    # Scaling logic: prioritize explicit parameter, then env, then CPU count.
+    threads_env = os.environ.get("VERTEBRA_THREADS")
+    default_threads = int(threads_env) if threads_env else (os.cpu_count() or 1)
+    cpu_count = worker_count if worker_count is not None else default_threads
 
     global _wsgi_executor  # noqa: PLW0603
     _wsgi_executor = ThreadPoolExecutor(

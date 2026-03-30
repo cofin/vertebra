@@ -83,6 +83,11 @@ impl SupervisorRingFactory {
         // Set app import path
         cmd.env("VERTEBRA_APP", app_path);
 
+        // Propagate thread count
+        if let Ok(threads) = std::env::var("VERTEBRA_THREADS") {
+            cmd.env("VERTEBRA_THREADS", threads);
+        }
+
         // Set parent death signal (Linux only)
         #[cfg(target_os = "linux")]
         process::set_parent_death_signal(&mut cmd);

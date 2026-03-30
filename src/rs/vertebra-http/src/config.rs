@@ -27,6 +27,8 @@ pub struct ServerConfig {
     pub topology: Topology,
     /// Multi-process worker configuration.
     pub workers: WorkerConfig,
+    /// Number of Python threads per process (for free-threading).
+    pub thread_count: usize,
 }
 
 /// Runtime topology for Vertebra.
@@ -99,6 +101,7 @@ impl Default for ServerConfig {
             dev_mode: false,
             topology: Topology::default(),
             workers: WorkerConfig::default(),
+            thread_count: num_cpus(),
         }
     }
 }
@@ -145,6 +148,13 @@ impl ServerConfig {
         if let Ok(top) = std::env::var("VERTEBRA_TOPOLOGY") {
             if let Ok(t) = top.parse::<Topology>() {
                 config.topology = t;
+            }
+        }
+
+        // Thread scaling config
+        if let Ok(threads) = std::env::var("VERTEBRA_THREADS") {
+            if let Ok(n) = threads.parse::<usize>() {
+                config.thread_count = n;
             }
         }
 

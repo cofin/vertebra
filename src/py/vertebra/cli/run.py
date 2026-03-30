@@ -20,6 +20,7 @@ from vertebra.utils.serializers import from_json
 @click.option("--host", default="127.0.0.1", help="Host to bind to")
 @click.option("--port", type=int, default=8000, help="Port to bind to")
 @click.option("--workers", type=int, default=None, help="Number of worker processes")
+@click.option("--threads", type=int, default=None, help="Number of threads per process")
 @click.option(
     "--topology",
     type=click.Choice(["embedded", "shm"], case_sensitive=False),
@@ -39,6 +40,7 @@ def run(
     host: str,
     port: int,
     workers: int | None,
+    threads: int | None,
     topology: str,
     config_path: str | None,
     log_level: str,
@@ -56,6 +58,10 @@ def run(
     if workers is None:
         workers = 1 if topology.lower() == "shm" else 0
 
+    # Default threads to CPU count if not specified
+    if threads is None:
+        threads = os.cpu_count() or 1
+
     env = os.environ.copy()
     env["VERTEBRA_APP"] = app
 
@@ -66,6 +72,7 @@ def run(
     env["VERTEBRA_HOST"] = host
     env["VERTEBRA_PORT"] = str(port)
     env["VERTEBRA_WORKERS"] = str(workers)
+    env["VERTEBRA_THREADS"] = str(threads)
     env["VERTEBRA_TOPOLOGY"] = topology.lower()
     env["VERTEBRA_LOG_LEVEL"] = log_level
     env["VERTEBRA_NATIVE"] = "0" if asgi else "1"

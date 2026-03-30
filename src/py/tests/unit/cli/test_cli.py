@@ -80,6 +80,10 @@ def test_run_sets_topology_env(runner: CliRunner, monkeypatch: pytest.MonkeyPatc
     assert captured["env"]["VERTEBRA_TOPOLOGY"] == "embedded"
     assert captured["env"]["VERTEBRA_WORKERS"] == "4"
 
+    # 4. Explicit threads
+    runner.invoke(cli, ["run", "sample_app:app", "--threads", "8", "--no-banner"])
+    assert captured["env"]["VERTEBRA_THREADS"] == "8"
+
 
 def test_dev_sets_vertebra_dev_env(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     """vtb dev should set VERTEBRA_DEV=1 and start with single worker."""
