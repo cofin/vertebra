@@ -94,7 +94,7 @@ def _header_to_cgi(name: str) -> str:
 class WsgiEnviron(Mapping[str, Any]):
     """Lazy read-only WSGI environ mapping backed by a VertebraRequest."""
 
-    __slots__ = ("_req", "_server_name", "_server_port", "_url_scheme", "_cache")
+    __slots__ = ("_req", "_server_name", "_server_port", "_url_scheme", "_cache", "_path_info")
 
     def __init__(
         self,
@@ -109,6 +109,8 @@ class WsgiEnviron(Mapping[str, Any]):
         self._server_port: int = server_port
         self._url_scheme: str = url_scheme
         self._cache: dict[str, Any] | None = None
+        # Pre-quote path info once
+        self._path_info: str = quote(request.path, safe="/:@!$&'()*+,;=")
 
     def _ensure_cache(self) -> dict[str, Any]:
         if self._cache is None:
@@ -123,7 +125,7 @@ class WsgiEnviron(Mapping[str, Any]):
         if key == "SCRIPT_NAME":
             return ""
         if key == "PATH_INFO":
-            return quote(req.path, safe="/:@!$&'()*+,;=")
+            return self._path_info
         if key == "QUERY_STRING":
             return req.query or ""
         if key == "SERVER_NAME":

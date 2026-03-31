@@ -9,7 +9,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyString};
 
-use vertebra_core::transport::{decode_headers_raw, BatchSnapshot};
+use vertebra_core::transport::BatchSnapshot;
 
 use crate::headers::VertebraHeaders;
 
@@ -97,8 +97,7 @@ impl VertebraRequest {
     #[getter]
     fn headers(&self) -> VertebraHeaders {
         let raw = self.batch.headers_raw(self.index);
-        let decoded = decode_headers_raw(raw);
-        VertebraHeaders::new(decoded)
+        VertebraHeaders::new(bytes::Bytes::copy_from_slice(raw))
     }
 
     fn as_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {

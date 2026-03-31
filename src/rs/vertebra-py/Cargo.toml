@@ -9,6 +9,7 @@ description = "PyO3 bindings for Vertebra native extension"
 
 [dependencies]
 vertebra-core = { path = "../vertebra-core" }
+bytes = { workspace = true }
 pyo3 = { workspace = true }
 
 [build-dependencies]

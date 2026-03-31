@@ -16,6 +16,9 @@ _SCOPE_TYPE = "http"
 
 def _build_headers(request: Any) -> list[tuple[bytes, bytes]]:
     """Materialise headers from VertebraHeaders proxy."""
+    # Use optimized asgi_items() if available (lazy proxy)
+    if hasattr(request.headers, "asgi_items"):
+        return request.headers.asgi_items()
     return [(name.lower().encode("latin-1"), value.encode("latin-1")) for name, value in request.headers.items()]
 
 

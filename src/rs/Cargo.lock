@@ -4000,6 +4000,7 @@ dependencies = [
 name = "vertebra-py"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "pyo3",
  "pyo3-build-config",
  "vertebra-core",

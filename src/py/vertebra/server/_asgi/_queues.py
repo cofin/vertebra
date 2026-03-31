@@ -61,8 +61,9 @@ class SendCollector:
 
         if msg_type == "http.response.start":
             self._status = int(message["status"])
-            raw_headers: list[Any] = message.get("headers", [])
-            self._headers = [(name.decode("latin-1"), value.decode("latin-1")) for name, value in raw_headers]
+            # Fast path: store raw byte headers directly.
+            # VertebraResponse constructor now handles byte headers efficiently.
+            self._headers = message.get("headers", [])
             self._started = True
 
         elif msg_type == "http.response.body":
