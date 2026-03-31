@@ -1,12 +1,14 @@
 //! Response builder for the Vertebra batch runner.
 
+use bytes::Bytes;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyString, PyTuple};
 
-#[pyclass(name = "VertebraResponse")]
+#[pyclass(name = "VertebraResponse", from_py_object)]
+#[derive(Clone)]
 pub struct VertebraResponse {
     pub status: u16,
-    pub body: Vec<u8>,
+    pub body: Bytes,
     pub headers: Vec<(String, String)>,
     pub request_id: u64,
 }
@@ -21,7 +23,7 @@ impl VertebraResponse {
         headers: Option<&Bound<'_, PyAny>>,
         request_id: u64,
     ) -> PyResult<Self> {
-        let body = body.unwrap_or(&[]).to_vec();
+        let body = Bytes::copy_from_slice(body.unwrap_or(&[]));
         let mut header_vec: Vec<(String, String)> = Vec::new();
 
         if let Some(h) = headers {
@@ -32,10 +34,22 @@ impl VertebraResponse {
             } else if let Ok(list) = h.cast::<PyList>() {
                 for item in list.iter() {
                     let tuple = item.cast::<PyTuple>()?;
-                    header_vec.push((
-                        tuple.get_item(0)?.extract::<String>()?,
-                        tuple.get_item(1)?.extract::<String>()?,
-                    ));
+                    let k_obj = tuple.get_item(0)?;
+                    let v_obj = tuple.get_item(1)?;
+
+                    let k = if let Ok(b) = k_obj.cast::<PyBytes>() {
+                        String::from_utf8_lossy(b.as_bytes()).to_string()
+                    } else {
+                        k_obj.extract::<String>()?
+                    };
+
+                    let v = if let Ok(b) = v_obj.cast::<PyBytes>() {
+                        String::from_utf8_lossy(b.as_bytes()).to_string()
+                    } else {
+                        v_obj.extract::<String>()?
+                    };
+
+                    header_vec.push((k, v));
                 }
             }
         }

@@ -181,8 +181,8 @@ fn drain_worker(worker: &Arc<RingPair>, dispatcher: &Dispatcher) -> bool {
                     resp.correlation_id,
                     PendingResponse {
                         status: resp.status,
-                        headers_mp: bytes::Bytes::from(resp.headers_raw),
-                        body: bytes::Bytes::from(resp.body),
+                        headers_mp: resp.headers_raw,
+                        body: resp.body,
                     },
                 ));
             }

@@ -77,7 +77,7 @@ fn spawn_response_reader(dispatcher: Arc<Dispatcher>) {
                     PendingResponse {
                         status: resp.status,
                         headers_mp: encode_response_headers(&resp.headers),
-                        body: bytes::Bytes::from(resp.body),
+                        body: resp.body,
                     },
                 );
             }
@@ -151,7 +151,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // arena_capacity=256 nodes, slab_capacity=1MB, channel_depth=4
     // Multi-process SHM uses its own transport, but we still initialize the
     // bridge singleton for in-process compatibility.
-    BatchBridge::init(256, 1_048_576, 4, config.workers.count).expect("failed to initialize batch bridge");
+    BatchBridge::init(256, 1_048_576, 4, config.workers.count)
+        .expect("failed to initialize batch bridge");
 
     // --- Register the _vertebra extension module before Python starts ---
     // This ensures embedded Python shares the same BatchBridge singleton
@@ -213,9 +214,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     1
                 };
 
-                let factory =
-                    SupervisorRingFactory::new(worker_count, RingPairConfig::default())
-                        .expect("failed to create supervisor ring factory");
+                let factory = SupervisorRingFactory::new(worker_count, RingPairConfig::default())
+                    .expect("failed to create supervisor ring factory");
 
                 info!(
                     workers = worker_count,

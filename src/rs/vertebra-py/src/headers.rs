@@ -99,16 +99,22 @@ impl VertebraHeaders {
         while pos < data.len() {
             let name_len = data[pos] as usize;
             pos += 1;
-            if pos + name_len > data.len() { break; }
+            if pos + name_len > data.len() {
+                break;
+            }
             let name = &data[pos..pos + name_len];
             // Lowercase the key for ASGI spec compliance
             let name_lower = name.to_ascii_lowercase();
             pos += name_len;
 
-            if pos + 2 > data.len() { break; }
+            if pos + 2 > data.len() {
+                break;
+            }
             let value_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
             pos += 2;
-            if pos + value_len > data.len() { break; }
+            if pos + value_len > data.len() {
+                break;
+            }
             let value = &data[pos..pos + value_len];
             pos += value_len;
 
@@ -154,14 +160,20 @@ impl VertebraHeaders {
             }
             let name_len = data[pos] as usize;
             pos += 1;
-            if pos + name_len > data.len() { return None; }
+            if pos + name_len > data.len() {
+                return None;
+            }
             let name = String::from_utf8_lossy(&data[pos..pos + name_len]).to_string();
             pos += name_len;
 
-            if pos + 2 > data.len() { return None; }
+            if pos + 2 > data.len() {
+                return None;
+            }
             let value_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
             pos += 2;
-            if pos + value_len > data.len() { return None; }
+            if pos + value_len > data.len() {
+                return None;
+            }
             let value = String::from_utf8_lossy(&data[pos..pos + value_len]).to_string();
             pos += value_len;
 
@@ -188,11 +200,15 @@ impl VertebraHeadersIter {
         }
         let name_len = self.raw[self.pos] as usize;
         self.pos += 1;
-        if self.pos + name_len > self.raw.len() { return None; }
+        if self.pos + name_len > self.raw.len() {
+            return None;
+        }
         let name = String::from_utf8_lossy(&self.raw[self.pos..self.pos + name_len]).to_string();
         self.pos += name_len;
 
-        if self.pos + 2 > self.raw.len() { return None; }
+        if self.pos + 2 > self.raw.len() {
+            return None;
+        }
         let value_len = u16::from_le_bytes([self.raw[self.pos], self.raw[self.pos + 1]]) as usize;
         self.pos += 2 + value_len;
 

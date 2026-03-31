@@ -150,7 +150,7 @@ pub fn submit_results(py: Python<'_>, responses: Vec<Py<VertebraResponse>>) -> P
             request_id: resp.request_id,
             status: resp.status,
             headers: resp.headers.clone(),
-            body: resp.body.clone(),
+            body: resp.body.clone(), // This is now a cheap Bytes clone
         });
     }
 

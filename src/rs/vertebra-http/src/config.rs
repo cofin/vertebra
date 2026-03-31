@@ -32,18 +32,13 @@ pub struct ServerConfig {
 }
 
 /// Runtime topology for Vertebra.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Topology {
     /// Single-process, Python in-process via PyO3.
+    #[default]
     Embedded,
     /// Multi-process, Python workers via SHM IPC.
     Shm,
-}
-
-impl Default for Topology {
-    fn default() -> Self {
-        Self::Embedded
-    }
 }
 
 impl std::str::FromStr for Topology {

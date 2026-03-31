@@ -24,7 +24,7 @@
     "**/node_modules": true,
     "**/.terraform": true,
     "tmp": false,
-    "scratch": true,
+    "scratch": false,
     "**/.static": true,
     "dist": false,
     ".dmypy.json": true,

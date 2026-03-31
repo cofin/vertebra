@@ -354,7 +354,7 @@ def _dispatch_batch(
     # 1. Sync native handlers
     for _idx, request, handler in partitioned.sync_native:
 
-        def _dispatch_sync(req=request, h=handler) -> None:
+        def _dispatch_sync(req: Any = request, h: Any = handler) -> None:
             try:
                 response = _call_handler(h, req, loop=scheduler.loop)
                 submit_response(_coerce_response(response, req.request_id, vr_cls))
@@ -367,7 +367,7 @@ def _dispatch_batch(
     # 2. Async native handlers
     for _idx, request, handler in partitioned.async_native:
 
-        async def _dispatch_async(req=request, h=handler) -> None:
+        async def _dispatch_async(req: Any = request, h: Any = handler) -> None:
             try:
                 has_params, _ = _handler_meta(h)
                 if has_params:
@@ -398,7 +398,7 @@ def _dispatch_batch(
             # WSGI still uses thread pool but each result is submitted individually
             for _idx, request in entries:
 
-                def _dispatch_wsgi(req=request, a=adapter) -> None:
+                def _dispatch_wsgi(req: Any = request, a: Any = adapter) -> None:
                     try:
                         submit_response(a(req))
                     except Exception:
@@ -574,7 +574,8 @@ def run_worker(
                 partitioned = _partition_batch(batch, handlers, cpu_mounts)
                 # Only dispatch sync native and WSGI mounts
                 results = _dispatch_batch(partitioned, handlers, cpu_mounts, VR, scheduler)
-                submit_results(results)
+                if results is not None:
+                    submit_results(results)
         finally:
             pass
 

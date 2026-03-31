@@ -22,7 +22,7 @@ pub struct BridgeResponse {
     pub request_id: u64,
     pub status: u16,
     pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
+    pub body: bytes::Bytes,
 }
 
 /// Request data to be written into the transport arena and slab.

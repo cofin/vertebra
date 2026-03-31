@@ -61,8 +61,12 @@ impl ResponseData {
             return Err(RingPairError::InvalidResponse("truncated"));
         }
 
-        let headers_raw = Bytes::copy_from_slice(&data[RESPONSE_HEADER_SIZE..RESPONSE_HEADER_SIZE + headers_len]);
-        let body = Bytes::copy_from_slice(&data[RESPONSE_HEADER_SIZE + headers_len..RESPONSE_HEADER_SIZE + headers_len + body_len]);
+        let headers_raw =
+            Bytes::copy_from_slice(&data[RESPONSE_HEADER_SIZE..RESPONSE_HEADER_SIZE + headers_len]);
+        let body = Bytes::copy_from_slice(
+            &data
+                [RESPONSE_HEADER_SIZE + headers_len..RESPONSE_HEADER_SIZE + headers_len + body_len],
+        );
 
         Ok(Self {
             correlation_id,
@@ -615,5 +619,178 @@ mod tests {
         assert_eq!(resp.status, 200);
         assert_eq!(resp.headers_raw, &headers_raw[..]);
         assert_eq!(resp.body, &body[..]);
+    }
+
+    #[test]
+    fn tiered_ring_set_response_empty_body() {
+        let config = TieredRingConfig::default();
+        let set = TieredRingSet::create(&config).expect("create");
+
+        set.send_response(99, 204, b"", b"").expect("send");
+
+        let resp = set
+            .try_recv_response()
+            .expect("recv")
+            .expect("should have response");
+        assert_eq!(resp.correlation_id, 99);
+        assert_eq!(resp.status, 204);
+        assert!(resp.headers_raw.is_empty());
+        assert!(resp.body.is_empty());
+    }
+
+    #[test]
+    fn tiered_ring_set_recv_none_when_empty() {
+        let config = TieredRingConfig::default();
+        let set = TieredRingSet::create(&config).expect("create");
+        assert!(set.try_recv_response().expect("recv").is_none());
+    }
+
+    #[test]
+    fn tiered_ring_set_response_too_large() {
+        let config = TieredRingConfig::default();
+        let set = TieredRingSet::create(&config).expect("create");
+
+        let huge_body = vec![0u8; 3 * 1024 * 1024]; // 3MB > 2MB xlarge
+        let result = set.send_response(1, 200, b"", &huge_body);
+        assert!(matches!(result, Err(RingPairError::ResponseTooLarge(_))));
+    }
+
+    mod prop_tests {
+        use crate::transport::{BatchSnapshot, TransportNode};
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn batch_snapshot_serialize_arbitrary(
+                slab_data in proptest::collection::vec(any::<u8>(), 0..1024),
+                node_count in 0usize..32,
+                flags in any::<u32>(),
+            ) {
+                let nodes: Vec<TransportNode> = (0..node_count)
+                    .map(|i| TransportNode {
+                        method_tag: (i % 9) as u8,
+                        http_version_tag: 1,
+                        _pad: [0; 2],
+                        handler_id: i as u64,
+                        correlation_id: i as u64 * 7,
+                        path_offset: 0,
+                        path_len: 0,
+                        query_offset: 0,
+                        query_len: 0,
+                        headers_offset: 0,
+                        headers_len: 0,
+                        body_offset: 0,
+                        body_len: 0,
+                    })
+                    .collect();
+
+                let snap = BatchSnapshot::new_with_flags(slab_data.clone(), nodes.clone(), flags);
+                let mut buf = vec![0u8; snap.serialized_size()];
+                let written = snap.serialize_into(&mut buf);
+                prop_assert_eq!(written, snap.serialized_size());
+
+                let deserialized = BatchSnapshot::deserialize_from(&buf[..written])
+                    .expect("deserialize should succeed");
+                prop_assert_eq!(deserialized.len(), node_count);
+                prop_assert_eq!(deserialized.flags(), flags);
+                for i in 0..node_count {
+                    prop_assert_eq!(deserialized.node(i).handler_id, i as u64);
+                    prop_assert_eq!(deserialized.node(i).correlation_id, i as u64 * 7);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ring_pair_from_inherited_round_trips() {
+        let config = RingPairConfig::default();
+        let pair = RingPair::create(config.clone()).expect("create");
+
+        // Get FDs for inheritance
+        let req_fd = pair.request_ring_handle().expect("request ring handle");
+        let resp_handles = pair.response_rings.handles();
+        let req_notify_fd = pair.request_notifier.as_raw_fd();
+        let resp_notify_fd = pair.response_notifier.as_raw_fd();
+
+        // Simulate worker-side attach (same process, but tests the API)
+        // Note: we can't truly test from_inherited in the same process because
+        // the original RingPair still owns the FDs. Instead, verify the FDs are valid.
+        assert!(req_fd >= 0);
+        for h in &resp_handles {
+            assert!(h.unwrap() >= 0);
+        }
+        assert!(req_notify_fd >= 0);
+        assert!(resp_notify_fd >= 0);
+
+        // Verify data round-trips through the request ring
+        let data = b"inherited test";
+        pair.request_ring.try_send(data, 0).expect("send");
+        let mut buf = vec![0u8; 1024];
+        let len = pair.request_ring.try_recv(&mut buf).expect("recv");
+        assert_eq!(&buf[..len], data);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fd_set_returns_valid_fds() {
+        let pair = RingPair::create(RingPairConfig::default()).expect("create");
+        let fds = pair.fd_set();
+
+        assert!(fds.req_ring_fd >= 0, "request ring FD should be valid");
+        assert!(fds.resp_small_fd >= 0, "small response FD should be valid");
+        assert!(fds.resp_medium_fd >= 0);
+        assert!(fds.resp_large_fd >= 0);
+        assert!(fds.resp_xlarge_fd >= 0);
+        assert!(fds.req_notify_fd >= 0);
+        assert!(fds.resp_notify_fd >= 0);
+        assert!(fds.req_ring_size > 0);
+        assert!(fds.resp_small_size > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_vars_protocol_complete() {
+        let pair = RingPair::create(RingPairConfig::default()).expect("create");
+        let fds = pair.fd_set();
+        let vars = fds.to_env_vars(3);
+
+        // Should contain all expected vars
+        let keys: Vec<&str> = vars.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"VERTEBRA_TRANSPORT_MODE"));
+        assert!(keys.contains(&"VERTEBRA_WORKER_ID"));
+        assert!(keys.contains(&"VERTEBRA_REQ_RING_FD"));
+        assert!(keys.contains(&"VERTEBRA_REQ_RING_SIZE"));
+        assert!(keys.contains(&"VERTEBRA_RESP_RING_SMALL_FD"));
+        assert!(keys.contains(&"VERTEBRA_RESP_RING_MEDIUM_FD"));
+        assert!(keys.contains(&"VERTEBRA_RESP_RING_LARGE_FD"));
+        assert!(keys.contains(&"VERTEBRA_RESP_RING_XLARGE_FD"));
+        assert!(keys.contains(&"VERTEBRA_REQ_NOTIFY_FD"));
+        assert!(keys.contains(&"VERTEBRA_RESP_NOTIFY_FD"));
+
+        // Worker ID should be 3
+        let worker_id = vars
+            .iter()
+            .find(|(k, _)| k == "VERTEBRA_WORKER_ID")
+            .unwrap();
+        assert_eq!(worker_id.1, "3");
+
+        // Transport mode should be shm
+        let mode = vars
+            .iter()
+            .find(|(k, _)| k == "VERTEBRA_TRANSPORT_MODE")
+            .unwrap();
+        assert_eq!(mode.1, "shm");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn all_fds_for_make_inheritable() {
+        let pair = RingPair::create(RingPairConfig::default()).expect("create");
+        let fds = pair.all_fds();
+        assert_eq!(fds.len(), 7); // req_ring + 4 resp tiers + 2 notifiers
+        for fd in &fds {
+            assert!(*fd >= 0, "all FDs should be valid");
+        }
     }
 }

@@ -18,7 +18,7 @@ def _build_headers(request: Any) -> list[tuple[bytes, bytes]]:
     """Materialise headers from VertebraHeaders proxy."""
     # Use optimized asgi_items() if available (lazy proxy)
     if hasattr(request.headers, "asgi_items"):
-        return request.headers.asgi_items()
+        return request.headers.asgi_items()  # type: ignore[no-any-return]
     return [(name.lower().encode("latin-1"), value.encode("latin-1")) for name, value in request.headers.items()]
 
 
@@ -48,11 +48,11 @@ class AsgiScope(dict):  # type: ignore[type-arg]
 def build_scope(request: Any, *, root_path: str = "") -> AsgiScope:
     """Build an ASGI 3.0 HTTP connection scope from a VertebraRequest."""
     # Use zero-copy raw bytes directly from Rust if available to avoid re-encoding
-    raw_path: bytes = getattr(request, "raw_path", None)
+    raw_path: bytes | None = getattr(request, "raw_path", None)
     if raw_path is None:
         raw_path = request.path.encode("latin-1")
 
-    query_string: bytes = getattr(request, "raw_query", None)
+    query_string: bytes | None = getattr(request, "raw_query", None)
     if query_string is None:
         query_str = request.query or ""
         query_string = query_str.encode("latin-1")
