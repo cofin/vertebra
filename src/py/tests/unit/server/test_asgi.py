@@ -231,7 +231,8 @@ async def test_send_collector_header_conversion() -> None:
     )
     await sc({"type": "http.response.body", "body": b""})
     r = sc.response
-    assert r.headers == [("content-type", "text/html")]
+    # SendCollector stores headers as-is; VertebraResponse handles byte→str.
+    assert r.headers == [(b"content-type", b"text/html")]
 
 
 # --- Adapter ---

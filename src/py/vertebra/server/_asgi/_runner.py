@@ -15,6 +15,19 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Deferred imports cached at module level on first use.
+_VR: type | None = None
+_submit_response: Any = None
+
+
+def _ensure_ffi() -> tuple[type, Any]:
+    global _VR, _submit_response  # noqa: PLW0603
+    if _VR is None:
+        from vertebra._vertebra import VertebraResponse, submit_response
+        _VR = VertebraResponse
+        _submit_response = submit_response
+    return _VR, _submit_response  # type: ignore[return-value]
+
 
 class AsgiRunner:
     """Synchronous batch runner wrapper around AsgiAdapter."""
@@ -54,13 +67,11 @@ class AsgiRunner:
 
     def spawn_single(self, request: Any) -> None:
         """Process a single request asynchronously and submit its response."""
-        from vertebra._vertebra import VertebraResponse as VR
-        from vertebra._vertebra import submit_response
+        VR, submit = _ensure_ffi()
 
         async def _dispatch() -> None:
             resp = await self._adapter.run_single(request)
-            # Individual submission immediately notifies supervisor
-            submit_response(
+            submit(
                 VR(
                     status=resp.status,
                     body=resp.body,

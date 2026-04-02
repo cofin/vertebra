@@ -13,13 +13,40 @@ _UNBUILT = object()
 _ASGI_VERSION: dict[str, str] = {"version": "3.0", "spec_version": "2.3"}
 _SCOPE_TYPE = "http"
 
+# Template dict with all static keys pre-set.  dict.copy() is a single
+# C-level memcpy of the hash table — much cheaper than building 14 keys
+# from scratch per request.
+_SCOPE_TEMPLATE: dict[str, Any] = {
+    "type": _SCOPE_TYPE,
+    "asgi": _ASGI_VERSION,
+    "http_version": "1.1",
+    "method": "",
+    "headers": _UNBUILT,
+    "path": "",
+    "raw_path": b"",
+    "query_string": b"",
+    "root_path": "",
+    "scheme": "http",
+    "server": None,
+    "client": None,
+    "state": {},
+    "extensions": {},
+}
+
+# Shared empty dicts for state/extensions — ASGI spec allows mutation so
+# each scope needs its own instance, but we avoid the literal overhead by
+# calling dict() which is marginally faster than {} in tight loops on
+# CPython < 3.14.  On 3.14+ they're equivalent; either way this is a
+# minor micro-opt vs the template copy being the big win.
+_EMPTY_DICT = dict
+
 
 def _build_headers(request: Any) -> list[tuple[bytes, bytes]]:
     """Materialise headers from VertebraHeaders proxy."""
-    # Use optimized asgi_items() if available (lazy proxy)
-    if hasattr(request.headers, "asgi_items"):
-        return request.headers.asgi_items()  # type: ignore[no-any-return]
-    return [(name.lower().encode("latin-1"), value.encode("latin-1")) for name, value in request.headers.items()]
+    hdrs = request.headers
+    if hasattr(hdrs, "asgi_items"):
+        return hdrs.asgi_items()  # type: ignore[no-any-return]
+    return [(name.lower().encode("latin-1"), value.encode("latin-1")) for name, value in hdrs.items()]
 
 
 class AsgiScope(dict):  # type: ignore[type-arg]
@@ -47,40 +74,25 @@ class AsgiScope(dict):  # type: ignore[type-arg]
 
 def build_scope(request: Any, *, root_path: str = "") -> AsgiScope:
     """Build an ASGI 3.0 HTTP connection scope from a VertebraRequest."""
-    # Use zero-copy raw bytes directly from Rust if available to avoid re-encoding
-    raw_path: bytes | None = getattr(request, "raw_path", None)
-    if raw_path is None:
-        raw_path = request.path.encode("latin-1")
+    scope = _SCOPE_TEMPLATE.copy()
 
-    query_string: bytes | None = getattr(request, "raw_query", None)
-    if query_string is None:
-        query_str = request.query or ""
-        query_string = query_str.encode("latin-1")
+    scope["http_version"] = getattr(request, "http_version", "1.1")
+    scope["method"] = request.method.upper()
+    scope["path"] = request.path
+    scope["raw_path"] = getattr(request, "raw_path", None) or request.path.encode("latin-1")
+    scope["query_string"] = getattr(request, "raw_query", None) or (request.query or "").encode("latin-1")
+    scope["root_path"] = root_path
+    scope["scheme"] = getattr(request, "scheme", "http")
+    # Each scope must own its own mutable state/extensions dicts.
+    scope["state"] = _EMPTY_DICT()
+    scope["extensions"] = _EMPTY_DICT()
 
-    base: dict[str, Any] = {
-        "type": _SCOPE_TYPE,
-        "asgi": _ASGI_VERSION,
-        "http_version": getattr(request, "http_version", "1.1"),
-        "method": request.method.upper(),
-        "headers": _UNBUILT,
-        "path": request.path,
-        "raw_path": raw_path,
-        "query_string": query_string,
-        "root_path": root_path,
-        "scheme": getattr(request, "scheme", "http"),
-        "server": None,
-        "client": None,
-        "state": {},
-        "extensions": {},
-    }
-
-    # Only build tuples when attributes actually exist.
     server_host = getattr(request, "server_host", None)
     if server_host is not None:
-        base["server"] = (server_host, getattr(request, "server_port", None))
+        scope["server"] = (server_host, getattr(request, "server_port", None))
 
     client_host = getattr(request, "client_host", None)
     if client_host is not None:
-        base["client"] = (client_host, getattr(request, "client_port", None))
+        scope["client"] = (client_host, getattr(request, "client_port", None))
 
-    return AsgiScope(base, request)
+    return AsgiScope(scope, request)

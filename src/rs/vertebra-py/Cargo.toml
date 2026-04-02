@@ -15,6 +15,9 @@ pyo3 = { workspace = true }
 [build-dependencies]
 pyo3-build-config = { version = "0.28.2", features = ["resolve-config"] }
 
+[dev-dependencies]
+pyo3 = { workspace = true, features = ["auto-initialize"] }
+
 [features]
 default = []
 # Use "extension-module" when building as a standalone .so (maturin develop).

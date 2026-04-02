@@ -31,6 +31,10 @@ _REQUIRED_KEYS: tuple[str, ...] = (
 
 _HTTP_PREFIX = "HTTP_"
 
+# Pre-computed constants for static WSGI keys (shared across all environs).
+_WSGI_VERSION = (1, 0)
+_STDERR = sys.stderr
+
 
 class BodyStream:
     """Read-only file-like wrapper over body bytes for wsgi.input."""
@@ -94,7 +98,7 @@ def _header_to_cgi(name: str) -> str:
 class WsgiEnviron(Mapping[str, Any]):
     """Lazy read-only WSGI environ mapping backed by a VertebraRequest."""
 
-    __slots__ = ("_req", "_server_name", "_server_port", "_url_scheme", "_cache", "_path_info")
+    __slots__ = ("_req", "_cache")
 
     def __init__(
         self,
@@ -105,64 +109,42 @@ class WsgiEnviron(Mapping[str, Any]):
         url_scheme: str = "http",
     ) -> None:
         self._req = request
-        self._server_name: str = server_name
-        self._server_port: int = server_port
-        self._url_scheme: str = url_scheme
-        self._cache: dict[str, Any] | None = None
-        # Pre-quote path info once
-        self._path_info: str = quote(request.path, safe="/:@!$&'()*+,;=")
+        # Pre-seed the cache with all static/semi-static values.  This avoids
+        # per-key dispatch overhead for the ~10 keys that every WSGI framework
+        # accesses.  Dynamic keys (headers, wsgi.input) are computed lazily.
+        self._cache: dict[str, Any] = {
+            "REQUEST_METHOD": request.method.upper(),
+            "SCRIPT_NAME": "",
+            "PATH_INFO": quote(request.path, safe="/:@!$&'()*+,;="),
+            "QUERY_STRING": request.query or "",
+            "SERVER_NAME": server_name,
+            "SERVER_PORT": str(server_port),
+            "SERVER_PROTOCOL": getattr(request, "http_version", None) or "HTTP/1.1",
+            "wsgi.version": _WSGI_VERSION,
+            "wsgi.url_scheme": url_scheme,
+            "wsgi.errors": _STDERR,
+            "wsgi.multithread": True,
+            "wsgi.multiprocess": True,
+            "wsgi.run_once": False,
+        }
 
-    def _ensure_cache(self) -> dict[str, Any]:
-        if self._cache is None:
-            self._cache = {}
-        return self._cache
-
-    def _compute(self, key: str) -> Any:  # noqa: PLR0911
+    def _compute(self, key: str) -> Any:
         req = self._req
-
-        if key == "REQUEST_METHOD":
-            return req.method.upper()
-        if key == "SCRIPT_NAME":
-            return ""
-        if key == "PATH_INFO":
-            return self._path_info
-        if key == "QUERY_STRING":
-            return req.query or ""
-        if key == "SERVER_NAME":
-            return self._server_name
-        if key == "SERVER_PORT":
-            return str(self._server_port)
-        if key == "SERVER_PROTOCOL":
-            return getattr(req, "http_version", None) or "HTTP/1.1"
-        if key == "wsgi.version":
-            return (1, 0)
-        if key == "wsgi.url_scheme":
-            return self._url_scheme
         if key == "wsgi.input":
             return BodyStream(req.body or b"")
-        if key == "wsgi.errors":
-            return sys.stderr
-        if key == "wsgi.multithread":
-            return True
-        if key == "wsgi.multiprocess":
-            return True
-        if key == "wsgi.run_once":
-            return False
         if key == "CONTENT_TYPE":
             return req.headers.get("content-type", "")
         if key == "CONTENT_LENGTH":
             return req.headers.get("content-length", "")
         if key.startswith(_HTTP_PREFIX):
-            cgi_suffix = key[len(_HTTP_PREFIX) :]
-            header_name = cgi_suffix.lower().replace("_", "-")
+            header_name = key[5:].lower().replace("_", "-")
             value = req.headers.get(header_name)
             if value is not None:
                 return value
-            return _MISSING
         return _MISSING
 
     def __getitem__(self, key: str) -> Any:
-        cache = self._ensure_cache()
+        cache = self._cache
         cached = cache.get(key, _MISSING)
         if cached is not _MISSING:
             return cached

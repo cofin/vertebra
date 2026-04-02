@@ -9,6 +9,17 @@ __all__ = ["WsgiAdapter", "WsgiError"]
 
 _WsgiApp = Callable[[dict[str, Any], Callable[..., None]], Iterable[bytes]]
 
+# Deferred import cached at module level on first use.
+_VertebraResponse: type | None = None
+
+
+def _get_response_cls() -> type:
+    global _VertebraResponse  # noqa: PLW0603
+    if _VertebraResponse is None:
+        from vertebra._vertebra import VertebraResponse
+        _VertebraResponse = VertebraResponse
+    return _VertebraResponse
+
 
 class WsgiError(Exception):
     """Raised when the WSGI app violates the PEP 3333 contract."""
@@ -17,11 +28,12 @@ class WsgiError(Exception):
 class WsgiAdapter:
     """Wraps a WSGI callable and translates VertebraRequest → VertebraResponse."""
 
-    __slots__ = ("_app", "_url_scheme")
+    __slots__ = ("_app", "_url_scheme", "_response_cls")
 
     def __init__(self, app: _WsgiApp, *, url_scheme: str = "http") -> None:
         self._app: _WsgiApp = app
         self._url_scheme: str = url_scheme
+        self._response_cls: type = _get_response_cls()
 
     def __call__(
         self,
@@ -31,8 +43,6 @@ class WsgiAdapter:
         server_port: int = 8000,
     ) -> Any:
         """Run the WSGI app against *request* and return a response."""
-        from vertebra._vertebra import VertebraResponse
-
         environ = WsgiEnviron(
             request,
             server_name=server_name,
@@ -81,7 +91,7 @@ class WsgiAdapter:
 
         body = b"".join(chunks)
 
-        return VertebraResponse(
+        return self._response_cls(
             status=status_code,
             headers=response_headers,
             body=body,

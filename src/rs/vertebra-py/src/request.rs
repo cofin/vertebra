@@ -4,7 +4,7 @@
 //! Fields are materialized as Python objects on demand from the snapshot's
 //! contiguous data slab — unused fields are never allocated.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyString};
@@ -18,16 +18,34 @@ use crate::headers::VertebraHeaders;
 /// The snapshot's data slab is a single contiguous allocation shared across
 /// all requests in the batch. Each getter reads bytes from the slab and
 /// creates a Python object only when accessed.
+///
+/// Headers are cached on first access via `OnceLock` to avoid repeated
+/// `Bytes::copy_from_slice` calls — WSGI environ may hit `.headers.get()`
+/// multiple times per request (CONTENT_TYPE, CONTENT_LENGTH, HTTP_* keys).
 #[pyclass(name = "VertebraRequest", frozen)]
 pub struct VertebraRequest {
     batch: Arc<BatchSnapshot>,
     index: usize,
+    cached_headers: OnceLock<VertebraHeaders>,
 }
 
 impl VertebraRequest {
     /// Create a new request proxy pointing to `index` in `batch`.
     pub fn new(batch: Arc<BatchSnapshot>, index: usize) -> Self {
-        Self { batch, index }
+        Self {
+            batch,
+            index,
+            cached_headers: OnceLock::new(),
+        }
+    }
+
+    fn get_headers(&self) -> VertebraHeaders {
+        self.cached_headers
+            .get_or_init(|| {
+                let raw = self.batch.headers_raw(self.index);
+                VertebraHeaders::new(bytes::Bytes::copy_from_slice(raw))
+            })
+            .clone()
     }
 }
 
@@ -96,8 +114,7 @@ impl VertebraRequest {
 
     #[getter]
     fn headers(&self) -> VertebraHeaders {
-        let raw = self.batch.headers_raw(self.index);
-        VertebraHeaders::new(bytes::Bytes::copy_from_slice(raw))
+        self.get_headers()
     }
 
     fn as_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {

@@ -8,6 +8,9 @@ __all__ = ["ReceiveChannel", "SendCollector"]
 _STATE_BODY = 0
 _STATE_DISCONNECT = 1
 
+# Pre-built immutable message — reused across all requests after body delivery.
+_DISCONNECT_MSG: dict[str, Any] = {"type": "http.disconnect"}
+
 
 @dataclasses.dataclass
 class AsgiResponse:
@@ -37,7 +40,7 @@ class ReceiveChannel:
                 "body": self._body,
                 "more_body": False,
             }
-        return {"type": "http.disconnect"}
+        return _DISCONNECT_MSG
 
 
 class SendCollector:

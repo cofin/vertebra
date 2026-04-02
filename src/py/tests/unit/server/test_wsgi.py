@@ -127,15 +127,18 @@ def test_wsgi_environ_wsgi_input_is_shm_wrapper() -> None:
     assert inp.read() == b"test body"
 
 
-def test_wsgi_environ_cache_none_before_access() -> None:
+def test_wsgi_environ_cache_pre_seeded() -> None:
     env = WsgiEnviron(MockRequest())
-    assert env._cache is None  # noqa: SLF001
-
-
-def test_wsgi_environ_cache_populated_after_access() -> None:
-    env = WsgiEnviron(MockRequest())
-    _ = env["REQUEST_METHOD"]
+    # Cache is pre-seeded with static keys at init time.
     assert env._cache is not None  # noqa: SLF001
+    assert "REQUEST_METHOD" in env._cache  # noqa: SLF001
+
+
+def test_wsgi_environ_cache_grows_on_dynamic_access() -> None:
+    env = WsgiEnviron(MockRequest())
+    initial_size = len(env._cache)  # noqa: SLF001
+    _ = env["wsgi.input"]
+    assert len(env._cache) > initial_size  # noqa: SLF001
 
 
 def test_wsgi_environ_missing_key_raises() -> None:
