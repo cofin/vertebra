@@ -79,6 +79,21 @@ class BenchmarkStore:
         self._conn.execute(self._schema["create_bench_result_seq"])
         self._conn.execute(self._schema["create_benchmark_runs"])
         self._conn.execute(self._schema["create_benchmark_results"])
+        self._migrate_add_topology()
+
+    def _migrate_add_topology(self) -> None:
+        """Add topology column to benchmark_results if missing (pre-existing DBs)."""
+        cols = {
+            row[0]
+            for row in self._conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'benchmark_results'"
+            ).fetchall()
+        }
+        if "topology" not in cols:
+            self._conn.execute(
+                "ALTER TABLE benchmark_results ADD COLUMN topology VARCHAR DEFAULT 'unknown'"
+            )
 
     def create_run(self, note: str = "") -> str:
         """Create a new benchmark run and return its run_id."""
