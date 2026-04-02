@@ -484,18 +484,24 @@ def run_worker(
     error_handler: "Callable[[Exception, VertebraRequest], VertebraResponse] | None" = None,
     worker_count: "int | None" = None,
 ) -> None:
-    """Execute the batch runner loop with Hybrid Architecture.
+    """Execute the batch runner loop with Unified Dispatch Architecture.
 
-    - **IO Multiplexer**: Single thread managing a persistent event loop for ALL
-      async handlers and ASGI mounts. Preserves batch-first IO amortization.
-    - **CPU Workers**: N threads for sequential sync handlers and WSGI mounts.
-      Benefits from multi-core/free-threading.
-    - **Shared Transport**: Lock-free MPMC bridge.
+    A single **IO Multiplexer** thread is the sole batch consumer — it
+    partitions each batch once, routes async work to the persistent
+    ``CallbackScheduler`` event loop, and routes sync work to a shared
+    ``ThreadPoolExecutor``.  Individual responses are submitted via
+    ``submit_response()`` as they complete (fire-and-forget).
+
+    This eliminates the previous competing-consumer problem where N CPU
+    worker threads raced the IO multiplexer for the same MPMC queue,
+    causing batch fragmentation and misrouted requests.
+
+    ``worker_count`` controls the sync thread pool size.
     """
     import os
 
     from vertebra._vertebra import VertebraResponse as VR
-    from vertebra._vertebra import get_batch, get_request_notify_fd, init_transport, submit_results
+    from vertebra._vertebra import get_batch, get_request_notify_fd, init_transport
 
     _install_signal_handlers()
 
@@ -518,70 +524,35 @@ def run_worker(
     # 1. Shared Infrastructure
     scheduler = CallbackScheduler()
 
-    # Scaling logic: prioritize explicit parameter, then env, then CPU count.
+    # Thread pool for sync handlers and WSGI mounts.  Sized by explicit
+    # parameter, then VERTEBRA_THREADS env, then CPU count.
     threads_env = os.environ.get("VERTEBRA_THREADS")
     default_threads = int(threads_env) if threads_env else (os.cpu_count() or 1)
-    cpu_count = worker_count if worker_count is not None else default_threads
+    pool_size = worker_count if worker_count is not None else default_threads
 
     global _wsgi_executor  # noqa: PLW0603
     _wsgi_executor = ThreadPoolExecutor(
-        max_workers=max(128, cpu_count * 8),
+        max_workers=max(128, pool_size * 8),
         thread_name_prefix="vertebra-sync",
     )
 
     resolved_mounts = _build_mount_adapters(mounts or [])
 
-    # 2. Worker Loops
-    def _io_multiplexer_loop() -> None:
-        """Single thread for all async work."""
-        # IO-multiplexer specific mounts (ASGI only)
-        io_mounts: list[tuple[str, Any, str]] = []
-        for prefix, app, protocol in resolved_mounts:
-            if protocol == "asgi":
-                from vertebra.server._asgi._runner import AsgiRunner
+    # 2. Build all mount adapters once (both ASGI and WSGI).
+    active_mounts: list[tuple[str, Any, str]] = []
+    for prefix, app, protocol in resolved_mounts:
+        if protocol == "asgi":
+            from vertebra.server._asgi._runner import AsgiRunner
 
-                io_mounts.append((prefix, AsgiRunner(app, mount_prefix=prefix, loop=scheduler.loop), "asgi"))
+            active_mounts.append((prefix, AsgiRunner(app, mount_prefix=prefix, loop=scheduler.loop), "asgi"))
+        elif protocol == "wsgi":
+            from vertebra.server._wsgi._adapter import WsgiAdapter
 
-        try:
-            while _RUNNING:
-                batch = get_batch(timeout_ms=batch_timeout_ms)
-                if batch is None:
-                    continue
+            active_mounts.append((prefix, WsgiAdapter(app), "wsgi"))
 
-                partitioned = _partition_batch(batch, handlers, io_mounts)
-                # Only dispatch async native and ASGI mounts in fire-and-forget mode
-                _dispatch_batch(partitioned, handlers, io_mounts, VR, scheduler, async_mode=True)
-        finally:
-            # Note: scheduler stopped by main thread
-            pass
-
-    def _cpu_worker_loop(worker_id: int) -> None:
-        """N threads for all sync work."""
-        # CPU-worker specific mounts (WSGI only)
-        cpu_mounts: list[tuple[str, Any, str]] = []
-        for prefix, app, protocol in resolved_mounts:
-            if protocol == "wsgi":
-                from vertebra.server._wsgi._adapter import WsgiAdapter
-
-                cpu_mounts.append((prefix, WsgiAdapter(app), "wsgi"))
-
-        try:
-            while _RUNNING:
-                batch = get_batch(timeout_ms=batch_timeout_ms)
-                if batch is None:
-                    continue
-
-                partitioned = _partition_batch(batch, handlers, cpu_mounts)
-                # Only dispatch sync native and WSGI mounts
-                results = _dispatch_batch(partitioned, handlers, cpu_mounts, VR, scheduler)
-                if results is not None:
-                    submit_results(results)
-        finally:
-            pass
-
-    # 3. Spawn Hybrid Workers
+    # 3. Dispatch loop
     if is_shm:
-        # SHM mode: Run event-driven loop in main thread
+        # SHM mode: asyncio event-driven loop in main thread.
         try:
             asyncio.run(_shm_worker_loop(handlers, resolved_mounts, scheduler, batch_timeout_ms))
         finally:
@@ -592,29 +563,21 @@ def run_worker(
                 _wsgi_executor = None
         return
 
-    threads: list[threading.Thread] = []
-
-    # One IO Multiplexer
-    io_thread = threading.Thread(target=_io_multiplexer_loop, name="vertebra-io-mux", daemon=True)
-    io_thread.start()
-    threads.append(io_thread)
-
-    # N CPU Workers (minus 1, as this thread becomes worker 0)
-    for i in range(1, cpu_count):
-        t = threading.Thread(target=_cpu_worker_loop, args=(i,), name=f"vertebra-cpu-{i}", daemon=True)
-        t.start()
-        threads.append(t)
-
+    # In-process mode: single IO multiplexer thread as sole batch consumer.
     try:
-        _cpu_worker_loop(0)
+        while _RUNNING:
+            batch = get_batch(timeout_ms=batch_timeout_ms)
+            if batch is None:
+                continue
+
+            partitioned = _partition_batch(batch, handlers, active_mounts)
+            _dispatch_batch(partitioned, handlers, active_mounts, VR, scheduler, async_mode=True)
     finally:
         _RUNNING = False
         scheduler.stop()
         if _wsgi_executor is not None:
             _wsgi_executor.shutdown(wait=False)
             _wsgi_executor = None
-        for t in threads:
-            t.join(timeout=2.0)
 
 
 def _is_free_threaded() -> bool:
