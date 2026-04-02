@@ -409,7 +409,7 @@ mod tests {
             request_id: 1,
             status: 200,
             headers: vec![("content-type".to_string(), "text/plain".to_string())],
-            body: b"hello world".to_vec(),
+            body: bytes::Bytes::from_static(b"hello world"),
         }];
         bridge.resp_tx.send(responses).await.unwrap();
 
@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].request_id, 1);
         assert_eq!(received[0].status, 200);
-        assert_eq!(received[0].body, b"hello world");
+        assert_eq!(received[0].body.as_ref(), b"hello world");
     }
 
     #[test]
