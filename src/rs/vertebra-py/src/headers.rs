@@ -92,7 +92,7 @@ impl VertebraHeaders {
 
     /// Optimized path for ASGI: returns headers as a list of (bytes, bytes)
     /// where keys are lowercased.
-    fn asgi_items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+    pub fn asgi_items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let mut tuples: Vec<Bound<'py, PyAny>> = Vec::new();
         let data = &self.raw;
         let mut pos = 0;

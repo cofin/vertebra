@@ -21,7 +21,7 @@ use crate::transport::{
 pub struct BridgeResponse {
     pub request_id: u64,
     pub status: u16,
-    pub headers: Vec<(String, String)>,
+    pub headers: Vec<(Vec<u8>, Vec<u8>)>,
     pub body: bytes::Bytes,
 }
 

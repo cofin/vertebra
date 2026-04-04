@@ -72,8 +72,14 @@ class AsgiScope(dict):  # type: ignore[type-arg]
             return default
 
 
-def build_scope(request: Any, *, root_path: str = "") -> AsgiScope:
+def build_scope(request: Any, *, root_path: str = "") -> Any:
     """Build an ASGI 3.0 HTTP connection scope from a VertebraRequest."""
+    if hasattr(request, "asgi_scope"):
+        scope = request.asgi_scope()
+        if root_path:
+            scope["root_path"] = root_path
+        return scope
+
     scope = _SCOPE_TEMPLATE.copy()
 
     scope["http_version"] = getattr(request, "http_version", "1.1")

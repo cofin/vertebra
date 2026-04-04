@@ -141,6 +141,18 @@ def test_build_scope_root_path() -> None:
     assert scope["root_path"] == "/api"
 
 
+def test_build_scope_uses_materialized_scope() -> None:
+    from vertebra.server._asgi._scope import build_scope
+
+    class MockMaterializedRequest:
+        def asgi_scope(self):
+            return {"type": "http", "materialized": True}
+
+    scope = build_scope(MockMaterializedRequest())
+    assert scope["type"] == "http"
+    assert scope["materialized"] is True
+
+
 # --- Queues ---
 
 
