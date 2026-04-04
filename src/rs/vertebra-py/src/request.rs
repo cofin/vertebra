@@ -118,6 +118,7 @@ impl VertebraRequest {
     }
 
     fn asgi_scope<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        println!("DEBUG: asgi_scope called");
         let d = PyDict::new(py);
         d.set_item("type", "http")?;
         d.set_item("asgi", {

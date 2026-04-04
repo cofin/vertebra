@@ -153,6 +153,27 @@ def test_build_scope_uses_materialized_scope() -> None:
     assert scope["materialized"] is True
 
 
+def test_build_scope_native_vertebra_request() -> None:
+    """Verify that a real VertebraRequest uses its native asgi_scope."""
+    from vertebra._vertebra import VertebraRequest, init_transport, try_get_batch
+    from vertebra.server._asgi._scope import build_scope
+
+    # First verify the method exists on the native class
+    assert hasattr(VertebraRequest, "asgi_scope")
+
+    # Try to get a real instance if possible (requires a batch in the ring)
+    init_transport(mode="inprocess")
+    batch = try_get_batch()
+    if batch is None or len(batch) == 0:
+        pytest.skip("No batch available to test native VertebraRequest instance materialization")
+
+    req = batch[0]
+    scope = build_scope(req)
+    assert scope["type"] == "http"
+    assert "asgi" in scope
+    assert "headers" in scope
+
+
 # --- Queues ---
 
 

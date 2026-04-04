@@ -408,7 +408,7 @@ mod tests {
         let responses = vec![BridgeResponse {
             request_id: 1,
             status: 200,
-            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+            headers: vec![(b"content-type".to_vec(), b"text/plain".to_vec())],
             body: bytes::Bytes::from_static(b"hello world"),
         }];
         bridge.resp_tx.send(responses).await.unwrap();
@@ -560,7 +560,7 @@ mod tests {
         let raw = snap.headers_raw(0);
         let decoded = crate::transport::decode_headers_raw(raw);
         assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0], ("host".to_string(), "localhost".to_string()));
+        assert_eq!(decoded[0], (b"host".to_vec(), b"localhost".to_vec()));
     }
 
     #[test]

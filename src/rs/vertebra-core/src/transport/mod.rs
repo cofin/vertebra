@@ -807,10 +807,79 @@ impl BatchSnapshot {
 /// Fixed header size for batch snapshot wire format.
 const BATCH_HEADER_SIZE: usize = 16; // flags(4) + node_count(4) + slab_len(4) + pad(4)
 
+/// Helper for packing multiple request components into a single contiguous slab.
+pub struct ShmBatchWriter<'a> {
+    pub nodes: Vec<TransportNode>,
+    pub components: Vec<&'a [u8]>,
+    pub flags: u32,
+}
+
+impl<'a> ShmBatchWriter<'a> {
+    pub fn new(flags: u32) -> Self {
+        Self {
+            nodes: Vec::new(),
+            components: Vec::new(),
+            flags,
+        }
+    }
+
+    pub fn serialized_size(&self) -> usize {
+        let slab_len: usize = self.components.iter().map(|c| c.len()).sum();
+        const BATCH_HEADER_SIZE: usize = 16;
+        BATCH_HEADER_SIZE + self.nodes.len() * std::mem::size_of::<TransportNode>() + slab_len
+    }
+
+    pub fn serialize_into(mut self, out: &mut [u8]) -> usize {
+        let node_count = self.nodes.len() as u32;
+        let slab_len: usize = self.components.iter().map(|c| c.len()).sum();
+        
+        let mut offset = 0;
+        out[offset..offset + 4].copy_from_slice(&self.flags.to_le_bytes());
+        offset += 4;
+        out[offset..offset + 4].copy_from_slice(&node_count.to_le_bytes());
+        offset += 4;
+        out[offset..offset + 4].copy_from_slice(&(slab_len as u32).to_le_bytes());
+        offset += 4;
+        out[offset..offset + 4].fill(0); // padding
+        offset += 4;
+
+        // Pack nodes and resolve offsets
+        let mut slab_offset = 0;
+        let mut comp_iter = self.components.iter();
+        for node in &mut self.nodes {
+            node.path_offset = slab_offset as u32;
+            slab_offset += node.path_len as usize;
+            if node.query_len > 0 {
+                node.query_offset = slab_offset as u32;
+                slab_offset += node.query_len as usize;
+            }
+            node.headers_offset = slab_offset as u32;
+            slab_offset += node.headers_len as usize;
+            node.body_offset = slab_offset as u32;
+            slab_offset += node.body_len as usize;
+        }
+
+        let nodes_bytes = unsafe {
+            core::slice::from_raw_parts(
+                self.nodes.as_ptr().cast::<u8>(),
+                self.nodes.len() * std::mem::size_of::<TransportNode>(),
+            )
+        };
+        out[offset..offset + nodes_bytes.len()].copy_from_slice(nodes_bytes);
+        offset += nodes_bytes.len();
+
+        for comp in self.components {
+            out[offset..offset + comp.len()].copy_from_slice(comp);
+            offset += comp.len();
+        }
+        offset
+    }
+}
+
 /// Decode headers from the compact binary format.
 ///
 /// Format per header: `[name_len: u8][name: bytes][value_len: u16 LE][value: bytes]`
-pub fn decode_headers_raw(data: &[u8]) -> Vec<(String, String)> {
+pub fn decode_headers_raw(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut headers = Vec::new();
     let mut pos = 0;
     while pos < data.len() {
@@ -819,7 +888,7 @@ pub fn decode_headers_raw(data: &[u8]) -> Vec<(String, String)> {
         if pos + name_len > data.len() {
             break;
         }
-        let name = String::from_utf8_lossy(&data[pos..pos + name_len]).to_string();
+        let name = data[pos..pos + name_len].to_vec();
         pos += name_len;
 
         if pos + 2 > data.len() {
@@ -830,7 +899,7 @@ pub fn decode_headers_raw(data: &[u8]) -> Vec<(String, String)> {
         if pos + value_len > data.len() {
             break;
         }
-        let value = String::from_utf8_lossy(&data[pos..pos + value_len]).to_string();
+        let value = data[pos..pos + value_len].to_vec();
         pos += value_len;
 
         headers.push((name, value));
@@ -1117,7 +1186,7 @@ mod tests {
 
         let headers = decode_headers_raw(&buf);
         assert_eq!(headers.len(), 1);
-        assert_eq!(headers[0], ("host".to_string(), "localhost".to_string()));
+        assert_eq!(headers[0], (b"host".to_vec(), b"localhost".to_vec()));
     }
 
     #[test]
@@ -1132,10 +1201,10 @@ mod tests {
 
         let headers = decode_headers_raw(&buf);
         assert_eq!(headers.len(), 2);
-        assert_eq!(headers[0], ("host".to_string(), "example.com".to_string()));
+        assert_eq!(headers[0], (b"host".to_vec(), b"example.com".to_vec()));
         assert_eq!(
             headers[1],
-            ("content-type".to_string(), "text/plain".to_string())
+            (b"content-type".to_vec(), b"text/plain".to_vec())
         );
     }
 
