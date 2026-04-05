@@ -261,7 +261,7 @@ def test_wsgi_adapter_response_headers_forwarded() -> None:
     adapter = WsgiAdapter(app)
     response = adapter(MockRequest())
     hdrs = list(response.headers)
-    assert any(h[0] == "X-Foo" and h[1] == "bar" for h in hdrs)
+    assert any(h[0] == b"X-Foo" and h[1] == b"bar" for h in hdrs)
 
 
 # --- Extensions ---

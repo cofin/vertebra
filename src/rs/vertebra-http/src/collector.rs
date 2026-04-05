@@ -93,6 +93,22 @@ impl BatchCollector {
         )
     }
 
+    /// Spawn a pool of collectors and return their senders.
+    pub fn spawn_pool(
+        dispatcher: Arc<Dispatcher>,
+        policy: DrainPolicy,
+        shard_count: usize,
+        channel_capacity: usize,
+    ) -> Vec<mpsc::Sender<PendingRequest>> {
+        let mut senders = Vec::with_capacity(shard_count);
+        for _ in 0..shard_count {
+            let (collector, tx) = Self::new(Arc::clone(&dispatcher), policy.clone(), channel_capacity);
+            tokio::spawn(collector.run());
+            senders.push(tx);
+        }
+        senders
+    }
+
     /// Run the collector loop until the channel is closed.
     pub async fn run(mut self) {
         let mut pending: Vec<PendingRequest> = Vec::with_capacity(self.policy.batch_size());

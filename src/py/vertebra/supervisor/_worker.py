@@ -55,6 +55,19 @@ def main() -> None:
 
     app = _import_app(app_path)
 
+    # If native mode is disabled, we expect a raw ASGI/WSGI app.
+    # Wrap it in a VertebraApp mounted at root for unified batch processing.
+    if os.environ.get("VERTEBRA_NATIVE") == "0":
+        from vertebra.framework._app import VertebraApp
+
+        print(  # noqa: T201
+            f"[vertebra worker {worker_id}] wrapping raw app in ASGI adapter",
+            file=sys.stderr,
+        )
+        wrapped = VertebraApp()
+        wrapped.mount("/", app, protocol="asgi")
+        app = wrapped
+
     from vertebra._vertebra import init_transport
 
     if transport_mode == "shm":

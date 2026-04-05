@@ -3,8 +3,8 @@
 //! A `RingPair` encapsulates the bidirectional communication channel between
 //! the supervisor and a single worker process:
 //!
-//! - **Request ring** (supervisor → worker): carries serialized `BatchSnapshot` data
-//! - **Response rings** (worker → supervisor): tiered by response size for slot efficiency
+//! - **Request ring** (supervisor → worker): carries serialized `BatchSnapshot` data (MPMC)
+//! - **Response rings** (worker → supervisor): tiered by response size for slot efficiency (SPSC)
 //! - **Notifiers**: eventfd/pipe pairs for instant cross-process wakeup
 //!
 //! # Lifecycle
@@ -22,7 +22,7 @@ use std::os::fd::RawFd;
 use bytes::Bytes;
 
 use crate::buffer::{ChannelMode, RingLayout};
-use crate::channel::{ChannelError, SpscRing};
+use crate::channel::{ChannelError, MpmcRing, SpscRing};
 use crate::notify::Notifier;
 use crate::shm::ShmRegion;
 use crate::tiered_ring::{RingTier, TieredRingConfig};
@@ -93,7 +93,7 @@ impl Default for RingPairConfig {
         Self {
             // 64KB slots accommodate ~64 requests × 56-byte TransportNode + slab data
             request_slot_size: 64 * 1024,
-            request_slots: 64,
+            request_slots: 1024, // Increased from 64
             response_tiers: TieredRingConfig::default(),
         }
     }
@@ -305,11 +305,14 @@ fn shm_handle_from_ring(ring: &Arc<SpscRing>) -> Option<RawFd> {
     ring.region_handle()
 }
 
-/// Bidirectional SPSC ring pair for one supervisor ↔ worker channel.
+/// Bidirectional ring pair for one supervisor ↔ worker channel.
+///
+/// Uses MPMC for the request path (multiple collectors → single worker)
+/// and SPSC for response path (single worker → single supervisor reader).
 pub struct RingPair {
-    /// Request ring: supervisor writes, worker reads.
-    pub request_ring: Arc<SpscRing>,
-    /// Response rings: worker writes, supervisor reads (tiered by size).
+    /// Request ring: supervisor writes (MPMC), worker reads.
+    pub request_ring: Arc<MpmcRing>,
+    /// Response rings: worker writes, supervisor reads (tiered by size, SPSC).
     pub response_rings: TieredRingSet,
     /// Notifier for request ring (supervisor signals worker).
     pub request_notifier: Notifier,
@@ -325,7 +328,7 @@ impl RingPair {
         let req_layout = RingLayout::new(
             config.request_slot_size,
             config.request_slots,
-            ChannelMode::Spsc,
+            ChannelMode::Mpmc,
         );
         let req_region = Arc::new(ShmRegion::create(req_layout.total_size)?);
         let pid = std::process::id();
@@ -334,7 +337,7 @@ impl RingPair {
             .unwrap_or_default()
             .as_secs();
         let request_ring =
-            Arc::new(unsafe { SpscRing::initialize(req_region, req_layout, pid, epoch)? });
+            Arc::new(unsafe { MpmcRing::initialize(req_region, req_layout, pid, epoch)? });
 
         let response_rings = TieredRingSet::create(&config.response_tiers)?;
         let request_notifier = Notifier::new().map_err(RingPairError::Io)?;
@@ -364,10 +367,10 @@ impl RingPair {
         let req_layout = RingLayout::new(
             config.request_slot_size,
             config.request_slots,
-            ChannelMode::Spsc,
+            ChannelMode::Mpmc,
         );
         let req_region = Arc::new(ShmRegion::map(req_ring_fd, req_layout.total_size)?);
-        let request_ring = Arc::new(SpscRing::attach(req_region, req_layout)?);
+        let request_ring = Arc::new(MpmcRing::attach(req_region, req_layout)?);
 
         let response_rings = TieredRingSet::from_inherited(
             &config.response_tiers,
@@ -390,6 +393,9 @@ impl RingPair {
     }
 
     pub unsafe fn reclaim(&self) {
+        // SAFETY: Reset is safe here because we assume the worker is stopped.
+        // We need to cast back to the underlying types if we were using a trait,
+        // but here we just have the Arc<MpmcRing> and Arc<SpscRing>.
         self.request_ring.reset();
         self.response_rings.small.reset();
         self.response_rings.medium.reset();
@@ -410,7 +416,7 @@ impl RingPair {
         let req_layout = RingLayout::new(
             self.config.request_slot_size,
             self.config.request_slots,
-            ChannelMode::Spsc,
+            ChannelMode::Mpmc,
         );
         RingPairFds {
             req_ring_fd: self.request_ring.region_handle().unwrap_or(-1),

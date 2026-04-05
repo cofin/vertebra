@@ -87,12 +87,7 @@ pub async fn handle(
     };
 
     // 5. Send to collector for batching.
-    //
-    // The collector's try_recv drain loop handles the fast path naturally:
-    // under low load, a single request arrives → collector fires immediately
-    // after the timeout (200µs with adaptive policy). Under high load,
-    // multiple requests accumulate and drain at preferred batch sizes.
-    if state.collector_tx.send(pending).await.is_err() {
+    if state.get_collector().send(pending).await.is_err() {
         return Ok(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "server shutting down",
@@ -167,19 +162,18 @@ fn error_response(status: StatusCode, msg: &'static str) -> HyperResponse {
 /// Encode response headers into the compact binary format.
 ///
 /// Format per header: `[name_len: u8][name: bytes][value_len: u16 LE][value: bytes]`
-pub fn encode_response_headers(headers: &[(String, String)]) -> Bytes {
+pub fn encode_response_headers(headers: &[(Vec<u8>, Vec<u8>)]) -> Bytes {
     if headers.is_empty() {
         return Bytes::new();
     }
     let mut buf = Vec::with_capacity(headers.len() * 32);
-    for (name, value) in headers {
-        let n = name.as_bytes();
-        let v = value.as_bytes();
-        buf.push(n.len() as u8);
-        buf.extend_from_slice(n);
-        let vlen = v.len() as u16;
+    for (name, value) in headers.iter() {
+        buf.push(name.len() as u8);
+        buf.extend_from_slice(name);
+        let vlen = value.len() as u16;
         buf.extend_from_slice(&vlen.to_le_bytes());
-        buf.extend_from_slice(v);
+        buf.extend_from_slice(value);
     }
     Bytes::from(buf)
 }
+

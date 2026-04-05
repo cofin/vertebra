@@ -72,7 +72,7 @@ async fn spawn_test_server() -> (std::net::SocketAddr, oneshot::Sender<()>) {
                         request_id: batch.node(i).correlation_id,
                         status: 200,
                         headers: Vec::new(),
-                        body: b"hello".to_vec(),
+                        body: b"hello".to_vec().into(),
                     })
                     .collect();
 
@@ -115,7 +115,7 @@ async fn spawn_test_server() -> (std::net::SocketAddr, oneshot::Sender<()>) {
     });
 
     tokio::spawn(async move {
-        server::run_with_collector(config, router, dispatcher, collector_tx, async move {
+        server::run_with_collector(config, router, dispatcher, vec![collector_tx], async move {
             let _ = shutdown_rx.await;
         })
         .await

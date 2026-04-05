@@ -5,20 +5,21 @@
 //!   each `PendingRequest`. No bridge, no arena, no correlation IDs.
 //! - **Bridge**: requests written into the arena-backed `BatchBridge`,
 //!   responses polled from the bridge channel. Uses DashMap for correlation.
-//! - **SharedMemory**: requests serialized into per-worker SPSC rings,
+//! - **SharedMemory**: requests serialized into per-worker MPMC rings,
 //!   responses read from tiered response rings. Uses O(1) `CorrelationSlab`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use vertebra_core::bridge::{BatchBridge, WriteRequest};
 use vertebra_core::transport::ring_pair::RingPair;
-use vertebra_core::transport::{BatchSnapshot, Transport, TransportNode};
+use vertebra_core::transport::{ShmBatchWriter, Transport, TransportNode, BufferPool};
 
 use crate::collector::{Batch, PendingResponse};
 use crate::correlation::CorrelationSlab;
@@ -30,7 +31,7 @@ pub enum DispatchMode {
     Direct,
     /// Bridge: batch written to arena/slab, responses via bridge channel (data-intensive).
     Bridge,
-    /// SharedMemory: batch serialized into per-worker SPSC rings (multi-process).
+    /// SharedMemory: batch serialized into per-worker MPMC rings (multi-process).
     SharedMemory,
 }
 
@@ -60,44 +61,43 @@ struct WorkerState {
     transport: Transport,
 }
 
-struct PendingShmDispatchBatch {
+struct ShmDispatchBatch {
     flags: u32,
-    slab: Vec<u8>,
     nodes: Vec<TransportNode>,
     correlation_ids: Vec<u64>,
+    components: Vec<bytes::Bytes>,
 }
 
-impl PendingShmDispatchBatch {
+impl ShmDispatchBatch {
     fn new(flags: u32) -> Self {
         Self {
             flags,
-            slab: Vec::new(),
             nodes: Vec::new(),
             correlation_ids: Vec::new(),
+            components: Vec::new(),
         }
     }
 }
 
 struct TransportRequestView<'a> {
-    handler_id: u64,
-    method_tag: u8,
-    http_version_tag: u8,
     path: &'a str,
     query: Option<&'a str>,
     headers_mp: &'a bytes::Bytes,
     body: &'a bytes::Bytes,
 }
 
-/// SharedMemory dispatcher with round-robin routing and O(1) correlation.
+/// SharedMemory dispatcher with round-robin routing and sharded O(1) correlation.
 pub struct ShmDispatcher {
     workers: Vec<WorkerState>,
     next_worker: AtomicUsize,
-    correlation: Mutex<CorrelationSlab>,
+    correlation_shards: Vec<Mutex<CorrelationSlab>>,
+    shard_mask: usize,
+    buffer_pool: Arc<BufferPool>,
 }
 
 impl ShmDispatcher {
     /// Create a new SHM dispatcher.
-    pub fn new(ring_pairs: Vec<Arc<RingPair>>, max_inflight: usize) -> Self {
+    pub fn new(ring_pairs: Vec<Arc<RingPair>>, max_inflight: usize) -> Arc<Self> {
         let workers: Vec<WorkerState> = ring_pairs
             .into_iter()
             .map(|rp| WorkerState {
@@ -106,33 +106,55 @@ impl ShmDispatcher {
             })
             .collect();
 
-        Self {
+        let shard_count = 8;
+        let shard_mask = shard_count - 1;
+        let shard_capacity = max_inflight / shard_count;
+
+        let correlation_shards = (0..shard_count)
+            .map(|_| Mutex::new(CorrelationSlab::new(shard_capacity)))
+            .collect();
+
+        // 1024 buffer pairs, 1MB slab per batch, 256 nodes per batch.
+        let buffer_pool = Arc::new(BufferPool::new(1024, 1_048_576, 256));
+
+        let this = Arc::new(Self {
             workers,
             next_worker: AtomicUsize::new(0),
-            correlation: Mutex::new(CorrelationSlab::new(max_inflight)),
-        }
+            correlation_shards,
+            shard_mask,
+            buffer_pool,
+        });
+
+        // Spawn periodic sweep task (1s intervals, 30s timeout)
+        let sweep_inner = Arc::clone(&this);
+        tokio::spawn(async move {
+            info!("SHM correlation sweep task started");
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let timeout = Duration::from_secs(30);
+            loop {
+                interval.tick().await;
+                sweep_inner.sweep_expired(timeout);
+            }
+        });
+
+        this
     }
 
-    /// Dispatch a batch to workers via SPSC rings.
-    ///
-    /// Each request in the batch is:
-    /// 1. Assigned to a worker in round-robin order
-    /// 2. Appended to a per-worker, per-flags `BatchSnapshot`
-    /// 3. Correlation IDs allocated from the slab
-    /// 4. Flushed into the worker request ring with one notify per snapshot
-    pub fn dispatch_shm(&self, batch: Batch) {
+    /// Dispatch a batch to workers via MPMC rings.
+    pub fn dispatch_shm(&self, batch: Batch) -> usize {
         use vertebra_core::protocol::flags;
 
         let worker_count = self.workers.len();
         if worker_count == 0 {
             error!("no SHM workers configured, dropping batch");
-            return;
+            return 0;
         }
 
         let start = self
             .next_worker
             .fetch_add(batch.requests.len().max(1), Ordering::Relaxed);
-        let mut pending_batches: HashMap<(usize, u32), PendingShmDispatchBatch> = HashMap::new();
+        let mut pending_batches: HashMap<(usize, u32), ShmDispatchBatch> = HashMap::new();
+        let mut dispatched_count = 0;
 
         for (offset, req) in batch.requests.into_iter().enumerate() {
             let crate::collector::PendingRequest {
@@ -147,9 +169,6 @@ impl ShmDispatcher {
                 reply,
             } = req;
             let request_view = TransportRequestView {
-                handler_id,
-                method_tag,
-                http_version_tag,
                 path: &path,
                 query: query.as_deref(),
                 headers_mp: &headers_mp,
@@ -204,44 +223,82 @@ impl ShmDispatcher {
                 continue;
             }
 
-            // Allocate correlation ID (unless F&F)
             let correlation_id = if is_fnf {
                 0
             } else {
-                let mut slab = self.correlation.lock().unwrap();
+                let shard_idx = (start + offset) & self.shard_mask;
+                let mut slab = self.correlation_shards[shard_idx].lock().unwrap();
                 if slab.in_flight() >= slab.capacity() {
                     drop(slab);
-                    warn!("correlation slab full, responding with 503");
+                    warn!(shard = shard_idx, "correlation shard full, responding with 503");
                     if let Some(reply) = reply.take() {
                         let _ = reply.send(service_unavailable_response());
                     }
                     continue;
                 }
-                slab.insert(
+                let internal_id = slab.insert(
                     reply.take().expect("reply must be present"),
                     worker_idx as u32,
                 )
-                .expect("correlation slot should be available after capacity check")
+                .expect("correlation slot should be available after capacity check");
+                
+                (internal_id << 8) | (shard_idx as u64)
             };
 
             let pending = pending_batches
                 .entry(batch_key)
-                .or_insert_with(|| PendingShmDispatchBatch::new(req_flags));
-            let node = append_transport_node(&request_view, correlation_id, &mut pending.slab);
-            pending.nodes.push(node);
+                .or_insert_with(|| ShmDispatchBatch::new(req_flags));
+            
+            pending.nodes.push(TransportNode {
+                method_tag,
+                http_version_tag,
+                _pad: [0; 2],
+                handler_id,
+                correlation_id,
+                path_offset: 0,
+                path_len: path.len() as u32,
+                query_offset: 0,
+                query_len: query.as_ref().map_or(0, |q| q.len() as u32),
+                headers_offset: 0,
+                headers_len: headers_mp.len() as u32,
+                body_offset: 0,
+                body_len: body.len() as u32,
+            });
+            pending.components.push(bytes::Bytes::from(path));
+            if let Some(q) = query {
+                pending.components.push(bytes::Bytes::from(q));
+            }
+            pending.components.push(headers_mp);
+            pending.components.push(body);
             if !is_fnf {
                 pending.correlation_ids.push(correlation_id);
             }
+            dispatched_count += 1;
         }
 
         for ((worker_idx, _flags), pending) in pending_batches {
             self.flush_shm_dispatch_batch(worker_idx, pending);
         }
+        
+        dispatched_count
     }
 
-    /// Access the correlation slab (for response reader to complete entries).
-    pub fn correlation(&self) -> &Mutex<CorrelationSlab> {
-        &self.correlation
+    /// Access a specific correlation shard.
+    pub fn correlation_shard(&self, shard_idx: usize) -> &Mutex<CorrelationSlab> {
+        &self.correlation_shards[shard_idx]
+    }
+
+    /// Get the number of correlation shards.
+    pub fn shard_count(&self) -> usize {
+        self.correlation_shards.len()
+    }
+
+    /// Sweep for expired entries across all shards.
+    pub fn sweep_expired(&self, timeout: Duration) {
+        for shard in &self.correlation_shards {
+            let mut slab = shard.lock().unwrap();
+            slab.sweep_expired(timeout);
+        }
     }
 
     /// Get all ring pairs (for the response reader).
@@ -252,31 +309,44 @@ impl ShmDispatcher {
             .collect()
     }
 
-    fn flush_shm_dispatch_batch(&self, worker_idx: usize, pending: PendingShmDispatchBatch) {
+    fn flush_shm_dispatch_batch(&self, worker_idx: usize, pending: ShmDispatchBatch) {
         let worker = &self.workers[worker_idx];
-        let snap = BatchSnapshot::new_with_flags(pending.slab, pending.nodes, pending.flags);
-        let mut buf = vec![0u8; snap.serialized_size()];
-        snap.serialize_into(&mut buf);
+        let writer = ShmBatchWriter {
+            nodes: pending.nodes,
+            components: pending.components.iter().map(|c| c.as_ref()).collect(),
+            flags: pending.flags,
+        };
 
-        match worker.ring_pair.request_ring.try_send(&buf, 0) {
+        // Final optimization: Zero-alloc serialization directly into ring slot.
+        match worker.ring_pair.request_ring.try_send_with(pending.flags, |slot| {
+            writer.serialize_into(slot)
+        }) {
             Ok(()) => {
-                let _ = worker.transport.notify_request();
+                // PERF: Lazy Notify
+                let stats = worker.ring_pair.request_ring.stats();
+                if stats.write_head == stats.read_head.wrapping_add(1) & ((stats.slots as u64) - 1) {
+                    let _ = worker.transport.notify_request();
+                }
             }
             Err(vertebra_core::channel::ChannelError::Full) => {
-                debug!(worker = worker_idx, "request ring became full before send");
+                debug!(worker = worker_idx, "request ring full during flush");
                 if !pending.correlation_ids.is_empty() {
-                    let mut slab = self.correlation.lock().unwrap();
-                    for correlation_id in pending.correlation_ids {
-                        slab.complete(correlation_id, service_unavailable_response());
+                    for cid in pending.correlation_ids {
+                        let shard_idx = (cid & 0xFF) as usize;
+                        let internal_id = cid >> 8;
+                        let mut slab = self.correlation_shards[shard_idx].lock().unwrap();
+                        slab.complete(internal_id, service_unavailable_response());
                     }
                 }
             }
             Err(e) => {
                 error!(worker = worker_idx, error = %e, "ring send error");
                 if !pending.correlation_ids.is_empty() {
-                    let mut slab = self.correlation.lock().unwrap();
-                    for correlation_id in pending.correlation_ids {
-                        slab.complete(correlation_id, service_unavailable_response());
+                    for cid in pending.correlation_ids {
+                        let shard_idx = (cid & 0xFF) as usize;
+                        let internal_id = cid >> 8;
+                        let mut slab = self.correlation_shards[shard_idx].lock().unwrap();
+                        slab.complete(internal_id, service_unavailable_response());
                     }
                 }
             }
@@ -294,59 +364,14 @@ fn batch_snapshot_serialized_size(node_count: usize, slab_len: usize) -> usize {
 }
 
 fn batch_can_fit_request(
-    pending: &PendingShmDispatchBatch,
+    pending: &ShmDispatchBatch,
     req: &TransportRequestView<'_>,
     max_payload: usize,
 ) -> bool {
     let next_nodes = pending.nodes.len() + 1;
-    let next_slab = pending.slab.len() + request_slab_size(req);
+    let current_slab_len: usize = pending.components.iter().map(|c| c.len()).sum();
+    let next_slab = current_slab_len + request_slab_size(req);
     batch_snapshot_serialized_size(next_nodes, next_slab) <= max_payload
-}
-
-/// Append a pending request to a shared slab and return its TransportNode.
-fn append_transport_node(
-    req: &TransportRequestView<'_>,
-    correlation_id: u64,
-    slab: &mut Vec<u8>,
-) -> TransportNode {
-    let path_bytes = req.path.as_bytes();
-    let query_bytes = req.query.map(str::as_bytes);
-    let headers_bytes = &req.headers_mp[..];
-    let body_bytes = &req.body[..];
-
-    let path_offset = slab.len() as u32;
-    slab.extend_from_slice(path_bytes);
-    let path_len = path_bytes.len() as u32;
-
-    let query_offset = slab.len() as u32;
-    let query_len = query_bytes.map_or(0, |q| {
-        slab.extend_from_slice(q);
-        q.len()
-    }) as u32;
-
-    let headers_offset = slab.len() as u32;
-    slab.extend_from_slice(headers_bytes);
-    let headers_len = headers_bytes.len() as u32;
-
-    let body_offset = slab.len() as u32;
-    slab.extend_from_slice(body_bytes);
-    let body_len = body_bytes.len() as u32;
-
-    TransportNode {
-        method_tag: req.method_tag,
-        http_version_tag: req.http_version_tag,
-        _pad: [0; 2],
-        handler_id: req.handler_id,
-        correlation_id,
-        path_offset,
-        path_len,
-        query_offset,
-        query_len,
-        headers_offset,
-        headers_len,
-        body_offset,
-        body_len,
-    }
 }
 
 fn service_unavailable_response() -> PendingResponse {
@@ -381,7 +406,7 @@ struct Inner {
 /// The dispatcher.
 ///
 /// Manages in-flight request tracking and dispatches batches to workers
-/// via the direct channel, arena-backed BatchBridge, or SPSC ring pairs.
+/// via the direct channel, arena-backed BatchBridge, or MPMC ring pairs.
 pub struct Dispatcher {
     inner: Arc<Inner>,
 }
@@ -423,7 +448,7 @@ impl Dispatcher {
 
     /// Create a new dispatcher in SharedMemory mode.
     pub fn new_shm(ring_pairs: Vec<Arc<RingPair>>, max_inflight: usize) -> Self {
-        let shm = Arc::new(ShmDispatcher::new(ring_pairs, max_inflight));
+        let shm = ShmDispatcher::new(ring_pairs, max_inflight);
         Self {
             inner: Arc::new(Inner {
                 pending: DashMap::new(),
@@ -441,32 +466,36 @@ impl Dispatcher {
     }
 
     /// Dispatch a batch to workers.
-    pub fn dispatch(&self, batch: Batch) {
+    ///
+    /// Returns the number of requests successfully dispatched.
+    pub fn dispatch(&self, batch: Batch) -> usize {
         match self.inner.mode {
             DispatchMode::Direct => self.dispatch_direct(batch),
             DispatchMode::Bridge => self.dispatch_bridge(batch),
             DispatchMode::SharedMemory => {
                 if let Some(shm) = &self.inner.shm_dispatcher {
-                    shm.dispatch_shm(batch);
+                    shm.dispatch_shm(batch)
                 } else {
                     error!("SHM dispatcher not configured");
+                    0
                 }
             }
         }
     }
 
     /// Direct dispatch: send batch through channel, responses flow back via oneshot.
-    fn dispatch_direct(&self, batch: Batch) {
+    fn dispatch_direct(&self, batch: Batch) -> usize {
         use vertebra_core::protocol::flags;
 
         let tx = match &self.inner.direct_tx {
             Some(tx) => tx,
             None => {
                 error!("direct dispatch channel not configured");
-                return;
+                return 0;
             }
         };
 
+        let count = batch.requests.len();
         let requests = batch
             .requests
             .into_iter()
@@ -488,21 +517,25 @@ impl Dispatcher {
 
         if tx.try_send(DirectBatch { requests }).is_err() {
             error!("direct dispatch channel full or closed, dropping batch");
+            0
+        } else {
+            count
         }
     }
 
     /// Bridge dispatch: write into arena/slab, seal, and track correlation IDs.
-    fn dispatch_bridge(&self, batch: Batch) {
+    fn dispatch_bridge(&self, batch: Batch) -> usize {
         use vertebra_core::protocol::flags;
 
         let bridge = match BatchBridge::get() {
             Some(b) => b,
             None => {
                 error!("batch bridge not initialized, dropping batch");
-                return;
+                return 0;
             }
         };
         let writer = bridge.batch_writer();
+        let mut dispatched_count = 0;
 
         for req in batch.requests {
             let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
@@ -526,12 +559,16 @@ impl Dispatcher {
                 if !is_fnf {
                     self.inner.pending.remove(&id);
                 }
+            } else {
+                dispatched_count += 1;
             }
         }
 
         if let Err(e) = writer.seal() {
             error!(error = %e, "transport seal failed");
         }
+        
+        dispatched_count
     }
 
     /// Complete a request with a response (bridge or SHM mode).
@@ -539,10 +576,13 @@ impl Dispatcher {
         match self.inner.mode {
             DispatchMode::SharedMemory => {
                 if let Some(shm) = &self.inner.shm_dispatcher {
-                    let mut slab = shm.correlation().lock().unwrap();
-                    if !slab.complete(correlation_id, response) {
+                    let shard_idx = (correlation_id & 0xFF) as usize;
+                    let internal_id = correlation_id >> 8;
+                    let mut slab = shm.correlation_shard(shard_idx).lock().unwrap();
+                    if !slab.complete(internal_id, response) {
                         debug!(
                             id = correlation_id,
+                            shard = shard_idx,
                             "no pending SHM request for correlation ID"
                         );
                     }
@@ -563,11 +603,14 @@ impl Dispatcher {
         match self.inner.mode {
             DispatchMode::SharedMemory => {
                 if let Some(shm) = &self.inner.shm_dispatcher {
-                    let mut slab = shm.correlation().lock().unwrap();
                     for (correlation_id, response) in responses {
-                        if !slab.complete(correlation_id, response) {
+                        let shard_idx = (correlation_id & 0xFF) as usize;
+                        let internal_id = correlation_id >> 8;
+                        let mut slab = shm.correlation_shard(shard_idx).lock().unwrap();
+                        if !slab.complete(internal_id, response) {
                             debug!(
                                 id = correlation_id,
+                                shard = shard_idx,
                                 "no pending SHM request for correlation ID"
                             );
                         }
@@ -739,7 +782,7 @@ mod tests {
         // Read the request from the ring to get the correlation ID
         let mut buf = vec![0u8; pair.request_ring.payload_capacity()];
         let len = pair.request_ring.try_recv(&mut buf).expect("should recv");
-        let snap = BatchSnapshot::deserialize_from(&buf[..len]).expect("deserialize");
+        let snap = vertebra_core::transport::BatchSnapshot::deserialize_from(&buf[..len]).expect("deserialize");
         let correlation_id = snap.node(0).correlation_id;
         assert!(correlation_id > 0);
 

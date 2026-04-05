@@ -36,8 +36,8 @@ def test_vertebra_response_construct_with_headers_dict() -> None:
     # headers returns list of tuples
     hdrs = list(r.headers)
     assert len(hdrs) == 1
-    assert hdrs[0][0] == "content-type"
-    assert hdrs[0][1] == "text/plain"
+    assert hdrs[0][0] == b"content-type"
+    assert hdrs[0][1] == b"text/plain"
 
 
 def test_vertebra_response_construct_with_headers_list() -> None:
@@ -46,7 +46,7 @@ def test_vertebra_response_construct_with_headers_list() -> None:
         headers=[("x-custom", "value")],
     )
     hdrs = list(r.headers)
-    assert hdrs[0][0] == "x-custom"
+    assert hdrs[0][0] == b"x-custom"
 
 
 def test_vertebra_response_request_id_set() -> None:

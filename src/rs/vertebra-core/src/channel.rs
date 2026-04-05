@@ -1323,6 +1323,12 @@ impl MpmcRing {
         self.layout.slot_size - core::mem::size_of::<SlotHeader>()
     }
 
+    /// Get the underlying shared memory region's handle (FD on Unix).
+    #[cfg(unix)]
+    pub fn region_handle(&self) -> Option<std::os::fd::RawFd> {
+        self.region.handle()
+    }
+
     pub fn stats(&self) -> RingStats {
         RingStats {
             slot_size: self.layout.slot_size,
@@ -1362,30 +1368,89 @@ impl MpmcRing {
             });
         }
 
-        let tail = self.tail().load(Ordering::Relaxed);
-        let index = (tail & self.mask) as usize;
-        let seq = self.sequence(index).load(Ordering::Acquire);
-        let diff = seq as i64 - tail as i64;
+        let mut tail = self.tail().load(Ordering::Relaxed);
+        loop {
+            let index = (tail & self.mask) as usize;
+            let seq = self.sequence(index).load(Ordering::Acquire);
+            let diff = seq as i64 - tail as i64;
 
-        if diff == 0 {
-            if self
-                .tail()
-                .compare_exchange(tail, tail + 1, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                unsafe {
-                    self.write_slot(index, payload, flags);
+            if diff == 0 {
+                match self.tail().compare_exchange(
+                    tail,
+                    tail + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        unsafe {
+                            self.write_slot(index, payload, flags);
+                        }
+                        self.sequence(index).store(tail + 1, Ordering::Release);
+                        return Ok(());
+                    }
+                    Err(actual) => {
+                        tail = actual;
+                        continue;
+                    }
                 }
-                self.sequence(index).store(tail + 1, Ordering::Release);
-                return Ok(());
+            } else if diff < 0 {
+                return Err(ChannelError::Full);
+            } else {
+                tail = self.tail().load(Ordering::Relaxed);
             }
-        } else if diff < 0 {
-            return Err(ChannelError::Full);
         }
+    }
 
-        // If we lost race or state changed, return Full/Busy.
-        // For simplicity in non-blocking mode, treat as Full/Busy retry.
-        Err(ChannelError::Full)
+    /// Zero-copy send: reserve a slot and call `f` to write the payload.
+    ///
+    /// # Arguments
+    ///
+    /// * `flags` - Protocol flags for the slot
+    /// * `f` - Closure that receives a mutable slice to the slot payload and returns number of bytes written.
+    pub fn try_send_with<F>(&self, flags: u32, f: F) -> Result<(), ChannelError>
+    where
+        F: FnOnce(&mut [u8]) -> usize,
+    {
+        let mut tail = self.tail().load(Ordering::Relaxed);
+        loop {
+            let index = (tail & self.mask) as usize;
+            let seq = self.sequence(index).load(Ordering::Acquire);
+            let diff = seq as i64 - tail as i64;
+
+            if diff == 0 {
+                match self.tail().compare_exchange(
+                    tail,
+                    tail + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        unsafe {
+                            let slot = self.slot_ptr(index);
+                            let header = slot.cast::<SlotHeader>();
+                            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+                            let payload_slice = core::slice::from_raw_parts_mut(
+                                payload_ptr,
+                                self.payload_capacity(),
+                            );
+                            let written = f(payload_slice);
+                            (*header).len = written as u32;
+                            (*header).flags = flags;
+                        }
+                        self.sequence(index).store(tail + 1, Ordering::Release);
+                        return Ok(());
+                    }
+                    Err(actual) => {
+                        tail = actual;
+                        continue;
+                    }
+                }
+            } else if diff < 0 {
+                return Err(ChannelError::Full);
+            } else {
+                tail = self.tail().load(Ordering::Relaxed);
+            }
+        }
     }
 
     pub fn send(&self, payload: &[u8], flags: u32) -> Result<(), ChannelError> {
@@ -1402,45 +1467,69 @@ impl MpmcRing {
     }
 
     pub fn try_recv(&self, out: &mut [u8]) -> Result<usize, ChannelError> {
-        let head = self.head().load(Ordering::Relaxed);
-        let index = (head & self.mask) as usize;
-        let seq = self.sequence(index).load(Ordering::Acquire);
-        let diff = seq as i64 - (head + 1) as i64;
+        let mut head = self.head().load(Ordering::Relaxed);
+        loop {
+            let index = (head & self.mask) as usize;
+            let seq = self.sequence(index).load(Ordering::Acquire);
+            let diff = seq as i64 - (head + 1) as i64;
 
-        if diff == 0
-            && self
-                .head()
-                .compare_exchange(head, head + 1, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        {
-            let len = unsafe { self.read_slot(index, out)? };
-            self.sequence(index)
-                .store(head + self.mask + 1, Ordering::Release);
-            return Ok(len);
+            if diff == 0 {
+                match self.head().compare_exchange(
+                    head,
+                    head + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        let len = unsafe { self.read_slot(index, out)? };
+                        self.sequence(index)
+                            .store(head + self.mask + 1, Ordering::Release);
+                        return Ok(len);
+                    }
+                    Err(actual) => {
+                        head = actual;
+                        continue;
+                    }
+                }
+            } else if diff < 0 {
+                return Err(ChannelError::Empty);
+            } else {
+                head = self.head().load(Ordering::Relaxed);
+            }
         }
-
-        Err(ChannelError::Empty)
     }
 
     pub fn try_recv_with_flags(&self, out: &mut [u8]) -> Result<(usize, u32), ChannelError> {
-        let head = self.head().load(Ordering::Relaxed);
-        let index = (head & self.mask) as usize;
-        let seq = self.sequence(index).load(Ordering::Acquire);
-        let diff = seq as i64 - (head + 1) as i64;
+        let mut head = self.head().load(Ordering::Relaxed);
+        loop {
+            let index = (head & self.mask) as usize;
+            let seq = self.sequence(index).load(Ordering::Acquire);
+            let diff = seq as i64 - (head + 1) as i64;
 
-        if diff == 0
-            && self
-                .head()
-                .compare_exchange(head, head + 1, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        {
-            let (len, flags) = unsafe { self.read_slot_with_flags(index, out)? };
-            self.sequence(index)
-                .store(head + self.mask + 1, Ordering::Release);
-            return Ok((len, flags));
+            if diff == 0 {
+                match self.head().compare_exchange(
+                    head,
+                    head + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        let (len, flags) = unsafe { self.read_slot_with_flags(index, out)? };
+                        self.sequence(index)
+                            .store(head + self.mask + 1, Ordering::Release);
+                        return Ok((len, flags));
+                    }
+                    Err(actual) => {
+                        head = actual;
+                        continue;
+                    }
+                }
+            } else if diff < 0 {
+                return Err(ChannelError::Empty);
+            } else {
+                head = self.head().load(Ordering::Relaxed);
+            }
         }
-
-        Err(ChannelError::Empty)
     }
 
     pub fn recv(&self, out: &mut [u8]) -> Result<usize, ChannelError> {
@@ -1449,6 +1538,27 @@ impl MpmcRing {
             match self.try_recv(out) {
                 Ok(len) => return Ok(len),
                 Err(ChannelError::Empty) => backoff.snooze(),
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    pub fn recv_timeout(
+        &self,
+        out: &mut [u8],
+        timeout: Duration,
+    ) -> Result<Option<usize>, ChannelError> {
+        let deadline = Instant::now() + timeout;
+        let backoff = Backoff::new();
+        loop {
+            match self.try_recv(out) {
+                Ok(len) => return Ok(Some(len)),
+                Err(ChannelError::Empty) => {
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    backoff.snooze();
+                }
                 Err(err) => return Err(err),
             }
         }
@@ -1530,6 +1640,22 @@ impl MpmcRing {
         }
 
         results
+    }
+
+    /// Reset the ring to empty state.
+    ///
+    /// # Safety
+    /// Caller must ensure no other thread is reading or writing to this ring.
+    pub unsafe fn reset(&self) {
+        self.head().store(0, Ordering::Release);
+        self.tail().store(0, Ordering::Release);
+        // Reset sequences
+        for i in 0..self.layout.slots {
+            (*self.sequences.add(i)).store(i as u64, Ordering::Release);
+        }
+        // Bump generation
+        let header = &*self.header;
+        header.generation.fetch_add(1, Ordering::Release);
     }
 }
 

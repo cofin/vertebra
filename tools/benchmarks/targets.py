@@ -140,6 +140,14 @@ ALL_TARGETS: dict[str, Target] = {
         env={"VERTEBRA_WORKERS": "4"},
         description="Vertebra SHM, native handlers, 4 workers",
     ),
+    "vtb-shm-native-8w": Target(
+        name="vtb-shm-native-8w",
+        topology=Topology.SHM,
+        cmd=_vertebra_run("tools.benchmarks.apps.vertebra_app:native_app", "--host", "127.0.0.1", "--port", "8014"),
+        port=8014,
+        env={"VERTEBRA_WORKERS": "8"},
+        description="Vertebra SHM, native handlers, 8 workers",
+    ),
     "vtb-shm-asgi-4w": Target(
         name="vtb-shm-asgi-4w",
         topology=Topology.SHM,
@@ -149,6 +157,16 @@ ALL_TARGETS: dict[str, Target] = {
         port=8012,
         env={"VERTEBRA_WORKERS": "4"},
         description="Vertebra SHM, ASGI, 4 workers",
+    ),
+    "vtb-shm-asgi-8w": Target(
+        name="vtb-shm-asgi-8w",
+        topology=Topology.SHM,
+        cmd=_vertebra_run(
+            "tools.benchmarks.apps.vertebra_app:asgi_app", "--asgi", "--host", "127.0.0.1", "--port", "8015"
+        ),
+        port=8015,
+        env={"VERTEBRA_WORKERS": "8"},
+        description="Vertebra SHM, ASGI, 8 workers",
     ),
     "vtb-shm-wsgi-4w": Target(
         name="vtb-shm-wsgi-4w",

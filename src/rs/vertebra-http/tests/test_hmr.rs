@@ -28,7 +28,7 @@ async fn spawn_hmr_server(dev_mode: bool) -> (std::net::SocketAddr, oneshot::Sen
     });
 
     tokio::spawn(async move {
-        server::run_with_collector(config, router, dispatcher, collector_tx, async move {
+        server::run_with_collector(config, router, dispatcher, vec![collector_tx], async move {
             let _ = shutdown_rx.await;
         })
         .await

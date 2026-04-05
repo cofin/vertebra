@@ -25,21 +25,32 @@ use crate::router::NativeRouter;
 #[cfg(feature = "tls")]
 use crate::tls::TlsAcceptor;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 /// Shared state threaded through every request service call.
 pub struct ServerState {
     pub router: Arc<NativeRouter>,
     pub dispatcher: Arc<Dispatcher>,
     pub config: Arc<ServerConfig>,
-    pub collector_tx: tokio::sync::mpsc::Sender<PendingRequest>,
+    pub collector_shards: Vec<tokio::sync::mpsc::Sender<PendingRequest>>,
+    pub next_shard: AtomicUsize,
     pub hmr: Arc<HmrState>,
 }
 
-/// Run the HTTP server with a collector channel until the shutdown signal resolves.
+impl ServerState {
+    /// Get a collector shard sender (round-robin).
+    pub fn get_collector(&self) -> &tokio::sync::mpsc::Sender<PendingRequest> {
+        let idx = self.next_shard.fetch_add(1, Ordering::Relaxed) % self.collector_shards.len();
+        &self.collector_shards[idx]
+    }
+}
+
+/// Run the HTTP server with sharded collector channels until the shutdown signal resolves.
 pub async fn run_with_collector(
     config: Arc<ServerConfig>,
     router: Arc<NativeRouter>,
     dispatcher: Arc<Dispatcher>,
-    collector_tx: tokio::sync::mpsc::Sender<PendingRequest>,
+    collector_shards: Vec<tokio::sync::mpsc::Sender<PendingRequest>>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(config.bind).await?;
@@ -49,7 +60,8 @@ pub async fn run_with_collector(
         router: Arc::clone(&router),
         dispatcher: Arc::clone(&dispatcher),
         config: Arc::clone(&config),
-        collector_tx,
+        collector_shards,
+        next_shard: AtomicUsize::new(0),
         hmr: Arc::new(HmrState::default()),
     });
 

@@ -254,19 +254,17 @@ pub fn try_get_batch() -> PyResult<Option<VertebraBatch>> {
 /// Encode headers into Vertebra's compact binary format.
 ///
 /// Format per header: `[name_len: u8][name: bytes][value_len: u16 LE][value: bytes]`
-fn encode_headers_compact(headers: &[(String, String)]) -> Vec<u8> {
+fn encode_headers_compact(headers: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
     if headers.is_empty() {
         return Vec::new();
     }
     let mut buf = Vec::with_capacity(headers.len() * 32);
     for (name, value) in headers {
-        let n = name.as_bytes();
-        let v = value.as_bytes();
-        buf.push(n.len() as u8);
-        buf.extend_from_slice(n);
-        let vlen = v.len() as u16;
+        buf.push(name.len() as u8);
+        buf.extend_from_slice(name);
+        let vlen = value.len() as u16;
         buf.extend_from_slice(&vlen.to_le_bytes());
-        buf.extend_from_slice(v);
+        buf.extend_from_slice(value);
     }
     buf
 }

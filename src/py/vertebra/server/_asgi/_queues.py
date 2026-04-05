@@ -17,7 +17,7 @@ class AsgiResponse:
     """Duck-type compatible with VertebraResponse for batch runner."""
 
     status: int
-    headers: list[tuple[str, str]]
+    headers: Any
     body: bytes
     request_id: int = 0
 

@@ -56,13 +56,15 @@ class AsgiRunner:
         """Process a batch of requests synchronously."""
         if self._scheduler:
             fut = self._scheduler.schedule(self._adapter.run_batch(requests))
-            concurrent.futures.wait([fut])
+            # Wait for the future from the CallbackScheduler thread
             return fut.result()
 
         if self._loop.is_running():
+            # If the loop is running elsewhere (e.g. from AsgiRunner created in shm_worker_loop)
             future = asyncio.run_coroutine_threadsafe(self._adapter.run_batch(requests), self._loop)
             return future.result()
 
+        # Fallback for sync run (loop not yet running)
         return self._loop.run_until_complete(self._adapter.run_batch(requests))
 
     def spawn_single(self, request: Any) -> None:
@@ -70,15 +72,32 @@ class AsgiRunner:
         VR, submit = _ensure_ffi()
 
         async def _dispatch() -> None:
-            resp = await self._adapter.run_single(request)
-            submit(
-                VR(
-                    status=resp.status,
-                    body=resp.body,
-                    headers=getattr(resp, "headers", []),
-                    request_id=request.request_id,
-                )
-            )
+            try:
+                resp = await self._adapter.run_single(request)
+                try:
+                    hdrs = getattr(resp, "headers", [])
+                    # Defensive: convert list of lists/tuples to tuple of tuples
+                    # Some PyO3 versions are picky about this when multiple fields exist.
+                    hdrs_tuple = tuple(tuple(h) for h in hdrs)
+                    
+                    vtb_resp = VR(
+                        status=resp.status,
+                        body=resp.body,
+                        headers=hdrs_tuple,
+                        request_id=request.request_id,
+                    )
+                    submit(vtb_resp)
+                except Exception:
+                    log.exception("failed to construct or submit VertebraResponse for request %d", request.request_id)
+                    submit(
+                        VR(
+                            status=500,
+                            body=b"Internal Server Error (FFI Error)",
+                            request_id=request.request_id,
+                        )
+                    )
+            except Exception:
+                log.exception("unhandled error in AsgiRunner dispatch loop")
 
         if self._scheduler:
             self._scheduler.spawn(_dispatch())

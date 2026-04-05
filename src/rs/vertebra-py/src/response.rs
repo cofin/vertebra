@@ -1,15 +1,16 @@
 //! Response builder for the Vertebra batch runner.
 
 use bytes::Bytes;
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyList, PyString, PyTuple};
+use pyo3::types::{PyAnyMethods, PyBytes, PyDict, PyList, PyTuple};
 
-#[pyclass(name = "VertebraResponse", from_py_object)]
+#[pyclass(name = "VertebraResponse", skip_from_py_object)]
 #[derive(Clone)]
 pub struct VertebraResponse {
     pub status: u16,
     pub body: Bytes,
-    pub headers: Vec<(String, String)>,
+    pub headers: Vec<(Vec<u8>, Vec<u8>)>,
     pub request_id: u64,
 }
 
@@ -19,73 +20,101 @@ impl VertebraResponse {
     #[pyo3(signature = (status, body=None, headers=None, request_id=0))]
     fn new(
         status: u16,
-        body: Option<&[u8]>,
-        headers: Option<&Bound<'_, PyAny>>,
+        body: Option<Bound<'_, PyAny>>,
+        headers: Option<Bound<'_, PyAny>>,
         request_id: u64,
     ) -> PyResult<Self> {
-        let body = Bytes::copy_from_slice(body.unwrap_or(&[]));
-        let mut header_vec: Vec<(String, String)> = Vec::new();
-
-        if let Some(h) = headers {
-            if let Ok(dict) = h.cast::<pyo3::types::PyDict>() {
-                for (k, v) in dict.iter() {
-                    header_vec.push((k.extract::<String>()?, v.extract::<String>()?));
+        let body_bytes = match body {
+            Some(b) => {
+                if let Ok(py_bytes) = b.downcast::<PyBytes>() {
+                    Bytes::copy_from_slice(py_bytes.as_bytes())
+                } else {
+                    Bytes::copy_from_slice(&b.extract::<Vec<u8>>()?)
                 }
-            } else if let Ok(list) = h.cast::<PyList>() {
+            }
+            None => Bytes::new(),
+        };
+
+        let mut header_vec: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        if let Some(h) = headers {
+            if let Ok(dict) = h.downcast::<PyDict>() {
+                for (k, v) in dict.iter() {
+                    header_vec.push((
+                        k.extract::<Vec<u8>>().or_else(|_| k.extract::<String>().map(|s| s.into_bytes()))?,
+                        v.extract::<Vec<u8>>().or_else(|_| v.extract::<String>().map(|s| s.into_bytes()))?,
+                    ));
+                }
+            } else if let Ok(list) = h.downcast::<PyList>() {
                 for item in list.iter() {
-                    let tuple = item.cast::<PyTuple>()?;
-                    let k_obj = tuple.get_item(0)?;
-                    let v_obj = tuple.get_item(1)?;
-
-                    let k = if let Ok(b) = k_obj.cast::<PyBytes>() {
-                        String::from_utf8_lossy(b.as_bytes()).to_string()
+                    let (k_obj, v_obj) = if let Ok(t) = item.downcast::<PyTuple>() {
+                        (t.get_item(0)?, t.get_item(1)?)
+                    } else if let Ok(l) = item.downcast::<PyList>() {
+                        (l.get_item(0)?, l.get_item(1)?)
                     } else {
-                        k_obj.extract::<String>()?
+                        return Err(PyTypeError::new_err(format!(
+                            "header entry must be a tuple or list, got {}",
+                            item.get_type().name()?
+                        )));
                     };
 
-                    let v = if let Ok(b) = v_obj.cast::<PyBytes>() {
-                        String::from_utf8_lossy(b.as_bytes()).to_string()
+                    header_vec.push((
+                        k_obj.extract::<Vec<u8>>().or_else(|_| k_obj.extract::<String>().map(|s| s.into_bytes()))?,
+                        v_obj.extract::<Vec<u8>>().or_else(|_| v_obj.extract::<String>().map(|s| s.into_bytes()))?,
+                    ));
+                }
+            } else if let Ok(tuple) = h.downcast::<PyTuple>() {
+                for item in tuple.iter() {
+                    let (k_obj, v_obj) = if let Ok(t) = item.downcast::<PyTuple>() {
+                        (t.get_item(0)?, t.get_item(1)?)
+                    } else if let Ok(l) = item.downcast::<PyList>() {
+                        (l.get_item(0)?, l.get_item(1)?)
                     } else {
-                        v_obj.extract::<String>()?
+                        return Err(PyTypeError::new_err(format!(
+                            "header entry must be a tuple or list, got {}",
+                            item.get_type().name()?
+                        )));
                     };
 
-                    header_vec.push((k, v));
+                    header_vec.push((
+                        k_obj.extract::<Vec<u8>>().or_else(|_| k_obj.extract::<String>().map(|s| s.into_bytes()))?,
+                        v_obj.extract::<Vec<u8>>().or_else(|_| v_obj.extract::<String>().map(|s| s.into_bytes()))?,
+                    ));
                 }
             }
         }
 
         Ok(Self {
             status,
-            body,
+            body: body_bytes,
             headers: header_vec,
             request_id,
         })
     }
 
     #[getter]
-    fn status(&self) -> u16 {
+    pub fn status(&self) -> u16 {
         self.status
     }
 
     #[getter]
-    fn body<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+    pub fn body<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, &self.body)
     }
 
     #[getter]
-    fn request_id(&self) -> u64 {
+    pub fn request_id(&self) -> u64 {
         self.request_id
     }
 
     #[getter]
-    fn headers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+    pub fn headers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let mut tuples: Vec<Bound<'py, PyAny>> = Vec::with_capacity(self.headers.len());
         for (name, value) in &self.headers {
             let t = PyTuple::new(
                 py,
                 [
-                    PyString::new(py, name).into_any(),
-                    PyString::new(py, value).into_any(),
+                    PyBytes::new(py, name).into_any(),
+                    PyBytes::new(py, value).into_any(),
                 ],
             )?;
             tuples.push(t.into_any());
@@ -100,5 +129,15 @@ impl VertebraResponse {
             self.body.len(),
             self.request_id,
         )
+    }
+}
+
+impl VertebraResponse {
+    pub fn get_headers(&self) -> &[(Vec<u8>, Vec<u8>)] {
+        &self.headers
+    }
+
+    pub fn get_body(&self) -> &Bytes {
+        &self.body
     }
 }

@@ -33,10 +33,21 @@ use vertebra_http::{
 
 /// Extract routes from a Python VertebraApp and build the Rust RouteTable.
 #[cfg(feature = "python")]
-fn build_route_table_from_app(_py: Python<'_>, app: &Bound<'_, PyAny>) -> PyResult<RouteTable> {
+fn build_route_table_from_app(py: Python<'_>, app: &Bound<'_, PyAny>) -> PyResult<RouteTable> {
     let mut table = RouteTable::new();
 
-    let handler_index = app.getattr("handler_index")?;
+    // If the app is a raw ASGI function/callable instead of a VertebraApp, wrap it.
+    let app_obj = if app.getattr("handler_index").is_err() && app.is_callable() {
+        info!("wrapping raw callable app in ASGI adapter");
+        let app_mod = py.import("vertebra.framework._app")?;
+        let wrapped = app_mod.getattr("VertebraApp")?.call0()?;
+        wrapped.getattr("mount")?.call1(("/", app))?;
+        wrapped
+    } else {
+        app.clone()
+    };
+
+    let handler_index = app_obj.getattr("handler_index")?;
     let dict = handler_index.cast::<PyDict>()?;
 
     for (_, info) in dict.iter() {
@@ -47,7 +58,7 @@ fn build_route_table_from_app(_py: Python<'_>, app: &Bound<'_, PyAny>) -> PyResu
     }
 
     // Register mount prefixes as catch-all routes.
-    let mounts = app.getattr("mounts")?;
+    let mounts = app_obj.getattr("mounts")?;
     for mount in mounts.try_iter()? {
         let mount = mount?;
         let prefix: String = mount.get_item(0)?.extract()?;
@@ -104,14 +115,24 @@ fn spawn_python_worker(app_path: String) {
                 let module = py.import(parts[0])?;
                 let app = module.getattr(parts[1])?;
 
+                // If the app is a raw ASGI function/callable instead of a VertebraApp, wrap it.
+                let app_obj = if app.getattr("handler_index").is_err() && app.is_callable() {
+                    let app_mod = py.import("vertebra.framework._app")?;
+                    let wrapped = app_mod.getattr("VertebraApp")?.call0()?;
+                    wrapped.getattr("mount")?.call1(("/", &app))?;
+                    wrapped
+                } else {
+                    app
+                };
+
                 // Initialize the transport (bridge already created by main).
                 native_mod
                     .getattr("init_transport")?
                     .call((), Some(&PyDict::new(py)))?;
 
-                let handlers = app.getattr("_handlers")?;
+                let handlers = app_obj.getattr("_handlers")?;
                 let builtins = py.import("builtins")?;
-                let mounts_list = builtins.getattr("list")?.call1((app.getattr("mounts")?,))?;
+                let mounts_list = builtins.getattr("list")?.call1((app_obj.getattr("mounts")?,))?;
 
                 let runner = py.import("vertebra.server._native")?;
                 let kwargs = PyDict::new(py);
@@ -265,9 +286,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // --- Collector ---
-    let (collector, collector_tx) =
-        BatchCollector::new(Arc::clone(&dispatcher), DrainPolicy::default_fixed(), 1024);
-    tokio::spawn(collector.run());
+    // Shard the collector to break the single-threaded bottleneck.
+    // 8 shards provides better scale for many-core systems.
+    let shard_count = 8;
+    let collector_shards = BatchCollector::spawn_pool(
+        Arc::clone(&dispatcher),
+        vertebra_http::policy::DrainPolicy::default_adaptive(),
+        shard_count,
+        16384,
+    );
 
     // --- Start server ---
     let shutdown = async {
@@ -279,7 +306,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Arc::clone(&config),
         router,
         dispatcher,
-        collector_tx,
+        collector_shards,
         shutdown,
     )
     .await?;
