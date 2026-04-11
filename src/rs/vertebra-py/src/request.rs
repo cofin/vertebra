@@ -11,6 +11,7 @@ use pyo3::types::{PyBytes, PyDict, PyString};
 
 use vertebra_core::transport::BatchSnapshot;
 
+use crate::asgi_scope::AsgiScope;
 use crate::headers::VertebraHeaders;
 
 /// Zero-object request proxy backed by a shared [`BatchSnapshot`].
@@ -117,29 +118,16 @@ impl VertebraRequest {
         self.get_headers()
     }
 
-    fn asgi_scope<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        println!("DEBUG: asgi_scope called");
-        let d = PyDict::new(py);
-        d.set_item("type", "http")?;
-        d.set_item("asgi", {
-            let inner = PyDict::new(py);
-            inner.set_item("version", "3.0")?;
-            inner.set_item("spec_version", "2.3")?;
-            inner
-        })?;
-        d.set_item("http_version", self.http_version(py))?;
-        d.set_item("method", self.method(py).to_string().to_uppercase())?;
-        d.set_item("path", self.path(py))?;
-        d.set_item("raw_path", self.raw_path(py))?;
-        d.set_item("query_string", self.raw_query(py))?;
-        d.set_item("root_path", "")?; // Default for now
-        d.set_item("scheme", "http")?; // Default for now
-        d.set_item("headers", self.get_headers().asgi_items(py)?)?;
-        d.set_item("state", PyDict::new(py))?;
-        d.set_item("extensions", PyDict::new(py))?;
-        d.set_item("server", py.None())?;
-        d.set_item("client", py.None())?;
-        Ok(d)
+    /// Return a lazy ASGI scope backed by this request's snapshot slot.
+    ///
+    /// Middleware that needs a real `dict` can call `scope.copy()`.
+    #[pyo3(signature = (root_path=None))]
+    fn asgi_scope(&self, root_path: Option<String>) -> AsgiScope {
+        AsgiScope::new(
+            Arc::clone(&self.batch),
+            self.index,
+            root_path.unwrap_or_default(),
+        )
     }
 
     fn as_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {

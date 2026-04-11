@@ -73,9 +73,13 @@ class AsgiScope(dict):  # type: ignore[type-arg]
 
 
 def build_scope(request: Any, *, root_path: str = "") -> Any:
-    """Build an ASGI 3.0 HTTP connection scope from a VertebraRequest."""
-    # Fast path: Native request materializes its own scope in Rust.
-    # This is ~3-4x faster than building it in Python via template copy.
+    """Build an ASGI 3.0 HTTP connection scope from a VertebraRequest.
+
+    Fast path returns a Rust-backed ``AsgiScope`` pyclass that lazily
+    materializes each key on first access. Middleware that needs a real
+    ``dict`` can call ``scope.copy()``.
+    """
+    # Fast path: Native request returns a lazy AsgiScope pyclass.
     if hasattr(request, "asgi_scope"):
         scope = request.asgi_scope()
         if root_path:

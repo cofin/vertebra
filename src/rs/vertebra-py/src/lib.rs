@@ -10,6 +10,7 @@
 use pyo3::prelude::*;
 
 pub mod api;
+pub mod asgi_scope;
 pub mod batch;
 pub mod headers;
 pub mod request;
@@ -35,6 +36,8 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<response::VertebraResponse>()?;
     m.add_class::<batch::VertebraBatch>()?;
     m.add_class::<batch::VertebraBatchIter>()?;
+    m.add_class::<asgi_scope::AsgiScope>()?;
+    m.add_class::<asgi_scope::AsgiScopeKeyIter>()?;
 
     // Vectorized batch API
     m.add_function(wrap_pyfunction!(api::init_transport, m)?)?;
