@@ -7,6 +7,7 @@
 //! mirror the constant here via `pyo3-build-config`.
 
 pub mod assets;
+pub mod backpressure;
 pub mod collector;
 pub mod config;
 pub mod correlation;

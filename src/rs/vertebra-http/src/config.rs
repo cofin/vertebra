@@ -3,6 +3,8 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::backpressure::{BackpressureConfig, CircuitBreakerConfig};
+
 /// Top-level server configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -29,6 +31,8 @@ pub struct ServerConfig {
     pub workers: WorkerConfig,
     /// Number of Python threads per process (for free-threading).
     pub thread_count: usize,
+    /// Admission control thresholds for the dispatcher ingress path.
+    pub backpressure: BackpressureConfig,
 }
 
 /// Runtime topology for Vertebra.
@@ -97,6 +101,7 @@ impl Default for ServerConfig {
             topology: Topology::default(),
             workers: WorkerConfig::default(),
             thread_count: num_cpus(),
+            backpressure: BackpressureConfig::default(),
         }
     }
 }
@@ -169,6 +174,47 @@ impl ServerConfig {
         }
         if let Ok(app) = std::env::var("VERTEBRA_APP") {
             config.workers.app_path = app;
+        }
+
+        // Backpressure controller knobs.
+        if let Ok(v) = std::env::var("VERTEBRA_BP_MAX_IN_FLIGHT") {
+            if let Ok(n) = v.parse::<usize>() {
+                config.backpressure.max_in_flight = n;
+            }
+        }
+        if let Ok(v) = std::env::var("VERTEBRA_BP_MAX_QUEUE_DEPTH") {
+            if let Ok(n) = v.parse::<usize>() {
+                config.backpressure.max_queue_depth = n;
+            }
+        }
+        if let Ok(v) = std::env::var("VERTEBRA_BP_MAX_QUEUE_TIME_MS") {
+            if let Ok(n) = v.parse::<u64>() {
+                config.backpressure.max_queue_time = Duration::from_millis(n);
+            }
+        }
+        // Circuit breaker knobs.
+        let cb: &mut CircuitBreakerConfig = &mut config.backpressure.circuit_breaker;
+        if let Ok(v) = std::env::var("VERTEBRA_BP_CB_FAILURE_RATE") {
+            if let Ok(f) = v.parse::<f64>() {
+                if (0.0..=1.0).contains(&f) {
+                    cb.failure_rate_threshold = f;
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("VERTEBRA_BP_CB_MIN_SAMPLES") {
+            if let Ok(n) = v.parse::<u64>() {
+                cb.min_samples = n;
+            }
+        }
+        if let Ok(v) = std::env::var("VERTEBRA_BP_CB_WINDOW_MS") {
+            if let Ok(n) = v.parse::<u64>() {
+                cb.window = Duration::from_millis(n);
+            }
+        }
+        if let Ok(v) = std::env::var("VERTEBRA_BP_CB_HALF_OPEN_PROBES") {
+            if let Ok(n) = v.parse::<u64>() {
+                cb.half_open_probe_count = n;
+            }
         }
 
         config

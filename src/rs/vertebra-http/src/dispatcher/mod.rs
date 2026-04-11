@@ -27,6 +27,7 @@ use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error};
 
+use crate::backpressure::{BackpressureConfig, BackpressureController};
 use crate::collector::{Batch, PendingResponse};
 
 pub use self::shm::ShmDispatcher;
@@ -61,8 +62,15 @@ pub(super) struct Inner {
 ///
 /// Manages in-flight request tracking and dispatches batches to workers
 /// via the direct channel, arena-backed BatchBridge, or MPMC ring pairs.
+///
+/// The optional `backpressure` controller is exposed via
+/// [`Dispatcher::backpressure`] for callers that wrap dispatch with
+/// explicit admission control. The dispatcher itself never shortcuts the
+/// dispatch path based on the controller — the HTTP ingress layer owns
+/// that decision so it can return a proper HTTP response on rejection.
 pub struct Dispatcher {
     inner: Arc<Inner>,
+    backpressure: Option<Arc<BackpressureController>>,
 }
 
 impl Default for Dispatcher {
@@ -82,6 +90,7 @@ impl Dispatcher {
                 shm_dispatcher: None,
                 mode: DispatchMode::Bridge,
             }),
+            backpressure: None,
         }
     }
 
@@ -96,6 +105,7 @@ impl Dispatcher {
                 shm_dispatcher: None,
                 mode: DispatchMode::Direct,
             }),
+            backpressure: None,
         };
         (dispatcher, rx)
     }
@@ -111,7 +121,23 @@ impl Dispatcher {
                 shm_dispatcher: Some(shm),
                 mode: DispatchMode::SharedMemory,
             }),
+            backpressure: None,
         }
+    }
+
+    /// Attach a backpressure controller. The dispatcher itself never
+    /// consults the controller — the HTTP ingress path must call
+    /// [`BackpressureController::try_acquire`] before calling
+    /// [`Dispatcher::dispatch`] and handle the rejection.
+    #[must_use]
+    pub fn with_backpressure(mut self, config: BackpressureConfig) -> Self {
+        self.backpressure = Some(Arc::new(BackpressureController::new(config)));
+        self
+    }
+
+    /// Access the backpressure controller, if one has been attached.
+    pub fn backpressure(&self) -> Option<&Arc<BackpressureController>> {
+        self.backpressure.as_ref()
     }
 
     /// Get the SHM dispatcher (for response reader access).
