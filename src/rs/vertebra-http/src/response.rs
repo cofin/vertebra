@@ -15,10 +15,16 @@ use tracing::{debug, warn};
 
 use vertebra_core::transport::decode_headers_raw;
 
+use crate::backpressure::{BackpressureMetricsSnapshot, CircuitState, RejectionReason};
 use crate::collector::{method_tag, PendingRequest, PendingResponse};
 use crate::hmr;
 use crate::router::RouterError;
 use crate::server::ServerState;
+
+/// Path for the backpressure-aware health endpoint. Always returns 200 so
+/// that load balancers can probe it even when the controller is
+/// saturated or the circuit is open.
+const HEALTH_PATH: &str = "/__vertebra/health";
 
 type HyperResponse = Response<Full<Bytes>>;
 
@@ -30,6 +36,24 @@ pub async fn handle(
     if state.config.dev_mode && hmr::is_hmr_path(req.uri().path()) {
         return Ok(hmr::handle(req, state).await);
     }
+
+    // Health endpoint sits above routing and backpressure so probes always
+    // work, even when the controller is shedding load.
+    if req.uri().path() == HEALTH_PATH {
+        return Ok(health_response(state.dispatcher.backpressure().map(|c| c.snapshot())));
+    }
+
+    // Admission control. If a BackpressureController is attached, acquire a
+    // permit before doing any real work; hold it for the lifetime of the
+    // request via `_permit`.
+    let _permit = if let Some(controller) = state.dispatcher.backpressure() {
+        match controller.try_acquire().await {
+            Ok(permit) => Some(permit),
+            Err(reason) => return Ok(rejection_response(reason)),
+        }
+    } else {
+        None
+    };
 
     let method = req.method().clone();
     let uri = req.uri().clone();
@@ -95,15 +119,71 @@ pub async fn handle(
     }
 
     // 6. Await response.
-    match reply_rx.await {
-        Ok(resp) => Ok(build_response(resp)),
+    let hyper_resp = match reply_rx.await {
+        Ok(resp) => build_response(resp),
         Err(_) => {
             warn!(handler_id, "worker dropped response channel");
-            Ok(error_response(
+            error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "worker error",
-            ))
+            )
         }
+    };
+
+    // Feed the circuit breaker. 5xx counts as failure; everything else is
+    // treated as success from the infrastructure's perspective.
+    if let Some(controller) = state.dispatcher.backpressure() {
+        if hyper_resp.status().is_server_error() {
+            controller.record_failure();
+        } else {
+            controller.record_success();
+        }
+    }
+
+    Ok(hyper_resp)
+}
+
+fn rejection_response(reason: RejectionReason) -> HyperResponse {
+    let (status, msg) = match reason {
+        RejectionReason::Saturated => (StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable"),
+        RejectionReason::QueueTimeout => (StatusCode::SERVICE_UNAVAILABLE, "Server Busy"),
+        RejectionReason::CircuitOpen => (StatusCode::TOO_MANY_REQUESTS, "Too Many Requests"),
+    };
+    Response::builder()
+        .status(status)
+        .header("content-type", "text/plain; charset=utf-8")
+        .header("retry-after", "1")
+        .body(Full::new(Bytes::from_static(msg.as_bytes())))
+        .unwrap_or_else(|_| error_response(status, msg))
+}
+
+fn health_response(snapshot: Option<BackpressureMetricsSnapshot>) -> HyperResponse {
+    let body = match snapshot {
+        Some(s) => format!(
+            "{{\"status\":\"healthy\",\"backpressure\":{{\"in_flight\":{},\"queue_depth\":{},\"circuit_state\":\"{}\",\"counters\":{{\"accepted\":{},\"saturated_rejected\":{},\"queue_rejected\":{},\"circuit_rejected\":{},\"timeout_rejected\":{}}}}}}}",
+            s.in_flight,
+            s.queue_depth,
+            circuit_state_str(s.circuit_state),
+            s.accepted,
+            s.saturated_rejected,
+            s.queue_rejected,
+            s.circuit_rejected,
+            s.timeout_rejected,
+        ),
+        None => "{\"status\":\"healthy\"}".to_string(),
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(body)))
+        .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "health error"))
+}
+
+fn circuit_state_str(state: CircuitState) -> &'static str {
+    match state {
+        CircuitState::Closed => "closed",
+        CircuitState::Open => "open",
+        CircuitState::HalfOpen => "half_open",
     }
 }
 

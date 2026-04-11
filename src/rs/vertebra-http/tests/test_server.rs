@@ -12,6 +12,7 @@ use tokio::sync::oneshot;
 
 use vertebra_core::bridge::{BatchBridge, BridgeResponse};
 use vertebra_http::{
+    backpressure::BackpressureConfig,
     collector::{BatchCollector, PendingResponse},
     config::ServerConfig,
     dispatcher::Dispatcher,
@@ -43,6 +44,13 @@ fn drain_stale() {
 /// Spawn a test server on a random port. Returns the bound address and a
 /// shutdown sender.
 async fn spawn_test_server() -> (std::net::SocketAddr, oneshot::Sender<()>) {
+    spawn_test_server_with(None).await
+}
+
+/// Spawn a test server with an optional backpressure config.
+async fn spawn_test_server_with(
+    bp: Option<BackpressureConfig>,
+) -> (std::net::SocketAddr, oneshot::Sender<()>) {
     ensure_bridge();
     drain_stale();
 
@@ -51,7 +59,10 @@ async fn spawn_test_server() -> (std::net::SocketAddr, oneshot::Sender<()>) {
     table.insert("POST", "/echo");
 
     let router = Arc::new(NativeRouter::from_entries(table.into_entries()).unwrap());
-    let dispatcher = Arc::new(Dispatcher::new());
+    let dispatcher = match bp {
+        Some(cfg) => Arc::new(Dispatcher::new().with_backpressure(cfg)),
+        None => Arc::new(Dispatcher::new()),
+    };
     let (collector, collector_tx) =
         BatchCollector::new(Arc::clone(&dispatcher), DrainPolicy::default_fixed(), 128);
 
@@ -164,4 +175,49 @@ async fn test_server_accepts_multiple_requests() {
             .unwrap();
         assert_eq!(resp.status(), 200);
     }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_health_endpoint_reports_snapshot() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let bp = BackpressureConfig {
+        max_in_flight: 4,
+        max_queue_depth: 4,
+        max_queue_time: Duration::from_millis(25),
+        ..BackpressureConfig::default()
+    };
+    let (addr, _shutdown) = spawn_test_server_with(Some(bp)).await;
+
+    // Drive one successful request so the accepted counter advances.
+    let _ = reqwest::get(format!("http://{}/hello", addr)).await.unwrap();
+
+    let resp = reqwest::get(format!("http://{}/__vertebra/health", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.starts_with("application/json"), "content-type: {ct}");
+
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("\"status\":\"healthy\""), "body: {body}");
+    assert!(body.contains("\"backpressure\""), "body: {body}");
+    assert!(body.contains("\"circuit_state\":\"closed\""), "body: {body}");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_health_endpoint_works_without_backpressure() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let (addr, _shutdown) = spawn_test_server().await;
+    let resp = reqwest::get(format!("http://{}/__vertebra/health", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("\"status\":\"healthy\""), "body: {body}");
 }

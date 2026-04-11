@@ -245,7 +245,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 // Create SHM dispatcher with ring pairs
                 let ring_pairs: Vec<Arc<vertebra_core::transport::ring_pair::RingPair>> =
                     factory.all_ring_pairs().to_vec();
-                dispatcher = Arc::new(Dispatcher::new_shm(ring_pairs.clone(), 65536));
+                dispatcher = Arc::new(
+                    Dispatcher::new_shm(ring_pairs.clone(), 65536)
+                        .with_backpressure(config.backpressure.clone()),
+                );
 
                 // Spawn response reader
                 let shutdown_token = tokio_util::sync::CancellationToken::new();
@@ -265,12 +268,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
             #[cfg(not(unix))]
             {
-                dispatcher = Arc::new(Dispatcher::new());
+                dispatcher = Arc::new(
+                    Dispatcher::new().with_backpressure(config.backpressure.clone()),
+                );
                 spawn_response_reader(Arc::clone(&dispatcher));
             }
         } else {
             // In-process mode: bridge dispatcher + bridge response reader
-            dispatcher = Arc::new(Dispatcher::new());
+            dispatcher = Arc::new(
+                Dispatcher::new().with_backpressure(config.backpressure.clone()),
+            );
             spawn_response_reader(Arc::clone(&dispatcher));
             spawn_python_worker(app_path.clone());
         }
@@ -279,7 +286,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     #[cfg(not(feature = "python"))]
     {
-        dispatcher = Arc::new(Dispatcher::new());
+        dispatcher = Arc::new(
+            Dispatcher::new().with_backpressure(config.backpressure.clone()),
+        );
         spawn_response_reader(Arc::clone(&dispatcher));
         info!(bind = %config.bind, "vertebra-server starting (no python)");
     }
