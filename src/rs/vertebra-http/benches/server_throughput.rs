@@ -90,7 +90,7 @@ fn bench_direct_dispatch(c: &mut Criterion) {
             config,
             router,
             dispatcher,
-            collector_tx,
+            vec![collector_tx],
             std::future::pending::<()>(),
         ));
 
@@ -184,7 +184,7 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
                             request_id: snap.node(i).correlation_id,
                             status: 200,
                             headers: Vec::new(),
-                            body: b"ok".to_vec(),
+                            body: bytes::Bytes::from_static(b"ok"),
                         })
                         .collect();
                     if let Some(bridge) = BatchBridge::get() {
@@ -225,7 +225,7 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
             config,
             router,
             dispatcher,
-            collector_tx,
+            vec![collector_tx],
             std::future::pending::<()>(),
         ));
 
@@ -324,7 +324,7 @@ fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
                             request_id: snap.node(i).correlation_id,
                             status: 200,
                             headers: Vec::new(),
-                            body: b"ok".to_vec(),
+                            body: bytes::Bytes::from_static(b"ok"),
                         })
                         .collect();
                     if let Some(bridge) = BatchBridge::get() {
@@ -364,7 +364,7 @@ fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
             config,
             router,
             dispatcher,
-            collector_tx,
+            vec![collector_tx],
             std::future::pending::<()>(),
         ));
 
