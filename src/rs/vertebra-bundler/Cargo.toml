@@ -18,13 +18,11 @@ pyo3 = { workspace = true }
 
 # oxc for parsing/transforming (Rolldown's foundation)
 oxc_parser = "0.112"
-oxc_ast = "0.112"
 oxc_span = "0.112"
 oxc_allocator = "0.112"
 oxc_codegen = "0.112"
 oxc_transformer = "0.112"
 oxc_semantic = "0.112"
-oxc_resolver = "11.17"
 
 # File watching for HMR
 notify = { package = "rolldown-notify", version = "10.1", default-features = false, features = ["macos_kqueue"] }
@@ -42,7 +40,6 @@ serde_json = "1"
 
 # Utilities
 thiserror = "2"
-walkdir = "2"
 dashmap = "6"
 crossbeam-queue = "0.3"
 

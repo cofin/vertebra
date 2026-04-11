@@ -5,7 +5,6 @@ Sub-packages::
     from vertebra.server._native import run_worker
     from vertebra.server._asgi import AsgiAdapter, AsgiRunner
     from vertebra.server._wsgi import WsgiAdapter, WsgiRunner
-    from vertebra.server._ipc import parse_batch, RawRequest
 """
 
 from vertebra.server._native import run_worker

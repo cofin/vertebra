@@ -22,6 +22,8 @@ use tokio::sync::broadcast;
 /// Main bundler class exposed to Python via PyO3
 #[pyclass]
 pub struct RolldownBundler {
+    /// Tokio runtime is retained so futures spawned during dev-mode watching
+    /// still have an executor even though we never call into it directly here.
     #[allow(dead_code)]
     runtime: Runtime,
     watcher: Option<HmrWatcher>,

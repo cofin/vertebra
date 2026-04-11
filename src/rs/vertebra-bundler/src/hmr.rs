@@ -59,8 +59,6 @@ pub struct HmrWatcher {
     debouncer: Debouncer<RecommendedWatcher>,
     event_tx: broadcast::Sender<HmrEvent>,
     watch_dirs: Vec<PathBuf>,
-    #[allow(dead_code)]
-    extensions: Vec<String>,
 }
 
 impl HmrWatcher {
@@ -72,7 +70,6 @@ impl HmrWatcher {
     ) -> Result<(Self, broadcast::Receiver<HmrEvent>)> {
         let (event_tx, event_rx) = broadcast::channel(100);
         let event_tx_clone = event_tx.clone();
-        let extensions_clone = extensions.clone();
 
         let debouncer = new_debouncer(
             Duration::from_millis(debounce_ms),
@@ -84,7 +81,7 @@ impl HmrWatcher {
                         // Check extension filter
                         if let Some(ext) = path.extension() {
                             let ext_str = ext.to_string_lossy();
-                            if extensions_clone.iter().any(|e| e == ext_str.as_ref()) {
+                            if extensions.iter().any(|e| e == ext_str.as_ref()) {
                                 let path_str = path.to_string_lossy().to_string();
                                 let _ = event_tx_clone.send(HmrEvent::update(path_str));
                             }
@@ -100,7 +97,6 @@ impl HmrWatcher {
                 debouncer,
                 event_tx,
                 watch_dirs,
-                extensions,
             },
             event_rx,
         ))
@@ -133,12 +129,6 @@ impl HmrWatcher {
     /// Send a reload signal
     pub fn notify_reload(&self) {
         let _ = self.event_tx.send(HmrEvent::reload());
-    }
-
-    /// Get a new receiver for HMR events
-    #[allow(dead_code)]
-    pub fn subscribe(&self) -> broadcast::Receiver<HmrEvent> {
-        self.event_tx.subscribe()
     }
 }
 

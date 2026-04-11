@@ -12,7 +12,6 @@ use pyo3::prelude::*;
 pub mod api;
 pub mod batch;
 pub mod headers;
-pub mod protocol;
 pub mod request;
 pub mod response;
 
@@ -47,24 +46,6 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(api::get_request_notify_fd, m)?)?;
     m.add_function(wrap_pyfunction!(api::clear_request_notification, m)?)?;
     m.add_function(wrap_pyfunction!(api::try_get_batch, m)?)?;
-
-    // Protocol flags
-    m.add("FLAGS_NONE", vertebra_core::protocol::flags::NONE)?;
-    m.add("FLAGS_PRIORITY", vertebra_core::protocol::flags::PRIORITY)?;
-    m.add(
-        "FLAGS_COMPRESSED",
-        vertebra_core::protocol::flags::COMPRESSED,
-    )?;
-    m.add(
-        "FLAGS_FIRE_AND_FORGET",
-        vertebra_core::protocol::flags::FIRE_AND_FORGET,
-    )?;
-    m.add("FLAGS_BATCH", vertebra_core::protocol::flags::BATCH)?;
-    m.add("FLAGS_OK", vertebra_core::protocol::flags::OK)?;
-    m.add("FLAGS_ERROR", vertebra_core::protocol::flags::ERROR)?;
-
-    // Compression codec enum
-    m.add_class::<protocol::PyCompressionCodec>()?;
 
     Ok(())
 }
