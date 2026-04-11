@@ -1,4 +1,5 @@
-//! Shared dispatcher types used across all three dispatch modes.
+//! Shared dispatcher types used across all three dispatch modes, plus small
+//! helpers for the SHM accounting path.
 
 use std::sync::Arc;
 
@@ -60,4 +61,39 @@ pub(super) struct TransportRequestView<'a> {
     pub(super) query: Option<&'a str>,
     pub(super) headers_mp: &'a bytes::Bytes,
     pub(super) body: &'a bytes::Bytes,
+}
+
+pub(super) fn request_slab_size(req: &TransportRequestView<'_>) -> usize {
+    req.path.len() + req.query.map_or(0, str::len) + req.headers_mp.len() + req.body.len()
+}
+
+pub(super) fn batch_snapshot_serialized_size(node_count: usize, slab_len: usize) -> usize {
+    const BATCH_HEADER_SIZE: usize = 16;
+    BATCH_HEADER_SIZE + node_count * std::mem::size_of::<TransportNode>() + slab_len
+}
+
+pub(super) fn batch_can_fit_request(
+    pending: &ShmDispatchBatch,
+    req: &TransportRequestView<'_>,
+    max_payload: usize,
+) -> bool {
+    let next_nodes = pending.nodes.len() + 1;
+    let current_slab_len: usize = pending.components.iter().map(|c| c.len()).sum();
+    let next_slab = current_slab_len + request_slab_size(req);
+    batch_snapshot_serialized_size(next_nodes, next_slab) <= max_payload
+}
+
+pub(super) fn worker_ring_has_capacity(worker: &WorkerState) -> bool {
+    let stats = worker.ring_pair.request_ring.stats();
+    let mask = (stats.slots as u64).wrapping_sub(1);
+    let next = stats.write_head.wrapping_add(1) & mask;
+    next != stats.read_head
+}
+
+pub(super) fn service_unavailable_response() -> PendingResponse {
+    PendingResponse {
+        status: 503,
+        headers_mp: bytes::Bytes::new(),
+        body: bytes::Bytes::from_static(b"Service Unavailable"),
+    }
 }

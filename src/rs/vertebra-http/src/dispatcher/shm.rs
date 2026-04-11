@@ -11,8 +11,12 @@ use tracing::{debug, error, info, warn};
 use vertebra_core::transport::ring_pair::RingPair;
 use vertebra_core::transport::{ShmBatchWriter, Transport, TransportNode};
 
-use super::types::{ShmDispatchBatch, TransportRequestView, WorkerState};
-use crate::collector::{Batch, PendingResponse};
+use super::types::{
+    batch_can_fit_request, batch_snapshot_serialized_size, request_slab_size,
+    service_unavailable_response, worker_ring_has_capacity, ShmDispatchBatch, TransportRequestView,
+    WorkerState,
+};
+use crate::collector::Batch;
 use crate::correlation::CorrelationSlab;
 
 /// SharedMemory dispatcher with round-robin routing and sharded O(1) correlation.
@@ -280,37 +284,3 @@ impl ShmDispatcher {
     }
 }
 
-fn request_slab_size(req: &TransportRequestView<'_>) -> usize {
-    req.path.len() + req.query.map_or(0, str::len) + req.headers_mp.len() + req.body.len()
-}
-
-fn batch_snapshot_serialized_size(node_count: usize, slab_len: usize) -> usize {
-    const BATCH_HEADER_SIZE: usize = 16;
-    BATCH_HEADER_SIZE + node_count * std::mem::size_of::<TransportNode>() + slab_len
-}
-
-fn batch_can_fit_request(
-    pending: &ShmDispatchBatch,
-    req: &TransportRequestView<'_>,
-    max_payload: usize,
-) -> bool {
-    let next_nodes = pending.nodes.len() + 1;
-    let current_slab_len: usize = pending.components.iter().map(|c| c.len()).sum();
-    let next_slab = current_slab_len + request_slab_size(req);
-    batch_snapshot_serialized_size(next_nodes, next_slab) <= max_payload
-}
-
-pub(super) fn service_unavailable_response() -> PendingResponse {
-    PendingResponse {
-        status: 503,
-        headers_mp: bytes::Bytes::new(),
-        body: bytes::Bytes::from_static(b"Service Unavailable"),
-    }
-}
-
-fn worker_ring_has_capacity(worker: &WorkerState) -> bool {
-    let stats = worker.ring_pair.request_ring.stats();
-    let mask = (stats.slots as u64).wrapping_sub(1);
-    let next = stats.write_head.wrapping_add(1) & mask;
-    next != stats.read_head
-}
