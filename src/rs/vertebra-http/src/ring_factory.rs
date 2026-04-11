@@ -1,8 +1,10 @@
-//! Supervisor for multi-process workers with shared-memory ring pairs.
+//! Ring factory for multi-process workers with shared-memory ring pairs.
 //!
-//! `SupervisorRingFactory` creates SPSC ring pairs before spawning Python
+//! `RingFactory` creates SPSC ring pairs before spawning Python
 //! worker processes. Each worker inherits the ring FDs and reconstructs
-//! its transport from environment variables.
+//! its transport from environment variables. Despite the "spawn"/"shutdown"
+//! helpers, this is not a process supervisor — the actual Python supervisor
+//! lives in `src/py/vertebra/supervisor/_supervisor.py`.
 
 use std::process::{Child, Command};
 use std::sync::Arc;
@@ -13,11 +15,11 @@ use vertebra_core::process;
 use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig, RingPairError};
 
 /// Creates and manages SPSC ring pairs for multi-process workers.
-pub struct SupervisorRingFactory {
+pub struct RingFactory {
     pairs: Vec<Arc<RingPair>>,
 }
 
-impl SupervisorRingFactory {
+impl RingFactory {
     /// Create ring pairs for `worker_count` workers.
     ///
     /// All shared memory regions and notifier FDs are created before any
@@ -67,7 +69,7 @@ impl SupervisorRingFactory {
         worker_id: usize,
         app_path: &str,
         python_bin: &str,
-    ) -> Result<Child, SupervisorError> {
+    ) -> Result<Child, RingFactoryError> {
         let pair = &self.pairs[worker_id];
         let fds = pair.fd_set();
         let env_vars = fds.to_env_vars(worker_id);
@@ -92,7 +94,7 @@ impl SupervisorRingFactory {
         #[cfg(target_os = "linux")]
         process::set_parent_death_signal(&mut cmd);
 
-        let child = cmd.spawn().map_err(SupervisorError::Spawn)?;
+        let child = cmd.spawn().map_err(RingFactoryError::Spawn)?;
         info!(worker_id, pid = child.id(), "spawned worker process");
 
         Ok(child)
@@ -104,7 +106,7 @@ impl SupervisorRingFactory {
         &self,
         app_path: &str,
         python_bin: &str,
-    ) -> Result<Vec<Child>, SupervisorError> {
+    ) -> Result<Vec<Child>, RingFactoryError> {
         let mut children = Vec::with_capacity(self.pairs.len());
         for i in 0..self.pairs.len() {
             match self.spawn_worker(i, app_path, python_bin) {
@@ -318,9 +320,9 @@ pub fn install_panic_cleanup_hook() {
     }));
 }
 
-/// Errors from supervisor operations.
+/// Errors from ring factory operations.
 #[derive(Debug, thiserror::Error)]
-pub enum SupervisorError {
+pub enum RingFactoryError {
     #[error("failed to create ring pair: {0}")]
     RingPair(#[from] RingPairError),
     #[error("failed to spawn worker: {0}")]
@@ -334,7 +336,7 @@ mod tests {
     #[test]
     fn factory_creates_ring_pairs() {
         let factory =
-            SupervisorRingFactory::new(4, RingPairConfig::default()).expect("create factory");
+            RingFactory::new(4, RingPairConfig::default()).expect("create factory");
         assert_eq!(factory.worker_count(), 4);
 
         // Each ring pair should be independently usable
@@ -353,7 +355,7 @@ mod tests {
     #[test]
     fn factory_ring_pairs_are_independent() {
         let factory =
-            SupervisorRingFactory::new(2, RingPairConfig::default()).expect("create factory");
+            RingFactory::new(2, RingPairConfig::default()).expect("create factory");
 
         // Send to worker 0
         factory
@@ -469,7 +471,7 @@ mod tests {
     #[test]
     fn factory_fds_are_inheritable() {
         let factory =
-            SupervisorRingFactory::new(1, RingPairConfig::default()).expect("create factory");
+            RingFactory::new(1, RingPairConfig::default()).expect("create factory");
         let pair = factory.ring_pair(0);
         let fds = pair.all_fds();
 

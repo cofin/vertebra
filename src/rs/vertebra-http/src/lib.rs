@@ -13,7 +13,7 @@ pub mod response_reader;
 pub mod route_table;
 pub mod router;
 pub mod server;
-pub mod supervisor;
+pub mod ring_factory;
 
 #[cfg(feature = "tls")]
 pub mod tls;

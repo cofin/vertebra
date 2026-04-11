@@ -226,7 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             {
                 use vertebra_core::transport::ring_pair::RingPairConfig;
                 use vertebra_http::response_reader;
-                use vertebra_http::supervisor::SupervisorRingFactory;
+                use vertebra_http::ring_factory::RingFactory;
 
                 let worker_count = if config.workers.count > 0 {
                     config.workers.count
@@ -234,8 +234,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     1
                 };
 
-                let factory = SupervisorRingFactory::new(worker_count, RingPairConfig::default())
-                    .expect("failed to create supervisor ring factory");
+                let factory = RingFactory::new(worker_count, RingPairConfig::default())
+                    .expect("failed to create ring factory");
 
                 info!(
                     workers = worker_count,
@@ -313,10 +313,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // --- Graceful shutdown of SHM workers ---
     #[cfg(all(feature = "python", unix))]
     if let Some(ref mut children) = shm_children {
-        use vertebra_http::supervisor::SupervisorRingFactory;
+        use vertebra_http::ring_factory::RingFactory;
 
         info!("shutting down multi-process workers");
-        SupervisorRingFactory::shutdown_workers(children, std::time::Duration::from_secs(5));
+        RingFactory::shutdown_workers(children, std::time::Duration::from_secs(5));
     }
 
     Ok(())
