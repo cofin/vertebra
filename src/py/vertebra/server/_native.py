@@ -392,8 +392,10 @@ def _dispatch_batch(
     for prefix, entries in partitioned.mounts.items():
         adapter, protocol = mount_lookup[prefix]
         if protocol == "asgi":
-            for _idx, request in entries:
-                adapter.spawn_single(request)
+            # Batched spawn amortizes the cross-thread wake across the
+            # whole mount batch. Falls back to spawn_single per request
+            # for single-item or non-running-loop cases internally.
+            adapter.spawn_batch(req for _idx, req in entries)
         elif protocol == "wsgi":
             # WSGI still uses thread pool but each result is submitted individually
             for _idx, request in entries:

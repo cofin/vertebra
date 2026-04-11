@@ -338,6 +338,77 @@ def test_asgi_runner_synchronous_interface() -> None:
         runner.close()
 
 
+def test_asgi_runner_direct_send_drives_coro_without_task() -> None:
+    """_drive_coro should step a coroutine that needs no I/O and never create a Task."""
+    import asyncio
+
+    from vertebra.server._asgi._runner import _drive_coro
+
+    called: dict[str, Any] = {"done": False, "task_count_before": 0, "task_count_after": 0}
+
+    async def instant() -> None:
+        called["done"] = True
+
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        called["task_count_before"] = len(asyncio.all_tasks(loop))
+        _drive_coro(instant())
+        called["task_count_after"] = len(asyncio.all_tasks(loop))
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+    assert called["done"] is True
+    assert called["task_count_after"] == called["task_count_before"], (
+        "direct drive must not create asyncio Tasks for sync-completing coros"
+    )
+
+
+def test_asgi_runner_coro_resumer_chains_across_await() -> None:
+    """_CoroResumer must keep driving a coroutine across multiple yields."""
+    import asyncio
+
+    from vertebra.server._asgi._runner import _drive_coro
+
+    values: list[int] = []
+
+    async def two_step() -> None:
+        values.append(1)
+        await asyncio.sleep(0)
+        values.append(2)
+        await asyncio.sleep(0)
+        values.append(3)
+
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        _drive_coro(two_step())
+        # Run the loop briefly so add_done_callback fires and the resumer
+        # gets a chance to advance the coroutine.
+        loop.run_until_complete(asyncio.sleep(0.01))
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+    assert values == [1, 2, 3]
+
+
+def test_asgi_runner_direct_send_disabled_via_env(monkeypatch: "pytest.MonkeyPatch") -> None:
+    """Setting VERTEBRA_ASGI_DIRECT_SEND=0 should fall back to Task creation."""
+    import importlib
+
+    from vertebra.server._asgi import _runner as runner_module
+
+    monkeypatch.setenv("VERTEBRA_ASGI_DIRECT_SEND", "0")
+    reloaded = importlib.reload(runner_module)
+    try:
+        assert reloaded._DIRECT_SEND is False
+    finally:
+        monkeypatch.delenv("VERTEBRA_ASGI_DIRECT_SEND", raising=False)
+        importlib.reload(runner_module)
+
+
 def test_asgi_runner_shared_running_loop_uses_threadsafe_submission() -> None:
     import asyncio
     import threading
