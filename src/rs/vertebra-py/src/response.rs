@@ -26,7 +26,7 @@ impl VertebraResponse {
     ) -> PyResult<Self> {
         let body_bytes = match body {
             Some(b) => {
-                if let Ok(py_bytes) = b.downcast::<PyBytes>() {
+                if let Ok(py_bytes) = b.cast::<PyBytes>() {
                     Bytes::copy_from_slice(py_bytes.as_bytes())
                 } else {
                     Bytes::copy_from_slice(&b.extract::<Vec<u8>>()?)
@@ -37,18 +37,18 @@ impl VertebraResponse {
 
         let mut header_vec: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         if let Some(h) = headers {
-            if let Ok(dict) = h.downcast::<PyDict>() {
+            if let Ok(dict) = h.cast::<PyDict>() {
                 for (k, v) in dict.iter() {
                     header_vec.push((
                         k.extract::<Vec<u8>>().or_else(|_| k.extract::<String>().map(|s| s.into_bytes()))?,
                         v.extract::<Vec<u8>>().or_else(|_| v.extract::<String>().map(|s| s.into_bytes()))?,
                     ));
                 }
-            } else if let Ok(list) = h.downcast::<PyList>() {
+            } else if let Ok(list) = h.cast::<PyList>() {
                 for item in list.iter() {
-                    let (k_obj, v_obj) = if let Ok(t) = item.downcast::<PyTuple>() {
+                    let (k_obj, v_obj) = if let Ok(t) = item.cast::<PyTuple>() {
                         (t.get_item(0)?, t.get_item(1)?)
-                    } else if let Ok(l) = item.downcast::<PyList>() {
+                    } else if let Ok(l) = item.cast::<PyList>() {
                         (l.get_item(0)?, l.get_item(1)?)
                     } else {
                         return Err(PyTypeError::new_err(format!(
@@ -62,11 +62,11 @@ impl VertebraResponse {
                         v_obj.extract::<Vec<u8>>().or_else(|_| v_obj.extract::<String>().map(|s| s.into_bytes()))?,
                     ));
                 }
-            } else if let Ok(tuple) = h.downcast::<PyTuple>() {
+            } else if let Ok(tuple) = h.cast::<PyTuple>() {
                 for item in tuple.iter() {
-                    let (k_obj, v_obj) = if let Ok(t) = item.downcast::<PyTuple>() {
+                    let (k_obj, v_obj) = if let Ok(t) = item.cast::<PyTuple>() {
                         (t.get_item(0)?, t.get_item(1)?)
-                    } else if let Ok(l) = item.downcast::<PyList>() {
+                    } else if let Ok(l) = item.cast::<PyList>() {
                         (l.get_item(0)?, l.get_item(1)?)
                     } else {
                         return Err(PyTypeError::new_err(format!(

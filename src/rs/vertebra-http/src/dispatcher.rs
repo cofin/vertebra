@@ -19,7 +19,7 @@ use tracing::{debug, error, info, warn};
 
 use vertebra_core::bridge::{BatchBridge, WriteRequest};
 use vertebra_core::transport::ring_pair::RingPair;
-use vertebra_core::transport::{ShmBatchWriter, Transport, TransportNode, BufferPool};
+use vertebra_core::transport::{ShmBatchWriter, Transport, TransportNode};
 
 use crate::collector::{Batch, PendingResponse};
 use crate::correlation::CorrelationSlab;
@@ -92,7 +92,6 @@ pub struct ShmDispatcher {
     next_worker: AtomicUsize,
     correlation_shards: Vec<Mutex<CorrelationSlab>>,
     shard_mask: usize,
-    buffer_pool: Arc<BufferPool>,
 }
 
 impl ShmDispatcher {
@@ -114,15 +113,11 @@ impl ShmDispatcher {
             .map(|_| Mutex::new(CorrelationSlab::new(shard_capacity)))
             .collect();
 
-        // 1024 buffer pairs, 1MB slab per batch, 256 nodes per batch.
-        let buffer_pool = Arc::new(BufferPool::new(1024, 1_048_576, 256));
-
         let this = Arc::new(Self {
             workers,
             next_worker: AtomicUsize::new(0),
             correlation_shards,
             shard_mask,
-            buffer_pool,
         });
 
         // Spawn periodic sweep task (1s intervals, 30s timeout)
@@ -709,8 +704,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shm_dispatcher_round_robin() {
+    #[tokio::test]
+    async fn shm_dispatcher_round_robin() {
         use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
 
         let pairs: Vec<Arc<RingPair>> = (0..4)
@@ -755,8 +750,8 @@ mod tests {
         assert_eq!(total, 8);
     }
 
-    #[test]
-    fn shm_dispatcher_complete_through_correlation() {
+    #[tokio::test]
+    async fn shm_dispatcher_complete_through_correlation() {
         use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
 
         let pair = Arc::new(RingPair::create(RingPairConfig::default()).unwrap());

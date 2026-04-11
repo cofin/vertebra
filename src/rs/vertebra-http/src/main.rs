@@ -24,7 +24,6 @@ use vertebra_http::{
     collector::{BatchCollector, PendingResponse},
     config::ServerConfig,
     dispatcher::Dispatcher,
-    policy::DrainPolicy,
     response::encode_response_headers,
     route_table::RouteTable,
     router::NativeRouter,

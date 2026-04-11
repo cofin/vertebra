@@ -8,6 +8,9 @@ use tokio::sync::oneshot;
 
 #[test]
 fn test_concurrent_dispatch_to_single_worker() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+
     let worker_count = 1;
     let mut pairs = Vec::new();
     for _ in 0..worker_count {

@@ -845,7 +845,6 @@ impl<'a> ShmBatchWriter<'a> {
 
         // Pack nodes and resolve offsets
         let mut slab_offset = 0;
-        let mut comp_iter = self.components.iter();
         for node in &mut self.nodes {
             node.path_offset = slab_offset as u32;
             slab_offset += node.path_len as usize;
