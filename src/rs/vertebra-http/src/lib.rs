@@ -1,4 +1,10 @@
 //! vertebra-http: Native HTTP server, router, and batch collector.
+//!
+//! Free-threaded Python (3.14t) detection lives in the `vertebra-py` crate
+//! as `vertebra_py::FREE_THREADED` — it is the only crate in the workspace
+//! that currently needs to branch on `#[cfg(Py_GIL_DISABLED)]`. HTTP-level
+//! code does not vary across GIL / free-threaded builds; if that changes,
+//! mirror the constant here via `pyo3-build-config`.
 
 pub mod assets;
 pub mod collector;
