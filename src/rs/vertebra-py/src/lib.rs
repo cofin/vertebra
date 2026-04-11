@@ -15,6 +15,7 @@ pub mod batch;
 pub mod headers;
 pub mod request;
 pub mod response;
+pub mod wsgi_environ;
 
 /// Whether this build targets free-threaded Python (3.14t+).
 #[cfg(Py_GIL_DISABLED)]
@@ -38,6 +39,8 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<batch::VertebraBatchIter>()?;
     m.add_class::<asgi_scope::AsgiScope>()?;
     m.add_class::<asgi_scope::AsgiScopeKeyIter>()?;
+    m.add_class::<wsgi_environ::WsgiEnviron>()?;
+    m.add_class::<wsgi_environ::WsgiEnvironKeyIter>()?;
 
     // Vectorized batch API
     m.add_function(wrap_pyfunction!(api::init_transport, m)?)?;

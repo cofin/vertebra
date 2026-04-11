@@ -13,6 +13,7 @@ use vertebra_core::transport::BatchSnapshot;
 
 use crate::asgi_scope::AsgiScope;
 use crate::headers::VertebraHeaders;
+use crate::wsgi_environ::WsgiEnviron;
 
 /// Zero-object request proxy backed by a shared [`BatchSnapshot`].
 ///
@@ -127,6 +128,25 @@ impl VertebraRequest {
             Arc::clone(&self.batch),
             self.index,
             root_path.unwrap_or_default(),
+        )
+    }
+
+    /// Return a lazy WSGI environ backed by this request's snapshot slot.
+    ///
+    /// Middleware that needs a real `dict` can call `environ.copy()`.
+    #[pyo3(signature = (server_name=None, server_port=None, url_scheme=None))]
+    fn wsgi_environ(
+        &self,
+        server_name: Option<String>,
+        server_port: Option<u16>,
+        url_scheme: Option<String>,
+    ) -> WsgiEnviron {
+        WsgiEnviron::new(
+            Arc::clone(&self.batch),
+            self.index,
+            server_name.unwrap_or_else(|| "localhost".to_string()),
+            server_port.unwrap_or(8000),
+            url_scheme.unwrap_or_else(|| "http".to_string()),
         )
     }
 
