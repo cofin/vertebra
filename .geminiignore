@@ -1,8 +1,13 @@
 # Allow specs folder
 !specs
 !.agents
+!.agents/**
+!specs/**
 # Keep gemini folder
 !gemini
+!AGENTS.md
+!GEMINI.md
+!CLAUDE.md
 
 # Version Control
 .git/
