@@ -39,6 +39,7 @@ dev = [
 ]
 test = [
     "pytest",
+    "pytest-cov>=5.0",
     "anyio",
 ]
 lint = [

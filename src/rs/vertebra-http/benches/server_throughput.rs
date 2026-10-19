@@ -132,18 +132,23 @@ fn bench_direct_dispatch(c: &mut Criterion) {
             let client = client.clone();
             let url = url.clone();
             async move {
-                let remaining = Arc::new(std::sync::atomic::AtomicI64::new(requests_per_iter as i64));
+                let remaining =
+                    Arc::new(std::sync::atomic::AtomicI64::new(requests_per_iter as i64));
                 let mut workers = Vec::with_capacity(32);
                 for _ in 0..32 {
                     let client = client.clone();
                     let url = url.clone();
                     let remaining = Arc::clone(&remaining);
                     workers.push(tokio::spawn(async move {
-                        while remaining
-                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
-                            > 0
-                        {
-                            let _ = client.get(&url).send().await.unwrap().bytes().await.unwrap();
+                        while remaining.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) > 0 {
+                            let _ = client
+                                .get(&url)
+                                .send()
+                                .await
+                                .unwrap()
+                                .bytes()
+                                .await
+                                .unwrap();
                         }
                     }));
                 }
@@ -277,18 +282,23 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
             let client = client.clone();
             let url = url.clone();
             async move {
-                let remaining = Arc::new(std::sync::atomic::AtomicI64::new(requests_per_iter as i64));
+                let remaining =
+                    Arc::new(std::sync::atomic::AtomicI64::new(requests_per_iter as i64));
                 let mut workers = Vec::with_capacity(32);
                 for _ in 0..32 {
                     let client = client.clone();
                     let url = url.clone();
                     let remaining = Arc::clone(&remaining);
                     workers.push(tokio::spawn(async move {
-                        while remaining
-                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
-                            > 0
-                        {
-                            let _ = client.get(&url).send().await.unwrap().bytes().await.unwrap();
+                        while remaining.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) > 0 {
+                            let _ = client
+                                .get(&url)
+                                .send()
+                                .await
+                                .unwrap()
+                                .bytes()
+                                .await
+                                .unwrap();
                         }
                     }));
                 }
@@ -410,18 +420,23 @@ fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
             let client = client.clone();
             let url = url.clone();
             async move {
-                let remaining = Arc::new(std::sync::atomic::AtomicI64::new(requests_per_iter as i64));
+                let remaining =
+                    Arc::new(std::sync::atomic::AtomicI64::new(requests_per_iter as i64));
                 let mut workers = Vec::with_capacity(32);
                 for _ in 0..32 {
                     let client = client.clone();
                     let url = url.clone();
                     let remaining = Arc::clone(&remaining);
                     workers.push(tokio::spawn(async move {
-                        while remaining
-                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
-                            > 0
-                        {
-                            let _ = client.get(&url).send().await.unwrap().bytes().await.unwrap();
+                        while remaining.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) > 0 {
+                            let _ = client
+                                .get(&url)
+                                .send()
+                                .await
+                                .unwrap()
+                                .bytes()
+                                .await
+                                .unwrap();
                         }
                     }));
                 }

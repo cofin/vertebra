@@ -368,39 +368,40 @@ mod tests {
         let drained_ids = Arc::new(Mutex::new(Vec::new()));
         let drained_ids_reader = Arc::clone(&drained_ids);
         let pair_reader = Arc::clone(&pair);
-        let reader = std::thread::spawn(move || {
-            loop {
-                if drained_ids_reader.lock().expect("lock ids").len() >= 2 {
-                    break;
-                }
-
-                assert!(
-                    pair_reader
-                        .response_notifier
-                        .wait(100)
-                        .expect("wait for response notification"),
-                    "response notification should arrive"
-                );
-                pair_reader
-                    .response_notifier
-                    .clear()
-                    .expect("clear response notifier");
-
-                while let Some(resp) = pair_reader
-                    .response_rings
-                    .try_recv_response()
-                    .expect("drain response ring")
-                {
-                    drained_ids_reader
-                        .lock()
-                        .expect("lock ids")
-                        .push(resp.correlation_id);
-                }
-            }
-        });
 
         let mut pending_notification = false;
         pyo3::Python::attach(|py| {
+            let reader = std::thread::spawn(move || {
+                loop {
+                    if drained_ids_reader.lock().expect("lock ids").len() >= 2 {
+                        break;
+                    }
+
+                    assert!(
+                        pair_reader
+                            .response_notifier
+                            .wait(5_000)
+                            .expect("wait for response notification"),
+                        "response notification should arrive"
+                    );
+                    pair_reader
+                        .response_notifier
+                        .clear()
+                        .expect("clear response notifier");
+
+                    while let Some(resp) = pair_reader
+                        .response_rings
+                        .try_recv_response()
+                        .expect("drain response ring")
+                    {
+                        drained_ids_reader
+                            .lock()
+                            .expect("lock ids")
+                            .push(resp.correlation_id);
+                    }
+                }
+            });
+
             send_shm_response_with_backpressure(
                 py,
                 &transport,
@@ -421,11 +422,14 @@ mod tests {
                 b"second",
             )
             .expect("recover from ring full");
-        });
-        flush_shm_response_notification(&transport, &mut pending_notification)
-            .expect("flush final notification");
 
-        reader.join().expect("reader thread should exit");
+            flush_shm_response_notification(&transport, &mut pending_notification)
+                .expect("flush final notification");
+
+            py.detach(|| {
+                reader.join().expect("reader thread should exit");
+            });
+        });
 
         let drained_ids = drained_ids.lock().expect("lock ids");
         assert_eq!(drained_ids.as_slice(), &[1, 2]);

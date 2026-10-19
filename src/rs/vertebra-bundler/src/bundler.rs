@@ -222,8 +222,11 @@ impl RolldownBundler {
         // Read and transform entry file (single-pass AST parse + codegen with optional minification)
         let source = fs::read_to_string(&entry_path).map_err(BundlerError::Io)?;
 
-        let final_code =
-            transform_internal(entry_path.to_string_lossy().as_ref(), &source, config.minify)?;
+        let final_code = transform_internal(
+            entry_path.to_string_lossy().as_ref(),
+            &source,
+            config.minify,
+        )?;
 
         // Determine output filename
         let entry_stem = entry_path

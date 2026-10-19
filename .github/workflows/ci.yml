@@ -78,7 +78,7 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - name: Run tests
-        run: make test
+        run: make py-test
       - name: Generate coverage
         if: matrix.python-version == '3.12'
         run: make coverage

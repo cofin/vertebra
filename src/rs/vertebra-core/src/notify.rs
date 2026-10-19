@@ -477,19 +477,17 @@ mod tests {
         assert!(result, "should receive notification");
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn notifier_no_cloexec() {
         let notifier = Notifier::new().expect("failed to create notifier");
-        let fd = notifier.as_raw_fd();
-
-        // Verify EFD_CLOEXEC is NOT set.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        assert!(flags >= 0, "fcntl F_GETFD failed");
-        assert!(
-            (flags & libc::FD_CLOEXEC) == 0,
-            "FD_CLOEXEC should NOT be set for cross-process IPC"
-        );
+        for fd in [notifier.as_raw_fd(), notifier.write_fd()] {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags >= 0, "fcntl F_GETFD failed");
+            assert!(
+                (flags & libc::FD_CLOEXEC) == 0,
+                "FD_CLOEXEC should NOT be set for cross-process IPC"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -513,6 +511,29 @@ mod tests {
         let child_notifier = unsafe { Notifier::from_raw_fd(dup_fd) };
 
         // Notify and check.
+        child_notifier.notify().expect("notify failed");
+        assert!(child_notifier.has_pending());
+        child_notifier.clear().expect("clear failed");
+        assert!(!child_notifier.has_pending());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn notifier_from_raw_fds() {
+        let notifier = Notifier::new().expect("failed to create notifier");
+        let read_fd = notifier.as_raw_fd();
+        let write_fd = notifier.write_fd();
+
+        notifier.notify().expect("notify failed");
+
+        let dup_read = unsafe { libc::dup(read_fd) };
+        let dup_write = unsafe { libc::dup(write_fd) };
+        assert!(dup_read >= 0 && dup_write >= 0, "dup failed");
+
+        notifier.clear().expect("clear failed");
+        drop(notifier);
+
+        let child_notifier = unsafe { Notifier::from_raw_fds(dup_read, dup_write) };
         child_notifier.notify().expect("notify failed");
         assert!(child_notifier.has_pending());
         child_notifier.clear().expect("clear failed");
@@ -560,20 +581,13 @@ mod tests {
 
     #[test]
     fn spin_wait_park_fallback() {
-        let notifier = Notifier::new().expect("failed to create notifier");
+        let notifier = std::sync::Arc::new(Notifier::new().expect("failed to create notifier"));
+        let notifier_clone = std::sync::Arc::clone(&notifier);
 
         // Spawn thread to notify after a small delay
-        let notifier_clone_fd = notifier.as_raw_fd();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(5));
-            let dup_fd = unsafe { libc::dup(notifier_clone_fd) };
-            if dup_fd >= 0 {
-                let val: u64 = 1;
-                unsafe {
-                    libc::write(dup_fd, &val as *const u64 as *const libc::c_void, 8);
-                    libc::close(dup_fd);
-                }
-            }
+            notifier_clone.notify().expect("notify failed");
         });
 
         let start = std::time::Instant::now();

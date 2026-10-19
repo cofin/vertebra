@@ -10,9 +10,9 @@ use std::sync::Arc;
 use hyper::Request;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
 #[cfg(feature = "tls")]
 use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::TokioIo;
 #[cfg(feature = "tls")]
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::net::{TcpListener, TcpStream};

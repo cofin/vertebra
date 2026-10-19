@@ -85,10 +85,7 @@ pub(super) fn batch_can_fit_request(
 }
 
 pub(super) fn worker_ring_has_capacity(worker: &WorkerState) -> bool {
-    let stats = worker.ring_pair.request_ring.stats();
-    let mask = (stats.slots as u64).wrapping_sub(1);
-    let next = stats.write_head.wrapping_add(1) & mask;
-    next != stats.read_head
+    worker.ring_pair.request_ring.has_capacity()
 }
 
 pub(super) fn service_unavailable_response() -> PendingResponse {

@@ -100,8 +100,8 @@ impl SlotView {
         // Advance read head to release the slot
         let next = self.slot_index.wrapping_add(1) & self.ring.mask;
         self.ring.read_head().store(next, Ordering::Release);
-        if self.ring.send_waiters().load(Ordering::Acquire) > 0 {
-            self.ring.wait_read_ptr().fetch_add(1, Ordering::Release);
+        self.ring.wait_read_ptr().fetch_add(1, Ordering::SeqCst);
+        if self.ring.send_waiters().load(Ordering::SeqCst) > 0 {
             let _ = crate::sync::wake_one(self.ring.wait_read_ptr());
         }
 
@@ -295,10 +295,10 @@ impl SpscRing {
         }
         // Release ensures all slot writes are visible before advancing tail
         self.write_head().store(next, Ordering::Release);
-        self.wait_write_ptr().fetch_add(1, Ordering::Release);
+        self.wait_write_ptr().fetch_add(1, Ordering::SeqCst);
         // PERF: Conditional wake - only syscall if receivers are actually waiting.
         // This eliminates ~8µs per send when receiver is actively polling.
-        if self.recv_waiters().load(Ordering::Acquire) > 0 {
+        if self.recv_waiters().load(Ordering::SeqCst) > 0 {
             sync::wake_one(self.wait_write_ptr())?;
         }
         Ok(())
@@ -331,8 +331,8 @@ impl SpscRing {
             writer(payload_slice);
         }
         self.write_head().store(next, Ordering::Release);
-        self.wait_write_ptr().fetch_add(1, Ordering::Release);
-        if self.recv_waiters().load(Ordering::Acquire) > 0 {
+        self.wait_write_ptr().fetch_add(1, Ordering::SeqCst);
+        if self.recv_waiters().load(Ordering::SeqCst) > 0 {
             sync::wake_one(self.wait_write_ptr())?;
         }
         Ok(())
@@ -348,20 +348,20 @@ impl SpscRing {
                 Ok(()) => return Ok(()),
                 Err(ChannelError::Full) => {
                     let wait_word = self.wait_read_ptr();
-                    let expected = wait_word.load(Ordering::Acquire);
+                    let expected = wait_word.load(Ordering::SeqCst);
 
-                    self.send_waiters().fetch_add(1, Ordering::Release);
+                    self.send_waiters().fetch_add(1, Ordering::SeqCst);
 
-                    let head = self.read_head().load(Ordering::Acquire);
-                    let tail = self.write_head().load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::SeqCst);
+                    let tail = self.write_head().load(Ordering::SeqCst);
                     let next = tail.wrapping_add(1) & self.mask;
                     if next != head {
-                        self.send_waiters().fetch_sub(1, Ordering::Relaxed);
+                        self.send_waiters().fetch_sub(1, Ordering::SeqCst);
                         continue;
                     }
 
                     let result = sync::wait_on_address(wait_word, expected);
-                    self.send_waiters().fetch_sub(1, Ordering::Relaxed);
+                    self.send_waiters().fetch_sub(1, Ordering::SeqCst);
                     result?;
                 }
                 Err(err) => return Err(err),
@@ -375,25 +375,25 @@ impl SpscRing {
                 Ok(()) => return Ok(()),
                 Err(ChannelError::Full) => {
                     let wait_word = self.wait_read_ptr();
-                    let expected = wait_word.load(Ordering::Acquire);
+                    let expected = wait_word.load(Ordering::SeqCst);
 
                     // CRITICAL: Increment waiter count BEFORE checking for space.
-                    // Uses Release to ensure the increment is visible before we park.
-                    self.send_waiters().fetch_add(1, Ordering::Release);
+                    // Uses SeqCst to prevent Store-Load reordering before we park.
+                    self.send_waiters().fetch_add(1, Ordering::SeqCst);
 
                     // CRITICAL: Double-check for space after incrementing counter.
-                    let head = self.read_head().load(Ordering::Acquire);
-                    let tail = self.write_head().load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::SeqCst);
+                    let tail = self.write_head().load(Ordering::SeqCst);
                     let next = tail.wrapping_add(1) & self.mask;
                     if next != head {
                         // Space freed! Decrement counter and retry.
-                        self.send_waiters().fetch_sub(1, Ordering::Relaxed);
+                        self.send_waiters().fetch_sub(1, Ordering::SeqCst);
                         continue;
                     }
 
                     // Safe to park - receiver will see send_waiters > 0 and wake us.
                     let result = sync::wait_on_address(wait_word, expected);
-                    self.send_waiters().fetch_sub(1, Ordering::Relaxed);
+                    self.send_waiters().fetch_sub(1, Ordering::SeqCst);
                     result?;
                 }
                 Err(err) => return Err(err),
@@ -418,22 +418,22 @@ impl SpscRing {
                     }
                     let remaining = deadline - now;
                     let wait_word = self.wait_read_ptr();
-                    let expected = wait_word.load(Ordering::Acquire);
+                    let expected = wait_word.load(Ordering::SeqCst);
 
                     // Increment waiter count before checking for space
-                    self.send_waiters().fetch_add(1, Ordering::Release);
+                    self.send_waiters().fetch_add(1, Ordering::SeqCst);
 
                     // Double-check for space after incrementing counter
-                    let head = self.read_head().load(Ordering::Acquire);
-                    let tail = self.write_head().load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::SeqCst);
+                    let tail = self.write_head().load(Ordering::SeqCst);
                     let next = tail.wrapping_add(1) & self.mask;
                     if next != head {
-                        self.send_waiters().fetch_sub(1, Ordering::Relaxed);
+                        self.send_waiters().fetch_sub(1, Ordering::SeqCst);
                         continue;
                     }
 
                     let timed_out = !sync::wait_on_address_timeout(wait_word, expected, remaining)?;
-                    self.send_waiters().fetch_sub(1, Ordering::Relaxed);
+                    self.send_waiters().fetch_sub(1, Ordering::SeqCst);
                     if timed_out {
                         return Ok(false);
                     }
@@ -452,10 +452,10 @@ impl SpscRing {
         let len = unsafe { self.read_slot(head, out)? };
         let next = head.wrapping_add(1) & self.mask;
         self.read_head().store(next, Ordering::Release);
-        self.wait_read_ptr().fetch_add(1, Ordering::Release);
+        self.wait_read_ptr().fetch_add(1, Ordering::SeqCst);
         // PERF: Conditional wake - only syscall if senders are actually waiting.
         // This eliminates ~8µs per recv when sender is actively pushing.
-        if self.send_waiters().load(Ordering::Acquire) > 0 {
+        if self.send_waiters().load(Ordering::SeqCst) > 0 {
             sync::wake_one(self.wait_read_ptr())?;
         }
         Ok(len)
@@ -470,9 +470,9 @@ impl SpscRing {
         let (len, flags) = unsafe { self.read_slot_with_flags(head, out)? };
         let next = head.wrapping_add(1) & self.mask;
         self.read_head().store(next, Ordering::Release);
-        self.wait_read_ptr().fetch_add(1, Ordering::Release);
+        self.wait_read_ptr().fetch_add(1, Ordering::SeqCst);
         // PERF: Conditional wake - only syscall if senders are actually waiting.
-        if self.send_waiters().load(Ordering::Acquire) > 0 {
+        if self.send_waiters().load(Ordering::SeqCst) > 0 {
             sync::wake_one(self.wait_read_ptr())?;
         }
         Ok((len, flags))
@@ -484,27 +484,26 @@ impl SpscRing {
                 Ok(len) => return Ok(len),
                 Err(ChannelError::Empty) => {
                     let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::Acquire);
+                    let expected = wait_word.load(Ordering::SeqCst);
 
                     // CRITICAL: Increment waiter count BEFORE checking for data.
                     // This ensures sender sees us waiting before it checks the counter.
-                    // Uses Release to ensure the increment is visible before we park.
-                    self.recv_waiters().fetch_add(1, Ordering::Release);
+                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
 
                     // CRITICAL: Double-check for data after incrementing counter.
                     // If sender wrote data between try_recv and fetch_add, we'd miss it
                     // without this re-check (lost wakeup bug).
-                    let head = self.read_head().load(Ordering::Acquire);
-                    let tail = self.write_head().load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::SeqCst);
+                    let tail = self.write_head().load(Ordering::SeqCst);
                     if head != tail {
                         // Data arrived! Decrement counter and retry.
-                        self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                         continue;
                     }
 
                     // Safe to park - sender will see recv_waiters > 0 and wake us.
                     let result = sync::wait_on_address(wait_word, expected);
-                    self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                     result?;
                 }
                 Err(err) => return Err(err),
@@ -528,21 +527,21 @@ impl SpscRing {
                     }
                     let remaining = deadline - now;
                     let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::Acquire);
+                    let expected = wait_word.load(Ordering::SeqCst);
 
                     // Increment waiter count before checking for data
-                    self.recv_waiters().fetch_add(1, Ordering::Release);
+                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
 
                     // Double-check for data after incrementing counter
-                    let head = self.read_head().load(Ordering::Acquire);
-                    let tail = self.write_head().load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::SeqCst);
+                    let tail = self.write_head().load(Ordering::SeqCst);
                     if head != tail {
-                        self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                         continue;
                     }
 
                     let timed_out = !sync::wait_on_address_timeout(wait_word, expected, remaining)?;
-                    self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                     if timed_out {
                         return Ok(None);
                     }
@@ -623,19 +622,21 @@ impl SpscRing {
                     }
                     let remaining = timeout_deadline - now;
                     let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::Acquire);
+                    let expected = wait_word.load(Ordering::SeqCst);
 
                     // Increment waiter count before checking for data
-                    self.recv_waiters().fetch_add(1, Ordering::Release);
+                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
 
                     // Double-check for data before blocking
-                    if self.has_data() {
-                        self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                    let head = self.read_head().load(Ordering::SeqCst);
+                    let tail = self.write_head().load(Ordering::SeqCst);
+                    if head != tail {
+                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                         continue;
                     }
 
                     let timed_out = !sync::wait_on_address_timeout(wait_word, expected, remaining)?;
-                    self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                     if timed_out {
                         return Ok(None);
                     }
@@ -651,21 +652,21 @@ impl SpscRing {
                 Ok(result) => return Ok(result),
                 Err(ChannelError::Empty) => {
                     let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::Acquire);
+                    let expected = wait_word.load(Ordering::SeqCst);
 
                     // Increment waiter count before checking for data
-                    self.recv_waiters().fetch_add(1, Ordering::Release);
+                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
 
                     // Double-check for data after incrementing counter
-                    let head = self.read_head().load(Ordering::Acquire);
-                    let tail = self.write_head().load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::SeqCst);
+                    let tail = self.write_head().load(Ordering::SeqCst);
                     if head != tail {
-                        self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                         continue;
                     }
 
                     let result = sync::wait_on_address(wait_word, expected);
-                    self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                     result?;
                 }
                 Err(err) => return Err(err),
@@ -719,21 +720,21 @@ impl SpscRing {
                 Ok(view) => return Ok(view),
                 Err(ChannelError::Empty) => {
                     let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::Acquire);
+                    let expected = wait_word.load(Ordering::SeqCst);
 
                     // Increment waiter count before checking for data
-                    self.recv_waiters().fetch_add(1, Ordering::Release);
+                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
 
                     // Double-check for data after incrementing counter
-                    let head = self.read_head().load(Ordering::Acquire);
-                    let tail = self.write_head().load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::SeqCst);
+                    let tail = self.write_head().load(Ordering::SeqCst);
                     if head != tail {
-                        self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                         continue;
                     }
 
                     let result = sync::wait_on_address(wait_word, expected);
-                    self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                     result?;
                 }
                 Err(err) => return Err(err),
@@ -757,21 +758,21 @@ impl SpscRing {
                     }
                     let remaining = deadline - now;
                     let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::Acquire);
+                    let expected = wait_word.load(Ordering::SeqCst);
 
                     // Increment waiter count before checking for data
-                    self.recv_waiters().fetch_add(1, Ordering::Release);
+                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
 
                     // Double-check for data after incrementing counter
-                    let head = self.read_head().load(Ordering::Acquire);
-                    let tail = self.write_head().load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::SeqCst);
+                    let tail = self.write_head().load(Ordering::SeqCst);
                     if head != tail {
-                        self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                         continue;
                     }
 
                     let timed_out = !sync::wait_on_address_timeout(wait_word, expected, remaining)?;
-                    self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                     if timed_out {
                         return Ok(None);
                     }
@@ -797,21 +798,21 @@ impl SpscRing {
                     }
                     let remaining = deadline - now;
                     let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::Acquire);
+                    let expected = wait_word.load(Ordering::SeqCst);
 
                     // Increment waiter count before checking for data
-                    self.recv_waiters().fetch_add(1, Ordering::Release);
+                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
 
                     // Double-check for data after incrementing counter
-                    let head = self.read_head().load(Ordering::Acquire);
-                    let tail = self.write_head().load(Ordering::Acquire);
+                    let head = self.read_head().load(Ordering::SeqCst);
+                    let tail = self.write_head().load(Ordering::SeqCst);
                     if head != tail {
-                        self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                         continue;
                     }
 
                     let timed_out = !sync::wait_on_address_timeout(wait_word, expected, remaining)?;
-                    self.recv_waiters().fetch_sub(1, Ordering::Relaxed);
+                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
                     if timed_out {
                         return Ok(None);
                     }
@@ -867,10 +868,10 @@ impl SpscRing {
             // Single atomic store for all reads
             self.read_head().store(head, Ordering::Release);
             self.wait_read_ptr()
-                .fetch_add(count as u32, Ordering::Release);
+                .fetch_add(count as u32, Ordering::SeqCst);
 
             // PERF: Single conditional wake for entire batch
-            if self.send_waiters().load(Ordering::Acquire) > 0 {
+            if self.send_waiters().load(Ordering::SeqCst) > 0 {
                 // Wake all waiting senders since we freed multiple slots
                 let _ = sync::wake_all(self.wait_read_ptr());
             }
@@ -1415,6 +1416,15 @@ impl MpmcRing {
         let head = self.head().load(Ordering::Relaxed);
         let tail = self.tail().load(Ordering::Relaxed);
         head != tail
+    }
+
+    /// Check if at least one slot is currently available for writing.
+    #[inline]
+    pub fn has_capacity(&self) -> bool {
+        let tail = self.tail().load(Ordering::Relaxed);
+        let index = (tail & self.mask) as usize;
+        let seq = self.sequence(index).load(Ordering::Acquire);
+        (seq as i64 - tail as i64) >= 0
     }
 
     fn head(&self) -> &AtomicU64 {

@@ -613,7 +613,7 @@ mod tests {
             .env("VERTEBRA_SHM_NAME", &name)
             .env("VERTEBRA_SHM_SIZE", "4096")
             .arg("--exact")
-            .arg("shm_multi_process_roundtrip")
+            .arg("shm::tests::shm_multi_process_roundtrip")
             .arg("--nocapture")
             .spawn()
             .unwrap();
@@ -622,7 +622,7 @@ mod tests {
             .env("VERTEBRA_SHM_NAME", &name)
             .env("VERTEBRA_SHM_SIZE", "4096")
             .arg("--exact")
-            .arg("shm_multi_process_roundtrip")
+            .arg("shm::tests::shm_multi_process_roundtrip")
             .arg("--nocapture")
             .spawn()
             .unwrap();

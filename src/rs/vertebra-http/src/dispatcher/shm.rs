@@ -133,7 +133,7 @@ impl ShmDispatcher {
                 let flushed = pending_batches
                     .remove(&batch_key)
                     .expect("pending SHM batch should exist");
-                self.flush_shm_dispatch_batch(worker_idx, flushed);
+                dispatched_count += self.flush_shm_dispatch_batch(worker_idx, flushed);
             }
 
             let req_slab_bytes = request_slab_size(&request_view);
@@ -203,11 +203,10 @@ impl ShmDispatcher {
             if !is_fnf {
                 pending.correlation_ids.push(correlation_id);
             }
-            dispatched_count += 1;
         }
 
         for ((worker_idx, _flags), pending) in pending_batches {
-            self.flush_shm_dispatch_batch(worker_idx, pending);
+            dispatched_count += self.flush_shm_dispatch_batch(worker_idx, pending);
         }
 
         dispatched_count
@@ -239,8 +238,9 @@ impl ShmDispatcher {
             .collect()
     }
 
-    fn flush_shm_dispatch_batch(&self, worker_idx: usize, pending: ShmDispatchBatch) {
+    fn flush_shm_dispatch_batch(&self, worker_idx: usize, pending: ShmDispatchBatch) -> usize {
         let worker = &self.workers[worker_idx];
+        let node_count = pending.nodes.len();
         let writer = ShmBatchWriter {
             nodes: pending.nodes,
             components: pending.components.iter().map(|c| c.as_ref()).collect(),
@@ -259,14 +259,17 @@ impl ShmDispatcher {
                 if stats.write_head == stats.read_head.wrapping_add(1) {
                     let _ = worker.transport.notify_request();
                 }
+                node_count
             }
             Err(vertebra_core::channel::ChannelError::Full) => {
                 debug!(worker = worker_idx, "request ring full during flush");
                 self.fail_correlations(&pending.correlation_ids);
+                0
             }
             Err(e) => {
                 error!(worker = worker_idx, error = %e, "ring send error");
                 self.fail_correlations(&pending.correlation_ids);
+                0
             }
         }
     }

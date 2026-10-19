@@ -44,9 +44,14 @@ fn test_concurrent_dispatch_to_single_worker() {
     for t in 0..thread_count {
         let dispatcher = Arc::clone(&dispatcher);
         handles.push(thread::spawn(move || {
+            let start = std::time::Instant::now();
             for i in 0..iterations {
                 let mut success = false;
                 while !success {
+                    assert!(
+                        start.elapsed() < Duration::from_secs(10),
+                        "producer thread {t} timed out at iteration {i}"
+                    );
                     let (tx, _rx) = oneshot::channel();
                     let req = PendingRequest {
                         handler_id: (t * 10000 + i) as u64,

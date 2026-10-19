@@ -349,6 +349,8 @@ impl RingPair {
         resp_xlarge_fd: RawFd,
         req_notify_fd: RawFd,
         resp_notify_fd: RawFd,
+        #[cfg(not(target_os = "linux"))] req_notify_write_fd: RawFd,
+        #[cfg(not(target_os = "linux"))] resp_notify_write_fd: RawFd,
     ) -> Result<Self, RingPairError> {
         let req_layout = RingLayout::new(
             config.request_slot_size,
@@ -368,8 +370,17 @@ impl RingPair {
             )?
         };
 
+        #[cfg(target_os = "linux")]
         let request_notifier = unsafe { Notifier::from_raw_fd(req_notify_fd) };
+        #[cfg(target_os = "linux")]
         let response_notifier = unsafe { Notifier::from_raw_fd(resp_notify_fd) };
+
+        #[cfg(not(target_os = "linux"))]
+        let request_notifier =
+            unsafe { Notifier::from_raw_fds(req_notify_fd, req_notify_write_fd) };
+        #[cfg(not(target_os = "linux"))]
+        let response_notifier =
+            unsafe { Notifier::from_raw_fds(resp_notify_fd, resp_notify_write_fd) };
 
         Ok(Self {
             request_ring,
@@ -445,6 +456,10 @@ impl RingPair {
             .total_size,
             req_notify_fd: self.request_notifier.as_raw_fd(),
             resp_notify_fd: self.response_notifier.as_raw_fd(),
+            #[cfg(not(target_os = "linux"))]
+            req_notify_write_fd: self.request_notifier.write_fd(),
+            #[cfg(not(target_os = "linux"))]
+            resp_notify_write_fd: self.response_notifier.write_fd(),
         }
     }
 
@@ -467,6 +482,10 @@ impl RingPair {
         let resp_xlarge_fd: RawFd = env_parse("VERTEBRA_RESP_RING_XLARGE_FD")?;
         let req_notify_fd: RawFd = env_parse("VERTEBRA_REQ_NOTIFY_FD")?;
         let resp_notify_fd: RawFd = env_parse("VERTEBRA_RESP_NOTIFY_FD")?;
+        #[cfg(not(target_os = "linux"))]
+        let req_notify_write_fd: RawFd = env_parse("VERTEBRA_REQ_NOTIFY_WRITE_FD")?;
+        #[cfg(not(target_os = "linux"))]
+        let resp_notify_write_fd: RawFd = env_parse("VERTEBRA_RESP_NOTIFY_WRITE_FD")?;
 
         unsafe {
             Self::from_inherited(
@@ -478,22 +497,17 @@ impl RingPair {
                 resp_xlarge_fd,
                 req_notify_fd,
                 resp_notify_fd,
+                #[cfg(not(target_os = "linux"))]
+                req_notify_write_fd,
+                #[cfg(not(target_os = "linux"))]
+                resp_notify_write_fd,
             )
         }
     }
 
     #[cfg(unix)]
     pub fn all_fds(&self) -> Vec<RawFd> {
-        let fds = self.fd_set();
-        vec![
-            fds.req_ring_fd,
-            fds.resp_small_fd,
-            fds.resp_medium_fd,
-            fds.resp_large_fd,
-            fds.resp_xlarge_fd,
-            fds.req_notify_fd,
-            fds.resp_notify_fd,
-        ]
+        self.fd_set().all_fds()
     }
 }
 
@@ -512,12 +526,17 @@ pub struct RingPairFds {
     pub resp_xlarge_size: usize,
     pub req_notify_fd: RawFd,
     pub resp_notify_fd: RawFd,
+    #[cfg(not(target_os = "linux"))]
+    pub req_notify_write_fd: RawFd,
+    #[cfg(not(target_os = "linux"))]
+    pub resp_notify_write_fd: RawFd,
 }
 
 #[cfg(unix)]
 impl RingPairFds {
     pub fn to_env_vars(&self, worker_id: usize) -> Vec<(String, String)> {
-        vec![
+        #[allow(unused_mut)]
+        let mut vars = vec![
             ("VERTEBRA_TRANSPORT_MODE".into(), "shm".into()),
             ("VERTEBRA_WORKER_ID".into(), worker_id.to_string()),
             ("VERTEBRA_REQ_RING_FD".into(), self.req_ring_fd.to_string()),
@@ -565,11 +584,24 @@ impl RingPairFds {
                 "VERTEBRA_RESP_NOTIFY_FD".into(),
                 self.resp_notify_fd.to_string(),
             ),
-        ]
+        ];
+        #[cfg(not(target_os = "linux"))]
+        {
+            vars.push((
+                "VERTEBRA_REQ_NOTIFY_WRITE_FD".into(),
+                self.req_notify_write_fd.to_string(),
+            ));
+            vars.push((
+                "VERTEBRA_RESP_NOTIFY_WRITE_FD".into(),
+                self.resp_notify_write_fd.to_string(),
+            ));
+        }
+        vars
     }
 
     pub fn all_fds(&self) -> Vec<RawFd> {
-        vec![
+        #[allow(unused_mut)]
+        let mut fds = vec![
             self.req_ring_fd,
             self.resp_small_fd,
             self.resp_medium_fd,
@@ -577,7 +609,13 @@ impl RingPairFds {
             self.resp_xlarge_fd,
             self.req_notify_fd,
             self.resp_notify_fd,
-        ]
+        ];
+        #[cfg(not(target_os = "linux"))]
+        {
+            fds.push(self.req_notify_write_fd);
+            fds.push(self.resp_notify_write_fd);
+        }
+        fds
     }
 }
 
@@ -750,6 +788,11 @@ mod tests {
         assert!(fds.resp_xlarge_fd >= 0);
         assert!(fds.req_notify_fd >= 0);
         assert!(fds.resp_notify_fd >= 0);
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(fds.req_notify_write_fd >= 0);
+            assert!(fds.resp_notify_write_fd >= 0);
+        }
         assert!(fds.req_ring_size > 0);
         assert!(fds.resp_small_size > 0);
     }
@@ -773,6 +816,11 @@ mod tests {
         assert!(keys.contains(&"VERTEBRA_RESP_RING_XLARGE_FD"));
         assert!(keys.contains(&"VERTEBRA_REQ_NOTIFY_FD"));
         assert!(keys.contains(&"VERTEBRA_RESP_NOTIFY_FD"));
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(keys.contains(&"VERTEBRA_REQ_NOTIFY_WRITE_FD"));
+            assert!(keys.contains(&"VERTEBRA_RESP_NOTIFY_WRITE_FD"));
+        }
 
         // Worker ID should be 3
         let worker_id = vars
@@ -794,7 +842,10 @@ mod tests {
     fn all_fds_for_make_inheritable() {
         let pair = RingPair::create(RingPairConfig::default()).expect("create");
         let fds = pair.all_fds();
+        #[cfg(target_os = "linux")]
         assert_eq!(fds.len(), 7); // req_ring + 4 resp tiers + 2 notifiers
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(fds.len(), 9); // req_ring + 4 resp tiers + 2 pipe pairs (read + write)
         for fd in &fds {
             assert!(*fd >= 0, "all FDs should be valid");
         }
