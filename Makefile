@@ -191,7 +191,7 @@ check: lint test coverage                           ## Everything: lint, type ch
 .PHONY: bench
 bench: build                                        ## Run benchmarks (use TARGETS= and SCENARIOS= to customize)
 	@echo "${INFO} Running benchmarks..."
-	@uv run python -m tools.benchmarks run \
+	@uv run --group bench python -m tools.benchmarks run \
 		-t $${TARGETS:-vtb} \
 		-s $${SCENARIOS:-default} \
 		$${BENCH_ARGS:-}
@@ -200,7 +200,7 @@ bench: build                                        ## Run benchmarks (use TARGE
 .PHONY: bench-all
 bench-all: build                                    ## Run ALL benchmarks (all targets, all scenarios)
 	@echo "${INFO} Running full benchmark suite..."
-	@uv run python -m tools.benchmarks run \
+	@uv run --group bench python -m tools.benchmarks run \
 		-t all \
 		-s full \
 		$${BENCH_ARGS:-}
@@ -218,13 +218,13 @@ bench-ft:                                           ## Benchmark with Python 3.1
 		--manifest-path src/rs/Cargo.toml \
 		--release --target-dir src/rs/target-ft 2>&1 | tail -3
 	@echo "${INFO} Running free-threaded benchmarks..."
-	@uv run python -m tools.benchmarks run -t freethreaded -s $${SCENARIOS:-multiworker} $${BENCH_ARGS:-}
+	@uv run --group bench python -m tools.benchmarks run -t freethreaded -s $${SCENARIOS:-multiworker} $${BENCH_ARGS:-}
 	@echo "${OK} Free-threaded benchmarks complete"
 
 .PHONY: bench-report
 bench-report:                                       ## Show latest benchmark report
-	@uv run python -m tools.benchmarks report
+	@uv run --group bench python -m tools.benchmarks report
 
 .PHONY: bench-diff
 bench-diff:                                         ## Compare latest benchmark run vs previous
-	@uv run python -m tools.benchmarks compare
+	@uv run --group bench python -m tools.benchmarks compare

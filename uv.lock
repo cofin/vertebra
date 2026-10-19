@@ -1000,17 +1000,11 @@ build = [
 ]
 dev = [
     { name = "anyio" },
-    { name = "duckdb" },
-    { name = "granian" },
-    { name = "httptools" },
     { name = "maturin" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
-    { name = "spikard" },
-    { name = "uvicorn", extra = ["standard"] },
-    { name = "uvloop" },
 ]
 lint = [
     { name = "mypy" },
@@ -1048,17 +1042,11 @@ bench = [
 build = [{ name = "maturin", specifier = ">=1.5,<2" }]
 dev = [
     { name = "anyio" },
-    { name = "duckdb", specifier = ">=1.0" },
-    { name = "granian", specifier = ">=1.6" },
-    { name = "httptools", specifier = ">=0.6" },
     { name = "maturin", specifier = ">=1.5,<2" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov", specifier = ">=5.0" },
     { name = "ruff" },
-    { name = "spikard", specifier = ">=0.12" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
-    { name = "uvloop", specifier = ">=0.21" },
 ]
 lint = [
     { name = "mypy" },
