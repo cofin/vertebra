@@ -42,6 +42,7 @@ pub(super) struct ShmDispatchBatch {
     pub(super) nodes: Vec<TransportNode>,
     pub(super) correlation_ids: Vec<u64>,
     pub(super) components: Vec<bytes::Bytes>,
+    pub(super) slab_len: usize,
 }
 
 impl ShmDispatchBatch {
@@ -51,6 +52,7 @@ impl ShmDispatchBatch {
             nodes: Vec::new(),
             correlation_ids: Vec::new(),
             components: Vec::new(),
+            slab_len: 0,
         }
     }
 }
@@ -78,8 +80,7 @@ pub(super) fn batch_can_fit_request(
     max_payload: usize,
 ) -> bool {
     let next_nodes = pending.nodes.len() + 1;
-    let current_slab_len: usize = pending.components.iter().map(|c| c.len()).sum();
-    let next_slab = current_slab_len + request_slab_size(req);
+    let next_slab = pending.slab_len + request_slab_size(req);
     batch_snapshot_serialized_size(next_nodes, next_slab) <= max_payload
 }
 

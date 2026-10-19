@@ -4,10 +4,10 @@ import asyncio
 import logging
 from typing import Any
 
-from vertebra.server._asgi._queues import AsgiResponse, ReceiveChannel, SendCollector
+from vertebra.server._asgi._queues import AsgiReceive, AsgiResponse, AsgiSend
 from vertebra.server._asgi._scope import build_scope
 
-__all__ = ["AsgiAdapter"]
+__all__ = ("AsgiAdapter",)
 
 log = logging.getLogger(__name__)
 
@@ -23,9 +23,9 @@ class AsgiAdapter:
 
     async def run_single(self, request: Any) -> AsgiResponse:
         """Run the ASGI app for a single request."""
-        collector = SendCollector()
+        collector = AsgiSend()
         scope = build_scope(request, root_path=self._mount_prefix)
-        receive = ReceiveChannel(request)
+        receive = AsgiReceive(request)
         req_id = getattr(request, "request_id", 0)
 
         try:

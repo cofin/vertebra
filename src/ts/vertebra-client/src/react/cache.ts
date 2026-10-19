@@ -5,10 +5,10 @@
  * semantics and pattern-based invalidation.
  */
 
-interface CacheEntry {
+export interface CacheEntry {
   data: any;
   timestamp: number;
-  promise: Promise<any> | null;
+  promise?: Promise<any> | null;
 }
 
 export class QueryCache {
@@ -22,13 +22,12 @@ export class QueryCache {
   }
 
   /** Get a cache entry if it exists and is not stale. */
-  get(key: string, staleTime: number): CacheEntry | null {
+  get(key: string, staleTime: number): CacheEntry | undefined {
     const entry = this.entries.get(key);
-    if (!entry) return null;
-    if (staleTime > 0 && Date.now() - entry.timestamp < staleTime) {
-      return entry;
+    if (!entry) return undefined;
+    if (staleTime > 0 && Date.now() - entry.timestamp >= staleTime) {
+      return undefined;
     }
-    // staleTime=0: return entry for instant Suspense resolve, but caller should refetch
     return entry;
   }
 
@@ -37,7 +36,7 @@ export class QueryCache {
     const entry = this.entries.get(key);
 
     // Fresh cache hit — return data immediately
-    if (entry && staleTime > 0 && Date.now() - entry.timestamp < staleTime) {
+    if (entry && entry.timestamp > 0 && staleTime > 0 && Date.now() - entry.timestamp < staleTime) {
       return Promise.resolve(entry.data);
     }
 
@@ -47,11 +46,22 @@ export class QueryCache {
     }
 
     // Start new fetch
-    const promise = fetcher().then((data) => {
-      this.entries.set(key, { data, timestamp: Date.now(), promise: null });
-      this.notify();
-      return data;
-    });
+    const promise = fetcher()
+      .then((data) => {
+        this.entries.set(key, { data, timestamp: Date.now(), promise: undefined });
+        this.notify();
+        return data;
+      })
+      .catch((err) => {
+        const current = this.entries.get(key);
+        if (current?.promise === promise) {
+          current.promise = undefined;
+          if (current.timestamp === 0) {
+            this.entries.delete(key);
+          }
+        }
+        throw err;
+      });
 
     // Store pending promise for dedup
     if (entry) {
@@ -65,7 +75,7 @@ export class QueryCache {
 
   /** Set a cache entry directly. */
   set(key: string, data: any): void {
-    this.entries.set(key, { data, timestamp: Date.now(), promise: null });
+    this.entries.set(key, { data, timestamp: Date.now(), promise: undefined });
     this.notify();
   }
 

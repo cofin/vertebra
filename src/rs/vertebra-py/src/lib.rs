@@ -17,6 +17,13 @@ pub mod request;
 pub mod response;
 pub mod wsgi_environ;
 
+pub use asgi_scope::{AsgiScope, AsgiScopeIterator, AsgiScopeKeyIter};
+pub use batch::{RequestBatch, RequestBatchIterator, VertebraBatch, VertebraBatchIter};
+pub use headers::{Headers, HeadersIterator, VertebraHeaders, VertebraHeadersIter};
+pub use request::{Request, VertebraRequest};
+pub use response::{Response, VertebraResponse};
+pub use wsgi_environ::{WsgiEnviron, WsgiEnvironIterator, WsgiEnvironKeyIter};
+
 /// Whether this build targets free-threaded Python (3.14t+).
 #[cfg(Py_GIL_DISABLED)]
 pub const FREE_THREADED: bool = true;
@@ -30,17 +37,35 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("FREE_THREADED", FREE_THREADED)?;
 
-    // Ghost Framework FFI types
+    // Ghost Framework FFI types (legacy + domain-oriented canonical names)
     m.add_class::<request::VertebraRequest>()?;
+    m.add("Request", m.getattr("VertebraRequest")?)?;
+
     m.add_class::<headers::VertebraHeaders>()?;
+    m.add("Headers", m.getattr("VertebraHeaders")?)?;
+
     m.add_class::<headers::VertebraHeadersIter>()?;
+    m.add("HeadersIterator", m.getattr("VertebraHeadersIter")?)?;
+    m.add("HeadersIter", m.getattr("VertebraHeadersIter")?)?;
+
     m.add_class::<response::VertebraResponse>()?;
+    m.add("Response", m.getattr("VertebraResponse")?)?;
+
     m.add_class::<batch::VertebraBatch>()?;
+    m.add("RequestBatch", m.getattr("VertebraBatch")?)?;
+    m.add("Batch", m.getattr("VertebraBatch")?)?;
+
     m.add_class::<batch::VertebraBatchIter>()?;
+    m.add("RequestBatchIterator", m.getattr("VertebraBatchIter")?)?;
+    m.add("BatchIter", m.getattr("VertebraBatchIter")?)?;
+
     m.add_class::<asgi_scope::AsgiScope>()?;
     m.add_class::<asgi_scope::AsgiScopeKeyIter>()?;
+    m.add("AsgiScopeIterator", m.getattr("AsgiScopeKeyIter")?)?;
+
     m.add_class::<wsgi_environ::WsgiEnviron>()?;
     m.add_class::<wsgi_environ::WsgiEnvironKeyIter>()?;
+    m.add("WsgiEnvironIterator", m.getattr("WsgiEnvironKeyIter")?)?;
 
     // Vectorized batch API
     m.add_function(wrap_pyfunction!(api::init_transport, m)?)?;

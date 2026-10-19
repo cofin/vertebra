@@ -9,6 +9,8 @@ from vertebra.builder._codegen._metadata import RouteMetadata
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+__all__ = ("TypeScriptGenerator", "format_typescript")
+
 
 @dataclass(slots=True)
 class TypeScriptGenerator:
@@ -91,6 +93,3 @@ class TypeScriptGenerator:
 def format_typescript(output: str) -> str:
     """Normalize trailing whitespace for generated TypeScript."""
     return "\n".join(line.rstrip() for line in output.strip().splitlines()) + "\n"
-
-
-__all__ = ("TypeScriptGenerator", "format_typescript")

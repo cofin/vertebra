@@ -5,7 +5,6 @@
 //! 2. `policy.timeout()` has elapsed since the first request in the current batch.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
@@ -113,70 +112,26 @@ impl BatchCollector {
     /// Run the collector loop until the channel is closed.
     pub async fn run(mut self) {
         let mut pending: Vec<PendingRequest> = Vec::with_capacity(self.policy.batch_size());
-        let mut deadline: Option<Instant> = None;
-        let timeout = self.policy.timeout();
 
-        loop {
-            let sleep = match deadline {
-                Some(d) => {
-                    let now = Instant::now();
-                    if now >= d { Duration::ZERO } else { d - now }
-                }
-                None => Duration::from_secs(3600),
-            };
+        while let Some(req) = self.rx.recv().await {
+            let max_size = self.policy.batch_size();
+            pending.push(req);
 
-            tokio::select! {
-                biased;
-
-                maybe_req = self.rx.recv() => {
-                    match maybe_req {
-                        None => {
-                            if !pending.is_empty() {
-                                self.drain(&mut pending).await;
-                            }
-                            debug!("BatchCollector shutting down");
-                            return;
-                        }
-                        Some(req) => {
-                            if deadline.is_none() {
-                                deadline = Some(Instant::now() + timeout);
-                            }
-                            let has_priority =
-                                req.flags & vertebra_core::protocol::flags::PRIORITY != 0;
-                            pending.push(req);
-
-                            // Eagerly drain any buffered requests (try_recv loop).
-                            while pending.len() < self.policy.batch_size() {
-                                match self.rx.try_recv() {
-                                    Ok(r) => pending.push(r),
-                                    Err(_) => break,
-                                }
-                            }
-
-                            trace!(depth = pending.len(), "queued request(s)");
-
-                            // PRIORITY: drain immediately — don't wait for batch
-                            // size or timeout. The priority request (and any
-                            // already-accumulated requests) go out in one batch.
-                            if has_priority
-                                || pending.len() >= self.policy.batch_size()
-                                || self.policy.matches_preferred(pending.len())
-                            {
-                                self.drain(&mut pending).await;
-                                deadline = None;
-                            }
-                        }
-                    }
-                }
-
-                _ = tokio::time::sleep(sleep), if deadline.is_some() => {
-                    if !pending.is_empty() {
-                        self.drain(&mut pending).await;
-                    }
-                    deadline = None;
+            while pending.len() < max_size {
+                match self.rx.try_recv() {
+                    Ok(r) => pending.push(r),
+                    Err(_) => break,
                 }
             }
+
+            trace!(depth = pending.len(), "queued request(s)");
+            self.drain(&mut pending).await;
         }
+
+        if !pending.is_empty() {
+            self.drain(&mut pending).await;
+        }
+        debug!("BatchCollector shutting down");
     }
 
     async fn drain(&mut self, pending: &mut Vec<PendingRequest>) {
@@ -186,6 +141,9 @@ impl BatchCollector {
             requests: std::mem::replace(pending, Vec::with_capacity(self.policy.batch_size())),
         };
         self.dispatcher.dispatch(batch);
-        self.policy.adapt(count);
+        self.policy.record_batch(count);
     }
 }
+
+/// Domain-oriented alias for [`BatchCollector`].
+pub type RequestBatcher = BatchCollector;

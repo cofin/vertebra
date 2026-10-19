@@ -3,28 +3,31 @@
 Aligned with vtb.
 """
 
-import contextlib
 import datetime
 import enum
 import json
 import uuid as _uuid_mod
 from abc import ABC, abstractmethod
 from decimal import Decimal
-from typing import Any, Final, Literal, Protocol, cast, overload
+from typing import Any, Final, Literal, cast, overload
 
 from msgspec.json import Decoder, Encoder
 
+from vertebra import _typing
 from vertebra._typing import (
-    MSGSPEC_INSTALLED,
     NUMPY_INSTALLED,
-    ORJSON_INSTALLED,
     PYDANTIC_INSTALLED,
     UUID_UTILS_INSTALLED,
-    BaseModel,
-    attrs_asdict,
 )
 from vertebra.utils.module_loader import import_optional
-from vertebra.utils.type_guards import dataclass_to_dict, is_attrs_instance, is_dataclass_instance, is_msgspec_struct
+from vertebra.utils.serializers._numpy import numpy_array_enc_hook
+from vertebra.utils.serializers._schema import _dump_msgspec_fields
+from vertebra.utils.type_guards import (
+    dataclass_to_dict,
+    is_attrs_instance,
+    is_dataclass_instance,
+    is_msgspec_struct,
+)
 from vertebra.utils.uuids import _load_uuid_utils
 
 __all__ = (
@@ -37,20 +40,9 @@ __all__ = (
     "convert_datetime_to_gmt_iso",
     "decode_json",
     "encode_json",
+    "encode_json_bytes",
     "get_default_serializer",
 )
-
-
-class JSONSerializer(Protocol):
-    """Protocol for JSON serializer implementations."""
-
-    def encode(self, data: Any, *, as_bytes: bool = False) -> str | bytes:
-        """Encode Python data into JSON."""
-        ...
-
-    def decode(self, data: str | bytes, *, decode_bytes: bool = True) -> Any:
-        """Decode JSON into Python data."""
-        ...
 
 
 class BaseJSONSerializer(ABC):
@@ -69,7 +61,7 @@ class BaseJSONSerializer(ABC):
         ...
 
 
-class MsgspecSerializer(BaseJSONSerializer):
+class JSONSerializer(BaseJSONSerializer):
     """Msgspec-based JSON serializer."""
 
     __slots__ = ("_decoder", "_encoder")
@@ -79,44 +71,46 @@ class MsgspecSerializer(BaseJSONSerializer):
         self._decoder: Final[Decoder[Any]] = Decoder()
 
     def encode(self, data: Any, *, as_bytes: bool = False) -> str | bytes:
+        """Encode Python data into JSON string or UTF-8 bytes."""
+        encoded = self.encode_bytes(data)
+        return encoded if as_bytes else encoded.decode("utf-8")
+
+    def encode_bytes(self, data: Any) -> bytes:
+        """Encode Python data directly into UTF-8 JSON bytes."""
         try:
-            encoded = self._encoder.encode(data)
+            return self._encoder.encode(data)
         except TypeError as exc:
             if _is_explicit_unsupported_error(exc):
                 raise
-            if ORJSON_INSTALLED:
-                return _get_orjson_fallback().encode(data, as_bytes=as_bytes)
-            return _get_stdlib_fallback().encode(data, as_bytes=as_bytes)
+            return cast("bytes", _get_stdlib_fallback().encode(data, as_bytes=True))
         except ValueError:
-            if ORJSON_INSTALLED:
-                return _get_orjson_fallback().encode(data, as_bytes=as_bytes)
-            return _get_stdlib_fallback().encode(data, as_bytes=as_bytes)
-        return encoded if as_bytes else encoded.decode("utf-8")
+            return cast("bytes", _get_stdlib_fallback().encode(data, as_bytes=True))
 
     def decode(self, data: str | bytes, *, decode_bytes: bool = True) -> Any:
+        """Decode JSON string or bytes into Python data."""
         if isinstance(data, bytes):
             if not decode_bytes:
                 return data
             try:
                 return self._decoder.decode(data)
             except (TypeError, ValueError):
-                if ORJSON_INSTALLED:
-                    return _get_orjson_fallback().decode(data, decode_bytes=decode_bytes)
                 return _get_stdlib_fallback().decode(data, decode_bytes=decode_bytes)
         try:
             return self._decoder.decode(data.encode("utf-8"))
         except (TypeError, ValueError):
-            if ORJSON_INSTALLED:
-                return _get_orjson_fallback().decode(data, decode_bytes=decode_bytes)
             return _get_stdlib_fallback().decode(data, decode_bytes=decode_bytes)
 
 
+MsgspecSerializer = JSONSerializer
+
+
 class OrjsonSerializer(BaseJSONSerializer):
-    """Orjson-based JSON serializer."""
+    """Orjson-based JSON serializer retained for compatibility."""
 
     __slots__ = ()
 
     def encode(self, data: Any, *, as_bytes: bool = False) -> str | bytes:
+        """Encode Python data into JSON via orjson or standard library fallback."""
         orjson_mod = import_optional("orjson")
         if orjson_mod is None:
             return _get_stdlib_fallback().encode(data, as_bytes=as_bytes)
@@ -140,6 +134,7 @@ class OrjsonSerializer(BaseJSONSerializer):
         return encoded if as_bytes else encoded.decode("utf-8")
 
     def decode(self, data: str | bytes, *, decode_bytes: bool = True) -> Any:
+        """Decode JSON into Python data via orjson or standard library fallback."""
         orjson_mod = import_optional("orjson")
         if orjson_mod is None:
             return _get_stdlib_fallback().decode(data, decode_bytes=decode_bytes)
@@ -154,10 +149,12 @@ class StandardLibSerializer(BaseJSONSerializer):
     __slots__ = ()
 
     def encode(self, data: Any, *, as_bytes: bool = False) -> str | bytes:
+        """Encode Python data into JSON using the standard library."""
         encoded = json.dumps(data, default=_normalize_supported_value)
         return encoded.encode("utf-8") if as_bytes else encoded
 
     def decode(self, data: str | bytes, *, decode_bytes: bool = True) -> Any:
+        """Decode JSON into Python data using the standard library."""
         if isinstance(data, bytes):
             if not decode_bytes:
                 return data
@@ -178,21 +175,17 @@ def convert_date_to_iso(value: datetime.date) -> str:
 
 
 def get_default_serializer() -> JSONSerializer:
-    """Return the best available JSON serializer."""
+    """Return the default msgspec-backed JSON serializer."""
     global _default_serializer
 
     if _default_serializer is None:
-        if MSGSPEC_INSTALLED:
-            with contextlib.suppress(ImportError):
-                _default_serializer = MsgspecSerializer()
-        if _default_serializer is None and ORJSON_INSTALLED:
-            with contextlib.suppress(ImportError):
-                _default_serializer = OrjsonSerializer()
-        if _default_serializer is None:
-            _default_serializer = StandardLibSerializer()
-
-    assert _default_serializer is not None
+        _default_serializer = JSONSerializer()
     return _default_serializer
+
+
+def encode_json_bytes(data: Any) -> bytes:
+    """Encode Python data directly into UTF-8 JSON bytes."""
+    return get_default_serializer().encode_bytes(data)
 
 
 @overload
@@ -209,7 +202,8 @@ def encode_json(data: Any, *, as_bytes: bool = ...) -> str | bytes: ...
 
 def encode_json(data: Any, *, as_bytes: bool = False) -> str | bytes:
     """Encode Python data into JSON."""
-    return get_default_serializer().encode(data, as_bytes=as_bytes)
+    encoded = get_default_serializer().encode_bytes(data)
+    return encoded if as_bytes else encoded.decode("utf-8")
 
 
 def decode_json(data: str | bytes, *, decode_bytes: bool = True) -> Any:
@@ -217,45 +211,36 @@ def decode_json(data: str | bytes, *, decode_bytes: bool = True) -> Any:
     return get_default_serializer().decode(data, decode_bytes=decode_bytes)
 
 
-_orjson_fallback: OrjsonSerializer | None = None
+_UNLOADED_UUID_TYPE: Final[object] = object()
+_uuid_utils_type: Any = _UNLOADED_UUID_TYPE
 _stdlib_fallback: StandardLibSerializer | None = None
 _default_serializer: JSONSerializer | None = None
 
 
 def _get_uuid_utils_type() -> type[Any] | None:
+    """Lazy-resolve and cache the uuid-utils UUID type when installed."""
+    global _uuid_utils_type
+    if _uuid_utils_type is not _UNLOADED_UUID_TYPE:
+        return cast("type[Any] | None", _uuid_utils_type)
     if not UUID_UTILS_INSTALLED:
+        _uuid_utils_type = None
         return None
     module = _load_uuid_utils()
-    if module is None:
-        return None
-    return cast("type[Any]", module.UUID)
+    _uuid_utils_type = None if module is None else cast("type[Any]", module.UUID)
+    return cast("type[Any] | None", _uuid_utils_type)
 
 
-_UUID_UTILS_TYPE: type[Any] | None = _get_uuid_utils_type()
+def _is_uuid_utils_instance(value: Any) -> bool:
+    """Return True when value is an instance of uuid_utils.UUID."""
+    uuid_type = _get_uuid_utils_type()
+    return uuid_type is not None and isinstance(value, uuid_type)
 
 
 def _dump_pydantic_model(value: Any) -> Any:
+    """Dump a Pydantic model instance to a dictionary."""
     if hasattr(value, "model_dump"):
         return value.model_dump()
     return value.dict()
-
-
-def _dump_msgspec_struct(value: Any) -> dict[str, Any]:
-    return {field_name: value.__getattribute__(field_name) for field_name in value.__struct_fields__}
-
-
-def _normalize_numpy_value(value: Any) -> Any:
-    if not NUMPY_INSTALLED:
-        return value
-
-    np = import_optional("numpy")
-    if np is None:
-        return value
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    return value
 
 
 def _normalize_supported_value(value: Any) -> Any:
@@ -264,23 +249,21 @@ def _normalize_supported_value(value: Any) -> Any:
         return convert_datetime_to_gmt_iso(value)
     if isinstance(value, datetime.date):
         return convert_date_to_iso(value)
-    if isinstance(value, _uuid_mod.UUID):
-        return str(value)
-    if _UUID_UTILS_TYPE is not None and isinstance(value, _UUID_UTILS_TYPE):
+    if isinstance(value, _uuid_mod.UUID) or _is_uuid_utils_instance(value):
         return str(value)
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, enum.Enum):
         return value.value
-    if PYDANTIC_INSTALLED and isinstance(value, BaseModel):
+    if PYDANTIC_INSTALLED and isinstance(value, _typing.BaseModel):
         return _dump_pydantic_model(value)
     if is_dataclass_instance(value):
         return dataclass_to_dict(value)
     if is_attrs_instance(value):
-        return attrs_asdict(value, recurse=True)
+        return _typing.attrs_asdict(value, recurse=True)
     if is_msgspec_struct(value):
-        return _dump_msgspec_struct(value)
-    numpy_value = _normalize_numpy_value(value)
+        return _dump_msgspec_fields(value)
+    numpy_value = numpy_array_enc_hook(value)
     if numpy_value is not value:
         return numpy_value
 
@@ -289,17 +272,12 @@ def _normalize_supported_value(value: Any) -> Any:
 
 
 def _is_explicit_unsupported_error(exc: Exception) -> bool:
+    """Return True when TypeError originates from an unsupported JSON value."""
     return "unsupported json value" in str(exc).lower()
 
 
-def _get_orjson_fallback() -> OrjsonSerializer:
-    global _orjson_fallback
-    if _orjson_fallback is None:
-        _orjson_fallback = OrjsonSerializer()
-    return _orjson_fallback
-
-
 def _get_stdlib_fallback() -> StandardLibSerializer:
+    """Return the cached standard library JSON serializer fallback."""
     global _stdlib_fallback
     if _stdlib_fallback is None:
         _stdlib_fallback = StandardLibSerializer()

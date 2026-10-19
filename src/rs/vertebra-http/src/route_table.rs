@@ -63,6 +63,9 @@ impl RouteTable {
     }
 }
 
+/// Domain-oriented alias for [`RouteTable`].
+pub type DynamicRouteTable = RouteTable;
+
 #[cfg(test)]
 mod tests {
     use super::*;

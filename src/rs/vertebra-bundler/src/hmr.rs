@@ -132,6 +132,9 @@ impl HmrWatcher {
     }
 }
 
+/// Domain-oriented alias for [`HmrWatcher`].
+pub type SourceWatcher = HmrWatcher;
+
 #[cfg(test)]
 mod tests {
     use super::*;

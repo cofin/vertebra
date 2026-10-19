@@ -79,14 +79,14 @@ fn bench_direct_dispatch(c: &mut Criterion) {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        drop(listener);
 
         let config = Arc::new(ServerConfig {
             bind: addr,
             ..ServerConfig::default()
         });
 
-        tokio::spawn(server::run_with_collector(
+        tokio::spawn(server::run_with_listener(
+            listener,
             config,
             router,
             dispatcher,
@@ -94,12 +94,33 @@ fn bench_direct_dispatch(c: &mut Criterion) {
             std::future::pending::<()>(),
         ));
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
         addr
     });
 
     let requests_per_iter: u64 = 1000;
     let url = format!("http://{}/hello", addr);
+    let client = rt.block_on(async {
+        let c = reqwest::Client::builder()
+            .pool_max_idle_per_host(64)
+            .tcp_nodelay(true)
+            .no_proxy()
+            .http1_only()
+            .build()
+            .unwrap();
+        let mut warm = Vec::with_capacity(32);
+        for _ in 0..32 {
+            let c = c.clone();
+            let u = url.clone();
+            warm.push(tokio::spawn(async move {
+                let _ = c.get(&u).send().await.unwrap().bytes().await.unwrap();
+            }));
+        }
+        for h in warm {
+            h.await.unwrap();
+        }
+        c
+    });
 
     let mut group = c.benchmark_group("direct_dispatch");
     group.throughput(Throughput::Elements(requests_per_iter));
@@ -108,28 +129,26 @@ fn bench_direct_dispatch(c: &mut Criterion) {
 
     group.bench_function("http11_concurrent_1000", |b| {
         b.to_async(&rt).iter(|| {
+            let client = client.clone();
             let url = url.clone();
             async move {
-                let client = reqwest::Client::builder()
-                    .pool_max_idle_per_host(64)
-                    .build()
-                    .unwrap();
-
-                let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
-                let mut handles = Vec::with_capacity(requests_per_iter as usize);
-
-                for _ in 0..requests_per_iter {
+                let remaining = Arc::new(std::sync::atomic::AtomicI64::new(requests_per_iter as i64));
+                let mut workers = Vec::with_capacity(32);
+                for _ in 0..32 {
                     let client = client.clone();
                     let url = url.clone();
-                    let sem = Arc::clone(&semaphore);
-                    handles.push(tokio::spawn(async move {
-                        let _permit = sem.acquire().await.unwrap();
-                        let _ = client.get(&url).send().await.unwrap();
+                    let remaining = Arc::clone(&remaining);
+                    workers.push(tokio::spawn(async move {
+                        while remaining
+                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+                            > 0
+                        {
+                            let _ = client.get(&url).send().await.unwrap().bytes().await.unwrap();
+                        }
                     }));
                 }
-
-                for h in handles {
-                    h.await.unwrap();
+                for w in workers {
+                    w.await.unwrap();
                 }
             }
         });
@@ -169,16 +188,9 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
 
         tokio::spawn(collector.run());
 
-        // Simulated Python worker (bridge path)
-        tokio::spawn(async move {
-            loop {
-                let batch = tokio::task::spawn_blocking(|| {
-                    BatchBridge::get().and_then(|b| b.poll_batch(Duration::from_millis(50)))
-                })
-                .await
-                .unwrap();
-
-                if let Some(snap) = batch {
+        std::thread::spawn(move || {
+            while let Some(bridge) = BatchBridge::get() {
+                if let Some(snap) = bridge.poll_batch(Duration::from_millis(50)) {
                     let responses: Vec<BridgeResponse> = (0..snap.len())
                         .map(|i| BridgeResponse {
                             request_id: snap.node(i).correlation_id,
@@ -187,9 +199,7 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
                             body: bytes::Bytes::from_static(b"ok"),
                         })
                         .collect();
-                    if let Some(bridge) = BatchBridge::get() {
-                        let _ = bridge.submit_responses_async(responses).await;
-                    }
+                    let _ = bridge.submit_responses(responses);
                 }
             }
         });
@@ -214,14 +224,14 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        drop(listener);
 
         let config = Arc::new(ServerConfig {
             bind: addr,
             ..ServerConfig::default()
         });
 
-        tokio::spawn(server::run_with_collector(
+        tokio::spawn(server::run_with_listener(
+            listener,
             config,
             router,
             dispatcher,
@@ -229,12 +239,33 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
             std::future::pending::<()>(),
         ));
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
         addr
     });
 
     let requests_per_iter: u64 = 1000;
     let url = format!("http://{}/hello", addr);
+    let client = rt.block_on(async {
+        let c = reqwest::Client::builder()
+            .pool_max_idle_per_host(64)
+            .tcp_nodelay(true)
+            .no_proxy()
+            .http1_only()
+            .build()
+            .unwrap();
+        let mut warm = Vec::with_capacity(32);
+        for _ in 0..32 {
+            let c = c.clone();
+            let u = url.clone();
+            warm.push(tokio::spawn(async move {
+                let _ = c.get(&u).send().await.unwrap().bytes().await.unwrap();
+            }));
+        }
+        for h in warm {
+            h.await.unwrap();
+        }
+        c
+    });
 
     let mut group = c.benchmark_group("bridge_dispatch");
     group.throughput(Throughput::Elements(requests_per_iter));
@@ -243,28 +274,26 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
 
     group.bench_function("http11_concurrent_1000", |b| {
         b.to_async(&rt).iter(|| {
+            let client = client.clone();
             let url = url.clone();
             async move {
-                let client = reqwest::Client::builder()
-                    .pool_max_idle_per_host(64)
-                    .build()
-                    .unwrap();
-
-                let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
-                let mut handles = Vec::with_capacity(requests_per_iter as usize);
-
-                for _ in 0..requests_per_iter {
+                let remaining = Arc::new(std::sync::atomic::AtomicI64::new(requests_per_iter as i64));
+                let mut workers = Vec::with_capacity(32);
+                for _ in 0..32 {
                     let client = client.clone();
                     let url = url.clone();
-                    let sem = Arc::clone(&semaphore);
-                    handles.push(tokio::spawn(async move {
-                        let _permit = sem.acquire().await.unwrap();
-                        let _ = client.get(&url).send().await.unwrap();
+                    let remaining = Arc::clone(&remaining);
+                    workers.push(tokio::spawn(async move {
+                        while remaining
+                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+                            > 0
+                        {
+                            let _ = client.get(&url).send().await.unwrap().bytes().await.unwrap();
+                        }
                     }));
                 }
-
-                for h in handles {
-                    h.await.unwrap();
+                for w in workers {
+                    w.await.unwrap();
                 }
             }
         });
@@ -274,7 +303,7 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
 }
 
 fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
-    use vertebra_core::bridge::{BatchBridge, BridgeResponse};
+    use vertebra_core::bridge::BatchBridge;
     use vertebra_http::{
         collector::{BatchCollector, PendingResponse},
         config::ServerConfig,
@@ -309,31 +338,6 @@ fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
 
         tokio::spawn(collector.run());
 
-        // Simulated Python worker (bridge path)
-        tokio::spawn(async move {
-            loop {
-                let batch = tokio::task::spawn_blocking(|| {
-                    BatchBridge::get().and_then(|b| b.poll_batch(Duration::from_millis(50)))
-                })
-                .await
-                .unwrap();
-
-                if let Some(snap) = batch {
-                    let responses: Vec<BridgeResponse> = (0..snap.len())
-                        .map(|i| BridgeResponse {
-                            request_id: snap.node(i).correlation_id,
-                            status: 200,
-                            headers: Vec::new(),
-                            body: bytes::Bytes::from_static(b"ok"),
-                        })
-                        .collect();
-                    if let Some(bridge) = BatchBridge::get() {
-                        let _ = bridge.submit_responses_async(responses).await;
-                    }
-                }
-            }
-        });
-
         let dispatcher_for_resp = Arc::clone(&dispatcher);
         tokio::spawn(async move {
             let bridge = BatchBridge::get().expect("bridge not initialized");
@@ -353,14 +357,14 @@ fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        drop(listener);
 
         let config = Arc::new(ServerConfig {
             bind: addr,
             ..ServerConfig::default()
         });
 
-        tokio::spawn(server::run_with_collector(
+        tokio::spawn(server::run_with_listener(
+            listener,
             config,
             router,
             dispatcher,
@@ -368,12 +372,33 @@ fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
             std::future::pending::<()>(),
         ));
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
         addr
     });
 
     let requests_per_iter: u64 = 1000;
     let url = format!("http://{}/hello", addr);
+    let client = rt.block_on(async {
+        let c = reqwest::Client::builder()
+            .pool_max_idle_per_host(64)
+            .tcp_nodelay(true)
+            .no_proxy()
+            .http1_only()
+            .build()
+            .unwrap();
+        let mut warm = Vec::with_capacity(32);
+        for _ in 0..32 {
+            let c = c.clone();
+            let u = url.clone();
+            warm.push(tokio::spawn(async move {
+                let _ = c.get(&u).send().await.unwrap().bytes().await.unwrap();
+            }));
+        }
+        for h in warm {
+            h.await.unwrap();
+        }
+        c
+    });
 
     let mut group = c.benchmark_group("bridge_dispatch_adaptive");
     group.throughput(Throughput::Elements(requests_per_iter));
@@ -382,28 +407,26 @@ fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
 
     group.bench_function("http11_concurrent_1000", |b| {
         b.to_async(&rt).iter(|| {
+            let client = client.clone();
             let url = url.clone();
             async move {
-                let client = reqwest::Client::builder()
-                    .pool_max_idle_per_host(64)
-                    .build()
-                    .unwrap();
-
-                let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
-                let mut handles = Vec::with_capacity(requests_per_iter as usize);
-
-                for _ in 0..requests_per_iter {
+                let remaining = Arc::new(std::sync::atomic::AtomicI64::new(requests_per_iter as i64));
+                let mut workers = Vec::with_capacity(32);
+                for _ in 0..32 {
                     let client = client.clone();
                     let url = url.clone();
-                    let sem = Arc::clone(&semaphore);
-                    handles.push(tokio::spawn(async move {
-                        let _permit = sem.acquire().await.unwrap();
-                        let _ = client.get(&url).send().await.unwrap();
+                    let remaining = Arc::clone(&remaining);
+                    workers.push(tokio::spawn(async move {
+                        while remaining
+                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+                            > 0
+                        {
+                            let _ = client.get(&url).send().await.unwrap().bytes().await.unwrap();
+                        }
                     }));
                 }
-
-                for h in handles {
-                    h.await.unwrap();
+                for w in workers {
+                    w.await.unwrap();
                 }
             }
         });

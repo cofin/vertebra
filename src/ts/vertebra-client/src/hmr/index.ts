@@ -1,3 +1,5 @@
+import { computeBackoffDelay } from "../client/retry";
+
 /**
  * Vertebra HMR Client
  *
@@ -89,7 +91,7 @@ function hideErrorOverlay(): void {
 // HMR Client
 // ---------------------------------------------------------------------------
 
-export class VertebraHmrClient {
+class HotReloadClient {
   private ws: WebSocket | null = null;
   private reconnectAttempts = 0;
   private reconnectTimer: any = null;
@@ -255,7 +257,7 @@ export class VertebraHmrClient {
       return;
     }
 
-    const delay = Math.min(RECONNECT_BASE_MS * 2 ** this.reconnectAttempts + Math.random() * 1000, RECONNECT_MAX_MS);
+    const delay = computeBackoffDelay(this.reconnectAttempts, RECONNECT_BASE_MS, RECONNECT_MAX_MS);
 
     this.reconnectAttempts++;
     this.reconnectTimer = setTimeout(() => {
@@ -265,18 +267,20 @@ export class VertebraHmrClient {
   }
 }
 
+export { HotReloadClient, HotReloadClient as VertebraHmrClient };
+
 // ---------------------------------------------------------------------------
 // Window global + auto-connect
 // ---------------------------------------------------------------------------
 
 declare global {
   interface Window {
-    __vertebra_hmr: VertebraHmrClient;
+    __vertebra_hmr: HotReloadClient;
   }
 }
 
 if (typeof window !== "undefined") {
-  const client = new VertebraHmrClient();
+  const client = new HotReloadClient();
   client.connect();
   window.__vertebra_hmr = client;
 }

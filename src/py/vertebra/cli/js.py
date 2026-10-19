@@ -14,16 +14,14 @@ from typing import Any
 import click
 
 from vertebra.builder._config import BuildConfig
-from vertebra.builder._import_map import write_import_map
+from vertebra.builder._import_map import parse_package_spec, write_import_map
 from vertebra.builder._orchestrator import BuildOrchestrator
 from vertebra.cli.errors import CLIError
 from vertebra.cli.theme import console
 
-logger = logging.getLogger("vertebra.cli.js")
-
 __all__ = ("js",)
 
-_MIN_SCOPED_PKG_PARTS = 2
+logger = logging.getLogger("vertebra.cli.js")
 
 
 @click.group()
@@ -182,13 +180,7 @@ def exec_cmd(cmd: tuple[str, ...]) -> None:
 
 def _parse_package_name(spec: str) -> str:
     """Extract package name from spec like ``react@18`` or ``@scope/pkg@1.0``."""
-    if spec.startswith("@"):
-        parts = spec.split("@")
-        if len(parts) >= _MIN_SCOPED_PKG_PARTS:
-            return f"@{parts[1]}"
-    if "@" in spec:
-        return spec.rsplit("@", 1)[0]
-    return spec
+    return parse_package_spec(spec)[0]
 
 
 def _read_pyproject(project_dir: Path) -> tuple[str, dict[str, Any]]:

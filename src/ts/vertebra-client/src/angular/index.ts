@@ -1,18 +1,18 @@
 import { effect, Injectable, inject, signal, untracked } from "@angular/core";
-import { VertebraClient } from "../client/client";
-import type { VertebraConfig } from "../client/types";
+import { HttpClient } from "../client/client";
+import type { ClientConfig } from "../client/types";
 
 @Injectable({
   providedIn: "root",
 })
 export class VertebraClientService {
-  private client: VertebraClient | null = null;
+  private client: HttpClient | null = null;
 
-  init(config: VertebraConfig) {
-    this.client = new VertebraClient(config);
+  init(config: ClientConfig) {
+    this.client = new HttpClient(config);
   }
 
-  getClient(): VertebraClient {
+  getClient(): HttpClient {
     if (!this.client) {
       throw new Error("VertebraClientService must be initialized with init()");
     }

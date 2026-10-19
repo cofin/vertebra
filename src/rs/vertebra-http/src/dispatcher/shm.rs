@@ -136,7 +136,8 @@ impl ShmDispatcher {
                 self.flush_shm_dispatch_batch(worker_idx, flushed);
             }
 
-            if batch_snapshot_serialized_size(1, request_slab_size(&request_view)) > max_payload {
+            let req_slab_bytes = request_slab_size(&request_view);
+            if batch_snapshot_serialized_size(1, req_slab_bytes) > max_payload {
                 warn!(
                     worker = worker_idx,
                     "request batch too large for SHM slot, responding with 503"
@@ -192,6 +193,7 @@ impl ShmDispatcher {
                 body_offset: 0,
                 body_len: body.len() as u32,
             });
+            pending.slab_len += req_slab_bytes;
             pending.components.push(bytes::Bytes::from(path));
             if let Some(q) = query {
                 pending.components.push(bytes::Bytes::from(q));
@@ -252,10 +254,9 @@ impl ShmDispatcher {
             .try_send_with(pending.flags, |slot| writer.serialize_into(slot))
         {
             Ok(()) => {
-                // PERF: Lazy Notify
+                // PERF: Lazy Notify — only signal when the ring transitioned from empty to non-empty.
                 let stats = worker.ring_pair.request_ring.stats();
-                if stats.write_head == stats.read_head.wrapping_add(1) & ((stats.slots as u64) - 1)
-                {
+                if stats.write_head == stats.read_head.wrapping_add(1) {
                     let _ = worker.transport.notify_request();
                 }
             }

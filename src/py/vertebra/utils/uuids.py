@@ -6,13 +6,14 @@ falling back to standard library. Aligned with vtb.
 """
 
 import warnings
-from collections.abc import Callable
 from importlib import import_module
-from typing import Any, cast
+from typing import Any, Final, cast
 from uuid import NAMESPACE_DNS, NAMESPACE_OID, NAMESPACE_URL, NAMESPACE_X500, UUID
 from uuid import uuid3 as _stdlib_uuid3
 from uuid import uuid4 as _stdlib_uuid4
 from uuid import uuid5 as _stdlib_uuid5
+
+from vertebra._typing import NANOID_INSTALLED, UUID_UTILS_INSTALLED
 
 __all__ = (
     "NAMESPACE_DNS",
@@ -21,6 +22,7 @@ __all__ = (
     "NAMESPACE_X500",
     "NANOID_INSTALLED",
     "UUID_UTILS_INSTALLED",
+    "_load_uuid_utils",
     "nanoid",
     "uuid3",
     "uuid4",
@@ -98,32 +100,39 @@ def nanoid() -> str:
     return cast("str", module.generate())
 
 
-class _Availability:
-    """Lazy availability flag for optional dependencies."""
-
-    __slots__ = ("_loader",)
-
-    def __init__(self, loader: Callable[[], Any | None]) -> None:
-        self._loader = loader
-
-    def __bool__(self) -> bool:
-        return self._loader() is not None
+_UNLOADED: Final[object] = object()
+_uuid_utils_module: Any = _UNLOADED
+_nanoid_module: Any = _UNLOADED
 
 
 def _load_uuid_utils() -> Any | None:
-    """Load uuid-utils when available."""
-    try:
-        return import_module("uuid_utils")
-    except Exception:
+    """Load and cache uuid-utils when available."""
+    global _uuid_utils_module
+    if _uuid_utils_module is not _UNLOADED:
+        return _uuid_utils_module
+    if not UUID_UTILS_INSTALLED:
+        _uuid_utils_module = None
         return None
+    try:
+        _uuid_utils_module = import_module("uuid_utils")
+    except Exception:
+        _uuid_utils_module = None
+    return _uuid_utils_module
 
 
 def _load_nanoid() -> Any | None:
-    """Load fastnanoid when available."""
-    try:
-        return import_module("fastnanoid")
-    except Exception:
+    """Load and cache fastnanoid when available."""
+    global _nanoid_module
+    if _nanoid_module is not _UNLOADED:
+        return _nanoid_module
+    if not NANOID_INSTALLED:
+        _nanoid_module = None
         return None
+    try:
+        _nanoid_module = import_module("fastnanoid")
+    except Exception:
+        _nanoid_module = None
+    return _nanoid_module
 
 
 def _convert_namespace(namespace: Any, module: Any | None) -> Any:
@@ -137,8 +146,5 @@ def _convert_namespace(namespace: Any, module: Any | None) -> Any:
 
 
 def _nanoid_impl() -> str:
+    """Generate a fallback hexadecimal Nano ID."""
     return _stdlib_uuid4().hex
-
-
-UUID_UTILS_INSTALLED = _Availability(_load_uuid_utils)
-NANOID_INSTALLED = _Availability(_load_nanoid)

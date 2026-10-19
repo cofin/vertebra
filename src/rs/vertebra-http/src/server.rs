@@ -10,7 +10,10 @@ use std::sync::Arc;
 use hyper::Request;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::TokioIo;
+#[cfg(feature = "tls")]
+use hyper_util::rt::TokioExecutor;
+#[cfg(feature = "tls")]
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info};
@@ -105,6 +108,7 @@ pub async fn run_with_listener(
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
+                        let _ = stream.set_nodelay(true);
                         let state = Arc::clone(&state);
                         #[cfg(feature = "tls")]
                         if let Some(ref tls_acc) = tls_acceptor {
@@ -144,22 +148,17 @@ async fn serve_plain(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!(peer = %peer, "plain TCP connection");
     let io = TokioIo::new(stream);
-    let state = Arc::clone(&state);
 
-    // Use HTTP/1 builder with pipeline_flush for improved throughput.
-    // pipeline_flush flushes response bytes eagerly, reducing per-response
-    // latency and improving keep-alive connection throughput.
-    let mut builder = AutoBuilder::new(TokioExecutor::new());
-    builder.http1().pipeline_flush(true);
-
-    builder
-        .serve_connection_with_upgrades(
+    hyper::server::conn::http1::Builder::new()
+        .pipeline_flush(true)
+        .serve_connection(
             io,
             service_fn(move |req: Request<Incoming>| {
                 let state = Arc::clone(&state);
                 async move { handle(req, state).await }
             }),
         )
+        .with_upgrades()
         .await?;
     Ok(())
 }
@@ -176,7 +175,10 @@ async fn serve_tls(
     let io = TokioIo::new(tls_stream);
     let state = Arc::clone(&state);
 
-    AutoBuilder::new(TokioExecutor::new())
+    let mut builder = AutoBuilder::new(TokioExecutor::new());
+    builder.http1().pipeline_flush(true);
+
+    builder
         .serve_connection_with_upgrades(
             io,
             service_fn(move |req: Request<Incoming>| {

@@ -7,9 +7,9 @@ from typing import Any
 
 from vertebra._typing import module_available
 from vertebra.server._asgi._queues import AsgiResponse
-from vertebra.utils.serializers._json import encode_json
+from vertebra.utils.serializers._json import encode_json_bytes
 
-__all__ = [
+__all__ = (
     "FastApiExtension",
     "HeaderFilter",
     "LitestarExtension",
@@ -17,7 +17,7 @@ __all__ = [
     "get_extensions",
     "is_static_route",
     "register_extension",
-]
+)
 
 log = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ class LitestarExtension:
                 return None
             result = await route_handler(**params)
             if isinstance(result, dict):
-                body = encode_json(result, as_bytes=True)
+                body = encode_json_bytes(result)
                 return AsgiResponse(status=200, headers=[("content-type", "application/json")], body=body)
             if isinstance(result, (str, bytes)):
                 body = result.encode("utf-8") if isinstance(result, str) else result

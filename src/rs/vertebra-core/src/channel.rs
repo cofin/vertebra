@@ -100,8 +100,10 @@ impl SlotView {
         // Advance read head to release the slot
         let next = self.slot_index.wrapping_add(1) & self.ring.mask;
         self.ring.read_head().store(next, Ordering::Release);
-        self.ring.wait_read_ptr().fetch_add(1, Ordering::Release);
-        let _ = crate::sync::wake_one(self.ring.wait_read_ptr());
+        if self.ring.send_waiters().load(Ordering::Acquire) > 0 {
+            self.ring.wait_read_ptr().fetch_add(1, Ordering::Release);
+            let _ = crate::sync::wake_one(self.ring.wait_read_ptr());
+        }
 
         // Clear the borrowed flag to allow new borrows
         self.ring.slot_borrowed.store(false, Ordering::Release);
@@ -282,10 +284,8 @@ impl SpscRing {
                 capacity: self.payload_capacity(),
             });
         }
-        // PERF: Relaxed loads for availability check - just testing if full.
-        // The Release store on write_head ensures slot data is visible to receivers.
-        let head = self.read_head().load(Ordering::Relaxed);
         let tail = self.write_head().load(Ordering::Relaxed);
+        let head = self.read_head().load(Ordering::Acquire);
         let next = tail.wrapping_add(1) & self.mask;
         if next == head {
             return Err(ChannelError::Full);
@@ -302,6 +302,71 @@ impl SpscRing {
             sync::wake_one(self.wait_write_ptr())?;
         }
         Ok(())
+    }
+
+    /// Zero-copy send: reserve a slot and call `writer` to populate `len` bytes of payload.
+    pub fn try_send_with<F>(&self, len: usize, flags: u32, writer: F) -> Result<(), ChannelError>
+    where
+        F: FnOnce(&mut [u8]),
+    {
+        if len > self.payload_capacity() {
+            return Err(ChannelError::PayloadTooLarge {
+                len,
+                capacity: self.payload_capacity(),
+            });
+        }
+        let tail = self.write_head().load(Ordering::Relaxed);
+        let head = self.read_head().load(Ordering::Acquire);
+        let next = tail.wrapping_add(1) & self.mask;
+        if next == head {
+            return Err(ChannelError::Full);
+        }
+        unsafe {
+            let slot = self.slot_ptr(tail);
+            let header = slot.cast::<SlotHeader>();
+            (*header).len = len as u32;
+            (*header).flags = flags;
+            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+            let payload_slice = core::slice::from_raw_parts_mut(payload_ptr, len);
+            writer(payload_slice);
+        }
+        self.write_head().store(next, Ordering::Release);
+        self.wait_write_ptr().fetch_add(1, Ordering::Release);
+        if self.recv_waiters().load(Ordering::Acquire) > 0 {
+            sync::wake_one(self.wait_write_ptr())?;
+        }
+        Ok(())
+    }
+
+    /// Blocking zero-copy send: waits for space if full, then calls `writer` to populate `len` bytes.
+    pub fn send_with<F>(&self, len: usize, flags: u32, mut writer: F) -> Result<(), ChannelError>
+    where
+        F: FnMut(&mut [u8]),
+    {
+        loop {
+            match self.try_send_with(len, flags, &mut writer) {
+                Ok(()) => return Ok(()),
+                Err(ChannelError::Full) => {
+                    let wait_word = self.wait_read_ptr();
+                    let expected = wait_word.load(Ordering::Acquire);
+
+                    self.send_waiters().fetch_add(1, Ordering::Release);
+
+                    let head = self.read_head().load(Ordering::Acquire);
+                    let tail = self.write_head().load(Ordering::Acquire);
+                    let next = tail.wrapping_add(1) & self.mask;
+                    if next != head {
+                        self.send_waiters().fetch_sub(1, Ordering::Relaxed);
+                        continue;
+                    }
+
+                    let result = sync::wait_on_address(wait_word, expected);
+                    self.send_waiters().fetch_sub(1, Ordering::Relaxed);
+                    result?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     pub fn send(&self, payload: &[u8], flags: u32) -> Result<(), ChannelError> {
@@ -379,15 +444,11 @@ impl SpscRing {
     }
 
     pub fn try_recv(&self, out: &mut [u8]) -> Result<usize, ChannelError> {
-        // PERF: Relaxed loads for availability check - just testing if empty.
         let head = self.read_head().load(Ordering::Relaxed);
-        let tail = self.write_head().load(Ordering::Relaxed);
+        let tail = self.write_head().load(Ordering::Acquire);
         if head == tail {
             return Err(ChannelError::Empty);
         }
-        // CRITICAL: Acquire fence ensures we see all writes sender made to slot
-        // before we read the payload. This synchronizes with sender's Release store.
-        std::sync::atomic::fence(Ordering::Acquire);
         let len = unsafe { self.read_slot(head, out)? };
         let next = head.wrapping_add(1) & self.mask;
         self.read_head().store(next, Ordering::Release);
@@ -401,14 +462,11 @@ impl SpscRing {
     }
 
     pub fn try_recv_with_flags(&self, out: &mut [u8]) -> Result<(usize, u32), ChannelError> {
-        // PERF: Relaxed loads for availability check
         let head = self.read_head().load(Ordering::Relaxed);
-        let tail = self.write_head().load(Ordering::Relaxed);
+        let tail = self.write_head().load(Ordering::Acquire);
         if head == tail {
             return Err(ChannelError::Empty);
         }
-        // CRITICAL: Acquire fence before reading slot data
-        std::sync::atomic::fence(Ordering::Acquire);
         let (len, flags) = unsafe { self.read_slot_with_flags(head, out)? };
         let next = head.wrapping_add(1) & self.mask;
         self.read_head().store(next, Ordering::Release);
@@ -1565,6 +1623,77 @@ impl MpmcRing {
             match self.try_recv(out) {
                 Ok(len) => return Ok(Some(len)),
                 Err(ChannelError::Empty) => {
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    backoff.snooze();
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    /// Zero-copy receive: claim a slot and pass a slice of its payload and flags to `reader`
+    /// before releasing the slot's sequence number.
+    pub fn try_recv_with<F, R>(&self, reader: F) -> Result<Option<(R, u32)>, ChannelError>
+    where
+        F: FnOnce(&[u8], u32) -> R,
+    {
+        let mut head = self.head().load(Ordering::Relaxed);
+        loop {
+            let index = (head & self.mask) as usize;
+            let seq = self.sequence(index).load(Ordering::Acquire);
+            let diff = seq as i64 - (head + 1) as i64;
+
+            if diff == 0 {
+                match self.head().compare_exchange(
+                    head,
+                    head + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        let (result, flags) = unsafe {
+                            let slot = self.slot_ptr(index);
+                            let header = &*slot.cast::<SlotHeader>();
+                            let len = header.len as usize;
+                            let flags = header.flags;
+                            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+                            let payload_slice = core::slice::from_raw_parts(payload_ptr, len);
+                            (reader(payload_slice, flags), flags)
+                        };
+                        self.sequence(index)
+                            .store(head + self.mask + 1, Ordering::Release);
+                        return Ok(Some((result, flags)));
+                    }
+                    Err(actual) => {
+                        head = actual;
+                        continue;
+                    }
+                }
+            } else if diff < 0 {
+                return Ok(None);
+            } else {
+                head = self.head().load(Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Zero-copy receive with timeout.
+    pub fn recv_timeout_with<F, R>(
+        &self,
+        timeout: Duration,
+        mut reader: F,
+    ) -> Result<Option<(R, u32)>, ChannelError>
+    where
+        F: FnMut(&[u8], u32) -> R,
+    {
+        let deadline = Instant::now() + timeout;
+        let backoff = Backoff::new();
+        loop {
+            match self.try_recv_with(&mut reader) {
+                Ok(Some(res)) => return Ok(Some(res)),
+                Ok(None) => {
                     if Instant::now() >= deadline {
                         return Ok(None);
                     }

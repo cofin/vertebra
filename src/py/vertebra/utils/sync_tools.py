@@ -89,9 +89,6 @@ class CapacityLimiter:
         return self._semaphore_instance
 
 
-_default_limiter = CapacityLimiter(1000)
-
-
 def run_[**ParamSpecT, ReturnT](
     async_function: Callable[ParamSpecT, Coroutine[Any, Any, ReturnT]],
 ) -> Callable[ParamSpecT, ReturnT]:

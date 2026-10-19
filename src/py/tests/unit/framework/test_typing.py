@@ -60,3 +60,27 @@ def test_public_typing_facade_unknown_attr_raises():
         from vertebra import typing
 
         typing.NonExistentType  # noqa: B018
+
+
+def test_optional_dependency_canonical_name_and_alias():
+    from vertebra._typing import OptionalDependency, OptionalDependencyFlag
+
+    assert OptionalDependency is OptionalDependencyFlag
+
+
+def test_lazy_vertebra_import_and_native_server_import():
+    """Bare `import vertebra` must not import heavy optional packages or server circular chains."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; "
+        "import vertebra; "
+        "heavy = [m for m in ('pydantic', 'attrs', 'attr', 'numpy', 'orjson', 'rich', "
+        "'vertebra.framework._app', 'vertebra.framework._router') if m in sys.modules]; "
+        "assert not heavy, f'Unexpected eager imports: {heavy}'; "
+        "import vertebra.server._native; "
+        "assert vertebra.App is vertebra.VertebraApp"
+    )
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr

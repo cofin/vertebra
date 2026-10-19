@@ -79,14 +79,14 @@ impl Transport {
     pub fn poll_batch(&self, timeout: Duration) -> Option<Arc<BatchSnapshot>> {
         match &self.backend {
             Backend::InProcess(rx) => rx.recv_timeout(timeout).ok(),
-            Backend::SharedMemory(ring_pair) => {
-                let mut buf = vec![0u8; ring_pair.request_ring.payload_capacity()];
-                match ring_pair.request_ring.recv_timeout(&mut buf, timeout) {
-                    Ok(Some(len)) => BatchSnapshot::deserialize_from(&buf[..len]).ok(),
-                    Ok(None) => None,
-                    Err(_) => None,
-                }
-            }
+            Backend::SharedMemory(ring_pair) => ring_pair
+                .request_ring
+                .recv_timeout_with(timeout, |slice, _flags| {
+                    BatchSnapshot::deserialize_from(slice).ok()
+                })
+                .ok()
+                .flatten()
+                .and_then(|(batch, _flags)| batch),
         }
     }
 
@@ -94,13 +94,12 @@ impl Transport {
     pub fn poll_batch_async(&self) -> Option<Arc<BatchSnapshot>> {
         match &self.backend {
             Backend::InProcess(rx) => rx.try_recv().ok(),
-            Backend::SharedMemory(ring_pair) => {
-                let mut buf = vec![0u8; ring_pair.request_ring.payload_capacity()];
-                match ring_pair.request_ring.try_recv(&mut buf) {
-                    Ok(len) => BatchSnapshot::deserialize_from(&buf[..len]).ok(),
-                    Err(_) => None,
-                }
-            }
+            Backend::SharedMemory(ring_pair) => ring_pair
+                .request_ring
+                .try_recv_with(|slice, _flags| BatchSnapshot::deserialize_from(slice).ok())
+                .ok()
+                .flatten()
+                .and_then(|(batch, _flags)| batch),
         }
     }
 
@@ -875,35 +874,74 @@ impl<'a> ShmBatchWriter<'a> {
     }
 }
 
-/// Decode headers from the compact binary format.
+/// Domain-oriented alias for [`BatchSnapshot`].
+pub type RequestBatch = BatchSnapshot;
+
+/// Domain-oriented alias for [`TransportNode`].
+pub type RequestRecord = TransportNode;
+
+/// Zero-allocation iterator over raw encoded headers.
 ///
 /// Format per header: `[name_len: u8][name: bytes][value_len: u16 LE][value: bytes]`
-pub fn decode_headers_raw(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let mut headers = Vec::new();
+pub fn iter_raw_headers(data: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
     let mut pos = 0;
-    while pos < data.len() {
+    std::iter::from_fn(move || {
+        if pos >= data.len() {
+            return None;
+        }
         let name_len = data[pos] as usize;
         pos += 1;
         if pos + name_len > data.len() {
-            break;
+            pos = data.len();
+            return None;
         }
-        let name = data[pos..pos + name_len].to_vec();
+        let name = &data[pos..pos + name_len];
         pos += name_len;
 
         if pos + 2 > data.len() {
-            break;
+            pos = data.len();
+            return None;
         }
         let value_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
         pos += 2;
         if pos + value_len > data.len() {
-            break;
+            pos = data.len();
+            return None;
         }
-        let value = data[pos..pos + value_len].to_vec();
+        let value = &data[pos..pos + value_len];
         pos += value_len;
 
-        headers.push((name, value));
+        Some((name, value))
+    })
+}
+
+/// Encode headers into the compact binary format.
+///
+/// Format per header: `[name_len: u8][name: bytes][value_len: u16 LE][value: bytes]`
+pub fn encode_headers_compact(headers: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    if headers.is_empty() {
+        return Vec::new();
     }
-    headers
+    let estimated_size: usize = headers.iter().map(|(k, v)| 3 + k.len() + v.len()).sum();
+    let mut buf = Vec::with_capacity(estimated_size);
+    for (name, value) in headers {
+        let name_len = name.len().min(u8::MAX as usize);
+        let value_len = value.len().min(u16::MAX as usize);
+        buf.push(name_len as u8);
+        buf.extend_from_slice(&name[..name_len]);
+        buf.extend_from_slice(&(value_len as u16).to_le_bytes());
+        buf.extend_from_slice(&value[..value_len]);
+    }
+    buf
+}
+
+/// Decode headers from the compact binary format.
+///
+/// Format per header: `[name_len: u8][name: bytes][value_len: u16 LE][value: bytes]`
+pub fn decode_headers_raw(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    iter_raw_headers(data)
+        .map(|(k, v)| (k.to_vec(), v.to_vec()))
+        .collect()
 }
 
 // Compile-time layout assertions. If TransportNode's size or alignment changes,

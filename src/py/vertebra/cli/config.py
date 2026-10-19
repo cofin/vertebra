@@ -24,6 +24,3 @@ def configure_rich_click() -> None:
     click.rich_click.STYLE_HEADER_TEXT = "bold"
     click.rich_click.STYLE_ERRORS_SUGGESTION = "dim italic"
     click.rich_click.ERRORS_SUGGESTION = "Try 'vtb --help' for more information."
-
-
-configure_rich_click()

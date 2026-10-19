@@ -1,13 +1,17 @@
 """Tests for the BuildOrchestrator."""
 
+import importlib
 import socket
+import textwrap
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from click.testing import CliRunner
 
 from vertebra.builder._config import BuildConfig
 from vertebra.builder._orchestrator import BuildOrchestrator
+from vertebra.cli.build import build
 
 
 @pytest.fixture
@@ -103,3 +107,117 @@ def test_run_bundler_noop_when_no_entry(tmp_project: Path) -> None:
     with patch.object(orchestrator, "_run_native") as mock_native:
         orchestrator._run_bundler(dev=False)
         mock_native.assert_not_called()
+
+
+def test_build_config_load_from_directory_and_vtb_section(tmp_path: Path) -> None:
+    """BuildConfig.load should accept a project directory and support [tool.vtb]."""
+    (tmp_path / "pyproject.toml").write_text(
+        textwrap.dedent(
+            """
+            [tool.vtb]
+            app = "example.app:app"
+            entry = "src/main.ts"
+            outdir = "static/dist"
+            codegen = true
+            codegen_output = "frontend/generated"
+            dev_port = 4242
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = BuildConfig.load(tmp_path)
+    assert cfg.app == "example.app:app"
+    assert cfg.entry == "src/main.ts"
+    assert cfg.outdir == "static/dist"
+    assert cfg.codegen is True
+    assert cfg.codegen_output == "frontend/generated"
+    assert cfg.dev_port == 4242
+
+
+def test_codegen_only_writes_generated_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """codegen_only() should emit TypeScript, Zod, and manifest artifacts."""
+    app_module = tmp_path / "sample_app.py"
+    app_module.write_text(
+        textwrap.dedent(
+            """
+            import msgspec
+            from vertebra.framework._app import App
+
+            class User(msgspec.Struct):
+                id: int
+                name: str
+
+            app = App()
+
+            @app.get("/users/{user_id}")
+            def get_user(user_id: int) -> User:
+                return User(id=user_id, name="Ada")
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    cfg = BuildConfig(app="sample_app:app", codegen=True, codegen_output="generated")
+    orch = BuildOrchestrator(tmp_path, config=cfg)
+
+    output_dir = orch.codegen_only()
+
+    assert (output_dir / "types.d.ts").exists()
+    assert (output_dir / "schemas.zod.ts").exists()
+    assert (output_dir / "manifest.json").exists()
+
+
+def test_codegen_only_uses_runtime_app_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """codegen_only() should accept an app path override from the runtime."""
+    app_module = tmp_path / "sample_runtime_app.py"
+    app_module.write_text(
+        textwrap.dedent(
+            """
+            import msgspec
+            from vertebra.framework._app import App
+
+            class Health(msgspec.Struct):
+                status: str
+
+            app = App()
+
+            @app.get("/health")
+            def health() -> Health:
+                return Health(status="ok")
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    cfg = BuildConfig(codegen=True, codegen_output="generated")
+    orch = BuildOrchestrator(tmp_path, config=cfg, app_path="sample_runtime_app:app")
+
+    output_dir = orch.codegen_only()
+
+    assert (output_dir / "types.d.ts").exists()
+    assert (output_dir / "schemas.zod.ts").exists()
+    assert (output_dir / "manifest.json").exists()
+
+
+def test_cli_build_invokes_orchestrator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI build command should hand off frontend builds to the orchestrator."""
+    called: list[Path] = []
+
+    class FakeOrchestrator:
+        def __init__(self, project_dir: Path) -> None:
+            called.append(project_dir)
+
+        def build(self) -> bool:
+            return True
+
+    build_module = importlib.import_module("vertebra.cli.build")
+    monkeypatch.setattr(build_module, "BuildOrchestrator", FakeOrchestrator)
+
+    runner = CliRunner()
+    result = runner.invoke(build, ["--project-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert called == [tmp_path.resolve()]

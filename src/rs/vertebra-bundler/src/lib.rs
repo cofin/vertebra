@@ -13,16 +13,17 @@ mod ssr;
 
 use pyo3::prelude::*;
 
-pub use bundler::RolldownBundler;
+pub use bundler::{Bundler, RolldownBundler};
 pub use config::{BuildResult, BundleConfig, DevConfig, OutputFile};
 pub use errors::BundlerError;
-pub use hmr::HmrEvent;
+pub use hmr::{HmrEvent, HmrWatcher, SourceWatcher};
 pub use ssr::{SsrPool, SsrResult};
 
 /// Python module definition
 #[pymodule]
 fn _bundler(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RolldownBundler>()?;
+    m.add("Bundler", m.getattr("RolldownBundler")?)?;
     m.add_class::<BundleConfig>()?;
     m.add_class::<DevConfig>()?;
     m.add_class::<BuildResult>()?;

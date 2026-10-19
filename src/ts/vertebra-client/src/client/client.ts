@@ -1,12 +1,13 @@
 import { NetworkError, TimeoutError, throwParsedError } from "./errors";
-import type { RouteResponse, VertebraConfig } from "./types";
-import { VertebraWebSocket } from "./ws";
+import { computeBackoffDelay } from "./retry";
+import type { ClientConfig, RouteResponse } from "./types";
+import { RealtimeChannel } from "./ws";
 
-export class VertebraClient {
-  private config: Required<VertebraConfig>;
-  private ws: VertebraWebSocket | null = null;
+class HttpClient {
+  private config: Required<ClientConfig>;
+  private ws: RealtimeChannel | null = null;
 
-  constructor(config: VertebraConfig) {
+  constructor(config: ClientConfig) {
     this.config = {
       baseURL: config.baseURL.replace(/\/$/, ""),
       headers: config.headers || {},
@@ -98,7 +99,7 @@ export class VertebraClient {
 
         // Network/timeout errors are retryable
         if (attempt < maxAttempts) {
-          const delay = Math.min(initialDelay * 2 ** attempt + Math.random() * initialDelay * 0.5, 30_000);
+          const delay = computeBackoffDelay(attempt, initialDelay);
           await sleep(delay);
           continue;
         }
@@ -117,7 +118,7 @@ export class VertebraClient {
    */
   subscribe<T>(channel: string, callback: (data: T) => void): () => void {
     if (!this.ws) {
-      this.ws = new VertebraWebSocket(this.config.wsURL);
+      this.ws = new RealtimeChannel(this.config.wsURL);
     }
     return this.ws.subscribe(channel, callback);
   }
@@ -165,6 +166,7 @@ function parseRetryDelay(response: Response, initialDelay: number, attempt: numb
       return Math.max(0, date - Date.now());
     }
   }
-  // Exponential backoff with jitter
-  return Math.min(initialDelay * 2 ** attempt + Math.random() * initialDelay * 0.5, 30_000);
+  return computeBackoffDelay(attempt, initialDelay);
 }
+
+export { HttpClient, HttpClient as VertebraClient };

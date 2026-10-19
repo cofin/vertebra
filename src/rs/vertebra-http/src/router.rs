@@ -65,17 +65,22 @@ impl NativeRouter {
         method: &str,
         path: &'r str,
     ) -> Result<RouteMatch<'r>, RouterError> {
-        let method_upper = method.to_ascii_uppercase();
+        let method_upper: std::borrow::Cow<'_, str> =
+            if method.bytes().all(|b| !b.is_ascii_lowercase()) {
+                std::borrow::Cow::Borrowed(method)
+            } else {
+                std::borrow::Cow::Owned(method.to_ascii_uppercase())
+            };
         let mr =
             self.per_method
-                .get(method_upper.as_str())
+                .get(method_upper.as_ref())
                 .ok_or_else(|| RouterError::NotFound {
-                    method: method_upper.clone(),
+                    method: method_upper.clone().into_owned(),
                     path: path.to_owned(),
                 })?;
 
         let matched = mr.at(path).map_err(|_| RouterError::NotFound {
-            method: method_upper,
+            method: method_upper.into_owned(),
             path: path.to_owned(),
         })?;
 
@@ -85,3 +90,6 @@ impl NativeRouter {
         })
     }
 }
+
+/// Domain-oriented alias for [`NativeRouter`].
+pub type Router = NativeRouter;

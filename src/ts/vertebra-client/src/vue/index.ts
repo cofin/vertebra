@@ -1,17 +1,17 @@
 import { inject, type MaybeRefOrGetter, provide, ref, toValue, watch } from "vue";
-import { VertebraClient } from "../client/client";
-import type { VertebraConfig } from "../client/types";
+import { HttpClient } from "../client/client";
+import type { ClientConfig } from "../client/types";
 
 const VERTEBRA_SYMBOL = Symbol("vertebra");
 
-export function provideVertebra(config: VertebraConfig) {
-  const client = new VertebraClient(config);
+export function provideVertebra(config: ClientConfig): HttpClient {
+  const client = new HttpClient(config);
   provide(VERTEBRA_SYMBOL, client);
   return client;
 }
 
-export function useVertebraClient(): VertebraClient {
-  const client = inject<VertebraClient>(VERTEBRA_SYMBOL);
+export function useVertebraClient(): HttpClient {
+  const client = inject<HttpClient>(VERTEBRA_SYMBOL);
   if (!client) {
     throw new Error("useVertebraClient must be used after provideVertebra");
   }

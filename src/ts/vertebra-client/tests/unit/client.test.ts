@@ -1,13 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { VertebraClient } from "../../src/client/client";
+import { HttpClient, VertebraClient } from "../../src/client/client";
 import { TimeoutError } from "../../src/client/errors";
+import { computeBackoffDelay } from "../../src/client/retry";
+import { RealtimeChannel, VertebraWebSocket } from "../../src/client/ws";
+import { HotReloadClient, VertebraHmrClient } from "../../src/hmr/index";
+import { initVertebraHtmx } from "../../src/htmx/index";
+import * as rootExports from "../../src/index";
+import { QueryCache } from "../../src/react/cache";
 
-describe("VertebraClient", () => {
-  let client: VertebraClient;
+describe("HttpClient / VertebraClient", () => {
+  let client: HttpClient;
 
   beforeEach(() => {
-    client = new VertebraClient({ baseURL: "http://api.test" });
+    client = new HttpClient({ baseURL: "http://api.test" });
     vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("exports canonical domain names and backwards-compatible Vertebra* aliases", () => {
+    expect(HttpClient).toBe(VertebraClient);
+    expect(RealtimeChannel).toBe(VertebraWebSocket);
+    expect(HotReloadClient).toBe(VertebraHmrClient);
+    expect(rootExports.HttpClient).toBe(rootExports.VertebraClient);
+    expect(rootExports.RealtimeChannel).toBe(rootExports.VertebraWebSocket);
+    expect(rootExports.SessionStore).toBe(rootExports.VertebraStore);
+    expect(rootExports.HotReloadClient).toBe(rootExports.VertebraHmrClient);
   });
 
   it("interpolates path parameters correctly", async () => {
@@ -103,5 +119,57 @@ describe("VertebraClient", () => {
 
     await expect(noRetryClient.call("GET", "/forbidden")).rejects.toThrow("Forbidden");
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("computeBackoffDelay", () => {
+  it("computes exponential delay with jitter capped at maxDelayMs", () => {
+    const d0 = computeBackoffDelay(0, 1000, 30_000);
+    expect(d0).toBeGreaterThanOrEqual(1000);
+    expect(d0).toBeLessThanOrEqual(1500);
+
+    const capped = computeBackoffDelay(10, 1000, 5000);
+    expect(capped).toBe(5000);
+  });
+});
+
+describe("QueryCache", () => {
+  it("returns undefined from get() when entry is stale", () => {
+    const cache = new QueryCache();
+    const key = QueryCache.stableKey("GET", "/items", undefined);
+    cache.set(key, ["a"]);
+
+    expect(cache.get(key, 5000)?.data).toEqual(["a"]);
+
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10_000);
+    expect(cache.get(key, 5000)).toBeUndefined();
+    vi.restoreAllMocks();
+  });
+
+  it("clears pending promise on rejection so subsequent getOrCreate retries", async () => {
+    const cache = new QueryCache();
+    const key = QueryCache.stableKey("GET", "/items", undefined);
+    let calls = 0;
+
+    await expect(
+      cache.getOrCreate(key, 5000, async () => {
+        calls++;
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+
+    const data = await cache.getOrCreate(key, 5000, async () => {
+      calls++;
+      return { ok: true };
+    });
+
+    expect(data).toEqual({ ok: true });
+    expect(calls).toBe(2);
+  });
+});
+
+describe("initVertebraHtmx", () => {
+  it("returns undefined without allocating an unused client", () => {
+    expect(initVertebraHtmx({ baseURL: "http://api.test" })).toBeUndefined();
   });
 });

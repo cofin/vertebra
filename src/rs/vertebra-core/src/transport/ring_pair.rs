@@ -174,7 +174,32 @@ impl TieredRingSet {
         Ok(Arc::new(ring))
     }
 
-    /// Send a response through the appropriate tier ring.
+    fn write_response_slot(
+        slot: &mut [u8],
+        correlation_id: u64,
+        status: u16,
+        headers_raw: &[u8],
+        body: &[u8],
+    ) {
+        let mut offset = 0;
+        slot[offset..offset + 4].copy_from_slice(&RESPONSE_MAGIC.to_le_bytes());
+        offset += 4;
+        slot[offset..offset + 8].copy_from_slice(&correlation_id.to_le_bytes());
+        offset += 8;
+        slot[offset..offset + 2].copy_from_slice(&status.to_le_bytes());
+        offset += 2;
+        let headers_len = headers_raw.len() as u16;
+        slot[offset..offset + 2].copy_from_slice(&headers_len.to_le_bytes());
+        offset += 2;
+        let body_len = body.len() as u32;
+        slot[offset..offset + 4].copy_from_slice(&body_len.to_le_bytes());
+        offset += 4;
+        slot[offset..offset + headers_raw.len()].copy_from_slice(headers_raw);
+        offset += headers_raw.len();
+        slot[offset..offset + body.len()].copy_from_slice(body);
+    }
+
+    /// Send a response through the appropriate tier ring without intermediate heap allocation.
     pub fn send_response(
         &self,
         correlation_id: u64,
@@ -187,26 +212,10 @@ impl TieredRingSet {
             .select_ring(total_size)
             .ok_or(RingPairError::ResponseTooLarge(total_size))?;
 
-        let mut buf = vec![0u8; total_size];
-        let mut offset = 0;
-
-        buf[offset..offset + 4].copy_from_slice(&RESPONSE_MAGIC.to_le_bytes());
-        offset += 4;
-        buf[offset..offset + 8].copy_from_slice(&correlation_id.to_le_bytes());
-        offset += 8;
-        buf[offset..offset + 2].copy_from_slice(&status.to_le_bytes());
-        offset += 2;
-        let headers_len = headers_raw.len() as u16;
-        buf[offset..offset + 2].copy_from_slice(&headers_len.to_le_bytes());
-        offset += 2;
-        let body_len = body.len() as u32;
-        buf[offset..offset + 4].copy_from_slice(&body_len.to_le_bytes());
-        offset += 4;
-        buf[offset..offset + headers_raw.len()].copy_from_slice(headers_raw);
-        offset += headers_raw.len();
-        buf[offset..offset + body.len()].copy_from_slice(body);
-
-        ring.try_send(&buf, 0).map_err(RingPairError::Channel)
+        ring.try_send_with(total_size, 0, |slot| {
+            Self::write_response_slot(slot, correlation_id, status, headers_raw, body);
+        })
+        .map_err(RingPairError::Channel)
     }
 
     /// Send a response through the appropriate tier ring, blocking until
@@ -223,53 +232,24 @@ impl TieredRingSet {
             .select_ring(total_size)
             .ok_or(RingPairError::ResponseTooLarge(total_size))?;
 
-        let mut buf = vec![0u8; total_size];
-        let mut offset = 0;
-
-        buf[offset..offset + 4].copy_from_slice(&RESPONSE_MAGIC.to_le_bytes());
-        offset += 4;
-        buf[offset..offset + 8].copy_from_slice(&correlation_id.to_le_bytes());
-        offset += 8;
-        buf[offset..offset + 2].copy_from_slice(&status.to_le_bytes());
-        offset += 2;
-        let headers_len = headers_raw.len() as u16;
-        buf[offset..offset + 2].copy_from_slice(&headers_len.to_le_bytes());
-        offset += 2;
-        let body_len = body.len() as u32;
-        buf[offset..offset + 4].copy_from_slice(&body_len.to_le_bytes());
-        offset += 4;
-        buf[offset..offset + headers_raw.len()].copy_from_slice(headers_raw);
-        offset += headers_raw.len();
-        buf[offset..offset + body.len()].copy_from_slice(body);
-
-        ring.send(&buf, 0).map_err(RingPairError::Channel)
+        ring.send_with(total_size, 0, |slot| {
+            Self::write_response_slot(slot, correlation_id, status, headers_raw, body);
+        })
+        .map_err(RingPairError::Channel)
     }
 
-    /// Try to receive a response from any tier (checks small → xlarge).
-    ///
-    /// This version uses a scratch buffer to minimize allocations.
+    /// Try to receive a response from any tier (checks small → xlarge) using zero-copy slot views.
     pub fn try_recv_response(&self) -> Result<Option<ResponseData>, RingPairError> {
-        thread_local! {
-            static SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
-        }
-
-        SCRATCH.with(|scratch| {
-            let mut scratch = scratch.borrow_mut();
-            for ring in [&self.small, &self.medium, &self.large, &self.xlarge] {
-                let cap = ring.payload_capacity();
-                if scratch.len() < cap {
-                    scratch.resize(cap, 0);
+        for ring in [&self.small, &self.medium, &self.large, &self.xlarge] {
+            match ring.try_recv_view() {
+                Ok(view) => {
+                    return ResponseData::deserialize(view.as_slice()).map(Some);
                 }
-                match ring.try_recv(&mut scratch) {
-                    Ok(len) => {
-                        return ResponseData::deserialize(&scratch[..len]).map(Some);
-                    }
-                    Err(ChannelError::Empty) => continue,
-                    Err(e) => return Err(RingPairError::Channel(e)),
-                }
+                Err(ChannelError::Empty) => continue,
+                Err(e) => return Err(RingPairError::Channel(e)),
             }
-            Ok(None)
-        })
+        }
+        Ok(None)
     }
 
     /// Select the ring for the given response size.
@@ -600,6 +580,12 @@ impl RingPairFds {
         ]
     }
 }
+
+/// Domain-oriented alias for [`TieredRingSet`].
+pub type ResponseChannel = TieredRingSet;
+
+/// Domain-oriented alias for [`RingPair`].
+pub type WorkerChannel = RingPair;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RingPairError {

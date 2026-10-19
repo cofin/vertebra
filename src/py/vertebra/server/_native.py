@@ -19,10 +19,18 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from vertebra.utils.serializers._json import encode_json
+from vertebra.utils.serializers._json import encode_json_bytes
 
 if TYPE_CHECKING:
     from vertebra._vertebra import VertebraBatch, VertebraRequest, VertebraResponse
+
+__all__ = (
+    "AsyncRuntime",
+    "BatchDispatchPlan",
+    "CallbackScheduler",
+    "_PartitionedBatch",
+    "run_worker",
+)
 
 _NATIVE_FREE_THREADED = False
 _submit_response: Any = None
@@ -34,15 +42,13 @@ with contextlib.suppress(ImportError):
         submit_response as _submit_response,
     )
 
-__all__ = ("CallbackScheduler", "run_worker")
-
 log = logging.getLogger(__name__)
 _REQUEST_PARAMS = frozenset({"request", "req"})
 _RUNNING = True
 _wsgi_executor: ThreadPoolExecutor | None = None
 
 
-class CallbackScheduler:
+class AsyncRuntime:
     """Persistent event loop thread for scheduling async callbacks from sync threads.
 
     Reduces per-batch overhead by avoiding loop start/stop and enabling
@@ -155,14 +161,20 @@ class CallbackScheduler:
         return futures
 
 
+CallbackScheduler = AsyncRuntime
+
+
 @dataclass(slots=True)
-class _PartitionedBatch:
+class BatchDispatchPlan:
     """Result of partitioning a batch into dispatch groups."""
 
     sync_native: list[tuple[int, Any, Any]] = field(default_factory=list)
     async_native: list[tuple[int, Any, Any]] = field(default_factory=list)
     mounts: dict[str, list[tuple[int, Any]]] = field(default_factory=dict)
     unmatched: list[tuple[int, Any]] = field(default_factory=list)
+
+
+_PartitionedBatch = BatchDispatchPlan
 
 
 def run_worker(
@@ -176,7 +188,7 @@ def run_worker(
     """Execute the batch runner loop with Unified Dispatch Architecture.
 
     A single IO Multiplexer thread is the sole batch consumer: it partitions
-    each batch once, routes async work to the persistent ``CallbackScheduler``
+    each batch once, routes async work to the persistent ``AsyncRuntime``
     event loop, and routes sync work to a shared ``ThreadPoolExecutor``.
     Individual responses are submitted via ``submit_response()`` as they
     complete.
@@ -197,7 +209,23 @@ def run_worker(
         if notify_fd <= -1:
             init_transport(mode="shm")
     else:
-        init_transport()
+        ring_name = os.environ.get("VERTEBRA_RING_NAME", "default")
+        slot_size = int(os.environ.get("VERTEBRA_SLOT_SIZE", "4096"))
+        slots = int(os.environ.get("VERTEBRA_SLOTS", "64"))
+        batch_size = int(os.environ.get("VERTEBRA_BATCH_SIZE", "64"))
+        if ring_name == "default" and slot_size == 4096 and slots == 64 and batch_size == 64:
+            init_transport()
+        else:
+            init_transport(
+                mode="inprocess",
+                ring_name=ring_name,
+                slot_size=slot_size,
+                slots=slots,
+                batch_size=batch_size,
+            )
+
+    for handler in handlers.values():
+        _handler_dispatch_spec(handler)
 
     scheduler = CallbackScheduler()
 
@@ -213,6 +241,7 @@ def run_worker(
 
     resolved_mounts = _build_mount_adapters(mounts or [])
     active_mounts = _instantiate_mount_runners(resolved_mounts, scheduler.loop)
+    mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in active_mounts}
 
     try:
         if is_shm:
@@ -232,6 +261,7 @@ def run_worker(
                 VR,
                 scheduler,
                 async_mode=True,
+                mount_lookup=mount_lookup,
             )
     finally:
         _RUNNING = False
@@ -304,18 +334,23 @@ def _partition_batch(
     batch: "list[Any] | VertebraBatch",
     handlers: dict[int, Any],
     mount_runners: list[tuple[str, Any, str]],
-) -> _PartitionedBatch:
+) -> BatchDispatchPlan:
     """Classify each request into sync, async, mount, or unmatched groups."""
-    result = _PartitionedBatch()
+    result = BatchDispatchPlan()
+    sync_native = result.sync_native
+    async_native = result.async_native
+    mounts_map = result.mounts
+    unmatched = result.unmatched
+    get_handler = handlers.get
 
     for idx, request in enumerate(batch):
-        handler = handlers.get(request.handler_id)
+        handler = get_handler(request.handler_id)
         if handler is not None:
-            _, is_async = _handler_meta(handler)
+            _, is_async, _, _ = _handler_dispatch_spec(handler)
             if is_async:
-                result.async_native.append((idx, request, handler))
+                async_native.append((idx, request, handler))
             else:
-                result.sync_native.append((idx, request, handler))
+                sync_native.append((idx, request, handler))
             continue
 
         if mount_runners:
@@ -323,13 +358,13 @@ def _partition_batch(
             matched = False
             for prefix, _adapter, _protocol in mount_runners:
                 if path.startswith(prefix):
-                    result.mounts.setdefault(prefix, []).append((idx, request))
+                    mounts_map.setdefault(prefix, []).append((idx, request))
                     matched = True
                     break
             if matched:
                 continue
 
-        result.unmatched.append((idx, request))
+        unmatched.append((idx, request))
 
     return result
 
@@ -376,13 +411,14 @@ def _dispatch_wsgi_concurrent(
 
 
 def _dispatch_batch(
-    partitioned: _PartitionedBatch,
+    partitioned: BatchDispatchPlan,
     handlers: dict[int, Any],
     mount_runners: list[tuple[str, Any, str]],
     vr_cls: Any,
-    scheduler: CallbackScheduler | asyncio.AbstractEventLoop,
+    scheduler: AsyncRuntime | asyncio.AbstractEventLoop,
     *,
     async_mode: bool = False,
+    mount_lookup: dict[str, tuple[Any, str]] | None = None,
 ) -> list[Any] | None:
     """Dispatch a partitioned batch with concurrent execution.
 
@@ -390,7 +426,7 @@ def _dispatch_batch(
     In async mode, spawns fire-and-forget tasks and returns None.
     """
     _ = handlers
-    loop = scheduler.loop if isinstance(scheduler, CallbackScheduler) else scheduler
+    loop = scheduler.loop if isinstance(scheduler, AsyncRuntime) else scheduler
 
     if not async_mode:
         total = (
@@ -408,13 +444,10 @@ def _dispatch_batch(
         if partitioned.async_native:
             coros = []
             for _idx, request, handler in partitioned.async_native:
-                has_params, _ = _handler_meta(handler)
-                if has_params:
-                    coros.append(handler(*_resolve_handler_args(handler, request)))
-                else:
-                    coros.append(handler())
+                _, _, _, invoker = _handler_dispatch_spec(handler)
+                coros.append(invoker(request))
 
-            if isinstance(scheduler, CallbackScheduler):
+            if isinstance(scheduler, AsyncRuntime):
                 futures = scheduler.schedule_batch(coros)
                 concurrent.futures.wait(futures)
                 for (idx, request, _handler), fut in zip(partitioned.async_native, futures, strict=True):
@@ -442,9 +475,11 @@ def _dispatch_batch(
                         )
 
         if partitioned.mounts:
-            mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in mount_runners}
+            resolved_lookup = mount_lookup or {
+                prefix: (adapter, protocol) for prefix, adapter, protocol in mount_runners
+            }
             for prefix, entries in partitioned.mounts.items():
-                adapter, protocol = mount_lookup[prefix]
+                adapter, protocol = resolved_lookup[prefix]
                 if protocol == "asgi":
                     requests_list = [req for _idx, req in entries]
                     responses = adapter(requests_list)
@@ -470,10 +505,11 @@ def _dispatch_batch(
     if partitioned.sync_native:
         executor = _get_wsgi_executor()
         for _idx, request, handler in partitioned.sync_native:
+            _, _, _, invoker = _handler_dispatch_spec(handler)
 
-            def _dispatch_sync(req: Any = request, h: Any = handler) -> None:
+            def _dispatch_sync(req: Any = request, inv: Any = invoker) -> None:
                 try:
-                    response = _call_handler(h, req, loop=loop)
+                    response = inv(req)
                     submit(_coerce_response(response, req.request_id, vr_cls))
                 except Exception:
                     log.exception("Sync handler error for request %s", req.request_id)
@@ -484,11 +520,11 @@ def _dispatch_batch(
     if partitioned.async_native:
         async_coros: list[Coroutine[Any, Any, None]] = []
         for _idx, request, handler in partitioned.async_native:
+            _, _, _, invoker = _handler_dispatch_spec(handler)
 
-            async def _dispatch_async(req: Any = request, h: Any = handler) -> None:
+            async def _dispatch_async(req: Any = request, inv: Any = invoker) -> None:
                 try:
-                    has_params, _ = _handler_meta(h)
-                    raw = await (h(*_resolve_handler_args(h, req)) if has_params else h())
+                    raw = await inv(req)
                     submit(_coerce_response(raw, req.request_id, vr_cls))
                 except Exception:
                     log.exception("Async handler error for request %s", req.request_id)
@@ -502,16 +538,19 @@ def _dispatch_batch(
 
             async_coros.append(_dispatch_async())
 
-        if isinstance(scheduler, CallbackScheduler):
+        if isinstance(scheduler, AsyncRuntime):
             scheduler.spawn_batch(async_coros)
+        elif asyncio._get_running_loop() is loop:
+            for coro in async_coros:
+                loop.create_task(coro)
         else:
             for coro in async_coros:
                 loop.call_soon_threadsafe(loop.create_task, coro)
 
     if partitioned.mounts:
-        mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in mount_runners}
+        resolved_lookup = mount_lookup or {prefix: (adapter, protocol) for prefix, adapter, protocol in mount_runners}
         for prefix, entries in partitioned.mounts.items():
-            adapter, protocol = mount_lookup[prefix]
+            adapter, protocol = resolved_lookup[prefix]
             if protocol == "asgi":
                 adapter.spawn_batch(req for _idx, req in entries)
             elif protocol == "wsgi":
@@ -535,7 +574,7 @@ def _dispatch_batch(
 async def _shm_worker_loop(
     handlers: dict[int, Any],
     active_mounts: list[tuple[str, Any, str]],
-    scheduler: CallbackScheduler,
+    scheduler: AsyncRuntime,
     batch_timeout_ms: int,
 ) -> None:
     """Run the asyncio-driven SHM worker loop using eventfd notifications."""
@@ -551,6 +590,10 @@ async def _shm_worker_loop(
     loop = asyncio.get_running_loop()
     notify_fd = get_request_notify_fd()
     ready_event = asyncio.Event()
+    mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in active_mounts}
+    dispatch_target: AsyncRuntime | asyncio.AbstractEventLoop = (
+        loop if isinstance(scheduler, AsyncRuntime) else scheduler
+    )
 
     def _on_readable() -> None:
         ready_event.set()
@@ -577,8 +620,9 @@ async def _shm_worker_loop(
                     handlers,
                     active_mounts,
                     VR,
-                    scheduler,
+                    dispatch_target,
                     async_mode=True,
+                    mount_lookup=mount_lookup,
                 )
     finally:
         loop.remove_reader(notify_fd)
@@ -589,49 +633,95 @@ def _is_free_threaded() -> bool:
     return bool(_NATIVE_FREE_THREADED)
 
 
-@functools.lru_cache(maxsize=256)
-def _handler_meta(handler: Any) -> tuple[bool, bool]:
-    """Return (has_params, is_async) for a handler callable."""
-    has_params = bool(inspect.signature(handler).parameters)
+def _extract_request(request: Any) -> Any:
+    return request
+
+
+def _extract_body(request: Any) -> bytes:
+    body = request.body
+    return body if isinstance(body, bytes) else bytes(body or b"")
+
+
+def _extract_headers(request: Any) -> Any:
+    return request.headers
+
+
+def _extract_method(request: Any) -> Any:
+    return request.method
+
+
+def _extract_path(request: Any) -> Any:
+    return request.path
+
+
+def _extract_query(request: Any) -> Any:
+    return request.query
+
+
+_PARAM_EXTRACTORS: dict[str, Callable[[Any], Any]] = {
+    "request": _extract_request,
+    "req": _extract_request,
+    "body": _extract_body,
+    "headers": _extract_headers,
+    "method": _extract_method,
+    "path": _extract_path,
+    "query": _extract_query,
+}
+
+
+@functools.lru_cache(maxsize=512)
+def _handler_dispatch_spec(
+    handler: Any,
+) -> tuple[bool, bool, tuple[str, ...], Callable[[Any], Any]]:
+    """Compile and cache ``(has_params, is_async, param_names, invoker)`` for a handler."""
+    params = tuple(inspect.signature(handler).parameters.keys())
+    has_params = bool(params)
     is_async = inspect.iscoroutinefunction(handler)
+    if not has_params:
+
+        def _invoke_no_args(_request: Any, _h: Any = handler) -> Any:
+            return _h()
+
+        invoker: Callable[[Any], Any] = _invoke_no_args
+    elif len(params) == 1 and params[0] in _REQUEST_PARAMS:
+        invoker = handler
+    else:
+        extractors = tuple(_PARAM_EXTRACTORS.get(name, _extract_request) for name in params)
+
+        def _invoke_with_extractors(
+            request: Any,
+            _h: Any = handler,
+            _ext: tuple[Callable[[Any], Any], ...] = extractors,
+        ) -> Any:
+            return _h(*(fn(request) for fn in _ext))
+
+        invoker = _invoke_with_extractors
+    return has_params, is_async, params, invoker
+
+
+def _handler_meta(handler: Any) -> tuple[bool, bool]:
+    """Return ``(has_params, is_async)`` for a handler callable."""
+    has_params, is_async, _, _ = _handler_dispatch_spec(handler)
     return has_params, is_async
 
 
-@functools.lru_cache(maxsize=256)
 def _handler_params(handler: Any) -> tuple[str, ...]:
     """Return cached parameter names for a handler callable."""
-    return tuple(inspect.signature(handler).parameters.keys())
+    return _handler_dispatch_spec(handler)[2]
 
 
 def _resolve_handler_args(handler: Any, request: Any) -> tuple[Any, ...]:
     """Build positional arguments for a handler based on its parameter names."""
-    params = _handler_params(handler)
+    params = _handler_dispatch_spec(handler)[2]
     if not params:
         return ()
-    args: list[Any] = []
-    for name in params:
-        if name in _REQUEST_PARAMS:
-            args.append(request)
-        elif name == "body":
-            body = request.body
-            args.append(body if isinstance(body, bytes) else bytes(body or b""))
-        elif name == "headers":
-            args.append(request.headers)
-        elif name == "method":
-            args.append(request.method)
-        elif name == "path":
-            args.append(request.path)
-        elif name == "query":
-            args.append(request.query)
-        else:
-            args.append(request)
-    return tuple(args)
+    return tuple(_PARAM_EXTRACTORS.get(name, _extract_request)(request) for name in params)
 
 
 def _call_handler(handler: Any, request: Any, *, loop: asyncio.AbstractEventLoop | None = None) -> Any:
     """Call a handler, resolving parameters by name."""
-    has_params, is_async = _handler_meta(handler)
-    result = handler(*_resolve_handler_args(handler, request)) if has_params else handler()
+    _, is_async, _, invoker = _handler_dispatch_spec(handler)
+    result = invoker(request)
     if is_async:
         if loop is None:
             msg = "async handler called without an event loop"
@@ -659,5 +749,5 @@ def _coerce_response(raw: Any, request_id: int, vr_cls: Any) -> Any:
     elif isinstance(raw, str):
         body = raw.encode("utf-8")
     else:
-        body = encode_json(raw, as_bytes=True)
+        body = encode_json_bytes(raw)
     return vr_cls(status=200, body=body, request_id=request_id)

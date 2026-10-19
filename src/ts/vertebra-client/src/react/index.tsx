@@ -1,22 +1,22 @@
 import type React from "react";
 import { createContext, use, useCallback, useContext, useMemo, useState } from "react";
-import { VertebraClient } from "../client/client";
-import type { VertebraConfig } from "../client/types";
+import { HttpClient } from "../client/client";
+import type { ClientConfig } from "../client/types";
 import { QueryCache, queryCache } from "./cache";
 
-const VertebraContext = createContext<VertebraClient | null>(null);
+const VertebraContext = createContext<HttpClient | null>(null);
 
 export interface VertebraProviderProps {
-  config: VertebraConfig;
+  config: ClientConfig;
   children: React.ReactNode;
 }
 
 export function VertebraProvider({ config, children }: VertebraProviderProps) {
-  const client = useMemo(() => new VertebraClient(config), [config]);
+  const client = useMemo(() => new HttpClient(config), [config]);
   return <VertebraContext.Provider value={client}>{children}</VertebraContext.Provider>;
 }
 
-export function useVertebraClient() {
+export function useVertebraClient(): HttpClient {
   const client = useContext(VertebraContext);
   if (!client) {
     throw new Error("useVertebraClient must be used within a VertebraProvider");
@@ -34,16 +34,19 @@ export function useQuery<TInput = any, TOutput = any>(
   method: string,
   path: string,
   input?: TInput,
-  options: { timeout?: number; enabled?: boolean; staleTime?: number } = {},
+  options?: { timeout?: number; enabled?: boolean; staleTime?: number },
 ) {
   const client = useVertebraClient();
-  const { enabled = true, staleTime = 0 } = options;
+  const enabled = options?.enabled ?? true;
+  const staleTime = options?.staleTime ?? 0;
+  const timeout = options?.timeout;
 
   const promise = useMemo(() => {
     if (!enabled) return Promise.resolve(null);
     const key = QueryCache.stableKey(method, path, input);
-    return queryCache.getOrCreate(key, staleTime, () => client.call<TInput, TOutput>(method, path, input, options));
-  }, [client, method, path, enabled, staleTime, input, options]);
+    const callOptions = timeout !== undefined ? { timeout } : undefined;
+    return queryCache.getOrCreate(key, staleTime, () => client.call<TInput, TOutput>(method, path, input, callOptions));
+  }, [client, method, path, enabled, staleTime, timeout, input]);
 
   const data = use(promise);
 

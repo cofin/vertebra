@@ -15,7 +15,7 @@ from vertebra.server._wsgi._extensions import (
 )
 from vertebra.server._wsgi._runner import WsgiRunner
 
-__all__ = [
+__all__ = (
     "BodyStream",
     "DjangoWsgiApp",
     "FlaskWsgiApp",
@@ -27,4 +27,4 @@ __all__ = [
     "configure_django",
     "create_flask_app",
     "wrap_with_error_handler",
-]
+)

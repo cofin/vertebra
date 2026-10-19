@@ -11,7 +11,7 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, overload
 
-from vertebra.cli.errors import ImproperConfigurationError
+from vertebra._typing import ImproperConfigurationError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

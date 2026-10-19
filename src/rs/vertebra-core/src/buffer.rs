@@ -4,11 +4,6 @@ use core::sync::atomic::{AtomicU32, AtomicU64};
 use std::cell::UnsafeCell;
 use std::sync::{Arc, Mutex};
 
-use arrow::error::ArrowError;
-use arrow::ipc::reader::StreamReader;
-use arrow::ipc::writer::StreamWriter;
-use arrow::record_batch::RecordBatch;
-
 /// Cache line size used to isolate hot atomics.
 ///
 /// Keep this in sync with `CacheLine<T>` alignment below.
@@ -217,26 +212,6 @@ impl Drop for Buffer {
     }
 }
 
-/// Write a RecordBatch into an Arrow IPC stream buffer.
-pub fn write_arrow_ipc(batch: &RecordBatch, buffer: &mut [u8]) -> Result<usize, ArrowError> {
-    let mut cursor = std::io::Cursor::new(buffer);
-    let mut writer = StreamWriter::try_new(&mut cursor, batch.schema().as_ref())?;
-    writer.write(batch)?;
-    writer.finish()?;
-    Ok(cursor.position() as usize)
-}
-
-/// Read RecordBatches from an Arrow IPC stream buffer.
-pub fn read_arrow_ipc(buffer: &[u8]) -> Result<Vec<RecordBatch>, ArrowError> {
-    let cursor = std::io::Cursor::new(buffer);
-    let reader = StreamReader::try_new(cursor, None)?;
-    let mut batches = Vec::new();
-    for batch in reader {
-        batches.push(batch?);
-    }
-    Ok(batches)
-}
-
 /// Describes a ring layout derived from slot size + slot count.
 #[derive(Debug, Copy, Clone)]
 pub struct RingLayout {
@@ -292,8 +267,6 @@ fn align_up(value: usize, align: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{ArrayRef, Int32Array};
-    use arrow::datatypes::{DataType, Field, Schema};
     use proptest::prelude::*;
     use std::sync::Arc;
 
@@ -366,21 +339,5 @@ mod tests {
             drop(buffers);
             prop_assert_eq!(pool.available(), count);
         }
-    }
-
-    #[test]
-    fn arrow_ipc_round_trip() {
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "value",
-            DataType::Int32,
-            false,
-        )]));
-        let array: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
-        let batch = RecordBatch::try_new(schema, vec![array]).unwrap();
-        let mut buffer = vec![0u8; 1024];
-        let written = write_arrow_ipc(&batch, &mut buffer).unwrap();
-        let batches = read_arrow_ipc(&buffer[..written]).unwrap();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].num_rows(), 3);
     }
 }

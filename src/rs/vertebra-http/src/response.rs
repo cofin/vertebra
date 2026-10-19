@@ -9,11 +9,11 @@ use bytes::Bytes;
 use http::{Response, StatusCode};
 use http_body_util::Full;
 use hyper::Request;
-use hyper::body::Incoming;
+use hyper::body::{Body, Incoming};
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-use vertebra_core::transport::decode_headers_raw;
+use vertebra_core::transport::{encode_headers_compact, iter_raw_headers};
 
 use crate::backpressure::{BackpressureMetricsSnapshot, CircuitState, RejectionReason};
 use crate::collector::{PendingRequest, PendingResponse, method_tag};
@@ -57,9 +57,9 @@ pub async fn handle(
         None
     };
 
-    let method = req.method().clone();
-    let uri = req.uri().clone();
-    let path = uri.path();
+    let (parts, body) = req.into_parts();
+    let method = &parts.method;
+    let path = parts.uri.path();
 
     // 1. Route lookup.
     let route_match = match state.router.lookup(method.as_str(), path) {
@@ -82,15 +82,18 @@ pub async fn handle(
     debug!(handler_id, method = %method, path, "routed request");
 
     // 2. Collect body (buffered in Chapter 5; streaming deferred).
-    let (parts, body) = req.into_parts();
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(e) => {
-            warn!(error = %e, "failed to read request body");
-            return Ok(error_response(
-                StatusCode::BAD_REQUEST,
-                "failed to read body",
-            ));
+    let body_bytes = if body.is_end_stream() {
+        Bytes::new()
+    } else {
+        match http_body_util::BodyExt::collect(body).await {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => {
+                warn!(error = %e, "failed to read request body");
+                return Ok(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "failed to read body",
+                ));
+            }
         }
     };
 
@@ -102,11 +105,11 @@ pub async fn handle(
 
     let pending = PendingRequest {
         handler_id,
-        method_tag: method_tag(&method),
+        method_tag: method_tag(method),
         http_version_tag: version_tag(parts.version),
         flags: vertebra_core::protocol::flags::NONE,
         path: path.to_owned(),
-        query: uri.query().map(str::to_owned),
+        query: parts.uri.query().map(str::to_owned),
         headers_mp,
         body: body_bytes,
         reply: reply_tx,
@@ -220,8 +223,7 @@ fn build_response(resp: PendingResponse) -> HyperResponse {
 
     // Decode response headers from compact binary format and set on Hyper response.
     if !resp.headers_mp.is_empty() {
-        let headers = decode_headers_raw(&resp.headers_mp);
-        for (name, value) in headers {
+        for (name, value) in iter_raw_headers(&resp.headers_mp) {
             builder = builder.header(name, value);
         }
     }
@@ -242,16 +244,5 @@ fn error_response(status: StatusCode, msg: &'static str) -> HyperResponse {
 ///
 /// Format per header: `[name_len: u8][name: bytes][value_len: u16 LE][value: bytes]`
 pub fn encode_response_headers(headers: &[(Vec<u8>, Vec<u8>)]) -> Bytes {
-    if headers.is_empty() {
-        return Bytes::new();
-    }
-    let mut buf = Vec::with_capacity(headers.len() * 32);
-    for (name, value) in headers.iter() {
-        buf.push(name.len() as u8);
-        buf.extend_from_slice(name);
-        let vlen = value.len() as u16;
-        buf.extend_from_slice(&vlen.to_le_bytes());
-        buf.extend_from_slice(value);
-    }
-    Bytes::from(buf)
+    Bytes::from(encode_headers_compact(headers))
 }

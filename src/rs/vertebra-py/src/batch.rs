@@ -65,3 +65,9 @@ impl VertebraBatchIter {
         }
     }
 }
+
+/// Domain-oriented alias for [`VertebraBatch`].
+pub type RequestBatch = VertebraBatch;
+
+/// Domain-oriented alias for [`VertebraBatchIter`].
+pub type RequestBatchIterator = VertebraBatchIter;

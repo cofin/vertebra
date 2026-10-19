@@ -16,16 +16,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
-use tokio::runtime::Runtime;
 use tokio::sync::broadcast;
 
 /// Main bundler class exposed to Python via PyO3
 #[pyclass]
 pub struct RolldownBundler {
-    /// Tokio runtime is retained so futures spawned during dev-mode watching
-    /// still have an executor even though we never call into it directly here.
-    #[allow(dead_code)]
-    runtime: Runtime,
     watcher: Option<HmrWatcher>,
     hmr_rx: Option<broadcast::Receiver<HmrEvent>>,
     hmr_port: Option<u16>,
@@ -38,12 +33,7 @@ impl RolldownBundler {
     /// Create a new RolldownBundler instance
     #[new]
     pub fn new() -> PyResult<Self> {
-        let runtime = Runtime::new().map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create runtime: {}", e))
-        })?;
-
         Ok(Self {
-            runtime,
             watcher: None,
             hmr_rx: None,
             hmr_port: None,
@@ -109,7 +99,8 @@ impl RolldownBundler {
 
     /// Transform a single TypeScript/JavaScript file
     pub fn transform_file(&self, py: Python<'_>, path: &str, source: &str) -> PyResult<String> {
-        let result = py.detach(|| transform_internal(path, source).map_err(|e| e.to_string()));
+        let result =
+            py.detach(|| transform_internal(path, source, false).map_err(|e| e.to_string()));
         result.map_err(pyo3::exceptions::PyRuntimeError::new_err)
     }
 
@@ -228,17 +219,11 @@ impl RolldownBundler {
         // Ensure output directory exists
         fs::create_dir_all(&out_dir)?;
 
-        // Read and transform entry file
+        // Read and transform entry file (single-pass AST parse + codegen with optional minification)
         let source = fs::read_to_string(&entry_path).map_err(BundlerError::Io)?;
 
-        let transformed = transform_internal(entry_path.to_string_lossy().as_ref(), &source)?;
-
-        // Apply minification if requested
-        let final_code = if config.minify {
-            minify_code(&transformed)?
-        } else {
-            transformed
-        };
+        let final_code =
+            transform_internal(entry_path.to_string_lossy().as_ref(), &source, config.minify)?;
 
         // Determine output filename
         let entry_stem = entry_path
@@ -259,6 +244,9 @@ impl RolldownBundler {
     }
 }
 
+/// Domain-oriented alias for [`RolldownBundler`].
+pub type Bundler = RolldownBundler;
+
 impl Default for RolldownBundler {
     fn default() -> Self {
         Self::new().expect("Failed to create default bundler")
@@ -266,7 +254,7 @@ impl Default for RolldownBundler {
 }
 
 /// Transform TypeScript/JavaScript to ES target, stripping type annotations
-fn transform_internal(path: &str, source: &str) -> Result<String> {
+fn transform_internal(path: &str, source: &str, minify: bool) -> Result<String> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path).unwrap_or_default();
 
@@ -297,28 +285,7 @@ fn transform_internal(path: &str, source: &str) -> Result<String> {
     // Generate output code
     let codegen = Codegen::new()
         .with_options(CodegenOptions {
-            minify: false,
-            ..Default::default()
-        })
-        .build(&ret.program);
-
-    Ok(codegen.code)
-}
-
-/// Simple minification via OXC codegen with minify flag
-fn minify_code(code: &str) -> Result<String> {
-    let allocator = Allocator::default();
-    let source_type = SourceType::default().with_module(true);
-
-    let ret = Parser::new(&allocator, code, source_type).parse();
-
-    if !ret.diagnostics.is_empty() {
-        return Err(BundlerError::Transform("Minification parse error".into()));
-    }
-
-    let codegen = Codegen::new()
-        .with_options(CodegenOptions {
-            minify: true,
+            minify,
             ..Default::default()
         })
         .build(&ret.program);
@@ -334,7 +301,7 @@ mod tests {
     #[test]
     fn test_transform_typescript() {
         let ts_source = "const greeting: string = 'hello';\nfunction add(a: number, b: number): number { return a + b; }\n";
-        let result = transform_internal("test.ts", ts_source);
+        let result = transform_internal("test.ts", ts_source, false);
         assert!(result.is_ok(), "Transform failed: {:?}", result.err());
         let output = result.unwrap();
         // TypeScript type annotations should be stripped
@@ -357,7 +324,7 @@ mod tests {
     #[test]
     fn test_minify_output() {
         let source = "const   greeting   =   'hello';\n\nconst   x   =   42;\n";
-        let result = minify_code(source);
+        let result = transform_internal("test.js", source, true);
         assert!(result.is_ok(), "Minify failed: {:?}", result.err());
         let output = result.unwrap();
         // Minified code should be shorter (less whitespace)

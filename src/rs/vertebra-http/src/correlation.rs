@@ -165,6 +165,9 @@ impl CorrelationSlab {
     }
 }
 
+/// Domain-oriented alias for [`CorrelationSlab`].
+pub type InFlightRequests = CorrelationSlab;
+
 #[cfg(test)]
 mod tests {
     use super::*;

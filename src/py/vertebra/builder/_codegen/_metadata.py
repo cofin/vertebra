@@ -7,7 +7,10 @@ from typing import Any
 
 from vertebra.builder._codegen._extractor import TypeExtractor
 from vertebra.builder._codegen._ir import TypeNode, UnknownType
+from vertebra.framework._app import App
 from vertebra.framework._router import RouteDef
+
+__all__ = ("RouteCollector", "RouteMetadata")
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,12 +28,15 @@ class RouteMetadata:
 
 
 class RouteCollector:
-    """Collect route metadata from a ``VertebraApp`` instance."""
+    """Collect route metadata from a Vertebra ``App`` instance."""
 
     def __init__(self, extractor: TypeExtractor | None = None) -> None:
         self._extractor = extractor or TypeExtractor()
 
     def collect(self, app: Any) -> list[RouteMetadata]:
+        """Discover all routes in the given application object."""
+        if not isinstance(app, App):
+            return []
         return [self._from_route(route) for route in app.routes]
 
     def _from_route(self, route: RouteDef) -> RouteMetadata:
@@ -40,7 +46,7 @@ class RouteCollector:
         source_file = Path(inspect.getsourcefile(handler) or "<unknown>")
 
         return RouteMetadata(
-            operation_id=_operation_id(route.method, route.path),
+            operation_id=self._operation_id(route.method, route.path),
             handler_fn=handler,
             source_file=source_file,
             params=params,
@@ -50,20 +56,17 @@ class RouteCollector:
             handler_name=handler_name,
         )
 
-
-def _operation_id(method: str, path: str) -> str:
-    parts = [method.lower()]
-    for segment in path.strip("/").split("/"):
-        if not segment:
-            continue
-        if segment.startswith("{") and segment.endswith("}"):
-            name = segment[1:-1].split(":", 1)[0].strip()
-            parts.append(f"by_{name}")
-            continue
-        parts.append(segment.replace("-", "_"))
-    if len(parts) == 1:
-        parts.append("root")
-    return ".".join(parts)
-
-
-__all__ = ("RouteCollector", "RouteMetadata")
+    @staticmethod
+    def _operation_id(method: str, path: str) -> str:
+        parts = [method.lower()]
+        for segment in path.strip("/").split("/"):
+            if not segment:
+                continue
+            if segment.startswith("{") and segment.endswith("}"):
+                name = segment[1:-1].split(":", 1)[0].strip()
+                parts.append(f"by_{name}")
+                continue
+            parts.append(segment.replace("-", "_"))
+        if len(parts) == 1:
+            parts.append("root")
+        return ".".join(parts)
