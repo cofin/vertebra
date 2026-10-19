@@ -3,10 +3,10 @@
 from typing import NoReturn
 
 import click
-from rich.console import Console
-from rich.panel import Panel
 
-__all__ = [
+from vertebra.cli.theme import console
+
+__all__ = (
     "EXIT_CONFIG_ERROR",
     "EXIT_INTERNAL_ERROR",
     "EXIT_SUCCESS",
@@ -15,18 +15,15 @@ __all__ = [
     "ConfigResolverError",
     "ImproperConfigurationError",
     "MissingDependencyError",
-    "error_console",
     "format_error",
     "print_cli_error",
     "raise_cli_error",
-]
+)
 
 EXIT_SUCCESS = 0
 EXIT_USER_ERROR = 1
 EXIT_CONFIG_ERROR = 2
 EXIT_INTERNAL_ERROR = 99
-
-error_console = Console(stderr=True)
 
 
 class CLIError(click.ClickException):
@@ -35,20 +32,12 @@ class CLIError(click.ClickException):
     def __init__(self, message: str, *, hint: str | None = None, exit_code: int = EXIT_USER_ERROR) -> None:
         super().__init__(message)
         self.hint = hint
-        self.exit_code = exit_code
+        self.__dict__["exit_code"] = exit_code
 
     def show(self, file: object = None) -> None:
-        from rich.text import Text
-
+        """Render the CLI error to the themed console."""
         _ = file
-        content = Text()
-        content.append(self.message, style="bold")
-        if self.hint:
-            content.append("\n\n")
-            content.append("Hint: ", style="dim")
-            content.append(self.hint, style="dim italic")
-        panel = Panel(content, title="Error", title_align="left", border_style="red", padding=(0, 1))
-        error_console.print(panel)
+        console.error(self.message, hint=self.hint)
 
 
 class MissingDependencyError(click.ClickException):
@@ -58,20 +47,15 @@ class MissingDependencyError(click.ClickException):
         self.package = package
         self.install_package = install_package or package
         message = f"Optional dependency '{package}' is required but not installed."
-        self.hint = f"Install it with: pip install {self.install_package}"
+        self.hint = f"Install it with: uv add {self.install_package}"
         super().__init__(message)
 
     def show(self, file: object = None) -> None:
-        from rich.text import Text
-
+        """Render the missing dependency warning and installation hint."""
         _ = file
-        content = Text()
-        content.append(str(self), style="bold")
-        content.append("\n\n")
-        content.append("Hint: ", style="dim")
-        content.append(self.hint, style="dim italic")
-        panel = Panel(content, title="Dependency Missing", title_align="left", border_style="yellow", padding=(0, 1))
-        error_console.print(panel)
+        console.warning(str(self))
+        if self.hint:
+            console.step(self.hint)
 
 
 class ConfigResolverError(click.ClickException):
@@ -118,6 +102,6 @@ def print_cli_error(exc: Exception) -> None:
 
 
 def raise_cli_error(exc: Exception) -> NoReturn:
-    """Convert an exception to CLIError and raise it."""
+    """Convert an exception to ``CLIError`` and raise it."""
     message, hint, exit_code = format_error(exc)
     raise CLIError(message, hint=hint, exit_code=exit_code) from exc

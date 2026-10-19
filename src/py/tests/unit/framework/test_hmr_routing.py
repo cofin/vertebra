@@ -6,10 +6,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from vertebra.builder._codegen._watch import HmrEventRouter, classify_file
 
-# ---------------------------------------------------------------------------
-# classify_file
-# ---------------------------------------------------------------------------
-
 
 def test_classify_file_classify_python_file() -> None:
     assert classify_file("src/app.py") == "python"
@@ -52,11 +48,6 @@ def test_classify_file_classify_case_insensitive_extension() -> None:
     assert classify_file("src/App.TSX") == "frontend"
 
 
-# ---------------------------------------------------------------------------
-# HmrEventRouter: subscribe / unsubscribe
-# ---------------------------------------------------------------------------
-
-
 def test_hmr_event_router_clients_subscribe_unsubscribe() -> None:
     router = HmrEventRouter()
     mock_ws = object()
@@ -68,7 +59,7 @@ def test_hmr_event_router_clients_subscribe_unsubscribe() -> None:
 
 def test_hmr_event_router_clients_unsubscribe_missing_client_is_noop() -> None:
     router = HmrEventRouter()
-    router.unsubscribe(object())  # should not raise
+    router.unsubscribe(object())
     assert router.client_count == 0
 
 
@@ -81,11 +72,6 @@ def test_hmr_event_router_clients_multiple_clients() -> None:
     assert router.client_count == 3
     router.unsubscribe(ws2)
     assert router.client_count == 2
-
-
-# ---------------------------------------------------------------------------
-# HmrEventRouter: route_event
-# ---------------------------------------------------------------------------
 
 
 def test_hmr_event_router_routing_routes_python_to_bridge() -> None:
@@ -104,7 +90,6 @@ def test_hmr_event_router_routing_routes_frontend_to_callback() -> None:
     callback = MagicMock()
     router = HmrEventRouter(on_hmr_update=callback)
 
-    # No event loop set, so _broadcast is a no-op, but callback fires.
     router.route_event(["src/App.tsx", "src/style.css"])
 
     callback.assert_called_once_with(["src/App.tsx", "src/style.css"])
@@ -119,7 +104,6 @@ def test_hmr_event_router_routing_config_triggers_full_reload() -> None:
         router.route_event(["pyproject.toml"])
 
     mock_broadcast.assert_called_once_with({"type": "full-reload", "reason": "config change"})
-    # Config change short-circuits: bridge and callback should NOT be called.
     bridge.invalidate.assert_not_called()
     callback.assert_not_called()
 
@@ -147,8 +131,7 @@ def test_hmr_event_router_routing_unknown_files_ignored() -> None:
 
 
 def test_hmr_event_router_routing_no_bridge_skips_invalidation() -> None:
-    router = HmrEventRouter()  # no bridge
-    # Should not raise
+    router = HmrEventRouter()
     router.route_event(["src/app.py"])
 
 
@@ -157,11 +140,6 @@ def test_hmr_event_router_routing_empty_changeset_is_noop() -> None:
     router = HmrEventRouter(bridge=bridge)
     router.route_event([])
     bridge.invalidate.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# HmrEventRouter: broadcast with event loop
-# ---------------------------------------------------------------------------
 
 
 def test_hmr_event_router_broadcast_sends_to_clients() -> None:
@@ -184,13 +162,11 @@ def test_hmr_event_router_broadcast_sends_to_clients() -> None:
         loop.close()
 
     good_ws.send_text.assert_called_once_with('{"type":"update"}')
-    # Stale client should have been pruned.
     assert router.client_count == 1
 
 
 def test_hmr_event_router_broadcast_without_loop_is_noop() -> None:
     router = HmrEventRouter()
-    # No loop set, _broadcast should silently return.
     router._broadcast({"type": "update", "updates": []})
 
 

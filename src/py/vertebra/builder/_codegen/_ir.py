@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 class TypeNode(msgspec.Struct, frozen=True, tag_field="_type", tag=True):
     """Base class for route codegen IR nodes."""
 
-    def to_typescript(self) -> str:  # pragma: no cover - overridden in subclasses
+    def to_typescript(self) -> str:
         raise NotImplementedError
 
     def iter_children(self) -> "Iterable[TypeNode]":

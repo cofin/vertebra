@@ -5,10 +5,6 @@ import pytest
 from vertebra.framework._app import HandlerInfo, VertebraApp, _make_handler_id
 from vertebra.framework._router import handler_id
 
-# ---------------------------------------------------------------------------
-# HandlerIdStability
-# ---------------------------------------------------------------------------
-
 
 def test_handler_id_stability_same_method_path_same_id() -> None:
     assert _make_handler_id("GET", "/ping") == _make_handler_id("GET", "/ping")
@@ -34,11 +30,10 @@ def test_handler_id_stability_path_normalized_via_app_route() -> None:
     """Path normalization happens in VertebraApp._route, not _make_handler_id."""
     app = VertebraApp()
 
-    @app.get("ping")  # without leading slash
+    @app.get("ping")
     def handler() -> str:
         return "ok"
 
-    # The route was normalized to /ping
     assert app.routes[0].path == "/ping"
     expected_id = _make_handler_id("GET", "/ping")
     assert expected_id in app.handler_index
@@ -52,11 +47,6 @@ def test_handler_id_stability_result_fits_uint64() -> None:
 def test_handler_id_stability_routing_module_handler_id_matches() -> None:
     """handler_id() from routing module must produce identical values."""
     assert handler_id("GET", "/ping") == _make_handler_id("GET", "/ping")
-
-
-# ---------------------------------------------------------------------------
-# VertebraAppRouteRegistration
-# ---------------------------------------------------------------------------
 
 
 def test_vertebra_app_route_registration_get_decorator_registers_route() -> None:

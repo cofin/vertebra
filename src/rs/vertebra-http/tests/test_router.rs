@@ -1,7 +1,7 @@
 //! Unit tests for the native router.
 
 use vertebra_http::{
-    route_table::{handler_id, RouteTable},
+    route_table::{RouteTable, handler_id},
     router::NativeRouter,
 };
 

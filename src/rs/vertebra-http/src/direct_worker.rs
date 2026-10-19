@@ -259,8 +259,8 @@ mod tests {
 
     #[tokio::test]
     async fn adaptive_worker_accumulates_under_load() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let (tx, rx) = mpsc::channel(256);
         let batch_sizes = Arc::new(std::sync::Mutex::new(Vec::new()));

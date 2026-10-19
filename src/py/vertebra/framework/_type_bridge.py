@@ -1,7 +1,11 @@
+"""TypeBridge: caching and version hashing for generated frontend type assets."""
+
 import hashlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+__all__ = ("TypeAssets", "TypeBridge")
 
 
 @dataclass
@@ -17,22 +21,22 @@ class TypeAssets:
 
 
 class TypeBridge:
-    """Manages the delivery of generated types to the frontend.
+    """Manage delivery of generated types, Zod schemas, and route manifests."""
 
-    Provides caching, ETag versioning, and invalidation for TypeScript
-    declarations and route manifests.
-    """
-
-    def __init__(self, codegen_dir: Path | str):
+    def __init__(self, codegen_dir: Path | str) -> None:
         self.codegen_dir = Path(codegen_dir)
         self._cache: TypeAssets | None = None
 
+    @property
+    def version(self) -> str:
+        """Return the current assets version hash."""
+        return self.get_assets().version
+
     def get_assets(self) -> TypeAssets:
-        """Return the current type assets, rebuilding cache if needed."""
+        """Return the current type assets, rebuilding the cache if needed."""
         if self._cache is not None:
             return self._cache
 
-        # 1. Load files from codegen dir
         ts_path = self.codegen_dir / "types.d.ts"
         zod_path = self.codegen_dir / "schemas.zod.ts"
         routes_path = self.codegen_dir / "routes.ts"
@@ -43,7 +47,6 @@ class TypeBridge:
         routes_content = routes_path.read_text() if routes_path.exists() else ""
         manifest_content = manifest_path.read_text() if manifest_path.exists() else "{}"
 
-        # 2. Generate version hash from contents
         combined = ts_content + zod_content + routes_content + manifest_content
         version = hashlib.sha256(combined.encode()).hexdigest()[:12]
 
@@ -59,8 +62,3 @@ class TypeBridge:
     def invalidate(self) -> None:
         """Clear the asset cache to force a reload on next access."""
         self._cache = None
-
-    @property
-    def version(self) -> str:
-        """Return the current assets version hash."""
-        return self.get_assets().version

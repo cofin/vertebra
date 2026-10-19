@@ -12,20 +12,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# AnyIO configuration
-# ---------------------------------------------------------------------------
-
 
 @pytest.fixture(params=["asyncio"])
 def anyio_backend(request: pytest.FixtureRequest) -> str:
     """AnyIO backend fixture — asyncio only (trio not used)."""
     return request.param
-
-
-# ---------------------------------------------------------------------------
-# Shared path fixtures
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -47,11 +38,6 @@ def codegen_dir(tmp_path: Path) -> Path:
     return d
 
 
-# ---------------------------------------------------------------------------
-# Shared memory cleanup
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def shm_name() -> str:
     """Unique shared memory name to avoid test collisions."""
@@ -69,11 +55,6 @@ def _cleanup_shm() -> Any:
         for path in glob.glob(pattern):
             with contextlib.suppress(OSError):
                 os.unlink(path)
-
-
-# ---------------------------------------------------------------------------
-# ASGI test helpers
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()

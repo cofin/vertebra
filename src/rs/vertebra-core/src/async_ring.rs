@@ -128,20 +128,9 @@ impl AsyncRing {
         slots: usize,
     ) -> Result<Self, AsyncRingError> {
         let layout = RingLayout::new(slot_size, slots, crate::buffer::ChannelMode::Spsc);
-        // Map region from FD
-        // ShmRegion::map handles mmap
-        let region = Arc::new(ShmRegion::map(fd, layout.total_size)?);
-        // Note: ShmRegion::map takes ownership of FD if we treat it as ShmHandle?
-        // Let's check ShmRegion::map implementation.
-        // It calls map_fd_region which creates ShmRegion.
-        // However, we usually duplicate the FD or pass ownership.
-        // Here we assume we pass ownership of the raw FD to ShmRegion.
-
-        let ring = SpscRing::attach(Arc::clone(&region), layout)?;
-        let notifier = Notifier::new()?; // Create new notifier for local use?
-                                         // Wait, if this is worker, it needs to attach to existing notifier if using shared?
-                                         // Or does it have its own?
-                                         // Worker.py uses add_reader on a separate notification FD.
+        let region = Arc::new(unsafe { ShmRegion::map(fd, layout.total_size)? });
+        let ring = unsafe { SpscRing::attach(Arc::clone(&region), layout)? };
+        let notifier = Notifier::new()?;
 
         Ok(Self {
             ring,
@@ -396,8 +385,8 @@ impl AsyncMpmcRing {
         slots: usize,
     ) -> Result<Self, AsyncRingError> {
         let layout = RingLayout::new(slot_size, slots, crate::buffer::ChannelMode::Mpmc);
-        let region = Arc::new(ShmRegion::map(fd, layout.total_size)?);
-        let ring = MpmcRing::attach(Arc::clone(&region), layout)?;
+        let region = Arc::new(unsafe { ShmRegion::map(fd, layout.total_size)? });
+        let ring = unsafe { MpmcRing::attach(Arc::clone(&region), layout)? };
         let notifier = Notifier::new()?;
 
         Ok(Self {

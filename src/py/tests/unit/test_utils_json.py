@@ -34,7 +34,6 @@ def test_encode_decode_basic():
 def test_encode_datetime():
     dt = datetime.datetime(2026, 3, 20, 10, 30, tzinfo=datetime.UTC)
     encoded = to_json({"dt": dt}, as_bytes=True)
-    # msgspec encodes datetime to ISO format
     assert b"2026-03-20T10:30:00Z" in encoded
 
 

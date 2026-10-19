@@ -7,7 +7,7 @@ SHELL := /bin/bash
 .ONESHELL:
 .EXPORT_ALL_VARIABLES:
 MAKEFLAGS += --no-print-directory
-SHELLFLAGS := -e -o pipefail -c
+.SHELLFLAGS := -eu -o pipefail -c
 
 ifndef VERBOSE
 .SILENT:
@@ -108,8 +108,8 @@ ts-lint:                                            ## Lint TS package with auto
 dev:                                                ## Install native extensions in debug mode for development
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler)
-	@uv run maturin develop --uv 2>&1 | grep -E "Compiling|Finished|Built wheel|Installed|error\[" | tail -3
-	@uv run maturin develop --uv -m src/rs/vertebra-bundler/Cargo.toml 2>&1 | grep -E "Compiling|Finished|Built wheel|Installed|error\[" | tail -3
+	@uv run maturin develop --uv
+	@uv run maturin develop --uv -m src/rs/vertebra-bundler/Cargo.toml
 
 # =============================================================================
 # Build
@@ -118,8 +118,8 @@ dev:                                                ## Install native extensions
 build: ts-build                                     ## Build optimized release binaries + native extension + TS client
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --release)
-	@uv run maturin develop --uv -r 2>&1 | grep -E "Compiling|Finished|Built wheel|Installed|error\[" | tail -3
-	@uv run maturin develop --uv -r -m src/rs/vertebra-bundler/Cargo.toml 2>&1 | grep -E "Compiling|Finished|Built wheel|Installed|error\[" | tail -3
+	@uv run maturin develop --uv -r
+	@uv run maturin develop --uv -r -m src/rs/vertebra-bundler/Cargo.toml
 	@uv build
 	@echo "${OK} Build complete"
 
@@ -161,7 +161,7 @@ lint: ts-lint                                       ## Format and lint everythin
 	@echo "${INFO} Linting and fixing Rust (Fmt & Clippy)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo fmt)
-	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --exclude vertebra-py --all-targets -- -D warnings >/dev/null 2>&1)
+	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,compression -- -D warnings)
 	@echo "${INFO} Running type checks (Mypy)..."
 	@uv run mypy src/py/vertebra
 	@echo "${OK} Lint complete"

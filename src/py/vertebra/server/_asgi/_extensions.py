@@ -1,13 +1,13 @@
-"""ASGI framework extensions — shared utilities + FastAPI/Litestar integrations."""
+"""ASGI framework extensions — shared utilities and FastAPI/Litestar integrations."""
 
 import functools
 import logging
 import re
 from typing import Any
 
+from vertebra._typing import module_available
 from vertebra.server._asgi._queues import AsgiResponse
-
-log = logging.getLogger(__name__)
+from vertebra.utils.serializers._json import encode_json
 
 __all__ = [
     "FastApiExtension",
@@ -19,11 +19,20 @@ __all__ = [
     "register_extension",
 ]
 
-# ---------------------------------------------------------------------------
-# Extension registry
-# ---------------------------------------------------------------------------
+log = logging.getLogger(__name__)
 
 _EXTENSIONS: list[Any] = []
+_FASTAPI_AVAILABLE = module_available("fastapi")
+_LITESTAR_AVAILABLE = module_available("litestar")
+
+_OPENAPI_PATHS: frozenset[str] = frozenset(
+    {
+        "/openapi.json",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
+    }
+)
 
 
 def register_extension(extension: Any) -> None:
@@ -34,11 +43,6 @@ def register_extension(extension: Any) -> None:
 def get_extensions() -> list[Any]:
     """Return the list of registered extensions."""
     return list(_EXTENSIONS)
-
-
-# ---------------------------------------------------------------------------
-# Route utilities
-# ---------------------------------------------------------------------------
 
 
 @functools.lru_cache(maxsize=512)
@@ -68,31 +72,11 @@ class HeaderFilter:
         return any(name == self._name_bytes and value == self._value_bytes for name, value in headers_bytes)
 
 
-# ---------------------------------------------------------------------------
-# FastAPI extension
-# ---------------------------------------------------------------------------
-
-try:
-    import fastapi as _fastapi_mod  # noqa: F401
-
-    _FASTAPI_AVAILABLE = True
-except ImportError:
-    _FASTAPI_AVAILABLE = False
-
-_OPENAPI_PATHS: frozenset[str] = frozenset(
-    {
-        "/openapi.json",
-        "/docs",
-        "/docs/oauth2-redirect",
-        "/redoc",
-    }
-)
-
-
 class FastApiExtension:
     """Vertebra extension for FastAPI ASGI applications."""
 
     def can_accelerate(self, app: Any) -> bool:
+        """Return True if the given application is a FastAPI instance."""
         if not _FASTAPI_AVAILABLE:
             return False
         try:
@@ -103,10 +87,12 @@ class FastApiExtension:
             return False
 
     async def try_handle(self, app: Any, request: Any) -> AsgiResponse | None:
-        """Always returns None — scaffold for future optimization."""
+        """Attempt direct handler invocation, returning None to fall through."""
+        _ = (app, request)
         return None
 
     def extract_routes(self, app: Any) -> dict[str, Any]:
+        """Extract static and dynamic routes registered on a FastAPI app."""
         if not _FASTAPI_AVAILABLE:
             return {}
         try:
@@ -121,22 +107,11 @@ class FastApiExtension:
             return {}
 
 
-# ---------------------------------------------------------------------------
-# Litestar extension (primary framework integration)
-# ---------------------------------------------------------------------------
-
-try:
-    import litestar as _litestar_mod  # noqa: F401
-
-    _LITESTAR_AVAILABLE = True
-except ImportError:
-    _LITESTAR_AVAILABLE = False
-
-
 class LitestarExtension:
     """Vertebra extension for Litestar ASGI applications."""
 
     def can_accelerate(self, app: Any) -> bool:
+        """Return True if the given application is a Litestar instance."""
         if not _LITESTAR_AVAILABLE:
             return False
         try:
@@ -147,7 +122,7 @@ class LitestarExtension:
             return False
 
     async def try_handle(self, app: Any, request: Any) -> AsgiResponse | None:
-        """Attempt direct handler invocation. Returns None to fall through."""
+        """Attempt direct handler invocation, returning None to fall through."""
         try:
             from litestar import Litestar
 
@@ -158,9 +133,7 @@ class LitestarExtension:
                 return None
             result = await route_handler(**params)
             if isinstance(result, dict):
-                import json as _json
-
-                body = _json.dumps(result).encode("utf-8")
+                body = encode_json(result, as_bytes=True)
                 return AsgiResponse(status=200, headers=[("content-type", "application/json")], body=body)
             if isinstance(result, (str, bytes)):
                 body = result.encode("utf-8") if isinstance(result, str) else result
@@ -170,20 +143,8 @@ class LitestarExtension:
             log.debug("Litestar direct invocation failed, falling back to ASGI", exc_info=True)
             return None
 
-    def _resolve_handler(self, app: Any, request: Any) -> tuple[Any, dict[str, Any]]:
-        try:
-            for route in getattr(app, "routes", []):
-                handler = getattr(route, "route_handler", None)
-                path = getattr(route, "path", None)
-                if path == request.path and handler is not None:
-                    fn = getattr(handler, "fn", None)
-                    if fn is not None and not getattr(handler, "middleware", None):
-                        return fn.value if hasattr(fn, "value") else fn, {}
-        except Exception:
-            pass
-        return None, {}
-
     def extract_routes(self, app: Any) -> dict[str, Any]:
+        """Extract route handlers keyed by path pattern from a Litestar app."""
         if not _LITESTAR_AVAILABLE:
             return {}
         try:
@@ -198,8 +159,20 @@ class LitestarExtension:
             log.debug("Litestar route extraction failed", exc_info=True)
             return {}
 
+    def _resolve_handler(self, app: Any, request: Any) -> tuple[Any, dict[str, Any]]:
+        try:
+            for route in getattr(app, "routes", []):
+                handler = getattr(route, "route_handler", None)
+                path = getattr(route, "path", None)
+                if path == request.path and handler is not None:
+                    fn = getattr(handler, "fn", None)
+                    if fn is not None and not getattr(handler, "middleware", None):
+                        return fn.value if hasattr(fn, "value") else fn, {}
+        except Exception:
+            pass
+        return None, {}
 
-# Auto-register available extensions
+
 if _FASTAPI_AVAILABLE:
     register_extension(FastApiExtension())
 

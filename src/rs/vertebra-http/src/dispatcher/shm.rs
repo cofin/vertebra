@@ -12,9 +12,9 @@ use vertebra_core::transport::ring_pair::RingPair;
 use vertebra_core::transport::{ShmBatchWriter, Transport, TransportNode};
 
 use super::types::{
-    batch_can_fit_request, batch_snapshot_serialized_size, request_slab_size,
-    service_unavailable_response, worker_ring_has_capacity, ShmDispatchBatch, TransportRequestView,
-    WorkerState,
+    ShmDispatchBatch, TransportRequestView, WorkerState, batch_can_fit_request,
+    batch_snapshot_serialized_size, request_slab_size, service_unavailable_response,
+    worker_ring_has_capacity,
 };
 use crate::collector::Batch;
 use crate::correlation::CorrelationSlab;
@@ -116,10 +116,8 @@ impl ShmDispatcher {
 
             let Some(worker_idx) = worker_idx else {
                 warn!("all worker rings full, responding with 503");
-                if !is_fnf {
-                    if let Some(reply) = reply.take() {
-                        let _ = reply.send(service_unavailable_response());
-                    }
+                if !is_fnf && let Some(reply) = reply.take() {
+                    let _ = reply.send(service_unavailable_response());
                 }
                 continue;
             };
@@ -129,13 +127,13 @@ impl ShmDispatcher {
                 .ring_pair
                 .request_ring
                 .payload_capacity();
-            if let Some(pending) = pending_batches.get(&batch_key) {
-                if !batch_can_fit_request(pending, &request_view, max_payload) {
-                    let flushed = pending_batches
-                        .remove(&batch_key)
-                        .expect("pending SHM batch should exist");
-                    self.flush_shm_dispatch_batch(worker_idx, flushed);
-                }
+            if let Some(pending) = pending_batches.get(&batch_key)
+                && !batch_can_fit_request(pending, &request_view, max_payload)
+            {
+                let flushed = pending_batches
+                    .remove(&batch_key)
+                    .expect("pending SHM batch should exist");
+                self.flush_shm_dispatch_batch(worker_idx, flushed);
             }
 
             if batch_snapshot_serialized_size(1, request_slab_size(&request_view)) > max_payload {
@@ -143,10 +141,8 @@ impl ShmDispatcher {
                     worker = worker_idx,
                     "request batch too large for SHM slot, responding with 503"
                 );
-                if !is_fnf {
-                    if let Some(reply) = reply.take() {
-                        let _ = reply.send(service_unavailable_response());
-                    }
+                if !is_fnf && let Some(reply) = reply.take() {
+                    let _ = reply.send(service_unavailable_response());
                 }
                 continue;
             }
@@ -158,7 +154,10 @@ impl ShmDispatcher {
                 let mut slab = self.correlation_shards[shard_idx].lock().unwrap();
                 if slab.in_flight() >= slab.capacity() {
                     drop(slab);
-                    warn!(shard = shard_idx, "correlation shard full, responding with 503");
+                    warn!(
+                        shard = shard_idx,
+                        "correlation shard full, responding with 503"
+                    );
                     if let Some(reply) = reply.take() {
                         let _ = reply.send(service_unavailable_response());
                     }
@@ -283,4 +282,3 @@ impl ShmDispatcher {
         }
     }
 }
-

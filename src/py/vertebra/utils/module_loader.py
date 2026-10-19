@@ -24,6 +24,7 @@ __all__ = (
     "ensure_sqlalchemy",
     "ensure_sqlspec",
     "ensure_uvloop",
+    "import_optional",
     "import_string",
     "module_available",
     "module_to_os_path",
@@ -31,43 +32,18 @@ __all__ = (
 )
 
 
-# =============================================================================
-# Module Loading and Import Utilities
-# =============================================================================
-
-
-def _require_dependency(
-    module_name: str, *, package_name: str | None = None, install_package: str | None = None
-) -> None:
-    """Raise MissingDependencyError when an optional dependency is absent."""
-
-    if module_available(module_name):
-        return
-
-    package = package_name or module_name
-    install = install_package or package
-    raise MissingDependencyError(package=package, install_package=install)
-
-
-def _raise_import_error(msg: str, exc: Exception | None = None) -> None:
-    """Raise an ImportError with optional exception chaining."""
-    if exc is not None:
-        raise ImportError(msg) from exc
-    raise ImportError(msg)
-
-
-def _resolve_import_attr(obj: Any, attr: str, module: "ModuleType | None", dotted_path: str) -> Any:
-    """Resolve a dotted attribute path segment on a module or object."""
+def import_optional(module_name: str) -> Any | None:
+    """Import and return a module when available, or None if not installed."""
+    if not module_available(module_name):
+        return None
     try:
-        return obj.__getattribute__(attr)
-    except AttributeError as exc:
-        module_name = module.__name__ if module is not None else "unknown"
-        _raise_import_error(f"Module '{module_name}' has no attribute '{attr}' in '{dotted_path}'", exc)
-        raise
+        return importlib.import_module(module_name)
+    except Exception:
+        return None
 
 
 def module_to_os_path(dotted_path: str = "app") -> Path:
-    """Convert a module dotted path to filesystem path."""
+    """Convert a module dotted path to a filesystem path."""
     try:
         if (src := find_spec(dotted_path)) is None:
             msg = f"Couldn't find the path for {dotted_path}"
@@ -82,7 +58,6 @@ def module_to_os_path(dotted_path: str = "app") -> Path:
 
 def import_string(dotted_path: str) -> Any:
     """Import a module or attribute from a dotted path string."""
-
     obj: Any = None
     try:
         parts = dotted_path.split(".")
@@ -149,3 +124,32 @@ def ensure_pyarrow() -> None:
 def ensure_msgspec() -> None:
     """Ensure msgspec is available."""
     _require_dependency("msgspec")
+
+
+def _require_dependency(
+    module_name: str, *, package_name: str | None = None, install_package: str | None = None
+) -> None:
+    """Raise MissingDependencyError when an optional dependency is absent."""
+    if module_available(module_name):
+        return
+
+    package = package_name or module_name
+    install = install_package or package
+    raise MissingDependencyError(package=package, install_package=install)
+
+
+def _raise_import_error(msg: str, exc: Exception | None = None) -> None:
+    """Raise an ImportError with optional exception chaining."""
+    if exc is not None:
+        raise ImportError(msg) from exc
+    raise ImportError(msg)
+
+
+def _resolve_import_attr(obj: Any, attr: str, module: "ModuleType | None", dotted_path: str) -> Any:
+    """Resolve a dotted attribute path segment on a module or object."""
+    try:
+        return obj.__getattribute__(attr)
+    except AttributeError as exc:
+        module_name = module.__name__ if module is not None else "unknown"
+        _raise_import_error(f"Module '{module_name}' has no attribute '{attr}' in '{dotted_path}'", exc)
+        raise

@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -37,6 +37,13 @@ struct NotifierFd {
 impl AsRawFd for NotifierFd {
     fn as_raw_fd(&self) -> RawFd {
         self.fd
+    }
+}
+
+#[cfg(unix)]
+impl AsFd for NotifierFd {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        unsafe { BorrowedFd::borrow_raw(self.fd) }
     }
 }
 
@@ -81,7 +88,7 @@ async fn run_worker_reader(
     #[cfg(unix)]
     {
         let fd = worker.response_notifier.as_raw_fd();
-        match AsyncFd::new(NotifierFd { fd }) {
+        match unsafe { AsyncFd::register(NotifierFd { fd }) } {
             Ok(async_fd) => {
                 run_worker_reader_async(worker_id, worker, dispatcher, shutdown, async_fd).await;
             }

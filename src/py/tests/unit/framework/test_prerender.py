@@ -7,10 +7,6 @@ from unittest.mock import MagicMock
 from vertebra.framework._ssr._backends import SsrResult
 from vertebra.framework._ssr._prerender import prerender_routes
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _mock_ssr_client(head: "list[str] | None" = None, body: str = "<div>rendered</div>") -> MagicMock:
     client = MagicMock()
@@ -19,11 +15,6 @@ def _mock_ssr_client(head: "list[str] | None" = None, body: str = "<div>rendered
         body=body,
     )
     return client
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 def test_prerender_routes_single_route(tmp_path: Path) -> None:
@@ -69,7 +60,7 @@ def test_prerender_routes_with_root_template(tmp_path: Path) -> None:
     html = written[0].read_text()
     assert "<title>Test</title>" in html
     assert "<div>rendered</div>" in html
-    assert "<!--ssr-head-->" not in html  # markers replaced
+    assert "<!--ssr-head-->" not in html
     assert "<!--ssr-body-->" not in html
 
 
@@ -84,7 +75,7 @@ def test_prerender_routes_render_failure_continues(tmp_path: Path) -> None:
         {"path": "/good", "component": "Good", "props": {}},
     ]
     written = prerender_routes(ssr_client=client, routes=routes, outdir=tmp_path)
-    assert len(written) == 1  # only the successful one
+    assert len(written) == 1
 
 
 def test_prerender_routes_page_object_has_version(tmp_path: Path) -> None:
@@ -115,7 +106,6 @@ def test_prerender_routes_html_contains_page_data(tmp_path: Path) -> None:
     prerender_routes(ssr_client=client, routes=routes, outdir=tmp_path)
     html = (tmp_path / "index.html").read_text()
     assert 'data-page="app"' in html
-    # Verify JSON roundtrips correctly
     page_data = json.loads(html.split('type="application/json">')[1].split("</script>")[0])
     assert page_data["component"] == "Home"
     assert page_data["props"]["user"] == "test"

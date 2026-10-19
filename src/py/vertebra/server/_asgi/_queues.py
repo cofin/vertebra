@@ -3,18 +3,16 @@
 import dataclasses
 from typing import Any
 
-__all__ = ["ReceiveChannel", "SendCollector"]
+__all__ = ["AsgiResponse", "ReceiveChannel", "SendCollector"]
 
 _STATE_BODY = 0
 _STATE_DISCONNECT = 1
-
-# Pre-built immutable message — reused across all requests after body delivery.
 _DISCONNECT_MSG: dict[str, Any] = {"type": "http.disconnect"}
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class AsgiResponse:
-    """Duck-type compatible with VertebraResponse for batch runner."""
+    """Duck-type compatible with VertebraResponse for the batch runner."""
 
     status: int
     headers: Any
@@ -46,11 +44,11 @@ class ReceiveChannel:
 class SendCollector:
     """Async callable that collects ASGI send messages into a response.
 
-    Optimised for the common single-chunk case: stores the first body chunk
-    directly, only allocates a list when multiple chunks arrive.
+    Optimized for the common single-chunk case by storing the first body chunk
+    directly and only allocating a list when multiple chunks arrive.
     """
 
-    __slots__ = ("_status", "_headers", "_body", "_extra_chunks", "_started")
+    __slots__ = ("_body", "_extra_chunks", "_headers", "_started", "_status")
 
     def __init__(self) -> None:
         self._status: int = 0
@@ -59,36 +57,31 @@ class SendCollector:
         self._extra_chunks: list[bytes] | None = None
         self._started: bool = False
 
-    async def __call__(self, message: dict[str, Any]) -> None:
-        msg_type: str = message["type"]
-
-        if msg_type == "http.response.start":
-            self._status = int(message["status"])
-            # Fast path: store raw byte headers directly.
-            # VertebraResponse constructor now handles byte headers efficiently.
-            self._headers = message.get("headers", [])
-            self._started = True
-
-        elif msg_type == "http.response.body":
-            chunk: bytes = message.get("body", b"")
-            if chunk:
-                if not self._body:
-                    # Fast path: first chunk stored directly, no list.
-                    self._body = chunk if isinstance(chunk, bytes) else bytes(chunk)
-                else:
-                    # Slow path: multiple chunks — accumulate in list.
-                    if self._extra_chunks is None:
-                        self._extra_chunks = [self._body]
-                    self._extra_chunks.append(chunk if isinstance(chunk, bytes) else bytes(chunk))
-
-        else:
-            msg = f"SendCollector received unexpected ASGI message type: {msg_type!r}"
-            raise RuntimeError(msg)
-
     @property
     def response(self) -> AsgiResponse:
+        """Build the final AsgiResponse once http.response.start has been received."""
         if not self._started:
             msg = "ASGI app completed without sending http.response.start"
             raise RuntimeError(msg)
         body = b"".join(self._extra_chunks) if self._extra_chunks is not None else self._body
         return AsgiResponse(status=self._status, headers=self._headers, body=body)
+
+    async def __call__(self, message: dict[str, Any]) -> None:
+        msg_type: str = message["type"]
+
+        if msg_type == "http.response.start":
+            self._status = int(message["status"])
+            self._headers = message.get("headers", [])
+            self._started = True
+        elif msg_type == "http.response.body":
+            chunk: bytes = message.get("body", b"")
+            if chunk:
+                if not self._body:
+                    self._body = chunk if isinstance(chunk, bytes) else bytes(chunk)
+                else:
+                    if self._extra_chunks is None:
+                        self._extra_chunks = [self._body]
+                    self._extra_chunks.append(chunk if isinstance(chunk, bytes) else bytes(chunk))
+        else:
+            msg = f"SendCollector received unexpected ASGI message type: {msg_type!r}"
+            raise RuntimeError(msg)

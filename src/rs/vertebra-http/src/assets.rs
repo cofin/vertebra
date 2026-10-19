@@ -125,26 +125,21 @@ impl AssetManager {
             .header("content-type", mime);
 
         // Inject Link preload headers for the index page.
-        if is_index || effective.ends_with("index.html") {
-            if let Some(manifest) = &self.manifest {
-                if let Some(entry) = manifest.get("index.html") {
-                    builder = builder
-                        .header("Link", format!("</{}>; rel=preload; as=script", entry.file));
-                    if let Some(css) = &entry.css {
-                        for c in css {
-                            builder =
-                                builder.header("Link", format!("</{}>; rel=preload; as=style", c));
-                        }
-                    }
-                    if let Some(imports) = &entry.imports {
-                        for key in imports {
-                            if let Some(chunk) = manifest.get(key) {
-                                builder = builder.header(
-                                    "Link",
-                                    format!("</{}>; rel=preload; as=script", chunk.file),
-                                );
-                            }
-                        }
+        if (is_index || effective.ends_with("index.html"))
+            && let Some(manifest) = &self.manifest
+            && let Some(entry) = manifest.get("index.html")
+        {
+            builder = builder.header("Link", format!("</{}>; rel=preload; as=script", entry.file));
+            if let Some(css) = &entry.css {
+                for c in css {
+                    builder = builder.header("Link", format!("</{}>; rel=preload; as=style", c));
+                }
+            }
+            if let Some(imports) = &entry.imports {
+                for key in imports {
+                    if let Some(chunk) = manifest.get(key) {
+                        builder = builder
+                            .header("Link", format!("</{}>; rel=preload; as=script", chunk.file));
                     }
                 }
             }

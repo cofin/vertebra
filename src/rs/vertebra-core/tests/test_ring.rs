@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use vertebra_core::buffer::{ChannelMode, RingLayout, CACHELINE_BYTES};
+use vertebra_core::buffer::{CACHELINE_BYTES, ChannelMode, RingLayout};
 use vertebra_core::channel::{ChannelError, SpscRing};
 use vertebra_core::shm::ShmRegion;
 

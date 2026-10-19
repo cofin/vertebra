@@ -11,31 +11,45 @@ import contextlib
 import functools
 import inspect
 import logging
+import os
 import signal
-import sys
 import threading
+from collections.abc import Callable, Coroutine, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
+
+from vertebra.utils.serializers._json import encode_json
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
-
     from vertebra._vertebra import VertebraBatch, VertebraRequest, VertebraResponse
 
+_NATIVE_FREE_THREADED = False
+_submit_response: Any = None
+with contextlib.suppress(ImportError):
+    from vertebra._vertebra import (
+        FREE_THREADED as _NATIVE_FREE_THREADED,
+    )
+    from vertebra._vertebra import (
+        submit_response as _submit_response,
+    )
+
+__all__ = ("CallbackScheduler", "run_worker")
+
 log = logging.getLogger(__name__)
+_REQUEST_PARAMS = frozenset({"request", "req"})
 _RUNNING = True
-_T = TypeVar("_T")
+_wsgi_executor: ThreadPoolExecutor | None = None
 
 
 class CallbackScheduler:
     """Persistent event loop thread for scheduling async callbacks from sync threads.
 
-    Drastically reduces per-batch overhead by avoiding loop start/stop and
-    enabling continuous IO overlap across batch boundaries.
+    Reduces per-batch overhead by avoiding loop start/stop and enabling
+    continuous I/O overlap across batch boundaries.
     """
 
-    __slots__ = ("_loop", "_thread", "_tasks")
+    __slots__ = ("_loop", "_tasks", "_thread")
 
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -47,8 +61,13 @@ class CallbackScheduler:
         )
         self._thread.start()
 
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop:
+        """Return the underlying event loop."""
+        return self._loop
+
     def stop(self) -> None:
-        """Stop the event loop and wait for the thread to exit."""
+        """Stop the event loop and wait for the background thread to exit."""
         if not self._loop.is_running():
             return
 
@@ -64,7 +83,7 @@ class CallbackScheduler:
         self._thread.join(timeout=5.0)
         self._loop.close()
 
-    def spawn(self, coro: "Coroutine[Any, Any, Any]") -> None:
+    def spawn(self, coro: Coroutine[Any, Any, Any]) -> None:
         """Schedule a coroutine onto the event loop without blocking."""
 
         def _callback() -> None:
@@ -74,48 +93,161 @@ class CallbackScheduler:
 
         self._loop.call_soon_threadsafe(_callback)
 
-    def schedule(self, coro: "Coroutine[Any, Any, _T]") -> "concurrent.futures.Future[_T]":
+    def spawn_batch(self, coros: Iterable[Coroutine[Any, Any, Any]]) -> None:
+        """Schedule multiple coroutines onto the event loop in a single cross-thread wake."""
+        coro_list = list(coros)
+        if not coro_list:
+            return
+
+        def _callback() -> None:
+            loop = self._loop
+            tasks = self._tasks
+            discard = tasks.discard
+            for coro in coro_list:
+                task = loop.create_task(coro)
+                tasks.add(task)
+                task.add_done_callback(discard)
+
+        self._loop.call_soon_threadsafe(_callback)
+
+    def schedule[T](self, coro: Coroutine[Any, Any, T]) -> concurrent.futures.Future[T]:
         """Schedule a coroutine onto the event loop and return a Future."""
-        future: concurrent.futures.Future[_T] = concurrent.futures.Future()
+        future: concurrent.futures.Future[T] = concurrent.futures.Future()
 
         def _callback() -> None:
             async def _wrap() -> None:
                 try:
                     result = await coro
                     future.set_result(result)
-                except Exception as e:
-                    future.set_exception(e)
+                except Exception as exc:
+                    future.set_exception(exc)
 
             self._loop.create_task(_wrap())
 
         self._loop.call_soon_threadsafe(_callback)
         return future
 
-    def schedule_batch(
+    def schedule_batch[T](
         self,
-        coros: "list[Coroutine[Any, Any, _T]]",
-    ) -> "list[concurrent.futures.Future[_T]]":
-        """Schedule multiple coroutines and return their Futures."""
-        return [self.schedule(c) for c in coros]
+        coros: list[Coroutine[Any, Any, T]],
+    ) -> list[concurrent.futures.Future[T]]:
+        """Schedule multiple coroutines under a single loop wake and return their Futures."""
+        if not coros:
+            return []
+        futures: list[concurrent.futures.Future[T]] = [concurrent.futures.Future() for _ in coros]
 
-    @property
-    def loop(self) -> asyncio.AbstractEventLoop:
-        """Access the underlying event loop."""
-        return self._loop
+        def _callback() -> None:
+            loop = self._loop
+            for coro, fut in zip(coros, futures, strict=True):
+
+                async def _wrap(
+                    c: Coroutine[Any, Any, T] = coro,
+                    f: concurrent.futures.Future[T] = fut,
+                ) -> None:
+                    try:
+                        f.set_result(await c)
+                    except Exception as exc:
+                        f.set_exception(exc)
+
+                loop.create_task(_wrap())
+
+        self._loop.call_soon_threadsafe(_callback)
+        return futures
+
+
+@dataclass(slots=True)
+class _PartitionedBatch:
+    """Result of partitioning a batch into dispatch groups."""
+
+    sync_native: list[tuple[int, Any, Any]] = field(default_factory=list)
+    async_native: list[tuple[int, Any, Any]] = field(default_factory=list)
+    mounts: dict[str, list[tuple[int, Any]]] = field(default_factory=dict)
+    unmatched: list[tuple[int, Any]] = field(default_factory=list)
+
+
+def run_worker(
+    handlers: "dict[int, Callable[[VertebraRequest], VertebraResponse]]",
+    *,
+    mounts: "list[tuple[str, Any, str]] | None" = None,
+    batch_timeout_ms: int = 100,
+    error_handler: "Callable[[Exception, VertebraRequest], VertebraResponse] | None" = None,
+    worker_count: int | None = None,
+) -> None:
+    """Execute the batch runner loop with Unified Dispatch Architecture.
+
+    A single IO Multiplexer thread is the sole batch consumer: it partitions
+    each batch once, routes async work to the persistent ``CallbackScheduler``
+    event loop, and routes sync work to a shared ``ThreadPoolExecutor``.
+    Individual responses are submitted via ``submit_response()`` as they
+    complete.
+    """
+    global _RUNNING, _wsgi_executor
+    _ = error_handler
+    from vertebra._vertebra import VertebraResponse as VR
+    from vertebra._vertebra import get_batch, get_request_notify_fd, init_transport
+
+    _install_signal_handlers()
+    _RUNNING = True
+
+    transport_mode = os.environ.get("VERTEBRA_TRANSPORT_MODE", "inprocess")
+    notify_fd = get_request_notify_fd()
+    is_shm = transport_mode == "shm" or notify_fd > -1
+
+    if is_shm:
+        if notify_fd <= -1:
+            init_transport(mode="shm")
+    else:
+        init_transport()
+
+    scheduler = CallbackScheduler()
+
+    threads_env = os.environ.get("VERTEBRA_THREADS")
+    default_threads = int(threads_env) if threads_env else (os.cpu_count() or 1)
+    pool_size = worker_count if worker_count is not None else default_threads
+
+    executor = ThreadPoolExecutor(
+        max_workers=max(128, pool_size * 8),
+        thread_name_prefix="vertebra-sync",
+    )
+    _wsgi_executor = executor
+
+    resolved_mounts = _build_mount_adapters(mounts or [])
+    active_mounts = _instantiate_mount_runners(resolved_mounts, scheduler.loop)
+
+    try:
+        if is_shm:
+            asyncio.run(_shm_worker_loop(handlers, active_mounts, scheduler, batch_timeout_ms))
+            return
+
+        while _RUNNING:
+            batch = get_batch(timeout_ms=batch_timeout_ms)
+            if batch is None:
+                continue
+
+            partitioned = _partition_batch(batch, handlers, active_mounts)
+            _dispatch_batch(
+                partitioned,
+                handlers,
+                active_mounts,
+                VR,
+                scheduler,
+                async_mode=True,
+            )
+    finally:
+        _RUNNING = False
+        scheduler.stop()
+        if _wsgi_executor is not None:
+            _wsgi_executor.shutdown(wait=False)
+            _wsgi_executor = None
 
 
 def _install_signal_handlers() -> None:
-    """Install SIGTERM and SIGINT handlers for clean batch-boundary shutdown.
-
-    Signal handlers can only be set from the main thread. When the Rust binary
-    spawns Python via PyO3, the worker runs on a background thread — in that
-    case we skip installation (the Rust side handles shutdown signals).
-    """
+    """Install SIGTERM and SIGINT handlers for clean batch-boundary shutdown."""
     if threading.current_thread() is not threading.main_thread():
         return
 
-    def _handle_signal(signum: int, frame: object) -> None:  # noqa: ARG001
-        global _RUNNING  # noqa: PLW0603
+    def _handle_signal(_signum: int, _frame: object) -> None:
+        global _RUNNING
         _RUNNING = False
 
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -124,14 +256,11 @@ def _install_signal_handlers() -> None:
 
 def _detect_protocol(app: Any) -> str:
     """Detect whether an app is WSGI or ASGI by inspecting its callable signature."""
-    # Check the app itself first (handles bare async def functions).
     if inspect.iscoroutinefunction(app):
         return "asgi"
-    # For class instances, check if the class's __call__ is async.
     cls_call = type(app).__dict__.get("__call__")
     if cls_call is not None and inspect.iscoroutinefunction(cls_call):
         return "asgi"
-    # Fallback: count parameters (3+ = ASGI scope/receive/send).
     try:
         sig = inspect.signature(app)
         params = [p for p in sig.parameters.values() if p.name != "self"]
@@ -145,7 +274,7 @@ def _detect_protocol(app: Any) -> str:
 def _build_mount_adapters(
     mounts: list[tuple[str, Any, str]],
 ) -> list[tuple[str, Any, str]]:
-    """Build adapter instances for each mount, resolving protocol="auto"."""
+    """Resolve protocol='auto' for each mount configuration tuple."""
     resolved: list[tuple[str, Any, str]] = []
     for prefix, app, protocol in mounts:
         if protocol == "auto":
@@ -154,19 +283,21 @@ def _build_mount_adapters(
     return resolved
 
 
-# ---------------------------------------------------------------------------
-# Batch partitioning
-# ---------------------------------------------------------------------------
+def _instantiate_mount_runners(
+    resolved_mounts: list[tuple[str, Any, str]],
+    loop: asyncio.AbstractEventLoop,
+) -> list[tuple[str, Any, str]]:
+    """Instantiate AsgiRunner and WsgiAdapter wrappers once for all resolved mounts."""
+    from vertebra.server._asgi._runner import AsgiRunner
+    from vertebra.server._wsgi._adapter import WsgiAdapter
 
-
-@dataclass
-class _PartitionedBatch:
-    """Result of partitioning a batch into dispatch groups."""
-
-    sync_native: list[tuple[int, Any, Any]] = field(default_factory=list)
-    async_native: list[tuple[int, Any, Any]] = field(default_factory=list)
-    mounts: dict[str, list[tuple[int, Any]]] = field(default_factory=dict)
-    unmatched: list[tuple[int, Any]] = field(default_factory=list)
+    active_mounts: list[tuple[str, Any, str]] = []
+    for prefix, app, protocol in resolved_mounts:
+        if protocol == "asgi":
+            active_mounts.append((prefix, AsgiRunner(app, mount_prefix=prefix, loop=loop), "asgi"))
+        elif protocol == "wsgi":
+            active_mounts.append((prefix, WsgiAdapter(app), "wsgi"))
+    return active_mounts
 
 
 def _partition_batch(
@@ -174,10 +305,7 @@ def _partition_batch(
     handlers: dict[int, Any],
     mount_runners: list[tuple[str, Any, str]],
 ) -> _PartitionedBatch:
-    """Classify each request into sync, async, mount, or unmatched groups.
-
-    O(N) dict lookups + prefix checks — negligible vs I/O.
-    """
+    """Classify each request into sync, async, mount, or unmatched groups."""
     result = _PartitionedBatch()
 
     for idx, request in enumerate(batch):
@@ -190,43 +318,33 @@ def _partition_batch(
                 result.sync_native.append((idx, request, handler))
             continue
 
-        # Try mounted apps by prefix match.
-        path = request.path
-        matched = False
-        for prefix, _adapter, _protocol in mount_runners:
-            if path.startswith(prefix):
-                result.mounts.setdefault(prefix, []).append((idx, request))
-                matched = True
-                break
+        if mount_runners:
+            path = request.path
+            matched = False
+            for prefix, _adapter, _protocol in mount_runners:
+                if path.startswith(prefix):
+                    result.mounts.setdefault(prefix, []).append((idx, request))
+                    matched = True
+                    break
+            if matched:
+                continue
 
-        if not matched:
-            result.unmatched.append((idx, request))
+        result.unmatched.append((idx, request))
 
     return result
 
 
-# ---------------------------------------------------------------------------
-# WSGI concurrent dispatch
-# ---------------------------------------------------------------------------
-
-# Module-level executor shared across all workers. Lazy-initialized on first
-# WSGI dispatch.  Thread pool for IO-bound WSGI apps (DB queries, HTTP calls).
-_wsgi_executor: "ThreadPoolExecutor | None" = None
-
-
 def _get_wsgi_executor() -> ThreadPoolExecutor:
     """Return the shared WSGI thread pool, creating it on first use."""
-    global _wsgi_executor  # noqa: PLW0603
+    global _wsgi_executor
     if _wsgi_executor is None:
-        import os
-
-        # Increase default to 128 to handle high-concurrency benchmarks
-        # (e.g. io_10ms with c=128).
         pool_size = max(128, (os.cpu_count() or 1) * 8)
-        _wsgi_executor = ThreadPoolExecutor(
+        executor = ThreadPoolExecutor(
             max_workers=pool_size,
             thread_name_prefix="vertebra-wsgi",
         )
+        _wsgi_executor = executor
+        return executor
     return _wsgi_executor
 
 
@@ -234,50 +352,35 @@ def _dispatch_wsgi_concurrent(
     adapter: Any,
     entries: list[tuple[int, Any]],
     results: list[Any],
-    vr_cls: type,
+    vr_cls: Any,
 ) -> None:
-    """Dispatch WSGI requests concurrently via thread pool.
-
-    All requests are submitted up front, then all results collected. This
-    maximizes IO overlap for blocking WSGI apps. For trivially fast WSGI
-    apps (hello), the thread pool overhead is ~2x vs sequential — an
-    acceptable trade-off for the massive IO improvement (1.3s → ~10ms).
-    """
+    """Dispatch WSGI requests concurrently via the shared thread pool."""
     if len(entries) == 1:
-        # Single request — no concurrency benefit, skip pool overhead.
         idx, request = entries[0]
         try:
             results[idx] = adapter(request)
         except Exception:
-            print(f"[vertebra] wsgi handler error for request {request.request_id}", file=sys.stderr)  # noqa: T201
+            log.exception("WSGI handler error for request %s", request.request_id)
             results[idx] = vr_cls(status=500, body=b"internal server error", request_id=request.request_id)
         return
 
     executor = _get_wsgi_executor()
-    indexed_futures: list[tuple[int, Any, Any]] = []
-    for idx, request in entries:
-        future = executor.submit(adapter, request)
-        indexed_futures.append((idx, request, future))
+    indexed_futures = [(idx, request, executor.submit(adapter, request)) for idx, request in entries]
 
     for idx, request, future in indexed_futures:
         try:
             results[idx] = future.result()
         except Exception:
-            print(f"[vertebra] wsgi handler error for request {request.request_id}", file=sys.stderr)  # noqa: T201
+            log.exception("WSGI handler error for request %s", request.request_id)
             results[idx] = vr_cls(status=500, body=b"internal server error", request_id=request.request_id)
-
-
-# ---------------------------------------------------------------------------
-# Dispatch
-# ---------------------------------------------------------------------------
 
 
 def _dispatch_batch(
     partitioned: _PartitionedBatch,
     handlers: dict[int, Any],
     mount_runners: list[tuple[str, Any, str]],
-    vr_cls: type,
-    scheduler: CallbackScheduler,
+    vr_cls: Any,
+    scheduler: CallbackScheduler | asyncio.AbstractEventLoop,
     *,
     async_mode: bool = False,
 ) -> list[Any] | None:
@@ -286,7 +389,8 @@ def _dispatch_batch(
     In blocking mode (default), returns responses in original batch order.
     In async mode, spawns fire-and-forget tasks and returns None.
     """
-    from vertebra._vertebra import submit_response
+    _ = handlers
+    loop = scheduler.loop if isinstance(scheduler, CallbackScheduler) else scheduler
 
     if not async_mode:
         total = (
@@ -297,12 +401,10 @@ def _dispatch_batch(
         )
         results: list[Any] = [None] * total
 
-        # 1. Sync native handlers — sequential, zero overhead for trivial handlers.
         for idx, request, handler in partitioned.sync_native:
-            response = _call_handler(handler, request, loop=scheduler.loop if partitioned.async_native else None)
+            response = _call_handler(handler, request, loop=loop if partitioned.async_native else None)
             results[idx] = _coerce_response(response, request.request_id, vr_cls)
 
-        # 2. Async native handlers — scheduled onto persistent loop.
         if partitioned.async_native:
             coros = []
             for _idx, request, handler in partitioned.async_native:
@@ -312,116 +414,131 @@ def _dispatch_batch(
                 else:
                     coros.append(handler())
 
-            futures = scheduler.schedule_batch(coros)
-            concurrent.futures.wait(futures)
+            if isinstance(scheduler, CallbackScheduler):
+                futures = scheduler.schedule_batch(coros)
+                concurrent.futures.wait(futures)
+                for (idx, request, _handler), fut in zip(partitioned.async_native, futures, strict=True):
+                    try:
+                        raw = fut.result()
+                        results[idx] = _coerce_response(raw, request.request_id, vr_cls)
+                    except Exception:
+                        log.exception("Async handler error for request %s", request.request_id)
+                        results[idx] = vr_cls(
+                            status=500,
+                            body=b"internal server error",
+                            request_id=request.request_id,
+                        )
+            else:
+                for (idx, request, _handler), coro in zip(partitioned.async_native, coros, strict=True):
+                    try:
+                        raw = loop.run_until_complete(coro)
+                        results[idx] = _coerce_response(raw, request.request_id, vr_cls)
+                    except Exception:
+                        log.exception("Async handler error for request %s", request.request_id)
+                        results[idx] = vr_cls(
+                            status=500,
+                            body=b"internal server error",
+                            request_id=request.request_id,
+                        )
 
-            for (idx, request, _handler), fut in zip(partitioned.async_native, futures, strict=True):
-                try:
-                    raw = fut.result()
-                    results[idx] = _coerce_response(raw, request.request_id, vr_cls)
-                except Exception as e:
-                    print(f"[vertebra] async handler error: {e}", file=sys.stderr)  # noqa: T201
-                    results[idx] = vr_cls(
-                        status=500,
-                        body=b"internal server error",
-                        request_id=request.request_id,
-                    )
+        if partitioned.mounts:
+            mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in mount_runners}
+            for prefix, entries in partitioned.mounts.items():
+                adapter, protocol = mount_lookup[prefix]
+                if protocol == "asgi":
+                    requests_list = [req for _idx, req in entries]
+                    responses = adapter(requests_list)
+                    for (idx, request), resp in zip(entries, responses, strict=True):
+                        results[idx] = vr_cls(
+                            status=resp.status,
+                            body=resp.body,
+                            headers=getattr(resp, "headers", []),
+                            request_id=request.request_id,
+                        )
+                elif protocol == "wsgi":
+                    _dispatch_wsgi_concurrent(adapter, entries, results, vr_cls)
 
-        # 3. Mounts — batched per prefix.
-        mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in mount_runners}
-        for prefix, entries in partitioned.mounts.items():
-            adapter, protocol = mount_lookup[prefix]
-            if protocol == "asgi":
-                requests_list = [req for _idx, req in entries]
-                responses = adapter(requests_list)
-                for (idx, request), resp in zip(entries, responses, strict=True):
-                    results[idx] = vr_cls(
-                        status=resp.status,
-                        body=resp.body,
-                        headers=getattr(resp, "headers", []),
-                        request_id=request.request_id,
-                    )
-            elif protocol == "wsgi":
-                _dispatch_wsgi_concurrent(adapter, entries, results, vr_cls)
-
-        # 4. Unmatched — 404.
         for idx, request in partitioned.unmatched:
             results[idx] = vr_cls(status=404, body=b"not found", request_id=request.request_id)
 
         return results
 
-    # ASYNC MODE: Fire and forget
-    # 1. Sync native handlers
-    for _idx, request, handler in partitioned.sync_native:
+    submit = _submit_response
+    if submit is None:
+        from vertebra._vertebra import submit_response as submit
 
-        def _dispatch_sync(req: Any = request, h: Any = handler) -> None:
-            try:
-                response = _call_handler(h, req, loop=scheduler.loop)
-                submit_response(_coerce_response(response, req.request_id, vr_cls))
-            except Exception as e:
-                print(f"[vertebra] sync handler error: {e}", file=sys.stderr)  # noqa: T201
-                submit_response(vr_cls(status=500, body=b"internal server error", request_id=req.request_id))
+    if partitioned.sync_native:
+        executor = _get_wsgi_executor()
+        for _idx, request, handler in partitioned.sync_native:
 
-        _get_wsgi_executor().submit(_dispatch_sync)
+            def _dispatch_sync(req: Any = request, h: Any = handler) -> None:
+                try:
+                    response = _call_handler(h, req, loop=loop)
+                    submit(_coerce_response(response, req.request_id, vr_cls))
+                except Exception:
+                    log.exception("Sync handler error for request %s", req.request_id)
+                    submit(vr_cls(status=500, body=b"internal server error", request_id=req.request_id))
 
-    # 2. Async native handlers
-    for _idx, request, handler in partitioned.async_native:
+            executor.submit(_dispatch_sync)
 
-        async def _dispatch_async(req: Any = request, h: Any = handler) -> None:
-            try:
-                has_params, _ = _handler_meta(h)
-                if has_params:
-                    raw = await h(*_resolve_handler_args(h, req))
-                else:
-                    raw = await h()
-                submit_response(_coerce_response(raw, req.request_id, vr_cls))
-            except Exception as e:
-                print(f"[vertebra] async handler error: {e}", file=sys.stderr)  # noqa: T201
-                submit_response(
-                    vr_cls(
-                        status=500,
-                        body=b"internal server error",
-                        request_id=req.request_id,
+    if partitioned.async_native:
+        async_coros: list[Coroutine[Any, Any, None]] = []
+        for _idx, request, handler in partitioned.async_native:
+
+            async def _dispatch_async(req: Any = request, h: Any = handler) -> None:
+                try:
+                    has_params, _ = _handler_meta(h)
+                    raw = await (h(*_resolve_handler_args(h, req)) if has_params else h())
+                    submit(_coerce_response(raw, req.request_id, vr_cls))
+                except Exception:
+                    log.exception("Async handler error for request %s", req.request_id)
+                    submit(
+                        vr_cls(
+                            status=500,
+                            body=b"internal server error",
+                            request_id=req.request_id,
+                        )
                     )
-                )
 
-        scheduler.spawn(_dispatch_async())
+            async_coros.append(_dispatch_async())
 
-    # 3. Mounts
-    mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in mount_runners}
-    for prefix, entries in partitioned.mounts.items():
-        adapter, protocol = mount_lookup[prefix]
-        if protocol == "asgi":
-            # Batched spawn amortizes the cross-thread wake across the
-            # whole mount batch. Falls back to spawn_single per request
-            # for single-item or non-running-loop cases internally.
-            adapter.spawn_batch(req for _idx, req in entries)
-        elif protocol == "wsgi":
-            # WSGI still uses thread pool but each result is submitted individually
-            for _idx, request in entries:
+        if isinstance(scheduler, CallbackScheduler):
+            scheduler.spawn_batch(async_coros)
+        else:
+            for coro in async_coros:
+                loop.call_soon_threadsafe(loop.create_task, coro)
 
-                def _dispatch_wsgi(req: Any = request, a: Any = adapter) -> None:
-                    try:
-                        submit_response(a(req))
-                    except Exception:
-                        submit_response(vr_cls(status=500, body=b"internal server error", request_id=req.request_id))
+    if partitioned.mounts:
+        mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in mount_runners}
+        for prefix, entries in partitioned.mounts.items():
+            adapter, protocol = mount_lookup[prefix]
+            if protocol == "asgi":
+                adapter.spawn_batch(req for _idx, req in entries)
+            elif protocol == "wsgi":
+                executor = _get_wsgi_executor()
+                for _idx, request in entries:
 
-                _get_wsgi_executor().submit(_dispatch_wsgi)
+                    def _dispatch_wsgi(req: Any = request, a: Any = adapter) -> None:
+                        try:
+                            submit(a(req))
+                        except Exception:
+                            submit(vr_cls(status=500, body=b"internal server error", request_id=req.request_id))
 
-    # 4. Unmatched
+                    executor.submit(_dispatch_wsgi)
+
     for _idx, request in partitioned.unmatched:
-        submit_response(vr_cls(status=404, body=b"not found", request_id=request.request_id))
+        submit(vr_cls(status=404, body=b"not found", request_id=request.request_id))
 
     return None
 
 
 async def _shm_worker_loop(
     handlers: dict[int, Any],
-    resolved_mounts: list[tuple[str, Any, str]],
+    active_mounts: list[tuple[str, Any, str]],
     scheduler: CallbackScheduler,
     batch_timeout_ms: int,
 ) -> None:
-    """Asyncio-driven SHM worker loop using eventfd notifications."""
+    """Run the asyncio-driven SHM worker loop using eventfd notifications."""
     from vertebra._vertebra import (
         VertebraResponse as VR,
     )
@@ -435,21 +552,6 @@ async def _shm_worker_loop(
     notify_fd = get_request_notify_fd()
     ready_event = asyncio.Event()
 
-    # Create mount adapters once
-    active_mounts: list[tuple[str, Any, str]] = []
-    for prefix, app, protocol in resolved_mounts:
-        if protocol == "asgi":
-            from vertebra.server._asgi._runner import AsgiRunner
-
-            # AsgiRunner is a synchronous batch interface, so it must submit
-            # onto the scheduler's off-thread loop rather than re-enter the
-            # currently running SHM event loop.
-            active_mounts.append((prefix, AsgiRunner(app, mount_prefix=prefix, loop=scheduler.loop), "asgi"))
-        elif protocol == "wsgi":
-            from vertebra.server._wsgi._adapter import WsgiAdapter
-
-            active_mounts.append((prefix, WsgiAdapter(app), "wsgi"))
-
     def _on_readable() -> None:
         ready_event.set()
 
@@ -458,143 +560,38 @@ async def _shm_worker_loop(
 
     try:
         while _RUNNING:
-            # Wait for next notification or small timeout
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(ready_event.wait(), timeout=batch_timeout_ms / 1000.0)
             ready_event.clear()
 
-            # Clear the notification BEFORE draining to avoid TOCTOU race conditions
             clear_request_notification()
 
-            # Drain all available batches
             while True:
                 batch = try_get_batch()
                 if batch is None:
                     break
 
                 partitioned = _partition_batch(batch, handlers, active_mounts)
-                _dispatch_batch(partitioned, handlers, active_mounts, VR, scheduler, async_mode=True)
+                _dispatch_batch(
+                    partitioned,
+                    handlers,
+                    active_mounts,
+                    VR,
+                    scheduler,
+                    async_mode=True,
+                )
     finally:
         loop.remove_reader(notify_fd)
 
 
-def run_worker(
-    handlers: "dict[int, Callable[[VertebraRequest], VertebraResponse]]",
-    *,
-    mounts: "list[tuple[str, Any, str]] | None" = None,
-    batch_timeout_ms: int = 100,
-    error_handler: "Callable[[Exception, VertebraRequest], VertebraResponse] | None" = None,
-    worker_count: "int | None" = None,
-) -> None:
-    """Execute the batch runner loop with Unified Dispatch Architecture.
-
-    A single **IO Multiplexer** thread is the sole batch consumer — it
-    partitions each batch once, routes async work to the persistent
-    ``CallbackScheduler`` event loop, and routes sync work to a shared
-    ``ThreadPoolExecutor``.  Individual responses are submitted via
-    ``submit_response()`` as they complete (fire-and-forget).
-
-    This eliminates the previous competing-consumer problem where N CPU
-    worker threads raced the IO multiplexer for the same MPMC queue,
-    causing batch fragmentation and misrouted requests.
-
-    ``worker_count`` controls the sync thread pool size.
-    """
-    import os
-
-    from vertebra._vertebra import VertebraResponse as VR
-    from vertebra._vertebra import get_batch, get_request_notify_fd, init_transport
-
-    _install_signal_handlers()
-
-    global _RUNNING  # noqa: PLW0603
-    _RUNNING = True
-
-    # Initialize the transport channel once. SHM workers may already have
-    # initialized the transport in the process entrypoint before delegating
-    # here, so we must not call init_transport(mode="shm") twice.
-    transport_mode = os.environ.get("VERTEBRA_TRANSPORT_MODE", "inprocess")
-    notify_fd = get_request_notify_fd()
-    is_shm = transport_mode == "shm" or notify_fd > -1
-
-    if is_shm:
-        if notify_fd <= -1:
-            init_transport(mode="shm")
-    else:
-        init_transport()
-
-    # 1. Shared Infrastructure
-    scheduler = CallbackScheduler()
-
-    # Thread pool for sync handlers and WSGI mounts.  Sized by explicit
-    # parameter, then VERTEBRA_THREADS env, then CPU count.
-    threads_env = os.environ.get("VERTEBRA_THREADS")
-    default_threads = int(threads_env) if threads_env else (os.cpu_count() or 1)
-    pool_size = worker_count if worker_count is not None else default_threads
-
-    global _wsgi_executor  # noqa: PLW0603
-    _wsgi_executor = ThreadPoolExecutor(
-        max_workers=max(128, pool_size * 8),
-        thread_name_prefix="vertebra-sync",
-    )
-
-    resolved_mounts = _build_mount_adapters(mounts or [])
-
-    # 2. Build all mount adapters once (both ASGI and WSGI).
-    active_mounts: list[tuple[str, Any, str]] = []
-    for prefix, app, protocol in resolved_mounts:
-        if protocol == "asgi":
-            from vertebra.server._asgi._runner import AsgiRunner
-
-            active_mounts.append((prefix, AsgiRunner(app, mount_prefix=prefix, loop=scheduler.loop), "asgi"))
-        elif protocol == "wsgi":
-            from vertebra.server._wsgi._adapter import WsgiAdapter
-
-            active_mounts.append((prefix, WsgiAdapter(app), "wsgi"))
-
-    # 3. Dispatch loop
-    if is_shm:
-        # SHM mode: asyncio event-driven loop in main thread.
-        try:
-            asyncio.run(_shm_worker_loop(handlers, resolved_mounts, scheduler, batch_timeout_ms))
-        finally:
-            _RUNNING = False
-            scheduler.stop()
-            if _wsgi_executor is not None:
-                _wsgi_executor.shutdown(wait=False)
-                _wsgi_executor = None
-        return
-
-    # In-process mode: single IO multiplexer thread as sole batch consumer.
-    try:
-        while _RUNNING:
-            batch = get_batch(timeout_ms=batch_timeout_ms)
-            if batch is None:
-                continue
-
-            partitioned = _partition_batch(batch, handlers, active_mounts)
-            _dispatch_batch(partitioned, handlers, active_mounts, VR, scheduler, async_mode=True)
-    finally:
-        _RUNNING = False
-        scheduler.stop()
-        if _wsgi_executor is not None:
-            _wsgi_executor.shutdown(wait=False)
-            _wsgi_executor = None
-
-
 def _is_free_threaded() -> bool:
-    """Check if the current Python build is free-threaded."""
-    try:
-        from vertebra._vertebra import FREE_THREADED
-
-        return FREE_THREADED
-    except ImportError:
-        return False
+    """Return True if the current Python build is free-threaded."""
+    return bool(_NATIVE_FREE_THREADED)
 
 
 @functools.lru_cache(maxsize=256)
 def _handler_meta(handler: Any) -> tuple[bool, bool]:
-    """Return (has_params, is_async) for a handler."""
+    """Return (has_params, is_async) for a handler callable."""
     has_params = bool(inspect.signature(handler).parameters)
     is_async = inspect.iscoroutinefunction(handler)
     return has_params, is_async
@@ -602,16 +599,12 @@ def _handler_meta(handler: Any) -> tuple[bool, bool]:
 
 @functools.lru_cache(maxsize=256)
 def _handler_params(handler: Any) -> tuple[str, ...]:
-    """Return parameter names for a handler (cached)."""
+    """Return cached parameter names for a handler callable."""
     return tuple(inspect.signature(handler).parameters.keys())
 
 
-# Parameter names that receive the whole request object.
-_REQUEST_PARAMS = frozenset({"request", "req"})
-
-
 def _resolve_handler_args(handler: Any, request: Any) -> tuple[Any, ...]:
-    """Build positional args for a handler based on its parameter names."""
+    """Build positional arguments for a handler based on its parameter names."""
     params = _handler_params(handler)
     if not params:
         return ()
@@ -631,12 +624,11 @@ def _resolve_handler_args(handler: Any, request: Any) -> tuple[Any, ...]:
         elif name == "query":
             args.append(request.query)
         else:
-            # Unknown param name — pass request as fallback.
             args.append(request)
     return tuple(args)
 
 
-def _call_handler(handler: Any, request: Any, *, loop: "asyncio.AbstractEventLoop | None" = None) -> Any:
+def _call_handler(handler: Any, request: Any, *, loop: asyncio.AbstractEventLoop | None = None) -> Any:
     """Call a handler, resolving parameters by name."""
     has_params, is_async = _handler_meta(handler)
     result = handler(*_resolve_handler_args(handler, request)) if has_params else handler()
@@ -648,28 +640,24 @@ def _call_handler(handler: Any, request: Any, *, loop: "asyncio.AbstractEventLoo
     return result
 
 
-def _coerce_response(raw: Any, request_id: int, vr_cls: type) -> Any:
+def _coerce_response(raw: Any, request_id: int, vr_cls: Any) -> Any:
     """Turn a handler return value into a VertebraResponse."""
     if isinstance(raw, vr_cls):
-        if raw.request_id == 0:  # type: ignore[attr-defined]
-            return vr_cls(status=raw.status, body=bytes(raw.body), request_id=request_id)  # type: ignore[attr-defined]
+        if raw.request_id == 0:
+            try:
+                raw.request_id = request_id
+            except AttributeError:
+                return vr_cls(
+                    status=raw.status,
+                    body=bytes(raw.body),
+                    headers=getattr(raw, "headers", None),
+                    request_id=request_id,
+                )
         return raw
-    # Handler returned a primitive — wrap it.
     if isinstance(raw, bytes):
         body = raw
     elif isinstance(raw, str):
-        body = raw.encode()
+        body = raw.encode("utf-8")
     else:
-        import json
-
-        body = json.dumps(raw).encode()
+        body = encode_json(raw, as_bytes=True)
     return vr_cls(status=200, body=body, request_id=request_id)
-
-
-def _internal_error(request_id: int) -> "VertebraResponse":
-    from vertebra._vertebra import VertebraResponse as VR
-
-    return VR(status=500, body=b"internal server error", request_id=request_id)
-
-
-__all__ = ("run_worker",)

@@ -577,11 +577,13 @@ mod tests {
             .map(|_| {
                 let b = Arc::clone(&bridge);
                 let r = Arc::clone(&received);
-                thread::spawn(move || loop {
-                    if b.poll_batch(Duration::from_millis(200)).is_some() {
-                        r.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        break;
+                thread::spawn(move || {
+                    loop {
+                        if b.poll_batch(Duration::from_millis(200)).is_some() {
+                            r.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            break;
+                        }
                     }
                 })
             })

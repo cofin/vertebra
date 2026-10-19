@@ -2,10 +2,10 @@
 //!
 //! Target: >1 M ops/s single-thread SPSC ping-pong at 256-byte slots.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::sync::Arc;
 use std::time::Duration;
-use vertebra_core::buffer::{ChannelMode, RingLayout, CACHELINE_BYTES};
+use vertebra_core::buffer::{CACHELINE_BYTES, ChannelMode, RingLayout};
 use vertebra_core::channel::{MpmcRing, SpscRing};
 use vertebra_core::shm::ShmRegion;
 

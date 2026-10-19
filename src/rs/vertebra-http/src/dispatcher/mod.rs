@@ -20,8 +20,8 @@ mod shm;
 mod tests;
 pub mod types;
 
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot};
@@ -111,7 +111,10 @@ impl Dispatcher {
     }
 
     /// Create a new dispatcher in SharedMemory mode.
-    pub fn new_shm(ring_pairs: Vec<Arc<vertebra_core::transport::ring_pair::RingPair>>, max_inflight: usize) -> Self {
+    pub fn new_shm(
+        ring_pairs: Vec<Arc<vertebra_core::transport::ring_pair::RingPair>>,
+        max_inflight: usize,
+    ) -> Self {
         let shm = ShmDispatcher::new(ring_pairs, max_inflight);
         Self {
             inner: Arc::new(Inner {

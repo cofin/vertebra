@@ -131,7 +131,9 @@ fn spawn_python_worker(app_path: String) {
 
                 let handlers = app_obj.getattr("_handlers")?;
                 let builtins = py.import("builtins")?;
-                let mounts_list = builtins.getattr("list")?.call1((app_obj.getattr("mounts")?,))?;
+                let mounts_list = builtins
+                    .getattr("list")?
+                    .call1((app_obj.getattr("mounts")?,))?;
 
                 let runner = py.import("vertebra.server._native")?;
                 let kwargs = PyDict::new(py);
@@ -268,16 +270,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
             #[cfg(not(unix))]
             {
-                dispatcher = Arc::new(
-                    Dispatcher::new().with_backpressure(config.backpressure.clone()),
-                );
+                dispatcher =
+                    Arc::new(Dispatcher::new().with_backpressure(config.backpressure.clone()));
                 spawn_response_reader(Arc::clone(&dispatcher));
             }
         } else {
             // In-process mode: bridge dispatcher + bridge response reader
-            dispatcher = Arc::new(
-                Dispatcher::new().with_backpressure(config.backpressure.clone()),
-            );
+            dispatcher = Arc::new(Dispatcher::new().with_backpressure(config.backpressure.clone()));
             spawn_response_reader(Arc::clone(&dispatcher));
             spawn_python_worker(app_path.clone());
         }
@@ -286,9 +285,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     #[cfg(not(feature = "python"))]
     {
-        dispatcher = Arc::new(
-            Dispatcher::new().with_backpressure(config.backpressure.clone()),
-        );
+        dispatcher = Arc::new(Dispatcher::new().with_backpressure(config.backpressure.clone()));
         spawn_response_reader(Arc::clone(&dispatcher));
         info!(bind = %config.bind, "vertebra-server starting (no python)");
     }

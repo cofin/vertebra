@@ -12,70 +12,45 @@ Environment variables (set by supervisor):
     VERTEBRA_TRANSPORT_MODE: "inprocess" or "shm" (default: "inprocess")
     VERTEBRA_APP:            App import path (e.g. "myapp:app")
     VERTEBRA_WORKER_ID:      Integer worker index (for logging)
-
-    # In-process mode:
-    VERTEBRA_RING_NAME:   Named MPMC ring to connect to
-    VERTEBRA_SLOT_SIZE:   Ring slot size in bytes
-    VERTEBRA_SLOTS:       Number of ring slots
-    VERTEBRA_BATCH_SIZE:  Maximum batch size (default 64)
-
-    # SHM mode (FDs inherited from supervisor):
-    VERTEBRA_REQ_RING_FD, VERTEBRA_REQ_RING_SIZE, etc.
+    VERTEBRA_RING_NAME:      Named MPMC ring to connect to
+    VERTEBRA_SLOT_SIZE:      Ring slot size in bytes
+    VERTEBRA_SLOTS:          Number of ring slots
+    VERTEBRA_BATCH_SIZE:     Maximum batch size (default 64)
 """
 
 import importlib
+import logging
 import os
-import sys
 from typing import Any
 
+from vertebra.framework._app import VertebraApp
+from vertebra.server._native import run_worker
 
-def _import_app(app_path: str) -> Any:
-    """Import an application object from a dotted path.
-
-    Accepts "module:attr" format (e.g. "myapp.server:app").
-    """
-    if ":" not in app_path:
-        msg = f"VERTEBRA_APP must be in 'module:attr' format, got: {app_path!r}"
-        raise ValueError(msg)
-    module_path, attr = app_path.rsplit(":", 1)
-    module = importlib.import_module(module_path)
-    return getattr(module, attr)
+__all__ = ("_import_app", "main")
 
 
 def main() -> None:
     """Initialize a worker process and start the batch runner loop."""
+    from vertebra._vertebra import init_transport
+
     transport_mode = os.environ.get("VERTEBRA_TRANSPORT_MODE", "inprocess")
     app_path = os.environ["VERTEBRA_APP"]
     worker_id = int(os.environ.get("VERTEBRA_WORKER_ID", "0"))
 
-    print(  # noqa: T201
-        f"[vertebra worker {worker_id}] starting, app={app_path!r}, mode={transport_mode}",
-        file=sys.stderr,
-    )
+    logger = logging.getLogger(f"vertebra.worker.{worker_id}")
+    logger.info("starting, app=%r, mode=%s", app_path, transport_mode)
 
     app = _import_app(app_path)
 
-    # If native mode is disabled, we expect a raw ASGI/WSGI app.
-    # Wrap it in a VertebraApp mounted at root for unified batch processing.
     if os.environ.get("VERTEBRA_NATIVE") == "0":
-        from vertebra.framework._app import VertebraApp
-
-        print(  # noqa: T201
-            f"[vertebra worker {worker_id}] wrapping raw app in ASGI adapter",
-            file=sys.stderr,
-        )
+        logger.info("wrapping raw app in ASGI adapter")
         wrapped = VertebraApp()
         wrapped.mount("/", app, protocol="asgi")
         app = wrapped
 
-    from vertebra._vertebra import init_transport
-
     if transport_mode == "shm":
         init_transport(mode="shm")
-        print(  # noqa: T201
-            f"[vertebra worker {worker_id}] connected via shared memory",
-            file=sys.stderr,
-        )
+        logger.info("connected via shared memory")
     else:
         ring_name = os.environ.get("VERTEBRA_RING_NAME", "default")
         slot_size = int(os.environ.get("VERTEBRA_SLOT_SIZE", "4096"))
@@ -88,22 +63,26 @@ def main() -> None:
             slots=slots,
             batch_size=batch_size,
         )
-        print(  # noqa: T201
-            f"[vertebra worker {worker_id}] connected to ring {ring_name!r}",
-            file=sys.stderr,
-        )
+        logger.info("connected to ring %r", ring_name)
 
-    handlers = app._handlers  # noqa: SLF001
+    handlers = app._handlers
     mounts = list(app.mounts) if hasattr(app, "mounts") else []
-
     worker_count = int(os.environ.get("VERTEBRA_WORKERS", "1"))
-
-    from vertebra.server._native import run_worker
 
     run_worker(handlers, mounts=mounts, batch_timeout_ms=100, worker_count=worker_count)
 
 
-__all__ = ("_import_app", "main")
+def _import_app(app_path: str) -> Any:
+    """Import an application object from a dotted path.
+
+    Accepts ``module:attr`` format (e.g. ``myapp.server:app``).
+    """
+    if ":" not in app_path:
+        msg = f"VERTEBRA_APP must be in 'module:attr' format, got: {app_path!r}"
+        raise ValueError(msg)
+    module_path, attr = app_path.rsplit(":", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, attr)
 
 
 if __name__ == "__main__":

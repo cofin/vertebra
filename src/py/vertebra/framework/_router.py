@@ -1,6 +1,6 @@
 """Routing primitives for the native app framework."""
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 import msgspec
@@ -83,6 +83,12 @@ def handler_id(method: str, path: str) -> int:
     return _make_handler_id(method, _normalize_path(path))
 
 
+def extract_path_params(template: str, path: str) -> "dict[str, Any]":
+    """Extract and coerce params from a path based on a typed template."""
+    segments = _compile_path_template(_normalize_path(template))
+    return _extract_params_from_segments(segments, _normalize_path(path))
+
+
 def _route(method: str, path: str) -> "Callable[[Callable[..., Any]], Callable[..., Any]]":
     normalized_path = _normalize_path(path)
     segments = _compile_path_template(normalized_path)
@@ -91,16 +97,10 @@ def _route(method: str, path: str) -> "Callable[[Callable[..., Any]], Callable[.
         routes: list[RouteDef] = getattr(handler, "__vertebra_routes__", [])
         route = RouteDef(method=method, path=normalized_path, handler=handler, segments=segments)
         routes.append(route)
-        handler.__vertebra_routes__ = routes  # type: ignore[attr-defined]
+        cast("Any", handler).__vertebra_routes__ = routes
         return handler
 
     return decorator
-
-
-def extract_path_params(template: str, path: str) -> "dict[str, Any]":
-    """Extract and coerce params from a path based on a typed template."""
-    segments = _compile_path_template(_normalize_path(template))
-    return _extract_params_from_segments(segments, _normalize_path(path))
 
 
 def _normalize_prefix(prefix: str) -> str:

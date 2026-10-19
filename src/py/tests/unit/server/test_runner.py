@@ -7,10 +7,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Fake VertebraRequest / VertebraResponse stubs
-# ---------------------------------------------------------------------------
-
 
 class FakeRequest:
     """Minimal request stub matching VertebraRequest interface."""
@@ -44,11 +40,6 @@ class FakeResponse:
         self.headers = headers or []
 
 
-# ---------------------------------------------------------------------------
-# Fixture: CallbackScheduler with automatic cleanup
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def scheduler():
     from vertebra.server._native import CallbackScheduler
@@ -56,11 +47,6 @@ def scheduler():
     s = CallbackScheduler()
     yield s
     s.stop()
-
-
-# ---------------------------------------------------------------------------
-# Phase 1: Unified event loop
-# ---------------------------------------------------------------------------
 
 
 def test_unified_event_loop_handler_loop_global_removed():
@@ -80,11 +66,6 @@ def test_unified_event_loop_call_handler_accepts_loop_param():
     assert "loop" in sig.parameters, "_call_handler must accept a loop parameter"
 
 
-# ---------------------------------------------------------------------------
-# Phase 2: Batch partitioning
-# ---------------------------------------------------------------------------
-
-
 def test_partition_batch_sync_handler_classified():
     """Sync native handlers go to the sync_native group."""
     from vertebra.server._native import _partition_batch
@@ -98,8 +79,8 @@ def test_partition_batch_sync_handler_classified():
     result = _partition_batch(batch, handlers, [])
 
     assert len(result.sync_native) == 1
-    assert result.sync_native[0][0] == 0  # original index
-    assert result.sync_native[0][1] is batch[0]  # request
+    assert result.sync_native[0][0] == 0
+    assert result.sync_native[0][1] is batch[0]
     assert result.sync_native[0][2] is sync_handler
 
 
@@ -161,10 +142,10 @@ def test_partition_batch_mixed_batch_partitioned():
     mount_runners = [("/app", mock_adapter, "wsgi")]
 
     batch = [
-        FakeRequest(handler_id=1, request_id=1),  # sync
-        FakeRequest(handler_id=2, request_id=2),  # async
-        FakeRequest(handler_id=0, path="/app/x", request_id=3),  # mount
-        FakeRequest(handler_id=0, path="/nowhere", request_id=4),  # 404
+        FakeRequest(handler_id=1, request_id=1),
+        FakeRequest(handler_id=2, request_id=2),
+        FakeRequest(handler_id=0, path="/app/x", request_id=3),
+        FakeRequest(handler_id=0, path="/nowhere", request_id=4),
     ]
 
     result = _partition_batch(batch, handlers, mount_runners)
@@ -174,11 +155,6 @@ def test_partition_batch_mixed_batch_partitioned():
     assert "/app" in result.mounts
     assert len(result.mounts["/app"]) == 1
     assert len(result.unmatched) == 1
-
-
-# ---------------------------------------------------------------------------
-# Phase 2b: Parameter injection
-# ---------------------------------------------------------------------------
 
 
 def test_parameter_injection_body_param_gets_bytes():
@@ -256,11 +232,6 @@ def test_parameter_injection_async_body_param(scheduler):
     assert results[0].request_id == 1
 
 
-# ---------------------------------------------------------------------------
-# Phase 3: Concurrent dispatch
-# ---------------------------------------------------------------------------
-
-
 def test_concurrent_dispatch_async_handlers_concurrent(scheduler):
     """N async handlers with 10ms sleep should complete in ~10ms, not N*10ms."""
     from vertebra.server._native import _dispatch_batch, _partition_batch
@@ -281,7 +252,6 @@ def test_concurrent_dispatch_async_handlers_concurrent(scheduler):
     results = _dispatch_batch(partitioned, handlers, [], FakeResponse, scheduler)
     elapsed_ms = (time.monotonic() - start) * 1000
 
-    # Should be ~20ms (concurrent), NOT 100ms (sequential)
     assert elapsed_ms < sleep_ms * 2, f"Async handlers took {elapsed_ms:.0f}ms — expected ~{sleep_ms}ms (concurrent)"
     assert len(results) == n_handlers
     assert all(r.status == 200 for r in results)
@@ -309,9 +279,9 @@ def test_concurrent_dispatch_error_isolation(scheduler):
     results = _dispatch_batch(partitioned, handlers, [], FakeResponse, scheduler)
 
     assert len(results) == 3
-    assert results[0].status == 200  # good
-    assert results[1].status == 500  # bad — error isolated
-    assert results[2].status == 200  # good — not cancelled
+    assert results[0].status == 200
+    assert results[1].status == 500
+    assert results[2].status == 200
 
 
 def test_concurrent_dispatch_result_ordering_preserved(scheduler):
@@ -326,10 +296,10 @@ def test_concurrent_dispatch_result_ordering_preserved(scheduler):
 
     handlers = {1: sync_h, 2: async_h}
     batch = [
-        FakeRequest(handler_id=2, request_id=10),  # async
-        FakeRequest(handler_id=1, request_id=20),  # sync
-        FakeRequest(handler_id=2, request_id=30),  # async
-        FakeRequest(handler_id=1, request_id=40),  # sync
+        FakeRequest(handler_id=2, request_id=10),
+        FakeRequest(handler_id=1, request_id=20),
+        FakeRequest(handler_id=2, request_id=30),
+        FakeRequest(handler_id=1, request_id=40),
     ]
 
     partitioned = _partition_batch(batch, handlers, [])
@@ -389,14 +359,8 @@ def test_concurrent_dispatch_mount_batching(scheduler):
     partitioned = _partition_batch(batch, {}, mount_runners)
     results = _dispatch_batch(partitioned, {}, mount_runners, FakeResponse, scheduler)
 
-    # Should be ONE call with all 3 requests, not 3 separate calls
     assert call_count == 1
     assert len(results) == 3
-
-
-# ---------------------------------------------------------------------------
-# Phase 6: WSGI concurrent dispatch (Ch1: wsgi-concurrent)
-# ---------------------------------------------------------------------------
 
 
 def test_wsgi_concurrent_dispatch_requests_concurrent(scheduler):
@@ -436,7 +400,6 @@ def test_wsgi_concurrent_dispatch_requests_concurrent(scheduler):
     results = _dispatch_batch(partitioned, {}, mount_runners, FakeResponse, scheduler)
     elapsed_ms = (time_mod.monotonic() - start) * 1000
 
-    # Should be ~20ms (concurrent), NOT 100ms (sequential 5*20ms)
     assert elapsed_ms < sleep_ms * 2, (
         f"WSGI dispatch took {elapsed_ms:.0f}ms — expected ~{sleep_ms}ms (concurrent), "
         f"not {sleep_ms * n_requests}ms (sequential)"
@@ -464,7 +427,7 @@ def test_wsgi_concurrent_dispatch_error_isolation(scheduler):
     mount_runners = [("/app", adapter, "wsgi")]
     batch = [
         FakeRequest(handler_id=0, path="/app/a", request_id=1),
-        FakeRequest(handler_id=0, path="/app/b", request_id=2),  # will error
+        FakeRequest(handler_id=0, path="/app/b", request_id=2),
         FakeRequest(handler_id=0, path="/app/c", request_id=3),
     ]
 
@@ -473,9 +436,9 @@ def test_wsgi_concurrent_dispatch_error_isolation(scheduler):
 
     assert len(results) == 3
     assert results[0].status == 200
-    assert results[1].status == 500  # error isolated
+    assert results[1].status == 500
     assert results[2].status == 200
-    assert call_count == 3  # all three were attempted
+    assert call_count == 3
 
 
 def test_wsgi_concurrent_dispatch_result_ordering(scheduler):
@@ -504,11 +467,6 @@ def test_wsgi_concurrent_dispatch_result_ordering(scheduler):
     assert results[2].body == b"req-30"
 
 
-# ---------------------------------------------------------------------------
-# Phase 7: Hybrid dispatch — sync + async in parallel (Ch4: hybrid-workers)
-# ---------------------------------------------------------------------------
-
-
 def test_hybrid_dispatch_async_handlers_amortize_io(scheduler):
     """Multiple async handlers with sleep should complete in ~1 sleep, not N*sleep."""
     import time as time_mod
@@ -531,7 +489,6 @@ def test_hybrid_dispatch_async_handlers_amortize_io(scheduler):
     results = _dispatch_batch(partitioned, handlers, [], FakeResponse, scheduler)
     elapsed_ms = (time_mod.monotonic() - start) * 1000
 
-    # All 5 sleeps gathered concurrently: ~30ms, not 150ms.
     assert elapsed_ms < sleep_ms * 2, (
         f"Async dispatch took {elapsed_ms:.0f}ms — expected ~{sleep_ms}ms (gathered), not {sleep_ms * n}ms (sequential)"
     )
@@ -571,11 +528,6 @@ def test_hybrid_dispatch_async_only_batch_no_deadlock(scheduler):
     assert all(r.status == 200 for r in results)
 
 
-# ---------------------------------------------------------------------------
-# Phase 8: Thread safety for free-threading (Ch5: free-threading)
-# ---------------------------------------------------------------------------
-
-
 def test_thread_safety_concurrent_sync_handlers_no_data_corruption(scheduler):
     """Multiple sync handlers on thread pool must not corrupt shared results."""
     import threading
@@ -597,14 +549,12 @@ def test_thread_safety_concurrent_sync_handlers_no_data_corruption(scheduler):
     partitioned = _partition_batch(batch, handlers, [])
     results = _dispatch_batch(partitioned, handlers, [], FakeResponse, scheduler)
 
-    # All 20 results must be present and correctly ordered.
     assert len(results) == 20
     for i in range(20):
         assert results[i].body == f"t{i}".encode()
         assert results[i].request_id == i
 
-    # Should have used multiple threads (thread pool).
-    assert len(seen_threads) >= 1  # At least 1; may be >1 under pool
+    assert len(seen_threads) >= 1
 
 
 def test_thread_safety_handler_meta_cache_thread_safe():
@@ -623,7 +573,6 @@ def test_thread_safety_handler_meta_cache_thread_safe():
         futures = [pool.submit(_handler_meta, sync_h if i % 2 == 0 else async_h) for i in range(100)]
         results = [f.result() for f in futures]
 
-    # All results should be consistent.
     sync_results = [r for i, r in enumerate(results) if i % 2 == 0]
     async_results = [r for i, r in enumerate(results) if i % 2 != 0]
     assert all(r == (True, False) for r in sync_results)
@@ -636,20 +585,11 @@ def test_thread_safety_run_worker_no_free_threading_gate():
 
     from vertebra.server._native import run_worker
 
-    # Verify the function signature accepts worker_count.
     sig = inspect.signature(run_worker)
     assert "worker_count" in sig.parameters
 
-    # The implementation should not gate on _is_free_threaded for worker_count>1.
-    # We can't call run_worker without the native extension, but we verify
-    # the source code doesn't contain the old gate.
     source = inspect.getsource(run_worker)
     assert "_is_free_threaded()" not in source
-
-
-# ---------------------------------------------------------------------------
-# Phase 5: Free-threading support
-# ---------------------------------------------------------------------------
 
 
 def test_free_threading_is_free_threaded_returns_bool():
@@ -668,11 +608,6 @@ def test_free_threading_run_worker_accepts_worker_count():
 
     sig = inspect.signature(run_worker)
     assert "worker_count" in sig.parameters
-
-
-# ---------------------------------------------------------------------------
-# Phase 4: 404 handling
-# ---------------------------------------------------------------------------
 
 
 def test_unmatched_gives_404(scheduler):

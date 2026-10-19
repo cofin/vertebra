@@ -87,11 +87,11 @@ impl ShmRegion {
         let size = align_to_page(size)?;
         #[cfg(unix)]
         {
-            return map_fd_region(handle, size);
+            return unsafe { map_fd_region(handle, size) };
         }
         #[cfg(windows)]
         {
-            return map_windows_region(handle, size);
+            return unsafe { map_windows_region(handle, size) };
         }
         #[allow(unreachable_code)]
         Err(ShmError::InvalidSize)
@@ -190,7 +190,7 @@ impl ShmRegion {
     /// # Safety
     /// The caller must ensure no mutable aliasing occurs across processes.
     pub unsafe fn as_slice(&self) -> &[u8] {
-        core::slice::from_raw_parts(self.ptr.as_ptr(), self.len)
+        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 
     /// Get the raw bytes as a mutable slice.
@@ -198,7 +198,7 @@ impl ShmRegion {
     /// # Safety
     /// The caller must ensure exclusive write access to this mapping.
     pub unsafe fn as_mut_slice(&mut self) -> &mut [u8] {
-        core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len)
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 
     pub fn size(&self) -> usize {
@@ -390,14 +390,16 @@ fn create_shm_open_region(size: usize) -> Result<ShmRegion, ShmError> {
 #[cfg(unix)]
 unsafe fn map_fd_region(fd: RawFd, size: usize) -> Result<ShmRegion, ShmError> {
     // SAFETY: map shared memory from an existing fd.
-    let ptr = libc::mmap(
-        std::ptr::null_mut(),
-        size,
-        libc::PROT_READ | libc::PROT_WRITE,
-        libc::MAP_SHARED,
-        fd,
-        0,
-    );
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
     if ptr == libc::MAP_FAILED {
         return Err(io::Error::last_os_error().into());
     }
@@ -418,7 +420,7 @@ fn create_windows_region(size: usize) -> Result<ShmRegion, ShmError> {
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Memory::{
-        CreateFileMappingW, MapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
+        CreateFileMappingW, FILE_MAP_ALL_ACCESS, MapViewOfFile, PAGE_READWRITE,
     };
 
     let size_u64 = size as u64;
@@ -454,7 +456,7 @@ fn create_windows_region(size: usize) -> Result<ShmRegion, ShmError> {
 #[cfg(windows)]
 unsafe fn map_windows_region(handle: RawHandle, size: usize) -> Result<ShmRegion, ShmError> {
     use windows_sys::Win32::Foundation::GetLastError;
-    use windows_sys::Win32::System::Memory::{MapViewOfFile, FILE_MAP_ALL_ACCESS};
+    use windows_sys::Win32::System::Memory::{FILE_MAP_ALL_ACCESS, MapViewOfFile};
 
     let ptr = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size) as *mut u8;
     if ptr.is_null() {

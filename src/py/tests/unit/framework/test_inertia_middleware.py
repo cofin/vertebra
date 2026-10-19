@@ -25,10 +25,6 @@ from vertebra.framework._inertia import (
 )
 from vertebra.framework._types import Headers, Request
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_request(
     method: str = "GET",
@@ -60,11 +56,6 @@ def _make_mock_ssr_client(*, fail: bool = False) -> object:
     return _MockSsrClient()
 
 
-# ---------------------------------------------------------------------------
-# InertiaConfig
-# ---------------------------------------------------------------------------
-
-
 def test_inertia_config_defaults() -> None:
     cfg = InertiaConfig()
     assert cfg.enabled is False
@@ -91,11 +82,6 @@ def test_inertia_config_custom_values() -> None:
     assert cfg.version == "abc123"
     assert cfg.ssr_enabled is True
     assert cfg.shared_data == {"app_name": "Test"}
-
-
-# ---------------------------------------------------------------------------
-# Prop type helpers
-# ---------------------------------------------------------------------------
 
 
 def test_prop_type_helpers_defer_creates_deferred_prop() -> None:
@@ -155,11 +141,6 @@ def test_prop_type_helpers_inertia_convenience() -> None:
     assert resp.encrypt_history is False
 
 
-# ---------------------------------------------------------------------------
-# Request detection
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("headers", "expected"),
     [
@@ -173,11 +154,6 @@ def test_is_inertia_request(headers: "dict[str, str]", expected: bool) -> None:
     mw = InertiaMiddleware()
     req = _make_request(headers=headers)
     assert mw.is_inertia_request(req) is expected
-
-
-# ---------------------------------------------------------------------------
-# Page object construction
-# ---------------------------------------------------------------------------
 
 
 def test_build_page_object_basic() -> None:
@@ -236,11 +212,6 @@ def test_build_page_object_request_props_override_shared_data() -> None:
     assert page["props"]["locale"] == "fr"
 
 
-# ---------------------------------------------------------------------------
-# Partial reloads
-# ---------------------------------------------------------------------------
-
-
 def test_partial_reloads_includes_only_requested_props() -> None:
     mw = InertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request(
@@ -291,14 +262,8 @@ def test_partial_reloads_wrong_component_includes_all() -> None:
         props={"count": 42, "users": ["alice"]},
     )
     page = mw.build_page_object(req, resp)
-    # Different component -> all props included
     assert "count" in page["props"]
     assert "users" in page["props"]
-
-
-# ---------------------------------------------------------------------------
-# Deferred props
-# ---------------------------------------------------------------------------
 
 
 def test_deferred_props_excluded_from_initial_response() -> None:
@@ -336,11 +301,6 @@ def test_deferred_props_resolved_during_partial_reload() -> None:
     assert page["props"]["stats"] == {"visits": 100}
 
 
-# ---------------------------------------------------------------------------
-# Merge props
-# ---------------------------------------------------------------------------
-
-
 def test_merge_props_metadata_in_page_object() -> None:
     mw = InertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
@@ -376,11 +336,6 @@ def test_merge_props_deep_merge_metadata() -> None:
     assert page["deepMergeProps"] == ["preferences"]
 
 
-# ---------------------------------------------------------------------------
-# Once props
-# ---------------------------------------------------------------------------
-
-
 def test_once_props_included_initially() -> None:
     mw = InertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
@@ -410,11 +365,6 @@ def test_once_props_skipped_when_cached() -> None:
     assert page["props"]["name"] == "Test"
 
 
-# ---------------------------------------------------------------------------
-# Scroll props
-# ---------------------------------------------------------------------------
-
-
 def test_scroll_props_in_page_object() -> None:
     mw = InertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
@@ -433,11 +383,6 @@ def test_scroll_props_in_page_object() -> None:
     assert page["scrollProps"]["items"]["currentPage"] == 1
     assert page["scrollProps"]["items"]["nextPage"] == 2
     assert page["scrollProps"]["items"]["previousPage"] is None
-
-
-# ---------------------------------------------------------------------------
-# Optional props
-# ---------------------------------------------------------------------------
 
 
 def test_optional_props_excluded_on_initial_load() -> None:
@@ -467,11 +412,6 @@ def test_optional_props_resolved_during_partial_reload() -> None:
     )
     page = mw.build_page_object(req, resp)
     assert page["props"]["heavy"] == "expensive"
-
-
-# ---------------------------------------------------------------------------
-# Version conflict
-# ---------------------------------------------------------------------------
 
 
 def test_version_conflict_mismatch_returns_409() -> None:
@@ -512,13 +452,7 @@ def test_version_conflict_only_on_get() -> None:
     )
     resp = InertiaResponse(component="Pages/Home")
     result = mw.process(req, resp)
-    # POST should not trigger 409
     assert result.status == 200
-
-
-# ---------------------------------------------------------------------------
-# Redirect fixup
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -543,11 +477,6 @@ def test_redirect_fixup(method: str, status: int, expected: bool) -> None:
     assert mw.should_redirect_303(method, status) is expected
 
 
-# ---------------------------------------------------------------------------
-# JSON response for Inertia XHR
-# ---------------------------------------------------------------------------
-
-
 def test_json_response_inertia_request_returns_json() -> None:
     mw = InertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request(headers={"X-Inertia": "true", "X-Inertia-Version": "v1"})
@@ -563,11 +492,6 @@ def test_json_response_inertia_request_returns_json() -> None:
     assert page["version"] == "v1"
 
 
-# ---------------------------------------------------------------------------
-# HTML response for initial page load
-# ---------------------------------------------------------------------------
-
-
 def test_html_response_initial_load_returns_html() -> None:
     mw = InertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
@@ -577,7 +501,7 @@ def test_html_response_initial_load_returns_html() -> None:
     assert "text/html" in (result.headers.get("Content-Type") or "")
     html = result.body.decode("utf-8")
     assert '<script data-page="app" type="application/json">' in html
-    assert '"component": "Pages/Home"' in html
+    assert '"component":"Pages/Home"' in html or '"component": "Pages/Home"' in html
 
 
 def test_html_response_contains_v3_script_tag() -> None:
@@ -588,11 +512,6 @@ def test_html_response_contains_v3_script_tag() -> None:
     html = result.body.decode("utf-8")
     assert 'data-page="app"' in html
     assert 'type="application/json"' in html
-
-
-# ---------------------------------------------------------------------------
-# SSR integration
-# ---------------------------------------------------------------------------
 
 
 def test_ssr_integration_renders_head_and_body() -> None:
@@ -617,9 +536,7 @@ def test_ssr_integration_csr_fallback_on_failure() -> None:
     result = mw.process(req, resp)
     assert result.status == 200
     html = result.body.decode("utf-8")
-    # Should still have the script tag (CSR fallback)
     assert '<script data-page="app" type="application/json">' in html
-    # Should NOT have SSR content
     assert "<title>SSR Page</title>" not in html
 
 
@@ -631,13 +548,7 @@ def test_ssr_integration_not_used_for_inertia_xhr() -> None:
     resp = InertiaResponse(component="Pages/Home")
     result = mw.process(req, resp)
     assert result.headers.get("Content-Type") == "application/json"
-    # SSR client should not have been called
     assert client.last_page is None
-
-
-# ---------------------------------------------------------------------------
-# Error bag handling
-# ---------------------------------------------------------------------------
 
 
 def test_error_bag_header_passed_through() -> None:
@@ -649,14 +560,7 @@ def test_error_bag_header_passed_through() -> None:
         props={"errors": {"login": {"email": "required"}}},
     )
     page = mw.build_page_object(req, resp)
-    # Error bag data is in props as normal; the header tells the client
-    # which bag to display
     assert page["props"]["errors"]["login"]["email"] == "required"
-
-
-# ---------------------------------------------------------------------------
-# Version auto-detection
-# ---------------------------------------------------------------------------
 
 
 def test_version_auto_detect_dev_version_when_no_manifest() -> None:
@@ -667,11 +571,6 @@ def test_version_auto_detect_dev_version_when_no_manifest() -> None:
 def test_version_auto_detect_explicit_version_takes_precedence() -> None:
     mw = InertiaMiddleware(InertiaConfig(version="abc123"))
     assert mw.get_version() == "abc123"
-
-
-# ---------------------------------------------------------------------------
-# Callable props
-# ---------------------------------------------------------------------------
 
 
 def test_callable_props_resolved() -> None:

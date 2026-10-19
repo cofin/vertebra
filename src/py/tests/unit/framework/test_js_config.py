@@ -2,10 +2,6 @@
 
 from vertebra.builder._config import BuildConfig, JsConfig
 
-# ---------------------------------------------------------------------------
-# JsConfigDefaults
-# ---------------------------------------------------------------------------
-
 
 def test_js_config_defaults_dependencies_default_empty() -> None:
     cfg = JsConfig()
@@ -15,11 +11,6 @@ def test_js_config_defaults_dependencies_default_empty() -> None:
 def test_js_config_defaults_dev_dependencies_default_empty() -> None:
     cfg = JsConfig()
     assert cfg.dev_dependencies == ()
-
-
-# ---------------------------------------------------------------------------
-# BuildConfigDefaults
-# ---------------------------------------------------------------------------
 
 
 def test_build_config_defaults_bundler_default_native() -> None:
@@ -36,11 +27,6 @@ def test_build_config_defaults_js_default_empty() -> None:
     cfg = BuildConfig()
     assert cfg.js.dependencies == ()
     assert cfg.js.dev_dependencies == ()
-
-
-# ---------------------------------------------------------------------------
-# BuildConfigLoad
-# ---------------------------------------------------------------------------
 
 
 def test_build_config_load_loads_js_section(tmp_path) -> None:  # type: ignore[no-untyped-def]

@@ -138,10 +138,10 @@ impl TieredRingSet {
         large_fd: RawFd,
         xlarge_fd: RawFd,
     ) -> Result<Self, RingPairError> {
-        let small = Self::attach_tier_ring(&config.small, small_fd)?;
-        let medium = Self::attach_tier_ring(&config.medium, medium_fd)?;
-        let large = Self::attach_tier_ring(&config.large, large_fd)?;
-        let xlarge = Self::attach_tier_ring(&config.xlarge, xlarge_fd)?;
+        let small = unsafe { Self::attach_tier_ring(&config.small, small_fd)? };
+        let medium = unsafe { Self::attach_tier_ring(&config.medium, medium_fd)? };
+        let large = unsafe { Self::attach_tier_ring(&config.large, large_fd)? };
+        let xlarge = unsafe { Self::attach_tier_ring(&config.xlarge, xlarge_fd)? };
 
         Ok(Self {
             small,
@@ -169,8 +169,8 @@ impl TieredRingSet {
     unsafe fn attach_tier_ring(tier: &RingTier, fd: RawFd) -> Result<Arc<SpscRing>, RingPairError> {
         let layout = RingLayout::new(tier.slot_size, tier.slot_count, ChannelMode::Spsc);
         // SAFETY: caller guarantees fd is valid and points to an initialized region.
-        let region = Arc::new(ShmRegion::map(fd, layout.total_size)?);
-        let ring = SpscRing::attach(region, layout)?;
+        let region = Arc::new(unsafe { ShmRegion::map(fd, layout.total_size)? });
+        let ring = unsafe { SpscRing::attach(region, layout)? };
         Ok(Arc::new(ring))
     }
 
@@ -352,6 +352,12 @@ impl RingPair {
         })
     }
 
+    /// Attach to an inherited set of shared-memory ring and notifier file descriptors.
+    ///
+    /// # Safety
+    ///
+    /// All passed file descriptors must be valid, open shared-memory or eventfd
+    /// descriptors initialized with layouts matching `config`.
     #[cfg(unix)]
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn from_inherited(
@@ -369,19 +375,21 @@ impl RingPair {
             config.request_slots,
             ChannelMode::Mpmc,
         );
-        let req_region = Arc::new(ShmRegion::map(req_ring_fd, req_layout.total_size)?);
-        let request_ring = Arc::new(MpmcRing::attach(req_region, req_layout)?);
+        let req_region = Arc::new(unsafe { ShmRegion::map(req_ring_fd, req_layout.total_size)? });
+        let request_ring = Arc::new(unsafe { MpmcRing::attach(req_region, req_layout)? });
 
-        let response_rings = TieredRingSet::from_inherited(
-            &config.response_tiers,
-            resp_small_fd,
-            resp_medium_fd,
-            resp_large_fd,
-            resp_xlarge_fd,
-        )?;
+        let response_rings = unsafe {
+            TieredRingSet::from_inherited(
+                &config.response_tiers,
+                resp_small_fd,
+                resp_medium_fd,
+                resp_large_fd,
+                resp_xlarge_fd,
+            )?
+        };
 
-        let request_notifier = Notifier::from_raw_fd(req_notify_fd);
-        let response_notifier = Notifier::from_raw_fd(resp_notify_fd);
+        let request_notifier = unsafe { Notifier::from_raw_fd(req_notify_fd) };
+        let response_notifier = unsafe { Notifier::from_raw_fd(resp_notify_fd) };
 
         Ok(Self {
             request_ring,
@@ -392,15 +400,21 @@ impl RingPair {
         })
     }
 
+    /// Reset all request/response rings and drain notifiers after a worker exits.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure no concurrent worker process is reading from or
+    /// writing to the underlying rings while they are being reset.
     pub unsafe fn reclaim(&self) {
         // SAFETY: Reset is safe here because we assume the worker is stopped.
-        // We need to cast back to the underlying types if we were using a trait,
-        // but here we just have the Arc<MpmcRing> and Arc<SpscRing>.
-        self.request_ring.reset();
-        self.response_rings.small.reset();
-        self.response_rings.medium.reset();
-        self.response_rings.large.reset();
-        self.response_rings.xlarge.reset();
+        unsafe {
+            self.request_ring.reset();
+            self.response_rings.small.reset();
+            self.response_rings.medium.reset();
+            self.response_rings.large.reset();
+            self.response_rings.xlarge.reset();
+        }
         let _ = self.request_notifier.clear();
         let _ = self.response_notifier.clear();
     }

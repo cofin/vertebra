@@ -15,7 +15,11 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-fn generate_self_signed() -> (NamedTempFile, NamedTempFile, rcgen::CertifiedKey) {
+fn generate_self_signed() -> (
+    NamedTempFile,
+    NamedTempFile,
+    rcgen::CertifiedKey<rcgen::KeyPair>,
+) {
     install_crypto_provider();
     let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
 
@@ -27,7 +31,7 @@ fn generate_self_signed() -> (NamedTempFile, NamedTempFile, rcgen::CertifiedKey)
 
     let mut key_file = NamedTempFile::new().unwrap();
     key_file
-        .write_all(certified_key.key_pair.serialize_pem().as_bytes())
+        .write_all(certified_key.signing_key.serialize_pem().as_bytes())
         .unwrap();
     key_file.flush().unwrap();
 
@@ -108,6 +112,8 @@ async fn tls_handshake_and_https_request() {
     // Build a reqwest client that trusts our self-signed cert
     let ca_cert = reqwest::Certificate::from_pem(certified_key.cert.pem().as_bytes()).unwrap();
     let client = reqwest::Client::builder()
+        .no_proxy()
+        .http1_only()
         .add_root_certificate(ca_cert)
         .build()
         .unwrap();

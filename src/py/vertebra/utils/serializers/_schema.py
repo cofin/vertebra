@@ -7,7 +7,7 @@ import os
 from collections.abc import Callable, Iterable
 from functools import partial
 from threading import RLock
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import Any, Final, cast
 
 from vertebra._typing import UNSET, attrs_asdict
 from vertebra.utils.type_guards import (
@@ -20,9 +20,6 @@ from vertebra.utils.type_guards import (
     is_pydantic_model,
 )
 
-if TYPE_CHECKING:
-    pass
-
 __all__ = (
     "SchemaSerializer",
     "get_collection_serializer",
@@ -32,58 +29,8 @@ __all__ = (
     "serialize_collection",
 )
 
-
 DEBUG_ENV_FLAG: Final[str] = "VTB_DEBUG_PIPELINE_CACHE"
 _PRIMITIVE_TYPES: Final[tuple[type[Any], ...]] = (str, bytes, int, float, bool)
-
-
-def _is_truthy(value: str | None) -> bool:
-    if value is None:
-        return False
-    normalized = value.strip().lower()
-    return normalized in {"1", "true", "yes", "on"}
-
-
-def _metrics_enabled() -> bool:
-    return _is_truthy(os.getenv(DEBUG_ENV_FLAG))
-
-
-class _SerializerCacheMetrics:
-    __slots__ = ("hits", "max_size", "misses", "size")
-
-    def __init__(self) -> None:
-        self.hits = 0
-        self.misses = 0
-        self.size = 0
-        self.max_size = 0
-
-    def record_hit(self, cache_size: int) -> None:
-        if not _metrics_enabled():
-            return
-        self.hits += 1
-        self.size = cache_size
-        self.max_size = max(self.max_size, cache_size)
-
-    def record_miss(self, cache_size: int) -> None:
-        if not _metrics_enabled():
-            return
-        self.misses += 1
-        self.size = cache_size
-        self.max_size = max(self.max_size, cache_size)
-
-    def reset(self) -> None:
-        self.hits = 0
-        self.misses = 0
-        self.size = 0
-        self.max_size = 0
-
-    def snapshot(self) -> dict[str, int]:
-        return {
-            "hits": self.hits if _metrics_enabled() else 0,
-            "misses": self.misses if _metrics_enabled() else 0,
-            "max_size": self.max_size if _metrics_enabled() else 0,
-            "size": self.size if _metrics_enabled() else 0,
-        }
 
 
 class SchemaSerializer:
@@ -104,71 +51,6 @@ class SchemaSerializer:
 
     def dump_many(self, items: Iterable[Any]) -> list[dict[str, Any]]:
         return [self._dump(item) for item in items]
-
-
-_SERIALIZER_LOCK: RLock = RLock()
-_SCHEMA_SERIALIZERS: dict[tuple[type[Any] | None, bool], SchemaSerializer] = {}
-_SERIALIZER_METRICS = _SerializerCacheMetrics()
-
-
-def _make_serializer_key(sample: Any, exclude_unset: bool) -> tuple[type[Any] | None, bool]:
-    if sample is None or isinstance(sample, dict):
-        return (None, exclude_unset)
-    return (type(sample), exclude_unset)
-
-
-def _dump_identity_dict(value: Any) -> dict[str, Any]:
-    return cast("dict[str, Any]", value)
-
-
-def _dump_msgspec_fields(value: Any) -> dict[str, Any]:
-    return {field_name: value.__getattribute__(field_name) for field_name in value.__struct_fields__}
-
-
-def _dump_msgspec_excluding_unset(value: Any) -> dict[str, Any]:
-    return {
-        field_name: field_value
-        for field_name in value.__struct_fields__
-        if (field_value := value.__getattribute__(field_name)) != UNSET
-    }
-
-
-def _dump_dataclass(value: Any, *, exclude_unset: bool) -> dict[str, Any]:
-    return dataclass_to_dict(value, exclude_empty=exclude_unset)
-
-
-def _dump_pydantic(value: Any, *, exclude_unset: bool) -> dict[str, Any]:
-    return cast("dict[str, Any]", value.model_dump(exclude_unset=exclude_unset))
-
-
-def _dump_attrs(value: Any) -> dict[str, Any]:
-    return attrs_asdict(value, recurse=True)  # type: ignore[no-any-return]
-
-
-def _dump_dict_attr(value: Any) -> dict[str, Any]:
-    return dict(value.__dict__)
-
-
-def _dump_mapping(value: Any) -> dict[str, Any]:
-    return dict(value)
-
-
-def _build_dump_function(sample: Any, exclude_unset: bool) -> Callable[[Any], dict[str, Any]]:
-    if sample is None or isinstance(sample, dict):
-        return _dump_identity_dict
-    if is_dataclass_instance(sample):
-        return cast("Callable[[Any], dict[str, Any]]", partial(_dump_dataclass, exclude_unset=exclude_unset))
-    if is_pydantic_model(sample):
-        return cast("Callable[[Any], dict[str, Any]]", partial(_dump_pydantic, exclude_unset=exclude_unset))
-    if is_msgspec_struct(sample):
-        if exclude_unset:
-            return _dump_msgspec_excluding_unset
-        return _dump_msgspec_fields
-    if is_attrs_instance(sample):
-        return _dump_attrs
-    if has_dict_attribute(sample):
-        return _dump_dict_attr
-    return _dump_mapping
 
 
 def get_collection_serializer(sample: Any, *, exclude_unset: bool = True) -> SchemaSerializer:
@@ -230,3 +112,117 @@ def schema_dump(data: Any, *, exclude_unset: bool = True) -> Any:
 
     serializer = get_collection_serializer(data, exclude_unset=exclude_unset)
     return serializer.dump_one(data)
+
+
+class _SerializerCacheMetrics:
+    __slots__ = ("hits", "max_size", "misses", "size")
+
+    def __init__(self) -> None:
+        self.hits = 0
+        self.misses = 0
+        self.size = 0
+        self.max_size = 0
+
+    def record_hit(self, cache_size: int) -> None:
+        if not _metrics_enabled():
+            return
+        self.hits += 1
+        self.size = cache_size
+        self.max_size = max(self.max_size, cache_size)
+
+    def record_miss(self, cache_size: int) -> None:
+        if not _metrics_enabled():
+            return
+        self.misses += 1
+        self.size = cache_size
+        self.max_size = max(self.max_size, cache_size)
+
+    def reset(self) -> None:
+        self.hits = 0
+        self.misses = 0
+        self.size = 0
+        self.max_size = 0
+
+    def snapshot(self) -> dict[str, int]:
+        return {
+            "hits": self.hits if _metrics_enabled() else 0,
+            "misses": self.misses if _metrics_enabled() else 0,
+            "max_size": self.max_size if _metrics_enabled() else 0,
+            "size": self.size if _metrics_enabled() else 0,
+        }
+
+
+_SERIALIZER_LOCK: RLock = RLock()
+_SCHEMA_SERIALIZERS: dict[tuple[type[Any] | None, bool], SchemaSerializer] = {}
+_SERIALIZER_METRICS = _SerializerCacheMetrics()
+
+
+def _is_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    return normalized in {"1", "true", "yes", "on"}
+
+
+def _metrics_enabled() -> bool:
+    return _is_truthy(os.getenv(DEBUG_ENV_FLAG))
+
+
+def _make_serializer_key(sample: Any, exclude_unset: bool) -> tuple[type[Any] | None, bool]:
+    if sample is None or isinstance(sample, dict):
+        return (None, exclude_unset)
+    return (type(sample), exclude_unset)
+
+
+def _dump_identity_dict(value: Any) -> dict[str, Any]:
+    return cast("dict[str, Any]", value)
+
+
+def _dump_msgspec_fields(value: Any) -> dict[str, Any]:
+    return {field_name: value.__getattribute__(field_name) for field_name in value.__struct_fields__}
+
+
+def _dump_msgspec_excluding_unset(value: Any) -> dict[str, Any]:
+    return {
+        field_name: field_value
+        for field_name in value.__struct_fields__
+        if (field_value := value.__getattribute__(field_name)) != UNSET
+    }
+
+
+def _dump_dataclass(value: Any, *, exclude_unset: bool) -> dict[str, Any]:
+    return dataclass_to_dict(value, exclude_empty=exclude_unset)
+
+
+def _dump_pydantic(value: Any, *, exclude_unset: bool) -> dict[str, Any]:
+    return cast("dict[str, Any]", value.model_dump(exclude_unset=exclude_unset))
+
+
+def _dump_attrs(value: Any) -> dict[str, Any]:
+    return cast("dict[str, Any]", attrs_asdict(value, recurse=True))
+
+
+def _dump_dict_attr(value: Any) -> dict[str, Any]:
+    return dict(value.__dict__)
+
+
+def _dump_mapping(value: Any) -> dict[str, Any]:
+    return dict(value)
+
+
+def _build_dump_function(sample: Any, exclude_unset: bool) -> Callable[[Any], dict[str, Any]]:
+    if sample is None or isinstance(sample, dict):
+        return _dump_identity_dict
+    if is_dataclass_instance(sample):
+        return cast("Callable[[Any], dict[str, Any]]", partial(_dump_dataclass, exclude_unset=exclude_unset))
+    if is_pydantic_model(sample):
+        return cast("Callable[[Any], dict[str, Any]]", partial(_dump_pydantic, exclude_unset=exclude_unset))
+    if is_msgspec_struct(sample):
+        if exclude_unset:
+            return _dump_msgspec_excluding_unset
+        return _dump_msgspec_fields
+    if is_attrs_instance(sample):
+        return _dump_attrs
+    if has_dict_attribute(sample):
+        return _dump_dict_attr
+    return _dump_mapping

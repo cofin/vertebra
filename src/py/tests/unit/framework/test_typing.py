@@ -2,10 +2,6 @@
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# InternalTyping
-# ---------------------------------------------------------------------------
-
 
 def test_internal_typing_handler_id_is_int():
     from vertebra._typing import HandlerID
@@ -16,7 +12,6 @@ def test_internal_typing_handler_id_is_int():
 def test_internal_typing_raw_headers_alias():
     from vertebra._typing import RawHeaders
 
-    # RawHeaders should be list[tuple[str, str]]
     assert RawHeaders == list[tuple[str, str]]
 
 
@@ -24,11 +19,6 @@ def test_internal_typing_lifecycle_hook_is_callable():
     from vertebra._typing import LifecycleHook
 
     assert LifecycleHook is not None
-
-
-# ---------------------------------------------------------------------------
-# PublicTypingFacade
-# ---------------------------------------------------------------------------
 
 
 def test_public_typing_facade_reexports_from_internal():
@@ -50,7 +40,6 @@ def test_public_typing_facade_struct_available():
 
 def test_public_typing_facade_missing_optional_raises():
     """Accessing a type for an uninstalled package should raise."""
-    # pyarrow is likely not installed in the test env
     try:
         import pyarrow  # noqa: F401
 

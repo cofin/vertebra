@@ -6,9 +6,13 @@
 //! Tests are serialized via a static mutex because they share the global
 //! `BatchBridge` singleton.
 
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 use vertebra_core::bridge::{BatchBridge, BridgeResponse};
 use vertebra_http::{
@@ -41,16 +45,42 @@ fn drain_stale() {
     }
 }
 
-/// Spawn a test server on a random port. Returns the bound address and a
-/// shutdown sender.
-async fn spawn_test_server() -> (std::net::SocketAddr, oneshot::Sender<()>) {
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder().no_proxy().build().unwrap()
+}
+
+struct TestServer {
+    addr: std::net::SocketAddr,
+    running: Arc<AtomicBool>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    collector_handle: JoinHandle<()>,
+    worker_handle: JoinHandle<()>,
+    resp_handle: JoinHandle<()>,
+    server_handle: JoinHandle<()>,
+}
+
+impl TestServer {
+    async fn shutdown(mut self) {
+        self.running.store(false, Ordering::Release);
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        self.collector_handle.abort();
+        self.resp_handle.abort();
+        let _ = self.collector_handle.await;
+        let _ = self.resp_handle.await;
+        let _ = self.worker_handle.await;
+        let _ = self.server_handle.await;
+    }
+}
+
+/// Spawn a test server on a random port.
+async fn spawn_test_server() -> TestServer {
     spawn_test_server_with(None).await
 }
 
 /// Spawn a test server with an optional backpressure config.
-async fn spawn_test_server_with(
-    bp: Option<BackpressureConfig>,
-) -> (std::net::SocketAddr, oneshot::Sender<()>) {
+async fn spawn_test_server_with(bp: Option<BackpressureConfig>) -> TestServer {
     ensure_bridge();
     drain_stale();
 
@@ -66,13 +96,15 @@ async fn spawn_test_server_with(
     let (collector, collector_tx) =
         BatchCollector::new(Arc::clone(&dispatcher), DrainPolicy::default_fixed(), 128);
 
-    tokio::spawn(collector.run());
+    let collector_handle = tokio::spawn(collector.run());
+    let running = Arc::new(AtomicBool::new(true));
+    let worker_running = Arc::clone(&running);
 
-    // Simulated Python worker: polls bridge for requests, returns responses.
-    tokio::spawn(async move {
-        loop {
+    // Simulated Python worker: polls bridge for requests while active, returns responses.
+    let worker_handle = tokio::spawn(async move {
+        while worker_running.load(Ordering::Acquire) {
             let snapshot = tokio::task::spawn_blocking(|| {
-                BatchBridge::get().and_then(|b| b.poll_batch(Duration::from_millis(50)))
+                BatchBridge::get().and_then(|b| b.poll_batch(Duration::from_millis(5)))
             })
             .await
             .unwrap();
@@ -96,7 +128,7 @@ async fn spawn_test_server_with(
 
     // Response reader: async recv from bridge, completes dispatcher futures.
     let dispatcher_for_resp = Arc::clone(&dispatcher);
-    tokio::spawn(async move {
+    let resp_handle = tokio::spawn(async move {
         let bridge = BatchBridge::get().expect("bridge not initialized");
         while let Some(resps) = bridge.recv_responses().await {
             for resp in resps {
@@ -105,7 +137,7 @@ async fn spawn_test_server_with(
                     PendingResponse {
                         status: resp.status,
                         headers_mp: encode_response_headers(&resp.headers),
-                        body: bytes::Bytes::from(resp.body),
+                        body: resp.body,
                     },
                 );
             }
@@ -114,67 +146,86 @@ async fn spawn_test_server_with(
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
-    // Bind to port 0; pass the discovered address back.
+    // Bind to port 0 and pass the bound listener directly to avoid re-bind races.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    // Drop the listener so `run_with_collector` can rebind it.
-    drop(listener);
 
     let config = Arc::new(ServerConfig {
         bind: addr,
         ..ServerConfig::default()
     });
 
-    tokio::spawn(async move {
-        server::run_with_collector(config, router, dispatcher, vec![collector_tx], async move {
-            let _ = shutdown_rx.await;
-        })
+    let server_handle = tokio::spawn(async move {
+        server::run_with_listener(
+            listener,
+            config,
+            router,
+            dispatcher,
+            vec![collector_tx],
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
         .await
         .unwrap();
     });
 
-    // Brief yield to allow the server to bind.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    (addr, shutdown_tx)
+    TestServer {
+        addr,
+        running,
+        shutdown_tx: Some(shutdown_tx),
+        collector_handle,
+        worker_handle,
+        resp_handle,
+        server_handle,
+    }
 }
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn test_http11_hello() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let (addr, _shutdown) = spawn_test_server().await;
-    let resp = reqwest::get(format!("http://{}/hello", addr))
+    let srv = spawn_test_server().await;
+    let client = http_client();
+    let resp = client
+        .get(format!("http://{}/hello", srv.addr))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+    srv.shutdown().await;
 }
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn test_http11_not_found() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let (addr, _shutdown) = spawn_test_server().await;
-    let resp = reqwest::get(format!("http://{}/nonexistent", addr))
+    let srv = spawn_test_server().await;
+    let client = http_client();
+    let resp = client
+        .get(format!("http://{}/nonexistent", srv.addr))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+    srv.shutdown().await;
 }
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn test_server_accepts_multiple_requests() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let (addr, _shutdown) = spawn_test_server().await;
-    let client = reqwest::Client::new();
+    let srv = spawn_test_server().await;
+    let client = http_client();
     for _ in 0..10 {
         let resp = client
-            .get(format!("http://{}/hello", addr))
+            .get(format!("http://{}/hello", srv.addr))
             .send()
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
     }
+    srv.shutdown().await;
 }
 
 #[tokio::test]
@@ -187,12 +238,19 @@ async fn test_health_endpoint_reports_snapshot() {
         max_queue_time: Duration::from_millis(25),
         ..BackpressureConfig::default()
     };
-    let (addr, _shutdown) = spawn_test_server_with(Some(bp)).await;
+    let srv = spawn_test_server_with(Some(bp)).await;
+    let client = http_client();
 
     // Drive one successful request so the accepted counter advances.
-    let _ = reqwest::get(format!("http://{}/hello", addr)).await.unwrap();
+    let _ = client
+        .get(format!("http://{}/hello", srv.addr))
+        .send()
+        .await
+        .unwrap();
 
-    let resp = reqwest::get(format!("http://{}/__vertebra/health", addr))
+    let resp = client
+        .get(format!("http://{}/__vertebra/health", srv.addr))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -206,18 +264,26 @@ async fn test_health_endpoint_reports_snapshot() {
     let body = resp.text().await.unwrap();
     assert!(body.contains("\"status\":\"healthy\""), "body: {body}");
     assert!(body.contains("\"backpressure\""), "body: {body}");
-    assert!(body.contains("\"circuit_state\":\"closed\""), "body: {body}");
+    assert!(
+        body.contains("\"circuit_state\":\"closed\""),
+        "body: {body}"
+    );
+    srv.shutdown().await;
 }
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn test_health_endpoint_works_without_backpressure() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let (addr, _shutdown) = spawn_test_server().await;
-    let resp = reqwest::get(format!("http://{}/__vertebra/health", addr))
+    let srv = spawn_test_server().await;
+    let client = http_client();
+    let resp = client
+        .get(format!("http://{}/__vertebra/health", srv.addr))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
     assert!(body.contains("\"status\":\"healthy\""), "body: {body}");
+    srv.shutdown().await;
 }

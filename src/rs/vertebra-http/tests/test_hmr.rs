@@ -11,6 +11,10 @@ use tokio_tungstenite::connect_async;
 
 use vertebra_http::{config::ServerConfig, dispatcher::Dispatcher, router::NativeRouter, server};
 
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder().no_proxy().build().unwrap()
+}
+
 async fn spawn_hmr_server(dev_mode: bool) -> (std::net::SocketAddr, oneshot::Sender<()>) {
     let router = Arc::new(NativeRouter::from_entries(Vec::new()).unwrap());
     let dispatcher = Arc::new(Dispatcher::new());
@@ -19,7 +23,6 @@ async fn spawn_hmr_server(dev_mode: bool) -> (std::net::SocketAddr, oneshot::Sen
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    drop(listener);
 
     let config = Arc::new(ServerConfig {
         bind: addr,
@@ -28,22 +31,31 @@ async fn spawn_hmr_server(dev_mode: bool) -> (std::net::SocketAddr, oneshot::Sen
     });
 
     tokio::spawn(async move {
-        server::run_with_collector(config, router, dispatcher, vec![collector_tx], async move {
-            let _ = shutdown_rx.await;
-        })
+        server::run_with_listener(
+            listener,
+            config,
+            router,
+            dispatcher,
+            vec![collector_tx],
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
         .await
         .unwrap();
     });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
     (addr, shutdown_tx)
 }
 
 #[tokio::test]
 async fn test_hmr_status_endpoint_reports_state() {
     let (addr, _shutdown) = spawn_hmr_server(true).await;
+    let client = http_client();
 
-    let response = reqwest::get(format!("http://{addr}/__vertebra/hmr"))
+    let response = client
+        .get(format!("http://{addr}/__vertebra/hmr"))
+        .send()
         .await
         .unwrap();
 
@@ -59,7 +71,7 @@ async fn test_hmr_status_endpoint_reports_state() {
 #[tokio::test]
 async fn test_hmr_signal_endpoint_advances_generation() {
     let (addr, _shutdown) = spawn_hmr_server(true).await;
-    let client = reqwest::Client::new();
+    let client = http_client();
 
     let response = client
         .post(format!("http://{addr}/__vertebra/hmr/signal"))
@@ -86,7 +98,7 @@ async fn test_hmr_websocket_receives_signal_events() {
         .await
         .unwrap();
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let response = client
         .post(format!("http://{addr}/__vertebra/hmr/signal"))
         .send()
@@ -108,8 +120,11 @@ async fn test_hmr_websocket_receives_signal_events() {
 #[tokio::test]
 async fn test_hmr_endpoints_are_disabled_outside_dev_mode() {
     let (addr, _shutdown) = spawn_hmr_server(false).await;
+    let client = http_client();
 
-    let response = reqwest::get(format!("http://{addr}/__vertebra/hmr"))
+    let response = client
+        .get(format!("http://{addr}/__vertebra/hmr"))
+        .send()
         .await
         .unwrap();
 

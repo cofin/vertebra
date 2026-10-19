@@ -104,7 +104,6 @@ def dataclass_to_dict(
         value = getattr(obj, field.name)
         if exclude_none and value is None:
             continue
-        # For now, exclude_empty is handled as exclude_none in this simple version
         if exclude_empty and value is None:
             continue
 

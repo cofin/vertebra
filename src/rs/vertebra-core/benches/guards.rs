@@ -1,9 +1,10 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use jsonwebtoken::{encode, EncodingKey, Header};
+use criterion::{Criterion, criterion_group, criterion_main};
+use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::Serialize;
+use std::hint::black_box;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use vertebra_core::guards::{validate_jwt, RateLimiter};
+use vertebra_core::guards::{RateLimiter, validate_jwt};
 
 #[derive(Debug, Serialize)]
 struct Claims {

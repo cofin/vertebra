@@ -28,8 +28,8 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
-use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 
 /// Async-capable notification handle for tokio integration.
 ///
@@ -49,10 +49,8 @@ use tokio::io::Interest;
 /// notifier.clear()?;
 /// ```
 pub struct AsyncNotifier {
-    /// The underlying eventfd
-    fd: OwnedFd,
-    /// Tokio async wrapper for epoll integration
-    async_fd: AsyncFd<RawFd>,
+    /// Tokio async wrapper around the owned eventfd for epoll integration
+    async_fd: AsyncFd<OwnedFd>,
 }
 
 impl AsyncNotifier {
@@ -70,12 +68,9 @@ impl AsyncNotifier {
         let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
         // Wrap with AsyncFd for tokio integration
-        let async_fd = AsyncFd::with_interest(fd, Interest::READABLE)?;
+        let async_fd = unsafe { AsyncFd::register_with_interest(owned_fd, Interest::READABLE)? };
 
-        Ok(Self {
-            fd: owned_fd,
-            async_fd,
-        })
+        Ok(Self { async_fd })
     }
 
     /// Reconstruct an async notifier from a raw file descriptor.
@@ -87,20 +82,17 @@ impl AsyncNotifier {
     /// - The caller must ensure `fd` is a valid eventfd
     /// - The caller takes ownership of the FD
     pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {
-        let owned_fd = OwnedFd::from_raw_fd(fd);
-        let async_fd = AsyncFd::with_interest(fd, Interest::READABLE)?;
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let async_fd = unsafe { AsyncFd::register_with_interest(owned_fd, Interest::READABLE)? };
 
-        Ok(Self {
-            fd: owned_fd,
-            async_fd,
-        })
+        Ok(Self { async_fd })
     }
 
     /// Get the raw file descriptor.
     ///
     /// Useful for passing to child processes via environment variables.
     pub fn as_raw_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
+        self.async_fd.get_ref().as_raw_fd()
     }
 
     /// Signal that data is available.
@@ -110,7 +102,7 @@ impl AsyncNotifier {
         let val: u64 = 1;
         let ret = unsafe {
             libc::write(
-                self.fd.as_raw_fd(),
+                self.as_raw_fd(),
                 &val as *const u64 as *const libc::c_void,
                 8,
             )
@@ -133,7 +125,7 @@ impl AsyncNotifier {
         let mut val: u64 = 0;
         let _ = unsafe {
             libc::read(
-                self.fd.as_raw_fd(),
+                self.as_raw_fd(),
                 &mut val as *mut u64 as *mut libc::c_void,
                 8,
             )
@@ -145,7 +137,7 @@ impl AsyncNotifier {
     /// Check if notifications are pending without blocking.
     pub fn has_pending(&self) -> bool {
         let mut pfd = libc::pollfd {
-            fd: self.fd.as_raw_fd(),
+            fd: self.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         };

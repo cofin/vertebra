@@ -242,10 +242,10 @@ impl WorkerLifecycle {
         let now = std::time::Instant::now();
 
         // If worker ran for > 60s before crashing, reset crash count (not a crash loop)
-        if let Some(spawn_time) = self.last_spawn {
-            if now.duration_since(spawn_time) > std::time::Duration::from_secs(60) {
-                self.crash_count = 0;
-            }
+        if let Some(spawn_time) = self.last_spawn
+            && now.duration_since(spawn_time) > std::time::Duration::from_secs(60)
+        {
+            self.crash_count = 0;
         }
 
         self.crash_count += 1;
@@ -297,11 +297,11 @@ pub fn cleanup_stale_shm() {
     match fs::read_dir(shm_dir) {
         Ok(entries) => {
             for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with("vertebra-") || name.starts_with("vertebra_") {
-                        tracing::warn!(name, "cleaning up stale SHM region");
-                        let _ = fs::remove_file(entry.path());
-                    }
+                if let Some(name) = entry.file_name().to_str()
+                    && (name.starts_with("vertebra-") || name.starts_with("vertebra_"))
+                {
+                    tracing::warn!(name, "cleaning up stale SHM region");
+                    let _ = fs::remove_file(entry.path());
                 }
             }
         }
@@ -335,8 +335,7 @@ mod tests {
 
     #[test]
     fn factory_creates_ring_pairs() {
-        let factory =
-            RingFactory::new(4, RingPairConfig::default()).expect("create factory");
+        let factory = RingFactory::new(4, RingPairConfig::default()).expect("create factory");
         assert_eq!(factory.worker_count(), 4);
 
         // Each ring pair should be independently usable
@@ -354,8 +353,7 @@ mod tests {
 
     #[test]
     fn factory_ring_pairs_are_independent() {
-        let factory =
-            RingFactory::new(2, RingPairConfig::default()).expect("create factory");
+        let factory = RingFactory::new(2, RingPairConfig::default()).expect("create factory");
 
         // Send to worker 0
         factory
@@ -366,11 +364,13 @@ mod tests {
 
         // Worker 1's ring should be empty
         let mut buf = vec![0u8; 1024];
-        assert!(factory
-            .ring_pair(1)
-            .request_ring
-            .try_recv(&mut buf)
-            .is_err());
+        assert!(
+            factory
+                .ring_pair(1)
+                .request_ring
+                .try_recv(&mut buf)
+                .is_err()
+        );
 
         // Worker 0's ring should have the data
         let len = factory
@@ -470,8 +470,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn factory_fds_are_inheritable() {
-        let factory =
-            RingFactory::new(1, RingPairConfig::default()).expect("create factory");
+        let factory = RingFactory::new(1, RingPairConfig::default()).expect("create factory");
         let pair = factory.ring_pair(0);
         let fds = pair.all_fds();
 

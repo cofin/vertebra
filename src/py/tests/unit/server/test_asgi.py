@@ -4,8 +4,6 @@ from typing import Any
 
 import pytest
 
-# --- Mock objects ---
-
 
 class MockHeaders:
     def __init__(self, headers: "dict[str, str] | None" = None):
@@ -45,9 +43,6 @@ class MockRequest:
         self.handler_id = handler_id
         self.request_id = request_id
         self.headers = MockHeaders(headers)
-
-
-# --- Scope ---
 
 
 def test_build_scope_type_is_http() -> None:
@@ -158,10 +153,8 @@ def test_build_scope_native_vertebra_request() -> None:
     from vertebra._vertebra import VertebraRequest, init_transport, try_get_batch
     from vertebra.server._asgi._scope import build_scope
 
-    # First verify the method exists on the native class
     assert hasattr(VertebraRequest, "asgi_scope")
 
-    # Try to get a real instance if possible (requires a batch in the ring)
     init_transport(mode="inprocess")
     batch = try_get_batch()
     if batch is None or len(batch) == 0:
@@ -172,9 +165,6 @@ def test_build_scope_native_vertebra_request() -> None:
     assert scope["type"] == "http"
     assert "asgi" in scope
     assert "headers" in scope
-
-
-# --- Queues ---
 
 
 @pytest.mark.anyio
@@ -264,11 +254,7 @@ async def test_send_collector_header_conversion() -> None:
     )
     await sc({"type": "http.response.body", "body": b""})
     r = sc.response
-    # SendCollector stores headers as-is; VertebraResponse handles byte→str.
     assert r.headers == [(b"content-type", b"text/html")]
-
-
-# --- Adapter ---
 
 
 @pytest.mark.anyio
@@ -384,8 +370,6 @@ def test_asgi_runner_coro_resumer_chains_across_await() -> None:
     try:
         asyncio.set_event_loop(loop)
         _drive_coro(two_step())
-        # Run the loop briefly so add_done_callback fires and the resumer
-        # gets a chance to advance the coroutine.
         loop.run_until_complete(asyncio.sleep(0.01))
     finally:
         asyncio.set_event_loop(None)
@@ -444,9 +428,6 @@ def test_asgi_runner_shared_running_loop_uses_threadsafe_submission() -> None:
         thread.join(timeout=1.0)
 
 
-# --- Extensions ---
-
-
 def test_asgi_extensions_compile_guard_pattern() -> None:
     from vertebra.server._asgi._extensions import compile_guard_pattern
 
@@ -480,11 +461,8 @@ def test_asgi_extensions_register_and_get_extensions() -> None:
     register_extension(sentinel)
     exts = get_extensions()
     assert sentinel in exts
-    _EXTENSIONS.pop()  # cleanup
+    _EXTENSIONS.pop()
     assert len(_EXTENSIONS) == orig_len
-
-
-# --- Ch2: ASGI fast-path optimizations ---
 
 
 def test_asgi_scope_optimizations_asgi_version_shared_across_scopes() -> None:

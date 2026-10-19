@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
-use vertebra_http::dispatcher::Dispatcher;
-use vertebra_http::collector::{PendingRequest, Batch};
 use tokio::sync::oneshot;
+use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+use vertebra_http::collector::{Batch, PendingRequest};
+use vertebra_http::dispatcher::Dispatcher;
 
 #[test]
 fn test_concurrent_dispatch_to_single_worker() {
@@ -14,15 +14,17 @@ fn test_concurrent_dispatch_to_single_worker() {
     let worker_count = 1;
     let mut pairs = Vec::new();
     for _ in 0..worker_count {
-        pairs.push(Arc::new(RingPair::create(RingPairConfig::default()).unwrap()));
+        pairs.push(Arc::new(
+            RingPair::create(RingPairConfig::default()).unwrap(),
+        ));
     }
 
     let dispatcher = Arc::new(Dispatcher::new_shm(pairs.clone(), 65536));
-    
+
     let thread_count = 4;
     let iterations = 1000;
     let total_expected = iterations * thread_count;
-    
+
     // Start consumer thread
     let ring_clone = Arc::clone(&pairs[0].request_ring);
     let consumer_handle = thread::spawn(move || {
@@ -57,8 +59,10 @@ fn test_concurrent_dispatch_to_single_worker() {
                         body: bytes::Bytes::new(),
                         reply: tx,
                     };
-                    let batch = Batch { requests: vec![req] };
-                    
+                    let batch = Batch {
+                        requests: vec![req],
+                    };
+
                     if dispatcher.dispatch(batch) > 0 {
                         success = true;
                     } else {

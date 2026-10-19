@@ -3,8 +3,8 @@
 pub mod ring_pair;
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use self::ring_pair::{ResponseData, RingPair, RingPairError};
@@ -832,7 +832,7 @@ impl<'a> ShmBatchWriter<'a> {
     pub fn serialize_into(mut self, out: &mut [u8]) -> usize {
         let node_count = self.nodes.len() as u32;
         let slab_len: usize = self.components.iter().map(|c| c.len()).sum();
-        
+
         let mut offset = 0;
         out[offset..offset + 4].copy_from_slice(&self.flags.to_le_bytes());
         offset += 4;

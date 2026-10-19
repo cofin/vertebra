@@ -6,8 +6,6 @@ import pytest
 
 from vertebra.server._asgi._queues import AsgiResponse
 
-# --- Mocks ---
-
 
 class MockHeaders:
     def __init__(self, headers: "dict[str, str] | None" = None):
@@ -72,9 +70,6 @@ class MockResponse:
         self.headers = headers or []
 
 
-# --- Phase 1: AsgiResponse request_id ---
-
-
 def test_asgi_response_request_id_default_request_id_is_zero() -> None:
     resp = AsgiResponse(status=200, headers=[], body=b"ok")
     assert resp.request_id == 0
@@ -109,9 +104,6 @@ async def test_asgi_response_request_id_adapter_propagates_request_id_on_failure
     results = await adapter.run_batch([MockRequest(request_id=77)])
     assert results[0].request_id == 77
     assert results[0].status == 500
-
-
-# --- Phase 2: Mount Dispatch ---
 
 
 def test_protocol_detection_detect_wsgi() -> None:
@@ -291,7 +283,6 @@ def test_asgi_event_loop_sharing_close_only_closes_owned_loop() -> None:
     try:
         runner = AsgiRunner(app, loop=loop)
         runner.close()
-        # Shared loop should still be open
         assert not loop.is_closed()
     finally:
         loop.close()
@@ -302,7 +293,6 @@ def test_wsgi_environ_http_version_default_http_version() -> None:
 
     req = MockRequest()
     env = WsgiEnviron(req)
-    # Default falls back to HTTP/1.1 since MockRequest has no http_version
     assert env["SERVER_PROTOCOL"] == "HTTP/1.1"
 
 

@@ -65,7 +65,7 @@ class ZodGenerator:
     def _render_object_schema(self, name: str, obj: ObjectType) -> str:
         return f"export const {name}Schema = {self._node_to_zod(obj)};"
 
-    def _node_to_zod(self, node: TypeNode) -> str:  # noqa: PLR0911
+    def _node_to_zod(self, node: TypeNode) -> str:
         if isinstance(node, AnnotatedType):
             return self._node_to_zod(node.base)
         if isinstance(node, ArrayType):

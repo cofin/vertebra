@@ -1,29 +1,30 @@
+"""ASGI middleware for developer features: generated types, HMR WebSocket, and script injection."""
+
 import asyncio
 import contextlib
-import json
 import logging
+import pkgutil
 import time
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from vertebra.framework._type_bridge import TypeBridge
+from vertebra.utils.serializers._json import decode_json, encode_json
+
+__all__ = ("ASGIApp", "DevMiddleware", "broadcast_hmr_event")
 
 logger = logging.getLogger("vertebra.dev")
 
+_ws_clients: set[asyncio.Queue[dict[str, Any]]] = set()
+
 
 class ASGIApp(Protocol):
+    """Protocol for an ASGI 3.0 callable."""
+
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None: ...
 
 
-# Module-level client tracking for WS broadcast.
-_ws_clients: set["asyncio.Queue[dict[str, Any]]"] = set()
-
-
 def broadcast_hmr_event(event: dict[str, Any]) -> None:
-    """Push an HMR event to all connected WebSocket clients.
-
-    Safe to call from any context — drops events for clients whose
-    queues are full (non-blocking).
-    """
+    """Push an HMR event to all connected WebSocket clients without blocking."""
     for queue in _ws_clients.copy():
         with contextlib.suppress(asyncio.QueueFull):
             queue.put_nowait(event)
@@ -32,30 +33,16 @@ def broadcast_hmr_event(event: dict[str, Any]) -> None:
 class DevMiddleware:
     """ASGI middleware for developer features.
 
-    Handles:
-    1. Serving generated types via /__vertebra/ endpoints.
-    2. WebSocket for HMR notifications with broadcast.
-    3. HTML injection of the HMR client script.
+    Serves generated types via ``/__vertebra/`` endpoints, provides a WebSocket
+    channel for HMR notifications, and injects the HMR client script into HTML
+    responses.
     """
 
-    def __init__(self, app: ASGIApp, type_bridge: TypeBridge):
+    def __init__(self, app: ASGIApp, type_bridge: TypeBridge) -> None:
         self.app = app
         self.type_bridge = type_bridge
-        # Wire type_bridge invalidation to HMR broadcast
         self._original_invalidate = type_bridge.invalidate
-        type_bridge.invalidate = self._invalidate_and_broadcast  # type: ignore[method-assign]
-
-    def _invalidate_and_broadcast(self) -> None:
-        """Clear type cache and notify all HMR clients."""
-        self._original_invalidate()
-        assets = self.type_bridge.get_assets()
-        broadcast_hmr_event(
-            {
-                "type": "types-update",
-                "version": assets.version,
-                "timestamp": time.time(),
-            }
-        )
+        cast("Any", type_bridge).invalidate = self._invalidate_and_broadcast
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] == "http":
@@ -64,10 +51,8 @@ class DevMiddleware:
                 await self.handle_dev_request(scope, receive, send)
                 return
 
-            # For regular requests, wrap send to inject HMR script into HTML
             async def wrapped_send(message: dict[str, Any]) -> None:
                 if message["type"] == "http.response.start":
-                    # Check if it's an HTML response
                     headers = dict(message.get("headers", []))
                     content_type = headers.get(b"content-type", b"").decode()
                     scope["__vtb_is_html"] = "text/html" in content_type
@@ -75,22 +60,20 @@ class DevMiddleware:
                 elif message["type"] == "http.response.body" and scope.get("__vtb_is_html"):
                     body = message.get("body", b"")
                     if b"</body>" in body:
-                        # Simple injection before </body>
                         script = b'<script type="module" src="/__vertebra/client/hmr.js"></script>'
-                        injected = body.replace(b"</body>", script + b"</body>")
-                        message["body"] = injected
+                        message["body"] = body.replace(b"</body>", script + b"</body>")
                     await send(message)
                 else:
                     await send(message)
 
             await self.app(scope, receive, wrapped_send)
-
         elif scope["type"] == "websocket" and scope["path"] == "/__vertebra/ws":
             await self.handle_ws(scope, receive, send)
         else:
             await self.app(scope, receive, send)
 
-    async def handle_dev_request(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+    async def handle_dev_request(self, scope: dict[str, Any], _receive: Any, send: Any) -> None:
+        """Serve generated type declarations, manifests, and the HMR client bundle."""
         path = scope["path"]
         assets = self.type_bridge.get_assets()
 
@@ -112,10 +95,6 @@ class DevMiddleware:
             content = assets.manifest
             content_type = "application/json"
         elif path == "/__vertebra/client/hmr.js":
-            # Serve the pre-built HMR client bundle from the Python package.
-            # tsup syncs dist/hmr/index.js → bundle/hmr.js
-            import pkgutil
-
             js_data = None
             for name in ("server/_js/bundle/hmr.js", "server/_js/bundle/index.js"):
                 try:
@@ -136,6 +115,7 @@ class DevMiddleware:
         await self.send_response(send, content.encode(), content_type)
 
     async def send_response(self, send: Any, body: bytes, content_type: str, status: int = 200) -> None:
+        """Send an HTTP response with no-cache headers."""
         await send(
             {
                 "type": "http.response.start",
@@ -154,27 +134,20 @@ class DevMiddleware:
             }
         )
 
-    async def handle_ws(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        """WebSocket handler for HMR event broadcast.
-
-        Each connected client gets an asyncio.Queue. A writer task reads
-        from the queue and sends JSON messages. The reader task handles
-        incoming messages (ping/pong) and disconnect cleanup.
-        """
+    async def handle_ws(self, _scope: dict[str, Any], receive: Any, send: Any) -> None:
+        """Manage a WebSocket connection for HMR event broadcast."""
         await send({"type": "websocket.accept"})
 
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
         _ws_clients.add(queue)
 
-        # Send initial connected message
         await send(
             {
                 "type": "websocket.send",
-                "text": json.dumps({"type": "connected", "timestamp": time.time()}),
+                "text": encode_json({"type": "connected", "timestamp": time.time()}),
             }
         )
 
-        # Writer: drains the broadcast queue and sends to this client
         async def writer() -> None:
             try:
                 while True:
@@ -182,7 +155,7 @@ class DevMiddleware:
                     await send(
                         {
                             "type": "websocket.send",
-                            "text": json.dumps(event),
+                            "text": encode_json(event),
                         }
                     )
             except Exception:
@@ -195,20 +168,31 @@ class DevMiddleware:
                 if message["type"] == "websocket.disconnect":
                     break
                 if message["type"] == "websocket.receive":
-                    # Handle ping from client
                     text = message.get("text", "")
                     if text:
                         try:
-                            data = json.loads(text)
-                            if data.get("type") == "ping":
+                            data = decode_json(text)
+                            if isinstance(data, dict) and data.get("type") == "ping":
                                 await send(
                                     {
                                         "type": "websocket.send",
-                                        "text": json.dumps({"type": "pong", "timestamp": time.time()}),
+                                        "text": encode_json({"type": "pong", "timestamp": time.time()}),
                                     }
                                 )
-                        except (json.JSONDecodeError, TypeError):
+                        except Exception:
                             pass
         finally:
             writer_task.cancel()
             _ws_clients.discard(queue)
+
+    def _invalidate_and_broadcast(self) -> None:
+        """Clear type cache and notify all HMR clients."""
+        self._original_invalidate()
+        assets = self.type_bridge.get_assets()
+        broadcast_hmr_event(
+            {
+                "type": "types-update",
+                "version": assets.version,
+                "timestamp": time.time(),
+            }
+        )

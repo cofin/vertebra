@@ -53,7 +53,7 @@ impl CorrelationSlab {
     ) -> Option<u64> {
         let index = self.free_list.pop()? as usize;
         self.generations[index] = self.generations[index].wrapping_add(1);
-        let gen = self.generations[index];
+        let generation = self.generations[index];
 
         self.slots[index] = Some(CorrelationEntry {
             reply,
@@ -61,7 +61,7 @@ impl CorrelationSlab {
             worker_id,
         });
 
-        Some(((gen as u64) << 32) | (index as u64))
+        Some(((generation as u64) << 32) | (index as u64))
     }
 
     /// Complete a correlation by sending the response through the oneshot.
@@ -97,12 +97,12 @@ impl CorrelationSlab {
         let mut expired = Vec::new();
 
         for index in 0..self.capacity {
-            if let Some(entry) = &self.slots[index] {
-                if now.duration_since(entry.created_at) >= timeout {
-                    let gen = self.generations[index];
-                    let id = ((gen as u64) << 32) | (index as u64);
-                    expired.push(id);
-                }
+            if let Some(entry) = &self.slots[index]
+                && now.duration_since(entry.created_at) >= timeout
+            {
+                let generation = self.generations[index];
+                let id = ((generation as u64) << 32) | (index as u64);
+                expired.push(id);
             }
         }
 
@@ -131,11 +131,11 @@ impl CorrelationSlab {
         let mut swept = Vec::new();
 
         for index in 0..self.capacity {
-            if let Some(entry) = &self.slots[index] {
-                if entry.worker_id == dead_worker_id {
-                    let gen = self.generations[index];
-                    swept.push(((gen as u64) << 32) | (index as u64));
-                }
+            if let Some(entry) = &self.slots[index]
+                && entry.worker_id == dead_worker_id
+            {
+                let generation = self.generations[index];
+                swept.push(((generation as u64) << 32) | (index as u64));
             }
         }
 

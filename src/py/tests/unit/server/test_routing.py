@@ -15,10 +15,6 @@ from vertebra.framework._router import (
     put,
 )
 
-# ---------------------------------------------------------------------------
-# TestDecorators
-# ---------------------------------------------------------------------------
-
 _DECORATOR_CASES = [
     (get, "GET", "/items"),
     (post, "POST", "/items"),
@@ -69,11 +65,6 @@ def test_decorators_handler_returns_original_callable() -> None:
     assert noop() is None
 
 
-# ---------------------------------------------------------------------------
-# TestRouter
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("prefix", "expected_path"),
     [
@@ -102,11 +93,6 @@ def test_router_empty_prefix_is_identity() -> None:
 
     router.register(x)
     assert router.routes[0].path == "/x"
-
-
-# ---------------------------------------------------------------------------
-# TestPathParamExtraction
-# ---------------------------------------------------------------------------
 
 
 def test_path_param_extraction_integer_param() -> None:
@@ -159,11 +145,6 @@ def test_path_param_extraction_path_mismatch_raises() -> None:
 def test_path_param_extraction_too_many_segments_raises() -> None:
     with pytest.raises(ValueError):
         extract_path_params("/items/{item_id:int}", "/items/1/extra")
-
-
-# ---------------------------------------------------------------------------
-# TestHandlerIdPublicAPI
-# ---------------------------------------------------------------------------
 
 
 def test_handler_id_public_api_is_int() -> None:

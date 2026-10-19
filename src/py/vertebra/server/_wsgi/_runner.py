@@ -1,5 +1,6 @@
 """WsgiRunner: batch loop for a WSGI application."""
 
+import contextlib
 import logging
 import os
 import signal
@@ -8,6 +9,20 @@ from collections.abc import Callable
 from typing import Any
 
 from vertebra.server._wsgi._adapter import WsgiAdapter, WsgiError
+
+_NativeVertebraResponse: Any = None
+_get_batch: Any = None
+_submit_results: Any = None
+with contextlib.suppress(ImportError):
+    from vertebra._vertebra import (
+        VertebraResponse as _NativeVertebraResponse,
+    )
+    from vertebra._vertebra import (
+        get_batch as _get_batch,
+    )
+    from vertebra._vertebra import (
+        submit_results as _submit_results,
+    )
 
 __all__ = ["WsgiRunner"]
 
@@ -19,7 +34,7 @@ _WsgiApp = Callable[[dict[str, Any], Callable[..., None]], Any]
 class WsgiRunner:
     """Synchronous batch runner for a WSGI application."""
 
-    __slots__ = ("_adapter", "_server_name", "_server_port", "_on_error", "_running")
+    __slots__ = ("_adapter", "_on_error", "_running", "_server_name", "_server_port")
 
     def __init__(
         self,
@@ -36,26 +51,17 @@ class WsgiRunner:
         self._on_error = on_error or self._default_error
         self._running = False
 
-    @staticmethod
-    def _default_error(*_args: Any) -> Any:
-        from vertebra._vertebra import VertebraResponse
-
-        return VertebraResponse(status=500, body=b"Internal Server Error")
-
-    def _handle_signals(self) -> None:
-        def _stop(signum: int, frame: Any) -> None:  # noqa: ARG001
-            log.info("WsgiRunner received signal %d, stopping.", signum)
-            self.stop()
-
-        signal.signal(signal.SIGTERM, _stop)
-        signal.signal(signal.SIGINT, _stop)
-
     def stop(self) -> None:
+        """Signal the runner loop to stop after the current batch."""
         self._running = False
 
     def run(self) -> None:
         """Enter the main batch processing loop."""
-        from vertebra._vertebra import get_batch, submit_results
+        get_batch_fn = _get_batch
+        submit_results_fn = _submit_results
+        if get_batch_fn is None or submit_results_fn is None:
+            from vertebra._vertebra import get_batch as get_batch_fn
+            from vertebra._vertebra import submit_results as submit_results_fn
 
         self._running = True
         self._handle_signals()
@@ -64,7 +70,7 @@ class WsgiRunner:
 
         while self._running:
             try:
-                batch = get_batch()
+                batch = get_batch_fn()
             except Exception:
                 log.exception("ffi.get_batch() failed; exiting runner.")
                 break
@@ -82,9 +88,25 @@ class WsgiRunner:
                 responses.append(response)
 
             try:
-                submit_results(responses)
+                submit_results_fn(responses)
             except Exception:
                 log.exception("ffi.submit_results() failed; exiting runner.")
                 break
 
         log.info("WsgiRunner stopped.")
+
+    def _handle_signals(self) -> None:
+        def _stop(signum: int, _frame: Any) -> None:
+            log.info("WsgiRunner received signal %d, stopping.", signum)
+            self.stop()
+
+        signal.signal(signal.SIGTERM, _stop)
+        signal.signal(signal.SIGINT, _stop)
+
+    @staticmethod
+    def _default_error(*_args: Any) -> Any:
+        if _NativeVertebraResponse is not None:
+            return _NativeVertebraResponse(status=500, body=b"Internal Server Error")
+        from vertebra._vertebra import VertebraResponse
+
+        return VertebraResponse(status=500, body=b"Internal Server Error")

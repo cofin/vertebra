@@ -9,14 +9,12 @@ Provides helpers for:
 import os
 import tomllib
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Final, overload
 
 from vertebra.cli.errors import ImproperConfigurationError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-T = TypeVar("T")
 
 __all__ = (
     "FALSE_VALUES",
@@ -31,21 +29,6 @@ __all__ = (
 
 TRUE_VALUES: Final = {"1", "true", "yes", "on"}
 FALSE_VALUES: Final = {"0", "false", "no", "off"}
-
-
-# =============================================================================
-# Environment Variable Parsing
-# =============================================================================
-
-
-def _coerce_bool(value: str) -> bool:
-    normalized = value.strip().lower()
-    if normalized in TRUE_VALUES:
-        return True
-    if normalized in FALSE_VALUES:
-        return False
-    msg = f"Invalid boolean environment variable: {value}"
-    raise ValueError(msg)
 
 
 @overload
@@ -79,13 +62,8 @@ def get_env(key: str, default: Any = None, type_hint: type | None = None) -> Any
     return value
 
 
-# =============================================================================
-# pyproject.toml Discovery
-# =============================================================================
-
-
 def find_pyproject_toml() -> Path | None:
-    """Walk filesystem upward to find pyproject.toml."""
+    """Walk filesystem upward to find pyproject.toml, stopping at .git or root."""
     current = Path.cwd()
 
     while True:
@@ -93,11 +71,9 @@ def find_pyproject_toml() -> Path | None:
         if pyproject.exists():
             return pyproject
 
-        # Stop at .git boundary
         if (current / ".git").exists():
             return None
 
-        # Stop at filesystem root
         if current == current.parent:
             return None
 
@@ -168,11 +144,6 @@ def read_pyproject_section(section: str) -> dict[str, Any]:
     return dict(tool_vtb.get(section, {}))
 
 
-# =============================================================================
-# Connection Config Normalization
-# =============================================================================
-
-
 def normalize_connection_config(
     connection_config: "Mapping[str, Any] | None", *, extra_key: str = "extra"
 ) -> dict[str, Any]:
@@ -186,3 +157,13 @@ def normalize_connection_config(
         raise ImproperConfigurationError(msg)
     normalized.update(extras)
     return normalized
+
+
+def _coerce_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in TRUE_VALUES:
+        return True
+    if normalized in FALSE_VALUES:
+        return False
+    msg = f"Invalid boolean environment variable: {value}"
+    raise ValueError(msg)

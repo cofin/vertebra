@@ -1,17 +1,11 @@
-"""Build configuration from ``[tool.vertebra]`` in *pyproject.toml*.
-
-Reads project-level build settings including JavaScript dependency
-declarations and bundler preferences.
-"""
+"""Build configuration from ``[tool.vertebra]`` in *pyproject.toml*."""
 
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# JavaScript dependency configuration
-# ---------------------------------------------------------------------------
+__all__ = ("BuildConfig", "JsConfig")
 
 
 @dataclass
@@ -22,25 +16,9 @@ class JsConfig:
     dev_dependencies: tuple[str, ...] = ()
 
 
-# ---------------------------------------------------------------------------
-# Top-level build configuration
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class BuildConfig:
-    """Build configuration loaded from ``[tool.vertebra]`` in *pyproject.toml*.
-
-    Attributes:
-        entry: Frontend entry point (e.g. ``"src/main.ts"``). Empty string means no frontend.
-        outdir: Output directory for bundled assets (relative to project root).
-        bundler: The bundler backend to use (``"native"`` by default).
-        dev_port: HMR dev-server port.  ``None`` means auto-select.
-        codegen: Whether to run type codegen before bundling.
-        codegen_output: Directory for generated type files.
-        app: Application import path (e.g. ``"myapp:app"``).
-        js: JavaScript/npm dependency declarations.
-    """
+    """Build configuration loaded from ``[tool.vertebra]`` in *pyproject.toml*."""
 
     entry: str = ""
     outdir: str = "dist"
@@ -51,21 +29,9 @@ class BuildConfig:
     app: str = ""
     js: JsConfig = field(default_factory=JsConfig)
 
-    # -- factory ----------------------------------------------------------
-
     @classmethod
     def load(cls, pyproject_path: Path | str) -> "BuildConfig":
-        """Load build configuration from a *pyproject.toml* file.
-
-        Returns a default :class:`BuildConfig` when the file is missing or
-        the ``[tool.vertebra]`` section is absent.
-
-        Args:
-            pyproject_path: Path to the *pyproject.toml* file.
-
-        Returns:
-            A fully-populated :class:`BuildConfig`.
-        """
+        """Load build configuration from a *pyproject.toml* file."""
         pyproject_path = Path(pyproject_path)
 
         if not pyproject_path.exists():
@@ -89,11 +55,8 @@ class BuildConfig:
         )
         app_path: str = vertebra_cfg.get("app", "")
 
-        # -- JS section ---------------------------------------------------
         js_section: dict[str, Any] = vertebra_cfg.get("js", {})
         dependencies = tuple(js_section.get("dependencies", ()))
-
-        # Accept both hyphenated and underscored keys
         dev_deps_raw = js_section.get("dev-dependencies") or js_section.get("dev_dependencies", ())
         dev_dependencies = tuple(dev_deps_raw)
 
@@ -109,6 +72,3 @@ class BuildConfig:
             app=app_path,
             js=js,
         )
-
-
-__all__ = ("BuildConfig", "JsConfig")

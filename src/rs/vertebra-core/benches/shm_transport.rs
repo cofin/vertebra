@@ -7,7 +7,7 @@
 //! - Transport parity: InProcess vs SharedMemory poll_batch
 //! - CorrelationSlab insert/complete vs baseline
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::sync::Arc;
 use std::time::Duration;
 

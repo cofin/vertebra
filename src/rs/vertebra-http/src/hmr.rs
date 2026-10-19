@@ -4,8 +4,8 @@
 //! Plain `GET` requests return JSON status so the signal path remains debuggable
 //! even without a browser WebSocket client.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -17,9 +17,9 @@ use hyper::body::Incoming;
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use tokio::sync::broadcast;
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::{Message, Role};
-use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, warn};
 
 use crate::server::ServerState;

@@ -150,10 +150,10 @@ impl SsrPool {
     pub fn render(&self, component: &str, page_json: &str) -> Result<SsrResult> {
         // Check cache.
         let cache_key = self.cache_key(component, page_json);
-        if let Some(cached) = self.cache.get(&cache_key) {
-            if cached.created_at.elapsed() < self.cache_ttl {
-                return Ok(cached.result.clone());
-            }
+        if let Some(cached) = self.cache.get(&cache_key)
+            && cached.created_at.elapsed() < self.cache_ttl
+        {
+            return Ok(cached.result.clone());
         }
 
         // Acquire a context from the pool.
@@ -213,12 +213,11 @@ impl SsrPool {
             let mut head = Vec::new();
             if let Some(arr) = head_val.as_array() {
                 for i in 0..arr.len() {
-                    if let Ok(val) = arr.get::<Value>(i) {
-                        if let Some(s) = val.as_string() {
-                            if let Ok(s) = s.to_string() {
-                                head.push(s);
-                            }
-                        }
+                    if let Ok(val) = arr.get::<Value>(i)
+                        && let Some(s) = val.as_string()
+                        && let Ok(s) = s.to_string()
+                    {
+                        head.push(s);
                     }
                 }
             }

@@ -2,7 +2,6 @@
 
 import asyncio
 import contextlib
-import json
 import logging
 import threading
 import time
@@ -10,6 +9,10 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from vertebra.utils.serializers._json import encode_json
+
+__all__ = ("CodegenWatcher", "HmrEventRouter", "HmrNotifier", "classify_file")
 
 logger = logging.getLogger(__name__)
 
@@ -29,17 +32,13 @@ _IGNORED_PATH_PARTS = frozenset(
     }
 )
 
-# ---------------------------------------------------------------------------
-# File classification
-# ---------------------------------------------------------------------------
-
 _PYTHON_EXTS = frozenset({".py", ".pyi"})
 _FRONTEND_EXTS = frozenset({".ts", ".tsx", ".js", ".jsx", ".css", ".scss", ".less", ".vue", ".svelte"})
 _CONFIG_NAMES = frozenset({"pyproject.toml", "package.json", "tsconfig.json"})
 
 
 def classify_file(filepath: str) -> str:
-    """Classify a file into: ``'python'``, ``'frontend'``, ``'config'``, or ``'unknown'``."""
+    """Classify a file into ``'python'``, ``'frontend'``, ``'config'``, or ``'unknown'``."""
     p = Path(filepath)
     if p.name in _CONFIG_NAMES:
         return "config"
@@ -51,11 +50,6 @@ def classify_file(filepath: str) -> str:
     return "unknown"
 
 
-# ---------------------------------------------------------------------------
-# HMR notifier (HTTP signal to Rust server)
-# ---------------------------------------------------------------------------
-
-
 class HmrNotifier:
     """Notify the Rust HMR endpoint after code generation completes."""
 
@@ -64,9 +58,9 @@ class HmrNotifier:
 
     def notify(self) -> None:
         """POST to the HMR signal endpoint without surfacing delivery errors."""
-        request = urllib.request.Request(self._url, data=b"", method="POST")  # noqa: S310
+        request = urllib.request.Request(self._url, data=b"", method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=1):  # noqa: S310
+            with urllib.request.urlopen(request, timeout=1):
                 return
         except Exception:
             logger.debug(
@@ -74,11 +68,6 @@ class HmrNotifier:
                 self._url,
                 exc_info=True,
             )
-
-
-# ---------------------------------------------------------------------------
-# Codegen file watcher (polling)
-# ---------------------------------------------------------------------------
 
 
 class CodegenWatcher:
@@ -139,33 +128,25 @@ class CodegenWatcher:
         return snapshot
 
 
-# ---------------------------------------------------------------------------
-# HMR event router
-# ---------------------------------------------------------------------------
-
-
 class HmrEventRouter:
-    """Routes HMR events from the file watcher based on file type.
-
-    - ``.py`` files -> TypeBridge.invalidate() (type regeneration)
-    - ``.ts``/``.tsx``/``.css`` -> broadcast ``'update'`` to HMR clients
-    - Config files -> broadcast ``'full-reload'``
-
-    Pattern: litecore HmrEventRouter
-    """
+    """Route HMR events from the file watcher based on file type."""
 
     def __init__(
         self,
         bridge: Any = None,
         on_hmr_update: Callable[[list[str]], None] | None = None,
     ) -> None:
-        self._bridge = bridge  # TypeBridge instance (optional)
-        self._on_hmr_update = on_hmr_update  # callback for frontend changes
+        self._bridge = bridge
+        self._on_hmr_update = on_hmr_update
         self._hmr_clients: set[Any] = set()
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
 
-    # -- Client management ---------------------------------------------------
+    @property
+    def client_count(self) -> int:
+        """Return the number of connected HMR clients."""
+        with self._lock:
+            return len(self._hmr_clients)
 
     def subscribe(self, ws: Any) -> None:
         """Register a WebSocket client for HMR broadcasts."""
@@ -176,14 +157,6 @@ class HmrEventRouter:
         """Remove a WebSocket client from HMR broadcasts."""
         with self._lock:
             self._hmr_clients.discard(ws)
-
-    @property
-    def client_count(self) -> int:
-        """Return the number of connected HMR clients."""
-        with self._lock:
-            return len(self._hmr_clients)
-
-    # -- Event routing -------------------------------------------------------
 
     def route_event(self, changed_files: list[str]) -> None:
         """Route file changes to appropriate handlers."""
@@ -200,33 +173,26 @@ class HmrEventRouter:
             elif category == "config":
                 config_change = True
 
-        # Config changes trigger a hard reload and short-circuit.
         if config_change:
             self._broadcast({"type": "full-reload", "reason": "config change"})
             return
 
-        # Python changes invalidate the type bridge for regeneration.
         if python_files and self._bridge is not None:
             self._bridge.invalidate(changed_files=[Path(p) for p in python_files])
 
-        # Frontend changes are broadcast to all HMR clients.
         if frontend_files:
             updates = [{"path": f, "timestamp": time.time()} for f in frontend_files]
             self._broadcast({"type": "update", "updates": updates})
             if self._on_hmr_update:
                 self._on_hmr_update(frontend_files)
 
-    # -- Event loop binding --------------------------------------------------
-
     def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind an asyncio event loop for broadcasting to WebSocket clients."""
         self._loop = loop
 
-    # -- Internal broadcast --------------------------------------------------
-
     def _broadcast(self, message: dict[str, Any]) -> None:
         """Broadcast JSON message to all connected HMR clients."""
-        payload = json.dumps(message)
+        payload = encode_json(message)
         loop = self._loop
         if loop is None:
             return
@@ -251,6 +217,3 @@ class HmrEventRouter:
 
 def _should_watch(path: Path) -> bool:
     return not any(part in _IGNORED_PATH_PARTS for part in path.parts)
-
-
-__all__ = ("CodegenWatcher", "HmrEventRouter", "HmrNotifier", "classify_file")

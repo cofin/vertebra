@@ -15,6 +15,8 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
 
 use vertebra_core::transport::BatchSnapshot;
 
+use crate::headers::iter_raw_headers;
+
 /// Fixed-layout WSGI keys that every environ must expose.
 const STATIC_KEYS: &[&str] = &[
     "REQUEST_METHOD",
@@ -79,26 +81,10 @@ impl WsgiEnviron {
         if self.header_cache.is_none() {
             let raw = self.batch.headers_raw(self.index);
             let mut map = HashMap::new();
-            let mut pos = 0;
-            while pos < raw.len() {
-                let name_len = raw[pos] as usize;
-                pos += 1;
-                if pos + name_len > raw.len() {
-                    break;
-                }
-                let name = String::from_utf8_lossy(&raw[pos..pos + name_len]).to_string();
-                pos += name_len;
-                if pos + 2 > raw.len() {
-                    break;
-                }
-                let value_len = u16::from_le_bytes([raw[pos], raw[pos + 1]]) as usize;
-                pos += 2;
-                if pos + value_len > raw.len() {
-                    break;
-                }
-                let value = String::from_utf8_lossy(&raw[pos..pos + value_len]).to_string();
-                pos += value_len;
-                map.insert(name.to_ascii_lowercase(), value);
+            for (name, value) in iter_raw_headers(raw) {
+                let name_lower = String::from_utf8_lossy(name).to_ascii_lowercase();
+                let val_str = String::from_utf8_lossy(value).into_owned();
+                map.insert(name_lower, val_str);
             }
             self.header_cache = Some(map);
         }
@@ -108,10 +94,7 @@ impl WsgiEnviron {
     fn build_known(&mut self, py: Python<'_>, key: &str) -> PyResult<Option<Py<PyAny>>> {
         let node = self.batch.node(self.index);
         let obj: Py<PyAny> = match key {
-            "REQUEST_METHOD" => {
-                let m = node.method_name().to_ascii_uppercase();
-                PyString::new(py, &m).into_any().unbind()
-            }
+            "REQUEST_METHOD" => PyString::intern(py, node.method_name()).into_any().unbind(),
             "SCRIPT_NAME" => PyString::intern(py, "").into_any().unbind(),
             "PATH_INFO" => PyString::new(py, self.batch.path(self.index))
                 .into_any()
@@ -124,7 +107,9 @@ impl WsgiEnviron {
             "SERVER_PORT" => PyString::new(py, &self.server_port.to_string())
                 .into_any()
                 .unbind(),
-            "SERVER_PROTOCOL" => PyString::intern(py, node.http_version()).into_any().unbind(),
+            "SERVER_PROTOCOL" => PyString::intern(py, node.http_version())
+                .into_any()
+                .unbind(),
             "wsgi.version" => {
                 let t = PyTuple::new(py, [1i32.into_pyobject(py)?, 0i32.into_pyobject(py)?])?;
                 t.into_any().unbind()
@@ -133,7 +118,6 @@ impl WsgiEnviron {
             "wsgi.input" => {
                 let body = self.batch.body(self.index);
                 let body_bytes = PyBytes::new(py, body);
-                // Return an io.BytesIO over the body for WSGI apps.
                 let io = py.import("io")?;
                 let bio = io.call_method1("BytesIO", (body_bytes,))?;
                 bio.into_any().unbind()
@@ -149,23 +133,22 @@ impl WsgiEnviron {
                 let v = self
                     .ensure_headers()
                     .get("content-type")
-                    .cloned()
-                    .unwrap_or_default();
-                PyString::new(py, &v).into_any().unbind()
+                    .map(String::as_str)
+                    .unwrap_or("");
+                PyString::new(py, v).into_any().unbind()
             }
             "CONTENT_LENGTH" => {
                 let v = self
                     .ensure_headers()
                     .get("content-length")
-                    .cloned()
-                    .unwrap_or_default();
-                PyString::new(py, &v).into_any().unbind()
+                    .map(String::as_str)
+                    .unwrap_or("");
+                PyString::new(py, v).into_any().unbind()
             }
             _ if key.starts_with("HTTP_") => {
                 let header_name = key[5..].to_ascii_lowercase().replace('_', "-");
-                let v = self.ensure_headers().get(&header_name).cloned();
-                match v {
-                    Some(val) => PyString::new(py, &val).into_any().unbind(),
+                match self.ensure_headers().get(&header_name) {
+                    Some(val) => PyString::new(py, val).into_any().unbind(),
                     None => return Ok(None),
                 }
             }
@@ -175,15 +158,15 @@ impl WsgiEnviron {
     }
 
     fn collect_keys(&mut self) -> Vec<String> {
+        let _ = self.ensure_headers();
+        let headers = self.header_cache.as_ref().unwrap();
         let mut keys: Vec<String> =
-            Vec::with_capacity(STATIC_KEYS.len() + self.extras.len() + 8);
+            Vec::with_capacity(STATIC_KEYS.len() + self.extras.len() + headers.len());
         for k in STATIC_KEYS {
             if !self.deleted.contains(*k) {
                 keys.push((*k).to_string());
             }
         }
-        // Materialize headers once and yield CONTENT_TYPE, CONTENT_LENGTH, HTTP_*
-        let headers = self.ensure_headers().clone();
         if headers.contains_key("content-type") && !self.deleted.contains("CONTENT_TYPE") {
             keys.push("CONTENT_TYPE".to_string());
         }
@@ -241,7 +224,9 @@ impl WsgiEnviron {
     fn __delitem__(&mut self, key: &str) -> PyResult<()> {
         let in_extras = self.extras.remove(key).is_some();
         self.cached.remove(key);
-        if in_extras || STATIC_KEYS.contains(&key) || key.starts_with("HTTP_")
+        if in_extras
+            || STATIC_KEYS.contains(&key)
+            || key.starts_with("HTTP_")
             || key == "CONTENT_TYPE"
             || key == "CONTENT_LENGTH"
         {
@@ -251,18 +236,21 @@ impl WsgiEnviron {
         Err(PyKeyError::new_err(key.to_string()))
     }
 
-    fn __contains__(&mut self, py: Python<'_>, key: &str) -> PyResult<bool> {
+    fn __contains__(&mut self, key: &str) -> bool {
         if self.deleted.contains(key) {
-            return Ok(false);
+            return false;
         }
-        if self.extras.contains_key(key) {
-            return Ok(true);
+        if self.extras.contains_key(key) || STATIC_KEYS.contains(&key) {
+            return true;
         }
-        if STATIC_KEYS.contains(&key) {
-            return Ok(true);
+        if key == "CONTENT_TYPE" || key == "CONTENT_LENGTH" {
+            return true;
         }
-        // Dynamic lookup (HTTP_*, CONTENT_TYPE, CONTENT_LENGTH)
-        Ok(self.build_known(py, key)?.is_some())
+        if let Some(rest) = key.strip_prefix("HTTP_") {
+            let header_name = rest.to_ascii_lowercase().replace('_', "-");
+            return self.ensure_headers().contains_key(&header_name);
+        }
+        false
     }
 
     fn __len__(&mut self) -> usize {
@@ -330,10 +318,7 @@ impl WsgiEnviron {
         let mut tuples: Vec<Bound<'py, PyAny>> = Vec::with_capacity(keys.len());
         for k in &keys {
             let v = self.__getitem__(py, k)?;
-            let t = PyTuple::new(
-                py,
-                [PyString::new(py, k).into_any(), v.into_bound(py)],
-            )?;
+            let t = PyTuple::new(py, [PyString::new(py, k).into_any(), v.into_bound(py)])?;
             tuples.push(t.into_any());
         }
         PyList::new(py, &tuples)

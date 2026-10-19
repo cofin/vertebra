@@ -4,7 +4,7 @@
 //! - Immediate data (data already available): < 5µs
 //! - Blocked wake (data arrives after wait starts): < 10µs
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;

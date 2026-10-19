@@ -10,7 +10,9 @@ import json
 import uuid as _uuid_mod
 from abc import ABC, abstractmethod
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, overload
+from typing import Any, Final, Literal, Protocol, cast, overload
+
+from msgspec.json import Decoder, Encoder
 
 from vertebra._typing import (
     MSGSPEC_INSTALLED,
@@ -21,11 +23,9 @@ from vertebra._typing import (
     BaseModel,
     attrs_asdict,
 )
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.type_guards import dataclass_to_dict, is_attrs_instance, is_dataclass_instance, is_msgspec_struct
 from vertebra.utils.uuids import _load_uuid_utils
-
-if TYPE_CHECKING:
-    pass
 
 __all__ = (
     "BaseJSONSerializer",
@@ -39,87 +39,6 @@ __all__ = (
     "encode_json",
     "get_default_serializer",
 )
-
-
-def _get_uuid_utils_type() -> type[Any] | None:
-    if not UUID_UTILS_INSTALLED:
-        return None
-    module = _load_uuid_utils()
-    if module is None:
-        return None
-    return module.UUID  # type: ignore[no-any-return]
-
-
-_UUID_UTILS_TYPE: type[Any] | None = _get_uuid_utils_type()
-
-
-def convert_datetime_to_gmt_iso(value: datetime.datetime) -> str:
-    """Normalize datetime values to ISO 8601 strings."""
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=datetime.UTC)
-    return value.isoformat().replace("+00:00", "Z")
-
-
-def convert_date_to_iso(value: datetime.date) -> str:
-    """Normalize date values to ISO 8601 strings."""
-    return value.isoformat()
-
-
-def _dump_pydantic_model(value: Any) -> Any:
-    if hasattr(value, "model_dump"):
-        return value.model_dump()
-    return value.dict()
-
-
-def _dump_msgspec_struct(value: Any) -> dict[str, Any]:
-    return {field_name: value.__getattribute__(field_name) for field_name in value.__struct_fields__}
-
-
-def _normalize_numpy_value(value: Any) -> Any:
-    if not NUMPY_INSTALLED:
-        return value
-
-    import numpy as np
-
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    return value
-
-
-def _normalize_supported_value(value: Any) -> Any:
-    """Convert supported non-native values into JSON-compatible objects."""
-    if isinstance(value, datetime.datetime):
-        return convert_datetime_to_gmt_iso(value)
-    if isinstance(value, datetime.date):
-        return convert_date_to_iso(value)
-    if isinstance(value, _uuid_mod.UUID):
-        return str(value)
-    if _UUID_UTILS_TYPE is not None and isinstance(value, _UUID_UTILS_TYPE):
-        return str(value)
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, enum.Enum):
-        return value.value
-    if PYDANTIC_INSTALLED and isinstance(value, BaseModel):
-        return _dump_pydantic_model(value)
-    if is_dataclass_instance(value):
-        return dataclass_to_dict(value)
-    if is_attrs_instance(value):
-        return attrs_asdict(value, recurse=True)
-    if is_msgspec_struct(value):
-        return _dump_msgspec_struct(value)
-    numpy_value = _normalize_numpy_value(value)
-    if numpy_value is not value:
-        return numpy_value
-
-    msg = f"unsupported JSON value: {type(value).__name__}"
-    raise TypeError(msg)
-
-
-def _is_explicit_unsupported_error(exc: Exception) -> bool:
-    return "unsupported json value" in str(exc).lower()
 
 
 class JSONSerializer(Protocol):
@@ -150,33 +69,12 @@ class BaseJSONSerializer(ABC):
         ...
 
 
-_orjson_fallback: "OrjsonSerializer | None" = None
-_stdlib_fallback: "StandardLibSerializer | None" = None
-_default_serializer: "JSONSerializer | None" = None
-
-
-def _get_orjson_fallback() -> "OrjsonSerializer":
-    global _orjson_fallback
-    if _orjson_fallback is None:
-        _orjson_fallback = OrjsonSerializer()
-    return _orjson_fallback
-
-
-def _get_stdlib_fallback() -> "StandardLibSerializer":
-    global _stdlib_fallback
-    if _stdlib_fallback is None:
-        _stdlib_fallback = StandardLibSerializer()
-    return _stdlib_fallback
-
-
 class MsgspecSerializer(BaseJSONSerializer):
     """Msgspec-based JSON serializer."""
 
     __slots__ = ("_decoder", "_encoder")
 
     def __init__(self) -> None:
-        from msgspec.json import Decoder, Encoder
-
         self._encoder: Final[Encoder] = Encoder(enc_hook=_normalize_supported_value)
         self._decoder: Final[Decoder[Any]] = Decoder()
 
@@ -219,17 +117,19 @@ class OrjsonSerializer(BaseJSONSerializer):
     __slots__ = ()
 
     def encode(self, data: Any, *, as_bytes: bool = False) -> str | bytes:
-        from orjson import OPT_NAIVE_UTC, OPT_SERIALIZE_UUID
-        from orjson import dumps as orjson_dumps
+        orjson_mod = import_optional("orjson")
+        if orjson_mod is None:
+            return _get_stdlib_fallback().encode(data, as_bytes=as_bytes)
 
-        options = OPT_NAIVE_UTC | OPT_SERIALIZE_UUID
+        options = orjson_mod.OPT_NAIVE_UTC | orjson_mod.OPT_SERIALIZE_UUID
         if NUMPY_INSTALLED:
-            from orjson import OPT_SERIALIZE_NUMPY
-
-            options |= OPT_SERIALIZE_NUMPY
+            options |= orjson_mod.OPT_SERIALIZE_NUMPY
 
         try:
-            encoded = orjson_dumps(data, default=_normalize_supported_value, option=options)
+            encoded = cast(
+                "bytes",
+                orjson_mod.dumps(data, default=_normalize_supported_value, option=options),
+            )
         except TypeError as exc:
             if _is_explicit_unsupported_error(exc):
                 raise
@@ -237,16 +137,15 @@ class OrjsonSerializer(BaseJSONSerializer):
                 unsupported_msg = "unsupported JSON value"
                 raise TypeError(unsupported_msg) from exc
             raise
-        return encoded if as_bytes else encoded.decode("utf-8")  # type: ignore[no-any-return]
+        return encoded if as_bytes else encoded.decode("utf-8")
 
     def decode(self, data: str | bytes, *, decode_bytes: bool = True) -> Any:
-        from orjson import loads as orjson_loads
-
-        if isinstance(data, bytes):
-            if not decode_bytes:
-                return data
-            return orjson_loads(data)
-        return orjson_loads(data)
+        orjson_mod = import_optional("orjson")
+        if orjson_mod is None:
+            return _get_stdlib_fallback().decode(data, decode_bytes=decode_bytes)
+        if isinstance(data, bytes) and not decode_bytes:
+            return data
+        return orjson_mod.loads(data)
 
 
 class StandardLibSerializer(BaseJSONSerializer):
@@ -264,6 +163,18 @@ class StandardLibSerializer(BaseJSONSerializer):
                 return data
             return json.loads(data.decode("utf-8"))
         return json.loads(data)
+
+
+def convert_datetime_to_gmt_iso(value: datetime.datetime) -> str:
+    """Normalize datetime values to ISO 8601 strings."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.UTC)
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def convert_date_to_iso(value: datetime.date) -> str:
+    """Normalize date values to ISO 8601 strings."""
+    return value.isoformat()
 
 
 def get_default_serializer() -> JSONSerializer:
@@ -292,6 +203,10 @@ def encode_json(data: Any, *, as_bytes: Literal[False] = ...) -> str: ...
 def encode_json(data: Any, *, as_bytes: Literal[True]) -> bytes: ...
 
 
+@overload
+def encode_json(data: Any, *, as_bytes: bool = ...) -> str | bytes: ...
+
+
 def encode_json(data: Any, *, as_bytes: bool = False) -> str | bytes:
     """Encode Python data into JSON."""
     return get_default_serializer().encode(data, as_bytes=as_bytes)
@@ -300,3 +215,92 @@ def encode_json(data: Any, *, as_bytes: bool = False) -> str | bytes:
 def decode_json(data: str | bytes, *, decode_bytes: bool = True) -> Any:
     """Decode JSON input into Python data."""
     return get_default_serializer().decode(data, decode_bytes=decode_bytes)
+
+
+_orjson_fallback: OrjsonSerializer | None = None
+_stdlib_fallback: StandardLibSerializer | None = None
+_default_serializer: JSONSerializer | None = None
+
+
+def _get_uuid_utils_type() -> type[Any] | None:
+    if not UUID_UTILS_INSTALLED:
+        return None
+    module = _load_uuid_utils()
+    if module is None:
+        return None
+    return cast("type[Any]", module.UUID)
+
+
+_UUID_UTILS_TYPE: type[Any] | None = _get_uuid_utils_type()
+
+
+def _dump_pydantic_model(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    return value.dict()
+
+
+def _dump_msgspec_struct(value: Any) -> dict[str, Any]:
+    return {field_name: value.__getattribute__(field_name) for field_name in value.__struct_fields__}
+
+
+def _normalize_numpy_value(value: Any) -> Any:
+    if not NUMPY_INSTALLED:
+        return value
+
+    np = import_optional("numpy")
+    if np is None:
+        return value
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _normalize_supported_value(value: Any) -> Any:
+    """Convert supported non-native values into JSON-compatible objects."""
+    if isinstance(value, datetime.datetime):
+        return convert_datetime_to_gmt_iso(value)
+    if isinstance(value, datetime.date):
+        return convert_date_to_iso(value)
+    if isinstance(value, _uuid_mod.UUID):
+        return str(value)
+    if _UUID_UTILS_TYPE is not None and isinstance(value, _UUID_UTILS_TYPE):
+        return str(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, enum.Enum):
+        return value.value
+    if PYDANTIC_INSTALLED and isinstance(value, BaseModel):
+        return _dump_pydantic_model(value)
+    if is_dataclass_instance(value):
+        return dataclass_to_dict(value)
+    if is_attrs_instance(value):
+        return attrs_asdict(value, recurse=True)
+    if is_msgspec_struct(value):
+        return _dump_msgspec_struct(value)
+    numpy_value = _normalize_numpy_value(value)
+    if numpy_value is not value:
+        return numpy_value
+
+    msg = f"unsupported JSON value: {type(value).__name__}"
+    raise TypeError(msg)
+
+
+def _is_explicit_unsupported_error(exc: Exception) -> bool:
+    return "unsupported json value" in str(exc).lower()
+
+
+def _get_orjson_fallback() -> OrjsonSerializer:
+    global _orjson_fallback
+    if _orjson_fallback is None:
+        _orjson_fallback = OrjsonSerializer()
+    return _orjson_fallback
+
+
+def _get_stdlib_fallback() -> StandardLibSerializer:
+    global _stdlib_fallback
+    if _stdlib_fallback is None:
+        _stdlib_fallback = StandardLibSerializer()
+    return _stdlib_fallback

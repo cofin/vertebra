@@ -32,11 +32,6 @@ _UVLOOP_ENV_KEY = "VERTEBRA_UVLOOP"
 _DISABLE_VALUES = frozenset({"0", "false", "no", "off", "disable", "disabled"})
 
 
-# ---------------------------------------------------------------------------
-# Error type
-# ---------------------------------------------------------------------------
-
-
 class LoopMismatchError(RuntimeError):
     """Raised when an event loop mismatch is detected."""
 
@@ -44,11 +39,6 @@ class LoopMismatchError(RuntimeError):
         full = f"{message}\n  Suggestion: {suggestion}" if suggestion else message
         super().__init__(full)
         self.suggestion = suggestion
-
-
-# ---------------------------------------------------------------------------
-# Policy helpers
-# ---------------------------------------------------------------------------
 
 
 def is_uvloop_supported() -> bool:
@@ -103,11 +93,6 @@ def get_current_loop_policy_name() -> str:
     if "asyncio" in module:
         return "asyncio (default)"
     return f"{module}.{cls.__qualname__}"
-
-
-# ---------------------------------------------------------------------------
-# Diagnostic checks
-# ---------------------------------------------------------------------------
 
 
 def check_running_loop() -> asyncio.AbstractEventLoop | None:

@@ -135,7 +135,7 @@ impl Notifier {
     #[cfg(target_os = "linux")]
     pub unsafe fn from_raw_fd(fd: RawFd) -> Self {
         Self {
-            fd: OwnedFd::from_raw_fd(fd),
+            fd: unsafe { OwnedFd::from_raw_fd(fd) },
         }
     }
 
@@ -151,8 +151,8 @@ impl Notifier {
     #[cfg(not(target_os = "linux"))]
     pub unsafe fn from_raw_fds(read_fd: RawFd, write_fd: RawFd) -> Self {
         Self {
-            read_fd: OwnedFd::from_raw_fd(read_fd),
-            write_fd: OwnedFd::from_raw_fd(write_fd),
+            read_fd: unsafe { OwnedFd::from_raw_fd(read_fd) },
+            write_fd: unsafe { OwnedFd::from_raw_fd(write_fd) },
         }
     }
 

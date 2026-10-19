@@ -2,7 +2,7 @@
 
 use crate::errors::{BundlerError, Result};
 use notify::{RecommendedWatcher, WatchMode};
-use notify_debouncer_mini::{new_debouncer, DebouncedEvent, Debouncer};
+use notify_debouncer_mini::{DebouncedEvent, Debouncer, new_debouncer};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;

@@ -102,7 +102,8 @@ impl BatchCollector {
     ) -> Vec<mpsc::Sender<PendingRequest>> {
         let mut senders = Vec::with_capacity(shard_count);
         for _ in 0..shard_count {
-            let (collector, tx) = Self::new(Arc::clone(&dispatcher), policy.clone(), channel_capacity);
+            let (collector, tx) =
+                Self::new(Arc::clone(&dispatcher), policy.clone(), channel_capacity);
             tokio::spawn(collector.run());
             senders.push(tx);
         }
@@ -119,11 +120,7 @@ impl BatchCollector {
             let sleep = match deadline {
                 Some(d) => {
                     let now = Instant::now();
-                    if now >= d {
-                        Duration::ZERO
-                    } else {
-                        d - now
-                    }
+                    if now >= d { Duration::ZERO } else { d - now }
                 }
                 None => Duration::from_secs(3600),
             };

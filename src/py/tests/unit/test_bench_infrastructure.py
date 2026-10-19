@@ -5,8 +5,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Ensure repo root is on sys.path so `tools.benchmarks` is importable.
-# This file is at src/py/tests/unit/test_bench_infrastructure.py
 _REPO_ROOT = str(Path(__file__).resolve().parents[4])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
@@ -49,7 +47,6 @@ def test_targets_baseline_targets_defined() -> None:
 def test_targets_all_targets_count() -> None:
     from tools.benchmarks.targets import ALL_TARGETS
 
-    # 6 vertebra + 1 freethreaded (currently defined) + 3 baseline = 10
     assert len(ALL_TARGETS) >= 10
 
 
@@ -105,7 +102,6 @@ def test_scenarios_body_100k_in_full() -> None:
 def test_endpoint_coverage_asgi_app_has_all_paths() -> None:
     from tools.benchmarks.apps.asgi import app
 
-    # Minimal check that it's a callable
     assert callable(app)
 
 

@@ -26,7 +26,6 @@ def middleware(type_bridge: TypeBridge) -> DevMiddleware:
 def test_broadcast_hmr_event_to_empty_clients() -> None:
     _ws_clients.clear()
     broadcast_hmr_event({"type": "test"})
-    # No error
 
 
 def test_broadcast_hmr_event_delivers_to_queue() -> None:
@@ -62,9 +61,7 @@ def test_broadcast_hmr_event_drops_on_full_queue() -> None:
     q.put_nowait({"type": "old"})
     _ws_clients.add(q)
     try:
-        # Should not raise
         broadcast_hmr_event({"type": "new"})
-        # Old event still there, new was dropped
         assert q.get_nowait()["type"] == "old"
     finally:
         _ws_clients.discard(q)
@@ -92,9 +89,7 @@ async def test_handle_ws_accept_and_connected_message(middleware: DevMiddleware)
 
     await middleware.handle_ws({}, receive, send)
 
-    # First call: accept
     send.assert_any_call({"type": "websocket.accept"})
-    # Second call: connected message
     calls = [c.args[0] for c in send.call_args_list]
     connected_calls = [c for c in calls if c.get("type") == "websocket.send"]
     assert len(connected_calls) >= 1
@@ -109,7 +104,7 @@ async def test_handle_ws_cleanup_on_disconnect(middleware: DevMiddleware) -> Non
 
     before = len(_ws_clients)
     await middleware.handle_ws({}, receive, send)
-    assert len(_ws_clients) == before  # Client removed on disconnect
+    assert len(_ws_clients) == before
 
 
 @pytest.mark.anyio()

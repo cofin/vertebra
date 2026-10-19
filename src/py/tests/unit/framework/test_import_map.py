@@ -5,10 +5,6 @@ import json
 from vertebra.builder._config import JsConfig
 from vertebra.builder._import_map import generate_import_map, parse_package_spec, write_import_map
 
-# ---------------------------------------------------------------------------
-# ParsePackageSpec
-# ---------------------------------------------------------------------------
-
 
 def test_parse_package_spec_simple_package() -> None:
     assert parse_package_spec("react@^19") == ("react", "^19")
@@ -32,11 +28,6 @@ def test_parse_package_spec_exact_version() -> None:
 
 def test_parse_package_spec_tilde_version() -> None:
     assert parse_package_spec("react@~18.2") == ("react", "~18.2")
-
-
-# ---------------------------------------------------------------------------
-# GenerateImportMap
-# ---------------------------------------------------------------------------
 
 
 def test_generate_import_map_basic() -> None:
@@ -85,11 +76,6 @@ def test_generate_import_map_multiple_dependencies() -> None:
     assert result["imports"]["react"] == "npm:react@^19"
     assert result["imports"]["react-dom"] == "npm:react-dom@^19"
     assert result["imports"]["@tanstack/router"] == "npm:@tanstack/router@^1"
-
-
-# ---------------------------------------------------------------------------
-# WriteImportMap
-# ---------------------------------------------------------------------------
 
 
 def test_write_import_map_writes_file(tmp_path) -> None:  # type: ignore[no-untyped-def]

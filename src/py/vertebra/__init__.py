@@ -6,6 +6,7 @@ Example::
 
     app = VertebraApp()
 
+
     @app.get("/hello")
     def hello() -> str:
         return "world"
@@ -27,13 +28,13 @@ from vertebra.framework._router import (
 __version__ = "0.1.0"
 
 __all__ = (
-    # Application
     "App",
     "HandlerInfo",
-    "VertebraApp",
-    # Routing
-    "Router",
     "RouteDef",
+    "Router",
+    "VertebraApp",
+    "__version__",
+    "_make_handler_id",
     "delete",
     "extract_path_params",
     "get",
@@ -41,7 +42,4 @@ __all__ = (
     "patch",
     "post",
     "put",
-    # Meta
-    "__version__",
-    "_make_handler_id",
 )

@@ -1,6 +1,5 @@
 """Run command."""
 
-import logging
 import os
 import sys
 import tomllib
@@ -9,10 +8,14 @@ from typing import Any
 
 import click
 
+from vertebra.builder._config import BuildConfig
+from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
 from vertebra.utils.serializers import from_json
+
+__all__ = ("load_config", "run")
 
 
 @click.command()
@@ -52,20 +55,17 @@ def run(
     no_banner: bool,
 ) -> None:
     """Run the Vertebra server."""
-    logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO))
+    configure_logging(level=log_level, mode="prod")
 
-    # Resolve workers based on topology if not explicitly provided
     if workers is None:
         workers = 1 if topology.lower() == "shm" else 0
 
-    # Default threads to CPU count if not specified
     if threads is None:
         threads = os.cpu_count() or 1
 
     env = os.environ.copy()
     env["VERTEBRA_APP"] = app
 
-    # Ensure the CWD is importable (for app paths like "tools.benchmarks.apps.foo:bar")
     cwd = os.getcwd()
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{cwd}{os.pathsep}{existing}" if existing else cwd
@@ -83,7 +83,6 @@ def run(
     elif tls_cert or tls_key:
         raise CLIError("Both --tls-cert and --tls-key must be provided together", exit_code=EXIT_CONFIG_ERROR)
 
-    # Set static dir for production frontend serving if available
     static_dir = _resolve_static_dir(Path.cwd())
     if static_dir:
         env["VERTEBRA_STATIC_DIR"] = str(static_dir)
@@ -111,28 +110,6 @@ def run(
     sys.exit(exit_code)
 
 
-def _resolve_static_dir(project_dir: Path) -> Path | None:
-    """Resolve the static assets directory for production frontend serving."""
-    try:
-        from vertebra.builder._config import BuildConfig
-
-        config = BuildConfig.load(project_dir)
-        if config.outdir:
-            candidate = project_dir / config.outdir
-            if candidate.is_dir():
-                return candidate
-    except Exception:
-        pass
-
-    # Fallback: check common static directories
-    for name in ("dist/static", "dist"):
-        candidate = project_dir / name
-        if candidate.is_dir():
-            return candidate
-
-    return None
-
-
 def load_config(path: Path) -> dict[str, Any]:
     """Load a Vertebra config file into a dict."""
     if not path.exists():
@@ -146,3 +123,22 @@ def load_config(path: Path) -> dict[str, Any]:
         return data
     msg = f"Unsupported config format: {path.suffix}"
     raise ValueError(msg)
+
+
+def _resolve_static_dir(project_dir: Path) -> Path | None:
+    """Resolve the static assets directory for production frontend serving."""
+    try:
+        config = BuildConfig.load(project_dir)
+        if config.outdir:
+            candidate = project_dir / config.outdir
+            if candidate.is_dir():
+                return candidate
+    except Exception:
+        pass
+
+    for name in ("dist/static", "dist"):
+        candidate = project_dir / name
+        if candidate.is_dir():
+            return candidate
+
+    return None

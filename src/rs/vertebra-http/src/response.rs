@@ -8,15 +8,15 @@ use std::sync::Arc;
 use bytes::Bytes;
 use http::{Response, StatusCode};
 use http_body_util::Full;
-use hyper::body::Incoming;
 use hyper::Request;
+use hyper::body::Incoming;
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
 use vertebra_core::transport::decode_headers_raw;
 
 use crate::backpressure::{BackpressureMetricsSnapshot, CircuitState, RejectionReason};
-use crate::collector::{method_tag, PendingRequest, PendingResponse};
+use crate::collector::{PendingRequest, PendingResponse, method_tag};
 use crate::hmr;
 use crate::router::RouterError;
 use crate::server::ServerState;
@@ -40,7 +40,9 @@ pub async fn handle(
     // Health endpoint sits above routing and backpressure so probes always
     // work, even when the controller is shedding load.
     if req.uri().path() == HEALTH_PATH {
-        return Ok(health_response(state.dispatcher.backpressure().map(|c| c.snapshot())));
+        return Ok(health_response(
+            state.dispatcher.backpressure().map(|c| c.snapshot()),
+        ));
     }
 
     // Admission control. If a BackpressureController is attached, acquire a
@@ -123,10 +125,7 @@ pub async fn handle(
         Ok(resp) => build_response(resp),
         Err(_) => {
             warn!(handler_id, "worker dropped response channel");
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "worker error",
-            )
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "worker error")
         }
     };
 
@@ -256,4 +255,3 @@ pub fn encode_response_headers(headers: &[(Vec<u8>, Vec<u8>)]) -> Bytes {
     }
     Bytes::from(buf)
 }
-

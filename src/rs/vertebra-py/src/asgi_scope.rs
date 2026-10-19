@@ -2,11 +2,11 @@
 //!
 //! Replaces the `_SCOPE_TEMPLATE.copy()` dict path in
 //! `server/_asgi/_scope.py` with a `#[pyclass(mapping)]` that materializes
-//! known keys on demand. Keeps the `VertebraRequest` arena alive via an
-//! `Arc<BatchSnapshot>` so path/query/headers slices stay valid for as long
-//! as middleware holds the scope.
+//! known keys on demand using a fixed-size inline slot table and bitmask.
+//! Keeps the `VertebraRequest` arena alive via an `Arc<BatchSnapshot>` so
+//! path/query/headers slices stay valid for as long as middleware holds the scope.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use pyo3::exceptions::PyKeyError;
@@ -15,10 +15,10 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
 
 use vertebra_core::transport::BatchSnapshot;
 
-use crate::headers::VertebraHeaders;
+use crate::headers::decode_asgi_headers;
 
 /// Known ASGI HTTP scope keys per the ASGI 3.0 spec.
-const KNOWN_KEYS: &[&str] = &[
+const KNOWN_KEYS: [&str; 14] = [
     "type",
     "asgi",
     "http_version",
@@ -35,6 +35,27 @@ const KNOWN_KEYS: &[&str] = &[
     "client",
 ];
 
+#[inline]
+fn known_key_index(key: &str) -> Option<usize> {
+    match key {
+        "type" => Some(0),
+        "asgi" => Some(1),
+        "http_version" => Some(2),
+        "method" => Some(3),
+        "path" => Some(4),
+        "raw_path" => Some(5),
+        "query_string" => Some(6),
+        "root_path" => Some(7),
+        "scheme" => Some(8),
+        "headers" => Some(9),
+        "state" => Some(10),
+        "extensions" => Some(11),
+        "server" => Some(12),
+        "client" => Some(13),
+        _ => None,
+    }
+}
+
 /// Lazy ASGI scope. Implements the mapping protocol so framework middleware
 /// that expects a dict can read it without the scope having to materialize
 /// every key up-front.
@@ -43,12 +64,12 @@ pub struct AsgiScope {
     batch: Arc<BatchSnapshot>,
     index: usize,
     root_path: String,
-    /// Cached materialized values for known keys.
-    cached: HashMap<String, Py<PyAny>>,
-    /// User-set keys (via `__setitem__` or `update`).
-    extras: HashMap<String, Py<PyAny>>,
-    /// Keys that have been removed via `__delitem__`.
-    deleted: HashSet<String>,
+    /// Inline cache for the 14 standard ASGI HTTP scope keys.
+    cached: [Option<Py<PyAny>>; KNOWN_KEYS.len()],
+    /// Bitmask of deleted known keys (bit `i` == 1 means `KNOWN_KEYS[i]` was deleted).
+    deleted_known: u16,
+    /// Lazily allocated map for non-standard keys added via `__setitem__` / `update`.
+    extras: Option<HashMap<String, Py<PyAny>>>,
 }
 
 impl AsgiScope {
@@ -58,61 +79,63 @@ impl AsgiScope {
             batch,
             index,
             root_path,
-            cached: HashMap::new(),
-            extras: HashMap::new(),
-            deleted: HashSet::new(),
+            cached: [const { None }; KNOWN_KEYS.len()],
+            deleted_known: 0,
+            extras: None,
         }
     }
 
-    fn build_known(&self, py: Python<'_>, key: &str) -> PyResult<Option<Py<PyAny>>> {
+    #[inline]
+    fn is_known_deleted(&self, idx: usize) -> bool {
+        (self.deleted_known & (1u16 << idx)) != 0
+    }
+
+    fn build_known_by_index(&self, py: Python<'_>, idx: usize) -> PyResult<Py<PyAny>> {
         let node = self.batch.node(self.index);
-        let obj: Py<PyAny> = match key {
-            "type" => PyString::intern(py, "http").into_any().unbind(),
-            "asgi" => {
+        let obj: Py<PyAny> = match idx {
+            0 => PyString::intern(py, "http").into_any().unbind(),
+            1 => {
                 let d = PyDict::new(py);
                 d.set_item("version", "3.0")?;
                 d.set_item("spec_version", "2.3")?;
                 d.into_any().unbind()
             }
-            "http_version" => PyString::intern(py, node.http_version()).into_any().unbind(),
-            "method" => {
-                let method = node.method_name().to_ascii_uppercase();
-                PyString::new(py, &method).into_any().unbind()
-            }
-            "path" => PyString::new(py, self.batch.path(self.index))
+            2 => PyString::intern(py, node.http_version())
                 .into_any()
                 .unbind(),
-            "raw_path" => PyBytes::new(py, self.batch.path(self.index).as_bytes())
+            3 => PyString::intern(py, node.method_name()).into_any().unbind(),
+            4 => PyString::new(py, self.batch.path(self.index))
                 .into_any()
                 .unbind(),
-            "query_string" => {
+            5 => PyBytes::new(py, self.batch.path(self.index).as_bytes())
+                .into_any()
+                .unbind(),
+            6 => {
                 let q = self.batch.query(self.index).unwrap_or("");
                 PyBytes::new(py, q.as_bytes()).into_any().unbind()
             }
-            "root_path" => PyString::new(py, &self.root_path).into_any().unbind(),
-            "scheme" => PyString::intern(py, "http").into_any().unbind(),
-            "headers" => {
-                let raw = self.batch.headers_raw(self.index);
-                let hdrs = VertebraHeaders::new(bytes::Bytes::copy_from_slice(raw));
-                hdrs.asgi_items(py)?.into_any().unbind()
-            }
-            "state" => PyDict::new(py).into_any().unbind(),
-            "extensions" => PyDict::new(py).into_any().unbind(),
-            "server" | "client" => py.None(),
-            _ => return Ok(None),
+            7 => PyString::new(py, &self.root_path).into_any().unbind(),
+            8 => PyString::intern(py, "http").into_any().unbind(),
+            9 => decode_asgi_headers(py, self.batch.headers_raw(self.index))?
+                .into_any()
+                .unbind(),
+            10 | 11 => PyDict::new(py).into_any().unbind(),
+            12 | 13 => py.None(),
+            _ => unreachable!(),
         };
-        Ok(Some(obj))
+        Ok(obj)
     }
 
     fn collect_keys(&self) -> Vec<String> {
-        let mut keys: Vec<String> = Vec::with_capacity(KNOWN_KEYS.len() + self.extras.len());
-        for k in KNOWN_KEYS {
-            if !self.deleted.contains(*k) {
+        let extra_len = self.extras.as_ref().map_or(0, HashMap::len);
+        let mut keys: Vec<String> = Vec::with_capacity(KNOWN_KEYS.len() + extra_len);
+        for (idx, k) in KNOWN_KEYS.iter().enumerate() {
+            if !self.is_known_deleted(idx) {
                 keys.push((*k).to_string());
             }
         }
-        for k in self.extras.keys() {
-            if !KNOWN_KEYS.contains(&k.as_str()) && !self.deleted.contains(k) {
+        if let Some(ref extras) = self.extras {
+            for k in extras.keys() {
                 keys.push(k.clone());
             }
         }
@@ -123,62 +146,67 @@ impl AsgiScope {
 #[pymethods]
 impl AsgiScope {
     fn __getitem__(&mut self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        if self.deleted.contains(key) {
-            return Err(PyKeyError::new_err(key.to_string()));
-        }
-        if let Some(v) = self.extras.get(key) {
-            return Ok(v.clone_ref(py));
-        }
-        if let Some(v) = self.cached.get(key) {
-            return Ok(v.clone_ref(py));
-        }
-        if let Some(v) = self.build_known(py, key)? {
+        if let Some(idx) = known_key_index(key) {
+            if self.is_known_deleted(idx) {
+                return Err(PyKeyError::new_err(key.to_string()));
+            }
+            if let Some(ref v) = self.cached[idx] {
+                return Ok(v.clone_ref(py));
+            }
+            let v = self.build_known_by_index(py, idx)?;
             let clone = v.clone_ref(py);
-            self.cached.insert(key.to_string(), v);
+            self.cached[idx] = Some(v);
             return Ok(clone);
+        }
+        if let Some(ref extras) = self.extras
+            && let Some(v) = extras.get(key)
+        {
+            return Ok(v.clone_ref(py));
         }
         Err(PyKeyError::new_err(key.to_string()))
     }
 
     fn __setitem__(&mut self, key: String, value: Py<PyAny>) {
-        self.deleted.remove(&key);
-        self.extras.insert(key, value);
+        if let Some(idx) = known_key_index(&key) {
+            self.deleted_known &= !(1u16 << idx);
+            self.cached[idx] = Some(value);
+        } else {
+            self.extras
+                .get_or_insert_with(HashMap::new)
+                .insert(key, value);
+        }
     }
 
     fn __delitem__(&mut self, key: &str) -> PyResult<()> {
-        let in_extras = self.extras.remove(key).is_some();
-        let is_known = KNOWN_KEYS.contains(&key);
-        if in_extras || is_known {
-            self.cached.remove(key);
-            self.deleted.insert(key.to_string());
+        if let Some(idx) = known_key_index(key) {
+            if self.is_known_deleted(idx) {
+                return Err(PyKeyError::new_err(key.to_string()));
+            }
+            self.deleted_known |= 1u16 << idx;
+            self.cached[idx] = None;
+            return Ok(());
+        }
+        if let Some(ref mut extras) = self.extras
+            && extras.remove(key).is_some()
+        {
             return Ok(());
         }
         Err(PyKeyError::new_err(key.to_string()))
     }
 
     fn __contains__(&self, key: &str) -> bool {
-        if self.deleted.contains(key) {
-            return false;
+        if let Some(idx) = known_key_index(key) {
+            return !self.is_known_deleted(idx);
         }
-        if self.extras.contains_key(key) {
-            return true;
-        }
-        KNOWN_KEYS.contains(&key)
+        self.extras
+            .as_ref()
+            .is_some_and(|extras| extras.contains_key(key))
     }
 
     fn __len__(&self) -> usize {
-        let mut n = 0usize;
-        for k in KNOWN_KEYS {
-            if !self.deleted.contains(*k) {
-                n += 1;
-            }
-        }
-        for k in self.extras.keys() {
-            if !KNOWN_KEYS.contains(&k.as_str()) && !self.deleted.contains(k) {
-                n += 1;
-            }
-        }
-        n
+        let live_known = KNOWN_KEYS.len() - (self.deleted_known.count_ones() as usize);
+        let extra_len = self.extras.as_ref().map_or(0, HashMap::len);
+        live_known + extra_len
     }
 
     fn __iter__(slf: PyRef<'_, Self>, py: Python<'_>) -> PyResult<Py<AsgiScopeKeyIter>> {
@@ -211,8 +239,7 @@ impl AsgiScope {
             Err(_) => {
                 let val = default.unwrap_or_else(|| py.None());
                 let clone = val.clone_ref(py);
-                self.deleted.remove(&key);
-                self.extras.insert(key, val);
+                self.__setitem__(key, val);
                 Ok(clone)
             }
         }
@@ -242,10 +269,7 @@ impl AsgiScope {
         let mut tuples: Vec<Bound<'py, PyAny>> = Vec::with_capacity(keys.len());
         for k in &keys {
             let v = self.__getitem__(py, k)?;
-            let t = PyTuple::new(
-                py,
-                [PyString::new(py, k).into_any(), v.into_bound(py)],
-            )?;
+            let t = PyTuple::new(py, [PyString::new(py, k).into_any(), v.into_bound(py)])?;
             tuples.push(t.into_any());
         }
         PyList::new(py, &tuples)
@@ -259,7 +283,6 @@ impl AsgiScope {
             }
             return Ok(());
         }
-        // Fall back to .items() for dict-like mappings.
         let items = other.call_method0("items")?;
         let iter = items.try_iter()?;
         for item in iter {
@@ -286,14 +309,14 @@ impl AsgiScope {
         if !other.hasattr("keys")? {
             return Ok(false);
         }
-        let my_keys = self.collect_keys();
+        let my_len = self.__len__();
         let keys_call = other.call_method0("keys")?;
         let iter = keys_call.try_iter()?;
         let mut other_count = 0usize;
         for k in iter {
             let k = k?;
             let ks: String = k.extract()?;
-            if !my_keys.contains(&ks) {
+            if !self.__contains__(&ks) {
                 return Ok(false);
             }
             let other_val = other.get_item(&ks)?;
@@ -303,11 +326,11 @@ impl AsgiScope {
             }
             other_count += 1;
         }
-        Ok(other_count == my_keys.len())
+        Ok(other_count == my_len)
     }
 
     fn __repr__(&self) -> String {
-        format!("AsgiScope({} keys)", self.collect_keys().len())
+        format!("AsgiScope({} keys)", self.__len__())
     }
 }
 

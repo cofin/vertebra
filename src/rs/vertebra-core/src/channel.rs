@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use crossbeam_utils::Backoff;
 
 use crate::buffer::{
-    Buffer, BufferError, BufferPool, ChannelMode, RegionState, RingLayout, ShmHeader, SlotHeader,
-    ABI_VERSION, MAGIC, SLOT_ALIGN,
+    ABI_VERSION, Buffer, BufferError, BufferPool, ChannelMode, MAGIC, RegionState, RingLayout,
+    SLOT_ALIGN, ShmHeader, SlotHeader,
 };
 use crate::shm::{ShmError, ShmRegion};
 use crate::sync::{self, SyncError};
@@ -166,7 +166,7 @@ impl SpscRing {
         }
         // SAFETY: caller guarantees exclusive initialization and valid mapping.
         let header = region.as_ptr().cast::<ShmHeader>();
-        let header_ref = &mut *header;
+        let header_ref = unsafe { &mut *header };
         header_ref.magic = MAGIC;
         header_ref.abi_version = ABI_VERSION;
         header_ref.flags = 0;
@@ -185,7 +185,7 @@ impl SpscRing {
         header_ref.wait_write.0.store(0, Ordering::Relaxed);
         header_ref.send_waiters.0.store(0, Ordering::Relaxed);
         header_ref.recv_waiters.0.store(0, Ordering::Relaxed);
-        Self::from_region(region, layout)
+        unsafe { Self::from_region(region, layout) }
     }
 
     /// Attach to an existing shared region and validate the header.
@@ -195,14 +195,14 @@ impl SpscRing {
     pub unsafe fn attach(region: Arc<ShmRegion>, layout: RingLayout) -> Result<Self, ChannelError> {
         // SAFETY: caller guarantees region is initialized and mapped.
         let header = region.as_ptr().cast::<ShmHeader>();
-        let header_ref = &*header;
+        let header_ref = unsafe { &*header };
         if header_ref.magic != MAGIC || header_ref.abi_version != ABI_VERSION {
             return Err(ChannelError::NotReady);
         }
         if header_ref.state.load(Ordering::Acquire) != RegionState::Ready as u32 {
             return Err(ChannelError::NotReady);
         }
-        Self::from_region(region, layout)
+        unsafe { Self::from_region(region, layout) }
     }
 
     /// Create a ring without initializing the header.
@@ -218,7 +218,7 @@ impl SpscRing {
         }
         // SAFETY: region is a valid shared memory mapping.
         let header = region.as_ptr().cast::<ShmHeader>();
-        let data = region.as_ptr().add(layout.header_size);
+        let data = unsafe { region.as_ptr().add(layout.header_size) };
         Ok(Self {
             region,
             header,
@@ -826,15 +826,17 @@ impl SpscRing {
     /// # Safety
     /// Caller must ensure the slot at `index` contains valid data.
     unsafe fn read_slot_to_vec(&self, index: u64) -> (Vec<u8>, u32) {
-        let slot = self.slot_ptr(index);
-        let header = &*slot.cast::<SlotHeader>();
-        let len = header.len as usize;
-        let flags = header.flags;
-        let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+        unsafe {
+            let slot = self.slot_ptr(index);
+            let header = &*slot.cast::<SlotHeader>();
+            let len = header.len as usize;
+            let flags = header.flags;
+            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
 
-        let mut payload = vec![0u8; len];
-        ptr::copy_nonoverlapping(payload_ptr, payload.as_mut_ptr(), len);
-        (payload, flags)
+            let mut payload = vec![0u8; len];
+            ptr::copy_nonoverlapping(payload_ptr, payload.as_mut_ptr(), len);
+            (payload, flags)
+        }
     }
 
     /// Reset the ring to empty state. Used for reclaiming rings from dead workers.
@@ -851,7 +853,7 @@ impl SpscRing {
         self.recv_waiters().store(0, Ordering::Release);
         self.slot_borrowed.store(false, Ordering::Release);
         // Bump generation to invalidate any stale references
-        let header = &*self.header;
+        let header = unsafe { &*self.header };
         header.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -883,31 +885,35 @@ impl SpscRing {
 
     unsafe fn slot_ptr(&self, index: u64) -> *mut u8 {
         let offset = (index as usize & self.mask as usize) * self.layout.slot_size;
-        self.data.add(offset)
+        unsafe { self.data.add(offset) }
     }
 
     unsafe fn write_slot(&self, index: u64, payload: &[u8], flags: u32) {
-        let slot = self.slot_ptr(index);
-        let header = slot.cast::<SlotHeader>();
-        (*header).len = payload.len() as u32;
-        (*header).flags = flags;
-        let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
-        ptr::copy_nonoverlapping(payload.as_ptr(), payload_ptr, payload.len());
+        unsafe {
+            let slot = self.slot_ptr(index);
+            let header = slot.cast::<SlotHeader>();
+            (*header).len = payload.len() as u32;
+            (*header).flags = flags;
+            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+            ptr::copy_nonoverlapping(payload.as_ptr(), payload_ptr, payload.len());
+        }
     }
 
     unsafe fn read_slot(&self, index: u64, out: &mut [u8]) -> Result<usize, ChannelError> {
-        let slot = self.slot_ptr(index);
-        let header = &*slot.cast::<SlotHeader>();
-        let len = header.len as usize;
-        if len > out.len() {
-            return Err(ChannelError::BufferTooSmall {
-                len,
-                capacity: out.len(),
-            });
+        unsafe {
+            let slot = self.slot_ptr(index);
+            let header = &*slot.cast::<SlotHeader>();
+            let len = header.len as usize;
+            if len > out.len() {
+                return Err(ChannelError::BufferTooSmall {
+                    len,
+                    capacity: out.len(),
+                });
+            }
+            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+            ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
+            Ok(len)
         }
-        let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
-        ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
-        Ok(len)
     }
 
     unsafe fn read_slot_with_flags(
@@ -915,18 +921,20 @@ impl SpscRing {
         index: u64,
         out: &mut [u8],
     ) -> Result<(usize, u32), ChannelError> {
-        let slot = self.slot_ptr(index);
-        let header = &*slot.cast::<SlotHeader>();
-        let len = header.len as usize;
-        if len > out.len() {
-            return Err(ChannelError::BufferTooSmall {
-                len,
-                capacity: out.len(),
-            });
+        unsafe {
+            let slot = self.slot_ptr(index);
+            let header = &*slot.cast::<SlotHeader>();
+            let len = header.len as usize;
+            if len > out.len() {
+                return Err(ChannelError::BufferTooSmall {
+                    len,
+                    capacity: out.len(),
+                });
+            }
+            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+            ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
+            Ok((len, header.flags))
         }
-        let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
-        ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
-        Ok((len, header.flags))
     }
 
     /// Peek at a slot without copying or advancing the cursor.
@@ -936,12 +944,14 @@ impl SpscRing {
     /// # Safety
     /// Caller must ensure the index is valid (head <= index < tail).
     unsafe fn peek_slot(&self, index: u64) -> (*const u8, usize, u32) {
-        let slot = self.slot_ptr(index);
-        let header = &*slot.cast::<SlotHeader>();
-        let len = header.len as usize;
-        let flags = header.flags;
-        let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
-        (payload_ptr, len, flags)
+        unsafe {
+            let slot = self.slot_ptr(index);
+            let header = &*slot.cast::<SlotHeader>();
+            let len = header.len as usize;
+            let flags = header.flags;
+            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+            (payload_ptr, len, flags)
+        }
     }
 }
 
@@ -1240,7 +1250,7 @@ impl MpmcRing {
         }
 
         let header = region.as_ptr().cast::<ShmHeader>();
-        let header_ref = &mut *header;
+        let header_ref = unsafe { &mut *header };
         header_ref.magic = MAGIC;
         header_ref.abi_version = ABI_VERSION;
         header_ref.flags = 0;
@@ -1261,12 +1271,13 @@ impl MpmcRing {
         header_ref.recv_waiters.0.store(0, Ordering::Relaxed);
 
         // Initialize sequences
-        let sequences = region.as_ptr().add(layout.seq_offset()).cast::<AtomicU64>();
-        for i in 0..layout.slots {
-            (*sequences.add(i)).store(i as u64, Ordering::Relaxed);
+        unsafe {
+            let sequences = region.as_ptr().add(layout.seq_offset()).cast::<AtomicU64>();
+            for i in 0..layout.slots {
+                (*sequences.add(i)).store(i as u64, Ordering::Relaxed);
+            }
+            Self::from_region(region, layout)
         }
-
-        Self::from_region(region, layout)
     }
 
     /// Attach to an existing shared region.
@@ -1275,7 +1286,7 @@ impl MpmcRing {
     /// Caller must ensure the region stays mapped for the lifetime of the ring.
     pub unsafe fn attach(region: Arc<ShmRegion>, layout: RingLayout) -> Result<Self, ChannelError> {
         let header = region.as_ptr().cast::<ShmHeader>();
-        let header_ref = &*header;
+        let header_ref = unsafe { &*header };
         if header_ref.magic != MAGIC || header_ref.abi_version != ABI_VERSION {
             return Err(ChannelError::NotReady);
         }
@@ -1285,7 +1296,7 @@ impl MpmcRing {
         if layout.mode != ChannelMode::Mpmc {
             return Err(ChannelError::InvalidLayout);
         }
-        Self::from_region(region, layout)
+        unsafe { Self::from_region(region, layout) }
     }
 
     /// Create a ring without initializing the header.
@@ -1300,8 +1311,8 @@ impl MpmcRing {
             return Err(ChannelError::InvalidLayout);
         }
         let header = region.as_ptr().cast::<ShmHeader>();
-        let sequences = region.as_ptr().add(layout.seq_offset()).cast::<AtomicU64>();
-        let data = region.as_ptr().add(layout.ring_offset());
+        let sequences = unsafe { region.as_ptr().add(layout.seq_offset()).cast::<AtomicU64>() };
+        let data = unsafe { region.as_ptr().add(layout.ring_offset()) };
         Ok(Self {
             region,
             header,
@@ -1566,31 +1577,35 @@ impl MpmcRing {
 
     unsafe fn slot_ptr(&self, index: usize) -> *mut u8 {
         let offset = index * self.layout.slot_size;
-        self.data.add(offset)
+        unsafe { self.data.add(offset) }
     }
 
     unsafe fn write_slot(&self, index: usize, payload: &[u8], flags: u32) {
-        let slot = self.slot_ptr(index);
-        let header = slot.cast::<SlotHeader>();
-        (*header).len = payload.len() as u32;
-        (*header).flags = flags;
-        let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
-        ptr::copy_nonoverlapping(payload.as_ptr(), payload_ptr, payload.len());
+        unsafe {
+            let slot = self.slot_ptr(index);
+            let header = slot.cast::<SlotHeader>();
+            (*header).len = payload.len() as u32;
+            (*header).flags = flags;
+            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+            ptr::copy_nonoverlapping(payload.as_ptr(), payload_ptr, payload.len());
+        }
     }
 
     unsafe fn read_slot(&self, index: usize, out: &mut [u8]) -> Result<usize, ChannelError> {
-        let slot = self.slot_ptr(index);
-        let header = &*slot.cast::<SlotHeader>();
-        let len = header.len as usize;
-        if len > out.len() {
-            return Err(ChannelError::BufferTooSmall {
-                len,
-                capacity: out.len(),
-            });
+        unsafe {
+            let slot = self.slot_ptr(index);
+            let header = &*slot.cast::<SlotHeader>();
+            let len = header.len as usize;
+            if len > out.len() {
+                return Err(ChannelError::BufferTooSmall {
+                    len,
+                    capacity: out.len(),
+                });
+            }
+            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+            ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
+            Ok(len)
         }
-        let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
-        ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
-        Ok(len)
     }
 
     unsafe fn read_slot_with_flags(
@@ -1598,18 +1613,20 @@ impl MpmcRing {
         index: usize,
         out: &mut [u8],
     ) -> Result<(usize, u32), ChannelError> {
-        let slot = self.slot_ptr(index);
-        let header = &*slot.cast::<SlotHeader>();
-        let len = header.len as usize;
-        if len > out.len() {
-            return Err(ChannelError::BufferTooSmall {
-                len,
-                capacity: out.len(),
-            });
+        unsafe {
+            let slot = self.slot_ptr(index);
+            let header = &*slot.cast::<SlotHeader>();
+            let len = header.len as usize;
+            if len > out.len() {
+                return Err(ChannelError::BufferTooSmall {
+                    len,
+                    capacity: out.len(),
+                });
+            }
+            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+            ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
+            Ok((len, header.flags))
         }
-        let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
-        ptr::copy_nonoverlapping(payload_ptr, out.as_mut_ptr(), len);
-        Ok((len, header.flags))
     }
 
     /// Drain up to `max` messages without blocking.
@@ -1650,12 +1667,14 @@ impl MpmcRing {
         self.head().store(0, Ordering::Release);
         self.tail().store(0, Ordering::Release);
         // Reset sequences
-        for i in 0..self.layout.slots {
-            (*self.sequences.add(i)).store(i as u64, Ordering::Release);
+        unsafe {
+            for i in 0..self.layout.slots {
+                (*self.sequences.add(i)).store(i as u64, Ordering::Release);
+            }
+            // Bump generation
+            let header = &*self.header;
+            header.generation.fetch_add(1, Ordering::Release);
         }
-        // Bump generation
-        let header = &*self.header;
-        header.generation.fetch_add(1, Ordering::Release);
     }
 }
 

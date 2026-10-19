@@ -33,7 +33,7 @@
 //!  bump=0          bump=1 (after first push)
 //! ```
 
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{Layout, alloc, dealloc};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -118,7 +118,7 @@ impl BatchNode {
         if self.body_ptr.is_null() || self.body_len == 0 {
             return &[];
         }
-        std::slice::from_raw_parts(self.body_ptr, self.body_len)
+        unsafe { std::slice::from_raw_parts(self.body_ptr, self.body_len) }
     }
 
     /// Return the raw header bytes.
@@ -129,7 +129,7 @@ impl BatchNode {
         if self.headers_ptr.is_null() || self.headers_len == 0 {
             return &[];
         }
-        std::slice::from_raw_parts(self.headers_ptr, self.headers_len)
+        unsafe { std::slice::from_raw_parts(self.headers_ptr, self.headers_len) }
     }
 }
 
@@ -240,7 +240,7 @@ impl BatchArena {
     /// The caller must ensure no concurrent `push` or `reset` occurs.
     pub unsafe fn as_slice(&self) -> &[BatchNode] {
         let len = self.len();
-        std::slice::from_raw_parts(self.slab.as_ptr(), len)
+        unsafe { std::slice::from_raw_parts(self.slab.as_ptr(), len) }
     }
 
     /// Return a pointer to the node at `index` without bounds-checking.
@@ -248,7 +248,7 @@ impl BatchArena {
     /// # Safety
     /// `index` must be < `self.len()`.
     pub unsafe fn get_unchecked(&self, index: usize) -> *const BatchNode {
-        self.slab.as_ptr().add(index) as *const BatchNode
+        unsafe { self.slab.as_ptr().add(index) as *const BatchNode }
     }
 }
 

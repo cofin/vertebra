@@ -2,13 +2,10 @@
 
 import sys
 from collections.abc import Iterator, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import quote
 
-if TYPE_CHECKING:
-    pass
-
-__all__ = ["WsgiEnviron", "BodyStream"]
+__all__ = ["BodyStream", "WsgiEnviron"]
 
 _MISSING: object = object()
 
@@ -30,8 +27,6 @@ _REQUIRED_KEYS: tuple[str, ...] = (
 )
 
 _HTTP_PREFIX = "HTTP_"
-
-# Pre-computed constants for static WSGI keys (shared across all environs).
 _WSGI_VERSION = (1, 0)
 _STDERR = sys.stderr
 
@@ -39,13 +34,14 @@ _STDERR = sys.stderr
 class BodyStream:
     """Read-only file-like wrapper over body bytes for wsgi.input."""
 
-    __slots__ = ("_view", "_pos")
+    __slots__ = ("_pos", "_view")
 
     def __init__(self, body: bytes) -> None:
         self._view: memoryview = memoryview(body)
         self._pos: int = 0
 
     def read(self, size: int = -1) -> bytes:
+        """Read up to ``size`` bytes from the request body."""
         if size == -1:
             chunk = bytes(self._view[self._pos :])
             self._pos = len(self._view)
@@ -55,6 +51,7 @@ class BodyStream:
         return chunk
 
     def readline(self, hint: int = -1) -> bytes:
+        """Read a single newline-delimited line from the request body."""
         start = self._pos
         end = len(self._view)
         if hint != -1:
@@ -68,6 +65,7 @@ class BodyStream:
         return chunk
 
     def readlines(self, hint: int = -1) -> list[bytes]:
+        """Read all remaining lines from the request body."""
         lines: list[bytes] = []
         total = 0
         while True:
@@ -88,17 +86,10 @@ class BodyStream:
             yield line
 
 
-def _header_to_cgi(name: str) -> str:
-    upper = name.upper().replace("-", "_")
-    if upper in ("CONTENT_TYPE", "CONTENT_LENGTH"):
-        return upper
-    return _HTTP_PREFIX + upper
-
-
 class WsgiEnviron(Mapping[str, Any]):
     """Lazy read-only WSGI environ mapping backed by a VertebraRequest."""
 
-    __slots__ = ("_req", "_cache")
+    __slots__ = ("_cache", "_req")
 
     def __init__(
         self,
@@ -109,9 +100,6 @@ class WsgiEnviron(Mapping[str, Any]):
         url_scheme: str = "http",
     ) -> None:
         self._req = request
-        # Pre-seed the cache with all static/semi-static values.  This avoids
-        # per-key dispatch overhead for the ~10 keys that every WSGI framework
-        # accesses.  Dynamic keys (headers, wsgi.input) are computed lazily.
         self._cache: dict[str, Any] = {
             "REQUEST_METHOD": request.method.upper(),
             "SCRIPT_NAME": "",
@@ -127,21 +115,6 @@ class WsgiEnviron(Mapping[str, Any]):
             "wsgi.multiprocess": True,
             "wsgi.run_once": False,
         }
-
-    def _compute(self, key: str) -> Any:
-        req = self._req
-        if key == "wsgi.input":
-            return BodyStream(req.body or b"")
-        if key == "CONTENT_TYPE":
-            return req.headers.get("content-type", "")
-        if key == "CONTENT_LENGTH":
-            return req.headers.get("content-length", "")
-        if key.startswith(_HTTP_PREFIX):
-            header_name = key[5:].lower().replace("_", "-")
-            value = req.headers.get(header_name)
-            if value is not None:
-                return value
-        return _MISSING
 
     def __getitem__(self, key: str) -> Any:
         cache = self._cache
@@ -190,3 +163,18 @@ class WsgiEnviron(Mapping[str, Any]):
 
     def __repr__(self) -> str:
         return f"WsgiEnviron(method={self._req.method!r}, path={self._req.path!r})"
+
+    def _compute(self, key: str) -> Any:
+        req = self._req
+        if key == "wsgi.input":
+            return BodyStream(req.body or b"")
+        if key == "CONTENT_TYPE":
+            return req.headers.get("content-type", "")
+        if key == "CONTENT_LENGTH":
+            return req.headers.get("content-length", "")
+        if key.startswith(_HTTP_PREFIX):
+            header_name = key[5:].lower().replace("_", "-")
+            value = req.headers.get(header_name)
+            if value is not None:
+                return value
+        return _MISSING

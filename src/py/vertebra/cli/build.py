@@ -5,6 +5,9 @@ from pathlib import Path
 import click
 
 from vertebra.builder._orchestrator import BuildOrchestrator
+from vertebra.cli.theme import console
+
+__all__ = ("build",)
 
 
 @click.command()
@@ -26,11 +29,12 @@ def build(target: str, profile: str, project_dir: Path) -> None:
 
     if target in {"frontend", "all"}:
         orchestrator = BuildOrchestrator(project_dir.resolve())
-        built = orchestrator.build()
+        with console.status("Building frontend…"):
+            built = orchestrator.build()
         if built:
-            click.echo("Frontend build complete.")
+            console.success("Frontend build complete")
         else:
-            click.echo("No frontend project detected; skipped frontend build.")
+            console.info("No frontend project detected — skipped frontend build")
 
     if target in {"backend", "all"}:
-        click.echo("Backend build is not implemented yet.")
+        console.warning("Backend build is not implemented yet")

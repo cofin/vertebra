@@ -6,9 +6,9 @@ Aligned with vtb.
 from typing import Any, Final
 
 from vertebra._typing import NUMPY_INSTALLED
+from vertebra.utils.module_loader import import_optional
 
 __all__ = ("numpy_array_dec_hook", "numpy_array_enc_hook", "numpy_array_predicate")
-
 
 _NUMPY_DECODER_SENTINEL: Final[object] = object()
 
@@ -18,8 +18,9 @@ def numpy_array_enc_hook(value: Any) -> Any:
     if not NUMPY_INSTALLED:
         return value
 
-    import numpy as np
-
+    np = import_optional("numpy")
+    if np is None:
+        return value
     if isinstance(value, np.ndarray):
         return value.tolist()
     if isinstance(value, np.generic):
@@ -45,7 +46,9 @@ def numpy_array_dec_hook(target_or_value: Any, value: Any = _NUMPY_DECODER_SENTI
     if not should_decode or not isinstance(raw_value, list):
         return raw_value
 
-    import numpy as np
+    np = import_optional("numpy")
+    if np is None:
+        return raw_value
 
     try:
         return np.array(raw_value)
@@ -58,7 +61,9 @@ def numpy_array_predicate(value_or_target: Any) -> bool:
     if not NUMPY_INSTALLED:
         return False
 
-    import numpy as np
+    np = import_optional("numpy")
+    if np is None:
+        return False
 
     if isinstance(value_or_target, type):
         try:

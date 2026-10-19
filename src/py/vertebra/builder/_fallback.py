@@ -4,8 +4,6 @@ When the native Rust bundler is unavailable (or the user explicitly
 configures ``bundler = "vite"``), this module manages a Vite dev-server
 subprocess and provides a one-shot ``run_vite_build`` helper for
 production builds.
-
-Pattern follows litecore ``DevServerManager``.
 """
 
 import contextlib
@@ -18,6 +16,8 @@ import subprocess
 import time
 from pathlib import Path
 
+__all__ = ("ViteDevServer", "run_vite_build")
+
 logger = logging.getLogger(__name__)
 
 _STARTUP_TIMEOUT = 30.0
@@ -25,11 +25,7 @@ _SHUTDOWN_TIMEOUT = 5.0
 
 
 class ViteDevServer:
-    """Manages a Vite dev server subprocess lifecycle.
-
-    Handles: port binding, startup health check (TCP connect poll),
-    process group cleanup, graceful/forced shutdown.
-    """
+    """Manage a Vite dev server subprocess lifecycle."""
 
     __slots__ = ("_port", "_process", "_project_dir")
 
@@ -49,11 +45,7 @@ class ViteDevServer:
         return self._process is not None and self._process.poll() is None
 
     def start(self) -> None:
-        """Start the Vite dev server and block until it accepts connections.
-
-        Raises:
-            RuntimeError: If Vite is not installed or fails to start.
-        """
+        """Start the Vite dev server and block until it accepts connections."""
         cmd = self._resolve_command()
         env = {**os.environ, "BROWSER": "none", "PORT": str(self._port)}
 
@@ -65,7 +57,7 @@ class ViteDevServer:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            preexec_fn=os.setsid if hasattr(os, "setsid") else None,  # noqa: PLW1509
+            preexec_fn=os.setsid if hasattr(os, "setsid") else None,
         )
 
         if not self._wait_for_ready():
@@ -85,7 +77,6 @@ class ViteDevServer:
         self._process = None
         logger.info("Stopping Vite (pid %d)", process.pid)
 
-        # Graceful SIGTERM to the process group
         try:
             if hasattr(os, "killpg"):
                 os.killpg(os.getpgid(process.pid), signal.SIGTERM)
@@ -97,7 +88,6 @@ class ViteDevServer:
         try:
             process.wait(timeout=_SHUTDOWN_TIMEOUT)
         except subprocess.TimeoutExpired:
-            # Force kill
             try:
                 if hasattr(os, "killpg"):
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
@@ -129,7 +119,6 @@ class ViteDevServer:
         interval = 0.1
 
         while time.monotonic() < deadline:
-            # Check if the process crashed
             if self._process is not None and self._process.poll() is not None:
                 return False
 
@@ -149,11 +138,7 @@ class ViteDevServer:
 
 
 def run_vite_build(project_dir: Path) -> None:
-    """Run a one-shot Vite production build.
-
-    Raises:
-        RuntimeError: If Vite is not installed or the build fails.
-    """
+    """Run a one-shot Vite production build."""
     vite_bin = shutil.which("vite")
     if not vite_bin:
         npx = shutil.which("npx")
@@ -168,6 +153,3 @@ def run_vite_build(project_dir: Path) -> None:
     if result.returncode != 0:
         msg = f"Vite build exited with status {result.returncode}"
         raise RuntimeError(msg)
-
-
-__all__ = ("ViteDevServer", "run_vite_build")

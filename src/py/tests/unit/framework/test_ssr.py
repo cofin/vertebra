@@ -10,10 +10,6 @@ from vertebra.framework._ssr._backends import (
     create_ssr_client,
 )
 
-# ---------------------------------------------------------------------------
-# SsrResult
-# ---------------------------------------------------------------------------
-
 
 def test_ssr_result_basic() -> None:
     r = SsrResult(head=["<title>Test</title>"], body="<div>hello</div>")
@@ -25,11 +21,6 @@ def test_ssr_result_empty() -> None:
     r = SsrResult(head=[], body="")
     assert r.head == []
     assert r.body == ""
-
-
-# ---------------------------------------------------------------------------
-# create_ssr_client factory
-# ---------------------------------------------------------------------------
 
 
 def test_create_ssr_client_no_entry_returns_none() -> None:
@@ -70,11 +61,6 @@ def test_create_ssr_client_native_mode_with_init_error_falls_back() -> None:
         mock_sidecar.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# SidecarSsrClient
-# ---------------------------------------------------------------------------
-
-
 def _make_sidecar_client(port: int = 13714) -> SidecarSsrClient:
     """Create a SidecarSsrClient without starting a process."""
     client = SidecarSsrClient.__new__(SidecarSsrClient)
@@ -96,13 +82,13 @@ def test_sidecar_ssr_client_base_url_custom_port() -> None:
 
 def test_sidecar_ssr_client_stop_no_process() -> None:
     client = _make_sidecar_client()
-    client.stop()  # should not raise
+    client.stop()
 
 
 def test_sidecar_ssr_client_stop_already_exited() -> None:
     client = _make_sidecar_client()
     mock_proc = MagicMock()
-    mock_proc.poll.return_value = 0  # already exited
+    mock_proc.poll.return_value = 0
     client._process = mock_proc
     client.stop()
     mock_proc.terminate.assert_not_called()
@@ -110,7 +96,7 @@ def test_sidecar_ssr_client_stop_already_exited() -> None:
 
 def test_sidecar_ssr_client_invalidate_is_noop() -> None:
     client = _make_sidecar_client()
-    client.invalidate(["file.ts"])  # should not raise
+    client.invalidate(["file.ts"])
 
 
 def test_sidecar_ssr_client_start_no_runtime_raises() -> None:

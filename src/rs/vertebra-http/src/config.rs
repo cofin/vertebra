@@ -139,34 +139,36 @@ impl ServerConfig {
                 });
             }
             (Some(_), None) | (None, Some(_)) => {
-                eprintln!("[vertebra] warning: both VERTEBRA_TLS_CERT and VERTEBRA_TLS_KEY must be set for TLS");
+                eprintln!(
+                    "[vertebra] warning: both VERTEBRA_TLS_CERT and VERTEBRA_TLS_KEY must be set for TLS"
+                );
             }
             _ => {}
         }
 
         // Topology config
-        if let Ok(top) = std::env::var("VERTEBRA_TOPOLOGY") {
-            if let Ok(t) = top.parse::<Topology>() {
-                config.topology = t;
-            }
+        if let Ok(top) = std::env::var("VERTEBRA_TOPOLOGY")
+            && let Ok(t) = top.parse::<Topology>()
+        {
+            config.topology = t;
         }
 
         // Thread scaling config
-        if let Ok(threads) = std::env::var("VERTEBRA_THREADS") {
-            if let Ok(n) = threads.parse::<usize>() {
-                config.thread_count = n;
-            }
+        if let Ok(threads) = std::env::var("VERTEBRA_THREADS")
+            && let Ok(n) = threads.parse::<usize>()
+        {
+            config.thread_count = n;
         }
 
         // Worker config
-        if let Ok(count) = std::env::var("VERTEBRA_WORKERS") {
-            if let Ok(n) = count.parse::<usize>() {
-                config.workers.count = n;
-                // If workers > 0 and topology was not explicitly set to Embedded,
-                // assume SHM for backward compatibility.
-                if n > 0 && std::env::var("VERTEBRA_TOPOLOGY").is_err() {
-                    config.topology = Topology::Shm;
-                }
+        if let Ok(count) = std::env::var("VERTEBRA_WORKERS")
+            && let Ok(n) = count.parse::<usize>()
+        {
+            config.workers.count = n;
+            // If workers > 0 and topology was not explicitly set to Embedded,
+            // assume SHM for backward compatibility.
+            if n > 0 && std::env::var("VERTEBRA_TOPOLOGY").is_err() {
+                config.topology = Topology::Shm;
             }
         }
         if let Ok(python) = std::env::var("VERTEBRA_PYTHON_BIN") {
@@ -177,44 +179,43 @@ impl ServerConfig {
         }
 
         // Backpressure controller knobs.
-        if let Ok(v) = std::env::var("VERTEBRA_BP_MAX_IN_FLIGHT") {
-            if let Ok(n) = v.parse::<usize>() {
-                config.backpressure.max_in_flight = n;
-            }
+        if let Ok(v) = std::env::var("VERTEBRA_BP_MAX_IN_FLIGHT")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            config.backpressure.max_in_flight = n;
         }
-        if let Ok(v) = std::env::var("VERTEBRA_BP_MAX_QUEUE_DEPTH") {
-            if let Ok(n) = v.parse::<usize>() {
-                config.backpressure.max_queue_depth = n;
-            }
+        if let Ok(v) = std::env::var("VERTEBRA_BP_MAX_QUEUE_DEPTH")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            config.backpressure.max_queue_depth = n;
         }
-        if let Ok(v) = std::env::var("VERTEBRA_BP_MAX_QUEUE_TIME_MS") {
-            if let Ok(n) = v.parse::<u64>() {
-                config.backpressure.max_queue_time = Duration::from_millis(n);
-            }
+        if let Ok(v) = std::env::var("VERTEBRA_BP_MAX_QUEUE_TIME_MS")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            config.backpressure.max_queue_time = Duration::from_millis(n);
         }
         // Circuit breaker knobs.
         let cb: &mut CircuitBreakerConfig = &mut config.backpressure.circuit_breaker;
-        if let Ok(v) = std::env::var("VERTEBRA_BP_CB_FAILURE_RATE") {
-            if let Ok(f) = v.parse::<f64>() {
-                if (0.0..=1.0).contains(&f) {
-                    cb.failure_rate_threshold = f;
-                }
-            }
+        if let Ok(v) = std::env::var("VERTEBRA_BP_CB_FAILURE_RATE")
+            && let Ok(f) = v.parse::<f64>()
+            && (0.0..=1.0).contains(&f)
+        {
+            cb.failure_rate_threshold = f;
         }
-        if let Ok(v) = std::env::var("VERTEBRA_BP_CB_MIN_SAMPLES") {
-            if let Ok(n) = v.parse::<u64>() {
-                cb.min_samples = n;
-            }
+        if let Ok(v) = std::env::var("VERTEBRA_BP_CB_MIN_SAMPLES")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            cb.min_samples = n;
         }
-        if let Ok(v) = std::env::var("VERTEBRA_BP_CB_WINDOW_MS") {
-            if let Ok(n) = v.parse::<u64>() {
-                cb.window = Duration::from_millis(n);
-            }
+        if let Ok(v) = std::env::var("VERTEBRA_BP_CB_WINDOW_MS")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            cb.window = Duration::from_millis(n);
         }
-        if let Ok(v) = std::env::var("VERTEBRA_BP_CB_HALF_OPEN_PROBES") {
-            if let Ok(n) = v.parse::<u64>() {
-                cb.half_open_probe_count = n;
-            }
+        if let Ok(v) = std::env::var("VERTEBRA_BP_CB_HALF_OPEN_PROBES")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            cb.half_open_probe_count = n;
         }
 
         config

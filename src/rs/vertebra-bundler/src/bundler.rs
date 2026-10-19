@@ -120,7 +120,7 @@ impl RolldownBundler {
 
         let ret = Parser::new(&allocator, source, source_type).parse();
 
-        let diagnostics: Vec<String> = ret.errors.iter().map(|e| e.to_string()).collect();
+        let diagnostics: Vec<String> = ret.diagnostics.iter().map(|e| e.to_string()).collect();
 
         Ok(diagnostics)
     }
@@ -272,11 +272,11 @@ fn transform_internal(path: &str, source: &str) -> Result<String> {
 
     let mut ret = Parser::new(&allocator, source, source_type).parse();
 
-    if !ret.errors.is_empty() {
+    if !ret.diagnostics.is_empty() {
         return Err(BundlerError::Parse {
             path: path.to_string(),
             message: ret
-                .errors
+                .diagnostics
                 .iter()
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
@@ -312,7 +312,7 @@ fn minify_code(code: &str) -> Result<String> {
 
     let ret = Parser::new(&allocator, code, source_type).parse();
 
-    if !ret.errors.is_empty() {
+    if !ret.diagnostics.is_empty() {
         return Err(BundlerError::Transform("Minification parse error".into()));
     }
 

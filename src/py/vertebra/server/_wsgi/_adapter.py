@@ -1,24 +1,18 @@
 """WsgiAdapter: wraps one WSGI app callable."""
 
+import contextlib
 from collections.abc import Callable, Iterable
 from typing import Any
 
 from vertebra.server._wsgi._environ import WsgiEnviron
 
+_NativeVertebraResponse: Any = None
+with contextlib.suppress(ImportError):
+    from vertebra._vertebra import VertebraResponse as _NativeVertebraResponse
+
 __all__ = ["WsgiAdapter", "WsgiError"]
 
-_WsgiApp = Callable[[dict[str, Any], Callable[..., None]], Iterable[bytes]]
-
-# Deferred import cached at module level on first use.
-_VertebraResponse: type | None = None
-
-
-def _get_response_cls() -> type:
-    global _VertebraResponse  # noqa: PLW0603
-    if _VertebraResponse is None:
-        from vertebra._vertebra import VertebraResponse
-        _VertebraResponse = VertebraResponse
-    return _VertebraResponse
+_WsgiApp = Callable[[Any, Callable[..., None]], Iterable[bytes]]
 
 
 class WsgiError(Exception):
@@ -26,14 +20,14 @@ class WsgiError(Exception):
 
 
 class WsgiAdapter:
-    """Wraps a WSGI callable and translates VertebraRequest → VertebraResponse."""
+    """Wraps a WSGI callable and translates VertebraRequest to VertebraResponse."""
 
-    __slots__ = ("_app", "_url_scheme", "_response_cls")
+    __slots__ = ("_app", "_response_cls", "_url_scheme")
 
     def __init__(self, app: _WsgiApp, *, url_scheme: str = "http") -> None:
         self._app: _WsgiApp = app
         self._url_scheme: str = url_scheme
-        self._response_cls: type = _get_response_cls()
+        self._response_cls: Any = _get_response_cls()
 
     def __call__(
         self,
@@ -42,15 +36,18 @@ class WsgiAdapter:
         server_name: str = "localhost",
         server_port: int = 8000,
     ) -> Any:
-        """Run the WSGI app against *request* and return a response."""
-        environ = WsgiEnviron(
-            request,
-            server_name=server_name,
-            server_port=server_port,
-            url_scheme=self._url_scheme,
-        )
+        """Run the WSGI app against ``request`` and return a VertebraResponse."""
+        if hasattr(request, "wsgi_environ"):
+            environ: Any = request.wsgi_environ(server_name, server_port, self._url_scheme)
+        else:
+            environ = WsgiEnviron(
+                request,
+                server_name=server_name,
+                server_port=server_port,
+                url_scheme=self._url_scheme,
+            )
 
-        _response_state: list[tuple[str, list[tuple[str, str]]] | None] = [None]
+        response_state: list[tuple[str, list[tuple[str, str]]] | None] = [None]
 
         def start_response(
             status: str,
@@ -59,16 +56,16 @@ class WsgiAdapter:
         ) -> None:
             if exc_info is not None:
                 try:
-                    if _response_state[0] is not None:
+                    if response_state[0] is not None:
                         raise exc_info[1].with_traceback(exc_info[2])
                 finally:
                     exc_info = None
             if not isinstance(status, str):
                 msg = f"start_response status must be str, got {type(status)!r}"
                 raise WsgiError(msg)
-            _response_state[0] = (status, list(response_headers))
+            response_state[0] = (status, list(response_headers))
 
-        result_iterable: Iterable[bytes] = self._app(environ, start_response)  # type: ignore[arg-type]
+        result_iterable: Iterable[bytes] = self._app(environ, start_response)
 
         try:
             chunks: list[bytes] = list(result_iterable)
@@ -77,11 +74,11 @@ class WsgiAdapter:
             if close is not None:
                 close()
 
-        if _response_state[0] is None:
+        if response_state[0] is None:
             msg = "WSGI app returned without calling start_response"
             raise WsgiError(msg)
 
-        status_line, response_headers = _response_state[0]
+        status_line, response_headers = response_state[0]
 
         try:
             status_code = int(status_line.split(" ", 1)[0])
@@ -89,7 +86,7 @@ class WsgiAdapter:
             msg = f"Cannot parse status code from {status_line!r}"
             raise WsgiError(msg) from exc
 
-        body = b"".join(chunks)
+        body = chunks[0] if len(chunks) == 1 else b"".join(chunks)
 
         return self._response_cls(
             status=status_code,
@@ -97,3 +94,12 @@ class WsgiAdapter:
             body=body,
             request_id=getattr(request, "request_id", 0),
         )
+
+
+def _get_response_cls() -> Any:
+    """Return the native VertebraResponse class."""
+    if _NativeVertebraResponse is not None:
+        return _NativeVertebraResponse
+    from vertebra._vertebra import VertebraResponse
+
+    return VertebraResponse

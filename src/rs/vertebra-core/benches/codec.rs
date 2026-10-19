@@ -3,8 +3,8 @@
 //! Tests lz4 and zstd at representative IPC payload sizes:
 //! 256B (minimal), 4KB (typical), 64KB (headers-heavy), 1MB (large body).
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use vertebra_core::protocol::codec::{compress, decompress, CompressionCodec};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use vertebra_core::protocol::codec::{CompressionCodec, compress, decompress};
 
 fn make_payload(size: usize) -> Vec<u8> {
     // Semi-realistic: repeating JSON-like pattern (compresses moderately)

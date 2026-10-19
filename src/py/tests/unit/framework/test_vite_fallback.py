@@ -5,10 +5,6 @@ from unittest.mock import patch
 
 from vertebra.builder._fallback import ViteDevServer, run_vite_build
 
-# ---------------------------------------------------------------------------
-# ViteDevServer
-# ---------------------------------------------------------------------------
-
 
 def test_vite_dev_server_proxy_url() -> None:
     server = ViteDevServer(Path("/tmp"), 5173)
@@ -23,7 +19,7 @@ def test_vite_dev_server_not_running_initially() -> None:
 def test_vite_dev_server_stop_when_not_started() -> None:
     """Stopping a server that was never started should be a no-op."""
     server = ViteDevServer(Path("/tmp"), 5173)
-    server.stop()  # should not raise
+    server.stop()
     assert not server.is_running
 
 
@@ -64,11 +60,6 @@ def test_vite_dev_server_resolve_command_falls_back_to_npx() -> None:
         cmd = server._resolve_command()  # noqa: SLF001
         assert "npx" in cmd
         assert "vite" in cmd
-
-
-# ---------------------------------------------------------------------------
-# RunViteBuild
-# ---------------------------------------------------------------------------
 
 
 def test_run_vite_build_raises_when_vite_missing() -> None:

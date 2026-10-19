@@ -1,9 +1,10 @@
 [package]
 name = "vertebra-bundler"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 description = "Native OXC bundler integration for Vertebra"
-license = "MIT"
 
 [lib]
 name = "_bundler"
@@ -17,31 +18,35 @@ extension-module = ["pyo3/extension-module"]
 pyo3 = { workspace = true }
 
 # oxc for parsing/transforming (Rolldown's foundation)
-oxc_parser = "0.112"
-oxc_span = "0.112"
-oxc_allocator = "0.112"
-oxc_codegen = "0.112"
-oxc_transformer = "0.112"
-oxc_semantic = "0.112"
+oxc_parser = "0.155"
+oxc_span = "0.155"
+oxc_allocator = "0.155"
+oxc_codegen = "0.155"
+oxc_transformer = "0.155"
+oxc_semantic = "0.155"
 
 # File watching for HMR
-notify = { package = "rolldown-notify", version = "10.1", default-features = false, features = ["macos_kqueue"] }
-notify-debouncer-mini = { package = "rolldown-notify-debouncer-mini", version = "0.8", default-features = false, features = ["macos_kqueue"] }
+notify = { package = "rolldown-notify", version = "11.0", default-features = false, features = ["macos_kqueue"] }
+notify-debouncer-mini = { package = "rolldown-notify-debouncer-mini", version = "0.9", default-features = false, features = ["macos_kqueue"] }
 
-# QuickJS for SSR (Task 9)
-rquickjs = { version = "0.10", features = ["bindgen", "classes", "properties", "parallel"] }
+# QuickJS for SSR
+rquickjs = { version = "0.14", features = ["bindgen", "classes", "properties", "parallel"] }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "fs", "sync", "macros"] }
+tokio = { workspace = true }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Utilities
-thiserror = "2"
+thiserror = { workspace = true }
 dashmap = "6"
 crossbeam-queue = "0.3"
 
+[build-dependencies]
+pyo3-build-config = { workspace = true }
+
 [dev-dependencies]
+pyo3 = { workspace = true, features = ["auto-initialize"] }
 tempfile = "3"

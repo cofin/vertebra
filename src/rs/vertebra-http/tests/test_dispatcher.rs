@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 use vertebra_core::bridge::BatchBridge;
-use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
 use vertebra_core::transport::BatchSnapshot;
+use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
 use vertebra_http::{
     collector::{Batch, PendingRequest, PendingResponse},
     dispatcher::Dispatcher,

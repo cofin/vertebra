@@ -4,15 +4,24 @@ Defaults to the native bundler (Rolldown via vertebra._bundler) with
 automatic fallback to Vite when the native extension is unavailable.
 """
 
+import atexit
 import logging
+import os
 import socket
 from pathlib import Path
 
+from vertebra.builder._codegen._collector import RouteCollector
+from vertebra.builder._codegen._manifest import RouteManifest
+from vertebra.builder._codegen._typescript import TypeScriptGenerator
+from vertebra.builder._codegen._zod import ZodGenerator
 from vertebra.builder._config import BuildConfig
-
-logger = logging.getLogger("vertebra.build")
+from vertebra.builder._fallback import ViteDevServer, run_vite_build
+from vertebra.builder._import_map import write_import_map
+from vertebra.supervisor._worker import _import_app
 
 __all__ = ["BuildOrchestrator"]
+
+logger = logging.getLogger("vertebra.build")
 
 
 class BuildOrchestrator:
@@ -31,10 +40,10 @@ class BuildOrchestrator:
         self._app_path = app_path or self.config.app
         self._hmr_base_url = hmr_base_url
         self._dev_port: int | None = None
-        self._vite_server: object | None = None
+        self._vite_server: ViteDevServer | None = None
 
     def build(self) -> bool:
-        """Production build. Returns True if frontend was built."""
+        """Run a production build, returning True if a frontend entry was built."""
         if not self.config.entry:
             return False
         if self.config.codegen:
@@ -45,7 +54,7 @@ class BuildOrchestrator:
         return True
 
     def dev(self) -> None:
-        """Dev mode: native watcher + HMR."""
+        """Start dev mode with native watcher and HMR."""
         self._dev_port = self._resolve_dev_port()
         if self.config.codegen:
             self._run_codegen()
@@ -54,7 +63,7 @@ class BuildOrchestrator:
         self._run_bundler(dev=True)
 
     def codegen_only(self, *, output_dir: Path | None = None) -> Path:
-        """Run only type codegen, return output directory."""
+        """Run only type codegen and return the output directory."""
         out = output_dir or (self.project_dir / self.config.codegen_output)
         out.mkdir(parents=True, exist_ok=True)
         self._run_codegen(output_dir=out)
@@ -120,25 +129,15 @@ class BuildOrchestrator:
     def _run_vite_fallback(self, *, dev: bool) -> None:
         """Run Vite as fallback bundler."""
         if dev:
-            from vertebra.builder._fallback import ViteDevServer
-
             self._vite_server = ViteDevServer(self.project_dir, self._dev_port or 5173)
             self._vite_server.start()
-
-            import atexit
-            import os
-
             os.environ["VERTEBRA_VITE_PROXY"] = self._vite_server.proxy_url
             atexit.register(self._vite_server.stop)
         else:
-            from vertebra.builder._fallback import run_vite_build
-
             run_vite_build(self.project_dir)
 
     def _resolve_js_deps(self) -> None:
         """Resolve JavaScript dependencies via import map."""
-        from vertebra.builder._import_map import write_import_map
-
         vertebra_dir = self.project_dir / ".vertebra"
         write_import_map(self.config.js, vertebra_dir)
 
@@ -154,18 +153,10 @@ class BuildOrchestrator:
         logger.info("Running type codegen -> %s", out)
 
         try:
-            from vertebra.builder._codegen._collector import RouteCollector
-            from vertebra.builder._codegen._manifest import RouteManifest
-            from vertebra.builder._codegen._typescript import TypeScriptGenerator
-            from vertebra.builder._codegen._zod import ZodGenerator
-            from vertebra.supervisor._worker import _import_app
-
-            # 1. Load app and collect routes
             app = _import_app(self._app_path)
             collector = RouteCollector()
             routes = collector.collect(app)
 
-            # 2. Generate assets
             ts_gen = TypeScriptGenerator()
             ts_content = ts_gen.generate(routes)
             (out / "types.d.ts").write_text(ts_content)
@@ -178,11 +169,9 @@ class BuildOrchestrator:
             manifest_content = manifest_gen.generate(routes)
             (out / "manifest.json").write_text(manifest_content)
 
-            # Also generate a basic routes.ts for convenience
             (out / "routes.ts").write_text("// Auto-generated route tree\nexport const routes = {};\n")
 
             logger.info("Codegen complete: %d routes", len(routes))
-
         except Exception:
             logger.exception("Codegen failed")
             raise

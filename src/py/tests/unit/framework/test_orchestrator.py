@@ -20,9 +20,6 @@ def tmp_project(tmp_path: Path) -> Path:
     return tmp_path
 
 
-# --- TestFindAvailablePort ---
-
-
 def test_find_available_port_finds_open_port() -> None:
     """Should return a port in the requested range."""
     port = BuildOrchestrator._find_available_port(start=15000, end=15100)
@@ -31,24 +28,17 @@ def test_find_available_port_finds_open_port() -> None:
 
 def test_find_available_port_skips_occupied_port() -> None:
     """Should skip a port that is already in use."""
-    # Bind a port first
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         occupied_port = sock.getsockname()[1]
-        # Search a range starting at the occupied port
         port = BuildOrchestrator._find_available_port(start=occupied_port, end=occupied_port + 10)
-        # Should not return the occupied port
         assert port != occupied_port
 
 
 def test_find_available_port_raises_when_no_port_available() -> None:
     """Should raise RuntimeError when range is exhausted."""
     with pytest.raises(RuntimeError, match="No available port"):
-        # Use a range of 0 ports
         BuildOrchestrator._find_available_port(start=1, end=1)
-
-
-# --- TestResolveDevPort ---
 
 
 def test_resolve_dev_port_returns_explicit_config_port(tmp_project: Path) -> None:
@@ -66,9 +56,6 @@ def test_resolve_dev_port_auto_selects_when_no_config(tmp_project: Path) -> None
     assert 5173 <= port < 5200
 
 
-# --- TestBuild ---
-
-
 def test_build_returns_false_with_no_entry(tmp_project: Path) -> None:
     """Should return False when no entry point is configured."""
     config = BuildConfig(entry="")
@@ -83,9 +70,6 @@ def test_build_returns_true_with_entry(tmp_project: Path) -> None:
 
     with patch.object(orchestrator, "_run_bundler"):
         assert orchestrator.build() is True
-
-
-# --- TestRunBundler ---
 
 
 def test_run_bundler_falls_back_to_vite_on_import_error(tmp_project: Path) -> None:

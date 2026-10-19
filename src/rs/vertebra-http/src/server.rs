@@ -7,9 +7,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use hyper::Request;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper::Request;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::net::{TcpListener, TcpStream};
@@ -54,7 +54,28 @@ pub async fn run_with_collector(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(config.bind).await?;
-    info!(addr = %config.bind, "vertebra-http listening");
+    run_with_listener(
+        listener,
+        config,
+        router,
+        dispatcher,
+        collector_shards,
+        shutdown,
+    )
+    .await
+}
+
+/// Run the HTTP server on a pre-bound `TcpListener` until the shutdown signal resolves.
+pub async fn run_with_listener(
+    listener: TcpListener,
+    config: Arc<ServerConfig>,
+    router: Arc<NativeRouter>,
+    dispatcher: Arc<Dispatcher>,
+    collector_shards: Vec<tokio::sync::mpsc::Sender<PendingRequest>>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let bound_addr = listener.local_addr().unwrap_or(config.bind);
+    info!(addr = %bound_addr, "vertebra-http listening");
 
     let state = Arc::new(ServerState {
         router: Arc::clone(&router),

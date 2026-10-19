@@ -75,8 +75,8 @@ impl Default for Router {
     }
 }
 
-fn normalize_typed_path(path: &str) -> Result<String, RouterError> {
-    if !path.contains('{') {
+pub fn normalize_typed_path(path: &str) -> Result<String, RouterError> {
+    if !path.contains('{') && !path.contains(':') && !path.contains('*') {
         return Ok(path.to_string());
     }
 
@@ -93,6 +93,24 @@ fn normalize_typed_path(path: &str) -> Result<String, RouterError> {
 }
 
 fn normalize_typed_segment(segment: &str) -> Result<Option<String>, RouterError> {
+    if let Some(name) = segment.strip_prefix(':') {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(RouterError::InvalidParam {
+                segment: segment.to_string(),
+            });
+        }
+        return Ok(Some(format!("{{{name}}}")));
+    }
+    if let Some(name) = segment.strip_prefix('*') {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(RouterError::InvalidParam {
+                segment: segment.to_string(),
+            });
+        }
+        return Ok(Some(format!("{{*{name}}}")));
+    }
     if !(segment.starts_with('{') && segment.ends_with('}')) {
         return Ok(None);
     }
@@ -116,7 +134,7 @@ fn normalize_typed_segment(segment: &str) -> Result<Option<String>, RouterError>
         }
     }
 
-    Ok(Some(format!(":{name}")))
+    Ok(Some(format!("{{{name}}}")))
 }
 
 fn is_supported_type(param_type: &str) -> bool {

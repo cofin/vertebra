@@ -5,7 +5,6 @@ Two modes:
 - Sidecar: Managed Node/Bun subprocess using Inertia SSR protocol (fallback)
 """
 
-import json
 import logging
 import os
 import shutil
@@ -13,11 +12,13 @@ import signal
 import socket
 import subprocess
 import time
+import urllib.request
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
-if TYPE_CHECKING:
-    pass
+from vertebra.utils.serializers._json import decode_json, encode_json
+
+__all__ = ("NativeSsrClient", "SidecarSsrClient", "SsrClient", "SsrResult", "create_ssr_client")
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class SsrResult:
 
 
 class SsrClient(Protocol):
-    """Unified SSR interface -- both native and sidecar implement this."""
+    """Unified SSR interface implemented by both native and sidecar backends."""
 
     def render(self, page: dict[str, Any]) -> SsrResult: ...
     def invalidate(self, paths: list[str]) -> None: ...
@@ -48,25 +49,24 @@ class NativeSsrClient:
         self._bundler.init_ssr(bundle_path, pool_size)
 
     def render(self, page: dict[str, Any]) -> SsrResult:
+        """Render an Inertia page object via the native QuickJS pool."""
         result = self._bundler.ssr_render(
             page.get("component", ""),
-            json.dumps(page),
+            encode_json(page),
         )
         return SsrResult(head=result["head"], body=result["body"])
 
     def invalidate(self, paths: list[str]) -> None:
+        """Invalidate cached modules in the QuickJS pool."""
         self._bundler.ssr_invalidate(paths)
 
     def stop(self) -> None:
+        """Shut down the QuickJS isolate pool."""
         self._bundler.ssr_shutdown()
 
 
 class SidecarSsrClient:
-    """SSR via standard Inertia SSR server (Node/Bun subprocess).
-
-    Manages the lifecycle of a Node/Bun process running the Inertia
-    SSR server. Communicates via HTTP POST to /render.
-    """
+    """SSR via standard Inertia SSR server (Node/Bun subprocess)."""
 
     _STARTUP_TIMEOUT: float = 30.0
     _SHUTDOWN_TIMEOUT: float = 5.0
@@ -77,40 +77,9 @@ class SidecarSsrClient:
         self._process: subprocess.Popen[str] | None = None
         self._start()
 
-    @property
-    def _base_url(self) -> str:
-        return f"http://127.0.0.1:{self._port}"
-
-    def _start(self) -> None:
-        runtime = shutil.which("bun") or shutil.which("node")
-        if not runtime:
-            msg = "Node.js or Bun required for SSR sidecar mode"
-            raise RuntimeError(msg)
-
-        cmd = f"{runtime} {self._entry}"
-        env = {**os.environ, "PORT": str(self._port)}
-
-        self._process = subprocess.Popen(
-            cmd,
-            shell=True,  # noqa: S602
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            preexec_fn=os.setsid if hasattr(os, "setsid") else None,  # noqa: PLW1509
-        )
-
-        if not self._wait_for_health():
-            self.stop()
-            msg = f"SSR server failed to start on port {self._port}"
-            raise RuntimeError(msg)
-
-        logger.info("SSR sidecar ready on port %d", self._port)
-
     def render(self, page: dict[str, Any]) -> SsrResult:
-        import urllib.request
-
-        data = json.dumps(page).encode()
+        """Render an Inertia page object via HTTP POST to the sidecar /render endpoint."""
+        data = encode_json(page, as_bytes=True)
         req = urllib.request.Request(
             f"{self._base_url}/render",
             data=data,
@@ -118,8 +87,8 @@ class SidecarSsrClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310
-                result = json.loads(resp.read())
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                result = decode_json(resp.read())
                 return SsrResult(
                     head=result.get("head", []),
                     body=result.get("body", ""),
@@ -129,20 +98,19 @@ class SidecarSsrClient:
             raise RuntimeError(msg) from e
 
     def invalidate(self, paths: list[str]) -> None:
-        pass  # Sidecar handles its own module invalidation
+        """No-op for sidecar mode, which handles its own module invalidation."""
+        _ = paths
 
     def stop(self) -> None:
-        # Try graceful shutdown via /shutdown endpoint
+        """Gracefully shut down the sidecar subprocess."""
         try:
-            import urllib.request
-
             req = urllib.request.Request(
                 f"{self._base_url}/shutdown",
                 data=b"",
                 method="POST",
             )
-            urllib.request.urlopen(req, timeout=1)  # noqa: S310
-        except Exception:  # noqa: BLE001
+            urllib.request.urlopen(req, timeout=1)
+        except Exception:
             pass
 
         process = self._process
@@ -166,6 +134,36 @@ class SidecarSsrClient:
                 pass
         except (OSError, ProcessLookupError):
             pass
+
+    @property
+    def _base_url(self) -> str:
+        return f"http://127.0.0.1:{self._port}"
+
+    def _start(self) -> None:
+        runtime = shutil.which("bun") or shutil.which("node")
+        if not runtime:
+            msg = "Node.js or Bun required for SSR sidecar mode"
+            raise RuntimeError(msg)
+
+        cmd = f"{runtime} {self._entry}"
+        env = {**os.environ, "PORT": str(self._port)}
+
+        self._process = subprocess.Popen(
+            cmd,
+            shell=True,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            preexec_fn=os.setsid if hasattr(os, "setsid") else None,
+        )
+
+        if not self._wait_for_health():
+            self.stop()
+            msg = f"SSR server failed to start on port {self._port}"
+            raise RuntimeError(msg)
+
+        logger.info("SSR sidecar ready on port %d", self._port)
 
     def _wait_for_health(self, timeout: float | None = None) -> bool:
         if timeout is None:
@@ -194,10 +192,7 @@ def create_ssr_client(
     pool_size: int = 4,
     sidecar_port: int = 13714,
 ) -> SsrClient | None:
-    """Factory: create the appropriate SSR client based on mode.
-
-    Falls back from native to sidecar if native extension unavailable.
-    """
+    """Create the appropriate SSR client based on mode, falling back to sidecar if needed."""
     if not entry:
         return None
 
@@ -207,7 +202,7 @@ def create_ssr_client(
         except ImportError:
             logger.warning("Native SSR (vertebra._bundler) unavailable. Falling back to sidecar mode.")
             return SidecarSsrClient(entry, sidecar_port)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("Native SSR init failed, falling back to sidecar")
             return SidecarSsrClient(entry, sidecar_port)
 

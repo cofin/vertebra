@@ -150,13 +150,14 @@ pub fn submit_results(py: Python<'_>, responses: Vec<Py<VertebraResponse>>) -> P
             request_id: resp.request_id,
             status: resp.status,
             headers: resp.headers.clone(),
-            body: resp.body.clone(), // This is now a cheap Bytes clone
+            body: resp.body.clone(),
         });
     }
 
-    bridge.submit_responses(bridge_responses).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("failed to submit responses: {e}"))
-    })?;
+    py.detach(|| bridge.submit_responses(bridge_responses))
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("failed to submit responses: {e}"))
+        })?;
 
     Ok(())
 }
@@ -199,13 +200,15 @@ pub fn submit_response(py: Python<'_>, py_resp: Py<VertebraResponse>) -> PyResul
         )
     })?;
 
-    bridge
-        .submit_responses(vec![BridgeResponse {
-            request_id: resp.request_id,
-            status: resp.status,
-            headers: resp.headers.clone(),
-            body: resp.body.clone(),
-        }])
+    let bridge_resp = BridgeResponse {
+        request_id: resp.request_id,
+        status: resp.status,
+        headers: resp.headers.clone(),
+        body: resp.body.clone(),
+    };
+    drop(resp);
+
+    py.detach(|| bridge.submit_responses(vec![bridge_resp]))
         .map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("failed to submit response: {e}"))
         })?;
@@ -221,10 +224,10 @@ pub fn submit_response(py: Python<'_>, py_resp: Py<VertebraResponse>) -> PyResul
 pub fn get_request_notify_fd() -> i32 {
     #[cfg(unix)]
     {
-        if let Some(transport) = SHM_TRANSPORT.get() {
-            if let vertebra_core::transport::Backend::SharedMemory(rp) = transport.backend() {
-                return rp.request_notifier.as_raw_fd();
-            }
+        if let Some(transport) = SHM_TRANSPORT.get()
+            && let vertebra_core::transport::Backend::SharedMemory(rp) = transport.backend()
+        {
+            return rp.request_notifier.as_raw_fd();
         }
     }
     -1
@@ -332,32 +335,34 @@ mod tests {
         let drained_ids = Arc::new(Mutex::new(Vec::new()));
         let drained_ids_reader = Arc::clone(&drained_ids);
         let pair_reader = Arc::clone(&pair);
-        let reader = std::thread::spawn(move || loop {
-            if drained_ids_reader.lock().expect("lock ids").len() >= 2 {
-                break;
-            }
+        let reader = std::thread::spawn(move || {
+            loop {
+                if drained_ids_reader.lock().expect("lock ids").len() >= 2 {
+                    break;
+                }
 
-            assert!(
+                assert!(
+                    pair_reader
+                        .response_notifier
+                        .wait(100)
+                        .expect("wait for response notification"),
+                    "response notification should arrive"
+                );
                 pair_reader
                     .response_notifier
-                    .wait(100)
-                    .expect("wait for response notification"),
-                "response notification should arrive"
-            );
-            pair_reader
-                .response_notifier
-                .clear()
-                .expect("clear response notifier");
+                    .clear()
+                    .expect("clear response notifier");
 
-            while let Some(resp) = pair_reader
-                .response_rings
-                .try_recv_response()
-                .expect("drain response ring")
-            {
-                drained_ids_reader
-                    .lock()
-                    .expect("lock ids")
-                    .push(resp.correlation_id);
+                while let Some(resp) = pair_reader
+                    .response_rings
+                    .try_recv_response()
+                    .expect("drain response ring")
+                {
+                    drained_ids_reader
+                        .lock()
+                        .expect("lock ids")
+                        .push(resp.correlation_id);
+                }
             }
         });
 

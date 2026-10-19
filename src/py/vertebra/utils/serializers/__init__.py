@@ -3,6 +3,7 @@
 Aligned with vtb.
 """
 
+from vertebra.utils.serializers._json import decode_json, encode_json
 from vertebra.utils.serializers._json import decode_json as from_json
 from vertebra.utils.serializers._json import encode_json as to_json
 from vertebra.utils.serializers._numpy import (
@@ -21,6 +22,8 @@ from vertebra.utils.serializers._schema import (
 
 __all__ = (
     "SchemaSerializer",
+    "decode_json",
+    "encode_json",
     "from_json",
     "get_collection_serializer",
     "get_serializer_metrics",

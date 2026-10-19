@@ -188,13 +188,12 @@ impl BackpressureController {
     /// the elapsed time since opening.
     fn check_circuit(&self) -> CircuitState {
         let mut inner = self.circuit.lock().expect("circuit mutex");
-        if inner.state == CircuitState::Open {
-            if let Some(opened) = inner.opened_at {
-                if opened.elapsed() >= self.config.circuit_breaker.window {
-                    inner.state = CircuitState::HalfOpen;
-                    inner.half_open_successes = 0;
-                }
-            }
+        if inner.state == CircuitState::Open
+            && let Some(opened) = inner.opened_at
+            && opened.elapsed() >= self.config.circuit_breaker.window
+        {
+            inner.state = CircuitState::HalfOpen;
+            inner.half_open_successes = 0;
         }
         inner.state
     }
@@ -204,7 +203,9 @@ impl BackpressureController {
     pub async fn try_acquire(&self) -> Result<OwnedSemaphorePermit, RejectionReason> {
         // Circuit breaker: reject immediately if open.
         if matches!(self.check_circuit(), CircuitState::Open) {
-            self.metrics.circuit_rejected.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .circuit_rejected
+                .fetch_add(1, Ordering::Relaxed);
             return Err(RejectionReason::CircuitOpen);
         }
 
@@ -234,9 +235,7 @@ impl BackpressureController {
                 Ok(permit)
             }
             Ok(Err(_closed)) => {
-                self.metrics
-                    .queue_rejected
-                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics.queue_rejected.fetch_add(1, Ordering::Relaxed);
                 Err(RejectionReason::Saturated)
             }
             Err(_elapsed) => {

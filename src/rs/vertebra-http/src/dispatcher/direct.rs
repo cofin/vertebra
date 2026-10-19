@@ -4,8 +4,8 @@
 
 use tracing::error;
 
-use super::types::{DirectBatch, DirectRequest};
 use super::Inner;
+use super::types::{DirectBatch, DirectRequest};
 use crate::collector::Batch;
 
 pub(super) fn dispatch_direct(inner: &Inner, batch: Batch) -> usize {

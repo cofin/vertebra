@@ -3,9 +3,35 @@
 use bytes::Bytes;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAnyMethods, PyBytes, PyDict, PyList, PyTuple};
+use pyo3::types::{PyAnyMethods, PyBytes, PyDict, PyList, PyString, PyTuple};
 
-#[pyclass(name = "VertebraResponse", skip_from_py_object)]
+#[inline]
+fn extract_header_bytes(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Ok(b) = obj.cast::<PyBytes>() {
+        Ok(b.as_bytes().to_vec())
+    } else if let Ok(s) = obj.cast::<PyString>() {
+        Ok(s.to_str()?.as_bytes().to_vec())
+    } else {
+        obj.extract::<Vec<u8>>()
+    }
+}
+
+#[inline]
+fn extract_header_entry(item: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, Vec<u8>)> {
+    let (k_obj, v_obj) = if let Ok(t) = item.cast::<PyTuple>() {
+        (t.get_item(0)?, t.get_item(1)?)
+    } else if let Ok(l) = item.cast::<PyList>() {
+        (l.get_item(0)?, l.get_item(1)?)
+    } else {
+        return Err(PyTypeError::new_err(format!(
+            "header entry must be a tuple or list, got {}",
+            item.get_type().name()?
+        )));
+    };
+    Ok((extract_header_bytes(&k_obj)?, extract_header_bytes(&v_obj)?))
+}
+
+#[pyclass(name = "VertebraResponse")]
 #[derive(Clone)]
 pub struct VertebraResponse {
     pub status: u16,
@@ -28,8 +54,10 @@ impl VertebraResponse {
             Some(b) => {
                 if let Ok(py_bytes) = b.cast::<PyBytes>() {
                     Bytes::copy_from_slice(py_bytes.as_bytes())
+                } else if let Ok(py_str) = b.cast::<PyString>() {
+                    Bytes::copy_from_slice(py_str.to_str()?.as_bytes())
                 } else {
-                    Bytes::copy_from_slice(&b.extract::<Vec<u8>>()?)
+                    Bytes::from(b.extract::<Vec<u8>>()?)
                 }
             }
             None => Bytes::new(),
@@ -38,47 +66,19 @@ impl VertebraResponse {
         let mut header_vec: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         if let Some(h) = headers {
             if let Ok(dict) = h.cast::<PyDict>() {
+                header_vec.reserve(dict.len());
                 for (k, v) in dict.iter() {
-                    header_vec.push((
-                        k.extract::<Vec<u8>>().or_else(|_| k.extract::<String>().map(|s| s.into_bytes()))?,
-                        v.extract::<Vec<u8>>().or_else(|_| v.extract::<String>().map(|s| s.into_bytes()))?,
-                    ));
+                    header_vec.push((extract_header_bytes(&k)?, extract_header_bytes(&v)?));
                 }
             } else if let Ok(list) = h.cast::<PyList>() {
+                header_vec.reserve(list.len());
                 for item in list.iter() {
-                    let (k_obj, v_obj) = if let Ok(t) = item.cast::<PyTuple>() {
-                        (t.get_item(0)?, t.get_item(1)?)
-                    } else if let Ok(l) = item.cast::<PyList>() {
-                        (l.get_item(0)?, l.get_item(1)?)
-                    } else {
-                        return Err(PyTypeError::new_err(format!(
-                            "header entry must be a tuple or list, got {}",
-                            item.get_type().name()?
-                        )));
-                    };
-
-                    header_vec.push((
-                        k_obj.extract::<Vec<u8>>().or_else(|_| k_obj.extract::<String>().map(|s| s.into_bytes()))?,
-                        v_obj.extract::<Vec<u8>>().or_else(|_| v_obj.extract::<String>().map(|s| s.into_bytes()))?,
-                    ));
+                    header_vec.push(extract_header_entry(&item)?);
                 }
             } else if let Ok(tuple) = h.cast::<PyTuple>() {
+                header_vec.reserve(tuple.len());
                 for item in tuple.iter() {
-                    let (k_obj, v_obj) = if let Ok(t) = item.cast::<PyTuple>() {
-                        (t.get_item(0)?, t.get_item(1)?)
-                    } else if let Ok(l) = item.cast::<PyList>() {
-                        (l.get_item(0)?, l.get_item(1)?)
-                    } else {
-                        return Err(PyTypeError::new_err(format!(
-                            "header entry must be a tuple or list, got {}",
-                            item.get_type().name()?
-                        )));
-                    };
-
-                    header_vec.push((
-                        k_obj.extract::<Vec<u8>>().or_else(|_| k_obj.extract::<String>().map(|s| s.into_bytes()))?,
-                        v_obj.extract::<Vec<u8>>().or_else(|_| v_obj.extract::<String>().map(|s| s.into_bytes()))?,
-                    ));
+                    header_vec.push(extract_header_entry(&item)?);
                 }
             }
         }
@@ -104,6 +104,11 @@ impl VertebraResponse {
     #[getter]
     pub fn request_id(&self) -> u64 {
         self.request_id
+    }
+
+    #[setter]
+    pub fn set_request_id(&mut self, request_id: u64) {
+        self.request_id = request_id;
     }
 
     #[getter]

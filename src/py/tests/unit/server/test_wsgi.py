@@ -6,8 +6,6 @@ import pytest
 
 from vertebra.server._wsgi._environ import BodyStream, WsgiEnviron
 
-# --- Mock objects ---
-
 
 class MockHeaders:
     def __init__(self, headers: "dict[str, str] | None" = None):
@@ -46,9 +44,6 @@ class MockRequest:
         self.headers = MockHeaders(headers)
 
 
-# --- BodyStream ---
-
-
 def test_body_stream_read_all() -> None:
     w = BodyStream(b"hello world")
     assert w.read() == b"hello world"
@@ -84,9 +79,6 @@ def test_body_stream_empty_body() -> None:
     w = BodyStream(b"")
     assert w.read() == b""
     assert w.readline() == b""
-
-
-# --- WsgiEnviron ---
 
 
 def test_wsgi_environ_request_method() -> None:
@@ -129,7 +121,6 @@ def test_wsgi_environ_wsgi_input_is_shm_wrapper() -> None:
 
 def test_wsgi_environ_cache_pre_seeded() -> None:
     env = WsgiEnviron(MockRequest())
-    # Cache is pre-seeded with static keys at init time.
     assert env._cache is not None  # noqa: SLF001
     assert "REQUEST_METHOD" in env._cache  # noqa: SLF001
 
@@ -176,9 +167,6 @@ def test_wsgi_environ_dict_conversion() -> None:
     d = dict(env)
     assert d["REQUEST_METHOD"] == "GET"
     assert "wsgi.input" in d
-
-
-# --- WsgiAdapter ---
 
 
 def test_wsgi_adapter_simple_app() -> None:
@@ -262,9 +250,6 @@ def test_wsgi_adapter_response_headers_forwarded() -> None:
     response = adapter(MockRequest())
     hdrs = list(response.headers)
     assert any(h[0] == b"X-Foo" and h[1] == b"bar" for h in hdrs)
-
-
-# --- Extensions ---
 
 
 def test_wsgi_extensions_large_body_bypass_noop() -> None:

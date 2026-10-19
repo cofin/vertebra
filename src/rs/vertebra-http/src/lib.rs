@@ -17,10 +17,10 @@ pub mod hmr;
 pub mod policy;
 pub mod response;
 pub mod response_reader;
+pub mod ring_factory;
 pub mod route_table;
 pub mod router;
 pub mod server;
-pub mod ring_factory;
 
 #[cfg(feature = "tls")]
 pub mod tls;

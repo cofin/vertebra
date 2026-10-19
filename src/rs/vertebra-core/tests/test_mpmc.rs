@@ -1,8 +1,8 @@
 //! Integration tests for `vertebra_core::channel::MpmcRing`.
 
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU64, Ordering},
 };
 use vertebra_core::channel::MpmcRing;
 

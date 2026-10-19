@@ -1,5 +1,3 @@
-# mypy: warn-unused-ignores=false
-# ruff: noqa: RUF100, PLR0913, A002, DOC201, PLR6301, PLR0917, ARG004, ARG002, ARG001
 """Internal cross-cutting type aliases and library shims for Vertebra.
 
 These types are shared across multiple subpackages (server/, framework/, etc.).
@@ -7,6 +5,7 @@ Import from here to avoid defining the same alias in multiple places.
 Includes compatibility shims for optional dependencies.
 """
 
+import contextlib
 import enum
 from collections.abc import Awaitable, Callable, Sequence
 from enum import Enum
@@ -20,14 +19,34 @@ from typing import (
     runtime_checkable,
 )
 
-from typing_extensions import TypeVar
-
-T = TypeVar("T")
-T_co = TypeVar("T_co", covariant=True)
-
-# ---------------------------------------------------------------------------
-# Core Dependency Availability (Moved here to avoid circular imports)
-# ---------------------------------------------------------------------------
+__all__ = (
+    "ATTRS_INSTALLED",
+    "AttrsInstance",
+    "BaseModel",
+    "DataclassProtocol",
+    "Empty",
+    "EmptyType",
+    "HandlerID",
+    "LifecycleHook",
+    "MSGSPEC_INSTALLED",
+    "NUMPY_INSTALLED",
+    "NumpyArray",
+    "ORJSON_INSTALLED",
+    "OffsetPagination",
+    "PYDANTIC_INSTALLED",
+    "RawHeaders",
+    "SQLSPEC_INSTALLED",
+    "Struct",
+    "UNSET",
+    "UUID_UTILS_INSTALLED",
+    "UVLOOP_INSTALLED",
+    "UnsetType",
+    "attrs_asdict",
+    "attrs_has",
+    "dependency_flag",
+    "module_available",
+    "reset_dependency_cache",
+)
 
 _dependency_cache: dict[str, bool] = {}
 
@@ -45,6 +64,14 @@ def module_available(module_name: str) -> bool:
 
     _dependency_cache[module_name] = is_available
     return is_available
+
+
+def reset_dependency_cache(module_name: str | None = None) -> None:
+    """Clear cached availability for one module or the entire cache."""
+    if module_name is None:
+        _dependency_cache.clear()
+        return
+    _dependency_cache.pop(module_name, None)
 
 
 class OptionalDependencyFlag:
@@ -68,11 +95,6 @@ def dependency_flag(module_name: str) -> OptionalDependencyFlag:
     return OptionalDependencyFlag(module_name)
 
 
-# ---------------------------------------------------------------------------
-# Sentinel types
-# ---------------------------------------------------------------------------
-
-
 class EmptyType(Enum):
     """A sentinel type for empty values."""
 
@@ -90,28 +112,14 @@ class UnsetType(Enum):
 
 UNSET = UnsetType.Unset
 
-
-# ---------------------------------------------------------------------------
-# Native batch protocol types
-# ---------------------------------------------------------------------------
-
 HandlerID = int
 """Stable uint64 handler identifier (FNV-1a of method + path)."""
 
 RawHeaders = list[tuple[str, str]]
 """HTTP headers as a list of (name, value) string pairs."""
 
-# ---------------------------------------------------------------------------
-# Lifecycle
-# ---------------------------------------------------------------------------
-
 LifecycleHook = Callable[[], Any | Awaitable[Any]]
 """Sync or async callable invoked at startup/shutdown."""
-
-
-# ---------------------------------------------------------------------------
-# Library Shims (from sqlspec)
-# ---------------------------------------------------------------------------
 
 
 @runtime_checkable
@@ -122,7 +130,7 @@ class DataclassProtocol(Protocol):
 
 
 class BaseModelStub:
-    """Placeholder implementation."""
+    """Placeholder implementation for Pydantic BaseModel."""
 
     model_fields: ClassVar[dict[str, Any]] = {}
     __slots__ = ("__dict__", "__pydantic_extra__", "__pydantic_fields_set__", "__pydantic_private__")
@@ -146,22 +154,25 @@ class BaseModelStub:
         warnings: bool | Literal["none", "warn", "error"] = True,
         serialize_as_any: bool = False,
     ) -> dict[str, Any]:
-        """Placeholder implementation."""
+        """Return non-private instance attributes as a dictionary."""
+        _ = (
+            include,
+            exclude,
+            context,
+            by_alias,
+            exclude_unset,
+            exclude_defaults,
+            exclude_none,
+            round_trip,
+            warnings,
+            serialize_as_any,
+        )
         return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
-
-
-# Try to import real implementations at runtime
-try:
-    from pydantic import BaseModel as _RealBaseModel
-
-    BaseModel = _RealBaseModel
-except ImportError:
-    BaseModel = BaseModelStub  # type: ignore[assignment]
 
 
 @dataclass_transform()
 class StructStub:
-    """Placeholder implementation."""
+    """Placeholder implementation for msgspec Struct."""
 
     __struct_fields__: ClassVar[tuple[str, ...]] = ()
     __slots__ = ()
@@ -171,23 +182,9 @@ class StructStub:
             setattr(self, key, value)
 
 
-try:
-    from msgspec import Struct as _RealStruct
-
-    Struct = _RealStruct
-except ImportError:
-    Struct = StructStub  # type: ignore[assignment,misc]
-
-
-try:
-    import orjson  # noqa: F401
-except ImportError:
-    orjson = None  # type: ignore[assignment]  # noqa: F841
-
-
 @dataclass_transform()
 class AttrsInstanceStub:
-    """Placeholder Implementation for attrs classes"""
+    """Placeholder implementation for attrs classes."""
 
     __attrs_attrs__: ClassVar[tuple[Any, ...]] = ()
     __slots__ = ()
@@ -198,24 +195,9 @@ class AttrsInstanceStub:
 
 
 def attrs_asdict_stub(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    """Placeholder implementation"""
+    """Placeholder implementation for attrs.asdict."""
+    _ = (args, kwargs)
     return {}
-
-
-try:
-    from attrs import AttrsInstance as _RealAttrsInstance
-    from attrs import asdict as _real_attrs_asdict
-    from attrs import has as _real_attrs_has
-
-    AttrsInstance = _RealAttrsInstance
-    attrs_asdict = _real_attrs_asdict
-    attrs_has = _real_attrs_has
-except ImportError:
-    AttrsInstance = AttrsInstanceStub  # type: ignore[assignment]
-    attrs_asdict = attrs_asdict_stub
-
-    def attrs_has(obj: Any) -> bool:
-        return False
 
 
 @runtime_checkable
@@ -225,10 +207,42 @@ class NumpyArrayStub(Protocol):
     def tolist(self) -> list[Any]: ...
 
 
-try:
-    from numpy import ndarray as NumpyArray
-except ImportError:
-    NumpyArray = NumpyArrayStub  # type: ignore[assignment]
+BaseModel: Any = BaseModelStub
+with contextlib.suppress(ImportError):
+    from pydantic import BaseModel as _RealBaseModel
+
+    BaseModel = _RealBaseModel
+
+Struct: Any = StructStub
+with contextlib.suppress(ImportError):
+    from msgspec import Struct as _RealStruct
+
+    Struct = _RealStruct
+
+AttrsInstance: Any = AttrsInstanceStub
+attrs_asdict: Callable[..., Any] = attrs_asdict_stub
+
+
+def _attrs_has_stub(obj: Any) -> bool:
+    _ = obj
+    return False
+
+
+attrs_has: Callable[[Any], bool] = _attrs_has_stub
+with contextlib.suppress(ImportError):
+    from attrs import AttrsInstance as _RealAttrsInstance
+    from attrs import asdict as _real_attrs_asdict
+    from attrs import has as _real_attrs_has
+
+    AttrsInstance = _RealAttrsInstance
+    attrs_asdict = _real_attrs_asdict
+    attrs_has = _real_attrs_has
+
+NumpyArray: Any = NumpyArrayStub
+with contextlib.suppress(ImportError):
+    from numpy import ndarray as _RealNumpyArray
+
+    NumpyArray = _RealNumpyArray
 
 
 class OffsetPagination[T]:
@@ -248,10 +262,6 @@ class OffsetPagination[T]:
         self.total = total
 
 
-# ---------------------------------------------------------------------------
-# Installation Flags
-# ---------------------------------------------------------------------------
-
 ATTRS_INSTALLED = dependency_flag("attrs")
 MSGSPEC_INSTALLED = dependency_flag("msgspec")
 NUMPY_INSTALLED = dependency_flag("numpy")
@@ -260,39 +270,3 @@ PYDANTIC_INSTALLED = dependency_flag("pydantic")
 SQLSPEC_INSTALLED = dependency_flag("sqlspec")
 UVLOOP_INSTALLED = dependency_flag("uvloop")
 UUID_UTILS_INSTALLED = dependency_flag("uuid_utils")
-
-__all__ = (
-    "ATTRS_INSTALLED",
-    "AttrsInstance",
-    "BaseModel",
-    "DataclassProtocol",
-    "Empty",
-    "EmptyType",
-    "HandlerID",
-    "LifecycleHook",
-    "MSGSPEC_INSTALLED",
-    "NUMPY_INSTALLED",
-    "NumpyArray",
-    "ORJSON_INSTALLED",
-    "OffsetPagination",
-    "PYDANTIC_INSTALLED",
-    "RawHeaders",
-    "SQLSPEC_INSTALLED",
-    "Struct",
-    "UNSET",
-    "UVLOOP_INSTALLED",
-    "UUID_UTILS_INSTALLED",
-    "UnsetType",
-    "attrs_asdict",
-    "attrs_has",
-    "module_available",
-    "reset_dependency_cache",
-)
-
-
-def reset_dependency_cache(module_name: str | None = None) -> None:
-    """Clear cached availability for one module or the entire cache."""
-    if module_name is None:
-        _dependency_cache.clear()
-        return
-    _dependency_cache.pop(module_name, None)

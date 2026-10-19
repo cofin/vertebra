@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use std::fs::OpenOptions;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU8;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicU8;
 
 use crate::platform;
 

@@ -1,7 +1,7 @@
 //! Error types for vertebra-bundler
 
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::PyErr;
+use pyo3::exceptions::PyRuntimeError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]

@@ -4,6 +4,78 @@ use bytes::Bytes;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
 
+/// Decode raw compact headers directly into an ASGI-compliant list of `(bytes, bytes)` tuples
+/// with lowercased header names, avoiding intermediate `Bytes` or `String` allocations.
+pub(crate) fn decode_asgi_headers<'py>(
+    py: Python<'py>,
+    data: &[u8],
+) -> PyResult<Bound<'py, PyList>> {
+    let mut tuples: Vec<Bound<'py, PyAny>> = Vec::with_capacity(8);
+    let mut pos = 0;
+    while pos < data.len() {
+        let name_len = data[pos] as usize;
+        pos += 1;
+        if pos + name_len > data.len() {
+            break;
+        }
+        let name = &data[pos..pos + name_len];
+        pos += name_len;
+
+        if pos + 2 > data.len() {
+            break;
+        }
+        let value_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        if pos + value_len > data.len() {
+            break;
+        }
+        let value = &data[pos..pos + value_len];
+        pos += value_len;
+
+        let name_py = if name.iter().any(|b| b.is_ascii_uppercase()) {
+            let lower = name.to_ascii_lowercase();
+            PyBytes::new(py, &lower)
+        } else {
+            PyBytes::new(py, name)
+        };
+
+        let t = PyTuple::new(py, [name_py.into_any(), PyBytes::new(py, value).into_any()])?;
+        tuples.push(t.into_any());
+    }
+    PyList::new(py, &tuples)
+}
+
+/// Iterate raw `(name, value)` byte slices from compact header encoding.
+#[inline]
+pub(crate) fn iter_raw_headers(data: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
+    let mut pos = 0;
+    std::iter::from_fn(move || {
+        if pos >= data.len() {
+            return None;
+        }
+        let name_len = data[pos] as usize;
+        pos += 1;
+        if pos + name_len > data.len() {
+            return None;
+        }
+        let name = &data[pos..pos + name_len];
+        pos += name_len;
+
+        if pos + 2 > data.len() {
+            return None;
+        }
+        let value_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        if pos + value_len > data.len() {
+            return None;
+        }
+        let value = &data[pos..pos + value_len];
+        pos += value_len;
+
+        Some((name, value))
+    })
+}
+
 #[pyclass(name = "VertebraHeaders", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct VertebraHeaders {
@@ -19,36 +91,23 @@ impl VertebraHeaders {
 #[pymethods]
 impl VertebraHeaders {
     fn __getitem__<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyString>> {
-        let key_lower = key.to_ascii_lowercase();
-        for (name, value) in self.iter_decoded() {
-            if name.to_ascii_lowercase() == key_lower {
-                return Ok(PyString::new(py, &value));
+        let key_bytes = key.as_bytes();
+        for (name, value) in iter_raw_headers(&self.raw) {
+            if name.eq_ignore_ascii_case(key_bytes) {
+                let val_str = String::from_utf8_lossy(value);
+                return Ok(PyString::new(py, &val_str));
             }
         }
         Err(pyo3::exceptions::PyKeyError::new_err(key.to_string()))
     }
 
     fn __contains__(&self, key: &str) -> bool {
-        let key_lower = key.to_ascii_lowercase();
-        self.iter_decoded()
-            .any(|(name, _)| name.to_ascii_lowercase() == key_lower)
+        let key_bytes = key.as_bytes();
+        iter_raw_headers(&self.raw).any(|(name, _)| name.eq_ignore_ascii_case(key_bytes))
     }
 
     fn __len__(&self) -> usize {
-        let mut count = 0;
-        let mut pos = 0;
-        let data = &self.raw;
-        while pos < data.len() {
-            let name_len = data[pos] as usize;
-            pos += 1 + name_len;
-            if pos + 2 > data.len() {
-                break;
-            }
-            let value_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-            pos += 2 + value_len;
-            count += 1;
-        }
-        count
+        iter_raw_headers(&self.raw).count()
     }
 
     #[pyo3(signature = (key, default=None))]
@@ -61,28 +120,32 @@ impl VertebraHeaders {
 
     fn keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let mut names: Vec<Bound<'py, PyAny>> = Vec::new();
-        for (name, _) in self.iter_decoded() {
-            names.push(PyString::new(py, &name).into_any());
+        for (name, _) in iter_raw_headers(&self.raw) {
+            let name_str = String::from_utf8_lossy(name);
+            names.push(PyString::new(py, &name_str).into_any());
         }
         PyList::new(py, &names)
     }
 
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let mut vals: Vec<Bound<'py, PyAny>> = Vec::new();
-        for (_, value) in self.iter_decoded() {
-            vals.push(PyString::new(py, &value).into_any());
+        for (_, value) in iter_raw_headers(&self.raw) {
+            let val_str = String::from_utf8_lossy(value);
+            vals.push(PyString::new(py, &val_str).into_any());
         }
         PyList::new(py, &vals)
     }
 
     fn items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let mut tuples: Vec<Bound<'py, PyAny>> = Vec::new();
-        for (name, value) in self.iter_decoded() {
+        for (name, value) in iter_raw_headers(&self.raw) {
+            let name_str = String::from_utf8_lossy(name);
+            let val_str = String::from_utf8_lossy(value);
             let t = PyTuple::new(
                 py,
                 [
-                    PyString::new(py, &name).into_any(),
-                    PyString::new(py, &value).into_any(),
+                    PyString::new(py, &name_str).into_any(),
+                    PyString::new(py, &val_str).into_any(),
                 ],
             )?;
             tuples.push(t.into_any());
@@ -93,47 +156,15 @@ impl VertebraHeaders {
     /// Optimized path for ASGI: returns headers as a list of (bytes, bytes)
     /// where keys are lowercased.
     pub fn asgi_items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let mut tuples: Vec<Bound<'py, PyAny>> = Vec::new();
-        let data = &self.raw;
-        let mut pos = 0;
-        while pos < data.len() {
-            let name_len = data[pos] as usize;
-            pos += 1;
-            if pos + name_len > data.len() {
-                break;
-            }
-            let name = &data[pos..pos + name_len];
-            // Lowercase the key for ASGI spec compliance
-            let name_lower = name.to_ascii_lowercase();
-            pos += name_len;
-
-            if pos + 2 > data.len() {
-                break;
-            }
-            let value_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-            pos += 2;
-            if pos + value_len > data.len() {
-                break;
-            }
-            let value = &data[pos..pos + value_len];
-            pos += value_len;
-
-            let t = PyTuple::new(
-                py,
-                [
-                    PyBytes::new(py, &name_lower).into_any(),
-                    PyBytes::new(py, value).into_any(),
-                ],
-            )?;
-            tuples.push(t.into_any());
-        }
-        PyList::new(py, &tuples)
+        decode_asgi_headers(py, &self.raw)
     }
 
     fn as_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
-        for (name, value) in self.iter_decoded() {
-            d.set_item(name, value)?;
+        for (name, value) in iter_raw_headers(&self.raw) {
+            let name_str = String::from_utf8_lossy(name);
+            let val_str = String::from_utf8_lossy(value);
+            d.set_item(name_str.as_ref(), val_str.as_ref())?;
         }
         Ok(d)
     }
@@ -147,38 +178,6 @@ impl VertebraHeaders {
 
     fn __repr__(&self) -> String {
         format!("VertebraHeaders(raw_len={})", self.raw.len())
-    }
-}
-
-impl VertebraHeaders {
-    fn iter_decoded(&self) -> impl Iterator<Item = (String, String)> + '_ {
-        let mut pos = 0;
-        let data = &self.raw;
-        std::iter::from_fn(move || {
-            if pos >= data.len() {
-                return None;
-            }
-            let name_len = data[pos] as usize;
-            pos += 1;
-            if pos + name_len > data.len() {
-                return None;
-            }
-            let name = String::from_utf8_lossy(&data[pos..pos + name_len]).to_string();
-            pos += name_len;
-
-            if pos + 2 > data.len() {
-                return None;
-            }
-            let value_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-            pos += 2;
-            if pos + value_len > data.len() {
-                return None;
-            }
-            let value = String::from_utf8_lossy(&data[pos..pos + value_len]).to_string();
-            pos += value_len;
-
-            Some((name, value))
-        })
     }
 }
 
@@ -203,7 +202,7 @@ impl VertebraHeadersIter {
         if self.pos + name_len > self.raw.len() {
             return None;
         }
-        let name = String::from_utf8_lossy(&self.raw[self.pos..self.pos + name_len]).to_string();
+        let name = String::from_utf8_lossy(&self.raw[self.pos..self.pos + name_len]).into_owned();
         self.pos += name_len;
 
         if self.pos + 2 > self.raw.len() {

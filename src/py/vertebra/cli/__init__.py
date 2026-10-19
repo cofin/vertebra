@@ -2,13 +2,15 @@
 
 import click
 
-from vertebra.cli import config as _config  # noqa: F401
+from vertebra.cli.config import configure_rich_click
 from vertebra.cli.dev import dev
 from vertebra.cli.init import init
 from vertebra.cli.js import js
 from vertebra.cli.run import run
 
-__all__ = ["cli", "main"]
+__all__ = ("cli", "main", "vtb")
+
+configure_rich_click()
 
 
 @click.group()

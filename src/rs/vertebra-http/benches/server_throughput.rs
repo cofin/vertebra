@@ -7,7 +7,7 @@
 //! Run with:
 //!   cd src/rs && cargo bench --package vertebra-http --bench server_throughput
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -205,7 +205,7 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
                         PendingResponse {
                             status: resp.status,
                             headers_mp: encode_response_headers(&resp.headers),
-                            body: bytes::Bytes::from(resp.body),
+                            body: resp.body,
                         },
                     );
                 }
@@ -344,7 +344,7 @@ fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
                         PendingResponse {
                             status: resp.status,
                             headers_mp: encode_response_headers(&resp.headers),
-                            body: bytes::Bytes::from(resp.body),
+                            body: resp.body,
                         },
                     );
                 }

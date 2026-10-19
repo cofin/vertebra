@@ -5,7 +5,7 @@ use std::io;
 use std::time::Duration;
 
 use crate::sync::SyncError;
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_TIMEOUT};
+use windows_sys::Win32::Foundation::{ERROR_TIMEOUT, GetLastError};
 use windows_sys::Win32::System::Threading::{WaitOnAddress, WakeByAddressAll, WakeByAddressSingle};
 
 pub(crate) fn wait_on_address(word: &AtomicU32, expected: u32) -> Result<(), SyncError> {

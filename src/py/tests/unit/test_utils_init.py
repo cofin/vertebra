@@ -6,7 +6,6 @@ from vertebra import utils
 def test_utils_package_is_thin():
     """Verify vertebra.utils is a thin package with no re-exports."""
     assert "explicitly" in utils.__doc__
-    # Thin init should not re-export any symbols (submodules are ok)
     public_names = [
         n for n in dir(utils) if not n.startswith("_") and not isinstance(getattr(utils, n), types.ModuleType)
     ]

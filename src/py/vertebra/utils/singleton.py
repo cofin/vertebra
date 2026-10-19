@@ -5,11 +5,9 @@ Aligned with vtb.
 """
 
 import threading
-from typing import Any, TypeVar
+from typing import Any, cast
 
 __all__ = ("SingletonMeta",)
-
-_T = TypeVar("_T")
 
 
 class SingletonMeta(type):
@@ -18,11 +16,11 @@ class SingletonMeta(type):
     _instances: dict[type, object] = {}
     _lock = threading.Lock()
 
-    def __call__(cls: type[_T], *args: Any, **kwargs: Any) -> _T:
+    def __call__[T](cls: type[T], *args: Any, **kwargs: Any) -> T:
         """Call method for the singleton metaclass."""
         if cls not in SingletonMeta._instances:
             with SingletonMeta._lock:
                 if cls not in SingletonMeta._instances:
-                    instance = super().__call__(*args, **kwargs)  # type: ignore[misc]
+                    instance = type.__call__(cls, *args, **kwargs)
                     SingletonMeta._instances[cls] = instance
-        return SingletonMeta._instances[cls]  # type: ignore[return-value]
+        return cast("T", SingletonMeta._instances[cls])

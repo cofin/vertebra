@@ -45,7 +45,8 @@ impl NativeRouter {
 
         for entry in entries {
             let mr = per_method.entry(entry.method.clone()).or_default();
-            mr.insert(entry.path.as_str(), entry.handler_id)?;
+            let normalized = vertebra_core::router::normalize_typed_path(entry.path.as_str())?;
+            mr.insert(normalized.as_str(), entry.handler_id)?;
             debug!(
                 method = %entry.method,
                 path  = %entry.path,
