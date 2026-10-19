@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { SessionStore, VertebraStore } from "../../src/store/index";
+import { SessionStore } from "../../src/store/index";
 
-describe("SessionStore / VertebraStore (ADK Pattern)", () => {
+describe("SessionStore (ADK Pattern)", () => {
   let store: SessionStore;
 
   beforeEach(() => {
@@ -30,10 +30,6 @@ describe("SessionStore / VertebraStore (ADK Pattern)", () => {
     store = new SessionStore();
   });
 
-  it("exports SessionStore and VertebraStore alias", () => {
-    expect(SessionStore).toBe(VertebraStore);
-  });
-
   it("sets and gets memory-only (temp:) values", () => {
     store.set("temp:query", "test");
     expect(store.get("temp:query")).toBe("test");
@@ -48,7 +44,7 @@ describe("SessionStore / VertebraStore (ADK Pattern)", () => {
 
   it("loads persistent values on initialization", () => {
     localStorage.setItem("vtb:user:lang", JSON.stringify("en"));
-    const newStore = new VertebraStore();
+    const newStore = new SessionStore();
     expect(newStore.get("user:lang")).toBe("en");
   });
 

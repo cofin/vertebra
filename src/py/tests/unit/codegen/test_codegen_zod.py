@@ -6,7 +6,7 @@ import msgspec
 
 from vertebra.builder._codegen._metadata import RouteCollector
 from vertebra.builder._codegen._zod import ZodGenerator
-from vertebra.framework._app import VertebraApp
+from vertebra.framework._app import App
 
 
 class User(msgspec.Struct):
@@ -20,7 +20,7 @@ class Payload:
 
 
 def test_generate_zod_named_schemas() -> None:
-    app = VertebraApp()
+    app = App()
 
     @app.get("/users/{user_id}")
     def get_user(user_id: int) -> User:
@@ -36,7 +36,7 @@ def test_generate_zod_named_schemas() -> None:
 
 
 def test_generate_zod_for_dataclass_payload() -> None:
-    app = VertebraApp()
+    app = App()
 
     @app.post("/payload")
     def create_payload(payload: Payload) -> Payload:

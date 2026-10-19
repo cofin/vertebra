@@ -7,7 +7,6 @@ import datetime
 import enum
 import json
 import uuid as _uuid_mod
-from abc import ABC, abstractmethod
 from decimal import Decimal
 from typing import Any, Final, Literal, cast, overload
 
@@ -15,11 +14,9 @@ from msgspec.json import Decoder, Encoder
 
 from vertebra import _typing
 from vertebra._typing import (
-    NUMPY_INSTALLED,
     PYDANTIC_INSTALLED,
     UUID_UTILS_INSTALLED,
 )
-from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers._numpy import numpy_array_enc_hook
 from vertebra.utils.serializers._schema import _dump_msgspec_fields
 from vertebra.utils.type_guards import (
@@ -31,11 +28,7 @@ from vertebra.utils.type_guards import (
 from vertebra.utils.uuids import _load_uuid_utils
 
 __all__ = (
-    "BaseJSONSerializer",
     "JSONSerializer",
-    "MsgspecSerializer",
-    "OrjsonSerializer",
-    "StandardLibSerializer",
     "convert_date_to_iso",
     "convert_datetime_to_gmt_iso",
     "decode_json",
@@ -45,23 +38,7 @@ __all__ = (
 )
 
 
-class BaseJSONSerializer(ABC):
-    """Base class shared by JSON serializer implementations."""
-
-    __slots__ = ()
-
-    @abstractmethod
-    def encode(self, data: Any, *, as_bytes: bool = False) -> str | bytes:
-        """Encode Python data into JSON."""
-        ...
-
-    @abstractmethod
-    def decode(self, data: str | bytes, *, decode_bytes: bool = True) -> Any:
-        """Decode JSON into Python data."""
-        ...
-
-
-class JSONSerializer(BaseJSONSerializer):
+class JSONSerializer:
     """Msgspec-based JSON serializer."""
 
     __slots__ = ("_decoder", "_encoder")
@@ -82,9 +59,9 @@ class JSONSerializer(BaseJSONSerializer):
         except TypeError as exc:
             if _is_explicit_unsupported_error(exc):
                 raise
-            return cast("bytes", _get_stdlib_fallback().encode(data, as_bytes=True))
+            return json.dumps(data, default=_normalize_supported_value).encode("utf-8")
         except ValueError:
-            return cast("bytes", _get_stdlib_fallback().encode(data, as_bytes=True))
+            return json.dumps(data, default=_normalize_supported_value).encode("utf-8")
 
     def decode(self, data: str | bytes, *, decode_bytes: bool = True) -> Any:
         """Decode JSON string or bytes into Python data."""
@@ -94,72 +71,11 @@ class JSONSerializer(BaseJSONSerializer):
             try:
                 return self._decoder.decode(data)
             except (TypeError, ValueError):
-                return _get_stdlib_fallback().decode(data, decode_bytes=decode_bytes)
+                return json.loads(data.decode("utf-8"))
         try:
             return self._decoder.decode(data.encode("utf-8"))
         except (TypeError, ValueError):
-            return _get_stdlib_fallback().decode(data, decode_bytes=decode_bytes)
-
-
-MsgspecSerializer = JSONSerializer
-
-
-class OrjsonSerializer(BaseJSONSerializer):
-    """Orjson-based JSON serializer retained for compatibility."""
-
-    __slots__ = ()
-
-    def encode(self, data: Any, *, as_bytes: bool = False) -> str | bytes:
-        """Encode Python data into JSON via orjson or standard library fallback."""
-        orjson_mod = import_optional("orjson")
-        if orjson_mod is None:
-            return _get_stdlib_fallback().encode(data, as_bytes=as_bytes)
-
-        options = orjson_mod.OPT_NAIVE_UTC | orjson_mod.OPT_SERIALIZE_UUID
-        if NUMPY_INSTALLED:
-            options |= orjson_mod.OPT_SERIALIZE_NUMPY
-
-        try:
-            encoded = cast(
-                "bytes",
-                orjson_mod.dumps(data, default=_normalize_supported_value, option=options),
-            )
-        except TypeError as exc:
-            if _is_explicit_unsupported_error(exc):
-                raise
-            if "type is not json serializable" in str(exc).lower():
-                unsupported_msg = "unsupported JSON value"
-                raise TypeError(unsupported_msg) from exc
-            raise
-        return encoded if as_bytes else encoded.decode("utf-8")
-
-    def decode(self, data: str | bytes, *, decode_bytes: bool = True) -> Any:
-        """Decode JSON into Python data via orjson or standard library fallback."""
-        orjson_mod = import_optional("orjson")
-        if orjson_mod is None:
-            return _get_stdlib_fallback().decode(data, decode_bytes=decode_bytes)
-        if isinstance(data, bytes) and not decode_bytes:
-            return data
-        return orjson_mod.loads(data)
-
-
-class StandardLibSerializer(BaseJSONSerializer):
-    """Standard library JSON serializer fallback."""
-
-    __slots__ = ()
-
-    def encode(self, data: Any, *, as_bytes: bool = False) -> str | bytes:
-        """Encode Python data into JSON using the standard library."""
-        encoded = json.dumps(data, default=_normalize_supported_value)
-        return encoded.encode("utf-8") if as_bytes else encoded
-
-    def decode(self, data: str | bytes, *, decode_bytes: bool = True) -> Any:
-        """Decode JSON into Python data using the standard library."""
-        if isinstance(data, bytes):
-            if not decode_bytes:
-                return data
-            return json.loads(data.decode("utf-8"))
-        return json.loads(data)
+            return json.loads(data)
 
 
 def convert_datetime_to_gmt_iso(value: datetime.datetime) -> str:
@@ -213,7 +129,6 @@ def decode_json(data: str | bytes, *, decode_bytes: bool = True) -> Any:
 
 _UNLOADED_UUID_TYPE: Final[object] = object()
 _uuid_utils_type: Any = _UNLOADED_UUID_TYPE
-_stdlib_fallback: StandardLibSerializer | None = None
 _default_serializer: JSONSerializer | None = None
 
 
@@ -274,11 +189,3 @@ def _normalize_supported_value(value: Any) -> Any:
 def _is_explicit_unsupported_error(exc: Exception) -> bool:
     """Return True when TypeError originates from an unsupported JSON value."""
     return "unsupported json value" in str(exc).lower()
-
-
-def _get_stdlib_fallback() -> StandardLibSerializer:
-    """Return the cached standard library JSON serializer fallback."""
-    global _stdlib_fallback
-    if _stdlib_fallback is None:
-        _stdlib_fallback = StandardLibSerializer()
-    return _stdlib_fallback

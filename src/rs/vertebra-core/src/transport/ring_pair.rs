@@ -619,12 +619,6 @@ impl RingPairFds {
     }
 }
 
-/// Domain-oriented alias for [`TieredRingSet`].
-pub type ResponseChannel = TieredRingSet;
-
-/// Domain-oriented alias for [`RingPair`].
-pub type WorkerChannel = RingPair;
-
 #[derive(Debug, thiserror::Error)]
 pub enum RingPairError {
     #[error("shared memory error: {0}")]

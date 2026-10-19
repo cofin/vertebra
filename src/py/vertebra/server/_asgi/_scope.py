@@ -53,7 +53,7 @@ class AsgiScope(dict[str, Any]):
 
 
 def build_scope(request: Any, *, root_path: str = "") -> Any:
-    """Build an ASGI 3.0 HTTP connection scope from a VertebraRequest.
+    """Build an ASGI 3.0 HTTP connection scope from a Request.
 
     The native fast path returns a Rust-backed ``AsgiScope`` pyclass that
     lazily materializes each key on first access.

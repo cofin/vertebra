@@ -10,7 +10,7 @@ use tracing::debug;
 
 use crate::route_table::{HandlerId, RouteEntry};
 
-/// Error returned by `NativeRouter::lookup`.
+/// Error returned by `Router::lookup`.
 #[derive(Debug, thiserror::Error)]
 pub enum RouterError {
     #[error("no route matched: method={method} path={path}")]
@@ -30,14 +30,14 @@ pub struct RouteMatch<'a> {
 
 /// A compiled, immutable router built from a `RouteTable`.
 ///
-/// Thread-safe: wrap in `Arc<NativeRouter>` and share across Tokio tasks.
-pub struct NativeRouter {
+/// Thread-safe: wrap in `Arc<Router>` and share across Tokio tasks.
+pub struct Router {
     /// One matchit router per HTTP method.
     per_method: HashMap<String, MatchitRouter<HandlerId>>,
 }
 
-impl NativeRouter {
-    /// Build a `NativeRouter` from the collected route entries.
+impl Router {
+    /// Build a `Router` from the collected route entries.
     pub fn from_entries(
         entries: Vec<RouteEntry>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -90,6 +90,3 @@ impl NativeRouter {
         })
     }
 }
-
-/// Domain-oriented alias for [`NativeRouter`].
-pub type Router = NativeRouter;

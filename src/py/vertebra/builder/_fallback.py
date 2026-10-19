@@ -16,7 +16,7 @@ import subprocess
 import time
 from pathlib import Path
 
-__all__ = ("DevServerProcess", "ViteDevServer", "run_vite_build")
+__all__ = ("DevServerProcess", "run_vite_build")
 
 logger = logging.getLogger(__name__)
 
@@ -135,9 +135,6 @@ class DevServerProcess:
             interval = min(interval * 1.5, 1.0)
 
         return False
-
-
-ViteDevServer = DevServerProcess
 
 
 def run_vite_build(project_dir: Path) -> None:

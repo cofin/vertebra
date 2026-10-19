@@ -1,8 +1,8 @@
-//! RolldownBundler -- Main bundler implementation using OXC
+//! Bundler -- Main bundler implementation using OXC
 
 use crate::config::{BuildResult, BundleConfig, DevConfig, OutputFile};
 use crate::errors::{BundlerError, Result};
-use crate::hmr::{HmrEvent, HmrWatcher};
+use crate::hmr::{HmrEvent, SourceWatcher};
 use crate::ssr::SsrPool;
 use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenOptions};
@@ -19,9 +19,9 @@ use std::time::Instant;
 use tokio::sync::broadcast;
 
 /// Main bundler class exposed to Python via PyO3
-#[pyclass]
-pub struct RolldownBundler {
-    watcher: Option<HmrWatcher>,
+#[pyclass(name = "Bundler")]
+pub struct Bundler {
+    watcher: Option<SourceWatcher>,
     hmr_rx: Option<broadcast::Receiver<HmrEvent>>,
     hmr_port: Option<u16>,
     is_dev_mode: bool,
@@ -29,8 +29,8 @@ pub struct RolldownBundler {
 }
 
 #[pymethods]
-impl RolldownBundler {
-    /// Create a new RolldownBundler instance
+impl Bundler {
+    /// Create a new Bundler instance
     #[new]
     pub fn new() -> PyResult<Self> {
         Ok(Self {
@@ -61,7 +61,7 @@ impl RolldownBundler {
         let watch_dirs: Vec<PathBuf> = config.watch_dirs.iter().map(PathBuf::from).collect();
 
         let (watcher, rx) =
-            HmrWatcher::new(watch_dirs, config.extensions.clone(), config.debounce_ms)
+            SourceWatcher::new(watch_dirs, config.extensions.clone(), config.debounce_ms)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         self.watcher = Some(watcher);
@@ -206,7 +206,7 @@ impl RolldownBundler {
     }
 }
 
-impl RolldownBundler {
+impl Bundler {
     /// Internal build implementation
     fn build_internal(&self, config: &BundleConfig) -> Result<BuildResult> {
         let start = Instant::now();
@@ -247,10 +247,7 @@ impl RolldownBundler {
     }
 }
 
-/// Domain-oriented alias for [`RolldownBundler`].
-pub type Bundler = RolldownBundler;
-
-impl Default for RolldownBundler {
+impl Default for Bundler {
     fn default() -> Self {
         Self::new().expect("Failed to create default bundler")
     }
@@ -351,7 +348,7 @@ mod tests {
             ..BundleConfig::default()
         };
 
-        let bundler = RolldownBundler::default();
+        let bundler = Bundler::default();
         let result = bundler.build_internal(&config);
         assert!(result.is_ok(), "Build failed: {:?}", result.err());
 

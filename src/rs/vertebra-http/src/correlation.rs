@@ -21,14 +21,14 @@ struct CorrelationEntry {
 }
 
 /// O(1) correlation table using a pre-allocated slab with generation counters.
-pub struct CorrelationSlab {
+pub struct InFlightRequests {
     slots: Vec<Option<CorrelationEntry>>,
     free_list: Vec<u32>,
     generations: Vec<u32>,
     capacity: usize,
 }
 
-impl CorrelationSlab {
+impl InFlightRequests {
     /// Create a new slab with the given capacity.
     ///
     /// Typical values: 65536 for 64K concurrent in-flight requests.
@@ -165,23 +165,20 @@ impl CorrelationSlab {
     }
 }
 
-/// Domain-oriented alias for [`CorrelationSlab`].
-pub type InFlightRequests = CorrelationSlab;
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn new_slab_is_empty() {
-        let slab = CorrelationSlab::new(1024);
+        let slab = InFlightRequests::new(1024);
         assert_eq!(slab.in_flight(), 0);
         assert_eq!(slab.capacity(), 1024);
     }
 
     #[test]
     fn insert_and_complete_round_trip() {
-        let mut slab = CorrelationSlab::new(64);
+        let mut slab = InFlightRequests::new(64);
         let (tx, mut rx) = oneshot::channel();
 
         let id = slab.insert(tx, 0).expect("should insert");
@@ -204,7 +201,7 @@ mod tests {
 
     #[test]
     fn insert_1000_complete_random_order() {
-        let mut slab = CorrelationSlab::new(2048);
+        let mut slab = InFlightRequests::new(2048);
         let mut ids_and_rxs = Vec::new();
 
         for i in 0..1000u64 {
@@ -232,7 +229,7 @@ mod tests {
 
     #[test]
     fn generation_prevents_aba() {
-        let mut slab = CorrelationSlab::new(4);
+        let mut slab = InFlightRequests::new(4);
         let (tx1, _rx1) = oneshot::channel();
         let id1 = slab.insert(tx1, 0).expect("insert");
 
@@ -270,7 +267,7 @@ mod tests {
 
     #[test]
     fn capacity_exhaustion() {
-        let mut slab = CorrelationSlab::new(2);
+        let mut slab = InFlightRequests::new(2);
         let (tx1, _rx1) = oneshot::channel();
         let (tx2, _rx2) = oneshot::channel();
         let (tx3, _rx3) = oneshot::channel();
@@ -282,7 +279,7 @@ mod tests {
 
     #[test]
     fn complete_invalid_id() {
-        let mut slab = CorrelationSlab::new(4);
+        let mut slab = InFlightRequests::new(4);
         let result = slab.complete(
             9999,
             PendingResponse {
@@ -296,7 +293,7 @@ mod tests {
 
     #[test]
     fn sweep_for_worker() {
-        let mut slab = CorrelationSlab::new(64);
+        let mut slab = InFlightRequests::new(64);
 
         // Insert entries for workers 0, 1, 2
         for w in 0..3u32 {
@@ -315,7 +312,7 @@ mod tests {
 
     #[test]
     fn sweep_expired() {
-        let mut slab = CorrelationSlab::new(64);
+        let mut slab = InFlightRequests::new(64);
         let (tx, _rx) = oneshot::channel();
         slab.insert(tx, 0).expect("insert");
 

@@ -1,6 +1,6 @@
 //! Zero-object request proxy for the Vertebra batch runner.
 //!
-//! Each `VertebraRequest` holds an `Arc<BatchSnapshot>` and an index into it.
+//! Each `Request` holds an `Arc<BatchSnapshot>` and an index into it.
 //! Fields are materialized as Python objects on demand from the snapshot's
 //! contiguous data slab — unused fields are never allocated.
 
@@ -12,7 +12,7 @@ use pyo3::types::{PyBytes, PyDict, PyString};
 use vertebra_core::transport::BatchSnapshot;
 
 use crate::asgi_scope::AsgiScope;
-use crate::headers::VertebraHeaders;
+use crate::headers::Headers;
 use crate::wsgi_environ::WsgiEnviron;
 
 /// Zero-object request proxy backed by a shared [`BatchSnapshot`].
@@ -24,14 +24,14 @@ use crate::wsgi_environ::WsgiEnviron;
 /// Headers are cached on first access via `OnceLock` to avoid repeated
 /// `Bytes::copy_from_slice` calls — WSGI environ may hit `.headers.get()`
 /// multiple times per request (CONTENT_TYPE, CONTENT_LENGTH, HTTP_* keys).
-#[pyclass(name = "VertebraRequest", frozen)]
-pub struct VertebraRequest {
+#[pyclass(name = "Request", frozen)]
+pub struct Request {
     batch: Arc<BatchSnapshot>,
     index: usize,
-    cached_headers: OnceLock<VertebraHeaders>,
+    cached_headers: OnceLock<Headers>,
 }
 
-impl VertebraRequest {
+impl Request {
     /// Create a new request proxy pointing to `index` in `batch`.
     pub fn new(batch: Arc<BatchSnapshot>, index: usize) -> Self {
         Self {
@@ -41,18 +41,18 @@ impl VertebraRequest {
         }
     }
 
-    fn get_headers(&self) -> VertebraHeaders {
+    fn get_headers(&self) -> Headers {
         self.cached_headers
             .get_or_init(|| {
                 let raw = self.batch.headers_raw(self.index);
-                VertebraHeaders::new(bytes::Bytes::copy_from_slice(raw))
+                Headers::new(bytes::Bytes::copy_from_slice(raw))
             })
             .clone()
     }
 }
 
 #[pymethods]
-impl VertebraRequest {
+impl Request {
     #[getter]
     fn method<'py>(&self, py: Python<'py>) -> Bound<'py, PyString> {
         let name = self.batch.node(self.index).method_name();
@@ -115,7 +115,7 @@ impl VertebraRequest {
     }
 
     #[getter]
-    fn headers(&self) -> VertebraHeaders {
+    fn headers(&self) -> Headers {
         self.get_headers()
     }
 
@@ -164,7 +164,7 @@ impl VertebraRequest {
     fn __repr__(&self) -> String {
         let n = self.batch.node(self.index);
         format!(
-            "VertebraRequest(method={:?}, path={:?}, handler_id={}, request_id={})",
+            "Request(method={:?}, path={:?}, handler_id={}, request_id={})",
             n.method_name(),
             self.batch.path(self.index),
             n.handler_id,
@@ -172,6 +172,3 @@ impl VertebraRequest {
         )
     }
 }
-
-/// Domain-oriented alias for [`VertebraRequest`].
-pub type Request = VertebraRequest;

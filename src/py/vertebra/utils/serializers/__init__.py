@@ -5,13 +5,10 @@ Aligned with vtb.
 
 from vertebra.utils.serializers._json import (
     JSONSerializer,
-    MsgspecSerializer,
     decode_json,
     encode_json,
     encode_json_bytes,
 )
-from vertebra.utils.serializers._json import decode_json as from_json
-from vertebra.utils.serializers._json import encode_json as to_json
 from vertebra.utils.serializers._numpy import (
     numpy_array_dec_hook,
     numpy_array_enc_hook,
@@ -28,12 +25,10 @@ from vertebra.utils.serializers._schema import (
 
 __all__ = (
     "JSONSerializer",
-    "MsgspecSerializer",
     "SchemaSerializer",
     "decode_json",
     "encode_json",
     "encode_json_bytes",
-    "from_json",
     "get_collection_serializer",
     "get_serializer_metrics",
     "numpy_array_dec_hook",
@@ -42,5 +37,4 @@ __all__ = (
     "reset_serializer_cache",
     "schema_dump",
     "serialize_collection",
-    "to_json",
 )

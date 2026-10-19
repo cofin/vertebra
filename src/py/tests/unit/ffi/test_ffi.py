@@ -9,33 +9,33 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from vertebra._vertebra import (  # type: ignore[import-untyped]
-    VertebraResponse,
+    Response,
     init_transport,
     submit_response,
 )
-from vertebra.framework._app import VertebraApp, _make_handler_id
+from vertebra.framework._app import App, _make_handler_id
 from vertebra.framework._router import handler_id
 from vertebra.server import _native as native_module
-from vertebra.server._native import CallbackScheduler, _dispatch_batch, _PartitionedBatch
+from vertebra.server._native import AsyncRuntime, BatchDispatchPlan, _dispatch_batch
 from vertebra.supervisor import _worker as worker_module
-from vertebra.supervisor._worker import _import_app
+from vertebra.utils.module_loader import import_app
 
 
 def test_vertebra_response_construct_basic() -> None:
-    r = VertebraResponse(status=200, body=b"ok")
+    r = Response(status=200, body=b"ok")
     assert r.status == 200
     assert bytes(r.body) == b"ok"
     assert r.request_id == 0
 
 
 def test_vertebra_response_construct_empty_body() -> None:
-    r = VertebraResponse(status=404)
+    r = Response(status=404)
     assert r.status == 404
     assert bytes(r.body) == b""
 
 
 def test_vertebra_response_construct_with_headers_dict() -> None:
-    r = VertebraResponse(
+    r = Response(
         status=200,
         body=b"data",
         headers={"content-type": "text/plain"},
@@ -48,7 +48,7 @@ def test_vertebra_response_construct_with_headers_dict() -> None:
 
 
 def test_vertebra_response_construct_with_headers_list() -> None:
-    r = VertebraResponse(
+    r = Response(
         status=200,
         headers=[("x-custom", "value")],
     )
@@ -57,12 +57,12 @@ def test_vertebra_response_construct_with_headers_list() -> None:
 
 
 def test_vertebra_response_request_id_set() -> None:
-    r = VertebraResponse(status=200, request_id=42)
+    r = Response(status=200, request_id=42)
     assert r.request_id == 42
 
 
 def test_vertebra_response_request_id_mutated_in_place() -> None:
-    r = VertebraResponse(status=200, body=b"ok", headers=[("x-test", "1")])
+    r = Response(status=200, body=b"ok", headers=[("x-test", "1")])
     assert r.request_id == 0
     r.request_id = 99
     assert r.request_id == 99
@@ -70,7 +70,7 @@ def test_vertebra_response_request_id_mutated_in_place() -> None:
 
 
 def test_vertebra_response_repr() -> None:
-    r = VertebraResponse(status=200, body=b"hi", request_id=7)
+    r = Response(status=200, body=b"hi", request_id=7)
     rep = repr(r)
     assert "200" in rep
     assert "7" in rep
@@ -95,13 +95,13 @@ def test_handler_id_cross_language_routing_module_matches() -> None:
 
 
 def test_worker_import_app_valid() -> None:
-    app = _import_app("vertebra.framework._app:VertebraApp")
-    assert app is VertebraApp
+    app = import_app("vertebra.framework._app:App")
+    assert app is App
 
 
 def test_worker_import_app_invalid_format() -> None:
     with pytest.raises(ValueError, match="module:attr"):
-        _import_app("invalid_no_colon")
+        import_app("invalid_no_colon")
 
 
 def test_worker_main_shm_transport_initialized_once(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,7 +111,7 @@ def test_worker_main_shm_transport_initialized_once(monkeypatch: pytest.MonkeyPa
 
     fake_ext = ModuleType("vertebra._vertebra")
 
-    class FakeVertebraResponse:
+    class FakeResponse:
         def __init__(self, status: int = 200, body: bytes = b"", request_id: int = 0) -> None:
             self.status = status
             self.body = body
@@ -128,7 +128,7 @@ def test_worker_main_shm_transport_initialized_once(monkeypatch: pytest.MonkeyPa
     def fake_get_request_notify_fd() -> int:
         return 11 if state["mode"] == "shm" else -1
 
-    fake_ext.VertebraResponse = FakeVertebraResponse  # type: ignore[attr-defined]
+    fake_ext.Response = FakeResponse  # type: ignore[attr-defined]
     fake_ext.init_transport = fake_init_transport  # type: ignore[attr-defined]
     fake_ext.get_request_notify_fd = fake_get_request_notify_fd  # type: ignore[attr-defined]
     fake_ext.get_batch = lambda timeout_ms=100: None  # type: ignore[attr-defined]
@@ -154,9 +154,9 @@ def test_worker_main_shm_transport_initialized_once(monkeypatch: pytest.MonkeyPa
     fake_app = SimpleNamespace(_handlers={}, mounts=[])
 
     monkeypatch.setitem(sys.modules, "vertebra._vertebra", fake_ext)
-    monkeypatch.setattr(worker_module, "_import_app", lambda app_path: fake_app)
+    monkeypatch.setattr(worker_module, "import_app", lambda app_path: fake_app)
     monkeypatch.setattr(native_module, "_install_signal_handlers", lambda: None)
-    monkeypatch.setattr(native_module, "CallbackScheduler", FakeScheduler)
+    monkeypatch.setattr(native_module, "AsyncRuntime", FakeScheduler)
     monkeypatch.setattr(native_module, "ThreadPoolExecutor", FakeExecutor)
     monkeypatch.setattr(native_module, "_shm_worker_loop", fake_shm_worker_loop)
     monkeypatch.setenv("VERTEBRA_TRANSPORT_MODE", "shm")
@@ -176,7 +176,7 @@ def test_worker_main_clears_wsgi_executor_on_shutdown(monkeypatch: pytest.Monkey
     fake_ext.get_request_notify_fd = lambda: -1  # type: ignore[attr-defined]
     fake_ext.get_batch = lambda timeout_ms=100: None  # type: ignore[attr-defined]
     fake_ext.submit_results = lambda responses: None  # type: ignore[attr-defined]
-    fake_ext.VertebraResponse = object  # type: ignore[attr-defined]
+    fake_ext.Response = object  # type: ignore[attr-defined]
 
     class FakeScheduler:
         def __init__(self) -> None:
@@ -198,9 +198,9 @@ def test_worker_main_clears_wsgi_executor_on_shutdown(monkeypatch: pytest.Monkey
     fake_app = SimpleNamespace(_handlers={}, mounts=[])
 
     monkeypatch.setitem(sys.modules, "vertebra._vertebra", fake_ext)
-    monkeypatch.setattr(worker_module, "_import_app", lambda app_path: fake_app)
+    monkeypatch.setattr(worker_module, "import_app", lambda app_path: fake_app)
     monkeypatch.setattr(native_module, "_install_signal_handlers", lambda: None)
-    monkeypatch.setattr(native_module, "CallbackScheduler", FakeScheduler)
+    monkeypatch.setattr(native_module, "AsyncRuntime", FakeScheduler)
     monkeypatch.setattr(native_module, "ThreadPoolExecutor", FakeExecutor)
     monkeypatch.setattr(native_module, "_shm_worker_loop", fake_shm_worker_loop)
     monkeypatch.setenv("VERTEBRA_TRANSPORT_MODE", "shm")
@@ -244,13 +244,13 @@ def test_worker_module_executes_main_when_run_as_script(monkeypatch: pytest.Monk
 
 def test_submit_response_exists() -> None:
     init_transport()
-    resp = VertebraResponse(status=200, body=b"hello", request_id=123)
+    resp = Response(status=200, body=b"hello", request_id=123)
     submit_response(resp)
 
 
 def test_non_blocking_dispatch() -> None:
     init_transport()
-    scheduler = CallbackScheduler()
+    scheduler = AsyncRuntime()
 
     async def slow_handler() -> bytes:
         await asyncio.sleep(0.1)
@@ -262,11 +262,11 @@ def test_non_blocking_dispatch() -> None:
             self.handler_id = 1
 
     batch = [Req(1), Req(2)]
-    partitioned = _PartitionedBatch()
+    partitioned = BatchDispatchPlan()
     partitioned.async_native = [(0, batch[0], slow_handler), (1, batch[1], slow_handler)]
 
     start = time.monotonic()
-    _dispatch_batch(partitioned, {1: slow_handler}, [], VertebraResponse, scheduler, async_mode=True)
+    _dispatch_batch(partitioned, {1: slow_handler}, [], Response, scheduler, async_mode=True)
     elapsed = time.monotonic() - start
 
     assert elapsed < 0.05

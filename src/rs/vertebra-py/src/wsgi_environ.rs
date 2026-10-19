@@ -329,9 +329,9 @@ impl WsgiEnviron {
         self.collect_keys().len()
     }
 
-    fn __iter__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Py<WsgiEnvironKeyIter>> {
+    fn __iter__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Py<WsgiEnvironIterator>> {
         let keys = slf.collect_keys();
-        Py::new(py, WsgiEnvironKeyIter { keys, pos: 0 })
+        Py::new(py, WsgiEnvironIterator { keys, pos: 0 })
     }
 
     #[pyo3(signature = (key, default=None))]
@@ -435,14 +435,14 @@ impl WsgiEnviron {
 }
 
 /// Iterator over the environ's live keys.
-#[pyclass]
-pub struct WsgiEnvironKeyIter {
+#[pyclass(name = "WsgiEnvironIterator")]
+pub struct WsgiEnvironIterator {
     keys: Vec<String>,
     pos: usize,
 }
 
 #[pymethods]
-impl WsgiEnvironKeyIter {
+impl WsgiEnvironIterator {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
@@ -456,6 +456,3 @@ impl WsgiEnvironKeyIter {
         }
     }
 }
-
-/// Domain-oriented alias for [`WsgiEnvironKeyIter`].
-pub type WsgiEnvironIterator = WsgiEnvironKeyIter;

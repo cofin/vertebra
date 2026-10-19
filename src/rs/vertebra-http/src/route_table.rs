@@ -1,7 +1,7 @@
 //! Route registration API.
 //!
 //! `RouteTable` is a builder that accepts (method, path_pattern, handler_id)
-//! triples before startup. Once built it hands off the data to `NativeRouter`.
+//! triples before startup. Once built it hands off the data to `Router`.
 
 use fnv::FnvHasher;
 use std::hash::{Hash, Hasher};
@@ -32,7 +32,7 @@ pub struct RouteEntry {
 
 /// Builder for the route table.
 ///
-/// Collect routes at startup, then call `build()` to get a `NativeRouter`.
+/// Collect routes at startup, then call `build()` to get a `Router`.
 #[derive(Debug, Default)]
 pub struct RouteTable {
     entries: Vec<RouteEntry>,
@@ -62,9 +62,6 @@ impl RouteTable {
         self.entries
     }
 }
-
-/// Domain-oriented alias for [`RouteTable`].
-pub type DynamicRouteTable = RouteTable;
 
 #[cfg(test)]
 mod tests {

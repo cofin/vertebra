@@ -5,7 +5,7 @@
 //! - BatchSnapshot serialize/deserialize throughput
 //! - Tiered ring tier selection cost
 //! - Transport parity: InProcess vs SharedMemory poll_batch
-//! - CorrelationSlab insert/complete vs baseline
+//! - InFlightRequests insert/complete vs baseline
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::sync::Arc;

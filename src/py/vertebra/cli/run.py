@@ -13,7 +13,7 @@ from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
-from vertebra.utils.serializers import from_json
+from vertebra.utils.serializers import decode_json
 
 __all__ = ("load_config", "run")
 
@@ -120,7 +120,7 @@ def load_config(path: Path) -> dict[str, Any]:
         with path.open("rb") as f:
             return tomllib.load(f)
     if path.suffix == ".json":
-        data: dict[str, Any] = from_json(path.read_bytes())
+        data: dict[str, Any] = decode_json(path.read_bytes())
         return data
     msg = f"Unsupported config format: {path.suffix}"
     raise ValueError(msg)

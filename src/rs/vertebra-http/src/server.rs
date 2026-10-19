@@ -23,7 +23,7 @@ use crate::config::ServerConfig;
 use crate::dispatcher::Dispatcher;
 use crate::hmr::HmrState;
 use crate::response::handle;
-use crate::router::NativeRouter;
+use crate::router::Router;
 
 #[cfg(feature = "tls")]
 use crate::tls::TlsAcceptor;
@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Shared state threaded through every request service call.
 pub struct ServerState {
-    pub router: Arc<NativeRouter>,
+    pub router: Arc<Router>,
     pub dispatcher: Arc<Dispatcher>,
     pub config: Arc<ServerConfig>,
     pub collector_shards: Vec<tokio::sync::mpsc::Sender<PendingRequest>>,
@@ -51,7 +51,7 @@ impl ServerState {
 /// Run the HTTP server with sharded collector channels until the shutdown signal resolves.
 pub async fn run_with_collector(
     config: Arc<ServerConfig>,
-    router: Arc<NativeRouter>,
+    router: Arc<Router>,
     dispatcher: Arc<Dispatcher>,
     collector_shards: Vec<tokio::sync::mpsc::Sender<PendingRequest>>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -72,7 +72,7 @@ pub async fn run_with_collector(
 pub async fn run_with_listener(
     listener: TcpListener,
     config: Arc<ServerConfig>,
-    router: Arc<NativeRouter>,
+    router: Arc<Router>,
     dispatcher: Arc<Dispatcher>,
     collector_shards: Vec<tokio::sync::mpsc::Sender<PendingRequest>>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,

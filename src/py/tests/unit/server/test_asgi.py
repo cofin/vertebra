@@ -149,16 +149,16 @@ def test_build_scope_uses_materialized_scope() -> None:
 
 
 def test_build_scope_native_vertebra_request() -> None:
-    """Verify that a real VertebraRequest uses its native asgi_scope."""
-    from vertebra._vertebra import VertebraRequest, init_transport, try_get_batch
+    """Verify that a real Request uses its native asgi_scope."""
+    from vertebra._vertebra import Request, init_transport, try_get_batch
     from vertebra.server._asgi._scope import build_scope
 
-    assert hasattr(VertebraRequest, "asgi_scope")
+    assert hasattr(Request, "asgi_scope")
 
     init_transport(mode="inprocess")
     batch = try_get_batch()
     if batch is None or len(batch) == 0:
-        pytest.skip("No batch available to test native VertebraRequest instance materialization")
+        pytest.skip("No batch available to test native Request instance materialization")
 
     req = batch[0]
     scope = build_scope(req)
@@ -169,9 +169,9 @@ def test_build_scope_native_vertebra_request() -> None:
 
 @pytest.mark.anyio
 async def test_receive_channel_first_call_returns_body() -> None:
-    from vertebra.server._asgi._queues import ReceiveChannel
+    from vertebra.server._asgi._queues import AsgiReceive
 
-    rc = ReceiveChannel(MockRequest(body=b"hello"))
+    rc = AsgiReceive(MockRequest(body=b"hello"))
     msg = await rc()
     assert msg["type"] == "http.request"
     assert msg["body"] == b"hello"
@@ -180,9 +180,9 @@ async def test_receive_channel_first_call_returns_body() -> None:
 
 @pytest.mark.anyio
 async def test_receive_channel_second_call_disconnect() -> None:
-    from vertebra.server._asgi._queues import ReceiveChannel
+    from vertebra.server._asgi._queues import AsgiReceive
 
-    rc = ReceiveChannel(MockRequest())
+    rc = AsgiReceive(MockRequest())
     await rc()
     msg = await rc()
     assert msg["type"] == "http.disconnect"
@@ -190,9 +190,9 @@ async def test_receive_channel_second_call_disconnect() -> None:
 
 @pytest.mark.anyio
 async def test_receive_channel_subsequent_calls_disconnect() -> None:
-    from vertebra.server._asgi._queues import ReceiveChannel
+    from vertebra.server._asgi._queues import AsgiReceive
 
-    rc = ReceiveChannel(MockRequest())
+    rc = AsgiReceive(MockRequest())
     await rc()
     for _ in range(5):
         msg = await rc()
@@ -201,9 +201,9 @@ async def test_receive_channel_subsequent_calls_disconnect() -> None:
 
 @pytest.mark.anyio
 async def test_send_collector_captures_status() -> None:
-    from vertebra.server._asgi._queues import SendCollector
+    from vertebra.server._asgi._queues import AsgiSend
 
-    sc = SendCollector()
+    sc = AsgiSend()
     await sc({"type": "http.response.start", "status": 200, "headers": []})
     await sc({"type": "http.response.body", "body": b"ok"})
     r = sc.response
@@ -213,9 +213,9 @@ async def test_send_collector_captures_status() -> None:
 
 @pytest.mark.anyio
 async def test_send_collector_accumulates_chunks() -> None:
-    from vertebra.server._asgi._queues import SendCollector
+    from vertebra.server._asgi._queues import AsgiSend
 
-    sc = SendCollector()
+    sc = AsgiSend()
     await sc({"type": "http.response.start", "status": 200, "headers": []})
     await sc({"type": "http.response.body", "body": b"abc", "more_body": True})
     await sc({"type": "http.response.body", "body": b"de", "more_body": False})
@@ -224,27 +224,27 @@ async def test_send_collector_accumulates_chunks() -> None:
 
 @pytest.mark.anyio
 async def test_send_collector_response_before_start_raises() -> None:
-    from vertebra.server._asgi._queues import SendCollector
+    from vertebra.server._asgi._queues import AsgiSend
 
-    sc = SendCollector()
+    sc = AsgiSend()
     with pytest.raises(RuntimeError, match="http.response.start"):
         _ = sc.response
 
 
 @pytest.mark.anyio
 async def test_send_collector_unknown_type_raises() -> None:
-    from vertebra.server._asgi._queues import SendCollector
+    from vertebra.server._asgi._queues import AsgiSend
 
-    sc = SendCollector()
+    sc = AsgiSend()
     with pytest.raises(RuntimeError, match="unexpected"):
         await sc({"type": "http.weirdmessage"})
 
 
 @pytest.mark.anyio
 async def test_send_collector_header_conversion() -> None:
-    from vertebra.server._asgi._queues import SendCollector
+    from vertebra.server._asgi._queues import AsgiSend
 
-    sc = SendCollector()
+    sc = AsgiSend()
     await sc(
         {
             "type": "http.response.start",
@@ -488,9 +488,9 @@ def test_asgi_scope_optimizations_none_when_no_host(key: str) -> None:
 @pytest.mark.anyio
 async def test_send_collector_fast_path_single_chunk_no_list() -> None:
     """Single-chunk response should not allocate _extra_chunks list."""
-    from vertebra.server._asgi._queues import SendCollector
+    from vertebra.server._asgi._queues import AsgiSend
 
-    c = SendCollector()
+    c = AsgiSend()
     await c({"type": "http.response.start", "status": 200, "headers": []})
     await c({"type": "http.response.body", "body": b"hello"})
     assert c._extra_chunks is None  # noqa: SLF001
@@ -500,9 +500,9 @@ async def test_send_collector_fast_path_single_chunk_no_list() -> None:
 @pytest.mark.anyio
 async def test_send_collector_fast_path_multi_chunk_joins() -> None:
     """Multiple chunks should accumulate and join correctly."""
-    from vertebra.server._asgi._queues import SendCollector
+    from vertebra.server._asgi._queues import AsgiSend
 
-    c = SendCollector()
+    c = AsgiSend()
     await c({"type": "http.response.start", "status": 200, "headers": []})
     await c({"type": "http.response.body", "body": b"abc"})
     await c({"type": "http.response.body", "body": b"de"})

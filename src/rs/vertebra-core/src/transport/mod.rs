@@ -518,7 +518,7 @@ impl std::fmt::Debug for BufferPool {
 /// Immutable batch snapshot for zero-object request proxies.
 ///
 /// Created by `poll_batch()` and shared via `Arc` across all
-/// `VertebraRequest` instances in a batch. Fields are read lazily
+/// `Request` instances in a batch. Fields are read lazily
 /// from the slab bytes — unused fields are never materialized.
 ///
 /// When pool-backed, dropping the snapshot returns the buffers to the
@@ -873,12 +873,6 @@ impl<'a> ShmBatchWriter<'a> {
         offset
     }
 }
-
-/// Domain-oriented alias for [`BatchSnapshot`].
-pub type RequestBatch = BatchSnapshot;
-
-/// Domain-oriented alias for [`TransportNode`].
-pub type RequestRecord = TransportNode;
 
 /// Zero-allocation iterator over raw encoded headers.
 ///

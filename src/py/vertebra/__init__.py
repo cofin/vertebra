@@ -15,7 +15,7 @@ Example::
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from vertebra.framework._app import App, HandlerInfo, VertebraApp, _make_handler_id
+    from vertebra.framework._app import App, HandlerInfo, _make_handler_id
     from vertebra.framework._router import (
         RouteDef,
         Router,
@@ -33,7 +33,6 @@ __all__ = (
     "HandlerInfo",
     "RouteDef",
     "Router",
-    "VertebraApp",
     "__version__",
     "_make_handler_id",
     "delete",
@@ -47,7 +46,7 @@ __all__ = (
 
 __version__ = "0.1.0"
 
-_APP_EXPORTS = frozenset({"App", "HandlerInfo", "VertebraApp", "_make_handler_id"})
+_APP_EXPORTS = frozenset({"App", "HandlerInfo", "_make_handler_id"})
 _ROUTER_EXPORTS = frozenset(
     {
         "RouteDef",

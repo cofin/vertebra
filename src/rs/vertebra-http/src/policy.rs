@@ -9,7 +9,7 @@ use std::time::Duration;
 
 /// Policy determining when a batch should be drained.
 #[derive(Debug, Clone)]
-pub enum DrainPolicy {
+pub enum BatchPolicy {
     /// Drain when `size` requests accumulate OR `timeout` elapses, whichever is first.
     Fixed { size: usize, timeout: Duration },
 
@@ -32,7 +32,7 @@ pub enum DrainPolicy {
     },
 }
 
-impl DrainPolicy {
+impl BatchPolicy {
     /// Create the default fixed policy (64 requests, 1ms timeout).
     pub fn default_fixed() -> Self {
         Self::Fixed {
@@ -105,10 +105,7 @@ impl DrainPolicy {
     }
 }
 
-/// Domain-oriented alias for [`DrainPolicy`].
-pub type BatchPolicy = DrainPolicy;
-
-impl Default for DrainPolicy {
+impl Default for BatchPolicy {
     fn default() -> Self {
         Self::default_fixed()
     }
@@ -120,7 +117,7 @@ mod tests {
 
     #[test]
     fn fixed_policy_defaults() {
-        let p = DrainPolicy::default_fixed();
+        let p = BatchPolicy::default_fixed();
         assert_eq!(p.batch_size(), 64);
         assert_eq!(p.timeout(), Duration::from_millis(1));
         assert!(!p.matches_preferred(8));
@@ -128,7 +125,7 @@ mod tests {
 
     #[test]
     fn adaptive_preferred_sizes() {
-        let p = DrainPolicy::default_adaptive();
+        let p = BatchPolicy::default_adaptive();
         assert!(p.matches_preferred(8));
         assert!(p.matches_preferred(16));
         assert!(p.matches_preferred(32));
@@ -139,15 +136,15 @@ mod tests {
 
     #[test]
     fn adaptive_timeout_is_max_queue_delay() {
-        let p = DrainPolicy::default_adaptive();
+        let p = BatchPolicy::default_adaptive();
         assert_eq!(p.timeout(), Duration::from_micros(200));
     }
 
     #[test]
     fn adaptive_ema_updates() {
-        let mut p = DrainPolicy::default_adaptive();
+        let mut p = BatchPolicy::default_adaptive();
         p.adapt(32);
-        if let DrainPolicy::Adaptive {
+        if let BatchPolicy::Adaptive {
             ema_arrival_rate, ..
         } = &p
         {
@@ -160,7 +157,7 @@ mod tests {
         for _ in 0..20 {
             p.adapt(16);
         }
-        if let DrainPolicy::Adaptive {
+        if let BatchPolicy::Adaptive {
             ema_arrival_rate, ..
         } = &p
         {
@@ -170,7 +167,7 @@ mod tests {
 
     #[test]
     fn fixed_adapt_is_noop() {
-        let mut p = DrainPolicy::default_fixed();
+        let mut p = BatchPolicy::default_fixed();
         p.adapt(100); // Should not panic or change anything
         assert_eq!(p.batch_size(), 64);
     }

@@ -13,7 +13,7 @@ from vertebra.cli.theme import (
     SUCCESS,
     SYM_ELLIPSIS,
     SYM_SUCCESS,
-    VertebraConsole,
+    Console,
     console,
     render_shutdown_blocks,
     render_startup_blocks,
@@ -29,7 +29,7 @@ def render_banner(
     port: int = 8000,
     workers: int = 1,
     log_level: str = "info",
-    vc: VertebraConsole | None = None,
+    vc: Console | None = None,
 ) -> None:
     """Render the startup banner to the terminal."""
     _ = log_level
@@ -74,7 +74,7 @@ def render_banner(
     render_startup_blocks(target)
 
 
-def render_shutdown(*, vc: VertebraConsole | None = None) -> None:
+def render_shutdown(*, vc: Console | None = None) -> None:
     """Render the shutdown display."""
     target = vc or console
     if not target.is_tty:

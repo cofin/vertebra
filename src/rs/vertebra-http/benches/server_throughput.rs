@@ -12,13 +12,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn bench_router_lookup(c: &mut Criterion) {
-    use vertebra_http::{route_table::RouteTable, router::NativeRouter};
+    use vertebra_http::{route_table::RouteTable, router::Router};
 
     let mut table = RouteTable::new();
     for i in 0..100 {
         table.insert("GET", &format!("/api/v1/resource/{}", i));
     }
-    let router = Arc::new(NativeRouter::from_entries(table.into_entries()).unwrap());
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
 
     let mut group = c.benchmark_group("router");
     group.throughput(Throughput::Elements(1));
@@ -34,12 +34,12 @@ fn bench_router_lookup(c: &mut Criterion) {
 
 fn bench_direct_dispatch(c: &mut Criterion) {
     use vertebra_http::{
-        collector::{BatchCollector, PendingResponse},
+        collector::{PendingResponse, RequestBatcher},
         config::ServerConfig,
         dispatcher::Dispatcher,
-        policy::DrainPolicy,
+        policy::BatchPolicy,
         route_table::RouteTable,
-        router::NativeRouter,
+        router::Router,
         server,
     };
 
@@ -52,14 +52,14 @@ fn bench_direct_dispatch(c: &mut Criterion) {
     let addr = rt.block_on(async {
         let mut table = RouteTable::new();
         table.insert("GET", "/hello");
-        let router = Arc::new(NativeRouter::from_entries(table.into_entries()).unwrap());
+        let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
 
         // Direct dispatch: no bridge, no arena
         let (dispatcher, mut direct_rx) = Dispatcher::new_direct(4096);
         let dispatcher = Arc::new(dispatcher);
 
         let (collector, collector_tx) =
-            BatchCollector::new(Arc::clone(&dispatcher), DrainPolicy::default_fixed(), 4096);
+            RequestBatcher::new(Arc::clone(&dispatcher), BatchPolicy::default_fixed(), 4096);
         tokio::spawn(collector.run());
 
         // Direct dispatch worker — responds via oneshot, no bridge
@@ -165,13 +165,13 @@ fn bench_direct_dispatch(c: &mut Criterion) {
 fn bench_bridge_dispatch(c: &mut Criterion) {
     use vertebra_core::bridge::{BatchBridge, BridgeResponse};
     use vertebra_http::{
-        collector::{BatchCollector, PendingResponse},
+        collector::{PendingResponse, RequestBatcher},
         config::ServerConfig,
         dispatcher::Dispatcher,
-        policy::DrainPolicy,
+        policy::BatchPolicy,
         response::encode_response_headers,
         route_table::RouteTable,
-        router::NativeRouter,
+        router::Router,
         server,
     };
 
@@ -184,12 +184,12 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
     let addr = rt.block_on(async {
         let mut table = RouteTable::new();
         table.insert("GET", "/hello");
-        let router = Arc::new(NativeRouter::from_entries(table.into_entries()).unwrap());
+        let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
 
         let _ = BatchBridge::init(512, 1_048_576, 4, 1);
         let dispatcher = Arc::new(Dispatcher::new());
         let (collector, collector_tx) =
-            BatchCollector::new(Arc::clone(&dispatcher), DrainPolicy::default_fixed(), 4096);
+            RequestBatcher::new(Arc::clone(&dispatcher), BatchPolicy::default_fixed(), 4096);
 
         tokio::spawn(collector.run());
 
@@ -315,13 +315,13 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
 fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
     use vertebra_core::bridge::BatchBridge;
     use vertebra_http::{
-        collector::{BatchCollector, PendingResponse},
+        collector::{PendingResponse, RequestBatcher},
         config::ServerConfig,
         dispatcher::Dispatcher,
-        policy::DrainPolicy,
+        policy::BatchPolicy,
         response::encode_response_headers,
         route_table::RouteTable,
-        router::NativeRouter,
+        router::Router,
         server,
     };
 
@@ -334,15 +334,15 @@ fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
     let addr = rt.block_on(async {
         let mut table = RouteTable::new();
         table.insert("GET", "/hello");
-        let router = Arc::new(NativeRouter::from_entries(table.into_entries()).unwrap());
+        let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
 
         // NOTE: BatchBridge is a global singleton — if bench_bridge_dispatch ran
         // first, this init will fail. That's fine; the existing bridge is reused.
         let _ = BatchBridge::init(512, 1_048_576, 4, 1);
         let dispatcher = Arc::new(Dispatcher::new());
-        let (collector, collector_tx) = BatchCollector::new(
+        let (collector, collector_tx) = RequestBatcher::new(
             Arc::clone(&dispatcher),
-            DrainPolicy::default_adaptive(),
+            BatchPolicy::default_adaptive(),
             4096,
         );
 

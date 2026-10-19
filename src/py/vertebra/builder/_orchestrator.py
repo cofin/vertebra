@@ -10,8 +10,8 @@ import os
 import socket
 from pathlib import Path
 
-from vertebra.builder._codegen._collector import RouteCollector
 from vertebra.builder._codegen._manifest import ManifestGenerator
+from vertebra.builder._codegen._metadata import RouteCollector
 from vertebra.builder._codegen._typescript import TypeScriptGenerator
 from vertebra.builder._codegen._zod import ZodGenerator
 from vertebra.builder._config import BuildConfig

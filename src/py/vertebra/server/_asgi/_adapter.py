@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 
 
 class AsgiAdapter:
-    """Drives an ASGI 3.0 application over a batch of VertebraRequests."""
+    """Drives an ASGI 3.0 application over a batch of Requests."""
 
     __slots__ = ("_app", "_mount_prefix")
 

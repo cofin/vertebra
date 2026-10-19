@@ -2,20 +2,20 @@
 
 import json
 
-from vertebra.builder._codegen._manifest import RouteManifest
+from vertebra.builder._codegen._manifest import ManifestGenerator
 from vertebra.builder._codegen._metadata import RouteCollector
-from vertebra.framework._app import VertebraApp
+from vertebra.framework._app import App
 
 
 def test_manifest_uses_route_metadata() -> None:
-    app = VertebraApp()
+    app = App()
 
     @app.get("/hello")
     def hello() -> str:
         return "world"
 
     routes = RouteCollector().collect(app)
-    output = RouteManifest().generate(routes)
+    output = ManifestGenerator().generate(routes)
     data = json.loads(output)
 
     assert data["version"] == 1
@@ -27,7 +27,7 @@ def test_manifest_uses_route_metadata() -> None:
 
 
 def test_manifest_handles_multiple_routes() -> None:
-    app = VertebraApp()
+    app = App()
 
     @app.get("/items")
     def list_items() -> list[str]:
@@ -38,7 +38,7 @@ def test_manifest_handles_multiple_routes() -> None:
         return name
 
     routes = RouteCollector().collect(app)
-    data = json.loads(RouteManifest().generate(routes))
+    data = json.loads(ManifestGenerator().generate(routes))
 
     assert len(data["routes"]) == 2
     assert "get.items" in data["routes"]

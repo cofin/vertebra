@@ -3,7 +3,7 @@
 //! Replaces the `_SCOPE_TEMPLATE.copy()` dict path in
 //! `server/_asgi/_scope.py` with a `#[pyclass(mapping)]` that materializes
 //! known keys on demand using a fixed-size inline slot table and bitmask.
-//! Keeps the `VertebraRequest` arena alive via an `Arc<BatchSnapshot>` so
+//! Keeps the `Request` arena alive via an `Arc<BatchSnapshot>` so
 //! path/query/headers slices stay valid for as long as middleware holds the scope.
 
 use std::collections::HashMap;
@@ -209,7 +209,7 @@ impl AsgiScope {
         live_known + extra_len
     }
 
-    fn __iter__(slf: PyRef<'_, Self>, py: Python<'_>) -> PyResult<Py<AsgiScopeKeyIter>> {
+    fn __iter__(slf: PyRef<'_, Self>, py: Python<'_>) -> PyResult<Py<AsgiScopeIterator>> {
         let extras = slf
             .extras
             .as_ref()
@@ -217,7 +217,7 @@ impl AsgiScope {
             .unwrap_or_default();
         Py::new(
             py,
-            AsgiScopeKeyIter {
+            AsgiScopeIterator {
                 deleted_known: slf.deleted_known,
                 known_pos: 0,
                 extras,
@@ -354,8 +354,8 @@ impl AsgiScope {
 }
 
 /// Iterator over the scope's live keys.
-#[pyclass]
-pub struct AsgiScopeKeyIter {
+#[pyclass(name = "AsgiScopeIterator")]
+pub struct AsgiScopeIterator {
     deleted_known: u16,
     known_pos: usize,
     extras: Vec<String>,
@@ -363,7 +363,7 @@ pub struct AsgiScopeKeyIter {
 }
 
 #[pymethods]
-impl AsgiScopeKeyIter {
+impl AsgiScopeIterator {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
@@ -385,6 +385,3 @@ impl AsgiScopeKeyIter {
         }
     }
 }
-
-/// Domain-oriented alias for [`AsgiScopeKeyIter`].
-pub type AsgiScopeIterator = AsgiScopeKeyIter;

@@ -31,9 +31,9 @@ fn extract_header_entry(item: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, Vec<u8>)>
     Ok((extract_header_bytes(&k_obj)?, extract_header_bytes(&v_obj)?))
 }
 
-#[pyclass(name = "VertebraResponse")]
+#[pyclass(name = "Response")]
 #[derive(Clone)]
-pub struct VertebraResponse {
+pub struct Response {
     pub status: u16,
     pub body: Bytes,
     pub headers: Vec<(Vec<u8>, Vec<u8>)>,
@@ -41,7 +41,7 @@ pub struct VertebraResponse {
 }
 
 #[pymethods]
-impl VertebraResponse {
+impl Response {
     #[new]
     #[pyo3(signature = (status, body=None, headers=None, request_id=0))]
     fn new(
@@ -129,7 +129,7 @@ impl VertebraResponse {
 
     fn __repr__(&self) -> String {
         format!(
-            "VertebraResponse(status={}, body_len={}, request_id={})",
+            "Response(status={}, body_len={}, request_id={})",
             self.status,
             self.body.len(),
             self.request_id,
@@ -137,7 +137,7 @@ impl VertebraResponse {
     }
 }
 
-impl VertebraResponse {
+impl Response {
     pub fn get_headers(&self) -> &[(Vec<u8>, Vec<u8>)] {
         &self.headers
     }
@@ -146,6 +146,3 @@ impl VertebraResponse {
         &self.body
     }
 }
-
-/// Domain-oriented alias for [`VertebraResponse`].
-pub type Response = VertebraResponse;

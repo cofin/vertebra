@@ -2,15 +2,15 @@
 
 use vertebra_http::{
     route_table::{RouteTable, handler_id},
-    router::NativeRouter,
+    router::Router,
 };
 
-fn build_router(routes: &[(&str, &str)]) -> NativeRouter {
+fn build_router(routes: &[(&str, &str)]) -> Router {
     let mut table = RouteTable::new();
     for (method, path) in routes {
         table.insert(method, path);
     }
-    NativeRouter::from_entries(table.into_entries()).unwrap()
+    Router::from_entries(table.into_entries()).unwrap()
 }
 
 #[test]

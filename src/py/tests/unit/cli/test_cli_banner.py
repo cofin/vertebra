@@ -9,19 +9,19 @@ import pytest
 from vertebra.cli import theme
 from vertebra.cli.banner.logos import LOGO_COMPACT, LOGO_FULL, get_logo
 from vertebra.cli.banner.renderer import render_banner, render_shutdown
-from vertebra.cli.theme import VertebraConsole
+from vertebra.cli.theme import Console
 
 
-def _make_tty_console() -> tuple[VertebraConsole, io.StringIO]:
-    """Create a TTY-enabled ``VertebraConsole`` backed by ``StringIO``."""
+def _make_tty_console() -> tuple[Console, io.StringIO]:
+    """Create a TTY-enabled ``Console`` backed by ``StringIO``."""
     buf = io.StringIO()
-    return VertebraConsole(file=buf, force_terminal=True), buf
+    return Console(file=buf, force_terminal=True), buf
 
 
-def _make_pipe_console() -> tuple[VertebraConsole, io.StringIO]:
-    """Create a non-TTY ``VertebraConsole`` backed by ``StringIO``."""
+def _make_pipe_console() -> tuple[Console, io.StringIO]:
+    """Create a non-TTY ``Console`` backed by ``StringIO``."""
     buf = io.StringIO()
-    return VertebraConsole(file=buf, force_terminal=False), buf
+    return Console(file=buf, force_terminal=False), buf
 
 
 def test_full_logo_is_two_lines() -> None:

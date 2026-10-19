@@ -40,7 +40,6 @@ __all__ = (
     "NumpyArrayStub",
     "ORJSON_INSTALLED",
     "OptionalDependency",
-    "OptionalDependencyFlag",
     "PYDANTIC_INSTALLED",
     "RawHeaders",
     "Struct",
@@ -107,9 +106,6 @@ class OptionalDependency:
     def __repr__(self) -> str:
         status = "available" if module_available(self.module_name) else "missing"
         return f"OptionalDependency(module='{self.module_name}', status='{status}')"
-
-
-OptionalDependencyFlag = OptionalDependency
 
 
 class EmptyType(Enum):

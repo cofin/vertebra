@@ -137,4 +137,4 @@ class RealtimeChannel {
   }
 }
 
-export { RealtimeChannel, RealtimeChannel as VertebraWebSocket };
+export { RealtimeChannel };

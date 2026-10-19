@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 
 __all__ = (
     "MissingDependencyError",
-    "_import_app",
     "dependency_flag",
     "ensure_advanced_alchemy",
     "ensure_msgspec",
@@ -46,9 +45,6 @@ def import_app(app_path: str) -> Any:
     module_path, attr = app_path.rsplit(":", 1)
     module = importlib.import_module(module_path)
     return getattr(module, attr)
-
-
-_import_app = import_app
 
 
 def import_optional(module_name: str) -> Any | None:

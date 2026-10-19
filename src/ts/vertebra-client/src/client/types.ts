@@ -13,7 +13,7 @@ interface ClientConfig {
   wsURL?: string;
 }
 
-export type { ClientConfig, ClientConfig as VertebraConfig };
+export type { ClientConfig };
 
 export interface RetryConfig {
   /** Maximum number of retry attempts. Default: 3. */

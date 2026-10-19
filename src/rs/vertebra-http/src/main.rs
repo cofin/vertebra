@@ -1,7 +1,7 @@
 //! `vertebra-server` binary entrypoint.
 //!
 //! With the `python` feature (default), embeds a Python worker thread that
-//! imports the user's VertebraApp, extracts routes, and runs the batch worker
+//! imports the user's App, extracts routes, and runs the batch worker
 //! loop. Without it, serves hardcoded test routes.
 
 use std::sync::Arc;
@@ -21,25 +21,25 @@ use tracing_subscriber::EnvFilter;
 use vertebra_core::bridge::BatchBridge;
 
 use vertebra_http::{
-    collector::{BatchCollector, PendingResponse},
+    collector::{PendingResponse, RequestBatcher},
     config::ServerConfig,
     dispatcher::Dispatcher,
     response::encode_response_headers,
     route_table::RouteTable,
-    router::NativeRouter,
+    router::Router,
     server,
 };
 
-/// Extract routes from a Python VertebraApp and build the Rust RouteTable.
+/// Extract routes from a Python App and build the Rust RouteTable.
 #[cfg(feature = "python")]
 fn build_route_table_from_app(py: Python<'_>, app: &Bound<'_, PyAny>) -> PyResult<RouteTable> {
     let mut table = RouteTable::new();
 
-    // If the app is a raw ASGI function/callable instead of a VertebraApp, wrap it.
+    // If the app is a raw ASGI function/callable instead of an App, wrap it.
     let app_obj = if app.getattr("handler_index").is_err() && app.is_callable() {
         info!("wrapping raw callable app in ASGI adapter");
         let app_mod = py.import("vertebra.framework._app")?;
-        let wrapped = app_mod.getattr("VertebraApp")?.call0()?;
+        let wrapped = app_mod.getattr("App")?.call0()?;
         wrapped.getattr("mount")?.call1(("/", app))?;
         wrapped
     } else {
@@ -114,10 +114,10 @@ fn spawn_python_worker(app_path: String) {
                 let module = py.import(parts[0])?;
                 let app = module.getattr(parts[1])?;
 
-                // If the app is a raw ASGI function/callable instead of a VertebraApp, wrap it.
+                // If the app is a raw ASGI function/callable instead of an App, wrap it.
                 let app_obj = if app.getattr("handler_index").is_err() && app.is_callable() {
                     let app_mod = py.import("vertebra.framework._app")?;
-                    let wrapped = app_mod.getattr("VertebraApp")?.call0()?;
+                    let wrapped = app_mod.getattr("App")?.call0()?;
                     wrapped.getattr("mount")?.call1(("/", &app))?;
                     wrapped
                 } else {
@@ -211,7 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         t
     };
 
-    let router = Arc::new(NativeRouter::from_entries(table.into_entries())?);
+    let router = Arc::new(Router::from_entries(table.into_entries())?);
     info!("route table built");
 
     // --- Worker spawning + Dispatcher setup ---
@@ -294,9 +294,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Shard the collector to break the single-threaded bottleneck.
     // 8 shards provides better scale for many-core systems.
     let shard_count = 8;
-    let collector_shards = BatchCollector::spawn_pool(
+    let collector_shards = RequestBatcher::spawn_pool(
         Arc::clone(&dispatcher),
-        vertebra_http::policy::DrainPolicy::default_adaptive(),
+        vertebra_http::policy::BatchPolicy::default_adaptive(),
         shard_count,
         16384,
     );

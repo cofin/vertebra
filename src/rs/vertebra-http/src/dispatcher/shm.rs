@@ -17,13 +17,13 @@ use super::types::{
     worker_ring_has_capacity,
 };
 use crate::collector::Batch;
-use crate::correlation::CorrelationSlab;
+use crate::correlation::InFlightRequests;
 
 /// SharedMemory dispatcher with round-robin routing and sharded O(1) correlation.
 pub struct ShmDispatcher {
     workers: Vec<WorkerState>,
     next_worker: AtomicUsize,
-    correlation_shards: Vec<Mutex<CorrelationSlab>>,
+    correlation_shards: Vec<Mutex<InFlightRequests>>,
     shard_mask: usize,
 }
 
@@ -43,7 +43,7 @@ impl ShmDispatcher {
         let shard_capacity = max_inflight / shard_count;
 
         let correlation_shards = (0..shard_count)
-            .map(|_| Mutex::new(CorrelationSlab::new(shard_capacity)))
+            .map(|_| Mutex::new(InFlightRequests::new(shard_capacity)))
             .collect();
 
         let this = Arc::new(Self {
@@ -213,7 +213,7 @@ impl ShmDispatcher {
     }
 
     /// Access a specific correlation shard.
-    pub fn correlation_shard(&self, shard_idx: usize) -> &Mutex<CorrelationSlab> {
+    pub fn correlation_shard(&self, shard_idx: usize) -> &Mutex<InFlightRequests> {
         &self.correlation_shards[shard_idx]
     }
 

@@ -1,14 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { HttpClient, VertebraClient } from "../../src/client/client";
+import { HttpClient } from "../../src/client/client";
 import { TimeoutError } from "../../src/client/errors";
 import { computeBackoffDelay } from "../../src/client/retry";
-import { RealtimeChannel, VertebraWebSocket } from "../../src/client/ws";
-import { HotReloadClient, VertebraHmrClient } from "../../src/hmr/index";
+import { RealtimeChannel } from "../../src/client/ws";
+import { HotReloadClient } from "../../src/hmr/index";
 import { initVertebraHtmx } from "../../src/htmx/index";
 import * as rootExports from "../../src/index";
 import { QueryCache } from "../../src/react/cache";
 
-describe("HttpClient / VertebraClient", () => {
+describe("HttpClient", () => {
   let client: HttpClient;
 
   beforeEach(() => {
@@ -16,14 +16,10 @@ describe("HttpClient / VertebraClient", () => {
     vi.stubGlobal("fetch", vi.fn());
   });
 
-  it("exports canonical domain names and backwards-compatible Vertebra* aliases", () => {
-    expect(HttpClient).toBe(VertebraClient);
-    expect(RealtimeChannel).toBe(VertebraWebSocket);
-    expect(HotReloadClient).toBe(VertebraHmrClient);
-    expect(rootExports.HttpClient).toBe(rootExports.VertebraClient);
-    expect(rootExports.RealtimeChannel).toBe(rootExports.VertebraWebSocket);
-    expect(rootExports.SessionStore).toBe(rootExports.VertebraStore);
-    expect(rootExports.HotReloadClient).toBe(rootExports.VertebraHmrClient);
+  it("exports canonical domain names from root", () => {
+    expect(rootExports.HttpClient).toBe(HttpClient);
+    expect(rootExports.RealtimeChannel).toBe(RealtimeChannel);
+    expect(rootExports.HotReloadClient).toBe(HotReloadClient);
   });
 
   it("interpolates path parameters correctly", async () => {
@@ -58,7 +54,7 @@ describe("HttpClient / VertebraClient", () => {
 
   it("throws TimeoutError on abort", async () => {
     // Disable retries so abort throws immediately
-    const noRetryClient = new VertebraClient({
+    const noRetryClient = new HttpClient({
       baseURL: "http://api.test",
       retry: { maxAttempts: 0 },
     });
@@ -74,7 +70,7 @@ describe("HttpClient / VertebraClient", () => {
 
   it("handles non-JSON error responses", async () => {
     // Disable retries — 500 is retryable by default
-    const noRetryClient = new VertebraClient({
+    const noRetryClient = new HttpClient({
       baseURL: "http://api.test",
       retry: { maxAttempts: 0 },
     });
@@ -105,7 +101,7 @@ describe("HttpClient / VertebraClient", () => {
   });
 
   it("does not retry non-retryable status codes", async () => {
-    const noRetryClient = new VertebraClient({
+    const noRetryClient = new HttpClient({
       baseURL: "http://api.test",
       retry: { maxAttempts: 0 },
     });

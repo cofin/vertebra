@@ -6,7 +6,7 @@ import msgspec
 
 from vertebra.builder._codegen._metadata import RouteCollector
 from vertebra.builder._codegen._typescript import TypeScriptGenerator, format_typescript
-from vertebra.framework._app import VertebraApp
+from vertebra.framework._app import App
 
 
 class User(msgspec.Struct):
@@ -20,7 +20,7 @@ class Payload:
 
 
 def test_generate_typescript_from_routes() -> None:
-    app = VertebraApp()
+    app = App()
 
     @app.get("/users/{user_id}")
     def get_user(user_id: int) -> User:
@@ -37,7 +37,7 @@ def test_generate_typescript_from_routes() -> None:
 
 
 def test_generate_typescript_with_dataclass_body() -> None:
-    app = VertebraApp()
+    app = App()
 
     @app.post("/payload")
     def create_payload(payload: Payload) -> Payload:

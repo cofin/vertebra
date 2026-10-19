@@ -10,7 +10,7 @@ from vertebra.utils.serializers._json import encode_json
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-__all__ = ("ManifestGenerator", "RouteManifest")
+__all__ = ("ManifestGenerator",)
 
 
 class ManifestGenerator:
@@ -31,6 +31,3 @@ class ManifestGenerator:
             }
         payload = {"routes": route_entries, "version": 1}
         return msgspec.json.format(encode_json(payload, as_bytes=True), indent=2).decode("utf-8")
-
-
-RouteManifest = ManifestGenerator

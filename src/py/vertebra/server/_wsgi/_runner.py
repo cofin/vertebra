@@ -12,12 +12,12 @@ from vertebra.server._wsgi._adapter import WsgiAdapter, WsgiError
 
 __all__ = ("WsgiRunner",)
 
-_NativeVertebraResponse: Any = None
+_NativeResponse: Any = None
 _get_batch: Any = None
 _submit_results: Any = None
 with contextlib.suppress(ImportError):
     from vertebra._vertebra import (
-        VertebraResponse as _NativeVertebraResponse,
+        Response as _NativeResponse,
     )
     from vertebra._vertebra import (
         get_batch as _get_batch,
@@ -105,8 +105,8 @@ class WsgiRunner:
 
     @staticmethod
     def _default_error(*_args: Any) -> Any:
-        if _NativeVertebraResponse is not None:
-            return _NativeVertebraResponse(status=500, body=b"Internal Server Error")
-        from vertebra._vertebra import VertebraResponse
+        if _NativeResponse is not None:
+            return _NativeResponse(status=500, body=b"Internal Server Error")
+        from vertebra._vertebra import Response
 
-        return VertebraResponse(status=500, body=b"Internal Server Error")
+        return Response(status=500, body=b"Internal Server Error")

@@ -23,9 +23,9 @@ import os
 
 from vertebra.framework._app import App
 from vertebra.server._native import run_worker
-from vertebra.utils.module_loader import _import_app, import_app
+from vertebra.utils.module_loader import import_app
 
-__all__ = ("_import_app", "import_app", "main")
+__all__ = ("import_app", "main")
 
 
 def main() -> None:
@@ -37,7 +37,7 @@ def main() -> None:
     logger = logging.getLogger(f"vertebra.worker.{worker_id}")
     logger.info("starting, app=%r, mode=%s", app_path, transport_mode)
 
-    app = _import_app(app_path)
+    app = import_app(app_path)
 
     if os.environ.get("VERTEBRA_NATIVE") == "0":
         logger.info("wrapping raw app in ASGI adapter")
