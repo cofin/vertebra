@@ -6,14 +6,14 @@ import os
 from collections.abc import Callable, Iterable
 from typing import Any, cast
 
-__all__ = [
+__all__ = (
     "DjangoWsgiApp",
     "FlaskWsgiApp",
     "LargeBodyBypass",
     "configure_django",
     "create_flask_app",
     "wrap_with_error_handler",
-]
+)
 
 log = logging.getLogger(__name__)
 

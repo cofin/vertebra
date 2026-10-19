@@ -7,6 +7,22 @@ import msgspec
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
+__all__ = (
+    "AnnotatedType",
+    "ArrayType",
+    "GenericType",
+    "LiteralType",
+    "NamedTypeRef",
+    "ObjectType",
+    "PrimitiveType",
+    "RawType",
+    "StreamType",
+    "TupleType",
+    "TypeNode",
+    "UnionType",
+    "UnknownType",
+)
+
 
 class TypeNode(msgspec.Struct, frozen=True, tag_field="_type", tag=True):
     """Base class for route codegen IR nodes."""
@@ -137,20 +153,3 @@ class StreamType(TypeNode, frozen=True, tag="stream"):
 
     def iter_children(self) -> "Iterable[TypeNode]":
         return (self.item,)
-
-
-__all__ = (
-    "AnnotatedType",
-    "ArrayType",
-    "GenericType",
-    "LiteralType",
-    "NamedTypeRef",
-    "ObjectType",
-    "PrimitiveType",
-    "RawType",
-    "StreamType",
-    "TupleType",
-    "TypeNode",
-    "UnionType",
-    "UnknownType",
-)

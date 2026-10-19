@@ -1,5 +1,4 @@
-import { VertebraClient } from "../client/client";
-import type { VertebraConfig } from "../client/types";
+import type { ClientConfig } from "../client/types";
 
 /**
  * Initialize HTMX 2 integration for Vertebra.
@@ -7,9 +6,7 @@ import type { VertebraConfig } from "../client/types";
  * Auto-intercepts HTMX requests to inject Vertebra headers
  * and handle JSON bodies for mutations.
  */
-export function initVertebraHtmx(config: VertebraConfig) {
-  const client = new VertebraClient(config);
-
+export function initVertebraHtmx(config: ClientConfig): void {
   if (typeof document === "undefined") return;
 
   document.addEventListener("htmx:configRequest", (event: any) => {
@@ -30,6 +27,4 @@ export function initVertebraHtmx(config: VertebraConfig) {
   document.addEventListener("htmx:responseError", (event: any) => {
     console.error("[vertebra:htmx] request failed:", event.detail);
   });
-
-  return client;
 }

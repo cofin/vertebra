@@ -146,6 +146,7 @@ test: rs-test py-test ts-test                       ## Run all tests (Rust, Pyth
 .PHONY: coverage
 coverage:                                           ## Run tests with coverage report
 	@uv run pytest src/py/tests --cov --quiet
+	@uv run coverage xml >/dev/null 2>&1
 	@uv run coverage html >/dev/null 2>&1
 	@echo "${OK} Coverage report: htmlcov/index.html"
 
@@ -160,11 +161,25 @@ lint: ts-lint                                       ## Format and lint everythin
 	@uv run ruff format src/py/vertebra src/py/tests
 	@echo "${INFO} Linting and fixing Rust (Fmt & Clippy)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && cargo fmt)
+	@(cd src/rs && cargo fmt --all)
 	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,compression -- -D warnings)
 	@echo "${INFO} Running type checks (Mypy)..."
 	@uv run mypy src/py/vertebra
 	@echo "${OK} Lint complete"
+
+.PHONY: lint-all
+lint-all:                                           ## Check formatting, linting, and types without mutating files (CI)
+	@echo "${INFO} Checking TS package (Biome)..."
+	@(cd src/ts/vertebra-client && bunx biome check .)
+	@echo "${INFO} Checking Python (Ruff & Mypy)..."
+	@uv run ruff check src/py/vertebra src/py/tests
+	@uv run ruff format --check src/py/vertebra src/py/tests
+	@uv run mypy src/py/vertebra
+	@echo "${INFO} Checking Rust (Fmt & Clippy)..."
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@(cd src/rs && cargo fmt --all -- --check)
+	@(cd src/rs && cargo clippy --workspace --all-targets --features tls,compression -- -D warnings)
+	@echo "${OK} All lint checks passed"
 
 .PHONY: check
 check: lint test coverage                           ## Everything: lint, type check, all tests, coverage
@@ -176,7 +191,7 @@ check: lint test coverage                           ## Everything: lint, type ch
 .PHONY: bench
 bench: build                                        ## Run benchmarks (use TARGETS= and SCENARIOS= to customize)
 	@echo "${INFO} Running benchmarks..."
-	@uv run python -m tools.benchmarks run \
+	@uv run --group bench python -m tools.benchmarks run \
 		-t $${TARGETS:-vtb} \
 		-s $${SCENARIOS:-default} \
 		$${BENCH_ARGS:-}
@@ -185,7 +200,7 @@ bench: build                                        ## Run benchmarks (use TARGE
 .PHONY: bench-all
 bench-all: build                                    ## Run ALL benchmarks (all targets, all scenarios)
 	@echo "${INFO} Running full benchmark suite..."
-	@uv run python -m tools.benchmarks run \
+	@uv run --group bench python -m tools.benchmarks run \
 		-t all \
 		-s full \
 		$${BENCH_ARGS:-}
@@ -203,13 +218,13 @@ bench-ft:                                           ## Benchmark with Python 3.1
 		--manifest-path src/rs/Cargo.toml \
 		--release --target-dir src/rs/target-ft 2>&1 | tail -3
 	@echo "${INFO} Running free-threaded benchmarks..."
-	@uv run python -m tools.benchmarks run -t freethreaded -s $${SCENARIOS:-multiworker} $${BENCH_ARGS:-}
+	@uv run --group bench python -m tools.benchmarks run -t freethreaded -s $${SCENARIOS:-multiworker} $${BENCH_ARGS:-}
 	@echo "${OK} Free-threaded benchmarks complete"
 
 .PHONY: bench-report
 bench-report:                                       ## Show latest benchmark report
-	@uv run python -m tools.benchmarks report
+	@uv run --group bench python -m tools.benchmarks report
 
 .PHONY: bench-diff
 bench-diff:                                         ## Compare latest benchmark run vs previous
-	@uv run python -m tools.benchmarks compare
+	@uv run --group bench python -m tools.benchmarks compare

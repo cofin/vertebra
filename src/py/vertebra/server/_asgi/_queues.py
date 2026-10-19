@@ -3,7 +3,13 @@
 import dataclasses
 from typing import Any
 
-__all__ = ["AsgiResponse", "ReceiveChannel", "SendCollector"]
+__all__ = (
+    "AsgiReceive",
+    "AsgiResponse",
+    "AsgiSend",
+    "ReceiveChannel",
+    "SendCollector",
+)
 
 _STATE_BODY = 0
 _STATE_DISCONNECT = 1
@@ -20,28 +26,32 @@ class AsgiResponse:
     request_id: int = 0
 
 
-class ReceiveChannel:
+class AsgiReceive:
     """Async callable that delivers ASGI http.request then http.disconnect."""
 
-    __slots__ = ("_body", "_state")
+    __slots__ = ("_request", "_state")
 
     def __init__(self, request: Any) -> None:
-        body = request.body
-        self._body: bytes = body if isinstance(body, bytes) else bytes(body or b"")
+        self._request = request
         self._state: int = _STATE_BODY
 
     async def __call__(self) -> dict[str, Any]:
         if self._state == _STATE_BODY:
             self._state = _STATE_DISCONNECT
+            raw_body = self._request.body
+            body = raw_body if isinstance(raw_body, bytes) else bytes(raw_body or b"")
             return {
                 "type": "http.request",
-                "body": self._body,
+                "body": body,
                 "more_body": False,
             }
         return _DISCONNECT_MSG
 
 
-class SendCollector:
+ReceiveChannel = AsgiReceive
+
+
+class AsgiSend:
     """Async callable that collects ASGI send messages into a response.
 
     Optimized for the common single-chunk case by storing the first body chunk
@@ -83,5 +93,8 @@ class SendCollector:
                         self._extra_chunks = [self._body]
                     self._extra_chunks.append(chunk if isinstance(chunk, bytes) else bytes(chunk))
         else:
-            msg = f"SendCollector received unexpected ASGI message type: {msg_type!r}"
+            msg = f"AsgiSend received unexpected ASGI message type: {msg_type!r}"
             raise RuntimeError(msg)
+
+
+SendCollector = AsgiSend

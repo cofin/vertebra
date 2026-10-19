@@ -7,14 +7,14 @@ from dataclasses import fields as dataclasses_fields
 from dataclasses import is_dataclass as dataclasses_is_dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
+from vertebra import _typing
 from vertebra._typing import (
     ATTRS_INSTALLED,
     MSGSPEC_INSTALLED,
     PYDANTIC_INSTALLED,
-    BaseModel,
+    UNSET,
     DataclassProtocol,
-    Struct,
-    attrs_has,
+    Empty,
 )
 
 if TYPE_CHECKING:
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from vertebra._typing import BaseModelStub, StructStub
 
 __all__ = (
+    "DictProtocol",
     "dataclass_to_dict",
     "has_dict_attribute",
     "is_attrs_instance",
@@ -57,29 +58,31 @@ def is_pydantic_model(obj: Any) -> "TypeGuard[BaseModelStub]":
     """Check if a value is a pydantic model class or instance."""
     if not PYDANTIC_INSTALLED:
         return False
+    base_model = _typing.BaseModel
     if isinstance(obj, type):
         try:
-            return issubclass(obj, BaseModel)
+            return issubclass(obj, base_model)
         except TypeError:
             return False
-    return isinstance(obj, BaseModel)
+    return isinstance(obj, base_model)
 
 
 def is_msgspec_struct(obj: Any) -> "TypeGuard[StructStub]":
     """Check if a value is a msgspec struct class or instance."""
     if not MSGSPEC_INSTALLED:
         return False
+    struct_type = _typing.Struct
     if isinstance(obj, type):
         try:
-            return issubclass(obj, Struct)
+            return issubclass(obj, struct_type)
         except TypeError:
             return False
-    return isinstance(obj, Struct)
+    return isinstance(obj, struct_type)
 
 
 def is_attrs_instance(obj: Any) -> bool:
     """Check if a value is an attrs class instance."""
-    return bool(ATTRS_INSTALLED) and attrs_has(obj.__class__)
+    return bool(ATTRS_INSTALLED) and _typing.attrs_has(obj.__class__)
 
 
 def is_dict(obj: Any) -> "TypeGuard[dict[str, Any]]":
@@ -104,7 +107,7 @@ def dataclass_to_dict(
         value = getattr(obj, field.name)
         if exclude_none and value is None:
             continue
-        if exclude_empty and value is None:
+        if exclude_empty and (value is Empty or value is UNSET):
             continue
 
         if is_dataclass_instance(value) and convert_nested:

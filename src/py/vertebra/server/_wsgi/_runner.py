@@ -10,6 +10,8 @@ from typing import Any
 
 from vertebra.server._wsgi._adapter import WsgiAdapter, WsgiError
 
+__all__ = ("WsgiRunner",)
+
 _NativeVertebraResponse: Any = None
 _get_batch: Any = None
 _submit_results: Any = None
@@ -23,8 +25,6 @@ with contextlib.suppress(ImportError):
     from vertebra._vertebra import (
         submit_results as _submit_results,
     )
-
-__all__ = ["WsgiRunner"]
 
 log = logging.getLogger(__name__)
 

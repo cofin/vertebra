@@ -4,6 +4,8 @@ use bytes::Bytes;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
 
+pub(crate) use vertebra_core::transport::iter_raw_headers;
+
 /// Decode raw compact headers directly into an ASGI-compliant list of `(bytes, bytes)` tuples
 /// with lowercased header names, avoiding intermediate `Bytes` or `String` allocations.
 pub(crate) fn decode_asgi_headers<'py>(
@@ -11,27 +13,7 @@ pub(crate) fn decode_asgi_headers<'py>(
     data: &[u8],
 ) -> PyResult<Bound<'py, PyList>> {
     let mut tuples: Vec<Bound<'py, PyAny>> = Vec::with_capacity(8);
-    let mut pos = 0;
-    while pos < data.len() {
-        let name_len = data[pos] as usize;
-        pos += 1;
-        if pos + name_len > data.len() {
-            break;
-        }
-        let name = &data[pos..pos + name_len];
-        pos += name_len;
-
-        if pos + 2 > data.len() {
-            break;
-        }
-        let value_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-        pos += 2;
-        if pos + value_len > data.len() {
-            break;
-        }
-        let value = &data[pos..pos + value_len];
-        pos += value_len;
-
+    for (name, value) in iter_raw_headers(data) {
         let name_py = if name.iter().any(|b| b.is_ascii_uppercase()) {
             let lower = name.to_ascii_lowercase();
             PyBytes::new(py, &lower)
@@ -43,37 +25,6 @@ pub(crate) fn decode_asgi_headers<'py>(
         tuples.push(t.into_any());
     }
     PyList::new(py, &tuples)
-}
-
-/// Iterate raw `(name, value)` byte slices from compact header encoding.
-#[inline]
-pub(crate) fn iter_raw_headers(data: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
-    let mut pos = 0;
-    std::iter::from_fn(move || {
-        if pos >= data.len() {
-            return None;
-        }
-        let name_len = data[pos] as usize;
-        pos += 1;
-        if pos + name_len > data.len() {
-            return None;
-        }
-        let name = &data[pos..pos + name_len];
-        pos += name_len;
-
-        if pos + 2 > data.len() {
-            return None;
-        }
-        let value_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-        pos += 2;
-        if pos + value_len > data.len() {
-            return None;
-        }
-        let value = &data[pos..pos + value_len];
-        pos += value_len;
-
-        Some((name, value))
-    })
 }
 
 #[pyclass(name = "VertebraHeaders", frozen, from_py_object)]
@@ -214,3 +165,9 @@ impl VertebraHeadersIter {
         Some(name)
     }
 }
+
+/// Domain-oriented alias for [`VertebraHeaders`].
+pub type Headers = VertebraHeaders;
+
+/// Domain-oriented alias for [`VertebraHeadersIter`].
+pub type HeadersIterator = VertebraHeadersIter;

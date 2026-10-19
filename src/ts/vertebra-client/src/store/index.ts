@@ -2,7 +2,7 @@
  * Session Store following the Google ADK pattern.
  * Provides lifecycle-aware state management with persistence prefixes.
  */
-export class VertebraStore {
+class SessionStore {
   private state: Map<string, any> = new Map();
   private listeners: Set<(key: string, value: any) => void> = new Set();
 
@@ -86,4 +86,6 @@ export class VertebraStore {
 }
 
 // Global singleton instance
-export const store = new VertebraStore();
+export const store = new SessionStore();
+
+export { SessionStore, SessionStore as VertebraStore };

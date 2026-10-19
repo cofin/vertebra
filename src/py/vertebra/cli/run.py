@@ -65,6 +65,7 @@ def run(
 
     env = os.environ.copy()
     env["VERTEBRA_APP"] = app
+    env["VERTEBRA_PYTHON_BIN"] = sys.executable
 
     cwd = os.getcwd()
     existing = env.get("PYTHONPATH", "")

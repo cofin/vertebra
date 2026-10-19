@@ -52,7 +52,9 @@ def dev(
     os.environ["VERTEBRA_DEV"] = "1"
 
     env: dict[str, Any] = os.environ.copy()
+    env["VERTEBRA_APP"] = app
     env["VERTEBRA_PYTHON_APP"] = app
+    env["VERTEBRA_PYTHON_BIN"] = sys.executable
     env["VERTEBRA_HOST"] = host
     env["VERTEBRA_PORT"] = str(port)
     env["VERTEBRA_WORKERS"] = "1"
@@ -66,7 +68,6 @@ def dev(
 
     try:
         server_cmd = build_server_command()
-        server_cmd.extend(["--python", sys.executable])
     except SystemExit as e:
         raise CLIError(
             str(e), hint="Ensure vertebra-server binary is available/built.", exit_code=EXIT_CONFIG_ERROR

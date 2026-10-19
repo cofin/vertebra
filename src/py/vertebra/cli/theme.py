@@ -1,7 +1,7 @@
 """Centralized theme module for Vertebra CLI.
 
 Single source of truth for colors, symbols, and styled console output.
-All CLI output should go through the ``console`` singleton or ``VertebraConsole``.
+All CLI output should go through the ``console`` singleton or ``Console``.
 """
 
 import os
@@ -10,10 +10,13 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Any
 
-from rich.console import Console, RenderableType
+from rich.console import Console as RichConsole
+from rich.console import RenderableType
 
 __all__ = (
     "ACCENT",
+    "Console",
+    "ContentProvider",
     "ERROR",
     "MUTED",
     "SECONDARY",
@@ -24,9 +27,8 @@ __all__ = (
     "SYM_INFO",
     "SYM_SUCCESS",
     "SYM_WARNING",
-    "WARNING",
-    "ContentProvider",
     "VertebraConsole",
+    "WARNING",
     "console",
     "get_shutdown_blocks",
     "get_startup_blocks",
@@ -52,14 +54,11 @@ SYM_ELLIPSIS = "…"
 
 ContentProvider = Callable[[], str | RenderableType]
 
-_STARTUP_BLOCKS: list[tuple[str, Callable[[], Any]]] = []
-_SHUTDOWN_BLOCKS: list[tuple[str, Callable[[], Any]]] = []
 
-
-class VertebraConsole:
+class Console:
     """Semantic console wrapper for Vertebra CLI output.
 
-    Wraps ``rich.Console`` with semantic methods (``success``, ``error``, etc.)
+    Wraps ``rich.console.Console`` with semantic methods (``success``, ``error``, etc.)
     that produce consistent, symbol-driven output. All output goes to stderr
     to keep stdout clean for piping.
     """
@@ -74,14 +73,14 @@ class VertebraConsole:
     ) -> None:
         no_color = os.environ.get("NO_COLOR")
         if no_color is not None:
-            self._console = Console(
+            self._console = RichConsole(
                 file=file or sys.stderr,
                 no_color=True,
                 force_terminal=force_terminal,
                 highlight=False,
             )
         else:
-            self._console = Console(
+            self._console = RichConsole(
                 file=file or sys.stderr,
                 force_terminal=force_terminal,
                 highlight=False,
@@ -124,7 +123,7 @@ class VertebraConsole:
         self._console.print()
 
     def raw(self, *args: Any, **kwargs: Any) -> None:
-        """Pass-through to the underlying ``Console.print``."""
+        """Pass-through to the underlying ``RichConsole.print``."""
         self._console.print(*args, **kwargs)
 
     def status(self, msg: str) -> AbstractContextManager[Any]:
@@ -138,16 +137,7 @@ class VertebraConsole:
         return _NoopContext()
 
 
-class _NoopContext:
-    """Minimal context manager that performs no action."""
-
-    __slots__ = ()
-
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, *args: Any) -> None:
-        pass
+VertebraConsole = Console
 
 
 def register_startup_block(name: str, provider: Callable[[], Any]) -> None:
@@ -170,7 +160,7 @@ def get_shutdown_blocks() -> list[tuple[str, Callable[[], Any]]]:
     return list(_SHUTDOWN_BLOCKS)
 
 
-def render_startup_blocks(vc: VertebraConsole | None = None) -> None:
+def render_startup_blocks(vc: Console | None = None) -> None:
     """Render all registered startup content blocks."""
     target = vc or console
     for name, provider in _STARTUP_BLOCKS:
@@ -183,7 +173,7 @@ def render_startup_blocks(vc: VertebraConsole | None = None) -> None:
             target.step(f"{name}: failed to render")
 
 
-def render_shutdown_blocks(vc: VertebraConsole | None = None) -> None:
+def render_shutdown_blocks(vc: Console | None = None) -> None:
     """Render all registered shutdown content blocks."""
     target = vc or console
     for name, provider in _SHUTDOWN_BLOCKS:
@@ -195,4 +185,18 @@ def render_shutdown_blocks(vc: VertebraConsole | None = None) -> None:
             target.step(f"{name}: failed to render")
 
 
-console = VertebraConsole()
+class _NoopContext:
+    """Minimal context manager that performs no action."""
+
+    __slots__ = ()
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *args: Any) -> None:
+        pass
+
+
+_STARTUP_BLOCKS: list[tuple[str, Callable[[], Any]]] = []
+_SHUTDOWN_BLOCKS: list[tuple[str, Callable[[], Any]]] = []
+console = Console()

@@ -9,7 +9,8 @@ from functools import partial
 from threading import RLock
 from typing import Any, Final, cast
 
-from vertebra._typing import UNSET, attrs_asdict
+from vertebra import _typing
+from vertebra._typing import UNSET
 from vertebra.utils.type_guards import (
     dataclass_to_dict,
     has_dict_attribute,
@@ -199,7 +200,7 @@ def _dump_pydantic(value: Any, *, exclude_unset: bool) -> dict[str, Any]:
 
 
 def _dump_attrs(value: Any) -> dict[str, Any]:
-    return cast("dict[str, Any]", attrs_asdict(value, recurse=True))
+    return cast("dict[str, Any]", _typing.attrs_asdict(value, recurse=True))
 
 
 def _dump_dict_attr(value: Any) -> dict[str, Any]:

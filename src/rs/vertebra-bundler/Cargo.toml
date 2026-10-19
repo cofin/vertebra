@@ -26,8 +26,8 @@ oxc_transformer = "0.155"
 oxc_semantic = "0.155"
 
 # File watching for HMR
-notify = { package = "rolldown-notify", version = "11.0", default-features = false, features = ["macos_kqueue"] }
-notify-debouncer-mini = { package = "rolldown-notify-debouncer-mini", version = "0.9", default-features = false, features = ["macos_kqueue"] }
+notify = { workspace = true }
+notify-debouncer-mini = { workspace = true }
 
 # QuickJS for SSR
 rquickjs = { version = "0.14", features = ["bindgen", "classes", "properties", "parallel"] }

@@ -4,17 +4,19 @@ from typing import NoReturn
 
 import click
 
+from vertebra._typing import ImproperConfigurationError, MissingDependencyError, VertebraError
 from vertebra.cli.theme import console
 
 __all__ = (
+    "CLIError",
+    "ConfigResolverError",
     "EXIT_CONFIG_ERROR",
     "EXIT_INTERNAL_ERROR",
     "EXIT_SUCCESS",
     "EXIT_USER_ERROR",
-    "CLIError",
-    "ConfigResolverError",
     "ImproperConfigurationError",
     "MissingDependencyError",
+    "VertebraError",
     "format_error",
     "print_cli_error",
     "raise_cli_error",
@@ -26,7 +28,7 @@ EXIT_CONFIG_ERROR = 2
 EXIT_INTERNAL_ERROR = 99
 
 
-class CLIError(click.ClickException):
+class CLIError(click.ClickException, VertebraError):
     """Vertebra CLI exception with Rich formatting support."""
 
     def __init__(self, message: str, *, hint: str | None = None, exit_code: int = EXIT_USER_ERROR) -> None:
@@ -40,33 +42,8 @@ class CLIError(click.ClickException):
         console.error(self.message, hint=self.hint)
 
 
-class MissingDependencyError(click.ClickException):
-    """Raised when an optional dependency is required but unavailable."""
-
-    def __init__(self, package: str, *, install_package: str | None = None) -> None:
-        self.package = package
-        self.install_package = install_package or package
-        message = f"Optional dependency '{package}' is required but not installed."
-        self.hint = f"Install it with: uv add {self.install_package}"
-        super().__init__(message)
-
-    def show(self, file: object = None) -> None:
-        """Render the missing dependency warning and installation hint."""
-        _ = file
-        console.warning(str(self))
-        if self.hint:
-            console.step(self.hint)
-
-
-class ConfigResolverError(click.ClickException):
+class ConfigResolverError(click.ClickException, VertebraError):
     """Raised when configuration resolution fails."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-
-
-class ImproperConfigurationError(click.ClickException):
-    """Raised when configuration is invalid."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message)

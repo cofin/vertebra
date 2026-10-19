@@ -16,7 +16,7 @@
 //! failure rate over a sliding window.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -131,6 +131,8 @@ struct CircuitBreakerInner {
     state: CircuitState,
     /// Timestamps of recent samples (success = false, failure = true).
     samples: VecDeque<(Instant, bool)>,
+    /// Running count of failures currently in `samples`.
+    failure_count: usize,
     /// Count of successful probes while half-open.
     half_open_successes: u64,
     /// Instant the circuit opened (for computing when to transition to
@@ -143,6 +145,7 @@ impl CircuitBreakerInner {
         Self {
             state: CircuitState::Closed,
             samples: VecDeque::new(),
+            failure_count: 0,
             half_open_successes: 0,
             opened_at: None,
         }
@@ -151,7 +154,11 @@ impl CircuitBreakerInner {
     fn prune(&mut self, now: Instant, window: Duration) {
         while let Some(&(ts, _)) = self.samples.front() {
             if now.duration_since(ts) > window {
-                self.samples.pop_front();
+                if let Some((_, is_failure)) = self.samples.pop_front()
+                    && is_failure
+                {
+                    self.failure_count = self.failure_count.saturating_sub(1);
+                }
             } else {
                 break;
             }
@@ -166,6 +173,7 @@ pub struct BackpressureController {
     semaphore: Arc<Semaphore>,
     queue_depth: AtomicUsize,
     metrics: Arc<BackpressureMetrics>,
+    circuit_state: AtomicU8,
     circuit: Mutex<CircuitBreakerInner>,
 }
 
@@ -180,6 +188,7 @@ impl BackpressureController {
             semaphore: Arc::new(Semaphore::new(max)),
             queue_depth: AtomicUsize::new(0),
             metrics: Arc::new(BackpressureMetrics::default()),
+            circuit_state: AtomicU8::new(0),
             circuit: Mutex::new(CircuitBreakerInner::new()),
         }
     }
@@ -187,6 +196,9 @@ impl BackpressureController {
     /// Check the circuit breaker; may transition open → half-open based on
     /// the elapsed time since opening.
     fn check_circuit(&self) -> CircuitState {
+        if self.circuit_state.load(Ordering::Acquire) == 0 {
+            return CircuitState::Closed;
+        }
         let mut inner = self.circuit.lock().expect("circuit mutex");
         if inner.state == CircuitState::Open
             && let Some(opened) = inner.opened_at
@@ -194,6 +206,7 @@ impl BackpressureController {
         {
             inner.state = CircuitState::HalfOpen;
             inner.half_open_successes = 0;
+            self.circuit_state.store(2, Ordering::Release);
         }
         inner.state
     }
@@ -260,6 +273,8 @@ impl BackpressureController {
                 inner.state = CircuitState::Closed;
                 inner.opened_at = None;
                 inner.samples.clear();
+                inner.failure_count = 0;
+                self.circuit_state.store(0, Ordering::Release);
             }
         }
     }
@@ -270,23 +285,26 @@ impl BackpressureController {
         let now = Instant::now();
         inner.prune(now, self.config.circuit_breaker.window);
         inner.samples.push_back((now, true));
+        inner.failure_count += 1;
 
         // Any failure in half-open slams us back to open.
         if inner.state == CircuitState::HalfOpen {
             inner.state = CircuitState::Open;
             inner.opened_at = Some(now);
             inner.half_open_successes = 0;
+            self.circuit_state.store(1, Ordering::Release);
             return;
         }
 
         if inner.state == CircuitState::Closed
             && inner.samples.len() as u64 >= self.config.circuit_breaker.min_samples
         {
-            let failures = inner.samples.iter().filter(|(_, f)| *f).count() as f64;
+            let failures = inner.failure_count as f64;
             let total = inner.samples.len() as f64;
             if failures / total >= self.config.circuit_breaker.failure_rate_threshold {
                 inner.state = CircuitState::Open;
                 inner.opened_at = Some(now);
+                self.circuit_state.store(1, Ordering::Release);
             }
         }
     }

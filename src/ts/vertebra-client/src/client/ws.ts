@@ -1,3 +1,5 @@
+import { computeBackoffDelay } from "./retry";
+
 /**
  * WebSocket subscription manager for Vertebra.
  *
@@ -11,7 +13,7 @@ const RECONNECT_MAX_MS = 30_000;
 
 type Callback = (data: any) => void;
 
-export class VertebraWebSocket {
+class RealtimeChannel {
   private ws: WebSocket | null = null;
   private subscriptions = new Map<string, Set<Callback>>();
   private reconnectAttempts = 0;
@@ -126,7 +128,7 @@ export class VertebraWebSocket {
   private scheduleReconnect(): void {
     if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) return;
 
-    const delay = Math.min(RECONNECT_BASE_MS * 2 ** this.reconnectAttempts + Math.random() * 1000, RECONNECT_MAX_MS);
+    const delay = computeBackoffDelay(this.reconnectAttempts, RECONNECT_BASE_MS, RECONNECT_MAX_MS);
     this.reconnectAttempts++;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -134,3 +136,5 @@ export class VertebraWebSocket {
     }, delay);
   }
 }
+
+export { RealtimeChannel, RealtimeChannel as VertebraWebSocket };

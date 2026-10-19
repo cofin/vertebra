@@ -23,6 +23,8 @@ from vertebra.builder._codegen._metadata import RouteMetadata
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+__all__ = ("ZodGenerator",)
+
 
 @dataclass(slots=True)
 class ZodGenerator:
@@ -81,12 +83,6 @@ class ZodGenerator:
         if isinstance(node, NamedTypeRef):
             return f"{node.name}Schema"
         if isinstance(node, ObjectType):
-            if node.name and node.name in self.declared:
-                fields = ", ".join(
-                    f"{field}: {self._maybe_optional(field, field_type, node.optional_fields)}"
-                    for field, field_type in node.fields.items()
-                )
-                return f"z.object({{{fields}}})"
             fields = ", ".join(
                 f"{field}: {self._maybe_optional(field, field_type, node.optional_fields)}"
                 for field, field_type in node.fields.items()
@@ -122,6 +118,3 @@ class ZodGenerator:
         if node.kind == "Uint8Array":
             return "z.instanceof(Uint8Array)"
         return "z.unknown()"
-
-
-__all__ = ("ZodGenerator",)

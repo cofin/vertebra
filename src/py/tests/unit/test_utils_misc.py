@@ -31,3 +31,21 @@ def test_module_loader_import_string():
 def test_module_available():
     assert module_available("os") is True
     assert module_available("non_existent_module_xyz") is False
+
+
+def test_dataclass_to_dict_exclude_empty():
+    from dataclasses import dataclass
+
+    from vertebra._typing import UNSET, Empty
+    from vertebra.utils.type_guards import dataclass_to_dict
+
+    @dataclass
+    class Payload:
+        name: str
+        empty_val: object = Empty
+        unset_val: object = UNSET
+        none_val: str | None = None
+
+    item = Payload(name="ok")
+    assert dataclass_to_dict(item, exclude_empty=True) == {"name": "ok", "none_val": None}
+    assert "empty_val" in dataclass_to_dict(item, exclude_empty=False)

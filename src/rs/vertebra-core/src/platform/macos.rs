@@ -10,15 +10,20 @@ use std::time::{Duration, Instant};
 
 use crate::sync::SyncError;
 
+#[cfg(not(feature = "macos-ulock"))]
 const SPIN_ITERS: usize = 1024;
+#[cfg(not(feature = "macos-ulock"))]
 const SLEEP_NS: i64 = 1_000_000; // 1ms
 
 pub(crate) fn wait_on_address(word: &AtomicU32, expected: u32) -> Result<(), SyncError> {
     #[cfg(feature = "macos-ulock")]
     {
-        return ulock_wait(word, expected);
+        ulock_wait(word, expected)
     }
-    spin_sleep_wait(word, expected)
+    #[cfg(not(feature = "macos-ulock"))]
+    {
+        spin_sleep_wait(word, expected)
+    }
 }
 
 pub(crate) fn wait_on_address_timeout(
@@ -31,29 +36,39 @@ pub(crate) fn wait_on_address_timeout(
     }
     #[cfg(feature = "macos-ulock")]
     {
-        return ulock_wait_timeout(word, expected, timeout);
+        ulock_wait_timeout(word, expected, timeout)
     }
-    spin_sleep_wait_timeout(word, expected, timeout)
+    #[cfg(not(feature = "macos-ulock"))]
+    {
+        spin_sleep_wait_timeout(word, expected, timeout)
+    }
 }
 
 pub(crate) fn wake_one(word: &AtomicU32) -> Result<(), SyncError> {
     #[cfg(feature = "macos-ulock")]
     {
-        return ulock_wake(word, 1);
+        ulock_wake(word, false)
     }
-    let _ = word.load(Ordering::Acquire);
-    Ok(())
+    #[cfg(not(feature = "macos-ulock"))]
+    {
+        let _ = word.load(Ordering::Acquire);
+        Ok(())
+    }
 }
 
 pub(crate) fn wake_all(word: &AtomicU32) -> Result<(), SyncError> {
     #[cfg(feature = "macos-ulock")]
     {
-        return ulock_wake(word, i32::MAX);
+        ulock_wake(word, true)
     }
-    let _ = word.load(Ordering::Acquire);
-    Ok(())
+    #[cfg(not(feature = "macos-ulock"))]
+    {
+        let _ = word.load(Ordering::Acquire);
+        Ok(())
+    }
 }
 
+#[cfg(not(feature = "macos-ulock"))]
 fn spin_sleep_wait(word: &AtomicU32, expected: u32) -> Result<(), SyncError> {
     let mut spins = 0usize;
     loop {
@@ -75,6 +90,7 @@ fn spin_sleep_wait(word: &AtomicU32, expected: u32) -> Result<(), SyncError> {
     }
 }
 
+#[cfg(not(feature = "macos-ulock"))]
 fn spin_sleep_wait_timeout(
     word: &AtomicU32,
     expected: u32,
@@ -109,10 +125,12 @@ fn spin_sleep_wait_timeout(
 #[cfg(feature = "macos-ulock")]
 const UL_COMPARE_AND_WAIT: u32 = 1;
 #[cfg(feature = "macos-ulock")]
+const ULF_WAKE_ALL: u32 = 0x0000_0100;
+#[cfg(feature = "macos-ulock")]
 const ULF_NO_ERRNO: u32 = 0x0100_0000;
 
 #[cfg(feature = "macos-ulock")]
-extern "C" {
+unsafe extern "C" {
     fn __ulock_wait(operation: u32, addr: *const u32, value: u64, timeout: u32) -> i32;
     fn __ulock_wake(operation: u32, addr: *const u32, wake_value: u64) -> i32;
 }
@@ -122,12 +140,12 @@ fn ulock_wait(word: &AtomicU32, expected: u32) -> Result<(), SyncError> {
     let addr = word as *const AtomicU32 as *const u32;
     let op = UL_COMPARE_AND_WAIT | ULF_NO_ERRNO;
     let rc = unsafe { __ulock_wait(op, addr, expected as u64, 0) };
-    if rc == 0 {
+    if rc >= 0 {
         return Ok(());
     }
-    match rc {
-        libc::EINTR | libc::EAGAIN => Ok(()),
-        _ => Err(SyncError::Syscall(io::Error::from_raw_os_error(rc))),
+    match -rc {
+        libc::EINTR | libc::EAGAIN | libc::EFAULT => Ok(()),
+        errno => Err(SyncError::Syscall(io::Error::from_raw_os_error(errno))),
     }
 }
 
@@ -139,26 +157,31 @@ fn ulock_wait_timeout(
 ) -> Result<bool, SyncError> {
     let addr = word as *const AtomicU32 as *const u32;
     let op = UL_COMPARE_AND_WAIT | ULF_NO_ERRNO;
-    let micros = timeout.as_micros().min(u32::MAX as u128) as u32;
+    let micros = timeout.as_micros().min(u32::MAX as u128).max(1) as u32;
     let rc = unsafe { __ulock_wait(op, addr, expected as u64, micros) };
-    if rc == 0 {
+    if rc >= 0 {
         return Ok(true);
     }
-    match rc {
+    match -rc {
         libc::ETIMEDOUT => Ok(false),
-        libc::EINTR | libc::EAGAIN => Ok(true),
-        _ => Err(SyncError::Syscall(io::Error::from_raw_os_error(rc))),
+        libc::EINTR | libc::EAGAIN | libc::EFAULT => Ok(true),
+        errno => Err(SyncError::Syscall(io::Error::from_raw_os_error(errno))),
     }
 }
 
 #[cfg(feature = "macos-ulock")]
-fn ulock_wake(word: &AtomicU32, count: i32) -> Result<(), SyncError> {
+fn ulock_wake(word: &AtomicU32, wake_all: bool) -> Result<(), SyncError> {
     let addr = word as *const AtomicU32 as *const u32;
-    let op = UL_COMPARE_AND_WAIT | ULF_NO_ERRNO;
-    let rc = unsafe { __ulock_wake(op, addr, count as u64) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(SyncError::Syscall(io::Error::from_raw_os_error(rc)))
+    let mut op = UL_COMPARE_AND_WAIT | ULF_NO_ERRNO;
+    if wake_all {
+        op |= ULF_WAKE_ALL;
+    }
+    let rc = unsafe { __ulock_wake(op, addr, 0) };
+    if rc >= 0 {
+        return Ok(());
+    }
+    match -rc {
+        libc::ENOENT | libc::EINTR | libc::EAGAIN => Ok(()),
+        errno => Err(SyncError::Syscall(io::Error::from_raw_os_error(errno))),
     }
 }

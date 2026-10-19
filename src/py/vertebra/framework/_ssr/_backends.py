@@ -43,9 +43,9 @@ class NativeSsrClient:
     """SSR via embedded QuickJS in the vertebra-bundler crate."""
 
     def __init__(self, bundle_path: str, pool_size: int = 4) -> None:
-        from vertebra._bundler import RolldownBundler
+        from vertebra._bundler import Bundler
 
-        self._bundler = RolldownBundler()
+        self._bundler = Bundler()
         self._bundler.init_ssr(bundle_path, pool_size)
 
     def render(self, page: dict[str, Any]) -> SsrResult:
@@ -76,6 +76,10 @@ class SidecarSsrClient:
         self._port = port
         self._process: subprocess.Popen[str] | None = None
         self._start()
+
+    @property
+    def _base_url(self) -> str:
+        return f"http://127.0.0.1:{self._port}"
 
     def render(self, page: dict[str, Any]) -> SsrResult:
         """Render an Inertia page object via HTTP POST to the sidecar /render endpoint."""
@@ -134,10 +138,6 @@ class SidecarSsrClient:
                 pass
         except (OSError, ProcessLookupError):
             pass
-
-    @property
-    def _base_url(self) -> str:
-        return f"http://127.0.0.1:{self._port}"
 
     def _start(self) -> None:
         runtime = shutil.which("bun") or shutil.which("node")

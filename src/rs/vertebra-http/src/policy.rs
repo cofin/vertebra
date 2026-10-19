@@ -98,7 +98,15 @@ impl DrainPolicy {
             *ema_arrival_rate = *ema_alpha * rate + (1.0 - *ema_alpha) * *ema_arrival_rate;
         }
     }
+
+    /// Record a drained batch size for adaptive arrival-rate estimation.
+    pub fn record_batch(&mut self, batch_count: usize) {
+        self.adapt(batch_count);
+    }
 }
+
+/// Domain-oriented alias for [`DrainPolicy`].
+pub type BatchPolicy = DrainPolicy;
 
 impl Default for DrainPolicy {
     fn default() -> Self {

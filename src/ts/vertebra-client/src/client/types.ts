@@ -1,4 +1,6 @@
-export interface VertebraConfig {
+export { computeBackoffDelay } from "./retry";
+
+interface ClientConfig {
   /** Base URL of the Vertebra Python server. */
   baseURL: string;
   /** Custom headers to include in every request. */
@@ -10,6 +12,8 @@ export interface VertebraConfig {
   /** WebSocket URL for HMR updates. */
   wsURL?: string;
 }
+
+export type { ClientConfig, ClientConfig as VertebraConfig };
 
 export interface RetryConfig {
   /** Maximum number of retry attempts. Default: 3. */

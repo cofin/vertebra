@@ -31,17 +31,23 @@ class BuildConfig:
 
     @classmethod
     def load(cls, pyproject_path: Path | str) -> "BuildConfig":
-        """Load build configuration from a *pyproject.toml* file."""
+        """Load build configuration from a project directory or *pyproject.toml* file."""
         pyproject_path = Path(pyproject_path)
+        if pyproject_path.is_dir():
+            pyproject_path = pyproject_path / "pyproject.toml"
 
-        if not pyproject_path.exists():
+        if not pyproject_path.is_file():
             return cls()
 
         with open(pyproject_path, "rb") as fh:
             data: dict[str, Any] = tomllib.load(fh)
 
-        vertebra_cfg = data.get("tool", {}).get("vertebra", {})
-        if not vertebra_cfg:
+        tool_section = data.get("tool", {})
+        if not isinstance(tool_section, dict):
+            return cls()
+
+        vertebra_cfg = tool_section.get("vertebra") or tool_section.get("vtb") or {}
+        if not isinstance(vertebra_cfg, dict) or not vertebra_cfg:
             return cls()
 
         entry: str = vertebra_cfg.get("entry", "")
@@ -50,8 +56,8 @@ class BuildConfig:
         dev_port_raw = vertebra_cfg.get("dev-port") or vertebra_cfg.get("dev_port")
         dev_port: int | None = int(dev_port_raw) if dev_port_raw is not None else None
         codegen: bool = bool(vertebra_cfg.get("codegen", False))
-        codegen_output: str = vertebra_cfg.get(
-            "codegen-output", vertebra_cfg.get("codegen_output", ".vertebra/generated")
+        codegen_output: str = str(
+            vertebra_cfg.get("codegen-output") or vertebra_cfg.get("codegen_output") or ".vertebra/generated"
         )
         app_path: str = vertebra_cfg.get("app", "")
 

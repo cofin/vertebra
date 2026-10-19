@@ -12,7 +12,6 @@ name = "vertebra_core"
 crate-type = ["lib"]
 
 [dependencies]
-arrow = { workspace = true }
 crossbeam-channel = { workspace = true }
 crossbeam-utils = { workspace = true }
 matchit = { workspace = true }

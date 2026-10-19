@@ -172,3 +172,6 @@ impl VertebraRequest {
         )
     }
 }
+
+/// Domain-oriented alias for [`VertebraRequest`].
+pub type Request = VertebraRequest;

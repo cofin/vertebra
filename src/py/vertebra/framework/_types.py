@@ -6,6 +6,8 @@ parsing, body streaming, and WSGI/ASGI bridging live in later chapters.
 
 from dataclasses import dataclass, field
 
+__all__ = ("Headers", "Request", "Response")
+
 
 @dataclass
 class Headers:
@@ -48,6 +50,3 @@ class Response:
     status: int = 200
     headers: Headers = field(default_factory=Headers)
     body: bytes = b""
-
-
-__all__ = ("Headers", "Request", "Response")

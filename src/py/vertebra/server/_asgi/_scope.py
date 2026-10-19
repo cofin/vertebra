@@ -2,7 +2,7 @@
 
 from typing import Any, cast
 
-__all__ = ["AsgiScope", "build_scope"]
+__all__ = ("AsgiScope", "build_scope")
 
 _UNBUILT = object()
 _ASGI_VERSION: dict[str, str] = {"version": "3.0", "spec_version": "2.3"}
@@ -59,14 +59,7 @@ def build_scope(request: Any, *, root_path: str = "") -> Any:
     lazily materializes each key on first access.
     """
     if hasattr(request, "asgi_scope"):
-        if root_path:
-            try:
-                return request.asgi_scope(root_path)
-            except TypeError:
-                scope = request.asgi_scope()
-                scope["root_path"] = root_path
-                return scope
-        return request.asgi_scope()
+        return request.asgi_scope(root_path) if root_path else request.asgi_scope()
 
     scope = _SCOPE_TEMPLATE.copy()
     scope["http_version"] = getattr(request, "http_version", "1.1")

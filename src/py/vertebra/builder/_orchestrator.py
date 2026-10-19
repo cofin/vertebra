@@ -11,15 +11,15 @@ import socket
 from pathlib import Path
 
 from vertebra.builder._codegen._collector import RouteCollector
-from vertebra.builder._codegen._manifest import RouteManifest
+from vertebra.builder._codegen._manifest import ManifestGenerator
 from vertebra.builder._codegen._typescript import TypeScriptGenerator
 from vertebra.builder._codegen._zod import ZodGenerator
 from vertebra.builder._config import BuildConfig
-from vertebra.builder._fallback import ViteDevServer, run_vite_build
+from vertebra.builder._fallback import DevServerProcess, run_vite_build
 from vertebra.builder._import_map import write_import_map
-from vertebra.supervisor._worker import _import_app
+from vertebra.utils.module_loader import import_app
 
-__all__ = ["BuildOrchestrator"]
+__all__ = ("BuildOrchestrator",)
 
 logger = logging.getLogger("vertebra.build")
 
@@ -40,7 +40,7 @@ class BuildOrchestrator:
         self._app_path = app_path or self.config.app
         self._hmr_base_url = hmr_base_url
         self._dev_port: int | None = None
-        self._vite_server: ViteDevServer | None = None
+        self._vite_server: DevServerProcess | None = None
 
     def build(self) -> bool:
         """Run a production build, returning True if a frontend entry was built."""
@@ -106,9 +106,9 @@ class BuildOrchestrator:
 
     def _run_native(self, *, dev: bool) -> None:
         """Run the native Rolldown bundler."""
-        from vertebra._bundler import BundleConfig, DevConfig, RolldownBundler
+        from vertebra._bundler import BundleConfig, Bundler, DevConfig
 
-        bundler = RolldownBundler()
+        bundler = Bundler()
         if dev:
             dev_config = DevConfig(
                 entry=str(self.project_dir / self.config.entry),
@@ -129,7 +129,7 @@ class BuildOrchestrator:
     def _run_vite_fallback(self, *, dev: bool) -> None:
         """Run Vite as fallback bundler."""
         if dev:
-            self._vite_server = ViteDevServer(self.project_dir, self._dev_port or 5173)
+            self._vite_server = DevServerProcess(self.project_dir, self._dev_port or 5173)
             self._vite_server.start()
             os.environ["VERTEBRA_VITE_PROXY"] = self._vite_server.proxy_url
             atexit.register(self._vite_server.stop)
@@ -153,7 +153,7 @@ class BuildOrchestrator:
         logger.info("Running type codegen -> %s", out)
 
         try:
-            app = _import_app(self._app_path)
+            app = import_app(self._app_path)
             collector = RouteCollector()
             routes = collector.collect(app)
 
@@ -165,7 +165,7 @@ class BuildOrchestrator:
             zod_content = zod_gen.generate(routes)
             (out / "schemas.zod.ts").write_text(zod_content)
 
-            manifest_gen = RouteManifest()
+            manifest_gen = ManifestGenerator()
             manifest_content = manifest_gen.generate(routes)
             (out / "manifest.json").write_text(manifest_content)
 

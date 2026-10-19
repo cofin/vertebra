@@ -1,17 +1,17 @@
 import { getContext, setContext } from "svelte";
-import { VertebraClient } from "../client/client";
-import type { VertebraConfig } from "../client/types";
+import { HttpClient } from "../client/client";
+import type { ClientConfig } from "../client/types";
 
 const VERTEBRA_KEY = Symbol("vertebra");
 
-export function setVertebraClient(config: VertebraConfig) {
-  const client = new VertebraClient(config);
+export function setVertebraClient(config: ClientConfig): HttpClient {
+  const client = new HttpClient(config);
   setContext(VERTEBRA_KEY, client);
   return client;
 }
 
-export function getVertebraClient(): VertebraClient {
-  const client = getContext<VertebraClient>(VERTEBRA_KEY);
+export function getVertebraClient(): HttpClient {
+  const client = getContext<HttpClient>(VERTEBRA_KEY);
   if (!client) {
     throw new Error("getVertebraClient must be used after setVertebraClient");
   }

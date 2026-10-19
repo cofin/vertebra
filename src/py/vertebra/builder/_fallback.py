@@ -16,7 +16,7 @@ import subprocess
 import time
 from pathlib import Path
 
-__all__ = ("ViteDevServer", "run_vite_build")
+__all__ = ("DevServerProcess", "ViteDevServer", "run_vite_build")
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ _STARTUP_TIMEOUT = 30.0
 _SHUTDOWN_TIMEOUT = 5.0
 
 
-class ViteDevServer:
+class DevServerProcess:
     """Manage a Vite dev server subprocess lifecycle."""
 
     __slots__ = ("_port", "_process", "_project_dir")
@@ -135,6 +135,9 @@ class ViteDevServer:
             interval = min(interval * 1.5, 1.0)
 
         return False
+
+
+ViteDevServer = DevServerProcess
 
 
 def run_vite_build(project_dir: Path) -> None:

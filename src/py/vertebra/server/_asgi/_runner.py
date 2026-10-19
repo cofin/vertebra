@@ -28,15 +28,15 @@ from typing import Any
 
 from vertebra.server._asgi._adapter import AsgiAdapter
 from vertebra.server._asgi._queues import AsgiResponse
-from vertebra.server._native import CallbackScheduler
+from vertebra.server._native import AsyncRuntime
+
+__all__ = ("AsgiRunner",)
 
 _NativeVertebraResponse: Any = None
 _native_submit_response: Any = None
 with contextlib.suppress(ImportError):
     from vertebra._vertebra import VertebraResponse as _NativeVertebraResponse
     from vertebra._vertebra import submit_response as _native_submit_response
-
-__all__ = ["AsgiRunner"]
 
 log = logging.getLogger(__name__)
 _RAW_DIRECT_SEND = os.environ.get("VERTEBRA_ASGI_DIRECT_SEND")
@@ -57,12 +57,12 @@ class AsgiRunner:
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         self._adapter = AsgiAdapter(app, mount_prefix=mount_prefix)
-        self._scheduler: CallbackScheduler | None = None
+        self._scheduler: AsyncRuntime | None = None
         if loop is not None:
             self._loop = loop
             self._owns_loop = False
         else:
-            self._scheduler = CallbackScheduler()
+            self._scheduler = AsyncRuntime()
             self._loop = self._scheduler.loop
             self._owns_loop = True
 
@@ -221,22 +221,28 @@ def _ensure_ffi() -> tuple[Any, Any]:
     return VertebraResponse, submit_response
 
 
+def _current_loop() -> asyncio.AbstractEventLoop | None:
+    """Return the running event loop, falling back to the policy loop when set."""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        with contextlib.suppress(RuntimeError):
+            return asyncio.get_event_loop_policy().get_event_loop()
+        return None
+
+
 def _handle_yielded(coro: Any, yielded: Any) -> None:
     """Route whatever a coroutine yielded into the appropriate continuation."""
     if yielded is None:
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            return
-        loop.call_soon(_step_coro, coro)
+        loop = _current_loop()
+        if loop is not None:
+            loop.call_soon(_step_coro, coro)
         return
     add_cb = getattr(yielded, "add_done_callback", None)
     if add_cb is None:
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            return
-        loop.create_task(_wrap_remainder(coro, yielded))
+        loop = _current_loop()
+        if loop is not None:
+            loop.create_task(_wrap_remainder(coro, yielded))
         return
     add_cb(_CoroResumer(coro))
 

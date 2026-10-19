@@ -6,11 +6,11 @@ from typing import Any
 
 from vertebra.server._wsgi._environ import WsgiEnviron
 
+__all__ = ("WsgiAdapter", "WsgiError")
+
 _NativeVertebraResponse: Any = None
 with contextlib.suppress(ImportError):
     from vertebra._vertebra import VertebraResponse as _NativeVertebraResponse
-
-__all__ = ["WsgiAdapter", "WsgiError"]
 
 _WsgiApp = Callable[[Any, Callable[..., None]], Iterable[bytes]]
 

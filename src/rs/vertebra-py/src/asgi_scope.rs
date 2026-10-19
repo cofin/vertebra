@@ -210,8 +210,20 @@ impl AsgiScope {
     }
 
     fn __iter__(slf: PyRef<'_, Self>, py: Python<'_>) -> PyResult<Py<AsgiScopeKeyIter>> {
-        let keys = slf.collect_keys();
-        Py::new(py, AsgiScopeKeyIter { keys, pos: 0 })
+        let extras = slf
+            .extras
+            .as_ref()
+            .map(|e| e.keys().cloned().collect())
+            .unwrap_or_default();
+        Py::new(
+            py,
+            AsgiScopeKeyIter {
+                deleted_known: slf.deleted_known,
+                known_pos: 0,
+                extras,
+                extra_pos: 0,
+            },
+        )
     }
 
     #[pyo3(signature = (key, default=None))]
@@ -246,11 +258,18 @@ impl AsgiScope {
     }
 
     fn keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let keys = self.collect_keys();
-        let items: Vec<Bound<'py, PyAny>> = keys
-            .into_iter()
-            .map(|k| PyString::new(py, &k).into_any())
-            .collect();
+        let extra_len = self.extras.as_ref().map_or(0, HashMap::len);
+        let mut items: Vec<Bound<'py, PyAny>> = Vec::with_capacity(KNOWN_KEYS.len() + extra_len);
+        for (idx, k) in KNOWN_KEYS.iter().enumerate() {
+            if !self.is_known_deleted(idx) {
+                items.push(PyString::intern(py, k).into_any());
+            }
+        }
+        if let Some(ref extras) = self.extras {
+            for k in extras.keys() {
+                items.push(PyString::new(py, k).into_any());
+            }
+        }
         PyList::new(py, &items)
     }
 
@@ -337,8 +356,10 @@ impl AsgiScope {
 /// Iterator over the scope's live keys.
 #[pyclass]
 pub struct AsgiScopeKeyIter {
-    keys: Vec<String>,
-    pos: usize,
+    deleted_known: u16,
+    known_pos: usize,
+    extras: Vec<String>,
+    extra_pos: usize,
 }
 
 #[pymethods]
@@ -346,13 +367,24 @@ impl AsgiScopeKeyIter {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
-    fn __next__(&mut self) -> Option<String> {
-        if self.pos < self.keys.len() {
-            let k = self.keys[self.pos].clone();
-            self.pos += 1;
-            Some(k)
+
+    fn __next__<'py>(&mut self, py: Python<'py>) -> Option<Bound<'py, PyString>> {
+        while self.known_pos < KNOWN_KEYS.len() {
+            let idx = self.known_pos;
+            self.known_pos += 1;
+            if (self.deleted_known & (1u16 << idx)) == 0 {
+                return Some(PyString::intern(py, KNOWN_KEYS[idx]));
+            }
+        }
+        if self.extra_pos < self.extras.len() {
+            let k = &self.extras[self.extra_pos];
+            self.extra_pos += 1;
+            Some(PyString::new(py, k))
         } else {
             None
         }
     }
 }
+
+/// Domain-oriented alias for [`AsgiScopeKeyIter`].
+pub type AsgiScopeIterator = AsgiScopeKeyIter;

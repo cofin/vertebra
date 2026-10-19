@@ -325,14 +325,16 @@ fn create_memfd_region(size: usize) -> Result<ShmRegion, ShmError> {
 
 #[cfg(unix)]
 fn create_shm_open_region(size: usize) -> Result<ShmRegion, ShmError> {
-    let mut attempt = 0;
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static SHM_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut attempt = 0u32;
     let pid = std::process::id();
+    let seq = SHM_COUNTER.fetch_add(1, Ordering::Relaxed);
     loop {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| ShmError::InvalidSize)?
-            .as_nanos();
-        let name = format!("/vertebra-{}-{}-{}", pid, now, attempt);
+        // macOS XNU limits POSIX shared memory names (PSHMNAMLEN) to 31 bytes
+        // including the leading slash. Keep the generated name compact.
+        let name = format!("/vtb-{pid:x}-{seq:x}-{attempt:x}");
         let cname = CString::new(name)?;
         // SAFETY: shm_open expects a valid C string name.
         let fd = unsafe {
@@ -613,7 +615,7 @@ mod tests {
             .env("VERTEBRA_SHM_NAME", &name)
             .env("VERTEBRA_SHM_SIZE", "4096")
             .arg("--exact")
-            .arg("shm_multi_process_roundtrip")
+            .arg("shm::tests::shm_multi_process_roundtrip")
             .arg("--nocapture")
             .spawn()
             .unwrap();
@@ -622,7 +624,7 @@ mod tests {
             .env("VERTEBRA_SHM_NAME", &name)
             .env("VERTEBRA_SHM_SIZE", "4096")
             .arg("--exact")
-            .arg("shm_multi_process_roundtrip")
+            .arg("shm::tests::shm_multi_process_roundtrip")
             .arg("--nocapture")
             .spawn()
             .unwrap();

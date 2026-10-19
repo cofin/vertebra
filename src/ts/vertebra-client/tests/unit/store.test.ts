@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { VertebraStore } from "../../src/store/index";
+import { SessionStore, VertebraStore } from "../../src/store/index";
 
-describe("VertebraStore (ADK Pattern)", () => {
-  let store: VertebraStore;
+describe("SessionStore / VertebraStore (ADK Pattern)", () => {
+  let store: SessionStore;
 
   beforeEach(() => {
     // Mock localStorage
@@ -27,7 +27,11 @@ describe("VertebraStore (ADK Pattern)", () => {
     })();
 
     vi.stubGlobal("localStorage", localStorageMock);
-    store = new VertebraStore();
+    store = new SessionStore();
+  });
+
+  it("exports SessionStore and VertebraStore alias", () => {
+    expect(SessionStore).toBe(VertebraStore);
   });
 
   it("sets and gets memory-only (temp:) values", () => {

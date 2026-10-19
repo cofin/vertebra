@@ -146,3 +146,6 @@ impl VertebraResponse {
         &self.body
     }
 }
+
+/// Domain-oriented alias for [`VertebraResponse`].
+pub type Response = VertebraResponse;

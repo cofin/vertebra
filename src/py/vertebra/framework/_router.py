@@ -8,6 +8,21 @@ import msgspec
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+__all__ = (
+    "ParamSpec",
+    "RouteDef",
+    "Router",
+    "delete",
+    "extract_path_params",
+    "get",
+    "handler_id",
+    "patch",
+    "post",
+    "put",
+)
+
+_SUPPORTED_PARAM_TYPES = {"str", "string", "int", "i64", "u64", "float", "f64", "bool", "uuid", "path"}
+
 
 class ParamSpec(msgspec.Struct, frozen=True, array_like=True):
     name: str
@@ -232,19 +247,3 @@ def _parse_bool(value: str) -> bool:
         return False
     msg = "invalid boolean value"
     raise ValueError(msg)
-
-
-_SUPPORTED_PARAM_TYPES = {"str", "string", "int", "i64", "u64", "float", "f64", "bool", "uuid", "path"}
-
-__all__ = (
-    "ParamSpec",
-    "RouteDef",
-    "Router",
-    "delete",
-    "extract_path_params",
-    "get",
-    "handler_id",
-    "patch",
-    "post",
-    "put",
-)

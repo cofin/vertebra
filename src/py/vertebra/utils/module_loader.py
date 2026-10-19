@@ -9,14 +9,19 @@ from importlib.util import find_spec
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from vertebra._typing import dependency_flag, module_available, reset_dependency_cache
-from vertebra.cli.errors import MissingDependencyError
+from vertebra._typing import (
+    MissingDependencyError,
+    dependency_flag,
+    module_available,
+    reset_dependency_cache,
+)
 
 if TYPE_CHECKING:
     from types import ModuleType
 
 __all__ = (
     "MissingDependencyError",
+    "_import_app",
     "dependency_flag",
     "ensure_advanced_alchemy",
     "ensure_msgspec",
@@ -24,12 +29,26 @@ __all__ = (
     "ensure_sqlalchemy",
     "ensure_sqlspec",
     "ensure_uvloop",
+    "import_app",
     "import_optional",
     "import_string",
     "module_available",
     "module_to_os_path",
     "reset_dependency_cache",
 )
+
+
+def import_app(app_path: str) -> Any:
+    """Import an application object from a ``module:attr`` target string."""
+    if ":" not in app_path:
+        msg = f"VERTEBRA_APP must be in 'module:attr' format, got: {app_path!r}"
+        raise ValueError(msg)
+    module_path, attr = app_path.rsplit(":", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, attr)
+
+
+_import_app = import_app
 
 
 def import_optional(module_name: str) -> Any | None:

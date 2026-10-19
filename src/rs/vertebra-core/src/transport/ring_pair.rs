@@ -174,7 +174,32 @@ impl TieredRingSet {
         Ok(Arc::new(ring))
     }
 
-    /// Send a response through the appropriate tier ring.
+    fn write_response_slot(
+        slot: &mut [u8],
+        correlation_id: u64,
+        status: u16,
+        headers_raw: &[u8],
+        body: &[u8],
+    ) {
+        let mut offset = 0;
+        slot[offset..offset + 4].copy_from_slice(&RESPONSE_MAGIC.to_le_bytes());
+        offset += 4;
+        slot[offset..offset + 8].copy_from_slice(&correlation_id.to_le_bytes());
+        offset += 8;
+        slot[offset..offset + 2].copy_from_slice(&status.to_le_bytes());
+        offset += 2;
+        let headers_len = headers_raw.len() as u16;
+        slot[offset..offset + 2].copy_from_slice(&headers_len.to_le_bytes());
+        offset += 2;
+        let body_len = body.len() as u32;
+        slot[offset..offset + 4].copy_from_slice(&body_len.to_le_bytes());
+        offset += 4;
+        slot[offset..offset + headers_raw.len()].copy_from_slice(headers_raw);
+        offset += headers_raw.len();
+        slot[offset..offset + body.len()].copy_from_slice(body);
+    }
+
+    /// Send a response through the appropriate tier ring without intermediate heap allocation.
     pub fn send_response(
         &self,
         correlation_id: u64,
@@ -187,26 +212,10 @@ impl TieredRingSet {
             .select_ring(total_size)
             .ok_or(RingPairError::ResponseTooLarge(total_size))?;
 
-        let mut buf = vec![0u8; total_size];
-        let mut offset = 0;
-
-        buf[offset..offset + 4].copy_from_slice(&RESPONSE_MAGIC.to_le_bytes());
-        offset += 4;
-        buf[offset..offset + 8].copy_from_slice(&correlation_id.to_le_bytes());
-        offset += 8;
-        buf[offset..offset + 2].copy_from_slice(&status.to_le_bytes());
-        offset += 2;
-        let headers_len = headers_raw.len() as u16;
-        buf[offset..offset + 2].copy_from_slice(&headers_len.to_le_bytes());
-        offset += 2;
-        let body_len = body.len() as u32;
-        buf[offset..offset + 4].copy_from_slice(&body_len.to_le_bytes());
-        offset += 4;
-        buf[offset..offset + headers_raw.len()].copy_from_slice(headers_raw);
-        offset += headers_raw.len();
-        buf[offset..offset + body.len()].copy_from_slice(body);
-
-        ring.try_send(&buf, 0).map_err(RingPairError::Channel)
+        ring.try_send_with(total_size, 0, |slot| {
+            Self::write_response_slot(slot, correlation_id, status, headers_raw, body);
+        })
+        .map_err(RingPairError::Channel)
     }
 
     /// Send a response through the appropriate tier ring, blocking until
@@ -223,53 +232,24 @@ impl TieredRingSet {
             .select_ring(total_size)
             .ok_or(RingPairError::ResponseTooLarge(total_size))?;
 
-        let mut buf = vec![0u8; total_size];
-        let mut offset = 0;
-
-        buf[offset..offset + 4].copy_from_slice(&RESPONSE_MAGIC.to_le_bytes());
-        offset += 4;
-        buf[offset..offset + 8].copy_from_slice(&correlation_id.to_le_bytes());
-        offset += 8;
-        buf[offset..offset + 2].copy_from_slice(&status.to_le_bytes());
-        offset += 2;
-        let headers_len = headers_raw.len() as u16;
-        buf[offset..offset + 2].copy_from_slice(&headers_len.to_le_bytes());
-        offset += 2;
-        let body_len = body.len() as u32;
-        buf[offset..offset + 4].copy_from_slice(&body_len.to_le_bytes());
-        offset += 4;
-        buf[offset..offset + headers_raw.len()].copy_from_slice(headers_raw);
-        offset += headers_raw.len();
-        buf[offset..offset + body.len()].copy_from_slice(body);
-
-        ring.send(&buf, 0).map_err(RingPairError::Channel)
+        ring.send_with(total_size, 0, |slot| {
+            Self::write_response_slot(slot, correlation_id, status, headers_raw, body);
+        })
+        .map_err(RingPairError::Channel)
     }
 
-    /// Try to receive a response from any tier (checks small → xlarge).
-    ///
-    /// This version uses a scratch buffer to minimize allocations.
+    /// Try to receive a response from any tier (checks small → xlarge) using zero-copy slot views.
     pub fn try_recv_response(&self) -> Result<Option<ResponseData>, RingPairError> {
-        thread_local! {
-            static SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
-        }
-
-        SCRATCH.with(|scratch| {
-            let mut scratch = scratch.borrow_mut();
-            for ring in [&self.small, &self.medium, &self.large, &self.xlarge] {
-                let cap = ring.payload_capacity();
-                if scratch.len() < cap {
-                    scratch.resize(cap, 0);
+        for ring in [&self.small, &self.medium, &self.large, &self.xlarge] {
+            match ring.try_recv_view() {
+                Ok(view) => {
+                    return ResponseData::deserialize(view.as_slice()).map(Some);
                 }
-                match ring.try_recv(&mut scratch) {
-                    Ok(len) => {
-                        return ResponseData::deserialize(&scratch[..len]).map(Some);
-                    }
-                    Err(ChannelError::Empty) => continue,
-                    Err(e) => return Err(RingPairError::Channel(e)),
-                }
+                Err(ChannelError::Empty) => continue,
+                Err(e) => return Err(RingPairError::Channel(e)),
             }
-            Ok(None)
-        })
+        }
+        Ok(None)
     }
 
     /// Select the ring for the given response size.
@@ -369,6 +349,8 @@ impl RingPair {
         resp_xlarge_fd: RawFd,
         req_notify_fd: RawFd,
         resp_notify_fd: RawFd,
+        #[cfg(not(target_os = "linux"))] req_notify_write_fd: RawFd,
+        #[cfg(not(target_os = "linux"))] resp_notify_write_fd: RawFd,
     ) -> Result<Self, RingPairError> {
         let req_layout = RingLayout::new(
             config.request_slot_size,
@@ -388,8 +370,17 @@ impl RingPair {
             )?
         };
 
+        #[cfg(target_os = "linux")]
         let request_notifier = unsafe { Notifier::from_raw_fd(req_notify_fd) };
+        #[cfg(target_os = "linux")]
         let response_notifier = unsafe { Notifier::from_raw_fd(resp_notify_fd) };
+
+        #[cfg(not(target_os = "linux"))]
+        let request_notifier =
+            unsafe { Notifier::from_raw_fds(req_notify_fd, req_notify_write_fd) };
+        #[cfg(not(target_os = "linux"))]
+        let response_notifier =
+            unsafe { Notifier::from_raw_fds(resp_notify_fd, resp_notify_write_fd) };
 
         Ok(Self {
             request_ring,
@@ -465,6 +456,10 @@ impl RingPair {
             .total_size,
             req_notify_fd: self.request_notifier.as_raw_fd(),
             resp_notify_fd: self.response_notifier.as_raw_fd(),
+            #[cfg(not(target_os = "linux"))]
+            req_notify_write_fd: self.request_notifier.write_fd(),
+            #[cfg(not(target_os = "linux"))]
+            resp_notify_write_fd: self.response_notifier.write_fd(),
         }
     }
 
@@ -487,6 +482,10 @@ impl RingPair {
         let resp_xlarge_fd: RawFd = env_parse("VERTEBRA_RESP_RING_XLARGE_FD")?;
         let req_notify_fd: RawFd = env_parse("VERTEBRA_REQ_NOTIFY_FD")?;
         let resp_notify_fd: RawFd = env_parse("VERTEBRA_RESP_NOTIFY_FD")?;
+        #[cfg(not(target_os = "linux"))]
+        let req_notify_write_fd: RawFd = env_parse("VERTEBRA_REQ_NOTIFY_WRITE_FD")?;
+        #[cfg(not(target_os = "linux"))]
+        let resp_notify_write_fd: RawFd = env_parse("VERTEBRA_RESP_NOTIFY_WRITE_FD")?;
 
         unsafe {
             Self::from_inherited(
@@ -498,22 +497,17 @@ impl RingPair {
                 resp_xlarge_fd,
                 req_notify_fd,
                 resp_notify_fd,
+                #[cfg(not(target_os = "linux"))]
+                req_notify_write_fd,
+                #[cfg(not(target_os = "linux"))]
+                resp_notify_write_fd,
             )
         }
     }
 
     #[cfg(unix)]
     pub fn all_fds(&self) -> Vec<RawFd> {
-        let fds = self.fd_set();
-        vec![
-            fds.req_ring_fd,
-            fds.resp_small_fd,
-            fds.resp_medium_fd,
-            fds.resp_large_fd,
-            fds.resp_xlarge_fd,
-            fds.req_notify_fd,
-            fds.resp_notify_fd,
-        ]
+        self.fd_set().all_fds()
     }
 }
 
@@ -532,12 +526,17 @@ pub struct RingPairFds {
     pub resp_xlarge_size: usize,
     pub req_notify_fd: RawFd,
     pub resp_notify_fd: RawFd,
+    #[cfg(not(target_os = "linux"))]
+    pub req_notify_write_fd: RawFd,
+    #[cfg(not(target_os = "linux"))]
+    pub resp_notify_write_fd: RawFd,
 }
 
 #[cfg(unix)]
 impl RingPairFds {
     pub fn to_env_vars(&self, worker_id: usize) -> Vec<(String, String)> {
-        vec![
+        #[allow(unused_mut)]
+        let mut vars = vec![
             ("VERTEBRA_TRANSPORT_MODE".into(), "shm".into()),
             ("VERTEBRA_WORKER_ID".into(), worker_id.to_string()),
             ("VERTEBRA_REQ_RING_FD".into(), self.req_ring_fd.to_string()),
@@ -585,11 +584,24 @@ impl RingPairFds {
                 "VERTEBRA_RESP_NOTIFY_FD".into(),
                 self.resp_notify_fd.to_string(),
             ),
-        ]
+        ];
+        #[cfg(not(target_os = "linux"))]
+        {
+            vars.push((
+                "VERTEBRA_REQ_NOTIFY_WRITE_FD".into(),
+                self.req_notify_write_fd.to_string(),
+            ));
+            vars.push((
+                "VERTEBRA_RESP_NOTIFY_WRITE_FD".into(),
+                self.resp_notify_write_fd.to_string(),
+            ));
+        }
+        vars
     }
 
     pub fn all_fds(&self) -> Vec<RawFd> {
-        vec![
+        #[allow(unused_mut)]
+        let mut fds = vec![
             self.req_ring_fd,
             self.resp_small_fd,
             self.resp_medium_fd,
@@ -597,9 +609,21 @@ impl RingPairFds {
             self.resp_xlarge_fd,
             self.req_notify_fd,
             self.resp_notify_fd,
-        ]
+        ];
+        #[cfg(not(target_os = "linux"))]
+        {
+            fds.push(self.req_notify_write_fd);
+            fds.push(self.resp_notify_write_fd);
+        }
+        fds
     }
 }
+
+/// Domain-oriented alias for [`TieredRingSet`].
+pub type ResponseChannel = TieredRingSet;
+
+/// Domain-oriented alias for [`RingPair`].
+pub type WorkerChannel = RingPair;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RingPairError {
@@ -764,6 +788,11 @@ mod tests {
         assert!(fds.resp_xlarge_fd >= 0);
         assert!(fds.req_notify_fd >= 0);
         assert!(fds.resp_notify_fd >= 0);
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(fds.req_notify_write_fd >= 0);
+            assert!(fds.resp_notify_write_fd >= 0);
+        }
         assert!(fds.req_ring_size > 0);
         assert!(fds.resp_small_size > 0);
     }
@@ -787,6 +816,11 @@ mod tests {
         assert!(keys.contains(&"VERTEBRA_RESP_RING_XLARGE_FD"));
         assert!(keys.contains(&"VERTEBRA_REQ_NOTIFY_FD"));
         assert!(keys.contains(&"VERTEBRA_RESP_NOTIFY_FD"));
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(keys.contains(&"VERTEBRA_REQ_NOTIFY_WRITE_FD"));
+            assert!(keys.contains(&"VERTEBRA_RESP_NOTIFY_WRITE_FD"));
+        }
 
         // Worker ID should be 3
         let worker_id = vars
@@ -808,7 +842,10 @@ mod tests {
     fn all_fds_for_make_inheritable() {
         let pair = RingPair::create(RingPairConfig::default()).expect("create");
         let fds = pair.all_fds();
+        #[cfg(target_os = "linux")]
         assert_eq!(fds.len(), 7); // req_ring + 4 resp tiers + 2 notifiers
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(fds.len(), 9); // req_ring + 4 resp tiers + 2 pipe pairs (read + write)
         for fd in &fds {
             assert!(*fd >= 0, "all FDs should be valid");
         }

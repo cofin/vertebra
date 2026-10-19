@@ -84,6 +84,9 @@ pub struct BatchWriter<'a> {
     _guard: MutexGuard<'a, ()>,
 }
 
+/// Domain-oriented alias for [`BatchBridge`].
+pub type LocalExchange = BatchBridge;
+
 impl BatchBridge {
     /// Initialize the global bridge. Call once at startup.
     ///

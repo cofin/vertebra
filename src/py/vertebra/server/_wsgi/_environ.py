@@ -5,7 +5,7 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 from urllib.parse import quote
 
-__all__ = ["BodyStream", "WsgiEnviron"]
+__all__ = ("BodyStream", "WsgiEnviron")
 
 _MISSING: object = object()
 

@@ -12,9 +12,6 @@ import threading
 from pathlib import Path
 
 from vertebra.cli.banner import render_shutdown
-from vertebra.cli.tui import LogBuffer, run_dev_tui, stderr_reader
-
-logger = logging.getLogger("vertebra.supervisor")
 
 __all__ = (
     "build_server_command",
@@ -22,6 +19,8 @@ __all__ = (
     "find_server_binary",
     "run_supervisor",
 )
+
+logger = logging.getLogger("vertebra.supervisor")
 
 
 def run_supervisor(
@@ -113,6 +112,8 @@ def _run_with_tui(
     shutdown_timeout_ms: int,
 ) -> int:
     """Run the server with TUI mode using piped stderr and a Rich Live display."""
+    from vertebra.cli.tui import LogBuffer, run_dev_tui, stderr_reader
+
     log_buffer = LogBuffer()
     stop_event = threading.Event()
 

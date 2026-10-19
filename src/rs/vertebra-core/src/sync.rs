@@ -266,8 +266,7 @@ impl<T> SharedMutex<T> {
                     fallback: false,
                 });
             }
-            let state = self.futex.load(Ordering::Acquire);
-            if let Err(err) = wait_on_address(&self.futex, state) {
+            if let Err(err) = wait_on_address(&self.futex, 1) {
                 if wait_is_unsupported(&err) {
                     enable_fallback("wait primitive unavailable for SharedMutex");
                     return self.lock_fallback();
@@ -304,11 +303,12 @@ impl<T> SharedMutex<T> {
             if let Some(guard) = self.try_lock()? {
                 return Ok(Some(guard));
             }
-            if start.elapsed() >= timeout {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
                 return Ok(None);
             }
-            let state = self.futex.load(Ordering::Acquire);
-            if let Err(err) = wait_on_address(&self.futex, state) {
+            let remaining = timeout - elapsed;
+            if let Err(err) = wait_on_address_timeout(&self.futex, 1, remaining) {
                 if wait_is_unsupported(&err) {
                     enable_fallback("wait primitive unavailable for SharedMutex");
                     return self.lock_timeout_fallback(timeout);
