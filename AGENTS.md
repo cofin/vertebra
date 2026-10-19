@@ -1,0 +1,42 @@
+# Vertebra — Agent Instructions
+
+Vertebra is a Python-first, high-performance polyglot application backbone combining Python 3.12+/3.14t developer ergonomics with a Rust 2024 runtime (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`) and a full-stack TypeScript SDK (`@vertebra/client`).
+
+## Flow Operational Rule
+
+When a repository has `.agents/`, read its configured root, bundle index, active spec, authoritative task worksheet, and applicable recursively nested knowledge before acting. Operational skills resolve only from `.agents/skills/`.
+
+Route through the `flow` skill and exactly one lifecycle skill. Refine plans until every worksheet is executable, follow the selected worksheet without improvising, and route contradictions through revise/refine. Rewrite revised worksheets in place in present tense without historical transcripts, and keep Markdown checklist markers (`[x]`, `[~]`, `[ ]`) synchronized with task `state`. Apply direct Markdown frontmatter state synchronization and reconcile task-first.
+
+Close and archive completed specs on the working branch without waiting for branch merge; when scope grows beyond the active spec, finish the current spec and open a follow-up spec via `/flow:plan`. Before deleting any spec during archive, curate evidence-backed OKF chapters across nested domain, architecture, pattern, testing, and gotcha folders ([`knowledge/index.md`](.agents/bundles/knowledge/index.md)). Keep `specs/` and `research/` lazy (only materialized when active specs or research briefs exist).
+
+Write direct, zero-slop prose and code: avoid AI puffery, negative parallelisms, formulaic transitions, and inline `#` comments in Python (use Google-style docstrings and PEP 585/604/695 types). Proactively fix adjacent lint, typing, or dead-code issues in touched in-scope files and suggest the exact canonical `/flow:<action>` command next.
+
+Use `structured-choice-v1` for unresolved decisions: one decision at a time, only through a currently allowed compatible native tool or the equivalent sequential-text fallback. Run correctness review and then the mandatory fresh quality review before finish/archive.
+
+Commits remain local unless the user explicitly asks for delivery. Never create, move, force-update, or delete Git tags. Never commit or push directly to `main`; all changes must be made on a dedicated feature/fix branch with signed conventional commits and submitted via pull request.
+
+## Canonical Bundle Entry Points
+
+- [Bundle Index](.agents/bundles/index.md) — OKF v0.2 root index for product, nested knowledge, and lazy specs/research
+- [Product Definition](.agents/bundles/product/product.md) — Product vision, runtime topologies, and protocol capabilities
+- [Product Guidelines](.agents/bundles/product/product-guidelines.md) — Clean-break domain naming rules, hot-path invariants, and module layout
+- [Tech Stack](.agents/bundles/product/tech-stack.md) — Python 3.12+/3.14t, Rust 2024 crates, and TypeScript client stack
+- [Project Workflow](.agents/bundles/knowledge/workflow.md) — Canonical `Makefile` commands, polyglot rebuild cycle, verification strategies, and Flow execution loop
+- [Knowledge Index](.agents/bundles/knowledge/index.md) — Nested architectural (`architecture/{runtime,ipc,http,worker,frontend}/`), domain (`domains/{framework,server,ipc,http,frontend}/`), pattern (`patterns/{python,rust,typescript}/`), testing (`testing/`), and gotcha (`gotchas/`) chapters
+
+## Quick Verification Commands
+
+```bash
+make setup-env   # Auto-configure Rodete vs external registries for uv, bun/npm, and cargo
+make install     # Full setup: venv (3.12), uv sync, bun install/build, and maturin develop
+make dev         # Build Rust crates and install debug PyO3 extensions (_vertebra, _bundler)
+make lint        # Auto-fix TS (Biome), Python (Ruff), Rust (rustfmt + Clippy), and run Mypy
+make lint-all    # Read-only CI lint and type-check gate across TypeScript, Python, and Rust
+make rs-test     # Clean stale /dev/shm regions and run Rust workspace tests (--features tls,compression)
+make py-test     # Build debug extensions (make dev) and run Python pytest suite
+make ts-test     # Run TypeScript Vitest suite with isolated localstorage
+make test        # Run all Rust, Python, and TypeScript test suites
+make check       # Full verification gate: make lint + make test + make coverage
+make bench-ft    # Build .venv-ft + src/rs/target-ft and benchmark free-threaded Python 3.14t
+```

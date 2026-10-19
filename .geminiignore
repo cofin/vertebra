@@ -1,10 +1,6 @@
-# Allow specs folder
-!specs
+# Allow Flow OKF bundles and instruction files
 !.agents
 !.agents/**
-!specs/**
-# Keep gemini folder
-!gemini
 !AGENTS.md
 !GEMINI.md
 !CLAUDE.md
