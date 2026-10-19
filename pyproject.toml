@@ -93,6 +93,7 @@ module = [
     "pyarrow",
     "pyarrow.*",
     "tomlkit",
+    "uvloop",
     "fastapi",
     "fastapi.*",
     "litestar",
