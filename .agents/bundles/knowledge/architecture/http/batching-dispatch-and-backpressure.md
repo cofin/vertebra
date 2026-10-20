@@ -15,6 +15,11 @@ sources:
   - resource: src/rs/vertebra-http/src/dispatcher/shm.rs
   - resource: src/rs/vertebra-http/src/correlation.rs
   - resource: src/rs/vertebra-http/src/backpressure.rs
+  - resource: src/rs/vertebra-http/src/sse.rs
+  - resource: src/rs/vertebra-http/src/ws_mount.rs
+  - resource: src/rs/vertebra-http/src/pubsub.rs
+  - resource: src/py/vertebra/server/_asgi/_sse.py
+  - resource: src/py/vertebra/server/_asgi/_websocket.py
 ---
 
 # Request Batching, Dispatch & Backpressure

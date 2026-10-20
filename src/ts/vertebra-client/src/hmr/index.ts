@@ -155,24 +155,34 @@ class HotReloadClient {
   private onMessage(event: MessageEvent): void {
     this.resetPingTimer();
 
-    let msg: ServerMessage;
+    let msg: Record<string, any>;
     try {
       msg = JSON.parse(event.data as string);
     } catch {
       return;
     }
 
-    switch (msg.type) {
+    const kind: string | undefined = msg.type ?? msg.event;
+
+    switch (kind) {
       case "connected":
         console.log("[vertebra] HMR server ready");
         break;
 
       case "update":
-        this.handleUpdate(msg.updates);
+        if (Array.isArray(msg.updates)) {
+          this.handleUpdate(msg.updates);
+        }
+        break;
+
+      case "css-update":
+        if (typeof msg.path === "string") {
+          this.hotSwapCss(msg.path);
+        }
         break;
 
       case "full-reload":
-        console.log(`[vertebra] full reload: ${msg.reason}`);
+        console.log(`[vertebra] full reload: ${msg.reason ?? msg.path ?? ""}`);
         window.location.reload();
         break;
 
@@ -181,7 +191,8 @@ class HotReloadClient {
         break;
 
       case "types-update":
-        console.log(`[vertebra] types updated: ${msg.version}`);
+      case "vertebra:types-changed":
+        console.log(`[vertebra] types updated: ${msg.version ?? msg.generation ?? ""}`);
         window.dispatchEvent(new CustomEvent("vertebra:types-update", { detail: msg }));
         break;
 
