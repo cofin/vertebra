@@ -6,15 +6,21 @@
 //! code does not vary across GIL / free-threaded builds; if that changes,
 //! mirror the constant here via `pyo3-build-config`.
 
+pub mod access_log;
 pub mod assets;
 pub mod backpressure;
 pub mod collector;
+pub mod compression;
 pub mod config;
 pub mod correlation;
 pub mod direct_worker;
 pub mod dispatcher;
+pub mod health;
 pub mod hmr;
+pub mod multipart;
+pub mod payload;
 pub mod policy;
+pub mod profile;
 pub mod response;
 pub mod response_reader;
 pub mod ring_factory;

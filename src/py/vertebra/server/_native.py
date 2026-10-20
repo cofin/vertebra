@@ -19,11 +19,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from vertebra.server._rsgi._adapter import RsgiAdapter, is_rsgi_app
 from vertebra.server._runtime_tuning import (
     AsgiEventLoopPool,
     configure_worker_affinity,
     is_free_threaded,
 )
+from vertebra.server._wsgi._adapter import WsgiAdapter
 from vertebra.utils.serializers._json import encode_json_bytes
 
 if TYPE_CHECKING:
@@ -286,7 +288,9 @@ def _install_signal_handlers() -> None:
 
 
 def _detect_protocol(app: Any) -> str:
-    """Detect whether an app is WSGI or ASGI by inspecting its callable signature."""
+    """Detect whether an app is RSGI, ASGI, or WSGI by inspecting its callable signature."""
+    if is_rsgi_app(app):
+        return "rsgi"
     if inspect.iscoroutinefunction(app):
         return "asgi"
     cls_call = type(app).__dict__.get("__call__")
@@ -318,14 +322,17 @@ def _instantiate_mount_runners(
     resolved_mounts: list[tuple[str, Any, str]],
     loop: asyncio.AbstractEventLoop,
 ) -> list[tuple[str, Any, str]]:
-    """Instantiate AsgiRunner and WsgiAdapter wrappers once for all resolved mounts."""
+    """Instantiate AsgiRunner, RsgiAdapter, and WsgiAdapter wrappers once for all resolved mounts."""
     from vertebra.server._asgi._runner import AsgiRunner
-    from vertebra.server._wsgi._adapter import WsgiAdapter
 
     active_mounts: list[tuple[str, Any, str]] = []
     for prefix, app, protocol in resolved_mounts:
         if protocol == "asgi":
             active_mounts.append((prefix, AsgiRunner(app, mount_prefix=prefix, loop=loop), "asgi"))
+        elif protocol == "rsgi":
+            rsgi_adapter = RsgiAdapter(app)
+            rsgi_adapter.startup(loop)
+            active_mounts.append((prefix, rsgi_adapter, "rsgi"))
         elif protocol == "wsgi":
             active_mounts.append((prefix, WsgiAdapter(app), "wsgi"))
     return active_mounts
@@ -491,6 +498,16 @@ def _dispatch_batch(
                             headers=getattr(resp, "headers", []),
                             request_id=request.request_id,
                         )
+                elif protocol == "rsgi":
+                    for idx, request in entries:
+                        coro = adapter.handle_request(request)
+                        if isinstance(scheduler, (AsyncRuntime, AsgiEventLoopPool)):
+                            resp = scheduler.schedule(coro).result()
+                        elif loop.is_running():
+                            resp = asyncio.run_coroutine_threadsafe(coro, loop).result()
+                        else:
+                            resp = loop.run_until_complete(coro)
+                        results[idx] = _coerce_response(resp, request.request_id, vr_cls)
                 elif protocol == "wsgi":
                     _dispatch_wsgi_concurrent(adapter, entries, results, vr_cls)
 
@@ -554,6 +571,34 @@ def _dispatch_batch(
             adapter, protocol = resolved_lookup[prefix]
             if protocol == "asgi":
                 adapter.spawn_batch(req for _idx, req in entries)
+            elif protocol == "rsgi":
+                rsgi_coros: list[Coroutine[Any, Any, None]] = []
+                for _idx, request in entries:
+
+                    async def _dispatch_rsgi(req: Any = request, a: Any = adapter) -> None:
+                        try:
+                            resp = await a.handle_request(req)
+                            submit(_coerce_response(resp, req.request_id, vr_cls))
+                        except Exception:
+                            log.exception("RSGI handler error for request %s", req.request_id)
+                            submit(
+                                vr_cls(
+                                    status=500,
+                                    body=b"internal server error",
+                                    request_id=req.request_id,
+                                )
+                            )
+
+                    rsgi_coros.append(_dispatch_rsgi())
+
+                if isinstance(scheduler, (AsyncRuntime, AsgiEventLoopPool)):
+                    scheduler.spawn_batch(rsgi_coros)
+                elif asyncio._get_running_loop() is loop:
+                    for coro in rsgi_coros:
+                        loop.create_task(coro)
+                else:
+                    for coro in rsgi_coros:
+                        loop.call_soon_threadsafe(loop.create_task, coro)
             elif protocol == "wsgi":
                 executor = _get_wsgi_executor()
                 for _idx, request in entries:

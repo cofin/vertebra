@@ -86,10 +86,16 @@ pub async fn handle(
 
     // Health endpoint sits above routing and backpressure so probes always
     // work, even when the controller is shedding load.
-    if req.uri().path() == HEALTH_PATH {
-        return Ok(health_response(
-            state.dispatcher.backpressure().map(|c| c.snapshot()),
-        ));
+    if req.uri().path() == HEALTH_PATH
+        && let Some(bp) = state.dispatcher.backpressure()
+    {
+        return Ok(health_response(Some(bp.snapshot())));
+    }
+    if let Some(health_resp) =
+        crate::health::HealthEndpoint::default().try_intercept(req.uri().path())
+    {
+        let (parts, body) = health_resp.into_parts();
+        return Ok(Response::from_parts(parts, Either::Left(body)));
     }
 
     // Admission control. If a BackpressureController is attached, acquire a

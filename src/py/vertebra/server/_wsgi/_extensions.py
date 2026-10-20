@@ -1,24 +1,45 @@
-"""WSGI framework extensions — shared utilities and Django/Flask integrations."""
+"""WSGI framework extensions — zero-copy WsgiFileWrapper resolution and Django/Flask integrations."""
+
+from __future__ import annotations
 
 import importlib
 import logging
 import os
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import Any, cast
+
+from vertebra._vertebra import WsgiFileWrapper
 
 __all__ = (
     "DjangoWsgiApp",
     "FlaskWsgiApp",
     "LargeBodyBypass",
+    "WsgiFileWrapper",
     "configure_django",
     "create_flask_app",
+    "resolve_wsgi_file_wrapper",
     "wrap_with_error_handler",
 )
 
 log = logging.getLogger(__name__)
 
 _LARGE_BODY_THRESHOLD = 16 * 1024 * 1024
-_FlaskFactory = Callable[[], Any]
+type _FlaskFactory = Callable[[], Any]
+
+
+def resolve_wsgi_file_wrapper(result_iterable: Any) -> str | None:
+    """Return the underlying filesystem path if result_iterable is a filesystem-backed WsgiFileWrapper."""
+    if isinstance(result_iterable, WsgiFileWrapper):
+        path = result_iterable.path
+        if path and Path(path).is_file():
+            return str(path)
+    filelike = getattr(result_iterable, "filelike", None)
+    if filelike is not None:
+        name = getattr(filelike, "name", None)
+        if isinstance(name, str) and Path(name).is_file():
+            return name
+    return None
 
 
 class LargeBodyBypass:
@@ -44,40 +65,6 @@ class LargeBodyBypass:
     def __exit__(self, *_args: object) -> None:
         if self._patched:
             log.debug("LargeBodyBypass exiting.")
-
-
-def wrap_with_error_handler(
-    app: Callable[..., Iterable[bytes]],
-    *,
-    logger: logging.Logger | None = None,
-) -> Callable[..., Iterable[bytes]]:
-    """Wrap a WSGI app with structured exception logging."""
-    active_logger = logger or log
-
-    def _wrapped(
-        environ: dict[str, Any],
-        start_response: Callable[..., None],
-    ) -> Iterable[bytes]:
-        try:
-            return app(environ, start_response)
-        except Exception:
-            active_logger.exception(
-                "Unhandled exception in WSGI app: method=%s path=%s",
-                environ.get("REQUEST_METHOD", "?"),
-                environ.get("PATH_INFO", "?"),
-            )
-            raise
-
-    return _wrapped
-
-
-def configure_django(settings_module: str) -> None:
-    """Set DJANGO_SETTINGS_MODULE if not already set."""
-    current = os.environ.get("DJANGO_SETTINGS_MODULE")
-    if current and current != settings_module:
-        log.warning("DJANGO_SETTINGS_MODULE already set to %r; ignoring %r.", current, settings_module)
-        return
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", settings_module)
 
 
 class DjangoWsgiApp:
@@ -130,6 +117,40 @@ class FlaskWsgiApp:
                 raise RuntimeError(msg) from exc
             log.info("Flask application initialized via factory.")
         return self._app
+
+
+def wrap_with_error_handler(
+    app: Callable[..., Iterable[bytes]],
+    *,
+    logger: logging.Logger | None = None,
+) -> Callable[..., Iterable[bytes]]:
+    """Wrap a WSGI app with structured exception logging."""
+    active_logger = logger or log
+
+    def _wrapped(
+        environ: dict[str, Any],
+        start_response: Callable[..., None],
+    ) -> Iterable[bytes]:
+        try:
+            return app(environ, start_response)
+        except Exception:
+            active_logger.exception(
+                "Unhandled exception in WSGI app: method=%s path=%s",
+                environ.get("REQUEST_METHOD", "?"),
+                environ.get("PATH_INFO", "?"),
+            )
+            raise
+
+    return _wrapped
+
+
+def configure_django(settings_module: str) -> None:
+    """Set DJANGO_SETTINGS_MODULE if not already set."""
+    current = os.environ.get("DJANGO_SETTINGS_MODULE")
+    if current and current != settings_module:
+        log.warning("DJANGO_SETTINGS_MODULE already set to %r; ignoring %r.", current, settings_module)
+        return
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", settings_module)
 
 
 def create_flask_app(module_path: str, factory_name: str = "create_app") -> FlaskWsgiApp:

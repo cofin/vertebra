@@ -45,6 +45,9 @@ libc = { workspace = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Utilities
+brotli     = "7.0"
+flate2     = "1.1"
+multer     = "3.1.0"
 thiserror  = { workspace = true }
 tracing    = "0.1"
 fnv        = "1.0"
@@ -52,6 +55,7 @@ bytes      = { workspace = true }
 dashmap    = "6"
 mimalloc   = { workspace = true, optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zstd       = { workspace = true }
 
 [features]
 default = ["python", "mimalloc"]
