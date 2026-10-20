@@ -9,7 +9,7 @@
 //!   for correlation.
 //! - **SharedMemory** (`shm.rs`): requests serialized into per-worker MPMC
 //!   rings, responses read from tiered response rings. Uses O(1)
-//!   `CorrelationSlab`.
+//!   `InFlightRequests`.
 //!
 //! Shared request/worker types live in `types.rs`.
 

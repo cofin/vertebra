@@ -32,10 +32,10 @@ from vertebra.server._native import AsyncRuntime
 
 __all__ = ("AsgiRunner",)
 
-_NativeVertebraResponse: Any = None
+_NativeResponse: Any = None
 _native_submit_response: Any = None
 with contextlib.suppress(ImportError):
-    from vertebra._vertebra import VertebraResponse as _NativeVertebraResponse
+    from vertebra._vertebra import Response as _NativeResponse
     from vertebra._vertebra import submit_response as _native_submit_response
 
 log = logging.getLogger(__name__)
@@ -151,7 +151,7 @@ class AsgiRunner:
                     submit(vtb_resp)
                 except Exception:
                     log.exception(
-                        "failed to construct or submit VertebraResponse for request %d",
+                        "failed to construct or submit Response for request %d",
                         request.request_id,
                     )
                     submit(
@@ -213,12 +213,12 @@ class _BatchProcessor:
 
 
 def _ensure_ffi() -> tuple[Any, Any]:
-    """Return the native VertebraResponse class and submit_response function."""
-    if _NativeVertebraResponse is not None and _native_submit_response is not None:
-        return _NativeVertebraResponse, _native_submit_response
-    from vertebra._vertebra import VertebraResponse, submit_response
+    """Return the native Response class and submit_response function."""
+    if _NativeResponse is not None and _native_submit_response is not None:
+        return _NativeResponse, _native_submit_response
+    from vertebra._vertebra import Response, submit_response
 
-    return VertebraResponse, submit_response
+    return Response, submit_response
 
 
 def _current_loop() -> asyncio.AbstractEventLoop | None:

@@ -8,9 +8,9 @@ from vertebra.server._wsgi._environ import WsgiEnviron
 
 __all__ = ("WsgiAdapter", "WsgiError")
 
-_NativeVertebraResponse: Any = None
+_NativeResponse: Any = None
 with contextlib.suppress(ImportError):
-    from vertebra._vertebra import VertebraResponse as _NativeVertebraResponse
+    from vertebra._vertebra import Response as _NativeResponse
 
 _WsgiApp = Callable[[Any, Callable[..., None]], Iterable[bytes]]
 
@@ -20,7 +20,7 @@ class WsgiError(Exception):
 
 
 class WsgiAdapter:
-    """Wraps a WSGI callable and translates VertebraRequest to VertebraResponse."""
+    """Wraps a WSGI callable and translates Request to Response."""
 
     __slots__ = ("_app", "_response_cls", "_url_scheme")
 
@@ -36,7 +36,7 @@ class WsgiAdapter:
         server_name: str = "localhost",
         server_port: int = 8000,
     ) -> Any:
-        """Run the WSGI app against ``request`` and return a VertebraResponse."""
+        """Run the WSGI app against ``request`` and return a Response."""
         if hasattr(request, "wsgi_environ"):
             environ: Any = request.wsgi_environ(server_name, server_port, self._url_scheme)
         else:
@@ -97,9 +97,9 @@ class WsgiAdapter:
 
 
 def _get_response_cls() -> Any:
-    """Return the native VertebraResponse class."""
-    if _NativeVertebraResponse is not None:
-        return _NativeVertebraResponse
-    from vertebra._vertebra import VertebraResponse
+    """Return the native Response class."""
+    if _NativeResponse is not None:
+        return _NativeResponse
+    from vertebra._vertebra import Response
 
-    return VertebraResponse
+    return Response

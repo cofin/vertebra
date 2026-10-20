@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 use crate::dispatcher::Dispatcher;
-use crate::policy::DrainPolicy;
+use crate::policy::BatchPolicy;
 
 /// A single request item queued for batching.
 #[derive(Debug)]
@@ -64,21 +64,21 @@ pub fn method_tag(method: &hyper::Method) -> u8 {
     }
 }
 
-/// The batch collector task.
+/// The request batcher task.
 ///
 /// Spawn one of these per worker thread or per CPU. It receives `PendingRequest`
 /// values over a channel, accumulates them, and drains when the policy fires.
-pub struct BatchCollector {
+pub struct RequestBatcher {
     rx: mpsc::Receiver<PendingRequest>,
     dispatcher: Arc<Dispatcher>,
-    policy: DrainPolicy,
+    policy: BatchPolicy,
 }
 
-impl BatchCollector {
-    /// Create a new collector and return the sender half of the channel.
+impl RequestBatcher {
+    /// Create a new batcher and return the sender half of the channel.
     pub fn new(
         dispatcher: Arc<Dispatcher>,
-        policy: DrainPolicy,
+        policy: BatchPolicy,
         channel_capacity: usize,
     ) -> (Self, mpsc::Sender<PendingRequest>) {
         let (tx, rx) = mpsc::channel(channel_capacity);
@@ -92,10 +92,10 @@ impl BatchCollector {
         )
     }
 
-    /// Spawn a pool of collectors and return their senders.
+    /// Spawn a pool of batchers and return their senders.
     pub fn spawn_pool(
         dispatcher: Arc<Dispatcher>,
-        policy: DrainPolicy,
+        policy: BatchPolicy,
         shard_count: usize,
         channel_capacity: usize,
     ) -> Vec<mpsc::Sender<PendingRequest>> {
@@ -109,7 +109,7 @@ impl BatchCollector {
         senders
     }
 
-    /// Run the collector loop until the channel is closed.
+    /// Run the batcher loop until the channel is closed.
     pub async fn run(mut self) {
         let mut pending: Vec<PendingRequest> = Vec::with_capacity(self.policy.batch_size());
 
@@ -131,7 +131,7 @@ impl BatchCollector {
         if !pending.is_empty() {
             self.drain(&mut pending).await;
         }
-        debug!("BatchCollector shutting down");
+        debug!("RequestBatcher shutting down");
     }
 
     async fn drain(&mut self, pending: &mut Vec<PendingRequest>) {
@@ -144,6 +144,3 @@ impl BatchCollector {
         self.policy.record_batch(count);
     }
 }
-
-/// Domain-oriented alias for [`BatchCollector`].
-pub type RequestBatcher = BatchCollector;

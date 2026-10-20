@@ -1,4 +1,4 @@
-//! Lazy headers proxy for `VertebraRequest`.
+//! Lazy headers proxy for `Request`.
 
 use bytes::Bytes;
 use pyo3::prelude::*;
@@ -27,20 +27,20 @@ pub(crate) fn decode_asgi_headers<'py>(
     PyList::new(py, &tuples)
 }
 
-#[pyclass(name = "VertebraHeaders", frozen, from_py_object)]
+#[pyclass(name = "Headers", frozen, from_py_object)]
 #[derive(Clone)]
-pub struct VertebraHeaders {
+pub struct Headers {
     raw: Bytes,
 }
 
-impl VertebraHeaders {
+impl Headers {
     pub fn new(raw: Bytes) -> Self {
         Self { raw }
     }
 }
 
 #[pymethods]
-impl VertebraHeaders {
+impl Headers {
     fn __getitem__<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyString>> {
         let key_bytes = key.as_bytes();
         for (name, value) in iter_raw_headers(&self.raw) {
@@ -120,26 +120,26 @@ impl VertebraHeaders {
         Ok(d)
     }
 
-    fn __iter__(&self) -> VertebraHeadersIter {
-        VertebraHeadersIter {
+    fn __iter__(&self) -> HeadersIterator {
+        HeadersIterator {
             raw: self.raw.clone(),
             pos: 0,
         }
     }
 
     fn __repr__(&self) -> String {
-        format!("VertebraHeaders(raw_len={})", self.raw.len())
+        format!("Headers(raw_len={})", self.raw.len())
     }
 }
 
-#[pyclass]
-pub struct VertebraHeadersIter {
+#[pyclass(name = "HeadersIterator")]
+pub struct HeadersIterator {
     raw: Bytes,
     pos: usize,
 }
 
 #[pymethods]
-impl VertebraHeadersIter {
+impl HeadersIterator {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
@@ -165,9 +165,3 @@ impl VertebraHeadersIter {
         Some(name)
     }
 }
-
-/// Domain-oriented alias for [`VertebraHeaders`].
-pub type Headers = VertebraHeaders;
-
-/// Domain-oriented alias for [`VertebraHeadersIter`].
-pub type HeadersIterator = VertebraHeadersIter;

@@ -1,8 +1,8 @@
-"""Tests for VertebraApp route registration and handler ID stability."""
+"""Tests for App route registration and handler ID stability."""
 
 import pytest
 
-from vertebra.framework._app import HandlerInfo, VertebraApp, _make_handler_id
+from vertebra.framework._app import App, HandlerInfo, _make_handler_id
 from vertebra.framework._router import handler_id
 
 
@@ -27,8 +27,8 @@ def test_handler_id_stability_method_normalized_to_upper() -> None:
 
 
 def test_handler_id_stability_path_normalized_via_app_route() -> None:
-    """Path normalization happens in VertebraApp._route, not _make_handler_id."""
-    app = VertebraApp()
+    """Path normalization happens in App._route, not _make_handler_id."""
+    app = App()
 
     @app.get("ping")
     def handler() -> str:
@@ -50,7 +50,7 @@ def test_handler_id_stability_routing_module_handler_id_matches() -> None:
 
 
 def test_vertebra_app_route_registration_get_decorator_registers_route() -> None:
-    app = VertebraApp()
+    app = App()
 
     @app.get("/ping")
     def ping() -> str:
@@ -62,7 +62,7 @@ def test_vertebra_app_route_registration_get_decorator_registers_route() -> None
 
 
 def test_vertebra_app_route_registration_multiple_methods_on_same_path() -> None:
-    app = VertebraApp()
+    app = App()
 
     @app.get("/items")
     def list_items() -> list:
@@ -78,7 +78,7 @@ def test_vertebra_app_route_registration_multiple_methods_on_same_path() -> None
 
 
 def test_vertebra_app_route_registration_handler_index_populated() -> None:
-    app = VertebraApp()
+    app = App()
 
     @app.get("/hello")
     def hello() -> str:
@@ -95,7 +95,7 @@ def test_vertebra_app_route_registration_handler_index_populated() -> None:
 
 def test_vertebra_app_route_registration_handler_index_last_registration_wins() -> None:
     """Duplicate method+path: last registration wins in handler_index."""
-    app = VertebraApp()
+    app = App()
 
     @app.get("/x")
     def first() -> str:
@@ -111,7 +111,7 @@ def test_vertebra_app_route_registration_handler_index_last_registration_wins() 
 
 
 def test_vertebra_app_route_registration_handlers_dict_populated() -> None:
-    app = VertebraApp()
+    app = App()
 
     @app.get("/test")
     def test_handler() -> str:
@@ -123,7 +123,7 @@ def test_vertebra_app_route_registration_handlers_dict_populated() -> None:
 
 
 def test_vertebra_app_route_registration_mount_records_sub_app() -> None:
-    app = VertebraApp()
+    app = App()
     sentinel = object()
     app.mount("/static", sentinel)
     assert len(app.mounts) == 1
@@ -134,7 +134,7 @@ def test_vertebra_app_route_registration_mount_records_sub_app() -> None:
 
 
 def test_vertebra_app_route_registration_mount_with_protocol() -> None:
-    app = VertebraApp()
+    app = App()
     sentinel = object()
     app.mount("/api", sentinel, protocol="wsgi")
     prefix, mounted, protocol = app.mounts[0]
@@ -149,7 +149,7 @@ def test_vertebra_app_route_registration_handler_info_is_msgspec_struct() -> Non
 
 @pytest.mark.anyio
 async def test_vertebra_app_route_registration_lifecycle_hooks_delegate_to_inner_app() -> None:
-    app = VertebraApp()
+    app = App()
     calls: list[str] = []
 
     @app.on_startup

@@ -169,4 +169,4 @@ function parseRetryDelay(response: Response, initialDelay: number, attempt: numb
   return computeBackoffDelay(attempt, initialDelay);
 }
 
-export { HttpClient, HttpClient as VertebraClient };
+export { HttpClient };

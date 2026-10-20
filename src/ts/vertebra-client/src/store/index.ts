@@ -88,4 +88,4 @@ class SessionStore {
 // Global singleton instance
 export const store = new SessionStore();
 
-export { SessionStore, SessionStore as VertebraStore };
+export { SessionStore };

@@ -25,8 +25,8 @@ pub mod server;
 #[cfg(feature = "tls")]
 pub mod tls;
 
-pub use collector::{BatchCollector, RequestBatcher};
-pub use correlation::{CorrelationSlab, InFlightRequests};
-pub use policy::{BatchPolicy, DrainPolicy};
-pub use route_table::{DynamicRouteTable, RouteTable};
-pub use router::{NativeRouter, Router};
+pub use collector::RequestBatcher;
+pub use correlation::InFlightRequests;
+pub use policy::BatchPolicy;
+pub use route_table::RouteTable;
+pub use router::Router;

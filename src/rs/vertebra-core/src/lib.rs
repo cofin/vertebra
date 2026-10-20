@@ -23,6 +23,6 @@ pub mod tiered_ring;
 pub mod transport;
 
 // Re-exports for ergonomics
-pub use bridge::{BatchBridge, BridgeResponse, LocalExchange, WriteRequest};
-pub use transport::ring_pair::{ResponseChannel, RingPair, TieredRingSet, WorkerChannel};
-pub use transport::{BatchSnapshot, RequestBatch, RequestRecord, TransportError, TransportNode};
+pub use bridge::{BatchBridge, BridgeResponse, WriteRequest};
+pub use transport::ring_pair::{RingPair, TieredRingSet};
+pub use transport::{BatchSnapshot, TransportError, TransportNode};

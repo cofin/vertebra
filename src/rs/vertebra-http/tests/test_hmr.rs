@@ -9,14 +9,14 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_tungstenite::connect_async;
 
-use vertebra_http::{config::ServerConfig, dispatcher::Dispatcher, router::NativeRouter, server};
+use vertebra_http::{config::ServerConfig, dispatcher::Dispatcher, router::Router, server};
 
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder().no_proxy().build().unwrap()
 }
 
 async fn spawn_hmr_server(dev_mode: bool) -> (std::net::SocketAddr, oneshot::Sender<()>) {
-    let router = Arc::new(NativeRouter::from_entries(Vec::new()).unwrap());
+    let router = Arc::new(Router::from_entries(Vec::new()).unwrap());
     let dispatcher = Arc::new(Dispatcher::new());
     let (collector_tx, _collector_rx) = tokio::sync::mpsc::channel(4);
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();

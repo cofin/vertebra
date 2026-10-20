@@ -11,9 +11,9 @@ use tokio::sync::oneshot;
 
 use vertebra_core::bridge::BatchBridge;
 use vertebra_http::{
-    collector::{BatchCollector, PendingRequest, PendingResponse},
+    collector::{PendingRequest, PendingResponse, RequestBatcher},
     dispatcher::Dispatcher,
-    policy::DrainPolicy,
+    policy::BatchPolicy,
 };
 
 /// Serialize collector tests to prevent cross-test bridge interference.
@@ -76,11 +76,11 @@ async fn test_drain_by_size() {
     let dispatcher = Dispatcher::new();
     let dispatcher = Arc::new(dispatcher);
 
-    let policy = DrainPolicy::Fixed {
+    let policy = BatchPolicy::Fixed {
         size: 4,
         timeout: Duration::from_secs(60),
     };
-    let (collector, tx) = BatchCollector::new(Arc::clone(&dispatcher), policy, 64);
+    let (collector, tx) = RequestBatcher::new(Arc::clone(&dispatcher), policy, 64);
     tokio::spawn(collector.run());
 
     for i in 0..4u64 {
@@ -104,11 +104,11 @@ async fn test_drain_by_timeout() {
     let dispatcher = Dispatcher::new();
     let dispatcher = Arc::new(dispatcher);
 
-    let policy = DrainPolicy::Fixed {
+    let policy = BatchPolicy::Fixed {
         size: 64,
         timeout: Duration::from_millis(5),
     };
-    let (collector, tx) = BatchCollector::new(Arc::clone(&dispatcher), policy, 64);
+    let (collector, tx) = RequestBatcher::new(Arc::clone(&dispatcher), policy, 64);
     tokio::spawn(collector.run());
 
     for i in 0..3u64 {
@@ -132,11 +132,11 @@ async fn test_no_spurious_drain() {
     let dispatcher = Dispatcher::new();
     let dispatcher = Arc::new(dispatcher);
 
-    let policy = DrainPolicy::Fixed {
+    let policy = BatchPolicy::Fixed {
         size: 64,
         timeout: Duration::from_millis(5),
     };
-    let (collector, _tx) = BatchCollector::new(Arc::clone(&dispatcher), policy, 64);
+    let (collector, _tx) = RequestBatcher::new(Arc::clone(&dispatcher), policy, 64);
     tokio::spawn(collector.run());
 
     let total = tokio::task::spawn_blocking(|| collect_all_requests(Duration::from_millis(30)))
@@ -155,11 +155,11 @@ async fn test_partial_batch_on_shutdown() {
     let dispatcher = Dispatcher::new();
     let dispatcher = Arc::new(dispatcher);
 
-    let policy = DrainPolicy::Fixed {
+    let policy = BatchPolicy::Fixed {
         size: 64,
         timeout: Duration::from_secs(60),
     };
-    let (collector, tx) = BatchCollector::new(Arc::clone(&dispatcher), policy, 64);
+    let (collector, tx) = RequestBatcher::new(Arc::clone(&dispatcher), policy, 64);
     tokio::spawn(collector.run());
 
     for i in 0..5u64 {

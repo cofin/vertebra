@@ -267,7 +267,7 @@ class HotReloadClient {
   }
 }
 
-export { HotReloadClient, HotReloadClient as VertebraHmrClient };
+export { HotReloadClient };
 
 // ---------------------------------------------------------------------------
 // Window global + auto-connect

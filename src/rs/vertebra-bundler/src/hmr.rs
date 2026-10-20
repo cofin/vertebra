@@ -55,13 +55,13 @@ impl HmrEvent {
 }
 
 /// File watcher for HMR
-pub struct HmrWatcher {
+pub struct SourceWatcher {
     debouncer: Debouncer<RecommendedWatcher>,
     event_tx: broadcast::Sender<HmrEvent>,
     watch_dirs: Vec<PathBuf>,
 }
 
-impl HmrWatcher {
+impl SourceWatcher {
     /// Create a new HMR watcher
     pub fn new(
         watch_dirs: Vec<PathBuf>,
@@ -132,9 +132,6 @@ impl HmrWatcher {
     }
 }
 
-/// Domain-oriented alias for [`HmrWatcher`].
-pub type SourceWatcher = HmrWatcher;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,7 +163,7 @@ mod tests {
         let watch_dirs = vec![PathBuf::from(".")];
         let extensions = vec!["ts".to_string(), "tsx".to_string()];
 
-        let result = HmrWatcher::new(watch_dirs, extensions, 100);
+        let result = SourceWatcher::new(watch_dirs, extensions, 100);
         assert!(result.is_ok());
     }
 }

@@ -51,7 +51,7 @@ static BRIDGE: OnceLock<BatchBridge> = OnceLock::new();
 /// through the channel.
 ///
 /// The worker calls `poll_batch()`, which receives that pre-sealed
-/// [`BatchSnapshot`] as an `Arc` shared across all `VertebraRequest`
+/// [`BatchSnapshot`] as an `Arc` shared across all `Request`
 /// proxies in the batch.
 ///
 /// # Response path
@@ -83,9 +83,6 @@ pub struct BatchWriter<'a> {
     bridge: &'a BatchBridge,
     _guard: MutexGuard<'a, ()>,
 }
-
-/// Domain-oriented alias for [`BatchBridge`].
-pub type LocalExchange = BatchBridge;
 
 impl BatchBridge {
     /// Initialize the global bridge. Call once at startup.

@@ -21,7 +21,7 @@ from vertebra.cli.theme import (
     SYM_SUCCESS,
     SYM_WARNING,
     WARNING,
-    VertebraConsole,
+    Console,
     console,
     get_shutdown_blocks,
     get_startup_blocks,
@@ -32,10 +32,10 @@ from vertebra.cli.theme import (
 )
 
 
-def _make_console() -> tuple[VertebraConsole, io.StringIO]:
-    """Create a ``VertebraConsole`` that writes to a ``StringIO`` buffer."""
+def _make_console() -> tuple[Console, io.StringIO]:
+    """Create a ``Console`` that writes to a ``StringIO`` buffer."""
     buf = io.StringIO()
-    vc = VertebraConsole(file=buf, force_terminal=True)
+    vc = Console(file=buf, force_terminal=True)
     return vc, buf
 
 
@@ -153,15 +153,15 @@ def test_console_raw_passes_through() -> None:
 
 
 def test_module_console_singleton_exists() -> None:
-    """Verify the module-level ``console`` singleton is a ``VertebraConsole``."""
-    assert isinstance(console, VertebraConsole)
+    """Verify the module-level ``console`` singleton is a ``Console``."""
+    assert isinstance(console, Console)
 
 
 def test_no_color_suppresses_ansi(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify ``NO_COLOR`` suppresses ANSI escape sequences."""
     monkeypatch.setenv("NO_COLOR", "1")
     buf = io.StringIO()
-    vc = VertebraConsole(file=buf)
+    vc = Console(file=buf)
     vc.success("done")
     output = buf.getvalue()
     assert "✓" in output
@@ -172,7 +172,7 @@ def test_no_color_suppresses_ansi(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_no_color_property(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify ``no_color`` is ``True`` when ``NO_COLOR`` is set."""
     monkeypatch.setenv("NO_COLOR", "1")
-    vc = VertebraConsole()
+    vc = Console()
     assert vc.no_color is True
 
 
@@ -180,7 +180,7 @@ def test_color_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify ``no_color`` is ``False`` when ``NO_COLOR`` is unset."""
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.delenv("FORCE_COLOR", raising=False)
-    vc = VertebraConsole()
+    vc = Console()
     assert vc.no_color is False
 
 
@@ -273,7 +273,7 @@ def test_status_context_manager_exists() -> None:
 def test_status_non_tty_prints_message() -> None:
     """Verify ``status()`` prints a static message in non-TTY mode."""
     buf = io.StringIO()
-    vc = VertebraConsole(file=buf, force_terminal=False)
+    vc = Console(file=buf, force_terminal=False)
     with vc.status("building…"):
         pass
     output = buf.getvalue()

@@ -13,6 +13,16 @@ ifndef VERBOSE
 .SILENT:
 endif
 
+# Rodete (Internal Linux) detection and overrides
+ifneq ($(shell grep -s -q "rodete" /etc/os-release && echo "yes"),)
+export NPM_CONFIG_REGISTRY=https://registry.npmjs.org
+export PIP_INDEX_URL=https://pypi.org/simple
+export UV_INDEX_URL=https://pypi.org/simple
+export UV_DEFAULT_INDEX=https://pypi.org/simple
+export CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+export CARGO_NET_GIT_FETCH_WITH_CLI=true
+endif
+
 BLUE := $(shell printf "\033[1;34m")
 GREEN := $(shell printf "\033[1;32m")
 RED := $(shell printf "\033[1;31m")
@@ -32,18 +42,48 @@ help:                                               ## Display this help text fo
 # =============================================================================
 # Setup
 # =============================================================================
+.PHONY: setup-env
+setup-env:                                          ## Configure environment (detects Rodete vs standard Linux/macOS)
+	@bash tools/scripts/setup-env.sh
+
+.PHONY: install-uv
+install-uv:                                         ## Install uv package manager
+	@echo "${INFO} Installing uv..."
+	@curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
+	@echo "${OK} UV installed successfully"
+
+.PHONY: install-bun
+install-bun:                                        ## Install Bun JavaScript runtime
+	@echo "${INFO} Installing bun..."
+	@curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1
+	@echo "${OK} Bun installed successfully"
+
+.PHONY: install-rust
+install-rust:                                       ## Install Rust toolchain via rustup
+	@echo "${INFO} Installing Rust toolchain..."
+	@curl -fsSL https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1
+	@echo "${OK} Rust installed successfully"
+
 .PHONY: install
-install: clean ts-install dev                       ## Install everything (Python + Rust + TS + native extension)
-	@echo "${INFO} Starting installation..."
+install: destroy clean setup-env                    ## Install everything (Python + Rust + TS + native extension)
+	@echo "${INFO} Starting fresh installation..."
 	@if ! command -v uv >/dev/null 2>&1; then \
-		curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1; \
+		$(MAKE) install-uv; \
+	fi
+	@if ! command -v bun >/dev/null 2>&1; then \
+		$(MAKE) install-bun; \
+	fi
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@if ! command -v cargo >/dev/null 2>&1; then \
+		$(MAKE) install-rust; \
+		if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi; \
 	fi
 	@uv python pin 3.12 >/dev/null 2>&1
 	@uv venv >/dev/null 2>&1
 	@uv sync --all-extras --dev
-	@if ! command -v cargo >/dev/null 2>&1; then \
-		curl -fsSL https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1; \
-	fi
+	@$(MAKE) ts-install
+	@$(MAKE) ts-build
+	@$(MAKE) dev
 	@echo "${OK} Installation complete"
 
 .PHONY: clean
@@ -65,7 +105,7 @@ destroy:                                            ## Destroy virtual environme
 	@rm -rf .venv && echo "${OK} Virtual environment destroyed"
 
 .PHONY: upgrade
-upgrade:                                            ## Upgrade all dependencies (Python, Rust, TS, CI)
+upgrade: setup-env                                  ## Upgrade all dependencies (Python, Rust, TS, CI)
 	@echo "${INFO} Upgrading Python dependencies (uv)..."
 	@uv lock --upgrade && uv sync --all-extras --dev
 	@echo "${INFO} Upgrading Rust dependencies (cargo)..."

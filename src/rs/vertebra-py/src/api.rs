@@ -14,8 +14,8 @@ use pyo3::prelude::*;
 use vertebra_core::bridge::{BatchBridge, BridgeResponse};
 use vertebra_core::transport::{Transport, TransportError, encode_headers_compact};
 
-use crate::batch::VertebraBatch;
-use crate::response::VertebraResponse;
+use crate::batch::RequestBatch;
+use crate::response::Response;
 
 /// Global SHM transport, set once by `init_transport(mode="shm")`.
 static SHM_TRANSPORT: OnceLock<Transport> = OnceLock::new();
@@ -81,11 +81,11 @@ pub fn init_transport(
 /// Fetch the next batch of requests as a vectorized object. GIL released.
 #[pyfunction]
 #[pyo3(name = "get_batch", signature = (timeout_ms=100))]
-pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<VertebraBatch>> {
+pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<RequestBatch>> {
     // SHM path: poll from SPSC ring
     if let Some(transport) = SHM_TRANSPORT.get() {
         let snapshot = py.detach(|| transport.poll_batch(Duration::from_millis(timeout_ms)));
-        return Ok(snapshot.map(|s| VertebraBatch { snapshot: s }));
+        return Ok(snapshot.map(|s| RequestBatch { snapshot: s }));
     }
 
     // In-process path: poll from BatchBridge
@@ -96,7 +96,7 @@ pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<VertebraBat
     })?;
 
     let snapshot = py.detach(|| bridge.poll_batch(Duration::from_millis(timeout_ms)));
-    Ok(snapshot.map(|s| VertebraBatch { snapshot: s }))
+    Ok(snapshot.map(|s| RequestBatch { snapshot: s }))
 }
 
 /// Submit processed responses back to the HTTP server.
@@ -104,7 +104,7 @@ pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<VertebraBat
 /// In SHM mode, serializes responses into the tiered response ring.
 /// In in-process mode, pushes through the BatchBridge.
 #[pyfunction]
-pub fn submit_results(py: Python<'_>, responses: Vec<Py<VertebraResponse>>) -> PyResult<()> {
+pub fn submit_results(py: Python<'_>, responses: Vec<Py<Response>>) -> PyResult<()> {
     // SHM path: write responses to tiered ring
     if let Some(transport) = SHM_TRANSPORT.get() {
         if responses.is_empty() {
@@ -184,7 +184,7 @@ pub fn submit_results(py: Python<'_>, responses: Vec<Py<VertebraResponse>>) -> P
 ///
 /// This is used for fire-and-forget asynchronous completion.
 #[pyfunction]
-pub fn submit_response(py: Python<'_>, py_resp: Py<VertebraResponse>) -> PyResult<()> {
+pub fn submit_response(py: Python<'_>, py_resp: Py<Response>) -> PyResult<()> {
     let resp = py_resp.borrow(py);
 
     // SHM path: write response to tiered ring
@@ -277,10 +277,10 @@ pub fn clear_request_notification() -> PyResult<()> {
 
 #[pyfunction]
 #[pyo3(name = "try_get_batch")]
-pub fn try_get_batch() -> PyResult<Option<VertebraBatch>> {
+pub fn try_get_batch() -> PyResult<Option<RequestBatch>> {
     if let Some(transport) = SHM_TRANSPORT.get() {
         let snapshot = transport.poll_batch_async();
-        return Ok(snapshot.map(|s| VertebraBatch { snapshot: s }));
+        return Ok(snapshot.map(|s| RequestBatch { snapshot: s }));
     }
     Ok(None)
 }

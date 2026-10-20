@@ -17,13 +17,13 @@ use tokio::task::JoinHandle;
 use vertebra_core::bridge::{BatchBridge, BridgeResponse};
 use vertebra_http::{
     backpressure::BackpressureConfig,
-    collector::{BatchCollector, PendingResponse},
+    collector::{PendingResponse, RequestBatcher},
     config::ServerConfig,
     dispatcher::Dispatcher,
-    policy::DrainPolicy,
+    policy::BatchPolicy,
     response::encode_response_headers,
     route_table::RouteTable,
-    router::NativeRouter,
+    router::Router,
     server,
 };
 
@@ -88,13 +88,13 @@ async fn spawn_test_server_with(bp: Option<BackpressureConfig>) -> TestServer {
     table.insert("GET", "/hello");
     table.insert("POST", "/echo");
 
-    let router = Arc::new(NativeRouter::from_entries(table.into_entries()).unwrap());
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
     let dispatcher = match bp {
         Some(cfg) => Arc::new(Dispatcher::new().with_backpressure(cfg)),
         None => Arc::new(Dispatcher::new()),
     };
     let (collector, collector_tx) =
-        BatchCollector::new(Arc::clone(&dispatcher), DrainPolicy::default_fixed(), 128);
+        RequestBatcher::new(Arc::clone(&dispatcher), BatchPolicy::default_fixed(), 128);
 
     let collector_handle = tokio::spawn(collector.run());
     let running = Arc::new(AtomicBool::new(true));

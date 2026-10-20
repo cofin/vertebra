@@ -1,4 +1,4 @@
-"""Lazy WSGI environ mapping over VertebraRequest."""
+"""Lazy WSGI environ mapping over Request."""
 
 import sys
 from collections.abc import Iterator, Mapping
@@ -87,7 +87,7 @@ class BodyStream:
 
 
 class WsgiEnviron(Mapping[str, Any]):
-    """Lazy read-only WSGI environ mapping backed by a VertebraRequest."""
+    """Lazy read-only WSGI environ mapping backed by a Request."""
 
     __slots__ = ("_cache", "_req")
 

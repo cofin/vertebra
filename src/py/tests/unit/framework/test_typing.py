@@ -62,10 +62,11 @@ def test_public_typing_facade_unknown_attr_raises():
         typing.NonExistentType  # noqa: B018
 
 
-def test_optional_dependency_canonical_name_and_alias():
-    from vertebra._typing import OptionalDependency, OptionalDependencyFlag
+def test_optional_dependency_canonical_name():
+    from vertebra._typing import OptionalDependency
 
-    assert OptionalDependency is OptionalDependencyFlag
+    flag = OptionalDependency("msgspec")
+    assert bool(flag) is True
 
 
 def test_lazy_vertebra_import_and_native_server_import():
@@ -80,7 +81,7 @@ def test_lazy_vertebra_import_and_native_server_import():
         "'vertebra.framework._app', 'vertebra.framework._router') if m in sys.modules]; "
         "assert not heavy, f'Unexpected eager imports: {heavy}'; "
         "import vertebra.server._native; "
-        "assert vertebra.App is vertebra.VertebraApp"
+        "assert vertebra.App is not None"
     )
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert res.returncode == 0, res.stderr

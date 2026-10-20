@@ -27,7 +27,6 @@ __all__ = (
     "SYM_INFO",
     "SYM_SUCCESS",
     "SYM_WARNING",
-    "VertebraConsole",
     "WARNING",
     "console",
     "get_shutdown_blocks",
@@ -135,9 +134,6 @@ class Console:
             )
         self._console.print(f"  [{ACCENT}]{SYM_ELLIPSIS}[/{ACCENT}] {msg}")
         return _NoopContext()
-
-
-VertebraConsole = Console
 
 
 def register_startup_block(name: str, provider: Callable[[], Any]) -> None:

@@ -1,9 +1,9 @@
-"""VertebraApp benchmark application.
+"""Vertebra App benchmark application.
 
 Provides three exports:
-    native_app - VertebraApp with native handlers (batch dispatch)
-    asgi_app   - VertebraApp mounting the pure ASGI app under "/"
-    wsgi_app   - VertebraApp mounting the pure WSGI app under "/"
+    native_app - App with native handlers (batch dispatch)
+    asgi_app   - App mounting the pure ASGI app under "/"
+    wsgi_app   - App mounting the pure WSGI app under "/"
 """
 
 from __future__ import annotations
@@ -22,13 +22,9 @@ from tools.benchmarks.apps.asgi import (
     app as raw_asgi_app,
 )
 from tools.benchmarks.apps.wsgi import app as raw_wsgi_app
-from vertebra.framework._app import VertebraApp
+from vertebra.framework._app import App
 
-# =============================================================================
-# Native app: handlers registered via decorators
-# =============================================================================
-
-native_app = VertebraApp()
+native_app = App()
 
 
 @native_app.get("/hello")
@@ -77,16 +73,8 @@ async def io10() -> bytes:
     return b"ok"
 
 
-# =============================================================================
-# ASGI app: mounts the pure ASGI function under "/"
-# =============================================================================
-
-asgi_app = VertebraApp()
+asgi_app = App()
 asgi_app.mount("/", raw_asgi_app, protocol="asgi")
 
-# =============================================================================
-# WSGI app: mounts the pure WSGI function under "/"
-# =============================================================================
-
-wsgi_app = VertebraApp()
+wsgi_app = App()
 wsgi_app.mount("/", raw_wsgi_app, protocol="wsgi")

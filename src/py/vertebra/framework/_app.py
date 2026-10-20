@@ -19,7 +19,7 @@ from vertebra.framework._router import (
     _normalize_prefix,
 )
 
-__all__ = ("App", "HandlerInfo", "LifecycleHook", "VertebraApp", "_make_handler_id")
+__all__ = ("App", "HandlerInfo", "LifecycleHook", "_make_handler_id")
 
 _FNV_OFFSET = 0xCBF29CE484222325
 _FNV_PRIME = 0x100000001B3
@@ -180,9 +180,6 @@ class App:
             result = hook()
             if inspect.isawaitable(result):
                 await result
-
-
-VertebraApp = App
 
 
 def _fnv1a_write(h: int, data: bytes) -> int:

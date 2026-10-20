@@ -8,7 +8,7 @@ import msgspec
 from vertebra.builder._codegen._extractor import TypeExtractor
 from vertebra.builder._codegen._ir import AnnotatedType, ArrayType, ObjectType, PrimitiveType, UnionType
 from vertebra.builder._codegen._metadata import RouteCollector
-from vertebra.framework._app import VertebraApp
+from vertebra.framework._app import App
 
 
 class Address(msgspec.Struct):
@@ -73,7 +73,7 @@ def test_extract_dataclass_runtime_model() -> None:
 
 
 def test_collect_routes_from_app() -> None:
-    app = VertebraApp()
+    app = App()
 
     @app.get("/users/{user_id}")
     def get_user(user_id: int) -> SimpleUser:
@@ -91,7 +91,7 @@ def test_collect_routes_from_app() -> None:
 
 
 def test_collect_routes_uses_unknown_for_unannotated_values() -> None:
-    app = VertebraApp()
+    app = App()
 
     @app.post("/submit")
     def submit(payload, count: int) -> str:  # noqa: ANN001

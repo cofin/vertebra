@@ -7,8 +7,6 @@ __all__ = (
     "AsgiReceive",
     "AsgiResponse",
     "AsgiSend",
-    "ReceiveChannel",
-    "SendCollector",
 )
 
 _STATE_BODY = 0
@@ -18,7 +16,7 @@ _DISCONNECT_MSG: dict[str, Any] = {"type": "http.disconnect"}
 
 @dataclasses.dataclass(slots=True)
 class AsgiResponse:
-    """Duck-type compatible with VertebraResponse for the batch runner."""
+    """Duck-type compatible with Response for the batch runner."""
 
     status: int
     headers: Any
@@ -46,9 +44,6 @@ class AsgiReceive:
                 "more_body": False,
             }
         return _DISCONNECT_MSG
-
-
-ReceiveChannel = AsgiReceive
 
 
 class AsgiSend:
@@ -95,6 +90,3 @@ class AsgiSend:
         else:
             msg = f"AsgiSend received unexpected ASGI message type: {msg_type!r}"
             raise RuntimeError(msg)
-
-
-SendCollector = AsgiSend

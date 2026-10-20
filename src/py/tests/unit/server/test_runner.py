@@ -9,7 +9,7 @@ import pytest
 
 
 class FakeRequest:
-    """Minimal request stub matching VertebraRequest interface."""
+    """Minimal request stub matching Request interface."""
 
     def __init__(
         self,
@@ -31,7 +31,7 @@ class FakeRequest:
 
 
 class FakeResponse:
-    """Minimal response stub matching VertebraResponse interface."""
+    """Minimal response stub matching Response interface."""
 
     def __init__(self, status: int = 200, body: bytes = b"", request_id: int = 0, headers: "list | None" = None):
         self.status = status
@@ -42,9 +42,9 @@ class FakeResponse:
 
 @pytest.fixture()
 def scheduler():
-    from vertebra.server._native import CallbackScheduler
+    from vertebra.server._native import AsyncRuntime
 
-    s = CallbackScheduler()
+    s = AsyncRuntime()
     yield s
     s.stop()
 

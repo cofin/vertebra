@@ -22,13 +22,11 @@ from typing import TYPE_CHECKING, Any
 from vertebra.utils.serializers._json import encode_json_bytes
 
 if TYPE_CHECKING:
-    from vertebra._vertebra import VertebraBatch, VertebraRequest, VertebraResponse
+    from vertebra._vertebra import Request, RequestBatch, Response
 
 __all__ = (
     "AsyncRuntime",
     "BatchDispatchPlan",
-    "CallbackScheduler",
-    "_PartitionedBatch",
     "run_worker",
 )
 
@@ -161,9 +159,6 @@ class AsyncRuntime:
         return futures
 
 
-CallbackScheduler = AsyncRuntime
-
-
 @dataclass(slots=True)
 class BatchDispatchPlan:
     """Result of partitioning a batch into dispatch groups."""
@@ -174,15 +169,12 @@ class BatchDispatchPlan:
     unmatched: list[tuple[int, Any]] = field(default_factory=list)
 
 
-_PartitionedBatch = BatchDispatchPlan
-
-
 def run_worker(
-    handlers: "dict[int, Callable[[VertebraRequest], VertebraResponse]]",
+    handlers: "dict[int, Callable[[Request], Response]]",
     *,
     mounts: "list[tuple[str, Any, str]] | None" = None,
     batch_timeout_ms: int = 100,
-    error_handler: "Callable[[Exception, VertebraRequest], VertebraResponse] | None" = None,
+    error_handler: "Callable[[Exception, Request], Response] | None" = None,
     worker_count: int | None = None,
 ) -> None:
     """Execute the batch runner loop with Unified Dispatch Architecture.
@@ -195,7 +187,7 @@ def run_worker(
     """
     global _RUNNING, _wsgi_executor
     _ = error_handler
-    from vertebra._vertebra import VertebraResponse as VR
+    from vertebra._vertebra import Response as VR
     from vertebra._vertebra import get_batch, get_request_notify_fd, init_transport
 
     _install_signal_handlers()
@@ -227,7 +219,7 @@ def run_worker(
     for handler in handlers.values():
         _handler_dispatch_spec(handler)
 
-    scheduler = CallbackScheduler()
+    scheduler = AsyncRuntime()
 
     threads_env = os.environ.get("VERTEBRA_THREADS")
     default_threads = int(threads_env) if threads_env else (os.cpu_count() or 1)
@@ -331,7 +323,7 @@ def _instantiate_mount_runners(
 
 
 def _partition_batch(
-    batch: "list[Any] | VertebraBatch",
+    batch: "list[Any] | RequestBatch",
     handlers: dict[int, Any],
     mount_runners: list[tuple[str, Any, str]],
 ) -> BatchDispatchPlan:
@@ -579,7 +571,7 @@ async def _shm_worker_loop(
 ) -> None:
     """Run the asyncio-driven SHM worker loop using eventfd notifications."""
     from vertebra._vertebra import (
-        VertebraResponse as VR,
+        Response as VR,
     )
     from vertebra._vertebra import (
         clear_request_notification,
@@ -731,7 +723,7 @@ def _call_handler(handler: Any, request: Any, *, loop: asyncio.AbstractEventLoop
 
 
 def _coerce_response(raw: Any, request_id: int, vr_cls: Any) -> Any:
-    """Turn a handler return value into a VertebraResponse."""
+    """Turn a handler return value into a Response."""
     if isinstance(raw, vr_cls):
         if raw.request_id == 0:
             try:
