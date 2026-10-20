@@ -27,7 +27,13 @@ from collections.abc import Iterable
 from typing import Any
 
 from vertebra.server._asgi._adapter import AsgiAdapter
-from vertebra.server._asgi._queues import AsgiResponse
+from vertebra.server._asgi._queues import (
+    DEFAULT_STREAM_HIGH_WATERMARK,
+    DEFAULT_STREAM_LOW_WATERMARK,
+    DEFAULT_STREAM_QUEUE_MAXSIZE,
+    AsgiResponse,
+    AsgiStreamQueuePair,
+)
 from vertebra.server._native import AsyncRuntime
 
 __all__ = ("AsgiRunner",)
@@ -132,6 +138,28 @@ class AsgiRunner:
             self._scheduler.stop()
         elif self._owns_loop:
             self._loop.close()
+
+    def create_stream_queues(
+        self,
+        maxsize: int = DEFAULT_STREAM_QUEUE_MAXSIZE,
+        *,
+        high_watermark: int = DEFAULT_STREAM_HIGH_WATERMARK,
+        low_watermark: int = DEFAULT_STREAM_LOW_WATERMARK,
+    ) -> AsgiStreamQueuePair:
+        """Create a bounded AsgiStreamQueuePair for SSE or WebSocket streaming."""
+        return AsgiStreamQueuePair(
+            maxsize=maxsize,
+            high_watermark=high_watermark,
+            low_watermark=low_watermark,
+        )
+
+    async def run_stream_session(
+        self,
+        scope: dict[str, Any],
+        queues: AsgiStreamQueuePair,
+    ) -> None:
+        """Run the wrapped ASGI application against a bounded AsgiStreamQueuePair."""
+        await self._adapter._app(scope, queues.receive, queues.send)
 
     def _make_dispatch_coro(self, request: Any) -> Any:
         """Build the dispatch coroutine that runs the ASGI app and submits its response."""

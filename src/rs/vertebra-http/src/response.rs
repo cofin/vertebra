@@ -102,7 +102,7 @@ pub async fn handle(
     // permit before doing any real work; hold it for the lifetime of the
     // request via `_permit`.
     let _permit = if let Some(controller) = state.dispatcher.backpressure() {
-        match controller.try_acquire().await {
+        match controller.try_acquire_for_path(req.uri().path()).await {
             Ok(permit) => Some(permit),
             Err(reason) => return Ok(rejection_response(reason)),
         }
@@ -210,6 +210,9 @@ fn rejection_response(reason: RejectionReason) -> HyperResponse {
     let (status, msg) = match reason {
         RejectionReason::Saturated => (StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable"),
         RejectionReason::QueueTimeout => (StatusCode::SERVICE_UNAVAILABLE, "Server Busy"),
+        RejectionReason::StreamLimitExceeded => {
+            (StatusCode::SERVICE_UNAVAILABLE, "Stream Limit Exceeded")
+        }
         RejectionReason::CircuitOpen => (StatusCode::TOO_MANY_REQUESTS, "Too Many Requests"),
     };
     Response::builder()
