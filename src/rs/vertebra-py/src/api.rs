@@ -9,9 +9,13 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 
 use vertebra_core::bridge::{BatchBridge, BridgeResponse};
+use vertebra_core::ipc::{
+    FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING, RESPONSE_SLOT_HEADER_LEN, ResponseSlot,
+};
 use vertebra_core::transport::{Transport, TransportError, encode_headers_compact};
 
 use crate::batch::RequestBatch;
@@ -283,6 +287,138 @@ pub fn try_get_batch() -> PyResult<Option<RequestBatch>> {
         return Ok(snapshot.map(|s| RequestBatch { snapshot: s }));
     }
     Ok(None)
+}
+
+/// Encode and submit a raw buffer-protocol response directly into `ResponseSlot` wire frames.
+///
+/// Payloads fitting within `slot_capacity` emit a single unary slot frame; payloads exceeding
+/// `slot_capacity` automatically split into `FLAG_STREAMING | FLAG_HEADERS_SENT` ->
+/// `FLAG_STREAMING` -> `FLAG_STREAMING | FLAG_FINAL` chunks without intermediate payload copies.
+#[pyfunction]
+#[pyo3(
+    name = "submit_raw_response",
+    signature = (request_id, status, headers, body, flags=FLAG_FINAL, slot_capacity=16384)
+)]
+pub fn submit_raw_response(
+    py: Python<'_>,
+    request_id: u64,
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: &Bound<'_, PyAny>,
+    flags: u16,
+    slot_capacity: usize,
+) -> PyResult<Vec<Vec<u8>>> {
+    let py_buf = PyBuffer::<u8>::get(body)?;
+    let owned_fallback: Option<Vec<u8>> = if py_buf.is_c_contiguous() {
+        None
+    } else {
+        Some(py_buf.to_vec(py)?)
+    };
+
+    let body_slice: &[u8] = match &owned_fallback {
+        Some(vec) => vec.as_slice(),
+        None => {
+            let len = py_buf.item_count();
+            if len == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(py_buf.buf_ptr() as *const u8, len) }
+            }
+        }
+    };
+
+    let cap = slot_capacity.max(RESPONSE_SLOT_HEADER_LEN + 64);
+    let single_size = ResponseSlot::encoded_size(&headers, body_slice);
+    let mut encoded_frames: Vec<Vec<u8>> = Vec::new();
+
+    if single_size <= cap && (flags & FLAG_STREAMING) == 0 {
+        let mut frame = vec![0u8; single_size];
+        ResponseSlot::encode_raw_parts_into(
+            request_id,
+            status,
+            flags | FLAG_FINAL,
+            &headers,
+            body_slice,
+            &mut frame,
+        )
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+        if let Some(transport) = SHM_TRANSPORT.get() {
+            let headers_raw = encode_headers_compact(
+                &headers
+                    .iter()
+                    .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
+                    .collect::<Vec<_>>(),
+            );
+            let mut pending_notify = false;
+            let _ = send_shm_response_detached(
+                transport,
+                &mut pending_notify,
+                request_id,
+                status,
+                &headers_raw,
+                body_slice,
+            );
+            let _ = flush_shm_response_notification(transport, &mut pending_notify);
+        }
+
+        encoded_frames.push(frame);
+        return Ok(encoded_frames);
+    }
+
+    let first_overhead = ResponseSlot::encoded_size(&headers, &[]);
+    let first_max_body = cap.saturating_sub(first_overhead).max(1);
+    let subsequent_overhead = ResponseSlot::encoded_size(&[], &[]);
+    let subsequent_max_body = cap.saturating_sub(subsequent_overhead).max(1);
+
+    let mut offset = 0usize;
+    let total = body_slice.len();
+    let mut is_first = true;
+
+    while offset < total || is_first {
+        let chunk_headers: &[(String, String)] = if is_first { &headers } else { &[] };
+        let max_chunk = if is_first {
+            first_max_body
+        } else {
+            subsequent_max_body
+        };
+        let end = (offset + max_chunk).min(total);
+        let chunk = &body_slice[offset..end];
+        let is_last = end >= total;
+
+        let mut chunk_flags = FLAG_STREAMING;
+        if is_first {
+            chunk_flags |= FLAG_HEADERS_SENT;
+        }
+        if is_last {
+            chunk_flags |= FLAG_FINAL;
+        }
+
+        let frame_size = ResponseSlot::encoded_size(chunk_headers, chunk);
+        let mut frame = vec![0u8; frame_size];
+        ResponseSlot::encode_raw_parts_into(
+            request_id,
+            status,
+            chunk_flags,
+            chunk_headers,
+            chunk,
+            &mut frame,
+        )
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+        encoded_frames.push(frame);
+        offset = end;
+        is_first = false;
+    }
+
+    if let Some(transport) = SHM_TRANSPORT.get() {
+        for frame in &encoded_frames {
+            let _ = transport.send_response_bytes(frame);
+        }
+        let _ = transport.notify_response();
+    }
+
+    Ok(encoded_frames)
 }
 
 fn flush_shm_response_notification(

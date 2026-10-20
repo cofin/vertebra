@@ -1,11 +1,12 @@
 ---
 type: Guide
 title: "Python Server, Worker Loop & Protocol Adapters Domain"
-description: "Canonical domain types for Vertebra's Python worker runtime, vectorized batch dispatch plan, ASGI/WSGI adapters, and process supervision."
+description: "Canonical domain types for Vertebra's Python worker runtime, AsgiEventLoopPool, vectorized batch dispatch plan, ASGI/WSGI adapters, and process supervision."
 status: stable
-tags: [domains, server, worker, asgi, wsgi]
+tags: [domains, server, worker, asgi, wsgi, free-threaded]
 sources:
   - resource: src/py/vertebra/server/_native.py
+  - resource: src/py/vertebra/server/_runtime_tuning.py
   - resource: src/py/vertebra/server/_asgi/_runner.py
   - resource: src/py/vertebra/server/_asgi/_queues.py
   - resource: src/py/vertebra/server/_wsgi/_adapter.py
@@ -17,16 +18,17 @@ sources:
 
 # Python Server, Worker Loop & Protocol Adapters Domain
 
-[`vertebra.server`](../../../../../src/py/vertebra/server/__init__.py) and [`vertebra.supervisor`](../../../../../src/py/vertebra/supervisor/__init__.py) host the embedded and multi-process Python worker loops, vectorized batch partitioning, task-free ASGI 3.0 runner, synchronous PEP 3333 WSGI adapter, and process supervision utilities.
+[`vertebra.server`](../../../../../src/py/vertebra/server/__init__.py) and [`vertebra.supervisor`](../../../../../src/py/vertebra/supervisor/__init__.py) host the embedded and multi-process Python worker loops, free-threaded event-loop pooling, vectorized batch partitioning, task-free ASGI 3.0 runner, synchronous PEP 3333 WSGI adapter, and process supervision utilities.
 
-## 1. Worker Loop & Vectorized Batch Dispatch (`_native.py`, `supervisor/_worker.py`)
+## 1. Worker Loop, Runtime Tuning & Vectorized Batch Dispatch (`_native.py`, `_runtime_tuning.py`, `supervisor/_worker.py`)
 
 | Symbol | Source | Responsibility |
 |---|---|---|
 | [`AsyncRuntime`](../../../../../src/py/vertebra/server/_native.py) | `vertebra.server._native` | Dedicated background `asyncio` event loop thread supporting single-wakeup vectorized batch execution (`spawn_batch`, `schedule_batch`, `spawn`, `schedule`). |
+| [`AsgiEventLoopPool`](../../../../../src/py/vertebra/server/_runtime_tuning.py) / [`apply_runtime_tuning`](../../../../../src/py/vertebra/server/_runtime_tuning.py) | `vertebra.server._runtime_tuning` | Multi-thread `asyncio` event-loop pool (`num_loops=N` under Python `3.14t`) and startup GC/allocator tuning (`gc.set_threshold(50_000, 20, 20)`, `gc.freeze()`, `MALLOC_ARENA_MAX=2`). |
 | [`BatchDispatchPlan`](../../../../../src/py/vertebra/server/_native.py) | `vertebra.server._native` | Partitions an incoming `RequestBatch` via `_partition_batch()` into `sync_native`, `async_native`, `mounts`, and `unmatched`. |
 | [`run_worker`](../../../../../src/py/vertebra/server/_native.py) | `vertebra.server._native` | Unified batch runner loop supporting both in-process `BatchBridge` (`get_batch` / `submit_response`) and multi-process SHM (`_shm_worker_loop`, `try_get_batch`). |
-| [`WorkerProcess`](../../../../../src/py/vertebra/supervisor/_worker.py) | `vertebra.supervisor._worker` | Subprocess worker entry point attaching to inherited SHM file descriptors and invoking `run_worker`. |
+| [`WorkerProcess`](../../../../../src/py/vertebra/supervisor/_worker.py) | `vertebra.supervisor._worker` | Subprocess worker entry point supporting `worker_mode="process"` or `"thread"` and attaching to inherited SHM file descriptors. |
 
 ## 2. ASGI 3.0 & WSGI Protocol Adapters (`_asgi/`, `_wsgi/`, `asgi_scope.rs`, `wsgi_environ.rs`)
 

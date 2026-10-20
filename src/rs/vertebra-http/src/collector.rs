@@ -4,13 +4,128 @@
 //! 1. The slot count reaches `policy.batch_size()`, or
 //! 2. `policy.timeout()` has elapsed since the first request in the current batch.
 
+use std::convert::Infallible;
 use std::sync::Arc;
 
+use bytes::Bytes;
+use http::HeaderMap;
+use hyper::body::Frame;
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 use crate::dispatcher::Dispatcher;
 use crate::policy::BatchPolicy;
+
+/// Wrapper around a bounded frame receiver for progressive HTTP response streaming.
+pub struct PendingResponseBody {
+    rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>,
+}
+
+impl PendingResponseBody {
+    /// Wrap a frame receiver channel for streaming responses.
+    pub fn new(rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>) -> Self {
+        Self { rx }
+    }
+
+    /// Consume the wrapper and return the underlying receiver.
+    pub fn into_inner(self) -> mpsc::Receiver<Result<Frame<Bytes>, Infallible>> {
+        self.rx
+    }
+}
+
+impl std::fmt::Debug for PendingResponseBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingResponseBody")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Progressive response frame collector that either buffers in memory or forwards
+/// `Frame::data` and `Frame::trailers` immediately over a bounded `mpsc::Sender`.
+pub struct ResponseCollector {
+    chunks: Vec<Bytes>,
+    trailers: Option<HeaderMap>,
+    stream_tx: Option<mpsc::Sender<Result<Frame<Bytes>, Infallible>>>,
+}
+
+impl Default for ResponseCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ResponseCollector {
+    /// Create an in-memory collector.
+    pub fn new() -> Self {
+        Self {
+            chunks: Vec::new(),
+            trailers: None,
+            stream_tx: None,
+        }
+    }
+
+    /// Create a streaming collector that forwards frames immediately over `tx`.
+    pub fn with_stream_sender(tx: mpsc::Sender<Result<Frame<Bytes>, Infallible>>) -> Self {
+        Self {
+            chunks: Vec::new(),
+            trailers: None,
+            stream_tx: Some(tx),
+        }
+    }
+
+    /// Push a body data chunk to the stream channel or in-memory buffer.
+    pub async fn push_chunk(
+        &self,
+        chunk: Bytes,
+    ) -> Result<(), mpsc::error::SendError<Result<Frame<Bytes>, Infallible>>> {
+        if let Some(tx) = &self.stream_tx {
+            tx.send(Ok(Frame::data(chunk))).await?;
+        }
+        Ok(())
+    }
+
+    /// Push trailing headers (`Frame::trailers`) to the stream channel.
+    pub async fn push_trailers(
+        &self,
+        trailers: HeaderMap,
+    ) -> Result<(), mpsc::error::SendError<Result<Frame<Bytes>, Infallible>>> {
+        if let Some(tx) = &self.stream_tx {
+            tx.send(Ok(Frame::trailers(trailers))).await?;
+        }
+        Ok(())
+    }
+
+    /// Append a chunk to the in-memory buffer (synchronous collection path).
+    pub fn collect_chunk(&mut self, chunk: Bytes) {
+        self.chunks.push(chunk);
+    }
+
+    /// Set trailing headers on the in-memory collector.
+    pub fn set_trailers(&mut self, trailers: HeaderMap) {
+        self.trailers = Some(trailers);
+    }
+
+    /// Return trailing headers if any were collected.
+    pub fn trailers(&self) -> Option<&HeaderMap> {
+        self.trailers.as_ref()
+    }
+
+    /// Consume buffered chunks into a single `Bytes` buffer.
+    pub fn into_bytes(self) -> Bytes {
+        if self.chunks.is_empty() {
+            return Bytes::new();
+        }
+        if self.chunks.len() == 1 {
+            return self.chunks.into_iter().next().unwrap();
+        }
+        let total: usize = self.chunks.iter().map(Bytes::len).sum();
+        let mut out = Vec::with_capacity(total);
+        for chunk in self.chunks {
+            out.extend_from_slice(&chunk);
+        }
+        Bytes::from(out)
+    }
+}
 
 /// A single request item queued for batching.
 #[derive(Debug)]
@@ -35,12 +150,39 @@ pub struct PendingRequest {
     pub reply: tokio::sync::oneshot::Sender<PendingResponse>,
 }
 
-/// A completed response returned from a Python worker through the ring buffer.
+/// A completed or streaming response returned from a Python worker through the ring buffer.
 #[derive(Debug)]
 pub struct PendingResponse {
     pub status: u16,
     pub headers_mp: bytes::Bytes,
     pub body: bytes::Bytes,
+    pub stream_rx: Option<PendingResponseBody>,
+}
+
+impl PendingResponse {
+    /// Construct a unary in-memory response.
+    pub fn unary(status: u16, headers_mp: bytes::Bytes, body: bytes::Bytes) -> Self {
+        Self {
+            status,
+            headers_mp,
+            body,
+            stream_rx: None,
+        }
+    }
+
+    /// Construct a progressive streaming response.
+    pub fn streaming(
+        status: u16,
+        headers_mp: bytes::Bytes,
+        rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>,
+    ) -> Self {
+        Self {
+            status,
+            headers_mp,
+            body: Bytes::new(),
+            stream_rx: Some(PendingResponseBody::new(rx)),
+        }
+    }
 }
 
 /// A batch ready to be pushed to the dispatcher.

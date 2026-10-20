@@ -1,0 +1,113 @@
+"""Unit tests for zero-copy Py_buffer response submission and Request.body_view."""
+
+from __future__ import annotations
+
+import pytest
+
+from vertebra._vertebra import Request, Response, submit_raw_response
+
+
+def test_request_body_view_returns_readonly_memoryview() -> None:
+    """Verify Request.body_view exposes a read-only memoryview matching Request.body."""
+    payload = b'{"event":"zero-copy","count":42}'
+    req = Request.from_parts("POST", "/ingest", payload)
+
+    view = req.body_view
+    assert isinstance(view, memoryview)
+    assert view.readonly is True
+    assert bytes(view) == payload
+    assert req.body == payload
+
+    with pytest.raises(TypeError):
+        view[0] = 0x7F
+
+
+def test_request_body_view_empty_body_returns_empty_memoryview() -> None:
+    """Verify Request.body_view returns an empty read-only memoryview when body is empty."""
+    req = Request.from_parts("GET", "/empty", b"")
+    view = req.body_view
+    assert isinstance(view, memoryview)
+    assert view.readonly is True
+    assert len(view) == 0
+    assert req.body is None
+
+
+def test_response_from_buffer_accepts_bytes_bytearray_and_memoryview() -> None:
+    """Verify Response.from_buffer reads contiguous bytes, bytearray, and sliced memoryview."""
+    raw_bytearray = bytearray(b"prefix-payload-suffix")
+    sliced_view = memoryview(raw_bytearray)[7:14]
+
+    resp_mv = Response.from_buffer(
+        201,
+        sliced_view,
+        headers=[("content-type", "text/plain")],
+        request_id=55,
+    )
+    assert resp_mv.status == 201
+    assert resp_mv.body == b"payload"
+    assert resp_mv.request_id == 55
+    assert resp_mv.headers == [(b"content-type", b"text/plain")]
+
+    resp_ba = Response.from_buffer(200, raw_bytearray, request_id=56)
+    assert resp_ba.body == b"prefix-payload-suffix"
+
+    resp_bytes = Response.from_buffer(200, b"direct-bytes", request_id=57)
+    assert resp_bytes.body == b"direct-bytes"
+
+
+def test_submit_raw_response_unary_and_auto_chunked_streaming() -> None:
+    """Verify submit_raw_response encodes unary slots and chunks >16 KiB buffers with FLAG_STREAMING."""
+    small_view = memoryview(b"compact-unary-payload")
+    frames = submit_raw_response(
+        request_id=101,
+        status=200,
+        headers=[("content-type", "application/octet-stream")],
+        body=small_view,
+        flags=2,
+        slot_capacity=16384,
+    )
+    assert len(frames) == 1
+
+    large_payload = bytearray(i % 251 for i in range(256 * 1024))
+    stream_frames = submit_raw_response(
+        request_id=202,
+        status=200,
+        headers=[("content-type", "application/octet-stream"), ("x-stream", "true")],
+        body=memoryview(large_payload),
+        flags=2,
+        slot_capacity=16384,
+    )
+    assert len(stream_frames) > 16
+
+    reassembled = bytearray()
+    for idx, frame in enumerate(stream_frames):
+        req_id = int.from_bytes(frame[0:8], "little")
+        status = int.from_bytes(frame[8:10], "little")
+        flags = int.from_bytes(frame[10:12], "little")
+        header_count = int.from_bytes(frame[12:14], "little")
+        assert req_id == 202
+        assert status == 200
+        assert (flags & 1) != 0
+
+        if idx == 0:
+            assert (flags & (1 << 4)) != 0
+            assert header_count == 2
+        else:
+            assert header_count == 0
+
+        if idx == len(stream_frames) - 1:
+            assert (flags & (1 << 1)) != 0
+        else:
+            assert (flags & (1 << 1)) == 0
+
+        offset = 16
+        for _ in range(header_count):
+            klen = int.from_bytes(frame[offset : offset + 2], "little")
+            offset += 2 + klen
+            vlen = int.from_bytes(frame[offset : offset + 2], "little")
+            offset += 2 + vlen
+        blen = int.from_bytes(frame[offset : offset + 4], "little")
+        offset += 4
+        reassembled.extend(frame[offset : offset + blen])
+
+    assert bytes(reassembled) == bytes(large_payload)

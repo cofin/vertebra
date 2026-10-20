@@ -171,7 +171,7 @@ impl Dispatcher {
         match self.inner.mode {
             DispatchMode::SharedMemory => {
                 if let Some(shm) = &self.inner.shm_dispatcher {
-                    let shard_idx = (correlation_id & 0xFF) as usize;
+                    let shard_idx = (correlation_id as usize) & (shm.shard_count() - 1);
                     let internal_id = correlation_id >> 8;
                     let mut slab = shm.correlation_shard(shard_idx).lock().unwrap();
                     if !slab.complete(internal_id, response) {
@@ -198,8 +198,9 @@ impl Dispatcher {
         match self.inner.mode {
             DispatchMode::SharedMemory => {
                 if let Some(shm) = &self.inner.shm_dispatcher {
+                    let shard_mask = shm.shard_count() - 1;
                     for (correlation_id, response) in responses {
-                        let shard_idx = (correlation_id & 0xFF) as usize;
+                        let shard_idx = (correlation_id as usize) & shard_mask;
                         let internal_id = correlation_id >> 8;
                         let mut slab = shm.correlation_shard(shard_idx).lock().unwrap();
                         if !slab.complete(internal_id, response) {
@@ -221,6 +222,15 @@ impl Dispatcher {
                     }
                 }
             }
+        }
+    }
+
+    /// Forward a raw SHM `ResponseSlot` frame to the SHM dispatcher.
+    pub fn handle_raw_response_slot(&self, raw_slot: &[u8]) -> bool {
+        if let Some(shm) = &self.inner.shm_dispatcher {
+            shm.handle_raw_response_slot(raw_slot)
+        } else {
+            false
         }
     }
 }

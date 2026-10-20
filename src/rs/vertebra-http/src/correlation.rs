@@ -115,6 +115,7 @@ impl InFlightRequests {
                     status: 504,
                     headers_mp: bytes::Bytes::new(),
                     body: bytes::Bytes::from_static(b"Gateway Timeout"),
+                    stream_rx: None,
                 });
                 self.free_list.push(index as u32);
             }
@@ -146,6 +147,7 @@ impl InFlightRequests {
                     status: 502,
                     headers_mp: bytes::Bytes::new(),
                     body: bytes::Bytes::from_static(b"Bad Gateway"),
+                    stream_rx: None,
                 });
                 self.free_list.push(index as u32);
             }
@@ -190,6 +192,7 @@ mod tests {
                 status: 200,
                 headers_mp: bytes::Bytes::new(),
                 body: bytes::Bytes::from_static(b"ok"),
+                stream_rx: None,
             },
         );
         assert!(completed);
@@ -219,6 +222,7 @@ mod tests {
                     status: 200,
                     headers_mp: bytes::Bytes::new(),
                     body: bytes::Bytes::from_static(b"ok"),
+                    stream_rx: None,
                 },
             );
             let resp = rx.try_recv().expect("should receive");
@@ -240,6 +244,7 @@ mod tests {
                 status: 200,
                 headers_mp: bytes::Bytes::new(),
                 body: bytes::Bytes::from_static(b"ok"),
+                stream_rx: None,
             },
         );
 
@@ -259,6 +264,7 @@ mod tests {
                 status: 500,
                 headers_mp: bytes::Bytes::new(),
                 body: bytes::Bytes::from_static(b"stale"),
+                stream_rx: None,
             },
         );
         assert!(!stale_complete, "stale ID should not complete");
@@ -286,6 +292,7 @@ mod tests {
                 status: 200,
                 headers_mp: bytes::Bytes::new(),
                 body: bytes::Bytes::from_static(b"ok"),
+                stream_rx: None,
             },
         );
         assert!(!result);

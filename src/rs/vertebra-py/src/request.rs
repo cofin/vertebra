@@ -6,10 +6,11 @@
 
 use std::sync::{Arc, OnceLock};
 
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyString};
 
-use vertebra_core::transport::BatchSnapshot;
+use vertebra_core::transport::{BatchSnapshot, TransportNode};
 
 use crate::asgi_scope::AsgiScope;
 use crate::headers::Headers;
@@ -24,7 +25,7 @@ use crate::wsgi_environ::WsgiEnviron;
 /// Headers are cached on first access via `OnceLock` to avoid repeated
 /// `Bytes::copy_from_slice` calls — WSGI environ may hit `.headers.get()`
 /// multiple times per request (CONTENT_TYPE, CONTENT_LENGTH, HTTP_* keys).
-#[pyclass(name = "Request", frozen)]
+#[pyclass(name = "Request", frozen, freelist = 128)]
 pub struct Request {
     batch: Arc<BatchSnapshot>,
     index: usize,
@@ -53,6 +54,57 @@ impl Request {
 
 #[pymethods]
 impl Request {
+    /// Construct a single-node `Request` from raw method, path, and body bytes.
+    #[staticmethod]
+    #[pyo3(signature = (method, path, body=None, request_id=1, handler_id=1))]
+    pub fn from_parts(
+        py: Python<'_>,
+        method: &str,
+        path: &str,
+        body: Option<&Bound<'_, PyAny>>,
+        request_id: u64,
+        handler_id: u64,
+    ) -> PyResult<Self> {
+        let body_bytes = match body {
+            Some(b) => crate::response::extract_buffer_bytes(py, b)?,
+            None => bytes::Bytes::new(),
+        };
+        let method_tag = match method {
+            "GET" => 0,
+            "POST" => 1,
+            "PUT" => 2,
+            "DELETE" => 3,
+            "PATCH" => 4,
+            "HEAD" => 5,
+            "OPTIONS" => 6,
+            "TRACE" => 7,
+            "CONNECT" => 8,
+            _ => 255,
+        };
+        let path_bytes = path.as_bytes();
+        let mut slab = Vec::with_capacity(path_bytes.len() + body_bytes.len());
+        slab.extend_from_slice(path_bytes);
+        slab.extend_from_slice(&body_bytes);
+
+        let node = TransportNode {
+            method_tag,
+            http_version_tag: 1,
+            _pad: [0; 2],
+            handler_id,
+            correlation_id: request_id,
+            path_offset: 0,
+            path_len: path_bytes.len() as u32,
+            query_offset: 0,
+            query_len: 0,
+            headers_offset: 0,
+            headers_len: 0,
+            body_offset: path_bytes.len() as u32,
+            body_len: body_bytes.len() as u32,
+        };
+        let snapshot = Arc::new(BatchSnapshot::new(slab, vec![node]));
+        Ok(Self::new(snapshot, 0))
+    }
+
     #[getter]
     fn method<'py>(&self, py: Python<'py>) -> Bound<'py, PyString> {
         let name = self.batch.node(self.index).method_name();
@@ -89,6 +141,32 @@ impl Request {
             None
         } else {
             Some(PyBytes::new(py, body))
+        }
+    }
+
+    /// Return a zero-copy read-only Python `memoryview` over the request body bytes in the batch slab.
+    ///
+    /// The returned `memoryview` borrows directly from the active `BatchSnapshot` slab and is
+    /// valid for the duration of the request handler turn (while the `BatchSnapshot` remains alive).
+    /// Call `bytes(request.body_view)` if the payload must be retained after the handler returns.
+    #[getter]
+    pub fn body_view(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let slice = self.batch.body(self.index);
+        let ptr = if slice.is_empty() {
+            std::ptr::NonNull::<u8>::dangling().as_ptr()
+        } else {
+            slice.as_ptr()
+        };
+        unsafe {
+            let mv = ffi::PyMemoryView_FromMemory(
+                ptr as *mut std::os::raw::c_char,
+                slice.len() as ffi::Py_ssize_t,
+                ffi::PyBUF_READ,
+            );
+            if mv.is_null() {
+                return Err(PyErr::fetch(py));
+            }
+            Ok(Bound::from_owned_ptr(py, mv).unbind())
         }
     }
 

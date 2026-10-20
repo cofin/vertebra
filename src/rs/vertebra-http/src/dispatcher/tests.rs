@@ -22,6 +22,7 @@ fn complete_with_no_pending_is_noop() {
             status: 200,
             headers_mp: bytes::Bytes::new(),
             body: bytes::Bytes::from_static(b"ok"),
+            stream_rx: None,
         },
     );
 }
@@ -168,6 +169,7 @@ async fn shm_dispatcher_complete_through_correlation() {
             status: 200,
             headers_mp: bytes::Bytes::new(),
             body: bytes::Bytes::from_static(b"world"),
+            stream_rx: None,
         },
     );
 

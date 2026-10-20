@@ -71,6 +71,7 @@ fn bench_direct_dispatch(c: &mut Criterion) {
                             status: 200,
                             headers_mp: bytes::Bytes::new(),
                             body: bytes::Bytes::from_static(b"ok"),
+                            stream_rx: None,
                         });
                     }
                 }
@@ -221,6 +222,7 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
                             status: resp.status,
                             headers_mp: encode_response_headers(&resp.headers),
                             body: resp.body,
+                            stream_rx: None,
                         },
                     );
                 }
@@ -359,6 +361,7 @@ fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
                             status: resp.status,
                             headers_mp: encode_response_headers(&resp.headers),
                             body: resp.body,
+                            stream_rx: None,
                         },
                     );
                 }

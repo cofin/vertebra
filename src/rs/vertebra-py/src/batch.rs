@@ -40,6 +40,25 @@ impl RequestBatch {
         };
         Py::new(slf.py(), iter)
     }
+
+    /// Build and submit a batch of `(status, buffer_body)` tuples aligned with this batch's request IDs.
+    pub fn submit_buffers(
+        &self,
+        py: Python<'_>,
+        items: Vec<(u16, Bound<'_, PyAny>)>,
+    ) -> PyResult<Vec<Py<crate::response::Response>>> {
+        let mut out = Vec::with_capacity(items.len());
+        for (idx, (status, body_obj)) in items.into_iter().enumerate() {
+            let req_id = if idx < self.snapshot.len() {
+                self.snapshot.node(idx).correlation_id
+            } else {
+                0
+            };
+            let resp = crate::response::Response::from_buffer(py, status, &body_obj, None, req_id)?;
+            out.push(Py::new(py, resp)?);
+        }
+        Ok(out)
+    }
 }
 
 /// Iterator over requests in a `RequestBatch`.

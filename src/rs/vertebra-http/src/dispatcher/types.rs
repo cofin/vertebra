@@ -93,5 +93,6 @@ pub(super) fn service_unavailable_response() -> PendingResponse {
         status: 503,
         headers_mp: bytes::Bytes::new(),
         body: bytes::Bytes::from_static(b"Service Unavailable"),
+        stream_rx: None,
     }
 }
