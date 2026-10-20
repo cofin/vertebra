@@ -1,15 +1,18 @@
 ---
-name: domain-server-worker-and-protocols
-description: Canonical domain types for Vertebra's Python worker runtime, vectorized batch dispatch plan, ASGI/WSGI adapters, and process supervision.
+type: Guide
+title: "Python Server, Worker Loop & Protocol Adapters Domain"
+description: "Canonical domain types for Vertebra's Python worker runtime, vectorized batch dispatch plan, ASGI/WSGI adapters, and process supervision."
+status: stable
+tags: [domains, server, worker, asgi, wsgi]
 sources:
-  - src/py/vertebra/server/_native.py
-  - src/py/vertebra/server/_asgi/_runner.py
-  - src/py/vertebra/server/_asgi/_queues.py
-  - src/py/vertebra/server/_wsgi/_adapter.py
-  - src/py/vertebra/supervisor/_supervisor.py
-  - src/py/vertebra/supervisor/_worker.py
-  - src/rs/vertebra-py/src/asgi_scope.rs
-  - src/rs/vertebra-py/src/wsgi_environ.rs
+  - resource: src/py/vertebra/server/_native.py
+  - resource: src/py/vertebra/server/_asgi/_runner.py
+  - resource: src/py/vertebra/server/_asgi/_queues.py
+  - resource: src/py/vertebra/server/_wsgi/_adapter.py
+  - resource: src/py/vertebra/supervisor/_supervisor.py
+  - resource: src/py/vertebra/supervisor/_worker.py
+  - resource: src/rs/vertebra-py/src/asgi_scope.rs
+  - resource: src/rs/vertebra-py/src/wsgi_environ.rs
 ---
 
 # Python Server, Worker Loop & Protocol Adapters Domain

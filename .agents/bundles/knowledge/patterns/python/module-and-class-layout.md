@@ -1,11 +1,14 @@
 ---
-name: pattern-python-module-and-class-layout
-description: Python 3.12+ module layout, PEP 562 lazy exports, class member ordering, zero inline comments, and PEP 695/604/585 typing.
+type: Pattern
+title: "Python Module Structure, Class Layout & PEP 695 Typing"
+description: "Python 3.12+ module layout, PEP 562 lazy exports, class member ordering, zero inline comments, and PEP 695/604/585 typing."
+status: stable
+tags: [patterns, python, code-style, typing, conventions]
 sources:
-  - src/py/vertebra/__init__.py
-  - src/py/vertebra/framework/_app.py
-  - src/py/vertebra/utils/module_loader.py
-  - pyproject.toml
+  - resource: src/py/vertebra/__init__.py
+  - resource: src/py/vertebra/framework/_app.py
+  - resource: src/py/vertebra/utils/module_loader.py
+  - resource: pyproject.toml
 ---
 
 # Python Module Structure, Class Layout & PEP 695 Typing

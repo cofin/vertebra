@@ -1,6 +1,12 @@
 ---
-name: gotchas-index
-description: Index of Vertebra's runtime, PyO3 FFI, ASGI, shared-memory, and cross-platform IPC gotchas.
+title: "Gotchas & Non-Obvious Footguns Index"
+description: "Index of Vertebra's runtime, PyO3 FFI, ASGI, shared-memory, and cross-platform IPC gotchas."
+status: stable
+tags:
+  - gotchas
+  - index
+  - pyo3
+  - shared-memory
 ---
 
 # Gotchas & Non-Obvious Footguns Index

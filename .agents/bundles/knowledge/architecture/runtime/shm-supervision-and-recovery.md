@@ -1,12 +1,15 @@
 ---
-name: runtime-shm-supervision-and-recovery
-description: Shared-memory FD inheritance, WorkerSupervisor process lifecycle, pidfd crash detection, ring reclamation, and /dev/shm sweeping.
+type: Guide
+title: "SHM Worker Supervision & Crash Recovery"
+description: "Shared-memory FD inheritance, WorkerSupervisor process lifecycle, pidfd crash detection, ring reclamation, and /dev/shm sweeping."
+status: stable
+tags: [architecture, runtime, supervisor, shared-memory, crash-recovery]
 sources:
-  - src/rs/vertebra-http/src/ring_factory.rs
-  - src/rs/vertebra-core/src/process.rs
-  - src/rs/vertebra-core/src/cleanup.rs
-  - src/rs/vertebra-core/src/transport/ring_pair.rs
-  - src/py/vertebra/supervisor/_supervisor.py
+  - resource: src/rs/vertebra-http/src/ring_factory.rs
+  - resource: src/rs/vertebra-core/src/process.rs
+  - resource: src/rs/vertebra-core/src/cleanup.rs
+  - resource: src/rs/vertebra-core/src/transport/ring_pair.rs
+  - resource: src/py/vertebra/supervisor/_supervisor.py
 ---
 
 # SHM Worker Supervision & Crash Recovery

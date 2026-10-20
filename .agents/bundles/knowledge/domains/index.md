@@ -1,6 +1,12 @@
 ---
-name: domains-index
-description: Index of Vertebra's nested domain vocabulary and bounded-context chapters across Python, Rust, and TypeScript.
+title: "Domain Vocabulary Index"
+description: "Index of Vertebra's nested domain vocabulary and bounded-context chapters across Python, Rust, and TypeScript."
+status: stable
+tags:
+  - domains
+  - index
+  - vocabulary
+  - architecture
 ---
 
 # Domain Vocabulary Index

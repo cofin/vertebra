@@ -113,3 +113,38 @@ Never manufacture a failing unit test for documentation, configuration, generate
 5. Stage exact task-owned paths only and create one signed conventional commit (`<type>(<scope>): <description>`) on the feature/fix branch.
 6. Close the task with the commit SHA, exact commands/results, and checked acceptance criteria; reconcile `spec.md` in the same state transaction.
 7. During `/flow:archive`, synthesize reusable learnings into the nested `.agents/bundles/knowledge/{architecture,domains,patterns,testing,gotchas}/**/*.md` tree, append the archive summary to `.agents/bundles/log.md`, and remove the completed spec directory.
+
+## Low-Signal Test & Gate Policy
+
+Reject tests that lock incidental prompt phrases, private implementation shape, duplicate snapshots, or file existence without an operational contract. Prefer native parser, lint, type, and build contracts to source scanners when they express the complete rule. Retain tests for observable behavior, public contracts, proven regressions, error paths, interoperability, and operationally meaningful structure such as signatures, exports, hashing, memory layout, compilation, serialization, and isolation.
+
+When replacing a gate, prove the replacement against an isolated violation before removing the old check. Confirm aggregate discovery includes new and untracked files where relevant.
+
+## Commits & Checkpoints
+
+Use `<type>(<scope>): <description>` with signed commits (`commit.gpgsign=true`) on a dedicated feature/fix branch and stage exact paths. Do not force-add ignored Flow artifacts. A phase checkpoint records affected task ids, the last functional commit, and fresh aggregate evidence; never create an empty checkpoint commit.
+
+Flow may append supplementary Git notes under `refs/notes/flow` only after the canonical Markdown transaction succeeds. Notes are optional, stay local by default, and never become state authority. Git tags are prohibited as evidence or fallback transport.
+
+## Knowledge Lifecycle
+
+1. **Capture:** append dated discoveries to the owning task and reusable learnings to the flow's `learnings.md`.
+2. **Synthesize:** integrate reusable current-state guidance into the best matching chapter anywhere under `.agents/bundles/knowledge/**/*.md`, preserving project-shaped nesting (`architecture/`, `domains/`, `patterns/`, `testing/`, `gotchas/`).
+3. **Log:** history belongs in `.agents/bundles/log.md`, not in current-state knowledge prose.
+4. **Contract:** after verified completion and archive review, delete the archived spec directory; Git history is the archive.
+
+Operational project skills live only at `.agents/skills/`. Never create `.agents/bundles/skills/`.
+
+## Quality Gates
+
+Before close or checkpoint, require:
+
+- worksheet acceptance criteria satisfied with fresh evidence;
+- selected verification strategy followed, including isolated gate proof when required;
+- focused and relevant aggregate commands green (`make lint-all`, `make rs-test`, `make py-test`, `make ts-test`);
+- repository-defined lint, type, build, docs, coverage, security, and performance gates run when applicable;
+- no accidental public API, typing, performance, import-boundary, or behavior change;
+- no unrelated paths staged and `git diff --check` clean;
+- discoveries and verification limitations recorded.
+
+Coverage follows repository and worksheet requirements. Compare affected lines/branches when deleting behavioral tests; there is no universal percentage or one-test-file-per-module mandate.

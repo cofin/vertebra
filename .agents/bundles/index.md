@@ -48,6 +48,6 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 ## 3. Specifications, Research & Activity Log
 
-- **`specs/` (lazy)** — Created on demand by `/flow:plan` or `/flow:prd` (`specs/<flow_id>/spec.md`, `tasks/*.md`, `learnings.md`) and removed after 5-dimension synthesis during `/flow:archive`.
-- **`research/` (lazy)** — Created on demand when primary-source research briefs are saved.
+- **`specs/` (lazy)** — Materialized only when planned or active flows exist; completed flows are contracted into `knowledge/` and `log.md`.
+- **`research/` (lazy)** — Materialized only when un-promoted technical research briefs exist.
 - **[Bundle Activity Log](log.md)** — Chronological log of bundle initialization, syntheses, and archived flows.

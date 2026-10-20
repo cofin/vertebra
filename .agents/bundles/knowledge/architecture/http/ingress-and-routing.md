@@ -1,13 +1,16 @@
 ---
-name: http-ingress-and-routing
-description: Tokio HTTP/1.1 and HTTP/2 Server listener loop, TLS, matchit Router with FNV-1a HandlerId, RouteTable, and static asset serving.
+type: Guide
+title: "HTTP/1.1 & HTTP/2 Ingress & Native Routing"
+description: "Tokio HTTP/1.1 and HTTP/2 Server listener loop, TLS, matchit Router with FNV-1a HandlerId, RouteTable, and static asset serving."
+status: stable
+tags: [architecture, http, routing, tls, rust]
 sources:
-  - src/rs/vertebra-http/src/server.rs
-  - src/rs/vertebra-http/src/router.rs
-  - src/rs/vertebra-http/src/route_table.rs
-  - src/rs/vertebra-http/src/tls.rs
-  - src/rs/vertebra-http/src/assets.rs
-  - src/rs/vertebra-core/src/router.rs
+  - resource: src/rs/vertebra-http/src/server.rs
+  - resource: src/rs/vertebra-http/src/router.rs
+  - resource: src/rs/vertebra-http/src/route_table.rs
+  - resource: src/rs/vertebra-http/src/tls.rs
+  - resource: src/rs/vertebra-http/src/assets.rs
+  - resource: src/rs/vertebra-core/src/router.rs
 ---
 
 # HTTP/1.1 & HTTP/2 Ingress & Native Routing

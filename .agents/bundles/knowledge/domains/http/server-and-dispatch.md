@@ -1,18 +1,21 @@
 ---
-name: domain-http-server-and-dispatch
-description: Canonical domain types for Vertebra's Rust HTTP/1.1 & HTTP/2 ingress server, router, sharded batcher, dispatcher, and backpressure.
+type: Guide
+title: "Rust HTTP Ingress, Batching & Dispatch Domain"
+description: "Canonical domain types for Vertebra's Rust HTTP/1.1 & HTTP/2 ingress server, router, sharded batcher, dispatcher, and backpressure."
+status: stable
+tags: [domains, http, routing, batching, rust]
 sources:
-  - src/rs/vertebra-http/src/lib.rs
-  - src/rs/vertebra-http/src/server.rs
-  - src/rs/vertebra-http/src/router.rs
-  - src/rs/vertebra-http/src/route_table.rs
-  - src/rs/vertebra-http/src/collector.rs
-  - src/rs/vertebra-http/src/policy.rs
-  - src/rs/vertebra-http/src/dispatcher/mod.rs
-  - src/rs/vertebra-http/src/dispatcher/shm.rs
-  - src/rs/vertebra-http/src/correlation.rs
-  - src/rs/vertebra-http/src/backpressure.rs
-  - src/rs/vertebra-http/src/ring_factory.rs
+  - resource: src/rs/vertebra-http/src/lib.rs
+  - resource: src/rs/vertebra-http/src/server.rs
+  - resource: src/rs/vertebra-http/src/router.rs
+  - resource: src/rs/vertebra-http/src/route_table.rs
+  - resource: src/rs/vertebra-http/src/collector.rs
+  - resource: src/rs/vertebra-http/src/policy.rs
+  - resource: src/rs/vertebra-http/src/dispatcher/mod.rs
+  - resource: src/rs/vertebra-http/src/dispatcher/shm.rs
+  - resource: src/rs/vertebra-http/src/correlation.rs
+  - resource: src/rs/vertebra-http/src/backpressure.rs
+  - resource: src/rs/vertebra-http/src/ring_factory.rs
 ---
 
 # Rust HTTP Ingress, Batching & Dispatch Domain

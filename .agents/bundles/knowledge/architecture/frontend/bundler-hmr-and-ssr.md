@@ -1,12 +1,15 @@
 ---
-name: frontend-bundler-hmr-and-ssr
-description: Oxc Bundler, rolldown-notify SourceWatcher, rquickjs SsrPool with ArrayQueue context leasing and DashMap TTL cache, and BuildOrchestrator.
+type: Guide
+title: "Oxc Bundler, HMR & QuickJS SSR Pool"
+description: "Oxc Bundler, rolldown-notify SourceWatcher, rquickjs SsrPool with ArrayQueue context leasing and DashMap TTL cache, and BuildOrchestrator."
+status: stable
+tags: [architecture, frontend, bundler, hmr, ssr]
 sources:
-  - src/rs/vertebra-bundler/src/bundler.rs
-  - src/rs/vertebra-bundler/src/hmr.rs
-  - src/rs/vertebra-bundler/src/ssr.rs
-  - src/py/vertebra/builder/_orchestrator.py
-  - src/py/vertebra/builder/_fallback.py
+  - resource: src/rs/vertebra-bundler/src/bundler.rs
+  - resource: src/rs/vertebra-bundler/src/hmr.rs
+  - resource: src/rs/vertebra-bundler/src/ssr.rs
+  - resource: src/py/vertebra/builder/_orchestrator.py
+  - resource: src/py/vertebra/builder/_fallback.py
 ---
 
 # Oxc Bundler, HMR & QuickJS SSR Pool

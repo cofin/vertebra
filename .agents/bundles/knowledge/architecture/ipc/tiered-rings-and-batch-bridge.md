@@ -1,12 +1,15 @@
 ---
-name: ipc-tiered-rings-and-batch-bridge
-description: RingPair request/response channels, 4-tier TieredRingSet with VRES wire envelopes, and in-process BatchBridge slab transport.
+type: Guide
+title: "Tiered Rings & In-Process Batch Bridge"
+description: "RingPair request/response channels, 4-tier TieredRingSet with VRES wire envelopes, and in-process BatchBridge slab transport."
+status: stable
+tags: [architecture, ipc, tiered-rings, batch-bridge, rust]
 sources:
-  - src/rs/vertebra-core/src/transport/mod.rs
-  - src/rs/vertebra-core/src/transport/ring_pair.rs
-  - src/rs/vertebra-core/src/tiered_ring.rs
-  - src/rs/vertebra-core/src/bridge.rs
-  - src/rs/vertebra-core/src/buffer.rs
+  - resource: src/rs/vertebra-core/src/transport/mod.rs
+  - resource: src/rs/vertebra-core/src/transport/ring_pair.rs
+  - resource: src/rs/vertebra-core/src/tiered_ring.rs
+  - resource: src/rs/vertebra-core/src/bridge.rs
+  - resource: src/rs/vertebra-core/src/buffer.rs
 ---
 
 # Tiered Rings & In-Process Batch Bridge

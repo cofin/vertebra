@@ -1,14 +1,17 @@
 ---
-name: testing-benchmarks-and-free-threaded
-description: Criterion and tools.benchmarks suites, --group bench dependency isolation, and Python 3.14t free-threaded verification.
+type: Guide
+title: "Benchmark Suite & Free-Threaded Python 3.14t"
+description: "Criterion and tools.benchmarks suites, --group bench dependency isolation, and Python 3.14t free-threaded verification."
+status: stable
+tags: [testing, benchmarks, free-threaded, python, rust]
 sources:
-  - Makefile
-  - pyproject.toml
-  - tools/benchmarks/cli.py
-  - tools/benchmarks/runner.py
-  - tools/benchmarks/scenarios.py
-  - src/rs/vertebra-core/Cargo.toml
-  - src/rs/vertebra-http/Cargo.toml
+  - resource: Makefile
+  - resource: pyproject.toml
+  - resource: tools/benchmarks/cli.py
+  - resource: tools/benchmarks/runner.py
+  - resource: tools/benchmarks/scenarios.py
+  - resource: src/rs/vertebra-core/Cargo.toml
+  - resource: src/rs/vertebra-http/Cargo.toml
 ---
 
 # Benchmark Suite & Free-Threaded Python 3.14t

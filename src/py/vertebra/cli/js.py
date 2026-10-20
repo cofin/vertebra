@@ -202,44 +202,8 @@ def _get_js_section(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_pyproject_js(project_dir: Path, js_data: dict[str, Any]) -> None:
-    """Write updated JS section back to pyproject.toml.
-
-    Uses ``tomlkit`` for formatting preservation if available, otherwise
-    falls back to manual text manipulation.
-    """
+    """Write updated ``[tool.vtb.js]`` section back to ``pyproject.toml``."""
     pyproject = project_dir / "pyproject.toml"
-
-    try:
-        import tomlkit
-
-        doc = tomlkit.parse(pyproject.read_text(encoding="utf-8")) if pyproject.exists() else tomlkit.document()
-
-        if "tool" not in doc:
-            doc["tool"] = tomlkit.table()
-        tool_section = doc["tool"]
-        if "vtb" not in tool_section:
-            tool_section["vtb"] = tomlkit.table()
-        vtb_section = tool_section["vtb"]
-        if "js" not in vtb_section:
-            vtb_section["js"] = tomlkit.table()
-        js_toml = vtb_section["js"]
-
-        for key in ("dependencies", "dev-dependencies"):
-            if key in js_data and js_data[key]:
-                arr = tomlkit.array()
-                arr.extend(js_data[key])
-                arr.multiline(True)
-                js_toml[key] = arr
-            elif key in js_toml:
-                del js_toml[key]
-
-        pyproject.write_text(tomlkit.dumps(doc), encoding="utf-8")
-    except ImportError:
-        _write_pyproject_js_manual(pyproject, js_data)
-
-
-def _write_pyproject_js_manual(pyproject: Path, js_data: dict[str, Any]) -> None:
-    """Fallback writer using text manipulation."""
     lines: list[str] = []
     if pyproject.exists():
         content = pyproject.read_text(encoding="utf-8")

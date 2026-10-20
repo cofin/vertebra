@@ -1,12 +1,15 @@
 ---
-name: testing-polyglot-test-matrix
-description: Rust, Python, and TypeScript test suites, environment registry auto-setup, maturin rebuilds, and /dev/shm cleanup gates.
+type: Guide
+title: "Polyglot Test Matrix & Environment Setup"
+description: "Rust, Python, and TypeScript test suites, environment registry auto-setup, maturin rebuilds, and /dev/shm cleanup gates."
+status: stable
+tags: [testing, verification, python, rust, typescript]
 sources:
-  - Makefile
-  - tools/scripts/setup-env.sh
-  - pyproject.toml
-  - src/rs/Cargo.toml
-  - src/py/tests/conftest.py
+  - resource: Makefile
+  - resource: tools/scripts/setup-env.sh
+  - resource: pyproject.toml
+  - resource: src/rs/Cargo.toml
+  - resource: src/py/tests/conftest.py
 ---
 
 # Polyglot Test Matrix & Environment Setup

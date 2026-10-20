@@ -1,13 +1,16 @@
 ---
-name: worker-asgi-and-wsgi-runners
-description: Task-free AsgiRunner coroutine driver, slab-backed AsgiScope and WsgiEnviron wrappers, and synchronous WsgiAdapter.
+type: Guide
+title: "Task-Free ASGI & Sync WSGI Runners"
+description: "Task-free AsgiRunner coroutine driver, slab-backed AsgiScope and WsgiEnviron wrappers, and synchronous WsgiAdapter."
+status: stable
+tags: [architecture, worker, asgi, wsgi, python]
 sources:
-  - src/py/vertebra/server/_asgi/_runner.py
-  - src/py/vertebra/server/_asgi/_queues.py
-  - src/py/vertebra/server/_asgi/_scope.py
-  - src/py/vertebra/server/_wsgi/_adapter.py
-  - src/rs/vertebra-py/src/asgi_scope.rs
-  - src/rs/vertebra-py/src/wsgi_environ.rs
+  - resource: src/py/vertebra/server/_asgi/_runner.py
+  - resource: src/py/vertebra/server/_asgi/_queues.py
+  - resource: src/py/vertebra/server/_asgi/_scope.py
+  - resource: src/py/vertebra/server/_wsgi/_adapter.py
+  - resource: src/rs/vertebra-py/src/asgi_scope.rs
+  - resource: src/rs/vertebra-py/src/wsgi_environ.rs
 ---
 
 # Task-Free ASGI & Sync WSGI Runners

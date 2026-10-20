@@ -1,13 +1,16 @@
 ---
-name: ipc-ring-buffers-and-shm
-description: ShmHeader cache-line layout, SpscRing zero-copy SlotView, Vyukov MpmcRing, LZ4/Zstd compression, and Linux/macOS wake primitives.
+type: Guide
+title: "Lock-Free Ring Buffers & Shared Memory"
+description: "ShmHeader cache-line layout, SpscRing zero-copy SlotView, Vyukov MpmcRing, LZ4/Zstd compression, and Linux/macOS wake primitives."
+status: stable
+tags: [architecture, ipc, shared-memory, ring-buffer, rust]
 sources:
-  - src/rs/vertebra-core/src/shm.rs
-  - src/rs/vertebra-core/src/channel.rs
-  - src/rs/vertebra-core/src/ipc.rs
-  - src/rs/vertebra-core/src/protocol/codec.rs
-  - src/rs/vertebra-core/src/platform/linux.rs
-  - src/rs/vertebra-core/src/platform/macos.rs
+  - resource: src/rs/vertebra-core/src/shm.rs
+  - resource: src/rs/vertebra-core/src/channel.rs
+  - resource: src/rs/vertebra-core/src/ipc.rs
+  - resource: src/rs/vertebra-core/src/protocol/codec.rs
+  - resource: src/rs/vertebra-core/src/platform/linux.rs
+  - resource: src/rs/vertebra-core/src/platform/macos.rs
 ---
 
 # Lock-Free Ring Buffers & Shared Memory

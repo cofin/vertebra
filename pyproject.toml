@@ -92,7 +92,6 @@ module = [
     "numpy.*",
     "pyarrow",
     "pyarrow.*",
-    "tomlkit",
     "uvloop",
     "fastapi",
     "fastapi.*",

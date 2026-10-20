@@ -1,12 +1,15 @@
 ---
-name: runtime-topologies-and-embedding
-description: Embedded single-process, multi-process SHM, and free-threaded Python 3.14t runtime topologies in Vertebra.
+type: Guide
+title: "Runtime Topologies & Python Embedding"
+description: "Embedded single-process, multi-process SHM, and free-threaded Python 3.14t runtime topologies in Vertebra."
+status: stable
+tags: [architecture, runtime, topologies, pyo3, free-threaded]
 sources:
-  - src/rs/vertebra-http/src/config.rs
-  - src/rs/vertebra-http/src/server.rs
-  - src/rs/vertebra-py/src/lib.rs
-  - src/py/vertebra/server/_native.py
-  - src/py/vertebra/cli/run.py
+  - resource: src/rs/vertebra-http/src/config.rs
+  - resource: src/rs/vertebra-http/src/server.rs
+  - resource: src/rs/vertebra-py/src/lib.rs
+  - resource: src/py/vertebra/server/_native.py
+  - resource: src/py/vertebra/cli/run.py
 ---
 
 # Runtime Topologies & Python Embedding

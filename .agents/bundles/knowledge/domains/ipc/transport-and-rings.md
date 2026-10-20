@@ -1,15 +1,18 @@
 ---
-name: domain-ipc-transport-and-rings
-description: Canonical domain types for Vertebra's Rust shared-memory regions, SPSC/MPMC ring buffers, tiered rings, and in-process BatchBridge.
+type: Guide
+title: "Rust IPC, Shared Memory & Ring Transport Domain"
+description: "Canonical domain types for Vertebra's Rust shared-memory regions, SPSC/MPMC ring buffers, tiered rings, and in-process BatchBridge."
+status: stable
+tags: [domains, ipc, shared-memory, ring-buffer, rust]
 sources:
-  - src/rs/vertebra-core/src/shm.rs
-  - src/rs/vertebra-core/src/channel.rs
-  - src/rs/vertebra-core/src/ipc.rs
-  - src/rs/vertebra-core/src/bridge.rs
-  - src/rs/vertebra-core/src/transport/ring_pair.rs
-  - src/rs/vertebra-core/src/tiered_ring.rs
-  - src/rs/vertebra-py/src/api.rs
-  - src/rs/vertebra-py/src/batch.rs
+  - resource: src/rs/vertebra-core/src/shm.rs
+  - resource: src/rs/vertebra-core/src/channel.rs
+  - resource: src/rs/vertebra-core/src/ipc.rs
+  - resource: src/rs/vertebra-core/src/bridge.rs
+  - resource: src/rs/vertebra-core/src/transport/ring_pair.rs
+  - resource: src/rs/vertebra-core/src/tiered_ring.rs
+  - resource: src/rs/vertebra-py/src/api.rs
+  - resource: src/rs/vertebra-py/src/batch.rs
 ---
 
 # Rust IPC, Shared Memory & Ring Transport Domain

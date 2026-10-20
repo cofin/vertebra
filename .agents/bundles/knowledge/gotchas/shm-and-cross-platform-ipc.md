@@ -1,13 +1,16 @@
 ---
-name: gotchas-shm-and-cross-platform-ipc
-description: Critical shared-memory ring, futex/ulock memory ordering, macOS XNU shm_open/pipe FD, and matchit 0.9 routing gotchas.
+type: Guide
+title: "Shared-Memory Rings & Cross-Platform IPC Gotchas"
+description: "Critical shared-memory ring, futex/ulock memory ordering, macOS XNU shm_open/pipe FD, and matchit 0.9 routing gotchas."
+status: stable
+tags: [gotchas, shared-memory, ipc, macos, routing]
 sources:
-  - src/rs/vertebra-core/src/channel.rs
-  - src/rs/vertebra-core/src/ipc.rs
-  - src/rs/vertebra-core/src/shm.rs
-  - src/rs/vertebra-core/src/platform/macos.rs
-  - src/rs/vertebra-core/src/transport/ring_pair.rs
-  - src/rs/vertebra-http/src/router.rs
+  - resource: src/rs/vertebra-core/src/channel.rs
+  - resource: src/rs/vertebra-core/src/ipc.rs
+  - resource: src/rs/vertebra-core/src/shm.rs
+  - resource: src/rs/vertebra-core/src/platform/macos.rs
+  - resource: src/rs/vertebra-core/src/transport/ring_pair.rs
+  - resource: src/rs/vertebra-http/src/router.rs
 ---
 
 # Shared-Memory Rings & Cross-Platform IPC Gotchas

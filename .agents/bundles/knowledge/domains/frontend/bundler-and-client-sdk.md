@@ -1,12 +1,15 @@
 ---
-name: domain-frontend-bundler-and-client-sdk
-description: Canonical domain types for Vertebra's Rust Oxc bundler/SSR pool, Python codegen orchestrator, CLI console, and @vertebra/client TypeScript SDK.
+type: Guide
+title: "Frontend Bundler, Codegen & TypeScript SDK Domain"
+description: "Canonical domain types for Vertebra's Rust Oxc bundler/SSR pool, Python codegen orchestrator, CLI console, and @vertebra/client TypeScript SDK."
+status: stable
+tags: [domains, frontend, bundler, codegen, typescript]
 sources:
-  - src/rs/vertebra-bundler/src/lib.rs
-  - src/py/vertebra/builder/_orchestrator.py
-  - src/py/vertebra/builder/_codegen/_extractor.py
-  - src/py/vertebra/cli/tui.py
-  - src/ts/vertebra-client/src/index.ts
+  - resource: src/rs/vertebra-bundler/src/lib.rs
+  - resource: src/py/vertebra/builder/_orchestrator.py
+  - resource: src/py/vertebra/builder/_codegen/_extractor.py
+  - resource: src/py/vertebra/cli/tui.py
+  - resource: src/ts/vertebra-client/src/index.ts
 ---
 
 # Frontend Bundler, Codegen & TypeScript SDK Domain

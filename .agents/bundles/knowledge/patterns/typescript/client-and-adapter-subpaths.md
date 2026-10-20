@@ -1,12 +1,15 @@
 ---
-name: pattern-typescript-client-and-adapter-subpaths
-description: Zero-dependency @vertebra/client core, tree-shakeable framework adapter subpaths, Biome formatting, and Python codegen alignment.
+type: Pattern
+title: "Client SDK & Framework Adapter Subpaths"
+description: "Zero-dependency @vertebra/client core, tree-shakeable framework adapter subpaths, Biome formatting, and Python codegen alignment."
+status: stable
+tags: [patterns, typescript, client-sdk, adapters, codegen]
 sources:
-  - src/ts/vertebra-client/package.json
-  - src/ts/vertebra-client/src/index.ts
-  - src/ts/vertebra-client/src/client/client.ts
-  - src/ts/vertebra-client/src/client/types.ts
-  - src/ts/vertebra-client/biome.json
+  - resource: src/ts/vertebra-client/package.json
+  - resource: src/ts/vertebra-client/src/index.ts
+  - resource: src/ts/vertebra-client/src/client/client.ts
+  - resource: src/ts/vertebra-client/src/client/types.ts
+  - resource: src/ts/vertebra-client/biome.json
 ---
 
 # Client SDK & Framework Adapter Subpaths
@@ -15,7 +18,7 @@ sources:
 
 ## 1. Canonical Root Exports (`src/ts/vertebra-client/src/index.ts`)
 
-The root `@vertebra/client` entrypoint exports only clean domain symbols (zero `Vertebra*` prefixes):
+The root `@vertebra/client` entrypoint exports only clean domain symbols (`HttpClient`, `RealtimeChannel`, `HotReloadClient`, `SessionStore`)—never legacy `Vertebra*` prefixes:
 
 <!-- truth: start -->
 ```typescript

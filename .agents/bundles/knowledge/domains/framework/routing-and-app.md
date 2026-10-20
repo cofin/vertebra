@@ -1,12 +1,15 @@
 ---
-name: domain-framework-routing-and-app
-description: Canonical domain types for Vertebra's Python HTTP application container, router, Inertia v3 protocol, and JSON serialization.
+type: Guide
+title: "Python Framework, Routing & Serialization Domain"
+description: "Canonical domain types for Vertebra's Python HTTP application container, router, Inertia v3 protocol, and JSON serialization."
+status: stable
+tags: [domains, framework, routing, serialization, python]
 sources:
-  - src/py/vertebra/framework/_app.py
-  - src/py/vertebra/framework/_router.py
-  - src/py/vertebra/framework/_inertia.py
-  - src/py/vertebra/utils/serializers/_json.py
-  - src/py/vertebra/utils/module_loader.py
+  - resource: src/py/vertebra/framework/_app.py
+  - resource: src/py/vertebra/framework/_router.py
+  - resource: src/py/vertebra/framework/_inertia.py
+  - resource: src/py/vertebra/utils/serializers/_json.py
+  - resource: src/py/vertebra/utils/module_loader.py
 ---
 
 # Python Framework, Routing & Serialization Domain

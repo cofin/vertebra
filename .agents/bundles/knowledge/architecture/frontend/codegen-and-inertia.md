@@ -1,13 +1,16 @@
 ---
-name: frontend-codegen-and-inertia
-description: Python-to-TypeScript/Zod codegen pipeline (TypeExtractor, TypeNode IR, generators) and Inertia.js v3 protocol middleware.
+type: Guide
+title: "TypeScript/Zod Codegen & Inertia v3 Protocol"
+description: "Python-to-TypeScript/Zod codegen pipeline (TypeExtractor, TypeNode IR, generators) and Inertia.js v3 protocol middleware."
+status: stable
+tags: [architecture, frontend, codegen, typescript, inertia]
 sources:
-  - src/py/vertebra/builder/_codegen/_extractor.py
-  - src/py/vertebra/builder/_codegen/_typescript.py
-  - src/py/vertebra/builder/_codegen/_zod.py
-  - src/py/vertebra/builder/_codegen/_manifest.py
-  - src/py/vertebra/builder/_import_map.py
-  - src/py/vertebra/framework/_inertia.py
+  - resource: src/py/vertebra/builder/_codegen/_extractor.py
+  - resource: src/py/vertebra/builder/_codegen/_typescript.py
+  - resource: src/py/vertebra/builder/_codegen/_zod.py
+  - resource: src/py/vertebra/builder/_codegen/_manifest.py
+  - resource: src/py/vertebra/builder/_import_map.py
+  - resource: src/py/vertebra/framework/_inertia.py
 ---
 
 # TypeScript/Zod Codegen & Inertia v3 Protocol

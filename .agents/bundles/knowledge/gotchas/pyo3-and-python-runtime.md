@@ -1,12 +1,15 @@
 ---
-name: gotchas-pyo3-and-python-runtime
-description: Footguns in Embedded PyO3 module initialization, task-free ASGI coroutine driving, and Python 3.14t dependency resolution.
+type: Guide
+title: "PyO3 FFI, Embedded Globals & Python Runtime Gotchas"
+description: "Footguns in Embedded PyO3 module initialization, task-free ASGI coroutine driving, and Python 3.14t dependency resolution."
+status: stable
+tags: [gotchas, pyo3, asgi, python, free-threaded]
 sources:
-  - src/rs/vertebra-py/src/lib.rs
-  - src/rs/vertebra-py/src/api.rs
-  - src/rs/vertebra-http/src/server.rs
-  - src/py/vertebra/server/_asgi/_runner.py
-  - pyproject.toml
+  - resource: src/rs/vertebra-py/src/lib.rs
+  - resource: src/rs/vertebra-py/src/api.rs
+  - resource: src/rs/vertebra-http/src/server.rs
+  - resource: src/py/vertebra/server/_asgi/_runner.py
+  - resource: pyproject.toml
 ---
 
 # PyO3 FFI, Embedded Globals & Python Runtime Gotchas
