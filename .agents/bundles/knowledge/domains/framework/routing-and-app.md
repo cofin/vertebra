@@ -34,5 +34,5 @@ sources:
 
 ## 3. Serialization & Optional Dependencies (`utils/`)
 
-- **[`JSONSerializer`](../../../../../src/py/vertebra/utils/serializers/_json.py)** (`encode_json`, `decode_json`, `encode_json_bytes`): Selects `msgspec.json` as primary tier, `orjson` as secondary fallback, and stdlib `json` as baseline.
+- **[`JSONSerializer`](../../../../../src/py/vertebra/utils/serializers/_json.py)** (`encode_json`, `decode_json`, `encode_json_bytes`): Encodes and decodes JSON using `msgspec.json` directly (`Encoder`, `Decoder`) with fallback to stdlib `json`.
 - **[`OptionalDependency`](../../../../../src/py/vertebra/utils/module_loader.py)** (`import_app`, `ensure_packages`, `module_to_os_path`): Resolves `"module:attribute"` application targets and guards optional dependencies with actionable `uv add <pkg>` error diagnostics.

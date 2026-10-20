@@ -1,6 +1,6 @@
 ---
 name: pattern-rust-ffi-and-gil-discipline
-description: PyO3 0.30.1 FFI conventions: py.detach around blocking waits, append_to_inittab! in Embedded mode, and lazy DataSlab #[pyclass] wrappers.
+description: "PyO3 0.30.1 FFI conventions: py.detach around blocking waits, append_to_inittab! in Embedded mode, and lazy DataSlab #[pyclass] wrappers."
 sources:
   - src/rs/vertebra-py/src/lib.rs
   - src/rs/vertebra-py/src/api.rs
