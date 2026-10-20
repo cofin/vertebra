@@ -8,6 +8,13 @@ sources:
   - resource: src/py/vertebra/server/_asgi/_runner.py
   - resource: src/py/vertebra/server/_asgi/_queues.py
   - resource: src/py/vertebra/server/_asgi/_scope.py
+  - resource: src/py/vertebra/server/_asgi/_litestar_router.py
+  - resource: src/py/vertebra/server/_asgi/_litestar_offload.py
+  - resource: src/py/vertebra/server/_asgi/_litestar_fastpath.py
+  - resource: src/py/vertebra/extensions/litestar/plugin.py
+  - resource: src/py/vertebra/extensions/litestar/channels.py
+  - resource: src/py/vertebra/extensions/litestar/store.py
+  - resource: src/py/vertebra/extensions/worker/runner.py
   - resource: src/py/vertebra/server/_rsgi/_adapter.py
   - resource: src/py/vertebra/server/_wsgi/_adapter.py
   - resource: src/rs/vertebra-py/src/asgi_scope.rs

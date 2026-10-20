@@ -16,7 +16,7 @@ pub enum RouterError {
     #[error("no route matched: method={method} path={path}")]
     NotFound { method: String, path: String },
     #[error("method not allowed for path {path}")]
-    MethodNotAllowed { path: String },
+    MethodNotAllowed { path: String, allowed: Vec<String> },
 }
 
 /// The result of a successful route match.
@@ -58,7 +58,18 @@ impl Router {
         Ok(Self { per_method })
     }
 
-    /// Look up a request by method and path.
+    /// Return sorted HTTP methods that match `path`.
+    pub fn allowed_methods(&self, path: &str) -> Vec<String> {
+        let mut methods: Vec<String> = self
+            .per_method
+            .iter()
+            .filter_map(|(method, router)| router.at(path).ok().map(|_| method.clone()))
+            .collect();
+        methods.sort();
+        methods
+    }
+
+    /// Look up a request by method and path, distinguishing 404 NotFound from 405 MethodNotAllowed.
     #[inline]
     pub fn lookup<'r>(
         &'r self,
@@ -71,22 +82,26 @@ impl Router {
             } else {
                 std::borrow::Cow::Owned(method.to_ascii_uppercase())
             };
-        let mr =
-            self.per_method
-                .get(method_upper.as_ref())
-                .ok_or_else(|| RouterError::NotFound {
-                    method: method_upper.clone().into_owned(),
-                    path: path.to_owned(),
-                })?;
+        if let Some(mr) = self.per_method.get(method_upper.as_ref())
+            && let Ok(matched) = mr.at(path)
+        {
+            return Ok(RouteMatch {
+                handler_id: *matched.value,
+                params: matched.params,
+            });
+        }
 
-        let matched = mr.at(path).map_err(|_| RouterError::NotFound {
+        let allowed = self.allowed_methods(path);
+        if !allowed.is_empty() {
+            return Err(RouterError::MethodNotAllowed {
+                path: path.to_owned(),
+                allowed,
+            });
+        }
+
+        Err(RouterError::NotFound {
             method: method_upper.into_owned(),
             path: path.to_owned(),
-        })?;
-
-        Ok(RouteMatch {
-            handler_id: *matched.value,
-            params: matched.params,
         })
     }
 }

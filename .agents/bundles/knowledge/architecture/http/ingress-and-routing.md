@@ -12,6 +12,9 @@ sources:
   - resource: src/rs/vertebra-http/src/h2c.rs
   - resource: src/rs/vertebra-http/src/http3.rs
   - resource: src/rs/vertebra-http/src/grpc.rs
+  - resource: src/rs/vertebra-http/src/cors.rs
+  - resource: src/rs/vertebra-http/src/discovery.rs
+  - resource: src/rs/vertebra-http/src/mcp_bridge.rs
   - resource: src/rs/vertebra-http/src/assets.rs
   - resource: src/rs/vertebra-http/src/health.rs
   - resource: src/rs/vertebra-http/src/payload.rs

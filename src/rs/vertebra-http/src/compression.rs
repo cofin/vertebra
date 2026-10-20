@@ -3,6 +3,7 @@
 use std::io::Write;
 
 use bytes::Bytes;
+use http::{HeaderMap, HeaderValue, header};
 
 /// Supported HTTP response `Content-Encoding` codecs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +132,139 @@ pub fn compress_response_body(
             encoder.write_all(body).ok()?;
             let encoded = encoder.finish().ok()?;
             Some((codec, Bytes::from(encoded)))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompressionBackend {
+    Zstd,
+    Gzip,
+    Brotli,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompressionOffloadConfig {
+    pub backend: CompressionBackend,
+    pub minimum_size: usize,
+    pub gzip_compress_level: u32,
+    pub brotli_quality: u32,
+    pub zstd_level: i32,
+    pub exclude_patterns: Vec<String>,
+    pub excluded_paths: Vec<String>,
+}
+
+impl Default for CompressionOffloadConfig {
+    fn default() -> Self {
+        Self {
+            backend: CompressionBackend::Zstd,
+            minimum_size: 500,
+            gzip_compress_level: 6,
+            brotli_quality: 4,
+            zstd_level: 3,
+            exclude_patterns: Vec::new(),
+            excluded_paths: Vec::new(),
+        }
+    }
+}
+
+impl CompressionOffloadConfig {
+    pub fn is_path_excluded(&self, path: &str) -> bool {
+        if self.excluded_paths.iter().any(|p| p == path) {
+            return true;
+        }
+        self.exclude_patterns
+            .iter()
+            .any(|pattern| path == pattern || path.starts_with(pattern.as_str()))
+    }
+
+    pub fn compress_if_eligible(
+        &self,
+        path: &str,
+        accept_encoding: Option<&str>,
+        headers: &mut HeaderMap,
+        body: Bytes,
+    ) -> Bytes {
+        if body.len() < self.minimum_size || self.is_path_excluded(path) {
+            return body;
+        }
+        if headers.contains_key(header::CONTENT_ENCODING) {
+            return body;
+        }
+        let Some(accept) = accept_encoding else {
+            return body;
+        };
+
+        match self.backend {
+            CompressionBackend::Zstd if accept.contains("zstd") => {
+                if let Ok(compressed) = zstd::stream::encode_all(body.as_ref(), self.zstd_level) {
+                    headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+                    headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+                    headers.remove(header::CONTENT_LENGTH);
+                    return Bytes::from(compressed);
+                }
+                body
+            }
+            CompressionBackend::Gzip if accept.contains("gzip") => {
+                let mut encoder = flate2::write::GzEncoder::new(
+                    Vec::new(),
+                    flate2::Compression::new(self.gzip_compress_level),
+                );
+                if encoder.write_all(body.as_ref()).is_ok()
+                    && let Ok(compressed) = encoder.finish()
+                {
+                    headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+                    headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+                    headers.remove(header::CONTENT_LENGTH);
+                    return Bytes::from(compressed);
+                }
+                body
+            }
+            CompressionBackend::Brotli if accept.contains("br") => {
+                let mut writer =
+                    brotli::CompressorWriter::new(Vec::new(), 4096, self.brotli_quality, 22);
+                if writer.write_all(body.as_ref()).is_ok() {
+                    let compressed = writer.into_inner();
+                    headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
+                    headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+                    headers.remove(header::CONTENT_LENGTH);
+                    return Bytes::from(compressed);
+                }
+                body
+            }
+            _ => body,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offload_compresses_zstd_gzip_and_brotli() {
+        let raw = Bytes::from(vec![b'a'; 1024]);
+
+        for (backend, accept, expected_encoding) in [
+            (CompressionBackend::Zstd, "zstd, gzip", "zstd"),
+            (CompressionBackend::Gzip, "gzip, deflate", "gzip"),
+            (CompressionBackend::Brotli, "br, gzip", "br"),
+        ] {
+            let cfg = CompressionOffloadConfig {
+                backend,
+                minimum_size: 256,
+                ..CompressionOffloadConfig::default()
+            };
+            let mut headers = HeaderMap::new();
+            let compressed =
+                cfg.compress_if_eligible("/items", Some(accept), &mut headers, raw.clone());
+            assert!(compressed.len() < raw.len());
+            assert_eq!(
+                headers
+                    .get(header::CONTENT_ENCODING)
+                    .and_then(|v| v.to_str().ok()),
+                Some(expected_encoding)
+            );
         }
     }
 }

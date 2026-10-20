@@ -5,10 +5,13 @@ automatic fallback to Vite when the native extension is unavailable.
 """
 
 import atexit
+import importlib
+import json
 import logging
 import os
 import socket
 from pathlib import Path
+from typing import Any
 
 from vertebra.builder._codegen._manifest import ManifestGenerator
 from vertebra.builder._codegen._metadata import RouteCollector
@@ -69,6 +72,42 @@ class BuildOrchestrator:
         self._run_codegen(output_dir=out)
         return out
 
+    def export_litestar_artifacts(
+        self,
+        app: Any,
+        *,
+        output_dir: Path | None = None,
+    ) -> dict[str, Path]:
+        """Auto-export litestar-vite and litestar-asyncapi artifacts when present on app."""
+        out = output_dir or (self.project_dir / self.config.codegen_output)
+        out.mkdir(parents=True, exist_ok=True)
+        exported: dict[str, Path] = {}
+
+        candidates: list[Any] = []
+        plugins = getattr(app, "plugins", None)
+        if plugins is not None:
+            raw_list = getattr(plugins, "plugins", plugins)
+            if isinstance(raw_list, (list, tuple, set)):
+                candidates.extend(raw_list)
+        state = getattr(app, "state", None)
+        if isinstance(state, dict) or (state is not None and hasattr(state, "values")):
+            candidates.extend(state.values())
+
+        for item in candidates:
+            vite_fn = getattr(item, "export_vite_metadata", None)
+            if callable(vite_fn) and "vite" not in exported:
+                vite_path = out / "litestar-vite.json"
+                vite_path.write_text(json.dumps(vite_fn(), indent=2), encoding="utf-8")
+                exported["vite"] = vite_path
+
+            asyncapi_fn = getattr(item, "export_asyncapi_schema", None)
+            if callable(asyncapi_fn) and "asyncapi" not in exported:
+                asyncapi_path = out / "asyncapi.json"
+                asyncapi_path.write_text(json.dumps(asyncapi_fn(), indent=2), encoding="utf-8")
+                exported["asyncapi"] = asyncapi_path
+
+        return exported
+
     @staticmethod
     def _find_available_port(start: int = 5173, end: int = 5200) -> int:
         """Find an available port in the given range."""
@@ -106,18 +145,17 @@ class BuildOrchestrator:
 
     def _run_native(self, *, dev: bool) -> None:
         """Run the native Rolldown bundler."""
-        from vertebra._bundler import BundleConfig, Bundler, DevConfig
-
-        bundler = Bundler()
+        bundler_mod = importlib.import_module("vertebra._bundler")
+        bundler = bundler_mod.Bundler()
         if dev:
-            dev_config = DevConfig(
+            dev_config = bundler_mod.DevConfig(
                 entry=str(self.project_dir / self.config.entry),
                 watch_dirs=[str(self.project_dir / "src")],
                 hmr_port=self._dev_port or 5173,
             )
             bundler.start_dev(dev_config)
         else:
-            bundle_config = BundleConfig(
+            bundle_config = bundler_mod.BundleConfig(
                 entry=str(self.project_dir / self.config.entry),
                 outdir=str(self.project_dir / self.config.outdir),
                 minify=True,
@@ -170,6 +208,7 @@ class BuildOrchestrator:
             (out / "manifest.json").write_text(manifest_content)
 
             (out / "routes.ts").write_text("// Auto-generated route tree\nexport const routes = {};\n")
+            self.export_litestar_artifacts(app, output_dir=out)
 
             logger.info("Codegen complete: %d routes", len(routes))
         except Exception:

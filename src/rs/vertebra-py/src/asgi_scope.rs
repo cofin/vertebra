@@ -114,6 +114,7 @@ fn build_extensions_dict<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         pyo3::intern!(py, "websocket.http.response"),
         PyDict::new(py),
     )?;
+    ext.set_item(pyo3::intern!(py, "tls"), PyDict::new(py))?;
     Ok(ext)
 }
 
@@ -213,18 +214,27 @@ impl AsgiScope {
 
 #[pymethods]
 impl AsgiScope {
-    /// Construct a standalone `AsgiScope` with a default `GET /` HTTP/1.1 snapshot.
     #[new]
     #[pyo3(signature = (root_path=None))]
     pub fn py_new(root_path: Option<String>) -> Self {
-        Self::from_parts(
-            "GET",
-            "/",
-            "",
-            None,
-            root_path.as_deref().unwrap_or(""),
-            "1.1",
-        )
+        let slab = b"/".to_vec();
+        let node = TransportNode {
+            method_tag: 0,
+            http_version_tag: 1,
+            _pad: [0; 2],
+            handler_id: 0,
+            correlation_id: 0,
+            path_offset: 0,
+            path_len: 1,
+            query_offset: 0,
+            query_len: 0,
+            headers_offset: 0,
+            headers_len: 0,
+            body_offset: 0,
+            body_len: 0,
+        };
+        let snapshot = Arc::new(BatchSnapshot::new(slab, vec![node]));
+        Self::new(snapshot, 0, root_path.unwrap_or_default())
     }
 
     /// Construct a standalone `AsgiScope` directly from HTTP components for unit tests and direct dispatch.
@@ -288,13 +298,9 @@ impl AsgiScope {
         Self::new(snapshot, 0, root_path.to_string())
     }
 
-    /// Return the 20 inline known scope keys.
     #[staticmethod]
-    pub fn known_keys<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let items: Vec<Bound<'py, PyAny>> = (0..KNOWN_KEYS.len())
-            .map(|idx| intern_known_key(py, idx).clone().into_any())
-            .collect();
-        PyList::new(py, &items)
+    pub fn known_keys() -> Vec<&'static str> {
+        KNOWN_KEYS.to_vec()
     }
 
     pub fn has_extras(&self) -> bool {
@@ -439,6 +445,19 @@ impl AsgiScope {
                 }
                 let clone = def_val.clone_ref(py);
                 self.__setitem__(py, key, def_val);
+                return Ok(clone);
+            }
+        }
+        if key == "extensions" {
+            if !self.is_known_deleted(IDX_EXTENSIONS)
+                && let Some(ref existing) = self.cached[IDX_EXTENSIONS]
+            {
+                return Ok(existing.clone_ref(py));
+            }
+            if let Some(def_val) = default {
+                let clone = def_val.clone_ref(py);
+                self.deleted_known &= !(1u32 << IDX_EXTENSIONS);
+                self.cached[IDX_EXTENSIONS] = Some(def_val);
                 return Ok(clone);
             }
         }
