@@ -25,6 +25,7 @@ pub struct ShmDispatcher {
     next_worker: AtomicUsize,
     correlation_shards: Vec<Mutex<InFlightRequests>>,
     shard_mask: usize,
+    pending_streams: Arc<crate::response_reader::PendingRequests>,
 }
 
 impl ShmDispatcher {
@@ -51,6 +52,7 @@ impl ShmDispatcher {
             next_worker: AtomicUsize::new(0),
             correlation_shards,
             shard_mask,
+            pending_streams: Arc::new(crate::response_reader::PendingRequests::new()),
         });
 
         // Spawn periodic sweep task (1s intervals, 30s timeout)
@@ -238,6 +240,108 @@ impl ShmDispatcher {
             .collect()
     }
 
+    /// Inspect an incoming `ResponseSlot` frame from SHM:
+    /// - If `FLAG_STREAMING` is set without `FLAG_FINAL`, register a streaming channel on first
+    ///   arrival (`FLAG_HEADERS_SENT`), complete the correlation slab entry with `PendingResponse::streaming`,
+    ///   and forward subsequent chunks/trailers through `PendingRequests`.
+    /// - Otherwise, complete the correlation slab entry immediately with `PendingResponse::unary`.
+    pub fn handle_raw_response_slot(&self, raw_slot: &[u8]) -> bool {
+        use bytes::Bytes;
+        use http::{HeaderMap, HeaderName, HeaderValue};
+        use hyper::body::Frame;
+        use vertebra_core::ipc::{
+            FLAG_ERROR, FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING, FLAG_TRAILERS, ResponseSlot,
+        };
+
+        let Some(correlation_id) = ResponseSlot::peek_request_id(raw_slot) else {
+            return false;
+        };
+        let Some(flags) = ResponseSlot::peek_flags(raw_slot) else {
+            return false;
+        };
+        let Ok(slot) = ResponseSlot::decode_from(raw_slot) else {
+            return false;
+        };
+
+        let is_streaming = (flags & FLAG_STREAMING) != 0;
+        let is_final = (flags & (FLAG_FINAL | FLAG_ERROR)) != 0;
+
+        if !is_streaming || ((flags & FLAG_HEADERS_SENT) != 0 && is_final) {
+            let encoded_headers: Vec<(Vec<u8>, Vec<u8>)> = slot
+                .headers
+                .into_iter()
+                .map(|(k, v)| (k.into_bytes(), v.into_bytes()))
+                .collect();
+            let headers_mp = crate::response::encode_response_headers(&encoded_headers);
+            let shard_idx = (slot.request_id as usize) & self.shard_mask;
+            let internal_id = correlation_id >> 8;
+            let mut slab = self.correlation_shards[shard_idx].lock().unwrap();
+            return slab.complete(
+                internal_id,
+                crate::collector::PendingResponse::unary(
+                    slot.status,
+                    headers_mp,
+                    Bytes::from(slot.body),
+                ),
+            );
+        }
+
+        if (flags & FLAG_HEADERS_SENT) != 0 {
+            let mut raw_rx = self.pending_streams.register_stream(correlation_id, 64);
+            let _ = self.pending_streams.deliver_raw_frame(raw_slot.to_vec());
+
+            let encoded_headers: Vec<(Vec<u8>, Vec<u8>)> = slot
+                .headers
+                .into_iter()
+                .map(|(k, v)| (k.into_bytes(), v.into_bytes()))
+                .collect();
+            let headers_mp = crate::response::encode_response_headers(&encoded_headers);
+            let (frame_tx, frame_rx) = tokio::sync::mpsc::channel(64);
+
+            tokio::spawn(async move {
+                while let Some(raw_frame) = raw_rx.recv().await {
+                    let Ok(chunk_slot) = ResponseSlot::decode_from(&raw_frame) else {
+                        break;
+                    };
+                    if (chunk_slot.flags & FLAG_TRAILERS) != 0 && !chunk_slot.headers.is_empty() {
+                        let mut trailers = HeaderMap::new();
+                        for (k, v) in chunk_slot.headers {
+                            if let (Ok(name), Ok(val)) = (
+                                HeaderName::from_bytes(k.as_bytes()),
+                                HeaderValue::from_str(&v),
+                            ) {
+                                trailers.insert(name, val);
+                            }
+                        }
+                        if frame_tx.send(Ok(Frame::trailers(trailers))).await.is_err() {
+                            break;
+                        }
+                    } else if !chunk_slot.body.is_empty()
+                        && frame_tx
+                            .send(Ok(Frame::data(Bytes::from(chunk_slot.body))))
+                            .await
+                            .is_err()
+                    {
+                        break;
+                    }
+                    if (chunk_slot.flags & (FLAG_FINAL | FLAG_ERROR)) != 0 {
+                        break;
+                    }
+                }
+            });
+
+            let shard_idx = (slot.request_id as usize) & self.shard_mask;
+            let internal_id = correlation_id >> 8;
+            let mut slab = self.correlation_shards[shard_idx].lock().unwrap();
+            return slab.complete(
+                internal_id,
+                crate::collector::PendingResponse::streaming(slot.status, headers_mp, frame_rx),
+            );
+        }
+
+        self.pending_streams.deliver_raw_frame(raw_slot.to_vec())
+    }
+
     fn flush_shm_dispatch_batch(&self, worker_idx: usize, pending: ShmDispatchBatch) -> usize {
         let worker = &self.workers[worker_idx];
         let node_count = pending.nodes.len();
@@ -279,7 +383,7 @@ impl ShmDispatcher {
             return;
         }
         for &cid in correlation_ids {
-            let shard_idx = (cid & 0xFF) as usize;
+            let shard_idx = (cid as usize) & self.shard_mask;
             let internal_id = cid >> 8;
             let mut slab = self.correlation_shards[shard_idx].lock().unwrap();
             slab.complete(internal_id, service_unavailable_response());

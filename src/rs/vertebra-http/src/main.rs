@@ -30,6 +30,10 @@ use vertebra_http::{
     server,
 };
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Extract routes from a Python App and build the Rust RouteTable.
 #[cfg(feature = "python")]
 fn build_route_table_from_app(py: Python<'_>, app: &Bound<'_, PyAny>) -> PyResult<RouteTable> {
@@ -88,6 +92,7 @@ fn spawn_response_reader(dispatcher: Arc<Dispatcher>) {
                         status: resp.status,
                         headers_mp: encode_response_headers(&resp.headers),
                         body: resp.body,
+                        stream_rx: None,
                     },
                 );
             }

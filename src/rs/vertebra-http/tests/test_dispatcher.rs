@@ -91,6 +91,7 @@ async fn test_complete_unblocks_hyper() {
             status: 201,
             headers_mp: bytes::Bytes::new(),
             body: bytes::Bytes::from_static(b"created"),
+            stream_rx: None,
         },
     );
 
@@ -117,6 +118,7 @@ async fn test_complete_unknown_id_is_noop() {
             status: 200,
             headers_mp: bytes::Bytes::new(),
             body: bytes::Bytes::new(),
+            stream_rx: None,
         },
     );
 }
@@ -189,6 +191,7 @@ async fn test_shm_complete_many_unblocks_multiple_waiters() {
                         status: 200,
                         headers_mp: bytes::Bytes::new(),
                         body: bytes::Bytes::from_static(b"ok"),
+                        stream_rx: None,
                     },
                 )
             })

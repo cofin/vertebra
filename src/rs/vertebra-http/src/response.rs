@@ -3,14 +3,17 @@
 //! `handle` is the `service_fn` target for both plain and TLS connections.
 
 use std::convert::Infallible;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
+use futures_util::Stream;
 use http::{Response, StatusCode};
-use http_body_util::Full;
+use http_body_util::{Either, Full, StreamBody};
 use hyper::Request;
-use hyper::body::{Body, Incoming};
-use tokio::sync::oneshot;
+use hyper::body::{Body, Frame, Incoming};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use vertebra_core::transport::{encode_headers_compact, iter_raw_headers};
@@ -26,15 +29,59 @@ use crate::server::ServerState;
 /// saturated or the circuit is open.
 const HEALTH_PATH: &str = "/__vertebra/health";
 
-type HyperResponse = Response<Full<Bytes>>;
+/// Adapter implementing `futures_util::Stream` over a Tokio `mpsc::Receiver` of HTTP body frames.
+pub struct ReceiverFrameStream {
+    rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>,
+}
+
+impl ReceiverFrameStream {
+    /// Wrap a bounded Tokio `mpsc::Receiver` as an HTTP frame stream.
+    pub fn new(rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>) -> Self {
+        Self { rx }
+    }
+}
+
+impl Stream for ReceiverFrameStream {
+    type Item = Result<Frame<Bytes>, Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
+    }
+}
+
+/// Progressive multi-chunk and trailer body stream.
+pub type StreamingBody = StreamBody<ReceiverFrameStream>;
+
+/// Dual-path HTTP response body: `Left(Full<Bytes>)` for zero-channel unary responses,
+/// `Right(StreamingBody)` for chunked, SSE, and trailer-bearing responses.
+pub type VertebraBody = Either<Full<Bytes>, StreamingBody>;
+
+/// Canonical HTTP response type used across `vertebra-http`.
+pub type VertebraResponse = Response<VertebraBody>;
+
+type HyperResponse = VertebraResponse;
+
+/// Wrap a contiguous byte buffer in the zero-allocation unary `Either::Left(Full<Bytes>)` branch.
+#[inline]
+pub fn full_body(bytes: impl Into<Bytes>) -> VertebraBody {
+    Either::Left(Full::new(bytes.into()))
+}
+
+/// Wrap a frame receiver in the progressive streaming `Either::Right(StreamBody)` branch.
+#[inline]
+pub fn stream_body(rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>) -> VertebraBody {
+    Either::Right(StreamBody::new(ReceiverFrameStream::new(rx)))
+}
 
 /// Top-level request handler; called for every accepted HTTP connection.
 pub async fn handle(
     req: Request<Incoming>,
     state: Arc<ServerState>,
-) -> Result<HyperResponse, Infallible> {
+) -> Result<VertebraResponse, Infallible> {
     if state.config.dev_mode && hmr::is_hmr_path(req.uri().path()) {
-        return Ok(hmr::handle(req, state).await);
+        let hmr_resp = hmr::handle(req, state).await;
+        let (parts, body) = hmr_resp.into_parts();
+        return Ok(Response::from_parts(parts, Either::Left(body)));
     }
 
     // Health endpoint sits above routing and backpressure so probes always
@@ -67,13 +114,13 @@ pub async fn handle(
         Err(RouterError::NotFound { .. }) => {
             return Ok(Response::builder()
                 .status(StatusCode::NOT_FOUND)
-                .body(Full::new(Bytes::from_static(b"Not Found")))
+                .body(full_body(Bytes::from_static(b"Not Found")))
                 .unwrap());
         }
         Err(RouterError::MethodNotAllowed { .. }) => {
             return Ok(Response::builder()
                 .status(StatusCode::METHOD_NOT_ALLOWED)
-                .body(Full::new(Bytes::from_static(b"Method Not Allowed")))
+                .body(full_body(Bytes::from_static(b"Method Not Allowed")))
                 .unwrap());
         }
     };
@@ -155,7 +202,7 @@ fn rejection_response(reason: RejectionReason) -> HyperResponse {
         .status(status)
         .header("content-type", "text/plain; charset=utf-8")
         .header("retry-after", "1")
-        .body(Full::new(Bytes::from_static(msg.as_bytes())))
+        .body(full_body(Bytes::from_static(msg.as_bytes())))
         .unwrap_or_else(|_| error_response(status, msg))
 }
 
@@ -177,7 +224,7 @@ fn health_response(snapshot: Option<BackpressureMetricsSnapshot>) -> HyperRespon
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")
-        .body(Full::new(Bytes::from(body)))
+        .body(full_body(Bytes::from(body)))
         .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "health error"))
 }
 
@@ -218,7 +265,8 @@ fn version_tag(version: http::Version) -> u8 {
     }
 }
 
-fn build_response(resp: PendingResponse) -> HyperResponse {
+/// Build a `VertebraResponse` from a `PendingResponse`, taking the streaming branch when `stream_rx` is present.
+pub fn build_response(resp: PendingResponse) -> VertebraResponse {
     let mut builder = Response::builder().status(resp.status);
 
     // Decode response headers from compact binary format and set on Hyper response.
@@ -228,7 +276,12 @@ fn build_response(resp: PendingResponse) -> HyperResponse {
         }
     }
 
-    builder.body(Full::new(resp.body)).unwrap_or_else(|_| {
+    let body = match resp.stream_rx {
+        Some(stream_rx) => stream_body(stream_rx.into_inner()),
+        None => full_body(resp.body),
+    };
+
+    builder.body(body).unwrap_or_else(|_| {
         error_response(StatusCode::INTERNAL_SERVER_ERROR, "response build error")
     })
 }
@@ -236,7 +289,7 @@ fn build_response(resp: PendingResponse) -> HyperResponse {
 fn error_response(status: StatusCode, msg: &'static str) -> HyperResponse {
     Response::builder()
         .status(status)
-        .body(Full::new(Bytes::from_static(msg.as_bytes())))
+        .body(full_body(Bytes::from_static(msg.as_bytes())))
         .unwrap()
 }
 

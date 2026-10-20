@@ -12,6 +12,8 @@ use std::sync::Arc;
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
+use dashmap::DashMap;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
@@ -23,6 +25,91 @@ use vertebra_core::transport::ring_pair::RingPair;
 
 use crate::collector::PendingResponse;
 use crate::dispatcher::Dispatcher;
+
+pub const FLAG_STREAMING: u16 = 1 << 0;
+pub const FLAG_FINAL: u16 = 1 << 1;
+pub const FLAG_ERROR: u16 = 1 << 2;
+pub const FLAG_HEADERS_SENT: u16 = 1 << 4;
+pub const FLAG_TRAILERS: u16 = 1 << 5;
+
+/// Responder channel variant for an in-flight request ID.
+pub enum PendingResponder {
+    /// Single-frame unary response channel.
+    Unary(oneshot::Sender<Vec<u8>>),
+    /// Multi-frame streaming response channel kept open until `FLAG_FINAL` or `FLAG_ERROR`.
+    Stream(mpsc::Sender<Vec<u8>>),
+}
+
+/// Concurrent correlation map supporting both unary and multi-frame streaming responses.
+#[derive(Default)]
+pub struct PendingRequests {
+    map: DashMap<u64, PendingResponder>,
+}
+
+impl PendingRequests {
+    /// Create an empty pending request registry.
+    pub fn new() -> Self {
+        Self {
+            map: DashMap::new(),
+        }
+    }
+
+    /// Number of currently active request correlations.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Return `true` when no request correlations are active.
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// Register a single-shot unary response channel for `request_id`.
+    pub fn register_unary(&self, request_id: u64) -> oneshot::Receiver<Vec<u8>> {
+        let (tx, rx) = oneshot::channel();
+        self.map.insert(request_id, PendingResponder::Unary(tx));
+        rx
+    }
+
+    /// Register a bounded multi-frame streaming channel for `request_id`.
+    pub fn register_stream(&self, request_id: u64, capacity: usize) -> mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        self.map.insert(request_id, PendingResponder::Stream(tx));
+        rx
+    }
+
+    /// Inspect raw frame header `[request_id: u64][status: u16][flags: u16]` and route to the registered responder.
+    ///
+    /// Keeps `PendingResponder::Stream` registered in `map` when `FLAG_STREAMING` is set without
+    /// `FLAG_FINAL` or `FLAG_ERROR`, and removes the entry on terminal frames.
+    pub fn deliver_raw_frame(&self, raw_bytes: Vec<u8>) -> bool {
+        if raw_bytes.len() < 12 {
+            return false;
+        }
+        let request_id = u64::from_le_bytes(raw_bytes[0..8].try_into().unwrap());
+        let flags = u16::from_le_bytes(raw_bytes[10..12].try_into().unwrap());
+        let is_streaming = (flags & FLAG_STREAMING) != 0;
+        let is_terminal = !is_streaming || (flags & (FLAG_FINAL | FLAG_ERROR)) != 0;
+
+        if is_terminal {
+            let Some((_, responder)) = self.map.remove(&request_id) else {
+                return false;
+            };
+            match responder {
+                PendingResponder::Unary(tx) => tx.send(raw_bytes).is_ok(),
+                PendingResponder::Stream(tx) => tx.try_send(raw_bytes).is_ok(),
+            }
+        } else {
+            let Some(entry) = self.map.get(&request_id) else {
+                return false;
+            };
+            match entry.value() {
+                PendingResponder::Stream(tx) => tx.try_send(raw_bytes).is_ok(),
+                PendingResponder::Unary(_) => false,
+            }
+        }
+    }
+}
 
 /// Wrapper around a raw FD for `AsyncFd` registration.
 ///
@@ -190,6 +277,7 @@ fn drain_worker(worker: &Arc<RingPair>, dispatcher: &Dispatcher) -> bool {
                         status: resp.status,
                         headers_mp: resp.headers_raw,
                         body: resp.body,
+                        stream_rx: None,
                     },
                 ));
             }

@@ -150,6 +150,22 @@ impl Transport {
         }
     }
 
+    /// Send a pre-encoded raw response frame back through the shared-memory transport.
+    pub fn send_response_bytes(&self, raw_frame: &[u8]) -> Result<(), TransportError> {
+        match &self.backend {
+            Backend::InProcess(_) => Ok(()),
+            Backend::SharedMemory(ring_pair) => {
+                ring_pair
+                    .send_response_bytes(raw_frame)
+                    .map_err(|e| match e {
+                        RingPairError::ResponseTooLarge(_) => TransportError::ResponseTooLarge,
+                        RingPairError::Channel(ChannelError::Full) => TransportError::RingFull,
+                        _ => TransportError::Disconnected,
+                    })
+            }
+        }
+    }
+
     /// Try to receive a response from the shared-memory transport.
     ///
     /// Returns `None` if no response is available or if using in-process backend.

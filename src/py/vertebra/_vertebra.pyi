@@ -1,8 +1,19 @@
 """Type stubs for the vertebra._vertebra native extension module."""
 
+from collections.abc import Buffer
+
 FREE_THREADED: bool
+GIL_USED: bool
 
 class Request:
+    @staticmethod
+    def from_parts(
+        method: str,
+        path: str,
+        body: Buffer | str | None = None,
+        request_id: int = 1,
+        handler_id: int = 1,
+    ) -> Request: ...
     @property
     def method(self) -> str: ...
     @property
@@ -16,6 +27,8 @@ class Request:
     @property
     def body(self) -> bytes | None: ...
     @property
+    def body_view(self) -> memoryview: ...
+    @property
     def handler_id(self) -> int: ...
     @property
     def request_id(self) -> int: ...
@@ -27,9 +40,16 @@ class Request:
     def headers(self) -> Headers: ...
     def as_dict(self) -> dict[str, object]: ...
     def asgi_scope(self, root_path: str = "") -> AsgiScope: ...
-    def wsgi_environ(self, root_path: str = "") -> WsgiEnviron: ...
+    def wsgi_environ(
+        self,
+        server_name: str | None = None,
+        server_port: int | str | None = None,
+        url_scheme: str | None = None,
+    ) -> WsgiEnviron: ...
 
 class Headers:
+    @staticmethod
+    def from_pairs(pairs: list[tuple[str, str]]) -> Headers: ...
     def __getitem__(self, key: str) -> str: ...
     def __contains__(self, key: object) -> bool: ...
     def __len__(self) -> int: ...
@@ -49,6 +69,7 @@ class RequestBatch:
     def __len__(self) -> int: ...
     def __getitem__(self, index: int) -> Request: ...
     def __iter__(self) -> RequestBatchIterator: ...
+    def submit_buffers(self, items: list[tuple[int, Buffer]]) -> list[Response]: ...
 
 class RequestBatchIterator:
     def __iter__(self) -> RequestBatchIterator: ...
@@ -98,7 +119,7 @@ class Response:
     status: int
     body: bytes
     request_id: int
-    headers: list[tuple[str, str]]
+    headers: list[tuple[bytes, bytes]]
     def __init__(
         self,
         status: int,
@@ -106,6 +127,13 @@ class Response:
         headers: dict[str, str] | list[tuple[str, str]] | None = None,
         request_id: int = 0,
     ) -> None: ...
+    @staticmethod
+    def from_buffer(
+        status: int,
+        body: Buffer | str,
+        headers: dict[str, str] | list[tuple[str, str]] | None = None,
+        request_id: int = 0,
+    ) -> Response: ...
 
 def init_transport(
     *,
@@ -121,3 +149,11 @@ def clear_request_notification() -> None: ...
 def try_get_batch() -> RequestBatch | None: ...
 def submit_results(responses: list[Response]) -> None: ...
 def submit_response(response: Response) -> None: ...
+def submit_raw_response(
+    request_id: int,
+    status: int,
+    headers: list[tuple[str, str]],
+    body: Buffer,
+    flags: int = 2,
+    slot_capacity: int = 16384,
+) -> list[bytes]: ...

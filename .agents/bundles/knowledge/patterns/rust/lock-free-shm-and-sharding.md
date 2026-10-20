@@ -1,15 +1,17 @@
 ---
 type: Pattern
 title: "Lock-Free Shared Memory & Sharded Concurrency"
-description: "Rust 2024 lock-free SHM cache-line alignment, SeqCst futex handshakes, bounds-checked unsafe slices, and sharded batch/correlation tables."
+description: "Rust 2024 lock-free SHM cache-line alignment, SeqCst futex handshakes, multi-slot BufferPool bitmaps, and sharded batch/correlation tables."
 status: stable
 tags: [patterns, rust, shared-memory, concurrency, sharding]
 sources:
   - resource: src/rs/vertebra-core/src/shm.rs
   - resource: src/rs/vertebra-core/src/channel.rs
   - resource: src/rs/vertebra-core/src/ipc.rs
+  - resource: src/rs/vertebra-core/src/buffer.rs
   - resource: src/rs/vertebra-http/src/collector.rs
   - resource: src/rs/vertebra-http/src/correlation.rs
+  - resource: src/rs/vertebra-http/src/dispatcher/shm.rs
 ---
 
 # Lock-Free Shared Memory & Sharded Concurrency
@@ -36,13 +38,15 @@ Producer cursors, consumer cursors, and futex waiter flags in [`ShmHeader`](../.
 ```
 <!-- truth: end -->
 
-## 2. Bounds Validation Before `std::slice::from_raw_parts`
+## 2. Bounds Validation & Contiguous Multi-Slot `BufferPool` Reservations
 
-Every `unsafe` pointer offset into `ShmRegion` must validate `offset + len <= self.data_len` and verify `slot_len <= max_payload` *before* constructing a slice via `std::slice::from_raw_parts` ([`channel.rs`](../../../../../src/rs/vertebra-core/src/channel.rs), [`ipc.rs`](../../../../../src/rs/vertebra-core/src/ipc.rs), [`tiered_ring.rs`](../../../../../src/rs/vertebra-core/src/tiered_ring.rs)).
+- Every `unsafe` pointer offset into `ShmRegion` must validate `offset + len <= self.data_len` and verify `slot_len <= max_payload` *before* constructing a slice via `std::slice::from_raw_parts` ([`channel.rs`](../../../../../src/rs/vertebra-core/src/channel.rs), [`ipc.rs`](../../../../../src/rs/vertebra-core/src/ipc.rs), [`tiered_ring.rs`](../../../../../src/rs/vertebra-core/src/tiered_ring.rs)).
+- When encoding payloads larger than a single `BufferPool` slot, call [`BufferPool::acquire_multi(num_slots)`](../../../../../src/rs/vertebra-core/src/buffer.rs) (which uses atomic 64-bit word bitmasks to claim $K$ contiguous slots) and release them via `release_multi(first_slot, num_slots)`.
 
 ## 3. Sharded Hot-Path Synchronization
 
 Avoid single-mutex bottlenecks across Tokio worker threads:
 
 - **[`RequestBatcher`](../../../../../src/rs/vertebra-http/src/collector.rs)**: Shards incoming requests across `NUM_SHARDS = 8` cache-line-aligned `Shard` structs (`#[repr(align(64))]`) indexed by thread ID hash.
-- **[`InFlightRequests`](../../../../../src/rs/vertebra-http/src/correlation.rs)**: Shards `65,536` correlation slots across `NUM_SHARDS = 256` independent `Mutex` buckets (`256` slots per shard).
+- **[`PendingRequests`](../../../../../src/rs/vertebra-http/src/correlation.rs)** (`InFlightRequests`): Shards `65,536` correlation slots across `NUM_SHARDS = 256` independent `Mutex` buckets (`256` slots per shard).
+- **[`ShmDispatcher`](../../../../../src/rs/vertebra-http/src/dispatcher/shm.rs)**: Uses power-of-two worker ring counts with bitmask selection (`idx & shard_mask`) when `rings.len().is_power_of_two()`.

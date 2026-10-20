@@ -4,7 +4,40 @@ use bytes::Bytes;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
 
-pub(crate) use vertebra_core::transport::iter_raw_headers;
+pub(crate) use vertebra_core::transport::{encode_headers_compact, iter_raw_headers};
+
+#[inline]
+fn intern_or_alloc_header_key<'py>(py: Python<'py>, name: &[u8]) -> Bound<'py, PyString> {
+    if name.eq_ignore_ascii_case(b"content-type") {
+        return pyo3::intern!(py, "content-type").clone();
+    }
+    if name.eq_ignore_ascii_case(b"content-length") {
+        return pyo3::intern!(py, "content-length").clone();
+    }
+    if name.eq_ignore_ascii_case(b"authorization") {
+        return pyo3::intern!(py, "authorization").clone();
+    }
+    if name.eq_ignore_ascii_case(b"accept") {
+        return pyo3::intern!(py, "accept").clone();
+    }
+    if name.eq_ignore_ascii_case(b"host") {
+        return pyo3::intern!(py, "host").clone();
+    }
+    if name.eq_ignore_ascii_case(b"user-agent") {
+        return pyo3::intern!(py, "user-agent").clone();
+    }
+    if name.eq_ignore_ascii_case(b"cookie") {
+        return pyo3::intern!(py, "cookie").clone();
+    }
+    if name.eq_ignore_ascii_case(b"upgrade") {
+        return pyo3::intern!(py, "upgrade").clone();
+    }
+    if name.eq_ignore_ascii_case(b"connection") {
+        return pyo3::intern!(py, "connection").clone();
+    }
+    let name_str = String::from_utf8_lossy(name);
+    PyString::new(py, &name_str)
+}
 
 /// Decode raw compact headers directly into an ASGI-compliant list of `(bytes, bytes)` tuples
 /// with lowercased header names, avoiding intermediate `Bytes` or `String` allocations.
@@ -27,7 +60,7 @@ pub(crate) fn decode_asgi_headers<'py>(
     PyList::new(py, &tuples)
 }
 
-#[pyclass(name = "Headers", frozen, from_py_object)]
+#[pyclass(name = "Headers", frozen, freelist = 128, from_py_object)]
 #[derive(Clone)]
 pub struct Headers {
     raw: Bytes,
@@ -41,6 +74,18 @@ impl Headers {
 
 #[pymethods]
 impl Headers {
+    /// Construct a `Headers` instance from `(name, value)` string tuples using compact binary encoding.
+    #[staticmethod]
+    pub fn from_pairs(pairs: Vec<(String, String)>) -> Self {
+        let raw_pairs: Vec<(Vec<u8>, Vec<u8>)> = pairs
+            .into_iter()
+            .map(|(k, v)| (k.into_bytes(), v.into_bytes()))
+            .collect();
+        Self {
+            raw: Bytes::from(encode_headers_compact(&raw_pairs)),
+        }
+    }
+
     fn __getitem__<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyString>> {
         let key_bytes = key.as_bytes();
         for (name, value) in iter_raw_headers(&self.raw) {
@@ -72,8 +117,7 @@ impl Headers {
     fn keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let mut names: Vec<Bound<'py, PyAny>> = Vec::new();
         for (name, _) in iter_raw_headers(&self.raw) {
-            let name_str = String::from_utf8_lossy(name);
-            names.push(PyString::new(py, &name_str).into_any());
+            names.push(intern_or_alloc_header_key(py, name).into_any());
         }
         PyList::new(py, &names)
     }
@@ -90,12 +134,11 @@ impl Headers {
     fn items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let mut tuples: Vec<Bound<'py, PyAny>> = Vec::new();
         for (name, value) in iter_raw_headers(&self.raw) {
-            let name_str = String::from_utf8_lossy(name);
             let val_str = String::from_utf8_lossy(value);
             let t = PyTuple::new(
                 py,
                 [
-                    PyString::new(py, &name_str).into_any(),
+                    intern_or_alloc_header_key(py, name).into_any(),
                     PyString::new(py, &val_str).into_any(),
                 ],
             )?;

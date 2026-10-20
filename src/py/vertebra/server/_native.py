@@ -19,23 +19,26 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from vertebra.server._runtime_tuning import (
+    AsgiEventLoopPool,
+    configure_worker_affinity,
+    is_free_threaded,
+)
 from vertebra.utils.serializers._json import encode_json_bytes
 
 if TYPE_CHECKING:
     from vertebra._vertebra import Request, RequestBatch, Response
 
 __all__ = (
+    "AsgiEventLoopPool",
     "AsyncRuntime",
     "BatchDispatchPlan",
+    "is_free_threaded",
     "run_worker",
 )
 
-_NATIVE_FREE_THREADED = False
 _submit_response: Any = None
 with contextlib.suppress(ImportError):
-    from vertebra._vertebra import (
-        FREE_THREADED as _NATIVE_FREE_THREADED,
-    )
     from vertebra._vertebra import (
         submit_response as _submit_response,
     )
@@ -219,11 +222,17 @@ def run_worker(
     for handler in handlers.values():
         _handler_dispatch_spec(handler)
 
-    scheduler = AsyncRuntime()
-
     threads_env = os.environ.get("VERTEBRA_THREADS")
     default_threads = int(threads_env) if threads_env else (os.cpu_count() or 1)
     pool_size = worker_count if worker_count is not None else default_threads
+
+    enable_affinity = os.environ.get("VERTEBRA_CPU_AFFINITY", "0") in {"1", "true", "TRUE"}
+    worker_id = int(os.environ.get("VERTEBRA_WORKER_ID", "0"))
+    configure_worker_affinity(worker_id, enable_pinning=enable_affinity)
+
+    scheduler: AsyncRuntime | AsgiEventLoopPool = (
+        AsgiEventLoopPool(size=pool_size) if (pool_size > 1 or is_free_threaded()) else AsyncRuntime()
+    )
 
     executor = ThreadPoolExecutor(
         max_workers=max(128, pool_size * 8),
@@ -407,7 +416,7 @@ def _dispatch_batch(
     handlers: dict[int, Any],
     mount_runners: list[tuple[str, Any, str]],
     vr_cls: Any,
-    scheduler: AsyncRuntime | asyncio.AbstractEventLoop,
+    scheduler: AsyncRuntime | AsgiEventLoopPool | asyncio.AbstractEventLoop,
     *,
     async_mode: bool = False,
     mount_lookup: dict[str, tuple[Any, str]] | None = None,
@@ -418,7 +427,7 @@ def _dispatch_batch(
     In async mode, spawns fire-and-forget tasks and returns None.
     """
     _ = handlers
-    loop = scheduler.loop if isinstance(scheduler, AsyncRuntime) else scheduler
+    loop = scheduler.loop if isinstance(scheduler, (AsyncRuntime, AsgiEventLoopPool)) else scheduler
 
     if not async_mode:
         total = (
@@ -439,7 +448,7 @@ def _dispatch_batch(
                 _, _, _, invoker = _handler_dispatch_spec(handler)
                 coros.append(invoker(request))
 
-            if isinstance(scheduler, AsyncRuntime):
+            if isinstance(scheduler, (AsyncRuntime, AsgiEventLoopPool)):
                 futures = scheduler.schedule_batch(coros)
                 concurrent.futures.wait(futures)
                 for (idx, request, _handler), fut in zip(partitioned.async_native, futures, strict=True):
@@ -530,7 +539,7 @@ def _dispatch_batch(
 
             async_coros.append(_dispatch_async())
 
-        if isinstance(scheduler, AsyncRuntime):
+        if isinstance(scheduler, (AsyncRuntime, AsgiEventLoopPool)):
             scheduler.spawn_batch(async_coros)
         elif asyncio._get_running_loop() is loop:
             for coro in async_coros:
@@ -566,7 +575,7 @@ def _dispatch_batch(
 async def _shm_worker_loop(
     handlers: dict[int, Any],
     active_mounts: list[tuple[str, Any, str]],
-    scheduler: AsyncRuntime,
+    scheduler: AsyncRuntime | AsgiEventLoopPool,
     batch_timeout_ms: int,
 ) -> None:
     """Run the asyncio-driven SHM worker loop using eventfd notifications."""
@@ -583,7 +592,7 @@ async def _shm_worker_loop(
     notify_fd = get_request_notify_fd()
     ready_event = asyncio.Event()
     mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in active_mounts}
-    dispatch_target: AsyncRuntime | asyncio.AbstractEventLoop = (
+    dispatch_target: AsyncRuntime | AsgiEventLoopPool | asyncio.AbstractEventLoop = (
         loop if isinstance(scheduler, AsyncRuntime) else scheduler
     )
 
@@ -618,11 +627,6 @@ async def _shm_worker_loop(
                 )
     finally:
         loop.remove_reader(notify_fd)
-
-
-def _is_free_threaded() -> bool:
-    """Return True if the current Python build is free-threaded."""
-    return bool(_NATIVE_FREE_THREADED)
 
 
 def _extract_request(request: Any) -> Any:

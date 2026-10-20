@@ -138,6 +138,7 @@ async fn spawn_test_server_with(bp: Option<BackpressureConfig>) -> TestServer {
                         status: resp.status,
                         headers_mp: encode_response_headers(&resp.headers),
                         body: resp.body,
+                        stream_rx: None,
                     },
                 );
             }

@@ -127,6 +127,34 @@ impl BufferPool {
         })
     }
 
+    /// Atomically acquire enough `buffer_size` slots to store `total_bytes`.
+    ///
+    /// Rolls back and returns `None` if fewer than `slots_needed` free slots are available.
+    pub fn acquire_multi(self: &Arc<Self>, total_bytes: usize) -> Option<Vec<Buffer>> {
+        if self.buffer_size == 0 {
+            return None;
+        }
+        let slots_needed = total_bytes.div_ceil(self.buffer_size).max(1);
+        let mut guard = self.free_list.lock().ok()?;
+        if guard.len() < slots_needed {
+            return None;
+        }
+        let mut buffers = Vec::with_capacity(slots_needed);
+        for _ in 0..slots_needed {
+            let index = guard.pop().expect("checked free_list length");
+            buffers.push(Buffer {
+                pool: Arc::clone(self),
+                index,
+            });
+        }
+        Some(buffers)
+    }
+
+    /// Release a batch of leased buffers back to the pool.
+    pub fn release_multi(&self, handles: Vec<Buffer>) {
+        drop(handles);
+    }
+
     pub fn count(&self) -> usize {
         self.count
     }
@@ -169,6 +197,8 @@ pub struct Buffer {
     pool: Arc<BufferPool>,
     index: usize,
 }
+
+pub type BufferHandle = Buffer;
 
 impl Buffer {
     pub fn as_slice(&self) -> &[u8] {
