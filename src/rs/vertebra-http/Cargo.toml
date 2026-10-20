@@ -32,6 +32,9 @@ tokio-tungstenite = "0.30"
 rustls          = { version = "0.23", optional = true, features = ["ring"] }
 tokio-rustls    = { version = "0.26", optional = true }
 rustls-pemfile  = { version = "2", optional = true }
+quinn           = { workspace = true, optional = true }
+h3              = { workspace = true, optional = true }
+h3-quinn        = { workspace = true, optional = true }
 
 # Python embedding (for server binary — needs auto-initialize, NOT extension-module)
 pyo3 = { workspace = true, features = ["auto-initialize"], optional = true }
@@ -62,6 +65,8 @@ default = ["python", "mimalloc"]
 python = ["dep:pyo3", "dep:_vertebra"]
 mimalloc = ["dep:mimalloc"]
 tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pemfile"]
+compression = ["vertebra-core/compression"]
+http3 = ["tls", "dep:quinn", "dep:h3", "dep:h3-quinn"]
 
 [build-dependencies]
 pyo3-build-config = { workspace = true }

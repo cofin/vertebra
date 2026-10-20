@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::backpressure::{BackpressureConfig, CircuitBreakerConfig};
+use crate::http3::Http3Config;
+use crate::tls::{MtlsConfig, TrustedProxyConfig};
 
 /// Top-level server configuration.
 #[derive(Debug, Clone)]
@@ -33,6 +35,22 @@ pub struct ServerConfig {
     pub thread_count: usize,
     /// Admission control thresholds for the dispatcher ingress path.
     pub backpressure: BackpressureConfig,
+    /// Enable adaptive HTTP/2 flow-control windows.
+    pub h2_adaptive_window: bool,
+    /// Initial HTTP/2 stream-level window size in bytes.
+    pub h2_initial_stream_window_size: Option<u32>,
+    /// Initial HTTP/2 connection-level window size in bytes.
+    pub h2_initial_connection_window_size: Option<u32>,
+    /// Maximum concurrent HTTP/2 streams per connection.
+    pub h2_max_concurrent_streams: Option<u32>,
+    /// HTTP/2 PING keep-alive interval in milliseconds.
+    pub h2_keep_alive_interval_ms: Option<u64>,
+    /// Enable RFC 9113 HTTP/1.1 `Upgrade: h2c` negotiation on cleartext sockets.
+    pub enable_h2c_upgrade: bool,
+    /// CIDR-verified reverse proxies permitted to supply identity headers.
+    pub trusted_proxies: TrustedProxyConfig,
+    /// HTTP/3 over QUIC configuration and `Alt-Svc` advertisement settings.
+    pub http3: Http3Config,
 }
 
 /// Runtime topology for Vertebra.
@@ -79,12 +97,14 @@ impl Default for WorkerConfig {
 }
 
 /// TLS configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TlsConfig {
     /// Path to the PEM-encoded certificate chain.
     pub cert_path: std::path::PathBuf,
     /// Path to the PEM-encoded private key.
     pub key_path: std::path::PathBuf,
+    /// Mutual TLS (mTLS) client certificate verification settings.
+    pub mtls: MtlsConfig,
 }
 
 impl Default for ServerConfig {
@@ -102,6 +122,14 @@ impl Default for ServerConfig {
             workers: WorkerConfig::default(),
             thread_count: num_cpus(),
             backpressure: BackpressureConfig::default(),
+            h2_adaptive_window: true,
+            h2_initial_stream_window_size: None,
+            h2_initial_connection_window_size: None,
+            h2_max_concurrent_streams: None,
+            h2_keep_alive_interval_ms: None,
+            enable_h2c_upgrade: true,
+            trusted_proxies: TrustedProxyConfig::default(),
+            http3: Http3Config::default(),
         }
     }
 }
@@ -136,6 +164,7 @@ impl ServerConfig {
                 config.tls = Some(TlsConfig {
                     cert_path: cert.into(),
                     key_path: key.into(),
+                    mtls: MtlsConfig::default(),
                 });
             }
             (Some(_), None) | (None, Some(_)) => {

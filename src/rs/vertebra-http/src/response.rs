@@ -177,13 +177,21 @@ pub async fn handle(
     }
 
     // 6. Await response.
-    let hyper_resp = match reply_rx.await {
+    let mut hyper_resp = match reply_rx.await {
         Ok(resp) => build_response(resp),
         Err(_) => {
             warn!(handler_id, "worker dropped response channel");
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "worker error")
         }
     };
+
+    if state.config.http3.enabled {
+        crate::http3::inject_alt_svc_header(
+            hyper_resp.headers_mut(),
+            state.config.bind.port(),
+            state.config.http3.alt_svc_max_age,
+        );
+    }
 
     // Feed the circuit breaker. 5xx counts as failure; everything else is
     // treated as success from the infrastructure's perspective.
