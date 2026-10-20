@@ -42,6 +42,7 @@ pyo3 = { workspace = true, features = ["auto-initialize"], optional = true }
 # Serialization (for AssetManager manifest)
 serde       = { workspace = true }
 serde_json  = { workspace = true }
+zstd        = { workspace = true }
 
 # Platform
 libc = { workspace = true }
@@ -58,7 +59,6 @@ bytes      = { workspace = true }
 dashmap    = "6"
 mimalloc   = { workspace = true, optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-zstd       = { workspace = true }
 
 [features]
 default = ["python", "mimalloc"]

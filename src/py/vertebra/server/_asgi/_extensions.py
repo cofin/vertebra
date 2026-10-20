@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from vertebra._typing import module_available
+from vertebra.server._asgi._litestar_router import extract_litestar_route_entries
 from vertebra.server._asgi._queues import AsgiResponse
 from vertebra.utils.serializers._json import encode_json_bytes
 
@@ -307,23 +308,16 @@ class LitestarExtension:
         if not _LITESTAR_AVAILABLE:
             return {}
         try:
-            routes: dict[str, Any] = {}
-            for route in getattr(app, "routes", []):
-                pattern = getattr(route, "path", None)
-                handler = getattr(route, "route_handler", None)
-                if pattern and handler:
-                    routes[pattern] = handler
-            return routes
+            return {entry.path_template: entry.route_handler for entry in extract_litestar_route_entries(app)}
         except Exception:
             log.debug("Litestar route extraction failed", exc_info=True)
             return {}
 
     def _resolve_handler(self, app: Any, request: Any) -> tuple[Any, dict[str, Any]]:
         try:
-            for route in getattr(app, "routes", []):
-                handler = getattr(route, "route_handler", None)
-                path = getattr(route, "path", None)
-                if path == request.path and handler is not None:
+            for entry in extract_litestar_route_entries(app):
+                if entry.path_template == request.path:
+                    handler = entry.route_handler
                     fn = getattr(handler, "fn", None)
                     if fn is not None and not getattr(handler, "middleware", None):
                         return fn.value if hasattr(fn, "value") else fn, {}

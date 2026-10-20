@@ -123,9 +123,10 @@ pub async fn handle(
                 .body(full_body(Bytes::from_static(b"Not Found")))
                 .unwrap());
         }
-        Err(RouterError::MethodNotAllowed { .. }) => {
+        Err(RouterError::MethodNotAllowed { allowed, .. }) => {
             return Ok(Response::builder()
                 .status(StatusCode::METHOD_NOT_ALLOWED)
+                .header("allow", allowed.join(", "))
                 .body(full_body(Bytes::from_static(b"Method Not Allowed")))
                 .unwrap());
         }
