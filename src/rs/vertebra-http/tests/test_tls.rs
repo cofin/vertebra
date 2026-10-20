@@ -45,6 +45,7 @@ fn tls_acceptor_from_valid_config() {
     let config = TlsConfig {
         cert_path: cert_file.path().to_path_buf(),
         key_path: key_file.path().to_path_buf(),
+        ..Default::default()
     };
 
     let acceptor = TlsAcceptor::from_config(&config);
@@ -61,6 +62,7 @@ fn tls_acceptor_missing_cert_file() {
     let config = TlsConfig {
         cert_path: "/nonexistent/cert.pem".into(),
         key_path: key_file.path().to_path_buf(),
+        ..Default::default()
     };
 
     assert!(TlsAcceptor::from_config(&config).is_err());
@@ -77,6 +79,7 @@ fn tls_acceptor_invalid_pem() {
     let config = TlsConfig {
         cert_path: cert_file.path().to_path_buf(),
         key_path: key_file.path().to_path_buf(),
+        ..Default::default()
     };
 
     assert!(TlsAcceptor::from_config(&config).is_err());
@@ -89,6 +92,7 @@ async fn tls_handshake_and_https_request() {
     let config = TlsConfig {
         cert_path: cert_file.path().to_path_buf(),
         key_path: key_file.path().to_path_buf(),
+        ..Default::default()
     };
 
     let acceptor = TlsAcceptor::from_config(&config).unwrap();

@@ -9,6 +9,9 @@ sources:
   - resource: src/rs/vertebra-http/src/router.rs
   - resource: src/rs/vertebra-http/src/route_table.rs
   - resource: src/rs/vertebra-http/src/tls.rs
+  - resource: src/rs/vertebra-http/src/h2c.rs
+  - resource: src/rs/vertebra-http/src/http3.rs
+  - resource: src/rs/vertebra-http/src/grpc.rs
   - resource: src/rs/vertebra-http/src/assets.rs
   - resource: src/rs/vertebra-http/src/health.rs
   - resource: src/rs/vertebra-http/src/payload.rs
@@ -17,6 +20,7 @@ sources:
   - resource: src/rs/vertebra-http/src/compression.rs
   - resource: src/rs/vertebra-http/src/profile.rs
   - resource: src/rs/vertebra-core/src/router.rs
+  - resource: src/py/vertebra/extensions/grpc/_decorator.py
 ---
 
 # HTTP/1.1 & HTTP/2 Ingress & Native Routing

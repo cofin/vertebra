@@ -15,8 +15,11 @@ pub mod config;
 pub mod correlation;
 pub mod direct_worker;
 pub mod dispatcher;
+pub mod grpc;
+pub mod h2c;
 pub mod health;
 pub mod hmr;
+pub mod http3;
 pub mod multipart;
 pub mod payload;
 pub mod policy;
@@ -27,8 +30,6 @@ pub mod ring_factory;
 pub mod route_table;
 pub mod router;
 pub mod server;
-
-#[cfg(feature = "tls")]
 pub mod tls;
 
 pub use collector::RequestBatcher;
