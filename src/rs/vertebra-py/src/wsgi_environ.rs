@@ -1,24 +1,18 @@
-//! Lazy WSGI environ backed by a `BatchSnapshot` + index.
-//!
-//! Parallels `asgi_scope::AsgiScope` but produces the PEP 3333 CGI-style
-//! keys (`REQUEST_METHOD`, `SCRIPT_NAME`, `PATH_INFO`, `QUERY_STRING`, etc.)
-//! and surfaces request headers via the `HTTP_*` prefix on demand. Keeps
-//! the `Arc<BatchSnapshot>` alive so path/header slices stay valid for as
-//! long as the WSGI app holds the environ.
+//! Lazy WSGI environ, zero-copy `WsgiInput`, and `WsgiFileWrapper` backed by `BatchSnapshot`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use pyo3::exceptions::PyKeyError;
+use bytes::Bytes;
+use pyo3::exceptions::{PyIOError, PyKeyError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple, PyType};
 
-use vertebra_core::transport::BatchSnapshot;
+use vertebra_core::transport::{BatchSnapshot, TransportNode, encode_headers_compact};
 
 use crate::headers::iter_raw_headers;
 
-static BYTES_IO: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SYS_STDERR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 #[inline]
@@ -30,8 +24,8 @@ fn eq_http_header_name(header_name: &[u8], cgi_rest: &[u8]) -> bool {
             .all(|(&h, &k)| (h == b'-' && k == b'_') || h.eq_ignore_ascii_case(&k))
 }
 
-/// Fixed-layout WSGI keys that every environ must expose.
-const STATIC_KEYS: &[&str] = &[
+/// Fixed-layout PEP 3333 WSGI keys exposed by every `WsgiEnviron`.
+pub const STATIC_KEYS: &[&str] = &[
     "REQUEST_METHOD",
     "SCRIPT_NAME",
     "PATH_INFO",
@@ -46,26 +40,218 @@ const STATIC_KEYS: &[&str] = &[
     "wsgi.multithread",
     "wsgi.multiprocess",
     "wsgi.run_once",
+    "wsgi.file_wrapper",
 ];
 
-/// Lazy WSGI environ. Implements the mapping protocol so existing WSGI
-/// apps treat it as a dict without the environ having to materialize every
-/// key up-front.
-#[pyclass(mapping, name = "WsgiEnviron")]
+#[inline]
+fn intern_static_wsgi_key<'py>(py: Python<'py>, key: &str) -> Bound<'py, PyString> {
+    match key {
+        "REQUEST_METHOD" => pyo3::intern!(py, "REQUEST_METHOD").clone(),
+        "SCRIPT_NAME" => pyo3::intern!(py, "SCRIPT_NAME").clone(),
+        "PATH_INFO" => pyo3::intern!(py, "PATH_INFO").clone(),
+        "QUERY_STRING" => pyo3::intern!(py, "QUERY_STRING").clone(),
+        "SERVER_NAME" => pyo3::intern!(py, "SERVER_NAME").clone(),
+        "SERVER_PORT" => pyo3::intern!(py, "SERVER_PORT").clone(),
+        "SERVER_PROTOCOL" => pyo3::intern!(py, "SERVER_PROTOCOL").clone(),
+        "wsgi.version" => pyo3::intern!(py, "wsgi.version").clone(),
+        "wsgi.url_scheme" => pyo3::intern!(py, "wsgi.url_scheme").clone(),
+        "wsgi.input" => pyo3::intern!(py, "wsgi.input").clone(),
+        "wsgi.errors" => pyo3::intern!(py, "wsgi.errors").clone(),
+        "wsgi.multithread" => pyo3::intern!(py, "wsgi.multithread").clone(),
+        "wsgi.multiprocess" => pyo3::intern!(py, "wsgi.multiprocess").clone(),
+        "wsgi.run_once" => pyo3::intern!(py, "wsgi.run_once").clone(),
+        "wsgi.file_wrapper" => pyo3::intern!(py, "wsgi.file_wrapper").clone(),
+        "CONTENT_TYPE" => pyo3::intern!(py, "CONTENT_TYPE").clone(),
+        "CONTENT_LENGTH" => pyo3::intern!(py, "CONTENT_LENGTH").clone(),
+        _ => PyString::new(py, key),
+    }
+}
+
+/// Zero-copy PEP 3333 `wsgi.input` reader backed by `Bytes` without Python `io.BytesIO`.
+#[pyclass(name = "WsgiInput", freelist = 128)]
+pub struct WsgiInput {
+    data: Bytes,
+    pos: usize,
+}
+
+impl WsgiInput {
+    pub fn from_bytes(data: Bytes) -> Self {
+        Self { data, pos: 0 }
+    }
+}
+
+#[pymethods]
+impl WsgiInput {
+    #[new]
+    #[pyo3(signature = (data=None))]
+    pub fn py_new(data: Option<&[u8]>) -> Self {
+        Self {
+            data: Bytes::copy_from_slice(data.unwrap_or(b"")),
+            pos: 0,
+        }
+    }
+
+    #[pyo3(signature = (size=-1))]
+    pub fn read<'py>(&mut self, py: Python<'py>, size: isize) -> Bound<'py, PyBytes> {
+        let remaining = self.data.len().saturating_sub(self.pos);
+        let take = if size < 0 {
+            remaining
+        } else {
+            (size as usize).min(remaining)
+        };
+        let slice = &self.data[self.pos..self.pos + take];
+        self.pos += take;
+        PyBytes::new(py, slice)
+    }
+
+    #[pyo3(signature = (size=-1))]
+    pub fn readline<'py>(&mut self, py: Python<'py>, size: isize) -> Bound<'py, PyBytes> {
+        if self.pos >= self.data.len() {
+            return PyBytes::new(py, b"");
+        }
+        let max_end = if size < 0 {
+            self.data.len()
+        } else {
+            self.data.len().min(self.pos + (size as usize))
+        };
+        let window = &self.data[self.pos..max_end];
+        let take = match window.iter().position(|&b| b == b'\n') {
+            Some(idx) => idx + 1,
+            None => window.len(),
+        };
+        let slice = &self.data[self.pos..self.pos + take];
+        self.pos += take;
+        PyBytes::new(py, slice)
+    }
+
+    #[pyo3(signature = (hint=-1))]
+    pub fn readlines<'py>(&mut self, py: Python<'py>, hint: isize) -> PyResult<Bound<'py, PyList>> {
+        let mut lines: Vec<Bound<'py, PyAny>> = Vec::new();
+        let mut total = 0usize;
+        loop {
+            let line = self.readline(py, -1);
+            let len = line.as_bytes().len();
+            if len == 0 {
+                break;
+            }
+            lines.push(line.into_any());
+            total += len;
+            if hint > 0 && total >= (hint as usize) {
+                break;
+            }
+        }
+        PyList::new(py, &lines)
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__<'py>(&mut self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
+        let line = self.readline(py, -1);
+        if line.as_bytes().is_empty() {
+            None
+        } else {
+            Some(line)
+        }
+    }
+}
+
+/// PEP 3333 `wsgi.file_wrapper` implementation resolving filesystem paths for Rust `pathsend`.
+#[pyclass(name = "WsgiFileWrapper", freelist = 128)]
+pub struct WsgiFileWrapper {
+    filelike: Py<PyAny>,
+    block_size: usize,
+    path: Option<String>,
+}
+
+#[pymethods]
+impl WsgiFileWrapper {
+    #[new]
+    #[pyo3(signature = (filelike, block_size=65536))]
+    pub fn py_new(filelike: &Bound<'_, PyAny>, block_size: usize) -> Self {
+        let path = filelike
+            .getattr("name")
+            .ok()
+            .and_then(|n| n.extract::<String>().ok())
+            .filter(|p| std::path::Path::new(p).is_file());
+        Self {
+            filelike: filelike.clone().unbind(),
+            block_size: block_size.max(4096),
+            path,
+        }
+    }
+
+    #[getter]
+    pub fn path(&self) -> Option<String> {
+        self.path.clone()
+    }
+
+    #[getter]
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    #[getter]
+    pub fn filelike(&self, py: Python<'_>) -> Py<PyAny> {
+        self.filelike.clone_ref(py)
+    }
+
+    /// Read the entire wrapped file in Rust (releasing the GIL) when backed by a filesystem path.
+    pub fn read_all_bytes<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let Some(ref file_path) = self.path else {
+            return Ok(None);
+        };
+        let path_owned = file_path.clone();
+        let data = py
+            .detach(|| std::fs::read(&path_owned))
+            .map_err(|e| PyIOError::new_err(format!("failed to read {file_path}: {e}")))?;
+        Ok(Some(PyBytes::new(py, &data)))
+    }
+
+    pub fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let bound = self.filelike.bind(py);
+        if bound.hasattr("close")? {
+            bound.call_method0("close")?;
+        }
+        Ok(())
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let chunk = self
+            .filelike
+            .bind(py)
+            .call_method1("read", (self.block_size,))?;
+        if let Ok(b) = chunk.cast::<PyBytes>() {
+            if b.as_bytes().is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(b.clone()));
+        }
+        let extracted: Vec<u8> = chunk.extract()?;
+        if extracted.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(PyBytes::new(py, &extracted)))
+        }
+    }
+}
+
+/// Lazy WSGI environ with freelist pooling and interned PEP 3333 keys.
+#[pyclass(mapping, name = "WsgiEnviron", freelist = 128)]
 pub struct WsgiEnviron {
     batch: Arc<BatchSnapshot>,
     index: usize,
     server_name: String,
     server_port: u16,
     url_scheme: String,
-    /// Cached materialized values for static and computed keys.
     cached: HashMap<String, Py<PyAny>>,
-    /// User-set keys (via `__setitem__` / middleware).
     extras: Option<HashMap<String, Py<PyAny>>>,
-    /// Keys that have been removed via `__delitem__`.
     deleted: Option<HashSet<String>>,
-    /// Lazily decoded header map (lowercase name -> value). Built on first
-    /// full key enumeration.
     header_cache: Option<HashMap<String, String>>,
 }
 
@@ -115,7 +301,7 @@ impl WsgiEnviron {
         let node = self.batch.node(self.index);
         let obj: Py<PyAny> = match key {
             "REQUEST_METHOD" => PyString::intern(py, node.method_name()).into_any().unbind(),
-            "SCRIPT_NAME" => PyString::intern(py, "").into_any().unbind(),
+            "SCRIPT_NAME" => pyo3::intern!(py, "").clone().into_any().unbind(),
             "PATH_INFO" => PyString::new(py, self.batch.path(self.index))
                 .into_any()
                 .unbind(),
@@ -136,14 +322,10 @@ impl WsgiEnviron {
             }
             "wsgi.url_scheme" => PyString::new(py, &self.url_scheme).into_any().unbind(),
             "wsgi.input" => {
-                let body = self.batch.body(self.index);
-                let body_bytes = PyBytes::new(py, body);
-                let bytes_io = BYTES_IO.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
-                    Ok(py.import("io")?.getattr("BytesIO")?.unbind())
-                })?;
-                let bio = bytes_io.bind(py).call1((body_bytes,))?;
-                bio.into_any().unbind()
+                let body = Bytes::copy_from_slice(self.batch.body(self.index));
+                Py::new(py, WsgiInput::from_bytes(body))?.into_any()
             }
+            "wsgi.file_wrapper" => PyType::new::<WsgiFileWrapper>(py).into_any().unbind(),
             "wsgi.errors" => {
                 let stderr = SYS_STDERR.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
                     Ok(py.import("sys")?.getattr("stderr")?.unbind())
@@ -250,7 +432,75 @@ impl WsgiEnviron {
 
 #[pymethods]
 impl WsgiEnviron {
-    fn __getitem__(&mut self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+    #[staticmethod]
+    #[pyo3(signature = (*, method="GET", path="/", query_string="", headers=None, body=None, server_name="localhost", server_port=8000, url_scheme="http"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        method: &str,
+        path: &str,
+        query_string: &str,
+        headers: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+        body: Option<&[u8]>,
+        server_name: &str,
+        server_port: u16,
+        url_scheme: &str,
+    ) -> Self {
+        let body_bytes = body.unwrap_or(b"");
+        let method_tag = match method {
+            "GET" => 0,
+            "POST" => 1,
+            "PUT" => 2,
+            "DELETE" => 3,
+            "PATCH" => 4,
+            "HEAD" => 5,
+            "OPTIONS" => 6,
+            "TRACE" => 7,
+            "CONNECT" => 8,
+            _ => 0,
+        };
+        let raw_headers = encode_headers_compact(&headers.unwrap_or_default());
+        let mut slab = Vec::with_capacity(
+            path.len() + query_string.len() + raw_headers.len() + body_bytes.len(),
+        );
+        let path_offset = 0u32;
+        let path_len = path.len() as u32;
+        slab.extend_from_slice(path.as_bytes());
+        let query_offset = slab.len() as u32;
+        let query_len = query_string.len() as u32;
+        slab.extend_from_slice(query_string.as_bytes());
+        let headers_offset = slab.len() as u32;
+        let headers_len = raw_headers.len() as u32;
+        slab.extend_from_slice(&raw_headers);
+        let body_offset = slab.len() as u32;
+        let body_len = body_bytes.len() as u32;
+        slab.extend_from_slice(body_bytes);
+
+        let node = TransportNode {
+            method_tag,
+            http_version_tag: 1,
+            _pad: [0; 2],
+            handler_id: 0,
+            correlation_id: 0,
+            path_offset,
+            path_len,
+            query_offset,
+            query_len,
+            headers_offset,
+            headers_len,
+            body_offset,
+            body_len,
+        };
+        let snapshot = Arc::new(BatchSnapshot::new(slab, vec![node]));
+        Self::new(
+            snapshot,
+            0,
+            server_name.to_string(),
+            server_port,
+            url_scheme.to_string(),
+        )
+    }
+
+    pub fn __getitem__(&mut self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         if self.is_deleted(key) {
             return Err(PyKeyError::new_err(key.to_string()));
         }
@@ -270,7 +520,7 @@ impl WsgiEnviron {
         Err(PyKeyError::new_err(key.to_string()))
     }
 
-    fn __setitem__(&mut self, key: String, value: Py<PyAny>) {
+    pub fn __setitem__(&mut self, key: String, value: Py<PyAny>) {
         if let Some(ref mut deleted) = self.deleted {
             deleted.remove(&key);
         }
@@ -279,7 +529,7 @@ impl WsgiEnviron {
             .insert(key, value);
     }
 
-    fn __delitem__(&mut self, key: &str) -> PyResult<()> {
+    pub fn __delitem__(&mut self, key: &str) -> PyResult<()> {
         let in_extras = self
             .extras
             .as_mut()
@@ -299,7 +549,7 @@ impl WsgiEnviron {
         Err(PyKeyError::new_err(key.to_string()))
     }
 
-    fn __contains__(&mut self, key: &str) -> bool {
+    pub fn __contains__(&mut self, key: &str) -> bool {
         if self.is_deleted(key) {
             return false;
         }
@@ -325,17 +575,20 @@ impl WsgiEnviron {
         false
     }
 
-    fn __len__(&mut self) -> usize {
+    pub fn __len__(&mut self) -> usize {
         self.collect_keys().len()
     }
 
-    fn __iter__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Py<WsgiEnvironIterator>> {
+    pub fn __iter__(
+        mut slf: PyRefMut<'_, Self>,
+        py: Python<'_>,
+    ) -> PyResult<Py<WsgiEnvironIterator>> {
         let keys = slf.collect_keys();
         Py::new(py, WsgiEnvironIterator { keys, pos: 0 })
     }
 
     #[pyo3(signature = (key, default=None))]
-    fn get(
+    pub fn get(
         &mut self,
         py: Python<'_>,
         key: &str,
@@ -348,7 +601,7 @@ impl WsgiEnviron {
     }
 
     #[pyo3(signature = (key, default=None))]
-    fn setdefault(
+    pub fn setdefault(
         &mut self,
         py: Python<'_>,
         key: String,
@@ -365,16 +618,16 @@ impl WsgiEnviron {
         }
     }
 
-    fn keys<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+    pub fn keys<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let keys = self.collect_keys();
         let items: Vec<Bound<'py, PyAny>> = keys
             .into_iter()
-            .map(|k| PyString::new(py, &k).into_any())
+            .map(|k| intern_static_wsgi_key(py, &k).into_any())
             .collect();
         PyList::new(py, &items)
     }
 
-    fn values<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+    pub fn values<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let keys = self.collect_keys();
         let mut items: Vec<Bound<'py, PyAny>> = Vec::with_capacity(keys.len());
         for k in &keys {
@@ -384,18 +637,21 @@ impl WsgiEnviron {
         PyList::new(py, &items)
     }
 
-    fn items<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+    pub fn items<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let keys = self.collect_keys();
         let mut tuples: Vec<Bound<'py, PyAny>> = Vec::with_capacity(keys.len());
         for k in &keys {
             let v = self.__getitem__(py, k)?;
-            let t = PyTuple::new(py, [PyString::new(py, k).into_any(), v.into_bound(py)])?;
+            let t = PyTuple::new(
+                py,
+                [intern_static_wsgi_key(py, k).into_any(), v.into_bound(py)],
+            )?;
             tuples.push(t.into_any());
         }
         PyList::new(py, &tuples)
     }
 
-    fn update(&mut self, other: &Bound<'_, PyAny>) -> PyResult<()> {
+    pub fn update(&mut self, other: &Bound<'_, PyAny>) -> PyResult<()> {
         if let Ok(dict) = other.cast::<PyDict>() {
             for (k, v) in dict.iter() {
                 let key: String = k.extract()?;
@@ -415,17 +671,17 @@ impl WsgiEnviron {
         Ok(())
     }
 
-    fn copy<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    pub fn copy<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
         let keys = self.collect_keys();
         for k in &keys {
             let v = self.__getitem__(py, k)?;
-            d.set_item(k, v)?;
+            d.set_item(intern_static_wsgi_key(py, k), v)?;
         }
         Ok(d)
     }
 
-    fn __repr__(&self) -> String {
+    pub fn __repr__(&self) -> String {
         format!(
             "WsgiEnviron(method={:?}, path={:?})",
             self.batch.node(self.index).method_name(),
@@ -435,7 +691,7 @@ impl WsgiEnviron {
 }
 
 /// Iterator over the environ's live keys.
-#[pyclass(name = "WsgiEnvironIterator")]
+#[pyclass(name = "WsgiEnvironIterator", freelist = 128)]
 pub struct WsgiEnvironIterator {
     keys: Vec<String>,
     pos: usize,
@@ -446,11 +702,12 @@ impl WsgiEnvironIterator {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
-    fn __next__(&mut self) -> Option<String> {
+
+    fn __next__<'py>(&mut self, py: Python<'py>) -> Option<Bound<'py, PyString>> {
         if self.pos < self.keys.len() {
-            let k = self.keys[self.pos].clone();
+            let k = &self.keys[self.pos];
             self.pos += 1;
-            Some(k)
+            Some(intern_static_wsgi_key(py, k))
         } else {
             None
         }

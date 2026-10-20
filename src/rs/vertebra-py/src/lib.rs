@@ -10,19 +10,26 @@
 use pyo3::prelude::*;
 
 pub mod api;
+pub mod asgi_bridge;
 pub mod asgi_scope;
 pub mod batch;
 pub mod headers;
 pub mod request;
 pub mod response;
+pub mod rsgi_protocol;
+pub mod rsgi_scope;
 pub mod wsgi_environ;
+pub mod wsgi_worker;
 
 pub use asgi_scope::{AsgiScope, AsgiScopeIterator};
 pub use batch::{RequestBatch, RequestBatchIterator};
 pub use headers::{Headers, HeadersIterator};
 pub use request::Request;
 pub use response::Response;
-pub use wsgi_environ::{WsgiEnviron, WsgiEnvironIterator};
+pub use rsgi_protocol::{RsgiHttpProtocol, RsgiTransport, RsgiWebsocketProtocol};
+pub use rsgi_scope::{RsgiHeaders, RsgiScope};
+pub use wsgi_environ::{WsgiEnviron, WsgiEnvironIterator, WsgiFileWrapper, WsgiInput};
+pub use wsgi_worker::run_wsgi_callable;
 
 /// Whether this build targets free-threaded Python (3.14t+).
 #[cfg(Py_GIL_DISABLED)]
@@ -48,6 +55,14 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<asgi_scope::AsgiScopeIterator>()?;
     m.add_class::<wsgi_environ::WsgiEnviron>()?;
     m.add_class::<wsgi_environ::WsgiEnvironIterator>()?;
+    m.add_class::<wsgi_environ::WsgiInput>()?;
+    m.add_class::<wsgi_environ::WsgiFileWrapper>()?;
+    m.add_class::<wsgi_worker::WsgiStartResponse>()?;
+    m.add_class::<rsgi_scope::RsgiHeaders>()?;
+    m.add_class::<rsgi_scope::RsgiScope>()?;
+    m.add_class::<rsgi_protocol::RsgiHttpProtocol>()?;
+    m.add_class::<rsgi_protocol::RsgiTransport>()?;
+    m.add_class::<rsgi_protocol::RsgiWebsocketProtocol>()?;
 
     // Vectorized batch API
     m.add_function(wrap_pyfunction!(api::init_transport, m)?)?;
@@ -60,6 +75,8 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(api::get_request_notify_fd, m)?)?;
     m.add_function(wrap_pyfunction!(api::clear_request_notification, m)?)?;
     m.add_function(wrap_pyfunction!(api::try_get_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(asgi_bridge::stream_file_chunks, m)?)?;
+    m.add_function(wrap_pyfunction!(wsgi_worker::run_wsgi_callable, m)?)?;
 
     Ok(())
 }

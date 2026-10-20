@@ -1,8 +1,11 @@
-"""ASGI framework extensions — shared utilities and FastAPI/Litestar integrations."""
+"""ASGI 3.0 wire extension helpers and framework integration extensions."""
+
+from __future__ import annotations
 
 import functools
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from vertebra._typing import module_available
@@ -10,9 +13,15 @@ from vertebra.server._asgi._queues import AsgiResponse
 from vertebra.utils.serializers._json import encode_json_bytes
 
 __all__ = (
+    "DebugResponse",
+    "EarlyHintResponse",
     "FastApiExtension",
     "HeaderFilter",
     "LitestarExtension",
+    "PathSendResponse",
+    "TrailerResponse",
+    "WebSocketHttpResponse",
+    "ZeroCopySendResponse",
     "compile_guard_pattern",
     "get_extensions",
     "is_static_route",
@@ -20,6 +29,8 @@ __all__ = (
 )
 
 log = logging.getLogger(__name__)
+
+type AsgiSendCallable = Callable[[dict[str, Any]], Awaitable[None]]
 
 _EXTENSIONS: list[Any] = []
 _FASTAPI_AVAILABLE = module_available("fastapi")
@@ -35,27 +46,175 @@ _OPENAPI_PATHS: frozenset[str] = frozenset(
 )
 
 
-def register_extension(extension: Any) -> None:
-    """Register a framework extension with AsgiAdapter's extension chain."""
-    _EXTENSIONS.append(extension)
+class ZeroCopySendResponse:
+    """ASGI http.response.zerocopysend helper transmitting a buffer-protocol view without copying."""
+
+    __slots__ = ("body", "headers", "more_body", "status")
+
+    def __init__(
+        self,
+        body: memoryview | bytes | bytearray,
+        *,
+        status: int = 200,
+        headers: list[tuple[bytes, bytes]] | None = None,
+        more_body: bool = False,
+    ) -> None:
+        self.body: memoryview = body if isinstance(body, memoryview) else memoryview(body)
+        self.status: int = status
+        self.headers: list[tuple[bytes, bytes]] = headers or []
+        self.more_body: bool = more_body
+
+    async def send(self, send: AsgiSendCallable) -> None:
+        """Emit http.response.start followed by http.response.zerocopysend."""
+        await send(
+            {
+                "type": "http.response.start",
+                "status": self.status,
+                "headers": self.headers,
+            }
+        )
+        await send(
+            {
+                "type": "http.response.zerocopysend",
+                "body": self.body,
+                "more_body": self.more_body,
+            }
+        )
 
 
-def get_extensions() -> list[Any]:
-    """Return the list of registered extensions."""
-    return list(_EXTENSIONS)
+class PathSendResponse:
+    """ASGI http.response.pathsend helper delegating file and byte-range streaming to Rust."""
+
+    __slots__ = ("end", "headers", "path", "start", "status")
+
+    def __init__(
+        self,
+        path: str,
+        *,
+        status: int = 200,
+        headers: list[tuple[bytes, bytes]] | None = None,
+        start: int | None = None,
+        end: int | None = None,
+    ) -> None:
+        self.path: str = path
+        self.status: int = status
+        self.headers: list[tuple[bytes, bytes]] = headers or []
+        self.start: int | None = start
+        self.end: int | None = end
+
+    async def send(self, send: AsgiSendCallable) -> None:
+        """Emit http.response.start followed by http.response.pathsend."""
+        await send(
+            {
+                "type": "http.response.start",
+                "status": self.status,
+                "headers": self.headers,
+            }
+        )
+        payload: dict[str, Any] = {
+            "type": "http.response.pathsend",
+            "path": self.path,
+        }
+        if self.start is not None:
+            payload["start"] = self.start
+        if self.end is not None:
+            payload["end"] = self.end
+        await send(payload)
 
 
-@functools.lru_cache(maxsize=512)
-def compile_guard_pattern(pattern: str) -> re.Pattern[str]:
-    """Compile and cache a route guard pattern."""
-    regex = re.sub(r"\{(\w+)\}", r"(?P<\1>[^/]+)", pattern)
-    regex = re.sub(r":(\w+)", r"(?P<\1>[^/]+)", regex)
-    return re.compile(rf"^{regex}$")
+class TrailerResponse:
+    """ASGI http.response.trailers helper emitting trailing HTTP/2 headers."""
+
+    __slots__ = ("headers", "more_trailers")
+
+    def __init__(
+        self,
+        headers: list[tuple[bytes, bytes]],
+        *,
+        more_trailers: bool = False,
+    ) -> None:
+        self.headers: list[tuple[bytes, bytes]] = headers
+        self.more_trailers: bool = more_trailers
+
+    async def send(self, send: AsgiSendCallable) -> None:
+        """Emit http.response.trailers."""
+        await send(
+            {
+                "type": "http.response.trailers",
+                "headers": self.headers,
+                "more_trailers": self.more_trailers,
+            }
+        )
 
 
-def is_static_route(path: str) -> bool:
-    """Return True if the path contains no variable segments."""
-    return "{" not in path and ":" not in path
+class EarlyHintResponse:
+    """ASGI http.response.early_hint helper emitting 103 Early Hints Link headers."""
+
+    __slots__ = ("links",)
+
+    def __init__(self, links: list[bytes]) -> None:
+        self.links: list[bytes] = links
+
+    async def send(self, send: AsgiSendCallable) -> None:
+        """Emit http.response.early_hint."""
+        await send(
+            {
+                "type": "http.response.early_hint",
+                "links": self.links,
+            }
+        )
+
+
+class DebugResponse:
+    """ASGI http.response.debug helper attaching diagnostic metadata to the response."""
+
+    __slots__ = ("info",)
+
+    def __init__(self, info: dict[str, Any]) -> None:
+        self.info: dict[str, Any] = info
+
+    async def send(self, send: AsgiSendCallable) -> None:
+        """Emit http.response.debug."""
+        await send(
+            {
+                "type": "http.response.debug",
+                "info": self.info,
+            }
+        )
+
+
+class WebSocketHttpResponse:
+    """ASGI websocket.http.response helper rejecting a WebSocket handshake with an HTTP response."""
+
+    __slots__ = ("body", "headers", "status")
+
+    def __init__(
+        self,
+        *,
+        status: int = 403,
+        headers: list[tuple[bytes, bytes]] | None = None,
+        body: bytes = b"",
+    ) -> None:
+        self.status: int = status
+        self.headers: list[tuple[bytes, bytes]] = headers or []
+        self.body: bytes = body
+
+    async def send(self, send: AsgiSendCallable) -> None:
+        """Emit websocket.http.response.start and websocket.http.response.body."""
+        await send(
+            {
+                "type": "websocket.http.response.start",
+                "status": self.status,
+                "headers": self.headers,
+            }
+        )
+        await send(
+            {
+                "type": "websocket.http.response.body",
+                "body": self.body,
+                "more_body": False,
+            }
+        )
 
 
 class HeaderFilter:
@@ -171,6 +330,29 @@ class LitestarExtension:
         except Exception:
             pass
         return None, {}
+
+
+def register_extension(extension: Any) -> None:
+    """Register a framework extension with AsgiAdapter's extension chain."""
+    _EXTENSIONS.append(extension)
+
+
+def get_extensions() -> list[Any]:
+    """Return the list of registered extensions."""
+    return list(_EXTENSIONS)
+
+
+@functools.lru_cache(maxsize=512)
+def compile_guard_pattern(pattern: str) -> re.Pattern[str]:
+    """Compile and cache a route guard pattern."""
+    regex = re.sub(r"\{(\w+)\}", r"(?P<\1>[^/]+)", pattern)
+    regex = re.sub(r":(\w+)", r"(?P<\1>[^/]+)", regex)
+    return re.compile(rf"^{regex}$")
+
+
+def is_static_route(path: str) -> bool:
+    """Return True if the path contains no variable segments."""
+    return "{" not in path and ":" not in path
 
 
 if _FASTAPI_AVAILABLE:
