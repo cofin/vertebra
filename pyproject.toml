@@ -99,6 +99,8 @@ module = [
     "litestar.*",
     "django.*",
     "_bundler",
+    "_storage",
+    "vertebra._storage",
     "concurrent.interpreters",
 ]
 ignore_missing_imports = true

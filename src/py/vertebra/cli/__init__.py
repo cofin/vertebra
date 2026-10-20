@@ -2,6 +2,7 @@
 
 import click
 
+from vertebra.cli.build import build as build_command
 from vertebra.cli.config import configure_rich_click
 from vertebra.cli.dev import dev
 from vertebra.cli.init import init
@@ -26,6 +27,7 @@ cli.add_command(run)
 cli.add_command(dev)
 cli.add_command(js)
 cli.add_command(init)
+cli.add_command(build_command, name="build")
 
 vtb = cli
 main = cli

@@ -10,6 +10,20 @@ sources:
   - resource: src/py/vertebra/builder/_codegen/_zod.py
   - resource: src/py/vertebra/builder/_codegen/_manifest.py
   - resource: src/py/vertebra/builder/_import_map.py
+  - resource: src/py/vertebra/extensions/codegen/plugin.py
+  - resource: src/py/vertebra/extensions/codegen/valibot.py
+  - resource: src/py/vertebra/extensions/codegen/zod.py
+  - resource: src/py/vertebra/extensions/codegen/openapi.py
+  - resource: src/py/vertebra/extensions/codegen/protobuf.py
+  - resource: src/py/vertebra/extensions/codegen/procedures.py
+  - resource: src/py/vertebra/storage/_store.py
+  - resource: src/py/vertebra/extensions/sqlspec/plugin.py
+  - resource: src/py/vertebra/extensions/alchemy/plugin.py
+  - resource: src/py/vertebra/build/standalone.py
+  - resource: src/py/vertebra/build/onefile.py
+  - resource: src/rs/vertebra-storage/src/lib.rs
+  - resource: src/rs/vertebra-storage/src/store.rs
+  - resource: src/rs/vertebra-storage/src/signing.rs
   - resource: src/py/vertebra/framework/_inertia.py
 ---
 

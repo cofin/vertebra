@@ -5,6 +5,7 @@ members = [
     "vertebra-http",
     "vertebra-py",
     "vertebra-bundler",
+    "vertebra-storage",
 ]
 
 [workspace.package]
