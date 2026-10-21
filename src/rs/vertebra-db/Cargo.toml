@@ -1,0 +1,21 @@
+[package]
+name = "vertebra-db"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "vertebra_db"
+crate-type = ["rlib"]
+
+[dependencies]
+base64 = "0.22"
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
+tokio.workspace = true
+url = "2.5"

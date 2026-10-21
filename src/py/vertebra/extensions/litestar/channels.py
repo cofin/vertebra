@@ -1,10 +1,17 @@
 """Vertebra pub/sub backend implementing Litestar's ChannelsBackend ABC."""
 
+from __future__ import annotations
+
 import asyncio
 import importlib
 from collections import deque
-from collections.abc import AsyncGenerator, Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any, Self
+
+from vertebra.db.redis import AsyncRedisDriver, RedisConfig
+from vertebra.db.valkey import AsyncValkeyDriver, ValkeyConfig
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Iterable
 
 __all__ = (
     "ChannelsBackend",
@@ -14,17 +21,48 @@ __all__ = (
 
 
 class ChannelsBackend:
-    """In-memory and Rust-bridged Litestar ChannelsBackend with bounded ring history."""
+    """In-memory, Valkey, and Redis-bridged Litestar ChannelsBackend with bounded ring history."""
 
-    __slots__ = ("_history", "_max_history", "_queues", "_running", "_subscribed_channels", "_subscribers")
+    __slots__ = (
+        "_driver",
+        "_history",
+        "_max_history",
+        "_queues",
+        "_running",
+        "_subscribed_channels",
+        "_subscribers",
+    )
 
-    def __init__(self, *, history: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        history: int = 0,
+        driver: AsyncValkeyDriver | AsyncRedisDriver | None = None,
+    ) -> None:
         self._max_history = max(0, history)
+        self._driver = driver
         self._history: dict[str, deque[bytes]] = {}
         self._subscribers: dict[str, set[asyncio.Queue[tuple[str, bytes] | None]]] = {}
         self._subscribed_channels: set[str] = set()
         self._queues: set[asyncio.Queue[tuple[str, bytes] | None]] = set()
         self._running = False
+
+    @classmethod
+    def from_valkey(cls, config_or_url: ValkeyConfig | str, *, history: int = 0) -> Self:
+        """Create a Litestar ChannelsBackend backed by a Valkey configuration or URL."""
+        cfg = ValkeyConfig(url=config_or_url) if isinstance(config_or_url, str) else config_or_url
+        return cls(history=history, driver=AsyncValkeyDriver(cfg))
+
+    @classmethod
+    def from_redis(cls, config_or_url: RedisConfig | str, *, history: int = 0) -> Self:
+        """Create a Litestar ChannelsBackend backed by a Redis configuration or URL."""
+        cfg = RedisConfig(url=config_or_url) if isinstance(config_or_url, str) else config_or_url
+        return cls(history=history, driver=AsyncRedisDriver(cfg))
+
+    @property
+    def driver(self) -> AsyncValkeyDriver | AsyncRedisDriver | None:
+        """Return the underlying Valkey or Redis driver when configured."""
+        return self._driver
 
     async def on_startup(self) -> None:
         """Initialize the channels backend on application startup."""
@@ -42,6 +80,8 @@ class ChannelsBackend:
         """Publish data to all subscribers across the specified channels."""
         payload = data if isinstance(data, bytes) else bytes(data)
         for channel in channels:
+            if self._driver is not None:
+                await self._driver.publish(channel, payload)
             if self._max_history > 0:
                 ring = self._history.get(channel)
                 if ring is None:
