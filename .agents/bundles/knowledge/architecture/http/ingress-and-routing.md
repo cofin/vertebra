@@ -10,6 +10,12 @@ sources:
   - resource: src/rs/vertebra-http/src/route_table.rs
   - resource: src/rs/vertebra-http/src/tls.rs
   - resource: src/rs/vertebra-http/src/assets.rs
+  - resource: src/rs/vertebra-http/src/health.rs
+  - resource: src/rs/vertebra-http/src/payload.rs
+  - resource: src/rs/vertebra-http/src/multipart.rs
+  - resource: src/rs/vertebra-http/src/access_log.rs
+  - resource: src/rs/vertebra-http/src/compression.rs
+  - resource: src/rs/vertebra-http/src/profile.rs
   - resource: src/rs/vertebra-core/src/router.rs
 ---
 

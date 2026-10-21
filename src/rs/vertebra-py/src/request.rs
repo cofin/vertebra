@@ -14,6 +14,8 @@ use vertebra_core::transport::{BatchSnapshot, TransportNode};
 
 use crate::asgi_scope::AsgiScope;
 use crate::headers::Headers;
+use crate::rsgi_protocol::RsgiHttpProtocol;
+use crate::rsgi_scope::RsgiScope;
 use crate::wsgi_environ::WsgiEnviron;
 
 /// Zero-object request proxy backed by a shared [`BatchSnapshot`].
@@ -225,6 +227,26 @@ impl Request {
             server_name.unwrap_or_else(|| "localhost".to_string()),
             server_port.unwrap_or(8000),
             url_scheme.unwrap_or_else(|| "http".to_string()),
+        )
+    }
+
+    /// Return an RSGI v1.6 scope backed by this request's snapshot slot.
+    #[pyo3(signature = (scheme="http", server="127.0.0.1:8000", client="127.0.0.1:0"))]
+    fn rsgi_scope(
+        &self,
+        py: Python<'_>,
+        scheme: &str,
+        server: &str,
+        client: &str,
+    ) -> PyResult<RsgiScope> {
+        RsgiScope::from_batch(py, &self.batch, self.index, "http", scheme, server, client)
+    }
+
+    /// Return a native RSGI v1.6 HTTP protocol handler for this request.
+    fn rsgi_protocol(&self) -> RsgiHttpProtocol {
+        RsgiHttpProtocol::new(
+            bytes::Bytes::copy_from_slice(self.batch.body(self.index)),
+            self.batch.node(self.index).correlation_id,
         )
     }
 

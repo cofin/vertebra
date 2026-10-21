@@ -8,9 +8,14 @@ sources:
   - resource: src/py/vertebra/server/_asgi/_runner.py
   - resource: src/py/vertebra/server/_asgi/_queues.py
   - resource: src/py/vertebra/server/_asgi/_scope.py
+  - resource: src/py/vertebra/server/_rsgi/_adapter.py
   - resource: src/py/vertebra/server/_wsgi/_adapter.py
   - resource: src/rs/vertebra-py/src/asgi_scope.rs
+  - resource: src/rs/vertebra-py/src/asgi_bridge.rs
+  - resource: src/rs/vertebra-py/src/rsgi_scope.rs
+  - resource: src/rs/vertebra-py/src/rsgi_protocol.rs
   - resource: src/rs/vertebra-py/src/wsgi_environ.rs
+  - resource: src/rs/vertebra-py/src/wsgi_worker.rs
 ---
 
 # Task-Free ASGI & Sync WSGI Runners

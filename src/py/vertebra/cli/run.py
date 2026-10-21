@@ -35,6 +35,12 @@ __all__ = ("load_config", "run")
 @click.option("--drain-timeout", type=int, default=5000, help="Drain timeout in milliseconds")
 @click.option("--shutdown-timeout", type=int, default=30000, help="Shutdown timeout in milliseconds")
 @click.option("--asgi", is_flag=True, default=False, help="Run in ASGI mode (disable native pipeline)")
+@click.option(
+    "--interface",
+    type=click.Choice(["auto", "asgi", "rsgi", "wsgi"], case_sensitive=False),
+    default="auto",
+    help="Gateway protocol interface (auto, asgi, rsgi, or wsgi)",
+)
 @click.option("--tls-cert", type=click.Path(exists=True), help="Path to PEM certificate for HTTPS")
 @click.option("--tls-key", type=click.Path(exists=True), help="Path to PEM private key for HTTPS")
 @click.option("--no-banner", is_flag=True, help="Disable startup banner")
@@ -50,6 +56,7 @@ def run(
     drain_timeout: int,
     shutdown_timeout: int,
     asgi: bool,
+    interface: str,
     tls_cert: str | None,
     tls_key: str | None,
     no_banner: bool,
@@ -76,6 +83,8 @@ def run(
     env["VERTEBRA_THREADS"] = str(threads)
     env["VERTEBRA_TOPOLOGY"] = topology.lower()
     env["VERTEBRA_LOG_LEVEL"] = log_level
+    resolved_interface = "asgi" if asgi and interface.lower() == "auto" else interface.lower()
+    env["VERTEBRA_INTERFACE"] = resolved_interface
     env["VERTEBRA_NATIVE"] = "0" if asgi else "1"
 
     if tls_cert and tls_key:
