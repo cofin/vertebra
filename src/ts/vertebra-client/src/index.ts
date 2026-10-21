@@ -13,6 +13,17 @@ export type { ClientConfig, RetryConfig, RouteResponse } from "./client/types";
 export { RealtimeChannel } from "./client/ws";
 export { HotReloadClient, type ServerMessage } from "./hmr/index";
 export {
+  fnv1aFieldId,
+  fnv1aStateId,
+  HybridLogicalClock,
+  LiveStateClient,
+  type LiveStateListener,
+  OfflineDeltaQueue,
+  type StateDeltaMessage,
+  StateOpcode,
+  type StateOpcodeValue,
+} from "./live/index";
+export {
   EventSourceClient,
   SseClient,
   type SseClientOptions,

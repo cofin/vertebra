@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 use thiserror::Error;
 
@@ -10,6 +12,9 @@ pub enum StateOpcode {
     ObjectReplace = 0x03,
     SyncRequest = 0x04,
     SyncResponse = 0x05,
+    ActionCall = 0x06,
+    ActionResult = 0x07,
+    BatchPatch = 0x08,
 }
 
 impl TryFrom<u8> for StateOpcode {
@@ -22,6 +27,9 @@ impl TryFrom<u8> for StateOpcode {
             0x03 => Ok(Self::ObjectReplace),
             0x04 => Ok(Self::SyncRequest),
             0x05 => Ok(Self::SyncResponse),
+            0x06 => Ok(Self::ActionCall),
+            0x07 => Ok(Self::ActionResult),
+            0x08 => Ok(Self::BatchPatch),
             _ => Err(StateDeltaError::InvalidOpcode(value)),
         }
     }
@@ -30,6 +38,141 @@ impl TryFrom<u8> for StateOpcode {
 impl From<StateOpcode> for u8 {
     fn from(value: StateOpcode) -> Self {
         value as u8
+    }
+}
+
+/// 64-bit Hybrid Logical Clock (HLC) combining a 48-bit physical millisecond clock and 16-bit logical counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct HybridLogicalClock {
+    pub wall_ms: u64,
+    pub logical: u16,
+}
+
+impl HybridLogicalClock {
+    pub fn new(wall_ms: u64, logical: u16) -> Self {
+        Self {
+            wall_ms: wall_ms & 0x0000_FFFF_FFFF_FFFF,
+            logical,
+        }
+    }
+
+    pub fn pack(self) -> u64 {
+        ((self.wall_ms & 0x0000_FFFF_FFFF_FFFF) << 16) | u64::from(self.logical)
+    }
+
+    pub fn unpack(packed: u64) -> Self {
+        Self {
+            wall_ms: packed >> 16,
+            logical: (packed & 0xFFFF) as u16,
+        }
+    }
+
+    pub fn tick(&mut self, now_ms: u64) -> u64 {
+        let clamped_now = now_ms & 0x0000_FFFF_FFFF_FFFF;
+        if clamped_now > self.wall_ms {
+            self.wall_ms = clamped_now;
+            self.logical = 0;
+        } else {
+            self.logical = self.logical.saturating_add(1);
+        }
+        self.pack()
+    }
+
+    pub fn receive(&mut self, remote_packed: u64, now_ms: u64) -> u64 {
+        let remote = Self::unpack(remote_packed);
+        let clamped_now = now_ms & 0x0000_FFFF_FFFF_FFFF;
+        if clamped_now > self.wall_ms && clamped_now > remote.wall_ms {
+            self.wall_ms = clamped_now;
+            self.logical = 0;
+        } else if self.wall_ms == remote.wall_ms {
+            self.logical = self.logical.max(remote.logical).saturating_add(1);
+        } else if remote.wall_ms > self.wall_ms {
+            self.wall_ms = remote.wall_ms;
+            self.logical = remote.logical.saturating_add(1);
+        } else {
+            self.logical = self.logical.saturating_add(1);
+        }
+        self.pack()
+    }
+}
+
+/// Last-Write-Wins (LWW) state register keyed by 32-bit FNV-1a field ID.
+#[derive(Debug, Clone, Default)]
+pub struct LwwStateRegister {
+    pub state_id: u64,
+    fields: BTreeMap<u32, (u64, Value)>,
+    tombstones: BTreeMap<u32, u64>,
+}
+
+impl LwwStateRegister {
+    pub fn new(state_id: u64) -> Self {
+        Self {
+            state_id,
+            fields: BTreeMap::new(),
+            tombstones: BTreeMap::new(),
+        }
+    }
+
+    pub fn apply(&mut self, delta: &StateDelta) -> bool {
+        match delta {
+            StateDelta::FieldSet {
+                state_id,
+                field_id,
+                timestamp_ns,
+                value,
+            }
+            | StateDelta::ObjectReplace {
+                state_id,
+                field_id,
+                timestamp_ns,
+                value,
+            } => {
+                if *state_id != self.state_id {
+                    return false;
+                }
+                let latest_ts = self
+                    .fields
+                    .get(field_id)
+                    .map(|(ts, _)| *ts)
+                    .max(self.tombstones.get(field_id).copied())
+                    .unwrap_or(0);
+                if *timestamp_ns >= latest_ts {
+                    self.tombstones.remove(field_id);
+                    self.fields
+                        .insert(*field_id, (*timestamp_ns, value.clone()));
+                    true
+                } else {
+                    false
+                }
+            }
+            StateDelta::FieldDelete {
+                state_id,
+                field_id,
+                timestamp_ns,
+            } => {
+                if *state_id != self.state_id {
+                    return false;
+                }
+                let latest_ts = self
+                    .fields
+                    .get(field_id)
+                    .map(|(ts, _)| *ts)
+                    .max(self.tombstones.get(field_id).copied())
+                    .unwrap_or(0);
+                if *timestamp_ns >= latest_ts {
+                    self.fields.remove(field_id);
+                    self.tombstones.insert(*field_id, *timestamp_ns);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    pub fn get(&self, field_id: u32) -> Option<&Value> {
+        self.fields.get(&field_id).map(|(_, v)| v)
     }
 }
 
@@ -59,6 +202,22 @@ pub enum StateDelta {
     SyncResponse {
         state_id: u64,
         state: Value,
+    },
+    ActionCall {
+        state_id: u64,
+        action_id: u32,
+        call_id: u64,
+        args: Value,
+    },
+    ActionResult {
+        state_id: u64,
+        call_id: u64,
+        result: Value,
+    },
+    BatchPatch {
+        state_id: u64,
+        timestamp_ns: u64,
+        patches: Value,
     },
 }
 
@@ -157,6 +316,38 @@ pub fn encode_delta(delta: &StateDelta) -> Result<Vec<u8>, rmp_serde::encode::Er
             json_u64(*state_id),
             state.clone(),
         ],
+        StateDelta::ActionCall {
+            state_id,
+            action_id,
+            call_id,
+            args,
+        } => vec![
+            json_u64(u64::from(StateOpcode::ActionCall as u8)),
+            json_u64(*state_id),
+            json_u64(u64::from(*action_id)),
+            json_u64(*call_id),
+            args.clone(),
+        ],
+        StateDelta::ActionResult {
+            state_id,
+            call_id,
+            result,
+        } => vec![
+            json_u64(u64::from(StateOpcode::ActionResult as u8)),
+            json_u64(*state_id),
+            json_u64(*call_id),
+            result.clone(),
+        ],
+        StateDelta::BatchPatch {
+            state_id,
+            timestamp_ns,
+            patches,
+        } => vec![
+            json_u64(u64::from(StateOpcode::BatchPatch as u8)),
+            json_u64(*state_id),
+            json_u64(*timestamp_ns),
+            patches.clone(),
+        ],
     };
     rmp_serde::to_vec(&payload)
 }
@@ -231,6 +422,43 @@ pub fn decode_delta(data: &[u8]) -> Result<StateDelta, StateDeltaError> {
                 state: raw[2].clone(),
             })
         }
+        StateOpcode::ActionCall => {
+            if raw.len() != 5 {
+                return Err(StateDeltaError::InvalidWire(
+                    "action call delta must have 5 elements",
+                ));
+            }
+            Ok(StateDelta::ActionCall {
+                state_id,
+                action_id: value_to_u32(&raw[2])?,
+                call_id: value_to_u64(&raw[3])?,
+                args: raw[4].clone(),
+            })
+        }
+        StateOpcode::ActionResult => {
+            if raw.len() != 4 {
+                return Err(StateDeltaError::InvalidWire(
+                    "action result delta must have 4 elements",
+                ));
+            }
+            Ok(StateDelta::ActionResult {
+                state_id,
+                call_id: value_to_u64(&raw[2])?,
+                result: raw[3].clone(),
+            })
+        }
+        StateOpcode::BatchPatch => {
+            if raw.len() != 4 {
+                return Err(StateDeltaError::InvalidWire(
+                    "batch patch delta must have 4 elements",
+                ));
+            }
+            Ok(StateDelta::BatchPatch {
+                state_id,
+                timestamp_ns: value_to_u64(&raw[2])?,
+                patches: raw[3].clone(),
+            })
+        }
     }
 }
 
@@ -270,5 +498,33 @@ mod tests {
         let encoded = encode_delta(&delta).expect("encode");
         let decoded = decode_delta(&encoded).expect("decode");
         assert_eq!(decoded, delta);
+    }
+
+    #[test]
+    fn hlc_and_lww_conflict_resolution() {
+        let mut hlc = HybridLogicalClock::new(1000, 0);
+        let ts1 = hlc.tick(1000);
+        let ts2 = hlc.tick(1000);
+        assert!(ts2 > ts1);
+
+        let sid = state_id("CartState");
+        let fid = field_id("quantity");
+        let mut reg = LwwStateRegister::new(sid);
+
+        let newer = StateDelta::FieldSet {
+            state_id: sid,
+            field_id: fid,
+            timestamp_ns: ts2,
+            value: json!(5),
+        };
+        let older = StateDelta::FieldSet {
+            state_id: sid,
+            field_id: fid,
+            timestamp_ns: ts1,
+            value: json!(2),
+        };
+        assert!(reg.apply(&newer));
+        assert!(!reg.apply(&older));
+        assert_eq!(reg.get(fid), Some(&json!(5)));
     }
 }

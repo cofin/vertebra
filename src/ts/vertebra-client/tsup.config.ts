@@ -15,6 +15,7 @@ export default defineConfig({
     "src/htmx/index.ts",
     "src/store/index.ts",
     "src/hmr/index.ts",
+    "src/live/index.ts",
   ],
   format: ["esm"],
   dts: true,
