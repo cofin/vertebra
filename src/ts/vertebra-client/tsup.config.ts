@@ -16,6 +16,7 @@ export default defineConfig({
     "src/store/index.ts",
     "src/hmr/index.ts",
     "src/live/index.ts",
+    "src/apex/index.ts",
   ],
   format: ["esm"],
   dts: true,
