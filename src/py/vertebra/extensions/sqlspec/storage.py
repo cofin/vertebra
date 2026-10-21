@@ -10,9 +10,13 @@ import msgspec
 from vertebra.storage import ObjectMeta, PutResult, VertebraStore
 
 __all__ = (
+    "ObjectStore",
+    "SQLSpecStorageBridge",
+    "SQLSpecStore",
     "StreamingStorageResponse",
     "VertebraObjectStore",
     "VertebraSQLSpecStorageAdapter",
+    "VertebraSQLSpecStore",
 )
 
 _PARQUET_MAGIC = b"PAR1"
@@ -46,8 +50,8 @@ class StreamingStorageResponse:
             yield view[offset : offset + self.chunk_size]
 
 
-class VertebraSQLSpecStorageAdapter:
-    """SQLSpec storage adapter backed by VertebraStore with Arrow IPC, Parquet, and JSONL support."""
+class SQLSpecStorageBridge:
+    """SQLSpec storage adapter backed by ObjectStore with Arrow IPC, Parquet, and JSONL support."""
 
     protocol: str = "vertebra"
     backend_type: str = "vertebra"
@@ -272,4 +276,8 @@ class VertebraSQLSpecStorageAdapter:
         return qualified_path
 
 
-VertebraObjectStore = VertebraSQLSpecStorageAdapter
+SQLSpecStore = SQLSpecStorageBridge
+ObjectStore = SQLSpecStorageBridge
+VertebraSQLSpecStorageAdapter = SQLSpecStorageBridge
+VertebraSQLSpecStore = SQLSpecStorageBridge
+VertebraObjectStore = SQLSpecStorageBridge

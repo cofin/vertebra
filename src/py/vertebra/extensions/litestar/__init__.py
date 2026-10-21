@@ -1,10 +1,16 @@
 """Vertebra Litestar extension package."""
 
 from vertebra.extensions.litestar.channels import (
+    ChannelsBackend,
     VertebraChannelsBackend,
     swap_litestar_channels_backend,
 )
-from vertebra.extensions.litestar.config import VertebraConfig
+from vertebra.extensions.litestar.config import (
+    LitestarConfig,
+    ServerConfig,
+    VertebraConfig,
+    VertebraServerConfig,
+)
 from vertebra.extensions.litestar.fastpath import (
     CompiledLitestarRoute,
     compile_litestar_fastpath_routes,
@@ -26,6 +32,8 @@ from vertebra.extensions.litestar.offload import (
     offload_litestar_middlewares,
 )
 from vertebra.extensions.litestar.plugin import (
+    LitestarPlugin,
+    VertebraLitestarPlugin,
     VertebraPlugin,
     enter_litestar_server_lifespan,
 )
@@ -40,25 +48,35 @@ from vertebra.extensions.litestar.router import (
     normalize_litestar_path_for_matchit,
 )
 from vertebra.extensions.litestar.store import (
+    MemoryStore,
     VertebraMemoryStore,
+    VertebraStore,
     swap_litestar_response_cache_store,
 )
 
 __all__ = (
+    "ChannelsBackend",
     "CompiledLitestarRoute",
     "CompressionOffloadSpec",
     "CorsOffloadSpec",
     "ExtractedLitestarRoute",
+    "LitestarConfig",
     "LitestarOffloadPlan",
+    "LitestarPlugin",
     "LitestarRouteCompiler",
     "LitestarRouterTable",
+    "MemoryStore",
     "MiddlewareOffloadCompiler",
     "OpenApiOffloadSpec",
+    "ServerConfig",
     "StaticMountOffloadSpec",
     "VertebraChannelsBackend",
     "VertebraConfig",
+    "VertebraLitestarPlugin",
     "VertebraMemoryStore",
     "VertebraPlugin",
+    "VertebraServerConfig",
+    "VertebraStore",
     "compile_litestar_fastpath_routes",
     "compile_litestar_routes",
     "compile_middleware_offload",

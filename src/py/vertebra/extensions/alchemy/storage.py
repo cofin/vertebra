@@ -10,6 +10,10 @@ from vertebra.storage import ObjectMeta, VertebraStore
 
 __all__ = (
     "AlchemyFileAttachment",
+    "AlchemyStore",
+    "FileAttachment",
+    "ObjectStoreBackend",
+    "StorageBackend",
     "VertebraAlchemyStorageBackend",
     "VertebraStorageBackend",
 )
@@ -20,7 +24,7 @@ type AsyncDataLike = SyncDataLike | AsyncIterable[bytes]
 
 
 @dataclass(slots=True)
-class AlchemyFileAttachment:
+class FileAttachment:
     """Value object representing an Advanced Alchemy FileObject attachment."""
 
     path: str
@@ -31,8 +35,11 @@ class AlchemyFileAttachment:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class VertebraAlchemyStorageBackend:
-    """Advanced Alchemy compatible storage backend backed by VertebraStore."""
+AlchemyFileAttachment = FileAttachment
+
+
+class ObjectStoreBackend:
+    """Advanced Alchemy compatible storage backend backed by ObjectStore."""
 
     driver: str = "vertebra"
     protocol: str = "vertebra"
@@ -179,4 +186,7 @@ class VertebraAlchemyStorageBackend:
         return b"".join(bytes(chunk) for chunk in data)
 
 
-VertebraStorageBackend = VertebraAlchemyStorageBackend
+StorageBackend = ObjectStoreBackend
+AlchemyStore = ObjectStoreBackend
+VertebraAlchemyStorageBackend = ObjectStoreBackend
+VertebraStorageBackend = ObjectStoreBackend

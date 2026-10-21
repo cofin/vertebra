@@ -5,6 +5,7 @@ export type { ClientConfig, RetryConfig, RouteResponse } from "./client/types";
 export { RealtimeChannel } from "./client/ws";
 export { HotReloadClient, type ServerMessage } from "./hmr/index";
 export {
+  EventSourceClient,
   SseClient,
   type SseClientOptions,
   type SseEventHandler,
