@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from collections.abc import Callable
 from typing import Any
@@ -12,8 +13,16 @@ __all__ = (
     "AsgiReceive",
     "AsgiResponse",
     "AsgiSend",
+    "AsgiStreamQueuePair",
     "ChunkCallback",
+    "DEFAULT_STREAM_HIGH_WATERMARK",
+    "DEFAULT_STREAM_LOW_WATERMARK",
+    "DEFAULT_STREAM_QUEUE_MAXSIZE",
 )
+
+DEFAULT_STREAM_QUEUE_MAXSIZE = 256
+DEFAULT_STREAM_HIGH_WATERMARK = 192
+DEFAULT_STREAM_LOW_WATERMARK = 64
 
 _STATE_BODY = 0
 _STATE_DISCONNECT = 1
@@ -196,3 +205,74 @@ class AsgiSend:
 
         msg = f"AsgiSend received unexpected ASGI message type: {msg_type!r}"
         raise RuntimeError(msg)
+
+
+class AsgiStreamQueuePair:
+    """Bounded receive/send queue pair for streaming ASGI SSE and WebSocket sessions."""
+
+    __slots__ = (
+        "_high_watermark",
+        "_low_watermark",
+        "_receive_queue",
+        "_resume_event",
+        "_send_paused",
+        "_send_queue",
+    )
+
+    def __init__(
+        self,
+        maxsize: int = DEFAULT_STREAM_QUEUE_MAXSIZE,
+        *,
+        high_watermark: int = DEFAULT_STREAM_HIGH_WATERMARK,
+        low_watermark: int = DEFAULT_STREAM_LOW_WATERMARK,
+    ) -> None:
+        bounded_max = max(1, maxsize)
+        self._receive_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=bounded_max)
+        self._send_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=bounded_max)
+        self._high_watermark = min(bounded_max, max(1, high_watermark))
+        self._low_watermark = max(0, min(self._high_watermark - 1, low_watermark))
+        self._send_paused = False
+        self._resume_event = asyncio.Event()
+        self._resume_event.set()
+
+    @property
+    def receive_queue(self) -> asyncio.Queue[dict[str, Any]]:
+        """Return the bounded inbound ASGI message queue."""
+        return self._receive_queue
+
+    @property
+    def send_queue(self) -> asyncio.Queue[dict[str, Any]]:
+        """Return the bounded outbound ASGI message queue."""
+        return self._send_queue
+
+    @property
+    def is_send_paused(self) -> bool:
+        """Return True when the outbound queue has crossed high_watermark."""
+        return self._send_paused
+
+    async def push_inbound(self, message: dict[str, Any]) -> None:
+        """Enqueue an inbound ASGI message for the application."""
+        await self._receive_queue.put(message)
+
+    async def receive(self) -> dict[str, Any]:
+        """ASGI receive callable backed by the bounded receive queue."""
+        return await self._receive_queue.get()
+
+    async def send(self, message: dict[str, Any]) -> None:
+        """ASGI send callable that pauses when buffered items reach high_watermark."""
+        await self._send_queue.put(message)
+        if self._send_queue.qsize() >= self._high_watermark:
+            self._send_paused = True
+            self._resume_event.clear()
+
+    async def wait_until_send_resumed(self) -> None:
+        """Block until the consumer drains the outbound queue to low_watermark."""
+        await self._resume_event.wait()
+
+    async def pop_outbound(self) -> dict[str, Any]:
+        """Dequeue the next outbound ASGI message and resume producers at low_watermark."""
+        message = await self._send_queue.get()
+        if self._send_paused and self._send_queue.qsize() <= self._low_watermark:
+            self._send_paused = False
+            self._resume_event.set()
+        return message

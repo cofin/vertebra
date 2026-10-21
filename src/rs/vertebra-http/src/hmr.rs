@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http::header::{self, HeaderValue};
-use http::{Method, Request, Response, StatusCode, Version};
+use http::{Method, Request, Response, StatusCode};
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -23,12 +23,68 @@ use tokio_tungstenite::tungstenite::protocol::{Message, Role};
 use tracing::{debug, warn};
 
 use crate::server::ServerState;
+use crate::ws_mount::is_websocket_upgrade;
 
 type HyperResponse = Response<Full<Bytes>>;
 
 pub const HMR_PATH: &str = "/__vertebra/hmr";
 pub const HMR_SIGNAL_PATH: &str = "/__vertebra/hmr/signal";
 pub const HMR_EVENT_NAME: &str = "vertebra:types-changed";
+
+/// HMR event kind emitted over the HMR WebSocket channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HmrEventKind {
+    Connected,
+    CssUpdate,
+    FullReload,
+    TypesUpdate,
+}
+
+impl HmrEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::CssUpdate => "css-update",
+            Self::FullReload => "full-reload",
+            Self::TypesUpdate => "types-update",
+        }
+    }
+
+    pub fn as_event_str(&self) -> &'static str {
+        match self {
+            Self::TypesUpdate => HMR_EVENT_NAME,
+            other => other.as_str(),
+        }
+    }
+}
+
+/// Structured HMR event payload serialized with both `"type"` and `"event"` fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HmrEvent {
+    pub kind: HmrEventKind,
+    pub path: String,
+    pub generation: u64,
+}
+
+impl HmrEvent {
+    pub fn new(kind: HmrEventKind, path: impl Into<String>, generation: u64) -> Self {
+        Self {
+            kind,
+            path: path.into(),
+            generation,
+        }
+    }
+
+    pub fn serialize(&self) -> String {
+        let kind_type = self.kind.as_str();
+        let kind_event = self.kind.as_event_str();
+        let escaped_path = self.path.replace('\\', "\\\\").replace('"', "\\\"");
+        format!(
+            r#"{{"type":"{kind_type}","event":"{kind_event}","path":"{escaped_path}","reason":"{escaped_path}","version":"{}","generation":{},"updates":[{{"path":"{escaped_path}","timestamp":{}}}],"timestamp":{}}}"#,
+            self.generation, self.generation, self.generation, self.generation,
+        )
+    }
+}
 
 /// Shared HMR state used by both the signal endpoint and WebSocket clients.
 pub struct HmrState {
@@ -195,36 +251,6 @@ async fn run_websocket(upgraded: Upgraded, hmr: Arc<HmrState>) {
     hmr.unregister_client();
 }
 
-fn is_websocket_upgrade(req: &Request<Incoming>) -> bool {
-    req.method() == Method::GET
-        && req.version() >= Version::HTTP_11
-        && req.uri().path() == HMR_PATH
-        && has_token(req, header::CONNECTION, "upgrade")
-        && has_header_value(req, header::UPGRADE, "websocket")
-        && has_header_value(req, header::SEC_WEBSOCKET_VERSION, "13")
-        && req.headers().contains_key(header::SEC_WEBSOCKET_KEY)
-}
-
-fn has_token(req: &Request<Incoming>, name: header::HeaderName, expected: &str) -> bool {
-    req.headers()
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| {
-            value
-                .split([' ', ','])
-                .any(|part| part.eq_ignore_ascii_case(expected))
-        })
-        .unwrap_or(false)
-}
-
-fn has_header_value(req: &Request<Incoming>, name: header::HeaderName, expected: &str) -> bool {
-    req.headers()
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.eq_ignore_ascii_case(expected))
-        .unwrap_or(false)
-}
-
 fn status_response(hmr: &HmrState) -> HyperResponse {
     let body = format!(
         "{{\"ok\":true,\"event\":\"{HMR_EVENT_NAME}\",\"generation\":{},\"connected_clients\":{},\"websocket\":true}}",
@@ -244,7 +270,7 @@ fn status_response(hmr: &HmrState) -> HyperResponse {
 }
 
 fn websocket_payload(generation: u64) -> String {
-    format!("{{\"event\":\"{HMR_EVENT_NAME}\",\"generation\":{generation}}}")
+    HmrEvent::new(HmrEventKind::TypesUpdate, HMR_PATH, generation).serialize()
 }
 
 fn method_not_allowed(allow: &'static str) -> HyperResponse {

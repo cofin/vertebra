@@ -9,6 +9,8 @@ sources:
   - resource: src/ts/vertebra-client/src/index.ts
   - resource: src/ts/vertebra-client/src/client/client.ts
   - resource: src/ts/vertebra-client/src/client/types.ts
+  - resource: src/ts/vertebra-client/src/sse.ts
+  - resource: src/ts/vertebra-client/src/websocket.ts
   - resource: src/ts/vertebra-client/biome.json
 ---
 

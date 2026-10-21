@@ -24,13 +24,16 @@ pub mod multipart;
 pub mod payload;
 pub mod policy;
 pub mod profile;
+pub mod pubsub;
 pub mod response;
 pub mod response_reader;
 pub mod ring_factory;
 pub mod route_table;
 pub mod router;
 pub mod server;
+pub mod sse;
 pub mod tls;
+pub mod ws_mount;
 
 pub use collector::RequestBatcher;
 pub use correlation::InFlightRequests;
