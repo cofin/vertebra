@@ -406,6 +406,23 @@ class SQLSpec[ConfigT]:
         state_mapping[SQLSPEC_STATE_KEY] = state
         return state
 
+    async def close_pools(self) -> None:
+        """Close all registered SQLSpec connection pools across primary and secondary bind keys."""
+        if self._state is None:
+            return
+        for pool in list(self._state.pools.values()):
+            close_fn = getattr(pool, "close", None)
+            if callable(close_fn):
+                res = close_fn()
+                if inspect.isawaitable(res):
+                    await res
+        for cfg in self.configs:
+            close_pool_fn = getattr(cfg, "close_pool", None)
+            if callable(close_pool_fn):
+                res = close_pool_fn()
+                if inspect.isawaitable(res):
+                    await res
+
     def on_app_init(self, app_config: Any) -> Any:
         """Litestar InitPluginProtocol hook registering SQLSpecState and SkipValidation DI providers."""
         target_state = getattr(app_config, "state", None)
@@ -420,6 +437,10 @@ class SQLSpec[ConfigT]:
         if isinstance(dependencies, dict):
             for cfg in self.configs:
                 self._register_config_dependencies(dependencies, cfg)
+
+        on_shutdown = getattr(app_config, "on_shutdown", None)
+        if isinstance(on_shutdown, list):
+            on_shutdown.append(self.close_pools)
         return app_config
 
     def on_cli_init(self, cli: Any) -> None:

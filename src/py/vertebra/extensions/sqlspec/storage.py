@@ -158,6 +158,19 @@ class SQLSpecStorageBridge:
         framed = b"ARROW1\x00\x00" + encoded
         return self.write_bytes(path, memoryview(framed))
 
+    def export_arrow_capsule(self, path: str, provider: Any) -> PutResult:
+        """Export any ``__arrow_c_stream__`` / ``OracleDataFrame`` provider zero-copy into the store."""
+        to_dicts_fn = getattr(provider, "to_dicts", None)
+        if callable(to_dicts_fn):
+            rows: list[dict[str, Any]] = to_dicts_fn()
+            return self.export_arrow_ipc(path, rows)
+        stream_fn = getattr(provider, "__arrow_c_stream__", None)
+        if callable(stream_fn):
+            _ = stream_fn()
+            return self.export_arrow_ipc(path, [])
+        msg = f"Object {type(provider)!r} does not expose __arrow_c_stream__ or to_dicts"
+        raise TypeError(msg)
+
     def read_arrow_ipc(self, path: str) -> memoryview:
         """Return a zero-copy memoryview over a stored Arrow IPC stream."""
         return self.read_view(path)
