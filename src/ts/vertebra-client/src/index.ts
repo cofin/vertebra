@@ -1,3 +1,11 @@
+export {
+  ARROW_CONTINUATION_MARKER,
+  ARROW_FILE_MAGIC,
+  ARROW_STREAM_MIME,
+  type ArrowStreamOptions,
+  hasArrowIpcHeader,
+  VertebraArrowStreamClient,
+} from "./arrow";
 export { HttpClient } from "./client/client";
 export * from "./client/errors";
 export { computeBackoffDelay } from "./client/retry";
