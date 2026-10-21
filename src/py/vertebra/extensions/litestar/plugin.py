@@ -9,15 +9,15 @@ from typing import Any
 
 from vertebra.extensions.litestar.channels import swap_litestar_channels_backend
 from vertebra.extensions.litestar.config import VertebraConfig
-from vertebra.extensions.litestar.store import swap_litestar_response_cache_store
-from vertebra.server._asgi._litestar_fastpath import (
+from vertebra.extensions.litestar.fastpath import (
     CompiledLitestarRoute,
     compile_litestar_fastpath_routes,
 )
-from vertebra.server._asgi._litestar_offload import (
+from vertebra.extensions.litestar.offload import (
     LitestarOffloadPlan,
     offload_litestar_middlewares,
 )
+from vertebra.extensions.litestar.store import swap_litestar_response_cache_store
 
 __all__ = ("VertebraPlugin", "enter_litestar_server_lifespan")
 
@@ -87,7 +87,6 @@ class VertebraPlugin:
         yield
 
     def _finalize_app_acceleration(self, app: Any) -> None:
-        """Finalize route extraction, offload plan compilation, and store/channel swaps."""
         self._offload_plan = offload_litestar_middlewares(app, config=self._config)
         if self._config.swap_memory_channels:
             swap_litestar_channels_backend(app)
@@ -118,7 +117,6 @@ def enter_litestar_server_lifespan(app: Any, *, app_path: str | None = None) -> 
 
 
 def _load_litestar_get() -> Callable[..., Callable[[Callable[..., Any]], Any]]:
-    """Load litestar.get decorator or return a lightweight fallback decorator."""
     try:
         mod = importlib.import_module("litestar")
         plugins_mod = importlib.import_module("litestar.plugins")

@@ -3,8 +3,11 @@
 use crate::errors::{BundlerError, Result};
 use notify::{RecommendedWatcher, WatchMode};
 use notify_debouncer_mini::{DebouncedEvent, Debouncer, new_debouncer};
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
@@ -129,6 +132,86 @@ impl SourceWatcher {
     /// Send a reload signal
     pub fn notify_reload(&self) {
         let _ = self.event_tx.send(HmrEvent::reload());
+    }
+}
+
+/// Python-visible wrapper around `SourceWatcher` with non-blocking event polling.
+#[pyclass(name = "SourceWatcher")]
+pub struct PySourceWatcher {
+    inner: Mutex<SourceWatcher>,
+    rx: Mutex<broadcast::Receiver<HmrEvent>>,
+}
+
+#[pymethods]
+impl PySourceWatcher {
+    #[new]
+    #[pyo3(signature = (watch_dirs, extensions=None, debounce_ms=100))]
+    pub fn py_new(
+        watch_dirs: Vec<String>,
+        extensions: Option<Vec<String>>,
+        debounce_ms: u64,
+    ) -> PyResult<Self> {
+        let paths: Vec<PathBuf> = watch_dirs.into_iter().map(PathBuf::from).collect();
+        let exts = extensions.unwrap_or_else(|| vec!["py".to_string(), "ts".to_string()]);
+        let (watcher, rx) = SourceWatcher::new(paths, exts, debounce_ms)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self {
+            inner: Mutex::new(watcher),
+            rx: Mutex::new(rx),
+        })
+    }
+
+    pub fn start(&self) -> PyResult<()> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("watcher mutex poisoned"))?;
+        guard
+            .start()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    pub fn stop(&self) -> PyResult<()> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("watcher mutex poisoned"))?;
+        guard
+            .stop()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Drain all pending updated file paths from the broadcast receiver without blocking.
+    pub fn poll_events(&self) -> PyResult<Vec<String>> {
+        let mut guard = self
+            .rx
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("watcher rx mutex poisoned"))?;
+        let mut paths = Vec::new();
+        while let Ok(evt) = guard.try_recv() {
+            if let HmrEvent::Update { path, .. } = evt {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
+    }
+
+    pub fn notify_type_change(&self, version: &str) -> PyResult<()> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("watcher mutex poisoned"))?;
+        guard.notify_type_change(version);
+        Ok(())
+    }
+
+    pub fn notify_reload(&self) -> PyResult<()> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("watcher mutex poisoned"))?;
+        guard.notify_reload();
+        Ok(())
     }
 }
 

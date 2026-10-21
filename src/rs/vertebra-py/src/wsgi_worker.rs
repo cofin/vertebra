@@ -78,10 +78,8 @@ pub fn run_wsgi_callable(
         let wrapper_ref = wrapper.borrow();
         if let Some(file_path) = wrapper_ref.path() {
             let path_clone = file_path.clone();
-            let file_bytes = py
-                .detach(|| std::fs::read(&path_clone))
-                .map_err(|e| PyRuntimeError::new_err(format!("sendfile read failed: {e}")))?;
-            body_buf = file_bytes;
+            py.detach(|| std::fs::metadata(&path_clone))
+                .map_err(|e| PyRuntimeError::new_err(format!("sendfile stat failed: {e}")))?;
             sendfile_path = Some(file_path);
         } else {
             for item in result_iter.try_iter()? {

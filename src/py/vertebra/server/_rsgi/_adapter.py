@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 from typing import Any, Literal
 
-from vertebra._vertebra import (
-    Response,
-    RsgiHeaders,
-    RsgiHttpProtocol,
-    RsgiScope,
-)
+Response: Any = None
+RsgiHeaders: Any = None
+RsgiHttpProtocol: Any = None
+RsgiScope: Any = None
+with contextlib.suppress(ImportError):
+    from vertebra._vertebra import (
+        Response,
+        RsgiHeaders,
+        RsgiHttpProtocol,
+        RsgiScope,
+    )
 
 __all__ = (
     "InterfaceMode",
