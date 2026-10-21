@@ -1,12 +1,15 @@
 ---
-name: pattern-rust-lock-free-shm-and-sharding
-description: Rust 2024 lock-free SHM cache-line alignment, SeqCst futex handshakes, bounds-checked unsafe slices, and sharded batch/correlation tables.
+type: Pattern
+title: "Lock-Free Shared Memory & Sharded Concurrency"
+description: "Rust 2024 lock-free SHM cache-line alignment, SeqCst futex handshakes, bounds-checked unsafe slices, and sharded batch/correlation tables."
+status: stable
+tags: [patterns, rust, shared-memory, concurrency, sharding]
 sources:
-  - src/rs/vertebra-core/src/shm.rs
-  - src/rs/vertebra-core/src/channel.rs
-  - src/rs/vertebra-core/src/ipc.rs
-  - src/rs/vertebra-http/src/collector.rs
-  - src/rs/vertebra-http/src/correlation.rs
+  - resource: src/rs/vertebra-core/src/shm.rs
+  - resource: src/rs/vertebra-core/src/channel.rs
+  - resource: src/rs/vertebra-core/src/ipc.rs
+  - resource: src/rs/vertebra-http/src/collector.rs
+  - resource: src/rs/vertebra-http/src/correlation.rs
 ---
 
 # Lock-Free Shared Memory & Sharded Concurrency

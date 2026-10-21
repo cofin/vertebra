@@ -1,21 +1,24 @@
 ---
-name: pattern-typescript-client-and-adapter-subpaths
-description: Zero-dependency @vertebra/client core, tree-shakeable framework adapter subpaths, Biome formatting, and Python codegen alignment.
+type: Pattern
+title: "Client SDK & Framework Adapter Subpaths"
+description: "Zero-dependency @vertebra/client core, tree-shakeable framework adapter subpaths, Biome formatting, and Python codegen alignment."
+status: stable
+tags: [patterns, typescript, client-sdk, adapters, codegen]
 sources:
-  - src/ts/vertebra-client/package.json
-  - src/ts/vertebra-client/src/index.ts
-  - src/ts/vertebra-client/src/client/client.ts
-  - src/ts/vertebra-client/src/client/types.ts
-  - src/ts/vertebra-client/biome.json
+  - resource: src/ts/vertebra-client/package.json
+  - resource: src/ts/vertebra-client/src/index.ts
+  - resource: src/ts/vertebra-client/src/client/client.ts
+  - resource: src/ts/vertebra-client/src/client/types.ts
+  - resource: src/ts/vertebra-client/biome.json
 ---
 
 # Client SDK & Framework Adapter Subpaths
 
 [`@vertebra/client`](../../../../../src/ts/vertebra-client/package.json) provides a zero-runtime-dependency TypeScript core (`HttpClient`, `RealtimeChannel`, `SessionStore`, `HotReloadClient`) plus tree-shakeable subpath exports for six frontend frameworks and build tools.
 
-## 1. Canonical Root Exports (`src/index.ts`)
+## 1. Canonical Root Exports (`src/ts/vertebra-client/src/index.ts`)
 
-The root `@vertebra/client` entrypoint exports only clean domain symbols (zero `Vertebra*` prefixes):
+The root `@vertebra/client` entrypoint exports only clean domain symbols (`HttpClient`, `RealtimeChannel`, `HotReloadClient`, `SessionStore`)—never legacy `Vertebra*` prefixes:
 
 <!-- truth: start -->
 ```typescript
@@ -33,13 +36,13 @@ export { SessionStore, store } from "./store/index";
 
 Framework and tooling integrations live in dedicated subdirectories exported in [`package.json`](../../../../../src/ts/vertebra-client/package.json):
 
-- `@vertebra/client/react` ([`src/react/cache.ts`](../../../../../src/ts/vertebra-client/src/react/cache.ts)) — React 19 hooks and `QueryCache`
-- `@vertebra/client/vue` ([`src/vue/index.ts`](../../../../../src/ts/vertebra-client/src/vue/index.ts)) — Vue 3.5 composables
-- `@vertebra/client/svelte` ([`src/svelte/index.ts`](../../../../../src/ts/vertebra-client/src/svelte/index.ts)) — Svelte 5 store bindings
-- `@vertebra/client/angular` ([`src/angular/index.ts`](../../../../../src/ts/vertebra-client/src/angular/index.ts)) — Angular 22 DI service bindings
-- `@vertebra/client/htmx` ([`src/htmx/index.ts`](../../../../../src/ts/vertebra-client/src/htmx/index.ts)) — HTMX extension helpers
-- `@vertebra/client/vite` ([`src/vite/index.ts`](../../../../../src/ts/vertebra-client/src/vite/index.ts)) — Vite 8 plugin and dev proxy helpers
-- `@vertebra/client/store` ([`src/store/index.ts`](../../../../../src/ts/vertebra-client/src/store/index.ts)) — Standalone `SessionStore`
+- `@vertebra/client/react` ([`src/ts/vertebra-client/src/react/cache.ts`](../../../../../src/ts/vertebra-client/src/react/cache.ts)) — React 19 hooks and `QueryCache`
+- `@vertebra/client/vue` ([`src/ts/vertebra-client/src/vue/index.ts`](../../../../../src/ts/vertebra-client/src/vue/index.ts)) — Vue 3.5 composables
+- `@vertebra/client/svelte` ([`src/ts/vertebra-client/src/svelte/index.ts`](../../../../../src/ts/vertebra-client/src/svelte/index.ts)) — Svelte 5 store bindings
+- `@vertebra/client/angular` ([`src/ts/vertebra-client/src/angular/index.ts`](../../../../../src/ts/vertebra-client/src/angular/index.ts)) — Angular 22 DI service bindings
+- `@vertebra/client/htmx` ([`src/ts/vertebra-client/src/htmx/index.ts`](../../../../../src/ts/vertebra-client/src/htmx/index.ts)) — HTMX extension helpers
+- `@vertebra/client/vite` ([`src/ts/vertebra-client/src/vite/index.ts`](../../../../../src/ts/vertebra-client/src/vite/index.ts)) — Vite 8 plugin and dev proxy helpers
+- `@vertebra/client/store` ([`src/ts/vertebra-client/src/store/index.ts`](../../../../../src/ts/vertebra-client/src/store/index.ts)) — Standalone `SessionStore`
 
 ## 3. Strict TypeScript, Biome & Codegen Parity
 

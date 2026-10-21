@@ -1,15 +1,18 @@
 ---
-name: http-batching-dispatch-and-backpressure
-description: 8-shard RequestBatcher, adaptive BatchPolicy, Dispatcher modes, 256-shard InFlightRequests, and BackpressureController circuit breaker.
+type: Guide
+title: "Request Batching, Dispatch & Backpressure"
+description: "8-shard RequestBatcher, adaptive BatchPolicy, Dispatcher modes, 256-shard InFlightRequests, and BackpressureController circuit breaker."
+status: stable
+tags: [architecture, http, batching, dispatch, backpressure]
 sources:
-  - src/rs/vertebra-http/src/collector.rs
-  - src/rs/vertebra-http/src/policy.rs
-  - src/rs/vertebra-http/src/dispatcher/mod.rs
-  - src/rs/vertebra-http/src/dispatcher/direct.rs
-  - src/rs/vertebra-http/src/dispatcher/bridge.rs
-  - src/rs/vertebra-http/src/dispatcher/shm.rs
-  - src/rs/vertebra-http/src/correlation.rs
-  - src/rs/vertebra-http/src/backpressure.rs
+  - resource: src/rs/vertebra-http/src/collector.rs
+  - resource: src/rs/vertebra-http/src/policy.rs
+  - resource: src/rs/vertebra-http/src/dispatcher/mod.rs
+  - resource: src/rs/vertebra-http/src/dispatcher/direct.rs
+  - resource: src/rs/vertebra-http/src/dispatcher/bridge.rs
+  - resource: src/rs/vertebra-http/src/dispatcher/shm.rs
+  - resource: src/rs/vertebra-http/src/correlation.rs
+  - resource: src/rs/vertebra-http/src/backpressure.rs
 ---
 
 # Request Batching, Dispatch & Backpressure

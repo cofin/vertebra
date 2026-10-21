@@ -1,10 +1,13 @@
 ---
-name: pattern-python-hot-path-and-async-dispatch
-description: Hot-path request dispatch patterns: startup signature caching, 4-way BatchDispatchPlan, single-wake AsyncRuntime, and vectorized FFI completion.
+type: Pattern
+title: "Hot-Path Caching & Single-Wake Async Dispatch"
+description: "Hot-path request dispatch patterns: startup signature caching, 4-way BatchDispatchPlan, single-wake AsyncRuntime, and vectorized FFI completion."
+status: stable
+tags: [patterns, python, performance, batch-dispatch, async]
 sources:
-  - src/py/vertebra/server/_native.py
-  - src/py/vertebra/server/_asgi/_runner.py
-  - src/py/vertebra/framework/_app.py
+  - resource: src/py/vertebra/server/_native.py
+  - resource: src/py/vertebra/server/_asgi/_runner.py
+  - resource: src/py/vertebra/framework/_app.py
 ---
 
 # Hot-Path Caching & Single-Wake Async Dispatch

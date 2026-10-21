@@ -1,12 +1,15 @@
 ---
-name: domain-framework-routing-and-app
-description: Canonical domain types for Vertebra's Python HTTP application container, router, Inertia v3 protocol, and JSON serialization.
+type: Guide
+title: "Python Framework, Routing & Serialization Domain"
+description: "Canonical domain types for Vertebra's Python HTTP application container, router, Inertia v3 protocol, and JSON serialization."
+status: stable
+tags: [domains, framework, routing, serialization, python]
 sources:
-  - src/py/vertebra/framework/_app.py
-  - src/py/vertebra/framework/_router.py
-  - src/py/vertebra/framework/_inertia.py
-  - src/py/vertebra/utils/serializers/_json.py
-  - src/py/vertebra/utils/module_loader.py
+  - resource: src/py/vertebra/framework/_app.py
+  - resource: src/py/vertebra/framework/_router.py
+  - resource: src/py/vertebra/framework/_inertia.py
+  - resource: src/py/vertebra/utils/serializers/_json.py
+  - resource: src/py/vertebra/utils/module_loader.py
 ---
 
 # Python Framework, Routing & Serialization Domain
@@ -34,5 +37,5 @@ sources:
 
 ## 3. Serialization & Optional Dependencies (`utils/`)
 
-- **[`JSONSerializer`](../../../../../src/py/vertebra/utils/serializers/_json.py)** (`encode_json`, `decode_json`, `encode_json_bytes`): Selects `msgspec.json` as primary tier, `orjson` as secondary fallback, and stdlib `json` as baseline.
+- **[`JSONSerializer`](../../../../../src/py/vertebra/utils/serializers/_json.py)** (`encode_json`, `decode_json`, `encode_json_bytes`): Encodes and decodes JSON using `msgspec.json` directly (`Encoder`, `Decoder`) with fallback to stdlib `json`.
 - **[`OptionalDependency`](../../../../../src/py/vertebra/utils/module_loader.py)** (`import_app`, `ensure_packages`, `module_to_os_path`): Resolves `"module:attribute"` application targets and guards optional dependencies with actionable `uv add <pkg>` error diagnostics.

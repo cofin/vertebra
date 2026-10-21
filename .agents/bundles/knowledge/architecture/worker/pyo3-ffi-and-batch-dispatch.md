@@ -1,13 +1,16 @@
 ---
-name: worker-pyo3-ffi-and-batch-dispatch
-description: Slab-backed PyO3 Request/Headers/Response/RequestBatch wrappers, 4-way BatchDispatchPlan, and single-wake AsyncRuntime.
+type: Guide
+title: "PyO3 Zero-Copy FFI & Vectorized Batch Dispatch"
+description: "Slab-backed PyO3 Request/Headers/Response/RequestBatch wrappers, 4-way BatchDispatchPlan, and single-wake AsyncRuntime."
+status: stable
+tags: [architecture, worker, pyo3, ffi, batch-dispatch]
 sources:
-  - src/rs/vertebra-py/src/api.rs
-  - src/rs/vertebra-py/src/batch.rs
-  - src/rs/vertebra-py/src/request.rs
-  - src/rs/vertebra-py/src/headers.rs
-  - src/rs/vertebra-py/src/response.rs
-  - src/py/vertebra/server/_native.py
+  - resource: src/rs/vertebra-py/src/api.rs
+  - resource: src/rs/vertebra-py/src/batch.rs
+  - resource: src/rs/vertebra-py/src/request.rs
+  - resource: src/rs/vertebra-py/src/headers.rs
+  - resource: src/rs/vertebra-py/src/response.rs
+  - resource: src/py/vertebra/server/_native.py
 ---
 
 # PyO3 Zero-Copy FFI & Vectorized Batch Dispatch

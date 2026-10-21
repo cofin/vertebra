@@ -1,6 +1,12 @@
 ---
-name: testing-index
-description: Index of Vertebra's testing, verification, and benchmark chapters across Rust, Python, TypeScript, and free-threaded Python 3.14t.
+title: "Testing & Verification Index"
+description: "Index of Vertebra's testing, verification, and benchmark chapters across Rust, Python, TypeScript, and free-threaded Python 3.14t."
+status: stable
+tags:
+  - testing
+  - index
+  - verification
+  - benchmarks
 ---
 
 # Testing & Verification Index
