@@ -1,4 +1,13 @@
 export {
+  type ApexGlobalNamespace,
+  type ApexItemHandle,
+  type ApexRegionBridgeOptions,
+  dispatchApexDynamicAction,
+  parseVertebraIslandAttributes,
+  VertebraApexRegionBridge,
+  type VertebraIslandDescriptor,
+} from "./apex/index";
+export {
   ARROW_CONTINUATION_MARKER,
   ARROW_FILE_MAGIC,
   ARROW_STREAM_MIME,
