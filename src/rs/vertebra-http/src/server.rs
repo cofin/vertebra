@@ -10,10 +10,8 @@ use std::sync::Arc;
 use hyper::Request;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-#[cfg(feature = "tls")]
 use hyper_util::rt::TokioExecutor;
 use hyper_util::rt::TokioIo;
-#[cfg(feature = "tls")]
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info};
@@ -147,18 +145,26 @@ async fn serve_plain(
     state: Arc<ServerState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!(peer = %peer, "plain TCP connection");
+    let _ = crate::h2c::detect_cleartext_protocol(&stream).await?;
     let io = TokioIo::new(stream);
 
-    hyper::server::conn::http1::Builder::new()
-        .pipeline_flush(true)
-        .serve_connection(
+    let mut builder = AutoBuilder::new(TokioExecutor::new());
+    builder.http1().pipeline_flush(true);
+    builder
+        .http2()
+        .adaptive_window(state.config.h2_adaptive_window)
+        .initial_stream_window_size(state.config.h2_initial_stream_window_size)
+        .initial_connection_window_size(state.config.h2_initial_connection_window_size)
+        .max_concurrent_streams(state.config.h2_max_concurrent_streams);
+
+    builder
+        .serve_connection_with_upgrades(
             io,
             service_fn(move |req: Request<Incoming>| {
                 let state = Arc::clone(&state);
                 async move { handle(req, state).await }
             }),
         )
-        .with_upgrades()
         .await?;
     Ok(())
 }
