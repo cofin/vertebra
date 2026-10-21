@@ -19,6 +19,16 @@ dependencies = [
 [project.scripts]
 vtb = "vertebra.cli:cli"
 
+[project.entry-points."sqlalchemy.dialects"]
+"postgresql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:PostgresVertebraDialect"
+"postgresql.vtb" = "vertebra.extensions.sqlalchemy.dialects:PostgresVertebraDialect"
+"oracle.vertebra" = "vertebra.extensions.sqlalchemy.dialects:OracleVertebraDialect"
+"oracle.vtb" = "vertebra.extensions.sqlalchemy.dialects:OracleVertebraDialect"
+"mysql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:MysqlVertebraDialect"
+"mysql.vtb" = "vertebra.extensions.sqlalchemy.dialects:MysqlVertebraDialect"
+"sqlite.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SqliteVertebraDialect"
+"sqlite.vtb" = "vertebra.extensions.sqlalchemy.dialects:SqliteVertebraDialect"
+
 [project.optional-dependencies]
 framework = [
     "msgspec>=0.18",

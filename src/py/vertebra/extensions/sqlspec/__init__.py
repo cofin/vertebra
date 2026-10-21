@@ -1,5 +1,11 @@
 """SQLSpec extension, PEP 695 generic configurations, and zero-copy object storage integration."""
 
+from vertebra.extensions.sqlspec.oracle import (
+    ORACLE_TEXT_RESERVED_WORDS,
+    build_oracle_hybrid_rrf_sql,
+    sanitize_for_json,
+    sanitize_oracle_text_query,
+)
 from vertebra.extensions.sqlspec.plugin import (
     SQLSPEC_PLUGIN_PRIORITY,
     SQLSPEC_STATE_KEY,
@@ -33,6 +39,7 @@ from vertebra.extensions.sqlspec.storage import (
 )
 
 __all__ = (
+    "ORACLE_TEXT_RESERVED_WORDS",
     "SQLSPEC_PLUGIN_PRIORITY",
     "SQLSPEC_STATE_KEY",
     "AsyncDatabaseConfig",
@@ -59,5 +66,8 @@ __all__ = (
     "VertebraSQLSpecPlugin",
     "VertebraSQLSpecStorageAdapter",
     "VertebraSQLSpecStore",
+    "build_oracle_hybrid_rrf_sql",
+    "sanitize_for_json",
+    "sanitize_oracle_text_query",
     "wrap_config",
 )

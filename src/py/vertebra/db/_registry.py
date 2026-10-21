@@ -43,7 +43,12 @@ def parse_database_url(url: str) -> AnyDatabaseConfig:
     if base_scheme in ("mysql", "mariadb"):
         return MysqlConfig(dsn=url)
     if base_scheme == "sqlite":
-        db_path = parsed.path[1:] if parsed.path.startswith("//") else (parsed.path or ":memory:")
+        if parsed.path in ("", "/", "/:memory:", ":memory:"):
+            db_path = ":memory:"
+        elif parsed.path.startswith("//"):
+            db_path = parsed.path[1:]
+        else:
+            db_path = parsed.path.lstrip("/")
         return SqliteConfig(database=db_path)
     if base_scheme in ("redis", "rediss"):
         return RedisConfig(url=url)
