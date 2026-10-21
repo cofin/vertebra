@@ -1,4 +1,4 @@
-"""Unit tests for vertebra.storage (VertebraStore, ObjectStore, zero-copy memoryview, and V4 presigning)."""
+"""Unit tests for vertebra.storage (ObjectStore, zero-copy memoryview, and V4 presigning)."""
 
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from vertebra.storage import ObjectMeta, ObjectStore, PutResult, SigningConfig, VertebraStore
+from vertebra.storage import ObjectMeta, ObjectStore, PutResult, SigningConfig
 
 
 def test_memory_store_sync_crud_and_zero_copy_memoryview() -> None:
     """Verify synchronous CRUD, range reads, and zero-copy memoryview inputs/outputs on memory://."""
-    store = VertebraStore("memory://")
+    store = ObjectStore("memory://")
     payload = memoryview(b"abcdefghijklmnopqrstuvwxyz")
     result = store.put("alpha/alphabet.bin", payload)
     assert isinstance(result, PutResult)
@@ -52,7 +52,7 @@ def test_local_file_store_and_multipart(tmp_path: Path) -> None:
 @pytest.mark.anyio
 async def test_async_store_operations() -> None:
     """Verify asyncio-compatible put_async, get_async, get_range_async, head_async, list_async, delete_async."""
-    store = VertebraStore("memory://")
+    store = ObjectStore("memory://")
     await store.put_async("async/item.json", b'{"ok":true}')
     assert await store.exists_async("async/item.json")
 
@@ -74,7 +74,7 @@ async def test_async_store_operations() -> None:
 
 def test_hmac_and_s3_v4_presigning_and_verification() -> None:
     """Verify HMAC-SHA256 and S3 Signature V4 URL signing and verification."""
-    store = VertebraStore(
+    store = ObjectStore(
         "s3://media-bucket",
         signing=SigningConfig(
             provider="s3",
@@ -90,7 +90,7 @@ def test_hmac_and_s3_v4_presigning_and_verification() -> None:
     assert store.verify_presigned_url(signed_get, method="GET", timestamp=1_700_000_100)
     assert not store.verify_presigned_url(signed_get, method="GET", timestamp=1_700_003_000)
 
-    hmac_store = VertebraStore(
+    hmac_store = ObjectStore(
         "memory://",
         signing=SigningConfig(
             provider="hmac",
@@ -120,14 +120,14 @@ class _MockIamHandler(BaseHTTPRequestHandler):
         _ = (format, args)
 
 
-def test_gcs_v4_keyless_iam_presigning_via_vertebra_store() -> None:
-    """Verify VertebraStore supports provider='gcs' keyless IAM signBlob V4 presigning."""
+def test_gcs_v4_keyless_iam_presigning_via_object_store() -> None:
+    """Verify ObjectStore supports provider='gcs' keyless IAM signBlob V4 presigning."""
     server = HTTPServer(("127.0.0.1", 0), _MockIamHandler)
     port = server.server_address[1]
     thread = threading.Thread(target=server.handle_request, daemon=True)
     thread.start()
 
-    gcs_store = VertebraStore(
+    gcs_store = ObjectStore(
         "gs://ml-artifacts",
         signing=SigningConfig(
             provider="gcs",

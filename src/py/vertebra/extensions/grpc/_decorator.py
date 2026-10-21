@@ -7,27 +7,24 @@ import enum
 import inspect
 import struct
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field
 from typing import Any, Protocol, cast, get_args, get_origin, get_type_hints
 
 import msgspec
 import msgspec.inspect
 
-__all__ = [
+__all__ = (
     "GrpcContext",
     "GrpcError",
     "GrpcMethodKind",
     "GrpcMethodSpec",
-    "GrpcRegistry",
     "GrpcServiceRegistry",
     "GrpcStatus",
     "ProtobufSchemaGenerator",
-    "_ProtobufSchemaGenerator",
     "decode_lpm_frames",
     "encode_lpm_frame",
     "grpc_method",
     "percent_encode_grpc_message",
-]
+)
 
 _LPM_HEADER_STRUCT = struct.Struct(">BI")
 _ASYNC_STREAM_ORIGINS = (
@@ -68,12 +65,11 @@ class GrpcError(Exception):
         self.details = details or status.name
 
 
-@dataclass(slots=True)
-class GrpcContext:
+class GrpcContext(msgspec.Struct, gc=False):
     """Invocation context carrying peer address, request metadata, and optional deadline."""
 
     peer: str = ""
-    metadata: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, str] = msgspec.field(default_factory=dict)
     timeout_seconds: float | None = None
 
 
@@ -86,8 +82,7 @@ class GrpcMethodKind(enum.Enum):
     BIDI_STREAMING = "bidi_streaming"
 
 
-@dataclass(frozen=True, slots=True)
-class GrpcMethodSpec:
+class GrpcMethodSpec(msgspec.Struct, frozen=True, gc=False):
     """Introspected metadata for a decorated @grpc_method handler."""
 
     service: str
@@ -354,10 +349,7 @@ class GrpcServiceRegistry:
         return b"application/grpc+msgpack"
 
 
-GrpcRegistry = GrpcServiceRegistry
-
-
-class _ProtobufSchemaGenerator:
+class ProtobufSchemaGenerator:
     """Convert msgspec.Struct types and GrpcServiceRegistry definitions into .proto v3 schemas."""
 
     __slots__ = ("_package",)
@@ -491,9 +483,6 @@ class _ProtobufSchemaGenerator:
         if isinstance(type_info, msgspec.inspect.StructType):
             return type_info.cls.__name__
         return "bytes"
-
-
-ProtobufSchemaGenerator = _ProtobufSchemaGenerator
 
 
 def _unwrap_stream_type(annotation: Any) -> tuple[bool, type[msgspec.Struct]]:

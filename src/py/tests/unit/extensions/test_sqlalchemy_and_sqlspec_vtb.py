@@ -11,39 +11,32 @@ import pytest
 
 from vertebra.db import OracleDataFrame, PostgresConfig
 from vertebra.extensions.sqlalchemy import (
-    ALEMBIC_DIALECT_IMPLS,
-    DIALECT_SCHEMES,
+    AlembicImpl,
     BinaryJson,
     CreateViewOp,
-    FreeThreadedEngineAdapter,
-    OracleVertebraDialect,
-    PostgresVertebraDialect,
-    SqliteVertebraDialect,
+    DBAPIModule,
+    DeleteUsingClause,
+    DialectDescriptor,
+    InsertSentinelSpec,
+    OracleDialect,
+    ParameterizedSql,
+    PostgresDialect,
+    SelectInLoadSpec,
+    SqliteDialect,
+    SyncEngineAdapter,
     Vector,
-    VertebraDBAPIModule,
-    build_delete_using,
-    chunked_selectinload,
-    compare_vertebra_type,
-    compile_tstring_sql,
-    configure_insertmanyvalues_sentinel,
-    register_alembic_impls,
-    register_sqlalchemy_dialects,
-    render_vertebra_item,
-    resolve_alembic_migration_url,
 )
 from vertebra.extensions.sqlspec import (
-    SQLSpec,
-    SQLSpecStorageBridge,
+    OracleHybridSearch,
+    SQLSpecPlugin,
+    SQLSpecStore,
     SyncDatabaseConfig,
-    build_oracle_hybrid_rrf_sql,
-    sanitize_for_json,
-    sanitize_oracle_text_query,
 )
 from vertebra.storage import ObjectStore
 
 
 def test_oracle_json_text_and_hybrid_rrf_builders() -> None:
-    """Verify sanitize_for_json, sanitize_oracle_text_query, and build_oracle_hybrid_rrf_sql."""
+    """Verify OracleHybridSearch.sanitize_json, sanitize_text_query, and build_rrf_sql."""
     payload = {
         "ts": datetime.datetime(2026, 10, 21, 12, 0, tzinfo=datetime.UTC),
         "price": decimal.Decimal("19.99"),
@@ -52,19 +45,19 @@ def test_oracle_json_text_and_hybrid_rrf_builders() -> None:
         "vec": array.array("f", [1.0, 2.0]),
         "raw": memoryview(b"hello"),
     }
-    cleaned = sanitize_for_json(payload)
+    cleaned = OracleHybridSearch.sanitize_json(payload)
     assert cleaned["price"] == 19.99
     assert cleaned["count"] == 5
     assert cleaned["vec"] == [1.0, 2.0]
     assert cleaned["raw"] == "hello"
 
-    assert sanitize_oracle_text_query("dark roast AND espresso; DROP TABLE!") == (
+    assert OracleHybridSearch.sanitize_text_query("dark roast AND espresso; DROP TABLE!") == (
         "{dark} , {roast} , {AND} , {espresso} , {DROP} , {TABLE}"
     )
-    assert sanitize_oracle_text_query("arabica beans", mode="and") == "{arabica} & {beans}"
-    assert sanitize_oracle_text_query("cold brew", mode="near") == "NEAR(({cold}, {brew}))"
+    assert OracleHybridSearch.sanitize_text_query("arabica beans", mode="and") == "{arabica} & {beans}"
+    assert OracleHybridSearch.sanitize_text_query("cold brew", mode="near") == "NEAR(({cold}, {brew}))"
 
-    rrf_sql = build_oracle_hybrid_rrf_sql(
+    rrf_sql, rrf_binds = OracleHybridSearch.build_rrf_sql(
         "products",
         select_columns=("id", "name"),
         rrf_k=60,
@@ -74,13 +67,15 @@ def test_oracle_json_text_and_hybrid_rrf_builders() -> None:
     assert "CONTAINS(content, :text_query, 1) > 0" in rrf_sql
     assert "FULL OUTER JOIN text_candidates" in rrf_sql
     assert "FETCH FIRST :top_k ROWS ONLY" in rrf_sql
+    assert rrf_binds["rrf_k"] == 60
+    assert rrf_binds["candidate_limit"] == 25
 
 
 @pytest.mark.anyio
 async def test_sqlspec_arrow_capsule_export_and_multipool_shutdown() -> None:
-    """Verify SQLSpecStorageBridge.export_arrow_capsule and SQLSpec multi-pool shutdown."""
+    """Verify SQLSpecStore.export_arrow_capsule and SQLSpecPlugin multi-pool shutdown."""
     store = ObjectStore("memory://")
-    bridge = SQLSpecStorageBridge(store, prefix="exports")
+    bridge = SQLSpecStore(store, prefix="exports")
     df = OracleDataFrame(("id", "name"), [(1, "Alpha"), (2, "Beta")])
     res = bridge.export_arrow_capsule("items.arrow", df)
     assert res.size > 0
@@ -89,6 +84,8 @@ async def test_sqlspec_arrow_capsule_export_and_multipool_shutdown() -> None:
     closed_pools: list[str] = []
 
     class DummyPool:
+        __slots__ = ("name",)
+
         def __init__(self, name: str) -> None:
             self.name = name
 
@@ -96,6 +93,8 @@ async def test_sqlspec_arrow_capsule_export_and_multipool_shutdown() -> None:
             closed_pools.append(self.name)
 
     class DummyDriver:
+        __slots__ = ()
+
         def execute(self, statement: str, *args: object, **kwargs: object) -> object:
             _ = (statement, args, kwargs)
             return None
@@ -108,7 +107,10 @@ async def test_sqlspec_arrow_capsule_export_and_multipool_shutdown() -> None:
         bind_key="events",
         pool_instance=DummyPool("events"),
     )
-    plugin: SQLSpec[SyncDatabaseConfig[object, DummyPool, DummyDriver]] = SQLSpec(config=[cfg1, cfg2], store=store)
+    plugin: SQLSpecPlugin[SyncDatabaseConfig[object, DummyPool, DummyDriver]] = SQLSpecPlugin(
+        config=[cfg1, cfg2],
+        store=store,
+    )
     state_dict: dict[str, object] = {}
     plugin.install_state(state_dict)
     await plugin.close_pools()
@@ -143,15 +145,15 @@ def test_vector_and_binary_json_types_across_dialects() -> None:
 
 def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
     """Verify +vertebra and +vtb dialect registration, plain-tuple DBAPI cursor, and Alembic hooks."""
-    dialects = register_sqlalchemy_dialects()
-    assert len(DIALECT_SCHEMES) == 8
-    assert dialects["postgresql.vtb"] is PostgresVertebraDialect
-    assert dialects["oracle.vtb"] is OracleVertebraDialect
-    assert dialects["sqlite.vtb"] is SqliteVertebraDialect
-    assert OracleVertebraDialect.use_insertmanyvalues is True
-    assert OracleVertebraDialect.insert_executemany_returning is True
+    dialects = DialectDescriptor.register_all()
+    assert len(dialects) == 8
+    assert dialects["postgresql.vtb"] is PostgresDialect
+    assert dialects["oracle.vtb"] is OracleDialect
+    assert dialects["sqlite.vtb"] is SqliteDialect
+    assert OracleDialect.use_insertmanyvalues is True
+    assert OracleDialect.insert_executemany_returning is True
 
-    dbapi = VertebraDBAPIModule()
+    dbapi = DBAPIModule()
     conn = dbapi.connect("sqlite+vtb:///:memory:")
     cur = conn.cursor()
     cur.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
@@ -162,21 +164,23 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
     assert type(row) is tuple
     conn.close()
 
-    impls = register_alembic_impls()
-    assert set(ALEMBIC_DIALECT_IMPLS) == set(impls)
+    impls = AlembicImpl.register_all()
+    assert len(impls) == 8
     assert impls["oracle+vtb"].transactional_ddl is False
     assert impls["postgresql+vtb"].transactional_ddl is True
 
     class DummyAutogenContext:
+        __slots__ = ("imports",)
+
         def __init__(self) -> None:
             self.imports: set[str] = set()
 
     ctx = DummyAutogenContext()
-    rendered_vec = render_vertebra_item("type", Vector(1536), ctx)
+    rendered_vec = AlembicImpl.render_item("type", Vector(1536), ctx)
     assert rendered_vec == "Vector(1536, storage_format='float32')"
     assert "from vertebra.extensions.sqlalchemy import Vector" in ctx.imports
-    assert compare_vertebra_type(None, None, None, "VECTOR(1536)", Vector(1536)) is False
-    assert compare_vertebra_type(None, None, None, "JSONB", BinaryJson()) is False
+    assert AlembicImpl.compare_type(None, None, None, "VECTOR(1536)", Vector(1536)) is False
+    assert AlembicImpl.compare_type(None, None, None, "JSONB", BinaryJson()) is False
 
     view_op = CreateViewOp("active_users_v", "SELECT id FROM users WHERE active = 1", or_replace=True)
     assert (
@@ -190,32 +194,37 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
         direct_dsn="postgresql://u:p@pg-primary:5432/app",
         pooler_mode="transaction",
     )
-    assert resolve_alembic_migration_url(pg_cfg) == "postgresql://u:p@pg-primary:5432/app"
+    assert AlembicImpl.resolve_migration_url(pg_cfg) == "postgresql://u:p@pg-primary:5432/app"
 
 
 @pytest.mark.anyio
-async def test_sqlalchemy_21_orm_optimizations_and_free_threaded_adapter() -> None:
-    """Verify chunked_selectinload, orm_insert_sentinel, Delete.using, tstring, and 3.14t adapter."""
-    load_spec = chunked_selectinload("items", chunksize=500, omit_join=True)
+async def test_sqlalchemy_21_orm_optimizations_and_sync_engine_adapter() -> None:
+    """Verify SelectInLoadSpec, InsertSentinelSpec, DeleteUsingClause, ParameterizedSql, and SyncEngineAdapter."""
+    load_spec = SelectInLoadSpec.create("items", chunksize=500, omit_join=True)
     assert load_spec.chunksize == 500
     assert load_spec.omit_join is True
     assert load_spec.num_batches(1200) == 3
 
-    sentinel = configure_insertmanyvalues_sentinel()
+    sentinel = InsertSentinelSpec.create()
     assert sentinel.use_insertmanyvalues is True
     assert sentinel.insert_executemany_returning is True
 
-    del_clause = build_delete_using(
-        "orders", "archived_customers", where_sql="orders.customer_id = archived_customers.id"
+    del_clause = DeleteUsingClause.create(
+        "orders",
+        "archived_customers",
+        where_sql="orders.customer_id = archived_customers.id",
     )
     assert del_clause.to_sql() == (
         "DELETE FROM orders USING archived_customers WHERE orders.customer_id = archived_customers.id"
     )
 
-    compiled = compile_tstring_sql(["SELECT * FROM items WHERE category = ", " AND price <= ", ""], ["coffee", 25.0])
+    compiled = ParameterizedSql.from_template(
+        ["SELECT * FROM items WHERE category = ", " AND price <= ", ""],
+        ["coffee", 25.0],
+    )
     assert compiled.sql == "SELECT * FROM items WHERE category = :p_1 AND price <= :p_2"
     assert compiled.params == {"p_1": "coffee", "p_2": 25.0}
 
-    adapter = FreeThreadedEngineAdapter(max_workers=2)
+    adapter = SyncEngineAdapter(max_workers=2)
     result = await adapter.run_sync(lambda x, y: x + y, 20, 22)
     assert result == 42

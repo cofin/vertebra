@@ -3,29 +3,29 @@
 from __future__ import annotations
 
 import importlib
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from vertebra.db._registry import parse_database_url
+import msgspec
+
+from vertebra.db._registry import DatabaseRegistry
 from vertebra.db.sqlite import SqliteConfig, SyncSqliteDriver
 from vertebra.server._runtime_tuning import is_free_threaded
-from vertebra.utils.sync_tools import FreeThreadedSyncPool
+from vertebra.utils.sync_tools import SyncPool
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
 __all__ = (
     "DIALECT_SCHEMES",
-    "FreeThreadedEngineAdapter",
-    "MysqlVertebraDialect",
-    "OracleVertebraDialect",
-    "PostgresVertebraDialect",
-    "SqliteVertebraDialect",
-    "VertebraDBAPIConnection",
-    "VertebraDBAPICursor",
-    "VertebraDBAPIModule",
-    "VertebraDialectDescriptor",
-    "register_sqlalchemy_dialects",
+    "DBAPIConnection",
+    "DBAPICursor",
+    "DBAPIModule",
+    "DialectDescriptor",
+    "MysqlDialect",
+    "OracleDialect",
+    "PostgresDialect",
+    "SqliteDialect",
+    "SyncEngineAdapter",
 )
 
 DIALECT_SCHEMES: tuple[str, ...] = (
@@ -40,10 +40,12 @@ DIALECT_SCHEMES: tuple[str, ...] = (
 )
 
 
-class VertebraDBAPICursor:
+class DBAPICursor:
     """PEP 249 DBAPI 2.0 cursor returning plain Python tuples for SQLAlchemy 2.1 ORM loaders."""
 
-    def __init__(self, connection: VertebraDBAPIConnection) -> None:
+    __slots__ = ("_conn", "_pos", "_rows", "arraysize", "description", "rowcount")
+
+    def __init__(self, connection: DBAPIConnection) -> None:
         self._conn = connection
         self._rows: list[tuple[Any, ...]] = []
         self._pos: int = 0
@@ -51,16 +53,14 @@ class VertebraDBAPICursor:
         self.rowcount: int = -1
         self.arraysize: int = 1
 
-    def execute(self, operation: str, parameters: Sequence[Any] | dict[str, Any] = ()) -> VertebraDBAPICursor:
+    def execute(self, operation: str, parameters: Sequence[Any] | dict[str, Any] = ()) -> DBAPICursor:
         """Execute a SQL statement and buffer plain-tuple rows."""
         self._rows = self._conn.execute_raw_tuples(operation, parameters)
         self._pos = 0
         self.rowcount = len(self._rows)
         return self
 
-    def executemany(
-        self, operation: str, seq_of_parameters: Sequence[Sequence[Any] | dict[str, Any]]
-    ) -> VertebraDBAPICursor:
+    def executemany(self, operation: str, seq_of_parameters: Sequence[Sequence[Any] | dict[str, Any]]) -> DBAPICursor:
         """Execute a parameterized SQL statement across a sequence of parameter sets."""
         total = 0
         for params in seq_of_parameters:
@@ -98,12 +98,14 @@ class VertebraDBAPICursor:
         self._pos = 0
 
 
-class VertebraDBAPIConnection:
+class DBAPIConnection:
     """PEP 249 DBAPI 2.0 connection backed by Vertebra's native driver layer."""
+
+    __slots__ = ("_config", "_sqlite_driver", "_url", "closed")
 
     def __init__(self, url: str = "sqlite+vtb:///:memory:") -> None:
         self._url = url
-        self._config = parse_database_url(url)
+        self._config = DatabaseRegistry.parse_url(url)
         self._sqlite_driver: SyncSqliteDriver | None = (
             SyncSqliteDriver(self._config) if isinstance(self._config, SqliteConfig) else None
         )
@@ -119,9 +121,9 @@ class VertebraDBAPIConnection:
         """Return the parsed database configuration."""
         return self._config
 
-    def cursor(self) -> VertebraDBAPICursor:
+    def cursor(self) -> DBAPICursor:
         """Create a new plain-tuple DBAPI cursor."""
-        return VertebraDBAPICursor(self)
+        return DBAPICursor(self)
 
     def execute_raw_tuples(
         self,
@@ -147,29 +149,28 @@ class VertebraDBAPIConnection:
             self.closed = True
 
 
-class VertebraDBAPIModule:
+class DBAPIModule:
     """PEP 249 DBAPI 2.0 module descriptor exposed by Vertebra SQLAlchemy dialects."""
 
     apilevel: str = "2.0"
     threadsafety: int = 2
-    paramstyle: str = "qmark"
     Error = Exception
     DatabaseError = Exception
     IntegrityError = Exception
     OperationalError = Exception
     InterfaceError = Exception
     ProgrammingError = Exception
+    __slots__ = ("paramstyle",)
 
     def __init__(self, *, paramstyle: str = "qmark") -> None:
         self.paramstyle = paramstyle
 
-    def connect(self, url: str = "sqlite+vtb:///:memory:", **_kwargs: Any) -> VertebraDBAPIConnection:
+    def connect(self, url: str = "sqlite+vtb:///:memory:", **_kwargs: Any) -> DBAPIConnection:
         """Open a PEP 249 connection for the given URL."""
-        return VertebraDBAPIConnection(url)
+        return DBAPIConnection(url)
 
 
-@dataclass(frozen=True, slots=True)
-class VertebraDialectDescriptor:
+class DialectDescriptor(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """SQLAlchemy 2.1 dialect metadata for `+vertebra` and `+vtb` URL schemes."""
 
     name: str
@@ -182,12 +183,46 @@ class VertebraDialectDescriptor:
     returns_plain_tuples: bool = True
 
     @classmethod
-    def import_dbapi(cls) -> VertebraDBAPIModule:
+    def import_dbapi(cls) -> DBAPIModule:
         """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1 ``import_dbapi()``."""
-        return VertebraDBAPIModule()
+        return DBAPIModule()
+
+    @classmethod
+    def register_all(cls) -> dict[str, DialectDescriptor]:
+        """Register all ``+vertebra`` and ``+vtb`` dialects with SQLAlchemy's dialect registry."""
+        mapping: dict[str, DialectDescriptor] = {
+            "postgresql.vertebra": PostgresDialect,
+            "postgresql.vtb": PostgresDialect,
+            "oracle.vertebra": OracleDialect,
+            "oracle.vtb": OracleDialect,
+            "mysql.vertebra": MysqlDialect,
+            "mysql.vtb": MysqlDialect,
+            "sqlite.vertebra": SqliteDialect,
+            "sqlite.vtb": SqliteDialect,
+        }
+        try:
+            sa_dialects: Any = importlib.import_module("sqlalchemy.dialects")
+            registry = getattr(sa_dialects, "registry", None)
+            if registry is not None and hasattr(registry, "register"):
+                dialect_cls_names = {
+                    "postgresql": "PostgresDialect",
+                    "oracle": "OracleDialect",
+                    "mysql": "MysqlDialect",
+                    "sqlite": "SqliteDialect",
+                }
+                for entry_name in mapping:
+                    backend, _driver = entry_name.split(".", 1)
+                    registry.register(
+                        entry_name,
+                        "vertebra.extensions.sqlalchemy.dialects",
+                        dialect_cls_names[backend],
+                    )
+        except ImportError:
+            pass
+        return mapping
 
 
-PostgresVertebraDialect = VertebraDialectDescriptor(
+PostgresDialect = DialectDescriptor(
     name="postgresql",
     driver="vertebra",
     paramstyle="pyformat",
@@ -197,7 +232,7 @@ PostgresVertebraDialect = VertebraDialectDescriptor(
     supports_native_jsonb=True,
 )
 
-OracleVertebraDialect = VertebraDialectDescriptor(
+OracleDialect = DialectDescriptor(
     name="oracle",
     driver="vertebra",
     paramstyle="named",
@@ -207,7 +242,7 @@ OracleVertebraDialect = VertebraDialectDescriptor(
     supports_native_jsonb=True,
 )
 
-MysqlVertebraDialect = VertebraDialectDescriptor(
+MysqlDialect = DialectDescriptor(
     name="mysql",
     driver="vertebra",
     paramstyle="format",
@@ -217,7 +252,7 @@ MysqlVertebraDialect = VertebraDialectDescriptor(
     supports_native_jsonb=False,
 )
 
-SqliteVertebraDialect = VertebraDialectDescriptor(
+SqliteDialect = DialectDescriptor(
     name="sqlite",
     driver="vertebra",
     paramstyle="qmark",
@@ -228,45 +263,18 @@ SqliteVertebraDialect = VertebraDialectDescriptor(
 )
 
 
-def register_sqlalchemy_dialects() -> dict[str, VertebraDialectDescriptor]:
-    """Register all ``+vertebra`` and ``+vtb`` dialects with SQLAlchemy's dialect registry."""
-    mapping: dict[str, VertebraDialectDescriptor] = {
-        "postgresql.vertebra": PostgresVertebraDialect,
-        "postgresql.vtb": PostgresVertebraDialect,
-        "oracle.vertebra": OracleVertebraDialect,
-        "oracle.vtb": OracleVertebraDialect,
-        "mysql.vertebra": MysqlVertebraDialect,
-        "mysql.vtb": MysqlVertebraDialect,
-        "sqlite.vertebra": SqliteVertebraDialect,
-        "sqlite.vtb": SqliteVertebraDialect,
-    }
-    try:
-        sa_dialects: Any = importlib.import_module("sqlalchemy.dialects")
-        registry = getattr(sa_dialects, "registry", None)
-        if registry is not None and hasattr(registry, "register"):
-            for entry_name in mapping:
-                backend, driver = entry_name.split(".", 1)
-                registry.register(
-                    entry_name,
-                    "vertebra.extensions.sqlalchemy.dialects",
-                    f"{backend.capitalize()}VertebraDialect",
-                )
-                _ = driver
-    except ImportError:
-        pass
-    return mapping
-
-
-class FreeThreadedEngineAdapter:
+class SyncEngineAdapter:
     """Optional-``greenlet`` SQLAlchemy 2.1 execution adapter for free-threaded Python ``3.14t``.
 
     Under free-threaded Python 3.14t (`sys._is_gil_enabled() == False`), synchronous SQLAlchemy
     ``Session`` and ``Engine`` operations execute with true multi-core parallelism on
-    ``FreeThreadedSyncPool`` worker threads without requiring ``greenlet`` context switches.
+    ``SyncPool`` worker threads without requiring ``greenlet`` context switches.
     """
 
+    __slots__ = ("_pool",)
+
     def __init__(self, *, max_workers: int = 8) -> None:
-        self._pool = FreeThreadedSyncPool(max_workers=max_workers)
+        self._pool = SyncPool(max_workers=max_workers)
 
     @property
     def is_free_threaded(self) -> bool:

@@ -121,15 +121,15 @@ def test_wsgi_environ_wsgi_input_is_shm_wrapper() -> None:
 
 def test_wsgi_environ_cache_pre_seeded() -> None:
     env = WsgiEnviron(MockRequest())
-    assert env._cache is not None  # noqa: SLF001
-    assert "REQUEST_METHOD" in env._cache  # noqa: SLF001
+    assert env._cache is not None
+    assert "REQUEST_METHOD" in env._cache
 
 
 def test_wsgi_environ_cache_grows_on_dynamic_access() -> None:
     env = WsgiEnviron(MockRequest())
-    initial_size = len(env._cache)  # noqa: SLF001
+    initial_size = len(env._cache)
     _ = env["wsgi.input"]
-    assert len(env._cache) > initial_size  # noqa: SLF001
+    assert len(env._cache) > initial_size
 
 
 def test_wsgi_environ_missing_key_raises() -> None:

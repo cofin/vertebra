@@ -12,8 +12,6 @@ from vertebra.db.valkey import AsyncValkeyDriver, ValkeyConfig
 
 __all__ = (
     "MemoryStore",
-    "VertebraMemoryStore",
-    "VertebraStore",
     "swap_litestar_response_cache_store",
 )
 
@@ -163,6 +161,4 @@ def _load_store_types() -> type[Any] | None:
         return None
 
 
-VertebraMemoryStore = MemoryStore
-VertebraStore = MemoryStore
 _MemoryStoreCls = _load_store_types()

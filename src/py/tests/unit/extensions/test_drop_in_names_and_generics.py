@@ -1,4 +1,4 @@
-"""Unit tests for drop-in ecosystem naming, PEP 695 generic configs, broker leasing, and CLI discovery."""
+"""Unit tests for canonical extension naming, PEP 695 generic configs, broker leasing, and CLI discovery."""
 
 from __future__ import annotations
 
@@ -9,23 +9,17 @@ import click
 import msgspec
 import pytest
 
+import vertebra.extensions.alchemy as alchemy_ext
+import vertebra.extensions.litestar as litestar_ext
+import vertebra.extensions.sqlspec as sqlspec_ext
 from vertebra.build.codegen import CodegenConfig, CodegenPlugin
-from vertebra.cli import (
+from vertebra.cli.plugin_registry import (
     CLIPluginProtocol,
     discover_entry_point_commands,
     register_app_cli_plugins,
 )
-from vertebra.extensions.advanced_alchemy import (
-    AdvancedAlchemy as AliasAdvancedAlchemy,
-)
-from vertebra.extensions.advanced_alchemy import (
-    SQLAlchemyAsyncConfig as AliasAsyncConfig,
-)
 from vertebra.extensions.alchemy import (
-    AdvancedAlchemy,
     AlchemyPlugin,
-    AlchemyStore,
-    AlchemyStorePlugin,
     BrokerConfig,
     BrokerPlugin,
     ChannelMessage,
@@ -34,12 +28,7 @@ from vertebra.extensions.alchemy import (
     ObjectStoreBackend,
     ShmBrokerTransport,
     SQLAlchemyAsyncConfig,
-    SQLAlchemyPlugin,
     SQLAlchemySyncConfig,
-    StorageBackend,
-)
-from vertebra.extensions.alchemy import (
-    wrap_config as wrap_alchemy_config,
 )
 from vertebra.extensions.litestar import (
     ChannelsBackend,
@@ -48,59 +37,51 @@ from vertebra.extensions.litestar import (
     LitestarRouteCompiler,
     MemoryStore,
     MiddlewareOffloadCompiler,
-    ServerConfig,
 )
 from vertebra.extensions.sqlspec import (
     AsyncDatabaseConfig,
     ProxyAsyncConfig,
     ProxySyncConfig,
-    SQLSpec,
     SQLSpecConfig,
     SQLSpecPlugin,
-    SQLSpecStorageBridge,
     SQLSpecStore,
-    SQLSpecStorePlugin,
     SyncDatabaseConfig,
 )
-from vertebra.extensions.sqlspec import (
-    wrap_config as wrap_sqlspec_config,
-)
 from vertebra.storage import (
-    LitestarObjectStore,
     ObjectStore,
-    ObjectStoreRegistry,
     StorageRegistry,
     get_default_storage_registry,
 )
 
 
 class _DummySyncDriver:
+    __slots__ = ()
+
     def execute(self, statement: str, *args: object, **kwargs: object) -> str:
         _ = (args, kwargs)
         return f"sync:{statement}"
 
 
 class _DummyAsyncDriver:
+    __slots__ = ()
+
     async def execute(self, statement: str, *args: object, **kwargs: object) -> str:
         _ = (args, kwargs)
         return f"async:{statement}"
 
 
-def test_drop_in_class_aliases_and_exports() -> None:
-    """Verify prefix-free canonical classes and backwards-compatible aliases resolve identically."""
-    assert LitestarConfig is ServerConfig
-    assert AlchemyPlugin is AdvancedAlchemy
-    assert SQLAlchemyPlugin is AdvancedAlchemy
-    assert AlchemyStorePlugin is AdvancedAlchemy
-    assert AliasAdvancedAlchemy is AdvancedAlchemy
-    assert AliasAsyncConfig is SQLAlchemyAsyncConfig
-    assert StorageBackend is ObjectStoreBackend
-    assert AlchemyStore is ObjectStoreBackend
-    assert SQLSpecPlugin is SQLSpec
-    assert SQLSpecStorePlugin is SQLSpec
-    assert SQLSpecStore is SQLSpecStorageBridge
-    assert LitestarObjectStore is ObjectStore
-    assert ObjectStoreRegistry is StorageRegistry
+def test_canonical_extension_exports() -> None:
+    """Verify canonical domain classes are exported and legacy aliases are absent."""
+    assert not hasattr(litestar_ext, "ServerConfig")
+    assert not hasattr(litestar_ext, "VertebraConfig")
+    assert not hasattr(litestar_ext, "VertebraPlugin")
+    assert not hasattr(alchemy_ext, "AdvancedAlchemy")
+    assert not hasattr(alchemy_ext, "SQLAlchemyPlugin")
+    assert not hasattr(alchemy_ext, "AlchemyStore")
+    assert not hasattr(alchemy_ext, "StorageBackend")
+    assert not hasattr(sqlspec_ext, "SQLSpec")
+    assert not hasattr(sqlspec_ext, "SQLSpecStorageBridge")
+    assert not hasattr(sqlspec_ext, "VertebraSQLSpecPlugin")
 
     plugin = LitestarPlugin(LitestarConfig(enable_health_endpoint=True))
     assert plugin.config.enable_health_endpoint is True
@@ -109,6 +90,8 @@ def test_drop_in_class_aliases_and_exports() -> None:
     assert isinstance(CodegenPlugin(CodegenConfig()), CodegenPlugin)
     assert LitestarRouteCompiler is not None
     assert MiddlewareOffloadCompiler is not None
+    assert ObjectStoreBackend is not None
+    assert SQLSpecStore is not None
 
 
 def test_sqlspec_generic_configs_and_pool_defaults() -> None:
@@ -130,7 +113,7 @@ def test_sqlspec_generic_configs_and_pool_defaults() -> None:
     )
     assert "pool_pre_ping" not in in_mem_cfg.pool_config
 
-    wrapped = wrap_sqlspec_config(sync_cfg)
+    wrapped = SQLSpecConfig.wrap(sync_cfg)
     assert isinstance(wrapped, SQLSpecConfig)
     assert wrapped.is_async is False
     assert wrapped.provide_session() is sync_driver
@@ -150,7 +133,10 @@ def test_sqlspec_generic_configs_and_pool_defaults() -> None:
     assert proxy_async.is_async is True
     assert proxy_async.provide_session() is async_driver
 
-    spec_plugin: SQLSpec[object] = SQLSpec(config=[proxy_sync, proxy_async], store=ObjectStore("memory://"))
+    spec_plugin: SQLSpecPlugin[object] = SQLSpecPlugin(
+        config=[proxy_sync, proxy_async],
+        store=ObjectStore("memory://"),
+    )
     assert spec_plugin.get_session(proxy_sync) is sync_driver
     assert spec_plugin.get_session(proxy_async) is async_driver
 
@@ -162,7 +148,7 @@ def test_sqlspec_generic_configs_and_pool_defaults() -> None:
 
 
 def test_alchemy_generic_configs_and_attachment_storage() -> None:
-    """Verify SQLAlchemyAsyncConfig, SQLAlchemySyncConfig, AdvancedAlchemy, and ObjectStoreBackend."""
+    """Verify SQLAlchemyAsyncConfig, SQLAlchemySyncConfig, AlchemyPlugin, and ObjectStoreBackend."""
     async_cfg = SQLAlchemyAsyncConfig[str, str, object](
         connection_string="postgresql+asyncpg://localhost/db",
         engine_instance="async_engine",
@@ -181,11 +167,11 @@ def test_alchemy_generic_configs_and_attachment_storage() -> None:
     assert "pool_pre_ping" not in sync_mem_cfg.engine_config
 
     custom_cfg = SimpleNamespace(connection_string="postgresql://localhost/db", engine_config={})
-    wrap_alchemy_config(custom_cfg)
+    AlchemyPlugin.wrap_config(custom_cfg)
     assert custom_cfg.engine_config["pool_pre_ping"] is True
 
     store = ObjectStore("memory://")
-    plugin = AdvancedAlchemy(
+    plugin = AlchemyPlugin(
         config=async_cfg,
         store=store,
         broker=BrokerPlugin(BrokerConfig(pool_size=2, max_overflow=1)),
@@ -271,6 +257,7 @@ def test_pluggable_cli_discovery_and_app_plugin_hooks(monkeypatch: pytest.Monkey
         pass
 
     class _FakeEntryPoint:
+        __slots__ = ()
         name = "custom-ep"
 
         @staticmethod
@@ -286,6 +273,8 @@ def test_pluggable_cli_discovery_and_app_plugin_hooks(monkeypatch: pytest.Monkey
     assert "custom-ep" in group.commands
 
     class _CustomCliPlugin:
+        __slots__ = ()
+
         def on_cli_init(self, cli: click.Group) -> None:
             @cli.command("app-plugin-cmd")
             def _cmd() -> None:

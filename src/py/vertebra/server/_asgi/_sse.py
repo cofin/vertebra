@@ -1,13 +1,12 @@
 """Server-Sent Events (SSE) ASGI response helper and http.response.sse extension support."""
 
-import dataclasses
 from collections.abc import AsyncIterable, Callable, Iterable
 from typing import Any
 
+import msgspec
+
 __all__ = (
     "DEFAULT_SSE_HEADERS",
-    "EventSourceResponse",
-    "ServerSentEvent",
     "SseEvent",
     "SseResponse",
     "extract_last_event_id",
@@ -31,8 +30,7 @@ def extract_last_event_id(scope: dict[str, Any]) -> str | None:
     return None
 
 
-@dataclasses.dataclass(slots=True, frozen=True)
-class SseEvent:
+class SseEvent(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
     """Structured Server-Sent Events message frame."""
 
     data: str = ""
@@ -78,9 +76,6 @@ class SseEvent:
         if self.comment is not None:
             message["comment"] = self.comment
         return message
-
-
-ServerSentEvent = SseEvent
 
 
 class SseResponse:
@@ -139,9 +134,6 @@ class SseResponse:
             await send({"type": "http.response.sse", "data": "", "more_body": False})
         else:
             await send({"type": "http.response.body", "body": b"", "more_body": False})
-
-
-EventSourceResponse = SseResponse
 
 
 def _sanitize_field(value: str) -> str:

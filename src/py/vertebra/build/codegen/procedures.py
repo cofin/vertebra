@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import hashlib
 import inspect
 import threading
 from collections.abc import Callable, Coroutine, Iterable
-from dataclasses import dataclass, field
 from typing import Annotated, Any, ClassVar, Literal, Self, TypeVar, cast, overload
+
+import msgspec
 
 from vertebra.build.codegen._extractor import TypeExtractor
 from vertebra.build.codegen._ir import (
@@ -60,28 +60,24 @@ T = TypeVar("T")
 type ParameterLocation = Literal["path", "query", "header", "cookie", "body"]
 
 
-@dataclass(frozen=True, slots=True)
-class LocationMarker:
+class LocationMarker(msgspec.Struct, frozen=True, gc=False):
     """Litestar v3 parameter location marker attached via typing.Annotated."""
 
     location: ParameterLocation
     media_type: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class NamedDependencyMarker:
+class NamedDependencyMarker(msgspec.Struct, frozen=True, gc=False):
     """Litestar v3 marker indicating a dependency-injected parameter excluded from schemas."""
 
     key: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class SkipValidationMarker:
+class SkipValidationMarker(msgspec.Struct, frozen=True, gc=False):
     """Litestar v3 marker indicating runtime validation is skipped while retaining schema type."""
 
 
-@dataclass(frozen=True, slots=True)
-class ParameterMarker:
+class ParameterMarker(msgspec.Struct, frozen=True, gc=False):
     """Litestar v2 compatible Parameter() specification for query, header, path, and cookie constraints."""
 
     query: str | None = None
@@ -102,8 +98,7 @@ class ParameterMarker:
     include_in_schema: bool = True
 
 
-@dataclass(frozen=True, slots=True)
-class BodyMarker:
+class BodyMarker(msgspec.Struct, frozen=True, gc=False):
     """Litestar v2 compatible Body() specification for request payload encoding and constraints."""
 
     media_type: str = "application/json"
@@ -180,8 +175,7 @@ NamedDependency = Annotated[T, NamedDependencyMarker()]
 SkipValidation = Annotated[T, SkipValidationMarker()]
 
 
-@dataclass(frozen=True, slots=True)
-class ParameterResolution:
+class ParameterResolution(msgspec.Struct, frozen=True, gc=False):
     """Normalized parameter metadata extracted from Litestar v2 and v3 Annotated markers."""
 
     name: str
@@ -418,8 +412,7 @@ def resolve_parameter_node(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class ProcedureParam:
+class ProcedureParam(msgspec.Struct, frozen=True, gc=False):
     """Metadata for a single schema-visible parameter on a @procedure function."""
 
     name: str
@@ -428,8 +421,7 @@ class ProcedureParam:
     optional: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class ProcedureInfo:
+class ProcedureInfo(msgspec.Struct, frozen=True, gc=False):
     """Metadata record for a registered @procedure RPC callable."""
 
     name: str
@@ -577,7 +569,7 @@ def procedure[**P, R](
                 optional=has_default or not resolution.required,
             )
 
-        is_async = asyncio.iscoroutinefunction(fn)
+        is_async = inspect.iscoroutinefunction(fn)
         info = ProcedureInfo(
             name=proc_name,
             func=fn,
@@ -613,12 +605,18 @@ def procedure[**P, R](
     return decorator
 
 
-@dataclass(slots=True)
 class ProcedureClientGenerator:
     """Emit typed TypeScript RPC client declarations from ProcedureRegistry."""
 
-    registry: ProcedureRegistry = field(default_factory=get_procedure_registry)
-    declared: dict[str, ObjectType] = field(default_factory=dict)
+    __slots__ = ("declared", "registry")
+
+    def __init__(
+        self,
+        registry: ProcedureRegistry | None = None,
+        declared: dict[str, ObjectType] | None = None,
+    ) -> None:
+        self.registry = registry if registry is not None else get_procedure_registry()
+        self.declared: dict[str, ObjectType] = declared if declared is not None else {}
 
     def generate_typescript_client(self) -> str:
         """Render TypeScript interfaces and the ProcedureRpcClient map for all registered procedures."""

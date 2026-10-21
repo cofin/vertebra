@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 
 from vertebra.framework.a2a import A2AServer
@@ -19,17 +18,36 @@ __all__ = (
 )
 
 
-@dataclass(slots=True)
 class LitestarEcosystemBridge:
     """Unified acceleration bridge attaching Vertebra subdomains to a Litestar application."""
 
-    mcp_server: McpServer | None = None
-    a2a_server: A2AServer | None = None
-    queue_service: QueueService = field(default_factory=QueueService)
-    email_service: EmailService = field(default_factory=EmailService)
-    autowire_loader: AutowireLoader | None = None
-    security_config: SecurityConfig | None = None
-    ssr_config: SsrConfig | None = None
+    __slots__ = (
+        "a2a_server",
+        "autowire_loader",
+        "email_service",
+        "mcp_server",
+        "queue_service",
+        "security_config",
+        "ssr_config",
+    )
+
+    def __init__(
+        self,
+        mcp_server: McpServer | None = None,
+        a2a_server: A2AServer | None = None,
+        queue_service: QueueService | None = None,
+        email_service: EmailService | None = None,
+        autowire_loader: AutowireLoader | None = None,
+        security_config: SecurityConfig | None = None,
+        ssr_config: SsrConfig | None = None,
+    ) -> None:
+        self.mcp_server = mcp_server
+        self.a2a_server = a2a_server
+        self.queue_service = queue_service if queue_service is not None else QueueService()
+        self.email_service = email_service if email_service is not None else EmailService()
+        self.autowire_loader = autowire_loader
+        self.security_config = security_config
+        self.ssr_config = ssr_config
 
     @classmethod
     def create(

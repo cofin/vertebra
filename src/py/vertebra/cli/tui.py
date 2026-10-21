@@ -8,9 +8,9 @@ import re
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
 from typing import IO
 
+import msgspec
 from rich.console import Console, Group, RenderableType
 from rich.layout import Layout
 from rich.live import Live
@@ -36,8 +36,7 @@ _LEVEL_STYLES = {
 }
 
 
-@dataclass(slots=True)
-class LogLine:
+class LogLine(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """A parsed log line with metadata."""
 
     raw: str

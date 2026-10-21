@@ -10,7 +10,7 @@ import pytest
 from vertebra.extensions.litestar import LitestarEcosystemBridge, attach_litestar_ecosystem_bridges
 from vertebra.framework.a2a import A2AServer, A2ATask, AgentCard, AgentSkill
 from vertebra.framework.asyncapi import AsyncAPISpecBuilder, AsyncChannelDef
-from vertebra.framework.channels import ChannelBus
+from vertebra.framework.channels import ChannelsBackend
 from vertebra.framework.di import Container, DependencyGraph, Provide
 from vertebra.framework.email import EmailMessage, EmailService
 from vertebra.framework.htmx import HtmxRequest, HtmxResponse
@@ -27,8 +27,8 @@ from vertebra.framework.security import (
     requires_scope,
     requires_tenant,
 )
-from vertebra.framework.ssr import encode_ssr_frame
-from vertebra.framework.stores import KeyValueStore, NamespacedStore
+from vertebra.framework.ssr import SsrFrame
+from vertebra.framework.stores import MemoryStore, NamespacedStore
 from vertebra.wasm import WASM_MAGIC_HEADER, WasmExecutionError, WasmModuleConfig, WasmPluginHost, WasmSandboxPolicy
 
 
@@ -95,7 +95,7 @@ def test_security_principal_and_guards() -> None:
 
 @pytest.mark.anyio
 async def test_queues_channels_stores_email_and_procedures() -> None:
-    """Verify QueueService, ChannelBus, NamespacedStore, EmailService, and ProcedureRouter."""
+    """Verify QueueService, ChannelsBackend, NamespacedStore, EmailService, and ProcedureRouter."""
     qsvc = QueueService()
 
     @task(lane="cpu")
@@ -107,13 +107,13 @@ async def test_queues_channels_stores_email_and_procedures() -> None:
     assert env.lane == "cpu"
     assert await qsvc.drain_once() == [81]
 
-    bus = ChannelBus(history=5)
+    bus = ChannelsBackend(history=5)
     await bus.on_startup()
     await bus.publish(b"evt", ["orders"])
     assert await bus.get_history("orders") == [b"evt"]
     await bus.on_shutdown()
 
-    kv = KeyValueStore()
+    kv = MemoryStore()
     ns = NamespacedStore(kv, "tenant-a")
     await ns.set("token", b"xyz")
     assert await ns.get("token") == b"xyz"
@@ -142,17 +142,17 @@ async def test_queues_channels_stores_email_and_procedures() -> None:
 
 
 def test_htmx_ssr_openapi_and_asyncapi() -> None:
-    """Verify HtmxRequest/HtmxResponse, UnixSocketSsrFrame, OpenAPI 3.1.0, and AsyncAPI 3.0.0 builders."""
+    """Verify HtmxRequest/HtmxResponse, SsrFrame, OpenAPI 3.1.0, and AsyncAPI 3.0.0 builders."""
     hx_req = HtmxRequest.from_headers({"HX-Request": "true", "HX-Target": "main-panel"})
     assert hx_req.is_htmx is True
     assert hx_req.target == "main-panel"
 
-    hx_resp = HtmxResponse("<div>Updated</div>", reswap="outerHTML", trigger={"saved": True})
+    hx_resp = HtmxResponse(html="<div>Updated</div>", reswap="outerHTML", trigger={"saved": True})
     headers = hx_resp.to_headers()
     assert headers["HX-Reswap"] == "outerHTML"
     assert headers["HX-Trigger"] == '{"saved":true}'
 
-    ssr_frame = encode_ssr_frame("Dashboard", {"count": 3})
+    ssr_frame = SsrFrame.encode("Dashboard", {"count": 3})
     assert int.from_bytes(ssr_frame[:4], "big") == len(ssr_frame) - 4
 
     oa = OpenAPISpecBuilder()

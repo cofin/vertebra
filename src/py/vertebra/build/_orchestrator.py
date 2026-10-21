@@ -6,21 +6,23 @@ automatic fallback to Vite when the native extension is unavailable.
 
 import atexit
 import importlib
-import json
 import logging
 import os
 import socket
 from pathlib import Path
 from typing import Any
 
+import msgspec
+
 from vertebra.build._config import BuildConfig
 from vertebra.build._fallback import DevServerProcess, run_vite_build
-from vertebra.build._import_map import write_import_map
+from vertebra.build._import_map import ImportMapGenerator
 from vertebra.build.codegen._manifest import ManifestGenerator
 from vertebra.build.codegen._metadata import RouteCollector
 from vertebra.build.codegen._typescript import TypeScriptGenerator
 from vertebra.build.codegen.zod import ZodGenerator
 from vertebra.utils.module_loader import import_app
+from vertebra.utils.serializers import encode_json_bytes
 
 __all__ = ("BuildOrchestrator",)
 
@@ -97,13 +99,19 @@ class BuildOrchestrator:
             vite_fn = getattr(item, "export_vite_metadata", None)
             if callable(vite_fn) and "vite" not in exported:
                 vite_path = out / "litestar-vite.json"
-                vite_path.write_text(json.dumps(vite_fn(), indent=2), encoding="utf-8")
+                vite_path.write_text(
+                    msgspec.json.format(encode_json_bytes(vite_fn()), indent=2).decode("utf-8"),
+                    encoding="utf-8",
+                )
                 exported["vite"] = vite_path
 
             asyncapi_fn = getattr(item, "export_asyncapi_schema", None)
             if callable(asyncapi_fn) and "asyncapi" not in exported:
                 asyncapi_path = out / "asyncapi.json"
-                asyncapi_path.write_text(json.dumps(asyncapi_fn(), indent=2), encoding="utf-8")
+                asyncapi_path.write_text(
+                    msgspec.json.format(encode_json_bytes(asyncapi_fn()), indent=2).decode("utf-8"),
+                    encoding="utf-8",
+                )
                 exported["asyncapi"] = asyncapi_path
 
         return exported
@@ -171,7 +179,7 @@ class BuildOrchestrator:
 
     def _resolve_js_deps(self) -> None:
         vertebra_dir = self.project_dir / ".vertebra"
-        write_import_map(self.config.js, vertebra_dir)
+        ImportMapGenerator.write(self.config.js, vertebra_dir)
 
     def _run_codegen(self, *, output_dir: Path | None = None) -> None:
         if not self._app_path:

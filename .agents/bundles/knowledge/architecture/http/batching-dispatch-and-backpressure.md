@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: "Request Batching, Dispatch & Backpressure"
-description: "Dual-path VertebraBody, 8-shard RequestBatcher, adaptive BatchPolicy, Dispatcher modes, 256-shard PendingRequests, and BackpressureController."
+description: "Dual-path ResponseBody, 8-shard RequestBatcher, adaptive BatchPolicy, Dispatcher modes, 256-shard PendingRequests, and BackpressureController."
 status: stable
 tags: [architecture, http, batching, dispatch, streaming, backpressure]
 sources:
@@ -24,7 +24,7 @@ sources:
 
 # Request Batching, Dispatch & Backpressure
 
-Dynamic requests matched by `Router` pass through [`BackpressureController`](../../../../../src/rs/vertebra-http/src/backpressure.rs), [`RequestBatcher`](../../../../../src/rs/vertebra-http/src/collector.rs), and [`Dispatcher`](../../../../../src/rs/vertebra-http/src/dispatcher/mod.rs) to amortize IPC and GIL acquisition across concurrent connections while supporting both unary and multi-frame streaming responses via [`VertebraBody`](../../../../../src/rs/vertebra-http/src/response.rs).
+Dynamic requests matched by `Router` pass through [`BackpressureController`](../../../../../src/rs/vertebra-http/src/backpressure.rs), [`RequestBatcher`](../../../../../src/rs/vertebra-http/src/collector.rs), and [`Dispatcher`](../../../../../src/rs/vertebra-http/src/dispatcher/mod.rs) to amortize IPC and GIL acquisition across concurrent connections while supporting both unary and multi-frame streaming responses via [`ResponseBody`](../../../../../src/rs/vertebra-http/src/response.rs).
 
 ```mermaid
 flowchart LR
@@ -35,9 +35,9 @@ flowchart LR
     Disp -->|"SharedMemory"| ShmDisp["ShmDispatcher + PendingRequests (256 Shards)"]
 ```
 
-## 1. Dual-Path `VertebraBody` & `PendingRequests` (`response.rs`, `correlation.rs`, `response_reader.rs`)
+## 1. Dual-Path `ResponseBody` & `PendingRequests` (`response.rs`, `correlation.rs`, `response_reader.rs`)
 
-- **[`VertebraBody`](../../../../../src/rs/vertebra-http/src/response.rs)**: Defined as `Either<Full<Bytes>, StreamingBody>` (`http_body_util::Either`). Unary responses use `full_body(Bytes)` (`Either::Left(Full::new(bytes))`) with zero channel allocation on the fast path, while progressive responses use `stream_body(rx)` (`Either::Right(StreamingBody)` backed by `tokio::sync::mpsc::Receiver<Result<Frame<Bytes>, Infallible>>`) for both `Frame::data` chunks and `Frame::trailers(HeaderMap)`.
+- **[`ResponseBody`](../../../../../src/rs/vertebra-http/src/response.rs)** / **[`HttpResponse`](../../../../../src/rs/vertebra-http/src/response.rs)**: `ResponseBody` is defined as `Either<Full<Bytes>, StreamingBody>` (`http_body_util::Either`), with `HttpResponse = Response<ResponseBody>`. Unary responses use `full_body(Bytes)` (`Either::Left(Full::new(bytes))`) with zero channel allocation on the fast path, while progressive responses use `stream_body(rx)` (`Either::Right(StreamingBody)` backed by `tokio::sync::mpsc::Receiver<Result<Frame<Bytes>, Infallible>>`) for both `Frame::data` chunks and `Frame::trailers(HeaderMap)`.
 - **[`PendingRequests`](../../../../../src/rs/vertebra-http/src/correlation.rs)** (aliased as `InFlightRequests`): Pre-allocates `65,536` correlation slots across `256` independent `Mutex` shards (`256` slots per shard). Supports both unary `complete(correlation_id, Response)` and streaming `start_stream` / `push_chunk` / `push_trailers` / `finish_stream` transitions driven by [`response_reader.rs`](../../../../../src/rs/vertebra-http/src/response_reader.rs).
 
 ## 2. 8-Shard `RequestBatcher` & `BatchPolicy` (`collector.rs`, `policy.rs`)

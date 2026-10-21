@@ -3,65 +3,77 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import importlib.util
 import inspect
+import os
+import socket
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import vertebra.storage._store as store_mod
 from vertebra.build import (
     BuildOrchestrator,
     CodegenConfig,
-    CodegenOrchestrator,
     CodegenPlugin,
     OnefileBuilder,
     StandaloneBuilder,
+    TypeScriptGenerator,
     ValibotGenerator,
     ZodGenerator,
-    generate_typescript,
+    format_typescript,
 )
-from vertebra.builder import BuildOrchestrator as LegacyBuildOrchestrator
-from vertebra.builder._codegen import CodegenOrchestrator as LegacyCodegenOrchestrator
-from vertebra.extensions.alchemy.storage import AlchemyFileAttachment, VertebraAlchemyStorageBackend
-from vertebra.extensions.codegen import CodegenPlugin as LegacyCodegenPlugin
 from vertebra.extensions.litestar import (
     LitestarRouteCompiler,
     MiddlewareOffloadCompiler,
-    compile_litestar_routes,
-    compile_middleware_offload,
-    create_fused_handler,
+    compile_litestar_fastpath_routes,
+    extract_litestar_routes,
+    offload_litestar_middlewares,
 )
-from vertebra.server._asgi._litestar_fastpath import create_fused_handler as shim_create_fused_handler
-from vertebra.server._asgi._litestar_offload import compile_middleware_offload as shim_compile_offload
-from vertebra.server._asgi._litestar_router import compile_litestar_routes as shim_compile_routes
-from vertebra.server._gil_audit import (
-    GilAuditReport,
-    audit_gil_state,
-    quarantine_unsafe_314t_modules,
-    snapshot_native_extensions,
-)
-from vertebra.server._native import _instantiate_mount_runners
+from vertebra.server._gil_audit import GilAuditReport
+from vertebra.server._native import _AsgiMountRunner, _instantiate_mount_runners
 from vertebra.server._runtime_tuning import AsgiEventLoopPool
-from vertebra.storage import VertebraStore
+from vertebra.server._shm_hardening import ShmAllocationPolicy
+from vertebra.storage import ObjectStore
 from vertebra.utils.portal import PortalProvider
 from vertebra.utils.sync_tools import (
     CapacityLimiter,
-    FreeThreadedSyncPool,
     LoopShardedResource,
-    async_to_sync,
-    sync_to_async,
+    SyncPool,
+    async_,
+    run_,
 )
 
 
+def _load_alchemy_storage_module() -> Any:
+    """Load vertebra.extensions.alchemy.storage directly or via standard import."""
+    try:
+        return importlib.import_module("vertebra.extensions.alchemy.storage")
+    except ImportError:
+        storage_path = Path(__file__).resolve().parents[3] / "vertebra" / "extensions" / "alchemy" / "storage.py"
+        spec = importlib.util.spec_from_file_location(
+            "vertebra_alchemy_storage_isolated",
+            storage_path,
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+
 def test_subdomain_consolidation_and_shims() -> None:
-    """Verify canonical vertebra.build and vertebra.extensions.litestar exports match legacy shims."""
-    assert BuildOrchestrator is LegacyBuildOrchestrator
-    assert CodegenOrchestrator is LegacyCodegenOrchestrator
-    assert CodegenPlugin is LegacyCodegenPlugin
-    assert compile_litestar_routes is shim_compile_routes
-    assert compile_middleware_offload is shim_compile_offload
-    assert create_fused_handler is shim_create_fused_handler
-    assert callable(generate_typescript)
+    """Verify canonical vertebra.build and vertebra.extensions.litestar exports."""
+    assert BuildOrchestrator is not None
+    assert CodegenPlugin is not None
+    assert TypeScriptGenerator is not None
+    assert callable(extract_litestar_routes)
+    assert callable(offload_litestar_middlewares)
+    assert callable(compile_litestar_fastpath_routes)
+    assert callable(format_typescript)
     assert OnefileBuilder is not None
     assert StandaloneBuilder is not None
     assert LitestarRouteCompiler is not None
@@ -83,14 +95,13 @@ def test_subdomain_consolidation_and_shims() -> None:
 
 @pytest.mark.anyio
 async def test_storage_and_alchemy_zero_to_thread(tmp_path: Path) -> None:
-    """Verify VertebraStore and VertebraAlchemyStorageBackend execute without asyncio.to_thread."""
-    import vertebra.extensions.alchemy.storage as alchemy_storage_mod
-    import vertebra.storage._store as store_mod
+    """Verify ObjectStore and ObjectStoreBackend execute without asyncio.to_thread."""
+    alchemy_storage_mod = _load_alchemy_storage_module()
 
     assert "to_thread" not in inspect.getsource(store_mod)
     assert "to_thread" not in inspect.getsource(alchemy_storage_mod)
 
-    store = VertebraStore("memory://")
+    store = ObjectStore("memory://")
     sample_file = tmp_path / "sample.bin"
     sample_file.write_bytes(b"zero-copy-payload-12345")
 
@@ -101,15 +112,15 @@ async def test_storage_and_alchemy_zero_to_thread(tmp_path: Path) -> None:
     assert isinstance(view, memoryview)
     assert bytes(view) == b"zero-copy-payload-12345"
 
-    backend = VertebraAlchemyStorageBackend(store=store, prefix="attachments")
-    attachment = AlchemyFileAttachment(path="doc.bin")
+    backend = alchemy_storage_mod.ObjectStoreBackend(store=store, prefix="attachments")
+    attachment = alchemy_storage_mod.FileAttachment(path="doc.bin")
     saved = await backend.save_object_async(attachment, sample_file)
     assert saved.size == 23
     assert await backend.get_content_async("doc.bin") == b"zero-copy-payload-12345"
 
 
 def test_portal_and_sync_tools_loop_sharding() -> None:
-    """Verify Portal concurrent submission, LoopShardedResource, CapacityLimiter, and FreeThreadedSyncPool."""
+    """Verify Portal concurrent submission, LoopShardedResource, CapacityLimiter, and SyncPool."""
     with PortalProvider() as portal:
 
         async def _double(x: int) -> int:
@@ -118,7 +129,7 @@ def test_portal_and_sync_tools_loop_sharding() -> None:
 
         assert portal.call(_double, 21) == 42
 
-    sync_fn = async_to_sync(lambda x: asyncio.sleep(0, result=x + 10))
+    sync_fn = run_(lambda x: asyncio.sleep(0, result=x + 10))
     assert sync_fn(5) == 15
 
     sharded: LoopShardedResource[list[int]] = LoopShardedResource(lambda: [1, 2, 3])
@@ -139,7 +150,7 @@ def test_portal_and_sync_tools_loop_sharding() -> None:
         loop1.close()
         loop2.close()
 
-    pool = FreeThreadedSyncPool(max_workers=2)
+    pool = SyncPool(max_workers=2)
     try:
         fut = pool.submit(lambda a, b: a + b, 19, 23)
         assert fut.result(timeout=5.0) == 42
@@ -147,7 +158,7 @@ def test_portal_and_sync_tools_loop_sharding() -> None:
         pool.shutdown()
 
     async def _run_sync_to_async() -> int:
-        wrapped = sync_to_async(lambda v: v * 3)
+        wrapped = async_(lambda v: v * 3)
         return await wrapped(7)
 
     assert asyncio.run(_run_sync_to_async()) == 21
@@ -155,21 +166,44 @@ def test_portal_and_sync_tools_loop_sharding() -> None:
 
 def test_gil_audit_and_strict_enforcement() -> None:
     """Verify GilAuditReport detects simulated GIL re-enablement and honours strict mode."""
-    ext_snap = snapshot_native_extensions()
+    assert isinstance(GilAuditReport.is_free_threaded_build(), bool)
+    ext_snap = GilAuditReport.snapshot_extensions()
     assert isinstance(ext_snap, frozenset)
-    assert isinstance(quarantine_unsafe_314t_modules(), tuple)
+    assert isinstance(GilAuditReport.quarantine_unsafe_modules(), tuple)
 
-    report = audit_gil_state(before_extensions=ext_snap, gil_enabled_before=True, strict=False)
+    report = GilAuditReport.audit(ext_snap, gil_enabled_before=True, strict=False)
     assert isinstance(report, GilAuditReport)
     assert not report.gil_reenabled_on_import
 
     with pytest.raises(RuntimeError, match="CPython GIL was silently re-enabled"):
-        audit_gil_state(
-            before_extensions=frozenset(),
+        GilAuditReport.audit(
+            frozenset(),
             gil_enabled_before=False,
             gil_enabled_after=True,
             strict=True,
         )
+
+
+def test_shm_allocation_policy_and_scm_rights() -> None:
+    """Verify ShmAllocationPolicy allocates anonymous SHM fds and transfers them via SCM_RIGHTS."""
+    policy = ShmAllocationPolicy(prefer_memfd=True)
+    fd, backend = policy.allocate_anonymous_shm_fd("ring-test", 4096)
+    try:
+        assert fd >= 0
+        assert backend in {"memfd", "tmpfile"}
+        sock_a, sock_b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            ShmAllocationPolicy.send_fd(sock_a, fd)
+            received_fd = ShmAllocationPolicy.recv_fd(sock_b)
+            try:
+                assert os.fstat(received_fd).st_size == 4096
+            finally:
+                os.close(received_fd)
+        finally:
+            sock_a.close()
+            sock_b.close()
+    finally:
+        os.close(fd)
 
 
 def test_asgi_event_loop_pool_sharded_mount_runners() -> None:
@@ -188,6 +222,7 @@ def test_asgi_event_loop_pool_sharded_mount_runners() -> None:
         prefix, runner, proto = mounts[0]
         assert prefix == "/api"
         assert proto == "asgi"
-        assert type(runner).__name__ == "_ShardedAsgiMountRunner"
+        assert isinstance(runner, _AsgiMountRunner)
+        assert type(runner).__name__ == "_AsgiMountRunner"
     finally:
         pool.stop()

@@ -5,7 +5,6 @@ from vertebra.db.dialer.alloydb import (
     AlloyDbClusterUri,
     AlloyDbConfig,
     AlloyDbDialer,
-    encode_alloydb_metadata_exchange,
 )
 from vertebra.db.dialer.cloudsql import (
     CloudSqlConfig,
@@ -21,5 +20,4 @@ __all__ = (
     "CloudSqlConfig",
     "CloudSqlDialer",
     "CloudSqlInstanceUri",
-    "encode_alloydb_metadata_exchange",
 )

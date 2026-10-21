@@ -3,7 +3,7 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from vertebra.builder._fallback import DevServerProcess, run_vite_build
+from vertebra.build import DevServerProcess, run_vite_build
 
 
 def test_vite_dev_server_proxy_url() -> None:
@@ -33,7 +33,7 @@ def test_vite_dev_server_resolve_command_no_vite_no_npx() -> None:
     server = DevServerProcess(Path("/tmp"), 5173)
     with patch("shutil.which", return_value=None):
         try:
-            server._resolve_command()  # noqa: SLF001
+            server._resolve_command()
         except RuntimeError as exc:
             assert "Vite not found" in str(exc)
         else:
@@ -43,7 +43,7 @@ def test_vite_dev_server_resolve_command_no_vite_no_npx() -> None:
 def test_vite_dev_server_resolve_command_uses_vite() -> None:
     server = DevServerProcess(Path("/tmp"), 5173)
     with patch("shutil.which", side_effect=lambda x: "/usr/bin/vite" if x == "vite" else None):
-        cmd = server._resolve_command()  # noqa: SLF001
+        cmd = server._resolve_command()
         assert "/usr/bin/vite" in cmd
         assert "--port 5173" in cmd
 
@@ -51,13 +51,13 @@ def test_vite_dev_server_resolve_command_uses_vite() -> None:
 def test_vite_dev_server_resolve_command_falls_back_to_npx() -> None:
     server = DevServerProcess(Path("/tmp"), 5173)
 
-    def mock_which(name: str) -> "str | None":
+    def mock_which(name: str) -> str | None:
         if name == "npx":
             return "/usr/bin/npx"
         return None
 
     with patch("shutil.which", side_effect=mock_which):
-        cmd = server._resolve_command()  # noqa: SLF001
+        cmd = server._resolve_command()
         assert "npx" in cmd
         assert "vite" in cmd
 

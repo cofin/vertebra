@@ -5,10 +5,11 @@ import runpy
 import sys
 import time
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
-from vertebra._vertebra import (  # type: ignore[import-untyped]
+from vertebra._vertebra import (
     Response,
     init_transport,
     submit_response,
@@ -109,7 +110,7 @@ def test_worker_main_shm_transport_initialized_once(monkeypatch: pytest.MonkeyPa
     init_calls: list[str] = []
     state = {"mode": "inprocess", "shm_loop_calls": 0}
 
-    fake_ext = ModuleType("vertebra._vertebra")
+    fake_ext: Any = ModuleType("vertebra._vertebra")
 
     class FakeResponse:
         def __init__(self, status: int = 200, body: bytes = b"", request_id: int = 0) -> None:
@@ -128,11 +129,11 @@ def test_worker_main_shm_transport_initialized_once(monkeypatch: pytest.MonkeyPa
     def fake_get_request_notify_fd() -> int:
         return 11 if state["mode"] == "shm" else -1
 
-    fake_ext.Response = FakeResponse  # type: ignore[attr-defined]
-    fake_ext.init_transport = fake_init_transport  # type: ignore[attr-defined]
-    fake_ext.get_request_notify_fd = fake_get_request_notify_fd  # type: ignore[attr-defined]
-    fake_ext.get_batch = lambda timeout_ms=100: None  # type: ignore[attr-defined]
-    fake_ext.submit_results = lambda responses: None  # type: ignore[attr-defined]
+    fake_ext.Response = FakeResponse
+    fake_ext.init_transport = fake_init_transport
+    fake_ext.get_request_notify_fd = fake_get_request_notify_fd
+    fake_ext.get_batch = lambda timeout_ms=100: None
+    fake_ext.submit_results = lambda responses: None
 
     class FakeScheduler:
         def __init__(self) -> None:
@@ -145,7 +146,7 @@ def test_worker_main_shm_transport_initialized_once(monkeypatch: pytest.MonkeyPa
         def __init__(self, *args: object, **kwargs: object) -> None:
             return None
 
-        def shutdown(self, wait: bool = False) -> None:  # noqa: FBT001, ARG002
+        def shutdown(self, *_args: object, **_kwargs: object) -> None:
             return None
 
     async def fake_shm_worker_loop(*args: object, **kwargs: object) -> None:
@@ -171,12 +172,12 @@ def test_worker_main_shm_transport_initialized_once(monkeypatch: pytest.MonkeyPa
 
 def test_worker_main_clears_wsgi_executor_on_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
     """Worker shutdown must not leak the module-global WSGI executor."""
-    fake_ext = ModuleType("vertebra._vertebra")
-    fake_ext.init_transport = lambda *args, **kwargs: None  # type: ignore[attr-defined]
-    fake_ext.get_request_notify_fd = lambda: -1  # type: ignore[attr-defined]
-    fake_ext.get_batch = lambda timeout_ms=100: None  # type: ignore[attr-defined]
-    fake_ext.submit_results = lambda responses: None  # type: ignore[attr-defined]
-    fake_ext.Response = object  # type: ignore[attr-defined]
+    fake_ext: Any = ModuleType("vertebra._vertebra")
+    fake_ext.init_transport = lambda *args, **kwargs: None
+    fake_ext.get_request_notify_fd = lambda: -1
+    fake_ext.get_batch = lambda timeout_ms=100: None
+    fake_ext.submit_results = lambda responses: None
+    fake_ext.Response = object
 
     class FakeScheduler:
         def __init__(self) -> None:
@@ -189,7 +190,7 @@ def test_worker_main_clears_wsgi_executor_on_shutdown(monkeypatch: pytest.Monkey
         def __init__(self, *args: object, **kwargs: object) -> None:
             return None
 
-        def shutdown(self, wait: bool = False) -> None:  # noqa: FBT001, ARG002
+        def shutdown(self, *_args: object, **_kwargs: object) -> None:
             return None
 
     async def fake_shm_worker_loop(*args: object, **kwargs: object) -> None:
@@ -207,20 +208,20 @@ def test_worker_main_clears_wsgi_executor_on_shutdown(monkeypatch: pytest.Monkey
     monkeypatch.setenv("VERTEBRA_APP", "fake.module:app")
     monkeypatch.setenv("VERTEBRA_WORKERS", "1")
 
-    native_module._wsgi_executor = None  # noqa: SLF001
+    vars(native_module)["_wsgi_executor"] = None
     worker_module.main()
 
-    assert native_module._wsgi_executor is None  # noqa: SLF001
+    assert vars(native_module)["_wsgi_executor"] is None
 
 
 def test_worker_module_executes_main_when_run_as_script(monkeypatch: pytest.MonkeyPatch) -> None:
     """python -m vertebra.supervisor._worker must invoke main()."""
-    fake_ext = ModuleType("vertebra._vertebra")
-    fake_ext.init_transport = lambda *args, **kwargs: None  # type: ignore[attr-defined]
+    fake_ext: Any = ModuleType("vertebra._vertebra")
+    fake_ext.init_transport = lambda *args, **kwargs: None
 
     fake_app = SimpleNamespace(_handlers={}, mounts=[])
-    fake_app_module = ModuleType("fake_worker_app")
-    fake_app_module.app = fake_app  # type: ignore[attr-defined]
+    fake_app_module: Any = ModuleType("fake_worker_app")
+    fake_app_module.app = fake_app
 
     run_worker_calls: list[tuple[object, dict[str, object]]] = []
 

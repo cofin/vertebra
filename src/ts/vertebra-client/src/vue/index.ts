@@ -4,16 +4,16 @@ import type { ClientConfig } from "../client/types";
 
 const VERTEBRA_SYMBOL = Symbol("vertebra");
 
-export function provideVertebra(config: ClientConfig): HttpClient {
+export function provideClient(config: ClientConfig): HttpClient {
   const client = new HttpClient(config);
   provide(VERTEBRA_SYMBOL, client);
   return client;
 }
 
-export function useVertebraClient(): HttpClient {
+export function useClient(): HttpClient {
   const client = inject<HttpClient>(VERTEBRA_SYMBOL);
   if (!client) {
-    throw new Error("useVertebraClient must be used after provideVertebra");
+    throw new Error("useClient must be used after provideClient");
   }
   return client;
 }
@@ -28,7 +28,7 @@ export function useQuery<TInput = any, TOutput = any>(
   input?: MaybeRefOrGetter<TInput>,
   options: { enabled?: MaybeRefOrGetter<boolean> } = {},
 ) {
-  const client = useVertebraClient();
+  const client = useClient();
   const data = ref<TOutput | null>(null);
   const loading = ref(false);
   const error = ref<Error | null>(null);
@@ -63,7 +63,7 @@ export function useQuery<TInput = any, TOutput = any>(
  * Vue 3.5 mutation composable.
  */
 export function useMutation<TInput = any, TOutput = any>(method: string, path: string) {
-  const client = useVertebraClient();
+  const client = useClient();
   const loading = ref(false);
   const error = ref<Error | null>(null);
 

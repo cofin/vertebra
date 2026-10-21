@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
+
+import msgspec
 
 __all__ = (
     "ApexExportArtifact",
@@ -11,8 +12,7 @@ __all__ = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class ApexExportArtifact:
+class ApexExportArtifact(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Generated SQL/YAML artifact from an ApexLang compilation or APEX export."""
 
     app_id: int
@@ -22,6 +22,8 @@ class ApexExportArtifact:
 
 class ApexLangRunner:
     """Compiles declarative ``.apexlang`` specifications into APEX/ORDS SQL installation scripts."""
+
+    __slots__ = ("workspace_name",)
 
     def __init__(self, workspace_name: str = "VERTEBRA_WS") -> None:
         self.workspace_name = workspace_name

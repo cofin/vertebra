@@ -11,7 +11,6 @@ import time
 import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass, field
 from typing import Any, Protocol, Self, runtime_checkable
 
 import msgspec
@@ -28,7 +27,7 @@ __all__ = (
 )
 
 
-class ChannelMessage(msgspec.Struct, frozen=True, gc=False):
+class ChannelMessage(msgspec.Struct, frozen=True, gc=False, array_like=True):
     """Zero-GC message envelope exchanged over broker pub/sub channels."""
 
     channel: str
@@ -37,8 +36,7 @@ class ChannelMessage(msgspec.Struct, frozen=True, gc=False):
     lease_id: str | None = None
 
 
-@dataclass(slots=True, frozen=True)
-class BrokerConfig:
+class BrokerConfig(msgspec.Struct, frozen=True, gc=False):
     """Configuration for cross-worker connection leasing and SHM transport."""
 
     pool_size: int = 10
@@ -50,8 +48,7 @@ class BrokerConfig:
     metrics_state_key: str = "db_broker_metrics"
 
 
-@dataclass(slots=True)
-class BrokerMetrics:
+class BrokerMetrics(msgspec.Struct, gc=False):
     """Live telemetry counters for the connection leasing broker."""
 
     active_leases: int = 0
@@ -363,18 +360,24 @@ class ShmBrokerTransport(InMemoryBrokerTransport):
         return None
 
 
-@dataclass(slots=True)
 class BrokerPlugin:
     """Plugin registering cross-worker connection leasing and broker metrics into app state and DI."""
 
-    config: BrokerConfig = field(default_factory=BrokerConfig)
-    transport: BrokerTransport | None = None
-    use_shm: bool = False
+    __slots__ = ("config", "transport", "use_shm")
 
-    def __post_init__(self) -> None:
-        """Initialize the default transport when none is explicitly provided."""
-        if self.transport is None:
-            self.transport = ShmBrokerTransport(self.config) if self.use_shm else InMemoryBrokerTransport(self.config)
+    def __init__(
+        self,
+        config: BrokerConfig | None = None,
+        transport: BrokerTransport | None = None,
+        use_shm: bool = False,
+    ) -> None:
+        self.config = config or BrokerConfig()
+        self.use_shm = use_shm
+        self.transport: BrokerTransport | None = (
+            (ShmBrokerTransport(self.config) if self.use_shm else InMemoryBrokerTransport(self.config))
+            if transport is None
+            else transport
+        )
 
     @property
     def active_transport(self) -> BrokerTransport:

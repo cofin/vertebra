@@ -7,29 +7,25 @@ from vertebra.extensions.grpc._decorator import (
     GrpcError,
     GrpcMethodKind,
     GrpcMethodSpec,
-    GrpcRegistry,
     GrpcServiceRegistry,
     GrpcStatus,
     ProtobufSchemaGenerator,
-    _ProtobufSchemaGenerator,
     decode_lpm_frames,
     encode_lpm_frame,
     grpc_method,
     percent_encode_grpc_message,
 )
 
-__all__ = [
+__all__ = (
     "GrpcContext",
     "GrpcError",
     "GrpcMethodKind",
     "GrpcMethodSpec",
-    "GrpcRegistry",
     "GrpcServiceRegistry",
     "GrpcStatus",
     "ProtobufSchemaGenerator",
-    "_ProtobufSchemaGenerator",
     "decode_lpm_frames",
     "encode_lpm_frame",
     "grpc_method",
     "percent_encode_grpc_message",
-]
+)

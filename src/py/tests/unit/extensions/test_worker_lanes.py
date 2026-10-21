@@ -14,14 +14,12 @@ from click.testing import CliRunner
 from vertebra.cli.run import run
 from vertebra.cli.workers import workers
 from vertebra.extensions.worker import (
-    MultiLaneWorkerRunner,
-    WorkerLaneConfig,
-    parse_worker_lanes,
-    run_oneshot_job,
+    LaneConfig,
+    WorkerRunner,
 )
 
 
-def _load_litestar_worker_test_primitives() -> tuple[Any, Any]:
+def _load_litestar_worker_test_primitives() -> tuple[Any, Callable[..., Callable[[Callable[..., Any]], Any]]]:
     """Load Litestar and get or fallback doubles when optional extra is absent."""
     try:
         mod = importlib.import_module("litestar")
@@ -35,6 +33,8 @@ def _load_litestar_worker_test_primitives() -> tuple[Any, Any]:
             return wrap
 
         class LitestarStub:
+            __slots__ = ("_on_shutdown", "_on_startup", "routes", "state")
+
             def __init__(
                 self,
                 route_handlers: Sequence[Any] | None = None,
@@ -69,22 +69,22 @@ Litestar, get = _load_litestar_worker_test_primitives()
 
 
 def test_parse_worker_lanes_matches_queues_and_concurrency() -> None:
-    """Verify parse_worker_lanes parses comma-separated queues and concurrency limits."""
-    lanes = parse_worker_lanes("default,etl,notifications", "10,2,5", drain_timeout_s=15.0)
+    """Verify WorkerRunner.parse_lanes parses comma-separated queues and concurrency limits."""
+    lanes = WorkerRunner.parse_lanes("default,etl,notifications", "10,2,5", drain_timeout_s=15.0)
     assert len(lanes) == 3
-    assert lanes[0] == WorkerLaneConfig(queue_name="default", concurrency=10, drain_timeout_s=15.0)
-    assert lanes[1] == WorkerLaneConfig(queue_name="etl", concurrency=2, drain_timeout_s=15.0)
-    assert lanes[2] == WorkerLaneConfig(queue_name="notifications", concurrency=5, drain_timeout_s=15.0)
+    assert lanes[0] == LaneConfig(queue_name="default", concurrency=10, drain_timeout_s=15.0)
+    assert lanes[1] == LaneConfig(queue_name="etl", concurrency=2, drain_timeout_s=15.0)
+    assert lanes[2] == LaneConfig(queue_name="notifications", concurrency=5, drain_timeout_s=15.0)
 
-    single_conc = parse_worker_lanes("default,etl", "4")
+    single_conc = WorkerRunner.parse_lanes("default,etl", "4")
     assert [lane.concurrency for lane in single_conc] == [4, 4]
 
 
 @pytest.mark.anyio
 async def test_multi_lane_worker_runner_isolates_lane_concurrency() -> None:
-    """Verify MultiLaneWorkerRunner enforces independent per-lane concurrency semaphores and drains cleanly."""
-    lanes = parse_worker_lanes("default,etl", "3,1", drain_timeout_s=5.0)
-    runner = MultiLaneWorkerRunner(lanes)
+    """Verify WorkerRunner enforces independent per-lane concurrency semaphores and drains cleanly."""
+    lanes = WorkerRunner.parse_lanes("default,etl", "3,1", drain_timeout_s=5.0)
+    runner = WorkerRunner(lanes)
 
     active_by_lane: dict[str, int] = {"default": 0, "etl": 0}
     peak_by_lane: dict[str, int] = {"default": 0, "etl": 0}
@@ -114,7 +114,7 @@ async def test_multi_lane_worker_runner_isolates_lane_concurrency() -> None:
 
 @pytest.mark.anyio
 async def test_run_oneshot_job_executes_inside_app_lifespan() -> None:
-    """Verify run_oneshot_job enters app lifespan, runs the named job, and returns exit code 0."""
+    """Verify WorkerRunner.run_oneshot enters app lifespan, runs the named job, and returns exit code 0."""
     events: list[str] = []
 
     async def on_startup() -> None:
@@ -137,11 +137,11 @@ async def test_run_oneshot_job_executes_inside_app_lifespan() -> None:
     )
     app.state["vertebra_jobs"] = {"rebuild_search_index": rebuild_search_index}
 
-    code = await run_oneshot_job(app, "rebuild_search_index")
+    code = await WorkerRunner.run_oneshot(app, "rebuild_search_index")
     assert code == 0
     assert events == ["startup", "job:rebuild_search_index", "shutdown"]
 
-    missing_code = await run_oneshot_job(app, "unknown_job")
+    missing_code = await WorkerRunner.run_oneshot(app, "unknown_job")
     assert missing_code == 1
 
 

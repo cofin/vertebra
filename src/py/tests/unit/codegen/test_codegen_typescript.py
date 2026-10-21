@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 import msgspec
 
-from vertebra.builder._codegen._metadata import RouteCollector
-from vertebra.builder._codegen._typescript import TypeScriptGenerator, format_typescript
+from vertebra.build.codegen._metadata import RouteCollector
+from vertebra.build.codegen._typescript import TypeScriptGenerator, format_typescript
 from vertebra.framework._app import App
 
 

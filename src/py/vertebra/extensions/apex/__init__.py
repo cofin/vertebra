@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from vertebra.extensions.apex.apexlang import ApexExportArtifact, ApexLangRunner
 from vertebra.extensions.apex.ebs_gateway import (
+    ConfirmationGate,
+    EbsGateway,
     EbsPolicyDecision,
     EbsPolicyEvaluator,
     EbsResponsibilityMapping,
-    EbsToolConfirmationGate,
-    GeminiEnterpriseEbsGateway,
 )
 from vertebra.extensions.apex.openapi import (
-    ApexOpenAPIBridge,
+    ApexOpenAPIGenerator,
     DualityViewSpec,
     OrdsEndpointSpec,
 )
@@ -25,14 +25,14 @@ from vertebra.extensions.apex.session import (
 __all__ = (
     "ApexExportArtifact",
     "ApexLangRunner",
-    "ApexOpenAPIBridge",
+    "ApexOpenAPIGenerator",
     "ApexSessionContext",
+    "ConfirmationGate",
     "DualityViewSpec",
+    "EbsGateway",
     "EbsPolicyDecision",
     "EbsPolicyEvaluator",
     "EbsResponsibilityMapping",
-    "EbsToolConfirmationGate",
-    "GeminiEnterpriseEbsGateway",
     "OracleConnectionLike",
     "OraclePoolLike",
     "OracleSessionManager",

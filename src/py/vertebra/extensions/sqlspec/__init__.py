@@ -1,11 +1,6 @@
 """SQLSpec extension, PEP 695 generic configurations, and zero-copy object storage integration."""
 
-from vertebra.extensions.sqlspec.oracle import (
-    ORACLE_TEXT_RESERVED_WORDS,
-    build_oracle_hybrid_rrf_sql,
-    sanitize_for_json,
-    sanitize_oracle_text_query,
-)
+from vertebra.extensions.sqlspec.oracle import OracleHybridSearch
 from vertebra.extensions.sqlspec.plugin import (
     SQLSPEC_PLUGIN_PRIORITY,
     SQLSPEC_STATE_KEY,
@@ -16,30 +11,18 @@ from vertebra.extensions.sqlspec.plugin import (
     DatabaseConfigProtocol,
     ProxyAsyncConfig,
     ProxySyncConfig,
-    SQLSpec,
     SQLSpecConfig,
     SQLSpecPlugin,
     SQLSpecState,
-    SQLSpecStorePlugin,
     SyncDatabaseConfig,
     SyncDriverAdapterBase,
-    VertebraProxyAsyncConfig,
-    VertebraProxySyncConfig,
-    VertebraSQLSpecPlugin,
-    wrap_config,
 )
 from vertebra.extensions.sqlspec.storage import (
-    ObjectStore,
-    SQLSpecStorageBridge,
     SQLSpecStore,
     StreamingStorageResponse,
-    VertebraObjectStore,
-    VertebraSQLSpecStorageAdapter,
-    VertebraSQLSpecStore,
 )
 
 __all__ = (
-    "ORACLE_TEXT_RESERVED_WORDS",
     "SQLSPEC_PLUGIN_PRIORITY",
     "SQLSPEC_STATE_KEY",
     "AsyncDatabaseConfig",
@@ -47,27 +30,14 @@ __all__ = (
     "BrokerPlugin",
     "ChannelMessage",
     "DatabaseConfigProtocol",
-    "ObjectStore",
+    "OracleHybridSearch",
     "ProxyAsyncConfig",
     "ProxySyncConfig",
-    "SQLSpec",
     "SQLSpecConfig",
     "SQLSpecPlugin",
     "SQLSpecState",
-    "SQLSpecStorageBridge",
     "SQLSpecStore",
-    "SQLSpecStorePlugin",
     "StreamingStorageResponse",
     "SyncDatabaseConfig",
     "SyncDriverAdapterBase",
-    "VertebraObjectStore",
-    "VertebraProxyAsyncConfig",
-    "VertebraProxySyncConfig",
-    "VertebraSQLSpecPlugin",
-    "VertebraSQLSpecStorageAdapter",
-    "VertebraSQLSpecStore",
-    "build_oracle_hybrid_rrf_sql",
-    "sanitize_for_json",
-    "sanitize_oracle_text_query",
-    "wrap_config",
 )

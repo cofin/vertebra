@@ -54,22 +54,20 @@ pub type StreamingBody = StreamBody<ReceiverFrameStream>;
 
 /// Dual-path HTTP response body: `Left(Full<Bytes>)` for zero-channel unary responses,
 /// `Right(StreamingBody)` for chunked, SSE, and trailer-bearing responses.
-pub type VertebraBody = Either<Full<Bytes>, StreamingBody>;
+pub type ResponseBody = Either<Full<Bytes>, StreamingBody>;
 
 /// Canonical HTTP response type used across `vertebra-http`.
-pub type VertebraResponse = Response<VertebraBody>;
-
-type HyperResponse = VertebraResponse;
+pub type HttpResponse = Response<ResponseBody>;
 
 /// Wrap a contiguous byte buffer in the zero-allocation unary `Either::Left(Full<Bytes>)` branch.
 #[inline]
-pub fn full_body(bytes: impl Into<Bytes>) -> VertebraBody {
+pub fn full_body(bytes: impl Into<Bytes>) -> ResponseBody {
     Either::Left(Full::new(bytes.into()))
 }
 
 /// Wrap a frame receiver in the progressive streaming `Either::Right(StreamBody)` branch.
 #[inline]
-pub fn stream_body(rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>) -> VertebraBody {
+pub fn stream_body(rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>) -> ResponseBody {
     Either::Right(StreamBody::new(ReceiverFrameStream::new(rx)))
 }
 
@@ -77,7 +75,7 @@ pub fn stream_body(rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>) -> Vert
 pub async fn handle(
     req: Request<Incoming>,
     state: Arc<ServerState>,
-) -> Result<VertebraResponse, Infallible> {
+) -> Result<HttpResponse, Infallible> {
     if state.config.dev_mode && hmr::is_hmr_path(req.uri().path()) {
         let hmr_resp = hmr::handle(req, state).await;
         let (parts, body) = hmr_resp.into_parts();
@@ -207,7 +205,7 @@ pub async fn handle(
     Ok(hyper_resp)
 }
 
-fn rejection_response(reason: RejectionReason) -> HyperResponse {
+fn rejection_response(reason: RejectionReason) -> HttpResponse {
     let (status, msg) = match reason {
         RejectionReason::Saturated => (StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable"),
         RejectionReason::QueueTimeout => (StatusCode::SERVICE_UNAVAILABLE, "Server Busy"),
@@ -224,7 +222,7 @@ fn rejection_response(reason: RejectionReason) -> HyperResponse {
         .unwrap_or_else(|_| error_response(status, msg))
 }
 
-fn health_response(snapshot: Option<BackpressureMetricsSnapshot>) -> HyperResponse {
+fn health_response(snapshot: Option<BackpressureMetricsSnapshot>) -> HttpResponse {
     let body = match snapshot {
         Some(s) => format!(
             "{{\"status\":\"healthy\",\"backpressure\":{{\"in_flight\":{},\"queue_depth\":{},\"circuit_state\":\"{}\",\"counters\":{{\"accepted\":{},\"saturated_rejected\":{},\"queue_rejected\":{},\"circuit_rejected\":{},\"timeout_rejected\":{}}}}}}}",
@@ -283,8 +281,8 @@ fn version_tag(version: http::Version) -> u8 {
     }
 }
 
-/// Build a `VertebraResponse` from a `PendingResponse`, taking the streaming branch when `stream_rx` is present.
-pub fn build_response(resp: PendingResponse) -> VertebraResponse {
+/// Build an `HttpResponse` from a `PendingResponse`, taking the streaming branch when `stream_rx` is present.
+pub fn build_response(resp: PendingResponse) -> HttpResponse {
     let mut builder = Response::builder().status(resp.status);
 
     // Decode response headers from compact binary format and set on Hyper response.
@@ -304,7 +302,7 @@ pub fn build_response(resp: PendingResponse) -> VertebraResponse {
     })
 }
 
-fn error_response(status: StatusCode, msg: &'static str) -> HyperResponse {
+fn error_response(status: StatusCode, msg: &'static str) -> HttpResponse {
     Response::builder()
         .status(status)
         .body(full_body(Bytes::from_static(msg.as_bytes())))

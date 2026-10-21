@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
+
+import msgspec
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -21,8 +22,7 @@ __all__ = (
 type ProcedureKind = Literal["query", "mutation", "subscription"]
 
 
-@dataclass(frozen=True, slots=True)
-class ProcedureDef:
+class ProcedureDef(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Typed RPC procedure definition (`query`, `mutation`, or `subscription`)."""
 
     name: str
@@ -34,6 +34,8 @@ class ProcedureDef:
 
 class ProcedureRouter:
     """Registry and dispatcher for typed RPC procedures."""
+
+    __slots__ = ("_prefix", "_procedures")
 
     def __init__(self, *, prefix: str = "/_rpc") -> None:
         self._prefix = prefix

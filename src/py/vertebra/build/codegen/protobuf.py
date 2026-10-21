@@ -1,7 +1,6 @@
 """Protobuf v3 (.proto) message and gRPC service definition generator."""
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field
 
 from vertebra.build.codegen._ir import (
     AnnotatedType,
@@ -19,13 +18,20 @@ from vertebra.build.codegen.procedures import resolve_parameter_node
 __all__ = ("ProtobufGenerator",)
 
 
-@dataclass(slots=True)
 class ProtobufGenerator:
     """Generate .proto v3 message and gRPC service blocks from RouteMetadata."""
 
-    package: str = "vertebra.v1"
-    service_name: str = "VertebraService"
-    declared: dict[str, ObjectType] = field(default_factory=dict)
+    __slots__ = ("declared", "package", "service_name")
+
+    def __init__(
+        self,
+        package: str = "vertebra.v1",
+        service_name: str = "VertebraService",
+        declared: dict[str, ObjectType] | None = None,
+    ) -> None:
+        self.package = package
+        self.service_name = service_name
+        self.declared: dict[str, ObjectType] = declared if declared is not None else {}
 
     def generate(self, routes: Iterable[RouteMetadata]) -> str:
         """Render a complete proto3 definition file."""

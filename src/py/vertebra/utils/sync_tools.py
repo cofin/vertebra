@@ -23,16 +23,14 @@ if TYPE_CHECKING:
 __all__ = (
     "NO_VALUE",
     "CapacityLimiter",
-    "FreeThreadedSyncPool",
     "LoopShardedResource",
     "NoValue",
+    "SyncPool",
     "async_",
-    "async_to_sync",
     "await_",
     "ensure_async_",
     "get_next",
     "run_",
-    "sync_to_async",
     "with_ensure_async_",
 )
 
@@ -114,10 +112,10 @@ class LoopShardedResource[T]:
             self._by_loop.clear()
 
 
-class FreeThreadedSyncPool:
+class SyncPool:
     """Dedicated worker pool for executing synchronous callables in parallel on Python 3.12+/3.14t."""
 
-    _default_instance: ClassVar["FreeThreadedSyncPool | None"] = None
+    _default_instance: ClassVar["SyncPool | None"] = None
     _default_lock: ClassVar[threading.Lock] = threading.Lock()
 
     __slots__ = ("_executor", "_max_workers", "_pid")
@@ -134,8 +132,8 @@ class FreeThreadedSyncPool:
         return self._max_workers
 
     @classmethod
-    def default(cls) -> "FreeThreadedSyncPool":
-        """Return the process-wide default FreeThreadedSyncPool."""
+    def default(cls) -> "SyncPool":
+        """Return the process-wide default SyncPool."""
         if cls._default_instance is None:
             with cls._default_lock:
                 if cls._default_instance is None:
@@ -382,7 +380,7 @@ class _AsyncWrapper[**ParamSpecT, ReturnT]:
 
     async def _dispatch(self, *args: ParamSpecT.args, **kwargs: ParamSpecT.kwargs) -> ReturnT:
         if _is_gil_disabled():
-            return await FreeThreadedSyncPool.default().submit_async(self._function, *args, **kwargs)
+            return await SyncPool.default().submit_async(self._function, *args, **kwargs)
         return await asyncio.to_thread(self._function, *args, **kwargs)
 
 
@@ -414,7 +412,3 @@ class _ContextManagerWrapper[T]:
         exc_tb: "TracebackType | None",
     ) -> bool | None:
         return self._cm.__exit__(exc_type, exc_val, exc_tb)
-
-
-async_to_sync = run_
-sync_to_async = async_

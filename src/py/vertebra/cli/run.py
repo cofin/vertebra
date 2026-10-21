@@ -9,12 +9,12 @@ from typing import Any
 
 import click
 
-from vertebra.builder._config import BuildConfig
+from vertebra.build import BuildConfig
 from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
 from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
-from vertebra.extensions.worker.runner import run_oneshot_job
+from vertebra.extensions.worker.runner import WorkerRunner
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
 from vertebra.utils.module_loader import import_app
 from vertebra.utils.serializers import decode_json
@@ -168,7 +168,7 @@ def _execute_oneshot_cli(app_path: str, job_name: str) -> int:
     os.environ["VERTEBRA_APP"] = app_path
     target_app = import_app(app_path)
     with enter_litestar_server_lifespan(target_app, app_path=app_path):
-        return asyncio.run(run_oneshot_job(target_app, job_name))
+        return asyncio.run(WorkerRunner.run_oneshot(target_app, job_name))
 
 
 def _resolve_static_dir(project_dir: Path) -> Path | None:

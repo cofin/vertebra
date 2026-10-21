@@ -1,9 +1,10 @@
 """Route metadata collection for frontend codegen."""
 
 import inspect
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import msgspec
 
 from vertebra.build.codegen._extractor import TypeExtractor
 from vertebra.build.codegen._ir import TypeNode, UnknownType
@@ -13,8 +14,7 @@ from vertebra.framework._router import RouteDef
 __all__ = ("RouteCollector", "RouteMetadata")
 
 
-@dataclass(frozen=True, slots=True)
-class RouteMetadata:
+class RouteMetadata(msgspec.Struct, frozen=True, gc=False):
     """Codegen metadata derived from a registered HTTP route."""
 
     operation_id: str

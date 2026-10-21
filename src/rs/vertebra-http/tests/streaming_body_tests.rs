@@ -7,9 +7,7 @@ use hyper::body::Frame;
 use tokio::sync::mpsc;
 
 use vertebra_http::collector::{PendingResponse, PendingResponseBody, ResponseCollector};
-use vertebra_http::response::{
-    VertebraBody, VertebraResponse, build_response, full_body, stream_body,
-};
+use vertebra_http::response::{HttpResponse, ResponseBody, build_response, full_body, stream_body};
 use vertebra_http::response_reader::{
     FLAG_ERROR, FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING, FLAG_TRAILERS, PendingRequests,
 };
@@ -27,7 +25,7 @@ fn encode_test_frame(request_id: u64, status: u16, flags: u16, payload: &[u8]) -
 
 #[tokio::test]
 async fn unary_full_body_yields_single_frame_without_channel() {
-    let body: VertebraBody = full_body(Bytes::from_static(b"unary-fast-path"));
+    let body: ResponseBody = full_body(Bytes::from_static(b"unary-fast-path"));
     let collected = body.collect().await.expect("collect unary body");
     assert_eq!(collected.to_bytes(), Bytes::from_static(b"unary-fast-path"));
 }
@@ -62,7 +60,7 @@ async fn stream_body_delivers_progressive_chunks_and_trailers() {
             .expect("trailers frame");
     });
 
-    let resp: VertebraResponse = http::Response::builder()
+    let resp: HttpResponse = http::Response::builder()
         .status(StatusCode::OK)
         .body(stream_body(rx))
         .expect("build streaming response");

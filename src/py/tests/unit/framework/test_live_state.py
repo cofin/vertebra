@@ -10,10 +10,6 @@ from vertebra.framework.live import (
     LiveStateRoom,
     StateDeltaFrame,
     StateOpcode,
-    decode_state_delta,
-    encode_state_delta,
-    fnv1a_field_id,
-    fnv1a_state_id,
     live_action,
 )
 
@@ -32,8 +28,8 @@ class GameState(LiveState):
 
 def test_fnv1a_hashes_match_rust_core() -> None:
     """Verify Python FNV-1a state_id and field_id match vertebra-core::protocol::state."""
-    assert fnv1a_state_id("GameState") == 0x374157F8DDD4C9A8
-    assert fnv1a_field_id("score") == 0xD22F9095
+    assert LiveState.compute_state_id("GameState") == 0x374157F8DDD4C9A8
+    assert LiveState.compute_field_id("score") == 0xD22F9095
 
 
 def test_hlc_tick_and_receive_monotonicity() -> None:
@@ -57,13 +53,13 @@ def test_live_state_mutation_and_lww_resolution() -> None:
     deltas = state.drain_deltas()
     assert len(deltas) == 1
     assert deltas[0].opcode == StateOpcode.FIELD_SET
-    assert deltas[0].field_id == fnv1a_field_id("score")
+    assert deltas[0].field_id == LiveState.compute_field_id("score")
     assert deltas[0].value == 25
 
     stale_frame = StateDeltaFrame(
         opcode=StateOpcode.FIELD_SET,
         state_id=state.state_id,
-        field_id=fnv1a_field_id("score"),
+        field_id=LiveState.compute_field_id("score"),
         timestamp_ns=deltas[0].timestamp_ns - 1,
         value=5,
     )
@@ -73,7 +69,7 @@ def test_live_state_mutation_and_lww_resolution() -> None:
     newer_frame = StateDeltaFrame(
         opcode=StateOpcode.FIELD_SET,
         state_id=state.state_id,
-        field_id=fnv1a_field_id("score"),
+        field_id=LiveState.compute_field_id("score"),
         timestamp_ns=deltas[0].timestamp_ns + 100,
         value=99,
     )
@@ -92,19 +88,17 @@ async def test_live_state_room_action_call_and_broadcast() -> None:
     state = GameState(score=10)
     room = LiveStateRoom("room:1", state, publish_fn=publish_fn)
 
-    call_frame = encode_state_delta(
-        StateDeltaFrame(
-            opcode=StateOpcode.ACTION_CALL,
-            state_id=state.state_id,
-            field_id=fnv1a_field_id("add_points"),
-            call_id=42,
-            value={"delta": 15},
-        )
-    )
+    call_frame = StateDeltaFrame(
+        opcode=StateOpcode.ACTION_CALL,
+        state_id=state.state_id,
+        field_id=LiveState.compute_field_id("add_points"),
+        call_id=42,
+        value={"delta": 15},
+    ).encode()
     responses = await room.handle_client_frame(call_frame)
     assert len(responses) == 2
-    delta_out = decode_state_delta(responses[0])
-    result_out = decode_state_delta(responses[1])
+    delta_out = StateDeltaFrame.decode(responses[0])
+    result_out = StateDeltaFrame.decode(responses[1])
     assert delta_out.opcode == StateOpcode.FIELD_SET
     assert delta_out.value == 25
     assert result_out.opcode == StateOpcode.ACTION_RESULT

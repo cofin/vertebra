@@ -1,8 +1,6 @@
 """Zod TypeScript validation schema generator with Litestar v2/v3 marker and JSON Schema support."""
 
-import json
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
 from typing import Any
 
 from vertebra.build.codegen._ir import (
@@ -23,15 +21,18 @@ from vertebra.build.codegen.procedures import (
     json_schema_to_type_node,
     resolve_parameter_node,
 )
+from vertebra.utils.serializers import encode_json
 
 __all__ = ("ZodGenerator",)
 
 
-@dataclass(slots=True)
 class ZodGenerator:
     """Generate Zod schemas from RouteMetadata, TypeNode IR, or JSON Schema dictionaries."""
 
-    declared: dict[str, ObjectType] = field(default_factory=dict)
+    __slots__ = ("declared",)
+
+    def __init__(self, declared: dict[str, ObjectType] | None = None) -> None:
+        self.declared: dict[str, ObjectType] = declared if declared is not None else {}
 
     def generate(self, routes: Iterable[RouteMetadata] | dict[str, Any] | TypeNode) -> str:
         """Render a complete TypeScript module exporting Zod schemas."""
@@ -71,7 +72,7 @@ class ZodGenerator:
                 expr = self._node_to_zod(res.base_type, res.constraints)
                 if not res.required:
                     expr = f"{expr}.optional()"
-                prop_key = res.external_name if res.external_name.isidentifier() else json.dumps(res.external_name)
+                prop_key = res.external_name if res.external_name.isidentifier() else encode_json(res.external_name)
                 fields.append(f"{prop_key}: {expr}")
             lines.append(f"export const {safe_id}Params = z.object({{{', '.join(fields)}}});")
             lines.append(f"export const {safe_id}Response = {self._node_to_zod(route.return_type, ())};")
@@ -163,7 +164,7 @@ class ZodGenerator:
             inner = ", ".join(self._node_to_zod(variant) for variant in node.variants)
             base = f"z.union([{inner}])"
         elif isinstance(node, LiteralType):
-            base = f"z.literal({json.dumps(node.value)})"
+            base = f"z.literal({encode_json(node.value)})"
         elif isinstance(node, GenericType):
             if node.name in {"Set", "ReadonlySet"} and node.params:
                 base = f"z.set({self._node_to_zod(node.params[0])})"
@@ -192,19 +193,19 @@ class ZodGenerator:
         result = base
         for key, value in constraints:
             if key == "ge":
-                result += f".gte({json.dumps(value)})"
+                result += f".gte({encode_json(value)})"
             elif key == "gt":
-                result += f".gt({json.dumps(value)})"
+                result += f".gt({encode_json(value)})"
             elif key == "le":
-                result += f".lte({json.dumps(value)})"
+                result += f".lte({encode_json(value)})"
             elif key == "lt":
-                result += f".lt({json.dumps(value)})"
+                result += f".lt({encode_json(value)})"
             elif key == "multiple_of":
-                result += f".multipleOf({json.dumps(value)})"
+                result += f".multipleOf({encode_json(value)})"
             elif key == "min_length":
-                result += f".min({json.dumps(value)})"
+                result += f".min({encode_json(value)})"
             elif key == "max_length":
-                result += f".max({json.dumps(value)})"
+                result += f".max({encode_json(value)})"
             elif key == "pattern":
                 escaped = str(value).replace("\\", "\\\\").replace("/", "\\/")
                 result += f".regex(/{escaped}/)"

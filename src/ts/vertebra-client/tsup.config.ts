@@ -17,6 +17,7 @@ export default defineConfig({
     "src/hmr/index.ts",
     "src/live/index.ts",
     "src/apex/index.ts",
+    "src/telemetry.ts",
   ],
   format: ["esm"],
   dts: true,

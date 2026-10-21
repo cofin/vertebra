@@ -13,9 +13,7 @@ from typing import Any
 
 import click
 
-from vertebra.builder._config import BuildConfig
-from vertebra.builder._import_map import parse_package_spec, write_import_map
-from vertebra.builder._orchestrator import BuildOrchestrator
+from vertebra.build import BuildConfig, BuildOrchestrator, ImportMapGenerator
 from vertebra.cli.errors import CLIError
 from vertebra.cli.theme import console
 
@@ -115,7 +113,7 @@ def install() -> None:
         config = BuildConfig.load(project_dir)
         if config.js.dependencies or config.js.dev_dependencies:
             with console.status("Resolving JS dependencies…"):
-                out = write_import_map(config.js, project_dir / ".vertebra", include_dev=True)
+                out = ImportMapGenerator.write(config.js, project_dir / ".vertebra", include_dev=True)
             console.success(f"Generated import map at {out}")
         else:
             console.info("No JS dependencies found in pyproject.toml")
@@ -180,7 +178,7 @@ def exec_cmd(cmd: tuple[str, ...]) -> None:
 
 def _parse_package_name(spec: str) -> str:
     """Extract package name from spec like ``react@18`` or ``@scope/pkg@1.0``."""
-    return parse_package_spec(spec)[0]
+    return ImportMapGenerator.parse_spec(spec)[0]
 
 
 def _read_pyproject(project_dir: Path) -> tuple[str, dict[str, Any]]:

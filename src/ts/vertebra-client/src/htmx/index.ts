@@ -6,7 +6,7 @@ import type { ClientConfig } from "../client/types";
  * Auto-intercepts HTMX requests to inject Vertebra headers
  * and handle JSON bodies for mutations.
  */
-export function initVertebraHtmx(config: ClientConfig): void {
+export function initHtmx(config: ClientConfig): void {
   if (typeof document === "undefined") return;
 
   document.addEventListener("htmx:configRequest", (event: any) => {

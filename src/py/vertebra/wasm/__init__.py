@@ -1,11 +1,10 @@
 """WebAssembly (WASI 0.2 Component Model) sandboxed plugin host with fuel and memory limits."""
 
-from __future__ import annotations
-
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import msgspec
 
 __all__ = (
     "WASM_MAGIC_HEADER",
@@ -13,7 +12,6 @@ __all__ = (
     "WasmModuleConfig",
     "WasmPluginHost",
     "WasmSandboxPolicy",
-    "validate_wasm_binary",
 )
 
 WASM_MAGIC_HEADER: bytes = b"\x00asm\x01\x00\x00\x00"
@@ -23,13 +21,7 @@ class WasmExecutionError(RuntimeError):
     """Raised when a Wasm guest exceeds fuel/memory limits or traps."""
 
 
-def validate_wasm_binary(wasm_bytes: bytes) -> bool:
-    """Return True if ``wasm_bytes`` begins with the canonical 8-byte WebAssembly binary header."""
-    return len(wasm_bytes) >= 8 and wasm_bytes[:8] == WASM_MAGIC_HEADER
-
-
-@dataclass(frozen=True, slots=True)
-class WasmSandboxPolicy:
+class WasmSandboxPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Capability-based WASI 0.2 sandbox policy for untrusted Wasm plugins and agent tools."""
 
     max_memory_bytes: int = 64 * 1024 * 1024
@@ -37,16 +29,15 @@ class WasmSandboxPolicy:
     epoch_timeout_ms: int = 500
     allow_network: bool = False
     allowed_preopen_dirs: tuple[str, ...] = ()
-    env_vars: dict[str, str] = field(default_factory=dict)
+    env_vars: dict[str, str] = msgspec.field(default_factory=dict)
 
 
-@dataclass(frozen=True, slots=True)
-class WasmModuleConfig:
+class WasmModuleConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for a registered WebAssembly guest module."""
 
     name: str
     wasm_source: Path | bytes
-    policy: WasmSandboxPolicy = field(default_factory=WasmSandboxPolicy)
+    policy: WasmSandboxPolicy = msgspec.field(default_factory=WasmSandboxPolicy)
 
 
 class WasmPluginHost:
@@ -62,6 +53,11 @@ class WasmPluginHost:
         """Return registered Wasm module configurations."""
         return dict(self._modules)
 
+    @staticmethod
+    def validate_binary(wasm_bytes: bytes) -> bool:
+        """Return True if ``wasm_bytes`` begins with the canonical 8-byte WebAssembly binary header."""
+        return len(wasm_bytes) >= 8 and wasm_bytes[:8] == WASM_MAGIC_HEADER
+
     def register_module(
         self,
         config: WasmModuleConfig,
@@ -70,7 +66,7 @@ class WasmPluginHost:
     ) -> WasmModuleConfig:
         """Validate and register a Wasm guest module."""
         raw = config.wasm_source.read_bytes() if isinstance(config.wasm_source, Path) else config.wasm_source
-        if not validate_wasm_binary(raw):
+        if not self.validate_binary(raw):
             msg = f"Invalid WebAssembly binary header for module {config.name!r}"
             raise ValueError(msg)
         self._modules[config.name] = config

@@ -4,8 +4,12 @@ from pathlib import Path
 
 import click
 
-from vertebra.build import OnefileBuilder, StandaloneBuilder, resolve_build_target
-from vertebra.builder._orchestrator import BuildOrchestrator
+from vertebra.build import (
+    BuildOrchestrator,
+    BuildTarget,
+    OnefileBuilder,
+    StandaloneBuilder,
+)
 from vertebra.cli.theme import console
 
 __all__ = ("build",)
@@ -72,7 +76,7 @@ def build(
     if standalone or onefile or target not in _LEGACY_TARGETS:
         platform_spec = None if target in _LEGACY_TARGETS else target
         try:
-            target_tuple = resolve_build_target(platform_spec, python_version=python_version)
+            target_tuple = BuildTarget.resolve(platform_spec, python_version=python_version)
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
 
@@ -106,7 +110,7 @@ def build(
             console.info("No frontend project detected — skipped frontend build")
 
     if target in {"backend", "all"}:
-        target_tuple = resolve_build_target(None, python_version=python_version)
+        target_tuple = BuildTarget.resolve(None, python_version=python_version)
         dist_dir = output or (resolved_project / "dist" / "backend")
         standalone_builder = StandaloneBuilder(
             project_dir=resolved_project,

@@ -1,11 +1,9 @@
-"""Unit tests for VertebraPlugin, anyio-compatible AsgiRunner, and BuildOrchestrator ecosystem export."""
+"""Unit tests for LitestarPlugin, anyio-compatible AsgiRunner, and BuildOrchestrator ecosystem export."""
 
 import asyncio
 import contextlib
-import dataclasses
 import importlib
 import inspect
-import json
 import os
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
@@ -16,16 +14,19 @@ import anyio
 import msgspec
 import pytest
 
-from vertebra.builder._orchestrator import BuildOrchestrator
+from vertebra.build import BuildOrchestrator
 from vertebra.extensions.litestar import (
-    VertebraConfig,
-    VertebraPlugin,
+    LitestarConfig,
+    LitestarPlugin,
     enter_litestar_server_lifespan,
 )
 from vertebra.server._asgi._runner import AsgiRunner, _drive_coro
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
-def _load_litestar_plugin_test_primitives() -> tuple[Any, Any, Any, Any, Any]:
+def _load_litestar_plugin_test_primitives() -> tuple[
+    Any, Callable[..., Callable[[Callable[..., Any]], Any]], Any, Any, Any
+]:
     """Load Litestar plugin test classes or fallback doubles when optional extra is absent."""
     try:
         litestar_mod = importlib.import_module("litestar")
@@ -41,8 +42,7 @@ def _load_litestar_plugin_test_primitives() -> tuple[Any, Any, Any, Any, Any]:
         )
     except ImportError:
 
-        @dataclasses.dataclass
-        class CompressionConfigStub:
+        class CompressionConfigStub(msgspec.Struct, gc=False):
             backend: str = "gzip"
             minimum_size: int = 500
             gzip_compress_level: int = 6
@@ -51,8 +51,7 @@ def _load_litestar_plugin_test_primitives() -> tuple[Any, Any, Any, Any, Any]:
             exclude: Sequence[str] | str | None = None
             exclude_opt_key: str | None = None
 
-        @dataclasses.dataclass
-        class CORSConfigStub:
+        class CORSConfigStub(msgspec.Struct, gc=False):
             allow_origins: Sequence[str] = ("*",)
             allow_methods: Sequence[str] = ("*",)
             allow_headers: Sequence[str] = ("*",)
@@ -63,6 +62,8 @@ def _load_litestar_plugin_test_primitives() -> tuple[Any, Any, Any, Any, Any]:
 
         class CLIPluginStub:
             """Fallback CLIPlugin base class."""
+
+            __slots__ = ()
 
         def get_stub(path: str, **_kwargs: Any) -> Callable[[Callable[..., Any]], Any]:
             def wrap(fn: Callable[..., Any]) -> Any:
@@ -78,6 +79,17 @@ def _load_litestar_plugin_test_primitives() -> tuple[Any, Any, Any, Any, Any]:
             return wrap
 
         class LitestarStub:
+            __slots__ = (
+                "before_send",
+                "compression_config",
+                "cors_config",
+                "openapi_config",
+                "openapi_schema",
+                "plugins",
+                "routes",
+                "state",
+            )
+
             def __init__(
                 self,
                 route_handlers: Sequence[Any] | None = None,
@@ -138,7 +150,7 @@ def _load_litestar_plugin_test_primitives() -> tuple[Any, Any, Any, Any, Any]:
                         out = handler.fn()
                         if inspect.isawaitable(out):
                             out = await out
-                        body = msgspec.json.encode(out)
+                        body = bytes(encode_json_bytes(out))
                         await send(
                             {
                                 "type": "http.response.start",
@@ -166,6 +178,8 @@ Litestar, get, CompressionConfig, CORSConfig, CLIPlugin = _load_litestar_plugin_
 class _LifecycleTrackerPlugin:
     """Test CLIPlugin recording entry and exit of server_lifespan."""
 
+    __slots__ = ("entered", "exited", "seen_app_env")
+
     def __init__(self) -> None:
         self.entered = False
         self.exited = False
@@ -182,11 +196,11 @@ class _LifecycleTrackerPlugin:
             self.exited = True
 
 
-def test_vertebra_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify VertebraPlugin intercepts compression/CORS before trie build and enters CLIPlugin.server_lifespan."""
+def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify LitestarPlugin intercepts compression/CORS before trie build and enters CLIPlugin.server_lifespan."""
     monkeypatch.delenv("LITESTAR_APP", raising=False)
     tracker = _LifecycleTrackerPlugin()
-    vtb_plugin = VertebraPlugin(VertebraConfig(enable_health_endpoint=True, health_path="/_vtb/healthz"))
+    vtb_plugin = LitestarPlugin(LitestarConfig(enable_health_endpoint=True, health_path="/_vtb/healthz"))
 
     @get("/ping", sync_to_thread=False)
     def ping() -> dict[str, str]:
@@ -213,8 +227,8 @@ def test_vertebra_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.Mon
         assert os.environ["LITESTAR_APP"] == "example.app:app"
     assert tracker.exited is True
 
-    disabled_plugin = VertebraPlugin(
-        VertebraConfig(
+    disabled_plugin = LitestarPlugin(
+        LitestarConfig(
             offload_compression=False,
             offload_cors=False,
             offload_static_files=False,
@@ -254,6 +268,8 @@ def test_asgi_runner_supports_anyio_task_group() -> None:
     app = Litestar(route_handlers=[concurrent_handler])
 
     class _SimpleRequest:
+        __slots__ = ("body", "handler_id", "headers", "method", "path", "query", "request_id")
+
         def __init__(self) -> None:
             self.method = "GET"
             self.path = "/concurrent"
@@ -283,14 +299,11 @@ def test_drive_coro_promotes_yielded_coroutine_to_asyncio_task() -> None:
             observed["has_task"] = asyncio.current_task() is not None
             _ = tg
 
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
+    async def _run() -> None:
         _drive_coro(yielded_then_anyio())
-        loop.run_until_complete(asyncio.sleep(0.02))
-    finally:
-        asyncio.set_event_loop(None)
-        loop.close()
+        await asyncio.sleep(0.02)
+
+    asyncio.run(_run())
 
     assert observed["has_task"] is True
 
@@ -299,10 +312,14 @@ def test_build_orchestrator_exports_litestar_vite_and_asyncapi(tmp_path: Path) -
     """Verify BuildOrchestrator exports litestar-vite and litestar-asyncapi schemas when present on the app."""
 
     class _StubVitePlugin:
+        __slots__ = ()
+
         def export_vite_metadata(self) -> dict[str, Any]:
             return {"ssr": False, "base": "/static/", "entry": "src/main.ts"}
 
     class _StubAsyncAPIPlugin:
+        __slots__ = ()
+
         def export_asyncapi_schema(self) -> dict[str, Any]:
             return {"asyncapi": "3.0.0", "info": {"title": "Events", "version": "1.0.0"}}
 
@@ -319,5 +336,5 @@ def test_build_orchestrator_exports_litestar_vite_and_asyncapi(tmp_path: Path) -
 
     assert "vite" in exported
     assert "asyncapi" in exported
-    assert json.loads(exported["vite"].read_text(encoding="utf-8"))["entry"] == "src/main.ts"
-    assert json.loads(exported["asyncapi"].read_text(encoding="utf-8"))["asyncapi"] == "3.0.0"
+    assert decode_json(exported["vite"].read_text(encoding="utf-8"))["entry"] == "src/main.ts"
+    assert decode_json(exported["asyncapi"].read_text(encoding="utf-8"))["asyncapi"] == "3.0.0"

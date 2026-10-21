@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from vertebra.extensions.litestar.store import (
     MemoryStore,
-    VertebraMemoryStore,
-    VertebraStore,
     swap_litestar_response_cache_store,
 )
 
-KeyValueStore = MemoryStore
+if TYPE_CHECKING:
+    from datetime import timedelta
 
 
 class NamespacedStore:
-    """Prefix-isolated view over a ``KeyValueStore`` / ``MemoryStore``."""
+    """Prefix-isolated view over a ``MemoryStore``."""
 
-    def __init__(self, store: KeyValueStore, namespace: str) -> None:
+    __slots__ = ("_namespace", "_store")
+
+    def __init__(self, store: MemoryStore, namespace: str) -> None:
         self._store = store
         self._namespace = namespace.strip(":")
 
@@ -40,10 +41,7 @@ class NamespacedStore:
 
 
 __all__ = (
-    "KeyValueStore",
     "MemoryStore",
     "NamespacedStore",
-    "VertebraMemoryStore",
-    "VertebraStore",
     "swap_litestar_response_cache_store",
 )

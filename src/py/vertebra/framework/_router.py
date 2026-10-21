@@ -22,14 +22,17 @@ __all__ = (
 )
 
 _SUPPORTED_PARAM_TYPES = {"str", "string", "int", "i64", "u64", "float", "f64", "bool", "uuid", "path"}
+_FNV_OFFSET = 0xCBF29CE484222325
+_FNV_PRIME = 0x100000001B3
+_MASK_64 = 0xFFFFFFFFFFFFFFFF
 
 
-class ParamSpec(msgspec.Struct, frozen=True, array_like=True):
+class ParamSpec(msgspec.Struct, frozen=True, gc=False, array_like=True):
     name: str
     param_type: str
 
 
-class RouteDef(msgspec.Struct, frozen=True, array_like=True):
+class RouteDef(msgspec.Struct, frozen=True, gc=False, array_like=True):
     method: str
     path: str
     handler: "Callable[..., Any]"
@@ -93,9 +96,26 @@ def handler_id(method: str, path: str) -> int:
     Returns:
         Stable uint64 integer.
     """
-    from vertebra.framework._app import _make_handler_id
-
     return _make_handler_id(method, _normalize_path(path))
+
+
+def _fnv1a_write(h: int, data: bytes) -> int:
+    """Update FNV-1a hash with each byte of ``data``."""
+    for b in data:
+        h ^= b
+        h = (h * _FNV_PRIME) & _MASK_64
+    return h
+
+
+def _make_handler_id(method: str, path: str) -> int:
+    """Derive a stable uint64 handler ID from method and path using FNV-1a."""
+    h = _FNV_OFFSET
+    h = _fnv1a_write(h, method.upper().encode())
+    h = _fnv1a_write(h, b"\xff")
+    h = _fnv1a_write(h, b" ")
+    h = _fnv1a_write(h, path.encode())
+    h = _fnv1a_write(h, b"\xff")
+    return h
 
 
 def extract_path_params(template: str, path: str) -> "dict[str, Any]":

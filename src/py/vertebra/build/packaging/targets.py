@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import platform
 import sys
-from dataclasses import dataclass
+
+import msgspec
 
 __all__ = (
     "KNOWN_TARGETS",
     "PBS_BASE_URL",
     "PBS_RELEASE_TAG",
-    "BuildTargetTuple",
-    "resolve_build_target",
+    "BuildTarget",
 )
 
 PBS_RELEASE_TAG: str = "20260301"
@@ -24,9 +24,23 @@ _PATCH_VERSIONS: dict[str, str] = {
     "3.14t": "3.14.0",
 }
 
+KNOWN_TARGETS: dict[str, tuple[str, str, str, str]] = {
+    "linux-x86_64": ("linux", "x86_64", "gnu", "x86_64-unknown-linux-gnu"),
+    "linux-x64": ("linux", "x86_64", "gnu", "x86_64-unknown-linux-gnu"),
+    "x86_64-unknown-linux-gnu": ("linux", "x86_64", "gnu", "x86_64-unknown-linux-gnu"),
+    "linux-aarch64": ("linux", "aarch64", "gnu", "aarch64-unknown-linux-gnu"),
+    "linux-arm64": ("linux", "aarch64", "gnu", "aarch64-unknown-linux-gnu"),
+    "aarch64-unknown-linux-gnu": ("linux", "aarch64", "gnu", "aarch64-unknown-linux-gnu"),
+    "darwin-x86_64": ("darwin", "x86_64", "apple", "x86_64-apple-darwin"),
+    "darwin-aarch64": ("darwin", "aarch64", "apple", "aarch64-apple-darwin"),
+    "darwin-arm64": ("darwin", "aarch64", "apple", "aarch64-apple-darwin"),
+    "macos-aarch64": ("darwin", "aarch64", "apple", "aarch64-apple-darwin"),
+    "aarch64-apple-darwin": ("darwin", "aarch64", "apple", "aarch64-apple-darwin"),
+    "windows-x86_64": ("windows", "x86_64", "msvc", "x86_64-pc-windows-msvc"),
+}
 
-@dataclass(frozen=True, slots=True)
-class BuildTargetTuple:
+
+class BuildTarget(msgspec.Struct, frozen=True, gc=False):
     """Resolved platform triple and python-build-standalone release coordinates."""
 
     os_name: str
@@ -58,7 +72,7 @@ class BuildTargetTuple:
         return "python.exe" if self.os_name == "windows" else "python3"
 
     @classmethod
-    def detect_host(cls, *, python_version: str = "3.12") -> BuildTargetTuple:
+    def detect_host(cls, *, python_version: str = "3.12") -> BuildTarget:
         """Detect the running host OS and CPU architecture."""
         if sys.platform.startswith("linux"):
             os_name = "linux"
@@ -97,40 +111,25 @@ class BuildTargetTuple:
             rust_triple=triple,
         )
 
-
-KNOWN_TARGETS: dict[str, tuple[str, str, str, str]] = {
-    "linux-x86_64": ("linux", "x86_64", "gnu", "x86_64-unknown-linux-gnu"),
-    "linux-x64": ("linux", "x86_64", "gnu", "x86_64-unknown-linux-gnu"),
-    "x86_64-unknown-linux-gnu": ("linux", "x86_64", "gnu", "x86_64-unknown-linux-gnu"),
-    "linux-aarch64": ("linux", "aarch64", "gnu", "aarch64-unknown-linux-gnu"),
-    "linux-arm64": ("linux", "aarch64", "gnu", "aarch64-unknown-linux-gnu"),
-    "aarch64-unknown-linux-gnu": ("linux", "aarch64", "gnu", "aarch64-unknown-linux-gnu"),
-    "darwin-x86_64": ("darwin", "x86_64", "apple", "x86_64-apple-darwin"),
-    "darwin-aarch64": ("darwin", "aarch64", "apple", "aarch64-apple-darwin"),
-    "darwin-arm64": ("darwin", "aarch64", "apple", "aarch64-apple-darwin"),
-    "macos-aarch64": ("darwin", "aarch64", "apple", "aarch64-apple-darwin"),
-    "aarch64-apple-darwin": ("darwin", "aarch64", "apple", "aarch64-apple-darwin"),
-    "windows-x86_64": ("windows", "x86_64", "msvc", "x86_64-pc-windows-msvc"),
-}
-
-
-def resolve_build_target(
-    target_spec: str | None = None,
-    *,
-    python_version: str = "3.12",
-) -> BuildTargetTuple:
-    """Resolve a target alias or Rust triple into a BuildTargetTuple."""
-    if not target_spec or target_spec in {"host", "native"}:
-        return BuildTargetTuple.detect_host(python_version=python_version)
-    entry = KNOWN_TARGETS.get(target_spec)
-    if entry is None:
-        msg = f"Unsupported build target specification: {target_spec}"
-        raise ValueError(msg)
-    os_name, arch, libc, triple = entry
-    return BuildTargetTuple(
-        os_name=os_name,
-        arch=arch,
-        libc=libc,
-        python_version=python_version,
-        rust_triple=triple,
-    )
+    @classmethod
+    def resolve(
+        cls,
+        target: str | None = None,
+        *,
+        python_version: str = "3.12",
+    ) -> BuildTarget:
+        """Resolve a target alias or Rust triple into a BuildTarget."""
+        if not target or target in {"host", "native"}:
+            return cls.detect_host(python_version=python_version)
+        entry = KNOWN_TARGETS.get(target)
+        if entry is None:
+            msg = f"Unsupported build target specification: {target}"
+            raise ValueError(msg)
+        os_name, arch, libc, triple = entry
+        return cls(
+            os_name=os_name,
+            arch=arch,
+            libc=libc,
+            python_version=python_version,
+            rust_triple=triple,
+        )

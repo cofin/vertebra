@@ -10,6 +10,7 @@ import uuid as _uuid_mod
 from decimal import Decimal
 from typing import Any, Final, Literal, cast, overload
 
+import msgspec
 from msgspec.json import Decoder, Encoder
 
 from vertebra import _typing
@@ -34,6 +35,8 @@ __all__ = (
     "decode_json",
     "encode_json",
     "encode_json_bytes",
+    "encode_json_into",
+    "format_json",
     "get_default_serializer",
 )
 
@@ -62,6 +65,10 @@ class JSONSerializer:
             return json.dumps(data, default=_normalize_supported_value).encode("utf-8")
         except ValueError:
             return json.dumps(data, default=_normalize_supported_value).encode("utf-8")
+
+    def encode_into(self, data: Any, buffer: bytearray, offset: int = 0) -> None:
+        """Encode Python data directly into a pre-allocated ``bytearray`` at ``offset`` with zero allocation."""
+        self._encoder.encode_into(data, buffer, offset)
 
     def decode(self, data: str | bytes, *, decode_bytes: bool = True) -> Any:
         """Decode JSON string or bytes into Python data."""
@@ -104,6 +111,11 @@ def encode_json_bytes(data: Any) -> bytes:
     return get_default_serializer().encode_bytes(data)
 
 
+def encode_json_into(data: Any, buffer: bytearray, offset: int = 0) -> None:
+    """Encode Python data directly into a pre-allocated ``bytearray`` at ``offset``."""
+    get_default_serializer().encode_into(data, buffer, offset)
+
+
 @overload
 def encode_json(data: Any, *, as_bytes: Literal[False] = ...) -> str: ...
 
@@ -125,6 +137,11 @@ def encode_json(data: Any, *, as_bytes: bool = False) -> str | bytes:
 def decode_json(data: str | bytes, *, decode_bytes: bool = True) -> Any:
     """Decode JSON input into Python data."""
     return get_default_serializer().decode(data, decode_bytes=decode_bytes)
+
+
+def format_json(value: Any, *, indent: int = 2) -> str:
+    """Format Python data into a pretty-printed JSON string."""
+    return msgspec.json.format(encode_json_bytes(value), indent=indent).decode("utf-8")
 
 
 _UNLOADED_UUID_TYPE: Final[object] = object()

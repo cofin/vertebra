@@ -9,8 +9,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from vertebra.builder._config import BuildConfig
-from vertebra.builder._orchestrator import BuildOrchestrator
+from vertebra.build import BuildConfig, BuildOrchestrator
 from vertebra.cli.build import build
 
 

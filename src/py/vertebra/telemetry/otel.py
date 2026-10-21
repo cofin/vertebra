@@ -1,0 +1,168 @@
+"""Zero-overhead W3C Trace Context, SpanExporter, and GenAI telemetry histograms."""
+
+import secrets
+import time
+from collections import deque
+from contextvars import ContextVar, Token
+from typing import Any
+
+import msgspec
+
+__all__ = (
+    "GenAiMetricSample",
+    "GenAiRecorder",
+    "SpanData",
+    "SpanExporter",
+    "TraceContext",
+)
+
+
+class TraceContext(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+    """W3C Trace Context ``traceparent`` representation (`00-<trace_id>-<span_id>-<flags>`)."""
+
+    trace_id: str
+    span_id: str
+    trace_flags: int = 1
+    version: int = 0
+
+    @classmethod
+    def parse(cls, header: str) -> "TraceContext | None":
+        """Parse a W3C ``traceparent`` header string."""
+        parts = header.strip().split("-")
+        if len(parts) < 4:
+            return None
+        ver_hex, tid_hex, sid_hex, flags_hex = parts[0], parts[1], parts[2], parts[3]
+        if len(ver_hex) != 2 or len(tid_hex) != 32 or len(sid_hex) != 16 or len(flags_hex) != 2:
+            return None
+        try:
+            ver = int(ver_hex, 16)
+            int(tid_hex, 16)
+            int(sid_hex, 16)
+            flags = int(flags_hex, 16)
+        except ValueError:
+            return None
+        if ver == 0xFF or tid_hex == "0" * 32 or sid_hex == "0" * 16:
+            return None
+        return cls(
+            trace_id=tid_hex.lower(),
+            span_id=sid_hex.lower(),
+            trace_flags=flags,
+            version=ver,
+        )
+
+    @classmethod
+    def generate(cls, *, sampled: bool = True) -> "TraceContext":
+        """Generate a new root ``TraceContext``."""
+        return cls(
+            trace_id=secrets.token_hex(16),
+            span_id=secrets.token_hex(8),
+            trace_flags=1 if sampled else 0,
+        )
+
+    @staticmethod
+    def current() -> "TraceContext | None":
+        """Return the active ``TraceContext`` from the current execution context."""
+        return _ACTIVE_TRACE_CTX.get()
+
+    @staticmethod
+    def set_current(ctx: "TraceContext | None") -> "Token[TraceContext | None]":
+        """Bind ``ctx`` as the active W3C trace context for the current execution context."""
+        return _ACTIVE_TRACE_CTX.set(ctx)
+
+    def new_child(self) -> "TraceContext":
+        """Create a child span context sharing ``trace_id``."""
+        return TraceContext(
+            trace_id=self.trace_id,
+            span_id=secrets.token_hex(8),
+            trace_flags=self.trace_flags,
+            version=self.version,
+        )
+
+    def format(self) -> str:
+        """Format as a canonical 55-character ``traceparent`` header."""
+        return f"{self.version:02x}-{self.trace_id}-{self.span_id}-{self.trace_flags:02x}"
+
+    @property
+    def is_sampled(self) -> bool:
+        """Return whether the sampled bit (`0x01`) is set."""
+        return bool(self.trace_flags & 0x01)
+
+
+_ACTIVE_TRACE_CTX: ContextVar[TraceContext | None] = ContextVar(
+    "_ACTIVE_TRACE_CTX",
+    default=None,
+)
+
+
+class SpanData(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+    """Lightweight span record exported through ``SpanExporter``."""
+
+    name: str
+    trace_id: str
+    span_id: str
+    parent_span_id: str | None = None
+    start_ns: int = 0
+    duration_ns: int = 0
+    status_code: int = 200
+    attributes: dict[str, Any] = msgspec.field(default_factory=dict)
+
+
+class SpanExporter:
+    """Bounded lock-free-style ring buffer for completed telemetry spans."""
+
+    def __init__(self, capacity: int = 4096) -> None:
+        self.capacity = max(1, capacity)
+        self._ring: deque[SpanData] = deque(maxlen=self.capacity)
+
+    def record_span(self, span: SpanData) -> None:
+        """Append a completed span to the bounded ring buffer."""
+        self._ring.append(span)
+
+    def drain_spans(self) -> list[SpanData]:
+        """Drain and return all buffered spans for batch OTLP export."""
+        spans = list(self._ring)
+        self._ring.clear()
+        return spans
+
+
+class GenAiMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+    """OpenTelemetry ``gen_ai.*`` semantic convention metric sample."""
+
+    model: str
+    operation: str
+    input_tokens: int
+    output_tokens: int
+    duration_seconds: float
+    timestamp: float = msgspec.field(default_factory=time.time)
+
+
+class GenAiRecorder:
+    """Records ``gen_ai.client.token.usage`` and ``gen_ai.client.operation.duration`` metrics."""
+
+    def __init__(self) -> None:
+        self._samples: list[GenAiMetricSample] = []
+
+    @property
+    def samples(self) -> tuple[GenAiMetricSample, ...]:
+        """Return recorded GenAI telemetry samples."""
+        return tuple(self._samples)
+
+    def record_generation(
+        self,
+        *,
+        model: str,
+        operation: str = "chat",
+        input_tokens: int,
+        output_tokens: int,
+        duration_seconds: float,
+    ) -> GenAiMetricSample:
+        """Record a model generation operation with token counts and latency."""
+        sample = GenAiMetricSample(
+            model=model,
+            operation=operation,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            duration_seconds=duration_seconds,
+        )
+        self._samples.append(sample)
+        return sample

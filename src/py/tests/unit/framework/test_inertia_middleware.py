@@ -1,7 +1,5 @@
 """Tests for the Inertia.js v3 protocol middleware."""
 
-import json
-
 import pytest
 
 from vertebra.framework._inertia import (
@@ -24,6 +22,7 @@ from vertebra.framework._inertia import (
     scroll,
 )
 from vertebra.framework._types import Headers, Request
+from vertebra.utils.serializers import decode_json
 
 
 def _make_request(
@@ -486,7 +485,7 @@ def test_json_response_inertia_request_returns_json() -> None:
     assert result.headers.get("Content-Type") == "application/json"
     assert result.headers.get("X-Inertia") == "true"
     assert result.headers.get("Vary") == "X-Inertia"
-    page = json.loads(result.body)
+    page = decode_json(result.body)
     assert page["component"] == "Pages/Home"
     assert page["props"]["title"] == "Home"
     assert page["version"] == "v1"

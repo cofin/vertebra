@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+import msgspec
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -29,17 +30,16 @@ class PermissionDeniedError(PermissionError):
     """Raised when a security guard rejects a principal or request."""
 
 
-@dataclass(frozen=True, slots=True)
-class Principal:
+class Principal(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Authenticated subject identity with roles, scopes, capabilities, and tenant context."""
 
     subject: str
     email: str | None = None
     tenant_id: str | None = None
-    roles: frozenset[str] = field(default_factory=frozenset)
-    scopes: frozenset[str] = field(default_factory=frozenset)
-    capabilities: frozenset[str] = field(default_factory=frozenset)
-    claims: dict[str, Any] = field(default_factory=dict)
+    roles: frozenset[str] = msgspec.field(default_factory=frozenset)
+    scopes: frozenset[str] = msgspec.field(default_factory=frozenset)
+    capabilities: frozenset[str] = msgspec.field(default_factory=frozenset)
+    claims: dict[str, Any] = msgspec.field(default_factory=dict)
 
     def has_role(self, role: str) -> bool:
         """Return True if the principal holds ``role``."""
@@ -54,13 +54,12 @@ class Principal:
         return capability in self.capabilities
 
 
-@dataclass(frozen=True, slots=True)
-class SecurityContext:
+class SecurityContext(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Request-scoped security context evaluated by route guards."""
 
     principal: Principal | None = None
     client_ip: str = "127.0.0.1"
-    headers: dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = msgspec.field(default_factory=dict)
 
     @property
     def is_authenticated(self) -> bool:
@@ -79,8 +78,7 @@ class SecurityContext:
         return self.principal
 
 
-@dataclass(frozen=True, slots=True)
-class CsrfConfig:
+class CsrfConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Cross-Site Request Forgery protection configuration."""
 
     secret: str
@@ -89,8 +87,7 @@ class CsrfConfig:
     safe_methods: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
 
-@dataclass(frozen=True, slots=True)
-class RateLimitConfig:
+class RateLimitConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Token-bucket rate limit configuration."""
 
     requests_per_window: int = 100
@@ -98,8 +95,7 @@ class RateLimitConfig:
     key_header: str = "x-forwarded-for"
 
 
-@dataclass(frozen=True, slots=True)
-class SecurityConfig:
+class SecurityConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Aggregate security configuration for Vertebra and Litestar applications."""
 
     jwt_issuer: str | None = None

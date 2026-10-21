@@ -15,7 +15,6 @@ if TYPE_CHECKING:
 
 __all__ = (
     "ChannelsBackend",
-    "VertebraChannelsBackend",
     "swap_litestar_channels_backend",
 )
 
@@ -171,5 +170,4 @@ def _load_channels_types() -> tuple[type[Any] | None, type[Any] | None]:
         return None, None
 
 
-VertebraChannelsBackend = ChannelsBackend
 _ChannelsPluginCls, _MemoryChannelsBackendCls = _load_channels_types()

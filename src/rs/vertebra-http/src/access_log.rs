@@ -160,3 +160,41 @@ impl AccessLogger {
             .unwrap_or_default()
     }
 }
+
+/// Format a Unix epoch second timestamp into Apache Common Log Format UTC (`[dd/Mon/yyyy:HH:MM:SS +0000]`)
+/// using Howard Hinnant's civil-from-days algorithm without external date crates.
+pub fn format_utc_clf_timestamp(epoch_secs: i64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = epoch_secs.div_euclid(86_400);
+    let secs_of_day = epoch_secs.rem_euclid(86_400);
+    let hour = secs_of_day / 3_600;
+    let minute = (secs_of_day % 3_600) / 60;
+    let second = secs_of_day % 60;
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = i64::from(yoe) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    let month_str = MONTHS[(m as usize).saturating_sub(1).min(11)];
+
+    format!("[{d:02}/{month_str}/{year:04}:{hour:02}:{minute:02}:{second:02} +0000]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utc_clf_timestamp_formatting() {
+        let formatted = format_utc_clf_timestamp(1_700_000_000);
+        assert_eq!(formatted, "[14/Nov/2023:22:13:20 +0000]");
+    }
+}

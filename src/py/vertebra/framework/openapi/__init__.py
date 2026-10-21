@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 
 import msgspec
@@ -14,8 +13,7 @@ __all__ = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class ScalarDocsConfig:
+class ScalarDocsConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Scalar interactive API documentation UI configuration."""
 
     path: str = "/docs"
@@ -23,8 +21,7 @@ class ScalarDocsConfig:
     dark_mode: bool = True
 
 
-@dataclass(frozen=True, slots=True)
-class OpenAPIConfig:
+class OpenAPIConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """OpenAPI 3.1.0 document configuration."""
 
     title: str = "Vertebra API"
@@ -32,11 +29,13 @@ class OpenAPIConfig:
     description: str = ""
     openapi_version: str = "3.1.0"
     schema_path: str = "/openapi.json"
-    scalar: ScalarDocsConfig = field(default_factory=ScalarDocsConfig)
+    scalar: ScalarDocsConfig = msgspec.field(default_factory=ScalarDocsConfig)
 
 
 class OpenAPISpecBuilder:
     """Constructs OpenAPI 3.1.0 documents from route metadata and ``msgspec.Struct`` types."""
+
+    __slots__ = ("_config", "_paths", "_schemas")
 
     def __init__(self, config: OpenAPIConfig | None = None) -> None:
         self._config = config or OpenAPIConfig()

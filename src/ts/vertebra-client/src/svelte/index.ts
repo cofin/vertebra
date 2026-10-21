@@ -4,16 +4,16 @@ import type { ClientConfig } from "../client/types";
 
 const VERTEBRA_KEY = Symbol("vertebra");
 
-export function setVertebraClient(config: ClientConfig): HttpClient {
+export function setClient(config: ClientConfig): HttpClient {
   const client = new HttpClient(config);
   setContext(VERTEBRA_KEY, client);
   return client;
 }
 
-export function getVertebraClient(): HttpClient {
+export function getClient(): HttpClient {
   const client = getContext<HttpClient>(VERTEBRA_KEY);
   if (!client) {
-    throw new Error("getVertebraClient must be used after setVertebraClient");
+    throw new Error("getClient must be used after setClient");
   }
   return client;
 }
@@ -27,7 +27,7 @@ export function createQuery<TInput = any, TOutput = any>(
   getInput: () => TInput,
   options: { enabled?: () => boolean } = {},
 ) {
-  const client = getVertebraClient();
+  const client = getClient();
 
   let data = $state<TOutput | null>(null);
   let loading = $state(false);
@@ -70,7 +70,7 @@ export function createQuery<TInput = any, TOutput = any>(
  * Svelte 5 mutation.
  */
 export function createMutation<TInput = any, TOutput = any>(method: string, path: string) {
-  const client = getVertebraClient();
+  const client = getClient();
 
   let loading = $state(false);
   let error = $state<Error | null>(null);

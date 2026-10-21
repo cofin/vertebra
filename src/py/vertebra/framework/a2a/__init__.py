@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import inspect
 import uuid
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
+
+import msgspec
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -21,8 +22,7 @@ __all__ = (
 type A2ATaskState = Literal["submitted", "working", "input-required", "completed", "failed", "canceled"]
 
 
-@dataclass(frozen=True, slots=True)
-class AgentSkill:
+class AgentSkill(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Skill advertised in an A2A ``AgentCard``."""
 
     id: str
@@ -32,8 +32,7 @@ class AgentSkill:
     examples: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class AgentCard:
+class AgentCard(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """A2A discovery document served at ``/.well-known/agent-card.json``."""
 
     name: str
@@ -70,18 +69,19 @@ class AgentCard:
         }
 
 
-@dataclass(slots=True)
-class A2ATask:
+class A2ATask(msgspec.Struct, gc=False, kw_only=True):
     """Stateful A2A task execution record."""
 
     id: str
     state: A2ATaskState = "submitted"
-    messages: list[dict[str, Any]] = field(default_factory=list)
-    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    messages: list[dict[str, Any]] = msgspec.field(default_factory=list)
+    artifacts: list[dict[str, Any]] = msgspec.field(default_factory=list)
 
 
 class A2AServer:
     """Agent-to-Agent (A2A) JSON-RPC 2.0 and discovery endpoint server."""
+
+    __slots__ = ("_card", "_handler", "_tasks")
 
     def __init__(
         self,

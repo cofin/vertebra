@@ -5,6 +5,7 @@ Two modes:
 - Sidecar: Managed Node/Bun subprocess using Inertia SSR protocol (fallback)
 """
 
+import importlib
 import logging
 import os
 import shutil
@@ -13,8 +14,9 @@ import socket
 import subprocess
 import time
 import urllib.request
-from dataclasses import dataclass
 from typing import Any, Protocol
+
+import msgspec
 
 from vertebra.utils.serializers._json import decode_json, encode_json
 
@@ -23,8 +25,7 @@ __all__ = ("NativeSsrClient", "SidecarSsrClient", "SsrClient", "SsrResult", "cre
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class SsrResult:
+class SsrResult(msgspec.Struct, frozen=True, gc=False):
     """Result of an SSR render call."""
 
     head: list[str]
@@ -42,10 +43,11 @@ class SsrClient(Protocol):
 class NativeSsrClient:
     """SSR via embedded QuickJS in the vertebra-bundler crate."""
 
-    def __init__(self, bundle_path: str, pool_size: int = 4) -> None:
-        from vertebra._bundler import Bundler
+    __slots__ = ("_bundler",)
 
-        self._bundler = Bundler()
+    def __init__(self, bundle_path: str, pool_size: int = 4) -> None:
+        bundler_mod = importlib.import_module("vertebra._bundler")
+        self._bundler = bundler_mod.Bundler()
         self._bundler.init_ssr(bundle_path, pool_size)
 
     def render(self, page: dict[str, Any]) -> SsrResult:
@@ -67,6 +69,8 @@ class NativeSsrClient:
 
 class SidecarSsrClient:
     """SSR via standard Inertia SSR server (Node/Bun subprocess)."""
+
+    __slots__ = ("_entry", "_port", "_process")
 
     _STARTUP_TIMEOUT: float = 30.0
     _SHUTDOWN_TIMEOUT: float = 5.0

@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass
 from enum import IntEnum
+
+import msgspec
 
 __all__ = (
     "AlloyDbAuthType",
     "AlloyDbClusterUri",
     "AlloyDbConfig",
     "AlloyDbDialer",
-    "encode_alloydb_metadata_exchange",
 )
 
 
@@ -22,8 +22,7 @@ class AlloyDbAuthType(IntEnum):
     IAM = 2
 
 
-@dataclass(frozen=True, slots=True)
-class AlloyDbClusterUri:
+class AlloyDbClusterUri(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Parsed AlloyDB instance URI (`projects/<p>/locations/<l>/clusters/<c>/instances/<i>`)."""
 
     project: str
@@ -57,40 +56,7 @@ class AlloyDbClusterUri:
         return f"{base}/v1beta/projects/{self.project}/locations/{self.location}/clusters/{self.cluster}:generateClientCertificate"
 
 
-def encode_alloydb_metadata_exchange(
-    user_agent: str,
-    auth_type: AlloyDbAuthType = AlloyDbAuthType.IAM,
-    oauth2_token: str = "",
-) -> bytes:
-    """Encode a 4-byte big-endian length-prefixed AlloyDB MetadataExchangeRequest protobuf frame."""
-    body = bytearray()
-    if user_agent:
-        ua_bytes = user_agent.encode("utf-8")
-        body.append(0x0A)
-        body.extend(_encode_varint(len(ua_bytes)))
-        body.extend(ua_bytes)
-    body.append(0x10)
-    body.extend(_encode_varint(int(auth_type)))
-    if oauth2_token:
-        tok_bytes = oauth2_token.encode("utf-8")
-        body.append(0x1A)
-        body.extend(_encode_varint(len(tok_bytes)))
-        body.extend(tok_bytes)
-    return struct.pack(">I", len(body)) + bytes(body)
-
-
-def _encode_varint(value: int) -> bytes:
-    out = bytearray()
-    val = value
-    while val >= 0x80:
-        out.append((val & 0x7F) | 0x80)
-        val >>= 7
-    out.append(val)
-    return bytes(out)
-
-
-@dataclass(frozen=True, slots=True)
-class AlloyDbConfig:
+class AlloyDbConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for zero-sidecar AlloyDB connections on port 5433."""
 
     instance_uri: str
@@ -123,4 +89,36 @@ class AlloyDbDialer:
     def build_handshake_frame(self, oauth2_token: str = "") -> bytes:
         """Build the initial MetadataExchangeRequest wire frame for port 5433."""
         mode = AlloyDbAuthType.IAM if self._config.enable_iam_auth else AlloyDbAuthType.BUILT_IN
-        return encode_alloydb_metadata_exchange(self._config.user_agent, mode, oauth2_token)
+        return self.encode_metadata_exchange(self._config.user_agent, mode, oauth2_token)
+
+    @staticmethod
+    def encode_metadata_exchange(
+        user_agent: str,
+        auth_type: AlloyDbAuthType = AlloyDbAuthType.IAM,
+        oauth2_token: str = "",
+    ) -> bytes:
+        """Encode a 4-byte big-endian length-prefixed AlloyDB MetadataExchangeRequest protobuf frame."""
+        body = bytearray()
+        if user_agent:
+            ua_bytes = user_agent.encode("utf-8")
+            body.append(0x0A)
+            body.extend(AlloyDbDialer._encode_varint(len(ua_bytes)))
+            body.extend(ua_bytes)
+        body.append(0x10)
+        body.extend(AlloyDbDialer._encode_varint(int(auth_type)))
+        if oauth2_token:
+            tok_bytes = oauth2_token.encode("utf-8")
+            body.append(0x1A)
+            body.extend(AlloyDbDialer._encode_varint(len(tok_bytes)))
+            body.extend(tok_bytes)
+        return struct.pack(">I", len(body)) + bytes(body)
+
+    @staticmethod
+    def _encode_varint(value: int) -> bytes:
+        out = bytearray()
+        val = value
+        while val >= 0x80:
+            out.append((val & 0x7F) | 0x80)
+            val >>= 7
+        out.append(val)
+        return bytes(out)

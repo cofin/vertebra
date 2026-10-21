@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Literal
+
+import msgspec
 
 __all__ = (
     "EmailAttachment",
@@ -16,8 +17,7 @@ __all__ = (
 type EmailBackendType = Literal["memory", "smtp", "resend", "sendgrid", "mailgun", "ses"]
 
 
-@dataclass(frozen=True, slots=True)
-class EmailAttachment:
+class EmailAttachment(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Binary or text email attachment."""
 
     filename: str
@@ -25,8 +25,7 @@ class EmailAttachment:
     content_type: str = "application/octet-stream"
 
 
-@dataclass(frozen=True, slots=True)
-class EmailMessage:
+class EmailMessage(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Outbound transactional email message."""
 
     subject: str
@@ -37,12 +36,11 @@ class EmailMessage:
     cc: tuple[str, ...] = ()
     bcc: tuple[str, ...] = ()
     reply_to: str | None = None
-    headers: dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = msgspec.field(default_factory=dict)
     attachments: tuple[EmailAttachment, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class EmailConfig:
+class EmailConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for ``EmailService``."""
 
     backend: EmailBackendType = "memory"
@@ -54,6 +52,8 @@ class EmailConfig:
 
 class EmailService:
     """Transactional email dispatcher with in-memory test outbox capture."""
+
+    __slots__ = ("_config", "_outbox")
 
     def __init__(self, config: EmailConfig | None = None) -> None:
         self._config = config or EmailConfig()

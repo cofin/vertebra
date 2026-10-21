@@ -1,13 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  HotReloadClient,
-  SseClient,
-  VertebraEventSource,
-  VertebraSseClient,
-  VertebraWebSocket,
-  VertebraWebSocketClient,
-  WebSocketClient,
-} from "../src/index";
+import { HotReloadClient, SseClient, WebSocketClient } from "../src/index";
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -110,7 +102,7 @@ class MockWebSocket {
   }
 }
 
-describe("VertebraSseClient & VertebraWebSocketClient", () => {
+describe("SseClient & WebSocketClient", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     MockEventSource.instances = [];
@@ -124,15 +116,13 @@ describe("VertebraSseClient & VertebraWebSocketClient", () => {
     vi.unstubAllGlobals();
   });
 
-  it("exports clean aliases SseClient and WebSocketClient alongside Vertebra* names", () => {
-    expect(SseClient).toBe(VertebraSseClient);
-    expect(VertebraEventSource).toBe(VertebraSseClient);
-    expect(WebSocketClient).toBe(VertebraWebSocketClient);
-    expect(VertebraWebSocket).toBe(VertebraWebSocketClient);
+  it("exports canonical SseClient and WebSocketClient classes", () => {
+    expect(typeof SseClient).toBe("function");
+    expect(typeof WebSocketClient).toBe("function");
   });
 
   it("tracks Last-Event-ID, dispatches typed handlers, and reconnects with lastEventId query param", () => {
-    const client = new VertebraSseClient("https://api.example.com/events", {
+    const client = new SseClient("https://api.example.com/events", {
       baseDelayMs: 100,
       maxDelayMs: 1000,
     });
@@ -164,7 +154,7 @@ describe("VertebraSseClient & VertebraWebSocketClient", () => {
   });
 
   it("negotiates subprotocols, tracks lastEventId, deduplicates 1024 idempotency keys, and sends heartbeats", () => {
-    const wsClient = new VertebraWebSocketClient("wss://api.example.com/ws", {
+    const wsClient = new WebSocketClient("wss://api.example.com/ws", {
       protocols: ["vtb.pubsub.v1", "json.v1"],
       heartbeatIntervalMs: 1000,
       heartbeatTimeoutMs: 2500,

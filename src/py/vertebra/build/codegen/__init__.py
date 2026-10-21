@@ -30,7 +30,6 @@ from vertebra.build.codegen.plugin import (
     CODEGEN_STATE_KEY,
     CodegenConfig,
     CodegenPlugin,
-    VertebraCodegenPlugin,
 )
 from vertebra.build.codegen.procedures import (
     Body,
@@ -64,10 +63,6 @@ from vertebra.build.codegen.protobuf import ProtobufGenerator
 from vertebra.build.codegen.valibot import ValibotGenerator
 from vertebra.build.codegen.zod import ZodGenerator
 
-CodegenOrchestrator = CodegenPlugin
-SchemaWatcher = CodegenWatcher
-generate_typescript = format_typescript
-
 __all__ = (
     "CODEGEN_STATE_KEY",
     "AnnotatedType",
@@ -75,7 +70,6 @@ __all__ = (
     "Body",
     "BodyMarker",
     "CodegenConfig",
-    "CodegenOrchestrator",
     "CodegenPlugin",
     "CodegenWatcher",
     "FromCookie",
@@ -108,7 +102,6 @@ __all__ = (
     "RawType",
     "RouteCollector",
     "RouteMetadata",
-    "SchemaWatcher",
     "SkipValidation",
     "SkipValidationMarker",
     "StreamType",
@@ -120,11 +113,9 @@ __all__ = (
     "UnionType",
     "UnknownType",
     "ValibotGenerator",
-    "VertebraCodegenPlugin",
     "ZodGenerator",
     "classify_file",
     "format_typescript",
-    "generate_typescript",
     "get_procedure_registry",
     "json_schema_to_type_node",
     "procedure",

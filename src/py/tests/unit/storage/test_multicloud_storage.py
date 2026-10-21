@@ -10,7 +10,6 @@ import pytest
 from vertebra.storage import (
     AsyncStore,
     AzureConfig,
-    FileObjectSessionTracker,
     GcsConfig,
     HttpConfig,
     LocalConfig,
@@ -18,11 +17,11 @@ from vertebra.storage import (
     ObjectStore,
     OciConfig,
     R2Config,
+    ReadableFile,
     S3Config,
+    SigningConfig,
     SyncStore,
-    VertebraReadableFile,
-    chunk_r2_uniform_parts,
-    sign_azure_sas,
+    UploadTracker,
 )
 
 
@@ -108,7 +107,7 @@ async def test_sync_store_and_async_store_facades(tmp_path: Path) -> None:
 def test_azure_sas_and_r2_uniform_chunking() -> None:
     """Azure SAS URL signing and Cloudflare R2 uniform multipart chunking are deterministic."""
     key = base64.b64encode(b"0123456789abcdef0123456789abcdef").decode("ascii")
-    signed_url = sign_azure_sas(
+    signed_url = SigningConfig.sign_azure_sas(
         "devstoreaccount1",
         key,
         "mycontainer",
@@ -124,17 +123,17 @@ def test_azure_sas_and_r2_uniform_chunking() -> None:
     assert "sig=" in signed_url
 
     payload = b"x" * (12 * 1024 * 1024)
-    chunks = chunk_r2_uniform_parts(payload, part_size=5 * 1024 * 1024)
+    chunks = R2Config.chunk_uniform_parts(payload, part_size=5 * 1024 * 1024)
     assert [len(c) for c in chunks] == [5 * 1024 * 1024, 5 * 1024 * 1024, 2 * 1024 * 1024]
 
 
 def test_vertebra_readable_file_seek_and_slice() -> None:
-    """VertebraReadableFile supports random-access range reads for Parquet/Arrow footers."""
+    """ReadableFile supports random-access range reads for Parquet/Arrow footers."""
     store = ObjectStore.from_memory("arrow-test")
     data = b"PAR1-column-chunk-0123456789-footer-PAR1"
     store.put("table.parquet", data)
 
-    with VertebraReadableFile(store, "table.parquet") as f:
+    with ReadableFile(store, "table.parquet") as f:
         assert f.size == len(data)
         assert f.read(4) == b"PAR1"
         assert f.tell() == 4
@@ -145,10 +144,10 @@ def test_vertebra_readable_file_seek_and_slice() -> None:
 
 @pytest.mark.anyio
 async def test_file_object_session_tracker_commit_and_rollback() -> None:
-    """FileObjectSessionTracker flushes staged uploads on commit and deletes them on rollback."""
+    """UploadTracker flushes staged uploads on commit and deletes them on rollback."""
     store = ObjectStore.from_memory("staging-test")
 
-    async with FileObjectSessionTracker(store) as tracker:
+    async with UploadTracker(store) as tracker:
         tracker.stage_upload("users/avatar.png", b"png-bytes")
         assert not store.exists("users/avatar.png")
         await tracker.before_flush_async()
@@ -159,7 +158,7 @@ async def test_file_object_session_tracker_commit_and_rollback() -> None:
     assert store.get("users/avatar.png") == b"png-bytes"
 
     with pytest.raises(RuntimeError, match="db transaction aborted"):
-        async with FileObjectSessionTracker(store) as failing_tracker:
+        async with UploadTracker(store) as failing_tracker:
             failing_tracker.stage_upload("users/orphan.png", b"orphan-bytes")
             await failing_tracker.before_flush_async()
             assert store.exists("users/orphan.png")

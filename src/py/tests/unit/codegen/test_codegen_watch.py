@@ -2,7 +2,7 @@
 
 import urllib.request
 
-from vertebra.builder._codegen._watch import HmrNotifier
+from vertebra.build.codegen._watch import HmrNotifier
 
 
 class _DummyResponse:

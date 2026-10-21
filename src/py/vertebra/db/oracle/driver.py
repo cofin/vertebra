@@ -6,32 +6,26 @@ import array
 import importlib
 from typing import TYPE_CHECKING, Any
 
-import msgspec
-
 from vertebra.db.oracle.config import OracleConfig
+from vertebra.utils.serializers import encode_json
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from vertebra.db.oracle.wallet import ExtractedWallet
+    from vertebra.db.oracle.wallet import OracleWallet
 
 __all__ = (
     "AsyncOracleDriver",
     "OracleDataFrame",
     "OraclePoolRegistry",
     "SyncOracleDriver",
-    "encode_oracle_vector",
 )
-
-
-def encode_oracle_vector(values: Sequence[float], *, dtype: str = "float32") -> array.array[float]:
-    """Encode a float sequence into an ``array.array`` suitable for Oracle 26ai ``DB_TYPE_VECTOR`` binds."""
-    typecode = "d" if dtype == "float64" else "f"
-    return array.array(typecode, values)
 
 
 class OracleDataFrame:
     """Tabular result wrapper exposing the Arrow C Data Interface PyCapsule protocol."""
+
+    __slots__ = ("_columns", "_rows")
 
     def __init__(self, columns: tuple[str, ...], rows: list[tuple[Any, ...]]) -> None:
         self._columns = columns
@@ -75,9 +69,11 @@ class OracleDataFrame:
 class SyncOracleDriver:
     """Synchronous Oracle Database driver with OSON, VECTOR, and zero-Instant-Client wallet support."""
 
+    __slots__ = ("_config", "_wallet")
+
     def __init__(self, config: OracleConfig) -> None:
         self._config = config
-        self._wallet: ExtractedWallet | None = config.resolve_wallet()
+        self._wallet: OracleWallet | None = config.resolve_wallet()
 
     @property
     def config(self) -> OracleConfig:
@@ -85,9 +81,20 @@ class SyncOracleDriver:
         return self._config
 
     @property
-    def wallet(self) -> ExtractedWallet | None:
+    def wallet(self) -> OracleWallet | None:
         """Return the extracted wallet metadata if configured."""
         return self._wallet
+
+    @staticmethod
+    def encode_vector(
+        values: Sequence[float | int],
+        *,
+        type_code: str = "f",
+        dtype: str | None = None,
+    ) -> array.array[float]:
+        """Encode a float sequence into an ``array.array`` suitable for Oracle 26ai ``DB_TYPE_VECTOR`` binds."""
+        resolved_code = ("d" if dtype == "float64" else "f") if dtype is not None else type_code
+        return array.array(resolved_code, values)
 
     def prepare_bind_params(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Prepare bind parameters with automatic VECTOR ``array.array`` and JSON serialization."""
@@ -96,9 +103,9 @@ class SyncOracleDriver:
         prepared: dict[str, Any] = {}
         for key, value in params.items():
             if isinstance(value, list) and value and all(isinstance(item, (int, float)) for item in value):
-                prepared[key] = encode_oracle_vector(value)
+                prepared[key] = self.encode_vector(value)
             elif isinstance(value, dict):
-                prepared[key] = msgspec.json.encode(value).decode("utf-8")
+                prepared[key] = encode_json(value)
             else:
                 prepared[key] = value
         return prepared
@@ -111,6 +118,8 @@ class SyncOracleDriver:
 class AsyncOracleDriver:
     """Asynchronous Oracle Database driver with OSON, VECTOR, and Arrow PyCapsule streaming."""
 
+    __slots__ = ("_sync",)
+
     def __init__(self, config: OracleConfig) -> None:
         self._sync = SyncOracleDriver(config)
 
@@ -120,7 +129,7 @@ class AsyncOracleDriver:
         return self._sync.config
 
     @property
-    def wallet(self) -> ExtractedWallet | None:
+    def wallet(self) -> OracleWallet | None:
         """Return the extracted wallet metadata if configured."""
         return self._sync.wallet
 
@@ -131,6 +140,8 @@ class AsyncOracleDriver:
 
 class OraclePoolRegistry:
     """Multi-pool registry isolating OLTP, analytics, and vector connection pools without state mutation."""
+
+    __slots__ = ("_base_config", "_pools")
 
     def __init__(self, base_config: OracleConfig) -> None:
         self._base_config = base_config

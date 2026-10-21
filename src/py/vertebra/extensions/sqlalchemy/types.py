@@ -6,7 +6,7 @@ import array
 import struct
 from typing import TYPE_CHECKING, Any, Literal
 
-import msgspec
+from vertebra.utils.serializers import decode_json, encode_json
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -23,6 +23,8 @@ type VectorDistanceMetric = Literal["cosine", "l2", "inner_product"]
 
 class VectorDistanceExpr:
     """Dialect-aware SQL expression descriptor for vector similarity operations."""
+
+    __slots__ = ("_column_name", "_metric", "_param_name", "_query_vector")
 
     def __init__(
         self,
@@ -88,6 +90,7 @@ class Vector:
     """Cross-database dense vector column descriptor supporting PostgreSQL, Oracle 26ai, MySQL 9.0, and SQLite."""
 
     cache_ok: bool = True
+    __slots__ = ("column_name", "dim", "storage_format")
 
     def __init__(
         self,
@@ -168,6 +171,7 @@ class BinaryJson:
     """Cross-database binary JSON column descriptor (`JSONB` on PG and SQLite 3.45+, OSON `JSON` on Oracle 26ai)."""
 
     cache_ok: bool = True
+    __slots__ = ()
 
     def get_col_spec(self, dialect_name: str = "postgresql") -> str:
         """Render the DDL column type specification for the target dialect."""
@@ -177,16 +181,16 @@ class BinaryJson:
         return "JSON"
 
     def process_bind_param(self, value: Any, dialect_name: str = "postgresql") -> bytes | str | None:
-        """Encode a Python value into UTF-8 JSON via ``msgspec``."""
+        """Encode a Python value into UTF-8 JSON via ``vertebra.utils.serializers``."""
         _ = dialect_name
         if value is None:
             return None
         if isinstance(value, (bytes, str)):
             return value
-        return msgspec.json.encode(value).decode("utf-8")
+        return encode_json(value)
 
     def process_result_value(self, value: Any, dialect_name: str = "postgresql") -> Any:
-        """Decode a JSON/JSONB/OSON payload via ``msgspec``."""
+        """Decode a JSON/JSONB/OSON payload via ``vertebra.utils.serializers``."""
         _ = dialect_name
         if value is None or isinstance(value, (dict, list)):
             return value
@@ -194,12 +198,12 @@ class BinaryJson:
             raw = bytes(value)
             if raw.startswith(b"\x01"):
                 raw = raw[1:]
-            return msgspec.json.decode(raw)
+            return decode_json(raw)
         if isinstance(value, (bytes, bytearray)):
             raw_b = bytes(value)
             if raw_b.startswith(b"\x01"):
                 raw_b = raw_b[1:]
-            return msgspec.json.decode(raw_b)
+            return decode_json(raw_b)
         if isinstance(value, str):
-            return msgspec.json.decode(value.encode("utf-8"))
+            return decode_json(value)
         return value

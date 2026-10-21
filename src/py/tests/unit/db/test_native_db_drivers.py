@@ -20,21 +20,18 @@ from vertebra.db import (
     CloudSqlDialer,
     CloudSqlInstanceUri,
     DatabaseRegistry,
-    OracleAdbFreeContainer,
     OracleConfig,
     OracleConnectDescriptor,
+    OracleContainer,
     OracleDataFrame,
     OraclePoolRegistry,
-    OrdsApexContainer,
+    OracleWallet,
+    OrdsContainer,
     PostgresConfig,
     SqliteConfig,
+    SyncOracleDriver,
+    SyncPostgresDriver,
     ValkeyConfig,
-    compute_worker_pool_budget,
-    encode_alloydb_metadata_exchange,
-    encode_oracle_vector,
-    extract_wallet_archive,
-    parse_database_url,
-    strip_pg_jsonb_header,
 )
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 
@@ -63,7 +60,7 @@ def test_cloudsql_and_alloydb_dialers() -> None:
     assert alloy_uri.project == "p1"
     assert alloy_uri.instance == "i1"
 
-    frame = encode_alloydb_metadata_exchange("vertebra-db/0.1", AlloyDbAuthType.IAM, "oauth-tok")
+    frame = AlloyDbDialer.encode_metadata_exchange("vertebra-db/0.1", AlloyDbAuthType.IAM, "oauth-tok")
     assert len(frame) > 4
     assert int.from_bytes(frame[:4], "big") == len(frame) - 4
 
@@ -82,8 +79,13 @@ def test_postgres_pooler_modes_and_jsonb_strip() -> None:
     )
     assert pg_cfg.effective_statement_cache_size == 0
     assert pg_cfg.effective_direct_dsn == "postgresql://app:secret@pg-primary:5432/prod"
-    assert bytes(strip_pg_jsonb_header(b'\x01{"ok":true}')) == b'{"ok":true}'
-    assert compute_worker_pool_budget(100, replica_count=3, workers_per_replica=3, reserved_admin_connections=10) == 10
+    assert bytes(SyncPostgresDriver.strip_jsonb_header(b'\x01{"ok":true}')) == b'{"ok":true}'
+    assert (
+        PostgresConfig.compute_worker_pool_budget(
+            100, replica_count=3, workers_per_replica=3, reserved_admin_connections=10
+        )
+        == 10
+    )
 
 
 @pytest.mark.anyio
@@ -144,7 +146,7 @@ def test_oracle_wallet_extraction_descriptor_and_multi_pool_isolation(tmp_path: 
         zf.writestr("ewallet.pem", "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
 
     prev_tns = os.environ.get("TNS_ADMIN")
-    extracted = extract_wallet_archive(wallet_zip, cache_root=tmp_path / "extracted")
+    extracted = OracleWallet.extract(wallet_zip, target_dir=tmp_path / "extracted")
     assert os.environ.get("TNS_ADMIN") == prev_tns
     mode = stat.S_IMODE(extracted.wallet_location.stat().st_mode)
     assert mode == 0o700
@@ -171,7 +173,7 @@ def test_oracle_wallet_extraction_descriptor_and_multi_pool_isolation(tmp_path: 
     assert oltp_pool.config.driver_features != vector_pool.config.driver_features
     assert base_cfg.driver_features == {"enable_numpy": True}
 
-    vec = encode_oracle_vector([0.1, 0.2, 0.3])
+    vec = SyncOracleDriver.encode_vector([0.1, 0.2, 0.3])
     assert vec.typecode == "f"
     assert len(vec) == 3
 
@@ -179,9 +181,9 @@ def test_oracle_wallet_extraction_descriptor_and_multi_pool_isolation(tmp_path: 
     assert len(df) == 2
     assert df.to_dicts()[0]["title"] == "Espresso"
 
-    adb_container = OracleAdbFreeContainer()
+    adb_container = OracleContainer()
     assert "adb-free:latest-23ai" in adb_container.image
-    ords_container = OrdsApexContainer()
+    ords_container = OrdsContainer()
     assert ords_container.enable_apex_lang is True
 
 
@@ -191,8 +193,8 @@ def test_database_registry_url_schemes() -> None:
     assert isinstance(registry.register("pg", "postgresql+vtb://u:p@localhost:5432/db"), PostgresConfig)
     assert isinstance(registry.register("valkey", "valkeys://localhost:6379/0"), ValkeyConfig)
     assert isinstance(registry.register("oracle", "oracle+vertebra://admin:pw@localhost:1521/FREEPDB1"), OracleConfig)
-    assert isinstance(parse_database_url("cloudsql://proj:us-central1:inst"), CloudSqlConfig)
+    assert isinstance(DatabaseRegistry.parse_url("cloudsql://proj:us-central1:inst"), CloudSqlConfig)
     assert isinstance(
-        parse_database_url("alloydb://projects/p/locations/r/clusters/c/instances/i"),
+        DatabaseRegistry.parse_url("alloydb://projects/p/locations/r/clusters/c/instances/i"),
         AlloyDbConfig,
     )

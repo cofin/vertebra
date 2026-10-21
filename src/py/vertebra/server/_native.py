@@ -16,17 +16,16 @@ import signal
 import threading
 from collections.abc import Callable, Coroutine, Iterable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+import msgspec
 
 from vertebra.server._rsgi._adapter import RsgiAdapter, is_rsgi_app
 from vertebra.server._runtime_tuning import (
     AsgiEventLoopPool,
     GilAuditReport,
-    audit_gil_state,
     configure_worker_affinity,
     is_free_threaded,
-    snapshot_native_extensions,
 )
 from vertebra.server._wsgi._adapter import WsgiAdapter
 from vertebra.utils.serializers._json import encode_json_bytes
@@ -39,10 +38,8 @@ __all__ = (
     "AsyncRuntime",
     "BatchDispatchPlan",
     "GilAuditReport",
-    "audit_gil_state",
     "is_free_threaded",
     "run_worker",
-    "snapshot_native_extensions",
 )
 
 _submit_response: Any = None
@@ -170,14 +167,13 @@ class AsyncRuntime:
         return futures
 
 
-@dataclass(slots=True)
-class BatchDispatchPlan:
+class BatchDispatchPlan(msgspec.Struct, gc=False):
     """Result of partitioning a batch into dispatch groups."""
 
-    sync_native: list[tuple[int, Any, Any]] = field(default_factory=list)
-    async_native: list[tuple[int, Any, Any]] = field(default_factory=list)
-    mounts: dict[str, list[tuple[int, Any]]] = field(default_factory=dict)
-    unmatched: list[tuple[int, Any]] = field(default_factory=list)
+    sync_native: list[tuple[int, Any, Any]] = msgspec.field(default_factory=list)
+    async_native: list[tuple[int, Any, Any]] = msgspec.field(default_factory=list)
+    mounts: dict[str, list[tuple[int, Any]]] = msgspec.field(default_factory=dict)
+    unmatched: list[tuple[int, Any]] = msgspec.field(default_factory=list)
 
 
 def run_worker(
@@ -237,7 +233,7 @@ def run_worker(
     enable_affinity = os.environ.get("VERTEBRA_CPU_AFFINITY", "0") in {"1", "true", "TRUE"}
     worker_id = int(os.environ.get("VERTEBRA_WORKER_ID", "0"))
     configure_worker_affinity(worker_id, enable_pinning=enable_affinity)
-    audit_gil_state()
+    GilAuditReport.audit()
 
     resolved_mounts = _build_mount_adapters(mounts or [])
     use_pool = pool_size > 1 or is_free_threaded()
@@ -322,7 +318,7 @@ def _build_mount_adapters(
     return resolved
 
 
-class _ShardedAsgiMountRunner:
+class _AsgiMountRunner:
     """Round-robin per-loop shard ASGI runner wrapper for AsgiEventLoopPool."""
 
     __slots__ = ("_idx", "_runners")
@@ -375,7 +371,7 @@ def _instantiate_mount_runners(
     for prefix, app, protocol in resolved_mounts:
         if protocol == "asgi":
             if len(shard_loops) > 1:
-                runner: Any = _ShardedAsgiMountRunner(app, mount_prefix=prefix, loops=shard_loops)
+                runner: Any = _AsgiMountRunner(app, mount_prefix=prefix, loops=shard_loops)
             else:
                 runner = AsgiRunner(app, mount_prefix=prefix, loop=primary_loop)
             active_mounts.append((prefix, runner, "asgi"))
@@ -693,7 +689,7 @@ async def _shm_worker_loop(
         mounts
         if all(
             protocol in {"asgi", "rsgi", "wsgi"}
-            and type(adapter).__name__ in {"AsgiRunner", "_ShardedAsgiMountRunner", "RsgiAdapter", "WsgiAdapter"}
+            and type(adapter).__name__ in {"AsgiRunner", "_AsgiMountRunner", "RsgiAdapter", "WsgiAdapter"}
             for _p, adapter, protocol in mounts
         )
         else _instantiate_mount_runners(mounts, dispatch_target)

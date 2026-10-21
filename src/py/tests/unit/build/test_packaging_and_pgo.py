@@ -24,27 +24,26 @@ from tools.pgo.rust_pgo import (
 from vertebra.build import (
     ONEFILE_MAGIC,
     ONEFILE_TRAILER_SIZE,
-    BuildTargetTuple,
+    BuildTarget,
     OnefileBuilder,
     StandaloneBuilder,
-    resolve_build_target,
 )
 from vertebra.cli import cli
 from vertebra.cli.build import build as build_command
 
 
-def test_build_target_tuple_resolution_and_pbs_urls() -> None:
+def test_build_target_resolution_and_pbs_urls() -> None:
     """Verify host detection, cross-target lookup, and 3.12 / 3.14t python-build-standalone URLs."""
-    host = BuildTargetTuple.detect_host()
+    host = BuildTarget.detect_host()
     assert host.os_name in {"linux", "darwin", "windows"}
     assert host.rust_triple
 
-    linux_ft = resolve_build_target("linux-x86_64", python_version="3.14t")
+    linux_ft = BuildTarget.resolve("linux-x86_64", python_version="3.14t")
     assert linux_ft.rust_triple == "x86_64-unknown-linux-gnu"
     assert linux_ft.is_freethreaded is True
     assert "freethreaded" in linux_ft.pbs_archive_name
 
-    mac_arm = resolve_build_target("darwin-aarch64", python_version="3.12")
+    mac_arm = BuildTarget.resolve("darwin-aarch64", python_version="3.12")
     assert mac_arm.rust_triple == "aarch64-apple-darwin"
     assert mac_arm.is_freethreaded is False
     assert mac_arm.pbs_url.startswith("https://github.com/astral-sh/python-build-standalone/releases/download/")
@@ -59,7 +58,7 @@ def test_standalone_and_onefile_builder_roundtrip(tmp_path: Path) -> None:
     (pkg_dir / "__init__.py").write_text('"""Sample package."""\nVALUE = 42\n')
     (pkg_dir / "main.py").write_text('"""Entrypoint."""\ndef run() -> int:\n    return 42\n')
 
-    target = resolve_build_target("linux-x86_64", python_version="3.12")
+    target = BuildTarget.resolve("linux-x86_64", python_version="3.12")
     dist_dir = tmp_path / "dist" / "standalone"
     standalone = StandaloneBuilder(project_dir=project_dir, target=target, entrypoint="app.main:run")
     staged = standalone.build(dist_dir)

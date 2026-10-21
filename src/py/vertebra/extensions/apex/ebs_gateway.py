@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
 from typing import Any
+
+import msgspec
 
 from vertebra.extensions.apex.session import (
     ApexSessionContext,
@@ -15,16 +16,15 @@ from vertebra.framework.a2a import AgentCard, AgentSkill
 from vertebra.framework.mcp import McpServer, McpTool
 
 __all__ = (
+    "ConfirmationGate",
+    "EbsGateway",
     "EbsPolicyDecision",
     "EbsPolicyEvaluator",
     "EbsResponsibilityMapping",
-    "EbsToolConfirmationGate",
-    "GeminiEnterpriseEbsGateway",
 )
 
 
-@dataclass(frozen=True, slots=True)
-class EbsResponsibilityMapping:
+class EbsResponsibilityMapping(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Maps an authenticated federated identity to an Oracle EBS responsibility and MOAC org."""
 
     principal_email: str
@@ -36,8 +36,7 @@ class EbsResponsibilityMapping:
     allowed_packages: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class EbsPolicyDecision:
+class EbsPolicyDecision(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Outcome of evaluating an EBS agent tool invocation against responsibility policies."""
 
     allowed: bool
@@ -47,6 +46,8 @@ class EbsPolicyDecision:
 
 class EbsPolicyEvaluator:
     """Evaluates whether an EBS responsibility permits executing a package or ISG service."""
+
+    __slots__ = ("confirmation_threshold",)
 
     def __init__(self, confirmation_threshold: float = 10000.0) -> None:
         self.confirmation_threshold = confirmation_threshold
@@ -83,11 +84,13 @@ class EbsPolicyEvaluator:
         )
 
 
-@dataclass(slots=True)
-class EbsToolConfirmationGate:
+class ConfirmationGate:
     """Human-in-the-loop confirmation gate for mutating Oracle EBS agent tool invocations."""
 
-    _approved_tokens: set[str] = field(default_factory=set)
+    __slots__ = ("_approved_tokens",)
+
+    def __init__(self, approved_tokens: set[str] | None = None) -> None:
+        self._approved_tokens: set[str] = approved_tokens if approved_tokens is not None else set()
 
     def approve(self, confirmation_token: str) -> None:
         """Record human-in-the-loop approval for a specific confirmation token."""
@@ -100,8 +103,18 @@ class EbsToolConfirmationGate:
         return confirmation_token in self._approved_tokens
 
 
-class GeminiEnterpriseEbsGateway:
+class EbsGateway:
     """Bridges Gemini Enterprise A2A/MCP agent calls to Oracle EBS ISG REST and PL/SQL APIs."""
+
+    __slots__ = (
+        "_isg_transport",
+        "_mcp_server",
+        "_skills",
+        "agent_name",
+        "confirmation_gate",
+        "endpoint_url",
+        "policy_evaluator",
+    )
 
     def __init__(
         self,
@@ -109,13 +122,13 @@ class GeminiEnterpriseEbsGateway:
         endpoint_url: str,
         *,
         policy_evaluator: EbsPolicyEvaluator | None = None,
-        confirmation_gate: EbsToolConfirmationGate | None = None,
+        confirmation_gate: ConfirmationGate | None = None,
         isg_transport: Callable[[str, dict[str, Any], dict[str, str]], Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self.agent_name = agent_name
         self.endpoint_url = endpoint_url
         self.policy_evaluator = policy_evaluator or EbsPolicyEvaluator()
-        self.confirmation_gate = confirmation_gate or EbsToolConfirmationGate()
+        self.confirmation_gate = confirmation_gate or ConfirmationGate()
         self._isg_transport = isg_transport
         self._mcp_server = McpServer(name=agent_name)
         self._skills: list[AgentSkill] = []
@@ -183,8 +196,8 @@ class GeminiEnterpriseEbsGateway:
             ebs_org_id=mapping.ebs_org_id,
             page_items=context.page_items,
         )
-        bind_Clauses = ", ".join(f"{k} => :{k}" for k in binds)
-        plsql = f"BEGIN {package_procedure}({bind_Clauses}); END;"
+        bind_clauses = ", ".join(f"{k} => :{k}" for k in binds)
+        plsql = f"BEGIN {package_procedure}({bind_clauses}); END;"
         async with OracleSessionManager.acquire_scoped(
             pool,
             enriched_context,

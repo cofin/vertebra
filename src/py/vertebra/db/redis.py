@@ -3,46 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
 from typing import Literal
+
+import msgspec
 
 __all__ = (
     "AsyncRedisDriver",
     "RedisConfig",
     "SyncRedisDriver",
-    "encode_hello3_handshake",
-    "encode_resp_command",
 )
 
 
-def encode_resp_command(args: Sequence[bytes | str]) -> bytes:
-    """Encode a Redis or Valkey RESP3 bulk-string array command."""
-    chunks = [f"*{len(args)}\r\n".encode("ascii")]
-    for arg in args:
-        raw = arg.encode("utf-8") if isinstance(arg, str) else bytes(arg)
-        chunks.append(f"${len(raw)}\r\n".encode("ascii"))
-        chunks.append(raw)
-        chunks.append(b"\r\n")
-    return b"".join(chunks)
-
-
-def encode_hello3_handshake(
-    *,
-    username: str | None = None,
-    password: str | None = None,
-    client_name: str | None = "vertebra",
-) -> bytes:
-    """Encode a RESP3 HELLO 3 handshake command with optional AUTH and SETNAME."""
-    parts: list[bytes | str] = ["HELLO", "3"]
-    if password is not None:
-        parts.extend(["AUTH", username or "default", password])
-    if client_name:
-        parts.extend(["SETNAME", client_name])
-    return encode_resp_command(parts)
-
-
-@dataclass(frozen=True, slots=True)
-class RedisConfig:
+class RedisConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for Redis 7.2+ / 8.0+ standalone, Sentinel, and Cluster connections."""
 
     url: str = "redis://localhost:6379/0"
@@ -52,7 +24,7 @@ class RedisConfig:
     protocol: Literal[2, 3] = 3
     topology: Literal["standalone", "sentinel", "cluster"] = "standalone"
     sentinel_service_name: str | None = None
-    cluster_nodes: tuple[str, ...] = field(default_factory=tuple)
+    cluster_nodes: tuple[str, ...] = ()
     enable_client_side_caching: bool = False
     enable_gcp_iam_auth: bool = False
     max_connections: int = 32
@@ -77,6 +49,41 @@ class SyncRedisDriver:
         """Return the active RedisConfig."""
         return self._config
 
+    @staticmethod
+    def encode_command(*parts: str | bytes | int) -> bytes:
+        """Encode a Redis or Valkey RESP3 bulk-string array command."""
+        chunks = [f"*{len(parts)}\r\n".encode("ascii")]
+        for arg in parts:
+            if isinstance(arg, int):
+                raw = str(arg).encode("ascii")
+            elif isinstance(arg, str):
+                raw = arg.encode("utf-8")
+            else:
+                raw = bytes(arg)
+            chunks.append(f"${len(raw)}\r\n".encode("ascii"))
+            chunks.append(raw)
+            chunks.append(b"\r\n")
+        return b"".join(chunks)
+
+    @staticmethod
+    def encode_hello3_handshake(
+        *,
+        auth_username: str | None = None,
+        auth_password: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        client_name: str | None = "vertebra",
+    ) -> bytes:
+        """Encode a RESP3 HELLO 3 handshake command with optional AUTH and SETNAME."""
+        effective_user = auth_username if auth_username is not None else username
+        effective_password = auth_password if auth_password is not None else password
+        parts: list[bytes | str] = ["HELLO", "3"]
+        if effective_password is not None:
+            parts.extend(["AUTH", effective_user or "default", effective_password])
+        if client_name:
+            parts.extend(["SETNAME", client_name])
+        return SyncRedisDriver.encode_command(*parts)
+
     def get(self, key: str) -> bytes | None:
         """Fetch a key value from the store."""
         return self._kv.get(key)
@@ -97,7 +104,7 @@ class SyncRedisDriver:
 
     def encode_pipeline(self, commands: Sequence[Sequence[bytes | str]]) -> bytes:
         """Encode a batch of pipelined RESP3 commands into a single wire buffer."""
-        return b"".join(encode_resp_command(cmd) for cmd in commands)
+        return b"".join(self.encode_command(*cmd) for cmd in commands)
 
 
 class AsyncRedisDriver:

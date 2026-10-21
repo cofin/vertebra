@@ -3,16 +3,11 @@
 from vertebra.build import codegen, packaging
 from vertebra.build._config import BuildConfig, JsConfig
 from vertebra.build._fallback import DevServerProcess, run_vite_build
-from vertebra.build._import_map import (
-    generate_import_map,
-    parse_package_spec,
-    write_import_map,
-)
+from vertebra.build._import_map import ImportMapGenerator
 from vertebra.build._orchestrator import BuildOrchestrator
 from vertebra.build.codegen import (
     CODEGEN_STATE_KEY,
     CodegenConfig,
-    CodegenOrchestrator,
     CodegenPlugin,
     CodegenWatcher,
     HmrEventRouter,
@@ -26,13 +21,11 @@ from vertebra.build.codegen import (
     ProtobufGenerator,
     RouteCollector,
     RouteMetadata,
-    SchemaWatcher,
     TypeExtractor,
     TypeScriptGenerator,
     ValibotGenerator,
-    VertebraCodegenPlugin,
     ZodGenerator,
-    generate_typescript,
+    format_typescript,
     get_procedure_registry,
     procedure,
 )
@@ -42,10 +35,9 @@ from vertebra.build.packaging import (
     ONEFILE_TRAILER_SIZE,
     PBS_BASE_URL,
     PBS_RELEASE_TAG,
-    BuildTargetTuple,
+    BuildTarget,
     OnefileBuilder,
     StandaloneBuilder,
-    resolve_build_target,
 )
 
 __all__ = (
@@ -57,14 +49,14 @@ __all__ = (
     "PBS_RELEASE_TAG",
     "BuildConfig",
     "BuildOrchestrator",
-    "BuildTargetTuple",
+    "BuildTarget",
     "CodegenConfig",
-    "CodegenOrchestrator",
     "CodegenPlugin",
     "CodegenWatcher",
     "DevServerProcess",
     "HmrEventRouter",
     "HmrNotifier",
+    "ImportMapGenerator",
     "JsConfig",
     "ManifestGenerator",
     "OnefileBuilder",
@@ -76,21 +68,15 @@ __all__ = (
     "ProtobufGenerator",
     "RouteCollector",
     "RouteMetadata",
-    "SchemaWatcher",
     "StandaloneBuilder",
     "TypeExtractor",
     "TypeScriptGenerator",
     "ValibotGenerator",
-    "VertebraCodegenPlugin",
     "ZodGenerator",
     "codegen",
-    "generate_import_map",
-    "generate_typescript",
+    "format_typescript",
     "get_procedure_registry",
     "packaging",
-    "parse_package_spec",
     "procedure",
-    "resolve_build_target",
     "run_vite_build",
-    "write_import_map",
 )

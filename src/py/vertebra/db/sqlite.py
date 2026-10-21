@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+
+import msgspec
 
 __all__ = (
     "AsyncSqliteDriver",
@@ -15,8 +16,7 @@ __all__ = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class SqliteConfig:
+class SqliteConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for SQLite 3.45+ with WAL mode, memory-mapped I/O, and binary JSONB."""
 
     database: str | Path = ":memory:"
@@ -26,6 +26,11 @@ class SqliteConfig:
     busy_timeout_ms: int = 5000
     foreign_keys: bool = True
     enable_jsonb: bool = True
+
+    def __post_init__(self) -> None:
+        if self.busy_timeout_ms < 0:
+            msg = f"busy_timeout_ms must be non-negative (got {self.busy_timeout_ms})"
+            raise ValueError(msg)
 
     @property
     def is_in_memory(self) -> bool:
