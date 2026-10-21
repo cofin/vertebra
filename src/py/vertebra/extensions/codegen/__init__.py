@@ -1,14 +1,11 @@
-"""Multi-target schema and typed RPC codegen extension for Vertebra."""
+"""Re-export shim for vertebra.build.codegen."""
 
-from vertebra.extensions.codegen.openapi import OpenAPIGenerator
-from vertebra.extensions.codegen.plugin import (
+from vertebra.build.codegen import (
     CODEGEN_STATE_KEY,
-    CodegenConfig,
-    VertebraCodegenPlugin,
-)
-from vertebra.extensions.codegen.procedures import (
     Body,
     BodyMarker,
+    CodegenConfig,
+    CodegenPlugin,
     FromCookie,
     FromHeader,
     FromPath,
@@ -19,6 +16,7 @@ from vertebra.extensions.codegen.procedures import (
     MultipartBody,
     NamedDependency,
     NamedDependencyMarker,
+    OpenAPIGenerator,
     Parameter,
     ParameterMarker,
     ParameterResolution,
@@ -26,22 +24,25 @@ from vertebra.extensions.codegen.procedures import (
     ProcedureInfo,
     ProcedureParam,
     ProcedureRegistry,
+    ProtobufGenerator,
     SkipValidation,
     SkipValidationMarker,
     URLEncodedBody,
+    ValibotGenerator,
+    VertebraCodegenPlugin,
+    ZodGenerator,
     get_procedure_registry,
+    json_schema_to_type_node,
     procedure,
     resolve_parameter_node,
 )
-from vertebra.extensions.codegen.protobuf import ProtobufGenerator
-from vertebra.extensions.codegen.valibot import ValibotGenerator
-from vertebra.extensions.codegen.zod import ZodGenerator
 
 __all__ = (
     "CODEGEN_STATE_KEY",
     "Body",
     "BodyMarker",
     "CodegenConfig",
+    "CodegenPlugin",
     "FromCookie",
     "FromHeader",
     "FromPath",
@@ -68,6 +69,7 @@ __all__ = (
     "VertebraCodegenPlugin",
     "ZodGenerator",
     "get_procedure_registry",
+    "json_schema_to_type_node",
     "procedure",
     "resolve_parameter_node",
 )

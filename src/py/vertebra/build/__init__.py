@@ -1,27 +1,96 @@
-"""Single-binary standalone and onefile packaging suite for Vertebra."""
+"""Unified build orchestrator, multi-target codegen, and standalone/onefile packaging for Vertebra."""
 
-from vertebra.build.onefile import (
+from vertebra.build import codegen, packaging
+from vertebra.build._config import BuildConfig, JsConfig
+from vertebra.build._fallback import DevServerProcess, run_vite_build
+from vertebra.build._import_map import (
+    generate_import_map,
+    parse_package_spec,
+    write_import_map,
+)
+from vertebra.build._orchestrator import BuildOrchestrator
+from vertebra.build.codegen import (
+    CODEGEN_STATE_KEY,
+    CodegenConfig,
+    CodegenOrchestrator,
+    CodegenPlugin,
+    CodegenWatcher,
+    HmrEventRouter,
+    HmrNotifier,
+    ManifestGenerator,
+    OpenAPIGenerator,
+    ProcedureClientGenerator,
+    ProcedureInfo,
+    ProcedureParam,
+    ProcedureRegistry,
+    ProtobufGenerator,
+    RouteCollector,
+    RouteMetadata,
+    SchemaWatcher,
+    TypeExtractor,
+    TypeScriptGenerator,
+    ValibotGenerator,
+    VertebraCodegenPlugin,
+    ZodGenerator,
+    generate_typescript,
+    get_procedure_registry,
+    procedure,
+)
+from vertebra.build.packaging import (
+    KNOWN_TARGETS,
     ONEFILE_MAGIC,
     ONEFILE_TRAILER_SIZE,
-    OnefileBuilder,
-)
-from vertebra.build.standalone import StandaloneBuilder
-from vertebra.build.targets import (
-    KNOWN_TARGETS,
     PBS_BASE_URL,
     PBS_RELEASE_TAG,
     BuildTargetTuple,
+    OnefileBuilder,
+    StandaloneBuilder,
     resolve_build_target,
 )
 
 __all__ = (
+    "CODEGEN_STATE_KEY",
     "KNOWN_TARGETS",
     "ONEFILE_MAGIC",
     "ONEFILE_TRAILER_SIZE",
     "PBS_BASE_URL",
     "PBS_RELEASE_TAG",
+    "BuildConfig",
+    "BuildOrchestrator",
     "BuildTargetTuple",
+    "CodegenConfig",
+    "CodegenOrchestrator",
+    "CodegenPlugin",
+    "CodegenWatcher",
+    "DevServerProcess",
+    "HmrEventRouter",
+    "HmrNotifier",
+    "JsConfig",
+    "ManifestGenerator",
     "OnefileBuilder",
+    "OpenAPIGenerator",
+    "ProcedureClientGenerator",
+    "ProcedureInfo",
+    "ProcedureParam",
+    "ProcedureRegistry",
+    "ProtobufGenerator",
+    "RouteCollector",
+    "RouteMetadata",
+    "SchemaWatcher",
     "StandaloneBuilder",
+    "TypeExtractor",
+    "TypeScriptGenerator",
+    "ValibotGenerator",
+    "VertebraCodegenPlugin",
+    "ZodGenerator",
+    "codegen",
+    "generate_import_map",
+    "generate_typescript",
+    "get_procedure_registry",
+    "packaging",
+    "parse_package_spec",
+    "procedure",
     "resolve_build_target",
+    "run_vite_build",
+    "write_import_map",
 )

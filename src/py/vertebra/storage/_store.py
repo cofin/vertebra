@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import builtins
 import calendar
@@ -150,6 +149,26 @@ class VertebraStore:
         self._memory[key] = (raw, meta)
         return PutResult(path=key, size=len(raw), etag=digest)
 
+    def put_file(self, path: str, file_path: str | Path) -> PutResult:
+        """Read a local file and upload it to the given object key."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        resolved_src = Path(file_path)
+        if not resolved_src.exists():
+            msg = f"Source file not found: {resolved_src}"
+            raise FileNotFoundError(msg)
+        if self._native is not None and hasattr(self._native, "put_file"):
+            native_meta = self._native.put_file(key, str(resolved_src))
+            etag = native_meta.etag or f"{int(native_meta.size):016x}"
+            return PutResult(
+                path=str(native_meta.path),
+                size=int(native_meta.size),
+                etag=str(etag),
+                version=native_meta.version,
+            )
+        return self.put(path, resolved_src.read_bytes())
+
     def put_multipart(self, path: str, parts: Sequence[Buffer]) -> PutResult:
         """Concatenate and upload multiple buffer parts atomically."""
         key = self._normalize_key(path)
@@ -191,6 +210,11 @@ class VertebraStore:
 
     def get_view(self, path: str) -> memoryview:
         """Return a zero-copy memoryview over the object payload."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None and hasattr(self._native, "get_buffer"):
+            return memoryview(self._native.get_buffer(key))
         return memoryview(self.get(path))
 
     def get_range(self, path: str, offset: int, length: int) -> bytes:
@@ -309,32 +333,136 @@ class VertebraStore:
         ]
 
     async def put_async(self, path: str, data: Buffer) -> PutResult:
-        """Asynchronously write a buffer to the store."""
-        return await asyncio.to_thread(self.put, path, data)
+        """Asynchronously write a buffer to the store via Rust Tokio awaitable."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        view = memoryview(data).cast("B")
+        if self._native is not None and hasattr(self._native, "put_async"):
+            native_meta = await self._native.put_async(key, view)
+            etag = native_meta.etag or hashlib.sha256(view).hexdigest()[:16]
+            return PutResult(
+                path=str(native_meta.path),
+                size=int(native_meta.size),
+                etag=str(etag),
+                version=native_meta.version,
+            )
+        return self.put(path, data)
+
+    async def put_file_async(self, path: str, file_path: str | Path) -> PutResult:
+        """Asynchronously stream a local file into the store via Rust Tokio awaitable."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        resolved_src = Path(file_path)
+        if not resolved_src.exists():
+            msg = f"Source file not found: {resolved_src}"
+            raise FileNotFoundError(msg)
+        if self._native is not None and hasattr(self._native, "put_file_async"):
+            native_meta = await self._native.put_file_async(key, str(resolved_src))
+            etag = native_meta.etag or f"{int(native_meta.size):016x}"
+            return PutResult(
+                path=str(native_meta.path),
+                size=int(native_meta.size),
+                etag=str(etag),
+                version=native_meta.version,
+            )
+        return self.put_file(path, resolved_src)
 
     async def get_async(self, path: str) -> bytes:
-        """Asynchronously read an object from the store."""
-        return await asyncio.to_thread(self.get, path)
+        """Asynchronously read an object from the store via Rust Tokio awaitable."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None and hasattr(self._native, "get_async"):
+            return bytes(await self._native.get_async(key))
+        return self.get(path)
+
+    async def get_view_async(self, path: str) -> memoryview:
+        """Asynchronously read a zero-copy memoryview over an object payload."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None and hasattr(self._native, "get_buffer_async"):
+            return memoryview(await self._native.get_buffer_async(key))
+        return memoryview(await self.get_async(path))
 
     async def get_range_async(self, path: str, offset: int, length: int) -> bytes:
-        """Asynchronously read a byte range from the store."""
-        return await asyncio.to_thread(self.get_range, path, offset, length)
+        """Asynchronously read a byte range from the store via Rust Tokio awaitable."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None and hasattr(self._native, "get_range_async"):
+            return bytes(await self._native.get_range_async(key, offset, length))
+        return self.get_range(path, offset, length)
 
     async def head_async(self, path: str) -> ObjectMeta:
-        """Asynchronously read object metadata."""
-        return await asyncio.to_thread(self.head, path)
+        """Asynchronously read object metadata via Rust Tokio awaitable."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None and hasattr(self._native, "head_async"):
+            native_meta = await self._native.head_async(key)
+            return ObjectMeta(
+                path=str(native_meta.path),
+                size=int(native_meta.size),
+                last_modified=str(native_meta.last_modified),
+                etag=native_meta.etag,
+                version=native_meta.version,
+            )
+        return self.head(path)
 
     async def exists_async(self, path: str) -> bool:
-        """Asynchronously check whether an object exists."""
-        return await asyncio.to_thread(self.exists, path)
+        """Asynchronously check whether an object exists via Rust Tokio awaitable."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None and hasattr(self._native, "exists_async"):
+            return bool(await self._native.exists_async(key))
+        return self.exists(path)
 
     async def delete_async(self, path: str) -> None:
-        """Asynchronously delete an object."""
-        await asyncio.to_thread(self.delete, path)
+        """Asynchronously delete an object via Rust Tokio awaitable."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None and hasattr(self._native, "delete_async"):
+            try:
+                await self._native.delete_async(key)
+            except FileNotFoundError:
+                return
+            return
+        self.delete(path)
+
+    async def copy_async(self, src: str, dst: str) -> None:
+        """Asynchronously copy an object within the store via Rust Tokio awaitable."""
+        src_key = self._normalize_key(src)
+        dst_key = self._normalize_key(dst)
+        if self._local_root is not None:
+            self._resolve_local(src_key)
+            self._resolve_local(dst_key)
+        if self._native is not None and hasattr(self._native, "copy_async"):
+            await self._native.copy_async(src_key, dst_key)
+            return
+        self.copy(src, dst)
 
     async def list_async(self, prefix: str = "") -> builtins.list[ObjectMeta]:
-        """Asynchronously list objects matching prefix."""
-        return await asyncio.to_thread(self.list, prefix)
+        """Asynchronously list objects matching prefix via Rust Tokio awaitable."""
+        norm_prefix = self._normalize_key(prefix) if prefix else ""
+        if self._native is not None and hasattr(self._native, "list_async"):
+            items = await self._native.list_async(norm_prefix or None)
+            return [
+                ObjectMeta(
+                    path=str(item.path),
+                    size=int(item.size),
+                    last_modified=str(item.last_modified),
+                    etag=item.etag,
+                    version=item.version,
+                )
+                for item in items
+                if not norm_prefix or str(item.path).startswith(norm_prefix)
+            ]
+        return self.list(prefix)
 
     def presign_get(
         self,

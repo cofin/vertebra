@@ -1,7 +1,5 @@
 //! RSGI v1.6 HTTP and WebSocket protocol implementations (`RsgiHttpProtocol`, `RsgiTransport`, `RsgiWebsocketProtocol`).
 
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -163,15 +161,14 @@ impl RsgiHttpProtocol {
         file: String,
     ) -> PyResult<()> {
         let path_owned = file.clone();
-        let data = py
-            .detach(|| std::fs::read(&path_owned))
-            .map_err(|e| PyIOError::new_err(format!("failed to read file {file}: {e}")))?;
+        py.detach(|| std::fs::metadata(&path_owned))
+            .map_err(|e| PyIOError::new_err(format!("failed to stat file {file}: {e}")))?;
         if let Ok(mut st) = self.state.lock() {
             st.status = status;
             let mut encoded = Self::encode_headers(headers);
             encoded.push((b"x-vertebra-sendfile".to_vec(), file.as_bytes().to_vec()));
             st.headers = encoded;
-            st.body = data;
+            st.body.clear();
             st.file_path = Some(file);
             st.file_range = None;
         }
@@ -194,15 +191,15 @@ impl RsgiHttpProtocol {
             ));
         }
         let path_owned = file.clone();
-        let (buf, clamped_end, total_len) =
-            match py.detach(|| read_file_range_sync(&path_owned, start, end)) {
+        let (clamped_end, total_len) =
+            match py.detach(|| stat_file_range_sync(&path_owned, start, end)) {
                 Ok(tuple) => tuple,
                 Err(FileRangeError::InvalidRange(range_msg)) => {
                     return Err(PyValueError::new_err(range_msg));
                 }
                 Err(FileRangeError::Io(io_err)) => {
                     return Err(PyIOError::new_err(format!(
-                        "failed to read range from {file}: {io_err}"
+                        "failed to stat range from {file}: {io_err}"
                     )));
                 }
             };
@@ -216,7 +213,7 @@ impl RsgiHttpProtocol {
                 format!("{start}-{clamped_end}/{total_len}").into_bytes(),
             ));
             st.headers = encoded;
-            st.body = buf;
+            st.body.clear();
             st.file_path = Some(file);
             st.file_range = Some((start, clamped_end));
         }
@@ -366,13 +363,8 @@ impl From<std::io::Error> for FileRangeError {
     }
 }
 
-fn read_file_range_sync(
-    path: &str,
-    start: u64,
-    end: u64,
-) -> Result<(Vec<u8>, u64, u64), FileRangeError> {
-    let mut fh = File::open(path)?;
-    let metadata = fh.metadata()?;
+fn stat_file_range_sync(path: &str, start: u64, end: u64) -> Result<(u64, u64), FileRangeError> {
+    let metadata = std::fs::metadata(path)?;
     let total_len = metadata.len();
     let clamped_end = end.min(total_len);
     if start >= clamped_end {
@@ -380,11 +372,7 @@ fn read_file_range_sync(
             "Invalid file range: start exceeds file length",
         ));
     }
-    let take_len = (clamped_end - start) as usize;
-    fh.seek(SeekFrom::Start(start))?;
-    let mut buf = vec![0u8; take_len];
-    fh.read_exact(&mut buf)?;
-    Ok((buf, clamped_end, total_len))
+    Ok((clamped_end, total_len))
 }
 
 #[allow(dead_code)]

@@ -22,8 +22,11 @@ from typing import TYPE_CHECKING, Any
 from vertebra.server._rsgi._adapter import RsgiAdapter, is_rsgi_app
 from vertebra.server._runtime_tuning import (
     AsgiEventLoopPool,
+    GilAuditReport,
+    audit_gil_state,
     configure_worker_affinity,
     is_free_threaded,
+    snapshot_native_extensions,
 )
 from vertebra.server._wsgi._adapter import WsgiAdapter
 from vertebra.utils.serializers._json import encode_json_bytes
@@ -35,8 +38,11 @@ __all__ = (
     "AsgiEventLoopPool",
     "AsyncRuntime",
     "BatchDispatchPlan",
+    "GilAuditReport",
+    "audit_gil_state",
     "is_free_threaded",
     "run_worker",
+    "snapshot_native_extensions",
 )
 
 _submit_response: Any = None
@@ -231,25 +237,22 @@ def run_worker(
     enable_affinity = os.environ.get("VERTEBRA_CPU_AFFINITY", "0") in {"1", "true", "TRUE"}
     worker_id = int(os.environ.get("VERTEBRA_WORKER_ID", "0"))
     configure_worker_affinity(worker_id, enable_pinning=enable_affinity)
-
-    scheduler: AsyncRuntime | AsgiEventLoopPool = (
-        AsgiEventLoopPool(size=pool_size) if (pool_size > 1 or is_free_threaded()) else AsyncRuntime()
-    )
-
-    executor = ThreadPoolExecutor(
-        max_workers=max(128, pool_size * 8),
-        thread_name_prefix="vertebra-sync",
-    )
-    _wsgi_executor = executor
+    audit_gil_state()
 
     resolved_mounts = _build_mount_adapters(mounts or [])
-    active_mounts = _instantiate_mount_runners(resolved_mounts, scheduler.loop)
-    mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in active_mounts}
+    use_pool = pool_size > 1 or is_free_threaded()
+    scheduler: AsyncRuntime | AsgiEventLoopPool | None = (
+        AsgiEventLoopPool(size=pool_size) if use_pool else (None if is_shm else AsyncRuntime())
+    )
 
     try:
         if is_shm:
-            asyncio.run(_shm_worker_loop(handlers, active_mounts, scheduler, batch_timeout_ms))
+            asyncio.run(_shm_worker_loop(handlers, resolved_mounts, scheduler, batch_timeout_ms))
             return
+
+        assert scheduler is not None
+        active_mounts = _instantiate_mount_runners(resolved_mounts, scheduler)
+        mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in active_mounts}
 
         while _RUNNING:
             batch = get_batch(timeout_ms=batch_timeout_ms)
@@ -268,7 +271,8 @@ def run_worker(
             )
     finally:
         _RUNNING = False
-        scheduler.stop()
+        if scheduler is not None:
+            scheduler.stop()
         if _wsgi_executor is not None:
             _wsgi_executor.shutdown(wait=False)
             _wsgi_executor = None
@@ -318,20 +322,66 @@ def _build_mount_adapters(
     return resolved
 
 
+class _ShardedAsgiMountRunner:
+    """Round-robin per-loop shard ASGI runner wrapper for AsgiEventLoopPool."""
+
+    __slots__ = ("_idx", "_runners")
+
+    def __init__(self, app: Any, *, mount_prefix: str, loops: tuple[asyncio.AbstractEventLoop, ...]) -> None:
+        from vertebra.server._asgi._runner import AsgiRunner
+
+        self._runners = tuple(AsgiRunner(app, mount_prefix=mount_prefix, loop=lp) for lp in loops)
+        self._idx = 0
+
+    def __call__(self, requests: list[Any]) -> list[Any]:
+        runner = self._runners[self._idx % len(self._runners)]
+        self._idx += 1
+        return runner(requests)
+
+    def spawn_batch(self, requests: Iterable[Any]) -> None:
+        req_list = list(requests)
+        if not req_list:
+            return
+        n_shards = len(self._runners)
+        if n_shards == 1 or len(req_list) == 1:
+            runner = self._runners[self._idx % n_shards]
+            self._idx += 1
+            runner.spawn_batch(req_list)
+            return
+        buckets: list[list[Any]] = [[] for _ in range(n_shards)]
+        for pos, req in enumerate(req_list):
+            buckets[(self._idx + pos) % n_shards].append(req)
+        self._idx += len(req_list)
+        for runner, bucket in zip(self._runners, buckets, strict=True):
+            if bucket:
+                runner.spawn_batch(bucket)
+
+
 def _instantiate_mount_runners(
     resolved_mounts: list[tuple[str, Any, str]],
-    loop: asyncio.AbstractEventLoop,
+    loop_or_scheduler: asyncio.AbstractEventLoop | AsyncRuntime | AsgiEventLoopPool,
 ) -> list[tuple[str, Any, str]]:
     """Instantiate AsgiRunner, RsgiAdapter, and WsgiAdapter wrappers once for all resolved mounts."""
     from vertebra.server._asgi._runner import AsgiRunner
 
+    primary_loop = (
+        loop_or_scheduler.loop
+        if isinstance(loop_or_scheduler, (AsyncRuntime, AsgiEventLoopPool))
+        else loop_or_scheduler
+    )
+    shard_loops = loop_or_scheduler.loops if isinstance(loop_or_scheduler, AsgiEventLoopPool) else (primary_loop,)
+
     active_mounts: list[tuple[str, Any, str]] = []
     for prefix, app, protocol in resolved_mounts:
         if protocol == "asgi":
-            active_mounts.append((prefix, AsgiRunner(app, mount_prefix=prefix, loop=loop), "asgi"))
+            if len(shard_loops) > 1:
+                runner: Any = _ShardedAsgiMountRunner(app, mount_prefix=prefix, loops=shard_loops)
+            else:
+                runner = AsgiRunner(app, mount_prefix=prefix, loop=primary_loop)
+            active_mounts.append((prefix, runner, "asgi"))
         elif protocol == "rsgi":
             rsgi_adapter = RsgiAdapter(app)
-            rsgi_adapter.startup(loop)
+            rsgi_adapter.startup(primary_loop)
             active_mounts.append((prefix, rsgi_adapter, "rsgi"))
         elif protocol == "wsgi":
             active_mounts.append((prefix, WsgiAdapter(app), "wsgi"))
@@ -619,8 +669,8 @@ def _dispatch_batch(
 
 async def _shm_worker_loop(
     handlers: dict[int, Any],
-    active_mounts: list[tuple[str, Any, str]],
-    scheduler: AsyncRuntime | AsgiEventLoopPool,
+    mounts: list[tuple[str, Any, str]],
+    scheduler: AsyncRuntime | AsgiEventLoopPool | None,
     batch_timeout_ms: int,
 ) -> None:
     """Run the asyncio-driven SHM worker loop using eventfd notifications."""
@@ -636,10 +686,19 @@ async def _shm_worker_loop(
     loop = asyncio.get_running_loop()
     notify_fd = get_request_notify_fd()
     ready_event = asyncio.Event()
-    mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in active_mounts}
     dispatch_target: AsyncRuntime | AsgiEventLoopPool | asyncio.AbstractEventLoop = (
-        loop if isinstance(scheduler, AsyncRuntime) else scheduler
+        scheduler if isinstance(scheduler, AsgiEventLoopPool) else loop
     )
+    active_mounts = (
+        mounts
+        if all(
+            protocol in {"asgi", "rsgi", "wsgi"}
+            and type(adapter).__name__ in {"AsgiRunner", "_ShardedAsgiMountRunner", "RsgiAdapter", "WsgiAdapter"}
+            for _p, adapter, protocol in mounts
+        )
+        else _instantiate_mount_runners(mounts, dispatch_target)
+    )
+    mount_lookup = {prefix: (adapter, protocol) for prefix, adapter, protocol in active_mounts}
 
     def _on_readable() -> None:
         ready_event.set()

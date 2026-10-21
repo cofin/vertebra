@@ -1,6 +1,5 @@
 """Advanced Alchemy FileObject/StoredObject storage backend powered by VertebraStore."""
 
-import asyncio
 import inspect
 from collections.abc import AsyncIterable, Buffer, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -68,9 +67,12 @@ class VertebraAlchemyStorageBackend:
     ) -> AlchemyFileAttachment:
         """Persist data synchronously and populate size and etag on file_object."""
         _ = kwargs
-        raw = self._resolve_sync_data(data)
         qualified = self._qualify(file_object.path)
-        put_res = self._store.put(qualified, raw)
+        if isinstance(data, Path):
+            put_res = self._store.put_file(qualified, data)
+        else:
+            raw = self._resolve_sync_data(data)
+            put_res = self._store.put(qualified, raw)
         file_object.size = put_res.size
         file_object.etag = put_res.etag
         if put_res.etag:
@@ -85,9 +87,12 @@ class VertebraAlchemyStorageBackend:
     ) -> AlchemyFileAttachment:
         """Persist data asynchronously and populate size and etag on file_object."""
         _ = kwargs
-        raw = await self._resolve_async_data(data)
         qualified = self._qualify(file_object.path)
-        put_res = await self._store.put_async(qualified, raw)
+        if isinstance(data, Path):
+            put_res = await self._store.put_file_async(qualified, data)
+        else:
+            raw = await self._resolve_async_data(data)
+            put_res = await self._store.put_async(qualified, raw)
         file_object.size = put_res.size
         file_object.etag = put_res.etag
         if put_res.etag:
@@ -160,7 +165,7 @@ class VertebraAlchemyStorageBackend:
         if isinstance(data, Buffer):
             return data
         if isinstance(data, Path):
-            return await asyncio.to_thread(data.read_bytes)
+            return data.read_bytes()
         if hasattr(data, "read"):
             result = data.read()
             if inspect.isawaitable(result):

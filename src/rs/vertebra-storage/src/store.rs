@@ -24,7 +24,16 @@ static STORAGE_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .expect("failed to initialize vertebra-storage Tokio runtime")
 });
 
+pub fn runtime_handle() -> tokio::runtime::Handle {
+    tokio::runtime::Handle::try_current().unwrap_or_else(|_| STORAGE_RUNTIME.handle().clone())
+}
+
 pub fn block_on_storage<F: std::future::Future>(future: F) -> F::Output {
+    if let Ok(handle) = tokio::runtime::Handle::try_current()
+        && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+    {
+        return tokio::task::block_in_place(|| handle.block_on(future));
+    }
     STORAGE_RUNTIME.block_on(future)
 }
 
@@ -32,6 +41,8 @@ pub fn block_on_storage<F: std::future::Future>(future: F) -> F::Output {
 pub enum StorageError {
     #[error("object_store error: {0}")]
     ObjectStore(#[from] object_store::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("invalid storage URL '{0}': {1}")]
     InvalidUrl(String, String),
     #[error("signing error: {0}")]
@@ -283,6 +294,15 @@ impl ObjectStoreEngine {
             etag: result.e_tag,
             version: result.version,
         })
+    }
+
+    pub async fn put_file(
+        &self,
+        path: &str,
+        file_path: &str,
+    ) -> Result<StoredObjectMeta, StorageError> {
+        let raw = tokio::fs::read(file_path).await?;
+        self.put(path, Bytes::from(raw)).await
     }
 
     pub async fn put_multipart(

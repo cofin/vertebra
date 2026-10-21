@@ -10,13 +10,26 @@ import sys
 import threading
 from typing import TYPE_CHECKING, Any
 
+from vertebra.server._gil_audit import (
+    GilAuditReport,
+    audit_gil_state,
+    is_free_threaded_build,
+    quarantine_unsafe_314t_modules,
+    snapshot_native_extensions,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Iterable
 
 __all__ = (
     "AsgiEventLoopPool",
+    "GilAuditReport",
+    "audit_gil_state",
     "configure_worker_affinity",
     "is_free_threaded",
+    "is_free_threaded_build",
+    "quarantine_unsafe_314t_modules",
+    "snapshot_native_extensions",
 )
 
 
@@ -76,6 +89,11 @@ class AsgiEventLoopPool:
     def size(self) -> int:
         """Return the number of event loop shards in the pool."""
         return self._size
+
+    @property
+    def loops(self) -> tuple[asyncio.AbstractEventLoop, ...]:
+        """Return all event loop shards in the pool."""
+        return tuple(self._loops)
 
     @property
     def loop(self) -> asyncio.AbstractEventLoop:
