@@ -2,14 +2,14 @@
 
 import hashlib
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
+
+import msgspec
 
 __all__ = ("TypeAssets", "TypeBridge")
 
 
-@dataclass
-class TypeAssets:
+class TypeAssets(msgspec.Struct, frozen=True, gc=False):
     """Container for generated type assets."""
 
     version: str = ""
@@ -17,7 +17,7 @@ class TypeAssets:
     zod_schemas: str = ""
     routes: str = ""
     manifest: str = ""
-    timestamp: float = field(default_factory=time.time)
+    timestamp: float = msgspec.field(default_factory=time.time)
 
 
 class TypeBridge:

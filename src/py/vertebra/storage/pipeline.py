@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 from collections.abc import Buffer
-from dataclasses import dataclass, field
 from typing import Any
+
+import msgspec
 
 from vertebra.storage._store import ObjectStore, PutResult
 
 __all__ = (
-    "FileObjectSessionTracker",
     "StagedUpload",
+    "UploadTracker",
 )
 
 
-@dataclass(slots=True, frozen=True)
-class StagedUpload:
+class StagedUpload(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Pending object write staged within a database transaction boundary."""
 
     key: str
@@ -24,14 +25,16 @@ class StagedUpload:
     store: ObjectStore
 
 
-@dataclass(slots=True)
-class FileObjectSessionTracker:
+class UploadTracker:
     """Tracks staged uploads and deletes orphaned cloud objects on database transaction rollback."""
 
-    default_store: ObjectStore | None = None
-    _staged_uploads: list[StagedUpload] = field(default_factory=list, init=False, repr=False)
-    _uploaded_keys: list[tuple[ObjectStore, str]] = field(default_factory=list, init=False, repr=False)
-    _pending_deletes: list[tuple[ObjectStore, str]] = field(default_factory=list, init=False, repr=False)
+    __slots__ = ("_pending_deletes", "_staged_uploads", "_uploaded_keys", "default_store")
+
+    def __init__(self, default_store: ObjectStore | None = None) -> None:
+        self.default_store = default_store
+        self._staged_uploads: list[StagedUpload] = []
+        self._uploaded_keys: list[tuple[ObjectStore, str]] = []
+        self._pending_deletes: list[tuple[ObjectStore, str]] = []
 
     @property
     def staged_count(self) -> int:
@@ -53,7 +56,7 @@ class FileObjectSessionTracker:
         """Queue an object upload to be written during before_flush."""
         target_store = store or self.default_store
         if target_store is None:
-            msg = "An ObjectStore must be provided to stage_upload or FileObjectSessionTracker"
+            msg = "An ObjectStore must be provided to stage_upload or UploadTracker"
             raise ValueError(msg)
         self._staged_uploads.append(StagedUpload(key=key, data=bytes(memoryview(data)), store=target_store))
 
@@ -66,7 +69,7 @@ class FileObjectSessionTracker:
         """Queue an object key to be deleted only after the database transaction commits."""
         target_store = store or self.default_store
         if target_store is None:
-            msg = "An ObjectStore must be provided to stage_delete or FileObjectSessionTracker"
+            msg = "An ObjectStore must be provided to stage_delete or UploadTracker"
             raise ValueError(msg)
         self._pending_deletes.append((target_store, key))
 
@@ -133,8 +136,6 @@ class FileObjectSessionTracker:
     def attach_sqlalchemy_session(self, session_or_factory: Any) -> None:
         """Register SQLAlchemy before_flush, after_commit, and after_rollback listeners when SQLAlchemy is present."""
         try:
-            import importlib
-
             event_mod = importlib.import_module("sqlalchemy.event")
             listen = event_mod.listen
             listen(session_or_factory, "before_flush", self.before_flush)
@@ -143,7 +144,7 @@ class FileObjectSessionTracker:
         except ImportError:
             return
 
-    async def __aenter__(self) -> FileObjectSessionTracker:
+    async def __aenter__(self) -> UploadTracker:
         """Enter an async transactional upload tracking context."""
         return self
 

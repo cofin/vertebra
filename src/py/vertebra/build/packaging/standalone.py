@@ -1,12 +1,13 @@
 """Standalone relocatable directory builder for Vertebra applications."""
 
-import json
 import py_compile
 import shutil
-from dataclasses import dataclass
 from pathlib import Path
 
-from vertebra.build.packaging.targets import BuildTargetTuple
+import msgspec
+
+from vertebra.build.packaging.targets import BuildTarget
+from vertebra.utils.serializers import encode_json_bytes
 
 __all__ = ("StandaloneBuilder",)
 
@@ -28,14 +29,22 @@ _EXCLUDED_DIRS: frozenset[str] = frozenset(
 )
 
 
-@dataclass(slots=True)
 class StandaloneBuilder:
     """Assemble a relocatable standalone distribution with compiled .pyc bytecode and entrypoint bootstrap."""
 
-    project_dir: Path
-    target: BuildTargetTuple
-    entrypoint: str = "app:app"
-    pgo_enabled: bool = False
+    __slots__ = ("entrypoint", "pgo_enabled", "project_dir", "target")
+
+    def __init__(
+        self,
+        project_dir: Path,
+        target: BuildTarget,
+        entrypoint: str = "app:app",
+        pgo_enabled: bool = False,
+    ) -> None:
+        self.project_dir = project_dir
+        self.target = target
+        self.entrypoint = entrypoint
+        self.pgo_enabled = pgo_enabled
 
     def build(self, output_dir: Path) -> Path:
         """Stage application sources, compile .pyc files, and write manifest.json and __main__.py."""
@@ -89,7 +98,8 @@ class StandaloneBuilder:
             "pgo_enabled": self.pgo_enabled,
             "compiled_modules": compiled_count,
         }
-        (dist_root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        formatted = msgspec.json.format(encode_json_bytes(manifest), indent=2).decode("utf-8")
+        (dist_root / "manifest.json").write_text(formatted + "\n")
         (dist_root / "__main__.py").write_text(self._render_bootstrap())
         return dist_root
 

@@ -280,8 +280,6 @@ pub struct SseHub {
     heartbeat_interval: Duration,
 }
 
-pub type SseStreamHub = SseHub;
-
 impl SseHub {
     /// Create a new `SseHub` with per-topic `replay_capacity` and keepalive `heartbeat_interval`.
     pub fn new(replay_capacity: usize, heartbeat_interval: Duration) -> Self {

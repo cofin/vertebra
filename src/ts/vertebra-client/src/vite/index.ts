@@ -1,6 +1,6 @@
 import type { Plugin, ViteDevServer } from "vite";
 
-export interface VertebraPluginOptions {
+export interface VitePluginOptions {
   /**
    * Base URL of the Vertebra Python server.
    * @default "http://localhost:8000"
@@ -27,7 +27,7 @@ export interface VertebraPluginOptions {
  * 3. HMR integration for type changes.
  * 4. Immediate type poll when .py files change.
  */
-export default function vertebraPlugin(options: VertebraPluginOptions = {}): Plugin {
+export function vitePlugin(options: VitePluginOptions = {}): Plugin {
   const { serverUrl = "http://localhost:8000", hmr = true, virtualModuleName = "virtual:vertebra-types" } = options;
 
   const resolvedVirtualModuleId = `\0${virtualModuleName}`;
@@ -105,3 +105,5 @@ export default function vertebraPlugin(options: VertebraPluginOptions = {}): Plu
     },
   };
 }
+
+export default vitePlugin;

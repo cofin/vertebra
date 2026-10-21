@@ -13,18 +13,18 @@ import pytest
 
 from vertebra._vertebra import AsgiScope
 from vertebra.extensions.litestar.channels import (
-    VertebraChannelsBackend,
+    ChannelsBackend,
     swap_litestar_channels_backend,
 )
-from vertebra.extensions.litestar.store import (
-    VertebraMemoryStore,
-    swap_litestar_response_cache_store,
-)
-from vertebra.server._asgi._litestar_fastpath import (
+from vertebra.extensions.litestar.fastpath import (
     ScopeState,
     compile_litestar_fastpath_routes,
     dispatch_litestar_handler_direct,
     preseed_litestar_scope_body,
+)
+from vertebra.extensions.litestar.store import (
+    MemoryStore,
+    swap_litestar_response_cache_store,
 )
 
 
@@ -294,7 +294,7 @@ MsgspecDTO = _PRIMS["MsgspecDTO"]
 NotAuthorizedException = _PRIMS["NotAuthorizedException"]
 File = _PRIMS["File"]
 ServerSentEvent = _PRIMS["ServerSentEvent"]
-MemoryStore = _PRIMS["MemoryStore"]
+LitestarMemoryStore = _PRIMS["MemoryStore"]
 
 
 def _make_scope(
@@ -505,11 +505,11 @@ async def test_swap_channels_backend_and_response_cache_store() -> None:
         route_handlers=[get_cached],
         plugins=[channels_plugin],
         response_cache_config=cache_config,
-        stores={"response_cache": MemoryStore()},
+        stores={"response_cache": LitestarMemoryStore()},
     )
 
     swapped_channels = swap_litestar_channels_backend(app)
-    assert isinstance(swapped_channels, VertebraChannelsBackend)
+    assert isinstance(swapped_channels, ChannelsBackend)
     await swapped_channels.on_startup()
     await swapped_channels.subscribe(["alerts"])
     await swapped_channels.publish(b"alert-1", ["alerts"])
@@ -543,7 +543,7 @@ async def test_swap_channels_backend_and_response_cache_store() -> None:
     await asyncio.wait_for(consumer_task, timeout=1.0)
 
     swapped_store = swap_litestar_response_cache_store(app)
-    assert isinstance(swapped_store, VertebraMemoryStore)
+    assert isinstance(swapped_store, MemoryStore)
     async with swapped_store as ctx_store:
         assert ctx_store is swapped_store
         await swapped_store.set("k1", b"v1", expires_in=60)

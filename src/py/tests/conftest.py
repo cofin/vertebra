@@ -64,13 +64,13 @@ def mock_asgi_app() -> AsyncMock:
 
 
 @pytest.fixture()
-def asgi_send() -> AsyncMock:
+def asgi_send() -> Any:
     """Mock ASGI send callable that records messages."""
-    send = AsyncMock()
-    send.messages: list[dict] = []  # type: ignore[attr-defined]
+    send: Any = AsyncMock()
+    send.messages = []
 
     async def _send(message: dict[str, Any]) -> None:
-        send.messages.append(message)  # type: ignore[attr-defined]
+        send.messages.append(message)
 
     send.side_effect = _send
     return send

@@ -4,22 +4,22 @@ import { HttpClient } from "../client/client";
 import type { ClientConfig } from "../client/types";
 import { QueryCache, queryCache } from "./cache";
 
-const VertebraContext = createContext<HttpClient | null>(null);
+export const ClientContext = createContext<HttpClient | null>(null);
 
-export interface VertebraProviderProps {
+export interface ClientProviderProps {
   config: ClientConfig;
   children: React.ReactNode;
 }
 
-export function VertebraProvider({ config, children }: VertebraProviderProps) {
+export function ClientProvider({ config, children }: ClientProviderProps) {
   const client = useMemo(() => new HttpClient(config), [config]);
-  return <VertebraContext.Provider value={client}>{children}</VertebraContext.Provider>;
+  return <ClientContext.Provider value={client}>{children}</ClientContext.Provider>;
 }
 
-export function useVertebraClient(): HttpClient {
-  const client = useContext(VertebraContext);
+export function useClient(): HttpClient {
+  const client = useContext(ClientContext);
   if (!client) {
-    throw new Error("useVertebraClient must be used within a VertebraProvider");
+    throw new Error("useClient must be used within a ClientProvider");
   }
   return client;
 }
@@ -36,7 +36,7 @@ export function useQuery<TInput = any, TOutput = any>(
   input?: TInput,
   options?: { timeout?: number; enabled?: boolean; staleTime?: number },
 ) {
-  const client = useVertebraClient();
+  const client = useClient();
   const enabled = options?.enabled ?? true;
   const staleTime = options?.staleTime ?? 0;
   const timeout = options?.timeout;
@@ -60,7 +60,7 @@ export function useQuery<TInput = any, TOutput = any>(
  * to ensure fresh data on next render.
  */
 export function useMutation<TInput = any, TOutput = any>(method: string, path: string) {
-  const client = useVertebraClient();
+  const client = useClient();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 

@@ -54,6 +54,10 @@
     "./apex": {
       "types": "./dist/apex/index.d.ts",
       "import": "./dist/apex/index.js"
+    },
+    "./telemetry": {
+      "types": "./dist/telemetry.d.ts",
+      "import": "./dist/telemetry.js"
     }
   },
   "files": [

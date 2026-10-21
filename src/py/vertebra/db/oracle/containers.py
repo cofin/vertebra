@@ -5,12 +5,12 @@ from __future__ import annotations
 import msgspec
 
 __all__ = (
-    "OracleAdbFreeContainer",
-    "OrdsApexContainer",
+    "OracleContainer",
+    "OrdsContainer",
 )
 
 
-class OracleAdbFreeContainer(msgspec.Struct, frozen=True):
+class OracleContainer(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Container specification for ``container-registry.oracle.com/database/adb-free:latest-23ai``."""
 
     image: str = "container-registry.oracle.com/database/adb-free:latest-23ai"
@@ -34,7 +34,7 @@ class OracleAdbFreeContainer(msgspec.Struct, frozen=True):
         return f"{host}:{self.tns_port}/{self.service_name}"
 
 
-class OrdsApexContainer(msgspec.Struct, frozen=True):
+class OrdsContainer(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Container specification for Oracle REST Data Services (ORDS) and Oracle APEX 24.2 (`ApexLang`)."""
 
     image: str = "container-registry.oracle.com/database/ords:latest"

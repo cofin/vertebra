@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: "Rust HTTP Ingress, Batching & Dispatch Domain"
-description: "Canonical domain types for Vertebra's Rust HTTP/1.1 & HTTP/2 ingress server, dual-path VertebraBody, router, sharded batcher, dispatcher, and backpressure."
+description: "Canonical domain types for Vertebra's Rust HTTP/1.1 & HTTP/2 ingress server, dual-path ResponseBody, router, sharded batcher, dispatcher, and backpressure."
 status: stable
 tags: [domains, http, routing, batching, streaming, rust]
 sources:
@@ -29,7 +29,7 @@ sources:
 | Symbol | Source | Responsibility |
 |---|---|---|
 | [`Server`](../../../../../src/rs/vertebra-http/src/server.rs) / [`ServerConfig`](../../../../../src/rs/vertebra-http/src/config.rs) | `vertebra_http::server` | Tokio TCP/TLS accept loop, HTTP/1.1 `pipeline_flush` & HTTP/2 connection serving, embedded Python worker spawning, and graceful drain. |
-| [`VertebraBody`](../../../../../src/rs/vertebra-http/src/response.rs) / [`StreamingBody`](../../../../../src/rs/vertebra-http/src/response.rs) | `vertebra_http::response` | Dual-path `Either<Full<Bytes>, StreamingBody>` (`full_body` and `stream_body`) supporting zero-allocation unary responses and multi-frame chunk/trailer streams. |
+| [`ResponseBody`](../../../../../src/rs/vertebra-http/src/response.rs) / [`HttpResponse`](../../../../../src/rs/vertebra-http/src/response.rs) / [`StreamingBody`](../../../../../src/rs/vertebra-http/src/response.rs) | `vertebra_http::response` | Dual-path `Either<Full<Bytes>, StreamingBody>` (`full_body` and `stream_body`) supporting zero-allocation unary responses and multi-frame chunk/trailer streams. |
 | [`Router`](../../../../../src/rs/vertebra-http/src/router.rs) / [`RouteMatch`](../../../../../src/rs/vertebra-http/src/router.rs) | `vertebra_http::router` | Per-method `matchit 0.9` radix router with `normalize_typed_path` (`{id:int}`, `:id`, `*rest` $\to$ `{id}`, `{*rest}`) and deterministic FNV-1a `HandlerId`. |
 | [`RouteTable`](../../../../../src/rs/vertebra-http/src/route_table.rs) | `vertebra_http::route_table` | Concurrent route table supporting atomic route registration and hot swapping during `vtb dev`. |
 | [`StaticAssets`](../../../../../src/rs/vertebra-http/src/assets.rs) | `vertebra_http::assets` | Zero-Python static file handler with canonical path traversal guards, ETag / `304 Not Modified`, and immutable cache headers. |

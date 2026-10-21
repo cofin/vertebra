@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from vertebra.server._asgi._litestar_offload import (
+from vertebra.extensions.litestar.offload import (
     CorsOffloadSpec,
     LitestarOffloadPlan,
     OpenApiOffloadSpec,

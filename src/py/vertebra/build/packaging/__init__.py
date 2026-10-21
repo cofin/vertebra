@@ -10,8 +10,7 @@ from vertebra.build.packaging.targets import (
     KNOWN_TARGETS,
     PBS_BASE_URL,
     PBS_RELEASE_TAG,
-    BuildTargetTuple,
-    resolve_build_target,
+    BuildTarget,
 )
 
 __all__ = (
@@ -20,8 +19,7 @@ __all__ = (
     "ONEFILE_TRAILER_SIZE",
     "PBS_BASE_URL",
     "PBS_RELEASE_TAG",
-    "BuildTargetTuple",
+    "BuildTarget",
     "OnefileBuilder",
     "StandaloneBuilder",
-    "resolve_build_target",
 )

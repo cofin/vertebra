@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import inspect
 import uuid
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
+
+import msgspec
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -24,8 +25,7 @@ __all__ = (
 type TaskLane = Literal["cpu", "io", "agent"]
 
 
-@dataclass(frozen=True, slots=True)
-class TaskRetryPolicy:
+class TaskRetryPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Retry and exponential backoff policy for background tasks."""
 
     max_retries: int = 3
@@ -34,27 +34,24 @@ class TaskRetryPolicy:
     backoff_multiplier: float = 2.0
 
 
-@dataclass(frozen=True, slots=True)
-class CronSchedule:
+class CronSchedule(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Recurring cron schedule descriptor for background jobs."""
 
     expression: str
     timezone: str = "UTC"
 
 
-@dataclass(frozen=True, slots=True)
-class TaskDef:
+class TaskDef(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Registered background task definition bound to a worker execution lane."""
 
     name: str
     fn: Callable[..., Any]
     lane: TaskLane = "io"
-    retry_policy: TaskRetryPolicy = field(default_factory=TaskRetryPolicy)
+    retry_policy: TaskRetryPolicy = msgspec.field(default_factory=TaskRetryPolicy)
     cron: CronSchedule | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class TaskEnvelope:
+class TaskEnvelope(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
     """Enqueued task execution envelope."""
 
     task_id: str
@@ -65,8 +62,7 @@ class TaskEnvelope:
     attempt: int = 1
 
 
-@dataclass(frozen=True, slots=True)
-class QueueConfig:
+class QueueConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for ``QueueService`` supporting memory, Valkey, Redis, Postgres, and Oracle backends."""
 
     backend_url: str = "memory://"
@@ -76,6 +72,8 @@ class QueueConfig:
 
 class QueueService:
     """Multi-lane background task queue service."""
+
+    __slots__ = ("_config", "_pending", "_tasks")
 
     def __init__(self, config: QueueConfig | None = None) -> None:
         self._config = config or QueueConfig()

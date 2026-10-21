@@ -1,8 +1,9 @@
 """Codegen extension plugin for Vertebra and Litestar applications."""
 
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import msgspec
 
 from vertebra.build.codegen._metadata import RouteMetadata
 from vertebra.build.codegen.openapi import OpenAPIGenerator
@@ -19,14 +20,12 @@ __all__ = (
     "CODEGEN_STATE_KEY",
     "CodegenConfig",
     "CodegenPlugin",
-    "VertebraCodegenPlugin",
 )
 
 CODEGEN_STATE_KEY: str = "codegen"
 
 
-@dataclass(frozen=True, slots=True)
-class CodegenConfig:
+class CodegenConfig(msgspec.Struct, frozen=True, gc=False):
     """Configuration controlling multi-target schema and RPC client emission."""
 
     output_dir: Path = Path("src/generated")
@@ -41,12 +40,18 @@ class CodegenConfig:
     protobuf_service: str = "VertebraService"
 
 
-@dataclass(slots=True)
 class CodegenPlugin:
     """Plugin orchestrating Valibot, Zod, OpenAPI 3.1.0, Protobuf v3, and @procedure output."""
 
-    config: CodegenConfig = field(default_factory=CodegenConfig)
-    registry: ProcedureRegistry = field(default_factory=get_procedure_registry)
+    __slots__ = ("config", "registry")
+
+    def __init__(
+        self,
+        config: CodegenConfig | None = None,
+        registry: ProcedureRegistry | None = None,
+    ) -> None:
+        self.config = config if config is not None else CodegenConfig()
+        self.registry = registry if registry is not None else get_procedure_registry()
 
     def install_state(self, state_mapping: dict[str, Any]) -> CodegenConfig:
         """Register the CodegenConfig in application state."""
@@ -107,6 +112,3 @@ class CodegenPlugin:
             written["procedures"] = proc_path
 
         return written
-
-
-VertebraCodegenPlugin = CodegenPlugin

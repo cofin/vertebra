@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+import msgspec
 
 __all__ = (
     "ApexSessionContext",
@@ -40,8 +41,7 @@ class OraclePoolLike(Protocol):
         ...
 
 
-@dataclass(frozen=True, slots=True)
-class ApexSessionContext:
+class ApexSessionContext(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Identity and session context for Oracle APEX and Oracle E-Business Suite."""
 
     app_id: int
@@ -53,11 +53,13 @@ class ApexSessionContext:
     ebs_resp_id: int | None = None
     ebs_resp_appl_id: int | None = None
     ebs_org_id: int | None = None
-    page_items: dict[str, str] = field(default_factory=dict)
+    page_items: dict[str, str] = msgspec.field(default_factory=dict)
 
 
 class OracleSessionManager:
     """Manages zero-RTT OTel tagging and guaranteed PL/SQL session attachment/detachment."""
+
+    __slots__ = ()
 
     @staticmethod
     def build_attach_plsql(context: ApexSessionContext) -> tuple[str, dict[str, Any]]:

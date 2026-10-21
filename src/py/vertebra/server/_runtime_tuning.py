@@ -10,13 +10,7 @@ import sys
 import threading
 from typing import TYPE_CHECKING, Any
 
-from vertebra.server._gil_audit import (
-    GilAuditReport,
-    audit_gil_state,
-    is_free_threaded_build,
-    quarantine_unsafe_314t_modules,
-    snapshot_native_extensions,
-)
+from vertebra.server._gil_audit import GilAuditReport
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Iterable
@@ -24,19 +18,17 @@ if TYPE_CHECKING:
 __all__ = (
     "AsgiEventLoopPool",
     "GilAuditReport",
-    "audit_gil_state",
     "configure_worker_affinity",
     "is_free_threaded",
-    "is_free_threaded_build",
-    "quarantine_unsafe_314t_modules",
-    "snapshot_native_extensions",
 )
 
 
 def is_free_threaded() -> bool:
     """Return True when running on a free-threaded Python interpreter with the GIL disabled."""
     checker = getattr(sys, "_is_gil_enabled", None)
-    return bool(checker is not None and not checker())
+    if checker is not None:
+        return not bool(checker())
+    return GilAuditReport.is_free_threaded_build()
 
 
 def configure_worker_affinity(worker_index: int, *, enable_pinning: bool = False) -> bool:

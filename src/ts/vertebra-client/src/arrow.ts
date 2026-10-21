@@ -11,23 +11,7 @@ export interface ArrowStreamOptions {
   readonly headers?: Record<string, string>;
 }
 
-export function hasArrowIpcHeader(bytes: Uint8Array): boolean {
-  if (bytes.byteLength < 8) {
-    return false;
-  }
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (view.getUint32(0, true) === ARROW_CONTINUATION_MARKER) {
-    return true;
-  }
-  for (let i = 0; i < 6; i += 1) {
-    if (bytes[i] !== ARROW_FILE_MAGIC[i]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-export class VertebraArrowStreamClient {
+export class ArrowStreamClient {
   private readonly endpoint: string;
   private readonly baseHeaders: Record<string, string>;
 
@@ -37,6 +21,22 @@ export class VertebraArrowStreamClient {
       Accept: ARROW_STREAM_MIME,
       ...(options.headers ?? {}),
     };
+  }
+
+  public static hasIpcHeader(bytes: Uint8Array): boolean {
+    if (bytes.byteLength < 8) {
+      return false;
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (view.getUint32(0, true) === ARROW_CONTINUATION_MARKER) {
+      return true;
+    }
+    for (let i = 0; i < 6; i += 1) {
+      if (bytes[i] !== ARROW_FILE_MAGIC[i]) {
+        return false;
+      }
+    }
+    return true;
   }
 
   public get url(): string {

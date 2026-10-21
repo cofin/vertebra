@@ -11,7 +11,7 @@ from uuid import UUID
 import pytest
 
 from vertebra._vertebra import AsgiScope
-from vertebra.server._asgi._litestar_router import (
+from vertebra.extensions.litestar.router import (
     ExtractedLitestarRoute,
     LitestarRouterTable,
     _unpack_route_handler_map_entry,

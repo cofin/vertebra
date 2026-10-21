@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Buffer, Mapping, Sequence
-from dataclasses import dataclass, field
 from typing import Any, Literal
+
+import msgspec
 
 from vertebra.db.dialer.alloydb import AlloyDbConfig
 from vertebra.db.dialer.cloudsql import CloudSqlConfig
@@ -14,40 +15,12 @@ __all__ = (
     "PoolerMode",
     "PostgresConfig",
     "SyncPostgresDriver",
-    "compute_worker_pool_budget",
-    "strip_pg_jsonb_header",
 )
 
 type PoolerMode = Literal["direct", "transaction", "session"]
 
 
-def strip_pg_jsonb_header(raw: Buffer) -> memoryview:
-    """Strip the 1-byte PostgreSQL binary JSONB version prefix (`\\x01`) with zero copy."""
-    view = memoryview(raw).cast("B")
-    if len(view) == 0:
-        msg = "Empty PostgreSQL binary JSONB payload"
-        raise ValueError(msg)
-    if view[0] != 0x01:
-        msg = f"Unsupported PostgreSQL binary JSONB version byte: 0x{view[0]:02x}"
-        raise ValueError(msg)
-    return view[1:]
-
-
-def compute_worker_pool_budget(
-    total_budget: int,
-    *,
-    replica_count: int = 1,
-    workers_per_replica: int = 1,
-    reserved_admin_connections: int = 10,
-) -> int:
-    """Compute per-worker pool size from a cluster-wide database connection budget."""
-    usable = max(0, total_budget - reserved_admin_connections)
-    total_shards = max(1, replica_count) * max(1, workers_per_replica)
-    return max(1, usable // total_shards)
-
-
-@dataclass(frozen=True, slots=True)
-class PostgresConfig:
+class PostgresConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """PostgreSQL configuration supporting Cloud SQL, AlloyDB, and PgBouncer/PgCat/pgdog poolers."""
 
     dsn: str = "postgresql://localhost:5432/postgres"
@@ -64,7 +37,13 @@ class PostgresConfig:
     application_name: str = "vertebra"
     statement_timeout_ms: int | None = None
     idle_in_transaction_session_timeout_ms: int | None = None
-    session_gucs: Mapping[str, str] = field(default_factory=dict)
+    session_gucs: Mapping[str, str] = msgspec.field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.min_size < 0 or self.max_size < 1 or self.min_size > self.max_size:
+            msg = f"Invalid pool bounds: min_size={self.min_size}, max_size={self.max_size}"
+            raise ValueError(msg)
+        msgspec.structs.force_setattr(self, "session_gucs", dict(self.session_gucs))
 
     @property
     def effective_statement_cache_size(self) -> int:
@@ -81,6 +60,23 @@ class PostgresConfig:
     def effective_direct_dsn(self) -> str:
         """Return the direct primary DSN for LISTEN/NOTIFY, logical replication, and migrations."""
         return self.direct_dsn or self.dsn
+
+    @staticmethod
+    def compute_worker_pool_budget(
+        max_connections: int,
+        worker_count: int = 1,
+        *,
+        replica_count: int = 1,
+        workers_per_replica: int | None = None,
+        reserved_super_connections: int = 5,
+        reserved_admin_connections: int | None = None,
+    ) -> int:
+        """Compute per-worker pool size from a cluster-wide database connection budget."""
+        reserved = reserved_admin_connections if reserved_admin_connections is not None else reserved_super_connections
+        usable = max(0, max_connections - reserved)
+        per_replica = workers_per_replica if workers_per_replica is not None else worker_count
+        total_shards = max(1, replica_count) * max(1, per_replica)
+        return max(1, usable // total_shards)
 
     def build_session_gucs(self) -> dict[str, str]:
         """Build the startup/session GUC parameters for the PostgreSQL connection."""
@@ -124,6 +120,18 @@ class SyncPostgresDriver:
         """Return the active PostgresConfig."""
         return self._config
 
+    @staticmethod
+    def strip_jsonb_header(payload: Buffer) -> memoryview:
+        """Strip the 1-byte PostgreSQL binary JSONB version prefix (`\\x01`) with zero copy."""
+        view = memoryview(payload).cast("B")
+        if len(view) == 0:
+            msg = "Empty PostgreSQL binary JSONB payload"
+            raise ValueError(msg)
+        if view[0] != 0x01:
+            msg = f"Unsupported PostgreSQL binary JSONB version byte: 0x{view[0]:02x}"
+            raise ValueError(msg)
+        return view[1:]
+
     def execute_tuples(
         self,
         sql: str,
@@ -135,7 +143,7 @@ class SyncPostgresDriver:
 
     def decode_binary_jsonb(self, raw: Buffer) -> memoryview:
         """Return a zero-copy UTF-8 JSON memoryview from a binary PostgreSQL JSONB column."""
-        return strip_pg_jsonb_header(raw)
+        return self.strip_jsonb_header(raw)
 
 
 class AsyncPostgresDriver:
@@ -162,4 +170,4 @@ class AsyncPostgresDriver:
 
     def decode_binary_jsonb(self, raw: Buffer) -> memoryview:
         """Return a zero-copy UTF-8 JSON memoryview from a binary PostgreSQL JSONB column."""
-        return strip_pg_jsonb_header(raw)
+        return SyncPostgresDriver.strip_jsonb_header(raw)

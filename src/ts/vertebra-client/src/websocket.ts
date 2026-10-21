@@ -282,5 +282,3 @@ export class WebSocketClient {
     }, delay);
   }
 }
-
-export { WebSocketClient as VertebraWebSocket, WebSocketClient as VertebraWebSocketClient };

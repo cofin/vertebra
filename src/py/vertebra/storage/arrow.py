@@ -7,10 +7,10 @@ from typing import Self
 
 from vertebra.storage._store import ObjectStore
 
-__all__ = ("VertebraReadableFile",)
+__all__ = ("ReadableFile",)
 
 
-class VertebraReadableFile(io.RawIOBase):
+class ReadableFile(io.RawIOBase):
     """Seekable read-only file-like object backed by ObjectStore range reads (`get_range`).
 
     Enables PyArrow, Polars, and DataFusion to inspect Parquet footer metadata and read
@@ -123,5 +123,5 @@ class VertebraReadableFile(io.RawIOBase):
 
     def _ensure_open(self) -> None:
         if self._closed:
-            msg = "I/O operation on closed VertebraReadableFile"
+            msg = "I/O operation on closed ReadableFile"
             raise ValueError(msg)

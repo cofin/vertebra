@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-from vertebra.db._registry import AnyDatabaseConfig, DatabaseRegistry, parse_database_url
+from vertebra.db._registry import DatabaseRegistry
 from vertebra.db.cdc import (
     CdcConfig,
     ChangeEvent,
-    ListenNotifySpillBridge,
-    build_logical_emit_message_sql,
+    ChangeFeed,
 )
 from vertebra.db.datafusion import (
     ARROW_STREAM_MEDIA_TYPE,
     DataFusionConfig,
+    DataFusionEngine,
     DataFusionMode,
-    DataFusionTableRegistration,
-    EmbeddedDataFusionEngine,
+    TableRegistration,
 )
 from vertebra.db.dialer import (
     AlloyDbAuthType,
@@ -24,50 +23,38 @@ from vertebra.db.dialer import (
     CloudSqlConfig,
     CloudSqlDialer,
     CloudSqlInstanceUri,
-    encode_alloydb_metadata_exchange,
 )
 from vertebra.db.mysql import AsyncMysqlDriver, MysqlConfig, SyncMysqlDriver
 from vertebra.db.oracle import (
     AsyncOracleDriver,
-    ExtractedWallet,
-    OracleAdbFreeContainer,
     OracleConfig,
     OracleConnectDescriptor,
+    OracleContainer,
     OracleDataFrame,
     OraclePoolRegistry,
-    OraclePoolSettings,
-    OrdsApexContainer,
+    OracleWallet,
+    OrdsContainer,
     SyncOracleDriver,
-    build_wallet_ssl_context,
-    encode_oracle_vector,
-    extract_wallet_archive,
-    parse_tnsnames_ora,
-    resolve_tns_alias,
 )
 from vertebra.db.pipeline import (
     CteStep,
     QueryPipeline,
     RelOverlay,
-    chunked_jsonb_build_object,
 )
 from vertebra.db.postgres import (
     AsyncPostgresDriver,
+    PoolerMode,
     PostgresConfig,
     SyncPostgresDriver,
-    compute_worker_pool_budget,
-    strip_pg_jsonb_header,
 )
 from vertebra.db.redis import (
     AsyncRedisDriver,
     RedisConfig,
     SyncRedisDriver,
-    encode_hello3_handshake,
-    encode_resp_command,
 )
 from vertebra.db.rls import (
-    PlannerUnfencedTenantPredicate,
+    TenantPredicate,
     TenantScopeConfig,
-    build_session_tenant_guc_sql,
 )
 from vertebra.db.sqlite import AsyncSqliteDriver, SqliteConfig, SyncSqliteDriver
 from vertebra.db.valkey import (
@@ -82,7 +69,6 @@ __all__ = (
     "AlloyDbClusterUri",
     "AlloyDbConfig",
     "AlloyDbDialer",
-    "AnyDatabaseConfig",
     "AsyncMysqlDriver",
     "AsyncOracleDriver",
     "AsyncPostgresDriver",
@@ -91,26 +77,24 @@ __all__ = (
     "AsyncValkeyDriver",
     "CdcConfig",
     "ChangeEvent",
+    "ChangeFeed",
     "CloudSqlConfig",
     "CloudSqlDialer",
     "CloudSqlInstanceUri",
     "CteStep",
     "DataFusionConfig",
+    "DataFusionEngine",
     "DataFusionMode",
-    "DataFusionTableRegistration",
     "DatabaseRegistry",
-    "EmbeddedDataFusionEngine",
-    "ExtractedWallet",
-    "ListenNotifySpillBridge",
     "MysqlConfig",
-    "OracleAdbFreeContainer",
     "OracleConfig",
     "OracleConnectDescriptor",
+    "OracleContainer",
     "OracleDataFrame",
     "OraclePoolRegistry",
-    "OraclePoolSettings",
-    "OrdsApexContainer",
-    "PlannerUnfencedTenantPredicate",
+    "OracleWallet",
+    "OrdsContainer",
+    "PoolerMode",
     "PostgresConfig",
     "QueryPipeline",
     "RedisConfig",
@@ -122,20 +106,8 @@ __all__ = (
     "SyncRedisDriver",
     "SyncSqliteDriver",
     "SyncValkeyDriver",
+    "TableRegistration",
+    "TenantPredicate",
     "TenantScopeConfig",
     "ValkeyConfig",
-    "build_logical_emit_message_sql",
-    "build_session_tenant_guc_sql",
-    "build_wallet_ssl_context",
-    "chunked_jsonb_build_object",
-    "compute_worker_pool_budget",
-    "encode_alloydb_metadata_exchange",
-    "encode_hello3_handshake",
-    "encode_oracle_vector",
-    "encode_resp_command",
-    "extract_wallet_archive",
-    "parse_database_url",
-    "parse_tnsnames_ora",
-    "resolve_tns_alias",
-    "strip_pg_jsonb_header",
 )

@@ -5,7 +5,7 @@ import type { ClientConfig } from "../client/types";
 @Injectable({
   providedIn: "root",
 })
-export class VertebraClientService {
+export class ClientService {
   private client: HttpClient | null = null;
 
   init(config: ClientConfig) {
@@ -14,7 +14,7 @@ export class VertebraClientService {
 
   getClient(): HttpClient {
     if (!this.client) {
-      throw new Error("VertebraClientService must be initialized with init()");
+      throw new Error("ClientService must be initialized with init()");
     }
     return this.client;
   }
@@ -29,7 +29,7 @@ export function injectQuery<TInput = any, TOutput = any>(
   input: () => TInput,
   options: { enabled?: () => boolean } = {},
 ) {
-  const service = inject(VertebraClientService);
+  const service = inject(ClientService);
   const data = signal<TOutput | null>(null);
   const loading = signal(false);
   const error = signal<Error | null>(null);
@@ -67,7 +67,7 @@ export function injectQuery<TInput = any, TOutput = any>(
  * Angular 21 Signal-based mutation.
  */
 export function injectMutation<TInput = any, TOutput = any>(method: string, path: string) {
-  const service = inject(VertebraClientService);
+  const service = inject(ClientService);
   const loading = signal(false);
   const error = signal<Error | null>(null);
 

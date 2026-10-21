@@ -8,22 +8,23 @@ import calendar
 import hashlib
 import hmac
 import importlib
-import json
 import shutil
 import time
 import urllib.request
 from collections.abc import Buffer, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+import msgspec
+
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
     "AsyncStore",
     "AzureConfig",
     "GcsConfig",
     "HttpConfig",
-    "LitestarObjectStore",
     "LocalConfig",
     "MemoryConfig",
     "ObjectMeta",
@@ -35,15 +36,10 @@ __all__ = (
     "SigningConfig",
     "StorageConfig",
     "SyncStore",
-    "VertebraStore",
-    "chunk_r2_uniform_parts",
-    "sign_azure_sas",
-    "sign_oci_headers",
 )
 
 
-@dataclass(frozen=True, slots=True)
-class LocalConfig:
+class LocalConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for local filesystem object storage."""
 
     root: str | Path
@@ -57,8 +53,7 @@ class LocalConfig:
         return f"file://{resolved.as_posix()}", {}
 
 
-@dataclass(frozen=True, slots=True)
-class S3Config:
+class S3Config(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for AWS S3 or S3-compatible object storage."""
 
     bucket: str
@@ -86,8 +81,7 @@ class S3Config:
         return f"s3://{self.bucket}", opts
 
 
-@dataclass(frozen=True, slots=True)
-class GcsConfig:
+class GcsConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for Google Cloud Storage."""
 
     bucket: str
@@ -110,8 +104,7 @@ class GcsConfig:
         return f"gs://{self.bucket}", opts
 
 
-@dataclass(frozen=True, slots=True)
-class AzureConfig:
+class AzureConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for Azure Blob Storage and ADLS Gen2."""
 
     container: str
@@ -144,8 +137,7 @@ class AzureConfig:
         return f"az://{self.container}", opts
 
 
-@dataclass(frozen=True, slots=True)
-class OciConfig:
+class OciConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for native Oracle Cloud Infrastructure (OCI) Object Storage REST v2."""
 
     bucket: str
@@ -180,8 +172,7 @@ class OciConfig:
         return f"oci://{self.bucket}@{self.namespace}", opts
 
 
-@dataclass(frozen=True, slots=True)
-class R2Config:
+class R2Config(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for Cloudflare R2 object storage."""
 
     bucket: str
@@ -192,6 +183,18 @@ class R2Config:
     custom_domain: str | None = None
     endpoint: str | None = None
     allow_http: bool = False
+
+    @staticmethod
+    def chunk_uniform_parts(data: Buffer, part_size: int = 8 * 1024 * 1024) -> list[bytes]:
+        """Split a payload into uniform-sized parts for Cloudflare R2 multipart uploads."""
+        raw = memoryview(data).cast("B").tobytes()
+        native_mod = ObjectStore._get_native_module()
+        if native_mod is not None and hasattr(native_mod, "py_chunk_r2_uniform_parts"):
+            return [bytes(part) for part in native_mod.py_chunk_r2_uniform_parts(raw, part_size)]
+        size = max(part_size, 5 * 1024 * 1024)
+        if not raw:
+            return [b""]
+        return [raw[i : i + size] for i in range(0, len(raw), size)]
 
     def resolved_endpoint(self) -> str:
         """Resolve the Cloudflare R2 jurisdiction or custom endpoint URL."""
@@ -218,8 +221,7 @@ class R2Config:
         return f"r2://{self.bucket}", opts
 
 
-@dataclass(frozen=True, slots=True)
-class HttpConfig:
+class HttpConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for HTTP/WebDAV object storage."""
 
     url: str
@@ -230,8 +232,7 @@ class HttpConfig:
         return self.url, dict(self.headers or {})
 
 
-@dataclass(frozen=True, slots=True)
-class MemoryConfig:
+class MemoryConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for in-memory object storage."""
 
     namespace: str = "default"
@@ -244,9 +245,8 @@ class MemoryConfig:
 type StorageConfig = LocalConfig | S3Config | GcsConfig | AzureConfig | OciConfig | R2Config | HttpConfig | MemoryConfig
 
 
-@dataclass(frozen=True, slots=True)
-class ObjectMeta:
-    """Metadata describing an object stored in VertebraStore."""
+class ObjectMeta(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Metadata describing an object stored in ObjectStore."""
 
     path: str
     size: int
@@ -255,8 +255,7 @@ class ObjectMeta:
     version: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class PutResult:
+class PutResult(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Result metadata returned from a write operation."""
 
     path: str
@@ -265,8 +264,7 @@ class PutResult:
     version: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class SigningConfig:
+class SigningConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for HMAC-SHA256, S3 SigV4, and GCS V4 presigned URL generation."""
 
     provider: Literal["hmac", "s3", "gcs"] = "hmac"
@@ -279,6 +277,82 @@ class SigningConfig:
     iam_endpoint: str = "https://iamcredentials.googleapis.com"
     access_token: str | None = None
     endpoint: str | None = None
+
+    @staticmethod
+    def sign_oci_headers(
+        tenancy_ocid: str,
+        user_ocid: str,
+        fingerprint: str,
+        private_key_pem: str,
+        method: str,
+        url: str,
+        *,
+        body: bytes | None = None,
+        content_type: str | None = None,
+        timestamp: int = 1_700_000_000,
+    ) -> dict[str, str]:
+        """Compute OCI draft-cavage-http-signatures-08 RSA-SHA256 signed headers."""
+        native_mod = ObjectStore._get_native_module()
+        if native_mod is not None and hasattr(native_mod, "py_sign_oci_cavage_headers"):
+            return dict(
+                native_mod.py_sign_oci_cavage_headers(
+                    tenancy_ocid,
+                    user_ocid,
+                    fingerprint,
+                    private_key_pem,
+                    method,
+                    url,
+                    body,
+                    content_type,
+                    timestamp,
+                )
+            )
+        msg = "vertebra._storage native module is required for RSA-SHA256 OCI request signing"
+        raise RuntimeError(msg)
+
+    @staticmethod
+    def sign_azure_sas(
+        account: str,
+        access_key: str,
+        container: str,
+        blob_name: str,
+        *,
+        method: str = "GET",
+        expires_in_secs: int = 3600,
+        now_ts: int | None = None,
+        endpoint: str | None = None,
+    ) -> str:
+        """Compute an Azure Blob Service SAS URL (HMAC-SHA256)."""
+        resolved_ts = int(time.time()) if now_ts is None else now_ts
+        native_mod = ObjectStore._get_native_module()
+        if native_mod is not None and hasattr(native_mod, "py_sign_azure_sas_url"):
+            return str(
+                native_mod.py_sign_azure_sas_url(
+                    account,
+                    container,
+                    access_key,
+                    method,
+                    blob_name,
+                    expires_in_secs,
+                    resolved_ts,
+                    endpoint,
+                )
+            )
+        expiry_ts = resolved_ts + expires_in_secs
+        se = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expiry_ts))
+        sv = "2020-12-06"
+        sp = "cw" if method.upper() in {"PUT", "POST"} else "r"
+        canonicalized_resource = f"/blob/{account}/{container}/{blob_name.lstrip('/')}"
+        string_to_sign = "\n".join(
+            [sp, "", se, canonicalized_resource, "", "", "https", sv, "b", "", "", "", "", "", ""]
+        )
+        decoded_key = base64.b64decode(access_key)
+        sig = base64.b64encode(hmac.new(decoded_key, string_to_sign.encode("utf-8"), hashlib.sha256).digest()).decode(
+            "ascii"
+        )
+        qs = urlencode({"sv": sv, "sr": "b", "sp": sp, "se": se, "spr": "https", "sig": sig})
+        base_url = (endpoint or f"https://{account}.blob.core.windows.net").rstrip("/")
+        return f"{base_url}/{container}/{blob_name.lstrip('/')}?{qs}"
 
 
 class ObjectStore:
@@ -1132,13 +1206,19 @@ class ObjectStore:
             f"{self._signing.iam_endpoint.rstrip('/')}/v1/projects/-/serviceAccounts/"
             f"{self._signing.service_account_email}:signBlob"
         )
-        body_bytes = json.dumps({"payload": base64.b64encode(string_to_sign.encode()).decode("ascii")}).encode("utf-8")
+        body_bytes = bytes(encode_json_bytes({"payload": base64.b64encode(string_to_sign.encode()).decode("ascii")}))
         headers = {"Content-Type": "application/json"}
         if self._signing.access_token:
             headers["Authorization"] = f"Bearer {self._signing.access_token}"
         req = urllib.request.Request(iam_url, data=body_bytes, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp_data = json.loads(resp.read().decode("utf-8"))
+        parsed_iam = urlparse(iam_url)
+        opener = (
+            urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            if parsed_iam.hostname in {"127.0.0.1", "localhost", "::1"}
+            else urllib.request.build_opener()
+        )
+        with opener.open(req, timeout=10) as resp:
+            resp_data = decode_json(resp.read())
         signed_blob_str = str(resp_data["signedBlob"])
         try:
             raw_sig = base64.b64decode(signed_blob_str, validate=True)
@@ -1283,93 +1363,3 @@ class AsyncStore:
     async def list(self, prefix: str = "") -> builtins.list[ObjectMeta]:
         """List objects under prefix asynchronously."""
         return await self._store.list_async(prefix)
-
-
-def sign_oci_headers(
-    tenancy_ocid: str,
-    user_ocid: str,
-    fingerprint: str,
-    private_key_pem: str,
-    method: str,
-    url: str,
-    *,
-    body: bytes | None = None,
-    content_type: str | None = None,
-    timestamp: int = 1_700_000_000,
-) -> dict[str, str]:
-    """Compute OCI draft-cavage-http-signatures-08 RSA-SHA256 signed headers."""
-    native_mod = ObjectStore._get_native_module()
-    if native_mod is not None and hasattr(native_mod, "py_sign_oci_cavage_headers"):
-        return dict(
-            native_mod.py_sign_oci_cavage_headers(
-                tenancy_ocid,
-                user_ocid,
-                fingerprint,
-                private_key_pem,
-                method,
-                url,
-                body,
-                content_type,
-                timestamp,
-            )
-        )
-    msg = "vertebra._storage native module is required for RSA-SHA256 OCI request signing"
-    raise RuntimeError(msg)
-
-
-def sign_azure_sas(
-    account: str,
-    access_key: str,
-    container: str,
-    blob_name: str,
-    *,
-    method: str = "GET",
-    expires_in_secs: int = 3600,
-    now_ts: int | None = None,
-    endpoint: str | None = None,
-) -> str:
-    """Compute an Azure Blob Service SAS URL (HMAC-SHA256)."""
-    resolved_ts = int(time.time()) if now_ts is None else now_ts
-    native_mod = ObjectStore._get_native_module()
-    if native_mod is not None and hasattr(native_mod, "py_sign_azure_sas_url"):
-        return str(
-            native_mod.py_sign_azure_sas_url(
-                account,
-                container,
-                access_key,
-                method,
-                blob_name,
-                expires_in_secs,
-                resolved_ts,
-                endpoint,
-            )
-        )
-    expiry_ts = resolved_ts + expires_in_secs
-    se = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expiry_ts))
-    sv = "2020-12-06"
-    sp = "cw" if method.upper() in {"PUT", "POST"} else "r"
-    canonicalized_resource = f"/blob/{account}/{container}/{blob_name.lstrip('/')}"
-    string_to_sign = "\n".join([sp, "", se, canonicalized_resource, "", "", "https", sv, "b", "", "", "", "", "", ""])
-    decoded_key = base64.b64decode(access_key)
-    sig = base64.b64encode(hmac.new(decoded_key, string_to_sign.encode("utf-8"), hashlib.sha256).digest()).decode(
-        "ascii"
-    )
-    qs = urlencode({"sv": sv, "sr": "b", "sp": sp, "se": se, "spr": "https", "sig": sig})
-    base_url = (endpoint or f"https://{account}.blob.core.windows.net").rstrip("/")
-    return f"{base_url}/{container}/{blob_name.lstrip('/')}?{qs}"
-
-
-def chunk_r2_uniform_parts(payload: Buffer, *, part_size: int = 8 * 1024 * 1024) -> list[bytes]:
-    """Split a payload into uniform-sized parts for Cloudflare R2 multipart uploads."""
-    raw = memoryview(payload).cast("B").tobytes()
-    native_mod = ObjectStore._get_native_module()
-    if native_mod is not None and hasattr(native_mod, "py_chunk_r2_uniform_parts"):
-        return [bytes(part) for part in native_mod.py_chunk_r2_uniform_parts(raw, part_size)]
-    size = max(part_size, 5 * 1024 * 1024)
-    if not raw:
-        return [b""]
-    return [raw[i : i + size] for i in range(0, len(raw), size)]
-
-
-VertebraStore = ObjectStore
-LitestarObjectStore = ObjectStore

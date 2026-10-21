@@ -1,6 +1,8 @@
 """Tests for JsConfig and BuildConfig JS section parsing."""
 
-from vertebra.builder._config import BuildConfig, JsConfig
+from pathlib import Path
+
+from vertebra.build import BuildConfig, JsConfig
 
 
 def test_js_config_defaults_dependencies_default_empty() -> None:
@@ -29,7 +31,7 @@ def test_build_config_defaults_js_default_empty() -> None:
     assert cfg.js.dev_dependencies == ()
 
 
-def test_build_config_load_loads_js_section(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_build_config_load_loads_js_section(tmp_path: Path) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
         """\
@@ -47,7 +49,7 @@ dev-dependencies = ["typescript@^5"]
     assert cfg.js.dev_dependencies == ("typescript@^5",)
 
 
-def test_build_config_load_no_js_section(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_build_config_load_no_js_section(tmp_path: Path) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
         """\
@@ -60,7 +62,7 @@ bundler = "native"
     assert cfg.js.dev_dependencies == ()
 
 
-def test_build_config_load_no_vertebra_section(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_build_config_load_no_vertebra_section(tmp_path: Path) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
         """\
@@ -73,13 +75,13 @@ name = "myapp"
     assert cfg.js.dependencies == ()
 
 
-def test_build_config_load_missing_file(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_build_config_load_missing_file(tmp_path: Path) -> None:
     cfg = BuildConfig.load(tmp_path / "nonexistent.toml")
     assert cfg.bundler == "native"
     assert cfg.js.dependencies == ()
 
 
-def test_build_config_load_hyphenated_keys(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_build_config_load_hyphenated_keys(tmp_path: Path) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
         """\
@@ -92,7 +94,7 @@ dev-dependencies = ["vitest@^1", "@testing-library/react@^14"]
     assert cfg.js.dev_dependencies == ("vitest@^1", "@testing-library/react@^14")
 
 
-def test_build_config_load_dev_port_parsed(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_build_config_load_dev_port_parsed(tmp_path: Path) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
         """\

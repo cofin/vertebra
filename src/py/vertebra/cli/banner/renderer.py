@@ -5,7 +5,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from vertebra.builder._config import BuildConfig
+from vertebra.build import BuildConfig
 from vertebra.cli.banner.logos import LOGO_COMPACT, get_logo
 from vertebra.cli.theme import (
     ACCENT,

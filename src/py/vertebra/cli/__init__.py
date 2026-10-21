@@ -8,22 +8,11 @@ from vertebra.cli.dev import dev as _dev_cmd
 from vertebra.cli.init import init as _init_cmd
 from vertebra.cli.js import js as _js_cmd
 from vertebra.cli.mcp import mcp as _mcp_cmd
-from vertebra.cli.plugin_registry import (
-    CLIPluginProtocol,
-    discover_entry_point_commands,
-    register_app_cli_plugins,
-)
+from vertebra.cli.plugin_registry import discover_entry_point_commands
 from vertebra.cli.run import run as _run_cmd
 from vertebra.cli.workers import workers as _workers_cmd
 
-__all__ = (
-    "CLIPluginProtocol",
-    "cli",
-    "discover_entry_point_commands",
-    "main",
-    "register_app_cli_plugins",
-    "vtb",
-)
+__all__ = ("cli",)
 
 configure_rich_click()
 
@@ -45,9 +34,6 @@ cli.add_command(_mcp_cmd)
 cli.add_command(_workers_cmd)
 cli.add_command(build_command, name="build")
 discover_entry_point_commands(cli)
-
-vtb = cli
-main = cli
 
 if __name__ == "__main__":
     cli()

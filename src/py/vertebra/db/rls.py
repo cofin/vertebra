@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
+import msgspec
+
 __all__ = (
-    "PlannerUnfencedTenantPredicate",
+    "TenantPredicate",
     "TenantScopeConfig",
-    "build_session_tenant_guc_sql",
 )
 
 
-@dataclass(frozen=True, slots=True)
-class TenantScopeConfig:
+class TenantScopeConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for dual-layer PostgreSQL tenant isolation (planner predicate + RLS GUC)."""
 
     guc_name: str = "app.tenant_id"
@@ -21,19 +20,7 @@ class TenantScopeConfig:
     parameter_cast: str | None = "uuid"
 
 
-def build_session_tenant_guc_sql(
-    tenant_id: str,
-    *,
-    config: TenantScopeConfig | None = None,
-    is_local: bool = True,
-) -> tuple[str, tuple[str, str, bool]]:
-    """Build a parameterized ``set_config($1, $2, $3)`` statement for transaction-local RLS enforcement."""
-    cfg = config or TenantScopeConfig()
-    return "SELECT set_config($1, $2, $3)", (cfg.guc_name, tenant_id, is_local)
-
-
-@dataclass(frozen=True, slots=True)
-class PlannerUnfencedTenantPredicate:
+class TenantPredicate(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Positional tenant predicate allowing PostgreSQL index scans without ``security_barrier`` fencing."""
 
     table_alias: str
@@ -45,3 +32,14 @@ class PlannerUnfencedTenantPredicate:
         col_ref = f"{self.table_alias}.{self.config.tenant_column}" if self.table_alias else self.config.tenant_column
         cast_suffix = f"::{self.config.parameter_cast}" if self.config.parameter_cast else ""
         return f"{col_ref} = ${param_index}{cast_suffix}"
+
+    @staticmethod
+    def build_session_guc_sql(
+        tenant_id: str,
+        config: TenantScopeConfig | None = None,
+        *,
+        is_local: bool = True,
+    ) -> tuple[str, tuple[str, str, bool]]:
+        """Build a parameterized ``set_config($1, $2, $3)`` statement for transaction-local RLS enforcement."""
+        cfg = config or TenantScopeConfig()
+        return "SELECT set_config($1, $2, $3)", (cfg.guc_name, tenant_id, is_local)

@@ -1,57 +1,74 @@
 """Import map generation from JavaScript dependency configuration."""
 
-from typing import TYPE_CHECKING, Any
+from collections.abc import Sequence
+from pathlib import Path
 
 import msgspec
 
-from vertebra.utils.serializers._json import encode_json
+from vertebra.build._config import JsConfig
+from vertebra.utils.serializers import encode_json_bytes
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from vertebra.build._config import JsConfig
-
-__all__ = ("generate_import_map", "parse_package_spec", "write_import_map")
+__all__ = ("ImportMapGenerator",)
 
 
-def parse_package_spec(spec: str) -> tuple[str, str]:
-    """Parse a package specifier into ``(name, version)``."""
-    if spec.startswith("@"):
-        rest = spec[1:]
-        after_slash = rest.split("/", 1)[-1]
-        if "@" in after_slash:
-            idx = spec.rindex("@")
-            return spec[:idx], spec[idx + 1 :]
-        return spec, ""
+class ImportMapGenerator:
+    """Generate and persist V8-compatible JavaScript import maps."""
 
-    name, _, version = spec.partition("@")
-    return name, version
+    @staticmethod
+    def parse_spec(spec: str) -> tuple[str, str]:
+        """Parse a package specifier into ``(name, version)``."""
+        if spec.startswith("@"):
+            rest = spec[1:]
+            after_slash = rest.split("/", 1)[-1]
+            if "@" in after_slash:
+                idx = spec.rindex("@")
+                return spec[:idx], spec[idx + 1 :]
+            return spec, ""
 
+        name, _, version = spec.partition("@")
+        return name, version
 
-def generate_import_map(js_config: "JsConfig", *, include_dev: bool = False) -> dict[str, Any]:
-    """Generate a V8-compatible import map from *js_config*."""
-    imports: dict[str, str] = {}
+    @staticmethod
+    def generate(
+        js_config: JsConfig | Sequence[str],
+        *,
+        include_dev: bool = False,
+    ) -> dict[str, dict[str, str]]:
+        """Generate a V8-compatible import map from *js_config* or package specifiers."""
+        imports: dict[str, str] = {}
 
-    all_specs = list(js_config.dependencies)
-    if include_dev:
-        all_specs.extend(js_config.dev_dependencies)
-
-    for spec in all_specs:
-        name, version = parse_package_spec(spec)
-        if version:
-            imports[name] = f"npm:{name}@{version}"
+        if isinstance(js_config, JsConfig):
+            all_specs = list(js_config.dependencies)
+            if include_dev:
+                all_specs.extend(js_config.dev_dependencies)
         else:
-            imports[name] = f"npm:{name}"
+            all_specs = list(js_config)
 
-    return {"imports": imports}
+        for spec in all_specs:
+            name, version = ImportMapGenerator.parse_spec(spec)
+            if version:
+                imports[name] = f"npm:{name}@{version}"
+            else:
+                imports[name] = f"npm:{name}"
 
+        return {"imports": imports}
 
-def write_import_map(js_config: "JsConfig", output_dir: "Path", *, include_dev: bool = False) -> "Path":
-    """Generate and write ``import_map.json`` to *output_dir*."""
-    import_map = generate_import_map(js_config, include_dev=include_dev)
+    @staticmethod
+    def write(
+        js_config: JsConfig | Sequence[str],
+        output_dir: Path,
+        *,
+        include_dev: bool = False,
+    ) -> Path:
+        """Generate and write ``import_map.json`` to *output_dir*."""
+        import_map = ImportMapGenerator.generate(js_config, include_dev=include_dev)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "import_map.json"
-    formatted = msgspec.json.format(encode_json(import_map, as_bytes=True), indent=2).decode("utf-8")
-    output_path.write_text(formatted + "\n")
-    return output_path
+        if output_dir.suffix == ".json":
+            output_dir.parent.mkdir(parents=True, exist_ok=True)
+            output_path = output_dir
+        else:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = output_dir / "import_map.json"
+        formatted = msgspec.json.format(encode_json_bytes(import_map), indent=2).decode("utf-8")
+        output_path.write_text(formatted + "\n")
+        return output_path

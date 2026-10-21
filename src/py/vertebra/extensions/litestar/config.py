@@ -1,17 +1,11 @@
 """Configuration for LitestarPlugin integration."""
 
-import dataclasses
+import msgspec
 
-__all__ = (
-    "LitestarConfig",
-    "ServerConfig",
-    "VertebraConfig",
-    "VertebraServerConfig",
-)
+__all__ = ("LitestarConfig",)
 
 
-@dataclasses.dataclass(slots=True, frozen=True)
-class LitestarConfig:
+class LitestarConfig(msgspec.Struct, frozen=True, gc=False):
     """Configuration controlling zero-code-change Litestar accelerations and runtime hooks."""
 
     offload_compression: bool = True
@@ -23,8 +17,3 @@ class LitestarConfig:
     enable_direct_handler_fastpath: bool = True
     enable_health_endpoint: bool = False
     health_path: str = "/healthz"
-
-
-ServerConfig = LitestarConfig
-VertebraConfig = LitestarConfig
-VertebraServerConfig = LitestarConfig

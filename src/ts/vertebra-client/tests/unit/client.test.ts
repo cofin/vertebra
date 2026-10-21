@@ -4,7 +4,7 @@ import { TimeoutError } from "../../src/client/errors";
 import { computeBackoffDelay } from "../../src/client/retry";
 import { RealtimeChannel } from "../../src/client/ws";
 import { HotReloadClient } from "../../src/hmr/index";
-import { initVertebraHtmx } from "../../src/htmx/index";
+import { initHtmx } from "../../src/htmx/index";
 import * as rootExports from "../../src/index";
 import { QueryCache } from "../../src/react/cache";
 
@@ -164,8 +164,8 @@ describe("QueryCache", () => {
   });
 });
 
-describe("initVertebraHtmx", () => {
+describe("initHtmx", () => {
   it("returns undefined without allocating an unused client", () => {
-    expect(initVertebraHtmx({ baseURL: "http://api.test" })).toBeUndefined();
+    expect(initHtmx({ baseURL: "http://api.test" })).toBeUndefined();
   });
 });

@@ -6,11 +6,10 @@ import io
 import struct
 import tarfile
 import zlib
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from vertebra.build.packaging.targets import BuildTargetTuple
+from vertebra.build.packaging.targets import BuildTarget
 
 __all__ = (
     "ONEFILE_MAGIC",
@@ -23,17 +22,17 @@ ONEFILE_TRAILER_STRUCT = struct.Struct("<8sQ32s")
 ONEFILE_TRAILER_SIZE: int = ONEFILE_TRAILER_STRUCT.size
 
 
-@dataclass(slots=True)
 class OnefileBuilder:
     """Package a standalone distribution directory into a single-file executable with a VTB1FILE footer."""
 
-    dist_dir: Path
-    target: BuildTargetTuple
+    __slots__ = ("dist_dir", "target")
 
-    def __post_init__(self) -> None:
-        if not self.dist_dir.exists():
-            msg = f"Standalone distribution folder not found: {self.dist_dir}"
+    def __init__(self, dist_dir: Path, target: BuildTarget) -> None:
+        if not dist_dir.exists():
+            msg = f"Standalone distribution folder not found: {dist_dir}"
             raise ValueError(msg)
+        self.dist_dir = dist_dir
+        self.target = target
 
     def build(self, output_path: Path) -> Path:
         """Create a single-file executable containing a launcher stub, compressed tar archive, and 48-byte footer."""

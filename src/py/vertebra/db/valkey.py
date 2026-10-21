@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
 from typing import Literal
 
-from vertebra.db.redis import (
-    encode_hello3_handshake,
-    encode_resp_command,
-)
+import msgspec
+
+from vertebra.db.redis import SyncRedisDriver
 
 __all__ = (
     "AsyncValkeyDriver",
@@ -18,8 +16,7 @@ __all__ = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class ValkeyConfig:
+class ValkeyConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for Valkey 8.0+ / 9.0+ standalone, Sentinel, Cluster, and GCP Memorystore."""
 
     url: str = "valkey://localhost:6379/0"
@@ -29,9 +26,9 @@ class ValkeyConfig:
     protocol: Literal[2, 3] = 3
     topology: Literal["standalone", "sentinel", "cluster"] = "standalone"
     sentinel_service_name: str | None = None
-    cluster_nodes: tuple[str, ...] = field(default_factory=tuple)
+    cluster_nodes: tuple[str, ...] = ()
     enable_client_side_caching: bool = True
-    client_tracking_prefixes: tuple[str, ...] = field(default_factory=tuple)
+    client_tracking_prefixes: tuple[str, ...] = ()
     enable_gcp_memorystore_iam: bool = False
     memorystore_instance_id: str | None = None
     max_connections: int = 32
@@ -46,9 +43,9 @@ class ValkeyConfig:
         effective_password = iam_token if (self.enable_gcp_memorystore_iam and iam_token) else self.password
         effective_user = "default" if self.enable_gcp_memorystore_iam else self.username
         cmds = [
-            encode_hello3_handshake(
-                username=effective_user,
-                password=effective_password,
+            SyncRedisDriver.encode_hello3_handshake(
+                auth_username=effective_user,
+                auth_password=effective_password,
                 client_name=self.client_name,
             )
         ]
@@ -57,7 +54,7 @@ class ValkeyConfig:
             for prefix in self.client_tracking_prefixes:
                 tracking_cmd.extend(["PREFIX", prefix])
             tracking_cmd.append("BCAST")
-            cmds.append(encode_resp_command(tracking_cmd))
+            cmds.append(SyncRedisDriver.encode_command(*tracking_cmd))
         return cmds
 
 
@@ -118,7 +115,7 @@ class SyncValkeyDriver:
 
     def encode_pipeline(self, commands: Sequence[Sequence[bytes | str]]) -> bytes:
         """Encode a batch of pipelined Valkey RESP3 commands into a single wire buffer."""
-        return b"".join(encode_resp_command(cmd) for cmd in commands)
+        return b"".join(SyncRedisDriver.encode_command(*cmd) for cmd in commands)
 
 
 class AsyncValkeyDriver:

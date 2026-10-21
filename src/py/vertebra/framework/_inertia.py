@@ -9,9 +9,10 @@ and redirect fixup.
 import hashlib
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+
+import msgspec
 
 from vertebra.framework._types import Headers, Response
 from vertebra.utils.serializers._json import encode_json
@@ -40,8 +41,7 @@ __all__ = (
 logger = logging.getLogger("vertebra.inertia")
 
 
-@dataclass
-class InertiaConfig:
+class InertiaConfig(msgspec.Struct, frozen=True, gc=False):
     """Configuration for the Inertia.js v3 middleware."""
 
     enabled: bool = False
@@ -54,7 +54,7 @@ class InertiaConfig:
     ssr_pool_size: int = 4
     ssr_entry: str | None = None
     sidecar_port: int = 13714
-    shared_data: dict[str, Any] = field(default_factory=dict)
+    shared_data: dict[str, Any] = msgspec.field(default_factory=dict)
     manifest_path: str = "dist/.vite/manifest.json"
 
 
@@ -171,12 +171,11 @@ def optional(resolver: Callable[[], Any]) -> OptionalProp:
     return OptionalProp(resolver)
 
 
-@dataclass
-class InertiaResponse:
+class InertiaResponse(msgspec.Struct, frozen=True, gc=False):
     """Value returned by an Inertia page handler."""
 
     component: str
-    props: dict[str, Any] = field(default_factory=dict)
+    props: dict[str, Any] = msgspec.field(default_factory=dict)
     encrypt_history: bool = False
     clear_history: bool = False
 
@@ -197,8 +196,7 @@ def inertia(
     )
 
 
-@dataclass
-class SsrResult:
+class SsrResult(msgspec.Struct, frozen=True, gc=False):
     """Result from an SSR render call."""
 
     head: list[str]

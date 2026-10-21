@@ -1,4 +1,4 @@
-"""Unit tests for Oracle APEX session management, ORDS OpenAPI bridge, and Gemini Enterprise EBS Gateway."""
+"""Unit tests for Oracle APEX session management, ORDS OpenAPI generator, and EBS Gateway."""
 
 from __future__ import annotations
 
@@ -10,17 +10,20 @@ import pytest
 
 from vertebra.extensions.apex import (
     ApexLangRunner,
-    ApexOpenAPIBridge,
+    ApexOpenAPIGenerator,
     ApexSessionContext,
+    ConfirmationGate,
     DualityViewSpec,
+    EbsGateway,
     EbsResponsibilityMapping,
-    GeminiEnterpriseEbsGateway,
     OracleSessionManager,
 )
 
 
 class FakeOracleConn:
     """In-memory mock of an async python-oracledb Thin connection."""
+
+    __slots__ = ("action", "client_identifier", "ecid", "executed", "module")
 
     def __init__(self) -> None:
         self.module: str | None = None
@@ -39,6 +42,8 @@ class FakeOracleConn:
 
 class FakeOraclePool:
     """In-memory mock of an async python-oracledb connection pool."""
+
+    __slots__ = ("conn",)
 
     def __init__(self) -> None:
         self.conn = FakeOracleConn()
@@ -92,12 +97,14 @@ async def test_oracle_session_manager_attach_and_guaranteed_detach() -> None:
 
 
 @pytest.mark.anyio
-async def test_gemini_enterprise_ebs_gateway_policy_and_confirmation_gate() -> None:
-    """Verify GeminiEnterpriseEbsGateway enforces responsibility policy and confirmation tokens."""
+async def test_ebs_gateway_policy_and_confirmation_gate() -> None:
+    """Verify EbsGateway enforces responsibility policy and ConfirmationGate tokens."""
     pool = FakeOraclePool()
-    gateway = GeminiEnterpriseEbsGateway(
+    gate = ConfirmationGate()
+    gateway = EbsGateway(
         agent_name="ebs-procurement-agent",
         endpoint_url="https://agents.example.com/a2a",
+        confirmation_gate=gate,
     )
     mapping = EbsResponsibilityMapping(
         principal_email="buyer@example.com",
@@ -143,10 +150,10 @@ async def test_gemini_enterprise_ebs_gateway_policy_and_confirmation_gate() -> N
     assert "PO_DOCUMENT_ACTION_PVT.APPROVE" in pool.conn.executed[1][0]
 
 
-def test_ords_openapi_and_duality_view_bridge_and_apexlang() -> None:
-    """Verify ApexOpenAPIBridge converts ORDS OpenAPI and 26ai Duality Views into MCP/A2A specs."""
-    bridge = ApexOpenAPIBridge("https://adb.example.com/ords/hr")
-    bridge.load_ords_openapi(
+def test_ords_openapi_and_duality_view_generator_and_apexlang() -> None:
+    """Verify ApexOpenAPIGenerator converts ORDS OpenAPI and 26ai Duality Views into MCP/A2A specs."""
+    generator = ApexOpenAPIGenerator("https://adb.example.com/ords/hr")
+    generator.load_ords_openapi(
         "hr",
         {
             "paths": {
@@ -159,9 +166,9 @@ def test_ords_openapi_and_duality_view_bridge_and_apexlang() -> None:
             }
         },
     )
-    bridge.register_duality_view(DualityViewSpec(view_name="ORDER_DV", root_table="ORDERS"))
-    tools = bridge.to_mcp_tools()
-    skills = bridge.to_a2a_skills()
+    generator.register_duality_view(DualityViewSpec(view_name="ORDER_DV", root_table="ORDERS"))
+    tools = generator.to_mcp_tools()
+    skills = generator.to_a2a_skills()
     assert len(tools) == 2
     assert len(skills) == 2
     assert tools[0].name == "list_employees"

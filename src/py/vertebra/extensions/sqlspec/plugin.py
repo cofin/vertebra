@@ -6,12 +6,11 @@ import contextlib
 import importlib
 import inspect
 from collections.abc import Sequence
-from dataclasses import dataclass, field
-from typing import Any, Protocol, cast, overload, runtime_checkable
+from typing import Any, ClassVar, Protocol, cast, overload, runtime_checkable
 
 from vertebra.extensions.alchemy.broker import BrokerPlugin, BrokerTransport, ChannelMessage
-from vertebra.extensions.alchemy.plugin import synthesize_skip_validation_annotation
-from vertebra.extensions.sqlspec.storage import SQLSpecStorageBridge
+from vertebra.extensions.alchemy.plugin import AlchemyPlugin
+from vertebra.extensions.sqlspec.storage import SQLSpecStore
 from vertebra.storage import ObjectStore as BaseObjectStore
 
 __all__ = (
@@ -24,17 +23,11 @@ __all__ = (
     "DatabaseConfigProtocol",
     "ProxyAsyncConfig",
     "ProxySyncConfig",
-    "SQLSpec",
     "SQLSpecConfig",
     "SQLSpecPlugin",
     "SQLSpecState",
-    "SQLSpecStorePlugin",
     "SyncDatabaseConfig",
     "SyncDriverAdapterBase",
-    "VertebraProxyAsyncConfig",
-    "VertebraProxySyncConfig",
-    "VertebraSQLSpecPlugin",
-    "wrap_config",
 )
 
 SQLSPEC_PLUGIN_PRIORITY: int = -5800
@@ -91,12 +84,18 @@ class SyncDatabaseConfig[
     """Base synchronous SQLSpec database configuration."""
 
     is_async: bool = False
-    supports_connection_pooling: bool = True
-    bind_key: str = "default"
-    session_key: str = "db_session"
-    connection_key: str = "db_connection"
-    pool_config: dict[str, Any]
-    driver_features: dict[str, Any]
+    __slots__ = (
+        "_connection_instance",
+        "_driver_instance",
+        "_pool_instance",
+        "bind_key",
+        "connection_key",
+        "driver_features",
+        "dsn",
+        "pool_config",
+        "session_key",
+        "supports_connection_pooling",
+    )
 
     def __init__(
         self,
@@ -145,12 +144,18 @@ class AsyncDatabaseConfig[
     """Base asynchronous SQLSpec database configuration."""
 
     is_async: bool = True
-    supports_connection_pooling: bool = True
-    bind_key: str = "default"
-    session_key: str = "db_session"
-    connection_key: str = "db_connection"
-    pool_config: dict[str, Any]
-    driver_features: dict[str, Any]
+    __slots__ = (
+        "_connection_instance",
+        "_driver_instance",
+        "_pool_instance",
+        "bind_key",
+        "connection_key",
+        "driver_features",
+        "dsn",
+        "pool_config",
+        "session_key",
+        "supports_connection_pooling",
+    )
 
     def __init__(
         self,
@@ -191,24 +196,6 @@ class AsyncDatabaseConfig[
         return cast("PoolT", self._pool_instance)
 
 
-def _is_in_memory_dsn(dsn: str | None) -> bool:
-    if not dsn:
-        return False
-    lowered = dsn.lower()
-    return ":memory:" in lowered or "mode=memory" in lowered
-
-
-def _inject_sqlspec_pool_defaults(config: Any) -> None:
-    supports_pooling = bool(getattr(config, "supports_connection_pooling", True))
-    dsn = getattr(config, "dsn", None) or getattr(config, "connection_string", None)
-    if not supports_pooling or _is_in_memory_dsn(dsn):
-        return
-    pool_cfg = getattr(config, "pool_config", None)
-    if isinstance(pool_cfg, dict):
-        pool_cfg.setdefault("pool_pre_ping", True)
-        pool_cfg.setdefault("pool_recycle", 1800)
-
-
 class SQLSpecConfig[ConfigT]:
     """Generic SQLSpec configuration wrapper preserving concrete ConfigT types across all SQLSpec drivers."""
 
@@ -247,11 +234,18 @@ class SQLSpecConfig[ConfigT]:
         """Forward attribute lookups to the underlying ConfigT instance."""
         return getattr(self.config, name)
 
+    @classmethod
+    def wrap[T](cls, config: T) -> SQLSpecConfig[T]:
+        """Wrap any SQLSpec configuration in SQLSpecConfig[T] with production pool defaults."""
+        return SQLSpecConfig(config)
+
 
 class ProxySyncConfig[
     SyncConfigT: SyncDatabaseConfig[Any, Any, Any],
 ](SyncDatabaseConfig[Any, Any, Any]):
     """Generic synchronous SQLSpec proxy configuration preserving inner SyncConfigT types."""
+
+    __slots__ = ("broker", "config")
 
     def __init__(
         self,
@@ -290,6 +284,8 @@ class ProxyAsyncConfig[
 ](AsyncDatabaseConfig[Any, Any, Any]):
     """Generic asynchronous SQLSpec proxy configuration preserving inner AsyncConfigT types."""
 
+    __slots__ = ("broker", "config")
+
     def __init__(
         self,
         config: AsyncConfigT,
@@ -322,35 +318,55 @@ class ProxyAsyncConfig[
         return self.config.create_pool()
 
 
-def wrap_config[ConfigT](config: ConfigT) -> SQLSpecConfig[ConfigT]:
-    """Wrap any SQLSpec configuration in SQLSpecConfig[ConfigT] with production pool defaults."""
-    return SQLSpecConfig(config)
-
-
-@dataclass(slots=True)
 class SQLSpecState:
     """Runtime state container registered under state['sqlspec']."""
 
-    pools: dict[str | None, Any] = field(default_factory=dict)
-    configs: dict[str | None, Any] = field(default_factory=dict)
-    object_store: SQLSpecStorageBridge | None = None
-    is_available: bool = True
+    __slots__ = ("configs", "is_available", "object_store", "pools")
+
+    def __init__(
+        self,
+        pools: dict[str | None, Any] | None = None,
+        configs: dict[str | None, Any] | None = None,
+        object_store: SQLSpecStore | None = None,
+        is_available: bool = True,
+    ) -> None:
+        self.pools: dict[str | None, Any] = dict(pools or {})
+        self.configs: dict[str | None, Any] = dict(configs or {})
+        self.object_store = object_store
+        self.is_available = is_available
 
 
-@dataclass(slots=True)
-class SQLSpec[ConfigT]:
+class SQLSpecPlugin[ConfigT]:
     """Litestar and Vertebra SQLSpec plugin parameterized by the wrapped database configuration."""
 
-    config: ConfigT | Sequence[ConfigT] | None = None
-    store: BaseObjectStore | None = None
-    storage_prefix: str = ""
-    storage_key: str = "vertebra"
-    loader: Any = None
-    priority: int = SQLSPEC_PLUGIN_PRIORITY
-    _state: SQLSpecState | None = field(default=None, init=False, repr=False)
+    PLUGIN_PRIORITY: ClassVar[int] = SQLSPEC_PLUGIN_PRIORITY
+    STATE_KEY: ClassVar[str] = SQLSPEC_STATE_KEY
+    __slots__ = (
+        "_state",
+        "config",
+        "loader",
+        "priority",
+        "storage_key",
+        "storage_prefix",
+        "store",
+    )
 
-    def __post_init__(self) -> None:
-        """Apply pool health defaults to wrapped config object(s)."""
+    def __init__(
+        self,
+        config: ConfigT | Sequence[ConfigT] | None = None,
+        store: BaseObjectStore | None = None,
+        storage_prefix: str = "",
+        storage_key: str = "vertebra",
+        loader: Any = None,
+        priority: int = SQLSPEC_PLUGIN_PRIORITY,
+    ) -> None:
+        self.config = config
+        self.store = store
+        self.storage_prefix = storage_prefix
+        self.storage_key = storage_key
+        self.loader = loader
+        self.priority = priority
+        self._state: SQLSpecState | None = None
         for item in self.configs:
             _inject_sqlspec_pool_defaults(item)
 
@@ -362,6 +378,11 @@ class SQLSpec[ConfigT]:
         if isinstance(self.config, Sequence) and not isinstance(self.config, (str, bytes)):
             return tuple(self.config)
         return (self.config,)
+
+    @staticmethod
+    def wrap_config[T](config: T) -> SQLSpecConfig[T]:
+        """Wrap any SQLSpec configuration in SQLSpecConfig[T] with production pool defaults."""
+        return SQLSpecConfig(config)
 
     @overload
     def get_session[SyncDriverT: SyncDriverAdapterBase](
@@ -387,7 +408,7 @@ class SQLSpec[ConfigT]:
 
     def install_state(self, state_mapping: dict[str, Any]) -> SQLSpecState:
         """Populate and return the SQLSpecState in a mutable state dictionary."""
-        adapter = SQLSpecStorageBridge(self.store, prefix=self.storage_prefix) if self.store is not None else None
+        adapter = SQLSpecStore(self.store, prefix=self.storage_prefix) if self.store is not None else None
         configs_map: dict[str | None, Any] = {}
         pools_map: dict[str | None, Any] = {}
         for idx, cfg in enumerate(self.configs):
@@ -447,8 +468,8 @@ class SQLSpec[ConfigT]:
         """Litestar CLIPluginProtocol hook for CLI extension registration."""
         _ = cli
 
-    @staticmethod
-    def _register_config_dependencies(dependencies: dict[str, Any], cfg: Any) -> None:
+    @classmethod
+    def _register_config_dependencies(cls, dependencies: dict[str, Any], cfg: Any) -> None:
         session_key = getattr(cfg, "session_key", "db_session")
         connection_key = getattr(cfg, "connection_key", "db_connection")
         provide_session_fn = getattr(cfg, "provide_session", None)
@@ -461,12 +482,12 @@ class SQLSpec[ConfigT]:
             provide_cls = None
 
         if callable(provide_session_fn) and session_key not in dependencies:
-            wrapped_session = SQLSpec._wrap_skip_validation_provider(provide_session_fn)
+            wrapped_session = cls._wrap_skip_validation_provider(provide_session_fn)
             dependencies[session_key] = (
                 provide_cls(wrapped_session, sync_to_thread=False) if provide_cls is not None else wrapped_session
             )
         if callable(provide_connection_fn) and connection_key not in dependencies:
-            wrapped_conn = SQLSpec._wrap_skip_validation_provider(provide_connection_fn)
+            wrapped_conn = cls._wrap_skip_validation_provider(provide_connection_fn)
             dependencies[connection_key] = (
                 provide_cls(wrapped_conn, sync_to_thread=False) if provide_cls is not None else wrapped_conn
             )
@@ -475,7 +496,7 @@ class SQLSpec[ConfigT]:
     def _wrap_skip_validation_provider(fn: Any) -> Any:
         sig = inspect.signature(fn)
         ret_ann = sig.return_annotation if sig.return_annotation is not inspect.Signature.empty else Any
-        skip_ann = synthesize_skip_validation_annotation(ret_ann)
+        skip_ann = AlchemyPlugin.synthesize_skip_validation_annotation(ret_ann)
 
         def provider() -> Any:
             return fn()
@@ -486,8 +507,19 @@ class SQLSpec[ConfigT]:
         return provider
 
 
-SQLSpecPlugin = SQLSpec
-SQLSpecStorePlugin = SQLSpec
-VertebraSQLSpecPlugin = SQLSpec
-VertebraProxySyncConfig = ProxySyncConfig
-VertebraProxyAsyncConfig = ProxyAsyncConfig
+def _is_in_memory_dsn(dsn: str | None) -> bool:
+    if not dsn:
+        return False
+    lowered = dsn.lower()
+    return ":memory:" in lowered or "mode=memory" in lowered
+
+
+def _inject_sqlspec_pool_defaults(config: Any) -> None:
+    supports_pooling = bool(getattr(config, "supports_connection_pooling", True))
+    dsn = getattr(config, "dsn", None) or getattr(config, "connection_string", None)
+    if not supports_pooling or _is_in_memory_dsn(dsn):
+        return
+    pool_cfg = getattr(config, "pool_config", None)
+    if isinstance(pool_cfg, dict):
+        pool_cfg.setdefault("pool_pre_ping", True)
+        pool_cfg.setdefault("pool_recycle", 1800)

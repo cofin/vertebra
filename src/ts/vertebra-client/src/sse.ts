@@ -207,5 +207,3 @@ export class SseClient {
     }, delay);
   }
 }
-
-export { SseClient as EventSourceClient, SseClient as VertebraEventSource, SseClient as VertebraSseClient };

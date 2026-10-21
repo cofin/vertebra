@@ -1,12 +1,13 @@
 """Litestar v2 and v3 route extraction and typed path parameter conversion for Rust matchit 0.9."""
 
-import dataclasses
 import re
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
+
+import msgspec
 
 from vertebra.framework._app import _make_handler_id
 
@@ -15,7 +16,6 @@ __all__ = (
     "LitestarRouteCompiler",
     "LitestarRouterTable",
     "_unpack_route_handler_map_entry",
-    "compile_litestar_routes",
     "convert_litestar_path_params",
     "extract_litestar_route_entries",
     "extract_litestar_routes",
@@ -23,8 +23,7 @@ __all__ = (
 )
 
 
-@dataclasses.dataclass(slots=True, frozen=True)
-class ExtractedLitestarRoute:
+class ExtractedLitestarRoute(msgspec.Struct, frozen=True, gc=False, array_like=True):
     """Pre-compiled Litestar route entry indexed by stable uint64 handler_id."""
 
     handler_id: int
@@ -82,6 +81,8 @@ class LitestarRouterTable:
 
 class LitestarRouteCompiler:
     """Compiler extracting Litestar v2 and v3 route handlers into a LitestarRouterTable."""
+
+    __slots__ = ()
 
     def compile(self, app: Any) -> LitestarRouterTable:
         """Compile all HTTP routes on the given Litestar application into a LitestarRouterTable."""
@@ -224,6 +225,3 @@ def _compile_match_regex(path_template: str) -> re.Pattern[str]:
             parts.append(f"(?P<{param_name}>[^/]+)")
     pattern = "/".join(parts) or "/"
     return re.compile(f"^{pattern}$")
-
-
-compile_litestar_routes = extract_litestar_routes

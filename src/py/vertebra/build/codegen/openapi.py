@@ -2,10 +2,7 @@
 
 import re
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
 from typing import Any
-
-import msgspec
 
 from vertebra.build.codegen._ir import (
     AnnotatedType,
@@ -21,6 +18,7 @@ from vertebra.build.codegen._ir import (
 )
 from vertebra.build.codegen._metadata import RouteMetadata
 from vertebra.build.codegen.procedures import resolve_parameter_node
+from vertebra.utils.serializers import encode_json
 
 __all__ = ("OpenAPIGenerator",)
 
@@ -28,11 +26,13 @@ _PATH_PARAM_PATTERN = re.compile(r"\{(\w+)(?::\w+)?\}")
 _SCHEMA_REF_PREFIX = f"{chr(35)}/components/schemas/"
 
 
-@dataclass(slots=True)
 class OpenAPIGenerator:
     """Generate OpenAPI 3.1.0 specifications from collected RouteMetadata."""
 
-    declared: dict[str, ObjectType] = field(default_factory=dict)
+    __slots__ = ("declared",)
+
+    def __init__(self, declared: dict[str, ObjectType] | None = None) -> None:
+        self.declared: dict[str, ObjectType] = declared if declared is not None else {}
 
     def generate(
         self,
@@ -77,7 +77,7 @@ class OpenAPIGenerator:
     ) -> str:
         """Render the OpenAPI 3.1.0 specification as a JSON string."""
         doc = self.generate(routes, title=title, version=version)
-        return msgspec.json.encode(doc).decode("utf-8")
+        return encode_json(doc)
 
     def _collect_named_types(self, nodes: Iterable[TypeNode]) -> None:
         for node in nodes:

@@ -1,15 +1,14 @@
-"""Unit tests for vertebra.extensions.codegen (Valibot, Zod, OpenAPI 3.1.0, Protobuf v3, @procedure, Litestar v2/v3 markers)."""
+"""Unit tests for vertebra.build.codegen (Valibot, Zod, OpenAPI 3.1.0, Protobuf v3, @procedure, Litestar v2/v3 markers)."""
 
 from pathlib import Path
 from typing import Annotated
 
 import msgspec
 
-from vertebra.builder._codegen._extractor import TypeExtractor
-from vertebra.builder._codegen._metadata import RouteMetadata
-from vertebra.extensions.codegen import (
+from vertebra.build.codegen import (
     Body,
     CodegenConfig,
+    CodegenPlugin,
     FromCookie,
     FromHeader,
     FromPath,
@@ -23,16 +22,17 @@ from vertebra.extensions.codegen import (
     ProcedureClientGenerator,
     ProcedureRegistry,
     ProtobufGenerator,
+    RouteMetadata,
     SkipValidation,
+    TypeExtractor,
     URLEncodedBody,
     ValibotGenerator,
-    VertebraCodegenPlugin,
     ZodGenerator,
     procedure,
 )
 
 
-class CreateOrderInput(msgspec.Struct):
+class CreateOrderInput(msgspec.Struct, gc=False):
     """Order creation payload."""
 
     sku: str
@@ -40,7 +40,7 @@ class CreateOrderInput(msgspec.Struct):
     notes: str | None = None
 
 
-class OrderRecord(msgspec.Struct):
+class OrderRecord(msgspec.Struct, gc=False):
     """Order response payload."""
 
     order_id: str
@@ -52,9 +52,13 @@ class OrderRecord(msgspec.Struct):
 class InternalService:
     """Dummy injected service dependency."""
 
+    __slots__ = ()
+
 
 class HeaderParameter:
     """Simulated Litestar v3 HeaderParameter metadata object with wire name alias and constraints."""
+
+    __slots__ = ("min_length", "name")
 
     def __init__(self, *, name: str, min_length: int) -> None:
         self.name = name
@@ -270,7 +274,7 @@ def test_procedure_decorator_registry_and_typescript_client_codegen() -> None:
     assert "injected_svc" not in ts_client
     assert "internal_flag" not in ts_client
 
-    plugin = VertebraCodegenPlugin(CodegenConfig(enable_valibot=True, enable_openapi=True, enable_protobuf=True))
+    plugin = CodegenPlugin(CodegenConfig(enable_valibot=True, enable_openapi=True, enable_protobuf=True))
     app_state: dict[str, object] = {}
     plugin.install_state(app_state)
     assert "codegen" in app_state

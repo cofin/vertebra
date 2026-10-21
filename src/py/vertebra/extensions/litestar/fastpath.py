@@ -1,10 +1,11 @@
 """Fused direct Litestar v2/v3 HTTPRouteHandler execution and ScopeState.body pre-seeding."""
 
-import dataclasses
 import importlib
 import inspect
 from collections.abc import AsyncGenerator, AsyncIterable, Callable, Generator, Iterable
 from typing import Any, Self
+
+import msgspec
 
 from vertebra.extensions.litestar.offload import (
     _get_handler_after_response,
@@ -16,18 +17,14 @@ from vertebra.extensions.litestar.offload import (
 from vertebra.extensions.litestar.router import extract_litestar_routes
 
 __all__ = (
-    "ASGIResponse",
     "CompiledLitestarRoute",
-    "ScopeState",
     "compile_litestar_fastpath_routes",
-    "create_fused_handler",
     "dispatch_litestar_handler_direct",
     "preseed_litestar_scope_body",
 )
 
 
-@dataclasses.dataclass(slots=True, frozen=True)
-class CompiledLitestarRoute:
+class CompiledLitestarRoute(msgspec.Struct, frozen=True, gc=False, array_like=True):
     """Pre-compiled per-route dispatch metadata for zero-overhead Litestar v2/v3 handler invocation."""
 
     handler_id: int
@@ -215,6 +212,3 @@ async def _offload_sse_response(asgi_response: Any, send: Any) -> None:
             raw = chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8")
             await send({"type": "http.response.body", "body": raw, "more_body": True})
     await send({"type": "http.response.body", "body": b"", "more_body": False})
-
-
-create_fused_handler = compile_litestar_fastpath_routes

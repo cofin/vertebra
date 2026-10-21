@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
+
+import msgspec
 
 __all__ = (
-    "ARROW_STREAM_MEDIA_TYPE",
     "DataFusionConfig",
-    "DataFusionMode",
-    "DataFusionTableRegistration",
-    "EmbeddedDataFusionEngine",
+    "DataFusionEngine",
+    "TableRegistration",
 )
 
 ARROW_STREAM_MEDIA_TYPE: str = "application/vnd.apache.arrow.stream"
@@ -18,8 +17,7 @@ ARROW_STREAM_MEDIA_TYPE: str = "application/vnd.apache.arrow.stream"
 type DataFusionMode = Literal["in_process", "pgwire_fdw"]
 
 
-@dataclass(frozen=True, slots=True)
-class DataFusionTableRegistration:
+class TableRegistration(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Registered Parquet, Vortex, Arrow, or live relational table in DataFusion."""
 
     name: str
@@ -27,8 +25,7 @@ class DataFusionTableRegistration:
     format: Literal["parquet", "vortex", "arrow", "postgres", "oracle"] = "parquet"
 
 
-@dataclass(frozen=True, slots=True)
-class DataFusionConfig:
+class DataFusionConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for DataFusion analytics execution across Cloud Run and GKE topologies.
 
     - ``mode="in_process"``: Executes federated joins inside the Vertebra worker process and
@@ -46,24 +43,32 @@ class DataFusionConfig:
     require_mtls_for_pgwire: bool = True
 
 
-@dataclass(slots=True)
-class EmbeddedDataFusionEngine:
+class DataFusionEngine:
     """Federated query engine joining ObjectStore datasets with live database tables."""
 
-    config: DataFusionConfig = field(default_factory=DataFusionConfig)
-    _tables: dict[str, DataFusionTableRegistration] = field(default_factory=dict, init=False)
+    ARROW_STREAM_MEDIA_TYPE: ClassVar[str] = ARROW_STREAM_MEDIA_TYPE
+    __slots__ = ("_config", "_tables")
+
+    def __init__(self, config: DataFusionConfig | None = None) -> None:
+        self._config = config or DataFusionConfig()
+        self._tables: dict[str, TableRegistration] = {}
 
     @property
-    def tables(self) -> dict[str, DataFusionTableRegistration]:
+    def config(self) -> DataFusionConfig:
+        """Return the active DataFusionConfig."""
+        return self._config
+
+    @property
+    def tables(self) -> dict[str, TableRegistration]:
         """Return registered tables."""
         return dict(self._tables)
 
     @property
     def supports_cloud_run_ingress(self) -> bool:
         """Return True when the engine operates over single-port HTTP/2 Arrow IPC streaming."""
-        return self.config.mode == "in_process"
+        return self._config.mode == "in_process"
 
-    def register_table(self, registration: DataFusionTableRegistration) -> DataFusionTableRegistration:
+    def register_table(self, registration: TableRegistration) -> TableRegistration:
         """Register an ObjectStore dataset or live relational table."""
         self._tables[registration.name] = registration
         return registration
@@ -72,7 +77,7 @@ class EmbeddedDataFusionEngine:
         """Return a federated execution plan descriptor for ``sql``."""
         referenced = [name for name in self._tables if name in sql]
         return {
-            "mode": self.config.mode,
+            "mode": self._config.mode,
             "media_type": ARROW_STREAM_MEDIA_TYPE,
             "referenced_tables": referenced,
             "sql": sql,

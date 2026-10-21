@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { type ApexGlobalNamespace, parseVertebraIslandAttributes, VertebraApexRegionBridge } from "../src/apex/index";
+import { type ApexGlobalNamespace, ApexRegion } from "../src/apex/index";
 
-describe("VertebraApexRegionBridge and APEX islands", () => {
+describe("ApexRegion and APEX islands", () => {
   it("reads and writes APEX page items and triggers Dynamic Actions", () => {
     const store = new Map<string, string>([["P12_PO_ID", "45001"]]);
     const events: Array<{ name: string; data: unknown }> = [];
@@ -19,7 +19,7 @@ describe("VertebraApexRegionBridge and APEX islands", () => {
       },
     };
 
-    const bridge = new VertebraApexRegionBridge({
+    const bridge = new ApexRegion({
       regionId: "po_approval_region",
       appId: 105,
       pageId: 12,
@@ -39,12 +39,19 @@ describe("VertebraApexRegionBridge and APEX islands", () => {
     expect(events[0]?.name).toBe("vertebra:approved");
   });
 
-  it("parses <vertebra-island> attributes cleanly", () => {
-    const desc = parseVertebraIslandAttributes({
+  it("parses <vertebra-island> attributes and HTML markup cleanly", () => {
+    const desc = ApexRegion.parseIslands({
       "data-component": "EbsAgentChat",
       "data-props": JSON.stringify({ orgId: 204 }),
     });
     expect(desc.componentName).toBe("EbsAgentChat");
     expect(desc.props).toEqual({ orgId: 204 });
+
+    const islands = ApexRegion.parseIslands(
+      `<vertebra-island data-component="EbsAgentChat" data-props='{"orgId":204}'></vertebra-island>`,
+    );
+    expect(islands).toHaveLength(1);
+    expect(islands[0]?.componentName).toBe("EbsAgentChat");
+    expect(islands[0]?.props).toEqual({ orgId: 204 });
   });
 });

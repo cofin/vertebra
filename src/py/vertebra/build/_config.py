@@ -1,23 +1,22 @@
 """Build configuration from ``[tool.vertebra]`` in *pyproject.toml*."""
 
 import tomllib
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import msgspec
 
 __all__ = ("BuildConfig", "JsConfig")
 
 
-@dataclass
-class JsConfig:
+class JsConfig(msgspec.Struct, frozen=True, gc=False):
     """JavaScript dependency configuration from ``[tool.vertebra.js]``."""
 
     dependencies: tuple[str, ...] = ()
     dev_dependencies: tuple[str, ...] = ()
 
 
-@dataclass
-class BuildConfig:
+class BuildConfig(msgspec.Struct, frozen=True, gc=False):
     """Build configuration loaded from ``[tool.vertebra]`` in *pyproject.toml*."""
 
     entry: str = ""
@@ -27,7 +26,7 @@ class BuildConfig:
     codegen: bool = False
     codegen_output: str = ".vertebra/generated"
     app: str = ""
-    js: JsConfig = field(default_factory=JsConfig)
+    js: JsConfig = msgspec.field(default_factory=JsConfig)
 
     @classmethod
     def load(cls, pyproject_path: Path | str) -> "BuildConfig":

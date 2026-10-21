@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import ssl
 import time
-from dataclasses import dataclass
+
+import msgspec
 
 __all__ = (
     "CloudSqlConfig",
@@ -13,8 +14,7 @@ __all__ = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class CloudSqlInstanceUri:
+class CloudSqlInstanceUri(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Parsed Google Cloud SQL instance connection name (`project:region:instance`)."""
 
     project: str
@@ -44,8 +44,7 @@ class CloudSqlInstanceUri:
         return f"{base}/sql/v1beta4/projects/{self.project}/instances/{self.instance}:generateEphemeralCert"
 
 
-@dataclass(frozen=True, slots=True)
-class CloudSqlConfig:
+class CloudSqlConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for zero-sidecar Cloud SQL connections on port 3307."""
 
     instance_connection_name: str

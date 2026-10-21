@@ -8,7 +8,6 @@ from typing import Any
 from vertebra.storage._store import ObjectStore, SigningConfig
 
 __all__ = (
-    "ObjectStoreRegistry",
     "StorageRegistry",
     "get_default_storage_registry",
 )
@@ -129,7 +128,6 @@ class StorageRegistry:
         return f"{uri}|opts={opts_repr!r}|sig={signing!r}"
 
 
-ObjectStoreRegistry = StorageRegistry
 _DEFAULT_REGISTRY = StorageRegistry()
 
 

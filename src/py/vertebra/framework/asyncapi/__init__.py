@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any, Literal
+
+import msgspec
 
 __all__ = (
     "AsyncAPIConfig",
@@ -12,18 +13,16 @@ __all__ = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class AsyncChannelDef:
+class AsyncChannelDef(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """AsyncAPI 3.0.0 channel definition for WebSocket, SSE, or pub/sub topics."""
 
     address: str
     protocol: Literal["ws", "wss", "sse", "shm-pubsub", "valkey", "redis"] = "ws"
     description: str = ""
-    message_schema: dict[str, Any] = field(default_factory=dict)
+    message_schema: dict[str, Any] = msgspec.field(default_factory=dict)
 
 
-@dataclass(frozen=True, slots=True)
-class AsyncAPIConfig:
+class AsyncAPIConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """AsyncAPI 3.0.0 document configuration."""
 
     title: str = "Vertebra Realtime API"
@@ -34,6 +33,8 @@ class AsyncAPIConfig:
 
 class AsyncAPISpecBuilder:
     """Constructs AsyncAPI 3.0.0 specifications from registered event channels."""
+
+    __slots__ = ("_channels", "_config")
 
     def __init__(self, config: AsyncAPIConfig | None = None) -> None:
         self._config = config or AsyncAPIConfig()

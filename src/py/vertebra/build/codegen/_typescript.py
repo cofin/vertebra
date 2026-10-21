@@ -1,6 +1,5 @@
 """TypeScript generation for route metadata."""
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from vertebra.build.codegen._ir import AnnotatedType, NamedTypeRef, ObjectType, TypeNode
@@ -12,11 +11,13 @@ if TYPE_CHECKING:
 __all__ = ("TypeScriptGenerator", "format_typescript")
 
 
-@dataclass(slots=True)
 class TypeScriptGenerator:
     """Generate TypeScript declarations from collected routes."""
 
-    declared: dict[str, ObjectType] = field(default_factory=dict)
+    __slots__ = ("declared",)
+
+    def __init__(self, declared: dict[str, ObjectType] | None = None) -> None:
+        self.declared: dict[str, ObjectType] = declared if declared is not None else {}
 
     def generate(self, routes: "Iterable[RouteMetadata]") -> str:
         """Render TypeScript interfaces and the Procedures namespace."""

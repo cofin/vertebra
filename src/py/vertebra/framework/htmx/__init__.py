@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
+
+from vertebra.utils.serializers import encode_json
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -28,8 +29,7 @@ type HxSwap = Literal[
 ]
 
 
-@dataclass(frozen=True, slots=True)
-class HtmxRequest:
+class HtmxRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Parsed HTMX request headers (`HX-Request`, `HX-Target`, `HX-Trigger`, `HX-Boosted`)."""
 
     is_htmx: bool = False
@@ -57,8 +57,7 @@ class HtmxRequest:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class HtmxResponse:
+class HtmxResponse(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """HTML fragment response with typed ``HX-*`` response headers."""
 
     html: str
@@ -73,7 +72,7 @@ class HtmxResponse:
     trigger: str | dict[str, Any] | None = None
     trigger_after_settle: str | dict[str, Any] | None = None
     trigger_after_swap: str | dict[str, Any] | None = None
-    extra_headers: dict[str, str] = field(default_factory=dict)
+    extra_headers: dict[str, str] = msgspec.field(default_factory=dict)
 
     def to_headers(self) -> dict[str, str]:
         """Build the HTTP response header dictionary including ``HX-*`` directives."""
@@ -103,5 +102,5 @@ class HtmxResponse:
             ("HX-Trigger-After-Swap", self.trigger_after_swap),
         ):
             if val is not None:
-                headers[hdr_name] = val if isinstance(val, str) else msgspec.json.encode(val).decode("utf-8")
+                headers[hdr_name] = val if isinstance(val, str) else encode_json(val)
         return headers

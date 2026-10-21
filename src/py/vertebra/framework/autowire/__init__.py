@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
-from dataclasses import dataclass, field
 from typing import Any
+
+import msgspec
 
 __all__ = (
     "AutowireConfig",
@@ -13,8 +14,7 @@ __all__ = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class AutowireConfig:
+class AutowireConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for startup-time domain package scanning and route/service discovery."""
 
     domain_packages: tuple[str, ...] = ()
@@ -23,13 +23,15 @@ class AutowireConfig:
     ignore_private_modules: bool = True
 
 
-@dataclass(slots=True)
 class AutowireLoader:
     """Startup-only package scanner caching discovered controllers and services."""
 
-    config: AutowireConfig = field(default_factory=AutowireConfig)
-    _controllers: list[type[Any]] = field(default_factory=list, init=False)
-    _services: list[type[Any]] = field(default_factory=list, init=False)
+    __slots__ = ("_controllers", "_services", "config")
+
+    def __init__(self, config: AutowireConfig | None = None) -> None:
+        self.config = config or AutowireConfig()
+        self._controllers: list[type[Any]] = []
+        self._services: list[type[Any]] = []
 
     @property
     def controllers(self) -> tuple[type[Any], ...]:

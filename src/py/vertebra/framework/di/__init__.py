@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
+
+import msgspec
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -19,8 +20,7 @@ __all__ = (
 type Scope = Literal["singleton", "request", "transient"]
 
 
-@dataclass(frozen=True, slots=True)
-class Provide:
+class Provide(msgspec.Struct, frozen=True, gc=False):
     """Dependency provider descriptor with explicit scope and sync-to-thread control."""
 
     dependency: Callable[..., Any]
@@ -41,6 +41,8 @@ class Provide:
 
 class DependencyGraph:
     """Topologically sorted dependency resolution graph compiled at application startup."""
+
+    __slots__ = ("_order", "_providers")
 
     def __init__(self, providers: dict[str, Provide | Callable[..., Any]] | None = None) -> None:
         self._providers: dict[str, Provide] = {}
@@ -97,6 +99,8 @@ class DependencyGraph:
 
 class Container:
     """Scoped dependency injection container executing a compiled ``DependencyGraph``."""
+
+    __slots__ = ("_graph", "_singletons")
 
     def __init__(self, graph: DependencyGraph) -> None:
         self._graph = graph

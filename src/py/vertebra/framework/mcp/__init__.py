@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+import msgspec
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -20,19 +21,17 @@ __all__ = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class McpTool:
+class McpTool(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """MCP tool descriptor with JSON Schema parameters and handler callable."""
 
     name: str
     description: str
     fn: Callable[..., Any]
-    input_schema: dict[str, Any] = field(default_factory=lambda: {"type": "object", "properties": {}})
+    input_schema: dict[str, Any] = msgspec.field(default_factory=lambda: {"type": "object", "properties": {}})
     requires_confirmation: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class McpResource:
+class McpResource(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """MCP resource descriptor exposed under a URI template."""
 
     uri: str
@@ -42,8 +41,7 @@ class McpResource:
     mime_type: str = "application/json"
 
 
-@dataclass(frozen=True, slots=True)
-class McpPrompt:
+class McpPrompt(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """MCP prompt template descriptor."""
 
     name: str
@@ -53,6 +51,8 @@ class McpPrompt:
 
 class McpServer:
     """Streamable HTTP (`/mcp`) and JSON-RPC 2.0 Model Context Protocol dispatcher."""
+
+    __slots__ = ("_name", "_prompts", "_resources", "_tools", "_version")
 
     def __init__(self, *, name: str = "vertebra-mcp", version: str = "0.1.0") -> None:
         self._name = name

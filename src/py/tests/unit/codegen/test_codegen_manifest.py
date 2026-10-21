@@ -1,10 +1,9 @@
 """Tests for route manifest generation."""
 
-import json
-
-from vertebra.builder._codegen._manifest import ManifestGenerator
-from vertebra.builder._codegen._metadata import RouteCollector
+from vertebra.build.codegen._manifest import ManifestGenerator
+from vertebra.build.codegen._metadata import RouteCollector
 from vertebra.framework._app import App
+from vertebra.utils.serializers import decode_json
 
 
 def test_manifest_uses_route_metadata() -> None:
@@ -16,7 +15,7 @@ def test_manifest_uses_route_metadata() -> None:
 
     routes = RouteCollector().collect(app)
     output = ManifestGenerator().generate(routes)
-    data = json.loads(output)
+    data = decode_json(output)
 
     assert data["version"] == 1
     entry = data["routes"]["get.hello"]
@@ -38,7 +37,7 @@ def test_manifest_handles_multiple_routes() -> None:
         return name
 
     routes = RouteCollector().collect(app)
-    data = json.loads(ManifestGenerator().generate(routes))
+    data = decode_json(ManifestGenerator().generate(routes))
 
     assert len(data["routes"]) == 2
     assert "get.items" in data["routes"]

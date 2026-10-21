@@ -242,8 +242,6 @@ pub struct PubSubBroker {
     shm_ring: Option<Arc<ShmBroadcastRing>>,
 }
 
-pub type PubSubHub = PubSubBroker;
-
 impl PubSubBroker {
     /// Create a new `PubSubBroker` for `worker_id`.
     pub fn new(

@@ -105,8 +105,6 @@ pub struct WsConnectionRegistry {
     connections: DashMap<u64, WsConnectionHandle>,
 }
 
-pub type WebSocketMountRegistry = WsConnectionRegistry;
-
 impl WsConnectionRegistry {
     /// Create an empty connection registry.
     pub fn new() -> Self {

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Any
+
+import msgspec
 
 from vertebra.db.dialer.cloudsql import CloudSqlConfig
 
@@ -15,8 +16,7 @@ __all__ = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class MysqlConfig:
+class MysqlConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for MySQL 8.0+/9.0+ and MariaDB connections."""
 
     dsn: str = "mysql://localhost:3306/mysql"
@@ -26,6 +26,11 @@ class MysqlConfig:
     enable_iam_auth: bool = False
     charset: str = "utf8mb4"
     autocommit: bool = False
+
+    def __post_init__(self) -> None:
+        if self.min_size < 0 or self.max_size < 1 or self.min_size > self.max_size:
+            msg = f"Invalid pool bounds: min_size={self.min_size}, max_size={self.max_size}"
+            raise ValueError(msg)
 
     def to_cloud_dialer_config(self) -> CloudSqlConfig | None:
         """Return CloudSqlConfig when `cloud_sql_instance` is set."""

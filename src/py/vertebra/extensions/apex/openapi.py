@@ -1,22 +1,22 @@
-"""ORDS REST catalog and Oracle 26ai JSON Relational Duality View OpenAPI/MCP bridge."""
+"""ORDS REST catalog and Oracle 26ai JSON Relational Duality View OpenAPI/MCP generator."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
+
+import msgspec
 
 from vertebra.framework.a2a import AgentSkill
 from vertebra.framework.mcp import McpTool
 
 __all__ = (
-    "ApexOpenAPIBridge",
+    "ApexOpenAPIGenerator",
     "DualityViewSpec",
     "OrdsEndpointSpec",
 )
 
 
-@dataclass(frozen=True, slots=True)
-class OrdsEndpointSpec:
+class OrdsEndpointSpec(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Metadata for an Oracle REST Data Services (ORDS) endpoint."""
 
     module_name: str
@@ -24,21 +24,22 @@ class OrdsEndpointSpec:
     method: str
     operation_id: str
     description: str = ""
-    parameters: dict[str, Any] = field(default_factory=dict)
+    parameters: dict[str, Any] = msgspec.field(default_factory=dict)
 
 
-@dataclass(frozen=True, slots=True)
-class DualityViewSpec:
+class DualityViewSpec(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Metadata for an Oracle 26ai JSON Relational Duality View."""
 
     view_name: str
     root_table: str
     etag_checked: bool = True
-    json_schema: dict[str, Any] = field(default_factory=dict)
+    json_schema: dict[str, Any] = msgspec.field(default_factory=dict)
 
 
-class ApexOpenAPIBridge:
+class ApexOpenAPIGenerator:
     """Compiles ORDS OpenAPI 3.0 catalogs and 26ai Duality Views into MCP tools and A2A skills."""
+
+    __slots__ = ("_duality_views", "_endpoints", "base_ords_url")
 
     def __init__(self, base_ords_url: str) -> None:
         self.base_ords_url = base_ords_url.rstrip("/")

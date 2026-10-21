@@ -1,11 +1,12 @@
 """Zero-code-change Litestar v2 and v3 startup introspection for Rust middleware and asset offloading."""
 
-import dataclasses
 import hashlib
 import importlib
 import re
 from pathlib import Path
 from typing import Any
+
+import msgspec
 
 from vertebra.extensions.litestar.router import _unpack_route_handler_map_entry
 from vertebra.utils.serializers._json import encode_json_bytes
@@ -25,7 +26,6 @@ __all__ = (
     "_get_handler_request_class",
     "_is_default_local_filesystem",
     "_rebuild_litestar_routing_trie",
-    "compile_middleware_offload",
     "evaluate_cors_preflight",
     "evaluate_cors_response_headers",
     "evaluate_openapi_cache_request",
@@ -33,8 +33,7 @@ __all__ = (
 )
 
 
-@dataclasses.dataclass(slots=True, frozen=True)
-class CompressionOffloadSpec:
+class CompressionOffloadSpec(msgspec.Struct, frozen=True, gc=False):
     """Extracted Litestar CompressionConfig parameters for Rust vertebra-http."""
 
     backend: str
@@ -47,8 +46,7 @@ class CompressionOffloadSpec:
     excluded_paths: tuple[str, ...]
 
 
-@dataclasses.dataclass(slots=True, frozen=True)
-class CorsOffloadSpec:
+class CorsOffloadSpec(msgspec.Struct, frozen=True, gc=False):
     """Extracted Litestar CORSConfig parameters for Rust vertebra-http."""
 
     allow_origins: tuple[str, ...]
@@ -60,8 +58,7 @@ class CorsOffloadSpec:
     allow_origin_regex: str | None = None
 
 
-@dataclasses.dataclass(slots=True, frozen=True)
-class StaticMountOffloadSpec:
+class StaticMountOffloadSpec(msgspec.Struct, frozen=True, gc=False):
     """Extracted static file mount configuration for zero-GIL Rust asset serving."""
 
     path_prefix: str
@@ -71,8 +68,7 @@ class StaticMountOffloadSpec:
     headers: dict[str, str]
 
 
-@dataclasses.dataclass(slots=True, frozen=True)
-class OpenApiOffloadSpec:
+class OpenApiOffloadSpec(msgspec.Struct, frozen=True, gc=False):
     """Pre-rendered OpenAPI JSON payload and ETag for zero-GIL Rust serving."""
 
     schema_path: str
@@ -81,8 +77,7 @@ class OpenApiOffloadSpec:
     content_type: str = "application/vnd.oai.openapi+json"
 
 
-@dataclasses.dataclass(slots=True, frozen=True)
-class LitestarOffloadPlan:
+class LitestarOffloadPlan(msgspec.Struct, frozen=True, gc=False):
     """Complete startup offload plan extracted from an unmodified Litestar v2 or v3 app."""
 
     compression: CompressionOffloadSpec | None
@@ -93,6 +88,8 @@ class LitestarOffloadPlan:
 
 class MiddlewareOffloadCompiler:
     """Compiler extracting CompressionConfig, CORSConfig, StaticFiles, and OpenAPI into a LitestarOffloadPlan."""
+
+    __slots__ = ()
 
     def compile(self, app: Any, *, config: Any = None) -> LitestarOffloadPlan:
         """Extract and compile the Rust middleware offload plan for the given Litestar app."""
@@ -484,6 +481,3 @@ def _extract_openapi_schema_payload(app: Any) -> OpenApiOffloadSpec | None:
         body=body,
         etag=f'"{digest}"',
     )
-
-
-compile_middleware_offload = offload_litestar_middlewares

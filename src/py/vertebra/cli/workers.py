@@ -7,10 +7,7 @@ import sys
 import click
 
 from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
-from vertebra.extensions.worker.runner import (
-    MultiLaneWorkerRunner,
-    parse_worker_lanes,
-)
+from vertebra.extensions.worker.runner import WorkerRunner
 from vertebra.utils.module_loader import import_app
 
 __all__ = ("execute_worker_cli", "run_workers", "workers")
@@ -28,8 +25,8 @@ def execute_worker_cli(
     os.environ["LITESTAR_APP"] = app_path
     os.environ["VERTEBRA_APP"] = app_path
     app = import_app(app_path)
-    lanes = parse_worker_lanes(queues, concurrency, drain_timeout_s=drain_timeout_s)
-    runner = MultiLaneWorkerRunner(lanes)
+    lanes = WorkerRunner.parse_lanes(queues, concurrency, drain_timeout_s=drain_timeout_s)
+    runner = WorkerRunner(lanes)
     state = getattr(app, "state", None)
     if isinstance(state, dict):
         state["vertebra_worker_runner"] = runner

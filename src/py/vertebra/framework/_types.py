@@ -1,19 +1,18 @@
 """Request and Response type stubs.
 
-These are placeholder dataclasses. Full implementations with header
+These are placeholder structs. Full implementations with header
 parsing, body streaming, and WSGI/ASGI bridging live in later chapters.
 """
 
-from dataclasses import dataclass, field
+import msgspec
 
 __all__ = ("Headers", "Request", "Response")
 
 
-@dataclass
-class Headers:
+class Headers(msgspec.Struct, gc=False):
     """Immutable view of HTTP headers."""
 
-    _data: list[tuple[str, str]] = field(default_factory=list)
+    _data: list[tuple[str, str]] = msgspec.field(default_factory=list)
 
     def get(self, name: str, default: str | None = None) -> str | None:
         """Return first header value for name (case-insensitive)."""
@@ -28,8 +27,7 @@ class Headers:
         return list(self._data)
 
 
-@dataclass
-class Request:
+class Request(msgspec.Struct, gc=False):
     """Minimal HTTP request stub.
 
     Populated by the native batch runner in later chapters.
@@ -38,15 +36,14 @@ class Request:
     method: str = "GET"
     path: str = "/"
     query_string: bytes = b""
-    headers: Headers = field(default_factory=Headers)
+    headers: Headers = msgspec.field(default_factory=Headers)
     body: bytes = b""
     handler_id: int = 0
 
 
-@dataclass
-class Response:
+class Response(msgspec.Struct, gc=False):
     """Minimal HTTP response stub."""
 
     status: int = 200
-    headers: Headers = field(default_factory=Headers)
+    headers: Headers = msgspec.field(default_factory=Headers)
     body: bytes = b""

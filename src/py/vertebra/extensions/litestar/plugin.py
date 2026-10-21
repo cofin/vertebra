@@ -21,8 +21,6 @@ from vertebra.extensions.litestar.store import swap_litestar_response_cache_stor
 
 __all__ = (
     "LitestarPlugin",
-    "VertebraLitestarPlugin",
-    "VertebraPlugin",
     "enter_litestar_server_lifespan",
 )
 
@@ -151,6 +149,4 @@ def _load_litestar_get() -> Callable[..., Callable[[Callable[..., Any]], Any]]:
         return fallback_get
 
 
-VertebraPlugin = LitestarPlugin
-VertebraLitestarPlugin = LitestarPlugin
 _litestar_get = _load_litestar_get()

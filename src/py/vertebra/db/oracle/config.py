@@ -3,21 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from vertebra.db.oracle.wallet import ExtractedWallet, extract_wallet_archive
+import msgspec
+
+from vertebra.db.oracle.wallet import OracleWallet
 
 __all__ = (
     "OracleConfig",
     "OracleConnectDescriptor",
-    "OraclePoolSettings",
 )
 
 
-@dataclass(frozen=True, slots=True)
-class OracleConnectDescriptor:
+class OracleConnectDescriptor(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """High-availability Oracle TNS connect descriptor builder for Exadata, RAC, SCAN, DRCP, and TAC."""
 
     hosts: tuple[tuple[str, int], ...] = (("localhost", 1521),)
@@ -55,8 +54,7 @@ class OracleConnectDescriptor:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class OracleConfig:
+class OracleConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Zero-Instant-Client Oracle 19c / 26ai Thin-Mode configuration with immutable pool derivation."""
 
     dsn: str | None = None
@@ -78,10 +76,10 @@ class OracleConfig:
     min_size: int = 1
     max_size: int = 10
     bind_key: str = "default"
-    driver_features: Mapping[str, Any] = field(default_factory=lambda: {"fetch_lobs": False})
+    driver_features: Mapping[str, Any] = msgspec.field(default_factory=lambda: {"fetch_lobs": False})
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "driver_features", dict(self.driver_features))
+        msgspec.structs.force_setattr(self, "driver_features", dict(self.driver_features))
 
     def derive_pool(
         self,
@@ -99,7 +97,7 @@ class OracleConfig:
         merged_features = dict(self.driver_features)
         if driver_features is not None:
             merged_features.update(driver_features)
-        return replace(
+        return msgspec.structs.replace(
             self,
             bind_key=bind_key,
             min_size=min_size,
@@ -107,14 +105,14 @@ class OracleConfig:
             driver_features=merged_features,
         )
 
-    def resolve_wallet(self, *, cache_root: str | Path | None = None) -> ExtractedWallet | None:
+    def resolve_wallet(self, *, cache_root: str | Path | None = None) -> OracleWallet | None:
         """Extract or resolve the configured Oracle wallet without mutating global TNS_ADMIN."""
         source = self.wallet_zip if self.wallet_zip is not None else self.wallet_location
         if source is None:
             return None
-        return extract_wallet_archive(source, cache_root=cache_root, wallet_password=self.wallet_password)
+        return OracleWallet.extract(source, target_dir=cache_root, wallet_password=self.wallet_password)
 
-    def build_effective_dsn(self, *, wallet: ExtractedWallet | None = None) -> str:
+    def build_effective_dsn(self, *, wallet: OracleWallet | None = None) -> str:
         """Build the effective TNS descriptor or Easy Connect string."""
         resolved_wallet = wallet or self.resolve_wallet()
         if resolved_wallet is not None and self.tns_alias:
@@ -163,6 +161,3 @@ class OracleConfig:
             if not self.ssl_check_hostname:
                 params["ssl_server_dn_match"] = False
         return params
-
-
-OraclePoolSettings = OracleConfig

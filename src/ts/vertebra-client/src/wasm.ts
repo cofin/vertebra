@@ -9,19 +9,7 @@ export interface WasmClientOptions {
   readonly imports?: WebAssembly.Imports;
 }
 
-export function isValidWasmBinary(bytes: Uint8Array): boolean {
-  if (bytes.byteLength < 8) {
-    return false;
-  }
-  for (let i = 0; i < 8; i += 1) {
-    if (bytes[i] !== WASM_MAGIC_BYTES[i]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-export class VertebraWasmClient {
+export class WasmClient {
   private readonly maxMemoryPages: number;
   private readonly baseImports: WebAssembly.Imports;
 
@@ -30,12 +18,24 @@ export class VertebraWasmClient {
     this.baseImports = options.imports ?? {};
   }
 
+  public static isValidBinary(bytes: Uint8Array): boolean {
+    if (bytes.byteLength < 8) {
+      return false;
+    }
+    for (let i = 0; i < 8; i += 1) {
+      if (bytes[i] !== WASM_MAGIC_BYTES[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   public get memoryLimitBytes(): number {
     return this.maxMemoryPages * 65536;
   }
 
   public async instantiateBytes(bytes: Uint8Array): Promise<WebAssembly.WebAssemblyInstantiatedSource> {
-    if (!isValidWasmBinary(bytes)) {
+    if (!WasmClient.isValidBinary(bytes)) {
       throw new Error("Invalid WebAssembly binary magic header");
     }
     return WebAssembly.instantiate(bytes, this.baseImports);
