@@ -164,6 +164,55 @@ pub async fn run_adaptive_worker_simple<F>(
     .await;
 }
 
+/// Sharded pool of adaptive direct dispatch workers, binding one worker loop per shard index.
+pub struct DirectWorkerPool {
+    shard_senders: Vec<mpsc::Sender<DirectBatch>>,
+}
+
+impl DirectWorkerPool {
+    /// Spawn `worker_count` independent adaptive worker loops, passing `(worker_idx, requests)`
+    /// to `handler_factory(worker_idx)` so each worker thread binds its dedicated event loop shard.
+    pub fn spawn<F>(
+        mut ingress_rx: mpsc::Receiver<DirectBatch>,
+        worker_count: usize,
+        config: AdaptiveWorkerConfig,
+        mut handler_factory: F,
+    ) -> Self
+    where
+        F: FnMut(usize) -> BatchHandler + Send + 'static,
+    {
+        let count = worker_count.max(1);
+        let mut shard_senders = Vec::with_capacity(count);
+
+        for worker_idx in 0..count {
+            let (tx, rx) = mpsc::channel(config.max_batch.max(64));
+            let worker_cfg = config.clone();
+            let handler = handler_factory(worker_idx);
+            tokio::spawn(run_adaptive_worker(rx, worker_cfg, handler));
+            shard_senders.push(tx);
+        }
+
+        let fanout_senders = shard_senders.clone();
+        tokio::spawn(async move {
+            let mut next_idx = 0usize;
+            while let Some(batch) = ingress_rx.recv().await {
+                let target = next_idx % fanout_senders.len();
+                next_idx = next_idx.wrapping_add(1);
+                if fanout_senders[target].send(batch).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        Self { shard_senders }
+    }
+
+    /// Number of active worker shards in the pool.
+    pub fn worker_count(&self) -> usize {
+        self.shard_senders.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +272,7 @@ mod tests {
                 status: 200,
                 headers_mp: Bytes::new(),
                 body: Bytes::from_static(b"ok"),
+                stream_rx: None,
             }
         }));
 
@@ -312,6 +362,7 @@ mod tests {
                             status: 200,
                             headers_mp: Bytes::new(),
                             body: Bytes::from_static(b"ok"),
+                            stream_rx: None,
                         });
                     }
                     processed_clone.fetch_add(1, Ordering::Relaxed);

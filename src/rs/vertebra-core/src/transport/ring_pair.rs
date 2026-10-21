@@ -238,6 +238,19 @@ impl TieredRingSet {
         .map_err(RingPairError::Channel)
     }
 
+    /// Send a pre-encoded raw response frame through the appropriate tier ring.
+    pub fn send_response_bytes(&self, raw_frame: &[u8]) -> Result<(), RingPairError> {
+        let total_size = raw_frame.len();
+        let ring = self
+            .select_ring(total_size)
+            .ok_or(RingPairError::ResponseTooLarge(total_size))?;
+
+        ring.try_send_with(total_size, 0, |slot| {
+            slot[..total_size].copy_from_slice(raw_frame);
+        })
+        .map_err(RingPairError::Channel)
+    }
+
     /// Try to receive a response from any tier (checks small → xlarge) using zero-copy slot views.
     pub fn try_recv_response(&self) -> Result<Option<ResponseData>, RingPairError> {
         for ring in [&self.small, &self.medium, &self.large, &self.xlarge] {
@@ -508,6 +521,11 @@ impl RingPair {
     #[cfg(unix)]
     pub fn all_fds(&self) -> Vec<RawFd> {
         self.fd_set().all_fds()
+    }
+
+    /// Send a pre-encoded raw response frame through the tiered response rings.
+    pub fn send_response_bytes(&self, raw_frame: &[u8]) -> Result<(), RingPairError> {
+        self.response_rings.send_response_bytes(raw_frame)
     }
 }
 

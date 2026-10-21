@@ -31,11 +31,12 @@ pub const FREE_THREADED: bool = true;
 pub const FREE_THREADED: bool = false;
 
 /// The `_vertebra` native extension module.
-#[pymodule]
+#[pymodule(gil_used = false)]
 #[pyo3(name = "_vertebra")]
 pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("FREE_THREADED", FREE_THREADED)?;
+    m.add("GIL_USED", false)?;
 
     m.add_class::<request::Request>()?;
     m.add_class::<headers::Headers>()?;
@@ -53,6 +54,7 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(api::get_batch, m)?)?;
     m.add_function(wrap_pyfunction!(api::submit_results, m)?)?;
     m.add_function(wrap_pyfunction!(api::submit_response, m)?)?;
+    m.add_function(wrap_pyfunction!(api::submit_raw_response, m)?)?;
 
     // SHM async helpers
     m.add_function(wrap_pyfunction!(api::get_request_notify_fd, m)?)?;

@@ -593,10 +593,10 @@ def test_thread_safety_run_worker_no_free_threading_gate():
 
 
 def test_free_threading_is_free_threaded_returns_bool():
-    """_is_free_threaded should return a bool without error."""
-    from vertebra.server._native import _is_free_threaded
+    """is_free_threaded should return a bool without error."""
+    from vertebra.server._native import is_free_threaded
 
-    result = _is_free_threaded()
+    result = is_free_threaded()
     assert isinstance(result, bool)
 
 

@@ -1,9 +1,9 @@
 ---
 type: Guide
 title: "PyO3 Zero-Copy FFI & Vectorized Batch Dispatch"
-description: "Slab-backed PyO3 Request/Headers/Response/RequestBatch wrappers, 4-way BatchDispatchPlan, and single-wake AsyncRuntime."
+description: "Slab-backed PyO3 Request/Headers/Response/RequestBatch wrappers, zero-copy Py_buffer views, PyOnceLock header interning, and 4-way BatchDispatchPlan."
 status: stable
-tags: [architecture, worker, pyo3, ffi, batch-dispatch]
+tags: [architecture, worker, pyo3, ffi, zero-copy, batch-dispatch]
 sources:
   - resource: src/rs/vertebra-py/src/api.rs
   - resource: src/rs/vertebra-py/src/batch.rs
@@ -15,16 +15,16 @@ sources:
 
 # PyO3 Zero-Copy FFI & Vectorized Batch Dispatch
 
-[`vertebra-py`](../../../../../src/rs/vertebra-py/src/lib.rs) (`vertebra._vertebra`) exposes slab-backed Python types and vectorized batch completion so Python workers in [`_native.py`](../../../../../src/py/vertebra/server/_native.py) process HTTP batches with minimal allocation and FFI transitions.
+[`vertebra-py`](../../../../../src/rs/vertebra-py/src/lib.rs) (`vertebra._vertebra`) exposes slab-backed Python types, zero-copy `Py_buffer` views, and vectorized batch completion so Python workers in [`_native.py`](../../../../../src/py/vertebra/server/_native.py) process HTTP batches with minimal allocation and FFI transitions.
 
-## 1. Slab-Backed Lazy `#[pyclass]` Types (`request.rs`, `headers.rs`, `response.rs`, `batch.rs`)
+## 1. Slab-Backed Lazy `#[pyclass]` Types & Zero-Copy `Py_buffer` (`request.rs`, `headers.rs`, `response.rs`, `batch.rs`)
 
 When [`get_batch`](../../../../../src/rs/vertebra-py/src/api.rs) or [`try_get_batch`](../../../../../src/rs/vertebra-py/src/api.rs) drains a batch, it wraps the underlying `BatchSnapshot` inside a [`RequestBatch`](../../../../../src/rs/vertebra-py/src/batch.rs) (`RequestBatchIterator`) without copying headers or bodies into Python heap objects:
 
-- **[`Request`](../../../../../src/rs/vertebra-py/src/request.rs)**: Lazily reads `method`, `path`, `query`, `body`, and `headers` from the underlying `DataSlab` on property access, caching materialized Python objects only for attributes the handler actually reads.
-- **[`Headers`](../../../../../src/rs/vertebra-py/src/headers.rs) & [`HeadersIterator`](../../../../../src/rs/vertebra-py/src/headers.rs)**: Case-insensitive mapping backed by Rust header slices (`get`, `get_all`, `keys`, `values`, `items`, `__contains__`, `__len__`, `__iter__`).
-- **[`Response`](../../../../../src/rs/vertebra-py/src/response.rs)**: Holds `status: u16`, `headers: Vec<(String, String)>`, `body: Bytes`, and `request_id: u64`.
-- **Vectorized & Streaming Submission ([`api.rs`](../../../../../src/rs/vertebra-py/src/api.rs))**: `submit_results(responses)` submits an entire batch while releasing the GIL (`py.detach`), and `submit_response(resp)` completes individual responses in `async_mode=True`.
+- **[`Request`](../../../../../src/rs/vertebra-py/src/request.rs) & `Request.body_view`**: Lazily reads `method`, `path`, `query`, `body`, and `headers` from the underlying `DataSlab` on property access. `request.body_view` returns a zero-copy read-only Python `memoryview` (`PyMemoryView_FromMemory` with an attached `_SlabAnchor` keeping `Arc<DataSlab>` alive) so `msgspec.json.decode(request.body_view)` parses directly from the Rust slab without allocating a `PyBytes` copy. `Request.from_parts(...)` constructs standalone slab-backed requests in unit tests.
+- **[`Headers`](../../../../../src/rs/vertebra-py/src/headers.rs) & `PyOnceLock` Interning**: Case-insensitive mapping backed by Rust header slices (`get`, `get_all`, `keys`, `values`, `items`, `__contains__`, `__len__`, `__iter__`). Common lowercase HTTP header keys (`content-type`, `authorization`, `accept`, `user-agent`, `host`, `cookie`, etc.) are interned via `PyOnceLock<Py<PyString>>` and `pyo3::intern!`.
+- **[`Response`](../../../../../src/rs/vertebra-py/src/response.rs) & `Response.from_buffer`**: Holds `status: u16`, `headers: Vec<(String, String)>`, `body: Bytes`, and `request_id: u64`. `Response.from_buffer(...)` and `RequestBatch.submit_buffers(...)` extract payload bytes from any Python buffer-protocol object (`bytes`, `bytearray`, `memoryview`) via `PyBuffer::<u8>::get` and copy directly into Rust `Bytes` inside `py.detach`.
+- **Direct Raw & Vectorized Submission ([`api.rs`](../../../../../src/rs/vertebra-py/src/api.rs))**: `submit_raw_response(request_id, status, headers, body)` writes status, header tuples, and body bytes directly into `BatchBridge` or `TieredRingSet::send_response_bytes` without constructing a `#[pyclass] Response`. `submit_results(responses)` and `submit_response(resp)` complete batch or individual responses while releasing the GIL (`py.detach`).
 
 ## 2. Startup Dispatch Caching (`_handler_dispatch_spec`)
 

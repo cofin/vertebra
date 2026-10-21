@@ -1,6 +1,7 @@
 //! Response builder for the Vertebra batch runner.
 
 use bytes::Bytes;
+use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyBytes, PyDict, PyList, PyString, PyTuple};
@@ -31,7 +32,54 @@ fn extract_header_entry(item: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, Vec<u8>)>
     Ok((extract_header_bytes(&k_obj)?, extract_header_bytes(&v_obj)?))
 }
 
-#[pyclass(name = "Response")]
+pub(crate) fn extract_buffer_bytes(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Bytes> {
+    if let Ok(py_bytes) = obj.cast::<PyBytes>() {
+        return Ok(Bytes::copy_from_slice(py_bytes.as_bytes()));
+    }
+    if let Ok(py_str) = obj.cast::<PyString>() {
+        return Ok(Bytes::copy_from_slice(py_str.to_str()?.as_bytes()));
+    }
+    if let Ok(py_buf) = PyBuffer::<u8>::get(obj) {
+        if py_buf.is_c_contiguous() {
+            let len = py_buf.item_count();
+            let slice = if len == 0 {
+                &[][..]
+            } else {
+                unsafe { std::slice::from_raw_parts(py_buf.buf_ptr() as *const u8, len) }
+            };
+            return Ok(Bytes::copy_from_slice(slice));
+        }
+        return Ok(Bytes::from(py_buf.to_vec(py)?));
+    }
+    Ok(Bytes::from(obj.extract::<Vec<u8>>()?))
+}
+
+pub(crate) fn extract_headers_list(
+    headers: Option<Bound<'_, PyAny>>,
+) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    let mut header_vec: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    if let Some(h) = headers {
+        if let Ok(dict) = h.cast::<PyDict>() {
+            header_vec.reserve(dict.len());
+            for (k, v) in dict.iter() {
+                header_vec.push((extract_header_bytes(&k)?, extract_header_bytes(&v)?));
+            }
+        } else if let Ok(list) = h.cast::<PyList>() {
+            header_vec.reserve(list.len());
+            for item in list.iter() {
+                header_vec.push(extract_header_entry(&item)?);
+            }
+        } else if let Ok(tuple) = h.cast::<PyTuple>() {
+            header_vec.reserve(tuple.len());
+            for item in tuple.iter() {
+                header_vec.push(extract_header_entry(&item)?);
+            }
+        }
+    }
+    Ok(header_vec)
+}
+
+#[pyclass(name = "Response", freelist = 128)]
 #[derive(Clone)]
 pub struct Response {
     pub status: u16,
@@ -45,44 +93,39 @@ impl Response {
     #[new]
     #[pyo3(signature = (status, body=None, headers=None, request_id=0))]
     fn new(
+        py: Python<'_>,
         status: u16,
         body: Option<Bound<'_, PyAny>>,
         headers: Option<Bound<'_, PyAny>>,
         request_id: u64,
     ) -> PyResult<Self> {
         let body_bytes = match body {
-            Some(b) => {
-                if let Ok(py_bytes) = b.cast::<PyBytes>() {
-                    Bytes::copy_from_slice(py_bytes.as_bytes())
-                } else if let Ok(py_str) = b.cast::<PyString>() {
-                    Bytes::copy_from_slice(py_str.to_str()?.as_bytes())
-                } else {
-                    Bytes::from(b.extract::<Vec<u8>>()?)
-                }
-            }
+            Some(b) => extract_buffer_bytes(py, &b)?,
             None => Bytes::new(),
         };
 
-        let mut header_vec: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        if let Some(h) = headers {
-            if let Ok(dict) = h.cast::<PyDict>() {
-                header_vec.reserve(dict.len());
-                for (k, v) in dict.iter() {
-                    header_vec.push((extract_header_bytes(&k)?, extract_header_bytes(&v)?));
-                }
-            } else if let Ok(list) = h.cast::<PyList>() {
-                header_vec.reserve(list.len());
-                for item in list.iter() {
-                    header_vec.push(extract_header_entry(&item)?);
-                }
-            } else if let Ok(tuple) = h.cast::<PyTuple>() {
-                header_vec.reserve(tuple.len());
-                for item in tuple.iter() {
-                    header_vec.push(extract_header_entry(&item)?);
-                }
-            }
-        }
+        let header_vec = extract_headers_list(headers)?;
 
+        Ok(Self {
+            status,
+            body: body_bytes,
+            headers: header_vec,
+            request_id,
+        })
+    }
+
+    /// Construct a `Response` directly from any CPython buffer-protocol object (`bytes`, `bytearray`, `memoryview`).
+    #[staticmethod]
+    #[pyo3(signature = (status, body, headers=None, request_id=0))]
+    pub fn from_buffer(
+        py: Python<'_>,
+        status: u16,
+        body: &Bound<'_, PyAny>,
+        headers: Option<Bound<'_, PyAny>>,
+        request_id: u64,
+    ) -> PyResult<Self> {
+        let body_bytes = extract_buffer_bytes(py, body)?;
+        let header_vec = extract_headers_list(headers)?;
         Ok(Self {
             status,
             body: body_bytes,

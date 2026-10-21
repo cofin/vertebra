@@ -165,11 +165,22 @@ pub mod flags {
     pub const OK: u32 = 1 << 4;
     /// Response contains an error.
     pub const ERROR: u32 = 1 << 5;
+    /// Multi-frame streaming response active.
+    pub const STREAMING: u32 = 1 << 6;
+    /// Terminal frame of a stream or unary response.
+    pub const FINAL: u32 = 1 << 7;
+    /// Initial response headers carried in this frame.
+    pub const HEADERS_SENT: u32 = 1 << 8;
+    /// Frame carries HTTP/2 or gRPC trailing headers.
+    pub const TRAILERS: u32 = 1 << 9;
 }
 
 /// Response flags for IPC messages.
 pub mod response_flags {
-    pub use super::flags::{COMPRESSED, ERROR, NONE, OK};
+    pub use super::flags::{COMPRESSED, ERROR, FINAL, HEADERS_SENT, NONE, OK, STREAMING, TRAILERS};
+    pub const STREAM_START: u32 = STREAMING | HEADERS_SENT;
+    pub const STREAM_CHUNK: u32 = STREAMING;
+    pub const STREAM_END: u32 = STREAMING | FINAL;
 }
 
 /// Control message types for broker coordination.

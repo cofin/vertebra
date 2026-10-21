@@ -20,8 +20,9 @@ pub use hmr::{HmrEvent, SourceWatcher};
 pub use ssr::{SsrPool, SsrResult};
 
 /// Python module definition
-#[pymodule]
+#[pymodule(gil_used = false)]
 fn _bundler(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("GIL_USED", false)?;
     m.add_class::<Bundler>()?;
     m.add_class::<BundleConfig>()?;
     m.add_class::<DevConfig>()?;

@@ -50,11 +50,13 @@ tracing    = "0.1"
 fnv        = "1.0"
 bytes      = { workspace = true }
 dashmap    = "6"
+mimalloc   = { workspace = true, optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
-default = ["python"]
+default = ["python", "mimalloc"]
 python = ["dep:pyo3", "dep:_vertebra"]
+mimalloc = ["dep:mimalloc"]
 tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pemfile"]
 
 [build-dependencies]

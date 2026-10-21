@@ -1,15 +1,17 @@
 ---
 type: Guide
 title: "Tiered Rings & In-Process Batch Bridge"
-description: "RingPair request/response channels, 4-tier TieredRingSet with VRES wire envelopes, and in-process BatchBridge slab transport."
+description: "RingPair request/response channels, 4-tier TieredRingSet with VRES wire envelopes, multi-frame streaming flags, and in-process BatchBridge slab transport."
 status: stable
-tags: [architecture, ipc, tiered-rings, batch-bridge, rust]
+tags: [architecture, ipc, tiered-rings, batch-bridge, streaming, rust]
 sources:
   - resource: src/rs/vertebra-core/src/transport/mod.rs
   - resource: src/rs/vertebra-core/src/transport/ring_pair.rs
   - resource: src/rs/vertebra-core/src/tiered_ring.rs
   - resource: src/rs/vertebra-core/src/bridge.rs
   - resource: src/rs/vertebra-core/src/buffer.rs
+  - resource: src/rs/vertebra-core/src/ipc.rs
+  - resource: src/rs/vertebra-core/src/protocol/mod.rs
 ---
 
 # Tiered Rings & In-Process Batch Bridge
@@ -34,10 +36,18 @@ A [`RingPair`](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs) c
 | Tier 2 (`medium`) | `64 KiB` | `32` slots | Large JSON lists, SSR HTML fragments |
 | Tier 3 (`large`) | `1 MiB` | `8` slots | Full-page SSR payloads, bulk exports |
 
-- **Spillover Promotion**: `TieredRingSet::send_response` selects the smallest tier fitting the 20-byte `VRES` header plus headers and body. If that tier's ring is full, it promotes the write to the next larger tier and records a spillover counter.
+- **Spillover Promotion**: `TieredRingSet::send_response` and `TieredRingSet::send_response_bytes` select the smallest tier fitting the 20-byte `VRES` header plus headers and body. If that tier's ring is full, they promote the write to the next larger tier and record a spillover counter.
 - **20-Byte `VRES` Response Envelope**: Responses carry a 20-byte `VRES` header (`magic: "VRES"`, `correlation_id: u64`, `status: u16`, `flags: u16`, `headers_len: u32`) followed by compact headers and body bytes, written directly into the SHM slot via `SpscRing::try_send_with`.
 
-## 3. In-Process `BatchBridge` (`bridge.rs`, `buffer.rs`)
+## 3. Multi-Frame Streaming & 44-Byte `ResponseSlot` (`ipc.rs`, `protocol/mod.rs`, `buffer.rs`)
+
+For multi-frame streaming and >`1 MiB` payloads over shared memory:
+
+- **44-Byte `ResponseSlot` & Stream Flags ([`ipc.rs`](../../../../../src/rs/vertebra-core/src/ipc.rs))**: `ResponseSlot` (`SLOT_SIZE = 44`) includes `stream_seq: u32` and streaming flags (`FLAG_STREAM_CHUNK = 1 << 4`, `FLAG_STREAM_END = 1 << 5`, `FLAG_TRAILERS = 1 << 6`) alongside `FLAG_COMPRESSED_LZ4` and `FLAG_COMPRESSED_ZSTD`.
+- **`ResponseSlot::encode_raw_parts_into` ([`protocol/mod.rs`](../../../../../src/rs/vertebra-core/src/protocol/mod.rs))**: Writes HTTP status, raw header tuples, and raw body bytes directly into a `BufferPool` slot without constructing an intermediate `PayloadResponse` struct.
+- **`BufferPool::acquire_multi(num_slots)` ([`buffer.rs`](../../../../../src/rs/vertebra-core/src/buffer.rs))**: Atomically reserves $K$ contiguous slots from the bitmap using 64-bit word masks (`release_multi` frees all $K$ slots) so oversized frames never panic when `payload > slot_size`.
+
+## 4. In-Process `BatchBridge` (`bridge.rs`, `buffer.rs`)
 
 In `Topology::Embedded`, [`BatchBridge`](../../../../../src/rs/vertebra-core/src/bridge.rs) bypasses POSIX shared memory using in-process arenas:
 
