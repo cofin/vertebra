@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from vertebra.extensions.litestar.channels import swap_litestar_channels_backend
-from vertebra.extensions.litestar.config import VertebraConfig
+from vertebra.extensions.litestar.config import LitestarConfig
 from vertebra.extensions.litestar.fastpath import (
     CompiledLitestarRoute,
     compile_litestar_fastpath_routes,
@@ -19,22 +19,27 @@ from vertebra.extensions.litestar.offload import (
 )
 from vertebra.extensions.litestar.store import swap_litestar_response_cache_store
 
-__all__ = ("VertebraPlugin", "enter_litestar_server_lifespan")
+__all__ = (
+    "LitestarPlugin",
+    "VertebraLitestarPlugin",
+    "VertebraPlugin",
+    "enter_litestar_server_lifespan",
+)
 
 
-class VertebraPlugin:
+class LitestarPlugin:
     """Litestar plugin enabling zero-GIL Rust offload, direct handler dispatch, and CLI lifespans."""
 
     __slots__ = ("_compiled_routes", "_config", "_offload_plan")
 
-    def __init__(self, config: VertebraConfig | None = None) -> None:
-        self._config = config or VertebraConfig()
+    def __init__(self, config: LitestarConfig | None = None) -> None:
+        self._config = config or LitestarConfig()
         self._offload_plan: LitestarOffloadPlan | None = None
         self._compiled_routes: dict[int, CompiledLitestarRoute] = {}
 
     @property
-    def config(self) -> VertebraConfig:
-        """Return the active VertebraConfig."""
+    def config(self) -> LitestarConfig:
+        """Return the active LitestarConfig."""
         return self._config
 
     @property
@@ -125,7 +130,7 @@ def _load_litestar_get() -> Callable[..., Callable[[Callable[..., Any]], Any]]:
             reg = getattr(proto, "register", None)
             if callable(reg):
                 with contextlib.suppress(TypeError):
-                    reg(VertebraPlugin)
+                    reg(LitestarPlugin)
         get_fn: Callable[..., Callable[[Callable[..., Any]], Any]] = mod.get
         return get_fn
     except ImportError:
@@ -146,4 +151,6 @@ def _load_litestar_get() -> Callable[..., Callable[[Callable[..., Any]], Any]]:
         return fallback_get
 
 
+VertebraPlugin = LitestarPlugin
+VertebraLitestarPlugin = LitestarPlugin
 _litestar_get = _load_litestar_get()

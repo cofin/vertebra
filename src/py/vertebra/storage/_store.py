@@ -19,6 +19,7 @@ from typing import Any, ClassVar, Literal
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 __all__ = (
+    "LitestarObjectStore",
     "ObjectMeta",
     "ObjectStore",
     "PutResult",
@@ -64,7 +65,7 @@ class SigningConfig:
     endpoint: str | None = None
 
 
-class VertebraStore:
+class ObjectStore:
     """Unified object store supporting zero-copy memoryview buffers, sync/async I/O, and V4 presigning."""
 
     _native_module: ClassVar[Any] = None
@@ -758,4 +759,5 @@ class VertebraStore:
         return cleaned
 
 
-ObjectStore = VertebraStore
+VertebraStore = ObjectStore
+LitestarObjectStore = ObjectStore

@@ -5,10 +5,15 @@ import time
 from datetime import timedelta
 from typing import Any, Self
 
-__all__ = ("VertebraMemoryStore", "swap_litestar_response_cache_store")
+__all__ = (
+    "MemoryStore",
+    "VertebraMemoryStore",
+    "VertebraStore",
+    "swap_litestar_response_cache_store",
+)
 
 
-class VertebraMemoryStore:
+class MemoryStore:
     """Lock-free monotonic TTL store replacing Litestar's anyio.Lock-gated MemoryStore."""
 
     __slots__ = ("_entries",)
@@ -87,8 +92,8 @@ class VertebraMemoryStore:
         return int(remaining)
 
 
-def swap_litestar_response_cache_store(app: Any) -> VertebraMemoryStore | None:
-    """Transparently replace Litestar's default response_cache MemoryStore with VertebraMemoryStore."""
+def swap_litestar_response_cache_store(app: Any) -> MemoryStore | None:
+    """Transparently replace Litestar's default response_cache MemoryStore with Vertebra's MemoryStore."""
     stores = getattr(app, "stores", None)
     if stores is None:
         return None
@@ -101,30 +106,32 @@ def swap_litestar_response_cache_store(app: Any) -> VertebraMemoryStore | None:
         else:
             return None
     current = internal_dict.get(store_name)
-    is_memory_store = (_MemoryStoreCls is not None and isinstance(current, _MemoryStoreCls)) or type(
-        current
-    ).__name__ == "MemoryStore"
+    is_memory_store = (_MemoryStoreCls is not None and isinstance(current, _MemoryStoreCls)) or (
+        type(current).__name__ == "MemoryStore" and not isinstance(current, MemoryStore)
+    )
     if is_memory_store:
-        replacement = VertebraMemoryStore()
+        replacement = MemoryStore()
         internal_dict[store_name] = replacement
         return replacement
-    if isinstance(current, VertebraMemoryStore):
+    if isinstance(current, MemoryStore):
         return current
     return None
 
 
 def _load_store_types() -> type[Any] | None:
-    """Load Litestar MemoryStore and register VertebraMemoryStore as a Store virtual subclass."""
+    """Load Litestar MemoryStore and register MemoryStore as a Store virtual subclass."""
     try:
         base_mod = importlib.import_module("litestar.stores.base")
         mem_mod = importlib.import_module("litestar.stores.memory")
         register_fn = getattr(base_mod.Store, "register", None)
         if callable(register_fn):
-            register_fn(VertebraMemoryStore)
+            register_fn(MemoryStore)
         memory_cls: type[Any] = mem_mod.MemoryStore
         return memory_cls
     except ImportError:
         return None
 
 
+VertebraMemoryStore = MemoryStore
+VertebraStore = MemoryStore
 _MemoryStoreCls = _load_store_types()

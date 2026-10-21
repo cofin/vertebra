@@ -29,7 +29,7 @@ const DEFAULT_BASE_DELAY_MS = 1000;
 const DEFAULT_MAX_DELAY_MS = 30_000;
 const MAX_IDEMPOTENCY_KEYS = 1024;
 
-export class VertebraWebSocketClient {
+export class WebSocketClient {
   private readonly url: string;
   private readonly protocols?: string | string[];
   private readonly heartbeatIntervalMs: number;
@@ -283,4 +283,4 @@ export class VertebraWebSocketClient {
   }
 }
 
-export { VertebraWebSocketClient as VertebraWebSocket, VertebraWebSocketClient as WebSocketClient };
+export { WebSocketClient as VertebraWebSocket, WebSocketClient as VertebraWebSocketClient };

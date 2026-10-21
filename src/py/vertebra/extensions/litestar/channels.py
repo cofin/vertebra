@@ -6,10 +6,14 @@ from collections import deque
 from collections.abc import AsyncGenerator, Iterable
 from typing import Any
 
-__all__ = ("VertebraChannelsBackend", "swap_litestar_channels_backend")
+__all__ = (
+    "ChannelsBackend",
+    "VertebraChannelsBackend",
+    "swap_litestar_channels_backend",
+)
 
 
-class VertebraChannelsBackend:
+class ChannelsBackend:
     """In-memory and Rust-bridged Litestar ChannelsBackend with bounded ring history."""
 
     __slots__ = ("_history", "_max_history", "_queues", "_running", "_subscribed_channels", "_subscribers")
@@ -89,7 +93,7 @@ class VertebraChannelsBackend:
         return items
 
 
-def swap_litestar_channels_backend(app: Any) -> VertebraChannelsBackend | None:
+def swap_litestar_channels_backend(app: Any) -> ChannelsBackend | None:
     """Transparently replace MemoryChannelsBackend on a Litestar app's ChannelsPlugin."""
     plugins = getattr(app, "plugins", None)
     if plugins is None:
@@ -106,25 +110,26 @@ def swap_litestar_channels_backend(app: Any) -> VertebraChannelsBackend | None:
             ) or type(backend).__name__ == "MemoryChannelsBackend"
             if is_memory_backend:
                 history = int(getattr(backend, "_history", 0) or 0)
-                replacement = VertebraChannelsBackend(history=history)
+                replacement = ChannelsBackend(history=history)
                 plugin._backend = replacement
                 return replacement
-            if isinstance(backend, VertebraChannelsBackend):
+            if isinstance(backend, ChannelsBackend):
                 return backend
     return None
 
 
 def _load_channels_types() -> tuple[type[Any] | None, type[Any] | None]:
-    """Load Litestar ChannelsPlugin and MemoryChannelsBackend and register VertebraChannelsBackend."""
+    """Load Litestar ChannelsPlugin and MemoryChannelsBackend and register ChannelsBackend."""
     try:
         ch_mod = importlib.import_module("litestar.channels")
         mem_mod = importlib.import_module("litestar.channels.backends.memory")
         register_fn = getattr(ch_mod.ChannelsBackend, "register", None)
         if callable(register_fn):
-            register_fn(VertebraChannelsBackend)
+            register_fn(ChannelsBackend)
         return ch_mod.ChannelsPlugin, mem_mod.MemoryChannelsBackend
     except ImportError:
         return None, None
 
 
+VertebraChannelsBackend = ChannelsBackend
 _ChannelsPluginCls, _MemoryChannelsBackendCls = _load_channels_types()

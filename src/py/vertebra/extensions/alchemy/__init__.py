@@ -1,13 +1,35 @@
-"""Advanced Alchemy extension and object storage backend for Vertebra."""
+"""Advanced Alchemy extension, connection broker, and object storage backend for Vertebra."""
 
+from vertebra.extensions.alchemy.broker import (
+    BrokerConfig,
+    BrokerMetrics,
+    BrokerPlugin,
+    BrokerTransport,
+    ChannelMessage,
+    ConnectionLease,
+    InMemoryBrokerTransport,
+    ShmBrokerTransport,
+)
 from vertebra.extensions.alchemy.plugin import (
     AA_PLUGIN_PRIORITY,
     AA_STATE_KEY,
+    AdvancedAlchemy,
+    AlchemyPlugin,
+    AlchemyStorePlugin,
+    SQLAlchemyAsyncConfig,
+    SQLAlchemyPlugin,
     SQLAlchemyState,
+    SQLAlchemySyncConfig,
     VertebraAlchemyPlugin,
+    synthesize_skip_validation_annotation,
+    wrap_config,
 )
 from vertebra.extensions.alchemy.storage import (
     AlchemyFileAttachment,
+    AlchemyStore,
+    FileAttachment,
+    ObjectStoreBackend,
+    StorageBackend,
     VertebraAlchemyStorageBackend,
     VertebraStorageBackend,
 )
@@ -15,9 +37,29 @@ from vertebra.extensions.alchemy.storage import (
 __all__ = (
     "AA_PLUGIN_PRIORITY",
     "AA_STATE_KEY",
+    "AdvancedAlchemy",
     "AlchemyFileAttachment",
+    "AlchemyPlugin",
+    "AlchemyStore",
+    "AlchemyStorePlugin",
+    "BrokerConfig",
+    "BrokerMetrics",
+    "BrokerPlugin",
+    "BrokerTransport",
+    "ChannelMessage",
+    "ConnectionLease",
+    "FileAttachment",
+    "InMemoryBrokerTransport",
+    "ObjectStoreBackend",
+    "SQLAlchemyAsyncConfig",
+    "SQLAlchemyPlugin",
     "SQLAlchemyState",
+    "SQLAlchemySyncConfig",
+    "ShmBrokerTransport",
+    "StorageBackend",
     "VertebraAlchemyPlugin",
     "VertebraAlchemyStorageBackend",
     "VertebraStorageBackend",
+    "synthesize_skip_validation_annotation",
+    "wrap_config",
 )

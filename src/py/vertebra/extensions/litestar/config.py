@@ -1,12 +1,17 @@
-"""Configuration for VertebraPlugin Litestar integration."""
+"""Configuration for LitestarPlugin integration."""
 
 import dataclasses
 
-__all__ = ("VertebraConfig",)
+__all__ = (
+    "LitestarConfig",
+    "ServerConfig",
+    "VertebraConfig",
+    "VertebraServerConfig",
+)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
-class VertebraConfig:
+class LitestarConfig:
     """Configuration controlling zero-code-change Litestar accelerations and runtime hooks."""
 
     offload_compression: bool = True
@@ -18,3 +23,8 @@ class VertebraConfig:
     enable_direct_handler_fastpath: bool = True
     enable_health_endpoint: bool = False
     health_path: str = "/healthz"
+
+
+ServerConfig = LitestarConfig
+VertebraConfig = LitestarConfig
+VertebraServerConfig = LitestarConfig
