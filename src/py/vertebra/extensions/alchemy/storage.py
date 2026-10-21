@@ -6,16 +6,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vertebra.storage import ObjectMeta, VertebraStore
+from vertebra.storage import FileObjectSessionTracker, ObjectMeta, VertebraStore
 
 __all__ = (
     "AlchemyFileAttachment",
     "AlchemyStore",
     "FileAttachment",
+    "FileObjectSessionTracker",
     "ObjectStoreBackend",
     "StorageBackend",
     "VertebraAlchemyStorageBackend",
     "VertebraStorageBackend",
+    "provide_file_object_tracker",
 )
 
 type PathLike = str | Path
@@ -150,6 +152,10 @@ class ObjectStoreBackend:
             return self._store.presign_put(qualified, expires_in_secs=expires_in_secs, timestamp=timestamp)
         return self._store.presign_get(qualified, expires_in_secs=expires_in_secs, timestamp=timestamp)
 
+    def tracker(self) -> FileObjectSessionTracker:
+        """Create a transactional FileObjectSessionTracker bound to this storage backend."""
+        return FileObjectSessionTracker(self._store)
+
     def _qualify(self, path: PathLike) -> str:
         raw_path = path.as_posix() if isinstance(path, Path) else str(path)
         cleaned = raw_path.strip().lstrip("/")
@@ -184,6 +190,16 @@ class ObjectStoreBackend:
                 chunks.append(bytes(chunk))
             return b"".join(chunks)
         return b"".join(bytes(chunk) for chunk in data)
+
+
+async def provide_file_object_tracker(store: VertebraStore) -> AsyncIterable[FileObjectSessionTracker]:
+    """Litestar dependency provider yielding a transactional FileObjectSessionTracker."""
+    tracker = FileObjectSessionTracker(store)
+    try:
+        yield tracker
+    except Exception:
+        await tracker.after_rollback_async()
+        raise
 
 
 StorageBackend = ObjectStoreBackend

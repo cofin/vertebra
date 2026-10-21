@@ -345,6 +345,74 @@ pub async fn sign_gcs_v4_with_iam_endpoint(
     ))
 }
 
+#[derive(Clone, Debug)]
+pub struct AzureSasConfig {
+    pub account: String,
+    pub container: String,
+    pub access_key_b64: String,
+    pub endpoint: Option<String>,
+}
+
+/// Generate a zero-I/O Azure Shared Key Blob SAS URL (`sv=2020-12-06`).
+pub fn sign_azure_sas_url(
+    config: &AzureSasConfig,
+    method: &str,
+    blob_path: &str,
+    expires_in_secs: u64,
+    now_unix: i64,
+) -> Result<String, StorageError> {
+    let start_dt: DateTime<Utc> = Utc
+        .timestamp_opt(now_unix, 0)
+        .single()
+        .ok_or_else(|| StorageError::Signing("invalid unix timestamp".to_string()))?;
+    let expiry_dt: DateTime<Utc> = Utc
+        .timestamp_opt(now_unix + expires_in_secs as i64, 0)
+        .single()
+        .ok_or_else(|| StorageError::Signing("invalid expiry timestamp".to_string()))?;
+    let st = start_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let se = expiry_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let sp = match method.to_ascii_uppercase().as_str() {
+        "PUT" | "POST" => "cw",
+        "DELETE" => "d",
+        _ => "r",
+    };
+    let sv = "2020-12-06";
+    let sr = "b";
+    let trimmed_blob = blob_path.trim_start_matches('/');
+    let canonicalized_resource = format!(
+        "/blob/{}/{}/{}",
+        config.account, config.container, trimmed_blob
+    );
+    let string_to_sign =
+        format!("{sp}\n{st}\n{se}\n{canonicalized_resource}\n\n\nhttps\n{sv}\n{sr}\n\n\n\n\n\n");
+    let raw_key = BASE64_STANDARD
+        .decode(config.access_key_b64.as_bytes())
+        .unwrap_or_else(|_| config.access_key_b64.as_bytes().to_vec());
+    let sig_bytes = hmac_sha256(&raw_key, string_to_sign.as_bytes())?;
+    let sig_b64 = BASE64_STANDARD.encode(sig_bytes);
+
+    let base_endpoint = config
+        .endpoint
+        .clone()
+        .unwrap_or_else(|| format!("https://{}.blob.core.windows.net", config.account));
+    let query = format!(
+        "sv={}&st={}&se={}&sr={}&sp={}&spr=https&sig={}",
+        urlencoding_encode(sv),
+        urlencoding_encode(&st),
+        urlencoding_encode(&se),
+        sr,
+        sp,
+        urlencoding_encode(&sig_b64)
+    );
+    Ok(format!(
+        "{}/{}/{}?{}",
+        base_endpoint.trim_end_matches('/'),
+        config.container,
+        trimmed_blob,
+        query
+    ))
+}
+
 fn urlencoding_encode(input: &str) -> String {
     url::form_urlencoded::byte_serialize(input.as_bytes()).collect()
 }

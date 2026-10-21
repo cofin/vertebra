@@ -19,13 +19,229 @@ from typing import Any, ClassVar, Literal
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 __all__ = (
+    "AsyncStore",
+    "AzureConfig",
+    "GcsConfig",
+    "HttpConfig",
     "LitestarObjectStore",
+    "LocalConfig",
+    "MemoryConfig",
     "ObjectMeta",
     "ObjectStore",
+    "OciConfig",
     "PutResult",
+    "R2Config",
+    "S3Config",
     "SigningConfig",
+    "StorageConfig",
+    "SyncStore",
     "VertebraStore",
+    "chunk_r2_uniform_parts",
+    "sign_azure_sas",
+    "sign_oci_headers",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class LocalConfig:
+    """Configuration for local filesystem object storage."""
+
+    root: str | Path
+    create_dirs: bool = True
+
+    def to_url_and_options(self) -> tuple[str, dict[str, str]]:
+        """Convert configuration into a canonical URL and options dictionary."""
+        resolved = Path(self.root).resolve()
+        if self.create_dirs:
+            resolved.mkdir(parents=True, exist_ok=True)
+        return f"file://{resolved.as_posix()}", {}
+
+
+@dataclass(frozen=True, slots=True)
+class S3Config:
+    """Configuration for AWS S3 or S3-compatible object storage."""
+
+    bucket: str
+    region: str = "us-east-1"
+    endpoint: str | None = None
+    access_key_id: str | None = None
+    secret_access_key: str | None = None
+    session_token: str | None = None
+    virtual_hosted_style: bool = False
+    allow_http: bool = False
+
+    def to_url_and_options(self) -> tuple[str, dict[str, str]]:
+        """Convert configuration into a canonical URL and options dictionary."""
+        opts: dict[str, str] = {"region": self.region}
+        if self.endpoint:
+            opts["endpoint"] = self.endpoint
+        if self.access_key_id:
+            opts["access_key_id"] = self.access_key_id
+        if self.secret_access_key:
+            opts["secret_access_key"] = self.secret_access_key
+        if self.session_token:
+            opts["session_token"] = self.session_token
+        if self.allow_http:
+            opts["allow_http"] = "true"
+        return f"s3://{self.bucket}", opts
+
+
+@dataclass(frozen=True, slots=True)
+class GcsConfig:
+    """Configuration for Google Cloud Storage."""
+
+    bucket: str
+    service_account_path: str | None = None
+    service_account_key: str | None = None
+    application_credentials: str | None = None
+    service_account_email: str | None = None
+    iam_endpoint: str = "https://iamcredentials.googleapis.com"
+    access_token: str | None = None
+
+    def to_url_and_options(self) -> tuple[str, dict[str, str]]:
+        """Convert configuration into a canonical URL and options dictionary."""
+        opts: dict[str, str] = {}
+        if self.service_account_path:
+            opts["service_account_path"] = self.service_account_path
+        elif self.application_credentials:
+            opts["service_account_path"] = self.application_credentials
+        if self.service_account_key:
+            opts["service_account_key"] = self.service_account_key
+        return f"gs://{self.bucket}", opts
+
+
+@dataclass(frozen=True, slots=True)
+class AzureConfig:
+    """Configuration for Azure Blob Storage and ADLS Gen2."""
+
+    container: str
+    account: str
+    access_key: str | None = None
+    sas_token: str | None = None
+    tenant_id: str | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
+    endpoint: str | None = None
+    use_emulator: bool = False
+
+    def to_url_and_options(self) -> tuple[str, dict[str, str]]:
+        """Convert configuration into a canonical URL and options dictionary."""
+        opts: dict[str, str] = {"account": self.account}
+        if self.access_key:
+            opts["access_key"] = self.access_key
+        if self.sas_token:
+            opts["sas_token"] = self.sas_token
+        if self.tenant_id:
+            opts["tenant_id"] = self.tenant_id
+        if self.client_id:
+            opts["client_id"] = self.client_id
+        if self.client_secret:
+            opts["client_secret"] = self.client_secret
+        if self.endpoint:
+            opts["endpoint"] = self.endpoint
+        elif self.use_emulator:
+            opts["endpoint"] = f"http://127.0.0.1:4577/{self.account}"
+        return f"az://{self.container}", opts
+
+
+@dataclass(frozen=True, slots=True)
+class OciConfig:
+    """Configuration for native Oracle Cloud Infrastructure (OCI) Object Storage REST v2."""
+
+    bucket: str
+    namespace: str
+    region: str = "us-ashburn-1"
+    tenancy_ocid: str | None = None
+    user_ocid: str | None = None
+    fingerprint: str | None = None
+    private_key_pem: str | None = None
+    private_key_path: str | Path | None = None
+    endpoint: str | None = None
+
+    def to_url_and_options(self) -> tuple[str, dict[str, str]]:
+        """Convert configuration into a canonical URL and options dictionary."""
+        opts: dict[str, str] = {
+            "namespace": self.namespace,
+            "region": self.region,
+        }
+        if self.tenancy_ocid:
+            opts["tenancy_ocid"] = self.tenancy_ocid
+        if self.user_ocid:
+            opts["user_ocid"] = self.user_ocid
+        if self.fingerprint:
+            opts["fingerprint"] = self.fingerprint
+        pem = self.private_key_pem
+        if pem is None and self.private_key_path is not None:
+            pem = Path(self.private_key_path).read_text(encoding="utf-8")
+        if pem:
+            opts["private_key_pem"] = pem
+        if self.endpoint:
+            opts["endpoint"] = self.endpoint
+        return f"oci://{self.bucket}@{self.namespace}", opts
+
+
+@dataclass(frozen=True, slots=True)
+class R2Config:
+    """Configuration for Cloudflare R2 object storage."""
+
+    bucket: str
+    account_id: str
+    access_key_id: str | None = None
+    secret_access_key: str | None = None
+    jurisdiction: Literal["eu", "fedramp"] | str | None = None
+    custom_domain: str | None = None
+    endpoint: str | None = None
+    allow_http: bool = False
+
+    def resolved_endpoint(self) -> str:
+        """Resolve the Cloudflare R2 jurisdiction or custom endpoint URL."""
+        if self.endpoint:
+            return self.endpoint.rstrip("/")
+        if self.jurisdiction:
+            return f"https://{self.account_id}.{self.jurisdiction}.r2.cloudflarestorage.com"
+        return f"https://{self.account_id}.r2.cloudflarestorage.com"
+
+    def to_url_and_options(self) -> tuple[str, dict[str, str]]:
+        """Convert configuration into a canonical URL and options dictionary."""
+        opts: dict[str, str] = {
+            "account_id": self.account_id,
+            "endpoint": self.resolved_endpoint(),
+        }
+        if self.access_key_id:
+            opts["access_key_id"] = self.access_key_id
+        if self.secret_access_key:
+            opts["secret_access_key"] = self.secret_access_key
+        if self.jurisdiction:
+            opts["jurisdiction"] = str(self.jurisdiction)
+        if self.allow_http:
+            opts["allow_http"] = "true"
+        return f"r2://{self.bucket}", opts
+
+
+@dataclass(frozen=True, slots=True)
+class HttpConfig:
+    """Configuration for HTTP/WebDAV object storage."""
+
+    url: str
+    headers: dict[str, str] | None = None
+
+    def to_url_and_options(self) -> tuple[str, dict[str, str]]:
+        """Convert configuration into a canonical URL and options dictionary."""
+        return self.url, dict(self.headers or {})
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryConfig:
+    """Configuration for in-memory object storage."""
+
+    namespace: str = "default"
+
+    def to_url_and_options(self) -> tuple[str, dict[str, str]]:
+        """Convert configuration into a canonical URL and options dictionary."""
+        return "memory://", {"namespace": self.namespace}
+
+
+type StorageConfig = LocalConfig | S3Config | GcsConfig | AzureConfig | OciConfig | R2Config | HttpConfig | MemoryConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +318,7 @@ class ObjectStore:
             "az",
             "azure",
             "abfs",
+            "oci",
             "http",
             "https",
             "r2",
@@ -121,6 +338,207 @@ class ObjectStore:
     def scheme(self) -> str:
         """Return the URL scheme for this store."""
         return self._scheme
+
+    @property
+    def options(self) -> dict[str, str]:
+        """Return a copy of the configured options dictionary."""
+        return dict(self._options)
+
+    @classmethod
+    def from_config(
+        cls,
+        config: StorageConfig,
+        *,
+        signing: SigningConfig | None = None,
+    ) -> ObjectStore:
+        """Construct an ObjectStore from any provider StorageConfig."""
+        url, options = config.to_url_and_options()
+        return cls(url, options=options, signing=signing)
+
+    @classmethod
+    def from_local(cls, root: str | Path, *, create_dirs: bool = True) -> ObjectStore:
+        """Construct an ObjectStore backed by a local filesystem directory."""
+        return cls.from_config(LocalConfig(root=root, create_dirs=create_dirs))
+
+    @classmethod
+    def from_s3(
+        cls,
+        bucket: str,
+        *,
+        region: str = "us-east-1",
+        endpoint: str | None = None,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
+        session_token: str | None = None,
+        virtual_hosted_style: bool = False,
+        allow_http: bool = False,
+        signing: SigningConfig | None = None,
+    ) -> ObjectStore:
+        """Construct an ObjectStore backed by AWS S3 or an S3-compatible endpoint."""
+        cfg = S3Config(
+            bucket=bucket,
+            region=region,
+            endpoint=endpoint,
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            session_token=session_token,
+            virtual_hosted_style=virtual_hosted_style,
+            allow_http=allow_http,
+        )
+        default_signing = signing or (
+            SigningConfig(
+                provider="s3",
+                bucket=bucket,
+                region=region,
+                access_key_id=access_key_id or "",
+                secret_access_key=secret_access_key or "",
+                endpoint=endpoint,
+            )
+            if access_key_id and secret_access_key
+            else None
+        )
+        return cls.from_config(cfg, signing=default_signing)
+
+    @classmethod
+    def from_gcs(
+        cls,
+        bucket: str,
+        *,
+        service_account_path: str | None = None,
+        service_account_key: str | None = None,
+        application_credentials: str | None = None,
+        service_account_email: str | None = None,
+        iam_endpoint: str = "https://iamcredentials.googleapis.com",
+        access_token: str | None = None,
+    ) -> ObjectStore:
+        """Construct an ObjectStore backed by Google Cloud Storage."""
+        cfg = GcsConfig(
+            bucket=bucket,
+            service_account_path=service_account_path,
+            service_account_key=service_account_key,
+            application_credentials=application_credentials,
+            service_account_email=service_account_email,
+            iam_endpoint=iam_endpoint,
+            access_token=access_token,
+        )
+        signing = (
+            SigningConfig(
+                provider="gcs",
+                bucket=bucket,
+                service_account_email=service_account_email,
+                iam_endpoint=iam_endpoint,
+                access_token=access_token,
+            )
+            if service_account_email
+            else None
+        )
+        return cls.from_config(cfg, signing=signing)
+
+    @classmethod
+    def from_azure(
+        cls,
+        container: str,
+        account: str,
+        *,
+        access_key: str | None = None,
+        sas_token: str | None = None,
+        tenant_id: str | None = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        endpoint: str | None = None,
+        use_emulator: bool = False,
+    ) -> ObjectStore:
+        """Construct an ObjectStore backed by Azure Blob Storage or ADLS Gen2."""
+        return cls.from_config(
+            AzureConfig(
+                container=container,
+                account=account,
+                access_key=access_key,
+                sas_token=sas_token,
+                tenant_id=tenant_id,
+                client_id=client_id,
+                client_secret=client_secret,
+                endpoint=endpoint,
+                use_emulator=use_emulator,
+            )
+        )
+
+    @classmethod
+    def from_oci(
+        cls,
+        bucket: str,
+        namespace: str,
+        *,
+        region: str = "us-ashburn-1",
+        tenancy_ocid: str | None = None,
+        user_ocid: str | None = None,
+        fingerprint: str | None = None,
+        private_key_pem: str | None = None,
+        private_key_path: str | Path | None = None,
+        endpoint: str | None = None,
+    ) -> ObjectStore:
+        """Construct an ObjectStore backed by native OCI Object Storage REST v2."""
+        return cls.from_config(
+            OciConfig(
+                bucket=bucket,
+                namespace=namespace,
+                region=region,
+                tenancy_ocid=tenancy_ocid,
+                user_ocid=user_ocid,
+                fingerprint=fingerprint,
+                private_key_pem=private_key_pem,
+                private_key_path=private_key_path,
+                endpoint=endpoint,
+            )
+        )
+
+    @classmethod
+    def from_r2(
+        cls,
+        bucket: str,
+        account_id: str,
+        *,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
+        jurisdiction: Literal["eu", "fedramp"] | str | None = None,
+        custom_domain: str | None = None,
+        endpoint: str | None = None,
+        allow_http: bool = False,
+    ) -> ObjectStore:
+        """Construct an ObjectStore backed by Cloudflare R2."""
+        cfg = R2Config(
+            bucket=bucket,
+            account_id=account_id,
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            jurisdiction=jurisdiction,
+            custom_domain=custom_domain,
+            endpoint=endpoint,
+            allow_http=allow_http,
+        )
+        signing = (
+            SigningConfig(
+                provider="s3",
+                bucket=bucket,
+                region="auto",
+                access_key_id=access_key_id,
+                secret_access_key=secret_access_key,
+                endpoint=cfg.resolved_endpoint(),
+            )
+            if access_key_id and secret_access_key
+            else None
+        )
+        return cls.from_config(cfg, signing=signing)
+
+    @classmethod
+    def from_http(cls, url: str, *, headers: dict[str, str] | None = None) -> ObjectStore:
+        """Construct an ObjectStore backed by HTTP/WebDAV."""
+        return cls.from_config(HttpConfig(url=url, headers=headers))
+
+    @classmethod
+    def from_memory(cls, namespace: str = "default") -> ObjectStore:
+        """Construct an in-memory ObjectStore."""
+        return cls.from_config(MemoryConfig(namespace=namespace))
 
     def put(self, path: str, data: Buffer) -> PutResult:
         """Write any Buffer (bytes, bytearray, memoryview) to the given object key."""
@@ -757,6 +1175,200 @@ class ObjectStore:
             msg = f"Invalid relative parent segment in storage key: {path}"
             raise ValueError(msg)
         return cleaned
+
+
+class SyncStore:
+    """Explicit synchronous facade over an ObjectStore."""
+
+    __slots__ = ("_store",)
+
+    def __init__(self, store: ObjectStore) -> None:
+        self._store = store
+
+    @property
+    def store(self) -> ObjectStore:
+        """Return the underlying ObjectStore."""
+        return self._store
+
+    def put(self, path: str, data: Buffer) -> PutResult:
+        """Write a buffer synchronously."""
+        return self._store.put(path, data)
+
+    def put_file(self, path: str, file_path: str | Path) -> PutResult:
+        """Upload a local file synchronously."""
+        return self._store.put_file(path, file_path)
+
+    def get(self, path: str) -> bytes:
+        """Read object bytes synchronously."""
+        return self._store.get(path)
+
+    def get_view(self, path: str) -> memoryview:
+        """Return a zero-copy memoryview over the object."""
+        return self._store.get_view(path)
+
+    def get_range(self, path: str, offset: int, length: int) -> bytes:
+        """Read a byte slice synchronously."""
+        return self._store.get_range(path, offset, length)
+
+    def head(self, path: str) -> ObjectMeta:
+        """Read object metadata synchronously."""
+        return self._store.head(path)
+
+    def exists(self, path: str) -> bool:
+        """Check whether an object exists synchronously."""
+        return self._store.exists(path)
+
+    def delete(self, path: str) -> None:
+        """Delete an object synchronously."""
+        self._store.delete(path)
+
+    def copy(self, src: str, dst: str) -> None:
+        """Copy an object synchronously."""
+        self._store.copy(src, dst)
+
+    def list(self, prefix: str = "") -> builtins.list[ObjectMeta]:
+        """List objects under prefix synchronously."""
+        return self._store.list(prefix)
+
+
+class AsyncStore:
+    """Explicit asynchronous facade over an ObjectStore."""
+
+    __slots__ = ("_store",)
+
+    def __init__(self, store: ObjectStore) -> None:
+        self._store = store
+
+    @property
+    def store(self) -> ObjectStore:
+        """Return the underlying ObjectStore."""
+        return self._store
+
+    async def put(self, path: str, data: Buffer) -> PutResult:
+        """Write a buffer asynchronously."""
+        return await self._store.put_async(path, data)
+
+    async def put_file(self, path: str, file_path: str | Path) -> PutResult:
+        """Upload a local file asynchronously."""
+        return await self._store.put_file_async(path, file_path)
+
+    async def get(self, path: str) -> bytes:
+        """Read object bytes asynchronously."""
+        return await self._store.get_async(path)
+
+    async def get_view(self, path: str) -> memoryview:
+        """Return a zero-copy memoryview over the object asynchronously."""
+        return await self._store.get_view_async(path)
+
+    async def get_range(self, path: str, offset: int, length: int) -> bytes:
+        """Read a byte slice asynchronously."""
+        return await self._store.get_range_async(path, offset, length)
+
+    async def head(self, path: str) -> ObjectMeta:
+        """Read object metadata asynchronously."""
+        return await self._store.head_async(path)
+
+    async def exists(self, path: str) -> bool:
+        """Check whether an object exists asynchronously."""
+        return await self._store.exists_async(path)
+
+    async def delete(self, path: str) -> None:
+        """Delete an object asynchronously."""
+        await self._store.delete_async(path)
+
+    async def copy(self, src: str, dst: str) -> None:
+        """Copy an object asynchronously."""
+        await self._store.copy_async(src, dst)
+
+    async def list(self, prefix: str = "") -> builtins.list[ObjectMeta]:
+        """List objects under prefix asynchronously."""
+        return await self._store.list_async(prefix)
+
+
+def sign_oci_headers(
+    tenancy_ocid: str,
+    user_ocid: str,
+    fingerprint: str,
+    private_key_pem: str,
+    method: str,
+    url: str,
+    *,
+    body: bytes | None = None,
+    content_type: str | None = None,
+    timestamp: int = 1_700_000_000,
+) -> dict[str, str]:
+    """Compute OCI draft-cavage-http-signatures-08 RSA-SHA256 signed headers."""
+    native_mod = ObjectStore._get_native_module()
+    if native_mod is not None and hasattr(native_mod, "py_sign_oci_cavage_headers"):
+        return dict(
+            native_mod.py_sign_oci_cavage_headers(
+                tenancy_ocid,
+                user_ocid,
+                fingerprint,
+                private_key_pem,
+                method,
+                url,
+                body,
+                content_type,
+                timestamp,
+            )
+        )
+    msg = "vertebra._storage native module is required for RSA-SHA256 OCI request signing"
+    raise RuntimeError(msg)
+
+
+def sign_azure_sas(
+    account: str,
+    access_key: str,
+    container: str,
+    blob_name: str,
+    *,
+    method: str = "GET",
+    expires_in_secs: int = 3600,
+    now_ts: int | None = None,
+    endpoint: str | None = None,
+) -> str:
+    """Compute an Azure Blob Service SAS URL (HMAC-SHA256)."""
+    resolved_ts = int(time.time()) if now_ts is None else now_ts
+    native_mod = ObjectStore._get_native_module()
+    if native_mod is not None and hasattr(native_mod, "py_sign_azure_sas_url"):
+        return str(
+            native_mod.py_sign_azure_sas_url(
+                account,
+                container,
+                access_key,
+                method,
+                blob_name,
+                expires_in_secs,
+                resolved_ts,
+                endpoint,
+            )
+        )
+    expiry_ts = resolved_ts + expires_in_secs
+    se = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expiry_ts))
+    sv = "2020-12-06"
+    sp = "cw" if method.upper() in {"PUT", "POST"} else "r"
+    canonicalized_resource = f"/blob/{account}/{container}/{blob_name.lstrip('/')}"
+    string_to_sign = "\n".join([sp, "", se, canonicalized_resource, "", "", "https", sv, "b", "", "", "", "", "", ""])
+    decoded_key = base64.b64decode(access_key)
+    sig = base64.b64encode(hmac.new(decoded_key, string_to_sign.encode("utf-8"), hashlib.sha256).digest()).decode(
+        "ascii"
+    )
+    qs = urlencode({"sv": sv, "sr": "b", "sp": sp, "se": se, "spr": "https", "sig": sig})
+    base_url = (endpoint or f"https://{account}.blob.core.windows.net").rstrip("/")
+    return f"{base_url}/{container}/{blob_name.lstrip('/')}?{qs}"
+
+
+def chunk_r2_uniform_parts(payload: Buffer, *, part_size: int = 8 * 1024 * 1024) -> list[bytes]:
+    """Split a payload into uniform-sized parts for Cloudflare R2 multipart uploads."""
+    raw = memoryview(payload).cast("B").tobytes()
+    native_mod = ObjectStore._get_native_module()
+    if native_mod is not None and hasattr(native_mod, "py_chunk_r2_uniform_parts"):
+        return [bytes(part) for part in native_mod.py_chunk_r2_uniform_parts(raw, part_size)]
+    size = max(part_size, 5 * 1024 * 1024)
+    if not raw:
+        return [b""]
+    return [raw[i : i + size] for i in range(0, len(raw), size)]
 
 
 VertebraStore = ObjectStore

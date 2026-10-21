@@ -1,5 +1,6 @@
 //! `vertebra-storage` crate and `vertebra._storage` PyO3 extension module.
 
+pub mod oci;
 pub mod signing;
 pub mod store;
 
@@ -13,9 +14,10 @@ use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use crate::oci::{OciCavageCredentials, chunk_uniform_parts, sign_oci_cavage_request};
 use crate::signing::{
-    GcsSignConfig, HmacSigner, S3SignConfig, sign_gcs_v4_with_iam_endpoint, sign_s3_v4_url,
-    verify_s3_v4_url,
+    AzureSasConfig, GcsSignConfig, HmacSigner, S3SignConfig, sign_azure_sas_url,
+    sign_gcs_v4_with_iam_endpoint, sign_s3_v4_url, verify_s3_v4_url,
 };
 use crate::store::{
     ObjectStoreEngine, StorageError, StoredObjectMeta, block_on_storage, runtime_handle,
@@ -564,6 +566,85 @@ fn py_sign_gcs_v4_iam_url(
     .map_err(to_py_err)
 }
 
+#[pyfunction]
+#[pyo3(signature = (tenancy_ocid, user_ocid, fingerprint, private_key_pem, method, url, body=None, content_type=None, timestamp=1700000000))]
+#[allow(clippy::too_many_arguments)]
+fn py_sign_oci_cavage_headers(
+    py: Python<'_>,
+    tenancy_ocid: &str,
+    user_ocid: &str,
+    fingerprint: &str,
+    private_key_pem: &str,
+    method: &str,
+    url: &str,
+    body: Option<&[u8]>,
+    content_type: Option<&str>,
+    timestamp: i64,
+) -> PyResult<HashMap<String, String>> {
+    let creds = OciCavageCredentials {
+        tenancy_ocid: tenancy_ocid.to_string(),
+        user_ocid: user_ocid.to_string(),
+        fingerprint: fingerprint.to_string(),
+        private_key_pem: private_key_pem.to_string(),
+    };
+    let signed = py
+        .detach(|| sign_oci_cavage_request(&creds, method, url, body, content_type, timestamp))
+        .map_err(to_py_err)?;
+    let mut headers = HashMap::new();
+    headers.insert("Authorization".to_string(), signed.authorization);
+    headers.insert("Date".to_string(), signed.date);
+    headers.insert("Host".to_string(), signed.host);
+    if let Some(sha) = signed.x_content_sha256 {
+        headers.insert("x-content-sha256".to_string(), sha);
+    }
+    if let Some(ct) = signed.content_type {
+        headers.insert("content-type".to_string(), ct);
+    }
+    if let Some(cl) = signed.content_length {
+        headers.insert("content-length".to_string(), cl);
+    }
+    Ok(headers)
+}
+
+#[pyfunction]
+#[pyo3(signature = (account, container, access_key, method, blob_path, expires_in_secs=3600, timestamp=1700000000, endpoint=None))]
+#[allow(clippy::too_many_arguments)]
+fn py_sign_azure_sas_url(
+    py: Python<'_>,
+    account: &str,
+    container: &str,
+    access_key: &str,
+    method: &str,
+    blob_path: &str,
+    expires_in_secs: u64,
+    timestamp: i64,
+    endpoint: Option<String>,
+) -> PyResult<String> {
+    let cfg = AzureSasConfig {
+        account: account.to_string(),
+        container: container.to_string(),
+        access_key_b64: access_key.to_string(),
+        endpoint,
+    };
+    py.detach(|| sign_azure_sas_url(&cfg, method, blob_path, expires_in_secs, timestamp))
+        .map_err(to_py_err)
+}
+
+#[pyfunction]
+#[pyo3(signature = (data, part_size=8388608))]
+fn py_chunk_r2_uniform_parts(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    part_size: usize,
+) -> PyResult<Vec<StorageBuffer>> {
+    let payload = extract_buffer_bytes(py, data)?;
+    let parts = py.detach(|| chunk_uniform_parts(payload, part_size));
+    Ok(parts
+        .into_iter()
+        .map(|d| StorageBuffer { data: d })
+        .collect())
+}
+
 #[pymodule(gil_used = false)]
 pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeObjectStore>()?;
@@ -575,5 +656,8 @@ pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_sign_s3_v4_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_verify_s3_v4_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_gcs_v4_iam_url, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sign_oci_cavage_headers, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sign_azure_sas_url, m)?)?;
+    m.add_function(wrap_pyfunction!(py_chunk_r2_uniform_parts, m)?)?;
     Ok(())
 }
