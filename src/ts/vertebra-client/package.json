@@ -46,6 +46,10 @@
     "./arrow": {
       "types": "./dist/arrow.d.ts",
       "import": "./dist/arrow.js"
+    },
+    "./live": {
+      "types": "./dist/live/index.d.ts",
+      "import": "./dist/live/index.js"
     }
   },
   "files": [
