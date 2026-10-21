@@ -1,0 +1,40 @@
+[package]
+name = "vertebra-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Multi-backend cloud object storage and V4 presigning for Vertebra"
+
+[lib]
+name = "_storage"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+base64 = "0.22"
+bytes.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+futures = "0.3"
+hex = "0.4"
+hmac = "0.12"
+http = "1.2"
+object_store = { version = "0.13.2", features = ["aws", "gcp", "azure", "http"] }
+pyo3 = { workspace = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
+tokio.workspace = true
+url = "2.5"
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }
+
+[dev-dependencies]
+pyo3 = { workspace = true, features = ["auto-initialize"] }
+tempfile = "3.15"
