@@ -42,6 +42,10 @@
     "./wasm": {
       "types": "./dist/wasm.d.ts",
       "import": "./dist/wasm.js"
+    },
+    "./arrow": {
+      "types": "./dist/arrow.d.ts",
+      "import": "./dist/arrow.js"
     }
   },
   "files": [
