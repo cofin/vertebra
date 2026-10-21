@@ -38,6 +38,10 @@
     "./store": {
       "types": "./dist/store/index.d.ts",
       "import": "./dist/store/index.js"
+    },
+    "./wasm": {
+      "types": "./dist/wasm.d.ts",
+      "import": "./dist/wasm.js"
     }
   },
   "files": [

@@ -15,6 +15,12 @@ export {
 } from "./sse";
 export { SessionStore, store } from "./store/index";
 export {
+  isValidWasmBinary,
+  VertebraWasmClient,
+  WASM_MAGIC_BYTES,
+  type WasmClientOptions,
+} from "./wasm";
+export {
   type PubSubWireFrame,
   VertebraWebSocket,
   VertebraWebSocketClient,

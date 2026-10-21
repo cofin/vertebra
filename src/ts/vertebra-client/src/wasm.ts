@@ -1,0 +1,43 @@
+/**
+ * Browser and Worker WebAssembly execution bridge (`@vertebra/client/wasm`).
+ */
+
+export const WASM_MAGIC_BYTES = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
+export interface WasmClientOptions {
+  readonly maxMemoryPages?: number;
+  readonly imports?: WebAssembly.Imports;
+}
+
+export function isValidWasmBinary(bytes: Uint8Array): boolean {
+  if (bytes.byteLength < 8) {
+    return false;
+  }
+  for (let i = 0; i < 8; i += 1) {
+    if (bytes[i] !== WASM_MAGIC_BYTES[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export class VertebraWasmClient {
+  private readonly maxMemoryPages: number;
+  private readonly baseImports: WebAssembly.Imports;
+
+  public constructor(options: WasmClientOptions = {}) {
+    this.maxMemoryPages = options.maxMemoryPages ?? 256;
+    this.baseImports = options.imports ?? {};
+  }
+
+  public get memoryLimitBytes(): number {
+    return this.maxMemoryPages * 65536;
+  }
+
+  public async instantiateBytes(bytes: Uint8Array): Promise<WebAssembly.WebAssemblyInstantiatedSource> {
+    if (!isValidWasmBinary(bytes)) {
+      throw new Error("Invalid WebAssembly binary magic header");
+    }
+    return WebAssembly.instantiate(bytes, this.baseImports);
+  }
+}
