@@ -4298,6 +4298,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vertebra-db"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "vertebra-http"
 version = "0.1.0"
 dependencies = [
