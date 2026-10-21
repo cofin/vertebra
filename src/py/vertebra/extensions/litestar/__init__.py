@@ -11,6 +11,10 @@ from vertebra.extensions.litestar.config import (
     VertebraConfig,
     VertebraServerConfig,
 )
+from vertebra.extensions.litestar.ecosystem import (
+    LitestarEcosystemBridge,
+    attach_litestar_ecosystem_bridges,
+)
 from vertebra.extensions.litestar.fastpath import (
     CompiledLitestarRoute,
     compile_litestar_fastpath_routes,
@@ -61,6 +65,7 @@ __all__ = (
     "CorsOffloadSpec",
     "ExtractedLitestarRoute",
     "LitestarConfig",
+    "LitestarEcosystemBridge",
     "LitestarOffloadPlan",
     "LitestarPlugin",
     "LitestarRouteCompiler",
@@ -77,6 +82,7 @@ __all__ = (
     "VertebraPlugin",
     "VertebraServerConfig",
     "VertebraStore",
+    "attach_litestar_ecosystem_bridges",
     "compile_litestar_fastpath_routes",
     "compile_litestar_routes",
     "compile_middleware_offload",
