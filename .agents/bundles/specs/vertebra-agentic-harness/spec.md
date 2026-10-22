@@ -2,16 +2,16 @@
 type: PRD
 flow_id: vertebra-agentic-harness
 title: "Master PRD: Vertebra Extendable Agentic Harness (MCP 2026-07-28, A2A 1.0, AgentRuntime, SpecTree, DynamicWorkflow, Skills, Queues, and GenAI Telemetry)"
-state: planned
+state: closed
 plan_revision: 2
 plan_commit: ""
-state_revision: 0
+state_revision: 1
 current_task: null
-last_operation: null
-operation_targets: []
-last_verified_checkpoint: null
+last_operation: "commit"
+operation_targets: [src/py/vertebra/agent/**]
+last_verified_checkpoint: "e8edc02"
 created_at: 2026-10-22T04:45:00Z
-updated_at: 2026-10-22T04:45:00Z
+updated_at: 2026-10-22T15:45:00Z
 description: "First-class, extendable agentic harness in vertebra.agent combining MCP 2026-07-28, A2A 1.0, multi-turn AgentRuntime, hierarchical SpecTree and DynamicWorkflow DAG orchestration, progressive skill discovery, background queue task execution, and Rust-accelerated GenAI OpenTelemetry spans/metrics/logs across both native vertebra.framework.App and Litestar."
 tags: [feature, agent, mcp, a2a, telemetry]
 parent_prd: null
@@ -143,15 +143,14 @@ flowchart LR
 
 ## Implementation Plan
 
-- [ ] 1 [`agentic-core-and-observability`](../agentic-core-and-observability/spec.md)
-- [ ] 2 [`agentic-mcp-protocol-and-bridge`](../agentic-mcp-protocol-and-bridge/spec.md)
-- [ ] 3 [`agentic-a2a-protocol`](../agentic-a2a-protocol/spec.md)
-- [ ] 4 [`agentic-runtime-and-workflows`](../agentic-runtime-and-workflows/spec.md)
+- [x] 1 [`agentic-core-and-observability`](../agentic-core-and-observability/spec.md)
+- [x] 2 [`agentic-mcp-protocol-and-bridge`](../agentic-mcp-protocol-and-bridge/spec.md)
+- [x] 3 [`agentic-a2a-protocol`](../agentic-a2a-protocol/spec.md)
+- [x] 4 [`agentic-runtime-and-workflows`](../agentic-runtime-and-workflows/spec.md)
 
 ## Continuity Snapshot
 
-- Active flow: `vertebra-agentic-harness` (Master PRD), state `planned`.
-- Current task: none. Next exact step: `/flow:implement agentic-core-and-observability`.
-- Plan identity: `plan_revision: 2`, `plan_commit: ""`. State identity: `state_revision: 0`.
+- Active flow: `vertebra-agentic-harness` (Master PRD), state `closed`. All 4 child chapters and 19 tasks completed and verified.
+- Plan identity: `plan_revision: 2`, `plan_commit: ""`. State identity: `state_revision: 1`.
 - Blockers: none.
 - Knowledge paths: `.agents/bundles/product/product-guidelines.md`, `.agents/bundles/knowledge/workflow.md`, `.agents/bundles/knowledge/patterns/python/module-and-class-layout.md`, `.agents/bundles/knowledge/patterns/rust/ffi-and-gil-discipline.md`.

@@ -2,7 +2,7 @@
 type: Spec
 flow_id: agentic-core-and-observability
 title: "Chapter 1: Agentic Core Primitives, Security Context, and Universal GenAI Observability"
-state: planned
+state: closed
 plan_revision: 2
 plan_commit: ""
 state_revision: 0
@@ -93,12 +93,12 @@ src/py/tests/unit/agent/
 ## Implementation Plan
 
 ### Phase 1: Core Protocol Primitives, Context, and Observability
-- [ ] 1.1 Core JSON-RPC 2.0 dispatcher, cursor pagination, schema builder, and SSE frame codec ([worksheet](tasks/1.1.md))
-- [ ] 1.2 Execution context (`AgentContext`, caller identity, cancellation, progress) and guard inheritance ([worksheet](tasks/1.2.md))
-- [ ] 1.3 End-to-end agentic telemetry harness (`agent/telemetry.py` + `telemetry/genai.py`) ([worksheet](tasks/1.3.md))
-- [ ] 1.4 Rust-accelerated JSON-RPC frame classification and schema digest caching in `vertebra-py` ([worksheet](tasks/1.4.md))
-- [ ] 1.5 Unit and property tests for JSON-RPC, schema builder, guard inheritance, and telemetry emission ([worksheet](tasks/1.5.md))
-- [ ] Chapter gate: `make lint-all && make rs-test && make py-test`
+- [x] 1.1 Core JSON-RPC 2.0 dispatcher, cursor pagination, schema builder, and SSE frame codec ([worksheet](tasks/1.1.md))
+- [x] 1.2 Execution context (`AgentContext`, caller identity, cancellation, progress) and guard inheritance ([worksheet](tasks/1.2.md))
+- [x] 1.3 End-to-end agentic telemetry harness (`agent/telemetry.py` + `telemetry/genai.py`) ([worksheet](tasks/1.3.md))
+- [x] 1.4 Rust-accelerated JSON-RPC frame classification and schema digest caching in `vertebra-py` ([worksheet](tasks/1.4.md))
+- [x] 1.5 Unit and property tests for JSON-RPC, schema builder, guard inheritance, and telemetry emission ([worksheet](tasks/1.5.md))
+- [x] Chapter gate: `make lint-all && make rs-test && make py-test`
 
 ## Requirement-to-task trace
 

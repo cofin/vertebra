@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from vertebra._typing import MissingDependencyError
+from vertebra.agent.plugin import AgentPlugin
 from vertebra.extensions.litestar.channels import swap_litestar_channels_backend
 from vertebra.extensions.litestar.config import LitestarConfig
 from vertebra.extensions.litestar.fastpath import (
@@ -113,6 +114,14 @@ class LitestarPlugin:
             if isinstance(plugins, list):
                 plugins.append(a2a_plugin)
             app_config.state["litestar_a2a_plugin"] = a2a_plugin
+
+        if self._config.agent_config is not None:
+            agent_plugin = (
+                self._config.agent_config
+                if isinstance(self._config.agent_config, AgentPlugin)
+                else AgentPlugin(self._config.agent_config)
+            )
+            agent_plugin.on_app_init(app_config)
 
         app_config.on_app_init.append(self._finalize_app_acceleration)
         return app_config

@@ -2,7 +2,7 @@
 type: Spec
 flow_id: agentic-a2a-protocol
 title: "Chapter 3: Agent-to-Agent (A2A) 1.0 Protocol, Streaming, JWS Agent Card Signing, and MCP/A2A Bridges"
-state: planned
+state: closed
 plan_revision: 2
 plan_commit: ""
 state_revision: 0
@@ -80,11 +80,11 @@ src/py/tests/unit/agent/
 ## Implementation Plan
 
 ### Phase 1: A2A 1.0 Models, Service, Signing, and Bridges
-- [ ] 3.1 Full A2A `1.0` data models as `msgspec.Struct(frozen=True, gc=False)` (`agent/a2a/models.py`) ([worksheet](tasks/3.1.md))
-- [ ] 3.2 A2A `1.0` JSON-RPC + SSE streaming methods and JWS Agent Card signing (`agent/a2a/{service,routes,signing}.py`) ([worksheet](tasks/3.2.md))
-- [ ] 3.3 Bidirectional MCP <-> A2A bridges (`agent/bridges/{mcp,a2a}.py`) ([worksheet](tasks/3.3.md))
-- [ ] 3.4 A2A `1.0` end-to-end streaming, push notification, and bridge integration tests (`test_a2a_protocol.py`) ([worksheet](tasks/3.4.md))
-- [ ] Chapter gate: `make lint-all && make rs-test && make py-test`
+- [x] 3.1 Full A2A `1.0` data models as `msgspec.Struct(frozen=True, gc=False)` (`agent/a2a/models.py`) ([worksheet](tasks/3.1.md))
+- [x] 3.2 A2A `1.0` JSON-RPC + SSE streaming methods and JWS Agent Card signing (`agent/a2a/{service,routes,signing}.py`) ([worksheet](tasks/3.2.md))
+- [x] 3.3 Bidirectional MCP <-> A2A bridges (`agent/bridges/{mcp,a2a}.py`) ([worksheet](tasks/3.3.md))
+- [x] 3.4 A2A `1.0` end-to-end streaming, push notification, and bridge integration tests (`test_a2a_protocol.py`) ([worksheet](tasks/3.4.md))
+- [x] Chapter gate: `make lint-all && make rs-test && make py-test`
 
 ## Requirement-to-task trace
 

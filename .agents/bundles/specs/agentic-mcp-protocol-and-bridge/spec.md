@@ -2,14 +2,14 @@
 type: Spec
 flow_id: agentic-mcp-protocol-and-bridge
 title: "Chapter 2: MCP 2026-07-28 Protocol Surface, Skills Catalog, Async Tasks, Transports, and ORDS/APEX Synthesis"
-state: planned
+state: closed
 plan_revision: 2
 plan_commit: ""
-state_revision: 0
+state_revision: 1
 current_task: null
-last_operation: null
+last_operation: closed
 operation_targets: []
-last_verified_checkpoint: null
+last_verified_checkpoint: "2026-10-22T14:45:00Z"
 created_at: 2026-10-22T04:45:00Z
 updated_at: 2026-10-22T04:45:00Z
 description: "Implement the full MCP 2026-07-28 specification, .agents/skills/ progressive disclosure catalog, SkillController/PromptController, QueueService-backed async tasks/*, Streamable HTTP/SSE/stdio transports, vtb mcp bridge, Rust discovery offload, and executable ORDS/26ai Duality View/APEX tool synthesis."
@@ -93,15 +93,15 @@ src/py/tests/unit/agent/
 ## Implementation Plan
 
 ### Phase 1: MCP 2026-07-28 Core Surface, Skills, and Tasks
-- [ ] 2.1 Full MCP `2026-07-28` registry and handlers (`agent/mcp/{registry,service,routes}.py`) ([worksheet](tasks/2.1.md))
-- [ ] 2.2 Skills catalog, `.agents/skills/` progressive disclosure loader, `SkillController`, and `PromptController` (`agent/mcp/{skills,controllers}.py`) ([worksheet](tasks/2.2.md))
-- [ ] 2.3 Async MCP `tasks/*` and queue bridge integration (`agent/mcp/tasks.py`) ([worksheet](tasks/2.3.md))
-- [ ] Checkpoint: `make lint-all && uv run pytest src/py/tests/unit/agent/test_mcp_conformance.py -k "registry or skills or tasks" -q`
+- [x] 2.1 Full MCP `2026-07-28` registry and handlers (`agent/mcp/{registry,service,routes}.py`) ([worksheet](tasks/2.1.md))
+- [x] 2.2 Skills catalog, `.agents/skills/` progressive disclosure loader, `SkillController`, and `PromptController` (`agent/mcp/{skills,controllers}.py`) ([worksheet](tasks/2.2.md))
+- [x] 2.3 Async MCP `tasks/*` and queue bridge integration (`agent/mcp/tasks.py`) ([worksheet](tasks/2.3.md))
+- [x] Checkpoint: `make lint-all && uv run pytest src/py/tests/unit/agent/test_mcp_conformance.py -k "registry or skills or tasks" -q`
 
 ### Phase 2: Transports, CLI Bridge, Discovery Offload, and ORDS/APEX Synthesis
-- [ ] 2.4 Streamable HTTP, SSE, and stdio transports plus `vtb mcp bridge` CLI and Rust `.well-known/mcp.json` discovery offload ([worksheet](tasks/2.4.md))
-- [ ] 2.5 ORDS/APEX automatic MCP tool/resource synthesis and end-to-end MCP `2026-07-28` conformance tests ([worksheet](tasks/2.5.md))
-- [ ] Chapter gate: `make lint-all && make rs-test && make py-test`
+- [x] 2.4 Streamable HTTP, SSE, and stdio transports plus `vtb mcp bridge` CLI and Rust `.well-known/mcp.json` discovery offload ([worksheet](tasks/2.4.md))
+- [x] 2.5 ORDS/APEX automatic MCP tool/resource synthesis and end-to-end MCP `2026-07-28` conformance tests ([worksheet](tasks/2.5.md))
+- [x] Chapter gate: `make lint-all && make rs-test && make py-test`
 
 ## Requirement-to-task trace
 

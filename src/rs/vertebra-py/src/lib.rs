@@ -4,6 +4,7 @@
 
 use pyo3::prelude::*;
 
+pub mod agent;
 pub mod asgi;
 pub mod broker;
 pub mod file_io;
@@ -16,6 +17,7 @@ pub mod telemetry;
 pub mod transport;
 pub mod wsgi;
 
+pub use agent::{SchemaDigestCache, classify_jsonrpc_frame};
 pub use asgi::{AsgiScope, AsgiScopeIterator};
 pub use broker::{
     NativeBrokerStats, NativeLeaseBroker, NativeLeaseGrant, NativeStatementCache,
@@ -73,6 +75,10 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<broker::NativeStatementPlan>()?;
     m.add_class::<broker::NativeStatementCacheStats>()?;
     m.add_class::<broker::NativeStatementCache>()?;
+    m.add_class::<agent::SchemaDigestCache>()?;
+
+    // Agentic JSON-RPC fastpath
+    m.add_function(wrap_pyfunction!(agent::classify_jsonrpc_frame, m)?)?;
 
     // Vectorized batch API
     m.add_function(wrap_pyfunction!(transport::init_transport, m)?)?;
