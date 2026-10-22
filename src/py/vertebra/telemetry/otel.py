@@ -11,6 +11,8 @@ import msgspec
 from vertebra._vertebra import format_traceparent, parse_traceparent
 
 __all__ = (
+    "DbPoolMetricSample",
+    "DbPoolRecorder",
     "GenAiMetricSample",
     "GenAiRecorder",
     "SpanData",
@@ -164,3 +166,42 @@ class GenAiRecorder:
         drained = list(self._samples)
         self._samples.clear()
         return drained
+
+
+class DbPoolMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+    """OpenTelemetry db.client.connections.* semantic convention metric sample."""
+
+    pool_name: str
+    active_leases: int
+    primary_in_use: int
+    overflow_in_use: int
+    max_capacity: int
+    waiting_threads: int
+    total_timeouts: int
+    total_reclaimed: int
+    statement_cache_hits: int
+    statement_cache_misses: int
+    wait_duration_ms: float = 0.0
+    timestamp: float = msgspec.field(default_factory=time.time)
+
+
+class DbPoolRecorder:
+    """Records database connection pool and statement cache telemetry metrics."""
+
+    def __init__(self) -> None:
+        self._samples: list[DbPoolMetricSample] = []
+
+    @property
+    def samples(self) -> tuple[DbPoolMetricSample, ...]:
+        """Return recorded database pool telemetry samples."""
+        return tuple(self._samples)
+
+    def record_sample(self, sample: DbPoolMetricSample) -> None:
+        """Record a database pool telemetry metric sample."""
+        self._samples.append(sample)
+
+    def drain_samples(self) -> list[DbPoolMetricSample]:
+        """Drain and return all buffered database pool metric samples."""
+        samples = list(self._samples)
+        self._samples.clear()
+        return samples

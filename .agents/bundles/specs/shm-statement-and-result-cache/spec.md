@@ -48,7 +48,7 @@ With `ShmLeaseTable` and `NativeLeaseBroker` established in Chapter 1 (`shm-brok
 
 ## Task Breakdown
 
-- [ ] `shm-statement-and-result-cache:2.1` — Implement Seqlock `ShmStatementCache` & PyO3 `NativeStatementCache` (`verification_strategy: behavior_tdd`, `depends_on: []`)
-- [ ] `shm-statement-and-result-cache:2.2` — Implement `vertebra.extensions.broker` Transport & Wire `ShmBrokerTransport` to `NativeLeaseBroker` (`verification_strategy: behavior_tdd`, `depends_on: [shm-statement-and-result-cache:2.1]`)
-- [ ] `shm-statement-and-result-cache:2.3` — Integrate `BrokerPlugin`, `AlchemyPlugin` & `SQLSpecPlugin` with `/debug/zpages/broker` & OpenTelemetry (`verification_strategy: behavior_tdd`, `depends_on: [shm-statement-and-result-cache:2.2]`)
-- [ ] `shm-statement-and-result-cache:2.4` — Criterion Benchmarks & Multi-Worker `3.12`/`3.14t` Integration Verification (`verification_strategy: integration_acceptance`, `depends_on: [shm-statement-and-result-cache:2.3]`)
+- [x] `shm-statement-and-result-cache:2.1` — Implement Seqlock `ShmStatementCache` & PyO3 `NativeStatementCache` (`verification_strategy: behavior_tdd`, `depends_on: []`)
+- [x] `shm-statement-and-result-cache:2.2` — Implement `vertebra.extensions.broker` Transport & Wire `ShmBrokerTransport` to `NativeLeaseBroker` (`verification_strategy: behavior_tdd`, `depends_on: [shm-statement-and-result-cache:2.1]`)
+- [x] `shm-statement-and-result-cache:2.3` — Integrate `BrokerPlugin`, `AlchemyPlugin` & `SQLSpecPlugin` with `/debug/zpages/broker` & OpenTelemetry (`verification_strategy: behavior_tdd`, `depends_on: [shm-statement-and-result-cache:2.2]`)
+- [x] `shm-statement-and-result-cache:2.4` — Criterion Benchmarks & Multi-Worker `3.12`/`3.14t` Integration Verification (`verification_strategy: integration_acceptance`, `depends_on: [shm-statement-and-result-cache:2.3]`)

@@ -1,7 +1,7 @@
 """Type stubs for the vertebra._vertebra native extension module."""
 
 from collections.abc import Awaitable, Buffer
-from typing import Any, final
+from typing import Any, Self, final
 
 __version__: str
 FREE_THREADED: bool
@@ -14,9 +14,15 @@ __all__ = [
     "AsgiScopeIterator",
     "Headers",
     "HeadersIterator",
+    "NativeBrokerStats",
     "NativeJwtGuard",
+    "NativeLeaseBroker",
+    "NativeLeaseGrant",
     "NativeLogSink",
     "NativeRateLimiter",
+    "NativeStatementCache",
+    "NativeStatementCacheStats",
+    "NativeStatementPlan",
     "Request",
     "RequestBatch",
     "RequestBatchIterator",
@@ -480,3 +486,96 @@ def run_wsgi_callable(
 def parse_traceparent(header: str) -> tuple[str, str, int] | None: ...
 def format_traceparent(trace_id: str, span_id: str, trace_flags: int) -> str: ...
 def sanitize_sql(sql: str) -> str: ...
+
+@final
+class NativeLeaseGrant:
+    slot_index: int
+    generation: int
+    worker_pid: int
+    is_overflow: bool
+    acquired_ns: int
+    expiry_ns: int
+    bind_key_hash: int
+
+@final
+class NativeBrokerStats:
+    pool_size: int
+    max_overflow: int
+    active_leases: int
+    primary_in_use: int
+    overflow_in_use: int
+    waiting_threads: int
+    total_acquired: int
+    total_released: int
+    total_expired: int
+    total_timeouts: int
+    total_reclaimed: int
+
+@final
+class NativeLeaseBroker:
+    def __new__(cls, pool_size: int = 20, max_overflow: int = 10) -> Self: ...
+    @staticmethod
+    def create_named(name: str, pool_size: int = 20, max_overflow: int = 10) -> NativeLeaseBroker: ...
+    @staticmethod
+    def open_named(name: str, pool_size: int = 20, max_overflow: int = 10) -> NativeLeaseBroker: ...
+    @staticmethod
+    def from_fd(fd: int, size: int) -> NativeLeaseBroker: ...
+    @staticmethod
+    def from_env() -> NativeLeaseBroker | None: ...
+    def acquire(
+        self,
+        worker_pid: int,
+        ttl_ns: int = 0,
+        timeout_ms: int = 5000,
+        bind_key_hash: int = 0,
+    ) -> NativeLeaseGrant | None: ...
+    def try_acquire(
+        self,
+        worker_pid: int,
+        ttl_ns: int = 0,
+        bind_key_hash: int = 0,
+    ) -> NativeLeaseGrant | None: ...
+    def release(self, slot_index: int, generation: int) -> bool: ...
+    def reap_expired(self) -> int: ...
+    def reclaim_worker(self, worker_pid: int) -> int: ...
+    def stats(self) -> NativeBrokerStats: ...
+    @property
+    def pool_size(self) -> int: ...
+    @property
+    def max_overflow(self) -> int: ...
+    @property
+    def total_capacity(self) -> int: ...
+
+@final
+class NativeStatementPlan:
+    sql_hash: int
+    dialect_tag: int
+    param_count: int
+    compiled_sql: bytes
+    param_plan: bytes
+
+@final
+class NativeStatementCacheStats:
+    capacity: int
+    hits: int
+    misses: int
+    inserts: int
+    evictions: int
+
+@final
+class NativeStatementCache:
+    def __new__(cls, capacity: int = 512) -> Self: ...
+    @staticmethod
+    def create_named(name: str, capacity: int = 512) -> NativeStatementCache: ...
+    @staticmethod
+    def open_named(name: str, capacity: int = 512) -> NativeStatementCache: ...
+    def lookup(self, dialect_tag: int, raw_sql: bytes) -> NativeStatementPlan | None: ...
+    def insert(
+        self,
+        dialect_tag: int,
+        raw_sql: bytes,
+        param_count: int,
+        compiled_sql: bytes,
+        param_plan: bytes,
+    ) -> bool: ...
+    def stats(self) -> NativeStatementCacheStats: ...

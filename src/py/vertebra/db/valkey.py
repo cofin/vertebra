@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Literal
+from typing import TYPE_CHECKING, Any
 
-import msgspec
+from vertebra.db.redis import (
+    AsyncRedisDriver,
+    RedisConfig,
+    SyncRedisDriver,
+)
 
-from vertebra.db.redis import AsyncRedisDriver, SyncRedisDriver
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 __all__ = (
     "AsyncValkeyDriver",
@@ -16,22 +20,15 @@ __all__ = (
 )
 
 
-class ValkeyConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class ValkeyConfig(RedisConfig, frozen=True, gc=False, kw_only=True):
     """Configuration for Valkey 8.0+ / 9.0+ standalone, Sentinel, Cluster, and GCP Memorystore."""
 
     url: str = "valkey://localhost:6379/0"
-    username: str | None = None
-    password: str | None = None
     client_name: str = "vertebra-valkey"
-    protocol: Literal[2, 3] = 3
-    topology: Literal["standalone", "sentinel", "cluster"] = "standalone"
-    sentinel_service_name: str | None = None
-    cluster_nodes: tuple[str, ...] = ()
     enable_client_side_caching: bool = True
     client_tracking_prefixes: tuple[str, ...] = ()
     enable_gcp_memorystore_iam: bool = False
     memorystore_instance_id: str | None = None
-    max_connections: int = 32
 
     @property
     def uses_tls(self) -> bool:
@@ -57,76 +54,148 @@ class ValkeyConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             cmds.append(SyncRedisDriver.encode_command(*tracking_cmd))
         return cmds
 
+    def to_redis_config(self) -> RedisConfig:
+        """Convert to equivalent RedisConfig."""
+        return self
+
 
 class SyncValkeyDriver(SyncRedisDriver):
     """Synchronous Valkey 8.0+/9.0+ driver with RESP3 client-side cache tracking."""
 
-    __slots__ = ("_client_cache",)
+    __slots__ = ("_client_cache", "_invalidation_listeners", "_valkey_config")
 
     def __init__(self, config: ValkeyConfig | None = None) -> None:
-        super().__init__(config or ValkeyConfig())
+        self._valkey_config = config or ValkeyConfig()
+        super().__init__(self._valkey_config)
         self._client_cache: dict[str, bytes] = {}
+        self._invalidation_listeners: list[Callable[[Sequence[str]], None]] = []
+        self.register_push_callback(self._on_push_frame)
 
     @property
     def config(self) -> ValkeyConfig:
         """Return the active ValkeyConfig."""
-        cfg: ValkeyConfig = self._config
-        return cfg
+        return self._valkey_config
 
     @property
     def cached_keys(self) -> tuple[str, ...]:
         """Return the keys currently tracked in the local RESP3 client-side cache."""
         return tuple(self._client_cache.keys())
 
+    def add_invalidation_listener(self, listener: Callable[[Sequence[str]], None]) -> None:
+        """Register an invalidation callback for client-side caching invalidation notifications."""
+        self._invalidation_listeners.append(listener)
+
+    def handle_invalidation_push(self, keys: Sequence[str | bytes]) -> int:
+        """Process a RESP3 `invalidate` push frame, evicting local entries and invoking listeners."""
+        normalized: list[str] = [k.decode("utf-8") if isinstance(k, bytes) else str(k) for k in keys]
+        evicted = 0
+        for k in normalized:
+            if self._client_cache.pop(k, None) is not None:
+                evicted += 1
+        for listener in self._invalidation_listeners:
+            listener(normalized)
+        return evicted
+
+    def _on_push_frame(self, items: list[Any]) -> None:
+        """Route incoming RESP3 push frames to invalidation handlers."""
+        if items and items[0] in ("invalidate", b"invalidate") and len(items) > 1:
+            raw_keys = items[1]
+            if isinstance(raw_keys, list):
+                self.handle_invalidation_push(raw_keys)
+
     def get(self, key: str) -> bytes | None:
         """Fetch a key value, consulting the RESP3 client-side cache when enabled."""
-        self._require_memory_backend()
-        if self.config.enable_client_side_caching and key in self._client_cache:
+        if self._valkey_config.enable_client_side_caching and key in self._client_cache:
             return self._client_cache[key]
         val = super().get(key)
-        if val is not None and self.config.enable_client_side_caching:
+        if val is not None and self._valkey_config.enable_client_side_caching:
             self._client_cache[key] = val
         return val
 
     def set(self, key: str, value: bytes | str, *, ex: int | None = None) -> None:
         """Set a key value and update/invalidate local client-side cache state."""
-        super().set(key, value, ex=ex)
-        if self.config.enable_client_side_caching:
-            self._client_cache[key] = self._kv[key]
+        raw = value.encode("utf-8") if isinstance(value, str) else bytes(value)
+        if self._valkey_config.enable_client_side_caching:
+            self._client_cache[key] = raw
+        super().set(key, raw, ex=ex)
 
     def delete(self, key: str) -> bool:
         """Delete a key and evict from client-side cache."""
-        self._require_memory_backend()
         self._client_cache.pop(key, None)
         return super().delete(key)
 
-    def handle_invalidation_push(self, keys: Sequence[str]) -> int:
-        """Process a RESP3 `invalidate` push frame (`>2\\r\\n$10\\r\\ninvalidate\\r\\n...`)."""
-        evicted = 0
-        for key in keys:
-            if self._client_cache.pop(key, None) is not None:
-                evicted += 1
-        return evicted
+    def flushdb(self) -> None:
+        """Clear the store and client-side cache."""
+        self._client_cache.clear()
+        super().flushdb()
 
 
 class AsyncValkeyDriver(AsyncRedisDriver):
-    """Asynchronous Valkey 8.0+/9.0+ RESP3 driver facade."""
+    """Asynchronous Valkey 8.0+/9.0+ RESP3 driver with client-side cache tracking."""
 
-    __slots__ = ()
+    __slots__ = ("_client_cache", "_invalidation_listeners", "_valkey_config")
 
     def __init__(self, config: ValkeyConfig | None = None) -> None:
-        self._sync: SyncValkeyDriver = SyncValkeyDriver(config)
+        self._valkey_config = config or ValkeyConfig()
+        super().__init__(self._valkey_config)
+        self._client_cache: dict[str, bytes] = {}
+        self._invalidation_listeners: list[Callable[[Sequence[str]], None]] = []
+        self.register_push_callback(self._on_push_frame)
 
     @property
     def config(self) -> ValkeyConfig:
         """Return the active ValkeyConfig."""
-        return self._sync.config
+        return self._valkey_config
 
     @property
     def cached_keys(self) -> tuple[str, ...]:
         """Return the keys currently tracked in the local RESP3 client-side cache."""
-        return self._sync.cached_keys
+        return tuple(self._client_cache.keys())
 
-    def handle_invalidation_push(self, keys: Sequence[str]) -> int:
-        """Process a RESP3 client-side caching invalidation push frame."""
-        return self._sync.handle_invalidation_push(keys)
+    def add_invalidation_listener(self, listener: Callable[[Sequence[str]], None]) -> None:
+        """Register an invalidation callback for client-side caching invalidation notifications."""
+        self._invalidation_listeners.append(listener)
+
+    def handle_invalidation_push(self, keys: Sequence[str | bytes]) -> int:
+        """Process a RESP3 `invalidate` push frame, evicting local entries and invoking listeners."""
+        normalized: list[str] = [k.decode("utf-8") if isinstance(k, bytes) else str(k) for k in keys]
+        evicted = 0
+        for k in normalized:
+            if self._client_cache.pop(k, None) is not None:
+                evicted += 1
+        for listener in self._invalidation_listeners:
+            listener(normalized)
+        return evicted
+
+    def _on_push_frame(self, items: list[Any]) -> None:
+        """Route incoming RESP3 push frames to invalidation handlers."""
+        if items and items[0] in ("invalidate", b"invalidate") and len(items) > 1:
+            raw_keys = items[1]
+            if isinstance(raw_keys, list):
+                self.handle_invalidation_push(raw_keys)
+
+    async def get(self, key: str) -> bytes | None:
+        """Asynchronously fetch a key value, consulting client-side cache when enabled."""
+        if self._valkey_config.enable_client_side_caching and key in self._client_cache:
+            return self._client_cache[key]
+        val = await super().get(key)
+        if val is not None and self._valkey_config.enable_client_side_caching:
+            self._client_cache[key] = val
+        return val
+
+    async def set(self, key: str, value: bytes | str, *, ex: int | None = None) -> None:
+        """Asynchronously set a key value and update client cache."""
+        raw = value.encode("utf-8") if isinstance(value, str) else bytes(value)
+        if self._valkey_config.enable_client_side_caching:
+            self._client_cache[key] = raw
+        await super().set(key, raw, ex=ex)
+
+    async def delete(self, key: str) -> bool:
+        """Asynchronously delete a key and evict from client cache."""
+        self._client_cache.pop(key, None)
+        return await super().delete(key)
+
+    async def flushdb(self) -> None:
+        """Clear the store and client cache."""
+        self._client_cache.clear()
+        await super().flushdb()

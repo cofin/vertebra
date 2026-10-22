@@ -95,11 +95,11 @@ src/py/tests/unit/data/
 ## Implementation Plan
 
 ### Phase 1: Native RESP3 Drivers, Stores/Channels, CDC Parquet Spill, and DataFusion
-- [ ] 3.1 Native RESP3 sync/async socket and TLS connection pool for `RedisDriver` and `ValkeyDriver` with pipelining, pub/sub, and Lua `EVALSHA` caching ([worksheet](tasks/3.1.md))
-- [ ] 3.2 Live `KeyValueBackend` and `ChannelBus` Redis/Valkey adapters ([worksheet](tasks/3.2.md))
-- [ ] 3.3 Live `ChangeFeed` consumer with `ObjectStore` Parquet spill, `QueryPipeline.execute`, and `DataFusionEngine` vectorized Arrow SQL ([worksheet](tasks/3.3.md))
-- [ ] 3.4 Unit and integration acceptance tests for RESP3 Redis/Valkey drivers, `ChangeFeed` Parquet spill, and `DataFusionEngine` ([worksheet](tasks/3.4.md))
-- [ ] Chapter gate: `make lint-all && make py-test`
+- [x] 3.1 Native RESP3 sync/async socket and TLS connection pool for `RedisDriver` and `ValkeyDriver` with pipelining, pub/sub, and Lua `EVALSHA` caching ([worksheet](tasks/3.1.md))
+- [x] 3.2 Live `KeyValueBackend` and `ChannelBus` Redis/Valkey adapters ([worksheet](tasks/3.2.md))
+- [x] 3.3 Live `ChangeFeed` consumer with `ObjectStore` Parquet spill, `QueryPipeline.execute`, and `DataFusionEngine` vectorized Arrow SQL ([worksheet](tasks/3.3.md))
+- [x] 3.4 Unit and integration acceptance tests for RESP3 Redis/Valkey drivers, `ChangeFeed` Parquet spill, and `DataFusionEngine` ([worksheet](tasks/3.4.md))
+- [x] Chapter gate: `make lint-all && make py-test`
 
 ## Requirement-to-task trace
 

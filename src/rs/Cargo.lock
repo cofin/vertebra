@@ -4315,6 +4315,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "jsonwebtoken",
+ "libc",
  "pyo3",
  "pyo3-build-config",
  "serde_json",

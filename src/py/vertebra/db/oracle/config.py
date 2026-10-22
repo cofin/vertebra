@@ -83,6 +83,7 @@ class OracleConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     cclass: str | None = None
     tac_profile: Literal["oltp", "batch", "exadata"] | None = None
     sdu: int | None = None
+    thick_mode_lib_dir: str | None = None
     min_size: int = 1
     max_size: int = 10
     bind_key: str = "default"
@@ -115,12 +116,12 @@ class OracleConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             driver_features=merged_features,
         )
 
-    def resolve_wallet(self, *, cache_root: str | Path | None = None) -> OracleWallet | None:
+    def resolve_wallet(self, *, target_dir: str | Path | None = None) -> OracleWallet | None:
         """Extract or resolve the configured Oracle wallet without mutating global TNS_ADMIN."""
         source = self.wallet_zip if self.wallet_zip is not None else self.wallet_location
         if source is None:
             return None
-        return OracleWallet.extract(source, target_dir=cache_root, wallet_password=self.wallet_password)
+        return OracleWallet.extract(source, target_dir=target_dir, wallet_password=self.wallet_password)
 
     def build_effective_dsn(self, *, wallet: OracleWallet | None = None) -> str:
         """Build the effective TNS descriptor or Easy Connect string."""
@@ -147,9 +148,9 @@ class OracleConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             return desc.to_tns_descriptor()
         return f"{self.host}:{self.port}/{self.service_name}"
 
-    def to_oracledb_connect_params(self, *, cache_root: str | Path | None = None) -> dict[str, Any]:
+    def to_oracledb_connect_params(self, *, target_dir: str | Path | None = None) -> dict[str, Any]:
         """Return keyword arguments for `oracledb.create_pool` / `oracledb.connect` in Thin Mode."""
-        wallet = self.resolve_wallet(cache_root=cache_root)
+        wallet = self.resolve_wallet(target_dir=target_dir)
         params: dict[str, Any] = {
             "user": self.user,
             "password": self.password,

@@ -1,5 +1,7 @@
 //! Platform-specific shared memory and wait primitives.
 
+pub use crate::sync::WaitWord;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]

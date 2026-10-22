@@ -5,11 +5,12 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from vertebra.framework.stores import ResponseCacheStore
+from vertebra.framework.stores import KeyValueBackend, ResponseCacheStore
 
 MemoryStore = ResponseCacheStore
 
 __all__ = (
+    "KeyValueBackend",
     "MemoryStore",
     "ResponseCacheStore",
     "swap_litestar_response_cache_store",

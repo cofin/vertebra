@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+mod broker;
 mod mpmc;
 mod ring;
 mod shm;

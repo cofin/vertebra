@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use tracing::{error, info};
 
+use vertebra_core::broker::ShmLeaseTable;
 use vertebra_core::process;
+use vertebra_core::shm::ShmRegion;
 use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig, RingPairError};
 
 /// State of a managed worker process.
@@ -30,6 +32,7 @@ pub struct WorkerLifecycle {
     pub last_crash: Option<std::time::Instant>,
     pub last_spawn: Option<std::time::Instant>,
     pub worker_id: usize,
+    pub last_pid: u32,
     pub app_path: String,
     pub python_bin: String,
 }
@@ -48,6 +51,7 @@ impl WorkerLifecycle {
             use vertebra_core::platform::linux::pidfd_open;
             pidfd_open(child.id() as i32).ok()
         };
+        let last_pid = child.id();
 
         Self {
             child: Some(child),
@@ -59,6 +63,7 @@ impl WorkerLifecycle {
             last_crash: None,
             last_spawn: Some(std::time::Instant::now()),
             worker_id,
+            last_pid,
             app_path,
             python_bin,
         }
@@ -80,6 +85,24 @@ impl WorkerLifecycle {
             }
         } else {
             false
+        }
+    }
+
+    /// Check if the worker is alive, and if it exited, reclaim its broker leases.
+    pub fn check_alive_and_reclaim(&mut self, broker_table: &ShmLeaseTable) -> (bool, u32) {
+        if self.check_alive() {
+            (true, 0)
+        } else {
+            let reclaimed = broker_table.reclaim_worker(self.last_pid);
+            if reclaimed > 0 {
+                tracing::warn!(
+                    worker_id = self.worker_id,
+                    pid = self.last_pid,
+                    reclaimed,
+                    "reclaimed broker leases from exited worker"
+                );
+            }
+            (false, reclaimed)
         }
     }
 
@@ -156,6 +179,7 @@ impl WorkerLifecycle {
             self.pidfd = pidfd_open(child.id() as i32).ok();
         }
 
+        self.last_pid = child.id();
         self.child = Some(child);
         self.state = WorkerHealth::Running;
         self.last_spawn = Some(std::time::Instant::now());
@@ -168,11 +192,25 @@ impl WorkerLifecycle {
 pub struct RingFactory {
     pairs: Vec<Arc<RingPair>>,
     lifecycles: Vec<WorkerLifecycle>,
+    broker_table: Arc<ShmLeaseTable>,
+    #[cfg(unix)]
+    broker_shm_fd: std::os::fd::RawFd,
+    broker_shm_size: usize,
 }
 
 impl RingFactory {
     /// Create ring pairs for `worker_count` workers.
     pub fn new(worker_count: usize, config: RingPairConfig) -> Result<Self, RingPairError> {
+        Self::with_broker_config(worker_count, config, 20, 10)
+    }
+
+    /// Create ring pairs and an atomic shared-memory connection broker lease table.
+    pub fn with_broker_config(
+        worker_count: usize,
+        config: RingPairConfig,
+        pool_size: u32,
+        max_overflow: u32,
+    ) -> Result<Self, RingPairError> {
         let mut pairs = Vec::with_capacity(worker_count);
         for i in 0..worker_count {
             let pair = RingPair::create(config.clone())?;
@@ -187,10 +225,41 @@ impl RingFactory {
             pairs.push(Arc::new(pair));
         }
 
+        let broker_shm_size = ShmLeaseTable::required_size(pool_size, max_overflow);
+        let region = ShmRegion::create(broker_shm_size).map_err(RingPairError::Shm)?;
+
+        #[cfg(unix)]
+        let broker_shm_fd = {
+            let fd = region.handle().unwrap_or(-1);
+            if fd >= 0 {
+                process::make_inheritable(&[fd]);
+            }
+            fd
+        };
+
+        let broker_table = Arc::new(
+            ShmLeaseTable::init_in_region(region, pool_size, max_overflow)
+                .map_err(|e| RingPairError::Io(std::io::Error::other(e.to_string())))?,
+        );
+
         Ok(Self {
             pairs,
             lifecycles: Vec::with_capacity(worker_count),
+            broker_table,
+            #[cfg(unix)]
+            broker_shm_fd,
+            broker_shm_size,
         })
+    }
+
+    /// Return a reference to the shared-memory connection broker lease table.
+    pub fn broker_table(&self) -> &Arc<ShmLeaseTable> {
+        &self.broker_table
+    }
+
+    /// Reclaim all connection leases held by an exited worker PID.
+    pub fn reclaim_worker_leases(&self, worker_pid: u32) -> u32 {
+        self.broker_table.reclaim_worker(worker_pid)
     }
 
     /// Get the ring pair for a specific worker.
@@ -243,6 +312,20 @@ impl RingFactory {
 
         if let Ok(threads) = std::env::var("VERTEBRA_THREADS") {
             cmd.env("VERTEBRA_THREADS", threads);
+        }
+
+        #[cfg(unix)]
+        {
+            cmd.env("VERTEBRA_BROKER_SHM_FD", self.broker_shm_fd.to_string());
+            cmd.env("VERTEBRA_BROKER_SHM_SIZE", self.broker_shm_size.to_string());
+            cmd.env(
+                "VERTEBRA_BROKER_POOL_SIZE",
+                self.broker_table.pool_size().to_string(),
+            );
+            cmd.env(
+                "VERTEBRA_BROKER_MAX_OVERFLOW",
+                self.broker_table.max_overflow().to_string(),
+            );
         }
 
         #[cfg(target_os = "linux")]

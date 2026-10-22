@@ -10,6 +10,7 @@ from vertebra.db.dialer.cloudsql import (
     CloudSqlConfig,
     CloudSqlDialer,
     CloudSqlInstanceUri,
+    EphemeralCertBundle,
 )
 
 __all__ = (
@@ -20,4 +21,5 @@ __all__ = (
     "CloudSqlConfig",
     "CloudSqlDialer",
     "CloudSqlInstanceUri",
+    "EphemeralCertBundle",
 )

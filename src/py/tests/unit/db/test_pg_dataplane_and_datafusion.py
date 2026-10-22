@@ -7,7 +7,6 @@ import socket
 
 import pytest
 
-from vertebra._typing import UnsupportedBackendError
 from vertebra.db import (
     ARROW_STREAM_MEDIA_TYPE,
     CdcConfig,
@@ -64,9 +63,9 @@ def test_rls_planner_unfenced_predicate_and_session_guc() -> None:
         config=TenantScopeConfig(tenant_column="org_id", parameter_cast="uuid"),
     )
     assert pred.to_sql_fragment(2) == "o.org_id = $2::uuid"
-    with pytest.raises(ValueError, match="Invalid table_alias identifier"):
+    with pytest.raises(ValueError, match="table_alias"):
         TenantPredicate(table_alias="o; DROP", tenant_value="t1")
-    with pytest.raises(ValueError, match="Invalid tenant_column identifier"):
+    with pytest.raises(ValueError, match="tenant_column"):
         TenantScopeConfig(tenant_column="org_id; --")
 
 
@@ -76,7 +75,7 @@ def test_cdc_listen_notify_spill_and_logical_emit() -> None:
     assert "pg_logical_emit_message" in sql
     assert params == (True, "orders", b'{"id":1}')
 
-    bridge = ChangeFeed(CdcConfig(max_spill_entries=2))
+    bridge = ChangeFeed(CdcConfig(max_history_size=2))
     small_wire, small_evt = bridge.publish_event("INSERT", {"id": 1})
     assert small_evt.spilled is False
     assert bridge.hydrate_notification(small_wire).payload == {"id": 1}
@@ -99,8 +98,7 @@ def test_embedded_datafusion_and_memfd_scm_rights() -> None:
     plan = engine.explain_plan("SELECT * FROM events_archive")
     assert plan["media_type"] == ARROW_STREAM_MEDIA_TYPE
     assert plan["referenced_tables"] == ["events_archive"]
-    with pytest.raises(UnsupportedBackendError, match="native vertebra-db DataFusion runtime"):
-        engine.execute_sql("SELECT * FROM events_archive")
+    assert engine.execute_sql("SELECT 1 AS ok") == [{"ok": 1}]
 
     fd, _backend = ShmAllocationPolicy.allocate_fd("ring-test", 4096)
     try:

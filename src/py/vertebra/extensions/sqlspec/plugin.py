@@ -263,6 +263,11 @@ class SQLSpecConfig[ConfigT]:
         """Forward attribute lookups to the underlying ConfigT instance."""
         return getattr(self.config, name)
 
+    @classmethod
+    def wrap[T](cls, config: T) -> SQLSpecConfig[T]:
+        """Wrap any SQLSpec configuration in SQLSpecConfig[T] with production pool defaults."""
+        return SQLSpecConfig(config)
+
 
 class ProxySyncConfig[
     SyncConfigT,
@@ -471,6 +476,7 @@ class SQLSpecPlugin[ConfigT]:
     STATE_KEY: ClassVar[str] = SQLSPEC_STATE_KEY
     __slots__ = (
         "_state",
+        "broker",
         "config",
         "loader",
         "priority",
@@ -486,6 +492,7 @@ class SQLSpecPlugin[ConfigT]:
         storage_prefix: str = "",
         storage_key: str = "vertebra",
         loader: Any = None,
+        broker: Any = None,
         priority: int = SQLSPEC_PLUGIN_PRIORITY,
     ) -> None:
         self.config = config
@@ -493,6 +500,7 @@ class SQLSpecPlugin[ConfigT]:
         self.storage_prefix = storage_prefix
         self.storage_key = storage_key
         self.loader = loader
+        self.broker = broker
         self.priority = priority
         self._state: SQLSpecState | None = None
         for item in self.configs:
@@ -506,6 +514,11 @@ class SQLSpecPlugin[ConfigT]:
         if isinstance(self.config, Sequence) and not isinstance(self.config, (str, bytes)):
             return tuple(self.config)
         return (self.config,)
+
+    @staticmethod
+    def wrap_config[T](config: T) -> SQLSpecConfig[T]:
+        """Wrap any SQLSpec configuration in SQLSpecConfig[T] with production pool defaults."""
+        return SQLSpecConfig(config)
 
     @overload
     def get_session[SyncDriverT: SyncDriverAdapterBase](
@@ -593,9 +606,19 @@ class SQLSpecPlugin[ConfigT]:
         target_state = getattr(app_config, "state", None)
         if isinstance(target_state, dict):
             self.install_state(target_state)
+            if self.broker is not None:
+                broker_transport = getattr(self.broker, "transport", self.broker)
+                target_state["db_broker"] = broker_transport
+                if "zpages" in target_state and hasattr(self.broker, "_register_zpages"):
+                    self.broker._register_zpages(target_state["zpages"])
         elif target_state is not None and hasattr(target_state, "update"):
             holder: dict[str, Any] = {}
             self.install_state(holder)
+            if self.broker is not None:
+                broker_transport = getattr(self.broker, "transport", self.broker)
+                holder["db_broker"] = broker_transport
+                if hasattr(target_state, "zpages") and hasattr(self.broker, "_register_zpages"):
+                    self.broker._register_zpages(target_state.zpages)
             target_state.update(holder)
 
         dependencies = getattr(app_config, "dependencies", None)

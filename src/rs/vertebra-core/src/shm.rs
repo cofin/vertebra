@@ -97,6 +97,11 @@ impl ShmRegion {
         Err(ShmError::InvalidSize)
     }
 
+    /// Map an existing shared memory file descriptor / handle into this process.
+    pub fn from_fd(handle: ShmHandle, size: usize) -> Result<Self, ShmError> {
+        unsafe { Self::map(handle, size) }
+    }
+
     /// Open an existing named region (Unix only).
     #[cfg(unix)]
     pub fn open_named(name: &str, size: usize) -> Result<Self, ShmError> {
