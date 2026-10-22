@@ -2,7 +2,7 @@
 type: PRD
 flow_id: vertebra-queues-and-messaging
 title: "Master PRD: Distributed Task Queues, Multi-Lane Worker Scheduler & Transactional Email Providers"
-state: planned
+state: closed
 plan_revision: 2
 plan_commit: ""
 state_revision: 0
@@ -124,8 +124,8 @@ flowchart TD
 
 Chapter progress is tracked by each child spec's `state`.
 
-- [ ] 1 [`distributed-queue-backends`](../distributed-queue-backends/spec.md)
-- [ ] 2 [`transactional-email-providers`](../transactional-email-providers/spec.md)
+- [x] 1 [`distributed-queue-backends`](../distributed-queue-backends/spec.md)
+- [x] 2 [`transactional-email-providers`](../transactional-email-providers/spec.md)
 
 ## Continuity Snapshot
 

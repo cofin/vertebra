@@ -13,10 +13,10 @@ sources:
   - resource: src/py/vertebra/framework/ssr/__init__.py
   - resource: src/py/vertebra/framework/openapi.py
   - resource: src/py/vertebra/framework/asyncapi.py
-  - resource: src/py/vertebra/framework/queues.py
+  - resource: src/py/vertebra/framework/queues/__init__.py
   - resource: src/py/vertebra/framework/channels.py
   - resource: src/py/vertebra/framework/stores.py
-  - resource: src/py/vertebra/framework/email.py
+  - resource: src/py/vertebra/framework/email/__init__.py
   - resource: src/py/vertebra/framework/procedures.py
   - resource: src/py/vertebra/extensions/litestar/plugin.py
   - resource: src/rs/vertebra-http/src/discovery.rs
@@ -44,4 +44,4 @@ sources:
 ## 3. Agent Protocols (`litestar-mcp`) & Background Infrastructure (`queues`, `channels`, `stores`, `email`)
 
 - **First-Party `litestar-mcp` (`LitestarMCP`, `LitestarA2A` via `vertebra[mcp]`)**: Model Context Protocol (MCP) and Agent-to-Agent (A2A) endpoints are provided by the official first-party `litestar-mcp` package (`LitestarMCP`, `MCPConfig`, `LitestarA2A`, `A2AConfig`) discovered by [`LitestarPlugin`](../../../../../src/py/vertebra/extensions/litestar/plugin.py) (`mcp_endpoint`, `a2a_endpoint`) and paired with Rust's [`WellKnownDiscoveryCache`](../../../../../src/rs/vertebra-http/src/discovery.rs) (`/.well-known/agent.json`, `/.well-known/mcp.json`).
-- **[`queues.py`](../../../../../src/py/vertebra/framework/queues.py), [`channels.py`](../../../../../src/py/vertebra/framework/channels.py), [`stores.py`](../../../../../src/py/vertebra/framework/stores.py), [`email.py`](../../../../../src/py/vertebra/framework/email.py)**: `QueueService`, `@task`, `TaskLane` (`CPU`/`IO`/`AGENT`), `TaskRetryPolicy`, and `CronSchedule`; `ChannelsBackend`; `MemoryStore` and `NamespacedStore`; `EmailService`, `EmailMessage`, and `EmailConfig` (`memory`, `smtp`, `resend`, `sendgrid`, `mailgun`, `ses`).
+- **[`queues`](../../../../../src/py/vertebra/framework/queues/__init__.py), [`channels.py`](../../../../../src/py/vertebra/framework/channels.py), [`stores.py`](../../../../../src/py/vertebra/framework/stores.py), [`email`](../../../../../src/py/vertebra/framework/email/__init__.py)**: `QueueService`, `@task`, `TaskLane` (`CPU`/`IO`/`AGENT`), `TaskRetryPolicy`, and `CronSchedule`; `ChannelsBackend`; `MemoryStore` and `NamespacedStore`; `EmailService`, `EmailMessage`, and `EmailConfig` (`memory`, `smtp`, `resend`, `sendgrid`, `mailgun`, `ses`).

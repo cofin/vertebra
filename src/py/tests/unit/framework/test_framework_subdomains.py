@@ -296,8 +296,8 @@ def test_asyncapi_spec_builder_from_channels() -> None:
 @pytest.mark.anyio
 async def test_queue_and_email_backend_validation_and_policies(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify UnsupportedBackendError enforcement, QueueService retries/cron, and EmailService dispatch."""
-    with pytest.raises(UnsupportedBackendError, match="not supported; use 'memory://'"):
-        QueueService(QueueConfig(backend_url="redis://localhost:6379/0"))
+    with pytest.raises(UnsupportedBackendError, match="Unsupported queue backend URL scheme"):
+        QueueService(QueueConfig(backend_url="amqp://localhost:5672"))
 
     qsvc = QueueService()
     attempts = 0
@@ -332,9 +332,8 @@ async def test_queue_and_email_backend_validation_and_policies(monkeypatch: pyte
     not_due_results = await qsvc.run_due_schedules(minute=16, hour=10)
     assert not_due_results == []
 
-    for backend_name in ("sendgrid", "resend", "mailgun", "ses"):
-        with pytest.raises(UnsupportedBackendError, match="not supported; use 'memory' or 'smtp'"):
-            EmailService(EmailConfig(backend=backend_name))  # type: ignore[arg-type]
+    with pytest.raises(UnsupportedBackendError, match="Unsupported email backend"):
+        EmailService(EmailConfig(backend="postmark"))  # type: ignore[arg-type]
 
     mem_svc = EmailService(EmailConfig(backend="memory"))
     receipt = await mem_svc.send(
@@ -346,9 +345,10 @@ async def test_queue_and_email_backend_validation_and_policies(monkeypatch: pyte
     sent_messages: list[Any] = []
 
     class MockSMTP:
-        def __init__(self, host: str, port: int) -> None:
+        def __init__(self, host: str, port: int, timeout: float = 10.0) -> None:
             self.host = host
             self.port = port
+            self.timeout = timeout
 
         def __enter__(self) -> MockSMTP:
             return self
@@ -356,11 +356,21 @@ async def test_queue_and_email_backend_validation_and_policies(monkeypatch: pyte
         def __exit__(self, *args: Any) -> None:
             pass
 
-        def send_message(self, msg: Any) -> None:
+        def ehlo(self) -> None:
+            pass
+
+        def noop(self) -> tuple[int, bytes]:
+            return (250, b"ok")
+
+        def quit(self) -> None:
+            pass
+
+        def send_message(self, msg: Any, **_kwargs: Any) -> dict[str, Any]:
             sent_messages.append(msg)
+            return {}
 
     monkeypatch.setattr("smtplib.SMTP", MockSMTP)
-    smtp_svc = EmailService(EmailConfig(backend="smtp", smtp_host="127.0.0.1", smtp_port=2525))
+    smtp_svc = EmailService(EmailConfig(backend="smtp", smtp_host="127.0.0.1", smtp_port=2525, use_starttls=False))
     smtp_receipt = await smtp_svc.send(
         EmailMessage(
             subject="Invoice",
@@ -370,6 +380,6 @@ async def test_queue_and_email_backend_validation_and_policies(monkeypatch: pyte
             html_body="<p>Invoice</p>",
         )
     )
-    assert smtp_receipt.startswith("smtp-")
+    assert smtp_receipt.startswith("<") and smtp_receipt.endswith(">")
     assert len(sent_messages) == 1
     assert sent_messages[0]["Subject"] == "Invoice"
