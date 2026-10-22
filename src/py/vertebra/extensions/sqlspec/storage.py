@@ -4,17 +4,104 @@ from __future__ import annotations
 
 import fnmatch
 from collections.abc import AsyncIterator, Buffer, Iterator, Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 
-from vertebra.storage import ObjectMeta, ObjectStore, PutResult
-from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.storage import ObjectMeta, ObjectStore, PutResult, SigningConfig
+from vertebra.storage.registry import StorageRegistry, get_default_storage_registry
+from vertebra.utils.serializers import (
+    decode_json,
+    decode_msgpack,
+    encode_json_bytes,
+    encode_msgpack,
+)
 
 __all__ = (
+    "ArrowFlightSerializer",
     "SQLSpecStore",
+    "SqlSpecStorageBridge",
     "StreamingStorageResponse",
 )
+
+
+class SqlSpecStorageBridge:
+    """Bridge between SQLSpec storage operations and Vertebra StorageRegistry."""
+
+    __slots__ = ("_registry",)
+
+    def __init__(self, registry: StorageRegistry | None = None) -> None:
+        self._registry = registry if registry is not None else get_default_storage_registry()
+
+    @property
+    def registry(self) -> StorageRegistry:
+        """Return the underlying StorageRegistry."""
+        return self._registry
+
+    def register_alias(
+        self,
+        alias: str,
+        target: str | ObjectStore | Any,
+        *,
+        options: dict[str, str] | None = None,
+        signing: SigningConfig | None = None,
+    ) -> None:
+        """Register a storage alias."""
+        self._registry.register_alias(alias, target, options=options, signing=signing)
+
+    def resolve_store(self, alias_or_uri: str) -> ObjectStore:
+        """Resolve an ObjectStore from alias or URI."""
+        return self._registry.resolve_store(alias_or_uri)
+
+    def _split_target(self, target: str) -> tuple[ObjectStore, str]:
+        """Split a logical target path into resolved ObjectStore and relative object key."""
+        if "://" in target:
+            return self.resolve_store(target), ""
+        alias, sep, key = target.partition("/")
+        if sep:
+            try:
+                store = self.resolve_store(alias)
+                return store, key
+            except (ValueError, KeyError):
+                pass
+        return self.resolve_store(target), ""
+
+    def put_bytes(self, target: str, data: Buffer) -> PutResult:
+        """Put raw bytes into the resolved store."""
+        store, key = self._split_target(target)
+        return store.put(key, data)
+
+    def get_bytes(self, target: str) -> bytes:
+        """Get raw bytes from the resolved store."""
+        store, key = self._split_target(target)
+        return store.get(key)
+
+    def put_json(self, target: str, obj: Any) -> PutResult:
+        """Encode object to JSON and put into resolved store."""
+        store, key = self._split_target(target)
+        return store.put(key, encode_json_bytes(obj))
+
+    def get_json(self, target: str) -> Any:
+        """Get bytes from resolved store and decode JSON."""
+        store, key = self._split_target(target)
+        return decode_json(store.get(key))
+
+
+class ArrowFlightSerializer:
+    """Serializer converting Arrow tables and flight descriptors using msgpack."""
+
+    __slots__ = ()
+
+    @staticmethod
+    def serialize_descriptor(descriptor: Any) -> bytes:
+        """Serialize a flight descriptor to msgpack."""
+        return encode_msgpack(descriptor)
+
+    @staticmethod
+    def deserialize_descriptor(payload: bytes) -> Any:
+        """Deserialize a flight descriptor from msgpack."""
+        return decode_msgpack(payload)
+
 
 _PARQUET_MAGIC = b"PAR1"
 
@@ -149,7 +236,7 @@ class SQLSpecStore:
         """Write an Arrow IPC stream buffer or framed tabular batch zero-copy to the store."""
         if isinstance(payload, Buffer):
             return self.write_bytes(path, memoryview(payload))
-        encoded = msgspec.msgpack.encode(list(payload))
+        encoded = encode_msgpack(list(payload))
         framed = b"ARROW1\x00\x00" + encoded
         return self.write_bytes(path, memoryview(framed))
 
@@ -174,7 +261,7 @@ class SQLSpecStore:
         """Write a Parquet buffer or columnar msgpack frame to the store."""
         if isinstance(payload, Buffer):
             return self.write_bytes(path, memoryview(payload))
-        body = msgspec.msgpack.encode(list(payload))
+        body = encode_msgpack(list(payload))
         framed = _PARQUET_MAGIC + body + _PARQUET_MAGIC
         return self.write_bytes(path, memoryview(framed))
 
@@ -183,7 +270,7 @@ class SQLSpecStore:
         raw = self.read_bytes(path)
         if raw.startswith(_PARQUET_MAGIC) and raw.endswith(_PARQUET_MAGIC) and len(raw) >= 8:
             inner = raw[4:-4]
-            return msgspec.msgpack.decode(inner, type=list[dict[str, Any]])
+            return cast("list[dict[str, Any]]", decode_msgpack(inner, type=list[dict[str, Any]]))
         return raw
 
     def presign_download(

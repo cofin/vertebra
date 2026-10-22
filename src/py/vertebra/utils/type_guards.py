@@ -7,10 +7,11 @@ from dataclasses import fields as dataclasses_fields
 from dataclasses import is_dataclass as dataclasses_is_dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
+from msgspec import Struct
+
 from vertebra import _typing
 from vertebra._typing import (
     ATTRS_INSTALLED,
-    MSGSPEC_INSTALLED,
     PYDANTIC_INSTALLED,
     UNSET,
     DataclassProtocol,
@@ -20,7 +21,7 @@ from vertebra._typing import (
 if TYPE_CHECKING:
     from typing import TypeGuard
 
-    from vertebra._typing import BaseModelStub, StructStub
+    from vertebra._typing import BaseModelStub
 
 __all__ = (
     "DictProtocol",
@@ -67,17 +68,14 @@ def is_pydantic_model(obj: Any) -> "TypeGuard[BaseModelStub]":
     return isinstance(obj, base_model)
 
 
-def is_msgspec_struct(obj: Any) -> "TypeGuard[StructStub]":
+def is_msgspec_struct(obj: Any) -> "TypeGuard[Struct]":
     """Check if a value is a msgspec struct class or instance."""
-    if not MSGSPEC_INSTALLED:
-        return False
-    struct_type = _typing.Struct
     if isinstance(obj, type):
         try:
-            return issubclass(obj, struct_type)
+            return issubclass(obj, Struct)
         except TypeError:
             return False
-    return isinstance(obj, struct_type)
+    return isinstance(obj, Struct)
 
 
 def is_attrs_instance(obj: Any) -> bool:

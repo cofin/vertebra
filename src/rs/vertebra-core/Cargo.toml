@@ -14,15 +14,15 @@ crate-type = ["lib"]
 [dependencies]
 crossbeam-channel = { workspace = true }
 crossbeam-utils = { workspace = true }
-matchit = { workspace = true }
+hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, default-features = false, features = ["sync"] }
 bytes = { workspace = true }
 jsonwebtoken = { workspace = true }
 lz4_flex = { workspace = true, optional = true }
-rmp-serde = { workspace = true }
 zstd = { workspace = true, optional = true }
 
 [features]
@@ -32,7 +32,6 @@ macos-ulock = []
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
-rustix = { workspace = true, features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }
@@ -40,22 +39,10 @@ windows-sys = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = { workspace = true }
-tokio-test = "0.4"
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [[bench]]
 name = "spsc"
-harness = false
-
-[[bench]]
-name = "mpmc"
-harness = false
-
-[[bench]]
-name = "spin_wait"
-harness = false
-
-[[bench]]
-name = "router"
 harness = false
 
 [[bench]]

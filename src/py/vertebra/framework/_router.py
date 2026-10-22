@@ -1,14 +1,23 @@
 """Routing primitives for the native app framework."""
 
-from typing import TYPE_CHECKING, Any, cast
+import re
+from collections.abc import Callable, Sequence
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
+from typing import Any, cast
 from uuid import UUID
 
 import msgspec
 
-if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+try:
+    import vertebra._vertebra as _vtb
+
+    _native_handler_id: Callable[[str, str], int] | None = getattr(_vtb, "handler_id", None)
+except ImportError:
+    _native_handler_id = None
 
 __all__ = (
+    "PARAM_CONVERTERS",
     "ParamSpec",
     "RouteDef",
     "Router",
@@ -16,6 +25,8 @@ __all__ = (
     "extract_path_params",
     "get",
     "handler_id",
+    "normalize_path",
+    "normalize_prefix",
     "patch",
     "post",
     "put",
@@ -25,6 +36,40 @@ _SUPPORTED_PARAM_TYPES = {"str", "string", "int", "i64", "u64", "float", "f64", 
 _FNV_OFFSET = 0xCBF29CE484222325
 _FNV_PRIME = 0x100000001B3
 _MASK_64 = 0xFFFFFFFFFFFFFFFF
+_ISO_DURATION_RE = re.compile(
+    r"^P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$"
+)
+
+
+def _parse_timedelta(raw: str) -> timedelta:
+    match = _ISO_DURATION_RE.match(raw)
+    if match and any(match.groupdict().values()):
+        days = int(match.group("days") or 0)
+        hours = int(match.group("hours") or 0)
+        minutes = int(match.group("minutes") or 0)
+        seconds = float(match.group("seconds") or 0.0)
+        return timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
+    return timedelta(seconds=float(raw))
+
+
+def _parse_path_param(raw: str) -> str:
+    return raw.lstrip("/")
+
+
+PARAM_CONVERTERS: dict[str, Callable[[str], Any]] = {
+    "str": str,
+    "string": str,
+    "int": int,
+    "float": float,
+    "uuid": UUID,
+    "decimal": Decimal,
+    "date": date.fromisoformat,
+    "datetime": datetime.fromisoformat,
+    "time": time.fromisoformat,
+    "timedelta": _parse_timedelta,
+    "path": _parse_path_param,
+}
+_PARAM_CONVERTERS = PARAM_CONVERTERS
 
 
 class ParamSpec(msgspec.Struct, frozen=True, gc=False, array_like=True):
@@ -35,8 +80,8 @@ class ParamSpec(msgspec.Struct, frozen=True, gc=False, array_like=True):
 class RouteDef(msgspec.Struct, frozen=True, gc=False, array_like=True):
     method: str
     path: str
-    handler: "Callable[..., Any]"
-    segments: "tuple[str | ParamSpec, ...]" = ()
+    handler: Callable[..., Any]
+    segments: tuple[str | ParamSpec, ...] = ()
 
     def with_prefix(self, prefix: str) -> "RouteDef":
         normalized_prefix = _normalize_prefix(prefix)
@@ -58,29 +103,29 @@ class Router:
         self.prefix = _normalize_prefix(prefix)
         self.routes: list[RouteDef] = []
 
-    def register(self, handler: "Callable[..., Any]") -> None:
+    def register(self, handler: Callable[..., Any]) -> None:
         routes: Sequence[RouteDef] = getattr(handler, "__vertebra_routes__", ())
         for route in routes:
             self.routes.append(route.with_prefix(self.prefix))
 
 
-def get(path: str) -> "Callable[[Callable[..., Any]], Callable[..., Any]]":
+def get(path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     return _route("GET", path)
 
 
-def post(path: str) -> "Callable[[Callable[..., Any]], Callable[..., Any]]":
+def post(path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     return _route("POST", path)
 
 
-def put(path: str) -> "Callable[[Callable[..., Any]], Callable[..., Any]]":
+def put(path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     return _route("PUT", path)
 
 
-def delete(path: str) -> "Callable[[Callable[..., Any]], Callable[..., Any]]":
+def delete(path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     return _route("DELETE", path)
 
 
-def patch(path: str) -> "Callable[[Callable[..., Any]], Callable[..., Any]]":
+def patch(path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     return _route("PATCH", path)
 
 
@@ -109,6 +154,8 @@ def _fnv1a_write(h: int, data: bytes) -> int:
 
 def _make_handler_id(method: str, path: str) -> int:
     """Derive a stable uint64 handler ID from method and path using FNV-1a."""
+    if _native_handler_id is not None:
+        return int(_native_handler_id(method, path))
     h = _FNV_OFFSET
     h = _fnv1a_write(h, method.upper().encode())
     h = _fnv1a_write(h, b"\xff")
@@ -118,17 +165,17 @@ def _make_handler_id(method: str, path: str) -> int:
     return h
 
 
-def extract_path_params(template: str, path: str) -> "dict[str, Any]":
+def extract_path_params(template: str, path: str) -> dict[str, Any]:
     """Extract and coerce params from a path based on a typed template."""
     segments = _compile_path_template(_normalize_path(template))
     return _extract_params_from_segments(segments, _normalize_path(path))
 
 
-def _route(method: str, path: str) -> "Callable[[Callable[..., Any]], Callable[..., Any]]":
+def _route(method: str, path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     normalized_path = _normalize_path(path)
     segments = _compile_path_template(normalized_path)
 
-    def decorator(handler: "Callable[..., Any]") -> "Callable[..., Any]":
+    def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
         routes: list[RouteDef] = getattr(handler, "__vertebra_routes__", [])
         route = RouteDef(method=method, path=normalized_path, handler=handler, segments=segments)
         routes.append(route)
@@ -138,7 +185,8 @@ def _route(method: str, path: str) -> "Callable[[Callable[..., Any]], Callable[.
     return decorator
 
 
-def _normalize_prefix(prefix: str) -> str:
+def normalize_prefix(prefix: str) -> str:
+    """Normalize a router prefix to start with '/' and omit trailing '/'."""
     if not prefix:
         return ""
     prefix = prefix.strip()
@@ -149,12 +197,19 @@ def _normalize_prefix(prefix: str) -> str:
     return prefix.rstrip("/")
 
 
-def _normalize_path(path: str) -> str:
+_normalize_prefix = normalize_prefix
+
+
+def normalize_path(path: str) -> str:
+    """Normalize a route path to start with '/'."""
     if not path:
         return "/"
     if not path.startswith("/"):
         return f"/{path}"
     return path
+
+
+_normalize_path = normalize_path
 
 
 def _split_path(path: str) -> "list[str]":

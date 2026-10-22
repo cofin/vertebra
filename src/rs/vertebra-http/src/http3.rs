@@ -1,26 +1,24 @@
 //! HTTP/3 over QUIC endpoint (`quinn 0.11.9`, `h3 0.0.8`, `h3-quinn 0.0.10`) and
 //! `Alt-Svc` header advertisement.
 
+#[cfg(feature = "http3")]
 use std::convert::Infallible;
 #[cfg(feature = "http3")]
 use std::future::Future;
-use std::pin::Pin;
 #[cfg(feature = "http3")]
 use std::sync::Arc;
-use std::task::{Context, Poll};
 #[cfg(feature = "http3")]
 use std::time::Duration;
 
-use bytes::Bytes;
 #[cfg(feature = "http3")]
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use http::{HeaderMap, HeaderValue};
 #[cfg(feature = "http3")]
 use http::{Request, Response};
 #[cfg(feature = "http3")]
 use http_body_util::{BodyExt, Either, Full};
-use hyper::body::{Body, Frame};
-use tokio::sync::mpsc;
+#[cfg(feature = "http3")]
+use hyper::body::Body;
 #[cfg(feature = "http3")]
 use tokio::sync::watch;
 #[cfg(feature = "http3")]
@@ -62,30 +60,6 @@ pub fn inject_alt_svc_header(headers: &mut HeaderMap, port: u16, max_age: u64) {
     }
     if let Ok(val) = HeaderValue::from_str(&format_alt_svc_header(port, max_age)) {
         headers.insert(http::header::ALT_SVC, val);
-    }
-}
-
-/// Stream body backed by a bounded `tokio::sync::mpsc::Receiver<Result<Frame<Bytes>, Infallible>>`.
-pub struct H3ChannelBody {
-    rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>,
-}
-
-impl H3ChannelBody {
-    /// Wrap a frame receiver into an `http_body::Body`.
-    pub fn new(rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>) -> Self {
-        Self { rx }
-    }
-}
-
-impl Body for H3ChannelBody {
-    type Data = Bytes;
-    type Error = Infallible;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        self.rx.poll_recv(cx)
     }
 }
 

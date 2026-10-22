@@ -1,6 +1,11 @@
 """SQLSpec extension, PEP 695 generic configurations, and zero-copy object storage integration."""
 
-from vertebra.extensions.sqlspec.oracle import OracleHybridSearch
+from vertebra.extensions.sqlspec.oracle import (
+    OracleConfig,
+    OracleHybridSearch,
+    OraclePoolRegistry,
+    OracleVectorConverter,
+)
 from vertebra.extensions.sqlspec.plugin import (
     SQLSPEC_PLUGIN_PRIORITY,
     SQLSPEC_STATE_KEY,
@@ -11,13 +16,17 @@ from vertebra.extensions.sqlspec.plugin import (
     DatabaseConfigProtocol,
     ProxyAsyncConfig,
     ProxySyncConfig,
+    SQLSpecAsyncConfig,
     SQLSpecConfig,
     SQLSpecPlugin,
     SQLSpecState,
+    SQLSpecSyncConfig,
     SyncDatabaseConfig,
     SyncDriverAdapterBase,
 )
 from vertebra.extensions.sqlspec.storage import (
+    ArrowFlightSerializer,
+    SqlSpecStorageBridge,
     SQLSpecStore,
     StreamingStorageResponse,
 )
@@ -25,18 +34,25 @@ from vertebra.extensions.sqlspec.storage import (
 __all__ = (
     "SQLSPEC_PLUGIN_PRIORITY",
     "SQLSPEC_STATE_KEY",
+    "ArrowFlightSerializer",
     "AsyncDatabaseConfig",
     "AsyncDriverAdapterBase",
     "BrokerPlugin",
     "ChannelMessage",
     "DatabaseConfigProtocol",
+    "OracleConfig",
     "OracleHybridSearch",
+    "OraclePoolRegistry",
+    "OracleVectorConverter",
     "ProxyAsyncConfig",
     "ProxySyncConfig",
+    "SQLSpecAsyncConfig",
     "SQLSpecConfig",
     "SQLSpecPlugin",
     "SQLSpecState",
     "SQLSpecStore",
+    "SQLSpecSyncConfig",
+    "SqlSpecStorageBridge",
     "StreamingStorageResponse",
     "SyncDatabaseConfig",
     "SyncDriverAdapterBase",

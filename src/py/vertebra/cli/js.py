@@ -13,7 +13,8 @@ from typing import Any
 
 import click
 
-from vertebra.build import BuildConfig, BuildOrchestrator, ImportMapGenerator
+from vertebra.build import BuildConfig, BuildOrchestrator
+from vertebra.build._import_map import ImportMapGenerator
 from vertebra.cli.errors import CLIError
 from vertebra.cli.theme import console
 

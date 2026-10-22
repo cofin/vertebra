@@ -1,0 +1,5 @@
+{
+  "summary":  "Agentic Review Infrastructure design for Vertebra: 8 review areas, shared checklist (RT/HTTP/FFI/PY/TS/PERF/TEST/DOC), false-positive suppression catalog, paired reviewer/specialist custom agents, review_setup.py validator, and baseline review run procedure.",
+  "updatedAt":  "2026-10-22T03:47:17.848919655Z",
+  "userFacing":  true
+}

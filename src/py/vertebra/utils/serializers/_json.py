@@ -3,12 +3,13 @@
 Aligned with vtb.
 """
 
+from __future__ import annotations
+
 import datetime
 import enum
-import json
 import uuid as _uuid_mod
 from decimal import Decimal
-from typing import Any, Final, Literal, cast, overload
+from typing import Any, ClassVar, Final, Literal, cast, overload
 
 import msgspec
 from msgspec.json import Decoder, Encoder
@@ -46,9 +47,18 @@ class JSONSerializer:
 
     __slots__ = ("_decoder", "_encoder")
 
+    _default: ClassVar[JSONSerializer | None] = None
+
     def __init__(self) -> None:
         self._encoder: Final[Encoder] = Encoder(enc_hook=_normalize_supported_value)
         self._decoder: Final[Decoder[Any]] = Decoder()
+
+    @classmethod
+    def default(cls) -> JSONSerializer:
+        """Return process-global default JSONSerializer instance."""
+        if cls._default is None:
+            cls._default = cls()
+        return cls._default
 
     def encode(self, data: Any, *, as_bytes: bool = False) -> str | bytes:
         """Encode Python data into JSON string or UTF-8 bytes."""
@@ -57,14 +67,7 @@ class JSONSerializer:
 
     def encode_bytes(self, data: Any) -> bytes:
         """Encode Python data directly into UTF-8 JSON bytes."""
-        try:
-            return self._encoder.encode(data)
-        except TypeError as exc:
-            if _is_explicit_unsupported_error(exc):
-                raise
-            return json.dumps(data, default=_normalize_supported_value).encode("utf-8")
-        except ValueError:
-            return json.dumps(data, default=_normalize_supported_value).encode("utf-8")
+        return self._encoder.encode(data)
 
     def encode_into(self, data: Any, buffer: bytearray, offset: int = 0) -> None:
         """Encode Python data directly into a pre-allocated ``bytearray`` at ``offset`` with zero allocation."""
@@ -75,14 +78,8 @@ class JSONSerializer:
         if isinstance(data, bytes):
             if not decode_bytes:
                 return data
-            try:
-                return self._decoder.decode(data)
-            except (TypeError, ValueError):
-                return json.loads(data.decode("utf-8"))
-        try:
-            return self._decoder.decode(data.encode("utf-8"))
-        except (TypeError, ValueError):
-            return json.loads(data)
+            return self._decoder.decode(data)
+        return self._decoder.decode(data.encode("utf-8"))
 
 
 def convert_datetime_to_gmt_iso(value: datetime.datetime) -> str:
@@ -97,13 +94,18 @@ def convert_date_to_iso(value: datetime.date) -> str:
     return value.isoformat()
 
 
+_UNLOADED_UUID_TYPE: Final[object] = object()
+
+
+class _UuidTypeCache:
+    """Class-scoped holder for lazy UUID backend."""
+
+    uuid_utils_type: ClassVar[Any] = _UNLOADED_UUID_TYPE
+
+
 def get_default_serializer() -> JSONSerializer:
     """Return the default msgspec-backed JSON serializer."""
-    global _default_serializer
-
-    if _default_serializer is None:
-        _default_serializer = JSONSerializer()
-    return _default_serializer
+    return JSONSerializer.default()
 
 
 def encode_json_bytes(data: Any) -> bytes:
@@ -144,22 +146,16 @@ def format_json(value: Any, *, indent: int = 2) -> str:
     return msgspec.json.format(encode_json_bytes(value), indent=indent).decode("utf-8")
 
 
-_UNLOADED_UUID_TYPE: Final[object] = object()
-_uuid_utils_type: Any = _UNLOADED_UUID_TYPE
-_default_serializer: JSONSerializer | None = None
-
-
 def _get_uuid_utils_type() -> type[Any] | None:
     """Lazy-resolve and cache the uuid-utils UUID type when installed."""
-    global _uuid_utils_type
-    if _uuid_utils_type is not _UNLOADED_UUID_TYPE:
-        return cast("type[Any] | None", _uuid_utils_type)
+    if _UuidTypeCache.uuid_utils_type is not _UNLOADED_UUID_TYPE:
+        return cast("type[Any] | None", _UuidTypeCache.uuid_utils_type)
     if not UUID_UTILS_INSTALLED:
-        _uuid_utils_type = None
+        _UuidTypeCache.uuid_utils_type = None
         return None
     module = _load_uuid_utils()
-    _uuid_utils_type = None if module is None else cast("type[Any]", module.UUID)
-    return cast("type[Any] | None", _uuid_utils_type)
+    _UuidTypeCache.uuid_utils_type = None if module is None else cast("type[Any]", module.UUID)
+    return cast("type[Any] | None", _UuidTypeCache.uuid_utils_type)
 
 
 def _is_uuid_utils_instance(value: Any) -> bool:
@@ -201,8 +197,3 @@ def _normalize_supported_value(value: Any) -> Any:
 
     msg = f"unsupported JSON value: {type(value).__name__}"
     raise TypeError(msg)
-
-
-def _is_explicit_unsupported_error(exc: Exception) -> bool:
-    """Return True when TypeError originates from an unsupported JSON value."""
-    return "unsupported json value" in str(exc).lower()

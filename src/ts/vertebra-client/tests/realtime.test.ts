@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HotReloadClient, SseClient, WebSocketClient } from "../src/index";
+import { HttpClient } from "../src/client/client";
+import { HotReloadClient, initHotReload } from "../src/hmr/index";
+import { SseClient, WebSocketClient } from "../src/index";
+import { BoundedKeySet } from "../src/internal/lru_set";
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -244,6 +247,69 @@ describe("SseClient & WebSocketClient", () => {
       generation: 2,
     });
     expect(reloadSpy).toHaveBeenCalledTimes(1);
+    hmr.destroy();
+  });
+
+  it("BoundedKeySet evicts oldest key in O(1) Set order when capacity is exceeded", () => {
+    const bks = new BoundedKeySet(3);
+    expect(bks.add("k1")).toBe(true);
+    expect(bks.add("k1")).toBe(false);
+    expect(bks.add("k2")).toBe(true);
+    expect(bks.add("k3")).toBe(true);
+    expect(bks.size).toBe(3);
+
+    expect(bks.add("k4")).toBe(true);
+    expect(bks.size).toBe(3);
+    expect(bks.has("k1")).toBe(false);
+    expect(bks.has("k2")).toBe(true);
+    expect(bks.has("k3")).toBe(true);
+    expect(bks.has("k4")).toBe(true);
+  });
+
+  it("HttpClient.subscribe delegates to WebSocketClient and unsubscribes when last listener leaves", () => {
+    const client = new HttpClient({ baseURL: "http://api.test", wsURL: "ws://api.test/__vertebra/ws" });
+    const received: any[] = [];
+    const unsubscribe1 = client.subscribe<string>("chat", (data) => received.push(data));
+    const unsubscribe2 = client.subscribe<string>("chat", (data) => received.push(data));
+
+    expect(MockWebSocket.instances).toHaveLength(1);
+    const ws = MockWebSocket.instances[0];
+    if (!ws) throw new Error("expected WebSocket instance");
+    ws.simulateOpen();
+
+    ws.simulateMessage({
+      type: "event",
+      topic: "chat",
+      data: "hello",
+    });
+    expect(received).toEqual(["hello", "hello"]);
+
+    // Remove first listener - topic still has 1 listener
+    unsubscribe1();
+    expect(ws.sent.some((f) => JSON.parse(f).type === "unsubscribe")).toBe(false);
+
+    // Remove second listener - topic now has 0 listeners, sends unsubscribe and closes
+    unsubscribe2();
+    expect(
+      ws.sent.some((f) => {
+        const parsed = JSON.parse(f);
+        return parsed.type === "unsubscribe" && parsed.topic === "chat";
+      }),
+    ).toBe(true);
+    expect(ws.readyState).toBe(MockWebSocket.CLOSED);
+  });
+
+  it("initHotReload connects and registers window.__vertebra_hmr without top-level import side-effects", () => {
+    const fakeWindow: any = {
+      location: { protocol: "http:", host: "localhost:3000", reload: vi.fn() },
+      dispatchEvent: vi.fn(),
+    };
+    vi.stubGlobal("window", fakeWindow);
+
+    expect(fakeWindow.__vertebra_hmr).toBeUndefined();
+    const hmr = initHotReload("/__vertebra/hmr");
+    expect(fakeWindow.__vertebra_hmr).toBe(hmr);
+    expect(MockWebSocket.instances.length).toBeGreaterThan(0);
     hmr.destroy();
   });
 });

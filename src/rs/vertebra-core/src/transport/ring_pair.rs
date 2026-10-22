@@ -106,6 +106,7 @@ pub struct TieredRingSet {
     pub large: Arc<SpscRing>,
     pub xlarge: Arc<SpscRing>,
     pub config: TieredRingConfig,
+    next_tier: std::sync::atomic::AtomicUsize,
 }
 
 impl TieredRingSet {
@@ -122,6 +123,7 @@ impl TieredRingSet {
             large,
             xlarge,
             config: config.clone(),
+            next_tier: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -149,6 +151,7 @@ impl TieredRingSet {
             large,
             xlarge,
             config: config.clone(),
+            next_tier: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -207,6 +210,9 @@ impl TieredRingSet {
         headers_raw: &[u8],
         body: &[u8],
     ) -> Result<(), RingPairError> {
+        if headers_raw.len() > u16::MAX as usize {
+            return Err(RingPairError::InvalidResponse("headers exceed 65535 bytes"));
+        }
         let total_size = RESPONSE_HEADER_SIZE + headers_raw.len() + body.len();
         let ring = self
             .select_ring(total_size)
@@ -227,6 +233,9 @@ impl TieredRingSet {
         headers_raw: &[u8],
         body: &[u8],
     ) -> Result<(), RingPairError> {
+        if headers_raw.len() > u16::MAX as usize {
+            return Err(RingPairError::InvalidResponse("headers exceed 65535 bytes"));
+        }
         let total_size = RESPONSE_HEADER_SIZE + headers_raw.len() + body.len();
         let ring = self
             .select_ring(total_size)
@@ -251,9 +260,14 @@ impl TieredRingSet {
         .map_err(RingPairError::Channel)
     }
 
-    /// Try to receive a response from any tier (checks small → xlarge) using zero-copy slot views.
+    /// Try to receive a response from any tier using round-robin rotation and zero-copy slot views.
     pub fn try_recv_response(&self) -> Result<Option<ResponseData>, RingPairError> {
-        for ring in [&self.small, &self.medium, &self.large, &self.xlarge] {
+        let tiers = [&self.small, &self.medium, &self.large, &self.xlarge];
+        let start = self
+            .next_tier
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        for offset in 0..tiers.len() {
+            let ring = tiers[(start.wrapping_add(offset)) % tiers.len()];
             match ring.try_recv_view() {
                 Ok(view) => {
                     return ResponseData::deserialize(view.as_slice()).map(Some);
@@ -267,13 +281,13 @@ impl TieredRingSet {
 
     /// Select the ring for the given response size.
     pub fn select_ring(&self, response_size: usize) -> Option<&Arc<SpscRing>> {
-        if response_size <= self.config.small.slot_size {
+        if response_size <= self.small.payload_capacity() {
             Some(&self.small)
-        } else if response_size <= self.config.medium.slot_size {
+        } else if response_size <= self.medium.payload_capacity() {
             Some(&self.medium)
-        } else if response_size <= self.config.large.slot_size {
+        } else if response_size <= self.large.payload_capacity() {
             Some(&self.large)
-        } else if response_size <= self.config.xlarge.slot_size {
+        } else if response_size <= self.xlarge.payload_capacity() {
             Some(&self.xlarge)
         } else {
             None
@@ -709,6 +723,66 @@ mod tests {
         let huge_body = vec![0u8; 3 * 1024 * 1024]; // 3MB > 2MB xlarge
         let result = set.send_response(1, 200, b"", &huge_body);
         assert!(matches!(result, Err(RingPairError::ResponseTooLarge(_))));
+    }
+
+    #[test]
+    fn tiered_ring_set_selects_next_tier_near_boundary() {
+        let config = TieredRingConfig::default();
+        let set = TieredRingSet::create(&config).expect("create");
+
+        // Small tier capacity is 4096 - SlotHeader::SIZE (8) = 4088 bytes
+        // Frame size is RESPONSE_HEADER_SIZE (20) + headers_len + body_len
+        // If total frame size is small.payload_capacity() + 1, it must select medium tier and succeed
+        let small_cap = set.small.payload_capacity();
+        let body_len = (small_cap + 1) - RESPONSE_HEADER_SIZE;
+        let body = vec![7u8; body_len];
+        set.send_response(123, 200, b"", &body)
+            .expect("should route to medium tier and succeed");
+
+        let resp = set
+            .try_recv_response()
+            .expect("recv")
+            .expect("should have response");
+        assert_eq!(resp.correlation_id, 123);
+        assert_eq!(resp.body.len(), body_len);
+    }
+
+    #[test]
+    fn write_response_slot_rejects_oversized_headers() {
+        let config = TieredRingConfig::default();
+        let set = TieredRingSet::create(&config).expect("create");
+
+        // Headers larger than 65535 bytes must be rejected with InvalidResponse
+        let huge_headers = vec![0u8; 66_000];
+        let err = set
+            .send_response(1, 200, &huge_headers, b"")
+            .expect_err("should reject oversized headers");
+        assert!(matches!(err, RingPairError::InvalidResponse(_)));
+    }
+
+    #[test]
+    fn tiered_ring_set_fair_drain_rotates_across_tiers() {
+        let config = TieredRingConfig::default();
+        let set = TieredRingSet::create(&config).expect("create");
+
+        // Enqueue 2 small responses and 1 medium response
+        set.send_response(1, 200, b"", b"small-1")
+            .expect("send small-1");
+        set.send_response(2, 200, b"", b"small-2")
+            .expect("send small-2");
+        let medium_body = vec![b'm'; set.small.payload_capacity() + 64];
+        set.send_response(3, 200, b"", &medium_body)
+            .expect("send medium-3");
+
+        let first = set.try_recv_response().unwrap().unwrap();
+        let second = set.try_recv_response().unwrap().unwrap();
+        let third = set.try_recv_response().unwrap().unwrap();
+
+        // Because try_recv_response rotates the starting tier index on every call,
+        // the medium response is drained on the second call instead of starving behind small-2.
+        assert_eq!(first.correlation_id, 1);
+        assert_eq!(second.correlation_id, 3);
+        assert_eq!(third.correlation_id, 2);
     }
 
     mod prop_tests {

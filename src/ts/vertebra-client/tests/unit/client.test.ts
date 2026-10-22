@@ -2,11 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpClient } from "../../src/client/client";
 import { TimeoutError } from "../../src/client/errors";
 import { computeBackoffDelay } from "../../src/client/retry";
-import { RealtimeChannel } from "../../src/client/ws";
 import { HotReloadClient } from "../../src/hmr/index";
 import { initHtmx } from "../../src/htmx/index";
 import * as rootExports from "../../src/index";
 import { QueryCache } from "../../src/react/cache";
+import { WebSocketClient } from "../../src/websocket";
 
 describe("HttpClient", () => {
   let client: HttpClient;
@@ -18,7 +18,7 @@ describe("HttpClient", () => {
 
   it("exports canonical domain names from root", () => {
     expect(rootExports.HttpClient).toBe(HttpClient);
-    expect(rootExports.RealtimeChannel).toBe(RealtimeChannel);
+    expect(rootExports.WebSocketClient).toBe(WebSocketClient);
     expect(rootExports.HotReloadClient).toBe(HotReloadClient);
   });
 
@@ -34,6 +34,56 @@ describe("HttpClient", () => {
     await client.call("GET", "/users/{id}", { id: 123 });
 
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("/users/123"), expect.any(Object));
+  });
+
+  it("interpolates and URL-encodes path parameters for POST while omitting them from body", async () => {
+    const mockFetch = vi.mocked(fetch);
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await client.call("POST", "/users/{id}/profile", { id: "user 42/special", role: "admin" });
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/users/user%2042%2Fspecial/profile"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ role: "admin" }),
+      }),
+    );
+  });
+
+  it("returns undefined on 204 No Content or empty bodies without throwing SyntaxError", async () => {
+    const mockFetch = vi.mocked(fetch);
+    mockFetch.mockResolvedValueOnce(
+      new Response(null, {
+        status: 204,
+        headers: { "Content-Length": "0" },
+      }),
+    );
+
+    const res = await client.callWithResponse("DELETE", "/items/1");
+    expect(res.status).toBe(204);
+    expect(res.data).toBeUndefined();
+  });
+
+  it("preserves string correlation IDs in X-Request-ID", async () => {
+    const mockFetch = vi.mocked(fetch);
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Request-ID": "req-abc-123",
+        },
+      }),
+    );
+
+    const res = await client.callWithResponse("GET", "/ping");
+    expect(res.requestId).toBe("req-abc-123");
   });
 
   it("appends remaining params as query string for GET", async () => {
@@ -161,6 +211,16 @@ describe("QueryCache", () => {
 
     expect(data).toEqual({ ok: true });
     expect(calls).toBe(2);
+  });
+
+  it("canonicalizes object key order in stableKey", () => {
+    const k1 = QueryCache.stableKey("GET", "/items", { a: 1, b: 2 });
+    const k2 = QueryCache.stableKey("GET", "/items", { b: 2, a: 1 });
+    expect(k1).toBe(k2);
+
+    const kNested1 = QueryCache.stableKey("POST", "/items", { z: { b: 1, a: 2 }, y: [1, 2] });
+    const kNested2 = QueryCache.stableKey("POST", "/items", { y: [1, 2], z: { a: 2, b: 1 } });
+    expect(kNested1).toBe(kNested2);
   });
 });
 

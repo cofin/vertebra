@@ -16,12 +16,12 @@ use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info};
 
-use crate::collector::PendingRequest;
+use crate::batcher::PendingRequest;
 use crate::config::ServerConfig;
 use crate::dispatcher::Dispatcher;
 use crate::hmr::HmrState;
 use crate::response::handle;
-use crate::router::Router;
+use crate::routing::Router;
 
 #[cfg(feature = "tls")]
 use crate::tls::TlsAcceptor;

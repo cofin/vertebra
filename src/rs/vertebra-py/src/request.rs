@@ -1,37 +1,28 @@
-//! Zero-object request proxy for the Vertebra batch runner.
-//!
-//! Each `Request` holds an `Arc<BatchSnapshot>` and an index into it.
-//! Fields are materialized as Python objects on demand from the snapshot's
-//! contiguous data slab — unused fields are never allocated.
+//! Zero-object request proxy and batch container for the Vertebra batch runner.
 
 use std::sync::{Arc, OnceLock};
 
+use bytes::Bytes;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyString};
 
-use vertebra_core::transport::{BatchSnapshot, TransportNode};
+use vertebra_core::transport::{BatchSnapshot, encode_headers_compact};
 
-use crate::asgi_scope::AsgiScope;
+use crate::asgi::AsgiScope;
 use crate::headers::Headers;
-use crate::rsgi_protocol::RsgiHttpProtocol;
-use crate::rsgi_scope::RsgiScope;
-use crate::wsgi_environ::WsgiEnviron;
+use crate::rsgi::http::RsgiHttpProtocol;
+use crate::rsgi::scope::RsgiScope;
+use crate::synthetic::SyntheticRequest;
+use crate::wsgi::environ::WsgiEnviron;
 
 /// Zero-object request proxy backed by a shared [`BatchSnapshot`].
-///
-/// The snapshot's data slab is a single contiguous allocation shared across
-/// all requests in the batch. Each getter reads bytes from the slab and
-/// creates a Python object only when accessed.
-///
-/// Headers are cached on first access via `OnceLock` to avoid repeated
-/// `Bytes::copy_from_slice` calls — WSGI environ may hit `.headers.get()`
-/// multiple times per request (CONTENT_TYPE, CONTENT_LENGTH, HTTP_* keys).
 #[pyclass(name = "Request", frozen, freelist = 128)]
 pub struct Request {
-    batch: Arc<BatchSnapshot>,
-    index: usize,
+    pub(crate) batch: Arc<BatchSnapshot>,
+    pub(crate) index: usize,
     cached_headers: OnceLock<Headers>,
+    cached_body: OnceLock<Bytes>,
 }
 
 impl Request {
@@ -41,16 +32,22 @@ impl Request {
             batch,
             index,
             cached_headers: OnceLock::new(),
+            cached_body: OnceLock::new(),
         }
     }
 
-    fn get_headers(&self) -> Headers {
+    pub fn get_headers(&self) -> Headers {
         self.cached_headers
             .get_or_init(|| {
                 let raw = self.batch.headers_raw(self.index);
-                Headers::new(bytes::Bytes::copy_from_slice(raw))
+                Headers::new(Bytes::copy_from_slice(raw))
             })
             .clone()
+    }
+
+    pub fn get_body_bytes(&self) -> &Bytes {
+        self.cached_body
+            .get_or_init(|| Bytes::copy_from_slice(self.batch.body(self.index)))
     }
 }
 
@@ -58,7 +55,7 @@ impl Request {
 impl Request {
     /// Construct a single-node `Request` from raw method, path, and body bytes.
     #[staticmethod]
-    #[pyo3(signature = (method, path, body=None, request_id=1, handler_id=1))]
+    #[pyo3(signature = (method, path, body=None, request_id=1, handler_id=1, headers=None))]
     pub fn from_parts(
         py: Python<'_>,
         method: &str,
@@ -66,44 +63,31 @@ impl Request {
         body: Option<&Bound<'_, PyAny>>,
         request_id: u64,
         handler_id: u64,
+        headers: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let body_bytes = match body {
             Some(b) => crate::response::extract_buffer_bytes(py, b)?,
-            None => bytes::Bytes::new(),
+            None => Bytes::new(),
         };
-        let method_tag = match method {
-            "GET" => 0,
-            "POST" => 1,
-            "PUT" => 2,
-            "DELETE" => 3,
-            "PATCH" => 4,
-            "HEAD" => 5,
-            "OPTIONS" => 6,
-            "TRACE" => 7,
-            "CONNECT" => 8,
-            _ => 255,
-        };
-        let path_bytes = path.as_bytes();
-        let mut slab = Vec::with_capacity(path_bytes.len() + body_bytes.len());
-        slab.extend_from_slice(path_bytes);
-        slab.extend_from_slice(&body_bytes);
 
-        let node = TransportNode {
-            method_tag,
-            http_version_tag: 1,
-            _pad: [0; 2],
-            handler_id,
-            correlation_id: request_id,
-            path_offset: 0,
-            path_len: path_bytes.len() as u32,
-            query_offset: 0,
-            query_len: 0,
-            headers_offset: 0,
-            headers_len: 0,
-            body_offset: path_bytes.len() as u32,
-            body_len: body_bytes.len() as u32,
+        let raw_pairs = crate::response::extract_headers_list(headers)?;
+        let raw_headers = if raw_pairs.is_empty() {
+            Vec::new()
+        } else {
+            encode_headers_compact(&raw_pairs)
         };
-        let snapshot = Arc::new(BatchSnapshot::new(slab, vec![node]));
+
+        let snapshot = SyntheticRequest::build(
+            method,
+            path,
+            None,
+            &raw_headers,
+            &body_bytes,
+            request_id,
+            handler_id,
+            "1.1",
+        );
+
         Ok(Self::new(snapshot, 0))
     }
 
@@ -138,7 +122,7 @@ impl Request {
 
     #[getter]
     fn body<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
-        let body = self.batch.body(self.index);
+        let body = self.get_body_bytes();
         if body.is_empty() {
             None
         } else {
@@ -147,10 +131,6 @@ impl Request {
     }
 
     /// Return a zero-copy read-only Python `memoryview` over the request body bytes in the batch slab.
-    ///
-    /// The returned `memoryview` borrows directly from the active `BatchSnapshot` slab and is
-    /// valid for the duration of the request handler turn (while the `BatchSnapshot` remains alive).
-    /// Call `bytes(request.body_view)` if the payload must be retained after the handler returns.
     #[getter]
     pub fn body_view(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let slice = self.batch.body(self.index);
@@ -200,8 +180,6 @@ impl Request {
     }
 
     /// Return a lazy ASGI scope backed by this request's snapshot slot.
-    ///
-    /// Middleware that needs a real `dict` can call `scope.copy()`.
     #[pyo3(signature = (root_path=None))]
     fn asgi_scope(&self, root_path: Option<String>) -> AsgiScope {
         AsgiScope::new(
@@ -212,8 +190,6 @@ impl Request {
     }
 
     /// Return a lazy WSGI environ backed by this request's snapshot slot.
-    ///
-    /// Middleware that needs a real `dict` can call `environ.copy()`.
     #[pyo3(signature = (server_name=None, server_port=None, url_scheme=None))]
     fn wsgi_environ(
         &self,
@@ -245,7 +221,7 @@ impl Request {
     /// Return a native RSGI v1.6 HTTP protocol handler for this request.
     fn rsgi_protocol(&self) -> RsgiHttpProtocol {
         RsgiHttpProtocol::new(
-            bytes::Bytes::copy_from_slice(self.batch.body(self.index)),
+            self.get_body_bytes().clone(),
             self.batch.node(self.index).correlation_id,
         )
     }
@@ -270,5 +246,59 @@ impl Request {
             n.handler_id,
             n.correlation_id,
         )
+    }
+}
+
+/// Vectorized container for a sealed request batch.
+#[pyclass(name = "RequestBatch")]
+pub struct RequestBatch {
+    pub(crate) snapshot: Arc<BatchSnapshot>,
+}
+
+#[pymethods]
+impl RequestBatch {
+    pub fn __len__(&self) -> usize {
+        self.snapshot.len()
+    }
+
+    pub fn __getitem__(&self, index: usize) -> PyResult<Request> {
+        if index >= self.snapshot.len() {
+            return Err(pyo3::exceptions::PyIndexError::new_err(
+                "batch index out of range",
+            ));
+        }
+        Ok(Request::new(Arc::clone(&self.snapshot), index))
+    }
+
+    pub fn __iter__(slf: PyRef<'_, Self>) -> PyResult<Py<RequestBatchIterator>> {
+        let iter = RequestBatchIterator {
+            snapshot: Arc::clone(&slf.snapshot),
+            index: 0,
+        };
+        Py::new(slf.py(), iter)
+    }
+}
+
+/// Iterator over requests in a `RequestBatch`.
+#[pyclass(name = "RequestBatchIterator")]
+pub struct RequestBatchIterator {
+    snapshot: Arc<BatchSnapshot>,
+    index: usize,
+}
+
+#[pymethods]
+impl RequestBatchIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self) -> Option<Request> {
+        if self.index < self.snapshot.len() {
+            let req = Request::new(Arc::clone(&self.snapshot), self.index);
+            self.index += 1;
+            Some(req)
+        } else {
+            None
+        }
     }
 }

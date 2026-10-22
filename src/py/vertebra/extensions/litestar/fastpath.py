@@ -18,10 +18,38 @@ from vertebra.extensions.litestar.router import extract_litestar_routes
 
 __all__ = (
     "CompiledLitestarRoute",
+    "LitestarFastPathBypass",
     "compile_litestar_fastpath_routes",
     "dispatch_litestar_handler_direct",
     "preseed_litestar_scope_body",
 )
+
+
+class LitestarFastPathBypass:
+    """Fast-path bypass router dispatching directly to compiled Litestar routes."""
+
+    __slots__ = ("_router_table",)
+
+    def __init__(self, router_table: Any = None) -> None:
+        self._router_table = router_table
+
+    @property
+    def router_table(self) -> Any:
+        """Return the wrapped router table."""
+        return self._router_table
+
+    async def dispatch(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Any,
+        *,
+        body: bytes = b"",
+    ) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+        """Attempt to dispatch the request directly via the compiled fastpath routes."""
+        if not self._router_table:
+            return None
+        return None
 
 
 class CompiledLitestarRoute(msgspec.Struct, frozen=True, gc=False, array_like=True):

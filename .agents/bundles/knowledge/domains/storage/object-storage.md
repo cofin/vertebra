@@ -15,7 +15,6 @@ sources:
   - resource: src/py/vertebra/storage/_store.py
   - resource: src/py/vertebra/storage/registry.py
   - resource: src/py/vertebra/storage/pipeline.py
-  - resource: src/py/vertebra/storage/arrow.py
   - resource: src/py/tests/integration/storage/conftest.py
 ---
 
@@ -59,10 +58,11 @@ Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` with 
 
 - `ObjectStore(url, *, options, signing)` builds a `NativeObjectStore` for supported schemes. Constructors: `from_config`, `from_local`, `from_s3`, `from_gcs`, `from_azure`, `from_oci`, `from_r2`, `from_http`, `from_memory`.
 - Methods accept any `Buffer` and return `PutResult` / `ObjectMeta` structs. `get_view` / `get_view_async` return a `memoryview` over `StorageBuffer` without copying.
-- `presign_get`, `presign_put`, `verify_presigned_url` dispatch on `SigningConfig.provider` (`"hmac"`, `"s3"`, `"gcs"`). Verification supports HMAC and S3 only. GCS signing without the extension calls `signBlob` with `urllib`, and bypasses proxies for loopback IAM endpoints.
-- `SigningConfig.sign_oci_headers` (static) requires the native extension and raises `RuntimeError` without it. Its `timestamp` parameter defaults to the fixed value `1_700_000_000`, so callers must pass the current time for real requests.
-- `SigningConfig.sign_azure_sas` (static) uses the native function when available and has a pure-Python HMAC fallback.
+- `presign_get`, `presign_put`, `verify_presigned_url` dispatch on [`PresignedUrlSigner`](../../../../../src/py/vertebra/storage/_store.py) (`provider`: `"hmac"`, `"s3"`, `"gcs"`). Verification supports HMAC and S3 only. GCS signing without the extension calls `signBlob` with `urllib`, and bypasses proxies for loopback IAM endpoints.
+- `PresignedUrlSigner.sign_oci_headers` (static) requires the native extension and raises `RuntimeError` without it.
+- `PresignedUrlSigner.sign_azure_sas` (static) uses the native function when available and has a pure-Python HMAC fallback.
 - `R2Config.chunk_uniform_parts` (static) uses `py_chunk_r2_uniform_parts` when available. The Python fallback enforces a 5 MiB minimum part size. `R2Config.resolved_endpoint` builds `https://{account_id}[.{jurisdiction}].r2.cloudflarestorage.com`.
+- `PrefixedObjectStore` wraps an `ObjectStore` with a normalized key prefix (`apply_prefix`, `strip_prefix`), shared by `SQLSpecStore` and `ObjectStoreBackend`.
 - `SyncStore` and `AsyncStore` are thin explicit-mode facades over one `ObjectStore`.
 
 Key handling: `_normalize_key` strips leading `/` and rejects `..` segments. `_resolve_local` rejects paths that escape a `file://` root.
@@ -72,11 +72,11 @@ Key handling: `_normalize_key` strips leading `/` and rejects `..` segments. `_r
 | Symbol | Source | Responsibility |
 |---|---|---|
 | [`StorageRegistry`](../../../../../src/py/vertebra/storage/registry.py) | `registry.py` | `RLock`-guarded alias and URI cache (`register_alias`, `register_store`, `resolve_store`, `get`, `aliases`, `clear`). A target with a `to_store()` method is materialized on registration. Calls that pass per-call `options`/`signing` to an alias are not cached. |
-| `get_default_storage_registry` | `registry.py` | Returns the process-wide `_DEFAULT_REGISTRY`. |
+| `StorageRegistry.default()` | `registry.py` | Returns the process-wide `_DEFAULT_REGISTRY`. |
 | [`UploadTracker`](../../../../../src/py/vertebra/storage/pipeline.py) / `StagedUpload` | `pipeline.py` | Stages uploads and deferred deletes around a database transaction: `before_flush` writes staged objects, `after_commit` runs deferred deletes, `after_rollback` deletes the objects written in that transaction. Async variants mirror each hook. `attach_sqlalchemy_session` registers the three SQLAlchemy session events. `async with tracker:` rolls back on exception. Delete failures are suppressed. |
-| [`ReadableFile`](../../../../../src/py/vertebra/storage/arrow.py) | `arrow.py` | Read-only seekable `io.RawIOBase` backed by `get_range`, with `read_at` / `read_at_async` that leave the cursor alone. It lets PyArrow or Polars read Parquet footers and row groups without downloading the whole object. |
+| [`ReadableFile`](../../../../../src/py/vertebra/storage/_store.py) | `_store.py` | Read-only seekable `io.RawIOBase` backed by `get_range`, with `read_at` / `read_at_async` that leave the cursor alone. It lets PyArrow or Polars read Parquet footers and row groups without downloading the whole object. |
 
-`UploadTracker` is used by the alchemy storage extension ([sqlspec-alchemy-and-dialects](../extensions/sqlspec-alchemy-and-dialects.md)). `StorageRegistry`, `get_default_storage_registry`, and `ReadableFile` have no callers inside `src/py/vertebra` outside the storage package.
+`UploadTracker` is used by the alchemy storage extension ([sqlspec-alchemy-and-dialects](../extensions/sqlspec-alchemy-and-dialects.md)).
 
 ## 5. Emulator Fixtures
 

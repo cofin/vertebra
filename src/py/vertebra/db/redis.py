@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Literal
+from typing import Any, Literal
 
 import msgspec
+
+from vertebra._typing import UnsupportedBackendError
 
 __all__ = (
     "AsyncRedisDriver",
@@ -40,12 +42,12 @@ class SyncRedisDriver:
 
     __slots__ = ("_config", "_kv")
 
-    def __init__(self, config: RedisConfig | None = None) -> None:
-        self._config = config or RedisConfig()
+    def __init__(self, config: Any = None) -> None:
+        self._config: Any = config or RedisConfig()
         self._kv: dict[str, bytes] = {}
 
     @property
-    def config(self) -> RedisConfig:
+    def config(self) -> Any:
         """Return the active RedisConfig."""
         return self._config
 
@@ -68,43 +70,50 @@ class SyncRedisDriver:
     @staticmethod
     def encode_hello3_handshake(
         *,
-        auth_username: str | None = None,
-        auth_password: str | None = None,
         username: str | None = None,
         password: str | None = None,
         client_name: str | None = "vertebra",
     ) -> bytes:
         """Encode a RESP3 HELLO 3 handshake command with optional AUTH and SETNAME."""
-        effective_user = auth_username if auth_username is not None else username
-        effective_password = auth_password if auth_password is not None else password
         parts: list[bytes | str] = ["HELLO", "3"]
-        if effective_password is not None:
-            parts.extend(["AUTH", effective_user or "default", effective_password])
+        if password is not None:
+            parts.extend(["AUTH", username or "default", password])
         if client_name:
             parts.extend(["SETNAME", client_name])
         return SyncRedisDriver.encode_command(*parts)
 
     def get(self, key: str) -> bytes | None:
         """Fetch a key value from the store."""
+        self._require_memory_backend()
         return self._kv.get(key)
 
     def set(self, key: str, value: bytes | str, *, ex: int | None = None) -> None:
         """Set a key value in the store."""
         _ = ex
+        self._require_memory_backend()
         self._kv[key] = value.encode("utf-8") if isinstance(value, str) else bytes(value)
 
     def delete(self, key: str) -> bool:
         """Delete a key from the store."""
+        self._require_memory_backend()
         return self._kv.pop(key, None) is not None
 
     def publish(self, channel: str, payload: bytes | str) -> int:
         """Publish a message to a Redis pub/sub channel."""
         _ = (channel, payload)
+        self._require_memory_backend()
         return 1
 
     def encode_pipeline(self, commands: Sequence[Sequence[bytes | str]]) -> bytes:
         """Encode a batch of pipelined RESP3 commands into a single wire buffer."""
         return b"".join(self.encode_command(*cmd) for cmd in commands)
+
+    def _require_memory_backend(self) -> None:
+        """Enforce that in-memory KV operations are only permitted on 'memory://' URLs."""
+        url: str = getattr(self._config, "url", "")
+        if not url.startswith("memory://"):
+            msg = f"RESP3 driver I/O for {url!r} requires a connected transport or 'memory://' URL"
+            raise UnsupportedBackendError(msg)
 
 
 class AsyncRedisDriver:
@@ -112,11 +121,11 @@ class AsyncRedisDriver:
 
     __slots__ = ("_sync",)
 
-    def __init__(self, config: RedisConfig | None = None) -> None:
-        self._sync = SyncRedisDriver(config)
+    def __init__(self, config: Any = None) -> None:
+        self._sync: SyncRedisDriver = SyncRedisDriver(config)
 
     @property
-    def config(self) -> RedisConfig:
+    def config(self) -> Any:
         """Return the active RedisConfig."""
         return self._sync.config
 

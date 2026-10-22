@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 import msgspec
 
+from vertebra._typing import UnsupportedBackendError
 from vertebra.db.dialer.cloudsql import CloudSqlConfig
 
 __all__ = (
@@ -45,10 +47,16 @@ class MysqlConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class SyncMysqlDriver:
     """Synchronous MySQL driver facade returning plain tuples for SQLAlchemy 2.1 compatibility."""
 
-    __slots__ = ("_config",)
+    __slots__ = ("_config", "_executor")
 
-    def __init__(self, config: MysqlConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: MysqlConfig | None = None,
+        *,
+        executor: Callable[[str, Sequence[Any]], list[tuple[Any, ...]]] | None = None,
+    ) -> None:
         self._config = config or MysqlConfig()
+        self._executor = executor
 
     @property
     def config(self) -> MysqlConfig:
@@ -57,18 +65,27 @@ class SyncMysqlDriver:
 
     def execute_tuples(self, sql: str, parameters: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
         """Execute a SQL statement and return plain Python tuples."""
-        _ = (sql, parameters)
-        return []
+        if self._executor is None:
+            msg = "SyncMysqlDriver.execute_tuples requires a configured MySQL connection"
+            raise UnsupportedBackendError(msg)
+        return [tuple(row) for row in self._executor(sql, parameters)]
 
 
 class AsyncMysqlDriver:
     """Asynchronous MySQL driver facade."""
 
-    __slots__ = ("_config", "_sync")
+    __slots__ = ("_async_executor", "_config", "_sync")
 
-    def __init__(self, config: MysqlConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: MysqlConfig | None = None,
+        *,
+        executor: Callable[[str, Sequence[Any]], list[tuple[Any, ...]]] | None = None,
+        async_executor: Callable[[str, Sequence[Any]], Awaitable[list[tuple[Any, ...]]]] | None = None,
+    ) -> None:
         self._config = config or MysqlConfig()
-        self._sync = SyncMysqlDriver(self._config)
+        self._sync = SyncMysqlDriver(self._config, executor=executor)
+        self._async_executor = async_executor
 
     @property
     def config(self) -> MysqlConfig:
@@ -77,4 +94,7 @@ class AsyncMysqlDriver:
 
     async def execute_tuples(self, sql: str, parameters: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
         """Asynchronously execute a SQL statement and return plain Python tuples."""
-        return self._sync.execute_tuples(sql, parameters)
+        if self._async_executor is not None:
+            rows = await self._async_executor(sql, parameters)
+            return [tuple(row) for row in rows]
+        return await asyncio.to_thread(self._sync.execute_tuples, sql, parameters)

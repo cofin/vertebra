@@ -2,10 +2,8 @@
 
 from typing import TYPE_CHECKING, Any
 
-import msgspec
-
 from vertebra.build.codegen._metadata import RouteMetadata
-from vertebra.utils.serializers._json import encode_json
+from vertebra.utils.serializers import format_json
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -30,4 +28,4 @@ class ManifestGenerator:
                 "route": route.path,
             }
         payload = {"routes": route_entries, "version": 1}
-        return msgspec.json.format(encode_json(payload, as_bytes=True), indent=2).decode("utf-8")
+        return format_json(payload, indent=2)

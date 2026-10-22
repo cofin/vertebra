@@ -1,75 +1,70 @@
 //! Dispatcher: routes filled batches to workers.
 //!
-//! Three dispatch modes, each in its own submodule:
+//! Three dispatch backends:
 //! - **Direct** (`direct.rs`): batch sent via `tokio::sync::mpsc`, responses
-//!   via oneshot on each `PendingRequest`. No bridge, no arena, no
-//!   correlation IDs.
+//!   via oneshot on each `PendingRequest`.
 //! - **Bridge** (`bridge.rs`): requests written into the arena-backed
-//!   `BatchBridge`, responses polled from the bridge channel. Uses DashMap
-//!   for correlation.
-//! - **SharedMemory** (`shm.rs`): requests serialized into per-worker MPMC
+//!   `BatchBridge`, responses polled from the bridge channel. Uses `BridgeCorrelation`.
+//! - **Shm** (`shm.rs`): requests serialized into per-worker MPMC
 //!   rings, responses read from tiered response rings. Uses O(1)
 //!   `InFlightRequests`.
-//!
-//! Shared request/worker types live in `types.rs`.
 
 mod bridge;
+pub mod correlation;
 mod direct;
 mod shm;
+pub mod shm_reader;
 #[cfg(test)]
 mod tests;
 pub mod types;
+
+pub use self::bridge_types::BridgeCorrelation;
+pub use self::correlation::{CorrelationId, InFlightRequests};
+pub use self::shm::ShmDispatcher;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error};
+use tracing::debug;
 
 use crate::backpressure::{BackpressureConfig, BackpressureController};
-use crate::collector::{Batch, PendingResponse};
+use crate::batcher::Batch;
+use crate::body::PendingResponse;
 
-pub use self::shm::ShmDispatcher;
-pub use self::types::{DirectBatch, DirectRequest};
+mod bridge_types {
+    use super::*;
 
-/// How batches are dispatched to workers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DispatchMode {
-    /// Direct: batch sent via channel, responses via oneshot (fast path).
-    Direct,
-    /// Bridge: batch written to arena/slab, responses via bridge channel (data-intensive).
-    Bridge,
-    /// SharedMemory: batch serialized into per-worker MPMC rings (multi-process).
-    SharedMemory,
+    /// In-flight correlation tracking for bridge mode.
+    pub struct BridgeCorrelation {
+        pub pending: DashMap<u64, oneshot::Sender<PendingResponse>>,
+        pub next_id: AtomicU64,
+    }
+
+    impl Default for BridgeCorrelation {
+        fn default() -> Self {
+            Self {
+                pending: DashMap::new(),
+                next_id: AtomicU64::new(1),
+            }
+        }
+    }
 }
 
-/// Dispatcher state shared between the write task and the response router.
-pub(super) struct Inner {
-    /// In-flight correlation ID -> reply channel (bridge mode only).
-    pub(super) pending: DashMap<u64, oneshot::Sender<PendingResponse>>,
-    /// Next monotonic correlation ID (bridge mode only).
-    pub(super) next_id: AtomicU64,
-    /// Direct dispatch channel (Some if direct mode).
-    pub(super) direct_tx: Option<mpsc::Sender<DirectBatch>>,
-    /// SHM dispatcher (Some if SharedMemory mode).
-    pub(super) shm_dispatcher: Option<Arc<ShmDispatcher>>,
-    /// Dispatch mode.
-    pub(super) mode: DispatchMode,
+/// Active dispatch backend variant.
+pub enum DispatchBackend {
+    Direct(mpsc::Sender<Batch>),
+    Bridge(Arc<BridgeCorrelation>),
+    Shm(Arc<ShmDispatcher>),
 }
 
 /// The dispatcher.
 ///
 /// Manages in-flight request tracking and dispatches batches to workers
 /// via the direct channel, arena-backed BatchBridge, or MPMC ring pairs.
-///
-/// The optional `backpressure` controller is exposed via
-/// [`Dispatcher::backpressure`] for callers that wrap dispatch with
-/// explicit admission control. The dispatcher itself never shortcuts the
-/// dispatch path based on the controller — the HTTP ingress layer owns
-/// that decision so it can return a proper HTTP response on rejection.
 pub struct Dispatcher {
-    inner: Arc<Inner>,
+    backend: DispatchBackend,
     backpressure: Option<Arc<BackpressureController>>,
 }
 
@@ -83,28 +78,16 @@ impl Dispatcher {
     /// Create a new dispatcher in bridge mode (default).
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Inner {
-                pending: DashMap::new(),
-                next_id: AtomicU64::new(1),
-                direct_tx: None,
-                shm_dispatcher: None,
-                mode: DispatchMode::Bridge,
-            }),
+            backend: DispatchBackend::Bridge(Arc::new(BridgeCorrelation::default())),
             backpressure: None,
         }
     }
 
     /// Create a new dispatcher in direct mode.
-    pub fn new_direct(channel_capacity: usize) -> (Self, mpsc::Receiver<DirectBatch>) {
+    pub fn new_direct(channel_capacity: usize) -> (Self, mpsc::Receiver<Batch>) {
         let (tx, rx) = mpsc::channel(channel_capacity);
         let dispatcher = Self {
-            inner: Arc::new(Inner {
-                pending: DashMap::new(),
-                next_id: AtomicU64::new(1),
-                direct_tx: Some(tx),
-                shm_dispatcher: None,
-                mode: DispatchMode::Direct,
-            }),
+            backend: DispatchBackend::Direct(tx),
             backpressure: None,
         };
         (dispatcher, rx)
@@ -117,120 +100,103 @@ impl Dispatcher {
     ) -> Self {
         let shm = ShmDispatcher::new(ring_pairs, max_inflight);
         Self {
-            inner: Arc::new(Inner {
-                pending: DashMap::new(),
-                next_id: AtomicU64::new(1),
-                direct_tx: None,
-                shm_dispatcher: Some(shm),
-                mode: DispatchMode::SharedMemory,
-            }),
+            backend: DispatchBackend::Shm(shm),
             backpressure: None,
         }
     }
 
-    /// Attach a backpressure controller. The dispatcher itself never
-    /// consults the controller — the HTTP ingress path must call
-    /// [`BackpressureController::try_acquire`] before calling
-    /// [`Dispatcher::dispatch`] and handle the rejection.
+    /// Create a dispatcher from an existing `Arc<ShmDispatcher>`.
+    pub fn from_shm(shm: Arc<ShmDispatcher>) -> Self {
+        Self {
+            backend: DispatchBackend::Shm(shm),
+            backpressure: None,
+        }
+    }
+
+    /// Access the backend variant.
+    pub fn backend(&self) -> &DispatchBackend {
+        &self.backend
+    }
+
+    /// Attach a backpressure controller.
     #[must_use]
     pub fn with_backpressure(mut self, config: BackpressureConfig) -> Self {
         self.backpressure = Some(Arc::new(BackpressureController::new(config)));
         self
     }
 
-    /// Access the backpressure controller, if one has been attached.
+    /// Access the backpressure controller, if attached.
     pub fn backpressure(&self) -> Option<&Arc<BackpressureController>> {
         self.backpressure.as_ref()
     }
 
     /// Get the SHM dispatcher (for response reader access).
     pub fn shm_dispatcher(&self) -> Option<&Arc<ShmDispatcher>> {
-        self.inner.shm_dispatcher.as_ref()
+        match &self.backend {
+            DispatchBackend::Shm(shm) => Some(shm),
+            _ => None,
+        }
     }
 
     /// Dispatch a batch to workers.
-    ///
-    /// Returns the number of requests successfully dispatched.
     pub fn dispatch(&self, batch: Batch) -> usize {
-        match self.inner.mode {
-            DispatchMode::Direct => direct::dispatch_direct(&self.inner, batch),
-            DispatchMode::Bridge => bridge::dispatch_bridge(&self.inner, batch),
-            DispatchMode::SharedMemory => {
-                if let Some(shm) = &self.inner.shm_dispatcher {
-                    shm.dispatch_shm(batch)
-                } else {
-                    error!("SHM dispatcher not configured");
-                    0
-                }
-            }
+        match &self.backend {
+            DispatchBackend::Direct(tx) => direct::dispatch_direct(tx, batch),
+            DispatchBackend::Bridge(bridge) => bridge::dispatch_bridge(bridge, batch),
+            DispatchBackend::Shm(shm) => shm.dispatch_shm(batch),
         }
     }
 
     /// Complete a request with a response (bridge or SHM mode).
     pub fn complete(&self, correlation_id: u64, response: PendingResponse) {
-        match self.inner.mode {
-            DispatchMode::SharedMemory => {
-                if let Some(shm) = &self.inner.shm_dispatcher {
-                    let shard_idx = (correlation_id as usize) & (shm.shard_count() - 1);
-                    let internal_id = correlation_id >> 8;
-                    let mut slab = shm.correlation_shard(shard_idx).lock().unwrap();
-                    if !slab.complete(internal_id, response) {
-                        debug!(
-                            id = correlation_id,
-                            shard = shard_idx,
-                            "no pending SHM request for correlation ID"
-                        );
-                    }
+        match &self.backend {
+            DispatchBackend::Shm(shm) => {
+                let cid = CorrelationId::from_raw(correlation_id);
+                let shard_idx = cid.shard() & (shm.shard_count() - 1);
+                let mut slab = shm.correlation_shard(shard_idx).lock().unwrap();
+                if !slab.complete(cid, response) {
+                    debug!(
+                        id = correlation_id,
+                        shard = shard_idx,
+                        "no pending SHM request for correlation ID"
+                    );
                 }
             }
-            _ => {
-                if let Some((_, tx)) = self.inner.pending.remove(&correlation_id) {
+            DispatchBackend::Bridge(bridge) => {
+                if let Some((_, tx)) = bridge.pending.remove(&correlation_id) {
                     let _ = tx.send(response);
                 } else {
                     debug!(id = correlation_id, "no pending request for correlation ID");
                 }
             }
+            DispatchBackend::Direct(_) => {}
         }
     }
 
-    /// Complete multiple requests with a single pass through the tracking state.
+    /// Complete multiple requests with grouped per-shard locks in SHM mode.
     pub fn complete_many(&self, responses: Vec<(u64, PendingResponse)>) {
-        match self.inner.mode {
-            DispatchMode::SharedMemory => {
-                if let Some(shm) = &self.inner.shm_dispatcher {
-                    let shard_mask = shm.shard_count() - 1;
-                    for (correlation_id, response) in responses {
-                        let shard_idx = (correlation_id as usize) & shard_mask;
-                        let internal_id = correlation_id >> 8;
-                        let mut slab = shm.correlation_shard(shard_idx).lock().unwrap();
-                        if !slab.complete(internal_id, response) {
-                            debug!(
-                                id = correlation_id,
-                                shard = shard_idx,
-                                "no pending SHM request for correlation ID"
-                            );
-                        }
-                    }
-                }
+        match &self.backend {
+            DispatchBackend::Shm(shm) => {
+                shm.complete_many(responses);
             }
-            _ => {
+            DispatchBackend::Bridge(bridge) => {
                 for (correlation_id, response) in responses {
-                    if let Some((_, tx)) = self.inner.pending.remove(&correlation_id) {
+                    if let Some((_, tx)) = bridge.pending.remove(&correlation_id) {
                         let _ = tx.send(response);
                     } else {
                         debug!(id = correlation_id, "no pending request for correlation ID");
                     }
                 }
             }
+            DispatchBackend::Direct(_) => {}
         }
     }
 
     /// Forward a raw SHM `ResponseSlot` frame to the SHM dispatcher.
     pub fn handle_raw_response_slot(&self, raw_slot: &[u8]) -> bool {
-        if let Some(shm) = &self.inner.shm_dispatcher {
-            shm.handle_raw_response_slot(raw_slot)
-        } else {
-            false
+        match &self.backend {
+            DispatchBackend::Shm(shm) => shm.handle_raw_response_slot(raw_slot),
+            _ => false,
         }
     }
 }

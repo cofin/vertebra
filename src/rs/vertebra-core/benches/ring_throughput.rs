@@ -11,7 +11,7 @@ use vertebra_core::shm::ShmRegion;
 
 /// Allocate a SPSC ring backed by heap memory (not SHM) for benchmarking.
 fn make_spsc_heap(slots: usize, slot_size: usize) -> (std::mem::ManuallyDrop<Vec<u8>>, SpscRing) {
-    let layout = RingLayout::new(slots, slot_size, ChannelMode::Spsc);
+    let layout = RingLayout::new(slot_size, slots, ChannelMode::Spsc);
     let alloc = std::alloc::Layout::from_size_align(layout.total_size, CACHELINE_BYTES).unwrap();
     let raw_ptr = unsafe { std::alloc::alloc(alloc) };
     assert!(!raw_ptr.is_null());
@@ -35,7 +35,7 @@ fn bench_spsc_1m_ops(c: &mut Criterion) {
             &slot_size,
             |b, &slot_size| {
                 let (_sentinel, ring) = make_spsc_heap(256, slot_size);
-                let payload = vec![0xABu8; slot_size.min(64)];
+                let payload = vec![0xABu8; slot_size.saturating_sub(8).min(64)];
                 let mut buf = vec![0u8; slot_size];
                 b.iter(|| {
                     ring.send(&payload, 0).unwrap();
@@ -57,7 +57,7 @@ fn bench_spsc_burst(c: &mut Criterion) {
             BenchmarkId::new("fill_drain", burst),
             &burst,
             |b, &burst| {
-                let (_sentinel, ring) = make_spsc_heap(burst, 256);
+                let (_sentinel, ring) = make_spsc_heap(burst * 2, 256);
                 let payload = [0u8; 64];
                 let mut buf = [0u8; 256];
                 b.iter(|| {

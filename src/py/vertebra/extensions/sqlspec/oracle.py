@@ -10,7 +10,31 @@ import uuid
 from collections.abc import Sequence
 from typing import Any, ClassVar, Literal
 
-__all__ = ("OracleHybridSearch",)
+from vertebra.db.oracle import OracleConfig, OraclePoolRegistry, SyncOracleDriver
+
+__all__ = (
+    "OracleConfig",
+    "OracleHybridSearch",
+    "OraclePoolRegistry",
+    "OracleVectorConverter",
+)
+
+
+class OracleVectorConverter:
+    """Helper converting Python sequences into Oracle VECTOR bind parameters."""
+
+    __slots__ = ()
+
+    @staticmethod
+    def to_oracle_vector(
+        vector: Sequence[float | int],
+        *,
+        type_code: str = "f",
+        dtype: str | None = None,
+    ) -> array.array[Any]:
+        """Convert a sequence of floats or ints to an Oracle VECTOR representation."""
+        return SyncOracleDriver.encode_vector(vector, type_code=type_code, dtype=dtype)
+
 
 _ORACLE_TEXT_RESERVED_WORDS: frozenset[str] = frozenset(
     {
@@ -118,27 +142,39 @@ class OracleHybridSearch:
         query_vec: Sequence[float] | None = None,
         text_query: str = "",
         top_k: int = 10,
+        approximate: bool = True,
     ) -> tuple[str, dict[str, Any]]:
-        """Build an Oracle 26ai Reciprocal Rank Fusion (RRF) hybrid vector + full-text SQL query and bind dictionary."""
+        """Build an Oracle 26ai Reciprocal Rank Fusion (RRF) hybrid vector + full-text SQL query and bind dictionary.
+
+        Isolates ``ORDER BY VECTOR_DISTANCE(...) FETCH APPROX FIRST :candidate_limit ROWS ONLY`` inside an
+        inner derived table (`vec_top`) and assigns ``ROWNUM AS vec_rank`` in the outer CTE block so the
+        Oracle 26ai cost-based optimizer preserves ``VECTOR INDEX HNSW SCAN`` rather than falling back to
+        ``TABLE ACCESS FULL`` + ``WINDOW SORT``.
+        """
         projected = ", ".join(f"base.{col}" for col in select_columns)
+        fetch_clause = "FETCH APPROX FIRST" if approximate else "FETCH FIRST"
         sql = (
             "WITH vec_candidates AS ("
+            "SELECT vec_top.doc_id, ROWNUM AS vec_rank FROM ("
             f"SELECT {id_column} AS doc_id, "
-            f"ROW_NUMBER() OVER (ORDER BY VECTOR_DISTANCE({vector_column}, :query_vec, {vector_metric})) AS vec_rank "
+            f"VECTOR_DISTANCE({vector_column}, :query_vec, {vector_metric}) AS vec_distance "
             f"FROM {table} "
             f"ORDER BY VECTOR_DISTANCE({vector_column}, :query_vec, {vector_metric}) "
-            f"FETCH FIRST {int(candidate_limit)} ROWS ONLY"
+            f"{fetch_clause} :candidate_limit ROWS ONLY"
+            ") vec_top"
             "), text_candidates AS ("
+            "SELECT txt_top.doc_id, ROWNUM AS text_rank FROM ("
             f"SELECT {id_column} AS doc_id, "
-            "ROW_NUMBER() OVER (ORDER BY SCORE(1) DESC) AS text_rank "
+            "SCORE(1) AS text_score "
             f"FROM {table} "
             f"WHERE CONTAINS({text_column}, :text_query, 1) > 0 "
             "ORDER BY SCORE(1) DESC "
-            f"FETCH FIRST {int(candidate_limit)} ROWS ONLY"
+            "FETCH FIRST :candidate_limit ROWS ONLY"
+            ") txt_top"
             "), rrf_fused AS ("
             "SELECT COALESCE(v.doc_id, t.doc_id) AS doc_id, "
-            f"COALESCE(1.0 / ({int(rrf_k)} + v.vec_rank), 0.0) + "
-            f"COALESCE(1.0 / ({int(rrf_k)} + t.text_rank), 0.0) AS rrf_score "
+            "COALESCE(1.0 / (:rrf_k + v.vec_rank), 0.0) + "
+            "COALESCE(1.0 / (:rrf_k + t.text_rank), 0.0) AS rrf_score "
             "FROM vec_candidates v "
             "FULL OUTER JOIN text_candidates t ON v.doc_id = t.doc_id"
             ") "

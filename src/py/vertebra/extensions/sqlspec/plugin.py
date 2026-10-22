@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
-import contextlib
 import importlib
 import inspect
+import logging
 from collections.abc import Sequence
-from typing import Any, ClassVar, Protocol, cast, overload, runtime_checkable
+from typing import Any, ClassVar, Literal, Protocol, Self, cast, overload, runtime_checkable
+
+import msgspec
 
 from vertebra.extensions.alchemy.broker import BrokerPlugin, BrokerTransport, ChannelMessage
 from vertebra.extensions.alchemy.plugin import AlchemyPlugin
 from vertebra.extensions.sqlspec.storage import SQLSpecStore
 from vertebra.storage import ObjectStore as BaseObjectStore
+from vertebra.utils.sync_tools import SyncPool
+
+logger = logging.getLogger(__name__)
 
 __all__ = (
     "SQLSPEC_PLUGIN_PRIORITY",
@@ -23,9 +28,11 @@ __all__ = (
     "DatabaseConfigProtocol",
     "ProxyAsyncConfig",
     "ProxySyncConfig",
+    "SQLSpecAsyncConfig",
     "SQLSpecConfig",
     "SQLSpecPlugin",
     "SQLSpecState",
+    "SQLSpecSyncConfig",
     "SyncDatabaseConfig",
     "SyncDriverAdapterBase",
 )
@@ -76,124 +83,132 @@ class DatabaseConfigProtocol[
         ...
 
 
-class SyncDatabaseConfig[
+class _BaseSQLSpecConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Shared base configuration for SQLSpec synchronous and asynchronous database engines."""
+
+    bind_key: str = "default"
+    dsn: str = "sqlite:///:memory:"
+    direct_dsn: str | None = None
+    pooler_mode: Literal["session", "transaction", "statement", "direct", "auto"] | None = None
+    min_size: int = 1
+    max_size: int = 10
+    statement_cache_size: int = 256
+    enable_arrow: bool = False
+    driver_features: dict[str, Any] = msgspec.field(default_factory=dict)
+    session_key: str = "db_session"
+    connection_key: str = "db_connection"
+    supports_connection_pooling: bool = True
+    pool_config: dict[str, Any] = msgspec.field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.pooler_mode in ("transaction", "statement") and self.statement_cache_size == 256:
+            msgspec.structs.force_setattr(self, "statement_cache_size", 0)
+        if self.supports_connection_pooling and not _is_in_memory_dsn(self.dsn):
+            self.pool_config.setdefault("pool_pre_ping", True)
+            self.pool_config.setdefault("pool_recycle", 1800)
+
+    def effective_pool_config(self) -> dict[str, Any]:
+        """Return merged effective connection pool options."""
+        cfg: dict[str, Any] = {
+            "min_size": self.min_size,
+            "max_size": self.max_size,
+            "statement_cache_size": self.statement_cache_size,
+            "enable_arrow": self.enable_arrow,
+            **self.pool_config,
+        }
+        if self.supports_connection_pooling and not _is_in_memory_dsn(self.dsn):
+            cfg.setdefault("pool_pre_ping", True)
+            cfg.setdefault("pool_recycle", 1800)
+        return cfg
+
+    def derive_pool(self, **overrides: Any) -> Self:
+        """Clone configuration with per-pool overrides and deep-copied mutable dictionaries (`sqlspec>=0.68.0`)."""
+        base = msgspec.structs.asdict(self)
+        base["pool_config"] = dict(self.pool_config)
+        base["driver_features"] = dict(self.driver_features)
+        if "pool_config" in overrides and isinstance(overrides["pool_config"], dict):
+            merged_pool = dict(self.pool_config)
+            merged_pool.update(overrides["pool_config"])
+            overrides = {**overrides, "pool_config": merged_pool}
+        if "driver_features" in overrides and isinstance(overrides["driver_features"], dict):
+            merged_features = dict(self.driver_features)
+            merged_features.update(overrides["driver_features"])
+            overrides = {**overrides, "driver_features": merged_features}
+        base.update(overrides)
+        return type(self)(**base)
+
+    def derive_direct_config(self) -> Self:
+        """Return a session-mode configuration targeting ``direct_dsn`` for DDL/migrations/LISTEN (`sqlspec>=0.68.0`)."""
+        if not self.direct_dsn:
+            return self
+        return self.derive_pool(
+            dsn=self.direct_dsn,
+            pooler_mode="session",
+            min_size=min(1, self.max_size),
+            max_size=min(2, self.max_size),
+        )
+
+
+class SQLSpecSyncConfig[
     ConnectionT,
     PoolT,
     DriverT: SyncDriverAdapterBase,
-]:
-    """Base synchronous SQLSpec database configuration."""
+](_BaseSQLSpecConfig, frozen=True, gc=False, kw_only=True):
+    """Synchronous SQLSpec database configuration inheriting from _BaseSQLSpecConfig."""
 
-    is_async: bool = False
-    __slots__ = (
-        "_connection_instance",
-        "_driver_instance",
-        "_pool_instance",
-        "bind_key",
-        "connection_key",
-        "driver_features",
-        "dsn",
-        "pool_config",
-        "session_key",
-        "supports_connection_pooling",
-    )
+    driver_instance: Any = None
+    connection_instance: Any = None
+    pool_instance: Any = None
 
-    def __init__(
-        self,
-        *,
-        dsn: str = "sqlite:///:memory:",
-        bind_key: str = "default",
-        session_key: str = "db_session",
-        connection_key: str = "db_connection",
-        supports_connection_pooling: bool = True,
-        pool_config: dict[str, Any] | None = None,
-        driver_features: dict[str, Any] | None = None,
-        driver_instance: DriverT | None = None,
-        connection_instance: ConnectionT | None = None,
-        pool_instance: PoolT | None = None,
-    ) -> None:
-        self.dsn = dsn
-        self.bind_key = bind_key
-        self.session_key = session_key
-        self.connection_key = connection_key
-        self.supports_connection_pooling = supports_connection_pooling
-        self.pool_config = dict(pool_config or {})
-        self.driver_features = dict(driver_features or {})
-        self._driver_instance = driver_instance
-        self._connection_instance = connection_instance
-        self._pool_instance = pool_instance
-        _inject_sqlspec_pool_defaults(self)
+    @property
+    def is_async(self) -> bool:
+        """Return False for synchronous configuration."""
+        return False
 
     def provide_session(self) -> DriverT:
         """Return the configured synchronous driver session."""
-        return cast("DriverT", self._driver_instance)
+        return cast("DriverT", self.driver_instance)
 
     def provide_connection(self) -> ConnectionT:
         """Return the configured synchronous connection."""
-        return cast("ConnectionT", self._connection_instance)
+        return cast("ConnectionT", self.connection_instance)
 
     def create_pool(self) -> PoolT:
         """Return the configured synchronous connection pool."""
-        return cast("PoolT", self._pool_instance)
+        return cast("PoolT", self.pool_instance)
 
 
-class AsyncDatabaseConfig[
+class SQLSpecAsyncConfig[
     ConnectionT,
     PoolT,
     DriverT: AsyncDriverAdapterBase,
-]:
-    """Base asynchronous SQLSpec database configuration."""
+](_BaseSQLSpecConfig, frozen=True, gc=False, kw_only=True):
+    """Asynchronous SQLSpec database configuration inheriting from _BaseSQLSpecConfig."""
 
-    is_async: bool = True
-    __slots__ = (
-        "_connection_instance",
-        "_driver_instance",
-        "_pool_instance",
-        "bind_key",
-        "connection_key",
-        "driver_features",
-        "dsn",
-        "pool_config",
-        "session_key",
-        "supports_connection_pooling",
-    )
+    driver_instance: Any = None
+    connection_instance: Any = None
+    pool_instance: Any = None
 
-    def __init__(
-        self,
-        *,
-        dsn: str = "sqlite+aiosqlite:///:memory:",
-        bind_key: str = "default",
-        session_key: str = "db_session",
-        connection_key: str = "db_connection",
-        supports_connection_pooling: bool = True,
-        pool_config: dict[str, Any] | None = None,
-        driver_features: dict[str, Any] | None = None,
-        driver_instance: DriverT | None = None,
-        connection_instance: ConnectionT | None = None,
-        pool_instance: PoolT | None = None,
-    ) -> None:
-        self.dsn = dsn
-        self.bind_key = bind_key
-        self.session_key = session_key
-        self.connection_key = connection_key
-        self.supports_connection_pooling = supports_connection_pooling
-        self.pool_config = dict(pool_config or {})
-        self.driver_features = dict(driver_features or {})
-        self._driver_instance = driver_instance
-        self._connection_instance = connection_instance
-        self._pool_instance = pool_instance
-        _inject_sqlspec_pool_defaults(self)
+    @property
+    def is_async(self) -> bool:
+        """Return True for asynchronous configuration."""
+        return True
 
     def provide_session(self) -> DriverT:
         """Return the configured asynchronous driver session."""
-        return cast("DriverT", self._driver_instance)
+        return cast("DriverT", self.driver_instance)
 
     def provide_connection(self) -> ConnectionT:
         """Return the configured asynchronous connection."""
-        return cast("ConnectionT", self._connection_instance)
+        return cast("ConnectionT", self.connection_instance)
 
     def create_pool(self) -> PoolT:
         """Return the configured asynchronous connection pool."""
-        return cast("PoolT", self._pool_instance)
+        return cast("PoolT", self.pool_instance)
+
+
+SyncDatabaseConfig = SQLSpecSyncConfig
+AsyncDatabaseConfig = SQLSpecAsyncConfig
 
 
 class SQLSpecConfig[ConfigT]:
@@ -230,19 +245,28 @@ class SQLSpecConfig[ConfigT]:
         fn = getattr(self.config, "create_pool", None)
         return fn() if callable(fn) else None
 
+    def derive_pool(self, **overrides: Any) -> SQLSpecConfig[ConfigT]:
+        """Delegate per-pool configuration cloning to the wrapped configuration (`sqlspec>=0.68.0`)."""
+        fn = getattr(self.config, "derive_pool", None)
+        if callable(fn):
+            return SQLSpecConfig(cast("ConfigT", fn(**overrides)))
+        return self
+
+    def derive_direct_config(self) -> SQLSpecConfig[ConfigT]:
+        """Delegate direct-session configuration derivation to the wrapped configuration (`sqlspec>=0.68.0`)."""
+        fn = getattr(self.config, "derive_direct_config", None)
+        if callable(fn):
+            return SQLSpecConfig(cast("ConfigT", fn()))
+        return self
+
     def __getattr__(self, name: str) -> Any:
         """Forward attribute lookups to the underlying ConfigT instance."""
         return getattr(self.config, name)
 
-    @classmethod
-    def wrap[T](cls, config: T) -> SQLSpecConfig[T]:
-        """Wrap any SQLSpec configuration in SQLSpecConfig[T] with production pool defaults."""
-        return SQLSpecConfig(config)
-
 
 class ProxySyncConfig[
-    SyncConfigT: SyncDatabaseConfig[Any, Any, Any],
-](SyncDatabaseConfig[Any, Any, Any]):
+    SyncConfigT,
+]:
     """Generic synchronous SQLSpec proxy configuration preserving inner SyncConfigT types."""
 
     __slots__ = ("broker", "config")
@@ -254,34 +278,86 @@ class ProxySyncConfig[
         broker: BrokerTransport | None = None,
     ) -> None:
         _inject_sqlspec_pool_defaults(config)
-        super().__init__(
-            dsn=getattr(config, "dsn", "sqlite:///:memory:"),
-            bind_key=getattr(config, "bind_key", "default"),
-            session_key=getattr(config, "session_key", "db_session"),
-            connection_key=getattr(config, "connection_key", "db_connection"),
-            supports_connection_pooling=getattr(config, "supports_connection_pooling", True),
-            pool_config=getattr(config, "pool_config", None),
-            driver_features=getattr(config, "driver_features", None),
-        )
         self.config: SyncConfigT = config
         self.broker = broker
 
+    @property
+    def is_async(self) -> bool:
+        """Return False for synchronous proxy."""
+        return False
+
+    @property
+    def dsn(self) -> str:
+        """Return configured DSN."""
+        return str(getattr(self.config, "dsn", "sqlite:///:memory:"))
+
+    @property
+    def bind_key(self) -> str:
+        """Return configured bind key."""
+        return str(getattr(self.config, "bind_key", "default"))
+
+    @property
+    def session_key(self) -> str:
+        """Return configured session key."""
+        return str(getattr(self.config, "session_key", "db_session"))
+
+    @property
+    def connection_key(self) -> str:
+        """Return configured connection key."""
+        return str(getattr(self.config, "connection_key", "db_connection"))
+
+    @property
+    def supports_connection_pooling(self) -> bool:
+        """Return True when connection pooling is supported."""
+        return bool(getattr(self.config, "supports_connection_pooling", True))
+
+    @property
+    def pool_config(self) -> dict[str, Any]:
+        """Return pool configuration dictionary."""
+        return getattr(self.config, "pool_config", {})
+
+    @property
+    def driver_features(self) -> dict[str, Any]:
+        """Return driver features dictionary."""
+        return getattr(self.config, "driver_features", {})
+
     def provide_session(self) -> Any:
         """Delegate session provision to the wrapped SyncConfigT."""
-        return self.config.provide_session()
+        fn = getattr(self.config, "provide_session", None)
+        return fn() if callable(fn) else None
 
     def provide_connection(self) -> Any:
         """Delegate connection provision to the wrapped SyncConfigT."""
-        return self.config.provide_connection()
+        fn = getattr(self.config, "provide_connection", None)
+        return fn() if callable(fn) else None
 
     def create_pool(self) -> Any:
         """Delegate pool creation to the wrapped SyncConfigT."""
-        return self.config.create_pool()
+        fn = getattr(self.config, "create_pool", None)
+        return fn() if callable(fn) else None
+
+    def derive_pool(self, **overrides: Any) -> ProxySyncConfig[SyncConfigT]:
+        """Delegate per-pool configuration cloning to the wrapped SyncConfigT (`sqlspec>=0.68.0`)."""
+        fn = getattr(self.config, "derive_pool", None)
+        if callable(fn):
+            return ProxySyncConfig(cast("SyncConfigT", fn(**overrides)), broker=self.broker)
+        return self
+
+    def derive_direct_config(self) -> ProxySyncConfig[SyncConfigT]:
+        """Delegate direct-session configuration derivation to the wrapped SyncConfigT (`sqlspec>=0.68.0`)."""
+        fn = getattr(self.config, "derive_direct_config", None)
+        if callable(fn):
+            return ProxySyncConfig(cast("SyncConfigT", fn()), broker=self.broker)
+        return self
+
+    def __getattr__(self, name: str) -> Any:
+        """Forward attribute lookups to the underlying SyncConfigT instance."""
+        return getattr(self.config, name)
 
 
 class ProxyAsyncConfig[
-    AsyncConfigT: AsyncDatabaseConfig[Any, Any, Any],
-](AsyncDatabaseConfig[Any, Any, Any]):
+    AsyncConfigT,
+]:
     """Generic asynchronous SQLSpec proxy configuration preserving inner AsyncConfigT types."""
 
     __slots__ = ("broker", "config")
@@ -293,29 +369,81 @@ class ProxyAsyncConfig[
         broker: BrokerTransport | None = None,
     ) -> None:
         _inject_sqlspec_pool_defaults(config)
-        super().__init__(
-            dsn=getattr(config, "dsn", "sqlite+aiosqlite:///:memory:"),
-            bind_key=getattr(config, "bind_key", "default"),
-            session_key=getattr(config, "session_key", "db_session"),
-            connection_key=getattr(config, "connection_key", "db_connection"),
-            supports_connection_pooling=getattr(config, "supports_connection_pooling", True),
-            pool_config=getattr(config, "pool_config", None),
-            driver_features=getattr(config, "driver_features", None),
-        )
         self.config: AsyncConfigT = config
         self.broker = broker
 
+    @property
+    def is_async(self) -> bool:
+        """Return True for asynchronous proxy."""
+        return True
+
+    @property
+    def dsn(self) -> str:
+        """Return configured DSN."""
+        return str(getattr(self.config, "dsn", "sqlite+aiosqlite:///:memory:"))
+
+    @property
+    def bind_key(self) -> str:
+        """Return configured bind key."""
+        return str(getattr(self.config, "bind_key", "default"))
+
+    @property
+    def session_key(self) -> str:
+        """Return configured session key."""
+        return str(getattr(self.config, "session_key", "db_session"))
+
+    @property
+    def connection_key(self) -> str:
+        """Return configured connection key."""
+        return str(getattr(self.config, "connection_key", "db_connection"))
+
+    @property
+    def supports_connection_pooling(self) -> bool:
+        """Return True when connection pooling is supported."""
+        return bool(getattr(self.config, "supports_connection_pooling", True))
+
+    @property
+    def pool_config(self) -> dict[str, Any]:
+        """Return pool configuration dictionary."""
+        return getattr(self.config, "pool_config", {})
+
+    @property
+    def driver_features(self) -> dict[str, Any]:
+        """Return driver features dictionary."""
+        return getattr(self.config, "driver_features", {})
+
     def provide_session(self) -> Any:
         """Delegate session provision to the wrapped AsyncConfigT."""
-        return self.config.provide_session()
+        fn = getattr(self.config, "provide_session", None)
+        return fn() if callable(fn) else None
 
     def provide_connection(self) -> Any:
         """Delegate connection provision to the wrapped AsyncConfigT."""
-        return self.config.provide_connection()
+        fn = getattr(self.config, "provide_connection", None)
+        return fn() if callable(fn) else None
 
     def create_pool(self) -> Any:
         """Delegate pool creation to the wrapped AsyncConfigT."""
-        return self.config.create_pool()
+        fn = getattr(self.config, "create_pool", None)
+        return fn() if callable(fn) else None
+
+    def derive_pool(self, **overrides: Any) -> ProxyAsyncConfig[AsyncConfigT]:
+        """Delegate per-pool configuration cloning to the wrapped AsyncConfigT (`sqlspec>=0.68.0`)."""
+        fn = getattr(self.config, "derive_pool", None)
+        if callable(fn):
+            return ProxyAsyncConfig(cast("AsyncConfigT", fn(**overrides)), broker=self.broker)
+        return self
+
+    def derive_direct_config(self) -> ProxyAsyncConfig[AsyncConfigT]:
+        """Delegate direct-session configuration derivation to the wrapped AsyncConfigT (`sqlspec>=0.68.0`)."""
+        fn = getattr(self.config, "derive_direct_config", None)
+        if callable(fn):
+            return ProxyAsyncConfig(cast("AsyncConfigT", fn()), broker=self.broker)
+        return self
+
+    def __getattr__(self, name: str) -> Any:
+        """Forward attribute lookups to the underlying AsyncConfigT instance."""
+        return getattr(self.config, name)
 
 
 class SQLSpecState:
@@ -379,11 +507,6 @@ class SQLSpecPlugin[ConfigT]:
             return tuple(self.config)
         return (self.config,)
 
-    @staticmethod
-    def wrap_config[T](config: T) -> SQLSpecConfig[T]:
-        """Wrap any SQLSpec configuration in SQLSpecConfig[T] with production pool defaults."""
-        return SQLSpecConfig(config)
-
     @overload
     def get_session[SyncDriverT: SyncDriverAdapterBase](
         self,
@@ -416,10 +539,12 @@ class SQLSpecPlugin[ConfigT]:
             configs_map[key] = cfg
             create_pool_fn = getattr(cfg, "create_pool", None)
             if callable(create_pool_fn):
-                with contextlib.suppress(Exception):
+                try:
                     pool_obj = create_pool_fn()
                     if pool_obj is not None:
                         pools_map[key] = pool_obj
+                except (AttributeError, RuntimeError, OSError, ValueError) as exc:
+                    logger.debug("Failed creating pool for %s", key, exc_info=exc)
         if self.config is not None and self.storage_key not in configs_map:
             configs_map[self.storage_key] = self.config
         state = SQLSpecState(pools=pools_map, configs=configs_map, object_store=adapter, is_available=True)
@@ -427,22 +552,41 @@ class SQLSpecPlugin[ConfigT]:
         state_mapping[SQLSPEC_STATE_KEY] = state
         return state
 
+    async def _close_target(self, target: Any) -> None:
+        """Close or dispose a target pool or configuration object, offloading synchronous closes to SyncPool."""
+        for attr in ("close", "dispose", "close_pool"):
+            close_fn = getattr(target, attr, None)
+            if callable(close_fn):
+                try:
+                    if inspect.iscoroutinefunction(close_fn):
+                        await close_fn()
+                    else:
+                        res = await SyncPool.default().submit_async(close_fn)
+                        if inspect.isawaitable(res):
+                            await res
+                except (AttributeError, RuntimeError, OSError, ValueError) as exc:
+                    logger.debug("Error closing SQLSpec target %s", target, exc_info=exc)
+
     async def close_pools(self) -> None:
         """Close all registered SQLSpec connection pools across primary and secondary bind keys."""
         if self._state is None:
             return
+        closed: set[int] = set()
         for pool in list(self._state.pools.values()):
-            close_fn = getattr(pool, "close", None)
-            if callable(close_fn):
-                res = close_fn()
-                if inspect.isawaitable(res):
-                    await res
+            if id(pool) not in closed:
+                closed.add(id(pool))
+                await self._close_target(pool)
         for cfg in self.configs:
-            close_pool_fn = getattr(cfg, "close_pool", None)
-            if callable(close_pool_fn):
-                res = close_pool_fn()
-                if inspect.isawaitable(res):
-                    await res
+            pool_inst = getattr(cfg, "pool_instance", None)
+            if pool_inst is not None:
+                closed.add(id(pool_inst))
+            if id(cfg) not in closed:
+                closed.add(id(cfg))
+                await self._close_target(cfg)
+
+    async def shutdown(self) -> None:
+        """Shut down and close all active SQLSpec connection pools."""
+        await self.close_pools()
 
     def on_app_init(self, app_config: Any) -> Any:
         """Litestar InitPluginProtocol hook registering SQLSpecState and SkipValidation DI providers."""

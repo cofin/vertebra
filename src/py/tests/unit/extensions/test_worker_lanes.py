@@ -13,7 +13,7 @@ from click.testing import CliRunner
 
 from vertebra.cli.run import run
 from vertebra.cli.workers import workers
-from vertebra.extensions.worker import (
+from vertebra.framework.queues import (
     LaneConfig,
     WorkerRunner,
 )

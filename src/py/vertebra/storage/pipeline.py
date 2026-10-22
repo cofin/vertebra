@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import contextlib
+import collections
 import importlib
+import logging
 from collections.abc import Buffer
 from typing import Any
 
 import msgspec
 
 from vertebra.storage._store import ObjectStore, PutResult
+
+logger = logging.getLogger(__name__)
 
 __all__ = (
     "StagedUpload",
@@ -32,9 +35,9 @@ class UploadTracker:
 
     def __init__(self, default_store: ObjectStore | None = None) -> None:
         self.default_store = default_store
-        self._staged_uploads: list[StagedUpload] = []
-        self._uploaded_keys: list[tuple[ObjectStore, str]] = []
-        self._pending_deletes: list[tuple[ObjectStore, str]] = []
+        self._staged_uploads: collections.deque[StagedUpload] = collections.deque()
+        self._uploaded_keys: collections.deque[tuple[ObjectStore, str]] = collections.deque()
+        self._pending_deletes: collections.deque[tuple[ObjectStore, str]] = collections.deque()
 
     @property
     def staged_count(self) -> int:
@@ -77,7 +80,7 @@ class UploadTracker:
         """Flush all staged uploads to their target ObjectStore before database commit."""
         results: list[PutResult] = []
         while self._staged_uploads:
-            item = self._staged_uploads.pop(0)
+            item = self._staged_uploads.popleft()
             res = item.store.put(item.key, item.data)
             self._uploaded_keys.append((item.store, item.key))
             results.append(res)
@@ -87,7 +90,7 @@ class UploadTracker:
         """Asynchronously flush all staged uploads to their target ObjectStore."""
         results: list[PutResult] = []
         while self._staged_uploads:
-            item = self._staged_uploads.pop(0)
+            item = self._staged_uploads.popleft()
             res = await item.store.put_async(item.key, item.data)
             self._uploaded_keys.append((item.store, item.key))
             results.append(res)
@@ -97,17 +100,21 @@ class UploadTracker:
         """Finalize committed uploads and execute any deferred object deletions."""
         self._uploaded_keys.clear()
         while self._pending_deletes:
-            store, key = self._pending_deletes.pop(0)
-            with contextlib.suppress(Exception):
+            store, key = self._pending_deletes.popleft()
+            try:
                 store.delete(key)
+            except Exception:
+                logger.warning("Failed to delete object %r during transaction cleanup", key, exc_info=True)
 
     async def after_commit_async(self, *_args: Any) -> None:
         """Asynchronously finalize committed uploads and execute deferred deletions."""
         self._uploaded_keys.clear()
         while self._pending_deletes:
-            store, key = self._pending_deletes.pop(0)
-            with contextlib.suppress(Exception):
+            store, key = self._pending_deletes.popleft()
+            try:
                 await store.delete_async(key)
+            except Exception:
+                logger.warning("Failed to delete object %r during transaction cleanup", key, exc_info=True)
 
     def after_rollback(self, *_args: Any) -> int:
         """Delete any objects uploaded during the rolled-back transaction and clear staged state."""
@@ -116,9 +123,11 @@ class UploadTracker:
         reclaimed = 0
         while self._uploaded_keys:
             store, key = self._uploaded_keys.pop()
-            with contextlib.suppress(Exception):
+            try:
                 store.delete(key)
                 reclaimed += 1
+            except Exception:
+                logger.warning("Failed to delete object %r during transaction cleanup", key, exc_info=True)
         return reclaimed
 
     async def after_rollback_async(self, *_args: Any) -> int:
@@ -128,17 +137,19 @@ class UploadTracker:
         reclaimed = 0
         while self._uploaded_keys:
             store, key = self._uploaded_keys.pop()
-            with contextlib.suppress(Exception):
+            try:
                 await store.delete_async(key)
                 reclaimed += 1
+            except Exception:
+                logger.warning("Failed to delete object %r during transaction cleanup", key, exc_info=True)
         return reclaimed
 
     def attach_sqlalchemy_session(self, session_or_factory: Any) -> None:
-        """Register SQLAlchemy before_flush, after_commit, and after_rollback listeners when SQLAlchemy is present."""
+        """Register SQLAlchemy after_flush, after_commit, and after_rollback listeners when SQLAlchemy is present."""
         try:
             event_mod = importlib.import_module("sqlalchemy.event")
             listen = event_mod.listen
-            listen(session_or_factory, "before_flush", self.before_flush)
+            listen(session_or_factory, "after_flush", self.before_flush)
             listen(session_or_factory, "after_commit", self.after_commit)
             listen(session_or_factory, "after_rollback", self.after_rollback)
         except ImportError:

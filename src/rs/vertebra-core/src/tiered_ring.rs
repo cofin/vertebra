@@ -32,6 +32,12 @@ impl RingTier {
     pub fn total_bytes(&self) -> usize {
         self.slot_size * self.slot_count
     }
+
+    /// Usable payload capacity per slot, accounting for the slot header.
+    pub fn payload_capacity(&self) -> usize {
+        self.slot_size
+            .saturating_sub(core::mem::size_of::<crate::buffer::SlotHeader>())
+    }
 }
 
 impl Default for TieredRingConfig {
@@ -76,13 +82,13 @@ impl TieredRingConfig {
     ///
     /// Returns `None` if the response exceeds even the xlarge tier's slot size.
     pub fn select_tier(&self, response_size: usize) -> Option<&RingTier> {
-        if response_size <= self.small.slot_size {
+        if response_size <= self.small.payload_capacity() {
             Some(&self.small)
-        } else if response_size <= self.medium.slot_size {
+        } else if response_size <= self.medium.payload_capacity() {
             Some(&self.medium)
-        } else if response_size <= self.large.slot_size {
+        } else if response_size <= self.large.payload_capacity() {
             Some(&self.large)
-        } else if response_size <= self.xlarge.slot_size {
+        } else if response_size <= self.xlarge.payload_capacity() {
             Some(&self.xlarge)
         } else {
             None
@@ -107,19 +113,31 @@ mod tests {
     #[test]
     fn tier_selection() {
         let config = TieredRingConfig::default();
+        let small_cap = config.small.payload_capacity();
+        let medium_cap = config.medium.payload_capacity();
+        let large_cap = config.large.payload_capacity();
+        let xlarge_cap = config.xlarge.payload_capacity();
+
         assert_eq!(config.select_tier(100).unwrap().slot_size, 4 * 1024);
-        assert_eq!(config.select_tier(4096).unwrap().slot_size, 4 * 1024);
-        assert_eq!(config.select_tier(4097).unwrap().slot_size, 64 * 1024);
-        assert_eq!(config.select_tier(65536).unwrap().slot_size, 64 * 1024);
-        assert_eq!(config.select_tier(65537).unwrap().slot_size, 512 * 1024);
+        assert_eq!(config.select_tier(small_cap).unwrap().slot_size, 4 * 1024);
         assert_eq!(
-            config.select_tier(512 * 1024 + 1).unwrap().slot_size,
+            config.select_tier(small_cap + 1).unwrap().slot_size,
+            64 * 1024
+        );
+        assert_eq!(config.select_tier(medium_cap).unwrap().slot_size, 64 * 1024);
+        assert_eq!(
+            config.select_tier(medium_cap + 1).unwrap().slot_size,
+            512 * 1024
+        );
+        assert_eq!(config.select_tier(large_cap).unwrap().slot_size, 512 * 1024);
+        assert_eq!(
+            config.select_tier(large_cap + 1).unwrap().slot_size,
             2 * 1024 * 1024
         );
         assert_eq!(
-            config.select_tier(2 * 1024 * 1024).unwrap().slot_size,
+            config.select_tier(xlarge_cap).unwrap().slot_size,
             2 * 1024 * 1024
         );
-        assert!(config.select_tier(2 * 1024 * 1024 + 1).is_none());
+        assert!(config.select_tier(xlarge_cap + 1).is_none());
     }
 }

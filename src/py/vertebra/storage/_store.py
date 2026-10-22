@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import builtins
 import calendar
 import hashlib
 import hmac
 import importlib
+import io
 import shutil
 import time
 import urllib.request
 from collections.abc import Buffer, Sequence
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Self
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import msgspec
@@ -21,7 +23,6 @@ import msgspec
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
-    "AsyncStore",
     "AzureConfig",
     "GcsConfig",
     "HttpConfig",
@@ -32,10 +33,10 @@ __all__ = (
     "OciConfig",
     "PutResult",
     "R2Config",
+    "ReadableFile",
     "S3Config",
     "SigningConfig",
     "StorageConfig",
-    "SyncStore",
 )
 
 
@@ -400,7 +401,7 @@ class ObjectStore:
         }:
             try:
                 self._native = native_mod.NativeObjectStore(url, self._options or None)
-            except Exception:
+            except (RuntimeError, OSError, ValueError):
                 self._native = None
 
     @property
@@ -614,6 +615,28 @@ class ObjectStore:
         """Construct an in-memory ObjectStore."""
         return cls.from_config(MemoryConfig(namespace=namespace))
 
+    @staticmethod
+    def _native_to_put_result(native_meta: Any, fallback_etag: str = "") -> PutResult:
+        """Convert a native NativeObjectMeta instance into a PutResult."""
+        etag = getattr(native_meta, "etag", None) or fallback_etag
+        return PutResult(
+            path=str(native_meta.path),
+            size=int(native_meta.size),
+            etag=str(etag) if etag else None,
+            version=getattr(native_meta, "version", None),
+        )
+
+    @staticmethod
+    def _native_to_object_meta(native_meta: Any) -> ObjectMeta:
+        """Convert a native NativeObjectMeta instance into an ObjectMeta."""
+        return ObjectMeta(
+            path=str(native_meta.path),
+            size=int(native_meta.size),
+            last_modified=str(getattr(native_meta, "last_modified", "")),
+            etag=getattr(native_meta, "etag", None),
+            version=getattr(native_meta, "version", None),
+        )
+
     def put(self, path: str, data: Buffer) -> PutResult:
         """Write any Buffer (bytes, bytearray, memoryview) to the given object key."""
         key = self._normalize_key(path)
@@ -622,13 +645,7 @@ class ObjectStore:
         view = memoryview(data).cast("B")
         if self._native is not None:
             native_meta = self._native.put(key, view)
-            etag = native_meta.etag or hashlib.sha256(view).hexdigest()[:16]
-            return PutResult(
-                path=str(native_meta.path),
-                size=int(native_meta.size),
-                etag=str(etag),
-                version=native_meta.version,
-            )
+            return self._native_to_put_result(native_meta, hashlib.sha256(view).hexdigest()[:16])
         digest = hashlib.sha256(view).hexdigest()[:16]
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         if self._local_root is not None:
@@ -653,13 +670,7 @@ class ObjectStore:
             raise FileNotFoundError(msg)
         if self._native is not None and hasattr(self._native, "put_file"):
             native_meta = self._native.put_file(key, str(resolved_src))
-            etag = native_meta.etag or f"{int(native_meta.size):016x}"
-            return PutResult(
-                path=str(native_meta.path),
-                size=int(native_meta.size),
-                etag=str(etag),
-                version=native_meta.version,
-            )
+            return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
         return self.put(path, resolved_src.read_bytes())
 
     def put_multipart(self, path: str, parts: Sequence[Buffer]) -> PutResult:
@@ -727,13 +738,7 @@ class ObjectStore:
             self._resolve_local(key)
         if self._native is not None:
             native_meta = self._native.head(key)
-            return ObjectMeta(
-                path=str(native_meta.path),
-                size=int(native_meta.size),
-                last_modified=str(native_meta.last_modified),
-                etag=native_meta.etag,
-                version=native_meta.version,
-            )
+            return self._native_to_object_meta(native_meta)
         if self._local_root is not None:
             target = self._resolve_local(key)
             if not target.exists():
@@ -802,13 +807,7 @@ class ObjectStore:
         if self._native is not None:
             items = self._native.list(norm_prefix or None)
             return [
-                ObjectMeta(
-                    path=str(item.path),
-                    size=int(item.size),
-                    last_modified=str(item.last_modified),
-                    etag=item.etag,
-                    version=item.version,
-                )
+                self._native_to_object_meta(item)
                 for item in items
                 if not norm_prefix or str(item.path).startswith(norm_prefix)
             ]
@@ -833,13 +832,7 @@ class ObjectStore:
         view = memoryview(data).cast("B")
         if self._native is not None and hasattr(self._native, "put_async"):
             native_meta = await self._native.put_async(key, view)
-            etag = native_meta.etag or hashlib.sha256(view).hexdigest()[:16]
-            return PutResult(
-                path=str(native_meta.path),
-                size=int(native_meta.size),
-                etag=str(etag),
-                version=native_meta.version,
-            )
+            return self._native_to_put_result(native_meta, hashlib.sha256(view).hexdigest()[:16])
         return self.put(path, data)
 
     async def put_file_async(self, path: str, file_path: str | Path) -> PutResult:
@@ -853,13 +846,7 @@ class ObjectStore:
             raise FileNotFoundError(msg)
         if self._native is not None and hasattr(self._native, "put_file_async"):
             native_meta = await self._native.put_file_async(key, str(resolved_src))
-            etag = native_meta.etag or f"{int(native_meta.size):016x}"
-            return PutResult(
-                path=str(native_meta.path),
-                size=int(native_meta.size),
-                etag=str(etag),
-                version=native_meta.version,
-            )
+            return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
         return self.put_file(path, resolved_src)
 
     async def get_async(self, path: str) -> bytes:
@@ -896,13 +883,7 @@ class ObjectStore:
             self._resolve_local(key)
         if self._native is not None and hasattr(self._native, "head_async"):
             native_meta = await self._native.head_async(key)
-            return ObjectMeta(
-                path=str(native_meta.path),
-                size=int(native_meta.size),
-                last_modified=str(native_meta.last_modified),
-                etag=native_meta.etag,
-                version=native_meta.version,
-            )
+            return self._native_to_object_meta(native_meta)
         return self.head(path)
 
     async def exists_async(self, path: str) -> bool:
@@ -945,17 +926,15 @@ class ObjectStore:
         if self._native is not None and hasattr(self._native, "list_async"):
             items = await self._native.list_async(norm_prefix or None)
             return [
-                ObjectMeta(
-                    path=str(item.path),
-                    size=int(item.size),
-                    last_modified=str(item.last_modified),
-                    etag=item.etag,
-                    version=item.version,
-                )
+                self._native_to_object_meta(item)
                 for item in items
                 if not norm_prefix or str(item.path).startswith(norm_prefix)
             ]
         return self.list(prefix)
+
+    def open_readable_file(self, path: str, *, size: int | None = None) -> ReadableFile:
+        """Open a seekable read-only ReadableFile stream over the given object key."""
+        return ReadableFile(self, path, size=size)
 
     def presign_get(
         self,
@@ -989,6 +968,9 @@ class ObjectStore:
             msg = "SigningConfig is required to verify presigned URLs"
             raise RuntimeError(msg)
         now_ts = int(time.time()) if timestamp is None else timestamp
+        if self._signing.provider == "gcs":
+            msg = "GCS V4 RSA-SHA256 presigned URL verification is not supported offline"
+            raise NotImplementedError(msg)
         if self._signing.provider == "s3":
             return self._verify_s3_v4(signed_url, method=method, now_ts=now_ts)
         return self._verify_hmac(signed_url, method=method, now_ts=now_ts)
@@ -1206,12 +1188,15 @@ class ObjectStore:
             f"{self._signing.iam_endpoint.rstrip('/')}/v1/projects/-/serviceAccounts/"
             f"{self._signing.service_account_email}:signBlob"
         )
+        if not iam_url.startswith(("http:", "https:")):
+            msg = f"Unsupported IAM endpoint scheme: {iam_url!r}"
+            raise ValueError(msg)
+        parsed_iam = urlparse(iam_url)
         body_bytes = bytes(encode_json_bytes({"payload": base64.b64encode(string_to_sign.encode()).decode("ascii")}))
         headers = {"Content-Type": "application/json"}
         if self._signing.access_token:
             headers["Authorization"] = f"Bearer {self._signing.access_token}"
         req = urllib.request.Request(iam_url, data=body_bytes, headers=headers, method="POST")
-        parsed_iam = urlparse(iam_url)
         opener = (
             urllib.request.build_opener(urllib.request.ProxyHandler({}))
             if parsed_iam.hostname in {"127.0.0.1", "localhost", "::1"}
@@ -1222,7 +1207,7 @@ class ObjectStore:
         signed_blob_str = str(resp_data["signedBlob"])
         try:
             raw_sig = base64.b64decode(signed_blob_str, validate=True)
-        except Exception:
+        except (ValueError, binascii.Error):
             raw_sig = signed_blob_str.encode("utf-8")
         hex_sig = raw_sig.hex()
         return f"https://storage.googleapis.com{canonical_uri}?{canonical_qs}&X-Goog-Signature={hex_sig}"
@@ -1239,12 +1224,10 @@ class ObjectStore:
     @classmethod
     def _get_native_module(cls) -> Any:
         if not cls._native_loaded:
-            for mod_name in ("vertebra._storage", "_storage"):
-                try:
-                    cls._native_module = importlib.import_module(mod_name)
-                    break
-                except ImportError:
-                    continue
+            try:
+                cls._native_module = importlib.import_module("vertebra._storage")
+            except ImportError:
+                cls._native_module = None
             cls._native_loaded = True
         return cls._native_module
 
@@ -1257,109 +1240,118 @@ class ObjectStore:
         return cleaned
 
 
-class SyncStore:
-    """Explicit synchronous facade over an ObjectStore."""
+class ReadableFile(io.RawIOBase):
+    """Seekable read-only file-like object backed by ObjectStore range reads (`get_range`).
 
-    __slots__ = ("_store",)
+    Enables PyArrow, Polars, and DataFusion to inspect Parquet footer metadata and read
+    targeted row-group byte slices without downloading full multi-gigabyte blobs.
+    """
 
-    def __init__(self, store: ObjectStore) -> None:
+    __slots__ = ("_closed", "_key", "_pos", "_size", "_store")
+
+    def __init__(self, store: ObjectStore, key: str, *, size: int | None = None) -> None:
+        super().__init__()
         self._store = store
+        self._key = key
+        self._size = store.head(key).size if size is None else size
+        self._pos = 0
+        self._closed = False
 
     @property
-    def store(self) -> ObjectStore:
-        """Return the underlying ObjectStore."""
-        return self._store
-
-    def put(self, path: str, data: Buffer) -> PutResult:
-        """Write a buffer synchronously."""
-        return self._store.put(path, data)
-
-    def put_file(self, path: str, file_path: str | Path) -> PutResult:
-        """Upload a local file synchronously."""
-        return self._store.put_file(path, file_path)
-
-    def get(self, path: str) -> bytes:
-        """Read object bytes synchronously."""
-        return self._store.get(path)
-
-    def get_view(self, path: str) -> memoryview:
-        """Return a zero-copy memoryview over the object."""
-        return self._store.get_view(path)
-
-    def get_range(self, path: str, offset: int, length: int) -> bytes:
-        """Read a byte slice synchronously."""
-        return self._store.get_range(path, offset, length)
-
-    def head(self, path: str) -> ObjectMeta:
-        """Read object metadata synchronously."""
-        return self._store.head(path)
-
-    def exists(self, path: str) -> bool:
-        """Check whether an object exists synchronously."""
-        return self._store.exists(path)
-
-    def delete(self, path: str) -> None:
-        """Delete an object synchronously."""
-        self._store.delete(path)
-
-    def copy(self, src: str, dst: str) -> None:
-        """Copy an object synchronously."""
-        self._store.copy(src, dst)
-
-    def list(self, prefix: str = "") -> builtins.list[ObjectMeta]:
-        """List objects under prefix synchronously."""
-        return self._store.list(prefix)
-
-
-class AsyncStore:
-    """Explicit asynchronous facade over an ObjectStore."""
-
-    __slots__ = ("_store",)
-
-    def __init__(self, store: ObjectStore) -> None:
-        self._store = store
+    def size(self) -> int:
+        """Return total object byte size."""
+        return self._size
 
     @property
-    def store(self) -> ObjectStore:
-        """Return the underlying ObjectStore."""
-        return self._store
+    def closed(self) -> bool:
+        """Return True if the file handle has been closed."""
+        return self._closed
 
-    async def put(self, path: str, data: Buffer) -> PutResult:
-        """Write a buffer asynchronously."""
-        return await self._store.put_async(path, data)
+    def __enter__(self) -> Self:
+        """Enter the context manager and return self."""
+        return self
 
-    async def put_file(self, path: str, file_path: str | Path) -> PutResult:
-        """Upload a local file asynchronously."""
-        return await self._store.put_file_async(path, file_path)
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Close the handle when exiting the context manager."""
+        _ = (exc_type, exc_val, exc_tb)
+        self.close()
 
-    async def get(self, path: str) -> bytes:
-        """Read object bytes asynchronously."""
-        return await self._store.get_async(path)
+    def readable(self) -> bool:
+        """Return True indicating this stream supports reading."""
+        return True
 
-    async def get_view(self, path: str) -> memoryview:
-        """Return a zero-copy memoryview over the object asynchronously."""
-        return await self._store.get_view_async(path)
+    def seekable(self) -> bool:
+        """Return True indicating this stream supports random access seeking."""
+        return True
 
-    async def get_range(self, path: str, offset: int, length: int) -> bytes:
-        """Read a byte slice asynchronously."""
-        return await self._store.get_range_async(path, offset, length)
+    def writable(self) -> bool:
+        """Return False indicating this stream is read-only."""
+        return False
 
-    async def head(self, path: str) -> ObjectMeta:
-        """Read object metadata asynchronously."""
-        return await self._store.head_async(path)
+    def tell(self) -> int:
+        """Return the current cursor byte offset."""
+        self._ensure_open()
+        return self._pos
 
-    async def exists(self, path: str) -> bool:
-        """Check whether an object exists asynchronously."""
-        return await self._store.exists_async(path)
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        """Move the read cursor to a new byte offset and return the updated position."""
+        self._ensure_open()
+        if whence == io.SEEK_SET:
+            target = offset
+        elif whence == io.SEEK_CUR:
+            target = self._pos + offset
+        elif whence == io.SEEK_END:
+            target = self._size + offset
+        else:
+            msg = f"Invalid whence value: {whence}"
+            raise ValueError(msg)
+        if target < 0:
+            msg = f"Negative seek position: {target}"
+            raise ValueError(msg)
+        self._pos = min(target, self._size)
+        return self._pos
 
-    async def delete(self, path: str) -> None:
-        """Delete an object asynchronously."""
-        await self._store.delete_async(path)
+    def read(self, size: int = -1) -> bytes:
+        """Read up to size bytes starting at the current cursor position."""
+        self._ensure_open()
+        if self._pos >= self._size:
+            return b""
+        remaining = self._size - self._pos
+        length = remaining if size < 0 else min(size, remaining)
+        if length <= 0:
+            return b""
+        data = self._store.get_range(self._key, self._pos, length)
+        self._pos += len(data)
+        return data
 
-    async def copy(self, src: str, dst: str) -> None:
-        """Copy an object asynchronously."""
-        await self._store.copy_async(src, dst)
+    def read_at(self, offset: int, length: int) -> bytes:
+        """Read length bytes at offset without mutating the stream cursor."""
+        self._ensure_open()
+        if offset < 0 or length < 0:
+            msg = "offset and length must be non-negative"
+            raise ValueError(msg)
+        if offset >= self._size or length == 0:
+            return b""
+        bounded_len = min(length, self._size - offset)
+        return self._store.get_range(self._key, offset, bounded_len)
 
-    async def list(self, prefix: str = "") -> builtins.list[ObjectMeta]:
-        """List objects under prefix asynchronously."""
-        return await self._store.list_async(prefix)
+    async def read_at_async(self, offset: int, length: int) -> bytes:
+        """Asynchronously read length bytes at offset without mutating the stream cursor."""
+        self._ensure_open()
+        if offset < 0 or length < 0:
+            msg = "offset and length must be non-negative"
+            raise ValueError(msg)
+        if offset >= self._size or length == 0:
+            return b""
+        bounded_len = min(length, self._size - offset)
+        return await self._store.get_range_async(self._key, offset, bounded_len)
+
+    def close(self) -> None:
+        """Mark the file handle as closed."""
+        self._closed = True
+        super().close()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            msg = "I/O operation on closed ReadableFile"
+            raise ValueError(msg)

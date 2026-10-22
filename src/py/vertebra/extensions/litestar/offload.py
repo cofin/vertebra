@@ -9,13 +9,12 @@ from typing import Any
 import msgspec
 
 from vertebra.extensions.litestar.router import _unpack_route_handler_map_entry
-from vertebra.utils.serializers._json import encode_json_bytes
+from vertebra.utils.serializers import encode_json_bytes
 
 __all__ = (
     "CompressionOffloadSpec",
     "CorsOffloadSpec",
     "LitestarOffloadPlan",
-    "MiddlewareOffloadCompiler",
     "OpenApiOffloadSpec",
     "StaticMountOffloadSpec",
     "_get_handler_after_response",
@@ -84,16 +83,6 @@ class LitestarOffloadPlan(msgspec.Struct, frozen=True, gc=False):
     cors: CorsOffloadSpec | None
     static_mounts: tuple[StaticMountOffloadSpec, ...]
     openapi: OpenApiOffloadSpec | None
-
-
-class MiddlewareOffloadCompiler:
-    """Compiler extracting CompressionConfig, CORSConfig, StaticFiles, and OpenAPI into a LitestarOffloadPlan."""
-
-    __slots__ = ()
-
-    def compile(self, app: Any, *, config: Any = None) -> LitestarOffloadPlan:
-        """Extract and compile the Rust middleware offload plan for the given Litestar app."""
-        return offload_litestar_middlewares(app, config=config)
 
 
 def offload_litestar_middlewares(app: Any, *, config: Any = None) -> LitestarOffloadPlan:
@@ -470,7 +459,7 @@ def _extract_openapi_schema_payload(app: Any) -> OpenApiOffloadSpec | None:
         to_schema = getattr(schema_obj, "to_schema", None)
         raw_dict = to_schema() if callable(to_schema) else schema_obj
         body = encode_json_bytes(raw_dict)
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         return None
 
     base_path = str(getattr(openapi_cfg, "path", None) or "/schema").rstrip("/")

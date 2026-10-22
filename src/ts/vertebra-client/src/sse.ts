@@ -1,4 +1,5 @@
 import { computeBackoffDelay } from "./client/retry";
+import { BoundedKeySet } from "./internal/lru_set";
 
 export interface SseClientOptions {
   withCredentials?: boolean;
@@ -37,8 +38,7 @@ export class SseClient {
   private manuallyClosed = false;
   private handlers = new Map<string, Set<SseEventHandler<any>>>();
   private boundDomListeners = new Map<string, (ev: Event) => void>();
-  private seenIdempotencyOrder: string[] = [];
-  private seenIdempotencySet = new Set<string>();
+  private seenIdempotencyKeys = new BoundedKeySet(MAX_IDEMPOTENCY_KEYS);
 
   constructor(url: string, options: SseClientOptions = {}) {
     this.baseUrl = url;
@@ -152,7 +152,7 @@ export class SseClient {
         parsed &&
         typeof parsed === "object" &&
         typeof parsed.idempotencyKey === "string" &&
-        !this.recordIdempotencyKey(parsed.idempotencyKey)
+        !this.seenIdempotencyKeys.add(parsed.idempotencyKey)
       ) {
         return;
       }
@@ -170,21 +170,6 @@ export class SseClient {
     };
     this.boundDomListeners.set(eventName, listener);
     es.addEventListener(eventName, listener as EventListener);
-  }
-
-  private recordIdempotencyKey(key: string): boolean {
-    if (this.seenIdempotencySet.has(key)) {
-      return false;
-    }
-    if (this.seenIdempotencyOrder.length >= MAX_IDEMPOTENCY_KEYS) {
-      const evicted = this.seenIdempotencyOrder.shift();
-      if (evicted !== undefined) {
-        this.seenIdempotencySet.delete(evicted);
-      }
-    }
-    this.seenIdempotencySet.add(key);
-    this.seenIdempotencyOrder.push(key);
-    return true;
   }
 
   private cleanupEventSource(): void {

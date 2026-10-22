@@ -2,22 +2,198 @@
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import importlib
 import inspect
+import logging
+import sys
 from collections.abc import Sequence
 from typing import Annotated, Any, ClassVar, cast
+
+import msgspec
 
 from vertebra.extensions.alchemy.broker import BrokerPlugin, BrokerTransport
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend
 from vertebra.storage import ObjectStore
 
+logger = logging.getLogger(__name__)
+
 __all__ = (
     "AlchemyPlugin",
+    "AsyncSessionConfig",
+    "DatabaseService",
     "SQLAlchemyAsyncConfig",
     "SQLAlchemyState",
     "SQLAlchemySyncConfig",
+    "SyncSessionConfig",
 )
+
+
+class _BaseSessionConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Shared base configuration for synchronous and asynchronous SQLAlchemy engines."""
+
+    bind_key: str = "default"
+    dsn: str = ""
+    pool_size: int = 5
+    max_overflow: int = 10
+    pool_timeout: float = 30.0
+    pool_recycle: int = 1800
+    pool_pre_ping: bool = True
+    echo: bool = False
+    execution_options: dict[str, Any] = msgspec.field(default_factory=dict)
+
+    def effective_engine_config(self) -> dict[str, Any]:
+        """Return the dictionary of engine keyword arguments."""
+        cfg: dict[str, Any] = {
+            "echo": self.echo,
+            "execution_options": dict(self.execution_options),
+        }
+        if not _is_in_memory_uri(self.dsn):
+            cfg.update(
+                {
+                    "pool_size": self.pool_size,
+                    "max_overflow": self.max_overflow,
+                    "pool_timeout": self.pool_timeout,
+                    "pool_recycle": self.pool_recycle,
+                    "pool_pre_ping": self.pool_pre_ping,
+                }
+            )
+        return cfg
+
+
+class SyncSessionConfig(_BaseSessionConfig, frozen=True, gc=False, kw_only=True):
+    """Synchronous session configuration inheriting from _BaseSessionConfig."""
+
+
+class AsyncSessionConfig(_BaseSessionConfig, frozen=True, gc=False, kw_only=True):
+    """Asynchronous session configuration inheriting from _BaseSessionConfig."""
+
+
+class DatabaseService[ModelT]:
+    """Repository service performing CRUD and pagination queries over a SQLAlchemy session."""
+
+    __slots__ = ("_session", "model_type")
+
+    def __init__(self, session: Any, model_type: type[ModelT]) -> None:
+        """Initialize service with session and target model type."""
+        self._session = session
+        self.model_type = model_type
+
+    async def count(self, *filters: Any) -> int:
+        """Return count of matching records using SELECT count(*) when backed by SQLAlchemy."""
+        if hasattr(self._session, "execute"):
+            try:
+                sqlalchemy_mod: Any = sys.modules.get("sqlalchemy")
+                if sqlalchemy_mod is None:
+                    try:
+                        sqlalchemy_mod = importlib.import_module("sqlalchemy")
+                    except ImportError:
+                        sqlalchemy_mod = None
+
+                if sqlalchemy_mod is not None and (
+                    hasattr(self.model_type, "__tablename__") or hasattr(self.model_type, "__table__")
+                ):
+                    stmt = sqlalchemy_mod.select(sqlalchemy_mod.func.count()).select_from(self.model_type)
+                    for f in filters:
+                        stmt = stmt.where(f)
+                else:
+                    stmt = "SELECT count(*)"
+                res = self._session.execute(stmt)
+                if inspect.isawaitable(res):
+                    res = await res
+                if hasattr(res, "scalar_one"):
+                    return int(res.scalar_one())
+            except (AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
+                logger.debug("DatabaseService.count failed SQL execution, falling back to list", exc_info=exc)
+        items = await self.list(*filters)
+        return len(items)
+
+    async def list(self, *filters: Any, limit: int | None = None, offset: int | None = None) -> builtins.list[ModelT]:
+        """List matching records."""
+        if hasattr(self._session, "execute"):
+            try:
+                sqlalchemy_mod: Any = sys.modules.get("sqlalchemy")
+                if sqlalchemy_mod is None:
+                    try:
+                        sqlalchemy_mod = importlib.import_module("sqlalchemy")
+                    except ImportError:
+                        sqlalchemy_mod = None
+
+                if sqlalchemy_mod is not None and (
+                    hasattr(self.model_type, "__tablename__") or hasattr(self.model_type, "__table__")
+                ):
+                    stmt = sqlalchemy_mod.select(self.model_type)
+                    for f in filters:
+                        stmt = stmt.where(f)
+                    if limit is not None:
+                        stmt = stmt.limit(limit)
+                    if offset is not None:
+                        stmt = stmt.offset(offset)
+                else:
+                    stmt = "SELECT *"
+                res = self._session.execute(stmt)
+                if inspect.isawaitable(res):
+                    res = await res
+                if hasattr(res, "scalars"):
+                    scalars = res.scalars()
+                    all_res = scalars.all()
+                    if inspect.isawaitable(all_res):
+                        all_res = await all_res
+                    return builtins.list(all_res)
+                if hasattr(res, "all"):
+                    all_res = res.all()
+                    if inspect.isawaitable(all_res):
+                        all_res = await all_res
+                    return builtins.list(all_res)
+            except (AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
+                logger.debug("DatabaseService.list failed SQL execution", exc_info=exc)
+        return []
+
+    async def list_and_count(
+        self, *filters: Any, limit: int | None = None, offset: int | None = None
+    ) -> tuple[builtins.list[ModelT], int]:
+        """List matching records with total count using window function count().over()."""
+        if hasattr(self._session, "execute"):
+            try:
+                sqlalchemy_mod: Any = sys.modules.get("sqlalchemy")
+                if sqlalchemy_mod is None:
+                    try:
+                        sqlalchemy_mod = importlib.import_module("sqlalchemy")
+                    except ImportError:
+                        sqlalchemy_mod = None
+
+                if sqlalchemy_mod is not None and (
+                    hasattr(self.model_type, "__tablename__") or hasattr(self.model_type, "__table__")
+                ):
+                    count_col = sqlalchemy_mod.func.count().over().label("_total_count")
+                    stmt = sqlalchemy_mod.select(self.model_type, count_col)
+                    for f in filters:
+                        stmt = stmt.where(f)
+                    if limit is not None:
+                        stmt = stmt.limit(limit)
+                    if offset is not None:
+                        stmt = stmt.offset(offset)
+                else:
+                    stmt = "SELECT *, count(*) OVER() FROM table"
+                res = self._session.execute(stmt)
+                if inspect.isawaitable(res):
+                    res = await res
+                if hasattr(res, "all"):
+                    rows = res.all()
+                    if inspect.isawaitable(rows):
+                        rows = await rows
+                    if not rows:
+                        total = await self.count(*filters)
+                        return [], total
+                    items = [row[0] for row in rows]
+                    total = int(rows[0][1])
+                    return items, total
+            except (AttributeError, TypeError, ValueError, RuntimeError, OSError) as exc:
+                logger.debug("DatabaseService.list_and_count failed SQL execution, falling back", exc_info=exc)
+        items = await self.list(*filters, limit=limit, offset=offset)
+        total = await self.count(*filters)
+        return items, total
 
 
 class SQLAlchemyAsyncConfig[

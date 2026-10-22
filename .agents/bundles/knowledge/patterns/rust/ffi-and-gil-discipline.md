@@ -6,12 +6,12 @@ status: stable
 tags: [patterns, rust, pyo3, ffi, gil]
 sources:
   - resource: src/rs/vertebra-py/src/lib.rs
-  - resource: src/rs/vertebra-py/src/api.rs
+  - resource: src/rs/vertebra-py/src/transport.rs
   - resource: src/rs/vertebra-py/src/request.rs
   - resource: src/rs/vertebra-py/src/headers.rs
-  - resource: src/rs/vertebra-py/src/asgi_scope.rs
-  - resource: src/rs/vertebra-py/src/wsgi_environ.rs
-  - resource: src/rs/vertebra-py/src/rsgi_protocol.rs
+  - resource: src/rs/vertebra-py/src/asgi.rs
+  - resource: src/rs/vertebra-py/src/wsgi/environ.rs
+  - resource: src/rs/vertebra-py/src/rsgi/http.rs
   - resource: src/rs/vertebra-http/src/main.rs
 ---
 
@@ -21,7 +21,7 @@ The PyO3 extensions are `_vertebra` ([`vertebra-py`](../../../../../src/rs/verte
 
 ## Release the GIL Around Blocking Work (`py.detach`)
 
-Any `#[pyfunction]` that waits on a ring, channel, condition, or the filesystem releases the GIL with `py.detach(|| ...)`. Current sites: `get_batch` and the submit paths in [`api.rs`](../../../../../src/rs/vertebra-py/src/api.rs), file metadata and range reads in [`rsgi_protocol.rs`](../../../../../src/rs/vertebra-py/src/rsgi_protocol.rs), and file metadata in `wsgi_worker.rs`. Copy owned data out of `PyRef`s (and `drop` the borrow) before entering `detach`, as `submit_response` does.
+Any `#[pyfunction]` that waits on a ring, channel, condition, or the filesystem releases the GIL with `py.detach(|| ...)`. Current sites: `get_batch` and the submit paths in [`transport.rs`](../../../../../src/rs/vertebra-py/src/transport.rs), file metadata and range reads in [`rsgi/http.rs`](../../../../../src/rs/vertebra-py/src/rsgi/http.rs), and file metadata in `wsgi/worker.rs`. Copy owned data out of `PyRef`s (and `drop` the borrow) before entering `detach`, as `submit_response` does.
 
 <!-- truth: start -->
 ```rust
@@ -59,7 +59,7 @@ pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<RequestBatc
 
 ## Intern Repeated Keys
 
-Use `pyo3::intern!(py, "...")` for fixed header names and scope/environ keys, as in [`headers.rs`](../../../../../src/rs/vertebra-py/src/headers.rs), [`asgi_scope.rs`](../../../../../src/rs/vertebra-py/src/asgi_scope.rs), and [`wsgi_environ.rs`](../../../../../src/rs/vertebra-py/src/wsgi_environ.rs). Use `pyo3::sync::PyOnceLock` for process-wide cached Python objects (`SYS_STDERR` in `wsgi_environ.rs`).
+Use `pyo3::intern!(py, "...")` for fixed header names and scope/environ keys, as in [`headers.rs`](../../../../../src/rs/vertebra-py/src/headers.rs), [`asgi.rs`](../../../../../src/rs/vertebra-py/src/asgi.rs), and [`wsgi/environ.rs`](../../../../../src/rs/vertebra-py/src/wsgi/environ.rs). Use `pyo3::sync::PyOnceLock` for process-wide cached Python objects (`SYS_STDERR` in `wsgi/environ.rs`).
 
 ## Free-Threading Flags
 

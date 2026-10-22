@@ -1,21 +1,36 @@
-"""Oracle APEX, ORDS, and Gemini Enterprise E-Business Suite (EBS) integration."""
+"""Oracle APEX, ORDS, and 26ai Duality View integration for Vertebra."""
 
 from __future__ import annotations
 
-from vertebra.extensions.apex.apexlang import ApexExportArtifact, ApexLangRunner
-from vertebra.extensions.apex.ebs_gateway import (
+from vertebra.extensions.apex.bridge import (
+    ApexFederatedQuery,
+    ApexFederatedSource,
+    ApexIslandRegistry,
+    ApexIslandSpec,
+    ApexOfflineMutation,
+    ApexOfflineSyncEngine,
+    ApexOfflineSyncResult,
+)
+from vertebra.extensions.apex.gateway import (
+    ApexAccessPolicy,
+    ApexAgentCard,
+    ApexGateway,
+    ApexPageToolSpec,
+    ApexPolicyDecision,
+    ApexPolicyEvaluator,
     ConfirmationGate,
-    EbsGateway,
-    EbsPolicyDecision,
-    EbsPolicyEvaluator,
-    EbsResponsibilityMapping,
+    OrdsRestTransport,
 )
 from vertebra.extensions.apex.openapi import (
     ApexOpenAPIGenerator,
+    ApexSkillSpec,
+    ApexToolSpec,
     DualityViewSpec,
     OrdsEndpointSpec,
 )
 from vertebra.extensions.apex.session import (
+    ApexHandoffClaims,
+    ApexSessionAuth,
     ApexSessionContext,
     OracleConnectionLike,
     OraclePoolLike,
@@ -23,18 +38,30 @@ from vertebra.extensions.apex.session import (
 )
 
 __all__ = (
-    "ApexExportArtifact",
-    "ApexLangRunner",
+    "ApexAccessPolicy",
+    "ApexAgentCard",
+    "ApexFederatedQuery",
+    "ApexFederatedSource",
+    "ApexGateway",
+    "ApexHandoffClaims",
+    "ApexIslandRegistry",
+    "ApexIslandSpec",
+    "ApexOfflineMutation",
+    "ApexOfflineSyncEngine",
+    "ApexOfflineSyncResult",
     "ApexOpenAPIGenerator",
+    "ApexPageToolSpec",
+    "ApexPolicyDecision",
+    "ApexPolicyEvaluator",
+    "ApexSessionAuth",
     "ApexSessionContext",
+    "ApexSkillSpec",
+    "ApexToolSpec",
     "ConfirmationGate",
     "DualityViewSpec",
-    "EbsGateway",
-    "EbsPolicyDecision",
-    "EbsPolicyEvaluator",
-    "EbsResponsibilityMapping",
     "OracleConnectionLike",
     "OraclePoolLike",
     "OracleSessionManager",
     "OrdsEndpointSpec",
+    "OrdsRestTransport",
 )

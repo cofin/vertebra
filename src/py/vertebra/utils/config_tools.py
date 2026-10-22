@@ -11,20 +11,15 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, overload
 
-from vertebra._typing import ImproperConfigurationError
-
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    pass
 
 __all__ = (
     "FALSE_VALUES",
     "TRUE_VALUES",
-    "discover_config_from_pyproject",
     "find_pyproject_toml",
     "get_env",
-    "normalize_connection_config",
     "parse_pyproject_config",
-    "read_pyproject_section",
 )
 
 TRUE_VALUES: Final = {"1", "true", "yes", "on"}
@@ -114,49 +109,6 @@ def parse_pyproject_config(pyproject_path: Path) -> str | None:
         f"Invalid [tool.vtb].config in {pyproject_path}: must be string or list of strings, got {type(config).__name__}"
     )
     raise ValueError(msg)
-
-
-def discover_config_from_pyproject() -> str | None:
-    """Find and parse pyproject.toml for vtb config."""
-    pyproject_path = find_pyproject_toml()
-    if pyproject_path is None:
-        return None
-
-    return parse_pyproject_config(pyproject_path)
-
-
-def read_pyproject_section(section: str) -> dict[str, Any]:
-    """Read a specific section from [tool.vtb.<section>] in pyproject.toml."""
-    path = find_pyproject_toml()
-    if path is None:
-        return {}
-
-    try:
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-    except Exception:
-        return {}
-
-    tool_vtb = data.get("tool", {}).get("vtb", {})
-    if not isinstance(tool_vtb, dict):
-        return {}
-
-    return dict(tool_vtb.get(section, {}))
-
-
-def normalize_connection_config(
-    connection_config: "Mapping[str, Any] | None", *, extra_key: str = "extra"
-) -> dict[str, Any]:
-    """Normalize an adapter connection_config dictionary."""
-    normalized: dict[str, Any] = dict(connection_config) if connection_config else {}
-    extras = normalized.pop(extra_key, {})
-    if extras is None:
-        return normalized
-    if not isinstance(extras, dict):
-        msg = f"The '{extra_key}' field in connection_config must be a dictionary."
-        raise ImproperConfigurationError(msg)
-    normalized.update(extras)
-    return normalized
 
 
 def _coerce_bool(value: str) -> bool:

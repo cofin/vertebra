@@ -2,6 +2,7 @@
 
 from collections.abc import Iterable
 
+from vertebra.build.codegen._emitter import SchemaEmitter
 from vertebra.build.codegen._ir import (
     AnnotatedType,
     ArrayType,
@@ -12,16 +13,16 @@ from vertebra.build.codegen._ir import (
     TypeNode,
     UnionType,
 )
+from vertebra.build.codegen._json_schema import resolve_parameter_node
 from vertebra.build.codegen._metadata import RouteMetadata
-from vertebra.build.codegen.procedures import resolve_parameter_node
 
 __all__ = ("ProtobufGenerator",)
 
 
-class ProtobufGenerator:
+class ProtobufGenerator(SchemaEmitter):
     """Generate .proto v3 message and gRPC service blocks from RouteMetadata."""
 
-    __slots__ = ("declared", "package", "service_name")
+    __slots__ = ("package", "service_name")
 
     def __init__(
         self,
@@ -29,9 +30,9 @@ class ProtobufGenerator:
         service_name: str = "VertebraService",
         declared: dict[str, ObjectType] | None = None,
     ) -> None:
+        super().__init__(declared=declared)
         self.package = package
         self.service_name = service_name
-        self.declared: dict[str, ObjectType] = declared if declared is not None else {}
 
     def generate(self, routes: Iterable[RouteMetadata]) -> str:
         """Render a complete proto3 definition file."""
@@ -46,8 +47,8 @@ class ProtobufGenerator:
                 if not res.include_in_schema:
                     continue
                 visible_fields[param_name] = res.base_type
-                self._collect_named_types((res.base_type,))
-            self._collect_named_types((route.return_type,))
+                self._collect_objects(res.base_type)
+            self._collect_objects(route.return_type)
 
             rpc_name = self._to_pascal_case(route.handler_name)
             if len(visible_fields) == 1:
@@ -77,23 +78,16 @@ class ProtobufGenerator:
             f"package {self.package};",
         ]
 
-        for name in sorted(self.declared):
-            blocks.append(self._render_message(name, self.declared[name].fields, self.declared[name].optional_fields))
+        for name in sorted(self._declared):
+            blocks.append(self._render_message(name, self._declared[name].fields, self._declared[name].optional_fields))
 
         for msg_name, msg_fields in synthetic_messages:
-            if msg_name not in self.declared:
+            if msg_name not in self._declared:
                 blocks.append(self._render_message(msg_name, msg_fields, set()))
 
         service_block = [f"service {self.service_name} {{", *rpc_lines, "}"]
         blocks.append("\n".join(service_block))
         return "\n\n".join(blocks).strip() + "\n"
-
-    def _collect_named_types(self, nodes: Iterable[TypeNode]) -> None:
-        for node in nodes:
-            if isinstance(node, ObjectType) and node.name:
-                self.declared.setdefault(node.name, node)
-            for child in node.iter_children():
-                self._collect_named_types((child,))
 
     def _render_message(
         self,

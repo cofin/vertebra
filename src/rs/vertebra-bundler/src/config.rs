@@ -1,13 +1,11 @@
 //! Configuration types for the bundler
 
 use pyo3::prelude::*;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Configuration for production builds
 #[pyclass(from_py_object)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct BundleConfig {
     /// Entry point file path
     #[pyo3(get, set)]
@@ -28,44 +26,18 @@ pub struct BundleConfig {
     /// Target environment (es2020, es2022, esnext)
     #[pyo3(get, set)]
     pub target: String,
-
-    /// External packages to exclude from bundle
-    #[pyo3(get, set)]
-    pub external: Vec<String>,
-
-    /// Define replacements (e.g., process.env.NODE_ENV)
-    #[pyo3(get, set)]
-    pub define: HashMap<String, String>,
-
-    /// Output format (esm, cjs, iife)
-    #[pyo3(get, set)]
-    pub format: String,
-
-    /// Enable tree shaking
-    #[pyo3(get, set)]
-    pub tree_shaking: bool,
-
-    /// Code splitting
-    #[pyo3(get, set)]
-    pub splitting: bool,
 }
 
 #[pymethods]
 impl BundleConfig {
     #[new]
-    #[pyo3(signature = (entry, outdir="dist".to_string(), minify=true, sourcemap=false, target="es2022".to_string(), external=vec![], define=HashMap::new(), format="esm".to_string(), tree_shaking=true, splitting=false))]
-    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (entry, outdir="dist".to_string(), minify=true, sourcemap=false, target="es2022".to_string()))]
     pub fn new(
         entry: String,
         outdir: String,
         minify: bool,
         sourcemap: bool,
         target: String,
-        external: Vec<String>,
-        define: HashMap<String, String>,
-        format: String,
-        tree_shaking: bool,
-        splitting: bool,
     ) -> Self {
         Self {
             entry,
@@ -73,11 +45,6 @@ impl BundleConfig {
             minify,
             sourcemap,
             target,
-            external,
-            define,
-            format,
-            tree_shaking,
-            splitting,
         }
     }
 
@@ -98,18 +65,13 @@ impl Default for BundleConfig {
             minify: true,
             sourcemap: false,
             target: "es2022".to_string(),
-            external: vec![],
-            define: HashMap::new(),
-            format: "esm".to_string(),
-            tree_shaking: true,
-            splitting: false,
         }
     }
 }
 
 /// Configuration for development mode with HMR
 #[pyclass(from_py_object)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct DevConfig {
     /// Entry point file path
     #[pyo3(get, set)]
@@ -256,11 +218,6 @@ mod tests {
         assert!(config.minify);
         assert!(!config.sourcemap);
         assert_eq!(config.target, "es2022");
-        assert!(config.external.is_empty());
-        assert!(config.define.is_empty());
-        assert_eq!(config.format, "esm");
-        assert!(config.tree_shaking);
-        assert!(!config.splitting);
     }
 
     #[test]

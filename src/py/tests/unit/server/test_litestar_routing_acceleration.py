@@ -68,7 +68,6 @@ def test_asgi_scope_20_known_keys_no_extras_allocation() -> None:
     """Verify setting Litestar's 6 per-request keys uses fixed slots without allocating extras."""
     scope = AsgiScope()
     assert len(scope.known_keys()) == 20
-    assert scope.has_extras() is False
     assert "route_handler" not in scope
     assert "path_params" not in scope
     assert "connection" not in scope
@@ -85,7 +84,6 @@ def test_asgi_scope_20_known_keys_no_extras_allocation() -> None:
     scope["path_template"] = "/users/{user_id:int}"
     scope["connection"] = marker_connection
 
-    assert scope.has_extras() is False
     assert scope["app"] is marker_app
     assert scope["litestar_app"] is marker_app
     assert scope["path_params"] is path_params

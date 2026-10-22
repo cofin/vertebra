@@ -1,5 +1,6 @@
 """Free-threaded CPython 3.14t GIL re-enablement auditor and extension quarantine."""
 
+import asyncio
 import logging
 import os
 import sys
@@ -8,18 +9,18 @@ from collections.abc import Iterable
 
 import msgspec
 
-__all__ = ("GilAuditReport",)
+__all__ = (
+    "GilAuditReport",
+    "is_free_threaded",
+)
 
 log = logging.getLogger(__name__)
 _NATIVE_SUFFIXES = (".so", ".pyd", ".dylib")
 
 
-def _is_gil_currently_enabled() -> bool:
-    """Return True when the CPython GIL is currently enabled at runtime."""
-    checker = getattr(sys, "_is_gil_enabled", None)
-    if checker is None:
-        return True
-    return bool(checker())
+def is_free_threaded() -> bool:
+    """Return True when running on a free-threaded Python interpreter with the GIL disabled."""
+    return not GilAuditReport.gil_enabled()
 
 
 class GilAuditReport(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -35,13 +36,21 @@ class GilAuditReport(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     quarantined_modules: tuple[str, ...] = ()
 
     @staticmethod
+    def gil_enabled() -> bool:
+        """Return True when the CPython GIL is currently enabled at runtime."""
+        checker = getattr(sys, "_is_gil_enabled", None)
+        if checker is None:
+            return True
+        return bool(checker())
+
+    @staticmethod
     def is_free_threaded_build() -> bool:
-        """Return True when the interpreter was compiled with ``Py_GIL_Disabled``."""
+        """Return True when the interpreter was compiled with Py_GIL_Disabled."""
         return bool(sysconfig.get_config_var("Py_GIL_Disabled"))
 
     @staticmethod
     def snapshot_extensions() -> frozenset[str]:
-        """Return the set of currently loaded native C/Rust extension module names in ``sys.modules``."""
+        """Return the set of currently loaded native C/Rust extension module names in sys.modules."""
         loaded: set[str] = set()
         for name, mod in list(sys.modules.items()):
             if mod is None:
@@ -51,11 +60,23 @@ class GilAuditReport(msgspec.Struct, frozen=True, gc=False, kw_only=True):
                 loaded.add(name)
         return frozenset(loaded)
 
+    @classmethod
+    def snapshot_loaded_extensions(cls) -> frozenset[str]:
+        """Snapshot the currently loaded native extensions before application import."""
+        return cls.snapshot_extensions()
+
+    def quarantine_unsafe_modules(self, requested_shards: int) -> int:
+        """Enforce standard asyncio policy and single-shard execution when GIL is re-enabled or extensions are suspect."""
+        if self.gil_reenabled_on_import or bool(self.suspect_extensions):
+            asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+            return 1
+        return max(1, requested_shards)
+
     @staticmethod
-    def quarantine_unsafe_modules(allowlist: Iterable[str] | None = None) -> tuple[str, ...]:
-        """Detect and quarantine known 3.14t-unsafe event loop modules such as ``uvloop <= 0.22.1``."""
+    def detect_unsafe_modules(allowlist: Iterable[str] | None = None) -> tuple[str, ...]:
+        """Detect known 3.14t-unsafe event loop modules such as uvloop <= 0.22.1."""
         allowed = set(allowlist) if allowlist is not None else set()
-        if not GilAuditReport.is_free_threaded_build() and _is_gil_currently_enabled():
+        if not GilAuditReport.is_free_threaded_build() and GilAuditReport.gil_enabled():
             return ()
         quarantined: list[str] = []
         if "uvloop" not in allowed:
@@ -78,7 +99,6 @@ class GilAuditReport(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     @classmethod
     def audit(
         cls,
-        before_modules: frozenset[str] | None = None,
         *,
         before_extensions: frozenset[str] | None = None,
         gil_enabled_before: bool | None = None,
@@ -88,21 +108,15 @@ class GilAuditReport(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     ) -> "GilAuditReport":
         """Audit whether importing application modules silently re-enabled the CPython GIL."""
         ft_build = cls.is_free_threaded_build()
-        resolved_before = (
-            before_modules
-            if before_modules is not None
-            else (before_extensions if before_extensions is not None else frozenset())
-        )
+        resolved_before = before_extensions if before_extensions is not None else frozenset()
         after_ext = cls.snapshot_extensions()
         before_gil = (
-            gil_enabled_before
-            if gil_enabled_before is not None
-            else (_is_gil_currently_enabled() if not ft_build else False)
+            gil_enabled_before if gil_enabled_before is not None else (cls.gil_enabled() if not ft_build else False)
         )
-        after_gil = gil_enabled_after if gil_enabled_after is not None else _is_gil_currently_enabled()
+        after_gil = gil_enabled_after if gil_enabled_after is not None else cls.gil_enabled()
         reenabled = not before_gil and after_gil
         suspect = tuple(sorted(after_ext - resolved_before)) if reenabled else ()
-        quarantined = cls.quarantine_unsafe_modules(allowlist=allowlist)
+        quarantined = cls.detect_unsafe_modules(allowlist=allowlist)
 
         enforce_strict = (
             strict

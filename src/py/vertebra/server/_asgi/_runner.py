@@ -1,125 +1,194 @@
-"""AsgiRunner: integrates AsgiAdapter with the native batch runner."""
+"""AsgiRunner: unified ASGI 3.0 application driver and batch runner."""
 
 import asyncio
-import contextlib
-import importlib
 import logging
-import os
-from collections.abc import Iterable
+from collections.abc import Awaitable, Buffer, Callable
 from typing import Any
 
-from vertebra.server._asgi._adapter import AsgiAdapter
+import msgspec
+
+from vertebra._vertebra import (
+    AsgiScope,
+)
+from vertebra._vertebra import (
+    Request as _NativeRequest,
+)
+from vertebra._vertebra import (
+    Response as _NativeResponse,
+)
+from vertebra._vertebra import (
+    submit_raw_response as _native_submit_raw_response,
+)
+from vertebra._vertebra import (
+    submit_response as _native_submit_response,
+)
 from vertebra.server._asgi._queues import (
     DEFAULT_STREAM_HIGH_WATERMARK,
     DEFAULT_STREAM_LOW_WATERMARK,
     DEFAULT_STREAM_QUEUE_MAXSIZE,
+    AsgiReceive,
     AsgiResponse,
+    AsgiSend,
     AsgiStreamQueuePair,
+    AsgiStreamReceive,
+    AsgiStreamSend,
+    ChunkCallback,
 )
-from vertebra.server._native import AsyncRuntime
+from vertebra.server._loops import EventLoopPool
 
-__all__ = ("AsgiRunner",)
-
-_NativeResponse: Any = None
-_native_submit_response: Any = None
-with contextlib.suppress(ImportError):
-    from vertebra._vertebra import Response as _NativeResponse
-    from vertebra._vertebra import submit_response as _native_submit_response
-
-log = logging.getLogger(__name__)
-_RAW_DIRECT_SEND = os.environ.get("VERTEBRA_ASGI_DIRECT_SEND")
-_DIRECT_SEND = (
-    True if _RAW_DIRECT_SEND is None else _RAW_DIRECT_SEND.strip().lower() not in ("0", "false", "no", "off", "")
+__all__ = (
+    "FLAG_FINAL",
+    "FLAG_STREAMING",
+    "FLAG_TRAILERS",
+    "AsgiRunner",
 )
+
+logger = logging.getLogger(__name__)
+
+FLAG_STREAMING: int = 1 << 0
+FLAG_FINAL: int = 1 << 1
+FLAG_TRAILERS: int = 1 << 5
+
+
+class _InlineAsgiRequest(msgspec.Struct, frozen=True, gc=False):
+    """Lightweight request carrier used by AsgiRunner.handle_path."""
+
+    method: str = "GET"
+    path: str = "/"
+    query: str | None = None
+    headers: Any = None
+    body: bytes | None = None
+    request_id: int = 0
 
 
 class AsgiRunner:
-    """Synchronous batch runner wrapper around AsgiAdapter."""
+    """Drives ASGI 3.0 applications across single, batch, and streaming lifecycles."""
 
-    __slots__ = ("_adapter", "_loop", "_owns_loop", "_scheduler")
+    __slots__ = (
+        "_app",
+        "_last_trailer_frames",
+        "_lifespan_state",
+        "_loop",
+        "_mount_prefix",
+        "_on_chunk",
+        "_owned_pool",
+        "_owns_loop",
+    )
 
     def __init__(
         self,
-        app: Any,
-        mount_prefix: str = "",
+        app: Callable[..., Awaitable[Any]],
+        *,
         loop: asyncio.AbstractEventLoop | None = None,
+        mount_prefix: str = "",
+        lifespan_state: dict[str, Any] | None = None,
+        on_chunk: ChunkCallback | None = None,
     ) -> None:
-        self._adapter = AsgiAdapter(app, mount_prefix=mount_prefix)
-        self._scheduler: AsyncRuntime | None = None
-        if loop is not None:
-            self._loop = loop
-            self._owns_loop = False
-        else:
-            self._scheduler = AsyncRuntime()
-            self._loop = self._scheduler.loop
-            self._owns_loop = True
+        self._app = app
+        self._loop = loop
+        self._owns_loop = loop is None
+        self._owned_pool: EventLoopPool | None = None
+        self._mount_prefix = mount_prefix.rstrip("/")
+        self._lifespan_state: dict[str, Any] = lifespan_state if lifespan_state is not None else {}
+        self._on_chunk = on_chunk
+        self._last_trailer_frames: list[bytes] = []
+
+    @property
+    def lifespan_state(self) -> dict[str, Any]:
+        """Return the shared ASGI lifespan state dictionary."""
+        return self._lifespan_state
+
+    @property
+    def mount_prefix(self) -> str:
+        """Return the normalized mount prefix."""
+        return self._mount_prefix
+
+    @property
+    def last_trailer_frames(self) -> list[bytes]:
+        """Return the most recent encoded trailer frames emitted via submit_raw_response."""
+        return self._last_trailer_frames
+
+    async def run_single(self, request: Any) -> AsgiResponse:
+        """Drive ``self._app`` for a single request and return its ``AsgiResponse``."""
+        scope = self._build_scope(request)
+        body = self._extract_body(request)
+        request_id: int = getattr(request, "request_id", 0)
+
+        receive = AsgiReceive(body=body)
+        send = AsgiSend(request_id=request_id, on_chunk=self._on_chunk)
+
+        try:
+            await self._app(scope, receive, send)
+        except Exception:
+            logger.exception("Unhandled exception in ASGI application for %s", getattr(request, "path", "/"))
+            if not send.started:
+                return AsgiResponse(
+                    status=500,
+                    headers=[("content-type", "text/plain")],
+                    body=b"Internal Server Error",
+                    request_id=request_id,
+                )
+            return AsgiResponse(
+                status=500,
+                headers=send.response.headers if send.started else [],
+                body=b"",
+                request_id=request_id,
+            )
+
+        resp = send.response
+        if resp.trailers:
+            self._emit_trailers(resp, request_id)
+        return resp
+
+    async def handle_path(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        headers: Any = None,
+        body: bytes | None = None,
+        query: str | None = None,
+        request_id: int = 0,
+    ) -> AsgiResponse:
+        """Convenience helper that builds a request from ``path`` and calls ``run_single``."""
+        req = _InlineAsgiRequest(
+            method=method,
+            path=path,
+            query=query,
+            headers=headers,
+            body=body,
+            request_id=request_id,
+        )
+        return await self.run_single(req)
+
+    async def run_batch(self, requests: list[Any]) -> list[AsgiResponse]:
+        """Drive ``self._app`` concurrently across ``requests``."""
+        if not requests:
+            return []
+        tasks = [self.run_single(req) for req in requests]
+        return list(await asyncio.gather(*tasks))
 
     def __call__(self, requests: list[Any]) -> list[AsgiResponse]:
-        """Process a batch of requests synchronously."""
-        if self._scheduler:
-            fut = self._scheduler.schedule(self._adapter.run_batch(requests))
-            return fut.result()
-
-        if self._loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(self._adapter.run_batch(requests), self._loop)
+        """Run a batch of requests synchronously, returning their ``AsgiResponse`` objects."""
+        if not requests:
+            return []
+        loop = self._ensure_loop()
+        if loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(self.run_batch(requests), loop)
             return future.result()
+        return loop.run_until_complete(self.run_batch(requests))
 
-        return self._loop.run_until_complete(self._adapter.run_batch(requests))
+    def spawn_single(self, request: Any) -> Any:
+        """Spawn a single request as a background task on the event loop."""
+        loop = self._ensure_loop()
+        req_id: int = getattr(request, "request_id", 0)
+        return asyncio.run_coroutine_threadsafe(self._execute_and_submit(request, req_id), loop)
 
-    def spawn_single(self, request: Any) -> None:
-        """Process a single request asynchronously and submit its response."""
-        coro = self._make_dispatch_coro(request)
-
-        if self._scheduler:
-            self._scheduler.spawn(coro)
-            return
-
-        if self._loop.is_running():
-            if _DIRECT_SEND:
-                self._loop.call_soon_threadsafe(_drive_coro, coro)
-            else:
-                loop = self._loop
-                loop.call_soon_threadsafe(loop.create_task, coro)
-            return
-
-        self._loop.create_task(coro)
-
-    def spawn_batch(self, requests: Iterable[Any]) -> None:
-        """Process many requests with a single cross-thread wake."""
-        req_list = list(requests)
-        if not req_list:
-            return
-
-        if self._scheduler is not None:
-            if len(req_list) == 1:
-                self.spawn_single(req_list[0])
-                return
-            self._scheduler.spawn_batch(self._make_dispatch_coro(r) for r in req_list)
-            return
-
-        if not self._loop.is_running() or len(req_list) == 1:
-            for req in req_list:
-                self.spawn_single(req)
-            return
-
-        coros = [self._make_dispatch_coro(r) for r in req_list]
-        if _DIRECT_SEND:
-            self._loop.call_soon_threadsafe(_BatchProcessor(coros))
-        else:
-            loop = self._loop
-
-            def _create_all() -> None:
-                for c in coros:
-                    loop.create_task(c)
-
-            loop.call_soon_threadsafe(_create_all)
-
-    def close(self) -> None:
-        """Shut down the event loop when owned by this runner."""
-        if self._scheduler:
-            self._scheduler.stop()
-        elif self._owns_loop:
-            self._loop.close()
+    def spawn_batch(self, requests: list[Any]) -> list[Any]:
+        """Spawn each request in ``requests`` as an independent task on the event loop."""
+        if not requests:
+            return []
+        return [self.spawn_single(req) for req in requests]
 
     def create_stream_queues(
         self,
@@ -137,134 +206,198 @@ class AsgiRunner:
 
     async def run_stream_session(
         self,
-        scope: dict[str, Any],
-        queues: AsgiStreamQueuePair,
+        scope_or_request: Any,
+        queues: AsgiStreamQueuePair | AsgiStreamReceive,
+        send: AsgiStreamSend | None = None,
     ) -> None:
-        """Run the wrapped ASGI application against a bounded AsgiStreamQueuePair."""
-        await self._adapter._app(scope, queues.receive, queues.send)
+        """Run the wrapped ASGI application against a bounded AsgiStreamQueuePair or stream queues."""
+        if isinstance(queues, AsgiStreamQueuePair):
+            scope_arg = (
+                scope_or_request
+                if isinstance(scope_or_request, dict | AsgiScope)
+                else self._build_scope(scope_or_request)
+            )
+            await self._app(scope_arg, queues.receive, queues.send)
+            return
 
-    def _make_dispatch_coro(self, request: Any) -> Any:
-        """Build the dispatch coroutine that runs the ASGI app and submits its response."""
-        vr_cls, submit = _ensure_ffi()
-        adapter = self._adapter
-
-        async def _dispatch() -> None:
-            try:
-                resp = await adapter.run_single(request)
-                try:
-                    vtb_resp = vr_cls(
-                        status=resp.status,
-                        body=resp.body,
-                        headers=getattr(resp, "headers", None),
-                        request_id=request.request_id,
-                    )
-                    submit(vtb_resp)
-                except Exception:
-                    log.exception(
-                        "failed to construct or submit Response for request %d",
-                        request.request_id,
-                    )
-                    submit(
-                        vr_cls(
-                            status=500,
-                            body=b"Internal Server Error (FFI Error)",
-                            request_id=request.request_id,
-                        )
-                    )
-            except Exception:
-                log.exception("unhandled error in AsgiRunner dispatch loop")
-
-        return _dispatch()
-
-
-class _BatchProcessor:
-    """Single callable that drives many coroutines under one event-loop wake."""
-
-    __slots__ = ("_coros",)
-
-    def __init__(self, coros: list[Any]) -> None:
-        self._coros = coros
-
-    def __call__(self) -> None:
-        for coro in self._coros:
-            _drive_coro(coro)
-
-
-def _ensure_ffi() -> tuple[Any, Any]:
-    """Return the native Response class and submit_response function."""
-    if _NativeResponse is not None and _native_submit_response is not None:
-        return _NativeResponse, _native_submit_response
-    mod = importlib.import_module("vertebra._vertebra")
-    return mod.Response, mod.submit_response
-
-
-def _current_loop() -> asyncio.AbstractEventLoop | None:
-    """Return the running event loop, falling back to the policy loop when set."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        with contextlib.suppress(RuntimeError):
-            return asyncio.get_event_loop_policy().get_event_loop()
-        return None
-
-
-async def _resume_coro_in_task(coro: Any, initial_yielded: Any) -> None:
-    """Drive a yielded coroutine to completion inside a real asyncio.Task so anyio task groups work."""
-    yielded = initial_yielded
-    while True:
+        if send is None:
+            msg = "send queue is required when queues is an AsgiStreamReceive"
+            raise ValueError(msg)
+        scope = self._build_scope(scope_or_request)
         try:
-            if yielded is None:
-                await asyncio.sleep(0)
-                send_val = None
-            elif hasattr(yielded, "__await__") or asyncio.isfuture(yielded):
-                send_val = await yielded
-            else:
-                send_val = None
-        except asyncio.CancelledError as exc:
-            try:
-                yielded = coro.throw(exc)
-            except StopIteration:
-                return
-            except BaseException:
-                log.exception("coroutine raised after cancellation")
-                return
-        except BaseException as exc:
-            try:
-                yielded = coro.throw(type(exc), exc, exc.__traceback__)
-            except StopIteration:
-                return
-            except BaseException:
-                log.exception("coroutine raised unhandled exception")
-                return
+            await self._app(scope, queues, send)
+        except Exception:
+            logger.exception(
+                "Unhandled exception in streaming ASGI session for %s", getattr(scope_or_request, "path", "/")
+            )
+            if not send.started:
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 500,
+                        "headers": [(b"content-type", b"text/plain")],
+                    }
+                )
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": b"Internal Server Error",
+                        "more_body": False,
+                    }
+                )
+
+    def close(self) -> None:
+        """Shut down the owned event loop pool if one was created."""
+        if self._owned_pool is not None:
+            self._owned_pool.stop()
+            self._owned_pool = None
+            self._loop = None
+
+    def _build_scope(self, request: Any) -> AsgiScope:
+        """Build a native ``AsgiScope`` from a native ``Request`` or a Python test stub."""
+        if isinstance(request, _NativeRequest):
+            scope = request.asgi_scope(self._mount_prefix or None)
         else:
+            asgi_scope_fn = getattr(request, "asgi_scope", None)
+            if callable(asgi_scope_fn):
+                scope = asgi_scope_fn(self._mount_prefix or None)
+            else:
+                scope = self._build_scope_from_stub(request)
+        if self._lifespan_state:
+            scope["state"] = self._lifespan_state.copy()
+        return scope
+
+    def _build_scope_from_stub(self, request: Any) -> AsgiScope:
+        """Build an ``AsgiScope`` from a duck-typed request object."""
+        method: str = getattr(request, "method", "GET")
+        full_path: str = getattr(request, "path", "/")
+        prefix = self._mount_prefix
+        if prefix and full_path.startswith(prefix):
+            stripped_path = full_path[len(prefix) :] or "/"
+            root_path = prefix
+        else:
+            stripped_path = full_path
+            root_path = prefix
+
+        query: str = getattr(request, "query", None) or ""
+        http_version: str = getattr(request, "http_version", "1.1")
+        scheme: str = getattr(request, "scheme", "http")
+
+        raw_headers = getattr(request, "headers", None)
+        header_pairs: list[tuple[bytes, bytes]] = []
+        if raw_headers is not None:
+            asgi_items = getattr(raw_headers, "asgi_items", None)
+            if callable(asgi_items):
+                header_pairs = list(asgi_items())
+            else:
+                items = raw_headers.items() if hasattr(raw_headers, "items") else raw_headers
+                for k, v in items:
+                    kb = k.lower().encode("latin-1") if isinstance(k, str) else bytes(k).lower()
+                    vb = v.encode("latin-1") if isinstance(v, str) else bytes(v)
+                    header_pairs.append((kb, vb))
+
+        scope = AsgiScope.from_parts(
+            method=method,
+            path=stripped_path,
+            query_string=query,
+            headers=header_pairs,
+            root_path=root_path,
+            http_version=http_version,
+            scheme=scheme,
+        )
+
+        raw_path_attr = getattr(request, "raw_path", None)
+        if isinstance(raw_path_attr, bytes):
+            if prefix and raw_path_attr.startswith(prefix.encode("latin-1")):
+                rest = raw_path_attr[len(prefix) :] or b"/"
+                scope["raw_path"] = rest
+            else:
+                scope["raw_path"] = raw_path_attr
+
+        raw_query_attr = getattr(request, "raw_query", None)
+        if isinstance(raw_query_attr, bytes) and not query:
+            scope["query_string"] = raw_query_attr
+
+        client = getattr(request, "client", None)
+        if client is not None:
+            scope["client"] = client
+        server = getattr(request, "server", None)
+        if server is not None:
+            scope["server"] = server
+        return scope
+
+    @staticmethod
+    def _extract_body(request: Any) -> Buffer:
+        """Extract a zero-copy slab view when available, otherwise fall back to ``body``."""
+        if isinstance(request, _NativeRequest):
             try:
-                yielded = coro.send(send_val)
-            except StopIteration:
-                return
-            except BaseException:
-                log.exception("coroutine raised unhandled exception")
-                return
+                return request.body_view
+            except BufferError:
+                return request.body or b""
+        body: bytes | memoryview | None = getattr(request, "body", None)
+        return body if body is not None else b""
 
+    def _emit_trailers(self, resp: AsgiResponse, request_id: int) -> None:
+        """Encode and submit trailing HTTP headers via ``submit_raw_response``."""
+        req_id = resp.request_id or request_id
+        trailer_pairs = [
+            (
+                k.decode("latin-1") if isinstance(k, bytes) else str(k),
+                v.decode("latin-1") if isinstance(v, bytes) else str(v),
+            )
+            for k, v in resp.trailers
+        ]
+        self._last_trailer_frames = _native_submit_raw_response(
+            req_id,
+            resp.status,
+            trailer_pairs,
+            b"",
+            FLAG_TRAILERS | FLAG_FINAL,
+        )
 
-def _handle_yielded(coro: Any, yielded: Any) -> None:
-    """Promote a yielded coroutine into an asyncio.Task on the active event loop."""
-    loop = _current_loop()
-    if loop is not None:
-        loop.create_task(_resume_coro_in_task(coro, yielded))
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        if self._loop is None:
+            self._owned_pool = EventLoopPool(size=1)
+            self._loop = self._owned_pool.primary_loop
+        return self._loop
 
+    async def _execute_and_submit(self, request: Any, request_id: int) -> None:
+        try:
+            resp = await self.run_single(request)
+            native_resp = self._to_native_response(resp, request_id)
+            _native_submit_response(native_resp)
+        except Exception:
+            logger.exception("Unhandled error in spawned ASGI task (request_id=%d)", request_id)
+            try:
+                err_resp = _NativeResponse(500, b"Internal Server Error", None, request_id)
+                _native_submit_response(err_resp)
+            except Exception:
+                logger.exception("Failed to submit error response for request_id=%d", request_id)
 
-def _step_coro(coro: Any, value: Any = None) -> None:
-    """Send value into the coroutine once; if it yields, promote it to an asyncio.Task."""
-    try:
-        yielded = coro.send(value)
-    except StopIteration:
-        return
-    except BaseException:
-        log.exception("coroutine raised on send")
-        return
-    _handle_yielded(coro, yielded)
-
-
-def _drive_coro(coro: Any) -> None:
-    """Step a coroutine once and promote to an asyncio.Task if it suspends."""
-    _step_coro(coro)
+    def _to_native_response(self, resp: AsgiResponse, request_id: int) -> _NativeResponse:
+        """Convert an ``AsgiResponse`` to a Rust ``Response`` without extra body copies."""
+        hdr_pairs: list[tuple[str, str]] = list(resp.headers)
+        req_id = resp.request_id or request_id
+        if resp.file_path is not None:
+            try:
+                return _NativeResponse.from_file(
+                    resp.file_path,
+                    status=resp.status,
+                    headers=hdr_pairs or None,
+                    request_id=req_id,
+                )
+            except OSError:
+                return _NativeResponse(resp.status, bytes(resp.body), hdr_pairs or None, req_id)
+        if resp.zero_copy_buffer is not None:
+            return _NativeResponse.from_buffer(
+                resp.status,
+                resp.zero_copy_buffer,
+                hdr_pairs or None,
+                req_id,
+            )
+        return _NativeResponse(
+            resp.status,
+            bytes(resp.body),
+            hdr_pairs or None,
+            req_id,
+        )

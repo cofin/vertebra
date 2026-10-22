@@ -1,6 +1,7 @@
 //! Throughput benchmark for the `vertebra-http` server.
 //!
-//! Two benchmarks:
+//! Benchmarks:
+//! - **router**: lookup performance across 100 routes.
 //! - **direct_dispatch**: Direct channel path (no bridge, no arena). Target: >100k req/s.
 //! - **bridge_dispatch**: Full bridge path (arena + slab + async response). Measures overhead.
 //!
@@ -8,11 +9,12 @@
 //!   cd src/rs && cargo bench --package vertebra-http --bench server_throughput
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 fn bench_router_lookup(c: &mut Criterion) {
-    use vertebra_http::{route_table::RouteTable, router::Router};
+    use vertebra_http::routing::{RouteTable, Router};
 
     let mut table = RouteTable::new();
     for i in 0..100 {
@@ -34,12 +36,11 @@ fn bench_router_lookup(c: &mut Criterion) {
 
 fn bench_direct_dispatch(c: &mut Criterion) {
     use vertebra_http::{
-        collector::{PendingResponse, RequestBatcher},
+        batcher::{BatchLimit, RequestBatcher},
+        body::PendingResponse,
         config::ServerConfig,
         dispatcher::Dispatcher,
-        policy::BatchPolicy,
-        route_table::RouteTable,
-        router::Router,
+        routing::{RouteTable, Router},
         server,
     };
 
@@ -59,21 +60,19 @@ fn bench_direct_dispatch(c: &mut Criterion) {
         let dispatcher = Arc::new(dispatcher);
 
         let (collector, collector_tx) =
-            RequestBatcher::new(Arc::clone(&dispatcher), BatchPolicy::default_fixed(), 4096);
+            RequestBatcher::new(Arc::clone(&dispatcher), BatchLimit::default(), 4096);
         tokio::spawn(collector.run());
 
         // Direct dispatch worker — responds via oneshot, no bridge
         tokio::spawn(async move {
             while let Some(batch) = direct_rx.recv().await {
                 for req in batch.requests {
-                    if let Some(reply) = req.reply {
-                        let _ = reply.send(PendingResponse {
-                            status: 200,
-                            headers_mp: bytes::Bytes::new(),
-                            body: bytes::Bytes::from_static(b"ok"),
-                            stream_rx: None,
-                        });
-                    }
+                    let _ = req.reply.send(PendingResponse {
+                        status: 200,
+                        headers_mp: bytes::Bytes::new(),
+                        body: bytes::Bytes::from_static(b"ok"),
+                        stream_rx: None,
+                    });
                 }
             }
         });
@@ -163,18 +162,85 @@ fn bench_direct_dispatch(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_bridge_dispatch(c: &mut Criterion) {
+async fn setup_bridge_server(limit: vertebra_http::batcher::BatchLimit) -> SocketAddr {
     use vertebra_core::bridge::{BatchBridge, BridgeResponse};
     use vertebra_http::{
-        collector::{PendingResponse, RequestBatcher},
+        batcher::RequestBatcher,
+        body::PendingResponse,
         config::ServerConfig,
         dispatcher::Dispatcher,
-        policy::BatchPolicy,
         response::encode_response_headers,
-        route_table::RouteTable,
-        router::Router,
+        routing::{RouteTable, Router},
         server,
     };
+
+    let mut table = RouteTable::new();
+    table.insert("GET", "/hello");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+
+    let _ = BatchBridge::init(512, 1_048_576, 4, 1);
+    let dispatcher = Arc::new(Dispatcher::new());
+    let (collector, collector_tx) = RequestBatcher::new(Arc::clone(&dispatcher), limit, 4096);
+
+    tokio::spawn(collector.run());
+
+    std::thread::spawn(move || {
+        while let Some(bridge) = BatchBridge::get() {
+            if let Some(snap) = bridge.poll_batch(Duration::from_millis(50)) {
+                let responses: Vec<BridgeResponse> = (0..snap.len())
+                    .map(|i| BridgeResponse {
+                        request_id: snap.node(i).correlation_id,
+                        status: 200,
+                        headers: Vec::new(),
+                        body: bytes::Bytes::from_static(b"ok"),
+                    })
+                    .collect();
+                let _ = bridge.submit_responses(responses);
+            }
+        }
+    });
+
+    let dispatcher_for_resp = Arc::clone(&dispatcher);
+    tokio::spawn(async move {
+        let bridge = BatchBridge::get().expect("bridge not initialized");
+        while let Some(resps) = bridge.recv_responses().await {
+            for resp in resps {
+                dispatcher_for_resp.complete(
+                    resp.request_id,
+                    PendingResponse {
+                        status: resp.status,
+                        headers_mp: encode_response_headers(&resp.headers),
+                        body: resp.body,
+                        stream_rx: None,
+                    },
+                );
+            }
+        }
+    });
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let config = Arc::new(ServerConfig {
+        bind: addr,
+        ..ServerConfig::default()
+    });
+
+    tokio::spawn(server::run_with_listener(
+        listener,
+        config,
+        router,
+        dispatcher,
+        vec![collector_tx],
+        std::future::pending::<()>(),
+    ));
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    addr
+}
+
+fn bench_bridge_dispatch(c: &mut Criterion) {
+    use vertebra_http::batcher::BatchLimit;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -182,73 +248,7 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
         .build()
         .unwrap();
 
-    let addr = rt.block_on(async {
-        let mut table = RouteTable::new();
-        table.insert("GET", "/hello");
-        let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
-
-        let _ = BatchBridge::init(512, 1_048_576, 4, 1);
-        let dispatcher = Arc::new(Dispatcher::new());
-        let (collector, collector_tx) =
-            RequestBatcher::new(Arc::clone(&dispatcher), BatchPolicy::default_fixed(), 4096);
-
-        tokio::spawn(collector.run());
-
-        std::thread::spawn(move || {
-            while let Some(bridge) = BatchBridge::get() {
-                if let Some(snap) = bridge.poll_batch(Duration::from_millis(50)) {
-                    let responses: Vec<BridgeResponse> = (0..snap.len())
-                        .map(|i| BridgeResponse {
-                            request_id: snap.node(i).correlation_id,
-                            status: 200,
-                            headers: Vec::new(),
-                            body: bytes::Bytes::from_static(b"ok"),
-                        })
-                        .collect();
-                    let _ = bridge.submit_responses(responses);
-                }
-            }
-        });
-
-        // Async response reader (no spawn_blocking, no polling)
-        let dispatcher_for_resp = Arc::clone(&dispatcher);
-        tokio::spawn(async move {
-            let bridge = BatchBridge::get().expect("bridge not initialized");
-            while let Some(resps) = bridge.recv_responses().await {
-                for resp in resps {
-                    dispatcher_for_resp.complete(
-                        resp.request_id,
-                        PendingResponse {
-                            status: resp.status,
-                            headers_mp: encode_response_headers(&resp.headers),
-                            body: resp.body,
-                            stream_rx: None,
-                        },
-                    );
-                }
-            }
-        });
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let config = Arc::new(ServerConfig {
-            bind: addr,
-            ..ServerConfig::default()
-        });
-
-        tokio::spawn(server::run_with_listener(
-            listener,
-            config,
-            router,
-            dispatcher,
-            vec![collector_tx],
-            std::future::pending::<()>(),
-        ));
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        addr
-    });
+    let addr = rt.block_on(setup_bridge_server(BatchLimit { max: 64 }));
 
     let requests_per_iter: u64 = 1000;
     let url = format!("http://{}/hello", addr);
@@ -315,17 +315,7 @@ fn bench_bridge_dispatch(c: &mut Criterion) {
 }
 
 fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
-    use vertebra_core::bridge::BatchBridge;
-    use vertebra_http::{
-        collector::{PendingResponse, RequestBatcher},
-        config::ServerConfig,
-        dispatcher::Dispatcher,
-        policy::BatchPolicy,
-        response::encode_response_headers,
-        route_table::RouteTable,
-        router::Router,
-        server,
-    };
+    use vertebra_http::batcher::BatchLimit;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -333,61 +323,7 @@ fn bench_bridge_dispatch_adaptive(c: &mut Criterion) {
         .build()
         .unwrap();
 
-    let addr = rt.block_on(async {
-        let mut table = RouteTable::new();
-        table.insert("GET", "/hello");
-        let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
-
-        // NOTE: BatchBridge is a global singleton — if bench_bridge_dispatch ran
-        // first, this init will fail. That's fine; the existing bridge is reused.
-        let _ = BatchBridge::init(512, 1_048_576, 4, 1);
-        let dispatcher = Arc::new(Dispatcher::new());
-        let (collector, collector_tx) = RequestBatcher::new(
-            Arc::clone(&dispatcher),
-            BatchPolicy::default_adaptive(),
-            4096,
-        );
-
-        tokio::spawn(collector.run());
-
-        let dispatcher_for_resp = Arc::clone(&dispatcher);
-        tokio::spawn(async move {
-            let bridge = BatchBridge::get().expect("bridge not initialized");
-            while let Some(resps) = bridge.recv_responses().await {
-                for resp in resps {
-                    dispatcher_for_resp.complete(
-                        resp.request_id,
-                        PendingResponse {
-                            status: resp.status,
-                            headers_mp: encode_response_headers(&resp.headers),
-                            body: resp.body,
-                            stream_rx: None,
-                        },
-                    );
-                }
-            }
-        });
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let config = Arc::new(ServerConfig {
-            bind: addr,
-            ..ServerConfig::default()
-        });
-
-        tokio::spawn(server::run_with_listener(
-            listener,
-            config,
-            router,
-            dispatcher,
-            vec![collector_tx],
-            std::future::pending::<()>(),
-        ));
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        addr
-    });
+    let addr = rt.block_on(setup_bridge_server(BatchLimit { max: 128 }));
 
     let requests_per_iter: u64 = 1000;
     let url = format!("http://{}/hello", addr);

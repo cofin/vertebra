@@ -8,11 +8,12 @@ use std::time::{Duration, Instant};
 use crossbeam_utils::Backoff;
 
 use crate::buffer::{
-    ABI_VERSION, Buffer, BufferError, BufferPool, ChannelMode, MAGIC, RegionState, RingLayout,
-    SLOT_ALIGN, ShmHeader, SlotHeader,
+    ABI_VERSION, ChannelMode, MAGIC, RegionState, RingLayout, ShmHeader, SlotHeader,
 };
 use crate::shm::{ShmError, ShmRegion};
 use crate::sync::{self, SyncError};
+
+pub(crate) const SLOT_FLAG_ABORTED: u32 = 0x8000_0000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelError {
@@ -28,12 +29,10 @@ pub enum ChannelError {
     PayloadTooLarge { len: usize, capacity: usize },
     #[error("buffer too small: {len} > {capacity}")]
     BufferTooSmall { len: usize, capacity: usize },
-    #[error("buffer metadata invalid")]
-    InvalidBufferMeta,
+    #[error("corrupted slot in shared memory")]
+    CorruptedSlot,
     #[error("slot already borrowed")]
     SlotBorrowed,
-    #[error("buffer error: {0}")]
-    Buffer(#[from] BufferError),
     #[error("shared memory error: {0}")]
     Shm(#[from] ShmError),
     #[error("sync failure: {0}")]
@@ -87,7 +86,20 @@ impl SlotView {
     pub fn flags(&self) -> u32 {
         self.flags
     }
+}
 
+impl core::fmt::Debug for SlotView {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SlotView")
+            .field("slot_index", &self.slot_index)
+            .field("length", &self.length)
+            .field("flags", &self.flags)
+            .field("released", &self.released)
+            .finish()
+    }
+}
+
+impl SlotView {
     /// Explicitly release the slot back to the ring buffer.
     ///
     /// This is called automatically on drop, but can be called early.
@@ -264,19 +276,6 @@ impl SpscRing {
         head != tail
     }
 
-    /// Split the ring into sender/receiver handles.
-    ///
-    /// The caller must ensure only one sender and one receiver are used.
-    pub fn split(self) -> (SpscSender, SpscReceiver) {
-        let ring = Arc::new(self);
-        (
-            SpscSender {
-                ring: Arc::clone(&ring),
-            },
-            SpscReceiver { ring },
-        )
-    }
-
     pub fn try_send(&self, payload: &[u8], flags: u32) -> Result<(), ChannelError> {
         if payload.len() > self.payload_capacity() {
             return Err(ChannelError::PayloadTooLarge {
@@ -293,15 +292,7 @@ impl SpscRing {
         unsafe {
             self.write_slot(tail, payload, flags);
         }
-        // Release ensures all slot writes are visible before advancing tail
-        self.write_head().store(next, Ordering::Release);
-        self.wait_write_ptr().fetch_add(1, Ordering::SeqCst);
-        // PERF: Conditional wake - only syscall if receivers are actually waiting.
-        // This eliminates ~8µs per send when receiver is actively polling.
-        if self.recv_waiters().load(Ordering::SeqCst) > 0 {
-            sync::wake_one(self.wait_write_ptr())?;
-        }
-        Ok(())
+        self.publish_write(next)
     }
 
     /// Zero-copy send: reserve a slot and call `writer` to populate `len` bytes of payload.
@@ -321,21 +312,118 @@ impl SpscRing {
         if next == head {
             return Err(ChannelError::Full);
         }
+        struct SpscSendGuard {
+            header: *mut SlotHeader,
+            armed: bool,
+        }
+        impl Drop for SpscSendGuard {
+            fn drop(&mut self) {
+                if self.armed {
+                    unsafe {
+                        (*self.header).len = 0;
+                    }
+                }
+            }
+        }
+
         unsafe {
             let slot = self.slot_ptr(tail);
             let header = slot.cast::<SlotHeader>();
+            let mut guard = SpscSendGuard {
+                header,
+                armed: true,
+            };
             (*header).len = len as u32;
             (*header).flags = flags;
             let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
             let payload_slice = core::slice::from_raw_parts_mut(payload_ptr, len);
             writer(payload_slice);
+            guard.armed = false;
         }
+        self.publish_write(next)
+    }
+
+    #[inline]
+    fn publish_write(&self, next: u64) -> Result<(), ChannelError> {
         self.write_head().store(next, Ordering::Release);
         self.wait_write_ptr().fetch_add(1, Ordering::SeqCst);
         if self.recv_waiters().load(Ordering::SeqCst) > 0 {
             sync::wake_one(self.wait_write_ptr())?;
         }
         Ok(())
+    }
+
+    #[inline]
+    fn publish_read(&self, next: u64) -> Result<(), ChannelError> {
+        self.read_head().store(next, Ordering::Release);
+        self.wait_read_ptr().fetch_add(1, Ordering::SeqCst);
+        if self.send_waiters().load(Ordering::SeqCst) > 0 {
+            sync::wake_one(self.wait_read_ptr())?;
+        }
+        Ok(())
+    }
+
+    fn park_send(&self, deadline: Option<Instant>) -> Result<bool, ChannelError> {
+        let remaining = match deadline {
+            Some(dl) => {
+                let now = Instant::now();
+                if now >= dl {
+                    return Ok(false);
+                }
+                Some(dl - now)
+            }
+            None => None,
+        };
+        let wait_word = self.wait_read_ptr();
+        let expected = wait_word.load(Ordering::SeqCst);
+
+        self.send_waiters().fetch_add(1, Ordering::SeqCst);
+
+        let head = self.read_head().load(Ordering::SeqCst);
+        let tail = self.write_head().load(Ordering::SeqCst);
+        let next = tail.wrapping_add(1) & self.mask;
+        if next != head {
+            self.send_waiters().fetch_sub(1, Ordering::SeqCst);
+            return Ok(true);
+        }
+
+        let woke = match remaining {
+            Some(rem) => sync::wait_on_address_timeout(wait_word, expected, rem),
+            None => sync::wait_on_address(wait_word, expected).map(|()| true),
+        };
+        self.send_waiters().fetch_sub(1, Ordering::SeqCst);
+        Ok(woke?)
+    }
+
+    fn park_recv(&self, deadline: Option<Instant>) -> Result<bool, ChannelError> {
+        let remaining = match deadline {
+            Some(dl) => {
+                let now = Instant::now();
+                if now >= dl {
+                    return Ok(false);
+                }
+                Some(dl - now)
+            }
+            None => None,
+        };
+        let wait_word = self.wait_write_ptr();
+        let expected = wait_word.load(Ordering::SeqCst);
+
+        self.recv_waiters().fetch_add(1, Ordering::SeqCst);
+
+        let head = self.read_head().load(Ordering::SeqCst);
+        let tail = self.write_head().load(Ordering::SeqCst);
+        if head != tail {
+            self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
+            return Ok(true);
+        }
+
+        let woke = match remaining {
+            Some(rem) => sync::wait_on_address_timeout(wait_word, expected, rem),
+            None => sync::wait_on_address(wait_word, expected).map(|()| true),
+        };
+        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
+        Ok(woke?)
     }
 
     /// Blocking zero-copy send: waits for space if full, then calls `writer` to populate `len` bytes.
@@ -347,22 +435,7 @@ impl SpscRing {
             match self.try_send_with(len, flags, &mut writer) {
                 Ok(()) => return Ok(()),
                 Err(ChannelError::Full) => {
-                    let wait_word = self.wait_read_ptr();
-                    let expected = wait_word.load(Ordering::SeqCst);
-
-                    self.send_waiters().fetch_add(1, Ordering::SeqCst);
-
-                    let head = self.read_head().load(Ordering::SeqCst);
-                    let tail = self.write_head().load(Ordering::SeqCst);
-                    let next = tail.wrapping_add(1) & self.mask;
-                    if next != head {
-                        self.send_waiters().fetch_sub(1, Ordering::SeqCst);
-                        continue;
-                    }
-
-                    let result = sync::wait_on_address(wait_word, expected);
-                    self.send_waiters().fetch_sub(1, Ordering::SeqCst);
-                    result?;
+                    self.park_send(None)?;
                 }
                 Err(err) => return Err(err),
             }
@@ -374,27 +447,7 @@ impl SpscRing {
             match self.try_send(payload, flags) {
                 Ok(()) => return Ok(()),
                 Err(ChannelError::Full) => {
-                    let wait_word = self.wait_read_ptr();
-                    let expected = wait_word.load(Ordering::SeqCst);
-
-                    // CRITICAL: Increment waiter count BEFORE checking for space.
-                    // Uses SeqCst to prevent Store-Load reordering before we park.
-                    self.send_waiters().fetch_add(1, Ordering::SeqCst);
-
-                    // CRITICAL: Double-check for space after incrementing counter.
-                    let head = self.read_head().load(Ordering::SeqCst);
-                    let tail = self.write_head().load(Ordering::SeqCst);
-                    let next = tail.wrapping_add(1) & self.mask;
-                    if next != head {
-                        // Space freed! Decrement counter and retry.
-                        self.send_waiters().fetch_sub(1, Ordering::SeqCst);
-                        continue;
-                    }
-
-                    // Safe to park - receiver will see send_waiters > 0 and wake us.
-                    let result = sync::wait_on_address(wait_word, expected);
-                    self.send_waiters().fetch_sub(1, Ordering::SeqCst);
-                    result?;
+                    self.park_send(None)?;
                 }
                 Err(err) => return Err(err),
             }
@@ -412,29 +465,7 @@ impl SpscRing {
             match self.try_send(payload, flags) {
                 Ok(()) => return Ok(true),
                 Err(ChannelError::Full) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Ok(false);
-                    }
-                    let remaining = deadline - now;
-                    let wait_word = self.wait_read_ptr();
-                    let expected = wait_word.load(Ordering::SeqCst);
-
-                    // Increment waiter count before checking for space
-                    self.send_waiters().fetch_add(1, Ordering::SeqCst);
-
-                    // Double-check for space after incrementing counter
-                    let head = self.read_head().load(Ordering::SeqCst);
-                    let tail = self.write_head().load(Ordering::SeqCst);
-                    let next = tail.wrapping_add(1) & self.mask;
-                    if next != head {
-                        self.send_waiters().fetch_sub(1, Ordering::SeqCst);
-                        continue;
-                    }
-
-                    let timed_out = !sync::wait_on_address_timeout(wait_word, expected, remaining)?;
-                    self.send_waiters().fetch_sub(1, Ordering::SeqCst);
-                    if timed_out {
+                    if !self.park_send(Some(deadline))? {
                         return Ok(false);
                     }
                 }
@@ -444,6 +475,9 @@ impl SpscRing {
     }
 
     pub fn try_recv(&self, out: &mut [u8]) -> Result<usize, ChannelError> {
+        if self.slot_borrowed.load(Ordering::Acquire) {
+            return Err(ChannelError::SlotBorrowed);
+        }
         let head = self.read_head().load(Ordering::Relaxed);
         let tail = self.write_head().load(Ordering::Acquire);
         if head == tail {
@@ -451,17 +485,14 @@ impl SpscRing {
         }
         let len = unsafe { self.read_slot(head, out)? };
         let next = head.wrapping_add(1) & self.mask;
-        self.read_head().store(next, Ordering::Release);
-        self.wait_read_ptr().fetch_add(1, Ordering::SeqCst);
-        // PERF: Conditional wake - only syscall if senders are actually waiting.
-        // This eliminates ~8µs per recv when sender is actively pushing.
-        if self.send_waiters().load(Ordering::SeqCst) > 0 {
-            sync::wake_one(self.wait_read_ptr())?;
-        }
+        self.publish_read(next)?;
         Ok(len)
     }
 
     pub fn try_recv_with_flags(&self, out: &mut [u8]) -> Result<(usize, u32), ChannelError> {
+        if self.slot_borrowed.load(Ordering::Acquire) {
+            return Err(ChannelError::SlotBorrowed);
+        }
         let head = self.read_head().load(Ordering::Relaxed);
         let tail = self.write_head().load(Ordering::Acquire);
         if head == tail {
@@ -469,12 +500,7 @@ impl SpscRing {
         }
         let (len, flags) = unsafe { self.read_slot_with_flags(head, out)? };
         let next = head.wrapping_add(1) & self.mask;
-        self.read_head().store(next, Ordering::Release);
-        self.wait_read_ptr().fetch_add(1, Ordering::SeqCst);
-        // PERF: Conditional wake - only syscall if senders are actually waiting.
-        if self.send_waiters().load(Ordering::SeqCst) > 0 {
-            sync::wake_one(self.wait_read_ptr())?;
-        }
+        self.publish_read(next)?;
         Ok((len, flags))
     }
 
@@ -483,28 +509,7 @@ impl SpscRing {
             match self.try_recv(out) {
                 Ok(len) => return Ok(len),
                 Err(ChannelError::Empty) => {
-                    let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::SeqCst);
-
-                    // CRITICAL: Increment waiter count BEFORE checking for data.
-                    // This ensures sender sees us waiting before it checks the counter.
-                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
-
-                    // CRITICAL: Double-check for data after incrementing counter.
-                    // If sender wrote data between try_recv and fetch_add, we'd miss it
-                    // without this re-check (lost wakeup bug).
-                    let head = self.read_head().load(Ordering::SeqCst);
-                    let tail = self.write_head().load(Ordering::SeqCst);
-                    if head != tail {
-                        // Data arrived! Decrement counter and retry.
-                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                        continue;
-                    }
-
-                    // Safe to park - sender will see recv_waiters > 0 and wake us.
-                    let result = sync::wait_on_address(wait_word, expected);
-                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                    result?;
+                    self.park_recv(None)?;
                 }
                 Err(err) => return Err(err),
             }
@@ -521,28 +526,7 @@ impl SpscRing {
             match self.try_recv(out) {
                 Ok(len) => return Ok(Some(len)),
                 Err(ChannelError::Empty) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Ok(None);
-                    }
-                    let remaining = deadline - now;
-                    let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::SeqCst);
-
-                    // Increment waiter count before checking for data
-                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
-
-                    // Double-check for data after incrementing counter
-                    let head = self.read_head().load(Ordering::SeqCst);
-                    let tail = self.write_head().load(Ordering::SeqCst);
-                    if head != tail {
-                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                        continue;
-                    }
-
-                    let timed_out = !sync::wait_on_address_timeout(wait_word, expected, remaining)?;
-                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                    if timed_out {
+                    if !self.park_recv(Some(deadline))? {
                         return Ok(None);
                     }
                 }
@@ -586,8 +570,6 @@ impl SpscRing {
         spin_us: u64,
         timeout: Duration,
     ) -> Result<Option<usize>, ChannelError> {
-        use std::time::Instant;
-
         // Fast path: data already available
         match self.try_recv(out) {
             Ok(len) => return Ok(Some(len)),
@@ -616,28 +598,7 @@ impl SpscRing {
             match self.try_recv(out) {
                 Ok(len) => return Ok(Some(len)),
                 Err(ChannelError::Empty) => {
-                    let now = Instant::now();
-                    if now >= timeout_deadline {
-                        return Ok(None);
-                    }
-                    let remaining = timeout_deadline - now;
-                    let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::SeqCst);
-
-                    // Increment waiter count before checking for data
-                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
-
-                    // Double-check for data before blocking
-                    let head = self.read_head().load(Ordering::SeqCst);
-                    let tail = self.write_head().load(Ordering::SeqCst);
-                    if head != tail {
-                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                        continue;
-                    }
-
-                    let timed_out = !sync::wait_on_address_timeout(wait_word, expected, remaining)?;
-                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                    if timed_out {
+                    if !self.park_recv(Some(timeout_deadline))? {
                         return Ok(None);
                     }
                 }
@@ -651,23 +612,7 @@ impl SpscRing {
             match self.try_recv_with_flags(out) {
                 Ok(result) => return Ok(result),
                 Err(ChannelError::Empty) => {
-                    let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::SeqCst);
-
-                    // Increment waiter count before checking for data
-                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
-
-                    // Double-check for data after incrementing counter
-                    let head = self.read_head().load(Ordering::SeqCst);
-                    let tail = self.write_head().load(Ordering::SeqCst);
-                    if head != tail {
-                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                        continue;
-                    }
-
-                    let result = sync::wait_on_address(wait_word, expected);
-                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                    result?;
+                    self.park_recv(None)?;
                 }
                 Err(err) => return Err(err),
             }
@@ -702,6 +647,10 @@ impl SpscRing {
 
         // Get slot data without advancing the cursor
         let (data_ptr, length, flags) = unsafe { self.peek_slot(head) };
+        if length > self.payload_capacity() {
+            self.slot_borrowed.store(false, Ordering::Release);
+            return Err(ChannelError::CorruptedSlot);
+        }
 
         Ok(SlotView {
             ring: Arc::clone(self),
@@ -719,23 +668,7 @@ impl SpscRing {
             match self.try_recv_view() {
                 Ok(view) => return Ok(view),
                 Err(ChannelError::Empty) => {
-                    let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::SeqCst);
-
-                    // Increment waiter count before checking for data
-                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
-
-                    // Double-check for data after incrementing counter
-                    let head = self.read_head().load(Ordering::SeqCst);
-                    let tail = self.write_head().load(Ordering::SeqCst);
-                    if head != tail {
-                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                        continue;
-                    }
-
-                    let result = sync::wait_on_address(wait_word, expected);
-                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                    result?;
+                    self.park_recv(None)?;
                 }
                 Err(err) => return Err(err),
             }
@@ -752,28 +685,7 @@ impl SpscRing {
             match self.try_recv_view() {
                 Ok(view) => return Ok(Some(view)),
                 Err(ChannelError::Empty) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Ok(None);
-                    }
-                    let remaining = deadline - now;
-                    let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::SeqCst);
-
-                    // Increment waiter count before checking for data
-                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
-
-                    // Double-check for data after incrementing counter
-                    let head = self.read_head().load(Ordering::SeqCst);
-                    let tail = self.write_head().load(Ordering::SeqCst);
-                    if head != tail {
-                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                        continue;
-                    }
-
-                    let timed_out = !sync::wait_on_address_timeout(wait_word, expected, remaining)?;
-                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                    if timed_out {
+                    if !self.park_recv(Some(deadline))? {
                         return Ok(None);
                     }
                 }
@@ -792,28 +704,7 @@ impl SpscRing {
             match self.try_recv_with_flags(out) {
                 Ok(result) => return Ok(Some(result)),
                 Err(ChannelError::Empty) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Ok(None);
-                    }
-                    let remaining = deadline - now;
-                    let wait_word = self.wait_write_ptr();
-                    let expected = wait_word.load(Ordering::SeqCst);
-
-                    // Increment waiter count before checking for data
-                    self.recv_waiters().fetch_add(1, Ordering::SeqCst);
-
-                    // Double-check for data after incrementing counter
-                    let head = self.read_head().load(Ordering::SeqCst);
-                    let tail = self.write_head().load(Ordering::SeqCst);
-                    if head != tail {
-                        self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                        continue;
-                    }
-
-                    let timed_out = !sync::wait_on_address_timeout(wait_word, expected, remaining)?;
-                    self.recv_waiters().fetch_sub(1, Ordering::SeqCst);
-                    if timed_out {
+                    if !self.park_recv(Some(deadline))? {
                         return Ok(None);
                     }
                 }
@@ -842,6 +733,9 @@ impl SpscRing {
     /// Wake syscall amortized across batch.
     pub fn try_recv_batch(&self, max: usize) -> Vec<(Vec<u8>, u32)> {
         let mut results = Vec::with_capacity(max.min(self.layout.slots));
+        if self.slot_borrowed.load(Ordering::Acquire) {
+            return results;
+        }
 
         // PERF: Relaxed loads for availability check
         let mut head = self.read_head().load(Ordering::Relaxed);
@@ -963,6 +857,9 @@ impl SpscRing {
             let slot = self.slot_ptr(index);
             let header = &*slot.cast::<SlotHeader>();
             let len = header.len as usize;
+            if len > self.payload_capacity() {
+                return Err(ChannelError::CorruptedSlot);
+            }
             if len > out.len() {
                 return Err(ChannelError::BufferTooSmall {
                     len,
@@ -984,6 +881,9 @@ impl SpscRing {
             let slot = self.slot_ptr(index);
             let header = &*slot.cast::<SlotHeader>();
             let len = header.len as usize;
+            if len > self.payload_capacity() {
+                return Err(ChannelError::CorruptedSlot);
+            }
             if len > out.len() {
                 return Err(ChannelError::BufferTooSmall {
                     len,
@@ -1011,262 +911,6 @@ impl SpscRing {
             let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
             (payload_ptr, len, flags)
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct SpscSender {
-    ring: Arc<SpscRing>,
-}
-
-impl SpscSender {
-    pub fn payload_capacity(&self) -> usize {
-        self.ring.payload_capacity()
-    }
-
-    pub fn stats(&self) -> RingStats {
-        self.ring.stats()
-    }
-
-    /// Blocking send. Uses wait/wake to apply backpressure when full.
-    pub fn send(&self, payload: &[u8], flags: u32) -> Result<(), ChannelError> {
-        self.ring.send(payload, flags)
-    }
-
-    pub fn try_send(&self, payload: &[u8], flags: u32) -> Result<(), ChannelError> {
-        self.ring.try_send(payload, flags)
-    }
-
-    pub fn send_timeout(
-        &self,
-        payload: &[u8],
-        flags: u32,
-        timeout: Duration,
-    ) -> Result<bool, ChannelError> {
-        self.ring.send_timeout(payload, flags, timeout)
-    }
-}
-
-#[derive(Debug)]
-pub struct SpscReceiver {
-    ring: Arc<SpscRing>,
-}
-
-impl SpscReceiver {
-    pub fn recv(&self, out: &mut [u8]) -> Result<usize, ChannelError> {
-        self.ring.recv(out)
-    }
-
-    pub fn try_recv(&self, out: &mut [u8]) -> Result<usize, ChannelError> {
-        self.ring.try_recv(out)
-    }
-
-    pub fn stats(&self) -> RingStats {
-        self.ring.stats()
-    }
-
-    pub fn recv_with_flags(&self, out: &mut [u8]) -> Result<(usize, u32), ChannelError> {
-        self.ring.recv_with_flags(out)
-    }
-
-    pub fn try_recv_with_flags(&self, out: &mut [u8]) -> Result<(usize, u32), ChannelError> {
-        self.ring.try_recv_with_flags(out)
-    }
-
-    pub fn recv_timeout(
-        &self,
-        out: &mut [u8],
-        timeout: Duration,
-    ) -> Result<Option<usize>, ChannelError> {
-        self.ring.recv_timeout(out, timeout)
-    }
-
-    pub fn recv_timeout_with_flags(
-        &self,
-        out: &mut [u8],
-        timeout: Duration,
-    ) -> Result<Option<(usize, u32)>, ChannelError> {
-        self.ring.recv_timeout_with_flags(out, timeout)
-    }
-}
-
-#[derive(Debug)]
-pub struct BufferMessage {
-    pub buffer: Buffer,
-    pub len: usize,
-    pub flags: u32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct BufferMeta {
-    index: u32,
-    len: u32,
-    flags: u32,
-    _reserved: u32,
-}
-
-const BUFFER_META_BYTES: usize = core::mem::size_of::<BufferMeta>();
-
-fn encode_buffer_meta(meta: BufferMeta) -> [u8; BUFFER_META_BYTES] {
-    let mut out = [0u8; BUFFER_META_BYTES];
-    out[0..4].copy_from_slice(&meta.index.to_le_bytes());
-    out[4..8].copy_from_slice(&meta.len.to_le_bytes());
-    out[8..12].copy_from_slice(&meta.flags.to_le_bytes());
-    out[12..16].copy_from_slice(&meta._reserved.to_le_bytes());
-    out
-}
-
-fn decode_buffer_meta(bytes: &[u8]) -> Result<BufferMeta, ChannelError> {
-    if bytes.len() < BUFFER_META_BYTES {
-        return Err(ChannelError::InvalidBufferMeta);
-    }
-    let index = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-    let len = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-    let flags = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-    let reserved = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
-    Ok(BufferMeta {
-        index,
-        len,
-        flags,
-        _reserved: reserved,
-    })
-}
-
-#[derive(Debug)]
-pub struct BufferSender {
-    ring: Arc<SpscRing>,
-    /// Keeps the buffer pool alive. The sender owns buffers but doesn't
-    /// directly access the pool after sending (receiver reclaims them).
-    #[allow(dead_code)] // Intentional: Arc kept for pool lifetime symmetry with receiver
-    pool: Arc<BufferPool>,
-}
-
-#[derive(Debug)]
-pub struct BufferReceiver {
-    ring: Arc<SpscRing>,
-    pool: Arc<BufferPool>,
-}
-
-impl BufferSender {
-    pub fn send(&self, buffer: Buffer, len: usize, flags: u32) -> Result<(), ChannelError> {
-        let payload_capacity = buffer.len();
-        if len > payload_capacity {
-            return Err(ChannelError::PayloadTooLarge {
-                len,
-                capacity: payload_capacity,
-            });
-        }
-        let index = buffer.index();
-        let index_u32 = u32::try_from(index).map_err(|_| ChannelError::InvalidBufferMeta)?;
-        let len_u32 = u32::try_from(len).map_err(|_| ChannelError::InvalidBufferMeta)?;
-        let meta = BufferMeta {
-            index: index_u32,
-            len: len_u32,
-            flags,
-            _reserved: 0,
-        };
-        let payload = encode_buffer_meta(meta);
-        let mut buffer = Some(buffer);
-        self.ring.send(&payload, 0)?;
-        if let Some(buffer) = buffer.take() {
-            let _ = buffer.into_raw_index();
-        }
-        Ok(())
-    }
-
-    pub fn try_send(&self, buffer: Buffer, len: usize, flags: u32) -> Result<(), ChannelError> {
-        let payload_capacity = buffer.len();
-        if len > payload_capacity {
-            return Err(ChannelError::PayloadTooLarge {
-                len,
-                capacity: payload_capacity,
-            });
-        }
-        let index = buffer.index();
-        let index_u32 = u32::try_from(index).map_err(|_| ChannelError::InvalidBufferMeta)?;
-        let len_u32 = u32::try_from(len).map_err(|_| ChannelError::InvalidBufferMeta)?;
-        let meta = BufferMeta {
-            index: index_u32,
-            len: len_u32,
-            flags,
-            _reserved: 0,
-        };
-        let payload = encode_buffer_meta(meta);
-        let mut buffer = Some(buffer);
-        match self.ring.try_send(&payload, 0) {
-            Ok(()) => {
-                if let Some(buffer) = buffer.take() {
-                    let _ = buffer.into_raw_index();
-                }
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
-    }
-}
-
-impl BufferReceiver {
-    pub fn recv(&self) -> Result<BufferMessage, ChannelError> {
-        let mut payload = [0u8; BUFFER_META_BYTES];
-        let len = self.ring.recv(&mut payload)?;
-        if len != BUFFER_META_BYTES {
-            return Err(ChannelError::InvalidBufferMeta);
-        }
-        let meta = decode_buffer_meta(&payload)?;
-        let buffer = unsafe { self.pool.from_raw(meta.index as usize) }?;
-        Ok(BufferMessage {
-            buffer,
-            len: meta.len as usize,
-            flags: meta.flags,
-        })
-    }
-
-    pub fn try_recv(&self) -> Result<Option<BufferMessage>, ChannelError> {
-        let mut payload = [0u8; BUFFER_META_BYTES];
-        match self.ring.try_recv(&mut payload) {
-            Ok(len) => {
-                if len != BUFFER_META_BYTES {
-                    return Err(ChannelError::InvalidBufferMeta);
-                }
-                let meta = decode_buffer_meta(&payload)?;
-                let buffer = unsafe { self.pool.from_raw(meta.index as usize) }?;
-                Ok(Some(BufferMessage {
-                    buffer,
-                    len: meta.len as usize,
-                    flags: meta.flags,
-                }))
-            }
-            Err(ChannelError::Empty) => Ok(None),
-            Err(err) => Err(err),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct BufferChannel;
-
-impl BufferChannel {
-    pub fn split(
-        pool: Arc<BufferPool>,
-        slots: usize,
-    ) -> Result<(BufferSender, BufferReceiver), ChannelError> {
-        let slot_payload = BUFFER_META_BYTES;
-        let slot_size = align_up(
-            core::mem::size_of::<SlotHeader>() + slot_payload,
-            SLOT_ALIGN,
-        );
-        let layout = RingLayout::new(slot_size, slots, ChannelMode::Spsc);
-        let region = Arc::new(ShmRegion::create(layout.total_size)?);
-        let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0)? };
-        let ring = Arc::new(ring);
-        Ok((
-            BufferSender {
-                ring: Arc::clone(&ring),
-                pool: Arc::clone(&pool),
-            },
-            BufferReceiver { ring, pool },
-        ))
     }
 }
 
@@ -1504,18 +1148,49 @@ impl MpmcRing {
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
+                        struct MpmcSendGuard<'a> {
+                            header: *mut SlotHeader,
+                            seq: &'a AtomicU64,
+                            release_seq: u64,
+                            armed: bool,
+                        }
+                        impl<'a> Drop for MpmcSendGuard<'a> {
+                            fn drop(&mut self) {
+                                if self.armed {
+                                    unsafe {
+                                        (*self.header).len = 0;
+                                        (*self.header).flags = SLOT_FLAG_ABORTED;
+                                    }
+                                    self.seq.store(self.release_seq, Ordering::Release);
+                                }
+                            }
+                        }
+
+                        let slot = unsafe { self.slot_ptr(index) };
+                        let header = slot.cast::<SlotHeader>();
+                        let mut guard = MpmcSendGuard {
+                            header,
+                            seq: self.sequence(index),
+                            release_seq: tail + 1,
+                            armed: true,
+                        };
+
+                        let payload_ptr = unsafe { slot.add(core::mem::size_of::<SlotHeader>()) };
+                        let payload_slice = unsafe {
+                            core::slice::from_raw_parts_mut(payload_ptr, self.payload_capacity())
+                        };
+                        let written = f(payload_slice);
+                        if written > self.payload_capacity() {
+                            return Err(ChannelError::PayloadTooLarge {
+                                len: written,
+                                capacity: self.payload_capacity(),
+                            });
+                        }
                         unsafe {
-                            let slot = self.slot_ptr(index);
-                            let header = slot.cast::<SlotHeader>();
-                            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
-                            let payload_slice = core::slice::from_raw_parts_mut(
-                                payload_ptr,
-                                self.payload_capacity(),
-                            );
-                            let written = f(payload_slice);
                             (*header).len = written as u32;
                             (*header).flags = flags;
                         }
+                        guard.armed = false;
                         self.sequence(index).store(tail + 1, Ordering::Release);
                         return Ok(());
                     }
@@ -1560,10 +1235,18 @@ impl MpmcRing {
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
-                        let len = unsafe { self.read_slot(index, out)? };
+                        let slot = unsafe { self.slot_ptr(index) };
+                        let header = unsafe { &*slot.cast::<SlotHeader>() };
+                        if (header.flags & SLOT_FLAG_ABORTED) != 0 {
+                            self.sequence(index)
+                                .store(head + self.mask + 1, Ordering::Release);
+                            head = self.head().load(Ordering::Relaxed);
+                            continue;
+                        }
+                        let res = unsafe { self.read_slot(index, out) };
                         self.sequence(index)
                             .store(head + self.mask + 1, Ordering::Release);
-                        return Ok(len);
+                        return res;
                     }
                     Err(actual) => {
                         head = actual;
@@ -1593,10 +1276,18 @@ impl MpmcRing {
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
-                        let (len, flags) = unsafe { self.read_slot_with_flags(index, out)? };
+                        let slot = unsafe { self.slot_ptr(index) };
+                        let header = unsafe { &*slot.cast::<SlotHeader>() };
+                        if (header.flags & SLOT_FLAG_ABORTED) != 0 {
+                            self.sequence(index)
+                                .store(head + self.mask + 1, Ordering::Release);
+                            head = self.head().load(Ordering::Relaxed);
+                            continue;
+                        }
+                        let res = unsafe { self.read_slot_with_flags(index, out) };
                         self.sequence(index)
                             .store(head + self.mask + 1, Ordering::Release);
-                        return Ok((len, flags));
+                        return res;
                     }
                     Err(actual) => {
                         head = actual;
@@ -1663,14 +1354,29 @@ impl MpmcRing {
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
-                        let (result, flags) = unsafe {
+                        let (len, flags, payload_ptr) = unsafe {
                             let slot = self.slot_ptr(index);
                             let header = &*slot.cast::<SlotHeader>();
-                            let len = header.len as usize;
-                            let flags = header.flags;
-                            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
+                            (
+                                header.len as usize,
+                                header.flags,
+                                slot.add(core::mem::size_of::<SlotHeader>()),
+                            )
+                        };
+                        if (flags & SLOT_FLAG_ABORTED) != 0 {
+                            self.sequence(index)
+                                .store(head + self.mask + 1, Ordering::Release);
+                            head = self.head().load(Ordering::Relaxed);
+                            continue;
+                        }
+                        if len > self.payload_capacity() {
+                            self.sequence(index)
+                                .store(head + self.mask + 1, Ordering::Release);
+                            return Err(ChannelError::CorruptedSlot);
+                        }
+                        let result = unsafe {
                             let payload_slice = core::slice::from_raw_parts(payload_ptr, len);
-                            (reader(payload_slice, flags), flags)
+                            reader(payload_slice, flags)
                         };
                         self.sequence(index)
                             .store(head + self.mask + 1, Ordering::Release);
@@ -1735,6 +1441,9 @@ impl MpmcRing {
             let slot = self.slot_ptr(index);
             let header = &*slot.cast::<SlotHeader>();
             let len = header.len as usize;
+            if len > self.payload_capacity() {
+                return Err(ChannelError::CorruptedSlot);
+            }
             if len > out.len() {
                 return Err(ChannelError::BufferTooSmall {
                     len,
@@ -1756,6 +1465,9 @@ impl MpmcRing {
             let slot = self.slot_ptr(index);
             let header = &*slot.cast::<SlotHeader>();
             let len = header.len as usize;
+            if len > self.payload_capacity() {
+                return Err(ChannelError::CorruptedSlot);
+            }
             if len > out.len() {
                 return Err(ChannelError::BufferTooSmall {
                     len,
@@ -1815,10 +1527,6 @@ impl MpmcRing {
             header.generation.fetch_add(1, Ordering::Release);
         }
     }
-}
-
-fn align_up(value: usize, align: usize) -> usize {
-    value.div_ceil(align) * align
 }
 
 #[cfg(test)]
@@ -1907,18 +1615,20 @@ mod tests {
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
         assert!(!ptr.is_null());
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
-        let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
-        let (tx, rx) = ring.split();
+        let ring =
+            Arc::new(unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() });
+        let ring_tx = Arc::clone(&ring);
+        let ring_rx = Arc::clone(&ring);
         std::thread::scope(|s| {
             s.spawn(|| {
                 for i in 0u8..20 {
-                    tx.send(&[i], 0).unwrap();
+                    ring_tx.send(&[i], 0).unwrap();
                 }
             });
             s.spawn(|| {
                 let mut out = [0u8; 8];
                 for i in 0u8..20 {
-                    let len = rx.recv(&mut out).unwrap();
+                    let len = ring_rx.recv(&mut out).unwrap();
                     assert_eq!(len, 1);
                     assert_eq!(out[0], i);
                 }
@@ -1927,19 +1637,6 @@ mod tests {
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
-    }
-
-    #[test]
-    fn buffer_channel_round_trip() {
-        let pool = BufferPool::new(64, 2);
-        let (tx, rx) = BufferChannel::split(Arc::clone(&pool), 8).unwrap();
-        let mut buffer = pool.acquire().unwrap();
-        buffer.as_mut_slice()[0..4].copy_from_slice(b"ping");
-        tx.send(buffer, 4, 7).unwrap();
-        let msg = rx.recv().unwrap();
-        assert_eq!(msg.len, 4);
-        assert_eq!(msg.flags, 7);
-        assert_eq!(&msg.buffer.as_slice()[..4], b"ping");
     }
 
     #[test]
@@ -2143,6 +1840,40 @@ mod tests {
 
         // Now ring is truly empty
         assert!(matches!(ring.try_recv_view(), Err(ChannelError::Empty)));
+
+        unsafe {
+            std::alloc::dealloc(ptr, alloc_layout);
+        }
+    }
+
+    #[test]
+    fn spsc_copy_recv_while_slot_view_borrowed_returns_busy() {
+        let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
+        let alloc_layout =
+            std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
+                .unwrap();
+        let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        assert!(!ptr.is_null());
+        let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        let ring =
+            Arc::new(unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() });
+
+        ring.send(b"borrowed-slot", 7).unwrap();
+        let view = ring.try_recv_view().unwrap();
+
+        let mut buf = [0u8; 32];
+        assert!(matches!(
+            ring.try_recv(&mut buf),
+            Err(ChannelError::SlotBorrowed)
+        ));
+        assert!(matches!(
+            ring.try_recv_with_flags(&mut buf),
+            Err(ChannelError::SlotBorrowed)
+        ));
+        assert!(ring.try_recv_batch(4).is_empty());
+
+        drop(view);
+        assert!(matches!(ring.try_recv(&mut buf), Err(ChannelError::Empty)));
 
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);

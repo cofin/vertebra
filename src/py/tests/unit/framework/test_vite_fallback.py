@@ -3,7 +3,7 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from vertebra.build import DevServerProcess, run_vite_build
+from vertebra.build._fallback import DevServerProcess, run_vite_build
 
 
 def test_vite_dev_server_proxy_url() -> None:

@@ -1,19 +1,16 @@
 //! HMR (Hot Module Replacement) file watcher implementation
 
 use crate::errors::{BundlerError, Result};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use notify::{RecommendedWatcher, WatchMode};
 use notify_debouncer_mini::{DebouncedEvent, Debouncer, new_debouncer};
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
-use tokio::sync::broadcast;
 
 /// HMR event types sent to connected clients
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[derive(Clone, Debug)]
 pub enum HmrEvent {
     /// File was updated
     Update { path: String, timestamp: u64 },
@@ -21,8 +18,6 @@ pub enum HmrEvent {
     Types { version: String },
     /// Full page reload required
     Reload,
-    /// Connection established
-    Connected { hmr_url: String },
 }
 
 impl HmrEvent {
@@ -31,7 +26,7 @@ impl HmrEvent {
             path: path.into(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis() as u64,
         }
     }
@@ -45,22 +40,13 @@ impl HmrEvent {
     pub fn reload() -> Self {
         Self::Reload
     }
-
-    pub fn connected(hmr_url: impl Into<String>) -> Self {
-        Self::Connected {
-            hmr_url: hmr_url.into(),
-        }
-    }
-
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
-    }
 }
 
 /// File watcher for HMR
 pub struct SourceWatcher {
     debouncer: Debouncer<RecommendedWatcher>,
-    event_tx: broadcast::Sender<HmrEvent>,
+    event_tx: Sender<HmrEvent>,
+    event_rx: Receiver<HmrEvent>,
     watch_dirs: Vec<PathBuf>,
 }
 
@@ -70,8 +56,8 @@ impl SourceWatcher {
         watch_dirs: Vec<PathBuf>,
         extensions: Vec<String>,
         debounce_ms: u64,
-    ) -> Result<(Self, broadcast::Receiver<HmrEvent>)> {
-        let (event_tx, event_rx) = broadcast::channel(100);
+    ) -> Result<(Self, Receiver<HmrEvent>)> {
+        let (event_tx, event_rx) = bounded(256);
         let event_tx_clone = event_tx.clone();
 
         let debouncer = new_debouncer(
@@ -86,7 +72,7 @@ impl SourceWatcher {
                             let ext_str = ext.to_string_lossy();
                             if extensions.iter().any(|e| e == ext_str.as_ref()) {
                                 let path_str = path.to_string_lossy().to_string();
-                                let _ = event_tx_clone.send(HmrEvent::update(path_str));
+                                let _ = event_tx_clone.try_send(HmrEvent::update(path_str));
                             }
                         }
                     }
@@ -95,25 +81,27 @@ impl SourceWatcher {
         )
         .map_err(|e| BundlerError::Watcher(e.to_string()))?;
 
+        let rx_for_caller = event_rx.clone();
         Ok((
             Self {
                 debouncer,
                 event_tx,
+                event_rx,
                 watch_dirs,
             },
-            event_rx,
+            rx_for_caller,
         ))
     }
 
     /// Start watching directories
-    pub fn start(&mut self) -> Result<()> {
+    pub fn start(&mut self) -> Result<Receiver<HmrEvent>> {
         for dir in &self.watch_dirs {
             self.debouncer
                 .watcher()
                 .watch(dir, WatchMode::recursive())
                 .map_err(|e| BundlerError::Watcher(e.to_string()))?;
         }
-        Ok(())
+        Ok(self.event_rx.clone())
     }
 
     /// Stop watching
@@ -126,20 +114,27 @@ impl SourceWatcher {
 
     /// Send a type change notification
     pub fn notify_type_change(&self, version: &str) {
-        let _ = self.event_tx.send(HmrEvent::types(version));
+        let _ = self.event_tx.try_send(HmrEvent::types(version));
     }
 
     /// Send a reload signal
     pub fn notify_reload(&self) {
-        let _ = self.event_tx.send(HmrEvent::reload());
+        let _ = self.event_tx.try_send(HmrEvent::reload());
     }
+}
+
+struct WatcherState {
+    watcher: Option<SourceWatcher>,
+    rx: Option<Receiver<HmrEvent>>,
+    watch_dirs: Vec<PathBuf>,
+    extensions: Vec<String>,
+    debounce_ms: u64,
 }
 
 /// Python-visible wrapper around `SourceWatcher` with non-blocking event polling.
 #[pyclass(name = "SourceWatcher")]
 pub struct PySourceWatcher {
-    inner: Mutex<SourceWatcher>,
-    rx: Mutex<broadcast::Receiver<HmrEvent>>,
+    state: Mutex<WatcherState>,
 }
 
 #[pymethods]
@@ -153,64 +148,103 @@ impl PySourceWatcher {
     ) -> PyResult<Self> {
         let paths: Vec<PathBuf> = watch_dirs.into_iter().map(PathBuf::from).collect();
         let exts = extensions.unwrap_or_else(|| vec!["py".to_string(), "ts".to_string()]);
-        let (watcher, rx) = SourceWatcher::new(paths, exts, debounce_ms)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let (watcher, rx) = SourceWatcher::new(paths.clone(), exts.clone(), debounce_ms)?;
         Ok(Self {
-            inner: Mutex::new(watcher),
-            rx: Mutex::new(rx),
+            state: Mutex::new(WatcherState {
+                watcher: Some(watcher),
+                rx: Some(rx),
+                watch_dirs: paths,
+                extensions: exts,
+                debounce_ms,
+            }),
         })
     }
 
     pub fn start(&self) -> PyResult<()> {
-        let mut guard = self
-            .inner
+        let mut state = self
+            .state
             .lock()
-            .map_err(|_| PyRuntimeError::new_err("watcher mutex poisoned"))?;
-        guard
-            .start()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+            .map_err(|_| BundlerError::Poisoned("watcher"))?;
+        if state.watcher.is_none() {
+            let (watcher, rx) = SourceWatcher::new(
+                state.watch_dirs.clone(),
+                state.extensions.clone(),
+                state.debounce_ms,
+            )?;
+            state.watcher = Some(watcher);
+            state.rx = Some(rx);
+        }
+        if let Some(ref mut w) = state.watcher {
+            let rx = w.start()?;
+            state.rx = Some(rx);
+        }
+        Ok(())
     }
 
     pub fn stop(&self) -> PyResult<()> {
-        let mut guard = self
-            .inner
+        let mut state = self
+            .state
             .lock()
-            .map_err(|_| PyRuntimeError::new_err("watcher mutex poisoned"))?;
-        guard
-            .stop()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+            .map_err(|_| BundlerError::Poisoned("watcher"))?;
+        if let Some(ref mut w) = state.watcher {
+            w.stop()?;
+        }
+        state.watcher = None;
+        state.rx = None;
+        Ok(())
     }
 
-    /// Drain all pending updated file paths from the broadcast receiver without blocking.
-    pub fn poll_events(&self) -> PyResult<Vec<String>> {
-        let mut guard = self
-            .rx
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("watcher rx mutex poisoned"))?;
-        let mut paths = Vec::new();
-        while let Ok(evt) = guard.try_recv() {
-            if let HmrEvent::Update { path, .. } = evt {
+    /// Drain updated file paths from the receiver, optionally blocking up to `timeout_ms`.
+    #[pyo3(signature = (timeout_ms=None))]
+    pub fn poll_events(&self, py: Python<'_>, timeout_ms: Option<u64>) -> PyResult<Vec<String>> {
+        let rx = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| BundlerError::Poisoned("watcher"))?;
+            match &state.rx {
+                Some(rx) => rx.clone(),
+                None => return Ok(Vec::new()),
+            }
+        };
+
+        py.detach(|| {
+            let mut paths = Vec::new();
+            if let Some(ms) = timeout_ms
+                && ms > 0
+                && let Ok(HmrEvent::Update { path, .. }) =
+                    rx.recv_timeout(Duration::from_millis(ms))
+            {
                 paths.push(path);
             }
-        }
-        Ok(paths)
+            while let Ok(evt) = rx.try_recv() {
+                if let HmrEvent::Update { path, .. } = evt {
+                    paths.push(path);
+                }
+            }
+            Ok(paths)
+        })
     }
 
     pub fn notify_type_change(&self, version: &str) -> PyResult<()> {
-        let guard = self
-            .inner
+        let state = self
+            .state
             .lock()
-            .map_err(|_| PyRuntimeError::new_err("watcher mutex poisoned"))?;
-        guard.notify_type_change(version);
+            .map_err(|_| BundlerError::Poisoned("watcher"))?;
+        if let Some(ref w) = state.watcher {
+            w.notify_type_change(version);
+        }
         Ok(())
     }
 
     pub fn notify_reload(&self) -> PyResult<()> {
-        let guard = self
-            .inner
+        let state = self
+            .state
             .lock()
-            .map_err(|_| PyRuntimeError::new_err("watcher mutex poisoned"))?;
-        guard.notify_reload();
+            .map_err(|_| BundlerError::Poisoned("watcher"))?;
+        if let Some(ref w) = state.watcher {
+            w.notify_reload();
+        }
         Ok(())
     }
 }
@@ -220,25 +254,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hmr_event_serialization() {
+    fn test_hmr_events() {
         let event = HmrEvent::update("/src/App.tsx");
-        let json = event.to_json();
-        assert!(json.contains("\"type\":\"update\""));
-        assert!(json.contains("/src/App.tsx"));
+        if let HmrEvent::Update { path, .. } = event {
+            assert_eq!(path, "/src/App.tsx");
+        } else {
+            panic!("Expected Update event");
+        }
 
         let types_event = HmrEvent::types("abc123");
-        let json = types_event.to_json();
-        assert!(json.contains("\"type\":\"types\""));
-        assert!(json.contains("abc123"));
+        if let HmrEvent::Types { version } = types_event {
+            assert_eq!(version, "abc123");
+        } else {
+            panic!("Expected Types event");
+        }
 
         let reload_event = HmrEvent::reload();
-        let json = reload_event.to_json();
-        assert!(json.contains("\"type\":\"reload\""));
-
-        let connected_event = HmrEvent::connected("ws://localhost:5173/hmr");
-        let json = connected_event.to_json();
-        assert!(json.contains("\"type\":\"connected\""));
-        assert!(json.contains("ws://localhost:5173/hmr"));
+        assert!(matches!(reload_event, HmrEvent::Reload));
     }
 
     #[test]

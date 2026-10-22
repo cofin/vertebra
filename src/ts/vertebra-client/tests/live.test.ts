@@ -52,4 +52,23 @@ describe("LiveStateClient and HLC synchronization", () => {
     const t2 = hlc.tick(5000n);
     expect(t2 > t1).toBe(true);
   });
+
+  it("deletes a field when applying StateOpcode.FieldDelete", () => {
+    const client = new LiveStateClient("GameState", { score: 10, title: "level1" });
+    expect(client.getSnapshot().title).toBe("level1");
+
+    const success = client.applyServerDelta({
+      opcode: StateOpcode.FieldDelete,
+      stateId: client.stateId,
+      fieldId: fnv1aFieldId("title"),
+      timestampNs: 2000n,
+    });
+    expect(success).toBe(true);
+    expect("title" in client.getSnapshot()).toBe(false);
+  });
+
+  it("produces state and field IDs matching expected hex representation", () => {
+    expect(fnv1aStateId("GameState").toString(16)).toBe("374157f8ddd4c9a8");
+    expect(fnv1aFieldId("score").toString(16)).toBe("d22f9095");
+  });
 });

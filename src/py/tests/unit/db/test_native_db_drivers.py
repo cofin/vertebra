@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from vertebra._typing import UnsupportedBackendError
 from vertebra.db import (
     AlloyDbAuthType,
     AlloyDbClusterUri,
@@ -28,9 +29,14 @@ from vertebra.db import (
     OracleWallet,
     OrdsContainer,
     PostgresConfig,
+    RedisConfig,
     SqliteConfig,
+    SyncMysqlDriver,
     SyncOracleDriver,
     SyncPostgresDriver,
+    SyncRedisDriver,
+    SyncSqliteDriver,
+    SyncValkeyDriver,
     ValkeyConfig,
 )
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
@@ -49,12 +55,18 @@ def test_cloudsql_and_alloydb_dialers() -> None:
     assert "generateEphemeralCert" in csql_uri.generate_ephemeral_cert_url()
 
     csql_dialer = CloudSqlDialer(
-        CloudSqlConfig(instance_connection_name="my-proj:us-central1:my-pg", enable_iam_auth=True)
+        CloudSqlConfig(
+            instance_connection_name="my-proj:us-central1:my-pg",
+            enable_iam_auth=True,
+            refresh_lead_seconds=240,
+        )
     )
     assert csql_dialer.needs_refresh() is True
     csql_dialer.cache_iam_token("iam-token-123", expires_in_seconds=3600)
     assert csql_dialer.needs_refresh() is False
     assert csql_dialer.port == 3307
+    with pytest.raises(ValueError, match="ca_pem is required"):
+        csql_dialer.build_tls_context(ca_pem=None)
 
     alloy_uri = AlloyDbClusterUri.parse("projects/p1/locations/us-central1/clusters/c1/instances/i1")
     assert alloy_uri.project == "p1"
@@ -86,14 +98,30 @@ def test_postgres_pooler_modes_and_jsonb_strip() -> None:
         )
         == 10
     )
+    with pytest.raises(UnsupportedBackendError, match="native vertebra-db PostgreSQL driver"):
+        SyncPostgresDriver().execute_tuples("SELECT 1")
+    with pytest.raises(UnsupportedBackendError, match="configured MySQL connection"):
+        SyncMysqlDriver().execute_tuples("SELECT 1")
+    with pytest.raises(UnsupportedBackendError, match="requires a connected transport or 'memory://' URL"):
+        SyncRedisDriver(RedisConfig(url="redis://localhost:6379/0")).get("k")
+    with pytest.raises(UnsupportedBackendError, match="requires a connected transport or 'memory://' URL"):
+        SyncValkeyDriver(ValkeyConfig(url="valkey://localhost:6379/0")).set("k", "v")
+    with pytest.raises(UnsupportedBackendError, match="requires a connected transport or 'memory://' URL"):
+        SyncRedisDriver().publish("chan", b"msg")
 
 
 @pytest.mark.anyio
 async def test_sqlite_plain_tuple_fetching_for_sqlalchemy_21() -> None:
-    """Verify SQLite WAL configuration and plain-tuple row fetching for SQLAlchemy 2.1 ORM loaders."""
+    """Verify SQLite WAL configuration, explicit commit/rollback, and plain-tuple row fetching."""
+    with pytest.raises(ValueError, match="Invalid synchronous mode"):
+        SqliteConfig(synchronous="INVALID")  # type: ignore[arg-type]
+
     driver = AsyncSqliteDriver(SqliteConfig(database=":memory:"))
     await driver.execute_tuples("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
     await driver.execute_tuples("INSERT INTO items (id, name) VALUES (?, ?)", (1, "alpha"))
+    await driver.commit()
+    await driver.execute_tuples("INSERT INTO items (id, name) VALUES (?, ?)", (2, "rolled_back"))
+    await driver.rollback()
     rows = await driver.execute_tuples("SELECT id, name FROM items")
     assert rows == [(1, "alpha")]
     assert type(rows[0]) is tuple
@@ -115,7 +143,12 @@ async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
     assert b"TRACKING" in cmds[1]
     assert b"BCAST" in cmds[1]
 
-    vdriver = AsyncValkeyDriver(vcfg)
+    mem_vcfg = ValkeyConfig(
+        url="memory://",
+        enable_client_side_caching=True,
+        client_tracking_prefixes=("user:", "session:"),
+    )
+    vdriver = AsyncValkeyDriver(mem_vcfg)
     await vdriver.set("user:1", b"alice")
     assert vdriver.cached_keys == ("user:1",)
     assert await vdriver.get("user:1") == b"alice"
@@ -123,11 +156,11 @@ async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
     assert evicted == 1
     assert not vdriver.cached_keys
 
-    store = MemoryStore.from_valkey("valkey://127.0.0.1:6379/0")
+    store = MemoryStore.from_valkey("memory://")
     await store.set("k1", "v1", expires_in=60)
     assert await store.get("k1") == b"v1"
 
-    channels = ChannelsBackend.from_valkey("valkey://127.0.0.1:6379/0", history=5)
+    channels = ChannelsBackend.from_valkey("memory://", history=5)
     await channels.on_startup()
     await channels.publish(b"hello", ["topic-a"])
     assert await channels.get_history("topic-a") == [b"hello"]
@@ -181,8 +214,13 @@ def test_oracle_wallet_extraction_descriptor_and_multi_pool_isolation(tmp_path: 
     assert len(df) == 2
     assert df.to_dicts()[0]["title"] == "Espresso"
 
-    adb_container = OracleContainer()
+    adb_container = OracleContainer(admin_password="TestPassword123!")
     assert "adb-free:latest-23ai" in adb_container.image
+    assert adb_container.env_vars()["ADMIN_PASSWORD"] == "TestPassword123!"
+    with pytest.raises(ValueError, match="admin_password must be explicitly provided"):
+        OracleContainer().env_vars()
+    with pytest.raises(ValueError, match="Invalid TNS service_name"):
+        OracleConnectDescriptor(service_name="bad)(service").to_tns_descriptor()
     ords_container = OrdsContainer()
     assert ords_container.enable_apex_lang is True
 
@@ -198,3 +236,7 @@ def test_database_registry_url_schemes() -> None:
         DatabaseRegistry.parse_url("alloydb://projects/p/locations/r/clusters/c/instances/i"),
         AlloyDbConfig,
     )
+    registry.register("sqlite_mem", "sqlite:///:memory:")
+    sync_sqlite = registry.get_sync_driver("sqlite_mem")
+    assert isinstance(sync_sqlite, SyncSqliteDriver)
+    sync_sqlite.close()

@@ -3,9 +3,6 @@
 //! This crate provides foundational types and protocols used across the
 //! Vertebra ecosystem for zero-copy inter-process communication.
 
-/// Version constant synchronized with Python package.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 pub mod bridge;
 pub mod buffer;
 pub mod channel;
@@ -23,6 +20,7 @@ pub mod sync;
 pub mod telemetry;
 pub mod tiered_ring;
 pub mod transport;
+pub mod util;
 
 // Re-exports for ergonomics
 pub use bridge::{BatchBridge, BridgeResponse, WriteRequest};

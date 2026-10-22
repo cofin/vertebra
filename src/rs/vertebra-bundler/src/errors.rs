@@ -23,6 +23,9 @@ pub enum BundlerError {
 
     #[error("SSR pool exhausted — all workers busy")]
     PoolExhausted,
+
+    #[error("Lock poisoned: {0}")]
+    Poisoned(&'static str),
 }
 
 impl From<BundlerError> for PyErr {

@@ -18,12 +18,13 @@ extension-module = ["pyo3/extension-module"]
 pyo3 = { workspace = true }
 
 # oxc for parsing/transforming (Rolldown's foundation)
-oxc_parser = "0.155"
-oxc_span = "0.155"
 oxc_allocator = "0.155"
+oxc_ast = "0.155"
 oxc_codegen = "0.155"
-oxc_transformer = "0.155"
+oxc_parser = "0.155"
 oxc_semantic = "0.155"
+oxc_span = "0.155"
+oxc_transformer = "0.155"
 
 # File watching for HMR
 notify = { workspace = true }
@@ -32,21 +33,20 @@ notify-debouncer-mini = { workspace = true }
 # QuickJS for SSR
 rquickjs = { version = "0.14", features = ["bindgen", "classes", "properties", "parallel"] }
 
-# Async runtime
-tokio = { workspace = true }
-
-# Serialization
-serde = { workspace = true }
-serde_json = { workspace = true }
+# Async runtime / channels
+crossbeam-channel = { workspace = true }
 
 # Utilities
 thiserror = { workspace = true }
-dashmap = "6"
-crossbeam-queue = "0.3"
 
 [build-dependencies]
 pyo3-build-config = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 pyo3 = { workspace = true, features = ["auto-initialize"] }
 tempfile = "3"
+
+[[bench]]
+name = "ssr_render"
+harness = false

@@ -19,31 +19,41 @@ __all__ = (
 
 def __getattr__(name: str) -> Any:
     """Lazy-load optional dependency types on first access."""
+    val: Any = None
     if name == "Struct":
         msgspec_mod = import_optional("msgspec")
         if msgspec_mod is None:
             raise MissingDependencyError("msgspec", install_package="msgspec")
-        return msgspec_mod.Struct
+        val = msgspec_mod.Struct
 
-    if name == "BaseModel":
+    elif name == "BaseModel":
         pydantic_mod = import_optional("pydantic")
         if pydantic_mod is None:
             raise MissingDependencyError("pydantic", install_package="pydantic")
-        return pydantic_mod.BaseModel
+        val = pydantic_mod.BaseModel
 
-    if name in {"ndarray", "NDArray"}:
+    elif name in {"ndarray", "NDArray"}:
         np_mod = import_optional("numpy")
         if np_mod is None:
             raise MissingDependencyError("numpy", install_package="numpy")
-        if name == "NDArray":
-            return np_mod.typing.NDArray
-        return np_mod.ndarray
+        val = np_mod.typing.NDArray if name == "NDArray" else np_mod.ndarray
 
-    if name in {"Table", "RecordBatch"}:
+    elif name in {"Table", "RecordBatch"}:
         pa_mod = import_optional("pyarrow")
         if pa_mod is None:
             raise MissingDependencyError("pyarrow", install_package="pyarrow")
-        return getattr(pa_mod, name)
+        val = getattr(pa_mod, name)
+
+    if val is not None:
+        globals()[name] = val
+        return val
 
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)
+
+
+def __dir__() -> list[str]:
+    """Return public export symbols and module globals for dir()."""
+    return sorted(
+        set(__all__) | {"Struct", "BaseModel", "NDArray", "ndarray", "Table", "RecordBatch"} | set(globals().keys())
+    )

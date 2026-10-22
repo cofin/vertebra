@@ -2,7 +2,8 @@
 
 from pathlib import Path
 
-from vertebra.build import ImportMapGenerator, JsConfig
+from vertebra.build import JsConfig
+from vertebra.build._import_map import ImportMapGenerator
 from vertebra.utils.serializers import decode_json
 
 

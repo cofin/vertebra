@@ -2,15 +2,20 @@
 
 use std::sync::Arc;
 
+use http::uri::PathAndQuery;
 use tokio::sync::oneshot;
 
-use super::{Dispatcher, ShmDispatcher};
-use crate::collector::{Batch, PendingRequest, PendingResponse};
+use super::{DispatchBackend, Dispatcher, ShmDispatcher};
+use crate::batcher::{Batch, PendingRequest};
+use crate::body::PendingResponse;
 
 #[test]
 fn dispatcher_creates_with_empty_state() {
     let d = Dispatcher::new();
-    assert!(d.inner.pending.is_empty());
+    match d.backend() {
+        DispatchBackend::Bridge(b) => assert!(b.pending.is_empty()),
+        _ => panic!("expected bridge backend"),
+    }
 }
 
 #[test]
@@ -38,8 +43,7 @@ async fn direct_mode_sends_batch() {
             method_tag: 0,
             http_version_tag: 1,
             flags: 0,
-            path: "/test".to_owned(),
-            query: None,
+            path_and_query: PathAndQuery::from_static("/test"),
             headers_mp: bytes::Bytes::new(),
             body: bytes::Bytes::new(),
             reply: reply_tx,
@@ -50,8 +54,8 @@ async fn direct_mode_sends_batch() {
 
     let direct_batch = rx.recv().await.expect("should receive direct batch");
     assert_eq!(direct_batch.requests.len(), 1);
-    assert_eq!(direct_batch.requests[0].path, "/test");
-    assert!(direct_batch.requests[0].reply.is_some());
+    assert_eq!(direct_batch.requests[0].path(), "/test");
+    assert!(!direct_batch.requests[0].reply.is_closed());
 }
 
 #[tokio::test]
@@ -65,8 +69,7 @@ async fn direct_mode_fnf_has_no_reply() {
             method_tag: 0,
             http_version_tag: 1,
             flags: vertebra_core::protocol::flags::FIRE_AND_FORGET,
-            path: "/fire".to_owned(),
-            query: None,
+            path_and_query: PathAndQuery::from_static("/fire"),
             headers_mp: bytes::Bytes::new(),
             body: bytes::Bytes::new(),
             reply: reply_tx,
@@ -77,9 +80,10 @@ async fn direct_mode_fnf_has_no_reply() {
 
     let direct_batch = rx.recv().await.expect("should receive direct batch");
     assert_eq!(direct_batch.requests.len(), 1);
-    assert!(
-        direct_batch.requests[0].reply.is_none(),
-        "F&F request should have no reply channel"
+    assert_ne!(
+        direct_batch.requests[0].flags & vertebra_core::protocol::flags::FIRE_AND_FORGET,
+        0,
+        "F&F request should have FIRE_AND_FORGET flag set"
     );
 }
 
@@ -96,14 +100,14 @@ async fn shm_dispatcher_round_robin() {
     // Dispatch 8 requests — should round-robin across 4 workers
     for i in 0..8u64 {
         let (reply_tx, _reply_rx) = oneshot::channel();
+        let path_str = format!("/test/{i}");
         let batch = Batch {
             requests: vec![PendingRequest {
                 handler_id: i,
                 method_tag: 0,
                 http_version_tag: 1,
                 flags: 0,
-                path: format!("/test/{i}"),
-                query: None,
+                path_and_query: path_str.parse().unwrap(),
                 headers_mp: bytes::Bytes::new(),
                 body: bytes::Bytes::new(),
                 reply: reply_tx,
@@ -144,8 +148,7 @@ async fn shm_dispatcher_complete_through_correlation() {
             method_tag: 0,
             http_version_tag: 1,
             flags: 0,
-            path: "/hello".to_owned(),
-            query: None,
+            path_and_query: PathAndQuery::from_static("/hello"),
             headers_mp: bytes::Bytes::new(),
             body: bytes::Bytes::new(),
             reply: reply_tx,

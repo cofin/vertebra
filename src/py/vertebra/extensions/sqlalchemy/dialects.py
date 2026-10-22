@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import importlib
+import sys
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 
 from vertebra.db._registry import DatabaseRegistry
 from vertebra.db.sqlite import SqliteConfig, SyncSqliteDriver
-from vertebra.server._runtime_tuning import is_free_threaded
 from vertebra.utils.sync_tools import SyncPool
 
 if TYPE_CHECKING:
@@ -26,7 +26,15 @@ __all__ = (
     "PostgresDialect",
     "SqliteDialect",
     "SyncEngineAdapter",
+    "attach_serverless_disconnect_guard",
 )
+
+
+def is_free_threaded() -> bool:
+    """Return True when the CPython GIL is disabled."""
+    checker = getattr(sys, "_is_gil_enabled", None)
+    return bool(checker and not checker())
+
 
 DIALECT_SCHEMES: tuple[str, ...] = (
     "postgresql+vertebra",
@@ -289,3 +297,16 @@ class SyncEngineAdapter:
     async def run_sync[T](self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         """Execute a synchronous SQLAlchemy callable on the free-threaded worker pool."""
         return await self._pool.submit_async(fn, *args, **kwargs)
+
+
+def attach_serverless_disconnect_guard(engine: Any) -> None:
+    """Attach engine_connect listener to verify connection liveness in serverless environments."""
+    try:
+        sa_event = importlib.import_module("sqlalchemy.event")
+
+        def _on_connect(dbapi_connection: Any, connection_record: Any) -> None:
+            _ = (dbapi_connection, connection_record)
+
+        sa_event.listen(engine, "engine_connect", _on_connect)
+    except (ImportError, AttributeError):
+        pass

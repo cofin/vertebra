@@ -35,7 +35,7 @@ fn intern_or_alloc_header_key<'py>(py: Python<'py>, name: &[u8]) -> Bound<'py, P
     if name.eq_ignore_ascii_case(b"connection") {
         return pyo3::intern!(py, "connection").clone();
     }
-    let name_str = String::from_utf8_lossy(name);
+    let name_str = String::from_utf8_lossy(name).to_ascii_lowercase();
     PyString::new(py, &name_str)
 }
 
@@ -63,12 +63,16 @@ pub(crate) fn decode_asgi_headers<'py>(
 #[pyclass(name = "Headers", frozen, freelist = 128, from_py_object)]
 #[derive(Clone)]
 pub struct Headers {
-    raw: Bytes,
+    pub(crate) raw: Bytes,
 }
 
 impl Headers {
     pub fn new(raw: Bytes) -> Self {
         Self { raw }
+    }
+
+    pub fn raw_bytes(&self) -> &Bytes {
+        &self.raw
     }
 }
 
@@ -114,6 +118,18 @@ impl Headers {
         }
     }
 
+    /// Return all values matching `key` as a list of strings.
+    pub fn get_all(&self, key: &str) -> Vec<String> {
+        let key_bytes = key.as_bytes();
+        let mut out = Vec::new();
+        for (name, value) in iter_raw_headers(&self.raw) {
+            if name.eq_ignore_ascii_case(key_bytes) {
+                out.push(String::from_utf8_lossy(value).into_owned());
+            }
+        }
+        out
+    }
+
     fn keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let mut names: Vec<Bound<'py, PyAny>> = Vec::new();
         for (name, _) in iter_raw_headers(&self.raw) {
@@ -132,7 +148,7 @@ impl Headers {
     }
 
     fn items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let mut tuples: Vec<Bound<'py, PyAny>> = Vec::new();
+        let mut tuples: Vec<Bound<'py, PyAny>> = Vec::with_capacity(8);
         for (name, value) in iter_raw_headers(&self.raw) {
             let val_str = String::from_utf8_lossy(value);
             let t = PyTuple::new(
@@ -196,7 +212,8 @@ impl HeadersIterator {
         if self.pos + name_len > self.raw.len() {
             return None;
         }
-        let name = String::from_utf8_lossy(&self.raw[self.pos..self.pos + name_len]).into_owned();
+        let name =
+            String::from_utf8_lossy(&self.raw[self.pos..self.pos + name_len]).to_ascii_lowercase();
         self.pos += name_len;
 
         if self.pos + 2 > self.raw.len() {

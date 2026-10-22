@@ -10,19 +10,19 @@ sources:
   - resource: src/rs/vertebra-bundler/src/config.rs
   - resource: src/rs/vertebra-bundler/src/hmr.rs
   - resource: src/rs/vertebra-bundler/src/ssr.rs
-  - resource: src/rs/vertebra-bundler/src/dts.rs
+  - resource: src/rs/vertebra-bundler/src/declarations.rs
   - resource: src/rs/vertebra-bundler/src/errors.rs
   - resource: src/py/vertebra/_bundler.py
   - resource: src/py/vertebra/build/_orchestrator.py
   - resource: src/py/vertebra/build/_config.py
   - resource: src/py/vertebra/build/_fallback.py
   - resource: src/py/vertebra/build/_import_map.py
-  - resource: src/py/vertebra/framework/_ssr/_backends.py
+  - resource: src/py/vertebra/framework/ssr/__init__.py
 ---
 
 # Oxc Bundler, HMR Watcher & QuickJS SSR Pool
 
-[`vertebra-bundler`](../../../../../src/rs/vertebra-bundler/src/lib.rs) builds the `_bundler` PyO3 module (`crate-type = ["cdylib", "rlib"]`, `#[pymodule(gil_used = false)]`, module constant `GIL_USED = False`). [`vertebra/_bundler.py`](../../../../../src/py/vertebra/_bundler.py) re-exports only `Bundler`, `BundleConfig`, `DevConfig`, `BuildResult`, `OutputFile`, and `GIL_USED` as `vertebra._bundler`. `SourceWatcher`, `SsrPool`, `SsrResult`, `IsolatedDeclarationsGenerator`, `minify_css`, and `encode_ssr_worker_frame` are reachable only from the top-level `_bundler` module.
+[`vertebra-bundler`](../../../../../src/rs/vertebra-bundler/src/lib.rs) builds the `_bundler` PyO3 module (`crate-type = ["cdylib", "rlib"]`, `#[pymodule(gil_used = false)]`, module constant `GIL_USED = False`). [`vertebra/_bundler.py`](../../../../../src/py/vertebra/_bundler.py) re-exports `Bundler`, `BundleConfig`, `DevConfig`, `BuildResult`, `OutputFile`, `SourceWatcher`, `SsrPool`, `SsrResult`, `IsolatedDeclarationsGenerator`, `minify_css`, `encode_ssr_worker_frame`, and `GIL_USED` as `vertebra._bundler`. When the native `_bundler` extension is not compiled, `AssetBundler` raises `UnsupportedBackendError` rather than emitting stub bundle files.
 
 ## Single-entry transform (`bundler.rs`, `config.rs`)
 
@@ -51,15 +51,13 @@ The Python class (`PySourceWatcher`, exported as `SourceWatcher`) takes `(watch_
 - **Cache**: always on. Key is FNV-1a 64 over `component + ":" + page_json`; a hit requires the same pool `generation` and age under a fixed 60 s TTL. Entries are never evicted individually and the map has no size bound.
 - **Reload**: `invalidate()` re-reads the bundle, increments `generation`, and clears the cache; stale slots rebuild on next checkout. `shutdown()` clears slots and cache.
 
-`SsrPool.render` and `Bundler.ssr_render(component, page_json)` release the GIL. `Bundler.init_ssr(bundle_path, pool_size)`, `ssr_invalidate(paths)` (clears everything; `paths` is ignored), and `ssr_shutdown()` manage a pool owned by the `Bundler`. [`NativeSsrClient`](../../../../../src/py/vertebra/framework/_ssr/_backends.py) wraps these methods.
+`SsrPool.render` and `Bundler.ssr_render(component, page_json)` release the GIL. `Bundler.init_ssr(bundle_path, pool_size)`, `ssr_invalidate(paths)` (clears everything; `paths` is ignored), and `ssr_shutdown()` manage a pool owned by the `Bundler`. [`NativeSsrClient`](../../../../../src/py/vertebra/framework/ssr/__init__.py) wraps these methods.
 
-## Declarations, CSS, and SSR framing (`dts.rs`)
+## Declarations, CSS, and SSR framing (`declarations.rs`)
 
 - `IsolatedDeclarationsGenerator(strip_internal=True).emit_dts(filename, source_text)` emits `.d.ts` text from an Oxc parse.
 - `minify_css(css_source)` strips comments and collapses whitespace outside strings.
 - `encode_ssr_worker_frame(component, props_json)` returns a 4-byte big-endian length prefix plus JSON, the same framing as Python `SsrFrame.to_wire_bytes()`.
-
-No Python module calls these three today.
 
 ## Build orchestration (`build/_orchestrator.py`)
 
@@ -71,6 +69,6 @@ No Python module calls these three today.
 | `dev()` | `vtb dev` (background thread) | Picks a dev port (`dev-port` or first free in 5173–5199), then the same stages in dev mode. |
 | `codegen_only(output_dir=None)` | `vtb js generate-types` | Codegen only. |
 
-1. **Codegen**: `import_app(app)`, `RouteCollector().collect(app)`, then write `types.d.ts`, `schemas.zod.ts`, `manifest.json`, a placeholder `routes.ts`, and `litestar-vite.json` / `asyncapi.json` when an app plugin or state value exposes `export_vite_metadata` / `export_asyncapi_schema`. Skipped with a warning when `app` is unset. See [Codegen & Inertia](codegen-and-inertia.md).
+1. **Codegen**: `import_app(app)`, `RouteCollector().collect(app)`, then write `types.d.ts`, `schemas.zod.ts`, `manifest.json`, `routes.ts`, and `litestar-vite.json` / `asyncapi.json` when an app plugin or state value exposes `export_vite_metadata` / `export_asyncapi_schema`. Skipped with a warning when `app` is unset. See [Codegen & Inertia](codegen-and-inertia.md).
 2. **Import map**: [`ImportMapGenerator.write`](../../../../../src/py/vertebra/build/_import_map.py) writes `.vertebra/import_map.json` mapping each dependency spec to `npm:<name>@<version>`.
-3. **Bundler**: `importlib.import_module("vertebra._bundler")`. Production uses `BundleConfig(entry, outdir, minify=True, sourcemap=True)`; dev uses `DevConfig(entry, watch_dirs=[<project>/src], hmr_port=<port>)` and `start_dev`. When `bundler != "native"` or the import raises `ImportError`, it falls back to Vite: [`DevServerProcess`](../../../../../src/py/vertebra/build/_fallback.py) (`vite --port` or `npx vite --port`, sets `VERTEBRA_VITE_PROXY`) in dev, `run_vite_build` (`vite build`) in production.
+3. **Bundler**: `importlib.import_module("vertebra._bundler")`. Production uses `BundleConfig(entry, outdir, minify=True, sourcemap=True)`; dev uses `DevConfig(entry, watch_dirs=[<project>/src], hmr_port=<port>)` and `start_dev`. When `bundler != "native"` or the import raises `ImportError`, it falls back to Vite: [`DevServerProcess`](../../../../../src/py/vertebra/build/_fallback.py) and `ViteDevProxy` (`vite --port` or `npx vite --port`, sets `VERTEBRA_VITE_PROXY`) in dev, `run_vite_build` (`vite build`) in production.

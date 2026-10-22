@@ -3,32 +3,10 @@
 
 use std::sync::Arc;
 
-use tokio::sync::oneshot;
-
 use vertebra_core::transport::ring_pair::RingPair;
 use vertebra_core::transport::{Transport, TransportNode};
 
-use crate::collector::PendingResponse;
-
-/// A batch with its requests, ready for the direct dispatch worker.
-pub struct DirectBatch {
-    pub requests: Vec<DirectRequest>,
-}
-
-/// A single request in the direct dispatch path — carries the oneshot reply channel.
-pub struct DirectRequest {
-    pub handler_id: u64,
-    pub method_tag: u8,
-    pub http_version_tag: u8,
-    /// Protocol flags (see `vertebra_core::protocol::flags`).
-    pub flags: u32,
-    pub path: String,
-    pub query: Option<String>,
-    pub headers_mp: bytes::Bytes,
-    pub body: bytes::Bytes,
-    /// Reply channel. `None` for fire-and-forget requests.
-    pub reply: Option<oneshot::Sender<PendingResponse>>,
-}
+use crate::body::PendingResponse;
 
 /// Per-worker state for SHM dispatch.
 pub(super) struct WorkerState {
@@ -53,6 +31,39 @@ impl ShmDispatchBatch {
             correlation_ids: Vec::new(),
             components: Vec::new(),
             slab_len: 0,
+        }
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.flags = 0;
+        self.nodes.clear();
+        self.correlation_ids.clear();
+        self.components.clear();
+        self.slab_len = 0;
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+}
+
+/// Reusable batch scratch space preallocated for workers.
+pub(super) struct ShmBatchScratch {
+    pub(super) batches: Vec<ShmDispatchBatch>,
+}
+
+impl ShmBatchScratch {
+    pub(super) fn new(worker_count: usize) -> Self {
+        Self {
+            batches: (0..worker_count)
+                .map(|_| ShmDispatchBatch::new(0))
+                .collect(),
+        }
+    }
+
+    pub(super) fn clear(&mut self) {
+        for b in &mut self.batches {
+            b.clear();
         }
     }
 }

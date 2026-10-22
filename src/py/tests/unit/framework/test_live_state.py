@@ -105,3 +105,31 @@ async def test_live_state_room_action_call_and_broadcast() -> None:
     assert result_out.call_id == 42
     assert result_out.value == 25
     assert len(published) == 1
+
+
+def test_live_state_coalesces_and_bounds_pending_deltas() -> None:
+    """Verify mutating a field 1,000 times coalesces into 1 delta with latest value and bounded pending capacity."""
+    state = GameState(score=0)
+    for i in range(1, 1001):
+        state.score = i
+    deltas = state.flush_deltas()
+    assert len(deltas) == 1
+    assert deltas[0].value == 1000
+    assert deltas[0].field_id == LiveState.compute_field_id("score")
+
+    for i in range(300):
+        setattr(state, f"dynamic_field_{i}", i)
+    dynamic_deltas = state.flush_deltas()
+    assert len(dynamic_deltas) <= state._max_pending_deltas
+
+
+def test_live_state_wire_hex_format() -> None:
+    """Verify StateDeltaFrame MessagePack encoding matches expected wire hex string."""
+    frame = StateDeltaFrame(
+        opcode=StateOpcode.FIELD_SET,
+        state_id=0x374157F8DDD4C9A8,
+        field_id=0xD22F9095,
+        timestamp_ns=1000,
+        value=42,
+    )
+    assert frame.encode().hex() == "9501cf374157f8ddd4c9a8ced22f9095cd03e82a"

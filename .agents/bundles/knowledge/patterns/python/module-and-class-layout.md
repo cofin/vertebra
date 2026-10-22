@@ -10,13 +10,13 @@ sources:
   - resource: src/py/vertebra/framework/_router.py
   - resource: src/py/vertebra/utils/module_loader.py
   - resource: src/py/vertebra/_typing.py
-  - resource: src/py/vertebra/server/_native.py
+  - resource: src/py/vertebra/server/_dispatch.py
   - resource: pyproject.toml
 ---
 
 # Python Module Structure, Class Layout & PEP 695 Typing
 
-All Python code under [`src/py/vertebra/`](../../../../../src/py/vertebra/__init__.py) and [`src/py/tests/`](../../../../../src/py/tests/conftest.py) targets Python 3.12+ (`3.12`, `3.13`, `3.14`, `3.14t`) under strict Ruff and Mypy gates configured in [`pyproject.toml`](../../../../../pyproject.toml).
+All Python code under [`src/py/vertebra/`](../../../../../src/py/vertebra/__init__.py) and [`src/py/tests/`](../../../../../src/py/tests/conftest.py) targets Python 3.12+ (`3.12`, `3.13`, `3.14`, `3.14t`) under strict Ruff (`PLC0415` enforced) and Mypy gates configured in [`pyproject.toml`](../../../../../pyproject.toml).
 
 ## 1. Module Layout & PEP 562 Lazy Root Exports
 
@@ -48,8 +48,9 @@ def __getattr__(name: str) -> Any:
 Classes order members strictly as: class attributes / `__slots__` $\to$ `__init__` $\to$ `@property` getters $\to$ public methods $\to$ private `_...` helper methods. Private helpers used by a single class belong on that class as private methods rather than standalone module functions.
 
 - **Zero Inline `#` Comments**: Never write inline `#` comments in Python implementation or test files. Document intent, invariants, and edge cases inside Google-style docstrings.
-- **Top-Level Imports & Sanctioned Guards**: Place imports at module top level, or inside `if TYPE_CHECKING:` / [`module_loader.py`](../../../../../src/py/vertebra/utils/module_loader.py) (`import_optional`, `ensure_<pkg>()`, `import_app`). Sanctioned deferred imports are limited to PEP 562 `__getattr__` in `vertebra/__init__.py`, optional dependency probing in [`vertebra/_typing.py`](../../../../../src/py/vertebra/_typing.py), `importlib.import_module` for optional native extensions, and circular-import breakers.
-- **PEP 695 / 604 / 585 Typing**: Use built-in generic collections (`dict`, `list`, `tuple`, `set`), `X | Y` unions, and PEP 695 `type` aliases and generic functions/methods (`def schedule[T]` in [`_native.py`](../../../../../src/py/vertebra/server/_native.py)) with zero `typing_extensions` imports.
+- **Top-Level Imports (`PLC0415`) & Sanctioned Guards**: Place imports at module top level, or inside `if TYPE_CHECKING:` / [`module_loader.py`](../../../../../src/py/vertebra/utils/module_loader.py) (`import_optional`, `ensure_<pkg>()`, `import_app`). `PLC0415` is enabled repo-wide; per-file exemptions in `pyproject.toml` are restricted to PEP 562 `__getattr__` in `vertebra/__init__.py`, optional dependency probing in [`vertebra/_typing.py`](../../../../../src/py/vertebra/_typing.py), and documented runtime/circular-import boundaries.
+- **Fail-Fast `UnsupportedBackendError`**: Unwired or unconfigured external backends raise [`UnsupportedBackendError`](../../../../../src/py/vertebra/_typing.py) (`RuntimeError` subclass) instead of returning silent placeholder data.
+- **PEP 695 / 604 / 585 Typing**: Use built-in generic collections (`dict`, `list`, `tuple`, `set`), `X | Y` unions, and PEP 695 `type` aliases and generic functions/methods (`def schedule[T]` in [`_loops.py`](../../../../../src/py/vertebra/server/_loops.py)) with zero `typing_extensions` imports.
 
 ## 3. Value Objects (`msgspec.Struct`) & `__slots__`
 

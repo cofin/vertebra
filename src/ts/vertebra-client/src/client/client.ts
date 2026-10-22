@@ -1,11 +1,11 @@
+import { WebSocketClient } from "../websocket";
 import { NetworkError, TimeoutError, throwParsedError } from "./errors";
 import { computeBackoffDelay } from "./retry";
 import type { ClientConfig, RouteResponse } from "./types";
-import { RealtimeChannel } from "./ws";
 
 class HttpClient {
   private config: Required<ClientConfig>;
-  private ws: RealtimeChannel | null = null;
+  private ws: WebSocketClient | null = null;
 
   constructor(config: ClientConfig) {
     this.config = {
@@ -43,7 +43,7 @@ class HttpClient {
     input?: TInput,
     options: { headers?: Record<string, string>; timeout?: number } = {},
   ): Promise<RouteResponse<TOutput>> {
-    const url = this.buildUrl(path, method === "GET" ? input : undefined);
+    const { url, bodyInput } = this.buildUrl(path, method, input);
     const reqHeaders = new Headers({
       ...this.config.headers,
       ...options.headers,
@@ -51,7 +51,7 @@ class HttpClient {
       Accept: "application/json",
     });
 
-    const body = method !== "GET" && method !== "HEAD" && input ? JSON.stringify(input) : undefined;
+    const body = bodyInput !== undefined ? JSON.stringify(bodyInput) : undefined;
     const maxAttempts = this.config.retry.maxAttempts ?? 3;
     const initialDelay = this.config.retry.initialDelay ?? 1000;
     const retryableStatuses = this.config.retry.retryableStatuses ?? [408, 429, 500, 502, 503, 504];
@@ -80,13 +80,30 @@ class HttpClient {
           await throwParsedError(response);
         }
 
-        const data = await response.json();
+        let data: any;
+        const contentLength = response.headers.get("content-length");
+        const contentType = response.headers.get("content-type");
+
+        if (response.status === 204 || contentLength === "0") {
+          data = undefined;
+        } else if (contentType?.includes("application/json")) {
+          const text = await response.text();
+          data = text.length > 0 ? JSON.parse(text) : undefined;
+        } else {
+          data = await response.text();
+        }
+
+        const rawRequestId = response.headers.get("X-Request-ID");
+        let requestId: string | number | null = null;
+        if (rawRequestId !== null) {
+          requestId = /^\d+$/.test(rawRequestId) ? Number(rawRequestId) : rawRequestId;
+        }
 
         return {
           data,
           status: response.status,
           headers: response.headers,
-          requestId: Number.parseInt(response.headers.get("X-Request-ID") || "0", 10),
+          requestId,
         };
       } catch (error: any) {
         if (error.name === "AbortError") {
@@ -118,33 +135,55 @@ class HttpClient {
    */
   subscribe<T>(channel: string, callback: (data: T) => void): () => void {
     if (!this.ws) {
-      this.ws = new RealtimeChannel(this.config.wsURL);
+      this.ws = new WebSocketClient(this.config.wsURL);
     }
-    return this.ws.subscribe(channel, callback);
+    return this.ws.subscribe<T>(channel, (data) => callback(data));
   }
 
   /**
    * Build a URL with interpolated path parameters and optional query string.
    */
-  private buildUrl(path: string, params?: any): string {
+  private buildUrl(path: string, method: string, input?: any): { url: string; bodyInput?: any } {
     let interpolatedPath = path;
     const queryParams = new URLSearchParams();
+    const isGetOrHead = method === "GET" || method === "HEAD";
 
-    if (params && typeof params === "object") {
-      for (const [key, value] of Object.entries(params)) {
+    if (input && typeof input === "object" && !Array.isArray(input)) {
+      const consumedKeys = new Set<string>();
+      for (const [key, value] of Object.entries(input)) {
         const placeholder = `{${key}}`;
         if (interpolatedPath.includes(placeholder)) {
-          interpolatedPath = interpolatedPath.replace(placeholder, String(value));
-        } else if (value !== undefined && value !== null) {
+          interpolatedPath = interpolatedPath.replaceAll(placeholder, encodeURIComponent(String(value)));
+          consumedKeys.add(key);
+        } else if (isGetOrHead && value !== undefined && value !== null) {
           queryParams.append(key, String(value));
         }
       }
+
+      const fullPath = queryParams.size > 0 ? `${interpolatedPath}?${queryParams.toString()}` : interpolatedPath;
+      const url = `${this.config.baseURL}${fullPath.startsWith("/") ? "" : "/"}${fullPath}`;
+
+      if (isGetOrHead) {
+        return { url, bodyInput: undefined };
+      }
+
+      const remaining: Record<string, any> = {};
+      let remainingCount = 0;
+      for (const [key, value] of Object.entries(input)) {
+        if (!consumedKeys.has(key)) {
+          remaining[key] = value;
+          remainingCount++;
+        }
+      }
+      return {
+        url,
+        bodyInput: remainingCount > 0 ? remaining : undefined,
+      };
     }
 
-    const queryString = queryParams.toString();
-    const fullPath = queryString ? `${interpolatedPath}?${queryString}` : interpolatedPath;
-
-    return `${this.config.baseURL}${fullPath.startsWith("/") ? "" : "/"}${fullPath}`;
+    const fullPath = interpolatedPath;
+    const url = `${this.config.baseURL}${fullPath.startsWith("/") ? "" : "/"}${fullPath}`;
+    return { url, bodyInput: isGetOrHead ? undefined : input };
   }
 }
 

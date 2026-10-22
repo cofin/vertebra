@@ -3,13 +3,13 @@
 import logging
 import time
 import tomllib
-from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import msgspec
 
+from vertebra._vertebra import NativeLogSink
 from vertebra.telemetry.otel import TraceContext
 from vertebra.utils.serializers import encode_json_bytes
 
@@ -24,10 +24,10 @@ type LogOverflowPolicy = Literal["drop_oldest", "drop_newest", "block"]
 
 
 class _CallableLogFormatter(logging.Formatter):
-    """Standard library ``logging.Formatter`` that is also callable on event dicts."""
+    """Standard library logging.Formatter that is also callable on event dicts."""
 
     def __call__(self, record: dict[str, Any] | logging.LogRecord) -> str:
-        """Format a structured event dictionary or ``logging.LogRecord`` into a string."""
+        """Format a structured event dictionary or logging.LogRecord into a string."""
         if isinstance(record, logging.LogRecord):
             return self.format(record)
         level_name = str(record.get("level", "INFO")).upper()
@@ -56,7 +56,7 @@ class LoggingConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
     @classmethod
     def from_pyproject(cls, pyproject_path: str | Path = "pyproject.toml") -> "LoggingConfig":
-        """Load ``[tool.vertebra.logging]`` settings from ``pyproject.toml``."""
+        """Load [tool.vertebra.logging] settings from pyproject.toml."""
         path = Path(pyproject_path)
         if not path.is_file():
             return cls()
@@ -83,7 +83,7 @@ class LoggingConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     def extract_litestar_formatter(
         logging_config: Any,
     ) -> Callable[[dict[str, Any]], str] | None:
-        """Reconstruct the active formatter from a Litestar ``LoggingConfig``."""
+        """Reconstruct the active formatter from a Litestar LoggingConfig."""
         if logging_config is None:
             return None
         formatter_fn = getattr(logging_config, "formatter", None)
@@ -98,38 +98,90 @@ class LoggingConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
                 return _CallableLogFormatter(fmt=str(fmt), datefmt=datefmt)
         return _CallableLogFormatter("%(levelname)s - %(asctime)s - %(name)s - %(message)s")
 
+    def configure_stdlib(self, root_logger_name: str = "") -> "LogHandler":
+        """Configure standard library logging to emit through NativeLogSink off-GIL."""
+        sink = LogSink(
+            capacity=self.queue_capacity,
+            overflow_policy=self.overflow_policy,
+            target="stdout",
+        )
+        handler = LogHandler(sink)
+        root = logging.getLogger(root_logger_name)
+        root.setLevel(getattr(logging, self.level.upper(), logging.INFO))
+        root.addHandler(handler)
+        return handler
+
+    def to_litestar_config(self) -> Any:
+        """Create a Litestar-compatible logging configuration dictionary."""
+        return {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "standard": {
+                    "format": "%(levelname)s - %(name)s - %(message)s",
+                },
+            },
+            "handlers": {
+                "default": {
+                    "class": "vertebra.telemetry.logger.LogHandler",
+                    "level": self.level,
+                },
+            },
+            "loggers": {
+                "_root": {
+                    "handlers": ["default"],
+                    "level": self.level,
+                },
+            },
+        }
+
 
 class LogSink:
-    """Bounded non-blocking byte queue backing ``LogHandler`` and structlog sinks."""
+    """Bounded non-blocking byte queue backed by NativeLogSink."""
 
     def __init__(
         self,
         capacity: int = 8192,
         overflow_policy: LogOverflowPolicy = "drop_oldest",
+        target: str = "memory",
+        flush_interval_ms: int = 100,
     ) -> None:
         self.capacity = max(1, capacity)
         self.overflow_policy: LogOverflowPolicy = overflow_policy
-        self._queue: deque[bytes] = deque()
-        self.enqueued_count = 0
-        self.dropped_count = 0
+        self._target = target
+        self._flush_interval_ms = flush_interval_ms
+        self._native = NativeLogSink(
+            target=target,
+            capacity=self.capacity,
+            overflow_policy=overflow_policy,
+            flush_interval_ms=flush_interval_ms,
+        )
+
+    @property
+    def enqueued_count(self) -> int:
+        """Return the number of enqueued log records."""
+        return self._native.metrics()[0]
+
+    @property
+    def dropped_count(self) -> int:
+        """Return the number of dropped log records."""
+        return self._native.dropped_count()
 
     def write_bytes(self, payload: bytes) -> bool:
         """Enqueue pre-encoded UTF-8 JSON bytes without blocking."""
-        if len(self._queue) >= self.capacity:
-            if self.overflow_policy == "drop_newest":
-                self.dropped_count += 1
-                return False
-            self._queue.popleft()
-            self.dropped_count += 1
-        self._queue.append(payload)
-        self.enqueued_count += 1
-        return True
+        try:
+            self._native.emit(payload)
+            return True
+        except RuntimeError:
+            return False
 
     def drain(self) -> list[bytes]:
         """Drain all queued byte payloads."""
-        items = list(self._queue)
-        self._queue.clear()
-        return items
+        return self._native.drain()
+
+    def flush(self) -> None:
+        """Flush the native logger sink."""
+        self._native.flush()
 
     def build_structlog_processor(
         self,
@@ -169,7 +221,7 @@ class LogSink:
 
 
 class LogHandler(logging.Handler):
-    """Non-blocking ``logging.Handler`` encoding log records via ``msgspec.json``."""
+    """Non-blocking logging.Handler encoding log records via msgspec.json."""
 
     def __init__(
         self,
@@ -182,7 +234,7 @@ class LogHandler(logging.Handler):
         self._trace_context_getter = trace_context_getter or TraceContext.current
 
     def emit(self, record: logging.LogRecord) -> None:
-        """Encode ``record`` to UTF-8 JSON bytes and enqueue into ``self.sink``."""
+        """Encode record to UTF-8 JSON bytes and enqueue into self.sink."""
         trace_id: str | None = getattr(record, "trace_id", None)
         span_id: str | None = getattr(record, "span_id", None)
         if (trace_id is None or span_id is None) and self._trace_context_getter is not None:

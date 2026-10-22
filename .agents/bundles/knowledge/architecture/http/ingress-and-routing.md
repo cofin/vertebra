@@ -9,8 +9,7 @@ sources:
   - resource: src/rs/vertebra-http/src/server.rs
   - resource: src/rs/vertebra-http/src/response.rs
   - resource: src/rs/vertebra-http/src/config.rs
-  - resource: src/rs/vertebra-http/src/router.rs
-  - resource: src/rs/vertebra-http/src/route_table.rs
+  - resource: src/rs/vertebra-http/src/routing.rs
   - resource: src/rs/vertebra-http/src/tls.rs
   - resource: src/rs/vertebra-http/src/hmr.rs
   - resource: src/rs/vertebra-http/src/health.rs
@@ -28,20 +27,20 @@ The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/sr
 
 1. Calls `BatchBridge::init(256, 1_048_576, 4, workers)` for both topologies.
 2. Registers the embedded `_vertebra` module with `append_to_inittab!(pymodule_init)` before the first `Python::attach` (feature `python`, on by default).
-3. Imports the app and builds a [`RouteTable`](../../../../../src/rs/vertebra-http/src/route_table.rs) from `app.handler_index`. Each mount prefix is registered as `{prefix}/*rest` for `GET`, `POST`, `PUT`, `DELETE`, and `PATCH`. A raw callable app is wrapped in `vertebra.framework._app.App` and mounted at `/`.
-4. Selects a dispatcher. With `Topology::Shm` on Unix it creates a `RingFactory`, `Dispatcher::new_shm(rings, 65536)`, `response_reader::run_response_reader`, and spawns the worker processes. Otherwise it uses the Bridge dispatcher, a bridge response-reader task, and one embedded Python thread that runs `vertebra.server._native.run_worker`.
+3. Imports the app and builds a [`RouteTable`](../../../../../src/rs/vertebra-http/src/routing.rs) from `app.handler_index`. Each mount prefix is registered as `{prefix}/*rest` for `GET`, `POST`, `PUT`, `DELETE`, and `PATCH`. A raw callable app is wrapped in `vertebra.framework._app.App` and mounted at `/`.
+4. Selects a dispatcher. With `Topology::Shm` on Unix it creates a `RingFactory`, `Dispatcher::new_shm(rings, 65536)` (using an 8-shard cache-line-padded `InFlightRequests` map), `shm_reader::run_response_reader`, and spawns the worker processes. Otherwise it uses the Bridge dispatcher, a bridge response-reader task, and one embedded Python thread that runs `vertebra.server._dispatch.run_worker`.
 5. Starts eight `RequestBatcher` tasks (`BatchPolicy::default_adaptive()`, channel capacity 16,384).
-6. Runs `server::run_with_collector` until Ctrl-C (SIGINT).
+6. Runs `server::run_with_collector` until Ctrl-C (SIGINT) or `CancellationToken` drain.
 
-After the accept loop returns, SHM workers get SIGTERM and then SIGKILL if still running after 5 s (`RingFactory::shutdown_workers`). Connection tasks that are already running are not awaited.
+After the accept loop stops accepting new connections on cancellation, in-flight connections drain gracefully and SHM workers get SIGTERM and then SIGKILL if still running after 5 s (`RingFactory::shutdown_workers`).
 
 ## Accept loop (`server.rs`)
 
 [`run_with_listener`](../../../../../src/rs/vertebra-http/src/server.rs) (and `run_with_collector`, which binds `ServerConfig::bind` first) owns a [`ServerState`](../../../../../src/rs/vertebra-http/src/server.rs) holding the `Arc<Router>`, `Arc<Dispatcher>`, config, the batcher senders, and the dev `HmrState`.
 
-- Every accepted socket gets `TCP_NODELAY`. No other socket options are set.
-- Cleartext connections call `h2c::detect_cleartext_protocol` (one `peek`; the result is ignored), then serve through `hyper_util::server::conn::auto::Builder` with `http1().pipeline_flush(true)` and the `h2_*` window and stream settings from `ServerConfig`. HTTP/2 prior knowledge works on cleartext.
-- When `ServerConfig::tls` is set (both `VERTEBRA_TLS_CERT` and `VERTEBRA_TLS_KEY`), [`TlsAcceptor::from_config`](../../../../../src/rs/vertebra-http/src/tls.rs) loads the PEM files and advertises ALPN `h2` and `http/1.1`. mTLS uses `WebPkiClientVerifier` when `MtlsConfig.mode` is `Optional` or `Required`; `from_env` always sets `MtlsConfig::default()`. The TLS path does not apply the `h2_*` settings.
+- Every accepted socket gets `TCP_NODELAY`.
+- Cleartext connections serve through `hyper_util::server::conn::auto::Builder` (`AutoBuilder`) with `http1().pipeline_flush(true)` and the `h2_*` window and stream settings from `ServerConfig`. Both HTTP/1.1 and HTTP/2 prior-knowledge (`h2c`) connections are handled on the cleartext listener.
+- When `ServerConfig::tls` is set (both `VERTEBRA_TLS_CERT` and `VERTEBRA_TLS_KEY`), [`TlsAcceptor::from_config`](../../../../../src/rs/vertebra-http/src/tls.rs) loads the PEM files and advertises ALPN `h2` and `http/1.1`. mTLS uses `WebPkiClientVerifier` when `MtlsConfig.mode` is `Optional` or `Required`.
 - `ServerState::get_collector` picks a batcher sender round-robin with an `AtomicUsize`.
 
 ## Per-request pipeline (`response::handle`)
@@ -50,8 +49,8 @@ After the accept loop returns, SHM workers get SIGTERM and then SIGKILL if still
 
 1. Dev HMR: when `dev_mode` (`VERTEBRA_DEV=1`) and the path is `/__vertebra/hmr` or `/__vertebra/hmr/signal`, [`hmr::handle`](../../../../../src/rs/vertebra-http/src/hmr.rs) answers.
 2. `/__vertebra/health` returns 200 with the backpressure snapshot as JSON when a controller is attached.
-3. [`HealthEndpoint::default().try_intercept`](../../../../../src/rs/vertebra-http/src/health.rs) answers `/healthz`, `/livez`, `/__vertebra/health`, and `/readyz`. A new endpoint is built per request, so `set_state` changes are never visible here.
-4. Admission: `BackpressureController::try_acquire_for_path`. This runs before routing, so 404 and 405 responses also take a permit.
+3. [`HealthEndpoint::default().try_intercept`](../../../../../src/rs/vertebra-http/src/health.rs) answers `/healthz`, `/livez`, `/__vertebra/health`, and `/readyz`.
+4. Admission: `BackpressureController::try_acquire_for_path`.
 5. `Router::lookup`: 404 `Not Found`, or 405 with an `allow` header.
 6. The full request body is buffered with `BodyExt::collect`.
 7. Headers are compact-encoded and a `PendingRequest` with a `oneshot` reply channel is sent to a batcher; a closed channel returns 503.
@@ -59,11 +58,11 @@ After the accept loop returns, SHM workers get SIGTERM and then SIGKILL if still
 9. `http3::inject_alt_svc_header` runs when `http3.enabled` is true.
 10. The circuit breaker records a failure for 5xx and a success otherwise.
 
-## Routing (`router.rs`, `route_table.rs`)
+## Routing (`routing.rs`)
 
-- [`RouteTable`](../../../../../src/rs/vertebra-http/src/route_table.rs) is a startup builder: `insert(method, path) -> HandlerId` and `into_entries()`. There is no runtime route swap; dev reload restarts the process.
-- [`route_table::handler_id`](../../../../../src/rs/vertebra-http/src/route_table.rs) returns a `u64` (`HandlerId`) by feeding the uppercased method, a space byte, and the path to `FnvHasher` through `std::hash::Hash`, which appends `0xff` after each `str`. [`vertebra.framework._router._make_handler_id`](../../../../../src/py/vertebra/framework/_router.py) writes the same bytes, so Python and Rust agree on IDs without a registration exchange.
-- [`Router::from_entries`](../../../../../src/rs/vertebra-http/src/router.rs) builds a `HashMap<String, matchit::Router<HandlerId>>`, one tree per registered method. Each path goes through [`vertebra_core::router::normalize_typed_path`](../../../../../src/rs/vertebra-core/src/router.rs), which rewrites `:name` and `{name:type}` to `{name}`, and `*name` and `{name:path}` to `{*name}`.
+- [`RouteTable`](../../../../../src/rs/vertebra-http/src/routing.rs) is a startup builder: `insert(method, path) -> HandlerId` and `into_entries()`. There is no runtime route swap; dev reload restarts the process.
+- [`routing::handler_id`](../../../../../src/rs/vertebra-http/src/routing.rs) returns a `u64` (`HandlerId`) by feeding the uppercased method, a space byte, and the path to `FnvHasher` through `std::hash::Hash`, which appends `0xff` after each `str`. [`vertebra.framework._router._make_handler_id`](../../../../../src/py/vertebra/framework/_router.py) writes the same bytes, so Python and Rust agree on IDs without a registration exchange.
+- [`Router::from_entries`](../../../../../src/rs/vertebra-http/src/routing.rs) builds a `HashMap<String, matchit::Router<HandlerId>>`, one tree per registered method. Each path goes through [`vertebra_core::router::normalize_typed_path`](../../../../../src/rs/vertebra-core/src/router.rs), which rewrites `:name` and `{name:type}` to `{name}`, and `*name` and `{name:path}` to `{*name}`.
 - `Router::lookup` uppercases the method if needed. On a miss it calls `allowed_methods(path)` across all trees and returns `RouterError::MethodNotAllowed { allowed }` or `RouterError::NotFound`.
 
 ## Configuration (`config.rs`)

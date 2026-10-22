@@ -1,45 +1,33 @@
 """Utilities for async/sync interoperability, loop-sharded resources, and free-threaded sync pools."""
 
+from __future__ import annotations
+
 import asyncio
 import concurrent.futures
+import contextlib
 import contextvars
 import functools
-import inspect
 import os
 import sys
 import threading
 import weakref
 from collections.abc import Awaitable, Callable, Coroutine
-from contextlib import AbstractAsyncContextManager, AbstractContextManager
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from vertebra._typing import UVLOOP_INSTALLED
 from vertebra.utils.module_loader import import_optional
-from vertebra.utils.portal import get_global_portal
+from vertebra.utils.portal import PortalProvider
 
 if TYPE_CHECKING:
     from types import TracebackType
 
 __all__ = (
-    "NO_VALUE",
     "CapacityLimiter",
     "LoopShardedResource",
-    "NoValue",
     "SyncPool",
     "async_",
-    "await_",
-    "ensure_async_",
-    "get_next",
     "run_",
-    "with_ensure_async_",
 )
-
-
-class NoValue:
-    """Sentinel class for missing values."""
-
-
-NO_VALUE = NoValue()
 
 
 def _is_gil_disabled() -> bool:
@@ -115,7 +103,7 @@ class LoopShardedResource[T]:
 class SyncPool:
     """Dedicated worker pool for executing synchronous callables in parallel on Python 3.12+/3.14t."""
 
-    _default_instance: ClassVar["SyncPool | None"] = None
+    _default_instance: ClassVar[SyncPool | None] = None
     _default_lock: ClassVar[threading.Lock] = threading.Lock()
 
     __slots__ = ("_executor", "_max_workers", "_pid")
@@ -132,7 +120,7 @@ class SyncPool:
         return self._max_workers
 
     @classmethod
-    def default(cls) -> "SyncPool":
+    def default(cls) -> SyncPool:
         """Return the process-wide default SyncPool."""
         if cls._default_instance is None:
             with cls._default_lock:
@@ -164,7 +152,8 @@ class SyncPool:
     def shutdown(self, *, wait: bool = True) -> None:
         """Shut down the underlying thread pool executor."""
         if self._executor is not None:
-            self._executor.shutdown(wait=wait)
+            with contextlib.suppress(RuntimeError, OSError):
+                self._executor.shutdown(wait=wait)
             self._executor = None
             self._pid = None
 
@@ -217,11 +206,26 @@ class CapacityLimiter:
 
     async def __aexit__(
         self,
-        exc_type: "type[BaseException] | None",
-        exc_val: "BaseException | None",
-        exc_tb: "TracebackType | None",
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
     ) -> None:
         """Exit the async context manager."""
+        _ = (exc_type, exc_val, exc_tb)
+        self.release()
+
+    def __enter__(self) -> None:
+        """Enter synchronous context (no-op for async limiter)."""
+        pass
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Exit synchronous context."""
+        _ = (exc_type, exc_val, exc_tb)
         self.release()
 
     @property
@@ -253,14 +257,6 @@ def run_[**ParamSpecT, ReturnT](
     return _RunWrapper(async_function)
 
 
-def await_[**ParamSpecT, ReturnT](
-    async_function: Callable[ParamSpecT, Coroutine[Any, Any, ReturnT]],
-    raise_sync_error: bool = False,
-) -> Callable[ParamSpecT, ReturnT]:
-    """Convert an async function to a blocking one, running in the main async loop or global portal."""
-    return _AwaitWrapper(async_function, raise_sync_error)
-
-
 def async_[**ParamSpecT, ReturnT](
     function: Callable[ParamSpecT, ReturnT],
     *,
@@ -268,32 +264,6 @@ def async_[**ParamSpecT, ReturnT](
 ) -> Callable[ParamSpecT, Awaitable[ReturnT]]:
     """Convert a blocking function to an async one without redundant partial allocations."""
     return _AsyncWrapper(function, limiter)
-
-
-def ensure_async_[**ParamSpecT, ReturnT](
-    function: Callable[ParamSpecT, Awaitable[ReturnT] | ReturnT],
-) -> Callable[ParamSpecT, Awaitable[ReturnT]]:
-    """Convert a function to an async one if it is not already."""
-    if inspect.iscoroutinefunction(function):
-        return function
-
-    return _EnsureAsyncWrapper(function)
-
-
-def with_ensure_async_[T](
-    obj: AbstractContextManager[T] | AbstractAsyncContextManager[T],
-) -> AbstractAsyncContextManager[T]:
-    """Convert a context manager to an async one if it is not already."""
-    if isinstance(obj, AbstractContextManager):
-        return cast("AbstractAsyncContextManager[T]", _ContextManagerWrapper(obj))
-    return obj
-
-
-async def get_next(iterable: Any, default: Any = NO_VALUE, *_args: Any) -> Any:
-    """Return the next item from an async iterator."""
-    if isinstance(default, NoValue):
-        return await anext(iterable)
-    return await anext(iterable, default)
 
 
 class _RunWrapper[**ParamSpecT, ReturnT]:
@@ -310,58 +280,13 @@ class _RunWrapper[**ParamSpecT, ReturnT]:
             loop = None
 
         if loop is not None and loop.is_running():
-            portal = get_global_portal()
-            return portal.call(self._function, *args, **kwargs)
+            return PortalProvider.default().call(self._function, *args, **kwargs)
 
         if bool(UVLOOP_INSTALLED) and sys.platform != "win32" and not _is_gil_disabled():
             uvloop_mod = import_optional("uvloop")
             if uvloop_mod is not None:
                 uvloop_mod.install()
         return asyncio.run(self._function(*args, **kwargs))
-
-
-class _AwaitWrapper[**ParamSpecT, ReturnT]:
-    __slots__ = ("__dict__", "_function", "_raise_sync_error")
-
-    def __init__(
-        self,
-        async_function: Callable[ParamSpecT, Coroutine[Any, Any, ReturnT]],
-        raise_sync_error: bool,
-    ) -> None:
-        self._function = async_function
-        self._raise_sync_error = raise_sync_error
-        functools.update_wrapper(self, async_function)
-
-    def __call__(self, *args: ParamSpecT.args, **kwargs: ParamSpecT.kwargs) -> ReturnT:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            if self._raise_sync_error:
-                msg = "Cannot run async function"
-                raise RuntimeError(msg) from None
-            return get_global_portal().call(self._function, *args, **kwargs)
-
-        if loop.is_running():
-            try:
-                current_task = asyncio.current_task(loop=loop)
-            except RuntimeError:
-                current_task = None
-
-            if current_task is not None:
-                if self._raise_sync_error:
-                    msg = (
-                        "await_ cannot be called from within an async task running on the same event loop. "
-                        "Use 'await' instead."
-                    )
-                    raise RuntimeError(msg)
-                return get_global_portal().call(self._function, *args, **kwargs)
-            future = asyncio.run_coroutine_threadsafe(self._function(*args, **kwargs), loop)
-            return future.result()
-
-        if self._raise_sync_error:
-            msg = "Cannot run async function"
-            raise RuntimeError(msg)
-        return get_global_portal().call(self._function, *args, **kwargs)
 
 
 class _AsyncWrapper[**ParamSpecT, ReturnT]:
@@ -382,33 +307,3 @@ class _AsyncWrapper[**ParamSpecT, ReturnT]:
         if _is_gil_disabled():
             return await SyncPool.default().submit_async(self._function, *args, **kwargs)
         return await asyncio.to_thread(self._function, *args, **kwargs)
-
-
-class _EnsureAsyncWrapper[**ParamSpecT, ReturnT]:
-    __slots__ = ("__dict__", "_function")
-
-    def __init__(self, function: Callable[ParamSpecT, Awaitable[ReturnT] | ReturnT]) -> None:
-        self._function = function
-        functools.update_wrapper(self, function)
-
-    async def __call__(self, *args: ParamSpecT.args, **kwargs: ParamSpecT.kwargs) -> ReturnT:
-        result = self._function(*args, **kwargs)
-        if inspect.isawaitable(result):
-            return await cast("Awaitable[ReturnT]", result)
-        return result
-
-
-class _ContextManagerWrapper[T]:
-    def __init__(self, cm: AbstractContextManager[T]) -> None:
-        self._cm = cm
-
-    async def __aenter__(self) -> T:
-        return self._cm.__enter__()
-
-    async def __aexit__(
-        self,
-        exc_type: "type[BaseException] | None",
-        exc_val: "BaseException | None",
-        exc_tb: "TracebackType | None",
-    ) -> bool | None:
-        return self._cm.__exit__(exc_type, exc_val, exc_tb)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import vertebra.utils.sync_tools as sync_tools_mod
+from vertebra.utils.portal import PortalProvider
 from vertebra.utils.serializers import decode_json, format_json
 from vertebra.utils.sync_tools import (
     CapacityLimiter,
@@ -58,3 +60,30 @@ def test_format_json_pretty_prints_payload() -> None:
     formatted = format_json({"b": 2, "a": [1, 2]}, indent=2)
     assert "\n  " in formatted
     assert decode_json(formatted) == {"b": 2, "a": [1, 2]}
+
+
+def test_portal_provider_default_and_call() -> None:
+    """Verify PortalProvider.default() creates a singleton portal and runs callables."""
+    portal = PortalProvider.default()
+    assert portal is not None
+    assert PortalProvider.default() is portal
+
+    async def _add(a: int, b: int) -> int:
+        return a + b
+
+    result = portal.call(_add, 10, 32)
+    assert result == 42
+
+
+def test_sync_tools_dead_functions_removed() -> None:
+    """Verify dead sync utility functions and sentinels have been removed."""
+    for dead_name in (
+        "NoValue",
+        "NO_VALUE",
+        "await_",
+        "ensure_async_",
+        "with_ensure_async_",
+        "get_next",
+        "_Awaiter",
+    ):
+        assert not hasattr(sync_tools_mod, dead_name)

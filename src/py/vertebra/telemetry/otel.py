@@ -8,6 +8,8 @@ from typing import Any
 
 import msgspec
 
+from vertebra._vertebra import format_traceparent, parse_traceparent
+
 __all__ = (
     "GenAiMetricSample",
     "GenAiRecorder",
@@ -18,7 +20,7 @@ __all__ = (
 
 
 class TraceContext(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
-    """W3C Trace Context ``traceparent`` representation (`00-<trace_id>-<span_id>-<flags>`)."""
+    """W3C Trace Context traceparent representation (00-<trace_id>-<span_id>-<flags>)."""
 
     trace_id: str
     span_id: str
@@ -27,32 +29,21 @@ class TraceContext(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_li
 
     @classmethod
     def parse(cls, header: str) -> "TraceContext | None":
-        """Parse a W3C ``traceparent`` header string."""
-        parts = header.strip().split("-")
-        if len(parts) < 4:
+        """Parse a W3C traceparent header string using native Rust parser."""
+        result = parse_traceparent(header)
+        if result is None:
             return None
-        ver_hex, tid_hex, sid_hex, flags_hex = parts[0], parts[1], parts[2], parts[3]
-        if len(ver_hex) != 2 or len(tid_hex) != 32 or len(sid_hex) != 16 or len(flags_hex) != 2:
-            return None
-        try:
-            ver = int(ver_hex, 16)
-            int(tid_hex, 16)
-            int(sid_hex, 16)
-            flags = int(flags_hex, 16)
-        except ValueError:
-            return None
-        if ver == 0xFF or tid_hex == "0" * 32 or sid_hex == "0" * 16:
-            return None
+        trace_id, span_id, trace_flags = result
         return cls(
-            trace_id=tid_hex.lower(),
-            span_id=sid_hex.lower(),
-            trace_flags=flags,
-            version=ver,
+            trace_id=trace_id,
+            span_id=span_id,
+            trace_flags=trace_flags,
+            version=0,
         )
 
     @classmethod
     def generate(cls, *, sampled: bool = True) -> "TraceContext":
-        """Generate a new root ``TraceContext``."""
+        """Generate a new root TraceContext."""
         return cls(
             trace_id=secrets.token_hex(16),
             span_id=secrets.token_hex(8),
@@ -61,16 +52,16 @@ class TraceContext(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_li
 
     @staticmethod
     def current() -> "TraceContext | None":
-        """Return the active ``TraceContext`` from the current execution context."""
+        """Return the active TraceContext from the current execution context."""
         return _ACTIVE_TRACE_CTX.get()
 
     @staticmethod
     def set_current(ctx: "TraceContext | None") -> "Token[TraceContext | None]":
-        """Bind ``ctx`` as the active W3C trace context for the current execution context."""
+        """Bind ctx as the active W3C trace context for the current execution context."""
         return _ACTIVE_TRACE_CTX.set(ctx)
 
     def new_child(self) -> "TraceContext":
-        """Create a child span context sharing ``trace_id``."""
+        """Create a child span context sharing trace_id."""
         return TraceContext(
             trace_id=self.trace_id,
             span_id=secrets.token_hex(8),
@@ -79,12 +70,12 @@ class TraceContext(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_li
         )
 
     def format(self) -> str:
-        """Format as a canonical 55-character ``traceparent`` header."""
-        return f"{self.version:02x}-{self.trace_id}-{self.span_id}-{self.trace_flags:02x}"
+        """Format as a canonical 55-character traceparent header."""
+        return format_traceparent(self.trace_id, self.span_id, self.trace_flags)
 
     @property
     def is_sampled(self) -> bool:
-        """Return whether the sampled bit (`0x01`) is set."""
+        """Return whether the sampled bit (0x01) is set."""
         return bool(self.trace_flags & 0x01)
 
 
@@ -95,7 +86,7 @@ _ACTIVE_TRACE_CTX: ContextVar[TraceContext | None] = ContextVar(
 
 
 class SpanData(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
-    """Lightweight span record exported through ``SpanExporter``."""
+    """Lightweight span record exported through SpanExporter."""
 
     name: str
     trace_id: str
@@ -126,7 +117,7 @@ class SpanExporter:
 
 
 class GenAiMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
-    """OpenTelemetry ``gen_ai.*`` semantic convention metric sample."""
+    """OpenTelemetry gen_ai.* semantic convention metric sample."""
 
     model: str
     operation: str
@@ -137,10 +128,11 @@ class GenAiMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True, arr
 
 
 class GenAiRecorder:
-    """Records ``gen_ai.client.token.usage`` and ``gen_ai.client.operation.duration`` metrics."""
+    """Records gen_ai.client.token.usage and gen_ai.client.operation.duration metrics."""
 
-    def __init__(self) -> None:
-        self._samples: list[GenAiMetricSample] = []
+    def __init__(self, max_samples: int = 1024) -> None:
+        self.max_samples = max_samples
+        self._samples: deque[GenAiMetricSample] = deque(maxlen=max_samples)
 
     @property
     def samples(self) -> tuple[GenAiMetricSample, ...]:
@@ -166,3 +158,9 @@ class GenAiRecorder:
         )
         self._samples.append(sample)
         return sample
+
+    def drain(self) -> list[GenAiMetricSample]:
+        """Drain and return all recorded GenAI telemetry samples."""
+        drained = list(self._samples)
+        self._samples.clear()
+        return drained

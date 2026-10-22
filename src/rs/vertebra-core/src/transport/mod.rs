@@ -794,8 +794,13 @@ impl BatchSnapshot {
         // data[12..16] is padding
 
         let node_size = core::mem::size_of::<TransportNode>();
-        let node_bytes = node_count * node_size;
-        let expected = BATCH_HEADER_SIZE + node_bytes + slab_len;
+        let node_bytes = node_count
+            .checked_mul(node_size)
+            .ok_or(TransportError::DeserializeFailed("node_count overflow"))?;
+        let expected = BATCH_HEADER_SIZE
+            .checked_add(node_bytes)
+            .and_then(|sum| sum.checked_add(slab_len))
+            .ok_or(TransportError::DeserializeFailed("length overflow"))?;
         if data.len() < expected {
             return Err(TransportError::DeserializeFailed("truncated"));
         }
@@ -808,6 +813,34 @@ impl BatchSnapshot {
             let dst = nodes.as_mut_ptr() as *mut u8;
             unsafe {
                 core::ptr::copy_nonoverlapping(data[BATCH_HEADER_SIZE..].as_ptr(), dst, node_bytes);
+            }
+        }
+
+        // Validate node offsets and lengths against slab_len (CORE-20)
+        for node in &nodes {
+            let path_end = (node.path_offset as usize)
+                .checked_add(node.path_len as usize)
+                .ok_or(TransportError::DeserializeFailed("path offset overflow"))?;
+            if path_end > slab_len {
+                return Err(TransportError::DeserializeFailed("path out of bounds"));
+            }
+            let query_end = (node.query_offset as usize)
+                .checked_add(node.query_len as usize)
+                .ok_or(TransportError::DeserializeFailed("query offset overflow"))?;
+            if query_end > slab_len {
+                return Err(TransportError::DeserializeFailed("query out of bounds"));
+            }
+            let headers_end = (node.headers_offset as usize)
+                .checked_add(node.headers_len as usize)
+                .ok_or(TransportError::DeserializeFailed("headers offset overflow"))?;
+            if headers_end > slab_len {
+                return Err(TransportError::DeserializeFailed("headers out of bounds"));
+            }
+            let body_end = (node.body_offset as usize)
+                .checked_add(node.body_len as usize)
+                .ok_or(TransportError::DeserializeFailed("body offset overflow"))?;
+            if body_end > slab_len {
+                return Err(TransportError::DeserializeFailed("body out of bounds"));
             }
         }
 
@@ -1370,6 +1403,23 @@ mod tests {
         let mut buf = vec![0u8; BATCH_HEADER_SIZE];
         buf[4..8].copy_from_slice(&10u32.to_le_bytes()); // node_count = 10
         assert!(BatchSnapshot::deserialize_from(&buf).is_err());
+    }
+
+    #[test]
+    fn batch_snapshot_rejects_out_of_range_node_offsets() {
+        let node = TransportNode {
+            body_offset: 100,
+            body_len: 50, // 100 + 50 = 150 > slab_len (10)
+            ..Default::default()
+        };
+        let slab = vec![0u8; 10];
+        let snap = BatchSnapshot::new(slab, vec![node]);
+        let mut buf = vec![0u8; snap.serialized_size()];
+        snap.serialize_into(&mut buf);
+
+        let err =
+            BatchSnapshot::deserialize_from(&buf).expect_err("should reject out of range offset");
+        assert!(matches!(err, TransportError::DeserializeFailed(_)));
     }
 
     #[test]

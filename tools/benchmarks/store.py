@@ -86,14 +86,11 @@ class BenchmarkStore:
         cols = {
             row[0]
             for row in self._conn.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'benchmark_results'"
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'benchmark_results'"
             ).fetchall()
         }
         if "topology" not in cols:
-            self._conn.execute(
-                "ALTER TABLE benchmark_results ADD COLUMN topology VARCHAR DEFAULT 'unknown'"
-            )
+            self._conn.execute("ALTER TABLE benchmark_results ADD COLUMN topology VARCHAR DEFAULT 'unknown'")
 
     def create_run(self, note: str = "") -> str:
         """Create a new benchmark run and return its run_id."""

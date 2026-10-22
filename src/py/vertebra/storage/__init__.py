@@ -1,7 +1,6 @@
 """Native object storage, registry, Arrow file bridge, and V4/OCI/Azure signing package for Vertebra."""
 
 from vertebra.storage._store import (
-    AsyncStore,
     AzureConfig,
     GcsConfig,
     HttpConfig,
@@ -12,12 +11,11 @@ from vertebra.storage._store import (
     OciConfig,
     PutResult,
     R2Config,
+    ReadableFile,
     S3Config,
     SigningConfig,
     StorageConfig,
-    SyncStore,
 )
-from vertebra.storage.arrow import ReadableFile
 from vertebra.storage.pipeline import StagedUpload, UploadTracker
 from vertebra.storage.registry import (
     StorageRegistry,
@@ -25,7 +23,6 @@ from vertebra.storage.registry import (
 )
 
 __all__ = (
-    "AsyncStore",
     "AzureConfig",
     "GcsConfig",
     "HttpConfig",
@@ -42,7 +39,6 @@ __all__ = (
     "StagedUpload",
     "StorageConfig",
     "StorageRegistry",
-    "SyncStore",
     "UploadTracker",
     "get_default_storage_registry",
 )

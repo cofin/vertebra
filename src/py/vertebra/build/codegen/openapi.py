@@ -4,6 +4,7 @@ import re
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+from vertebra.build.codegen._emitter import SchemaEmitter
 from vertebra.build.codegen._ir import (
     AnnotatedType,
     ArrayType,
@@ -16,8 +17,8 @@ from vertebra.build.codegen._ir import (
     TypeNode,
     UnionType,
 )
+from vertebra.build.codegen._json_schema import resolve_parameter_node
 from vertebra.build.codegen._metadata import RouteMetadata
-from vertebra.build.codegen.procedures import resolve_parameter_node
 from vertebra.utils.serializers import encode_json
 
 __all__ = ("OpenAPIGenerator",)
@@ -26,13 +27,10 @@ _PATH_PARAM_PATTERN = re.compile(r"\{(\w+)(?::\w+)?\}")
 _SCHEMA_REF_PREFIX = f"{chr(35)}/components/schemas/"
 
 
-class OpenAPIGenerator:
+class OpenAPIGenerator(SchemaEmitter):
     """Generate OpenAPI 3.1.0 specifications from collected RouteMetadata."""
 
-    __slots__ = ("declared",)
-
-    def __init__(self, declared: dict[str, ObjectType] | None = None) -> None:
-        self.declared: dict[str, ObjectType] = declared if declared is not None else {}
+    __slots__ = ()
 
     def generate(
         self,
@@ -42,13 +40,7 @@ class OpenAPIGenerator:
         version: str = "1.0.0",
     ) -> dict[str, Any]:
         """Build an OpenAPI 3.1.0 dictionary from the given routes."""
-        route_list = list(routes)
-        for route in route_list:
-            for param_name, param_node in route.params.items():
-                res = resolve_parameter_node(param_name, param_node)
-                if res.include_in_schema:
-                    self._collect_named_types((res.base_type,))
-            self._collect_named_types((route.return_type,))
+        route_list = self._collect_route_objects(routes)
 
         paths: dict[str, dict[str, Any]] = {}
         for route in sorted(route_list, key=lambda r: (self._normalize_path(r.path), r.method, r.handler_name)):
@@ -58,8 +50,8 @@ class OpenAPIGenerator:
             path_item[route.method.lower()] = self._build_operation(route, path_params)
 
         schemas: dict[str, Any] = {}
-        for name in sorted(self.declared):
-            schemas[name] = self._type_to_schema(self.declared[name], in_component=True)
+        for name in sorted(self._declared):
+            schemas[name] = self._type_to_schema(self._declared[name], in_component=True)
 
         return {
             "openapi": "3.1.0",
@@ -78,13 +70,6 @@ class OpenAPIGenerator:
         """Render the OpenAPI 3.1.0 specification as a JSON string."""
         doc = self.generate(routes, title=title, version=version)
         return encode_json(doc)
-
-    def _collect_named_types(self, nodes: Iterable[TypeNode]) -> None:
-        for node in nodes:
-            if isinstance(node, ObjectType) and node.name:
-                self.declared.setdefault(node.name, node)
-            for child in node.iter_children():
-                self._collect_named_types((child,))
 
     @staticmethod
     def _normalize_path(path: str) -> str:
@@ -115,7 +100,8 @@ class OpenAPIGenerator:
                 )
 
         operation: dict[str, Any] = {
-            "operationId": route.operation_id.replace(".", "_"),
+            "operationId": route.operation_id,
+            "summary": route.handler_name.replace("_", " ").title(),
             "parameters": parameters,
             "responses": {
                 "200": {
@@ -150,41 +136,47 @@ class OpenAPIGenerator:
             return {"type": "array", "items": self._type_to_schema(node.item)}
 
         if isinstance(node, TupleType):
-            items = [self._type_to_schema(item) for item in node.items]
             return {
                 "type": "array",
-                "prefixItems": items,
-                "minItems": len(items),
-                "maxItems": len(items),
+                "prefixItems": [self._type_to_schema(i) for i in node.items],
+                "minItems": len(node.items),
+                "maxItems": len(node.items),
             }
 
         if isinstance(node, UnionType):
-            return {"oneOf": [self._type_to_schema(variant) for variant in node.variants]}
+            return {"anyOf": [self._type_to_schema(v) for v in node.variants]}
 
         if isinstance(node, LiteralType):
             return {"const": node.value}
+
+        if isinstance(node, GenericType) and node.name == "Record" and len(node.params) == 2:
+            return {"type": "object", "additionalProperties": self._type_to_schema(node.params[1])}
 
         if isinstance(node, NamedTypeRef):
             return {"$ref": f"{_SCHEMA_REF_PREFIX}{node.name}"}
 
         if isinstance(node, ObjectType):
-            if node.name and node.name in self.declared and not in_component:
+            if node.name and not in_component:
                 return {"$ref": f"{_SCHEMA_REF_PREFIX}{node.name}"}
-            props = {f_name: self._type_to_schema(f_type) for f_name, f_type in sorted(node.fields.items())}
-            required = sorted(f_name for f_name in node.fields if f_name not in node.optional_fields)
-            result: dict[str, Any] = {"type": "object", "properties": props}
-            if required:
-                result["required"] = required
-            return result
-
-        if isinstance(node, GenericType) and node.name == "Record" and len(node.params) == 2:
-            return {"type": "object", "additionalProperties": self._type_to_schema(node.params[1])}
+            properties: dict[str, Any] = {}
+            for field_name, field_type in node.fields.items():
+                f_res = resolve_parameter_node(field_name, field_type)
+                f_schema = self._apply_constraints(
+                    self._type_to_schema(f_res.base_type),
+                    f_res.constraints,
+                )
+                properties[field_name] = f_schema
+            required_fields = sorted(set(node.fields) - set(node.optional_fields))
+            doc: dict[str, Any] = {"type": "object", "properties": properties}
+            if required_fields:
+                doc["required"] = required_fields
+            return doc
 
         return {}
 
     @staticmethod
     def _primitive_schema(kind: str) -> dict[str, Any]:
-        mapping: dict[str, dict[str, Any]] = {
+        mapping = {
             "string": {"type": "string"},
             "number": {"type": "number"},
             "boolean": {"type": "boolean"},

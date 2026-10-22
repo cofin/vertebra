@@ -7,7 +7,7 @@ import sys
 import click
 
 from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
-from vertebra.extensions.worker.runner import WorkerRunner
+from vertebra.framework.queues import WorkerRunner
 from vertebra.utils.module_loader import import_app
 
 __all__ = ("execute_worker_cli", "run_workers", "workers")

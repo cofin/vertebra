@@ -19,6 +19,7 @@ from vertebra.framework._router import (
     _normalize_path,
     _normalize_prefix,
 )
+from vertebra.framework.openapi import OpenAPIConfig, OpenAPISpecBuilder
 
 __all__ = ("App", "HandlerInfo", "LifecycleHook", "_make_handler_id")
 
@@ -39,6 +40,8 @@ class App:
         "_handler_index",
         "_handlers",
         "_mounts",
+        "_openapi_builder",
+        "_openapi_config",
         "_routers",
         "_routes",
         "_shutdown_hooks",
@@ -53,6 +56,8 @@ class App:
         self._handler_index: dict[int, HandlerInfo] = {}
         self._handlers: dict[int, Callable[..., Any]] = {}
         self._mounts: list[tuple[str, Any, str]] = []
+        self._openapi_config: Any = None
+        self._openapi_builder: Any = None
 
     @property
     def routes(self) -> tuple[RouteDef, ...]:
@@ -126,6 +131,28 @@ class App:
     def mount(self, prefix: str, sub_app: Any, *, protocol: str = "auto") -> None:
         """Mount a WSGI or ASGI sub-application under a path prefix."""
         self._mounts.append((_normalize_prefix(prefix), sub_app, protocol))
+
+    def enable_docs(self, config: Any = None) -> Any:
+        """Enable OpenAPI schema and Scalar documentation endpoints."""
+        cfg = config or OpenAPIConfig()
+        builder = OpenAPISpecBuilder.from_app(self, config=cfg)
+        self._openapi_config = cfg
+        self._openapi_builder = builder
+
+        @self.get(cfg.schema_path)
+        def _openapi_schema() -> dict[str, Any]:
+            return builder.build()
+
+        @self.get(cfg.scalar.path)
+        def _scalar_docs() -> str:
+            return (
+                f"<!doctype html><html><head><title>{cfg.title}</title><meta charset='utf-8' />"
+                f"<meta name='viewport' content='width=device-width, initial-scale=1' /></head>"
+                f"<body><script id='api-reference' data-url='{cfg.schema_path}'></script>"
+                f"<script src='https://cdn.jsdelivr.net/npm/@scalar/api-reference'></script></body></html>"
+            )
+
+        return builder
 
     def on_startup(self, fn: LifecycleHook | None = None) -> Any:
         """Register a startup lifecycle hook directly or as a decorator."""

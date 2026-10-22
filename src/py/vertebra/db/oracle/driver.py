@@ -91,9 +91,12 @@ class SyncOracleDriver:
         *,
         type_code: str = "f",
         dtype: str | None = None,
-    ) -> array.array[float]:
+    ) -> array.array[Any]:
         """Encode a float sequence into an ``array.array`` suitable for Oracle 26ai ``DB_TYPE_VECTOR`` binds."""
-        resolved_code = ("d" if dtype == "float64" else "f") if dtype is not None else type_code
+        resolved_code: str = ("d" if dtype == "float64" else "f") if dtype is not None else type_code
+        if resolved_code not in {"f", "d", "b"}:
+            msg = f"Unsupported Oracle VECTOR type_code: {resolved_code!r}"
+            raise ValueError(msg)
         return array.array(resolved_code, values)
 
     def prepare_bind_params(self, params: dict[str, Any] | None = None) -> dict[str, Any]:

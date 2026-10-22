@@ -3,6 +3,7 @@
 import importlib
 import socket
 import textwrap
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -166,6 +167,10 @@ def test_codegen_only_writes_generated_files(tmp_path: Path, monkeypatch: pytest
     assert (output_dir / "types.d.ts").exists()
     assert (output_dir / "schemas.zod.ts").exists()
     assert (output_dir / "manifest.json").exists()
+    routes_ts = (output_dir / "routes.ts").read_text(encoding="utf-8")
+    assert "export const routes = {" in routes_ts
+    assert '"get.users.by_user_id": { method: "GET", path: "/users/{user_id}" }' in routes_ts
+    assert "} as const;" in routes_ts
 
 
 def test_codegen_only_uses_runtime_app_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -199,6 +204,10 @@ def test_codegen_only_uses_runtime_app_override(tmp_path: Path, monkeypatch: pyt
     assert (output_dir / "types.d.ts").exists()
     assert (output_dir / "schemas.zod.ts").exists()
     assert (output_dir / "manifest.json").exists()
+    routes_ts = (output_dir / "routes.ts").read_text(encoding="utf-8")
+    assert "export const routes = {" in routes_ts
+    assert '"get.health": { method: "GET", path: "/health" }' in routes_ts
+    assert "} as const;" in routes_ts
 
 
 def test_cli_build_invokes_orchestrator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,3 +229,46 @@ def test_cli_build_invokes_orchestrator(tmp_path: Path, monkeypatch: pytest.Monk
 
     assert result.exit_code == 0, result.output
     assert called == [tmp_path.resolve()]
+
+
+def test_native_build_real_extension_writes_bundle(tmp_path: Path) -> None:
+    """Real vertebra._bundler extension build should compile TypeScript entry to dist."""
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "main.ts").write_text("export const answer: number = 42;\n", encoding="utf-8")
+
+    config = BuildConfig(entry="src/main.ts", outdir="dist", bundler="native")
+    orch = BuildOrchestrator(tmp_path, config)
+    assert orch.build() is True
+    output_js = tmp_path / "dist" / "main.js"
+    assert output_js.is_file()
+    assert "42" in output_js.read_text(encoding="utf-8")
+
+
+def test_native_dev_retains_watcher_and_rebuilds_on_change(tmp_path: Path) -> None:
+    """BuildOrchestrator.dev() should keep native watcher alive and rebuild on source change."""
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    main_ts = src_dir / "main.ts"
+    main_ts.write_text("export const answer: number = 42;\n", encoding="utf-8")
+
+    config = BuildConfig(entry="src/main.ts", outdir="dist", bundler="native")
+    orch = BuildOrchestrator(tmp_path, config)
+    orch.dev()
+    try:
+        assert orch.is_watching is True
+        output_js = tmp_path / "dist" / "main.js"
+        assert output_js.is_file()
+        assert "42" in output_js.read_text(encoding="utf-8")
+
+        time.sleep(0.1)
+        main_ts.write_text("export const answer: number = 99;\n", encoding="utf-8")
+
+        for _ in range(30):
+            time.sleep(0.1)
+            if "99" in output_js.read_text(encoding="utf-8"):
+                break
+        assert "99" in output_js.read_text(encoding="utf-8")
+    finally:
+        orch.stop()
+        assert orch.is_watching is False

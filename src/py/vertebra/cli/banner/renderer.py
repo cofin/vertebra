@@ -1,10 +1,12 @@
 """Banner renderer for Vertebra startup and shutdown."""
 
+import importlib
 import importlib.metadata
 import shutil
 import sys
 from pathlib import Path
 
+from vertebra import __version__
 from vertebra.build import BuildConfig
 from vertebra.cli.banner.logos import LOGO_COMPACT, get_logo
 from vertebra.cli.theme import (
@@ -28,11 +30,9 @@ def render_banner(
     host: str = "127.0.0.1",
     port: int = 8000,
     workers: int = 1,
-    log_level: str = "info",
     vc: Console | None = None,
 ) -> None:
     """Render the startup banner to the terminal."""
-    _ = log_level
     target = vc or console
     if not target.is_tty:
         return
@@ -94,20 +94,14 @@ def _get_version() -> str:
     try:
         return importlib.metadata.version("vertebra")
     except importlib.metadata.PackageNotFoundError:
-        try:
-            from vertebra import __version__
-
-            return __version__
-        except ImportError:
-            return "dev"
+        return __version__ or "dev"
 
 
 def _detect_rust_server() -> bool:
     """Check if the Rust server binary is available."""
     try:
-        from vertebra.supervisor._supervisor import find_server_binary
-
-        find_server_binary()
+        sup_mod = importlib.import_module("vertebra.supervisor._supervisor")
+        sup_mod.find_server_binary()
     except (SystemExit, Exception):
         return False
     return True

@@ -1,8 +1,6 @@
 //! Shared memory layout and ring buffer metadata.
 
 use core::sync::atomic::{AtomicU32, AtomicU64};
-use std::cell::UnsafeCell;
-use std::sync::{Arc, Mutex};
 
 /// Cache line size used to isolate hot atomics.
 ///
@@ -18,9 +16,6 @@ pub const ABI_VERSION: u32 = 2;
 /// Magic marker for validating mapped regions ("VERTEBRA").
 pub const MAGIC: u64 = u64::from_le_bytes(*b"VERTEBRA");
 
-/// Supported fixed payload sizes (bytes) for ring slots.
-pub const SLOT_SIZES: [usize; 3] = [256, 1024, 4096];
-
 /// Slot alignment for payloads (bytes).
 pub const SLOT_ALIGN: usize = 64;
 
@@ -28,9 +23,7 @@ pub const SLOT_ALIGN: usize = 64;
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum RegionState {
-    Uninitialized = 0,
     Ready = 1,
-    Stale = 2,
 }
 
 /// Cache-line aligned wrapper to avoid false sharing.
@@ -85,163 +78,6 @@ pub struct SlotHeader {
     pub flags: u32,
 }
 
-/// Simple buffer pool for zero-copy workflows.
-#[derive(Debug)]
-pub struct BufferPool {
-    buffer_size: usize,
-    count: usize,
-    storage: UnsafeCell<Vec<u8>>,
-    free_list: Mutex<Vec<usize>>,
-}
-
-unsafe impl Send for BufferPool {}
-unsafe impl Sync for BufferPool {}
-
-#[derive(Debug, thiserror::Error)]
-pub enum BufferError {
-    #[error("buffer pool exhausted")]
-    Exhausted,
-    #[error("buffer index out of range")]
-    InvalidIndex,
-}
-
-impl BufferPool {
-    pub fn new(buffer_size: usize, count: usize) -> Arc<Self> {
-        let total = buffer_size * count;
-        let storage = UnsafeCell::new(vec![0u8; total]);
-        let free_list = (0..count).collect();
-        Arc::new(Self {
-            buffer_size,
-            count,
-            storage,
-            free_list: Mutex::new(free_list),
-        })
-    }
-
-    pub fn acquire(self: &Arc<Self>) -> Result<Buffer, BufferError> {
-        let mut guard = self.free_list.lock().map_err(|_| BufferError::Exhausted)?;
-        let index = guard.pop().ok_or(BufferError::Exhausted)?;
-        Ok(Buffer {
-            pool: Arc::clone(self),
-            index,
-        })
-    }
-
-    /// Atomically acquire enough `buffer_size` slots to store `total_bytes`.
-    ///
-    /// Rolls back and returns `None` if fewer than `slots_needed` free slots are available.
-    pub fn acquire_multi(self: &Arc<Self>, total_bytes: usize) -> Option<Vec<Buffer>> {
-        if self.buffer_size == 0 {
-            return None;
-        }
-        let slots_needed = total_bytes.div_ceil(self.buffer_size).max(1);
-        let mut guard = self.free_list.lock().ok()?;
-        if guard.len() < slots_needed {
-            return None;
-        }
-        let mut buffers = Vec::with_capacity(slots_needed);
-        for _ in 0..slots_needed {
-            let index = guard.pop().expect("checked free_list length");
-            buffers.push(Buffer {
-                pool: Arc::clone(self),
-                index,
-            });
-        }
-        Some(buffers)
-    }
-
-    /// Release a batch of leased buffers back to the pool.
-    pub fn release_multi(&self, handles: Vec<Buffer>) {
-        drop(handles);
-    }
-
-    pub fn count(&self) -> usize {
-        self.count
-    }
-
-    pub fn available(&self) -> usize {
-        self.free_list.lock().map(|guard| guard.len()).unwrap_or(0)
-    }
-
-    pub fn buffer_size(&self) -> usize {
-        self.buffer_size
-    }
-
-    fn release(&self, index: usize) {
-        if let Ok(mut guard) = self.free_list.lock() {
-            if cfg!(debug_assertions) && guard.contains(&index) {
-                panic!("double free detected for buffer index {index}");
-            }
-            guard.push(index);
-        }
-    }
-
-    /// Reconstruct a buffer from a raw index.
-    ///
-    /// # Safety
-    /// Caller must ensure the index originated from this pool and is currently checked out.
-    pub unsafe fn from_raw(self: &Arc<Self>, index: usize) -> Result<Buffer, BufferError> {
-        if index >= self.count {
-            return Err(BufferError::InvalidIndex);
-        }
-        Ok(Buffer {
-            pool: Arc::clone(self),
-            index,
-        })
-    }
-}
-
-/// Handle to an acquired buffer. Returns to pool on Drop.
-#[derive(Debug)]
-pub struct Buffer {
-    pool: Arc<BufferPool>,
-    index: usize,
-}
-
-pub type BufferHandle = Buffer;
-
-impl Buffer {
-    pub fn as_slice(&self) -> &[u8] {
-        let start = self.index * self.pool.buffer_size;
-        let end = start + self.pool.buffer_size;
-        // SAFETY: caller holds Buffer handle, ensuring exclusive access.
-        let storage: &Vec<u8> = unsafe { &*self.pool.storage.get() };
-        &storage[start..end]
-    }
-
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        let start = self.index * self.pool.buffer_size;
-        let end = start + self.pool.buffer_size;
-        // SAFETY: caller holds Buffer handle, ensuring exclusive access.
-        let storage: &mut Vec<u8> = unsafe { &mut *self.pool.storage.get() };
-        &mut storage[start..end]
-    }
-
-    pub fn len(&self) -> usize {
-        self.pool.buffer_size
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.pool.buffer_size == 0
-    }
-
-    pub fn index(&self) -> usize {
-        self.index
-    }
-
-    pub fn into_raw_index(self) -> usize {
-        let index = self.index;
-        std::mem::forget(self);
-        index
-    }
-}
-
-impl Drop for Buffer {
-    fn drop(&mut self) {
-        self.pool.release(self.index);
-    }
-}
-
 /// Describes a ring layout derived from slot size + slot count.
 #[derive(Debug, Copy, Clone)]
 pub struct RingLayout {
@@ -290,59 +126,17 @@ impl RingLayout {
     }
 }
 
-fn align_up(value: usize, align: usize) -> usize {
+pub fn align_up(value: usize, align: usize) -> usize {
     value.div_ceil(align) * align
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-    use std::sync::Arc;
 
     #[test]
     fn header_alignment_matches_cacheline() {
         assert_eq!(core::mem::align_of::<CacheLine<u8>>(), CACHELINE_BYTES);
-    }
-
-    #[test]
-    fn slot_sizes_are_power_of_two() {
-        for size in SLOT_SIZES {
-            assert!(size.is_power_of_two());
-        }
-    }
-
-    #[test]
-    fn buffer_pool_acquire_release() {
-        let pool = BufferPool::new(64, 2);
-        let mut a = pool.acquire().expect("buffer a");
-        let _b = pool.acquire().expect("buffer b");
-        assert!(pool.acquire().is_err());
-        a.as_mut_slice()[0] = 7;
-        drop(a);
-        assert!(pool.acquire().is_ok());
-    }
-
-    #[test]
-    fn buffer_pool_exhaustion() {
-        let pool = BufferPool::new(32, 1);
-        let _buf = pool.acquire().unwrap();
-        assert!(matches!(pool.acquire(), Err(BufferError::Exhausted)));
-    }
-
-    #[test]
-    fn buffer_pool_concurrent_acquire_release() {
-        let pool = BufferPool::new(64, 4);
-        std::thread::scope(|s| {
-            for _ in 0..4 {
-                let pool = Arc::clone(&pool);
-                s.spawn(move || {
-                    let mut buf = pool.acquire().unwrap();
-                    buf.as_mut_slice()[0] = 1;
-                });
-            }
-        });
-        assert_eq!(pool.available(), 4);
     }
 
     #[test]
@@ -356,18 +150,5 @@ mod tests {
             layout.total_size,
             layout.header_size + expected_seq_size + (slot_size * slots)
         );
-    }
-
-    proptest! {
-        #[test]
-        fn buffer_pool_no_double_free(count in 1usize..8, buffer_size in 8usize..256) {
-            let pool = BufferPool::new(buffer_size, count);
-            let mut buffers = Vec::new();
-            for _ in 0..count {
-                buffers.push(pool.acquire().unwrap());
-            }
-            drop(buffers);
-            prop_assert_eq!(pool.available(), count);
-        }
     }
 }

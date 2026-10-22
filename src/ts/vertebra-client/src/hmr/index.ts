@@ -281,17 +281,20 @@ class HotReloadClient {
 export { HotReloadClient };
 
 // ---------------------------------------------------------------------------
-// Window global + auto-connect
+// Window global + manual init
 // ---------------------------------------------------------------------------
 
 declare global {
   interface Window {
-    __vertebra_hmr: HotReloadClient;
+    __vertebra_hmr?: HotReloadClient;
   }
 }
 
-if (typeof window !== "undefined") {
-  const client = new HotReloadClient();
+export function initHotReload(hmrPath?: string): HotReloadClient {
+  const client = new HotReloadClient(hmrPath);
   client.connect();
-  window.__vertebra_hmr = client;
+  if (typeof window !== "undefined") {
+    window.__vertebra_hmr = client;
+  }
+  return client;
 }

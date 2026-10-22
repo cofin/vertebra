@@ -20,7 +20,8 @@ from vertebra.extensions.litestar import (
     LitestarPlugin,
     enter_litestar_server_lifespan,
 )
-from vertebra.server._asgi._runner import AsgiRunner, _drive_coro
+from vertebra.server._asgi._runner import AsgiRunner
+from vertebra.server._dispatch import _schedule_coros
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -300,7 +301,7 @@ def test_drive_coro_promotes_yielded_coroutine_to_asyncio_task() -> None:
             _ = tg
 
     async def _run() -> None:
-        _drive_coro(yielded_then_anyio())
+        _schedule_coros(asyncio.get_running_loop(), [yielded_then_anyio()])
         await asyncio.sleep(0.02)
 
     asyncio.run(_run())

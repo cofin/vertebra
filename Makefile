@@ -23,6 +23,8 @@ export CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
 endif
 
+export CARGO_TARGET_DIR ?= /tmp/vtb-cargo-target
+
 BLUE := $(shell printf "\033[1;34m")
 GREEN := $(shell printf "\033[1;32m")
 RED := $(shell printf "\033[1;31m")
@@ -178,6 +180,7 @@ rs-test:                                            ## Run Rust tests (all featu
 
 .PHONY: py-test
 py-test: dev                                        ## Run Python tests
+	@uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage
 	@uv run pytest src/py/tests -v
 	@echo "${OK} Python tests passed"
 
@@ -199,14 +202,18 @@ coverage:                                           ## Run tests with coverage r
 .PHONY: lint
 lint: ts-lint                                       ## Format and lint everything with auto-fixes (Python, Rust, TS)
 	@echo "${INFO} Linting and fixing Python (Ruff)..."
-	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests
-	@uv run ruff format src/py/vertebra src/py/tests
+	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests tools/scripts
+	@uv run ruff format src/py/vertebra src/py/tests tools/scripts
 	@echo "${INFO} Linting and fixing Rust (Fmt & Clippy)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo fmt --all)
 	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,compression -- -D warnings)
 	@echo "${INFO} Running type checks (Mypy)..."
-	@uv run mypy src/py/vertebra
+	@uv run mypy src/py/vertebra tools/scripts
+	@if uv run python -c "import vertebra._vertebra, vertebra._bundler, vertebra._storage" >/dev/null 2>&1; then \
+		uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage; \
+	fi
+	@$(MAKE) review-check
 	@echo "${OK} Lint complete"
 
 .PHONY: lint-all
@@ -214,14 +221,26 @@ lint-all:                                           ## Check formatting, linting
 	@echo "${INFO} Checking TS package (Biome)..."
 	@(cd src/ts/vertebra-client && bunx biome check .)
 	@echo "${INFO} Checking Python (Ruff & Mypy)..."
-	@uv run ruff check src/py/vertebra src/py/tests
-	@uv run ruff format --check src/py/vertebra src/py/tests
-	@uv run mypy src/py/vertebra
+	@uv run ruff check src/py/vertebra src/py/tests tools/scripts
+	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts
+	@uv run mypy src/py/vertebra tools/scripts
+	@if uv run python -c "import vertebra._vertebra, vertebra._bundler, vertebra._storage" >/dev/null 2>&1; then \
+		uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage; \
+	fi
 	@echo "${INFO} Checking Rust (Fmt & Clippy)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo fmt --all -- --check)
 	@(cd src/rs && cargo clippy --workspace --all-targets --features tls,compression -- -D warnings)
+	@$(MAKE) review-check
 	@echo "${OK} All lint checks passed"
+
+.PHONY: review-check
+review-check:                                       ## Validate agentic review setup, skills, and manifests
+	@uv run python -m tools.scripts.review_setup validate
+
+.PHONY: review-route
+review-route:                                       ## Route changed files to owning review areas and shards
+	@BASE=$${BASE:-origin/main}; uv run python -m tools.scripts.review_setup route --base "$$BASE"
 
 .PHONY: check
 check: lint test coverage                           ## Everything: lint, type check, all tests, coverage
@@ -270,3 +289,23 @@ bench-report:                                       ## Show latest benchmark rep
 .PHONY: bench-diff
 bench-diff:                                         ## Compare latest benchmark run vs previous
 	@uv run --group bench python -m tools.benchmarks compare
+
+.PHONY: rs-bench
+rs-bench:                                           ## Run Rust Criterion benchmarks
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@cd src/rs && cargo bench -p vertebra-core --features compression && cargo bench -p vertebra-http --bench server_throughput
+
+.PHONY: bench-micro
+bench-micro:                                        ## Run Python micro-benchmarks
+	@uv run --group bench python -m tools.benchmarks.micro
+
+.PHONY: bench-baseline
+bench-baseline:                                     ## Record benchmark baseline (NAME=pre-refactor by default)
+	@$(MAKE) rs-bench
+	@$(MAKE) bench-micro
+	@uv run --group bench python -m tools.benchmarks.baseline record --name $${NAME:-pre-refactor}
+
+.PHONY: bench-check
+bench-check:                                        ## Compare current benchmarks against baseline (BASELINE=pre-refactor)
+	@uv run --group bench python -m tools.benchmarks.baseline check --baseline $${BASELINE:-pre-refactor}
+

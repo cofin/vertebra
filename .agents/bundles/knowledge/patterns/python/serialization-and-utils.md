@@ -1,22 +1,23 @@
 ---
 type: Pattern
 title: "Serialization & Python Utility Conventions"
-description: "How `vertebra.utils` centralizes JSON encoding and decoding, schema dumping, async/sync bridging, free-threaded worker pools, optional imports, and config lookup."
+description: "How `vertebra.utils` centralizes JSON and MessagePack encoding and decoding, schema dumping, async/sync bridging, free-threaded worker pools, optional imports, and config lookup."
 status: stable
 tags: [patterns, python, serialization, concurrency]
 sources:
   - resource: src/py/vertebra/utils/serializers/__init__.py
   - resource: src/py/vertebra/utils/serializers/_json.py
+  - resource: src/py/vertebra/utils/serializers/_msgpack.py
   - resource: src/py/vertebra/utils/serializers/_schema.py
   - resource: src/py/vertebra/utils/serializers/_numpy.py
   - resource: src/py/vertebra/utils/sync_tools.py
   - resource: src/py/vertebra/utils/portal.py
   - resource: src/py/vertebra/utils/module_loader.py
-  - resource: src/py/vertebra/utils/loop_policy.py
   - resource: src/py/vertebra/utils/config_tools.py
   - resource: src/py/vertebra/utils/uuids.py
   - resource: src/py/vertebra/utils/type_guards.py
-  - resource: src/py/vertebra/utils/singleton.py
+  - resource: src/py/vertebra/db/pipeline.py
+  - resource: src/py/vertebra/db/rls.py
   - resource: src/py/tests/unit/utils/test_sync_tools.py
 ---
 
@@ -24,9 +25,9 @@ sources:
 
 [`vertebra.utils`](../../../../../src/py/vertebra/utils/__init__.py) is a namespace package (its `__init__.py` holds only a docstring) with no re-exports. Import from submodules. Module layout and lazy-import rules are covered in [module-and-class-layout](module-and-class-layout.md).
 
-## 1. JSON Goes Through `vertebra.utils.serializers`
+## 1. JSON & MessagePack Go Through `vertebra.utils.serializers`
 
-Every JSON encode or decode in `src/py/vertebra` goes through [`vertebra.utils.serializers`](../../../../../src/py/vertebra/utils/serializers/__init__.py). The package uses `msgspec.json` internally, behind a lazily created process-wide `JSONSerializer` (`get_default_serializer()` in `_json.py`).
+Every JSON or MessagePack encode or decode in `src/py/vertebra` goes through [`vertebra.utils.serializers`](../../../../../src/py/vertebra/utils/serializers/__init__.py). The package uses `msgspec.json` behind a lazily created process-wide `JSONSerializer` (`get_default_serializer()` in `_json.py`) and `msgspec.msgpack` behind [`MsgpackCodec`](../../../../../src/py/vertebra/utils/serializers/_msgpack.py) (`encode`, `decode`, `encode_into`, `decode_typed`).
 
 | Function | Behavior |
 |---|---|
@@ -35,6 +36,7 @@ Every JSON encode or decode in `src/py/vertebra` goes through [`vertebra.utils.s
 | `encode_json_into(data, buffer, offset=0)` | `msgspec` `Encoder.encode_into` into a caller-owned `bytearray`. It has no stdlib fallback. |
 | `decode_json(data, *, decode_bytes=True)` | Accepts `str` or `bytes`. With `decode_bytes=False`, `bytes` input is returned unchanged. |
 | `format_json(value, *, indent=2)` | Pretty-prints with `msgspec.json.format`. |
+| `MsgpackCodec.encode(value)` / `MsgpackCodec.decode(payload, type=...)` | Centralized MessagePack encoding and decoding (`encode_msgpack`, `decode_msgpack`). |
 
 `_normalize_supported_value` is the encoder `enc_hook`. It converts:
 
@@ -66,25 +68,26 @@ Fallbacks: when `msgspec` raises any other `TypeError` or a `ValueError`, `encod
 | `SyncPool` | Lazily created `ThreadPoolExecutor` (`max_workers` default `2 × cpu_count`, thread prefix `vertebra-ft-sync`). `submit` / `submit_async` copy `contextvars`. The executor is rebuilt after `fork` (PID check). `SyncPool.default()` is a double-checked singleton. |
 | `CapacityLimiter` | One `asyncio.Semaphore` per event loop (`WeakKeyDictionary`), reset after fork. Assigning `total_tokens` drops existing semaphores. |
 | `LoopShardedResource[T]` | One resource per event loop from `factory` or `async_factory`. A factory set up with only `async_factory` must be read with `get_async()`. |
+| `configure_event_loop_policy()`, `LoopDiagnostics`, `LoopMismatchError` | Event-loop policy installation (uvloop on non-Windows GIL builds unless `VERTEBRA_UVLOOP` disables it) and nested-loop/thread-affinity diagnostics in `sync_tools.py`. |
 | [`PortalProvider` / `Portal` / `PortalManager` / `get_global_portal`](../../../../../src/py/vertebra/utils/portal.py) | A background thread running its own event loop. `PortalManager` is a singleton that restarts the provider after fork or if the thread died, and stops it at exit. |
 
-Outside `vertebra.utils`, only `vertebra.extensions.sqlalchemy.dialects` (`SyncPool`) imports `sync_tools`. Tests are in [`test_sync_tools.py`](../../../../../src/py/tests/unit/utils/test_sync_tools.py).
+Outside `vertebra.utils`, `vertebra.extensions.sqlalchemy.dialects` (`SyncPool`) imports `sync_tools`. Tests are in [`test_sync_tools.py`](../../../../../src/py/tests/unit/utils/test_sync_tools.py).
 
-## 4. Optional Dependencies, Config, IDs
+## 4. Optional Dependencies, Config, SQL Identifiers & IDs
 
 - [`module_loader.py`](../../../../../src/py/vertebra/utils/module_loader.py): `import_app("module:attr")`, `import_string`, `import_optional` (returns `None` on any import failure), `module_available`, `dependency_flag`, `module_to_os_path`, `ensure_{sqlspec,sqlalchemy,advanced_alchemy,uvloop,pyarrow,msgspec}` (raise `MissingDependencyError`), `reset_dependency_cache`.
-- [`loop_policy.py`](../../../../../src/py/vertebra/utils/loop_policy.py): `configure_event_loop_policy()` installs uvloop unless `VERTEBRA_UVLOOP` is set to a disable value or the platform is Windows. It never raises. Also provides loop diagnostics (`check_nested_loop`, `check_loop_thread_affinity`, `diagnose_loop_state`, `LoopMismatchError`).
-- [`config_tools.py`](../../../../../src/py/vertebra/utils/config_tools.py): `get_env(key, default, type_hint)` (bool coercion from `1/true/yes/on` and `0/false/no/off`), `find_pyproject_toml`, and `parse_pyproject_config` / `read_pyproject_section`, which read `[tool.vtb]`. `LoggingConfig.from_pyproject` in `vertebra.telemetry` reads `[tool.vertebra.logging]` instead ([logging-tracing-and-genai](../../domains/telemetry/logging-tracing-and-genai.md)).
+- [`config_tools.py`](../../../../../src/py/vertebra/utils/config_tools.py): `get_env(key, default, type_hint)` (bool coercion from `1/true/yes/on` and `0/false/no/off`), `find_pyproject_toml`, `parse_pyproject_config` / `read_pyproject_section` (reads `[tool.vertebra]` with `[tool.vtb]` fallback), and `SingletonMeta` (thread-safe per-class singleton metaclass).
+- [`pipeline.py`](../../../../../src/py/vertebra/db/pipeline.py) and [`rls.py`](../../../../../src/py/vertebra/db/rls.py): `_IDENT_RE` (`^[A-Za-z_][A-Za-z0-9_]*$`) and `_validate_identifier()` validate SQL, PL/SQL, CTE, and GUC identifiers before string interpolation.
 - [`uuids.py`](../../../../../src/py/vertebra/utils/uuids.py): `uuid3/4/5/6/7` and `nanoid` use `uuid_utils` / `fastnanoid` when installed. `uuid6` falls back to `uuid4` with a warning.
-- `type_guards.py` (`is_dataclass_instance`, `is_pydantic_model`, `is_msgspec_struct`, `is_attrs_instance`, `dataclass_to_dict`) and `singleton.py` (`SingletonMeta`, thread-safe, keyed per class).
+- [`type_guards.py`](../../../../../src/py/vertebra/utils/type_guards.py): `is_dataclass_instance`, `is_pydantic_model`, `is_msgspec_struct`, `is_attrs_instance`, `dataclass_to_dict`.
 
 <!-- truth: start -->
-- No module under `src/py/vertebra` outside `utils/serializers/` calls `msgspec.json.encode`, `msgspec.json.decode`, `json.dumps`, `json.loads`, or `orjson`. The only `orjson` reference is the `ORJSON_INSTALLED` flag in `_typing.py`.
+- No module under `src/py/vertebra` outside `utils/serializers/` calls `msgspec.json.encode`, `msgspec.json.decode`, `msgspec.msgpack.encode`, `msgspec.msgpack.decode`, `json.dumps`, `json.loads`, or `orjson`.
 - `encode_json` and `encode_json_bytes` fall back to stdlib `json.dumps` for any `msgspec` `TypeError` other than "unsupported JSON value", and for any `ValueError`. `encode_json_into` has no fallback.
 - `decode_json` falls back to `json.loads` on `msgspec` `TypeError` or `ValueError`.
 - The JSON `enc_hook` encodes `Decimal` as `float` and naive `datetime` as UTC with a `Z` suffix.
 - `SchemaSerializer` pipelines are cached per `(type(sample), exclude_unset)`. Dicts and `None` share the key `(None, exclude_unset)`.
 - `async_` dispatches to `SyncPool.default()` only when `sys._is_gil_enabled()` returns `False`. Otherwise it uses `asyncio.to_thread`.
 - `SyncPool`, `CapacityLimiter`, and `PortalManager` rebuild their executor, semaphores, or provider when `os.getpid()` changes.
-- `vertebra.utils.config_tools` reads `[tool.vtb]` and `vertebra.telemetry.LoggingConfig` reads `[tool.vertebra.logging]`.
+- `vertebra.utils.config_tools` reads `[tool.vertebra]` (falling back to `[tool.vtb]`) and `vertebra.telemetry.LoggingConfig` reads `[tool.vertebra.logging]`.
 <!-- truth: end -->

@@ -97,28 +97,6 @@ impl ShmRegion {
         Err(ShmError::InvalidSize)
     }
 
-    /// Map an existing file descriptor into this process (safe wrapper).
-    ///
-    /// Used by worker processes to attach to shared memory regions created
-    /// by the supervisor and inherited across fork/spawn. The FD must point
-    /// to a valid shared memory region of at least `size` bytes.
-    ///
-    /// Does not take ownership of the FD — the caller is responsible for
-    /// closing it when no longer needed.
-    #[cfg(unix)]
-    pub fn from_fd(fd: RawFd, size: usize) -> Result<Self, ShmError> {
-        if fd < 0 {
-            return Err(ShmError::InvalidName);
-        }
-        if size == 0 {
-            return Err(ShmError::InvalidSize);
-        }
-        // SAFETY: caller guarantees fd is a valid, open file descriptor
-        // pointing to a shared memory region of at least `size` bytes.
-        // This is the documented contract for inherited FDs from the supervisor.
-        unsafe { Self::map(fd, size) }
-    }
-
     /// Open an existing named region (Unix only).
     #[cfg(unix)]
     pub fn open_named(name: &str, size: usize) -> Result<Self, ShmError> {
@@ -178,7 +156,16 @@ impl ShmRegion {
             }
         }
         // SAFETY: map the region for read/write.
-        let mut region = unsafe { map_fd_region(fd, size) }?;
+        let mut region = match unsafe { map_fd_region(fd, size) } {
+            Ok(region) => region,
+            Err(err) => {
+                unsafe {
+                    libc::close(fd);
+                    let _ = libc::shm_unlink(cname.as_ptr());
+                }
+                return Err(err);
+            }
+        };
         region.owns_handle = true;
         region.owns_mapping = true;
         region.unlink_name = Some(cname);
@@ -199,10 +186,6 @@ impl ShmRegion {
     /// The caller must ensure exclusive write access to this mapping.
     pub unsafe fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
-    }
-
-    pub fn size(&self) -> usize {
-        self.len
     }
 
     /// Create a ShmRegion from a raw pointer for tests.
@@ -296,30 +279,13 @@ fn create_memfd_region(size: usize) -> Result<ShmRegion, ShmError> {
         }
         let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
         let _ = libc::fcntl(fd, libc::F_ADD_SEALS, seals);
-        // SAFETY: mapping shared memory of `size` bytes from fd.
-        let ptr = libc::mmap(
-            std::ptr::null_mut(),
-            size,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            fd,
-            0,
-        );
-        if ptr == libc::MAP_FAILED {
-            let err = io::Error::last_os_error();
-            libc::close(fd);
-            return Err(err.into());
+        match map_fd_region(fd, size) {
+            Ok(region) => Ok(region),
+            Err(err) => {
+                libc::close(fd);
+                Err(err)
+            }
         }
-        let ptr = NonNull::new(ptr.cast::<u8>()).ok_or(ShmError::MapFailed)?;
-        Ok(ShmRegion {
-            ptr,
-            len: size,
-            handle: fd,
-            owns_handle: true,
-            owns_mapping: true,
-            #[cfg(unix)]
-            unlink_name: None,
-        })
     }
 }
 
@@ -352,32 +318,17 @@ fn create_shm_open_region(size: usize) -> Result<ShmRegion, ShmError> {
                     let _ = libc::shm_unlink(cname.as_ptr());
                     return Err(err.into());
                 }
-                // SAFETY: mapping shared memory of `size` bytes from fd.
-                let ptr = libc::mmap(
-                    std::ptr::null_mut(),
-                    size,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_SHARED,
-                    fd,
-                    0,
-                );
-                if ptr == libc::MAP_FAILED {
-                    let err = io::Error::last_os_error();
-                    libc::close(fd);
-                    let _ = libc::shm_unlink(cname.as_ptr());
-                    return Err(err.into());
+                match map_fd_region(fd, size) {
+                    Ok(region) => {
+                        let _ = libc::shm_unlink(cname.as_ptr());
+                        return Ok(region);
+                    }
+                    Err(err) => {
+                        libc::close(fd);
+                        let _ = libc::shm_unlink(cname.as_ptr());
+                        return Err(err);
+                    }
                 }
-                let _ = libc::shm_unlink(cname.as_ptr());
-                let ptr = NonNull::new(ptr.cast::<u8>()).ok_or(ShmError::MapFailed)?;
-                return Ok(ShmRegion {
-                    ptr,
-                    len: size,
-                    handle: fd,
-                    owns_handle: true,
-                    owns_mapping: true,
-                    #[cfg(unix)]
-                    unlink_name: None,
-                });
             }
         }
         let err = io::Error::last_os_error();

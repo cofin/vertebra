@@ -12,6 +12,8 @@ import threading
 from pathlib import Path
 
 from vertebra.cli.banner import render_shutdown
+from vertebra.cli.tui import LogBuffer, run_dev_tui, stderr_reader
+from vertebra.server.platform import ShmAllocationPolicy
 
 __all__ = (
     "build_server_command",
@@ -40,6 +42,8 @@ def run_supervisor(
     if not server_cmd:
         msg = "server_cmd must not be empty"
         raise ValueError(msg)
+
+    ShmAllocationPolicy().validate_environment()
 
     full_env = os.environ | env
     full_env["VERTEBRA_DRAIN_TIMEOUT_MS"] = str(drain_timeout_ms)
@@ -112,8 +116,6 @@ def _run_with_tui(
     shutdown_timeout_ms: int,
 ) -> int:
     """Run the server with TUI mode using piped stderr and a Rich Live display."""
-    from vertebra.cli.tui import LogBuffer, run_dev_tui, stderr_reader
-
     log_buffer = LogBuffer()
     stop_event = threading.Event()
 

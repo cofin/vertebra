@@ -8,7 +8,7 @@ export default defineConfig({
   entry: [
     "src/index.ts",
     "src/vite/index.ts",
-    "src/react/index.ts",
+    "src/react/index.tsx",
     "src/vue/index.ts",
     "src/svelte/index.ts",
     "src/angular/index.ts",
@@ -18,6 +18,8 @@ export default defineConfig({
     "src/live/index.ts",
     "src/apex/index.ts",
     "src/telemetry.ts",
+    "src/wasm.ts",
+    "src/arrow.ts",
   ],
   format: ["esm"],
   dts: true,

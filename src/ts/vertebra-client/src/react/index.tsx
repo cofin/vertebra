@@ -1,19 +1,26 @@
 import type React from "react";
-import { createContext, use, useCallback, useContext, useMemo, useState } from "react";
+import { createContext, use, useCallback, useContext, useMemo, useState, useSyncExternalStore } from "react";
 import { HttpClient } from "../client/client";
 import type { ClientConfig } from "../client/types";
 import { QueryCache, queryCache } from "./cache";
 
 export const ClientContext = createContext<HttpClient | null>(null);
+export const QueryCacheContext = createContext<QueryCache>(queryCache);
 
 export interface ClientProviderProps {
   config: ClientConfig;
+  cache?: QueryCache;
   children: React.ReactNode;
 }
 
-export function ClientProvider({ config, children }: ClientProviderProps) {
+export function ClientProvider({ config, cache, children }: ClientProviderProps) {
   const client = useMemo(() => new HttpClient(config), [config]);
-  return <ClientContext.Provider value={client}>{children}</ClientContext.Provider>;
+  const activeCache = useMemo(() => cache ?? new QueryCache(), [cache]);
+  return (
+    <ClientContext.Provider value={client}>
+      <QueryCacheContext.Provider value={activeCache}>{children}</QueryCacheContext.Provider>
+    </ClientContext.Provider>
+  );
 }
 
 export function useClient(): HttpClient {
@@ -22,6 +29,10 @@ export function useClient(): HttpClient {
     throw new Error("useClient must be used within a ClientProvider");
   }
   return client;
+}
+
+export function useQueryCache(): QueryCache {
+  return useContext(QueryCacheContext);
 }
 
 /**
@@ -37,16 +48,23 @@ export function useQuery<TInput = any, TOutput = any>(
   options?: { timeout?: number; enabled?: boolean; staleTime?: number },
 ) {
   const client = useClient();
+  const cache = useQueryCache();
   const enabled = options?.enabled ?? true;
   const staleTime = options?.staleTime ?? 0;
   const timeout = options?.timeout;
+
+  const version = useSyncExternalStore(
+    useCallback((onStoreChange) => cache.onChange(onStoreChange), [cache]),
+    () => cache.version,
+    () => cache.version,
+  );
 
   const promise = useMemo(() => {
     if (!enabled) return Promise.resolve(null);
     const key = QueryCache.stableKey(method, path, input);
     const callOptions = timeout !== undefined ? { timeout } : undefined;
-    return queryCache.getOrCreate(key, staleTime, () => client.call<TInput, TOutput>(method, path, input, callOptions));
-  }, [client, method, path, enabled, staleTime, timeout, input]);
+    return cache.getOrCreate(key, staleTime, () => client.call<TInput, TOutput>(method, path, input, callOptions));
+  }, [client, cache, method, path, enabled, staleTime, timeout, input, version]);
 
   const data = use(promise);
 
@@ -61,6 +79,7 @@ export function useQuery<TInput = any, TOutput = any>(
  */
 export function useMutation<TInput = any, TOutput = any>(method: string, path: string) {
   const client = useClient();
+  const cache = useQueryCache();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
@@ -69,7 +88,7 @@ export function useMutation<TInput = any, TOutput = any>(method: string, path: s
     setError(null);
     try {
       const result = await client.call<TInput, TOutput>(method, path, input);
-      queryCache.invalidate();
+      cache.invalidate();
       return result;
     } catch (err: any) {
       setError(err);
@@ -89,9 +108,13 @@ export function useMutation<TInput = any, TOutput = any>(method: string, path: s
  *                Omit to invalidate all entries.
  */
 export function useInvalidateQueries() {
-  return useCallback((pattern?: string) => {
-    queryCache.invalidate(pattern);
-  }, []);
+  const cache = useQueryCache();
+  return useCallback(
+    (pattern?: string) => {
+      cache.invalidate(pattern);
+    },
+    [cache],
+  );
 }
 
 export { QueryCache, queryCache };

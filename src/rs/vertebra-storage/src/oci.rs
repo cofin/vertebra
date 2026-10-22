@@ -29,11 +29,10 @@ use url::Url;
 
 use crate::store::StorageError;
 
+pub use crate::r2::{R2_UNIFORM_PART_SIZE, chunk_uniform_parts};
+
 /// Base64 SHA-256 of an empty 0-byte body (`""`), required by OCI on 0-byte `POST`/`PUT` requests.
 pub const EMPTY_BODY_SHA256_BASE64: &str = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
-
-/// Uniform 8 MiB multipart chunk size required by Cloudflare R2 and OCI multipart uploads.
-pub const R2_UNIFORM_PART_SIZE: usize = 8 * 1024 * 1024;
 
 /// Compute the Base64-encoded SHA-256 digest of `body`.
 pub fn sha256_base64(body: &[u8]) -> String {
@@ -43,22 +42,6 @@ pub fn sha256_base64(body: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(body);
     BASE64_STANDARD.encode(hasher.finalize())
-}
-
-/// Split a payload into uniform `part_size` chunks (all non-trailing chunks have identical byte length).
-pub fn chunk_uniform_parts(data: Bytes, part_size: usize) -> Vec<Bytes> {
-    let chunk_len = part_size.max(1);
-    if data.is_empty() {
-        return vec![Bytes::new()];
-    }
-    let mut parts = Vec::with_capacity(data.len().div_ceil(chunk_len));
-    let mut offset = 0;
-    while offset < data.len() {
-        let end = (offset + chunk_len).min(data.len());
-        parts.push(data.slice(offset..end));
-        offset = end;
-    }
-    parts
 }
 
 /// OCI `draft-cavage-http-signatures-08` credentials.

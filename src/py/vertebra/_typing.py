@@ -5,6 +5,8 @@ Import from here to avoid defining the same alias in multiple places.
 Includes lazy compatibility shims for optional dependencies.
 """
 
+from __future__ import annotations
+
 import contextlib
 import enum
 from collections.abc import Awaitable, Callable
@@ -14,16 +16,22 @@ from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
-    Literal,
+    Final,
     Protocol,
-    dataclass_transform,
     runtime_checkable,
 )
 
+from msgspec import Struct
+
 __all__ = (
     "ATTRS_INSTALLED",
+    "NANOID_INSTALLED",
+    "NUMPY_INSTALLED",
+    "PYDANTIC_INSTALLED",
+    "UNSET",
+    "UUID_UTILS_INSTALLED",
+    "UVLOOP_INSTALLED",
     "AttrsInstance",
-    "AttrsInstanceStub",
     "BaseModel",
     "BaseModelStub",
     "DataclassProtocol",
@@ -32,22 +40,12 @@ __all__ = (
     "HandlerID",
     "ImproperConfigurationError",
     "LifecycleHook",
-    "MSGSPEC_INSTALLED",
     "MissingDependencyError",
-    "NANOID_INSTALLED",
-    "NUMPY_INSTALLED",
     "NumpyArray",
-    "NumpyArrayStub",
-    "ORJSON_INSTALLED",
     "OptionalDependency",
-    "PYDANTIC_INSTALLED",
     "RawHeaders",
     "Struct",
-    "StructStub",
-    "UNSET",
-    "UUID_UTILS_INSTALLED",
-    "UVLOOP_INSTALLED",
-    "UnsetType",
+    "UnsupportedBackendError",
     "VertebraError",
     "attrs_asdict",
     "attrs_asdict_stub",
@@ -92,6 +90,10 @@ class ImproperConfigurationError(VertebraError, ValueError):
     """Raised when configuration is invalid."""
 
 
+class UnsupportedBackendError(VertebraError):
+    """Raised when a requested backend, driver, or provider is not supported."""
+
+
 class OptionalDependency:
     """Boolean-like wrapper that evaluates module availability lazily."""
 
@@ -115,15 +117,7 @@ class EmptyType(Enum):
 
 
 Empty = EmptyType.Empty
-
-
-class UnsetType(Enum):
-    """A sentinel type for unset values."""
-
-    Unset = enum.auto()
-
-
-UNSET = UnsetType.Unset
+UNSET: Final = EmptyType.Empty
 
 HandlerID = int
 """Stable uint64 handler identifier (FNV-1a of method + path)."""
@@ -154,64 +148,13 @@ class BaseModelStub:
 
     def model_dump(
         self,
-        /,
         *,
-        include: Any | None = None,
-        exclude: Any | None = None,
-        context: Any | None = None,
-        by_alias: bool = False,
-        exclude_unset: bool = False,
-        exclude_defaults: bool = False,
-        exclude_none: bool = False,
-        round_trip: bool = False,
-        warnings: bool | Literal["none", "warn", "error"] = True,
-        serialize_as_any: bool = False,
+        mode: str = "python",
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Return non-private instance attributes as a dictionary."""
-        _ = (
-            include,
-            exclude,
-            context,
-            by_alias,
-            exclude_unset,
-            exclude_defaults,
-            exclude_none,
-            round_trip,
-            warnings,
-            serialize_as_any,
-        )
+        _ = (mode, kwargs)
         return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
-
-
-@dataclass_transform()
-class StructStub:
-    """Placeholder implementation for msgspec Struct."""
-
-    __struct_fields__: ClassVar[tuple[str, ...]] = ()
-    __slots__ = ()
-
-    def __init__(self, **kwargs: Any) -> None:
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-
-
-@dataclass_transform()
-class AttrsInstanceStub:
-    """Placeholder implementation for attrs classes."""
-
-    __attrs_attrs__: ClassVar[tuple[Any, ...]] = ()
-    __slots__ = ()
-
-    def __init__(self, **kwargs: Any) -> None:
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-
-
-@runtime_checkable
-class NumpyArrayStub(Protocol):
-    """Protocol stub for numpy.ndarray."""
-
-    def tolist(self) -> list[Any]: ...
 
 
 def module_available(module_name: str) -> bool:
@@ -249,10 +192,8 @@ def attrs_asdict_stub(*args: Any, **kwargs: Any) -> dict[str, Any]:
 
 
 ATTRS_INSTALLED = dependency_flag("attrs")
-MSGSPEC_INSTALLED = dependency_flag("msgspec")
 NANOID_INSTALLED = dependency_flag("fastnanoid")
 NUMPY_INSTALLED = dependency_flag("numpy")
-ORJSON_INSTALLED = dependency_flag("orjson")
 PYDANTIC_INSTALLED = dependency_flag("pydantic")
 UVLOOP_INSTALLED = dependency_flag("uvloop")
 UUID_UTILS_INSTALLED = dependency_flag("uuid_utils")
@@ -268,11 +209,10 @@ def _attrs_has_stub(obj: Any) -> bool:
 
 if TYPE_CHECKING:
     BaseModel: Any = BaseModelStub
-    Struct: Any = StructStub
-    AttrsInstance: Any = AttrsInstanceStub
+    AttrsInstance: Any = Any
     attrs_asdict: Callable[..., Any] = attrs_asdict_stub
     attrs_has: Callable[[Any], bool] = _attrs_has_stub
-    NumpyArray: Any = NumpyArrayStub
+    NumpyArray: Any = Any
 
 
 def __getattr__(name: str) -> Any:
@@ -287,18 +227,8 @@ def __getattr__(name: str) -> Any:
         globals()["BaseModel"] = resolved
         return resolved
 
-    if name == "Struct":
-        resolved = StructStub
-        if MSGSPEC_INSTALLED:
-            with contextlib.suppress(ImportError):
-                from msgspec import Struct as _RealStruct
-
-                resolved = _RealStruct
-        globals()["Struct"] = resolved
-        return resolved
-
     if name in {"AttrsInstance", "attrs_asdict", "attrs_has"}:
-        resolved_instance: Any = AttrsInstanceStub
+        resolved_instance: Any = Any
         resolved_asdict: Callable[..., Any] = attrs_asdict_stub
         resolved_has: Callable[[Any], bool] = _attrs_has_stub
         if ATTRS_INSTALLED:
@@ -316,14 +246,14 @@ def __getattr__(name: str) -> Any:
         return globals()[name]
 
     if name == "NumpyArray":
-        resolved = NumpyArrayStub
+        resolved_np: Any = Any
         if NUMPY_INSTALLED:
             with contextlib.suppress(ImportError):
                 from numpy import ndarray as _RealNumpyArray
 
-                resolved = _RealNumpyArray
-        globals()["NumpyArray"] = resolved
-        return resolved
+                resolved_np = _RealNumpyArray
+        globals()["NumpyArray"] = resolved_np
+        return resolved_np
 
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)

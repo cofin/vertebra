@@ -35,3 +35,11 @@ repos:
     rev: "v1.0.2"
     hooks:
       - id: sphinx-lint
+  - repo: local
+    hooks:
+      - id: review-setup
+        name: validate agentic review setup
+        entry: uv run python -m tools.scripts.review_setup validate
+        language: system
+        pass_filenames: false
+        files: ^(\.agents/|AGENTS\.md|docs/|tools/scripts/review_setup\.py|src/py/tests/unit/test_review_setup\.py)

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, NoReturn
 
 import msgspec
+
+from vertebra._typing import UnsupportedBackendError
 
 __all__ = (
     "DataFusionConfig",
@@ -82,3 +84,9 @@ class DataFusionEngine:
             "referenced_tables": referenced,
             "sql": sql,
         }
+
+    def execute_sql(self, sql: str) -> NoReturn:
+        """Execute a federated SQL query via the native vertebra-db DataFusion runtime."""
+        _ = sql
+        msg = "DataFusionEngine.execute_sql requires the native vertebra-db DataFusion runtime"
+        raise UnsupportedBackendError(msg)

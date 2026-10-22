@@ -16,13 +16,16 @@ class OracleContainer(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     image: str = "container-registry.oracle.com/database/adb-free:latest-23ai"
     workload_type: str = "ATP"
     service_name: str = "myatp_high.adb.oraclecloud.com"
-    admin_password: str = "WelcomeOracle26ai!"
+    admin_password: str = ""
     tns_port: int = 1521
     mtls_port: int = 1522
     ords_https_port: int = 8443
 
     def env_vars(self) -> dict[str, str]:
         """Return container environment variables for Autonomous Database Free."""
+        if not self.admin_password:
+            msg = "OracleContainer.admin_password must be explicitly provided and non-empty"
+            raise ValueError(msg)
         return {
             "WORKLOAD_TYPE": self.workload_type,
             "WALLET_PASSWORD": self.admin_password,

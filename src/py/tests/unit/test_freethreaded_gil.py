@@ -52,7 +52,7 @@ def test_headers_interned_keys_and_concurrent_thread_access() -> None:
         "cookie",
         "upgrade",
         "connection",
-        "X-Custom-Trace",
+        "x-custom-trace",
     ]
     for idx in range(9):
         assert keys_first[idx] is keys_second[idx]

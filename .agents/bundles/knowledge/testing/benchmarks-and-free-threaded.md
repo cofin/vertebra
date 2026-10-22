@@ -48,7 +48,7 @@ Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `s
 
 ## 3. Scheduled Benchmarks (`.github/workflows/benchmark.yml`)
 
-The workflow runs on `workflow_dispatch` (input `full_benchmark`), on published releases, and weekly (`cron: '0 6 * * 1'`). It installs `oha` with `cargo install oha`, runs `make install` and `make build`, then `make bench` (or `make bench-all` when `full_benchmark` is true), uploads `tools/benchmarks/results/` with 90-day retention, and on `main` commits `tools/benchmarks/results/*.duckdb`. Because `make install` runs `make ts-build`, this workflow inherits the current `tsup` declaration-build failure described in [Tech Stack](../../product/tech-stack.md#typescript-package-configuration-srctsvertebra-client).
+The workflow runs on `workflow_dispatch` (input `full_benchmark`), on published releases, and weekly (`cron: '0 6 * * 1'`). It installs `oha` with `cargo install oha`, runs `make install` and `make build`, then `make bench` (or `make bench-all` when `full_benchmark` is true), uploads `tools/benchmarks/results/` with 90-day retention, and on `main` commits `tools/benchmarks/results/*.duckdb`.
 
 ## 4. Profile-Guided Optimization (`tools/pgo/`)
 
@@ -78,5 +78,5 @@ PyO3 links different CPython ABI symbols when `Py_GIL_DISABLED` is set, so free-
 
 - The CI `test-python` matrix includes `3.14t` and runs `make py-test` there.
 - `_vertebra`, `_bundler`, and `_storage` declare `#[pymodule(gil_used = false)]`.
-- [`test_freethreaded_gil.py`](../../../../src/py/tests/unit/test_freethreaded_gil.py) asserts `_vertebra.GIL_USED` and `_bundler.GIL_USED` are `False` and that `sys._is_gil_enabled()` stays false after import. It does not check `_storage`.
-- `unit/server/test_stage1_hotpath_and_314t.py` and `unit/server/test_runtime_tuning.py` cover the free-threaded dispatch and runtime-tuning paths; `GilAuditReport` (`server/_gil_audit.py`) reports native extensions that re-enable the GIL.
+- [`test_freethreaded_gil.py`](../../../../src/py/tests/unit/test_freethreaded_gil.py) asserts `_vertebra.GIL_USED`, `_bundler.GIL_USED`, and `_storage.GIL_USED` are `False` and that `sys._is_gil_enabled()` stays false after import.
+- `unit/server/test_hotpath_and_314t.py` and `unit/server/test_loops.py` cover the free-threaded dispatch and `EventLoopPool` paths; `GilAuditor` (`server/_gil_audit.py`) reports native extensions that re-enable the GIL.

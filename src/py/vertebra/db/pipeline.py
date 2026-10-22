@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -15,6 +16,14 @@ __all__ = (
     "RelOverlay",
 )
 
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_identifier(value: str, field_name: str) -> None:
+    if not _IDENT_RE.match(value):
+        msg = f"Invalid SQL identifier for {field_name}: {value!r}"
+        raise ValueError(msg)
+
 
 class RelOverlay(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Intra-statement read-your-own-writes CTE overlay (`UNION ALL` / `EXCEPT` over base table)."""
@@ -24,8 +33,17 @@ class RelOverlay(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     deleted_ids_cte: str | None = None
     id_column: str = "id"
 
+    def __post_init__(self) -> None:
+        _validate_identifier(self.base_table, "base_table")
+        _validate_identifier(self.id_column, "id_column")
+        if self.inserted_cte is not None:
+            _validate_identifier(self.inserted_cte, "inserted_cte")
+        if self.deleted_ids_cte is not None:
+            _validate_identifier(self.deleted_ids_cte, "deleted_ids_cte")
+
     def to_cte_sql(self, overlay_name: str) -> str:
         """Render the overlay CTE combining uncommitted CTE mutations with the base table."""
+        _validate_identifier(overlay_name, "overlay_name")
         base_select = f"SELECT * FROM {self.base_table}"
         if self.deleted_ids_cte:
             base_select = (
@@ -43,6 +61,9 @@ class CteStep(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     sql: str
     params: dict[str, Any] = msgspec.field(default_factory=dict)
     return_json_agg: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.name, "CteStep.name")
 
 
 class QueryPipeline:
@@ -63,25 +84,23 @@ class QueryPipeline:
     def build_jsonb_object(
         columns: Sequence[tuple[str, str] | str],
         *,
-        chunk_size: int = 50,
-        max_pairs_per_call: int | None = None,
+        max_pairs_per_call: int = 50,
     ) -> str:
         """Build a PostgreSQL ``jsonb_build_object(...)`` expression respecting the 100-argument function limit.
 
         PostgreSQL caps variadic C functions at 100 arguments (50 key-value pairs). Chunking at
-        ``chunk_size`` or ``max_pairs_per_call`` and concatenating with ``||`` prevents
+        ``max_pairs_per_call`` and concatenating with ``||`` prevents
         ``cannot pass more than 100 arguments to a function`` errors on wide tables.
         """
         if not columns:
             return "'{}'::jsonb"
-        limit = max_pairs_per_call if max_pairs_per_call is not None else chunk_size
-        if limit < 1 or limit > 50:
-            msg = f"max_pairs_per_call must be between 1 and 50 (got {limit})"
+        if max_pairs_per_call < 1 or max_pairs_per_call > 50:
+            msg = f"max_pairs_per_call must be between 1 and 50 (got {max_pairs_per_call})"
             raise ValueError(msg)
         normalized: list[tuple[str, str]] = [item if isinstance(item, tuple) else (item, item) for item in columns]
         chunks: list[str] = []
-        for offset in range(0, len(normalized), limit):
-            batch = normalized[offset : offset + limit]
+        for offset in range(0, len(normalized), max_pairs_per_call):
+            batch = normalized[offset : offset + max_pairs_per_call]
             args = ", ".join(f"'{key}', {expr}" for key, expr in batch)
             chunks.append(f"jsonb_build_object({args})")
         return " || ".join(chunks)

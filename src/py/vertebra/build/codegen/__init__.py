@@ -1,5 +1,6 @@
 """Unified multi-target schema, TypeScript, and RPC codegen package for Vertebra."""
 
+from vertebra.build.codegen._emitter import SchemaEmitter
 from vertebra.build.codegen._extractor import TypeExtractor
 from vertebra.build.codegen._ir import (
     AnnotatedType,
@@ -16,6 +17,11 @@ from vertebra.build.codegen._ir import (
     UnionType,
     UnknownType,
 )
+from vertebra.build.codegen._json_schema import (
+    ParameterResolution,
+    json_schema_to_type_node,
+    resolve_parameter_node,
+)
 from vertebra.build.codegen._manifest import ManifestGenerator
 from vertebra.build.codegen._metadata import RouteCollector, RouteMetadata
 from vertebra.build.codegen._typescript import TypeScriptGenerator, format_typescript
@@ -25,15 +31,11 @@ from vertebra.build.codegen._watch import (
     HmrNotifier,
     classify_file,
 )
-from vertebra.build.codegen.openapi import OpenAPIGenerator
-from vertebra.build.codegen.plugin import (
-    CODEGEN_STATE_KEY,
-    CodegenConfig,
-    CodegenPlugin,
-)
-from vertebra.build.codegen.procedures import (
+from vertebra.build.codegen.markers import (
     Body,
     BodyMarker,
+    Dependency,
+    FromBody,
     FromCookie,
     FromHeader,
     FromPath,
@@ -45,19 +47,26 @@ from vertebra.build.codegen.procedures import (
     NamedDependency,
     NamedDependencyMarker,
     Parameter,
+    ParameterLocation,
     ParameterMarker,
-    ParameterResolution,
+    Provide,
+    SkipValidation,
+    SkipValidationMarker,
+    URLEncodedBody,
+)
+from vertebra.build.codegen.openapi import OpenAPIGenerator
+from vertebra.build.codegen.plugin import (
+    CODEGEN_STATE_KEY,
+    CodegenConfig,
+    CodegenPlugin,
+)
+from vertebra.build.codegen.procedures import (
     ProcedureClientGenerator,
     ProcedureInfo,
     ProcedureParam,
     ProcedureRegistry,
-    SkipValidation,
-    SkipValidationMarker,
-    URLEncodedBody,
     get_procedure_registry,
-    json_schema_to_type_node,
     procedure,
-    resolve_parameter_node,
 )
 from vertebra.build.codegen.protobuf import ProtobufGenerator
 from vertebra.build.codegen.valibot import ValibotGenerator
@@ -72,6 +81,8 @@ __all__ = (
     "CodegenConfig",
     "CodegenPlugin",
     "CodegenWatcher",
+    "Dependency",
+    "FromBody",
     "FromCookie",
     "FromHeader",
     "FromPath",
@@ -91,6 +102,7 @@ __all__ = (
     "ObjectType",
     "OpenAPIGenerator",
     "Parameter",
+    "ParameterLocation",
     "ParameterMarker",
     "ParameterResolution",
     "PrimitiveType",
@@ -99,9 +111,11 @@ __all__ = (
     "ProcedureParam",
     "ProcedureRegistry",
     "ProtobufGenerator",
+    "Provide",
     "RawType",
     "RouteCollector",
     "RouteMetadata",
+    "SchemaEmitter",
     "SkipValidation",
     "SkipValidationMarker",
     "StreamType",

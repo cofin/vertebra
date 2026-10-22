@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 
 import click
 import msgspec
@@ -23,12 +24,17 @@ from vertebra.extensions.alchemy import (
     BrokerConfig,
     BrokerPlugin,
     ChannelMessage,
+    DatabaseService,
     FileAttachment,
     InMemoryBrokerTransport,
     ObjectStoreBackend,
     ShmBrokerTransport,
+    ShmSessionBroker,
     SQLAlchemyAsyncConfig,
     SQLAlchemySyncConfig,
+    StatementCache,
+    StoredObject,
+    SyncSessionConfig,
 )
 from vertebra.extensions.litestar import (
     ChannelsBackend,
@@ -36,7 +42,6 @@ from vertebra.extensions.litestar import (
     LitestarPlugin,
     LitestarRouteCompiler,
     MemoryStore,
-    MiddlewareOffloadCompiler,
 )
 from vertebra.extensions.sqlspec import (
     AsyncDatabaseConfig,
@@ -89,7 +94,6 @@ def test_canonical_extension_exports() -> None:
     assert isinstance(MemoryStore(), MemoryStore)
     assert isinstance(CodegenPlugin(CodegenConfig()), CodegenPlugin)
     assert LitestarRouteCompiler is not None
-    assert MiddlewareOffloadCompiler is not None
     assert ObjectStoreBackend is not None
     assert SQLSpecStore is not None
 
@@ -113,7 +117,7 @@ def test_sqlspec_generic_configs_and_pool_defaults() -> None:
     )
     assert "pool_pre_ping" not in in_mem_cfg.pool_config
 
-    wrapped = SQLSpecConfig.wrap(sync_cfg)
+    wrapped = SQLSpecConfig(sync_cfg)
     assert isinstance(wrapped, SQLSpecConfig)
     assert wrapped.is_async is False
     assert wrapped.provide_session() is sync_driver
@@ -234,7 +238,7 @@ def test_storage_registry_alias_and_uri_resolution() -> None:
     registry = StorageRegistry()
     mem_store = ObjectStore("memory://")
     mem_store.put("seed.txt", b"seeded")
-    registry.register_store("primary", mem_store)
+    registry.register_alias("primary", mem_store)
     registry.register_alias("exports", "memory://")
 
     assert registry.resolve_store("primary") is mem_store
@@ -286,3 +290,93 @@ def test_pluggable_cli_discovery_and_app_plugin_hooks(monkeypatch: pytest.Monkey
     activated = register_app_cli_plugins(group, fake_app)
     assert activated == ["_CustomCliPlugin"]
     assert "app-plugin-cmd" in group.commands
+
+
+@pytest.mark.anyio
+async def test_shm_session_broker_concurrency_and_lock_safety() -> None:
+    """Verify ShmSessionBroker lock safety, non-underflowing in_use, and O(1) cancelled waiter skip."""
+    broker = ShmSessionBroker(capacity=2)
+    assert broker.capacity == 2
+    assert broker.in_use == 0
+
+    assert broker.acquire() is True
+    assert broker.in_use == 1
+
+    assert await broker.acquire_async() is True
+    assert broker.in_use == 2
+
+    assert await broker.acquire_async(timeout=0.01) is False
+    assert broker.in_use == 2
+
+    broker.release()
+    assert broker.in_use == 1
+
+    await broker.release_async()
+    assert broker.in_use == 0
+
+    broker.release()
+    assert broker.in_use == 0
+
+
+def test_statement_cache_compilation() -> None:
+    """Verify StatementCache compiles ClauseElement-like objects and extracts parameter order."""
+    cache = StatementCache()
+
+    class FakeCompiled:
+        def __init__(self) -> None:
+            self.positiontup = ("user_id", "status")
+
+        def __str__(self) -> str:
+            return "SELECT id FROM users WHERE user_id = :user_id AND status = :status"
+
+    class FakeStatement:
+        def compile(self) -> FakeCompiled:
+            return FakeCompiled()
+
+    sql_text, params = cache.compile_and_encode(FakeStatement())
+    assert "SELECT id FROM users" in sql_text
+    assert params == ("user_id", "status")
+
+    raw_sql, empty_params = cache.compile_and_encode("SELECT 1")
+    assert raw_sql == "SELECT 1"
+    assert empty_params == ()
+
+
+@pytest.mark.anyio
+async def test_database_service_and_stored_object_delegation() -> None:
+    """Verify DatabaseService count/list_and_count queries and StoredObject direct ObjectStore delegation."""
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.executed: list[Any] = []
+
+        def execute(self, stmt: Any) -> Any:
+            self.executed.append(stmt)
+            return self
+
+        def scalar_one(self) -> int:
+            return 42
+
+        def scalars(self) -> Any:
+            return self
+
+        def all(self) -> list[Any]:
+            return [("row-1", 42), ("row-2", 42)]
+
+    service = DatabaseService(FakeSession(), model_type=str)
+    assert await service.count() == 42
+    items, total = await service.list_and_count()
+    assert len(items) == 2
+    assert total == 42
+
+    mem_store = ObjectStore("memory://")
+    registry = StorageRegistry()
+    registry.register_alias("default", mem_store)
+
+    obj = StoredObject(key="reports/summary.csv")
+    obj.put(b"col1,col2\n1,2\n", registry=registry)
+    assert obj.get(registry=registry) == b"col1,col2\n1,2\n"
+
+    sync_cfg = SyncSessionConfig(dsn="postgresql://localhost/app", pool_size=15)
+    assert sync_cfg.effective_engine_config()["pool_size"] == 15
+    assert sync_cfg.effective_engine_config()["pool_pre_ping"] is True

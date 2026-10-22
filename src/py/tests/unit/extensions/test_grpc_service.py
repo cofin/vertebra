@@ -1,13 +1,16 @@
-"""Unit tests for vertebra.extensions.grpc @grpc_method, GrpcServiceRegistry, and ProtobufSchemaGenerator."""
+"""Unit tests for vertebra.extensions.grpc @grpc_method, GrpcServiceRegistry, ProtobufSchemaGenerator, and WasmPluginHost."""
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import msgspec
 import pytest
 
+import vertebra.wasm as wasm_mod
+from vertebra._typing import MissingDependencyError
 from vertebra.extensions.grpc import (
     GrpcContext,
     GrpcError,
@@ -18,6 +21,14 @@ from vertebra.extensions.grpc import (
     decode_lpm_frames,
     encode_lpm_frame,
     grpc_method,
+)
+from vertebra.utils.serializers import decode_msgpack, encode_msgpack
+from vertebra.wasm import (
+    WASM_MAGIC_HEADER,
+    WasmExecutionError,
+    WasmModuleConfig,
+    WasmPluginHost,
+    WasmSandboxPolicy,
 )
 
 
@@ -93,7 +104,7 @@ async def test_grpc_service_registry_unary_and_streaming_asgi_dispatch() -> None
     registry.register(echo_client_stream)
     registry.register(echo_bidi_stream)
 
-    unary_payload = encode_lpm_frame(msgspec.msgpack.encode(EchoRequest(message="ping", count=7)))
+    unary_payload = encode_lpm_frame(encode_msgpack(EchoRequest(message="ping", count=7)))
     unary_events = await _invoke_asgi(
         registry,
         path="/vertebra.echo.EchoService/EchoUnary",
@@ -105,14 +116,14 @@ async def test_grpc_service_registry_unary_and_streaming_asgi_dispatch() -> None
         b"".join(e.get("body", b"") for e in unary_events if e["type"] == "http.response.body")
     )
     assert len(body_frames) == 1
-    decoded_unary = msgspec.msgpack.decode(body_frames[0], type=EchoResponse)
+    decoded_unary = decode_msgpack(body_frames[0], type=EchoResponse)
     assert decoded_unary.reply == "ack:ping"
     assert decoded_unary.sequence == 7
     trailer_event = unary_events[-1]
     assert trailer_event["type"] == "http.response.trailers"
     assert (b"grpc-status", b"0") in trailer_event["headers"]
 
-    stream_payload = encode_lpm_frame(msgspec.msgpack.encode(EchoRequest(message="item", count=3)))
+    stream_payload = encode_lpm_frame(encode_msgpack(EchoRequest(message="item", count=3)))
     stream_events = await _invoke_asgi(
         registry,
         path="/vertebra.echo.EchoService/EchoServerStream",
@@ -121,7 +132,7 @@ async def test_grpc_service_registry_unary_and_streaming_asgi_dispatch() -> None
     stream_frames = decode_lpm_frames(
         b"".join(e.get("body", b"") for e in stream_events if e["type"] == "http.response.body")
     )
-    assert [msgspec.msgpack.decode(f, type=EchoResponse).reply for f in stream_frames] == [
+    assert [decode_msgpack(f, type=EchoResponse).reply for f in stream_frames] == [
         "item-0",
         "item-1",
         "item-2",
@@ -129,8 +140,8 @@ async def test_grpc_service_registry_unary_and_streaming_asgi_dispatch() -> None
 
     client_stream_payload = b"".join(
         [
-            encode_lpm_frame(msgspec.msgpack.encode(EchoRequest(message="a", count=2))),
-            encode_lpm_frame(msgspec.msgpack.encode(EchoRequest(message="b", count=5))),
+            encode_lpm_frame(encode_msgpack(EchoRequest(message="a", count=2))),
+            encode_lpm_frame(encode_msgpack(EchoRequest(message="b", count=5))),
         ]
     )
     client_events = await _invoke_asgi(
@@ -141,7 +152,7 @@ async def test_grpc_service_registry_unary_and_streaming_asgi_dispatch() -> None
     client_frames = decode_lpm_frames(
         b"".join(e.get("body", b"") for e in client_events if e["type"] == "http.response.body")
     )
-    decoded_client = msgspec.msgpack.decode(client_frames[0], type=EchoResponse)
+    decoded_client = decode_msgpack(client_frames[0], type=EchoResponse)
     assert decoded_client.reply == "a|b"
     assert decoded_client.sequence == 7
 
@@ -153,7 +164,7 @@ async def test_grpc_service_registry_unary_and_streaming_asgi_dispatch() -> None
     bidi_frames = decode_lpm_frames(
         b"".join(e.get("body", b"") for e in bidi_events if e["type"] == "http.response.body")
     )
-    assert [msgspec.msgpack.decode(f, type=EchoResponse).reply for f in bidi_frames] == ["A", "B"]
+    assert [decode_msgpack(f, type=EchoResponse).reply for f in bidi_frames] == ["A", "B"]
 
 
 @pytest.mark.anyio
@@ -162,7 +173,7 @@ async def test_grpc_error_maps_to_trailers_status_and_percent_encoded_message() 
     registry = GrpcServiceRegistry()
     registry.register(echo_unary)
 
-    bad_payload = encode_lpm_frame(msgspec.msgpack.encode(EchoRequest(message="bad", count=-1)))
+    bad_payload = encode_lpm_frame(encode_msgpack(EchoRequest(message="bad", count=-1)))
     events = await _invoke_asgi(
         registry,
         path="/vertebra.echo.EchoService/EchoUnary",
@@ -173,8 +184,45 @@ async def test_grpc_error_maps_to_trailers_status_and_percent_encoded_message() 
     assert trailers[b"grpc-message"] == b"count%20must%20be%20non-negative"
 
 
+def test_decode_lpm_frames_rejects_trailing_partial_header() -> None:
+    """Verify decode_lpm_frames raises GrpcError(INTERNAL) on trailing incomplete header bytes."""
+    valid_frame = encode_lpm_frame(b"abc")
+    with pytest.raises(GrpcError) as exc_info:
+        decode_lpm_frames(valid_frame + b"\x00\x00")
+    assert exc_info.value.status is GrpcStatus.INTERNAL
+
+
+@pytest.mark.anyio
+async def test_grpc_method_injects_grpc_context() -> None:
+    """Verify @grpc_method supports 2-parameter handlers receiving GrpcContext from ASGI scope."""
+
+    @grpc_method(service="EchoService", package="vertebra.echo")
+    async def echo_with_ctx(req: EchoRequest, ctx: GrpcContext) -> EchoResponse:
+        return EchoResponse(
+            reply=f"{req.message}:{ctx.metadata.get('x-tenant', '')}",
+            sequence=int(ctx.timeout_seconds or 0),
+            metadata={"peer": ctx.peer},
+        )
+
+    registry = GrpcServiceRegistry()
+    registry.register(echo_with_ctx)
+
+    payload = encode_lpm_frame(encode_msgpack(EchoRequest(message="hello")))
+    events = await _invoke_asgi(
+        registry,
+        path="/vertebra.echo.EchoService/EchoWithCtx",
+        body=payload,
+        extra_headers=[(b"x-tenant", b"acme"), (b"grpc-timeout", b"5S")],
+    )
+    frames = decode_lpm_frames(b"".join(e.get("body", b"") for e in events if e["type"] == "http.response.body"))
+    decoded = decode_msgpack(frames[0], type=EchoResponse)
+    assert decoded.reply == "hello:acme"
+    assert decoded.sequence == 5
+    assert decoded.metadata["peer"] == "127.0.0.1:50051"
+
+
 def test_protobuf_schema_generator_emits_proto3_definitions() -> None:
-    """Verify ProtobufSchemaGenerator renders syntax = proto3 messages and service RPCs."""
+    """Verify ProtobufSchemaGenerator renders syntax = proto3 messages in declaration order and service RPCs."""
     registry = GrpcServiceRegistry()
     registry.register(echo_unary)
     registry.register(echo_server_stream)
@@ -187,16 +235,87 @@ def test_protobuf_schema_generator_emits_proto3_definitions() -> None:
     assert 'syntax = "proto3";' in proto_text
     assert "package vertebra.echo;" in proto_text
     assert "message EchoRequest {" in proto_text
-    assert "optional string correlation_id = 1;" in proto_text
+    assert "string message = 1;" in proto_text
     assert "int64 count = 2;" in proto_text
-    assert "string message = 3;" in proto_text
-    assert "repeated string tags = 4;" in proto_text
+    assert "repeated string tags = 3;" in proto_text
+    assert "optional string correlation_id = 4;" in proto_text
     assert "message EchoResponse {" in proto_text
-    assert "map<string, string> metadata = 1;" in proto_text
+    assert "string reply = 1;" in proto_text
+    assert "int64 sequence = 2;" in proto_text
+    assert "map<string, string> metadata = 3;" in proto_text
     assert "rpc EchoUnary(EchoRequest) returns (EchoResponse);" in proto_text
     assert "rpc EchoServerStream(EchoRequest) returns (stream EchoResponse);" in proto_text
     assert "rpc EchoClientStream(stream EchoRequest) returns (EchoResponse);" in proto_text
     assert "rpc EchoBidiStream(stream EchoRequest) returns (stream EchoResponse);" in proto_text
+
+
+def test_wasm_plugin_host_execution_and_missing_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify WasmPluginHost executes modules with fuel/memory limits and raises MissingDependencyError when wasmtime is absent."""
+    wasm_add_bytes = bytes.fromhex("0061736d0100000001070160027f7f017f030201000707010361646400000a09010700200020016a0b")
+    assert WasmModuleConfig.validate_binary(wasm_add_bytes) is True
+    assert wasm_add_bytes.startswith(WASM_MAGIC_HEADER)
+
+    host = WasmPluginHost()
+    host.register_module(
+        WasmModuleConfig(
+            name="host_math",
+            wasm_source=wasm_add_bytes,
+            policy=WasmSandboxPolicy(max_fuel=50),
+        ),
+        exports={"add": lambda a, b: a + b},
+    )
+    assert host.call_export("host_math", "add", 20, 22, fuel_cost=10) == 42
+    with pytest.raises(WasmExecutionError, match="exceeded max_fuel"):
+        host.call_export("host_math", "add", 1, 2, fuel_cost=100)
+
+    monkeypatch.setattr(wasm_mod, "_wasmtime", None)
+    with pytest.raises(MissingDependencyError, match="wasmtime"):
+        host.register_module(WasmModuleConfig(name="guest_missing", wasm_source=wasm_add_bytes))
+
+    class _FakeStore:
+        def __init__(self, _engine: Any) -> None:
+            self.fuel = 0
+            self.memory_size = 0
+
+        def set_fuel(self, fuel: int) -> None:
+            self.fuel = fuel
+
+        def set_limits(self, *, memory_size: int) -> None:
+            self.memory_size = memory_size
+
+    class _FakeInstance:
+        def __init__(self, _store: _FakeStore, _module: Any, _imports: list[Any]) -> None:
+            pass
+
+        def exports(self, _store: _FakeStore) -> dict[str, Any]:
+            def _add(st: _FakeStore, a: int, b: int) -> int:
+                if st.fuel <= 1:
+                    msg = "all fuel consumed by WebAssembly"
+                    raise RuntimeError(msg)
+                return a + b
+
+            return {"add": _add}
+
+    fake_wasmtime = SimpleNamespace(
+        Config=lambda: SimpleNamespace(consume_fuel=False),
+        Engine=lambda cfg: SimpleNamespace(config=cfg),
+        Module=lambda engine, raw: SimpleNamespace(engine=engine, raw=raw),
+        Store=_FakeStore,
+        Instance=_FakeInstance,
+    )
+    monkeypatch.setattr(wasm_mod, "_wasmtime", fake_wasmtime)
+    host.register_module(WasmModuleConfig(name="math", wasm_source=wasm_add_bytes))
+    assert host.call_export("math", "add", 20, 22) == 42
+
+    host.register_module(
+        WasmModuleConfig(
+            name="starved",
+            wasm_source=wasm_add_bytes,
+            policy=WasmSandboxPolicy(max_fuel=1),
+        )
+    )
+    with pytest.raises(WasmExecutionError, match="all fuel consumed"):
+        host.call_export("starved", "add", 1, 2)
 
 
 async def _invoke_asgi(
@@ -204,13 +323,18 @@ async def _invoke_asgi(
     *,
     path: str,
     body: bytes,
+    extra_headers: list[tuple[bytes, bytes]] | None = None,
 ) -> list[dict[str, Any]]:
     """Invoke GrpcServiceRegistry as an ASGI app and collect emitted send events."""
+    headers: list[tuple[bytes, bytes]] = [(b"content-type", b"application/grpc+msgpack")]
+    if extra_headers:
+        headers.extend(extra_headers)
     scope: dict[str, Any] = {
         "type": "http",
         "method": "POST",
         "path": path,
-        "headers": [(b"content-type", b"application/grpc+msgpack")],
+        "client": ("127.0.0.1", 50051),
+        "headers": headers,
         "extensions": {"http.response.trailers": {}},
     }
     sent: list[dict[str, Any]] = []

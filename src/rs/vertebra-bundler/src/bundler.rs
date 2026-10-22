@@ -3,7 +3,7 @@
 use crate::config::{BuildResult, BundleConfig, DevConfig, OutputFile};
 use crate::errors::{BundlerError, Result};
 use crate::hmr::{HmrEvent, SourceWatcher};
-use crate::ssr::SsrPool;
+use crossbeam_channel::Receiver;
 use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
@@ -11,69 +11,51 @@ use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
 use oxc_transformer::{TransformOptions, Transformer};
 use pyo3::prelude::*;
-use pyo3::types::PyList;
-use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
-use std::time::Instant;
-use tokio::sync::broadcast;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// Main bundler class exposed to Python via PyO3
+#[derive(Default)]
 #[pyclass(name = "Bundler")]
 pub struct Bundler {
     watcher: Option<SourceWatcher>,
-    hmr_rx: Option<broadcast::Receiver<HmrEvent>>,
+    rx: Option<Receiver<HmrEvent>>,
     hmr_port: Option<u16>,
     is_dev_mode: bool,
-    ssr_pool: Option<SsrPool>,
 }
 
 #[pymethods]
 impl Bundler {
     /// Create a new Bundler instance
     #[new]
-    pub fn new() -> PyResult<Self> {
-        Ok(Self {
-            watcher: None,
-            hmr_rx: None,
-            hmr_port: None,
-            is_dev_mode: false,
-            ssr_pool: None,
-        })
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Build a bundle from the given configuration
     pub fn build(&self, py: Python<'_>, config: &BundleConfig) -> PyResult<BuildResult> {
-        py.detach(|| {
-            self.build_internal(config)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-        })
+        let result = py.detach(|| self.build_internal(config))?;
+        Ok(result)
     }
 
     /// Start development mode with HMR
     pub fn start_dev(&mut self, _py: Python<'_>, config: &DevConfig) -> PyResult<()> {
         if self.is_dev_mode {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "Dev mode already started",
-            ));
+            return Err(BundlerError::Watcher("Dev mode already started".to_string()).into());
         }
 
         let watch_dirs: Vec<PathBuf> = config.watch_dirs.iter().map(PathBuf::from).collect();
 
-        let (watcher, rx) =
-            SourceWatcher::new(watch_dirs, config.extensions.clone(), config.debounce_ms)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let (mut watcher, rx) =
+            SourceWatcher::new(watch_dirs, config.extensions.clone(), config.debounce_ms)?;
+
+        watcher.start()?;
 
         self.watcher = Some(watcher);
-        self.hmr_rx = Some(rx);
+        self.rx = Some(rx);
         self.hmr_port = Some(config.hmr_port);
         self.is_dev_mode = true;
-
-        // Start watching
-        if let Some(ref mut w) = self.watcher {
-            w.start()
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        }
 
         Ok(())
     }
@@ -85,35 +67,58 @@ impl Bundler {
         }
 
         if let Some(ref mut w) = self.watcher {
-            w.stop()
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            w.stop()?;
         }
 
         self.watcher = None;
-        self.hmr_rx = None;
+        self.rx = None;
         self.hmr_port = None;
         self.is_dev_mode = false;
 
         Ok(())
     }
 
+    /// Drain updated file paths from the dev watcher receiver.
+    #[pyo3(signature = (timeout_ms=None))]
+    pub fn poll_events(&self, py: Python<'_>, timeout_ms: Option<u64>) -> PyResult<Vec<String>> {
+        let rx = match &self.rx {
+            Some(rx) => rx.clone(),
+            None => return Ok(Vec::new()),
+        };
+
+        py.detach(|| {
+            let mut paths = Vec::new();
+            if let Some(ms) = timeout_ms
+                && ms > 0
+                && let Ok(HmrEvent::Update { path, .. }) =
+                    rx.recv_timeout(Duration::from_millis(ms))
+            {
+                paths.push(path);
+            }
+            while let Ok(evt) = rx.try_recv() {
+                if let HmrEvent::Update { path, .. } = evt {
+                    paths.push(path);
+                }
+            }
+            Ok(paths)
+        })
+    }
+
     /// Transform a single TypeScript/JavaScript file
     pub fn transform_file(&self, py: Python<'_>, path: &str, source: &str) -> PyResult<String> {
-        let result =
-            py.detach(|| transform_internal(path, source, false).map_err(|e| e.to_string()));
-        result.map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        let result = py.detach(|| transform_internal(path, source, false, "es2022", false))?;
+        Ok(result.0)
     }
 
     /// Parse a file and return diagnostics
-    pub fn check_file(&self, path: &str, source: &str) -> PyResult<Vec<String>> {
-        let allocator = Allocator::default();
-        let source_type = SourceType::from_path(path).unwrap_or_default();
-
-        let ret = Parser::new(&allocator, source, source_type).parse();
-
-        let diagnostics: Vec<String> = ret.diagnostics.iter().map(|e| e.to_string()).collect();
-
-        Ok(diagnostics)
+    pub fn check_file(&self, py: Python<'_>, path: &str, source: &str) -> PyResult<Vec<String>> {
+        py.detach(|| {
+            let allocator = Allocator::default();
+            let source_type = SourceType::from_path(path).unwrap_or_default();
+            let ret = Parser::new(&allocator, source, source_type).parse();
+            let diagnostics: Vec<String> = ret.diagnostics.iter().map(|e| e.to_string()).collect();
+            Ok(diagnostics)
+        })
     }
 
     /// Notify connected clients of a type definition change
@@ -143,67 +148,6 @@ impl Bundler {
     pub fn is_dev_mode(&self) -> bool {
         self.is_dev_mode
     }
-
-    /// Initialize the SSR pool with a pre-built JS bundle.
-    ///
-    /// `bundle_path` is the path to the SSR bundle on disk (must define
-    /// `globalThis.__ssr_render`). `pool_size` controls the number of
-    /// pre-warmed QuickJS contexts.
-    pub fn init_ssr(&mut self, bundle_path: &str, pool_size: usize) -> PyResult<()> {
-        let pool = SsrPool::new(bundle_path, pool_size)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        self.ssr_pool = Some(pool);
-        Ok(())
-    }
-
-    /// Render a component via SSR.
-    ///
-    /// Returns a Python dict `{"head": List[str], "body": str}`.
-    /// The SSR pool must be initialized first via `init_ssr()`.
-    pub fn ssr_render(
-        &self,
-        py: Python<'_>,
-        component: &str,
-        page_json: &str,
-    ) -> PyResult<HashMap<String, Py<PyAny>>> {
-        let pool = self.ssr_pool.as_ref().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("SSR not initialized. Call init_ssr() first.")
-        })?;
-
-        let result = py
-            .detach(|| pool.render(component, page_json).map_err(|e| e.to_string()))
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-
-        // Convert SsrResult to Python dict.
-        let mut map = HashMap::new();
-        let head_list = PyList::new(py, result.head.iter().map(|s| s.as_str()))?;
-        map.insert("head".to_string(), head_list.unbind().into_any());
-        map.insert(
-            "body".to_string(),
-            result.body.into_pyobject(py)?.unbind().into_any(),
-        );
-        Ok(map)
-    }
-
-    /// Invalidate SSR cache for the given file paths.
-    ///
-    /// Currently clears the entire render cache and marks all contexts
-    /// as stale. A future version may do selective invalidation.
-    pub fn ssr_invalidate(&self, _paths: Vec<String>) -> PyResult<()> {
-        if let Some(pool) = &self.ssr_pool {
-            pool.invalidate();
-        }
-        Ok(())
-    }
-
-    /// Shut down the SSR pool, releasing all QuickJS contexts.
-    pub fn ssr_shutdown(&mut self) -> PyResult<()> {
-        if let Some(pool) = self.ssr_pool.as_mut() {
-            pool.shutdown();
-        }
-        self.ssr_pool = None;
-        Ok(())
-    }
 }
 
 impl Bundler {
@@ -219,13 +163,15 @@ impl Bundler {
         // Ensure output directory exists
         fs::create_dir_all(&out_dir)?;
 
-        // Read and transform entry file (single-pass AST parse + codegen with optional minification)
+        // Read and transform entry file
         let source = fs::read_to_string(&entry_path).map_err(BundlerError::Io)?;
 
-        let final_code = transform_internal(
+        let (mut final_code, sourcemap) = transform_internal(
             entry_path.to_string_lossy().as_ref(),
             &source,
             config.minify,
+            &config.target,
+            config.sourcemap,
         )?;
 
         // Determine output filename
@@ -235,6 +181,16 @@ impl Bundler {
             .unwrap_or_else(|| "bundle".to_string());
         let output_name = format!("{}.js", entry_stem);
         let output_path = out_dir.join(&output_name);
+
+        if config.sourcemap {
+            let map_name = format!("{}.js.map", entry_stem);
+            let map_path = out_dir.join(&map_name);
+            if let Some(map_str) = sourcemap {
+                fs::write(&map_path, &map_str)?;
+                outputs.push(OutputFile::new(map_name, map_str.len() as u64, false));
+                final_code.push_str(&format!("\n//# sourceMappingURL={}.js.map\n", entry_stem));
+            }
+        }
 
         // Write output
         fs::write(&output_path, &final_code)?;
@@ -247,14 +203,14 @@ impl Bundler {
     }
 }
 
-impl Default for Bundler {
-    fn default() -> Self {
-        Self::new().expect("Failed to create default bundler")
-    }
-}
-
 /// Transform TypeScript/JavaScript to ES target, stripping type annotations
-fn transform_internal(path: &str, source: &str, minify: bool) -> Result<String> {
+fn transform_internal(
+    path: &str,
+    source: &str,
+    minify: bool,
+    target: &str,
+    sourcemap: bool,
+) -> Result<(String, Option<String>)> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path).unwrap_or_default();
 
@@ -276,21 +232,31 @@ fn transform_internal(path: &str, source: &str, minify: bool) -> Result<String> 
     let semantic_ret = SemanticBuilder::new().build(&ret.program);
     let scoping = semantic_ret.semantic.into_scoping();
 
-    // Run the OXC transformer to strip TypeScript types and apply ES target transforms
-    let transform_options = TransformOptions::default();
-    let _transform_result =
-        Transformer::new(&allocator, std::path::Path::new(path), &transform_options)
-            .build_with_scoping(scoping, &mut ret.program);
+    // Run the OXC transformer using configured target
+    let transform_options =
+        TransformOptions::from_target(target).map_err(BundlerError::Transform)?;
+    let _transform_result = Transformer::new(&allocator, Path::new(path), &transform_options)
+        .build_with_scoping(scoping, &mut ret.program);
 
     // Generate output code
+    let source_map_path = if sourcemap {
+        Some(PathBuf::from(
+            Path::new(path).file_name().unwrap_or_default(),
+        ))
+    } else {
+        None
+    };
+
     let codegen = Codegen::new()
         .with_options(CodegenOptions {
             minify,
-            ..Default::default()
+            source_map_path,
+            ..CodegenOptions::default()
         })
         .build(&ret.program);
 
-    Ok(codegen.code)
+    let map_str = codegen.map.map(|m| m.to_json_string());
+    Ok((codegen.code, map_str))
 }
 
 #[cfg(test)]
@@ -301,9 +267,9 @@ mod tests {
     #[test]
     fn test_transform_typescript() {
         let ts_source = "const greeting: string = 'hello';\nfunction add(a: number, b: number): number { return a + b; }\n";
-        let result = transform_internal("test.ts", ts_source, false);
+        let result = transform_internal("test.ts", ts_source, false, "es2022", false);
         assert!(result.is_ok(), "Transform failed: {:?}", result.err());
-        let output = result.unwrap();
+        let (output, _) = result.unwrap();
         // TypeScript type annotations should be stripped
         assert!(
             !output.contains(": string"),
@@ -324,9 +290,9 @@ mod tests {
     #[test]
     fn test_minify_output() {
         let source = "const   greeting   =   'hello';\n\nconst   x   =   42;\n";
-        let result = transform_internal("test.js", source, true);
+        let result = transform_internal("test.js", source, true, "es2022", false);
         assert!(result.is_ok(), "Minify failed: {:?}", result.err());
-        let output = result.unwrap();
+        let (output, _) = result.unwrap();
         // Minified code should be shorter (less whitespace)
         assert!(output.len() < source.len(), "Minified output not shorter");
         assert!(output.contains("greeting"));
@@ -334,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_writes_output() {
+    fn test_build_writes_output_and_sourcemap() {
         let tmp = TempDir::new().unwrap();
         let entry_path = tmp.path().join("main.ts");
         let out_dir = tmp.path().join("dist");
@@ -345,7 +311,8 @@ mod tests {
             entry: entry_path.to_string_lossy().to_string(),
             outdir: out_dir.to_string_lossy().to_string(),
             minify: false,
-            ..BundleConfig::default()
+            sourcemap: true,
+            target: "es2022".to_string(),
         };
 
         let bundler = Bundler::default();
@@ -353,16 +320,38 @@ mod tests {
         assert!(result.is_ok(), "Build failed: {:?}", result.err());
 
         let build_result = result.unwrap();
-        assert_eq!(build_result.outputs.len(), 1);
-        assert_eq!(build_result.outputs[0].path, "main.js");
-        assert!(build_result.outputs[0].is_entry);
+        assert_eq!(build_result.outputs.len(), 2);
+        assert!(
+            build_result
+                .outputs
+                .iter()
+                .any(|o| o.path == "main.js" && o.is_entry)
+        );
+        assert!(
+            build_result
+                .outputs
+                .iter()
+                .any(|o| o.path == "main.js.map" && !o.is_entry)
+        );
 
-        // Verify file was written
+        // Verify JS output file was written and contains sourcemap reference
         let output_file = out_dir.join("main.js");
         assert!(output_file.exists(), "Output file not written");
         let content = fs::read_to_string(&output_file).unwrap();
         assert!(content.contains("42"));
-        // Type annotation should be stripped
         assert!(!content.contains(": number"));
+        assert!(content.contains("//# sourceMappingURL=main.js.map"));
+
+        // Verify map file was written
+        let map_file = out_dir.join("main.js.map");
+        assert!(map_file.exists(), "Sourcemap file not written");
+    }
+
+    #[test]
+    fn test_invalid_target_returns_error() {
+        let ts_source = "const greeting: string = 'hello';\n";
+        let result = transform_internal("test.ts", ts_source, false, "invalid_target_12345", false);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), BundlerError::Transform(_)));
     }
 }

@@ -3,6 +3,7 @@
 use bytes::Bytes;
 use http::{HeaderMap, Response, StatusCode};
 use http_body_util::Full;
+use vertebra_core::util::constant_time_eq;
 
 /// Configuration for opt-in `/debug/pprof/*` diagnostic endpoints.
 #[derive(Debug, Clone, Default)]
@@ -11,17 +12,6 @@ pub struct ProfileConfig {
     pub enabled: bool,
     /// Required `Authorization: Bearer <token>` secret when `enabled` is true.
     pub bearer_token: Option<String>,
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 impl ProfileConfig {

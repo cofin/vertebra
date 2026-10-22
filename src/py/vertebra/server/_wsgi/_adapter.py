@@ -1,37 +1,41 @@
-"""WsgiAdapter: wraps one WSGI app callable with zero-copy WsgiFileWrapper handoff."""
+"""WsgiAdapter: executes PEP 3333 WSGI callables on the Rust-backed environment."""
 
-from __future__ import annotations
-
-import contextlib
+import inspect
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from vertebra._vertebra import WsgiFileWrapper
-from vertebra.server._wsgi._environ import WsgiEnviron
-from vertebra.server._wsgi._extensions import resolve_wsgi_file_wrapper
+from vertebra._vertebra import (
+    Request,
+    Response,
+    WsgiEnviron,
+    WsgiFileWrapper,
+    run_wsgi_callable,
+)
 
-__all__ = ("WsgiAdapter", "WsgiError")
-
-_NativeResponse: Any = None
-with contextlib.suppress(ImportError):
-    from vertebra._vertebra import Response as _NativeResponse
-
-type _WsgiApp = Callable[[Any, Callable[..., None]], Iterable[bytes]]
+__all__ = (
+    "WsgiAdapter",
+    "WsgiError",
+)
 
 
-class WsgiError(Exception):
-    """Raised when the WSGI app violates the PEP 3333 contract."""
+class WsgiError(RuntimeError):
+    """Raised when a WSGI application violates PEP 3333."""
 
 
 class WsgiAdapter:
-    """Wraps a WSGI callable and translates Request to Response."""
+    """Adapts a PEP 3333 WSGI callable to Vertebra's request/response pipeline."""
 
-    __slots__ = ("_app", "_response_cls", "_url_scheme")
+    __slots__ = ("_app", "_is_generator_app", "_mount_prefix")
 
-    def __init__(self, app: _WsgiApp, *, url_scheme: str = "http") -> None:
-        self._app: _WsgiApp = app
-        self._url_scheme: str = url_scheme
-        self._response_cls: Any = _get_response_cls()
+    def __init__(
+        self,
+        app: Callable[..., Iterable[bytes]],
+        *,
+        mount_prefix: str = "",
+    ) -> None:
+        self._app = app
+        self._is_generator_app = inspect.isgeneratorfunction(app)
+        self._mount_prefix = mount_prefix.rstrip("/")
 
     def __call__(
         self,
@@ -39,82 +43,197 @@ class WsgiAdapter:
         *,
         server_name: str = "localhost",
         server_port: int = 8000,
-    ) -> Any:
-        """Run the WSGI app against request and return a Response."""
-        if hasattr(request, "wsgi_environ"):
-            environ: Any = request.wsgi_environ(server_name, server_port, self._url_scheme)
+        url_scheme: str = "http",
+    ) -> Response:
+        """Invoke ``handle_request`` when ``WsgiAdapter`` is called directly."""
+        return self.handle_request(
+            request,
+            server_name=server_name,
+            server_port=server_port,
+            url_scheme=url_scheme,
+        )
+
+    def handle_request(
+        self,
+        request: Any,
+        *,
+        server_name: str = "localhost",
+        server_port: int = 8000,
+        url_scheme: str = "http",
+    ) -> Response:
+        """Execute the WSGI application for ``request`` and return a ``Response``."""
+        request_id: int = getattr(request, "request_id", 0)
+        if isinstance(request, Request):
+            environ = request.wsgi_environ(
+                server_name=server_name,
+                server_port=server_port,
+                url_scheme=url_scheme,
+            )
+            if self._mount_prefix:
+                self._apply_mount_prefix(environ)
+            if not self._is_generator_app:
+                try:
+                    return run_wsgi_callable(self._app, environ, request_id)
+                except (RuntimeError, ValueError) as exc:
+                    raise WsgiError(str(exc)) from exc
         else:
-            environ = WsgiEnviron(
+            environ = self._build_environ(
                 request,
                 server_name=server_name,
                 server_port=server_port,
-                url_scheme=self._url_scheme,
+                url_scheme=url_scheme,
             )
-            environ._cache["wsgi.file_wrapper"] = WsgiFileWrapper
-        return self.run_environ(environ, request_id=int(getattr(request, "request_id", 0)))
+        environ["wsgi.file_wrapper"] = WsgiFileWrapper
+        return self._run_callable(environ, request_id)
 
-    def run_environ(self, environ: Any, *, request_id: int = 0) -> Any:
-        """Execute the WSGI application against an existing WsgiEnviron mapping."""
-        response_state: list[tuple[str, list[tuple[str, str]]] | None] = [None]
+    def run_environ(
+        self,
+        environ: WsgiEnviron,
+        request_id: int = 0,
+    ) -> Response:
+        """Execute the WSGI application against an existing ``WsgiEnviron``."""
+        if self._mount_prefix:
+            self._apply_mount_prefix(environ)
+        return self._run_callable(environ, request_id)
+
+    def _apply_mount_prefix(self, environ: WsgiEnviron) -> None:
+        """Adjust SCRIPT_NAME and PATH_INFO on a WsgiEnviron for mounted apps."""
+        path_info = str(environ.get("PATH_INFO", "/"))
+        if path_info.startswith(self._mount_prefix):
+            stripped = path_info[len(self._mount_prefix) :] or "/"
+            environ["SCRIPT_NAME"] = self._mount_prefix
+            environ["PATH_INFO"] = stripped
+
+    def _build_environ(
+        self,
+        request: Any,
+        *,
+        server_name: str = "localhost",
+        server_port: int = 8000,
+        url_scheme: str = "http",
+    ) -> WsgiEnviron:
+        """Construct a Rust ``WsgiEnviron`` from a Python request double."""
+        method: str = getattr(request, "method", "GET")
+        path: str = getattr(request, "path", "/")
+        query: str = getattr(request, "query", None) or ""
+        body_raw: bytes | None = getattr(request, "body", None)
+        raw_headers = getattr(request, "headers", None)
+        header_pairs: list[tuple[bytes, bytes]] = []
+        if raw_headers is not None:
+            items = raw_headers.items() if hasattr(raw_headers, "items") else raw_headers
+            for k, v in items:
+                kb = k.encode("latin-1") if isinstance(k, str) else bytes(k)
+                vb = v.encode("latin-1") if isinstance(v, str) else bytes(v)
+                header_pairs.append((kb, vb))
+        environ = WsgiEnviron.from_parts(
+            method=method,
+            path=path,
+            query_string=query,
+            headers=header_pairs,
+            body=body_raw,
+            server_name=server_name,
+            server_port=int(server_port),
+            url_scheme=url_scheme,
+        )
+        if self._mount_prefix:
+            self._apply_mount_prefix(environ)
+        return environ
+
+    def _run_callable(
+        self,
+        environ: WsgiEnviron,
+        request_id: int,
+    ) -> Response:
+        """Invoke the WSGI callable and collect status, headers, and body."""
+        status_code: int | None = None
+        response_headers: list[tuple[str, str]] = []
+        headers_sent = False
+        write_chunks: list[bytes] = []
 
         def start_response(
             status: str,
-            response_headers: list[tuple[str, str]],
-            exc_info: Any = None,
-        ) -> None:
+            headers: list[tuple[str, str]],
+            exc_info: tuple[type[BaseException] | None, BaseException | None, Any] | None = None,
+        ) -> Callable[[bytes], None]:
+            nonlocal status_code, response_headers, headers_sent
+
             if exc_info is not None:
                 try:
-                    if response_state[0] is not None:
+                    if headers_sent and exc_info[1] is not None:
                         raise exc_info[1].with_traceback(exc_info[2])
                 finally:
                     exc_info = None
-            if not isinstance(status, str):
-                msg = f"start_response status must be str, got {type(status)!r}"
+            elif status_code is not None:
+                msg = "start_response called a second time without exc_info"
                 raise WsgiError(msg)
-            response_state[0] = (status, list(response_headers))
 
-        result_iterable: Any = self._app(environ, start_response)
-        sendfile_path = resolve_wsgi_file_wrapper(result_iterable)
+            parts = status.split(" ", 1)
+            try:
+                code = int(parts[0])
+            except (ValueError, IndexError) as exc:
+                msg = f"Invalid WSGI status string: {status!r}"
+                raise WsgiError(msg) from exc
 
+            if code < 100 or code > 999:
+                msg = f"WSGI status code out of range: {code}"
+                raise WsgiError(msg)
+
+            status_code = code
+            response_headers = [(str(k).lower(), str(v)) for k, v in headers]
+
+            def write(data: bytes) -> None:
+                nonlocal headers_sent
+                headers_sent = True
+                if data:
+                    write_chunks.append(bytes(data))
+
+            return write
+
+        result_iter = self._app(environ, start_response)
+
+        if isinstance(result_iter, WsgiFileWrapper):
+            file_path = result_iter.path
+            if file_path is not None and status_code is not None:
+                result_iter.close()
+                return Response.from_file(
+                    file_path,
+                    status=status_code,
+                    headers=response_headers,
+                    request_id=request_id,
+                )
+            if status_code is not None:
+                raw_bytes = bytes(result_iter.read_all_bytes() or b"")
+                result_iter.close()
+                return Response(
+                    status=status_code,
+                    body=raw_bytes,
+                    headers=response_headers,
+                    request_id=request_id,
+                )
+
+        body_parts: list[bytes] = []
         try:
-            if sendfile_path is not None and isinstance(result_iterable, WsgiFileWrapper):
-                raw_bytes = result_iterable.read_all_bytes()
-                body = raw_bytes if raw_bytes is not None else b"".join(result_iterable)
-            else:
-                chunks: list[bytes] = list(result_iterable)
-                body = chunks[0] if len(chunks) == 1 else b"".join(chunks)
+            for chunk in result_iter:
+                if status_code is None:
+                    msg = "WSGI application yielded body bytes before calling start_response"
+                    raise WsgiError(msg)
+                headers_sent = True
+                if chunk:
+                    body_parts.append(bytes(chunk))
         finally:
-            close = getattr(result_iterable, "close", None)
-            if close is not None:
+            close = getattr(result_iter, "close", None)
+            if callable(close):
                 close()
 
-        if response_state[0] is None:
-            msg = "WSGI app returned without calling start_response"
+        if status_code is None:
+            msg = "WSGI application returned without calling start_response"
             raise WsgiError(msg)
 
-        status_line, response_headers = response_state[0]
-
-        try:
-            status_code = int(status_line.split(" ", 1)[0])
-        except (ValueError, IndexError) as exc:
-            msg = f"Cannot parse status code from {status_line!r}"
-            raise WsgiError(msg) from exc
-
-        if sendfile_path is not None:
-            response_headers.append(("x-vertebra-sendfile", sendfile_path))
-
-        return self._response_cls(
+        all_chunks = write_chunks + body_parts
+        body = b"".join(all_chunks)
+        return Response(
             status=status_code,
-            headers=response_headers,
             body=body,
+            headers=response_headers,
             request_id=request_id,
         )
-
-
-def _get_response_cls() -> Any:
-    """Return the native Response class."""
-    if _NativeResponse is not None:
-        return _NativeResponse
-    from vertebra._vertebra import Response
-
-    return Response

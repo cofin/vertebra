@@ -30,6 +30,7 @@ from vertebra.build.codegen import (
     ZodGenerator,
     procedure,
 )
+from vertebra.build.codegen._ir import ObjectType, PrimitiveType
 
 
 class CreateOrderInput(msgspec.Struct, gc=False):
@@ -278,3 +279,37 @@ def test_procedure_decorator_registry_and_typescript_client_codegen() -> None:
     app_state: dict[str, object] = {}
     plugin.install_state(app_state)
     assert "codegen" in app_state
+
+
+def test_emit_schema_on_zod_and_valibot_generators() -> None:
+    """Verify emit_schema unifies TypeNode and JSON schema inputs across Zod and Valibot."""
+    custom_type = ObjectType(
+        fields={"id": PrimitiveType("string"), "count": PrimitiveType("number")},
+        name="InventoryItem",
+    )
+
+    zod_from_node = ZodGenerator().emit_schema("InventoryItem", custom_type)
+    assert "export const InventoryItemSchema = z.object" in zod_from_node
+    assert "export type InventoryItem = z.infer<typeof InventoryItemSchema>;" in zod_from_node
+
+    valibot_from_node = ValibotGenerator().emit_schema("InventoryItem", custom_type)
+    assert "export const InventoryItemSchema = v.object" in valibot_from_node
+    assert "export type InventoryItem = v.InferOutput<typeof InventoryItemSchema>;" in valibot_from_node
+
+    json_schema = {
+        "title": "Widget",
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "minLength": 3},
+            "price": {"type": "number", "minimum": 0},
+        },
+        "required": ["name"],
+    }
+
+    zod_from_dict = ZodGenerator().emit_schema("Widget", json_schema)
+    assert "export const WidgetSchema = z.object" in zod_from_dict
+    assert "name: z.string().min(3)" in zod_from_dict
+
+    valibot_from_dict = ValibotGenerator().emit_schema("Widget", json_schema)
+    assert "export const WidgetSchema = v.object" in valibot_from_dict
+    assert "name: v.pipe(v.string(), v.minLength(3))" in valibot_from_dict

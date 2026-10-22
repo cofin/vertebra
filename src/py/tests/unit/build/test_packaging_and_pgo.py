@@ -6,27 +6,25 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-from tools.pgo.python_pgo import (
-    CPYTHON_PGO_FLAGS,
-    PLATFORM_MATRIX,
-    PythonBuildInfo,
-    check_pgo_availability,
-    detect_python_build,
-    get_platform_support,
-)
-from tools.pgo.rust_pgo import (
-    RustPgoConfig,
-    build_flags,
-    check_profdata_size,
-    merge_profiles,
-)
 
-from vertebra.build import (
+from vertebra.build.packaging import (
     ONEFILE_MAGIC,
     ONEFILE_TRAILER_SIZE,
     BuildTarget,
     OnefileBuilder,
     StandaloneBuilder,
+)
+from vertebra.build.packaging.pgo import (
+    CPYTHON_PGO_FLAGS,
+    PLATFORM_MATRIX,
+    PythonBuildInfo,
+    RustPgoConfig,
+    build_flags,
+    check_pgo_availability,
+    check_profdata_size,
+    detect_python_build,
+    get_platform_support,
+    merge_profiles,
 )
 from vertebra.cli import cli
 from vertebra.cli.build import build as build_command

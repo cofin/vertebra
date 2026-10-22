@@ -4,19 +4,18 @@
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use http::header::{self, HeaderValue};
 use http::{Response, StatusCode};
-use http_body_util::StreamBody;
 use hyper::body::Frame;
 use tokio::sync::{broadcast, mpsc};
+
+use crate::body::FrameReceiver;
 
 /// Keepalive comment frame emitted on idle intervals.
 pub const SSE_KEEPALIVE_PING: &[u8] = b": ping\r\n\r\n";
@@ -24,26 +23,7 @@ pub const SSE_KEEPALIVE_PING: &[u8] = b": ping\r\n\r\n";
 /// Default per-topic broadcast channel capacity.
 pub const DEFAULT_TOPIC_CHANNEL_CAPACITY: usize = 256;
 
-/// Stream wrapper converting `mpsc::Receiver<Result<Frame<Bytes>, Infallible>>` into a `futures_core::Stream`.
-pub struct SseFrameReceiverStream {
-    rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>,
-}
-
-impl SseFrameReceiverStream {
-    pub fn new(rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>) -> Self {
-        Self { rx }
-    }
-}
-
-impl futures_util::Stream for SseFrameReceiverStream {
-    type Item = Result<Frame<Bytes>, Infallible>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
-    }
-}
-
-pub type SseStreamingResponse = Response<StreamBody<SseFrameReceiverStream>>;
+pub type SseStreamingResponse = Response<FrameReceiver>;
 
 /// A single Server-Sent Events message frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -402,7 +382,7 @@ impl SseHub {
             )
             .header(header::CONNECTION, HeaderValue::from_static("keep-alive"))
             .header("x-accel-buffering", HeaderValue::from_static("no"))
-            .body(StreamBody::new(SseFrameReceiverStream::new(rx)))
+            .body(FrameReceiver::new(rx))
             .expect("valid SSE streaming response")
     }
 }
