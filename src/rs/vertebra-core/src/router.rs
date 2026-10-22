@@ -126,6 +126,9 @@ fn normalize_typed_segment(segment: &str) -> Result<Option<String>, RouterError>
 
     if let Some(param_type) = parts.next() {
         let param_type = param_type.trim();
+        if param_type == "path" {
+            return Ok(Some(format!("{{*{name}}}")));
+        }
         if !param_type.is_empty() && !is_supported_type(param_type) {
             return Err(RouterError::InvalidParamType {
                 segment: segment.to_string(),
@@ -140,7 +143,21 @@ fn normalize_typed_segment(segment: &str) -> Result<Option<String>, RouterError>
 fn is_supported_type(param_type: &str) -> bool {
     matches!(
         param_type,
-        "str" | "string" | "int" | "i64" | "u64" | "float" | "f64" | "bool" | "uuid"
+        "str"
+            | "string"
+            | "int"
+            | "i64"
+            | "u64"
+            | "float"
+            | "f64"
+            | "bool"
+            | "uuid"
+            | "decimal"
+            | "date"
+            | "datetime"
+            | "time"
+            | "timedelta"
+            | "path"
     )
 }
 

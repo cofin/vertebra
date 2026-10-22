@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from vertebra.builder._codegen._watch import HmrEventRouter, classify_file
+from vertebra.build.codegen._watch import HmrEventRouter, classify_file
 
 
 def test_classify_file_classify_python_file() -> None:

@@ -12,6 +12,7 @@ pub mod channel;
 pub mod cleanup;
 pub mod guards;
 pub mod ipc;
+pub mod logger;
 pub mod notify;
 pub mod platform;
 pub mod process;
@@ -19,6 +20,7 @@ pub mod protocol;
 pub mod router;
 pub mod shm;
 pub mod sync;
+pub mod telemetry;
 pub mod tiered_ring;
 pub mod transport;
 

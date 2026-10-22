@@ -9,22 +9,38 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from vertebra._typing import module_available
+from vertebra.extensions.litestar import (
+    ChannelsBackend,
+    LitestarConfig,
+    LitestarPlugin,
+    MemoryStore,
+    compile_litestar_fastpath_routes,
+    extract_litestar_routes,
+    offload_litestar_middlewares,
+)
 from vertebra.server._asgi._queues import AsgiResponse
 from vertebra.utils.serializers._json import encode_json_bytes
 
 __all__ = (
+    "ChannelsBackend",
     "DebugResponse",
     "EarlyHintResponse",
     "FastApiExtension",
     "HeaderFilter",
+    "LitestarConfig",
     "LitestarExtension",
+    "LitestarPlugin",
+    "MemoryStore",
     "PathSendResponse",
     "TrailerResponse",
     "WebSocketHttpResponse",
     "ZeroCopySendResponse",
     "compile_guard_pattern",
+    "compile_litestar_fastpath_routes",
+    "extract_litestar_routes",
     "get_extensions",
     "is_static_route",
+    "offload_litestar_middlewares",
     "register_extension",
 )
 
@@ -307,23 +323,18 @@ class LitestarExtension:
         if not _LITESTAR_AVAILABLE:
             return {}
         try:
-            routes: dict[str, Any] = {}
-            for route in getattr(app, "routes", []):
-                pattern = getattr(route, "path", None)
-                handler = getattr(route, "route_handler", None)
-                if pattern and handler:
-                    routes[pattern] = handler
-            return routes
+            table = extract_litestar_routes(app)
+            return {entry.path_template: entry.route_handler for entry in table.routes.values()}
         except Exception:
             log.debug("Litestar route extraction failed", exc_info=True)
             return {}
 
     def _resolve_handler(self, app: Any, request: Any) -> tuple[Any, dict[str, Any]]:
         try:
-            for route in getattr(app, "routes", []):
-                handler = getattr(route, "route_handler", None)
-                path = getattr(route, "path", None)
-                if path == request.path and handler is not None:
+            table = extract_litestar_routes(app)
+            for entry in table.routes.values():
+                if entry.path_template == request.path:
+                    handler = entry.route_handler
                     fn = getattr(handler, "fn", None)
                     if fn is not None and not getattr(handler, "middleware", None):
                         return fn.value if hasattr(fn, "value") else fn, {}

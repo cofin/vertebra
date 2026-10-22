@@ -1,18 +1,20 @@
-"""Advanced Alchemy FileObject/StoredObject storage backend powered by VertebraStore."""
+"""Advanced Alchemy FileObject/StoredObject storage backend powered by ObjectStore."""
 
-import asyncio
+from __future__ import annotations
+
 import inspect
 from collections.abc import AsyncIterable, Buffer, Iterable, Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vertebra.storage import ObjectMeta, VertebraStore
+import msgspec
+
+from vertebra.storage import ObjectMeta, ObjectStore
+from vertebra.storage.pipeline import StagedUpload, UploadTracker
 
 __all__ = (
-    "AlchemyFileAttachment",
-    "VertebraAlchemyStorageBackend",
-    "VertebraStorageBackend",
+    "FileAttachment",
+    "ObjectStoreBackend",
 )
 
 type PathLike = str | Path
@@ -20,8 +22,7 @@ type SyncDataLike = Buffer | Path | Iterable[bytes] | Any
 type AsyncDataLike = SyncDataLike | AsyncIterable[bytes]
 
 
-@dataclass(slots=True)
-class AlchemyFileAttachment:
+class FileAttachment(msgspec.Struct, gc=False):
     """Value object representing an Advanced Alchemy FileObject attachment."""
 
     path: str
@@ -29,11 +30,11 @@ class AlchemyFileAttachment:
     content_type: str = "application/octet-stream"
     size: int = 0
     etag: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = msgspec.field(default_factory=dict)
 
 
-class VertebraAlchemyStorageBackend:
-    """Advanced Alchemy compatible storage backend backed by VertebraStore."""
+class ObjectStoreBackend:
+    """Advanced Alchemy compatible storage backend backed by ObjectStore."""
 
     driver: str = "vertebra"
     protocol: str = "vertebra"
@@ -42,35 +43,38 @@ class VertebraAlchemyStorageBackend:
     def __init__(
         self,
         key: str = "default",
-        fs: VertebraStore | None = None,
+        fs: ObjectStore | None = None,
         *,
-        store: VertebraStore | None = None,
+        store: ObjectStore | None = None,
         prefix: str = "",
     ) -> None:
         actual_store = store or fs
-        if not isinstance(actual_store, VertebraStore):
-            msg = "VertebraAlchemyStorageBackend requires a VertebraStore instance"
+        if not isinstance(actual_store, ObjectStore):
+            msg = "ObjectStoreBackend requires an ObjectStore instance"
             raise TypeError(msg)
         self.key = key
         self._store = actual_store
         self._prefix = prefix.strip("/")
 
     @property
-    def store(self) -> VertebraStore:
-        """Return the underlying VertebraStore instance."""
+    def store(self) -> ObjectStore:
+        """Return the underlying ObjectStore instance."""
         return self._store
 
     def save_object(
         self,
-        file_object: AlchemyFileAttachment,
+        file_object: FileAttachment,
         data: SyncDataLike,
         **kwargs: Any,
-    ) -> AlchemyFileAttachment:
+    ) -> FileAttachment:
         """Persist data synchronously and populate size and etag on file_object."""
         _ = kwargs
-        raw = self._resolve_sync_data(data)
         qualified = self._qualify(file_object.path)
-        put_res = self._store.put(qualified, raw)
+        if isinstance(data, Path):
+            put_res = self._store.put_file(qualified, data)
+        else:
+            raw = self._resolve_sync_data(data)
+            put_res = self._store.put(qualified, raw)
         file_object.size = put_res.size
         file_object.etag = put_res.etag
         if put_res.etag:
@@ -79,15 +83,18 @@ class VertebraAlchemyStorageBackend:
 
     async def save_object_async(
         self,
-        file_object: AlchemyFileAttachment,
+        file_object: FileAttachment,
         data: AsyncDataLike,
         **kwargs: Any,
-    ) -> AlchemyFileAttachment:
+    ) -> FileAttachment:
         """Persist data asynchronously and populate size and etag on file_object."""
         _ = kwargs
-        raw = await self._resolve_async_data(data)
         qualified = self._qualify(file_object.path)
-        put_res = await self._store.put_async(qualified, raw)
+        if isinstance(data, Path):
+            put_res = await self._store.put_file_async(qualified, data)
+        else:
+            raw = await self._resolve_async_data(data)
+            put_res = await self._store.put_async(qualified, raw)
         file_object.size = put_res.size
         file_object.etag = put_res.etag
         if put_res.etag:
@@ -138,6 +145,25 @@ class VertebraAlchemyStorageBackend:
             return self._store.presign_put(qualified, expires_in_secs=expires_in_secs, timestamp=timestamp)
         return self._store.presign_get(qualified, expires_in_secs=expires_in_secs, timestamp=timestamp)
 
+    def tracker(self) -> UploadTracker:
+        """Create a transactional UploadTracker bound to this storage backend."""
+        return UploadTracker(self._store)
+
+    def build_staged_upload(self, path: PathLike, data: SyncDataLike) -> StagedUpload:
+        """Construct a StagedUpload record for the qualified path and payload."""
+        raw = self._resolve_sync_data(data)
+        return StagedUpload(key=self._qualify(path), data=bytes(memoryview(raw)), store=self._store)
+
+    @staticmethod
+    async def provide_tracker(store: ObjectStore) -> AsyncIterable[UploadTracker]:
+        """Litestar dependency provider yielding a transactional UploadTracker."""
+        tracker = UploadTracker(store)
+        try:
+            yield tracker
+        except Exception:
+            await tracker.after_rollback_async()
+            raise
+
     def _qualify(self, path: PathLike) -> str:
         raw_path = path.as_posix() if isinstance(path, Path) else str(path)
         cleaned = raw_path.strip().lstrip("/")
@@ -160,7 +186,7 @@ class VertebraAlchemyStorageBackend:
         if isinstance(data, Buffer):
             return data
         if isinstance(data, Path):
-            return await asyncio.to_thread(data.read_bytes)
+            return data.read_bytes()
         if hasattr(data, "read"):
             result = data.read()
             if inspect.isawaitable(result):
@@ -172,6 +198,3 @@ class VertebraAlchemyStorageBackend:
                 chunks.append(bytes(chunk))
             return b"".join(chunks)
         return b"".join(bytes(chunk) for chunk in data)
-
-
-VertebraStorageBackend = VertebraAlchemyStorageBackend

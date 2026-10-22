@@ -16,6 +16,8 @@ use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use thiserror::Error;
 use url::Url;
 
+use crate::oci::{OciCavageCredentials, OciObjectStore, R2_UNIFORM_PART_SIZE, chunk_uniform_parts};
+
 static STORAGE_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -24,7 +26,16 @@ static STORAGE_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .expect("failed to initialize vertebra-storage Tokio runtime")
 });
 
+pub fn runtime_handle() -> tokio::runtime::Handle {
+    tokio::runtime::Handle::try_current().unwrap_or_else(|_| STORAGE_RUNTIME.handle().clone())
+}
+
 pub fn block_on_storage<F: std::future::Future>(future: F) -> F::Output {
+    if let Ok(handle) = tokio::runtime::Handle::try_current()
+        && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+    {
+        return tokio::task::block_in_place(|| handle.block_on(future));
+    }
     STORAGE_RUNTIME.block_on(future)
 }
 
@@ -32,6 +43,8 @@ pub fn block_on_storage<F: std::future::Future>(future: F) -> F::Output {
 pub enum StorageError {
     #[error("object_store error: {0}")]
     ObjectStore(#[from] object_store::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("invalid storage URL '{0}': {1}")]
     InvalidUrl(String, String),
     #[error("signing error: {0}")]
@@ -82,6 +95,22 @@ pub enum BackendConfig {
         account: Option<String>,
         access_key: Option<String>,
         endpoint: Option<String>,
+    },
+    Oci {
+        bucket: String,
+        namespace: String,
+        region: String,
+        endpoint: Option<String>,
+        credentials: Option<OciCavageCredentials>,
+    },
+    R2 {
+        bucket: String,
+        account_id: String,
+        access_key_id: Option<String>,
+        secret_access_key: Option<String>,
+        jurisdiction: Option<String>,
+        endpoint: Option<String>,
+        allow_http: bool,
     },
     Http {
         url: String,
@@ -176,6 +205,54 @@ impl ObjectStoreEngine {
                     scheme: "az".to_string(),
                 })
             }
+            BackendConfig::Oci {
+                bucket,
+                namespace,
+                region,
+                endpoint,
+                credentials,
+            } => {
+                let store = OciObjectStore::new(namespace, bucket, region, endpoint, credentials)?;
+                Ok(Self {
+                    inner: Arc::new(store),
+                    scheme: "oci".to_string(),
+                })
+            }
+            BackendConfig::R2 {
+                bucket,
+                account_id,
+                access_key_id,
+                secret_access_key,
+                jurisdiction,
+                endpoint,
+                allow_http,
+            } => {
+                let resolved_endpoint = endpoint.unwrap_or_else(|| match jurisdiction.as_deref() {
+                    Some(j) if !j.trim().is_empty() => {
+                        format!(
+                            "https://{}.{}.r2.cloudflarestorage.com",
+                            account_id,
+                            j.trim()
+                        )
+                    }
+                    _ => format!("https://{}.r2.cloudflarestorage.com", account_id),
+                });
+                let mut builder = AmazonS3Builder::new()
+                    .with_bucket_name(&bucket)
+                    .with_region("auto")
+                    .with_endpoint(resolved_endpoint)
+                    .with_allow_http(allow_http);
+                if let Some(key_id) = access_key_id {
+                    builder = builder.with_access_key_id(key_id);
+                }
+                if let Some(secret) = secret_access_key {
+                    builder = builder.with_secret_access_key(secret);
+                }
+                Ok(Self {
+                    inner: Arc::new(builder.build()?),
+                    scheme: "r2".to_string(),
+                })
+            }
             BackendConfig::Http { url } => {
                 let store = HttpBuilder::new().with_url(url).build()?;
                 Ok(Self {
@@ -210,14 +287,9 @@ impl ObjectStoreEngine {
                     root: path.to_string_lossy().into_owned(),
                 })
             }
-            "s3" | "r2" | "b2" => {
+            "s3" | "b2" => {
                 let bucket = parsed.host_str().unwrap_or_default().to_string();
-                let endpoint = if parsed.scheme() == "r2" {
-                    let account_id = opts.get("account_id").cloned().unwrap_or_default();
-                    Some(opts.get("endpoint").cloned().unwrap_or_else(|| {
-                        format!("https://{account_id}.r2.cloudflarestorage.com")
-                    }))
-                } else if parsed.scheme() == "b2" {
+                let endpoint = if parsed.scheme() == "b2" {
                     let region = opts
                         .get("region")
                         .cloned()
@@ -240,6 +312,60 @@ impl ObjectStoreEngine {
                     secret_access_key: opts.get("secret_access_key").cloned(),
                     endpoint,
                     allow_http: opts.get("allow_http").is_some_and(|v| v == "true"),
+                })
+            }
+            "r2" => {
+                let bucket = parsed.host_str().unwrap_or_default().to_string();
+                let account_id = opts.get("account_id").cloned().unwrap_or_default();
+                Self::new(BackendConfig::R2 {
+                    bucket,
+                    account_id,
+                    access_key_id: opts.get("access_key_id").cloned(),
+                    secret_access_key: opts.get("secret_access_key").cloned(),
+                    jurisdiction: opts.get("jurisdiction").cloned(),
+                    endpoint: opts.get("endpoint").cloned(),
+                    allow_http: opts.get("allow_http").is_some_and(|v| v == "true"),
+                })
+            }
+            "oci" => {
+                let raw_host = parsed.host_str().unwrap_or_default();
+                let (bucket, host_ns) = if !parsed.username().is_empty() {
+                    (parsed.username().to_string(), Some(raw_host.to_string()))
+                } else {
+                    match raw_host.split_once('@') {
+                        Some((b, ns)) => (b.to_string(), Some(ns.to_string())),
+                        None => (raw_host.to_string(), None),
+                    }
+                };
+                let namespace = opts
+                    .get("namespace")
+                    .cloned()
+                    .or(host_ns)
+                    .unwrap_or_else(|| "default_ns".to_string());
+                let region = opts
+                    .get("region")
+                    .cloned()
+                    .unwrap_or_else(|| "us-ashburn-1".to_string());
+                let credentials = match (
+                    opts.get("tenancy_ocid"),
+                    opts.get("user_ocid"),
+                    opts.get("fingerprint"),
+                    opts.get("private_key_pem"),
+                ) {
+                    (Some(t), Some(u), Some(fp), Some(pem)) => Some(OciCavageCredentials {
+                        tenancy_ocid: t.clone(),
+                        user_ocid: u.clone(),
+                        fingerprint: fp.clone(),
+                        private_key_pem: pem.clone(),
+                    }),
+                    _ => None,
+                };
+                Self::new(BackendConfig::Oci {
+                    bucket,
+                    namespace,
+                    region,
+                    endpoint: opts.get("endpoint").cloned(),
+                    credentials,
                 })
             }
             "gs" | "gcs" => {
@@ -285,15 +411,33 @@ impl ObjectStoreEngine {
         })
     }
 
+    pub async fn put_file(
+        &self,
+        path: &str,
+        file_path: &str,
+    ) -> Result<StoredObjectMeta, StorageError> {
+        let raw = tokio::fs::read(file_path).await?;
+        self.put(path, Bytes::from(raw)).await
+    }
+
     pub async fn put_multipart(
         &self,
         path: &str,
         parts: Vec<Bytes>,
     ) -> Result<StoredObjectMeta, StorageError> {
         let location = StorePath::from(path);
-        let total_size: u64 = parts.iter().map(|b| b.len() as u64).sum();
+        let normalized_parts = if self.scheme == "r2" && parts.len() > 1 {
+            let mut combined = Vec::new();
+            for p in &parts {
+                combined.extend_from_slice(p);
+            }
+            chunk_uniform_parts(Bytes::from(combined), R2_UNIFORM_PART_SIZE)
+        } else {
+            parts
+        };
+        let total_size: u64 = normalized_parts.iter().map(|b| b.len() as u64).sum();
         let mut upload = self.inner.put_multipart(&location).await?;
-        for chunk in parts {
+        for chunk in normalized_parts {
             upload.put_part(PutPayload::from(chunk)).await?;
         }
         let result = upload.complete().await?;

@@ -1,5 +1,6 @@
 """Tests for App route registration and handler ID stability."""
 
+import msgspec
 import pytest
 
 from vertebra.framework._app import App, HandlerInfo, _make_handler_id
@@ -118,8 +119,8 @@ def test_vertebra_app_route_registration_handlers_dict_populated() -> None:
         return "ok"
 
     expected_id = _make_handler_id("GET", "/test")
-    assert expected_id in app._handlers  # noqa: SLF001
-    assert app._handlers[expected_id] is test_handler  # noqa: SLF001
+    assert expected_id in app._handlers
+    assert app._handlers[expected_id] is test_handler
 
 
 def test_vertebra_app_route_registration_mount_records_sub_app() -> None:
@@ -142,8 +143,6 @@ def test_vertebra_app_route_registration_mount_with_protocol() -> None:
 
 
 def test_vertebra_app_route_registration_handler_info_is_msgspec_struct() -> None:
-    import msgspec
-
     assert issubclass(HandlerInfo, msgspec.Struct)
 
 

@@ -1,4 +1,4 @@
-"""Unit tests for vertebra.extensions.grpc @grpc_method, GrpcServiceRegistry, and _ProtobufSchemaGenerator."""
+"""Unit tests for vertebra.extensions.grpc @grpc_method, GrpcServiceRegistry, and ProtobufSchemaGenerator."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from vertebra.extensions.grpc import (
     GrpcContext,
     GrpcError,
     GrpcMethodKind,
-    GrpcRegistry,
     GrpcServiceRegistry,
     GrpcStatus,
     ProtobufSchemaGenerator,
@@ -20,10 +19,9 @@ from vertebra.extensions.grpc import (
     encode_lpm_frame,
     grpc_method,
 )
-from vertebra.extensions.grpc._decorator import _ProtobufSchemaGenerator
 
 
-class EchoRequest(msgspec.Struct):
+class EchoRequest(msgspec.Struct, gc=False):
     """Input message for unary and streaming echo RPCs."""
 
     message: str
@@ -32,7 +30,7 @@ class EchoRequest(msgspec.Struct):
     correlation_id: str | None = None
 
 
-class EchoResponse(msgspec.Struct):
+class EchoResponse(msgspec.Struct, gc=False):
     """Output message for unary and streaming echo RPCs."""
 
     reply: str
@@ -84,7 +82,6 @@ def test_grpc_method_introspects_all_four_streaming_kinds() -> None:
     assert echo_bidi_stream.__grpc_method__.kind is GrpcMethodKind.BIDI_STREAMING
     ctx = GrpcContext(peer="127.0.0.1:50051", metadata={"x-request-id": "req-1"})
     assert ctx.peer == "127.0.0.1:50051"
-    assert GrpcRegistry is GrpcServiceRegistry
 
 
 @pytest.mark.anyio
@@ -177,15 +174,14 @@ async def test_grpc_error_maps_to_trailers_status_and_percent_encoded_message() 
 
 
 def test_protobuf_schema_generator_emits_proto3_definitions() -> None:
-    """Verify _ProtobufSchemaGenerator renders syntax = proto3 messages and service RPCs."""
+    """Verify ProtobufSchemaGenerator renders syntax = proto3 messages and service RPCs."""
     registry = GrpcServiceRegistry()
     registry.register(echo_unary)
     registry.register(echo_server_stream)
     registry.register(echo_client_stream)
     registry.register(echo_bidi_stream)
 
-    generator = _ProtobufSchemaGenerator(package="vertebra.echo")
-    assert ProtobufSchemaGenerator is _ProtobufSchemaGenerator
+    generator = ProtobufSchemaGenerator(package="vertebra.echo")
     proto_text = generator.generate_from_registry(registry)
 
     assert 'syntax = "proto3";' in proto_text

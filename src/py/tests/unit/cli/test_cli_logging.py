@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from collections.abc import Generator
@@ -10,6 +9,7 @@ from collections.abc import Generator
 import pytest
 
 from vertebra.cli._logging import JsonFormatter, StructuredFormatter, configure_logging
+from vertebra.utils.serializers import decode_json
 
 
 @pytest.fixture(autouse=True)
@@ -49,7 +49,7 @@ def test_json_formatter_outputs_valid_json() -> None:
     fmt = JsonFormatter()
     record = logging.LogRecord("myapp", logging.ERROR, "", 0, "oops", (), None)
     output = fmt.format(record)
-    data = json.loads(output)
+    data = decode_json(output)
     assert data["level"] == "ERROR"
     assert data["logger"] == "myapp"
     assert data["msg"] == "oops"
@@ -65,7 +65,7 @@ def test_json_formatter_includes_exception() -> None:
     except ValueError:
         record = logging.LogRecord("x", logging.ERROR, "", 0, "failed", (), sys.exc_info())
     output = fmt.format(record)
-    data = json.loads(output)
+    data = decode_json(output)
     assert "exception" in data
     assert "ValueError" in data["exception"]
 

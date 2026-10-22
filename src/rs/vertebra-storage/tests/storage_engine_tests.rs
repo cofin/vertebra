@@ -1,9 +1,14 @@
+use _storage::oci::{
+    EMPTY_BODY_SHA256_BASE64, OciCavageCredentials, R2_UNIFORM_PART_SIZE, chunk_uniform_parts,
+    sha256_base64, sign_oci_cavage_request,
+};
 use _storage::signing::{
-    GcsSignConfig, HmacSigner, S3SignConfig, sign_gcs_v4_with_iam_endpoint, sign_s3_v4_url,
-    verify_s3_v4_url,
+    AzureSasConfig, GcsSignConfig, HmacSigner, S3SignConfig, sign_azure_sas_url,
+    sign_gcs_v4_with_iam_endpoint, sign_s3_v4_url, verify_s3_v4_url,
 };
 use _storage::store::{BackendConfig, ObjectStoreEngine};
 use bytes::Bytes;
+use std::collections::HashMap;
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -163,4 +168,182 @@ async fn test_gcs_v4_keyless_iam_signblob_fallback() {
     assert!(url.contains("X-Goog-Algorithm=GOOG4-RSA-SHA256"));
     assert!(url.contains("X-Goog-Signature=646561646265656663616665"));
     server.await.expect("mock server task");
+}
+
+#[test]
+fn test_r2_uniform_part_chunking_and_azure_sas_signing() {
+    let payload = Bytes::from(vec![b'a'; R2_UNIFORM_PART_SIZE * 2 + 1234]);
+    let parts = chunk_uniform_parts(payload, R2_UNIFORM_PART_SIZE);
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0].len(), R2_UNIFORM_PART_SIZE);
+    assert_eq!(parts[1].len(), R2_UNIFORM_PART_SIZE);
+    assert_eq!(parts[2].len(), 1234);
+
+    let sas_cfg = AzureSasConfig {
+        account: "devstoreaccount1".to_string(),
+        container: "datasets".to_string(),
+        access_key_b64:
+            "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+                .to_string(),
+        endpoint: Some("http://127.0.0.1:4577/devstoreaccount1".to_string()),
+    };
+    let sas_url = sign_azure_sas_url(
+        &sas_cfg,
+        "GET",
+        "parquet/part-0.parquet",
+        3600,
+        1_700_000_000,
+    )
+    .expect("azure sas url");
+    assert!(sas_url.contains("sv=2020-12-06"));
+    assert!(sas_url.contains("sp=r"));
+    assert!(sas_url.contains("sig="));
+}
+
+#[tokio::test]
+async fn test_oci_cavage_signing_and_native_rest_v2_crud() {
+    let pem = concat!(
+        "-----BEGIN PRIVATE KEY-----\n",
+        "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDJTl8KiBfisWRw\n",
+        "nP4tfbLiOa0io1rTfTen2IIYQgek3ET1isNNTWqeWSaD8mzOrVlLZlAaDZopzq4Z\n",
+        "jzLNq9uwIDWPuCzZIVMIAGDpcI+cAuofDs9FGRh3x5fO78Z0ch4tfwAh3SZpcu4P\n",
+        "LqPpU1FwvhfHftK5UdM0LHW57xhPPzu+lfVuBH8fRULmrqQJvDpcwb0QZtHCTs/z\n",
+        "VWbLGhl1XCLUEI/95CnOVctJHeckgJL5chUXxDoXpZGyFfv8qz832BgO3LN7Hnn1\n",
+        "w9gLsidb94Bmq/kA49esiXDECgcBSRgZmpYSOZOwibU9RI3nFtNGb6IpGiXhiqI9\n",
+        "ci5V3jtFAgMBAAECggEAAN/7ltGaSqh3xdB5tUlUQiEjhMQTGTHm+N2tuCA4FH8k\n",
+        "zL4XILBbjhAAgB2uQNvrY290Frm94gA2s5s2CpRGiTdT4pWABoGRTz1HE5r6sJls\n",
+        "v7SLgn96ekW+i2DCW9gMZOXOhDw3F/9/q3yXWwzjjKyhyFpLSQNVnBXqb5m1lwXy\n",
+        "M9Eej90qFDr3Or+Y+Met0LEvt3E+tYuPjVlLTmQFjZOTCB/Kqudq3mkUG8G9cV6Y\n",
+        "YNN+RXjsHj7xsL3Rp+V6vua3B3hWjSnsqpl1u0CD0fBDOrbie2yCmK4n7C/0Hi7H\n",
+        "wwZoSGXR+y0hdMEXuZXX0iXjv3pFBvr7+RQwxWggAQKBgQDo8f2xFAUIUVH7t6Rm\n",
+        "nSN2XbVqOl2vdR47yoYS5HOxjgQtmgMqHQ4eusVIVirSStyGMs49ZtVGiL4cYqxs\n",
+        "vECXDHyiL3dPCcSS8MkzYcGv5QjXsuQLHvp4my2REWNB9RVCADslTIetMEFoFm0T\n",
+        "GvQz+RMvyJoGZl26mchwFGldRQKBgQDdOsGlqtjSc+TQ5q5YtZ0+phIzPZ1usbN4\n",
+        "qdjEYp5SCGNU2/AFayqKSPgD/ulMtdiXzA2qK4I9h5xmRE/A/FJVhW66S29+6CAP\n",
+        "/EGtfAYdFozsaZpjxCpYszagGVBnvViv9Y4KWUeyhN1lwfkbTLZ0jIiICt4Vp3Ci\n",
+        "5k6Vp2RGAQKBgA/6IQtXMy0p3rSkGNuM5ZTFwp6hmDFjmApDzsRW9PR1qCW0jYkC\n",
+        "6ygCaWuXtWItDkkKDQk7F1+6G0f5IJhopQl3Ksk49jbulZP6feJPTyiQTfX1aBy3\n",
+        "KDjDc/GiPquUcrvPJj9dq2Seja3k8+A+lgdGiyFY4e+Ub9NPnubJD5z9AoGBALeA\n",
+        "2kmpykne2eixv+JTWwgxRp18OU8tVTn8YJKdXsear5IfERvdhZ7I4fimhCweFnfr\n",
+        "SVZi2phhGUj21tS0NzM7B9q9YdF5h8barjvRyVxtbR1YhzjD6YBDv0bTWI+ETsE9\n",
+        "xMEuxzr73I1gdVnAqwNH4qQ9p3N8vQBSWtLl01YBAoGBAND7MuyVNdG+9pGItdFt\n",
+        "k9pz3Vc9t+8Fn31K9HldC9ejmnBapfkgwLdJemLQaqAs6tkbG2ajlCqv7Y4ZAARc\n",
+        "qkcDJbfy9jP/h7kvb/UNP21SxDscrKTAczxEm7PiTk3HPNOwx3/N6tPc+5HhR8LR\n",
+        "8OwWavCVE6HreFLFfrEAgSgF\n",
+        "-----END PRIVATE KEY-----\n"
+    )
+    .to_string();
+
+    let creds = OciCavageCredentials {
+        tenancy_ocid: "ocid1.tenancy.oc1..aaaa".to_string(),
+        user_ocid: "ocid1.user.oc1..bbbb".to_string(),
+        fingerprint: "12:34:56:78:90:ab:cd:ef".to_string(),
+        private_key_pem: pem.clone(),
+    };
+
+    assert_eq!(sha256_base64(&[]), EMPTY_BODY_SHA256_BASE64);
+    let get_headers = sign_oci_cavage_request(
+        &creds,
+        "GET",
+        "https://objectstorage.us-ashburn-1.oraclecloud.com/n/myns/b/mybucket/o/file.parquet",
+        None,
+        None,
+        1_700_000_000,
+    )
+    .expect("sign OCI GET");
+    assert!(
+        get_headers
+            .authorization
+            .contains("headers=\"(request-target) date host\"")
+    );
+    assert!(get_headers.x_content_sha256.is_none());
+
+    let empty_post_headers = sign_oci_cavage_request(
+        &creds,
+        "POST",
+        "https://objectstorage.us-ashburn-1.oraclecloud.com/n/myns/b/mybucket/u",
+        Some(&[]),
+        Some("application/json"),
+        1_700_000_000,
+    )
+    .expect("sign OCI 0-byte POST");
+    assert_eq!(
+        empty_post_headers.x_content_sha256.as_deref(),
+        Some(EMPTY_BODY_SHA256_BASE64)
+    );
+    assert!(empty_post_headers.authorization.contains(
+        "headers=\"(request-target) date host x-content-sha256 content-type content-length\""
+    ));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock oci server");
+    let addr = listener.local_addr().expect("local addr");
+
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for step in 0..3 {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let req_str = String::from_utf8_lossy(&buf[..n]);
+                assert!(
+                    req_str.contains("authorization: Signature version=\"1\"")
+                        || req_str.contains("Authorization: Signature version=\"1\"")
+                );
+                let resp = match step {
+                    0 => {
+                        assert!(req_str.starts_with("PUT /n/myns/b/mybucket/o/"));
+                        "HTTP/1.1 200 OK\r\netag: \"oci-etag-1\"\r\nopc-version-id: v1\r\nContent-Length: 0\r\n\r\n".to_string()
+                    }
+                    1 => {
+                        assert!(req_str.starts_with("GET /n/myns/b/mybucket/o/"));
+                        let body = "oci-native-rest-v2-payload";
+                        format!(
+                            "HTTP/1.1 200 OK\r\netag: \"oci-etag-1\"\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    }
+                    _ => {
+                        assert!(req_str.starts_with("GET /n/myns/b/mybucket/o?"));
+                        let body = r#"{"objects":[{"name":"datasets/test.bin","size":26,"etag":"oci-etag-1"}]}"#;
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    }
+                };
+                let _ = socket.write_all(resp.as_bytes()).await;
+            }
+        }
+    });
+
+    let mut opts = HashMap::new();
+    opts.insert("endpoint".to_string(), format!("http://{addr}"));
+    opts.insert("tenancy_ocid".to_string(), creds.tenancy_ocid);
+    opts.insert("user_ocid".to_string(), creds.user_ocid);
+    opts.insert("fingerprint".to_string(), creds.fingerprint);
+    opts.insert("private_key_pem".to_string(), pem);
+
+    let engine =
+        ObjectStoreEngine::from_url("oci://mybucket@myns", Some(&opts)).expect("build OCI engine");
+    let put_meta = engine
+        .put(
+            "datasets/test.bin",
+            Bytes::from_static(b"oci-native-rest-v2-payload"),
+        )
+        .await
+        .expect("OCI put");
+    assert_eq!(put_meta.etag.as_deref(), Some("\"oci-etag-1\""));
+
+    let fetched = engine.get("datasets/test.bin").await.expect("OCI get");
+    assert_eq!(&fetched[..], b"oci-native-rest-v2-payload");
+
+    let listed = engine.list(Some("datasets")).await.expect("OCI list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path, "datasets/test.bin");
+
+    server.await.expect("join mock oci server");
 }

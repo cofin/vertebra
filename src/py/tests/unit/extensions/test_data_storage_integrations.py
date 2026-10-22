@@ -1,29 +1,28 @@
-"""Unit tests for SQLSpec and Advanced Alchemy storage adapters and plugins."""
+"""Unit tests for SQLSpec and Alchemy storage adapters and plugins."""
 
 from pathlib import Path
 
 import pytest
 
 from vertebra.extensions.alchemy import (
-    AA_STATE_KEY,
-    AlchemyFileAttachment,
+    AlchemyPlugin,
+    FileAttachment,
+    ObjectStoreBackend,
     SQLAlchemyState,
-    VertebraAlchemyPlugin,
-    VertebraAlchemyStorageBackend,
 )
 from vertebra.extensions.sqlspec import (
     SQLSPEC_STATE_KEY,
+    SQLSpecPlugin,
     SQLSpecState,
+    SQLSpecStore,
     StreamingStorageResponse,
-    VertebraSQLSpecPlugin,
-    VertebraSQLSpecStorageAdapter,
 )
-from vertebra.storage import SigningConfig, VertebraStore
+from vertebra.storage import ObjectStore, SigningConfig
 
 
 def test_sqlspec_storage_adapter_crud_jsonl_arrow_parquet_and_streaming() -> None:
-    """Verify SQLSpec storage CRUD, globbing, JSONL, Arrow IPC, Parquet export, and chunked HTTP streaming."""
-    store = VertebraStore(
+    """Verify SQLSpecStore CRUD, globbing, JSONL, Arrow IPC, Parquet export, and chunked HTTP streaming."""
+    store = ObjectStore(
         "memory://",
         signing=SigningConfig(
             provider="hmac",
@@ -31,7 +30,7 @@ def test_sqlspec_storage_adapter_crud_jsonl_arrow_parquet_and_streaming() -> Non
             endpoint="https://exports.example.com",
         ),
     )
-    adapter = VertebraSQLSpecStorageAdapter(store, prefix="warehouse")
+    adapter = SQLSpecStore(store, prefix="warehouse")
 
     adapter.write_bytes("raw/payload.bin", memoryview(b"0123456789abcdef"))
     assert adapter.exists("raw/payload.bin")
@@ -76,9 +75,9 @@ def test_sqlspec_storage_adapter_crud_jsonl_arrow_parquet_and_streaming() -> Non
 
 @pytest.mark.anyio
 async def test_sqlspec_storage_adapter_async_and_plugin() -> None:
-    """Verify async SQLSpec storage methods, async chunk streaming, and VertebraSQLSpecPlugin initialization."""
-    store = VertebraStore("memory://")
-    adapter = VertebraSQLSpecStorageAdapter(store, prefix="async_lake")
+    """Verify async SQLSpecStore methods, async chunk streaming, and SQLSpecPlugin initialization."""
+    store = ObjectStore("memory://")
+    adapter = SQLSpecStore(store, prefix="async_lake")
 
     await adapter.write_bytes_async("events/batch.bin", b"async-batch-bytes")
     assert await adapter.exists_async("events/batch.bin")
@@ -93,7 +92,7 @@ async def test_sqlspec_storage_adapter_async_and_plugin() -> None:
     await adapter.delete_async("events/batch.bin")
     assert not await adapter.exists_async("events/batch.bin")
 
-    plugin = VertebraSQLSpecPlugin(store=store, storage_prefix="lake")
+    plugin: SQLSpecPlugin[object] = SQLSpecPlugin(store=store, storage_prefix="lake")
     app_state: dict[str, object] = {}
     state = plugin.install_state(app_state)
     assert isinstance(state, SQLSpecState)
@@ -103,8 +102,8 @@ async def test_sqlspec_storage_adapter_async_and_plugin() -> None:
 
 @pytest.mark.anyio
 async def test_alchemy_storage_backend_and_plugin(tmp_path: Path) -> None:
-    """Verify VertebraAlchemyStorageBackend sync/async save, get, delete, sign, and plugin state registration."""
-    store = VertebraStore(
+    """Verify ObjectStoreBackend sync/async save, get, delete, sign, and AlchemyPlugin state registration."""
+    store = ObjectStore(
         f"file://{tmp_path}",
         signing=SigningConfig(
             provider="hmac",
@@ -112,9 +111,9 @@ async def test_alchemy_storage_backend_and_plugin(tmp_path: Path) -> None:
             endpoint="https://attachments.example.com",
         ),
     )
-    backend = VertebraAlchemyStorageBackend(key="attachments", store=store, prefix="uploads")
+    backend = ObjectStoreBackend(key="attachments", store=store, prefix="uploads")
 
-    attachment = AlchemyFileAttachment(path="users/42/avatar.png", content_type="image/png")
+    attachment = FileAttachment(path="users/42/avatar.png", content_type="image/png")
     saved = backend.save_object(attachment, b"\x89PNG\r\n\x1a\nfake-image")
     assert saved.size == 18
     assert saved.etag is not None
@@ -123,23 +122,25 @@ async def test_alchemy_storage_backend_and_plugin(tmp_path: Path) -> None:
     signed_url = backend.sign_object_url("users/42/avatar.png", expires_in_secs=1200, timestamp=1_700_000_000)
     assert "X-Vtb-Signature=" in signed_url
 
-    async_att = AlchemyFileAttachment(path="users/42/report.pdf", content_type="application/pdf")
+    async_att = FileAttachment(path="users/42/report.pdf", content_type="application/pdf")
     await backend.save_object_async(async_att, memoryview(b"%PDF-1.7-async-content"))
     assert async_att.size == 22
     assert await backend.get_content_async("users/42/report.pdf") == b"%PDF-1.7-async-content"
 
     source_file = tmp_path / "source_doc.txt"
     source_file.write_bytes(b"path-based-async-upload")
-    path_att = AlchemyFileAttachment(path="users/42/source_doc.txt", content_type="text/plain")
+    path_att = FileAttachment(path="users/42/source_doc.txt", content_type="text/plain")
     await backend.save_object_async(path_att, source_file)
     assert path_att.size == 23
     assert await backend.get_content_async("users/42/source_doc.txt") == b"path-based-async-upload"
 
     class _AsyncReadable:
+        __slots__ = ()
+
         async def read(self) -> bytes:
             return b"awaitable-read-stream"
 
-    stream_att = AlchemyFileAttachment(path="users/42/stream.bin")
+    stream_att = FileAttachment(path="users/42/stream.bin")
     await backend.save_object_async(stream_att, _AsyncReadable())
     assert stream_att.size == 21
     assert await backend.get_content_async("users/42/stream.bin") == b"awaitable-read-stream"
@@ -147,9 +148,9 @@ async def test_alchemy_storage_backend_and_plugin(tmp_path: Path) -> None:
     backend.delete_object("users/42/avatar.png")
     await backend.delete_object_async(["users/42/report.pdf", "users/42/source_doc.txt", "users/42/stream.bin"])
 
-    plugin = VertebraAlchemyPlugin(store=store, storage_key="attachments")
+    plugin: AlchemyPlugin[object] = AlchemyPlugin(store=store, storage_key="attachments")
     app_state: dict[str, object] = {}
     alchemy_state = plugin.install_state(app_state)
     assert isinstance(alchemy_state, SQLAlchemyState)
-    assert app_state[AA_STATE_KEY] is alchemy_state
-    assert isinstance(alchemy_state.storage_backend, VertebraAlchemyStorageBackend)
+    assert app_state[AlchemyPlugin.STATE_KEY] is alchemy_state
+    assert isinstance(alchemy_state.storage_backend, ObjectStoreBackend)

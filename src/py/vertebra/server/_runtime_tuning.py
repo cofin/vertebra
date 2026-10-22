@@ -10,11 +10,14 @@ import sys
 import threading
 from typing import TYPE_CHECKING, Any
 
+from vertebra.server._gil_audit import GilAuditReport
+
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Iterable
 
 __all__ = (
     "AsgiEventLoopPool",
+    "GilAuditReport",
     "configure_worker_affinity",
     "is_free_threaded",
 )
@@ -23,7 +26,9 @@ __all__ = (
 def is_free_threaded() -> bool:
     """Return True when running on a free-threaded Python interpreter with the GIL disabled."""
     checker = getattr(sys, "_is_gil_enabled", None)
-    return bool(checker is not None and not checker())
+    if checker is not None:
+        return not bool(checker())
+    return GilAuditReport.is_free_threaded_build()
 
 
 def configure_worker_affinity(worker_index: int, *, enable_pinning: bool = False) -> bool:
@@ -76,6 +81,11 @@ class AsgiEventLoopPool:
     def size(self) -> int:
         """Return the number of event loop shards in the pool."""
         return self._size
+
+    @property
+    def loops(self) -> tuple[asyncio.AbstractEventLoop, ...]:
+        """Return all event loop shards in the pool."""
+        return tuple(self._loops)
 
     @property
     def loop(self) -> asyncio.AbstractEventLoop:

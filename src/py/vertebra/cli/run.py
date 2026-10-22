@@ -1,5 +1,6 @@
 """Run command."""
 
+import asyncio
 import os
 import sys
 import tomllib
@@ -8,11 +9,14 @@ from typing import Any
 
 import click
 
-from vertebra.builder._config import BuildConfig
+from vertebra.build import BuildConfig
 from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
+from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
+from vertebra.extensions.worker.runner import WorkerRunner
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
+from vertebra.utils.module_loader import import_app
 from vertebra.utils.serializers import decode_json
 
 __all__ = ("load_config", "run")
@@ -43,6 +47,17 @@ __all__ = ("load_config", "run")
 )
 @click.option("--tls-cert", type=click.Path(exists=True), help="Path to PEM certificate for HTTPS")
 @click.option("--tls-key", type=click.Path(exists=True), help="Path to PEM private key for HTTPS")
+@click.option(
+    "--worker-only",
+    is_flag=True,
+    default=False,
+    help="Run background worker lanes with health probes only",
+)
+@click.option(
+    "--oneshot-job",
+    default=None,
+    help="Execute a single registered job inside the app lifespan and exit",
+)
 @click.option("--no-banner", is_flag=True, help="Disable startup banner")
 def run(
     app: str,
@@ -59,10 +74,15 @@ def run(
     interface: str,
     tls_cert: str | None,
     tls_key: str | None,
+    worker_only: bool,
+    oneshot_job: str | None,
     no_banner: bool,
 ) -> None:
     """Run the Vertebra server."""
     configure_logging(level=log_level, mode="prod")
+
+    if oneshot_job:
+        sys.exit(_execute_oneshot_cli(app, oneshot_job))
 
     if workers is None:
         workers = 1 if topology.lower() == "shm" else 0
@@ -72,6 +92,7 @@ def run(
 
     env = os.environ.copy()
     env["VERTEBRA_APP"] = app
+    env["LITESTAR_APP"] = app
     env["VERTEBRA_PYTHON_BIN"] = sys.executable
 
     cwd = os.getcwd()
@@ -86,12 +107,16 @@ def run(
     resolved_interface = "asgi" if asgi and interface.lower() == "auto" else interface.lower()
     env["VERTEBRA_INTERFACE"] = resolved_interface
     env["VERTEBRA_NATIVE"] = "0" if asgi else "1"
+    env["VERTEBRA_WORKER_ONLY"] = "1" if worker_only else "0"
 
     if tls_cert and tls_key:
         env["VERTEBRA_TLS_CERT"] = str(Path(tls_cert).resolve())
         env["VERTEBRA_TLS_KEY"] = str(Path(tls_key).resolve())
     elif tls_cert or tls_key:
-        raise CLIError("Both --tls-cert and --tls-key must be provided together", exit_code=EXIT_CONFIG_ERROR)
+        raise CLIError(
+            "Both --tls-cert and --tls-key must be provided together",
+            exit_code=EXIT_CONFIG_ERROR,
+        )
 
     static_dir = _resolve_static_dir(Path.cwd())
     if static_dir:
@@ -105,7 +130,9 @@ def run(
         server_cmd = build_server_command()
     except SystemExit as e:
         raise CLIError(
-            str(e), hint="Ensure vertebra-server binary is available/built.", exit_code=EXIT_CONFIG_ERROR
+            str(e),
+            hint="Ensure vertebra-server binary is available/built.",
+            exit_code=EXIT_CONFIG_ERROR,
         ) from e
 
     if not no_banner:
@@ -133,6 +160,15 @@ def load_config(path: Path) -> dict[str, Any]:
         return data
     msg = f"Unsupported config format: {path.suffix}"
     raise ValueError(msg)
+
+
+def _execute_oneshot_cli(app_path: str, job_name: str) -> int:
+    """Import app_path, enter its server lifespan, and execute a single named oneshot job."""
+    os.environ["LITESTAR_APP"] = app_path
+    os.environ["VERTEBRA_APP"] = app_path
+    target_app = import_app(app_path)
+    with enter_litestar_server_lifespan(target_app, app_path=app_path):
+        return asyncio.run(WorkerRunner.run_oneshot(target_app, job_name))
 
 
 def _resolve_static_dir(project_dir: Path) -> Path | None:

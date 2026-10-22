@@ -1,26 +1,8 @@
-"""AsgiRunner: integrates AsgiAdapter with the native batch runner.
-
-Request dispatch has two paths:
-
-- **Direct coroutine driver** (default): call ``coro.send(None)`` directly and
-  chain a :class:`_CoroResumer` as a ``future.add_done_callback`` on each
-  yielded future. Skips the ``asyncio.Task`` object entirely for coroutines
-  that complete synchronously via ``PyIterAwaitable`` (or any other
-  short-circuit), saving the per-request Task allocation and tracking cost.
-
-- **Task fallback**: the original ``loop.create_task(coro)`` path. Selected
-  when ``VERTEBRA_ASGI_DIRECT_SEND`` is set to ``0``/``false``, or when the
-  request dispatch is running on a non-asyncio scheduler (which owns its
-  own spawn policy).
-
-``asyncio.current_task()`` returns ``None`` inside the direct driver because
-no Task wrapper exists. Middleware or tracing libraries that walk task
-context should either be written to tolerate ``None`` or the operator
-should flip ``VERTEBRA_ASGI_DIRECT_SEND=0`` to fall back to the Task path.
-"""
+"""AsgiRunner: integrates AsgiAdapter with the native batch runner."""
 
 import asyncio
 import contextlib
+import importlib
 import logging
 import os
 from collections.abc import Iterable
@@ -195,38 +177,6 @@ class AsgiRunner:
         return _dispatch()
 
 
-class _CoroResumer:
-    """Callback target for ``add_done_callback`` that resumes a coroutine on future completion."""
-
-    __slots__ = ("_coro",)
-
-    def __init__(self, coro: Any) -> None:
-        self._coro = coro
-
-    def __call__(self, fut: Any) -> None:
-        coro = self._coro
-        try:
-            exc = fut.exception()
-        except asyncio.CancelledError:
-            try:
-                yielded = coro.throw(asyncio.CancelledError())
-            except StopIteration:
-                return
-            except BaseException:
-                log.exception("coroutine raised after cancellation")
-                return
-        else:
-            try:
-                yielded = coro.throw(type(exc), exc, exc.__traceback__) if exc is not None else coro.send(fut.result())
-            except StopIteration:
-                return
-            except BaseException:
-                log.exception("coroutine raised unhandled exception")
-                return
-
-        _handle_yielded(coro, yielded)
-
-
 class _BatchProcessor:
     """Single callable that drives many coroutines under one event-loop wake."""
 
@@ -244,9 +194,8 @@ def _ensure_ffi() -> tuple[Any, Any]:
     """Return the native Response class and submit_response function."""
     if _NativeResponse is not None and _native_submit_response is not None:
         return _NativeResponse, _native_submit_response
-    from vertebra._vertebra import Response, submit_response
-
-    return Response, submit_response
+    mod = importlib.import_module("vertebra._vertebra")
+    return mod.Response, mod.submit_response
 
 
 def _current_loop() -> asyncio.AbstractEventLoop | None:
@@ -259,24 +208,53 @@ def _current_loop() -> asyncio.AbstractEventLoop | None:
         return None
 
 
+async def _resume_coro_in_task(coro: Any, initial_yielded: Any) -> None:
+    """Drive a yielded coroutine to completion inside a real asyncio.Task so anyio task groups work."""
+    yielded = initial_yielded
+    while True:
+        try:
+            if yielded is None:
+                await asyncio.sleep(0)
+                send_val = None
+            elif hasattr(yielded, "__await__") or asyncio.isfuture(yielded):
+                send_val = await yielded
+            else:
+                send_val = None
+        except asyncio.CancelledError as exc:
+            try:
+                yielded = coro.throw(exc)
+            except StopIteration:
+                return
+            except BaseException:
+                log.exception("coroutine raised after cancellation")
+                return
+        except BaseException as exc:
+            try:
+                yielded = coro.throw(type(exc), exc, exc.__traceback__)
+            except StopIteration:
+                return
+            except BaseException:
+                log.exception("coroutine raised unhandled exception")
+                return
+        else:
+            try:
+                yielded = coro.send(send_val)
+            except StopIteration:
+                return
+            except BaseException:
+                log.exception("coroutine raised unhandled exception")
+                return
+
+
 def _handle_yielded(coro: Any, yielded: Any) -> None:
-    """Route whatever a coroutine yielded into the appropriate continuation."""
-    if yielded is None:
-        loop = _current_loop()
-        if loop is not None:
-            loop.call_soon(_step_coro, coro)
-        return
-    add_cb = getattr(yielded, "add_done_callback", None)
-    if add_cb is None:
-        loop = _current_loop()
-        if loop is not None:
-            loop.create_task(_wrap_remainder(coro, yielded))
-        return
-    add_cb(_CoroResumer(coro))
+    """Promote a yielded coroutine into an asyncio.Task on the active event loop."""
+    loop = _current_loop()
+    if loop is not None:
+        loop.create_task(_resume_coro_in_task(coro, yielded))
 
 
 def _step_coro(coro: Any, value: Any = None) -> None:
-    """Send ``value`` into the coroutine and dispatch whatever it yields."""
+    """Send value into the coroutine once; if it yields, promote it to an asyncio.Task."""
     try:
         yielded = coro.send(value)
     except StopIteration:
@@ -287,15 +265,6 @@ def _step_coro(coro: Any, value: Any = None) -> None:
     _handle_yielded(coro, yielded)
 
 
-async def _wrap_remainder(coro: Any, yielded: Any) -> None:
-    """Turn an unexpected non-future yield into an awaited step."""
-    try:
-        value = await yielded
-        _step_coro(coro, value)
-    except BaseException:
-        log.exception("coroutine raised in remainder wrap")
-
-
 def _drive_coro(coro: Any) -> None:
-    """Step a coroutine once and attach a resumer on any yielded future."""
+    """Step a coroutine once and promote to an asyncio.Task if it suspends."""
     _step_coro(coro)

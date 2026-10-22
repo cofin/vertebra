@@ -8,6 +8,8 @@ from vertebra.utils.serializers._json import (
     decode_json,
     encode_json,
     encode_json_bytes,
+    encode_json_into,
+    format_json,
 )
 from vertebra.utils.serializers._numpy import (
     numpy_array_dec_hook,
@@ -29,6 +31,8 @@ __all__ = (
     "decode_json",
     "encode_json",
     "encode_json_bytes",
+    "encode_json_into",
+    "format_json",
     "get_collection_serializer",
     "get_serializer_metrics",
     "numpy_array_dec_hook",

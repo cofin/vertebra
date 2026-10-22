@@ -7,6 +7,7 @@
 
 mod bundler;
 mod config;
+mod dts;
 mod errors;
 mod hmr;
 mod ssr;
@@ -15,8 +16,9 @@ use pyo3::prelude::*;
 
 pub use bundler::Bundler;
 pub use config::{BuildResult, BundleConfig, DevConfig, OutputFile};
+pub use dts::{IsolatedDeclarationsGenerator, encode_ssr_worker_frame, minify_css};
 pub use errors::BundlerError;
-pub use hmr::{HmrEvent, SourceWatcher};
+pub use hmr::{HmrEvent, PySourceWatcher, SourceWatcher};
 pub use ssr::{SsrPool, SsrResult};
 
 /// Python module definition
@@ -28,5 +30,11 @@ fn _bundler(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DevConfig>()?;
     m.add_class::<BuildResult>()?;
     m.add_class::<OutputFile>()?;
+    m.add_class::<PySourceWatcher>()?;
+    m.add_class::<SsrPool>()?;
+    m.add_class::<SsrResult>()?;
+    m.add_class::<IsolatedDeclarationsGenerator>()?;
+    m.add_function(wrap_pyfunction!(minify_css, m)?)?;
+    m.add_function(wrap_pyfunction!(encode_ssr_worker_frame, m)?)?;
     Ok(())
 }

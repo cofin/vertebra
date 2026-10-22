@@ -1,27 +1,82 @@
-"""Single-binary standalone and onefile packaging suite for Vertebra."""
+"""Unified build orchestrator, multi-target codegen, and standalone/onefile packaging for Vertebra."""
 
-from vertebra.build.onefile import (
+from vertebra.build import codegen, packaging
+from vertebra.build._config import BuildConfig, JsConfig
+from vertebra.build._fallback import DevServerProcess, run_vite_build
+from vertebra.build._import_map import ImportMapGenerator
+from vertebra.build._orchestrator import BuildOrchestrator
+from vertebra.build.codegen import (
+    CODEGEN_STATE_KEY,
+    CodegenConfig,
+    CodegenPlugin,
+    CodegenWatcher,
+    HmrEventRouter,
+    HmrNotifier,
+    ManifestGenerator,
+    OpenAPIGenerator,
+    ProcedureClientGenerator,
+    ProcedureInfo,
+    ProcedureParam,
+    ProcedureRegistry,
+    ProtobufGenerator,
+    RouteCollector,
+    RouteMetadata,
+    TypeExtractor,
+    TypeScriptGenerator,
+    ValibotGenerator,
+    ZodGenerator,
+    format_typescript,
+    get_procedure_registry,
+    procedure,
+)
+from vertebra.build.packaging import (
+    KNOWN_TARGETS,
     ONEFILE_MAGIC,
     ONEFILE_TRAILER_SIZE,
-    OnefileBuilder,
-)
-from vertebra.build.standalone import StandaloneBuilder
-from vertebra.build.targets import (
-    KNOWN_TARGETS,
     PBS_BASE_URL,
     PBS_RELEASE_TAG,
-    BuildTargetTuple,
-    resolve_build_target,
+    BuildTarget,
+    OnefileBuilder,
+    StandaloneBuilder,
 )
 
 __all__ = (
+    "CODEGEN_STATE_KEY",
     "KNOWN_TARGETS",
     "ONEFILE_MAGIC",
     "ONEFILE_TRAILER_SIZE",
     "PBS_BASE_URL",
     "PBS_RELEASE_TAG",
-    "BuildTargetTuple",
+    "BuildConfig",
+    "BuildOrchestrator",
+    "BuildTarget",
+    "CodegenConfig",
+    "CodegenPlugin",
+    "CodegenWatcher",
+    "DevServerProcess",
+    "HmrEventRouter",
+    "HmrNotifier",
+    "ImportMapGenerator",
+    "JsConfig",
+    "ManifestGenerator",
     "OnefileBuilder",
+    "OpenAPIGenerator",
+    "ProcedureClientGenerator",
+    "ProcedureInfo",
+    "ProcedureParam",
+    "ProcedureRegistry",
+    "ProtobufGenerator",
+    "RouteCollector",
+    "RouteMetadata",
     "StandaloneBuilder",
-    "resolve_build_target",
+    "TypeExtractor",
+    "TypeScriptGenerator",
+    "ValibotGenerator",
+    "ZodGenerator",
+    "codegen",
+    "format_typescript",
+    "get_procedure_registry",
+    "packaging",
+    "procedure",
+    "run_vite_build",
 )

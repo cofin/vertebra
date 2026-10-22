@@ -1,60 +1,86 @@
 ---
 type: Guide
 title: "Request Batching, Dispatch & Backpressure"
-description: "Dual-path VertebraBody, 8-shard RequestBatcher, adaptive BatchPolicy, Dispatcher modes, 256-shard PendingRequests, and BackpressureController."
+description: "How matched requests flow through RequestBatcher tasks, BatchPolicy, the three Dispatcher modes, in-flight correlation, the SHM response reader, and BackpressureController admission."
 status: stable
-tags: [architecture, http, batching, dispatch, streaming, backpressure]
+tags: [architecture, http, batching, dispatch, backpressure]
 sources:
   - resource: src/rs/vertebra-http/src/response.rs
-  - resource: src/rs/vertebra-http/src/response_reader.rs
   - resource: src/rs/vertebra-http/src/collector.rs
   - resource: src/rs/vertebra-http/src/policy.rs
   - resource: src/rs/vertebra-http/src/dispatcher/mod.rs
   - resource: src/rs/vertebra-http/src/dispatcher/direct.rs
   - resource: src/rs/vertebra-http/src/dispatcher/bridge.rs
   - resource: src/rs/vertebra-http/src/dispatcher/shm.rs
+  - resource: src/rs/vertebra-http/src/dispatcher/types.rs
   - resource: src/rs/vertebra-http/src/correlation.rs
+  - resource: src/rs/vertebra-http/src/response_reader.rs
   - resource: src/rs/vertebra-http/src/backpressure.rs
-  - resource: src/rs/vertebra-http/src/sse.rs
-  - resource: src/rs/vertebra-http/src/ws_mount.rs
-  - resource: src/rs/vertebra-http/src/pubsub.rs
-  - resource: src/py/vertebra/server/_asgi/_sse.py
-  - resource: src/py/vertebra/server/_asgi/_websocket.py
+  - resource: src/rs/vertebra-http/src/main.rs
 ---
 
 # Request Batching, Dispatch & Backpressure
 
-Dynamic requests matched by `Router` pass through [`BackpressureController`](../../../../../src/rs/vertebra-http/src/backpressure.rs), [`RequestBatcher`](../../../../../src/rs/vertebra-http/src/collector.rs), and [`Dispatcher`](../../../../../src/rs/vertebra-http/src/dispatcher/mod.rs) to amortize IPC and GIL acquisition across concurrent connections while supporting both unary and multi-frame streaming responses via [`VertebraBody`](../../../../../src/rs/vertebra-http/src/response.rs).
+After [`response::handle`](../../../../../src/rs/vertebra-http/src/response.rs) admits and routes a request (see [HTTP Ingress](ingress-and-routing.md)), it sends a `PendingRequest` to one of the `RequestBatcher` tasks and awaits a `oneshot` reply. Batchers group requests and hand each batch to the [`Dispatcher`](../../../../../src/rs/vertebra-http/src/dispatcher/mod.rs), which moves it to Python workers and routes responses back.
 
 ```mermaid
 flowchart LR
-    Conn["Hyper Connection Task"] --> BP["BackpressureController"]
-    BP --> Batcher["RequestBatcher (8 Shards)"]
-    Batcher -->|"BatchPolicy Trigger"| Disp["Dispatcher"]
-    Disp -->|"Direct / Bridge"| PyBridge["BatchBridge (Embedded)"]
-    Disp -->|"SharedMemory"| ShmDisp["ShmDispatcher + PendingRequests (256 Shards)"]
+    Handle["response::handle"] --> BP["BackpressureController"]
+    BP --> Router["Router::lookup"]
+    Router --> Batcher["RequestBatcher tasks (8 in main.rs)"]
+    Batcher --> Disp["Dispatcher"]
+    Disp -->|Bridge| Bridge["BatchBridge (vertebra-core)"]
+    Disp -->|SharedMemory| Shm["ShmDispatcher + 8 InFlightRequests shards"]
+    Disp -->|Direct| Direct["mpsc of DirectBatch"]
 ```
 
-## 1. Dual-Path `VertebraBody` & `PendingRequests` (`response.rs`, `correlation.rs`, `response_reader.rs`)
+## Request and response types (`collector.rs`, `response.rs`)
 
-- **[`VertebraBody`](../../../../../src/rs/vertebra-http/src/response.rs)**: Defined as `Either<Full<Bytes>, StreamingBody>` (`http_body_util::Either`). Unary responses use `full_body(Bytes)` (`Either::Left(Full::new(bytes))`) with zero channel allocation on the fast path, while progressive responses use `stream_body(rx)` (`Either::Right(StreamingBody)` backed by `tokio::sync::mpsc::Receiver<Result<Frame<Bytes>, Infallible>>`) for both `Frame::data` chunks and `Frame::trailers(HeaderMap)`.
-- **[`PendingRequests`](../../../../../src/rs/vertebra-http/src/correlation.rs)** (aliased as `InFlightRequests`): Pre-allocates `65,536` correlation slots across `256` independent `Mutex` shards (`256` slots per shard). Supports both unary `complete(correlation_id, Response)` and streaming `start_stream` / `push_chunk` / `push_trailers` / `finish_stream` transitions driven by [`response_reader.rs`](../../../../../src/rs/vertebra-http/src/response_reader.rs).
+- [`PendingRequest`](../../../../../src/rs/vertebra-http/src/collector.rs): `handler_id: u64`, `method_tag` (from `method_tag`, `GET`=0 … `CONNECT`=8, other=255), `http_version_tag`, `flags: u32` (`vertebra_core::protocol::flags`), `path`, `query`, compact `headers_mp`, `body`, and `reply: oneshot::Sender<PendingResponse>`.
+- `PendingResponse { status, headers_mp, body, stream_rx: Option<PendingResponseBody> }` with `PendingResponse::unary` and `PendingResponse::streaming`.
+- [`ResponseBody`](../../../../../src/rs/vertebra-http/src/response.rs) is `Either<Full<Bytes>, StreamingBody>`, where `StreamingBody = StreamBody<ReceiverFrameStream>` over `mpsc::Receiver<Result<Frame<Bytes>, Infallible>>`. `HttpResponse = Response<ResponseBody>`. `full_body` and `stream_body` build each branch; `build_response` picks the streaming branch when `stream_rx` is set.
+- `ResponseCollector` (`new`, `with_stream_sender`, `collect_chunk`, `set_trailers`, `into_bytes`) is used only by `tests/streaming_body_tests.rs`.
 
-## 2. 8-Shard `RequestBatcher` & `BatchPolicy` (`collector.rs`, `policy.rs`)
+## `RequestBatcher` and `BatchPolicy` (`collector.rs`, `policy.rs`)
 
-[`RequestBatcher`](../../../../../src/rs/vertebra-http/src/collector.rs) partitions incoming requests across `NUM_SHARDS = 8` cache-line-aligned `Mutex<Vec<PendingRequest>>` shards selected via multiplicative Fibonacci hashing of the caller thread ID (`thread_id * 0x9E37_79B9_7F4A_7C15`):
+- [`RequestBatcher::spawn_pool(dispatcher, policy, shard_count, channel_capacity)`](../../../../../src/rs/vertebra-http/src/collector.rs) spawns `shard_count` independent Tokio tasks, each owning a bounded `mpsc::Receiver<PendingRequest>`. `main.rs` uses 8 tasks with capacity 16,384.
+- Each task awaits `rx.recv()`, drains already-queued requests with `try_recv` up to `policy.batch_size()`, calls `Dispatcher::dispatch`, and records the batch size. There is no linger timer; the module comment that mentions a timeout trigger is out of date.
+- [`BatchPolicy`](../../../../../src/rs/vertebra-http/src/policy.rs) is `Fixed { size, timeout }` (`default_fixed`: 64, 1 ms; also `Default`) or `Adaptive { preferred_sizes, max_queue_delay, ema_arrival_rate, ema_alpha, min_size, max_size }` (`default_adaptive`: `[8, 16, 32, 64]`, 200 µs, 0.0, 0.25, 1, 64). The batcher reads only `batch_size()` and calls `record_batch`, which updates the EMA. `timeout()` and `matches_preferred()` have no callers, so both variants behave as a size cap of 64.
 
-- **Zero-Timer Idle Sleep**: When `pending_count == 0`, the drain loop sleeps on `Notify::notified().await` with zero timer wheel overhead.
-- **Adaptive Drain (`BatchPolicy`)**: Configured by [`BatchPolicy`](../../../../../src/rs/vertebra-http/src/policy.rs) (`max_batch_size = 64`, `linger_us`, `adaptive = true`). When a batch reaches `max_batch_size`, `submit()` immediately wakes `flush_notify`. Under sustained high load, the drain loop skips the linger timer and drains all 8 shards immediately.
+## Dispatcher modes (`dispatcher/`)
 
-## 3. Three `Dispatcher` Modes (`dispatcher/`)
+`DispatchMode` has three variants. `Dispatcher::backpressure()` exposes the optional controller attached with `with_backpressure`; the dispatcher itself never consults it.
 
-[`Dispatcher`](../../../../../src/rs/vertebra-http/src/dispatcher/mod.rs) routes requests according to deployment topology:
+1. **Bridge** (`Dispatcher::new()`, the default and the embedded topology). [`dispatch_bridge`](../../../../../src/rs/vertebra-http/src/dispatcher/bridge.rs) assigns a monotonic `next_id`, stores the reply in a `DashMap<u64, oneshot::Sender>` (skipped for `FIRE_AND_FORGET`), pushes a `WriteRequest` into `BatchBridge::batch_writer()`, and seals the batch. The `spawn_response_reader` task in `main.rs` drains `bridge.recv_responses()` and calls `Dispatcher::complete`.
+2. **SharedMemory** (`Dispatcher::new_shm(ring_pairs, max_inflight)`, used when `Topology::Shm`). See the next section.
+3. **Direct** (`Dispatcher::new_direct(capacity)`). [`dispatch_direct`](../../../../../src/rs/vertebra-http/src/dispatcher/direct.rs) converts the batch into a `DirectBatch` of `DirectRequest`s and `try_send`s it on a bounded mpsc; a full channel drops the whole batch. `vertebra-server` never selects this mode; only `benches/server_throughput.rs` and dispatcher tests do.
 
-1. **[`Direct`](../../../../../src/rs/vertebra-http/src/dispatcher/direct.rs)** (`direct_worker.rs`): Dispatches directly to the embedded Python handler inside the same process without intermediate batch queuing.
-2. **[`Bridge`](../../../../../src/rs/vertebra-http/src/dispatcher/bridge.rs)**: Flushes [`RequestBatcher`](../../../../../src/rs/vertebra-http/src/collector.rs) batches into the in-process [`BatchBridge`](../../../../../src/rs/vertebra-core/src/bridge.rs).
-3. **[`SharedMemory`](../../../../../src/rs/vertebra-http/src/dispatcher/shm.rs)** (`response_reader.rs`): Encodes requests into `VREQ` wire format across power-of-two worker `RingPair` shards (`idx & shard_mask`) and supports multi-chunk streaming via `ShmDispatcher::dispatch_stream_chunk`. Dedicated Tokio response reader tasks (`response_reader.rs`) drain the 4-tier response `TieredRingSet` using zero-copy `SlotView` and resolve callers via [`PendingRequests`](../../../../../src/rs/vertebra-http/src/correlation.rs).
+## SharedMemory dispatch (`dispatcher/shm.rs`, `correlation.rs`, `response_reader.rs`)
 
-## 4. `BackpressureController` (`backpressure.rs`)
+- [`ShmDispatcher::new`](../../../../../src/rs/vertebra-http/src/dispatcher/shm.rs) creates 8 `Mutex<InFlightRequests>` shards of `max_inflight / 8` slots (65,536 / 8 = 8,192 in `main.rs`) and spawns a sweep task that runs every 1 s and expires entries older than 30 s.
+- [`InFlightRequests`](../../../../../src/rs/vertebra-http/src/correlation.rs) is a slab with a free list and per-slot generations. `insert` returns `(generation << 32) | index`; `complete`, `sweep_expired`, and `sweep_for_worker` (no production caller) resolve or fail entries.
+- `dispatch_shm` picks workers round-robin (`(start + offset) % worker_count`), probing for a ring with capacity. Requests are grouped per `(worker, flags)` into `ShmDispatchBatch` and serialized by `ShmBatchWriter` directly into a request-ring slot with `try_send_with`. The worker is notified only when the ring goes from empty to non-empty.
+- The wire correlation ID is `(internal_id << 8) | shard_idx`, with the shard chosen by `(start + offset) & 7`.
+- A request that does not fit a slot, a full set of rings, or a full correlation shard gets a 503. A ring-full error during flush fails every correlation in that batch with 503.
+- [`run_response_reader`](../../../../../src/rs/vertebra-http/src/response_reader.rs) runs one task per worker. It waits on the response notifier through `AsyncFd`, falling back to 100 µs polling. It drains `TieredRingSet::try_recv_response()` and completes through `Dispatcher::complete_many`, which locks the correlation shard per response. Every completion is unary (`stream_rx: None`).
+- `ShmDispatcher::handle_raw_response_slot` forwards multi-frame `ResponseSlot` streams through the `DashMap`-backed [`PendingRequests`](../../../../../src/rs/vertebra-http/src/response_reader.rs) (`register_stream`, `deliver_raw_frame`). The response reader never calls it, so SHM workers cannot stream responses today.
 
-- **[`BackpressureController`](../../../../../src/rs/vertebra-http/src/backpressure.rs)**: Guards ingress with a bounded `Semaphore` (`max_in_flight`) and a sliding-window circuit breaker (`Closed`, `Open`, `HalfOpen`), shedding overload immediately with `503 Service Unavailable` and `Retry-After`.
+Gotcha: the `<< 8` packing drops the top 8 bits of the 32-bit slab generation. After a slot is reused 2^24 times, its responses fail the generation check and the caller waits for the 30 s sweep.
+
+## `BackpressureController` (`backpressure.rs`)
+
+| Setting (`BackpressureConfig`) | Default | Env override |
+|---|---|---|
+| `max_in_flight` | 1024 | `VERTEBRA_BP_MAX_IN_FLIGHT` |
+| `max_queue_depth` | 1024 waiters | `VERTEBRA_BP_MAX_QUEUE_DEPTH` |
+| `max_queue_time` | 100 ms | `VERTEBRA_BP_MAX_QUEUE_TIME_MS` |
+| `max_active_streams` | 65,536 | none |
+| `high_watermark` / `low_watermark` | 192 / 64 chunks | none |
+| `priority_routes` | `/healthz`, `/readyz`, `/__vertebra/health` | none |
+| `CircuitBreakerConfig` | failure rate 0.5, 20 min samples, 10 s window, 5 half-open probes | `VERTEBRA_BP_CB_*` |
+
+- `try_acquire_for_path` first tries a separate `priority_semaphore` for priority routes, then falls back to `try_acquire`: an immediate permit, else a wait bounded by `max_queue_depth` and `max_queue_time`.
+- `RejectionReason::Saturated`, `QueueTimeout`, and `StreamLimitExceeded` map to 503; `CircuitOpen` maps to 429. `rejection_response` always adds `retry-after: 1`.
+- `record_success` and `record_failure` feed a sliding-window breaker with `Closed`, `Open`, and `HalfOpen` phases. They take a mutex on every response.
+- `snapshot()` returns `BackpressureMetricsSnapshot`, served as JSON at `/__vertebra/health`.
+- The stream API (`acquire_stream`, `StreamGuard`, `on_stream_chunk_enqueued`, `on_stream_chunk_dequeued`, `wait_until_resumed`) is called only from `tests/backpressure_streams_tests.rs`.

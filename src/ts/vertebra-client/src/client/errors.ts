@@ -1,35 +1,35 @@
-export class VertebraError extends Error {
+export class ClientError extends Error {
   constructor(
     message: string,
     public status?: number,
   ) {
     super(message);
-    this.name = "VertebraError";
+    this.name = "ClientError";
   }
 }
 
-export class NetworkError extends VertebraError {
+export class NetworkError extends ClientError {
   constructor(message = "Network request failed") {
     super(message);
     this.name = "NetworkError";
   }
 }
 
-export class TimeoutError extends VertebraError {
+export class TimeoutError extends ClientError {
   constructor(message = "Request timed out") {
     super(message, 408);
     this.name = "TimeoutError";
   }
 }
 
-export class ServerError extends VertebraError {
+export class ServerError extends ClientError {
   constructor(message: string, status: number) {
     super(message, status);
     this.name = "ServerError";
   }
 }
 
-export class ValidationError extends VertebraError {
+export class ValidationError extends ClientError {
   constructor(
     message: string,
     public fieldErrors: Record<string, string[]> = {},
@@ -40,7 +40,7 @@ export class ValidationError extends VertebraError {
 }
 
 /**
- * Factory to parse an error response and throw the appropriate VertebraError.
+ * Factory to parse an error response and throw the appropriate ClientError.
  */
 export async function throwParsedError(response: Response): Promise<never> {
   const status = response.status;
@@ -64,5 +64,5 @@ export async function throwParsedError(response: Response): Promise<never> {
     throw new ServerError(message, status);
   }
 
-  throw new VertebraError(message, status);
+  throw new ClientError(message, status);
 }

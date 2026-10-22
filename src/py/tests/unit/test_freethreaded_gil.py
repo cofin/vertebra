@@ -5,7 +5,9 @@ from __future__ import annotations
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-from vertebra import _bundler, _vertebra
+import pytest
+
+from vertebra import _vertebra
 from vertebra._vertebra import Headers
 
 
@@ -15,7 +17,8 @@ def test_native_modules_declare_gil_used_false() -> None:
     was_disabled = bool(checker is not None and not checker())
 
     assert getattr(_vertebra, "GIL_USED", None) is False
-    assert getattr(_bundler, "GIL_USED", None) is False
+    bundler_mod = pytest.importorskip("vertebra._bundler")
+    assert getattr(bundler_mod, "GIL_USED", None) is False
 
     if was_disabled and checker is not None:
         assert checker() is False

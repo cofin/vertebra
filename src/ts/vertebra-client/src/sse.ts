@@ -22,7 +22,7 @@ const DEFAULT_BASE_DELAY_MS = 500;
 const DEFAULT_MAX_DELAY_MS = 30_000;
 const MAX_IDEMPOTENCY_KEYS = 1024;
 
-export class VertebraSseClient {
+export class SseClient {
   private readonly baseUrl: string;
   private readonly withCredentials: boolean;
   private readonly lastEventIdParam: string;
@@ -207,5 +207,3 @@ export class VertebraSseClient {
     }, delay);
   }
 }
-
-export { VertebraSseClient as SseClient, VertebraSseClient as VertebraEventSource };

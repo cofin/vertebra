@@ -9,8 +9,7 @@ from typing import Any
 
 import click
 
-from vertebra.builder._config import BuildConfig
-from vertebra.builder._orchestrator import BuildOrchestrator
+from vertebra.build import BuildConfig, BuildOrchestrator
 from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError

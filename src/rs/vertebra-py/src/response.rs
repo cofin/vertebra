@@ -141,6 +141,29 @@ impl Response {
 
     #[getter]
     pub fn body<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        if self.body.is_empty()
+            && let Some(path_bytes) = self.header_value(b"x-vertebra-sendfile")
+            && let Ok(path_str) = std::str::from_utf8(path_bytes)
+        {
+            if let Some(range_bytes) = self.header_value(b"x-vertebra-sendfile-range")
+                && let Ok(range_str) = std::str::from_utf8(range_bytes)
+                && let Some((span, _total)) = range_str.split_once('/')
+                && let Some((start_s, end_s)) = span.split_once('-')
+                && let (Ok(start), Ok(end)) = (start_s.parse::<u64>(), end_s.parse::<u64>())
+                && end > start
+                && let Ok(mut fh) = std::fs::File::open(path_str)
+            {
+                use std::io::{Read, Seek, SeekFrom};
+                let len = (end - start) as usize;
+                let mut buf = vec![0u8; len];
+                if fh.seek(SeekFrom::Start(start)).is_ok() && fh.read_exact(&mut buf).is_ok() {
+                    return PyBytes::new(py, &buf);
+                }
+            }
+            if let Ok(file_bytes) = std::fs::read(path_str) {
+                return PyBytes::new(py, &file_bytes);
+            }
+        }
         PyBytes::new(py, &self.body)
     }
 
@@ -187,5 +210,12 @@ impl Response {
 
     pub fn get_body(&self) -> &Bytes {
         &self.body
+    }
+
+    fn header_value(&self, target: &[u8]) -> Option<&[u8]> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(target))
+            .map(|(_, v)| v.as_slice())
     }
 }

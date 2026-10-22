@@ -15,18 +15,15 @@ from vertebra.framework._router import (
     RouteDef,
     Router,
     _compile_path_template,
+    _make_handler_id,
     _normalize_path,
     _normalize_prefix,
 )
 
 __all__ = ("App", "HandlerInfo", "LifecycleHook", "_make_handler_id")
 
-_FNV_OFFSET = 0xCBF29CE484222325
-_FNV_PRIME = 0x100000001B3
-_MASK_64 = 0xFFFFFFFFFFFFFFFF
 
-
-class HandlerInfo(msgspec.Struct, frozen=True, array_like=True):
+class HandlerInfo(msgspec.Struct, frozen=True, gc=False, array_like=True):
     """Metadata stored per registered handler, serializable via msgspec."""
 
     handler_id: int
@@ -180,22 +177,3 @@ class App:
             result = hook()
             if inspect.isawaitable(result):
                 await result
-
-
-def _fnv1a_write(h: int, data: bytes) -> int:
-    """Update FNV-1a hash with each byte of ``data``."""
-    for b in data:
-        h ^= b
-        h = (h * _FNV_PRIME) & _MASK_64
-    return h
-
-
-def _make_handler_id(method: str, path: str) -> int:
-    """Derive a stable uint64 handler ID from method and path using FNV-1a."""
-    h = _FNV_OFFSET
-    h = _fnv1a_write(h, method.upper().encode())
-    h = _fnv1a_write(h, b"\xff")
-    h = _fnv1a_write(h, b" ")
-    h = _fnv1a_write(h, path.encode())
-    h = _fnv1a_write(h, b"\xff")
-    return h

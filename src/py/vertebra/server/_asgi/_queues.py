@@ -1,11 +1,10 @@
 """ASGI receive and send protocol callables with progressive streaming and wire extensions."""
 
-from __future__ import annotations
-
 import asyncio
-import dataclasses
 from collections.abc import Callable
 from typing import Any
+
+import msgspec
 
 from vertebra._vertebra import stream_file_chunks
 
@@ -31,8 +30,7 @@ _DISCONNECT_MSG: dict[str, Any] = {"type": "http.disconnect"}
 type ChunkCallback = Callable[[int, bytes, bool], None]
 
 
-@dataclasses.dataclass(slots=True)
-class AsgiResponse:
+class AsgiResponse(msgspec.Struct, gc=False):
     """Response container carrying unary or streamed body bytes and wire extension metadata."""
 
     status: int
@@ -40,8 +38,8 @@ class AsgiResponse:
     body: bytes
     request_id: int = 0
     streaming: bool = False
-    trailers: list[tuple[bytes, bytes]] = dataclasses.field(default_factory=list)
-    early_hints: list[list[tuple[bytes, bytes]]] = dataclasses.field(default_factory=list)
+    trailers: list[tuple[bytes, bytes]] = msgspec.field(default_factory=list)
+    early_hints: list[list[tuple[bytes, bytes]]] = msgspec.field(default_factory=list)
     file_path: str | None = None
     file_range: tuple[int, int] | None = None
     zero_copy_view: memoryview | None = None

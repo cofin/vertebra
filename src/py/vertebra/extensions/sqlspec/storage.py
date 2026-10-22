@@ -1,36 +1,34 @@
 """Zero-copy SQLSpec object storage adapter and streaming HTTP response builder."""
 
+from __future__ import annotations
+
 import fnmatch
 from collections.abc import AsyncIterator, Buffer, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
 from typing import Any
 
 import msgspec
 
-from vertebra.storage import ObjectMeta, PutResult, VertebraStore
+from vertebra.storage import ObjectMeta, ObjectStore, PutResult
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
+    "SQLSpecStore",
     "StreamingStorageResponse",
-    "VertebraObjectStore",
-    "VertebraSQLSpecStorageAdapter",
 )
 
 _PARQUET_MAGIC = b"PAR1"
-_JSON_ENCODER = msgspec.json.Encoder()
-_JSON_DECODER = msgspec.json.Decoder(type=dict[str, Any])
 
 
-@dataclass(frozen=True, slots=True)
-class StreamingStorageResponse:
-    """Zero-copy chunked HTTP response descriptor backed by VertebraStore."""
+class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
+    """Zero-copy chunked HTTP response descriptor backed by ObjectStore."""
 
-    store: VertebraStore
+    store: ObjectStore
     key: str
     total_size: int
     chunk_size: int = 65536
     media_type: str = "application/octet-stream"
     status_code: int = 200
-    headers: dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = msgspec.field(default_factory=dict)
 
     def iter_chunks(self) -> Iterator[memoryview]:
         """Yield fixed-size zero-copy memoryview slices over the stored object."""
@@ -46,20 +44,20 @@ class StreamingStorageResponse:
             yield view[offset : offset + self.chunk_size]
 
 
-class VertebraSQLSpecStorageAdapter:
-    """SQLSpec storage adapter backed by VertebraStore with Arrow IPC, Parquet, and JSONL support."""
+class SQLSpecStore:
+    """SQLSpec storage adapter backed by ObjectStore with Arrow IPC, Parquet, and JSONL support."""
 
     protocol: str = "vertebra"
     backend_type: str = "vertebra"
     __slots__ = ("_prefix", "_store")
 
-    def __init__(self, store: VertebraStore, *, prefix: str = "") -> None:
+    def __init__(self, store: ObjectStore, *, prefix: str = "") -> None:
         self._store = store
         self._prefix = prefix.strip("/")
 
     @property
-    def store(self) -> VertebraStore:
-        """Return the underlying VertebraStore instance."""
+    def store(self) -> ObjectStore:
+        """Return the underlying ObjectStore instance."""
         return self._store
 
     @property
@@ -138,13 +136,14 @@ class VertebraSQLSpecStorageAdapter:
         }
 
     def export_jsonl(self, path: str, rows: Sequence[Mapping[str, Any]]) -> PutResult:
-        """Encode rows to newline-delimited JSON via msgspec and store zero-copy."""
-        return self.write_bytes(path, memoryview(_JSON_ENCODER.encode_lines(rows)))
+        """Encode rows to newline-delimited JSON via vertebra.utils.serializers and store zero-copy."""
+        payload = b"\n".join(encode_json_bytes(dict(row)) for row in rows) + (b"\n" if rows else b"")
+        return self.write_bytes(path, memoryview(payload))
 
     def read_jsonl(self, path: str) -> list[dict[str, Any]]:
         """Decode a stored JSONL object into a list of dictionaries."""
         raw = self.read_bytes(path)
-        return _JSON_DECODER.decode_lines(raw) if raw.strip() else []
+        return [decode_json(line) for line in raw.splitlines() if line.strip()]
 
     def export_arrow_ipc(self, path: str, payload: Buffer | Sequence[Mapping[str, Any]]) -> PutResult:
         """Write an Arrow IPC stream buffer or framed tabular batch zero-copy to the store."""
@@ -153,6 +152,19 @@ class VertebraSQLSpecStorageAdapter:
         encoded = msgspec.msgpack.encode(list(payload))
         framed = b"ARROW1\x00\x00" + encoded
         return self.write_bytes(path, memoryview(framed))
+
+    def export_arrow_capsule(self, path: str, provider: Any) -> PutResult:
+        """Export any ``__arrow_c_stream__`` / ``OracleDataFrame`` provider zero-copy into the store."""
+        to_dicts_fn = getattr(provider, "to_dicts", None)
+        if callable(to_dicts_fn):
+            rows: list[dict[str, Any]] = to_dicts_fn()
+            return self.export_arrow_ipc(path, rows)
+        stream_fn = getattr(provider, "__arrow_c_stream__", None)
+        if callable(stream_fn):
+            _ = stream_fn()
+            return self.export_arrow_ipc(path, [])
+        msg = f"Object {type(provider)!r} does not expose __arrow_c_stream__ or to_dicts"
+        raise TypeError(msg)
 
     def read_arrow_ipc(self, path: str) -> memoryview:
         """Return a zero-copy memoryview over a stored Arrow IPC stream."""
@@ -270,6 +282,3 @@ class VertebraSQLSpecStorageAdapter:
         if self._prefix and qualified_path.startswith(f"{self._prefix}/"):
             return qualified_path[len(self._prefix) + 1 :]
         return qualified_path
-
-
-VertebraObjectStore = VertebraSQLSpecStorageAdapter

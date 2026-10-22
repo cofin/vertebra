@@ -1,9 +1,10 @@
 """ASGI 3.0 WebSocket session lifecycle and pre-upgrade websocket.http.response support."""
 
 import asyncio
-import dataclasses
 from collections.abc import Callable, Iterable
 from typing import Any
+
+import msgspec
 
 __all__ = (
     "WebSocketDisconnect",
@@ -24,13 +25,12 @@ class WebSocketDisconnect(Exception):
         self.reason = reason
 
 
-@dataclasses.dataclass(slots=True)
-class WebSocketHandshakeResult:
+class WebSocketHandshakeResult(msgspec.Struct, gc=False):
     """Outcome of the pre-upgrade ASGI WebSocket handshake."""
 
     accepted: bool
     subprotocol: str | None = None
-    headers: list[tuple[bytes, bytes]] = dataclasses.field(default_factory=list)
+    headers: list[tuple[bytes, bytes]] = msgspec.field(default_factory=list)
     status: int = 403
     body: bytes = b""
 

@@ -1,11 +1,11 @@
 """Tests for SSG prerendering."""
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
 from vertebra.framework._ssr._backends import SsrResult
 from vertebra.framework._ssr._prerender import prerender_routes
+from vertebra.utils.serializers import decode_json
 
 
 def _mock_ssr_client(head: "list[str] | None" = None, body: str = "<div>rendered</div>") -> MagicMock:
@@ -106,7 +106,7 @@ def test_prerender_routes_html_contains_page_data(tmp_path: Path) -> None:
     prerender_routes(ssr_client=client, routes=routes, outdir=tmp_path)
     html = (tmp_path / "index.html").read_text()
     assert 'data-page="app"' in html
-    page_data = json.loads(html.split('type="application/json">')[1].split("</script>")[0])
+    page_data = decode_json(html.split('type="application/json">')[1].split("</script>")[0])
     assert page_data["component"] == "Home"
     assert page_data["props"]["user"] == "test"
 

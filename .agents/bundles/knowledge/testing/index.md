@@ -11,5 +11,5 @@ tags:
 
 # Testing & Verification Index
 
-- [Polyglot Test Matrix & Environment Setup](polyglot-test-matrix.md) — `make setup-env` (`tools/scripts/setup-env.sh`), `make rs-test`, `make py-test`, `make ts-test`, `make lint-all`, `make check`, maturin extension rebuilds, and `/dev/shm` test hygiene.
-- [Benchmark Suite & Free-Threaded Python 3.14t](benchmarks-and-free-threaded.md) — `make bench`, `make bench-all`, `make bench-ft` (`.venv-ft` and `src/rs/target-ft`), `--group bench` dependency isolation, and Criterion microbenchmarks.
+- [Polyglot Test Matrix & Environment Setup](polyglot-test-matrix.md) — `make setup-env` (`tools/scripts/setup-env.sh`), `make dev` (`_vertebra`, `_bundler`, `_storage`), `make rs-test`, `make py-test`, `make ts-test`, `make lint-all`, `make check`, CI workflow matrix (`.github/workflows/ci.yml`: Python `3.12`–`3.14t`, Rust feature matrix), and `/dev/shm` test hygiene.
+- [Benchmark Suite & Free-Threaded Python 3.14t](benchmarks-and-free-threaded.md) — `make bench`, `make bench-all`, `make bench-ft` (`.venv-ft` and `src/rs/target-ft`), `oha` harness (`tools/benchmarks/`), scheduled `.github/workflows/benchmark.yml`, `--group bench` dependency isolation, `tools/pgo/` Rust/CPython PGO tooling, and Criterion microbenchmarks.

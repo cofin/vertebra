@@ -366,14 +366,11 @@ def test_asgi_runner_coro_resumer_chains_across_await() -> None:
         await asyncio.sleep(0)
         values.append(3)
 
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
+    async def _run() -> None:
         _drive_coro(two_step())
-        loop.run_until_complete(asyncio.sleep(0.01))
-    finally:
-        asyncio.set_event_loop(None)
-        loop.close()
+        await asyncio.sleep(0.01)
+
+    asyncio.run(_run())
 
     assert values == [1, 2, 3]
 
@@ -493,7 +490,7 @@ async def test_send_collector_fast_path_single_chunk_no_list() -> None:
     c = AsgiSend()
     await c({"type": "http.response.start", "status": 200, "headers": []})
     await c({"type": "http.response.body", "body": b"hello"})
-    assert c._extra_chunks is None  # noqa: SLF001
+    assert getattr(c, "_extra_chunks", None) is None
     assert c.response.body == b"hello"
 
 
@@ -506,7 +503,7 @@ async def test_send_collector_fast_path_multi_chunk_joins() -> None:
     await c({"type": "http.response.start", "status": 200, "headers": []})
     await c({"type": "http.response.body", "body": b"abc"})
     await c({"type": "http.response.body", "body": b"de"})
-    assert c._extra_chunks is not None  # noqa: SLF001
+    assert getattr(c, "_extra_chunks", None) is not None
     assert c.response.body == b"abcde"
 
 

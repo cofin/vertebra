@@ -1,13 +1,13 @@
 """Tests for route-driven type extraction and metadata collection."""
 
 from dataclasses import dataclass, field
-from typing import Annotated
+from typing import Annotated, Any
 
 import msgspec
 
-from vertebra.builder._codegen._extractor import TypeExtractor
-from vertebra.builder._codegen._ir import AnnotatedType, ArrayType, ObjectType, PrimitiveType, UnionType
-from vertebra.builder._codegen._metadata import RouteCollector
+from vertebra.build.codegen._extractor import TypeExtractor
+from vertebra.build.codegen._ir import AnnotatedType, ArrayType, ObjectType, PrimitiveType, UnionType
+from vertebra.build.codegen._metadata import RouteCollector
 from vertebra.framework._app import App
 
 
@@ -93,9 +93,11 @@ def test_collect_routes_from_app() -> None:
 def test_collect_routes_uses_unknown_for_unannotated_values() -> None:
     app = App()
 
-    @app.post("/submit")
-    def submit(payload, count: int) -> str:  # noqa: ANN001
+    def submit(payload: Any, count: int) -> str:
         return f"{payload}:{count}"
+
+    submit.__annotations__.pop("payload", None)
+    app.post("/submit")(submit)
 
     route = RouteCollector().collect(app)[0]
 

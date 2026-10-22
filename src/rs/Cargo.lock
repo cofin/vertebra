@@ -3274,6 +3274,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha2",
  "signature",
  "spki",
  "subtle",
@@ -4297,6 +4298,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vertebra-db"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "vertebra-http"
 version = "0.1.0"
 dependencies = [
@@ -4357,6 +4372,7 @@ dependencies = [
 name = "vertebra-storage"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "bytes",
  "chrono",
@@ -4368,6 +4384,7 @@ dependencies = [
  "pyo3",
  "pyo3-build-config",
  "reqwest 0.13.5",
+ "rsa",
  "serde",
  "serde_json",
  "sha2",

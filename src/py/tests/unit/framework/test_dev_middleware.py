@@ -1,7 +1,6 @@
 """Tests for DevMiddleware WebSocket broadcast."""
 
 import asyncio
-import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -9,6 +8,7 @@ import pytest
 
 from vertebra.framework._dev_middleware import DevMiddleware, _ws_clients, broadcast_hmr_event
 from vertebra.framework._type_bridge import TypeBridge
+from vertebra.utils.serializers import decode_json, encode_json
 
 
 @pytest.fixture()
@@ -93,7 +93,7 @@ async def test_handle_ws_accept_and_connected_message(middleware: DevMiddleware)
     calls = [c.args[0] for c in send.call_args_list]
     connected_calls = [c for c in calls if c.get("type") == "websocket.send"]
     assert len(connected_calls) >= 1
-    data = json.loads(connected_calls[0]["text"])
+    data = decode_json(connected_calls[0]["text"])
     assert data["type"] == "connected"
 
 
@@ -111,7 +111,7 @@ async def test_handle_ws_cleanup_on_disconnect(middleware: DevMiddleware) -> Non
 async def test_handle_ws_ping_pong(middleware: DevMiddleware) -> None:
     send = AsyncMock()
     messages = [
-        {"type": "websocket.receive", "text": json.dumps({"type": "ping"})},
+        {"type": "websocket.receive", "text": encode_json({"type": "ping"})},
         {"type": "websocket.disconnect"},
     ]
     receive = AsyncMock(side_effect=messages)

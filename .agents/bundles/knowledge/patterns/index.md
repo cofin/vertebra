@@ -16,14 +16,15 @@ Every pattern chapter contains code-truth blocks (`<!-- truth: start -->` / `<!-
 
 ## Python (`python/`)
 
-- [Module Structure, Class Layout & PEP 695 Typing](python/module-and-class-layout.md) — Top-level imports, PEP 562 lazy `__getattr__` package exports, strict class member ordering, Google-style docstrings without inline `#` comments, and PEP 695/604/585 typing.
-- [Hot-Path Caching & Single-Wake Async Dispatch](python/hot-path-and-async-dispatch.md) — Startup `_handler_dispatch_spec` caching, vectorized `submit_results` / `submit_response`, 4-way `BatchDispatchPlan`, single-wake `AsyncRuntime`, and task-free ASGI coroutine driving.
+- [Python Module Structure, Class Layout & PEP 695 Typing](python/module-and-class-layout.md) — Top-level imports, PEP 562 lazy `__getattr__` root exports, frozen `msgspec.Struct(..., gc=False)` value objects, strict class member ordering, Google-style docstrings without inline `#` comments, and PEP 695/604/585 typing.
+- [Hot-Path Caching & Single-Wake Async Dispatch](python/hot-path-and-async-dispatch.md) — Startup `_handler_dispatch_spec` (`lru_cache(maxsize=512)`), `BatchDispatchPlan` partitioning (`sync_native`, `async_native`, `mounts`, `unmatched`), `AsyncRuntime` / `AsgiEventLoopPool` wakeups, `_drive_coro` ASGI stepping, and `_coerce_response`.
+- [Serialization & Python Utility Conventions](python/serialization-and-utils.md) — Centralized `JSONSerializer` (`encode_json`, `encode_json_bytes`, `encode_json_into`, `decode_json`, `format_json`), `dump_schema`, `Portal` sync/async bridging, `LoopShardedResource`, `SyncPool`, and `module_loader` guards.
 
 ## Rust & PyO3 (`rust/`)
 
-- [PyO3 0.30.1 FFI & GIL Discipline](rust/ffi-and-gil-discipline.md) — `py.detach()` around blocking waits, `append_to_inittab!(_vertebra)`, lazy `DataSlab`-backed `#[pyclass]` wrappers, and `thiserror` error mapping.
-- [Lock-Free Shared Memory & Sharded Concurrency](rust/lock-free-shm-and-sharding.md) — `#[repr(C, align(64))]` cache-line isolation, `Acquire`/`Release`/`SeqCst` atomic ordering, bounds-checked `unsafe` pointer arithmetic, 8-shard `RequestBatcher`, and 256-shard `InFlightRequests`.
+- [PyO3 0.30.1 FFI & GIL Discipline](rust/ffi-and-gil-discipline.md) — `#[pymodule(gil_used = false)]` across `_vertebra`, `_bundler`, and `_storage`, `py.detach()` around blocking waits and file I/O, `append_to_inittab!(pymodule_init)`, lazy `Arc<BatchSnapshot>` request proxies (`freelist = 128`), and `pyo3::intern!` header/scope keys.
+- [Lock-Free Shared Memory & Sharded Concurrency](rust/lock-free-shm-and-sharding.md) — `CacheLine<T>` isolation, `Acquire`/`Release`/`SeqCst` futex handshakes, reserve-then-rollback slab atomics, `RequestBatcher` task pool, and `ShmDispatcher` sharded `Mutex<InFlightRequests>` slabs.
 
 ## TypeScript (`typescript/`)
 
-- [Client SDK & Framework Adapter Subpaths](typescript/client-and-adapter-subpaths.md) — Zero-dependency `@vertebra/client` core, subpath adapter exports (`react`, `vue`, `svelte`, `angular`, `htmx`, `vite`, `store`), Biome lint rules, and codegen alignment.
+- [Client SDK Root Exports, Subpaths & Build Entries](typescript/client-and-adapter-subpaths.md) — Zero-dependency `@vertebra/client` core, subpath exports (`vite`, `react`, `vue`, `svelte`, `angular`, `htmx`, `store`, `wasm`, `arrow`, `live`, `apex`, `telemetry`), `tsup` build entries, Biome lint rules, and codegen parity.

@@ -23,9 +23,9 @@ def test_env_coercion():
 
 
 def test_module_loader_import_string():
-    import json
+    from vertebra.utils.serializers import encode_json
 
-    assert import_string("json.dumps") is json.dumps
+    assert import_string("vertebra.utils.serializers.encode_json") is encode_json
 
 
 def test_module_available():
