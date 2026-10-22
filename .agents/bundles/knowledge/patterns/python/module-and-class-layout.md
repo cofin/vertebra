@@ -1,13 +1,16 @@
 ---
 type: Pattern
 title: "Python Module Structure, Class Layout & PEP 695 Typing"
-description: "Python 3.12+ module layout, PEP 562 lazy exports, class member ordering, zero inline comments, and PEP 695/604/585 typing."
+description: "Python 3.12+ module layout, PEP 562 lazy root exports, msgspec.Struct value objects, class member ordering, zero inline comments, and PEP 695/604/585 typing."
 status: stable
 tags: [patterns, python, code-style, typing, conventions]
 sources:
   - resource: src/py/vertebra/__init__.py
   - resource: src/py/vertebra/framework/_app.py
+  - resource: src/py/vertebra/framework/_router.py
   - resource: src/py/vertebra/utils/module_loader.py
+  - resource: src/py/vertebra/_typing.py
+  - resource: src/py/vertebra/server/_native.py
   - resource: pyproject.toml
 ---
 
@@ -15,9 +18,9 @@ sources:
 
 All Python code under [`src/py/vertebra/`](../../../../../src/py/vertebra/__init__.py) and [`src/py/tests/`](../../../../../src/py/tests/conftest.py) targets Python 3.12+ (`3.12`, `3.13`, `3.14`, `3.14t`) under strict Ruff and Mypy gates configured in [`pyproject.toml`](../../../../../pyproject.toml).
 
-## 1. Module Layout & PEP 562 Lazy Package Exports
+## 1. Module Layout & PEP 562 Lazy Root Exports
 
-Every module follows a fixed top-to-bottom layout: module docstring $\to$ grouped top-level imports (`stdlib`, third-party, local) $\to$ `if TYPE_CHECKING:` $\to$ `__all__` $\to$ public classes and functions $\to$ module-scoped `_...` helpers. Package `__init__.py` files use PEP 562 `__getattr__` lazy loading so `import vertebra` stays under 7 ms in-process:
+Every module follows a fixed top-to-bottom layout: module docstring $\to$ grouped top-level imports (`stdlib`, third-party, local) $\to$ `if TYPE_CHECKING:` $\to$ `__all__` $\to$ public classes and functions $\to$ module-scoped `_...` helpers. The top-level [`vertebra/__init__.py`](../../../../../src/py/vertebra/__init__.py) uses PEP 562 `__getattr__` lazy loading so `import vertebra` does not import the framework, server, or native extensions until first attribute access (whereas subpackage `__init__.py` files such as `vertebra/framework/__init__.py` and `vertebra/build/__init__.py` re-export their public symbols eagerly):
 
 <!-- truth: start -->
 ```python
@@ -45,5 +48,10 @@ def __getattr__(name: str) -> Any:
 Classes order members strictly as: class attributes / `__slots__` $\to$ `__init__` $\to$ `@property` getters $\to$ public methods $\to$ private `_...` helper methods. Private helpers used by a single class belong on that class as private methods rather than standalone module functions.
 
 - **Zero Inline `#` Comments**: Never write inline `#` comments in Python implementation or test files. Document intent, invariants, and edge cases inside Google-style docstrings.
-- **No Nested Imports**: Place all imports at module top level, or inside `if TYPE_CHECKING:` / [`module_loader.py`](../../../../../src/py/vertebra/utils/module_loader.py) (`ensure_packages`, `import_app`) when guarding optional third-party libraries.
-- **PEP 695 / 604 / 585 Typing**: Use built-in generic collections (`dict`, `list`, `tuple`, `set`), `X | Y` unions, and PEP 695 `type` aliases and generic functions/methods (`def schedule[T]`) with zero `typing_extensions` imports.
+- **Top-Level Imports & Sanctioned Guards**: Place imports at module top level, or inside `if TYPE_CHECKING:` / [`module_loader.py`](../../../../../src/py/vertebra/utils/module_loader.py) (`import_optional`, `ensure_<pkg>()`, `import_app`). Sanctioned deferred imports are limited to PEP 562 `__getattr__` in `vertebra/__init__.py`, optional dependency probing in [`vertebra/_typing.py`](../../../../../src/py/vertebra/_typing.py), `importlib.import_module` for optional native extensions, and circular-import breakers.
+- **PEP 695 / 604 / 585 Typing**: Use built-in generic collections (`dict`, `list`, `tuple`, `set`), `X | Y` unions, and PEP 695 `type` aliases and generic functions/methods (`def schedule[T]` in [`_native.py`](../../../../../src/py/vertebra/server/_native.py)) with zero `typing_extensions` imports.
+
+## 3. Value Objects (`msgspec.Struct`) & `__slots__`
+
+- **`msgspec.Struct(..., frozen=True, gc=False)`**: Use frozen, GC-exempt `msgspec.Struct` definitions (with `array_like=True` on hot-path frames and route descriptors such as [`RouteDef`](../../../../../src/py/vertebra/framework/_router.py) and [`HandlerInfo`](../../../../../src/py/vertebra/framework/_app.py)) instead of `@dataclass` for configuration, metadata, spec, and wire frame value objects so CPython omits `PyGC_Head` cyclic GC tracking overhead.
+- **`__slots__` on Stateful Classes**: Stateful service and runtime classes (`App`, `Router`, `InertiaMiddleware`, `JSONSerializer`) declare explicit `__slots__` to eliminate per-instance `__dict__` allocation.

@@ -17,44 +17,66 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
 
 ## Workflow & Quality Gates
 
-- **[Project Workflow & Commands](workflow.md)** — Canonical `Makefile` targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make lint-all`, `make check`, `make bench`, `make bench-ft`), polyglot rebuild discipline, and Flow OKF v0.2 execution rules.
+- **[Project Workflow & Commands](workflow.md)** — Canonical `Makefile` targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make lint-all`, `make check`, `make build`, `make bench`, `make bench-ft`, `make upgrade`), polyglot rebuild discipline across `_vertebra`, `_bundler`, and `_storage`, and Flow OKF v0.2 execution rules.
 
 ## Architecture (`architecture/`)
 
 - **[Architecture Index](architecture/index.md)**
 - **Runtime (`architecture/runtime/`)**:
-  - [Runtime Topologies & Python Embedding](architecture/runtime/topologies-and-embedding.md) — `Topology::Embedded` (`append_to_inittab!`, `BatchBridge`), `Topology::SharedMemory`, and `3.14t` free-threaded execution.
-  - [SHM Worker Supervision & Crash Recovery](architecture/runtime/shm-supervision-and-recovery.md) — `RingFactory` FD inheritance, `pidfd_open`/`waitid`, `RingPair::reclaim`, exponential backoff, and `/dev/shm` sweeping.
+  - [Runtime Topologies & Python Embedding](architecture/runtime/topologies-and-embedding.md) — `Topology::Embedded` (`append_to_inittab!(pymodule_init)`, `BatchBridge`), `Topology::Shm` (`RingFactory`), and `3.14t` free-threaded execution.
+  - [SHM Worker Spawn, Shutdown & Recovery Hooks](architecture/runtime/shm-supervision-and-recovery.md) — `RingFactory` FD inheritance, `RingPairFds` env handoff, `shutdown_workers`, and library-level recovery hooks (`WorkerLifecycle`, `RingPair::reclaim`, `cleanup_stale_shm`).
+  - [Server Platform & Process Lifecycle](architecture/runtime/platform-and-lifecycle.md) — `run_supervisor`, `AsgiEventLoopPool`, `GilAuditReport`, `ShmAllocationPolicy`, `CgroupQuota`, `LameDuckController`, and `ZPagesRegistry`.
 - **IPC & Shared Memory (`architecture/ipc/`)**:
   - [Lock-Free Ring Buffers & Shared Memory](architecture/ipc/ring-buffers-and-shm.md) — `ShmHeader` cache-line layout, `SpscRing` + `SlotView` zero-copy borrow/release, Vyukov `MpmcRing`, LZ4/Zstd compression, and Linux/macOS wake primitives.
-  - [Tiered Rings & In-Process Batch Bridge](architecture/ipc/tiered-rings-and-batch-bridge.md) — `RingPair`, 4-tier `TieredRingSet` (`20B` `VRES` wire header), and `BatchBridge` (`TransportArena`, `DataSlab`, `BufferPool`).
+  - [Tiered Rings & In-Process Batch Bridge](architecture/ipc/tiered-rings-and-batch-bridge.md) — `RingPair`, `TieredRingSet` (`small`/`medium`/`large`/`xlarge` response tiers, `VRES` wire frame header), `ResponseSlot`, and `BatchBridge` (`TransportArena`, `DataSlab`, `BufferPool`).
 - **HTTP Ingress & Dispatch (`architecture/http/`)**:
-  - [HTTP/1.1 & HTTP/2 Ingress & Native Routing](architecture/http/ingress-and-routing.md) — `Server` listener loop, HTTP/1.1 `pipeline_flush`, HTTP/2 `TlsAcceptor`, `Router` (`normalize_typed_path` + FNV-1a `HandlerId`), `RouteTable`, and static assets.
-  - [Request Batching, Dispatch & Backpressure](architecture/http/batching-dispatch-and-backpressure.md) — 8-shard `RequestBatcher` (`BatchPolicy`), `Dispatcher` (`Direct`, `Bridge`, `SharedMemory`), 256-shard `InFlightRequests`, and `BackpressureController`.
+  - [HTTP Ingress, Request Pipeline & Native Routing](architecture/http/ingress-and-routing.md) — `run_with_listener` accept loop (`ServerState`), HTTP/1.1 `pipeline_flush`, ALPN `TlsAcceptor` (`h2` + mTLS), `Router` (`normalize_typed_path` + FNV-1a `HandlerId`), and `RouteTable`.
+  - [Request Batching, Dispatch & Backpressure](architecture/http/batching-dispatch-and-backpressure.md) — `RequestBatcher` (`BatchPolicy::{Fixed, Adaptive}`), `Dispatcher` (`DispatchMode::{Direct, Bridge, SharedMemory}`), `ShmDispatcher` sharded `InFlightRequests` slabs, `PendingRequests`, and `BackpressureController`.
+  - [Protocol and Offload Modules in vertebra-http](architecture/http/protocol-and-offload-modules.md) — `h2c`, `http3`, `grpc`, `sse`, `ws_mount`, `pubsub`, `assets`, `compression`, `cors`, `health`, `payload`, `multipart`, `access_log`, `profile`, `discovery`, `mcp_bridge`, and `direct_worker`.
 - **Python Worker & Protocols (`architecture/worker/`)**:
-  - [PyO3 Zero-Copy FFI & Vectorized Batch Dispatch](architecture/worker/pyo3-ffi-and-batch-dispatch.md) — Slab-backed `Request`/`Headers`/`Response`/`RequestBatch`, `_handler_dispatch_spec`, 4-way `BatchDispatchPlan`, and single-wake `AsyncRuntime`.
-  - [Task-Free ASGI & Sync WSGI Runners](architecture/worker/asgi-and-wsgi-runners.md) — `AsgiRunner` (`_drive_coro`, `_CoroResumer`), `AsgiScope`, `AsgiReceive`/`AsgiSend`, and `WsgiAdapter` (`WsgiEnviron`).
+  - [PyO3 FFI & Vectorized Batch Dispatch](architecture/worker/pyo3-ffi-and-batch-dispatch.md) — `BatchSnapshot`-backed `Request`/`Headers`/`Response`/`RequestBatch`, `_handler_dispatch_spec`, `BatchDispatchPlan` (`sync_native`, `async_native`, `mounts`, `unmatched`), and `AsyncRuntime` / `AsgiEventLoopPool`.
+  - [ASGI, RSGI & WSGI Runners](architecture/worker/asgi-and-wsgi-runners.md) — `AsgiRunner` (`_drive_coro`, `_resume_coro_in_task`), `AsgiScope`, `AsgiReceive`/`AsgiSend`, RSGI 1.6 (`RsgiAdapter`, `RsgiScope`, `RsgiHttpProtocol`), and `WsgiAdapter` (`WsgiEnviron`).
 - **Frontend, SSR & Codegen (`architecture/frontend/`)**:
-  - [Oxc Bundler, HMR & QuickJS SSR Pool](architecture/frontend/bundler-hmr-and-ssr.md) — Oxc `Bundler`, `rolldown-notify` `SourceWatcher`, `rquickjs` `SsrPool` (`ArrayQueue` + `DashMap` TTL cache), and `BuildOrchestrator`.
-  - [TypeScript/Zod Codegen & Inertia v3 Protocol](architecture/frontend/codegen-and-inertia.md) — `TypeExtractor` (`TypeNode` IR), `TypeScriptGenerator`, `ZodGenerator`, `ManifestGenerator`, import maps, and `InertiaMiddleware`.
+  - [Oxc Bundler, HMR Watcher & QuickJS SSR Pool](architecture/frontend/bundler-hmr-and-ssr.md) — Oxc `Bundler`, `rolldown-notify-debouncer-mini` `SourceWatcher`, `rquickjs` `SsrPool` (`ArrayQueue` + `DashMap` 60 s TTL cache), and `BuildOrchestrator`.
+  - [Route Codegen Targets & Inertia v3 Middleware](architecture/frontend/codegen-and-inertia.md) — `RouteCollector`, `TypeExtractor` (`TypeNode` IR), `TypeScriptGenerator`, `ZodGenerator`, `ValibotGenerator`, `OpenApiGenerator`, `ProtobufSchemaGenerator`, `ProceduresGenerator`, `ManifestGenerator`, and `InertiaMiddleware`.
 
 ## Domains (`domains/`)
 
 - **[Domain Vocabulary Index](domains/index.md)**
-  - [Python Framework, Routing & Serialization (`domains/framework/`)](domains/framework/routing-and-app.md)
-  - [Python Server, Worker Loop & Protocol Adapters (`domains/server/`)](domains/server/worker-and-protocols.md)
-  - [Rust IPC, Shared Memory & Ring Transport (`domains/ipc/`)](domains/ipc/transport-and-rings.md)
-  - [Rust HTTP Ingress, Batching & Dispatch (`domains/http/`)](domains/http/server-and-dispatch.md)
-  - [Frontend Bundler, Codegen & TypeScript SDK (`domains/frontend/`)](domains/frontend/bundler-and-client-sdk.md)
+- **Framework (`domains/framework/`)**:
+  - [Python Framework, Routing & Serialization Domain](domains/framework/routing-and-app.md)
+  - [Framework Subdomains](domains/framework/subdomains.md)
+  - [Live State Synchronization](domains/framework/live-state.md)
+  - [`vtb` Command-Line Interface](domains/framework/cli.md)
+- **Server & Worker Runtime (`domains/server/`)**:
+  - [Python Server, Worker Loop & Protocol Adapters Domain](domains/server/worker-and-protocols.md)
+  - [Multi-Lane Worker Runner](domains/server/worker-lanes.md)
+- **IPC & HTTP (`domains/ipc/`, `domains/http/`)**:
+  - [Rust IPC, Shared Memory & Ring Transport Domain](domains/ipc/transport-and-rings.md)
+  - [Rust HTTP Ingress, Batching & Dispatch Domain](domains/http/server-and-dispatch.md)
+- **Frontend, Packaging & WASM (`domains/frontend/`)**:
+  - [Frontend Bundler, Codegen & Client SDK Domain](domains/frontend/bundler-and-client-sdk.md)
+  - [Standalone & Onefile Packaging and PGO Tooling](domains/frontend/packaging-and-pgo.md)
+  - [WASM Plugin Host & Browser Bridge](domains/frontend/wasm.md)
+- **Storage, Data, Telemetry & Extensions (`domains/storage/`, `domains/data/`, `domains/telemetry/`, `domains/extensions/`)**:
+  - [Object Storage, Presigning & Upload Tracking](domains/storage/object-storage.md)
+  - [Database Drivers, Cloud Dialers & Oracle Wallets](domains/data/database-drivers-and-dialers.md)
+  - [Query Pipelines, Change Feeds, Tenant Predicates & DataFusion](domains/data/query-pipeline-cdc-and-tenancy.md)
+  - [Logging, Trace Context, SQL Trace Propagation & GenAI Metrics](domains/telemetry/logging-tracing-and-genai.md)
+  - [Litestar Integration: Route Compiler, Middleware Offload, and Fast Path](domains/extensions/litestar.md)
+  - [SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions](domains/extensions/sqlspec-alchemy-and-dialects.md)
+  - [Oracle APEX, ORDS & E-Business Suite Gateway](domains/extensions/oracle-apex-and-ebs.md)
+  - [gRPC Services & Wire Framing](domains/extensions/grpc.md)
 
 ## Patterns & Conventions (`patterns/`)
 
 - **[Implementation Patterns Index](patterns/index.md)**
-  - [Python Module Structure, Class Layout & PEP 695 Typing (`patterns/python/`)](patterns/python/module-and-class-layout.md)
-  - [Python Hot-Path Caching & Single-Wake Async Dispatch (`patterns/python/`)](patterns/python/hot-path-and-async-dispatch.md)
-  - [Rust PyO3 0.30.1 FFI & GIL Discipline (`patterns/rust/`)](patterns/rust/ffi-and-gil-discipline.md)
-  - [Rust Lock-Free Shared Memory & Sharded Concurrency (`patterns/rust/`)](patterns/rust/lock-free-shm-and-sharding.md)
-  - [TypeScript Client SDK & Framework Adapter Subpaths (`patterns/typescript/`)](patterns/typescript/client-and-adapter-subpaths.md)
+  - [Python Module Structure, Class Layout & PEP 695 Typing](patterns/python/module-and-class-layout.md)
+  - [Hot-Path Caching & Single-Wake Async Dispatch](patterns/python/hot-path-and-async-dispatch.md)
+  - [Serialization & Python Utility Conventions](patterns/python/serialization-and-utils.md)
+  - [PyO3 0.30.1 FFI & GIL Discipline](patterns/rust/ffi-and-gil-discipline.md)
+  - [Lock-Free Shared Memory & Sharded Concurrency](patterns/rust/lock-free-shm-and-sharding.md)
+  - [Client SDK Root Exports, Subpaths & Build Entries](patterns/typescript/client-and-adapter-subpaths.md)
 
 ## Testing & Benchmarks (`testing/`)
 

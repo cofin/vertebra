@@ -1,6 +1,6 @@
 # Vertebra — Agent Instructions
 
-Vertebra is a Python-first, high-performance polyglot application backbone combining Python 3.12+/3.14t developer ergonomics with a Rust 2024 runtime (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`) and a full-stack TypeScript SDK (`@vertebra/client`).
+Vertebra is a Python-first, high-performance polyglot application backbone combining Python 3.12+/3.14t developer ergonomics with a Rust 2024 runtime (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`) and a full-stack TypeScript SDK (`@vertebra/client`).
 
 ## Flow Operational Rule
 
@@ -23,20 +23,24 @@ Commits remain local unless the user explicitly asks for delivery. Never create,
 - [Product Guidelines](.agents/bundles/product/product-guidelines.md) — Clean-break domain naming rules, hot-path invariants, and module layout
 - [Tech Stack](.agents/bundles/product/tech-stack.md) — Python 3.12+/3.14t, Rust 2024 crates, and TypeScript client stack
 - [Project Workflow](.agents/bundles/knowledge/workflow.md) — Canonical `Makefile` commands, polyglot rebuild cycle, verification strategies, and Flow execution loop
-- [Knowledge Index](.agents/bundles/knowledge/index.md) — Nested architectural (`architecture/{runtime,ipc,http,worker,frontend}/`), domain (`domains/{framework,server,ipc,http,frontend}/`), pattern (`patterns/{python,rust,typescript}/`), testing (`testing/`), and gotcha (`gotchas/`) chapters
+- [Knowledge Index](.agents/bundles/knowledge/index.md) — Nested architectural (`architecture/{runtime,ipc,http,worker,frontend}/`), domain (`domains/{framework,server,ipc,http,frontend,storage,data,telemetry,extensions}/`), pattern (`patterns/{python,rust,typescript}/`), testing (`testing/`), and gotcha (`gotchas/`) chapters
 
 ## Quick Verification Commands
 
 ```bash
-make setup-env   # Auto-configure Rodete vs external registries for uv, bun/npm, and cargo
-make install     # Full setup: venv (3.12), uv sync, bun install/build, and maturin develop
-make dev         # Build Rust crates and install debug PyO3 extensions (_vertebra, _bundler)
+make setup-env   # Configure public uv, bun/npm, and cargo registries on hosts whose mirrors replace them; no-op elsewhere
+make install     # Fresh setup: destroy .venv + clean, setup-env, pin Python 3.12, uv sync --all-extras --dev, bun install/build, make dev
+make dev         # Build non-extension Rust crates and install debug PyO3 extensions (_vertebra, _bundler, _storage)
 make lint        # Auto-fix TS (Biome), Python (Ruff), Rust (rustfmt + Clippy), and run Mypy
 make lint-all    # Read-only CI lint and type-check gate across TypeScript, Python, and Rust
-make rs-test     # Clean stale /dev/shm regions and run Rust workspace tests (--features tls,compression)
-make py-test     # Build debug extensions (make dev) and run Python pytest suite
-make ts-test     # Run TypeScript Vitest suite with isolated localstorage
+make rs-test     # Remove /dev/shm/test-* and /dev/shm/*vertebra*, then run Rust workspace tests (--features tls,compression)
+make py-test     # Build debug extensions (make dev) and run the Python pytest suite
+make ts-test     # Run the TypeScript Vitest suite with isolated localstorage
 make test        # Run all Rust, Python, and TypeScript test suites
+make coverage    # Run pytest with coverage (coverage.xml, htmlcov/)
 make check       # Full verification gate: make lint + make test + make coverage
+make build       # Release build: TS client, Rust crates, release maturin develop of the extensions, uv build
+make bench       # make build, then tools.benchmarks (TARGETS=vtb, SCENARIOS=default by default)
 make bench-ft    # Build .venv-ft + src/rs/target-ft and benchmark free-threaded Python 3.14t
+make upgrade     # Upgrade uv, cargo, bun, and pre-commit dependencies
 ```

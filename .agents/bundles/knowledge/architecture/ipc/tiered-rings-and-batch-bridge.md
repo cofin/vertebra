@@ -1,56 +1,67 @@
 ---
 type: Guide
 title: "Tiered Rings & In-Process Batch Bridge"
-description: "RingPair request/response channels, 4-tier TieredRingSet with VRES wire envelopes, multi-frame streaming flags, and in-process BatchBridge slab transport."
+description: "RingPair request/response framing, TieredRingSet size classes, ResponseSlot streaming frames, and the in-process BatchBridge batch transport."
 status: stable
-tags: [architecture, ipc, tiered-rings, batch-bridge, streaming, rust]
+tags: [architecture, ipc, tiered-rings, batch-bridge, rust]
 sources:
   - resource: src/rs/vertebra-core/src/transport/mod.rs
   - resource: src/rs/vertebra-core/src/transport/ring_pair.rs
   - resource: src/rs/vertebra-core/src/tiered_ring.rs
   - resource: src/rs/vertebra-core/src/bridge.rs
-  - resource: src/rs/vertebra-core/src/buffer.rs
   - resource: src/rs/vertebra-core/src/ipc.rs
-  - resource: src/rs/vertebra-core/src/protocol/mod.rs
+  - resource: src/rs/vertebra-core/src/protocol/codec.rs
+  - resource: src/rs/vertebra-py/src/api.rs
+  - resource: src/rs/vertebra-http/src/response_reader.rs
 ---
 
 # Tiered Rings & In-Process Batch Bridge
 
-Vertebra provides three transport abstractions atop its ring primitives: per-worker [`RingPair`](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs), size-segregated [`TieredRingSet`](../../../../../src/rs/vertebra-core/src/tiered_ring.rs), and the in-process [`BatchBridge`](../../../../../src/rs/vertebra-core/src/bridge.rs).
+Both topologies move requests as `BatchSnapshot`s (a `Vec<TransportNode>` plus one byte slab). Embedded mode hands snapshots across threads through [`BatchBridge`](../../../../../src/rs/vertebra-core/src/bridge.rs). Shm mode serializes them into a per-worker [`RingPair`](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs). [`Transport`](../../../../../src/rs/vertebra-core/src/transport/mod.rs) wraps either case as `Backend::InProcess(crossbeam Receiver)` or `Backend::SharedMemory(Arc<RingPair>)`.
 
-## 1. Per-Worker `RingPair` (`transport/ring_pair.rs`)
+## Request Batches (`transport/mod.rs`)
 
-A [`RingPair`](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs) combines a request `MpmcRing` (Tokio ingress $\to$ Python worker) with a 4-tier response [`TieredRingSet`](../../../../../src/rs/vertebra-core/src/tiered_ring.rs) (Python worker $\to$ Tokio ingress) plus two OS [`Notifier`](../../../../../src/rs/vertebra-core/src/notify.rs) instances:
+- **`TransportNode`** (`repr(C)`, 56 bytes): `method_tag`, `http_version_tag`, `handler_id: u64` (FNV-1a route id), `correlation_id: u64`, and `u32` offset/length pairs for path, query, headers, and body inside the slab.
+- **`DataSlab`** and **`TransportArena`**: fixed-capacity buffers filled with `fetch_add` reservations that roll back on overflow. `take_and_replace` swaps the backing `Vec` in O(1).
+- **`BatchSnapshot`**: owned `slab: Vec<u8>`, `nodes: Vec<TransportNode>`, an optional `transport::BufferPool` handle, `flags: u32`, and a lazily decompressed slab (`compression` feature). Dropping a pooled snapshot returns its `(slab, nodes)` pair to the pool.
+- **SHM framing**: `BatchSnapshot::serialize_into` / `deserialize_from` and `ShmBatchWriter` write a 16-byte batch header (`flags`, `node_count`, `slab_len`, padding), the node array, then the slab, into one request-ring slot.
+- Header helpers: `encode_headers_compact`, `iter_raw_headers`, `decode_headers_raw`.
 
-- Requests and responses use the compact `VREQ` / `VRES` binary wire framing in [`transport/mod.rs`](../../../../../src/rs/vertebra-core/src/transport/mod.rs) and [`tiered_ring.rs`](../../../../../src/rs/vertebra-core/src/tiered_ring.rs).
-- `RingPair::from_env` reconstructs the request ring, all 4 response rings, and both `Notifier` descriptors inside child processes using the `VERTEBRA_*_FD` environment variables.
+## In-Process `BatchBridge` (`bridge.rs`)
 
-## 2. 4-Tier Shared-Memory Response Ring Set (`tiered_ring.rs`)
+- `static BRIDGE: OnceLock<BatchBridge>` is set once by `BatchBridge::init(arena_capacity, slab_capacity, channel_depth, max_workers)`; `init_with_codec` also picks a `CompressionCodec`.
+- Writers take `batch_writer()`, which holds `write_lock` for the duration of `push_request` calls and `seal()`. Sealing swaps the active slab and arena with a pooled pair, optionally compresses the slab, and sends the `Arc<BatchSnapshot>` on a bounded `crossbeam_channel` of depth `channel_depth`. The `transport::BufferPool` holds `channel_depth + max(max_workers, 1)` buffer pairs and allocates fresh ones when empty.
+- **Compression**: `try_compress_slab` compresses the whole sealed slab with the configured codec and keeps it only when the output is strictly smaller. The codec is recorded as `flags::COMPRESSED` plus codec bits 6-7 ([`codec.rs`](../../../../../src/rs/vertebra-core/src/protocol/codec.rs)).
+- `poll_batch(timeout)` returns `Option<Arc<BatchSnapshot>>`; PyO3 wraps it in `RequestBatch`.
+- **Responses**: Python calls `submit_responses(Vec<BridgeResponse>)` (`blocking_send` on a `tokio::sync::mpsc` channel); the server task awaits `recv_responses()`. `BridgeResponse` carries `request_id`, `status`, `headers`, and `body`.
 
-[`TieredRingSet`](../../../../../src/rs/vertebra-core/src/tiered_ring.rs) eliminates internal slot fragmentation across heterogeneous payloads by provisioning four [`SpscRing`](../../../../../src/rs/vertebra-core/src/channel.rs) response tiers:
+## Per-Worker `RingPair` (`transport/ring_pair.rs`)
 
-| Tier | Slot Size | Default Capacity | Typical Payload |
-|---|---|---|---|
-| Tier 0 (`tiny`) | `512 B` | `256` slots | Health checks, status codes, small JSON pings |
-| Tier 1 (`small`) | `4 KiB` | `128` slots | Standard REST JSON responses |
-| Tier 2 (`medium`) | `64 KiB` | `32` slots | Large JSON lists, SSR HTML fragments |
-| Tier 3 (`large`) | `1 MiB` | `8` slots | Full-page SSR payloads, bulk exports |
+`RingPair` holds `request_ring: Arc<MpmcRing>`, `response_rings: TieredRingSet`, `request_notifier`, `response_notifier`, and its `RingPairConfig`. The default config uses 1024 request slots of 64 KiB and `TieredRingConfig::default()`.
 
-- **Spillover Promotion**: `TieredRingSet::send_response` and `TieredRingSet::send_response_bytes` select the smallest tier fitting the 20-byte `VRES` header plus headers and body. If that tier's ring is full, they promote the write to the next larger tier and record a spillover counter.
-- **20-Byte `VRES` Response Envelope**: Responses carry a 20-byte `VRES` header (`magic: "VRES"`, `correlation_id: u64`, `status: u16`, `flags: u16`, `headers_len: u32`) followed by compact headers and body bytes, written directly into the SHM slot via `SpscRing::try_send_with`.
+### Response Tiers
 
-## 3. Multi-Frame Streaming & 44-Byte `ResponseSlot` (`ipc.rs`, `protocol/mod.rs`, `buffer.rs`)
+`TieredRingSet` (in `ring_pair.rs`) holds one `SpscRing` per size class from [`TieredRingConfig`](../../../../../src/rs/vertebra-core/src/tiered_ring.rs):
 
-For multi-frame streaming and >`1 MiB` payloads over shared memory:
+| Tier | Slot size | Slots |
+|---|---|---|
+| `small` | 4 KiB | 64 |
+| `medium` | 64 KiB | 16 |
+| `large` | 512 KiB | 4 |
+| `xlarge` | 2 MiB | 2 |
 
-- **44-Byte `ResponseSlot` & Stream Flags ([`ipc.rs`](../../../../../src/rs/vertebra-core/src/ipc.rs))**: `ResponseSlot` (`SLOT_SIZE = 44`) includes `stream_seq: u32` and streaming flags (`FLAG_STREAM_CHUNK = 1 << 4`, `FLAG_STREAM_END = 1 << 5`, `FLAG_TRAILERS = 1 << 6`) alongside `FLAG_COMPRESSED_LZ4` and `FLAG_COMPRESSED_ZSTD`.
-- **`ResponseSlot::encode_raw_parts_into` ([`protocol/mod.rs`](../../../../../src/rs/vertebra-core/src/protocol/mod.rs))**: Writes HTTP status, raw header tuples, and raw body bytes directly into a `BufferPool` slot without constructing an intermediate `PayloadResponse` struct.
-- **`BufferPool::acquire_multi(num_slots)` ([`buffer.rs`](../../../../../src/rs/vertebra-core/src/buffer.rs))**: Atomically reserves $K$ contiguous slots from the bitmap using 64-bit word masks (`release_multi` frees all $K$ slots) so oversized frames never panic when `payload > slot_size`.
+`select_ring(total_size)` returns the smallest tier with `total_size <= slot_size`, or `None` (`ResponseTooLarge`). A full tier returns `ChannelError::Full`; there is no promotion to a larger tier. `send_response_blocking` waits on the chosen tier instead.
 
-## 4. In-Process `BatchBridge` (`bridge.rs`, `buffer.rs`)
+### `VRES` Response Frames
 
-In `Topology::Embedded`, [`BatchBridge`](../../../../../src/rs/vertebra-core/src/bridge.rs) bypasses POSIX shared memory using in-process arenas:
+`send_response` writes a 20-byte header followed by headers and body: `magic: u32` (`RESPONSE_MAGIC = 0x5652_4553`, "VRES"), `correlation_id: u64`, `status: u16`, `headers_len: u16`, `body_len: u32`. `try_recv_response` scans `small` → `xlarge` with `try_recv_view` and parses the first frame into `ResponseData`. The server's `response_reader::drain_worker` reads only this format.
 
-1. **`TransportArena` & `DataSlab`**: Tokio ingress threads push [`RequestSlot`](../../../../../src/rs/vertebra-core/src/bridge.rs) descriptors into a [`TransportArena`](../../../../../src/rs/vertebra-core/src/bridge.rs) whose strings and body bytes reside in a contiguous [`DataSlab`](../../../../../src/rs/vertebra-core/src/buffer.rs).
-2. **`BatchSnapshot`**: When the Python worker calls `get_batch(timeout_ms)` in [`api.rs`](../../../../../src/rs/vertebra-py/src/api.rs), `BatchBridge::poll_batch` returns a [`BatchSnapshot`](../../../../../src/rs/vertebra-core/src/bridge.rs) (`Arc<DataSlab>` + `Vec<RequestSlot>`) wrapped by PyO3 [`RequestBatch`](../../../../../src/rs/vertebra-py/src/batch.rs).
-3. **`BufferPool` Recycling**: Dropped `DataSlab` buffers return to [`BufferPool`](../../../../../src/rs/vertebra-core/src/buffer.rs) so steady-state request batches avoid heap allocation churn.
+## `ResponseSlot` Streaming Frames (`ipc.rs`)
+
+[`ResponseSlot`](../../../../../src/rs/vertebra-core/src/ipc.rs) is a second framing with a 16-byte header `[request_id u64][status u16][flags u16][header_count u16][reserved u16]`, length-prefixed headers, a `u32` body length, and the body. Flags are `u16`: `FLAG_STREAMING`, `FLAG_FINAL`, `FLAG_ERROR`, `FLAG_COMPRESSED`, `FLAG_HEADERS_SENT`, `FLAG_TRAILERS` (bits 0-5).
+
+- `ResponseSlot::encode_raw_parts_into(request_id, status, flags, headers, body, dst)` encodes borrowed parts into a caller buffer without building a `ResponseSlot`.
+- `submit_raw_response` ([`api.rs`](../../../../../src/rs/vertebra-py/src/api.rs)) reads the body through `PyBuffer`, splits it at `slot_capacity` (default 16384) into `STREAMING | HEADERS_SENT` → `STREAMING` → `STREAMING | FINAL` frames (one `Vec<u8>` each), and returns the frames. In SHM mode it also writes them with `send_response_bytes`; in-process mode submits nothing.
+- The server side does not consume these frames today: `Dispatcher::handle_raw_response_slot` and `response_reader::PendingRequests` streaming responders have no production caller, while `drain_worker` only parses `VRES`.
+
+`buffer::BufferPool` (fixed-size buffer leases, `acquire_multi(total_bytes)`) is a different type from `transport::BufferPool` and is used only in tests.

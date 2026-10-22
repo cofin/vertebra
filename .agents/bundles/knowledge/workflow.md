@@ -16,54 +16,59 @@ sources:
 
 <!-- truth: start -->
 - Task files under `.agents/bundles/specs/<flow_id>/tasks/` are authoritative; `spec.md` is the synchronized checklist and continuity view.
-- Use Vertebra's canonical [`Makefile`](../../../Makefile) targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make check`, `make bench`, `make bench-ft`) and rebuild PyO3 extensions via `make dev` after any Rust edit before running `pytest`.
+- Use Vertebra's canonical [`Makefile`](../../../Makefile) targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make coverage`, `make check`, `make build`, `make bench`, `make bench-ft`, `make upgrade`) and rebuild the PyO3 extensions (`_vertebra`, `_bundler`, `_storage`) via `make dev` after any Rust edit before running `pytest`.
 - Every task declares and justifies one `verification_strategy`; only observable behavior and defect correction require an initial failing test.
 - Record durable findings in the task's `## Notes & Discoveries` and preserve unrelated worktree changes.
 - Consumer operational skills install only under `.agents/skills/`. Product, knowledge, research, and specs remain under `.agents/bundles/` (`specs/` and `research/` are created lazily only when needed).
-- Flow never creates, moves, force-updates, or deletes Git tags, and never pushes automatically. All changes in Vertebra must be made on a dedicated feature/fix branch with signed conventional commits (`commit.gpgsign=true`) and submitted via pull request—never directly on `main`.
+- Flow never creates, moves, force-updates, or deletes Git tags, and never pushes automatically. All changes in Vertebra are made on a dedicated feature/fix branch with signed conventional commits (`commit.gpgsign=true`) and submitted via pull request, never directly on `main`.
 <!-- truth: end -->
 
 ## Canonical Polyglot Commands (`Makefile`)
 
-[`tools/scripts/setup-env.sh`](../../../tools/scripts/setup-env.sh) (`make setup-env`, run automatically by `make install` and `make upgrade`) detects internal Linux (`rodete` in `/etc/os-release`) and configures public registries in gitignored `uv.toml`, `.npmrc`, `src/ts/vertebra-client/.npmrc`, and `src/rs/.cargo/config.toml` while removing overrides on external local/CI machines.
+[`tools/scripts/setup-env.sh`](../../../tools/scripts/setup-env.sh) (`make setup-env`, run automatically by `make install` and `make upgrade`) first deletes any existing `uv.toml` and `src/rs/.cargo/config.toml`. On internal corporate Linux workstations whose package mirrors replace the public registries (detected by an `/etc/os-release` match in the script), it then writes `uv.toml` (default index `https://pypi.org/simple`), appends `registry=https://registry.npmjs.org` to `.npmrc` and `src/ts/vertebra-client/.npmrc`, and writes `src/rs/.cargo/config.toml` (sparse crates.io protocol, `git-fetch-with-cli = true`). On other hosts and in CI it writes nothing. The `Makefile` applies the same detection and exports `NPM_CONFIG_REGISTRY`, `PIP_INDEX_URL`, `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `CARGO_REGISTRIES_CRATES_IO_PROTOCOL`, and `CARGO_NET_GIT_FETCH_WITH_CLI`.
 
 ```bash
 # 1. Environment & Native PyO3 Extension Setup
-make setup-env                                            # Auto-configure Rodete vs standard registries (uv, bun/npm, cargo)
-make install                                              # Full fresh setup: venv (3.12), uv sync, bun install/build, maturin develop
-make dev                                                  # Build Rust workspace + debug PyO3 extensions (_vertebra, _bundler)
+make setup-env                                            # Configure public registries on hosts that need them; no-op elsewhere
+make install                                              # destroy + clean + setup-env, then uv python pin 3.12, uv sync --all-extras --dev, ts-install, ts-build, dev
+make dev                                                  # cargo build of non-extension crates + maturin develop for _vertebra, _bundler, _storage
+make upgrade                                              # uv lock --upgrade, cargo update, bun update, pre-commit autoupdate
+make clean                                                # Remove Python/Rust/TS build artifacts and caches (keeps .venv)
 
 # 2. Focused Language Test Suites
-make rs-test                                              # Clean /dev/shm/*vertebra* and run cargo test --workspace --features tls,compression
-make py-test                                              # Run make dev + uv run pytest src/py/tests -v
+make rs-test                                              # rm -rf /dev/shm/test-* /dev/shm/*vertebra*, then cargo test --workspace --features tls,compression
+make py-test                                              # make dev, then uv run pytest src/py/tests -v
 uv run pytest src/py/tests/unit/server/test_runner.py -q  # Focused Python test file (run make dev first if Rust changed)
-make ts-test                                              # Run Vitest in src/ts/vertebra-client with isolated --localstorage-file
+make ts-test                                              # bun run test (vitest run) with an isolated --localstorage-file
 
 # 3. Aggregate Test, Lint & Pre-PR Verification Gates
-make test                                                 # Run rs-test + py-test + ts-test
-make lint                                                 # Auto-fix TS (Biome), Python (Ruff check/format), Rust (fmt/clippy), and run mypy
-make lint-all                                             # Read-only CI gate: Biome + Ruff + mypy + cargo fmt --check + clippy -D warnings
-make coverage                                             # Run pytest with XML/HTML coverage reports
-make check                                                # Full verification gate: make lint + make test + make coverage
+make test                                                 # rs-test + py-test + ts-test
+make lint                                                 # Biome --write --unsafe, ruff check --fix + ruff format, cargo fmt, clippy --fix -D warnings, mypy
+make lint-all                                             # Read-only CI gate: biome check, ruff check, ruff format --check, mypy, cargo fmt --check, clippy -D warnings
+make coverage                                             # uv run pytest src/py/tests --cov, then coverage.xml and htmlcov/ (Python only)
+make check                                                # lint + test + coverage
 
-# 4. Release Builds & Comparative / Free-Threaded Benchmarks (--group bench isolated from dev)
-make build                                                # Release build of @vertebra/client, Rust workspace, maturin wheels, and uv build
-make bench                                                # Run tools.benchmarks (override with TARGETS=vtb SCENARIOS=default)
-make bench-all                                            # Run full benchmark matrix across all targets and scenarios
-make bench-ft                                             # Build .venv-ft + src/rs/target-ft against Python 3.14t and benchmark free-threaded mode
-make bench-report                                         # Render latest benchmark summary report (make bench-diff to compare runs)
+# 4. Release Builds & Benchmarks (--group bench kept out of dev)
+make build                                                # ts-build, release cargo build of non-extension crates, maturin develop -r for the three extensions, uv build
+make bench                                                # make build, then tools.benchmarks run -t ${TARGETS:-vtb} -s ${SCENARIOS:-default} ${BENCH_ARGS}
+make bench-all                                            # make build, then tools.benchmarks run -t all -s full
+make bench-ft                                             # Python 3.14t: sync .venv-ft, build src/rs/target-ft, run -t freethreaded -s ${SCENARIOS:-multiworker}
+make bench-report                                         # Latest benchmark report (make bench-diff compares the latest run with the previous one)
 ```
+
+`make dev` and `make build` exclude `vertebra-py`, `vertebra-bundler`, and `vertebra-storage` from `cargo build --workspace` because `maturin develop` builds and installs them into `.venv`. `make build` installs the release extensions into `.venv` and then runs `uv build`; it does not produce separate extension wheels.
 
 ## Polyglot Rebuild & Hygiene Rules
 
-1. **Rust $\to$ Python FFI Rebuild (`make dev`)**: `uv run pytest` loads compiled `.so` binaries (`vertebra._vertebra` and `vertebra._bundler`) from `.venv`. Whenever any `.rs` file in `vertebra-core`, `vertebra-py`, or `vertebra-bundler` changes, run `make dev` (or `make py-test`) before invoking `uv run pytest`.
-2. **Codegen $\to$ TypeScript Sync**: When modifying route schemas or [`src/py/vertebra/builder/_codegen/`](../../../src/py/vertebra/builder/_codegen/__init__.py), verify both `make py-test` (`src/py/tests/unit/codegen/`) and `make ts-test`.
-3. **Shared-Memory Cleanup**: Interrupted SHM tests can leave `/dev/shm/vertebra-*` or `/dev/shm/vtb-*` segments behind. `make rs-test` purges them automatically before running `cargo test`.
-4. **`--group bench` Isolation**: Keep `duckdb`, `spikard`, `granian`, and `uvicorn` strictly inside `[dependency-groups].bench` in [`pyproject.toml`](../../../pyproject.toml) so `Python 3.14t` test runs never compile `duckdb` C++ from source.
+1. **Rust to Python FFI Rebuild (`make dev`)**: `uv run pytest` loads the compiled `vertebra._vertebra`, `vertebra._bundler`, and `vertebra._storage` extensions from `.venv`. After any `.rs` change in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, or `vertebra-storage`, run `make dev` (or `make py-test`) before `uv run pytest`. `vertebra-http` changes need `make dev` only to rebuild the `vertebra-server` binary.
+2. **Codegen to TypeScript Sync**: When modifying route schemas or [`src/py/vertebra/build/codegen/`](../../../src/py/vertebra/build/codegen/__init__.py), run `make py-test` (`src/py/tests/unit/codegen/`, `src/py/tests/unit/extensions/test_codegen_suite.py`) and `make ts-test`.
+3. **Shared-Memory Cleanup**: `make rs-test` and the autouse `_cleanup_shm` fixture in [`src/py/tests/conftest.py`](../../../src/py/tests/conftest.py) remove `/dev/shm/test-*` and `/dev/shm/*vertebra*`. Runtime segments are named `/vtb-{pid:x}-{seq:x}-{attempt:x}` (`vertebra-core/src/shm.rs`) and are not matched by either glob; remove leftovers from interrupted server or worker runs with `rm -f /dev/shm/vtb-*`.
+4. **`--group bench` Isolation**: Keep `duckdb`, `uvicorn`, `httptools`, `uvloop`, `granian`, and `spikard` inside `[dependency-groups].bench` in [`pyproject.toml`](../../../pyproject.toml) so Python `3.14t` test runs never compile `duckdb` from source.
+5. **TypeScript Build**: `make ts-build` currently fails in the `tsup` declaration step on `src/wasm.ts`, which stops `make install` and `make build`; see [Tech Stack](../product/tech-stack.md#typescript-package-configuration-srctsvertebra-client).
 
 ## Direct-Read Continuity
 
-1. Resolve `.agents/setup-state.json:root_directory`, defaulting to `.agents/`.
+1. Resolve `.agents/setup-state.json:root_directory` (local-only, not tracked), falling back to `.agents/config.json` and then `.agents/`.
 2. Before selecting a flow or doing normal work, scan `<configured-root>/transactions/*/journal.md` and the retired `<configured-root>/tasks/transactions/*/journal.md`. Jointly arbitrate every nonterminal journal (`prepared`, `task_writes_started`, `recovery_required`, `contended`, or `rollback_in_progress`); recover the selected transaction from its recorded fragments, or stop on unresolved conflict.
 3. Resolve the configured bundle root, then read its index and candidate spec frontmatter under `specs/<flow_id>/`.
 4. Read authoritative task frontmatter in `tasks/*.md`.

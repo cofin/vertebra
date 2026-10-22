@@ -14,25 +14,27 @@ tags:
 
 ## Runtime (`runtime/`)
 
-- [Runtime Topologies & Python Embedding](runtime/topologies-and-embedding.md) — Embedded (`append_to_inittab!`, `BatchBridge`), Multi-Process (`WorkerSupervisor`, `RingFactory`), and Free-Threaded Python `3.14t` execution modes.
-- [SHM Worker Supervision & Crash Recovery](runtime/shm-supervision-and-recovery.md) — FD inheritance (`VERTEBRA_*_FD`), `pidfd_open` / `WaitId` crash detection, `RingPair::reclaim`, exponential backoff, and orphaned `/dev/shm` cleanup.
+- [Runtime Topologies & Python Embedding](runtime/topologies-and-embedding.md) — `Topology::Embedded` (`append_to_inittab!(pymodule_init)`, `BatchBridge`), `Topology::Shm` (`RingFactory`, `RingPairFds`), and Free-Threaded Python `3.14t` execution modes (`#[pymodule(gil_used = false)]` across `_vertebra`, `_bundler`, and `_storage`).
+- [SHM Worker Spawn, Shutdown & Recovery Hooks](runtime/shm-supervision-and-recovery.md) — `RingFactory` FD inheritance (`VERTEBRA_*_FD`), `shutdown_workers` (`SIGTERM` then `SIGKILL`), and library-level recovery primitives (`WorkerLifecycle` with `pidfd_open` + `Child::try_wait` and 1 s–32 s exponential backoff, `RingPair::reclaim`, `cleanup_stale_shm`).
+- [Server Platform & Process Lifecycle](runtime/platform-and-lifecycle.md) — `run_supervisor` binary launcher, `AsgiEventLoopPool`, `GilAuditReport`, `LoopShardedResource`, `SyncPool`, `ShmAllocationPolicy`, and container platform primitives (`CgroupQuota`, `LameDuckController`, `ZPagesRegistry`).
 
 ## IPC & Shared Memory (`ipc/`)
 
-- [Lock-Free Ring Buffers & Shared Memory](ipc/ring-buffers-and-shm.md) — `ShmHeader` 4-cache-line layout, `SpscRing` + `SlotView` zero-copy borrow/release, Vyukov `MpmcRing`, LZ4/Zstd payload compression, and Linux/macOS wake primitives.
-- [Tiered Rings & In-Process Batch Bridge](ipc/tiered-rings-and-batch-bridge.md) — `RingPair`, 4-tier `TieredRingSet` with 20-byte `VRES` wire envelopes and spillover, and in-process `BatchBridge` (`TransportArena`, `DataSlab`, `BufferPool`).
+- [Lock-Free Ring Buffers & Shared Memory](ipc/ring-buffers-and-shm.md) — `ShmHeader` layout (metadata plus six cache-line-isolated head/wait/waiter counters), `SpscRing` + `SlotView` zero-copy borrow/release, Vyukov `MpmcRing`, LZ4/Zstd payload compression, and Linux (`futex`/`eventfd`) / macOS (`pipe`/`__ulock_wait`) wake primitives.
+- [Tiered Rings & In-Process Batch Bridge](ipc/tiered-rings-and-batch-bridge.md) — `RingPair`, `TieredRingSet` (`small`/`medium`/`large`/`xlarge` response tiers with 20-byte `VRES` wire headers and spillover), `ResponseSlot` streaming frames, and in-process `BatchBridge` (`TransportArena`, `DataSlab`, `BufferPool`).
 
 ## HTTP Ingress & Dispatch (`http/`)
 
-- [HTTP/1.1 & HTTP/2 Ingress & Native Routing](http/ingress-and-routing.md) — `Server` listener loop, HTTP/1.1 `pipeline_flush`, HTTP/2 `TlsAcceptor`, `Router` (`normalize_typed_path` + FNV-1a `HandlerId`), `RouteTable`, and static assets.
-- [Request Batching, Dispatch & Backpressure](http/batching-dispatch-and-backpressure.md) — 8-shard `RequestBatcher` (`BatchPolicy`), `Dispatcher` modes (`Direct`, `Bridge`, `Shm`, `TieredShm`), 256-shard `InFlightRequests`, and `BackpressureController`.
+- [HTTP Ingress, Request Pipeline & Native Routing](http/ingress-and-routing.md) — `run_with_listener` accept loop (`ServerState`), HTTP/1.1 `pipeline_flush`, ALPN `TlsAcceptor` (`h2` + mTLS), `Router` (`normalize_typed_path` + FNV-1a `HandlerId`), and `RouteTable`.
+- [Request Batching, Dispatch & Backpressure](http/batching-dispatch-and-backpressure.md) — `RequestBatcher` shard pool (`BatchPolicy::{Fixed, Adaptive}`), `Dispatcher` (`DispatchMode::{Direct, Bridge, SharedMemory}`), `ShmDispatcher` sharded `Mutex<InFlightRequests>` slabs, `PendingRequests` streaming `DashMap`, and `BackpressureController`.
+- [Protocol and Offload Modules in vertebra-http](http/protocol-and-offload-modules.md) — Inventory of `vertebra-http` wire protocols (`h2c`, `http3`, `grpc`), realtime brokers (`sse`, `ws_mount`, `pubsub`), and offload helpers (`assets`, `compression`, `cors`, `health`, `payload`, `multipart`, `access_log`, `profile`, `discovery`, `mcp_bridge`, `direct_worker`).
 
 ## Python Worker & Protocols (`worker/`)
 
-- [PyO3 Zero-Copy FFI & Vectorized Batch Dispatch](worker/pyo3-ffi-and-batch-dispatch.md) — `vertebra._vertebra` slab-backed `Request`/`Headers`/`Response`/`RequestBatch`, 4-way `BatchDispatchPlan`, startup `_handler_dispatch_spec`, and single-wake `AsyncRuntime`.
-- [Task-Free ASGI & Sync WSGI Runners](worker/asgi-and-wsgi-runners.md) — `AsgiRunner` direct coroutine driver (`_drive_coro`, `_CoroResumer`), `AsgiScope`, `AsgiReceive`/`AsgiSend`, and `WsgiAdapter` (`WsgiEnviron`).
+- [PyO3 FFI & Vectorized Batch Dispatch](worker/pyo3-ffi-and-batch-dispatch.md) — `vertebra._vertebra` `BatchSnapshot`-backed `Request`/`Headers`/`Response`/`RequestBatch`, `_handler_dispatch_spec` (`lru_cache(maxsize=512)`), `BatchDispatchPlan` (`sync_native`, `async_native`, `mounts`, `unmatched`), and `AsyncRuntime` / `AsgiEventLoopPool` wakeups.
+- [ASGI, RSGI & WSGI Runners](worker/asgi-and-wsgi-runners.md) — `AsgiRunner` (`_drive_coro`, `_step_coro`, `_resume_coro_in_task`, `_BatchProcessor`), 20-slot `AsgiScope`, `AsgiReceive`/`AsgiSend`, RSGI 1.6 (`RsgiAdapter`, `RsgiScope`, `RsgiHttpProtocol`), and `WsgiAdapter` (`WsgiEnviron`).
 
 ## Frontend, SSR & Codegen (`frontend/`)
 
-- [Oxc Bundler, HMR & QuickJS SSR Pool](frontend/bundler-hmr-and-ssr.md) — Oxc `Bundler`, `rolldown-notify` `SourceWatcher`, `rquickjs` `SsrPool` with `ArrayQueue` context leasing and `DashMap` TTL cache, and `BuildOrchestrator`.
-- [TypeScript/Zod Codegen & Inertia v3 Protocol](frontend/codegen-and-inertia.md) — `TypeExtractor` (`TypeNode` IR), `TypeScriptGenerator`, `ZodGenerator`, `ManifestGenerator`, import-map vendor bundling, and `InertiaMiddleware`.
+- [Oxc Bundler, HMR Watcher & QuickJS SSR Pool](frontend/bundler-hmr-and-ssr.md) — Oxc `Bundler` (`vertebra._bundler`), `rolldown-notify-debouncer-mini` `SourceWatcher` (`HmrEvent`), `rquickjs` `SsrPool` with `ArrayQueue` slot leasing and `DashMap` 60 s TTL cache, and `BuildOrchestrator`.
+- [Route Codegen Targets & Inertia v3 Middleware](frontend/codegen-and-inertia.md) — `RouteCollector` and `TypeExtractor` (`TypeNode` IR), `TypeScriptGenerator`, `ZodGenerator`, `ValibotGenerator`, `OpenApiGenerator`, `ProtobufSchemaGenerator`, `ProceduresGenerator`, `ManifestGenerator`, import maps, and `InertiaMiddleware`.

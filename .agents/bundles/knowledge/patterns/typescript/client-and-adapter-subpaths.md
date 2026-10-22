@@ -1,53 +1,114 @@
 ---
 type: Pattern
-title: "Client SDK & Framework Adapter Subpaths"
-description: "Zero-dependency @vertebra/client core, tree-shakeable framework adapter subpaths, Biome formatting, and Python codegen alignment."
+title: "Client SDK Root Exports, Subpaths & Build Entries"
+description: "Rules for the @vertebra/client root entry, package.json subpath exports, tsup build entries, optional peers, and codegen parity."
 status: stable
-tags: [patterns, typescript, client-sdk, adapters, codegen]
+tags: [patterns, typescript, client-sdk, packaging]
 sources:
   - resource: src/ts/vertebra-client/package.json
-  - resource: src/ts/vertebra-client/src/index.ts
-  - resource: src/ts/vertebra-client/src/client/client.ts
-  - resource: src/ts/vertebra-client/src/client/types.ts
-  - resource: src/ts/vertebra-client/src/sse.ts
-  - resource: src/ts/vertebra-client/src/websocket.ts
+  - resource: src/ts/vertebra-client/tsup.config.ts
+  - resource: src/ts/vertebra-client/tsconfig.json
   - resource: src/ts/vertebra-client/biome.json
+  - resource: src/ts/vertebra-client/src/index.ts
+  - resource: src/ts/vertebra-client/src/react/index.tsx
+  - resource: src/ts/vertebra-client/src/svelte/index.ts
+  - resource: src/ts/vertebra-client/src/angular/index.ts
+  - resource: Makefile
 ---
 
-# Client SDK & Framework Adapter Subpaths
+# Client SDK Root Exports, Subpaths & Build Entries
 
-[`@vertebra/client`](../../../../../src/ts/vertebra-client/package.json) provides a zero-runtime-dependency TypeScript core (`HttpClient`, `RealtimeChannel`, `SessionStore`, `HotReloadClient`) plus tree-shakeable subpath exports for six frontend frameworks and build tools.
+[`@vertebra/client`](../../../../../src/ts/vertebra-client/package.json) is an ESM-only package (`"type": "module"`) with no runtime `dependencies`. Optional peers are `react ^19.0.0`, `vue ^3.5.0`, `@angular/core ^22.0.0`, and `vite ^8.0.0`; Svelte is a devDependency only and HTMX is not a dependency.
 
-## 1. Canonical Root Exports (`src/ts/vertebra-client/src/index.ts`)
+## Root entry (`src/index.ts`)
 
-The root `@vertebra/client` entrypoint exports only clean domain symbols (`HttpClient`, `RealtimeChannel`, `HotReloadClient`, `SessionStore`)—never legacy `Vertebra*` prefixes:
+The root entry re-exports the core client and every feature module. Framework adapters are subpath-only.
 
 <!-- truth: start -->
 ```typescript
+export {
+  type ApexGlobalNamespace,
+  type ApexItemHandle,
+  ApexRegion,
+  type ApexRegionBridgeOptions,
+  type IslandDescriptor,
+} from "./apex/index";
+export {
+  ARROW_CONTINUATION_MARKER,
+  ARROW_FILE_MAGIC,
+  ARROW_STREAM_MIME,
+  ArrowStreamClient,
+  type ArrowStreamOptions,
+} from "./arrow";
 export { HttpClient } from "./client/client";
 export * from "./client/errors";
 export { computeBackoffDelay } from "./client/retry";
 export type { ClientConfig, RetryConfig, RouteResponse } from "./client/types";
 export { RealtimeChannel } from "./client/ws";
 export { HotReloadClient, type ServerMessage } from "./hmr/index";
+export {
+  fnv1aFieldId,
+  fnv1aStateId,
+  HybridLogicalClock,
+  LiveStateClient,
+  type LiveStateListener,
+  OfflineDeltaQueue,
+  type StateDeltaMessage,
+  StateOpcode,
+  type StateOpcodeValue,
+} from "./live/index";
+export {
+  SseClient,
+  type SseClientOptions,
+  type SseEventHandler,
+  type SseMessageMeta,
+} from "./sse";
 export { SessionStore, store } from "./store/index";
+export { TraceContext } from "./telemetry";
+export {
+  WASM_MAGIC_BYTES,
+  WasmClient,
+  type WasmClientOptions,
+} from "./wasm";
+export {
+  type PubSubWireFrame,
+  WebSocketClient,
+  type WebSocketClientOptions,
+} from "./websocket";
 ```
 <!-- truth: end -->
 
-## 2. Isolated Subpath Exports (`package.json`)
+`SseClient`, `WebSocketClient`, `RealtimeChannel`, and `HotReloadClient` ship only from the root entry.
 
-Framework and tooling integrations live in dedicated subdirectories exported in [`package.json`](../../../../../src/ts/vertebra-client/package.json):
+## Subpath exports vs tsup entries
 
-- `@vertebra/client/react` ([`src/ts/vertebra-client/src/react/cache.ts`](../../../../../src/ts/vertebra-client/src/react/cache.ts)) — React 19 hooks and `QueryCache`
-- `@vertebra/client/vue` ([`src/ts/vertebra-client/src/vue/index.ts`](../../../../../src/ts/vertebra-client/src/vue/index.ts)) — Vue 3.5 composables
-- `@vertebra/client/svelte` ([`src/ts/vertebra-client/src/svelte/index.ts`](../../../../../src/ts/vertebra-client/src/svelte/index.ts)) — Svelte 5 store bindings
-- `@vertebra/client/angular` ([`src/ts/vertebra-client/src/angular/index.ts`](../../../../../src/ts/vertebra-client/src/angular/index.ts)) — Angular 22 DI service bindings
-- `@vertebra/client/htmx` ([`src/ts/vertebra-client/src/htmx/index.ts`](../../../../../src/ts/vertebra-client/src/htmx/index.ts)) — HTMX extension helpers
-- `@vertebra/client/vite` ([`src/ts/vertebra-client/src/vite/index.ts`](../../../../../src/ts/vertebra-client/src/vite/index.ts)) — Vite 8 plugin and dev proxy helpers
-- `@vertebra/client/store` ([`src/ts/vertebra-client/src/store/index.ts`](../../../../../src/ts/vertebra-client/src/store/index.ts)) — Standalone `SessionStore`
+`package.json` declares 13 export keys; [`tsup.config.ts`](../../../../../src/ts/vertebra-client/tsup.config.ts) lists the build entries.
 
-## 3. Strict TypeScript, Biome & Codegen Parity
+| Export | Source | Contents | tsup entry |
+| --- | --- | --- | --- |
+| `.` | `src/index.ts` | Everything above | yes |
+| `./react` | `src/react/index.tsx` | `ClientProvider`, `ClientContext`, `useClient`, `useQuery`, `useMutation`, `useInvalidateQueries`, `QueryCache`/`queryCache` | listed as `src/react/index.ts` (file is `.tsx`) |
+| `./vue` | `src/vue/index.ts` | `provideClient`, `useClient`, `useQuery`, `useMutation` | yes |
+| `./svelte` | `src/svelte/index.ts` | `setClient`, `getClient`, rune-based (`$state`) `createQuery`/`createMutation` | yes |
+| `./angular` | `src/angular/index.ts` | `@Injectable ClientService`, signal-based `injectQuery`/`injectMutation` | yes |
+| `./htmx` | `src/htmx/index.ts` | `initHtmx(config)` | yes |
+| `./vite` | `src/vite/index.ts` | `vitePlugin(options)` (also default export), `VitePluginOptions` | yes |
+| `./store` | `src/store/index.ts` | `SessionStore`, `store` | yes |
+| `./live` | `src/live/index.ts` | `LiveStateClient`, `HybridLogicalClock`, `OfflineDeltaQueue`, `StateOpcode`, `fnv1aStateId`, `fnv1aFieldId` | yes |
+| `./apex` | `src/apex/index.ts` | `ApexRegion` | yes |
+| `./telemetry` | `src/telemetry.ts` | `TraceContext` | yes |
+| `./wasm` | `src/wasm.ts` | `WasmClient`, `WASM_MAGIC_BYTES` | **no** |
+| `./arrow` | `src/arrow.ts` | `ArrowStreamClient`, `ARROW_*` constants | **no** |
 
-- **TypeScript ([`tsconfig.json`](../../../../../src/ts/vertebra-client/tsconfig.json))**: `strict: true`, `noUncheckedIndexedAccess: true`, `moduleResolution: "bundler"`, `target: "ES2022"`.
-- **Biome ([`biome.json`](../../../../../src/ts/vertebra-client/biome.json))**: Enforced via `make ts-lint` (`bunx biome check --write --unsafe .`) and `make lint-all` (`bunx biome check .`).
-- **Codegen Alignment**: Any change to [`RouteResponse`](../../../../../src/ts/vertebra-client/src/client/types.ts) or client route contracts must be updated in lockstep with [`_typescript.py`](../../../../../src/py/vertebra/builder/_codegen/_typescript.py), [`_zod.py`](../../../../../src/py/vertebra/builder/_codegen/_zod.py), and [`_manifest.py`](../../../../../src/py/vertebra/builder/_codegen/_manifest.py).
+`src/hmr/index.ts` is a tsup entry with no export key; tsup `onSuccess` copies `dist/index.js` and `dist/hmr/index.js` into `src/py/vertebra/server/_js/bundle/` (untracked) for `DevMiddleware`.
+
+Gotcha: `./wasm` and `./arrow` resolve to `dist/wasm.js` / `dist/arrow.js`, which tsup does not emit, and the `./react` entry path does not match `src/react/index.tsx`. Import these symbols from the root entry until the entries are fixed.
+
+## Rules
+
+- **Add a subpath in three places**: the source module, a `package.json` `exports` key (`types` + `import`), and a tsup `entry` with the exact filename. Re-export it from `src/index.ts` only when root consumers need it.
+- **Keep adapters out of the root**: framework adapters import their peer (`react`, `vue`, `svelte`, `@angular/core`, `vite`), all of which tsup marks `external`.
+- **TypeScript settings** ([`tsconfig.json`](../../../../../src/ts/vertebra-client/tsconfig.json)): `strict`, `target: "ES2022"`, `module: "ESNext"`, `moduleResolution: "Bundler"`, `jsx: "react-jsx"`, `lib: ES2022 + DOM`, declarations, declaration maps, and source maps.
+- **Lint**: Biome via `make ts-lint` (`bunx biome check --write --unsafe .`) and `make lint-all` (`bunx biome check .`). Tests run with `make ts-test` (Vitest over `tests/unit/` and the top-level `tests/*.test.ts` suites).
+- **Codegen parity**: client route contracts (`RouteResponse`, `HttpClient.call` path interpolation) must stay aligned with [`_typescript.py`](../../../../../src/py/vertebra/build/codegen/_typescript.py), [`zod.py`](../../../../../src/py/vertebra/build/codegen/zod.py), and [`_manifest.py`](../../../../../src/py/vertebra/build/codegen/_manifest.py).
+- **Cross-language ids**: `fnv1aStateId` (FNV-1a 64, `bigint`) and `fnv1aFieldId` (FNV-1a 32) must match Python `LiveState.compute_state_id` / `compute_field_id` and Rust `state_id` / `field_id` (see [Live State](../../domains/framework/live-state.md)).
