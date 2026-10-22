@@ -24,7 +24,7 @@ __all__ = (
 )
 
 
-class TypeNode(msgspec.Struct, frozen=True, tag_field="_type", tag=True):
+class TypeNode(msgspec.Struct, frozen=True, gc=False, tag_field="_type", tag=True):
     """Base class for route codegen IR nodes."""
 
     def to_typescript(self) -> str:

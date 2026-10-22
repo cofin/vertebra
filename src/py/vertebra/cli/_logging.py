@@ -53,6 +53,7 @@ def configure_logging(
     level: str = "info",
     mode: str = "dev",
     log_format: str = "auto",
+    tracebacks_show_locals: bool = False,
 ) -> None:
     """Configure the root logger for Vertebra.
 
@@ -77,7 +78,7 @@ def configure_logging(
             show_path=False,
             show_time=True,
             rich_tracebacks=True,
-            tracebacks_show_locals=False,
+            tracebacks_show_locals=tracebacks_show_locals,
             markup=True,
             log_time_format="[%H:%M:%S]",
         )

@@ -15,28 +15,29 @@ from typing import Any
 import pytest
 
 import vertebra.storage._store as store_mod
-from vertebra.build import (
-    BuildOrchestrator,
+from vertebra.build import BuildOrchestrator
+from vertebra.build.codegen import (
     CodegenConfig,
     CodegenPlugin,
-    OnefileBuilder,
-    StandaloneBuilder,
     TypeScriptGenerator,
     ValibotGenerator,
     ZodGenerator,
     format_typescript,
 )
+from vertebra.build.packaging import (
+    OnefileBuilder,
+    StandaloneBuilder,
+)
 from vertebra.extensions.litestar import (
     LitestarRouteCompiler,
-    MiddlewareOffloadCompiler,
     compile_litestar_fastpath_routes,
     extract_litestar_routes,
     offload_litestar_middlewares,
 )
 from vertebra.server._gil_audit import GilAuditReport
-from vertebra.server._native import _AsgiMountRunner, _instantiate_mount_runners
-from vertebra.server._runtime_tuning import AsgiEventLoopPool
-from vertebra.server._shm_hardening import ShmAllocationPolicy
+from vertebra.server._loops import EventLoopPool
+from vertebra.server.platform import ShmAllocationPolicy
+from vertebra.server.worker import _AsgiMountRunner, _instantiate_mount_runners
 from vertebra.storage import ObjectStore
 from vertebra.utils.portal import PortalProvider
 from vertebra.utils.sync_tools import (
@@ -77,7 +78,6 @@ def test_subdomain_consolidation_and_shims() -> None:
     assert OnefileBuilder is not None
     assert StandaloneBuilder is not None
     assert LitestarRouteCompiler is not None
-    assert MiddlewareOffloadCompiler is not None
     assert CodegenConfig is not None
 
     valibot_out = ValibotGenerator().emit_schema(
@@ -169,15 +169,16 @@ def test_gil_audit_and_strict_enforcement() -> None:
     assert isinstance(GilAuditReport.is_free_threaded_build(), bool)
     ext_snap = GilAuditReport.snapshot_extensions()
     assert isinstance(ext_snap, frozenset)
-    assert isinstance(GilAuditReport.quarantine_unsafe_modules(), tuple)
+    assert isinstance(GilAuditReport.detect_unsafe_modules(), tuple)
 
-    report = GilAuditReport.audit(ext_snap, gil_enabled_before=True, strict=False)
+    report = GilAuditReport.audit(before_extensions=ext_snap, gil_enabled_before=True, strict=False)
     assert isinstance(report, GilAuditReport)
     assert not report.gil_reenabled_on_import
+    assert report.quarantine_unsafe_modules(4) == 4
 
     with pytest.raises(RuntimeError, match="CPython GIL was silently re-enabled"):
         GilAuditReport.audit(
-            frozenset(),
+            before_extensions=frozenset(),
             gil_enabled_before=False,
             gil_enabled_after=True,
             strict=True,
@@ -207,8 +208,8 @@ def test_shm_allocation_policy_and_scm_rights() -> None:
 
 
 def test_asgi_event_loop_pool_sharded_mount_runners() -> None:
-    """Verify AsgiEventLoopPool exposes loop shards and _instantiate_mount_runners shards ASGI mounts."""
-    pool = AsgiEventLoopPool(size=2)
+    """Verify EventLoopPool exposes loop shards and _instantiate_mount_runners shards ASGI mounts."""
+    pool = EventLoopPool(size=2)
     try:
         assert len(pool.loops) == 2
 

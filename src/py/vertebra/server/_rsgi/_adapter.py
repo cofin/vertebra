@@ -1,24 +1,19 @@
-"""RSGI v1.6 application adapter driving __rsgi_init__, __rsgi__, and __rsgi_del__."""
-
-from __future__ import annotations
+"""RSGI v1.6 application adapter for Vertebra."""
 
 import asyncio
-import contextlib
 import inspect
-import logging
-from typing import Any, Literal
+from collections.abc import Callable
+from typing import Any
 
-Response: Any = None
-RsgiHeaders: Any = None
-RsgiHttpProtocol: Any = None
-RsgiScope: Any = None
-with contextlib.suppress(ImportError):
-    from vertebra._vertebra import (
-        Response,
-        RsgiHeaders,
-        RsgiHttpProtocol,
-        RsgiScope,
-    )
+from vertebra._vertebra import (
+    Request as _NativeRequest,
+)
+from vertebra._vertebra import (
+    Response,
+    RsgiHttpProtocol,
+    RsgiScope,
+)
+from vertebra.server._protocol import InterfaceMode, detect_interface, is_rsgi_app
 
 __all__ = (
     "InterfaceMode",
@@ -27,103 +22,105 @@ __all__ = (
     "is_rsgi_app",
 )
 
-log = logging.getLogger(__name__)
-
-type InterfaceMode = Literal["auto", "asgi", "rsgi", "wsgi"]
-
-
-def is_rsgi_app(app: Any) -> bool:
-    """Return True if the application object exposes an RSGI __rsgi__ entrypoint."""
-    return callable(getattr(app, "__rsgi__", None))
-
-
-def detect_interface(app: Any, configured: InterfaceMode = "auto") -> Literal["asgi", "rsgi", "wsgi"]:
-    """Resolve the gateway protocol interface for an application callable."""
-    if configured != "auto":
-        return configured
-    if is_rsgi_app(app):
-        return "rsgi"
-    if inspect.iscoroutinefunction(app) or (callable(app) and inspect.iscoroutinefunction(type(app).__call__)):
-        return "asgi"
-    try:
-        sig = inspect.signature(app)
-        if len(sig.parameters) == 3:
-            return "asgi"
-        if len(sig.parameters) == 2:
-            return "wsgi"
-    except (TypeError, ValueError):
-        pass
-    return "asgi"
-
 
 class RsgiAdapter:
-    """Drives an RSGI v1.6 application through startup, request handling, and shutdown."""
+    """Adapter that drives an RSGI v1.6 application callable `(scope, protocol)`."""
 
-    __slots__ = ("_app", "_client_addr", "_scheme", "_server_addr")
+    __slots__ = ("_app", "_client", "_is_async", "_mount_prefix", "_scheme", "_server", "_target")
 
     def __init__(
         self,
-        app: Any,
+        app: Callable[..., Any],
         *,
-        server_addr: str = "127.0.0.1:8000",
-        client_addr: str = "127.0.0.1:0",
+        mount_prefix: str = "",
+        server: str = "127.0.0.1:8000",
+        client: str = "127.0.0.1:0",
         scheme: str = "http",
     ) -> None:
         self._app = app
-        self._server_addr = server_addr
-        self._client_addr = client_addr
+        self._target: Callable[..., Any] = getattr(app, "__rsgi__", app)
+        self._mount_prefix = mount_prefix.rstrip("/")
+        self._server = server
+        self._client = client
         self._scheme = scheme
-
-    def startup(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Invoke __rsgi_init__(loop) if defined on the application."""
-        init_hook = getattr(self._app, "__rsgi_init__", None)
-        if callable(init_hook):
-            init_hook(loop)
-
-    def shutdown(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Invoke __rsgi_del__(loop) if defined on the application."""
-        del_hook = getattr(self._app, "__rsgi_del__", None)
-        if callable(del_hook):
-            del_hook(loop)
+        call_attr = type(app).__dict__.get("__call__")
+        self._is_async = (
+            inspect.iscoroutinefunction(self._target)
+            or inspect.iscoroutinefunction(app)
+            or inspect.iscoroutinefunction(call_attr)
+        )
 
     async def run_single(self, request: Any) -> Response:
-        """Execute __rsgi__(scope, protocol) for a native Request object."""
-        req_id = int(getattr(request, "request_id", 0))
-        raw_body = getattr(request, "body", None) or b""
-        if hasattr(request, "rsgi_scope"):
-            scope = request.rsgi_scope(self._scheme, self._server_addr, self._client_addr)
+        """Execute a single HTTP request against the RSGI application."""
+        request_id = int(getattr(request, "request_id", 0))
+        if isinstance(request, _NativeRequest) and not self._mount_prefix:
+            scope = request.rsgi_scope(
+                scheme=self._scheme,
+                server=self._server,
+                client=self._client,
+            )
+            protocol = request.rsgi_protocol()
         else:
-            hdr_pairs = list(request.headers.items()) if hasattr(request, "headers") else []
+            raw_path: str = getattr(request, "path", "/")
+            if self._mount_prefix and raw_path.startswith(self._mount_prefix):
+                path = raw_path[len(self._mount_prefix) :] or "/"
+            else:
+                path = raw_path
+
+            method: str = getattr(request, "method", "GET")
+            query: str = getattr(request, "query", None) or ""
+            http_version: str = getattr(request, "http_version", "1.1")
+            raw_body: bytes = getattr(request, "body", None) or b""
+
+            hdr_pairs: list[tuple[str, str]] = []
+            req_headers = getattr(request, "headers", None)
+            if req_headers is not None:
+                items = req_headers.items() if hasattr(req_headers, "items") else req_headers
+                for k, v in items:
+                    ks = k.decode("latin-1") if isinstance(k, bytes) else str(k)
+                    vs = v.decode("latin-1") if isinstance(v, bytes) else str(v)
+                    hdr_pairs.append((ks, vs))
+
+            authority = next((v for k, v in hdr_pairs if k.lower() == "host"), None)
             scope = RsgiScope(
                 proto="http",
-                http_version=getattr(request, "http_version", "1.1"),
-                server=self._server_addr,
-                client=self._client_addr,
+                http_version=http_version,
+                server=self._server,
+                client=self._client,
                 scheme=self._scheme,
-                method=request.method,
-                path=request.path,
-                query_string=getattr(request, "query", None) or "",
-                headers=RsgiHeaders(hdr_pairs),
+                method=method,
+                path=path,
+                query_string=query,
+                headers=hdr_pairs,
+                authority=authority,
             )
-        protocol = RsgiHttpProtocol(body=raw_body, request_id=req_id)
-        entrypoint = getattr(self._app, "__rsgi__", self._app)
+            protocol = RsgiHttpProtocol(body=raw_body, request_id=request_id)
+
         try:
-            result = entrypoint(scope, protocol)
-            if inspect.isawaitable(result):
-                await result
+            res = self._target(scope, protocol)
+            if inspect.isawaitable(res):
+                await res
             return protocol.take_response()
         except Exception:
-            log.exception("RSGI application raised unhandled exception for request %d", req_id)
-            return Response(
-                status=500,
-                body=b"Internal Server Error",
-                headers=[("content-type", "text/plain"), ("content-length", "21")],
-                request_id=req_id,
-            )
+            if Response is not None:
+                return Response(
+                    500,
+                    b"Internal Server Error",
+                    [("content-type", "text/plain")],
+                    request_id,
+                )
+            raise
 
-    async def handle_request(self, request: Any) -> Response:
-        """Execute __rsgi__(scope, protocol) for a single native Request object."""
-        return await self.run_single(request)
+    def run_batch(self, requests: list[Any], loop: asyncio.AbstractEventLoop | None = None) -> list[Response]:
+        """Execute a batch of requests against the RSGI application."""
+
+        async def _gather() -> list[Response]:
+            return list(await asyncio.gather(*(self.run_single(r) for r in requests)))
+
+        if loop is not None and loop.is_running():
+            fut = asyncio.run_coroutine_threadsafe(_gather(), loop)
+            return fut.result()
+        return asyncio.run(_gather())
 
     async def handle_http(
         self,
@@ -133,30 +130,16 @@ class RsgiAdapter:
         query_string: str = "",
         headers: list[tuple[str, str]] | None = None,
         body: bytes = b"",
-        http_version: str = "1.1",
-        authority: str | None = None,
         request_id: int = 0,
     ) -> Response:
-        """Execute __rsgi__(scope, protocol) from explicit HTTP components."""
-        scope = RsgiScope(
-            proto="http",
-            http_version=http_version,
-            server=self._server_addr,
-            client=self._client_addr,
-            scheme=self._scheme,
-            method=method,
-            path=path,
-            query_string=query_string,
-            headers=RsgiHeaders(headers or []),
-            authority=authority,
+        """Convenience helper to invoke the RSGI app directly with explicit HTTP fields."""
+        full_path = f"{path}?{query_string}" if query_string else path
+        raw_headers = [(k.encode("latin-1"), v.encode("latin-1")) for k, v in (headers or ())]
+        req = _NativeRequest.from_parts(
+            method,
+            full_path,
+            body=body,
+            request_id=request_id,
+            headers=raw_headers or None,
         )
-        protocol = RsgiHttpProtocol(body=body, request_id=request_id)
-        entrypoint = getattr(self._app, "__rsgi__", self._app)
-        result = entrypoint(scope, protocol)
-        if inspect.isawaitable(result):
-            await result
-        return protocol.take_response()
-
-    async def run_batch(self, requests: list[Any]) -> list[Response]:
-        """Execute __rsgi__ concurrently across a batch of requests."""
-        return list(await asyncio.gather(*(self.run_single(req) for req in requests)))
+        return await self.run_single(req)

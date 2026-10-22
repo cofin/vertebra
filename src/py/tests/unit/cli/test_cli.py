@@ -97,7 +97,7 @@ def test_dev_sets_vertebra_dev_env(runner: CliRunner, monkeypatch: pytest.Monkey
     monkeypatch.setattr(dev_module, "build_server_command", fake_build_server_command)
     monkeypatch.setattr(dev_module, "run_supervisor", fake_run_supervisor)
     monkeypatch.setattr(dev_module, "render_banner", lambda **kwargs: None)
-    monkeypatch.setattr(dev_module, "_start_frontend_dev", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dev_module, "_start_frontend_dev", lambda *args, **kwargs: (None, None))
 
     result = runner.invoke(cli, ["dev", "sample_app:app", "--no-banner"])
 

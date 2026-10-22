@@ -97,18 +97,41 @@ pub struct SpanRecord {
     pub flags: u8,
 }
 
+fn is_sql_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn match_sql_keyword(bytes: &[u8], pos: usize, kw: &[u8]) -> Option<usize> {
+    if pos > 0 && is_sql_word_byte(bytes[pos - 1]) {
+        return None;
+    }
+    let end = pos + kw.len();
+    if end > bytes.len() || !bytes[pos..end].eq_ignore_ascii_case(kw) {
+        return None;
+    }
+    if end < bytes.len() && is_sql_word_byte(bytes[end]) {
+        return None;
+    }
+    Some(end)
+}
+
 /// Sanitize high-cardinality SQL `IN (...)` and `VALUES (...)` lists for `db.query.text`.
 pub fn sanitize_sql_statement(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len());
     let bytes = sql.as_bytes();
-    let mut i = 0;
+    let mut last_copied = 0usize;
+    let mut i = 0usize;
     while i < bytes.len() {
-        if i + 3 <= bytes.len() && bytes[i..i + 3].eq_ignore_ascii_case(b"IN ") {
-            let mut j = i + 3;
+        let matched = match_sql_keyword(bytes, i, b"IN")
+            .map(|end| ("IN (?)", end))
+            .or_else(|| match_sql_keyword(bytes, i, b"VALUES").map(|end| ("VALUES (?)", end)));
+
+        if let Some((replacement, kw_end)) = matched {
+            let mut j = kw_end;
             while j < bytes.len() && bytes[j].is_ascii_whitespace() {
                 j += 1;
             }
-            if j < bytes.len() && bytes[j] == b'(' {
+            if j > kw_end && j < bytes.len() && bytes[j] == b'(' {
                 let mut depth = 1usize;
                 let mut k = j + 1;
                 while k < bytes.len() && depth > 0 {
@@ -120,15 +143,17 @@ pub fn sanitize_sql_statement(sql: &str) -> String {
                     k += 1;
                 }
                 if depth == 0 {
-                    out.push_str("IN (?)");
+                    out.push_str(&sql[last_copied..i]);
+                    out.push_str(replacement);
                     i = k;
+                    last_copied = i;
                     continue;
                 }
             }
         }
-        out.push(bytes[i] as char);
         i += 1;
     }
+    out.push_str(&sql[last_copied..]);
     out
 }
 
@@ -151,6 +176,22 @@ mod tests {
         assert_eq!(
             sanitized,
             "SELECT * FROM orders WHERE id IN (?) AND status = 'OPEN'"
+        );
+    }
+
+    #[test]
+    fn sanitize_sql_preserves_utf8_and_join_subquery_and_collapses_values() {
+        let sql = "SELECT * FROM orders JOIN (SELECT id FROM cafés) sub ON sub.id = orders.id WHERE tag IN ('α', 'β') AND note = '🚀'";
+        let sanitized = sanitize_sql_statement(sql);
+        assert_eq!(
+            sanitized,
+            "SELECT * FROM orders JOIN (SELECT id FROM cafés) sub ON sub.id = orders.id WHERE tag IN (?) AND note = '🚀'"
+        );
+
+        let insert_sql = "INSERT INTO items (name, qty) VALUES ('café', 1)";
+        assert_eq!(
+            sanitize_sql_statement(insert_sql),
+            "INSERT INTO items (name, qty) VALUES (?)"
         );
     }
 }

@@ -6,8 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from vertebra.framework._dev_middleware import DevMiddleware, _ws_clients, broadcast_hmr_event
-from vertebra.framework._type_bridge import TypeBridge
+from vertebra.framework.dev import DevMiddleware, TypeBridge, _ws_clients, broadcast_hmr_event
 from vertebra.utils.serializers import decode_json, encode_json
 
 

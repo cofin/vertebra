@@ -1,4 +1,5 @@
 import { computeBackoffDelay } from "./client/retry";
+import { BoundedKeySet } from "./internal/lru_set";
 
 export interface WebSocketClientOptions {
   protocols?: string | string[];
@@ -49,8 +50,7 @@ export class WebSocketClient {
 
   private subscriptions = new Map<string, Set<TopicCallback>>();
   private lastEventIds = new Map<string, string>();
-  private seenIdempotencyOrder: string[] = [];
-  private seenIdempotencySet = new Set<string>();
+  private seenIdempotencyKeys = new BoundedKeySet(MAX_IDEMPOTENCY_KEYS);
 
   constructor(url: string, options: WebSocketClientOptions = {}) {
     this.url = url;
@@ -208,7 +208,7 @@ export class WebSocketClient {
       return;
     }
 
-    if (frame.idempotencyKey && !this.recordIdempotencyKey(frame.idempotencyKey)) {
+    if (frame.idempotencyKey && !this.seenIdempotencyKeys.add(frame.idempotencyKey)) {
       return;
     }
 
@@ -225,21 +225,6 @@ export class WebSocketClient {
         cb(frame.data, frame);
       }
     }
-  }
-
-  private recordIdempotencyKey(key: string): boolean {
-    if (this.seenIdempotencySet.has(key)) {
-      return false;
-    }
-    if (this.seenIdempotencyOrder.length >= MAX_IDEMPOTENCY_KEYS) {
-      const evicted = this.seenIdempotencyOrder.shift();
-      if (evicted !== undefined) {
-        this.seenIdempotencySet.delete(evicted);
-      }
-    }
-    this.seenIdempotencySet.add(key);
-    this.seenIdempotencyOrder.push(key);
-    return true;
   }
 
   private startHeartbeat(): void {

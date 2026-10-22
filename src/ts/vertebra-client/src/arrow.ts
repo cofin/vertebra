@@ -46,4 +46,23 @@ export class ArrowStreamClient {
   public get headers(): Record<string, string> {
     return { ...this.baseHeaders };
   }
+
+  public async fetchBytes(init?: RequestInit): Promise<Uint8Array> {
+    const response = await fetch(this.endpoint, {
+      ...init,
+      headers: {
+        ...this.baseHeaders,
+        ...((init?.headers as Record<string, string> | undefined) ?? {}),
+      },
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Arrow IPC stream: HTTP ${response.status}`);
+    }
+    const buffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    if (!ArrowStreamClient.hasIpcHeader(bytes)) {
+      throw new Error("Invalid Arrow IPC payload");
+    }
+    return bytes;
+  }
 }

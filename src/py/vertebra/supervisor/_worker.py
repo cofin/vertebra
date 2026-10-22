@@ -22,10 +22,11 @@ import logging
 import os
 
 from vertebra.framework._app import App
-from vertebra.server._native import run_worker
+from vertebra.server._gil_audit import GilAuditReport
+from vertebra.server.worker import run_worker
 from vertebra.utils.module_loader import import_app
 
-__all__ = ("import_app", "main")
+__all__ = ("main",)
 
 
 def main() -> None:
@@ -37,6 +38,7 @@ def main() -> None:
     logger = logging.getLogger(f"vertebra.worker.{worker_id}")
     logger.info("starting, app=%r, mode=%s", app_path, transport_mode)
 
+    before_extensions = GilAuditReport.snapshot_loaded_extensions()
     app = import_app(app_path)
 
     if os.environ.get("VERTEBRA_NATIVE") == "0":
@@ -47,9 +49,13 @@ def main() -> None:
 
     handlers = app._handlers
     mounts = list(app.mounts) if hasattr(app, "mounts") else []
-    worker_count = int(os.environ.get("VERTEBRA_WORKERS", "1"))
 
-    run_worker(handlers, mounts=mounts, batch_timeout_ms=100, worker_count=worker_count)
+    run_worker(
+        handlers,
+        mounts=mounts,
+        batch_timeout_ms=100,
+        before_extensions=before_extensions,
+    )
 
 
 if __name__ == "__main__":

@@ -6,14 +6,14 @@ status: stable
 tags: [gotchas, pyo3, asgi, python, free-threaded]
 sources:
   - resource: src/rs/vertebra-py/src/lib.rs
-  - resource: src/rs/vertebra-py/src/api.rs
+  - resource: src/rs/vertebra-py/src/transport.rs
   - resource: src/rs/vertebra-py/src/request.rs
   - resource: src/rs/vertebra-bundler/src/lib.rs
   - resource: src/rs/vertebra-storage/src/lib.rs
   - resource: src/rs/vertebra-http/src/main.rs
   - resource: src/py/vertebra/server/_asgi/_runner.py
-  - resource: src/py/vertebra/server/_asgi/_scope.py
-  - resource: src/py/vertebra/server/_wsgi/_environ.py
+  - resource: src/py/vertebra/server/_asgi/_wire.py
+  - resource: src/py/vertebra/server/_wsgi/_adapter.py
   - resource: src/py/vertebra/server/_gil_audit.py
   - resource: pyproject.toml
 ---
@@ -24,13 +24,13 @@ sources:
 
 - **Symptom**: `RuntimeError: transport not initialized; call init_transport() first` even though Rust initialized `BatchBridge` right before spawning the Python worker thread.
 - **Root Cause**: The `vertebra-server` binary (package `vertebra-http`, feature `python`) statically links `vertebra-py` (`_vertebra`), while `.venv/lib/python3.*/site-packages/vertebra/_vertebra.cpython-*.so` is a separate dynamically loadable shared object. If Python executes a file-backed `import vertebra._vertebra`, `dlopen` loads the `.so` from disk with a **second** copy of `static BRIDGE: OnceLock<BatchBridge>` that is uninitialized.
-- **Rule**: In [`src/rs/vertebra-http/src/main.rs`](../../../../src/rs/vertebra-http/src/main.rs), always call `pyo3::append_to_inittab!(pymodule_init)` (imported from `_vertebra`) before the first `Python::attach` (`auto-initialize`), and on the worker thread alias `sys.modules["vertebra._vertebra"] = sys.modules["_vertebra"]` before importing the application or `vertebra.server._native`.
+- **Rule**: In [`src/rs/vertebra-http/src/main.rs`](../../../../src/rs/vertebra-http/src/main.rs), always call `pyo3::append_to_inittab!(pymodule_init)` (imported from `_vertebra`) before the first `Python::attach` (`auto-initialize`), and on the worker thread alias `sys.modules["vertebra._vertebra"] = sys.modules["_vertebra"]` before importing the application or `vertebra.server._dispatch`.
 
 ## 2. Missing `#[pymodule(gil_used = false)]` Re-Enables the GIL on Python `3.14t`
 
 - **Symptom**: `sys._is_gil_enabled()` flips from `False` to `True` with a `RuntimeWarning` when importing native extensions under `python3.14t`.
 - **Root Cause**: CPython `3.14t` automatically re-enables the GIL if any imported C/PyO3 extension module omits `Py_MOD_GIL_NOT_USED`.
-- **Rule**: Every `#[pymodule]` in the workspace ([`vertebra-py/src/lib.rs`](../../../../src/rs/vertebra-py/src/lib.rs), [`vertebra-bundler/src/lib.rs`](../../../../src/rs/vertebra-bundler/src/lib.rs), and [`vertebra-storage/src/lib.rs`](../../../../src/rs/vertebra-storage/src/lib.rs)) must keep `#[pymodule(gil_used = false)]`. At worker startup, [`GilAuditReport.audit()`](../../../../src/py/vertebra/server/_gil_audit.py) inspects loaded extensions, logs warnings if the GIL was re-enabled, and raises `RuntimeError` when `VERTEBRA_STRICT_FREE_THREADING=1`.
+- **Rule**: Every `#[pymodule]` in the workspace ([`vertebra-py/src/lib.rs`](../../../../src/rs/vertebra-py/src/lib.rs), [`vertebra-bundler/src/lib.rs`](../../../../src/rs/vertebra-bundler/src/lib.rs), and [`vertebra-storage/src/lib.rs`](../../../../src/rs/vertebra-storage/src/lib.rs)) must keep `#[pymodule(gil_used = false)]`. At worker startup, [`GilAuditor.audit()`](../../../../src/py/vertebra/server/_gil_audit.py) inspects loaded extensions, logs warnings if the GIL was re-enabled, and raises `RuntimeError` when `VERTEBRA_STRICT_FREE_THREADING=1`.
 
 ## 3. Task-Free `AsgiRunner` vs `asyncio.current_task()` (`_asgi/_runner.py`)
 
@@ -41,8 +41,8 @@ sources:
 ## 4. Unanchored `Request.body_view`, Shared Class Names & `submit_raw_response`
 
 - **Unanchored `Request.body_view` Lifetime**: [`Request.body_view`](../../../../src/rs/vertebra-py/src/request.rs) constructs a read-only `memoryview` via `PyMemoryView_FromMemory` over the `BatchSnapshot` slab without a lifetime anchor. It is valid only during the synchronous handler turn; call `bytes(request.body_view)` before retaining the payload across `await` points or background tasks.
-- **Native vs Fallback Class Name Collisions**: [`vertebra._vertebra.AsgiScope`](../../../../src/rs/vertebra-py/src/lib.rs) and [`vertebra.server._asgi._scope.AsgiScope`](../../../../src/py/vertebra/server/_asgi/_scope.py) (as well as native vs fallback `WsgiEnviron`, `Request`, and `Response` in `vertebra.framework._types`) share class names. Import native request-path types from `vertebra._vertebra`; the Python classes are pure-Python fallbacks for unit tests and non-native callers.
-- **`submit_raw_response` In-Process Behavior**: [`submit_raw_response`](../../../../src/rs/vertebra-py/src/api.rs) transmits frames only when `SHM_TRANSPORT` is initialized; in in-process `BatchBridge` mode it returns the encoded `ResponseSlot` byte frames without submitting them. Use `Response` + `submit_response` / `submit_results` for in-process workers.
+- **Native vs Fallback Class Name Collisions**: [`vertebra._vertebra.AsgiScope`](../../../../src/rs/vertebra-py/src/lib.rs) and [`vertebra.server._asgi._wire.AsgiScope`](../../../../src/py/vertebra/server/_asgi/_wire.py) (as well as native vs fallback `WsgiEnviron` in [`_wsgi/_adapter.py`](../../../../src/py/vertebra/server/_wsgi/_adapter.py) and `Request` / `Response` in `vertebra.framework._router`) share class names. Import native request-path types from `vertebra._vertebra`; the Python classes are pure-Python fallbacks for unit tests and non-native callers.
+- **`submit_raw_response` In-Process Behavior**: [`submit_raw_response`](../../../../src/rs/vertebra-py/src/transport.rs) transmits frames only when `SHM_TRANSPORT` is initialized; in in-process `BatchBridge` mode it returns the encoded `ResponseSlot` byte frames without submitting them. Use `Response` + `submit_response` / `submit_results` for in-process workers.
 
 ## 5. Stale PyO3 Extension Binaries & `bench` Dependency Isolation
 

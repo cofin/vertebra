@@ -21,12 +21,11 @@ use tracing_subscriber::EnvFilter;
 use vertebra_core::bridge::BatchBridge;
 
 use vertebra_http::{
-    collector::{PendingResponse, RequestBatcher},
+    batcher::{BatchLimit, PendingResponse, RequestBatcher},
     config::ServerConfig,
     dispatcher::Dispatcher,
     response::encode_response_headers,
-    route_table::RouteTable,
-    router::Router,
+    routing::{RouteTable, Router},
     server,
 };
 
@@ -172,6 +171,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
+    #[cfg(unix)]
+    vertebra_http::workers::cleanup_stale_shm();
+    vertebra_http::workers::install_panic_cleanup_hook();
+
+    let server_shutdown_token = tokio_util::sync::CancellationToken::new();
     let config = Arc::new(ServerConfig::from_env());
 
     // --- Initialize bridge ---
@@ -221,19 +225,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // --- Worker spawning + Dispatcher setup ---
     #[cfg(all(feature = "python", unix))]
-    let mut shm_children: Option<Vec<std::process::Child>> = None;
+    let mut shm_factory: Option<Arc<std::sync::Mutex<vertebra_http::workers::RingFactory>>> = None;
 
     let dispatcher;
 
     #[cfg(feature = "python")]
     {
         if config.topology == vertebra_http::config::Topology::Shm {
-            // Multi-process mode: SHM dispatcher + response reader
+            // Multi-process mode: SHM dispatcher + response reader + supervisor
             #[cfg(unix)]
             {
+                use std::sync::Mutex;
                 use vertebra_core::transport::ring_pair::RingPairConfig;
-                use vertebra_http::response_reader;
-                use vertebra_http::ring_factory::RingFactory;
+                use vertebra_http::dispatcher::{ShmDispatcher, shm_reader};
+                use vertebra_http::workers::{RingFactory, Supervisor};
 
                 let worker_count = if config.workers.count > 0 {
                     config.workers.count
@@ -241,7 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     1
                 };
 
-                let factory = RingFactory::new(worker_count, RingPairConfig::default())
+                let mut factory = RingFactory::new(worker_count, RingPairConfig::default())
                     .expect("failed to create ring factory");
 
                 info!(
@@ -250,27 +255,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 );
 
                 // Create SHM dispatcher with ring pairs
-                let ring_pairs: Vec<Arc<vertebra_core::transport::ring_pair::RingPair>> =
-                    factory.all_ring_pairs().to_vec();
+                let ring_pairs = factory.all_ring_pairs().to_vec();
+                let shm = ShmDispatcher::new(ring_pairs.clone(), 65536);
                 dispatcher = Arc::new(
-                    Dispatcher::new_shm(ring_pairs.clone(), 65536)
+                    Dispatcher::from_shm(Arc::clone(&shm))
                         .with_backpressure(config.backpressure.clone()),
                 );
 
+                // Spawn sweeper
+                shm.spawn_sweeper(server_shutdown_token.clone());
+
                 // Spawn response reader
-                let shutdown_token = tokio_util::sync::CancellationToken::new();
-                tokio::spawn(response_reader::run_response_reader(
+                shm_reader::spawn_response_readers(
                     ring_pairs,
                     Arc::clone(&dispatcher),
-                    shutdown_token.clone(),
-                ));
+                    server_shutdown_token.clone(),
+                );
 
                 // Spawn worker processes
                 let children = factory
                     .spawn_all(&app_path, &config.workers.python_bin)
                     .expect("failed to spawn workers");
 
-                shm_children = Some(children);
+                factory.attach_children(children, &app_path, &config.workers.python_bin);
+
+                let factory = Arc::new(Mutex::new(factory));
+                Supervisor::spawn(
+                    Arc::clone(&factory),
+                    Arc::clone(&shm),
+                    server_shutdown_token.clone(),
+                );
+
+                shm_factory = Some(factory);
             }
 
             #[cfg(not(unix))]
@@ -301,7 +317,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let shard_count = 8;
     let collector_shards = RequestBatcher::spawn_pool(
         Arc::clone(&dispatcher),
-        vertebra_http::policy::BatchPolicy::default_adaptive(),
+        BatchLimit::default(),
         shard_count,
         16384,
     );
@@ -321,13 +337,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     )
     .await?;
 
+    server_shutdown_token.cancel();
+
     // --- Graceful shutdown of SHM workers ---
     #[cfg(all(feature = "python", unix))]
-    if let Some(ref mut children) = shm_children {
-        use vertebra_http::ring_factory::RingFactory;
+    if let Some(factory) = shm_factory {
+        use vertebra_http::workers::RingFactory;
 
         info!("shutting down multi-process workers");
-        RingFactory::shutdown_workers(children, std::time::Duration::from_secs(5));
+        let mut factory = factory.lock().unwrap();
+        let lifecycles = factory.lifecycles_mut();
+        let mut children: Vec<_> = lifecycles
+            .iter_mut()
+            .filter_map(|l| l.child.take())
+            .collect();
+        RingFactory::shutdown_workers(&mut children, std::time::Duration::from_secs(5));
     }
 
     Ok(())

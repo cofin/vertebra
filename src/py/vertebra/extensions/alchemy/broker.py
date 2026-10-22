@@ -15,6 +15,8 @@ from typing import Any, Protocol, Self, runtime_checkable
 
 import msgspec
 
+from vertebra.utils.serializers import encode_msgpack
+
 __all__ = (
     "BrokerConfig",
     "BrokerMetrics",
@@ -24,6 +26,8 @@ __all__ = (
     "ConnectionLease",
     "InMemoryBrokerTransport",
     "ShmBrokerTransport",
+    "ShmSessionBroker",
+    "StatementCache",
 )
 
 
@@ -318,13 +322,12 @@ class InMemoryBrokerTransport:
 class ShmBrokerTransport(InMemoryBrokerTransport):
     """Shared-memory backed connection lease broker coordinating across worker processes."""
 
-    __slots__ = ("_encoder", "_shm_name", "_shm_region")
+    __slots__ = ("_shm_name", "_shm_region")
 
     def __init__(self, config: BrokerConfig | None = None) -> None:
         resolved_cfg = config or BrokerConfig()
         super().__init__(resolved_cfg)
         self._shm_name = resolved_cfg.shm_name or f"/vtb_broker_{os.getpid()}"
-        self._encoder = msgspec.msgpack.Encoder()
         self._shm_region = self._init_shm_region(self._shm_name)
 
     @property
@@ -335,7 +338,7 @@ class ShmBrokerTransport(InMemoryBrokerTransport):
     def publish(self, channel: str, payload: bytes) -> ChannelMessage:
         """Publish a ChannelMessage and encode it into MsgPack."""
         message = super().publish(channel, payload)
-        _ = self._encoder.encode(message)
+        _ = encode_msgpack(message)
         return message
 
     def close(self) -> None:
@@ -355,9 +358,102 @@ class ShmBrokerTransport(InMemoryBrokerTransport):
             shm_cls = getattr(native, "ShmRegion", None)
             if shm_cls is not None:
                 return shm_cls.create(name, 65536)
-        except Exception:
+        except (ImportError, AttributeError, OSError, RuntimeError, ValueError):
             return None
         return None
+
+
+class ShmSessionBroker:
+    """Thread-safe session broker managing connection checkout/checkin with async waiter queue."""
+
+    __slots__ = ("_capacity", "_in_use", "_lock", "_waiters")
+
+    def __init__(self, capacity: int = 10) -> None:
+        """Initialize session broker with capacity limit and synchronization lock."""
+        self._capacity = max(1, capacity)
+        self._in_use = 0
+        self._lock = threading.Lock()
+        self._waiters: deque[asyncio.Future[None]] = deque()
+
+    @property
+    def capacity(self) -> int:
+        """Return maximum concurrent session capacity."""
+        return self._capacity
+
+    @property
+    def in_use(self) -> int:
+        """Return number of currently active session leases."""
+        with self._lock:
+            return self._in_use
+
+    def acquire(self, timeout: float | None = None) -> bool:
+        """Acquire a session slot synchronously."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            with self._lock:
+                if self._in_use < self._capacity:
+                    self._in_use += 1
+                    return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(0.001)
+
+    async def acquire_async(self, timeout: float | None = None) -> bool:
+        """Acquire a session slot asynchronously without blocking the event loop."""
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            if self._in_use < self._capacity:
+                self._in_use += 1
+                return True
+            waiter: asyncio.Future[None] = loop.create_future()
+            self._waiters.append(waiter)
+
+        try:
+            if timeout is not None:
+                await asyncio.wait_for(asyncio.shield(waiter), timeout=timeout)
+            else:
+                await waiter
+            return True
+        except (TimeoutError, asyncio.CancelledError):
+            waiter.cancel()
+            return False
+
+    def release(self) -> None:
+        """Release a session slot and wake the next pending waiter."""
+        with self._lock:
+            if self._in_use > 0:
+                self._in_use -= 1
+            while self._waiters:
+                next_waiter = self._waiters.popleft()
+                if not next_waiter.done():
+                    self._in_use += 1
+                    next_waiter.set_result(None)
+                    break
+
+    async def release_async(self) -> None:
+        """Release a session slot asynchronously holding the lock."""
+        self.release()
+
+
+class StatementCache:
+    """Pre-compilation and parameter ordering cache for SQLAlchemy statements."""
+
+    __slots__ = ("_cache",)
+
+    def __init__(self) -> None:
+        """Initialize empty statement plan cache."""
+        self._cache: dict[str, tuple[str, tuple[str, ...]]] = {}
+
+    def compile_and_encode(self, statement: Any) -> tuple[str, tuple[str, ...]]:
+        """Compile a statement or ClauseElement and extract SQL text and parameter order."""
+        compile_fn = getattr(statement, "compile", None)
+        if callable(compile_fn):
+            compiled = compile_fn()
+            sql_text = str(compiled)
+            param_order = tuple(getattr(compiled, "positiontup", None) or tuple(getattr(compiled, "params", {}).keys()))
+            return sql_text, param_order
+        sql_text = str(statement)
+        return sql_text, ()
 
 
 class BrokerPlugin:

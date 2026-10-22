@@ -1,82 +1,28 @@
-"""Unified build orchestrator, multi-target codegen, and standalone/onefile packaging for Vertebra."""
+"""Unified build orchestrator, multi-target codegen, and packaging for Vertebra."""
 
-from vertebra.build import codegen, packaging
-from vertebra.build._config import BuildConfig, JsConfig
-from vertebra.build._fallback import DevServerProcess, run_vite_build
-from vertebra.build._import_map import ImportMapGenerator
-from vertebra.build._orchestrator import BuildOrchestrator
-from vertebra.build.codegen import (
-    CODEGEN_STATE_KEY,
-    CodegenConfig,
-    CodegenPlugin,
-    CodegenWatcher,
-    HmrEventRouter,
-    HmrNotifier,
-    ManifestGenerator,
-    OpenAPIGenerator,
-    ProcedureClientGenerator,
-    ProcedureInfo,
-    ProcedureParam,
-    ProcedureRegistry,
-    ProtobufGenerator,
-    RouteCollector,
-    RouteMetadata,
-    TypeExtractor,
-    TypeScriptGenerator,
-    ValibotGenerator,
-    ZodGenerator,
-    format_typescript,
-    get_procedure_registry,
-    procedure,
-)
-from vertebra.build.packaging import (
-    KNOWN_TARGETS,
-    ONEFILE_MAGIC,
-    ONEFILE_TRAILER_SIZE,
-    PBS_BASE_URL,
-    PBS_RELEASE_TAG,
-    BuildTarget,
-    OnefileBuilder,
-    StandaloneBuilder,
-)
+from typing import TYPE_CHECKING
+
+from vertebra.utils.module_loading import lazy_exports
+
+if TYPE_CHECKING:
+    from vertebra.build import codegen, packaging
+    from vertebra.build._config import BuildConfig, JsConfig
+    from vertebra.build._orchestrator import BuildOrchestrator
 
 __all__ = (
-    "CODEGEN_STATE_KEY",
-    "KNOWN_TARGETS",
-    "ONEFILE_MAGIC",
-    "ONEFILE_TRAILER_SIZE",
-    "PBS_BASE_URL",
-    "PBS_RELEASE_TAG",
     "BuildConfig",
     "BuildOrchestrator",
-    "BuildTarget",
-    "CodegenConfig",
-    "CodegenPlugin",
-    "CodegenWatcher",
-    "DevServerProcess",
-    "HmrEventRouter",
-    "HmrNotifier",
-    "ImportMapGenerator",
     "JsConfig",
-    "ManifestGenerator",
-    "OnefileBuilder",
-    "OpenAPIGenerator",
-    "ProcedureClientGenerator",
-    "ProcedureInfo",
-    "ProcedureParam",
-    "ProcedureRegistry",
-    "ProtobufGenerator",
-    "RouteCollector",
-    "RouteMetadata",
-    "StandaloneBuilder",
-    "TypeExtractor",
-    "TypeScriptGenerator",
-    "ValibotGenerator",
-    "ZodGenerator",
     "codegen",
-    "format_typescript",
-    "get_procedure_registry",
     "packaging",
-    "procedure",
-    "run_vite_build",
 )
+
+_EXPORTS: dict[str, str] = {
+    "BuildConfig": "vertebra.build._config",
+    "BuildOrchestrator": "vertebra.build._orchestrator",
+    "JsConfig": "vertebra.build._config",
+    "codegen": "vertebra.build.codegen",
+    "packaging": "vertebra.build.packaging",
+}
+
+__getattr__, __dir__ = lazy_exports(__name__, _EXPORTS)

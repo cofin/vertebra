@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import base64
+import collections
+import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+import vertebra.storage as storage
 from vertebra.storage import (
-    AsyncStore,
     AzureConfig,
     GcsConfig,
     HttpConfig,
@@ -20,7 +23,6 @@ from vertebra.storage import (
     ReadableFile,
     S3Config,
     SigningConfig,
-    SyncStore,
     UploadTracker,
 )
 
@@ -84,24 +86,64 @@ def test_storage_provider_configs_to_url_and_options(tmp_path: Path) -> None:
     assert mem_opts == {"namespace": "unit"}
 
 
-@pytest.mark.anyio
-async def test_sync_store_and_async_store_facades(tmp_path: Path) -> None:
-    """SyncStore and AsyncStore provide explicit sync and async facades over ObjectStore."""
-    base_store = ObjectStore.from_local(tmp_path)
-    sync_store = SyncStore(base_store)
-    async_store = AsyncStore(base_store)
+def test_sync_store_and_async_store_facades_removed() -> None:
+    """SyncStore and AsyncStore wrappers are deleted in favor of unified ObjectStore."""
+    assert not hasattr(storage, "SyncStore")
+    assert not hasattr(storage, "AsyncStore")
 
-    res = sync_store.put("folder/item.txt", b"hello-vertebra")
-    assert res.size == 14
-    assert sync_store.exists("folder/item.txt")
-    assert sync_store.get("folder/item.txt") == b"hello-vertebra"
-    assert sync_store.get_range("folder/item.txt", 6, 8) == b"vertebra"
 
-    await async_store.put("folder/async.txt", b"async-payload")
-    assert await async_store.exists("folder/async.txt")
-    assert await async_store.get("folder/async.txt") == b"async-payload"
-    items = await async_store.list("folder")
-    assert len(items) == 2
+def test_verify_presigned_url_gcs_raises_not_implemented() -> None:
+    """Verifying a GCS presigned URL offline raises NotImplementedError."""
+    store = ObjectStore(
+        "gs://ml-artifacts",
+        signing=SigningConfig(
+            provider="gcs",
+            bucket="ml-artifacts",
+            service_account_email="signer@project.iam.gserviceaccount.com",
+            iam_endpoint="http://127.0.0.1:8000",
+            access_token="mock-token",
+        ),
+    )
+    with pytest.raises(
+        NotImplementedError,
+        match="GCS V4 RSA-SHA256 presigned URL verification is not supported offline",
+    ):
+        store.verify_presigned_url(
+            "https://storage.googleapis.com/ml-artifacts/test.bin?X-Goog-Algorithm=GOOG4-RSA-SHA256"
+        )
+
+
+def test_upload_tracker_logs_rollback_errors_and_uses_deque(caplog: pytest.LogCaptureFixture) -> None:
+    """UploadTracker uses collections.deque, logs warnings on delete errors, and attaches after_flush."""
+    store = ObjectStore.from_memory("staging-test-err")
+    tracker = UploadTracker(store)
+
+    assert isinstance(tracker._staged_uploads, collections.deque)
+    assert isinstance(tracker._pending_deletes, collections.deque)
+
+    mock_session = MagicMock()
+    mock_listen = MagicMock()
+    mock_event_mod = MagicMock(listen=mock_listen)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(sys.modules, "sqlalchemy.event", mock_event_mod)
+        tracker.attach_sqlalchemy_session(mock_session)
+        mock_listen.assert_any_call(mock_session, "after_flush", tracker.before_flush)
+        mock_listen.assert_any_call(mock_session, "after_commit", tracker.after_commit)
+        mock_listen.assert_any_call(mock_session, "after_rollback", tracker.after_rollback)
+
+    tracker.stage_upload("fail/item.bin", b"data")
+    tracker.before_flush()
+    assert store.exists("fail/item.bin")
+
+    with pytest.MonkeyPatch.context() as mp:
+
+        def _failing_delete(self_store: ObjectStore, k: str) -> None:
+            raise OSError("disk IO failure")
+
+        mp.setattr(ObjectStore, "delete", _failing_delete)
+        with caplog.at_level("WARNING"):
+            tracker.after_rollback()
+        assert "Failed to delete object 'fail/item.bin' during transaction cleanup" in caplog.text
 
 
 def test_azure_sas_and_r2_uniform_chunking() -> None:

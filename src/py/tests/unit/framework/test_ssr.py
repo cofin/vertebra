@@ -1,10 +1,12 @@
 """Tests for SSR execution backends."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vertebra.framework._ssr._backends import (
+from vertebra.framework.ssr import (
+    NativeSsrClient,
     SidecarSsrClient,
     SsrResult,
     create_ssr_client,
@@ -33,8 +35,8 @@ def test_create_ssr_client_empty_entry_returns_none() -> None:
 
 def test_create_ssr_client_native_mode_fallback_on_import_error() -> None:
     with (
-        patch("vertebra.framework._ssr._backends.NativeSsrClient", side_effect=ImportError),
-        patch("vertebra.framework._ssr._backends.SidecarSsrClient") as mock_sidecar,
+        patch("vertebra.framework.ssr.NativeSsrClient", side_effect=ImportError),
+        patch("vertebra.framework.ssr.SidecarSsrClient") as mock_sidecar,
     ):
         mock_sidecar.return_value = MagicMock()
         client = create_ssr_client(mode="native", entry="/tmp/ssr.js", sidecar_port=19999)
@@ -43,7 +45,7 @@ def test_create_ssr_client_native_mode_fallback_on_import_error() -> None:
 
 
 def test_create_ssr_client_sidecar_mode_creates_sidecar() -> None:
-    with patch("vertebra.framework._ssr._backends.SidecarSsrClient") as mock:
+    with patch("vertebra.framework.ssr.SidecarSsrClient") as mock:
         mock.return_value = MagicMock()
         client = create_ssr_client(mode="sidecar", entry="/tmp/ssr.js", sidecar_port=19999)
         assert client is not None
@@ -52,8 +54,8 @@ def test_create_ssr_client_sidecar_mode_creates_sidecar() -> None:
 
 def test_create_ssr_client_native_mode_with_init_error_falls_back() -> None:
     with (
-        patch("vertebra.framework._ssr._backends.NativeSsrClient", side_effect=RuntimeError("boom")),
-        patch("vertebra.framework._ssr._backends.SidecarSsrClient") as mock_sidecar,
+        patch("vertebra.framework.ssr.NativeSsrClient", side_effect=RuntimeError("boom")),
+        patch("vertebra.framework.ssr.SidecarSsrClient") as mock_sidecar,
     ):
         mock_sidecar.return_value = MagicMock()
         client = create_ssr_client(mode="native", entry="/tmp/ssr.js")
@@ -105,3 +107,27 @@ def test_sidecar_ssr_client_start_no_runtime_raises() -> None:
         pytest.raises(RuntimeError, match="Node.js or Bun required"),
     ):
         SidecarSsrClient("ssr.js", port=19999)
+
+
+def test_native_ssr_client_with_real_pool(tmp_path: Path) -> None:
+    """NativeSsrClient should use real SsrPool to render component and return SsrResult."""
+    bundle_file = tmp_path / "ssr.js"
+    bundle_file.write_text(
+        """
+        globalThis.__ssr_render = function(component, props) {
+            return {
+                head: ["<title>" + (props.title || "Default") + "</title>"],
+                body: "<h1>" + component + "</h1>"
+            };
+        };
+        """,
+        encoding="utf-8",
+    )
+    client = NativeSsrClient(str(bundle_file), pool_size=2)
+    try:
+        res = client.render({"component": "Home", "title": "My Title"})
+        assert res.head == ["<title>My Title</title>"]
+        assert res.body == "<h1>Home</h1>"
+        client.invalidate(["ssr.js"])
+    finally:
+        client.stop()

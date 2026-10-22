@@ -10,11 +10,12 @@ from typing import Any
 import click
 
 from vertebra.build import BuildConfig
+from vertebra.cli._launch import ServerLaunchEnv
 from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
 from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
-from vertebra.extensions.worker.runner import WorkerRunner
+from vertebra.framework.queues import WorkerRunner
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
 from vertebra.utils.module_loader import import_app
 from vertebra.utils.serializers import decode_json
@@ -90,23 +91,20 @@ def run(
     if threads is None:
         threads = os.cpu_count() or 1
 
-    env = os.environ.copy()
-    env["VERTEBRA_APP"] = app
-    env["LITESTAR_APP"] = app
-    env["VERTEBRA_PYTHON_BIN"] = sys.executable
-
-    cwd = os.getcwd()
-    existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = f"{cwd}{os.pathsep}{existing}" if existing else cwd
-    env["VERTEBRA_HOST"] = host
-    env["VERTEBRA_PORT"] = str(port)
-    env["VERTEBRA_WORKERS"] = str(workers)
+    launch_env = ServerLaunchEnv(
+        app_path=app,
+        host=host,
+        port=port,
+        workers=workers,
+        log_level=log_level,
+        dev=False,
+        native=not asgi,
+    )
+    env = launch_env.to_environ()
     env["VERTEBRA_THREADS"] = str(threads)
     env["VERTEBRA_TOPOLOGY"] = topology.lower()
-    env["VERTEBRA_LOG_LEVEL"] = log_level
     resolved_interface = "asgi" if asgi and interface.lower() == "auto" else interface.lower()
     env["VERTEBRA_INTERFACE"] = resolved_interface
-    env["VERTEBRA_NATIVE"] = "0" if asgi else "1"
     env["VERTEBRA_WORKER_ONLY"] = "1" if worker_only else "0"
 
     if tls_cert and tls_key:
@@ -136,7 +134,7 @@ def run(
         ) from e
 
     if not no_banner:
-        render_banner(mode="serve", host=host, port=port, workers=workers, log_level=log_level)
+        render_banner(mode="serve", host=host, port=port, workers=workers)
 
     exit_code = run_supervisor(
         server_cmd=server_cmd,

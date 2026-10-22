@@ -5,7 +5,7 @@ from typing import NoReturn
 import click
 
 from vertebra._typing import ImproperConfigurationError, MissingDependencyError, VertebraError
-from vertebra.cli.theme import console
+from vertebra.cli.theme import Console, console
 
 __all__ = (
     "CLIError",
@@ -38,8 +38,8 @@ class CLIError(click.ClickException, VertebraError):
 
     def show(self, file: object = None) -> None:
         """Render the CLI error to the themed console."""
-        _ = file
-        console.error(self.message, hint=self.hint)
+        target_console = Console(file=file) if file is not None else console
+        target_console.error(self.message, hint=self.hint)
 
 
 class ConfigResolverError(click.ClickException, VertebraError):

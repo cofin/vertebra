@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import ssl
+import tempfile
 import time
+from pathlib import Path
 
 import msgspec
 
@@ -51,7 +54,7 @@ class CloudSqlConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     enable_iam_auth: bool = True
     ip_type: str = "PUBLIC"
     admin_api_endpoint: str = "https://sqladmin.googleapis.com"
-    refresh_Lead_seconds: int = 240
+    refresh_lead_seconds: int = 240
     port: int = 3307
 
 
@@ -79,7 +82,7 @@ class CloudSqlDialer:
     def needs_refresh(self, now_ts: float | None = None) -> bool:
         """Return True if the cached IAM token or ephemeral cert is within the refresh lead window."""
         current = time.time() if now_ts is None else now_ts
-        return self._cached_token is None or (self._cached_expiry - current) <= self._config.refresh_Lead_seconds
+        return self._cached_token is None or (self._cached_expiry - current) <= self._config.refresh_lead_seconds
 
     def cache_iam_token(self, token: str, expires_in_seconds: int = 3600, *, now_ts: float | None = None) -> None:
         """Store a refreshed OAuth2 IAM database login token."""
@@ -98,16 +101,26 @@ class CloudSqlDialer:
 
         Cloud SQL instance certificates use `project:instance` in the Subject CN rather
         than a DNS hostname, so `check_hostname` is disabled while certificate chain
-        verification remains enforced when `ca_pem` is provided.
+        verification remains enforced via `ca_pem`.
         """
+        if not ca_pem:
+            msg = "ca_pem is required to verify the Cloud SQL server certificate"
+            raise ValueError(msg)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_3
         ctx.check_hostname = False
-        if ca_pem:
-            ctx.verify_mode = ssl.CERT_REQUIRED
-            ctx.load_verify_locations(cadata=ca_pem)
-        else:
-            ctx.verify_mode = ssl.CERT_NONE
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        ctx.load_verify_locations(cadata=ca_pem)
         if client_cert_pem and client_key_pem:
-            raise NotImplementedError("Use load_cert_chain with a temporary memfd/file when client PEMs are provided")
+            fd, temp_path = tempfile.mkstemp(suffix=".pem")
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(client_cert_pem)
+                    if not client_cert_pem.endswith("\n"):
+                        handle.write("\n")
+                    handle.write(client_key_pem)
+                ctx.load_cert_chain(certfile=temp_path)
+            finally:
+                Path(temp_path).unlink(missing_ok=True)
         return ctx

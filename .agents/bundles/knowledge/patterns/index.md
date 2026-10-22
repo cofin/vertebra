@@ -17,7 +17,7 @@ Every pattern chapter contains code-truth blocks (`<!-- truth: start -->` / `<!-
 ## Python (`python/`)
 
 - [Python Module Structure, Class Layout & PEP 695 Typing](python/module-and-class-layout.md) — Top-level imports, PEP 562 lazy `__getattr__` root exports, frozen `msgspec.Struct(..., gc=False)` value objects, strict class member ordering, Google-style docstrings without inline `#` comments, and PEP 695/604/585 typing.
-- [Hot-Path Caching & Single-Wake Async Dispatch](python/hot-path-and-async-dispatch.md) — Startup `_handler_dispatch_spec` (`lru_cache(maxsize=512)`), `BatchDispatchPlan` partitioning (`sync_native`, `async_native`, `mounts`, `unmatched`), `AsyncRuntime` / `AsgiEventLoopPool` wakeups, `_drive_coro` ASGI stepping, and `_coerce_response`.
+- [Hot-Path Caching & Single-Wake Async Dispatch](python/hot-path-and-async-dispatch.md) — Startup `compile_handler_spec` (`lru_cache(maxsize=512)`), `BatchDispatchPlan` partitioning (`sync_native`, `async_native`, `mounts`, `unmatched`), `EventLoopPool` wakeups, `_drive_coro` ASGI stepping, and `coerce_response`.
 - [Serialization & Python Utility Conventions](python/serialization-and-utils.md) — Centralized `JSONSerializer` (`encode_json`, `encode_json_bytes`, `encode_json_into`, `decode_json`, `format_json`), `dump_schema`, `Portal` sync/async bridging, `LoopShardedResource`, `SyncPool`, and `module_loader` guards.
 
 ## Rust & PyO3 (`rust/`)

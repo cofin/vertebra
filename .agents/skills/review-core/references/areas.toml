@@ -1,0 +1,276 @@
+schema_version = 1
+
+[agents]
+model = "pro"
+common_preload = ["review-core", "flow-memory-keeper"]
+valid_tools = [
+  "call_mcp_tool",
+  "code_search",
+  "edit_file",
+  "find_by_name",
+  "grep_search",
+  "list_dir",
+  "list_resources",
+  "moma_search",
+  "multi_replace_file_content",
+  "read_file",
+  "read_resource",
+  "replace_file_content",
+  "run_command",
+  "search_web",
+  "send_message",
+  "skill_search",
+  "view_file",
+  "write_file",
+  "write_to_file"
+]
+write_tools = [
+  "edit_file",
+  "multi_replace_file_content",
+  "replace_file_content",
+  "write_file",
+  "write_to_file"
+]
+reviewer_required_tools = [
+  "read_file",
+  "view_file",
+  "grep_search",
+  "find_by_name",
+  "list_dir",
+  "code_search",
+  "run_command",
+  "search_web",
+  "moma_search",
+  "skill_search",
+  "call_mcp_tool",
+  "list_resources",
+  "read_resource",
+  "send_message"
+]
+specialist_extra_tools = ["edit_file", "write_file"]
+reviewer_forbidden_commands = [
+  '\bmake\s+lint\b(?!-all)',
+  '\bmake\s+(dev|install|rs-test|py-test|test|check|build)\b',
+  '--fix\b',
+  '--write\b',
+  '\bcargo\s+(fmt(?!.*--check)|clippy\s+--fix)',
+  '\bgit\s+(commit|push|reset|checkout|switch|stash|rebase|merge|tag|clean)\b',
+  '\brm\s+-',
+  '\b(bun|npm|uv)\s+(install|add|remove|sync)\b',
+  '\bmaturin\s+develop\b'
+]
+
+[policy]
+max_review_skill_lines = 200
+max_truth_lines = 40
+okf_reserved = ["index.md", "log.md"]
+privacy_scan = [
+  "AGENTS.md",
+  ".agents/skills/**/*.md",
+  ".agents/agents/*.md",
+  ".agents/bundles/**/*.md",
+  "docs/**/*.md"
+]
+forbidden_patterns = [
+  '/(?:home|Users)/[^/\s`]+/',
+  '/usr/local/\w+/home/',
+  '\bya29\.',
+  '\b\d+-(?:Layer|Point|Stage|Tier|Way|Pillar|Term|Step)\b'
+]
+forbidden_terms_env = "VERTEBRA_REVIEW_FORBIDDEN_TERMS"
+forbidden_terms_file = ".agents/scratch/forbidden-terms.txt"
+prohibition_line_markers = ["never use", "never refer", "do not use", "forbidden", "instead of"]
+
+[areas.runtime-ipc]
+prefix = "RT"
+title = "Rust runtime and IPC"
+paths = [
+  "src/rs/vertebra-core/**",
+  "src/rs/vertebra-storage/**",
+  "src/rs/*"
+]
+knowledge = [
+  ".agents/bundles/knowledge/patterns/rust/lock-free-shm-and-sharding.md",
+  ".agents/bundles/knowledge/gotchas/shm-and-cross-platform-ipc.md",
+  ".agents/bundles/knowledge/architecture/ipc/ring-buffers-and-shm.md",
+  ".agents/bundles/knowledge/architecture/ipc/tiered-rings-and-batch-bridge.md",
+  ".agents/bundles/knowledge/architecture/runtime/shm-supervision-and-recovery.md"
+]
+focused_commands = [
+  "cargo test -p vertebra-core --test it"
+]
+
+[[areas.runtime-ipc.shards]]
+name = "rings"
+paths = [
+  "src/rs/vertebra-core/src/channel.rs",
+  "src/rs/vertebra-core/src/ipc.rs",
+  "src/rs/vertebra-core/src/tiered_ring.rs",
+  "src/rs/vertebra-core/src/buffer.rs"
+]
+
+[[areas.runtime-ipc.shards]]
+name = "platform-and-transport"
+paths = [
+  "src/rs/vertebra-core/src/platform/**",
+  "src/rs/vertebra-core/src/transport/**",
+  "src/rs/vertebra-core/src/shm.rs",
+  "src/rs/vertebra-core/src/notify.rs",
+  "src/rs/vertebra-core/src/sync.rs",
+  "src/rs/vertebra-core/src/cleanup.rs",
+  "src/rs/vertebra-core/src/process.rs"
+]
+
+[areas.http-ingress]
+prefix = "HTTP"
+title = "HTTP ingress and protocols"
+paths = ["src/rs/vertebra-http/**"]
+knowledge = [
+  ".agents/bundles/knowledge/architecture/http/ingress-and-routing.md",
+  ".agents/bundles/knowledge/architecture/http/batching-dispatch-and-backpressure.md",
+  ".agents/bundles/knowledge/architecture/http/protocol-and-offload-modules.md",
+  ".agents/bundles/knowledge/domains/http/server-and-dispatch.md"
+]
+focused_commands = ["cargo test -p vertebra-http"]
+
+[[areas.http-ingress.shards]]
+name = "ingress-and-dispatch"
+paths = [
+  "src/rs/vertebra-http/src/ingress/**",
+  "src/rs/vertebra-http/src/dispatcher/**",
+  "src/rs/vertebra-http/src/payload.rs",
+  "src/rs/vertebra-http/src/router.rs",
+  "src/rs/vertebra-http/src/server.rs",
+  "src/rs/vertebra-http/src/service.rs",
+  "src/rs/vertebra-http/src/lib.rs"
+]
+
+[[areas.http-ingress.shards]]
+name = "protocols-and-realtime"
+paths = [
+  "src/rs/vertebra-http/src/h2c.rs",
+  "src/rs/vertebra-http/src/http3.rs",
+  "src/rs/vertebra-http/src/grpc.rs",
+  "src/rs/vertebra-http/src/sse.rs",
+  "src/rs/vertebra-http/src/ws_mount.rs",
+  "src/rs/vertebra-http/src/pubsub.rs",
+  "src/rs/vertebra-http/src/realtime.rs",
+  "src/rs/vertebra-http/src/tls.rs",
+  "src/rs/vertebra-http/src/compression.rs"
+]
+
+[areas.pyo3-bridge]
+prefix = "FFI"
+title = "PyO3 native extension bridge"
+paths = [
+  "src/rs/vertebra-py/**",
+  "src/rs/vertebra-bundler/src/lib.rs",
+  "src/py/vertebra/_vertebra.pyi",
+  "src/py/vertebra/_bundler.py",
+  "src/py/vertebra/_storage.pyi"
+]
+knowledge = [
+  ".agents/bundles/knowledge/architecture/worker/pyo3-ffi-and-batch-dispatch.md",
+  ".agents/bundles/knowledge/gotchas/pyo3-and-python-runtime.md",
+  ".agents/bundles/knowledge/patterns/rust/ffi-and-gil-discipline.md"
+]
+focused_commands = ["cargo test -p vertebra-py"]
+
+[areas.python-framework]
+prefix = "PY"
+title = "Python framework and server"
+paths = [
+  "src/py/vertebra/**"
+]
+knowledge = [
+  ".agents/bundles/knowledge/patterns/python/module-and-class-layout.md",
+  ".agents/bundles/knowledge/patterns/python/serialization-and-utils.md",
+  ".agents/bundles/knowledge/patterns/python/hot-path-and-async-dispatch.md",
+  ".agents/bundles/knowledge/domains/framework/routing-and-app.md",
+  ".agents/bundles/knowledge/domains/framework/subdomains.md"
+]
+focused_commands = ["uv run pytest src/py/tests/unit"]
+
+[[areas.python-framework.shards]]
+name = "server-and-core"
+paths = [
+  "src/py/vertebra/server/**",
+  "src/py/vertebra/utils/**",
+  "src/py/vertebra/telemetry/**",
+  "src/py/vertebra/__init__.py"
+]
+
+[[areas.python-framework.shards]]
+name = "framework-and-extensions"
+paths = [
+  "src/py/vertebra/framework/**",
+  "src/py/vertebra/extensions/**",
+  "src/py/vertebra/storage/**",
+  "src/py/vertebra/db/**",
+  "src/py/vertebra/build/**",
+  "src/py/vertebra/cli/**"
+]
+
+[areas.typescript-client]
+prefix = "TS"
+title = "TypeScript client SDK and bundler"
+paths = [
+  "src/ts/vertebra-client/**",
+  "src/rs/vertebra-bundler/**"
+]
+knowledge = [
+  ".agents/bundles/knowledge/domains/frontend/bundler-and-client-sdk.md",
+  ".agents/bundles/knowledge/architecture/frontend/bundler-hmr-and-ssr.md",
+  ".agents/bundles/knowledge/architecture/frontend/codegen-and-inertia.md",
+  ".agents/bundles/knowledge/patterns/typescript/client-and-adapter-subpaths.md"
+]
+focused_commands = ["bun run test"]
+
+[areas.performance]
+prefix = "PERF"
+title = "Performance and benchmarks"
+paths = [
+  "src/rs/*/benches/**",
+  "tools/benchmarks/**",
+  "tools/pgo/**",
+  "src/rs/Cargo.toml"
+]
+cross_cutting = true
+knowledge = [
+  ".agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md",
+  ".agents/bundles/knowledge/domains/frontend/packaging-and-pgo.md"
+]
+focused_commands = ["make rs-bench"]
+
+[areas.tests]
+prefix = "TEST"
+title = "Test suites and harnesses"
+paths = [
+  "src/py/tests/**",
+  "src/rs/*/tests/**",
+  "src/ts/vertebra-client/tests/**"
+]
+cross_cutting = true
+knowledge = [
+  ".agents/bundles/knowledge/testing/polyglot-test-matrix.md",
+  ".agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md"
+]
+focused_commands = ["uv run pytest"]
+
+[areas.docs-okf]
+prefix = "DOC"
+title = "Documentation and OKF bundles"
+paths = [
+  ".agents/bundles/**",
+  ".agents/skills/**",
+  ".agents/agents/**",
+  "AGENTS.md",
+  "docs/**",
+  "README.md"
+]
+cross_cutting = true
+knowledge = [
+  ".agents/bundles/knowledge/workflow.md",
+  ".agents/bundles/knowledge/index.md"
+]
+focused_commands = ["make review-check"]

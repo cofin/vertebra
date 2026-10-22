@@ -2,7 +2,7 @@
 
 import pytest
 
-from vertebra.framework._inertia import (
+from vertebra.framework.inertia import (
     DeepMergeProp,
     DeferredProp,
     InertiaConfig,
@@ -12,27 +12,26 @@ from vertebra.framework._inertia import (
     OnceProp,
     OptionalProp,
     ScrollProp,
-    SsrResult,
-    deep_merge,
-    defer,
     inertia,
-    merge,
-    once,
-    optional,
-    scroll,
 )
-from vertebra.framework._types import Headers, Request
+from vertebra.framework.ssr import SsrConfig, SsrResult
 from vertebra.utils.serializers import decode_json
+
+
+class _TestRequest:
+    def __init__(self, method: str = "GET", path: str = "/dashboard", headers: dict[str, str] | None = None) -> None:
+        self.method = method
+        self.path = path
+        self.headers = headers or {}
 
 
 def _make_request(
     method: str = "GET",
     path: str = "/dashboard",
-    headers: "dict[str, str] | None" = None,
-) -> Request:
+    headers: dict[str, str] | None = None,
+) -> _TestRequest:
     """Build a Request with the given headers."""
-    pairs = [(k, v) for k, v in (headers or {}).items()]
-    return Request(method=method, path=path, headers=Headers(_data=pairs))
+    return _TestRequest(method=method, path=path, headers=headers)
 
 
 def _make_mock_ssr_client(*, fail: bool = False) -> object:
@@ -60,13 +59,8 @@ def test_inertia_config_defaults() -> None:
     assert cfg.enabled is False
     assert cfg.root_template == "index.html"
     assert cfg.version is None
+    assert cfg.ssr is None
     assert cfg.ssr_enabled is False
-    assert cfg.ssr_mode == "native"
-    assert cfg.ssr_url == "http://127.0.0.1:13714"
-    assert cfg.ssr_timeout == 2.0
-    assert cfg.ssr_pool_size == 4
-    assert cfg.ssr_entry is None
-    assert cfg.sidecar_port == 13714
     assert cfg.shared_data == {}
 
 
@@ -74,7 +68,7 @@ def test_inertia_config_custom_values() -> None:
     cfg = InertiaConfig(
         enabled=True,
         version="abc123",
-        ssr_enabled=True,
+        ssr=SsrConfig(),
         shared_data={"app_name": "Test"},
     )
     assert cfg.enabled is True
@@ -84,7 +78,7 @@ def test_inertia_config_custom_values() -> None:
 
 
 def test_prop_type_helpers_defer_creates_deferred_prop() -> None:
-    prop = defer(lambda: [1, 2, 3], group="stats")
+    prop = DeferredProp(lambda: [1, 2, 3], group="stats")
     assert isinstance(prop, DeferredProp)
     assert prop.group == "stats"
     assert prop.once is False
@@ -92,32 +86,32 @@ def test_prop_type_helpers_defer_creates_deferred_prop() -> None:
 
 
 def test_prop_type_helpers_defer_default_group() -> None:
-    prop = defer(lambda: None)
+    prop = DeferredProp(lambda: None)
     assert prop.group == "default"
 
 
 def test_prop_type_helpers_merge_creates_merge_prop() -> None:
-    prop = merge(lambda: [1], prepend=True)
+    prop = MergeProp(lambda: [1], prepend=True)
     assert isinstance(prop, MergeProp)
     assert prop.prepend is True
     assert prop.resolver() == [1]
 
 
 def test_prop_type_helpers_deep_merge_creates_deep_merge_prop() -> None:
-    prop = deep_merge(lambda: {"a": 1})
+    prop = DeepMergeProp(lambda: {"a": 1})
     assert isinstance(prop, DeepMergeProp)
     assert prop.resolver() == {"a": 1}
 
 
 def test_prop_type_helpers_once_creates_once_prop() -> None:
-    prop = once(lambda: "token", expires_in=3600)
+    prop = OnceProp(lambda: "token", expires_in=3600)
     assert isinstance(prop, OnceProp)
     assert prop.expires_in == 3600
     assert prop.resolver() == "token"
 
 
 def test_prop_type_helpers_scroll_creates_scroll_prop() -> None:
-    prop = scroll(lambda: [], page_name="page", current_page=2, next_page=3)
+    prop = ScrollProp(lambda: [], page_name="page", current_page=2, next_page=3)
     assert isinstance(prop, ScrollProp)
     assert prop.page_name == "page"
     assert prop.current_page == 2
@@ -126,7 +120,7 @@ def test_prop_type_helpers_scroll_creates_scroll_prop() -> None:
 
 
 def test_prop_type_helpers_optional_creates_optional_prop() -> None:
-    prop = optional(lambda: "lazy")
+    prop = OptionalProp(lambda: "lazy")
     assert isinstance(prop, OptionalProp)
     assert prop.resolver() == "lazy"
 
@@ -272,7 +266,7 @@ def test_deferred_props_excluded_from_initial_response() -> None:
         component="Pages/Dashboard",
         props={
             "count": 42,
-            "stats": defer(lambda: {"visits": 100}, group="analytics"),
+            "stats": DeferredProp(lambda: {"visits": 100}, group="analytics"),
         },
     )
     page = mw.build_page_object(req, resp)
@@ -293,7 +287,7 @@ def test_deferred_props_resolved_during_partial_reload() -> None:
         component="Pages/Dashboard",
         props={
             "count": 42,
-            "stats": defer(lambda: {"visits": 100}),
+            "stats": DeferredProp(lambda: {"visits": 100}),
         },
     )
     page = mw.build_page_object(req, resp)
@@ -305,7 +299,7 @@ def test_merge_props_metadata_in_page_object() -> None:
     req = _make_request()
     resp = InertiaResponse(
         component="Pages/Feed",
-        props={"posts": merge(lambda: [{"id": 1}])},
+        props={"posts": MergeProp(lambda: [{"id": 1}])},
     )
     page = mw.build_page_object(req, resp)
     assert page["props"]["posts"] == [{"id": 1}]
@@ -317,7 +311,7 @@ def test_merge_props_prepend_metadata() -> None:
     req = _make_request()
     resp = InertiaResponse(
         component="Pages/Feed",
-        props={"notifications": merge(lambda: [{"id": 1}], prepend=True)},
+        props={"notifications": MergeProp(lambda: [{"id": 1}], prepend=True)},
     )
     page = mw.build_page_object(req, resp)
     assert page["prependProps"] == ["notifications"]
@@ -328,7 +322,7 @@ def test_merge_props_deep_merge_metadata() -> None:
     req = _make_request()
     resp = InertiaResponse(
         component="Pages/Settings",
-        props={"preferences": deep_merge(lambda: {"theme": "dark"})},
+        props={"preferences": DeepMergeProp(lambda: {"theme": "dark"})},
     )
     page = mw.build_page_object(req, resp)
     assert page["props"]["preferences"] == {"theme": "dark"}
@@ -340,7 +334,7 @@ def test_once_props_included_initially() -> None:
     req = _make_request()
     resp = InertiaResponse(
         component="Pages/Home",
-        props={"token": once(lambda: "abc123", expires_in=3600)},
+        props={"token": OnceProp(lambda: "abc123", expires_in=3600)},
     )
     page = mw.build_page_object(req, resp)
     assert page["props"]["token"] == "abc123"
@@ -357,7 +351,7 @@ def test_once_props_skipped_when_cached() -> None:
     )
     resp = InertiaResponse(
         component="Pages/Home",
-        props={"token": once(lambda: "abc123"), "name": "Test"},
+        props={"token": OnceProp(lambda: "abc123"), "name": "Test"},
     )
     page = mw.build_page_object(req, resp)
     assert "token" not in page["props"]
@@ -370,7 +364,7 @@ def test_scroll_props_in_page_object() -> None:
     resp = InertiaResponse(
         component="Pages/Feed",
         props={
-            "items": scroll(
+            "items": ScrollProp(
                 lambda: [1, 2, 3],
                 current_page=1,
                 next_page=2,
@@ -389,7 +383,7 @@ def test_optional_props_excluded_on_initial_load() -> None:
     req = _make_request()
     resp = InertiaResponse(
         component="Pages/Home",
-        props={"heavy": optional(lambda: "expensive"), "name": "Test"},
+        props={"heavy": OptionalProp(lambda: "expensive"), "name": "Test"},
     )
     page = mw.build_page_object(req, resp)
     assert "heavy" not in page["props"]
@@ -407,7 +401,7 @@ def test_optional_props_resolved_during_partial_reload() -> None:
     )
     resp = InertiaResponse(
         component="Pages/Home",
-        props={"heavy": optional(lambda: "expensive"), "name": "Test"},
+        props={"heavy": OptionalProp(lambda: "expensive"), "name": "Test"},
     )
     page = mw.build_page_object(req, resp)
     assert page["props"]["heavy"] == "expensive"
@@ -515,7 +509,7 @@ def test_html_response_contains_v3_script_tag() -> None:
 
 def test_ssr_integration_renders_head_and_body() -> None:
     client = _make_mock_ssr_client()
-    cfg = InertiaConfig(version="v1", ssr_enabled=True)
+    cfg = InertiaConfig(version="v1", ssr=SsrConfig())
     mw = InertiaMiddleware(cfg, ssr_client=client)
     req = _make_request()
     resp = InertiaResponse(component="Pages/Home")
@@ -528,7 +522,7 @@ def test_ssr_integration_renders_head_and_body() -> None:
 
 def test_ssr_integration_csr_fallback_on_failure() -> None:
     client = _make_mock_ssr_client(fail=True)
-    cfg = InertiaConfig(version="v1", ssr_enabled=True)
+    cfg = InertiaConfig(version="v1", ssr=SsrConfig())
     mw = InertiaMiddleware(cfg, ssr_client=client)
     req = _make_request()
     resp = InertiaResponse(component="Pages/Home")
@@ -541,7 +535,7 @@ def test_ssr_integration_csr_fallback_on_failure() -> None:
 
 def test_ssr_integration_not_used_for_inertia_xhr() -> None:
     client = _make_mock_ssr_client()
-    cfg = InertiaConfig(version="v1", ssr_enabled=True)
+    cfg = InertiaConfig(version="v1", ssr=SsrConfig())
     mw = InertiaMiddleware(cfg, ssr_client=client)
     req = _make_request(headers={"X-Inertia": "true", "X-Inertia-Version": "v1"})
     resp = InertiaResponse(component="Pages/Home")

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Buffer, Mapping, Sequence
+import asyncio
+from collections.abc import Awaitable, Buffer, Callable, Mapping, Sequence
 from typing import Any, Literal
 
 import msgspec
 
+from vertebra._typing import UnsupportedBackendError
 from vertebra.db.dialer.alloydb import AlloyDbConfig
 from vertebra.db.dialer.cloudsql import CloudSqlConfig
 
@@ -17,7 +19,7 @@ __all__ = (
     "SyncPostgresDriver",
 )
 
-type PoolerMode = Literal["direct", "transaction", "session"]
+type PoolerMode = Literal["direct", "transaction", "session", "statement", "auto"]
 
 
 class PostgresConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -49,10 +51,10 @@ class PostgresConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     def effective_statement_cache_size(self) -> int:
         """Return the prepared statement cache capacity safe for the configured pooler mode.
 
-        In transaction-mode PgBouncer/PgCat/pgdog, prepared statements must be disabled (`0`)
+        In transaction-mode or statement-mode PgBouncer/PgCat/pgdog, prepared statements must be disabled (`0`)
         unless protocol-level statement caching (`PgBouncer 1.21+` / `PgCat` / `pgdog`) is enabled.
         """
-        if self.pooler_mode == "transaction" and not self.protocol_level_pooler_cache:
+        if self.pooler_mode in ("transaction", "statement") and not self.protocol_level_pooler_cache:
             return 0
         return 256 if self.max_prepared_statements is None else max(0, self.max_prepared_statements)
 
@@ -61,6 +63,18 @@ class PostgresConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         """Return the direct primary DSN for LISTEN/NOTIFY, logical replication, and migrations."""
         return self.direct_dsn or self.dsn
 
+    def derive_direct_config(self) -> PostgresConfig:
+        """Return a session-mode PostgresConfig targeting ``effective_direct_dsn`` (`sqlspec>=0.68.0`)."""
+        if not self.direct_dsn:
+            return self
+        base = msgspec.structs.asdict(self)
+        base["dsn"] = self.direct_dsn
+        base["pooler_mode"] = "session"
+        base["min_size"] = min(1, self.max_size)
+        base["max_size"] = min(2, self.max_size)
+        base["session_gucs"] = dict(self.session_gucs)
+        return PostgresConfig(**base)
+
     @staticmethod
     def compute_worker_pool_budget(
         max_connections: int,
@@ -68,12 +82,10 @@ class PostgresConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         *,
         replica_count: int = 1,
         workers_per_replica: int | None = None,
-        reserved_super_connections: int = 5,
-        reserved_admin_connections: int | None = None,
+        reserved_admin_connections: int = 5,
     ) -> int:
         """Compute per-worker pool size from a cluster-wide database connection budget."""
-        reserved = reserved_admin_connections if reserved_admin_connections is not None else reserved_super_connections
-        usable = max(0, max_connections - reserved)
+        usable = max(0, max_connections - reserved_admin_connections)
         per_replica = workers_per_replica if workers_per_replica is not None else worker_count
         total_shards = max(1, replica_count) * max(1, per_replica)
         return max(1, usable // total_shards)
@@ -82,6 +94,7 @@ class PostgresConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         """Build the startup/session GUC parameters for the PostgreSQL connection."""
         gucs: dict[str, str] = {"application_name": self.application_name}
         if self.enable_alloydb_columnar_engine or self.alloydb_instance_uri is not None:
+            gucs["google_columnar_engine.enabled"] = "on"
             gucs["alloydb.enable_columnar_engine"] = "on"
         if self.statement_timeout_ms is not None:
             gucs["statement_timeout"] = str(self.statement_timeout_ms)
@@ -109,11 +122,16 @@ class PostgresConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class SyncPostgresDriver:
     """Synchronous PostgreSQL driver facade supporting plain-tuple and zero-copy JSONB reads."""
 
-    __slots__ = ("_config", "_in_memory_rows")
+    __slots__ = ("_config", "_executor")
 
-    def __init__(self, config: PostgresConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: PostgresConfig | None = None,
+        *,
+        executor: Callable[[str, Sequence[Any]], list[tuple[Any, ...]]] | None = None,
+    ) -> None:
         self._config = config or PostgresConfig()
-        self._in_memory_rows: list[tuple[Any, ...]] = []
+        self._executor = executor
 
     @property
     def config(self) -> PostgresConfig:
@@ -138,8 +156,10 @@ class SyncPostgresDriver:
         parameters: Sequence[Any] = (),
     ) -> list[tuple[Any, ...]]:
         """Execute a SQL statement and return plain Python tuples (optimized for SQLAlchemy 2.1)."""
-        _ = (sql, parameters)
-        return list(self._in_memory_rows)
+        if self._executor is None:
+            msg = "SyncPostgresDriver.execute_tuples requires the native vertebra-db PostgreSQL driver"
+            raise UnsupportedBackendError(msg)
+        return [tuple(row) for row in self._executor(sql, parameters)]
 
     def decode_binary_jsonb(self, raw: Buffer) -> memoryview:
         """Return a zero-copy UTF-8 JSON memoryview from a binary PostgreSQL JSONB column."""
@@ -149,11 +169,18 @@ class SyncPostgresDriver:
 class AsyncPostgresDriver:
     """Asynchronous PostgreSQL driver facade supporting plain-tuple and zero-copy JSONB reads."""
 
-    __slots__ = ("_config", "_sync")
+    __slots__ = ("_async_executor", "_config", "_sync")
 
-    def __init__(self, config: PostgresConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: PostgresConfig | None = None,
+        *,
+        executor: Callable[[str, Sequence[Any]], list[tuple[Any, ...]]] | None = None,
+        async_executor: Callable[[str, Sequence[Any]], Awaitable[list[tuple[Any, ...]]]] | None = None,
+    ) -> None:
         self._config = config or PostgresConfig()
-        self._sync = SyncPostgresDriver(self._config)
+        self._sync = SyncPostgresDriver(self._config, executor=executor)
+        self._async_executor = async_executor
 
     @property
     def config(self) -> PostgresConfig:
@@ -166,7 +193,10 @@ class AsyncPostgresDriver:
         parameters: Sequence[Any] = (),
     ) -> list[tuple[Any, ...]]:
         """Asynchronously execute a SQL statement and return plain Python tuples."""
-        return self._sync.execute_tuples(sql, parameters)
+        if self._async_executor is not None:
+            rows = await self._async_executor(sql, parameters)
+            return [tuple(row) for row in rows]
+        return await asyncio.to_thread(self._sync.execute_tuples, sql, parameters)
 
     def decode_binary_jsonb(self, raw: Buffer) -> memoryview:
         """Return a zero-copy UTF-8 JSON memoryview from a binary PostgreSQL JSONB column."""

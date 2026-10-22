@@ -33,19 +33,27 @@ export function injectQuery<TInput = any, TOutput = any>(
   const data = signal<TOutput | null>(null);
   const loading = signal(false);
   const error = signal<Error | null>(null);
+  let requestSeq = 0;
 
   const fetch = async () => {
     if (options.enabled && !options.enabled()) return;
 
+    const seq = ++requestSeq;
     loading.set(true);
     error.set(null);
     try {
       const result = await service.getClient().call<TInput, TOutput>(method, path, input());
-      data.set(result);
+      if (seq === requestSeq) {
+        data.set(result);
+      }
     } catch (err: any) {
-      error.set(err);
+      if (seq === requestSeq) {
+        error.set(err);
+      }
     } finally {
-      loading.set(false);
+      if (seq === requestSeq) {
+        loading.set(false);
+      }
     }
   };
 

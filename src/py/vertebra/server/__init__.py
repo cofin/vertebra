@@ -2,11 +2,14 @@
 
 Sub-packages::
 
-    from vertebra.server._native import run_worker
-    from vertebra.server._asgi import AsgiAdapter, AsgiRunner
-    from vertebra.server._wsgi import WsgiAdapter, WsgiRunner
+    from vertebra.server.worker import Worker, run_worker
+    from vertebra.server._asgi import AsgiRunner
+    from vertebra.server._wsgi import WsgiAdapter
 """
 
-from vertebra.server._native import run_worker
+from vertebra.server.worker import Worker, run_worker
 
-__all__ = ("run_worker",)
+__all__ = (
+    "Worker",
+    "run_worker",
+)

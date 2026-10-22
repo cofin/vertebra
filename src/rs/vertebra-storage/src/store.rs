@@ -16,11 +16,17 @@ use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use thiserror::Error;
 use url::Url;
 
-use crate::oci::{OciCavageCredentials, OciObjectStore, R2_UNIFORM_PART_SIZE, chunk_uniform_parts};
+use crate::oci::{OciCavageCredentials, OciObjectStore};
+use crate::r2::{R2_UNIFORM_PART_SIZE, chunk_uniform_parts};
 
 static STORAGE_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    let worker_threads = std::env::var("VERTEBRA_STORAGE_IO_THREADS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(2);
     tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(worker_threads)
         .enable_all()
         .build()
         .expect("failed to initialize vertebra-storage Tokio runtime")

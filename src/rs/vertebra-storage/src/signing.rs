@@ -5,8 +5,9 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, TimeZone, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use url::Url;
+use vertebra_core::util::{constant_time_eq, sha256_hex};
 
 use crate::store::StorageError;
 
@@ -17,12 +18,6 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> Result<Vec<u8>, StorageError> {
         .map_err(|e| StorageError::Signing(format!("invalid HMAC key length: {e}")))?;
     mac.update(message);
     Ok(mac.finalize().into_bytes().to_vec())
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hex::encode(hasher.finalize())
 }
 
 #[derive(Clone, Debug)]
@@ -415,15 +410,4 @@ pub fn sign_azure_sas_url(
 
 fn urlencoding_encode(input: &str) -> String {
     url::form_urlencoded::byte_serialize(input.as_bytes()).collect()
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }

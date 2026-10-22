@@ -3,6 +3,7 @@
 import asyncio
 import runpy
 import sys
+import threading
 import time
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -16,8 +17,13 @@ from vertebra._vertebra import (
 )
 from vertebra.framework._app import App, _make_handler_id
 from vertebra.framework._router import handler_id
-from vertebra.server import _native as native_module
-from vertebra.server._native import AsyncRuntime, BatchDispatchPlan, _dispatch_batch
+from vertebra.server import worker as server_worker_module
+from vertebra.server._dispatch import (
+    BatchDispatchPlan,
+    compile_handler_spec,
+    dispatch_batch,
+)
+from vertebra.server._loops import EventLoopPool
 from vertebra.supervisor import _worker as worker_module
 from vertebra.utils.module_loader import import_app
 
@@ -108,58 +114,31 @@ def test_worker_import_app_invalid_format() -> None:
 def test_worker_main_shm_transport_initialized_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """SHM workers must not initialize the native transport twice."""
     init_calls: list[str] = []
-    state = {"mode": "inprocess", "shm_loop_calls": 0}
-
-    fake_ext: Any = ModuleType("vertebra._vertebra")
-
-    class FakeResponse:
-        def __init__(self, status: int = 200, body: bytes = b"", request_id: int = 0) -> None:
-            self.status = status
-            self.body = body
-            self.request_id = request_id
-            self.headers: list[tuple[str, str]] = []
+    stop_event = threading.Event()
 
     def fake_init_transport(*, mode: str = "inprocess", **_: object) -> None:
         init_calls.append(mode)
         if len(init_calls) > 1:
             msg = "transport initialized twice"
             raise RuntimeError(msg)
-        state["mode"] = mode
 
-    def fake_get_request_notify_fd() -> int:
-        return 11 if state["mode"] == "shm" else -1
-
-    fake_ext.Response = FakeResponse
-    fake_ext.init_transport = fake_init_transport
-    fake_ext.get_request_notify_fd = fake_get_request_notify_fd
-    fake_ext.get_batch = lambda timeout_ms=100: None
-    fake_ext.submit_results = lambda responses: None
-
-    class FakeScheduler:
-        def __init__(self) -> None:
-            self.loop = object()
-
-        def stop(self) -> None:
-            return None
-
-    class FakeExecutor:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            return None
-
-        def shutdown(self, *_args: object, **_kwargs: object) -> None:
-            return None
-
-    async def fake_shm_worker_loop(*args: object, **kwargs: object) -> None:
-        state["shm_loop_calls"] += 1
+    def fake_get_batch(timeout_ms: int = 100) -> None:
+        del timeout_ms
+        stop_event.set()
+        return None
 
     fake_app = SimpleNamespace(_handlers={}, mounts=[])
+    orig_worker_cls = server_worker_module.Worker
 
-    monkeypatch.setitem(sys.modules, "vertebra._vertebra", fake_ext)
+    def make_worker(handlers: Any, **kwargs: Any) -> Any:
+        kwargs["stop_event"] = stop_event
+        return orig_worker_cls(handlers, **kwargs)
+
     monkeypatch.setattr(worker_module, "import_app", lambda app_path: fake_app)
-    monkeypatch.setattr(native_module, "_install_signal_handlers", lambda: None)
-    monkeypatch.setattr(native_module, "AsyncRuntime", FakeScheduler)
-    monkeypatch.setattr(native_module, "ThreadPoolExecutor", FakeExecutor)
-    monkeypatch.setattr(native_module, "_shm_worker_loop", fake_shm_worker_loop)
+    monkeypatch.setattr(server_worker_module, "Worker", make_worker)
+    monkeypatch.setattr(server_worker_module, "init_transport", fake_init_transport)
+    monkeypatch.setattr(server_worker_module, "get_request_notify_fd", lambda: -1)
+    monkeypatch.setattr(server_worker_module, "get_batch", fake_get_batch)
     monkeypatch.setenv("VERTEBRA_TRANSPORT_MODE", "shm")
     monkeypatch.setenv("VERTEBRA_APP", "fake.module:app")
     monkeypatch.setenv("VERTEBRA_WORKERS", "1")
@@ -167,69 +146,55 @@ def test_worker_main_shm_transport_initialized_once(monkeypatch: pytest.MonkeyPa
     worker_module.main()
 
     assert init_calls == ["shm"]
-    assert state["shm_loop_calls"] == 1
 
 
-def test_worker_main_clears_wsgi_executor_on_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Worker shutdown must not leak the module-global WSGI executor."""
-    fake_ext: Any = ModuleType("vertebra._vertebra")
-    fake_ext.init_transport = lambda *args, **kwargs: None
-    fake_ext.get_request_notify_fd = lambda: -1
-    fake_ext.get_batch = lambda timeout_ms=100: None
-    fake_ext.submit_results = lambda responses: None
-    fake_ext.Response = object
-
-    class FakeScheduler:
-        def __init__(self) -> None:
-            self.loop = object()
-
-        def stop(self) -> None:
-            return None
-
-    class FakeExecutor:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            return None
-
-        def shutdown(self, *_args: object, **_kwargs: object) -> None:
-            return None
-
-    async def fake_shm_worker_loop(*args: object, **kwargs: object) -> None:
-        return None
+def test_worker_main_clears_executor_on_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Worker shutdown must shut down its thread pool executor and event loop pool cleanly."""
+    shutdown_calls: list[bool] = []
+    stop_event = threading.Event()
+    stop_event.set()
 
     fake_app = SimpleNamespace(_handlers={}, mounts=[])
+    orig_worker_cls = server_worker_module.Worker
 
-    monkeypatch.setitem(sys.modules, "vertebra._vertebra", fake_ext)
+    class FakeExecutor:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def shutdown(self, *, wait: bool = False) -> None:
+            shutdown_calls.append(wait)
+
+    def make_worker(handlers: Any, **kwargs: Any) -> Any:
+        kwargs["stop_event"] = stop_event
+        return orig_worker_cls(handlers, **kwargs)
+
     monkeypatch.setattr(worker_module, "import_app", lambda app_path: fake_app)
-    monkeypatch.setattr(native_module, "_install_signal_handlers", lambda: None)
-    monkeypatch.setattr(native_module, "AsyncRuntime", FakeScheduler)
-    monkeypatch.setattr(native_module, "ThreadPoolExecutor", FakeExecutor)
-    monkeypatch.setattr(native_module, "_shm_worker_loop", fake_shm_worker_loop)
+    monkeypatch.setattr(server_worker_module, "Worker", make_worker)
+    monkeypatch.setattr(server_worker_module, "init_transport", lambda **kwargs: None)
+    monkeypatch.setattr(server_worker_module, "get_request_notify_fd", lambda: -1)
+    monkeypatch.setattr(server_worker_module, "ThreadPoolExecutor", FakeExecutor)
     monkeypatch.setenv("VERTEBRA_TRANSPORT_MODE", "shm")
     monkeypatch.setenv("VERTEBRA_APP", "fake.module:app")
     monkeypatch.setenv("VERTEBRA_WORKERS", "1")
 
-    vars(native_module)["_wsgi_executor"] = None
     worker_module.main()
 
-    assert vars(native_module)["_wsgi_executor"] is None
+    assert len(shutdown_calls) == 1
+    assert not hasattr(server_worker_module, "_wsgi_executor")
 
 
 def test_worker_module_executes_main_when_run_as_script(monkeypatch: pytest.MonkeyPatch) -> None:
     """python -m vertebra.supervisor._worker must invoke main()."""
-    fake_ext: Any = ModuleType("vertebra._vertebra")
-    fake_ext.init_transport = lambda *args, **kwargs: None
-
     fake_app = SimpleNamespace(_handlers={}, mounts=[])
     fake_app_module: Any = ModuleType("fake_worker_app")
     fake_app_module.app = fake_app
 
     run_worker_calls: list[tuple[object, dict[str, object]]] = []
 
-    monkeypatch.setitem(sys.modules, "vertebra._vertebra", fake_ext)
     monkeypatch.setitem(sys.modules, "fake_worker_app", fake_app_module)
     monkeypatch.delitem(sys.modules, "vertebra.supervisor._worker", raising=False)
     monkeypatch.setattr(
-        native_module,
+        server_worker_module,
         "run_worker",
         lambda handlers, **kwargs: run_worker_calls.append((handlers, kwargs)),
     )
@@ -251,7 +216,7 @@ def test_submit_response_exists() -> None:
 
 def test_non_blocking_dispatch() -> None:
     init_transport()
-    scheduler = AsyncRuntime()
+    scheduler = EventLoopPool(size=1)
 
     async def slow_handler() -> bytes:
         await asyncio.sleep(0.1)
@@ -262,12 +227,13 @@ def test_non_blocking_dispatch() -> None:
             self.request_id = rid
             self.handler_id = 1
 
+    spec = compile_handler_spec(slow_handler)
     batch = [Req(1), Req(2)]
     partitioned = BatchDispatchPlan()
-    partitioned.async_native = [(0, batch[0], slow_handler), (1, batch[1], slow_handler)]
+    partitioned.async_native = [(0, batch[0], spec), (1, batch[1], spec)]
 
     start = time.monotonic()
-    _dispatch_batch(partitioned, {1: slow_handler}, [], Response, scheduler, async_mode=True)
+    dispatch_batch(partitioned, {1: spec}, [], Response, scheduler, async_mode=True)
     elapsed = time.monotonic() - start
 
     assert elapsed < 0.05

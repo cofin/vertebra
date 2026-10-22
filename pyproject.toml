@@ -33,6 +33,9 @@ vtb = "vertebra.cli:cli"
 framework = [
     "msgspec>=0.18",
 ]
+sqlspec = [
+    "sqlspec>=0.68.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-anyio>=0.0.0",
@@ -87,11 +90,12 @@ known-first-party = ["vertebra"]
 
 [tool.pytest.ini_options]
 testpaths = ["src/py/tests"]
+pythonpath = ["."]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src/py/vertebra"]
+files = ["src/py/vertebra", "tools/scripts"]
 
 [[tool.mypy.overrides]]
 module = [
@@ -107,10 +111,9 @@ module = [
     "fastapi.*",
     "litestar",
     "litestar.*",
+    "sqlspec",
+    "sqlspec.*",
     "django.*",
-    "_bundler",
-    "_storage",
-    "vertebra._storage",
     "concurrent.interpreters",
 ]
 ignore_missing_imports = true

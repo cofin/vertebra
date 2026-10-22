@@ -7,15 +7,15 @@ from urllib.parse import urlparse
 
 from vertebra.db.dialer.alloydb import AlloyDbConfig, AlloyDbDialer
 from vertebra.db.dialer.cloudsql import CloudSqlConfig, CloudSqlDialer
-from vertebra.db.mysql import AsyncMysqlDriver, MysqlConfig
+from vertebra.db.mysql import AsyncMysqlDriver, MysqlConfig, SyncMysqlDriver
 from vertebra.db.oracle.config import OracleConfig
-from vertebra.db.oracle.driver import AsyncOracleDriver
-from vertebra.db.postgres import AsyncPostgresDriver, PostgresConfig
-from vertebra.db.redis import AsyncRedisDriver, RedisConfig
-from vertebra.db.sqlite import AsyncSqliteDriver, SqliteConfig
-from vertebra.db.valkey import AsyncValkeyDriver, ValkeyConfig
+from vertebra.db.oracle.driver import AsyncOracleDriver, SyncOracleDriver
+from vertebra.db.postgres import AsyncPostgresDriver, PostgresConfig, SyncPostgresDriver
+from vertebra.db.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
+from vertebra.db.sqlite import AsyncSqliteDriver, SqliteConfig, SyncSqliteDriver
+from vertebra.db.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
 
-__all__ = ("DatabaseRegistry",)
+__all__ = ("AnyDatabaseConfig", "AnyDatabaseDriver", "AnySyncDatabaseDriver", "DatabaseRegistry")
 
 type AnyDatabaseConfig = (
     PostgresConfig
@@ -28,15 +28,38 @@ type AnyDatabaseConfig = (
     | AlloyDbConfig
 )
 
+type AnyDatabaseDriver = (
+    AsyncPostgresDriver
+    | AsyncMysqlDriver
+    | AsyncSqliteDriver
+    | AsyncRedisDriver
+    | AsyncValkeyDriver
+    | AsyncOracleDriver
+    | CloudSqlDialer
+    | AlloyDbDialer
+)
+
+type AnySyncDatabaseDriver = (
+    SyncPostgresDriver
+    | SyncMysqlDriver
+    | SyncSqliteDriver
+    | SyncRedisDriver
+    | SyncValkeyDriver
+    | SyncOracleDriver
+    | CloudSqlDialer
+    | AlloyDbDialer
+)
+
 
 class DatabaseRegistry:
     """Named registry of configured database, cache, and cloud dialer instances."""
 
-    __slots__ = ("_configs", "_drivers")
+    __slots__ = ("_configs", "_drivers", "_sync_drivers")
 
     def __init__(self) -> None:
         self._configs: dict[str, AnyDatabaseConfig] = {}
-        self._drivers: dict[str, object] = {}
+        self._drivers: dict[str, AnyDatabaseDriver] = {}
+        self._sync_drivers: dict[str, AnySyncDatabaseDriver] = {}
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -62,7 +85,7 @@ class DatabaseRegistry:
             else:
                 db_path = parsed.path.lstrip("/")
             return SqliteConfig(database=db_path, **overrides)
-        if base_scheme in ("redis", "rediss"):
+        if base_scheme in ("redis", "rediss", "memory"):
             return RedisConfig(url=url, **overrides)
         if base_scheme in ("valkey", "valkeys"):
             return ValkeyConfig(url=url, **overrides)
@@ -91,6 +114,7 @@ class DatabaseRegistry:
         config = self.parse_url(config_or_url) if isinstance(config_or_url, str) else config_or_url
         self._configs[name] = config
         self._drivers.pop(name, None)
+        self._sync_drivers.pop(name, None)
         return config
 
     def get_config(self, name: str = "default") -> AnyDatabaseConfig:
@@ -100,12 +124,12 @@ class DatabaseRegistry:
             raise KeyError(msg)
         return self._configs[name]
 
-    def get_driver(self, name: str = "default") -> object:
-        """Lazily instantiate and return the driver for the given alias."""
+    def get_driver(self, name: str = "default") -> AnyDatabaseDriver:
+        """Lazily instantiate and return the asynchronous driver for the given alias."""
         if name in self._drivers:
             return self._drivers[name]
         config = self.get_config(name)
-        driver: object
+        driver: AnyDatabaseDriver
         if isinstance(config, PostgresConfig):
             driver = AsyncPostgresDriver(config)
         elif isinstance(config, MysqlConfig):
@@ -126,4 +150,32 @@ class DatabaseRegistry:
             msg = f"Unsupported config type: {type(config)!r}"
             raise TypeError(msg)
         self._drivers[name] = driver
+        return driver
+
+    def get_sync_driver(self, name: str = "default") -> AnySyncDatabaseDriver:
+        """Lazily instantiate and return the synchronous driver for the given alias."""
+        if name in self._sync_drivers:
+            return self._sync_drivers[name]
+        config = self.get_config(name)
+        driver: AnySyncDatabaseDriver
+        if isinstance(config, PostgresConfig):
+            driver = SyncPostgresDriver(config)
+        elif isinstance(config, MysqlConfig):
+            driver = SyncMysqlDriver(config)
+        elif isinstance(config, SqliteConfig):
+            driver = SyncSqliteDriver(config)
+        elif isinstance(config, RedisConfig):
+            driver = SyncRedisDriver(config)
+        elif isinstance(config, ValkeyConfig):
+            driver = SyncValkeyDriver(config)
+        elif isinstance(config, OracleConfig):
+            driver = SyncOracleDriver(config)
+        elif isinstance(config, CloudSqlConfig):
+            driver = CloudSqlDialer(config)
+        elif isinstance(config, AlloyDbConfig):
+            driver = AlloyDbDialer(config)
+        else:
+            msg = f"Unsupported config type: {type(config)!r}"
+            raise TypeError(msg)
+        self._sync_drivers[name] = driver
         return driver

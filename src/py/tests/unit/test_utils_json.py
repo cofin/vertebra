@@ -3,10 +3,17 @@ import datetime
 import decimal
 import enum
 import uuid
+from pathlib import Path
 
 import msgspec
 
-from vertebra.utils.serializers import decode_json, encode_json
+from vertebra.utils.serializers import (
+    MsgpackCodec,
+    decode_json,
+    decode_msgpack,
+    encode_json,
+    encode_msgpack,
+)
 
 
 class MyEnum(enum.Enum):
@@ -93,3 +100,55 @@ def test_decode_json_string():
     data = '{"a":1}'
     decoded = decode_json(data)
     assert decoded == {"a": 1}
+
+
+def test_msgpack_roundtrip_basic_and_memoryview() -> None:
+    """Verify MsgpackCodec round-trips basic primitives and supports memoryview inputs."""
+    payload = {"key": "value", "count": 42, "items": [1, 2, 3]}
+    encoded = encode_msgpack(payload)
+    assert isinstance(encoded, bytes)
+
+    decoded = decode_msgpack(encoded)
+    assert decoded == payload
+
+    view_decoded = decode_msgpack(memoryview(encoded))
+    assert view_decoded == payload
+
+
+def test_msgpack_struct_and_typed_decode() -> None:
+    """Verify MsgpackCodec encodes msgspec.Struct and decodes typed schemas."""
+    struct_inst = MyStruct(id=99, data="structured")
+    encoded = encode_msgpack(struct_inst)
+
+    decoded = decode_msgpack(encoded, type=MyStruct)
+    assert isinstance(decoded, MyStruct)
+    assert decoded.id == 99
+    assert decoded.data == "structured"
+
+
+def test_msgpack_uuid_datetime_path_hooks() -> None:
+    """Verify MsgpackCodec hooks for UUID, datetime, and Path objects."""
+    uid = uuid.uuid4()
+    now = datetime.datetime(2026, 10, 22, 12, 0, tzinfo=datetime.UTC)
+    pth = Path("/var/log/vertebra.log")
+
+    payload = {"uid": uid, "time": now, "path": pth}
+    encoded = encode_msgpack(payload)
+    assert isinstance(encoded, bytes)
+
+    decoded = decode_msgpack(encoded)
+    assert decoded["uid"] == str(uid)
+    assert decoded["path"] == str(pth)
+
+    codec = MsgpackCodec.default()
+    assert codec.decode(encoded) == decoded
+
+    path_encoded = encode_msgpack(pth)
+    decoded_path = decode_msgpack(path_encoded, type=Path)
+    assert isinstance(decoded_path, Path)
+    assert decoded_path == pth
+
+    uuid_encoded = encode_msgpack(uid)
+    decoded_uuid = decode_msgpack(uuid_encoded, type=uuid.UUID)
+    assert isinstance(decoded_uuid, uuid.UUID)
+    assert decoded_uuid == uid

@@ -1,13 +1,7 @@
-use matchit::Router as MatchRouter;
-use serde::{Deserialize, Serialize};
 use std::fmt;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct RouteId(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouterError {
-    Insert(matchit::InsertError),
     InvalidParam { segment: String },
     InvalidParamType { segment: String, param_type: String },
 }
@@ -15,7 +9,6 @@ pub enum RouterError {
 impl fmt::Display for RouterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RouterError::Insert(err) => write!(f, "{err}"),
             RouterError::InvalidParam { segment } => {
                 write!(f, "invalid typed param segment: {segment}")
             }
@@ -31,49 +24,6 @@ impl fmt::Display for RouterError {
 }
 
 impl std::error::Error for RouterError {}
-
-impl From<matchit::InsertError> for RouterError {
-    fn from(err: matchit::InsertError) -> Self {
-        RouterError::Insert(err)
-    }
-}
-
-pub struct Router {
-    inner: MatchRouter<RouteId>,
-}
-
-impl Router {
-    pub fn new() -> Self {
-        Self {
-            inner: MatchRouter::new(),
-        }
-    }
-
-    pub fn insert(&mut self, path: &str, id: RouteId) -> Result<(), RouterError> {
-        let normalized = normalize_typed_path(path)?;
-        self.inner.insert(&normalized, id)?;
-        Ok(())
-    }
-
-    pub fn match_path<'k, 'v>(
-        &'k self,
-        path: &'v str,
-    ) -> Option<(RouteId, Vec<(&'k str, &'v str)>)> {
-        match self.inner.at(path) {
-            Ok(m) => {
-                let params = m.params.iter().collect();
-                Some((*m.value, params))
-            }
-            Err(_) => None,
-        }
-    }
-}
-
-impl Default for Router {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 pub fn normalize_typed_path(path: &str) -> Result<String, RouterError> {
     if !path.contains('{') && !path.contains(':') && !path.contains('*') {
@@ -166,25 +116,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_router_matching() {
-        let mut router = Router::new();
-        router.insert("/hello", RouteId(1)).unwrap();
-        router.insert("/echo", RouteId(2)).unwrap();
-        router.insert("/user/{id:int}", RouteId(3)).unwrap();
-
+    fn test_normalize_typed_path() {
         assert_eq!(
-            router.match_path("/hello").map(|(id, _)| id),
-            Some(RouteId(1))
+            normalize_typed_path("/user/{id:int}").unwrap(),
+            "/user/{id}"
         );
         assert_eq!(
-            router.match_path("/echo").map(|(id, _)| id),
-            Some(RouteId(2))
+            normalize_typed_path("/static/{path:path}").unwrap(),
+            "/static/{*path}"
         );
-
-        let (id, params) = router.match_path("/user/123").unwrap();
-        assert_eq!(id, RouteId(3));
-        assert_eq!(params, vec![("id", "123")]);
-
-        assert_eq!(router.match_path("/notfound"), None);
+        assert_eq!(
+            normalize_typed_path("/simple/path").unwrap(),
+            "/simple/path"
+        );
     }
 }

@@ -5,30 +5,30 @@ description: "Server-authoritative LiveState rooms with 64-bit HybridLogicalCloc
 status: stable
 tags: [domains, framework, live-state, realtime, msgpack]
 sources:
-  - resource: src/rs/vertebra-core/src/protocol/state.rs
-  - resource: src/py/vertebra/framework/live/__init__.py
+  - resource: src/rs/vertebra-core/src/protocol/mod.rs
+  - resource: src/py/vertebra/framework/live.py
   - resource: src/ts/vertebra-client/src/live/index.ts
   - resource: src/ts/vertebra-client/tests/live.test.ts
 ---
 
 # Live State Synchronization
 
-Vertebra's Live Event State protocol synchronizes reactive state objects across Rust (`vertebra_core::protocol::state`), Python (`vertebra.framework.live`), and TypeScript (`@vertebra/client/live`) using compact MessagePack array frames and 64-bit Hybrid Logical Clock (HLC) Last-Write-Wins (LWW) conflict resolution.
+Vertebra's Live Event State protocol synchronizes reactive state objects across Rust (`vertebra_core::protocol`), Python (`vertebra.framework.live`), and TypeScript (`@vertebra/client/live`) using compact MessagePack array frames and 64-bit Hybrid Logical Clock (HLC) Last-Write-Wins (LWW) conflict resolution.
 
-## 1. Cross-Language Wire Protocol (`protocol/state.rs`, `framework/live/__init__.py`, `live/index.ts`)
+## 1. Cross-Language Wire Protocol (`protocol/mod.rs`, `framework/live.py`, `live/index.ts`)
 
 | Concept | Rust (`vertebra-core`) | Python (`vertebra.framework.live`) | TypeScript (`@vertebra/client/live`) |
 |---|---|---|---|
-| Opcodes (`0x01..0x08`) | [`StateOpcode`](../../../../../src/rs/vertebra-core/src/protocol/state.rs) | [`StateOpcode`](../../../../../src/py/vertebra/framework/live/__init__.py) | [`StateOpcode`](../../../../../src/ts/vertebra-client/src/live/index.ts) (`FieldSet` .. `BatchPatch`) |
-| 64-bit HLC (`48b wall_ms << 16 \| 16b logical`) | [`HybridLogicalClock`](../../../../../src/rs/vertebra-core/src/protocol/state.rs) | [`HybridLogicalClock`](../../../../../src/py/vertebra/framework/live/__init__.py) | [`HybridLogicalClock`](../../../../../src/ts/vertebra-client/src/live/index.ts) |
-| State & Field Hashing | `state_id` (FNV-1a 64), `field_id` (FNV-1a 32) | `LiveState.compute_state_id`, `compute_field_id` | `fnv1aStateId` (`bigint`), `fnv1aFieldId` (`number`) |
-| Delta Frame / Register | `StateDelta`, `LwwStateRegister`, `encode_delta`, `decode_delta` | [`StateDeltaFrame`](../../../../../src/py/vertebra/framework/live/__init__.py) (`array_like=True`) | `StateDeltaMessage<T>`, `OfflineDeltaQueue` |
+| Opcodes (`0x01..0x08`) | [`StateOpcode`](../../../../../src/rs/vertebra-core/src/protocol/mod.rs) | [`StateOpcode`](../../../../../src/py/vertebra/framework/live.py) | [`StateOpcode`](../../../../../src/ts/vertebra-client/src/live/index.ts) (`FieldSet` .. `BatchPatch`) |
+| 64-bit HLC (`48b wall_ms << 16 \| 16b logical`) | [`HybridLogicalClock`](../../../../../src/rs/vertebra-core/src/protocol/mod.rs) | [`HybridLogicalClock`](../../../../../src/py/vertebra/framework/live.py) | [`HybridLogicalClock`](../../../../../src/ts/vertebra-client/src/live/index.ts) |
+| State & Field Hashing | `state_id` (FNV-1a 64), `field_id` (FNV-1a 32) | `LiveState.compute_state_id`, `LiveState.compute_field_id` | `fnv1aStateId` (`bigint`), `fnv1aFieldId` (`number`) |
+| Delta Frame / Register | `StateDelta`, `LwwStateRegister`, `encode_delta`, `decode_delta` | [`StateDeltaFrame`](../../../../../src/py/vertebra/framework/live.py) (`array_like=True`) | `StateDeltaMessage<T>`, `OfflineDeltaQueue` |
 
-## 2. Python `LiveState` & `LiveStateRoom` (`framework/live/__init__.py`)
+## 2. Python `LiveState` & `LiveStateRoom` (`framework/live.py`)
 
-- **[`LiveState`](../../../../../src/py/vertebra/framework/live/__init__.py)**: Subclasses compute `__vertebra_state_id__` (FNV-1a 64 of class name), `__vertebra_field_map__` (FNV-1a 32 of annotated attributes), and `__vertebra_actions__` (methods decorated with `@live_action`) in `__init_subclass__`. Setting or deleting a public attribute advances `_hlc.tick()` and appends a `FIELD_SET` or `FIELD_DELETE` `StateDeltaFrame` to `_pending_deltas`.
+- **[`LiveState`](../../../../../src/py/vertebra/framework/live.py)**: Subclasses compute `__vertebra_state_id__` (FNV-1a 64 of class name), `__vertebra_field_map__` (FNV-1a 32 of annotated attributes), and `__vertebra_actions__` (methods decorated with `@live_action`) in `__init_subclass__`. Setting or deleting a public attribute advances `_hlc.tick()` and appends a `FIELD_SET` or `FIELD_DELETE` `StateDeltaFrame` to `_pending_deltas`.
 - **LWW Resolution & Actions**: `apply_delta(frame)` compares `frame.timestamp_ns` against `_field_timestamps[field_id]`, rejecting stale updates (`frame.timestamp_ns < current_ts`) and merging newer timestamps via `_hlc.receive()`. `dispatch_action(frame)` executes `@live_action` methods (sync or async) for `ACTION_CALL` (`0x06`) and returns an `ACTION_RESULT` (`0x07`) frame.
-- **[`LiveStateRoom`](../../../../../src/py/vertebra/framework/live/__init__.py)**: Binds a `LiveState` instance to a pub/sub `channel`, draining encoded MessagePack frames via `broadcast_pending()` and handling client `SYNC_REQUEST`, `ACTION_CALL`, and mutation frames via `handle_client_frame(raw_bytes)`.
+- **[`LiveStateRoom`](../../../../../src/py/vertebra/framework/live.py)**: Binds a `LiveState` instance to a pub/sub `channel`, draining encoded MessagePack frames (`MsgpackCodec`) via `broadcast_pending()` and handling client `SYNC_REQUEST`, `ACTION_CALL`, and mutation frames via `handle_client_frame(raw_bytes)`.
 
 ## 3. TypeScript `LiveStateClient` (`@vertebra/client/live`)
 

@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from vertebra.utils.serializers._json import encode_json
+from vertebra.utils.serializers import encode_json
 
 __all__ = ("CodegenWatcher", "HmrEventRouter", "HmrNotifier", "classify_file")
 
@@ -60,7 +60,12 @@ class HmrNotifier:
 
     def notify(self) -> None:
         """POST to the HMR signal endpoint without surfacing delivery errors."""
-        request = urllib.request.Request(self._url, data=b"", method="POST")
+        self.notify_reload()
+
+    def notify_reload(self, reason: str = "") -> None:
+        """POST a reload notification to the HMR signal endpoint."""
+        data = encode_json({"reason": reason}).encode("utf-8") if reason else b""
+        request = urllib.request.Request(self._url, data=data, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=1):
                 return
@@ -133,24 +138,32 @@ class CodegenWatcher:
             return None
 
     def _native_watch_loop(self) -> None:
+        """Poll events from native SourceWatcher in a background thread."""
         watcher = self._native_watcher
         if watcher is None:
             return
         timeout_ms = max(int(self.poll_interval * 1000), 25)
-        while not self._stop_event.is_set():
-            try:
-                changed = watcher.poll_events(timeout_ms)
-            except Exception:
-                break
-            if not changed:
-                continue
-            relevant = [p for p in changed if _should_watch(Path(p))]
-            if not relevant:
-                continue
-            try:
-                self.callback()
-            except Exception:
-                logger.exception("Codegen watcher callback failed")
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    changed = watcher.poll_events(timeout_ms)
+                except Exception:
+                    if self._stop_event.is_set():
+                        break
+                    logger.warning("CodegenWatcher poll error", exc_info=True)
+                    continue
+                if not changed:
+                    continue
+                relevant = [p for p in changed if _should_watch(Path(p))]
+                if not relevant:
+                    continue
+                try:
+                    self.callback()
+                except Exception:
+                    logger.exception("Codegen watcher callback failed")
+        finally:
+            with contextlib.suppress(Exception):
+                watcher.stop()
 
     def _watch_loop(self) -> None:
         while not self._stop_event.wait(self.poll_interval):

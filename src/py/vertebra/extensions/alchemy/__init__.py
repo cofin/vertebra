@@ -9,16 +9,22 @@ from vertebra.extensions.alchemy.broker import (
     ConnectionLease,
     InMemoryBrokerTransport,
     ShmBrokerTransport,
+    ShmSessionBroker,
+    StatementCache,
 )
 from vertebra.extensions.alchemy.plugin import (
     AlchemyPlugin,
+    AsyncSessionConfig,
+    DatabaseService,
     SQLAlchemyAsyncConfig,
     SQLAlchemyState,
     SQLAlchemySyncConfig,
+    SyncSessionConfig,
 )
 from vertebra.extensions.alchemy.storage import (
     FileAttachment,
     ObjectStoreBackend,
+    StoredObject,
 )
 from vertebra.extensions.sqlalchemy import (
     AlembicImpl,
@@ -35,8 +41,9 @@ from vertebra.extensions.sqlalchemy import (
 )
 
 __all__ = (
-    "AlembicImpl",
     "AlchemyPlugin",
+    "AlembicImpl",
+    "AsyncSessionConfig",
     "BinaryJson",
     "BrokerConfig",
     "BrokerMetrics",
@@ -45,6 +52,7 @@ __all__ = (
     "ChannelMessage",
     "ConnectionLease",
     "CreateViewOp",
+    "DatabaseService",
     "DeleteUsingClause",
     "DialectDescriptor",
     "DropViewOp",
@@ -58,6 +66,10 @@ __all__ = (
     "SQLAlchemySyncConfig",
     "SelectInLoadSpec",
     "ShmBrokerTransport",
+    "ShmSessionBroker",
+    "StatementCache",
+    "StoredObject",
     "SyncEngineAdapter",
+    "SyncSessionConfig",
     "Vector",
 )

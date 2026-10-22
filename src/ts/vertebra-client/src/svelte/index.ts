@@ -32,18 +32,27 @@ export function createQuery<TInput = any, TOutput = any>(
   let data = $state<TOutput | null>(null);
   let loading = $state(false);
   let error = $state<Error | null>(null);
+  let requestSeq = 0;
 
   async function fetch() {
     if (options.enabled && !options.enabled()) return;
 
+    const seq = ++requestSeq;
     loading = true;
     error = null;
     try {
-      data = await client.call<TInput, TOutput>(method, path, getInput());
+      const result = await client.call<TInput, TOutput>(method, path, getInput());
+      if (seq === requestSeq) {
+        data = result;
+      }
     } catch (err: any) {
-      error = err;
+      if (seq === requestSeq) {
+        error = err;
+      }
     } finally {
-      loading = false;
+      if (seq === requestSeq) {
+        loading = false;
+      }
     }
   }
 

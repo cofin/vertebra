@@ -3,25 +3,22 @@
 //! `handle` is the `service_fn` target for both plain and TLS connections.
 
 use std::convert::Infallible;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use futures_util::Stream;
 use http::{Response, StatusCode};
-use http_body_util::{Either, Full, StreamBody};
+use http_body_util::Either;
 use hyper::Request;
-use hyper::body::{Body, Frame, Incoming};
-use tokio::sync::{mpsc, oneshot};
+use hyper::body::{Body, Incoming};
+use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
 use vertebra_core::transport::{encode_headers_compact, iter_raw_headers};
 
 use crate::backpressure::{BackpressureMetricsSnapshot, CircuitState, RejectionReason};
-use crate::collector::{PendingRequest, PendingResponse, method_tag};
+use crate::batcher::{PendingRequest, PendingResponse, method_tag};
 use crate::hmr;
-use crate::router::RouterError;
+use crate::routing::RouterError;
 use crate::server::ServerState;
 
 /// Path for the backpressure-aware health endpoint. Always returns 200 so
@@ -29,47 +26,7 @@ use crate::server::ServerState;
 /// saturated or the circuit is open.
 const HEALTH_PATH: &str = "/__vertebra/health";
 
-/// Adapter implementing `futures_util::Stream` over a Tokio `mpsc::Receiver` of HTTP body frames.
-pub struct ReceiverFrameStream {
-    rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>,
-}
-
-impl ReceiverFrameStream {
-    /// Wrap a bounded Tokio `mpsc::Receiver` as an HTTP frame stream.
-    pub fn new(rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>) -> Self {
-        Self { rx }
-    }
-}
-
-impl Stream for ReceiverFrameStream {
-    type Item = Result<Frame<Bytes>, Infallible>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
-    }
-}
-
-/// Progressive multi-chunk and trailer body stream.
-pub type StreamingBody = StreamBody<ReceiverFrameStream>;
-
-/// Dual-path HTTP response body: `Left(Full<Bytes>)` for zero-channel unary responses,
-/// `Right(StreamingBody)` for chunked, SSE, and trailer-bearing responses.
-pub type ResponseBody = Either<Full<Bytes>, StreamingBody>;
-
-/// Canonical HTTP response type used across `vertebra-http`.
-pub type HttpResponse = Response<ResponseBody>;
-
-/// Wrap a contiguous byte buffer in the zero-allocation unary `Either::Left(Full<Bytes>)` branch.
-#[inline]
-pub fn full_body(bytes: impl Into<Bytes>) -> ResponseBody {
-    Either::Left(Full::new(bytes.into()))
-}
-
-/// Wrap a frame receiver in the progressive streaming `Either::Right(StreamBody)` branch.
-#[inline]
-pub fn stream_body(rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>) -> ResponseBody {
-    Either::Right(StreamBody::new(ReceiverFrameStream::new(rx)))
-}
+pub use crate::body::{FrameReceiver, HttpResponse, ResponseBody, full_body, stream_body};
 
 /// Top-level request handler; called for every accepted HTTP connection.
 pub async fn handle(
@@ -113,7 +70,7 @@ pub async fn handle(
     let path = parts.uri.path();
 
     // 1. Route lookup.
-    let route_match = match state.router.lookup(method.as_str(), path) {
+    let route_match = match state.router.lookup_method(method, path) {
         Ok(m) => m,
         Err(RouterError::NotFound { .. }) => {
             return Ok(Response::builder()
@@ -155,13 +112,18 @@ pub async fn handle(
     // 4. Create reply channel.
     let (reply_tx, reply_rx) = oneshot::channel::<PendingResponse>();
 
+    let path_and_query = parts
+        .uri
+        .into_parts()
+        .path_and_query
+        .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
+
     let pending = PendingRequest {
         handler_id,
         method_tag: method_tag(method),
         http_version_tag: version_tag(parts.version),
         flags: vertebra_core::protocol::flags::NONE,
-        path: path.to_owned(),
-        query: parts.uri.query().map(str::to_owned),
+        path_and_query,
         headers_mp,
         body: body_bytes,
         reply: reply_tx,

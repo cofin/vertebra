@@ -10,10 +10,9 @@ description = "PyO3 bindings for Vertebra native extension"
 [dependencies]
 vertebra-core = { path = "../vertebra-core" }
 bytes = { workspace = true }
-futures-util = "0.3"
 pyo3 = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { version = "0.7", features = ["io"] }
+serde_json = { workspace = true }
+jsonwebtoken = { workspace = true }
 
 [build-dependencies]
 pyo3-build-config = { workspace = true }

@@ -19,8 +19,10 @@ const FNV32_OFFSET = 0x811c9dc5;
 const FNV32_PRIME = 0x01000193;
 const HLC_WALL_MASK = 0x0000ffffffffffffn;
 
+const UTF8_ENCODER = new TextEncoder();
+
 export function fnv1aStateId(name: string): bigint {
-  const bytes = new TextEncoder().encode(name);
+  const bytes = UTF8_ENCODER.encode(name);
   let hash = FNV64_OFFSET;
   for (const byte of bytes) {
     hash ^= BigInt(byte);
@@ -30,7 +32,7 @@ export function fnv1aStateId(name: string): bigint {
 }
 
 export function fnv1aFieldId(name: string): number {
-  const bytes = new TextEncoder().encode(name);
+  const bytes = UTF8_ENCODER.encode(name);
   let hash = FNV32_OFFSET;
   for (const byte of bytes) {
     hash ^= byte;
@@ -205,6 +207,22 @@ export class LiveStateClient<TState extends Record<string, unknown>> {
       const key = this.fieldIdToKey.get(delta.fieldId);
       if (key !== undefined) {
         this.state = { ...this.state, [key]: delta.value };
+        this.notify();
+      }
+      return true;
+    }
+    if (delta.opcode === StateOpcode.FieldDelete && delta.fieldId !== undefined && delta.timestampNs !== undefined) {
+      const currentTs = this.fieldTimestamps.get(delta.fieldId) ?? 0n;
+      if (delta.timestampNs < currentTs) {
+        return false;
+      }
+      this.hlc.receive(delta.timestampNs);
+      this.fieldTimestamps.set(delta.fieldId, delta.timestampNs);
+      const key = this.fieldIdToKey.get(delta.fieldId);
+      if (key !== undefined) {
+        const nextState = { ...this.state };
+        delete nextState[key];
+        this.state = nextState;
         this.notify();
       }
       return true;

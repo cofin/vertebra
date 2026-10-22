@@ -4,8 +4,8 @@ from pathlib import Path
 
 import click
 
-from vertebra.build import (
-    BuildOrchestrator,
+from vertebra.build import BuildOrchestrator
+from vertebra.build.packaging import (
     BuildTarget,
     OnefileBuilder,
     StandaloneBuilder,
@@ -70,7 +70,6 @@ def build(
     project_dir: Path,
 ) -> None:
     """Build Vertebra application assets, standalone distributions, or onefile binaries."""
-    _ = profile
     resolved_project = project_dir.resolve()
 
     if standalone or onefile or target not in _LEGACY_TARGETS:
@@ -89,6 +88,7 @@ def build(
             project_dir=resolved_project,
             target=target_tuple,
             pgo_enabled=pgo,
+            profile=profile,
         )
         staged_dir = standalone_builder.build(dist_dir)
         console.success(f"Standalone build staged -> {staged_dir}")
@@ -116,6 +116,7 @@ def build(
             project_dir=resolved_project,
             target=target_tuple,
             pgo_enabled=pgo,
+            profile=profile,
         )
         staged = standalone_builder.build(dist_dir)
         console.success(f"Backend build complete -> {staged}")

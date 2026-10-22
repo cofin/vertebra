@@ -7,7 +7,7 @@ from typing import Literal
 
 import msgspec
 
-from vertebra.db.redis import SyncRedisDriver
+from vertebra.db.redis import AsyncRedisDriver, SyncRedisDriver
 
 __all__ = (
     "AsyncValkeyDriver",
@@ -44,8 +44,8 @@ class ValkeyConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         effective_user = "default" if self.enable_gcp_memorystore_iam else self.username
         cmds = [
             SyncRedisDriver.encode_hello3_handshake(
-                auth_username=effective_user,
-                auth_password=effective_password,
+                username=effective_user,
+                password=effective_password,
                 client_name=self.client_name,
             )
         ]
@@ -58,20 +58,20 @@ class ValkeyConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return cmds
 
 
-class SyncValkeyDriver:
+class SyncValkeyDriver(SyncRedisDriver):
     """Synchronous Valkey 8.0+/9.0+ driver with RESP3 client-side cache tracking."""
 
-    __slots__ = ("_client_cache", "_config", "_kv")
+    __slots__ = ("_client_cache",)
 
     def __init__(self, config: ValkeyConfig | None = None) -> None:
-        self._config = config or ValkeyConfig()
-        self._kv: dict[str, bytes] = {}
+        super().__init__(config or ValkeyConfig())
         self._client_cache: dict[str, bytes] = {}
 
     @property
     def config(self) -> ValkeyConfig:
         """Return the active ValkeyConfig."""
-        return self._config
+        cfg: ValkeyConfig = self._config
+        return cfg
 
     @property
     def cached_keys(self) -> tuple[str, ...]:
@@ -80,30 +80,25 @@ class SyncValkeyDriver:
 
     def get(self, key: str) -> bytes | None:
         """Fetch a key value, consulting the RESP3 client-side cache when enabled."""
-        if self._config.enable_client_side_caching and key in self._client_cache:
+        self._require_memory_backend()
+        if self.config.enable_client_side_caching and key in self._client_cache:
             return self._client_cache[key]
-        val = self._kv.get(key)
-        if val is not None and self._config.enable_client_side_caching:
+        val = super().get(key)
+        if val is not None and self.config.enable_client_side_caching:
             self._client_cache[key] = val
         return val
 
     def set(self, key: str, value: bytes | str, *, ex: int | None = None) -> None:
         """Set a key value and update/invalidate local client-side cache state."""
-        _ = ex
-        raw = value.encode("utf-8") if isinstance(value, str) else bytes(value)
-        self._kv[key] = raw
-        if self._config.enable_client_side_caching:
-            self._client_cache[key] = raw
+        super().set(key, value, ex=ex)
+        if self.config.enable_client_side_caching:
+            self._client_cache[key] = self._kv[key]
 
     def delete(self, key: str) -> bool:
         """Delete a key and evict from client-side cache."""
+        self._require_memory_backend()
         self._client_cache.pop(key, None)
-        return self._kv.pop(key, None) is not None
-
-    def publish(self, channel: str, payload: bytes | str) -> int:
-        """Publish a message to a Valkey pub/sub channel."""
-        _ = (channel, payload)
-        return 1
+        return super().delete(key)
 
     def handle_invalidation_push(self, keys: Sequence[str]) -> int:
         """Process a RESP3 `invalidate` push frame (`>2\\r\\n$10\\r\\ninvalidate\\r\\n...`)."""
@@ -113,18 +108,14 @@ class SyncValkeyDriver:
                 evicted += 1
         return evicted
 
-    def encode_pipeline(self, commands: Sequence[Sequence[bytes | str]]) -> bytes:
-        """Encode a batch of pipelined Valkey RESP3 commands into a single wire buffer."""
-        return b"".join(SyncRedisDriver.encode_command(*cmd) for cmd in commands)
 
-
-class AsyncValkeyDriver:
+class AsyncValkeyDriver(AsyncRedisDriver):
     """Asynchronous Valkey 8.0+/9.0+ RESP3 driver facade."""
 
-    __slots__ = ("_sync",)
+    __slots__ = ()
 
     def __init__(self, config: ValkeyConfig | None = None) -> None:
-        self._sync = SyncValkeyDriver(config)
+        self._sync: SyncValkeyDriver = SyncValkeyDriver(config)
 
     @property
     def config(self) -> ValkeyConfig:
@@ -136,26 +127,6 @@ class AsyncValkeyDriver:
         """Return the keys currently tracked in the local RESP3 client-side cache."""
         return self._sync.cached_keys
 
-    async def get(self, key: str) -> bytes | None:
-        """Asynchronously fetch a key value."""
-        return self._sync.get(key)
-
-    async def set(self, key: str, value: bytes | str, *, ex: int | None = None) -> None:
-        """Asynchronously set a key value."""
-        self._sync.set(key, value, ex=ex)
-
-    async def delete(self, key: str) -> bool:
-        """Asynchronously delete a key."""
-        return self._sync.delete(key)
-
-    async def publish(self, channel: str, payload: bytes | str) -> int:
-        """Asynchronously publish a message to a Valkey pub/sub channel."""
-        return self._sync.publish(channel, payload)
-
     def handle_invalidation_push(self, keys: Sequence[str]) -> int:
         """Process a RESP3 client-side caching invalidation push frame."""
         return self._sync.handle_invalidation_push(keys)
-
-    def encode_pipeline(self, commands: Sequence[Sequence[bytes | str]]) -> bytes:
-        """Encode a batch of pipelined Valkey RESP3 commands."""
-        return self._sync.encode_pipeline(commands)

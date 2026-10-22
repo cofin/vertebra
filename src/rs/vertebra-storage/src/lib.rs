@@ -1,6 +1,7 @@
 //! `vertebra-storage` crate and `vertebra._storage` PyO3 extension module.
 
 pub mod oci;
+pub mod r2;
 pub mod signing;
 pub mod store;
 
@@ -14,7 +15,8 @@ use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use crate::oci::{OciCavageCredentials, chunk_uniform_parts, sign_oci_cavage_request};
+use crate::oci::{OciCavageCredentials, sign_oci_cavage_request};
+use crate::r2::chunk_uniform_parts;
 use crate::signing::{
     AzureSasConfig, GcsSignConfig, HmacSigner, S3SignConfig, sign_azure_sas_url,
     sign_gcs_v4_with_iam_endpoint, sign_s3_v4_url, verify_s3_v4_url,
@@ -444,15 +446,16 @@ impl NativeObjectStore {
 }
 
 #[pyfunction]
-#[pyo3(signature = (base_url, secret, method, expires_in_secs=3600, timestamp=1700000000))]
+#[pyo3(signature = (base_url, secret, method, expires_in_secs=3600, timestamp=None))]
 fn py_sign_hmac_url(
     py: Python<'_>,
     base_url: &str,
     secret: &str,
     method: &str,
     expires_in_secs: u64,
-    timestamp: i64,
+    timestamp: Option<i64>,
 ) -> PyResult<String> {
+    let timestamp = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
     py.detach(|| {
         let signer = HmacSigner::new(secret.as_bytes());
         signer.sign_url(base_url, method, expires_in_secs, timestamp)
@@ -476,7 +479,7 @@ fn py_verify_hmac_url(
 }
 
 #[pyfunction]
-#[pyo3(signature = (bucket, region, access_key_id, secret_access_key, method, object_path, expires_in_secs=3600, timestamp=1700000000, endpoint=None))]
+#[pyo3(signature = (bucket, region, access_key_id, secret_access_key, method, object_path, expires_in_secs=3600, timestamp=None, endpoint=None))]
 #[allow(clippy::too_many_arguments)]
 fn py_sign_s3_v4_url(
     py: Python<'_>,
@@ -487,9 +490,10 @@ fn py_sign_s3_v4_url(
     method: &str,
     object_path: &str,
     expires_in_secs: u64,
-    timestamp: i64,
+    timestamp: Option<i64>,
     endpoint: Option<String>,
 ) -> PyResult<String> {
+    let timestamp = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
     py.detach(|| {
         let cfg = S3SignConfig {
             bucket: bucket.to_string(),
@@ -531,7 +535,7 @@ fn py_verify_s3_v4_url(
 }
 
 #[pyfunction]
-#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=1700000000, iam_endpoint="https://iamcredentials.googleapis.com", access_token=None))]
+#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=None, iam_endpoint="https://iamcredentials.googleapis.com", access_token=None))]
 #[allow(clippy::too_many_arguments)]
 fn py_sign_gcs_v4_iam_url(
     py: Python<'_>,
@@ -540,10 +544,11 @@ fn py_sign_gcs_v4_iam_url(
     method: &str,
     object_path: &str,
     expires_in_secs: u64,
-    timestamp: i64,
+    timestamp: Option<i64>,
     iam_endpoint: &str,
     access_token: Option<String>,
 ) -> PyResult<String> {
+    let timestamp = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
     let cfg = GcsSignConfig {
         bucket: bucket.to_string(),
         service_account_email: service_account_email.to_string(),
@@ -567,7 +572,7 @@ fn py_sign_gcs_v4_iam_url(
 }
 
 #[pyfunction]
-#[pyo3(signature = (tenancy_ocid, user_ocid, fingerprint, private_key_pem, method, url, body=None, content_type=None, timestamp=1700000000))]
+#[pyo3(signature = (tenancy_ocid, user_ocid, fingerprint, private_key_pem, method, url, body=None, content_type=None, timestamp=None))]
 #[allow(clippy::too_many_arguments)]
 fn py_sign_oci_cavage_headers(
     py: Python<'_>,
@@ -579,8 +584,9 @@ fn py_sign_oci_cavage_headers(
     url: &str,
     body: Option<&[u8]>,
     content_type: Option<&str>,
-    timestamp: i64,
+    timestamp: Option<i64>,
 ) -> PyResult<HashMap<String, String>> {
+    let timestamp = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
     let creds = OciCavageCredentials {
         tenancy_ocid: tenancy_ocid.to_string(),
         user_ocid: user_ocid.to_string(),
@@ -607,7 +613,7 @@ fn py_sign_oci_cavage_headers(
 }
 
 #[pyfunction]
-#[pyo3(signature = (account, container, access_key, method, blob_path, expires_in_secs=3600, timestamp=1700000000, endpoint=None))]
+#[pyo3(signature = (account, container, access_key, method, blob_path, expires_in_secs=3600, timestamp=None, endpoint=None))]
 #[allow(clippy::too_many_arguments)]
 fn py_sign_azure_sas_url(
     py: Python<'_>,
@@ -617,9 +623,10 @@ fn py_sign_azure_sas_url(
     method: &str,
     blob_path: &str,
     expires_in_secs: u64,
-    timestamp: i64,
+    timestamp: Option<i64>,
     endpoint: Option<String>,
 ) -> PyResult<String> {
+    let timestamp = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
     let cfg = AzureSasConfig {
         account: account.to_string(),
         container: container.to_string(),

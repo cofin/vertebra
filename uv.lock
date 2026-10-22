@@ -889,6 +889,42 @@ wheels = [
 ]
 
 [[package]]
+name = "sqlglot"
+version = "30.24.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/53/7c/9fd907983ff041692399bf855d344e1fcc9a02c8d92a5fee6dbdf139d19e/sqlglot-30.24.0.tar.gz", hash = "sha256:6451aabd1c9994d0f73355c962a5eaf9258381b3f2554e53db916cd9a605552a", size = 6131857, upload-time = "2026-10-20T17:14:03.987Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/68/5f/d78f74306cc026c5f40f8808a47356dfd37461eb15eb759a20e5e9efe7d7/sqlglot-30.24.0-py3-none-any.whl", hash = "sha256:9488828cc018453b7a3ba01e65d2749c9a731314c14583695163ca1f358203fe", size = 792162, upload-time = "2026-10-20T17:14:02.053Z" },
+]
+
+[[package]]
+name = "sqlspec"
+version = "0.68.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mypy-extensions" },
+    { name = "rich-click" },
+    { name = "sqlglot" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6a/cb/18c834cc4612ed0822bcb7597373c23a20703c27f3b0f4da3f29f13416a5/sqlspec-0.68.0.tar.gz", hash = "sha256:254c3c19e241a4b4cf4523eb03711d7373e5b33edcf445598eacf9d852ff620e", size = 4077351, upload-time = "2026-10-22T15:11:26.507Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ed/58/8649bac071a83321258efe634886a2000731c81d99d2d2f03c855ab6f0f8/sqlspec-0.68.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:76f9a40d09955df26c8f9eda76b0d985c9b1e48eaa0145ccce91908a161bc7ae", size = 9496309, upload-time = "2026-10-22T15:10:53.379Z" },
+    { url = "https://files.pythonhosted.org/packages/73/2e/e368c4b43d7bb14d5719bd18d5e52c564fda1d9e20f45a777fce41f2fb84/sqlspec-0.68.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:54b386ed211a400e96ee5ee064a31f3b14bd9171673a87d6cdeef3aa4af86119", size = 10891295, upload-time = "2026-10-22T15:10:56.232Z" },
+    { url = "https://files.pythonhosted.org/packages/9d/ef/22c1de123384c82004e7d68624b13397af2893c81f1810e3978ed44343ee/sqlspec-0.68.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:6d9602848b39bf44a729c8f8d6e16e128061247fe83a817fe6f66bd7620d7ebd", size = 10046759, upload-time = "2026-10-22T15:10:59.189Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/5d/b2c17fdc6f2cbe2d9ef261204fc1a2b9de33cb05ff330be63ce6ac090d47/sqlspec-0.68.0-cp312-cp312-win_amd64.whl", hash = "sha256:7d2f521dc2e0abc0569f8e0d29a2858739b84832c19499bf9555f5c733132c03", size = 8120732, upload-time = "2026-10-22T15:11:01.563Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/fc/b194cb9c0a37006bc01e663740074a401fde752a2f356169bdfd53c7f328/sqlspec-0.68.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:2b6ceb8e3838178afa689d586f2eea7380f6607a98d9aa233f8a35bd12897ab0", size = 9488194, upload-time = "2026-10-22T15:11:04.537Z" },
+    { url = "https://files.pythonhosted.org/packages/54/e3/9aad4f62f79aa90c94316ba7dfd8ffe0c43791bb68b06d42c0c57c08ddf5/sqlspec-0.68.0-cp313-cp313-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:c327386870b04b444fce0701464d382cf1adf1a19065fd806ea225b87bed9aea", size = 10932587, upload-time = "2026-10-22T15:11:07.277Z" },
+    { url = "https://files.pythonhosted.org/packages/72/04/fbfeab170d4cb4f252f001acefd7c29ec69fd1d7ad07b831dd804ef92c95/sqlspec-0.68.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:be504513eecaaf067dcb3b0401c5386dc321ffbbffbb9f116deecaa4efd64c29", size = 10112502, upload-time = "2026-10-22T15:11:09.625Z" },
+    { url = "https://files.pythonhosted.org/packages/9a/cb/a5f5e5e38e7e9e35f0ed500f602c9c01b9e2f925c40766a8b31d9f3cf5ea/sqlspec-0.68.0-cp313-cp313-win_amd64.whl", hash = "sha256:68248e553530f0bcb0d81654c5f5e68e4fffc5b6f9070efaa7b26749ffa2d025", size = 8130999, upload-time = "2026-10-22T15:11:12.327Z" },
+    { url = "https://files.pythonhosted.org/packages/88/49/05045d37f065fc834cce7385ab1fd7ca44840f3d1de74a9217257856ac52/sqlspec-0.68.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:e4b911877126eab0e56a286c398fc88e17c78efba8ec664bd4c111985efcf077", size = 9469971, upload-time = "2026-10-22T15:11:14.399Z" },
+    { url = "https://files.pythonhosted.org/packages/30/1c/e154cd0b6092380d2c4fa3dc25a55dcf74717d2cef23209c92a03863c5c9/sqlspec-0.68.0-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:71c148c0bdf934103e2c4ac7d61960f0c95d5499ed837e3608bf7fcd07e1eaea", size = 10890006, upload-time = "2026-10-22T15:11:16.825Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/38/db0acdd7adb6bdfff88d62287c9dbc9345f6d5ec0c84fad7d160c794193d/sqlspec-0.68.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:b24abfb165015125e1aea975967f280ecadfe1dc1d15f29a1fb907198186e403", size = 10114867, upload-time = "2026-10-22T15:11:19.157Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/8c/041168755b133707899e2a6c7ab44811720b110e01d93f1099e1e2cb2525/sqlspec-0.68.0-cp314-cp314-win_amd64.whl", hash = "sha256:1c851822662c14e0cae7a754fadacc9c6be8ef8521f16459fe9f2e8ec639d6f4", size = 8252910, upload-time = "2026-10-22T15:11:21.781Z" },
+    { url = "https://files.pythonhosted.org/packages/8e/f6/66c94575f4c67104b8dcabd67458c9d99f200205fd93ce71bb2996057683/sqlspec-0.68.0-py3-none-any.whl", hash = "sha256:b1228afa4a86c76f5a168216e489d2b442f3177d636371d1f9ba984734794472", size = 1827965, upload-time = "2026-10-22T15:11:23.731Z" },
+]
+
+[[package]]
 name = "typing-extensions"
 version = "4.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -985,6 +1021,9 @@ dev = [
 framework = [
     { name = "msgspec" },
 ]
+sqlspec = [
+    { name = "sqlspec" },
+]
 
 [package.dev-dependencies]
 bench = [
@@ -1027,8 +1066,9 @@ requires-dist = [
     { name = "rich", specifier = ">=13.0" },
     { name = "rich-click", specifier = ">=1.7" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
+    { name = "sqlspec", marker = "extra == 'sqlspec'", specifier = ">=0.68.0" },
 ]
-provides-extras = ["framework", "dev"]
+provides-extras = ["framework", "sqlspec", "dev"]
 
 [package.metadata.requires-dev]
 bench = [

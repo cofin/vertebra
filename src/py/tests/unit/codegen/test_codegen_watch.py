@@ -1,8 +1,11 @@
 """Tests for codegen watch and HMR notification helpers."""
 
+import threading
+import time
 import urllib.request
+from pathlib import Path
 
-from vertebra.build.codegen._watch import HmrNotifier
+from vertebra.build.codegen._watch import CodegenWatcher, HmrNotifier
 
 
 class _DummyResponse:
@@ -42,3 +45,23 @@ def test_hmr_notifier_swallows_delivery_errors(monkeypatch) -> None:
 
     notifier = HmrNotifier("http://127.0.0.1:9999")
     notifier.notify()
+
+
+def test_codegen_watcher_native_detects_changes(tmp_path: Path) -> None:
+    """CodegenWatcher with native SourceWatcher should detect file modification and invoke callback."""
+    src_file = tmp_path / "app.py"
+    src_file.write_text("x = 1\n", encoding="utf-8")
+
+    event = threading.Event()
+
+    def on_change() -> None:
+        event.set()
+
+    watcher = CodegenWatcher(tmp_path, on_change, poll_interval=0.05)
+    watcher.start()
+    try:
+        time.sleep(0.1)
+        src_file.write_text("x = 2\n", encoding="utf-8")
+        assert event.wait(timeout=2.0)
+    finally:
+        watcher.stop()

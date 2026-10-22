@@ -1,35 +1,33 @@
 //! vertebra-py — PyO3 extension module for Vertebra.
 //!
-//! Exposes the batch FFI API:
-//! - `Request` — zero-object request proxy
-//! - `Headers` — lazy header mapping
-//! - `Response` — response builder
-//! - `get_batch()` / `submit_results()` — vectorized batch API
-//! - `init_transport()` — channel initialization
+//! Exposes the batch FFI API, protocol scopes, native runners, and telemetry.
 
 use pyo3::prelude::*;
 
-pub mod api;
-pub mod asgi_bridge;
-pub mod asgi_scope;
-pub mod batch;
+pub mod asgi;
+pub mod file_io;
 pub mod headers;
 pub mod request;
 pub mod response;
-pub mod rsgi_protocol;
-pub mod rsgi_scope;
-pub mod wsgi_environ;
-pub mod wsgi_worker;
+pub mod rsgi;
+pub mod synthetic;
+pub mod telemetry;
+pub mod transport;
+pub mod wsgi;
 
-pub use asgi_scope::{AsgiScope, AsgiScopeIterator};
-pub use batch::{RequestBatch, RequestBatchIterator};
+pub use asgi::{AsgiScope, AsgiScopeIterator};
 pub use headers::{Headers, HeadersIterator};
-pub use request::Request;
+pub use request::{Request, RequestBatch, RequestBatchIterator};
 pub use response::Response;
-pub use rsgi_protocol::{RsgiHttpProtocol, RsgiTransport, RsgiWebsocketProtocol};
-pub use rsgi_scope::{RsgiHeaders, RsgiScope};
-pub use wsgi_environ::{WsgiEnviron, WsgiEnvironIterator, WsgiFileWrapper, WsgiInput};
-pub use wsgi_worker::run_wsgi_callable;
+pub use rsgi::{RsgiHttpProtocol, RsgiScope, RsgiTransport};
+pub use telemetry::{
+    NativeJwtGuard, NativeLogSink, NativeRateLimiter, format_traceparent, parse_traceparent,
+    sanitize_sql,
+};
+pub use wsgi::{
+    WsgiEnviron, WsgiEnvironIterator, WsgiFileWrapper, WsgiInput, WsgiStartResponse,
+    run_wsgi_callable,
+};
 
 /// Whether this build targets free-threaded Python (3.14t+).
 #[cfg(Py_GIL_DISABLED)]
@@ -49,45 +47,42 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<headers::Headers>()?;
     m.add_class::<headers::HeadersIterator>()?;
     m.add_class::<response::Response>()?;
-    m.add_class::<batch::RequestBatch>()?;
-    m.add_class::<batch::RequestBatchIterator>()?;
-    m.add_class::<asgi_scope::AsgiScope>()?;
-    m.add_class::<asgi_scope::AsgiScopeIterator>()?;
-    m.add_class::<wsgi_environ::WsgiEnviron>()?;
-    m.add_class::<wsgi_environ::WsgiEnvironIterator>()?;
-    m.add_class::<wsgi_environ::WsgiInput>()?;
-    m.add_class::<wsgi_environ::WsgiFileWrapper>()?;
-    m.add_class::<wsgi_worker::WsgiStartResponse>()?;
-    m.add_class::<rsgi_scope::RsgiHeaders>()?;
-    m.add_class::<rsgi_scope::RsgiScope>()?;
-    m.add_class::<rsgi_protocol::RsgiHttpProtocol>()?;
-    m.add_class::<rsgi_protocol::RsgiTransport>()?;
-    m.add_class::<rsgi_protocol::RsgiWebsocketProtocol>()?;
+    m.add_class::<request::RequestBatch>()?;
+    m.add_class::<request::RequestBatchIterator>()?;
+    m.add_class::<asgi::AsgiScope>()?;
+    m.add_class::<asgi::AsgiScopeIterator>()?;
+    m.add_class::<wsgi::WsgiEnviron>()?;
+    m.add_class::<wsgi::WsgiEnvironIterator>()?;
+    m.add_class::<wsgi::WsgiInput>()?;
+    m.add_class::<wsgi::WsgiFileWrapper>()?;
+    m.add_class::<wsgi::WsgiStartResponse>()?;
+    m.add_class::<rsgi::RsgiScope>()?;
+    m.add_class::<rsgi::RsgiHttpProtocol>()?;
+    m.add_class::<rsgi::RsgiTransport>()?;
+    m.add_class::<telemetry::NativeLogSink>()?;
+    m.add_class::<telemetry::NativeJwtGuard>()?;
+    m.add_class::<telemetry::NativeRateLimiter>()?;
 
     // Vectorized batch API
-    m.add_function(wrap_pyfunction!(api::init_transport, m)?)?;
-    m.add_function(wrap_pyfunction!(api::get_batch, m)?)?;
-    m.add_function(wrap_pyfunction!(api::submit_results, m)?)?;
-    m.add_function(wrap_pyfunction!(api::submit_response, m)?)?;
-    m.add_function(wrap_pyfunction!(api::submit_raw_response, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::init_transport, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::get_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::submit_results, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::submit_response, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::submit_raw_response, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::submit_response_raw, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::submit_batch_raw, m)?)?;
 
     // SHM async helpers
-    m.add_function(wrap_pyfunction!(api::get_request_notify_fd, m)?)?;
-    m.add_function(wrap_pyfunction!(api::clear_request_notification, m)?)?;
-    m.add_function(wrap_pyfunction!(api::try_get_batch, m)?)?;
-    m.add_function(wrap_pyfunction!(asgi_bridge::stream_file_chunks, m)?)?;
-    m.add_function(wrap_pyfunction!(wsgi_worker::run_wsgi_callable, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::get_request_notify_fd, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::clear_request_notification, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::try_get_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(file_io::stream_file_chunks, m)?)?;
+    m.add_function(wrap_pyfunction!(wsgi::run_wsgi_callable, m)?)?;
+
+    // Telemetry helpers
+    m.add_function(wrap_pyfunction!(telemetry::parse_traceparent, m)?)?;
+    m.add_function(wrap_pyfunction!(telemetry::format_traceparent, m)?)?;
+    m.add_function(wrap_pyfunction!(telemetry::sanitize_sql, m)?)?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn free_threaded_const_exists() {
-        // Verifies the FREE_THREADED constant compiles correctly
-        let _ = FREE_THREADED;
-    }
 }

@@ -7,17 +7,21 @@ from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
 
+from vertebra._typing import MissingDependencyError
 from vertebra.extensions.litestar.channels import swap_litestar_channels_backend
 from vertebra.extensions.litestar.config import LitestarConfig
 from vertebra.extensions.litestar.fastpath import (
     CompiledLitestarRoute,
+    LitestarFastPathBypass,
     compile_litestar_fastpath_routes,
 )
 from vertebra.extensions.litestar.offload import (
     LitestarOffloadPlan,
     offload_litestar_middlewares,
 )
+from vertebra.extensions.litestar.router import extract_litestar_routes
 from vertebra.extensions.litestar.store import swap_litestar_response_cache_store
+from vertebra.utils.module_loader import import_optional
 
 __all__ = (
     "LitestarPlugin",
@@ -28,12 +32,13 @@ __all__ = (
 class LitestarPlugin:
     """Litestar plugin enabling zero-GIL Rust offload, direct handler dispatch, and CLI lifespans."""
 
-    __slots__ = ("_compiled_routes", "_config", "_offload_plan")
+    __slots__ = ("_compiled_routes", "_config", "_offload_plan", "_router_table")
 
     def __init__(self, config: LitestarConfig | None = None) -> None:
         self._config = config or LitestarConfig()
         self._offload_plan: LitestarOffloadPlan | None = None
         self._compiled_routes: dict[int, CompiledLitestarRoute] = {}
+        self._router_table: Any = None
 
     @property
     def config(self) -> LitestarConfig:
@@ -50,10 +55,22 @@ class LitestarPlugin:
         """Return pre-compiled direct-dispatch route descriptors indexed by handler_id."""
         return self._compiled_routes
 
+    @property
+    def router_table(self) -> Any:
+        """Return the extracted router table if fastpath bypass is enabled."""
+        return self._router_table
+
     def on_app_init(self, app_config: Any) -> Any:
         """Intercept CompressionConfig and CORSConfig before Litestar builds its routing trie."""
         app_config.state["vertebra_config"] = self._config
         app_config.state["vertebra_plugin"] = self
+
+        if self._config.enable_fastpath_bypass:
+            try:
+                self._router_table = extract_litestar_routes(app_config)
+            except (AttributeError, TypeError, ValueError, KeyError):
+                self._router_table = None
+            app_config.state["vertebra_fastpath_bypass"] = LitestarFastPathBypass(self._router_table)
 
         if (
             self._config.offload_compression
@@ -74,6 +91,28 @@ class LitestarPlugin:
                 return {"status": "ok"}
 
             app_config.route_handlers.append(_vertebra_health_probe)
+
+        if self._config.mcp_config is not None:
+            mcp_mod = import_optional("litestar_mcp")
+            litestar_mcp_cls = getattr(mcp_mod, "LitestarMCP", None) if mcp_mod is not None else None
+            if litestar_mcp_cls is None:
+                raise MissingDependencyError("litestar-mcp", install_package="vertebra[mcp]", extra="mcp")
+            mcp_plugin = litestar_mcp_cls(self._config.mcp_config)
+            plugins = getattr(app_config, "plugins", None)
+            if isinstance(plugins, list):
+                plugins.append(mcp_plugin)
+            app_config.state["litestar_mcp_plugin"] = mcp_plugin
+
+        if self._config.a2a_config is not None:
+            mcp_mod = import_optional("litestar_mcp")
+            litestar_a2a_cls = getattr(mcp_mod, "LitestarA2A", None) if mcp_mod is not None else None
+            if litestar_a2a_cls is None:
+                raise MissingDependencyError("litestar-mcp", install_package="vertebra[mcp]", extra="mcp")
+            a2a_plugin = litestar_a2a_cls(self._config.a2a_config)
+            plugins = getattr(app_config, "plugins", None)
+            if isinstance(plugins, list):
+                plugins.append(a2a_plugin)
+            app_config.state["litestar_a2a_plugin"] = a2a_plugin
 
         app_config.on_app_init.append(self._finalize_app_acceleration)
         return app_config

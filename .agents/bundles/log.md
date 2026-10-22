@@ -10,11 +10,16 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-10-22] flow-plan | Materialized 5 Master PRDs, 21 Child Chapters, and 126 Refined Task Worksheets
+
+- Authored and validated 5 Master PRDs (`vertebra-design-quality`, `vertebra-agentic-harness`, `vertebra-native-db-drivers`, `vertebra-shm-connection-broker`, `vertebra-queues-and-messaging`), 21 child Flow specs, and 126 refined task worksheets (154 markdown files) under `.agents/bundles/specs/`.
+- Resolved architectural decisions `D1`–`D4` in `vertebra-design-quality/spec.md`: retained `vertebra-core/src/guards.rs` (`JwtValidator`, `RateLimiter`), `AsyncLogCore`, `W3cTraceContext`, and `sanitize_sql_statement` for Rust ingress pre-dispatch and PyO3 Litestar/native boosting alongside drop-in standard library `logging.Handler` and Litestar `LoggingConfig` integration; extracted full feature roadmaps into dedicated PRDs (`vertebra-agentic-harness`, `vertebra-native-db-drivers`, `vertebra-shm-connection-broker`, `vertebra-queues-and-messaging`).
+
 ## [2026-10-22] flow-resynthesize | OKF v0.2 Knowledge Bundle Audit & Full Resynthesis
 
 - Audited and resynthesized the entire OKF v0.2 bundle against the consolidated repository baseline (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `src/py/vertebra/`, and `src/ts/vertebra-client/`).
 - Reconciled all path moves (`builder/` $\to$ `build/`, `builder/_codegen/` $\to$ `build/codegen/`, `server/_asgi/_litestar_*.py` $\to$ `extensions/litestar/*.py`, `build/{standalone,onefile}.py` $\to$ `build/packaging/`) and canonical domain renames (`ObjectStore`/`SyncStore`/`AsyncStore`, `SQLSpecPlugin`, `AlchemyPlugin`, `BrokerPlugin`, `LitestarPlugin`, `ChannelsBackend`, `MemoryStore`, `WorkerRunner`/`LaneConfig`, `SseClient`/`WebSocketClient`, `LiveState`/`LiveStateClient`, `TraceContext`, `LogSink`/`LogHandler`, `CgroupQuota`, `LameDuckController`, `ZPagesRegistry`).
-- Rewrote `product/*`, `knowledge/workflow.md`, `architecture/**` (adding `runtime/platform-and-lifecycle.md` and `http/protocol-and-offload-modules.md`), `domains/**` (adding `storage/object-storage.md`, `data/database-drivers-and-dialers.md`, `data/query-pipeline-cdc-and-tenancy.md`, `telemetry/logging-tracing-and-genai.md`, `extensions/{litestar,sqlspec-alchemy-and-dialects,oracle-apex-and-ebs,grpc}.md`, `framework/{subdomains,live-state,cli}.md`, `server/worker-lanes.md`, and `frontend/{packaging-and-pgo,wasm}.md`), `patterns/**` (adding `python/serialization-and-utils.md`), `testing/**`, `gotchas/**`, and all category/root `index.md` files with zero broken links or missing source resources.
+- Rewrote `product/*`, `knowledge/workflow.md`, `architecture/**` (adding `runtime/platform-and-lifecycle.md` and `http/protocol-and-offload-modules.md`), `domains/**` (adding `storage/object-storage.md`, `data/database-drivers-and-dialers.md`, `data/query-pipeline-cdc-and-tenancy.md`, `telemetry/logging-tracing-and-genai.md`, `extensions/{litestar,sqlspec-alchemy-and-dialects,oracle-apex,grpc}.md`, `framework/{subdomains,live-state,cli}.md`, `server/worker-lanes.md`, and `frontend/{packaging-and-pgo,wasm}.md`), `patterns/**` (adding `python/serialization-and-utils.md`), `testing/**`, `gotchas/**`, and all category/root `index.md` files with zero broken links or missing source resources.
 
 ---
 

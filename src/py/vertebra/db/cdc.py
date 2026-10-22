@@ -34,6 +34,7 @@ class CdcConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     replication_slot_name: str = "vertebra_cdc_slot"
     publication_name: str = "vertebra_pub"
     max_slot_wal_keep_size_mb: int = 4096
+    max_spill_entries: int = 1024
 
 
 class ChangeFeed:
@@ -70,6 +71,9 @@ class ChangeFeed:
         encoded = encode_json_bytes(payload)
         spilled = len(encoded) > self._config.spill_threshold_bytes
         if spilled:
+            if len(self._spill_store) >= self._config.max_spill_entries:
+                oldest_key = next(iter(self._spill_store))
+                del self._spill_store[oldest_key]
             self._spill_store[event_id] = payload
             wire_envelope = encode_json(
                 {
@@ -96,6 +100,8 @@ class ChangeFeed:
             payload=payload,
             spilled=spilled,
         )
+        if len(self._history) >= self._config.max_spill_entries:
+            self._history.pop(0)
         self._history.append(evt)
         return wire_envelope, evt
 

@@ -2,14 +2,11 @@
 //! `grpc-timeout` parsing, percent-encoded `grpc-message` trailers, and
 //! `FLAG_TRAILERS` HTTP/2 trailer emission.
 
-use std::convert::Infallible;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
-use hyper::body::{Body, Frame};
+use hyper::body::Frame;
 use tokio::sync::mpsc;
 
 /// Length of the gRPC Length-Prefixed Message header (`1` compression byte + `4` BE length bytes).
@@ -18,8 +15,7 @@ pub const GRPC_HEADER_LEN: usize = 5;
 /// Default maximum inbound/outbound gRPC message size (`4 MiB`).
 pub const DEFAULT_MAX_GRPC_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
-/// Response flag bit indicating that the frame carries HTTP/2 trailing headers.
-pub const FLAG_TRAILERS: u16 = 1 << 5;
+pub use vertebra_core::ipc::FLAG_TRAILERS;
 
 /// Canonical gRPC status codes (`0..=16`).
 #[repr(u8)]
@@ -315,23 +311,6 @@ pub fn parse_grpc_timeout(header_val: &str) -> Result<Duration, GrpcError> {
     }
 }
 
-/// Stream body yielding gRPC LPM data frames followed by an HTTP/2 `Frame::trailers` frame.
-pub struct GrpcStreamBody {
-    rx: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>,
-}
-
-impl Body for GrpcStreamBody {
-    type Data = Bytes;
-    type Error = Infallible;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        self.rx.poll_recv(cx)
-    }
-}
-
 /// Build an HTTP/2 gRPC response that streams `frames` as 5-byte LPM data chunks
 /// and emits `Frame::trailers` when `flags & FLAG_TRAILERS != 0`.
 pub fn build_grpc_response_with_trailers(
@@ -340,7 +319,7 @@ pub fn build_grpc_response_with_trailers(
     status: GrpcStatus,
     message: Option<&str>,
     flags: u16,
-) -> Response<GrpcStreamBody> {
+) -> Response<crate::body::FrameReceiver> {
     let (tx, rx) = mpsc::channel(frames.len() + 2);
     let trailers = if (flags & FLAG_TRAILERS) != 0 {
         Some(build_grpc_trailers(status, message))
@@ -364,7 +343,7 @@ pub fn build_grpc_response_with_trailers(
     Response::builder()
         .status(StatusCode::OK)
         .header(http::header::CONTENT_TYPE, wire_format.content_type_str())
-        .body(GrpcStreamBody { rx })
+        .body(crate::body::FrameReceiver::new(rx))
         .expect("gRPC response must build")
 }
 

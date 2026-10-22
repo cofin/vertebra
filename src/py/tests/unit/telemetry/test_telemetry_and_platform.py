@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,8 +12,10 @@ import msgspec
 from vertebra.server.platform import (
     CgroupQuota,
     LameDuckController,
+    ShmAllocationPolicy,
     ZPagesRegistry,
 )
+from vertebra.server.worker import Worker
 from vertebra.telemetry import (
     GenAiMetricSample,
     GenAiRecorder,
@@ -174,3 +177,61 @@ def test_span_ring_genai_metrics_cgroup_and_zpages(tmp_path: Path) -> None:
     code_drain, body_drain = zpages.handle_zpage("/healthz")
     assert code_drain == 503
     assert msgspec.json.decode(body_drain)["status"] == "lame_duck"
+
+
+def test_genai_recorder_is_bounded_and_drains() -> None:
+    """Verify GenAiRecorder bounds retained samples via deque maxlen and drains atomically."""
+    recorder = GenAiRecorder(max_samples=8)
+    for idx in range(20):
+        recorder.record_generation(
+            model=f"gemini-model-{idx}",
+            input_tokens=10 + idx,
+            output_tokens=5 + idx,
+            duration_seconds=0.1,
+        )
+
+    assert len(recorder.samples) == 8
+    assert recorder.samples[0].model == "gemini-model-12"
+    assert recorder.samples[-1].model == "gemini-model-19"
+
+    drained = recorder.drain()
+    assert len(drained) == 8
+    assert drained[0].model == "gemini-model-12"
+    assert len(recorder.samples) == 0
+
+
+def test_worker_sigterm_enters_lame_duck_and_validates_shm_policy() -> None:
+    """Verify Worker.handle_sigterm validates ShmAllocationPolicy, enters lame-duck mode, and updates zPages."""
+    validated_calls: list[bool] = []
+
+    class TrackingShmPolicy(ShmAllocationPolicy):
+        def validate_environment(self) -> bool:
+            res = super().validate_environment()
+            validated_calls.append(res)
+            return res
+
+    policy = TrackingShmPolicy(prefer_memfd=True)
+    lame_duck = LameDuckController()
+    zpages = ZPagesRegistry("vertebra-worker", lame_duck=lame_duck)
+    stop_event = threading.Event()
+
+    worker = Worker(
+        {},
+        shm_policy=policy,
+        lame_duck=lame_duck,
+        zpages=zpages,
+        stop_event=stop_event,
+    )
+    assert not lame_duck.is_lame_duck
+    code_before, _ = zpages.handle_zpage("/healthz")
+    assert code_before == 200
+
+    worker.handle_sigterm()
+    assert validated_calls == [True]
+    assert lame_duck.is_lame_duck is True
+    assert stop_event.is_set() is True
+    code_after, body_after = zpages.handle_zpage("/healthz")
+    assert code_after == 503
+    assert msgspec.json.decode(body_after)["status"] == "lame_duck"
+    _, varz_body = zpages.handle_zpage("/varz")
+    assert msgspec.json.decode(varz_body)["worker_state"] == "draining"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import msgspec
@@ -11,6 +12,8 @@ __all__ = (
     "TenantScopeConfig",
 )
 
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 class TenantScopeConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for dual-layer PostgreSQL tenant isolation (planner predicate + RLS GUC)."""
@@ -19,6 +22,14 @@ class TenantScopeConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     tenant_column: str = "tenant_id"
     parameter_cast: str | None = "uuid"
 
+    def __post_init__(self) -> None:
+        if not _IDENT_RE.match(self.tenant_column):
+            msg = f"Invalid tenant_column identifier: {self.tenant_column!r}"
+            raise ValueError(msg)
+        if self.parameter_cast is not None and not _IDENT_RE.match(self.parameter_cast):
+            msg = f"Invalid parameter_cast identifier: {self.parameter_cast!r}"
+            raise ValueError(msg)
+
 
 class TenantPredicate(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Positional tenant predicate allowing PostgreSQL index scans without ``security_barrier`` fencing."""
@@ -26,6 +37,11 @@ class TenantPredicate(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     table_alias: str
     tenant_value: Any
     config: TenantScopeConfig = TenantScopeConfig()
+
+    def __post_init__(self) -> None:
+        if self.table_alias and not _IDENT_RE.match(self.table_alias):
+            msg = f"Invalid table_alias identifier: {self.table_alias!r}"
+            raise ValueError(msg)
 
     def to_sql_fragment(self, param_index: int = 1) -> str:
         """Render ``<alias>.<tenant_column> = $<N>[::<cast>]`` with cast on the parameter, never the column."""

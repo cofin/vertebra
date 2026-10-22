@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
@@ -14,6 +15,8 @@ __all__ = (
     "OracleConfig",
     "OracleConnectDescriptor",
 )
+
+_TNS_SAFE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class OracleConnectDescriptor(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -34,6 +37,13 @@ class OracleConnectDescriptor(msgspec.Struct, frozen=True, gc=False, kw_only=Tru
 
     def to_tns_descriptor(self) -> str:
         """Render the canonical `(DESCRIPTION=...)` connect descriptor string."""
+        if not _TNS_SAFE_RE.match(self.service_name):
+            msg = f"Invalid TNS service_name: {self.service_name!r}"
+            raise ValueError(msg)
+        for host, _port in self.hosts:
+            if not _TNS_SAFE_RE.match(host):
+                msg = f"Invalid TNS host: {host!r}"
+                raise ValueError(msg)
         lb = "ON" if self.load_balance else "OFF"
         fo = "ON" if self.failover else "OFF"
         sdu_part = f"(SDU={self.sdu})" if self.sdu is not None else ""

@@ -9,12 +9,13 @@ from typing import Any
 
 import msgspec
 
-from vertebra.storage import ObjectMeta, ObjectStore
+from vertebra.storage import ObjectMeta, ObjectStore, get_default_storage_registry
 from vertebra.storage.pipeline import StagedUpload, UploadTracker
 
 __all__ = (
     "FileAttachment",
     "ObjectStoreBackend",
+    "StoredObject",
 )
 
 type PathLike = str | Path
@@ -31,6 +32,54 @@ class FileAttachment(msgspec.Struct, gc=False):
     size: int = 0
     etag: str | None = None
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
+
+
+class StoredObject(msgspec.Struct, gc=False):
+    """Stored object descriptor delegating directly to ObjectStore and StorageRegistry."""
+
+    key: str
+    store_name: str = "default"
+    metadata: dict[str, Any] = msgspec.field(default_factory=dict)
+
+    def _resolve_store(self, registry: Any = None) -> ObjectStore:
+        reg = registry or get_default_storage_registry()
+        return reg.resolve_store(self.store_name)
+
+    def put(self, data: bytes, *, registry: Any = None) -> Any:
+        """Store bytes synchronously."""
+        return self._resolve_store(registry).put(self.key, data)
+
+    async def put_async(self, data: bytes, *, registry: Any = None) -> Any:
+        """Store bytes asynchronously."""
+        return await self._resolve_store(registry).put_async(self.key, data)
+
+    def get(self, *, registry: Any = None) -> bytes:
+        """Read bytes synchronously."""
+        return self._resolve_store(registry).get(self.key)
+
+    async def get_async(self, *, registry: Any = None) -> bytes:
+        """Read bytes asynchronously."""
+        return await self._resolve_store(registry).get_async(self.key)
+
+    def delete(self, *, registry: Any = None) -> None:
+        """Delete stored object synchronously."""
+        self._resolve_store(registry).delete(self.key)
+
+    async def delete_async(self, *, registry: Any = None) -> None:
+        """Delete stored object asynchronously."""
+        await self._resolve_store(registry).delete_async(self.key)
+
+    def presign_get(self, *, expires_in_secs: int = 3600, registry: Any = None) -> str:
+        """Generate presigned GET URL."""
+        return self._resolve_store(registry).presign_get(self.key, expires_in_secs=expires_in_secs)
+
+    def presign_put(self, *, expires_in_secs: int = 3600, registry: Any = None) -> str:
+        """Generate presigned PUT URL."""
+        return self._resolve_store(registry).presign_put(self.key, expires_in_secs=expires_in_secs)
+
+    def verify_presigned_url(self, url: str, *, registry: Any = None) -> bool:
+        """Verify presigned URL delegating directly to ObjectStore."""
+        return self._resolve_store(registry).verify_presigned_url(url)
 
 
 class ObjectStoreBackend:

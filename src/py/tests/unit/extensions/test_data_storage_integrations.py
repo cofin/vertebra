@@ -1,5 +1,6 @@
 """Unit tests for SQLSpec and Alchemy storage adapters and plugins."""
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -12,12 +13,17 @@ from vertebra.extensions.alchemy import (
 )
 from vertebra.extensions.sqlspec import (
     SQLSPEC_STATE_KEY,
+    OracleConfig,
+    OraclePoolRegistry,
+    OracleVectorConverter,
     SQLSpecPlugin,
     SQLSpecState,
+    SqlSpecStorageBridge,
     SQLSpecStore,
     StreamingStorageResponse,
+    SyncDatabaseConfig,
 )
-from vertebra.storage import ObjectStore, SigningConfig
+from vertebra.storage import ObjectStore, SigningConfig, StorageRegistry
 
 
 def test_sqlspec_storage_adapter_crud_jsonl_arrow_parquet_and_streaming() -> None:
@@ -154,3 +160,51 @@ async def test_alchemy_storage_backend_and_plugin(tmp_path: Path) -> None:
     assert isinstance(alchemy_state, SQLAlchemyState)
     assert app_state[AlchemyPlugin.STATE_KEY] is alchemy_state
     assert isinstance(alchemy_state.storage_backend, ObjectStoreBackend)
+
+
+@pytest.mark.anyio
+async def test_sqlspec_plugin_shutdown_and_oracle_converters() -> None:
+    """Verify SQLSpecPlugin.shutdown offloads sync driver close to SyncPool and Oracle converters work."""
+    closed_threads: list[str] = []
+
+    class DummySyncPool:
+        def close(self) -> None:
+            closed_threads.append(threading.current_thread().name)
+
+    dummy = DummySyncPool()
+    sync_cfg = SyncDatabaseConfig(
+        bind_key="oracle_db",
+        pool_instance=dummy,
+    )
+    plugin = SQLSpecPlugin(config=sync_cfg)
+    app_state: dict[str, object] = {}
+    plugin.install_state(app_state)
+
+    await plugin.shutdown()
+    assert len(closed_threads) == 1
+
+    vec = [0.1, 0.2, 0.3]
+    encoded = OracleVectorConverter.to_oracle_vector(vec)
+    assert len(encoded) == 3
+
+    ora_cfg = OracleConfig(user="app", host="localhost", service_name="FREEPDB1")
+    assert ora_cfg.user == "app"
+    registry = OraclePoolRegistry(ora_cfg)
+    assert registry is not None
+
+
+def test_sqlspec_storage_bridge_delegates_to_registry() -> None:
+    """Verify SqlSpecStorageBridge delegates alias and byte operations to StorageRegistry."""
+    registry = StorageRegistry()
+    store = ObjectStore("memory://")
+    bridge = SqlSpecStorageBridge(registry)
+    bridge.register_alias("primary", store)
+
+    resolved = bridge.resolve_store("primary")
+    assert resolved is store
+
+    bridge.put_bytes("primary/data.txt", b"bridge-bytes")
+    assert bridge.get_bytes("primary/data.txt") == b"bridge-bytes"
+
+    bridge.put_json("primary/data.json", {"key": "value"})
+    assert bridge.get_json("primary/data.json") == {"key": "value"}

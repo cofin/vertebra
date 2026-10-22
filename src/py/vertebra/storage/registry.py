@@ -56,10 +56,6 @@ class StorageRegistry:
             self._aliases[key] = (str(url), dict(options) if options else None, signing)
             self._stores.pop(key, None)
 
-    def register_store(self, alias: str, store: ObjectStore) -> None:
-        """Register an initialized ObjectStore under alias."""
-        self.register_alias(alias, store)
-
     def resolve_store(
         self,
         uri_or_alias: str = "memory://",

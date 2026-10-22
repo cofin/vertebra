@@ -28,6 +28,11 @@ class BuildConfig(msgspec.Struct, frozen=True, gc=False):
     app: str = ""
     js: JsConfig = msgspec.field(default_factory=JsConfig)
 
+    @property
+    def has_frontend(self) -> bool:
+        """Return True if a frontend entrypoint is configured."""
+        return bool(self.entry)
+
     @classmethod
     def load(cls, pyproject_path: Path | str) -> "BuildConfig":
         """Load build configuration from a project directory or *pyproject.toml* file."""

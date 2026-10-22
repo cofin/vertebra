@@ -38,6 +38,24 @@ export class WasmClient {
     if (!WasmClient.isValidBinary(bytes)) {
       throw new Error("Invalid WebAssembly binary magic header");
     }
-    return WebAssembly.instantiate(bytes, this.baseImports);
+    const module = await WebAssembly.compile(bytes as unknown as BufferSource);
+    const instance = await WebAssembly.instantiate(module, this.baseImports);
+
+    for (const exp of Object.values(instance.exports)) {
+      if (exp instanceof WebAssembly.Memory && exp.buffer.byteLength > this.memoryLimitBytes) {
+        throw new RangeError("WebAssembly memory exceeds configured maxMemoryPages");
+      }
+    }
+    for (const modImports of Object.values(this.baseImports)) {
+      if (typeof modImports === "object" && modImports !== null) {
+        for (const imp of Object.values(modImports)) {
+          if (imp instanceof WebAssembly.Memory && imp.buffer.byteLength > this.memoryLimitBytes) {
+            throw new RangeError("WebAssembly memory exceeds configured maxMemoryPages");
+          }
+        }
+      }
+    }
+
+    return { module, instance };
   }
 }

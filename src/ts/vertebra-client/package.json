@@ -39,6 +39,10 @@
       "types": "./dist/store/index.d.ts",
       "import": "./dist/store/index.js"
     },
+    "./hmr": {
+      "types": "./dist/hmr/index.d.ts",
+      "import": "./dist/hmr/index.js"
+    },
     "./wasm": {
       "types": "./dist/wasm.d.ts",
       "import": "./dist/wasm.js"

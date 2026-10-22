@@ -32,5 +32,5 @@ export interface RouteResponse<T = any> {
   /** Response headers. */
   headers: Headers;
   /** Unique request correlation ID. */
-  requestId: number;
+  requestId: string | number | null;
 }

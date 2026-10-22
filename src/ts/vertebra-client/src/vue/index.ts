@@ -32,18 +32,27 @@ export function useQuery<TInput = any, TOutput = any>(
   const data = ref<TOutput | null>(null);
   const loading = ref(false);
   const error = ref<Error | null>(null);
+  let requestSeq = 0;
 
   const fetchData = async () => {
     if (!toValue(options.enabled ?? true)) return;
 
+    const seq = ++requestSeq;
     loading.value = true;
     error.value = null;
     try {
-      data.value = await client.call<TInput, TOutput>(method, path, toValue(input));
+      const result = await client.call<TInput, TOutput>(method, path, toValue(input));
+      if (seq === requestSeq) {
+        data.value = result;
+      }
     } catch (err: any) {
-      error.value = err;
+      if (seq === requestSeq) {
+        error.value = err;
+      }
     } finally {
-      loading.value = false;
+      if (seq === requestSeq) {
+        loading.value = false;
+      }
     }
   };
 

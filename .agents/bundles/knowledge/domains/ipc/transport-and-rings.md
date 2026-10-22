@@ -18,8 +18,8 @@ sources:
   - resource: src/rs/vertebra-core/src/transport/ring_pair.rs
   - resource: src/rs/vertebra-core/src/tiered_ring.rs
   - resource: src/rs/vertebra-core/src/bridge.rs
-  - resource: src/rs/vertebra-py/src/api.rs
-  - resource: src/rs/vertebra-py/src/batch.rs
+  - resource: src/rs/vertebra-py/src/transport.rs
+  - resource: src/rs/vertebra-py/src/request.rs
 ---
 
 # Rust IPC, Shared Memory & Ring Transport Domain
@@ -39,7 +39,7 @@ Where each IPC type lives and what it is for. Behavior and memory orderings are 
 | `BufferChannel`, `BufferSender`, `BufferReceiver`, `BufferMessage` | `channel` | Pass `buffer::Buffer` leases through a ring. |
 | `ChannelError` | `channel` | `Full`, `Empty`, `PayloadTooLarge`, `BufferTooSmall`, `SlotBorrowed`, `NotReady`, `InvalidLayout`, and wrapped buffer/SHM/sync errors. |
 | [`Notifier`](../../../../../src/rs/vertebra-core/src/notify.rs) | `notify` | Inheritable wakeup FD: `eventfd(0, EFD_NONBLOCK)` on Linux, non-blocking pipe elsewhere. |
-| [`sync`](../../../../../src/rs/vertebra-core/src/sync.rs) functions and types | `sync` | `wait_on_address`, `wait_on_address_timeout`, `wake_one`, `wake_all`; `WaitWord`, `SharedMutex`, `SharedRwLock`, `SharedCondvar` (no production users). |
+| [`sync`](../../../../../src/rs/vertebra-core/src/sync.rs) functions and types | `sync` | `wait_on_address`, `wait_on_address_timeout`, `wake_one`, `wake_all`; `WaitWord`, `SharedMutex`, `SharedRwLock`, `SharedCondvar`. |
 
 ## Frames & Flags
 
@@ -67,9 +67,9 @@ Where each IPC type lives and what it is for. Behavior and memory orderings are 
 
 | Symbol | Source | Responsibility |
 |---|---|---|
-| [`RequestBatch`, `RequestBatchIterator`](../../../../../src/rs/vertebra-py/src/batch.rs) | `batch.rs` | Sequence view over an `Arc<BatchSnapshot>` yielding lazy `Request` proxies; `submit_buffers`. |
-| [`init_transport`](../../../../../src/rs/vertebra-py/src/api.rs) | `api.rs` | `mode="inprocess"` (default) initializes or reuses `BatchBridge`; `mode="shm"` sets `SHM_TRANSPORT` from `RingPair::from_env`. |
-| `get_batch`, `try_get_batch` | `api.rs` | Blocking poll with the GIL released, or non-blocking SHM poll. |
-| `submit_results`, `submit_response` | `api.rs` | Send `Response` objects as `VRES` frames (SHM) or `BridgeResponse`s (in-process). |
-| `submit_raw_response` | `api.rs` | Encode a buffer-protocol body as `ResponseSlot` frames; writes them only in SHM mode. |
-| `get_request_notify_fd`, `clear_request_notification` | `api.rs` | Expose and drain the SHM request notifier for `asyncio` (`-1` outside SHM mode). |
+| [`RequestBatch`, `RequestBatchIterator`](../../../../../src/rs/vertebra-py/src/request.rs) | `request.rs` | Sequence view over an `Arc<BatchSnapshot>` yielding lazy `Request` proxies; `submit_buffers`. |
+| [`init_transport`](../../../../../src/rs/vertebra-py/src/transport.rs) | `transport.rs` | `mode="inprocess"` (default) initializes or reuses `BatchBridge`; `mode="shm"` sets `SHM_TRANSPORT` from `RingPair::from_env`. |
+| `get_batch`, `try_get_batch` | `transport.rs` | Blocking poll with the GIL released, or non-blocking SHM poll. |
+| `submit_results`, `submit_response` | `transport.rs` | Send `Response` objects as `VRES` frames (SHM) or `BridgeResponse`s (in-process). |
+| `submit_raw_response` | `transport.rs` | Encode a buffer-protocol body as `ResponseSlot` frames; writes them only in SHM mode. |
+| `get_request_notify_fd`, `clear_request_notification` | `transport.rs` | Expose and drain the SHM request notifier for `asyncio` (`-1` outside SHM mode). |

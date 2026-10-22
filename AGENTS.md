@@ -33,6 +33,8 @@ make install     # Fresh setup: destroy .venv + clean, setup-env, pin Python 3.1
 make dev         # Build non-extension Rust crates and install debug PyO3 extensions (_vertebra, _bundler, _storage)
 make lint        # Auto-fix TS (Biome), Python (Ruff), Rust (rustfmt + Clippy), and run Mypy
 make lint-all    # Read-only CI lint and type-check gate across TypeScript, Python, and Rust
+make review-check # Validate review capability manifests, skills, agents, and privacy constraints
+make review-route # Route changed files to owning review areas and shards (BASE=origin/main)
 make rs-test     # Remove /dev/shm/test-* and /dev/shm/*vertebra*, then run Rust workspace tests (--features tls,compression)
 make py-test     # Build debug extensions (make dev) and run the Python pytest suite
 make ts-test     # Run the TypeScript Vitest suite with isolated localstorage
@@ -42,5 +44,9 @@ make check       # Full verification gate: make lint + make test + make coverage
 make build       # Release build: TS client, Rust crates, release maturin develop of the extensions, uv build
 make bench       # make build, then tools.benchmarks (TARGETS=vtb, SCENARIOS=default by default)
 make bench-ft    # Build .venv-ft + src/rs/target-ft and benchmark free-threaded Python 3.14t
+make rs-bench    # Run Rust Criterion microbenchmarks across core and http
+make bench-micro # Run Python microbenchmarks across hot-path primitives and warm import times
+make bench-baseline # Record baseline performance metrics (NAME=pre-refactor by default)
+make bench-check # Compare current benchmarks against baseline and enforce regression thresholds
 make upgrade     # Upgrade uv, cargo, bun, and pre-commit dependencies
 ```

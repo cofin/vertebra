@@ -11,8 +11,8 @@ sources:
   - resource: src/rs/vertebra-core/src/bridge.rs
   - resource: src/rs/vertebra-core/src/ipc.rs
   - resource: src/rs/vertebra-core/src/protocol/codec.rs
-  - resource: src/rs/vertebra-py/src/api.rs
-  - resource: src/rs/vertebra-http/src/response_reader.rs
+  - resource: src/rs/vertebra-py/src/transport.rs
+  - resource: src/rs/vertebra-http/src/dispatcher/shm_reader.rs
 ---
 
 # Tiered Rings & In-Process Batch Bridge
@@ -50,18 +50,16 @@ Both topologies move requests as `BatchSnapshot`s (a `Vec<TransportNode>` plus o
 | `large` | 512 KiB | 4 |
 | `xlarge` | 2 MiB | 2 |
 
-`select_ring(total_size)` returns the smallest tier with `total_size <= slot_size`, or `None` (`ResponseTooLarge`). A full tier returns `ChannelError::Full`; there is no promotion to a larger tier. `send_response_blocking` waits on the chosen tier instead.
+`select_ring(total_size)` returns the smallest tier with `total_size <= payload_capacity()`, or `None` (`ResponseTooLarge`). A full tier returns `ChannelError::Full`; `send_response_blocking` waits on the chosen tier instead.
 
 ### `VRES` Response Frames
 
-`send_response` writes a 20-byte header followed by headers and body: `magic: u32` (`RESPONSE_MAGIC = 0x5652_4553`, "VRES"), `correlation_id: u64`, `status: u16`, `headers_len: u16`, `body_len: u32`. `try_recv_response` scans `small` → `xlarge` with `try_recv_view` and parses the first frame into `ResponseData`. The server's `response_reader::drain_worker` reads only this format.
+`send_response` writes a 20-byte header followed by headers and body: `magic: u32` (`RESPONSE_MAGIC = 0x5652_4553`, "VRES"), `correlation_id: u64`, `status: u16`, `headers_len: u16`, `body_len: u32`. `try_recv_response` scans `small` → `xlarge` with `try_recv_view` and parses the first frame into `ResponseData`.
 
 ## `ResponseSlot` Streaming Frames (`ipc.rs`)
 
-[`ResponseSlot`](../../../../../src/rs/vertebra-core/src/ipc.rs) is a second framing with a 16-byte header `[request_id u64][status u16][flags u16][header_count u16][reserved u16]`, length-prefixed headers, a `u32` body length, and the body. Flags are `u16`: `FLAG_STREAMING`, `FLAG_FINAL`, `FLAG_ERROR`, `FLAG_COMPRESSED`, `FLAG_HEADERS_SENT`, `FLAG_TRAILERS` (bits 0-5).
+[`ResponseSlot`](../../../../../src/rs/vertebra-core/src/ipc.rs) provides the unified response framing with a 16-byte header `[request_id u64][status u16][flags u16][header_count u16][reserved u16]`, length-prefixed headers, a `u32` body length, and the body. Flags are `u16`: `FLAG_STREAMING`, `FLAG_FINAL`, `FLAG_ERROR`, `FLAG_COMPRESSED`, `FLAG_HEADERS_SENT`, `FLAG_TRAILERS` (bits 0-5).
 
 - `ResponseSlot::encode_raw_parts_into(request_id, status, flags, headers, body, dst)` encodes borrowed parts into a caller buffer without building a `ResponseSlot`.
-- `submit_raw_response` ([`api.rs`](../../../../../src/rs/vertebra-py/src/api.rs)) reads the body through `PyBuffer`, splits it at `slot_capacity` (default 16384) into `STREAMING | HEADERS_SENT` → `STREAMING` → `STREAMING | FINAL` frames (one `Vec<u8>` each), and returns the frames. In SHM mode it also writes them with `send_response_bytes`; in-process mode submits nothing.
-- The server side does not consume these frames today: `Dispatcher::handle_raw_response_slot` and `response_reader::PendingRequests` streaming responders have no production caller, while `drain_worker` only parses `VRES`.
-
-`buffer::BufferPool` (fixed-size buffer leases, `acquire_multi(total_bytes)`) is a different type from `transport::BufferPool` and is used only in tests.
+- `submit_raw_response` ([`transport.rs`](../../../../../src/rs/vertebra-py/src/transport.rs)) reads the body through `PyBuffer`, splits it at `slot_capacity` (default 16384) into `STREAMING | HEADERS_SENT` → `STREAMING` → `STREAMING | FINAL` frames (one `Vec<u8>` each), and returns the frames. In SHM mode it also writes them with `send_response_bytes`.
+- `ShmDispatcher::handle_raw_response_slot` and [`shm_reader::PendingRequests`](../../../../../src/rs/vertebra-http/src/dispatcher/shm_reader.rs) decode and route streaming `ResponseSlot` frames.

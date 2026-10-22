@@ -3,10 +3,8 @@
 from collections.abc import Sequence
 from pathlib import Path
 
-import msgspec
-
 from vertebra.build._config import JsConfig
-from vertebra.utils.serializers import encode_json_bytes
+from vertebra.utils.serializers import format_json
 
 __all__ = ("ImportMapGenerator",)
 
@@ -69,6 +67,6 @@ class ImportMapGenerator:
         else:
             output_dir.mkdir(parents=True, exist_ok=True)
             output_path = output_dir / "import_map.json"
-        formatted = msgspec.json.format(encode_json_bytes(import_map), indent=2).decode("utf-8")
+        formatted = format_json(import_map, indent=2)
         output_path.write_text(formatted + "\n")
         return output_path

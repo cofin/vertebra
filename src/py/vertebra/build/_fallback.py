@@ -24,6 +24,20 @@ _STARTUP_TIMEOUT = 30.0
 _SHUTDOWN_TIMEOUT = 5.0
 
 
+def _resolve_vite_argv(*args: str) -> list[str]:
+    """Resolve the command argument list for invoking Vite."""
+    vite_bin = shutil.which("vite")
+    if vite_bin:
+        return [vite_bin, *args]
+
+    npx_bin = shutil.which("npx")
+    if npx_bin:
+        return [npx_bin, "vite", *args]
+
+    msg = "Neither 'vite' nor 'npx' found on PATH (Vite not found)"
+    raise RuntimeError(msg)
+
+
 class DevServerProcess:
     """Manage a Vite dev server subprocess lifecycle."""
 
@@ -46,18 +60,17 @@ class DevServerProcess:
 
     def start(self) -> None:
         """Start the Vite dev server and block until it accepts connections."""
-        cmd = self._resolve_command()
+        argv = self._resolve_argv()
         env = {**os.environ, "BROWSER": "none", "PORT": str(self._port)}
 
         self._process = subprocess.Popen(
-            cmd,
-            shell=True,
+            argv,
             cwd=self._project_dir,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            preexec_fn=os.setsid if hasattr(os, "setsid") else None,
+            start_new_session=True,
         )
 
         if not self._wait_for_ready():
@@ -98,19 +111,11 @@ class DevServerProcess:
             with contextlib.suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=2)
 
+    def _resolve_argv(self) -> list[str]:
+        return _resolve_vite_argv("--port", str(self._port))
+
     def _resolve_command(self) -> str:
-        vite_bin = shutil.which("vite")
-        if vite_bin:
-            return f"{vite_bin} --port {self._port}"
-
-        npx = shutil.which("npx")
-        if npx:
-            return f"{npx} vite --port {self._port}"
-
-        msg = (
-            "Vite not found. Install: npm install -g vite\nOr use native bundler: bundler = 'native' in pyproject.toml"
-        )
-        raise RuntimeError(msg)
+        return " ".join(self._resolve_argv())
 
     def _wait_for_ready(self, timeout: float = _STARTUP_TIMEOUT) -> bool:
         deadline = time.monotonic() + timeout
@@ -137,16 +142,7 @@ class DevServerProcess:
 
 def run_vite_build(project_dir: Path) -> None:
     """Run a one-shot Vite production build."""
-    vite_bin = shutil.which("vite")
-    if not vite_bin:
-        npx = shutil.which("npx")
-        if not npx:
-            msg = "Vite not found. Install: npm install -g vite"
-            raise RuntimeError(msg)
-        cmd = [npx, "vite", "build"]
-    else:
-        cmd = [vite_bin, "build"]
-
+    cmd = _resolve_vite_argv("build")
     result = subprocess.run(cmd, cwd=project_dir, check=False)
     if result.returncode != 0:
         msg = f"Vite build exited with status {result.returncode}"

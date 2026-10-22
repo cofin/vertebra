@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import Sequence
 from pathlib import Path
@@ -14,6 +15,9 @@ __all__ = (
     "SqliteConfig",
     "SyncSqliteDriver",
 )
+
+
+_VALID_SYNCHRONOUS = {"OFF", "NORMAL", "FULL", "EXTRA"}
 
 
 class SqliteConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -30,6 +34,9 @@ class SqliteConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     def __post_init__(self) -> None:
         if self.busy_timeout_ms < 0:
             msg = f"busy_timeout_ms must be non-negative (got {self.busy_timeout_ms})"
+            raise ValueError(msg)
+        if self.synchronous not in _VALID_SYNCHRONOUS:
+            msg = f"Invalid synchronous mode: {self.synchronous!r}"
             raise ValueError(msg)
 
     @property
@@ -58,6 +65,9 @@ class SyncSqliteDriver:
 
     def __init__(self, config: SqliteConfig | None = None) -> None:
         self._config = config or SqliteConfig()
+        if self._config.synchronous not in _VALID_SYNCHRONOUS:
+            msg = f"Invalid synchronous mode: {self._config.synchronous!r}"
+            raise ValueError(msg)
         self._conn = sqlite3.connect(str(self._config.database), check_same_thread=False)
         for pragma in self._config.startup_pragmas():
             self._conn.execute(pragma)
@@ -80,8 +90,15 @@ class SyncSqliteDriver:
         """Execute a SQL statement and return plain Python tuples (`list[tuple[Any, ...]]`)."""
         cur = self._conn.execute(sql, parameters)
         rows = cur.fetchall()
-        self._conn.commit()
         return [tuple(row) for row in rows]
+
+    def commit(self) -> None:
+        """Commit the current SQLite transaction."""
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        """Roll back the current SQLite transaction."""
+        self._conn.rollback()
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""
@@ -107,8 +124,16 @@ class AsyncSqliteDriver:
         parameters: Sequence[Any] | dict[str, Any] = (),
     ) -> list[tuple[Any, ...]]:
         """Asynchronously execute a SQL statement and return plain Python tuples."""
-        return self._sync.execute_tuples(sql, parameters)
+        return await asyncio.to_thread(self._sync.execute_tuples, sql, parameters)
+
+    async def commit(self) -> None:
+        """Commit the current SQLite transaction."""
+        await asyncio.to_thread(self._sync.commit)
+
+    async def rollback(self) -> None:
+        """Roll back the current SQLite transaction."""
+        await asyncio.to_thread(self._sync.rollback)
 
     async def close(self) -> None:
         """Close the underlying SQLite connection."""
-        self._sync.close()
+        await asyncio.to_thread(self._sync.close)

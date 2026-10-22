@@ -20,12 +20,12 @@ sources:
   - resource: src/rs/vertebra-http/src/sse.rs
   - resource: src/rs/vertebra-http/src/ws_mount.rs
   - resource: src/rs/vertebra-http/src/pubsub.rs
-  - resource: src/rs/vertebra-http/src/direct_worker.rs
+  - resource: src/rs/vertebra-http/src/dispatcher/direct.rs
 ---
 
 # Protocol and Offload Modules in vertebra-http
 
-[`lib.rs`](../../../../../src/rs/vertebra-http/src/lib.rs) exports every module as `pub mod`. Only a few are reached from `main.rs`, `server.rs`, or [`response::handle`](../../../../../src/rs/vertebra-http/src/response.rs). The rest are library code exercised only by `src/rs/vertebra-http/tests/` and in-module tests. `vertebra-py` does not depend on `vertebra-http`, so Python cannot reach them either. Check this table before assuming a feature is live in `vertebra-server`.
+[`lib.rs`](../../../../../src/rs/vertebra-http/src/lib.rs) exports every module as `pub mod`. Only a few are reached from `main.rs`, `server.rs`, or [`response::handle`](../../../../../src/rs/vertebra-http/src/response.rs). The rest are library code exercised by `src/rs/vertebra-http/tests/` and in-module tests. `vertebra-py` does not depend on `vertebra-http`, so Python cannot reach them either. Check this table before assuming a feature is live in `vertebra-server`.
 
 ## Wired into the server
 
@@ -33,7 +33,7 @@ sources:
 |---|---|---|
 | [`hmr.rs`](../../../../../src/rs/vertebra-http/src/hmr.rs) | `HmrState`, `HmrEvent`, `HmrEventKind`, `HMR_PATH` (`/__vertebra/hmr`), `HMR_SIGNAL_PATH`, `HMR_EVENT_NAME` (`vertebra:types-changed`), `is_hmr_path`, `handle` | Dev-only WebSocket and signal endpoint, first step of `handle` |
 | [`health.rs`](../../../../../src/rs/vertebra-http/src/health.rs) | `HealthEndpoint`, `HealthState` (`Healthy`, `Draining`, `ShuttingDown`) | `try_intercept` on a per-request default instance |
-| [`h2c.rs`](../../../../../src/rs/vertebra-http/src/h2c.rs) | `H2C_PREFACE`, `CleartextProtocol`, `detect_cleartext_protocol` | Called in `serve_plain`; the result is discarded |
+| [`h2c.rs`](../../../../../src/rs/vertebra-http/src/h2c.rs) | `H2C_PREFACE`, `CleartextProtocol`, `detect_cleartext_protocol` | Called in `serve_plain`; `AutoBuilder` serves HTTP/1.1 and HTTP/2 prior-knowledge |
 | [`http3.rs`](../../../../../src/rs/vertebra-http/src/http3.rs) | `Http3Config` (`enabled: false`, `alt_svc_max_age: 86_400`, `max_concurrent_bidi_streams: 256`, `keep_alive_interval_ms: 15_000`), `inject_alt_svc_header` | Adds `Alt-Svc` when `http3.enabled`; `from_env` never enables it |
 | [`tls.rs`](../../../../../src/rs/vertebra-http/src/tls.rs) | `TlsAcceptor` (`from_config`, `accept`, `rustls_config`, `peer_identity`), `MtlsConfig`, `ClientAuthMode` | Acceptor used by `serve_tls` (feature `tls`) |
 
@@ -51,13 +51,13 @@ sources:
 | [`profile.rs`](../../../../../src/rs/vertebra-http/src/profile.rs) | `ProfileConfig`, `ProfileEndpoint` | Token-guarded endpoint that returns process metadata, not a profile |
 | [`sse.rs`](../../../../../src/rs/vertebra-http/src/sse.rs) | `SseEvent`, `SseTopicBuffer` (`replay_since`), `SseHub`, `SSE_KEEPALIVE_PING`, `DEFAULT_TOPIC_CHANNEL_CAPACITY` (256) | Used by `pubsub.rs` only |
 | [`ws_mount.rs`](../../../../../src/rs/vertebra-http/src/ws_mount.rs) | `WsConfig`, `WebSocketHandshakeDecision`, `WsConnectionRegistry`, `validate_origin`, `negotiate_subprotocol`, `build_handshake_response`, `run_ws_connection` | Only `is_websocket_upgrade` is used, by `hmr.rs` |
-| [`pubsub.rs`](../../../../../src/rs/vertebra-http/src/pubsub.rs) | `PubSubBroker`, `PubSubEnvelope`, `ShmBroadcastRing`, `topic_matches_pattern`, `MAX_IDEMPOTENCY_KEYS` (1024), `DEFAULT_BROADCAST_CAPACITY` (1024) | `ShmBroadcastRing` is a heap `Vec<Mutex<Vec<u8>>>`, not shared memory |
-| [`direct_worker.rs`](../../../../../src/rs/vertebra-http/src/direct_worker.rs) | `DirectWorkerPool`, `AdaptiveWorkerConfig`, `run_adaptive_worker`, `BatchHandler` | Consumer for `DispatchMode::Direct`, which the binary never selects |
+| [`pubsub.rs`](../../../../../src/rs/vertebra-http/src/pubsub.rs) | `PubSubBroker`, `PubSubEnvelope`, `TopicHub`, `ShmBroadcastRing`, `topic_matches_pattern`, `MAX_IDEMPOTENCY_KEYS` (1024), `DEFAULT_BROADCAST_CAPACITY` (1024) | `ShmBroadcastRing` is a heap `Vec<Mutex<Vec<u8>>>`, not shared memory |
+| [`dispatcher/direct.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/direct.rs) | `DirectWorkerPool`, `AdaptiveWorkerConfig`, `run_adaptive_worker`, `BatchHandler` | Consumer for `DispatchMode::Direct`, which the binary never selects |
 
 Modules covered elsewhere:
 
-- `cors.rs` and `compression.rs` (Litestar offload targets): [Litestar Integration](../../domains/extensions/litestar.md).
-- `discovery.rs` and `mcp_bridge.rs`: [Litestar Integration](../../domains/extensions/litestar.md).
+- `cors.rs` (`CorsPolicy`) and `compression.rs` (`ResponseCompressor`) (Litestar offload targets): [Litestar Integration](../../domains/extensions/litestar.md).
+- `discovery.rs`: [Litestar Integration](../../domains/extensions/litestar.md).
 - `grpc.rs`: [gRPC Services](../../domains/extensions/grpc.md).
 
 ## Rules for changes

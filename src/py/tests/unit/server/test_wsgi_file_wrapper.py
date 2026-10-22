@@ -8,7 +8,7 @@ from typing import Any
 
 from vertebra._vertebra import WsgiEnviron, WsgiFileWrapper, WsgiInput, run_wsgi_callable
 from vertebra.server._wsgi._adapter import WsgiAdapter
-from vertebra.server._wsgi._extensions import resolve_wsgi_file_wrapper
+from vertebra.server._wsgi._frameworks import resolve_wsgi_file_wrapper
 
 
 def test_wsgi_input_read_readline_readlines_and_iter() -> None:
@@ -62,7 +62,8 @@ def test_wsgi_file_wrapper_filesystem_pathsend_and_memory_fallback(tmp_path: Pat
     assert resp.status == 200
     assert resp.body == b"0123456789abcdef"
     header_map = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in resp.headers}
-    assert header_map["x-vertebra-sendfile"] == str(sample)
+    assert "x-vertebra-sendfile" not in header_map
+    assert header_map["content-length"] == "16"
 
     def memory_wsgi_app(environ: Any, start_response: Any) -> Any:
         start_response("200 OK", [("Content-Type", "text/plain")])

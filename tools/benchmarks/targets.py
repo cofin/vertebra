@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -10,11 +11,11 @@ from enum import StrEnum
 class Topology(StrEnum):
     """Runtime topologies for Vertebra."""
 
-    NATIVE = "native"  # Direct Rust handlers
-    EMBEDDED = "embedded"  # Python in-process (PyO3)
-    SHM = "shm"  # Multi-process shared memory
-    FREE_THREADED = "free-threaded"  # Python 3.14t in-process
-    BASELINE = "baseline"  # External baseline (granian, etc)
+    NATIVE = "native"
+    EMBEDDED = "embedded"
+    SHM = "shm"
+    FREE_THREADED = "free-threaded"
+    BASELINE = "baseline"
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,13 +23,47 @@ class Target:
     """A server target to benchmark."""
 
     name: str
-    cmd: list[str]
+    _cmd_data: list[str] | Callable[[], list[str]] = field(repr=False)
     topology: Topology
     host: str = "127.0.0.1"
     port: int = 8000
-    env: dict[str, str] = field(default_factory=dict)
+    _env_data: dict[str, str] | Callable[[], dict[str, str]] | None = field(default=None, repr=False)
     description: str = ""
     category: str = "vertebra"
+
+    def __init__(
+        self,
+        name: str,
+        cmd: list[str] | Callable[[], list[str]],
+        topology: Topology,
+        host: str = "127.0.0.1",
+        port: int = 8000,
+        env: dict[str, str] | Callable[[], dict[str, str]] | None = None,
+        description: str = "",
+        category: str = "vertebra",
+    ) -> None:
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "_cmd_data", cmd)
+        object.__setattr__(self, "topology", topology)
+        object.__setattr__(self, "host", host)
+        object.__setattr__(self, "port", port)
+        object.__setattr__(self, "_env_data", env)
+        object.__setattr__(self, "description", description)
+        object.__setattr__(self, "category", category)
+
+    @property
+    def cmd(self) -> list[str]:
+        """Return the target command list, resolving callable factory if provided."""
+        if callable(self._cmd_data):
+            return self._cmd_data()
+        return self._cmd_data
+
+    @property
+    def env(self) -> dict[str, str]:
+        """Return the target environment dictionary, resolving callable factory if provided."""
+        if callable(self._env_data):
+            return self._env_data()
+        return self._env_data if self._env_data is not None else {}
 
 
 def _py(*args: str) -> list[str]:
@@ -96,7 +131,7 @@ def _ft_run(*args: str) -> list[str]:
     """Build a command to run the 3.14t-linked vertebra-server binary."""
     binary = _ft_server_binary()
     if not os.path.isfile(binary):
-        return ["echo", f"3.14t server binary not found at {binary}"]
+        raise FileNotFoundError(f"3.14t server binary not found at {binary}; run 'make bench-ft' first")
     return [binary, *args]
 
 
@@ -180,15 +215,15 @@ ALL_TARGETS: dict[str, Target] = {
     "vtb-ft-native-4w": Target(
         name="vtb-ft-native-4w",
         topology=Topology.FREE_THREADED,
-        cmd=_ft_run(),
+        cmd=_ft_run,
         port=8022,
-        env={
+        env=lambda: {
             **_ft_env(),
             "VERTEBRA_APP": "tools.benchmarks.apps.vertebra_app:native_app",
             "VERTEBRA_HOST": "127.0.0.1",
             "VERTEBRA_PORT": "8022",
-            "VERTEBRA_WORKERS": "0",  # In-process
-            "VERTEBRA_CPU_COUNT": "4",  # Custom env for FT threading
+            "VERTEBRA_WORKERS": "0",
+            "VERTEBRA_CPU_COUNT": "4",
         },
         description="Vertebra FT, native handlers, 4 threads",
         category="freethreaded",

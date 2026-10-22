@@ -2,25 +2,32 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import msgspec
 import pytest
 
-from vertebra.extensions.litestar import LitestarEcosystemBridge, attach_litestar_ecosystem_bridges
-from vertebra.framework.a2a import A2AServer, A2ATask, AgentCard, AgentSkill
+from vertebra._typing import MissingDependencyError, UnsupportedBackendError
+from vertebra.extensions.litestar import LitestarConfig, LitestarPlugin
+from vertebra.framework._app import App
 from vertebra.framework.asyncapi import AsyncAPISpecBuilder, AsyncChannelDef
 from vertebra.framework.channels import ChannelsBackend
 from vertebra.framework.di import Container, DependencyGraph, Provide
-from vertebra.framework.email import EmailMessage, EmailService
+from vertebra.framework.email import EmailConfig, EmailMessage, EmailService
 from vertebra.framework.htmx import HtmxRequest, HtmxResponse
-from vertebra.framework.mcp import McpServer, mcp_resource, mcp_tool
-from vertebra.framework.openapi import OpenAPISpecBuilder
+from vertebra.framework.openapi import OpenAPIConfig, OpenAPISpecBuilder
 from vertebra.framework.procedures import ProcedureRouter, mutation, query
-from vertebra.framework.queues import QueueService, task
+from vertebra.framework.queues import CronSchedule, QueueConfig, QueueService, TaskRetryPolicy, task
 from vertebra.framework.security import (
+    CsrfConfig,
+    CsrfMiddleware,
+    Guard,
     PermissionDeniedError,
     Principal,
+    RateLimitConfig,
+    RateLimiter,
     SecurityContext,
     requires_capability,
     requires_role,
@@ -29,10 +36,10 @@ from vertebra.framework.security import (
 )
 from vertebra.framework.ssr import SsrFrame
 from vertebra.framework.stores import MemoryStore, NamespacedStore
-from vertebra.wasm import WASM_MAGIC_HEADER, WasmExecutionError, WasmModuleConfig, WasmPluginHost, WasmSandboxPolicy
+from vertebra.wasm import WASM_MAGIC_HEADER, WasmModuleConfig, WasmSandboxPolicy
 
 
-class ItemSchema(msgspec.Struct):
+class ItemSchema(msgspec.Struct, frozen=True, gc=False):
     """Sample msgspec schema for OpenAPI 3.1.0 generation."""
 
     id: int
@@ -168,68 +175,201 @@ def test_htmx_ssr_openapi_and_asyncapi() -> None:
     assert aa_doc["channels"]["orders"]["address"] == "/ws/orders"
 
 
-@pytest.mark.anyio
-async def test_mcp_a2a_wasm_and_litestar_ecosystem_bridge() -> None:
-    """Verify McpServer, A2AServer, WasmPluginHost, and LitestarEcosystemBridge."""
-    mcp_srv = McpServer(name="demo-mcp")
+def test_wasm_module_config_and_litestar_mcp_a2a_delegation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Verify WasmSandboxPolicy bounds, WasmModuleConfig validation, and LitestarPlugin MCP/A2A delegation."""
+    with pytest.raises(ValueError, match="max_memory_bytes must be > 0"):
+        WasmSandboxPolicy(max_memory_bytes=0)
+    with pytest.raises(ValueError, match="max_fuel must be > 0"):
+        WasmSandboxPolicy(max_fuel=0)
+    with pytest.raises(ValueError, match="epoch_timeout_ms must be > 0"):
+        WasmSandboxPolicy(epoch_timeout_ms=0)
 
-    @mcp_tool(description="Add two integers")
-    async def add_ints(a: int, b: int) -> int:
-        return a + b
-
-    @mcp_resource("config://app")
-    def app_cfg() -> dict[str, str]:
-        return {"mode": "active"}
-
-    mcp_srv.register_tool(add_ints)
-    mcp_srv.register_resource(app_cfg)
-
-    init_res = await mcp_srv.handle_jsonrpc({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
-    assert init_res["result"]["serverInfo"]["name"] == "demo-mcp"
-    call_res = await mcp_srv.handle_jsonrpc(
-        {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {"name": "add_ints", "arguments": {"a": 10, "b": 15}},
-        }
-    )
-    assert call_res["result"]["content"][0]["text"] == "25"
-
-    card = AgentCard(
-        name="OrderAgent",
-        description="Processes orders",
-        url="https://agent.example.com",
-        skills=(AgentSkill(id="lookup", name="Lookup Order", description="Find order by ID"),),
-    )
-
-    async def handle_a2a(task_obj: A2ATask, _params: dict[str, object]) -> str:
-        return f"Processed {task_obj.id}"
-
-    a2a_srv = A2AServer(card, handler=handle_a2a)
-    assert a2a_srv.agent_card_json()["name"] == "OrderAgent"
-    a2a_res = await a2a_srv.handle_jsonrpc(
-        {
-            "jsonrpc": "2.0",
-            "id": "req-1",
-            "method": "tasks/send",
-            "params": {"id": "t-100", "message": {"role": "user"}},
-        }
-    )
-    assert a2a_res["result"]["status"]["state"] == "completed"
-
-    host = WasmPluginHost()
     wasm_bytes = WASM_MAGIC_HEADER + b"\x00\x00\x00\x00"
-    host.register_module(
-        WasmModuleConfig(name="validator", wasm_source=wasm_bytes, policy=WasmSandboxPolicy(max_fuel=500)),
-        exports={"check": lambda s: len(str(s)) > 0},
-    )
-    assert host.call_export("validator", "check", "ok", fuel_cost=100) is True
-    with pytest.raises(WasmExecutionError, match="exceeded fuel budget"):
-        host.call_export("validator", "check", "ok", fuel_cost=1000)
+    wasm_file = tmp_path / "validator.wasm"
+    wasm_file.write_bytes(wasm_bytes)
+    cfg = WasmModuleConfig(name="validator", wasm_source=str(wasm_file), policy=WasmSandboxPolicy(max_fuel=500))
+    assert isinstance(cfg.wasm_source, Path)
+    assert cfg.load_and_validate() == wasm_bytes
 
-    bridge = LitestarEcosystemBridge.create(mcp_server=mcp_srv, a2a_server=a2a_srv)
-    fake_app = SimpleNamespace(state={})
-    attach_litestar_ecosystem_bridges(fake_app, bridge)
-    assert fake_app.state["mcp_server"] is mcp_srv
-    assert fake_app.state["a2a_server"] is a2a_srv
+    bad_cfg = WasmModuleConfig(name="broken", wasm_source=b"not-wasm")
+    with pytest.raises(ValueError, match="Invalid WebAssembly binary header"):
+        bad_cfg.load_and_validate()
+
+    monkeypatch.setattr("vertebra.extensions.litestar.plugin.import_optional", lambda _mod: None)
+    plugin = LitestarPlugin(LitestarConfig(mcp_config={"name": "demo"}))
+    fake_app_config = SimpleNamespace(
+        state={},
+        compression_config=None,
+        cors_config=None,
+        before_send=[],
+        route_handlers=[],
+        on_app_init=[],
+        plugins=[],
+    )
+    with pytest.raises(MissingDependencyError, match="litestar-mcp"):
+        plugin.on_app_init(fake_app_config)
+
+    fake_mcp_mod = SimpleNamespace(
+        LitestarMCP=lambda cfg_obj: ("LitestarMCP", cfg_obj),
+        LitestarA2A=lambda cfg_obj: ("LitestarA2A", cfg_obj),
+    )
+    monkeypatch.setattr("vertebra.extensions.litestar.plugin.import_optional", lambda _mod: fake_mcp_mod)
+    plugin_ok = LitestarPlugin(LitestarConfig(mcp_config={"name": "demo"}, a2a_config={"agent": "orders"}))
+    plugin_ok.on_app_init(fake_app_config)
+    assert fake_app_config.state["litestar_mcp_plugin"] == ("LitestarMCP", {"name": "demo"})
+    assert fake_app_config.state["litestar_a2a_plugin"] == ("LitestarA2A", {"agent": "orders"})
+
+
+def test_guard_requires_and_security_middleware() -> None:
+    """Verify compiled Guard.requires, CsrfMiddleware token validation, and RateLimiter token bucket."""
+    principal = Principal(
+        subject="admin-42",
+        tenant_id="tenant-corp",
+        roles=frozenset({"admin", "billing"}),
+        scopes=frozenset({"finance:write"}),
+        capabilities=frozenset({"reconcile"}),
+    )
+    ctx = SecurityContext(principal=principal)
+
+    guard = Guard.requires(
+        roles=("admin", "billing"),
+        scopes=("finance:write",),
+        capabilities=("reconcile",),
+        tenants=("tenant-corp",),
+    )
+    assert ctx.enforce(guard).subject == "admin-42"
+
+    failing_guard = Guard.requires(roles=("superadmin",))
+    with pytest.raises(PermissionDeniedError):
+        ctx.enforce(failing_guard)
+
+    csrf = CsrfMiddleware(CsrfConfig(secret="test-secret"))
+    token = csrf.generate_token()
+    assert csrf.verify_request("GET", {}, {}) is True
+    assert csrf.verify_request("POST", {"x-csrf-token": token}, {"vtb_csrf": token}) is True
+    assert csrf.verify_request("POST", {"x-csrf-token": "bad"}, {"vtb_csrf": token}) is False
+    assert csrf.verify_request("POST", {}, {"vtb_csrf": token}) is False
+
+    limiter = RateLimiter(RateLimitConfig(requests_per_window=2, window_seconds=60))
+    assert limiter.allow("client-1") is True
+    assert limiter.allow("client-1") is True
+    assert limiter.allow("client-1") is False
+    assert limiter.allow("client-2") is True
+
+
+def test_openapi_spec_builder_from_app_and_enable_docs() -> None:
+    """Verify OpenAPISpecBuilder.from_app route inspection and App.enable_docs route handlers."""
+    app = App()
+
+    @app.get("/items")
+    def list_items() -> ItemSchema:
+        """List all available items."""
+        return ItemSchema(id=1, name="first")
+
+    builder = OpenAPISpecBuilder.from_app(app)
+    spec = builder.build()
+    assert "/items" in spec["paths"]
+    assert "get" in spec["paths"]["/items"]
+    assert spec["paths"]["/items"]["get"]["summary"] == "List all available items."
+    assert "ItemSchema" in spec["components"]["schemas"]
+
+    app.enable_docs(OpenAPIConfig(title="Store API", schema_path="/custom-openapi.json"))
+    route_paths = [r.path for r in app.routes]
+    assert "/custom-openapi.json" in route_paths
+    assert "/docs" in route_paths
+
+
+def test_asyncapi_spec_builder_from_channels() -> None:
+    """Verify AsyncAPISpecBuilder.from_channels constructs valid AsyncAPI 3.0.0 documents."""
+    bus = ChannelsBackend()
+    bus._subscribed_channels.add("telemetry")
+    bus._subscribed_channels.add("alerts")
+
+    builder = AsyncAPISpecBuilder.from_channels(bus)
+    doc = builder.build()
+    assert doc["asyncapi"] == "3.0.0"
+    assert "telemetry" in doc["channels"]
+    assert "alerts" in doc["channels"]
+    assert doc["channels"]["telemetry"]["address"] == "/channels/telemetry"
+
+
+@pytest.mark.anyio
+async def test_queue_and_email_backend_validation_and_policies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify UnsupportedBackendError enforcement, QueueService retries/cron, and EmailService dispatch."""
+    with pytest.raises(UnsupportedBackendError, match="not supported; use 'memory://'"):
+        QueueService(QueueConfig(backend_url="redis://localhost:6379/0"))
+
+    qsvc = QueueService()
+    attempts = 0
+
+    @task(retry=TaskRetryPolicy(max_retries=2, initial_backoff_seconds=0.0))
+    async def flaky_task() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 2:
+            msg = "transient failure"
+            raise RuntimeError(msg)
+        return "success"
+
+    qsvc.register(flaky_task)
+    await qsvc.enqueue("flaky_task")
+    assert await qsvc.run_next() == "success"
+    assert attempts == 2
+
+    cron_ran = False
+
+    @task(cron=CronSchedule(expression="15 10 * * *"))
+    def daily_report() -> str:
+        nonlocal cron_ran
+        cron_ran = True
+        return "report_done"
+
+    qsvc.register(daily_report)
+    due_results = await qsvc.run_due_schedules(minute=15, hour=10)
+    assert due_results == ["report_done"]
+    assert cron_ran is True
+
+    not_due_results = await qsvc.run_due_schedules(minute=16, hour=10)
+    assert not_due_results == []
+
+    for backend_name in ("sendgrid", "resend", "mailgun", "ses"):
+        with pytest.raises(UnsupportedBackendError, match="not supported; use 'memory' or 'smtp'"):
+            EmailService(EmailConfig(backend=backend_name))  # type: ignore[arg-type]
+
+    mem_svc = EmailService(EmailConfig(backend="memory"))
+    receipt = await mem_svc.send(
+        EmailMessage(subject="Test", to=("user@example.com",), from_email="bot@example.com", text_body="Hello")
+    )
+    assert receipt == "msg-1"
+    assert len(mem_svc.outbox) == 1
+
+    sent_messages: list[Any] = []
+
+    class MockSMTP:
+        def __init__(self, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        def __enter__(self) -> MockSMTP:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def send_message(self, msg: Any) -> None:
+            sent_messages.append(msg)
+
+    monkeypatch.setattr("smtplib.SMTP", MockSMTP)
+    smtp_svc = EmailService(EmailConfig(backend="smtp", smtp_host="127.0.0.1", smtp_port=2525))
+    smtp_receipt = await smtp_svc.send(
+        EmailMessage(
+            subject="Invoice",
+            to=("client@example.com",),
+            from_email="billing@example.com",
+            text_body="Here is invoice",
+            html_body="<p>Invoice</p>",
+        )
+    )
+    assert smtp_receipt.startswith("smtp-")
+    assert len(sent_messages) == 1
+    assert sent_messages[0]["Subject"] == "Invoice"

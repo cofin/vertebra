@@ -10,11 +10,6 @@
 //! cross-process IPC via fork.
 
 use std::io;
-
-#[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-
-#[cfg(not(target_os = "linux"))]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 /// Platform-independent notification handle for async signaling.
@@ -274,6 +269,7 @@ impl Notifier {
     /// Check if the notifier has pending notifications without blocking.
     ///
     /// Returns `true` if there are pending notifications, `false` otherwise.
+    #[cfg(test)]
     pub fn has_pending(&self) -> bool {
         #[cfg(target_os = "linux")]
         let fd = self.fd.as_raw_fd();
@@ -313,105 +309,6 @@ impl Notifier {
         }
         Ok((pfd.revents & libc::POLLIN) != 0)
     }
-
-    /// Hybrid spin-then-park wait for low-latency notification.
-    ///
-    /// Spins checking `has_pending()` for `spin_us` microseconds before falling
-    /// back to blocking `wait()`. This captures immediate responses without
-    /// syscall overhead while still allowing efficient blocking for longer waits.
-    ///
-    /// # Arguments
-    ///
-    /// * `spin_us` - Maximum microseconds to spin before blocking (typically 2-10)
-    /// * `timeout_ms` - Total timeout in milliseconds (includes spin time)
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(true)` - Notification received (either during spin or park)
-    /// * `Ok(false)` - Timeout expired
-    /// * `Err` - System error during wait
-    ///
-    /// # Performance
-    ///
-    /// For immediate data availability (common case with fast servers):
-    /// - Spin phase returns in ~1-5us without syscall
-    /// - Pure eventfd wake would take 3-5us
-    ///
-    /// For delayed data:
-    /// - Falls back to efficient poll() after spin deadline
-    ///
-    /// # Note
-    ///
-    /// This method uses `poll(0)` syscall during spin, which adds ~200-500ns per
-    /// iteration. For ring buffer scenarios, prefer `spin_wait_or_park_with()`
-    /// which accepts a custom data-availability check function.
-    pub fn spin_wait_or_park(&self, spin_us: u64, timeout_ms: i32) -> io::Result<bool> {
-        self.spin_wait_or_park_with(spin_us, timeout_ms, || self.has_pending())
-    }
-
-    /// Hybrid spin-then-park wait with custom data-availability check.
-    ///
-    /// This variant is optimized for ring buffers where data availability can be
-    /// checked with a pure atomic memory read (head != tail) rather than a syscall.
-    ///
-    /// # Arguments
-    ///
-    /// * `spin_us` - Maximum microseconds to spin before blocking (typically 2-10)
-    /// * `timeout_ms` - Total timeout in milliseconds (includes spin time)
-    /// * `has_data` - Closure that returns `true` if data is available
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(true)` - Data available or notification received
-    /// * `Ok(false)` - Timeout expired
-    /// * `Err` - System error during wait
-    ///
-    /// # Performance
-    ///
-    /// With ring-buffer check (atomic load, ~1ns per iteration):
-    /// - Spin phase captures immediate data in ~1-3µs
-    /// - ~5000 iterations per 5µs spin duration
-    ///
-    /// With poll-based check (syscall, ~200-500ns per iteration):
-    /// - ~10-25 iterations per 5µs spin duration
-    pub fn spin_wait_or_park_with<F>(
-        &self,
-        spin_us: u64,
-        timeout_ms: i32,
-        has_data: F,
-    ) -> io::Result<bool>
-    where
-        F: Fn() -> bool,
-    {
-        use std::time::{Duration, Instant};
-
-        let start = Instant::now();
-        let spin_deadline = start + Duration::from_micros(spin_us);
-
-        // Spin phase: tight loop checking for data with provided closure
-        while Instant::now() < spin_deadline {
-            if has_data() {
-                return Ok(true);
-            }
-            std::hint::spin_loop();
-        }
-
-        // Park phase: fall back to blocking wait
-        // Adjust timeout to account for spin time elapsed
-        let elapsed_ms = start.elapsed().as_millis() as i32;
-        let remaining_ms = if timeout_ms < 0 {
-            timeout_ms // Infinite timeout
-        } else {
-            (timeout_ms - elapsed_ms).max(0)
-        };
-
-        if remaining_ms == 0 && timeout_ms >= 0 {
-            // Time already expired during spin
-            return Ok(false);
-        }
-
-        self.wait(remaining_ms)
-    }
 }
 
 impl AsRawFd for Notifier {
@@ -419,11 +316,6 @@ impl AsRawFd for Notifier {
         Notifier::as_raw_fd(self)
     }
 }
-
-// SAFETY: Notifier only contains file descriptors which are safe to send across threads.
-unsafe impl Send for Notifier {}
-// SAFETY: Notifier operations are atomic (eventfd counter, pipe writes).
-unsafe impl Sync for Notifier {}
 
 #[cfg(test)]
 mod tests {
@@ -538,69 +430,5 @@ mod tests {
         assert!(child_notifier.has_pending());
         child_notifier.clear().expect("clear failed");
         assert!(!child_notifier.has_pending());
-    }
-
-    #[test]
-    fn spin_wait_immediate_data() {
-        let notifier = Notifier::new().expect("failed to create notifier");
-
-        // Pre-notify so data is immediately available
-        notifier.notify().expect("notify failed");
-
-        let start = std::time::Instant::now();
-        let result = notifier
-            .spin_wait_or_park(100, 1000)
-            .expect("spin_wait failed");
-        let elapsed = start.elapsed();
-
-        assert!(result, "should return true when data pending");
-        assert!(
-            elapsed.as_micros() < 1000,
-            "immediate data should return fast: {}us",
-            elapsed.as_micros()
-        );
-    }
-
-    #[test]
-    fn spin_wait_timeout() {
-        let notifier = Notifier::new().expect("failed to create notifier");
-
-        let start = std::time::Instant::now();
-        let result = notifier
-            .spin_wait_or_park(5, 10) // 5us spin, 10ms timeout
-            .expect("spin_wait failed");
-        let elapsed = start.elapsed();
-
-        assert!(!result, "should return false on timeout");
-        assert!(
-            elapsed.as_millis() >= 8,
-            "should wait ~10ms, got {}ms",
-            elapsed.as_millis()
-        );
-    }
-
-    #[test]
-    fn spin_wait_park_fallback() {
-        let notifier = std::sync::Arc::new(Notifier::new().expect("failed to create notifier"));
-        let notifier_clone = std::sync::Arc::clone(&notifier);
-
-        // Spawn thread to notify after a small delay
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            notifier_clone.notify().expect("notify failed");
-        });
-
-        let start = std::time::Instant::now();
-        let result = notifier
-            .spin_wait_or_park(5, 100) // 5us spin, 100ms timeout
-            .expect("spin_wait failed");
-        let elapsed = start.elapsed();
-
-        assert!(result, "should return true when notified during park");
-        assert!(
-            elapsed.as_millis() < 50,
-            "should wake before timeout: {}ms",
-            elapsed.as_millis()
-        );
     }
 }

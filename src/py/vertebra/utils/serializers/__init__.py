@@ -10,35 +10,23 @@ from vertebra.utils.serializers._json import (
     encode_json_bytes,
     encode_json_into,
     format_json,
+    get_default_serializer,
 )
-from vertebra.utils.serializers._numpy import (
-    numpy_array_dec_hook,
-    numpy_array_enc_hook,
-    numpy_array_predicate,
-)
-from vertebra.utils.serializers._schema import (
-    SchemaSerializer,
-    get_collection_serializer,
-    get_serializer_metrics,
-    reset_serializer_cache,
-    schema_dump,
-    serialize_collection,
+from vertebra.utils.serializers._msgpack import (
+    MsgpackCodec,
+    decode_msgpack,
+    encode_msgpack,
 )
 
 __all__ = (
     "JSONSerializer",
-    "SchemaSerializer",
+    "MsgpackCodec",
     "decode_json",
+    "decode_msgpack",
     "encode_json",
     "encode_json_bytes",
     "encode_json_into",
+    "encode_msgpack",
     "format_json",
-    "get_collection_serializer",
-    "get_serializer_metrics",
-    "numpy_array_dec_hook",
-    "numpy_array_enc_hook",
-    "numpy_array_predicate",
-    "reset_serializer_cache",
-    "schema_dump",
-    "serialize_collection",
+    "get_default_serializer",
 )

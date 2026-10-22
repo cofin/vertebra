@@ -5,21 +5,20 @@ description: "Admission-controlled background task worker lanes (LaneConfig, Wor
 status: stable
 tags: [domains, server, worker-lanes, queues, cli]
 sources:
-  - resource: src/py/vertebra/extensions/worker/__init__.py
-  - resource: src/py/vertebra/extensions/worker/runner.py
   - resource: src/py/vertebra/cli/workers.py
+  - resource: src/py/vertebra/extensions/litestar/plugin.py
 ---
 
 # Multi-Lane Worker Runner
 
-[`vertebra.extensions.worker`](../../../../../src/py/vertebra/extensions/worker/__init__.py) and [`vertebra.cli.workers`](../../../../../src/py/vertebra/cli/workers.py) provide an admission-controlled background worker runner with per-queue `asyncio.Semaphore` isolation and oneshot job execution.
+[`vertebra.cli.workers`](../../../../../src/py/vertebra/cli/workers.py) provides an admission-controlled background worker runner (`LaneConfig`, `WorkerRunner`) with per-queue `asyncio.Semaphore` isolation and oneshot job execution.
 
-## 1. Domain Types (`extensions/worker/runner.py`)
+## 1. Domain Types (`cli/workers.py`)
 
 | Symbol | Source | Responsibility |
 |---|---|---|
-| [`LaneConfig`](../../../../../src/py/vertebra/extensions/worker/runner.py) | `vertebra.extensions.worker.runner` | Frozen `msgspec.Struct(gc=False, kw_only=True)` defining a queue lane's `queue_name`, `concurrency: int = 10`, and `drain_timeout_s: float = 30.0`. |
-| [`WorkerRunner`](../../../../../src/py/vertebra/extensions/worker/runner.py) | `vertebra.extensions.worker.runner` | Manages per-lane `asyncio.Semaphore` pools and in-flight task tracking (`submit`, `stop`, `parse_lanes`, `resolve_job`, `run_oneshot`). |
+| [`LaneConfig`](../../../../../src/py/vertebra/cli/workers.py) | `vertebra.cli.workers` | Frozen `msgspec.Struct(gc=False, kw_only=True)` defining a queue lane's `queue_name`, `concurrency: int = 10`, and `drain_timeout_s: float = 30.0`. |
+| [`WorkerRunner`](../../../../../src/py/vertebra/cli/workers.py) | `vertebra.cli.workers` | Manages per-lane `asyncio.Semaphore` pools and in-flight task tracking (`submit`, `stop`, `parse_lanes`, `resolve_job`, `run_oneshot`, `execute_cli`). |
 
 ## 2. Admission Control, Draining & Oneshot Execution
 
@@ -30,4 +29,4 @@ sources:
 
 ## 3. CLI Integration (`cli/workers.py`)
 
-- **[`vtb workers run APP`](../../../../../src/py/vertebra/cli/workers.py)** (`execute_worker_cli`): Sets `LITESTAR_APP` and `VERTEBRA_APP`, imports `APP` via `import_app`, attaches `WorkerRunner` to `app.state["vertebra_worker_runner"]` when `app.state` is a `dict`, enters [`enter_litestar_server_lifespan`](../../../../../src/py/vertebra/extensions/litestar/plugin.py), and drains all lanes via `runner.stop()` on exit.
+- **[`vtb workers run APP`](../../../../../src/py/vertebra/cli/workers.py)** (`WorkerRunner.execute_cli`): Sets `LITESTAR_APP` and `VERTEBRA_APP`, imports `APP` via `import_app`, attaches `WorkerRunner` to `app.state["vertebra_worker_runner"]` when `app.state` is a `dict`, enters [`LitestarPlugin.enter_server_lifespan`](../../../../../src/py/vertebra/extensions/litestar/plugin.py), and drains all lanes via `runner.stop()` on exit.

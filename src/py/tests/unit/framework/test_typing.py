@@ -7,6 +7,7 @@ import sys
 import msgspec
 import pytest
 
+import vertebra._typing as internal_typing
 from vertebra import typing as vertebra_typing
 from vertebra._typing import HandlerID, LifecycleHook, OptionalDependency, RawHeaders
 from vertebra.typing import (
@@ -66,6 +67,19 @@ def test_optional_dependency_canonical_name() -> None:
     assert bool(flag) is True
 
 
+def test_trimmed_typing_surface_removes_dead_stubs() -> None:
+    """Verify dead typing stubs and flags are removed from internal typing."""
+    for name in (
+        "UnsetType",
+        "StructStub",
+        "AttrsInstanceStub",
+        "NumpyArrayStub",
+        "MSGSPEC_INSTALLED",
+        "ORJSON_INSTALLED",
+    ):
+        assert not hasattr(internal_typing, name)
+
+
 def test_lazy_vertebra_import_and_native_server_import() -> None:
     """Bare `import vertebra` must not import heavy optional packages or server circular chains."""
     code = (
@@ -74,7 +88,7 @@ def test_lazy_vertebra_import_and_native_server_import() -> None:
         "heavy = [m for m in ('pydantic', 'attrs', 'attr', 'numpy', 'orjson', 'rich', "
         "'vertebra.framework._app', 'vertebra.framework._router') if m in sys.modules]; "
         "assert not heavy, f'Unexpected eager imports: {heavy}'; "
-        "import vertebra.server._native; "
+        "import vertebra.server._dispatch; "
         "assert vertebra.App is not None"
     )
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)

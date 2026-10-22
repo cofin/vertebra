@@ -68,6 +68,8 @@ uv.toml
 !.agents/bundles/**
 !.agents/skills/
 !.agents/skills/**
+!.agents/agents/
+!.agents/agents/**
 !.agents/config.json
 .agents/transactions/
 .agents/scratch/

@@ -5,9 +5,8 @@ availability checking. Aligned with vtb.
 """
 
 import importlib
-from importlib.util import find_spec
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+import sys
+from typing import Any
 
 from vertebra._typing import (
     MissingDependencyError,
@@ -16,23 +15,14 @@ from vertebra._typing import (
     reset_dependency_cache,
 )
 
-if TYPE_CHECKING:
-    from types import ModuleType
-
 __all__ = (
     "MissingDependencyError",
     "dependency_flag",
-    "ensure_advanced_alchemy",
-    "ensure_msgspec",
-    "ensure_pyarrow",
-    "ensure_sqlalchemy",
-    "ensure_sqlspec",
-    "ensure_uvloop",
     "import_app",
     "import_optional",
     "import_string",
+    "lazy_exports",
     "module_available",
-    "module_to_os_path",
     "reset_dependency_cache",
 )
 
@@ -53,22 +43,8 @@ def import_optional(module_name: str) -> Any | None:
         return None
     try:
         return importlib.import_module(module_name)
-    except Exception:
+    except ImportError:
         return None
-
-
-def module_to_os_path(dotted_path: str = "app") -> Path:
-    """Convert a module dotted path to a filesystem path."""
-    try:
-        if (src := find_spec(dotted_path)) is None:
-            msg = f"Couldn't find the path for {dotted_path}"
-            raise TypeError(msg)
-    except (ModuleNotFoundError, ValueError) as e:
-        msg = f"Couldn't find the path for {dotted_path}"
-        raise TypeError(msg) from e
-
-    path = Path(str(src.origin))
-    return path.parent if path.is_file() else path
 
 
 def import_string(dotted_path: str) -> Any:
@@ -99,58 +75,16 @@ def import_string(dotted_path: str) -> Any:
             attr = parts[-1]
             try:
                 parent_module = importlib.import_module(parent_module_path)
-            except Exception:
+            except ImportError:
                 return obj
             if attr not in parent_module.__dict__:
                 _raise_import_error(f"Module '{parent_module_path}' has no attribute '{attr}' in '{dotted_path}'")
 
         for attr in attrs:
             obj = _resolve_import_attr(obj, attr, module, dotted_path)
-    except Exception as e:
+    except (ImportError, AttributeError) as e:
         _raise_import_error(f"Could not import '{dotted_path}': {e}", e)
     return obj
-
-
-def ensure_sqlspec() -> None:
-    """Ensure sqlspec is available."""
-    _require_dependency("sqlspec")
-
-
-def ensure_sqlalchemy() -> None:
-    """Ensure sqlalchemy is available."""
-    _require_dependency("sqlalchemy")
-
-
-def ensure_advanced_alchemy() -> None:
-    """Ensure advanced_alchemy is available."""
-    _require_dependency("advanced_alchemy", package_name="advanced-alchemy")
-
-
-def ensure_uvloop() -> None:
-    """Ensure uvloop is available."""
-    _require_dependency("uvloop")
-
-
-def ensure_pyarrow() -> None:
-    """Ensure pyarrow is available."""
-    _require_dependency("pyarrow")
-
-
-def ensure_msgspec() -> None:
-    """Ensure msgspec is available."""
-    _require_dependency("msgspec")
-
-
-def _require_dependency(
-    module_name: str, *, package_name: str | None = None, install_package: str | None = None
-) -> None:
-    """Raise MissingDependencyError when an optional dependency is absent."""
-    if module_available(module_name):
-        return
-
-    package = package_name or module_name
-    install = install_package or package
-    raise MissingDependencyError(package=package, install_package=install)
 
 
 def _raise_import_error(msg: str, exc: Exception | None = None) -> None:
@@ -160,7 +94,7 @@ def _raise_import_error(msg: str, exc: Exception | None = None) -> None:
     raise ImportError(msg)
 
 
-def _resolve_import_attr(obj: Any, attr: str, module: "ModuleType | None", dotted_path: str) -> Any:
+def _resolve_import_attr(obj: Any, attr: str, module: Any | None, dotted_path: str) -> Any:
     """Resolve a dotted attribute path segment on a module or object."""
     try:
         return obj.__getattribute__(attr)
@@ -168,3 +102,59 @@ def _resolve_import_attr(obj: Any, attr: str, module: "ModuleType | None", dotte
         module_name = module.__name__ if module is not None else "unknown"
         _raise_import_error(f"Module '{module_name}' has no attribute '{attr}' in '{dotted_path}'", exc)
         raise
+
+
+def lazy_exports(
+    module_name: str,
+    exports_or_map: tuple[str, ...] | dict[str, Any],
+    mapping: dict[str, tuple[str, str]] | None = None,
+) -> tuple[Any, Any]:
+    """Create __getattr__ and __dir__ hooks for lazy module attribute exports.
+
+    Args:
+        module_name: Fully-qualified name of the module (e.g. __name__).
+        exports_or_map: Either a tuple/list of public export names, or a dict
+            mapping attribute names to their module paths or (module, attr) tuples.
+        mapping: Optional dictionary mapping attribute names to (submodule_path, attr_name)
+            tuples, used when exports_or_map is a tuple of names.
+
+    Returns:
+        A tuple of (getattr_fn, dir_fn) suitable for assigning to __getattr__ and __dir__.
+    """
+    if mapping is not None:
+        exports = tuple(exports_or_map)
+        export_map: dict[str, Any] = mapping
+    elif isinstance(exports_or_map, dict):
+        export_map = exports_or_map
+        exports = tuple(export_map.keys())
+    else:
+        exports = tuple(exports_or_map)
+        export_map = {}
+
+    def getattr_fn(name: str) -> Any:
+        if name in export_map:
+            target = export_map[name]
+            if isinstance(target, tuple):
+                submodule_path, attr_name = target
+                module = importlib.import_module(submodule_path)
+                val = getattr(module, attr_name) if attr_name else module
+            elif isinstance(target, str):
+                module = importlib.import_module(target)
+                val = getattr(module, name) if hasattr(module, name) else module
+            else:
+                val = target
+
+            target_module = sys.modules.get(module_name)
+            if target_module is not None:
+                target_module.__dict__[name] = val
+            return val
+
+        msg = f"module {module_name!r} has no attribute {name!r}"
+        raise AttributeError(msg)
+
+    def dir_fn() -> list[str]:
+        target_module = sys.modules.get(module_name)
+        mod_keys = set(target_module.__dict__.keys()) if target_module is not None else set()
+        return sorted(set(exports) | set(export_map.keys()) | mod_keys)
+
+    return getattr_fn, dir_fn

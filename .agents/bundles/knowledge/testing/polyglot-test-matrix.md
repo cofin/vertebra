@@ -51,25 +51,19 @@ CI runs on pushes to `main` and on every pull request. A `changes` job (`dorny/p
 | `test-python` | `python`, `rust`, or `ci` changed | `make py-test`; on 3.12 also `make coverage` and uploads `coverage.xml` | Python `3.12`, `3.13`, `3.14`, `3.14t` |
 | `test-rust` | `rust` or `ci` changed | `make rs-test` | `ubuntu-latest` |
 | `test-rust-features` | `rust` or `ci` changed | `cargo test --workspace --features "$CARGO_FEATURES"` | `ubuntu-latest` `tls,compression`; `macos-latest` `tls,compression,macos-ulock` |
-| `test-typescript` | `typescript` or `ci` changed | `make ts-install` + `make ts-test` | `ubuntu-latest` |
+| `test-typescript` | `typescript` or `ci` changed | `make ts-install` + `make ts-build` + `make ts-test` | `ubuntu-latest` |
 
-No CI job runs `make ts-build`, and no job enables the `vertebra-http` `http3` feature.
+## 4. Suite Inventory & Test Quality Standards
 
-## 4. Suite Inventory
+**Python** (`[tool.pytest.ini_options] testpaths = ["src/py/tests"]`, dependency group `test` = `pytest`, `pytest-cov>=5.0`, `anyio`, `[tool.coverage.report] fail_under = 80`):
 
-**Python** (`[tool.pytest.ini_options] testpaths = ["src/py/tests"]`, dependency group `test` = `pytest`, `pytest-cov>=5.0`, `anyio`):
+- **1:1 Module-Mirrored Layout**: Every directory under `src/py/tests/unit/` mirrors `src/py/vertebra/` (`unit/server/`, `unit/supervisor/`, `unit/framework/`, `unit/extensions/`, `unit/db/`, `unit/storage/`, `unit/telemetry/`, `unit/codegen/`, `unit/build/`, `unit/cli/`, `unit/ffi/`, `unit/native/`, `unit/utils/`) and contains an `__init__.py` so `ruff` (`INP001`) and `pytest` resolve package namespaces cleanly.
+- **Top-Level Imports (`PLC0415`) & Zero Stage-Numbered Tests**: All test files place imports at module top level (`PLC0415` enforced) and use domain-named filenames (`test_hotpath_and_314t.py`, `test_loops.py`, `test_asgi_runner.py`, `test_wsgi_adapter.py`, `test_rsgi_adapter.py`) rather than stage-numbered or audit-remediation filenames.
+- **Strong vs. Weak Assertions**: Assert exact observable outputs (status codes, wire bytes, SQL strings + bind tuples, round-trip decoded frames, state transitions, and negative error paths with `pytest.raises(SpecificException, match=...)`) rather than `assert x is not None` or `hasattr` checks.
 
-- `unit/server/`: ASGI, RSGI, WSGI, SSE, WebSocket, Litestar fastpath/offload/routing, realtime backpressure, runtime tuning, zero-copy buffers, and the free-threaded hot path (`test_stage1_hotpath_and_314t.py`).
-- `unit/framework/`: `App`, Inertia, SSR and prerender, import maps, Vite fallback, live state, and framework subdomains.
-- `unit/extensions/`: Litestar plugin, gRPC, SQLAlchemy/SQLSpec `+vtb`, Oracle APEX/EBS, worker lanes, codegen targets, drop-in names, and data/storage integrations.
-- `unit/db/`, `unit/storage/`, `unit/telemetry/`: database drivers and data plane, object storage, telemetry and platform.
-- `unit/codegen/`, `unit/build/` (`test_packaging_and_pgo.py`, which also imports `tools/pgo`), `unit/cli/`, `unit/ffi/`, `unit/utils/`, plus top-level `test_freethreaded_gil.py`, `test_bench_infrastructure.py`, and `test_utils_*.py`.
-- `integration/storage/` holds only Floci emulator fixtures (`conftest.py`) and no collected tests.
-- `unit/build/`, `unit/storage/`, and `unit/telemetry/` have no `__init__.py`. Under pytest's default `prepend` import mode their modules import by basename, so a duplicate basename elsewhere would collide.
+**Rust**: Single-binary integration harnesses (`tests/it/main.rs`) in `vertebra-core` (`tests/it/{shm,spsc,mpmc,streaming,tiered_ring}.rs`) and `vertebra-http` (`tests/it/{server,routing,batcher,dispatcher,backpressure,tls,h2c_mtls,http3,grpc,sse,pubsub,websocket,fastpaths,discovery,streaming}.rs`), plus `vertebra-storage/tests/storage_engine_tests.rs`. `vertebra-py` and `vertebra-bundler` use inline `#[cfg(test)]` modules.
 
-**Rust**: `vertebra-core/tests/` (`shm_streaming_tests`, `test_mpmc`, `test_ring`, `test_shm`); `vertebra-http/tests/` (server, router, collector, dispatcher, TLS, h2c/mTLS, gRPC, SSE, pub/sub, WebSocket mounts, ingress fastpaths, MCP/discovery, streaming bodies, HTTP/3); `vertebra-storage/tests/storage_engine_tests.rs`. `vertebra-py`, `vertebra-bundler`, and `vertebra-db` use inline `#[cfg(test)]` modules. `test_tls.rs` is gated on `tls`; `http3_quic_tests.rs` is gated on `http3`, which `make rs-test` does not enable; run `cargo test -p vertebra-http --features http3` to exercise it.
-
-**TypeScript**: `package.json` runs `vitest run` with no Vitest config file, so the default glob collects `tests/unit/client.test.ts`, `tests/unit/store.test.ts`, and the top-level `apex`, `arrow`, `live`, `realtime`, `telemetry`, and `wasm` suites.
+**TypeScript**: `package.json` runs `vitest run` over `tests/unit/client.test.ts`, `tests/unit/store.test.ts`, `tests/unit/adapters.test.ts`, and the top-level `apex`, `arrow`, `live`, `realtime`, `telemetry`, and `wasm` suites (including error-injection, retry-exhaustion, and reconnect-cap coverage).
 
 ## 5. Async Tests & Shared-Memory Hygiene
 

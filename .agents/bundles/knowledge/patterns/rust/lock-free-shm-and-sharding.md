@@ -9,11 +9,11 @@ sources:
   - resource: src/rs/vertebra-core/src/channel.rs
   - resource: src/rs/vertebra-core/src/transport/mod.rs
   - resource: src/rs/vertebra-core/src/bridge.rs
-  - resource: src/rs/vertebra-http/src/collector.rs
+  - resource: src/rs/vertebra-http/src/batcher.rs
   - resource: src/rs/vertebra-http/src/server.rs
-  - resource: src/rs/vertebra-http/src/correlation.rs
+  - resource: src/rs/vertebra-http/src/dispatcher/correlation.rs
   - resource: src/rs/vertebra-http/src/dispatcher/shm.rs
-  - resource: src/rs/vertebra-http/src/response_reader.rs
+  - resource: src/rs/vertebra-http/src/dispatcher/shm_reader.rs
   - resource: src/rs/vertebra-http/src/main.rs
 ---
 
@@ -55,7 +55,7 @@ A side that may sleep increments its waiter counter, re-checks the cursor, and w
 
 ## Validate SHM-Supplied Lengths
 
-Treat every `SlotHeader::len` read from shared memory as untrusted: clamp it to `payload_capacity()` (and to the frame's own declared lengths) before building a slice with `from_raw_parts`. Writers already reject `len > payload_capacity()`, and copying reads reject `len > out.len()`. The zero-copy readers `SpscRing::peek_slot` (behind `try_recv_view`) and `MpmcRing::try_recv_with` do not yet clamp; see the [SHM gotchas](../../gotchas/shm-and-cross-platform-ipc.md).
+Treat every `SlotHeader::len` read from shared memory as untrusted: clamp it to `payload_capacity()` (and to the frame's own declared lengths) before building a slice with `from_raw_parts`. Both copying readers and zero-copy readers (`SpscRing::peek_slot` behind `try_recv_view` and `MpmcRing::try_recv_with`) clamp `len` to `payload_capacity()`; see [SHM gotchas](../../gotchas/shm-and-cross-platform-ipc.md).
 
 ## Reserve-Then-Rollback Atomics
 
@@ -63,9 +63,9 @@ Treat every `SlotHeader::len` read from shared memory as untrusted: clamp it to 
 
 ## Sharded Hot Paths in `vertebra-http`
 
-- **Collector**: `RequestBatcher::spawn_pool(dispatcher, policy, shard_count, channel_capacity)` ([`collector.rs`](../../../../../src/rs/vertebra-http/src/collector.rs)) starts one batcher task per shard, each with its own `mpsc` channel. `main.rs` uses 8 shards with capacity 16384. `ServerState::get_collector` ([`server.rs`](../../../../../src/rs/vertebra-http/src/server.rs)) picks a shard round-robin with an `AtomicUsize`.
-- **Correlation**: `ShmDispatcher::new` ([`dispatcher/shm.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/shm.rs)) splits `max_inflight` (65,536 from `main.rs`) across 8 `Mutex<InFlightRequests>` shards of 8,192 slots. [`InFlightRequests`](../../../../../src/rs/vertebra-http/src/correlation.rs) is a slab with a LIFO free list and per-slot generation counters; `insert` returns `(generation << 32) | index` to prevent ABA. A full shard answers 503.
+- **Collector**: `RequestBatcher::spawn_pool(dispatcher, policy, shard_count, channel_capacity)` ([`batcher.rs`](../../../../../src/rs/vertebra-http/src/batcher.rs)) starts one batcher task per shard, each with its own `mpsc` channel. `main.rs` uses 8 shards with capacity 16384. `ServerState::get_collector` ([`server.rs`](../../../../../src/rs/vertebra-http/src/server.rs)) picks a shard round-robin with an `AtomicUsize`.
+- **Correlation**: `ShmDispatcher::new` ([`dispatcher/shm.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/shm.rs)) splits `max_inflight` (65,536 from `main.rs`) across 8 `Mutex<InFlightRequests>` shards of 8,192 slots. [`InFlightRequests`](../../../../../src/rs/vertebra-http/src/dispatcher/correlation.rs) is a slab with a LIFO free list and per-slot generation counters; `insert` returns `(generation << 32) | index` to prevent ABA. A full shard answers 503.
 - **Worker and shard selection**: a single `fetch_add` on `next_worker` gives a start index per batch. Request `i` prefers worker `(start + i) % worker_count`, probing forward for a ring with capacity (503 when all are full), and uses correlation shard `(start + i) & shard_mask`.
-- **Streaming responders**: `PendingRequests` ([`response_reader.rs`](../../../../../src/rs/vertebra-http/src/response_reader.rs)) is a `DashMap<u64, PendingResponder>` (unary `oneshot` or stream `mpsc`), separate from `InFlightRequests`.
+- **Streaming responders**: `PendingRequests` ([`dispatcher/shm_reader.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/shm_reader.rs)) is a `DashMap<u64, PendingResponder>` (unary `oneshot` or stream `mpsc`), separate from `InFlightRequests`.
 
 Prefer per-shard ownership over a single shared lock when adding new hot-path state, and keep shard counts powers of two when indexing with a mask.

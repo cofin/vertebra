@@ -78,3 +78,8 @@ def __getattr__(name: str) -> Any:
         return value
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)
+
+
+def __dir__() -> list[str]:
+    """Return public export symbols and module globals for dir()."""
+    return sorted(set(__all__) | set(globals().keys()))

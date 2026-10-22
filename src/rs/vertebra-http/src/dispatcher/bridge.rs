@@ -8,10 +8,10 @@ use tracing::error;
 
 use vertebra_core::bridge::{BatchBridge, WriteRequest};
 
-use super::Inner;
-use crate::collector::Batch;
+use super::BridgeCorrelation;
+use crate::batcher::Batch;
 
-pub(super) fn dispatch_bridge(inner: &Inner, batch: Batch) -> usize {
+pub(super) fn dispatch_bridge(bridge_corr: &BridgeCorrelation, batch: Batch) -> usize {
     use vertebra_core::protocol::flags;
 
     let Some(bridge) = BatchBridge::get() else {
@@ -22,28 +22,26 @@ pub(super) fn dispatch_bridge(inner: &Inner, batch: Batch) -> usize {
     let mut dispatched_count = 0;
 
     for req in batch.requests {
-        let id = inner.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = bridge_corr.next_id.fetch_add(1, Ordering::Relaxed);
         let is_fnf = req.flags & flags::FIRE_AND_FORGET != 0;
 
-        if !is_fnf {
-            inner.pending.insert(id, req.reply);
-        }
-
-        if let Err(e) = writer.push_request(&WriteRequest {
+        let push_result = writer.push_request(&WriteRequest {
             method_tag: req.method_tag,
             http_version_tag: req.http_version_tag,
             handler_id: req.handler_id,
             correlation_id: id,
-            path: req.path.as_bytes(),
-            query: req.query.as_ref().map(|q| q.as_bytes()),
+            path: req.path().as_bytes(),
+            query: req.query().map(str::as_bytes),
             headers_raw: &req.headers_mp,
             body: &req.body,
-        }) {
+        });
+
+        if let Err(e) = push_result {
             error!(error = %e, "transport push failed, dropping request");
-            if !is_fnf {
-                inner.pending.remove(&id);
-            }
         } else {
+            if !is_fnf {
+                bridge_corr.pending.insert(id, req.reply);
+            }
             dispatched_count += 1;
         }
     }

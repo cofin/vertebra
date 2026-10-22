@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyIOError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyBytes, PyDict, PyList, PyString, PyTuple};
 
@@ -92,7 +92,7 @@ pub struct Response {
 impl Response {
     #[new]
     #[pyo3(signature = (status, body=None, headers=None, request_id=0))]
-    fn new(
+    pub fn new(
         py: Python<'_>,
         status: u16,
         body: Option<Bound<'_, PyAny>>,
@@ -114,24 +114,88 @@ impl Response {
         })
     }
 
-    /// Construct a `Response` directly from any CPython buffer-protocol object (`bytes`, `bytearray`, `memoryview`).
+    /// Construct a `Response` from standard error status code with interned error text.
     #[staticmethod]
-    #[pyo3(signature = (status, body, headers=None, request_id=0))]
-    pub fn from_buffer(
+    #[pyo3(signature = (status, request_id=0))]
+    pub fn error(status: u16, request_id: u64) -> Self {
+        let body = match status {
+            400 => Bytes::from_static(b"bad request"),
+            401 => Bytes::from_static(b"unauthorized"),
+            403 => Bytes::from_static(b"forbidden"),
+            404 => Bytes::from_static(b"not found"),
+            405 => Bytes::from_static(b"method not allowed"),
+            500 => Bytes::from_static(b"internal server error"),
+            502 => Bytes::from_static(b"bad gateway"),
+            503 => Bytes::from_static(b"service unavailable"),
+            504 => Bytes::from_static(b"gateway timeout"),
+            _ => Bytes::from(format!("HTTP error {status}")),
+        };
+        let headers = vec![
+            (
+                b"content-type".to_vec(),
+                b"text/plain; charset=utf-8".to_vec(),
+            ),
+            (
+                b"content-length".to_vec(),
+                body.len().to_string().into_bytes(),
+            ),
+        ];
+        Self {
+            status,
+            body,
+            headers,
+            request_id,
+        }
+    }
+
+    /// Construct a `Response` by reading a file or byte range in detached threads.
+    #[staticmethod]
+    #[pyo3(signature = (path, status=200, headers=None, request_id=0, offset=None, length=None))]
+    pub fn from_file(
         py: Python<'_>,
+        path: &str,
         status: u16,
-        body: &Bound<'_, PyAny>,
         headers: Option<Bound<'_, PyAny>>,
         request_id: u64,
+        offset: Option<u64>,
+        length: Option<u64>,
     ) -> PyResult<Self> {
-        let body_bytes = extract_buffer_bytes(py, body)?;
-        let header_vec = extract_headers_list(headers)?;
+        let path_owned = path.to_string();
+        let end = offset.and_then(|o| length.map(|l| o + l));
+        let body_bytes = py
+            .detach(|| crate::file_io::read_file_range_sync(&path_owned, offset, end))
+            .map_err(|e| PyIOError::new_err(format!("failed to read file {path}: {e}")))?;
+
+        let mut header_vec = extract_headers_list(headers)?;
+        if !header_vec
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case(b"content-length"))
+        {
+            header_vec.push((
+                b"content-length".to_vec(),
+                body_bytes.len().to_string().into_bytes(),
+            ));
+        }
+
         Ok(Self {
             status,
             body: body_bytes,
             headers: header_vec,
             request_id,
         })
+    }
+
+    /// Construct a `Response` directly from any CPython buffer-protocol object (`bytes`, `bytearray`, `memoryview`).
+    #[staticmethod]
+    #[pyo3(signature = (status, body, headers=None, request_id=0))]
+    pub fn from_buffer(
+        py: Python<'_>,
+        status: u16,
+        body: Bound<'_, PyAny>,
+        headers: Option<Bound<'_, PyAny>>,
+        request_id: u64,
+    ) -> PyResult<Self> {
+        Self::new(py, status, Some(body), headers, request_id)
     }
 
     #[getter]
@@ -141,29 +205,6 @@ impl Response {
 
     #[getter]
     pub fn body<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        if self.body.is_empty()
-            && let Some(path_bytes) = self.header_value(b"x-vertebra-sendfile")
-            && let Ok(path_str) = std::str::from_utf8(path_bytes)
-        {
-            if let Some(range_bytes) = self.header_value(b"x-vertebra-sendfile-range")
-                && let Ok(range_str) = std::str::from_utf8(range_bytes)
-                && let Some((span, _total)) = range_str.split_once('/')
-                && let Some((start_s, end_s)) = span.split_once('-')
-                && let (Ok(start), Ok(end)) = (start_s.parse::<u64>(), end_s.parse::<u64>())
-                && end > start
-                && let Ok(mut fh) = std::fs::File::open(path_str)
-            {
-                use std::io::{Read, Seek, SeekFrom};
-                let len = (end - start) as usize;
-                let mut buf = vec![0u8; len];
-                if fh.seek(SeekFrom::Start(start)).is_ok() && fh.read_exact(&mut buf).is_ok() {
-                    return PyBytes::new(py, &buf);
-                }
-            }
-            if let Ok(file_bytes) = std::fs::read(path_str) {
-                return PyBytes::new(py, &file_bytes);
-            }
-        }
         PyBytes::new(py, &self.body)
     }
 
@@ -193,6 +234,23 @@ impl Response {
         PyList::new(py, &tuples)
     }
 
+    /// Format this response as HTTP/1.1 wire bytes.
+    pub fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        let mut buf = Vec::with_capacity(64 + self.body.len());
+        buf.extend_from_slice(b"HTTP/1.1 ");
+        buf.extend_from_slice(self.status.to_string().as_bytes());
+        buf.extend_from_slice(b" OK\r\n");
+        for (k, v) in &self.headers {
+            buf.extend_from_slice(k);
+            buf.extend_from_slice(b": ");
+            buf.extend_from_slice(v);
+            buf.extend_from_slice(b"\r\n");
+        }
+        buf.extend_from_slice(b"\r\n");
+        buf.extend_from_slice(&self.body);
+        PyBytes::new(py, &buf)
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Response(status={}, body_len={}, request_id={})",
@@ -200,22 +258,5 @@ impl Response {
             self.body.len(),
             self.request_id,
         )
-    }
-}
-
-impl Response {
-    pub fn get_headers(&self) -> &[(Vec<u8>, Vec<u8>)] {
-        &self.headers
-    }
-
-    pub fn get_body(&self) -> &Bytes {
-        &self.body
-    }
-
-    fn header_value(&self, target: &[u8]) -> Option<&[u8]> {
-        self.headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(target))
-            .map(|(_, v)| v.as_slice())
     }
 }

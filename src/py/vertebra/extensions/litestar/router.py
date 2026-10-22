@@ -1,15 +1,11 @@
 """Litestar v2 and v3 route extraction and typed path parameter conversion for Rust matchit 0.9."""
 
 import re
-from collections.abc import Callable
-from datetime import date, datetime, time, timedelta
-from decimal import Decimal
 from typing import Any
-from uuid import UUID
 
 import msgspec
 
-from vertebra.framework._app import _make_handler_id
+from vertebra.framework._router import PARAM_CONVERTERS, _make_handler_id
 
 __all__ = (
     "ExtractedLitestarRoute",
@@ -119,7 +115,7 @@ def convert_litestar_path_params(
     converted: dict[str, Any] = {}
     for name, raw_val in raw_params.items():
         type_name = param_types.get(name, "str")
-        converter = _PARAM_CONVERTERS.get(type_name, str)
+        converter = PARAM_CONVERTERS.get(type_name, str)
         converted[name] = converter(raw_val)
     return converted
 
@@ -163,39 +159,6 @@ def extract_litestar_route_entries(app: Any) -> list[ExtractedLitestarRoute]:
 
 
 _SEGMENT_PARAM_RE = re.compile(r"^\{([a-zA-Z_][a-zA-Z0-9_]*)(?::([a-zA-Z0-9_]+))?\}$")
-_ISO_DURATION_RE = re.compile(
-    r"^P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$"
-)
-
-
-def _parse_timedelta(raw: str) -> timedelta:
-    match = _ISO_DURATION_RE.match(raw)
-    if match and any(match.groupdict().values()):
-        days = int(match.group("days") or 0)
-        hours = int(match.group("hours") or 0)
-        minutes = int(match.group("minutes") or 0)
-        seconds = float(match.group("seconds") or 0.0)
-        return timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
-    return timedelta(seconds=float(raw))
-
-
-def _parse_path_param(raw: str) -> str:
-    return raw.lstrip("/")
-
-
-_PARAM_CONVERTERS: dict[str, Callable[[str], Any]] = {
-    "str": str,
-    "string": str,
-    "int": int,
-    "float": float,
-    "uuid": UUID,
-    "decimal": Decimal,
-    "date": date.fromisoformat,
-    "datetime": datetime.fromisoformat,
-    "time": time.fromisoformat,
-    "timedelta": _parse_timedelta,
-    "path": _parse_path_param,
-}
 
 
 def _unpack_route_handler_map_entry(entry: Any) -> tuple[Any, Any]:

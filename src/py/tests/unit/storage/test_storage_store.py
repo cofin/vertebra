@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from vertebra.storage import ObjectMeta, ObjectStore, PutResult, SigningConfig
+import vertebra.storage as storage
+from vertebra.storage import ObjectMeta, ObjectStore, PutResult, SigningConfig, StorageRegistry
+from vertebra.storage._store import ReadableFile
 
 
 def test_memory_store_sync_crud_and_zero_copy_memoryview() -> None:
@@ -143,3 +145,21 @@ def test_gcs_v4_keyless_iam_presigning_via_object_store() -> None:
 
     assert "X-Goog-Algorithm=GOOG4-RSA-SHA256" in signed
     assert "X-Goog-Signature=646561646265656663616665" in signed
+
+
+def test_object_store_open_readable_file(tmp_path: Path) -> None:
+    """ObjectStore.open_readable_file returns a seekable ReadableFile and wrappers are removed."""
+    assert not hasattr(storage, "SyncStore")
+    assert not hasattr(storage, "AsyncStore")
+    assert not hasattr(StorageRegistry, "register_store")
+
+    store = ObjectStore.from_local(tmp_path)
+    store.put("data.parquet", b"PAR1-parquet-content-PAR1")
+
+    with store.open_readable_file("data.parquet") as f:
+        assert isinstance(f, ReadableFile)
+        assert f.size == 25
+        assert f.read(4) == b"PAR1"
+        assert f.tell() == 4
+        f.seek(-4, 2)
+        assert f.read(4) == b"PAR1"

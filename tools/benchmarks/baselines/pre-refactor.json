@@ -1,0 +1,61 @@
+{
+  "name": "pre-refactor",
+  "commit": "b6bb832eeffe78dc9a68db8b78d3ed9865d5e66b",
+  "timestamp": "2026-10-22T15:43:19Z",
+  "criterion_ns_per_iter": {
+    "router::lookup_static_100_routes": 39.330079959712904,
+    "mpmc_single_thread_baseline": 25.652477518141584,
+    "bridge_dispatch::http11_concurrent_1000": 12271061.820833333,
+    "bridge_dispatch_adaptive::http11_concurrent_1000": 9555047.319444444,
+    "spsc_burst::fill_drain::256": 4760.362757622211,
+    "spsc_burst::fill_drain::64": 1160.5369064603453,
+    "spsc_burst::fill_drain::16": 287.0603211418063,
+    "spsc_throughput::ping_pong::256": 21.43002067710016,
+    "spsc_throughput::ping_pong::64": 20.69402769426211,
+    "spsc_throughput::ping_pong::1024": 20.92994669693615,
+    "direct_dispatch::http11_concurrent_1000": 8388839.75,
+    "mpmc_single_thread": 15.62051443798291,
+    "jwt_validate_hs256": 2259.2977415342057,
+    "rate_limiter_allow": 68.3340358268276,
+    "codec_roundtrip::none": 193.13271480815877,
+    "codec_roundtrip::zstd": 8939.94406751337,
+    "codec_roundtrip::lz4": 1116.6760480377166,
+    "codec_decompress::zstd::1MB": 107487.38912337662,
+    "codec_decompress::zstd::64KB": 8738.446789717349,
+    "codec_decompress::zstd::4KB": 2485.0509165256626,
+    "codec_decompress::zstd::256B": 2065.5587884089805,
+    "codec_decompress::lz4::1MB": 121050.44498556998,
+    "codec_decompress::lz4::64KB": 7422.614361167001,
+    "codec_decompress::lz4::4KB": 476.4132555562991,
+    "codec_decompress::lz4::256B": 65.33611370330493,
+    "codec_compress::zstd::1MB": 185205.6435185185,
+    "codec_compress::zstd::64KB": 18682.1456949905,
+    "codec_compress::zstd::4KB": 6420.547781385281,
+    "codec_compress::zstd::256B": 5377.770049366617,
+    "codec_compress::lz4::1MB": 87890.1910867464,
+    "codec_compress::lz4::64KB": 5776.924202693126,
+    "codec_compress::lz4::4KB": 601.9602521088957,
+    "codec_compress::lz4::256B": 255.29496800212934
+  },
+  "micro_ops_per_sec": {
+    "request_headers_materialization": 56030.97212840147,
+    "asgi_scope_build_and_copy": 45894.504780165094,
+    "wsgi_environ_items": 15360.583633362654,
+    "rsgi_scope_build": 123838.87126317754,
+    "response_construct": 141196.17160700305,
+    "serializers_msgpack_json": 383468.3717204347
+  },
+  "micro_p99_ns": {
+    "request_headers_materialization": 17968.177,
+    "asgi_scope_build_and_copy": 21820.585,
+    "wsgi_environ_items": 65437.9,
+    "rsgi_scope_build": 8089.071,
+    "response_construct": 7113.578,
+    "serializers_msgpack_json": 2646.811
+  },
+  "import_ms": {
+    "import_vertebra_ms": 27.608101,
+    "import_vertebra_framework_ms": 56.684194
+  },
+  "e2e_rps": {}
+}

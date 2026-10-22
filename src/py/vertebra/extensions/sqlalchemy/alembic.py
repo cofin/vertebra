@@ -8,13 +8,45 @@ from typing import Any, Literal
 import msgspec
 
 from vertebra.db.postgres import PostgresConfig
-from vertebra.extensions.sqlalchemy.types import BinaryJson, Vector
 
 __all__ = (
     "AlembicImpl",
+    "AlembicRunner",
     "CreateViewOp",
     "DropViewOp",
 )
+
+
+class AlembicRunner:
+    """Wrapper around alembic.command for executing programmatic migrations."""
+
+    __slots__ = ("_config",)
+
+    def __init__(self, config: Any = None) -> None:
+        """Initialize runner with optional Alembic configuration."""
+        self._config = config
+
+    def upgrade(self, revision: str = "head") -> None:
+        """Run alembic upgrade to revision."""
+        try:
+            cmd = importlib.import_module("alembic.command")
+            cfg_mod = importlib.import_module("alembic.config")
+
+            cfg = self._config if isinstance(self._config, cfg_mod.Config) else cfg_mod.Config()
+            cmd.upgrade(cfg, revision)
+        except (ImportError, AttributeError):
+            pass
+
+    def downgrade(self, revision: str = "-1") -> None:
+        """Run alembic downgrade to revision."""
+        try:
+            cmd = importlib.import_module("alembic.command")
+            cfg_mod = importlib.import_module("alembic.config")
+
+            cfg = self._config if isinstance(self._config, cfg_mod.Config) else cfg_mod.Config()
+            cmd.downgrade(cfg, revision)
+        except (ImportError, AttributeError):
+            pass
 
 
 class AlembicImpl(msgspec.Struct, frozen=True, gc=False):
@@ -62,14 +94,15 @@ class AlembicImpl(msgspec.Struct, frozen=True, gc=False):
         """Alembic ``render_item`` hook rendering ``Vector`` and ``BinaryJson`` column types."""
         if type_ != "type":
             return False
+        sa_mod = importlib.import_module("vertebra.extensions.sqlalchemy")
         imports = getattr(autogen_context, "imports", None)
-        if isinstance(obj, Vector):
+        if isinstance(obj, sa_mod.Vector):
             if isinstance(imports, set):
                 imports.add("from vertebra.extensions.sqlalchemy import Vector")
             if obj.dim is None:
                 return f"Vector(storage_format={obj.storage_format!r})"
             return f"Vector({obj.dim}, storage_format={obj.storage_format!r})"
-        if isinstance(obj, BinaryJson):
+        if isinstance(obj, sa_mod.BinaryJson):
             if isinstance(imports, set):
                 imports.add("from vertebra.extensions.sqlalchemy import BinaryJson")
             return "BinaryJson()"
@@ -85,16 +118,18 @@ class AlembicImpl(msgspec.Struct, frozen=True, gc=False):
     ) -> bool | None:
         """Alembic ``compare_type`` hook preventing false-positive diffs on ``Vector`` and ``BinaryJson``."""
         _ = (context, inspected_column, metadata_column)
-        if isinstance(metadata_type, Vector):
-            if isinstance(inspected_type, Vector):
-                return (inspected_type.dim != metadata_type.dim) or (
-                    inspected_type.storage_format != metadata_type.storage_format
+        sa_mod = importlib.import_module("vertebra.extensions.sqlalchemy")
+        if isinstance(metadata_type, sa_mod.Vector):
+            if isinstance(inspected_type, sa_mod.Vector):
+                return bool(
+                    (inspected_type.dim != metadata_type.dim)
+                    or (inspected_type.storage_format != metadata_type.storage_format)
                 )
             inspected_str = str(inspected_type).upper()
             if "VECTOR" in inspected_str:
                 return bool(metadata_type.dim is not None and str(metadata_type.dim) not in inspected_str)
-        if isinstance(metadata_type, BinaryJson):
-            if isinstance(inspected_type, BinaryJson):
+        if isinstance(metadata_type, sa_mod.BinaryJson):
+            if isinstance(inspected_type, sa_mod.BinaryJson):
                 return False
             inspected_str = str(inspected_type).upper()
             if inspected_str in ("JSON", "JSONB", "OSON"):

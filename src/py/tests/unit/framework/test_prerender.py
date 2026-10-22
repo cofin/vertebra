@@ -3,8 +3,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from vertebra.framework._ssr._backends import SsrResult
-from vertebra.framework._ssr._prerender import prerender_routes
+from vertebra.framework.ssr import SsrResult, prerender_routes
 from vertebra.utils.serializers import decode_json
 
 
