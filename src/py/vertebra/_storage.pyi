@@ -9,6 +9,7 @@ __all__ = [
     "RustTaskAwaitable",
     "StorageBuffer",
     "py_chunk_r2_uniform_parts",
+    "py_sign_aws_sigv4_headers",
     "py_sign_azure_sas_url",
     "py_sign_gcs_v4_iam_url",
     "py_sign_hmac_url",
@@ -140,3 +141,15 @@ def py_chunk_r2_uniform_parts(
     data: Buffer | bytes,
     part_size: int = 8388608,
 ) -> list[StorageBuffer]: ...
+def py_sign_aws_sigv4_headers(
+    service: str,
+    region: str,
+    access_key_id: str,
+    secret_access_key: str,
+    method: str,
+    url: str,
+    payload: bytes,
+    content_type: str = "application/json",
+    timestamp: int | None = None,
+    session_token: str | None = None,
+) -> dict[str, str]: ...

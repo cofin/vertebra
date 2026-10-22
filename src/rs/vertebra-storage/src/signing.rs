@@ -411,3 +411,158 @@ pub fn sign_azure_sas_url(
 fn urlencoding_encode(input: &str) -> String {
     url::form_urlencoded::byte_serialize(input.as_bytes()).collect()
 }
+
+#[derive(Clone, Debug)]
+pub struct AwsSigV4HeaderConfig {
+    pub service: String,
+    pub region: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: Option<String>,
+}
+
+pub fn sign_aws_sigv4_headers(
+    config: &AwsSigV4HeaderConfig,
+    method: &str,
+    url: &str,
+    payload: &[u8],
+    content_type: &str,
+    now_unix: i64,
+) -> Result<std::collections::HashMap<String, String>, StorageError> {
+    let parsed =
+        Url::parse(url).map_err(|e| StorageError::InvalidUrl(url.to_string(), e.to_string()))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| StorageError::Signing("missing host in url".to_string()))?
+        .to_string();
+
+    let host_header = match parsed.port() {
+        Some(port)
+            if (parsed.scheme() == "http" && port != 80)
+                || (parsed.scheme() == "https" && port != 443) =>
+        {
+            format!("{host}:{port}")
+        }
+        _ => host,
+    };
+
+    let timestamp: DateTime<Utc> = Utc
+        .timestamp_opt(now_unix, 0)
+        .single()
+        .ok_or_else(|| StorageError::Signing("invalid unix timestamp".to_string()))?;
+    let amz_date = timestamp.format("%Y%m%dT%H%M%SZ").to_string();
+    let datestamp = timestamp.format("%Y%m%d").to_string();
+    let payload_hash = sha256_hex(payload);
+
+    let mut canonical_headers = format!(
+        "content-type:{}\nhost:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
+        content_type.trim(),
+        host_header.trim(),
+        payload_hash,
+        amz_date,
+    );
+    let signed_headers = if let Some(ref token) = config.session_token {
+        canonical_headers.push_str(&format!("x-amz-security-token:{}\n", token.trim()));
+        "content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token".to_string()
+    } else {
+        "content-type;host;x-amz-content-sha256;x-amz-date".to_string()
+    };
+
+    let canonical_uri = if parsed.path().is_empty() {
+        "/".to_string()
+    } else {
+        parsed.path().to_string()
+    };
+    let canonical_querystring = parsed.query().unwrap_or("");
+
+    let canonical_request = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        method.to_ascii_uppercase(),
+        canonical_uri,
+        canonical_querystring,
+        canonical_headers,
+        signed_headers,
+        payload_hash
+    );
+
+    let credential_scope = format!(
+        "{datestamp}/{}/{}/aws4_request",
+        config.region, config.service
+    );
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
+        amz_date,
+        credential_scope,
+        sha256_hex(canonical_request.as_bytes())
+    );
+
+    let k_date = hmac_sha256(
+        format!("AWS4{}", config.secret_access_key).as_bytes(),
+        datestamp.as_bytes(),
+    )?;
+    let k_region = hmac_sha256(&k_date, config.region.as_bytes())?;
+    let k_service = hmac_sha256(&k_region, config.service.as_bytes())?;
+    let k_signing = hmac_sha256(&k_service, b"aws4_request")?;
+    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes())?);
+
+    let auth_header = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
+        config.access_key_id
+    );
+
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("Authorization".to_string(), auth_header);
+    headers.insert("content-type".to_string(), content_type.to_string());
+    headers.insert("host".to_string(), host_header);
+    headers.insert("x-amz-date".to_string(), amz_date);
+    headers.insert("x-amz-content-sha256".to_string(), payload_hash);
+    if let Some(ref token) = config.session_token {
+        headers.insert("x-amz-security-token".to_string(), token.clone());
+    }
+
+    Ok(headers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sign_aws_sigv4_headers_ses_v2() {
+        let config = AwsSigV4HeaderConfig {
+            service: "ses".to_string(),
+            region: "us-east-1".to_string(),
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: Some("session-token-test".to_string()),
+        };
+        let payload = br#"{"FromEmailAddress":"sender@example.com"}"#;
+        let headers = sign_aws_sigv4_headers(
+            &config,
+            "POST",
+            "https://email.us-east-1.amazonaws.com/v2/email/outbound-emails",
+            payload,
+            "application/json",
+            1_700_000_000,
+        )
+        .expect("signing must succeed");
+
+        assert_eq!(
+            headers.get("host").unwrap(),
+            "email.us-east-1.amazonaws.com"
+        );
+        assert_eq!(headers.get("x-amz-date").unwrap(), "20231114T221320Z");
+        assert_eq!(
+            headers.get("x-amz-security-token").unwrap(),
+            "session-token-test"
+        );
+        let auth = headers.get("Authorization").unwrap();
+        assert!(auth.starts_with(
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20231114/us-east-1/ses/aws4_request"
+        ));
+        assert!(auth.contains(
+            "SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+        ));
+        assert!(auth.contains("Signature="));
+    }
+}

@@ -2,7 +2,7 @@
 type: Spec
 flow_id: transactional-email-providers
 title: "Chapter 2: Transactional Email Providers, Webhook Verification, and Queued Delivery"
-state: planned
+state: closed
 plan_revision: 2
 plan_commit: ""
 state_revision: 0
@@ -95,14 +95,14 @@ src/py/tests/unit/framework/
 ## Implementation Plan
 
 ### Phase 1: Core Protocol, SMTP, Memory, and REST API Transports
-- [ ] 2.1 `EmailTransport` protocol, `SmtpEmailTransport`, and `MemoryEmailTransport` ([worksheet](tasks/2.1.md))
-- [ ] 2.2 API email providers (`ResendEmailTransport`, `SendGridEmailTransport`, `MailgunEmailTransport`) and webhook HMAC verification ([worksheet](tasks/2.2.md))
-- [ ] Checkpoint: `uv run ruff check src/py/vertebra/framework/email/ && uv run mypy src/py/vertebra/framework/email/`
+- [x] 2.1 `EmailTransport` protocol, `SmtpEmailTransport`, and `MemoryEmailTransport` ([worksheet](tasks/2.1.md))
+- [x] 2.2 API email providers (`ResendEmailTransport`, `SendGridEmailTransport`, `MailgunEmailTransport`) and webhook HMAC verification ([worksheet](tasks/2.2.md))
+- [x] Checkpoint: `uv run ruff check src/py/vertebra/framework/email/ && uv run mypy src/py/vertebra/framework/email/`
 
 ### Phase 2: Rust SigV4 AWS SES Transport, Queued Delivery & Verification
-- [ ] 2.3 `SesEmailTransport` via Rust `vertebra._storage` SigV4 signing and `EmailService.enqueue(...)` integration ([worksheet](tasks/2.3.md))
-- [ ] 2.4 Unit and contract tests for all email transports, webhook verification, and queued delivery ([worksheet](tasks/2.4.md))
-- [ ] Chapter gate: `make dev && make lint-all && make rs-test && make py-test`
+- [x] 2.3 `SesEmailTransport` via Rust `vertebra._storage` SigV4 signing and `EmailService.enqueue(...)` integration ([worksheet](tasks/2.3.md))
+- [x] 2.4 Unit and contract tests for all email transports, webhook verification, and queued delivery ([worksheet](tasks/2.4.md))
+- [x] Chapter gate: `make dev && make lint-all && make rs-test && make py-test`
 
 ## Requirement-to-task trace
 

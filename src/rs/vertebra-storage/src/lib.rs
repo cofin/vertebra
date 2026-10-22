@@ -18,8 +18,9 @@ use pyo3::types::PyBytes;
 use crate::oci::{OciCavageCredentials, sign_oci_cavage_request};
 use crate::r2::chunk_uniform_parts;
 use crate::signing::{
-    AzureSasConfig, GcsSignConfig, HmacSigner, S3SignConfig, sign_azure_sas_url,
-    sign_gcs_v4_with_iam_endpoint, sign_s3_v4_url, verify_s3_v4_url,
+    AwsSigV4HeaderConfig, AzureSasConfig, GcsSignConfig, HmacSigner, S3SignConfig,
+    sign_aws_sigv4_headers, sign_azure_sas_url, sign_gcs_v4_with_iam_endpoint, sign_s3_v4_url,
+    verify_s3_v4_url,
 };
 use crate::store::{
     ObjectStoreEngine, StorageError, StoredObjectMeta, block_on_storage, runtime_handle,
@@ -652,6 +653,34 @@ fn py_chunk_r2_uniform_parts(
         .collect())
 }
 
+#[pyfunction]
+#[pyo3(signature = (service, region, access_key_id, secret_access_key, method, url, payload, content_type="application/json", timestamp=None, session_token=None))]
+#[allow(clippy::too_many_arguments)]
+fn py_sign_aws_sigv4_headers(
+    py: Python<'_>,
+    service: &str,
+    region: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+    method: &str,
+    url: &str,
+    payload: &[u8],
+    content_type: &str,
+    timestamp: Option<i64>,
+    session_token: Option<String>,
+) -> PyResult<HashMap<String, String>> {
+    let now_ts = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let cfg = AwsSigV4HeaderConfig {
+        service: service.to_string(),
+        region: region.to_string(),
+        access_key_id: access_key_id.to_string(),
+        secret_access_key: secret_access_key.to_string(),
+        session_token,
+    };
+    py.detach(|| sign_aws_sigv4_headers(&cfg, method, url, payload, content_type, now_ts))
+        .map_err(to_py_err)
+}
+
 #[pymodule(gil_used = false)]
 pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeObjectStore>()?;
@@ -666,5 +695,6 @@ pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_sign_oci_cavage_headers, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_azure_sas_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_chunk_r2_uniform_parts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sign_aws_sigv4_headers, m)?)?;
     Ok(())
 }

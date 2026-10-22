@@ -2,10 +2,10 @@
 type: Spec
 flow_id: distributed-queue-backends
 title: "Chapter 1: Distributed Queue Backends, Cron Leader Election, and Multi-Lane Worker Runner"
-state: planned
+state: closed
 plan_revision: 2
 plan_commit: ""
-state_revision: 0
+state_revision: 1
 current_task: null
 last_operation: null
 operation_targets: []
@@ -97,14 +97,14 @@ src/py/tests/unit/framework/
 ## Implementation Plan
 
 ### Phase 1: Queue Backends (`Redis`/`Valkey`, `PostgreSQL`, `Oracle`)
-- [ ] 1.1 `QueueBackend` protocol, `MemoryQueueBackend`, and `ValkeyQueueBackend` / `RedisQueueBackend` ([worksheet](tasks/1.1.md))
-- [ ] 1.2 `PostgresQueueBackend` (`SKIP LOCKED` + `LISTEN/NOTIFY`) and `OracleQueueBackend` ([worksheet](tasks/1.2.md))
-- [ ] Checkpoint: `uv run ruff check src/py/vertebra/framework/queues/ && uv run mypy src/py/vertebra/framework/queues/`
+- [x] 1.1 `QueueBackend` protocol, `MemoryQueueBackend`, and `ValkeyQueueBackend` / `RedisQueueBackend` ([worksheet](tasks/1.1.md))
+- [x] 1.2 `PostgresQueueBackend` (`SKIP LOCKED` + `LISTEN/NOTIFY`) and `OracleQueueBackend` ([worksheet](tasks/1.2.md))
+- [x] Checkpoint: `uv run ruff check src/py/vertebra/framework/queues/ && uv run mypy src/py/vertebra/framework/queues/`
 
 ### Phase 2: Distributed Cron Scheduler, Multi-Lane Worker Runner & Verification
-- [ ] 1.3 Distributed cron scheduler, `MultiLaneWorkerRunner`, `LameDuckController` drain, and OpenTelemetry `messaging.*` spans ([worksheet](tasks/1.3.md))
-- [ ] 1.4 Concurrency, visibility-timeout recovery, cron leader-election, and DLQ tests across all queue backends ([worksheet](tasks/1.4.md))
-- [ ] Chapter gate: `make lint-all && make py-test`
+- [x] 1.3 Distributed cron scheduler, `MultiLaneWorkerRunner`, `LameDuckController` drain, and OpenTelemetry `messaging.*` spans ([worksheet](tasks/1.3.md))
+- [x] 1.4 Concurrency, visibility-timeout recovery, cron leader-election, and DLQ tests across all queue backends ([worksheet](tasks/1.4.md))
+- [x] Chapter gate: `make lint-all && make py-test`
 
 ## Requirement-to-task trace
 

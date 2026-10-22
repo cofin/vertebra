@@ -1,5 +1,7 @@
 """CLI commands for multi-lane background worker execution (vtb workers run)."""
 
+from __future__ import annotations
+
 import asyncio
 import os
 import sys
@@ -7,7 +9,8 @@ import sys
 import click
 
 from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
-from vertebra.framework.queues import WorkerRunner
+from vertebra.server.lanes import MultiLaneWorkerRunner, WorkerRunner
+from vertebra.server.platform import LameDuckController
 from vertebra.utils.module_loader import import_app
 
 __all__ = ("execute_worker_cli", "run_workers", "workers")
@@ -26,14 +29,16 @@ def execute_worker_cli(
     os.environ["VERTEBRA_APP"] = app_path
     app = import_app(app_path)
     lanes = WorkerRunner.parse_lanes(queues, concurrency, drain_timeout_s=drain_timeout_s)
-    runner = WorkerRunner(lanes)
+    lame_duck = LameDuckController()
+    runner = MultiLaneWorkerRunner(lanes, lame_duck=lame_duck)
     state = getattr(app, "state", None)
     if isinstance(state, dict):
         state["vertebra_worker_runner"] = runner
+        state["vertebra_lame_duck"] = lame_duck
     with enter_litestar_server_lifespan(app, app_path=app_path):
         try:
             if run_until_stopped:
-                asyncio.run(asyncio.Event().wait())
+                asyncio.run(runner.run(install_signal_handlers=True))
         except KeyboardInterrupt:
             pass
         finally:
