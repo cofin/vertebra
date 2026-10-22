@@ -8,9 +8,12 @@ import decimal
 import re
 import uuid
 from collections.abc import Sequence
-from typing import Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from vertebra.db.oracle import OracleConfig, OraclePoolRegistry, SyncOracleDriver
+
+if TYPE_CHECKING:
+    from vertebra.db.oracle.driver import AsyncOracleDriver
 
 __all__ = (
     "OracleConfig",
@@ -191,3 +194,79 @@ class OracleHybridSearch:
             "candidate_limit": int(candidate_limit),
         }
         return sql, binds
+
+    @classmethod
+    def execute_rrf(
+        cls,
+        driver: SyncOracleDriver,
+        table: str,
+        *,
+        id_column: str = "id",
+        vector_column: str = "embedding",
+        text_column: str = "content",
+        select_columns: tuple[str, ...] = ("id", "content"),
+        vector_metric: Literal["COSINE", "DOT", "EUCLIDEAN"] = "COSINE",
+        rrf_k: int = 60,
+        candidate_limit: int = 50,
+        query_vec: Sequence[float] | None = None,
+        text_query: str = "",
+        top_k: int = 10,
+        approximate: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Compile and execute an RRF hybrid search returning sanitized JSON row dicts."""
+        sql, binds = cls.build_rrf_sql(
+            table,
+            id_column=id_column,
+            vector_column=vector_column,
+            text_column=text_column,
+            select_columns=select_columns,
+            vector_metric=vector_metric,
+            rrf_k=rrf_k,
+            candidate_limit=candidate_limit,
+            query_vec=query_vec,
+            text_query=text_query,
+            top_k=top_k,
+            approximate=approximate,
+        )
+        if query_vec is not None:
+            binds["query_vec"] = driver.encode_vector(query_vec)
+        df = driver.execute_df(sql, binds)
+        return [cls.sanitize_json(row_dict) for row_dict in df.to_dicts()]
+
+    @classmethod
+    async def execute_rrf_async(
+        cls,
+        driver: AsyncOracleDriver,
+        table: str,
+        *,
+        id_column: str = "id",
+        vector_column: str = "embedding",
+        text_column: str = "content",
+        select_columns: tuple[str, ...] = ("id", "content"),
+        vector_metric: Literal["COSINE", "DOT", "EUCLIDEAN"] = "COSINE",
+        rrf_k: int = 60,
+        candidate_limit: int = 50,
+        query_vec: Sequence[float] | None = None,
+        text_query: str = "",
+        top_k: int = 10,
+        approximate: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Compile and asynchronously execute an RRF hybrid search returning sanitized row dicts."""
+        sql, binds = cls.build_rrf_sql(
+            table,
+            id_column=id_column,
+            vector_column=vector_column,
+            text_column=text_column,
+            select_columns=select_columns,
+            vector_metric=vector_metric,
+            rrf_k=rrf_k,
+            candidate_limit=candidate_limit,
+            query_vec=query_vec,
+            text_query=text_query,
+            top_k=top_k,
+            approximate=approximate,
+        )
+        if query_vec is not None:
+            binds["query_vec"] = SyncOracleDriver.encode_vector(query_vec)
+        df = await driver.execute_df(sql, binds)
+        return [cls.sanitize_json(row_dict) for row_dict in df.to_dicts()]

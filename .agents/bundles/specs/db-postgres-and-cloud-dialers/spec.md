@@ -100,11 +100,11 @@ src/py/tests/unit/
 ## Implementation Plan
 
 ### Phase 1: PostgreSQL Drivers, Cloud Dialers, and SQLAlchemy Dialect
-- [ ] 1.1 Pooled `SyncPostgresDriver`, `AsyncPostgresDriver`, and Arrow binary `COPY` streaming ([worksheet](tasks/1.1.md))
-- [ ] 1.2 Live `CloudSqlDialer` and `AlloyDbDialer` with IAM refresh, ephemeral X.509 cert exchange, and mTLS sockets ([worksheet](tasks/1.2.md))
-- [ ] 1.3 SQLAlchemy 2.1 `PostgresVtbDialect` (`postgresql+vtb`) with `Vector`, `BinaryJson`, `RETURNING` sentinel, and `DELETE ... USING` ([worksheet](tasks/1.3.md))
-- [ ] 1.4 Integration and acceptance tests for PostgreSQL drivers, Cloud SQL/AlloyDB dialers, and `postgresql+vtb` dialect ([worksheet](tasks/1.4.md))
-- [ ] Chapter gate: `make lint-all && make py-test`
+- [x] 1.1 Pooled `SyncPostgresDriver`, `AsyncPostgresDriver`, and Arrow binary `COPY` streaming ([worksheet](tasks/1.1.md))
+- [x] 1.2 Live `CloudSqlDialer` and `AlloyDbDialer` with IAM refresh, ephemeral X.509 cert exchange, and mTLS sockets ([worksheet](tasks/1.2.md))
+- [x] 1.3 SQLAlchemy 2.1 `PostgresVtbDialect` (`postgresql+vtb`) with `Vector`, `BinaryJson`, `RETURNING` sentinel, and `DELETE ... USING` ([worksheet](tasks/1.3.md))
+- [x] 1.4 Integration and acceptance tests for PostgreSQL drivers, Cloud SQL/AlloyDB dialers, and `postgresql+vtb` dialect ([worksheet](tasks/1.4.md))
+- [x] Chapter gate: `make lint-all && make py-test`
 
 ## Requirement-to-task trace
 

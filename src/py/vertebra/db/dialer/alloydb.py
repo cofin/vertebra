@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import socket
+import ssl
 import struct
+import time
+import urllib.request
+from collections.abc import Callable
 from enum import IntEnum
 
 import msgspec
+
+from vertebra.db.dialer.cloudsql import CloudSqlConfig, CloudSqlDialer, EphemeralCertBundle
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
     "AlloyDbAuthType",
@@ -112,6 +121,184 @@ class AlloyDbDialer:
             body.extend(AlloyDbDialer._encode_varint(len(tok_bytes)))
             body.extend(tok_bytes)
         return struct.pack(">I", len(body)) + bytes(body)
+
+    @staticmethod
+    def encode_metadata_exchange_response(code: int = 1, error_message: str = "") -> bytes:
+        """Encode a 4-byte length-prefixed AlloyDB MetadataExchangeResponse protobuf frame."""
+        body = bytearray()
+        body.append(0x08)
+        body.extend(AlloyDbDialer._encode_varint(code))
+        if error_message:
+            msg_bytes = error_message.encode("utf-8")
+            body.append(0x12)
+            body.extend(AlloyDbDialer._encode_varint(len(msg_bytes)))
+            body.extend(msg_bytes)
+        return struct.pack(">I", len(body)) + bytes(body)
+
+    @staticmethod
+    def decode_metadata_exchange_response(frame: bytes) -> tuple[int, str]:
+        """Decode a 4-byte length-prefixed AlloyDB MetadataExchangeResponse protobuf frame.
+
+        Protobuf wire encoding:
+        field 1: int32 response_code (1 = OK, 2 = ERROR) (tag: 0x08)
+        field 2: string error_message (tag: 0x12)
+        """
+        if len(frame) < 4:
+            msg = "Frame too short for length prefix"
+            raise ValueError(msg)
+        (body_len,) = struct.unpack(">I", frame[:4])
+        body = frame[4 : 4 + body_len]
+        if len(body) < body_len:
+            msg = "Truncated MetadataExchangeResponse body"
+            raise ValueError(msg)
+
+        code = 1
+        error_msg = ""
+        idx = 0
+        while idx < len(body):
+            tag_byte = body[idx]
+            idx += 1
+            field_num = tag_byte >> 3
+            wire_type = tag_byte & 0x07
+            if wire_type == 0:
+                val = 0
+                shift = 0
+                while idx < len(body):
+                    b = body[idx]
+                    idx += 1
+                    val |= (b & 0x7F) << shift
+                    if not (b & 0x80):
+                        break
+                    shift += 7
+                if field_num == 1:
+                    code = val
+            elif wire_type == 2:
+                length = 0
+                shift = 0
+                while idx < len(body):
+                    b = body[idx]
+                    idx += 1
+                    length |= (b & 0x7F) << shift
+                    if not (b & 0x80):
+                        break
+                    shift += 7
+                str_bytes = body[idx : idx + length]
+                idx += length
+                if field_num == 2:
+                    error_msg = str_bytes.decode("utf-8", errors="replace")
+            else:
+                break
+
+        if code != 1:
+            msg = f"AlloyDB MetadataExchange failed (code={code}): {error_msg}"
+            raise PermissionError(msg)
+        return code, error_msg
+
+    def build_tls_context(
+        self,
+        *,
+        ca_pem: str | None = None,
+        client_cert_pem: str | None = None,
+        client_key_pem: str | None = None,
+    ) -> ssl.SSLContext:
+        """Build a TLS 1.3 SSLContext for AlloyDB port 5433."""
+        dummy_csql = CloudSqlDialer(CloudSqlConfig(instance_connection_name="dummy:dummy:dummy"))
+        return dummy_csql.build_tls_context(
+            ca_pem=ca_pem,
+            client_cert_pem=client_cert_pem,
+            client_key_pem=client_key_pem,
+        )
+
+    def refresh_client_cert(
+        self,
+        *,
+        public_key_pem: str,
+        private_key_pem: str,
+        access_token: str,
+        http_transport: Callable[[str, bytes, dict[str, str]], bytes] | None = None,
+    ) -> EphemeralCertBundle:
+        """Exchange an ephemeral client RSA/ECDSA public key for an AlloyDB client certificate."""
+        url = self._uri.generate_client_cert_url()
+        payload = encode_json_bytes({"pem_csr": public_key_pem, "access_token": access_token})
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+        if http_transport is not None:
+            resp_bytes = http_transport(url, payload, headers)
+        else:
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req) as resp:
+                resp_bytes = resp.read()
+        data = decode_json(resp_bytes)
+        ca_cert = ""
+        client_cert = ""
+        if isinstance(data, dict):
+            ca_cert = data.get("caCert", "")
+            client_cert = data.get("clientCert", "")
+        return EphemeralCertBundle(
+            ca_cert_pem=ca_cert,
+            client_cert_pem=client_cert,
+            private_key_pem=private_key_pem,
+            server_ip="127.0.0.1",
+            expiration_ts=time.time() + 3600,
+        )
+
+    def connect_sync(
+        self,
+        host: str,
+        *,
+        oauth2_token: str = "",
+        ssl_context: ssl.SSLContext | None = None,
+        timeout: float = 10.0,
+    ) -> ssl.SSLSocket:
+        """Establish a synchronous TLS 1.3 mTLS connection to AlloyDB and perform MetadataExchange."""
+        ctx = ssl_context or self.build_tls_context()
+        raw_sock = socket.create_connection((host, self.port), timeout=timeout)
+        try:
+            tls_sock = ctx.wrap_socket(raw_sock)
+            req_frame = self.build_handshake_frame(oauth2_token)
+            tls_sock.sendall(req_frame)
+            header = tls_sock.recv(4)
+            if len(header) < 4:
+                msg = "AlloyDB socket closed before metadata exchange response header"
+                raise ConnectionResetError(msg)
+            (body_len,) = struct.unpack(">I", header)
+            body = bytearray()
+            while len(body) < body_len:
+                chunk = tls_sock.recv(body_len - len(body))
+                if not chunk:
+                    break
+                body.extend(chunk)
+            self.decode_metadata_exchange_response(header + bytes(body))
+            return tls_sock
+        except Exception:
+            raw_sock.close()
+            raise
+
+    async def connect_async(
+        self,
+        host: str,
+        *,
+        oauth2_token: str = "",
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Establish an asynchronous TLS 1.3 mTLS connection to AlloyDB and perform MetadataExchange."""
+        ctx = ssl_context or self.build_tls_context()
+        reader, writer = await asyncio.open_connection(host, self.port, ssl=ctx)
+        try:
+            req_frame = self.build_handshake_frame(oauth2_token)
+            writer.write(req_frame)
+            await writer.drain()
+            header = await reader.readexactly(4)
+            (body_len,) = struct.unpack(">I", header)
+            body = await reader.readexactly(body_len)
+            self.decode_metadata_exchange_response(header + body)
+            return reader, writer
+        except Exception:
+            writer.close()
+            await writer.wait_closed()
+            raise
 
     @staticmethod
     def _encode_varint(value: int) -> bytes:

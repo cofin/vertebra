@@ -9,7 +9,7 @@ import uuid
 
 import pytest
 
-from vertebra.db import OracleDataFrame, PostgresConfig
+from vertebra.db import OracleDataFrame, PostgresConfig, SyncPostgresDriver
 from vertebra.extensions.sqlalchemy import (
     AlembicImpl,
     BinaryJson,
@@ -18,11 +18,15 @@ from vertebra.extensions.sqlalchemy import (
     DeleteUsingClause,
     DialectDescriptor,
     InsertSentinelSpec,
+    MysqlVtbDialect,
     OracleDialect,
+    OracleVtbDialect,
     ParameterizedSql,
     PostgresDialect,
+    PostgresVtbDialect,
     SelectInLoadSpec,
     SqliteDialect,
+    SqliteVtbDialect,
     SyncEngineAdapter,
     Vector,
 )
@@ -64,6 +68,8 @@ def test_oracle_json_text_and_hybrid_rrf_builders() -> None:
         candidate_limit=25,
     )
     assert "VECTOR_DISTANCE(embedding, :query_vec, COSINE)" in rrf_sql
+    assert "FETCH APPROX FIRST :candidate_limit ROWS ONLY" in rrf_sql
+    assert "ROWNUM AS vec_rank" in rrf_sql
     assert "CONTAINS(content, :text_query, 1) > 0" in rrf_sql
     assert "FULL OUTER JOIN text_candidates" in rrf_sql
     assert "FETCH FIRST :top_k ROWS ONLY" in rrf_sql
@@ -195,6 +201,53 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
         pooler_mode="transaction",
     )
     assert AlembicImpl.resolve_migration_url(pg_cfg) == "postgresql://u:p@pg-primary:5432/app"
+
+
+def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
+    """Verify PostgresVtbDialect, DBAPIModule paramstyles, compiler hooks, and cursor descriptions."""
+    pg_dbapi = PostgresVtbDialect.dbapi()
+    assert pg_dbapi.paramstyle == "pyformat"
+    assert PostgresVtbDialect.import_dbapi().paramstyle == "pyformat"
+    assert SqliteVtbDialect.dbapi().paramstyle == "qmark"
+    assert MysqlVtbDialect.dbapi().paramstyle == "format"
+    assert OracleVtbDialect.dbapi().paramstyle == "named"
+
+    driver = SyncPostgresDriver(PostgresConfig(dsn="memory://"))
+    driver._in_memory_rows = [(1, "item1"), (2, "item2")]
+
+    conn = pg_dbapi.connect("postgresql+vtb://localhost:5432/app", driver=driver)
+    cur = conn.cursor()
+    cur.execute("SELECT id, name FROM items")
+    assert cur.description is not None
+    assert len(cur.description) == 2
+    assert cur.fetchall() == [(1, "item1"), (2, "item2")]
+    conn.commit()
+    conn.rollback()
+    conn.close()
+    assert conn.closed is True
+
+    sentinel_spec = InsertSentinelSpec.create(table_name="orders", sentinel_column="_vtb_sentinel")
+    rendered_insert = PostgresVtbDialect.compile_insert_returning_sentinel(
+        "orders",
+        ["id", "name"],
+        sentinel_spec,
+        pk_column="id",
+    )
+    assert rendered_insert == "INSERT INTO orders (id, name) VALUES (:id, :name) RETURNING id, _vtb_sentinel"
+
+    del_clause = DeleteUsingClause.create(
+        "orders",
+        "archived_customers",
+        where_sql="orders.customer_id = archived_customers.id",
+    )
+    assert PostgresVtbDialect.compile_delete_using(del_clause) == (
+        "DELETE FROM orders USING archived_customers WHERE orders.customer_id = archived_customers.id"
+    )
+
+    vec = Vector(768)
+    bjson = BinaryJson()
+    assert PostgresVtbDialect.type_descriptor(vec) is vec
+    assert PostgresVtbDialect.type_descriptor(bjson) is bjson
 
 
 @pytest.mark.anyio

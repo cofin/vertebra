@@ -5,6 +5,7 @@
 use pyo3::prelude::*;
 
 pub mod asgi;
+pub mod broker;
 pub mod file_io;
 pub mod headers;
 pub mod request;
@@ -16,6 +17,10 @@ pub mod transport;
 pub mod wsgi;
 
 pub use asgi::{AsgiScope, AsgiScopeIterator};
+pub use broker::{
+    NativeBrokerStats, NativeLeaseBroker, NativeLeaseGrant, NativeStatementCache,
+    NativeStatementCacheStats, NativeStatementPlan,
+};
 pub use headers::{Headers, HeadersIterator};
 pub use request::{Request, RequestBatch, RequestBatchIterator};
 pub use response::Response;
@@ -62,6 +67,12 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<telemetry::NativeLogSink>()?;
     m.add_class::<telemetry::NativeJwtGuard>()?;
     m.add_class::<telemetry::NativeRateLimiter>()?;
+    m.add_class::<broker::NativeLeaseGrant>()?;
+    m.add_class::<broker::NativeBrokerStats>()?;
+    m.add_class::<broker::NativeLeaseBroker>()?;
+    m.add_class::<broker::NativeStatementPlan>()?;
+    m.add_class::<broker::NativeStatementCacheStats>()?;
+    m.add_class::<broker::NativeStatementCache>()?;
 
     // Vectorized batch API
     m.add_function(wrap_pyfunction!(transport::init_transport, m)?)?;

@@ -131,9 +131,17 @@ class DatabaseRegistry:
         config = self.get_config(name)
         driver: AnyDatabaseDriver
         if isinstance(config, PostgresConfig):
-            driver = AsyncPostgresDriver(config)
+            dialer: object = None
+            if (dialer_cfg := config.to_cloud_dialer_config()) is not None:
+                dialer = (
+                    CloudSqlDialer(dialer_cfg) if isinstance(dialer_cfg, CloudSqlConfig) else AlloyDbDialer(dialer_cfg)
+                )
+            driver = AsyncPostgresDriver(config, dialer=dialer)
         elif isinstance(config, MysqlConfig):
-            driver = AsyncMysqlDriver(config)
+            mysql_dialer: CloudSqlDialer | None = None
+            if (csql_cfg := config.to_cloud_dialer_config()) is not None:
+                mysql_dialer = CloudSqlDialer(csql_cfg)
+            driver = AsyncMysqlDriver(config, dialer=mysql_dialer)
         elif isinstance(config, SqliteConfig):
             driver = AsyncSqliteDriver(config)
         elif isinstance(config, RedisConfig):
@@ -159,9 +167,17 @@ class DatabaseRegistry:
         config = self.get_config(name)
         driver: AnySyncDatabaseDriver
         if isinstance(config, PostgresConfig):
-            driver = SyncPostgresDriver(config)
+            dialer: object = None
+            if (dialer_cfg := config.to_cloud_dialer_config()) is not None:
+                dialer = (
+                    CloudSqlDialer(dialer_cfg) if isinstance(dialer_cfg, CloudSqlConfig) else AlloyDbDialer(dialer_cfg)
+                )
+            driver = SyncPostgresDriver(config, dialer=dialer)
         elif isinstance(config, MysqlConfig):
-            driver = SyncMysqlDriver(config)
+            mysql_sync_dialer: CloudSqlDialer | None = None
+            if (csql_cfg := config.to_cloud_dialer_config()) is not None:
+                mysql_sync_dialer = CloudSqlDialer(csql_cfg)
+            driver = SyncMysqlDriver(config, dialer=mysql_sync_dialer)
         elif isinstance(config, SqliteConfig):
             driver = SyncSqliteDriver(config)
         elif isinstance(config, RedisConfig):

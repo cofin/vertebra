@@ -78,6 +78,10 @@ impl WaitWord {
         self.word.store(value, Ordering::Release);
     }
 
+    pub fn fetch_add(&self, val: u32) -> u32 {
+        self.word.fetch_add(val, Ordering::AcqRel)
+    }
+
     pub fn wait(&self, expected: u32) -> Result<(), SyncError> {
         wait_on_address(&self.word, expected)
     }

@@ -2,7 +2,7 @@
 type: PRD
 flow_id: vertebra-shm-connection-broker
 title: "Master PRD: Cross-Process Shared-Memory Database Connection Lease Broker & Prepared Statement Cache"
-state: planned
+state: closed
 plan_revision: 2
 plan_commit: ""
 state_revision: 0

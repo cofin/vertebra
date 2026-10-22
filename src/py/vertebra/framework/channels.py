@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import deque
 from typing import TYPE_CHECKING, Self
 
@@ -23,6 +24,7 @@ class ChannelBus:
         "_history",
         "_max_history",
         "_queues",
+        "_reader_task",
         "_running",
         "_subscribed_channels",
         "_subscribers",
@@ -30,18 +32,27 @@ class ChannelBus:
 
     def __init__(
         self,
+        backend: ChannelBus | None = None,
         *,
         history: int = 0,
         driver: AsyncValkeyDriver | AsyncRedisDriver | None = None,
     ) -> None:
         """Initialize the channel bus with optional history buffer size and driver."""
-        self._max_history = max(0, history)
-        self._driver = driver
+        self._max_history: int = backend._max_history if backend is not None and history == 0 else max(0, history)
+        self._driver: AsyncValkeyDriver | AsyncRedisDriver | None = (
+            driver if driver is not None else (backend._driver if backend is not None else None)
+        )
         self._history: dict[str, deque[bytes]] = {}
         self._subscribers: dict[str, set[asyncio.Queue[tuple[str, bytes] | None]]] = {}
         self._subscribed_channels: set[str] = set()
         self._queues: set[asyncio.Queue[tuple[str, bytes] | None]] = set()
+        self._reader_task: asyncio.Task[None] | None = None
         self._running = False
+
+    @property
+    def backend(self) -> Self:
+        """Return this channel bus backend instance."""
+        return self
 
     @classmethod
     def from_valkey(cls, config_or_url: ValkeyConfig | str, *, history: int = 0) -> Self:
@@ -72,14 +83,35 @@ class ChannelBus:
     async def on_shutdown(self) -> None:
         """Flush and clear active subscriptions on application shutdown."""
         self._running = False
+        if self._reader_task is not None:
+            self._reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._reader_task
+            self._reader_task = None
         for queue in tuple(self._queues):
             queue.put_nowait(None)
         self._subscribers.clear()
         self._subscribed_channels.clear()
 
-    async def publish(self, data: bytes, channels: Iterable[str]) -> None:
+    async def _fan_in_loop(self) -> None:
+        """Consume remote Redis/Valkey pub/sub stream and fan in to local subscriber queues."""
+        if self._driver is None or not self._subscribed_channels:
+            return
+        try:
+            async for ch, payload in self._driver.subscribe(*self._subscribed_channels):
+                if not self._running:
+                    break
+                if self._max_history > 0:
+                    ring = self._history.setdefault(ch, deque(maxlen=self._max_history))
+                    ring.append(payload)
+                for queue in tuple(self._subscribers.get(ch, ())):
+                    queue.put_nowait((ch, payload))
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def publish(self, data: bytes | str, channels: Iterable[str]) -> None:
         """Publish data to all subscribers across the specified channels."""
-        payload = data if isinstance(data, bytes) else bytes(data)
+        payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
         for channel in channels:
             if self._driver is not None:
                 await self._driver.publish(channel, payload)
@@ -97,6 +129,12 @@ class ChannelBus:
         for channel in channels:
             self._subscribed_channels.add(channel)
             self._subscribers.setdefault(channel, set()).update(self._queues)
+        if self._driver is not None and not self._driver.config.url.startswith("memory://") and self._running:
+            if self._reader_task is not None:
+                self._reader_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._reader_task
+            self._reader_task = asyncio.create_task(self._fan_in_loop())
 
     async def unsubscribe(self, channels: Iterable[str]) -> None:
         """Remove subscription topic slots for channels and detach active stream queues."""

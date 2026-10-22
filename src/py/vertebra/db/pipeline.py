@@ -7,8 +7,12 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 
+from vertebra.utils.serializers import decode_json
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from vertebra.db.postgres import AsyncPostgresDriver, SyncPostgresDriver
 
 __all__ = (
     "CteStep",
@@ -16,13 +20,15 @@ __all__ = (
     "RelOverlay",
 )
 
-_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_IDENTIFIER_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 
 
-def _validate_identifier(value: str, field_name: str) -> None:
-    if not _IDENT_RE.match(value):
-        msg = f"Invalid SQL identifier for {field_name}: {value!r}"
+def _validate_sql_identifier(identifier: str, field_name: str = "identifier") -> str:
+    """Validate that identifier matches safe SQL naming syntax."""
+    if not _IDENTIFIER_PATTERN.match(identifier):
+        msg = f"Invalid SQL identifier for {field_name}: {identifier!r}"
         raise ValueError(msg)
+    return identifier
 
 
 class RelOverlay(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -34,16 +40,17 @@ class RelOverlay(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     id_column: str = "id"
 
     def __post_init__(self) -> None:
-        _validate_identifier(self.base_table, "base_table")
-        _validate_identifier(self.id_column, "id_column")
+        """Validate all constituent SQL identifiers."""
+        _validate_sql_identifier(self.base_table, "base_table")
         if self.inserted_cte is not None:
-            _validate_identifier(self.inserted_cte, "inserted_cte")
+            _validate_sql_identifier(self.inserted_cte, "inserted_cte")
         if self.deleted_ids_cte is not None:
-            _validate_identifier(self.deleted_ids_cte, "deleted_ids_cte")
+            _validate_sql_identifier(self.deleted_ids_cte, "deleted_ids_cte")
+        _validate_sql_identifier(self.id_column, "id_column")
 
     def to_cte_sql(self, overlay_name: str) -> str:
         """Render the overlay CTE combining uncommitted CTE mutations with the base table."""
-        _validate_identifier(overlay_name, "overlay_name")
+        _validate_sql_identifier(overlay_name, "overlay_name")
         base_select = f"SELECT * FROM {self.base_table}"
         if self.deleted_ids_cte:
             base_select = (
@@ -63,7 +70,8 @@ class CteStep(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     return_json_agg: bool = True
 
     def __post_init__(self) -> None:
-        _validate_identifier(self.name, "CteStep.name")
+        """Validate step name identifier."""
+        _validate_sql_identifier(self.name, "name")
 
 
 class QueryPipeline:
@@ -86,12 +94,7 @@ class QueryPipeline:
         *,
         max_pairs_per_call: int = 50,
     ) -> str:
-        """Build a PostgreSQL ``jsonb_build_object(...)`` expression respecting the 100-argument function limit.
-
-        PostgreSQL caps variadic C functions at 100 arguments (50 key-value pairs). Chunking at
-        ``max_pairs_per_call`` and concatenating with ``||`` prevents
-        ``cannot pass more than 100 arguments to a function`` errors on wide tables.
-        """
+        """Build a PostgreSQL ``jsonb_build_object(...)`` expression respecting the 100-argument function limit."""
         if not columns:
             return "'{}'::jsonb"
         if max_pairs_per_call < 1 or max_pairs_per_call > 50:
@@ -119,6 +122,7 @@ class QueryPipeline:
 
     def add_overlay(self, overlay_name: str, overlay: RelOverlay) -> QueryPipeline:
         """Register an intra-statement ``RelOverlay`` CTE."""
+        _validate_sql_identifier(overlay_name, "overlay_name")
         self._overlays.append((overlay_name, overlay))
         return self
 
@@ -131,7 +135,11 @@ class QueryPipeline:
         merged_params: dict[str, Any] = {}
         for step in self._steps:
             cte_parts.append(f"{step.name} AS ({step.sql})")
-            merged_params.update(step.params)
+            for k, v in step.params.items():
+                if k in merged_params and merged_params[k] != v:
+                    msg = f"Conflicting query pipeline parameter: {k!r}"
+                    raise ValueError(msg)
+                merged_params[k] = v
         for ov_name, overlay in self._overlays:
             cte_parts.append(overlay.to_cte_sql(ov_name))
 
@@ -146,3 +154,31 @@ class QueryPipeline:
         envelope_expr = self.build_jsonb_object(result_pairs, max_pairs_per_call=25)
         full_sql = f"WITH {', '.join(cte_parts)} SELECT {envelope_expr} AS payload"
         return full_sql, merged_params
+
+    def execute(self, driver: SyncPostgresDriver) -> dict[str, Any]:
+        """Execute compiled CTE query synchronously and unpack the result jsonb payload."""
+        sql, params = self.compile()
+        rows, _ = driver.execute_with_description(sql, params)
+        if not rows:
+            return {}
+        first = rows[0]
+        payload = first.get("payload") if isinstance(first, dict) else (first[0] if first else None)
+        if isinstance(payload, bytearray):
+            payload = bytes(payload)
+        if isinstance(payload, (str, bytes)):
+            return dict(decode_json(payload))
+        return dict(payload or {})
+
+    async def execute_async(self, driver: AsyncPostgresDriver) -> dict[str, Any]:
+        """Execute compiled CTE query asynchronously and unpack the result jsonb payload."""
+        sql, params = self.compile()
+        rows, _ = await driver.execute_with_description(sql, params)
+        if not rows:
+            return {}
+        first = rows[0]
+        payload = first.get("payload") if isinstance(first, dict) else (first[0] if first else None)
+        if isinstance(payload, bytearray):
+            payload = bytes(payload)
+        if isinstance(payload, (str, bytes)):
+            return dict(decode_json(payload))
+        return dict(payload or {})

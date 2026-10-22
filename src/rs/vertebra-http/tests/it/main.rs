@@ -7,6 +7,7 @@ pub static BRIDGE_TEST_LOCK: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex:
 
 mod assets_and_observability;
 mod backpressure_streams;
+mod broker_shm;
 mod collector;
 mod dispatcher;
 mod grpc_wire;

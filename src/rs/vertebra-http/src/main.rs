@@ -246,8 +246,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     1
                 };
 
-                let mut factory = RingFactory::new(worker_count, RingPairConfig::default())
-                    .expect("failed to create ring factory");
+                let mut factory = RingFactory::with_broker_config(
+                    worker_count,
+                    RingPairConfig::default(),
+                    config.workers.broker_pool_size,
+                    config.workers.broker_max_overflow,
+                )
+                .expect("failed to create ring factory");
 
                 info!(
                     workers = worker_count,

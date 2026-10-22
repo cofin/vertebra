@@ -52,7 +52,7 @@ This chapter builds the Rust shared-memory lease table (`ShmLeaseTable`), superv
 
 ## Task Breakdown
 
-- [ ] `shm-broker-lease-table:1.1` — Implement `ShmLeaseTable`, `LeaseSlot`, TTL Reaper & Futex Wait Queue in `vertebra-core` (`verification_strategy: behavior_tdd`, `depends_on: []`)
-- [ ] `shm-broker-lease-table:1.2` — Wire Supervisor Broker SHM Inheritance & Crash Lease Reclamation in `vertebra-http` (`verification_strategy: integration_acceptance`, `depends_on: [shm-broker-lease-table:1.1]`)
-- [ ] `shm-broker-lease-table:1.3` — Expose GIL-Detached `NativeLeaseBroker` PyO3 Bindings & Stubs in `vertebra-py` (`verification_strategy: behavior_tdd`, `depends_on: [shm-broker-lease-table:1.1]`)
-- [ ] `shm-broker-lease-table:1.4` — Multi-Process Contention, Futex Latency & Worker Crash Reclamation Tests (`verification_strategy: integration_acceptance`, `depends_on: [shm-broker-lease-table:1.2, shm-broker-lease-table:1.3]`)
+- [x] `shm-broker-lease-table:1.1` — Implement `ShmLeaseTable`, `LeaseSlot`, TTL Reaper & Futex Wait Queue in `vertebra-core` (`verification_strategy: behavior_tdd`, `depends_on: []`)
+- [x] `shm-broker-lease-table:1.2` — Wire Supervisor Broker SHM Inheritance & Crash Lease Reclamation in `vertebra-http` (`verification_strategy: integration_acceptance`, `depends_on: [shm-broker-lease-table:1.1]`)
+- [x] `shm-broker-lease-table:1.3` — Expose GIL-Detached `NativeLeaseBroker` PyO3 Bindings & Stubs in `vertebra-py` (`verification_strategy: behavior_tdd`, `depends_on: [shm-broker-lease-table:1.1]`)
+- [x] `shm-broker-lease-table:1.4` — Multi-Process Contention, Futex Latency & Worker Crash Reclamation Tests (`verification_strategy: integration_acceptance`, `depends_on: [shm-broker-lease-table:1.2, shm-broker-lease-table:1.3]`)

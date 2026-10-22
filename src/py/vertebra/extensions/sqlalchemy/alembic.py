@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import importlib
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
 
+from vertebra.db.mysql import MysqlConfig
+from vertebra.db.oracle import OracleConfig
 from vertebra.db.postgres import PostgresConfig
+
+if TYPE_CHECKING:
+    from vertebra.extensions.sqlalchemy.dialects import DBAPIConnection
 
 __all__ = (
     "AlembicImpl",
     "AlembicRunner",
+    "CreateVectorIndexOp",
     "CreateViewOp",
+    "DropVectorIndexOp",
     "DropViewOp",
 )
 
@@ -137,11 +144,90 @@ class AlembicImpl(msgspec.Struct, frozen=True, gc=False):
         return None
 
     @staticmethod
-    def resolve_migration_url(url: PostgresConfig | str) -> str:
+    def resolve_migration_url(url: PostgresConfig | OracleConfig | MysqlConfig | str) -> str:
         """Return the direct migration DSN, bypassing transaction-mode poolers (PgBouncer/PgCat/pgdog)."""
         if isinstance(url, PostgresConfig):
             return url.effective_direct_dsn
-        return url
+        if isinstance(url, OracleConfig):
+            auth = f"{url.user}:{url.password}"
+            return f"oracle+vtb://{auth}@{url.host}:{url.port}/{url.service_name}"
+        if isinstance(url, MysqlConfig):
+            dsn = url.dsn
+            if dsn.startswith("mysql://"):
+                return "mysql+vtb://" + dsn[len("mysql://") :]
+            return dsn
+        return str(url)
+
+    @staticmethod
+    def execute_ddl(
+        connection: DBAPIConnection | Any,
+        op: CreateViewOp | DropViewOp | CreateVectorIndexOp | DropVectorIndexOp,
+        *,
+        dialect_name: str = "postgresql",
+    ) -> None:
+        """Compile an Alembic DDL operation and execute it on the connection."""
+        sql = op.to_sql(dialect_name)
+        if hasattr(connection, "cursor"):
+            cur = connection.cursor()
+            try:
+                cur.execute(sql)
+            finally:
+                if hasattr(cur, "close"):
+                    cur.close()
+        elif hasattr(connection, "execute"):
+            connection.execute(sql)
+
+
+class CreateVectorIndexOp(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """SQLAlchemy 2.1 CreateVectorIndex DDL operation for Alembic migrations."""
+
+    index_name: str
+    table_name: str
+    column_name: str
+    metric: str = "cosine"
+
+    def to_sql(self, dialect_name: str = "postgresql") -> str:
+        """Render the dialect-aware CREATE VECTOR INDEX statement."""
+        base = dialect_name.split("+", 1)[0].lower()
+        if base == "oracle":
+            metric_kw = {
+                "cosine": "DISTANCE COSINE",
+                "l2": "DISTANCE EUCLIDEAN",
+                "inner_product": "DISTANCE DOT",
+            }.get(self.metric.lower(), "DISTANCE COSINE")
+            return (
+                f"CREATE VECTOR INDEX {self.index_name} ON {self.table_name} "
+                f"({self.column_name}) ORGANIZATION INMEMORY NEIGHBOR GRAPH {metric_kw}"
+            )
+        ops = {
+            "cosine": "vector_cosine_ops",
+            "l2": "vector_l2_ops",
+            "inner_product": "vector_ip_ops",
+        }.get(self.metric.lower(), "vector_cosine_ops")
+        return f"CREATE INDEX {self.index_name} ON {self.table_name} USING hnsw ({self.column_name} {ops})"
+
+    def reverse(self) -> DropVectorIndexOp:
+        """Return the inverse DropVectorIndexOp."""
+        return DropVectorIndexOp(
+            index_name=self.index_name,
+            table_name=self.table_name,
+        )
+
+
+class DropVectorIndexOp(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """SQLAlchemy 2.1 DropVectorIndex DDL operation for Alembic migrations."""
+
+    index_name: str
+    table_name: str = ""
+    if_exists: bool = True
+
+    def to_sql(self, dialect_name: str = "postgresql") -> str:
+        """Render the dialect-aware DROP INDEX statement."""
+        base = dialect_name.split("+", 1)[0].lower()
+        if base == "oracle":
+            return f"DROP INDEX {self.index_name}"
+        exists_clause = "IF EXISTS " if self.if_exists else ""
+        return f"DROP INDEX {exists_clause}{self.index_name}"
 
 
 class CreateViewOp(msgspec.Struct, frozen=True, gc=False):

@@ -24,7 +24,7 @@ class OracleContainer(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     def env_vars(self) -> dict[str, str]:
         """Return container environment variables for Autonomous Database Free."""
         if not self.admin_password:
-            msg = "OracleContainer.admin_password must be explicitly provided and non-empty"
+            msg = "OracleContainer.admin_password must be set before generating container env_vars"
             raise ValueError(msg)
         return {
             "WORKLOAD_TYPE": self.workload_type,

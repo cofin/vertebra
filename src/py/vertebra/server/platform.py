@@ -1,6 +1,7 @@
 """Cloud and internal platform runtime adapter, cgroup v2 sizing, z-pages, and lame-duck drain."""
 
 import array
+import collections.abc
 import math
 import os
 import socket
@@ -193,7 +194,7 @@ class ShmAllocationPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
 
 class ZPagesRegistry:
-    """Provides diagnostic payloads for /statusz, /healthz, /varz, and /rpcz."""
+    """Provides diagnostic payloads for /statusz, /healthz, /varz, /rpcz, and /brokerz."""
 
     def __init__(
         self,
@@ -206,6 +207,15 @@ class ZPagesRegistry:
         self.lame_duck = lame_duck or LameDuckController()
         self._vars: dict[str, Any] = {}
         self._rpc_stats: dict[str, dict[str, int]] = {}
+        self._broker_providers: dict[str, collections.abc.Callable[[], dict[str, object]]] = {}
+
+    def register_broker(
+        self,
+        name: str,
+        provider: collections.abc.Callable[[], dict[str, object]],
+    ) -> None:
+        """Register a broker telemetry provider function."""
+        self._broker_providers[name] = provider
 
     @staticmethod
     def discover_adapters(
@@ -248,6 +258,13 @@ class ZPagesRegistry:
             return 200, encode_json_bytes(self._vars)
         if path == "/rpcz":
             return 200, encode_json_bytes(self._rpc_stats)
+        if path in ("/brokerz", "/debug/zpages/broker"):
+            return 200, encode_json_bytes(
+                {
+                    "status": "ok",
+                    "brokers": {name: provider() for name, provider in self._broker_providers.items()},
+                }
+            )
         return 404, encode_json_bytes({"error": "not_found"})
 
 

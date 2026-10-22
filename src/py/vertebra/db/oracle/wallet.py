@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import io
 import os
 import shutil
@@ -10,6 +11,7 @@ import ssl
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import msgspec
 
@@ -24,6 +26,7 @@ class OracleWallet(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     pem_path: Path | None
     ca_cert_path: Path | None
     aliases: dict[str, str]
+    sqlnet_params: dict[str, str] = msgspec.field(default_factory=dict)
 
     def resolve_dsn(self, alias_or_dsn: str) -> str:
         """Resolve a TNS alias from the extracted wallet or return the DSN unchanged."""
@@ -39,9 +42,9 @@ class OracleWallet(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         """Build a Thin-Mode mTLS SSLContext for an OracleWallet without global TNS_ADMIN."""
         ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        ctx.verify_mode = ssl.CERT_REQUIRED
         if not ssl_check_hostname:
             ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
         if self.ca_cert_path is not None and self.ca_cert_path.exists():
             ctx.load_verify_locations(cafile=str(self.ca_cert_path))
         if self.pem_path is not None and self.pem_path.exists():
@@ -66,7 +69,6 @@ class OracleWallet(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         Never mutates `os.environ["TNS_ADMIN"]`, ensuring multiple pools with distinct wallets
         can coexist safely within the same process.
         """
-        _ = wallet_password
         base_dir = Path(target_dir) if target_dir is not None else Path(tempfile.gettempdir()) / "vertebra-wallets"
         base_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(base_dir, 0o700)
@@ -83,23 +85,14 @@ class OracleWallet(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             if not src_path.exists():
                 msg = f"Oracle wallet source not found: {src_path}"
                 raise FileNotFoundError(msg)
+            digest = hashlib.sha256(str(src_path).encode("utf-8")).hexdigest()[:16]
+            dest_dir = base_dir / f"wallet-{digest}"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(dest_dir, 0o700)
             if src_path.is_file() and zipfile.is_zipfile(src_path):
-                digest = hashlib.sha256(src_path.read_bytes()).hexdigest()[:16]
-                dest_dir = base_dir / f"wallet-{digest}"
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                os.chmod(dest_dir, 0o700)
                 with zipfile.ZipFile(src_path) as zf:
                     cls._safe_extract_zip(zf, dest_dir)
             elif src_path.is_dir():
-                hasher = hashlib.sha256()
-                for item in sorted(src_path.iterdir()):
-                    if item.is_file():
-                        hasher.update(item.name.encode("utf-8"))
-                        hasher.update(item.read_bytes())
-                digest = hasher.hexdigest()[:16]
-                dest_dir = base_dir / f"wallet-{digest}"
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                os.chmod(dest_dir, 0o700)
                 for item in src_path.iterdir():
                     if item.is_file():
                         dest = dest_dir / item.name
@@ -110,9 +103,15 @@ class OracleWallet(msgspec.Struct, frozen=True, gc=False, kw_only=True):
                 raise ValueError(msg)
 
         pem_path = dest_dir / "ewallet.pem"
+        p12_path = dest_dir / "ewallet.p12"
+        if not pem_path.exists() and p12_path.exists():
+            cls._convert_p12_to_pem(p12_path, pem_path, wallet_password=wallet_password)
+
         ca_cert_path = dest_dir / "adb_container.cert"
         tns_file = dest_dir / "tnsnames.ora"
         aliases = cls.parse_tnsnames(tns_file.read_text(encoding="utf-8")) if tns_file.exists() else {}
+        sqlnet_file = dest_dir / "sqlnet.ora"
+        sqlnet_params = cls.parse_sqlnet(sqlnet_file.read_text(encoding="utf-8")) if sqlnet_file.exists() else {}
 
         return cls(
             config_dir=dest_dir,
@@ -120,7 +119,21 @@ class OracleWallet(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             pem_path=pem_path if pem_path.exists() else None,
             ca_cert_path=ca_cert_path if ca_cert_path.exists() else None,
             aliases=aliases,
+            sqlnet_params=sqlnet_params,
         )
+
+    @staticmethod
+    def parse_sqlnet(content: str) -> dict[str, str]:
+        """Parse an Oracle sqlnet.ora file into a key-value parameter dictionary."""
+        params: dict[str, str] = {}
+        for line in content.splitlines():
+            comment_idx = line.find("#")
+            cleaned = line[:comment_idx].strip() if comment_idx >= 0 else line.strip()
+            if not cleaned or "=" not in cleaned:
+                continue
+            key, val = cleaned.split("=", 1)
+            params[key.strip().upper()] = val.strip().strip('"').strip("'")
+        return params
 
     @staticmethod
     def parse_tnsnames(content: str) -> dict[str, str]:
@@ -189,12 +202,41 @@ class OracleWallet(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         for member in zf.infolist():
             if member.is_dir():
                 continue
+            dest = (target_dir / member.filename).resolve()
+            if root not in dest.parents and dest != root:
+                msg = f"Rejected zip member outside target wallet directory: {member.filename}"
+                raise ValueError(msg)
             filename = Path(member.filename).name
             if not filename or filename.startswith("."):
                 continue
-            dest = (target_dir / filename).resolve()
-            if root not in dest.parents:
-                msg = f"Rejected zip member outside target wallet directory: {member.filename}"
-                raise ValueError(msg)
+            dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(zf.read(member))
             os.chmod(dest, 0o600)
+
+    @staticmethod
+    def _convert_p12_to_pem(p12_path: Path, pem_path: Path, *, wallet_password: str | None) -> None:
+        try:
+            serialization_mod: Any = importlib.import_module("cryptography.hazmat.primitives.serialization")
+            pkcs12_mod: Any = importlib.import_module("cryptography.hazmat.primitives.serialization.pkcs12")
+        except ImportError:
+            return
+
+        pw_bytes = wallet_password.encode("utf-8") if wallet_password else None
+        private_key, cert, additional_certs = pkcs12_mod.load_key_and_certificates(p12_path.read_bytes(), pw_bytes)
+        chunks: list[bytes] = []
+        if private_key is not None:
+            enc = serialization_mod.BestAvailableEncryption(pw_bytes) if pw_bytes else serialization_mod.NoEncryption()
+            chunks.append(
+                private_key.private_bytes(
+                    serialization_mod.Encoding.PEM,
+                    serialization_mod.PrivateFormat.PKCS8,
+                    enc,
+                )
+            )
+        if cert is not None:
+            chunks.append(cert.public_bytes(serialization_mod.Encoding.PEM))
+        for extra in additional_certs or ():
+            chunks.append(extra.public_bytes(serialization_mod.Encoding.PEM))
+        if chunks:
+            pem_path.write_bytes(b"".join(chunks))
+            os.chmod(pem_path, 0o600)

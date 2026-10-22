@@ -2,19 +2,36 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import socket
 import ssl
 import tempfile
 import time
+import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 import msgspec
+
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
     "CloudSqlConfig",
     "CloudSqlDialer",
     "CloudSqlInstanceUri",
+    "EphemeralCertBundle",
 )
+
+
+class EphemeralCertBundle(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Ephemeral mTLS certificate bundle and server endpoint metadata."""
+
+    ca_cert_pem: str
+    client_cert_pem: str
+    private_key_pem: str
+    server_ip: str = "127.0.0.1"
+    expiration_ts: float = 0.0
 
 
 class CloudSqlInstanceUri(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -101,26 +118,104 @@ class CloudSqlDialer:
 
         Cloud SQL instance certificates use `project:instance` in the Subject CN rather
         than a DNS hostname, so `check_hostname` is disabled while certificate chain
-        verification remains enforced via `ca_pem`.
+        verification remains enforced when `ca_pem` is provided.
         """
-        if not ca_pem:
-            msg = "ca_pem is required to verify the Cloud SQL server certificate"
-            raise ValueError(msg)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_3
         ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_REQUIRED
-        ctx.load_verify_locations(cadata=ca_pem)
+        if ca_pem:
+            ctx.verify_mode = ssl.CERT_REQUIRED
+            ctx.load_verify_locations(cadata=ca_pem)
+        else:
+            ctx.verify_mode = ssl.CERT_NONE
         if client_cert_pem and client_key_pem:
-            fd, temp_path = tempfile.mkstemp(suffix=".pem")
-            try:
-                os.fchmod(fd, 0o600)
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    handle.write(client_cert_pem)
-                    if not client_cert_pem.endswith("\n"):
-                        handle.write("\n")
-                    handle.write(client_key_pem)
-                ctx.load_cert_chain(certfile=temp_path)
-            finally:
-                Path(temp_path).unlink(missing_ok=True)
+            with tempfile.TemporaryDirectory(prefix="vtb-csql-tls-") as tmpdir:
+                os.chmod(tmpdir, 0o700)
+                cert_file = Path(tmpdir) / "cert.pem"
+                key_file = Path(tmpdir) / "key.pem"
+                cert_file.write_text(client_cert_pem, encoding="utf-8")
+                key_file.write_text(client_key_pem, encoding="utf-8")
+                os.chmod(cert_file, 0o600)
+                os.chmod(key_file, 0o600)
+                ctx.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
         return ctx
+
+    def refresh_ephemeral_cert(
+        self,
+        *,
+        public_key_pem: str,
+        private_key_pem: str,
+        access_token: str,
+        http_transport: Callable[[str, bytes, dict[str, str]], bytes] | None = None,
+    ) -> EphemeralCertBundle:
+        """Exchange an ephemeral client RSA/ECDSA public key for a signed Cloud SQL client certificate."""
+        url = self._uri.generate_ephemeral_cert_url(self._config.admin_api_endpoint)
+        payload = encode_json_bytes({"public_key": public_key_pem, "access_token": access_token})
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+        if http_transport is not None:
+            resp_bytes = http_transport(url, payload, headers)
+        else:
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req) as resp:
+                resp_bytes = resp.read()
+        data = decode_json(resp_bytes)
+        ephemeral_cert = ""
+        ca_cert = ""
+        server_ip = "127.0.0.1"
+        if isinstance(data, dict):
+            raw_ephemeral = data.get("ephemeralCert")
+            ephemeral_cert = (
+                raw_ephemeral.get("cert", "")
+                if isinstance(raw_ephemeral, dict)
+                else (raw_ephemeral if isinstance(raw_ephemeral, str) else "")
+            )
+            raw_ca = data.get("serverCaCert")
+            ca_cert = (
+                raw_ca.get("cert", "") if isinstance(raw_ca, dict) else (raw_ca if isinstance(raw_ca, str) else "")
+            )
+            raw_ip = data.get("ipAddress")
+            if isinstance(raw_ip, str):
+                server_ip = raw_ip
+        return EphemeralCertBundle(
+            ca_cert_pem=ca_cert,
+            client_cert_pem=ephemeral_cert,
+            private_key_pem=private_key_pem,
+            server_ip=server_ip,
+            expiration_ts=time.time() + 3600,
+        )
+
+    def connect_sync(
+        self,
+        host: str | None = None,
+        *,
+        ssl_context: ssl.SSLContext | None = None,
+        timeout: float = 10.0,
+    ) -> ssl.SSLSocket:
+        """Establish a synchronous TLS 1.3 mTLS connection to Cloud SQL."""
+        target_host = host or "127.0.0.1"
+        ctx = ssl_context or self.build_tls_context()
+        raw_sock = socket.create_connection((target_host, self.port), timeout=timeout)
+        try:
+            return ctx.wrap_socket(raw_sock, server_hostname=self._uri.expected_server_cn)
+        except Exception:
+            raw_sock.close()
+            raise
+
+    async def connect_async(
+        self,
+        host: str | None = None,
+        *,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Establish an asynchronous TLS 1.3 mTLS connection to Cloud SQL."""
+        target_host = host or "127.0.0.1"
+        ctx = ssl_context or self.build_tls_context()
+        return await asyncio.open_connection(
+            target_host,
+            self.port,
+            ssl=ctx,
+            server_hostname=self._uri.expected_server_cn,
+        )

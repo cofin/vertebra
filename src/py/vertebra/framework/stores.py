@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping, Sequence
 from datetime import timedelta
-from typing import Self
+from typing import Any, Self
 
 from vertebra.db.redis import AsyncRedisDriver, RedisConfig
 from vertebra.db.valkey import AsyncValkeyDriver, ValkeyConfig
 
 __all__ = (
+    "KeyValueBackend",
     "MemoryStore",
     "NamespacedStore",
     "ResponseCacheStore",
@@ -25,6 +27,13 @@ class ResponseCacheStore:
         """Initialize store with optional Valkey or Redis backing driver."""
         self._entries: dict[str, tuple[bytes, float | None]] = {}
         self._driver = driver
+        if isinstance(driver, AsyncValkeyDriver):
+            driver.add_invalidation_listener(self._on_driver_invalidate)
+
+    def _on_driver_invalidate(self, keys: Any) -> None:
+        """Evict local cache entries matching invalidated keys."""
+        for key in keys:
+            self._entries.pop(key, None)
 
     @classmethod
     def from_valkey(cls, config_or_url: ValkeyConfig | str) -> Self:
@@ -53,8 +62,10 @@ class ResponseCacheStore:
         exc_val: object,
         exc_tb: object,
     ) -> None:
-        """Exit the async context manager."""
+        """Exit the async context manager and close underlying driver."""
         _ = (exc_type, exc_val, exc_tb)
+        if self._driver is not None:
+            await self._driver.close()
         return None
 
     async def get(self, key: str, renew_for: int | timedelta | None = None) -> bytes | None:
@@ -102,6 +113,8 @@ class ResponseCacheStore:
     async def delete_all(self) -> None:
         """Clear all entries from the store."""
         self._entries.clear()
+        if self._driver is not None:
+            await self._driver.flushdb()
 
     async def exists(self, key: str) -> bool:
         """Return True if key exists and has not expired."""
@@ -110,16 +123,48 @@ class ResponseCacheStore:
     async def expires_in(self, key: str) -> int | None:
         """Return remaining TTL in seconds for key, or None if unset or expired."""
         entry = self._entries.get(key)
-        if entry is None:
-            return None
-        _value, expires_at = entry
-        if expires_at is None:
-            return -1
-        remaining = expires_at - time.monotonic()
-        if remaining <= 0:
-            self._entries.pop(key, None)
-            return None
-        return int(remaining)
+        if entry is not None:
+            _value, expires_at = entry
+            if expires_at is None:
+                return -1
+            remaining = expires_at - time.monotonic()
+            if remaining <= 0:
+                self._entries.pop(key, None)
+                return None
+            return int(remaining)
+        if self._driver is not None:
+            pttl_ms = await self._driver.pttl(key)
+            if pttl_ms == -2:
+                return None
+            if pttl_ms == -1:
+                return -1
+            return max(0, pttl_ms // 1000)
+        return None
+
+    async def set_many(
+        self,
+        mapping: Mapping[str, str | bytes],
+        expires_in: int | timedelta | None = None,
+    ) -> None:
+        """Store multiple key-value pairs with an optional shared expiration duration."""
+        for key, value in mapping.items():
+            await self.set(key, value, expires_in=expires_in)
+
+    async def get_many(self, keys: Sequence[str]) -> dict[str, bytes | None]:
+        """Retrieve multiple keys in a single batch dictionary."""
+        result: dict[str, bytes | None] = {}
+        for key in keys:
+            result[key] = await self.get(key)
+        return result
+
+    def namespace(self, prefix: str) -> NamespacedStore:
+        """Return a prefix-isolated ``NamespacedStore`` view over this store."""
+        return NamespacedStore(self, prefix)
+
+    async def close(self) -> None:
+        """Close the underlying Valkey or Redis driver when configured."""
+        if self._driver is not None:
+            await self._driver.close()
 
 
 class NamespacedStore:
@@ -151,3 +196,4 @@ class NamespacedStore:
 
 
 MemoryStore = ResponseCacheStore
+KeyValueBackend = ResponseCacheStore

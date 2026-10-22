@@ -111,9 +111,9 @@ flowchart TD
 
 ## Implementation Plan
 
-- [ ] 1 `db-postgres-and-cloud-dialers` ([spec](../db-postgres-and-cloud-dialers/spec.md))
-- [ ] 2 `db-mysql-and-oracle-drivers` ([spec](../db-mysql-and-oracle-drivers/spec.md))
-- [ ] 3 `db-redis-valkey-and-analytics` ([spec](../db-redis-valkey-and-analytics/spec.md))
+- [x] 1 `db-postgres-and-cloud-dialers` ([spec](../db-postgres-and-cloud-dialers/spec.md))
+- [x] 2 `db-mysql-and-oracle-drivers` ([spec](../db-mysql-and-oracle-drivers/spec.md))
+- [x] 3 `db-redis-valkey-and-analytics` ([spec](../db-redis-valkey-and-analytics/spec.md))
 
 ## Continuity Snapshot
 

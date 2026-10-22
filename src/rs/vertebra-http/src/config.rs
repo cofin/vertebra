@@ -84,6 +84,12 @@ pub struct WorkerConfig {
     pub python_bin: String,
     /// App import path (e.g. "myapp:app").
     pub app_path: String,
+    /// Broker connection pool size (default 20).
+    pub broker_pool_size: u32,
+    /// Broker connection max overflow (default 10).
+    pub broker_max_overflow: u32,
+    /// Broker statement cache capacity (default 512).
+    pub broker_stmt_capacity: u32,
 }
 
 impl Default for WorkerConfig {
@@ -92,6 +98,9 @@ impl Default for WorkerConfig {
             count: 0,
             python_bin: "python3".to_string(),
             app_path: String::new(),
+            broker_pool_size: 20,
+            broker_max_overflow: 10,
+            broker_stmt_capacity: 512,
         }
     }
 }
@@ -205,6 +214,23 @@ impl ServerConfig {
         }
         if let Ok(app) = std::env::var("VERTEBRA_APP") {
             config.workers.app_path = app;
+        }
+        if let Ok(v) = std::env::var("VERTEBRA_BROKER_POOL_SIZE")
+            && let Ok(n) = v.parse::<u32>()
+            && n > 0
+        {
+            config.workers.broker_pool_size = n;
+        }
+        if let Ok(v) = std::env::var("VERTEBRA_BROKER_MAX_OVERFLOW")
+            && let Ok(n) = v.parse::<u32>()
+        {
+            config.workers.broker_max_overflow = n;
+        }
+        if let Ok(v) = std::env::var("VERTEBRA_BROKER_STMT_CAPACITY")
+            && let Ok(n) = v.parse::<u32>()
+            && n > 0
+        {
+            config.workers.broker_stmt_capacity = n;
         }
 
         // Backpressure controller knobs.

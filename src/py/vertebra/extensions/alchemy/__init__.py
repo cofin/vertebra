@@ -11,6 +11,7 @@ from vertebra.extensions.alchemy.broker import (
     ShmBrokerTransport,
     ShmSessionBroker,
     StatementCache,
+    StatementPlan,
 )
 from vertebra.extensions.alchemy.plugin import (
     AlchemyPlugin,
@@ -68,6 +69,7 @@ __all__ = (
     "ShmBrokerTransport",
     "ShmSessionBroker",
     "StatementCache",
+    "StatementPlan",
     "StoredObject",
     "SyncEngineAdapter",
     "SyncSessionConfig",

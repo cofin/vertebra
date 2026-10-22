@@ -12,7 +12,15 @@ __all__ = (
     "TenantScopeConfig",
 )
 
-_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_IDENTIFIER_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+
+
+def _validate_sql_identifier(identifier: str, field_name: str = "identifier") -> str:
+    """Validate that identifier matches safe SQL naming syntax."""
+    if not _IDENTIFIER_PATTERN.match(identifier):
+        msg = f"Invalid SQL identifier for {field_name}: {identifier!r}"
+        raise ValueError(msg)
+    return identifier
 
 
 class TenantScopeConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -23,12 +31,10 @@ class TenantScopeConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     parameter_cast: str | None = "uuid"
 
     def __post_init__(self) -> None:
-        if not _IDENT_RE.match(self.tenant_column):
-            msg = f"Invalid tenant_column identifier: {self.tenant_column!r}"
-            raise ValueError(msg)
-        if self.parameter_cast is not None and not _IDENT_RE.match(self.parameter_cast):
-            msg = f"Invalid parameter_cast identifier: {self.parameter_cast!r}"
-            raise ValueError(msg)
+        """Validate configured SQL identifiers."""
+        _validate_sql_identifier(self.tenant_column, "tenant_column")
+        if self.parameter_cast is not None:
+            _validate_sql_identifier(self.parameter_cast, "parameter_cast")
 
 
 class TenantPredicate(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -39,9 +45,9 @@ class TenantPredicate(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     config: TenantScopeConfig = TenantScopeConfig()
 
     def __post_init__(self) -> None:
-        if self.table_alias and not _IDENT_RE.match(self.table_alias):
-            msg = f"Invalid table_alias identifier: {self.table_alias!r}"
-            raise ValueError(msg)
+        """Validate table alias identifier when supplied."""
+        if self.table_alias:
+            _validate_sql_identifier(self.table_alias, "table_alias")
 
     def to_sql_fragment(self, param_index: int = 1) -> str:
         """Render ``<alias>.<tenant_column> = $<N>[::<cast>]`` with cast on the parameter, never the column."""

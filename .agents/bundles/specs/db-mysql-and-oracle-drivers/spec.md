@@ -103,11 +103,11 @@ src/py/tests/unit/
 ## Implementation Plan
 
 ### Phase 1: MySQL and Oracle Drivers, Wallets, and `+vtb` Dialects
-- [ ] 2.1 Pooled `SyncMysqlDriver`, `AsyncMysqlDriver`, and `mysql+vtb` SQLAlchemy 2.1 dialect ([worksheet](tasks/2.1.md))
-- [ ] 2.2 Pooled `SyncOracleDriver` and `AsyncOracleDriver`, `OracleWallet` `sqlnet.ora` mTLS, `DBMS_CLOUD` staging, and `OracleHybridSearch` execution ([worksheet](tasks/2.2.md))
-- [ ] 2.3 SQLAlchemy 2.1 `OracleVtbDialect` (`oracle+vtb`) and `AlembicImpl` DDL migration hooks ([worksheet](tasks/2.3.md))
-- [ ] 2.4 Unit and container-backed acceptance tests for MySQL and Oracle drivers, wallets, and `+vtb` dialects ([worksheet](tasks/2.4.md))
-- [ ] Chapter gate: `make lint-all && make py-test`
+- [x] 2.1 Pooled `SyncMysqlDriver`, `AsyncMysqlDriver`, and `mysql+vtb` SQLAlchemy 2.1 dialect ([worksheet](tasks/2.1.md))
+- [x] 2.2 Pooled `SyncOracleDriver` and `AsyncOracleDriver`, `OracleWallet` `sqlnet.ora` mTLS, `DBMS_CLOUD` staging, and `OracleHybridSearch` execution ([worksheet](tasks/2.2.md))
+- [x] 2.3 SQLAlchemy 2.1 `OracleVtbDialect` (`oracle+vtb`) and `AlembicImpl` DDL migration hooks ([worksheet](tasks/2.3.md))
+- [x] 2.4 Unit and container-backed acceptance tests for MySQL and Oracle drivers, wallets, and `+vtb` dialects ([worksheet](tasks/2.4.md))
+- [x] Chapter gate: `make lint-all && make py-test`
 
 ## Requirement-to-task trace
 
