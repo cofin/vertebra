@@ -1,4 +1,16 @@
 export {
+  A2aClient,
+  type A2aClientOptions,
+  AgentStreamClient,
+  type AgentStreamClientOptions,
+  encodeMcpHeaderValue,
+  MCP_PROTOCOL_VERSION,
+  McpClient,
+  type McpClientOptions,
+  type WorkflowLiveStatePayload,
+  WorkflowLiveSubscriber,
+} from "./agent/index";
+export {
   type ApexGlobalNamespace,
   type ApexItemHandle,
   type ApexOfflineMutationEntry,

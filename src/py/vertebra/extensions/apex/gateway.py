@@ -11,7 +11,9 @@ from typing import Any
 import msgspec
 
 from vertebra._typing import UnsupportedBackendError
-from vertebra.extensions.apex.openapi import ApexSkillSpec, ApexToolSpec
+from vertebra.agent.a2a.models import AgentCard, AgentInterface, AgentSkill
+from vertebra.agent.core.schema import Tool
+from vertebra.agent.mcp.registry import MCPRegistry
 from vertebra.extensions.apex.session import (
     ApexSessionContext,
     OraclePoolLike,
@@ -21,7 +23,6 @@ from vertebra.utils.serializers import encode_json
 
 __all__ = (
     "ApexAccessPolicy",
-    "ApexAgentCard",
     "ApexGateway",
     "ApexPageToolSpec",
     "ApexPolicyDecision",
@@ -34,14 +35,8 @@ _PLSQL_PROC_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$#]{0,63}(\.[A-Za-z][A-Za-z0-9
 _BIND_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$#]{0,63}$")
 
 
-class ApexAgentCard(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """A2A agent card descriptor for an Oracle APEX and ORDS gateway."""
-
-    name: str
-    description: str
-    url: str
-    version: str = "1.0.0"
-    skills: tuple[ApexSkillSpec, ...] = ()
+def _noop_page_tool_fn(**kwargs: Any) -> dict[str, Any]:
+    return dict(kwargs)
 
 
 class ApexPageToolSpec(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -60,26 +55,28 @@ class ApexPageToolSpec(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             msg = f"Invalid PL/SQL package procedure identifier: {self.package_procedure!r}"
             raise ValueError(msg)
 
-    def to_tool_spec(self) -> ApexToolSpec:
-        """Build an ``ApexToolSpec`` for this APEX page process."""
+    def to_tool_spec(self, fn: Callable[..., Any] | None = None) -> Tool:
+        """Build an executable ``Tool`` for this APEX page process."""
         props = {item: {"type": "string"} for item in self.page_items}
-        return ApexToolSpec(
+        return Tool(
             name=f"apex_p{self.page_id}_{self.process_name.lower()}",
             description=self.description or f"APEX Page {self.page_id} process {self.process_name}",
+            fn=fn or _noop_page_tool_fn,
             input_schema={
                 "type": "object",
                 "properties": props,
                 "required": list(self.page_items),
             },
+            requires_confirmation=self.is_mutating,
         )
 
-    def to_skill_spec(self) -> ApexSkillSpec:
-        """Build an ``ApexSkillSpec`` for this APEX page process."""
-        tool = self.to_tool_spec()
-        return ApexSkillSpec(
-            id=tool.name,
+    def to_skill_spec(self) -> AgentSkill:
+        """Build an ``AgentSkill`` for this APEX page process."""
+        tool_name = f"apex_p{self.page_id}_{self.process_name.lower()}"
+        return AgentSkill(
+            id=tool_name,
             name=self.process_name,
-            description=tool.description,
+            description=self.description or f"APEX Page {self.page_id} process {self.process_name}",
             tags=("oracle", "apex", f"app-{self.app_id}", f"page-{self.page_id}"),
         )
 
@@ -224,10 +221,10 @@ class ApexGateway:
     """Exposes Oracle APEX page processes, regions, and ORDS services as MCP tools and A2A skills."""
 
     __slots__ = (
+        "_mcp_registry",
         "_ords_transport",
         "_page_tools",
         "_skills",
-        "_tools",
         "agent_name",
         "confirmation_gate",
         "endpoint_url",
@@ -248,35 +245,152 @@ class ApexGateway:
         self.policy_evaluator = policy_evaluator or ApexPolicyEvaluator()
         self.confirmation_gate = confirmation_gate or ConfirmationGate()
         self._ords_transport = ords_transport
-        self._skills: list[ApexSkillSpec] = []
-        self._tools: dict[str, ApexToolSpec] = {}
+        self._mcp_registry = MCPRegistry()
+        self._skills: list[AgentSkill] = []
         self._page_tools: dict[str, ApexPageToolSpec] = {}
 
-    def register_skill(self, skill: ApexSkillSpec, tool_spec: ApexToolSpec) -> None:
+    def register_skill(self, skill: AgentSkill, tool_spec: Any) -> None:
         """Register an APEX/ORDS capability as both an A2A skill and an MCP tool."""
         self._skills.append(skill)
-        self._tools[tool_spec.name] = tool_spec
+        if isinstance(tool_spec, Tool):
+            self._mcp_registry.register_tool(tool_spec)
+        elif hasattr(tool_spec, "name"):
+            tool = Tool(
+                name=tool_spec.name,
+                description=getattr(tool_spec, "description", ""),
+                fn=getattr(tool_spec, "fn", _noop_page_tool_fn),
+                input_schema=getattr(tool_spec, "input_schema", {}),
+            )
+            self._mcp_registry.register_tool(tool)
 
-    def register_page_tool(self, page_tool: ApexPageToolSpec) -> ApexToolSpec:
+    def register_page_tool(
+        self,
+        page_tool: ApexPageToolSpec,
+        *,
+        policy: ApexAccessPolicy | None = None,
+        pool: OraclePoolLike | None = None,
+        context: ApexSessionContext | None = None,
+        amount: float = 0.0,
+        required_scheme: str | None = None,
+    ) -> Tool:
         """Register an Oracle APEX page process as both an MCP tool and an A2A skill."""
-        tool_spec = page_tool.to_tool_spec()
+        fn: Callable[..., Any] | None = None
+        if policy is not None and pool is not None and context is not None:
+            bound_policy = policy
+            bound_pool = pool
+            bound_ctx = context
+
+            async def _page_tool_fn(confirmation_token: str | None = None, **binds: Any) -> dict[str, Any]:
+                return await self.execute_plsql_process(
+                    bound_pool,
+                    bound_policy,
+                    bound_ctx,
+                    page_tool.package_procedure,
+                    binds,
+                    is_mutating=page_tool.is_mutating,
+                    amount=amount,
+                    required_scheme=required_scheme,
+                    confirmation_token=confirmation_token,
+                )
+
+            fn = _page_tool_fn
+
+        tool_spec = page_tool.to_tool_spec(fn=fn)
         skill_spec = page_tool.to_skill_spec()
         self._page_tools[tool_spec.name] = page_tool
         self.register_skill(skill_spec, tool_spec)
         return tool_spec
 
-    def build_agent_card(self) -> ApexAgentCard:
+    def register_plsql_tool(
+        self,
+        package_procedure: str,
+        description: str,
+        input_schema: dict[str, Any],
+        policy: ApexAccessPolicy,
+        pool: OraclePoolLike,
+        context: ApexSessionContext,
+        *,
+        is_mutating: bool = False,
+        amount: float = 0.0,
+        required_scheme: str | None = None,
+    ) -> Tool:
+        """Register an executable Tool calling execute_plsql_process under APEX access policy."""
+        tool_name = package_procedure.lower().replace(".", "_")
+
+        async def _plsql_tool_fn(confirmation_token: str | None = None, **binds: Any) -> dict[str, Any]:
+            return await self.execute_plsql_process(
+                pool,
+                policy,
+                context,
+                package_procedure,
+                binds,
+                is_mutating=is_mutating,
+                amount=amount,
+                required_scheme=required_scheme,
+                confirmation_token=confirmation_token,
+            )
+
+        tool = Tool(
+            name=tool_name,
+            description=description,
+            fn=_plsql_tool_fn,
+            input_schema=input_schema,
+            requires_confirmation=is_mutating,
+        )
+        self._mcp_registry.register_tool(tool)
+        return tool
+
+    def register_ords_tool(
+        self,
+        service_alias: str,
+        description: str,
+        input_schema: dict[str, Any],
+        policy: ApexAccessPolicy,
+        *,
+        bearer_token: str = "",
+        context: ApexSessionContext | None = None,
+        is_mutating: bool = False,
+        amount: float = 0.0,
+        required_scheme: str | None = None,
+    ) -> Tool:
+        """Register an executable Tool calling execute_ords_rest under APEX access policy."""
+        tool_name = service_alias.lower().replace("/", "_")
+
+        async def _ords_tool_fn(confirmation_token: str | None = None, **payload: Any) -> dict[str, Any]:
+            return await self.execute_ords_rest(
+                policy,
+                service_alias,
+                payload,
+                bearer_token=bearer_token,
+                context=context,
+                is_mutating=is_mutating,
+                amount=amount,
+                required_scheme=required_scheme,
+                confirmation_token=confirmation_token,
+            )
+
+        tool = Tool(
+            name=tool_name,
+            description=description,
+            fn=_ords_tool_fn,
+            input_schema=input_schema,
+            requires_confirmation=is_mutating,
+        )
+        self._mcp_registry.register_tool(tool)
+        return tool
+
+    def build_agent_card(self) -> AgentCard:
         """Publish the A2A v1.0 AgentCard for this Oracle APEX gateway."""
-        return ApexAgentCard(
+        return AgentCard(
             name=self.agent_name,
             description="Vertebra Oracle APEX & ORDS Agent Gateway",
-            url=self.endpoint_url,
+            supported_interfaces=(AgentInterface(url=self.endpoint_url),),
             skills=tuple(self._skills),
         )
 
-    def build_mcp_tools(self) -> dict[str, ApexToolSpec]:
-        """Return the registered MCP tool specifications."""
-        return dict(self._tools)
+    def build_mcp_tools(self) -> dict[str, Tool]:
+        """Return the registered executable MCP tool definitions."""
+        return {t.name: t for t in self._mcp_registry.list_tools()}
 
     async def execute_plsql_process(
         self,

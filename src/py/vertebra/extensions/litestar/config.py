@@ -22,3 +22,4 @@ class LitestarConfig(msgspec.Struct, frozen=True, gc=False):
     health_path: str = "/healthz"
     mcp_config: Any | None = None
     a2a_config: Any | None = None
+    agent_config: Any | None = None

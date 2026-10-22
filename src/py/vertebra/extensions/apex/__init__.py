@@ -1,4 +1,4 @@
-"""Oracle APEX, ORDS, and 26ai Duality View integration for Vertebra."""
+"""Oracle APEX, ORDS, and 26ai JSON Relational Duality View integration."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from vertebra.extensions.apex.bridge import (
 )
 from vertebra.extensions.apex.gateway import (
     ApexAccessPolicy,
-    ApexAgentCard,
     ApexGateway,
     ApexPageToolSpec,
     ApexPolicyDecision,
@@ -23,10 +22,11 @@ from vertebra.extensions.apex.gateway import (
 )
 from vertebra.extensions.apex.openapi import (
     ApexOpenAPIGenerator,
-    ApexSkillSpec,
-    ApexToolSpec,
+    DualityViewMcpHandler,
     DualityViewSpec,
     OrdsEndpointSpec,
+    OrdsMcpSynthesizer,
+    OrdsTransportProtocol,
 )
 from vertebra.extensions.apex.session import (
     ApexHandoffClaims,
@@ -39,7 +39,6 @@ from vertebra.extensions.apex.session import (
 
 __all__ = (
     "ApexAccessPolicy",
-    "ApexAgentCard",
     "ApexFederatedQuery",
     "ApexFederatedSource",
     "ApexGateway",
@@ -55,13 +54,14 @@ __all__ = (
     "ApexPolicyEvaluator",
     "ApexSessionAuth",
     "ApexSessionContext",
-    "ApexSkillSpec",
-    "ApexToolSpec",
     "ConfirmationGate",
+    "DualityViewMcpHandler",
     "DualityViewSpec",
     "OracleConnectionLike",
     "OraclePoolLike",
     "OracleSessionManager",
     "OrdsEndpointSpec",
+    "OrdsMcpSynthesizer",
     "OrdsRestTransport",
+    "OrdsTransportProtocol",
 )

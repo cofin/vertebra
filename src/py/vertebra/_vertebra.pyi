@@ -30,12 +30,14 @@ __all__ = [
     "RsgiHttpProtocol",
     "RsgiScope",
     "RsgiTransport",
+    "SchemaDigestCache",
     "WsgiEnviron",
     "WsgiEnvironIterator",
     "WsgiFileWrapper",
     "WsgiInput",
     "_WsgiStartResponse",
     "__version__",
+    "classify_jsonrpc_frame",
     "clear_request_notification",
     "format_traceparent",
     "get_batch",
@@ -579,3 +581,17 @@ class NativeStatementCache:
         param_plan: bytes,
     ) -> bool: ...
     def stats(self) -> NativeStatementCacheStats: ...
+
+def classify_jsonrpc_frame(
+    payload: bytes,
+) -> tuple[int, str | None, str | None]: ...
+
+@final
+class SchemaDigestCache:
+    def __new__(cls) -> Self: ...
+    @staticmethod
+    def compute_schema_digest(bytes: bytes) -> int: ...
+    def put(self, key: str, json_bytes: bytes) -> tuple[int, str]: ...
+    def get_etag(self, key: str) -> str | None: ...
+    def get_bytes(self, key: str) -> bytes | None: ...
+    def combined_etag(self) -> str: ...

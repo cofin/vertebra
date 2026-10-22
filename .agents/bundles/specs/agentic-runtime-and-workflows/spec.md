@@ -2,16 +2,16 @@
 type: Spec
 flow_id: agentic-runtime-and-workflows
 title: "Chapter 4: AgentRuntime, Hierarchical SpecTree, DynamicWorkflow DAG Engine, Session Stores, Dual-Host Mounting, and TypeScript SDK"
-state: planned
+state: closed
 plan_revision: 2
 plan_commit: ""
-state_revision: 0
+state_revision: 1
 current_task: null
-last_operation: null
-operation_targets: []
-last_verified_checkpoint: null
+last_operation: "commit"
+operation_targets: [src/py/vertebra/agent/runtime.py, src/py/vertebra/agent/spec.py, src/py/vertebra/agent/workflow.py, src/py/vertebra/agent/sessions.py, src/py/vertebra/agent/controller.py, src/py/vertebra/agent/plugin.py, src/ts/vertebra-client/src/agent/index.ts]
+last_verified_checkpoint: "e8edc02"
 created_at: 2026-10-22T04:45:00Z
-updated_at: 2026-10-22T04:45:00Z
+updated_at: 2026-10-22T15:33:00Z
 description: "Implement the extendable AgentRuntime with ModelProvider and ConfirmationGate, hierarchical SpecTree and DynamicWorkflow DAG engine with LiveState HLC delta broadcasting, pluggable AgentSessionStore backends, unified native App and LitestarPlugin mounting, and the @vertebra/client/agent TypeScript SDK."
 tags: [feature, agent, workflow, typescript]
 parent_prd: vertebra-agentic-harness
@@ -95,15 +95,15 @@ src/ts/vertebra-client/
 ## Implementation Plan
 
 ### Phase 1: AgentRuntime, SpecTree, DynamicWorkflow, and Session Stores
-- [ ] 4.1 Extendable `AgentRuntime` with pluggable model providers, tool execution loop, retry/backoff, and `ConfirmationGate` (`agent/runtime.py`) ([worksheet](tasks/4.1.md))
-- [ ] 4.2 `SpecTree` hierarchical task planning and `DynamicWorkflow` DAG engine with `LiveState` delta broadcasting (`agent/{spec,workflow}.py`) ([worksheet](tasks/4.2.md))
-- [ ] 4.3 Pluggable `AgentSessionStore` (5 backends) and streaming chat controller (`agent/{sessions,controller}.py`) ([worksheet](tasks/4.3.md))
-- [ ] Checkpoint: `make lint-all && uv run pytest src/py/tests/unit/agent/test_runtime_and_workflows.py -k "runtime or workflow or session" -q`
+- [x] 4.1 Extendable `AgentRuntime` with pluggable model providers, tool execution loop, retry/backoff, and `ConfirmationGate` (`agent/runtime.py`) ([worksheet](tasks/4.1.md))
+- [x] 4.2 `SpecTree` hierarchical task planning and `DynamicWorkflow` DAG engine with `LiveState` delta broadcasting (`agent/{spec,workflow}.py`) ([worksheet](tasks/4.2.md))
+- [x] 4.3 Pluggable `AgentSessionStore` (5 backends) and streaming chat controller (`agent/{sessions,controller}.py`) ([worksheet](tasks/4.3.md))
+- [x] Checkpoint: `make lint-all && uv run pytest src/py/tests/unit/agent/test_runtime_and_workflows.py -k "runtime or workflow or session" -q`
 
 ### Phase 2: Dual-Host Mounting and TypeScript `@vertebra/client/agent` SDK
-- [ ] 4.4 Unified mounting on both native `vertebra.framework.app.App` and Litestar (`agent/plugin.py`, `extensions/litestar/plugin.py`) ([worksheet](tasks/4.4.md))
-- [ ] 4.5 TypeScript `@vertebra/client/agent` SDK subpath and Vitest suite (`src/ts/vertebra-client/src/agent/index.ts`) ([worksheet](tasks/4.5.md))
-- [ ] Chapter gate: `make lint-all && make rs-test && make py-test && make ts-test`
+- [x] 4.4 Unified mounting on both native `vertebra.framework.app.App` and Litestar (`agent/plugin.py`, `extensions/litestar/plugin.py`) ([worksheet](tasks/4.4.md))
+- [x] 4.5 TypeScript `@vertebra/client/agent` SDK subpath and Vitest suite (`src/ts/vertebra-client/src/agent/index.ts`) ([worksheet](tasks/4.5.md))
+- [x] Chapter gate: `make lint-all && make rs-test && make py-test && make ts-test`
 
 ## Requirement-to-task trace
 
@@ -126,7 +126,7 @@ src/ts/vertebra-client/
 
 ## Continuity Snapshot
 
-- Active flow: `agentic-runtime-and-workflows`, state `planned`. Current task: none. Next step: `/flow:implement agentic-runtime-and-workflows` after Chapters 2 and 3 complete.
-- Plan identity: plan_revision 2, plan_commit: "". State identity: state_revision 0.
-- Blockers: none. Decisions: Litestar plugin integration aligned with extensions/litestar/plugin.py from 6.3 and framework/app.py from 5.1; TypeScript client subpath aligned with consolidated tsup.config.ts from 7.6.
+- Active flow: `agentic-runtime-and-workflows`, state `closed`. All tasks 4.1-4.5 completed and verified.
+- Plan identity: plan_revision 2, plan_commit: "". State identity: state_revision 1.
+- Blockers: none. Standing by for `feat/queues-and-messaging` (PR 3) to rebase and hand off PR 4.
 - Knowledge paths: `.agents/bundles/product/product-guidelines.md`, `.agents/bundles/knowledge/patterns/python/module-and-class-layout.md`, `.agents/bundles/knowledge/patterns/typescript/client-and-adapter-subpaths.md`.

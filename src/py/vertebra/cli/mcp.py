@@ -1,47 +1,28 @@
-"""MCP stdio-to-HTTP bridge CLI command (vtb mcp bridge)."""
+"""MCP stdio-to-HTTP bridge and server CLI commands (vtb mcp bridge, vtb mcp serve)."""
 
-import os
 import sys
-import urllib.request
-from collections.abc import Callable
-from typing import TextIO
+from typing import Any, TextIO
 
+import anyio
 import click
 
-from vertebra.utils.serializers import decode_json
+from vertebra.agent.mcp.bridge import run_stdio_http_bridge
+from vertebra.agent.mcp.client import mcp_request_headers
+from vertebra.agent.mcp.service import MCPService
+from vertebra.agent.mcp.stdio import run_stdio_server
 
 __all__ = (
     "bridge",
     "extract_mcp_headers_from_jsonrpc",
     "mcp",
     "run_mcp_stdio_bridge",
+    "serve",
 )
-
-_MCP_PROTOCOL_VERSION = "2026-07-28"
 
 
 def extract_mcp_headers_from_jsonrpc(payload: bytes) -> dict[str, str]:
-    """Extract Mcp-Method, Mcp-Name, and MCP-Protocol-Version headers from a JSON-RPC 2.0 frame."""
-    headers: dict[str, str] = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-        "MCP-Protocol-Version": _MCP_PROTOCOL_VERSION,
-    }
-    try:
-        decoded = decode_json(payload)
-    except Exception:
-        return headers
-
-    if isinstance(decoded, dict):
-        method = decoded.get("method")
-        if isinstance(method, str) and method:
-            headers["Mcp-Method"] = method
-        params = decoded.get("params")
-        if isinstance(params, dict):
-            name = params.get("name")
-            if isinstance(name, str) and name:
-                headers["Mcp-Name"] = name
-    return headers
+    """Extract Mcp-Method, Mcp-Name, and MCP-Protocol-Version headers from a JSON-RPC frame."""
+    return mcp_request_headers(payload)
 
 
 def run_mcp_stdio_bridge(
@@ -49,44 +30,26 @@ def run_mcp_stdio_bridge(
     url: str,
     bearer_token: str | None = None,
     timeout_s: float = 30.0,
+    max_message_bytes: int = 4_194_304,
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
-    transport: Callable[[str, dict[str, str], bytes], bytes] | None = None,
+    transport: Any = None,
 ) -> int:
-    """Forward newline-delimited JSON-RPC 2.0 frames from stdin to an HTTP MCP endpoint."""
-    in_stream = stdin if stdin is not None else sys.stdin
-    out_stream = stdout if stdout is not None else sys.stdout
-    send_fn = (
-        transport
-        if transport is not None
-        else lambda target_url, hdrs, raw: _default_http_transport(
-            target_url,
-            hdrs,
-            raw,
-            timeout_s=timeout_s,
-        )
+    """Forward newline-delimited JSON-RPC frames from stdin to an HTTP MCP endpoint."""
+    return run_stdio_http_bridge(
+        url=url,
+        bearer_token=bearer_token,
+        timeout_s=timeout_s,
+        max_message_bytes=max_message_bytes,
+        stdin=stdin,
+        stdout=stdout,
+        transport=transport,
     )
-
-    resolved_token = bearer_token or os.environ.get("VERTEBRA_MCP_TOKEN")
-
-    for raw_line in in_stream:
-        stripped = raw_line.strip()
-        if not stripped:
-            continue
-        payload = stripped.encode("utf-8")
-        headers = extract_mcp_headers_from_jsonrpc(payload)
-        if resolved_token:
-            headers["Authorization"] = f"Bearer {resolved_token}"
-        response_bytes = send_fn(url, headers, payload)
-        if response_bytes:
-            out_stream.write(response_bytes.decode("utf-8").strip() + "\n")
-            out_stream.flush()
-    return 0
 
 
 @click.group()
 def mcp() -> None:
-    """Model Context Protocol (MCP) utilities and stdio bridge."""
+    """Model Context Protocol (MCP) utilities, server, and stdio bridge."""
 
 
 @mcp.command()
@@ -100,14 +63,11 @@ def bridge(url: str, bearer_token: str | None, timeout_s: float) -> None:
         sys.exit(exit_code)
 
 
-def _default_http_transport(
-    url: str,
-    headers: dict[str, str],
-    body: bytes,
-    *,
-    timeout_s: float = 30.0,
-) -> bytes:
-    """POST a JSON-RPC 2.0 message to an HTTP MCP endpoint and return the response payload."""
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        return bytes(resp.read())
+@mcp.command()
+@click.option("--name", default="vertebra-mcp", help="Server name")
+def serve(name: str) -> None:
+    """Run an in-process MCP service over standard input/output (stdio)."""
+    service = MCPService()
+    exit_code = anyio.run(lambda: run_stdio_server(service))
+    if exit_code != 0:
+        sys.exit(exit_code)

@@ -1,0 +1,83 @@
+"""Agent-to-Agent (A2A) 1.0 protocol models, service, HTTP handlers, and signing.
+
+This package provides a spec-conformant implementation of the A2A 1.0 protocol
+for inter-agent communication, discovery, streaming, and task coordination.
+"""
+
+from vertebra.agent.a2a.models import (
+    TERMINAL_A2A_STATES,
+    AgentCapabilities,
+    AgentCard,
+    AgentCardSignature,
+    AgentInterface,
+    AgentProvider,
+    AgentSkill,
+    Artifact,
+    DataPart,
+    FileContent,
+    FilePart,
+    Message,
+    Part,
+    PushNotificationAuthenticationInfo,
+    PushNotificationConfig,
+    Task,
+    TaskArtifactUpdateEvent,
+    TaskPushNotificationConfig,
+    TaskState,
+    TaskStatus,
+    TaskStatusUpdateEvent,
+    TextPart,
+)
+from vertebra.agent.a2a.routes import A2AHttpHandler
+from vertebra.agent.a2a.service import (
+    CONTENT_TYPE_NOT_SUPPORTED,
+    EXTENDED_CARD_NOT_CONFIGURED,
+    PUSH_NOTIFICATION_NOT_SUPPORTED,
+    TASK_NOT_CANCELABLE,
+    TASK_NOT_FOUND,
+    UNSUPPORTED_OPERATION,
+    A2AConfig,
+    A2AService,
+    A2ATaskStore,
+    PushNotificationDispatcher,
+    get_owner_key,
+)
+from vertebra.agent.a2a.signing import AgentCardSigner
+
+__all__ = [
+    "CONTENT_TYPE_NOT_SUPPORTED",
+    "EXTENDED_CARD_NOT_CONFIGURED",
+    "PUSH_NOTIFICATION_NOT_SUPPORTED",
+    "TASK_NOT_CANCELABLE",
+    "TASK_NOT_FOUND",
+    "TERMINAL_A2A_STATES",
+    "UNSUPPORTED_OPERATION",
+    "A2AConfig",
+    "A2AHttpHandler",
+    "A2AService",
+    "A2ATaskStore",
+    "AgentCapabilities",
+    "AgentCard",
+    "AgentCardSignature",
+    "AgentCardSigner",
+    "AgentInterface",
+    "AgentProvider",
+    "AgentSkill",
+    "Artifact",
+    "DataPart",
+    "FileContent",
+    "FilePart",
+    "Message",
+    "Part",
+    "PushNotificationAuthenticationInfo",
+    "PushNotificationConfig",
+    "PushNotificationDispatcher",
+    "Task",
+    "TaskArtifactUpdateEvent",
+    "TaskPushNotificationConfig",
+    "TaskState",
+    "TaskStatus",
+    "TaskStatusUpdateEvent",
+    "TextPart",
+    "get_owner_key",
+]

@@ -78,3 +78,93 @@ def test_vtb_mcp_bridge_cli_command(monkeypatch: Any) -> None:
         "bearer_token": "my-jwt",
         "timeout_s": 15.0,
     }
+
+
+def test_extract_mcp_headers_resources_and_tasks() -> None:
+    """Verify resources/read extracts uri and tasks/get extracts taskId into Mcp-Name."""
+    res_line = b'{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"file:///data.txt"}}'
+    res_headers = extract_mcp_headers_from_jsonrpc(res_line)
+    assert res_headers["Mcp-Method"] == "resources/read"
+    assert res_headers["Mcp-Name"] == "file:///data.txt"
+
+    task_line = b'{"jsonrpc":"2.0","id":3,"method":"tasks/get","params":{"taskId":"task_12345"}}'
+    task_headers = extract_mcp_headers_from_jsonrpc(task_line)
+    assert task_headers["Mcp-Method"] == "tasks/get"
+    assert task_headers["Mcp-Name"] == "task_12345"
+
+
+def test_extract_mcp_headers_base64_non_ascii() -> None:
+    """Verify non-ASCII parameter names are encoded using RFC 2047 format."""
+    line = '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"тест_инструмент"}}'.encode()
+    headers = extract_mcp_headers_from_jsonrpc(line)
+    assert headers["Mcp-Method"] == "tools/call"
+    assert headers["Mcp-Name"].startswith("=?utf-8?B?")
+    assert headers["Mcp-Name"].endswith("?=")
+
+
+def test_run_mcp_stdio_bridge_sse_unwrapping() -> None:
+    """Verify SSE text/event-stream payloads are unpacked and written line-by-line to stdout."""
+    stdin_buf = io.StringIO('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}\n')
+    stdout_buf = io.StringIO()
+
+    def fake_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
+        sse_payload = b'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":"hello"}\n\n'
+        return 200, {"Content-Type": "text/event-stream"}, sse_payload
+
+    exit_code = run_mcp_stdio_bridge(
+        url="https://agent.example.com/mcp",
+        stdin=stdin_buf,
+        stdout=stdout_buf,
+        transport=fake_transport,
+    )
+    assert exit_code == 0
+    assert stdout_buf.getvalue().strip() == '{"jsonrpc":"2.0","id":1,"result":"hello"}'
+
+
+def test_run_mcp_stdio_bridge_session_id_propagation() -> None:
+    """Verify Mcp-Session-Id from response headers is propagated to subsequent requests."""
+    stdin_buf = io.StringIO(
+        '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n{"jsonrpc":"2.0","id":2,"method":"prompts/list"}\n'
+    )
+    stdout_buf = io.StringIO()
+    received_headers: list[dict[str, str]] = []
+
+    def fake_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
+        received_headers.append(dict(headers))
+        return 200, {"Mcp-Session-Id": "sess-xyz-987"}, b'{"jsonrpc":"2.0","id":1,"result":{}}'
+
+    exit_code = run_mcp_stdio_bridge(
+        url="https://agent.example.com/mcp",
+        stdin=stdin_buf,
+        stdout=stdout_buf,
+        transport=fake_transport,
+    )
+    assert exit_code == 0
+    assert len(received_headers) == 2
+    assert "Mcp-Session-Id" not in received_headers[0]
+    assert received_headers[1]["Mcp-Session-Id"] == "sess-xyz-987"
+
+
+def test_run_mcp_stdio_bridge_max_message_bytes_enforcement() -> None:
+    """Verify messages exceeding max_message_bytes trigger a -32600 error response without transport call."""
+    large_arg = "x" * 2000
+    stdin_buf = io.StringIO(f'{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"data":"{large_arg}"}}}}\n')
+    stdout_buf = io.StringIO()
+    transport_called = False
+
+    def fake_transport(url: str, headers: dict[str, str], body: bytes) -> bytes:
+        nonlocal transport_called
+        transport_called = True
+        return b"{}"
+
+    exit_code = run_mcp_stdio_bridge(
+        url="https://agent.example.com/mcp",
+        max_message_bytes=500,
+        stdin=stdin_buf,
+        stdout=stdout_buf,
+        transport=fake_transport,
+    )
+    assert exit_code == 0
+    assert not transport_called
+    output = stdout_buf.getvalue()
+    assert "-32600" in output

@@ -20,6 +20,7 @@ export default defineConfig({
     "src/telemetry.ts",
     "src/wasm.ts",
     "src/arrow.ts",
+    "src/agent/index.ts",
   ],
   format: ["esm"],
   dts: true,

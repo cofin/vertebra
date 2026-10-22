@@ -78,10 +78,14 @@ impl WellKnownDiscoveryCache {
     }
 
     pub fn register_mcp_manifest(&self, body: Bytes) {
+        self.register_mcp_manifest_with_version("2026-07-28", body);
+    }
+
+    pub fn register_mcp_manifest_with_version(&self, version: &'static str, body: Bytes) {
         self.register_document(
             "/.well-known/mcp.json",
             "application/json",
-            Some(("mcp-protocol-version", "2026-07-28")),
+            Some(("mcp-protocol-version", version)),
             body,
         );
     }
@@ -125,7 +129,11 @@ impl WellKnownDiscoveryCache {
 }
 
 pub fn is_excluded_from_spa_fallback(path: &str) -> bool {
-    DEFAULT_SPA_EXCLUDED_PREFIXES.iter().any(|prefix| {
+    is_excluded_from_spa_fallback_custom(path, &DEFAULT_SPA_EXCLUDED_PREFIXES)
+}
+
+pub fn is_excluded_from_spa_fallback_custom(path: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| {
         path == *prefix
             || path
                 .strip_prefix(prefix)
