@@ -10,6 +10,18 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-10-23] flow-archive | Completed and Archived 5 Master PRDs, 21 Child Chapters, and 126 Tasks
+
+- Completed and archived 5 Master PRDs (`vertebra-design-quality`, `vertebra-shm-connection-broker`, `vertebra-native-db-drivers`, `vertebra-queues-and-messaging`, `vertebra-agentic-harness`) and all 21 child specs (126 tasks total) following merge into `main` across PRs #36, #37, #38, #39, and #40.
+- Synthesized 5-dimension OKF v0.2 knowledge across nested domain chapters:
+  - `domains/agent/mcp-and-a2a-protocol-harness.md`: MCP `2026-07-28` SSE/Stdio transports, A2A `1.0` JCS/RFC 8785 Ed25519/ECDSA signed agent cards, durable DAG workflows, SpecTree execution, Rust PyO3 cryptographic fastpaths, and GenAI telemetry.
+  - `domains/data/broker-and-shm-leases.md`: Cross-process SHM connection lease broker (`ShmLeaseTable`, `ShmStatementCache` in `vertebra-core`), PyO3 `NativeConnectionBroker`, and Python `ConnectionBroker` / `SyncPool` / `LoopShardedResource`.
+  - `domains/framework/distributed-queues-and-email.md`: Distributed queue backends (`MemoryQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `PostgresQueueBackend`, `OracleQueueBackend`), `CronScheduler` leader election, `MultiLaneWorkerRunner` with priority lanes, and transactional email providers (`SmtpProvider`, `ResendProvider`, `SendGridProvider`, `MailgunProvider`, `SesProvider` with native Rust SigV4 signing).
+  - `domains/extensions/oracle-apex.md`: Creative Vertebra + Oracle APEX integration (`ApexIslandRegistry`, `LiveState` two-way binding, `ApexOfflineOutbox` with monotonic HLC sync, `ApexFederatedQuery`, `ApexSessionAuth` HMAC handoff, and `ApexGateway` MCP/A2A synthesis with `ConfirmationGate`).
+  - `domains/data/database-drivers-and-dialers.md`: Native network database drivers for Postgres, MySQL, Oracle, Redis, Valkey, and DataFusion Arrow streaming.
+  - `gotchas/pyo3-and-python-runtime.md`: `AsyncLogCore` batched newline-delimited JSONL buffer handling, TNS descriptor validation, and async socket teardown timeouts.
+- Contracted `.agents/bundles/specs/` so the specifications tree remains lazy until new active specs are planned.
+
 ## [2026-10-22] flow-plan | Materialized 5 Master PRDs, 21 Child Chapters, and 126 Refined Task Worksheets
 
 - Authored and validated 5 Master PRDs (`vertebra-design-quality`, `vertebra-agentic-harness`, `vertebra-native-db-drivers`, `vertebra-shm-connection-broker`, `vertebra-queues-and-messaging`), 21 child Flow specs, and 126 refined task worksheets (154 markdown files) under `.agents/bundles/specs/`.

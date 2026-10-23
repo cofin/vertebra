@@ -139,7 +139,7 @@ fn spawn_python_worker(app_path: String) {
                     .getattr("list")?
                     .call1((app_obj.getattr("mounts")?,))?;
 
-                let runner = py.import("vertebra.server._native")?;
+                let runner = py.import("vertebra.server.worker")?;
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("mounts", mounts_list)?;
 

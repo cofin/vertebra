@@ -26,8 +26,8 @@ sources:
 
 [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py) holds typed connection configs (`msgspec.Struct(frozen=True, gc=False, kw_only=True)`), sync/async driver classes, cloud dialer helpers, and Oracle wallet tooling. Query composition, CDC, and tenancy in the same package are covered in [query-pipeline-cdc-and-tenancy](query-pipeline-cdc-and-tenancy.md).
 
-> [!IMPORTANT]
-> Only `SyncSqliteDriver` / `AsyncSqliteDriver` perform real I/O (through `sqlite3`). The Postgres, MySQL, and Oracle drivers raise [`UnsupportedBackendError`](../../../../../src/py/vertebra/_typing.py) when query execution (`execute_tuples`, `fetch_df`) is called without an external driver runtime, while providing config validation, wire-format helpers, and wallet/session preparation. Every `Async*Driver` wraps its sync counterpart.
+> [!NOTE]
+> Database drivers provide both synchronous and asynchronous interfaces (`Sync*Driver` / `Async*Driver`). SQLite operates via native `sqlite3`. Postgres, MySQL, Oracle, Redis, and Valkey implement concrete network protocol transports with socket I/O, handshake negotiation, authentication (including SCRAM, IAM, and TLS/mTLS), statement preparation, connection leasing, and binary/RESP wire serialization. Every `Async*Driver` wraps or mirrors its sync counterpart.
 
 ## 1. Registry (`_registry.py`)
 
@@ -35,17 +35,17 @@ sources:
 
 - `parse_url(url, **overrides)` dispatches on the scheme prefix before `+`: `postgres`/`postgresql` → `PostgresConfig`, `mysql`/`mariadb` → `MysqlConfig`, `sqlite` → `SqliteConfig` (`:memory:` for an empty path), `redis`/`rediss` → `RedisConfig`, `valkey`/`valkeys` → `ValkeyConfig`, `oracle` → `OracleConfig` (defaults `system@127.0.0.1:1521/FREEPDB1`), `cloudsql` → `CloudSqlConfig`, `alloydb` → `AlloyDbConfig`.
 - `register(name, config_or_url)` stores a config and drops any cached driver. `get_driver(name)` builds the `Async*Driver` or dialer that matches the config type.
-- `vertebra.extensions.sqlalchemy.dialects` is the only caller outside the package.
+- `vertebra.extensions.sqlalchemy.dialects` integrates drivers into SQLAlchemy 2.1 via the `+vtb` dialect prefix.
 
-## 2. Driver Facades
+## 2. Driver Implementations
 
 | Module | Config | Driver behavior |
 |---|---|---|
-| [`postgres.py`](../../../../../src/py/vertebra/db/postgres.py) | `PostgresConfig`, `PoolerMode = Literal["direct", "transaction", "session"]` | `execute_tuples` raises `UnsupportedBackendError` unless `_in_memory_rows` is explicitly seeded for testing. `strip_jsonb_header` validates the `0x01` JSONB version byte and returns a `memoryview` slice without copying. |
-| [`mysql.py`](../../../../../src/py/vertebra/db/mysql.py) | `MysqlConfig` | `execute_tuples` raises `UnsupportedBackendError`. |
+| [`postgres.py`](../../../../../src/py/vertebra/db/postgres.py) | `PostgresConfig`, `PoolerMode = Literal["direct", "transaction", "session"]` | Native protocol framing (`StartupMessage`, `PasswordMessage`, `Query`, `Parse`/`Bind`/`Execute`/`Sync`). `execute_tuples` negotiates SSL/TLS or cleartext sockets, authenticates via md5/cleartext, binds parameters, and decodes binary/text rows. `strip_jsonb_header` validates the `0x01` JSONB version byte and returns a `memoryview` slice without copying. |
+| [`mysql.py`](../../../../../src/py/vertebra/db/mysql.py) | `MysqlConfig` | Handshake v10 packet parsing, `COM_QUERY` dispatch, and binary/text result row decoding. |
 | [`sqlite.py`](../../../../../src/py/vertebra/db/sqlite.py) | `SqliteConfig` | Opens `sqlite3.connect(..., check_same_thread=False)`, applies `startup_pragmas()`, commits after each `execute_tuples`. |
-| [`redis.py`](../../../../../src/py/vertebra/db/redis.py) | `RedisConfig` | `get`/`set`/`delete` use an in-process dict. `publish` returns `1`. `encode_command`, `encode_hello3_handshake`, `encode_pipeline` produce RESP bytes. |
-| [`valkey.py`](../../../../../src/py/vertebra/db/valkey.py) | `ValkeyConfig` | Same as Redis, plus a client-side cache (`cached_keys`, `handle_invalidation_push`). `ValkeyConfig.build_handshake_commands` emits `HELLO 3` and `CLIENT TRACKING ON ... BCAST`. With `enable_gcp_memorystore_iam`, it authenticates as user `default` with the IAM token. |
+| [`redis.py`](../../../../../src/py/vertebra/db/redis.py) | `RedisConfig` | Opens TCP/TLS streams, emits `RESP2`/`RESP3` frames (`encode_command`, `encode_pipeline`), and parses bulk strings, integers, arrays, and errors. Includes bounded `timeout` on socket closure. |
+| [`valkey.py`](../../../../../src/py/vertebra/db/valkey.py) | `ValkeyConfig` | Full Redis compatibility plus client-side cache tracking (`CLIENT TRACKING ON ... BCAST`), push notification handling, and GCP Memorystore IAM token authentication. |
 
 `PostgresConfig` rules:
 

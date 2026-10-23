@@ -46,8 +46,11 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
 - **Framework (`domains/framework/`)**:
   - [Python Framework, Routing & Serialization Domain](domains/framework/routing-and-app.md)
   - [Framework Subdomains](domains/framework/subdomains.md)
+  - [Distributed Queues, Cron Leader Election & Transactional Email](domains/framework/distributed-queues-and-email.md)
   - [Live State Synchronization](domains/framework/live-state.md)
   - [`vtb` Command-Line Interface](domains/framework/cli.md)
+- **Agent Protocols & Harness (`domains/agent/`)**:
+  - [Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols](domains/agent/mcp-and-a2a-protocol-harness.md)
 - **Server & Worker Runtime (`domains/server/`)**:
   - [Python Server, Worker Loop & Protocol Adapters Domain](domains/server/worker-and-protocols.md)
   - [Multi-Lane Worker Runner](domains/server/worker-lanes.md)
@@ -60,6 +63,7 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
   - [WASM Plugin Host & Browser Bridge](domains/frontend/wasm.md)
 - **Storage, Data, Telemetry & Extensions (`domains/storage/`, `domains/data/`, `domains/telemetry/`, `domains/extensions/`)**:
   - [Object Storage, Presigning & Upload Tracking](domains/storage/object-storage.md)
+  - [Shared-Memory Connection Broker & Statement Cache](domains/data/broker-and-shm-leases.md)
   - [Database Drivers, Cloud Dialers & Oracle Wallets](domains/data/database-drivers-and-dialers.md)
   - [Query Pipelines, Change Feeds, Tenant Predicates & DataFusion](domains/data/query-pipeline-cdc-and-tenancy.md)
   - [Logging, Trace Context, SQL Trace Propagation & GenAI Metrics](domains/telemetry/logging-tracing-and-genai.md)
