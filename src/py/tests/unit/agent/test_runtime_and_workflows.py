@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Sequence
 from types import SimpleNamespace
 from typing import Any
 
+import msgspec
 import pytest
 
 from vertebra.agent import (
@@ -27,10 +28,12 @@ from vertebra.agent import (
     AgentPlugin,
     AgentPluginConfig,
     AgentRuntime,
+    AgentStreamFrame,
     AlchemySessionStore,
     CacheSessionStore,
     CallerIdentity,
     ChatRequest,
+    ConfirmationDecisionRequest,
     ConfirmationGate,
     DynamicWorkflow,
     MemorySessionStore,
@@ -474,7 +477,17 @@ async def test_all_five_session_stores() -> None:
 @pytest.mark.anyio
 async def test_agent_chat_controller_endpoints() -> None:
     """Verify AgentChatController turns, confirmation, session history, and owner isolation."""
-    mock_model = DummyMockModel([ModelDelta(event_type="delta", text="Controller response")])
+    mock_model = DummyMockModel(
+        [
+            [
+                ModelDelta(
+                    event_type="delta",
+                    text="Controller response",
+                    usage=GenAiUsage(input_tokens=12, output_tokens=8),
+                )
+            ]
+        ]
+    )
     runtime = AgentRuntime(model_provider=mock_model)
     store = MemorySessionStore()
     ctrl = AgentChatController(runtime=runtime, session_store=store, base_path="/agent")
@@ -504,6 +517,31 @@ async def test_agent_chat_controller_endpoints() -> None:
     assert code == 200
     parsed = decode_json(body)
     assert parsed["response"] == "Controller response"
+    assert isinstance(parsed["usage"], dict)
+    assert parsed["usage"]["input_tokens"] == 12
+    assert parsed["usage"]["output_tokens"] == 8
+
+    sse_frame = AgentStreamFrame(
+        turn_id="turn_sse_1",
+        event_type="delta",
+        agent_name="DefaultAgent",
+        text="streamed chunk",
+        usage=GenAiUsage(input_tokens=5, output_tokens=3),
+    ).to_sse_frame("1")
+    sse_payload = decode_json(sse_frame.data)
+    assert isinstance(sse_payload, dict)
+    assert sse_payload["turn_id"] == "turn_sse_1"
+    assert sse_payload["text"] == "streamed chunk"
+    assert "tool_name" not in sse_payload
+    assert isinstance(sse_payload["usage"], dict)
+    assert sse_payload["usage"]["input_tokens"] == 5
+
+    assert ChatRequest.__struct_config__.forbid_unknown_fields is True
+    assert ConfirmationDecisionRequest.__struct_config__.forbid_unknown_fields is True
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.convert({"message": "hi", "unexpected_field": 1}, ChatRequest)
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.convert({"decision": "approve", "unexpected_field": 1}, ConfirmationDecisionRequest)
 
 
 @pytest.mark.anyio

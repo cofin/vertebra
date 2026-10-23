@@ -72,7 +72,7 @@ class BrokerMetrics(msgspec.Struct, frozen=True, gc=False):
     statement_cache_evictions: int = 0
 
 
-class StatementPlan(msgspec.Struct, frozen=True, gc=False):
+class StatementPlan(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Compiled statement and ordered bind-parameter plan."""
 
     sql_hash: int

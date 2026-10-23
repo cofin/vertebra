@@ -19,7 +19,7 @@ __all__ = (
 )
 
 
-class ExtractedLitestarRoute(msgspec.Struct, frozen=True, gc=False, array_like=True):
+class ExtractedLitestarRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Pre-compiled Litestar route entry indexed by stable uint64 handler_id."""
 
     handler_id: int

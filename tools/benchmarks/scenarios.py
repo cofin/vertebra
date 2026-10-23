@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import msgspec
 
 
-@dataclass(frozen=True, slots=True)
-class Scenario:
+class Scenario(msgspec.Struct, frozen=True, gc=False):
     """A benchmark scenario describing an HTTP request to test."""
 
     path: str
@@ -12,7 +11,6 @@ class Scenario:
     body: str | None = None
     description: str = ""
     concurrency_levels: list[int] | None = None
-    # Performance gates (targets for validation)
     min_rps: float | None = None
     max_latency_ms: float | None = None
 
@@ -65,7 +63,7 @@ SCENARIOS: dict[str, Scenario] = {
     "io_10ms": Scenario(
         path="/io10",
         description="Simulated 10 ms I/O delay",
-        min_rps=5000,  # Scaled by workers/concurrency in validation logic
+        min_rps=5000,
         max_latency_ms=15.0,
     ),
 }
@@ -73,7 +71,4 @@ SCENARIOS: dict[str, Scenario] = {
 QUICK_SCENARIOS: list[str] = ["hello", "body_1k", "json", "io_10ms"]
 DEFAULT_SCENARIOS: list[str] = ["hello", "plaintext", "body_1k", "body_10k", "json", "echo", "io_10ms"]
 FULL_SCENARIOS: list[str] = list(SCENARIOS)
-
-# Multi-worker scenarios: focus on IO-bound (where parallelism matters most)
-# and hello (baseline throughput ceiling).
 MULTIWORKER_SCENARIOS: list[str] = ["hello", "json", "echo", "io_10ms"]

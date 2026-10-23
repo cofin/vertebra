@@ -9,6 +9,7 @@ from typing import Any
 
 import msgspec
 
+from vertebra._typing import BaseStruct
 from vertebra.storage import ObjectMeta, ObjectStore, get_default_storage_registry
 from vertebra.storage.pipeline import StagedUpload, UploadTracker
 
@@ -23,7 +24,7 @@ type SyncDataLike = Buffer | Path | Iterable[bytes] | Any
 type AsyncDataLike = SyncDataLike | AsyncIterable[bytes]
 
 
-class FileAttachment(msgspec.Struct, gc=False):
+class FileAttachment(BaseStruct):
     """Value object representing an Advanced Alchemy FileObject attachment."""
 
     path: str
@@ -34,7 +35,7 @@ class FileAttachment(msgspec.Struct, gc=False):
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
 
 
-class StoredObject(msgspec.Struct, gc=False):
+class StoredObject(msgspec.Struct, frozen=True, gc=False):
     """Stored object descriptor delegating directly to ObjectStore and StorageRegistry."""
 
     key: str

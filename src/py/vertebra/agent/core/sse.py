@@ -14,7 +14,7 @@ import msgspec
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 
-class SseFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class SseFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """Server-Sent Event wire frame."""
 
     id: str = ""

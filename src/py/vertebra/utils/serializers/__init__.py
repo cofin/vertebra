@@ -17,8 +17,18 @@ from vertebra.utils.serializers._msgpack import (
     decode_msgpack,
     encode_msgpack,
 )
+from vertebra.utils.serializers._schema import (
+    BaseStruct,
+    CamelizedBaseStruct,
+    FrozenBaseStruct,
+    FrozenCamelizedStruct,
+)
 
 __all__ = (
+    "BaseStruct",
+    "CamelizedBaseStruct",
+    "FrozenBaseStruct",
+    "FrozenCamelizedStruct",
     "JSONSerializer",
     "MsgpackCodec",
     "decode_json",

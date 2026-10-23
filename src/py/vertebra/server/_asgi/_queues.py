@@ -31,7 +31,7 @@ class AsgiProtocolError(RuntimeError):
     """Raised when an ASGI application violates the ASGI 3.0 state machine."""
 
 
-class AsgiResponse(msgspec.Struct, gc=False):
+class AsgiResponse(msgspec.Struct, frozen=True, gc=False):
     """Collected HTTP response from an ASGI application."""
 
     status: int

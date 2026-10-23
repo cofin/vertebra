@@ -40,7 +40,7 @@ KNOWN_TARGETS: dict[str, tuple[str, str, str, str]] = {
 }
 
 
-class BuildTarget(msgspec.Struct, frozen=True, gc=False):
+class BuildTarget(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Resolved platform triple and python-build-standalone release coordinates."""
 
     os_name: str

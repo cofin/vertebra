@@ -34,7 +34,7 @@ class EphemeralCertBundle(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     expiration_ts: float = 0.0
 
 
-class CloudSqlInstanceUri(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class CloudSqlInstanceUri(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """Parsed Google Cloud SQL instance connection name (`project:region:instance`)."""
 
     project: str

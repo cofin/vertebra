@@ -5,9 +5,10 @@ import os
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+
+import msgspec
 
 __all__ = (
     "CODEGEN_FLAGS",
@@ -40,13 +41,12 @@ CODEGEN_FLAGS: dict[str, str] = {
 }
 
 
-@dataclass(frozen=True, slots=True)
-class RustPgoConfig:
+class RustPgoConfig(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Immutable configuration for Rust PGO build stages."""
 
     crate_name: str = "vertebra-http"
-    manifest_path: Path = field(default_factory=lambda: _DEFAULT_MANIFEST)
-    profile_dir: Path = field(default_factory=lambda: _DEFAULT_PROFILE_DIR)
+    manifest_path: Path = msgspec.field(default_factory=lambda: _DEFAULT_MANIFEST)
+    profile_dir: Path = msgspec.field(default_factory=lambda: _DEFAULT_PROFILE_DIR)
     llvm_profdata_bin: str = ""
     maturin_features: str = "pyo3/extension-module"
 

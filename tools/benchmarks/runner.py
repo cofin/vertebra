@@ -6,15 +6,15 @@ import signal
 import socket
 import subprocess
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Self
+
+import msgspec
 
 if TYPE_CHECKING:
     from types import TracebackType
 
 
-@dataclass(slots=True)
-class BenchmarkResult:
+class BenchmarkResult(msgspec.Struct, frozen=True, gc=False):
     """Container for a single benchmark measurement."""
 
     target: str
@@ -83,7 +83,11 @@ class OhaRunner:
         return env
 
     def _parse(self, raw: dict[str, Any]) -> dict[str, Any]:
-        """Parse oha 1.12.1 JSON output into a flat result dict."""
+        """Parse oha 1.12.1 JSON output into a flat result dict.
+
+        Computes RPS from total successful requests divided by elapsed time,
+        since instantaneous sample averages can skew on bursty batch-first workloads.
+        """
         summary = raw.get("summary", {})
         latency_pcts = raw.get("latencyPercentiles", {})
         rps_data = raw.get("rps", {})
@@ -103,9 +107,6 @@ class OhaRunner:
         )
         total_requests = sum(_i(count) for count in status_dist.values()) + transport_errors
 
-        # Compute RPS from total successful requests / elapsed time.
-        # Both rps.mean (instantaneous sample average) and summary.requestsPerSec
-        # can be inaccurate for bursty batch-first workloads.
         elapsed = _f(summary.get("total"))
         successful = sum(_i(count) for code, count in status_dist.items() if str(code).startswith("2"))
         rps = successful / elapsed if elapsed > 0 and successful > 0 else _f(rps_data.get("mean"))
@@ -167,7 +168,7 @@ class ServerRunner:
                 stderr = ""
                 if self._process.stderr:
                     stderr = self._process.stderr.read().decode(errors="replace").strip()
-                    stderr = "\n".join(stderr.splitlines()[-20:])  # last 20 lines
+                    stderr = "\n".join(stderr.splitlines()[-20:])
                 msg = f"Server process exited with code {self._process.returncode}"
                 if stderr:
                     msg += f"\n{stderr}"

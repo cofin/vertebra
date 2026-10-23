@@ -21,7 +21,7 @@ __all__ = (
 )
 
 
-class ChangeEvent(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class ChangeEvent(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Change-feed event emitted via ``LISTEN``/``NOTIFY`` or ``pg_logical_emit_message``."""
 
     event_id: int

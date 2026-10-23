@@ -31,7 +31,7 @@ def _extract_params(fn: Callable[..., Any]) -> tuple[str, ...]:
     )
 
 
-class Provide(msgspec.Struct, gc=False):
+class Provide(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Dependency provider descriptor with explicit scope and sync-to-thread control."""
 
     dependency: Callable[..., Any]
@@ -43,7 +43,7 @@ class Provide(msgspec.Struct, gc=False):
     def __post_init__(self) -> None:
         """Precompute parameter names if not explicitly provided."""
         if not self.parameter_names:
-            self.parameter_names = _extract_params(self.dependency)
+            msgspec.structs.force_setattr(self, "parameter_names", _extract_params(self.dependency))
 
 
 class DependencyGraph:

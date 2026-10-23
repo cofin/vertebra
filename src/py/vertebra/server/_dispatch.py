@@ -80,7 +80,7 @@ _PARAM_EXTRACTORS: dict[str, Callable[[Any], Any]] = {
 }
 
 
-class HandlerSpec(msgspec.Struct, frozen=True, gc=False, array_like=True):
+class HandlerSpec(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Pre-compiled dispatch specification and invoker for a route handler."""
 
     has_params: bool
@@ -231,7 +231,7 @@ async def _invoke_async_handler(
         return build_error_response(exc, request, error_handler, vr_cls)
 
 
-class BatchDispatchPlan(msgspec.Struct, gc=False):
+class BatchDispatchPlan(msgspec.Struct, frozen=True, gc=False):
     """Result of partitioning a batch into dispatch groups."""
 
     sync_native: list[tuple[int, Any, HandlerSpec]] = msgspec.field(default_factory=list)

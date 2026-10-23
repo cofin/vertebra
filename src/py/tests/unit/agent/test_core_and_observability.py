@@ -132,6 +132,10 @@ async def test_jsonrpc_single_batch_and_notification_silence() -> None:
     assert unknown_res is not None
     assert unknown_res["error"]["code"] == METHOD_NOT_FOUND
 
+    assert JsonRpcRequest.__struct_config__.forbid_unknown_fields is True
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.convert({"jsonrpc": "2.0", "method": "ping", "extra": True}, JsonRpcRequest)
+
 
 def test_cursor_pagination_roundtrip_and_invalid_cursor() -> None:
     """Test cursor pagination round-trip and validation rejection."""
@@ -301,6 +305,12 @@ def test_sse_replay_buffer_and_stream_broker_resumption() -> None:
 
     assert len(replayed) == 3
     assert [f.id for f in replayed] == ["3", "4", "5"]
+
+    sample_frame = SseFrame(id="1", event="message", data="frame-1")
+    assert SseFrame.__struct_config__.array_like is False
+    assert SseFrame.__struct_config__.cache_hash is True
+    assert isinstance(decode_json(encode_json_bytes(sample_frame)), dict)
+    assert isinstance(hash(sample_frame), int)
 
 
 @pytest.mark.anyio

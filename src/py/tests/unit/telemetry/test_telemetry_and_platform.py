@@ -19,6 +19,7 @@ from vertebra.server.worker import Worker
 from vertebra.telemetry import (
     GenAiMetricSample,
     GenAiRecorder,
+    GenAiUsage,
     LoggingConfig,
     LogHandler,
     LogSink,
@@ -27,6 +28,8 @@ from vertebra.telemetry import (
     SqlTracePropagator,
     TraceContext,
 )
+from vertebra.telemetry.otel import DbPoolMetricSample
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
 class DummyOracleConn:
@@ -155,6 +158,33 @@ def test_span_ring_genai_metrics_cgroup_and_zpages(tmp_path: Path) -> None:
     assert isinstance(sample, GenAiMetricSample)
     assert sample.input_tokens == 120
     assert len(genai.samples) == 1
+
+    trace_sample = TraceContext(trace_id="4bf92f3577b34da6a3ce929d0e0e4736", span_id="00f067aa0ba902b7")
+    usage_sample = GenAiUsage(input_tokens=10, output_tokens=5)
+    pool_sample = DbPoolMetricSample(
+        pool_name="primary",
+        active_leases=2,
+        primary_in_use=2,
+        overflow_in_use=0,
+        max_capacity=8,
+        waiting_threads=0,
+        total_timeouts=0,
+        total_reclaimed=0,
+        statement_cache_hits=10,
+        statement_cache_misses=1,
+    )
+    span_sample = SpanData(
+        name="GET /orders",
+        trace_id="4bf92f3577b34da6a3ce929d0e0e4736",
+        span_id="00f067aa0ba902b7",
+        parent_span_id=None,
+        start_ns=100,
+        duration_ns=500,
+    )
+    for item in (trace_sample, usage_sample, sample, pool_sample, span_sample):
+        assert isinstance(decode_json(encode_json_bytes(item)), dict)
+    assert isinstance(hash(trace_sample), int)
+    assert isinstance(hash(usage_sample), int)
 
     cpu_max = tmp_path / "cpu.max"
     mem_max = tmp_path / "memory.max"

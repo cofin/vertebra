@@ -71,7 +71,7 @@ def _parse_field(
     return frozenset(values)
 
 
-class CronExpression(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class CronExpression(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """Parsed 5-field cron expression representation."""
 
     minutes: frozenset[int]

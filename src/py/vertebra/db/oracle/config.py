@@ -19,7 +19,7 @@ __all__ = (
 _TNS_SAFE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
-class OracleConnectDescriptor(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class OracleConnectDescriptor(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """High-availability Oracle TNS connect descriptor builder for Exadata, RAC, SCAN, DRCP, and TAC."""
 
     hosts: tuple[tuple[str, int], ...] = (("localhost", 1521),)

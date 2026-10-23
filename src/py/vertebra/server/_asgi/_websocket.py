@@ -25,7 +25,7 @@ class WebSocketDisconnect(Exception):
         self.reason = reason
 
 
-class WebSocketHandshakeResult(msgspec.Struct, gc=False):
+class WebSocketHandshakeResult(msgspec.Struct, frozen=True, gc=False):
     """Outcome of the pre-upgrade ASGI WebSocket handshake."""
 
     accepted: bool

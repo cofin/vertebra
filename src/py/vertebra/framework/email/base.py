@@ -75,7 +75,7 @@ class EmailMessage(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     metadata: dict[str, str] = msgspec.field(default_factory=dict)
 
 
-class EmailReceipt(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class EmailReceipt(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Delivery confirmation receipt returned by an email transport."""
 
     message_id: str

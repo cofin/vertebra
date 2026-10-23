@@ -52,7 +52,7 @@ class LitestarFastPathBypass:
         return None
 
 
-class CompiledLitestarRoute(msgspec.Struct, frozen=True, gc=False, array_like=True):
+class CompiledLitestarRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Pre-compiled per-route dispatch metadata for zero-overhead Litestar v2/v3 handler invocation."""
 
     handler_id: int

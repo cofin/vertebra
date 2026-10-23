@@ -2,16 +2,25 @@ import dataclasses
 import datetime
 import decimal
 import enum
+import gc
 import uuid
 from pathlib import Path
 
 import msgspec
+import pytest
 
+from vertebra._typing import (
+    BaseStruct,
+    CamelizedBaseStruct,
+    FrozenBaseStruct,
+    FrozenCamelizedStruct,
+)
 from vertebra.utils.serializers import (
     MsgpackCodec,
     decode_json,
     decode_msgpack,
     encode_json,
+    encode_json_bytes,
     encode_msgpack,
 )
 
@@ -152,3 +161,70 @@ def test_msgpack_uuid_datetime_path_hooks() -> None:
     decoded_uuid = decode_msgpack(uuid_encoded, type=uuid.UUID)
     assert isinstance(decoded_uuid, uuid.UUID)
     assert decoded_uuid == uid
+
+
+class SampleBaseItem(BaseStruct):
+    """Mutable snake_case base struct with omitted defaults."""
+
+    item_name: str
+    optional_tag: str | None = None
+
+
+class SampleCamelItem(CamelizedBaseStruct):
+    """Mutable camelCase base struct with omitted defaults."""
+
+    item_name: str
+    optional_tag: str | None = None
+
+
+class SampleFrozenItem(FrozenBaseStruct):
+    """Immutable snake_case base struct with omitted defaults."""
+
+    item_name: str
+    optional_tag: str | None = None
+
+
+class SampleFrozenCamelItem(FrozenCamelizedStruct):
+    """Immutable camelCase base struct with omitted defaults."""
+
+    item_name: str
+    optional_tag: str | None = None
+
+
+def test_base_struct_hierarchy_configs_immutability_and_wire_encoding() -> None:
+    """Verify BaseStruct, CamelizedBaseStruct, FrozenBaseStruct, and FrozenCamelizedStruct contracts."""
+    for cls in (SampleBaseItem, SampleCamelItem, SampleFrozenItem, SampleFrozenCamelItem):
+        cfg = cls.__struct_config__
+        assert cfg.gc is False
+        assert cfg.omit_defaults is True
+        assert cfg.repr_omit_defaults is True
+
+    assert SampleBaseItem.__struct_config__.frozen is False
+    assert SampleCamelItem.__struct_config__.frozen is False
+    assert SampleFrozenItem.__struct_config__.frozen is True
+    assert SampleFrozenCamelItem.__struct_config__.frozen is True
+
+    mutable_base = SampleBaseItem(item_name="alpha")
+    mutable_camel = SampleCamelItem(item_name="beta")
+    frozen_base = SampleFrozenItem(item_name="gamma")
+    frozen_camel = SampleFrozenCamelItem(item_name="delta")
+
+    assert not gc.is_tracked(mutable_base)
+    assert not gc.is_tracked(mutable_camel)
+    assert not gc.is_tracked(frozen_base)
+    assert not gc.is_tracked(frozen_camel)
+
+    mutable_base.optional_tag = "updated"
+    assert mutable_base.to_dict() == {"item_name": "alpha", "optional_tag": "updated"}
+
+    with pytest.raises(AttributeError):
+        frozen_base.item_name = "mutated"
+
+    with pytest.raises(AttributeError):
+        frozen_camel.item_name = "mutated"
+
+    assert decode_json(encode_json_bytes(frozen_base)) == {"item_name": "gamma"}
+    assert decode_json(encode_json_bytes(frozen_camel)) == {"itemName": "delta"}
+    assert decode_json(encode_json_bytes(mutable_camel)) == {"itemName": "beta"}
+    assert "optional_tag" not in repr(frozen_base)
+    assert "optional_tag" not in repr(frozen_camel)

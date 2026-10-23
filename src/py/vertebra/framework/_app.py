@@ -24,7 +24,7 @@ from vertebra.framework.openapi import OpenAPIConfig, OpenAPISpecBuilder
 __all__ = ("App", "HandlerInfo", "LifecycleHook", "_make_handler_id")
 
 
-class HandlerInfo(msgspec.Struct, frozen=True, gc=False, array_like=True):
+class HandlerInfo(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Metadata stored per registered handler, serializable via msgspec."""
 
     handler_id: int

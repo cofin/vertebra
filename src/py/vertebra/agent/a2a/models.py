@@ -10,6 +10,7 @@ from typing import Any, Literal, cast
 
 import msgspec
 
+from vertebra._typing import FrozenCamelizedStruct
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 TaskState = Literal[
@@ -33,7 +34,7 @@ TERMINAL_A2A_STATES: frozenset[TaskState] = frozenset(
 )
 
 
-class TextPart(msgspec.Struct, tag_field="kind", tag="text", frozen=True, gc=False, kw_only=True, rename="camel"):
+class TextPart(FrozenCamelizedStruct, tag_field="kind", tag="text", frozen=True, kw_only=True):
     """Plain text content item in an A2A message or artifact."""
 
     text: str = ""
@@ -44,7 +45,7 @@ class TextPart(msgspec.Struct, tag_field="kind", tag="text", frozen=True, gc=Fal
         return "text"
 
 
-class FileContent(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True):
+class FileContent(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """File payload or remote URI pointer."""
 
     data: str | None = None
@@ -52,7 +53,7 @@ class FileContent(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="c
     mime_type: str | None = None
 
 
-class FilePart(msgspec.Struct, tag_field="kind", tag="file", frozen=True, gc=False, kw_only=True, rename="camel"):
+class FilePart(FrozenCamelizedStruct, tag_field="kind", tag="file", frozen=True, kw_only=True):
     """Binary or document file item in an A2A message or artifact."""
 
     file: FileContent
@@ -63,7 +64,7 @@ class FilePart(msgspec.Struct, tag_field="kind", tag="file", frozen=True, gc=Fal
         return "file"
 
 
-class DataPart(msgspec.Struct, tag_field="kind", tag="data", frozen=True, gc=False, kw_only=True, rename="camel"):
+class DataPart(FrozenCamelizedStruct, tag_field="kind", tag="data", frozen=True, kw_only=True):
     """Structured data dictionary item in an A2A message or artifact."""
 
     data: dict[str, Any] = msgspec.field(default_factory=dict)
@@ -77,7 +78,7 @@ class DataPart(msgspec.Struct, tag_field="kind", tag="data", frozen=True, gc=Fal
 type Part = TextPart | FilePart | DataPart
 
 
-class Message(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True):
+class Message(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Message exchanged between caller and agent."""
 
     message_id: str
@@ -88,7 +89,7 @@ class Message(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel
     metadata: dict[str, Any] | None = None
 
 
-class Artifact(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True):
+class Artifact(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Durable artifact produced during task execution."""
 
     artifact_id: str
@@ -98,7 +99,7 @@ class Artifact(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="came
     metadata: dict[str, Any] | None = None
 
 
-class TaskStatus(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True):
+class TaskStatus(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Current progress and state of an A2A task."""
 
     state: TaskState
@@ -106,7 +107,7 @@ class TaskStatus(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="ca
     timestamp: str | None = None
 
 
-class Task(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True):
+class Task(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Immutable representation of an A2A durable task."""
 
     task_id: str
@@ -117,9 +118,7 @@ class Task(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", 
     owner_id: str | None = None
 
 
-class TaskStatusUpdateEvent(
-    msgspec.Struct, tag_field="kind", tag="status", frozen=True, gc=False, kw_only=True, rename="camel"
-):
+class TaskStatusUpdateEvent(FrozenCamelizedStruct, tag_field="kind", tag="status", frozen=True, kw_only=True):
     """Streaming event notifying subscribers of a task state transition."""
 
     task_id: str
@@ -132,9 +131,7 @@ class TaskStatusUpdateEvent(
         return "status"
 
 
-class TaskArtifactUpdateEvent(
-    msgspec.Struct, tag_field="kind", tag="artifact", frozen=True, gc=False, kw_only=True, rename="camel"
-):
+class TaskArtifactUpdateEvent(FrozenCamelizedStruct, tag_field="kind", tag="artifact", frozen=True, kw_only=True):
     """Streaming event publishing a newly generated or updated task artifact."""
 
     task_id: str
@@ -146,15 +143,13 @@ class TaskArtifactUpdateEvent(
         return "artifact"
 
 
-class PushNotificationAuthenticationInfo(
-    msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True
-):
+class PushNotificationAuthenticationInfo(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Authentication schemes supported by the push notification webhook endpoint."""
 
     schemes: tuple[str, ...] = ("bearer",)
 
 
-class PushNotificationConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True):
+class PushNotificationConfig(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Configuration for webhook push notification delivery."""
 
     url: str
@@ -162,16 +157,14 @@ class PushNotificationConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True
     authentication: PushNotificationAuthenticationInfo | None = None
 
 
-class TaskPushNotificationConfig(
-    msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True
-):
+class TaskPushNotificationConfig(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Task-specific push notification binding."""
 
     task_id: str
     config: PushNotificationConfig
 
 
-class AgentInterface(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True):
+class AgentInterface(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Transport interface declaration in an A2A 1.0 AgentCard."""
 
     url: str
@@ -179,7 +172,7 @@ class AgentInterface(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename
     protocol_version: str = "1.0"
 
 
-class AgentCapabilities(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True):
+class AgentCapabilities(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Capabilities advertised by an A2A 1.0 agent."""
 
     streaming: bool = True
@@ -187,14 +180,14 @@ class AgentCapabilities(msgspec.Struct, frozen=True, gc=False, kw_only=True, ren
     extended_card: bool = True
 
 
-class AgentProvider(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True):
+class AgentProvider(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Organization or author providing the A2A agent."""
 
     organization: str = ""
     url: str | None = None
 
 
-class AgentSkill(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True):
+class AgentSkill(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Discrete skill capability exposed by an agent."""
 
     id: str
@@ -204,7 +197,7 @@ class AgentSkill(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="ca
     examples: tuple[str, ...] = ()
 
 
-class AgentCardSignature(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True):
+class AgentCardSignature(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """RFC 7515 JWS signature envelope verifying AgentCard authenticity."""
 
     protected: str
@@ -212,7 +205,7 @@ class AgentCardSignature(msgspec.Struct, frozen=True, gc=False, kw_only=True, re
     header: dict[str, Any] | None = None
 
 
-class AgentCard(msgspec.Struct, frozen=True, gc=False, kw_only=True, rename="camel", omit_defaults=True):
+class AgentCard(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """A2A 1.0 Agent Card discoverable at /.well-known/agent-card.json."""
 
     name: str

@@ -42,7 +42,7 @@ sources:
 
 ## 2. Agent-to-Agent Protocol (A2A 1.0)
 
-[`vertebra.agent.a2a`](../../../../../src/py/vertebra/agent/a2a/service.py) provides peer-to-peer agent collaboration with verifiable cryptographic identity.
+[`vertebra.agent.a2a`](../../../../../src/py/vertebra/agent/a2a/service.py) provides peer-to-peer agent collaboration with verifiable cryptographic identity. All A2A 1.0 data models in [`a2a/models.py`](../../../../../src/py/vertebra/agent/a2a/models.py) subclass [`FrozenCamelizedStruct`](../../../../../src/py/vertebra/_typing.py) (`frozen=True, gc=False, rename="camel", omit_defaults=True, repr_omit_defaults=True`), while MCP `2026-07-28` models in [`mcp/models.py`](../../../../../src/py/vertebra/agent/mcp/models.py) subclass [`FrozenBaseStruct`](../../../../../src/py/vertebra/_typing.py).
 
 - **Cryptographic Card Signing (`signing.py`)**: Signs and verifies `AgentCard` manifests using JSON Canonicalization Scheme (JCS, RFC 8785) with Ed25519 (`ed25519`) or ECDSA P-256 (`es256`).
 - **Discovery Endpoint**: Serves `/.well-known/agent.json` containing the public `AgentCard`, supported skills, operational modes, and verification keys.

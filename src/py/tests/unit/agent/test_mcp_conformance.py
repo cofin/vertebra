@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from vertebra._typing import FrozenBaseStruct
 from vertebra.agent.core.context import AgentContext, CallerIdentity
 from vertebra.agent.core.guards import GuardProtocol, PermissionDeniedError
 from vertebra.agent.core.schema import tool
@@ -97,6 +98,14 @@ async def test_mcp_service_tools_list_and_call() -> None:
 
     prof_res = await service._handle_tools_call({"name": "get_profile", "arguments": {}})
     assert prof_res["structuredContent"] == {"name": "Alice", "role": "Admin"}
+
+    txt = TextContent(text="hello")
+    blob = BlobContent(data="YmluYXJ5")
+    arg = PromptArgument(name="topic")
+    msg = PromptMessage(role="user", content=txt)
+    for model in (txt, blob, arg, msg):
+        assert isinstance(model, FrozenBaseStruct)
+        assert isinstance(hash(model), int)
 
 
 @pytest.mark.anyio

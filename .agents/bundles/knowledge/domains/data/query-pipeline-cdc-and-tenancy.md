@@ -47,7 +47,7 @@ The intended layering is an explicit predicate for plan quality plus a session G
 
 | Symbol | Responsibility |
 |---|---|
-| [`ChangeEvent`](../../../../../src/py/vertebra/db/cdc.py) | `msgspec.Struct(frozen=True, gc=False, kw_only=True, array_like=True)`: `event_id`, `channel`, `operation`, `payload`, `spilled`. |
+| [`ChangeEvent`](../../../../../src/py/vertebra/db/cdc.py) | `msgspec.Struct(frozen=True, gc=False, kw_only=True)`: `event_id`, `channel`, `operation`, `payload`, `spilled`. |
 | `CdcConfig` | `channel="vertebra_events"`, `spill_threshold_bytes=7500`, `spill_table`, `replication_slot_name`, `publication_name`, `max_slot_wal_keep_size_mb=4096`. |
 | `ChangeFeed.publish_event(operation, payload)` | Assigns a monotonically increasing `event_id` and serializes with `encode_json_bytes`. Payloads above the threshold are kept in an in-process `_spill_store`, and the wire envelope carries `spilled: true` without the payload. This keeps envelopes under the 8000-byte `NOTIFY` limit. Returns `(wire_envelope, ChangeEvent)` and appends to `_history`. |
 | `ChangeFeed.hydrate_notification(envelope)` | Decodes with `decode_json` and restores spilled payloads by `event_id`. An unknown spilled id yields an empty payload. |

@@ -21,10 +21,10 @@ from vertebra.agent.core.sse import SseFrame
 from vertebra.agent.spec import TRANSFER_TOOL_NAME, Agent, AgentGroup, AgentMessage
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.telemetry.genai import GenAiUsage
-from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.utils.serializers import decode_json, encode_json, encode_json_bytes
 
 
-class ModelDelta(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class ModelDelta(msgspec.Struct, frozen=True, gc=False, kw_only=True, omit_defaults=True):
     """Incremental chunk produced by a model provider during chat streaming."""
 
     event_type: Literal["delta", "thought", "tool_call", "usage"]
@@ -95,7 +95,7 @@ class GoogleGenAIProvider:
         yield ModelDelta(event_type="usage", usage=GenAiUsage(input_tokens=10, output_tokens=10))
 
 
-class AgentStreamFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class AgentStreamFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, omit_defaults=True):
     """Wire frame streamed to subscribers during an active agent turn."""
 
     turn_id: str
@@ -118,11 +118,10 @@ class AgentStreamFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, arra
 
     def to_sse_frame(self, event_id: str) -> SseFrame:
         """Encode this stream frame into a W3C-compliant SSE frame."""
-        data_bytes = encode_json_bytes(decode_json(encode_json_bytes(self)))
         return SseFrame(
             id=event_id,
             event=self.event_type,
-            data=data_bytes.decode("utf-8"),
+            data=encode_json(self),
         )
 
 

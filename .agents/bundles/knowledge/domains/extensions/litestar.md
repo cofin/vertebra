@@ -33,6 +33,6 @@ sources:
 
 ## 3. Fused Fast Path, Channels & Store (`fastpath.py`, `channels.py`, `store.py`)
 
-- **[`CompiledLitestarRoute`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py)**: Frozen `msgspec.Struct(gc=False, array_like=True)` produced by `CompiledLitestarRoute.compile_routes` for routes without custom ASGI middleware stacks. [`CompiledLitestarRoute.dispatch_direct`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py) and `CompiledLitestarRoute.preseed_scope_body` bypass full ASGI middleware traversal when eligible.
+- **[`CompiledLitestarRoute`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py)**: Frozen `msgspec.Struct(gc=False, kw_only=True)` produced by `compile_litestar_fastpath_routes` for routes without custom ASGI middleware stacks. [`dispatch_litestar_handler_direct`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py) and `preseed_litestar_scope_body` bypass full ASGI middleware traversal when eligible.
 - **[`ChannelsBackend`](../../../../../src/py/vertebra/extensions/litestar/channels.py)** (`ChannelsBackend.install_into_app_config`): Native in-memory/SHM-compatible backend for Litestar `ChannelsPlugin` supporting `publish`, `subscribe`, `unsubscribe`, `stream_events`, and bounded history.
 - **[`MemoryStore`](../../../../../src/py/vertebra/extensions/litestar/store.py)** (`MemoryStore.install_into_app_config`): Monotonic-clock TTL key-value store (`get`, `set`, `delete`, `delete_all`, `exists`, `expires_in`) replacing Litestar's default response-cache store.

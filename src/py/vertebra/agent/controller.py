@@ -57,7 +57,7 @@ class QueuedTurnTicket(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     status: str = "queued"
 
 
-class ConfirmationDecisionRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class ConfirmationDecisionRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True, forbid_unknown_fields=True):
     """Payload to approve or reject a pending human-in-the-loop confirmation ticket."""
 
     decision: Literal["approve", "reject"] = "approve"

@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from vertebra.server._asgi._sse import SseEvent, SseResponse, extract_last_event_id
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
 def test_sse_event_encoding_and_header_sanitization() -> None:
@@ -27,6 +28,10 @@ def test_sse_event_encoding_and_header_sanitization() -> None:
         "data: beta\r\n"
         "data: gamma\r\n\r\n"
     )
+    assert SseEvent.__struct_config__.array_like is False
+    assert SseEvent.__struct_config__.cache_hash is True
+    assert isinstance(decode_json(encode_json_bytes(event)), dict)
+    assert isinstance(hash(event), int)
 
 
 def test_extract_last_event_id_from_asgi_scope() -> None:
