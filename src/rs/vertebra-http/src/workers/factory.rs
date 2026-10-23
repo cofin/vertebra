@@ -35,6 +35,12 @@ pub struct WorkerLifecycle {
     pub last_pid: u32,
     pub app_path: String,
     pub python_bin: String,
+    #[cfg(unix)]
+    pub broker_shm_fd: std::os::fd::RawFd,
+    pub broker_shm_size: usize,
+    pub broker_pool_size: u32,
+    pub broker_max_overflow: u32,
+    pub lease_table: Option<Arc<ShmLeaseTable>>,
 }
 
 impl WorkerLifecycle {
@@ -66,6 +72,32 @@ impl WorkerLifecycle {
             last_pid,
             app_path,
             python_bin,
+            #[cfg(unix)]
+            broker_shm_fd: -1,
+            broker_shm_size: 0,
+            broker_pool_size: 20,
+            broker_max_overflow: 10,
+            lease_table: None,
+        }
+    }
+
+    /// Attach a shared-memory lease table to this worker lifecycle.
+    pub fn with_lease_table(mut self, lease_table: Arc<ShmLeaseTable>) -> Self {
+        self.lease_table = Some(lease_table);
+        self
+    }
+
+    /// Set the shared-memory lease table for this worker lifecycle.
+    pub fn set_lease_table(&mut self, lease_table: Arc<ShmLeaseTable>) {
+        self.lease_table = Some(lease_table);
+    }
+
+    /// Reclaim any active connection leases held by this worker's last PID.
+    pub fn reclaim_worker_leases(&self) -> u32 {
+        if let Some(ref table) = self.lease_table {
+            table.reclaim_worker(self.last_pid)
+        } else {
+            0
         }
     }
 
@@ -163,6 +195,19 @@ impl WorkerLifecycle {
             cmd.env("VERTEBRA_THREADS", threads);
         }
 
+        if self.broker_shm_fd >= 0 && self.broker_shm_size > 0 {
+            cmd.env("VERTEBRA_BROKER_SHM_FD", self.broker_shm_fd.to_string());
+            cmd.env("VERTEBRA_BROKER_SHM_SIZE", self.broker_shm_size.to_string());
+            cmd.env(
+                "VERTEBRA_BROKER_POOL_SIZE",
+                self.broker_pool_size.to_string(),
+            );
+            cmd.env(
+                "VERTEBRA_BROKER_MAX_OVERFLOW",
+                self.broker_max_overflow.to_string(),
+            );
+        }
+
         #[cfg(target_os = "linux")]
         process::set_parent_death_signal(&mut cmd);
 
@@ -225,7 +270,8 @@ impl RingFactory {
             pairs.push(Arc::new(pair));
         }
 
-        let broker_shm_size = ShmLeaseTable::required_size(pool_size, max_overflow);
+        let broker_shm_size =
+            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, 512);
         let region = ShmRegion::create(broker_shm_size).map_err(RingPairError::Shm)?;
 
         #[cfg(unix)]
@@ -238,7 +284,7 @@ impl RingFactory {
         };
 
         let broker_table = Arc::new(
-            ShmLeaseTable::init_in_region(region, pool_size, max_overflow)
+            ShmLeaseTable::init_in_region_with_statements(region, pool_size, max_overflow, 512)
                 .map_err(|e| RingPairError::Io(std::io::Error::other(e.to_string())))?,
         );
 
@@ -372,23 +418,46 @@ impl RingFactory {
 
     /// Attach spawned children to lifecycles.
     pub fn attach_children(&mut self, children: Vec<Child>, app_path: &str, python_bin: &str) {
+        let pool_size = self.broker_table.pool_size();
+        let max_overflow = self.broker_table.max_overflow();
         self.lifecycles = children
             .into_iter()
             .enumerate()
             .map(|(i, child)| {
-                WorkerLifecycle::new(
+                let mut lc = WorkerLifecycle::new(
                     child,
                     Arc::clone(&self.pairs[i]),
                     i,
                     app_path.to_owned(),
                     python_bin.to_owned(),
-                )
+                );
+                #[cfg(unix)]
+                {
+                    lc.broker_shm_fd = self.broker_shm_fd;
+                }
+                lc.broker_shm_size = self.broker_shm_size;
+                lc.broker_pool_size = pool_size;
+                lc.broker_max_overflow = max_overflow;
+                lc.lease_table = Some(Arc::clone(&self.broker_table));
+                lc
             })
             .collect();
     }
 
     /// Add a lifecycle directly (e.g. for testing).
-    pub fn add_lifecycle(&mut self, lifecycle: WorkerLifecycle) {
+    pub fn add_lifecycle(&mut self, mut lifecycle: WorkerLifecycle) {
+        #[cfg(unix)]
+        if lifecycle.broker_shm_fd < 0 {
+            lifecycle.broker_shm_fd = self.broker_shm_fd;
+        }
+        if lifecycle.broker_shm_size == 0 {
+            lifecycle.broker_shm_size = self.broker_shm_size;
+        }
+        lifecycle.broker_pool_size = self.broker_table.pool_size();
+        lifecycle.broker_max_overflow = self.broker_table.max_overflow();
+        if lifecycle.lease_table.is_none() {
+            lifecycle.lease_table = Some(Arc::clone(&self.broker_table));
+        }
         self.lifecycles.push(lifecycle);
     }
 
@@ -617,5 +686,37 @@ mod tests {
                 "FD_CLOEXEC should be cleared for inheritance"
             );
         }
+    }
+
+    #[test]
+    fn factory_broker_colocates_statement_cache_and_reclaims_leases() {
+        let mut factory =
+            RingFactory::with_broker_config(1, RingPairConfig::default(), 4, 2).expect("factory");
+        assert_eq!(factory.broker_table().stmt_capacity(), 512);
+        let stmt_cache = factory
+            .broker_table()
+            .statement_cache()
+            .expect("co-located statement cache");
+        assert!(stmt_cache.insert(1, b"SELECT 1", 0, b"SELECT 1", b""));
+        assert!(stmt_cache.lookup(1, b"SELECT 1").is_some());
+
+        let child = Command::new("true").spawn().expect("spawn true");
+        let worker_pid = child.id();
+        let lifecycle = WorkerLifecycle::new(
+            child,
+            factory.ring_pair(0),
+            0,
+            "app:app".into(),
+            "python".into(),
+        );
+        factory.add_lifecycle(lifecycle);
+
+        let _grant = factory
+            .broker_table()
+            .try_acquire(worker_pid, 60_000_000_000, 777)
+            .expect("grant");
+        assert_eq!(factory.broker_table().stats().active_leases, 1);
+        assert_eq!(factory.lifecycles_mut()[0].reclaim_worker_leases(), 1);
+        assert_eq!(factory.broker_table().stats().active_leases, 0);
     }
 }

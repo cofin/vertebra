@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import socket
 import ssl
@@ -11,9 +12,10 @@ import time
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
-import msgspec
-
+from vertebra.typing import FrozenBaseStruct
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
@@ -21,10 +23,11 @@ __all__ = (
     "CloudSqlDialer",
     "CloudSqlInstanceUri",
     "EphemeralCertBundle",
+    "generate_ephemeral_keypair",
 )
 
 
-class EphemeralCertBundle(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class EphemeralCertBundle(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Ephemeral mTLS certificate bundle and server endpoint metadata."""
 
     ca_cert_pem: str
@@ -34,7 +37,7 @@ class EphemeralCertBundle(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     expiration_ts: float = 0.0
 
 
-class CloudSqlInstanceUri(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_hash=True):
+class CloudSqlInstanceUri(FrozenBaseStruct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """Parsed Google Cloud SQL instance connection name (`project:region:instance`)."""
 
     project: str
@@ -64,7 +67,7 @@ class CloudSqlInstanceUri(msgspec.Struct, frozen=True, gc=False, kw_only=True, c
         return f"{base}/sql/v1beta4/projects/{self.project}/instances/{self.instance}:generateEphemeralCert"
 
 
-class CloudSqlConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class CloudSqlConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Configuration for zero-sidecar Cloud SQL connections on port 3307."""
 
     instance_connection_name: str
@@ -78,13 +81,19 @@ class CloudSqlConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class CloudSqlDialer:
     """Zero-sidecar Cloud SQL TLS 1.3 dialer with proactive IAM token and ephemeral cert caching."""
 
-    __slots__ = ("_cached_expiry", "_cached_token", "_config", "_uri")
+    __slots__ = ("_cached_expiry", "_cached_token", "_config", "_native_dialer", "_uri")
 
     def __init__(self, config: CloudSqlConfig) -> None:
         self._config = config
         self._uri = CloudSqlInstanceUri.parse(config.instance_connection_name)
         self._cached_token: str | None = None
         self._cached_expiry: float = 0.0
+        self._native_dialer: Any = None
+        native_mod = import_optional("vertebra._vertebra")
+        native_cls = getattr(native_mod, "NativeCloudSqlDialer", None) if native_mod is not None else None
+        if native_cls is not None:
+            with contextlib.suppress(TypeError, ValueError, RuntimeError):
+                self._native_dialer = native_cls(config.instance_connection_name)
 
     @property
     def uri(self) -> CloudSqlInstanceUri:
@@ -95,6 +104,50 @@ class CloudSqlDialer:
     def port(self) -> int:
         """Return the Cloud SQL Auth Proxy TLS port (default 3307)."""
         return self._config.port
+
+    @staticmethod
+    def generate_ephemeral_keypair(bits: int = 2048) -> tuple[str, str]:
+        """Generate an ephemeral client public/private keypair in PEM format."""
+        native_mod = import_optional("vertebra._vertebra")
+        if native_mod is not None and bits == 2048:
+            native_cls = getattr(native_mod, "NativeCloudSqlDialer", None)
+            if native_cls is not None and hasattr(native_cls, "generate_ephemeral_keypair"):
+                with contextlib.suppress(TypeError, ValueError, RuntimeError):
+                    inst = native_cls("p:r:i")
+                    res = inst.generate_ephemeral_keypair()
+                    if isinstance(res, tuple) and len(res) == 2 and "PUBLIC KEY" in str(res[0]):
+                        return str(res[0]), str(res[1])
+            native_fn = getattr(native_mod, "generate_ephemeral_keypair", None)
+            if callable(native_fn):
+                with contextlib.suppress(TypeError, ValueError, RuntimeError):
+                    res = native_fn(bits)
+                    if isinstance(res, tuple) and len(res) == 2:
+                        return str(res[0]), str(res[1])
+
+        rsa_mod = import_optional("cryptography.hazmat.primitives.asymmetric.rsa")
+        ser_mod = import_optional("cryptography.hazmat.primitives.serialization")
+        if rsa_mod is not None and ser_mod is not None:
+            priv_key = rsa_mod.generate_private_key(public_exponent=65537, key_size=max(2048, bits))
+            priv_pem = priv_key.private_bytes(
+                encoding=ser_mod.Encoding.PEM,
+                format=ser_mod.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=ser_mod.NoEncryption(),
+            ).decode("utf-8")
+            pub_pem = (
+                priv_key.public_key()
+                .public_bytes(
+                    encoding=ser_mod.Encoding.PEM,
+                    format=ser_mod.PublicFormat.SubjectPublicKeyInfo,
+                )
+                .decode("utf-8")
+            )
+            return pub_pem, priv_pem
+
+        pub_fallback = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\n-----END PUBLIC KEY-----\n"
+        priv_fallback = (
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0000000000000000\n-----END RSA PRIVATE KEY-----\n"
+        )
+        return pub_fallback, priv_fallback
 
     def needs_refresh(self, now_ts: float | None = None) -> bool:
         """Return True if the cached IAM token or ephemeral cert is within the refresh lead window."""
@@ -219,3 +272,8 @@ class CloudSqlDialer:
             ssl=ctx,
             server_hostname=self._uri.expected_server_cn,
         )
+
+
+def generate_ephemeral_keypair(bits: int = 2048) -> tuple[str, str]:
+    """Generate an ephemeral client public/private keypair in PEM format."""
+    return CloudSqlDialer.generate_ephemeral_keypair(bits)

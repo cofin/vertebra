@@ -2,16 +2,21 @@
 type: PRD
 flow_id: shm-native-drivers-and-broker-proxy
 title: "Two-Tier Shared-Memory Database & Storage Plane: Rust-Native SHM Drivers and Universal SQLSpec/Alchemy Broker Proxy"
-state: planned
+state: closed
 plan_revision: 2
 plan_commit: null
-state_revision: 0
+state_revision: 1
 current_task: null
-last_operation: null
-operation_targets: []
-last_verified_checkpoint: null
+last_operation: finish
+operation_targets:
+  - "1.1"
+  - "1.2"
+  - "2.1"
+  - "2.2"
+  - "2.3"
+last_verified_checkpoint: "make rs-test && make py-test && make lint-all && make review-check"
 created_at: 2026-10-23T20:18:00Z
-updated_at: 2026-10-23T20:46:00Z
+updated_at: 2026-10-23T22:26:00Z
 description: "Master PRD restoring and completing Vertebra's two-tier shared-memory data architecture: (1) Rust-native database (PostgreSQL, MySQL, SQLite, Oracle, SQL Server, DuckDB), cache (Redis, Valkey), and cloud dialer drivers in vertebra-db integrated natively with shared-memory rings and Arrow IPC regions, and (2) the universal SHM broker proxy enabling any existing SQLSpec or Advanced Alchemy driver to run over shared memory."
 tags: [prd, database, rust, shm, sqlspec, advanced-alchemy, arrow]
 child_specs:
@@ -57,19 +62,19 @@ Across [`cofin/vertebra`](https://github.com/cofin/vertebra) (commits `809c8d77`
 ## Implementation Plan
 
 ### Phase 1: Shared-Memory Broker Core & Universal SQLSpec / Alchemy Proxy
-- [ ] 1.1 Complete [`shm-database-broker`](../shm-database-broker/spec.md) (co-located SHM lease + statement cache region, supervisor `reclaim_worker`, and cross-process broker channel ring)
-- [ ] 1.2 Complete [`shm-broker-driver-proxy`](../shm-broker-driver-proxy/spec.md) (`SqlSpecProvider` host, `ProxySyncDriver`/`ProxyAsyncDriver` SHM ring RPC, threshold-based `ShmRegion` Arrow IPC result transfer, and `ProxySyncConfig`/`ProxyAsyncConfig`/`AlchemyPlugin` wiring)
+- [x] 1.1 Complete [`shm-database-broker`](../shm-database-broker/spec.md) (co-located SHM lease + statement cache region, supervisor `reclaim_worker`, and cross-process broker channel ring)
+- [x] 1.2 Complete [`shm-broker-driver-proxy`](../shm-broker-driver-proxy/spec.md) (`SqlSpecProvider` host, `ProxySyncDriver`/`ProxyAsyncDriver` SHM ring RPC, threshold-based `ShmRegion` Arrow IPC result transfer, and `ProxySyncConfig`/`ProxyAsyncConfig`/`AlchemyPlugin` wiring)
 
 ### Phase 2: Rust-Native Database, Cache & Cloud Dialer Engine (`vertebra-db`)
-- [ ] 2.1 Complete [`rust-native-shm-drivers`](../rust-native-shm-drivers/spec.md) (`src/rs/vertebra-db` crate, native Rust Postgres/MySQL/SQLite pools, Cloud SQL `:3307` & AlloyDB `:5433` mTLS dialers, SHM + Arrow IPC cursors, and `Vertebra*` SQLSpec/SQLAlchemy `+vtb` adapters)
-- [ ] 2.2 Complete [`rust-native-enterprise-olap-drivers`](../rust-native-enterprise-olap-drivers/spec.md) (Rust-native Oracle Thin TNS/TTC, SQL Server `tiberius` TDS, and SHM-brokered DuckDB Arrow IPC drivers in `src/rs/vertebra-db` + `Vertebra{Oracle,Mssql,Duckdb}*Config` and `{oracle,mssql,duckdb}+vtb` dialects)
-- [ ] 2.3 Complete [`redis-valkey-resp3`](../redis-valkey-resp3/spec.md) (Rust RESP3 parser/encoder in `vertebra-db`, `CLIENT TRACKING` invalidation, Sentinel/Cluster CRC16 routing, Memorystore IAM auth, and SHM cache integration)
+- [x] 2.1 Complete [`rust-native-shm-drivers`](../rust-native-shm-drivers/spec.md) (`src/rs/vertebra-db` crate, native Rust Postgres/MySQL/SQLite pools, Cloud SQL `:3307` & AlloyDB `:5433` mTLS dialers, SHM + Arrow IPC cursors, and `Vertebra*` SQLSpec/SQLAlchemy `+vtb` adapters)
+- [x] 2.2 Complete [`rust-native-enterprise-olap-drivers`](../rust-native-enterprise-olap-drivers/spec.md) (Rust-native Oracle Thin TNS/TTC, SQL Server `tiberius` TDS, and SHM-brokered DuckDB Arrow IPC drivers in `src/rs/vertebra-db` + `Vertebra{Oracle,Mssql,Duckdb}*Config` and `{oracle,mssql,duckdb}+vtb` dialects)
+- [x] 2.3 Complete [`redis-valkey-resp3`](../redis-valkey-resp3/spec.md) (Rust RESP3 parser/encoder in `vertebra-db`, `CLIENT TRACKING` invalidation, Sentinel/Cluster CRC16 routing, Memorystore IAM auth, and SHM cache integration)
 
 ## Continuity Snapshot
 
-- **Active Flow**: `shm-native-drivers-and-broker-proxy` (`planned`)
+- **Active Flow**: `shm-native-drivers-and-broker-proxy` (`closed`)
 - **Current Task & Claimant**: `null`
-- **Last Verified Checkpoint**: `null`
+- **Last Verified Checkpoint**: `make rs-test && make py-test && make lint-all && make review-check`
 - **Decisions**:
   - Reconciled historical architecture across `cofin/vertebra`, `cofin/litecore`, `cofin/bungi`, and `cofin/sqlspec` into a two-tier shared-memory data plane: Tier 1 Rust-native SHM drivers (`vertebra-db` + `vertebra-storage`) for all 6 relational/analytical engines (PostgreSQL, MySQL, SQLite, Oracle, SQL Server, DuckDB) plus Redis and Valkey, and Tier 2 universal SHM broker proxy (`ProxySyncConfig[ConfigT]`, `ProxyAsyncConfig[ConfigT]`, `SqlSpecProvider`) for any upstream `sqlspec` or `advanced-alchemy` driver.
 - **Recent Discoveries**:

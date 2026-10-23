@@ -2,16 +2,19 @@
 type: Spec
 flow_id: rust-native-enterprise-olap-drivers
 title: "Rust-Native Shared-Memory Oracle, SQL Server (MSSQL) & DuckDB Drivers and Adapters (vertebra-db)"
-state: planned
+state: closed
 plan_revision: 1
 plan_commit: null
-state_revision: 0
+state_revision: 1
 current_task: null
-last_operation: null
-operation_targets: []
-last_verified_checkpoint: null
+last_operation: finish
+operation_targets:
+  - "1.1"
+  - "1.2"
+  - "2.1"
+last_verified_checkpoint: "make rs-test && make py-test && make lint-all"
 created_at: 2026-10-23T20:44:00Z
-updated_at: 2026-10-23T20:44:00Z
+updated_at: 2026-10-23T22:25:00Z
 description: "Extend src/rs/vertebra-db, vertebra-py, vertebra.db, and vertebra.extensions.{sqlspec,sqlalchemy} with native Rust shared-memory drivers for Oracle (pure-Rust Thin TNS/TTC wire protocol + TNS/Wallet extraction), SQL Server / MSSQL (pure-Rust tiberius TDS wire protocol with rustls and zero msodbcsql18/unixODBC dependency), and DuckDB (feature-gated duckdb / Arrow C Data Interface single-writer SHM broker host with zero-copy ShmRegion Arrow IPC streaming)."
 tags: [feature, rust, database, shm, arrow, oracle, mssql, sqlserver, duckdb]
 parent_prd: shm-native-drivers-and-broker-proxy
@@ -64,17 +67,17 @@ research: []
 ## Implementation Plan
 
 ### Phase 1: Native Rust Thin Oracle & Pure-Rust TDS SQL Server (`MSSQL`) Drivers
-- [ ] 1.1 Implement pure-Rust Thin Oracle driver (`src/rs/vertebra-db/src/oracle.rs`) with TNS/Wallet extraction, 26ai `VECTOR`/`OSON`, zero-RTT TTC trace attributes, and SHM Arrow IPC bindings in `src/py/vertebra/db/oracle.py`
-- [ ] 1.2 Implement pure-Rust TDS SQL Server (`tiberius`) driver (`src/rs/vertebra-db/src/mssql.rs`) with `rustls`, `@P1` parameter binding, and SHM Arrow IPC bindings in `src/py/vertebra/db/mssql.py`
+- [x] 1.1 Implement pure-Rust Thin Oracle driver (`src/rs/vertebra-db/src/oracle.rs`) with TNS/Wallet extraction, 26ai `VECTOR`/`OSON`, zero-RTT TTC trace attributes, and SHM Arrow IPC bindings in `src/py/vertebra/db/oracle.py`
+- [x] 1.2 Implement pure-Rust TDS SQL Server (`tiberius`) driver (`src/rs/vertebra-db/src/mssql.rs`) with `rustls`, `@P1` parameter binding, and SHM Arrow IPC bindings in `src/py/vertebra/db/mssql.py`
 
 ### Phase 2: SHM-Brokered DuckDB Arrow Driver & Unified SQLSpec / SQLAlchemy `+vtb` Adapters
-- [ ] 2.1 Implement SHM-brokered single-writer DuckDB Arrow driver (`src/rs/vertebra-db/src/duckdb.rs` + `src/py/vertebra/db/duckdb.py`) and wire `DatabaseRegistry`, `Vertebra{Oracle,Mssql,Duckdb}*Config`, and `{oracle,mssql,duckdb}+vtb` SQLAlchemy dialects
+- [x] 2.1 Implement SHM-brokered single-writer DuckDB Arrow driver (`src/rs/vertebra-db/src/duckdb.rs` + `src/py/vertebra/db/duckdb.py`) and wire `DatabaseRegistry`, `Vertebra{Oracle,Mssql,Duckdb}*Config`, and `{oracle,mssql,duckdb}+vtb` SQLAlchemy dialects
 
 ## Continuity Snapshot
 
-- **Active Flow**: `rust-native-enterprise-olap-drivers` (`planned`)
+- **Active Flow**: `rust-native-enterprise-olap-drivers` (`closed`)
 - **Current Task & Claimant**: `null`
-- **Last Verified Checkpoint**: `null`
+- **Last Verified Checkpoint**: `make rs-test && make py-test && make lint-all`
 - **Decisions**:
   - Use pure-Rust Thin TNS/TTC (`oracledb` `v26.0` / `oracle-rs` + `vertebra-db::tns`) for Oracle and pure-Rust TDS (`tiberius` with `rustls`) for SQL Server so neither engine requires proprietary C client libraries (`libclntsh` or `msodbcsql18`/`unixODBC`).
   - Gate `libduckdb-sys` compilation behind optional Cargo feature `duckdb` while streaming Arrow batches via the zero-compile Arrow C Data Interface (`FFI_ArrowArrayStream`) and `ShmRegion` Arrow IPC so multi-worker Python servers share one DuckDB catalog without file-lock contention or slow default Cargo builds.

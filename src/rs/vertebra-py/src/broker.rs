@@ -4,11 +4,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pyo3::prelude::*;
+use pyo3::types::{PyAnyMethods, PyBytes};
 use vertebra_core::broker::{
-    BrokerError, LeaseGrant, LeaseTableStats, ShmLeaseTable, ShmStatementCache,
+    BrokerError, LeaseGrant, LeaseTableStats, ShmLeaseHeader, ShmLeaseTable, ShmStatementCache,
     StatementCacheStats, StatementPlanEntry,
 };
 use vertebra_core::shm::ShmRegion;
+
+type PyChannelFrame<'py> = (String, Bound<'py, PyBytes>, u64, Option<String>);
+
+fn extract_bytes_or_str(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Ok(b) = obj.cast::<PyBytes>() {
+        Ok(b.as_bytes().to_vec())
+    } else if let Ok(s) = obj.extract::<&str>() {
+        Ok(s.as_bytes().to_vec())
+    } else {
+        obj.extract::<Vec<u8>>()
+    }
+}
 
 fn broker_err_to_py(err: BrokerError) -> PyErr {
     match err {
@@ -114,35 +127,52 @@ pub struct NativeLeaseBroker {
 #[pymethods]
 impl NativeLeaseBroker {
     #[new]
-    #[pyo3(signature = (pool_size=20, max_overflow=10))]
-    pub fn new(pool_size: u32, max_overflow: u32) -> PyResult<Self> {
-        let req_size = ShmLeaseTable::required_size(pool_size, max_overflow);
+    #[pyo3(signature = (pool_size=20, max_overflow=10, stmt_capacity=512))]
+    pub fn new(pool_size: u32, max_overflow: u32, stmt_capacity: u32) -> PyResult<Self> {
+        let req_size =
+            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, stmt_capacity);
         let region = ShmRegion::create(req_size)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        let table = ShmLeaseTable::init_in_region(region, pool_size, max_overflow)
-            .map_err(broker_err_to_py)?;
+        let table = ShmLeaseTable::init_in_region_with_statements(
+            region,
+            pool_size,
+            max_overflow,
+            stmt_capacity,
+        )
+        .map_err(broker_err_to_py)?;
         Ok(Self {
             table: Arc::new(table),
         })
     }
 
     #[staticmethod]
-    #[pyo3(signature = (name, pool_size=20, max_overflow=10))]
-    pub fn create_named(name: &str, pool_size: u32, max_overflow: u32) -> PyResult<Self> {
-        let req_size = ShmLeaseTable::required_size(pool_size, max_overflow);
+    #[pyo3(signature = (name, pool_size=20, max_overflow=10, stmt_capacity=512))]
+    pub fn create_named(
+        name: &str,
+        pool_size: u32,
+        max_overflow: u32,
+        stmt_capacity: u32,
+    ) -> PyResult<Self> {
+        let req_size =
+            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, stmt_capacity);
         #[cfg(unix)]
         {
             let region = ShmRegion::create_named(name, req_size)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            let table = ShmLeaseTable::init_in_region(region, pool_size, max_overflow)
-                .map_err(broker_err_to_py)?;
+            let table = ShmLeaseTable::init_in_region_with_statements(
+                region,
+                pool_size,
+                max_overflow,
+                stmt_capacity,
+            )
+            .map_err(broker_err_to_py)?;
             Ok(Self {
                 table: Arc::new(table),
             })
         }
         #[cfg(not(unix))]
         {
-            let _ = (name, pool_size, max_overflow, req_size);
+            let _ = (name, pool_size, max_overflow, stmt_capacity, req_size);
             Err(pyo3::exceptions::PyNotImplementedError::new_err(
                 "named SHM regions only supported on Unix",
             ))
@@ -150,13 +180,28 @@ impl NativeLeaseBroker {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (name, pool_size=20, max_overflow=10))]
-    pub fn open_named(name: &str, pool_size: u32, max_overflow: u32) -> PyResult<Self> {
-        let req_size = ShmLeaseTable::required_size(pool_size, max_overflow);
+    #[pyo3(signature = (name, pool_size=20, max_overflow=10, stmt_capacity=512))]
+    pub fn open_named(
+        name: &str,
+        pool_size: u32,
+        max_overflow: u32,
+        stmt_capacity: u32,
+    ) -> PyResult<Self> {
+        let req_size =
+            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, stmt_capacity);
         #[cfg(unix)]
         {
-            let region = ShmRegion::open_named(name, req_size)
+            let mut region = ShmRegion::open_named(name, req_size)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            if region.len() >= std::mem::size_of::<ShmLeaseHeader>() {
+                let total_size =
+                    unsafe { (*(region.as_ptr() as *const ShmLeaseHeader)).total_size as usize };
+                if total_size > region.len() {
+                    drop(region);
+                    region = ShmRegion::open_named(name, total_size)
+                        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                }
+            }
             let table = ShmLeaseTable::attach_region(region).map_err(broker_err_to_py)?;
             Ok(Self {
                 table: Arc::new(table),
@@ -164,7 +209,7 @@ impl NativeLeaseBroker {
         }
         #[cfg(not(unix))]
         {
-            let _ = (name, pool_size, max_overflow, req_size);
+            let _ = (name, pool_size, max_overflow, stmt_capacity, req_size);
             Err(pyo3::exceptions::PyNotImplementedError::new_err(
                 "named SHM regions only supported on Unix",
             ))
@@ -172,6 +217,7 @@ impl NativeLeaseBroker {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (fd, size=0))]
     pub fn from_fd(fd: i32, size: usize) -> PyResult<Self> {
         #[cfg(unix)]
         {
@@ -181,7 +227,21 @@ impl NativeLeaseBroker {
                     std::io::Error::last_os_error().to_string(),
                 ));
             }
-            let region = ShmRegion::from_fd(dup_fd, size)
+            let effective_size = if size > 0 {
+                size
+            } else {
+                let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe { libc::fstat(dup_fd, &mut stat) } != 0 || stat.st_size <= 0 {
+                    unsafe {
+                        libc::close(dup_fd);
+                    }
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "unable to determine SHM region size from fd",
+                    ));
+                }
+                stat.st_size as usize
+            };
+            let region = ShmRegion::from_fd(dup_fd, effective_size)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let table = ShmLeaseTable::attach_region(region).map_err(broker_err_to_py)?;
             Ok(Self {
@@ -205,22 +265,86 @@ impl NativeLeaseBroker {
                 Ok(v) => v,
                 Err(_) => return Ok(None),
             };
-            let size_val = match std::env::var("VERTEBRA_BROKER_SHM_SIZE") {
-                Ok(v) => v,
-                Err(_) => return Ok(None),
-            };
             let fd: i32 = fd_val.parse().map_err(|e: std::num::ParseIntError| {
                 pyo3::exceptions::PyValueError::new_err(e.to_string())
             })?;
-            let size: usize = size_val.parse().map_err(|e: std::num::ParseIntError| {
-                pyo3::exceptions::PyValueError::new_err(e.to_string())
-            })?;
+            let size: usize = match std::env::var("VERTEBRA_BROKER_SHM_SIZE") {
+                Ok(v) => v.parse().map_err(|e: std::num::ParseIntError| {
+                    pyo3::exceptions::PyValueError::new_err(e.to_string())
+                })?,
+                Err(_) => 0,
+            };
             Self::from_fd(fd, size).map(Some)
         }
         #[cfg(not(unix))]
         {
             Ok(None)
         }
+    }
+
+    pub fn statement_cache(&self) -> Option<NativeStatementCache> {
+        self.table
+            .statement_cache()
+            .map(|c| NativeStatementCache { cache: Arc::new(c) })
+    }
+
+    pub fn active_leases_for_worker(
+        &self,
+        py: Python<'_>,
+        worker_pid: u32,
+    ) -> Vec<(u16, u32, u64)> {
+        let table = Arc::clone(&self.table);
+        py.detach(move || table.active_leases_for_worker(worker_pid))
+    }
+
+    #[pyo3(signature = (channel, payload, timestamp_ns=None, lease_id=None))]
+    pub fn publish_channel(
+        &self,
+        channel: &Bound<'_, PyAny>,
+        payload: &[u8],
+        timestamp_ns: Option<u64>,
+        lease_id: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        let ch_bytes = extract_bytes_or_str(channel)?;
+        let lid_bytes = match lease_id {
+            Some(obj) => Some(extract_bytes_or_str(obj)?),
+            None => None,
+        };
+        let ts = timestamp_ns.unwrap_or_else(vertebra_core::broker::monotonic_now_ns);
+        Ok(self
+            .table
+            .publish_channel(&ch_bytes, payload, ts, lid_bytes.as_deref()))
+    }
+
+    pub fn drain_channel<'py>(
+        &self,
+        py: Python<'py>,
+        channel: &Bound<'py, PyAny>,
+    ) -> PyResult<Vec<PyChannelFrame<'py>>> {
+        let ch_bytes = extract_bytes_or_str(channel)?;
+        let frames = self.table.drain_channel(&ch_bytes);
+        Ok(frames
+            .into_iter()
+            .map(|f| {
+                let ch_str = String::from_utf8_lossy(&f.channel).into_owned();
+                let py_payload = PyBytes::new(py, &f.payload);
+                let lid_str = f.lease_id.map(|b| String::from_utf8_lossy(&b).into_owned());
+                (ch_str, py_payload, f.timestamp_ns, lid_str)
+            })
+            .collect())
+    }
+
+    pub fn drain_all_channels<'py>(&self, py: Python<'py>) -> Vec<PyChannelFrame<'py>> {
+        let frames = self.table.drain_all_channels();
+        frames
+            .into_iter()
+            .map(|f| {
+                let ch_str = String::from_utf8_lossy(&f.channel).into_owned();
+                let py_payload = PyBytes::new(py, &f.payload);
+                let lid_str = f.lease_id.map(|b| String::from_utf8_lossy(&b).into_owned());
+                (ch_str, py_payload, f.timestamp_ns, lid_str)
+            })
+            .collect()
     }
 
     #[pyo3(signature = (worker_pid, ttl_ns=0, timeout_ms=5000, bind_key_hash=0))]
@@ -296,6 +420,33 @@ impl NativeLeaseBroker {
     #[getter]
     pub fn total_capacity(&self) -> u32 {
         self.table.total_capacity()
+    }
+
+    #[getter]
+    pub fn stmt_capacity(&self) -> u32 {
+        self.table.stmt_capacity()
+    }
+
+    #[getter]
+    pub fn stmt_offset(&self) -> u64 {
+        self.table.stmt_offset()
+    }
+
+    #[getter]
+    pub fn shm_size(&self) -> usize {
+        self.table.region_size()
+    }
+
+    #[getter]
+    pub fn shm_fd(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            self.table.region_handle()
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 }
 
@@ -444,5 +595,14 @@ impl NativeStatementCache {
 
     pub fn stats(&self) -> NativeStatementCacheStats {
         NativeStatementCacheStats::from(self.cache.stats())
+    }
+
+    pub fn invalidate_all(&self) {
+        self.cache.invalidate_all();
+    }
+
+    #[getter]
+    pub fn capacity(&self) -> u32 {
+        self.cache.capacity()
     }
 }

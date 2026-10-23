@@ -2,16 +2,19 @@
 type: Spec
 flow_id: shm-database-broker
 title: "Shared-Memory Database Broker Supervisor Reaping, Unified Region & Pub/Sub Ring"
-state: planned
+state: closed
 plan_revision: 1
 plan_commit: null
-state_revision: 0
+state_revision: 1
 current_task: null
-last_operation: null
-operation_targets: []
-last_verified_checkpoint: null
+last_operation: finish
+operation_targets:
+  - "1.1"
+  - "1.2"
+  - "2.1"
+last_verified_checkpoint: "make rs-test && make py-test && make lint-all"
 created_at: 2026-10-23T19:34:00Z
-updated_at: 2026-10-23T19:34:00Z
+updated_at: 2026-10-23T22:23:00Z
 description: "Complete cross-process shared-memory database broker integration: co-locate ShmStatementCache inside ShmLeaseTable's single ShmRegion via stmt_offset, wire supervisor worker-exit lease reclamation into RingFactory/WorkerLifecycle, and back ShmBrokerTransport.publish/drain_channel with a cross-process SHM ring."
 tags: [feature, ipc, shm, database, broker]
 parent_prd: shm-native-drivers-and-broker-proxy
@@ -49,18 +52,18 @@ research: []
 
 ### Phase 1: Unified SHM Region & Supervisor Worker Reclamation
 
-- [ ] 1.1 Co-locate `ShmStatementCache` inside `ShmLeaseTable` (`stmt_offset` / `stmt_capacity`) and expose unified `NativeLeaseBroker` attachment in `vertebra-py`
-- [ ] 1.2 Wire `ShmLeaseTable::reclaim_worker(pid)` into `vertebra-http` SHM worker lifecycle teardown and respawn hooks
+- [x] 1.1 Co-locate `ShmStatementCache` inside `ShmLeaseTable` (`stmt_offset` / `stmt_capacity`) and expose unified `NativeLeaseBroker` attachment in `vertebra-py`
+- [x] 1.2 Wire `ShmLeaseTable::reclaim_worker(pid)` into `vertebra-http` SHM worker lifecycle teardown and respawn hooks
 
 ### Phase 2: Cross-Process Broker Pub/Sub Ring
 
-- [ ] 2.1 Back `ShmBrokerTransport.publish` and `drain_channel` with a lock-free cross-process SHM channel buffer and multi-process tests
+- [x] 2.1 Back `ShmBrokerTransport.publish` and `drain_channel` with a lock-free cross-process SHM channel buffer and multi-process tests
 
 ## Continuity Snapshot
 
-- **Active Flow**: `shm-database-broker` (`planned`)
+- **Active Flow**: `shm-database-broker` (`closed`)
 - **Current Task & Claimant**: `null`
-- **Last Verified Checkpoint**: `null`
+- **Last Verified Checkpoint**: `make rs-test && make py-test && make lint-all`
 - **Decisions**:
   - Created a clean `planned` Flow spec for the remaining cross-process SHM broker work (co-located statement cache region, supervisor `reclaim_worker` hook, and cross-process `ChannelMessage` ring) instead of reopening archived specs.
 - **Recent Discoveries**:

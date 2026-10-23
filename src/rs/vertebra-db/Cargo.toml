@@ -1,0 +1,42 @@
+[package]
+name = "vertebra-db"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native Rust database wire protocols, cloud dialers, and shared-memory Arrow/row framing for Vertebra"
+
+[lib]
+name = "vertebra_db"
+crate-type = ["rlib"]
+
+[dependencies]
+vertebra-core = { path = "../vertebra-core" }
+bytes = { workspace = true }
+chrono = { workspace = true }
+dashmap = "6"
+flate2 = "1.1"
+hex = { workspace = true }
+hmac = { workspace = true }
+rcgen = "0.14"
+reqwest = { workspace = true }
+rmp-serde = { workspace = true }
+rsa = { version = "0.9", features = ["sha2"] }
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = "0.26"
+url = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = "3"
+
+[features]
+default = []
+duckdb = []

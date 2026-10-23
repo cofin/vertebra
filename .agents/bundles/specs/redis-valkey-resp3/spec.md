@@ -2,16 +2,19 @@
 type: Spec
 flow_id: redis-valkey-resp3
 title: "Redis & Valkey RESP3 Topology Routing, Client Tracking & Pub/Sub Multiplexing"
-state: planned
+state: closed
 plan_revision: 1
 plan_commit: null
-state_revision: 0
+state_revision: 1
 current_task: null
-last_operation: null
-operation_targets: []
-last_verified_checkpoint: null
+last_operation: finish
+operation_targets:
+  - "1.1"
+  - "1.2"
+  - "2.1"
+last_verified_checkpoint: "make rs-test && make py-test && make lint-all"
 created_at: 2026-10-23T19:33:00Z
-updated_at: 2026-10-23T19:33:00Z
+updated_at: 2026-10-23T22:25:00Z
 description: "Rust-native and SHM-backed Redis 7.2+/8.0+ and Valkey 8.0+/9.0+ RESP3 drivers (src/rs/vertebra-db + vertebra.db.{redis,valkey}): Cluster CRC16 slot routing and Sentinel discovery, live socket wiring for Valkey CLIENT TRACKING BCAST push invalidation and GCP Memorystore IAM token refresh, and multiplexed Pub/Sub subscriber streams."
 tags: [feature, rust, database, redis, valkey, resp3, shm]
 parent_prd: shm-native-drivers-and-broker-proxy
@@ -52,18 +55,18 @@ research: []
 
 ### Phase 1: Valkey Handshake Wiring & Bounded Client Tracking Cache
 
-- [ ] 1.1 Wire `ValkeyConfig.build_handshake_commands`, GCP Memorystore IAM token provider, and bounded LRU `_client_cache` into `SyncValkeyDriver` and `AsyncValkeyDriver`
-- [ ] 1.2 Implement Sentinel master resolution and Cluster CRC16 hash-slot routing (`MOVED`/`ASK`) in `SyncRedisDriver` and `AsyncRedisDriver`
+- [x] 1.1 Wire `ValkeyConfig.build_handshake_commands`, GCP Memorystore IAM token provider, and bounded LRU `_client_cache` into `SyncValkeyDriver` and `AsyncValkeyDriver`
+- [x] 1.2 Implement Sentinel master resolution and Cluster CRC16 hash-slot routing (`MOVED`/`ASK`) in `SyncRedisDriver` and `AsyncRedisDriver`
 
 ### Phase 2: Multiplexed RESP3 Pub/Sub & Verification
 
-- [ ] 2.1 Add multiplexed RESP3 `SUBSCRIBE`/`UNSUBSCRIBE` channel fan-out and end-to-end loopback socket tests for Redis and Valkey
+- [x] 2.1 Add multiplexed RESP3 `SUBSCRIBE`/`UNSUBSCRIBE` channel fan-out and end-to-end loopback socket tests for Redis and Valkey
 
 ## Continuity Snapshot
 
-- **Active Flow**: `redis-valkey-resp3` (`planned`)
+- **Active Flow**: `redis-valkey-resp3` (`closed`)
 - **Current Task & Claimant**: `null`
-- **Last Verified Checkpoint**: `null`
+- **Last Verified Checkpoint**: `make rs-test && make py-test && make lint-all`
 - **Decisions**:
   - Deferred Redis and Valkey RESP3 topology routing, live `CLIENT TRACKING` socket handshake wiring, and pub/sub multiplexing into a standalone `planned` Flow spec so core SQLSpec/Oracle consolidation lands cleanly first.
 - **Recent Discoveries**:

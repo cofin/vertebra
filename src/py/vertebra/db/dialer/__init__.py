@@ -11,6 +11,7 @@ from vertebra.db.dialer.cloudsql import (
     CloudSqlDialer,
     CloudSqlInstanceUri,
     EphemeralCertBundle,
+    generate_ephemeral_keypair,
 )
 
 __all__ = (
@@ -22,4 +23,5 @@ __all__ = (
     "CloudSqlDialer",
     "CloudSqlInstanceUri",
     "EphemeralCertBundle",
+    "generate_ephemeral_keypair",
 )

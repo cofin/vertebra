@@ -199,3 +199,49 @@ fn test_shm_statement_cache_create_and_attach_persistence() {
     assert_eq!(&looked_up2.param_plan[..], param_plan);
     assert_eq!(cache2.stats().hits, 2);
 }
+
+#[cfg(unix)]
+#[test]
+fn test_shm_lease_table_colocated_statement_cache_and_channel_ring_across_named_shm() {
+    let name = format!("/vtb-colocated-it-{}", std::process::id());
+    let (primary, primary_stmt) = match ShmLeaseTable::create_with_statements(&name, 4, 2, 16) {
+        Ok(pair) => pair,
+        Err(_) => return,
+    };
+    let (secondary, secondary_stmt) = ShmLeaseTable::open_with_statements(&name).unwrap();
+
+    assert_eq!(primary.stmt_capacity(), 16);
+    assert_eq!(secondary.stmt_capacity(), 16);
+    assert_eq!(primary.stmt_offset(), secondary.stmt_offset());
+
+    assert!(primary_stmt.insert(
+        1,
+        b"SELECT * FROM accounts WHERE id = :id",
+        1,
+        b"SELECT * FROM accounts WHERE id = $1",
+        b"\x91\xa2id",
+    ));
+    let plan = secondary_stmt
+        .lookup(1, b"SELECT * FROM accounts WHERE id = :id")
+        .expect("secondary lookup");
+    assert_eq!(plan.param_count, 1);
+    assert_eq!(
+        &plan.compiled_sql[..],
+        b"SELECT * FROM accounts WHERE id = $1"
+    );
+
+    let g0 = primary.try_acquire(9001, 60_000_000_000, 123).unwrap();
+    assert_eq!(
+        secondary.active_leases_for_worker(9001),
+        vec![(123, g0.slot_index, g0.generation)]
+    );
+
+    assert!(primary.publish_channel(b"events", b"payload-alpha", 123_456, Some(b"0:1")));
+    let drained = secondary.drain_channel(b"events");
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].channel, b"events");
+    assert_eq!(drained[0].payload, b"payload-alpha");
+    assert_eq!(drained[0].timestamp_ns, 123_456);
+    assert_eq!(drained[0].lease_id.as_deref(), Some(&b"0:1"[..]));
+    assert!(primary.drain_channel(b"events").is_empty());
+}

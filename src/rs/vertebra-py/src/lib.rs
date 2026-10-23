@@ -7,6 +7,7 @@ use pyo3::prelude::*;
 pub mod agent;
 pub mod asgi;
 pub mod broker;
+pub mod db;
 pub mod file_io;
 pub mod headers;
 pub mod request;
@@ -23,6 +24,7 @@ pub use broker::{
     NativeBrokerStats, NativeLeaseBroker, NativeLeaseGrant, NativeStatementCache,
     NativeStatementCacheStats, NativeStatementPlan,
 };
+pub use db::{NativeAlloyDbDialer, NativeCloudSqlDialer, VertebraArrowCursor};
 pub use headers::{Headers, HeadersIterator};
 pub use request::{Request, RequestBatch, RequestBatchIterator};
 pub use response::Response;
@@ -100,6 +102,9 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(telemetry::parse_traceparent, m)?)?;
     m.add_function(wrap_pyfunction!(telemetry::format_traceparent, m)?)?;
     m.add_function(wrap_pyfunction!(telemetry::sanitize_sql, m)?)?;
+
+    // Native database dialers, wire codecs, and SHM Arrow IPC cursors
+    db::register_db_bindings(m)?;
 
     Ok(())
 }

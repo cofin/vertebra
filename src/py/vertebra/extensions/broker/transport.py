@@ -265,6 +265,24 @@ class InMemoryBrokerTransport:
                 self._cond.notify_all()
             return reclaimed
 
+    def active_leases_for_worker(self, worker_pid: int) -> list[tuple[int, int, int]]:
+        """Return active `(pool_id, slot_index, generation)` tuples for `worker_pid`."""
+        with self._lock:
+            return [
+                (
+                    0,
+                    lease.slot_index,
+                    lease.generation,
+                )
+                for lease in self._active_leases.values()
+                if lease.worker_id == worker_pid
+            ]
+
+    def invalidate_statements(self) -> None:
+        """Clear all cached statement plans."""
+        with self._lock:
+            self._stmt_cache.clear()
+
     def get_or_compile_statement(
         self,
         dialect: str,
@@ -322,6 +340,15 @@ class InMemoryBrokerTransport:
         with self._lock:
             return self._channels.pop(channel, [])
 
+    def drain_all_channels(self) -> list[ChannelMessage]:
+        """Drain buffered messages across all channels."""
+        with self._lock:
+            out: list[ChannelMessage] = []
+            for messages in self._channels.values():
+                out.extend(messages)
+            self._channels.clear()
+            return out
+
     def close(self) -> None:
         """Release broker resources."""
         pass
@@ -337,7 +364,12 @@ class ShmBrokerTransport:
         "sqlite": 4,
     }
 
-    def __init__(self, config: BrokerConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: BrokerConfig | None = None,
+        *,
+        native: NativeLeaseBroker | None = None,
+    ) -> None:
         raw_cfg = config or BrokerConfig()
         acq_ms = (
             int(raw_cfg.acquire_timeout * 1000)
@@ -350,36 +382,75 @@ class ShmBrokerTransport:
             else raw_cfg.lease_ttl_ms
         )
         self._config = msgspec.structs.replace(raw_cfg, acquire_timeout_ms=acq_ms, lease_ttl_ms=ttl_ms)
-        self._channels: dict[str, list[ChannelMessage]] = {}
-        env_broker = NativeLeaseBroker.from_env()
 
-        if env_broker is not None:
-            self._native = env_broker
-            self._stmt_cache = NativeStatementCache(self._config.statement_cache_capacity)
-        elif self._config.shm_name:
-            try:
-                self._native = NativeLeaseBroker.open_named(
-                    self._config.shm_name,
-                    self._config.pool_size,
-                    self._config.max_overflow,
-                )
-            except Exception:
-                self._native = NativeLeaseBroker.create_named(
-                    self._config.shm_name,
-                    self._config.pool_size,
-                    self._config.max_overflow,
-                )
-            stmt_name = f"{self._config.shm_name}-stmt"
-            try:
-                self._stmt_cache = NativeStatementCache.open_named(stmt_name, self._config.statement_cache_capacity)
-            except Exception:
-                self._stmt_cache = NativeStatementCache.create_named(stmt_name, self._config.statement_cache_capacity)
+        if native is not None:
+            self._native = native
         else:
-            self._native = NativeLeaseBroker(self._config.pool_size, self._config.max_overflow)
-            self._stmt_cache = NativeStatementCache(self._config.statement_cache_capacity)
+            env_broker = NativeLeaseBroker.from_env()
+            if env_broker is not None:
+                self._native = env_broker
+            elif self._config.shm_name:
+                try:
+                    self._native = NativeLeaseBroker.open_named(
+                        self._config.shm_name,
+                        self._config.pool_size,
+                        self._config.max_overflow,
+                        self._config.statement_cache_capacity,
+                    )
+                except Exception:
+                    self._native = NativeLeaseBroker.create_named(
+                        self._config.shm_name,
+                        self._config.pool_size,
+                        self._config.max_overflow,
+                        self._config.statement_cache_capacity,
+                    )
+            else:
+                self._native = NativeLeaseBroker(
+                    self._config.pool_size,
+                    self._config.max_overflow,
+                    self._config.statement_cache_capacity,
+                )
 
+        colocated_cache = self._native.statement_cache()
+        self._stmt_cache = (
+            colocated_cache
+            if colocated_cache is not None
+            else NativeStatementCache(self._config.statement_cache_capacity)
+        )
         self._active_leases: dict[str, ConnectionLease] = {}
         self._lock = threading.Lock()
+
+    @classmethod
+    def from_fd(
+        cls,
+        fd: int,
+        size: int = 0,
+        config: BrokerConfig | None = None,
+    ) -> ShmBrokerTransport:
+        """Attach a broker transport to an inherited shared-memory file descriptor."""
+        cfg = config or BrokerConfig()
+        native = NativeLeaseBroker.from_fd(fd, size)
+        return cls(config=cfg, native=native)
+
+    @property
+    def shm_fd(self) -> int | None:
+        """Return underlying shared-memory file descriptor when available."""
+        return self._native.shm_fd
+
+    @property
+    def shm_size(self) -> int:
+        """Return total size in bytes of the shared-memory broker region."""
+        return self._native.shm_size
+
+    @property
+    def stmt_offset(self) -> int:
+        """Return byte offset of the co-located statement cache within the SHM region."""
+        return self._native.stmt_offset
+
+    @property
+    def stmt_capacity(self) -> int:
+        """Return slot capacity of the co-located statement cache."""
+        return self._native.stmt_capacity
 
     def acquire(
         self,
@@ -481,6 +552,14 @@ class ShmBrokerTransport:
                 del self._active_leases[lid]
         return self._native.reclaim_worker(worker_pid)
 
+    def active_leases_for_worker(self, worker_pid: int) -> list[tuple[int, int, int]]:
+        """Return active `(pool_id, slot_index, generation)` tuples for `worker_pid`."""
+        return list(self._native.active_leases_for_worker(worker_pid))
+
+    def invalidate_statements(self) -> None:
+        """Invalidate all cached statement plans in shared memory."""
+        self._stmt_cache.invalidate_all()
+
     def get_or_compile_statement(
         self,
         dialect: str,
@@ -540,16 +619,41 @@ class ShmBrokerTransport:
         )
 
     def publish(self, channel: str, payload: bytes, lease_id: str | None = None) -> ChannelMessage:
-        """Publish a message to a named channel."""
-        msg = ChannelMessage(channel=channel, payload=payload, timestamp_ns=time.time_ns(), lease_id=lease_id)
-        with self._lock:
-            self._channels.setdefault(channel, []).append(msg)
-        return msg
+        """Publish a message to a named shared-memory channel."""
+        ts_ns = time.time_ns()
+        self._native.publish_channel(channel, payload, ts_ns, lease_id)
+        return ChannelMessage(
+            channel=channel,
+            payload=payload,
+            timestamp_ns=ts_ns,
+            lease_id=lease_id,
+        )
 
     def drain_channel(self, channel: str) -> list[ChannelMessage]:
-        """Drain buffered messages from a named channel."""
-        with self._lock:
-            return self._channels.pop(channel, [])
+        """Drain buffered messages for `channel` from the shared-memory channel ring."""
+        frames = self._native.drain_channel(channel)
+        return [
+            ChannelMessage(
+                channel=ch,
+                payload=data,
+                timestamp_ns=ts_ns,
+                lease_id=lid,
+            )
+            for ch, data, ts_ns, lid in frames
+        ]
+
+    def drain_all_channels(self) -> list[ChannelMessage]:
+        """Drain buffered messages across all channels from the shared-memory channel ring."""
+        frames = self._native.drain_all_channels()
+        return [
+            ChannelMessage(
+                channel=ch,
+                payload=data,
+                timestamp_ns=ts_ns,
+                lease_id=lid,
+            )
+            for ch, data, ts_ns, lid in frames
+        ]
 
     def close(self) -> None:
         """Release broker resources."""

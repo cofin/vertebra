@@ -2,16 +2,19 @@
 type: Spec
 flow_id: shm-broker-driver-proxy
 title: "Universal Shared-Memory Broker Proxy for Any SQLSpec or Advanced Alchemy Driver"
-state: planned
+state: closed
 plan_revision: 1
 plan_commit: null
-state_revision: 0
+state_revision: 1
 current_task: null
-last_operation: null
-operation_targets: []
-last_verified_checkpoint: null
+last_operation: finish
+operation_targets:
+  - "1.1"
+  - "1.2"
+  - "2.1"
+last_verified_checkpoint: "make py-test && make lint-all"
 created_at: 2026-10-23T20:18:00Z
-updated_at: 2026-10-23T20:18:00Z
+updated_at: 2026-10-23T22:23:00Z
 description: "Wire ProxySyncConfig[SyncConfigT], ProxyAsyncConfig[AsyncConfigT], SqlSpecProvider, and AlchemyPlugin so any existing driver supported in SQLSpec or Advanced Alchemy executes across shared-memory rings with threshold-based ShmRegion Arrow IPC zero-copy result transfer."
 tags: [feature, sqlspec, advanced-alchemy, shm, broker, arrow, proxy]
 parent_prd: shm-native-drivers-and-broker-proxy
@@ -58,17 +61,17 @@ research: []
 ## Implementation Plan
 
 ### Phase 1: `SqlSpecProvider` & Threshold-Based `ShmRegion` Arrow IPC Transport
-- [ ] 1.1 Implement `SqlSpecProvider`, transaction-pinned lease execution, and threshold-based `ShmRegion` Arrow IPC result spilling (`_write_arrow_region` / `_arrow_release`) in `src/py/vertebra/extensions/sqlspec/provider.py`
-- [ ] 1.2 Implement `ProxySyncDriver` and `ProxyAsyncDriver` in `src/py/vertebra/extensions/sqlspec/proxy.py` and wire `ProxySyncConfig[SyncConfigT]`, `ProxyAsyncConfig[AsyncConfigT]`, and `SQLSpecPlugin`
+- [x] 1.1 Implement `SqlSpecProvider`, transaction-pinned lease execution, and threshold-based `ShmRegion` Arrow IPC result spilling (`_write_arrow_region` / `_arrow_release`) in `src/py/vertebra/extensions/sqlspec/provider.py`
+- [x] 1.2 Implement `ProxySyncDriver` and `ProxyAsyncDriver` in `src/py/vertebra/extensions/sqlspec/proxy.py` and wire `ProxySyncConfig[SyncConfigT]`, `ProxyAsyncConfig[AsyncConfigT]`, and `SQLSpecPlugin`
 
 ### Phase 2: Advanced Alchemy Broker Engine Wiring & Multi-Driver Verification
-- [ ] 2.1 Wire `AlchemyPlugin` and `ShmSessionBroker` to auto-attach SHM lease checkout/checkin and `ShmStatementCache` across SQLAlchemy sync/async engines, and verify with upstream SQLSpec and Advanced Alchemy drivers
+- [x] 2.1 Wire `AlchemyPlugin` and `ShmSessionBroker` to auto-attach SHM lease checkout/checkin and `ShmStatementCache` across SQLAlchemy sync/async engines, and verify with upstream SQLSpec and Advanced Alchemy drivers
 
 ## Continuity Snapshot
 
-- **Active Flow**: `shm-broker-driver-proxy` (`planned`)
+- **Active Flow**: `shm-broker-driver-proxy` (`closed`)
 - **Current Task & Claimant**: `null`
-- **Last Verified Checkpoint**: `null`
+- **Last Verified Checkpoint**: `make py-test && make lint-all`
 - **Decisions**:
   - Any existing driver supported in `sqlspec` (e.g., `oracledb`, `spanner`, `bigquery`, `duckdb`, `adbc`, `asyncpg`, `psycopg`) or `advanced-alchemy` is supported over shared memory via `ProxySyncConfig[ConfigT]`, `ProxyAsyncConfig[ConfigT]`, `SqlSpecProvider`, and `AlchemyPlugin(broker=...)` without writing bespoke per-database Python driver wrappers in `vertebra.db`.
 - **Recent Discoveries**:

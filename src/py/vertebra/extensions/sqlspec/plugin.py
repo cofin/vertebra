@@ -11,6 +11,11 @@ import msgspec
 
 from vertebra.extensions.alchemy.broker import BrokerPlugin, BrokerTransport, ChannelMessage
 from vertebra.extensions.alchemy.plugin import AlchemyPlugin
+from vertebra.extensions.sqlspec.provider import SqlSpecProvider
+from vertebra.extensions.sqlspec.proxy import (
+    ProxyAsyncSessionContext,
+    ProxySyncSessionContext,
+)
 from vertebra.extensions.sqlspec.storage import SQLSpecStore
 from vertebra.storage import ObjectStore as BaseObjectStore
 from vertebra.utils.module_loader import import_optional
@@ -274,17 +279,23 @@ class ProxySyncConfig[
 ]:
     """Generic synchronous SQLSpec proxy configuration preserving inner SyncConfigT types."""
 
-    __slots__ = ("broker", "config")
+    __slots__ = ("broker", "config", "provider")
 
     def __init__(
         self,
         config: SyncConfigT,
         *,
-        broker: BrokerTransport | None = None,
+        broker: BrokerTransport | SqlSpecProvider | None = None,
+        provider: SqlSpecProvider | None = None,
     ) -> None:
         _inject_sqlspec_pool_defaults(config)
         self.config: SyncConfigT = config
-        self.broker = broker
+        if isinstance(broker, SqlSpecProvider):
+            self.provider: SqlSpecProvider | None = provider or broker
+            self.broker: Any = broker.broker
+        else:
+            self.provider = provider
+            self.broker = broker
 
     @property
     def is_async(self) -> bool:
@@ -326,8 +337,29 @@ class ProxySyncConfig[
         """Return driver features dictionary."""
         return getattr(self.config, "driver_features", {})
 
+    def provide_proxied_session(self, *, worker_pid: int | None = None) -> ProxySyncSessionContext:
+        """Return a synchronous session context manager backed by SqlSpecProvider and SHM leases."""
+        if self.provider is None:
+            self.provider = SqlSpecProvider(
+                self.config,
+                broker=self.broker,
+                pool_name=self.bind_key,
+            )
+        return ProxySyncSessionContext(
+            self.provider,
+            broker=self.broker,
+            pool_name=self.bind_key,
+            worker_pid=worker_pid,
+        )
+
     def provide_session(self) -> Any:
-        """Delegate session provision to the wrapped SyncConfigT."""
+        """Delegate session provision to ProxySyncSessionContext when provider is attached, or inner SyncConfigT."""
+        if self.provider is not None:
+            return ProxySyncSessionContext(
+                self.provider,
+                broker=self.broker,
+                pool_name=self.bind_key,
+            )
         fn = getattr(self.config, "provide_session", None)
         return fn() if callable(fn) else None
 
@@ -345,14 +377,22 @@ class ProxySyncConfig[
         """Delegate per-pool configuration cloning to the wrapped SyncConfigT (`sqlspec>=0.68.0`)."""
         fn = getattr(self.config, "derive_pool", None)
         if callable(fn):
-            return ProxySyncConfig(cast("SyncConfigT", fn(**overrides)), broker=self.broker)
+            return ProxySyncConfig(
+                cast("SyncConfigT", fn(**overrides)),
+                broker=self.broker,
+                provider=self.provider,
+            )
         return self
 
     def derive_direct_config(self) -> ProxySyncConfig[SyncConfigT]:
         """Delegate direct-session configuration derivation to the wrapped SyncConfigT (`sqlspec>=0.68.0`)."""
         fn = getattr(self.config, "derive_direct_config", None)
         if callable(fn):
-            return ProxySyncConfig(cast("SyncConfigT", fn()), broker=self.broker)
+            return ProxySyncConfig(
+                cast("SyncConfigT", fn()),
+                broker=self.broker,
+                provider=self.provider,
+            )
         return self
 
     def __getattr__(self, name: str) -> Any:
@@ -365,17 +405,23 @@ class ProxyAsyncConfig[
 ]:
     """Generic asynchronous SQLSpec proxy configuration preserving inner AsyncConfigT types."""
 
-    __slots__ = ("broker", "config")
+    __slots__ = ("broker", "config", "provider")
 
     def __init__(
         self,
         config: AsyncConfigT,
         *,
-        broker: BrokerTransport | None = None,
+        broker: BrokerTransport | SqlSpecProvider | None = None,
+        provider: SqlSpecProvider | None = None,
     ) -> None:
         _inject_sqlspec_pool_defaults(config)
         self.config: AsyncConfigT = config
-        self.broker = broker
+        if isinstance(broker, SqlSpecProvider):
+            self.provider: SqlSpecProvider | None = provider or broker
+            self.broker: Any = broker.broker
+        else:
+            self.provider = provider
+            self.broker = broker
 
     @property
     def is_async(self) -> bool:
@@ -417,8 +463,29 @@ class ProxyAsyncConfig[
         """Return driver features dictionary."""
         return getattr(self.config, "driver_features", {})
 
+    def provide_proxied_session(self, *, worker_pid: int | None = None) -> ProxyAsyncSessionContext:
+        """Return an asynchronous session context manager backed by SqlSpecProvider and SHM leases."""
+        if self.provider is None:
+            self.provider = SqlSpecProvider(
+                self.config,
+                broker=self.broker,
+                pool_name=self.bind_key,
+            )
+        return ProxyAsyncSessionContext(
+            self.provider,
+            broker=self.broker,
+            pool_name=self.bind_key,
+            worker_pid=worker_pid,
+        )
+
     def provide_session(self) -> Any:
-        """Delegate session provision to the wrapped AsyncConfigT."""
+        """Delegate session provision to ProxyAsyncSessionContext when provider is attached, or inner AsyncConfigT."""
+        if self.provider is not None:
+            return ProxyAsyncSessionContext(
+                self.provider,
+                broker=self.broker,
+                pool_name=self.bind_key,
+            )
         fn = getattr(self.config, "provide_session", None)
         return fn() if callable(fn) else None
 
@@ -436,14 +503,22 @@ class ProxyAsyncConfig[
         """Delegate per-pool configuration cloning to the wrapped AsyncConfigT (`sqlspec>=0.68.0`)."""
         fn = getattr(self.config, "derive_pool", None)
         if callable(fn):
-            return ProxyAsyncConfig(cast("AsyncConfigT", fn(**overrides)), broker=self.broker)
+            return ProxyAsyncConfig(
+                cast("AsyncConfigT", fn(**overrides)),
+                broker=self.broker,
+                provider=self.provider,
+            )
         return self
 
     def derive_direct_config(self) -> ProxyAsyncConfig[AsyncConfigT]:
         """Delegate direct-session configuration derivation to the wrapped AsyncConfigT (`sqlspec>=0.68.0`)."""
         fn = getattr(self.config, "derive_direct_config", None)
         if callable(fn):
-            return ProxyAsyncConfig(cast("AsyncConfigT", fn()), broker=self.broker)
+            return ProxyAsyncConfig(
+                cast("AsyncConfigT", fn()),
+                broker=self.broker,
+                provider=self.provider,
+            )
         return self
 
     def __getattr__(self, name: str) -> Any:
