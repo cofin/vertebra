@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 
 from vertebra._vertebra import (
-    NativeLeaseBroker,
-    NativeStatementCache,
+    LeaseBroker,
+    StatementCache,
 )
 from vertebra.utils.serializers import decode_msgpack, encode_msgpack
 from vertebra.utils.sync_tools import SyncPool
@@ -368,7 +368,7 @@ class ShmBrokerTransport:
         self,
         config: BrokerConfig | None = None,
         *,
-        native: NativeLeaseBroker | None = None,
+        native: LeaseBroker | None = None,
     ) -> None:
         raw_cfg = config or BrokerConfig()
         acq_ms = (
@@ -386,26 +386,26 @@ class ShmBrokerTransport:
         if native is not None:
             self._native = native
         else:
-            env_broker = NativeLeaseBroker.from_env()
+            env_broker = LeaseBroker.from_env()
             if env_broker is not None:
                 self._native = env_broker
             elif self._config.shm_name:
                 try:
-                    self._native = NativeLeaseBroker.open_named(
+                    self._native = LeaseBroker.open_named(
                         self._config.shm_name,
                         self._config.pool_size,
                         self._config.max_overflow,
                         self._config.statement_cache_capacity,
                     )
                 except Exception:
-                    self._native = NativeLeaseBroker.create_named(
+                    self._native = LeaseBroker.create_named(
                         self._config.shm_name,
                         self._config.pool_size,
                         self._config.max_overflow,
                         self._config.statement_cache_capacity,
                     )
             else:
-                self._native = NativeLeaseBroker(
+                self._native = LeaseBroker(
                     self._config.pool_size,
                     self._config.max_overflow,
                     self._config.statement_cache_capacity,
@@ -413,9 +413,7 @@ class ShmBrokerTransport:
 
         colocated_cache = self._native.statement_cache()
         self._stmt_cache = (
-            colocated_cache
-            if colocated_cache is not None
-            else NativeStatementCache(self._config.statement_cache_capacity)
+            colocated_cache if colocated_cache is not None else StatementCache(self._config.statement_cache_capacity)
         )
         self._active_leases: dict[str, ConnectionLease] = {}
         self._lock = threading.Lock()
@@ -429,7 +427,7 @@ class ShmBrokerTransport:
     ) -> ShmBrokerTransport:
         """Attach a broker transport to an inherited shared-memory file descriptor."""
         cfg = config or BrokerConfig()
-        native = NativeLeaseBroker.from_fd(fd, size)
+        native = LeaseBroker.from_fd(fd, size)
         return cls(config=cfg, native=native)
 
     @property

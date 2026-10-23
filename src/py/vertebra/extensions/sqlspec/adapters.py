@@ -11,10 +11,10 @@ from vertebra.db.mysql import AsyncMysqlDriver, MysqlConfig, SyncMysqlDriver
 from vertebra.db.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
 from vertebra.db.postgres import (
     ARROW_SHM_THRESHOLD_ROWS,
+    ArrowCursor,
     AsyncPostgresDriver,
     PostgresConfig,
     SyncPostgresDriver,
-    VertebraArrowCursor,
 )
 from vertebra.db.sqlite import AsyncSqliteDriver, SqliteConfig, SyncSqliteDriver
 
@@ -22,20 +22,20 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 
 __all__ = [
-    "VertebraDuckdbAsyncConfig",
-    "VertebraDuckdbSyncConfig",
-    "VertebraMssqlAsyncConfig",
-    "VertebraMssqlSyncConfig",
-    "VertebraMysqlAsyncConfig",
-    "VertebraMysqlSyncConfig",
-    "VertebraOracleAsyncConfig",
-    "VertebraOracleSyncConfig",
-    "VertebraPostgresAsyncConfig",
-    "VertebraPostgresSyncConfig",
-    "VertebraSqlSpecAsyncConfig",
-    "VertebraSqlSpecSyncConfig",
-    "VertebraSqliteAsyncConfig",
-    "VertebraSqliteSyncConfig",
+    "AsyncAdapterConfig",
+    "DuckdbAsyncConfig",
+    "DuckdbSyncConfig",
+    "MssqlAsyncConfig",
+    "MssqlSyncConfig",
+    "MysqlAsyncConfig",
+    "MysqlSyncConfig",
+    "OracleAsyncConfig",
+    "OracleSyncConfig",
+    "PostgresAsyncConfig",
+    "PostgresSyncConfig",
+    "SqliteAsyncConfig",
+    "SqliteSyncConfig",
+    "SyncAdapterConfig",
 ]
 
 
@@ -81,12 +81,12 @@ class _SyncAdapterSession:
         params: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         shm_threshold_rows: int | None = None,
-    ) -> VertebraArrowCursor:
-        """Execute a query and return a zero-copy `VertebraArrowCursor`."""
+    ) -> ArrowCursor:
+        """Execute a query and return a zero-copy `ArrowCursor`."""
         threshold = self._arrow_threshold_rows if shm_threshold_rows is None else shm_threshold_rows
         if params is None:
-            return cast("VertebraArrowCursor", self._driver.select_to_arrow(sql, shm_threshold_rows=threshold))
-        return cast("VertebraArrowCursor", self._driver.select_to_arrow(sql, params, shm_threshold_rows=threshold))
+            return cast("ArrowCursor", self._driver.select_to_arrow(sql, shm_threshold_rows=threshold))
+        return cast("ArrowCursor", self._driver.select_to_arrow(sql, params, shm_threshold_rows=threshold))
 
 
 class _AsyncAdapterSession:
@@ -133,17 +133,15 @@ class _AsyncAdapterSession:
         params: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         shm_threshold_rows: int | None = None,
-    ) -> VertebraArrowCursor:
-        """Execute a query asynchronously and return a zero-copy `VertebraArrowCursor`."""
+    ) -> ArrowCursor:
+        """Execute a query asynchronously and return a zero-copy `ArrowCursor`."""
         threshold = self._arrow_threshold_rows if shm_threshold_rows is None else shm_threshold_rows
         if params is None:
-            return cast("VertebraArrowCursor", await self._driver.select_to_arrow(sql, shm_threshold_rows=threshold))
-        return cast(
-            "VertebraArrowCursor", await self._driver.select_to_arrow(sql, params, shm_threshold_rows=threshold)
-        )
+            return cast("ArrowCursor", await self._driver.select_to_arrow(sql, shm_threshold_rows=threshold))
+        return cast("ArrowCursor", await self._driver.select_to_arrow(sql, params, shm_threshold_rows=threshold))
 
 
-class VertebraSqlSpecSyncConfig[ConfigT, DriverT]:
+class SyncAdapterConfig[ConfigT, DriverT]:
     """Base synchronous SQLSpec adapter configuration backed by a Vertebra native driver."""
 
     dialect: ClassVar[str] = "generic"
@@ -190,7 +188,7 @@ class VertebraSqlSpecSyncConfig[ConfigT, DriverT]:
             self._driver_instance = None
 
 
-class VertebraSqlSpecAsyncConfig[ConfigT, DriverT]:
+class AsyncAdapterConfig[ConfigT, DriverT]:
     """Base asynchronous SQLSpec adapter configuration backed by a Vertebra native driver."""
 
     dialect: ClassVar[str] = "generic"
@@ -237,7 +235,7 @@ class VertebraSqlSpecAsyncConfig[ConfigT, DriverT]:
             self._driver_instance = None
 
 
-class VertebraPostgresSyncConfig(VertebraSqlSpecSyncConfig[PostgresConfig, SyncPostgresDriver]):
+class PostgresSyncConfig(SyncAdapterConfig[PostgresConfig, SyncPostgresDriver]):
     """Synchronous SQLSpec adapter configuration for PostgreSQL (`postgres+vtb`)."""
 
     dialect: ClassVar[str] = "postgres"
@@ -245,7 +243,7 @@ class VertebraPostgresSyncConfig(VertebraSqlSpecSyncConfig[PostgresConfig, SyncP
     _driver_cls: ClassVar[type[SyncPostgresDriver]] = SyncPostgresDriver
 
 
-class VertebraPostgresAsyncConfig(VertebraSqlSpecAsyncConfig[PostgresConfig, AsyncPostgresDriver]):
+class PostgresAsyncConfig(AsyncAdapterConfig[PostgresConfig, AsyncPostgresDriver]):
     """Asynchronous SQLSpec adapter configuration for PostgreSQL (`postgres+vtb`)."""
 
     dialect: ClassVar[str] = "postgres"
@@ -253,7 +251,7 @@ class VertebraPostgresAsyncConfig(VertebraSqlSpecAsyncConfig[PostgresConfig, Asy
     _driver_cls: ClassVar[type[AsyncPostgresDriver]] = AsyncPostgresDriver
 
 
-class VertebraMysqlSyncConfig(VertebraSqlSpecSyncConfig[MysqlConfig, SyncMysqlDriver]):
+class MysqlSyncConfig(SyncAdapterConfig[MysqlConfig, SyncMysqlDriver]):
     """Synchronous SQLSpec adapter configuration for MySQL/MariaDB (`mysql+vtb`)."""
 
     dialect: ClassVar[str] = "mysql"
@@ -261,7 +259,7 @@ class VertebraMysqlSyncConfig(VertebraSqlSpecSyncConfig[MysqlConfig, SyncMysqlDr
     _driver_cls: ClassVar[type[SyncMysqlDriver]] = SyncMysqlDriver
 
 
-class VertebraMysqlAsyncConfig(VertebraSqlSpecAsyncConfig[MysqlConfig, AsyncMysqlDriver]):
+class MysqlAsyncConfig(AsyncAdapterConfig[MysqlConfig, AsyncMysqlDriver]):
     """Asynchronous SQLSpec adapter configuration for MySQL/MariaDB (`mysql+vtb`)."""
 
     dialect: ClassVar[str] = "mysql"
@@ -269,7 +267,7 @@ class VertebraMysqlAsyncConfig(VertebraSqlSpecAsyncConfig[MysqlConfig, AsyncMysq
     _driver_cls: ClassVar[type[AsyncMysqlDriver]] = AsyncMysqlDriver
 
 
-class VertebraSqliteSyncConfig(VertebraSqlSpecSyncConfig[SqliteConfig, SyncSqliteDriver]):
+class SqliteSyncConfig(SyncAdapterConfig[SqliteConfig, SyncSqliteDriver]):
     """Synchronous SQLSpec adapter configuration for SQLite (`sqlite+vtb`)."""
 
     dialect: ClassVar[str] = "sqlite"
@@ -277,7 +275,7 @@ class VertebraSqliteSyncConfig(VertebraSqlSpecSyncConfig[SqliteConfig, SyncSqlit
     _driver_cls: ClassVar[type[SyncSqliteDriver]] = SyncSqliteDriver
 
 
-class VertebraSqliteAsyncConfig(VertebraSqlSpecAsyncConfig[SqliteConfig, AsyncSqliteDriver]):
+class SqliteAsyncConfig(AsyncAdapterConfig[SqliteConfig, AsyncSqliteDriver]):
     """Asynchronous SQLSpec adapter configuration for SQLite (`sqlite+vtb`)."""
 
     dialect: ClassVar[str] = "sqlite"
@@ -285,7 +283,7 @@ class VertebraSqliteAsyncConfig(VertebraSqlSpecAsyncConfig[SqliteConfig, AsyncSq
     _driver_cls: ClassVar[type[AsyncSqliteDriver]] = AsyncSqliteDriver
 
 
-class VertebraOracleSyncConfig(VertebraSqlSpecSyncConfig[OracleConfig, SyncOracleDriver]):
+class OracleSyncConfig(SyncAdapterConfig[OracleConfig, SyncOracleDriver]):
     """Synchronous SQLSpec adapter configuration for Oracle Thin (`oracle+vtb`)."""
 
     dialect: ClassVar[str] = "oracle"
@@ -293,7 +291,7 @@ class VertebraOracleSyncConfig(VertebraSqlSpecSyncConfig[OracleConfig, SyncOracl
     _driver_cls: ClassVar[type[SyncOracleDriver]] = SyncOracleDriver
 
 
-class VertebraOracleAsyncConfig(VertebraSqlSpecAsyncConfig[OracleConfig, AsyncOracleDriver]):
+class OracleAsyncConfig(AsyncAdapterConfig[OracleConfig, AsyncOracleDriver]):
     """Asynchronous SQLSpec adapter configuration for Oracle Thin (`oracle+vtb`)."""
 
     dialect: ClassVar[str] = "oracle"
@@ -301,7 +299,7 @@ class VertebraOracleAsyncConfig(VertebraSqlSpecAsyncConfig[OracleConfig, AsyncOr
     _driver_cls: ClassVar[type[AsyncOracleDriver]] = AsyncOracleDriver
 
 
-class VertebraMssqlSyncConfig(VertebraSqlSpecSyncConfig[MssqlConfig, SyncMssqlDriver]):
+class MssqlSyncConfig(SyncAdapterConfig[MssqlConfig, SyncMssqlDriver]):
     """Synchronous SQLSpec adapter configuration for SQL Server (`mssql+vtb`)."""
 
     dialect: ClassVar[str] = "mssql"
@@ -309,7 +307,7 @@ class VertebraMssqlSyncConfig(VertebraSqlSpecSyncConfig[MssqlConfig, SyncMssqlDr
     _driver_cls: ClassVar[type[SyncMssqlDriver]] = SyncMssqlDriver
 
 
-class VertebraMssqlAsyncConfig(VertebraSqlSpecAsyncConfig[MssqlConfig, AsyncMssqlDriver]):
+class MssqlAsyncConfig(AsyncAdapterConfig[MssqlConfig, AsyncMssqlDriver]):
     """Asynchronous SQLSpec adapter configuration for SQL Server (`mssql+vtb`)."""
 
     dialect: ClassVar[str] = "mssql"
@@ -317,7 +315,7 @@ class VertebraMssqlAsyncConfig(VertebraSqlSpecAsyncConfig[MssqlConfig, AsyncMssq
     _driver_cls: ClassVar[type[AsyncMssqlDriver]] = AsyncMssqlDriver
 
 
-class VertebraDuckdbSyncConfig(VertebraSqlSpecSyncConfig[DuckdbConfig, SyncDuckdbDriver]):
+class DuckdbSyncConfig(SyncAdapterConfig[DuckdbConfig, SyncDuckdbDriver]):
     """Synchronous SQLSpec adapter configuration for DuckDB (`duckdb+vtb`)."""
 
     dialect: ClassVar[str] = "duckdb"
@@ -325,7 +323,7 @@ class VertebraDuckdbSyncConfig(VertebraSqlSpecSyncConfig[DuckdbConfig, SyncDuckd
     _driver_cls: ClassVar[type[SyncDuckdbDriver]] = SyncDuckdbDriver
 
 
-class VertebraDuckdbAsyncConfig(VertebraSqlSpecAsyncConfig[DuckdbConfig, AsyncDuckdbDriver]):
+class DuckdbAsyncConfig(AsyncAdapterConfig[DuckdbConfig, AsyncDuckdbDriver]):
     """Asynchronous SQLSpec adapter configuration for DuckDB (`duckdb+vtb`)."""
 
     dialect: ClassVar[str] = "duckdb"

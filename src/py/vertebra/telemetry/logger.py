@@ -9,7 +9,7 @@ from typing import Any, Literal, cast
 
 import msgspec
 
-from vertebra._vertebra import NativeLogSink
+from vertebra._vertebra import LogSink as _CoreLogSink
 from vertebra.telemetry.otel import TraceContext
 from vertebra.utils.serializers import encode_json_bytes
 
@@ -99,7 +99,7 @@ class LoggingConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return _CallableLogFormatter("%(levelname)s - %(asctime)s - %(name)s - %(message)s")
 
     def configure_stdlib(self, root_logger_name: str = "") -> "LogHandler":
-        """Configure standard library logging to emit through NativeLogSink off-GIL."""
+        """Configure standard library logging to emit through LogSink off-GIL."""
         sink = LogSink(
             capacity=self.queue_capacity,
             overflow_policy=self.overflow_policy,
@@ -137,7 +137,7 @@ class LoggingConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
 
 class LogSink:
-    """Bounded non-blocking byte queue backed by NativeLogSink."""
+    """Bounded non-blocking byte queue backed by vertebra._vertebra.LogSink."""
 
     def __init__(
         self,
@@ -150,7 +150,7 @@ class LogSink:
         self.overflow_policy: LogOverflowPolicy = overflow_policy
         self._target = target
         self._flush_interval_ms = flush_interval_ms
-        self._native = NativeLogSink(
+        self._native = _CoreLogSink(
             target=target,
             capacity=self.capacity,
             overflow_policy=overflow_policy,

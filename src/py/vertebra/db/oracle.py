@@ -16,7 +16,7 @@ import msgspec
 
 from vertebra.db.postgres import (
     ARROW_SHM_THRESHOLD_ROWS,
-    VertebraArrowCursor,
+    ArrowCursor,
 )
 from vertebra.typing import (
     FrozenBaseStruct,
@@ -44,10 +44,6 @@ __all__ = [
     "OracleSessionAttrs",
     "OracleWallet",
     "SyncOracleDriver",
-    "decode_oracle_vector_binary",
-    "decode_oracle_vector_f32",
-    "decode_oracle_vector_f64",
-    "decode_oracle_vector_i8",
     "decode_oson",
     "decode_oson_payload",
     "decode_tns_packet",
@@ -56,10 +52,6 @@ __all__ = [
     "decode_vector_f32",
     "decode_vector_f64",
     "decode_vector_i8",
-    "encode_oracle_vector_binary",
-    "encode_oracle_vector_f32",
-    "encode_oracle_vector_f64",
-    "encode_oracle_vector_i8",
     "encode_oson",
     "encode_oson_payload",
     "encode_tns_connect_packet",
@@ -588,16 +580,6 @@ def decode_vector_binary(payload: bytes | bytearray | memoryview) -> bytes:
     return bytes(body)
 
 
-encode_oracle_vector_f32 = encode_vector_f32
-decode_oracle_vector_f32 = decode_vector_f32
-encode_oracle_vector_f64 = encode_vector_f64
-decode_oracle_vector_f64 = decode_vector_f64
-encode_oracle_vector_i8 = encode_vector_i8
-decode_oracle_vector_i8 = decode_vector_i8
-encode_oracle_vector_binary = encode_vector_binary
-decode_oracle_vector_binary = decode_vector_binary
-
-
 def encode_oson_payload(json_bytes: bytes) -> bytes:
     """Wrap raw UTF-8 JSON bytes with an 8-byte Oracle 26ai `OSON` binary header."""
     native = import_optional("vertebra._vertebra")
@@ -829,10 +811,10 @@ class SyncOracleDriver:
         params: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         shm_threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-    ) -> VertebraArrowCursor:
+    ) -> ArrowCursor:
         """Execute a query and materialize the result set as a zero-copy Arrow cursor."""
         rows = self.select(sql, params)
-        return VertebraArrowCursor.from_rows(rows, threshold_rows=shm_threshold_rows)
+        return ArrowCursor.from_rows(rows, threshold_rows=shm_threshold_rows)
 
     def close(self) -> None:
         """Close the underlying driver resources."""
@@ -881,8 +863,8 @@ class AsyncOracleDriver:
         params: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         shm_threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-    ) -> VertebraArrowCursor:
-        """Execute a query asynchronously and return a zero-copy `VertebraArrowCursor`."""
+    ) -> ArrowCursor:
+        """Execute a query asynchronously and return a zero-copy `ArrowCursor`."""
         return await asyncio.to_thread(
             self._sync.select_to_arrow,
             sql,

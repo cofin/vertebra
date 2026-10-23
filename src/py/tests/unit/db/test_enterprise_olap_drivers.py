@@ -14,6 +14,7 @@ from vertebra.db import (
     AlloyDbAuthType,
     AlloyDbConfig,
     AlloyDbDialer,
+    ArrowCursor,
     AsyncDuckdbDriver,
     AsyncMssqlDriver,
     AsyncMysqlDriver,
@@ -35,7 +36,6 @@ from vertebra.db import (
     SyncMssqlDriver,
     SyncOracleDriver,
     SyncSqliteDriver,
-    VertebraArrowCursor,
     decode_oson,
     decode_vector_binary,
     decode_vector_f32,
@@ -75,30 +75,30 @@ from vertebra.db.postgres import (
     write_arrow_shm,
 )
 from vertebra.extensions.sqlalchemy.dialects import (
+    DBAPIConnection,
+    DBAPICursor,
     DialectDescriptor,
-    DuckdbVtbDialect,
-    MssqlVtbDialect,
-    MysqlVtbDialect,
+    DuckdbDialect,
+    MssqlDialect,
+    MysqlDialect,
     NullPool,
-    OracleVtbDialect,
-    PostgresVtbDialect,
-    SqliteVtbDialect,
-    VertebraDbapiConnection,
-    VertebraDbapiCursor,
+    OracleDialect,
+    PostgresDialect,
+    SqliteDialect,
 )
 from vertebra.extensions.sqlspec.adapters import (
-    VertebraDuckdbAsyncConfig,
-    VertebraDuckdbSyncConfig,
-    VertebraMssqlAsyncConfig,
-    VertebraMssqlSyncConfig,
-    VertebraMysqlAsyncConfig,
-    VertebraMysqlSyncConfig,
-    VertebraOracleAsyncConfig,
-    VertebraOracleSyncConfig,
-    VertebraPostgresAsyncConfig,
-    VertebraPostgresSyncConfig,
-    VertebraSqliteAsyncConfig,
-    VertebraSqliteSyncConfig,
+    DuckdbAsyncConfig,
+    DuckdbSyncConfig,
+    MssqlAsyncConfig,
+    MssqlSyncConfig,
+    MysqlAsyncConfig,
+    MysqlSyncConfig,
+    OracleAsyncConfig,
+    OracleSyncConfig,
+    PostgresAsyncConfig,
+    PostgresSyncConfig,
+    SqliteAsyncConfig,
+    SqliteSyncConfig,
 )
 from vertebra.typing import ImproperConfigurationError, VertebraError
 
@@ -187,7 +187,7 @@ def test_postgres_jsonb_pgcopy_and_arrow_shm_cursor() -> None:
     dict_rows = [{"id": idx, "name": f"row-{idx}"} for idx in range(10)]
     region_view = write_arrow_shm(dict_rows)
     cursor = read_arrow_shm(region_view, len(region_view))
-    assert isinstance(cursor, VertebraArrowCursor)
+    assert isinstance(cursor, ArrowCursor)
     assert len(cursor) == 10
     assert len(cursor.buffer_view()) == len(region_view)
     assert cursor.to_pylist() == dict_rows
@@ -453,29 +453,29 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
     assert isinstance(reg.parse_url("duckdb:///:memory:"), DuckdbConfig)
 
     sync_configs = [
-        VertebraPostgresSyncConfig(),
-        VertebraMysqlSyncConfig(),
-        VertebraSqliteSyncConfig(),
-        VertebraOracleSyncConfig(),
-        VertebraMssqlSyncConfig(),
-        VertebraDuckdbSyncConfig(),
+        PostgresSyncConfig(),
+        MysqlSyncConfig(),
+        SqliteSyncConfig(),
+        OracleSyncConfig(),
+        MssqlSyncConfig(),
+        DuckdbSyncConfig(),
     ]
     for scfg in sync_configs:
         assert scfg.is_async is False
         assert scfg.arrow_threshold_rows == ARROW_SHM_THRESHOLD_ROWS
 
     async_configs = [
-        VertebraPostgresAsyncConfig(),
-        VertebraMysqlAsyncConfig(),
-        VertebraSqliteAsyncConfig(),
-        VertebraOracleAsyncConfig(),
-        VertebraMssqlAsyncConfig(),
-        VertebraDuckdbAsyncConfig(),
+        PostgresAsyncConfig(),
+        MysqlAsyncConfig(),
+        SqliteAsyncConfig(),
+        OracleAsyncConfig(),
+        MssqlAsyncConfig(),
+        DuckdbAsyncConfig(),
     ]
     for acfg in async_configs:
         assert acfg.is_async is True
 
-    sqlite_sync = VertebraSqliteSyncConfig(path=":memory:")
+    sqlite_sync = SqliteSyncConfig(path=":memory:")
     with sqlite_sync.provide_session() as session:
         session.execute("CREATE TABLE t_sync (k INTEGER PRIMARY KEY, v TEXT)")
         session.execute("INSERT INTO t_sync (k, v) VALUES (?, ?)", (1, "one"))
@@ -483,7 +483,7 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
         assert session.select_value("SELECT v FROM t_sync WHERE k = ?", (1,)) == "one"
     sqlite_sync.close()
 
-    duck_async = VertebraDuckdbAsyncConfig(path=":memory:")
+    duck_async = DuckdbAsyncConfig(path=":memory:")
     async with duck_async.provide_session() as asession:
         await asession.execute("CREATE TABLE t_async (k INTEGER, v TEXT)")
         await asession.execute("INSERT INTO t_async VALUES (42, 'answer')")
@@ -505,7 +505,7 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
 
 def test_sqlalchemy_vtb_dialects_nullpool_and_dbapi_broker_forwarding() -> None:
     """Verify all 6 SQLAlchemy +vtb dialects use NullPool and forward DBAPI operations through the SHM broker."""
-    vtb_map = DialectDescriptor.vtb_dialects()
+    vtb_map = DialectDescriptor.dialects()
     assert set(vtb_map.keys()) == {
         "postgresql+vtb",
         "mysql+vtb",
@@ -515,20 +515,20 @@ def test_sqlalchemy_vtb_dialects_nullpool_and_dbapi_broker_forwarding() -> None:
         "duckdb+vtb",
     }
     for dialect_cls in (
-        PostgresVtbDialect,
-        MysqlVtbDialect,
-        SqliteVtbDialect,
-        OracleVtbDialect,
-        MssqlVtbDialect,
-        DuckdbVtbDialect,
+        PostgresDialect,
+        MysqlDialect,
+        SqliteDialect,
+        OracleDialect,
+        MssqlDialect,
+        DuckdbDialect,
     ):
         assert dialect_cls.poolclass is NullPool
         assert dialect_cls.get_pool_class() is NullPool
 
     all_registered = DialectDescriptor.register_all(include_enterprise_olap=True)
     assert len(all_registered) == 12
-    assert all_registered["mssql.vtb"] is MssqlVtbDialect
-    assert all_registered["duckdb.vtb"] is DuckdbVtbDialect
+    assert all_registered["mssql.vtb"] is MssqlDialect
+    assert all_registered["duckdb.vtb"] is DuckdbDialect
 
     broker = _MockBroker()
     for url in (
@@ -537,9 +537,9 @@ def test_sqlalchemy_vtb_dialects_nullpool_and_dbapi_broker_forwarding() -> None:
         "mssql+vtb://localhost:1433/master",
         "duckdb+vtb:///:memory:",
     ):
-        conn = VertebraDbapiConnection(url, broker=broker)
+        conn = DBAPIConnection(url, broker=broker)
         cur = conn.cursor()
-        assert isinstance(cur, VertebraDbapiCursor)
+        assert isinstance(cur, DBAPICursor)
         cur.execute("CREATE TABLE items (id INTEGER, name TEXT)")
         cur.execute("INSERT INTO items VALUES (1, 'vtb')")
         cur.execute("SELECT id, name FROM items")

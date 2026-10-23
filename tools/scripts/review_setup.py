@@ -1684,7 +1684,7 @@ class ReviewSetupValidator:
         return issues
 
     def _check_python_imports(self) -> list[ReviewIssue]:
-        """Validate PY-08: forbid vertebra._typing outside typing.py and raw importlib.import_module outside module_loader.py."""
+        """Validate PY-07 domain naming rules and PY-08 typing/module_loader import rules."""
         issues: list[ReviewIssue] = []
         py_root = self.repo_root / "src/py"
         if not py_root.exists():
@@ -1698,8 +1698,10 @@ class ReviewSetupValidator:
             "src/py/vertebra/utils/module_loader.py",
             "src/py/vertebra/build/packaging/_onefile_extract.py",
         }
+        allowed_vertebra_classes = {"VertebraError"}
 
-        for py_file in sorted(py_root.rglob("*.py")):
+        py_files = sorted(list(py_root.rglob("*.py")) + list(py_root.rglob("*.pyi")))
+        for py_file in py_files:
             rel_file = py_file.relative_to(self.repo_root).as_posix()
             try:
                 source = py_file.read_text(encoding="utf-8")
@@ -1708,8 +1710,56 @@ class ReviewSetupValidator:
                 continue
 
             in_vertebra_pkg = rel_file.startswith("src/py/vertebra/")
+            if in_vertebra_pkg:
+                for stmt in tree.body:
+                    if (
+                        isinstance(stmt, ast.Assign)
+                        and len(stmt.targets) == 1
+                        and isinstance(stmt.targets[0], ast.Name)
+                        and isinstance(stmt.value, ast.Name)
+                    ):
+                        alias_name = stmt.targets[0].id
+                        if alias_name.startswith(("Vertebra", "Native")) or "Vtb" in alias_name:
+                            issues.append(
+                                ReviewIssue(
+                                    "python_imports",
+                                    rel_file,
+                                    stmt.lineno,
+                                    f"top-level alias '{alias_name} = {stmt.value.id}' violates domain naming rules (PY-07)",
+                                )
+                            )
+
             for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
+                if in_vertebra_pkg and isinstance(node, ast.ClassDef):
+                    cls_name = node.name
+                    if cls_name.startswith("Vertebra") and cls_name not in allowed_vertebra_classes:
+                        issues.append(
+                            ReviewIssue(
+                                "python_imports",
+                                rel_file,
+                                node.lineno,
+                                f"class '{cls_name}' uses forbidden 'Vertebra*' prefix; use a clean domain name (PY-07)",
+                            )
+                        )
+                    elif "Vtb" in cls_name:
+                        issues.append(
+                            ReviewIssue(
+                                "python_imports",
+                                rel_file,
+                                node.lineno,
+                                f"class '{cls_name}' uses forbidden '*Vtb*' token; use a clean domain name (PY-07)",
+                            )
+                        )
+                    elif cls_name.startswith("Native"):
+                        issues.append(
+                            ReviewIssue(
+                                "python_imports",
+                                rel_file,
+                                node.lineno,
+                                f"class '{cls_name}' uses forbidden 'Native*' implementation prefix; use a clean domain name (PY-07)",
+                            )
+                        )
+                elif isinstance(node, ast.Import):
                     for alias in node.names:
                         if alias.name == "vertebra._typing" and rel_file not in allowed_private_typing:
                             issues.append(

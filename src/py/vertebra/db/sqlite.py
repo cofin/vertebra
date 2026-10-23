@@ -13,7 +13,7 @@ from typing import Any
 import msgspec
 
 from vertebra.db.postgres import (
-    VertebraArrowCursor,
+    ArrowCursor,
     _normalize_driver_params,
     write_arrow_shm,
 )
@@ -210,12 +210,12 @@ class SyncSqliteDriver:
         *params: Any,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
         shm_threshold_rows: int = 0,
-    ) -> VertebraArrowCursor:
-        """Execute a query and return a VertebraArrowCursor via zero-copy ShmRegion Arrow IPC."""
+    ) -> ArrowCursor:
+        """Execute a query and return an ArrowCursor via zero-copy ShmRegion Arrow IPC."""
         resolved = _normalize_driver_params(params, parameters)
         rows, desc = self.execute_with_description(sql, resolved)
         cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
-        return VertebraArrowCursor.from_rows(rows, cols, threshold_rows=shm_threshold_rows)
+        return ArrowCursor.from_rows(rows, cols, threshold_rows=shm_threshold_rows)
 
     def write_arrow_shm(self, table: Any) -> memoryview:
         """Write an Arrow Table into a shared-memory Arrow IPC buffer and return a memoryview."""
@@ -300,8 +300,8 @@ class AsyncSqliteDriver:
         *params: Any,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
         shm_threshold_rows: int = 0,
-    ) -> VertebraArrowCursor:
-        """Asynchronously execute a query and return a VertebraArrowCursor via zero-copy ShmRegion Arrow IPC."""
+    ) -> ArrowCursor:
+        """Asynchronously execute a query and return an ArrowCursor via zero-copy ShmRegion Arrow IPC."""
         resolved = _normalize_driver_params(params, parameters)
         return await asyncio.to_thread(
             self._sync.select_to_arrow,

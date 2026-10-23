@@ -6,7 +6,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use vertebra_db::dialer::{
-    AlloyDbDialer, AuthType, CloudSqlDialer, IpType,
+    AlloyDbDialer as RsAlloyDbDialer, AuthType, CloudSqlDialer as RsCloudSqlDialer, IpType,
     decode_alloydb_metadata_response as rs_decode_alloydb_metadata_response,
     encode_alloydb_metadata_exchange as rs_encode_alloydb_metadata_exchange,
 };
@@ -43,15 +43,15 @@ use vertebra_db::tns::{
     parse_tnsnames_ora as rs_parse_tnsnames_ora, resolve_tns_alias as rs_resolve_tns_alias,
 };
 
-/// Native zero-sidecar Google Cloud SQL (`:3307`) mTLS dialer.
+/// Zero-sidecar Google Cloud SQL (`:3307`) mTLS dialer.
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone, Debug)]
-pub struct NativeCloudSqlDialer {
-    inner: CloudSqlDialer,
+pub struct CloudSqlDialer {
+    inner: RsCloudSqlDialer,
 }
 
 #[pymethods]
-impl NativeCloudSqlDialer {
+impl CloudSqlDialer {
     #[new]
     #[pyo3(signature = (instance_uri, ip_type="PUBLIC", iam_auth=true))]
     pub fn new(instance_uri: &str, ip_type: &str, iam_auth: bool) -> PyResult<Self> {
@@ -62,7 +62,7 @@ impl NativeCloudSqlDialer {
             AuthType::Password
         };
         let inner =
-            CloudSqlDialer::new(instance_uri, parsed_ip, auth).map_err(PyValueError::new_err)?;
+            RsCloudSqlDialer::new(instance_uri, parsed_ip, auth).map_err(PyValueError::new_err)?;
         Ok(Self { inner })
     }
 
@@ -103,15 +103,15 @@ impl NativeCloudSqlDialer {
     }
 }
 
-/// Native zero-sidecar Google Cloud AlloyDB (`:5433`) mTLS and `MetadataExchangeRequest` dialer.
+/// Zero-sidecar Google Cloud AlloyDB (`:5433`) mTLS and `MetadataExchangeRequest` dialer.
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone, Debug)]
-pub struct NativeAlloyDbDialer {
-    inner: AlloyDbDialer,
+pub struct AlloyDbDialer {
+    inner: RsAlloyDbDialer,
 }
 
 #[pymethods]
-impl NativeAlloyDbDialer {
+impl AlloyDbDialer {
     #[new]
     #[pyo3(signature = (cluster_uri, ip_type="PRIVATE", iam_auth=true))]
     pub fn new(cluster_uri: &str, ip_type: &str, iam_auth: bool) -> PyResult<Self> {
@@ -122,7 +122,7 @@ impl NativeAlloyDbDialer {
             AuthType::Password
         };
         let inner =
-            AlloyDbDialer::new(cluster_uri, parsed_ip, auth).map_err(PyValueError::new_err)?;
+            RsAlloyDbDialer::new(cluster_uri, parsed_ip, auth).map_err(PyValueError::new_err)?;
         Ok(Self { inner })
     }
 
@@ -171,7 +171,7 @@ impl NativeAlloyDbDialer {
 /// Shared-memory Arrow IPC cursor backed by `vertebra_core::shm::ShmRegion`.
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone, Debug)]
-pub struct VertebraArrowCursor {
+pub struct ArrowCursor {
     #[pyo3(get)]
     pub shm_name: String,
     #[pyo3(get)]
@@ -179,7 +179,7 @@ pub struct VertebraArrowCursor {
 }
 
 #[pymethods]
-impl VertebraArrowCursor {
+impl ArrowCursor {
     #[new]
     pub fn new(shm_name: String, byte_len: usize) -> Self {
         Self { shm_name, byte_len }
@@ -511,9 +511,9 @@ pub fn parse_cluster_redirect(err_msg: &str) -> Option<(String, u16, String, u16
 
 /// Register all `vertebra-db` classes and functions on the `_vertebra` Python module.
 pub fn register_db_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<NativeCloudSqlDialer>()?;
-    m.add_class::<NativeAlloyDbDialer>()?;
-    m.add_class::<VertebraArrowCursor>()?;
+    m.add_class::<CloudSqlDialer>()?;
+    m.add_class::<AlloyDbDialer>()?;
+    m.add_class::<ArrowCursor>()?;
 
     m.add_function(wrap_pyfunction!(encode_alloydb_metadata_exchange, m)?)?;
     m.add_function(wrap_pyfunction!(decode_alloydb_metadata_response, m)?)?;

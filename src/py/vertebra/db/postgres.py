@@ -20,11 +20,11 @@ from vertebra.utils.serializers import decode_json, encode_json_bytes
 __all__ = (
     "ARROW_SHM_THRESHOLD_ROWS",
     "PGCOPY_BINARY_SIGNATURE",
+    "ArrowCursor",
     "AsyncPostgresDriver",
     "PoolerMode",
     "PostgresConfig",
     "SyncPostgresDriver",
-    "VertebraArrowCursor",
     "decode_pgcopy_rows",
     "encode_pg_jsonb",
     "encode_pgcopy_rows",
@@ -39,7 +39,7 @@ ARROW_SHM_THRESHOLD_ROWS: int = 256
 type PoolerMode = Literal["direct", "transaction", "session", "statement", "auto"]
 
 
-class VertebraArrowCursor:
+class ArrowCursor:
     """Zero-copy shared-memory Arrow IPC cursor for bulk analytical result sets."""
 
     __slots__ = ("_buffer", "_columns", "_mmap", "_rows", "_shm_cursor", "_used_shm")
@@ -137,8 +137,8 @@ class VertebraArrowCursor:
         columns: Sequence[str] | None = None,
         *,
         threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-    ) -> VertebraArrowCursor:
-        """Build a VertebraArrowCursor from tabular rows, using SHM Arrow IPC when threshold is met."""
+    ) -> ArrowCursor:
+        """Build an ArrowCursor from tabular rows, using SHM Arrow IPC when threshold is met."""
         if rows and isinstance(rows[0], Mapping):
             dict_rows = [dict(r) for r in rows]
             cols = tuple(columns) if columns is not None else tuple(dict_rows[0].keys())
@@ -212,10 +212,10 @@ def write_arrow_shm(table: Any) -> memoryview:
                 else:
                     writer.write_batch(table)
             payload = sink.getvalue().to_pybytes()
-        elif isinstance(table, VertebraArrowCursor):
+        elif isinstance(table, ArrowCursor):
             return table.buffer_view()
         elif isinstance(table, Sequence) and not isinstance(table, str):
-            cur = VertebraArrowCursor.from_rows(table, threshold_rows=1)
+            cur = ArrowCursor.from_rows(table, threshold_rows=1)
             return cur.buffer_view()
         else:
             payload = encode_json_bytes(table)
@@ -225,9 +225,9 @@ def write_arrow_shm(table: Any) -> memoryview:
     return memoryview(region)[: len(payload)]
 
 
-def read_arrow_shm(region: Any, length: int | None = None) -> VertebraArrowCursor:
-    """Wrap a shared-memory Arrow IPC buffer or memoryview in a zero-copy `VertebraArrowCursor`."""
-    if isinstance(region, VertebraArrowCursor):
+def read_arrow_shm(region: Any, length: int | None = None) -> ArrowCursor:
+    """Wrap a shared-memory Arrow IPC buffer or memoryview in a zero-copy `ArrowCursor`."""
+    if isinstance(region, ArrowCursor):
         return region
     raw_view = memoryview(region)
     if length is not None:
@@ -250,7 +250,7 @@ def read_arrow_shm(region: Any, length: int | None = None) -> VertebraArrowCurso
             if isinstance(decoded, list) and decoded and isinstance(decoded[0], dict):
                 cols = tuple(decoded[0].keys())
                 rows = [tuple(d.get(c) for c in cols) for d in decoded]
-    return VertebraArrowCursor(raw_view, rows=rows, columns=cols, used_shm=True)
+    return ArrowCursor(raw_view, rows=rows, columns=cols, used_shm=True)
 
 
 def strip_pg_jsonb_header(payload: Buffer) -> memoryview:
@@ -735,7 +735,7 @@ class SyncPostgresDriver:
         resolved = _normalize_driver_params(params, parameters)
         rows, desc = self.execute_with_description(sql, resolved)
         cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
-        cursor = VertebraArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
+        cursor = ArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
         return cursor.to_arrow_table()
 
     def write_arrow_shm(self, table: Any) -> memoryview:
@@ -1001,7 +1001,7 @@ class AsyncPostgresDriver:
         resolved = _normalize_driver_params(params, parameters)
         rows, desc = await self.execute_with_description(sql, resolved)
         cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
-        cursor = VertebraArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
+        cursor = ArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
         return cursor.to_arrow_table()
 
     def write_arrow_shm(self, table: Any) -> memoryview:

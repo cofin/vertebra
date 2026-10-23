@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: "Shared-Memory Connection Broker & Statement Cache"
-description: "The cross-process SHM connection lease broker (`ShmLeaseTable` and `ShmStatementCache` in `vertebra-core/src/broker.rs`), the native PyO3 bindings (`NativeLeaseBroker`, `NativeStatementCache`), and Python broker transports (`ShmBrokerTransport`, `InMemoryBrokerTransport`, `BrokerPlugin`, `SyncPool`, `LoopShardedResource`)."
+description: "The cross-process SHM connection lease broker (`ShmLeaseTable` and `ShmStatementCache` in `vertebra-core/src/broker.rs`), the native PyO3 bindings (`LeaseBroker`, `StatementCache`), and Python broker transports (`ShmBrokerTransport`, `InMemoryBrokerTransport`, `BrokerPlugin`, `SyncPool`, `LoopShardedResource`)."
 status: stable
 tags: [domains, data, broker, shm, ipc, database]
 sources:
@@ -39,6 +39,6 @@ Vertebra provides cross-process shared-memory database connection management and
 
 [`vertebra.extensions.broker.transport`](../../../../../src/py/vertebra/extensions/broker/transport.py) and [`vertebra.extensions.broker.plugin`](../../../../../src/py/vertebra/extensions/broker/plugin.py) integrate the native SHM tables into Python runtimes:
 
-- **`ShmBrokerTransport` & `InMemoryBrokerTransport`**: Coordinate lease requests and statement plan caching across workers via `NativeLeaseBroker` and `NativeStatementCache`, with an in-process thread-safe fallback.
+- **`ShmBrokerTransport` & `InMemoryBrokerTransport`**: Coordinate lease requests and statement plan caching across workers via `LeaseBroker` and `StatementCache`, with an in-process thread-safe fallback.
 - **`BrokerPlugin` & `ShmSessionBroker`**: Install broker state, DI providers, ZPages diagnostics, OpenTelemetry `DbPoolRecorder` metrics, and SQLAlchemy `checkout`/`checkin` pool event listeners.
 - **`SyncPool` & `LoopShardedResource`** ([`vertebra.utils.sync_tools`](../../../../../src/py/vertebra/utils/sync_tools.py)): Offload blocking operations without event-loop starvation and shard resources per event-loop thread in multi-loop or free-threaded (Python 3.14t) topologies.

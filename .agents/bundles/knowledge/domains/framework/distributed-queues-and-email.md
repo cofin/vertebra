@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: "Distributed Queues, Cron Leader Election & Transactional Email"
-description: "The `vertebra.framework.queues` backends (Memory, Redis, Valkey, Postgres, Oracle), `CronScheduler` leader election, `MultiLaneWorkerRunner` with priority lanes, and `vertebra.framework.email` transactional providers (SMTP, Resend, SendGrid, Mailgun, AWS SES with Rust SigV4 signing)."
+description: "The `vertebra.framework.queues` backends (Memory, Redis, Valkey, Postgres, Oracle), `CronScheduler` leader election, `WorkerRunner` with priority lanes, and `vertebra.framework.email` transactional providers (SMTP, Resend, SendGrid, Mailgun, AWS SES with Rust SigV4 signing)."
 status: stable
 tags: [domains, framework, queues, email, cron, workers]
 sources:
@@ -33,7 +33,7 @@ Vertebra provides pluggable distributed background task queues, multi-process cr
 
 [`vertebra.server.lanes`](../../../../../src/py/vertebra/server/lanes.py) and [`CronScheduler`](../../../../../src/py/vertebra/framework/queues/__init__.py) isolate background processing:
 
-- **Priority Worker Lanes (`MultiLaneWorkerRunner`)**: Partitions workers into dedicated lanes:
+- **Priority Worker Lanes (`WorkerRunner`)**: Partitions workers into dedicated lanes:
   - `TaskLane.CPU`: Dedicated worker pool for heavy compute, compression, or cryptographic work.
   - `TaskLane.IO`: High-concurrency event-loop lanes for network calls, database queries, and webhooks.
   - `TaskLane.AGENT`: Specialized lanes with bounded concurrency for LLM agent loops, tool dispatch, and streaming workflows.

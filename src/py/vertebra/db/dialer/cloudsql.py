@@ -90,7 +90,7 @@ class CloudSqlDialer:
         self._cached_expiry: float = 0.0
         self._native_dialer: Any = None
         native_mod = import_optional("vertebra._vertebra")
-        native_cls = getattr(native_mod, "NativeCloudSqlDialer", None) if native_mod is not None else None
+        native_cls = getattr(native_mod, "CloudSqlDialer", None) if native_mod is not None else None
         if native_cls is not None:
             with contextlib.suppress(TypeError, ValueError, RuntimeError):
                 self._native_dialer = native_cls(config.instance_connection_name)
@@ -110,7 +110,7 @@ class CloudSqlDialer:
         """Generate an ephemeral client public/private keypair in PEM format."""
         native_mod = import_optional("vertebra._vertebra")
         if native_mod is not None and bits == 2048:
-            native_cls = getattr(native_mod, "NativeCloudSqlDialer", None)
+            native_cls = getattr(native_mod, "CloudSqlDialer", None)
             if native_cls is not None and hasattr(native_cls, "generate_ephemeral_keypair"):
                 with contextlib.suppress(TypeError, ValueError, RuntimeError):
                     inst = native_cls("p:r:i")

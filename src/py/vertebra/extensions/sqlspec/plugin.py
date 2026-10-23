@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 __all__ = (
     "SQLSPEC_PLUGIN_PRIORITY",
     "SQLSPEC_STATE_KEY",
-    "AsyncDatabaseConfig",
     "AsyncDriverAdapterBase",
     "BrokerPlugin",
     "ChannelMessage",
@@ -38,7 +37,6 @@ __all__ = (
     "SQLSpecPlugin",
     "SQLSpecState",
     "SQLSpecSyncConfig",
-    "SyncDatabaseConfig",
     "SyncDriverAdapterBase",
 )
 
@@ -210,10 +208,6 @@ class SQLSpecAsyncConfig[
     def create_pool(self) -> PoolT:
         """Return the configured asynchronous connection pool."""
         return cast("PoolT", self.pool_instance)
-
-
-SyncDatabaseConfig = SQLSpecSyncConfig
-AsyncDatabaseConfig = SQLSpecAsyncConfig
 
 
 class SQLSpecConfig[ConfigT]:
@@ -598,14 +592,14 @@ class SQLSpecPlugin[ConfigT]:
     @overload
     def get_session[SyncDriverT: SyncDriverAdapterBase](
         self,
-        config: SyncDatabaseConfig[Any, Any, SyncDriverT] | ProxySyncConfig[SyncDatabaseConfig[Any, Any, SyncDriverT]],
+        config: SQLSpecSyncConfig[Any, Any, SyncDriverT] | ProxySyncConfig[SQLSpecSyncConfig[Any, Any, SyncDriverT]],
     ) -> SyncDriverT: ...
 
     @overload
     def get_session[AsyncDriverT: AsyncDriverAdapterBase](
         self,
-        config: AsyncDatabaseConfig[Any, Any, AsyncDriverT]
-        | ProxyAsyncConfig[AsyncDatabaseConfig[Any, Any, AsyncDriverT]],
+        config: SQLSpecAsyncConfig[Any, Any, AsyncDriverT]
+        | ProxyAsyncConfig[SQLSpecAsyncConfig[Any, Any, AsyncDriverT]],
     ) -> AsyncDriverT: ...
 
     def get_session(self, config: Any = None) -> Any:

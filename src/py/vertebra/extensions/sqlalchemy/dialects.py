@@ -31,21 +31,13 @@ __all__ = (
     "DBAPIModule",
     "DialectDescriptor",
     "DuckdbDialect",
-    "DuckdbVtbDialect",
     "MssqlDialect",
-    "MssqlVtbDialect",
     "MysqlDialect",
-    "MysqlVtbDialect",
     "NullPool",
     "OracleDialect",
-    "OracleVtbDialect",
     "PostgresDialect",
-    "PostgresVtbDialect",
     "SqliteDialect",
-    "SqliteVtbDialect",
     "SyncEngineAdapter",
-    "VertebraDbapiConnection",
-    "VertebraDbapiCursor",
     "attach_serverless_disconnect_guard",
 )
 
@@ -274,10 +266,6 @@ class DBAPIConnection:
             self.closed = True
 
 
-VertebraDbapiCursor = DBAPICursor
-VertebraDbapiConnection = DBAPIConnection
-
-
 class DBAPIModule:
     """PEP 249 DBAPI 2.0 module descriptor exposed by Vertebra SQLAlchemy dialects."""
 
@@ -350,48 +338,48 @@ class DialectDescriptor:
         return cls.dbapi()
 
     @classmethod
-    def vtb_dialects(cls) -> dict[str, type[DialectDescriptor]]:
+    def dialects(cls) -> dict[str, type[DialectDescriptor]]:
         """Return all 6 `+vtb` SQLAlchemy dialect classes keyed by URL scheme."""
         return {
-            "postgresql+vtb": PostgresVtbDialect,
-            "mysql+vtb": MysqlVtbDialect,
-            "sqlite+vtb": SqliteVtbDialect,
-            "oracle+vtb": OracleVtbDialect,
-            "mssql+vtb": MssqlVtbDialect,
-            "duckdb+vtb": DuckdbVtbDialect,
+            "postgresql+vtb": PostgresDialect,
+            "mysql+vtb": MysqlDialect,
+            "sqlite+vtb": SqliteDialect,
+            "oracle+vtb": OracleDialect,
+            "mssql+vtb": MssqlDialect,
+            "duckdb+vtb": DuckdbDialect,
         }
 
     @classmethod
     def register_all(cls, *, include_enterprise_olap: bool = False) -> dict[str, Any]:
         """Register ``+vertebra`` and ``+vtb`` dialects with SQLAlchemy's dialect registry."""
         core_mapping: dict[str, Any] = {
-            "postgresql.vertebra": PostgresVtbDialect,
-            "postgresql.vtb": PostgresVtbDialect,
-            "oracle.vertebra": OracleVtbDialect,
-            "oracle.vtb": OracleVtbDialect,
-            "mysql.vertebra": MysqlVtbDialect,
-            "mysql.vtb": MysqlVtbDialect,
-            "sqlite.vertebra": SqliteVtbDialect,
-            "sqlite.vtb": SqliteVtbDialect,
+            "postgresql.vertebra": PostgresDialect,
+            "postgresql.vtb": PostgresDialect,
+            "oracle.vertebra": OracleDialect,
+            "oracle.vtb": OracleDialect,
+            "mysql.vertebra": MysqlDialect,
+            "mysql.vtb": MysqlDialect,
+            "sqlite.vertebra": SqliteDialect,
+            "sqlite.vtb": SqliteDialect,
         }
         full_mapping: dict[str, Any] = {
             **core_mapping,
-            "mssql.vertebra": MssqlVtbDialect,
-            "mssql.vtb": MssqlVtbDialect,
-            "duckdb.vertebra": DuckdbVtbDialect,
-            "duckdb.vtb": DuckdbVtbDialect,
+            "mssql.vertebra": MssqlDialect,
+            "mssql.vtb": MssqlDialect,
+            "duckdb.vertebra": DuckdbDialect,
+            "duckdb.vtb": DuckdbDialect,
         }
         sa_dialects = import_optional("sqlalchemy.dialects")
         if sa_dialects is not None:
             registry = getattr(sa_dialects, "registry", None)
             if registry is not None and hasattr(registry, "register"):
                 dialect_cls_names = {
-                    "postgresql": "PostgresVtbDialect",
-                    "oracle": "OracleVtbDialect",
-                    "mysql": "MysqlVtbDialect",
-                    "sqlite": "SqliteVtbDialect",
-                    "mssql": "MssqlVtbDialect",
-                    "duckdb": "DuckdbVtbDialect",
+                    "postgresql": "PostgresDialect",
+                    "oracle": "OracleDialect",
+                    "mysql": "MysqlDialect",
+                    "sqlite": "SqliteDialect",
+                    "mssql": "MssqlDialect",
+                    "duckdb": "DuckdbDialect",
                 }
                 for entry_name in full_mapping:
                     backend, _driver = entry_name.split(".", 1)
@@ -403,7 +391,7 @@ class DialectDescriptor:
         return full_mapping if include_enterprise_olap else core_mapping
 
 
-class PostgresVtbDialect(DialectDescriptor):
+class PostgresDialect(DialectDescriptor):
     """SQLAlchemy 2.1 dialect for PostgreSQL backing +vertebra and +vtb URLs."""
 
     name: str = "postgresql"
@@ -452,7 +440,7 @@ class PostgresVtbDialect(DialectDescriptor):
         return col_type
 
 
-class SqliteVtbDialect(DialectDescriptor):
+class SqliteDialect(DialectDescriptor):
     """SQLAlchemy 2.1 dialect for SQLite backing +vertebra and +vtb URLs."""
 
     name: str = "sqlite"
@@ -476,7 +464,7 @@ class SqliteVtbDialect(DialectDescriptor):
         return cls.dbapi()
 
 
-class MysqlVtbDialect(DialectDescriptor):
+class MysqlDialect(DialectDescriptor):
     """SQLAlchemy 2.1 dialect for MySQL backing +vertebra and +vtb URLs."""
 
     name: str = "mysql"
@@ -507,7 +495,7 @@ class MysqlVtbDialect(DialectDescriptor):
         return col_type
 
 
-class OracleVtbDialect(DialectDescriptor):
+class OracleDialect(DialectDescriptor):
     """SQLAlchemy 2.1 dialect for Oracle backing +vertebra and +vtb URLs."""
 
     name: str = "oracle"
@@ -556,7 +544,7 @@ class OracleVtbDialect(DialectDescriptor):
         return col_type
 
 
-class MssqlVtbDialect(DialectDescriptor):
+class MssqlDialect(DialectDescriptor):
     """SQLAlchemy 2.1 dialect for SQL Server (`mssql+vtb`) using `NullPool` and SHM broker."""
 
     name: str = "mssql"
@@ -580,7 +568,7 @@ class MssqlVtbDialect(DialectDescriptor):
         return cls.dbapi()
 
 
-class DuckdbVtbDialect(DialectDescriptor):
+class DuckdbDialect(DialectDescriptor):
     """SQLAlchemy 2.1 dialect for DuckDB (`duckdb+vtb`) using `NullPool` and SHM broker."""
 
     name: str = "duckdb"
@@ -602,14 +590,6 @@ class DuckdbVtbDialect(DialectDescriptor):
     def import_dbapi(cls) -> DBAPIModule:
         """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1."""
         return cls.dbapi()
-
-
-PostgresDialect = PostgresVtbDialect
-OracleDialect = OracleVtbDialect
-MysqlDialect = MysqlVtbDialect
-SqliteDialect = SqliteVtbDialect
-MssqlDialect = MssqlVtbDialect
-DuckdbDialect = DuckdbVtbDialect
 
 
 class SyncEngineAdapter:

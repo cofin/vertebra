@@ -10,7 +10,7 @@ from vertebra.db.dialer.cloudsql import CloudSqlConfig, CloudSqlDialer
 from vertebra.db.mysql import AsyncMysqlDriver, MysqlConfig, SyncMysqlDriver
 from vertebra.extensions.sqlalchemy import (
     DBAPIConnection,
-    MysqlVtbDialect,
+    MysqlDialect,
     Vector,
 )
 from vertebra.typing import MissingDependencyError
@@ -295,15 +295,15 @@ def test_dbapi_connection_routes_mysql_and_dialect_compilation() -> None:
     conn.close()
     assert mock_conn.closed is True
 
-    assert MysqlVtbDialect.paramstyle == "format"
-    assert MysqlVtbDialect.use_insertmanyvalues is True
-    assert MysqlVtbDialect.insert_executemany_returning is False
-    assert MysqlVtbDialect.supports_native_jsonb is False
+    assert MysqlDialect.paramstyle == "format"
+    assert MysqlDialect.use_insertmanyvalues is True
+    assert MysqlDialect.insert_executemany_returning is False
+    assert MysqlDialect.supports_native_jsonb is False
 
     vec = Vector(512)
     assert vec.get_col_spec("mysql+vtb") == "VECTOR(512)"
     dist_expr = vec.cosine_distance([0.1, 0.2], param_name="q")
     assert dist_expr.compile_sql("mysql+vtb") == "DISTANCE_COSINE(embedding, :q)"
 
-    adapted = MysqlVtbDialect.type_descriptor(vec)
+    adapted = MysqlDialect.type_descriptor(vec)
     assert adapted is vec

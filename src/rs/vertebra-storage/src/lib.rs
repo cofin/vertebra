@@ -223,12 +223,12 @@ impl ObjectMeta {
 }
 
 #[pyclass(frozen)]
-pub struct NativeObjectStore {
+pub struct ObjectStore {
     engine: ObjectStoreEngine,
 }
 
 #[pymethods]
-impl NativeObjectStore {
+impl ObjectStore {
     #[new]
     #[pyo3(signature = (url, options=None))]
     fn new(url: &str, options: Option<HashMap<String, String>>) -> PyResult<Self> {
@@ -683,7 +683,7 @@ fn py_sign_aws_sigv4_headers(
 
 #[pymodule(gil_used = false)]
 pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<NativeObjectStore>()?;
+    m.add_class::<ObjectStore>()?;
     m.add_class::<ObjectMeta>()?;
     m.add_class::<RustTaskAwaitable>()?;
     m.add_class::<StorageBuffer>()?;

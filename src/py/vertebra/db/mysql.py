@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from vertebra.db.dialer.cloudsql import CloudSqlConfig, CloudSqlDialer
 from vertebra.db.postgres import (
     ARROW_SHM_THRESHOLD_ROWS,
-    VertebraArrowCursor,
+    ArrowCursor,
     _normalize_driver_params,
     write_arrow_shm,
 )
@@ -270,7 +270,7 @@ class SyncMysqlDriver:
         resolved = _normalize_driver_params(params, parameters)
         rows, desc = self.execute_with_description(sql, resolved)
         cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
-        cursor = VertebraArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
+        cursor = ArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
         return cursor.to_arrow_table()
 
     def write_arrow_shm(self, table: Any) -> memoryview:
@@ -471,7 +471,7 @@ class AsyncMysqlDriver:
         resolved = _normalize_driver_params(params, parameters)
         rows, desc = await self.execute_with_description(sql, resolved)
         cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
-        cursor = VertebraArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
+        cursor = ArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
         return cursor.to_arrow_table()
 
     def write_arrow_shm(self, table: Any) -> memoryview:

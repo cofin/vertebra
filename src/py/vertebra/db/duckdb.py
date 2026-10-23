@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from vertebra.db.postgres import (
     ARROW_SHM_THRESHOLD_ROWS,
-    VertebraArrowCursor,
+    ArrowCursor,
     read_arrow_shm,
     write_arrow_shm,
 )
@@ -215,10 +215,10 @@ class SyncDuckdbDriver:
         params: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         shm_threshold_rows: int = 1,
-    ) -> VertebraArrowCursor:
-        """Stream analytical query results into a zero-copy `ShmRegion`-backed `VertebraArrowCursor`."""
+    ) -> ArrowCursor:
+        """Stream analytical query results into a zero-copy `ShmRegion`-backed `ArrowCursor`."""
         rows = self.select(sql, params)
-        return VertebraArrowCursor.from_rows(rows, threshold_rows=shm_threshold_rows)
+        return ArrowCursor.from_rows(rows, threshold_rows=shm_threshold_rows)
 
     def close(self) -> None:
         """Close the underlying DuckDB connection."""
@@ -251,8 +251,8 @@ class AsyncDuckdbDriver:
         params: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         shm_threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-    ) -> VertebraArrowCursor:
-        """Execute a query asynchronously and return a zero-copy `VertebraArrowCursor`."""
+    ) -> ArrowCursor:
+        """Execute a query asynchronously and return a zero-copy `ArrowCursor`."""
         return await asyncio.to_thread(
             self._sync.select_to_arrow,
             sql,

@@ -66,11 +66,11 @@ from vertebra.db.pipeline import (
 )
 from vertebra.db.postgres import (
     ARROW_SHM_THRESHOLD_ROWS,
+    ArrowCursor,
     AsyncPostgresDriver,
     PoolerMode,
     PostgresConfig,
     SyncPostgresDriver,
-    VertebraArrowCursor,
 )
 from vertebra.db.redis import (
     AsyncRedisDriver,
@@ -95,6 +95,7 @@ __all__ = (
     "AlloyDbClusterUri",
     "AlloyDbConfig",
     "AlloyDbDialer",
+    "ArrowCursor",
     "AsyncDuckdbDriver",
     "AsyncMssqlDriver",
     "AsyncMysqlDriver",
@@ -139,7 +140,6 @@ __all__ = (
     "TenantPredicate",
     "TenantScopeConfig",
     "ValkeyConfig",
-    "VertebraArrowCursor",
     "decode_oson",
     "decode_vector_binary",
     "decode_vector_f32",

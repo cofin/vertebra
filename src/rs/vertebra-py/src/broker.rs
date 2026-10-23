@@ -6,8 +6,8 @@ use std::time::Duration;
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyBytes};
 use vertebra_core::broker::{
-    BrokerError, LeaseGrant, LeaseTableStats, ShmLeaseHeader, ShmLeaseTable, ShmStatementCache,
-    StatementCacheStats, StatementPlanEntry,
+    BrokerError, LeaseGrant as RsLeaseGrant, LeaseTableStats, ShmLeaseHeader, ShmLeaseTable,
+    ShmStatementCache, StatementCacheStats as RsStatementCacheStats, StatementPlanEntry,
 };
 use vertebra_core::shm::ShmRegion;
 
@@ -42,7 +42,7 @@ fn broker_err_to_py(err: BrokerError) -> PyErr {
 
 #[pyclass(frozen, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NativeLeaseGrant {
+pub struct LeaseGrant {
     #[pyo3(get)]
     pub slot_index: u32,
     #[pyo3(get)]
@@ -59,8 +59,8 @@ pub struct NativeLeaseGrant {
     pub bind_key_hash: u64,
 }
 
-impl From<LeaseGrant> for NativeLeaseGrant {
-    fn from(g: LeaseGrant) -> Self {
+impl From<RsLeaseGrant> for LeaseGrant {
+    fn from(g: RsLeaseGrant) -> Self {
         Self {
             slot_index: g.slot_index,
             generation: g.generation,
@@ -75,7 +75,7 @@ impl From<LeaseGrant> for NativeLeaseGrant {
 
 #[pyclass(frozen, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NativeBrokerStats {
+pub struct BrokerStats {
     #[pyo3(get)]
     pub pool_size: u32,
     #[pyo3(get)]
@@ -100,7 +100,7 @@ pub struct NativeBrokerStats {
     pub total_reclaimed: u64,
 }
 
-impl From<LeaseTableStats> for NativeBrokerStats {
+impl From<LeaseTableStats> for BrokerStats {
     fn from(s: LeaseTableStats) -> Self {
         Self {
             pool_size: s.pool_size,
@@ -120,12 +120,12 @@ impl From<LeaseTableStats> for NativeBrokerStats {
 
 #[pyclass]
 #[derive(Clone)]
-pub struct NativeLeaseBroker {
+pub struct LeaseBroker {
     table: Arc<ShmLeaseTable>,
 }
 
 #[pymethods]
-impl NativeLeaseBroker {
+impl LeaseBroker {
     #[new]
     #[pyo3(signature = (pool_size=20, max_overflow=10, stmt_capacity=512))]
     pub fn new(pool_size: u32, max_overflow: u32, stmt_capacity: u32) -> PyResult<Self> {
@@ -282,10 +282,10 @@ impl NativeLeaseBroker {
         }
     }
 
-    pub fn statement_cache(&self) -> Option<NativeStatementCache> {
+    pub fn statement_cache(&self) -> Option<StatementCache> {
         self.table
             .statement_cache()
-            .map(|c| NativeStatementCache { cache: Arc::new(c) })
+            .map(|c| StatementCache { cache: Arc::new(c) })
     }
 
     pub fn active_leases_for_worker(
@@ -355,7 +355,7 @@ impl NativeLeaseBroker {
         ttl_ns: u64,
         timeout_ms: u64,
         bind_key_hash: u64,
-    ) -> PyResult<Option<NativeLeaseGrant>> {
+    ) -> PyResult<Option<LeaseGrant>> {
         let table = Arc::clone(&self.table);
         let result = py.detach(move || {
             table.acquire(
@@ -366,7 +366,7 @@ impl NativeLeaseBroker {
             )
         });
         match result {
-            Ok(grant) => Ok(Some(NativeLeaseGrant::from(grant))),
+            Ok(grant) => Ok(Some(LeaseGrant::from(grant))),
             Err(BrokerError::PoolExhausted) => Ok(None),
             Err(err) => Err(broker_err_to_py(err)),
         }
@@ -378,9 +378,9 @@ impl NativeLeaseBroker {
         worker_pid: u32,
         ttl_ns: u64,
         bind_key_hash: u64,
-    ) -> PyResult<Option<NativeLeaseGrant>> {
+    ) -> PyResult<Option<LeaseGrant>> {
         match self.table.try_acquire(worker_pid, ttl_ns, bind_key_hash) {
-            Ok(grant) => Ok(Some(NativeLeaseGrant::from(grant))),
+            Ok(grant) => Ok(Some(LeaseGrant::from(grant))),
             Err(BrokerError::PoolExhausted) => Ok(None),
             Err(err) => Err(broker_err_to_py(err)),
         }
@@ -403,8 +403,8 @@ impl NativeLeaseBroker {
         self.table.reclaim_worker(worker_pid)
     }
 
-    pub fn stats(&self) -> NativeBrokerStats {
-        NativeBrokerStats::from(self.table.stats())
+    pub fn stats(&self) -> BrokerStats {
+        BrokerStats::from(self.table.stats())
     }
 
     #[getter]
@@ -456,7 +456,7 @@ impl NativeLeaseBroker {
 
 #[pyclass(frozen, from_py_object)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeStatementPlan {
+pub struct StatementPlan {
     #[pyo3(get)]
     pub sql_hash: u64,
     #[pyo3(get)]
@@ -469,7 +469,7 @@ pub struct NativeStatementPlan {
     pub param_plan: Vec<u8>,
 }
 
-impl From<StatementPlanEntry> for NativeStatementPlan {
+impl From<StatementPlanEntry> for StatementPlan {
     fn from(e: StatementPlanEntry) -> Self {
         Self {
             sql_hash: e.sql_hash,
@@ -483,7 +483,7 @@ impl From<StatementPlanEntry> for NativeStatementPlan {
 
 #[pyclass(frozen, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NativeStatementCacheStats {
+pub struct StatementCacheStats {
     #[pyo3(get)]
     pub capacity: u32,
     #[pyo3(get)]
@@ -496,8 +496,8 @@ pub struct NativeStatementCacheStats {
     pub evictions: u64,
 }
 
-impl From<StatementCacheStats> for NativeStatementCacheStats {
-    fn from(s: StatementCacheStats) -> Self {
+impl From<RsStatementCacheStats> for StatementCacheStats {
+    fn from(s: RsStatementCacheStats) -> Self {
         Self {
             capacity: s.capacity,
             hits: s.hits,
@@ -510,12 +510,12 @@ impl From<StatementCacheStats> for NativeStatementCacheStats {
 
 #[pyclass]
 #[derive(Clone)]
-pub struct NativeStatementCache {
+pub struct StatementCache {
     cache: Arc<ShmStatementCache>,
 }
 
 #[pymethods]
-impl NativeStatementCache {
+impl StatementCache {
     #[new]
     #[pyo3(signature = (capacity=512))]
     pub fn new(capacity: u32) -> PyResult<Self> {
@@ -575,10 +575,10 @@ impl NativeStatementCache {
         }
     }
 
-    pub fn lookup(&self, dialect_tag: u8, raw_sql: &[u8]) -> Option<NativeStatementPlan> {
+    pub fn lookup(&self, dialect_tag: u8, raw_sql: &[u8]) -> Option<StatementPlan> {
         self.cache
             .lookup(dialect_tag, raw_sql)
-            .map(NativeStatementPlan::from)
+            .map(StatementPlan::from)
     }
 
     pub fn insert(
@@ -593,8 +593,8 @@ impl NativeStatementCache {
             .insert(dialect_tag, raw_sql, param_count, compiled_sql, param_plan)
     }
 
-    pub fn stats(&self) -> NativeStatementCacheStats {
-        NativeStatementCacheStats::from(self.cache.stats())
+    pub fn stats(&self) -> StatementCacheStats {
+        StatementCacheStats::from(self.cache.stats())
     }
 
     pub fn invalidate_all(&self) {

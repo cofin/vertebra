@@ -44,13 +44,13 @@ from vertebra.extensions.litestar import (
     MemoryStore,
 )
 from vertebra.extensions.sqlspec import (
-    AsyncDatabaseConfig,
     ProxyAsyncConfig,
     ProxySyncConfig,
+    SQLSpecAsyncConfig,
     SQLSpecConfig,
     SQLSpecPlugin,
     SQLSpecStore,
-    SyncDatabaseConfig,
+    SQLSpecSyncConfig,
 )
 from vertebra.storage import (
     ObjectStore,
@@ -101,7 +101,7 @@ def test_canonical_extension_exports() -> None:
 def test_sqlspec_generic_configs_and_pool_defaults() -> None:
     """Verify PEP 695 generic SQLSpecConfig, ProxySyncConfig, ProxyAsyncConfig, and pool defaults."""
     sync_driver = _DummySyncDriver()
-    sync_cfg = SyncDatabaseConfig[str, str, _DummySyncDriver](
+    sync_cfg = SQLSpecSyncConfig[str, str, _DummySyncDriver](
         dsn="postgresql://localhost:5432/app",
         bind_key="primary",
         driver_instance=sync_driver,
@@ -111,7 +111,7 @@ def test_sqlspec_generic_configs_and_pool_defaults() -> None:
     assert sync_cfg.pool_config["pool_pre_ping"] is True
     assert sync_cfg.pool_config["pool_recycle"] == 1800
 
-    in_mem_cfg = SyncDatabaseConfig[str, str, _DummySyncDriver](
+    in_mem_cfg = SQLSpecSyncConfig[str, str, _DummySyncDriver](
         dsn="sqlite:///:memory:",
         driver_instance=sync_driver,
     )
@@ -128,7 +128,7 @@ def test_sqlspec_generic_configs_and_pool_defaults() -> None:
     assert proxy_sync.create_pool() == "sync_pool"
 
     async_driver = _DummyAsyncDriver()
-    async_cfg = AsyncDatabaseConfig[str, str, _DummyAsyncDriver](
+    async_cfg = SQLSpecAsyncConfig[str, str, _DummyAsyncDriver](
         dsn="postgresql+asyncpg://localhost:5432/app",
         driver_instance=async_driver,
     )

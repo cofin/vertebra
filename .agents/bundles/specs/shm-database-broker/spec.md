@@ -30,7 +30,7 @@ research: []
 ### Code Analysis Summary
 
 - [`src/rs/vertebra-core/src/broker.rs`](../../../../src/rs/vertebra-core/src/broker.rs): Implements `ShmLeaseTable` (`ShmLeaseHeader` + `LeaseSlot`) and `ShmStatementCache` (`ShmStatementHeader` + 256-byte `StatementSlot` with optimistic seqlock and 4-way set-associative CLOCK eviction). `ShmLeaseHeader` already defines `stmt_capacity: u32` and `stmt_offset: u64`, and `ShmStatementCache::from_raw_ptrs` exists to attach a sub-cache inside `ShmLeaseTable`, but `ShmLeaseTable::init_in_region` currently sets `stmt_capacity = 0` and `stmt_offset = 0`, requiring `ShmBrokerTransport` to allocate a second separate SHM region (`{shm_name}-stmt`).
-- [`src/py/vertebra/extensions/broker/transport.py`](../../../../src/py/vertebra/extensions/broker/transport.py): `ShmBrokerTransport` wraps `NativeLeaseBroker` and `NativeStatementCache`, but `publish` and `drain_channel` store `ChannelMessage` items in a process-local `self._channels: dict[str, list[ChannelMessage]]` rather than a cross-process shared-memory broadcast ring.
+- [`src/py/vertebra/extensions/broker/transport.py`](../../../../src/py/vertebra/extensions/broker/transport.py): `ShmBrokerTransport` wraps `LeaseBroker` and `StatementCache`, but `publish` and `drain_channel` store `ChannelMessage` items in a process-local `self._channels: dict[str, list[ChannelMessage]]` rather than a cross-process shared-memory broadcast ring.
 - [`src/rs/vertebra-http/src/ring_factory.rs`](../../../../src/rs/vertebra-http/src/ring_factory.rs): Spawns and supervises Python SHM worker processes, but does not invoke `ShmLeaseTable::reclaim_worker(worker_pid)` when a worker process exits or crashes, leaving orphaned database connection leases until their TTL expires.
 
 ### Relevant Patterns
@@ -52,7 +52,7 @@ research: []
 
 ### Phase 1: Unified SHM Region & Supervisor Worker Reclamation
 
-- [x] 1.1 Co-locate `ShmStatementCache` inside `ShmLeaseTable` (`stmt_offset` / `stmt_capacity`) and expose unified `NativeLeaseBroker` attachment in `vertebra-py`
+- [x] 1.1 Co-locate `ShmStatementCache` inside `ShmLeaseTable` (`stmt_offset` / `stmt_capacity`) and expose unified `LeaseBroker` attachment in `vertebra-py`
 - [x] 1.2 Wire `ShmLeaseTable::reclaim_worker(pid)` into `vertebra-http` SHM worker lifecycle teardown and respawn hooks
 
 ### Phase 2: Cross-Process Broker Pub/Sub Ring

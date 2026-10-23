@@ -35,7 +35,7 @@ Object storage has two layers. [`vertebra-storage`](../../../../../src/rs/verteb
 | [`OciObjectStore`](../../../../../src/rs/vertebra-storage/src/oci.rs) | `oci.rs` | Native `ObjectStore` impl over the OCI Object Storage REST API (`/n/{ns}/b/{bucket}/o/{name}`, pre-authenticated `par_url`, multipart via `OciMultipartUpload`). Defaults to `https://objectstorage.{region}.oraclecloud.com`. |
 | `OciCavageCredentials`, `sign_oci_cavage_request` | `oci.rs` | RSA-SHA256 `draft-cavage-http-signatures-08` request signing (`Authorization`, `Date`, `Host`, `x-content-sha256`). |
 | `chunk_uniform_parts`, `R2_UNIFORM_PART_SIZE` | `oci.rs` | Splits a payload into equal 8 MiB parts. `ObjectStoreEngine::put_multipart` re-chunks multi-part uploads when the scheme is `r2`, because R2 requires uniform non-trailing part sizes. |
-| `NativeObjectStore` | `lib.rs` | Python class with sync and `*_async` methods for `put`, `put_file`, `get`, `get_buffer`, `get_range`, `head`, `exists`, `delete`, `copy`, `list`, plus sync `put_multipart`. |
+| `ObjectStore` | `lib.rs` | Python class with sync and `*_async` methods for `put`, `put_file`, `get`, `get_buffer`, `get_range`, `head`, `exists`, `delete`, `copy`, `list`, plus sync `put_multipart`. |
 | `StorageBuffer` | `lib.rs` | Frozen `Bytes` holder that implements the buffer protocol, so `memoryview(buf)` does not copy. |
 | `RustTaskAwaitable` | `lib.rs` | `spawn_rust_task` creates an asyncio future on the running loop, runs the Rust future on the storage runtime, and resolves it through `call_soon_threadsafe`. Async calls do not go through `asyncio.to_thread`. |
 
@@ -56,7 +56,7 @@ Verification uses `constant_time_eq`.
 
 Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` with a `to_url_and_options()` method: `LocalConfig`, `S3Config`, `GcsConfig`, `AzureConfig`, `OciConfig`, `R2Config`, `HttpConfig`, `MemoryConfig`. `StorageConfig` is the PEP 695 union of all of them.
 
-- `ObjectStore(url, *, options, signing)` builds a `NativeObjectStore` for supported schemes. Constructors: `from_config`, `from_local`, `from_s3`, `from_gcs`, `from_azure`, `from_oci`, `from_r2`, `from_http`, `from_memory`.
+- `ObjectStore(url, *, options, signing)` builds a `vertebra._storage.ObjectStore` for supported schemes. Constructors: `from_config`, `from_local`, `from_s3`, `from_gcs`, `from_azure`, `from_oci`, `from_r2`, `from_http`, `from_memory`.
 - Methods accept any `Buffer` and return `PutResult` / `ObjectMeta` structs. `get_view` / `get_view_async` return a `memoryview` over `StorageBuffer` without copying.
 - `presign_get`, `presign_put`, `verify_presigned_url` dispatch on [`PresignedUrlSigner`](../../../../../src/py/vertebra/storage/_store.py) (`provider`: `"hmac"`, `"s3"`, `"gcs"`). Verification supports HMAC and S3 only. GCS signing without the extension calls `signBlob` with `urllib`, and bypasses proxies for loopback IAM endpoints.
 - `PresignedUrlSigner.sign_oci_headers` (static) requires the native extension and raises `RuntimeError` without it.
@@ -84,6 +84,6 @@ There is no emulator preset class in the library. [`src/py/tests/integration/sto
 
 ## 6. Gotchas
 
-- `ObjectStore.__init__` catches any exception from `NativeObjectStore(...)` and sets `_native = None`. With no native store and no `file://` root, reads and writes go to the in-process `_memory` dict. A misconfigured `s3://` store therefore keeps working in memory without raising an error.
+- `ObjectStore.__init__` catches any exception from `vertebra._storage.ObjectStore(...)` and sets `_native = None`. With no native store and no `file://` root, reads and writes go to the in-process `_memory` dict. A misconfigured `s3://` store therefore keeps working in memory without raising an error.
 - Without the native extension, every `*_async` method calls its blocking sync counterpart.
 - `put` without a native backend synthesizes the ETag as the first 16 hex characters of SHA-256.

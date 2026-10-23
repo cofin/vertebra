@@ -9,7 +9,7 @@ import sys
 import click
 
 from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
-from vertebra.server.lanes import MultiLaneWorkerRunner, WorkerRunner
+from vertebra.server.lanes import WorkerRunner
 from vertebra.server.platform import LameDuckController
 from vertebra.utils.module_loader import import_app
 
@@ -30,7 +30,7 @@ def execute_worker_cli(
     app = import_app(app_path)
     lanes = WorkerRunner.parse_lanes(queues, concurrency, drain_timeout_s=drain_timeout_s)
     lame_duck = LameDuckController()
-    runner = MultiLaneWorkerRunner(lanes, lame_duck=lame_duck)
+    runner = WorkerRunner(lanes, lame_duck=lame_duck)
     state = getattr(app, "state", None)
     if isinstance(state, dict):
         state["vertebra_worker_runner"] = runner

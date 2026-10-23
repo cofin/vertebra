@@ -36,7 +36,6 @@ from vertebra.framework.queues.scheduler import (
 from vertebra.server.lanes import (
     LaneConfig,
     LaneMetrics,
-    MultiLaneWorkerRunner,
     WorkerRunner,
     parse_lanes,
     run_oneshot,
@@ -51,7 +50,6 @@ __all__ = (
     "LaneConfig",
     "LaneMetrics",
     "MemoryQueueBackend",
-    "MultiLaneWorkerRunner",
     "OracleQueueBackend",
     "OracleQueueExecutor",
     "PostgresQueueBackend",

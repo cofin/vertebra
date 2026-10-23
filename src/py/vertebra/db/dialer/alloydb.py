@@ -93,7 +93,7 @@ class AlloyDbDialer:
         self._uri = AlloyDbClusterUri.parse(config.instance_uri)
         self._native_dialer: Any = None
         native_mod = import_optional("vertebra._vertebra")
-        native_cls = getattr(native_mod, "NativeAlloyDbDialer", None) if native_mod is not None else None
+        native_cls = getattr(native_mod, "AlloyDbDialer", None) if native_mod is not None else None
         if native_cls is not None:
             with contextlib.suppress(TypeError, ValueError, RuntimeError):
                 self._native_dialer = native_cls(config.instance_uri)
@@ -127,7 +127,7 @@ class AlloyDbDialer:
         """Encode a 4-byte big-endian length-prefixed AlloyDB MetadataExchangeRequest protobuf frame."""
         native_mod = import_optional("vertebra._vertebra")
         if native_mod is not None:
-            native_cls = getattr(native_mod, "NativeAlloyDbDialer", None)
+            native_cls = getattr(native_mod, "AlloyDbDialer", None)
             if native_cls is not None and hasattr(native_cls, "encode_metadata_exchange"):
                 with contextlib.suppress(TypeError, ValueError, RuntimeError):
                     res = native_cls.encode_metadata_exchange(user_agent, int(auth_type), oauth2_token)

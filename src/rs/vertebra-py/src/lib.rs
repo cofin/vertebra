@@ -21,17 +21,15 @@ pub mod wsgi;
 pub use agent::{SchemaDigestCache, classify_jsonrpc_frame};
 pub use asgi::{AsgiScope, AsgiScopeIterator};
 pub use broker::{
-    NativeBrokerStats, NativeLeaseBroker, NativeLeaseGrant, NativeStatementCache,
-    NativeStatementCacheStats, NativeStatementPlan,
+    BrokerStats, LeaseBroker, LeaseGrant, StatementCache, StatementCacheStats, StatementPlan,
 };
-pub use db::{NativeAlloyDbDialer, NativeCloudSqlDialer, VertebraArrowCursor};
+pub use db::{AlloyDbDialer, ArrowCursor, CloudSqlDialer};
 pub use headers::{Headers, HeadersIterator};
 pub use request::{Request, RequestBatch, RequestBatchIterator};
 pub use response::Response;
 pub use rsgi::{RsgiHttpProtocol, RsgiScope, RsgiTransport};
 pub use telemetry::{
-    NativeJwtGuard, NativeLogSink, NativeRateLimiter, format_traceparent, parse_traceparent,
-    sanitize_sql,
+    JwtGuard, LogSink, RateLimiter, format_traceparent, parse_traceparent, sanitize_sql,
 };
 pub use wsgi::{
     WsgiEnviron, WsgiEnvironIterator, WsgiFileWrapper, WsgiInput, WsgiStartResponse,
@@ -68,15 +66,15 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<rsgi::RsgiScope>()?;
     m.add_class::<rsgi::RsgiHttpProtocol>()?;
     m.add_class::<rsgi::RsgiTransport>()?;
-    m.add_class::<telemetry::NativeLogSink>()?;
-    m.add_class::<telemetry::NativeJwtGuard>()?;
-    m.add_class::<telemetry::NativeRateLimiter>()?;
-    m.add_class::<broker::NativeLeaseGrant>()?;
-    m.add_class::<broker::NativeBrokerStats>()?;
-    m.add_class::<broker::NativeLeaseBroker>()?;
-    m.add_class::<broker::NativeStatementPlan>()?;
-    m.add_class::<broker::NativeStatementCacheStats>()?;
-    m.add_class::<broker::NativeStatementCache>()?;
+    m.add_class::<telemetry::LogSink>()?;
+    m.add_class::<telemetry::JwtGuard>()?;
+    m.add_class::<telemetry::RateLimiter>()?;
+    m.add_class::<broker::LeaseGrant>()?;
+    m.add_class::<broker::BrokerStats>()?;
+    m.add_class::<broker::LeaseBroker>()?;
+    m.add_class::<broker::StatementPlan>()?;
+    m.add_class::<broker::StatementCacheStats>()?;
+    m.add_class::<broker::StatementCache>()?;
     m.add_class::<agent::SchemaDigestCache>()?;
 
     // Agentic JSON-RPC fastpath

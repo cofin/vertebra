@@ -18,7 +18,7 @@ from vertebra.extensions.alchemy import (
     SQLAlchemyAsyncConfig,
     SQLAlchemySyncConfig,
 )
-from vertebra.extensions.sqlspec import AsyncDatabaseConfig, SyncDatabaseConfig
+from vertebra.extensions.sqlspec import SQLSpecAsyncConfig, SQLSpecSyncConfig
 from vertebra.extensions.sqlspec.provider import (
     BrokerRpcRequest,
     BrokerRpcResponse,
@@ -147,7 +147,7 @@ class _SqliteAsyncUpstreamDriver:
 def test_proxy_sync_driver_small_inline_results() -> None:
     """Verify small result sets (< 256 rows) return inline via ProxySyncDriver."""
     upstream = _SqliteSyncUpstreamDriver()
-    cfg = SyncDatabaseConfig[Any, Any, _SqliteSyncUpstreamDriver](
+    cfg = SQLSpecSyncConfig[Any, Any, _SqliteSyncUpstreamDriver](
         bind_key="primary",
         driver_instance=upstream,
     )
@@ -209,7 +209,7 @@ def test_proxy_sync_driver_small_inline_results() -> None:
 async def test_proxy_async_driver_small_inline_results() -> None:
     """Verify small result sets (< 256 rows) return inline via ProxyAsyncDriver."""
     upstream = _SqliteAsyncUpstreamDriver()
-    cfg = AsyncDatabaseConfig[Any, Any, _SqliteAsyncUpstreamDriver](
+    cfg = SQLSpecAsyncConfig[Any, Any, _SqliteAsyncUpstreamDriver](
         bind_key="async_pool",
         driver_instance=upstream,
     )

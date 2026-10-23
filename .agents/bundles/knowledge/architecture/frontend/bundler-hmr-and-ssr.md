@@ -51,7 +51,7 @@ The Python class (`PySourceWatcher`, exported as `SourceWatcher`) takes `(watch_
 - **Cache**: always on. Key is FNV-1a 64 over `component + ":" + page_json`; a hit requires the same pool `generation` and age under a fixed 60 s TTL. Entries are never evicted individually and the map has no size bound.
 - **Reload**: `invalidate()` re-reads the bundle, increments `generation`, and clears the cache; stale slots rebuild on next checkout. `shutdown()` clears slots and cache.
 
-`SsrPool.render` and `Bundler.ssr_render(component, page_json)` release the GIL. `Bundler.init_ssr(bundle_path, pool_size)`, `ssr_invalidate(paths)` (clears everything; `paths` is ignored), and `ssr_shutdown()` manage a pool owned by the `Bundler`. [`NativeSsrClient`](../../../../../src/py/vertebra/framework/ssr/__init__.py) wraps these methods.
+`SsrPool.render` and `Bundler.ssr_render(component, page_json)` release the GIL. `Bundler.init_ssr(bundle_path, pool_size)`, `ssr_invalidate(paths)` (clears everything; `paths` is ignored), and `ssr_shutdown()` manage a pool owned by the `Bundler`. [`EmbeddedSsrClient`](../../../../../src/py/vertebra/framework/ssr/__init__.py) wraps these methods.
 
 ## Declarations, CSS, and SSR framing (`declarations.rs`)
 

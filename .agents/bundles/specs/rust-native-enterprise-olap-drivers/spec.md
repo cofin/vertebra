@@ -33,14 +33,14 @@ research: []
   - Historical Rust Oracle drivers (`oracle` crate wrapping ODPI-C) required Oracle Instant Client (`libclntsh.so`) on the host. In 2026, two 100% pure-Rust Thin TNS/TTC drivers exist on `crates.io` requiring **zero Oracle Instant Client / OCI libraries**:
     1. **`oracledb`** (`v26.0.0-beta.4`, `oracle/rust-oracledb`): Official Oracle pure-Rust Thin driver speaking TNS/TTC directly over TCP/TLS (`rustls`), supporting Oracle 12c–26ai, `VECTOR` (`FLOAT32`/`FLOAT64`/`INT8`/`BINARY`), `JSON`/`OSON`, `CLOB`/`BLOB`, DRCP, and optional `features = ["arrow"]` (`arrow-array` / `arrow-schema`) batch extraction.
     2. **`oracle-rs`** (`0.1`, `stiang/oracle-rs` + `deadpool-oracle`): Pure-Rust async Tokio TNS driver with `rustls` TLS, Autonomous Database Wallet (`ewallet.pem` + `tnsnames.ora`), statement caching, `VECTOR`, `JSON`, and `LOB` support.
-  - Paired with `vertebra-db`'s existing pure-Rust `parse_tnsnames_ora`, `resolve_tns_alias`, and `OracleConnectDescriptor` (`6737c0c:src/rs/vertebra-db/src/lib.rs:272-422`) plus in-memory Autonomous Database Wallet archive extraction, `vertebra-db` provides a zero-OCI native Rust SHM Oracle driver (`SyncOracleDriver`, `AsyncOracleDriver`, `VertebraOracleSyncConfig`, `VertebraOracleAsyncConfig`, `oracle+vtb`) alongside Tier-2 `ProxySyncConfig[OracleSyncConfig]` / `ProxyAsyncConfig[OracleAsyncConfig]`.
+  - Paired with `vertebra-db`'s existing pure-Rust `parse_tnsnames_ora`, `resolve_tns_alias`, and `OracleConnectDescriptor` (`6737c0c:src/rs/vertebra-db/src/lib.rs:272-422`) plus in-memory Autonomous Database Wallet archive extraction, `vertebra-db` provides a zero-OCI native Rust SHM Oracle driver (`SyncOracleDriver`, `AsyncOracleDriver`, `OracleSyncConfig`, `OracleAsyncConfig`, `oracle+vtb`) alongside Tier-2 `ProxySyncConfig[OracleSyncConfig]` / `ProxyAsyncConfig[OracleAsyncConfig]`.
 - **SQL Server / MSSQL (`src/rs/vertebra-db/src/mssql.rs`) — 100% Pure-Rust TDS Wire Protocol (`tiberius`)**:
   - Python SQL Server drivers (`pyodbc`, `mssql-python`) require installing Microsoft's proprietary C++ `msodbcsql18` OS driver and `unixODBC`.
   - **`tiberius`** (`0.12`, `default-features = false`, `features = ["rustls", "tds73", "chrono"]`) + `tokio-util` (`compat`) is a **100% pure-Rust asynchronous Tabular Data Stream (TDS) wire-protocol implementation**.
-  - Integrating `tiberius` in `src/rs/vertebra-db/src/mssql.rs` gives Vertebra a zero-C-dependency SQL Server / Azure SQL / Cloud SQL for SQL Server driver (`MssqlConfig`, `SyncMssqlDriver`, `AsyncMssqlDriver`, `VertebraMssqlSyncConfig`, `VertebraMssqlAsyncConfig`, `mssql+vtb`) that streams TDS rows directly into SHM ring slots or `ShmRegion` Arrow IPC buffers.
+  - Integrating `tiberius` in `src/rs/vertebra-db/src/mssql.rs` gives Vertebra a zero-C-dependency SQL Server / Azure SQL / Cloud SQL for SQL Server driver (`MssqlConfig`, `SyncMssqlDriver`, `AsyncMssqlDriver`, `MssqlSyncConfig`, `MssqlAsyncConfig`, `mssql+vtb`) that streams TDS rows directly into SHM ring slots or `ShmRegion` Arrow IPC buffers.
 - **DuckDB (`src/rs/vertebra-db/src/duckdb.rs`) — Shared Single-Writer SHM Broker Host + Zero-Copy Arrow IPC**:
   - DuckDB enforces a single-process write lock on database files, which prevents multi-worker Python servers from sharing a read/write DuckDB catalog across worker processes.
-  - By hosting the DuckDB catalog inside the Rust SHM broker (using Cargo feature `duckdb` with `duckdb::Connection::query_arrow` or the zero-compile Arrow C Data Interface `FFI_ArrowArrayStream` so default `make dev` builds never pay a 5-minute C++ amalgamation compile), all worker processes query and mutate a single shared DuckDB instance over lock-free SHM rings and receive `RecordBatch` streams zero-copy via `ShmRegion` Arrow IPC (`DuckdbConfig`, `SyncDuckdbDriver`, `AsyncDuckdbDriver`, `VertebraDuckdbSyncConfig`, `VertebraDuckdbAsyncConfig`, `duckdb+vtb`).
+  - By hosting the DuckDB catalog inside the Rust SHM broker (using Cargo feature `duckdb` with `duckdb::Connection::query_arrow` or the zero-compile Arrow C Data Interface `FFI_ArrowArrayStream` so default `make dev` builds never pay a 5-minute C++ amalgamation compile), all worker processes query and mutate a single shared DuckDB instance over lock-free SHM rings and receive `RecordBatch` streams zero-copy via `ShmRegion` Arrow IPC (`DuckdbConfig`, `SyncDuckdbDriver`, `AsyncDuckdbDriver`, `DuckdbSyncConfig`, `DuckdbAsyncConfig`, `duckdb+vtb`).
 
 ### Relevant Patterns
 
@@ -60,9 +60,9 @@ research: []
 3. **Native SHM-Brokered DuckDB Driver & Arrow C Data Interface (`duckdb.rs`)**:
    - Implement `src/rs/vertebra-db/src/duckdb.rs` hosting a single-writer / multi-reader DuckDB instance in the SHM broker with session pragma initialization (`memory_limit`, `threads`, `temp_directory`, `httpfs_connection_caching`, `enable_http_metadata_cache`, `parquet_metadata_cache`) and zero-copy Arrow C Data Interface / `ShmRegion` Arrow IPC result streaming, keeping C++ `libduckdb-sys` compilation strictly feature-gated (`--features duckdb`) so default Cargo builds stay fast.
    - Expose `DuckdbConfig`, `SyncDuckdbDriver`, and `AsyncDuckdbDriver` in `src/py/vertebra/db/duckdb.py`.
-4. **SQLSpec `Vertebra*Config` and SQLAlchemy `+vtb` Dialects for Oracle, MSSQL & DuckDB**:
+4. **SQLSpec Adapter Configs and SQLAlchemy `+vtb` Dialects for Oracle, MSSQL & DuckDB**:
    - Register `oracle`, `mssql`/`sqlserver`, and `duckdb` URL schemes in `DatabaseRegistry` (`src/py/vertebra/db/_registry.py`).
-   - Expose `VertebraOracleSyncConfig` / `VertebraOracleAsyncConfig`, `VertebraMssqlSyncConfig` / `VertebraMssqlAsyncConfig`, and `VertebraDuckdbSyncConfig` / `VertebraDuckdbAsyncConfig` in `src/py/vertebra/extensions/sqlspec/adapters.py`, plus `OracleVtbDialect`, `MssqlVtbDialect`, and `DuckdbVtbDialect` (`oracle+vtb`, `mssql+vtb`, `duckdb+vtb`) in `src/py/vertebra/extensions/sqlalchemy/dialects.py`.
+   - Expose `OracleSyncConfig` / `OracleAsyncConfig`, `MssqlSyncConfig` / `MssqlAsyncConfig`, and `DuckdbSyncConfig` / `DuckdbAsyncConfig` in `src/py/vertebra/extensions/sqlspec/adapters.py`, plus `OracleDialect`, `MssqlDialect`, and `DuckdbDialect` (`oracle+vtb`, `mssql+vtb`, `duckdb+vtb`) in `src/py/vertebra/extensions/sqlalchemy/dialects.py`.
 
 ## Implementation Plan
 
@@ -71,7 +71,7 @@ research: []
 - [x] 1.2 Implement pure-Rust TDS SQL Server (`tiberius`) driver (`src/rs/vertebra-db/src/mssql.rs`) with `rustls`, `@P1` parameter binding, and SHM Arrow IPC bindings in `src/py/vertebra/db/mssql.py`
 
 ### Phase 2: SHM-Brokered DuckDB Arrow Driver & Unified SQLSpec / SQLAlchemy `+vtb` Adapters
-- [x] 2.1 Implement SHM-brokered single-writer DuckDB Arrow driver (`src/rs/vertebra-db/src/duckdb.rs` + `src/py/vertebra/db/duckdb.py`) and wire `DatabaseRegistry`, `Vertebra{Oracle,Mssql,Duckdb}*Config`, and `{oracle,mssql,duckdb}+vtb` SQLAlchemy dialects
+- [x] 2.1 Implement SHM-brokered single-writer DuckDB Arrow driver (`src/rs/vertebra-db/src/duckdb.rs` + `src/py/vertebra/db/duckdb.py`) and wire `DatabaseRegistry`, `{Oracle,Mssql,Duckdb}*Config`, and `{oracle,mssql,duckdb}+vtb` SQLAlchemy dialects
 
 ## Continuity Snapshot
 

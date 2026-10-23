@@ -10,21 +10,19 @@ GIL_USED: bool
 __all__ = [
     "FREE_THREADED",
     "GIL_USED",
+    "AlloyDbDialer",
+    "ArrowCursor",
     "AsgiScope",
     "AsgiScopeIterator",
+    "BrokerStats",
+    "CloudSqlDialer",
     "Headers",
     "HeadersIterator",
-    "NativeAlloyDbDialer",
-    "NativeBrokerStats",
-    "NativeCloudSqlDialer",
-    "NativeJwtGuard",
-    "NativeLeaseBroker",
-    "NativeLeaseGrant",
-    "NativeLogSink",
-    "NativeRateLimiter",
-    "NativeStatementCache",
-    "NativeStatementCacheStats",
-    "NativeStatementPlan",
+    "JwtGuard",
+    "LeaseBroker",
+    "LeaseGrant",
+    "LogSink",
+    "RateLimiter",
     "Request",
     "RequestBatch",
     "RequestBatchIterator",
@@ -33,7 +31,9 @@ __all__ = [
     "RsgiScope",
     "RsgiTransport",
     "SchemaDigestCache",
-    "VertebraArrowCursor",
+    "StatementCache",
+    "StatementCacheStats",
+    "StatementPlan",
     "WsgiEnviron",
     "WsgiEnvironIterator",
     "WsgiFileWrapper",
@@ -441,14 +441,14 @@ class RsgiTransport:
     def send_str(self, /, data: str) -> Awaitable[None]: ...
 
 @final
-class NativeLogSink:
+class LogSink:
     def __new__(
         cls,
         target: str = "stdout",
         capacity: int = 65536,
         overflow_policy: str = "block",
         flush_interval_ms: int = 100,
-    ) -> NativeLogSink: ...
+    ) -> LogSink: ...
     def __repr__(self, /) -> str: ...
     def drain(self, /) -> list[bytes]: ...
     def dropped_count(self, /) -> int: ...
@@ -459,22 +459,22 @@ class NativeLogSink:
     def metrics(self, /) -> tuple[int, int, int]: ...
 
 @final
-class NativeJwtGuard:
+class JwtGuard:
     def __new__(
         cls,
         secret: bytes,
         leeway_secs: int = 60,
-    ) -> NativeJwtGuard: ...
+    ) -> JwtGuard: ...
     def __repr__(self, /) -> str: ...
     def validate(self, /, token: str) -> str: ...
 
 @final
-class NativeRateLimiter:
+class RateLimiter:
     def __new__(
         cls,
         capacity: int,
         refill_rate_per_sec: float,
-    ) -> NativeRateLimiter: ...
+    ) -> RateLimiter: ...
     def __repr__(self, /) -> str: ...
     def acquire(self, /, key: str, tokens: int = 1) -> bool: ...
 
@@ -521,7 +521,7 @@ def format_traceparent(trace_id: str, span_id: str, trace_flags: int) -> str: ..
 def sanitize_sql(sql: str) -> str: ...
 
 @final
-class NativeLeaseGrant:
+class LeaseGrant:
     slot_index: int
     generation: int
     worker_pid: int
@@ -531,7 +531,7 @@ class NativeLeaseGrant:
     bind_key_hash: int
 
 @final
-class NativeBrokerStats:
+class BrokerStats:
     pool_size: int
     max_overflow: int
     active_leases: int
@@ -545,7 +545,7 @@ class NativeBrokerStats:
     total_reclaimed: int
 
 @final
-class NativeLeaseBroker:
+class LeaseBroker:
     def __new__(
         cls,
         pool_size: int = 20,
@@ -558,19 +558,19 @@ class NativeLeaseBroker:
         pool_size: int = 20,
         max_overflow: int = 10,
         stmt_capacity: int = 512,
-    ) -> NativeLeaseBroker: ...
+    ) -> LeaseBroker: ...
     @staticmethod
     def open_named(
         name: str,
         pool_size: int = 20,
         max_overflow: int = 10,
         stmt_capacity: int = 512,
-    ) -> NativeLeaseBroker: ...
+    ) -> LeaseBroker: ...
     @staticmethod
-    def from_fd(fd: int, size: int = 0) -> NativeLeaseBroker: ...
+    def from_fd(fd: int, size: int = 0) -> LeaseBroker: ...
     @staticmethod
-    def from_env() -> NativeLeaseBroker | None: ...
-    def statement_cache(self) -> NativeStatementCache | None: ...
+    def from_env() -> LeaseBroker | None: ...
+    def statement_cache(self) -> StatementCache | None: ...
     def active_leases_for_worker(self, worker_pid: int) -> list[tuple[int, int, int]]: ...
     def publish_channel(
         self,
@@ -590,17 +590,17 @@ class NativeLeaseBroker:
         ttl_ns: int = 0,
         timeout_ms: int = 5000,
         bind_key_hash: int = 0,
-    ) -> NativeLeaseGrant | None: ...
+    ) -> LeaseGrant | None: ...
     def try_acquire(
         self,
         worker_pid: int,
         ttl_ns: int = 0,
         bind_key_hash: int = 0,
-    ) -> NativeLeaseGrant | None: ...
+    ) -> LeaseGrant | None: ...
     def release(self, slot_index: int, generation: int) -> bool: ...
     def reap_expired(self) -> int: ...
     def reclaim_worker(self, worker_pid: int) -> int: ...
-    def stats(self) -> NativeBrokerStats: ...
+    def stats(self) -> BrokerStats: ...
     @property
     def pool_size(self) -> int: ...
     @property
@@ -617,7 +617,7 @@ class NativeLeaseBroker:
     def shm_fd(self) -> int | None: ...
 
 @final
-class NativeStatementPlan:
+class StatementPlan:
     sql_hash: int
     dialect_tag: int
     param_count: int
@@ -625,7 +625,7 @@ class NativeStatementPlan:
     param_plan: bytes
 
 @final
-class NativeStatementCacheStats:
+class StatementCacheStats:
     capacity: int
     hits: int
     misses: int
@@ -633,13 +633,13 @@ class NativeStatementCacheStats:
     evictions: int
 
 @final
-class NativeStatementCache:
+class StatementCache:
     def __new__(cls, capacity: int = 512) -> Self: ...
     @staticmethod
-    def create_named(name: str, capacity: int = 512) -> NativeStatementCache: ...
+    def create_named(name: str, capacity: int = 512) -> StatementCache: ...
     @staticmethod
-    def open_named(name: str, capacity: int = 512) -> NativeStatementCache: ...
-    def lookup(self, dialect_tag: int, raw_sql: bytes) -> NativeStatementPlan | None: ...
+    def open_named(name: str, capacity: int = 512) -> StatementCache: ...
+    def lookup(self, dialect_tag: int, raw_sql: bytes) -> StatementPlan | None: ...
     def insert(
         self,
         dialect_tag: int,
@@ -648,7 +648,7 @@ class NativeStatementCache:
         compiled_sql: bytes,
         param_plan: bytes,
     ) -> bool: ...
-    def stats(self) -> NativeStatementCacheStats: ...
+    def stats(self) -> StatementCacheStats: ...
     def invalidate_all(self) -> None: ...
     @property
     def capacity(self) -> int: ...
@@ -668,7 +668,7 @@ class SchemaDigestCache:
     def combined_etag(self) -> str: ...
 
 @final
-class NativeCloudSqlDialer:
+class CloudSqlDialer:
     def __new__(
         cls,
         instance_uri: str,
@@ -690,7 +690,7 @@ class NativeCloudSqlDialer:
     def generate_ephemeral_keypair(self) -> tuple[str, str]: ...
 
 @final
-class NativeAlloyDbDialer:
+class AlloyDbDialer:
     def __new__(
         cls,
         cluster_uri: str,
@@ -716,12 +716,12 @@ class NativeAlloyDbDialer:
     ) -> bytes: ...
 
 @final
-class VertebraArrowCursor:
+class ArrowCursor:
     shm_name: str
     byte_len: int
     def __new__(cls, shm_name: str, byte_len: int) -> Self: ...
     @staticmethod
-    def write_ipc_to_shm(shm_name: str, payload: bytes) -> VertebraArrowCursor: ...
+    def write_ipc_to_shm(shm_name: str, payload: bytes) -> ArrowCursor: ...
     @staticmethod
     def read_ipc_from_shm(shm_name: str) -> bytes: ...
     def read_bytes(self) -> bytes: ...

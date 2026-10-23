@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from vertebra.db.postgres import (
     ARROW_SHM_THRESHOLD_ROWS,
-    VertebraArrowCursor,
+    ArrowCursor,
 )
 from vertebra.typing import FrozenBaseStruct, VertebraError
 from vertebra.utils.module_loader import import_optional
@@ -368,10 +368,10 @@ class SyncMssqlDriver:
         params: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         shm_threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-    ) -> VertebraArrowCursor:
+    ) -> ArrowCursor:
         """Execute a query and materialize the result set as a zero-copy Arrow cursor."""
         rows = self.select(sql, params)
-        return VertebraArrowCursor.from_rows(rows, threshold_rows=shm_threshold_rows)
+        return ArrowCursor.from_rows(rows, threshold_rows=shm_threshold_rows)
 
     def close(self) -> None:
         """Close the underlying driver resources."""
@@ -409,8 +409,8 @@ class AsyncMssqlDriver:
         params: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         shm_threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-    ) -> VertebraArrowCursor:
-        """Execute a query asynchronously and return a zero-copy `VertebraArrowCursor`."""
+    ) -> ArrowCursor:
+        """Execute a query asynchronously and return a zero-copy `ArrowCursor`."""
         return await asyncio.to_thread(
             self._sync.select_to_arrow,
             sql,

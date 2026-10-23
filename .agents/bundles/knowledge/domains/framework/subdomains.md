@@ -38,7 +38,7 @@ sources:
 ## 2. Frontend Rendering & API Specifications (`htmx`, `ssr`, `openapi`, `asyncapi`)
 
 - **[`htmx.py`](../../../../../src/py/vertebra/framework/htmx.py)**: `HtmxRequest` header parser (`HX-Request`, `HX-Target`, `HX-Trigger`) and `HtmxResponse` / `HxSwap` response header builders.
-- **[`ssr`](../../../../../src/py/vertebra/framework/ssr/__init__.py)**: `SsrConfig`, `SsrFrame`, and `create_ssr_client` selecting between `NativeSsrClient` (`vertebra._bundler.SsrPool`) and `SidecarSsrClient`, plus static route prerendering (`ssr/_prerender.py`).
+- **[`ssr`](../../../../../src/py/vertebra/framework/ssr/__init__.py)**: `SsrConfig`, `SsrFrame`, and `create_ssr_client` selecting between `EmbeddedSsrClient` (`vertebra._bundler.SsrPool`) and `SidecarSsrClient`, plus static route prerendering (`ssr/_prerender.py`).
 - **[`openapi.py`](../../../../../src/py/vertebra/framework/openapi.py) & [`asyncapi.py`](../../../../../src/py/vertebra/framework/asyncapi.py)**: `OpenAPIConfig`, `OpenAPISpecBuilder`, and `ScalarDocsConfig` for OpenAPI 3.1.0 + Scalar UI; `AsyncAPIConfig`, `AsyncAPISpecBuilder`, and `AsyncChannelDef` for AsyncAPI 3.0.0 WebSocket/SSE/channel schemas.
 
 ## 3. Agent Protocols (`litestar-mcp`) & Background Infrastructure (`queues`, `channels`, `stores`, `email`)
