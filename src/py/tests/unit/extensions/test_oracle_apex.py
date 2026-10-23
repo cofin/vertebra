@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 
-from vertebra._typing import UnsupportedBackendError
 from vertebra.extensions.apex import (
     ApexAccessPolicy,
     ApexFederatedQuery,
@@ -28,6 +27,7 @@ from vertebra.extensions.apex import (
     OracleSessionManager,
 )
 from vertebra.framework.live import LiveState
+from vertebra.typing import UnsupportedBackendError
 
 
 class FakeOracleConn:

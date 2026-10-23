@@ -1,7 +1,7 @@
 import os
 from dataclasses import dataclass
 
-from vertebra._typing import UNSET, Empty
+from vertebra.typing import UNSET, Empty
 from vertebra.utils.config_tools import get_env
 from vertebra.utils.module_loader import import_string, module_available
 from vertebra.utils.serializers import encode_json

@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 
-from vertebra._typing import MissingDependencyError
 from vertebra.db import AlloyDbDialer, CloudSqlDialer, DatabaseRegistry
 from vertebra.db.postgres import (
     PGCOPY_BINARY_SIGNATURE,
@@ -16,6 +15,7 @@ from vertebra.db.postgres import (
     PostgresConfig,
     SyncPostgresDriver,
 )
+from vertebra.typing import MissingDependencyError
 
 
 def _build_test_pgcopy_payload(

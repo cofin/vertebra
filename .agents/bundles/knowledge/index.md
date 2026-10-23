@@ -64,7 +64,7 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
 - **Storage, Data, Telemetry & Extensions (`domains/storage/`, `domains/data/`, `domains/telemetry/`, `domains/extensions/`)**:
   - [Object Storage, Presigning & Upload Tracking](domains/storage/object-storage.md)
   - [Shared-Memory Connection Broker & Statement Cache](domains/data/broker-and-shm-leases.md)
-  - [Database Drivers, Cloud Dialers & Oracle Wallets](domains/data/database-drivers-and-dialers.md)
+  - [Database Drivers & Cloud Dialers](domains/data/database-drivers-and-dialers.md)
   - [Query Pipelines, Change Feeds, Tenant Predicates & DataFusion](domains/data/query-pipeline-cdc-and-tenancy.md)
   - [Logging, Trace Context, SQL Trace Propagation & GenAI Metrics](domains/telemetry/logging-tracing-and-genai.md)
   - [Litestar Integration: Route Compiler, Middleware Offload, and Fast Path](domains/extensions/litestar.md)

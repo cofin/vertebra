@@ -1,6 +1,5 @@
 """WSGI framework wrappers (Django, Flask) and large-body streaming helpers."""
 
-import importlib
 import io
 import logging
 import os
@@ -9,6 +8,7 @@ from collections.abc import Callable, Iterable
 from typing import Any, Protocol
 
 from vertebra._vertebra import WsgiFileWrapper, WsgiInput
+from vertebra.utils.module_loader import import_optional
 
 __all__ = (
     "DjangoWsgiApp",
@@ -190,11 +190,10 @@ class DjangoWsgiApp:
     ) -> "DjangoWsgiApp":
         """Initialise Django with ``settings_module`` and return a wrapped app."""
         os.environ.setdefault("DJANGO_SETTINGS_MODULE", settings_module)
-        try:
-            django_wsgi = importlib.import_module("django.core.wsgi")
-        except ImportError as exc:
+        django_wsgi = import_optional("django.core.wsgi")
+        if django_wsgi is None:
             msg = "Django is required for DjangoWsgiApp.from_settings()"
-            raise ImportError(msg) from exc
+            raise ImportError(msg)
         get_wsgi_application = django_wsgi.get_wsgi_application
         return cls(get_wsgi_application(), debug=debug)
 

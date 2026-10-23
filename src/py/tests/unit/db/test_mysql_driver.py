@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 
-from vertebra._typing import MissingDependencyError
 from vertebra.db.dialer.cloudsql import CloudSqlConfig, CloudSqlDialer
 from vertebra.db.mysql import AsyncMysqlDriver, MysqlConfig, SyncMysqlDriver
 from vertebra.extensions.sqlalchemy import (
@@ -14,6 +13,7 @@ from vertebra.extensions.sqlalchemy import (
     MysqlVtbDialect,
     Vector,
 )
+from vertebra.typing import MissingDependencyError
 
 
 class FakeCursor:

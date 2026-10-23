@@ -53,9 +53,9 @@ Fallbacks: when `msgspec` raises any other `TypeError` or a `ValueError`, `encod
 
 `_numpy.py` also exports `numpy_array_enc_hook`, `numpy_array_dec_hook` (direct one-argument use or Litestar's `(target_type, value)` form), and `numpy_array_predicate`. Each hook returns the value unchanged when NumPy is not installed.
 
-## 2. Base Structs & Schema Dumping (`_schema.py`, `_typing.py`)
+## 2. Base Structs & Schema Dumping (`_schema.py`, `typing.py`)
 
-[`vertebra._typing`](../../../../../src/py/vertebra/_typing.py) and [`vertebra.utils.serializers`](../../../../../src/py/vertebra/utils/serializers/__init__.py) export four canonical `msgspec.Struct` base classes, each providing `.to_dict()`:
+[`vertebra.typing`](../../../../../src/py/vertebra/typing.py) and [`vertebra.utils.serializers`](../../../../../src/py/vertebra/utils/serializers/__init__.py) export four canonical `msgspec.Struct` base classes, each providing `.to_dict()`:
 - `BaseStruct(Struct, gc=False, omit_defaults=True, repr_omit_defaults=True)` and `CamelizedBaseStruct(BaseStruct, rename="camel")` for mutable state objects.
 - `FrozenBaseStruct(Struct, frozen=True, gc=False, omit_defaults=True, repr_omit_defaults=True)` and `FrozenCamelizedStruct(FrozenBaseStruct, rename="camel", frozen=True)` for immutable wire models and configs.
 
@@ -79,7 +79,7 @@ Outside `vertebra.utils`, `vertebra.extensions.sqlalchemy.dialects` (`SyncPool`)
 
 ## 4. Optional Dependencies, Config, SQL Identifiers & IDs
 
-- [`module_loader.py`](../../../../../src/py/vertebra/utils/module_loader.py): `import_app("module:attr")`, `import_string`, `import_optional` (returns `None` on any import failure), `module_available`, `dependency_flag`, `module_to_os_path`, `ensure_{sqlspec,sqlalchemy,advanced_alchemy,uvloop,pyarrow,msgspec}` (raise `MissingDependencyError`), `reset_dependency_cache`.
+- [`module_loader.py`](../../../../../src/py/vertebra/utils/module_loader.py): `import_app("module:attr")`, `import_string`, `import_optional` (caches imported `ModuleType` or `None` in `_module_cache` so repeated positive and negative lookups are $O(1)$ without re-running `importlib.import_module`), `ensure_module` (returns cached `ModuleType` or raises `MissingDependencyError`), `module_available`, `dependency_flag`, `module_to_os_path`, `ensure_{sqlspec,sqlalchemy,advanced_alchemy,uvloop,pyarrow,msgspec}` (raise `MissingDependencyError`), `reset_dependency_cache` (clears `_availability_cache`, `_module_cache`, and resets `OptionalDependency` flags).
 - [`config_tools.py`](../../../../../src/py/vertebra/utils/config_tools.py): `get_env(key, default, type_hint)` (bool coercion from `1/true/yes/on` and `0/false/no/off`), `find_pyproject_toml`, `parse_pyproject_config` / `read_pyproject_section` (reads `[tool.vertebra]` with `[tool.vtb]` fallback), and `SingletonMeta` (thread-safe per-class singleton metaclass).
 - [`pipeline.py`](../../../../../src/py/vertebra/db/pipeline.py) and [`rls.py`](../../../../../src/py/vertebra/db/rls.py): `_IDENT_RE` (`^[A-Za-z_][A-Za-z0-9_]*$`) and `_validate_identifier()` validate SQL, PL/SQL, CTE, and GUC identifiers before string interpolation.
 - [`uuids.py`](../../../../../src/py/vertebra/utils/uuids.py): `uuid3/4/5/6/7` and `nanoid` use `uuid_utils` / `fastnanoid` when installed. `uuid6` falls back to `uuid4` with a warning.

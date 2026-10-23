@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import sys
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from importlib.util import find_spec
@@ -188,6 +189,9 @@ class BaseModelStub:
 
 def module_available(module_name: str) -> bool:
     """Return True if the given module can be resolved."""
+    if module_name in sys.modules:
+        return sys.modules[module_name] is not None
+
     cached = _dependency_cache.get(module_name)
     if cached is not None:
         return cached
@@ -202,11 +206,13 @@ def module_available(module_name: str) -> bool:
 
 
 def reset_dependency_cache(module_name: str | None = None) -> None:
-    """Clear cached availability for one module or the entire cache."""
+    """Clear cached availability and imported module instances for one module or the entire cache."""
     if module_name is None:
         _dependency_cache.clear()
+        _module_cache.clear()
         return
     _dependency_cache.pop(module_name, None)
+    _module_cache.pop(module_name, None)
 
 
 def dependency_flag(module_name: str) -> OptionalDependency:
@@ -228,6 +234,7 @@ UVLOOP_INSTALLED = dependency_flag("uvloop")
 UUID_UTILS_INSTALLED = dependency_flag("uuid_utils")
 
 _dependency_cache: dict[str, bool] = {}
+_module_cache: dict[str, Any] = {}
 
 
 def _attrs_has_stub(obj: Any) -> bool:

@@ -1,13 +1,13 @@
 ---
 type: Guide
-title: "Database Drivers, Cloud Dialers & Oracle Wallets"
-description: "The `vertebra.db` driver facades, `DatabaseRegistry`, Cloud SQL and AlloyDB dialers, and Oracle wallet and TNS handling."
+title: "Database Drivers & Cloud Dialers"
+description: "The `vertebra.db` driver facades, `DatabaseRegistry`, and Cloud SQL and AlloyDB dialers."
 status: stable
-tags: [domains, database, drivers, oracle, cloud-sql]
+tags: [domains, database, drivers, cloud-sql, alloydb]
 sources:
   - resource: src/py/vertebra/db/__init__.py
   - resource: src/py/vertebra/db/_registry.py
-  - resource: src/py/vertebra/_typing.py
+  - resource: src/py/vertebra/typing.py
   - resource: src/py/vertebra/db/postgres.py
   - resource: src/py/vertebra/db/mysql.py
   - resource: src/py/vertebra/db/sqlite.py
@@ -15,25 +15,21 @@ sources:
   - resource: src/py/vertebra/db/valkey.py
   - resource: src/py/vertebra/db/dialer/cloudsql.py
   - resource: src/py/vertebra/db/dialer/alloydb.py
-  - resource: src/py/vertebra/db/oracle/config.py
-  - resource: src/py/vertebra/db/oracle/driver.py
-  - resource: src/py/vertebra/db/oracle/wallet.py
-  - resource: src/py/vertebra/db/oracle/containers.py
   - resource: src/py/tests/unit/db/test_native_db_drivers.py
 ---
 
-# Database Drivers, Cloud Dialers & Oracle Wallets
+# Database Drivers & Cloud Dialers
 
-[`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py) holds typed connection configs (`msgspec.Struct(frozen=True, gc=False, kw_only=True)`), sync/async driver classes, cloud dialer helpers, and Oracle wallet tooling. Query composition, CDC, and tenancy in the same package are covered in [query-pipeline-cdc-and-tenancy](query-pipeline-cdc-and-tenancy.md).
+[`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py) holds typed connection configs (`msgspec.Struct(frozen=True, gc=False, kw_only=True)`), sync/async driver classes, and cloud dialer helpers. Query composition, CDC, and tenancy in the same package are covered in [query-pipeline-cdc-and-tenancy](query-pipeline-cdc-and-tenancy.md).
 
 > [!NOTE]
-> Database drivers provide both synchronous and asynchronous interfaces (`Sync*Driver` / `Async*Driver`). SQLite operates via native `sqlite3`. Postgres, MySQL, Oracle, Redis, and Valkey implement concrete network protocol transports with socket I/O, handshake negotiation, authentication (including SCRAM, IAM, and TLS/mTLS), statement preparation, connection leasing, and binary/RESP wire serialization. Every `Async*Driver` wraps or mirrors its sync counterpart.
+> Database drivers provide both synchronous and asynchronous interfaces (`Sync*Driver` / `Async*Driver`). SQLite operates via native `sqlite3`. Postgres, MySQL, Redis, and Valkey implement concrete network protocol transports with socket I/O, handshake negotiation, authentication (including SCRAM, IAM, and TLS/mTLS), statement preparation, connection leasing, and binary/RESP wire serialization. Every `Async*Driver` wraps or mirrors its sync counterpart. Oracle relational connectivity, Autonomous Database wallet extraction, and 26ai hybrid vector/text search are delegated directly to `sqlspec>=0.68.0` (`sqlspec.adapters.oracledb` and `sqlspec.adapters.adbc`), while [`vertebra.extensions.apex`](../extensions/oracle-apex.md) and [`vertebra.framework.queues.oracle`](../framework/distributed-queues-and-email.md) provide Oracle APEX and AQ/TxEventQ integration.
 
 ## 1. Registry (`_registry.py`)
 
 [`DatabaseRegistry`](../../../../../src/py/vertebra/db/_registry.py) maps names to configs and lazily built drivers.
 
-- `parse_url(url, **overrides)` dispatches on the scheme prefix before `+`: `postgres`/`postgresql` → `PostgresConfig`, `mysql`/`mariadb` → `MysqlConfig`, `sqlite` → `SqliteConfig` (`:memory:` for an empty path), `redis`/`rediss` → `RedisConfig`, `valkey`/`valkeys` → `ValkeyConfig`, `oracle` → `OracleConfig` (defaults `system@127.0.0.1:1521/FREEPDB1`), `cloudsql` → `CloudSqlConfig`, `alloydb` → `AlloyDbConfig`.
+- `parse_url(url, **overrides)` dispatches on the scheme prefix before `+`: `postgres`/`postgresql` → `PostgresConfig`, `mysql`/`mariadb` → `MysqlConfig`, `sqlite` → `SqliteConfig` (`:memory:` for an empty path), `redis`/`rediss` → `RedisConfig`, `valkey`/`valkeys` → `ValkeyConfig`, `cloudsql` → `CloudSqlConfig`, `alloydb` → `AlloyDbConfig`.
 - `register(name, config_or_url)` stores a config and drops any cached driver. `get_driver(name)` builds the `Async*Driver` or dialer that matches the config type.
 - `vertebra.extensions.sqlalchemy.dialects` integrates drivers into SQLAlchemy 2.1 via the `+vtb` dialect prefix.
 
@@ -66,15 +62,3 @@ sources:
 | `AlloyDbConfig` / `AlloyDbDialer` / `AlloyDbAuthType` | Port 5433. `encode_metadata_exchange` writes a 4-byte big-endian length followed by protobuf-style fields: user agent (tag `0x0A`), auth type (`0x10`, `BUILT_IN=1` / `IAM=2`), token (`0x1A`). `build_handshake_frame` picks IAM or built-in auth from `enable_iam_auth`. |
 
 Neither dialer opens a socket or calls the admin APIs. They supply URIs, TLS contexts, token caching, and handshake bytes for a caller-supplied transport.
-
-## 4. Oracle (`oracle/`)
-
-| Symbol | Responsibility |
-|---|---|
-| [`OracleConnectDescriptor`](../../../../../src/py/vertebra/db/oracle/config.py) | Renders a full `(DESCRIPTION=...)` string with timeouts, retries, `LOAD_BALANCE`/`FAILOVER`, optional `SDU`, and the `SSL_SERVER_DN_MATCH` security clause. |
-| `OracleConfig` | `build_effective_dsn` resolves in order: wallet TNS alias, then `dsn` (passed through wallet aliases), then a generated descriptor when `hosts`/`drcp`/`tac_profile`/`sdu` are set (TCPS when a wallet exists, SDU 65535 for `batch`/`exadata`), else `host:port/service`. `to_oracledb_connect_params` returns `oracledb` Thin-mode kwargs (`cclass` defaults to `VERTEBRA_{BIND_KEY}` under DRCP). `derive_pool` copies the config with merged `driver_features` so a secondary pool cannot change the primary's `fetch_lobs=False` default. |
-| [`OracleWallet`](../../../../../src/py/vertebra/db/oracle/wallet.py) | `extract` unpacks a `Wallet_*.zip` (path or bytes) or copies a wallet directory into `<root>/vertebra-wallets/wallet-<sha16>` with `0o700` directories and `0o600` files. Zip members are flattened to basenames and must stay inside the target. `ewallet.p12` is converted to `ewallet.pem` when `cryptography` is importable. `os.environ["TNS_ADMIN"]` is never set, so pools with different wallets can coexist. `parse_tnsnames` handles comments, multi-alias entries, and nested parentheses, and upper-cases aliases. `build_ssl_context` builds a Thin-mode mTLS context. |
-| [`SyncOracleDriver`](../../../../../src/py/vertebra/db/oracle/driver.py) / `AsyncOracleDriver` | Resolve the wallet at construction. `encode_vector` returns `array.array("f"/"d")` for `VECTOR` binds. `prepare_bind_params` converts numeric lists to vectors and dicts to JSON via `encode_json`. `fetch_df` wraps caller-supplied rows or raises `UnsupportedBackendError` when invoked without pre-fetched rows. |
-| `OracleDataFrame` | Column/row container with `to_dicts`, `to_arrow_table` (imports `pyarrow`), and `__arrow_c_stream__`. |
-| `OraclePoolRegistry` | Named `AsyncOracleDriver` pools built with `derive_pool`. `get_pool("default")` registers lazily. |
-| [`OracleContainer`](../../../../../src/py/vertebra/db/oracle/containers.py) / `OrdsContainer` | Container image settings for Autonomous Database Free (`adb-free:latest-23ai`, ports 1521/1522/8443, `env_vars`, `jdbc_thin_dsn`) and ORDS (`ords:latest`, port 8181, `ords_base_url`). They hold settings only and do not start containers. |

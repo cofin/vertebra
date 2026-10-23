@@ -8,7 +8,6 @@ sources:
   - resource: src/py/vertebra/extensions/sqlspec/__init__.py
   - resource: src/py/vertebra/extensions/sqlspec/plugin.py
   - resource: src/py/vertebra/extensions/sqlspec/storage.py
-  - resource: src/py/vertebra/extensions/sqlspec/oracle.py
   - resource: src/py/vertebra/extensions/alchemy/__init__.py
   - resource: src/py/vertebra/extensions/alchemy/plugin.py
   - resource: src/py/vertebra/extensions/alchemy/broker.py
@@ -20,7 +19,7 @@ sources:
 
 # SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions
 
-These packages copy the plugin and config shapes of SQLSpec, Advanced Alchemy, SQLAlchemy, and Alembic without depending on those libraries. Each module imports `litestar.di`, `litestar.typing`, `sqlalchemy.dialects`, or `alembic.ddl.impl` lazily through `importlib` and still works when they are missing. Unit coverage: `test_drop_in_names_and_generics.py`, `test_data_storage_integrations.py`, and `test_sqlalchemy_and_sqlspec_vtb.py` under `src/py/tests/unit/extensions/`.
+These packages copy the plugin and config shapes of SQLSpec, Advanced Alchemy, SQLAlchemy, and Alembic without depending on those libraries. Each module imports `litestar.di`, `litestar.typing`, `sqlalchemy.dialects`, or `alembic.ddl.impl` lazily through [`vertebra.utils.module_loader`](../../../../../src/py/vertebra/utils/module_loader.py) and still works when they are missing. Unit coverage: `test_drop_in_names_and_generics.py`, `test_data_storage_integrations.py`, and `test_sqlalchemy_and_sqlspec_vtb.py` under `src/py/tests/unit/extensions/`.
 
 ## 1. Plugins and Generic Configs
 
@@ -66,12 +65,11 @@ Leases count slots. They do not hand out database connections.
 | Symbol | Responsibility |
 |---|---|
 | `DIALECT_SCHEMES` | `{postgresql,oracle,mysql,sqlite}+{vertebra,vtb}`. |
-| [`DialectDescriptor`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects.py) | Frozen metadata struct (`name`, `driver`, `paramstyle`, statement-cache and insertmanyvalues flags). Module-level instances: `PostgresDialect` (`pyformat`), `OracleDialect` (`named`), `MysqlDialect` (`format`, no RETURNING, no native JSONB), `SqliteDialect` (`qmark`). `import_dbapi()` returns `DBAPIModule`. `register_all()` calls `sqlalchemy.dialects.registry.register` for each `backend.driver` name when SQLAlchemy is importable. |
-| `DBAPIModule` / `DBAPIConnection` / `DBAPICursor` | PEP 249 surface. The connection parses the URL with `DatabaseRegistry.parse_url`. SQLite URLs execute through `SyncSqliteDriver`, while non-SQLite backends raise [`UnsupportedBackendError`](../../../../../src/py/vertebra/_typing.py). |
+| [`DialectDescriptor`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects.py) | Frozen metadata struct (`name`, `driver`, `paramstyle`, statement-cache and insertmanyvalues flags). Module-level instances: `PostgresDialect` (`pyformat`), `OracleVtbDialect` (`named`), `MysqlDialect` (`format`, no RETURNING, no native JSONB), `SqliteDialect` (`qmark`). `import_dbapi()` returns `DBAPIModule`. `register_all()` calls `sqlalchemy.dialects.registry.register` for each `backend.driver` name when SQLAlchemy is importable. |
+| `DBAPIModule` / `DBAPIConnection` / `DBAPICursor` | PEP 249 surface. The connection parses the URL with `DatabaseRegistry.parse_url` (`postgresql`, `mysql`, `sqlite`). Non-supported URLs raise [`UnsupportedBackendError`](../../../../../src/py/vertebra/typing.py). |
 | `SyncEngineAdapter` | `run_sync(fn, ...)` submits to `SyncPool.submit_async`. `requires_greenlet` is `not is_free_threaded()`. |
 | [`Vector`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects.py) / `VectorDistanceExpr` | `get_col_spec` renders Oracle `VECTOR(dim\|*, FLOAT32\|...)`, PG/MySQL `VECTOR(dim)`, otherwise `BLOB`. `cosine_distance` / `l2_distance` / `inner_product` compile to Oracle `VECTOR_DISTANCE`, pgvector `<=>`/`<->`/`<#>`, MySQL `DISTANCE_*`, or `vec_distance_*`. |
 | [`BinaryJson`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects.py) | `JSONB` on PG/SQLite, `JSON` elsewhere. Encodes with `encode_json`. |
 | [`AlembicImpl`](../../../../../src/py/vertebra/extensions/sqlalchemy/alembic.py) | `register_all` aliases each `+vtb` key to the base dialect impl in `DefaultImpl._impls`. Static `render_item` and `compare_type` hooks handle `Vector`/`BinaryJson` and treat `JSON`/`JSONB`/`OSON` as equal. `resolve_migration_url` returns `PostgresConfig.effective_direct_dsn`. |
-| `CreateViewOp` / `DropViewOp` | DDL strings. `OR REPLACE` is dropped on SQLite and `IF EXISTS` is dropped on Oracle. `reverse()` gives the inverse op. |
+| `CreateViewOp` / `DropViewOp` / `CreateVectorIndexOp` / `DropVectorIndexOp` | DDL strings. `OR REPLACE` is dropped on SQLite and `IF EXISTS` is dropped on Oracle. `CreateVectorIndexOp` compiles `CREATE VECTOR INDEX ... ORGANIZATION INMEMORY NEIGHBOR GRAPH` on Oracle and `USING hnsw` on PostgreSQL. `reverse()` gives the inverse op. |
 | [`SelectInLoadSpec`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects.py), `InsertSentinelSpec`, `DeleteUsingClause`, `ParameterizedSql` | Chunk size 1–1000 (Oracle `ORA-01795` limit), `num_batches`; sentinel-column settings; `DELETE ... USING ...` rendering with identifier validation checks on table names; conversion of PEP 750 template strings (`strings`/`interpolations`) or a static-parts sequence into `:p_N` named binds. |
-| [`OracleHybridSearch`](../../../../../src/py/vertebra/extensions/sqlspec/oracle.py) | Static `sanitize_json` (JSON/OSON-safe primitives, LOB `read()`), `sanitize_text_query` (alphanumeric tokens wrapped in `{}` and joined by `accum`/`and`/`near`), and `build_rrf_sql` (validates `table`, `id_column`, `vector_column`, and `text_column` via `SqlIdentifier.validate` and fuses vector + Oracle Text CTEs by reciprocal rank). |

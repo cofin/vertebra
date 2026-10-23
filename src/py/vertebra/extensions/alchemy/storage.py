@@ -9,9 +9,9 @@ from typing import Any
 
 import msgspec
 
-from vertebra._typing import BaseStruct
 from vertebra.storage import ObjectMeta, ObjectStore, get_default_storage_registry
 from vertebra.storage.pipeline import StagedUpload, UploadTracker
+from vertebra.typing import BaseStruct
 
 __all__ = (
     "FileAttachment",

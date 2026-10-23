@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import inspect
 import struct
 from collections.abc import Awaitable, Buffer, Callable, Iterator, Mapping, Sequence
@@ -10,10 +9,9 @@ from typing import Any, Literal
 
 import msgspec
 
-from vertebra._typing import MissingDependencyError
 from vertebra.db.dialer.alloydb import AlloyDbConfig
 from vertebra.db.dialer.cloudsql import CloudSqlConfig
-from vertebra.db.oracle.driver import OracleDataFrame
+from vertebra.utils.module_loader import ensure_module, import_optional
 
 __all__ = (
     "PGCOPY_BINARY_SIGNATURE",
@@ -176,15 +174,11 @@ class SyncPostgresDriver:
             return self._pool
         if self._config.dsn.startswith("memory://"):
             return None
-        try:
-            psycopg_pool = importlib.import_module("psycopg_pool")
-        except ImportError as exc:
-            msg = "psycopg_pool"
-            raise MissingDependencyError(
-                msg,
-                install_package="psycopg[binary,pool]",
-                extra="postgres",
-            ) from exc
+        psycopg_pool = ensure_module(
+            "psycopg_pool",
+            install_package="psycopg[binary,pool]",
+            extra="postgres",
+        )
 
         kwargs: dict[str, Any] = {
             "autocommit": False,
@@ -357,7 +351,7 @@ class SyncPostgresDriver:
         *,
         batch_size: int = 1024,
     ) -> Iterator[Any]:
-        """Execute a query via binary COPY and yield PyArrow RecordBatch or OracleDataFrame chunks."""
+        """Execute a query via binary COPY and yield PyArrow RecordBatch or tuple batch chunks."""
         rows: list[tuple[Any, ...]] = []
         if self._pool is not None:
             if hasattr(self._pool, "copy_binary_stream"):
@@ -388,10 +382,7 @@ class SyncPostgresDriver:
         else:
             rows = list(self._in_memory_rows)
 
-        try:
-            pa: Any = importlib.import_module("pyarrow")
-        except ImportError:
-            pa = None
+        pa = import_optional("pyarrow")
 
         cols = tuple(columns)
         if not rows:
@@ -399,7 +390,7 @@ class SyncPostgresDriver:
                 pydict_empty: dict[str, list[Any]] = {col: [] for col in cols}
                 yield pa.RecordBatch.from_pydict(pydict_empty)
             else:
-                yield OracleDataFrame(cols, [])
+                yield []
             return
 
         for i in range(0, len(rows), batch_size):
@@ -410,7 +401,7 @@ class SyncPostgresDriver:
                 }
                 yield pa.RecordBatch.from_pydict(pydict_chunk)
             else:
-                yield OracleDataFrame(cols, chunk)
+                yield chunk
 
     def commit(self) -> None:
         """Commit the active transaction."""
@@ -480,18 +471,15 @@ class AsyncPostgresDriver:
             return self._pool
         if self._config.dsn.startswith("memory://"):
             return None
-        try:
-            return importlib.import_module("asyncpg")
-        except ImportError:
-            try:
-                return importlib.import_module("psycopg_pool")
-            except ImportError as exc:
-                msg = "asyncpg"
-                raise MissingDependencyError(
-                    msg,
-                    install_package="asyncpg",
-                    extra="postgres",
-                ) from exc
+        asyncpg_mod = import_optional("asyncpg")
+        if asyncpg_mod is not None:
+            return asyncpg_mod
+        return ensure_module(
+            "psycopg_pool",
+            package="asyncpg",
+            install_package="asyncpg",
+            extra="postgres",
+        )
 
     async def execute_with_description(
         self,

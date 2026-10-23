@@ -1,7 +1,6 @@
 """Self-extracting single-binary builder with zstd compression and VTB1FILE SHA-256 footer."""
 
 import hashlib
-import importlib
 import inspect
 import io
 import tarfile
@@ -18,6 +17,7 @@ from vertebra.build.packaging._onefile_extract import (
     inspect_trailer_bytes,
 )
 from vertebra.build.packaging.targets import BuildTarget
+from vertebra.utils.module_loader import import_optional
 
 __all__ = (
     "ONEFILE_MAGIC",
@@ -97,10 +97,7 @@ class OnefileBuilder:
 
     @staticmethod
     def _load_zstd() -> Any:
-        try:
-            return importlib.import_module("zstandard")
-        except ImportError:
-            return None
+        return import_optional("zstandard")
 
     @classmethod
     def _launcher_stub(cls, short_hash: str) -> bytes:

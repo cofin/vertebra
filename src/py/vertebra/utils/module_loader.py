@@ -8,8 +8,9 @@ import importlib
 import sys
 from typing import Any
 
-from vertebra._typing import (
+from vertebra.typing import (
     MissingDependencyError,
+    _module_cache,
     dependency_flag,
     module_available,
     reset_dependency_cache,
@@ -18,6 +19,7 @@ from vertebra._typing import (
 __all__ = (
     "MissingDependencyError",
     "dependency_flag",
+    "ensure_module",
     "import_app",
     "import_optional",
     "import_string",
@@ -38,13 +40,43 @@ def import_app(app_path: str) -> Any:
 
 
 def import_optional(module_name: str) -> Any | None:
-    """Import and return a module when available, or None if not installed."""
+    """Import and return a cached module when available, or None if not installed."""
+    if module_name in sys.modules:
+        loaded = sys.modules[module_name]
+        if loaded is not None:
+            _module_cache[module_name] = loaded
+        return loaded
+
+    cached = _module_cache.get(module_name)
+    if cached is not None:
+        return cached
+
     if not module_available(module_name):
         return None
     try:
-        return importlib.import_module(module_name)
+        mod = importlib.import_module(module_name)
     except ImportError:
         return None
+    _module_cache[module_name] = mod
+    return mod
+
+
+def ensure_module(
+    module_name: str,
+    *,
+    package: str | None = None,
+    extra: str | None = None,
+    install_package: str | None = None,
+) -> Any:
+    """Import and return a cached module, or raise MissingDependencyError if unavailable."""
+    mod = import_optional(module_name)
+    if mod is None:
+        raise MissingDependencyError(
+            package or module_name,
+            install_package=install_package,
+            extra=extra,
+        )
+    return mod
 
 
 def import_string(dotted_path: str) -> Any:

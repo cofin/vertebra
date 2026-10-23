@@ -22,3 +22,11 @@ All JSON encoding and decoding must invoke functions from `vertebra.utils.serial
 - `decode_json(data, target_type)`: Decodes JSON bytes or strings with type validation.
 
 Direct imports of `json` or `msgspec.json` outside `vertebra.utils.serializers` are forbidden.
+
+---
+
+## Public `vertebra.typing` Shim & Cached `module_loader` (`PY-08`)
+
+- Always import typing aliases, base structs (`BaseStruct`, `CamelizedBaseStruct`, `FrozenBaseStruct`, `FrozenCamelizedStruct`, `Struct`), sentinels (`Empty`, `EmptyType`, `UNSET`), protocols (`DataclassProtocol`, `AttrsInstance`), exceptions (`VertebraError`, `MissingDependencyError`, `ImproperConfigurationError`, `UnsupportedBackendError`), and optional dependency flags from the public `vertebra.typing` shim.
+- Importing from `vertebra._typing` outside `src/py/vertebra/typing.py` (and its dedicated unit test `src/py/tests/unit/framework/test_typing.py`) is forbidden.
+- Always route optional or dynamic module loading through `vertebra.utils.module_loader` (`import_optional`, `ensure_module`, `module_available`, `import_string`, `import_app`), which caches imported `ModuleType` objects in `_module_cache`. Direct `importlib.import_module` calls outside `src/py/vertebra/utils/module_loader.py` and the standalone self-extractor stub `src/py/vertebra/build/packaging/_onefile_extract.py` are forbidden.

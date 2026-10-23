@@ -14,7 +14,7 @@ import weakref
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from vertebra._typing import UVLOOP_INSTALLED
+from vertebra.typing import UVLOOP_INSTALLED
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.portal import PortalProvider
 

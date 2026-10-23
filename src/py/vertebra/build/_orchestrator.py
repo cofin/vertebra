@@ -6,7 +6,6 @@ automatic fallback to Vite when the native extension is unavailable.
 
 import atexit
 import contextlib
-import importlib
 import logging
 import os
 import socket
@@ -22,7 +21,7 @@ from vertebra.build.codegen._metadata import RouteCollector, RouteMetadata
 from vertebra.build.codegen._typescript import TypeScriptGenerator
 from vertebra.build.codegen._watch import HmrNotifier
 from vertebra.build.codegen.zod import ZodGenerator
-from vertebra.utils.module_loader import import_app
+from vertebra.utils.module_loader import ensure_module, import_app
 from vertebra.utils.serializers import encode_json, format_json
 
 __all__ = ("BuildOrchestrator",)
@@ -172,7 +171,7 @@ class BuildOrchestrator:
             self._run_vite_fallback(dev=dev)
 
     def _run_native(self, *, dev: bool) -> None:
-        bundler_mod = importlib.import_module("vertebra._bundler")
+        bundler_mod = ensure_module("vertebra._bundler")
         bundler = bundler_mod.Bundler()
         bundle_config = bundler_mod.BundleConfig(
             entry=str(self.project_dir / self.config.entry),

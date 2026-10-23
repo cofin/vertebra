@@ -10,7 +10,7 @@ from typing import Any, Literal, cast
 
 import msgspec
 
-from vertebra._typing import FrozenCamelizedStruct
+from vertebra.typing import FrozenCamelizedStruct
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 TaskState = Literal[

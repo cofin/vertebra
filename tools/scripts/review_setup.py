@@ -5,6 +5,7 @@ shared checklists, false-positive catalogs, OKF knowledge bundles, privacy
 hygiene, and finding ledgers according to vertebra review infrastructure specs.
 """
 
+import ast
 import fnmatch
 import os
 import re
@@ -574,6 +575,7 @@ class ReviewSetupValidator:
             "files",
             "bundles",
             "privacy",
+            "python_imports",
         }
     )
 
@@ -618,6 +620,9 @@ class ReviewSetupValidator:
 
         if "privacy" in active_rules:
             issues.extend(self._check_privacy())
+
+        if "python_imports" in active_rules:
+            issues.extend(self._check_python_imports())
 
         return issues
 
@@ -1675,6 +1680,90 @@ class ReviewSetupValidator:
                                 f"private term #{term_idx}",
                             )
                         )
+
+        return issues
+
+    def _check_python_imports(self) -> list[ReviewIssue]:
+        """Validate PY-08: forbid vertebra._typing outside typing.py and raw importlib.import_module outside module_loader.py."""
+        issues: list[ReviewIssue] = []
+        py_root = self.repo_root / "src/py"
+        if not py_root.exists():
+            return issues
+
+        allowed_private_typing = {
+            "src/py/vertebra/typing.py",
+            "src/py/tests/unit/framework/test_typing.py",
+        }
+        allowed_import_module = {
+            "src/py/vertebra/utils/module_loader.py",
+            "src/py/vertebra/build/packaging/_onefile_extract.py",
+        }
+
+        for py_file in sorted(py_root.rglob("*.py")):
+            rel_file = py_file.relative_to(self.repo_root).as_posix()
+            try:
+                source = py_file.read_text(encoding="utf-8")
+                tree = ast.parse(source, filename=rel_file)
+            except SyntaxError:
+                continue
+
+            in_vertebra_pkg = rel_file.startswith("src/py/vertebra/")
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name == "vertebra._typing" and rel_file not in allowed_private_typing:
+                            issues.append(
+                                ReviewIssue(
+                                    "python_imports",
+                                    rel_file,
+                                    node.lineno,
+                                    "import from 'vertebra.typing' instead of private 'vertebra._typing' (PY-08)",
+                                )
+                            )
+                elif isinstance(node, ast.ImportFrom):
+                    mod_name = node.module or ""
+                    if (
+                        mod_name == "vertebra._typing" or (in_vertebra_pkg and node.level > 0 and mod_name == "_typing")
+                    ) and rel_file not in allowed_private_typing:
+                        issues.append(
+                            ReviewIssue(
+                                "python_imports",
+                                rel_file,
+                                node.lineno,
+                                "import from 'vertebra.typing' instead of private 'vertebra._typing' (PY-08)",
+                            )
+                        )
+                    if (
+                        in_vertebra_pkg
+                        and mod_name == "importlib"
+                        and any(a.name == "import_module" for a in node.names)
+                        and rel_file not in allowed_import_module
+                    ):
+                        issues.append(
+                            ReviewIssue(
+                                "python_imports",
+                                rel_file,
+                                node.lineno,
+                                "use vertebra.utils.module_loader.{import_optional,ensure_module} instead of importlib.import_module (PY-08)",
+                            )
+                        )
+                elif (
+                    in_vertebra_pkg
+                    and isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "import_module"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "importlib"
+                    and rel_file not in allowed_import_module
+                ):
+                    issues.append(
+                        ReviewIssue(
+                            "python_imports",
+                            rel_file,
+                            node.lineno,
+                            "use vertebra.utils.module_loader.{import_optional,ensure_module} instead of importlib.import_module (PY-08)",
+                        )
+                    )
 
         return issues
 

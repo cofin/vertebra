@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import collections
-import importlib
 import logging
 from collections.abc import Buffer
 from typing import Any
@@ -11,6 +10,7 @@ from typing import Any
 import msgspec
 
 from vertebra.storage._store import ObjectStore, PutResult
+from vertebra.utils.module_loader import import_optional
 
 logger = logging.getLogger(__name__)
 
@@ -146,14 +146,13 @@ class UploadTracker:
 
     def attach_sqlalchemy_session(self, session_or_factory: Any) -> None:
         """Register SQLAlchemy after_flush, after_commit, and after_rollback listeners when SQLAlchemy is present."""
-        try:
-            event_mod = importlib.import_module("sqlalchemy.event")
-            listen = event_mod.listen
-            listen(session_or_factory, "after_flush", self.before_flush)
-            listen(session_or_factory, "after_commit", self.after_commit)
-            listen(session_or_factory, "after_rollback", self.after_rollback)
-        except ImportError:
+        event_mod = import_optional("sqlalchemy.event")
+        if event_mod is None:
             return
+        listen = event_mod.listen
+        listen(session_or_factory, "after_flush", self.before_flush)
+        listen(session_or_factory, "after_commit", self.after_commit)
+        listen(session_or_factory, "after_rollback", self.after_rollback)
 
     async def __aenter__(self) -> UploadTracker:
         """Enter an async transactional upload tracking context."""

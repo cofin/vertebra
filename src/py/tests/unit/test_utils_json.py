@@ -9,7 +9,7 @@ from pathlib import Path
 import msgspec
 import pytest
 
-from vertebra._typing import (
+from vertebra.typing import (
     BaseStruct,
     CamelizedBaseStruct,
     FrozenBaseStruct,

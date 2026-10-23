@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkabl
 
 import msgspec
 
-from vertebra._typing import UnsupportedBackendError
 from vertebra.telemetry.otel import TraceContext
+from vertebra.typing import UnsupportedBackendError
 from vertebra.utils.module_loader import import_string
 
 if TYPE_CHECKING:

@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from msgspec import Struct
 
-from vertebra import _typing
-from vertebra._typing import (
+from vertebra import typing as vertebra_typing
+from vertebra.typing import (
     ATTRS_INSTALLED,
     PYDANTIC_INSTALLED,
     UNSET,
@@ -21,7 +21,7 @@ from vertebra._typing import (
 if TYPE_CHECKING:
     from typing import TypeGuard
 
-    from vertebra._typing import BaseModelStub
+    from vertebra.typing import BaseModelStub
 
 __all__ = (
     "DictProtocol",
@@ -59,7 +59,7 @@ def is_pydantic_model(obj: Any) -> "TypeGuard[BaseModelStub]":
     """Check if a value is a pydantic model class or instance."""
     if not PYDANTIC_INSTALLED:
         return False
-    base_model = _typing.BaseModel
+    base_model = vertebra_typing.BaseModel
     if isinstance(obj, type):
         try:
             return issubclass(obj, base_model)
@@ -80,7 +80,7 @@ def is_msgspec_struct(obj: Any) -> "TypeGuard[Struct]":
 
 def is_attrs_instance(obj: Any) -> bool:
     """Check if a value is an attrs class instance."""
-    return bool(ATTRS_INSTALLED) and _typing.attrs_has(obj.__class__)
+    return bool(ATTRS_INSTALLED) and vertebra_typing.attrs_has(obj.__class__)
 
 
 def is_dict(obj: Any) -> "TypeGuard[dict[str, Any]]":

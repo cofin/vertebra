@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import inspect
 import logging
 from collections.abc import Sequence
@@ -14,6 +13,7 @@ from vertebra.extensions.alchemy.broker import BrokerPlugin, BrokerTransport, Ch
 from vertebra.extensions.alchemy.plugin import AlchemyPlugin
 from vertebra.extensions.sqlspec.storage import SQLSpecStore
 from vertebra.storage import ObjectStore as BaseObjectStore
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.sync_tools import SyncPool
 
 logger = logging.getLogger(__name__)
@@ -642,11 +642,8 @@ class SQLSpecPlugin[ConfigT]:
         provide_session_fn = getattr(cfg, "provide_session", None)
         provide_connection_fn = getattr(cfg, "provide_connection", None)
 
-        provide_cls: type[Any] | None = None
-        try:
-            provide_cls = importlib.import_module("litestar.di").Provide
-        except ImportError:
-            provide_cls = None
+        di_mod = import_optional("litestar.di")
+        provide_cls: type[Any] | None = getattr(di_mod, "Provide", None) if di_mod is not None else None
 
         if callable(provide_session_fn) and session_key not in dependencies:
             wrapped_session = cls._wrap_skip_validation_provider(provide_session_fn)

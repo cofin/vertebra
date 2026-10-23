@@ -5,7 +5,6 @@ from typing import Any
 
 import pytest
 
-from vertebra._typing import FrozenBaseStruct
 from vertebra.agent.core.context import AgentContext, CallerIdentity
 from vertebra.agent.core.guards import GuardProtocol, PermissionDeniedError
 from vertebra.agent.core.schema import tool
@@ -34,6 +33,7 @@ from vertebra.agent.mcp import (
     prompt,
     resource,
 )
+from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.serializers import decode_json
 
 

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import importlib
 import pkgutil
 from typing import Any
 
 import msgspec
+
+from vertebra.utils.module_loader import ensure_module
 
 __all__ = (
     "AutowireConfig",
@@ -49,7 +50,7 @@ class AutowireLoader:
         self._controllers.clear()
         self._services.clear()
         for pkg_name in self.config.domain_packages:
-            pkg = importlib.import_module(pkg_name)
+            pkg = ensure_module(pkg_name)
             self._inspect_module(pkg)
             pkg_path = getattr(pkg, "__path__", None)
             if pkg_path is not None:
@@ -57,7 +58,7 @@ class AutowireLoader:
                     short = mod_info.name.rsplit(".", 1)[-1]
                     if self.config.ignore_private_modules and short.startswith("_"):
                         continue
-                    mod = importlib.import_module(mod_info.name)
+                    mod = ensure_module(mod_info.name)
                     self._inspect_module(mod)
         return self.controllers, self.services
 

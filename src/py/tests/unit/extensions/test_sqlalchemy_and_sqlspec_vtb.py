@@ -1,22 +1,22 @@
-"""Unit tests for SQLSpec Oracle 26ai helpers, SQLAlchemy 2.1 +vtb dialects, Alembic, and ORM optimizations."""
+"""Unit tests for SQLSpec storage/plugin helpers, SQLAlchemy 2.1 +vtb dialects, Alembic, and ORM optimizations."""
 
 from __future__ import annotations
 
 import array
-import datetime
-import decimal
-import uuid
 
 import pytest
 
-from vertebra.db import OracleDataFrame, PostgresConfig, SyncPostgresDriver
+from vertebra.db import PostgresConfig, SyncPostgresDriver
 from vertebra.extensions.sqlalchemy import (
     AlembicImpl,
     BinaryJson,
+    CreateVectorIndexOp,
     CreateViewOp,
+    DBAPIConnection,
     DBAPIModule,
     DeleteUsingClause,
     DialectDescriptor,
+    DropVectorIndexOp,
     InsertSentinelSpec,
     MysqlVtbDialect,
     OracleDialect,
@@ -31,7 +31,6 @@ from vertebra.extensions.sqlalchemy import (
     Vector,
 )
 from vertebra.extensions.sqlspec import (
-    OracleHybridSearch,
     SQLSpecPlugin,
     SQLSpecStore,
     SyncDatabaseConfig,
@@ -39,51 +38,19 @@ from vertebra.extensions.sqlspec import (
 from vertebra.storage import ObjectStore
 
 
-def test_oracle_json_text_and_hybrid_rrf_builders() -> None:
-    """Verify OracleHybridSearch.sanitize_json, sanitize_text_query, and build_rrf_sql."""
-    payload = {
-        "ts": datetime.datetime(2026, 10, 21, 12, 0, tzinfo=datetime.UTC),
-        "price": decimal.Decimal("19.99"),
-        "count": decimal.Decimal("5"),
-        "id": uuid.UUID("12345678-1234-5678-1234-567812345678"),
-        "vec": array.array("f", [1.0, 2.0]),
-        "raw": memoryview(b"hello"),
-    }
-    cleaned = OracleHybridSearch.sanitize_json(payload)
-    assert cleaned["price"] == 19.99
-    assert cleaned["count"] == 5
-    assert cleaned["vec"] == [1.0, 2.0]
-    assert cleaned["raw"] == "hello"
-
-    assert OracleHybridSearch.sanitize_text_query("dark roast AND espresso; DROP TABLE!") == (
-        "{dark} , {roast} , {AND} , {espresso} , {DROP} , {TABLE}"
-    )
-    assert OracleHybridSearch.sanitize_text_query("arabica beans", mode="and") == "{arabica} & {beans}"
-    assert OracleHybridSearch.sanitize_text_query("cold brew", mode="near") == "NEAR(({cold}, {brew}))"
-
-    rrf_sql, rrf_binds = OracleHybridSearch.build_rrf_sql(
-        "products",
-        select_columns=("id", "name"),
-        rrf_k=60,
-        candidate_limit=25,
-    )
-    assert "VECTOR_DISTANCE(embedding, :query_vec, COSINE)" in rrf_sql
-    assert "FETCH APPROX FIRST :candidate_limit ROWS ONLY" in rrf_sql
-    assert "ROWNUM AS vec_rank" in rrf_sql
-    assert "CONTAINS(content, :text_query, 1) > 0" in rrf_sql
-    assert "FULL OUTER JOIN text_candidates" in rrf_sql
-    assert "FETCH FIRST :top_k ROWS ONLY" in rrf_sql
-    assert rrf_binds["rrf_k"] == 60
-    assert rrf_binds["candidate_limit"] == 25
-
-
 @pytest.mark.anyio
 async def test_sqlspec_arrow_capsule_export_and_multipool_shutdown() -> None:
     """Verify SQLSpecStore.export_arrow_capsule and SQLSpecPlugin multi-pool shutdown."""
     store = ObjectStore("memory://")
     bridge = SQLSpecStore(store, prefix="exports")
-    df = OracleDataFrame(("id", "name"), [(1, "Alpha"), (2, "Beta")])
-    res = bridge.export_arrow_capsule("items.arrow", df)
+
+    class TabularProvider:
+        __slots__ = ()
+
+        def to_dicts(self) -> list[dict[str, object]]:
+            return [{"id": 1, "name": "Alpha"}, {"id": 2, "name": "Beta"}]
+
+    res = bridge.export_arrow_capsule("items.arrow", TabularProvider())
     assert res.size > 0
     assert len(bridge.read_arrow_ipc("items.arrow")) == res.size
 
@@ -201,6 +168,40 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
         pooler_mode="transaction",
     )
     assert AlembicImpl.resolve_migration_url(pg_cfg) == "postgresql://u:p@pg-primary:5432/app"
+
+    sentinel_spec = InsertSentinelSpec.create(table_name="orders", sentinel_column="_insert_sentinel")
+    rendered_insert = OracleVtbDialect.compile_insert_returning_sentinel(
+        "orders",
+        ("id", "total"),
+        sentinel_spec,
+        pk_column="id",
+    )
+    assert rendered_insert == (
+        "INSERT INTO orders (id, total) VALUES (:id, :total) "
+        "RETURNING id, _insert_sentinel INTO :ret_id, :ret__insert_sentinel"
+    )
+
+    vec_op = CreateVectorIndexOp(
+        index_name="idx_items_vec",
+        table_name="items",
+        column_name="embedding",
+        metric="cosine",
+    )
+    assert vec_op.to_sql("oracle+vtb") == (
+        "CREATE VECTOR INDEX idx_items_vec ON items (embedding) ORGANIZATION INMEMORY NEIGHBOR GRAPH DISTANCE COSINE"
+    )
+    assert vec_op.to_sql("postgresql+vtb") == (
+        "CREATE INDEX idx_items_vec ON items USING hnsw (embedding vector_cosine_ops)"
+    )
+
+    drop_op = vec_op.reverse()
+    assert isinstance(drop_op, DropVectorIndexOp)
+    assert drop_op.to_sql("oracle+vtb") == "DROP INDEX idx_items_vec"
+    assert drop_op.to_sql("postgresql+vtb") == "DROP INDEX IF EXISTS idx_items_vec"
+
+    ddl_conn = DBAPIConnection("sqlite+vtb:///:memory:")
+    AlembicImpl.execute_ddl(ddl_conn, view_op, dialect_name="sqlite+vtb")
+    ddl_conn.close()
 
 
 def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:

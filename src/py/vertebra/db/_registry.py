@@ -8,8 +8,6 @@ from urllib.parse import urlparse
 from vertebra.db.dialer.alloydb import AlloyDbConfig, AlloyDbDialer
 from vertebra.db.dialer.cloudsql import CloudSqlConfig, CloudSqlDialer
 from vertebra.db.mysql import AsyncMysqlDriver, MysqlConfig, SyncMysqlDriver
-from vertebra.db.oracle.config import OracleConfig
-from vertebra.db.oracle.driver import AsyncOracleDriver, SyncOracleDriver
 from vertebra.db.postgres import AsyncPostgresDriver, PostgresConfig, SyncPostgresDriver
 from vertebra.db.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
 from vertebra.db.sqlite import AsyncSqliteDriver, SqliteConfig, SyncSqliteDriver
@@ -18,14 +16,7 @@ from vertebra.db.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
 __all__ = ("AnyDatabaseConfig", "AnyDatabaseDriver", "AnySyncDatabaseDriver", "DatabaseRegistry")
 
 type AnyDatabaseConfig = (
-    PostgresConfig
-    | MysqlConfig
-    | SqliteConfig
-    | RedisConfig
-    | ValkeyConfig
-    | OracleConfig
-    | CloudSqlConfig
-    | AlloyDbConfig
+    PostgresConfig | MysqlConfig | SqliteConfig | RedisConfig | ValkeyConfig | CloudSqlConfig | AlloyDbConfig
 )
 
 type AnyDatabaseDriver = (
@@ -34,7 +25,6 @@ type AnyDatabaseDriver = (
     | AsyncSqliteDriver
     | AsyncRedisDriver
     | AsyncValkeyDriver
-    | AsyncOracleDriver
     | CloudSqlDialer
     | AlloyDbDialer
 )
@@ -45,7 +35,6 @@ type AnySyncDatabaseDriver = (
     | SyncSqliteDriver
     | SyncRedisDriver
     | SyncValkeyDriver
-    | SyncOracleDriver
     | CloudSqlDialer
     | AlloyDbDialer
 )
@@ -89,16 +78,6 @@ class DatabaseRegistry:
             return RedisConfig(url=url, **overrides)
         if base_scheme in ("valkey", "valkeys"):
             return ValkeyConfig(url=url, **overrides)
-        if base_scheme == "oracle":
-            oracle_kwargs: dict[str, Any] = {
-                "user": parsed.username or "system",
-                "password": parsed.password or "",
-                "host": parsed.hostname or "127.0.0.1",
-                "port": parsed.port or 1521,
-                "service_name": parsed.path.lstrip("/") or "FREEPDB1",
-            }
-            oracle_kwargs.update(overrides)
-            return OracleConfig(**oracle_kwargs)
         if base_scheme == "cloudsql":
             instance_uri = f"{parsed.netloc}{parsed.path}"
             return CloudSqlConfig(instance_connection_name=instance_uri, **overrides)
@@ -148,8 +127,6 @@ class DatabaseRegistry:
             driver = AsyncRedisDriver(config)
         elif isinstance(config, ValkeyConfig):
             driver = AsyncValkeyDriver(config)
-        elif isinstance(config, OracleConfig):
-            driver = AsyncOracleDriver(config)
         elif isinstance(config, CloudSqlConfig):
             driver = CloudSqlDialer(config)
         elif isinstance(config, AlloyDbConfig):
@@ -184,8 +161,6 @@ class DatabaseRegistry:
             driver = SyncRedisDriver(config)
         elif isinstance(config, ValkeyConfig):
             driver = SyncValkeyDriver(config)
-        elif isinstance(config, OracleConfig):
-            driver = SyncOracleDriver(config)
         elif isinstance(config, CloudSqlConfig):
             driver = CloudSqlDialer(config)
         elif isinstance(config, AlloyDbConfig):

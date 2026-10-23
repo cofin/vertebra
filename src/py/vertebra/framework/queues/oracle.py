@@ -22,8 +22,6 @@ from vertebra.utils.serializers import decode_json, encode_json_bytes
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from vertebra.db.oracle.config import OracleConfig
-
 __all__ = (
     "CLAIM_ORACLE_JOBS_SQL",
     "ORACLE_QUEUE_DDL",
@@ -298,7 +296,7 @@ class OracleQueueBackend:
         self,
         config: QueueConfig | None = None,
         *,
-        oracle_config: OracleConfig | None = None,
+        oracle_config: Any = None,
         executor: OracleQueueExecutor | None = None,
     ) -> None:
         self._config = config or QueueConfig()

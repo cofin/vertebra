@@ -22,7 +22,13 @@ from vertebra.typing import (
 from vertebra.typing import (
     Struct,
 )
-from vertebra.utils.module_loader import MissingDependencyError
+from vertebra.utils.module_loader import (
+    MissingDependencyError,
+    _module_cache,
+    ensure_module,
+    import_optional,
+    reset_dependency_cache,
+)
 
 
 def test_internal_typing_handler_id_is_int() -> None:
@@ -93,3 +99,44 @@ def test_lazy_vertebra_import_and_native_server_import() -> None:
     )
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert res.returncode == 0, res.stderr
+
+
+def test_public_typing_facade_exports_structs_exceptions_and_sentinels() -> None:
+    """Verify vertebra.typing exports the full public typing, struct, sentinel, and exception surface."""
+    for attr in (
+        "BaseStruct",
+        "CamelizedBaseStruct",
+        "FrozenBaseStruct",
+        "FrozenCamelizedStruct",
+        "Struct",
+        "VertebraError",
+        "MissingDependencyError",
+        "ImproperConfigurationError",
+        "UnsupportedBackendError",
+        "Empty",
+        "EmptyType",
+        "UNSET",
+        "OptionalDependency",
+        "module_available",
+        "reset_dependency_cache",
+    ):
+        assert hasattr(vertebra_typing, attr), f"Missing {attr} on vertebra.typing"
+
+
+def test_module_loader_caches_imported_modules_and_ensure_module() -> None:
+    """Verify import_optional and ensure_module cache imported ModuleType objects."""
+    reset_dependency_cache()
+    assert "json" not in _module_cache
+
+    mod1 = import_optional("json")
+    assert mod1 is not None
+    assert _module_cache.get("json") is mod1
+    assert import_optional("json") is mod1
+    assert ensure_module("json") is mod1
+
+    assert import_optional("vertebra_nonexistent_pkg_xyz") is None
+    with pytest.raises(MissingDependencyError, match="vertebra_nonexistent_pkg_xyz"):
+        ensure_module("vertebra_nonexistent_pkg_xyz", extra="custom")
+
+    reset_dependency_cache()
+    assert "json" not in _module_cache

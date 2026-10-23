@@ -5,7 +5,6 @@ A2A 1.0, AgentChatController, and .well-known discovery manifests on both native
 vertebra.framework.App and Litestar applications with automatic opt-attribute handler discovery.
 """
 
-import importlib
 from typing import Any, cast
 
 import msgspec
@@ -20,6 +19,7 @@ from vertebra.agent.mcp.service import MCPService
 from vertebra.agent.runtime import AgentRuntime
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.framework._app import App
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -208,11 +208,12 @@ class AgentPlugin:
 
     def _mount_litestar_routes(self, route_handlers: list[Any]) -> None:
         """Mount Litestar route handlers for MCP, A2A, and chat controller."""
-        try:
-            litestar_mod = importlib.import_module("litestar")
-            get_fn = litestar_mod.get
-            post_fn = litestar_mod.post
-        except Exception:
+        litestar_mod = import_optional("litestar")
+        if litestar_mod is None:
+            return
+        get_fn = getattr(litestar_mod, "get", None)
+        post_fn = getattr(litestar_mod, "post", None)
+        if get_fn is None or post_fn is None:
             return
 
         srv = self.mcp_service

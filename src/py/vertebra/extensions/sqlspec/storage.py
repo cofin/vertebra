@@ -241,7 +241,7 @@ class SQLSpecStore:
         return self.write_bytes(path, memoryview(framed))
 
     def export_arrow_capsule(self, path: str, provider: Any) -> PutResult:
-        """Export any ``__arrow_c_stream__`` / ``OracleDataFrame`` provider zero-copy into the store."""
+        """Export any ``__arrow_c_stream__`` or tabular dictionary provider zero-copy into the store."""
         to_dicts_fn = getattr(provider, "to_dicts", None)
         if callable(to_dicts_fn):
             rows: list[dict[str, Any]] = to_dicts_fn()

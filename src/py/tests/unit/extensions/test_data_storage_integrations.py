@@ -13,9 +13,6 @@ from vertebra.extensions.alchemy import (
 )
 from vertebra.extensions.sqlspec import (
     SQLSPEC_STATE_KEY,
-    OracleConfig,
-    OraclePoolRegistry,
-    OracleVectorConverter,
     SQLSpecPlugin,
     SQLSpecState,
     SqlSpecStorageBridge,
@@ -163,8 +160,8 @@ async def test_alchemy_storage_backend_and_plugin(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_sqlspec_plugin_shutdown_and_oracle_converters() -> None:
-    """Verify SQLSpecPlugin.shutdown offloads sync driver close to SyncPool and Oracle converters work."""
+async def test_sqlspec_plugin_shutdown() -> None:
+    """Verify SQLSpecPlugin.shutdown offloads sync driver close to SyncPool."""
     closed_threads: list[str] = []
 
     class DummySyncPool:
@@ -173,7 +170,7 @@ async def test_sqlspec_plugin_shutdown_and_oracle_converters() -> None:
 
     dummy = DummySyncPool()
     sync_cfg = SyncDatabaseConfig(
-        bind_key="oracle_db",
+        bind_key="primary_db",
         pool_instance=dummy,
     )
     plugin = SQLSpecPlugin(config=sync_cfg)
@@ -182,15 +179,6 @@ async def test_sqlspec_plugin_shutdown_and_oracle_converters() -> None:
 
     await plugin.shutdown()
     assert len(closed_threads) == 1
-
-    vec = [0.1, 0.2, 0.3]
-    encoded = OracleVectorConverter.to_oracle_vector(vec)
-    assert len(encoded) == 3
-
-    ora_cfg = OracleConfig(user="app", host="localhost", service_name="FREEPDB1")
-    assert ora_cfg.user == "app"
-    registry = OraclePoolRegistry(ora_cfg)
-    assert registry is not None
 
 
 def test_sqlspec_storage_bridge_delegates_to_registry() -> None:

@@ -4,7 +4,6 @@ This module provides the core execution harness for autonomous agents and agent 
 managing model generation, parallel tool execution, retry backoff, and human-in-the-loop gates.
 """
 
-import importlib
 import random
 import secrets
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -21,6 +20,7 @@ from vertebra.agent.core.sse import SseFrame
 from vertebra.agent.spec import TRANSFER_TOOL_NAME, Agent, AgentGroup, AgentMessage
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.telemetry.genai import GenAiUsage
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json, encode_json_bytes
 
 
@@ -68,13 +68,12 @@ class GoogleGenAIProvider:
     def _get_client(self) -> Any:
         if self._client is not None:
             return self._client
-        try:
-            genai_module = importlib.import_module("google.genai")
-            self._client = genai_module.Client(api_key=self.api_key)
-            return self._client
-        except ImportError as exc:
+        genai_module = import_optional("google.genai")
+        if genai_module is None:
             msg = "The 'google-genai' package is required to use GoogleGenAIProvider"
-            raise RuntimeError(msg) from exc
+            raise RuntimeError(msg)
+        self._client = genai_module.Client(api_key=self.api_key)
+        return self._client
 
     async def stream_chat(
         self,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import threading
 import time
 from collections import deque
@@ -19,6 +18,7 @@ from vertebra.extensions.broker import (
     ShmBrokerTransport,
     StatementPlan,
 )
+from vertebra.utils.module_loader import import_optional
 
 __all__ = (
     "BrokerConfig",
@@ -168,12 +168,13 @@ class ShmSessionBroker:
 
     def attach_to_engine(self, engine: Any) -> None:
         """Attach checkout and checkin listeners to a SQLAlchemy engine."""
-        try:
-            sa_event: Any = importlib.import_module("sqlalchemy.event")
-            sa_event.listen(engine.pool, "checkout", self.on_checkout)
-            sa_event.listen(engine.pool, "checkin", self.on_checkin)
-        except (ImportError, AttributeError):
-            pass
+        sa_event = import_optional("sqlalchemy.event")
+        if sa_event is not None:
+            try:
+                sa_event.listen(engine.pool, "checkout", self.on_checkout)
+                sa_event.listen(engine.pool, "checkin", self.on_checkin)
+            except AttributeError:
+                pass
 
 
 class StatementCache:

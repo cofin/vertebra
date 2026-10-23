@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from vertebra._typing import (
+from vertebra.typing import (
     BaseStruct,
     CamelizedBaseStruct,
     FrozenBaseStruct,

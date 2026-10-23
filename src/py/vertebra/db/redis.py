@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 import msgspec
 
-from vertebra._typing import VertebraError
+from vertebra.typing import VertebraError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence

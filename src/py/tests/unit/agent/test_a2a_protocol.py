@@ -5,7 +5,6 @@ from typing import Any
 
 import pytest
 
-from vertebra._typing import FrozenCamelizedStruct
 from vertebra.agent.a2a import (
     A2AConfig,
     A2AHttpHandler,
@@ -28,6 +27,7 @@ from vertebra.agent.core.context import AgentContext, CallerIdentity
 from vertebra.agent.core.schema import tool
 from vertebra.agent.mcp import MCPConfig, MCPService
 from vertebra.telemetry.otel import TraceContext
+from vertebra.typing import FrozenCamelizedStruct
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 

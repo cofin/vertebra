@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import collections
-import importlib
 import urllib.parse
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vertebra._typing import MissingDependencyError
 from vertebra.db.dialer.cloudsql import CloudSqlConfig, CloudSqlDialer
+from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     import ssl
@@ -118,11 +117,7 @@ class SyncMysqlDriver:
                     return self._connect_factory()
             return self._connect_factory()
 
-        try:
-            pymysql: Any = importlib.import_module("pymysql")
-        except ImportError as exc:
-            msg = "pymysql"
-            raise MissingDependencyError(msg, install_package="pymysql", extra="mysql") from exc
+        pymysql: Any = ensure_module("pymysql", install_package="pymysql", extra="mysql")
 
         connect_kwargs: dict[str, Any] = {
             "host": params["host"],
@@ -266,11 +261,7 @@ class AsyncMysqlDriver:
         """Ensure connection pool is initialized or raise MissingDependencyError."""
         if self._pool is not None:
             return self._pool
-        try:
-            asyncmy: Any = importlib.import_module("asyncmy")
-        except ImportError as exc:
-            msg = "asyncmy"
-            raise MissingDependencyError(msg, install_package="asyncmy", extra="mysql") from exc
+        asyncmy: Any = ensure_module("asyncmy", install_package="asyncmy", extra="mysql")
         params = self._config.parse_dsn_params()
         pool_kwargs: dict[str, Any] = {
             "host": params["host"],

@@ -1,15 +1,9 @@
-"""Unit tests for native database drivers, Cloud SQL / AlloyDB dialers, Valkey/Redis, and Oracle 26ai."""
+"""Unit tests for native database drivers, Cloud SQL / AlloyDB dialers, and Valkey/Redis."""
 
 from __future__ import annotations
 
-import os
-import stat
-import zipfile
-from typing import TYPE_CHECKING
-
 import pytest
 
-from vertebra._typing import MissingDependencyError
 from vertebra.db import (
     AlloyDbAuthType,
     AlloyDbClusterUri,
@@ -21,18 +15,10 @@ from vertebra.db import (
     CloudSqlDialer,
     CloudSqlInstanceUri,
     DatabaseRegistry,
-    OracleConfig,
-    OracleConnectDescriptor,
-    OracleContainer,
-    OracleDataFrame,
-    OraclePoolRegistry,
-    OracleWallet,
-    OrdsContainer,
     PostgresConfig,
     RedisConfig,
     SqliteConfig,
     SyncMysqlDriver,
-    SyncOracleDriver,
     SyncPostgresDriver,
     SyncRedisDriver,
     SyncSqliteDriver,
@@ -40,9 +26,7 @@ from vertebra.db import (
     ValkeyConfig,
 )
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from vertebra.typing import MissingDependencyError
 
 
 def test_cloudsql_and_alloydb_dialers() -> None:
@@ -167,70 +151,11 @@ async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
     await channels.on_shutdown()
 
 
-def test_oracle_wallet_extraction_descriptor_and_multi_pool_isolation(tmp_path: Path) -> None:
-    """Verify zero-Instant-Client wallet extraction, Exadata/RAC descriptor, and pool isolation."""
-    wallet_zip = tmp_path / "Wallet_ATP.zip"
-    tns_content = (
-        "myatp_high = (DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=adb.us-ashburn-1.oraclecloud.com)(PORT=1522))"
-        "(CONNECT_DATA=(SERVICE_NAME=myatp_high.adb.oraclecloud.com)))\n"
-    )
-    with zipfile.ZipFile(wallet_zip, "w") as zf:
-        zf.writestr("tnsnames.ora", tns_content)
-        zf.writestr("ewallet.pem", "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
-
-    prev_tns = os.environ.get("TNS_ADMIN")
-    extracted = OracleWallet.extract(wallet_zip, target_dir=tmp_path / "extracted")
-    assert os.environ.get("TNS_ADMIN") == prev_tns
-    mode = stat.S_IMODE(extracted.wallet_location.stat().st_mode)
-    assert mode == 0o700
-    assert "MYATP_HIGH" in extracted.aliases
-
-    desc = OracleConnectDescriptor(
-        hosts=(("scan1.exadata.internal", 1521), ("scan2.exadata.internal", 1521)),
-        service_name="oltp_tac.exadata.internal",
-        server_mode="POOLED",
-    )
-    rendered = desc.to_tns_descriptor()
-    assert "(LOAD_BALANCE=ON)" in rendered
-    assert "(SERVER=POOLED)" in rendered
-    assert "(FAILOVER=ON)" in rendered
-
-    base_cfg = OracleConfig(
-        dsn="127.0.0.1:1521/FREEPDB1",
-        wallet_zip=wallet_zip,
-        driver_features={"enable_numpy": True},
-    )
-    registry = OraclePoolRegistry(base_cfg)
-    oltp_pool = registry.register_pool("oltp", max_size=32, driver_features={"oson_max_field_name_size": 255})
-    vector_pool = registry.register_pool("vector", max_size=8, driver_features={"vector_hnsw_ef_search": 64})
-    assert oltp_pool.config.driver_features != vector_pool.config.driver_features
-    assert base_cfg.driver_features == {"enable_numpy": True}
-
-    vec = SyncOracleDriver.encode_vector([0.1, 0.2, 0.3])
-    assert vec.typecode == "f"
-    assert len(vec) == 3
-
-    df = OracleDataFrame(("id", "title"), [(1, "Espresso"), (2, "Cold Brew")])
-    assert len(df) == 2
-    assert df.to_dicts()[0]["title"] == "Espresso"
-
-    adb_container = OracleContainer(admin_password="TestPassword123!")
-    assert "adb-free:latest-23ai" in adb_container.image
-    assert adb_container.env_vars()["ADMIN_PASSWORD"] == "TestPassword123!"
-    with pytest.raises(ValueError, match="admin_password must be"):
-        OracleContainer().env_vars()
-    with pytest.raises(ValueError, match="Invalid TNS service_name"):
-        OracleConnectDescriptor(service_name="bad)(service").to_tns_descriptor()
-    ords_container = OrdsContainer()
-    assert ords_container.enable_apex_lang is True
-
-
 def test_database_registry_url_schemes() -> None:
-    """Verify URL scheme parsing across PostgreSQL, MySQL, SQLite, Redis, Valkey, Oracle, Cloud SQL, and AlloyDB."""
+    """Verify URL scheme parsing across PostgreSQL, MySQL, SQLite, Redis, Valkey, Cloud SQL, and AlloyDB."""
     registry = DatabaseRegistry()
     assert isinstance(registry.register("pg", "postgresql+vtb://u:p@localhost:5432/db"), PostgresConfig)
     assert isinstance(registry.register("valkey", "valkeys://localhost:6379/0"), ValkeyConfig)
-    assert isinstance(registry.register("oracle", "oracle+vertebra://admin:pw@localhost:1521/FREEPDB1"), OracleConfig)
     assert isinstance(DatabaseRegistry.parse_url("cloudsql://proj:us-central1:inst"), CloudSqlConfig)
     assert isinstance(
         DatabaseRegistry.parse_url("alloydb://projects/p/locations/r/clusters/c/instances/i"),

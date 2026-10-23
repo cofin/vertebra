@@ -1,32 +1,122 @@
-"""Public typing facade for Vertebra applications.
+"""Public typing facade for Vertebra applications and internal subpackages.
 
-Provides user-facing type aliases and conditional exports for optional
-dependencies. Application developers import from here instead of reaching
-into private modules.
+Provides user-facing type aliases, base structs, exceptions, sentinels, and
+conditional exports for optional dependencies. Always import from ``vertebra.typing``
+instead of ``vertebra._typing``.
 """
 
-from typing import Any
+from __future__ import annotations
 
-from vertebra._typing import HandlerID, LifecycleHook, RawHeaders
-from vertebra.utils.module_loader import MissingDependencyError, import_optional
+from typing import TYPE_CHECKING, Any
+
+from vertebra import _typing
+from vertebra._typing import (
+    ATTRS_INSTALLED,
+    NANOID_INSTALLED,
+    NUMPY_INSTALLED,
+    PYDANTIC_INSTALLED,
+    UNSET,
+    UUID_UTILS_INSTALLED,
+    UVLOOP_INSTALLED,
+    BaseModelStub,
+    BaseStruct,
+    CamelizedBaseStruct,
+    DataclassProtocol,
+    Empty,
+    EmptyType,
+    FrozenBaseStruct,
+    FrozenCamelizedStruct,
+    HandlerID,
+    ImproperConfigurationError,
+    LifecycleHook,
+    MissingDependencyError,
+    OptionalDependency,
+    RawHeaders,
+    Struct,
+    UnsupportedBackendError,
+    VertebraError,
+    _module_cache,
+    attrs_asdict_stub,
+    dependency_flag,
+    module_available,
+    reset_dependency_cache,
+)
+
+if TYPE_CHECKING:
+    from vertebra._typing import (
+        AttrsInstance,
+        BaseModel,
+        NumpyArray,
+        attrs_asdict,
+        attrs_has,
+    )
+
+    NDArray: Any = Any
+    ndarray: Any = Any
+    Table: Any = Any
+    RecordBatch: Any = Any
 
 __all__ = (
+    "ATTRS_INSTALLED",
+    "NANOID_INSTALLED",
+    "NUMPY_INSTALLED",
+    "PYDANTIC_INSTALLED",
+    "UNSET",
+    "UUID_UTILS_INSTALLED",
+    "UVLOOP_INSTALLED",
+    "AttrsInstance",
+    "BaseModel",
+    "BaseModelStub",
+    "BaseStruct",
+    "CamelizedBaseStruct",
+    "DataclassProtocol",
+    "Empty",
+    "EmptyType",
+    "FrozenBaseStruct",
+    "FrozenCamelizedStruct",
     "HandlerID",
+    "ImproperConfigurationError",
     "LifecycleHook",
+    "MissingDependencyError",
+    "NDArray",
+    "NumpyArray",
+    "OptionalDependency",
     "RawHeaders",
+    "RecordBatch",
+    "Struct",
+    "Table",
+    "UnsupportedBackendError",
+    "VertebraError",
+    "_module_cache",
+    "attrs_asdict",
+    "attrs_asdict_stub",
+    "attrs_has",
+    "dependency_flag",
+    "module_available",
+    "ndarray",
+    "reset_dependency_cache",
 )
+
+
+_LAZY_OPTIONAL_TYPES = frozenset({"BaseModel", "ndarray", "NDArray", "Table", "RecordBatch"})
+_DELEGATED_TYPING_ATTRS = frozenset({"AttrsInstance", "attrs_asdict", "attrs_has", "NumpyArray"})
 
 
 def __getattr__(name: str) -> Any:
     """Lazy-load optional dependency types on first access."""
-    val: Any = None
-    if name == "Struct":
-        msgspec_mod = import_optional("msgspec")
-        if msgspec_mod is None:
-            raise MissingDependencyError("msgspec", install_package="msgspec")
-        val = msgspec_mod.Struct
+    if name in _DELEGATED_TYPING_ATTRS:
+        val = getattr(_typing, name)
+        globals()[name] = val
+        return val
 
-    elif name == "BaseModel":
+    if name not in _LAZY_OPTIONAL_TYPES:
+        msg = f"module {__name__!r} has no attribute {name!r}"
+        raise AttributeError(msg)
+
+    from vertebra.utils.module_loader import import_optional
+
+    val = None
+    if name == "BaseModel":
         pydantic_mod = import_optional("pydantic")
         if pydantic_mod is None:
             raise MissingDependencyError("pydantic", install_package="pydantic")
@@ -44,16 +134,10 @@ def __getattr__(name: str) -> Any:
             raise MissingDependencyError("pyarrow", install_package="pyarrow")
         val = getattr(pa_mod, name)
 
-    if val is not None:
-        globals()[name] = val
-        return val
-
-    msg = f"module {__name__!r} has no attribute {name!r}"
-    raise AttributeError(msg)
+    globals()[name] = val
+    return val
 
 
 def __dir__() -> list[str]:
     """Return public export symbols and module globals for dir()."""
-    return sorted(
-        set(__all__) | {"Struct", "BaseModel", "NDArray", "ndarray", "Table", "RecordBatch"} | set(globals().keys())
-    )
+    return sorted(set(__all__) | set(globals().keys()))

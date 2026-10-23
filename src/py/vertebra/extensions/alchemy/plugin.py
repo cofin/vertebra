@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import builtins
 import contextlib
-import importlib
 import inspect
 import logging
-import sys
 from collections.abc import Sequence
 from typing import Annotated, Any, ClassVar, cast
 
@@ -16,6 +14,7 @@ import msgspec
 from vertebra.extensions.alchemy.broker import BrokerPlugin, BrokerTransport
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend
 from vertebra.storage import ObjectStore
+from vertebra.utils.module_loader import import_optional
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +83,7 @@ class DatabaseService[ModelT]:
         """Return count of matching records using SELECT count(*) when backed by SQLAlchemy."""
         if hasattr(self._session, "execute"):
             try:
-                sqlalchemy_mod: Any = sys.modules.get("sqlalchemy")
-                if sqlalchemy_mod is None:
-                    try:
-                        sqlalchemy_mod = importlib.import_module("sqlalchemy")
-                    except ImportError:
-                        sqlalchemy_mod = None
+                sqlalchemy_mod = import_optional("sqlalchemy")
 
                 if sqlalchemy_mod is not None and (
                     hasattr(self.model_type, "__tablename__") or hasattr(self.model_type, "__table__")
@@ -113,12 +107,7 @@ class DatabaseService[ModelT]:
         """List matching records."""
         if hasattr(self._session, "execute"):
             try:
-                sqlalchemy_mod: Any = sys.modules.get("sqlalchemy")
-                if sqlalchemy_mod is None:
-                    try:
-                        sqlalchemy_mod = importlib.import_module("sqlalchemy")
-                    except ImportError:
-                        sqlalchemy_mod = None
+                sqlalchemy_mod = import_optional("sqlalchemy")
 
                 if sqlalchemy_mod is not None and (
                     hasattr(self.model_type, "__tablename__") or hasattr(self.model_type, "__table__")
@@ -156,12 +145,7 @@ class DatabaseService[ModelT]:
         """List matching records with total count using window function count().over()."""
         if hasattr(self._session, "execute"):
             try:
-                sqlalchemy_mod: Any = sys.modules.get("sqlalchemy")
-                if sqlalchemy_mod is None:
-                    try:
-                        sqlalchemy_mod = importlib.import_module("sqlalchemy")
-                    except ImportError:
-                        sqlalchemy_mod = None
+                sqlalchemy_mod = import_optional("sqlalchemy")
 
                 if sqlalchemy_mod is not None and (
                     hasattr(self.model_type, "__tablename__") or hasattr(self.model_type, "__table__")
@@ -393,13 +377,11 @@ class AlchemyPlugin[ConfigT]:
     @staticmethod
     def synthesize_skip_validation_annotation(target_type: Any) -> Any:
         """Wrap target_type in Litestar's SkipValidation when Litestar is installed."""
-        try:
-            typing_mod = importlib.import_module("litestar.typing")
+        typing_mod = import_optional("litestar.typing")
+        if typing_mod is not None:
             skip_val = getattr(typing_mod, "SkipValidation", None)
             if skip_val is not None:
                 return Annotated[target_type, skip_val]
-        except ImportError:
-            pass
         return target_type
 
     def install_state(self, state_mapping: dict[str, Any]) -> SQLAlchemyState:
@@ -471,11 +453,8 @@ class AlchemyPlugin[ConfigT]:
         provide_session_fn = getattr(cfg, "provide_session", None)
         provide_engine_fn = getattr(cfg, "provide_engine", None)
 
-        provide_cls: type[Any] | None = None
-        try:
-            provide_cls = importlib.import_module("litestar.di").Provide
-        except ImportError:
-            provide_cls = None
+        di_mod = import_optional("litestar.di")
+        provide_cls: type[Any] | None = getattr(di_mod, "Provide", None) if di_mod is not None else None
 
         if callable(provide_session_fn) and session_key not in dependencies:
             wrapped_session = cls._wrap_skip_validation_provider(provide_session_fn)

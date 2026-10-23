@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 import msgspec
 
-from vertebra._typing import FrozenBaseStruct
+from vertebra.typing import FrozenBaseStruct
 
 MCP_PROTOCOL_VERSION: str = "2026-07-28"
 HEADER_MISMATCH: int = -32020

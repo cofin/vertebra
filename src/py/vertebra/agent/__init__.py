@@ -5,8 +5,9 @@ SpecTree task decomposition, DynamicWorkflow DAG orchestration, pluggable sessio
 streaming chat controllers, and GenAI telemetry.
 """
 
-import importlib
 from typing import Any
+
+from vertebra.utils.module_loader import ensure_module
 
 __all__ = (
     "A2AConfig",
@@ -252,76 +253,76 @@ _PLUGIN_EXPORTS = frozenset(
 def __getattr__(name: str) -> Any:
     """Lazy-load agent package exports on first attribute access."""
     if name == "a2a":
-        mod = importlib.import_module("vertebra.agent.a2a")
+        mod = ensure_module("vertebra.agent.a2a")
         globals()["a2a"] = mod
         return mod
 
     if name == "bridges":
-        mod = importlib.import_module("vertebra.agent.bridges")
+        mod = ensure_module("vertebra.agent.bridges")
         globals()["bridges"] = mod
         return mod
 
     if name == "mcp":
-        mod = importlib.import_module("vertebra.agent.mcp")
+        mod = ensure_module("vertebra.agent.mcp")
         globals()["mcp"] = mod
         return mod
 
     if name in _CORE_EXPORTS:
-        mod = importlib.import_module("vertebra.agent.core")
+        mod = ensure_module("vertebra.agent.core")
         val = getattr(mod, name)
         globals()[name] = val
         return val
 
     if name in _TELEMETRY_EXPORTS:
-        mod = importlib.import_module("vertebra.agent.telemetry")
+        mod = ensure_module("vertebra.agent.telemetry")
         val = getattr(mod, name)
         globals()[name] = val
         return val
 
     if name in _A2A_EXPORTS:
-        mod = importlib.import_module("vertebra.agent.a2a")
+        mod = ensure_module("vertebra.agent.a2a")
         val = getattr(mod, name)
         globals()[name] = val
         return val
 
     if name in _BRIDGE_EXPORTS:
-        mod = importlib.import_module("vertebra.agent.bridges")
+        mod = ensure_module("vertebra.agent.bridges")
         val = getattr(mod, name)
         globals()[name] = val
         return val
 
     if name in _SPEC_EXPORTS:
-        mod = importlib.import_module("vertebra.agent.spec")
+        mod = ensure_module("vertebra.agent.spec")
         val = getattr(mod, name)
         globals()[name] = val
         return val
 
     if name in _RUNTIME_EXPORTS:
-        mod = importlib.import_module("vertebra.agent.runtime")
+        mod = ensure_module("vertebra.agent.runtime")
         val = getattr(mod, name)
         globals()[name] = val
         return val
 
     if name in _WORKFLOW_EXPORTS:
-        mod = importlib.import_module("vertebra.agent.workflow")
+        mod = ensure_module("vertebra.agent.workflow")
         val = getattr(mod, name)
         globals()[name] = val
         return val
 
     if name in _SESSION_EXPORTS:
-        mod = importlib.import_module("vertebra.agent.sessions")
+        mod = ensure_module("vertebra.agent.sessions")
         val = getattr(mod, name)
         globals()[name] = val
         return val
 
     if name in _CONTROLLER_EXPORTS:
-        mod = importlib.import_module("vertebra.agent.controller")
+        mod = ensure_module("vertebra.agent.controller")
         val = getattr(mod, name)
         globals()[name] = val
         return val
 
     if name in _PLUGIN_EXPORTS:
-        mod = importlib.import_module("vertebra.agent.plugin")
+        mod = ensure_module("vertebra.agent.plugin")
         val = getattr(mod, name)
         globals()[name] = val
         return val

@@ -10,7 +10,6 @@ from typing import Any
 
 import msgspec
 
-from vertebra._typing import LifecycleHook
 from vertebra.framework._router import (
     RouteDef,
     Router,
@@ -20,6 +19,7 @@ from vertebra.framework._router import (
     _normalize_prefix,
 )
 from vertebra.framework.openapi import OpenAPIConfig, OpenAPISpecBuilder
+from vertebra.typing import LifecycleHook
 
 __all__ = ("App", "HandlerInfo", "LifecycleHook", "_make_handler_id")
 
