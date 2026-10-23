@@ -18,22 +18,19 @@ from vertebra.extensions.sqlalchemy import (
     DialectDescriptor,
     DropVectorIndexOp,
     InsertSentinelSpec,
-    MysqlVtbDialect,
+    MysqlDialect,
     OracleDialect,
-    OracleVtbDialect,
     ParameterizedSql,
     PostgresDialect,
-    PostgresVtbDialect,
     SelectInLoadSpec,
     SqliteDialect,
-    SqliteVtbDialect,
     SyncEngineAdapter,
     Vector,
 )
 from vertebra.extensions.sqlspec import (
     SQLSpecPlugin,
     SQLSpecStore,
-    SyncDatabaseConfig,
+    SQLSpecSyncConfig,
 )
 from vertebra.storage import ObjectStore
 
@@ -72,15 +69,15 @@ async def test_sqlspec_arrow_capsule_export_and_multipool_shutdown() -> None:
             _ = (statement, args, kwargs)
             return None
 
-    cfg1 = SyncDatabaseConfig[object, DummyPool, DummyDriver](
+    cfg1 = SQLSpecSyncConfig[object, DummyPool, DummyDriver](
         bind_key="primary",
         pool_instance=DummyPool("primary"),
     )
-    cfg2 = SyncDatabaseConfig[object, DummyPool, DummyDriver](
+    cfg2 = SQLSpecSyncConfig[object, DummyPool, DummyDriver](
         bind_key="events",
         pool_instance=DummyPool("events"),
     )
-    plugin: SQLSpecPlugin[SyncDatabaseConfig[object, DummyPool, DummyDriver]] = SQLSpecPlugin(
+    plugin: SQLSpecPlugin[SQLSpecSyncConfig[object, DummyPool, DummyDriver]] = SQLSpecPlugin(
         config=[cfg1, cfg2],
         store=store,
     )
@@ -170,7 +167,7 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
     assert AlembicImpl.resolve_migration_url(pg_cfg) == "postgresql://u:p@pg-primary:5432/app"
 
     sentinel_spec = InsertSentinelSpec.create(table_name="orders", sentinel_column="_insert_sentinel")
-    rendered_insert = OracleVtbDialect.compile_insert_returning_sentinel(
+    rendered_insert = OracleDialect.compile_insert_returning_sentinel(
         "orders",
         ("id", "total"),
         sentinel_spec,
@@ -205,13 +202,13 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
 
 
 def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
-    """Verify PostgresVtbDialect, DBAPIModule paramstyles, compiler hooks, and cursor descriptions."""
-    pg_dbapi = PostgresVtbDialect.dbapi()
+    """Verify PostgresDialect, DBAPIModule paramstyles, compiler hooks, and cursor descriptions."""
+    pg_dbapi = PostgresDialect.dbapi()
     assert pg_dbapi.paramstyle == "pyformat"
-    assert PostgresVtbDialect.import_dbapi().paramstyle == "pyformat"
-    assert SqliteVtbDialect.dbapi().paramstyle == "qmark"
-    assert MysqlVtbDialect.dbapi().paramstyle == "format"
-    assert OracleVtbDialect.dbapi().paramstyle == "named"
+    assert PostgresDialect.import_dbapi().paramstyle == "pyformat"
+    assert SqliteDialect.dbapi().paramstyle == "qmark"
+    assert MysqlDialect.dbapi().paramstyle == "format"
+    assert OracleDialect.dbapi().paramstyle == "named"
 
     driver = SyncPostgresDriver(PostgresConfig(dsn="memory://"))
     driver._in_memory_rows = [(1, "item1"), (2, "item2")]
@@ -228,7 +225,7 @@ def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
     assert conn.closed is True
 
     sentinel_spec = InsertSentinelSpec.create(table_name="orders", sentinel_column="_vtb_sentinel")
-    rendered_insert = PostgresVtbDialect.compile_insert_returning_sentinel(
+    rendered_insert = PostgresDialect.compile_insert_returning_sentinel(
         "orders",
         ["id", "name"],
         sentinel_spec,
@@ -241,14 +238,14 @@ def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
         "archived_customers",
         where_sql="orders.customer_id = archived_customers.id",
     )
-    assert PostgresVtbDialect.compile_delete_using(del_clause) == (
+    assert PostgresDialect.compile_delete_using(del_clause) == (
         "DELETE FROM orders USING archived_customers WHERE orders.customer_id = archived_customers.id"
     )
 
     vec = Vector(768)
     bjson = BinaryJson()
-    assert PostgresVtbDialect.type_descriptor(vec) is vec
-    assert PostgresVtbDialect.type_descriptor(bjson) is bjson
+    assert PostgresDialect.type_descriptor(vec) is vec
+    assert PostgresDialect.type_descriptor(bjson) is bjson
 
 
 @pytest.mark.anyio

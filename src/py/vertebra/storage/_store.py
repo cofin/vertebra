@@ -400,7 +400,7 @@ class ObjectStore:
             "b2",
         }:
             try:
-                self._native = native_mod.NativeObjectStore(url, self._options or None)
+                self._native = native_mod.ObjectStore(url, self._options or None)
             except (RuntimeError, OSError, ValueError):
                 self._native = None
 

@@ -17,8 +17,8 @@ from vertebra.extensions.sqlspec import (
     SQLSpecState,
     SqlSpecStorageBridge,
     SQLSpecStore,
+    SQLSpecSyncConfig,
     StreamingStorageResponse,
-    SyncDatabaseConfig,
 )
 from vertebra.storage import ObjectStore, SigningConfig, StorageRegistry
 
@@ -169,7 +169,7 @@ async def test_sqlspec_plugin_shutdown() -> None:
             closed_threads.append(threading.current_thread().name)
 
     dummy = DummySyncPool()
-    sync_cfg = SyncDatabaseConfig(
+    sync_cfg = SQLSpecSyncConfig(
         bind_key="primary_db",
         pool_instance=dummy,
     )

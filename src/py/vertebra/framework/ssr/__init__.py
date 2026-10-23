@@ -25,7 +25,7 @@ from vertebra.utils.serializers import decode_json, encode_json
 from vertebra.utils.sync_tools import SyncPool
 
 __all__ = (
-    "NativeSsrClient",
+    "EmbeddedSsrClient",
     "SidecarSsrClient",
     "SsrClient",
     "SsrConfig",
@@ -106,7 +106,7 @@ class SsrClient(Protocol):
         )
 
 
-class NativeSsrClient:
+class EmbeddedSsrClient:
     """Embedded QuickJS isolate pool in the vertebra-bundler Rust extension."""
 
     __slots__ = ("_pool",)
@@ -118,7 +118,7 @@ class NativeSsrClient:
 
     def __init__(self, bundle_path: str, pool_size: int = 4) -> None:
         if _bundler is None:
-            msg = "vertebra._bundler native extension is required for NativeSsrClient"
+            msg = "vertebra._bundler native extension is required for EmbeddedSsrClient"
             raise ImportError(msg)
         self._pool = _bundler.SsrPool(bundle_path, pool_size)
 
@@ -283,7 +283,7 @@ def create_ssr_client(
 
     if mode == "native":
         try:
-            return NativeSsrClient(entry, pool_size)
+            return EmbeddedSsrClient(entry, pool_size)
         except ImportError:
             logger.warning("Native SSR (vertebra._bundler) unavailable. Falling back to sidecar mode.")
             return SidecarSsrClient(entry, sidecar_port)

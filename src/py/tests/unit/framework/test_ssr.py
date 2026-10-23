@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from vertebra.framework.ssr import (
-    NativeSsrClient,
+    EmbeddedSsrClient,
     SidecarSsrClient,
     SsrResult,
     create_ssr_client,
@@ -35,7 +35,7 @@ def test_create_ssr_client_empty_entry_returns_none() -> None:
 
 def test_create_ssr_client_native_mode_fallback_on_import_error() -> None:
     with (
-        patch("vertebra.framework.ssr.NativeSsrClient", side_effect=ImportError),
+        patch("vertebra.framework.ssr.EmbeddedSsrClient", side_effect=ImportError),
         patch("vertebra.framework.ssr.SidecarSsrClient") as mock_sidecar,
     ):
         mock_sidecar.return_value = MagicMock()
@@ -54,7 +54,7 @@ def test_create_ssr_client_sidecar_mode_creates_sidecar() -> None:
 
 def test_create_ssr_client_native_mode_with_init_error_falls_back() -> None:
     with (
-        patch("vertebra.framework.ssr.NativeSsrClient", side_effect=RuntimeError("boom")),
+        patch("vertebra.framework.ssr.EmbeddedSsrClient", side_effect=RuntimeError("boom")),
         patch("vertebra.framework.ssr.SidecarSsrClient") as mock_sidecar,
     ):
         mock_sidecar.return_value = MagicMock()
@@ -110,7 +110,7 @@ def test_sidecar_ssr_client_start_no_runtime_raises() -> None:
 
 
 def test_native_ssr_client_with_real_pool(tmp_path: Path) -> None:
-    """NativeSsrClient should use real SsrPool to render component and return SsrResult."""
+    """EmbeddedSsrClient should use real SsrPool to render component and return SsrResult."""
     bundle_file = tmp_path / "ssr.js"
     bundle_file.write_text(
         """
@@ -123,7 +123,7 @@ def test_native_ssr_client_with_real_pool(tmp_path: Path) -> None:
         """,
         encoding="utf-8",
     )
-    client = NativeSsrClient(str(bundle_file), pool_size=2)
+    client = EmbeddedSsrClient(str(bundle_file), pool_size=2)
     try:
         res = client.render({"component": "Home", "title": "My Title"})
         assert res.head == ["<title>My Title</title>"]

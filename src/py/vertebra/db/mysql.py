@@ -7,9 +7,14 @@ import urllib.parse
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-import msgspec
-
 from vertebra.db.dialer.cloudsql import CloudSqlConfig, CloudSqlDialer
+from vertebra.db.postgres import (
+    ARROW_SHM_THRESHOLD_ROWS,
+    ArrowCursor,
+    _normalize_driver_params,
+    write_arrow_shm,
+)
+from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
@@ -22,7 +27,7 @@ __all__ = (
 )
 
 
-class MysqlConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class MysqlConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Configuration for MySQL 8.0+/9.0+ and MariaDB connections."""
 
     dsn: str = "mysql://localhost:3306/mysql"
@@ -32,6 +37,7 @@ class MysqlConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     enable_iam_auth: bool = False
     charset: str = "utf8mb4"
     autocommit: bool = False
+    broker: Any = None
 
     def __post_init__(self) -> None:
         if self.min_size < 0 or self.max_size < 1 or self.min_size > self.max_size:
@@ -71,15 +77,16 @@ class MysqlConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
 
 class SyncMysqlDriver:
-    """Synchronous MySQL driver facade with bounded connection pooling."""
+    """Synchronous MySQL driver facade with bounded connection pooling and SHM broker integration."""
 
-    __slots__ = ("_closed", "_config", "_connect_factory", "_dialer", "_idle_conns")
+    __slots__ = ("_broker", "_closed", "_config", "_connect_factory", "_dialer", "_idle_conns", "_in_memory_rows")
 
     def __init__(
         self,
         config: MysqlConfig | None = None,
         *,
         dialer: CloudSqlDialer | None = None,
+        broker: Any = None,
         connect_factory: Any = None,
     ) -> None:
         self._config = config or MysqlConfig()
@@ -88,9 +95,11 @@ class SyncMysqlDriver:
             csql_cfg = self._config.to_cloud_dialer_config()
             if csql_cfg is not None:
                 self._dialer = CloudSqlDialer(csql_cfg)
+        self._broker = broker if broker is not None else self._config.broker
         self._connect_factory = connect_factory
         self._idle_conns: collections.deque[Any] = collections.deque(maxlen=self._config.max_size)
         self._closed: bool = False
+        self._in_memory_rows: list[tuple[Any, ...]] = []
 
     @property
     def config(self) -> MysqlConfig:
@@ -101,6 +110,11 @@ class SyncMysqlDriver:
     def dialer(self) -> CloudSqlDialer | None:
         """Return the attached CloudSqlDialer if configured."""
         return self._dialer
+
+    @property
+    def broker(self) -> Any:
+        """Return the attached SHM connection broker transport if configured."""
+        return self._broker
 
     def _create_connection(self) -> Any:
         """Create a new database connection or raise MissingDependencyError."""
@@ -155,40 +169,63 @@ class SyncMysqlDriver:
         parameters: Sequence[Any] | Mapping[str, Any] = (),
     ) -> tuple[list[tuple[Any, ...]], tuple[tuple[str, Any, None, None, None, None, None], ...] | None]:
         """Execute a SQL statement and return plain tuples and column description."""
-        conn = self._acquire()
+        if self._closed:
+            msg = "SyncMysqlDriver is closed"
+            raise RuntimeError(msg)
+
+        lease: Any = None
+        if self._broker is not None:
+            if hasattr(self._broker, "get_or_compile_statement"):
+                self._broker.get_or_compile_statement("mysql", sql, lambda s: (s, ()))
+            if hasattr(self._broker, "acquire"):
+                lease = self._broker.acquire(bind_key="mysql")
+
         try:
-            if hasattr(conn, "execute_with_description"):
-                res: tuple[
-                    list[tuple[Any, ...]],
-                    tuple[tuple[str, Any, None, None, None, None, None], ...] | None,
-                ] = conn.execute_with_description(sql, parameters)
-                return res
-            if hasattr(conn, "cursor"):
-                cur = conn.cursor()
-                try:
-                    cur.execute(sql, parameters if parameters else None)
-                    rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+            if self._config.dsn.startswith("memory://") and self._connect_factory is None:
+                desc = (
+                    tuple((f"col_{i}", None, None, None, None, None, None) for i in range(len(self._in_memory_rows[0])))
+                    if self._in_memory_rows
+                    else None
+                )
+                return list(self._in_memory_rows), desc
+
+            conn = self._acquire()
+            try:
+                if hasattr(conn, "execute_with_description"):
+                    res: tuple[
+                        list[tuple[Any, ...]],
+                        tuple[tuple[str, Any, None, None, None, None, None], ...] | None,
+                    ] = conn.execute_with_description(sql, parameters)
+                    return res
+                if hasattr(conn, "cursor"):
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(sql, parameters if parameters else None)
+                        rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+                        desc = (
+                            tuple((d[0], d[1], None, None, None, None, None) for d in cur.description)
+                            if getattr(cur, "description", None)
+                            else None
+                        )
+                        return [tuple(r) for r in rows], desc
+                    finally:
+                        if hasattr(cur, "close"):
+                            cur.close()
+                if hasattr(conn, "execute"):
+                    exec_res = conn.execute(sql, parameters if parameters else None)
+                    rows = exec_res.fetchall() if hasattr(exec_res, "fetchall") else list(exec_res)
                     desc = (
-                        tuple((d[0], d[1], None, None, None, None, None) for d in cur.description)
-                        if getattr(cur, "description", None)
+                        tuple((d[0], d[1], None, None, None, None, None) for d in exec_res.description)
+                        if getattr(exec_res, "description", None)
                         else None
                     )
                     return [tuple(r) for r in rows], desc
-                finally:
-                    if hasattr(cur, "close"):
-                        cur.close()
-            if hasattr(conn, "execute"):
-                exec_res = conn.execute(sql, parameters if parameters else None)
-                rows = exec_res.fetchall() if hasattr(exec_res, "fetchall") else list(exec_res)
-                desc = (
-                    tuple((d[0], d[1], None, None, None, None, None) for d in exec_res.description)
-                    if getattr(exec_res, "description", None)
-                    else None
-                )
-                return [tuple(r) for r in rows], desc
-            return [], None
+                return [], None
+            finally:
+                self._release(conn)
         finally:
-            self._release(conn)
+            if lease is not None and hasattr(lease, "release"):
+                lease.release()
 
     def execute_tuples(
         self,
@@ -198,6 +235,47 @@ class SyncMysqlDriver:
         """Execute a SQL statement and return plain Python tuples."""
         rows, _ = self.execute_with_description(sql, parameters)
         return rows
+
+    def execute(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+    ) -> list[tuple[Any, ...]]:
+        """Execute a SQL statement with variadic or sequence parameters."""
+        resolved = _normalize_driver_params(params, parameters)
+        return self.execute_tuples(sql, resolved)
+
+    def select(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+    ) -> list[dict[str, Any]]:
+        """Execute a SELECT statement and return rows as dictionaries."""
+        resolved = _normalize_driver_params(params, parameters)
+        rows, desc = self.execute_with_description(sql, resolved)
+        if not rows:
+            return []
+        cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]))]
+        return [{col: (r[i] if i < len(r) else None) for i, col in enumerate(cols)} for r in rows]
+
+    def select_to_arrow(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+    ) -> Any:
+        """Execute a query and return a PyArrow Table backed by ShmRegion Arrow IPC when >= 256 rows."""
+        resolved = _normalize_driver_params(params, parameters)
+        rows, desc = self.execute_with_description(sql, resolved)
+        cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
+        cursor = ArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
+        return cursor.to_arrow_table()
+
+    def write_arrow_shm(self, table: Any) -> memoryview:
+        """Write an Arrow Table into a shared-memory Arrow IPC buffer and return a memoryview."""
+        return write_arrow_shm(table)
 
     def commit(self) -> None:
         """Commit the active transaction across active connections."""
@@ -227,15 +305,16 @@ class SyncMysqlDriver:
 
 
 class AsyncMysqlDriver:
-    """Asynchronous MySQL driver facade backed by asyncmy."""
+    """Asynchronous MySQL driver facade backed by asyncmy and SHM broker leasing."""
 
-    __slots__ = ("_closed", "_config", "_dialer", "_pool")
+    __slots__ = ("_broker", "_closed", "_config", "_dialer", "_in_memory_rows", "_pool")
 
     def __init__(
         self,
         config: MysqlConfig | None = None,
         *,
         dialer: CloudSqlDialer | None = None,
+        broker: Any = None,
         pool: Any = None,
     ) -> None:
         self._config = config or MysqlConfig()
@@ -244,8 +323,10 @@ class AsyncMysqlDriver:
             csql_cfg = self._config.to_cloud_dialer_config()
             if csql_cfg is not None:
                 self._dialer = CloudSqlDialer(csql_cfg)
+        self._broker = broker if broker is not None else self._config.broker
         self._pool = pool
         self._closed: bool = False
+        self._in_memory_rows: list[tuple[Any, ...]] = []
 
     @property
     def config(self) -> MysqlConfig:
@@ -256,6 +337,11 @@ class AsyncMysqlDriver:
     def dialer(self) -> CloudSqlDialer | None:
         """Return the attached CloudSqlDialer if configured."""
         return self._dialer
+
+    @property
+    def broker(self) -> Any:
+        """Return the attached SHM connection broker transport if configured."""
+        return self._broker
 
     async def _ensure_pool(self) -> Any:
         """Ensure connection pool is initialized or raise MissingDependencyError."""
@@ -286,30 +372,37 @@ class AsyncMysqlDriver:
         if self._closed:
             msg = "AsyncMysqlDriver is closed"
             raise RuntimeError(msg)
-        pool = await self._ensure_pool()
-        if hasattr(pool, "execute_with_description"):
-            raw_res = pool.execute_with_description(sql, parameters)
-            if hasattr(raw_res, "__await__"):
-                raw_res = await raw_res
-            res: tuple[
-                list[tuple[Any, ...]],
-                tuple[tuple[str, Any, None, None, None, None, None], ...] | None,
-            ] = raw_res
-            return res
-        if hasattr(pool, "acquire"):
-            async with pool.acquire() as conn, conn.cursor() as cur:
-                await cur.execute(sql, parameters if parameters else None)
-                rows = await cur.fetchall() if hasattr(cur, "fetchall") else []
+
+        lease: Any = None
+        if self._broker is not None:
+            if hasattr(self._broker, "get_or_compile_statement"):
+                self._broker.get_or_compile_statement("mysql", sql, lambda s: (s, ()))
+            if hasattr(self._broker, "acquire_async"):
+                lease = await self._broker.acquire_async(bind_key="mysql")
+            elif hasattr(self._broker, "acquire"):
+                lease = self._broker.acquire(bind_key="mysql")
+
+        try:
+            if self._config.dsn.startswith("memory://") and self._pool is None:
                 desc = (
-                    tuple((d[0], d[1], None, None, None, None, None) for d in cur.description)
-                    if getattr(cur, "description", None)
+                    tuple((f"col_{i}", None, None, None, None, None, None) for i in range(len(self._in_memory_rows[0])))
+                    if self._in_memory_rows
                     else None
                 )
-                return [tuple(r) for r in rows], desc
-        if hasattr(pool, "connection"):
-            conn = pool.connection()
-            if hasattr(conn, "__aenter__"):
-                async with conn as active_conn, active_conn.cursor() as cur:
+                return list(self._in_memory_rows), desc
+
+            pool = await self._ensure_pool()
+            if hasattr(pool, "execute_with_description"):
+                raw_res = pool.execute_with_description(sql, parameters)
+                if hasattr(raw_res, "__await__"):
+                    raw_res = await raw_res
+                res: tuple[
+                    list[tuple[Any, ...]],
+                    tuple[tuple[str, Any, None, None, None, None, None], ...] | None,
+                ] = raw_res
+                return res
+            if hasattr(pool, "acquire"):
+                async with pool.acquire() as conn, conn.cursor() as cur:
                     await cur.execute(sql, parameters if parameters else None)
                     rows = await cur.fetchall() if hasattr(cur, "fetchall") else []
                     desc = (
@@ -318,7 +411,22 @@ class AsyncMysqlDriver:
                         else None
                     )
                     return [tuple(r) for r in rows], desc
-        return [], None
+            if hasattr(pool, "connection"):
+                conn = pool.connection()
+                if hasattr(conn, "__aenter__"):
+                    async with conn as active_conn, active_conn.cursor() as cur:
+                        await cur.execute(sql, parameters if parameters else None)
+                        rows = await cur.fetchall() if hasattr(cur, "fetchall") else []
+                        desc = (
+                            tuple((d[0], d[1], None, None, None, None, None) for d in cur.description)
+                            if getattr(cur, "description", None)
+                            else None
+                        )
+                        return [tuple(r) for r in rows], desc
+            return [], None
+        finally:
+            if lease is not None and hasattr(lease, "release"):
+                lease.release()
 
     async def execute_tuples(
         self,
@@ -328,6 +436,47 @@ class AsyncMysqlDriver:
         """Asynchronously execute a SQL statement and return plain Python tuples."""
         rows, _ = await self.execute_with_description(sql, parameters)
         return rows
+
+    async def execute(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+    ) -> list[tuple[Any, ...]]:
+        """Asynchronously execute a SQL statement."""
+        resolved = _normalize_driver_params(params, parameters)
+        return await self.execute_tuples(sql, resolved)
+
+    async def select(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+    ) -> list[dict[str, Any]]:
+        """Asynchronously execute a SELECT statement and return rows as dictionaries."""
+        resolved = _normalize_driver_params(params, parameters)
+        rows, desc = await self.execute_with_description(sql, resolved)
+        if not rows:
+            return []
+        cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]))]
+        return [{col: (r[i] if i < len(r) else None) for i, col in enumerate(cols)} for r in rows]
+
+    async def select_to_arrow(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+    ) -> Any:
+        """Asynchronously execute a query and return a PyArrow Table over ShmRegion Arrow IPC."""
+        resolved = _normalize_driver_params(params, parameters)
+        rows, desc = await self.execute_with_description(sql, resolved)
+        cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
+        cursor = ArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
+        return cursor.to_arrow_table()
+
+    def write_arrow_shm(self, table: Any) -> memoryview:
+        """Write an Arrow Table into a shared-memory Arrow IPC buffer and return a memoryview."""
+        return write_arrow_shm(table)
 
     async def close(self) -> None:
         """Close the async driver pool."""

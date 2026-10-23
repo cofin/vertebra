@@ -7,14 +7,17 @@ import contextlib
 import inspect
 import logging
 from collections.abc import Sequence
-from typing import Annotated, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, cast
 
 import msgspec
 
-from vertebra.extensions.alchemy.broker import BrokerPlugin, BrokerTransport
+from vertebra.extensions.alchemy.broker import BrokerTransport, ShmSessionBroker
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend
 from vertebra.storage import ObjectStore
 from vertebra.utils.module_loader import import_optional
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -332,7 +335,7 @@ class AlchemyPlugin[ConfigT]:
         store: ObjectStore | None = None,
         storage_key: str = "vertebra",
         storage_prefix: str = "",
-        broker: BrokerPlugin | None = None,
+        broker: Any = None,
         priority: int = PLUGIN_PRIORITY,
     ) -> None:
         self.config = config
@@ -409,7 +412,16 @@ class AlchemyPlugin[ConfigT]:
             if maker is not None:
                 session_makers_map[key] = maker
 
-        broker_transport = self.broker.install_state(state_mapping) if self.broker is not None else None
+        broker_transport = self._resolve_broker_transport(state_mapping)
+        if broker_transport is not None:
+            for key, engine in engines_map.items():
+                session_broker = (
+                    self.broker
+                    if isinstance(self.broker, ShmSessionBroker)
+                    else ShmSessionBroker(broker_transport, bind_key=str(key or "sqlalchemy"))
+                )
+                session_broker.attach_to_engine(engine)
+
         state = SQLAlchemyState(
             engines=engines_map,
             session_makers=session_makers_map,
@@ -422,6 +434,44 @@ class AlchemyPlugin[ConfigT]:
         state_mapping[self.STATE_KEY] = state
         return state
 
+    @contextlib.contextmanager
+    def provide_proxied_session(
+        self,
+        config: Any = None,
+        *,
+        pool_name: str | None = None,
+        worker_pid: int | None = None,
+    ) -> Iterator[Any]:
+        """Acquire a broker lease, yield a synchronous SQLAlchemy session, roll back on error, and release."""
+        target_cfg = config if config is not None else (self.configs[0] if self.configs else None)
+        if target_cfg is None:
+            msg = "No SQLAlchemy configuration registered on AlchemyPlugin"
+            raise RuntimeError(msg)
+        eff_pool = pool_name or str(getattr(target_cfg, "bind_key", None) or "default")
+        session_broker = self._ensure_session_broker(eff_pool)
+        with session_broker.provide_session(target_cfg, pool_name=eff_pool, worker_pid=worker_pid) as session:
+            yield session
+
+    @contextlib.asynccontextmanager
+    async def provide_proxied_async_session(
+        self,
+        config: Any = None,
+        *,
+        pool_name: str | None = None,
+        worker_pid: int | None = None,
+    ) -> AsyncIterator[Any]:
+        """Acquire a broker lease asynchronously, yield an async SQLAlchemy session, roll back on error, and release."""
+        target_cfg = config if config is not None else (self.configs[0] if self.configs else None)
+        if target_cfg is None:
+            msg = "No SQLAlchemy configuration registered on AlchemyPlugin"
+            raise RuntimeError(msg)
+        eff_pool = pool_name or str(getattr(target_cfg, "bind_key", None) or "default")
+        session_broker = self._ensure_session_broker(eff_pool)
+        async with session_broker.provide_async_session(
+            target_cfg, pool_name=eff_pool, worker_pid=worker_pid
+        ) as session:
+            yield session
+
     def on_app_init(self, app_config: Any) -> Any:
         """Litestar InitPluginProtocol hook registering SQLAlchemyState and SkipValidation DI providers."""
         target_state = getattr(app_config, "state", None)
@@ -432,7 +482,7 @@ class AlchemyPlugin[ConfigT]:
             self.install_state(holder)
             target_state.update(holder)
 
-        if self.broker is not None:
+        if self.broker is not None and hasattr(self.broker, "on_app_init") and callable(self.broker.on_app_init):
             self.broker.on_app_init(app_config)
 
         dependencies = getattr(app_config, "dependencies", None)
@@ -445,6 +495,29 @@ class AlchemyPlugin[ConfigT]:
     def on_cli_init(self, cli: Any) -> None:
         """Litestar CLIPluginProtocol hook for CLI extension registration."""
         _ = cli
+
+    def _resolve_broker_transport(self, state_mapping: dict[str, Any]) -> Any:
+        """Resolve and install the underlying broker transport into state_mapping."""
+        if self.broker is None:
+            return None
+        install_fn = getattr(self.broker, "install_state", None)
+        if callable(install_fn):
+            return install_fn(state_mapping)
+        if isinstance(self.broker, ShmSessionBroker):
+            state_mapping["db_broker"] = self.broker.transport
+            return self.broker.transport
+        transport = getattr(self.broker, "transport", self.broker)
+        state_mapping["db_broker"] = transport
+        return transport
+
+    def _ensure_session_broker(self, bind_key: str) -> ShmSessionBroker:
+        """Return or wrap the configured broker as a ShmSessionBroker."""
+        if isinstance(self.broker, ShmSessionBroker):
+            return self.broker
+        if self.broker is not None:
+            transport = getattr(self.broker, "transport", self.broker)
+            return ShmSessionBroker(transport=transport, bind_key=bind_key)
+        return ShmSessionBroker(bind_key=bind_key)
 
     @classmethod
     def _register_config_dependencies(cls, dependencies: dict[str, Any], cfg: Any) -> None:

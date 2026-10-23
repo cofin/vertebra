@@ -464,7 +464,7 @@ def test_real_repo_bundles_and_privacy_pass() -> None:
 
 
 def test_python_imports_catches_private_typing_and_raw_import_module(tmp_path: Path) -> None:
-    """Verify python_imports rule rejects vertebra._typing and raw importlib.import_module calls."""
+    """Verify python_imports rule rejects vertebra._typing, raw importlib.import_module, and PY-07 prefix violations."""
     repo = build_minimal_review_tree(tmp_path)
     pkg_dir = repo / "src/py/vertebra/sample"
     pkg_dir.mkdir(parents=True, exist_ok=True)
@@ -472,6 +472,12 @@ def test_python_imports_catches_private_typing_and_raw_import_module(tmp_path: P
     bad_file.write_text(
         "import importlib\n"
         "from vertebra._typing import MissingDependencyError\n\n"
+        "class VertebraSampleConfig:\n"
+        "    pass\n\n"
+        "class PostgresVtbDialect:\n"
+        "    pass\n\n"
+        "class NativeSampleBroker:\n"
+        "    pass\n\n"
         "def load() -> object:\n"
         "    return importlib.import_module('json')\n",
         encoding="utf-8",
@@ -481,3 +487,6 @@ def test_python_imports_catches_private_typing_and_raw_import_module(tmp_path: P
     issues = validator.validate(frozenset({"python_imports"}))
     assert any("vertebra._typing" in i.message for i in issues)
     assert any("importlib.import_module" in i.message for i in issues)
+    assert any("VertebraSampleConfig" in i.message for i in issues)
+    assert any("PostgresVtbDialect" in i.message for i in issues)
+    assert any("NativeSampleBroker" in i.message for i in issues)

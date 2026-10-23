@@ -30,6 +30,7 @@ pub struct ShmDispatcher {
     shard_mask: usize,
     scratch: Mutex<ShmBatchScratch>,
     pending_streams: Arc<PendingRequests>,
+    lease_table: Mutex<Option<Arc<vertebra_core::broker::ShmLeaseTable>>>,
 }
 
 impl ShmDispatcher {
@@ -60,7 +61,31 @@ impl ShmDispatcher {
             shard_mask,
             scratch: Mutex::new(ShmBatchScratch::new(worker_count)),
             pending_streams: Arc::new(PendingRequests::new()),
+            lease_table: Mutex::new(None),
         })
+    }
+
+    /// Attach a shared-memory lease table for dead-worker lease reclamation.
+    pub fn set_lease_table(&self, lease_table: Arc<vertebra_core::broker::ShmLeaseTable>) {
+        *self.lease_table.lock().unwrap() = Some(lease_table);
+    }
+
+    /// Builder-style attachment of a shared-memory lease table.
+    pub fn with_lease_table(
+        self: Arc<Self>,
+        lease_table: Arc<vertebra_core::broker::ShmLeaseTable>,
+    ) -> Arc<Self> {
+        self.set_lease_table(lease_table);
+        self
+    }
+
+    /// Reclaim active connection leases held by an exited worker PID.
+    pub fn reclaim_worker_leases(&self, worker_pid: u32) -> u32 {
+        if let Some(ref table) = *self.lease_table.lock().unwrap() {
+            table.reclaim_worker(worker_pid)
+        } else {
+            0
+        }
     }
 
     /// Spawn periodic correlation sweeper task holding a Weak reference.

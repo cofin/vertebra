@@ -10,19 +10,19 @@ GIL_USED: bool
 __all__ = [
     "FREE_THREADED",
     "GIL_USED",
+    "AlloyDbDialer",
+    "ArrowCursor",
     "AsgiScope",
     "AsgiScopeIterator",
+    "BrokerStats",
+    "CloudSqlDialer",
     "Headers",
     "HeadersIterator",
-    "NativeBrokerStats",
-    "NativeJwtGuard",
-    "NativeLeaseBroker",
-    "NativeLeaseGrant",
-    "NativeLogSink",
-    "NativeRateLimiter",
-    "NativeStatementCache",
-    "NativeStatementCacheStats",
-    "NativeStatementPlan",
+    "JwtGuard",
+    "LeaseBroker",
+    "LeaseGrant",
+    "LogSink",
+    "RateLimiter",
     "Request",
     "RequestBatch",
     "RequestBatchIterator",
@@ -31,6 +31,9 @@ __all__ = [
     "RsgiScope",
     "RsgiTransport",
     "SchemaDigestCache",
+    "StatementCache",
+    "StatementCacheStats",
+    "StatementPlan",
     "WsgiEnviron",
     "WsgiEnvironIterator",
     "WsgiFileWrapper",
@@ -39,14 +42,42 @@ __all__ = [
     "__version__",
     "classify_jsonrpc_frame",
     "clear_request_notification",
+    "crc16_xmodem",
+    "decode_alloydb_metadata_response",
+    "decode_oracle_vector_binary",
+    "decode_oracle_vector_f32",
+    "decode_oracle_vector_f64",
+    "decode_oracle_vector_i8",
+    "decode_oson_payload",
+    "decode_pgcopy_rows",
+    "duckdb_bootstrap_statements",
+    "encode_alloydb_metadata_exchange",
+    "encode_hello3_handshake",
+    "encode_oracle_vector_binary",
+    "encode_oracle_vector_f32",
+    "encode_oracle_vector_f64",
+    "encode_oracle_vector_i8",
+    "encode_oson_payload",
+    "encode_pg_jsonb",
+    "encode_pgcopy_rows",
+    "encode_resp_command",
+    "encode_tds_sql_batch",
+    "encode_ttc_session_attrs",
     "format_traceparent",
     "get_batch",
     "get_request_notify_fd",
     "init_transport",
+    "parse_cluster_redirect",
+    "parse_tnsnames_ora",
     "parse_traceparent",
+    "redis_hash_slot",
+    "resolve_tns_alias",
+    "rewrite_mssql_placeholders",
     "run_wsgi_callable",
     "sanitize_sql",
+    "sqlite_initialization_pragmas",
     "stream_file_chunks",
+    "strip_pg_jsonb_header",
     "submit_batch_raw",
     "submit_raw_response",
     "submit_response",
@@ -410,14 +441,14 @@ class RsgiTransport:
     def send_str(self, /, data: str) -> Awaitable[None]: ...
 
 @final
-class NativeLogSink:
+class LogSink:
     def __new__(
         cls,
         target: str = "stdout",
         capacity: int = 65536,
         overflow_policy: str = "block",
         flush_interval_ms: int = 100,
-    ) -> NativeLogSink: ...
+    ) -> LogSink: ...
     def __repr__(self, /) -> str: ...
     def drain(self, /) -> list[bytes]: ...
     def dropped_count(self, /) -> int: ...
@@ -428,22 +459,22 @@ class NativeLogSink:
     def metrics(self, /) -> tuple[int, int, int]: ...
 
 @final
-class NativeJwtGuard:
+class JwtGuard:
     def __new__(
         cls,
         secret: bytes,
         leeway_secs: int = 60,
-    ) -> NativeJwtGuard: ...
+    ) -> JwtGuard: ...
     def __repr__(self, /) -> str: ...
     def validate(self, /, token: str) -> str: ...
 
 @final
-class NativeRateLimiter:
+class RateLimiter:
     def __new__(
         cls,
         capacity: int,
         refill_rate_per_sec: float,
-    ) -> NativeRateLimiter: ...
+    ) -> RateLimiter: ...
     def __repr__(self, /) -> str: ...
     def acquire(self, /, key: str, tokens: int = 1) -> bool: ...
 
@@ -490,7 +521,7 @@ def format_traceparent(trace_id: str, span_id: str, trace_flags: int) -> str: ..
 def sanitize_sql(sql: str) -> str: ...
 
 @final
-class NativeLeaseGrant:
+class LeaseGrant:
     slot_index: int
     generation: int
     worker_pid: int
@@ -500,7 +531,7 @@ class NativeLeaseGrant:
     bind_key_hash: int
 
 @final
-class NativeBrokerStats:
+class BrokerStats:
     pool_size: int
     max_overflow: int
     active_leases: int
@@ -514,42 +545,79 @@ class NativeBrokerStats:
     total_reclaimed: int
 
 @final
-class NativeLeaseBroker:
-    def __new__(cls, pool_size: int = 20, max_overflow: int = 10) -> Self: ...
+class LeaseBroker:
+    def __new__(
+        cls,
+        pool_size: int = 20,
+        max_overflow: int = 10,
+        stmt_capacity: int = 512,
+    ) -> Self: ...
     @staticmethod
-    def create_named(name: str, pool_size: int = 20, max_overflow: int = 10) -> NativeLeaseBroker: ...
+    def create_named(
+        name: str,
+        pool_size: int = 20,
+        max_overflow: int = 10,
+        stmt_capacity: int = 512,
+    ) -> LeaseBroker: ...
     @staticmethod
-    def open_named(name: str, pool_size: int = 20, max_overflow: int = 10) -> NativeLeaseBroker: ...
+    def open_named(
+        name: str,
+        pool_size: int = 20,
+        max_overflow: int = 10,
+        stmt_capacity: int = 512,
+    ) -> LeaseBroker: ...
     @staticmethod
-    def from_fd(fd: int, size: int) -> NativeLeaseBroker: ...
+    def from_fd(fd: int, size: int = 0) -> LeaseBroker: ...
     @staticmethod
-    def from_env() -> NativeLeaseBroker | None: ...
+    def from_env() -> LeaseBroker | None: ...
+    def statement_cache(self) -> StatementCache | None: ...
+    def active_leases_for_worker(self, worker_pid: int) -> list[tuple[int, int, int]]: ...
+    def publish_channel(
+        self,
+        channel: Any,
+        payload: bytes,
+        timestamp_ns: int | None = None,
+        lease_id: Any = None,
+    ) -> bool: ...
+    def drain_channel(
+        self,
+        channel: Any,
+    ) -> list[tuple[str, bytes, int, str | None]]: ...
+    def drain_all_channels(self) -> list[tuple[str, bytes, int, str | None]]: ...
     def acquire(
         self,
         worker_pid: int,
         ttl_ns: int = 0,
         timeout_ms: int = 5000,
         bind_key_hash: int = 0,
-    ) -> NativeLeaseGrant | None: ...
+    ) -> LeaseGrant | None: ...
     def try_acquire(
         self,
         worker_pid: int,
         ttl_ns: int = 0,
         bind_key_hash: int = 0,
-    ) -> NativeLeaseGrant | None: ...
+    ) -> LeaseGrant | None: ...
     def release(self, slot_index: int, generation: int) -> bool: ...
     def reap_expired(self) -> int: ...
     def reclaim_worker(self, worker_pid: int) -> int: ...
-    def stats(self) -> NativeBrokerStats: ...
+    def stats(self) -> BrokerStats: ...
     @property
     def pool_size(self) -> int: ...
     @property
     def max_overflow(self) -> int: ...
     @property
     def total_capacity(self) -> int: ...
+    @property
+    def stmt_capacity(self) -> int: ...
+    @property
+    def stmt_offset(self) -> int: ...
+    @property
+    def shm_size(self) -> int: ...
+    @property
+    def shm_fd(self) -> int | None: ...
 
 @final
-class NativeStatementPlan:
+class StatementPlan:
     sql_hash: int
     dialect_tag: int
     param_count: int
@@ -557,7 +625,7 @@ class NativeStatementPlan:
     param_plan: bytes
 
 @final
-class NativeStatementCacheStats:
+class StatementCacheStats:
     capacity: int
     hits: int
     misses: int
@@ -565,13 +633,13 @@ class NativeStatementCacheStats:
     evictions: int
 
 @final
-class NativeStatementCache:
+class StatementCache:
     def __new__(cls, capacity: int = 512) -> Self: ...
     @staticmethod
-    def create_named(name: str, capacity: int = 512) -> NativeStatementCache: ...
+    def create_named(name: str, capacity: int = 512) -> StatementCache: ...
     @staticmethod
-    def open_named(name: str, capacity: int = 512) -> NativeStatementCache: ...
-    def lookup(self, dialect_tag: int, raw_sql: bytes) -> NativeStatementPlan | None: ...
+    def open_named(name: str, capacity: int = 512) -> StatementCache: ...
+    def lookup(self, dialect_tag: int, raw_sql: bytes) -> StatementPlan | None: ...
     def insert(
         self,
         dialect_tag: int,
@@ -580,7 +648,10 @@ class NativeStatementCache:
         compiled_sql: bytes,
         param_plan: bytes,
     ) -> bool: ...
-    def stats(self) -> NativeStatementCacheStats: ...
+    def stats(self) -> StatementCacheStats: ...
+    def invalidate_all(self) -> None: ...
+    @property
+    def capacity(self) -> int: ...
 
 def classify_jsonrpc_frame(
     payload: bytes,
@@ -595,3 +666,125 @@ class SchemaDigestCache:
     def get_etag(self, key: str) -> str | None: ...
     def get_bytes(self, key: str) -> bytes | None: ...
     def combined_etag(self) -> str: ...
+
+@final
+class CloudSqlDialer:
+    def __new__(
+        cls,
+        instance_uri: str,
+        ip_type: str = "PUBLIC",
+        iam_auth: bool = True,
+    ) -> Self: ...
+    @property
+    def admin_api_path(self) -> str: ...
+    @property
+    def server_port(self) -> int: ...
+    @property
+    def project(self) -> str: ...
+    @property
+    def region(self) -> str: ...
+    @property
+    def instance(self) -> str: ...
+    @property
+    def expected_server_cn(self) -> str: ...
+    def generate_ephemeral_keypair(self) -> tuple[str, str]: ...
+
+@final
+class AlloyDbDialer:
+    def __new__(
+        cls,
+        cluster_uri: str,
+        ip_type: str = "PRIVATE",
+        iam_auth: bool = True,
+    ) -> Self: ...
+    @property
+    def server_port(self) -> int: ...
+    @property
+    def admin_api_path(self) -> str: ...
+    @property
+    def project(self) -> str: ...
+    @property
+    def location(self) -> str: ...
+    @property
+    def cluster(self) -> str: ...
+    @property
+    def instance(self) -> str: ...
+    def encode_metadata_exchange(
+        self,
+        user_agent: str = "vertebra-db/0.1",
+        token: str = "",
+    ) -> bytes: ...
+
+@final
+class ArrowCursor:
+    shm_name: str
+    byte_len: int
+    def __new__(cls, shm_name: str, byte_len: int) -> Self: ...
+    @staticmethod
+    def write_ipc_to_shm(shm_name: str, payload: bytes) -> ArrowCursor: ...
+    @staticmethod
+    def read_ipc_from_shm(shm_name: str) -> bytes: ...
+    def read_bytes(self) -> bytes: ...
+    def release(self) -> bool: ...
+
+def encode_alloydb_metadata_exchange(
+    user_agent: str = "vertebra-db/0.1",
+    oauth2_token: str = "",
+    iam_auth: bool = True,
+) -> bytes: ...
+def decode_alloydb_metadata_response(data: bytes) -> tuple[int, str]: ...
+def strip_pg_jsonb_header(data: bytes) -> bytes: ...
+def encode_pg_jsonb(data: bytes) -> bytes: ...
+def encode_pgcopy_rows(rows: list[list[bytes | None]]) -> bytes: ...
+def decode_pgcopy_rows(data: bytes) -> list[list[bytes | None]]: ...
+def parse_tnsnames_ora(contents: str) -> dict[str, str]: ...
+def resolve_tns_alias(
+    contents: str,
+    alias: str,
+) -> tuple[str, int, str | None, str | None, str | None] | None: ...
+def encode_oracle_vector_f32(values: list[float]) -> bytes: ...
+def decode_oracle_vector_f32(data: bytes) -> list[float]: ...
+def encode_oracle_vector_f64(values: list[float]) -> bytes: ...
+def decode_oracle_vector_f64(data: bytes) -> list[float]: ...
+def encode_oracle_vector_i8(values: list[int]) -> bytes: ...
+def decode_oracle_vector_i8(data: bytes) -> list[int]: ...
+def encode_oracle_vector_binary(bits: bytes) -> bytes: ...
+def decode_oracle_vector_binary(data: bytes) -> bytes: ...
+def encode_oson_payload(data: bytes) -> bytes: ...
+def decode_oson_payload(data: bytes) -> bytes: ...
+def encode_ttc_session_attrs(
+    client_id: str | None = None,
+    module: str | None = None,
+    action: str | None = None,
+    ecid: str | None = None,
+) -> bytes: ...
+def rewrite_mssql_placeholders(sql: str) -> tuple[str, int]: ...
+def encode_tds_sql_batch(sql: str, tx_descriptor: int = 0) -> bytes: ...
+def duckdb_bootstrap_statements(
+    path: str = ":memory:",
+    memory_limit_mb: int = 2048,
+    threads: int = 4,
+    parquet_metadata_cache: bool = True,
+    httpfs_connection_caching: bool = True,
+    enable_http_metadata_cache: bool = True,
+) -> list[str]: ...
+def sqlite_initialization_pragmas(
+    path: str = ":memory:",
+    wal_mode: bool = True,
+    synchronous: str = "NORMAL",
+    mmap_size: int = 268435456,
+    busy_timeout_ms: int = 5000,
+    max_readers: int = 16,
+    foreign_keys: bool = True,
+) -> list[str]: ...
+def encode_resp_command(args: list[bytes]) -> bytes: ...
+def encode_hello3_handshake(
+    client_name: str = "vertebra",
+    username: str | None = None,
+    password: str | None = None,
+    enable_tracking_bcast: bool = False,
+    prefixes: list[str] = ...,
+) -> bytes: ...
+def crc16_xmodem(data: bytes) -> int: ...
+def redis_hash_slot(key: bytes) -> int: ...
+def parse_cluster_redirect(err_msg: str) -> tuple[str, int, str, int] | None: ...

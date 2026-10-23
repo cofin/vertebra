@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 __all__ = (
     "LaneConfig",
     "LaneMetrics",
-    "MultiLaneWorkerRunner",
     "WorkerRunner",
     "parse_lanes",
     "run_oneshot",
@@ -52,7 +51,7 @@ class LaneMetrics(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     dlq_total: int = 0
 
 
-class MultiLaneWorkerRunner:
+class WorkerRunner:
     """Admission-controlled multi-lane worker runner with QueueService integration and lame-duck drain."""
 
     __slots__ = (
@@ -318,6 +317,5 @@ class MultiLaneWorkerRunner:
         return 0
 
 
-WorkerRunner = MultiLaneWorkerRunner
-parse_lanes = MultiLaneWorkerRunner.parse_lanes
-run_oneshot = MultiLaneWorkerRunner.run_oneshot
+parse_lanes = WorkerRunner.parse_lanes
+run_oneshot = WorkerRunner.run_oneshot

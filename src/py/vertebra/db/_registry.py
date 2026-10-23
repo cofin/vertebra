@@ -7,7 +7,10 @@ from urllib.parse import urlparse
 
 from vertebra.db.dialer.alloydb import AlloyDbConfig, AlloyDbDialer
 from vertebra.db.dialer.cloudsql import CloudSqlConfig, CloudSqlDialer
+from vertebra.db.duckdb import AsyncDuckdbDriver, DuckdbConfig, SyncDuckdbDriver
+from vertebra.db.mssql import AsyncMssqlDriver, MssqlConfig, SyncMssqlDriver
 from vertebra.db.mysql import AsyncMysqlDriver, MysqlConfig, SyncMysqlDriver
+from vertebra.db.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
 from vertebra.db.postgres import AsyncPostgresDriver, PostgresConfig, SyncPostgresDriver
 from vertebra.db.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
 from vertebra.db.sqlite import AsyncSqliteDriver, SqliteConfig, SyncSqliteDriver
@@ -16,13 +19,25 @@ from vertebra.db.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
 __all__ = ("AnyDatabaseConfig", "AnyDatabaseDriver", "AnySyncDatabaseDriver", "DatabaseRegistry")
 
 type AnyDatabaseConfig = (
-    PostgresConfig | MysqlConfig | SqliteConfig | RedisConfig | ValkeyConfig | CloudSqlConfig | AlloyDbConfig
+    PostgresConfig
+    | MysqlConfig
+    | SqliteConfig
+    | OracleConfig
+    | MssqlConfig
+    | DuckdbConfig
+    | RedisConfig
+    | ValkeyConfig
+    | CloudSqlConfig
+    | AlloyDbConfig
 )
 
 type AnyDatabaseDriver = (
     AsyncPostgresDriver
     | AsyncMysqlDriver
     | AsyncSqliteDriver
+    | AsyncOracleDriver
+    | AsyncMssqlDriver
+    | AsyncDuckdbDriver
     | AsyncRedisDriver
     | AsyncValkeyDriver
     | CloudSqlDialer
@@ -33,6 +48,9 @@ type AnySyncDatabaseDriver = (
     SyncPostgresDriver
     | SyncMysqlDriver
     | SyncSqliteDriver
+    | SyncOracleDriver
+    | SyncMssqlDriver
+    | SyncDuckdbDriver
     | SyncRedisDriver
     | SyncValkeyDriver
     | CloudSqlDialer
@@ -43,12 +61,13 @@ type AnySyncDatabaseDriver = (
 class DatabaseRegistry:
     """Named registry of configured database, cache, and cloud dialer instances."""
 
-    __slots__ = ("_configs", "_drivers", "_sync_drivers")
+    __slots__ = ("_broker", "_configs", "_drivers", "_sync_drivers")
 
-    def __init__(self) -> None:
+    def __init__(self, *, broker: Any = None) -> None:
         self._configs: dict[str, AnyDatabaseConfig] = {}
         self._drivers: dict[str, AnyDatabaseDriver] = {}
         self._sync_drivers: dict[str, AnySyncDatabaseDriver] = {}
+        self._broker = broker
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -73,7 +92,19 @@ class DatabaseRegistry:
                 db_path = parsed.path[1:]
             else:
                 db_path = parsed.path.lstrip("/")
-            return SqliteConfig(database=db_path, **overrides)
+            return SqliteConfig(path=db_path, database=db_path, **overrides)
+        if base_scheme == "oracle":
+            return OracleConfig(dsn=url, **overrides)
+        if base_scheme in ("mssql", "sqlserver"):
+            return MssqlConfig(dsn=url, **overrides)
+        if base_scheme == "duckdb":
+            if parsed.path in ("", "/", "/:memory:", ":memory:"):
+                duck_path = ":memory:"
+            elif parsed.path.startswith("//"):
+                duck_path = parsed.path[1:]
+            else:
+                duck_path = parsed.path.lstrip("/")
+            return DuckdbConfig(path=duck_path, database=duck_path, **overrides)
         if base_scheme in ("redis", "rediss", "memory"):
             return RedisConfig(url=url, **overrides)
         if base_scheme in ("valkey", "valkeys"):
@@ -115,14 +146,20 @@ class DatabaseRegistry:
                 dialer = (
                     CloudSqlDialer(dialer_cfg) if isinstance(dialer_cfg, CloudSqlConfig) else AlloyDbDialer(dialer_cfg)
                 )
-            driver = AsyncPostgresDriver(config, dialer=dialer)
+            driver = AsyncPostgresDriver(config, dialer=dialer, broker=self._broker)
         elif isinstance(config, MysqlConfig):
             mysql_dialer: CloudSqlDialer | None = None
             if (csql_cfg := config.to_cloud_dialer_config()) is not None:
                 mysql_dialer = CloudSqlDialer(csql_cfg)
-            driver = AsyncMysqlDriver(config, dialer=mysql_dialer)
+            driver = AsyncMysqlDriver(config, dialer=mysql_dialer, broker=self._broker)
         elif isinstance(config, SqliteConfig):
-            driver = AsyncSqliteDriver(config)
+            driver = AsyncSqliteDriver(config, broker=self._broker)
+        elif isinstance(config, OracleConfig):
+            driver = AsyncOracleDriver(config, broker=self._broker)
+        elif isinstance(config, MssqlConfig):
+            driver = AsyncMssqlDriver(config, broker=self._broker)
+        elif isinstance(config, DuckdbConfig):
+            driver = AsyncDuckdbDriver(config, broker=self._broker)
         elif isinstance(config, RedisConfig):
             driver = AsyncRedisDriver(config)
         elif isinstance(config, ValkeyConfig):
@@ -149,14 +186,20 @@ class DatabaseRegistry:
                 dialer = (
                     CloudSqlDialer(dialer_cfg) if isinstance(dialer_cfg, CloudSqlConfig) else AlloyDbDialer(dialer_cfg)
                 )
-            driver = SyncPostgresDriver(config, dialer=dialer)
+            driver = SyncPostgresDriver(config, dialer=dialer, broker=self._broker)
         elif isinstance(config, MysqlConfig):
             mysql_sync_dialer: CloudSqlDialer | None = None
             if (csql_cfg := config.to_cloud_dialer_config()) is not None:
                 mysql_sync_dialer = CloudSqlDialer(csql_cfg)
-            driver = SyncMysqlDriver(config, dialer=mysql_sync_dialer)
+            driver = SyncMysqlDriver(config, dialer=mysql_sync_dialer, broker=self._broker)
         elif isinstance(config, SqliteConfig):
-            driver = SyncSqliteDriver(config)
+            driver = SyncSqliteDriver(config, broker=self._broker)
+        elif isinstance(config, OracleConfig):
+            driver = SyncOracleDriver(config, broker=self._broker)
+        elif isinstance(config, MssqlConfig):
+            driver = SyncMssqlDriver(config, broker=self._broker)
+        elif isinstance(config, DuckdbConfig):
+            driver = SyncDuckdbDriver(config, broker=self._broker)
         elif isinstance(config, RedisConfig):
             driver = SyncRedisDriver(config)
         elif isinstance(config, ValkeyConfig):

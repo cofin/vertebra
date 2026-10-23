@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import socket
 import ssl
 import struct
@@ -10,10 +11,16 @@ import time
 import urllib.request
 from collections.abc import Callable
 from enum import IntEnum
+from typing import Any
 
-import msgspec
-
-from vertebra.db.dialer.cloudsql import CloudSqlConfig, CloudSqlDialer, EphemeralCertBundle
+from vertebra.db.dialer.cloudsql import (
+    CloudSqlConfig,
+    CloudSqlDialer,
+    EphemeralCertBundle,
+    generate_ephemeral_keypair,
+)
+from vertebra.typing import FrozenBaseStruct
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
@@ -31,7 +38,7 @@ class AlloyDbAuthType(IntEnum):
     IAM = 2
 
 
-class AlloyDbClusterUri(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_hash=True):
+class AlloyDbClusterUri(FrozenBaseStruct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """Parsed AlloyDB instance URI (`projects/<p>/locations/<l>/clusters/<c>/instances/<i>`)."""
 
     project: str
@@ -65,7 +72,7 @@ class AlloyDbClusterUri(msgspec.Struct, frozen=True, gc=False, kw_only=True, cac
         return f"{base}/v1beta/projects/{self.project}/locations/{self.location}/clusters/{self.cluster}:generateClientCertificate"
 
 
-class AlloyDbConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class AlloyDbConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Configuration for zero-sidecar AlloyDB connections on port 5433."""
 
     instance_uri: str
@@ -79,11 +86,17 @@ class AlloyDbConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class AlloyDbDialer:
     """Zero-sidecar AlloyDB mTLS dialer performing the MetadataExchange handshake on port 5433."""
 
-    __slots__ = ("_config", "_uri")
+    __slots__ = ("_config", "_native_dialer", "_uri")
 
     def __init__(self, config: AlloyDbConfig) -> None:
         self._config = config
         self._uri = AlloyDbClusterUri.parse(config.instance_uri)
+        self._native_dialer: Any = None
+        native_mod = import_optional("vertebra._vertebra")
+        native_cls = getattr(native_mod, "AlloyDbDialer", None) if native_mod is not None else None
+        if native_cls is not None:
+            with contextlib.suppress(TypeError, ValueError, RuntimeError):
+                self._native_dialer = native_cls(config.instance_uri)
 
     @property
     def uri(self) -> AlloyDbClusterUri:
@@ -95,6 +108,11 @@ class AlloyDbDialer:
         """Return the AlloyDB mTLS server proxy port (default 5433)."""
         return self._config.port
 
+    @staticmethod
+    def generate_ephemeral_keypair(bits: int = 2048) -> tuple[str, str]:
+        """Generate an ephemeral client public/private keypair in PEM format."""
+        return generate_ephemeral_keypair(bits)
+
     def build_handshake_frame(self, oauth2_token: str = "") -> bytes:
         """Build the initial MetadataExchangeRequest wire frame for port 5433."""
         mode = AlloyDbAuthType.IAM if self._config.enable_iam_auth else AlloyDbAuthType.BUILT_IN
@@ -103,10 +121,26 @@ class AlloyDbDialer:
     @staticmethod
     def encode_metadata_exchange(
         user_agent: str,
-        auth_type: AlloyDbAuthType = AlloyDbAuthType.IAM,
+        auth_type: AlloyDbAuthType | int = AlloyDbAuthType.IAM,
         oauth2_token: str = "",
     ) -> bytes:
         """Encode a 4-byte big-endian length-prefixed AlloyDB MetadataExchangeRequest protobuf frame."""
+        native_mod = import_optional("vertebra._vertebra")
+        if native_mod is not None:
+            native_cls = getattr(native_mod, "AlloyDbDialer", None)
+            if native_cls is not None and hasattr(native_cls, "encode_metadata_exchange"):
+                with contextlib.suppress(TypeError, ValueError, RuntimeError):
+                    res = native_cls.encode_metadata_exchange(user_agent, int(auth_type), oauth2_token)
+                    if isinstance(res, (bytes, bytearray)):
+                        return bytes(res)
+            for fn_name in ("encode_alloydb_metadata_exchange", "encode_alloydb_metadata_exchange_native"):
+                native_fn = getattr(native_mod, fn_name, None)
+                if callable(native_fn):
+                    with contextlib.suppress(TypeError, ValueError, RuntimeError):
+                        res = native_fn(user_agent, int(auth_type), oauth2_token)
+                        if isinstance(res, (bytes, bytearray)):
+                            return bytes(res)
+
         body = bytearray()
         if user_agent:
             ua_bytes = user_agent.encode("utf-8")
@@ -121,6 +155,63 @@ class AlloyDbDialer:
             body.extend(AlloyDbDialer._encode_varint(len(tok_bytes)))
             body.extend(tok_bytes)
         return struct.pack(">I", len(body)) + bytes(body)
+
+    @staticmethod
+    def decode_metadata_exchange(frame: bytes) -> dict[str, Any]:
+        """Decode a 4-byte big-endian length-prefixed AlloyDB MetadataExchangeRequest protobuf frame."""
+        if len(frame) < 4:
+            msg = "Frame too short for length prefix"
+            raise ValueError(msg)
+        (body_len,) = struct.unpack(">I", frame[:4])
+        body = frame[4 : 4 + body_len]
+        if len(body) < body_len:
+            msg = "Truncated MetadataExchangeRequest body"
+            raise ValueError(msg)
+
+        user_agent = ""
+        auth_type = AlloyDbAuthType.IAM
+        oauth2_token = ""
+        idx = 0
+        while idx < len(body):
+            tag_byte = body[idx]
+            idx += 1
+            field_num = tag_byte >> 3
+            wire_type = tag_byte & 0x07
+            if wire_type == 0:
+                val = 0
+                shift = 0
+                while idx < len(body):
+                    b = body[idx]
+                    idx += 1
+                    val |= (b & 0x7F) << shift
+                    if not (b & 0x80):
+                        break
+                    shift += 7
+                if field_num == 2:
+                    auth_type = AlloyDbAuthType(val)
+            elif wire_type == 2:
+                length = 0
+                shift = 0
+                while idx < len(body):
+                    b = body[idx]
+                    idx += 1
+                    length |= (b & 0x7F) << shift
+                    if not (b & 0x80):
+                        break
+                    shift += 7
+                str_bytes = body[idx : idx + length]
+                idx += length
+                if field_num == 1:
+                    user_agent = str_bytes.decode("utf-8", errors="replace")
+                elif field_num == 3:
+                    oauth2_token = str_bytes.decode("utf-8", errors="replace")
+            else:
+                break
+        return {
+            "user_agent": user_agent,
+            "auth_type": auth_type,
+            "oauth2_token": oauth2_token,
+        }
 
     @staticmethod
     def encode_metadata_exchange_response(code: int = 1, error_message: str = "") -> bytes:

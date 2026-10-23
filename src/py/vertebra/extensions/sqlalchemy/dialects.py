@@ -6,7 +6,10 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 from vertebra.db._registry import DatabaseRegistry
+from vertebra.db.duckdb import DuckdbConfig, SyncDuckdbDriver
+from vertebra.db.mssql import MssqlConfig, SyncMssqlDriver
 from vertebra.db.mysql import MysqlConfig, SyncMysqlDriver
+from vertebra.db.oracle import OracleConfig, SyncOracleDriver
 from vertebra.db.postgres import PostgresConfig, SyncPostgresDriver
 from vertebra.db.sqlite import SqliteConfig, SyncSqliteDriver
 from vertebra.utils.module_loader import import_optional
@@ -21,19 +24,19 @@ if TYPE_CHECKING:
     )
 
 __all__ = (
+    "ALL_DIALECT_SCHEMES",
     "DIALECT_SCHEMES",
     "DBAPIConnection",
     "DBAPICursor",
     "DBAPIModule",
     "DialectDescriptor",
+    "DuckdbDialect",
+    "MssqlDialect",
     "MysqlDialect",
-    "MysqlVtbDialect",
+    "NullPool",
     "OracleDialect",
-    "OracleVtbDialect",
     "PostgresDialect",
-    "PostgresVtbDialect",
     "SqliteDialect",
-    "SqliteVtbDialect",
     "SyncEngineAdapter",
     "attach_serverless_disconnect_guard",
 )
@@ -45,6 +48,22 @@ def is_free_threaded() -> bool:
     return bool(checker and not checker())
 
 
+class _FallbackNullPool:
+    """Zero-pooling SQLAlchemy pool class delegating connection lifecycle to the Vertebra SHM broker."""
+
+    is_null_pool: bool = True
+
+
+def _resolve_null_pool() -> type[Any]:
+    sa_pool = import_optional("sqlalchemy.pool")
+    if sa_pool is not None and hasattr(sa_pool, "NullPool"):
+        pool_cls: type[Any] = sa_pool.NullPool
+        return pool_cls
+    return _FallbackNullPool
+
+
+NullPool: type[Any] = _resolve_null_pool()
+
 DIALECT_SCHEMES: tuple[str, ...] = (
     "postgresql+vertebra",
     "postgresql+vtb",
@@ -54,6 +73,14 @@ DIALECT_SCHEMES: tuple[str, ...] = (
     "mysql+vtb",
     "sqlite+vertebra",
     "sqlite+vtb",
+)
+
+ALL_DIALECT_SCHEMES: tuple[str, ...] = (
+    *DIALECT_SCHEMES,
+    "mssql+vertebra",
+    "mssql+vtb",
+    "duckdb+vertebra",
+    "duckdb+vtb",
 )
 
 
@@ -123,18 +150,34 @@ class DBAPICursor:
 class DBAPIConnection:
     """PEP 249 DBAPI 2.0 connection backed by Vertebra's native driver layer."""
 
-    __slots__ = ("_config", "_driver", "_sqlite_driver", "_url", "closed")
+    __slots__ = ("_broker", "_config", "_driver", "_sqlite_driver", "_url", "closed")
 
-    def __init__(self, url: str = "sqlite+vtb:///:memory:", *, driver: Any = None) -> None:
+    def __init__(
+        self,
+        url: str = "sqlite+vtb:///:memory:",
+        *,
+        driver: Any = None,
+        broker: Any = None,
+    ) -> None:
         self._url = url
-        self._config = DatabaseRegistry.parse_url(url)
+        self._broker = broker
+        self._config = (
+            DatabaseRegistry.parse_url(url, broker=broker) if broker is not None else DatabaseRegistry.parse_url(url)
+        )
         self._driver = driver
-        if self._driver is None and isinstance(self._config, PostgresConfig):
-            self._driver = SyncPostgresDriver(self._config)
-        elif self._driver is None and isinstance(self._config, MysqlConfig):
-            self._driver = SyncMysqlDriver(self._config)
+        if self._driver is None:
+            if isinstance(self._config, PostgresConfig):
+                self._driver = SyncPostgresDriver(self._config, broker=broker)
+            elif isinstance(self._config, MysqlConfig):
+                self._driver = SyncMysqlDriver(self._config, broker=broker)
+            elif isinstance(self._config, OracleConfig):
+                self._driver = SyncOracleDriver(self._config, broker=broker)
+            elif isinstance(self._config, MssqlConfig):
+                self._driver = SyncMssqlDriver(self._config, broker=broker)
+            elif isinstance(self._config, DuckdbConfig):
+                self._driver = SyncDuckdbDriver(self._config, broker=broker)
         self._sqlite_driver: SyncSqliteDriver | None = (
-            SyncSqliteDriver(self._config) if isinstance(self._config, SqliteConfig) else None
+            SyncSqliteDriver(self._config, broker=broker) if isinstance(self._config, SqliteConfig) else None
         )
         self.closed: bool = False
 
@@ -147,6 +190,11 @@ class DBAPIConnection:
     def config(self) -> Any:
         """Return the parsed database configuration."""
         return self._config
+
+    @property
+    def broker(self) -> Any:
+        """Return the attached shared-memory database broker, if any."""
+        return self._broker
 
     @property
     def driver(self) -> Any:
@@ -165,10 +213,13 @@ class DBAPIConnection:
         """Execute a query returning rows and column descriptions."""
         if self._driver is not None:
             if hasattr(self._driver, "execute_with_description"):
+                raw_res = self._driver.execute_with_description(sql, parameters)
+                if isinstance(raw_res, tuple) and len(raw_res) == 3:
+                    return raw_res[0], raw_res[1]
                 driver_res: tuple[
                     list[tuple[Any, ...]],
                     tuple[tuple[str, Any, None, None, None, None, None], ...] | None,
-                ] = self._driver.execute_with_description(sql, parameters)
+                ] = raw_res
                 return driver_res
             if hasattr(self._driver, "execute_tuples"):
                 rows = self._driver.execute_tuples(sql, parameters)
@@ -242,6 +293,7 @@ class DialectDescriptor:
     name: str = ""
     driver: str = "vertebra"
     paramstyle: str = "qmark"
+    poolclass: type[Any] = NullPool
     supports_statement_cache: bool = True
     use_insertmanyvalues: bool = True
     insert_executemany_returning: bool = True
@@ -270,6 +322,12 @@ class DialectDescriptor:
         self.returns_plain_tuples = returns_plain_tuples
 
     @classmethod
+    def get_pool_class(cls, url: Any = None) -> type[Any]:
+        """Return `NullPool` so SQLAlchemy delegates pooling to the Vertebra SHM broker."""
+        _ = url
+        return cls.poolclass
+
+    @classmethod
     def dbapi(cls) -> DBAPIModule:
         """Return the PEP 249 DBAPI module."""
         return DBAPIModule(paramstyle=cls.paramstyle)
@@ -280,44 +338,66 @@ class DialectDescriptor:
         return cls.dbapi()
 
     @classmethod
-    def register_all(cls) -> dict[str, Any]:
-        """Register all ``+vertebra`` and ``+vtb`` dialects with SQLAlchemy's dialect registry."""
-        mapping: dict[str, Any] = {
-            "postgresql.vertebra": PostgresVtbDialect,
-            "postgresql.vtb": PostgresVtbDialect,
-            "oracle.vertebra": OracleVtbDialect,
-            "oracle.vtb": OracleVtbDialect,
-            "mysql.vertebra": MysqlVtbDialect,
-            "mysql.vtb": MysqlVtbDialect,
-            "sqlite.vertebra": SqliteVtbDialect,
-            "sqlite.vtb": SqliteVtbDialect,
+    def dialects(cls) -> dict[str, type[DialectDescriptor]]:
+        """Return all 6 `+vtb` SQLAlchemy dialect classes keyed by URL scheme."""
+        return {
+            "postgresql+vtb": PostgresDialect,
+            "mysql+vtb": MysqlDialect,
+            "sqlite+vtb": SqliteDialect,
+            "oracle+vtb": OracleDialect,
+            "mssql+vtb": MssqlDialect,
+            "duckdb+vtb": DuckdbDialect,
+        }
+
+    @classmethod
+    def register_all(cls, *, include_enterprise_olap: bool = False) -> dict[str, Any]:
+        """Register ``+vertebra`` and ``+vtb`` dialects with SQLAlchemy's dialect registry."""
+        core_mapping: dict[str, Any] = {
+            "postgresql.vertebra": PostgresDialect,
+            "postgresql.vtb": PostgresDialect,
+            "oracle.vertebra": OracleDialect,
+            "oracle.vtb": OracleDialect,
+            "mysql.vertebra": MysqlDialect,
+            "mysql.vtb": MysqlDialect,
+            "sqlite.vertebra": SqliteDialect,
+            "sqlite.vtb": SqliteDialect,
+        }
+        full_mapping: dict[str, Any] = {
+            **core_mapping,
+            "mssql.vertebra": MssqlDialect,
+            "mssql.vtb": MssqlDialect,
+            "duckdb.vertebra": DuckdbDialect,
+            "duckdb.vtb": DuckdbDialect,
         }
         sa_dialects = import_optional("sqlalchemy.dialects")
         if sa_dialects is not None:
             registry = getattr(sa_dialects, "registry", None)
             if registry is not None and hasattr(registry, "register"):
                 dialect_cls_names = {
-                    "postgresql": "PostgresVtbDialect",
-                    "oracle": "OracleVtbDialect",
-                    "mysql": "MysqlVtbDialect",
-                    "sqlite": "SqliteVtbDialect",
+                    "postgresql": "PostgresDialect",
+                    "oracle": "OracleDialect",
+                    "mysql": "MysqlDialect",
+                    "sqlite": "SqliteDialect",
+                    "mssql": "MssqlDialect",
+                    "duckdb": "DuckdbDialect",
                 }
-                for entry_name in mapping:
+                for entry_name in full_mapping:
                     backend, _driver = entry_name.split(".", 1)
                     registry.register(
                         entry_name,
                         "vertebra.extensions.sqlalchemy.dialects",
                         dialect_cls_names[backend],
                     )
-        return mapping
+        return full_mapping if include_enterprise_olap else core_mapping
 
 
-class PostgresVtbDialect(DialectDescriptor):
+class PostgresDialect(DialectDescriptor):
     """SQLAlchemy 2.1 dialect for PostgreSQL backing +vertebra and +vtb URLs."""
 
     name: str = "postgresql"
     driver: str = "vertebra"
     paramstyle: str = "pyformat"
+    poolclass: type[Any] = NullPool
     supports_statement_cache: bool = True
     use_insertmanyvalues: bool = True
     insert_executemany_returning: bool = True
@@ -360,12 +440,13 @@ class PostgresVtbDialect(DialectDescriptor):
         return col_type
 
 
-class SqliteVtbDialect(DialectDescriptor):
+class SqliteDialect(DialectDescriptor):
     """SQLAlchemy 2.1 dialect for SQLite backing +vertebra and +vtb URLs."""
 
     name: str = "sqlite"
     driver: str = "vertebra"
     paramstyle: str = "qmark"
+    poolclass: type[Any] = NullPool
     supports_statement_cache: bool = True
     use_insertmanyvalues: bool = True
     insert_executemany_returning: bool = True
@@ -383,12 +464,13 @@ class SqliteVtbDialect(DialectDescriptor):
         return cls.dbapi()
 
 
-class MysqlVtbDialect(DialectDescriptor):
+class MysqlDialect(DialectDescriptor):
     """SQLAlchemy 2.1 dialect for MySQL backing +vertebra and +vtb URLs."""
 
     name: str = "mysql"
     driver: str = "vertebra"
     paramstyle: str = "format"
+    poolclass: type[Any] = NullPool
     supports_statement_cache: bool = True
     use_insertmanyvalues: bool = True
     insert_executemany_returning: bool = False
@@ -413,12 +495,13 @@ class MysqlVtbDialect(DialectDescriptor):
         return col_type
 
 
-class OracleVtbDialect(DialectDescriptor):
+class OracleDialect(DialectDescriptor):
     """SQLAlchemy 2.1 dialect for Oracle backing +vertebra and +vtb URLs."""
 
     name: str = "oracle"
     driver: str = "vertebra"
     paramstyle: str = "named"
+    poolclass: type[Any] = NullPool
     supports_statement_cache: bool = True
     use_insertmanyvalues: bool = True
     insert_executemany_returning: bool = True
@@ -461,10 +544,52 @@ class OracleVtbDialect(DialectDescriptor):
         return col_type
 
 
-PostgresDialect = PostgresVtbDialect
-OracleDialect = OracleVtbDialect
-MysqlDialect = MysqlVtbDialect
-SqliteDialect = SqliteVtbDialect
+class MssqlDialect(DialectDescriptor):
+    """SQLAlchemy 2.1 dialect for SQL Server (`mssql+vtb`) using `NullPool` and SHM broker."""
+
+    name: str = "mssql"
+    driver: str = "vertebra"
+    paramstyle: str = "qmark"
+    poolclass: type[Any] = NullPool
+    supports_statement_cache: bool = True
+    use_insertmanyvalues: bool = True
+    insert_executemany_returning: bool = True
+    supports_native_jsonb: bool = False
+    returns_plain_tuples: bool = True
+
+    @classmethod
+    def dbapi(cls) -> DBAPIModule:
+        """Return the PEP 249 DBAPI module with qmark paramstyle."""
+        return DBAPIModule(paramstyle=cls.paramstyle)
+
+    @classmethod
+    def import_dbapi(cls) -> DBAPIModule:
+        """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1."""
+        return cls.dbapi()
+
+
+class DuckdbDialect(DialectDescriptor):
+    """SQLAlchemy 2.1 dialect for DuckDB (`duckdb+vtb`) using `NullPool` and SHM broker."""
+
+    name: str = "duckdb"
+    driver: str = "vertebra"
+    paramstyle: str = "qmark"
+    poolclass: type[Any] = NullPool
+    supports_statement_cache: bool = True
+    use_insertmanyvalues: bool = True
+    insert_executemany_returning: bool = True
+    supports_native_jsonb: bool = True
+    returns_plain_tuples: bool = True
+
+    @classmethod
+    def dbapi(cls) -> DBAPIModule:
+        """Return the PEP 249 DBAPI module with qmark paramstyle."""
+        return DBAPIModule(paramstyle=cls.paramstyle)
+
+    @classmethod
+    def import_dbapi(cls) -> DBAPIModule:
+        """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1."""
+        return cls.dbapi()
 
 
 class SyncEngineAdapter:

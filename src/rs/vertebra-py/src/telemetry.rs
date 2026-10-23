@@ -31,9 +31,9 @@ impl std::io::Write for MemoryLogSink {
     }
 }
 
-/// Dedicated native log sink draining byte records off-GIL.
-#[pyclass(name = "NativeLogSink")]
-pub struct NativeLogSink {
+/// Dedicated log sink draining byte records off-GIL.
+#[pyclass(name = "LogSink")]
+pub struct LogSink {
     core: Option<AsyncLogCore>,
     memory_buf: Option<Arc<Mutex<Vec<Vec<u8>>>>>,
     #[allow(dead_code)]
@@ -45,7 +45,7 @@ pub struct NativeLogSink {
 }
 
 #[pymethods]
-impl NativeLogSink {
+impl LogSink {
     #[new]
     #[pyo3(signature = (target="stdout", capacity=65536, overflow_policy="block", flush_interval_ms=100))]
     pub fn py_new(
@@ -322,14 +322,14 @@ pub fn sanitize_sql(sql: &str) -> String {
 }
 
 /// HS256 JWT validator executing in Rust.
-#[pyclass(name = "NativeJwtGuard")]
-pub struct NativeJwtGuard {
+#[pyclass(name = "JwtGuard")]
+pub struct JwtGuard {
     secret: Vec<u8>,
     leeway_secs: u64,
 }
 
 #[pymethods]
-impl NativeJwtGuard {
+impl JwtGuard {
     #[new]
     #[pyo3(signature = (secret, leeway_secs=60))]
     pub fn py_new(secret: &[u8], leeway_secs: u64) -> Self {
@@ -355,15 +355,15 @@ impl NativeJwtGuard {
 }
 
 /// Token bucket rate limiter executing in Rust.
-#[pyclass(name = "NativeRateLimiter")]
-pub struct NativeRateLimiter {
+#[pyclass(name = "RateLimiter")]
+pub struct RateLimiter {
     capacity: f64,
     refill_rate_per_sec: f64,
     buckets: Mutex<HashMap<String, (f64, Instant)>>,
 }
 
 #[pymethods]
-impl NativeRateLimiter {
+impl RateLimiter {
     #[new]
     #[pyo3(signature = (capacity, refill_rate_per_sec))]
     pub fn py_new(capacity: u64, refill_rate_per_sec: f64) -> Self {
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn test_rate_limiter() {
-        let limiter = NativeRateLimiter::py_new(2, 0.0);
+        let limiter = RateLimiter::py_new(2, 0.0);
         assert!(limiter.acquire("ip", 1));
         assert!(limiter.acquire("ip", 1));
         assert!(!limiter.acquire("ip", 1));

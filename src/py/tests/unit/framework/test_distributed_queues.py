@@ -24,7 +24,7 @@ from vertebra.framework.queues import (
     task,
 )
 from vertebra.framework.queues.scheduler import CronScheduler
-from vertebra.server.lanes import LaneConfig, MultiLaneWorkerRunner
+from vertebra.server.lanes import LaneConfig, WorkerRunner
 from vertebra.server.platform import LameDuckController
 from vertebra.telemetry.otel import SpanExporter, TraceContext
 
@@ -395,7 +395,7 @@ async def test_distributed_cron_scheduler_leader_election_and_failover() -> None
 
 @pytest.mark.anyio
 async def test_multi_lane_worker_runner_lame_duck_drain_and_otel_spans() -> None:
-    """Verify MultiLaneWorkerRunner drains in-flight jobs on lame-duck shutdown and exports spans."""
+    """Verify WorkerRunner drains in-flight jobs on lame-duck shutdown and exports spans."""
     backend = MemoryQueueBackend()
     qsvc = QueueService(backend=backend)
     lame_duck = LameDuckController()
@@ -419,7 +419,7 @@ async def test_multi_lane_worker_runner_lame_duck_drain_and_otel_spans() -> None
     finally:
         TraceContext.set_current(token.old_value if hasattr(token, "old_value") else None)
 
-    runner = MultiLaneWorkerRunner(
+    runner = WorkerRunner(
         [LaneConfig(queue_name="cpu", concurrency=2, drain_timeout_s=2.0, lane_kind="cpu")],
         queue_service=qsvc,
         lame_duck=lame_duck,
