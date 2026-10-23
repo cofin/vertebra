@@ -5,7 +5,7 @@ Aligned with vtb.
 
 from typing import Any
 
-from vertebra._typing import NUMPY_INSTALLED
+from vertebra.typing import NUMPY_INSTALLED
 from vertebra.utils.module_loader import import_optional
 
 __all__ = ("numpy_array_enc_hook",)

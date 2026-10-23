@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import importlib
 from typing import Any
 
 from vertebra.framework.stores import KeyValueBackend, ResponseCacheStore
+from vertebra.utils.module_loader import import_optional
 
 MemoryStore = ResponseCacheStore
 
@@ -48,16 +48,15 @@ def swap_litestar_response_cache_store(
 
 def _load_store_types() -> type[Any] | None:
     """Load Litestar MemoryStore and register ResponseCacheStore as a Store virtual subclass."""
-    try:
-        base_mod = importlib.import_module("litestar.stores.base")
-        mem_mod = importlib.import_module("litestar.stores.memory")
-        register_fn = getattr(base_mod.Store, "register", None)
-        if callable(register_fn):
-            register_fn(ResponseCacheStore)
-        memory_cls: type[Any] = mem_mod.MemoryStore
-        return memory_cls
-    except ImportError:
+    base_mod = import_optional("litestar.stores.base")
+    mem_mod = import_optional("litestar.stores.memory")
+    if base_mod is None or mem_mod is None:
         return None
+    register_fn = getattr(base_mod.Store, "register", None)
+    if callable(register_fn):
+        register_fn(ResponseCacheStore)
+    memory_cls: type[Any] = mem_mod.MemoryStore
+    return memory_cls
 
 
 _MemoryStoreCls = _load_store_types()

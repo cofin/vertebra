@@ -27,6 +27,7 @@ from vertebra.agent.core.context import AgentContext, CallerIdentity
 from vertebra.agent.core.schema import tool
 from vertebra.agent.mcp import MCPConfig, MCPService
 from vertebra.telemetry.otel import TraceContext
+from vertebra.typing import FrozenCamelizedStruct
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -87,6 +88,10 @@ def test_a2a_1_0_models_camel_case_wire_roundtrip_and_card_validation() -> None:
     assert task_dict["taskId"] == "task-303"
     assert task_dict["status"]["state"] == "working"
     assert task_dict["artifacts"][0]["artifactId"] == "art-202"
+    assert isinstance(msg, FrozenCamelizedStruct)
+    assert isinstance(task, FrozenCamelizedStruct)
+    assert isinstance(text_part, FrozenCamelizedStruct)
+    assert "metadata" not in decode_json(encode_json_bytes(text_part))
 
     valid_card = _sample_card("/a2a")
     valid_card.validate_for_path("/a2a")

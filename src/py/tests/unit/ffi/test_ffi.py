@@ -228,9 +228,11 @@ def test_non_blocking_dispatch() -> None:
             self.handler_id = 1
 
     spec = compile_handler_spec(slow_handler)
+    assert isinstance(hash(spec), int)
     batch = [Req(1), Req(2)]
-    partitioned = BatchDispatchPlan()
-    partitioned.async_native = [(0, batch[0], spec), (1, batch[1], spec)]
+    partitioned = BatchDispatchPlan(async_native=[(0, batch[0], spec), (1, batch[1], spec)])
+    with pytest.raises(AttributeError):
+        partitioned.async_native = []
 
     start = time.monotonic()
     dispatch_batch(partitioned, {1: spec}, [], Response, scheduler, async_mode=True)

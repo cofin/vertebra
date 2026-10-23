@@ -8,7 +8,6 @@ import builtins
 import calendar
 import hashlib
 import hmac
-import importlib
 import io
 import shutil
 import time
@@ -20,6 +19,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import msgspec
 
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
@@ -1224,10 +1224,7 @@ class ObjectStore:
     @classmethod
     def _get_native_module(cls) -> Any:
         if not cls._native_loaded:
-            try:
-                cls._native_module = importlib.import_module("vertebra._storage")
-            except ImportError:
-                cls._native_module = None
+            cls._native_module = import_optional("vertebra._storage")
             cls._native_loaded = True
         return cls._native_module
 

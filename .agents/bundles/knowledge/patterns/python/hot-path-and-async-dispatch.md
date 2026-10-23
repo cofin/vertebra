@@ -16,20 +16,28 @@ sources:
 
 Python worker code on the request hot path ([`_dispatch.py`](../../../../../src/py/vertebra/server/_dispatch.py), [`_loops.py`](../../../../../src/py/vertebra/server/_loops.py), [`_asgi/_runner.py`](../../../../../src/py/vertebra/server/_asgi/_runner.py)) avoids per-request reflection, per-request cross-thread wakeups, and unnecessary `asyncio.Task` allocations.
 
-## 1. Startup Signature Caching (`compile_handler_spec` / `_handler_dispatch_spec`)
+## 1. Startup Signature Caching (`HandlerSpec` / `compile_handler_spec`)
 
-Never call `inspect.signature()` on the request path. [`compile_handler_spec(handler)`](../../../../../src/py/vertebra/server/_dispatch.py) (`@functools.lru_cache(maxsize=512)`, pre-warmed at worker startup for up to 512 registered handlers) compiles a specialized invoker closure once:
+Never call `inspect.signature()` on the request path. [`compile_handler_spec(handler)`](../../../../../src/py/vertebra/server/_dispatch.py) (pre-compiled at worker startup via `compile_handler_table(handlers)`) compiles a `HandlerSpec` and specialized invoker closure once:
 
 <!-- truth: start -->
 ```python
-@functools.lru_cache(maxsize=512)
-def _handler_dispatch_spec(
-    handler: Any,
-) -> tuple[bool, bool, tuple[str, ...], Callable[[Any], Any]]:
-    """Compile and cache ``(has_params, is_async, param_names, invoker)`` for a handler."""
-    params = tuple(inspect.signature(handler).parameters.keys())
+class HandlerSpec(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
+    """Pre-compiled dispatch specification and invoker for a route handler."""
+
+    has_params: bool
+    is_async: bool
+    param_names: tuple[str, ...]
+    invoker: Callable[..., Any]
+
+
+def compile_handler_spec(handler: Callable[..., Any]) -> HandlerSpec:
+    """Compile parameter extractors and invocation strategy for a handler."""
+    sig = inspect.signature(handler)
+    params = tuple(sig.parameters.keys())
     has_params = bool(params)
     is_async = inspect.iscoroutinefunction(handler)
+
     if not has_params:
 
         def _invoke_no_args(_request: Any, _h: Any = handler) -> Any:
@@ -49,7 +57,13 @@ def _handler_dispatch_spec(
             return _h(*(fn(request) for fn in _ext))
 
         invoker = _invoke_with_extractors
-    return has_params, is_async, params, invoker
+
+    return HandlerSpec(
+        has_params=has_params,
+        is_async=is_async,
+        param_names=params,
+        invoker=invoker,
+    )
 ```
 <!-- truth: end -->
 
@@ -64,4 +78,4 @@ def _handler_dispatch_spec(
 
 - **Response Coercion (`coerce_response`)**: [`coerce_response(result, request_id)`](../../../../../src/py/vertebra/server/_dispatch.py) passes native `Response` objects through (backfilling `request_id`), wraps `bytes` and `str` bodies directly, and serializes structured values (`dict`, `list`, `msgspec.Struct`) via `encode_json_bytes` from `vertebra.utils.serializers._json`. Unhandled exceptions become `500` (`b"internal server error"`) and unmatched routes become `404` (`b"not found"`).
 - **Per-Request vs Batch Completion**: Async and executor-backed handlers complete individually via `submit_response(resp)` (which detaches from the GIL during transport write), whereas synchronous blocking callers use `submit_results(responses)`.
-- **Loop-Local & Fused Fast Paths**: Use [`LoopShardedResource[T]`](../../../../../src/py/vertebra/utils/sync_tools.py) to shard non-thread-safe async primitives across `EventLoopPool` loops without cross-loop lock contention, and [`CompiledLitestarRoute`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py) (`array_like=True` `msgspec.Struct`) for fused Litestar direct dispatch.
+- **Loop-Local & Fused Fast Paths**: Use [`LoopShardedResource[T]`](../../../../../src/py/vertebra/utils/sync_tools.py) to shard non-thread-safe async primitives across `EventLoopPool` loops without cross-loop lock contention, and [`CompiledLitestarRoute`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py) (`frozen=True, gc=False, kw_only=True` `msgspec.Struct`) for fused Litestar direct dispatch.

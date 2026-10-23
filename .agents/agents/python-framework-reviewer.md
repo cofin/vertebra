@@ -42,7 +42,7 @@ You are a read-only reviewer. You report findings; you never edit files, stage, 
 2. Audit strict typing (PEP 695/604/585) and confirm strict mypy compliance (`PY-03`).
 3. Ensure value objects are `msgspec.Struct(frozen=True, gc=False)` (`PY-04`).
 4. Validate that all JSON operations route through `vertebra.utils.serializers` (`PY-05`).
-5. Confirm package lazy imports (`PY-06`) and top-level module imports (`PY-08`).
+5. Confirm package lazy imports (`PY-06`), top-level module imports, public `vertebra.typing` shim usage (never `vertebra._typing` outside `vertebra/typing.py`), and cached `vertebra.utils.module_loader` (`import_optional`, `ensure_module`) usage instead of raw `importlib.import_module` (`PY-08`).
 6. Check [`false-positive-suppressions.md`](../skills/review-core/references/false-positive-suppressions.md).
 
 ## Allowed Commands

@@ -1,4 +1,4 @@
-"""Native database drivers, Cloud SQL / AlloyDB dialers, Valkey/Redis, and Oracle 26ai subsystem."""
+"""Native database drivers, Cloud SQL / AlloyDB dialers, Valkey/Redis, and DataFusion subsystem."""
 
 from __future__ import annotations
 
@@ -25,17 +25,6 @@ from vertebra.db.dialer import (
     CloudSqlInstanceUri,
 )
 from vertebra.db.mysql import AsyncMysqlDriver, MysqlConfig, SyncMysqlDriver
-from vertebra.db.oracle import (
-    AsyncOracleDriver,
-    OracleConfig,
-    OracleConnectDescriptor,
-    OracleContainer,
-    OracleDataFrame,
-    OraclePoolRegistry,
-    OracleWallet,
-    OrdsContainer,
-    SyncOracleDriver,
-)
 from vertebra.db.pipeline import (
     CteStep,
     QueryPipeline,
@@ -70,7 +59,6 @@ __all__ = (
     "AlloyDbConfig",
     "AlloyDbDialer",
     "AsyncMysqlDriver",
-    "AsyncOracleDriver",
     "AsyncPostgresDriver",
     "AsyncRedisDriver",
     "AsyncSqliteDriver",
@@ -87,13 +75,6 @@ __all__ = (
     "DataFusionMode",
     "DatabaseRegistry",
     "MysqlConfig",
-    "OracleConfig",
-    "OracleConnectDescriptor",
-    "OracleContainer",
-    "OracleDataFrame",
-    "OraclePoolRegistry",
-    "OracleWallet",
-    "OrdsContainer",
     "PoolerMode",
     "PostgresConfig",
     "QueryPipeline",
@@ -101,7 +82,6 @@ __all__ = (
     "RelOverlay",
     "SqliteConfig",
     "SyncMysqlDriver",
-    "SyncOracleDriver",
     "SyncPostgresDriver",
     "SyncRedisDriver",
     "SyncSqliteDriver",

@@ -63,7 +63,7 @@ CPYTHON_PGO_FLAGS: dict[str, str] = {
 }
 
 
-class PythonBuildInfo(msgspec.Struct, frozen=True, gc=False):
+class PythonBuildInfo(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Immutable snapshot of a CPython interpreter's optimization configuration."""
 
     version: str
@@ -73,7 +73,7 @@ class PythonBuildInfo(msgspec.Struct, frozen=True, gc=False):
     architecture: str
 
 
-class PlatformSupport(msgspec.Struct, frozen=True, gc=False):
+class PlatformSupport(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """CPython optimization availability record for an OS and CPU architecture pair."""
 
     os_name: str
@@ -84,7 +84,7 @@ class PlatformSupport(msgspec.Struct, frozen=True, gc=False):
     notes: str
 
 
-class RustPgoConfig(msgspec.Struct, frozen=True, gc=False):
+class RustPgoConfig(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Immutable configuration for Rust PGO build stages."""
 
     crate_name: str = "vertebra-http"

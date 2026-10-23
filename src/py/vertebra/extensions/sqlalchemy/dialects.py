@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import importlib
 import sys
 from typing import TYPE_CHECKING, Any
 
 from vertebra.db._registry import DatabaseRegistry
 from vertebra.db.mysql import MysqlConfig, SyncMysqlDriver
-from vertebra.db.oracle import OracleConfig, SyncOracleDriver
 from vertebra.db.postgres import PostgresConfig, SyncPostgresDriver
 from vertebra.db.sqlite import SqliteConfig, SyncSqliteDriver
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.sync_tools import SyncPool
 
 if TYPE_CHECKING:
@@ -134,8 +133,6 @@ class DBAPIConnection:
             self._driver = SyncPostgresDriver(self._config)
         elif self._driver is None and isinstance(self._config, MysqlConfig):
             self._driver = SyncMysqlDriver(self._config)
-        elif self._driver is None and isinstance(self._config, OracleConfig):
-            self._driver = SyncOracleDriver(self._config)
         self._sqlite_driver: SyncSqliteDriver | None = (
             SyncSqliteDriver(self._config) if isinstance(self._config, SqliteConfig) else None
         )
@@ -295,8 +292,8 @@ class DialectDescriptor:
             "sqlite.vertebra": SqliteVtbDialect,
             "sqlite.vtb": SqliteVtbDialect,
         }
-        try:
-            sa_dialects: Any = importlib.import_module("sqlalchemy.dialects")
+        sa_dialects = import_optional("sqlalchemy.dialects")
+        if sa_dialects is not None:
             registry = getattr(sa_dialects, "registry", None)
             if registry is not None and hasattr(registry, "register"):
                 dialect_cls_names = {
@@ -312,8 +309,6 @@ class DialectDescriptor:
                         "vertebra.extensions.sqlalchemy.dialects",
                         dialect_cls_names[backend],
                     )
-        except ImportError:
-            pass
         return mapping
 
 
@@ -502,12 +497,14 @@ class SyncEngineAdapter:
 
 def attach_serverless_disconnect_guard(engine: Any) -> None:
     """Attach engine_connect listener to verify connection liveness in serverless environments."""
+    sa_event = import_optional("sqlalchemy.event")
+    if sa_event is None:
+        return
     try:
-        sa_event = importlib.import_module("sqlalchemy.event")
 
         def _on_connect(dbapi_connection: Any, connection_record: Any) -> None:
             _ = (dbapi_connection, connection_record)
 
         sa_event.listen(engine, "engine_connect", _on_connect)
-    except (ImportError, AttributeError):
+    except AttributeError:
         pass

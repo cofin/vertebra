@@ -11,14 +11,19 @@ tags:
 
 # Domain Vocabulary Index
 
-Vertebra uses one domain naming model across Python, Rust, and TypeScript: each class, struct, and function names the domain concept directly, without brand prefixes (`Vertebra*`, except for the root `VertebraError` exception hierarchy in `vertebra._typing`), implementation-mechanism suffixes, or compatibility aliases.
+Vertebra uses one domain naming model across Python, Rust, and TypeScript: each class, struct, and function names the domain concept directly, without brand prefixes (`Vertebra*`, except for the root `VertebraError` exception hierarchy in `vertebra.typing`), implementation-mechanism suffixes, or compatibility aliases.
 
 ## Framework (`framework/`)
 
 - [Python Framework, Routing & Serialization Domain](framework/routing-and-app.md) — `App`, `Router`, `RouteDef`, `ParamSpec`, `HandlerInfo`, `Request`, `Response`, `InertiaMiddleware`, `InertiaConfig`, `InertiaResponse`, `JSONSerializer`, `MsgpackCodec`, `module_loader`, and `OptionalDependency`.
 - [Framework Subdomains](framework/subdomains.md) — `di` (`Container`, `Provide`), `security` (`SecurityConfig`, `Guard`), `autowire` (`AutowireLoader`), `procedures` (`ProcedureRouter`), `htmx`, `ssr`, `openapi`, `asyncapi`, `queues`, `channels`, `stores`, `email`, and first-party `litestar-mcp` (`LitestarMCP`, `MCPConfig`, `LitestarA2A`, `A2AConfig`) integration.
+- [Distributed Queues, Cron Leader Election & Transactional Email](framework/distributed-queues-and-email.md) — Pluggable queue backends (`MemoryQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `PostgresQueueBackend`, `OracleQueueBackend`), `CronScheduler` leader election, `MultiLaneWorkerRunner` with priority lanes, and transactional email providers (`SmtpProvider`, `ResendProvider`, `SendGridProvider`, `MailgunProvider`, `SesProvider` with native Rust SigV4 signing).
 - [Live State Synchronization](framework/live-state.md) — `LiveState`, `LiveStateRoom`, `StateDeltaFrame`, `StateOpcode`, `HybridLogicalClock`, `@live_action`, `LwwStateRegister`, and TypeScript `LiveStateClient` / `OfflineDeltaQueue`.
 - [`vtb` Command-Line Interface](framework/cli.md) — `vtb run`, `vtb dev`, `vtb build`, `vtb js`, `vtb init`, `vtb mcp bridge`, `vtb workers run`, `discover_entry_point_commands`, `Console`, and `run_dev_tui`.
+
+## Agent Protocols & Harness (`agent/`)
+
+- [Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols](agent/mcp-and-a2a-protocol-harness.md) — Model Context Protocol (`MCP 2026-07-28`) SSE and Stdio transports, Agent-to-Agent (`A2A 1.0`) JCS/RFC 8785 Ed25519/ECDSA signed agent cards, durable DAG workflows, SpecTree execution, Rust PyO3 cryptographic fastpaths, and GenAI telemetry.
 
 ## Server & Worker Runtime (`server/`)
 
@@ -39,7 +44,8 @@ Vertebra uses one domain naming model across Python, Rust, and TypeScript: each 
 ## Storage, Data, Telemetry & Extensions (`storage/`, `data/`, `telemetry/`, `extensions/`)
 
 - [Object Storage, Presigning & Upload Tracking](storage/object-storage.md) — `vertebra-storage` (`vertebra._storage`: `NativeObjectStore`, `StorageBuffer`, `RustTaskAwaitable`) and `vertebra.storage` (`ObjectStore`, `SyncStore`, `AsyncStore`, `PrefixedObjectStore`, `PresignedUrlSigner`, `StorageRegistry`, `UploadTracker`, `ReadableFile`, S3/GCS/Azure/OCI/R2 signing).
-- [Database Drivers, Cloud Dialers & Oracle Wallets](data/database-drivers-and-dialers.md) — `vertebra.db` (`SyncPostgresDriver`, `AsyncPostgresDriver`, MySQL/SQLite/Redis/Valkey/Oracle drivers, `CloudSqlDialer`, `AlloyDbDialer`, `OracleWallet`, `DatabaseRegistry`, `UnsupportedBackendError`).
+- [Shared-Memory Connection Broker & Statement Cache](data/broker-and-shm-leases.md) — `ShmLeaseTable` and `ShmStatementCache` in `vertebra-core`, `NativeLeaseBroker` and `NativeStatementCache` in `_vertebra`, and `ShmBrokerTransport` / `InMemoryBrokerTransport` / `BrokerPlugin` in `vertebra.extensions.broker`.
+- [Database Drivers & Cloud Dialers](data/database-drivers-and-dialers.md) — `vertebra.db` (`SyncPostgresDriver`, `AsyncPostgresDriver`, MySQL/SQLite/Redis/Valkey drivers, `CloudSqlDialer`, `AlloyDbDialer`, `DatabaseRegistry`, `UnsupportedBackendError`).
 - [Query Pipelines, Change Feeds, Tenant Predicates & DataFusion](data/query-pipeline-cdc-and-tenancy.md) — `QueryPipeline`, `CteStep`, `RelOverlay`, `ChangeFeed`, `TenantPredicate`, `DataFusionEngine`, and `@vertebra/client/arrow` `ArrowStreamClient`.
 - [Logging, Trace Context, SQL Trace Propagation & GenAI Metrics](telemetry/logging-tracing-and-genai.md) — `AsyncLogCore` / `BoundedLogQueue`, `W3cTraceContext`, `LogSink`, `LogHandler`, `TraceContext`, `SpanExporter`, `SqlTracePropagator`, `GenAiRecorder`, and `@vertebra/client/telemetry`.
 - [Litestar Integration: Route Compiler, Middleware Offload, and Fast Path](extensions/litestar.md) — `LitestarPlugin`, `LitestarRouteCompiler`, `MiddlewareOffloadCompiler`, `CompiledLitestarRoute`, `ChannelsBackend`, `MemoryStore`, and `litestar-mcp` (`LitestarMCP`, `LitestarA2A`) integration.

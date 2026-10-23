@@ -1,10 +1,23 @@
-"""Msgspec struct field dumping helper for serializers."""
+"""Msgspec base structs and struct field dumping helpers for serializers."""
 
 from __future__ import annotations
 
 from typing import Any
 
-__all__ = ("_dump_msgspec_fields",)
+from vertebra.typing import (
+    BaseStruct,
+    CamelizedBaseStruct,
+    FrozenBaseStruct,
+    FrozenCamelizedStruct,
+)
+
+__all__ = (
+    "BaseStruct",
+    "CamelizedBaseStruct",
+    "FrozenBaseStruct",
+    "FrozenCamelizedStruct",
+    "_dump_msgspec_fields",
+)
 
 
 def _dump_msgspec_fields(value: Any) -> dict[str, Any]:

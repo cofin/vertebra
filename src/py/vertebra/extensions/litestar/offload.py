@@ -1,7 +1,6 @@
 """Zero-code-change Litestar v2 and v3 startup introspection for Rust middleware and asset offloading."""
 
 import hashlib
-import importlib
 import re
 from pathlib import Path
 from typing import Any
@@ -9,6 +8,7 @@ from typing import Any
 import msgspec
 
 from vertebra.extensions.litestar.router import _unpack_route_handler_map_entry
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import encode_json_bytes
 
 __all__ = (
@@ -277,11 +277,9 @@ def _rebuild_litestar_routing_trie(app: Any) -> None:
     if isinstance(mount_routes, dict):
         mount_routes.clear()
 
-    try:
-        trie_types = importlib.import_module("litestar._asgi.routing_trie.types")
+    trie_types = import_optional("litestar._asgi.routing_trie.types")
+    if trie_types is not None and hasattr(trie_types, "create_node"):
         asgi_router.root_route_map_node = trie_types.create_node()
-    except ImportError:
-        pass
 
     if hasattr(asgi_router, "_trie_initialized"):
         asgi_router._trie_initialized = True

@@ -33,6 +33,7 @@ from vertebra.agent.mcp import (
     prompt,
     resource,
 )
+from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.serializers import decode_json
 
 
@@ -97,6 +98,14 @@ async def test_mcp_service_tools_list_and_call() -> None:
 
     prof_res = await service._handle_tools_call({"name": "get_profile", "arguments": {}})
     assert prof_res["structuredContent"] == {"name": "Alice", "role": "Admin"}
+
+    txt = TextContent(text="hello")
+    blob = BlobContent(data="YmluYXJ5")
+    arg = PromptArgument(name="topic")
+    msg = PromptMessage(role="user", content=txt)
+    for model in (txt, blob, arg, msg):
+        assert isinstance(model, FrozenBaseStruct)
+        assert isinstance(hash(model), int)
 
 
 @pytest.mark.anyio

@@ -1,11 +1,5 @@
 """SQLSpec extension, PEP 695 generic configurations, and zero-copy object storage integration."""
 
-from vertebra.extensions.sqlspec.oracle import (
-    OracleConfig,
-    OracleHybridSearch,
-    OraclePoolRegistry,
-    OracleVectorConverter,
-)
 from vertebra.extensions.sqlspec.plugin import (
     SQLSPEC_PLUGIN_PRIORITY,
     SQLSPEC_STATE_KEY,
@@ -40,10 +34,6 @@ __all__ = (
     "BrokerPlugin",
     "ChannelMessage",
     "DatabaseConfigProtocol",
-    "OracleConfig",
-    "OracleHybridSearch",
-    "OraclePoolRegistry",
-    "OracleVectorConverter",
     "ProxyAsyncConfig",
     "ProxySyncConfig",
     "SQLSpecAsyncConfig",

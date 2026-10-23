@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import contextlib
-import importlib
 import io
 import sqlite3
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import msgspec
 
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import encode_json_bytes
 
 if TYPE_CHECKING:
@@ -77,11 +77,10 @@ class DataFusionEngine:
         self._tables: dict[str, TableRegistration] = {}
         self._arrow_tables: dict[str, Any] = {}
         self._ctx: Any = None
-        try:
-            datafusion_mod = importlib.import_module("datafusion")
-            self._ctx = datafusion_mod.SessionContext()
-        except (ImportError, Exception):
-            self._ctx = None
+        datafusion_mod = import_optional("datafusion")
+        if datafusion_mod is not None:
+            with contextlib.suppress(Exception):
+                self._ctx = datafusion_mod.SessionContext()
 
     @property
     def config(self) -> DataFusionConfig:
@@ -167,25 +166,23 @@ class DataFusionEngine:
                 df = self._ctx.sql(sql)
                 return df.to_arrow_table()
         rows = self.execute_dicts(sql)
-        try:
-            pa = importlib.import_module("pyarrow")
-            return pa.Table.from_pylist(rows)
-        except (ImportError, Exception):
-            return _FallbackArrowTable(rows)
+        pa = import_optional("pyarrow")
+        if pa is not None:
+            with contextlib.suppress(Exception):
+                return pa.Table.from_pylist(rows)
+        return _FallbackArrowTable(rows)
 
     def stream_arrow_ipc(self, sql: str) -> bytes:
         """Execute SQL query and serialize result table as Arrow IPC stream bytes."""
         arrow_table = self.execute_arrow(sql)
-        try:
-            ipc = importlib.import_module("pyarrow.ipc")
-            if hasattr(arrow_table, "schema"):
+        ipc = import_optional("pyarrow.ipc")
+        if ipc is not None and hasattr(arrow_table, "schema"):
+            with contextlib.suppress(Exception):
                 sink = io.BytesIO()
                 writer = ipc.new_stream(sink, arrow_table.schema)
                 writer.write_table(arrow_table)
                 writer.close()
                 return sink.getvalue()
-        except (ImportError, Exception):
-            pass
 
         rows = self.execute_dicts(sql)
         header = b"ARROW1\x00\x00\x00\x00"

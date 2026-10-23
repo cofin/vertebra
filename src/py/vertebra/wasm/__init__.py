@@ -6,7 +6,7 @@ from typing import Any
 
 import msgspec
 
-from vertebra._typing import MissingDependencyError
+from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
 
 __all__ = (

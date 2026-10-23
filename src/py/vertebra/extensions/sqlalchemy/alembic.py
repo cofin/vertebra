@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import importlib
 from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
 
 from vertebra.db.mysql import MysqlConfig
-from vertebra.db.oracle import OracleConfig
 from vertebra.db.postgres import PostgresConfig
+from vertebra.utils.module_loader import ensure_module, import_optional
 
 if TYPE_CHECKING:
     from vertebra.extensions.sqlalchemy.dialects import DBAPIConnection
@@ -35,24 +34,26 @@ class AlembicRunner:
 
     def upgrade(self, revision: str = "head") -> None:
         """Run alembic upgrade to revision."""
+        cmd = import_optional("alembic.command")
+        cfg_mod = import_optional("alembic.config")
+        if cmd is None or cfg_mod is None:
+            return
         try:
-            cmd = importlib.import_module("alembic.command")
-            cfg_mod = importlib.import_module("alembic.config")
-
             cfg = self._config if isinstance(self._config, cfg_mod.Config) else cfg_mod.Config()
             cmd.upgrade(cfg, revision)
-        except (ImportError, AttributeError):
+        except AttributeError:
             pass
 
     def downgrade(self, revision: str = "-1") -> None:
         """Run alembic downgrade to revision."""
+        cmd = import_optional("alembic.command")
+        cfg_mod = import_optional("alembic.config")
+        if cmd is None or cfg_mod is None:
+            return
         try:
-            cmd = importlib.import_module("alembic.command")
-            cfg_mod = importlib.import_module("alembic.config")
-
             cfg = self._config if isinstance(self._config, cfg_mod.Config) else cfg_mod.Config()
             cmd.downgrade(cfg, revision)
-        except (ImportError, AttributeError):
+        except AttributeError:
             pass
 
 
@@ -79,8 +80,8 @@ class AlembicImpl(msgspec.Struct, frozen=True, gc=False):
             "sqlite+vertebra": cls(__dialect__="sqlite", transactional_ddl=True),
             "sqlite+vtb": cls(__dialect__="sqlite", transactional_ddl=True),
         }
-        try:
-            impl_mod: Any = importlib.import_module("alembic.ddl.impl")
+        impl_mod = import_optional("alembic.ddl.impl")
+        if impl_mod is not None:
             default_impl = getattr(impl_mod, "DefaultImpl", None)
             i_map = getattr(default_impl, "_impls", None) if default_impl is not None else None
             if isinstance(i_map, dict):
@@ -88,8 +89,6 @@ class AlembicImpl(msgspec.Struct, frozen=True, gc=False):
                     base_impl = i_map.get(desc.__dialect__)
                     if base_impl is not None:
                         i_map.setdefault(key, base_impl)
-        except ImportError:
-            pass
         return impls
 
     @staticmethod
@@ -101,7 +100,7 @@ class AlembicImpl(msgspec.Struct, frozen=True, gc=False):
         """Alembic ``render_item`` hook rendering ``Vector`` and ``BinaryJson`` column types."""
         if type_ != "type":
             return False
-        sa_mod = importlib.import_module("vertebra.extensions.sqlalchemy")
+        sa_mod = ensure_module("vertebra.extensions.sqlalchemy")
         imports = getattr(autogen_context, "imports", None)
         if isinstance(obj, sa_mod.Vector):
             if isinstance(imports, set):
@@ -125,7 +124,7 @@ class AlembicImpl(msgspec.Struct, frozen=True, gc=False):
     ) -> bool | None:
         """Alembic ``compare_type`` hook preventing false-positive diffs on ``Vector`` and ``BinaryJson``."""
         _ = (context, inspected_column, metadata_column)
-        sa_mod = importlib.import_module("vertebra.extensions.sqlalchemy")
+        sa_mod = ensure_module("vertebra.extensions.sqlalchemy")
         if isinstance(metadata_type, sa_mod.Vector):
             if isinstance(inspected_type, sa_mod.Vector):
                 return bool(
@@ -144,13 +143,10 @@ class AlembicImpl(msgspec.Struct, frozen=True, gc=False):
         return None
 
     @staticmethod
-    def resolve_migration_url(url: PostgresConfig | OracleConfig | MysqlConfig | str) -> str:
+    def resolve_migration_url(url: PostgresConfig | MysqlConfig | str) -> str:
         """Return the direct migration DSN, bypassing transaction-mode poolers (PgBouncer/PgCat/pgdog)."""
         if isinstance(url, PostgresConfig):
             return url.effective_direct_dsn
-        if isinstance(url, OracleConfig):
-            auth = f"{url.user}:{url.password}"
-            return f"oracle+vtb://{auth}@{url.host}:{url.port}/{url.service_name}"
         if isinstance(url, MysqlConfig):
             dsn = url.dsn
             if dsn.startswith("mysql://"):

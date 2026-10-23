@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import sys
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from importlib.util import find_spec
@@ -21,6 +22,7 @@ from typing import (
     runtime_checkable,
 )
 
+import msgspec
 from msgspec import Struct
 
 __all__ = (
@@ -34,9 +36,13 @@ __all__ = (
     "AttrsInstance",
     "BaseModel",
     "BaseModelStub",
+    "BaseStruct",
+    "CamelizedBaseStruct",
     "DataclassProtocol",
     "Empty",
     "EmptyType",
+    "FrozenBaseStruct",
+    "FrozenCamelizedStruct",
     "HandlerID",
     "ImproperConfigurationError",
     "LifecycleHook",
@@ -54,6 +60,30 @@ __all__ = (
     "module_available",
     "reset_dependency_cache",
 )
+
+
+class BaseStruct(Struct, gc=False, omit_defaults=True, repr_omit_defaults=True):
+    """Mutable GC-free base struct for state objects."""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert struct fields to a Python dictionary."""
+        return msgspec.structs.asdict(self)
+
+
+class CamelizedBaseStruct(BaseStruct, rename="camel"):
+    """Mutable GC-free base struct with camelCase wire field names."""
+
+
+class FrozenBaseStruct(Struct, frozen=True, gc=False, omit_defaults=True, repr_omit_defaults=True):
+    """Immutable GC-free base struct for configs, metadata, and wire models."""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert struct fields to a Python dictionary."""
+        return msgspec.structs.asdict(self)
+
+
+class FrozenCamelizedStruct(FrozenBaseStruct, rename="camel", frozen=True):
+    """Immutable GC-free base struct with camelCase wire field names."""
 
 
 class VertebraError(Exception):
@@ -159,6 +189,9 @@ class BaseModelStub:
 
 def module_available(module_name: str) -> bool:
     """Return True if the given module can be resolved."""
+    if module_name in sys.modules:
+        return sys.modules[module_name] is not None
+
     cached = _dependency_cache.get(module_name)
     if cached is not None:
         return cached
@@ -173,11 +206,13 @@ def module_available(module_name: str) -> bool:
 
 
 def reset_dependency_cache(module_name: str | None = None) -> None:
-    """Clear cached availability for one module or the entire cache."""
+    """Clear cached availability and imported module instances for one module or the entire cache."""
     if module_name is None:
         _dependency_cache.clear()
+        _module_cache.clear()
         return
     _dependency_cache.pop(module_name, None)
+    _module_cache.pop(module_name, None)
 
 
 def dependency_flag(module_name: str) -> OptionalDependency:
@@ -199,6 +234,7 @@ UVLOOP_INSTALLED = dependency_flag("uvloop")
 UUID_UTILS_INSTALLED = dependency_flag("uuid_utils")
 
 _dependency_cache: dict[str, bool] = {}
+_module_cache: dict[str, Any] = {}
 
 
 def _attrs_has_stub(obj: Any) -> bool:

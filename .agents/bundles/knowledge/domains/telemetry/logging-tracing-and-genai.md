@@ -50,9 +50,9 @@ Telemetry code lives in separate places that do not call each other: `vertebra-c
 
 | Symbol | Responsibility |
 |---|---|
-| [`TraceContext`](../../../../../src/py/vertebra/telemetry/otel.py) | `msgspec.Struct(frozen=True, gc=False, kw_only=True, array_like=True)`: `trace_id`, `span_id` (lowercase hex), `trace_flags=1`, `version=0`. `parse(header)` validates field lengths and hex and rejects version `ff` and zero ids. Also `generate(sampled=)`, `new_child()`, `format()`, `is_sampled`. |
+| [`TraceContext`](../../../../../src/py/vertebra/telemetry/otel.py) | `msgspec.Struct(frozen=True, gc=False, kw_only=True, cache_hash=True)`: `trace_id`, `span_id` (lowercase hex), `trace_flags=1`, `version=0`. `parse(header)` validates field lengths and hex and rejects version `ff` and zero ids. Also `generate(sampled=)`, `new_child()`, `format()`, `is_sampled`. |
 | `TraceContext.current` / `set_current` (static) | Read and bind the module-level `ContextVar` `_ACTIVE_TRACE_CTX`. `set_current` returns the reset `Token`. |
-| `SpanData` / `SpanExporter` | Array-like span struct. `SpanExporter` is a `deque(maxlen=capacity)` (default 4096) with `record_span` and `drain_spans`. When full, the oldest span is evicted silently. |
+| `SpanData` / `SpanExporter` | Frozen `msgspec.Struct(gc=False, kw_only=True)` span record. `SpanExporter` is a `deque(maxlen=capacity)` (default 4096) with `record_span` and `drain_spans`. When full, the oldest span is evicted silently. |
 | `GenAiMetricSample` / `GenAiRecorder` | Sample struct named after the OpenTelemetry `gen_ai.client.token.usage` / `gen_ai.client.operation.duration` metrics: `model`, `operation`, token counts, `duration_seconds`, `timestamp`. `record_generation(...)` appends to an unbounded list exposed as `samples`. |
 
 ## 4. SQL Trace Propagation (`db_propagation.py`)

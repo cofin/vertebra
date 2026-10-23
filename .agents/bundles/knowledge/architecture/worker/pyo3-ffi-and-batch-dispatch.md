@@ -41,11 +41,11 @@ sources:
 
 ## Startup handler specs (`_dispatch.py`)
 
-`run_worker` calls `_handler_dispatch_spec(handler)` for every handler at startup. The function is wrapped in `functools.lru_cache(maxsize=512)` and returns `(has_params, is_async, params, invoker)` from one `inspect.signature` call.
+`run_worker` calls `compile_handler_table(handlers)` (`compile_handler_spec(handler)`) for every handler at startup, returning a frozen [`HandlerSpec`](../../../../../src/py/vertebra/server/_dispatch.py) (`msgspec.Struct, frozen=True, gc=False, cache_hash=True`) with `(has_params, is_async, param_names, invoker)` from one `inspect.signature` call.
 
 ## `BatchDispatchPlan` partitioning and scheduling
 
-[`_partition_batch(batch, handlers, mount_runners)`](../../../../../src/py/vertebra/server/_dispatch.py) fills a [`BatchDispatchPlan`](../../../../../src/py/vertebra/server/_dispatch.py) (`msgspec.Struct, gc=False`) with four groups. `run_worker` and `_shm_worker_loop` always call `_dispatch_batch(..., async_mode=True)`:
+[`_partition_batch(batch, handlers, mount_runners)`](../../../../../src/py/vertebra/server/_dispatch.py) fills a [`BatchDispatchPlan`](../../../../../src/py/vertebra/server/_dispatch.py) (`msgspec.Struct, frozen=True, gc=False`) with four groups. `run_worker` and `_shm_worker_loop` always call `_dispatch_batch(..., async_mode=True)`:
 
 1. `sync_native`: each handler is submitted to the shared `vertebra-wsgi` `ThreadPoolExecutor` (`max(128, cpu_count * 8)` threads) and completed with `submit_response`.
 2. `async_native`: coroutines go to `scheduler.spawn_batch`. `EventLoopPool(size=1)` wakes its loop once per batch; `EventLoopPool(size > 1)` wakes once per non-empty shard. In SHM mode without a pool, `_shm_worker_loop` calls `loop.create_task` on its own running loop.

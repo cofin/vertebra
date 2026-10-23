@@ -5,7 +5,6 @@ MemorySessionStore, CacheSessionStore, SQLSpecSessionStore, AlchemySessionStore,
 ObjectStoreSessionStore, serializing conversation history via vertebra.utils.serializers.
 """
 
-import importlib
 import inspect
 import time
 from collections import OrderedDict
@@ -18,6 +17,7 @@ import anyio
 import msgspec
 
 from vertebra.agent.spec import AgentMessage
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 ANONYMOUS_OWNER = "anonymous"
@@ -253,11 +253,10 @@ class SQLSpecSessionStore:
 
 def _sql_text(statement: str) -> Any:
     """Safely build a SQLAlchemy text clause if sqlalchemy is installed, else return statement."""
-    try:
-        sa = importlib.import_module("sqlalchemy")
+    sa = import_optional("sqlalchemy")
+    if sa is not None and hasattr(sa, "text"):
         return sa.text(statement)
-    except Exception:
-        return statement
+    return statement
 
 
 class AlchemySessionStore:

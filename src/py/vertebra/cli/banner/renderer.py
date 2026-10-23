@@ -1,6 +1,5 @@
 """Banner renderer for Vertebra startup and shutdown."""
 
-import importlib
 import importlib.metadata
 import shutil
 import sys
@@ -20,6 +19,7 @@ from vertebra.cli.theme import (
     render_shutdown_blocks,
     render_startup_blocks,
 )
+from vertebra.utils.module_loader import import_optional
 
 __all__ = ("render_banner", "render_shutdown")
 
@@ -100,7 +100,9 @@ def _get_version() -> str:
 def _detect_rust_server() -> bool:
     """Check if the Rust server binary is available."""
     try:
-        sup_mod = importlib.import_module("vertebra.supervisor._supervisor")
+        sup_mod = import_optional("vertebra.supervisor._supervisor")
+        if sup_mod is None:
+            return False
         sup_mod.find_server_binary()
     except (SystemExit, Exception):
         return False

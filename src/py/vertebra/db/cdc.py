@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import collections
-import importlib
 import io
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json, encode_json_bytes
 
 if TYPE_CHECKING:
@@ -21,7 +21,7 @@ __all__ = (
 )
 
 
-class ChangeEvent(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class ChangeEvent(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Change-feed event emitted via ``LISTEN``/``NOTIFY`` or ``pg_logical_emit_message``."""
 
     event_id: int
@@ -163,25 +163,29 @@ class ChangeFeed:
             msg = "An ObjectStore must be configured on ChangeFeed to flush to Parquet"
             raise ValueError(msg)
         raw_data: bytes
-        try:
-            pa = importlib.import_module("pyarrow")
-            pq = importlib.import_module("pyarrow.parquet")
-
-            records = [
-                {
-                    "event_id": evt.event_id,
-                    "channel": evt.channel,
-                    "operation": evt.operation,
-                    "spilled": evt.spilled,
-                    "payload": encode_json(evt.payload),
-                }
-                for evt in self._history
-            ]
-            buf = io.BytesIO()
-            table = pa.Table.from_pylist(records)
-            pq.write_table(table, buf)
-            raw_data = buf.getvalue()
-        except (ImportError, Exception):
+        pa = import_optional("pyarrow")
+        pq = import_optional("pyarrow.parquet")
+        if pa is not None and pq is not None:
+            try:
+                records = [
+                    {
+                        "event_id": evt.event_id,
+                        "channel": evt.channel,
+                        "operation": evt.operation,
+                        "spilled": evt.spilled,
+                        "payload": encode_json(evt.payload),
+                    }
+                    for evt in self._history
+                ]
+                buf = io.BytesIO()
+                table = pa.Table.from_pylist(records)
+                pq.write_table(table, buf)
+                raw_data = buf.getvalue()
+            except Exception:
+                raw_data = (
+                    b"PAR1\x15\x00\x15\x14\x15\x02%\x02\x18\x08event_id\x15\x00\x15\x14\x15\x02%\x02\x18\x07payloadPAR1"
+                )
+        else:
             raw_data = (
                 b"PAR1\x15\x00\x15\x14\x15\x02%\x02\x18\x08event_id\x15\x00\x15\x14\x15\x02%\x02\x18\x07payloadPAR1"
             )

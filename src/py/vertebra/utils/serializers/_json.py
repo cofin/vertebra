@@ -14,8 +14,8 @@ from typing import Any, ClassVar, Final, Literal, cast, overload
 import msgspec
 from msgspec.json import Decoder, Encoder
 
-from vertebra import _typing
-from vertebra._typing import (
+from vertebra import typing as vertebra_typing
+from vertebra.typing import (
     PYDANTIC_INSTALLED,
     UUID_UTILS_INSTALLED,
 )
@@ -183,12 +183,12 @@ def _normalize_supported_value(value: Any) -> Any:
         return float(value)
     if isinstance(value, enum.Enum):
         return value.value
-    if PYDANTIC_INSTALLED and isinstance(value, _typing.BaseModel):
+    if PYDANTIC_INSTALLED and isinstance(value, vertebra_typing.BaseModel):
         return _dump_pydantic_model(value)
     if is_dataclass_instance(value):
         return dataclass_to_dict(value)
     if is_attrs_instance(value):
-        return _typing.attrs_asdict(value, recurse=True)
+        return vertebra_typing.attrs_asdict(value, recurse=True)
     if is_msgspec_struct(value):
         return _dump_msgspec_fields(value)
     numpy_value = numpy_array_enc_hook(value)

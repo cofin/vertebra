@@ -2,7 +2,6 @@
 
 import asyncio
 import contextlib
-import importlib
 import logging
 import threading
 import time
@@ -11,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import encode_json
 
 __all__ = ("CodegenWatcher", "HmrEventRouter", "HmrNotifier", "classify_file")
@@ -126,7 +126,9 @@ class CodegenWatcher:
 
     def _try_create_native_watcher(self) -> Any:
         try:
-            bundler_mod = importlib.import_module("vertebra._bundler")
+            bundler_mod = import_optional("vertebra._bundler")
+            if bundler_mod is None:
+                return None
             watcher_cls = getattr(bundler_mod, "SourceWatcher", None)
             if watcher_cls is None:
                 return None

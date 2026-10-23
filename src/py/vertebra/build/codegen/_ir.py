@@ -36,7 +36,7 @@ class TypeNode(msgspec.Struct, frozen=True, gc=False, tag_field="_type", tag=Tru
         return ()
 
 
-class PrimitiveType(TypeNode, frozen=True, tag="primitive"):
+class PrimitiveType(TypeNode, frozen=True, cache_hash=True, tag="primitive"):
     """Primitive scalar TypeScript type node."""
 
     kind: str
@@ -95,7 +95,7 @@ class UnionType(TypeNode, frozen=True, tag="union"):
         return self.variants
 
 
-class LiteralType(TypeNode, frozen=True, tag="literal"):
+class LiteralType(TypeNode, frozen=True, cache_hash=True, tag="literal"):
     """Literal TypeScript type node."""
 
     value: object
@@ -143,7 +143,7 @@ class TupleType(TypeNode, frozen=True, tag="tuple"):
         return self.items
 
 
-class RawType(TypeNode, frozen=True, tag="raw"):
+class RawType(TypeNode, frozen=True, cache_hash=True, tag="raw"):
     """Verbatim TypeScript type expression node."""
 
     typescript: str
@@ -153,7 +153,7 @@ class RawType(TypeNode, frozen=True, tag="raw"):
         return self.typescript
 
 
-class UnknownType(TypeNode, frozen=True, tag="unknown"):
+class UnknownType(TypeNode, frozen=True, cache_hash=True, tag="unknown"):
     """Fallback TypeScript unknown type node."""
 
     def to_typescript(self) -> str:
@@ -161,7 +161,7 @@ class UnknownType(TypeNode, frozen=True, tag="unknown"):
         return "unknown"
 
 
-class NamedTypeRef(TypeNode, frozen=True, tag="named_ref"):
+class NamedTypeRef(TypeNode, frozen=True, cache_hash=True, tag="named_ref"):
     """Reference to a named TypeScript interface or type alias."""
 
     name: str

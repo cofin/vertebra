@@ -50,7 +50,7 @@ class JsonRpcError(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return payload
 
 
-class JsonRpcRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class JsonRpcRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True, forbid_unknown_fields=True):
     """JSON-RPC 2.0 request or notification envelope."""
 
     method: str

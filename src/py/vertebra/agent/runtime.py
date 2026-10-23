@@ -4,7 +4,6 @@ This module provides the core execution harness for autonomous agents and agent 
 managing model generation, parallel tool execution, retry backoff, and human-in-the-loop gates.
 """
 
-import importlib
 import random
 import secrets
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -21,10 +20,11 @@ from vertebra.agent.core.sse import SseFrame
 from vertebra.agent.spec import TRANSFER_TOOL_NAME, Agent, AgentGroup, AgentMessage
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.telemetry.genai import GenAiUsage
-from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.utils.module_loader import import_optional
+from vertebra.utils.serializers import decode_json, encode_json, encode_json_bytes
 
 
-class ModelDelta(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class ModelDelta(msgspec.Struct, frozen=True, gc=False, kw_only=True, omit_defaults=True):
     """Incremental chunk produced by a model provider during chat streaming."""
 
     event_type: Literal["delta", "thought", "tool_call", "usage"]
@@ -68,13 +68,12 @@ class GoogleGenAIProvider:
     def _get_client(self) -> Any:
         if self._client is not None:
             return self._client
-        try:
-            genai_module = importlib.import_module("google.genai")
-            self._client = genai_module.Client(api_key=self.api_key)
-            return self._client
-        except ImportError as exc:
+        genai_module = import_optional("google.genai")
+        if genai_module is None:
             msg = "The 'google-genai' package is required to use GoogleGenAIProvider"
-            raise RuntimeError(msg) from exc
+            raise RuntimeError(msg)
+        self._client = genai_module.Client(api_key=self.api_key)
+        return self._client
 
     async def stream_chat(
         self,
@@ -95,7 +94,7 @@ class GoogleGenAIProvider:
         yield ModelDelta(event_type="usage", usage=GenAiUsage(input_tokens=10, output_tokens=10))
 
 
-class AgentStreamFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class AgentStreamFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, omit_defaults=True):
     """Wire frame streamed to subscribers during an active agent turn."""
 
     turn_id: str
@@ -118,11 +117,10 @@ class AgentStreamFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, arra
 
     def to_sse_frame(self, event_id: str) -> SseFrame:
         """Encode this stream frame into a W3C-compliant SSE frame."""
-        data_bytes = encode_json_bytes(decode_json(encode_json_bytes(self)))
         return SseFrame(
             id=event_id,
             event=self.event_type,
-            data=data_bytes.decode("utf-8"),
+            data=encode_json(self),
         )
 
 

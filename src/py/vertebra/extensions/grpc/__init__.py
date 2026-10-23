@@ -75,7 +75,7 @@ class GrpcError(Exception):
         self.details = details or status.name
 
 
-class GrpcContext(msgspec.Struct, gc=False):
+class GrpcContext(msgspec.Struct, frozen=True, gc=False):
     """Invocation context carrying peer address, request metadata, and optional deadline."""
 
     peer: str = ""
@@ -92,7 +92,7 @@ class GrpcMethodKind(enum.Enum):
     BIDI_STREAMING = "bidi_streaming"
 
 
-class GrpcMethodSpec(msgspec.Struct, frozen=True, gc=False):
+class GrpcMethodSpec(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Introspected metadata for a decorated @grpc_method handler."""
 
     service: str

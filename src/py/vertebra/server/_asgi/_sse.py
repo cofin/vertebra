@@ -30,7 +30,7 @@ def extract_last_event_id(scope: dict[str, Any]) -> str | None:
     return None
 
 
-class SseEvent(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class SseEvent(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """Structured Server-Sent Events message frame."""
 
     data: str = ""

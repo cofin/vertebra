@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import importlib
 from typing import Any
 
 from vertebra.framework.channels import ChannelBus
+from vertebra.utils.module_loader import import_optional
 
 ChannelsBackend = ChannelBus
 
@@ -43,15 +43,14 @@ def swap_litestar_channels_backend(app: Any, backend: ChannelBus | None = None) 
 
 def _load_channels_types() -> tuple[type[Any] | None, type[Any] | None]:
     """Load Litestar ChannelsPlugin and MemoryChannelsBackend and register ChannelBus."""
-    try:
-        ch_mod = importlib.import_module("litestar.channels")
-        mem_mod = importlib.import_module("litestar.channels.backends.memory")
-        register_fn = getattr(ch_mod.ChannelsBackend, "register", None)
-        if callable(register_fn):
-            register_fn(ChannelBus)
-        return ch_mod.ChannelsPlugin, mem_mod.MemoryChannelsBackend
-    except ImportError:
+    ch_mod = import_optional("litestar.channels")
+    mem_mod = import_optional("litestar.channels.backends.memory")
+    if ch_mod is None or mem_mod is None:
         return None, None
+    register_fn = getattr(ch_mod.ChannelsBackend, "register", None)
+    if callable(register_fn):
+        register_fn(ChannelBus)
+    return ch_mod.ChannelsPlugin, mem_mod.MemoryChannelsBackend
 
 
 _ChannelsPluginCls, _MemoryChannelsBackendCls = _load_channels_types()

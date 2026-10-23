@@ -53,9 +53,13 @@ Fallbacks: when `msgspec` raises any other `TypeError` or a `ValueError`, `encod
 
 `_numpy.py` also exports `numpy_array_enc_hook`, `numpy_array_dec_hook` (direct one-argument use or Litestar's `(target_type, value)` form), and `numpy_array_predicate`. Each hook returns the value unchanged when NumPy is not installed.
 
-## 2. Schema Dumping (`_schema.py`)
+## 2. Base Structs & Schema Dumping (`_schema.py`, `typing.py`)
 
-`schema_dump(data, *, exclude_unset=True)`, `serialize_collection(items, ...)`, and `get_collection_serializer(sample, ...)` turn models into plain dicts through a `SchemaSerializer` cached per `(type, exclude_unset)` under a module `RLock`. The dump function is chosen once per type: dict identity, dataclass, Pydantic `model_dump`, `msgspec.Struct` fields (dropping `UNSET` when `exclude_unset`), attrs, `__dict__`, then `dict(value)`. Primitives, `None`, and dicts pass through unchanged. `get_serializer_metrics()` returns hit/miss/size counters only when `VTB_DEBUG_PIPELINE_CACHE` is truthy. `reset_serializer_cache()` clears the cache.
+[`vertebra.typing`](../../../../../src/py/vertebra/typing.py) and [`vertebra.utils.serializers`](../../../../../src/py/vertebra/utils/serializers/__init__.py) export four canonical `msgspec.Struct` base classes, each providing `.to_dict()`:
+- `BaseStruct(Struct, gc=False, omit_defaults=True, repr_omit_defaults=True)` and `CamelizedBaseStruct(BaseStruct, rename="camel")` for mutable state objects.
+- `FrozenBaseStruct(Struct, frozen=True, gc=False, omit_defaults=True, repr_omit_defaults=True)` and `FrozenCamelizedStruct(FrozenBaseStruct, rename="camel", frozen=True)` for immutable wire models and configs.
+
+`_dump_msgspec_fields(value)` in [`_schema.py`](../../../../../src/py/vertebra/utils/serializers/_schema.py) extracts `msgspec.Struct` fields into a plain dictionary when invoked through the serializer fallback hook.
 
 ## 3. Async/Sync Bridging (`sync_tools.py`, `portal.py`)
 
@@ -75,7 +79,7 @@ Outside `vertebra.utils`, `vertebra.extensions.sqlalchemy.dialects` (`SyncPool`)
 
 ## 4. Optional Dependencies, Config, SQL Identifiers & IDs
 
-- [`module_loader.py`](../../../../../src/py/vertebra/utils/module_loader.py): `import_app("module:attr")`, `import_string`, `import_optional` (returns `None` on any import failure), `module_available`, `dependency_flag`, `module_to_os_path`, `ensure_{sqlspec,sqlalchemy,advanced_alchemy,uvloop,pyarrow,msgspec}` (raise `MissingDependencyError`), `reset_dependency_cache`.
+- [`module_loader.py`](../../../../../src/py/vertebra/utils/module_loader.py): `import_app("module:attr")`, `import_string`, `import_optional` (caches imported `ModuleType` or `None` in `_module_cache` so repeated positive and negative lookups are $O(1)$ without re-running `importlib.import_module`), `ensure_module` (returns cached `ModuleType` or raises `MissingDependencyError`), `module_available`, `dependency_flag`, `module_to_os_path`, `ensure_{sqlspec,sqlalchemy,advanced_alchemy,uvloop,pyarrow,msgspec}` (raise `MissingDependencyError`), `reset_dependency_cache` (clears `_availability_cache`, `_module_cache`, and resets `OptionalDependency` flags).
 - [`config_tools.py`](../../../../../src/py/vertebra/utils/config_tools.py): `get_env(key, default, type_hint)` (bool coercion from `1/true/yes/on` and `0/false/no/off`), `find_pyproject_toml`, `parse_pyproject_config` / `read_pyproject_section` (reads `[tool.vertebra]` with `[tool.vtb]` fallback), and `SingletonMeta` (thread-safe per-class singleton metaclass).
 - [`pipeline.py`](../../../../../src/py/vertebra/db/pipeline.py) and [`rls.py`](../../../../../src/py/vertebra/db/rls.py): `_IDENT_RE` (`^[A-Za-z_][A-Za-z0-9_]*$`) and `_validate_identifier()` validate SQL, PL/SQL, CTE, and GUC identifiers before string interpolation.
 - [`uuids.py`](../../../../../src/py/vertebra/utils/uuids.py): `uuid3/4/5/6/7` and `nanoid` use `uuid_utils` / `fastnanoid` when installed. `uuid6` falls back to `uuid4` with a warning.
@@ -86,7 +90,7 @@ Outside `vertebra.utils`, `vertebra.extensions.sqlalchemy.dialects` (`SyncPool`)
 - `encode_json` and `encode_json_bytes` fall back to stdlib `json.dumps` for any `msgspec` `TypeError` other than "unsupported JSON value", and for any `ValueError`. `encode_json_into` has no fallback.
 - `decode_json` falls back to `json.loads` on `msgspec` `TypeError` or `ValueError`.
 - The JSON `enc_hook` encodes `Decimal` as `float` and naive `datetime` as UTC with a `Z` suffix.
-- `SchemaSerializer` pipelines are cached per `(type(sample), exclude_unset)`. Dicts and `None` share the key `(None, exclude_unset)`.
+- `BaseStruct`, `CamelizedBaseStruct`, `FrozenBaseStruct`, and `FrozenCamelizedStruct` configure `gc=False, omit_defaults=True, repr_omit_defaults=True` (with `frozen=True` on the frozen variants and `rename="camel"` on the camelized variants) and expose `.to_dict()` via `msgspec.structs.asdict`.
 - `async_` dispatches to `SyncPool.default()` only when `sys._is_gil_enabled()` returns `False`. Otherwise it uses `asyncio.to_thread`.
 - `SyncPool`, `CapacityLimiter`, and `PortalManager` rebuild their executor, semaphores, or provider when `os.getpid()` changes.
 - `vertebra.utils.config_tools` reads `[tool.vertebra]` (falling back to `[tool.vtb]`) and `vertebra.telemetry.LoggingConfig` reads `[tool.vertebra.logging]`.

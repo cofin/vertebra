@@ -41,7 +41,7 @@ You are a write-enabled specialist executing fixes and implementations in `pytho
 ## Implementation Process
 
 1. Review the assigned task worksheet or candidate finding.
-2. Implement targeted Python framework or server fixes using `edit_file` or `write_file`.
+2. Implement targeted Python framework or server fixes using `edit_file` or `write_file`, ensuring all typing/struct/exception/sentinel imports use `vertebra.typing` (never `vertebra._typing`) and all optional/dynamic module imports use `vertebra.utils.module_loader` (`import_optional`, `ensure_module`).
 
 ## Verification
 

@@ -4,8 +4,8 @@ from typing import NoReturn
 
 import click
 
-from vertebra._typing import ImproperConfigurationError, MissingDependencyError, VertebraError
 from vertebra.cli.theme import Console, console
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError, VertebraError
 
 __all__ = (
     "CLIError",

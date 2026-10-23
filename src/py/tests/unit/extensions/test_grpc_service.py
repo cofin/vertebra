@@ -10,7 +10,6 @@ import msgspec
 import pytest
 
 import vertebra.wasm as wasm_mod
-from vertebra._typing import MissingDependencyError
 from vertebra.extensions.grpc import (
     GrpcContext,
     GrpcError,
@@ -22,6 +21,7 @@ from vertebra.extensions.grpc import (
     encode_lpm_frame,
     grpc_method,
 )
+from vertebra.typing import MissingDependencyError
 from vertebra.utils.serializers import decode_msgpack, encode_msgpack
 from vertebra.wasm import (
     WASM_MAGIC_HEADER,

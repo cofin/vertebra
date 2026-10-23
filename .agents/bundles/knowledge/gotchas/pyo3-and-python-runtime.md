@@ -48,3 +48,14 @@ sources:
 
 - **Rebuild Extensions After Rust Edits**: `uv run pytest` imports compiled `.so` binaries from `.venv` (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`). Always run `make dev` (or `make py-test`) after modifying `vertebra-core`, `vertebra-py`, `vertebra-bundler`, or `vertebra-storage`.
 - **Keep `bench` Dependencies Out of `dev`**: Keep `duckdb`, `spikard`, and `granian` inside `[dependency-groups].bench` in [`pyproject.toml`](../../../../pyproject.toml) so `uv run` on Python `3.14t` never compiles `duckdb` from source during normal test runs.
+
+## 6. `AsyncLogCore` Batched Newline-Delimited JSONL Buffers vs Pure-Python Fallback
+
+- **Symptom**: `assert len(log_sink.drain()) == 4` passes in pure-Python fallback tests but fails with `assert 1 == 4` when running with the compiled `_vertebra` extension in CI.
+- **Root Cause**: The Rust native `AsyncLogCore` batches multiple JSONL records into a single `bytes` chunk (`b'{...}\n{...}\n{...}\n{...}\n'`) for zero-copy I/O efficiency, whereas the pure-Python `BoundedLogQueue` fallback appends separate single-record `bytes` items to a Python `collections.deque`.
+- **Rule**: When asserting on drained audit logs in unit tests, always split chunks on line boundaries: `[line for chunk in log_sink.drain() for line in chunk.splitlines() if line.strip()]`.
+
+## 7. TNS Descriptor Validation & Socket Teardown Timeouts
+
+- **TNS Character Validation**: Oracle Connect Descriptors constructed via `OracleConnectDescriptor.to_tns_descriptor()` must strictly validate host, port, protocol, service, and SID inputs against safe identifier regexes (`^[A-Za-z0-9._-]+$`) to prevent TNS descriptor injection attacks.
+- **Socket Teardown in Async Database Drivers**: In asyncio driver implementations (such as `AsyncRedisDriver` or loopback server mock harnesses), calling `writer.close()` must be paired with `asyncio.wait_for(writer.wait_closed(), timeout=...)` with a bounded timeout (e.g. 50 ms) to avoid hanging worker event loops during process shutdown.

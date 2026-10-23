@@ -8,7 +8,7 @@ description: Reviews Python framework architecture, server runners, Litestar ext
 - **Typing**: Strict PEP 695/604/585 typing; strict mypy passes with zero ignores (`PY-03`).
 - **Structs**: Config, metadata, and wire frames are `msgspec.Struct(..., frozen=True, gc=False)` (`PY-04`).
 - **Serializers**: JSON serialization routes through `vertebra.utils.serializers` (`PY-05`).
-- **Imports**: Top-level grouped imports; PEP 562 lazy loading in packages (`PY-01`, `PY-06`, `PY-08`).
+- **Imports**: Top-level grouped imports; public `vertebra.typing` shim only (never `vertebra._typing`); cached `vertebra.utils.module_loader` (`import_optional`, `ensure_module`) instead of raw `importlib.import_module`; PEP 562 lazy loading in packages (`PY-01`, `PY-06`, `PY-08`).
 - **Suppressions**: Respect `FP-PY-01`..`FP-PY-03` in the shared catalog.
 <!-- truth: end -->
 
@@ -35,7 +35,7 @@ description: Reviews Python framework architecture, server runners, Litestar ext
 2. **Type annotations**: Verify PEP 695 type parameters, PEP 604 unions (`T | None`), and built-in generics (`PY-03`).
 3. **Data models**: Require `msgspec.Struct(frozen=True, gc=False)` on value objects and wire frames (`PY-04`).
 4. **Serialization hygiene**: Ensure all JSON operations use `vertebra.utils.serializers` (`PY-05`).
-5. **Import discipline**: Enforce top-level imports and lazy PEP 562 exports in `__init__.py` files (`PY-06`, `PY-08`).
+5. **Import discipline**: Enforce top-level imports, public `vertebra.typing` shim usage (forbidding `vertebra._typing` outside `vertebra/typing.py`), cached `vertebra.utils.module_loader` (`import_optional`, `ensure_module`) instead of raw `importlib.import_module`, and lazy PEP 562 exports in `__init__.py` files (`PY-06`, `PY-08`).
 6. **Class ordering**: Verify slots, `__init__`, properties, public methods, and private methods in sequence (`PY-09`).
 7. **Hot path execution**: Prevent loop wakeups and signature inspection on per-request paths (`PY-10`).
 

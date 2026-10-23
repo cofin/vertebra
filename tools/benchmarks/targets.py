@@ -1,10 +1,13 @@
+"""Server targets and runtime topologies for Vertebra HTTP benchmarks."""
+
 from __future__ import annotations
 
+import glob
 import os
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -18,18 +21,19 @@ class Topology(StrEnum):
     BASELINE = "baseline"
 
 
-@dataclass(frozen=True, slots=True)
 class Target:
     """A server target to benchmark."""
 
-    name: str
-    _cmd_data: list[str] | Callable[[], list[str]] = field(repr=False)
-    topology: Topology
-    host: str = "127.0.0.1"
-    port: int = 8000
-    _env_data: dict[str, str] | Callable[[], dict[str, str]] | None = field(default=None, repr=False)
-    description: str = ""
-    category: str = "vertebra"
+    __slots__ = (
+        "_cmd_data",
+        "_env_data",
+        "category",
+        "description",
+        "host",
+        "name",
+        "port",
+        "topology",
+    )
 
     def __init__(
         self,
@@ -42,14 +46,14 @@ class Target:
         description: str = "",
         category: str = "vertebra",
     ) -> None:
-        object.__setattr__(self, "name", name)
-        object.__setattr__(self, "_cmd_data", cmd)
-        object.__setattr__(self, "topology", topology)
-        object.__setattr__(self, "host", host)
-        object.__setattr__(self, "port", port)
-        object.__setattr__(self, "_env_data", env)
-        object.__setattr__(self, "description", description)
-        object.__setattr__(self, "category", category)
+        self.name = name
+        self._cmd_data = cmd
+        self.topology = topology
+        self.host = host
+        self.port = port
+        self._env_data = env
+        self.description = description
+        self.category = category
 
     @property
     def cmd(self) -> list[str]:
@@ -101,8 +105,6 @@ def _ft_env() -> dict[str, str]:
     if uv is None:
         return {}
     try:
-        import subprocess
-
         py_path = subprocess.check_output([uv, "python", "find", "3.14t"], text=True).strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return {}
@@ -111,11 +113,8 @@ def _ft_env() -> dict[str, str]:
     src_py = os.path.join(repo, "src", "py")
     venv_ft = os.path.join(repo, ".venv-ft")
 
-    # Find the site-packages inside .venv-ft for the 3.14t interpreter
     site_packages = ""
     if os.path.isdir(venv_ft):
-        import glob
-
         matches = glob.glob(os.path.join(venv_ft, "lib", "python*", "site-packages"))
         if matches:
             site_packages = matches[0]
@@ -135,14 +134,7 @@ def _ft_run(*args: str) -> list[str]:
     return [binary, *args]
 
 
-# Port assignments:
-#   8000-8002  - vertebra single-worker embedded (native/asgi/wsgi)
-#   8003-8005  - baselines (granian/uvicorn/spikard)
-#   8010-8013  - vertebra multi-process SHM
-#   8020-8023  - vertebra free-threaded 3.14t
-
 ALL_TARGETS: dict[str, Target] = {
-    # ── Embedded (Single-process, in-process Python) ───────────────────
     "vtb-embedded-native": Target(
         name="vtb-embedded-native",
         topology=Topology.EMBEDDED,
@@ -166,7 +158,6 @@ ALL_TARGETS: dict[str, Target] = {
         port=8002,
         description="Vertebra embedded, WSGI adapter",
     ),
-    # ── SHM (Multi-process, shared-memory IPC) ──────────────────────────
     "vtb-shm-native-4w": Target(
         name="vtb-shm-native-4w",
         topology=Topology.SHM,
@@ -211,7 +202,6 @@ ALL_TARGETS: dict[str, Target] = {
         env={"VERTEBRA_WORKERS": "4"},
         description="Vertebra SHM, WSGI, 4 workers",
     ),
-    # ── Free-threaded Python 3.14t ──────────────────────────────────────
     "vtb-ft-native-4w": Target(
         name="vtb-ft-native-4w",
         topology=Topology.FREE_THREADED,
@@ -228,7 +218,6 @@ ALL_TARGETS: dict[str, Target] = {
         description="Vertebra FT, native handlers, 4 threads",
         category="freethreaded",
     ),
-    # ── Baselines ───────────────────────────────────────────────────────
     "granian-asgi": Target(
         name="granian-asgi",
         topology=Topology.BASELINE,

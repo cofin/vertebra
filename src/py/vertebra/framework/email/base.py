@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkabl
 
 import msgspec
 
-from vertebra._typing import UnsupportedBackendError
 from vertebra.framework.queues.base import TaskDef, TaskRetryPolicy
+from vertebra.typing import UnsupportedBackendError
 from vertebra.utils.module_loader import import_string
 
 if TYPE_CHECKING:
@@ -75,7 +75,7 @@ class EmailMessage(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     metadata: dict[str, str] = msgspec.field(default_factory=dict)
 
 
-class EmailReceipt(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class EmailReceipt(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Delivery confirmation receipt returned by an email transport."""
 
     message_id: str

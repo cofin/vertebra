@@ -461,3 +461,23 @@ def test_real_repo_bundles_and_privacy_pass() -> None:
     validator = ReviewSetupValidator(repo_root)
     issues = validator.validate(frozenset({"bundles", "privacy"}))
     assert issues == []
+
+
+def test_python_imports_catches_private_typing_and_raw_import_module(tmp_path: Path) -> None:
+    """Verify python_imports rule rejects vertebra._typing and raw importlib.import_module calls."""
+    repo = build_minimal_review_tree(tmp_path)
+    pkg_dir = repo / "src/py/vertebra/sample"
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+    bad_file = pkg_dir / "mod.py"
+    bad_file.write_text(
+        "import importlib\n"
+        "from vertebra._typing import MissingDependencyError\n\n"
+        "def load() -> object:\n"
+        "    return importlib.import_module('json')\n",
+        encoding="utf-8",
+    )
+
+    validator = ReviewSetupValidator(repo)
+    issues = validator.validate(frozenset({"python_imports"}))
+    assert any("vertebra._typing" in i.message for i in issues)
+    assert any("importlib.import_module" in i.message for i in issues)

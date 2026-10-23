@@ -1,6 +1,5 @@
 """Fused direct Litestar v2/v3 HTTPRouteHandler execution and ScopeState.body pre-seeding."""
 
-import importlib
 import inspect
 from collections.abc import AsyncGenerator, AsyncIterable, Callable, Generator, Iterable
 from typing import Any, Self
@@ -15,6 +14,7 @@ from vertebra.extensions.litestar.offload import (
     _is_default_local_filesystem,
 )
 from vertebra.extensions.litestar.router import extract_litestar_routes
+from vertebra.utils.module_loader import import_optional
 
 __all__ = (
     "CompiledLitestarRoute",
@@ -52,7 +52,7 @@ class LitestarFastPathBypass:
         return None
 
 
-class CompiledLitestarRoute(msgspec.Struct, frozen=True, gc=False, array_like=True):
+class CompiledLitestarRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Pre-compiled per-route dispatch metadata for zero-overhead Litestar v2/v3 handler invocation."""
 
     handler_id: int
@@ -207,12 +207,11 @@ class _FallbackASGIResponse:
 
 
 def _load_litestar_fastpath_types() -> tuple[Any, Any]:
-    try:
-        resp_mod = importlib.import_module("litestar.response.base")
-        state_mod = importlib.import_module("litestar.utils.scope.state")
+    resp_mod = import_optional("litestar.response.base")
+    state_mod = import_optional("litestar.utils.scope.state")
+    if resp_mod is not None and state_mod is not None:
         return resp_mod.ASGIResponse, state_mod.ScopeState
-    except ImportError:
-        return _FallbackASGIResponse, _FallbackScopeState
+    return _FallbackASGIResponse, _FallbackScopeState
 
 
 ASGIResponse, ScopeState = _load_litestar_fastpath_types()

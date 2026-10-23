@@ -7,14 +7,14 @@ to standard library.
 
 from __future__ import annotations
 
-from importlib import import_module
 from typing import Any, ClassVar, Final, cast
 from uuid import NAMESPACE_DNS, NAMESPACE_OID, NAMESPACE_URL, NAMESPACE_X500, UUID
 from uuid import uuid3 as _stdlib_uuid3
 from uuid import uuid4 as _stdlib_uuid4
 from uuid import uuid5 as _stdlib_uuid5
 
-from vertebra._typing import UUID_UTILS_INSTALLED
+from vertebra.typing import UUID_UTILS_INSTALLED
+from vertebra.utils.module_loader import import_optional
 
 __all__ = (
     "NAMESPACE_DNS",
@@ -44,10 +44,7 @@ class _UuidBackend:
         if not UUID_UTILS_INSTALLED:
             cls._module = None
             return None
-        try:
-            cls._module = import_module("uuid_utils")
-        except ImportError:
-            cls._module = None
+        cls._module = import_optional("uuid_utils")
         return cls._module
 
 

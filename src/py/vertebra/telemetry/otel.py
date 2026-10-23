@@ -29,7 +29,7 @@ __all__ = (
 )
 
 
-class TraceContext(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class TraceContext(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """W3C Trace Context traceparent representation (00-<trace_id>-<span_id>-<flags>)."""
 
     trace_id: str
@@ -95,7 +95,7 @@ _ACTIVE_TRACE_CTX: ContextVar[TraceContext | None] = ContextVar(
 )
 
 
-class SpanData(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class SpanData(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Lightweight span record exported through SpanExporter."""
 
     name: str
@@ -130,7 +130,7 @@ class SpanExporter:
         return spans
 
 
-class GenAiUsage(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class GenAiUsage(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """Token usage breakdown for a single model generation or aggregated turn."""
 
     input_tokens: int = 0
@@ -251,7 +251,7 @@ def calculate_percentile(sorted_values: list[float], percentile: float) -> float
     return d0 + d1
 
 
-class GenAiMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class GenAiMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """OpenTelemetry gen_ai.* semantic convention metric sample."""
 
     model: str
@@ -369,7 +369,7 @@ class GenAiRecorder:
         return drained
 
 
-class DbPoolMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class DbPoolMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """OpenTelemetry db.client.connections.* semantic convention metric sample."""
 
     pool_name: str

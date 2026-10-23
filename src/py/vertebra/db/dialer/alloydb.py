@@ -31,7 +31,7 @@ class AlloyDbAuthType(IntEnum):
     IAM = 2
 
 
-class AlloyDbClusterUri(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class AlloyDbClusterUri(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """Parsed AlloyDB instance URI (`projects/<p>/locations/<l>/clusters/<c>/instances/<i>`)."""
 
     project: str

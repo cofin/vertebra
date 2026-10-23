@@ -72,12 +72,12 @@ PARAM_CONVERTERS: dict[str, Callable[[str], Any]] = {
 _PARAM_CONVERTERS = PARAM_CONVERTERS
 
 
-class ParamSpec(msgspec.Struct, frozen=True, gc=False, array_like=True):
+class ParamSpec(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     name: str
     param_type: str
 
 
-class RouteDef(msgspec.Struct, frozen=True, gc=False, array_like=True):
+class RouteDef(msgspec.Struct, frozen=True, gc=False):
     method: str
     path: str
     handler: Callable[..., Any]

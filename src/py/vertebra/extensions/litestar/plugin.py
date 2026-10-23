@@ -1,13 +1,11 @@
 """First-class Litestar plugin activating Vertebra Rust accelerations and CLI server lifespan hooks."""
 
 import contextlib
-import importlib
 import os
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
 
-from vertebra._typing import MissingDependencyError
 from vertebra.agent.plugin import AgentPlugin
 from vertebra.extensions.litestar.channels import swap_litestar_channels_backend
 from vertebra.extensions.litestar.config import LitestarConfig
@@ -22,6 +20,7 @@ from vertebra.extensions.litestar.offload import (
 )
 from vertebra.extensions.litestar.router import extract_litestar_routes
 from vertebra.extensions.litestar.store import swap_litestar_response_cache_store
+from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
 
 __all__ = (
@@ -168,9 +167,9 @@ def enter_litestar_server_lifespan(app: Any, *, app_path: str | None = None) -> 
 
 
 def _load_litestar_get() -> Callable[..., Callable[[Callable[..., Any]], Any]]:
-    try:
-        mod = importlib.import_module("litestar")
-        plugins_mod = importlib.import_module("litestar.plugins")
+    mod = import_optional("litestar")
+    plugins_mod = import_optional("litestar.plugins")
+    if mod is not None and plugins_mod is not None:
         for proto_name in ("InitPluginProtocol", "CLIPlugin", "CLIPluginProtocol"):
             proto = getattr(plugins_mod, proto_name, None)
             reg = getattr(proto, "register", None)
@@ -179,22 +178,21 @@ def _load_litestar_get() -> Callable[..., Callable[[Callable[..., Any]], Any]]:
                     reg(LitestarPlugin)
         get_fn: Callable[..., Callable[[Callable[..., Any]], Any]] = mod.get
         return get_fn
-    except ImportError:
 
-        def fallback_get(path: str, **_kwargs: Any) -> Callable[[Callable[..., Any]], Any]:
-            def wrap(fn: Callable[..., Any]) -> Any:
-                return SimpleNamespace(
-                    paths={path},
-                    http_methods={"GET"},
-                    fn=fn,
-                    guards=(),
-                    middleware=(),
-                    opt={},
-                )
+    def fallback_get(path: str, **_kwargs: Any) -> Callable[[Callable[..., Any]], Any]:
+        def wrap(fn: Callable[..., Any]) -> Any:
+            return SimpleNamespace(
+                paths={path},
+                http_methods={"GET"},
+                fn=fn,
+                guards=(),
+                middleware=(),
+                opt={},
+            )
 
-            return wrap
+        return wrap
 
-        return fallback_get
+    return fallback_get
 
 
 _litestar_get = _load_litestar_get()

@@ -9,7 +9,6 @@ from typing import Any
 import msgspec
 import pytest
 
-from vertebra._typing import MissingDependencyError, UnsupportedBackendError
 from vertebra.extensions.litestar import LitestarConfig, LitestarPlugin
 from vertebra.framework._app import App
 from vertebra.framework.asyncapi import AsyncAPISpecBuilder, AsyncChannelDef
@@ -36,6 +35,7 @@ from vertebra.framework.security import (
 )
 from vertebra.framework.ssr import SsrFrame
 from vertebra.framework.stores import MemoryStore, NamespacedStore
+from vertebra.typing import MissingDependencyError, UnsupportedBackendError
 from vertebra.wasm import WASM_MAGIC_HEADER, WasmModuleConfig, WasmSandboxPolicy
 
 

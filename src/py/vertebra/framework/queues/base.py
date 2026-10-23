@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkabl
 
 import msgspec
 
-from vertebra._typing import UnsupportedBackendError
 from vertebra.telemetry.otel import TraceContext
+from vertebra.typing import UnsupportedBackendError
 from vertebra.utils.module_loader import import_string
 
 if TYPE_CHECKING:
@@ -38,7 +38,7 @@ __all__ = (
 type TaskLane = Literal["cpu", "io", "agent"]
 
 
-class TaskRetryPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class TaskRetryPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """Retry and exponential backoff policy for background tasks."""
 
     max_retries: int = 3
@@ -61,7 +61,7 @@ class TaskRetryPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return max(0.0, min(self.max_backoff_seconds, jittered))
 
 
-class CronSchedule(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class CronSchedule(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """Recurring cron schedule descriptor for background jobs."""
 
     expression: str

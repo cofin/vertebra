@@ -10,7 +10,6 @@ from typing import Any
 
 import msgspec
 
-from vertebra._typing import UnsupportedBackendError
 from vertebra.agent.a2a.models import AgentCard, AgentInterface, AgentSkill
 from vertebra.agent.core.schema import Tool
 from vertebra.agent.mcp.registry import MCPRegistry
@@ -19,6 +18,7 @@ from vertebra.extensions.apex.session import (
     OraclePoolLike,
     OracleSessionManager,
 )
+from vertebra.typing import UnsupportedBackendError
 from vertebra.utils.serializers import encode_json
 
 __all__ = (

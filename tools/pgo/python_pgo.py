@@ -5,7 +5,8 @@ import platform
 import subprocess
 import sys
 import sysconfig
-from dataclasses import dataclass
+
+import msgspec
 
 __all__ = (
     "CPYTHON_PGO_FLAGS",
@@ -18,8 +19,7 @@ __all__ = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class PythonBuildInfo:
+class PythonBuildInfo(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Immutable snapshot of a CPython interpreter's optimization configuration."""
 
     version: str
@@ -29,8 +29,7 @@ class PythonBuildInfo:
     architecture: str
 
 
-@dataclass(frozen=True, slots=True)
-class PlatformSupport:
+class PlatformSupport(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """CPython optimization availability record for an OS and CPU architecture pair."""
 
     os_name: str

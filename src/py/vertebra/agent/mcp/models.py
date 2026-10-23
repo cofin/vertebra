@@ -9,12 +9,14 @@ from typing import Any, Literal
 
 import msgspec
 
+from vertebra.typing import FrozenBaseStruct
+
 MCP_PROTOCOL_VERSION: str = "2026-07-28"
 HEADER_MISMATCH: int = -32020
 UNSUPPORTED_PROTOCOL_VERSION: int = -32022
 
 
-class MCPConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
     """Server configuration for Model Context Protocol handlers."""
 
     server_name: str = "vertebra-mcp"
@@ -29,14 +31,14 @@ class MCPConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     tasks_enabled: bool = True
 
 
-class TextContent(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class TextContent(FrozenBaseStruct, frozen=True, kw_only=True, cache_hash=True):
     """Plain text content item in an MCP tool output or prompt message."""
 
     type: Literal["text"] = "text"
     text: str = ""
 
 
-class BlobContent(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class BlobContent(FrozenBaseStruct, frozen=True, kw_only=True, cache_hash=True):
     """Binary base64-encoded media item in an MCP tool output."""
 
     type: Literal["image", "audio", "blob"] = "blob"
@@ -44,7 +46,7 @@ class BlobContent(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     mimeType: str = "application/octet-stream"
 
 
-class ResourceLinkContent(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class ResourceLinkContent(FrozenBaseStruct, frozen=True, kw_only=True, cache_hash=True):
     """Pointer referencing an active MCP resource URI."""
 
     type: Literal["resource_link"] = "resource_link"
@@ -56,7 +58,7 @@ class ResourceLinkContent(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 type ContentBlock = TextContent | BlobContent | ResourceLinkContent
 
 
-class ToolCallOutput(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class ToolCallOutput(FrozenBaseStruct, frozen=True, kw_only=True):
     """Normalized output envelope returned by an MCP tools/call invocation."""
 
     content: tuple[ContentBlock, ...] = ()
@@ -64,7 +66,7 @@ class ToolCallOutput(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     isError: bool = False
 
 
-class ResourceEntry(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class ResourceEntry(FrozenBaseStruct, frozen=True, kw_only=True):
     """Static resource descriptor advertised via resources/list."""
 
     uri: str
@@ -74,7 +76,7 @@ class ResourceEntry(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     reader: Callable[..., Any] | None = None
 
 
-class ResourceTemplateEntry(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class ResourceTemplateEntry(FrozenBaseStruct, frozen=True, kw_only=True):
     """Dynamic resource URI template advertised via resources/templates/list."""
 
     uriTemplate: str
@@ -84,7 +86,7 @@ class ResourceTemplateEntry(msgspec.Struct, frozen=True, gc=False, kw_only=True)
     reader: Callable[..., Any] | None = None
 
 
-class PromptArgument(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class PromptArgument(FrozenBaseStruct, frozen=True, kw_only=True, cache_hash=True):
     """Argument declaration for an MCP prompt template."""
 
     name: str
@@ -92,14 +94,14 @@ class PromptArgument(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     required: bool = False
 
 
-class PromptMessage(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class PromptMessage(FrozenBaseStruct, frozen=True, kw_only=True, cache_hash=True):
     """Message item in an instantiated prompt conversation."""
 
     role: Literal["user", "assistant"] = "user"
     content: TextContent | BlobContent = msgspec.field(default_factory=TextContent)
 
 
-class PromptEntry(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class PromptEntry(FrozenBaseStruct, frozen=True, kw_only=True):
     """Prompt template descriptor advertised via prompts/list."""
 
     name: str
