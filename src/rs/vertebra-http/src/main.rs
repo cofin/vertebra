@@ -177,6 +177,10 @@ fn spawn_python_workers(app_path: String, thread_count: usize) -> PyResult<Embed
             1
         };
 
+        if let Some(bridge) = BatchBridge::get() {
+            bridge.set_consumer_count(worker_threads);
+        }
+
         Ok(PreparedEmbeddedApp {
             handlers,
             mounts,

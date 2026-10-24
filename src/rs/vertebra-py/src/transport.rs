@@ -106,7 +106,7 @@ pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<RequestBatc
 
 /// Get the request notification FD for asyncio `loop.add_reader()`.
 ///
-/// Only available in SHM mode. Returns -1 if not in SHM mode.
+/// Available in SHM mode and single-consumer Embedded mode. Returns -1 otherwise.
 #[pyfunction]
 #[pyo3(name = "get_request_notify_fd")]
 pub fn get_request_notify_fd() -> i32 {
@@ -116,6 +116,9 @@ pub fn get_request_notify_fd() -> i32 {
             && let vertebra_core::transport::Backend::SharedMemory(rp) = transport.backend()
         {
             return rp.request_notifier.as_raw_fd();
+        }
+        if let Some(bridge) = BatchBridge::get() {
+            return bridge.request_notify_fd();
         }
     }
     -1
@@ -128,6 +131,12 @@ pub fn clear_request_notification() -> PyResult<()> {
         transport
             .clear_request()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("clear failed: {e}")))?;
+        return Ok(());
+    }
+    if let Some(bridge) = BatchBridge::get() {
+        bridge
+            .clear_request_notification()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("clear failed: {e}")))?;
     }
     Ok(())
 }
@@ -139,25 +148,36 @@ pub fn try_get_batch() -> PyResult<Option<RequestBatch>> {
         let snapshot = transport.poll_batch_async();
         return Ok(snapshot.map(|s| RequestBatch { snapshot: s }));
     }
+    if let Some(bridge) = BatchBridge::get() {
+        let snapshot = bridge.try_poll_batch();
+        return Ok(snapshot.map(|s| RequestBatch { snapshot: s }));
+    }
     Ok(None)
 }
 
-/// Arm Dekker sleep on the SHM request ring (`true` when empty and safe to park).
+/// Arm Dekker sleep on the request queue (`true` when empty and safe to park).
 #[pyfunction]
 #[pyo3(name = "prepare_request_sleep")]
 pub fn prepare_request_sleep() -> bool {
     if let Some(transport) = SHM_TRANSPORT.get() {
         return transport.prepare_request_sleep();
     }
+    if let Some(bridge) = BatchBridge::get() {
+        return bridge.prepare_request_sleep();
+    }
     false
 }
 
-/// Cancel Dekker sleep on the SHM request ring.
+/// Cancel Dekker sleep on the request queue.
 #[pyfunction]
 #[pyo3(name = "cancel_request_sleep")]
 pub fn cancel_request_sleep() {
     if let Some(transport) = SHM_TRANSPORT.get() {
         transport.cancel_request_sleep();
+        return;
+    }
+    if let Some(bridge) = BatchBridge::get() {
+        bridge.cancel_request_sleep();
     }
 }
 

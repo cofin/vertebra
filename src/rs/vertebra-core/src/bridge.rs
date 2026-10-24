@@ -8,10 +8,12 @@
 //! callback on the submitting worker thread or through an unbounded lock-free
 //! `tokio::sync::mpsc` channel.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::Duration;
 
+use crate::layout::CacheLine;
+use crate::notify::Notifier;
 use crate::protocol::codec::CompressionCodec;
 use crate::transport::{
     BatchSnapshot, BufferPool, DataSlab, InProcessRequest, Transport, TransportArena,
@@ -66,6 +68,9 @@ pub struct BatchBridge {
     fast_sink: OnceLock<ResponseSink>,
     has_override_sink: AtomicBool,
     override_sink: RwLock<Option<ResponseSink>>,
+    request_notifier: Option<Notifier>,
+    consumer_sleeping: CacheLine<AtomicBool>,
+    consumer_count: AtomicUsize,
     /// Compression codec for batch sealing. `None` disables compression.
     compression_codec: CompressionCodec,
 }
@@ -117,6 +122,9 @@ impl BatchBridge {
                 fast_sink: OnceLock::new(),
                 has_override_sink: AtomicBool::new(false),
                 override_sink: RwLock::new(None),
+                request_notifier: Notifier::new().ok(),
+                consumer_sleeping: CacheLine::new(AtomicBool::new(false)),
+                consumer_count: AtomicUsize::new(max_workers.max(1)),
                 compression_codec: codec,
             })
             .map_err(|_| "bridge already initialized")
@@ -125,6 +133,71 @@ impl BatchBridge {
     /// Get the global bridge. Returns `None` if not initialized.
     pub fn get() -> Option<&'static BatchBridge> {
         BRIDGE.get()
+    }
+
+    /// Update the active consumer worker thread count (`1` enables single-consumer `add_reader` FD).
+    pub fn set_consumer_count(&self, count: usize) {
+        self.consumer_count.store(count.max(1), Ordering::Release);
+    }
+
+    /// Return the pollable request notification FD when operating with a single consumer worker.
+    pub fn request_notify_fd(&self) -> i32 {
+        #[cfg(unix)]
+        {
+            if self.consumer_count.load(Ordering::Acquire) <= 1
+                && let Some(ref notifier) = self.request_notifier
+            {
+                return notifier.as_raw_fd();
+            }
+        }
+        -1
+    }
+
+    /// Drain pending request wakeup signals from the embedded notification handle.
+    pub fn clear_request_notification(&self) -> Result<(), TransportError> {
+        if let Some(ref notifier) = self.request_notifier {
+            notifier.clear().map_err(|_| TransportError::Disconnected)?;
+        }
+        Ok(())
+    }
+
+    /// Non-blocking poll for the next sealed batch snapshot.
+    pub fn try_poll_batch(&self) -> Option<Arc<BatchSnapshot>> {
+        self.transport.poll_batch_async()
+    }
+
+    /// Arm Dekker sleep on the embedded request queue (`true` when empty and safe to park).
+    #[inline]
+    pub fn prepare_request_sleep(&self) -> bool {
+        if self.consumer_count.load(Ordering::Acquire) > 1 || self.request_notifier.is_none() {
+            return false;
+        }
+        self.consumer_sleeping.store(true, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if !self.transport.is_empty() {
+            self.consumer_sleeping.store(false, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    /// Disarm Dekker sleep on the embedded request queue.
+    #[inline]
+    pub fn cancel_request_sleep(&self) {
+        if self.consumer_sleeping.load(Ordering::Relaxed) {
+            self.consumer_sleeping.store(false, Ordering::SeqCst);
+        }
+    }
+
+    #[inline]
+    fn notify_consumer_if_sleeping(&self) {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.consumer_sleeping.load(Ordering::SeqCst)
+            && self.consumer_sleeping.swap(false, Ordering::SeqCst)
+            && let Some(ref notifier) = self.request_notifier
+        {
+            let _ = notifier.notify();
+        }
     }
 
     /// Register a direct response completion callback that bypasses the async response channel.
@@ -155,7 +228,9 @@ impl BatchBridge {
         let snapshot = Arc::new(BatchSnapshot::from_inprocess(requests));
         self.batch_tx
             .send(snapshot)
-            .map_err(|_| TransportError::Disconnected)
+            .map_err(|_| TransportError::Disconnected)?;
+        self.notify_consumer_if_sleeping();
+        Ok(())
     }
 
     /// Acquire exclusive access for writing one slab-backed batch to the bridge.
@@ -234,7 +309,9 @@ impl BatchBridge {
         };
         self.batch_tx
             .send(snapshot)
-            .map_err(|_| TransportError::Disconnected)
+            .map_err(|_| TransportError::Disconnected)?;
+        self.notify_consumer_if_sleeping();
+        Ok(())
     }
 
     fn try_compress_slab(&self, slab_data: &[u8]) -> Option<(Vec<u8>, u32)> {
@@ -388,6 +465,9 @@ mod tests {
             fast_sink: OnceLock::new(),
             has_override_sink: AtomicBool::new(false),
             override_sink: RwLock::new(None),
+            request_notifier: Notifier::new().ok(),
+            consumer_sleeping: CacheLine::new(AtomicBool::new(false)),
+            consumer_count: AtomicUsize::new(1),
             compression_codec: codec,
         }
     }
@@ -822,6 +902,9 @@ mod tests {
             fast_sink: OnceLock::new(),
             has_override_sink: AtomicBool::new(false),
             override_sink: RwLock::new(None),
+            request_notifier: Notifier::new().ok(),
+            consumer_sleeping: CacheLine::new(AtomicBool::new(false)),
+            consumer_count: AtomicUsize::new(1),
             compression_codec: CompressionCodec::None,
         };
 
@@ -850,6 +933,45 @@ mod tests {
             }
         }
         assert_eq!(ids, vec![10, 11, 12, 13, 14]);
+    }
+
+    #[test]
+    fn dekker_request_notifier_wakes_single_consumer_and_disables_multi_consumer() {
+        let bridge = make_bridge();
+        assert!(bridge.request_notify_fd() >= 0);
+        assert!(bridge.prepare_request_sleep());
+
+        let req = InProcessRequest::new(
+            0,
+            1,
+            101,
+            5001,
+            bytes::Bytes::from_static(b"/inline"),
+            bytes::Bytes::new(),
+            bytes::Bytes::new(),
+            bytes::Bytes::new(),
+            bytes::Bytes::new(),
+        );
+        bridge.submit_inprocess_batch(vec![req]).unwrap();
+        assert!(
+            bridge
+                .request_notifier
+                .as_ref()
+                .unwrap()
+                .wait(10)
+                .expect("notifier wait")
+        );
+        bridge.clear_request_notification().unwrap();
+        assert!(!bridge.prepare_request_sleep());
+        let snap = bridge.try_poll_batch().expect("queued snapshot");
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap.path(0), "/inline");
+        assert!(bridge.prepare_request_sleep());
+        bridge.cancel_request_sleep();
+
+        bridge.set_consumer_count(4);
+        assert_eq!(bridge.request_notify_fd(), -1);
+        assert!(!bridge.prepare_request_sleep());
     }
 
     #[cfg(feature = "compression")]

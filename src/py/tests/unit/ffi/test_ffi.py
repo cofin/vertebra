@@ -266,5 +266,5 @@ def test_dekker_request_sleep_helpers_roundtrip() -> None:
     init_transport()
     should_sleep = prepare_request_sleep()
     assert isinstance(should_sleep, bool)
-    assert should_sleep is False
+    assert should_sleep is True
     cancel_request_sleep()

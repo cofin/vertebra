@@ -180,6 +180,14 @@ impl Transport {
         }
     }
 
+    /// Return `true` when the request transport currently holds no unread batches.
+    pub fn is_empty(&self) -> bool {
+        match &self.backend {
+            Backend::InProcess(rx) => rx.is_empty(),
+            Backend::SharedMemory(ring_pair) => !ring_pair.request_ring.has_data(),
+        }
+    }
+
     /// Send a response back through the transport.
     ///
     /// Only meaningful for `Backend::SharedMemory` — routes to the tiered

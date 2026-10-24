@@ -14,7 +14,7 @@ updated_at: 2026-10-24T19:29:00Z
 
 ## Phase 2 (`1ac8b83`)
 
-- `BatchBridge` bounded `crossbeam::bounded(4)` / `tokio::sync::mpsc::channel(4)` queues deadlock whenever more than 5 batches are in flight (`c >= 16` on 1 core, `c >= 32` on 8 cores, or async `io10`); unbounded queues paired with ingress admission control, `OnceLock<ResponseSink>`, and `InProcessRequest`-backed `BatchSnapshot`s eliminate the deadlock and fixed 1 MiB `DataSlab` cap (`b74ded5`).
+- `BatchBridge` bounded `crossbeam::bounded(4)` / `tokio::sync::mpsc::channel(4)` queues deadlock whenever more than 5 batches are in flight (`c >= 16` on 1 core, `c >= 32` on 8 cores, or async `io10`); unbounded queues paired with ingress admission control, `OnceLock<ResponseSink>`, `InProcessRequest`-backed `BatchSnapshot`s, and a Dekker `SeqCst` request `Notifier` (`consumer_sleeping`, `consumer_count <= 1` set from `spawn_python_workers` `worker_threads` rather than `config.thread_count`) eliminate the deadlock, fixed 1 MiB `DataSlab` cap, and second Python thread hop for Embedded `ASGI`/`RSGI`/`async` workers (`b74ded5`).
 - `ShmHeader` `ABI_VERSION = 3` adds cache-line-isolated `consumer_sleeping` and `active_flags` atomics enabling `SeqCst` Dekker `eventfd` coalescing (`0` `write()` syscalls while peers are polling), generation-synchronized SPSC cached heads, `CacheLine<AtomicU64>`-padded MPMC sequence slots, and zero-copy `MpmcSlotView`/`SlotView`-backed `BatchSnapshot`s (`1ac8b83`).
 
 ## Phase 3 (`3ce98ae`)

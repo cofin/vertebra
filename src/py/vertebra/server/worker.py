@@ -417,7 +417,7 @@ class Worker:
                 )
             else:
                 selector: selectors.BaseSelector | None = None
-                if notify_fd >= 0:
+                if notify_fd >= 0 and transport_mode == "shm":
                     try:
                         sel = selectors.DefaultSelector()
                         sel.register(notify_fd, selectors.EVENT_READ)
