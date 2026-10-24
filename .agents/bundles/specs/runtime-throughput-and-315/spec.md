@@ -3,15 +3,15 @@ type: Spec
 flow_id: runtime-throughput-and-315
 title: Runtime Throughput, Multi-Core Scaling, and Python 3.15 Optimizations
 state: active
-plan_revision: 1
+plan_revision: 2
 plan_commit: null
-state_revision: 20
+state_revision: 24
 current_task: null
-last_operation: 20261024T192900Z-flow-executor-checkpoint-phase-5-00
-operation_targets: ["5.1", "5.2"]
-last_verified_checkpoint: "phase:phase-5@5f4f421"
+last_operation: 20261024T221315Z-flow-executor-checkpoint-spec-00
+operation_targets: []
+last_verified_checkpoint: "phase:phase-5@071e5b6"
 created_at: 2026-10-24T16:02:00Z
-updated_at: 2026-10-24T19:29:00Z
+updated_at: 2026-10-24T22:13:15Z
 description: Eliminate embedded bridge deadlocks, single-ingress multi-worker contention, SHM syscall and lock overhead, ASGI/RSGI FFI dispatch allocations, and Python worker loop bottlenecks while adding Python 3.15 and 3.15t specializations.
 ---
 
@@ -61,27 +61,28 @@ Single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w` / `4w` / `8w
 
 - [x] Task 5.1: Overhaul Python worker loop with uvloop, inline vectorized sync dispatch, same-thread add_reader polling, Rust ASGI/RSGI batch drivers, O(1) mount routing, and PEP 810 lazy modules (`e4ae09d`)
 - [x] Task 5.2: Complete LitestarFastPathBypass.dispatch and Rust middleware offload configuration wiring (`5f4f421`)
+- [x] Task 5.3: Harden SHM tier wakeups, admission fences, ingress Vary/compression offloads, cibuildwheel 3.15 matrix, and Litestar fastpath parity (`071e5b6`)
 
 ## Continuity Snapshot
 
 - **Active Flow / Lifecycle**: `runtime-throughput-and-315` (`active`)
-- **Current Task & Claimant**: `none` (`none`)
-- **Last Verified Checkpoint**: `phase:phase-5@5f4f421`
+- **Current Task & Claimant**: `none`
+- **Last Verified Checkpoint**: `phase:phase-5@071e5b6`
 - **Decisions**:
   - `ABI_VERSION = 3` in `vertebra-core` adds `consumer_sleeping` and `active_flags` cache lines to `ShmHeader` for Dekker `SeqCst` zero-syscall notifications.
   - Per-worker `SO_REUSEPORT` embedded multi-process supervision powers multi-core throughput while preserving `--topology shm` with lock-free per-batch worker routing.
   - Default sync native routes run inline in vectorized batches; `sync_to_thread=True` opts into thread-pool offload.
   - `drive_asgi_batch` and `drive_rsgi_batch` step unary coroutines via `PyIter_Send` in Rust before falling back to `uvloop` tasks on real async suspension.
 - **Recent Discoveries**:
-  - `RouteTable::insert_mount_prefix_indexed` encodes `MOUNT_HANDLER_BASE | mount_index` for `O(1)` mount dispatch across all HTTP verbs including `OPTIONS` and `HEAD`.
   - `PyBuffer_FillInfo(view, slf.as_ptr(), ...)` anchors zero-copy `Request.body_view` directly to `Request` -> `Arc<BatchSnapshot>` while exposing PEP 688 `__buffer__` (`7742f8b`).
   - `_SteppedCoroutine` drives suspending ASGI and RSGI coroutines directly on both `asyncio` and `uvloop` without an intermediate Python wrapper frame (`00d0e7a`).
-  - `Worker._run_inline_event_loop` registers `loop.add_reader(notify_fd, ...)` with Dekker `prepare_request_sleep` / `cancel_request_sleep` on both `RingPair` (`shm`) and single-consumer `BatchBridge` (`embedded` when `consumer_count <= 1`) so `scheduler.size == 1` SHM and Embedded (`ASGI`, `RSGI`, and `async` native) workers poll and execute on one `uvloop` thread while pure-sync Embedded native workers park directly on `crossbeam` `get_batch` (`e4ae09d`).
+  - `Worker._run_inline_event_loop` registers `loop.add_reader(notify_fd, ...)` with Dekker `prepare_request_sleep` / `cancel_request_sleep` on both `RingPair` (`shm`) and single-consumer `BatchBridge` (`embedded` when `consumer_count <= 1`) (`e4ae09d`, `a115466`).
   - `LitestarFastPathBypass.dispatch` executes pure-signature and DI/DTO Litestar handlers directly from `AsgiRunner` without ASGI scope construction, while `LitestarOffloadPlan.to_server_config_json()` wires CORS, compression, static assets, and OpenAPI cache directly into `vertebra-http` (`5f4f421`).
+  - `TieredRingSet` active-tier ordering before `write_head` + `has_non_small_data()`, `BackpressureController` `SeqCst` fences, `append_vary_token` + compressible `Content-Type` checks, `pypa/cibuildwheel@v4.3.4` `cp314t`/`cp315`/`cp315t` wheel targets, `Worker._process_batch` `dispatch_app` routing, and `LitestarPlugin.ensure_finalized` + `LitestarFastPathBypass` fallback/exception/framing parity are verified green (`071e5b6`).
 - **Blockers & Unblock Conditions**: `none`
-- **Next Exact Step**: `Run full repository verification gates, live Single-Core/Multi-Core/Python-3.15 benchmarks vs. Granian 2.8.4, and Flow completion reviews.`
-- **Plan Identity**: `plan_revision: 1`, `plan_commit: null`
-- **State Identity**: `revision: 20`, `last_operation: 20261024T192900Z-flow-executor-checkpoint-phase-5-00`, `operation_targets: ["5.1", "5.2"]`
+- **Next Exact Step**: `Run final correctness review and mandatory quality review on cf5979e..HEAD, then execute Flow complete and archive.`
+- **Plan Identity**: `plan_revision: 2`, `plan_commit: null`
+- **State Identity**: `revision: 24`, `last_operation: 20261024T221315Z-flow-executor-checkpoint-spec-00`, `operation_targets: []`
 - **Relevant Rule & Knowledge Paths**:
   - `AGENTS.md`
   - `.agents/bundles/knowledge/workflow.md`
@@ -97,3 +98,4 @@ Single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w` / `4w` / `8w
 - {"actor": "flow-executor", "affected_task_ids": ["3.1", "3.2"], "last_functional_commit": "3ce98ae", "occurred_at": "2026-10-24T17:55:58Z", "operation": "checkpoint", "operation_id": "20261024T175558Z-flow-executor-checkpoint-phase-3-00", "phase_id": "phase-3", "scope": "phase", "verification_evidence": [{"command": "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,compression", "result": "46 unit + 89 integration + 3 discovery bridge tests passed"}, {"command": "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-http --all-targets --features tls,compression -- -D warnings", "result": "exit 0 (0 warnings)"}]}
 - {"actor": "flow-executor", "affected_task_ids": ["4.1", "4.2"], "last_functional_commit": "00d0e7a", "occurred_at": "2026-10-24T18:48:00Z", "operation": "checkpoint", "operation_id": "20261024T184800Z-flow-executor-checkpoint-phase-4-00", "phase_id": "phase-4", "scope": "phase", "verification_evidence": [{"command": "uv run pytest src/py/tests/unit/server/test_asgi.py src/py/tests/unit/server/test_asgi_scope_and_extensions.py src/py/tests/unit/server/test_rsgi_protocol.py -q", "result": "62 passed in 0.77s"}, {"command": "uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage", "result": "Success: no issues found in 3 modules"}]}
 - {"actor": "flow-executor", "affected_task_ids": ["5.1", "5.2"], "last_functional_commit": "5f4f421", "occurred_at": "2026-10-24T19:29:00Z", "operation": "checkpoint", "operation_id": "20261024T192900Z-flow-executor-checkpoint-phase-5-00", "phase_id": "phase-5", "scope": "phase", "verification_evidence": [{"command": "uv run pytest src/py/tests/unit/server/test_litestar_direct_fastpath.py src/py/tests/unit/server/test_litestar_rust_offload.py src/py/tests/unit/extensions/test_litestar_plugin.py src/py/tests/unit/cli/test_cli_commands.py -q", "result": "27 passed in 0.45s"}, {"command": "uv run mypy src/py/vertebra tools/scripts", "result": "Success: no issues found in 210 source files"}]}
+- {"actor": "flow-executor", "affected_task_ids": ["5.1", "5.2", "5.3"], "last_functional_commit": "071e5b6", "occurred_at": "2026-10-24T22:13:15Z", "operation": "checkpoint", "operation_id": "20261024T221315Z-flow-executor-checkpoint-spec-00", "phase_id": "phase-5", "scope": "phase", "verification_evidence": [{"command": "make rs-test", "result": "all workspace unit, integration, and doc tests passed"}, {"command": "make py-test", "result": "mypy.stubtest passed; 858 passed in 6.25s"}, {"command": "make ts-test", "result": "9 test files, 52 passed"}, {"command": "make coverage", "result": "858 passed, 81% total coverage"}, {"command": "make lint-all", "result": "exit 0 (Biome, Ruff, Mypy 210 files, stubtest 3 modules, rustfmt, Clippy, review-check)"}, {"command": "make review-check", "result": "exit 0 (0 issues)"}]}
