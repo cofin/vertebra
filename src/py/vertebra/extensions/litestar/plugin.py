@@ -16,6 +16,7 @@ from vertebra.extensions.litestar.fastpath import (
 )
 from vertebra.extensions.litestar.offload import (
     LitestarOffloadPlan,
+    _is_rust_offload_active,
     offload_litestar_middlewares,
 )
 from vertebra.extensions.litestar.router import extract_litestar_routes
@@ -32,13 +33,14 @@ __all__ = (
 class LitestarPlugin:
     """Litestar plugin enabling zero-GIL Rust offload, direct handler dispatch, and CLI lifespans."""
 
-    __slots__ = ("_compiled_routes", "_config", "_offload_plan", "_router_table")
+    __slots__ = ("_compiled_routes", "_config", "_finalized_app", "_offload_plan", "_router_table")
 
     def __init__(self, config: LitestarConfig | None = None) -> None:
         self._config = config or LitestarConfig()
         self._offload_plan: LitestarOffloadPlan | None = None
         self._compiled_routes: dict[int, CompiledLitestarRoute] = {}
         self._router_table: Any = None
+        self._finalized_app: Any = None
 
     @property
     def config(self) -> LitestarConfig:
@@ -65,21 +67,16 @@ class LitestarPlugin:
         app_config.state["vertebra_config"] = self._config
         app_config.state["vertebra_plugin"] = self
 
-        if self._config.enable_fastpath_bypass:
-            try:
-                self._router_table = extract_litestar_routes(app_config)
-            except (AttributeError, TypeError, ValueError, KeyError):
-                self._router_table = None
-            app_config.state["vertebra_fastpath_bypass"] = LitestarFastPathBypass(self._router_table)
-
         if (
             self._config.offload_compression
             and app_config.compression_config is not None
             and not app_config.before_send
         ):
-            app_config.state["_vertebra_offloaded_compression_config"] = app_config.compression_config
-            if _is_rust_offload_active():
-                app_config.compression_config = None
+            backend = str(getattr(app_config.compression_config, "backend", "gzip") or "gzip").strip().lower()
+            if backend in {"gzip", "brotli", "br", "zstd"}:
+                app_config.state["_vertebra_offloaded_compression_config"] = app_config.compression_config
+                if _is_rust_offload_active():
+                    app_config.compression_config = None
 
         if self._config.offload_cors and app_config.cors_config is not None:
             app_config.state["_vertebra_offloaded_cors_config"] = app_config.cors_config
@@ -123,8 +120,39 @@ class LitestarPlugin:
             )
             agent_plugin.on_app_init(app_config)
 
-        app_config.on_app_init.append(self._finalize_app_acceleration)
+        if self._config.enable_fastpath_bypass:
+            try:
+                self._router_table = extract_litestar_routes(app_config)
+            except (AttributeError, TypeError, ValueError, KeyError):
+                self._router_table = None
+            app_config.state["vertebra_fastpath_bypass"] = LitestarFastPathBypass(self._router_table)
+
+        self._offload_plan = offload_litestar_middlewares(
+            app_config,
+            config=self._config,
+            strip_python_middleware=False,
+        )
+        app_config.state["vertebra_offload_config_json"] = self._offload_plan.to_server_config_json()
+
+        lifespan_hooks = getattr(app_config, "lifespan", None)
+        if isinstance(lifespan_hooks, list):
+            plugin_ref = self
+
+            @contextlib.asynccontextmanager
+            async def _vertebra_finalize_lifespan(app: Any) -> Any:
+                plugin_ref.ensure_finalized(app)
+                yield
+
+            lifespan_hooks.append(_vertebra_finalize_lifespan)
+
         return app_config
+
+    def ensure_finalized(self, app: Any) -> None:
+        """Idempotently finalize route compilation, fastpath binding, and offload JSON on ``app``."""
+        if app is None or self._finalized_app is app:
+            return
+        self._finalized_app = app
+        self._finalize_app_acceleration(app)
 
     def on_cli_init(self, cli: Any) -> None:
         """Satisfy Litestar CLIPluginProtocol CLI group registration hook."""
@@ -133,8 +161,7 @@ class LitestarPlugin:
     @contextlib.contextmanager
     def server_lifespan(self, app: Any) -> Iterator[None]:
         """Ensure acceleration state is finalized when entering Litestar's server lifespan."""
-        if self._offload_plan is None:
-            self._finalize_app_acceleration(app)
+        self.ensure_finalized(app)
         yield
 
     def _finalize_app_acceleration(self, app: Any) -> None:
@@ -187,14 +214,6 @@ class LitestarPlugin:
 
             with contextlib.suppress(AttributeError, TypeError):
                 app.__vertebra_fastpath__ = bypass
-
-
-def _is_rust_offload_active() -> bool:
-    for key in ("VERTEBRA_SERVER_ACTIVE", "VERTEBRA_RUST_OFFLOAD"):
-        raw = os.environ.get(key, "").strip().lower()
-        if raw in {"1", "true", "yes", "on"}:
-            return True
-    return False
 
 
 @contextlib.contextmanager

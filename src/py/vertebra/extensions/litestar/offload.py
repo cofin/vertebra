@@ -1,6 +1,7 @@
 """Zero-code-change Litestar v2 and v3 startup introspection for Rust middleware and asset offloading."""
 
 import hashlib
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,9 @@ __all__ = (
     "_get_handler_opt",
     "_get_handler_request_class",
     "_is_default_local_filesystem",
+    "_is_rust_offload_active",
     "_rebuild_litestar_routing_trie",
+    "_supports_v2_layer_resolution",
     "evaluate_cors_preflight",
     "evaluate_cors_response_headers",
     "evaluate_openapi_cache_request",
@@ -152,7 +155,7 @@ def offload_litestar_middlewares(
     cfg = config
     if cfg is None:
         state = getattr(app, "state", None)
-        if isinstance(state, dict) or (state is not None and hasattr(state, "get")):
+        if state is not None and hasattr(state, "get"):
             cfg = state.get("vertebra_config")
 
     enable_compression = True if cfg is None else bool(getattr(cfg, "offload_compression", True))
@@ -259,6 +262,18 @@ def _origin_allowed(spec: CorsOffloadSpec, origin: str) -> bool:
     return spec.allow_origin_regex is not None and re.fullmatch(spec.allow_origin_regex, origin) is not None
 
 
+def _is_rust_offload_active() -> bool:
+    for key in ("VERTEBRA_SERVER_ACTIVE", "VERTEBRA_RUST_OFFLOAD"):
+        raw = os.environ.get(key, "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+    return False
+
+
+def _supports_v2_layer_resolution(handler: Any) -> bool:
+    return hasattr(handler, "ownership_layers")
+
+
 def _is_empty_sentinel(value: Any) -> bool:
     if value is None:
         return True
@@ -267,9 +282,10 @@ def _is_empty_sentinel(value: Any) -> bool:
 
 
 def _get_handler_guards(handler: Any) -> tuple[Any, ...]:
-    resolve_fn = getattr(handler, "resolve_guards", None)
-    if callable(resolve_fn):
-        return tuple(resolve_fn())
+    if _supports_v2_layer_resolution(handler):
+        resolve_fn = getattr(handler, "resolve_guards", None)
+        if callable(resolve_fn):
+            return tuple(resolve_fn())
     raw = getattr(handler, "guards", None)
     if raw is None or _is_empty_sentinel(raw):
         return ()
@@ -277,9 +293,10 @@ def _get_handler_guards(handler: Any) -> tuple[Any, ...]:
 
 
 def _get_handler_middleware(handler: Any) -> tuple[Any, ...]:
-    resolve_fn = getattr(handler, "resolve_middleware", None)
-    if callable(resolve_fn):
-        return tuple(resolve_fn())
+    if _supports_v2_layer_resolution(handler):
+        resolve_fn = getattr(handler, "resolve_middleware", None)
+        if callable(resolve_fn):
+            return tuple(resolve_fn())
     raw = getattr(handler, "middleware", None)
     if raw is None or _is_empty_sentinel(raw):
         return ()
@@ -287,9 +304,10 @@ def _get_handler_middleware(handler: Any) -> tuple[Any, ...]:
 
 
 def _get_handler_opt(handler: Any) -> dict[str, Any]:
-    resolve_fn = getattr(handler, "resolve_opts", None)
-    if callable(resolve_fn):
-        return dict(resolve_fn())
+    if _supports_v2_layer_resolution(handler):
+        resolve_fn = getattr(handler, "resolve_opts", None)
+        if callable(resolve_fn):
+            return dict(resolve_fn())
     raw = getattr(handler, "opt", None)
     if _is_empty_sentinel(raw) or not isinstance(raw, dict):
         return {}
@@ -297,9 +315,10 @@ def _get_handler_opt(handler: Any) -> dict[str, Any]:
 
 
 def _get_handler_exception_handlers(handler: Any) -> dict[Any, Any]:
-    resolve_fn = getattr(handler, "resolve_exception_handlers", None)
-    if callable(resolve_fn):
-        return dict(resolve_fn())
+    if _supports_v2_layer_resolution(handler):
+        resolve_fn = getattr(handler, "resolve_exception_handlers", None)
+        if callable(resolve_fn):
+            return dict(resolve_fn())
     raw = getattr(handler, "exception_handlers", None)
     if _is_empty_sentinel(raw) or not isinstance(raw, dict):
         return {}
@@ -310,9 +329,10 @@ def _get_handler_request_class(handler: Any, app: Any) -> Any:
     raw = getattr(handler, "request_class", None)
     if not _is_empty_sentinel(raw):
         return raw
-    resolve_fn = getattr(handler, "resolve_request_class", None)
-    if callable(resolve_fn):
-        return resolve_fn()
+    if _supports_v2_layer_resolution(handler):
+        resolve_fn = getattr(handler, "resolve_request_class", None)
+        if callable(resolve_fn):
+            return resolve_fn()
     return getattr(app, "request_class", None)
 
 
@@ -320,9 +340,10 @@ def _get_handler_after_response(handler: Any) -> Any:
     raw = getattr(handler, "after_response", None)
     if not _is_empty_sentinel(raw):
         return raw
-    resolve_fn = getattr(handler, "resolve_after_response", None)
-    if callable(resolve_fn):
-        return resolve_fn()
+    if _supports_v2_layer_resolution(handler):
+        resolve_fn = getattr(handler, "resolve_after_response", None)
+        if callable(resolve_fn):
+            return resolve_fn()
     return None
 
 
@@ -359,12 +380,16 @@ def _extract_compression_config(app: Any) -> CompressionOffloadSpec | None:
     cfg = getattr(app, "compression_config", None)
     if cfg is None:
         state = getattr(app, "state", None)
-        if isinstance(state, dict) or (state is not None and hasattr(state, "get")):
+        if state is not None and hasattr(state, "get"):
             cfg = state.get("_vertebra_offloaded_compression_config")
     if cfg is None:
         return None
 
-    backend = str(getattr(cfg, "backend", "gzip") or "gzip").lower()
+    backend = str(getattr(cfg, "backend", "gzip") or "gzip").strip().lower()
+    if backend == "br":
+        backend = "brotli"
+    if backend not in {"gzip", "brotli", "zstd"}:
+        return None
     minimum_size = int(getattr(cfg, "minimum_size", 500))
     gzip_level = int(getattr(cfg, "gzip_compress_level", 6))
     brotli_quality = int(getattr(cfg, "brotli_quality", 4))
@@ -373,7 +398,7 @@ def _extract_compression_config(app: Any) -> CompressionOffloadSpec | None:
     exclude_patterns: tuple[str, ...]
     if isinstance(raw_exclude, str):
         exclude_patterns = (raw_exclude,)
-    elif isinstance(raw_exclude, (list, tuple, set)):
+    elif isinstance(raw_exclude, list | tuple | set):
         exclude_patterns = tuple(str(x) for x in raw_exclude)
     else:
         exclude_patterns = ()
@@ -408,7 +433,7 @@ def _extract_cors_config(app: Any) -> CorsOffloadSpec | None:
     cfg = getattr(app, "cors_config", None)
     if cfg is None:
         state = getattr(app, "state", None)
-        if isinstance(state, dict) or (state is not None and hasattr(state, "get")):
+        if state is not None and hasattr(state, "get"):
             cfg = state.get("_vertebra_offloaded_cors_config")
     if cfg is None:
         return None
@@ -451,7 +476,7 @@ def _extract_static_mounts(app: Any) -> tuple[StaticMountOffloadSpec, ...]:
     seen_prefixes: set[str] = set()
 
     v2_configs = getattr(app, "static_files_config", None) or ()
-    if not isinstance(v2_configs, (list, tuple)):
+    if not isinstance(v2_configs, list | tuple):
         v2_configs = (v2_configs,)
     for cfg in v2_configs:
         path_prefix = getattr(cfg, "path", None)

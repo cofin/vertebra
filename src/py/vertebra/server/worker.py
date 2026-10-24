@@ -613,7 +613,7 @@ class Worker:
 
             if single_root_asgi is not None and isinstance(batch, RequestBatch):
                 drive_asgi_batch(
-                    single_root_asgi._app,
+                    single_root_asgi.dispatch_app,
                     batch,
                     loop_obj=loop_pool.primary_loop,
                     root_path="",

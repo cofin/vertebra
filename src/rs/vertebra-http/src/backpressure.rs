@@ -183,6 +183,7 @@ pub struct AdmissionPermit {
 impl Drop for AdmissionPermit {
     fn drop(&mut self) {
         self.counter.0.fetch_sub(1, Ordering::AcqRel);
+        std::sync::atomic::fence(Ordering::SeqCst);
         if let Some(ref wake) = self.wake
             && wake.queue_depth.0.load(Ordering::Acquire) > 0
         {
@@ -474,14 +475,14 @@ impl BackpressureController {
         max: usize,
         wake: Option<Arc<QueueWakeState>>,
     ) -> Option<AdmissionPermit> {
-        let mut cur = counter.0.load(Ordering::Relaxed);
+        let mut cur = counter.0.load(Ordering::Acquire);
         loop {
             if cur >= max {
                 return None;
             }
             match counter
                 .0
-                .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => {
                     return Some(AdmissionPermit {
@@ -550,6 +551,7 @@ impl BackpressureController {
                 let notified = self.wake_state.slot_notify.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
+                std::sync::atomic::fence(Ordering::SeqCst);
 
                 if let Some(permit) = Self::try_claim_slot(
                     &self.in_flight,

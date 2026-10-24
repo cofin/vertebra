@@ -202,3 +202,12 @@ def test_python_build_info_detects_315_tail_call_jit_freethreaded_and_frame_poin
         assert info.is_jit_enabled is True
         assert info.is_free_threaded is True
         assert info.has_frame_pointers is True
+
+
+def test_release_workflow_cibuildwheel_v4_and_python_315_matrix() -> None:
+    """Verify release.yaml builds Python 3.12-3.15 and free-threaded 3.14t/3.15t wheels with cibuildwheel v4.3.4."""
+    repo_root = Path(__file__).resolve().parents[5]
+    release_yaml = (repo_root / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8")
+    assert "pypa/cibuildwheel@v4.3.4" in release_yaml
+    for target in ("cp312-*", "cp313-*", "cp314-*", "cp314t-*", "cp315-*", "cp315t-*"):
+        assert target in release_yaml

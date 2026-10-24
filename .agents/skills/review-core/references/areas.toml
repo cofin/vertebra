@@ -160,7 +160,7 @@ paths = [
   "src/rs/vertebra-py/**",
   "src/rs/vertebra-bundler/src/lib.rs",
   "src/py/vertebra/_vertebra.pyi",
-  "src/py/vertebra/_bundler.py",
+  "src/py/vertebra/_bundler.pyi",
   "src/py/vertebra/_storage.pyi"
 ]
 knowledge = [

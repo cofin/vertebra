@@ -16,7 +16,7 @@ use tracing::{debug, warn};
 use vertebra_core::transport::{encode_headers_compact, iter_raw_headers};
 
 use crate::backpressure::{BackpressureMetricsSnapshot, CircuitState, RejectionReason};
-use crate::batcher::{PendingRequest, PendingResponse, method_tag};
+use crate::batcher::{PendingRequest, PendingResponse, http_version_tag, method_tag};
 use crate::compression::CompressionOffloadConfig;
 use crate::cors::CompiledCorsOffload;
 use crate::health::HealthState;
@@ -243,7 +243,7 @@ pub async fn handle(
     let pending = PendingRequest {
         handler_id,
         method_tag: method_tag(method),
-        http_version_tag: version_tag(parts.version),
+        http_version_tag: http_version_tag(parts.version),
         flags: vertebra_core::protocol::flags::NONE,
         path_and_query,
         headers_mp,
@@ -371,17 +371,6 @@ pub fn encode_header_map_compact(headers: &HeaderMap) -> Bytes {
         buf.extend_from_slice(&v[..vlen]);
     }
     Bytes::from(buf)
-}
-
-/// Encode an HTTP version into a compact byte tag.
-fn version_tag(version: http::Version) -> u8 {
-    match version {
-        http::Version::HTTP_10 => 0,
-        http::Version::HTTP_11 => 1,
-        http::Version::HTTP_2 => 2,
-        http::Version::HTTP_3 => 3,
-        _ => 1,
-    }
 }
 
 /// Build an `HttpResponse` from a `PendingResponse`, taking the streaming branch when `stream_rx` is present.

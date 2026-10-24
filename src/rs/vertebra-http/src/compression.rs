@@ -195,6 +195,13 @@ impl CompressionOffloadConfig {
         if headers.contains_key(header::CONTENT_ENCODING) {
             return body;
         }
+        if let Some(ct) = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            && !is_compressible_content_type(ct)
+        {
+            return body;
+        }
         let Some(accept) = accept_encoding else {
             return body;
         };
@@ -203,7 +210,7 @@ impl CompressionOffloadConfig {
             CompressionBackend::Zstd if accept.contains("zstd") => {
                 if let Ok(compressed) = zstd::stream::encode_all(body.as_ref(), self.zstd_level) {
                     headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
-                    headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+                    crate::cors::append_vary_token(headers, "Accept-Encoding");
                     headers.remove(header::CONTENT_LENGTH);
                     return Bytes::from(compressed);
                 }
@@ -218,7 +225,7 @@ impl CompressionOffloadConfig {
                     && let Ok(compressed) = encoder.finish()
                 {
                     headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-                    headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+                    crate::cors::append_vary_token(headers, "Accept-Encoding");
                     headers.remove(header::CONTENT_LENGTH);
                     return Bytes::from(compressed);
                 }
@@ -230,7 +237,7 @@ impl CompressionOffloadConfig {
                 if writer.write_all(body.as_ref()).is_ok() {
                     let compressed = writer.into_inner();
                     headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
-                    headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+                    crate::cors::append_vary_token(headers, "Accept-Encoding");
                     headers.remove(header::CONTENT_LENGTH);
                     return Bytes::from(compressed);
                 }

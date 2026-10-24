@@ -233,11 +233,13 @@ impl TieredRingSet {
             .select_ring_with_bit(total_size)
             .ok_or(RingPairError::ResponseTooLarge(total_size))?;
 
-        ring.try_send_with(total_size, 0, |slot| {
-            Self::write_response_slot(slot, correlation_id, status, headers_raw, body);
-        })
-        .map_err(RingPairError::Channel)?;
         self.mark_tier_active(bit);
+        if let Err(e) = ring.try_send_with(total_size, 0, |slot| {
+            Self::write_response_slot(slot, correlation_id, status, headers_raw, body);
+        }) {
+            self.clear_tier_if_empty(ring, bit);
+            return Err(RingPairError::Channel(e));
+        }
         Ok(())
     }
 
@@ -258,11 +260,13 @@ impl TieredRingSet {
             .select_ring_with_bit(total_size)
             .ok_or(RingPairError::ResponseTooLarge(total_size))?;
 
-        ring.send_with(total_size, 0, |slot| {
-            Self::write_response_slot(slot, correlation_id, status, headers_raw, body);
-        })
-        .map_err(RingPairError::Channel)?;
         self.mark_tier_active(bit);
+        if let Err(e) = ring.send_with(total_size, 0, |slot| {
+            Self::write_response_slot(slot, correlation_id, status, headers_raw, body);
+        }) {
+            self.clear_tier_if_empty(ring, bit);
+            return Err(RingPairError::Channel(e));
+        }
         Ok(())
     }
 
@@ -273,11 +277,13 @@ impl TieredRingSet {
             .select_ring_with_bit(total_size)
             .ok_or(RingPairError::ResponseTooLarge(total_size))?;
 
-        ring.try_send_with(total_size, 0, |slot| {
-            slot[..total_size].copy_from_slice(raw_frame);
-        })
-        .map_err(RingPairError::Channel)?;
         self.mark_tier_active(bit);
+        if let Err(e) = ring.try_send_with(total_size, 0, |slot| {
+            slot[..total_size].copy_from_slice(raw_frame);
+        }) {
+            self.clear_tier_if_empty(ring, bit);
+            return Err(RingPairError::Channel(e));
+        }
         Ok(())
     }
 
@@ -308,13 +314,18 @@ impl TieredRingSet {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Check whether any non-small response tier currently holds unread data (`Acquire` ordering).
+    #[inline]
+    fn has_non_small_data(&self) -> bool {
+        self.medium.has_data_acquire()
+            || self.large.has_data_acquire()
+            || self.xlarge.has_data_acquire()
+    }
+
     /// Check whether any response tier currently holds unread data (`Acquire` ordering).
     #[inline]
     pub fn has_any_data(&self) -> bool {
-        self.small.has_data_acquire()
-            || self.medium.has_data_acquire()
-            || self.large.has_data_acquire()
-            || self.xlarge.has_data_acquire()
+        self.small.has_data_acquire() || self.has_non_small_data()
     }
 
     /// Arm the Dekker `consumer_sleeping` flag (`1`) across all four response tiers.
@@ -354,10 +365,15 @@ impl TieredRingSet {
     /// Try to receive a zero-copy [`SlotView`] from any active tier.
     pub fn try_recv_view(&self) -> Result<Option<SlotView>, RingPairError> {
         let mask = self.active_tier_mask();
-        if (mask & !TIER_BIT_SMALL) == 0 {
+        if (mask & !TIER_BIT_SMALL) == 0 && !self.has_non_small_data() {
             return match self.small.try_recv_view() {
                 Ok(view) => Ok(Some(view)),
-                Err(ChannelError::Empty) => Ok(None),
+                Err(ChannelError::Empty) => {
+                    if (mask & TIER_BIT_SMALL) != 0 {
+                        self.clear_tier_if_empty(&self.small, TIER_BIT_SMALL);
+                    }
+                    Ok(None)
+                }
                 Err(e) => Err(RingPairError::Channel(e)),
             };
         }
@@ -373,7 +389,7 @@ impl TieredRingSet {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         for offset in 0..tiers.len() {
             let (ring, bit) = tiers[(start.wrapping_add(offset)) % tiers.len()];
-            if bit != TIER_BIT_SMALL && (mask & bit) == 0 {
+            if bit != TIER_BIT_SMALL && (mask & bit) == 0 && !ring.has_data_acquire() {
                 continue;
             }
             match ring.try_recv_view() {
@@ -412,7 +428,7 @@ impl TieredRingSet {
             if total_drained >= max_items {
                 break;
             }
-            if bit != TIER_BIT_SMALL && (mask & bit) == 0 {
+            if bit != TIER_BIT_SMALL && (mask & bit) == 0 && !ring.has_data_acquire() {
                 continue;
             }
             let remaining = max_items - total_drained;
@@ -444,7 +460,7 @@ impl TieredRingSet {
     /// Try to receive a response from any tier using round-robin rotation and zero-copy slot views.
     pub fn try_recv_response(&self) -> Result<Option<ResponseData>, RingPairError> {
         let mask = self.active_tier_mask();
-        if (mask & !TIER_BIT_SMALL) == 0 {
+        if (mask & !TIER_BIT_SMALL) == 0 && !self.has_non_small_data() {
             return match self.small.try_recv_view() {
                 Ok(view) => {
                     let parsed = ResponseData::deserialize(view.as_slice());
@@ -473,7 +489,7 @@ impl TieredRingSet {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         for offset in 0..tiers.len() {
             let (ring, bit) = tiers[(start.wrapping_add(offset)) % tiers.len()];
-            if bit != TIER_BIT_SMALL && (mask & bit) == 0 {
+            if bit != TIER_BIT_SMALL && (mask & bit) == 0 && !ring.has_data_acquire() {
                 continue;
             }
             match ring.try_recv_view() {

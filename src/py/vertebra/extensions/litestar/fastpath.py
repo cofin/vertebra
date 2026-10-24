@@ -16,12 +16,15 @@ from vertebra.extensions.litestar.offload import (
     _get_handler_request_class,
     _is_default_local_filesystem,
     _is_empty_sentinel,
+    _is_rust_offload_active,
+    _supports_v2_layer_resolution,
 )
 from vertebra.extensions.litestar.router import (
     ExtractedLitestarRoute,
     LitestarRouterTable,
     extract_litestar_routes,
 )
+from vertebra.typing import Empty
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
@@ -51,6 +54,7 @@ class CompiledLitestarRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True)
     handler_owns_get_response: bool
     has_exception_handlers: bool = False
     has_response_cache: bool = False
+    max_body_size: int | None = None
 
     @property
     def is_bypass_eligible(self) -> bool:
@@ -150,13 +154,23 @@ class LitestarFastPathBypass:
 
         async def _fastpath_asgi_app(scope: Any, receive: Any, send: Any) -> None:
             sent_via_callback = False
+            buffered_messages: list[Any] = []
+            upstream_exhausted = False
+
+            async def _buffering_receive() -> Any:
+                nonlocal upstream_exhausted
+                msg = await receive()
+                buffered_messages.append(msg)
+                if isinstance(msg, dict) and msg.get("type") == "http.request" and not msg.get("more_body", False):
+                    upstream_exhausted = True
+                return msg
 
             async def _tracked_send(message: Any) -> None:
                 nonlocal sent_via_callback
                 sent_via_callback = True
                 await send(message)
 
-            direct = await bypass.dispatch(scope, receive, _tracked_send)
+            direct = await bypass.dispatch(scope, _buffering_receive, _tracked_send)
             if direct is not None:
                 status_code, encoded_headers, raw_body = direct
                 await send(
@@ -176,7 +190,23 @@ class LitestarFastPathBypass:
                 return
             if sent_via_callback:
                 return
-            await fallback_app(scope, receive, send)
+            if not buffered_messages:
+                await fallback_app(scope, receive, send)
+                return
+
+            replay_idx = 0
+
+            async def _replay_receive() -> Any:
+                nonlocal replay_idx
+                if replay_idx < len(buffered_messages):
+                    item = buffered_messages[replay_idx]
+                    replay_idx += 1
+                    return item
+                if upstream_exhausted:
+                    return {"type": "http.request", "body": b"", "more_body": False}
+                return await receive()
+
+            await fallback_app(scope, _replay_receive, send)
 
         return _fastpath_asgi_app
 
@@ -189,6 +219,21 @@ class LitestarFastPathBypass:
         body: bytes | None = None,
     ) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
         """Attempt to dispatch the request directly via the compiled fastpath routes."""
+        if self._app is None and hasattr(scope, "get"):
+            app_candidate = scope.get("litestar_app") or scope.get("app")
+            if app_candidate is not None:
+                cand_state = getattr(app_candidate, "state", None)
+                plugin = (
+                    cand_state.get("vertebra_plugin")
+                    if (cand_state is not None and hasattr(cand_state, "get"))
+                    else None
+                )
+                ensure_fn = getattr(plugin, "ensure_finalized", None)
+                if callable(ensure_fn):
+                    ensure_fn(app_candidate)
+                else:
+                    self.bind_app(app_candidate)
+
         table = self._router_table
         if table is None or not table.routes:
             return None
@@ -218,13 +263,19 @@ class LitestarFastPathBypass:
 
         direct_plan = self._direct_plans.get(entry.handler_id)
         if direct_plan is not None:
-            return await _execute_direct_signature_plan(
-                direct_plan,
-                scope=scope,
-                path_params=path_params,
-                receive=receive,
-                body=body,
-            )
+            try:
+                return await _execute_direct_signature_plan(
+                    direct_plan,
+                    scope=scope,
+                    path_params=path_params,
+                    receive=receive,
+                    body=body,
+                )
+            except Exception as exc:
+                http_exc_resp = _serialize_http_exception(exc)
+                if http_exc_resp is not None:
+                    return http_exc_resp
+                raise
 
         if not compiled.can_dispatch_direct:
             return None
@@ -237,13 +288,22 @@ class LitestarFastPathBypass:
         scope["path_template"] = compiled.path_template
 
         resolved_body = await _resolve_request_body(scope, receive, body, method=method)
-        return await dispatch_litestar_handler_direct(
-            compiled,
-            scope=scope,
-            body=resolved_body,
-            receive=receive,
-            send=send,
-        )
+        if compiled.max_body_size is not None and len(resolved_body) > compiled.max_body_size:
+            return None
+
+        try:
+            return await dispatch_litestar_handler_direct(
+                compiled,
+                scope=scope,
+                body=resolved_body,
+                receive=receive,
+                send=send,
+            )
+        except Exception as exc:
+            http_exc_resp = _serialize_http_exception(exc)
+            if http_exc_resp is not None:
+                return http_exc_resp
+            raise
 
 
 def preseed_litestar_scope_body(scope: Any, body: bytes) -> Any:
@@ -276,52 +336,60 @@ async def dispatch_litestar_handler_direct(
     request = compiled.request_class(scope=scope, receive=receive, send=send)
     scope["connection"] = request
 
-    if compiled.has_guards:
-        await compiled.route_handler.authorize_connection(request)
+    try:
+        if compiled.has_guards:
+            await compiled.route_handler.authorize_connection(request)
 
-    if compiled.handler_owns_get_response:
-        asgi_response = await compiled.route_handler._get_response_for_request(request=request)
-    else:
-        asgi_response = await compiled.route._get_response_for_request(
-            scope=scope,
-            request=request,
-            route_handler=compiled.route_handler,
-            parameter_model=compiled.kwargs_model,
-        )
-
-    result: tuple[int, list[tuple[bytes, bytes]], bytes] | None = None
-    resp_cls_name = type(asgi_response).__name__
-
-    if type(asgi_response) is ASGIResponse or resp_cls_name == "ASGIResponse":
-        encoded_headers = asgi_response.encode_headers()
-        raw_body = asgi_response.body if isinstance(asgi_response.body, bytes) else bytes(asgi_response.body)
-        result = (int(asgi_response.status_code), encoded_headers, raw_body)
-    elif resp_cls_name == "ASGIFileResponse" and _is_default_local_filesystem(
-        getattr(asgi_response, "file_system", None)
-    ):
-        file_path = getattr(asgi_response, "file_path", None)
-        if file_path is not None:
-            await send(
-                {
-                    "type": "http.response.pathsend",
-                    "path": str(file_path),
-                    "status": int(getattr(asgi_response, "status_code", 200)),
-                    "headers": asgi_response.encode_headers(),
-                }
+        if compiled.handler_owns_get_response:
+            asgi_response = await compiled.route_handler._get_response_for_request(request=request)
+        else:
+            asgi_response = await compiled.route._get_response_for_request(
+                scope=scope,
+                request=request,
+                route_handler=compiled.route_handler,
+                parameter_model=compiled.kwargs_model,
             )
+
+        result: tuple[int, list[tuple[bytes, bytes]], bytes] | None = None
+        resp_cls_name = type(asgi_response).__name__
+
+        if type(asgi_response) is ASGIResponse or resp_cls_name == "ASGIResponse":
+            encoded_headers = asgi_response.encode_headers()
+            raw_body = asgi_response.body if isinstance(asgi_response.body, bytes) else bytes(asgi_response.body)
+            result = (int(asgi_response.status_code), encoded_headers, raw_body)
+        elif resp_cls_name == "ASGIFileResponse" and _is_default_local_filesystem(
+            getattr(asgi_response, "file_system", None)
+        ):
+            file_path = getattr(asgi_response, "file_path", None)
+            if file_path is not None:
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": int(getattr(asgi_response, "status_code", 200)),
+                        "headers": asgi_response.encode_headers(),
+                    }
+                )
+                await send(
+                    {
+                        "type": "http.response.pathsend",
+                        "path": str(file_path),
+                    }
+                )
+            else:
+                await asgi_response(scope, receive, send)
+        elif resp_cls_name == "ASGIStreamingSSEResponse":
+            await _offload_sse_response(asgi_response, send)
         else:
             await asgi_response(scope, receive, send)
-    elif resp_cls_name == "ASGIStreamingSSEResponse":
-        await _offload_sse_response(asgi_response, send)
-    else:
-        await asgi_response(scope, receive, send)
 
-    if compiled.after_response is not None:
-        after_res = compiled.after_response(request)
-        if inspect.isawaitable(after_res):
-            await after_res
+        if compiled.after_response is not None:
+            after_res = compiled.after_response(request)
+            if inspect.isawaitable(after_res):
+                await after_res
 
-    return result
+        return result
+    finally:
+        await _close_scope_upload_files(scope)
 
 
 _RESERVED_CONNECTION_KWARGS: frozenset[str] = frozenset(
@@ -356,20 +424,23 @@ class _DirectSignaturePlan(msgspec.Struct, frozen=True, gc=False):
     json_headers: list[tuple[bytes, bytes]]
     text_headers: list[tuple[bytes, bytes]]
     raw_bytes_headers: list[tuple[bytes, bytes]]
+    max_body_size: int | None = None
 
 
 class _FallbackScopeState:
     """Fallback ScopeState representation when the optional litestar extra is not installed."""
 
-    __slots__ = ("body",)
+    __slots__ = ("_form", "body", "form")
 
     def __init__(self) -> None:
-        self.body: bytes | None = None
+        self.body: Any = Empty
+        self._form: Any = Empty
+        self.form: Any = Empty
 
     @classmethod
     def from_scope(cls, scope: Any) -> Self:
         state = scope.setdefault("state", {})
-        existing = state.get("_ls_connection_state")
+        existing = state.get("_ls_connection_state") if hasattr(state, "get") else None
         if isinstance(existing, cls):
             return existing
         created = cls()
@@ -413,37 +484,92 @@ def _get_scope_state_cls() -> Any:
 
 
 def _has_lifecycle_hook(handler: Any, app: Any, attr_name: str, resolve_name: str) -> bool:
-    resolve_fn = getattr(handler, resolve_name, None)
-    if callable(resolve_fn):
-        return not _is_empty_sentinel(resolve_fn())
+    if _supports_v2_layer_resolution(handler):
+        resolve_fn = getattr(handler, resolve_name, None)
+        if callable(resolve_fn):
+            val = resolve_fn()
+            return not _is_empty_sentinel(val) and bool(val)
     raw = getattr(handler, attr_name, None)
-    if not _is_empty_sentinel(raw):
+    if not _is_empty_sentinel(raw) and bool(raw):
         return True
     if app is not None:
-        return not _is_empty_sentinel(getattr(app, attr_name, None))
+        app_val = getattr(app, attr_name, None)
+        return not _is_empty_sentinel(app_val) and bool(app_val)
     return False
+
+
+def _has_custom_exception_handlers(exc_map: Any) -> bool:
+    if _is_empty_sentinel(exc_map) or not isinstance(exc_map, dict) or not exc_map:
+        return False
+    for handler_fn in exc_map.values():
+        module_name = str(getattr(handler_fn, "__module__", "") or "")
+        if not module_name.startswith("litestar."):
+            return True
+    return False
+
+
+def _resolve_max_body_size(handler: Any, app: Any) -> int | None:
+    raw = getattr(handler, "request_max_body_size", None)
+    if not _is_empty_sentinel(raw) and isinstance(raw, int):
+        return raw
+    if _supports_v2_layer_resolution(handler):
+        resolve_fn = getattr(handler, "resolve_request_max_body_size", None)
+        if callable(resolve_fn):
+            resolved = resolve_fn()
+            if not _is_empty_sentinel(resolved) and isinstance(resolved, int):
+                return resolved
+    if app is not None:
+        app_max = getattr(app, "request_max_body_size", None)
+        if not _is_empty_sentinel(app_max) and isinstance(app_max, int):
+            return app_max
+    return None
 
 
 def _compile_routes_from_table(
     router_table: LitestarRouterTable,
     app: Any,
 ) -> dict[int, CompiledLitestarRoute]:
+    rust_offload = _is_rust_offload_active()
     has_before_send = bool(getattr(app, "before_send", None)) if app is not None else False
     app_has_middleware = bool(getattr(app, "middleware", None)) if app is not None else False
+    app_has_csrf = not _is_empty_sentinel(getattr(app, "csrf_config", None)) if app is not None else False
+    app_has_allowed_hosts = (
+        not _is_empty_sentinel(getattr(app, "allowed_hosts", None)) and bool(getattr(app, "allowed_hosts", None))
+        if app is not None
+        else False
+    )
+    app_has_py_compression = (
+        (not rust_offload) and not _is_empty_sentinel(getattr(app, "compression_config", None))
+        if app is not None
+        else False
+    )
+    app_has_py_cors = (
+        (not rust_offload) and not _is_empty_sentinel(getattr(app, "cors_config", None)) if app is not None else False
+    )
+    app_requires_pipeline = (
+        app_has_middleware or app_has_csrf or app_has_allowed_hosts or app_has_py_compression or app_has_py_cors
+    )
+    app_exc_handlers = getattr(app, "exception_handlers", None) if app is not None else None
+    has_app_custom_exc = _has_custom_exception_handlers(app_exc_handlers)
+
     compiled: dict[int, CompiledLitestarRoute] = {}
 
     for handler_id, entry in router_table.routes.items():
         handler = entry.route_handler
         guards = _get_handler_guards(handler)
         middleware = _get_handler_middleware(handler)
-        has_hooks = _has_lifecycle_hook(
-            handler, app, "before_request", "resolve_before_request"
-        ) or _has_lifecycle_hook(handler, app, "after_request", "resolve_after_request")
+        has_hooks = (
+            _has_lifecycle_hook(handler, app, "before_request", "resolve_before_request")
+            or _has_lifecycle_hook(handler, app, "after_request", "resolve_after_request")
+            or _has_lifecycle_hook(handler, app, "after_exception", "resolve_after_exception")
+        )
         request_class = _get_handler_request_class(handler, app)
         after_response = _get_handler_after_response(handler)
         exception_handlers = _get_handler_exception_handlers(handler)
+        has_custom_exc = has_app_custom_exc or _has_custom_exception_handlers(exception_handlers)
         has_cache = bool(getattr(handler, "cache", False))
         handler_owns_get_response = callable(getattr(handler, "_get_response_for_request", None))
+        max_body_size = _resolve_max_body_size(handler, app)
         compiled[handler_id] = CompiledLitestarRoute(
             handler_id=handler_id,
             method=entry.method,
@@ -453,12 +579,13 @@ def _compile_routes_from_table(
             kwargs_model=entry.kwargs_model,
             request_class=request_class,
             has_guards=bool(guards),
-            has_middleware=app_has_middleware or bool(middleware) or has_hooks,
+            has_middleware=app_requires_pipeline or bool(middleware) or has_hooks,
             has_before_send=has_before_send,
             after_response=after_response,
             handler_owns_get_response=handler_owns_get_response,
-            has_exception_handlers=bool(exception_handlers),
+            has_exception_handlers=has_custom_exc,
             has_response_cache=has_cache,
+            max_body_size=max_body_size,
         )
     return compiled
 
@@ -486,23 +613,47 @@ def _resolve_scalar_query_converter(annotation: Any) -> Callable[[str], Any] | N
 
 
 def _handler_has_dependencies_or_dto(handler: Any) -> bool:
-    resolve_deps = getattr(handler, "resolve_dependencies", None)
-    if callable(resolve_deps):
-        if resolve_deps():
+    if _supports_v2_layer_resolution(handler):
+        resolve_deps = getattr(handler, "resolve_dependencies", None)
+        if callable(resolve_deps) and resolve_deps():
             return True
-    else:
-        raw_deps = getattr(handler, "dependencies", None)
-        if not _is_empty_sentinel(raw_deps) and bool(raw_deps):
-            return True
+    raw_deps = getattr(handler, "dependencies", None)
+    if not _is_empty_sentinel(raw_deps) and bool(raw_deps):
+        return True
 
     for dto_attr, resolve_attr in (("dto", "resolve_data_dto"), ("return_dto", "resolve_return_dto")):
-        resolve_dto = getattr(handler, resolve_attr, None)
-        if callable(resolve_dto):
-            if not _is_empty_sentinel(resolve_dto()):
-                return True
-        elif not _is_empty_sentinel(getattr(handler, dto_attr, None)):
+        if _supports_v2_layer_resolution(handler):
+            resolve_dto = getattr(handler, resolve_attr, None)
+            if callable(resolve_dto):
+                if not _is_empty_sentinel(resolve_dto()):
+                    return True
+                continue
+        if not _is_empty_sentinel(getattr(handler, dto_attr, None)):
             return True
     return False
+
+
+def _handler_has_custom_response_metadata(handler: Any) -> bool:
+    for attr_name, resolve_name in (
+        ("response_headers", "resolve_response_headers"),
+        ("response_cookies", "resolve_response_cookies"),
+        ("type_encoders", "resolve_type_encoders"),
+    ):
+        if _supports_v2_layer_resolution(handler):
+            resolve_fn = getattr(handler, resolve_name, None)
+            if callable(resolve_fn) and bool(resolve_fn()):
+                return True
+        raw_val = getattr(handler, attr_name, None)
+        if not _is_empty_sentinel(raw_val) and bool(raw_val):
+            return True
+
+    for direct_attr in ("etag", "cache_control", "background", "type_decoders"):
+        val = getattr(handler, direct_attr, None)
+        if not _is_empty_sentinel(val) and bool(val):
+            return True
+
+    resp_cls = getattr(handler, "response_class", None)
+    return bool(not _is_empty_sentinel(resp_cls) and getattr(resp_cls, "__name__", "Response") != "Response")
 
 
 def _compile_direct_signature_plan(
@@ -510,7 +661,11 @@ def _compile_direct_signature_plan(
     compiled: CompiledLitestarRoute,
 ) -> _DirectSignaturePlan | None:
     handler = compiled.route_handler
-    if compiled.after_response is not None or _handler_has_dependencies_or_dto(handler):
+    if (
+        compiled.after_response is not None
+        or _handler_has_dependencies_or_dto(handler)
+        or _handler_has_custom_response_metadata(handler)
+    ):
         return None
 
     raw_fn = getattr(handler, "fn", None)
@@ -576,6 +731,8 @@ def _compile_direct_signature_plan(
         media_type = str(raw_media.value)
     elif isinstance(raw_media, str) and raw_media:
         media_type = raw_media
+    elif ret_hint is str:
+        media_type = "text/plain; charset=utf-8"
     else:
         media_type = "application/json"
 
@@ -596,6 +753,7 @@ def _compile_direct_signature_plan(
         raw_bytes_headers=[
             (b"content-type", media_bytes if media_type != "application/json" else b"application/octet-stream")
         ],
+        max_body_size=compiled.max_body_size,
     )
 
 
@@ -623,11 +781,13 @@ async def _resolve_request_body(
     if body is not None:
         return body
     state_obj = scope.get("state") if hasattr(scope, "get") else None
-    if isinstance(state_obj, dict):
+    if state_obj is not None and hasattr(state_obj, "get"):
         conn_state = state_obj.get("_ls_connection_state")
-        preseeded = getattr(conn_state, "body", None)
-        if preseeded is not None:
-            return preseeded if isinstance(preseeded, bytes) else bytes(preseeded)
+        preseeded: Any = getattr(conn_state, "body", Empty) if conn_state is not None else Empty
+        if isinstance(preseeded, bytes):
+            return preseeded
+        if isinstance(preseeded, (bytearray, memoryview)):
+            return bytes(preseeded)
     if method in _BODYLESS_HTTP_METHODS or not callable(receive):
         return b""
 
@@ -639,9 +799,9 @@ async def _resolve_request_body(
             chunks.append(chunk if isinstance(chunk, bytes) else bytes(chunk))
         if not message.get("more_body", False):
             break
-    if not chunks:
-        return b""
-    return chunks[0] if len(chunks) == 1 else b"".join(chunks)
+    resolved = b"" if not chunks else (chunks[0] if len(chunks) == 1 else b"".join(chunks))
+    preseed_litestar_scope_body(scope, resolved)
+    return resolved
 
 
 async def _execute_direct_signature_plan(
@@ -666,7 +826,10 @@ async def _execute_direct_signature_plan(
             qs_str = bytes(raw_qs).decode("latin-1")
         else:
             qs_str = str(raw_qs or "")
-        parsed_qs = dict(parse_qsl(qs_str, keep_blank_values=True)) if qs_str else {}
+        parsed_qs: dict[str, str] = {}
+        if qs_str:
+            for qk, qv in parse_qsl(qs_str, keep_blank_values=True):
+                parsed_qs.setdefault(qk, qv)
         for qspec in plan.query_params:
             if qspec.name in parsed_qs:
                 try:
@@ -680,6 +843,8 @@ async def _execute_direct_signature_plan(
 
     if plan.body_param is not None:
         raw_body = await _resolve_request_body(scope, receive, body)
+        if plan.max_body_size is not None and len(raw_body) > plan.max_body_size:
+            return None
         try:
             decoded = decode_json(raw_body)
             kwargs[plan.body_param] = (
@@ -703,24 +868,101 @@ async def _execute_direct_signature_plan(
     return (plan.status_code, list(plan.json_headers), encode_json_bytes(out))
 
 
+def _serialize_http_exception(exc: Exception) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+    status_code = getattr(exc, "status_code", None)
+    if not isinstance(status_code, int) or isinstance(status_code, bool) or not (100 <= status_code <= 599):
+        return None
+    if not hasattr(exc, "detail"):
+        return None
+
+    detail = getattr(exc, "detail", "")
+    payload: dict[str, Any] = {
+        "status_code": status_code,
+        "detail": detail if detail else str(exc),
+    }
+    extra = getattr(exc, "extra", None)
+    if extra is not None:
+        payload["extra"] = extra
+
+    headers: list[tuple[bytes, bytes]] = [(b"content-type", b"application/json")]
+    exc_headers = getattr(exc, "headers", None)
+    if isinstance(exc_headers, dict):
+        for hk, hv in exc_headers.items():
+            headers.append((str(hk).lower().encode("latin-1"), str(hv).encode("latin-1")))
+    elif isinstance(exc_headers, list | tuple):
+        for pair in exc_headers:
+            if isinstance(pair, list | tuple) and len(pair) == 2:
+                k_raw, v_raw = pair
+                kb = k_raw.lower() if isinstance(k_raw, bytes) else str(k_raw).lower().encode("latin-1")
+                vb = v_raw if isinstance(v_raw, bytes) else str(v_raw).encode("latin-1")
+                headers.append((kb, vb))
+
+    return (status_code, headers, encode_json_bytes(payload))
+
+
+async def _close_scope_upload_files(scope: Any) -> None:
+    if not hasattr(scope, "get"):
+        return
+    state_obj = scope.get("state")
+    if state_obj is None or not hasattr(state_obj, "get"):
+        return
+    conn_state = state_obj.get("_ls_connection_state")
+    if conn_state is None:
+        return
+
+    seen_ids: set[int] = set()
+    for form_attr in ("_form", "form"):
+        form_data = getattr(conn_state, form_attr, Empty)
+        if _is_empty_sentinel(form_data):
+            continue
+        values: Iterable[Any]
+        if isinstance(form_data, dict):
+            values = form_data.values()
+        elif isinstance(form_data, list | tuple):
+            values = form_data
+        else:
+            continue
+        for entry in values:
+            candidates = entry if isinstance(entry, list | tuple) else (entry,)
+            for item in candidates:
+                obj_id = id(item)
+                if obj_id in seen_ids:
+                    continue
+                close_fn = getattr(item, "close", None)
+                if callable(close_fn):
+                    seen_ids.add(obj_id)
+                    res = close_fn()
+                    if inspect.isawaitable(res):
+                        await res
+
+
 async def _offload_sse_response(asgi_response: Any, send: Any) -> None:
     ping_interval = getattr(asgi_response, "_ping_interval", None)
-    headers = asgi_response.encode_headers()
+    headers = list(asgi_response.encode_headers())
+    if ping_interval is not None:
+        headers.append((b"x-vertebra-sse-ping-interval", str(ping_interval).encode("latin-1")))
     status_code = int(getattr(asgi_response, "status_code", 200))
     await send(
         {
-            "type": "http.response.sse",
+            "type": "http.response.start",
             "status": status_code,
             "headers": headers,
-            "ping_interval_s": ping_interval,
         }
     )
+    if ping_interval is not None:
+        await send(
+            {
+                "type": "http.response.sse",
+                "ping_interval_s": ping_interval,
+                "more_body": True,
+            }
+        )
     iterator = getattr(asgi_response, "iterator", None)
-    if isinstance(iterator, (AsyncIterable, AsyncGenerator)):
+    if isinstance(iterator, AsyncIterable | AsyncGenerator):
         async for chunk in iterator:
             raw = chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8")
             await send({"type": "http.response.body", "body": raw, "more_body": True})
-    elif isinstance(iterator, (Iterable, Generator)):
+    elif isinstance(iterator, Iterable | Generator):
         for chunk in iterator:
             raw = chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8")
             await send({"type": "http.response.body", "body": raw, "more_body": True})

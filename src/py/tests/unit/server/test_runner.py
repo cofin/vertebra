@@ -17,6 +17,7 @@ from vertebra._vertebra import Request, init_transport
 from vertebra.framework._app import App
 from vertebra.framework._router import Router, get
 from vertebra.server import _dispatch, worker
+from vertebra.server._asgi._runner import AsgiRunner
 from vertebra.server._dispatch import (
     BatchDispatchPlan,
     _call_handler,
@@ -929,3 +930,62 @@ def test_worker_inline_event_loop_add_reader_drains_batches(monkeypatch: pytest.
         pool.stop()
         os.close(read_fd)
         os.close(write_fd)
+
+
+def test_worker_process_batch_single_root_asgi_dispatches_via_fastpath_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Worker._process_batch passes single_root_asgi.dispatch_app so __vertebra_fastpath__ executes."""
+
+    class _FakeFastPath:
+        async def dispatch(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def wrap_asgi(self, fallback_app: Any) -> Any:
+            async def _wrapped(scope: Any, receive: Any, send: Any) -> None:
+                await fallback_app(scope, receive, send)
+
+            return _wrapped
+
+    class _RootAsgiApp:
+        def __init__(self) -> None:
+            self.__vertebra_fastpath__ = _FakeFastPath()
+
+        async def __call__(self, _scope: Any, _receive: Any, send: Any) -> None:
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+
+    class _RequestBatchStub:
+        def __len__(self) -> int:
+            return 1
+
+    app = _RootAsgiApp()
+    asgi_runner = AsgiRunner(app)
+    captured_apps: list[Any] = []
+
+    def _spy_drive_asgi_batch(target_app: Any, batch_obj: Any, **_kwargs: Any) -> None:
+        _ = batch_obj
+        captured_apps.append(target_app)
+
+    monkeypatch.setattr(worker, "RequestBatch", _RequestBatchStub)
+    monkeypatch.setattr(worker, "drive_asgi_batch", _spy_drive_asgi_batch)
+
+    pool = EventLoopPool(size=1)
+    w = Worker({}, mounts=[("/", asgi_runner, "asgi")])
+    try:
+        assert asgi_runner.dispatch_app is not app
+        w._process_batch(
+            _RequestBatchStub(),
+            compiled_handlers={},
+            mount_runners=[("/", asgi_runner, "asgi")],
+            mount_lookup={"/": (asgi_runner, "asgi")},
+            all_sync_native=False,
+            single_root_asgi=asgi_runner,
+            single_root_rsgi=None,
+            loop_pool=pool,
+            executor=None,
+        )
+        assert captured_apps == [asgi_runner.dispatch_app]
+    finally:
+        asgi_runner.close()
+        pool.stop()

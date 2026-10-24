@@ -72,15 +72,14 @@ pub fn method_tag(method: &hyper::Method) -> u8 {
     crate::routing::standard_method_tag(method.as_str())
 }
 
-/// Encodes an HTTP version as a single byte tag.
+/// Encodes an HTTP version as a single byte tag matching `TransportNode::http_version()`.
 #[inline]
 pub fn http_version_tag(version: hyper::Version) -> u8 {
     match version {
-        hyper::Version::HTTP_09 => 0,
-        hyper::Version::HTTP_10 => 1,
-        hyper::Version::HTTP_11 => 2,
-        hyper::Version::HTTP_2 => 3,
-        hyper::Version::HTTP_3 => 4,
+        hyper::Version::HTTP_10 => 0,
+        hyper::Version::HTTP_11 => 1,
+        hyper::Version::HTTP_2 => 2,
+        hyper::Version::HTTP_3 => 3,
         _ => 1,
     }
 }

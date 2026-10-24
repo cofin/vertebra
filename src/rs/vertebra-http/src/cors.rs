@@ -4,6 +4,29 @@ use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+/// Append `token` to `Vary` without overwriting existing tokens or duplicating entries.
+pub fn append_vary_token(headers: &mut HeaderMap, token: &'static str) {
+    let mut existing_parts: Vec<String> = Vec::new();
+    for val in headers.get_all(header::VARY) {
+        if let Ok(raw) = val.to_str() {
+            for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                if part == "*" || part.eq_ignore_ascii_case(token) {
+                    return;
+                }
+                existing_parts.push(part.to_string());
+            }
+        }
+    }
+    if existing_parts.is_empty() {
+        headers.insert(header::VARY, HeaderValue::from_static(token));
+    } else {
+        existing_parts.push(token.to_string());
+        if let Ok(combined) = HeaderValue::from_str(&existing_parts.join(", ")) {
+            headers.insert(header::VARY, combined);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CorsOffloadConfig {
@@ -167,7 +190,7 @@ impl CorsOffloadConfig {
         if let Ok(val) = HeaderValue::from_str(&self.max_age.to_string()) {
             headers.insert(header::ACCESS_CONTROL_MAX_AGE, val);
         }
-        headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+        append_vary_token(&mut headers, "Origin");
         (StatusCode::NO_CONTENT, headers)
     }
 
@@ -200,7 +223,7 @@ impl CorsOffloadConfig {
             headers.insert(expose_name, val);
         }
         if allowed_origin != "*" {
-            headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+            append_vary_token(headers, "Origin");
         }
     }
 }

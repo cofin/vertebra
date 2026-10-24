@@ -370,3 +370,93 @@ fn offload_config_json_parses_into_server_config() {
     assert_eq!(cfg.static_mounts.len(), 1);
     assert_eq!(cfg.static_mounts[0].path_prefix, "/static");
 }
+
+#[test]
+fn cors_and_compression_preserve_vary_skip_incompressible_types_and_align_version_tags() {
+    use http::{HeaderMap, HeaderValue, Version, header};
+    use vertebra_http::batcher::http_version_tag;
+    use vertebra_http::compression::{CompressionBackend, CompressionOffloadConfig};
+    use vertebra_http::cors::CorsOffloadConfig;
+
+    let cors = CorsOffloadConfig {
+        allow_origins: vec!["https://app.example".to_string()],
+        allow_methods: vec!["GET".to_string(), "POST".to_string()],
+        allow_credentials: true,
+        ..CorsOffloadConfig::default()
+    };
+    let comp = CompressionOffloadConfig {
+        backend: CompressionBackend::Zstd,
+        minimum_size: 64,
+        ..CompressionOffloadConfig::default()
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::VARY, HeaderValue::from_static("Accept-Language"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+
+    cors.apply_response_headers("https://app.example", &mut headers);
+    let json_body = Bytes::from(vec![b'j'; 256]);
+    let compressed =
+        comp.compress_if_eligible("/api/data", Some("zstd"), &mut headers, json_body.clone());
+    assert!(compressed.len() < json_body.len());
+
+    cors.apply_response_headers("https://app.example", &mut headers);
+    let vary_str = headers
+        .get(header::VARY)
+        .and_then(|v| v.to_str().ok())
+        .expect("Vary header present");
+    let tokens: Vec<&str> = vary_str.split(',').map(str::trim).collect();
+    assert_eq!(tokens, vec!["Accept-Language", "Origin", "Accept-Encoding"]);
+
+    let mut png_headers = HeaderMap::new();
+    png_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    let png_body = Bytes::from(vec![0x89; 512]);
+    let untouched = comp.compress_if_eligible(
+        "/logo.png",
+        Some("zstd"),
+        &mut png_headers,
+        png_body.clone(),
+    );
+    assert_eq!(untouched, png_body);
+    assert!(png_headers.get(header::CONTENT_ENCODING).is_none());
+
+    assert_eq!(http_version_tag(Version::HTTP_10), 0);
+    assert_eq!(http_version_tag(Version::HTTP_11), 1);
+    assert_eq!(http_version_tag(Version::HTTP_2), 2);
+    assert_eq!(http_version_tag(Version::HTTP_3), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backpressure_queued_waiters_wake_without_lost_notifications() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use vertebra_http::backpressure::{BackpressureConfig, BackpressureController};
+
+    let controller = Arc::new(BackpressureController::new(BackpressureConfig {
+        max_in_flight: 2,
+        max_queue_depth: 32,
+        max_queue_time: Duration::from_millis(500),
+        ..BackpressureConfig::default()
+    }));
+
+    let mut handles = Vec::with_capacity(16);
+    for _ in 0..16 {
+        let c = Arc::clone(&controller);
+        handles.push(tokio::spawn(async move {
+            for _ in 0..30 {
+                let permit = c.try_acquire().await.expect("queued waiter must wake");
+                tokio::task::yield_now().await;
+                c.record_success();
+                drop(permit);
+            }
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+    assert_eq!(controller.snapshot().in_flight, 0);
+}

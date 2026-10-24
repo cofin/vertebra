@@ -169,3 +169,48 @@ fn tiered_ring_set_default_absorbs_256_burst_active_mask_and_zero_copy_drain() {
         "SHM BatchSnapshot body slice must point directly into ShmRegion without heap copy"
     );
 }
+
+#[test]
+fn tiered_ring_set_drains_non_small_tier_even_when_active_mask_is_cleared() {
+    use std::sync::atomic::Ordering;
+    use vertebra_core::TieredRingSet;
+    use vertebra_core::tiered_ring::TieredRingConfig;
+
+    let set = TieredRingSet::create(&TieredRingConfig::default()).expect("create TieredRingSet");
+    let medium_body = vec![b'm'; 6000];
+
+    set.send_response(41, 200, b"", &medium_body)
+        .expect("send medium response 1");
+    set.small.active_flags().store(0, Ordering::SeqCst);
+
+    let mut seen_ids = Vec::new();
+    let drained = set
+        .drain_with(16, |corr_id, status, _headers, body| {
+            assert_eq!(status, 200);
+            assert_eq!(body.len(), 6000);
+            seen_ids.push(corr_id);
+        })
+        .expect("drain_with fallback to has_data_acquire");
+    assert_eq!(drained, 1);
+    assert_eq!(seen_ids, vec![41]);
+
+    set.send_response(42, 201, b"", &medium_body)
+        .expect("send medium response 2");
+    set.small.active_flags().store(0, Ordering::SeqCst);
+    let resp = set
+        .try_recv_response()
+        .expect("try_recv_response")
+        .expect("medium response must be discovered via has_data_acquire");
+    assert_eq!(resp.correlation_id, 42);
+    assert_eq!(resp.status, 201);
+    assert_eq!(resp.body.len(), 6000);
+
+    set.send_response(43, 202, b"", &medium_body)
+        .expect("send medium response 3");
+    set.small.active_flags().store(0, Ordering::SeqCst);
+    let view = set
+        .try_recv_view()
+        .expect("try_recv_view")
+        .expect("medium slot view must be discovered via has_data_acquire");
+    assert!(!view.as_slice().is_empty());
+}

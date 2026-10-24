@@ -268,6 +268,11 @@ fn build_tokio_runtime(worker_threads: usize) -> std::io::Result<tokio::runtime:
 #[cfg(feature = "python")]
 fn extract_offload_json_from_app(app_obj: &Bound<'_, PyAny>) -> Option<String> {
     let state = app_obj.getattr("state").ok()?;
+    if let Ok(plugin) = state.call_method1("get", ("vertebra_plugin",))
+        && !plugin.is_none()
+    {
+        let _ = plugin.call_method1("ensure_finalized", (app_obj,));
+    }
     let val = state
         .call_method1("get", ("vertebra_offload_config_json",))
         .ok()?;

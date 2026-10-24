@@ -390,6 +390,16 @@ class AsgiRunner:
     @staticmethod
     def _resolve_fastpath(app: Any) -> Any:
         """Return an attached fastpath bypass dispatcher if exposed by ``app``."""
+        for candidate_app in (app, getattr(app, "_inner", None)):
+            if candidate_app is None:
+                continue
+            cand_state = getattr(candidate_app, "state", None)
+            if cand_state is not None and hasattr(cand_state, "get"):
+                plugin = cand_state.get("vertebra_plugin")
+                ensure_fn = getattr(plugin, "ensure_finalized", None)
+                if callable(ensure_fn):
+                    ensure_fn(candidate_app)
+
         direct = getattr(app, "__vertebra_fastpath__", None)
         if direct is not None and callable(getattr(direct, "dispatch", None)):
             return direct
