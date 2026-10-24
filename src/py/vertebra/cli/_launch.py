@@ -26,6 +26,7 @@ class ServerLaunchEnv(msgspec.Struct, frozen=True, gc=False):
     def to_environ(self, base: Mapping[str, str] | None = None) -> dict[str, str]:
         """Assemble environment variables dictionary while preserving omitted runtime overrides."""
         env = dict(base) if base is not None else os.environ.copy()
+        env["VERTEBRA_SERVER_ACTIVE"] = "1"
         env["VERTEBRA_APP"] = self.app_path
         env["LITESTAR_APP"] = self.app_path
         env["VERTEBRA_PYTHON_APP"] = self.app_path

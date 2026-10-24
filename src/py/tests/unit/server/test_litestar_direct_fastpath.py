@@ -17,15 +17,18 @@ from vertebra.extensions.litestar.channels import (
     swap_litestar_channels_backend,
 )
 from vertebra.extensions.litestar.fastpath import (
+    LitestarFastPathBypass,
     ScopeState,
     compile_litestar_fastpath_routes,
     dispatch_litestar_handler_direct,
     preseed_litestar_scope_body,
 )
+from vertebra.extensions.litestar.router import extract_litestar_routes
 from vertebra.extensions.litestar.store import (
     MemoryStore,
     swap_litestar_response_cache_store,
 )
+from vertebra.utils.serializers import decode_json
 
 
 class CreateOrderPayload(msgspec.Struct):
@@ -145,6 +148,7 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
                 fn: Callable[..., Any],
                 dto: Any = None,
                 guards: Sequence[Callable[..., Any]] = (),
+                middleware: Sequence[Any] = (),
                 dependencies: dict[str, Any] | None = None,
                 after_response: Callable[..., Any] | None = None,
             ) -> None:
@@ -153,7 +157,7 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
                 self.fn = fn
                 self.dto = dto
                 self.guards = tuple(guards)
-                self.middleware = ()
+                self.middleware = tuple(middleware)
                 self.opt: dict[str, Any] = {}
                 self.dependencies = dict(dependencies or {})
                 self.after_response = after_response
@@ -201,6 +205,7 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
                 *,
                 dto: Any = None,
                 guards: Sequence[Callable[..., Any]] = (),
+                middleware: Sequence[Any] = (),
                 dependencies: dict[str, Any] | None = None,
                 after_response: Callable[..., Any] | None = None,
                 **_kwargs: Any,
@@ -212,6 +217,7 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
                         fn=fn,
                         dto=dto,
                         guards=guards,
+                        middleware=middleware,
                         dependencies=dependencies,
                         after_response=after_response,
                     )
@@ -553,3 +559,77 @@ async def test_swap_channels_backend_and_response_cache_store() -> None:
         assert ttl is not None and ttl > 0
         await swapped_store.delete("k1")
         assert await swapped_store.get("k1") is None
+
+
+@pytest.mark.anyio
+async def test_fastpath_bypass_dispatches_eligible_sync_and_async_routes_and_skips_ineligible() -> None:
+    """Verify LitestarFastPathBypass.dispatch runs eligible sync/async routes directly and returns None for ineligible routes."""
+
+    def sample_guard(_conn: Any, _handler: Any) -> None:
+        return None
+
+    async def noop_middleware(app_fn: Any) -> Any:
+        return app_fn
+
+    @get("/items/{item_id:int}", sync_to_thread=False)
+    def get_item(item_id: int, limit: int = 5) -> dict[str, int]:
+        return {"id": item_id, "limit": limit}
+
+    @post("/fast-orders")
+    async def create_fast_order(data: CreateOrderPayload) -> dict[str, Any]:
+        return {"sku": data.sku, "qty": data.quantity}
+
+    @get("/guarded", guards=[sample_guard], sync_to_thread=False)
+    def guarded_route() -> dict[str, str]:
+        return {"ok": "guarded"}
+
+    @get("/wrapped", middleware=[noop_middleware], sync_to_thread=False)
+    def middleware_route() -> dict[str, str]:
+        return {"ok": "wrapped"}
+
+    app = Litestar(route_handlers=[get_item, create_fast_order, guarded_route, middleware_route])
+    router_table = extract_litestar_routes(app)
+    bypass = LitestarFastPathBypass(router_table, app=app)
+
+    async def forbidden_receive() -> dict[str, Any]:
+        raise AssertionError("receive() must not be called on GET or pre-supplied POST body")
+
+    async def noop_send(message: dict[str, Any]) -> None:
+        _ = message
+
+    get_scope = AsgiScope.from_parts(
+        method="GET",
+        path="/items/42",
+        query_string="limit=15",
+        headers=[(b"accept", b"application/json")],
+    )
+    get_res = await bypass.dispatch(get_scope, forbidden_receive, noop_send)
+    assert get_res is not None
+    status_get, headers_get, body_get = get_res
+    assert status_get == 200
+    assert (b"content-type", b"application/json") in [(k.lower(), v) for k, v in headers_get]
+    assert decode_json(body_get) == {"id": 42, "limit": 15}
+
+    post_scope = AsgiScope.from_parts(
+        method="POST",
+        path="/fast-orders",
+        headers=[(b"content-type", b"application/json")],
+    )
+    post_payload = b'{"sku":"X1","quantity":7}'
+    post_res = await bypass.dispatch(post_scope, forbidden_receive, noop_send, body=post_payload)
+    assert post_res is not None
+    status_post, _headers_post, body_post = post_res
+    assert status_post == 201
+    assert decode_json(body_post) == {"sku": "X1", "qty": 7}
+
+    guarded_scope = AsgiScope.from_parts(method="GET", path="/guarded")
+    assert await bypass.dispatch(guarded_scope, forbidden_receive, noop_send) is None
+
+    mw_scope = AsgiScope.from_parts(method="GET", path="/wrapped")
+    assert await bypass.dispatch(mw_scope, forbidden_receive, noop_send) is None
+
+    missing_scope = AsgiScope.from_parts(method="GET", path="/does-not-exist")
+    assert await bypass.dispatch(missing_scope, forbidden_receive, noop_send) is None
+
+    ws_scope: dict[str, Any] = {"type": "websocket", "method": "GET", "path": "/items/42"}
+    assert await bypass.dispatch(ws_scope, forbidden_receive, noop_send) is None

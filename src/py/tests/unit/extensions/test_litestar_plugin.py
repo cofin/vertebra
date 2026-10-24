@@ -198,8 +198,10 @@ class _LifecycleTrackerPlugin:
 
 
 def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify LitestarPlugin intercepts compression/CORS before trie build and enters CLIPlugin.server_lifespan."""
+    """Verify LitestarPlugin preserves standalone Python compression and strips it only when vertebra-server is active."""
     monkeypatch.delenv("LITESTAR_APP", raising=False)
+    monkeypatch.delenv("VERTEBRA_SERVER_ACTIVE", raising=False)
+    monkeypatch.delenv("VERTEBRA_RUST_OFFLOAD", raising=False)
     tracker = _LifecycleTrackerPlugin()
     vtb_plugin = LitestarPlugin(LitestarConfig(enable_health_endpoint=True, health_path="/_vtb/healthz"))
 
@@ -207,26 +209,40 @@ def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.Mon
     def ping() -> dict[str, str]:
         return {"status": "pong"}
 
-    app = Litestar(
+    standalone_app = Litestar(
         route_handlers=[ping],
         plugins=[vtb_plugin, tracker],
         compression_config=CompressionConfig(backend="zstd", minimum_size=512),
         cors_config=CORSConfig(allow_origins=["https://console.example.com"]),
     )
 
-    assert app.compression_config is None
-    assert app.state["_vertebra_offloaded_compression_config"] is not None
-    assert app.state["_vertebra_offloaded_cors_config"] is not None
+    assert standalone_app.compression_config is not None
+    assert standalone_app.state["_vertebra_offloaded_compression_config"] is not None
+    assert standalone_app.state["_vertebra_offloaded_cors_config"] is not None
     assert vtb_plugin.offload_plan is not None
     assert vtb_plugin.offload_plan.compression is not None
     assert vtb_plugin.offload_plan.compression.backend == "zstd"
     vtb_plugin.on_cli_init(None)
 
-    with enter_litestar_server_lifespan(app, app_path="example.app:app"):
+    with enter_litestar_server_lifespan(standalone_app, app_path="example.app:app"):
         assert tracker.entered is True
         assert tracker.seen_app_env == "example.app:app"
         assert os.environ["LITESTAR_APP"] == "example.app:app"
     assert tracker.exited is True
+
+    monkeypatch.setenv("VERTEBRA_SERVER_ACTIVE", "1")
+    active_plugin = LitestarPlugin(LitestarConfig(enable_health_endpoint=True, health_path="/_vtb/healthz"))
+    active_app = Litestar(
+        route_handlers=[ping],
+        plugins=[active_plugin],
+        compression_config=CompressionConfig(backend="zstd", minimum_size=512),
+        cors_config=CORSConfig(allow_origins=["https://console.example.com"]),
+    )
+    assert active_app.compression_config is None
+    assert active_plugin.offload_plan is not None
+    exported_cfg = decode_json(active_app.state["vertebra_offload_config_json"])
+    assert exported_cfg["compression"]["backend"] == "zstd"
+    assert exported_cfg["cors"]["allow_origins"] == ["https://console.example.com"]
 
     disabled_plugin = LitestarPlugin(
         LitestarConfig(
@@ -249,6 +265,55 @@ def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.Mon
     assert disabled_plugin.offload_plan.cors is None
     assert disabled_plugin.offload_plan.static_mounts == ()
     assert disabled_plugin.offload_plan.openapi is None
+
+
+def test_asgi_runner_invokes_attached_vertebra_fastpath(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify AsgiRunner invokes __vertebra_fastpath__ directly for eligible routes and falls back for unmatched paths."""
+    monkeypatch.delenv("VERTEBRA_SERVER_ACTIVE", raising=False)
+    vtb_plugin = LitestarPlugin()
+
+    @get("/accelerated", sync_to_thread=False)
+    def accelerated() -> dict[str, str]:
+        return {"fast": "yes"}
+
+    litestar_app = Litestar(route_handlers=[accelerated], plugins=[vtb_plugin])
+    bypass = litestar_app.state["vertebra_fastpath_bypass"]
+
+    class _FastPathOnlyAsgiWrapper:
+        def __init__(self, inner: Any, fastpath: Any) -> None:
+            self._inner = inner
+            self.__vertebra_fastpath__ = fastpath
+            self.fallback_paths: list[str] = []
+
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            if scope["path"] == "/accelerated":
+                raise AssertionError("outer ASGI router must be bypassed for eligible fastpath routes")
+            self.fallback_paths.append(scope["path"])
+            await self._inner(scope, receive, send)
+
+    class _SimpleRequest:
+        __slots__ = ("body", "handler_id", "headers", "method", "path", "query", "request_id")
+
+        def __init__(self, path: str, request_id: int) -> None:
+            self.method = "GET"
+            self.path = path
+            self.query = None
+            self.body = b""
+            self.handler_id = 1
+            self.request_id = request_id
+            self.headers: dict[str, str] = {}
+
+    wrapper = _FastPathOnlyAsgiWrapper(litestar_app, bypass)
+    runner = AsgiRunner(wrapper)
+    try:
+        responses = runner([_SimpleRequest("/accelerated", 1), _SimpleRequest("/missing", 2)])
+        assert len(responses) == 2
+        assert responses[0].status == 200
+        assert decode_json(bytes(responses[0].body)) == {"fast": "yes"}
+        assert responses[1].status == 404
+        assert wrapper.fallback_paths == ["/missing"]
+    finally:
+        runner.close()
 
 
 def test_asgi_runner_supports_anyio_task_group() -> None:

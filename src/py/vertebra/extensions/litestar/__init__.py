@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from vertebra.extensions.litestar.config import LitestarConfig
     from vertebra.extensions.litestar.fastpath import (
         CompiledLitestarRoute,
+        LitestarFastPathBypass,
         compile_litestar_fastpath_routes,
         dispatch_litestar_handler_direct,
         preseed_litestar_scope_body,
@@ -51,6 +52,7 @@ __all__ = (
     "CorsOffloadSpec",
     "ExtractedLitestarRoute",
     "LitestarConfig",
+    "LitestarFastPathBypass",
     "LitestarOffloadPlan",
     "LitestarPlugin",
     "LitestarRouteCompiler",
@@ -80,6 +82,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "swap_litestar_channels_backend": ("vertebra.extensions.litestar.channels", "swap_litestar_channels_backend"),
     "LitestarConfig": ("vertebra.extensions.litestar.config", "LitestarConfig"),
     "CompiledLitestarRoute": ("vertebra.extensions.litestar.fastpath", "CompiledLitestarRoute"),
+    "LitestarFastPathBypass": ("vertebra.extensions.litestar.fastpath", "LitestarFastPathBypass"),
     "compile_litestar_fastpath_routes": ("vertebra.extensions.litestar.fastpath", "compile_litestar_fastpath_routes"),
     "dispatch_litestar_handler_direct": ("vertebra.extensions.litestar.fastpath", "dispatch_litestar_handler_direct"),
     "preseed_litestar_scope_body": ("vertebra.extensions.litestar.fastpath", "preseed_litestar_scope_body"),

@@ -17,7 +17,7 @@ class LitestarConfig(msgspec.Struct, frozen=True, gc=False):
     swap_memory_channels: bool = True
     swap_memory_response_cache: bool = True
     enable_direct_handler_fastpath: bool = True
-    enable_fastpath_bypass: bool = False
+    enable_fastpath_bypass: bool = True
     enable_health_endpoint: bool = False
     health_path: str = "/healthz"
     mcp_config: Any | None = None

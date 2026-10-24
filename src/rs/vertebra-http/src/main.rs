@@ -132,6 +132,10 @@ fn spawn_python_workers(app_path: String, thread_count: usize) -> PyResult<Embed
         let sys = py.import("sys")?;
         sys.getattr("modules")?
             .set_item("vertebra._vertebra", &native_mod)?;
+        let os_mod = py.import("os")?;
+        os_mod
+            .getattr("environ")?
+            .call_method1("setdefault", ("VERTEBRA_SERVER_ACTIVE", "1"))?;
 
         let parts: Vec<&str> = app_path.splitn(2, ':').collect();
         let module = py.import(parts[0])?;
@@ -257,8 +261,20 @@ fn build_tokio_runtime(worker_threads: usize) -> std::io::Result<tokio::runtime:
     }
 }
 
+#[cfg(feature = "python")]
+fn extract_offload_json_from_app(app_obj: &Bound<'_, PyAny>) -> Option<String> {
+    let state = app_obj.getattr("state").ok()?;
+    let val = state
+        .call_method1("get", ("vertebra_offload_config_json",))
+        .ok()?;
+    if val.is_none() {
+        return None;
+    }
+    val.extract::<String>().ok()
+}
+
 async fn run_server(
-    config: Arc<ServerConfig>,
+    #[allow(unused_mut)] mut config: ServerConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let server_shutdown_token = tokio_util::sync::CancellationToken::new();
 
@@ -270,24 +286,39 @@ async fn run_server(
     #[cfg(feature = "python")]
     let (table, app_path) = {
         let app_path = std::env::var("VERTEBRA_APP").unwrap_or_else(|_| "app:app".to_string());
-        let table = Python::attach(|py| -> PyResult<RouteTable> {
-            let native_mod = py.import("_vertebra")?;
-            let sys = py.import("sys")?;
-            sys.getattr("modules")?
-                .set_item("vertebra._vertebra", &native_mod)?;
+        let (table, offload_json) =
+            Python::attach(|py| -> PyResult<(RouteTable, Option<String>)> {
+                let native_mod = py.import("_vertebra")?;
+                let sys = py.import("sys")?;
+                sys.getattr("modules")?
+                    .set_item("vertebra._vertebra", &native_mod)?;
+                let os_mod = py.import("os")?;
+                os_mod
+                    .getattr("environ")?
+                    .call_method1("setdefault", ("VERTEBRA_SERVER_ACTIVE", "1"))?;
 
-            let parts: Vec<&str> = app_path.splitn(2, ':').collect();
-            if parts.len() != 2 {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "VERTEBRA_APP must be 'module:attr', got: {app_path}"
-                )));
-            }
-            let module = py.import(parts[0])?;
-            let app_obj = module.getattr(parts[1])?;
-            build_route_table_from_app(py, &app_obj)
-        })?;
+                let parts: Vec<&str> = app_path.splitn(2, ':').collect();
+                if parts.len() != 2 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "VERTEBRA_APP must be 'module:attr', got: {app_path}"
+                    )));
+                }
+                let module = py.import(parts[0])?;
+                let app_obj = module.getattr(parts[1])?;
+                let extracted_offload = extract_offload_json_from_app(&app_obj);
+                let route_table = build_route_table_from_app(py, &app_obj)?;
+                Ok((route_table, extracted_offload))
+            })?;
+        if std::env::var_os("VERTEBRA_OFFLOAD_CONFIG").is_none()
+            && let Some(raw_json) = offload_json
+            && let Err(e) = config.apply_offload_json(&raw_json)
+        {
+            error!("failed to apply extracted Litestar offload config: {e}");
+        }
         (table, app_path)
     };
+
+    let config = Arc::new(config);
 
     #[cfg(not(feature = "python"))]
     let table = {
@@ -458,7 +489,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     vertebra_http::workers::install_panic_cleanup_hook();
 
-    let config = Arc::new(ServerConfig::from_env());
+    let config = ServerConfig::from_env();
 
     #[cfg(all(feature = "python", unix))]
     if config.topology == Topology::Embedded && config.workers.count > 1 && !is_embedded_child {

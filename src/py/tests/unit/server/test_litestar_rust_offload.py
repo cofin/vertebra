@@ -19,6 +19,7 @@ from vertebra.extensions.litestar.offload import (
     evaluate_openapi_cache_request,
     offload_litestar_middlewares,
 )
+from vertebra.utils.serializers import decode_json
 
 
 def _load_litestar_offload_primitives() -> tuple[Any, Any, Any, Any, Any]:
@@ -350,3 +351,67 @@ def test_flattened_v3_and_v2_handler_attribute_helpers() -> None:
     assert _get_handler_guards(handler) == ()
     assert _get_handler_middleware(handler) == ()
     assert _get_handler_opt(handler).get("custom_flag") is True
+
+
+def test_offload_plan_to_server_config_matches_rust_offload_schema(tmp_path: Path) -> None:
+    """Verify LitestarOffloadPlan.to_server_config exports JSON matching vertebra-http OffloadPlanPayload."""
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir()
+    (assets_dir / "bundle.js").write_text("export default 1;", encoding="utf-8")
+
+    @get("/items", sync_to_thread=False)
+    def get_items() -> list[str]:
+        return ["a"]
+
+    @get("/raw", opt={"exclude_from_compression": True}, sync_to_thread=False)
+    def get_raw() -> str:
+        return "raw"
+
+    static_router = create_static_files_router(
+        path="/static",
+        directories=[assets_dir],
+        html_mode=True,
+    )
+    app = Litestar(
+        route_handlers=[get_items, get_raw, static_router],
+        compression_config=CompressionConfig(
+            backend="zstd",
+            minimum_size=256,
+            zstd_level=3,
+            exclude=["/healthz"],
+            exclude_opt_key="exclude_from_compression",
+        ),
+        cors_config=CORSConfig(
+            allow_origins=["https://app.example.com"],
+            allow_methods=["GET", "POST"],
+            allow_headers=["Authorization"],
+            allow_credentials=True,
+            expose_headers=["X-Trace-Id"],
+            max_age=600,
+        ),
+    )
+
+    plan = offload_litestar_middlewares(app)
+    cfg = plan.to_server_config()
+    raw_json = plan.to_server_config_json()
+    assert decode_json(raw_json) == cfg
+
+    assert cfg["compression"]["backend"] == "zstd"
+    assert cfg["compression"]["minimum_size"] == 256
+    assert cfg["compression"]["zstd_level"] == 3
+    assert "/healthz" in cfg["compression"]["exclude_patterns"]
+    assert "/raw" in cfg["compression"]["excluded_paths"]
+
+    assert cfg["cors"]["allow_origins"] == ["https://app.example.com"]
+    assert cfg["cors"]["allow_methods"] == ["GET", "POST"]
+    assert cfg["cors"]["allow_credentials"] is True
+    assert cfg["cors"]["max_age"] == 600
+
+    assert len(cfg["static_mounts"]) == 1
+    assert cfg["static_mounts"][0]["path_prefix"] == "/static"
+    assert str(assets_dir.resolve()) in cfg["static_mounts"][0]["directories"]
+    assert cfg["static_mounts"][0]["html_mode"] is True
+
+    assert cfg["openapi"]["schema_path"] == "/schema/openapi.json"
+    assert isinstance(cfg["openapi"]["body"], str)
+    assert '"/items"' in cfg["openapi"]["body"]

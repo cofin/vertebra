@@ -1,6 +1,7 @@
 """Unit tests for newly added and hardened CLI commands and flags."""
 
 import io
+import os
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from vertebra.cli._launch import ServerLaunchEnv
 from vertebra.cli.banner.renderer import render_banner
 from vertebra.cli.errors import CLIError
 from vertebra.cli.theme import Console
+from vertebra.supervisor import _supervisor as supervisor_mod
 from vertebra.supervisor import _worker as supervisor_worker
 
 
@@ -228,3 +230,26 @@ def test_worker_main_asgi_app_avoids_double_mount(monkeypatch: pytest.MonkeyPatc
     assert handlers_raw == {}
     assert len(mounts_raw) == 1
     assert mounts_raw[0][1] is raw_asgi
+
+
+def test_find_server_binary_honors_cargo_target_dir_and_newest_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify find_server_binary prioritizes CARGO_TARGET_DIR and freshest release artifacts."""
+    monkeypatch.delenv("VERTEBRA_SERVER_BINARY", raising=False)
+    fake_repo = tmp_path / "repo"
+    stale_bin = fake_repo / "src" / "rs" / "target" / "release" / "vertebra-server"
+    stale_bin.parent.mkdir(parents=True)
+    stale_bin.write_bytes(b"stale")
+    os.utime(stale_bin, ns=(1_000_000_000, 1_000_000_000))
+
+    cargo_target = tmp_path / "cargo-out"
+    fresh_bin = cargo_target / "release" / "vertebra-server"
+    fresh_bin.parent.mkdir(parents=True)
+    fresh_bin.write_bytes(b"fresh")
+    os.utime(fresh_bin, ns=(2_000_000_000, 2_000_000_000))
+
+    monkeypatch.setattr(supervisor_mod, "find_repo_root", lambda _start: fake_repo)
+    monkeypatch.setenv("CARGO_TARGET_DIR", str(cargo_target))
+    assert supervisor_mod.find_server_binary() == str(fresh_bin)

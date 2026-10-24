@@ -9,7 +9,7 @@ import msgspec
 
 from vertebra.extensions.litestar.router import _unpack_route_handler_map_entry
 from vertebra.utils.module_loader import import_optional
-from vertebra.utils.serializers import encode_json_bytes
+from vertebra.utils.serializers import encode_json, encode_json_bytes
 
 __all__ = (
     "CompressionOffloadSpec",
@@ -84,8 +84,70 @@ class LitestarOffloadPlan(msgspec.Struct, frozen=True, gc=False):
     static_mounts: tuple[StaticMountOffloadSpec, ...]
     openapi: OpenApiOffloadSpec | None
 
+    def to_server_config(self) -> dict[str, Any]:
+        """Serialize this offload plan into the dictionary schema consumed by vertebra-http ServerConfig."""
+        compression_payload: dict[str, Any] | None = None
+        if self.compression is not None:
+            compression_payload = {
+                "backend": self.compression.backend,
+                "minimum_size": self.compression.minimum_size,
+                "gzip_compress_level": self.compression.gzip_compress_level,
+                "brotli_quality": self.compression.brotli_quality,
+                "zstd_level": self.compression.zstd_level,
+                "exclude_patterns": list(self.compression.exclude_patterns),
+                "excluded_paths": list(self.compression.excluded_paths),
+            }
 
-def offload_litestar_middlewares(app: Any, *, config: Any = None) -> LitestarOffloadPlan:
+        cors_payload: dict[str, Any] | None = None
+        if self.cors is not None:
+            cors_payload = {
+                "allow_origins": list(self.cors.allow_origins),
+                "allow_methods": list(self.cors.allow_methods),
+                "allow_headers": list(self.cors.allow_headers),
+                "allow_credentials": self.cors.allow_credentials,
+                "expose_headers": list(self.cors.expose_headers),
+                "max_age": max(0, self.cors.max_age),
+                "allow_origin_regex": self.cors.allow_origin_regex,
+            }
+
+        mounts_payload: list[dict[str, Any]] = [
+            {
+                "path_prefix": mount.path_prefix,
+                "directories": list(mount.directories),
+                "html_mode": mount.html_mode,
+                "send_as_attachment": mount.send_as_attachment,
+                "headers": dict(mount.headers),
+            }
+            for mount in self.static_mounts
+        ]
+
+        openapi_payload: dict[str, Any] | None = None
+        if self.openapi is not None:
+            openapi_payload = {
+                "schema_path": self.openapi.schema_path,
+                "body": self.openapi.body.decode("utf-8"),
+                "etag": self.openapi.etag,
+                "content_type": self.openapi.content_type,
+            }
+
+        return {
+            "compression": compression_payload,
+            "cors": cors_payload,
+            "static_mounts": mounts_payload,
+            "openapi": openapi_payload,
+        }
+
+    def to_server_config_json(self) -> str:
+        """Encode this offload plan as a JSON string for VERTEBRA_OFFLOAD_CONFIG."""
+        return encode_json(self.to_server_config())
+
+
+def offload_litestar_middlewares(
+    app: Any,
+    *,
+    config: Any = None,
+    strip_python_middleware: bool = True,
+) -> LitestarOffloadPlan:
     """Extract CompressionConfig, CORSConfig, StaticFiles, and OpenAPI from a Litestar v2 or v3 app."""
     cfg = config
     if cfg is None:
@@ -100,7 +162,8 @@ def offload_litestar_middlewares(app: Any, *, config: Any = None) -> LitestarOff
 
     compression_spec = _extract_compression_config(app) if enable_compression else None
     if (
-        enable_compression
+        strip_python_middleware
+        and enable_compression
         and compression_spec is not None
         and not getattr(app, "before_send", None)
         and getattr(app, "compression_config", None) is not None

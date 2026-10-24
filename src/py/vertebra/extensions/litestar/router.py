@@ -56,6 +56,16 @@ class LitestarRouterTable:
                 return entry
         return None
 
+    def match_with_params(self, method: str, path: str) -> tuple[ExtractedLitestarRoute, dict[str, Any]] | None:
+        """Match a request method and path and return the route entry with converted path parameters."""
+        for entry in self._by_method.get(method.upper(), ()):
+            matched = entry.regex_pattern.match(path)
+            if matched is not None:
+                raw_groups = matched.groupdict()
+                params = convert_litestar_path_params(raw_groups, entry.param_types) if raw_groups else {}
+                return entry, params
+        return None
+
     def allowed_methods(self, path: str) -> list[str]:
         """Return a sorted list of HTTP methods matching path for 405 Allow generation."""
         allowed: set[str] = set()

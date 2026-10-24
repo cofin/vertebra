@@ -127,7 +127,7 @@ class _AsgiMountRunner:
                 if len(requests) == 0:
                     return
                 drive_asgi_batch(
-                    self._runner._app,
+                    self._runner.dispatch_app,
                     requests,
                     loop_obj=self._pool.next_loop(),
                     root_path=self._runner.mount_prefix,
@@ -140,7 +140,7 @@ class _AsgiMountRunner:
                 return
             if isinstance(req_list[0], _NativeRequest):
                 drive_asgi_batch(
-                    self._runner._app,
+                    self._runner.dispatch_app,
                     req_list,
                     loop_obj=self._pool.next_loop(),
                     root_path=self._runner.mount_prefix,

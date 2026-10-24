@@ -78,7 +78,8 @@ class LitestarPlugin:
             and not app_config.before_send
         ):
             app_config.state["_vertebra_offloaded_compression_config"] = app_config.compression_config
-            app_config.compression_config = None
+            if _is_rust_offload_active():
+                app_config.compression_config = None
 
         if self._config.offload_cors and app_config.cors_config is not None:
             app_config.state["_vertebra_offloaded_cors_config"] = app_config.cors_config
@@ -137,13 +138,63 @@ class LitestarPlugin:
         yield
 
     def _finalize_app_acceleration(self, app: Any) -> None:
-        self._offload_plan = offload_litestar_middlewares(app, config=self._config)
+        rust_active = _is_rust_offload_active()
+        self._offload_plan = offload_litestar_middlewares(
+            app,
+            config=self._config,
+            strip_python_middleware=rust_active,
+        )
+        offload_json = self._offload_plan.to_server_config_json()
+        state = getattr(app, "state", None)
+        if state is not None:
+            with contextlib.suppress(TypeError, AttributeError):
+                state["vertebra_offload_config_json"] = offload_json
+
         if self._config.swap_memory_channels:
             swap_litestar_channels_backend(app)
         if self._config.swap_memory_response_cache:
             swap_litestar_response_cache_store(app)
         if self._config.enable_direct_handler_fastpath:
             self._compiled_routes = compile_litestar_fastpath_routes(app)
+
+        if self._config.enable_fastpath_bypass:
+            try:
+                self._router_table = extract_litestar_routes(app)
+            except (AttributeError, TypeError, ValueError, KeyError):
+                self._router_table = None
+
+            bypass: LitestarFastPathBypass | None = None
+            if state is not None and hasattr(state, "get"):
+                existing = state.get("vertebra_fastpath_bypass")
+                if isinstance(existing, LitestarFastPathBypass):
+                    bypass = existing
+
+            if bypass is None:
+                bypass = LitestarFastPathBypass(
+                    self._router_table,
+                    app=app,
+                    compiled_routes=self._compiled_routes or None,
+                )
+                if state is not None:
+                    with contextlib.suppress(TypeError, AttributeError):
+                        state["vertebra_fastpath_bypass"] = bypass
+            else:
+                bypass.bind_app(
+                    app,
+                    router_table=self._router_table,
+                    compiled_routes=self._compiled_routes or None,
+                )
+
+            with contextlib.suppress(AttributeError, TypeError):
+                app.__vertebra_fastpath__ = bypass
+
+
+def _is_rust_offload_active() -> bool:
+    for key in ("VERTEBRA_SERVER_ACTIVE", "VERTEBRA_RUST_OFFLOAD"):
+        raw = os.environ.get(key, "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+    return False
 
 
 @contextlib.contextmanager

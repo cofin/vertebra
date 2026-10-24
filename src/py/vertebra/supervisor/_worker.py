@@ -79,6 +79,7 @@ def main() -> None:
     logger = logging.getLogger(f"vertebra.worker.{worker_id}")
     logger.info("starting, app=%r, mode=%s", app_path, transport_mode)
 
+    os.environ.setdefault("VERTEBRA_SERVER_ACTIVE", "1")
     before_extensions = GilAuditReport.snapshot_loaded_extensions()
     app = import_app(app_path)
 

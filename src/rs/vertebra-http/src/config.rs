@@ -383,3 +383,73 @@ fn num_cpus() -> usize {
         .map(|n| n.get())
         .unwrap_or(1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compression::CompressionBackend;
+
+    #[test]
+    fn apply_offload_json_parses_litestar_offload_plan_payload() {
+        let payload = r#"{
+            "compression": {
+                "backend": "zstd",
+                "minimum_size": 256,
+                "gzip_compress_level": 6,
+                "brotli_quality": 4,
+                "zstd_level": 3,
+                "exclude_patterns": ["/healthz"],
+                "excluded_paths": ["/raw"]
+            },
+            "cors": {
+                "allow_origins": ["https://app.example.com"],
+                "allow_methods": ["GET", "POST"],
+                "allow_headers": ["Authorization"],
+                "allow_credentials": true,
+                "expose_headers": ["X-Trace-Id"],
+                "max_age": 600,
+                "allow_origin_regex": null
+            },
+            "static_mounts": [
+                {
+                    "path_prefix": "/static",
+                    "directories": ["/var/www/static"],
+                    "html_mode": true,
+                    "send_as_attachment": false,
+                    "headers": {"cache-control": "public, max-age=3600"}
+                }
+            ],
+            "openapi": {
+                "schema_path": "/schema/openapi.json",
+                "body": "{\"openapi\":\"3.1.0\"}",
+                "etag": "\"abc123\"",
+                "content_type": "application/vnd.oai.openapi+json"
+            }
+        }"#;
+
+        let mut cfg = ServerConfig::default();
+        cfg.apply_offload_json(payload)
+            .expect("valid offload payload");
+
+        let comp = cfg.compression.expect("compression populated");
+        assert_eq!(comp.backend, CompressionBackend::Zstd);
+        assert_eq!(comp.minimum_size, 256);
+        assert_eq!(comp.excluded_paths, vec!["/raw".to_string()]);
+
+        let cors = cfg.cors.expect("cors populated");
+        assert_eq!(
+            cors.allow_origins,
+            vec!["https://app.example.com".to_string()]
+        );
+        assert!(cors.allow_credentials);
+        assert_eq!(cors.max_age, 600);
+
+        assert_eq!(cfg.static_mounts.len(), 1);
+        assert_eq!(cfg.static_mounts[0].path_prefix, "/static");
+        assert!(cfg.static_mounts[0].html_mode);
+
+        let openapi = cfg.openapi_cache.expect("openapi cache populated");
+        assert_eq!(openapi.schema_path, "/schema/openapi.json");
+        assert_eq!(openapi.etag, "\"abc123\"");
+    }
+}
