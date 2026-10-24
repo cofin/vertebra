@@ -6,7 +6,7 @@ status: stable
 tags: [domains, frontend, bundler, codegen, typescript]
 sources:
   - resource: src/rs/vertebra-bundler/src/lib.rs
-  - resource: src/py/vertebra/_bundler.py
+  - resource: src/py/vertebra/_bundler.pyi
   - resource: src/py/vertebra/build/__init__.py
   - resource: src/py/vertebra/build/_orchestrator.py
   - resource: src/py/vertebra/framework/dev.py

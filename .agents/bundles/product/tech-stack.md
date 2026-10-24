@@ -29,10 +29,10 @@ sources:
 - **Rust (`edition = "2024"`, stable toolchain)**: no `rust-version` or `rust-toolchain` file is pinned; CI installs `dtolnay/rust-toolchain@stable`. The Cargo workspace under `src/rs/` has these member crates:
   - `vertebra-core`: `crossbeam-channel 0.5`, `crossbeam-utils 0.8`, `matchit 0.9`, `serde 1.0`, `serde_json 1.0`, `thiserror 2.0`, `tokio 1.54`, `bytes 1.12`, `jsonwebtoken 11.1` (`rust_crypto`), `rmp-serde 1.3`, optional `lz4_flex 0.14` and `zstd 0.14`; `libc 0.2` and `rustix 1.1` on Unix, `windows-sys 0.61` on Windows.
   - `vertebra-http`: `vertebra-server` binary and library (`hyper 1`, `hyper-util 0.1`, `http 1`, `http-body-util 0.1`, `tokio 1.54`, `tokio-util 0.7`, `matchit 0.9`, `futures-util 0.3`, `tokio-tungstenite 0.30`, `brotli 7.0`, `flate2 1.1`, `zstd 0.14`, `multer 3.1`, `dashmap 6`, `fnv 1.0`, `tracing 0.1`, `tracing-subscriber 0.3`; optional `rustls 0.23` + `tokio-rustls 0.26` + `rustls-pemfile 2`, `quinn 0.11.9` + `h3 0.0.8` + `h3-quinn 0.0.10`, `mimalloc 0.1.52`, and `pyo3 0.30.1` with `auto-initialize`).
-  - `vertebra-py`: PyO3 `0.30.1` extension `vertebra._vertebra` (`vertebra-core`, `bytes 1.12`, `tokio 1.54`, `tokio-util 0.7`, `futures-util 0.3`).
+  - `vertebra-py`: PyO3 `0.30.1` extension `vertebra._vertebra` (`vertebra-core`, `vertebra-db`, `bytes 1.12`, `tokio 1.54`, `tokio-util 0.7`, `futures-util 0.3`).
   - `vertebra-bundler`: PyO3 `0.30.1` extension `vertebra._bundler` (`oxc_* 0.155`, `rquickjs 0.14`, `rolldown-notify 11.0` + `rolldown-notify-debouncer-mini 0.9`, `dashmap 6`, `crossbeam-queue 0.3`, `tokio 1.54`).
   - `vertebra-storage`: PyO3 `0.30.1` extension `vertebra._storage` (`object_store 0.13.2` with `aws`/`gcp`/`azure`/`http`, `reqwest 0.13` with `rustls`, `rsa 0.9`, `hmac 0.12`, `sha2 0.10`, `chrono 0.4`, `url 2.5`, `base64 0.22`).
-  - `vertebra-db`: rlib `vertebra_db` (`url 2.5`, `sha2 0.10`, `base64 0.22`, `bytes 1.12`, `serde_json 1.0`, `tokio 1.54`).
+  - `vertebra-db`: rlib `vertebra_db` (`vertebra-core`, `url 2.5`, `sha2 0.10`, `base64 0.22`, `bytes 1.12`, `serde_json 1.0`, `tokio 1.54`).
 - **TypeScript (`@vertebra/client` `0.1.0`)**: managed by `bun`, bundled with `tsup ^8.5.1`, type-checked with `typescript ^5.9.3`, linted with `@biomejs/biome ^2.5.15`, tested with `vitest ^5.0.5`. Optional peer dependencies are `react ^19.0.0`, `vue ^3.5.0`, `@angular/core ^22.0.0`, and `vite ^8.0.0`; `svelte ^5.57.2` is a dev dependency only, and the HTMX adapter has no dependency.
 - **Verification Toolchain**: `ruff` (lint + format, `line-length = 120`, `target-version = "py312"`, rules `E,F,I,UP,B,SIM`), `mypy` (`strict = true`, `files = ["src/py/vertebra"]`), `pytest` + `pytest-cov`, `cargo fmt`, `cargo clippy --features tls,compression -- -D warnings`, `cargo test`, `bunx biome check`, `criterion 0.8` microbenchmarks, and the `tools.benchmarks` harness.
 <!-- truth: end -->
@@ -54,7 +54,7 @@ sources:
 
 - **Build Backend**: `maturin` builds `src/rs/vertebra-py/Cargo.toml` into `vertebra._vertebra` (`python-source = "src/py"`, feature `extension-module`). `make dev` and `make build` run two more `maturin develop` calls that build `src/rs/vertebra-bundler/Cargo.toml` into `vertebra._bundler` and `src/rs/vertebra-storage/Cargo.toml` into `vertebra._storage`.
 - **CLI Entrypoint**: `vtb = "vertebra.cli:cli"` registers `vtb run [--topology embedded|shm] [--interface auto|asgi|rsgi|wsgi]`, `vtb dev`, `vtb init`, `vtb js {add,remove,list,install,build,generate-types,exec}`, `vtb build [--target ...] [--standalone|--onefile] [--pgo]`, `vtb mcp bridge`, `vtb workers run`, and entry-point plugin commands ([`cli/__init__.py`](../../../src/py/vertebra/cli/__init__.py)).
-- **SQLAlchemy Dialect Entry Points**: `postgresql`, `oracle`, `mysql`, and `sqlite` each register `.vertebra` and `.vtb` dialects from `vertebra.extensions.sqlalchemy.dialects`.
+- **SQLAlchemy Dialect Entry Points**: `postgresql`, `oracle`, `mysql`, `sqlite`, `mssql`, and `duckdb` each register `.vertebra` and `.vtb` dialects from `vertebra.extensions.sqlalchemy.dialects`.
 - **Optional Extras**: `framework` (`msgspec>=0.18`) and `dev` (`pytest>=8.0`, `pytest-anyio`, `ruff>=0.4`, `mypy>=1.10`); `make install` syncs all extras.
 - **Dependency Groups**:
   - `dev`: includes `test` (`pytest`, `pytest-cov>=5.0`, `anyio`), `lint` (`ruff`, `mypy`), and `build` (`maturin>=1.5,<2`).
@@ -63,7 +63,7 @@ sources:
 
 ## TypeScript Package Configuration (`src/ts/vertebra-client/`)
 
-Subpath exports (`package.json`):
+Subpath exports (`package.json` and [`tsup.config.ts`](../../../src/ts/vertebra-client/tsup.config.ts)):
 
 | Subpath | Entry | Contents |
 | --- | --- | --- |
@@ -75,19 +75,15 @@ Subpath exports (`package.json`):
 | `/angular` | `src/angular/index.ts` | Angular `ClientService`, `injectQuery`, `injectMutation` |
 | `/htmx` | `src/htmx/index.ts` | `initHtmx` extension helper |
 | `/store` | `src/store/index.ts` | Standalone `SessionStore` |
+| `/hmr` | `src/hmr/index.ts` | `HotReloadClient`, `initHotReload` |
 | `/live` | `src/live/index.ts` | `LiveStateClient`, `HybridLogicalClock`, `OfflineDeltaQueue` |
-| `/apex` | `src/apex/index.ts` | `ApexRegion` |
+| `/apex` | `src/apex/index.ts` | `ApexRegion`, `ApexOfflineOutbox` |
 | `/telemetry` | `src/telemetry.ts` | `TraceContext` |
 | `/wasm` | `src/wasm.ts` | `WasmClient` |
 | `/arrow` | `src/arrow.ts` | `ArrowStreamClient` |
+| `/agent` | `src/agent/index.ts` | `McpClient`, `A2aClient`, `WorkflowStreamClient` |
 
-[`tsup.config.ts`](../../../src/ts/vertebra-client/tsup.config.ts) entry mismatches:
-
-- The entry list names `src/react/index.ts`, but the React adapter is `src/react/index.tsx`, so tsup skips it and `dist/react/` is not emitted.
-- There are no entries for `src/wasm.ts` or `src/arrow.ts`, so `dist/wasm.js` and `dist/arrow.js` are not emitted; `WasmClient` and `ArrowStreamClient` are reachable only from the package root.
-- `src/hmr/index.ts` is built without a subpath export; the `onSuccess` hook copies `dist/index.js` and `dist/hmr/index.js` into `src/py/vertebra/server/_js/bundle/` for the Python package.
-
-The declaration (`dts`) build fails on `src/wasm.ts` (`TS2739`, `Instance` is not assignable to `WebAssemblyInstantiatedSource`), so `tsup` exits non-zero after writing the JavaScript output. `make ts-build`, and therefore `make install` and `make build`, stop at that step. CI does not run `ts-build`; `make ts-test` and `make lint-all` do not type-check declarations.
+The `onSuccess` hook in [`tsup.config.ts`](../../../src/ts/vertebra-client/tsup.config.ts) copies `dist/index.js` and `dist/hmr/index.js` into `src/py/vertebra/server/_js/bundle/` for `DevMiddleware`.
 
 ## Related Context
 
