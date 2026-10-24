@@ -3,9 +3,11 @@
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
+from tools.pgo import python_pgo as tools_python_pgo
 
 from vertebra.build.packaging import (
     ONEFILE_MAGIC,
@@ -14,6 +16,7 @@ from vertebra.build.packaging import (
     OnefileBuilder,
     StandaloneBuilder,
 )
+from vertebra.build.packaging import pgo as packaging_pgo
 from vertebra.build.packaging.pgo import (
     CPYTHON_PGO_FLAGS,
     PLATFORM_MATRIX,
@@ -163,8 +166,39 @@ def test_rust_and_python_pgo_tooling(tmp_path: Path) -> None:
     assert isinstance(py_info, PythonBuildInfo)
     assert py_info.version
     avail = check_pgo_availability()
-    assert set(avail.keys()) == {"pgo", "lto", "bolt", "debug"}
+    assert {"pgo", "lto", "bolt", "debug", "tail_call_interp", "jit_available", "jit_enabled", "free_threaded"} <= set(
+        avail.keys()
+    )
     assert "--enable-optimizations" in CPYTHON_PGO_FLAGS
+    assert "--with-tail-call-interp" in CPYTHON_PGO_FLAGS
+    assert "--enable-experimental-jit" in CPYTHON_PGO_FLAGS
     assert len(PLATFORM_MATRIX) >= 4
     support = get_platform_support()
     assert support.cpython_pgo is True
+
+
+def test_python_build_info_detects_315_tail_call_jit_freethreaded_and_frame_pointers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify PythonBuildInfo detects Python 3.15 tail-call interpreter, JIT, free-threading, and frame pointers."""
+    synthetic_vars = {
+        "CONFIG_ARGS": "'--enable-optimizations' '--with-lto' '--with-tail-call-interp' '--enable-experimental-jit'",
+        "Py_TAIL_CALL_INTERP": "1",
+        "Py_GIL_DISABLED": "1",
+        "CFLAGS_NODIST": "-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer",
+    }
+    fake_jit = SimpleNamespace(is_available=lambda: True, is_enabled=lambda: True)
+
+    for mod in (packaging_pgo, tools_python_pgo):
+        monkeypatch.setattr(mod, "_query_sysconfig", lambda _exe: dict(synthetic_vars))
+        monkeypatch.setattr(mod, "_query_version", lambda _exe: "3.15.0rc3")
+        monkeypatch.setattr(mod.sys, "_jit", fake_jit, raising=False)
+        info = mod.detect_python_build()
+        assert info.version == "3.15.0rc3"
+        assert info.is_pgo is True
+        assert info.is_lto is True
+        assert info.is_tail_call_interp is True
+        assert info.is_jit_available is True
+        assert info.is_jit_enabled is True
+        assert info.is_free_threaded is True
+        assert info.has_frame_pointers is True

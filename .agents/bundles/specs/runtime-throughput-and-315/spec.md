@@ -5,13 +5,13 @@ title: Runtime Throughput, Multi-Core Scaling, and Python 3.15 Optimizations
 state: active
 plan_revision: 1
 plan_commit: null
-state_revision: 1
-current_task: null
-last_operation: 20261024T160605Z-flow-planner-activate-spec-00
-operation_targets: []
-last_verified_checkpoint: null
+state_revision: 3
+current_task: "1.2"
+last_operation: 20261024T161700Z-flow-executor-compound-1-1+1-2-00
+operation_targets: ["1.1", "1.2"]
+last_verified_checkpoint: "task:1.1@df36a30"
 created_at: 2026-10-24T16:02:00Z
-updated_at: 2026-10-24T16:06:05Z
+updated_at: 2026-10-24T16:17:00Z
 description: Eliminate embedded bridge deadlocks, single-ingress multi-worker contention, SHM syscall and lock overhead, ASGI/RSGI FFI dispatch allocations, and Python worker loop bottlenecks while adding Python 3.15 and 3.15t specializations.
 ---
 
@@ -39,8 +39,8 @@ Single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w` / `4w` / `8w
 
 ### Phase 1: Review Tooling, CLI, Supervisor, and Python 3.15 Build Readiness
 
-- [ ] Task 1.1: Align review agent tool manifests with subagent registry
-- [ ] Task 1.2: Fix CLI env preservation, ASGI App mount guard, Python 3.15 build/PGO/JIT detection, and benchmark harness
+- [x] Task 1.1: Align review agent tool manifests with subagent registry (`df36a30`)
+- [~] Task 1.2: Fix CLI env preservation, ASGI App mount guard, Python 3.15 build/PGO/JIT detection, and benchmark harness
 
 ### Phase 2: Lock-Free In-Process Bridge, Right-Sized SHM Rings, and Dekker Wakeups
 
@@ -65,8 +65,8 @@ Single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w` / `4w` / `8w
 ## Continuity Snapshot
 
 - **Active Flow / Lifecycle**: `runtime-throughput-and-315` (`active`)
-- **Current Task & Claimant**: `null`
-- **Last Verified Checkpoint**: `null`
+- **Current Task & Claimant**: `1.2` (`flow-executor`)
+- **Last Verified Checkpoint**: `task:1.1@df36a30`
 - **Decisions**:
   - `ABI_VERSION = 3` in `vertebra-core` adds `consumer_sleeping` and `active_flags` cache lines to `ShmHeader` for Dekker `SeqCst` zero-syscall notifications.
   - Per-worker `SO_REUSEPORT` embedded multi-process supervision powers multi-core throughput while preserving `--topology shm` with lock-free per-batch worker routing.
@@ -74,9 +74,9 @@ Single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w` / `4w` / `8w
   - `drive_asgi_batch` and `drive_rsgi_batch` step unary coroutines via `PyIter_Send` in Rust before falling back to `uvloop` tasks on real async suspension.
 - **Recent Discoveries**: `none`
 - **Blockers & Unblock Conditions**: `none`
-- **Next Exact Step**: `claim Task 1.1`
+- **Next Exact Step**: `Write failing unit tests in src/py/tests/unit/cli/test_cli_commands.py, src/py/tests/unit/build/test_packaging_and_pgo.py, and src/py/tests/unit/test_bench_infrastructure.py covering env-var preservation (VERTEBRA_WORKERS, VERTEBRA_TOPOLOGY, VERTEBRA_THREADS), --jit (PYTHON_JIT=1 on GIL builds, skipped/warned on free-threaded builds), VERTEBRA_NATIVE=0 App ASGI routing without double-mount, PythonBuildInfo tail-call/JIT/free-threaded/frame-pointer detection, and benchmark target command generation.`
 - **Plan Identity**: `plan_revision: 1`, `plan_commit: null`
-- **State Identity**: `revision: 1`, `last_operation: 20261024T160605Z-flow-planner-activate-spec-00`, `operation_targets: []`
+- **State Identity**: `revision: 3`, `last_operation: 20261024T161700Z-flow-executor-compound-1-1+1-2-00`, `operation_targets: ["1.1", "1.2"]`
 - **Relevant Rule & Knowledge Paths**:
   - `AGENTS.md`
   - `.agents/bundles/knowledge/workflow.md`

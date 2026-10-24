@@ -167,6 +167,12 @@ build: ts-build                                     ## Build optimized release b
 	@uv build
 	@echo "${OK} Build complete"
 
+.PHONY: build-pgo
+build-pgo: ts-build                                 ## Build PGO-optimized release server and PyO3 extensions (uses PROFDATA or baseline)
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@uv run python -c "from pathlib import Path; from tools.pgo.rust_pgo import RustPgoConfig, build_optimized, build_optimized_extension; cfg = RustPgoConfig(); profdata = Path('$${PROFDATA:-.profiles/merged.profdata}'); build_optimized(cfg, profdata); build_optimized_extension(cfg, profdata)"
+	@echo "${OK} PGO build complete"
+
 
 # =============================================================================
 # Test
@@ -268,18 +274,27 @@ bench-all: build                                    ## Run ALL benchmarks (all t
 	@echo "${OK} Full benchmarks complete"
 
 .PHONY: bench-ft
-bench-ft:                                           ## Benchmark with Python 3.14t free-threaded (auto-installs + builds)
-	@echo "${INFO} Installing Python 3.14t..."
-	@uv python install 3.14t 2>/dev/null || true
-	@echo "${INFO} Preparing .venv-ft with 3.14t dependencies..."
-	@UV_PROJECT_ENVIRONMENT=.venv-ft uv sync --python 3.14t --no-dev --extra framework 2>&1 | tail -3
-	@echo "${INFO} Building server binary linked against libpython3.14t..."
-	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@PYO3_PYTHON=$$(uv python find 3.14t) cargo build \
+bench-ft:                                           ## Benchmark with free-threaded Python (FT_PYTHON=3.15t fallback 3.14t)
+	@FT_PY="$${FT_PYTHON:-}"; \
+	if [ -z "$$FT_PY" ]; then \
+		if uv python find 3.15t >/dev/null 2>&1 || uv python install 3.15t 2>/dev/null; then \
+			FT_PY="3.15t"; \
+		else \
+			uv python install 3.14t 2>/dev/null || true; \
+			FT_PY="3.14t"; \
+		fi; \
+	else \
+		uv python install "$$FT_PY" 2>/dev/null || true; \
+	fi; \
+	echo "${INFO} Preparing .venv-ft with $$FT_PY dependencies..."; \
+	UV_PROJECT_ENVIRONMENT=.venv-ft uv sync --python "$$FT_PY" --no-dev --extra framework 2>&1 | tail -3; \
+	echo "${INFO} Building server binary linked against $$FT_PY..."; \
+	if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi; \
+	PYO3_PYTHON=$$(uv python find "$$FT_PY") cargo build \
 		--manifest-path src/rs/Cargo.toml \
-		--release --target-dir src/rs/target-ft 2>&1 | tail -3
-	@echo "${INFO} Running free-threaded benchmarks..."
-	@uv run --group bench python -m tools.benchmarks run -t freethreaded -s $${SCENARIOS:-multiworker} $${BENCH_ARGS:-}
+		--release --target-dir src/rs/target-ft 2>&1 | tail -3; \
+	echo "${INFO} Running free-threaded benchmarks ($$FT_PY)..."; \
+	FT_PYTHON="$$FT_PY" uv run --group bench python -m tools.benchmarks run -t freethreaded -s $${SCENARIOS:-multiworker} $${BENCH_ARGS:-}
 	@echo "${OK} Free-threaded benchmarks complete"
 
 .PHONY: bench-report
