@@ -48,8 +48,12 @@ pub(crate) fn decode_asgi_headers<'py>(
     let mut tuples: Vec<Bound<'py, PyAny>> = Vec::with_capacity(8);
     for (name, value) in iter_raw_headers(data) {
         let name_py = if name.iter().any(|b| b.is_ascii_uppercase()) {
-            let lower = name.to_ascii_lowercase();
-            PyBytes::new(py, &lower)
+            PyBytes::new_with(py, name.len(), |buf| {
+                for (dst, &src) in buf.iter_mut().zip(name.iter()) {
+                    *dst = src.to_ascii_lowercase();
+                }
+                Ok(())
+            })?
         } else {
             PyBytes::new(py, name)
         };
@@ -60,7 +64,20 @@ pub(crate) fn decode_asgi_headers<'py>(
     PyList::new(py, &tuples)
 }
 
-#[pyclass(name = "Headers", frozen, freelist = 128, from_py_object)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(
+        name = "Headers",
+        frozen,
+        freelist = 128,
+        immutable_type,
+        from_py_object
+    )
+)]
+#[cfg_attr(
+    Py_GIL_DISABLED,
+    pyclass(name = "Headers", frozen, immutable_type, from_py_object)
+)]
 #[derive(Clone)]
 pub struct Headers {
     pub(crate) raw: Bytes,
@@ -191,7 +208,11 @@ impl Headers {
     }
 }
 
-#[pyclass(name = "HeadersIterator")]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "HeadersIterator", freelist = 128, immutable_type)
+)]
+#[cfg_attr(Py_GIL_DISABLED, pyclass(name = "HeadersIterator", immutable_type))]
 pub struct HeadersIterator {
     raw: Bytes,
     pos: usize,

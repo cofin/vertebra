@@ -1,6 +1,6 @@
 """Type stubs for the vertebra._vertebra native extension module."""
 
-from collections.abc import Awaitable, Buffer
+from collections.abc import Awaitable, Buffer, Sequence
 from typing import Any, Self, final
 
 __version__: str
@@ -40,6 +40,7 @@ __all__ = [
     "WsgiInput",
     "_WsgiStartResponse",
     "__version__",
+    "cancel_request_sleep",
     "classify_jsonrpc_frame",
     "clear_request_notification",
     "crc16_xmodem",
@@ -70,6 +71,7 @@ __all__ = [
     "parse_cluster_redirect",
     "parse_tnsnames_ora",
     "parse_traceparent",
+    "prepare_request_sleep",
     "redis_hash_slot",
     "resolve_tns_alias",
     "rewrite_mssql_placeholders",
@@ -89,6 +91,7 @@ __all__ = [
 @final
 class Request:
     def __new__(cls) -> Request: ...
+    def __buffer__(self, flags: int, /) -> memoryview: ...
     def __repr__(self, /) -> str: ...
     def as_dict(self, /) -> dict[str, object]: ...
     def asgi_scope(self, /, root_path: str | None = None) -> AsgiScope: ...
@@ -487,6 +490,8 @@ def init_transport(
 def get_batch(timeout_ms: int = 100) -> RequestBatch | None: ...
 def get_request_notify_fd() -> int: ...
 def clear_request_notification() -> None: ...
+def prepare_request_sleep() -> bool: ...
+def cancel_request_sleep() -> None: ...
 def try_get_batch() -> RequestBatch | None: ...
 def submit_results(responses: list[Response]) -> None: ...
 def submit_response(response: Response) -> None: ...
@@ -501,10 +506,12 @@ def submit_raw_response(
 def submit_response_raw(
     request_id: int,
     status: int,
-    body: bytes,
-    headers_raw: bytes | None = None,
+    body: Buffer,
+    headers_raw: Buffer | None = None,
 ) -> None: ...
-def submit_batch_raw(items: list[tuple[int, int, bytes]]) -> None: ...
+def submit_batch_raw(
+    items: Sequence[tuple[int, int, Buffer] | tuple[int, int, Buffer, Buffer | None]],
+) -> None: ...
 def stream_file_chunks(
     path: str,
     start: int | None = None,

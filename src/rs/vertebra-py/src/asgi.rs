@@ -97,8 +97,43 @@ fn intern_known_key<'py>(py: Python<'py>, idx: usize) -> &'py Bound<'py, PyStrin
     }
 }
 
+static ASGI_VERSION_DICT: pyo3::sync::PyOnceLock<Py<PyDict>> = pyo3::sync::PyOnceLock::new();
 static PLAINTEXT_EXTENSIONS: pyo3::sync::PyOnceLock<Py<PyDict>> = pyo3::sync::PyOnceLock::new();
 static TLS_EXTENSIONS: pyo3::sync::PyOnceLock<Py<PyDict>> = pyo3::sync::PyOnceLock::new();
+
+#[inline]
+fn mark_immortal_if_supported(obj: &Bound<'_, PyAny>) {
+    #[cfg(Py_3_15)]
+    unsafe {
+        let _ = pyo3::ffi::PyUnstable_SetImmortal(obj.as_ptr());
+    }
+    #[cfg(not(Py_3_15))]
+    let _ = obj;
+}
+
+fn build_asgi_version_dict<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    let dict_ref = ASGI_VERSION_DICT.get_or_try_init(py, || -> PyResult<Py<PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item(pyo3::intern!(py, "version"), pyo3::intern!(py, "3.0"))?;
+        d.set_item(pyo3::intern!(py, "spec_version"), pyo3::intern!(py, "2.4"))?;
+        mark_immortal_if_supported(d.as_any());
+        Ok(d.unbind())
+    })?;
+    dict_ref.bind(py).copy()
+}
+
+fn build_empty_capability_entry<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[cfg(Py_3_15)]
+    {
+        let fd = pyo3::types::PyFrozenDict::empty(py)?;
+        mark_immortal_if_supported(fd.as_any());
+        Ok(fd.into_any())
+    }
+    #[cfg(not(Py_3_15))]
+    {
+        Ok(PyDict::new(py).into_any())
+    }
+}
 
 fn build_extensions_dict<'py>(py: Python<'py>, is_tls: bool) -> PyResult<Bound<'py, PyDict>> {
     let cell = if is_tls {
@@ -108,22 +143,25 @@ fn build_extensions_dict<'py>(py: Python<'py>, is_tls: bool) -> PyResult<Bound<'
     };
     let dict_ref = cell.get_or_try_init(py, || -> PyResult<Py<PyDict>> {
         let ext = PyDict::new(py);
-        ext.set_item(pyo3::intern!(py, "http.response.pathsend"), PyDict::new(py))?;
-        ext.set_item(
-            pyo3::intern!(py, "http.response.zerocopysend"),
-            PyDict::new(py),
-        )?;
-        ext.set_item(pyo3::intern!(py, "http.response.trailers"), PyDict::new(py))?;
+        let empty = build_empty_capability_entry(py)?;
+        ext.set_item(pyo3::intern!(py, "http.response.pathsend"), &empty)?;
+        ext.set_item(pyo3::intern!(py, "http.response.zerocopysend"), &empty)?;
+        ext.set_item(pyo3::intern!(py, "http.response.trailers"), &empty)?;
         if is_tls {
-            ext.set_item(pyo3::intern!(py, "tls"), PyDict::new(py))?;
+            ext.set_item(pyo3::intern!(py, "tls"), &empty)?;
         }
+        mark_immortal_if_supported(ext.as_any());
         Ok(ext.unbind())
     })?;
     dict_ref.bind(py).copy()
 }
 
 /// Lazy ASGI 3.0 scope with a 20-slot inline cache and freelist pooling.
-#[pyclass(mapping, name = "AsgiScope", freelist = 128)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(mapping, name = "AsgiScope", freelist = 128, immutable_type)
+)]
+#[cfg_attr(Py_GIL_DISABLED, pyclass(mapping, name = "AsgiScope", immutable_type))]
 pub struct AsgiScope {
     batch: Arc<BatchSnapshot>,
     index: usize,
@@ -173,16 +211,13 @@ impl AsgiScope {
         let node = self.batch.node(self.index);
         let val: Py<PyAny> = match idx {
             0 => pyo3::intern!(py, "http").clone().into_any().unbind(),
-            1 => {
-                let d = PyDict::new(py);
-                d.set_item(pyo3::intern!(py, "version"), pyo3::intern!(py, "3.0"))?;
-                d.set_item(pyo3::intern!(py, "spec_version"), pyo3::intern!(py, "2.4"))?;
-                d.into_any().unbind()
-            }
-            2 => PyString::intern(py, node.http_version())
+            1 => build_asgi_version_dict(py)?.into_any().unbind(),
+            2 => crate::request::intern_http_version(py, node.http_version())
                 .into_any()
                 .unbind(),
-            3 => PyString::intern(py, node.method_name()).into_any().unbind(),
+            3 => crate::request::intern_http_method(py, node.method_name())
+                .into_any()
+                .unbind(),
             4 => {
                 let is_tls = (self.batch.flags() & 1) != 0;
                 if is_tls {
@@ -592,7 +627,11 @@ impl AsgiScope {
 }
 
 /// Iterator over key strings in an `AsgiScope`.
-#[pyclass(name = "AsgiScopeIterator")]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "AsgiScopeIterator", freelist = 128, immutable_type)
+)]
+#[cfg_attr(Py_GIL_DISABLED, pyclass(name = "AsgiScopeIterator", immutable_type))]
 pub struct AsgiScopeIterator {
     deleted_known: u32,
     known_pos: usize,

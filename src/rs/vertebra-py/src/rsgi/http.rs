@@ -12,7 +12,11 @@ use crate::file_io::read_file_range_sync;
 use crate::response::Response;
 
 /// Immediately completed Python awaitable wrapping a precomputed result value.
-#[pyclass(name = "_RsgiReadyAwaitable", freelist = 128)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "_RsgiReadyAwaitable", freelist = 128, immutable_type)
+)]
+#[cfg_attr(Py_GIL_DISABLED, pyclass(name = "_RsgiReadyAwaitable", immutable_type))]
 pub struct RsgiReadyAwaitable {
     value: Option<Py<PyAny>>,
 }
@@ -47,12 +51,26 @@ static RSGI_DONE: pyo3::sync::PyOnceLock<Py<RsgiReadyAwaitable>> = pyo3::sync::P
 
 pub fn get_rsgi_done(py: Python<'_>) -> PyResult<Py<RsgiReadyAwaitable>> {
     RSGI_DONE
-        .get_or_try_init(py, || RsgiReadyAwaitable::none(py))
+        .get_or_try_init(py, || {
+            let done = RsgiReadyAwaitable::none(py)?;
+            #[cfg(Py_3_15)]
+            unsafe {
+                let _ = pyo3::ffi::PyUnstable_SetImmortal(done.as_ptr());
+            }
+            Ok(done)
+        })
         .map(|p| p.clone_ref(py))
 }
 
 /// Progressive streaming transport returned by `RsgiHttpProtocol.response_stream(status, headers)`.
-#[pyclass(name = "RsgiTransport", frozen, freelist = 128)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "RsgiTransport", frozen, freelist = 128, immutable_type)
+)]
+#[cfg_attr(
+    Py_GIL_DISABLED,
+    pyclass(name = "RsgiTransport", frozen, immutable_type)
+)]
 #[derive(Clone)]
 pub struct RsgiTransport {
     chunks: Arc<Mutex<Vec<u8>>>,
@@ -96,7 +114,14 @@ struct HttpProtocolState {
 }
 
 /// RSGI v1.6 HTTP protocol handler supporting single-call unary, file, file-range, and streaming responses.
-#[pyclass(name = "RsgiHttpProtocol", frozen, freelist = 128)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "RsgiHttpProtocol", frozen, freelist = 128, immutable_type)
+)]
+#[cfg_attr(
+    Py_GIL_DISABLED,
+    pyclass(name = "RsgiHttpProtocol", frozen, immutable_type)
+)]
 pub struct RsgiHttpProtocol {
     request_body: Bytes,
     request_id: u64,

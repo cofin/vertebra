@@ -6,7 +6,11 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
 /// Zero-copy PEP 3333 `wsgi.input` reader backed by `Bytes` without Python `io.BytesIO`.
-#[pyclass(name = "WsgiInput", freelist = 128)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "WsgiInput", freelist = 128, immutable_type)
+)]
+#[cfg_attr(Py_GIL_DISABLED, pyclass(name = "WsgiInput", immutable_type))]
 pub struct WsgiInput {
     data: Bytes,
     pos: usize,
@@ -95,7 +99,11 @@ impl WsgiInput {
 }
 
 /// PEP 3333 `wsgi.file_wrapper` implementation resolving filesystem paths for Rust file reads.
-#[pyclass(name = "WsgiFileWrapper", freelist = 128)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "WsgiFileWrapper", freelist = 128, immutable_type)
+)]
+#[cfg_attr(Py_GIL_DISABLED, pyclass(name = "WsgiFileWrapper", immutable_type))]
 pub struct WsgiFileWrapper {
     filelike: Py<PyAny>,
     block_size: usize,

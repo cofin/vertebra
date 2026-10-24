@@ -10,7 +10,11 @@ use crate::headers::Headers;
 use crate::synthetic::SyntheticRequest;
 
 /// RSGI v1.6 HTTP / WebSocket scope (`rsgi_version = "1.6"`).
-#[pyclass(name = "RsgiScope", frozen, freelist = 128)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "RsgiScope", frozen, freelist = 128, immutable_type)
+)]
+#[cfg_attr(Py_GIL_DISABLED, pyclass(name = "RsgiScope", frozen, immutable_type))]
 pub struct RsgiScope {
     batch: Arc<BatchSnapshot>,
     index: usize,

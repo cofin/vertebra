@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 /// Main bundler class exposed to Python via PyO3
 #[derive(Default)]
-#[pyclass(name = "Bundler")]
+#[pyclass(name = "Bundler", immutable_type)]
 pub struct Bundler {
     watcher: Option<SourceWatcher>,
     rx: Option<Receiver<HmrEvent>>,

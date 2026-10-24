@@ -79,7 +79,11 @@ pub(crate) fn extract_headers_list(
     Ok(header_vec)
 }
 
-#[pyclass(name = "Response", freelist = 128)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "Response", freelist = 128, immutable_type)
+)]
+#[cfg_attr(Py_GIL_DISABLED, pyclass(name = "Response", immutable_type))]
 #[derive(Clone)]
 pub struct Response {
     pub status: u16,
@@ -234,21 +238,36 @@ impl Response {
         PyList::new(py, &tuples)
     }
 
-    /// Format this response as HTTP/1.1 wire bytes.
-    pub fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        let mut buf = Vec::with_capacity(64 + self.body.len());
-        buf.extend_from_slice(b"HTTP/1.1 ");
-        buf.extend_from_slice(self.status.to_string().as_bytes());
-        buf.extend_from_slice(b" OK\r\n");
-        for (k, v) in &self.headers {
-            buf.extend_from_slice(k);
-            buf.extend_from_slice(b": ");
-            buf.extend_from_slice(v);
-            buf.extend_from_slice(b"\r\n");
-        }
-        buf.extend_from_slice(b"\r\n");
-        buf.extend_from_slice(&self.body);
-        PyBytes::new(py, &buf)
+    /// Format this response as HTTP/1.1 wire bytes directly into a `PyBytes` buffer.
+    pub fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let status_str = self.status.to_string();
+        let status_bytes = status_str.as_bytes();
+        let headers_wire_len: usize = self
+            .headers
+            .iter()
+            .map(|(k, v)| k.len() + 2 + v.len() + 2)
+            .sum();
+        let total_len = 9 + status_bytes.len() + 5 + headers_wire_len + 2 + self.body.len();
+        PyBytes::new_with(py, total_len, |buf| {
+            let mut pos = 0;
+            let mut put = |slice: &[u8]| {
+                buf[pos..pos + slice.len()].copy_from_slice(slice);
+                pos += slice.len();
+            };
+            put(b"HTTP/1.1 ");
+            put(status_bytes);
+            put(b" OK\r\n");
+            for (k, v) in &self.headers {
+                put(k);
+                put(b": ");
+                put(v);
+                put(b"\r\n");
+            }
+            put(b"\r\n");
+            put(&self.body);
+            debug_assert_eq!(pos, total_len);
+            Ok(())
+        })
     }
 
     fn __repr__(&self) -> String {

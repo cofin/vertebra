@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import gc
+
 import pytest
 
-from vertebra._vertebra import Request, Response, submit_raw_response
+from vertebra._vertebra import (
+    Request,
+    Response,
+    init_transport,
+    submit_batch_raw,
+    submit_raw_response,
+    submit_response_raw,
+)
 
 
 def test_request_body_view_returns_readonly_memoryview() -> None:
@@ -111,3 +120,40 @@ def test_submit_raw_response_unary_and_auto_chunked_streaming() -> None:
         reassembled.extend(frame[offset : offset + blen])
 
     assert bytes(reassembled) == bytes(large_payload)
+
+
+def test_request_buffer_protocol_and_anchored_lifetime() -> None:
+    """Verify Request implements buffer protocol and anchors body_view lifetime."""
+    payload = b"anchored-zero-copy-payload-0123456789"
+    req = Request.from_parts("POST", "/anchor", payload)
+
+    direct_view = memoryview(req)
+    assert direct_view.readonly is True
+    assert bytes(direct_view) == payload
+
+    view = req.body_view
+    assert view.readonly is True
+    assert view.obj is req
+
+    del direct_view
+    del req
+    gc.collect()
+
+    assert bytes(view) == payload
+
+
+def test_submit_response_raw_and_batch_raw_accept_buffers() -> None:
+    """Verify submit_response_raw and submit_batch_raw accept bytes, bytearray, and memoryview."""
+    init_transport()
+    req = Request.from_parts("POST", "/echo", b"echo-buffer-view")
+
+    submit_response_raw(1001, 200, req.body_view)
+    submit_response_raw(1002, 201, bytearray(b"mutable-buffer"), memoryview(b""))
+    submit_batch_raw(
+        [
+            (1003, 200, b"bytes-item"),
+            (1004, 200, bytearray(b"bytearray-item")),
+            (1005, 200, req.body_view),
+            (1006, 202, req.body_view, memoryview(b"")),
+        ]
+    )

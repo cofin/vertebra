@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use std::path::PathBuf;
 
 /// Configuration for production builds
-#[pyclass(from_py_object)]
+#[pyclass(immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
 pub struct BundleConfig {
     /// Entry point file path
@@ -70,7 +70,7 @@ impl Default for BundleConfig {
 }
 
 /// Configuration for development mode with HMR
-#[pyclass(from_py_object)]
+#[pyclass(immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
 pub struct DevConfig {
     /// Entry point file path
@@ -133,7 +133,7 @@ impl Default for DevConfig {
 }
 
 /// Build result returned from bundler
-#[pyclass(from_py_object)]
+#[pyclass(immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
 pub struct BuildResult {
     /// Output files generated
@@ -171,7 +171,7 @@ impl BuildResult {
 }
 
 /// Single output file from build
-#[pyclass(from_py_object)]
+#[pyclass(immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
 pub struct OutputFile {
     /// Output path relative to outdir

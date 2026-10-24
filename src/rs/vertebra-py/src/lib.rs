@@ -92,6 +92,8 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // SHM async helpers
     m.add_function(wrap_pyfunction!(transport::get_request_notify_fd, m)?)?;
     m.add_function(wrap_pyfunction!(transport::clear_request_notification, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::prepare_request_sleep, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::cancel_request_sleep, m)?)?;
     m.add_function(wrap_pyfunction!(transport::try_get_batch, m)?)?;
     m.add_function(wrap_pyfunction!(file_io::stream_file_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(wsgi::run_wsgi_callable, m)?)?;

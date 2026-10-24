@@ -132,7 +132,7 @@ struct WatcherState {
 }
 
 /// Python-visible wrapper around `SourceWatcher` with non-blocking event polling.
-#[pyclass(name = "SourceWatcher")]
+#[pyclass(name = "SourceWatcher", immutable_type)]
 pub struct PySourceWatcher {
     state: Mutex<WatcherState>,
 }

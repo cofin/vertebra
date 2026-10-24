@@ -85,7 +85,7 @@ pub fn classify_jsonrpc_frame(
 type CachedSchemaEntry = (u64, String, Vec<u8>);
 
 /// Thread-safe digest and byte cache for tool and skill JSON Schema payloads.
-#[pyclass(name = "SchemaDigestCache", frozen)]
+#[pyclass(name = "SchemaDigestCache", frozen, immutable_type)]
 pub struct SchemaDigestCache {
     inner: RwLock<BTreeMap<String, CachedSchemaEntry>>,
 }

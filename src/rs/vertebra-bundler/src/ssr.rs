@@ -15,7 +15,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// Result of an SSR render call.
-#[pyclass(from_py_object)]
+#[pyclass(immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
 pub struct SsrResult {
     /// Head tags emitted by the component (e.g. `<title>`, `<meta>`).
@@ -133,7 +133,7 @@ struct SsrSlot {
 }
 
 /// Pool of independent QuickJS runtimes and contexts for SSR rendering.
-#[pyclass]
+#[pyclass(immutable_type)]
 pub struct SsrPool {
     bundle_path: PathBuf,
     bundle_source: RwLock<Arc<str>>,

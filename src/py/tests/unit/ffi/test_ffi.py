@@ -12,7 +12,9 @@ import pytest
 
 from vertebra._vertebra import (
     Response,
+    cancel_request_sleep,
     init_transport,
+    prepare_request_sleep,
     submit_response,
 )
 from vertebra.framework._app import App, _make_handler_id
@@ -240,3 +242,12 @@ def test_non_blocking_dispatch() -> None:
 
     assert elapsed < 0.05
     scheduler.stop()
+
+
+def test_dekker_request_sleep_helpers_roundtrip() -> None:
+    """Verify prepare_request_sleep and cancel_request_sleep FFI helpers execute cleanly."""
+    init_transport()
+    should_sleep = prepare_request_sleep()
+    assert isinstance(should_sleep, bool)
+    assert should_sleep is False
+    cancel_request_sleep()

@@ -40,7 +40,7 @@ fn broker_err_to_py(err: BrokerError) -> PyErr {
     }
 }
 
-#[pyclass(frozen, from_py_object)]
+#[pyclass(frozen, immutable_type, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaseGrant {
     #[pyo3(get)]
@@ -73,7 +73,7 @@ impl From<RsLeaseGrant> for LeaseGrant {
     }
 }
 
-#[pyclass(frozen, from_py_object)]
+#[pyclass(frozen, immutable_type, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrokerStats {
     #[pyo3(get)]
@@ -118,7 +118,7 @@ impl From<LeaseTableStats> for BrokerStats {
     }
 }
 
-#[pyclass]
+#[pyclass(immutable_type)]
 #[derive(Clone)]
 pub struct LeaseBroker {
     table: Arc<ShmLeaseTable>,
@@ -454,7 +454,7 @@ impl LeaseBroker {
 // Statement Cache PyO3 Bindings (Task 2.1)
 // ============================================================================
 
-#[pyclass(frozen, from_py_object)]
+#[pyclass(frozen, immutable_type, from_py_object)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatementPlan {
     #[pyo3(get)]
@@ -481,7 +481,7 @@ impl From<StatementPlanEntry> for StatementPlan {
     }
 }
 
-#[pyclass(frozen, from_py_object)]
+#[pyclass(frozen, immutable_type, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatementCacheStats {
     #[pyo3(get)]
@@ -508,7 +508,7 @@ impl From<RsStatementCacheStats> for StatementCacheStats {
     }
 }
 
-#[pyclass]
+#[pyclass(immutable_type)]
 #[derive(Clone)]
 pub struct StatementCache {
     cache: Arc<ShmStatementCache>,

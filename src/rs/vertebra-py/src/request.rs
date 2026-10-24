@@ -16,8 +16,44 @@ use crate::rsgi::scope::RsgiScope;
 use crate::synthetic::SyntheticRequest;
 use crate::wsgi::environ::WsgiEnviron;
 
+#[inline]
+pub(crate) fn intern_http_method<'py>(py: Python<'py>, name: &str) -> Bound<'py, PyString> {
+    match name {
+        "GET" => pyo3::intern!(py, "GET").clone(),
+        "POST" => pyo3::intern!(py, "POST").clone(),
+        "PUT" => pyo3::intern!(py, "PUT").clone(),
+        "DELETE" => pyo3::intern!(py, "DELETE").clone(),
+        "PATCH" => pyo3::intern!(py, "PATCH").clone(),
+        "HEAD" => pyo3::intern!(py, "HEAD").clone(),
+        "OPTIONS" => pyo3::intern!(py, "OPTIONS").clone(),
+        "CONNECT" => pyo3::intern!(py, "CONNECT").clone(),
+        "TRACE" => pyo3::intern!(py, "TRACE").clone(),
+        _ => PyString::new(py, name),
+    }
+}
+
+#[inline]
+pub(crate) fn intern_http_version<'py>(py: Python<'py>, ver: &str) -> Bound<'py, PyString> {
+    match ver {
+        "1.1" => pyo3::intern!(py, "1.1").clone(),
+        "1.0" => pyo3::intern!(py, "1.0").clone(),
+        "2" => pyo3::intern!(py, "2").clone(),
+        "2.0" => pyo3::intern!(py, "2.0").clone(),
+        "3" => pyo3::intern!(py, "3").clone(),
+        "HTTP/1.1" => pyo3::intern!(py, "HTTP/1.1").clone(),
+        "HTTP/1.0" => pyo3::intern!(py, "HTTP/1.0").clone(),
+        "HTTP/2" => pyo3::intern!(py, "HTTP/2").clone(),
+        "HTTP/3" => pyo3::intern!(py, "HTTP/3").clone(),
+        _ => PyString::new(py, ver),
+    }
+}
+
 /// Zero-object request proxy backed by a shared [`BatchSnapshot`].
-#[pyclass(name = "Request", frozen, freelist = 128)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "Request", frozen, freelist = 128, immutable_type)
+)]
+#[cfg_attr(Py_GIL_DISABLED, pyclass(name = "Request", frozen, immutable_type))]
 pub struct Request {
     pub(crate) batch: Arc<BatchSnapshot>,
     pub(crate) index: usize,
@@ -94,7 +130,7 @@ impl Request {
     #[getter]
     fn method<'py>(&self, py: Python<'py>) -> Bound<'py, PyString> {
         let name = self.batch.node(self.index).method_name();
-        PyString::intern(py, name)
+        intern_http_method(py, name)
     }
 
     #[getter]
@@ -130,27 +166,49 @@ impl Request {
         }
     }
 
-    /// Return a zero-copy read-only Python `memoryview` over the request body bytes in the batch slab.
+    /// Return a zero-copy read-only Python `memoryview` anchored to this `Request`.
     #[getter]
-    pub fn body_view(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let slice = self.batch.body(self.index);
-        let ptr = if slice.is_empty() {
-            std::ptr::NonNull::<u8>::dangling().as_ptr()
-        } else {
-            slice.as_ptr()
-        };
+    pub fn body_view(slf: Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
         unsafe {
-            let mv = ffi::PyMemoryView_FromMemory(
-                ptr as *mut std::os::raw::c_char,
-                slice.len() as ffi::Py_ssize_t,
-                ffi::PyBUF_READ,
-            );
+            let mv = ffi::PyMemoryView_FromObject(slf.as_ptr());
             if mv.is_null() {
                 return Err(PyErr::fetch(py));
             }
             Ok(Bound::from_owned_ptr(py, mv).unbind())
         }
     }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: std::os::raw::c_int,
+    ) -> PyResult<()> {
+        let py = slf.py();
+        let req = slf.get();
+        let slice = req.batch.body(req.index);
+        let ptr = if slice.is_empty() {
+            std::ptr::NonNull::<u8>::dangling().as_ptr()
+        } else {
+            slice.as_ptr()
+        };
+        let ret = ffi::PyBuffer_FillInfo(
+            view,
+            slf.as_ptr(),
+            ptr as *mut std::os::raw::c_void,
+            slice.len() as ffi::Py_ssize_t,
+            1,
+            flags,
+        );
+        if ret == -1 {
+            return Err(PyErr::fetch(py));
+        }
+        Ok(())
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
 
     #[getter]
     fn handler_id(&self) -> u64 {
@@ -171,7 +229,7 @@ impl Request {
     #[getter]
     fn http_version<'py>(&self, py: Python<'py>) -> Bound<'py, PyString> {
         let version = self.batch.node(self.index).http_version();
-        PyString::intern(py, version)
+        intern_http_version(py, version)
     }
 
     #[getter]
@@ -250,7 +308,11 @@ impl Request {
 }
 
 /// Vectorized container for a sealed request batch.
-#[pyclass(name = "RequestBatch")]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "RequestBatch", freelist = 128, immutable_type)
+)]
+#[cfg_attr(Py_GIL_DISABLED, pyclass(name = "RequestBatch", immutable_type))]
 pub struct RequestBatch {
     pub(crate) snapshot: Arc<BatchSnapshot>,
 }
@@ -280,7 +342,14 @@ impl RequestBatch {
 }
 
 /// Iterator over requests in a `RequestBatch`.
-#[pyclass(name = "RequestBatchIterator")]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "RequestBatchIterator", freelist = 128, immutable_type)
+)]
+#[cfg_attr(
+    Py_GIL_DISABLED,
+    pyclass(name = "RequestBatchIterator", immutable_type)
+)]
 pub struct RequestBatchIterator {
     snapshot: Arc<BatchSnapshot>,
     index: usize,

@@ -18,7 +18,11 @@ struct StartResponseState {
     headers: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
-#[pyclass(name = "_WsgiStartResponse", freelist = 128)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "_WsgiStartResponse", freelist = 128, immutable_type)
+)]
+#[cfg_attr(Py_GIL_DISABLED, pyclass(name = "_WsgiStartResponse", immutable_type))]
 pub struct WsgiStartResponse {
     state: Mutex<StartResponseState>,
 }

@@ -8,7 +8,19 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from vertebra import _vertebra
-from vertebra._vertebra import Headers
+from vertebra._vertebra import (
+    ArrowCursor,
+    AsgiScope,
+    CloudSqlDialer,
+    Headers,
+    LeaseBroker,
+    Request,
+    RequestBatch,
+    Response,
+    RsgiHttpProtocol,
+    RsgiScope,
+    WsgiEnviron,
+)
 
 
 def test_native_modules_declare_gil_used_false() -> None:
@@ -66,3 +78,33 @@ def test_headers_interned_keys_and_concurrent_thread_access() -> None:
         results = list(pool.map(_worker, range(64)))
 
     assert all(r == ("application/json", "trace-99", 10) for r in results)
+
+
+def test_native_pyclasses_enforce_immutable_type() -> None:
+    """Verify non-subclassed native PyO3 types enforce Py_TPFLAGS_IMMUTABLETYPE."""
+    bundler_mod = pytest.importorskip("vertebra._bundler")
+    storage_mod = pytest.importorskip("vertebra._storage")
+
+    classes: list[type[object]] = [
+        Request,
+        Headers,
+        Response,
+        RequestBatch,
+        AsgiScope,
+        WsgiEnviron,
+        RsgiScope,
+        RsgiHttpProtocol,
+        LeaseBroker,
+        CloudSqlDialer,
+        ArrowCursor,
+        bundler_mod.Bundler,
+        bundler_mod.BundleConfig,
+        bundler_mod.SsrPool,
+        storage_mod.ObjectStore,
+        storage_mod.StorageBuffer,
+        storage_mod.ObjectMeta,
+    ]
+    attr_name = "_mutated_type_attr"
+    for cls in classes:
+        with pytest.raises(TypeError):
+            setattr(cls, attr_name, 1)
