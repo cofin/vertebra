@@ -11,6 +11,18 @@ use tracing::debug;
 /// Stable identifier for a route handler derived via FNV-1a.
 pub type HandlerId = u64;
 
+/// High-bit tag identifying pre-indexed mounted sub-application routes in O(1).
+pub const MOUNT_HANDLER_BASE: HandlerId = 0xFFFF_0000_0000_0000;
+
+/// HTTP methods registered on mounted ASGI/RSGI/WSGI prefix catch-alls.
+pub const MOUNT_METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"];
+
+/// Encode a 0-based mount index into a reserved `HandlerId`.
+#[inline]
+pub const fn mount_handler_id(mount_index: usize) -> HandlerId {
+    MOUNT_HANDLER_BASE | ((mount_index as u64) & 0x0000_FFFF_FFFF_FFFF)
+}
+
 /// Standard HTTP method names in tag order (0..=8).
 pub const STANDARD_METHODS: [&str; 9] = [
     "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE", "CONNECT",
@@ -55,6 +67,7 @@ pub struct RouteEntry {
 #[derive(Debug, Default)]
 pub struct RouteTable {
     entries: Vec<RouteEntry>,
+    next_mount_index: usize,
 }
 
 impl RouteTable {
@@ -71,6 +84,46 @@ impl RouteTable {
             path: path.to_owned(),
             handler_id: id,
         });
+        id
+    }
+
+    /// Register a route with an explicit `HandlerId`.
+    pub fn insert_with_id(&mut self, method: &str, path: &str, id: HandlerId) {
+        let upper = method.to_ascii_uppercase();
+        if self
+            .entries
+            .iter()
+            .any(|e| e.method == upper && e.path == path)
+        {
+            return;
+        }
+        self.entries.push(RouteEntry {
+            method: upper,
+            path: path.to_owned(),
+            handler_id: id,
+        });
+    }
+
+    /// Register a mounted sub-application prefix across [`MOUNT_METHODS`] using the next mount index.
+    pub fn insert_mount_prefix(&mut self, prefix: &str) -> HandlerId {
+        let idx = self.next_mount_index;
+        self.next_mount_index += 1;
+        self.insert_mount_prefix_indexed(prefix, idx)
+    }
+
+    /// Register a mounted sub-application prefix across [`MOUNT_METHODS`] with an explicit 0-based `mount_index`.
+    pub fn insert_mount_prefix_indexed(&mut self, prefix: &str, mount_index: usize) -> HandlerId {
+        let id = mount_handler_id(mount_index);
+        let trimmed = prefix.trim_end_matches('/');
+        let (exact, catch_all) = if trimmed.is_empty() {
+            ("/".to_string(), "/*rest".to_string())
+        } else {
+            (trimmed.to_string(), format!("{trimmed}/*rest"))
+        };
+        for method in &MOUNT_METHODS {
+            self.insert_with_id(method, &exact, id);
+            self.insert_with_id(method, &catch_all, id);
+        }
         id
     }
 

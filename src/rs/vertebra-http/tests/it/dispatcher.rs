@@ -363,3 +363,76 @@ async fn shm_reader_and_sweeper_exit_on_cancellation() {
         "reader did not exit on cancellation within 200ms"
     );
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_bridge_256_concurrent_requests_complete_via_direct_response_sink_without_deadlock() {
+    use vertebra_core::bridge::BridgeResponse;
+    use vertebra_http::dispatcher::DispatchBackend;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_bridge();
+    drain_stale();
+
+    let dispatcher = Arc::new(Dispatcher::new());
+    let mut all_receivers = Vec::with_capacity(256);
+
+    for batch_idx in 0..8usize {
+        let mut requests = Vec::with_capacity(32);
+        for item_idx in 0..32usize {
+            let seq = (batch_idx * 32 + item_idx) as u64;
+            let (tx, rx) = oneshot::channel();
+            requests.push(PendingRequest {
+                handler_id: seq,
+                method_tag: 0,
+                http_version_tag: 1,
+                flags: 0,
+                path_and_query: format!("/item/{seq}?k=v").parse().unwrap(),
+                headers_mp: bytes::Bytes::from_static(b"\x06x-test\x02\x00ok"),
+                body: bytes::Bytes::from(vec![b'x'; 4096]),
+                reply: tx,
+            });
+            all_receivers.push((seq, rx));
+        }
+        assert_eq!(dispatcher.dispatch(Batch { requests }), 32);
+    }
+
+    match dispatcher.backend() {
+        DispatchBackend::Bridge(corr) => assert_eq!(corr.in_flight(), 256),
+        _ => panic!("expected bridge backend"),
+    }
+
+    let bridge = BatchBridge::get().unwrap();
+    let mut polled = 0usize;
+    while polled < 256 {
+        let snap = bridge
+            .poll_batch(Duration::from_millis(100))
+            .expect("expected in-process batch snapshot");
+        for idx in 0..snap.len() {
+            let node = snap.node(idx);
+            bridge
+                .submit_response(BridgeResponse {
+                    request_id: node.correlation_id,
+                    status: 200,
+                    headers_raw: bytes::Bytes::new(),
+                    body: bytes::Bytes::from(format!("done-{}", node.handler_id)),
+                })
+                .expect("direct response sink submission");
+            polled += 1;
+        }
+    }
+
+    for (seq, rx) in all_receivers {
+        let resp = tokio::time::timeout(Duration::from_millis(100), rx)
+            .await
+            .expect("response oneshot timed out")
+            .expect("response oneshot dropped");
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body.as_ref(), format!("done-{seq}").as_bytes());
+    }
+
+    match dispatcher.backend() {
+        DispatchBackend::Bridge(corr) => assert!(corr.is_empty()),
+        _ => panic!("expected bridge backend"),
+    }
+}

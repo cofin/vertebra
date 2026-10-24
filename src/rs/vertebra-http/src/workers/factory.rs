@@ -501,6 +501,293 @@ impl RingFactory {
     }
 }
 
+/// Compute `(tokio_threads, py_threads)` per `SO_REUSEPORT` embedded worker process
+/// given `available_cpus`, `worker_count`, and optional requested `threads_hint`.
+pub fn compute_embedded_worker_budgets(
+    available_cpus: usize,
+    worker_count: usize,
+    threads_hint: Option<usize>,
+) -> (usize, usize) {
+    let cpus = available_cpus.max(1);
+    let workers = worker_count.max(1);
+    let tokio_threads = (cpus / (2 * workers)).max(1);
+    let max_py_per_worker = (cpus / workers).max(1);
+    let py_threads = threads_hint
+        .filter(|&n| n > 0)
+        .map_or(max_py_per_worker, |n| n.min(max_py_per_worker).max(1));
+    (tokio_threads, py_threads)
+}
+
+#[cfg(unix)]
+struct EmbeddedWorkerEntry {
+    worker_id: usize,
+    child: Option<Child>,
+    last_pid: u32,
+    state: WorkerHealth,
+    crash_count: u32,
+    last_crash: Option<std::time::Instant>,
+    last_spawn: Option<std::time::Instant>,
+}
+
+#[cfg(unix)]
+impl EmbeddedWorkerEntry {
+    fn check_alive(&mut self) -> bool {
+        if let Some(ref mut child) = self.child {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => {
+                    self.state = WorkerHealth::Dead;
+                    false
+                }
+                Ok(None) => true,
+            }
+        } else {
+            false
+        }
+    }
+
+    fn record_crash(&mut self) {
+        let now = std::time::Instant::now();
+        if let Some(spawn_time) = self.last_spawn
+            && now.duration_since(spawn_time) > std::time::Duration::from_secs(60)
+        {
+            self.crash_count = 0;
+        }
+        self.crash_count += 1;
+        self.last_crash = Some(now);
+        self.state = WorkerHealth::Dead;
+    }
+
+    fn respawn_delay(&self) -> std::time::Duration {
+        let exponent = self.crash_count.saturating_sub(1).min(5);
+        std::time::Duration::from_secs(1u64 << exponent)
+    }
+
+    fn circuit_breaker_tripped(&self) -> bool {
+        if self.crash_count <= 10 {
+            return false;
+        }
+        if let Some(last_crash) = self.last_crash {
+            return last_crash.elapsed() < std::time::Duration::from_secs(300);
+        }
+        false
+    }
+}
+
+/// Multi-process `SO_REUSEPORT` supervisor for `Topology::Embedded` (`workers > 1`).
+///
+/// Pre-initializes a shared-memory `ShmLeaseTable` region for cross-worker connection
+/// pooling and spawns `W` independent `vertebra-server` processes binding with `SO_REUSEPORT`.
+#[cfg(unix)]
+pub struct EmbeddedSupervisor {
+    worker_count: usize,
+    exe_path: std::path::PathBuf,
+    broker_table: Arc<ShmLeaseTable>,
+    broker_shm_fd: std::os::fd::RawFd,
+    broker_shm_size: usize,
+    entries: Vec<EmbeddedWorkerEntry>,
+}
+
+#[cfg(unix)]
+impl EmbeddedSupervisor {
+    /// Initialize shared broker SHM region and prepare `worker_count` embedded worker slots.
+    pub fn new(
+        worker_count: usize,
+        pool_size: u32,
+        max_overflow: u32,
+        stmt_capacity: u32,
+    ) -> Result<Self, RingFactoryError> {
+        let exe_path = std::env::current_exe().map_err(RingFactoryError::Spawn)?;
+        let stmt_cap = stmt_capacity.max(1);
+        let broker_shm_size =
+            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, stmt_cap);
+        let region = ShmRegion::create(broker_shm_size).map_err(RingPairError::Shm)?;
+        let broker_shm_fd = {
+            let fd = region.handle().unwrap_or(-1);
+            if fd >= 0 {
+                process::make_inheritable(&[fd]);
+            }
+            fd
+        };
+        let broker_table = Arc::new(
+            ShmLeaseTable::init_in_region_with_statements(
+                region,
+                pool_size,
+                max_overflow,
+                stmt_cap,
+            )
+            .map_err(|e| RingPairError::Io(std::io::Error::other(e.to_string())))?,
+        );
+
+        Ok(Self {
+            worker_count,
+            exe_path,
+            broker_table,
+            broker_shm_fd,
+            broker_shm_size,
+            entries: Vec::with_capacity(worker_count),
+        })
+    }
+
+    /// Return a reference to the shared-memory connection broker lease table.
+    pub fn broker_table(&self) -> &Arc<ShmLeaseTable> {
+        &self.broker_table
+    }
+
+    fn spawn_one(&self, worker_id: usize) -> Result<Child, RingFactoryError> {
+        let available_cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let threads_hint = std::env::var("VERTEBRA_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+        let (tokio_threads, py_threads) =
+            compute_embedded_worker_budgets(available_cpus, self.worker_count, threads_hint);
+
+        let mut cmd = Command::new(&self.exe_path);
+        cmd.env("VERTEBRA_EMBEDDED_WORKER", "1")
+            .env("VERTEBRA_REUSE_PORT", "1")
+            .env("VERTEBRA_TOPOLOGY", "embedded")
+            .env("VERTEBRA_WORKERS", "1")
+            .env("VERTEBRA_WORKER_ID", worker_id.to_string())
+            .env("VERTEBRA_THREADS", py_threads.to_string());
+
+        if std::env::var_os("VERTEBRA_TOKIO_THREADS").is_none() {
+            cmd.env("VERTEBRA_TOKIO_THREADS", tokio_threads.to_string());
+        }
+
+        if self.broker_shm_fd >= 0 && self.broker_shm_size > 0 {
+            cmd.env("VERTEBRA_BROKER_SHM_FD", self.broker_shm_fd.to_string())
+                .env("VERTEBRA_BROKER_SHM_SIZE", self.broker_shm_size.to_string())
+                .env(
+                    "VERTEBRA_BROKER_POOL_SIZE",
+                    self.broker_table.pool_size().to_string(),
+                )
+                .env(
+                    "VERTEBRA_BROKER_MAX_OVERFLOW",
+                    self.broker_table.max_overflow().to_string(),
+                );
+        }
+
+        #[cfg(target_os = "linux")]
+        process::set_parent_death_signal(&mut cmd);
+
+        let child = cmd.spawn().map_err(RingFactoryError::Spawn)?;
+        info!(
+            worker_id,
+            pid = child.id(),
+            tokio_threads,
+            py_threads,
+            "spawned SO_REUSEPORT embedded worker process"
+        );
+        Ok(child)
+    }
+
+    /// Spawn all `W` `SO_REUSEPORT` embedded worker processes.
+    pub fn spawn_all(&mut self) -> Result<(), RingFactoryError> {
+        self.entries.clear();
+        for worker_id in 0..self.worker_count {
+            match self.spawn_one(worker_id) {
+                Ok(child) => {
+                    let pid = child.id();
+                    self.entries.push(EmbeddedWorkerEntry {
+                        worker_id,
+                        child: Some(child),
+                        last_pid: pid,
+                        state: WorkerHealth::Running,
+                        crash_count: 0,
+                        last_crash: None,
+                        last_spawn: Some(std::time::Instant::now()),
+                    });
+                }
+                Err(e) => {
+                    error!(worker_id, error = %e, "failed to spawn embedded worker");
+                    let mut spawned: Vec<Child> = self
+                        .entries
+                        .iter_mut()
+                        .filter_map(|x| x.child.take())
+                        .collect();
+                    RingFactory::shutdown_workers(&mut spawned, std::time::Duration::from_secs(2));
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn poll_entries(&mut self) {
+        let mut to_respawn = Vec::new();
+        for (idx, entry) in self.entries.iter_mut().enumerate() {
+            if entry.state == WorkerHealth::Running && !entry.check_alive() {
+                let reclaimed = self.broker_table.reclaim_worker(entry.last_pid);
+                tracing::warn!(
+                    worker_id = entry.worker_id,
+                    pid = entry.last_pid,
+                    reclaimed,
+                    "embedded worker exited unexpectedly"
+                );
+                entry.record_crash();
+                if !entry.circuit_breaker_tripped() {
+                    entry.state = WorkerHealth::Respawning;
+                }
+            } else if entry.state == WorkerHealth::Respawning
+                && let Some(last_crash) = entry.last_crash
+                && last_crash.elapsed() >= entry.respawn_delay()
+            {
+                if !entry.circuit_breaker_tripped() {
+                    to_respawn.push(idx);
+                } else {
+                    error!(
+                        worker_id = entry.worker_id,
+                        "circuit breaker tripped for embedded worker"
+                    );
+                    entry.state = WorkerHealth::Dead;
+                }
+            }
+        }
+
+        for idx in to_respawn {
+            let worker_id = self.entries[idx].worker_id;
+            match self.spawn_one(worker_id) {
+                Ok(child) => {
+                    let pid = child.id();
+                    let entry = &mut self.entries[idx];
+                    entry.last_pid = pid;
+                    entry.child = Some(child);
+                    entry.state = WorkerHealth::Running;
+                    entry.last_spawn = Some(std::time::Instant::now());
+                }
+                Err(e) => {
+                    error!(worker_id, error = %e, "failed to respawn embedded worker");
+                }
+            }
+        }
+    }
+
+    /// Supervise child workers until `shutdown` resolves, then gracefully terminate all children.
+    pub async fn run(&mut self, shutdown: impl std::future::Future<Output = ()>) {
+        tokio::pin!(shutdown);
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => {
+                    info!("shutting down SO_REUSEPORT embedded workers");
+                    break;
+                }
+                _ = interval.tick() => {
+                    self.poll_entries();
+                }
+            }
+        }
+        let mut children: Vec<Child> = self
+            .entries
+            .iter_mut()
+            .filter_map(|e| e.child.take())
+            .collect();
+        RingFactory::shutdown_workers(&mut children, std::time::Duration::from_secs(5));
+    }
+}
+
 /// Clean up stale shared memory regions from previous crashed supervisors.
 #[cfg(unix)]
 pub fn cleanup_stale_shm() {
@@ -718,5 +1005,25 @@ mod tests {
         assert_eq!(factory.broker_table().stats().active_leases, 1);
         assert_eq!(factory.lifecycles_mut()[0].reclaim_worker_leases(), 1);
         assert_eq!(factory.broker_table().stats().active_leases, 0);
+    }
+
+    #[test]
+    fn embedded_worker_budgets_prevent_core_oversubscription() {
+        assert_eq!(compute_embedded_worker_budgets(8, 4, Some(48)), (1, 2));
+        assert_eq!(compute_embedded_worker_budgets(8, 8, Some(48)), (1, 1));
+        assert_eq!(compute_embedded_worker_budgets(8, 4, Some(1)), (1, 1));
+        assert_eq!(compute_embedded_worker_budgets(1, 1, Some(48)), (1, 1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_supervisor_initializes_inheritable_broker_table() {
+        let sup = EmbeddedSupervisor::new(4, 8, 2, 128).expect("embedded supervisor");
+        assert_eq!(sup.broker_table().pool_size(), 8);
+        assert_eq!(sup.broker_table().max_overflow(), 2);
+        assert_eq!(sup.broker_table().stmt_capacity(), 128);
+        assert!(sup.broker_shm_fd >= 0);
+        let flags = unsafe { libc::fcntl(sup.broker_shm_fd, libc::F_GETFD) };
+        assert!(flags >= 0 && (flags & libc::FD_CLOEXEC) == 0);
     }
 }

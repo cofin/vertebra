@@ -3,11 +3,11 @@
 //! Three dispatch backends:
 //! - **Direct** (`direct.rs`): batch sent via `tokio::sync::mpsc`, responses
 //!   via oneshot on each `PendingRequest`.
-//! - **Bridge** (`bridge.rs`): requests written into the arena-backed
-//!   `BatchBridge`, responses polled from the bridge channel. Uses `BridgeCorrelation`.
-//! - **Shm** (`shm.rs`): requests serialized into per-worker MPMC
-//!   rings, responses read from tiered response rings. Uses O(1)
-//!   `InFlightRequests`.
+//! - **Bridge** (`bridge.rs`): zero-copy `InProcessRequest` batches submitted
+//!   to `BatchBridge` with 8-shard O(1) `InFlightRequests` correlation and
+//!   direct `ResponseSink` completion.
+//! - **Shm** (`shm.rs`): whole batches serialized directly into per-worker MPMC
+//!   rings with warm-worker affinity and sharded O(1) `InFlightRequests`.
 
 mod bridge;
 pub mod correlation;
@@ -18,39 +18,19 @@ pub mod shm_reader;
 mod tests;
 pub mod types;
 
-pub use self::bridge_types::BridgeCorrelation;
+pub use self::bridge::BridgeCorrelation;
 pub use self::correlation::{CorrelationId, InFlightRequests};
 pub use self::shm::ShmDispatcher;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
-use dashmap::DashMap;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::backpressure::{BackpressureConfig, BackpressureController};
 use crate::batcher::{Batch, PendingRequest};
 use crate::body::PendingResponse;
-
-mod bridge_types {
-    use super::*;
-
-    /// In-flight correlation tracking for bridge mode.
-    pub struct BridgeCorrelation {
-        pub pending: DashMap<u64, oneshot::Sender<PendingResponse>>,
-        pub next_id: AtomicU64,
-    }
-
-    impl Default for BridgeCorrelation {
-        fn default() -> Self {
-            Self {
-                pending: DashMap::new(),
-                next_id: AtomicU64::new(1),
-            }
-        }
-    }
-}
 
 /// Active dispatch backend variant.
 pub enum DispatchBackend {
@@ -59,10 +39,7 @@ pub enum DispatchBackend {
     Shm(Arc<ShmDispatcher>),
 }
 
-/// The dispatcher.
-///
-/// Manages in-flight request tracking and dispatches batches to workers
-/// via the direct channel, arena-backed BatchBridge, or MPMC ring pairs.
+/// Manages in-flight request tracking and dispatches batches to workers.
 pub struct Dispatcher {
     backend: DispatchBackend,
     backpressure: Option<Arc<BackpressureController>>,
@@ -75,10 +52,14 @@ impl Default for Dispatcher {
 }
 
 impl Dispatcher {
-    /// Create a new dispatcher in bridge mode (default).
+    /// Create a new dispatcher in bridge mode (default) and register its direct `ResponseSink`.
     pub fn new() -> Self {
+        let corr = Arc::new(BridgeCorrelation::default());
+        if let Some(bridge) = vertebra_core::bridge::BatchBridge::get() {
+            corr.ensure_sink_registered(bridge);
+        }
         Self {
-            backend: DispatchBackend::Bridge(Arc::new(BridgeCorrelation::default())),
+            backend: DispatchBackend::Bridge(corr),
             backpressure: None,
         }
     }
@@ -110,6 +91,17 @@ impl Dispatcher {
         Self {
             backend: DispatchBackend::Shm(shm),
             backpressure: None,
+        }
+    }
+
+    /// Spawn a background correlation timeout sweeper when running in `Bridge` mode.
+    pub fn spawn_bridge_sweeper(
+        &self,
+        shutdown: CancellationToken,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        match &self.backend {
+            DispatchBackend::Bridge(corr) => Some(corr.spawn_sweeper(shutdown)),
+            _ => None,
         }
     }
 
@@ -153,25 +145,19 @@ impl Dispatcher {
         }
     }
 
-    /// Complete a request with a response (bridge or SHM mode).
+    /// Complete a request with a response (bridge or SHM mode), sending outside the shard lock.
     pub fn complete(&self, correlation_id: u64, response: PendingResponse) {
         match &self.backend {
             DispatchBackend::Shm(shm) => {
-                let cid = CorrelationId::from_raw(correlation_id);
-                let shard_idx = cid.shard() & (shm.shard_count() - 1);
-                let mut slab = shm.correlation_shard(shard_idx).lock().unwrap();
-                if !slab.complete(cid, response) {
+                if !shm.complete_one(correlation_id, response) {
                     debug!(
                         id = correlation_id,
-                        shard = shard_idx,
                         "no pending SHM request for correlation ID"
                     );
                 }
             }
             DispatchBackend::Bridge(bridge) => {
-                if let Some((_, tx)) = bridge.pending.remove(&correlation_id) {
-                    let _ = tx.send(response);
-                } else {
+                if !bridge.complete(correlation_id, response) {
                     debug!(id = correlation_id, "no pending request for correlation ID");
                 }
             }
@@ -179,20 +165,14 @@ impl Dispatcher {
         }
     }
 
-    /// Complete multiple requests with grouped per-shard locks in SHM mode.
+    /// Complete multiple requests with grouped per-shard locks, sending outside locks.
     pub fn complete_many(&self, responses: Vec<(u64, PendingResponse)>) {
         match &self.backend {
             DispatchBackend::Shm(shm) => {
                 shm.complete_many(responses);
             }
             DispatchBackend::Bridge(bridge) => {
-                for (correlation_id, response) in responses {
-                    if let Some((_, tx)) = bridge.pending.remove(&correlation_id) {
-                        let _ = tx.send(response);
-                    } else {
-                        debug!(id = correlation_id, "no pending request for correlation ID");
-                    }
-                }
+                bridge.complete_many(responses);
             }
             DispatchBackend::Direct(_) => {}
         }

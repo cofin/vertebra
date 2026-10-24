@@ -189,7 +189,7 @@ async fn run_worker_reader(
     }
 }
 
-/// Linux/Unix: Optimized loop using AsyncFd with cancellation select.
+/// Linux/Unix: Optimized loop using AsyncFd with Dekker `consumer_sleeping` and cancellation select.
 #[cfg(unix)]
 async fn run_worker_reader_async(
     worker_id: usize,
@@ -199,17 +199,40 @@ async fn run_worker_reader_async(
     async_fd: AsyncFd<NotifierFd>,
 ) {
     loop {
+        while drain_worker(&worker, &dispatcher) {}
+
+        if !worker.prepare_response_sleep() {
+            continue;
+        }
+
         tokio::select! {
             biased;
             _ = shutdown.cancelled() => {
+                worker.cancel_response_sleep();
                 break;
             }
             res = async_fd.readable() => {
+                worker.cancel_response_sleep();
                 match res {
                     Ok(mut guard) => {
-                        let _ = worker.response_notifier.clear();
-                        guard.clear_ready();
-                        drain_worker(&worker, &dispatcher);
+                        let _ = guard.try_io(|inner| {
+                            let mut buf = [0u8; 8];
+                            loop {
+                                let rc = unsafe {
+                                    libc::read(
+                                        inner.get_ref().as_raw_fd(),
+                                        buf.as_mut_ptr().cast::<libc::c_void>(),
+                                        buf.len(),
+                                    )
+                                };
+                                if rc < 0 {
+                                    return Err(std::io::Error::last_os_error());
+                                }
+                                if rc == 0 {
+                                    return Ok(());
+                                }
+                            }
+                        });
                     }
                     Err(e) => {
                         error!(worker_id, error = %e, "AsyncFd readable error; stopping worker reader");
@@ -221,7 +244,7 @@ async fn run_worker_reader_async(
     }
 
     // Final drain after shutdown
-    drain_worker(&worker, &dispatcher);
+    while drain_worker(&worker, &dispatcher) {}
 }
 
 /// Fallback: Periodic polling of the response rings with cancellation select.
@@ -239,40 +262,53 @@ async fn run_worker_reader_polling(
             biased;
             _ = shutdown.cancelled() => break,
             _ = tokio::time::sleep(poll_interval) => {
-                drain_worker(&worker, &dispatcher);
+                while drain_worker(&worker, &dispatcher) {}
             }
         }
     }
 
-    drain_worker(&worker, &dispatcher);
+    while drain_worker(&worker, &dispatcher) {}
 }
 
-/// Drain all available responses from a worker's tiered rings.
+/// Drain available responses from a worker's tiered rings via zero-copy `drain_with`.
 fn drain_worker(worker: &Arc<RingPair>, dispatcher: &Dispatcher) -> bool {
-    let mut any_received = false;
+    use bytes::Bytes;
+
     let mut completions = Vec::new();
-    loop {
-        match worker.response_rings.try_recv_response() {
-            Ok(Some(resp)) => {
-                any_received = true;
-                completions.push((
-                    resp.correlation_id,
-                    PendingResponse {
-                        status: resp.status,
-                        headers_mp: resp.headers_raw,
-                        body: resp.body,
-                        stream_rx: None,
-                    },
-                ));
-            }
-            Ok(None) => break,
-            Err(e) => {
-                warn!(error = %e, "error reading response ring");
-                break;
-            }
+    match worker
+        .response_rings
+        .drain_with(1024, |correlation_id, status, headers_raw, body| {
+            let headers_mp = if headers_raw.is_empty() {
+                Bytes::new()
+            } else {
+                Bytes::copy_from_slice(headers_raw)
+            };
+            let body_bytes = if body.is_empty() {
+                Bytes::new()
+            } else {
+                Bytes::copy_from_slice(body)
+            };
+            completions.push((
+                correlation_id,
+                PendingResponse {
+                    status,
+                    headers_mp,
+                    body: body_bytes,
+                    stream_rx: None,
+                },
+            ));
+        }) {
+        Ok(_) => {}
+        Err(e) => {
+            warn!(error = %e, "error reading response ring");
         }
     }
-    if !completions.is_empty() {
+
+    let any_received = !completions.is_empty();
+    if completions.len() == 1 {
+        let (cid, resp) = completions.pop().unwrap();
+        dispatcher.complete(cid, resp);
+    } else if any_received {
         dispatcher.complete_many(completions);
     }
     any_received

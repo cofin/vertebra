@@ -114,8 +114,8 @@ impl std::str::FromStr for Topology {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "embedded" => Ok(Self::Embedded),
+        match s.trim().to_lowercase().as_str() {
+            "auto" | "embedded" => Ok(Self::Embedded),
             "shm" => Ok(Self::Shm),
             _ => Err(format!("invalid topology: {s}")),
         }
@@ -270,17 +270,30 @@ impl ServerConfig {
         }
 
         // Topology config
-        if let Ok(top) = std::env::var("VERTEBRA_TOPOLOGY")
+        let explicit_topology = std::env::var("VERTEBRA_TOPOLOGY").ok().and_then(|v| {
+            let trimmed = v.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_lowercase())
+        });
+        if let Some(ref top) = explicit_topology
             && let Ok(t) = top.parse::<Topology>()
         {
             config.topology = t;
         }
 
-        // Thread scaling config
+        // Thread scaling config (clamped to available_parallelism / taskset affinity for Tokio)
+        let available_cpus = num_cpus();
         if let Ok(threads) = std::env::var("VERTEBRA_THREADS")
             && let Ok(n) = threads.parse::<usize>()
+            && n > 0
         {
             config.thread_count = n;
+            config.worker_threads = n.min(available_cpus).max(1);
+        }
+        if let Ok(tokio_threads) = std::env::var("VERTEBRA_TOKIO_THREADS")
+            && let Ok(n) = tokio_threads.parse::<usize>()
+            && n > 0
+        {
+            config.worker_threads = n;
         }
 
         // Worker config
@@ -288,10 +301,13 @@ impl ServerConfig {
             && let Ok(n) = count.parse::<usize>()
         {
             config.workers.count = n;
-            // If workers > 0 and topology was not explicitly set to Embedded,
-            // assume SHM for backward compatibility.
-            if n > 0 && std::env::var("VERTEBRA_TOPOLOGY").is_err() {
+            #[cfg(not(unix))]
+            if n > 1 && explicit_topology.as_deref() != Some("embedded") {
                 config.topology = Topology::Shm;
+            }
+            #[cfg(unix)]
+            if n > 1 && config.topology == Topology::Embedded {
+                config.reuse_port = true;
             }
         }
         if let Ok(python) = std::env::var("VERTEBRA_PYTHON_BIN") {
