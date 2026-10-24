@@ -22,7 +22,7 @@ use std::os::fd::RawFd;
 use bytes::Bytes;
 
 use crate::buffer::{ChannelMode, RingLayout};
-use crate::channel::{ChannelError, MpmcRing, SpscRing};
+use crate::channel::{ChannelError, MpmcRing, SlotView, SpscRing};
 use crate::notify::Notifier;
 use crate::shm::ShmRegion;
 use crate::tiered_ring::{RingTier, TieredRingConfig};
@@ -33,6 +33,12 @@ pub const RESPONSE_MAGIC: u32 = 0x56_52_45_53; // "VRES"
 /// Fixed header size for serialized responses (magic + correlation_id + status + headers_len + body_len).
 const RESPONSE_HEADER_SIZE: usize = 4 + 8 + 2 + 2 + 4; // 20 bytes
 
+/// Active tier bitmask constants stored in `TieredRingSet.small`'s `ShmHeader.active_flags`.
+pub const TIER_BIT_SMALL: u32 = 1 << 0;
+pub const TIER_BIT_MEDIUM: u32 = 1 << 1;
+pub const TIER_BIT_LARGE: u32 = 1 << 2;
+pub const TIER_BIT_XLARGE: u32 = 1 << 3;
+
 /// Deserialized response data from a ring slot.
 #[derive(Debug, Clone)]
 pub struct ResponseData {
@@ -42,8 +48,13 @@ pub struct ResponseData {
     pub body: Bytes,
 }
 
+/// Zero-copy parsed `VRES` response frame view: `(correlation_id, status, headers_raw, body)`.
+pub type ParsedResponseSlice<'a> = (u64, u16, &'a [u8], &'a [u8]);
+
 impl ResponseData {
-    fn deserialize(data: &[u8]) -> Result<Self, RingPairError> {
+    /// Parse a serialized `VRES` response slot in-place without copying header or body slices.
+    #[inline]
+    pub fn parse_slice(data: &[u8]) -> Result<ParsedResponseSlice<'_>, RingPairError> {
         if data.len() < RESPONSE_HEADER_SIZE {
             return Err(RingPairError::InvalidResponse("too short"));
         }
@@ -56,23 +67,27 @@ impl ResponseData {
         let headers_len = u16::from_le_bytes(data[14..16].try_into().unwrap()) as usize;
         let body_len = u32::from_le_bytes(data[16..20].try_into().unwrap()) as usize;
 
-        let expected = RESPONSE_HEADER_SIZE + headers_len + body_len;
+        let expected = RESPONSE_HEADER_SIZE
+            .checked_add(headers_len)
+            .and_then(|s| s.checked_add(body_len))
+            .ok_or(RingPairError::InvalidResponse("length overflow"))?;
         if data.len() < expected {
             return Err(RingPairError::InvalidResponse("truncated"));
         }
 
-        let headers_raw =
-            Bytes::copy_from_slice(&data[RESPONSE_HEADER_SIZE..RESPONSE_HEADER_SIZE + headers_len]);
-        let body = Bytes::copy_from_slice(
-            &data
-                [RESPONSE_HEADER_SIZE + headers_len..RESPONSE_HEADER_SIZE + headers_len + body_len],
-        );
+        let headers_end = RESPONSE_HEADER_SIZE + headers_len;
+        let headers_raw = &data[RESPONSE_HEADER_SIZE..headers_end];
+        let body = &data[headers_end..headers_end + body_len];
+        Ok((correlation_id, status, headers_raw, body))
+    }
 
+    fn deserialize(data: &[u8]) -> Result<Self, RingPairError> {
+        let (correlation_id, status, headers_raw, body) = Self::parse_slice(data)?;
         Ok(Self {
             correlation_id,
             status,
-            headers_raw,
-            body,
+            headers_raw: Bytes::copy_from_slice(headers_raw),
+            body: Bytes::copy_from_slice(body),
         })
     }
 }
@@ -214,14 +229,16 @@ impl TieredRingSet {
             return Err(RingPairError::InvalidResponse("headers exceed 65535 bytes"));
         }
         let total_size = RESPONSE_HEADER_SIZE + headers_raw.len() + body.len();
-        let ring = self
-            .select_ring(total_size)
+        let (ring, bit) = self
+            .select_ring_with_bit(total_size)
             .ok_or(RingPairError::ResponseTooLarge(total_size))?;
 
         ring.try_send_with(total_size, 0, |slot| {
             Self::write_response_slot(slot, correlation_id, status, headers_raw, body);
         })
-        .map_err(RingPairError::Channel)
+        .map_err(RingPairError::Channel)?;
+        self.mark_tier_active(bit);
+        Ok(())
     }
 
     /// Send a response through the appropriate tier ring, blocking until
@@ -237,61 +254,263 @@ impl TieredRingSet {
             return Err(RingPairError::InvalidResponse("headers exceed 65535 bytes"));
         }
         let total_size = RESPONSE_HEADER_SIZE + headers_raw.len() + body.len();
-        let ring = self
-            .select_ring(total_size)
+        let (ring, bit) = self
+            .select_ring_with_bit(total_size)
             .ok_or(RingPairError::ResponseTooLarge(total_size))?;
 
         ring.send_with(total_size, 0, |slot| {
             Self::write_response_slot(slot, correlation_id, status, headers_raw, body);
         })
-        .map_err(RingPairError::Channel)
+        .map_err(RingPairError::Channel)?;
+        self.mark_tier_active(bit);
+        Ok(())
     }
 
     /// Send a pre-encoded raw response frame through the appropriate tier ring.
     pub fn send_response_bytes(&self, raw_frame: &[u8]) -> Result<(), RingPairError> {
         let total_size = raw_frame.len();
-        let ring = self
-            .select_ring(total_size)
+        let (ring, bit) = self
+            .select_ring_with_bit(total_size)
             .ok_or(RingPairError::ResponseTooLarge(total_size))?;
 
         ring.try_send_with(total_size, 0, |slot| {
             slot[..total_size].copy_from_slice(raw_frame);
         })
-        .map_err(RingPairError::Channel)
+        .map_err(RingPairError::Channel)?;
+        self.mark_tier_active(bit);
+        Ok(())
     }
 
-    /// Try to receive a response from any tier using round-robin rotation and zero-copy slot views.
-    pub fn try_recv_response(&self) -> Result<Option<ResponseData>, RingPairError> {
-        let tiers = [&self.small, &self.medium, &self.large, &self.xlarge];
+    #[inline]
+    fn mark_tier_active(&self, bit: u32) {
+        let flags = self.small.active_flags();
+        if (flags.load(std::sync::atomic::Ordering::SeqCst) & bit) == 0 {
+            flags.fetch_or(bit, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[inline]
+    fn clear_tier_if_empty(&self, ring: &SpscRing, bit: u32) {
+        if !ring.has_data_acquire() {
+            let flags = self.small.active_flags();
+            flags.fetch_and(!bit, std::sync::atomic::Ordering::SeqCst);
+            if ring.has_data_acquire() {
+                flags.fetch_or(bit, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Return the bitmask (`TIER_BIT_*`) of currently active response tiers.
+    #[inline]
+    pub fn active_tier_mask(&self) -> u32 {
+        self.small
+            .active_flags()
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Check whether any response tier currently holds unread data (`Acquire` ordering).
+    #[inline]
+    pub fn has_any_data(&self) -> bool {
+        self.small.has_data_acquire()
+            || self.medium.has_data_acquire()
+            || self.large.has_data_acquire()
+            || self.xlarge.has_data_acquire()
+    }
+
+    /// Arm the Dekker `consumer_sleeping` flag (`1`) across all four response tiers.
+    #[inline]
+    pub fn prepare_sleep(&self) -> bool {
+        self.small
+            .consumer_sleeping()
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        if self.has_any_data() {
+            self.small
+                .consumer_sleeping()
+                .store(0, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    /// Disarm the Dekker `consumer_sleeping` flag (`0`).
+    #[inline]
+    pub fn cancel_sleep(&self) {
+        self.small.cancel_sleep();
+    }
+
+    /// Check and clear `consumer_sleeping` (`SeqCst` Dekker).
+    #[inline]
+    pub fn should_notify_and_clear(&self) -> bool {
+        self.small.should_notify_and_clear()
+    }
+
+    /// Notify `notifier` only when the response consumer has armed `consumer_sleeping == 1`.
+    #[inline]
+    pub fn notify_if_sleeping(&self, notifier: &Notifier) -> std::io::Result<bool> {
+        self.small.notify_if_sleeping(notifier)
+    }
+
+    /// Try to receive a zero-copy [`SlotView`] from any active tier.
+    pub fn try_recv_view(&self) -> Result<Option<SlotView>, RingPairError> {
+        let mask = self.active_tier_mask();
+        if (mask & !TIER_BIT_SMALL) == 0 {
+            return match self.small.try_recv_view() {
+                Ok(view) => Ok(Some(view)),
+                Err(ChannelError::Empty) => Ok(None),
+                Err(e) => Err(RingPairError::Channel(e)),
+            };
+        }
+
+        let tiers = [
+            (&self.small, TIER_BIT_SMALL),
+            (&self.medium, TIER_BIT_MEDIUM),
+            (&self.large, TIER_BIT_LARGE),
+            (&self.xlarge, TIER_BIT_XLARGE),
+        ];
         let start = self
             .next_tier
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         for offset in 0..tiers.len() {
-            let ring = tiers[(start.wrapping_add(offset)) % tiers.len()];
+            let (ring, bit) = tiers[(start.wrapping_add(offset)) % tiers.len()];
+            if bit != TIER_BIT_SMALL && (mask & bit) == 0 {
+                continue;
+            }
             match ring.try_recv_view() {
-                Ok(view) => {
-                    return ResponseData::deserialize(view.as_slice()).map(Some);
+                Ok(view) => return Ok(Some(view)),
+                Err(ChannelError::Empty) => {
+                    self.clear_tier_if_empty(ring, bit);
                 }
-                Err(ChannelError::Empty) => continue,
                 Err(e) => return Err(RingPairError::Channel(e)),
             }
         }
         Ok(None)
     }
 
-    /// Select the ring for the given response size.
-    pub fn select_ring(&self, response_size: usize) -> Option<&Arc<SpscRing>> {
+    /// Drain up to `max_items` responses across active tiers in small-first order without
+    /// allocating intermediate `Vec<u8>` or `Bytes` buffers.
+    pub fn drain_with<F>(&self, max_items: usize, mut f: F) -> Result<usize, RingPairError>
+    where
+        F: FnMut(u64, u16, &[u8], &[u8]),
+    {
+        if max_items == 0 {
+            return Ok(0);
+        }
+
+        let mask = self.active_tier_mask();
+        let tiers = [
+            (&self.small, TIER_BIT_SMALL),
+            (&self.medium, TIER_BIT_MEDIUM),
+            (&self.large, TIER_BIT_LARGE),
+            (&self.xlarge, TIER_BIT_XLARGE),
+        ];
+
+        let mut total_drained = 0usize;
+        let mut parse_err: Option<RingPairError> = None;
+
+        for (ring, bit) in tiers {
+            if total_drained >= max_items {
+                break;
+            }
+            if bit != TIER_BIT_SMALL && (mask & bit) == 0 {
+                continue;
+            }
+            let remaining = max_items - total_drained;
+            let count = ring
+                .drain_with(remaining, |slice, _flags| {
+                    if parse_err.is_some() {
+                        return;
+                    }
+                    match ResponseData::parse_slice(slice) {
+                        Ok((corr_id, status, headers_raw, body)) => {
+                            f(corr_id, status, headers_raw, body);
+                        }
+                        Err(err) => {
+                            parse_err = Some(err);
+                        }
+                    }
+                })
+                .map_err(RingPairError::Channel)?;
+            total_drained += count;
+            self.clear_tier_if_empty(ring, bit);
+            if let Some(err) = parse_err {
+                return Err(err);
+            }
+        }
+
+        Ok(total_drained)
+    }
+
+    /// Try to receive a response from any tier using round-robin rotation and zero-copy slot views.
+    pub fn try_recv_response(&self) -> Result<Option<ResponseData>, RingPairError> {
+        let mask = self.active_tier_mask();
+        if (mask & !TIER_BIT_SMALL) == 0 {
+            return match self.small.try_recv_view() {
+                Ok(view) => {
+                    let parsed = ResponseData::deserialize(view.as_slice());
+                    drop(view);
+                    self.clear_tier_if_empty(&self.small, TIER_BIT_SMALL);
+                    parsed.map(Some)
+                }
+                Err(ChannelError::Empty) => {
+                    if (mask & TIER_BIT_SMALL) != 0 {
+                        self.clear_tier_if_empty(&self.small, TIER_BIT_SMALL);
+                    }
+                    Ok(None)
+                }
+                Err(e) => Err(RingPairError::Channel(e)),
+            };
+        }
+
+        let tiers = [
+            (&self.small, TIER_BIT_SMALL),
+            (&self.medium, TIER_BIT_MEDIUM),
+            (&self.large, TIER_BIT_LARGE),
+            (&self.xlarge, TIER_BIT_XLARGE),
+        ];
+        let start = self
+            .next_tier
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        for offset in 0..tiers.len() {
+            let (ring, bit) = tiers[(start.wrapping_add(offset)) % tiers.len()];
+            if bit != TIER_BIT_SMALL && (mask & bit) == 0 {
+                continue;
+            }
+            match ring.try_recv_view() {
+                Ok(view) => {
+                    let parsed = ResponseData::deserialize(view.as_slice());
+                    drop(view);
+                    self.clear_tier_if_empty(ring, bit);
+                    return parsed.map(Some);
+                }
+                Err(ChannelError::Empty) => {
+                    self.clear_tier_if_empty(ring, bit);
+                }
+                Err(e) => return Err(RingPairError::Channel(e)),
+            }
+        }
+        Ok(None)
+    }
+
+    #[inline]
+    fn select_ring_with_bit(&self, response_size: usize) -> Option<(&Arc<SpscRing>, u32)> {
         if response_size <= self.small.payload_capacity() {
-            Some(&self.small)
+            Some((&self.small, TIER_BIT_SMALL))
         } else if response_size <= self.medium.payload_capacity() {
-            Some(&self.medium)
+            Some((&self.medium, TIER_BIT_MEDIUM))
         } else if response_size <= self.large.payload_capacity() {
-            Some(&self.large)
+            Some((&self.large, TIER_BIT_LARGE))
         } else if response_size <= self.xlarge.payload_capacity() {
-            Some(&self.xlarge)
+            Some((&self.xlarge, TIER_BIT_XLARGE))
         } else {
             None
         }
+    }
+
+    /// Select the ring for the given response size.
+    pub fn select_ring(&self, response_size: usize) -> Option<&Arc<SpscRing>> {
+        self.select_ring_with_bit(response_size)
+            .map(|(ring, _)| ring)
     }
 
     /// Get the SHM handle (FD) for each tier ring, for FD inheritance.
@@ -540,6 +759,43 @@ impl RingPair {
     /// Send a pre-encoded raw response frame through the tiered response rings.
     pub fn send_response_bytes(&self, raw_frame: &[u8]) -> Result<(), RingPairError> {
         self.response_rings.send_response_bytes(raw_frame)
+    }
+
+    /// Arm Dekker sleep on the request MPMC ring (`true` when empty and safe to wait).
+    #[inline]
+    pub fn prepare_request_sleep(&self) -> bool {
+        self.request_ring.prepare_sleep()
+    }
+
+    /// Cancel Dekker sleep on the request MPMC ring.
+    #[inline]
+    pub fn cancel_request_sleep(&self) {
+        self.request_ring.cancel_sleep();
+    }
+
+    /// Notify `request_notifier` only if the worker consumer is sleeping.
+    #[inline]
+    pub fn notify_request_if_sleeping(&self) -> std::io::Result<bool> {
+        self.request_ring.notify_if_sleeping(&self.request_notifier)
+    }
+
+    /// Arm Dekker sleep on the tiered response rings (`true` when all tiers are empty).
+    #[inline]
+    pub fn prepare_response_sleep(&self) -> bool {
+        self.response_rings.prepare_sleep()
+    }
+
+    /// Cancel Dekker sleep on the tiered response rings.
+    #[inline]
+    pub fn cancel_response_sleep(&self) {
+        self.response_rings.cancel_sleep();
+    }
+
+    /// Notify `response_notifier` only if the supervisor response reader is sleeping.
+    #[inline]
+    pub fn notify_response_if_sleeping(&self) -> std::io::Result<bool> {
+        self.response_rings
+            .notify_if_sleeping(&self.response_notifier)
     }
 }
 

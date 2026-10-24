@@ -88,3 +88,84 @@ fn region_size_is_page_aligned() {
         region.len()
     );
 }
+
+#[test]
+fn tiered_ring_set_default_absorbs_256_burst_active_mask_and_zero_copy_drain() {
+    use std::sync::Arc;
+    use vertebra_core::TieredRingSet;
+    use vertebra_core::buffer::{ChannelMode, RingLayout};
+    use vertebra_core::channel::MpmcRing;
+    use vertebra_core::tiered_ring::TieredRingConfig;
+    use vertebra_core::transport::{BatchSnapshot, TransportNode};
+
+    let config = TieredRingConfig::default();
+    assert!(
+        config.small.slot_count >= 512,
+        "default small tier must absorb c=256+ bursts without overflow"
+    );
+
+    let set = TieredRingSet::create(&config).expect("create TieredRingSet");
+    assert_eq!(set.active_tier_mask(), 0);
+
+    for i in 0..300u64 {
+        set.send_response(i, 200, b"\x04host\x09\x00localhost", b"ok")
+            .expect("300 small responses must fit without overflow");
+    }
+    assert_eq!(set.active_tier_mask(), 0b0001);
+
+    let mut seen = Vec::with_capacity(300);
+    let drained = set
+        .drain_with(512, |corr_id, status, headers_raw, body| {
+            assert_eq!(status, 200);
+            assert_eq!(headers_raw, b"\x04host\x09\x00localhost");
+            assert_eq!(body, b"ok");
+            seen.push(corr_id);
+        })
+        .expect("drain_with");
+    assert_eq!(drained, 300);
+    assert_eq!(seen.len(), 300);
+    assert_eq!(seen[0], 0);
+    assert_eq!(seen[299], 299);
+    assert_eq!(set.active_tier_mask(), 0);
+
+    // Zero-copy SHM BatchSnapshot: body slice points directly inside ShmRegion mapping.
+    let req_layout = RingLayout::new(4096, 8, ChannelMode::Mpmc);
+    let req_region = Arc::new(ShmRegion::create(req_layout.total_size).expect("req region"));
+    let region_start = req_region.as_ptr() as usize;
+    let region_end = region_start + req_region.len();
+    let req_ring = Arc::new(unsafe {
+        MpmcRing::initialize(Arc::clone(&req_region), req_layout, 0, 0).expect("init mpmc")
+    });
+
+    let payload = b"/zero-copy-path{\"echo\":true}";
+    let node = TransportNode {
+        method_tag: 1,
+        http_version_tag: 1,
+        _pad: [0; 2],
+        handler_id: 99,
+        correlation_id: 777,
+        path_offset: 0,
+        path_len: 15,
+        query_offset: 0,
+        query_len: 0,
+        headers_offset: 0,
+        headers_len: 0,
+        body_offset: 15,
+        body_len: 13,
+    };
+    let src_snap = BatchSnapshot::new(payload.to_vec(), vec![node]);
+    req_ring
+        .try_send_with(0, |slot| src_snap.serialize_into(slot))
+        .expect("serialize into shm slot");
+
+    let slot_view = req_ring.try_recv_view().expect("recv mpmc slot view");
+    let shm_snap = BatchSnapshot::from_mpmc_slot(slot_view).expect("from_mpmc_slot");
+    assert_eq!(shm_snap.len(), 1);
+    assert_eq!(shm_snap.path(0), "/zero-copy-path");
+    assert_eq!(shm_snap.body(0), b"{\"echo\":true}");
+    let body_ptr = shm_snap.body(0).as_ptr() as usize;
+    assert!(
+        (region_start..region_end).contains(&body_ptr),
+        "SHM BatchSnapshot body slice must point directly into ShmRegion without heap copy"
+    );
+}

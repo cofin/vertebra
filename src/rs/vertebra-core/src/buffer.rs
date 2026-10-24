@@ -11,7 +11,7 @@ pub const CACHELINE_BYTES: usize = 128;
 pub const CACHELINE_BYTES: usize = 64;
 
 /// ABI version for shared memory layouts.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 /// Magic marker for validating mapped regions ("VERTEBRA").
 pub const MAGIC: u64 = u64::from_le_bytes(*b"VERTEBRA");
@@ -33,6 +33,7 @@ pub enum RegionState {
     repr(align(64))
 )]
 #[repr(C)]
+#[derive(Debug, Default)]
 pub struct CacheLine<T>(pub T);
 
 /// Fixed header layout for all shared-memory regions.
@@ -62,6 +63,10 @@ pub struct ShmHeader {
     /// Number of threads blocked waiting to recv (ring empty).
     /// Used for conditional wake optimization - only wake if waiters > 0.
     pub recv_waiters: CacheLine<AtomicU32>,
+    /// Dekker consumer sleep flag (`0` = awake/polling, `1` = sleeping on notifier).
+    pub consumer_sleeping: CacheLine<AtomicU32>,
+    /// Active tier bitmask (`bit 0..3` on `TieredRingSet.small`) and auxiliary ring flags.
+    pub active_flags: CacheLine<AtomicU32>,
 }
 
 /// Channel configuration for the shared-memory ring.
@@ -94,7 +99,7 @@ impl RingLayout {
     pub fn new(slot_size: usize, slots: usize, mode: ChannelMode) -> Self {
         let seq_size = match mode {
             ChannelMode::Spsc => 0,
-            ChannelMode::Mpmc => slots * core::mem::size_of::<AtomicU64>(),
+            ChannelMode::Mpmc => slots * core::mem::size_of::<CacheLine<AtomicU64>>(),
         };
         let ring_size = slot_size * slots;
         let header_size = align_up(
@@ -144,7 +149,7 @@ mod tests {
         let slots = 64;
         let slot_size = 256;
         let layout = RingLayout::new(slot_size, slots, ChannelMode::Mpmc);
-        let expected_seq_size = slots * core::mem::size_of::<AtomicU64>();
+        let expected_seq_size = slots * core::mem::size_of::<CacheLine<AtomicU64>>();
         assert_eq!(layout.seq_size, expected_seq_size);
         assert_eq!(
             layout.total_size,

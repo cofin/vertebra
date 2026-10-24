@@ -750,7 +750,7 @@ mod tests {
             bytes::Bytes::from_static(b"stream=0"),
             headers_raw.clone(),
             payload.clone(),
-            bytes::Bytes::from_static(b"id\042"),
+            bytes::Bytes::from_static(b"id\x0042"),
         );
 
         bridge.submit_inprocess_batch(vec![req]).unwrap();
@@ -765,7 +765,7 @@ mod tests {
         assert_eq!(snap.headers_raw(0), headers_raw.as_ref());
         assert_eq!(snap.body(0).len(), 2 * 1024 * 1024);
         assert_eq!(snap.body_bytes_owned(0), payload);
-        assert_eq!(snap.path_params_raw(0), b"id\042");
+        assert_eq!(snap.path_params_raw(0), b"id\x0042");
 
         let mut wire = vec![0u8; snap.serialized_size()];
         let written = snap.serialize_into(&mut wire);

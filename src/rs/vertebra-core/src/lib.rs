@@ -30,6 +30,7 @@ pub use broker::{
     BrokerError, LeaseGrant, LeaseSlot, LeaseTableStats, ShmLeaseTable, ShmStatementCache,
     StatementCacheStats, StatementPlanEntry, StatementSlot,
 };
+pub use channel::{MpmcSlotView, SlotView};
 pub use layout::CacheLine;
 pub use transport::ring_pair::{RingPair, TieredRingSet};
 pub use transport::{BatchSnapshot, InProcessRequest, TransportError, TransportNode};
