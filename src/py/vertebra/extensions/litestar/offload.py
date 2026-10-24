@@ -307,7 +307,9 @@ def _get_handler_opt(handler: Any) -> dict[str, Any]:
     if _supports_v2_layer_resolution(handler):
         resolve_fn = getattr(handler, "resolve_opts", None)
         if callable(resolve_fn):
-            return dict(resolve_fn())
+            resolved = resolve_fn()
+            if isinstance(resolved, dict):
+                return dict(resolved)
     raw = getattr(handler, "opt", None)
     if _is_empty_sentinel(raw) or not isinstance(raw, dict):
         return {}
@@ -393,7 +395,8 @@ def _extract_compression_config(app: Any) -> CompressionOffloadSpec | None:
     minimum_size = int(getattr(cfg, "minimum_size", 500))
     gzip_level = int(getattr(cfg, "gzip_compress_level", 6))
     brotli_quality = int(getattr(cfg, "brotli_quality", 4))
-    zstd_level = int(getattr(cfg, "zstd_level", 3))
+    raw_zstd = getattr(cfg, "zstd_compress_level", None)
+    zstd_level = int(getattr(cfg, "zstd_level", 3) if raw_zstd is None else raw_zstd)
     raw_exclude = getattr(cfg, "exclude", None)
     exclude_patterns: tuple[str, ...]
     if isinstance(raw_exclude, str):

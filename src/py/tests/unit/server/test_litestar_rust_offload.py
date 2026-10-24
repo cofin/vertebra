@@ -1,5 +1,6 @@
 """Unit tests for zero-GIL Rust offload of Litestar v2/v3 Compression, CORS, StaticFiles, and OpenAPI."""
 
+import inspect
 import warnings
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -44,7 +45,7 @@ def _load_litestar_offload_primitives() -> tuple[Any, Any, Any, Any, Any]:
         minimum_size: int = 500
         gzip_compress_level: int = 6
         brotli_quality: int = 4
-        zstd_level: int = 3
+        zstd_compress_level: int = 3
         exclude: Sequence[str] | str | None = None
         exclude_opt_key: str | None = None
 
@@ -371,15 +372,18 @@ def test_offload_plan_to_server_config_matches_rust_offload_schema(tmp_path: Pat
         directories=[assets_dir],
         html_mode=True,
     )
+    comp_kwargs: dict[str, Any] = {
+        "backend": "zstd",
+        "minimum_size": 256,
+        "exclude": ["/healthz"],
+        "exclude_opt_key": "exclude_from_compression",
+    }
+    if "zstd_compress_level" in inspect.signature(CompressionConfig).parameters:
+        comp_kwargs["zstd_compress_level"] = 5
+
     app = Litestar(
         route_handlers=[get_items, get_raw, static_router],
-        compression_config=CompressionConfig(
-            backend="zstd",
-            minimum_size=256,
-            zstd_level=3,
-            exclude=["/healthz"],
-            exclude_opt_key="exclude_from_compression",
-        ),
+        compression_config=CompressionConfig(**comp_kwargs),
         cors_config=CORSConfig(
             allow_origins=["https://app.example.com"],
             allow_methods=["GET", "POST"],
@@ -397,7 +401,8 @@ def test_offload_plan_to_server_config_matches_rust_offload_schema(tmp_path: Pat
 
     assert cfg["compression"]["backend"] == "zstd"
     assert cfg["compression"]["minimum_size"] == 256
-    assert cfg["compression"]["zstd_level"] == 3
+    expected_zstd = 5 if "zstd_compress_level" in comp_kwargs else 3
+    assert cfg["compression"]["zstd_level"] == expected_zstd
     assert "/healthz" in cfg["compression"]["exclude_patterns"]
     assert "/raw" in cfg["compression"]["excluded_paths"]
 
@@ -464,3 +469,60 @@ def test_v3_flattened_handler_skips_deprecated_resolve_methods_and_filters_compr
     br_plan = offload_litestar_middlewares(br_app)
     assert br_plan.compression is not None
     assert br_plan.compression.backend == "brotli"
+
+
+def test_v2_inplace_resolve_opts_and_v3_zstd_compress_level_extraction() -> None:
+    """Verify _get_handler_opt handles Litestar v2 resolve_opts() -> None and zstd_compress_level extraction."""
+
+    class _V2InPlaceOptsHandler:
+        def __init__(self) -> None:
+            self.ownership_layers = (SimpleNamespace(opt={"exclude_from_compression": True}),)
+            self.opt: dict[str, Any] = {}
+            self.guards = ()
+            self.middleware = ()
+
+        def resolve_opts(self) -> None:
+            merged: dict[str, Any] = {}
+            for layer in self.ownership_layers:
+                merged.update(getattr(layer, "opt", None) or {})
+            self.opt = merged
+
+    v2_handler = _V2InPlaceOptsHandler()
+    assert _get_handler_opt(v2_handler) == {"exclude_from_compression": True}
+
+    v2_app = SimpleNamespace(
+        compression_config=SimpleNamespace(
+            backend="zstd",
+            minimum_size=128,
+            zstd_compress_level=7,
+            exclude=None,
+            exclude_opt_key="exclude_from_compression",
+        ),
+        cors_config=None,
+        before_send=None,
+        state={},
+        routes=[SimpleNamespace(path="/v2-opt-skip", route_handler_map={"GET": v2_handler}, path_parameters=())],
+        asgi_router=None,
+    )
+    v2_plan = offload_litestar_middlewares(v2_app)
+    assert v2_plan.compression is not None
+    assert v2_plan.compression.zstd_level == 7
+    assert v2_plan.compression.excluded_paths == ("/v2-opt-skip",)
+
+    legacy_zstd_app = SimpleNamespace(
+        compression_config=SimpleNamespace(
+            backend="zstd",
+            minimum_size=128,
+            zstd_level=4,
+            exclude=None,
+            exclude_opt_key=None,
+        ),
+        cors_config=None,
+        before_send=None,
+        state={},
+        routes=[],
+        asgi_router=None,
+    )
+    legacy_plan = offload_litestar_middlewares(legacy_zstd_app)
+    assert legacy_plan.compression is not None
+    assert legacy_plan.compression.zstd_level == 4

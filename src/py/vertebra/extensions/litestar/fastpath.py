@@ -489,6 +489,10 @@ def _has_lifecycle_hook(handler: Any, app: Any, attr_name: str, resolve_name: st
         if callable(resolve_fn):
             val = resolve_fn()
             return not _is_empty_sentinel(val) and bool(val)
+        for layer in getattr(handler, "ownership_layers", ()) or ():
+            layer_val = getattr(layer, attr_name, None)
+            if not _is_empty_sentinel(layer_val) and bool(layer_val):
+                return True
     raw = getattr(handler, attr_name, None)
     if not _is_empty_sentinel(raw) and bool(raw):
         return True
@@ -530,6 +534,9 @@ def _compile_routes_from_table(
     app: Any,
 ) -> dict[int, CompiledLitestarRoute]:
     rust_offload = _is_rust_offload_active()
+    app_state = getattr(app, "state", None) if app is not None else None
+    vtb_cfg = app_state.get("vertebra_config") if (app_state is not None and hasattr(app_state, "get")) else None
+    cors_offloaded = rust_offload and (vtb_cfg is None or bool(getattr(vtb_cfg, "offload_cors", True)))
     has_before_send = bool(getattr(app, "before_send", None)) if app is not None else False
     app_has_middleware = bool(getattr(app, "middleware", None)) if app is not None else False
     app_has_csrf = not _is_empty_sentinel(getattr(app, "csrf_config", None)) if app is not None else False
@@ -539,12 +546,10 @@ def _compile_routes_from_table(
         else False
     )
     app_has_py_compression = (
-        (not rust_offload) and not _is_empty_sentinel(getattr(app, "compression_config", None))
-        if app is not None
-        else False
+        not _is_empty_sentinel(getattr(app, "compression_config", None)) if app is not None else False
     )
     app_has_py_cors = (
-        (not rust_offload) and not _is_empty_sentinel(getattr(app, "cors_config", None)) if app is not None else False
+        (not cors_offloaded) and not _is_empty_sentinel(getattr(app, "cors_config", None)) if app is not None else False
     )
     app_requires_pipeline = (
         app_has_middleware or app_has_csrf or app_has_allowed_hosts or app_has_py_compression or app_has_py_cors
@@ -634,25 +639,49 @@ def _handler_has_dependencies_or_dto(handler: Any) -> bool:
 
 
 def _handler_has_custom_response_metadata(handler: Any) -> bool:
+    v2_layers = _supports_v2_layer_resolution(handler)
     for attr_name, resolve_name in (
         ("response_headers", "resolve_response_headers"),
         ("response_cookies", "resolve_response_cookies"),
         ("type_encoders", "resolve_type_encoders"),
+        ("type_decoders", "resolve_type_decoders"),
     ):
-        if _supports_v2_layer_resolution(handler):
+        if v2_layers:
             resolve_fn = getattr(handler, resolve_name, None)
-            if callable(resolve_fn) and bool(resolve_fn()):
-                return True
+            if callable(resolve_fn):
+                resolved_val = resolve_fn()
+                if not _is_empty_sentinel(resolved_val) and bool(resolved_val):
+                    return True
+                continue
+            for layer in getattr(handler, "ownership_layers", ()) or ():
+                layer_val = getattr(layer, attr_name, None)
+                if not _is_empty_sentinel(layer_val) and bool(layer_val):
+                    return True
         raw_val = getattr(handler, attr_name, None)
         if not _is_empty_sentinel(raw_val) and bool(raw_val):
             return True
 
-    for direct_attr in ("etag", "cache_control", "background", "type_decoders"):
+    for direct_attr in ("etag", "cache_control", "background"):
         val = getattr(handler, direct_attr, None)
         if not _is_empty_sentinel(val) and bool(val):
             return True
+        if v2_layers:
+            for layer in getattr(handler, "ownership_layers", ()) or ():
+                layer_val = getattr(layer, direct_attr, None)
+                if not _is_empty_sentinel(layer_val) and bool(layer_val):
+                    return True
 
     resp_cls = getattr(handler, "response_class", None)
+    if v2_layers and _is_empty_sentinel(resp_cls):
+        resolve_resp_cls = getattr(handler, "resolve_response_class", None)
+        if callable(resolve_resp_cls):
+            resp_cls = resolve_resp_cls()
+        else:
+            for layer in reversed(tuple(getattr(handler, "ownership_layers", ()) or ())):
+                candidate_cls = getattr(layer, "response_class", None)
+                if not _is_empty_sentinel(candidate_cls):
+                    resp_cls = candidate_cls
+                    break
     return bool(not _is_empty_sentinel(resp_cls) and getattr(resp_cls, "__name__", "Response") != "Response")
 
 
@@ -786,7 +815,7 @@ async def _resolve_request_body(
         preseeded: Any = getattr(conn_state, "body", Empty) if conn_state is not None else Empty
         if isinstance(preseeded, bytes):
             return preseeded
-        if isinstance(preseeded, (bytearray, memoryview)):
+        if isinstance(preseeded, bytearray | memoryview):
             return bytes(preseeded)
     if method in _BODYLESS_HTTP_METHODS or not callable(receive):
         return b""
