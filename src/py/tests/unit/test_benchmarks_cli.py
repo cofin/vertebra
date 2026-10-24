@@ -11,12 +11,12 @@ from tools.benchmarks.targets import _ft_run
 
 
 def test_ft_run_missing_binary_raises_file_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify _ft_run raises FileNotFoundError when the 3.14t binary does not exist."""
+    """Verify _ft_run raises FileNotFoundError when the free-threaded binary does not exist."""
     monkeypatch.setattr(
         "tools.benchmarks.targets._ft_server_binary",
-        lambda: "/tmp/nonexistent-path-to-vertebra-server-3.14t",
+        lambda: "/tmp/nonexistent-path-to-vertebra-server-ft",
     )
-    with pytest.raises(FileNotFoundError, match="3.14t server binary not found"):
+    with pytest.raises(FileNotFoundError, match="Free-threaded server binary not found"):
         _ft_run("test-arg")
 
 
