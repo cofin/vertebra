@@ -5,13 +5,13 @@ title: Runtime Throughput, Multi-Core Scaling, and Python 3.15 Optimizations
 state: active
 plan_revision: 1
 plan_commit: null
-state_revision: 6
-current_task: "2.1"
-last_operation: 20261024T163255Z-flow-executor-claim-2-1-00
-operation_targets: ["2.1"]
-last_verified_checkpoint: "phase:phase-1@c68065a"
+state_revision: 20
+current_task: null
+last_operation: 20261024T192900Z-flow-executor-checkpoint-phase-5-00
+operation_targets: ["5.1", "5.2"]
+last_verified_checkpoint: "phase:phase-5@5f4f421"
 created_at: 2026-10-24T16:02:00Z
-updated_at: 2026-10-24T16:32:55Z
+updated_at: 2026-10-24T19:29:00Z
 description: Eliminate embedded bridge deadlocks, single-ingress multi-worker contention, SHM syscall and lock overhead, ASGI/RSGI FFI dispatch allocations, and Python worker loop bottlenecks while adding Python 3.15 and 3.15t specializations.
 ---
 
@@ -44,39 +44,44 @@ Single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w` / `4w` / `8w
 
 ### Phase 2: Lock-Free In-Process Bridge, Right-Sized SHM Rings, and Dekker Wakeups
 
-- [~] Task 2.1: Eliminate BatchBridge deadlock and add zero-copy in-process batch snapshot and direct response callback
-- [ ] Task 2.2: Right-size SHM tiered rings, cache SPSC heads, pad MPMC sequence slots, and add Dekker zero-syscall wakeups
+- [x] Task 2.1: Eliminate BatchBridge deadlock and add zero-copy in-process batch snapshot and direct response callback (`b74ded5`)
+- [x] Task 2.2: Right-size SHM tiered rings, cache SPSC heads, pad MPMC sequence slots, and add Dekker zero-syscall wakeups (`1ac8b83`)
 
 ### Phase 3: Zero-Lock Rust HTTP Ingress, SO_REUSEPORT Embedded Runtime, and Middleware Offloads
 
-- [ ] Task 3.1: Remove ingress hot-path locks, redundant h2c peek, and MessagePack header transcoding, and wire Rust middleware offloads
-- [ ] Task 3.2: Add explicit Tokio runtime builder, multi-worker SO_REUSEPORT embedded topology, free-threaded worker pool, and lock-free sharded dispatchers
+- [x] Task 3.1: Remove ingress hot-path locks, redundant h2c peek, and MessagePack header transcoding, and wire Rust middleware offloads (`dbc19f5`)
+- [x] Task 3.2: Add explicit Tokio runtime builder, multi-worker SO_REUSEPORT embedded topology, free-threaded worker pool, and lock-free sharded dispatchers (`3ce98ae`)
 
 ### Phase 4: PyO3 0.30.1 FFI, Python 3.15/3.15t Specializations, and Rust ASGI/RSGI Drivers
 
-- [ ] Task 4.1: Apply Python 3.15 and 3.15t PyO3 optimizations, PEP 782 zero-init PyBytes, anchored Request.body_view, and Dekker batch response notifications
-- [ ] Task 4.2: Implement Rust-native AsgiProtocol and drive_asgi_batch plus lazy RsgiScope, direct-submitting RsgiHttpProtocol, and drive_rsgi_batch
+- [x] Task 4.1: Apply Python 3.15 and 3.15t PyO3 optimizations, PEP 782 zero-init PyBytes, anchored Request.body_view, and Dekker batch response notifications (`7742f8b`)
+- [x] Task 4.2: Implement Rust-native AsgiProtocol and drive_asgi_batch plus lazy RsgiScope, direct-submitting RsgiHttpProtocol, and drive_rsgi_batch (`00d0e7a`)
 
 ### Phase 5: Python Worker Loop, Inline Vectorized Sync Dispatch, uvloop, and Litestar Fastpaths
 
-- [ ] Task 5.1: Overhaul Python worker loop with uvloop, inline vectorized sync dispatch, same-thread add_reader polling, Rust ASGI/RSGI batch drivers, O(1) mount routing, and PEP 810 lazy modules
-- [ ] Task 5.2: Complete LitestarFastPathBypass.dispatch and Rust middleware offload configuration wiring
+- [x] Task 5.1: Overhaul Python worker loop with uvloop, inline vectorized sync dispatch, same-thread add_reader polling, Rust ASGI/RSGI batch drivers, O(1) mount routing, and PEP 810 lazy modules (`e4ae09d`)
+- [x] Task 5.2: Complete LitestarFastPathBypass.dispatch and Rust middleware offload configuration wiring (`5f4f421`)
 
 ## Continuity Snapshot
 
 - **Active Flow / Lifecycle**: `runtime-throughput-and-315` (`active`)
-- **Current Task & Claimant**: `2.1` (`flow-executor`)
-- **Last Verified Checkpoint**: `phase:phase-1@c68065a`
+- **Current Task & Claimant**: `none` (`none`)
+- **Last Verified Checkpoint**: `phase:phase-5@5f4f421`
 - **Decisions**:
   - `ABI_VERSION = 3` in `vertebra-core` adds `consumer_sleeping` and `active_flags` cache lines to `ShmHeader` for Dekker `SeqCst` zero-syscall notifications.
   - Per-worker `SO_REUSEPORT` embedded multi-process supervision powers multi-core throughput while preserving `--topology shm` with lock-free per-batch worker routing.
   - Default sync native routes run inline in vectorized batches; `sync_to_thread=True` opts into thread-pool offload.
   - `drive_asgi_batch` and `drive_rsgi_batch` step unary coroutines via `PyIter_Send` in Rust before falling back to `uvloop` tasks on real async suspension.
-- **Recent Discoveries**: `none`
+- **Recent Discoveries**:
+  - `RouteTable::insert_mount_prefix_indexed` encodes `MOUNT_HANDLER_BASE | mount_index` for `O(1)` mount dispatch across all HTTP verbs including `OPTIONS` and `HEAD`.
+  - `PyBuffer_FillInfo(view, slf.as_ptr(), ...)` anchors zero-copy `Request.body_view` directly to `Request` -> `Arc<BatchSnapshot>` while exposing PEP 688 `__buffer__` (`7742f8b`).
+  - `_SteppedCoroutine` drives suspending ASGI and RSGI coroutines directly on both `asyncio` and `uvloop` without an intermediate Python wrapper frame (`00d0e7a`).
+  - `Worker._run_inline_event_loop` registers `loop.add_reader(notify_fd, ...)` with Dekker `prepare_request_sleep` / `cancel_request_sleep` so `scheduler.size == 1` SHM workers poll and execute on one `uvloop` thread (`e4ae09d`).
+  - `LitestarFastPathBypass.dispatch` executes pure-signature and DI/DTO Litestar handlers directly from `AsgiRunner` without ASGI scope construction, while `LitestarOffloadPlan.to_server_config_json()` wires CORS, compression, static assets, and OpenAPI cache directly into `vertebra-http` (`5f4f421`).
 - **Blockers & Unblock Conditions**: `none`
-- **Next Exact Step**: `Add a reproduction unit test in src/rs/vertebra-core/src/bridge.rs that pushes 64 batches into BatchBridge before draining responses from a single consumer thread, proving the bounded-channel ABBA deadlock or stall cannot occur, plus a test verifying zero-copy InProcessRequest batches exceeding 1 MiB succeed without SlabFull errors and invoke a registered direct response completion handler.`
+- **Next Exact Step**: `Run full repository verification gates, live Single-Core/Multi-Core/Python-3.15 benchmarks vs. Granian 2.8.4, and Flow completion reviews.`
 - **Plan Identity**: `plan_revision: 1`, `plan_commit: null`
-- **State Identity**: `revision: 6`, `last_operation: 20261024T163255Z-flow-executor-claim-2-1-00`, `operation_targets: ["2.1"]`
+- **State Identity**: `revision: 20`, `last_operation: 20261024T192900Z-flow-executor-checkpoint-phase-5-00`, `operation_targets: ["5.1", "5.2"]`
 - **Relevant Rule & Knowledge Paths**:
   - `AGENTS.md`
   - `.agents/bundles/knowledge/workflow.md`
@@ -88,3 +93,7 @@ Single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w` / `4w` / `8w
 ## Verification Evidence
 
 - {"actor": "flow-executor", "affected_task_ids": ["1.1", "1.2"], "last_functional_commit": "c68065a", "occurred_at": "2026-10-24T16:31:52Z", "operation": "checkpoint", "operation_id": "20261024T163152Z-flow-executor-checkpoint-spec-00", "phase_id": "phase-1", "scope": "phase", "verification_evidence": [{"command": "uv run pytest src/py/tests/unit/test_review_setup.py src/py/tests/unit/cli/test_cli_commands.py src/py/tests/unit/build/test_packaging_and_pgo.py src/py/tests/unit/test_bench_infrastructure.py -q", "result": "50 passed in 1.65s"}, {"command": "make review-check", "result": "exit 0 (0 issues)"}]}
+- {"actor": "flow-executor", "affected_task_ids": ["2.1", "2.2"], "last_functional_commit": "1ac8b83", "occurred_at": "2026-10-24T17:10:30Z", "operation": "checkpoint", "operation_id": "20261024T171030Z-flow-executor-checkpoint-phase-2-00", "phase_id": "phase-2", "scope": "phase", "verification_evidence": [{"command": "cargo test --manifest-path src/rs/Cargo.toml --workspace --features tls,compression", "result": "all workspace unit, integration, and doc tests passed"}, {"command": "cargo clippy --manifest-path src/rs/Cargo.toml --workspace --all-targets --features tls,compression -- -D warnings", "result": "exit 0 (0 warnings)"}]}
+- {"actor": "flow-executor", "affected_task_ids": ["3.1", "3.2"], "last_functional_commit": "3ce98ae", "occurred_at": "2026-10-24T17:55:58Z", "operation": "checkpoint", "operation_id": "20261024T175558Z-flow-executor-checkpoint-phase-3-00", "phase_id": "phase-3", "scope": "phase", "verification_evidence": [{"command": "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,compression", "result": "46 unit + 89 integration + 3 discovery bridge tests passed"}, {"command": "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-http --all-targets --features tls,compression -- -D warnings", "result": "exit 0 (0 warnings)"}]}
+- {"actor": "flow-executor", "affected_task_ids": ["4.1", "4.2"], "last_functional_commit": "00d0e7a", "occurred_at": "2026-10-24T18:48:00Z", "operation": "checkpoint", "operation_id": "20261024T184800Z-flow-executor-checkpoint-phase-4-00", "phase_id": "phase-4", "scope": "phase", "verification_evidence": [{"command": "uv run pytest src/py/tests/unit/server/test_asgi.py src/py/tests/unit/server/test_asgi_scope_and_extensions.py src/py/tests/unit/server/test_rsgi_protocol.py -q", "result": "62 passed in 0.77s"}, {"command": "uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage", "result": "Success: no issues found in 3 modules"}]}
+- {"actor": "flow-executor", "affected_task_ids": ["5.1", "5.2"], "last_functional_commit": "5f4f421", "occurred_at": "2026-10-24T19:29:00Z", "operation": "checkpoint", "operation_id": "20261024T192900Z-flow-executor-checkpoint-phase-5-00", "phase_id": "phase-5", "scope": "phase", "verification_evidence": [{"command": "uv run pytest src/py/tests/unit/server/test_litestar_direct_fastpath.py src/py/tests/unit/server/test_litestar_rust_offload.py src/py/tests/unit/extensions/test_litestar_plugin.py src/py/tests/unit/cli/test_cli_commands.py -q", "result": "27 passed in 0.45s"}, {"command": "uv run mypy src/py/vertebra tools/scripts", "result": "Success: no issues found in 210 source files"}]}
