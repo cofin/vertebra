@@ -26,7 +26,7 @@ The Vertebra agentic review system provides automated, manifest-driven static an
 ## Review Architecture
 
 1. **Manifest and Routing**:
-   - `areas.toml` defines area manifests, ownership patterns, shard paths, and validation budgets.
+   - `areas.toml` defines area manifests, ownership patterns, shard paths, validation budgets, and static subagent tool lists (omitting runtime-only dynamic MCP multiplexer tools `call_mcp_tool`, `list_resources`, and `read_resource` from `.agents/agents/*.md` frontmatter so custom subagents launch cleanly against the static tool registry).
    - `make review-route BASE=origin/main` routes changed repository files to their designated area reviewers.
 2. **Review Execution and Ledger Validation**:
    - Area reviewers audit code against authoritative checklists (`RT-01..12`, `HTTP-01..12`, `FFI-01..10`, `PY-01..12`, etc.).

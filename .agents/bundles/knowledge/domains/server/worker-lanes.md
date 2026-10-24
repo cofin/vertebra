@@ -29,4 +29,4 @@ sources:
 
 ## 3. CLI Integration (`cli/workers.py`)
 
-- **[`vtb workers run APP`](../../../../../src/py/vertebra/cli/workers.py)** (`WorkerRunner.execute_cli`): Sets `LITESTAR_APP` and `VERTEBRA_APP`, imports `APP` via `import_app`, attaches `WorkerRunner` to `app.state["vertebra_worker_runner"]` when `app.state` is a `dict`, enters [`LitestarPlugin.enter_server_lifespan`](../../../../../src/py/vertebra/extensions/litestar/plugin.py), and drains all lanes via `runner.stop()` on exit.
+- **[`vtb workers run APP`](../../../../../src/py/vertebra/cli/workers.py)** (`WorkerRunner.execute_cli`): Sets `LITESTAR_APP` and `VERTEBRA_APP`, imports `APP` via `import_app`, attaches `WorkerRunner` to `app.state["vertebra_worker_runner"]` when `app.state` is a `dict`, enters [`enter_litestar_server_lifespan`](../../../../../src/py/vertebra/extensions/litestar/plugin.py), and drains all lanes via `runner.stop()` on exit.

@@ -17,14 +17,14 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 ## 1. Product Definition (`product/`)
 
-- **[Product Overview](product/product.md)** — Vision, core capabilities, runtime topologies (`Embedded` + `Shm`, Python `3.12`–`3.14t`), multicloud object storage, database drivers, telemetry, and Litestar/SQLSpec/Alchemy/APEX/gRPC integrations.
+- **[Product Overview](product/product.md)** — Vision, core capabilities, runtime topologies (`Auto`, `Embedded`, and `Shm`, Python `3.12`–`3.15` and free-threaded `3.14t`/`3.15t`), multicloud object storage, database drivers, telemetry, and Litestar/SQLSpec/Alchemy/APEX/gRPC integrations.
 - **[Product & Engineering Guidelines](product/product-guidelines.md)** — Clean-break domain naming rules, zero-copy hot-path invariants, `msgspec.Struct(..., frozen=True, gc=False)` value objects, Python module layout, and Git/PR discipline.
-- **[Technology Stack](product/tech-stack.md)** — Complete Rust workspace (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`), Python (`vertebra`), and TypeScript (`@vertebra/client`) dependency and toolchain matrix.
+- **[Technology Stack](product/tech-stack.md)** — Complete Rust workspace (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`), Python (`vertebra`), and TypeScript (`@vertebra/client`) dependency and toolchain matrix.
 
 ## 2. Engineering Knowledge Base (`knowledge/`)
 
 - **[Knowledge Base Index](knowledge/index.md)** — Master progressive-disclosure index for all nested knowledge chapters.
-- **[Project Workflow & Commands](knowledge/workflow.md)** — Canonical `Makefile` (`make setup-env`, `make install`, `make dev`, `make test`, `make lint-all`, `make review-check`, `make check`, `make build`, `make bench`, `make bench-ft`, `make bench-baseline`, `make bench-check`, `make upgrade`), polyglot rebuild cycle, and Flow OKF v0.2 execution rules.
+- **[Project Workflow & Commands](knowledge/workflow.md)** — Canonical `Makefile` (`make setup-env`, `make install`, `make dev`, `make test`, `make lint-all`, `make review-check`, `make check`, `make build`, `make build-pgo`, `make bench`, `make bench-ft`, `make bench-baseline`, `make bench-check`, `make upgrade`), polyglot rebuild cycle, and Flow OKF v0.2 execution rules.
 - **[Architecture (`knowledge/architecture/`)](knowledge/architecture/index.md)**:
   - `runtime/`: [Runtime Topologies & Python Embedding](knowledge/architecture/runtime/topologies-and-embedding.md), [SHM Worker Spawn, Shutdown & Recovery Hooks](knowledge/architecture/runtime/shm-supervision-and-recovery.md), [Server Platform & Process Lifecycle](knowledge/architecture/runtime/platform-and-lifecycle.md)
   - `ipc/`: [Lock-Free Ring Buffers & Shared Memory](knowledge/architecture/ipc/ring-buffers-and-shm.md), [Tiered Rings & In-Process Batch Bridge](knowledge/architecture/ipc/tiered-rings-and-batch-bridge.md)
@@ -44,7 +44,7 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
   - `rust/`: [PyO3 0.30.1 FFI & GIL Discipline](knowledge/patterns/rust/ffi-and-gil-discipline.md), [Lock-Free Shared Memory & Sharded Concurrency](knowledge/patterns/rust/lock-free-shm-and-sharding.md)
   - `typescript/`: [Client SDK Root Exports, Subpaths & Build Entries](knowledge/patterns/typescript/client-and-adapter-subpaths.md)
 - **[Testing (`knowledge/testing/`)](knowledge/testing/index.md)**:
-  - [Polyglot Test Matrix & Environment Setup](knowledge/testing/polyglot-test-matrix.md), [Benchmark Suite & Free-Threaded Python 3.14t](knowledge/testing/benchmarks-and-free-threaded.md), [Agentic Review & Benchmark Gates](knowledge/testing/agentic-review.md)
+  - [Polyglot Test Matrix & Environment Setup](knowledge/testing/polyglot-test-matrix.md), [Benchmark Suite & Free-Threaded Python 3.14t/3.15t](knowledge/testing/benchmarks-and-free-threaded.md), [Agentic Review & Benchmark Gates](knowledge/testing/agentic-review.md)
 - **[Gotchas (`knowledge/gotchas/`)](knowledge/gotchas/index.md)**:
   - [PyO3 FFI, Embedded Globals & Python Runtime Gotchas](knowledge/gotchas/pyo3-and-python-runtime.md), [Shared-Memory Rings & Cross-Platform IPC Gotchas](knowledge/gotchas/shm-and-cross-platform-ipc.md)
 

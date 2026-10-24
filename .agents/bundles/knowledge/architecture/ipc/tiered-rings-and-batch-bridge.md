@@ -17,27 +17,26 @@ sources:
 
 # Tiered Rings & In-Process Batch Bridge
 
-Both topologies move requests as `BatchSnapshot`s (a `Vec<TransportNode>` plus one byte slab). Embedded mode hands snapshots across threads through [`BatchBridge`](../../../../../src/rs/vertebra-core/src/bridge.rs). Shm mode serializes them into a per-worker [`RingPair`](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs). [`Transport`](../../../../../src/rs/vertebra-core/src/transport/mod.rs) wraps either case as `Backend::InProcess(crossbeam Receiver)` or `Backend::SharedMemory(Arc<RingPair>)`.
+Both topologies move requests as `BatchSnapshot`s. Embedded mode hands zero-copy `InProcessRequest` snapshots across threads through [`BatchBridge`](../../../../../src/rs/vertebra-core/src/bridge.rs) and completes responses directly through a registered `ResponseSink`. Shm mode serializes batches directly into a per-worker [`RingPair`](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs) and borrows the slot zero-copy on the Python side (`MpmcSlotView` / `SlotView`). [`Transport`](../../../../../src/rs/vertebra-core/src/transport/mod.rs) wraps either backend cleanly.
 
 ## Request Batches (`transport/mod.rs`)
 
-- **`TransportNode`** (`repr(C)`, 56 bytes): `method_tag`, `http_version_tag`, `handler_id: u64` (FNV-1a route id), `correlation_id: u64`, and `u32` offset/length pairs for path, query, headers, and body inside the slab.
-- **`DataSlab`** and **`TransportArena`**: fixed-capacity buffers filled with `fetch_add` reservations that roll back on overflow. `take_and_replace` swaps the backing `Vec` in O(1).
-- **`BatchSnapshot`**: owned `slab: Vec<u8>`, `nodes: Vec<TransportNode>`, an optional `transport::BufferPool` handle, `flags: u32`, and a lazily decompressed slab (`compression` feature). Dropping a pooled snapshot returns its `(slab, nodes)` pair to the pool.
-- **SHM framing**: `BatchSnapshot::serialize_into` / `deserialize_from` and `ShmBatchWriter` write a 16-byte batch header (`flags`, `node_count`, `slab_len`, padding), the node array, then the slab, into one request-ring slot.
+- **`TransportNode`** (`repr(C)`, 56 bytes): `method_tag`, `http_version_tag`, `handler_id: u64` (FNV-1a route id or `MOUNT_HANDLER_BASE | mount_idx`), `correlation_id: u64`, and `u32` offset/length pairs for path, query, headers, and body.
+- **`InProcessRequest`**: zero-copy in-process request record holding ref-counted `Bytes` slices (`path`, `query`, `headers_raw`, `body`, `method_tag`, `http_version_tag`, `handler_id`, `correlation_id`) with zero `DataSlab` copying and zero `1 MiB` batch size cap.
+- **`BatchSnapshot`**: supports multiple zero-copy backings—in-process `Vec<InProcessRequest>`, borrowed SHM `MpmcSlotView` / `SlotView` (releasing the ring slot on `Drop` without copying the slot onto the Python heap), or pooled `(slab, nodes)` pairs (`DataSlab` + `TransportArena` + `BufferPool`, with optional LZ4/Zstd slab decompression under `compression`).
+- **SHM framing**: `BatchSnapshot::serialize_into` and `ShmDispatcher` write a 16-byte batch header (`flags`, `node_count`, `slab_len`, padding), the `TransportNode` array, and the contiguous byte slab directly into one request-ring slot via `try_send_with`.
 - Header helpers: `encode_headers_compact`, `iter_raw_headers`, `decode_headers_raw`.
 
 ## In-Process `BatchBridge` (`bridge.rs`)
 
-- `static BRIDGE: OnceLock<BatchBridge>` is set once by `BatchBridge::init(arena_capacity, slab_capacity, channel_depth, max_workers)`; `init_with_codec` also picks a `CompressionCodec`.
-- Writers take `batch_writer()`, which holds `write_lock` for the duration of `push_request` calls and `seal()`. Sealing swaps the active slab and arena with a pooled pair, optionally compresses the slab, and sends the `Arc<BatchSnapshot>` on a bounded `crossbeam_channel` of depth `channel_depth`. The `transport::BufferPool` holds `channel_depth + max(max_workers, 1)` buffer pairs and allocates fresh ones when empty.
-- **Compression**: `try_compress_slab` compresses the whole sealed slab with the configured codec and keeps it only when the output is strictly smaller. The codec is recorded as `flags::COMPRESSED` plus codec bits 6-7 ([`codec.rs`](../../../../../src/rs/vertebra-core/src/protocol/codec.rs)).
-- `poll_batch(timeout)` returns `Option<Arc<BatchSnapshot>>`; PyO3 wraps it in `RequestBatch`.
-- **Responses**: Python calls `submit_responses(Vec<BridgeResponse>)` (`blocking_send` on a `tokio::sync::mpsc` channel); the server task awaits `recv_responses()`. `BridgeResponse` carries `request_id`, `status`, `headers`, and `body`.
+- `static BRIDGE: OnceLock<BatchBridge>` is initialized once by `BatchBridge::init` **only** when running in `Topology::Embedded`.
+- **Lock-free request queue**: `RequestBatcher` shards call `BatchBridge::submit_inprocess_batch(Vec<InProcessRequest>)`, pushing `Arc<BatchSnapshot>` onto an unbounded `crossbeam_channel` (bounded at ingress by `BackpressureController` `max_in_flight`, eliminating bounded-channel ABBA deadlocks between Tokio workers and Python). Legacy `BatchWriter::push_request` callers auto-seal on `SlabFull`/`ArenaFull`.
+- **Single-consumer Dekker request `Notifier`**: `BatchBridge` embeds a `Notifier` (`request_notify_fd`, `consumer_sleeping: AtomicU32`, `consumer_count: AtomicUsize`). When `consumer_count <= 1`, single-loop embedded `uvloop` workers register `loop.add_reader(request_notify_fd, ...)` and bracket idle waits with `prepare_request_sleep` / `cancel_request_sleep` so producers signal the FD only when the loop is sleeping. When `consumer_count > 1` (free-threaded multi-thread pools), workers poll `get_batch` directly.
+- **Direct response completion (`ResponseSink`)**: `BridgeResponse` carries `(request_id: u64, status: u16, headers_raw: Bytes, body: Bytes)` with zero `Vec<(Vec<u8>, Vec<u8>)>` header transcoding. When `vertebra-http` registers a `ResponseSink` (`OnceLock<ResponseSink>`), `submit_response_raw` and `submit_batch_raw` complete the sharded `InFlightRequests` `oneshot::Sender` directly on the submitting thread without an intermediate `mpsc` channel or `spawn_response_reader` task (falling back to an unbounded `mpsc` response channel in standalone bridge tests).
 
 ## Per-Worker `RingPair` (`transport/ring_pair.rs`)
 
-`RingPair` holds `request_ring: Arc<MpmcRing>`, `response_rings: TieredRingSet`, `request_notifier`, `response_notifier`, and its `RingPairConfig`. The default config uses 1024 request slots of 64 KiB and `TieredRingConfig::default()`.
+`RingPair` holds `request_ring: Arc<MpmcRing>`, `response_rings: TieredRingSet`, `request_notifier`, `response_notifier`, and its `RingPairConfig`. The default config uses 1024 request slots of 64 KiB and `TieredRingConfig::default()`, using `ShmHeader` (`ABI_VERSION = 3`) `consumer_sleeping` Dekker handshakes (`prepare_request_sleep`, `cancel_request_sleep`, `notify_request_if_sleeping`, `prepare_response_sleep`, `cancel_response_sleep`, `notify_response_if_sleeping`) to coalesce `eventfd`/`pipe` wakeups to ~0 syscalls under sustained load.
 
 ### Response Tiers
 
@@ -45,16 +44,16 @@ Both topologies move requests as `BatchSnapshot`s (a `Vec<TransportNode>` plus o
 
 | Tier | Slot size | Slots |
 |---|---|---|
-| `small` | 4 KiB | 64 |
-| `medium` | 64 KiB | 16 |
-| `large` | 512 KiB | 4 |
-| `xlarge` | 2 MiB | 2 |
+| `small` | 4 KiB | 512 |
+| `medium` | 32 KiB | 128 |
+| `large` | 256 KiB | 32 |
+| `xlarge` | 2 MiB | 8 |
 
-`select_ring(total_size)` returns the smallest tier with `total_size <= payload_capacity()`, or `None` (`ResponseTooLarge`). A full tier returns `ChannelError::Full`; `send_response_blocking` waits on the chosen tier instead.
+`select_ring(total_size)` returns the smallest tier with `total_size <= payload_capacity()`, or `None` (`ResponseTooLarge`). Before publishing `write_head` on a non-small tier, the sender sets that tier's bit (`bit 1..3`) in the small ring's `ShmHeader.active_flags` (`mark_tier_active`, clearing if empty on send error). Consumers drain `small` first via zero-copy `drain_responses_with` and only probe `medium`/`large`/`xlarge` when `active_tier_mask()` or `has_non_small_data()` (`ring.has_data_acquire()`) indicates pending frames.
 
 ### `VRES` Response Frames
 
-`send_response` writes a 20-byte header followed by headers and body: `magic: u32` (`RESPONSE_MAGIC = 0x5652_4553`, "VRES"), `correlation_id: u64`, `status: u16`, `headers_len: u16`, `body_len: u32`. `try_recv_response` scans `small` → `xlarge` with `try_recv_view` and parses the first frame into `ResponseData`.
+`send_response` writes a 20-byte header followed by compact binary headers and body: `magic: u32` (`RESPONSE_MAGIC = 0x5652_4553`, "VRES"), `correlation_id: u64`, `status: u16`, `headers_len: u16`, `body_len: u32`. `drain_responses_with` parses `HeaderMap` and `Bytes` directly from the borrowed SHM slot slice without intermediate `Vec<u8>` copies.
 
 ## `ResponseSlot` Streaming Frames (`ipc.rs`)
 

@@ -1,14 +1,16 @@
 ---
 type: Pattern
 title: "Lock-Free Shared Memory & Sharded Concurrency"
-description: "Rust conventions for cache-line isolation, SeqCst sleeper/waker handshakes, reserve-then-rollback atomics, SHM length validation, and sharded batching and correlation."
+description: "Rust conventions for cache-line isolation, Dekker SeqCst sleeper/waker handshakes, cached SPSC heads, padded MPMC slots, and lock-free sharded dispatch."
 status: stable
 tags: [patterns, rust, shared-memory, concurrency, sharding]
 sources:
   - resource: src/rs/vertebra-core/src/buffer.rs
   - resource: src/rs/vertebra-core/src/channel.rs
   - resource: src/rs/vertebra-core/src/transport/mod.rs
+  - resource: src/rs/vertebra-core/src/transport/ring_pair.rs
   - resource: src/rs/vertebra-core/src/bridge.rs
+  - resource: src/rs/vertebra-http/src/backpressure.rs
   - resource: src/rs/vertebra-http/src/batcher.rs
   - resource: src/rs/vertebra-http/src/server.rs
   - resource: src/rs/vertebra-http/src/dispatcher/correlation.rs
@@ -21,13 +23,13 @@ sources:
 
 All crates use `edition = "2024"`, and `make lint-all` runs `cargo clippy --workspace --all-targets --features tls,compression -- -D warnings`. The patterns below apply to [`vertebra-core`](../../../../../src/rs/vertebra-core/src/lib.rs) rings and the [`vertebra-http`](../../../../../src/rs/vertebra-http/src/lib.rs) dispatch path.
 
-## Cache-Line Isolation
+## Cache-Line Isolation (`ABI_VERSION = 3`) & Padded MPMC Sequence Slots
 
-Wrap every cross-process hot atomic in `CacheLine<T>` ([`buffer.rs`](../../../../../src/rs/vertebra-core/src/buffer.rs)) inside the `#[repr(C)]` `ShmHeader`. `CacheLine` is 64-byte aligned, 128-byte on aarch64 macOS, so the header size differs on Apple Silicon. Bump `ABI_VERSION` whenever the header layout changes; `attach` rejects mismatched regions.
+Wrap every cross-process hot atomic in `CacheLine<T>` ([`buffer.rs`](../../../../../src/rs/vertebra-core/src/buffer.rs)) inside the `#[repr(C)]` `ShmHeader` (`ABI_VERSION = 3`, including `consumer_sleeping: CacheLine<AtomicU32>` and `active_flags: CacheLine<AtomicU32>`). `CacheLine` is 64-byte aligned (128-byte on `aarch64` macOS), and [`MpmcRing`](../../../../../src/rs/vertebra-core/src/channel.rs) stores its sequence array as `CacheLine<AtomicU64>` per slot so adjacent Vyukov sequence updates never false-share cache lines across concurrent producers or consumers. Bump `ABI_VERSION` whenever `ShmHeader` or `MpmcRing` layout changes; `attach` rejects mismatched regions.
 
-## `SeqCst` Sleeper/Waker Handshake
+## `SeqCst` Sleeper/Waker & Dekker `consumer_sleeping` Handshakes
 
-A side that may sleep increments its waiter counter, re-checks the cursor, and waits on a wait word. The other side must publish its cursor, bump the wait word with `SeqCst`, and only then load the waiter counter with `SeqCst`. With weaker orderings the store and load can reorder and a wake is lost. `SlotView::release` in [`channel.rs`](../../../../../src/rs/vertebra-core/src/channel.rs):
+A side that may sleep arms its waiter word (`recv_waiters`/`send_waiters` for futex rings, or `ShmHeader::prepare_sleep()` setting `consumer_sleeping = 1` with `SeqCst` for `eventfd`/pipe-driven `TieredRingSet` and `BatchBridge`), re-checks the ring cursor (`cancel_sleep()` if data arrived), and blocks. The producer must publish its payload and cursor first (`TieredRingSet` sets `mark_tier_active(bit)` *before* `write_head` is published so non-small tiers are never skipped by `has_non_small_data()`), and only then test-and-clear the sleeper flag with `SeqCst` (`should_notify_and_clear()` / `send_waiters().load(Ordering::SeqCst)`). `SlotView::release` in [`channel.rs`](../../../../../src/rs/vertebra-core/src/channel.rs):
 
 <!-- truth: start -->
 ```rust
@@ -51,21 +53,17 @@ A side that may sleep increments its waiter counter, re-checks the cursor, and w
 ```
 <!-- truth: end -->
 
-`SpscRing::try_send_with` mirrors this on the producer side with `write_head`, `wait_write`, and `recv_waiters`.
+`SpscRing` caches remote `read_head` and `write_head` snapshots locally (`cached_read_head`, `cached_write_head`, invalidated when `ShmHeader.generation` advances on `reset()`), checks fast-empty (`read_head == write_head`) before attempting `slot_borrowed.compare_exchange` in `try_recv_view`, and drains bursts with `drain_with` using a single `Release` `read_head` commit per batch.
 
-## Validate SHM-Supplied Lengths
+## Validate SHM-Supplied Lengths & Zero-Copy In-Process Views
 
-Treat every `SlotHeader::len` read from shared memory as untrusted: clamp it to `payload_capacity()` (and to the frame's own declared lengths) before building a slice with `from_raw_parts`. Both copying readers and zero-copy readers (`SpscRing::peek_slot` behind `try_recv_view` and `MpmcRing::try_recv_with`) clamp `len` to `payload_capacity()`; see [SHM gotchas](../../gotchas/shm-and-cross-platform-ipc.md).
+Treat every `SlotHeader::len` read from shared memory as untrusted: clamp it to `payload_capacity()` (and to the frame's own declared lengths) before building a slice with `from_raw_parts`. Both `SpscRing::peek_slot` (`try_recv_view` / `drain_with`) and `MpmcRing::try_recv_view` (`MpmcSlotView`) clamp `len` to `payload_capacity()`. For in-process `Topology::Embedded`, [`BatchBridge`](../../../../../src/rs/vertebra-core/src/bridge.rs) passes `Arc<BatchSnapshot>` directly via an unbounded `crossbeam_channel` (bounded upstream by `BackpressureController`) and completes unary responses inline through `ResponseSink` (`DirectResponseSink`) without intermediate channel serialization; see [SHM gotchas](../../gotchas/shm-and-cross-platform-ipc.md).
 
-## Reserve-Then-Rollback Atomics
+## Sharded & Lock-Free Hot Paths in `vertebra-http`
 
-`DataSlab::write` and `TransportArena::push` ([`transport/mod.rs`](../../../../../src/rs/vertebra-core/src/transport/mod.rs)) reserve space with `fetch_add`, and on overflow undo it with `fetch_sub` before returning `SlabFull` / `ArenaFull`. They assume one writer at a time: `BatchBridge::batch_writer()` holds `write_lock` across pushes and `seal()`, and sealing swaps buffers with `take_and_replace` instead of copying.
+- **Collector**: `RequestBatcher::spawn_pool(dispatcher, limit, shard_count, channel_capacity)` ([`batcher.rs`](../../../../../src/rs/vertebra-http/src/batcher.rs)) starts one batcher task per shard (capped to active runtime threads so 1-thread runtimes avoid 8-task scheduling overhead), each maintaining double-buffered `Vec<PendingRequest>` storage (`BatchLimit::default()` = `64`) and draining bursts opportunistically via `try_recv()` with zero timer linger.
+- **Correlation & Per-Batch SHM Routing**: `ShmDispatcher::new` ([`dispatcher/shm.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/shm.rs)) splits `max_inflight` across 8 `Mutex<InFlightRequests>` shards (`(generation << 32) | index` ABA-safe keys), routes an entire batch to one target worker (`next_worker.fetch_add(1, Relaxed) % worker_count`, probing forward only if full) using stack-local arrays (zero global scratch `Mutex`), and releases the shard `Mutex` *before* calling `oneshot::Sender::send`.
+- **Lock-Free Admission & Circuit Breaker**: [`BackpressureController`](../../../../../src/rs/vertebra-http/src/backpressure.rs) enforces `SeqCst` ordering between `in_flight` and `queue_depth` and tracks failure thresholds with a 16-bucket atomic sliding window (`AtomicU64` `(epoch_sec << 32) | count`) instead of a `Mutex<VecDeque<Instant>>`.
+- **Streaming Responders**: `PendingRequests` ([`dispatcher/shm_reader.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/shm_reader.rs)) is a `DashMap<u64, PendingResponder>` (unary `oneshot` or stream `mpsc`), separate from `InFlightRequests`.
 
-## Sharded Hot Paths in `vertebra-http`
-
-- **Collector**: `RequestBatcher::spawn_pool(dispatcher, policy, shard_count, channel_capacity)` ([`batcher.rs`](../../../../../src/rs/vertebra-http/src/batcher.rs)) starts one batcher task per shard, each with its own `mpsc` channel. `main.rs` uses 8 shards with capacity 16384. `ServerState::get_collector` ([`server.rs`](../../../../../src/rs/vertebra-http/src/server.rs)) picks a shard round-robin with an `AtomicUsize`.
-- **Correlation**: `ShmDispatcher::new` ([`dispatcher/shm.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/shm.rs)) splits `max_inflight` (65,536 from `main.rs`) across 8 `Mutex<InFlightRequests>` shards of 8,192 slots. [`InFlightRequests`](../../../../../src/rs/vertebra-http/src/dispatcher/correlation.rs) is a slab with a LIFO free list and per-slot generation counters; `insert` returns `(generation << 32) | index` to prevent ABA. A full shard answers 503.
-- **Worker and shard selection**: a single `fetch_add` on `next_worker` gives a start index per batch. Request `i` prefers worker `(start + i) % worker_count`, probing forward for a ring with capacity (503 when all are full), and uses correlation shard `(start + i) & shard_mask`.
-- **Streaming responders**: `PendingRequests` ([`dispatcher/shm_reader.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/shm_reader.rs)) is a `DashMap<u64, PendingResponder>` (unary `oneshot` or stream `mpsc`), separate from `InFlightRequests`.
-
-Prefer per-shard ownership over a single shared lock when adding new hot-path state, and keep shard counts powers of two when indexing with a mask.
+Prefer per-shard or stack-local ownership over shared locks when adding hot-path state, and keep shard counts powers of two when indexing with a mask.

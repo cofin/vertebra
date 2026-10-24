@@ -35,27 +35,28 @@ sources:
 
 | Group | Fields |
 |---|---|
-| Metadata | `magic: u64` (`MAGIC = u64::from_le_bytes(*b"VERTEBRA")`), `abi_version: u32` (`ABI_VERSION = 2`), `flags`, `total_size`, `ring_offset`, `ring_size`, `generation: AtomicU32`, `state: AtomicU32` (`RegionState::{Uninitialized, Ready, Stale}`), `creator_pid`, `creator_epoch: u64`, reserved bytes |
+| Metadata | `magic: u64` (`MAGIC = u64::from_le_bytes(*b"VERTEBRA")`), `abi_version: u32` (`ABI_VERSION = 3`), `flags`, `total_size`, `ring_offset`, `ring_size`, `generation: AtomicU32`, `state: AtomicU32` (`RegionState::{Uninitialized, Ready, Stale}`), `creator_pid`, `creator_epoch: u64`, reserved bytes |
 | Cursors | `read_head: CacheLine<AtomicU64>`, `write_head: CacheLine<AtomicU64>` |
 | Wait words | `wait_read`, `wait_write`, `send_waiters`, `recv_waiters` (each `CacheLine<AtomicU32>`) |
+| Dekker & tier state | `consumer_sleeping: CacheLine<AtomicU32>`, `active_flags: CacheLine<AtomicU32>` |
 
-`RingLayout::new(slot_size, slots, ChannelMode)` computes `seq_offset()` (header end), `ring_offset()` (after the MPMC sequence array), and `total_size`. `initialize` writes the header and sets `state = Ready`; `attach` rejects a region whose `magic`, `abi_version`, or `state` do not match. Each slot starts with an 8-byte `SlotHeader { len: u32, flags: u32 }`, so `payload_capacity()` is `slot_size - 8`.
+`RingLayout::new(slot_size, slots, ChannelMode)` computes `seq_offset()` (header end), `ring_offset()` (after the cache-line-padded MPMC sequence array), and `total_size`. `initialize` writes the header and sets `state = Ready`; `attach` rejects a region whose `magic`, `abi_version` (`3`), or `state` do not match. `ShmHeader` provides `prepare_sleep` (`consumer_sleeping.store(1, SeqCst)`), `cancel_sleep` (`store(0, Release)`), and `should_notify_and_clear` (`SeqCst` fence + `swap(0, AcqRel) == 1`) so producers skip `eventfd`/`pipe` `write()` syscalls whenever the consumer is actively polling, while `active_flags` records non-empty response tiers. Each slot starts with an 8-byte `SlotHeader { len: u32, flags: u32 }`, so `payload_capacity()` is `slot_size - 8`.
 
 ## `SpscRing` & `SlotView` (`channel.rs`)
 
-[`SpscRing`](../../../../../src/rs/vertebra-core/src/channel.rs) uses masked cursors (`index & mask`), so one slot always stays empty and usable capacity is `slots - 1`.
+[`SpscRing`](../../../../../src/rs/vertebra-core/src/channel.rs) uses masked cursors (`index & mask`), so one slot always stays empty and usable capacity is `slots - 1`, and caches remote cursors (`cached_read_head` / `cached_write_head` as generation-synchronized `CacheLine<AtomicU64>` snapshots) so producers only reload `read_head` (`Acquire`) when `next == cached_read_head` and consumers reuse `cached_write_head`.
 
-- **Send** (`try_send`, `try_send_with(len, flags, writer)`): rejects `len > payload_capacity()` with `PayloadTooLarge`; loads `write_head` (`Relaxed`) and `read_head` (`Acquire`); returns `Full` when `(write_head + 1) & mask == read_head`. `try_send_with` lets the closure write directly into the slot. It then stores `write_head` (`Release`), bumps `wait_write` (`SeqCst`), and wakes a receiver only when `recv_waiters > 0`.
-- **Zero-copy receive** (`try_recv_view`, `recv_view`, `recv_view_timeout`): returns a `SlotView` that holds an `Arc<SpscRing>`, the slot index, and a raw pointer/length into the slot (clamped against `payload_capacity()`). Only one view may exist per ring; a second call returns `SlotBorrowed` until the first is released. `SlotView::release()` (also run on `Drop`) stores the next index into `read_head` (`Release`), bumps `wait_read` (`SeqCst`), wakes a sender if `send_waiters > 0`, and clears the borrow flag.
+- **Send** (`try_send`, `try_send_with(len, flags, writer)`): rejects `len > payload_capacity()` with `PayloadTooLarge`; checks cached `read_head` before reloading `header.read_head` (`Acquire`); returns `Full` when `(write_head + 1) & mask == read_head`. `try_send_with` lets the closure write directly into the slot, stores `write_head` (`Release`), and only executes the `wait_write` `SeqCst` `fetch_add` + futex wake when `recv_waiters > 0`. Blocking `send_with` spins up to 32 `Backoff` steps before entering `park_send`.
+- **Zero-copy receive** (`try_recv_view`, `recv_view`, `recv_view_timeout`, `drain_with`): `try_recv_view` checks `head == tail` **before** attempting `slot_borrowed.compare_exchange`, avoiding RMW cache-line dirties on empty tiers, and returns a `SlotView` holding `Arc<SpscRing>`, the slot index, and a bounds-clamped slice. `SlotView::release()` (also run on `Drop`) advances `read_head` (`Release`), clears the borrow flag, and wakes a parked sender when `send_waiters > 0`. `drain_with(max_items, f)` visits up to `max_items` slots zero-copy and advances `read_head` once per drained batch.
 - **Copying receive** (`try_recv`, `recv`, `recv_timeout`, `try_recv_batch`): copies into a caller buffer and returns `BufferTooSmall` if it does not fit.
 - `split()` yields `SpscSender` / `SpscReceiver` handles.
 
-## `MpmcRing` (`channel.rs`)
+## `MpmcRing` & `MpmcSlotView` (`channel.rs`)
 
-[`MpmcRing`](../../../../../src/rs/vertebra-core/src/channel.rs) is Vyukov's bounded queue. A separate `AtomicU64` sequence array (seeded with `i`) precedes the slot area. `head()` is `read_head` and `tail()` is `write_head`.
+[`MpmcRing`](../../../../../src/rs/vertebra-core/src/channel.rs) is Vyukov's bounded queue. A `CacheLine<AtomicU64>` sequence array (one cache line per slot to prevent false sharing, seeded with `i`) precedes the slot area. `head()` is `read_head` and `tail()` is `write_head`.
 
 - **Producers** (`try_send`, `try_send_with(flags, f)`): CAS `tail` when `seq - tail == 0`, write the slot, then store `seq = tail + 1` (`Release`). `has_capacity()` checks `(seq as i64 - tail as i64) >= 0`.
-- **Consumers** (`try_recv`, `try_recv_with_flags`, `try_recv_with(reader)`, `recv_timeout_with`): CAS `head` when `seq - (head + 1) == 0`, read the slot, then store `seq = head + slots` (`Release`). `try_recv_with` passes the slot payload slice to the closure without copying.
+- **Consumers** (`try_recv`, `try_recv_with_flags`, `try_recv_with(reader)`, `try_recv_view`, `recv_timeout_with`): CAS `head` when `seq - (head + 1) == 0`, read or borrow the slot (`MpmcSlotView` releases `seq = head + slots` on `Drop`), and expose zero-copy slices directly to `BatchSnapshot` without heap copying.
 
 ## Blocking Waits (`sync.rs`, `platform/`)
 

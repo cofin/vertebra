@@ -48,7 +48,7 @@ CI runs on pushes to `main` and on every pull request. A `changes` job (`dorny/p
 | Job | Runs When | Command | Matrix |
 |---|---|---|---|
 | `lint` | always | `make ts-install` + `make lint-all` | `ubuntu-latest` |
-| `test-python` | `python`, `rust`, or `ci` changed | `make py-test`; on 3.12 also `make coverage` and uploads `coverage.xml` | Python `3.12`, `3.13`, `3.14`, `3.14t` |
+| `test-python` | `python`, `rust`, or `ci` changed | `make py-test`; on 3.12 also `make coverage` and uploads `coverage.xml` | Python `3.12`, `3.13`, `3.14`, `3.14t`, `3.15`, `3.15t` (`3.15`/`3.15t` pre-release matrix entries) |
 | `test-rust` | `rust` or `ci` changed | `make rs-test` | `ubuntu-latest` |
 | `test-rust-features` | `rust` or `ci` changed | `cargo test --workspace --features "$CARGO_FEATURES"` | `ubuntu-latest` `tls,compression`; `macos-latest` `tls,compression,macos-ulock` |
 | `test-typescript` | `typescript` or `ci` changed | `make ts-install` + `make ts-build` + `make ts-test` | `ubuntu-latest` |

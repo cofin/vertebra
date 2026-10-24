@@ -16,7 +16,7 @@ sources:
 
 <!-- truth: start -->
 - Task files under `.agents/bundles/specs/<flow_id>/tasks/` are authoritative; `spec.md` is the synchronized checklist and continuity view.
-- Use Vertebra's canonical [`Makefile`](../../../Makefile) targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make review-check`, `make review-route`, `make coverage`, `make check`, `make build`, `make bench`, `make bench-ft`, `make rs-bench`, `make bench-micro`, `make bench-baseline`, `make bench-check`, `make upgrade`) and rebuild the PyO3 extensions (`_vertebra`, `_bundler`, `_storage`) via `make dev` after any Rust edit before running `pytest`.
+- Use Vertebra's canonical [`Makefile`](../../../Makefile) targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make review-check`, `make review-route`, `make coverage`, `make check`, `make build`, `make build-pgo`, `make bench`, `make bench-ft`, `make rs-bench`, `make bench-micro`, `make bench-baseline`, `make bench-check`, `make upgrade`) and rebuild the PyO3 extensions (`_vertebra`, `_bundler`, `_storage`) via `make dev` after any Rust edit before running `pytest`.
 - Every task declares and justifies one `verification_strategy`; only observable behavior and defect correction require an initial failing test.
 - Record durable findings in the task's `## Notes & Discoveries` and preserve unrelated worktree changes.
 - Consumer operational skills install only under `.agents/skills/`. Product, knowledge, research, and specs remain under `.agents/bundles/` (`specs/` and `research/` are created lazily only when needed).
@@ -52,9 +52,10 @@ make check                                                # lint + test + covera
 
 # 4. Release Builds & Benchmarks (--group bench kept out of dev)
 make build                                                # ts-build, release cargo build of non-extension crates, maturin develop -r for the three extensions, uv build
+make build-pgo                                            # Two-phase Rust PGO instrumentation + profile-use build via tools/pgo/rust_pgo.py
 make bench                                                # make build, then tools.benchmarks run -t ${TARGETS:-vtb} -s ${SCENARIOS:-default} ${BENCH_ARGS}
 make bench-all                                            # make build, then tools.benchmarks run -t all -s full
-make bench-ft                                             # Python 3.14t: sync .venv-ft, build src/rs/target-ft, run -t freethreaded -s ${SCENARIOS:-multiworker}
+make bench-ft                                             # Free-threaded Python (FT_PYTHON=3.15t fallback 3.14t): sync .venv-ft, build src/rs/target-ft, run -t freethreaded -s ${SCENARIOS:-multiworker}
 make rs-bench                                             # Run Rust Criterion microbenchmarks across core and http
 make bench-micro                                          # Run Python microbenchmarks across hot-path primitives and warm import times
 make bench-baseline                                       # Record baseline performance metrics (NAME=pre-refactor by default)
@@ -69,7 +70,7 @@ make bench-report                                         # Latest benchmark rep
 1. **Rust to Python FFI Rebuild (`make dev`)**: `uv run pytest` loads the compiled `vertebra._vertebra`, `vertebra._bundler`, and `vertebra._storage` extensions from `.venv`. After any `.rs` change in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, or `vertebra-storage`, run `make dev` (or `make py-test`) before `uv run pytest`. `vertebra-http` changes need `make dev` only to rebuild the `vertebra-server` binary.
 2. **Codegen to TypeScript Sync**: When modifying route schemas or [`src/py/vertebra/build/codegen/`](../../../src/py/vertebra/build/codegen/__init__.py), run `make py-test` (`src/py/tests/unit/codegen/`) and `make ts-test`.
 3. **Shared-Memory Cleanup**: `make rs-test` and the autouse `_cleanup_shm` fixture in [`src/py/tests/conftest.py`](../../../src/py/tests/conftest.py) remove `/dev/shm/test-*`, `/dev/shm/*vertebra*`, and `/dev/shm/vtb-*`.
-4. **`--group bench` Isolation**: Keep `duckdb`, `uvicorn`, `httptools`, `uvloop`, `granian`, and `spikard` inside `[dependency-groups].bench` in [`pyproject.toml`](../../../pyproject.toml) so Python `3.14t` test runs never compile `duckdb` from source.
+4. **`--group bench` Isolation**: Keep `duckdb`, `uvicorn`, `httptools`, `uvloop`, `granian`, and `spikard` inside `[dependency-groups].bench` in [`pyproject.toml`](../../../pyproject.toml) so Python `3.14t`/`3.15t` test runs never compile `duckdb` from source.
 5. **TypeScript Build**: `make ts-build` compiles all 13 subpath entrypoints (`index`, `react`, `vue`, `svelte`, `angular`, `htmx`, `vite`, `store`, `live`, `apex`, `telemetry`, `wasm`, `arrow`, plus `hmr`) and generates `.d.ts` declarations cleanly.
 
 ## Direct-Read Continuity
