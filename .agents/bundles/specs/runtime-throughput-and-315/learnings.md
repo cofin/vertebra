@@ -2,7 +2,7 @@
 type: Learnings
 flow_id: runtime-throughput-and-315
 created_at: 2026-10-24T17:10:25Z
-updated_at: 2026-10-24T22:13:00Z
+updated_at: 2026-10-24T22:38:20Z
 ---
 
 # Learnings — Runtime Throughput, Multi-Core Scaling, and Python 3.15 Optimizations
@@ -46,3 +46,8 @@ updated_at: 2026-10-24T22:13:00Z
 
 - All review findings from `cf5979e..a115466` are remediated and covered by regression tests across `shm.rs`, `ingress_fastpath.rs`, `test_litestar_plugin.py`, `test_litestar_direct_fastpath.py`, `test_litestar_rust_offload.py`, `test_runner.py`, and `test_packaging_and_pgo.py` (`make rs-test`, `make py-test` 858 passed, `make ts-test` 52 passed, `make coverage` 81%, `make lint-all`, and `make review-check` all exit `0`).
 - Live benchmarks on `071e5b6` confirm `0` non-2xx errors and `0` deadlocks across all topologies (`c=1..256+`, including `io10 c=256`), with Vertebra #1 across every single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w`/`4w`/`8w`) category against Granian `2.8.4` (`390,564 req/s` on Python 3.12 and `391,789 req/s` on CPython `3.15.0rc3` `PYTHON_JIT=1` at `8w hello c=256`, plus `204,331 req/s` on free-threaded `3.15.0rc3+freethreaded` single-process `4t`).
+
+## Task 5.4 Closure (`013c702`)
+
+- Real Litestar v2 (`2.24.0`) `BaseRouteHandler.resolve_opts()` mutates `self.opt` in place and returns `None`, and resolves `Controller`/`Router` `after_request`, `type_decoders`, and `response_class` through `ownership_layers` / `resolve_type_decoders` / `resolve_response_class` (without a `resolve_after_request` method), while Litestar v3 `CompressionConfig` uses `zstd_compress_level` (with `zstd_level` fallback).
+- `LitestarFastPathBypass` must disqualify direct fastpath whenever non-`None` `app.compression_config` remains (for example when `offload_compression=False` or an unsupported compression backend is configured) or when `vertebra_config.offload_cors` is `False`, even under `VERTEBRA_SERVER_ACTIVE=1`. All 860 Python tests, `make lint-all`, and `make review-check` exit `0` at `013c702`.
