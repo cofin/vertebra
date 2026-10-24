@@ -2,16 +2,16 @@
 type: Spec
 flow_id: runtime-throughput-and-315
 title: Runtime Throughput, Multi-Core Scaling, and Python 3.15 Optimizations
-state: active
+state: completed
 plan_revision: 3
 plan_commit: null
-state_revision: 28
+state_revision: 29
 current_task: null
-last_operation: 20261024T223845Z-flow-executor-checkpoint-spec-00
+last_operation: 20261024T225435Z-flow-executor-complete-spec-00
 operation_targets: []
 last_verified_checkpoint: "phase:phase-5@013c702"
 created_at: 2026-10-24T16:02:00Z
-updated_at: 2026-10-24T22:38:45Z
+updated_at: 2026-10-24T22:54:35Z
 description: Eliminate embedded bridge deadlocks, single-ingress multi-worker contention, SHM syscall and lock overhead, ASGI/RSGI FFI dispatch allocations, and Python worker loop bottlenecks while adding Python 3.15 and 3.15t specializations.
 ---
 
@@ -66,7 +66,7 @@ Single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w` / `4w` / `8w
 
 ## Continuity Snapshot
 
-- **Active Flow / Lifecycle**: `runtime-throughput-and-315` (`active`)
+- **Active Flow / Lifecycle**: `runtime-throughput-and-315` (`completed`)
 - **Current Task & Claimant**: `none`
 - **Last Verified Checkpoint**: `phase:phase-5@013c702`
 - **Decisions**:
@@ -81,9 +81,9 @@ Single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w` / `4w` / `8w
   - `TieredRingSet` active-tier ordering before `write_head` + `has_non_small_data()`, `BackpressureController` `SeqCst` fences, `append_vary_token` + compressible `Content-Type` checks, `pypa/cibuildwheel@v4.3.4` `cp314t`/`cp315`/`cp315t` wheel targets, `Worker._process_batch` `dispatch_app` routing, and `LitestarPlugin.ensure_finalized` + `LitestarFastPathBypass` fallback/exception/framing parity are verified green (`071e5b6`).
   - Litestar v2 `resolve_opts() -> None` in-place mutation, v2 `ownership_layers` `after_request`/`type_decoders`/`response_class` detection, v3 `zstd_compress_level` extraction, and un-offloaded Python `compression_config`/`cors_config` fastpath disqualifiers are aligned (`013c702`).
 - **Blockers & Unblock Conditions**: `none`
-- **Next Exact Step**: `Run final correctness review and mandatory quality review on cf5979e..HEAD, then execute Flow complete and archive.`
+- **Next Exact Step**: `Synthesize 5-dimension OKF v0.2 knowledge and archive runtime-throughput-and-315.`
 - **Plan Identity**: `plan_revision: 3`, `plan_commit: null`
-- **State Identity**: `revision: 28`, `last_operation: 20261024T223845Z-flow-executor-checkpoint-spec-00`, `operation_targets: []`
+- **State Identity**: `revision: 29`, `last_operation: 20261024T225435Z-flow-executor-complete-spec-00`, `operation_targets: []`
 - **Relevant Rule & Knowledge Paths**:
   - `AGENTS.md`
   - `.agents/bundles/knowledge/workflow.md`
