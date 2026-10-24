@@ -2,13 +2,15 @@
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Buffer, Callable
+from collections.abc import Awaitable, Buffer, Callable, Iterable
 from typing import Any
 
 import msgspec
 
 from vertebra._vertebra import (
     AsgiScope,
+    RequestBatch,
+    drive_asgi_batch,
 )
 from vertebra._vertebra import (
     Request as _NativeRequest,
@@ -184,11 +186,41 @@ class AsgiRunner:
         req_id: int = getattr(request, "request_id", 0)
         return asyncio.run_coroutine_threadsafe(self._execute_and_submit(request, req_id), loop)
 
-    def spawn_batch(self, requests: list[Any]) -> list[Any]:
-        """Spawn each request in ``requests`` as an independent task on the event loop."""
-        if not requests:
+    def spawn_batch(self, requests: RequestBatch | Iterable[Any]) -> list[Any]:
+        """Drive a batch of ASGI requests via Rust drive_asgi_batch or fallback tasks."""
+        if self._on_chunk is None:
+            if isinstance(requests, RequestBatch):
+                if len(requests) == 0:
+                    return []
+                loop = self._ensure_loop()
+                drive_asgi_batch(
+                    self._app,
+                    requests,
+                    loop_obj=loop,
+                    root_path=self._mount_prefix,
+                    lifespan_state=self._lifespan_state or None,
+                )
+                return []
+
+            req_list = requests if isinstance(requests, list | tuple) else list(requests)
+            if not req_list:
+                return []
+            if isinstance(req_list[0], _NativeRequest):
+                loop = self._ensure_loop()
+                drive_asgi_batch(
+                    self._app,
+                    req_list,
+                    loop_obj=loop,
+                    root_path=self._mount_prefix,
+                    lifespan_state=self._lifespan_state or None,
+                )
+                return []
+            return [self.spawn_single(req) for req in req_list]
+
+        req_items = requests if isinstance(requests, list | tuple) else list(requests)
+        if not req_items:
             return []
-        return [self.spawn_single(req) for req in requests]
+        return [self.spawn_single(req) for req in req_items]
 
     def create_stream_queues(
         self,

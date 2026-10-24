@@ -23,14 +23,22 @@ def detect_interface(app: Any, configured: InterfaceMode = "auto") -> Literal["a
         return configured
     if is_rsgi_app(app):
         return "rsgi"
-    if inspect.iscoroutinefunction(app) or (callable(app) and inspect.iscoroutinefunction(type(app).__call__)):
-        return "asgi"
+    is_async_fn = inspect.iscoroutinefunction(app) or (
+        callable(app) and inspect.iscoroutinefunction(type(app).__call__)
+    )
     try:
         sig = inspect.signature(app)
-        if len(sig.parameters) == 3:
-            return "asgi"
-        if len(sig.parameters) == 2:
-            return "wsgi"
+        positional_params = [
+            p
+            for p in sig.parameters.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
+        if not has_varargs:
+            if len(positional_params) == 3:
+                return "asgi"
+            if len(positional_params) == 2:
+                return "rsgi" if is_async_fn else "wsgi"
     except (TypeError, ValueError):
         pass
     return "asgi"

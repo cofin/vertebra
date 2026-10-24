@@ -2,16 +2,19 @@
 
 import asyncio
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from vertebra._vertebra import (
     Request as _NativeRequest,
 )
 from vertebra._vertebra import (
+    RequestBatch,
     Response,
     RsgiHttpProtocol,
     RsgiScope,
+    drive_rsgi_batch,
+    submit_response,
 )
 from vertebra.server._protocol import InterfaceMode, detect_interface, is_rsgi_app
 
@@ -53,11 +56,12 @@ class RsgiAdapter:
     async def run_single(self, request: Any) -> Response:
         """Execute a single HTTP request against the RSGI application."""
         request_id = int(getattr(request, "request_id", 0))
-        if isinstance(request, _NativeRequest) and not self._mount_prefix:
+        if isinstance(request, _NativeRequest):
             scope = request.rsgi_scope(
                 scheme=self._scheme,
                 server=self._server,
                 client=self._client,
+                root_path=self._mount_prefix,
             )
             protocol = request.rsgi_protocol()
         else:
@@ -122,6 +126,45 @@ class RsgiAdapter:
             return fut.result()
         return asyncio.run(_gather())
 
+    def spawn_batch(
+        self,
+        requests: RequestBatch | Iterable[Any],
+        *,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> int:
+        """Drive a batch of RSGI HTTP requests via Rust drive_rsgi_batch or fallback tasks."""
+        if isinstance(requests, RequestBatch):
+            if len(requests) == 0:
+                return 0
+            return drive_rsgi_batch(
+                self._target,
+                requests,
+                loop_obj=loop,
+                root_path=self._mount_prefix,
+                scheme=self._scheme,
+                server=self._server,
+                client=self._client,
+            )
+
+        req_list = requests if isinstance(requests, list | tuple) else list(requests)
+        if not req_list:
+            return 0
+        if isinstance(req_list[0], _NativeRequest):
+            return drive_rsgi_batch(
+                self._target,
+                req_list,
+                loop_obj=loop,
+                root_path=self._mount_prefix,
+                scheme=self._scheme,
+                server=self._server,
+                client=self._client,
+            )
+
+        if loop is not None:
+            for req in req_list:
+                asyncio.run_coroutine_threadsafe(self._execute_and_submit(req), loop)
+        return 0
+
     async def handle_http(
         self,
         *,
@@ -143,3 +186,7 @@ class RsgiAdapter:
             headers=raw_headers or None,
         )
         return await self.run_single(req)
+
+    async def _execute_and_submit(self, request: Any) -> None:
+        resp = await self.run_single(request)
+        submit_response(resp)

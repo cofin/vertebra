@@ -51,6 +51,25 @@ __all__ = (
     "stores",
 )
 
+__lazy_modules__ = [
+    "vertebra.framework._app",
+    "vertebra.framework._router",
+    "vertebra.framework.asyncapi",
+    "vertebra.framework.autowire",
+    "vertebra.framework.channels",
+    "vertebra.framework.di",
+    "vertebra.framework.email",
+    "vertebra.framework.htmx",
+    "vertebra.framework.inertia",
+    "vertebra.framework.live",
+    "vertebra.framework.openapi",
+    "vertebra.framework.procedures",
+    "vertebra.framework.queues",
+    "vertebra.framework.security",
+    "vertebra.framework.ssr",
+    "vertebra.framework.stores",
+]
+
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "App": ("vertebra.framework._app", "App"),
     "RouteDef": ("vertebra.framework._router", "RouteDef"),

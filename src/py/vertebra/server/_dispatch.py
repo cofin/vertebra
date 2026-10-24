@@ -14,6 +14,7 @@ import msgspec
 
 from vertebra._vertebra import (
     Response,
+    submit_batch_raw,
     submit_response,
     submit_response_raw,
 )
@@ -22,6 +23,10 @@ from vertebra.utils.serializers import encode_json_bytes
 __all__ = (
     "BatchDispatchPlan",
     "HandlerSpec",
+    "_JSON_CONTENT_TYPE_COMPACT",
+    "_MOUNT_HANDLER_MASK",
+    "_MOUNT_INDEX_MASK",
+    "_RAW_BUFFER_TYPES",
     "_call_handler",
     "_handler_meta",
     "_resolve_handler_args",
@@ -36,6 +41,15 @@ log = logging.getLogger(__name__)
 
 _REQUEST_PARAMS = frozenset({"request", "req"})
 _JSON_CONTENT_TYPE_COMPACT = b"\x0ccontent-type\x10\x00application/json"
+_RAW_BUFFER_TYPES = (bytes, bytearray, memoryview)
+_MOUNT_HANDLER_MASK = 0xFFFF_0000_0000_0000
+_MOUNT_INDEX_MASK = 0xFFFF
+
+
+class _AsyncErrorStub(msgspec.Struct, frozen=True, gc=False):
+    """Lightweight request identifier carrier avoiding BatchSnapshot retention across await."""
+
+    request_id: int
 
 
 def _extract_request(request: Any) -> Any:
@@ -87,14 +101,22 @@ class HandlerSpec(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     is_async: bool
     param_names: tuple[str, ...]
     invoker: Callable[..., Any]
+    sync_to_thread: bool = False
 
 
-def compile_handler_spec(handler: Callable[..., Any]) -> HandlerSpec:
+def compile_handler_spec(
+    handler: Callable[..., Any],
+    *,
+    sync_to_thread: bool | None = None,
+) -> HandlerSpec:
     """Compile parameter extractors and invocation strategy for a handler."""
     sig = inspect.signature(handler)
     params = tuple(sig.parameters.keys())
     has_params = bool(params)
     is_async = inspect.iscoroutinefunction(handler)
+    resolved_sync_to_thread = (
+        bool(getattr(handler, "__vertebra_sync_to_thread__", False)) if sync_to_thread is None else sync_to_thread
+    ) and not is_async
 
     if not has_params:
 
@@ -121,6 +143,7 @@ def compile_handler_spec(handler: Callable[..., Any]) -> HandlerSpec:
         is_async=is_async,
         param_names=params,
         invoker=invoker,
+        sync_to_thread=resolved_sync_to_thread,
     )
 
 
@@ -168,6 +191,10 @@ def _coerce_response(raw: Any, request_id: int, vr_cls: Any) -> Any:
         return raw
     if isinstance(raw, bytes):
         body = raw
+    elif isinstance(raw, bytearray | memoryview):
+        if vr_cls is Response:
+            return Response.from_buffer(200, raw, None, request_id)
+        body = bytes(raw)
     elif isinstance(raw, str):
         body = raw.encode("utf-8")
     else:
@@ -184,7 +211,7 @@ def _submit_coerced(
 ) -> None:
     """Submit a handler response using raw fastpath or Py<Response> fallback."""
     if submit_raw is not None:
-        if isinstance(raw, bytes):
+        if isinstance(raw, _RAW_BUFFER_TYPES):
             submit_raw(request_id, 200, raw)
             return
         if isinstance(raw, str):
@@ -231,10 +258,29 @@ async def _invoke_async_handler(
         return build_error_response(exc, request, error_handler, vr_cls)
 
 
+async def _await_async_item(
+    coro: Coroutine[Any, Any, Any],
+    request_id: int,
+    err_target: Any,
+    error_handler: Callable[..., Any] | None,
+    vr_cls: Any,
+    active_submit: Callable[[Any], None],
+    active_submit_raw: Callable[..., None] | None,
+) -> None:
+    """Await a pre-invoked handler coroutine without pinning Request across suspension."""
+    try:
+        raw = await coro
+        _submit_coerced(raw, request_id, vr_cls, active_submit, active_submit_raw)
+    except Exception as exc:
+        err_resp = build_error_response(exc, err_target, error_handler, vr_cls)
+        active_submit(err_resp)
+
+
 class BatchDispatchPlan(msgspec.Struct, frozen=True, gc=False):
     """Result of partitioning a batch into dispatch groups."""
 
     sync_native: list[tuple[int, Any, HandlerSpec]] = msgspec.field(default_factory=list)
+    sync_thread: list[tuple[int, Any, HandlerSpec]] = msgspec.field(default_factory=list)
     async_native: list[tuple[int, Any, HandlerSpec]] = msgspec.field(default_factory=list)
     mounts: dict[str, list[tuple[int, Any]]] = msgspec.field(default_factory=dict)
     unmatched: list[tuple[int, Any]] = msgspec.field(default_factory=list)
@@ -245,25 +291,43 @@ def partition_batch(
     handlers: Mapping[int, Any],
     mount_runners: Sequence[tuple[str, Any, str]],
 ) -> BatchDispatchPlan:
-    """Classify each request in a batch into sync, async, mount, or unmatched groups."""
+    """Classify each request in a batch into sync, threaded sync, async, mount, or unmatched groups."""
     plan = BatchDispatchPlan()
     sync_native = plan.sync_native
+    sync_thread = plan.sync_thread
     async_native = plan.async_native
     mounts_map = plan.mounts
     unmatched = plan.unmatched
     get_handler = handlers.get
+    mount_count = len(mount_runners)
 
     for idx, request in enumerate(batch):
-        handler_obj = get_handler(request.handler_id)
+        hid = request.handler_id
+        handler_obj = get_handler(hid)
         if handler_obj is not None:
             spec = handler_obj if isinstance(handler_obj, HandlerSpec) else compile_handler_spec(handler_obj)
             if spec.is_async:
                 async_native.append((idx, request, spec))
+            elif spec.sync_to_thread:
+                sync_thread.append((idx, request, spec))
             else:
                 sync_native.append((idx, request, spec))
             continue
 
-        if mount_runners:
+        if mount_count:
+            if hid < 0:
+                mount_idx = (-hid) - 1
+                if 0 <= mount_idx < mount_count:
+                    prefix = mount_runners[mount_idx][0]
+                    mounts_map.setdefault(prefix, []).append((idx, request))
+                    continue
+            elif (hid & _MOUNT_HANDLER_MASK) == _MOUNT_HANDLER_MASK:
+                mount_idx = hid & _MOUNT_INDEX_MASK
+                if 0 <= mount_idx < mount_count:
+                    prefix = mount_runners[mount_idx][0]
+                    mounts_map.setdefault(prefix, []).append((idx, request))
+                    continue
+
             path = getattr(request, "path", "")
             matched = False
             for prefix, _adapter, _protocol in mount_runners:
@@ -359,6 +423,7 @@ def dispatch_batch(
     if not async_mode:
         total = (
             len(partitioned.sync_native)
+            + len(partitioned.sync_thread)
             + len(partitioned.async_native)
             + sum(len(v) for v in partitioned.mounts.values())
             + len(partitioned.unmatched)
@@ -366,6 +431,9 @@ def dispatch_batch(
         results: list[Any] = [None] * total
 
         for idx, request, spec in partitioned.sync_native:
+            results[idx] = _invoke_sync_handler(spec, request, error_handler, vr_cls)
+
+        for idx, request, spec in partitioned.sync_thread:
             results[idx] = _invoke_sync_handler(spec, request, error_handler, vr_cls)
 
         if partitioned.async_native:
@@ -437,51 +505,81 @@ def dispatch_batch(
 
     active_submit = submit or submit_response
     active_submit_raw = submit_raw if submit_raw is not None else (submit_response_raw if submit is None else None)
+    use_native_batch_submit = (submit is None or submit is submit_response) and (
+        submit_raw is None or submit_raw is submit_response_raw
+    )
+    raw_batch: list[tuple[int, int, Any] | tuple[int, int, Any, bytes]] = []
 
     if partitioned.sync_native:
-        if len(partitioned.sync_native) == 1 and not partitioned.async_native and not partitioned.mounts:
-            _idx, request, spec = partitioned.sync_native[0]
-            try:
-                raw = spec.invoker(request)
-                _submit_coerced(raw, getattr(request, "request_id", 0), vr_cls, active_submit, active_submit_raw)
-            except Exception as exc:
-                err_resp = build_error_response(exc, request, error_handler, vr_cls)
-                active_submit(err_resp)
-        else:
-            active_exec = executor or ThreadPoolExecutor(max_workers=32, thread_name_prefix="vertebra-sync")
+        if use_native_batch_submit:
+            append_raw = raw_batch.append
             for _idx, request, spec in partitioned.sync_native:
+                req_id = getattr(request, "request_id", 0)
+                try:
+                    raw = spec.invoker(request)
+                    if isinstance(raw, _RAW_BUFFER_TYPES):
+                        append_raw((req_id, 200, raw))
+                    elif isinstance(raw, str):
+                        append_raw((req_id, 200, raw.encode("utf-8")))
+                    elif isinstance(raw, vr_cls):
+                        if getattr(raw, "request_id", 0) == 0:
+                            raw.request_id = req_id
+                        active_submit(raw)
+                    else:
+                        append_raw((req_id, 200, encode_json_bytes(raw), _JSON_CONTENT_TYPE_COMPACT))
+                except Exception as exc:
+                    err_resp = build_error_response(exc, request, error_handler, vr_cls)
+                    active_submit(err_resp)
+        else:
+            for _idx, request, spec in partitioned.sync_native:
+                req_id = getattr(request, "request_id", 0)
+                try:
+                    raw = spec.invoker(request)
+                    _submit_coerced(raw, req_id, vr_cls, active_submit, active_submit_raw)
+                except Exception as exc:
+                    err_resp = build_error_response(exc, request, error_handler, vr_cls)
+                    active_submit(err_resp)
 
-                def _dispatch_sync_item(
-                    req: Any = request,
-                    s: HandlerSpec = spec,
-                    eh: Any = error_handler,
-                ) -> None:
-                    try:
-                        raw = s.invoker(req)
-                        _submit_coerced(raw, getattr(req, "request_id", 0), vr_cls, active_submit, active_submit_raw)
-                    except Exception as exc:
-                        err_resp = build_error_response(exc, req, eh, vr_cls)
-                        active_submit(err_resp)
+    if partitioned.sync_thread:
+        active_exec = executor or ThreadPoolExecutor(max_workers=32, thread_name_prefix="vertebra-sync")
+        for _idx, request, spec in partitioned.sync_thread:
 
-                active_exec.submit(_dispatch_sync_item)
-
-    if partitioned.async_native:
-        async_coros: list[Coroutine[Any, Any, None]] = []
-        for _idx, request, spec in partitioned.async_native:
-
-            async def _dispatch_async_item(
+            def _dispatch_sync_item(
                 req: Any = request,
                 s: HandlerSpec = spec,
                 eh: Any = error_handler,
             ) -> None:
                 try:
-                    raw = await s.invoker(req)
+                    raw = s.invoker(req)
                     _submit_coerced(raw, getattr(req, "request_id", 0), vr_cls, active_submit, active_submit_raw)
                 except Exception as exc:
                     err_resp = build_error_response(exc, req, eh, vr_cls)
                     active_submit(err_resp)
 
-            async_coros.append(_dispatch_async_item())
+            active_exec.submit(_dispatch_sync_item)
+
+    if partitioned.async_native:
+        async_coros: list[Coroutine[Any, Any, None]] = []
+        for _idx, request, spec in partitioned.async_native:
+            req_id = getattr(request, "request_id", 0)
+            try:
+                coro = spec.invoker(request)
+            except Exception as exc:
+                err_resp = build_error_response(exc, request, error_handler, vr_cls)
+                active_submit(err_resp)
+                continue
+            err_target = request if error_handler is not None else _AsyncErrorStub(request_id=req_id)
+            async_coros.append(
+                _await_async_item(
+                    coro,
+                    req_id,
+                    err_target,
+                    error_handler,
+                    vr_cls,
+                    active_submit,
+                    active_submit_raw,
+                )
+            )
 
         _schedule_coros(scheduler or loop, async_coros)
 
@@ -490,28 +588,35 @@ def dispatch_batch(
         for prefix, entries in partitioned.mounts.items():
             adapter, protocol = resolved_lookup[prefix]
             if protocol == "asgi":
-                adapter.spawn_batch(req for _idx, req in entries)
+                adapter.spawn_batch([req for _idx, req in entries])
             elif protocol == "rsgi":
-                rsgi_coros: list[Coroutine[Any, Any, None]] = []
-                for _idx, request in entries:
+                if use_native_batch_submit and hasattr(adapter, "spawn_batch"):
+                    target_loop = scheduler.next_loop() if hasattr(scheduler, "next_loop") else loop
+                    adapter.spawn_batch(
+                        [req for _idx, req in entries],
+                        loop=target_loop if isinstance(target_loop, asyncio.AbstractEventLoop) else None,
+                    )
+                else:
+                    rsgi_coros: list[Coroutine[Any, Any, None]] = []
+                    for _idx, request in entries:
 
-                    async def _dispatch_rsgi_item(
-                        req: Any = request,
-                        a: Any = adapter,
-                    ) -> None:
-                        try:
-                            coro = a.run_single(req) if hasattr(a, "run_single") else a.handle_request(req)
-                            raw = await coro
-                            _submit_coerced(
-                                raw, getattr(req, "request_id", 0), vr_cls, active_submit, active_submit_raw
-                            )
-                        except Exception as exc:
-                            err_resp = build_error_response(exc, req, error_handler, vr_cls)
-                            active_submit(err_resp)
+                        async def _dispatch_rsgi_item(
+                            req: Any = request,
+                            a: Any = adapter,
+                        ) -> None:
+                            try:
+                                coro = a.run_single(req) if hasattr(a, "run_single") else a.handle_request(req)
+                                raw = await coro
+                                _submit_coerced(
+                                    raw, getattr(req, "request_id", 0), vr_cls, active_submit, active_submit_raw
+                                )
+                            except Exception as exc:
+                                err_resp = build_error_response(exc, req, error_handler, vr_cls)
+                                active_submit(err_resp)
 
-                    rsgi_coros.append(_dispatch_rsgi_item())
+                        rsgi_coros.append(_dispatch_rsgi_item())
 
-                _schedule_coros(scheduler or loop, rsgi_coros)
+                    _schedule_coros(scheduler or loop, rsgi_coros)
             elif protocol == "wsgi":
                 active_exec = executor or ThreadPoolExecutor(max_workers=32, thread_name_prefix="vertebra-wsgi")
                 for _idx, request in entries:
@@ -526,17 +631,25 @@ def dispatch_batch(
 
                     active_exec.submit(_dispatch_wsgi_item)
 
-    for _idx, request in partitioned.unmatched:
-        req_id = getattr(request, "request_id", 0)
-        if active_submit_raw is not None:
-            active_submit_raw(req_id, 404, b"not found")
-        elif hasattr(vr_cls, "error"):
-            try:
-                active_submit(vr_cls.error(404, req_id))
-            except Exception:
-                active_submit(vr_cls(status=404, body=b"not found", request_id=req_id))
+    if partitioned.unmatched:
+        if use_native_batch_submit:
+            for _idx, request in partitioned.unmatched:
+                raw_batch.append((getattr(request, "request_id", 0), 404, b"not found"))
         else:
-            active_submit(vr_cls(status=404, body=b"not found", request_id=req_id))
+            for _idx, request in partitioned.unmatched:
+                req_id = getattr(request, "request_id", 0)
+                if active_submit_raw is not None:
+                    active_submit_raw(req_id, 404, b"not found")
+                elif hasattr(vr_cls, "error"):
+                    try:
+                        active_submit(vr_cls.error(404, req_id))
+                    except Exception:
+                        active_submit(vr_cls(status=404, body=b"not found", request_id=req_id))
+                else:
+                    active_submit(vr_cls(status=404, body=b"not found", request_id=req_id))
+
+    if raw_batch:
+        submit_batch_raw(raw_batch)
 
     return None
 

@@ -4,9 +4,10 @@ Provides routing, decorator registration, sub-application mounting,
 handler ID indexing, and startup/shutdown lifecycle hooks.
 """
 
+import functools
 import inspect
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 
@@ -31,6 +32,7 @@ class HandlerInfo(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     method: str
     path: str
     handler_name: str
+    sync_to_thread: bool = False
 
 
 class App:
@@ -88,9 +90,22 @@ class App:
             method=route.method.upper(),
             path=route.path,
             handler_name=getattr(route.handler, "__qualname__", repr(route.handler)),
+            sync_to_thread=route.sync_to_thread,
         )
         self._handler_index[handler_id] = info
-        self._handlers[handler_id] = route.handler
+        handler_fn = route.handler
+        if route.sync_to_thread and not getattr(handler_fn, "__vertebra_sync_to_thread__", False):
+            try:
+                cast("Any", handler_fn).__vertebra_sync_to_thread__ = True
+            except (AttributeError, TypeError):
+
+                @functools.wraps(handler_fn)
+                def _threaded_wrapper(*args: Any, **kwargs: Any) -> Any:
+                    return handler_fn(*args, **kwargs)
+
+                cast("Any", _threaded_wrapper).__vertebra_sync_to_thread__ = True
+                handler_fn = _threaded_wrapper
+        self._handlers[handler_id] = handler_fn
 
     def register(self, target: Router | Callable[..., Any]) -> Any:
         """Register a Router or a route-decorated callable."""
@@ -108,25 +123,50 @@ class App:
         msg = "register expects a Router or decorated handler"
         raise TypeError(msg)
 
-    def get(self, path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def get(
+        self,
+        path: str,
+        *,
+        sync_to_thread: bool = False,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Register a GET handler."""
-        return self._route("GET", path)
+        return self._route("GET", path, sync_to_thread=sync_to_thread)
 
-    def post(self, path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def post(
+        self,
+        path: str,
+        *,
+        sync_to_thread: bool = False,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Register a POST handler."""
-        return self._route("POST", path)
+        return self._route("POST", path, sync_to_thread=sync_to_thread)
 
-    def put(self, path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def put(
+        self,
+        path: str,
+        *,
+        sync_to_thread: bool = False,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Register a PUT handler."""
-        return self._route("PUT", path)
+        return self._route("PUT", path, sync_to_thread=sync_to_thread)
 
-    def delete(self, path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def delete(
+        self,
+        path: str,
+        *,
+        sync_to_thread: bool = False,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Register a DELETE handler."""
-        return self._route("DELETE", path)
+        return self._route("DELETE", path, sync_to_thread=sync_to_thread)
 
-    def patch(self, path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def patch(
+        self,
+        path: str,
+        *,
+        sync_to_thread: bool = False,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Register a PATCH handler."""
-        return self._route("PATCH", path)
+        return self._route("PATCH", path, sync_to_thread=sync_to_thread)
 
     def mount(self, prefix: str, sub_app: Any, *, protocol: str = "auto") -> None:
         """Mount a WSGI or ASGI sub-application under a path prefix."""
@@ -186,12 +226,24 @@ class App:
         """Execute all registered shutdown hooks sequentially."""
         await self._run_hooks(self._shutdown_hooks)
 
-    def _route(self, method: str, path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def _route(
+        self,
+        method: str,
+        path: str,
+        *,
+        sync_to_thread: bool = False,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         normalized = _normalize_path(path)
 
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             segments = _compile_path_template(normalized)
-            route = RouteDef(method=method.upper(), path=normalized, handler=handler, segments=segments)
+            route = RouteDef(
+                method=method.upper(),
+                path=normalized,
+                handler=handler,
+                segments=segments,
+                sync_to_thread=sync_to_thread,
+            )
             self.add_route(route)
             return handler
 

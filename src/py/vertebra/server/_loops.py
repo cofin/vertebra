@@ -4,26 +4,56 @@ import asyncio
 import concurrent.futures
 import itertools
 import os
+import sys
 import threading
 from collections.abc import Coroutine, Iterable
 from typing import Any
 
 from vertebra.server._gil_audit import GilAuditReport
 from vertebra.server.platform import CgroupQuota
+from vertebra.utils.module_loader import import_optional
 
 __all__ = (
     "EventLoopPool",
     "configure_worker_affinity",
+    "create_event_loop",
     "resolve_loop_shards",
 )
 
 
+def create_event_loop() -> asyncio.AbstractEventLoop:
+    """Create a high-performance event loop preferring uvloop on POSIX and winloop on Windows."""
+    loop: asyncio.AbstractEventLoop | None = None
+    if sys.platform == "win32":
+        winloop = import_optional("winloop")
+        if winloop is not None:
+            loop = winloop.new_event_loop()
+    else:
+        uvloop = import_optional("uvloop")
+        if uvloop is not None:
+            loop = uvloop.new_event_loop()
+    if loop is None:
+        loop = asyncio.new_event_loop()
+    if hasattr(asyncio, "eager_task_factory"):
+        loop.set_task_factory(asyncio.eager_task_factory)
+    return loop
+
+
 def configure_worker_affinity(worker_index: int, *, enable_pinning: bool = False) -> bool:
-    """Pin the calling worker process or thread to worker_index % os.cpu_count() on Linux."""
+    """Pin the calling worker process or thread to an allowed CPU core on Linux."""
     if not enable_pinning or not hasattr(os, "sched_setaffinity"):
         return False
-    cpu_count = os.cpu_count() or 1
-    target_core = abs(worker_index) % cpu_count
+    allowed_cpus: list[int] = []
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            allowed_cpus = sorted(os.sched_getaffinity(0))
+        except OSError:
+            allowed_cpus = []
+    if allowed_cpus:
+        target_core = allowed_cpus[abs(worker_index) % len(allowed_cpus)]
+    else:
+        cpu_count = os.cpu_count() or 1
+        target_core = abs(worker_index) % cpu_count
     try:
         os.sched_setaffinity(0, {target_core})
     except OSError:
@@ -54,26 +84,32 @@ def resolve_loop_shards(
 
 
 class EventLoopPool:
-    """Sharded pool of persistent asyncio event loop threads (one loop per worker shard)."""
+    """Sharded pool of persistent event loops with optional inline single-thread mode."""
 
-    __slots__ = ("_counter", "_loops", "_size", "_stopped", "_task_sets", "_threads")
+    __slots__ = ("_counter", "_inline_single", "_loops", "_size", "_stopped", "_task_sets", "_threads")
 
-    def __init__(self, size: int | None = None) -> None:
+    def __init__(self, size: int | None = None, *, inline_single_loop: bool = False) -> None:
         resolved_size = size if size is not None else resolve_loop_shards()
         if resolved_size < 1:
             msg = "EventLoopPool size must be >= 1"
             raise ValueError(msg)
 
         self._size = resolved_size
+        self._inline_single = inline_single_loop and resolved_size == 1
         self._loops: list[asyncio.AbstractEventLoop] = []
         self._threads: list[threading.Thread] = []
         self._task_sets: list[set[asyncio.Task[Any]]] = []
         self._counter = itertools.count()
         self._stopped = False
 
+        if self._inline_single:
+            self._loops.append(create_event_loop())
+            self._task_sets.append(set())
+            return
+
         for shard_idx in range(resolved_size):
             ready = threading.Event()
-            loop = asyncio.new_event_loop()
+            loop = create_event_loop()
             self._loops.append(loop)
             self._task_sets.append(set())
             thread = threading.Thread(
@@ -120,6 +156,16 @@ class EventLoopPool:
         idx = (worker_index if worker_index is not None else next(self._counter)) % self._size
         loop = self._loops[idx]
         tasks = self._task_sets[idx]
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+
+        if running is loop:
+            task = loop.create_task(coro)
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+            return
 
         def _callback() -> None:
             task = loop.create_task(coro)
@@ -129,7 +175,40 @@ class EventLoopPool:
         loop.call_soon_threadsafe(_callback)
 
     def spawn_batch(self, coros: Iterable[Coroutine[Any, Any, Any]]) -> None:
-        """Partition and schedule a batch of coroutines across all event loop shards."""
+        """Partition and schedule a batch of coroutines with at most one wakeup per loop shard."""
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+
+        if self._size == 1:
+            batch = coros if isinstance(coros, list) else list(coros)
+            if not batch:
+                return
+            loop = self._loops[0]
+            tasks = self._task_sets[0]
+            if running is loop:
+                discard = tasks.discard
+                for item in batch:
+                    task = loop.create_task(item)
+                    tasks.add(task)
+                    task.add_done_callback(discard)
+                return
+
+            def _single_callback(
+                target_loop: asyncio.AbstractEventLoop = loop,
+                target_tasks: set[asyncio.Task[Any]] = tasks,
+                items: list[Coroutine[Any, Any, Any]] = batch,
+            ) -> None:
+                discard = target_tasks.discard
+                for item in items:
+                    task = target_loop.create_task(item)
+                    target_tasks.add(task)
+                    task.add_done_callback(discard)
+
+            loop.call_soon_threadsafe(_single_callback)
+            return
+
         buckets: list[list[Coroutine[Any, Any, Any]]] = [[] for _ in range(self._size)]
         for coro in coros:
             idx = next(self._counter) % self._size
@@ -140,6 +219,13 @@ class EventLoopPool:
                 continue
             loop = self._loops[idx]
             tasks = self._task_sets[idx]
+            if running is loop:
+                discard = tasks.discard
+                for item in shard_coros:
+                    task = loop.create_task(item)
+                    tasks.add(task)
+                    task.add_done_callback(discard)
+                continue
 
             def _callback(
                 target_loop: asyncio.AbstractEventLoop = loop,
@@ -211,6 +297,14 @@ class EventLoopPool:
             return
         self._stopped = True
 
+        if self._inline_single:
+            loop = self._loops[0]
+            if loop.is_running():
+                loop.call_soon_threadsafe(loop.stop)
+            elif not loop.is_closed():
+                loop.close()
+            return
+
         for idx, loop in enumerate(self._loops):
             if not loop.is_running():
                 continue
@@ -239,7 +333,5 @@ class EventLoopPool:
     @staticmethod
     def _run_loop_shard(loop: asyncio.AbstractEventLoop, ready: threading.Event) -> None:
         asyncio.set_event_loop(loop)
-        if hasattr(asyncio, "eager_task_factory"):
-            loop.set_task_factory(asyncio.eager_task_factory)
         loop.call_soon(ready.set)
         loop.run_forever()

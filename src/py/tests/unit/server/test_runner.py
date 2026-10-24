@@ -1,20 +1,28 @@
 """Tests for vertebra.server._dispatch, vertebra.server._loops, and vertebra.server.worker."""
 
 import asyncio
+import gc
 import inspect
+import os
 import threading
 import time
+import weakref
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from vertebra._vertebra import Request, init_transport
+from vertebra.framework._app import App
+from vertebra.framework._router import Router, get
 from vertebra.server import _dispatch, worker
 from vertebra.server._dispatch import (
     BatchDispatchPlan,
     _call_handler,
     _handler_meta,
     _resolve_handler_args,
+    compile_handler_table,
     dispatch_batch,
     partition_batch,
 )
@@ -632,3 +640,292 @@ def test_dispatch_batch_returns_pre_built_response_passthrough() -> None:
         assert results[0].request_id == 88
     finally:
         loop.close()
+
+
+class _CountingExecutor(ThreadPoolExecutor):
+    """ThreadPoolExecutor test double recording submit call counts."""
+
+    def __init__(self) -> None:
+        super().__init__(max_workers=2, thread_name_prefix="test-exec")
+        self.submit_calls = 0
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Future[Any]:
+        self.submit_calls += 1
+        return super().submit(fn, *args, **kwargs)
+
+
+class _NoPathAccessRequest:
+    """Request test double that fails if path prefix scanning is attempted."""
+
+    def __init__(self, handler_id: int, request_id: int) -> None:
+        self.handler_id = handler_id
+        self.request_id = request_id
+
+    @property
+    def path(self) -> str:
+        msg = "path must not be accessed when handler_id encodes a mount index"
+        raise AssertionError(msg)
+
+
+def test_sync_native_batch_runs_inline_without_executor_or_double_execution() -> None:
+    """Default sync native routes run inline without ThreadPoolExecutor or single-item double execution."""
+    init_transport()
+    caller_tid = threading.get_ident()
+    seen_tids: list[int] = []
+    dict_calls = 0
+
+    def h_bytes() -> bytes:
+        seen_tids.append(threading.get_ident())
+        return b"ok"
+
+    def h_dict() -> dict[str, int]:
+        nonlocal dict_calls
+        dict_calls += 1
+        seen_tids.append(threading.get_ident())
+        return {"count": dict_calls}
+
+    compiled = compile_handler_table({1: h_bytes, 2: h_dict})
+    exec_spy = _CountingExecutor()
+    pool = EventLoopPool(size=1)
+    w = Worker({1: h_bytes, 2: h_dict})
+    try:
+        single_dict_batch = [Request.from_parts("GET", "/json", b"", request_id=901, handler_id=2)]
+        w._process_batch(
+            single_dict_batch,
+            compiled_handlers=compiled,
+            mount_runners=[],
+            mount_lookup={},
+            all_sync_native=True,
+            loop_pool=pool,
+            executor=exec_spy,
+        )
+        assert dict_calls == 1
+        assert exec_spy.submit_calls == 0
+
+        multi_batch = [
+            Request.from_parts("GET", "/b1", b"", request_id=902, handler_id=1),
+            Request.from_parts("GET", "/b2", b"", request_id=903, handler_id=1),
+            Request.from_parts("GET", "/j1", b"", request_id=904, handler_id=2),
+        ]
+        w._process_batch(
+            multi_batch,
+            compiled_handlers=compiled,
+            mount_runners=[],
+            mount_lookup={},
+            all_sync_native=True,
+            loop_pool=pool,
+            executor=exec_spy,
+        )
+        assert dict_calls == 2
+        assert exec_spy.submit_calls == 0
+        assert all(tid == caller_tid for tid in seen_tids)
+    finally:
+        exec_spy.shutdown(wait=True)
+        pool.stop()
+
+
+def test_sync_to_thread_route_executes_once_on_executor() -> None:
+    """Routes decorated with sync_to_thread=True offload once to ThreadPoolExecutor while defaults stay inline."""
+    app = App()
+    caller_tid = threading.get_ident()
+    fast_tids: list[int] = []
+    blocking_tids: list[int] = []
+
+    @app.get("/fast")
+    def fast_route() -> bytes:
+        fast_tids.append(threading.get_ident())
+        return b"fast"
+
+    @app.get("/blocking", sync_to_thread=True)
+    def blocking_route() -> bytes:
+        blocking_tids.append(threading.get_ident())
+        return b"blocking"
+
+    router = Router(prefix="/v1")
+
+    @get("/slow", sync_to_thread=True)
+    def router_blocking() -> bytes:
+        blocking_tids.append(threading.get_ident())
+        return b"router-slow"
+
+    router.register(router_blocking)
+    app.register(router)
+
+    compiled = compile_handler_table(app._handlers)
+    fast_id = next(hid for hid, info in app.handler_index.items() if info.path == "/fast")
+    block_id = next(hid for hid, info in app.handler_index.items() if info.path == "/blocking")
+    router_id = next(hid for hid, info in app.handler_index.items() if info.path == "/v1/slow")
+
+    assert compiled[fast_id].sync_to_thread is False
+    assert compiled[block_id].sync_to_thread is True
+    assert compiled[router_id].sync_to_thread is True
+
+    submitted: list[MockResponse] = []
+    exec_spy = _CountingExecutor()
+    pool = EventLoopPool(size=1)
+    try:
+        batch = [
+            MockRequest(handler_id=fast_id, request_id=101, path="/fast"),
+            MockRequest(handler_id=block_id, request_id=102, path="/blocking"),
+            MockRequest(handler_id=router_id, request_id=103, path="/v1/slow"),
+        ]
+        plan = partition_batch(batch, compiled, [])
+        dispatch_batch(
+            plan,
+            compiled,
+            [],
+            MockResponse,
+            pool,
+            async_mode=True,
+            submit=submitted.append,
+            executor=exec_spy,
+        )
+        deadline = time.monotonic() + 2.0
+        while len(submitted) < 3 and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+        assert len(submitted) == 3
+        assert exec_spy.submit_calls == 2
+        assert fast_tids == [caller_tid]
+        assert len(blocking_tids) == 2
+        assert all(tid != caller_tid for tid in blocking_tids)
+    finally:
+        exec_spy.shutdown(wait=True)
+        pool.stop()
+
+
+def test_memoryview_and_bytearray_responses_serialize_zero_copy() -> None:
+    """Handlers returning req.body_view (memoryview) or bytearray serialize directly without TypeError."""
+    init_transport()
+
+    def echo_view(req: Request) -> memoryview:
+        return req.body_view
+
+    def echo_bytearray() -> bytearray:
+        return bytearray(b"mutable-bytes")
+
+    handlers = compile_handler_table({1: echo_view, 2: echo_bytearray})
+    req1 = Request.from_parts("POST", "/echo", b"zero-copy-body", request_id=910, handler_id=1)
+    req2 = Request.from_parts("GET", "/ba", b"", request_id=911, handler_id=2)
+
+    raw_calls: list[tuple[int, int, bytes]] = []
+
+    def capture_raw(req_id: int, status: int, body: Any, headers: Any = None) -> None:
+        del headers
+        raw_calls.append((req_id, status, bytes(body)))
+
+    plan = partition_batch([req1, req2], handlers, [])
+    dispatch_batch(
+        plan,
+        handlers,
+        [],
+        MockResponse,
+        None,
+        async_mode=True,
+        submit_raw=capture_raw,
+    )
+    assert raw_calls == [
+        (910, 200, b"zero-copy-body"),
+        (911, 200, b"mutable-bytes"),
+    ]
+
+
+def test_async_dispatch_unpins_request_before_await() -> None:
+    """Async handlers that do not retain Request release their Request reference before suspending."""
+    entered = threading.Event()
+    release_gate: asyncio.Event | None = None
+    loop_holder: list[asyncio.AbstractEventLoop] = []
+    submitted: list[MockResponse] = []
+
+    async def waiting_handler() -> bytes:
+        nonlocal release_gate
+        loop_holder.append(asyncio.get_running_loop())
+        release_gate = asyncio.Event()
+        entered.set()
+        await release_gate.wait()
+        return b"done"
+
+    compiled = compile_handler_table({1: waiting_handler})
+    pool = EventLoopPool(size=1)
+    try:
+        req = MockRequest(handler_id=1, request_id=707)
+        weak_req = weakref.ref(req)
+        plan = partition_batch([req], compiled, [])
+        dispatch_batch(
+            plan,
+            compiled,
+            [],
+            MockResponse,
+            pool,
+            async_mode=True,
+            submit=submitted.append,
+        )
+        del req
+        del plan
+        assert entered.wait(timeout=2.0)
+        gc.collect()
+        assert weak_req() is None
+        assert release_gate is not None
+        loop_holder[0].call_soon_threadsafe(release_gate.set)
+        deadline = time.monotonic() + 2.0
+        while not submitted and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert len(submitted) == 1
+        assert submitted[0].body == b"done"
+    finally:
+        pool.stop()
+
+
+def test_partition_batch_o1_mount_handler_id_without_path_scan() -> None:
+    """Mount handler IDs (both negative and MOUNT_HANDLER_BASE-tagged) resolve in O(1) without reading path."""
+    mounts = [
+        ("/first", lambda reqs: reqs, "asgi"),
+        ("/second", lambda reqs: reqs, "rsgi"),
+    ]
+    req_first = _NoPathAccessRequest(handler_id=-1, request_id=1)
+    req_second = _NoPathAccessRequest(handler_id=0xFFFF_0000_0000_0000 | 1, request_id=2)
+    plan = partition_batch([req_first, req_second], {}, mounts)
+    assert [r.request_id for _i, r in plan.mounts["/first"]] == [1]
+    assert [r.request_id for _i, r in plan.mounts["/second"]] == [2]
+    assert not plan.unmatched
+
+
+def test_worker_inline_event_loop_add_reader_drains_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same-thread uvloop add_reader loop drains SHM batches on a single thread and honours max_batches."""
+    init_transport()
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    seen_threads: list[int] = []
+    pending_batches: list[list[Request]] = [
+        [Request.from_parts("GET", "/a", b"", request_id=990, handler_id=1)],
+    ]
+
+    async def async_route() -> bytes:
+        seen_threads.append(threading.get_ident())
+        return b"inline-loop"
+
+    monkeypatch.setattr(worker, "try_get_batch", lambda: pending_batches.pop(0) if pending_batches else None)
+    monkeypatch.setattr(worker, "clear_request_notification", lambda: None)
+
+    pool = EventLoopPool(size=1, inline_single_loop=True)
+    w = Worker({1: async_route}, max_batches=1, batch_timeout_ms=10)
+    compiled = compile_handler_table({1: async_route})
+    try:
+        os.write(write_fd, b"\x01")
+        w._run_inline_event_loop(
+            notify_fd=read_fd,
+            timeout_sec=0.01,
+            compiled_handlers=compiled,
+            mount_runners=[],
+            mount_lookup={},
+            all_sync_native=False,
+            single_root_asgi=None,
+            single_root_rsgi=None,
+            loop_pool=pool,
+            executor=None,
+        )
+        assert seen_threads == [threading.get_ident()]
+    finally:
+        pool.stop()
+        os.close(read_fd)
+        os.close(write_fd)

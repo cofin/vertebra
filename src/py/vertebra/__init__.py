@@ -46,6 +46,21 @@ __all__ = (
 
 __version__ = "0.1.0"
 
+__lazy_modules__ = [
+    "vertebra.agent",
+    "vertebra.build",
+    "vertebra.cli",
+    "vertebra.db",
+    "vertebra.extensions",
+    "vertebra.framework",
+    "vertebra.server",
+    "vertebra.storage",
+    "vertebra.supervisor",
+    "vertebra.telemetry",
+    "vertebra.typing",
+    "vertebra.utils",
+]
+
 _APP_EXPORTS = frozenset({"App", "HandlerInfo", "_make_handler_id"})
 _ROUTER_EXPORTS = frozenset(
     {
