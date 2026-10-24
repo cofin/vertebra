@@ -5,13 +5,13 @@ title: Runtime Throughput, Multi-Core Scaling, and Python 3.15 Optimizations
 state: active
 plan_revision: 1
 plan_commit: null
-state_revision: 3
-current_task: "1.2"
-last_operation: 20261024T161700Z-flow-executor-compound-1-1+1-2-00
-operation_targets: ["1.1", "1.2"]
-last_verified_checkpoint: "task:1.1@df36a30"
+state_revision: 6
+current_task: "2.1"
+last_operation: 20261024T163255Z-flow-executor-claim-2-1-00
+operation_targets: ["2.1"]
+last_verified_checkpoint: "phase:phase-1@c68065a"
 created_at: 2026-10-24T16:02:00Z
-updated_at: 2026-10-24T16:17:00Z
+updated_at: 2026-10-24T16:32:55Z
 description: Eliminate embedded bridge deadlocks, single-ingress multi-worker contention, SHM syscall and lock overhead, ASGI/RSGI FFI dispatch allocations, and Python worker loop bottlenecks while adding Python 3.15 and 3.15t specializations.
 ---
 
@@ -40,11 +40,11 @@ Single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w` / `4w` / `8w
 ### Phase 1: Review Tooling, CLI, Supervisor, and Python 3.15 Build Readiness
 
 - [x] Task 1.1: Align review agent tool manifests with subagent registry (`df36a30`)
-- [~] Task 1.2: Fix CLI env preservation, ASGI App mount guard, Python 3.15 build/PGO/JIT detection, and benchmark harness
+- [x] Task 1.2: Fix CLI env preservation, ASGI App mount guard, Python 3.15 build/PGO/JIT detection, and benchmark harness (`c68065a`)
 
 ### Phase 2: Lock-Free In-Process Bridge, Right-Sized SHM Rings, and Dekker Wakeups
 
-- [ ] Task 2.1: Eliminate BatchBridge deadlock and add zero-copy in-process batch snapshot and direct response callback
+- [~] Task 2.1: Eliminate BatchBridge deadlock and add zero-copy in-process batch snapshot and direct response callback
 - [ ] Task 2.2: Right-size SHM tiered rings, cache SPSC heads, pad MPMC sequence slots, and add Dekker zero-syscall wakeups
 
 ### Phase 3: Zero-Lock Rust HTTP Ingress, SO_REUSEPORT Embedded Runtime, and Middleware Offloads
@@ -65,8 +65,8 @@ Single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w` / `4w` / `8w
 ## Continuity Snapshot
 
 - **Active Flow / Lifecycle**: `runtime-throughput-and-315` (`active`)
-- **Current Task & Claimant**: `1.2` (`flow-executor`)
-- **Last Verified Checkpoint**: `task:1.1@df36a30`
+- **Current Task & Claimant**: `2.1` (`flow-executor`)
+- **Last Verified Checkpoint**: `phase:phase-1@c68065a`
 - **Decisions**:
   - `ABI_VERSION = 3` in `vertebra-core` adds `consumer_sleeping` and `active_flags` cache lines to `ShmHeader` for Dekker `SeqCst` zero-syscall notifications.
   - Per-worker `SO_REUSEPORT` embedded multi-process supervision powers multi-core throughput while preserving `--topology shm` with lock-free per-batch worker routing.
@@ -74,9 +74,9 @@ Single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w` / `4w` / `8w
   - `drive_asgi_batch` and `drive_rsgi_batch` step unary coroutines via `PyIter_Send` in Rust before falling back to `uvloop` tasks on real async suspension.
 - **Recent Discoveries**: `none`
 - **Blockers & Unblock Conditions**: `none`
-- **Next Exact Step**: `Write failing unit tests in src/py/tests/unit/cli/test_cli_commands.py, src/py/tests/unit/build/test_packaging_and_pgo.py, and src/py/tests/unit/test_bench_infrastructure.py covering env-var preservation (VERTEBRA_WORKERS, VERTEBRA_TOPOLOGY, VERTEBRA_THREADS), --jit (PYTHON_JIT=1 on GIL builds, skipped/warned on free-threaded builds), VERTEBRA_NATIVE=0 App ASGI routing without double-mount, PythonBuildInfo tail-call/JIT/free-threaded/frame-pointer detection, and benchmark target command generation.`
+- **Next Exact Step**: `Add a reproduction unit test in src/rs/vertebra-core/src/bridge.rs that pushes 64 batches into BatchBridge before draining responses from a single consumer thread, proving the bounded-channel ABBA deadlock or stall cannot occur, plus a test verifying zero-copy InProcessRequest batches exceeding 1 MiB succeed without SlabFull errors and invoke a registered direct response completion handler.`
 - **Plan Identity**: `plan_revision: 1`, `plan_commit: null`
-- **State Identity**: `revision: 3`, `last_operation: 20261024T161700Z-flow-executor-compound-1-1+1-2-00`, `operation_targets: ["1.1", "1.2"]`
+- **State Identity**: `revision: 6`, `last_operation: 20261024T163255Z-flow-executor-claim-2-1-00`, `operation_targets: ["2.1"]`
 - **Relevant Rule & Knowledge Paths**:
   - `AGENTS.md`
   - `.agents/bundles/knowledge/workflow.md`
@@ -86,3 +86,5 @@ Single-core (`taskset -c 0`) and multi-core (`taskset -c 0-7`, `1w` / `4w` / `8w
   - `.agents/bundles/knowledge/patterns/rust/lock-free-shm-and-sharding.md`
 
 ## Verification Evidence
+
+- {"actor": "flow-executor", "affected_task_ids": ["1.1", "1.2"], "last_functional_commit": "c68065a", "occurred_at": "2026-10-24T16:31:52Z", "operation": "checkpoint", "operation_id": "20261024T163152Z-flow-executor-checkpoint-spec-00", "phase_id": "phase-1", "scope": "phase", "verification_evidence": [{"command": "uv run pytest src/py/tests/unit/test_review_setup.py src/py/tests/unit/cli/test_cli_commands.py src/py/tests/unit/build/test_packaging_and_pgo.py src/py/tests/unit/test_bench_infrastructure.py -q", "result": "50 passed in 1.65s"}, {"command": "make review-check", "result": "exit 0 (0 issues)"}]}

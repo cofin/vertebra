@@ -24,7 +24,6 @@ use vertebra_http::{
     batcher::{BatchLimit, PendingResponse, RequestBatcher},
     config::ServerConfig,
     dispatcher::Dispatcher,
-    response::encode_response_headers,
     routing::{RouteTable, Router},
     server,
 };
@@ -89,7 +88,7 @@ fn spawn_response_reader(dispatcher: Arc<Dispatcher>) {
                     resp.request_id,
                     PendingResponse {
                         status: resp.status,
-                        headers_mp: encode_response_headers(&resp.headers),
+                        headers_mp: resp.headers_raw,
                         body: resp.body,
                         stream_rx: None,
                     },

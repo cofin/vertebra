@@ -351,6 +351,11 @@ impl DataSlab {
         self.offset.store(0, Ordering::Release);
     }
 
+    /// Roll back the slab offset to a previous position after a partial write failure.
+    pub fn truncate_to(&self, used: usize) {
+        self.offset.store(used, Ordering::Release);
+    }
+
     /// Current usage in bytes.
     pub fn used(&self) -> usize {
         self.offset.load(Ordering::Acquire)
@@ -531,42 +536,119 @@ impl std::fmt::Debug for BufferPool {
     }
 }
 
+/// Zero-copy in-process request payload backed directly by [`bytes::Bytes`].
+///
+/// Used by embedded topologies to pass HTTP request components from Hyper into
+/// Python workers without copying through a fixed [`DataSlab`] or acquiring a
+/// batch writer mutex.
+#[derive(Debug, Clone)]
+pub struct InProcessRequest {
+    pub node: TransportNode,
+    pub path: bytes::Bytes,
+    pub query: bytes::Bytes,
+    pub headers_raw: bytes::Bytes,
+    pub body: bytes::Bytes,
+    pub path_params_raw: bytes::Bytes,
+}
+
+impl InProcessRequest {
+    /// Construct a zero-copy in-process request entry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        method_tag: u8,
+        http_version_tag: u8,
+        handler_id: u64,
+        correlation_id: u64,
+        path: bytes::Bytes,
+        query: bytes::Bytes,
+        headers_raw: bytes::Bytes,
+        body: bytes::Bytes,
+        path_params_raw: bytes::Bytes,
+    ) -> Self {
+        Self {
+            node: TransportNode {
+                method_tag,
+                http_version_tag,
+                _pad: [0; 2],
+                handler_id,
+                correlation_id,
+                path_offset: 0,
+                path_len: path.len().min(u32::MAX as usize) as u32,
+                query_offset: 0,
+                query_len: query.len().min(u32::MAX as usize) as u32,
+                headers_offset: 0,
+                headers_len: headers_raw.len().min(u32::MAX as usize) as u32,
+                body_offset: 0,
+                body_len: body.len().min(u32::MAX as usize) as u32,
+            },
+            path,
+            query,
+            headers_raw,
+            body,
+            path_params_raw,
+        }
+    }
+}
+
+enum SnapshotBacking {
+    Slab {
+        slab: Vec<u8>,
+        nodes: Vec<TransportNode>,
+        pool: Option<std::sync::Arc<BufferPool>>,
+        #[cfg(feature = "compression")]
+        decompressed_slab: std::sync::OnceLock<Vec<u8>>,
+    },
+    InProcess {
+        requests: Vec<InProcessRequest>,
+    },
+}
+
 /// Immutable batch snapshot for zero-object request proxies.
 ///
 /// Created by `poll_batch()` and shared via `Arc` across all
-/// `Request` instances in a batch. Fields are read lazily
-/// from the slab bytes — unused fields are never materialized.
+/// `Request` instances in a batch. Fields are read lazily from either a
+/// contiguous slab or zero-copy [`InProcessRequest`] `Bytes` slices.
 ///
 /// When pool-backed, dropping the snapshot returns the buffers to the
 /// pool for reuse (zero allocation on steady-state).
 pub struct BatchSnapshot {
-    slab: Vec<u8>,
-    nodes: Vec<TransportNode>,
-    pool: Option<std::sync::Arc<BufferPool>>,
+    backing: SnapshotBacking,
     /// Protocol flags for this batch (carries compression codec info).
     flags: u32,
-    /// Lazily decompressed slab data. Populated on first access when
-    /// the COMPRESSED flag is set.
-    #[cfg(feature = "compression")]
-    decompressed_slab: std::sync::OnceLock<Vec<u8>>,
 }
 
 impl std::fmt::Debug for BatchSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BatchSnapshot")
-            .field("slab_len", &self.slab.len())
-            .field("nodes_len", &self.nodes.len())
-            .field("pooled", &self.pool.is_some())
-            .field("flags", &self.flags)
-            .finish()
+        match &self.backing {
+            SnapshotBacking::Slab {
+                slab, nodes, pool, ..
+            } => f
+                .debug_struct("BatchSnapshot")
+                .field("kind", &"slab")
+                .field("slab_len", &slab.len())
+                .field("nodes_len", &nodes.len())
+                .field("pooled", &pool.is_some())
+                .field("flags", &self.flags)
+                .finish(),
+            SnapshotBacking::InProcess { requests } => f
+                .debug_struct("BatchSnapshot")
+                .field("kind", &"inprocess")
+                .field("nodes_len", &requests.len())
+                .field("flags", &self.flags)
+                .finish(),
+        }
     }
 }
 
 impl Drop for BatchSnapshot {
     fn drop(&mut self) {
-        if let Some(pool) = self.pool.take() {
-            let slab = std::mem::take(&mut self.slab);
-            let nodes = std::mem::take(&mut self.nodes);
+        if let SnapshotBacking::Slab {
+            slab, nodes, pool, ..
+        } = &mut self.backing
+            && let Some(pool) = pool.take()
+        {
+            let slab = std::mem::take(slab);
+            let nodes = std::mem::take(nodes);
             pool.return_pair(slab, nodes);
         }
     }
@@ -575,25 +657,20 @@ impl Drop for BatchSnapshot {
 impl BatchSnapshot {
     /// Create a new snapshot from slab data and transport nodes (no pool).
     pub fn new(slab: Vec<u8>, nodes: Vec<TransportNode>) -> Self {
-        Self {
-            slab,
-            nodes,
-            pool: None,
-            flags: 0,
-            #[cfg(feature = "compression")]
-            decompressed_slab: std::sync::OnceLock::new(),
-        }
+        Self::new_with_flags(slab, nodes, 0)
     }
 
     /// Create a new snapshot with protocol flags (no pool).
     pub fn new_with_flags(slab: Vec<u8>, nodes: Vec<TransportNode>, flags: u32) -> Self {
         Self {
-            slab,
-            nodes,
-            pool: None,
+            backing: SnapshotBacking::Slab {
+                slab,
+                nodes,
+                pool: None,
+                #[cfg(feature = "compression")]
+                decompressed_slab: std::sync::OnceLock::new(),
+            },
             flags,
-            #[cfg(feature = "compression")]
-            decompressed_slab: std::sync::OnceLock::new(),
         }
     }
 
@@ -603,14 +680,7 @@ impl BatchSnapshot {
         nodes: Vec<TransportNode>,
         pool: std::sync::Arc<BufferPool>,
     ) -> Self {
-        Self {
-            slab,
-            nodes,
-            pool: Some(pool),
-            flags: 0,
-            #[cfg(feature = "compression")]
-            decompressed_slab: std::sync::OnceLock::new(),
-        }
+        Self::new_pooled_with_flags(slab, nodes, pool, 0)
     }
 
     /// Create a pool-backed snapshot with protocol flags.
@@ -621,23 +691,41 @@ impl BatchSnapshot {
         flags: u32,
     ) -> Self {
         Self {
-            slab,
-            nodes,
-            pool: Some(pool),
+            backing: SnapshotBacking::Slab {
+                slab,
+                nodes,
+                pool: Some(pool),
+                #[cfg(feature = "compression")]
+                decompressed_slab: std::sync::OnceLock::new(),
+            },
             flags,
-            #[cfg(feature = "compression")]
-            decompressed_slab: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Create a zero-copy snapshot directly from in-process `Bytes`-backed requests.
+    pub fn from_inprocess(requests: Vec<InProcessRequest>) -> Self {
+        Self::from_inprocess_with_flags(requests, 0)
+    }
+
+    /// Create a zero-copy in-process snapshot with protocol flags.
+    pub fn from_inprocess_with_flags(requests: Vec<InProcessRequest>, flags: u32) -> Self {
+        Self {
+            backing: SnapshotBacking::InProcess { requests },
+            flags,
         }
     }
 
     /// Number of requests in this batch.
     pub fn len(&self) -> usize {
-        self.nodes.len()
+        match &self.backing {
+            SnapshotBacking::Slab { nodes, .. } => nodes.len(),
+            SnapshotBacking::InProcess { requests } => requests.len(),
+        }
     }
 
     /// Returns `true` if the batch is empty.
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.len() == 0
     }
 
     /// Protocol flags for this batch.
@@ -645,41 +733,58 @@ impl BatchSnapshot {
         self.flags
     }
 
-    /// Get the effective slab bytes, decompressing lazily if needed.
-    ///
-    /// When the COMPRESSED flag is set, this decompresses on first call and
-    /// caches the result. Subsequent calls return the cached decompressed data.
-    /// When not compressed, returns the raw slab directly.
-    fn slab_bytes(&self) -> &[u8] {
+    /// Get the effective slab bytes for slab-backed snapshots, decompressing lazily if needed.
+    fn slab_bytes<'a>(
+        &'a self,
+        slab: &'a [u8],
+        #[cfg(feature = "compression")] decompressed_slab: &'a std::sync::OnceLock<Vec<u8>>,
+    ) -> &'a [u8] {
         #[cfg(feature = "compression")]
         {
             use crate::protocol::codec::CompressionCodec;
             use crate::protocol::flags;
 
             if self.flags & flags::COMPRESSED != 0 {
-                return self.decompressed_slab.get_or_init(|| {
+                return decompressed_slab.get_or_init(|| {
                     let codec = CompressionCodec::from_flags(self.flags);
-                    crate::protocol::codec::decompress(&self.slab, codec)
+                    crate::protocol::codec::decompress(slab, codec)
                         .expect("batch slab decompression should not fail")
                 });
             }
         }
-        &self.slab
+        slab
     }
 
     /// Get the transport node at the given index.
     pub fn node(&self, index: usize) -> &TransportNode {
-        &self.nodes[index]
+        match &self.backing {
+            SnapshotBacking::Slab { nodes, .. } => &nodes[index],
+            SnapshotBacking::InProcess { requests } => &requests[index].node,
+        }
     }
 
     /// Read path bytes for the request at `index`.
     pub fn path_bytes(&self, index: usize) -> &[u8] {
-        let n = &self.nodes[index];
-        if n.path_len == 0 {
-            return &[];
+        match &self.backing {
+            SnapshotBacking::Slab {
+                slab,
+                nodes,
+                #[cfg(feature = "compression")]
+                decompressed_slab,
+                ..
+            } => {
+                let n = &nodes[index];
+                if n.path_len == 0 {
+                    return &[];
+                }
+                #[cfg(feature = "compression")]
+                let s = self.slab_bytes(slab, decompressed_slab);
+                #[cfg(not(feature = "compression"))]
+                let s = self.slab_bytes(slab);
+                &s[n.path_offset as usize..(n.path_offset + n.path_len) as usize]
+            }
+            SnapshotBacking::InProcess { requests } => &requests[index].path,
         }
-        let slab = self.slab_bytes();
-        &slab[n.path_offset as usize..(n.path_offset + n.path_len) as usize]
     }
 
     /// Read path as a UTF-8 string.
@@ -689,12 +794,29 @@ impl BatchSnapshot {
 
     /// Read query bytes (None if no query string).
     pub fn query_bytes(&self, index: usize) -> Option<&[u8]> {
-        let n = &self.nodes[index];
-        if n.query_len == 0 {
-            return None;
+        match &self.backing {
+            SnapshotBacking::Slab {
+                slab,
+                nodes,
+                #[cfg(feature = "compression")]
+                decompressed_slab,
+                ..
+            } => {
+                let n = &nodes[index];
+                if n.query_len == 0 {
+                    return None;
+                }
+                #[cfg(feature = "compression")]
+                let s = self.slab_bytes(slab, decompressed_slab);
+                #[cfg(not(feature = "compression"))]
+                let s = self.slab_bytes(slab);
+                Some(&s[n.query_offset as usize..(n.query_offset + n.query_len) as usize])
+            }
+            SnapshotBacking::InProcess { requests } => {
+                let q = &requests[index].query;
+                if q.is_empty() { None } else { Some(q) }
+            }
         }
-        let slab = self.slab_bytes();
-        Some(&slab[n.query_offset as usize..(n.query_offset + n.query_len) as usize])
     }
 
     /// Read query as a UTF-8 string.
@@ -705,30 +827,86 @@ impl BatchSnapshot {
 
     /// Read raw encoded header bytes.
     pub fn headers_raw(&self, index: usize) -> &[u8] {
-        let n = &self.nodes[index];
-        if n.headers_len == 0 {
-            return &[];
+        match &self.backing {
+            SnapshotBacking::Slab {
+                slab,
+                nodes,
+                #[cfg(feature = "compression")]
+                decompressed_slab,
+                ..
+            } => {
+                let n = &nodes[index];
+                if n.headers_len == 0 {
+                    return &[];
+                }
+                #[cfg(feature = "compression")]
+                let s = self.slab_bytes(slab, decompressed_slab);
+                #[cfg(not(feature = "compression"))]
+                let s = self.slab_bytes(slab);
+                &s[n.headers_offset as usize..(n.headers_offset + n.headers_len) as usize]
+            }
+            SnapshotBacking::InProcess { requests } => &requests[index].headers_raw,
         }
-        let slab = self.slab_bytes();
-        &slab[n.headers_offset as usize..(n.headers_offset + n.headers_len) as usize]
     }
 
     /// Read body bytes.
     pub fn body(&self, index: usize) -> &[u8] {
-        let n = &self.nodes[index];
-        if n.body_len == 0 {
-            return &[];
+        match &self.backing {
+            SnapshotBacking::Slab {
+                slab,
+                nodes,
+                #[cfg(feature = "compression")]
+                decompressed_slab,
+                ..
+            } => {
+                let n = &nodes[index];
+                if n.body_len == 0 {
+                    return &[];
+                }
+                #[cfg(feature = "compression")]
+                let s = self.slab_bytes(slab, decompressed_slab);
+                #[cfg(not(feature = "compression"))]
+                let s = self.slab_bytes(slab);
+                &s[n.body_offset as usize..(n.body_offset + n.body_len) as usize]
+            }
+            SnapshotBacking::InProcess { requests } => &requests[index].body,
         }
-        let slab = self.slab_bytes();
-        &slab[n.body_offset as usize..(n.body_offset + n.body_len) as usize]
+    }
+
+    /// Read body as an owned [`bytes::Bytes`] buffer (`O(1)` clone for in-process snapshots).
+    pub fn body_bytes_owned(&self, index: usize) -> bytes::Bytes {
+        match &self.backing {
+            SnapshotBacking::InProcess { requests } => requests[index].body.clone(),
+            SnapshotBacking::Slab { .. } => bytes::Bytes::copy_from_slice(self.body(index)),
+        }
+    }
+
+    /// Read raw encoded path parameter bytes (`empty` when unpopulated).
+    pub fn path_params_raw(&self, index: usize) -> &[u8] {
+        match &self.backing {
+            SnapshotBacking::Slab { .. } => &[],
+            SnapshotBacking::InProcess { requests } => &requests[index].path_params_raw,
+        }
     }
 
     /// Compute the serialized size for ring slot allocation.
     ///
     /// Wire format: `[flags:u32][node_count:u32][slab_len:u32][pad:u32][nodes...][slab...]`
     pub fn serialized_size(&self) -> usize {
-        let node_bytes = self.nodes.len() * core::mem::size_of::<TransportNode>();
-        BATCH_HEADER_SIZE + node_bytes + self.slab.len()
+        match &self.backing {
+            SnapshotBacking::Slab { slab, nodes, .. } => {
+                let node_bytes = nodes.len() * core::mem::size_of::<TransportNode>();
+                BATCH_HEADER_SIZE + node_bytes + slab.len()
+            }
+            SnapshotBacking::InProcess { requests } => {
+                let node_bytes = requests.len() * core::mem::size_of::<TransportNode>();
+                let slab_len: usize = requests
+                    .iter()
+                    .map(|r| r.path.len() + r.query.len() + r.headers_raw.len() + r.body.len())
+                    .sum();
+                BATCH_HEADER_SIZE + node_bytes + slab_len
+            }
+        }
     }
 
     /// Serialize this batch snapshot into a ring slot buffer.
@@ -747,35 +925,56 @@ impl BatchSnapshot {
             size
         );
 
-        let mut offset = 0;
+        match &self.backing {
+            SnapshotBacking::Slab { slab, nodes, .. } => {
+                let mut offset = 0;
+                slot[offset..offset + 4].copy_from_slice(&self.flags.to_le_bytes());
+                offset += 4;
+                slot[offset..offset + 4].copy_from_slice(&(nodes.len() as u32).to_le_bytes());
+                offset += 4;
+                slot[offset..offset + 4].copy_from_slice(&(slab.len() as u32).to_le_bytes());
+                offset += 4;
+                slot[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes());
+                offset += 4;
 
-        // Header: flags, node_count, slab_len, padding
-        slot[offset..offset + 4].copy_from_slice(&self.flags.to_le_bytes());
-        offset += 4;
-        slot[offset..offset + 4].copy_from_slice(&(self.nodes.len() as u32).to_le_bytes());
-        offset += 4;
-        slot[offset..offset + 4].copy_from_slice(&(self.slab.len() as u32).to_le_bytes());
-        offset += 4;
-        slot[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes()); // padding
-        offset += 4;
+                let node_bytes = nodes.len() * core::mem::size_of::<TransportNode>();
+                if node_bytes > 0 {
+                    // SAFETY: TransportNode is #[repr(C)], Copy, and contains only primitive types.
+                    let src = nodes.as_ptr() as *const u8;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src,
+                            slot[offset..].as_mut_ptr(),
+                            node_bytes,
+                        );
+                    }
+                    offset += node_bytes;
+                }
 
-        // Nodes: memcpy TransportNode array (repr(C), Copy)
-        let node_bytes = self.nodes.len() * core::mem::size_of::<TransportNode>();
-        if node_bytes > 0 {
-            // SAFETY: TransportNode is #[repr(C)], Copy, and contains only primitive types.
-            // The source slice is valid for node_bytes, and offset-based (no pointers).
-            let src = self.nodes.as_ptr() as *const u8;
-            unsafe {
-                core::ptr::copy_nonoverlapping(src, slot[offset..].as_mut_ptr(), node_bytes);
+                slot[offset..offset + slab.len()].copy_from_slice(slab);
+                offset + slab.len()
             }
-            offset += node_bytes;
+            SnapshotBacking::InProcess { requests } => {
+                let mut writer = ShmBatchWriter::new(self.flags);
+                writer.nodes.reserve(requests.len());
+                writer.components.reserve(requests.len() * 4);
+                for req in requests {
+                    let mut node = req.node;
+                    node.path_len = req.path.len() as u32;
+                    node.query_len = req.query.len() as u32;
+                    node.headers_len = req.headers_raw.len() as u32;
+                    node.body_len = req.body.len() as u32;
+                    writer.nodes.push(node);
+                    writer.components.push(&req.path);
+                    if !req.query.is_empty() {
+                        writer.components.push(&req.query);
+                    }
+                    writer.components.push(&req.headers_raw);
+                    writer.components.push(&req.body);
+                }
+                writer.serialize_into(slot)
+            }
         }
-
-        // Slab data
-        slot[offset..offset + self.slab.len()].copy_from_slice(&self.slab);
-        offset += self.slab.len();
-
-        offset
     }
 
     /// Deserialize a batch snapshot from ring slot data.

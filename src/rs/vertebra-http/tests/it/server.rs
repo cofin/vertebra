@@ -22,7 +22,6 @@ use vertebra_http::{
     body::PendingResponse,
     config::ServerConfig,
     dispatcher::Dispatcher,
-    response::encode_response_headers,
     routing::{RouteTable, Router},
     server,
 };
@@ -110,7 +109,7 @@ async fn spawn_test_server_with(bp: Option<BackpressureConfig>) -> TestServer {
                     .map(|i| BridgeResponse {
                         request_id: batch.node(i).correlation_id,
                         status: 200,
-                        headers: Vec::new(),
+                        headers_raw: bytes::Bytes::new(),
                         body: b"hello".to_vec().into(),
                     })
                     .collect();
@@ -132,7 +131,7 @@ async fn spawn_test_server_with(bp: Option<BackpressureConfig>) -> TestServer {
                     resp.request_id,
                     PendingResponse {
                         status: resp.status,
-                        headers_mp: encode_response_headers(&resp.headers),
+                        headers_mp: resp.headers_raw,
                         body: resp.body,
                         stream_rx: None,
                     },

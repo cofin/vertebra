@@ -17,9 +17,7 @@ use vertebra_core::bridge::{BatchBridge, BridgeResponse};
 use vertebra_core::ipc::{
     FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING, RESPONSE_SLOT_HEADER_LEN, ResponseSlot,
 };
-use vertebra_core::transport::{
-    Transport, TransportError, encode_headers_compact, iter_raw_headers,
-};
+use vertebra_core::transport::{Transport, TransportError, encode_headers_compact};
 
 use crate::request::RequestBatch;
 use crate::response::Response;
@@ -142,12 +140,6 @@ pub fn try_get_batch() -> PyResult<Option<RequestBatch>> {
     Ok(None)
 }
 
-fn decode_headers_from_raw(raw: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
-    iter_raw_headers(raw)
-        .map(|(k, v)| (k.to_vec(), v.to_vec()))
-        .collect()
-}
-
 pub struct ResponseSubmitter;
 
 impl ResponseSubmitter {
@@ -196,13 +188,12 @@ impl ResponseSubmitter {
         let resp = BridgeResponse {
             request_id,
             status,
-            headers: decode_headers_from_raw(headers_raw),
+            headers_raw: Bytes::copy_from_slice(headers_raw),
             body: Bytes::copy_from_slice(body),
         };
-        py.detach(|| bridge.submit_responses(vec![resp]))
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("failed to submit response: {e}"))
-            })?;
+        py.detach(|| bridge.submit_response(resp)).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("failed to submit response: {e}"))
+        })?;
         Ok(())
     }
 
@@ -256,7 +247,7 @@ impl ResponseSubmitter {
             bridge_responses.push(BridgeResponse {
                 request_id: *req_id,
                 status: *status,
-                headers: decode_headers_from_raw(headers_raw),
+                headers_raw: Bytes::copy_from_slice(headers_raw),
                 body: Bytes::copy_from_slice(body),
             });
         }
