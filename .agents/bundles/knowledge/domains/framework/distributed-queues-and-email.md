@@ -9,8 +9,8 @@ sources:
   - resource: src/py/vertebra/framework/email/__init__.py
   - resource: src/py/vertebra/server/lanes.py
   - resource: src/rs/vertebra-storage/src/lib.rs
-  - resource: src/py/tests/unit/framework/test_queues.py
-  - resource: src/py/tests/unit/framework/test_email.py
+  - resource: src/py/tests/unit/framework/test_distributed_queues.py
+  - resource: src/py/tests/unit/framework/test_email_providers.py
 ---
 
 # Distributed Queues, Cron Leader Election & Transactional Email

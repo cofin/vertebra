@@ -20,12 +20,14 @@ Vertebra provides cross-process shared-memory database connection management and
 
 ## 1. Rust SHM Lease Table (`broker.rs`)
 
-[`ShmLeaseTable`](../../../../../src/rs/vertebra-core/src/broker.rs) manages pooled connection slots in a fixed-size POSIX shared memory ring:
+[`ShmLeaseTable`](../../../../../src/rs/vertebra-core/src/broker.rs) manages pooled connection slots, a co-located statement cache, and a cross-process pub/sub ring in a single fixed-size POSIX shared memory region:
 
+- **Single-Region Co-location**: `ShmLeaseTable::init_in_region_with_statements(region, pool_size, max_overflow, stmt_capacity)` places the 64-byte `LeaseTableHeader` (including `stmt_offset`, `stmt_capacity`, `channel_write_seq`, and `channel_capacity`), the `LeaseSlot` array, the `ShmChannelSlot` ring (`DEFAULT_CHANNEL_CAPACITY = 256` × 256 B), and the `ShmStatementCache` inside one `ShmRegion` (`VERTEBRA_BROKER_SHM_FD` / `VERTEBRA_BROKER_SHM_SIZE`). `LeaseBroker.statement_cache()` returns a `StatementCache` handle bound to the co-located statement cache in the same region.
 - **Slot State Machine**: Each slot contains an atomic `state_and_pid` (`SLOT_STATE_FREE`, `SLOT_STATE_PRIMARY`, `SLOT_STATE_OVERFLOW`), `generation`, `acquired_ns`, `expiry_ns`, and `bind_key_hash`.
 - **Atomic Acquisition**: Workers acquire slots using compare-and-swap (`CAS`) without global locks, blocking on `wake_seq` (`WaitWord`) when exhausted.
-- **Heartbeats & Stale Reclamation**: If a worker process exits or fails to release its slot before `expiry_ns` elapses, `reap_expired` and `reclaim_worker` transition the slot back to `SLOT_STATE_FREE` and wake waiting workers.
-- **Slot Alignment**: Slots are padded to 64-byte cache lines to eliminate false sharing across concurrent worker cores.
+- **Heartbeats & Crash Reclamation**: If a worker process exits or fails to release its slot before `expiry_ns` elapses, `reap_expired` and `reclaim_worker(pid)` (invoked automatically by `WorkerLifecycle::reclaim_worker_leases` and `RingFactory::shutdown_workers` in [`workers/factory.rs`](../../../../../src/rs/vertebra-http/src/workers/factory.rs)) transition all slots owned by `pid` back to `SLOT_STATE_FREE` and wake waiting workers.
+- **Cross-Process Channel Ring (`ShmChannelSlot`)**: `publish_channel(channel, payload, sender_pid, timestamp_ns)` and `drain_channel(channel, cursor)` provide lock-free seqlock-guarded cross-process pub/sub messaging across forked workers.
+- **Slot Alignment**: Lease slots (64 B) and channel/statement slots (256 B) are cache-line aligned to eliminate false sharing across concurrent worker cores.
 
 ## 2. Shared Statement Cache (`ShmStatementCache`)
 

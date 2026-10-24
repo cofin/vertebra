@@ -10,6 +10,16 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-10-23] flow-archive | Completed and Archived SHM Data Plane PRD (`shm-native-drivers-and-broker-proxy`), 5 Child Specs, and 16 Tasks
+
+- Completed and archived Master PRD `shm-native-drivers-and-broker-proxy` and all 5 child specs (`rust-native-shm-drivers`, `rust-native-enterprise-olap-drivers`, `shm-broker-driver-proxy`, `shm-database-broker`, `redis-valkey-resp3` — 16 tasks total) following merge of PR #42 and PR #43 into `main` (`034703d`).
+- Synthesized 5-dimension OKF v0.2 knowledge across `product/` and nested `knowledge/` chapters:
+  - `domains/data/database-drivers-and-dialers.md`: Documented Tier-1 Rust-native SHM drivers in `src/rs/vertebra-db` and `vertebra.db` across PostgreSQL, MySQL, SQLite, Oracle (pure-Rust Thin TNS/TTC, Autonomous Database Wallet extraction, 26ai `VECTOR`/`OSON`), SQL Server (`tiberius` TDS, `@P1` rewriting), DuckDB (single-writer SHM broker host, DuckDB 2.0-safe startup pragmas), Redis/Valkey RESP3 (`CLIENT TRACKING`, Sentinel, Cluster CRC16 slot routing, Memorystore IAM auth), `ArrowCursor` over `ShmRegion` Arrow IPC, and `CloudSqlDialer` (`:3307`) / `AlloyDbDialer` (`:5433`).
+  - `domains/data/broker-and-shm-leases.md` & `architecture/runtime/shm-supervision-and-recovery.md`: Documented single-FD co-location of `ShmStatementCache` and `ShmChannelSlot` inside `ShmLeaseTable` (`VERTEBRA_BROKER_SHM_FD` / `VERTEBRA_BROKER_SHM_SIZE`, `LeaseBroker.statement_cache()`), supervisor worker-exit lease reclamation (`reclaim_worker`), and cross-process channel pub/sub.
+  - `domains/extensions/sqlspec-alchemy-and-dialects.md`: Documented Tier-1 `SyncAdapterConfig` / `AsyncAdapterConfig` (`{Postgres,Mysql,Sqlite,Oracle,Mssql,Duckdb}{Sync,Async}Config`), Tier-2 `SqlSpecProvider` / `ProxySyncDriver` / `ProxyAsyncDriver` with threshold-based `ShmRegion` Arrow IPC transfer (`SharedArrowBuffer`, `SharedArrowTable`), and all six `+vtb` `DialectDescriptor` instances (`{Postgres,Oracle,Mysql,Sqlite,Mssql,Duckdb}Dialect`).
+  - `testing/agentic-review.md` & `product/*`: Documented `PY-07` (clean domain naming without brand/mechanism prefixes or compatibility aliases) and `PY-08` (`vertebra.typing` boundary check) in `tools/scripts/review_setup.py`, and reconciled all moved source paths across the bundle.
+- Contracted `.agents/bundles/specs/` back to lazy (`.gitkeep` only).
+
 ## [2026-10-23] flow-archive | Completed and Archived 5 Master PRDs, 21 Child Chapters, and 126 Tasks
 
 - Completed and archived 5 Master PRDs (`vertebra-design-quality`, `vertebra-shm-connection-broker`, `vertebra-native-db-drivers`, `vertebra-queues-and-messaging`, `vertebra-agentic-harness`) and all 21 child specs (126 tasks total) following merge into `main` across PRs #36, #37, #38, #39, and #40.

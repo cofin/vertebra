@@ -6,10 +6,11 @@ status: stable
 tags: [guidelines, conventions, performance, naming, architecture]
 sources:
   - resource: src/py/vertebra/__init__.py
-  - resource: src/py/vertebra/server/_native.py
+  - resource: src/py/vertebra/server/_dispatch.py
   - resource: src/py/vertebra/server/_asgi/_runner.py
   - resource: src/py/vertebra/framework/_router.py
   - resource: src/py/vertebra/utils/serializers/_json.py
+  - resource: src/py/vertebra/typing.py
   - resource: src/py/vertebra/_typing.py
   - resource: src/rs/vertebra-core/src/channel.rs
   - resource: src/rs/vertebra-http/src/lib.rs
@@ -32,13 +33,13 @@ Per-request and per-batch code paths minimize heap allocations, copies, and cros
 
 - **Rust Shared Memory & Bridge**: Write serialized responses directly into ring slots through closure-based `SpscRing::try_send_with` / `MpmcRing::try_send_with`, and read through zero-copy `SlotView` (`SpscRing::try_recv_view`) or `MpmcRing::try_recv_with` ([`channel.rs`](../../../src/rs/vertebra-core/src/channel.rs)). Recycle `TransportArena` and `DataSlab` allocations through `BufferPool`.
 - **PyO3 FFI Boundary**: Release the Python GIL with `py.detach(|| ...)` on every blocking poll (`get_batch`), batch response submission (`submit_results`, `submit_response`), RSGI file I/O, Oxc bundle build (`Bundler::build`), QuickJS SSR render (`SsrPool::render`), and native object-store calls in `_storage`.
-- **Python Dispatch**: Partition each batch once into [`BatchDispatchPlan`](../../../src/py/vertebra/server/_native.py) (`sync_native`, `async_native`, `mounts`, `unmatched`), cache handler signatures with `@functools.lru_cache(maxsize=512)` on `_handler_dispatch_spec`, wake the `AsyncRuntime` event loop once per batch through `spawn_batch`/`schedule_batch`, and drive ASGI coroutines inline with [`_drive_coro`](../../../src/py/vertebra/server/_asgi/_runner.py) when `VERTEBRA_ASGI_DIRECT_SEND` is enabled; a coroutine that suspends is promoted to a task by `_resume_coro_in_task`.
+- **Python Dispatch**: Partition each batch once into [`BatchDispatchPlan`](../../../src/py/vertebra/server/_dispatch.py) (`sync_native`, `async_native`, `mounts`, `unmatched`), cache handler signatures with `@functools.lru_cache(maxsize=512)` on `_handler_dispatch_spec`, wake the `AsyncRuntime` event loop once per batch through `spawn_batch`/`schedule_batch`, and drive ASGI coroutines inline with [`_drive_coro`](../../../src/py/vertebra/server/_asgi/_runner.py) when `VERTEBRA_ASGI_DIRECT_SEND` is enabled; a coroutine that suspends is promoted to a task by `_resume_coro_in_task`.
 - **Lazy Package Startup**: Keep [`vertebra/__init__.py`](../../../src/py/vertebra/__init__.py) free of eager submodule imports. Its PEP 562 `__getattr__` loads `vertebra.framework` exports on first attribute access, so `import vertebra` does not import the framework, server, or native extensions.
 
 ## 3. Python Module Organization
 
 - **Python `>=3.12` Native Typing**: Use PEP 695 generic syntax (`def schedule[T]`, `class SQLSpecPlugin[ConfigT]`), PEP 604 unions (`X | Y`), and PEP 585 built-in collection types (`list`, `dict`, `tuple`, `set`). Do not add `typing_extensions` shims.
-- **Value Objects & Base Structs**: Config, metadata, spec, and frame value objects are `msgspec.Struct(..., frozen=True, gc=False)` (or extend [`BaseStruct`](../../../src/py/vertebra/_typing.py), [`CamelizedBaseStruct`](../../../src/py/vertebra/_typing.py), [`FrozenBaseStruct`](../../../src/py/vertebra/_typing.py), or [`FrozenCamelizedStruct`](../../../src/py/vertebra/_typing.py)). Enable `cache_hash=True` on hashable lookup/key structs, `forbid_unknown_fields=True` on inbound request schemas, and `array_like=True` strictly on internal positional wire/ring-buffer frames ([`ChannelMessage`](../../../src/py/vertebra/extensions/broker/transport.py), [`StateDeltaFrame`](../../../src/py/vertebra/framework/live.py), [`TaskEnvelope`](../../../src/py/vertebra/framework/queues/base.py)) — never on HTTP/SSE/JSON response models.
+- **Value Objects & Base Structs**: Config, metadata, spec, and frame value objects are `msgspec.Struct(..., frozen=True, gc=False)` (or extend [`BaseStruct`](../../../src/py/vertebra/typing.py), [`CamelizedBaseStruct`](../../../src/py/vertebra/typing.py), [`FrozenBaseStruct`](../../../src/py/vertebra/typing.py), or [`FrozenCamelizedStruct`](../../../src/py/vertebra/typing.py)). Enable `cache_hash=True` on hashable lookup/key structs, `forbid_unknown_fields=True` on inbound request schemas, and `array_like=True` strictly on internal positional wire/ring-buffer frames ([`ChannelMessage`](../../../src/py/vertebra/extensions/broker/transport.py), [`StateDeltaFrame`](../../../src/py/vertebra/framework/live.py), [`TaskEnvelope`](../../../src/py/vertebra/framework/queues/base.py)) — never on HTTP/SSE/JSON response models.
 - **JSON Serialization**: Route JSON through [`vertebra.utils.serializers`](../../../src/py/vertebra/utils/serializers/_json.py) (`encode_json`, `encode_json_bytes`, `encode_json_into`, `decode_json`, `format_json`, `JSONSerializer`) rather than calling `msgspec.json` or `json` directly in other modules.
 - **No Inline `#` Comments**: Do not place inline `#` comments in Python implementation or test files. Document intent, invariants, and edge cases in Google-style docstrings.
 - **Module & Class Layout**:
@@ -50,7 +51,7 @@ Per-request and per-batch code paths minimize heap allocations, copies, and cros
 
 ## 4. Polyglot Boundary & Git Discipline
 
-- **Single FNV-1a Route Identity**: Route matching happens in Rust ([`Router`](../../../src/rs/vertebra-http/src/router.rs) / `matchit 0.9`), which passes a `u64` handler id to Python workers. Any change to path normalization or FNV-1a hashing must keep [`src/rs/vertebra-http/src/router.rs`](../../../src/rs/vertebra-http/src/router.rs) and [`src/py/vertebra/framework/_router.py`](../../../src/py/vertebra/framework/_router.py) synchronized.
+- **Single FNV-1a Route Identity**: Route matching happens in Rust ([`Router`](../../../src/rs/vertebra-http/src/routing.rs) / `matchit 0.9`), which passes a `u64` handler id to Python workers. Any change to path normalization or FNV-1a hashing must keep [`src/rs/vertebra-http/src/routing.rs`](../../../src/rs/vertebra-http/src/routing.rs) and [`src/py/vertebra/framework/_router.py`](../../../src/py/vertebra/framework/_router.py) synchronized.
 - **Dependency Hygiene**: Keep benchmark-only packages (`duckdb`, `uvicorn`, `httptools`, `uvloop`, `granian`, `spikard`) in `[dependency-groups].bench` in [`pyproject.toml`](../../../pyproject.toml), never in `dev`.
 - **Branch & PR Discipline**: Never commit or push directly to `main`. Develop on a dedicated branch with signed commits, verify with `make lint-all` and focused test targets, and deliver through a pull request.
 

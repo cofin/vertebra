@@ -29,7 +29,8 @@ The Vertebra agentic review system provides automated, manifest-driven static an
    - `areas.toml` defines area manifests, ownership patterns, shard paths, and validation budgets.
    - `make review-route BASE=origin/main` routes changed repository files to their designated area reviewers.
 2. **Review Execution and Ledger Validation**:
-   - Area reviewers audit code against authoritative checklists (`RT-01..12`, `HTTP-01..12`, `FFI-01..10`, etc.).
+   - Area reviewers audit code against authoritative checklists (`RT-01..12`, `HTTP-01..12`, `FFI-01..10`, `PY-01..12`, etc.).
+   - `make review-check` enforces AST-level Python structural invariants in [`tools/scripts/review_setup.py`](../../../../tools/scripts/review_setup.py), including `PY-07` (clean domain naming without `Vertebra*`, `Native*`, `*VtbDialect`, or `X = Y` compatibility aliases) and `PY-08` (centralized `vertebra.typing` re-exports without `vertebra._typing` imports outside `typing.py`).
    - Findings adhere to machine-validated Markdown ledgers checked via `uv run python -m tools.scripts.review_setup ledger <path>`.
 3. **Benchmark Regression Gate**:
    - `make rs-bench`: Runs Rust Criterion benchmarks.

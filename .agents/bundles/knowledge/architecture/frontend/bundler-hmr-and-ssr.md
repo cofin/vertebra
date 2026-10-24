@@ -12,7 +12,7 @@ sources:
   - resource: src/rs/vertebra-bundler/src/ssr.rs
   - resource: src/rs/vertebra-bundler/src/declarations.rs
   - resource: src/rs/vertebra-bundler/src/errors.rs
-  - resource: src/py/vertebra/_bundler.py
+  - resource: src/py/vertebra/_bundler.pyi
   - resource: src/py/vertebra/build/_orchestrator.py
   - resource: src/py/vertebra/build/_config.py
   - resource: src/py/vertebra/build/_fallback.py
@@ -22,7 +22,7 @@ sources:
 
 # Oxc Bundler, HMR Watcher & QuickJS SSR Pool
 
-[`vertebra-bundler`](../../../../../src/rs/vertebra-bundler/src/lib.rs) builds the `_bundler` PyO3 module (`crate-type = ["cdylib", "rlib"]`, `#[pymodule(gil_used = false)]`, module constant `GIL_USED = False`). [`vertebra/_bundler.py`](../../../../../src/py/vertebra/_bundler.py) re-exports `Bundler`, `BundleConfig`, `DevConfig`, `BuildResult`, `OutputFile`, `SourceWatcher`, `SsrPool`, `SsrResult`, `IsolatedDeclarationsGenerator`, `minify_css`, `encode_ssr_worker_frame`, and `GIL_USED` as `vertebra._bundler`. When the native `_bundler` extension is not compiled, `AssetBundler` raises `UnsupportedBackendError` rather than emitting stub bundle files.
+[`vertebra-bundler`](../../../../../src/rs/vertebra-bundler/src/lib.rs) builds the `_bundler` PyO3 module (`crate-type = ["cdylib", "rlib"]`, `#[pymodule(gil_used = false)]`, module constant `GIL_USED = False`). [`vertebra/_bundler.pyi`](../../../../../src/py/vertebra/_bundler.pyi) declares the stub types for `Bundler`, `BundleConfig`, `DevConfig`, `BuildResult`, `OutputFile`, `SourceWatcher`, `SsrPool`, `SsrResult`, `IsolatedDeclarationsGenerator`, `minify_css`, `encode_ssr_worker_frame`, and `GIL_USED` as `vertebra._bundler`. When the native `_bundler` extension is not compiled, `AssetBundler` raises `UnsupportedBackendError` rather than emitting stub bundle files.
 
 ## Single-entry transform (`bundler.rs`, `config.rs`)
 
