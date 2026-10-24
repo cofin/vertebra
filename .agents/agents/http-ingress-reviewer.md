@@ -16,9 +16,6 @@ tools:
   - search_web
   - moma_search
   - skill_search
-  - call_mcp_tool
-  - list_resources
-  - read_resource
   - send_message
 preloadSkills:
   - review-core
