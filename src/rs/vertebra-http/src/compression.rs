@@ -4,6 +4,7 @@ use std::io::Write;
 
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, header};
+use serde::{Deserialize, Serialize};
 
 /// Supported HTTP response `Content-Encoding` codecs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,14 +137,17 @@ pub fn compress_response_body(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CompressionBackend {
     Zstd,
     Gzip,
+    #[serde(alias = "br")]
     Brotli,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CompressionOffloadConfig {
     pub backend: CompressionBackend,
     pub minimum_size: usize,

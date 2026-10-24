@@ -1,17 +1,54 @@
 //! Server configuration.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::backpressure::{BackpressureConfig, CircuitBreakerConfig};
+use crate::compression::CompressionOffloadConfig;
+use crate::cors::CorsOffloadConfig;
 use crate::http3::Http3Config;
 use crate::tls::{MtlsConfig, TrustedProxyConfig};
+
+/// Static asset mount specification offloaded from Python frameworks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StaticMountConfig {
+    pub path_prefix: String,
+    pub directories: Vec<String>,
+    pub html_mode: bool,
+    pub send_as_attachment: bool,
+    pub headers: HashMap<String, String>,
+}
+
+/// Pre-rendered OpenAPI JSON payload specification offloaded to Rust.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenApiCacheConfig {
+    pub schema_path: String,
+    pub body: String,
+    pub etag: String,
+    pub content_type: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct OffloadPlanPayload {
+    pub compression: Option<CompressionOffloadConfig>,
+    pub cors: Option<CorsOffloadConfig>,
+    pub static_mounts: Vec<StaticMountConfig>,
+    pub openapi: Option<OpenApiCacheConfig>,
+}
 
 /// Top-level server configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// Address to bind on.
     pub bind: SocketAddr,
+    /// Enable `SO_REUSEPORT` on Unix TCP listeners for multi-process worker scaling.
+    pub reuse_port: bool,
     /// Number of worker threads for the Tokio runtime.
     /// Defaults to the number of logical CPUs.
     pub worker_threads: usize,
@@ -47,10 +84,20 @@ pub struct ServerConfig {
     pub h2_keep_alive_interval_ms: Option<u64>,
     /// Enable RFC 9113 HTTP/1.1 `Upgrade: h2c` negotiation on cleartext sockets.
     pub enable_h2c_upgrade: bool,
+    /// Enable cleartext HTTP/2 prior-knowledge `MSG_PEEK` detection (disabled by default for zero-peek HTTP/1.1 fastpath).
+    pub enable_h2c_prior_knowledge: bool,
     /// CIDR-verified reverse proxies permitted to supply identity headers.
     pub trusted_proxies: TrustedProxyConfig,
     /// HTTP/3 over QUIC configuration and `Alt-Svc` advertisement settings.
     pub http3: Http3Config,
+    /// Optional Rust CORS preflight and response header offload configuration.
+    pub cors: Option<CorsOffloadConfig>,
+    /// Optional Rust response compression offload configuration.
+    pub compression: Option<CompressionOffloadConfig>,
+    /// Optional Rust static file mount configurations.
+    pub static_mounts: Vec<StaticMountConfig>,
+    /// Optional pre-rendered OpenAPI schema cache served directly in Rust.
+    pub openapi_cache: Option<OpenApiCacheConfig>,
 }
 
 /// Runtime topology for Vertebra.
@@ -120,6 +167,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             bind: "127.0.0.1:8000".parse().unwrap(),
+            reuse_port: false,
             worker_threads: num_cpus(),
             batch_size: 64,
             batch_timeout: Duration::from_millis(1),
@@ -137,13 +185,36 @@ impl Default for ServerConfig {
             h2_max_concurrent_streams: None,
             h2_keep_alive_interval_ms: None,
             enable_h2c_upgrade: true,
+            enable_h2c_prior_knowledge: false,
             trusted_proxies: TrustedProxyConfig::default(),
             http3: Http3Config::default(),
+            cors: None,
+            compression: None,
+            static_mounts: Vec::new(),
+            openapi_cache: None,
         }
     }
 }
 
 impl ServerConfig {
+    /// Parse a JSON middleware offload payload (`VERTEBRA_OFFLOAD_CONFIG`) into this `ServerConfig`.
+    pub fn apply_offload_json(&mut self, raw: &str) -> Result<(), serde_json::Error> {
+        let parsed: OffloadPlanPayload = serde_json::from_str(raw)?;
+        if let Some(comp) = parsed.compression {
+            self.compression = Some(comp);
+        }
+        if let Some(cors) = parsed.cors {
+            self.cors = Some(cors);
+        }
+        if !parsed.static_mounts.is_empty() {
+            self.static_mounts = parsed.static_mounts;
+        }
+        if let Some(openapi) = parsed.openapi {
+            self.openapi_cache = Some(openapi);
+        }
+        Ok(())
+    }
+
     /// Build config from environment variables, falling back to defaults.
     ///
     /// Reads `VERTEBRA_HOST` and `VERTEBRA_PORT` to construct the bind address.
@@ -164,6 +235,20 @@ impl ServerConfig {
             std::env::var("VERTEBRA_DEV").as_deref(),
             Ok("1") | Ok("true") | Ok("TRUE") | Ok("True")
         );
+        config.reuse_port = matches!(
+            std::env::var("VERTEBRA_REUSE_PORT").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("True")
+        );
+        config.enable_h2c_prior_knowledge = matches!(
+            std::env::var("VERTEBRA_H2C").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("True")
+        );
+        if let Ok(raw_offload) = std::env::var("VERTEBRA_OFFLOAD_CONFIG")
+            && !raw_offload.trim().is_empty()
+            && let Err(e) = config.apply_offload_json(&raw_offload)
+        {
+            eprintln!("[vertebra] warning: failed to parse VERTEBRA_OFFLOAD_CONFIG: {e}");
+        }
 
         // TLS config
         let tls_cert = std::env::var("VERTEBRA_TLS_CERT").ok();

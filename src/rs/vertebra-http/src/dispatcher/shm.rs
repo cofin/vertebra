@@ -119,18 +119,24 @@ impl ShmDispatcher {
     }
 
     /// Dispatch a batch to workers via MPMC rings with single-lock per batch.
-    pub fn dispatch_shm(&self, batch: Batch) -> usize {
+    pub fn dispatch_shm(&self, mut batch: Batch) -> usize {
+        self.dispatch_shm_vec(&mut batch.requests)
+    }
+
+    /// Dispatch requests in-place while preserving `requests` vector capacity.
+    pub fn dispatch_shm_vec(&self, requests: &mut Vec<crate::batcher::PendingRequest>) -> usize {
         use vertebra_core::protocol::flags;
 
         let worker_count = self.workers.len();
         if worker_count == 0 {
+            requests.clear();
             error!("no SHM workers configured, dropping batch");
             return 0;
         }
 
         let start = self
             .next_worker
-            .fetch_add(batch.requests.len().max(1), Ordering::Relaxed);
+            .fetch_add(requests.len().max(1), Ordering::Relaxed);
         let batch_seq = self.next_batch.fetch_add(1, Ordering::Relaxed);
         let mut shard_idx = batch_seq & self.shard_mask;
 
@@ -140,7 +146,7 @@ impl ShmDispatcher {
         let mut dispatched_count = 0;
         let mut shard_guard = self.correlation_shards[shard_idx].lock().unwrap();
 
-        for (offset, req) in batch.requests.into_iter().enumerate() {
+        for (offset, req) in requests.drain(..).enumerate() {
             let crate::batcher::PendingRequest {
                 handler_id,
                 method_tag,

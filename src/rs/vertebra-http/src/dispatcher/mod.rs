@@ -30,7 +30,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::debug;
 
 use crate::backpressure::{BackpressureConfig, BackpressureController};
-use crate::batcher::Batch;
+use crate::batcher::{Batch, PendingRequest};
 use crate::body::PendingResponse;
 
 mod bridge_types {
@@ -139,11 +139,17 @@ impl Dispatcher {
     }
 
     /// Dispatch a batch to workers.
-    pub fn dispatch(&self, batch: Batch) -> usize {
+    pub fn dispatch(&self, mut batch: Batch) -> usize {
+        self.dispatch_requests(&mut batch.requests)
+    }
+
+    /// Dispatch requests in-place, draining `requests` while preserving its heap capacity.
+    #[inline]
+    pub fn dispatch_requests(&self, requests: &mut Vec<PendingRequest>) -> usize {
         match &self.backend {
-            DispatchBackend::Direct(tx) => direct::dispatch_direct(tx, batch),
-            DispatchBackend::Bridge(bridge) => bridge::dispatch_bridge(bridge, batch),
-            DispatchBackend::Shm(shm) => shm.dispatch_shm(batch),
+            DispatchBackend::Direct(tx) => direct::dispatch_direct_vec(tx, requests),
+            DispatchBackend::Bridge(bridge) => bridge::dispatch_bridge_vec(bridge, requests),
+            DispatchBackend::Shm(shm) => shm.dispatch_shm_vec(requests),
         }
     }
 

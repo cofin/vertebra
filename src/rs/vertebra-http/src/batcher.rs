@@ -160,8 +160,9 @@ impl RequestBatcher {
 
     /// Run the batcher loop until the channel is closed.
     pub async fn run(mut self) {
-        let max_size = self.limit.max;
+        let max_size = self.limit.max.max(1);
         let mut pending: Vec<PendingRequest> = Vec::with_capacity(max_size);
+        let mut draining: Vec<PendingRequest> = Vec::with_capacity(max_size);
 
         while let Some(req) = self.rx.recv().await {
             pending.push(req);
@@ -174,21 +175,22 @@ impl RequestBatcher {
             }
 
             trace!(depth = pending.len(), "queued request(s)");
-            self.drain(&mut pending);
+            std::mem::swap(&mut pending, &mut draining);
+            self.drain(&mut draining);
         }
 
         if !pending.is_empty() {
-            self.drain(&mut pending);
+            std::mem::swap(&mut pending, &mut draining);
+            self.drain(&mut draining);
         }
         debug!("RequestBatcher shutting down");
     }
 
-    fn drain(&mut self, pending: &mut Vec<PendingRequest>) {
-        let count = pending.len();
+    #[inline]
+    fn drain(&mut self, draining: &mut Vec<PendingRequest>) {
+        let count = draining.len();
         debug!(count, "draining batch");
-        let batch = Batch {
-            requests: std::mem::replace(pending, Vec::with_capacity(self.limit.max)),
-        };
-        self.dispatcher.dispatch(batch);
+        self.dispatcher.dispatch_requests(draining);
+        draining.clear();
     }
 }

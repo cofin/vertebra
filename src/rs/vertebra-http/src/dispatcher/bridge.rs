@@ -9,19 +9,23 @@ use tracing::error;
 use vertebra_core::bridge::{BatchBridge, WriteRequest};
 
 use super::BridgeCorrelation;
-use crate::batcher::Batch;
+use crate::batcher::PendingRequest;
 
-pub(super) fn dispatch_bridge(bridge_corr: &BridgeCorrelation, batch: Batch) -> usize {
+pub(super) fn dispatch_bridge_vec(
+    bridge_corr: &BridgeCorrelation,
+    requests: &mut Vec<PendingRequest>,
+) -> usize {
     use vertebra_core::protocol::flags;
 
     let Some(bridge) = BatchBridge::get() else {
+        requests.clear();
         error!("batch bridge not initialized, dropping batch");
         return 0;
     };
     let writer = bridge.batch_writer();
     let mut dispatched_count = 0;
 
-    for req in batch.requests {
+    for req in requests.drain(..) {
         let id = bridge_corr.next_id.fetch_add(1, Ordering::Relaxed);
         let is_fnf = req.flags & flags::FIRE_AND_FORGET != 0;
 
