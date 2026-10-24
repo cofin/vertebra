@@ -19,7 +19,10 @@ pub mod transport;
 pub mod wsgi;
 
 pub use agent::{SchemaDigestCache, classify_jsonrpc_frame};
-pub use asgi::{AsgiScope, AsgiScopeIterator};
+pub use asgi::{
+    AsgiProtocol, AsgiScope, AsgiScopeIterator, PyEmptyAwaitable, PyValueAwaitable,
+    drive_asgi_batch,
+};
 pub use broker::{
     BrokerStats, LeaseBroker, LeaseGrant, StatementCache, StatementCacheStats, StatementPlan,
 };
@@ -27,7 +30,7 @@ pub use db::{AlloyDbDialer, ArrowCursor, CloudSqlDialer};
 pub use headers::{Headers, HeadersIterator};
 pub use request::{Request, RequestBatch, RequestBatchIterator};
 pub use response::Response;
-pub use rsgi::{RsgiHttpProtocol, RsgiScope, RsgiTransport};
+pub use rsgi::{RsgiHttpProtocol, RsgiScope, RsgiTransport, drive_rsgi_batch};
 pub use telemetry::{
     JwtGuard, LogSink, RateLimiter, format_traceparent, parse_traceparent, sanitize_sql,
 };
@@ -58,6 +61,9 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<request::RequestBatchIterator>()?;
     m.add_class::<asgi::AsgiScope>()?;
     m.add_class::<asgi::AsgiScopeIterator>()?;
+    m.add_class::<asgi::AsgiProtocol>()?;
+    m.add_class::<asgi::PyEmptyAwaitable>()?;
+    m.add_class::<asgi::PyValueAwaitable>()?;
     m.add_class::<wsgi::WsgiEnviron>()?;
     m.add_class::<wsgi::WsgiEnvironIterator>()?;
     m.add_class::<wsgi::WsgiInput>()?;
@@ -97,6 +103,8 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(transport::try_get_batch, m)?)?;
     m.add_function(wrap_pyfunction!(file_io::stream_file_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(wsgi::run_wsgi_callable, m)?)?;
+    m.add_function(wrap_pyfunction!(asgi::drive_asgi_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(rsgi::drive_rsgi_batch, m)?)?;
 
     // Telemetry helpers
     m.add_function(wrap_pyfunction!(telemetry::parse_traceparent, m)?)?;

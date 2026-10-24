@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ from vertebra._vertebra import (
     RsgiHttpProtocol,
     RsgiScope,
     RsgiTransport,
+    drive_rsgi_batch,
+    init_transport,
 )
 from vertebra.cli import cli
 from vertebra.server._dispatch import BatchDispatchPlan, dispatch_batch
@@ -329,3 +332,111 @@ def test_native_worker_mount_dispatch_for_rsgi() -> None:
         assert results[0].request_id == 77
     finally:
         loop.close()
+
+
+def test_rsgi_scope_lazy_cached_headers_root_path_and_interning() -> None:
+    """Verify RsgiScope lazily resolves fields, caches headers, slices root_path, and interns strings."""
+    req1 = Request.from_parts(
+        "GET",
+        "/api/v1/users?active=1",
+        b"",
+        request_id=801,
+        headers=[("Host", "api.example.com"), ("X-Trace", "t1")],
+    )
+    req2 = Request.from_parts("GET", "/api/v1", b"", request_id=802)
+
+    s1 = req1.rsgi_scope(root_path="/api/v1")
+    s2 = req2.rsgi_scope(root_path="/api/v1")
+
+    assert s1.path == "/users"
+    assert s1.root_path == "/api/v1"
+    assert s1.query_string == "active=1"
+    assert s1.authority == "api.example.com"
+    assert s2.path == "/"
+    assert s2.query_string == ""
+    assert s1.proto is s2.proto
+    assert s1.rsgi_version is s2.rsgi_version
+    assert s1.http_version is s2.http_version
+    assert s1.scheme is s2.scheme
+    assert s1.method is s2.method
+    assert list(s1.headers.items()) == list(s1.headers.items())
+
+
+def test_rsgi_done_concurrent_awaits_across_threads() -> None:
+    """Verify concurrent threads awaiting RSGI_DONE never trigger PyBorrowMutError."""
+    proto = RsgiHttpProtocol(body=b"", request_id=803)
+    transport = proto.response_stream(200, [])
+
+    def _worker(idx: int) -> None:
+        awaitable = transport.send_str(f"c{idx}|")
+        it = awaitable.__await__()
+        with pytest.raises(StopIteration) as stop:
+            next(it)
+        assert stop.value.value is None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(_worker, range(64)))
+
+    resp = proto.take_response()
+    assert resp.status == 200
+    assert len(resp.body) > 128
+
+
+@pytest.mark.anyio
+async def test_rsgi_http_protocol_direct_submit_and_drive_rsgi_batch() -> None:
+    """Verify direct-submitting RsgiHttpProtocol and zero-task unary drive_rsgi_batch."""
+    init_transport()
+    direct_proto = RsgiHttpProtocol(body=b"ping", request_id=810, direct_submit=True)
+    direct_proto.response_str(200, [("content-type", "text/plain")], "pong")
+
+    loop = asyncio.get_running_loop()
+    orig_create_task = loop.create_task
+    created_tasks: list[asyncio.Task[Any]] = []
+
+    def tracked_create_task(coro: Any, **kwargs: Any) -> asyncio.Task[Any]:
+        t = orig_create_task(coro, **kwargs)
+        created_tasks.append(t)
+        return t
+
+    executed: list[str] = []
+
+    class FastAndSlowRsgiApp:
+        async def __rsgi__(self, scope: RsgiScope, protocol: RsgiHttpProtocol) -> None:
+            if scope.path == "/fail":
+                raise ValueError("rsgi failure")
+            if scope.path == "/slow":
+                await asyncio.sleep(0.005)
+                stream = protocol.response_stream(200, [("content-type", "text/plain")])
+                await stream.send_str("s1")
+                await stream.send_bytes(b"s2")
+                executed.append("/slow")
+                return
+            raw = await protocol()
+            protocol.response_bytes(200, [("x-path", scope.path)], raw)
+            executed.append(scope.path)
+
+    app = FastAndSlowRsgiApp()
+    unary_reqs = [
+        Request.from_parts("POST", "/v1/a", b"1", request_id=811),
+        Request.from_parts("POST", "/v1/b", b"2", request_id=812),
+    ]
+    create_task_attr = "create_task"
+    setattr(loop, create_task_attr, tracked_create_task)
+    try:
+        inline_unary = drive_rsgi_batch(app, unary_reqs, loop_obj=loop, root_path="/v1")
+        assert inline_unary == 2
+        assert len(created_tasks) == 0
+
+        mixed_reqs = [
+            Request.from_parts("POST", "/c", b"3", request_id=813),
+            Request.from_parts("GET", "/slow", b"", request_id=814),
+            Request.from_parts("GET", "/fail", b"", request_id=815),
+        ]
+        inline_mixed = drive_rsgi_batch(app, mixed_reqs, loop_obj=loop)
+        assert inline_mixed == 2
+        assert len(created_tasks) == 1
+        await asyncio.gather(*created_tasks)
+    finally:
+        setattr(loop, create_task_attr, orig_create_task)
+
+    assert executed == ["/a", "/b", "/c", "/slow"]

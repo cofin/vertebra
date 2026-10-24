@@ -265,23 +265,22 @@ impl Request {
     }
 
     /// Return an RSGI v1.6 scope backed by this request's snapshot slot.
-    #[pyo3(signature = (scheme="http", server="127.0.0.1:8000", client="127.0.0.1:0"))]
-    fn rsgi_scope(
-        &self,
-        py: Python<'_>,
-        scheme: &str,
-        server: &str,
-        client: &str,
-    ) -> PyResult<RsgiScope> {
-        RsgiScope::from_batch(py, &self.batch, self.index, "http", scheme, server, client)
+    #[pyo3(signature = (scheme="http", server="127.0.0.1:8000", client="127.0.0.1:0", root_path=""))]
+    fn rsgi_scope(&self, scheme: &str, server: &str, client: &str, root_path: &str) -> RsgiScope {
+        RsgiScope::from_batch(
+            &self.batch,
+            self.index,
+            "http",
+            scheme,
+            server,
+            client,
+            root_path,
+        )
     }
 
     /// Return a native RSGI v1.6 HTTP protocol handler for this request.
     fn rsgi_protocol(&self) -> RsgiHttpProtocol {
-        RsgiHttpProtocol::new(
-            self.get_body_bytes().clone(),
-            self.batch.node(self.index).correlation_id,
-        )
+        RsgiHttpProtocol::from_batch(Arc::clone(&self.batch), self.index, false, false, None)
     }
 
     fn as_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {

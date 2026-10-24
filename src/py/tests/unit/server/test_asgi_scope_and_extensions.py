@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from vertebra._vertebra import AsgiScope, Request
+from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, drive_asgi_batch, init_transport
 from vertebra.server._asgi._runner import FLAG_FINAL, FLAG_TRAILERS, AsgiRunner
 from vertebra.server._asgi._wire import (
     PathSendResponse,
@@ -254,3 +254,53 @@ async def test_websocket_http_response_rejection_helper() -> None:
     assert sent[0]["status"] == 403
     assert sent[1]["type"] == "websocket.http.response.body"
     assert sent[1]["body"] == b"Forbidden"
+
+
+@pytest.mark.anyio
+async def test_asgi_protocol_zerocopysend_pathsend_and_lifespan_batch(tmp_path: Path) -> None:
+    """Verify AsgiProtocol handles zerocopysend, pathsend, root_path, and isolated lifespan_state."""
+    init_transport()
+    asset = tmp_path / "hello.txt"
+    asset.write_bytes(b"disk-bytes-payload")
+
+    req_zc = Request.from_parts("POST", "/sub/echo", b"zero-copy-view", request_id=701)
+    proto_zc = AsgiProtocol(b"", request_id=701)
+    await proto_zc.send({"type": "http.response.start", "status": 200, "headers": []})
+    await proto_zc.send(
+        {
+            "type": "http.response.zerocopysend",
+            "buffer": req_zc.body_view,
+            "more_body": False,
+        }
+    )
+    resp_zc = proto_zc.take_response()
+    assert resp_zc.body == b"zero-copy-view"
+
+    proto_path = AsgiProtocol(b"", request_id=702)
+    await proto_path.send({"type": "http.response.start", "status": 200, "headers": []})
+    await proto_path.send({"type": "http.response.pathsend", "path": str(asset)})
+    resp_path = proto_path.take_response()
+    assert resp_path.body == b"disk-bytes-payload"
+
+    seen_paths_and_states: list[tuple[str, str, int]] = []
+    shared_state = {"count": 10}
+
+    async def mounted_app(scope: Any, receive: Any, send: Any) -> None:
+        await receive()
+        scope["state"]["count"] += 1
+        seen_paths_and_states.append((scope["path"], scope["root_path"], scope["state"]["count"]))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"done"})
+
+    inline_done = drive_asgi_batch(
+        mounted_app,
+        [
+            Request.from_parts("GET", "/v2/items", b"", request_id=703),
+            Request.from_parts("GET", "/v2", b"", request_id=704),
+        ],
+        root_path="/v2",
+        lifespan_state=shared_state,
+    )
+    assert inline_done == 2
+    assert shared_state["count"] == 10
+    assert seen_paths_and_states == [("/items", "/v2", 11), ("/", "/v2", 11)]
