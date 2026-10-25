@@ -5,13 +5,13 @@ title: Two-Phase Rust PGO Pipeline, Python 3.15 Packaging, and Documentation Syn
 state: active
 plan_revision: 1
 plan_commit: null
-state_revision: 1
+state_revision: 9
 current_task: null
-last_operation: 20261025T152125Z-flow-planner-activate-spec-00
-operation_targets: []
-last_verified_checkpoint: null
+last_operation: 20261025T154635Z-flow-executor-checkpoint-phase-2-00
+operation_targets: ["2.1"]
+last_verified_checkpoint: 2dffe05
 created_at: 2026-10-25T15:21:20Z
-updated_at: 2026-10-25T15:21:25Z
+updated_at: 2026-10-25T15:46:35Z
 description: Wire the two-phase Rust PGO instrumentation and profile-use pipeline across vertebra-http and all PyO3 extensions, extend standalone/onefile packaging and vtb build for Python 3.15/3.15t and SQLAlchemy dialects, and synchronize AGENTS.md and OKF v0.2 documentation.
 tags: [feature, pgo, packaging, python-315, docs]
 parent_prd: null
@@ -52,27 +52,29 @@ research: []
 ## Implementation Plan
 
 ### Phase 1: Two-Phase Rust PGO Pipeline & Python 3.15 Packaging
-- [ ] Task 1.1: Wire two-phase Rust PGO pipeline, multi-extension CARGO_TARGET_DIR builds, and tools/pgo lint gates
-- [ ] Task 1.2: Add Python 3.15/3.15t and musl packaging targets, PGO/binary staging, and SQLAlchemy dialect entry points
+- [x] Task 1.1: Wire two-phase Rust PGO pipeline, multi-extension CARGO_TARGET_DIR builds, and tools/pgo lint gates (`23d0be5`)
+- [x] Task 1.2: Add Python 3.15/3.15t and musl packaging targets, PGO/binary staging, and SQLAlchemy dialect entry points (`774d920`)
 
 ### Phase 2: AGENTS.md & OKF v0.2 Documentation Sync
-- [ ] Task 2.1: Synchronize AGENTS.md quick commands and OKF v0.2 bundle symbol and PGO references
+- [x] Task 2.1: Synchronize AGENTS.md quick commands and OKF v0.2 bundle symbol and PGO references (`2dffe05`)
 
 ## Continuity Snapshot
 
 - **Active Flow / Lifecycle**: `pgo-packaging-and-docs-sync` (`active`)
-- **Current Task & Claimant**: `null`
-- **Last Verified Checkpoint**: `null`
+- **Current Task & Claimant**: `none (all tasks closed)`
+- **Last Verified Checkpoint**: `2dffe05`
 - **Decisions**:
   - Deduplicate `tools/pgo/rust_pgo.py` onto `vertebra.build.packaging.pgo` while keeping `tools/pgo/python_pgo.py` self-contained so monkeypatch unit tests against both modules continue to exercise independent sysconfig/JIT probes.
   - Omit `-m` when invoking `maturin develop` for `vertebra-py` from repository root so root `pyproject.toml` (`module-name = "vertebra._vertebra"`) applies, while passing `-m` for `vertebra-bundler` and `vertebra-storage` which carry crate-local `pyproject.toml` files.
   - Remove unused `resolve_llvm_profdata = find_llvm_profdata` and `OnefileBuilder.extract_archive = extract_to` symbol aliases.
 - **Recent Discoveries**:
-  - `pyproject.toml` `[project.entry-points."sqlalchemy.dialects"]` still pointed to `*VtbDialect` names removed in PR #43 and omitted `mssql` and `duckdb`.
+  - `src/py/vertebra/build/packaging/pgo.py` needed `Path(__file__).resolve().parents[5]` (not `parents[4]`) after relocation under `build/packaging/`, and `run_pgo_pipeline` / `build_optimized_extensions` now validate `.profdata` once per batch rather than spawning `llvm-profdata show` per crate.
+  - `vtb build` gained `--entrypoint`, `--profdata`, and `--server-binary`, `BuildTarget` validates `SUPPORTED_PYTHON_VERSIONS` (`3.12`–`3.15`, `3.14t`, `3.15t`) and resolves Linux `musl` triples, and all 12 `pyproject.toml` SQLAlchemy dialect entry points now resolve to `{Postgres,Oracle,Mysql,Sqlite,Mssql,Duckdb}Dialect`.
+  - Synchronized `AGENTS.md` and 10 OKF v0.2 bundle chapters (`2dffe05`) with zero broken relative links and zero missing `sources:` paths across all 62 bundle markdown files.
 - **Blockers & Unblock Conditions**: `none`
-- **Next Exact Step**: `claim Task 1.1`
+- **Next Exact Step**: `Run aggregate verification gates, code-reviewer, and quality-reviewer before complete and archive`
 - **Plan Identity**: `plan_revision: 1`, `plan_commit: null`
-- **State Identity**: `revision: 1`, `last_operation: 20261025T152125Z-flow-planner-activate-spec-00`, `operation_targets: []`
+- **State Identity**: `revision: 9`, `last_operation: 20261025T154635Z-flow-executor-checkpoint-phase-2-00`, `operation_targets: ["2.1"]`
 - **Relevant Rule / Knowledge Paths**:
   - `AGENTS.md`
   - `.agents/bundles/knowledge/workflow.md`
@@ -81,3 +83,6 @@ research: []
   - `.agents/bundles/knowledge/patterns/python/serialization-and-utils.md`
 
 ## Verification Evidence
+
+- Phase 1 Checkpoint (`774d920`): `uv run pytest src/py/tests/unit/build/test_packaging_and_pgo.py -q` (`13 passed in 0.73s`), `make lint-all` (`passed`).
+- Phase 2 Checkpoint (`2dffe05`): `make review-check` (`passed`), OKF bundle audit (`62 files, 0 errors`), `git diff --check` (`passed`).
