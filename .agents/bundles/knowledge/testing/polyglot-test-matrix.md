@@ -34,10 +34,10 @@ The `Makefile` applies the same host check and exports `NPM_CONFIG_REGISTRY`, `P
 |---|---|---|
 | `make dev` | `cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage` + `uv run maturin develop --uv` for `vertebra-py`, `vertebra-bundler`, and `vertebra-storage` | Builds and installs debug `vertebra._vertebra`, `vertebra._bundler`, and `vertebra._storage` into `.venv`. Required after a Rust edit before running `pytest`. |
 | `make rs-test` | `rm -rf /dev/shm/test-* /dev/shm/*vertebra*` + `cd src/rs && cargo test --workspace --features tls,compression` | Unit and integration tests across every workspace crate. |
-| `make py-test` | `make dev` + `uv run pytest src/py/tests -v` | Python suites under [`src/py/tests/`](../../../../src/py/tests/conftest.py). |
+| `make py-test` | `make dev` + `uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage` + `uv run pytest src/py/tests -v` | `.pyi` stub parity against compiled extensions plus Python suites under [`src/py/tests/`](../../../../src/py/tests/conftest.py). |
 | `make ts-test` | `cd src/ts/vertebra-client && NODE_OPTIONS="--localstorage-file=${TMPDIR:-/tmp}/vertebra-vitest-localstorage" bun run test` | Every Vitest suite under `src/ts/vertebra-client/tests/`. |
 | `make test` | `rs-test` + `py-test` + `ts-test` | All three languages. |
-| `make lint-all` | `bunx biome check .` + `ruff check` + `ruff format --check` + `mypy src/py/vertebra` + `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --features tls,compression -- -D warnings` | Read-only lint and type gate. |
+| `make lint-all` | `bunx biome check .` + `ruff check` & `ruff format --check` (`src/py/vertebra src/py/tests tools/scripts tools/pgo`) + `mypy src/py/vertebra tools/scripts tools/pgo` + `mypy.stubtest` + `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --features tls,compression -- -D warnings` + `make review-check` | Read-only lint, type, stub, and review-manifest gate. |
 | `make coverage` | `uv run pytest src/py/tests --cov --quiet` + `coverage xml` + `coverage html` | Python coverage only (`coverage.xml`, `htmlcov/`). |
 | `make check` | `lint` + `test` + `coverage` | Full local gate. `lint` applies auto-fixes. |
 

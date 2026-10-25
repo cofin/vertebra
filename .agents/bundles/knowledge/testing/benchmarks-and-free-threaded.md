@@ -12,6 +12,8 @@ sources:
   - resource: tools/benchmarks/scenarios.py
   - resource: tools/benchmarks/targets.py
   - resource: tools/benchmarks/store.py
+  - resource: src/py/vertebra/build/packaging/pgo.py
+  - resource: tools/pgo/__init__.py
   - resource: tools/pgo/rust_pgo.py
   - resource: tools/pgo/python_pgo.py
   - resource: .github/workflows/benchmark.yml
@@ -50,12 +52,12 @@ Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `s
 
 The workflow runs on `workflow_dispatch` (input `full_benchmark`), on published releases, and weekly (`cron: '0 6 * * 1'`). It installs `oha` with `cargo install oha`, runs `make install` and `make build`, then `make bench` (or `make bench-all` when `full_benchmark` is true), uploads `tools/benchmarks/results/` with 90-day retention, and on `main` commits `tools/benchmarks/results/*.duckdb`.
 
-## 4. Profile-Guided Optimization (`tools/pgo/`)
+## 4. Profile-Guided Optimization (`build/packaging/pgo.py`, `tools/pgo/`)
 
-- [`rust_pgo.py`](../../../../tools/pgo/rust_pgo.py): `RustPgoConfig` (`PgoMode` `generate | use | baseline`), `build_instrumented`, `build_optimized`, `build_instrumented_extension`, `build_optimized_extension`, `merge_profiles`, `weighted_merge_profiles`, `find_llvm_profdata`, `validate_profdata`, and `check_profdata_size`.
+- [`pgo.py`](../../../../src/py/vertebra/build/packaging/pgo.py) & [`rust_pgo.py`](../../../../tools/pgo/rust_pgo.py): `RustPgoConfig` (`PgoMode` `generate | use | baseline`), `EXTENSION_MANIFESTS`, `PgoPipelineResult`, `resolve_cargo_release_dir` (`CARGO_TARGET_DIR`), `build_instrumented`, `build_instrumented_extension`, `build_instrumented_extensions`, `run_default_pgo_workload`, `merge_profiles`, `weighted_merge_profiles`, `find_llvm_profdata`, `validate_profdata`, `check_profdata_size`, `build_optimized`, `build_optimized_extension`, `build_optimized_extensions`, and `run_pgo_pipeline` (`python -m tools.pgo.rust_pgo`).
 - [`python_pgo.py`](../../../../tools/pgo/python_pgo.py): `PythonBuildInfo`, `PlatformSupport`, `PLATFORM_MATRIX`, `detect_python_build`, `check_pgo_availability`, and `get_platform_support`.
 
-`make build-pgo` invokes `tools/pgo/rust_pgo.py` for two-phase instrumented and profile-use release builds. `src/py/tests/unit/build/test_packaging_and_pgo.py` exercises both modules, and `vtb build --pgo` records PGO metadata during packaging.
+`make build-pgo` invokes `uv run python -m tools.pgo.rust_pgo` for two-phase instrumented and profile-use release builds across `vertebra-http` and all three PyO3 extensions (or `PROFDATA=<path> make build-pgo` to reuse an existing profile). `src/py/tests/unit/build/test_packaging_and_pgo.py` exercises both modules, and `vtb build --pgo [--profdata <path>] [--server-binary <path>]` records PGO and `.profdata` metadata and bundles `bin/vertebra-server` during packaging.
 
 ## 5. Isolating `--group bench` Dependencies (`pyproject.toml`)
 

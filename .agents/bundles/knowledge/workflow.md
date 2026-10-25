@@ -16,7 +16,7 @@ sources:
 
 <!-- truth: start -->
 - Task files under `.agents/bundles/specs/<flow_id>/tasks/` are authoritative; `spec.md` is the synchronized checklist and continuity view.
-- Use Vertebra's canonical [`Makefile`](../../../Makefile) targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make review-check`, `make review-route`, `make coverage`, `make check`, `make build`, `make build-pgo`, `make bench`, `make bench-ft`, `make rs-bench`, `make bench-micro`, `make bench-baseline`, `make bench-check`, `make upgrade`) and rebuild the PyO3 extensions (`_vertebra`, `_bundler`, `_storage`) via `make dev` after any Rust edit before running `pytest`.
+- Use Vertebra's canonical [`Makefile`](../../../Makefile) targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make review-check`, `make review-route`, `make coverage`, `make check`, `make build`, `make build-pgo`, `make bench`, `make bench-all`, `make bench-ft`, `make bench-report`, `make rs-bench`, `make bench-micro`, `make bench-baseline`, `make bench-check`, `make upgrade`) and rebuild the PyO3 extensions (`_vertebra`, `_bundler`, `_storage`) via `make dev` after any Rust edit before running `pytest`.
 - Every task declares and justifies one `verification_strategy`; only observable behavior and defect correction require an initial failing test.
 - Record durable findings in the task's `## Notes & Discoveries` and preserve unrelated worktree changes.
 - Consumer operational skills install only under `.agents/skills/`. Product, knowledge, research, and specs remain under `.agents/bundles/` (`specs/` and `research/` are created lazily only when needed).
@@ -37,14 +37,14 @@ make clean                                                # Remove Python/Rust/T
 
 # 2. Focused Language Test Suites
 make rs-test                                              # rm -rf /dev/shm/test-* /dev/shm/*vertebra*, then cargo test --workspace --features tls,compression
-make py-test                                              # make dev, then uv run pytest src/py/tests -v
+make py-test                                              # make dev, mypy.stubtest (_vertebra, _bundler, _storage), then uv run pytest src/py/tests -v
 uv run pytest src/py/tests/unit/server/test_runner.py -q  # Focused Python test file (run make dev first if Rust changed)
 make ts-test                                              # bun run test (vitest run) with an isolated --localstorage-file
 
 # 3. Aggregate Test, Lint & Pre-PR Verification Gates
 make test                                                 # rs-test + py-test + ts-test
-make lint                                                 # Biome --write --unsafe, ruff check --fix + ruff format, cargo fmt, clippy --fix -D warnings, mypy
-make lint-all                                             # Read-only CI gate: biome check, ruff check, ruff format --check, mypy, cargo fmt --check, clippy -D warnings, review-check
+make lint                                                 # Biome --write --unsafe, ruff (src/py/vertebra src/py/tests tools/scripts tools/pgo), cargo fmt + clippy --fix, mypy + stubtest, review-check
+make lint-all                                             # Read-only CI gate: biome check, ruff check + format --check, mypy + stubtest, cargo fmt --check, clippy -D warnings, review-check
 make review-check                                         # Validate review capability manifests, skills, agents, and privacy constraints
 make review-route                                         # Route changed files to owning review areas and shards (BASE=origin/main)
 make coverage                                             # uv run pytest src/py/tests --cov, then coverage.xml and htmlcov/ (Python only)
@@ -52,7 +52,7 @@ make check                                                # lint + test + covera
 
 # 4. Release Builds & Benchmarks (--group bench kept out of dev)
 make build                                                # ts-build, release cargo build of non-extension crates, maturin develop -r for the three extensions, uv build
-make build-pgo                                            # Two-phase Rust PGO instrumentation + profile-use build via tools/pgo/rust_pgo.py
+make build-pgo                                            # Two-phase Rust PGO instrumentation + profile-use build via tools/pgo/rust_pgo.py (or PROFDATA=<path>)
 make bench                                                # make build, then tools.benchmarks run -t ${TARGETS:-vtb} -s ${SCENARIOS:-default} ${BENCH_ARGS}
 make bench-all                                            # make build, then tools.benchmarks run -t all -s full
 make bench-ft                                             # Free-threaded Python (FT_PYTHON=3.15t fallback 3.14t): sync .venv-ft, build src/rs/target-ft, run -t freethreaded -s ${SCENARIOS:-multiworker}
