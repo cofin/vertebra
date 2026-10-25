@@ -27,6 +27,7 @@ from vertebra.build.packaging.targets import (
     KNOWN_TARGETS,
     PBS_BASE_URL,
     PBS_RELEASE_TAG,
+    SUPPORTED_PYTHON_VERSIONS,
     BuildTarget,
 )
 
@@ -37,6 +38,7 @@ __all__ = (
     "ONEFILE_TRAILER_SIZE",
     "PBS_BASE_URL",
     "PBS_RELEASE_TAG",
+    "SUPPORTED_PYTHON_VERSIONS",
     "BuildTarget",
     "OnefileBuilder",
     "PgoPipelineResult",

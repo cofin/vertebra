@@ -43,9 +43,26 @@ _LEGACY_TARGETS: frozenset[str] = frozenset({"frontend", "backend", "all"})
     help="Enable Profile-Guided Optimization metadata during packaging",
 )
 @click.option(
+    "--profdata",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Merged LLVM .profdata file for Rust -Cprofile-use packaging metadata",
+)
+@click.option(
+    "--server-binary",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Compiled vertebra-server executable to bundle under bin/ in the staged distribution",
+)
+@click.option(
+    "--entrypoint",
+    default="app:app",
+    help="Application entrypoint module:attribute (default: app:app)",
+)
+@click.option(
     "--python-version",
     default="3.12",
-    help="Target Python runtime version (3.12, 3.13, 3.14, 3.14t)",
+    help="Target Python runtime version (3.12, 3.13, 3.14, 3.14t, 3.15, 3.15t)",
 )
 @click.option(
     "--output",
@@ -65,12 +82,16 @@ def build(
     standalone: bool,
     onefile: bool,
     pgo: bool,
+    profdata: Path | None,
+    server_binary: Path | None,
+    entrypoint: str,
     python_version: str,
     output: Path | None,
     project_dir: Path,
 ) -> None:
     """Build Vertebra application assets, standalone distributions, or onefile binaries."""
     resolved_project = project_dir.resolve()
+    effective_pgo = pgo or (profdata is not None)
 
     if standalone or onefile or target not in _LEGACY_TARGETS:
         platform_spec = None if target in _LEGACY_TARGETS else target
@@ -87,7 +108,10 @@ def build(
         standalone_builder = StandaloneBuilder(
             project_dir=resolved_project,
             target=target_tuple,
-            pgo_enabled=pgo,
+            entrypoint=entrypoint,
+            pgo_enabled=effective_pgo,
+            profdata_path=profdata,
+            server_binary=server_binary,
             profile=profile,
         )
         staged_dir = standalone_builder.build(dist_dir)
@@ -110,12 +134,18 @@ def build(
             console.info("No frontend project detected — skipped frontend build")
 
     if target in {"backend", "all"}:
-        target_tuple = BuildTarget.resolve(None, python_version=python_version)
+        try:
+            target_tuple = BuildTarget.resolve(None, python_version=python_version)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
         dist_dir = output or (resolved_project / "dist" / "backend")
         standalone_builder = StandaloneBuilder(
             project_dir=resolved_project,
             target=target_tuple,
-            pgo_enabled=pgo,
+            entrypoint=entrypoint,
+            pgo_enabled=effective_pgo,
+            profdata_path=profdata,
+            server_binary=server_binary,
             profile=profile,
         )
         staged = standalone_builder.build(dist_dir)

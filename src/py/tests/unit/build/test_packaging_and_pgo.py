@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from vertebra.build.packaging import (
     EXTENSION_MANIFESTS,
     ONEFILE_MAGIC,
     ONEFILE_TRAILER_SIZE,
+    SUPPORTED_PYTHON_VERSIONS,
     BuildTarget,
     OnefileBuilder,
     PgoPipelineResult,
@@ -42,6 +44,9 @@ from vertebra.build.packaging.pgo import (
 )
 from vertebra.cli import cli
 from vertebra.cli.build import build as build_command
+from vertebra.extensions.sqlalchemy.dialects import DialectDescriptor
+from vertebra.utils.module_loader import ensure_module
+from vertebra.utils.serializers import decode_json
 
 
 def test_build_target_resolution_and_pbs_urls() -> None:
@@ -448,3 +453,136 @@ def test_live_llvm_profdata_rejects_corrupt_data_when_installed(tmp_path: Path) 
     corrupt = tmp_path / "bad.profdata"
     corrupt.write_bytes(b"corrupt-profdata-bytes")
     assert validate_profdata(corrupt, llvm_profdata=llvm_bin) is False
+
+
+def test_build_target_python_315_musl_and_version_validation() -> None:
+    """Verify BuildTarget supports Python 3.15/3.15t, musl triples, and rejects unsupported versions."""
+    assert SUPPORTED_PYTHON_VERSIONS == ("3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t")
+    assert not hasattr(OnefileBuilder, "extract_archive")
+
+    py315 = BuildTarget.resolve("linux-x86_64-musl", python_version="3.15")
+    assert py315.rust_triple == "x86_64-unknown-linux-musl"
+    assert py315.libc == "musl"
+    assert py315.is_freethreaded is False
+    assert "cpython-3.15.0+" in py315.pbs_archive_name
+
+    py315t = BuildTarget.resolve("linux-aarch64-musl", python_version="3.15t")
+    assert py315t.rust_triple == "aarch64-unknown-linux-musl"
+    assert py315t.libc == "musl"
+    assert py315t.is_freethreaded is True
+    assert "cpython-3.15.0+" in py315t.pbs_archive_name
+    assert "freethreaded+pgo+lto" in py315t.pbs_archive_name
+
+    with pytest.raises(ValueError, match="Unsupported Python runtime version"):
+        BuildTarget.resolve("linux-x86_64", python_version="3.11")
+
+    with pytest.raises(ValueError, match="Unsupported Python runtime version"):
+        BuildTarget.detect_host(python_version="2.7")
+
+
+def test_standalone_and_cli_pgo_profdata_and_server_binary_staging(tmp_path: Path) -> None:
+    """Verify StandaloneBuilder, OnefileBuilder, and vtb build stage server binaries and PGO metadata."""
+    project_dir = tmp_path / "pgo_app"
+    pkg_dir = project_dir / "app"
+    pkg_dir.mkdir(parents=True)
+    (project_dir / "pyproject.toml").write_text('[project]\nname = "pgo-app"\nversion = "0.2.0"\n')
+    (pkg_dir / "__init__.py").write_text('"""PGO app package."""\n')
+    (pkg_dir / "main.py").write_text(
+        '"""Entrypoint verifying bundled server binary path."""\n'
+        "import os\n"
+        "from pathlib import Path\n\n"
+        "def run() -> int:\n"
+        '    srv = os.environ.get("VERTEBRA_SERVER_BINARY", "")\n'
+        "    return 0 if srv and Path(srv).is_file() else 7\n"
+    )
+
+    fake_server = tmp_path / "vertebra-server"
+    fake_server.write_bytes(b"#!/bin/sh\nexit 0\n")
+    fake_profdata = tmp_path / "sample.profdata"
+    fake_profdata.write_bytes(b"unvalidated-profdata-payload")
+
+    runner = CliRunner()
+    onefile_bin = tmp_path / "dist_out" / "pgo-app-onefile"
+    result = runner.invoke(
+        build_command,
+        [
+            "--project-dir",
+            str(project_dir),
+            "--standalone",
+            "--onefile",
+            "--entrypoint",
+            "app.main:run",
+            "--target",
+            "linux-x86_64-musl",
+            "--python-version",
+            "3.15t",
+            "--pgo",
+            "--profdata",
+            str(fake_profdata),
+            "--server-binary",
+            str(fake_server),
+            "--output",
+            str(onefile_bin),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert onefile_bin.is_file()
+
+    extracted = tmp_path / "extracted_onefile"
+    OnefileBuilder.extract_to(onefile_bin, extracted)
+    staged_server = extracted / "bin" / "vertebra-server"
+    assert staged_server.is_file()
+    assert os.access(staged_server, os.X_OK)
+
+    manifest = decode_json((extracted / "manifest.json").read_bytes())
+    assert manifest["pgo_enabled"] is True
+    assert manifest["server_binary"] == "bin/vertebra-server"
+    assert manifest["target"]["python_version"] == "3.15t"
+    assert manifest["target"]["rust_triple"] == "x86_64-unknown-linux-musl"
+    assert manifest["profdata_bytes"] == len(b"unvalidated-profdata-payload")
+    assert len(manifest["profdata_sha256"]) == 64
+    assert manifest["profdata_valid"] is False
+    assert isinstance(manifest["python_build"], dict)
+    assert "is_tail_call_interp" in manifest["python_build"]
+
+    cache_home = tmp_path / "onefile_cache"
+    env = dict(os.environ)
+    env["XDG_CACHE_HOME"] = str(cache_home)
+    env.pop("VERTEBRA_SERVER_BINARY", None)
+    proc = subprocess.run([str(onefile_bin)], env=env, capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+
+    bad_ver = runner.invoke(
+        build_command,
+        [
+            "--project-dir",
+            str(project_dir),
+            "--target",
+            "backend",
+            "--python-version",
+            "3.11",
+        ],
+    )
+    assert bad_ver.exit_code != 0
+    assert "Unsupported Python runtime version" in bad_ver.output
+
+
+def test_pyproject_sqlalchemy_dialect_entry_points_resolve() -> None:
+    """Verify all 12 pyproject.toml SQLAlchemy dialect entry points resolve to DialectDescriptor subclasses."""
+    repo_root = Path(__file__).resolve().parents[5]
+    pyproject_data = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+    entry_points: dict[str, str] = pyproject_data["project"]["entry-points"]["sqlalchemy.dialects"]
+
+    expected_keys = {
+        f"{engine}.{suffix}"
+        for engine in ("postgresql", "oracle", "mysql", "sqlite", "mssql", "duckdb")
+        for suffix in ("vertebra", "vtb")
+    }
+    assert set(entry_points.keys()) == expected_keys
+
+    for ep_name, target_spec in entry_points.items():
+        mod_name, _, cls_name = target_spec.partition(":")
+        module = ensure_module(mod_name)
+        resolved_cls = getattr(module, cls_name)
+        assert issubclass(resolved_cls, DialectDescriptor), ep_name
+        assert "Vtb" not in cls_name
