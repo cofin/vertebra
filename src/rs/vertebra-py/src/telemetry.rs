@@ -119,20 +119,9 @@ impl LogSink {
         let Some(ref core) = self.core else {
             return Ok(());
         };
-        let q = core.queue();
-        let interval = self.flush_interval_ms.max(50);
+        let timeout = Duration::from_millis(self.flush_interval_ms.saturating_mul(10).max(5_000));
         py.detach(|| {
-            let start = Instant::now();
-            let max_wait = Duration::from_millis(interval * 4);
-            while start.elapsed() < max_wait {
-                let enq = q.metrics.enqueued.load(Ordering::Relaxed);
-                let flu = q.metrics.flushed.load(Ordering::Relaxed);
-                let drop = q.metrics.dropped.load(Ordering::Relaxed);
-                if flu + drop >= enq {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            let _ = core.flush(timeout);
         });
         Ok(())
     }
@@ -141,9 +130,9 @@ impl LogSink {
         if let Some(ref core) = self.core {
             let q = core.queue();
             (
-                q.metrics.enqueued.load(Ordering::Relaxed),
-                q.metrics.flushed.load(Ordering::Relaxed),
-                q.metrics.dropped.load(Ordering::Relaxed),
+                q.metrics.enqueued.load(Ordering::Acquire),
+                q.metrics.flushed.load(Ordering::Acquire),
+                q.metrics.dropped.load(Ordering::Acquire),
             )
         } else {
             (0, 0, 0)
@@ -152,11 +141,7 @@ impl LogSink {
 
     pub fn len(&self) -> usize {
         if let Some(ref core) = self.core {
-            let q = core.queue();
-            let enq = q.metrics.enqueued.load(Ordering::Relaxed);
-            let flu = q.metrics.flushed.load(Ordering::Relaxed);
-            let drop = q.metrics.dropped.load(Ordering::Relaxed);
-            enq.saturating_sub(flu + drop) as usize
+            core.queue().pending_len()
         } else {
             0
         }
@@ -168,7 +153,7 @@ impl LogSink {
 
     pub fn dropped_count(&self) -> u64 {
         if let Some(ref core) = self.core {
-            core.queue().metrics.dropped.load(Ordering::Relaxed)
+            core.queue().metrics.dropped.load(Ordering::Acquire)
         } else {
             0
         }

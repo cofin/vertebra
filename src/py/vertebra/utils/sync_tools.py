@@ -12,7 +12,7 @@ import sys
 import threading
 import weakref
 from collections.abc import Awaitable, Callable, Coroutine
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from vertebra.typing import UVLOOP_INSTALLED
 from vertebra.utils.module_loader import import_optional
@@ -284,8 +284,8 @@ class _RunWrapper[**ParamSpecT, ReturnT]:
 
         if bool(UVLOOP_INSTALLED) and sys.platform != "win32" and not _is_gil_disabled():
             uvloop_mod = import_optional("uvloop")
-            if uvloop_mod is not None:
-                uvloop_mod.install()
+            if uvloop_mod is not None and hasattr(uvloop_mod, "run"):
+                return cast("ReturnT", uvloop_mod.run(self._function(*args, **kwargs)))
         return asyncio.run(self._function(*args, **kwargs))
 
 

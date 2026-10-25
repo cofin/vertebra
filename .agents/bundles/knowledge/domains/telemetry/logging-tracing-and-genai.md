@@ -7,6 +7,7 @@ tags: [domains, telemetry, logging, tracing]
 sources:
   - resource: src/rs/vertebra-core/src/logger.rs
   - resource: src/rs/vertebra-core/src/telemetry.rs
+  - resource: src/rs/vertebra-py/src/telemetry.rs
   - resource: src/rs/vertebra-http/src/access_log.rs
   - resource: src/py/vertebra/telemetry/__init__.py
   - resource: src/py/vertebra/telemetry/logger.py
@@ -28,8 +29,8 @@ Telemetry code lives in separate places that do not call each other: `vertebra-c
 | Symbol | Source | Responsibility |
 |---|---|---|
 | [`OverflowPolicy`](../../../../../src/rs/vertebra-core/src/logger.rs) | `logger.rs` | `DropOldest`, `DropNewest`, `BlockTimeoutMs(u64)`. |
-| `BoundedLogQueue` / `LoggerMetrics` | `logger.rs` | `Mutex<VecDeque<Vec<u8>>>` with `not_empty`/`not_full` condvars. `push` applies the overflow policy. `drain_batch(max, timeout)` waits once and then pops up to `max`. `close` wakes all waiters. Atomic `enqueued`/`flushed`/`dropped` counters. Poisoned locks are recovered. |
-| `AsyncLogCore` | `logger.rs` | `spawn(capacity, policy, flush_interval, sink)` starts a dedicated OS thread that drains batches of 256 into a 64 KiB `BufWriter`, appends a newline when one is missing, and flushes per batch. `spawn_stdout`, `write_bytes`, `queue`, `shutdown` are also provided. `Drop` calls `shutdown`. |
+| `BoundedLogQueue` / `LoggerMetrics` | `logger.rs` | `Mutex<QueueState>` (`VecDeque<Vec<u8>>` plus monotonic `write_seq`, `evicted_seq`, `flushed_seq`, and `worker_busy`) with `not_empty`, `not_full`, and `flushed_cv` condvars. `push` applies the overflow policy; `drain_batch(max, timeout)` waits once and pops up to `max`; `mark_flushed(count)` advances `flushed_seq` and `metrics.flushed` only after `BufWriter::flush` completes and wakes `wait_flushed(timeout)` callers; `pending_len` reports exact un-flushed accepted records. |
+| `AsyncLogCore` | `logger.rs` | `spawn(capacity, policy, flush_interval, sink)` starts a dedicated OS thread that drains batches of 256 into a 64 KiB `BufWriter`, appends a newline when one is missing, flushes the `BufWriter`, and then calls `mark_flushed`. Provides `spawn_stdout`, `write_bytes`, `flush`, `queue`, and `shutdown` (`Drop` calls `shutdown`). |
 | [`W3cTraceContext`](../../../../../src/rs/vertebra-core/src/telemetry.rs) | `telemetry.rs` | Byte-level `parse_traceparent` (rejects version `ff` and all-zero trace or span ids), `format_traceparent` (lowercase hex), `is_sampled`. |
 | `SpanRecord` | `telemetry.rs` | `#[repr(C)]` fixed-layout span (ids, start, duration, status, kind, flags). No ring or exporter uses it. |
 | `sanitize_sql_statement` | `telemetry.rs` | Collapses `IN (...)` to `IN (?)` with paren-depth tracking. Despite its doc comment, it does not touch `VALUES` lists. The `IN ` match is case-insensitive and has no word boundary, so `JOIN (subquery)` is also collapsed. |
@@ -41,10 +42,8 @@ Telemetry code lives in separate places that do not call each other: `vertebra-c
 |---|---|
 | `LogOverflowPolicy` | `Literal["drop_oldest", "drop_newest", "block"]`. |
 | [`LoggingConfig`](../../../../../src/py/vertebra/telemetry/logger.py) | Frozen struct: `level`, `json_format`, `queue_capacity=8192`, `overflow_policy`, `access_log_enabled`, `access_log_format`. `from_pyproject(path)` reads `[tool.vertebra.logging]` and replaces unknown policies with `drop_oldest`. `extract_litestar_formatter` (static) rebuilds a callable formatter from a Litestar `LoggingConfig`: it uses `formatter`, then the `standard` entry of `formatters`, then a default format. |
-| `LogSink` | Pure-Python `deque[bytes]` with `write_bytes`, `drain`, and `enqueued_count`/`dropped_count`. `build_structlog_processor` returns a final structlog processor that adds `level`, `timestamp`, `trace_id`, `span_id` and encodes with `encode_json_bytes`. `build_structlog_sink` accepts bytes, str, or dict. |
+| `LogSink` | Non-blocking byte sink backed by [`vertebra._vertebra.LogSink`](../../../../../src/rs/vertebra-py/src/telemetry.rs) (`AsyncLogCore`, off-GIL `emit`, Condvar-synchronized `flush` / `drain`, `enqueued_count`, `dropped_count`). `build_structlog_processor` returns a final structlog processor that adds `level`, `timestamp`, `trace_id`, `span_id` and encodes with `encode_json_bytes`. `build_structlog_sink` accepts `bytes`, `str`, or `dict`. |
 | `LogHandler` | `logging.Handler` that encodes `{timestamp, level, logger, message, trace_id?, span_id?}` with `encode_json_bytes` into a `LogSink`. Trace ids come from record attributes, then `TraceContext.current()`. |
-
-`LogSink` has no background consumer, so the caller must `drain()` it. The `"block"` policy behaves like `drop_oldest`, because only `"drop_newest"` is special-cased. The module does not use the Rust `AsyncLogCore`.
 
 ## 3. Python Trace Context, Spans, GenAI (`otel.py`)
 
