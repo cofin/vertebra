@@ -26,6 +26,10 @@ pub struct LoggerMetrics {
 struct QueueState {
     buf: VecDeque<Vec<u8>>,
     closed: bool,
+    write_seq: u64,
+    evicted_seq: u64,
+    flushed_seq: u64,
+    worker_busy: bool,
 }
 
 /// Bounded multi-producer single-consumer byte queue for non-blocking log records.
@@ -35,6 +39,7 @@ pub struct BoundedLogQueue {
     state: Mutex<QueueState>,
     not_empty: Condvar,
     not_full: Condvar,
+    flushed_cv: Condvar,
     pub metrics: LoggerMetrics,
 }
 
@@ -46,9 +51,14 @@ impl BoundedLogQueue {
             state: Mutex::new(QueueState {
                 buf: VecDeque::with_capacity(capacity.clamp(1, 4096)),
                 closed: false,
+                write_seq: 0,
+                evicted_seq: 0,
+                flushed_seq: 0,
+                worker_busy: false,
             }),
             not_empty: Condvar::new(),
             not_full: Condvar::new(),
+            flushed_cv: Condvar::new(),
             metrics: LoggerMetrics::default(),
         }
     }
@@ -64,12 +74,15 @@ impl BoundedLogQueue {
         if guard.buf.len() >= self.capacity {
             match self.policy {
                 OverflowPolicy::DropNewest => {
-                    self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.dropped.fetch_add(1, Ordering::AcqRel);
                     return false;
                 }
                 OverflowPolicy::DropOldest => {
-                    guard.buf.pop_front();
-                    self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
+                    if guard.buf.pop_front().is_some() {
+                        guard.evicted_seq += 1;
+                        self.metrics.dropped.fetch_add(1, Ordering::AcqRel);
+                        self.flushed_cv.notify_all();
+                    }
                 }
                 OverflowPolicy::BlockTimeoutMs(ms) => {
                     let timeout = Duration::from_millis(ms);
@@ -82,14 +95,15 @@ impl BoundedLogQueue {
                         };
                     guard = new_guard;
                     if result.timed_out() || guard.closed {
-                        self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
+                        self.metrics.dropped.fetch_add(1, Ordering::AcqRel);
                         return false;
                     }
                 }
             }
         }
         guard.buf.push_back(payload);
-        self.metrics.enqueued.fetch_add(1, Ordering::Relaxed);
+        guard.write_seq += 1;
+        self.metrics.enqueued.fetch_add(1, Ordering::AcqRel);
         self.not_empty.notify_one();
         true
     }
@@ -99,7 +113,7 @@ impl BoundedLogQueue {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if guard.buf.is_empty() && !guard.closed {
+        if guard.buf.is_empty() && !guard.closed && !wait_timeout.is_zero() {
             guard = match self.not_empty.wait_timeout(guard, wait_timeout) {
                 Ok((g, _)) => g,
                 Err(poisoned) => poisoned.into_inner().0,
@@ -112,18 +126,77 @@ impl BoundedLogQueue {
                 out.push(item);
             }
         }
+        guard.worker_busy = !out.is_empty();
         if !out.is_empty() {
             self.not_full.notify_all();
         }
         out
     }
 
-    pub fn close(&self) {
-        if let Ok(mut guard) = self.state.lock() {
-            guard.closed = true;
-            self.not_empty.notify_all();
-            self.not_full.notify_all();
+    /// Record that `count` drained records have been written and flushed to the underlying sink.
+    pub fn mark_flushed(&self, count: usize) {
+        let mut guard = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.flushed_seq += count as u64;
+        guard.worker_busy = false;
+        self.metrics
+            .flushed
+            .fetch_add(count as u64, Ordering::Release);
+        self.flushed_cv.notify_all();
+    }
+
+    /// Block until all records enqueued up to this call have been flushed (or evicted) to the sink.
+    pub fn wait_flushed(&self, timeout: Duration) -> bool {
+        let guard = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let target_seq = guard.write_seq;
+        if guard.flushed_seq + guard.evicted_seq >= target_seq {
+            return true;
         }
+        self.not_empty.notify_all();
+        let (final_guard, _) = match self.flushed_cv.wait_timeout_while(guard, timeout, |s| {
+            s.flushed_seq + s.evicted_seq < target_seq
+                && !(s.closed && s.buf.is_empty() && !s.worker_busy)
+        }) {
+            Ok(pair) => pair,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        final_guard.flushed_seq + final_guard.evicted_seq >= target_seq
+    }
+
+    /// Return the exact count of accepted records not yet flushed to the underlying sink.
+    pub fn pending_len(&self) -> usize {
+        let guard = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .write_seq
+            .saturating_sub(guard.flushed_seq + guard.evicted_seq) as usize
+    }
+
+    fn mark_worker_stopped(&self) {
+        let mut guard = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.worker_busy = false;
+        self.flushed_cv.notify_all();
+    }
+
+    pub fn close(&self) {
+        let mut guard = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.closed = true;
+        self.not_empty.notify_all();
+        self.not_full.notify_all();
+        self.flushed_cv.notify_all();
     }
 }
 
@@ -151,14 +224,15 @@ impl AsyncLogCore {
             while r_clone.load(Ordering::Acquire) {
                 let batch = q_clone.drain_batch(256, flush_interval);
                 if !batch.is_empty() {
+                    let batch_len = batch.len();
                     for mut line in batch {
                         if !line.ends_with(b"\n") {
                             line.push(b'\n');
                         }
                         let _ = writer.write_all(&line);
-                        q_clone.metrics.flushed.fetch_add(1, Ordering::Relaxed);
                     }
                     let _ = writer.flush();
+                    q_clone.mark_flushed(batch_len);
                 }
             }
             loop {
@@ -166,15 +240,18 @@ impl AsyncLogCore {
                 if remaining.is_empty() {
                     break;
                 }
+                let batch_len = remaining.len();
                 for mut line in remaining {
                     if !line.ends_with(b"\n") {
                         line.push(b'\n');
                     }
                     let _ = writer.write_all(&line);
-                    q_clone.metrics.flushed.fetch_add(1, Ordering::Relaxed);
                 }
+                let _ = writer.flush();
+                q_clone.mark_flushed(batch_len);
             }
             let _ = writer.flush();
+            q_clone.mark_worker_stopped();
         });
 
         Self {
@@ -190,6 +267,10 @@ impl AsyncLogCore {
 
     pub fn write_bytes(&self, payload: &[u8]) -> bool {
         self.queue.push(payload.to_vec())
+    }
+
+    pub fn flush(&self, timeout: Duration) -> bool {
+        self.queue.wait_flushed(timeout)
     }
 
     pub fn queue(&self) -> &Arc<BoundedLogQueue> {
@@ -241,6 +322,60 @@ mod tests {
         core.shutdown();
         let output = String::from_utf8(sink_buf.lock().unwrap().clone()).unwrap();
         assert!(output.contains("\"seq\":5"));
-        assert!(core.queue().metrics.flushed.load(Ordering::Relaxed) >= 1);
+        assert!(core.queue().metrics.flushed.load(Ordering::Acquire) >= 1);
+    }
+
+    #[test]
+    fn flush_waits_for_underlying_sink_write_after_bufwriter_flush() {
+        let sink_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        struct DelayedFlushWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for DelayedFlushWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                thread::sleep(Duration::from_millis(3));
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                thread::sleep(Duration::from_millis(3));
+                Ok(())
+            }
+        }
+
+        let core = AsyncLogCore::spawn(
+            8,
+            OverflowPolicy::DropNewest,
+            Duration::from_millis(100),
+            DelayedFlushWriter(Arc::clone(&sink_buf)),
+        );
+        for idx in 0..10 {
+            let payload = format!("{{\"event\":\"item-{idx}\"}}");
+            assert!(core.write_bytes(payload.as_bytes()));
+            assert!(core.flush(Duration::from_secs(2)));
+            let snapshot = String::from_utf8(sink_buf.lock().unwrap().clone()).unwrap();
+            assert!(
+                snapshot.contains(&payload),
+                "sink missing {payload} after flush(): {snapshot:?}"
+            );
+            assert_eq!(core.queue().pending_len(), 0);
+        }
+    }
+
+    #[test]
+    fn drop_newest_does_not_skew_pending_len_or_flush_barrier() {
+        let q = BoundedLogQueue::new(2, OverflowPolicy::DropNewest);
+        assert!(q.push(b"a".to_vec()));
+        assert!(q.push(b"b".to_vec()));
+        assert!(!q.push(b"c".to_vec()));
+        assert_eq!(q.pending_len(), 2);
+        let batch = q.drain_batch(1, Duration::ZERO);
+        assert_eq!(batch.len(), 1);
+        q.mark_flushed(1);
+        assert_eq!(q.pending_len(), 1);
+        assert!(!q.wait_flushed(Duration::from_millis(2)));
+        let batch2 = q.drain_batch(1, Duration::ZERO);
+        assert_eq!(batch2.len(), 1);
+        q.mark_flushed(1);
+        assert_eq!(q.pending_len(), 0);
+        assert!(q.wait_flushed(Duration::from_millis(2)));
     }
 }

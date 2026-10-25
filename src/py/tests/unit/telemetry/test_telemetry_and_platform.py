@@ -91,12 +91,16 @@ def test_structlog_zero_round_trip_bytes_sink(tmp_path: Path) -> None:
     sink = LogSink(capacity=8)
     processor = sink.build_structlog_processor(lambda: ("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"))
     write_fn = sink.build_structlog_sink()
-    encoded_bytes = processor(None, "info", {"event": "db.connected"})
-    assert isinstance(encoded_bytes, bytes)
-    assert write_fn(encoded_bytes)
-    record = msgspec.json.decode(sink.drain()[0])
-    assert record["event"] == "db.connected"
-    assert record["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736"
+    for seq in range(32):
+        encoded_bytes = processor(None, "info", {"event": "db.connected", "seq": seq})
+        assert isinstance(encoded_bytes, bytes)
+        assert write_fn(encoded_bytes)
+        drained = sink.drain()
+        assert len(drained) >= 1
+        record = msgspec.json.decode(drained[0])
+        assert record["event"] == "db.connected"
+        assert record["seq"] == seq
+        assert record["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736"
 
 
 def test_zero_rtt_oracle_and_postgres_sqlcommenter_and_sanitizer() -> None:

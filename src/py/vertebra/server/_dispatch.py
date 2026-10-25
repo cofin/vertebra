@@ -674,6 +674,8 @@ def _call_handler(handler: Any, request: Any, *, loop: asyncio.AbstractEventLoop
     result = spec.invoker(request)
     if spec.is_async:
         if loop is None:
+            if inspect.iscoroutine(result):
+                result.close()
             msg = "async handler called without an event loop"
             raise RuntimeError(msg)
         return loop.run_until_complete(result)

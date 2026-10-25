@@ -97,7 +97,7 @@ clean:                                              ## Remove build artifacts an
 	@find . -name '*.so' -path '*/vertebra/*' -exec rm -f {} + >/dev/null 2>&1
 	@rm -rf build/ dist/ >/dev/null 2>&1
 	@# Rust artifacts
-	@rm -rf src/rs/target src/rs/target-ft >/dev/null 2>&1
+	@rm -rf src/rs/target src/rs/target-ft .profiles tools/pgo/.profiles >/dev/null 2>&1
 	@# TypeScript/JS artifacts
 	@rm -rf src/ts/vertebra-client/dist .biome src/py/vertebra/server/_js/bundle/ >/dev/null 2>&1
 	@echo "${OK} Clean"
@@ -168,9 +168,13 @@ build: ts-build                                     ## Build optimized release b
 	@echo "${OK} Build complete"
 
 .PHONY: build-pgo
-build-pgo: ts-build                                 ## Build PGO-optimized release server and PyO3 extensions (uses PROFDATA or baseline)
+build-pgo: ts-build                                 ## Build PGO-optimized release server and PyO3 extensions (two-phase or PROFDATA=<path>)
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@uv run python -c "from pathlib import Path; from tools.pgo.rust_pgo import RustPgoConfig, build_optimized, build_optimized_extension; cfg = RustPgoConfig(); profdata = Path('$${PROFDATA:-.profiles/merged.profdata}'); build_optimized(cfg, profdata); build_optimized_extension(cfg, profdata)"
+	@if [ -n "$${PROFDATA:-}" ]; then \
+		uv run python -m tools.pgo.rust_pgo --profdata "$$PROFDATA" --use-existing; \
+	else \
+		uv run python -m tools.pgo.rust_pgo; \
+	fi
 	@echo "${OK} PGO build complete"
 
 
@@ -208,14 +212,14 @@ coverage:                                           ## Run tests with coverage r
 .PHONY: lint
 lint: ts-lint                                       ## Format and lint everything with auto-fixes (Python, Rust, TS)
 	@echo "${INFO} Linting and fixing Python (Ruff)..."
-	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests tools/scripts
-	@uv run ruff format src/py/vertebra src/py/tests tools/scripts
+	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests tools/scripts tools/pgo
+	@uv run ruff format src/py/vertebra src/py/tests tools/scripts tools/pgo
 	@echo "${INFO} Linting and fixing Rust (Fmt & Clippy)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo fmt --all)
 	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,compression -- -D warnings)
 	@echo "${INFO} Running type checks (Mypy)..."
-	@uv run mypy src/py/vertebra tools/scripts
+	@uv run mypy src/py/vertebra tools/scripts tools/pgo
 	@if uv run python -c "import vertebra._vertebra, vertebra._bundler, vertebra._storage" >/dev/null 2>&1; then \
 		uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage; \
 	fi
@@ -227,9 +231,9 @@ lint-all:                                           ## Check formatting, linting
 	@echo "${INFO} Checking TS package (Biome)..."
 	@(cd src/ts/vertebra-client && bunx biome check .)
 	@echo "${INFO} Checking Python (Ruff & Mypy)..."
-	@uv run ruff check src/py/vertebra src/py/tests tools/scripts
-	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts
-	@uv run mypy src/py/vertebra tools/scripts
+	@uv run ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo
+	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo
+	@uv run mypy src/py/vertebra tools/scripts tools/pgo
 	@if uv run python -c "import vertebra._vertebra, vertebra._bundler, vertebra._storage" >/dev/null 2>&1; then \
 		uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage; \
 	fi

@@ -20,14 +20,18 @@ dependencies = [
 vtb = "vertebra.cli:cli"
 
 [project.entry-points."sqlalchemy.dialects"]
-"postgresql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:PostgresVtbDialect"
-"postgresql.vtb" = "vertebra.extensions.sqlalchemy.dialects:PostgresVtbDialect"
-"oracle.vertebra" = "vertebra.extensions.sqlalchemy.dialects:OracleVtbDialect"
-"oracle.vtb" = "vertebra.extensions.sqlalchemy.dialects:OracleVtbDialect"
-"mysql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:MysqlVtbDialect"
-"mysql.vtb" = "vertebra.extensions.sqlalchemy.dialects:MysqlVtbDialect"
-"sqlite.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SqliteVtbDialect"
-"sqlite.vtb" = "vertebra.extensions.sqlalchemy.dialects:SqliteVtbDialect"
+"postgresql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:PostgresDialect"
+"postgresql.vtb" = "vertebra.extensions.sqlalchemy.dialects:PostgresDialect"
+"oracle.vertebra" = "vertebra.extensions.sqlalchemy.dialects:OracleDialect"
+"oracle.vtb" = "vertebra.extensions.sqlalchemy.dialects:OracleDialect"
+"mysql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:MysqlDialect"
+"mysql.vtb" = "vertebra.extensions.sqlalchemy.dialects:MysqlDialect"
+"sqlite.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SqliteDialect"
+"sqlite.vtb" = "vertebra.extensions.sqlalchemy.dialects:SqliteDialect"
+"mssql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:MssqlDialect"
+"mssql.vtb" = "vertebra.extensions.sqlalchemy.dialects:MssqlDialect"
+"duckdb.vertebra" = "vertebra.extensions.sqlalchemy.dialects:DuckdbDialect"
+"duckdb.vtb" = "vertebra.extensions.sqlalchemy.dialects:DuckdbDialect"
 
 [project.optional-dependencies]
 framework = [
@@ -95,7 +99,7 @@ pythonpath = ["."]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src/py/vertebra", "tools/scripts"]
+files = ["src/py/vertebra", "tools/scripts", "tools/pgo"]
 
 [[tool.mypy.overrides]]
 module = [

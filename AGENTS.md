@@ -1,6 +1,6 @@
 # Vertebra — Agent Instructions
 
-Vertebra is a Python-first, high-performance polyglot application backbone combining Python 3.12+/3.14t developer ergonomics with a Rust 2024 runtime (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`) and a full-stack TypeScript SDK (`@vertebra/client`).
+Vertebra is a Python-first, high-performance polyglot application backbone combining Python 3.12–3.15 and free-threaded 3.14t/3.15t developer ergonomics with a Rust 2024 runtime (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`) and a full-stack TypeScript SDK (`@vertebra/client`).
 
 ## Flow Operational Rule
 
@@ -21,9 +21,9 @@ Commits remain local unless the user explicitly asks for delivery. Never create,
 - [Bundle Index](.agents/bundles/index.md) — OKF v0.2 root index for product, nested knowledge, and lazy specs/research
 - [Product Definition](.agents/bundles/product/product.md) — Product vision, runtime topologies, and protocol capabilities
 - [Product Guidelines](.agents/bundles/product/product-guidelines.md) — Clean-break domain naming rules, hot-path invariants, and module layout
-- [Tech Stack](.agents/bundles/product/tech-stack.md) — Python 3.12+/3.14t, Rust 2024 crates, and TypeScript client stack
+- [Tech Stack](.agents/bundles/product/tech-stack.md) — Python 3.12–3.15 and 3.14t/3.15t, Rust 2024 crates, and TypeScript client stack
 - [Project Workflow](.agents/bundles/knowledge/workflow.md) — Canonical `Makefile` commands, polyglot rebuild cycle, verification strategies, and Flow execution loop
-- [Knowledge Index](.agents/bundles/knowledge/index.md) — Nested architectural (`architecture/{runtime,ipc,http,worker,frontend}/`), domain (`domains/{framework,server,ipc,http,frontend,storage,data,telemetry,extensions}/`), pattern (`patterns/{python,rust,typescript}/`), testing (`testing/`), and gotcha (`gotchas/`) chapters
+- [Knowledge Index](.agents/bundles/knowledge/index.md) — Nested architectural (`architecture/{runtime,ipc,http,worker,frontend}/`), domain (`domains/{framework,server,ipc,http,frontend,storage,data,telemetry,extensions,agent}/`), pattern (`patterns/{python,rust,typescript}/`), testing (`testing/`), and gotcha (`gotchas/`) chapters
 
 ## Quick Verification Commands
 
@@ -31,19 +31,22 @@ Commits remain local unless the user explicitly asks for delivery. Never create,
 make setup-env   # Configure public uv, bun/npm, and cargo registries on hosts whose mirrors replace them; no-op elsewhere
 make install     # Fresh setup: destroy .venv + clean, setup-env, pin Python 3.12, uv sync --all-extras --dev, bun install/build, make dev
 make dev         # Build non-extension Rust crates and install debug PyO3 extensions (_vertebra, _bundler, _storage)
-make lint        # Auto-fix TS (Biome), Python (Ruff), Rust (rustfmt + Clippy), and run Mypy
-make lint-all    # Read-only CI lint and type-check gate across TypeScript, Python, and Rust
+make lint        # Auto-fix TS (Biome), Python (Ruff), Rust (rustfmt + Clippy), and run Mypy + stubtest + review-check
+make lint-all    # Read-only CI lint, type-check, stubtest, and review-check gate across TypeScript, Python, and Rust
 make review-check # Validate review capability manifests, skills, agents, and privacy constraints
 make review-route # Route changed files to owning review areas and shards (BASE=origin/main)
 make rs-test     # Remove /dev/shm/test-* and /dev/shm/*vertebra*, then run Rust workspace tests (--features tls,compression)
-make py-test     # Build debug extensions (make dev) and run the Python pytest suite
+make py-test     # Build debug extensions (make dev), verify mypy.stubtest, and run the Python pytest suite
 make ts-test     # Run the TypeScript Vitest suite with isolated localstorage
 make test        # Run all Rust, Python, and TypeScript test suites
 make coverage    # Run pytest with coverage (coverage.xml, htmlcov/)
 make check       # Full verification gate: make lint + make test + make coverage
 make build       # Release build: TS client, Rust crates, release maturin develop of the extensions, uv build
+make build-pgo   # Two-phase Rust PGO instrumentation and profile-use build (or PROFDATA=<path>)
 make bench       # make build, then tools.benchmarks (TARGETS=vtb, SCENARIOS=default by default)
-make bench-ft    # Build .venv-ft + src/rs/target-ft and benchmark free-threaded Python 3.14t
+make bench-all   # make build, then tools.benchmarks across all targets and full scenarios
+make bench-ft    # Build .venv-ft + src/rs/target-ft and benchmark free-threaded Python (FT_PYTHON=3.15t fallback 3.14t)
+make bench-report # Show latest benchmark report (make bench-diff compares latest run vs previous)
 make rs-bench    # Run Rust Criterion microbenchmarks across core and http
 make bench-micro # Run Python microbenchmarks across hot-path primitives and warm import times
 make bench-baseline # Record baseline performance metrics (NAME=pre-refactor by default)

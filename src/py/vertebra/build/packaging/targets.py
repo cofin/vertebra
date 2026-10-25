@@ -11,32 +11,53 @@ __all__ = (
     "KNOWN_TARGETS",
     "PBS_BASE_URL",
     "PBS_RELEASE_TAG",
+    "SUPPORTED_PYTHON_VERSIONS",
     "BuildTarget",
 )
 
 PBS_RELEASE_TAG: str = "20260301"
 PBS_BASE_URL: str = "https://github.com/astral-sh/python-build-standalone/releases/download"
 
+SUPPORTED_PYTHON_VERSIONS: tuple[str, ...] = (
+    "3.12",
+    "3.13",
+    "3.14",
+    "3.14t",
+    "3.15",
+    "3.15t",
+)
+
 _PATCH_VERSIONS: dict[str, str] = {
     "3.12": "3.12.9",
     "3.13": "3.13.3",
     "3.14": "3.14.0",
     "3.14t": "3.14.0",
+    "3.15": "3.15.0",
+    "3.15t": "3.15.0",
 }
 
 KNOWN_TARGETS: dict[str, tuple[str, str, str, str]] = {
     "linux-x86_64": ("linux", "x86_64", "gnu", "x86_64-unknown-linux-gnu"),
     "linux-x64": ("linux", "x86_64", "gnu", "x86_64-unknown-linux-gnu"),
     "x86_64-unknown-linux-gnu": ("linux", "x86_64", "gnu", "x86_64-unknown-linux-gnu"),
+    "linux-x86_64-musl": ("linux", "x86_64", "musl", "x86_64-unknown-linux-musl"),
+    "x86_64-unknown-linux-musl": ("linux", "x86_64", "musl", "x86_64-unknown-linux-musl"),
     "linux-aarch64": ("linux", "aarch64", "gnu", "aarch64-unknown-linux-gnu"),
     "linux-arm64": ("linux", "aarch64", "gnu", "aarch64-unknown-linux-gnu"),
     "aarch64-unknown-linux-gnu": ("linux", "aarch64", "gnu", "aarch64-unknown-linux-gnu"),
+    "linux-aarch64-musl": ("linux", "aarch64", "musl", "aarch64-unknown-linux-musl"),
+    "linux-arm64-musl": ("linux", "aarch64", "musl", "aarch64-unknown-linux-musl"),
+    "aarch64-unknown-linux-musl": ("linux", "aarch64", "musl", "aarch64-unknown-linux-musl"),
     "darwin-x86_64": ("darwin", "x86_64", "apple", "x86_64-apple-darwin"),
+    "macos-x86_64": ("darwin", "x86_64", "apple", "x86_64-apple-darwin"),
+    "x86_64-apple-darwin": ("darwin", "x86_64", "apple", "x86_64-apple-darwin"),
     "darwin-aarch64": ("darwin", "aarch64", "apple", "aarch64-apple-darwin"),
     "darwin-arm64": ("darwin", "aarch64", "apple", "aarch64-apple-darwin"),
     "macos-aarch64": ("darwin", "aarch64", "apple", "aarch64-apple-darwin"),
     "aarch64-apple-darwin": ("darwin", "aarch64", "apple", "aarch64-apple-darwin"),
     "windows-x86_64": ("windows", "x86_64", "msvc", "x86_64-pc-windows-msvc"),
+    "windows-x64": ("windows", "x86_64", "msvc", "x86_64-pc-windows-msvc"),
+    "x86_64-pc-windows-msvc": ("windows", "x86_64", "msvc", "x86_64-pc-windows-msvc"),
 }
 
 
@@ -74,6 +95,7 @@ class BuildTarget(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     @classmethod
     def detect_host(cls, *, python_version: str = "3.12") -> BuildTarget:
         """Detect the running host OS and CPU architecture."""
+        cls._validate_python_version(python_version)
         if sys.platform.startswith("linux"):
             os_name = "linux"
             libc = "gnu"
@@ -119,6 +141,7 @@ class BuildTarget(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
         python_version: str = "3.12",
     ) -> BuildTarget:
         """Resolve a target alias or Rust triple into a BuildTarget."""
+        cls._validate_python_version(python_version)
         if not target or target in {"host", "native"}:
             return cls.detect_host(python_version=python_version)
         entry = KNOWN_TARGETS.get(target)
@@ -133,3 +156,10 @@ class BuildTarget(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
             python_version=python_version,
             rust_triple=triple,
         )
+
+    @staticmethod
+    def _validate_python_version(python_version: str) -> None:
+        if python_version not in SUPPORTED_PYTHON_VERSIONS:
+            supported = ", ".join(SUPPORTED_PYTHON_VERSIONS)
+            msg = f"Unsupported Python runtime version: {python_version!r} (expected one of {supported})"
+            raise ValueError(msg)

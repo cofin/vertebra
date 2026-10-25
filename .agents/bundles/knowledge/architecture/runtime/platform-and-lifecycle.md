@@ -16,6 +16,7 @@ sources:
   - resource: src/py/vertebra/server/platform.py
   - resource: src/py/vertebra/utils/sync_tools.py
   - resource: src/rs/vertebra-http/src/health.rs
+  - resource: src/rs/vertebra-http/src/response.rs
 ---
 
 # Server Platform & Process Lifecycle
@@ -64,4 +65,4 @@ This chapter covers the Python code that launches the Rust binary and runs insid
 - **`PlatformAdapter`**: a `Protocol` with `name` and `configure_server(zpages, quota)`.
 - **`ShmAllocationPolicy`** ([`platform.py`](../../../../../src/py/vertebra/server/platform.py)): `allocate_anonymous_shm_fd(name, size)` returns `(fd, "memfd")` from `os.memfd_create(f"vertebra-{name}", MFD_CLOEXEC)` or `(fd, "tmpfile")` from a duplicated temporary file, then `ftruncate`s it. `send_fd`/`recv_fd` pass a descriptor over an `AF_UNIX` socket with `SCM_RIGHTS`.
 
-The Rust binary caches a `HealthEndpoint` on `ServerState`: `response::handle` calls `state.health.try_intercept(path)` ([`health.rs`](../../../../../src/rs/vertebra-http/src/health.rs)) for `/healthz`, `/livez`, `/__vertebra/health`, and `/readyz`. It is separate from `ZPagesRegistry`.
+The Rust binary caches a `HealthEndpoint` on `ServerState`: `response::handle` calls `state.health_endpoint.try_intercept(req_path)` ([`response.rs`](../../../../../src/rs/vertebra-http/src/response.rs), [`health.rs`](../../../../../src/rs/vertebra-http/src/health.rs)) for `/healthz`, `/livez`, `/__vertebra/health`, and `/readyz`. It is separate from `ZPagesRegistry`.

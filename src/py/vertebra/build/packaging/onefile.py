@@ -77,8 +77,6 @@ class OnefileBuilder:
         """Verify the VTB1FILE trailer and extract the embedded archive into destination."""
         return extract_payload_archive(binary_path, destination)
 
-    extract_archive = extract_to
-
     def _create_compressed_archive(self) -> bytes:
         tar_buffer = io.BytesIO()
         with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
