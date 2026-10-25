@@ -84,6 +84,12 @@ tools/benchmarks/results/*.duckdb.wal
 .venv-ft/
 src/rs/target-ft/
 
+# PGO raw and merged profile artifacts
+.profiles/
+tools/pgo/.profiles/
+*.profraw
+*.profdata
+
 # POC archive — local reference only
 scratch/
 src/py/vertebra/server/_js/bundle/

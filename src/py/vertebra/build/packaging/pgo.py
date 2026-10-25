@@ -1,13 +1,17 @@
 """Profile-Guided Optimization (PGO) pipeline for Python and Rust artifacts."""
 
+import http.client
 import logging
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import sysconfig
 import tempfile
+import time
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -18,8 +22,10 @@ from vertebra.utils.serializers import decode_json
 __all__ = (
     "CODEGEN_FLAGS",
     "CPYTHON_PGO_FLAGS",
+    "EXTENSION_MANIFESTS",
     "PLATFORM_MATRIX",
     "PgoMode",
+    "PgoPipelineResult",
     "PlatformSupport",
     "PythonBuildInfo",
     "RustPgoConfig",
@@ -27,8 +33,10 @@ __all__ = (
     "build_flags",
     "build_instrumented",
     "build_instrumented_extension",
+    "build_instrumented_extensions",
     "build_optimized",
     "build_optimized_extension",
+    "build_optimized_extensions",
     "check_pgo_availability",
     "check_profdata_size",
     "detect_python_build",
@@ -37,7 +45,9 @@ __all__ = (
     "get_platform_support",
     "merge_profdata_command",
     "merge_profiles",
-    "resolve_llvm_profdata",
+    "resolve_cargo_release_dir",
+    "run_default_pgo_workload",
+    "run_pgo_pipeline",
     "validate_pgo_support",
     "validate_profdata",
     "weighted_merge_profiles",
@@ -45,10 +55,19 @@ __all__ = (
 
 logger = logging.getLogger("vertebra.pgo")
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+_REPO_ROOT = Path(__file__).resolve().parents[5]
 _RS_WORKSPACE = _REPO_ROOT / "src" / "rs"
 _DEFAULT_MANIFEST = _RS_WORKSPACE / "vertebra-http" / "Cargo.toml"
+_PY_EXT_MANIFEST = _RS_WORKSPACE / "vertebra-py" / "Cargo.toml"
+_BUNDLER_EXT_MANIFEST = _RS_WORKSPACE / "vertebra-bundler" / "Cargo.toml"
+_STORAGE_EXT_MANIFEST = _RS_WORKSPACE / "vertebra-storage" / "Cargo.toml"
+EXTENSION_MANIFESTS: tuple[Path, ...] = (
+    _PY_EXT_MANIFEST,
+    _BUNDLER_EXT_MANIFEST,
+    _STORAGE_EXT_MANIFEST,
+)
 _DEFAULT_PROFILE_DIR = _REPO_ROOT / ".profiles" / "raw"
+_DEFAULT_PROFDATA_PATH = _REPO_ROOT / ".profiles" / "merged.profdata"
 
 type PgoMode = Literal["generate", "use", "baseline"]
 
@@ -99,7 +118,8 @@ class RustPgoConfig(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     manifest_path: Path = msgspec.field(default_factory=lambda: _DEFAULT_MANIFEST)
     profile_dir: Path = msgspec.field(default_factory=lambda: _DEFAULT_PROFILE_DIR)
     llvm_profdata_bin: str = ""
-    maturin_features: str = "pyo3/extension-module"
+    maturin_features: str = "extension-module"
+    extension_manifests: tuple[Path, ...] = EXTENSION_MANIFESTS
 
     def resolved_profdata_bin(self) -> str:
         """Return the llvm-profdata executable path, auto-detecting when unset."""
@@ -110,6 +130,21 @@ class RustPgoConfig(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     def instrument_rustflags(self) -> str:
         """Return the RUSTFLAGS string for profile generation."""
         return " ".join(build_flags(self, pgo_mode="generate"))
+
+    def use_rustflags(self, profdata_path: Path) -> str:
+        """Return the RUSTFLAGS string for profile-guided optimization use."""
+        return " ".join(build_flags(self, pgo_mode="use", profdata_path=profdata_path))
+
+
+class PgoPipelineResult(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
+    """Summary of an executed Rust PGO build pipeline."""
+
+    release_dir: Path
+    profdata_path: Path
+    profdata_valid: bool
+    profdata_bytes: int
+    used_pgo: bool
+    extension_manifests: tuple[Path, ...] = EXTENSION_MANIFESTS
 
 
 PLATFORM_MATRIX: list[PlatformSupport] = [
@@ -252,7 +287,20 @@ def find_llvm_profdata() -> str:
     raise FileNotFoundError(msg)
 
 
-resolve_llvm_profdata = find_llvm_profdata
+def resolve_cargo_release_dir(
+    config: RustPgoConfig,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """Resolve the Cargo release output directory honoring CARGO_TARGET_DIR."""
+    active_env = os.environ if env is None else env
+    raw_target = active_env.get("CARGO_TARGET_DIR", "").strip()
+    if raw_target:
+        target_path = Path(raw_target)
+        if not target_path.is_absolute():
+            target_path = _REPO_ROOT / target_path
+        return target_path / "release"
+    return config.manifest_path.parent.parent / "target" / "release"
 
 
 def build_flags(
@@ -322,13 +370,16 @@ def validate_profdata(
     llvm_profdata: str | None = None,
 ) -> bool:
     """Validate a merged .profdata file via llvm-profdata show."""
-    if not profdata_path.exists():
+    if not profdata_path.is_file() or profdata_path.stat().st_size == 0:
         return False
-    binary = llvm_profdata or find_llvm_profdata()
+    try:
+        binary = llvm_profdata or find_llvm_profdata()
+    except FileNotFoundError:
+        return False
     try:
         subprocess.run([binary, "show", str(profdata_path)], check=True, capture_output=True, text=True)
         return True
-    except subprocess.CalledProcessError:
+    except (subprocess.SubprocessError, OSError):
         return False
 
 
@@ -370,52 +421,292 @@ def check_profdata_size(profdata_path: Path) -> int:
 
 
 def build_instrumented(config: RustPgoConfig) -> Path:
-    """Compile the Rust crate with -Cprofile-generate instrumentation enabled."""
+    """Compile the Rust server crate with -Cprofile-generate instrumentation enabled."""
     config.profile_dir.mkdir(parents=True, exist_ok=True)
     env = build_cargo_pgo_env(build_flags(config, pgo_mode="generate"))
     cmd = ["cargo", "build", "--release", "--manifest-path", str(config.manifest_path)]
     subprocess.run(cmd, check=True, env=env)
-    return config.manifest_path.parent.parent / "target" / "release"
+    return resolve_cargo_release_dir(config, env=env)
 
 
-def build_instrumented_extension(config: RustPgoConfig) -> Path:
-    """Compile the PyO3 extension with -Cprofile-generate via maturin develop."""
+def build_instrumented_extension(
+    config: RustPgoConfig,
+    manifest_path: Path | None = None,
+) -> Path:
+    """Compile a PyO3 extension crate with -Cprofile-generate via maturin develop."""
     config.profile_dir.mkdir(parents=True, exist_ok=True)
     env = build_cargo_pgo_env(build_flags(config, pgo_mode="generate"))
-    cmd = ["maturin", "develop", "--uv", "--release", "--features", config.maturin_features]
-    subprocess.run(cmd, check=True, env=env)
+    cmd = _maturin_develop_command(config, manifest_path)
+    subprocess.run(cmd, check=True, env=env, cwd=_REPO_ROOT)
+    return config.profile_dir
+
+
+def build_instrumented_extensions(config: RustPgoConfig) -> Path:
+    """Compile all configured PyO3 extension crates with -Cprofile-generate."""
+    for manifest in config.extension_manifests:
+        build_instrumented_extension(config, manifest_path=manifest)
     return config.profile_dir
 
 
 def build_optimized(config: RustPgoConfig, profdata_path: Path) -> Path:
-    """Compile the Rust crate with -Cprofile-use optimization, falling back to standard release if invalid."""
-    target_dir = config.manifest_path.parent.parent / "target" / "release"
-    if not profdata_path.exists():
-        subprocess.run(
-            ["cargo", "build", "--release", "--manifest-path", str(config.manifest_path)],
-            check=True,
-        )
-        return target_dir
+    """Compile the Rust server crate with -Cprofile-use, falling back cleanly if profdata is invalid."""
+    valid = validate_profdata(profdata_path, llvm_profdata=config.llvm_profdata_bin or None)
+    return _build_optimized_cargo(config, profdata_path, valid=valid)
 
-    env = build_cargo_pgo_env(build_flags(config, pgo_mode="use", profdata_path=profdata_path))
-    subprocess.run(
-        ["cargo", "build", "--release", "--manifest-path", str(config.manifest_path)],
-        check=True,
-        env=env,
+
+def build_optimized_extension(
+    config: RustPgoConfig,
+    profdata_path: Path,
+    manifest_path: Path | None = None,
+) -> Path:
+    """Compile a PyO3 extension crate with -Cprofile-use, falling back cleanly if profdata is invalid."""
+    valid = validate_profdata(profdata_path, llvm_profdata=config.llvm_profdata_bin or None)
+    return _build_optimized_maturin(config, profdata_path, manifest_path=manifest_path, valid=valid)
+
+
+def build_optimized_extensions(config: RustPgoConfig, profdata_path: Path) -> Path:
+    """Compile all configured PyO3 extension crates with -Cprofile-use, validating profdata once."""
+    valid = validate_profdata(profdata_path, llvm_profdata=config.llvm_profdata_bin or None)
+    for manifest in config.extension_manifests:
+        _build_optimized_maturin(config, profdata_path, manifest_path=manifest, valid=valid)
+    return resolve_cargo_release_dir(config)
+
+
+def run_default_pgo_workload(
+    config: RustPgoConfig,
+    release_dir: Path,
+    *,
+    requests_per_route: int = 250,
+) -> None:
+    """Execute a representative loopback HTTP and PyO3 workload to flush LLVM .profraw counters."""
+    config.profile_dir.mkdir(parents=True, exist_ok=True)
+    ext_env = os.environ.copy()
+    ext_env["LLVM_PROFILE_FILE"] = str(config.profile_dir / "vtb-ext-%p-%m.profraw")
+    ext_script = (
+        "import vertebra._vertebra as v, vertebra._bundler, vertebra._storage; "
+        "hdrs = v.Headers([('content-type', 'application/json'), ('x-pgo', '1')]); "
+        "_ = hdrs.get('content-type'); _ = list(hdrs)"
     )
-    return target_dir
+    subprocess.run([sys.executable, "-c", ext_script], check=True, env=ext_env, cwd=_REPO_ROOT)
+
+    binary_name = "vertebra-server.exe" if os.name == "nt" else "vertebra-server"
+    server_bin = release_dir / binary_name
+    if not server_bin.is_file():
+        return
+
+    with tempfile.TemporaryDirectory(prefix="vtb-pgo-train-") as tmpdir:
+        app_path = Path(tmpdir) / "pgo_train_app.py"
+        app_path.write_text(
+            '"""Temporary PGO training application."""\n'
+            "from vertebra import App, Request, Response\n\n"
+            "app = App()\n\n"
+            '@app.get("/")\n'
+            "def index(request: Request) -> Response:\n"
+            '    return Response.text("ok")\n\n'
+            '@app.get("/json")\n'
+            "def json_route(request: Request) -> dict[str, str]:\n"
+            '    return {"status": "ok", "runtime": "vertebra"}\n\n'
+            '@app.post("/echo")\n'
+            "def echo_route(request: Request) -> Response:\n"
+            "    return Response(status=200, body=bytes(request.body_view))\n",
+            encoding="utf-8",
+        )
+        port = _reserve_loopback_port()
+        srv_env = os.environ.copy()
+        srv_env["LLVM_PROFILE_FILE"] = str(config.profile_dir / "vtb-server-%p-%m.profraw")
+        srv_env["VERTEBRA_APP_MODULE"] = "pgo_train_app:app"
+        srv_env["VERTEBRA_HOST"] = "127.0.0.1"
+        srv_env["VERTEBRA_PORT"] = str(port)
+        srv_env["VERTEBRA_WORKERS"] = "1"
+        existing_py_path = srv_env.get("PYTHONPATH", "")
+        py_parts = [tmpdir, str(_REPO_ROOT / "src" / "py")]
+        if existing_py_path:
+            py_parts.append(existing_py_path)
+        srv_env["PYTHONPATH"] = os.pathsep.join(py_parts)
+
+        proc = subprocess.Popen(
+            [str(server_bin)],
+            env=srv_env,
+            cwd=_REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            _wait_for_http_ready("127.0.0.1", port, timeout_seconds=15.0)
+            _drive_http_training_requests("127.0.0.1", port, requests_per_route=requests_per_route)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5.0)
 
 
-def build_optimized_extension(config: RustPgoConfig, profdata_path: Path) -> Path:
-    """Compile the PyO3 extension with -Cprofile-use via maturin develop."""
-    target_dir = config.manifest_path.parent.parent / "target" / "release"
-    cmd = ["maturin", "develop", "--uv", "--release", "--features", config.maturin_features]
-    if not profdata_path.exists():
+def run_pgo_pipeline(
+    config: RustPgoConfig | None = None,
+    *,
+    profdata_output: Path | None = None,
+    baseline_profdata: Path | None = None,
+    workload_cmd: Sequence[str] | None = None,
+    workload_runner: Callable[[RustPgoConfig, Path], None] | None = None,
+    build_extensions: bool = True,
+    clean_raw_before: bool = True,
+    use_existing_profdata: bool = False,
+) -> PgoPipelineResult:
+    """Execute the two-phase Rust PGO pipeline across vertebra-server and PyO3 extensions."""
+    cfg = config or RustPgoConfig()
+    out_profdata = profdata_output or _DEFAULT_PROFDATA_PATH
+    llvm_bin = cfg.llvm_profdata_bin or None
+    manifests = cfg.extension_manifests if build_extensions else ()
+
+    if use_existing_profdata:
+        existing_valid = validate_profdata(out_profdata, llvm_profdata=llvm_bin)
+        release_dir = _build_optimized_cargo(cfg, out_profdata, valid=existing_valid)
+        if build_extensions:
+            for manifest in cfg.extension_manifests:
+                _build_optimized_maturin(cfg, out_profdata, manifest_path=manifest, valid=existing_valid)
+        return PgoPipelineResult(
+            release_dir=release_dir,
+            profdata_path=out_profdata,
+            profdata_valid=existing_valid,
+            profdata_bytes=check_profdata_size(out_profdata) if existing_valid else 0,
+            used_pgo=existing_valid,
+            extension_manifests=manifests,
+        )
+
+    if clean_raw_before and cfg.profile_dir.exists():
+        for stale in cfg.profile_dir.glob("**/*.profraw"):
+            stale.unlink(missing_ok=True)
+    cfg.profile_dir.mkdir(parents=True, exist_ok=True)
+
+    instrumented_dir = build_instrumented(cfg)
+    if build_extensions:
+        build_instrumented_extensions(cfg)
+
+    profile_pattern = str(cfg.profile_dir / "vtb-%p-%m.profraw")
+    if workload_runner is not None:
+        previous_profile_env = os.environ.get("LLVM_PROFILE_FILE")
+        os.environ["LLVM_PROFILE_FILE"] = profile_pattern
+        try:
+            workload_runner(cfg, instrumented_dir)
+        finally:
+            if previous_profile_env is None:
+                os.environ.pop("LLVM_PROFILE_FILE", None)
+            else:
+                os.environ["LLVM_PROFILE_FILE"] = previous_profile_env
+    elif workload_cmd is not None:
+        workload_env = os.environ.copy()
+        workload_env["LLVM_PROFILE_FILE"] = profile_pattern
+        subprocess.run(list(workload_cmd), check=True, env=workload_env, cwd=_REPO_ROOT)
+    else:
+        run_default_pgo_workload(cfg, instrumented_dir)
+
+    if baseline_profdata is not None and baseline_profdata.exists():
+        weighted_merge_profiles(baseline_profdata, cfg.profile_dir, out_profdata, llvm_profdata=llvm_bin)
+    else:
+        merge_profiles(cfg.profile_dir, out_profdata, llvm_profdata=llvm_bin)
+
+    valid = validate_profdata(out_profdata, llvm_profdata=llvm_bin)
+    release_dir = _build_optimized_cargo(cfg, out_profdata, valid=valid)
+    if build_extensions:
+        for manifest in cfg.extension_manifests:
+            _build_optimized_maturin(cfg, out_profdata, manifest_path=manifest, valid=valid)
+
+    return PgoPipelineResult(
+        release_dir=release_dir,
+        profdata_path=out_profdata,
+        profdata_valid=valid,
+        profdata_bytes=check_profdata_size(out_profdata),
+        used_pgo=valid,
+        extension_manifests=manifests,
+    )
+
+
+def _build_optimized_cargo(config: RustPgoConfig, profdata_path: Path, *, valid: bool) -> Path:
+    """Compile the Rust server crate using pre-validated profdata status."""
+    cmd = ["cargo", "build", "--release", "--manifest-path", str(config.manifest_path)]
+    if not valid:
+        logger.warning("PGO profdata %s is missing or invalid; falling back to standard release build.", profdata_path)
         subprocess.run(cmd, check=True)
-        return target_dir
+        return resolve_cargo_release_dir(config)
     env = build_cargo_pgo_env(build_flags(config, pgo_mode="use", profdata_path=profdata_path))
     subprocess.run(cmd, check=True, env=env)
-    return target_dir
+    return resolve_cargo_release_dir(config, env=env)
+
+
+def _build_optimized_maturin(
+    config: RustPgoConfig,
+    profdata_path: Path,
+    *,
+    manifest_path: Path | None,
+    valid: bool,
+) -> Path:
+    """Compile a PyO3 extension crate using pre-validated profdata status."""
+    cmd = _maturin_develop_command(config, manifest_path)
+    if not valid:
+        logger.warning(
+            "PGO profdata %s is missing or invalid; building extension without -Cprofile-use.",
+            profdata_path,
+        )
+        subprocess.run(cmd, check=True, cwd=_REPO_ROOT)
+        return resolve_cargo_release_dir(config)
+    env = build_cargo_pgo_env(build_flags(config, pgo_mode="use", profdata_path=profdata_path))
+    subprocess.run(cmd, check=True, env=env, cwd=_REPO_ROOT)
+    return resolve_cargo_release_dir(config, env=env)
+
+
+def _maturin_develop_command(config: RustPgoConfig, manifest_path: Path | None) -> list[str]:
+    """Build the maturin develop argv, omitting -m for root-configured vertebra-py."""
+    cmd = ["maturin", "develop", "--uv", "--release"]
+    if config.maturin_features:
+        cmd.extend(["--features", config.maturin_features])
+    if manifest_path is not None and manifest_path.resolve() != _PY_EXT_MANIFEST.resolve():
+        cmd.extend(["-m", str(manifest_path)])
+    return cmd
+
+
+def _reserve_loopback_port() -> int:
+    """Bind an ephemeral TCP port on 127.0.0.1 and return its port number."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        address = sock.getsockname()
+        return int(address[1])
+
+
+def _wait_for_http_ready(host: str, port: int, *, timeout_seconds: float) -> None:
+    """Poll a loopback HTTP server until it responds or timeout_seconds elapses."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        conn = http.client.HTTPConnection(host, port, timeout=1.0)
+        try:
+            conn.request("GET", "/")
+            resp = conn.getresponse()
+            resp.read()
+            if resp.status < 500:
+                return
+        except OSError:
+            time.sleep(0.05)
+        finally:
+            conn.close()
+    msg = f"Timed out waiting for instrumented vertebra-server on {host}:{port}"
+    raise TimeoutError(msg)
+
+
+def _drive_http_training_requests(host: str, port: int, *, requests_per_route: int) -> None:
+    """Issue keep-alive GET and POST requests against the instrumented server."""
+    payload = b'{"message":"vertebra-pgo-training"}' * 16
+    conn = http.client.HTTPConnection(host, port, timeout=5.0)
+    try:
+        for _ in range(requests_per_route):
+            conn.request("GET", "/")
+            conn.getresponse().read()
+            conn.request("GET", "/json")
+            conn.getresponse().read()
+            conn.request("POST", "/echo", body=payload, headers={"Content-Type": "application/json"})
+            conn.getresponse().read()
+    finally:
+        conn.close()
 
 
 def _detect_target_triple() -> str:

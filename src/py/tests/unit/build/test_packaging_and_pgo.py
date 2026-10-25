@@ -8,13 +8,19 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 from tools.pgo import python_pgo as tools_python_pgo
+from tools.pgo import rust_pgo as tools_rust_pgo
 
 from vertebra.build.packaging import (
+    EXTENSION_MANIFESTS,
     ONEFILE_MAGIC,
     ONEFILE_TRAILER_SIZE,
     BuildTarget,
     OnefileBuilder,
+    PgoPipelineResult,
     StandaloneBuilder,
+    find_llvm_profdata,
+    resolve_cargo_release_dir,
+    run_pgo_pipeline,
 )
 from vertebra.build.packaging import pgo as packaging_pgo
 from vertebra.build.packaging.pgo import (
@@ -23,11 +29,16 @@ from vertebra.build.packaging.pgo import (
     PythonBuildInfo,
     RustPgoConfig,
     build_flags,
+    build_instrumented_extensions,
+    build_optimized,
+    build_optimized_extension,
+    build_optimized_extensions,
     check_pgo_availability,
     check_profdata_size,
     detect_python_build,
     get_platform_support,
     merge_profiles,
+    validate_profdata,
 )
 from vertebra.cli import cli
 from vertebra.cli.build import build as build_command
@@ -211,3 +222,229 @@ def test_release_workflow_cibuildwheel_v4_and_python_315_matrix() -> None:
     assert "pypa/cibuildwheel@v4.3.4" in release_yaml
     for target in ("cp312-*", "cp313-*", "cp314-*", "cp314t-*", "cp315-*", "cp315t-*"):
         assert target in release_yaml
+
+
+def test_resolve_cargo_release_dir_and_multi_extension_manifests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify CARGO_TARGET_DIR resolution, real workspace manifests, and multi-extension maturin invocations."""
+    cfg = RustPgoConfig(profile_dir=tmp_path / "raw")
+    assert cfg.manifest_path.is_file()
+    assert len(EXTENSION_MANIFESTS) == 3
+    assert all(manifest.is_file() for manifest in EXTENSION_MANIFESTS)
+    assert not hasattr(packaging_pgo, "resolve_llvm_profdata")
+    assert tools_rust_pgo.RustPgoConfig is RustPgoConfig
+    assert tools_rust_pgo.run_pgo_pipeline is run_pgo_pipeline
+
+    monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
+    default_rel = resolve_cargo_release_dir(cfg)
+    assert default_rel == cfg.manifest_path.parent.parent / "target" / "release"
+
+    custom_target = tmp_path / "cargo-out"
+    monkeypatch.setenv("CARGO_TARGET_DIR", str(custom_target))
+    assert resolve_cargo_release_dir(cfg) == custom_target / "release"
+    assert resolve_cargo_release_dir(cfg, env={"CARGO_TARGET_DIR": "build/custom-rs"}).name == "release"
+
+    recorded_cmds: list[tuple[list[str], str]] = []
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = False,
+        env: dict[str, str] | None = None,
+        cwd: Path | None = None,
+        capture_output: bool = False,
+        text: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        if cmd[0] == "llvm-profdata" or "llvm-profdata" in Path(cmd[0]).name:
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+        rustflags = (env or {}).get("RUSTFLAGS", "")
+        recorded_cmds.append((list(cmd), rustflags))
+        assert check is True
+        assert cwd is not None
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(packaging_pgo.subprocess, "run", fake_run)
+    build_instrumented_extensions(cfg)
+    assert len(recorded_cmds) == 3
+    assert "-m" not in recorded_cmds[0][0]
+    assert "--features" in recorded_cmds[0][0]
+    assert "extension-module" in recorded_cmds[0][0]
+    assert f"-Cprofile-generate={cfg.profile_dir}" in recorded_cmds[0][1]
+    assert "-m" in recorded_cmds[1][0]
+    assert str(EXTENSION_MANIFESTS[1]) in recorded_cmds[1][0]
+    assert "-m" in recorded_cmds[2][0]
+    assert str(EXTENSION_MANIFESTS[2]) in recorded_cmds[2][0]
+
+    recorded_cmds.clear()
+    valid_profdata = tmp_path / "valid.profdata"
+    valid_profdata.write_bytes(b"PROFDATA")
+    cfg_with_bin = RustPgoConfig(profile_dir=tmp_path / "raw", llvm_profdata_bin="llvm-profdata")
+    build_optimized_extensions(cfg_with_bin, valid_profdata)
+    assert len(recorded_cmds) == 3
+    assert all(f"-Cprofile-use={valid_profdata}" in flags for _, flags in recorded_cmds)
+
+
+def test_build_optimized_falls_back_when_profdata_invalid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify validate_profdata rejects missing/corrupt files and build_optimized* falls back cleanly."""
+    missing = tmp_path / "missing.profdata"
+    assert validate_profdata(missing, llvm_profdata="/nonexistent/llvm-profdata") is False
+
+    empty = tmp_path / "empty.profdata"
+    empty.write_bytes(b"")
+    assert validate_profdata(empty, llvm_profdata="/nonexistent/llvm-profdata") is False
+
+    corrupt = tmp_path / "corrupt.profdata"
+    corrupt.write_bytes(b"not-valid-llvm-profdata")
+    assert validate_profdata(corrupt, llvm_profdata="/nonexistent/llvm-profdata") is False
+
+    executed: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = False,
+        env: dict[str, str] | None = None,
+        cwd: Path | None = None,
+        capture_output: bool = False,
+        text: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        if len(cmd) >= 2 and cmd[1] == "show":
+            raise subprocess.CalledProcessError(1, cmd, stderr="corrupt profile")
+        executed.append((list(cmd), env))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(packaging_pgo.subprocess, "run", fake_run)
+    monkeypatch.setenv("CARGO_TARGET_DIR", str(tmp_path / "target-dir"))
+    cfg = RustPgoConfig(profile_dir=tmp_path / "raw", llvm_profdata_bin="llvm-profdata")
+
+    out_dir = build_optimized(cfg, corrupt)
+    assert out_dir == tmp_path / "target-dir" / "release"
+    assert executed[-1][1] is None
+
+    ext_dir = build_optimized_extension(cfg, corrupt)
+    assert ext_dir == tmp_path / "target-dir" / "release"
+    assert executed[-1][1] is None
+
+
+def test_two_phase_pgo_pipeline_and_cli_orchestration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify run_pgo_pipeline orchestrates generate, workload, merge, validate, use, and CLI flags."""
+    raw_dir = tmp_path / "profiles" / "raw"
+    merged_out = tmp_path / "profiles" / "merged.profdata"
+    baseline_prof = tmp_path / "profiles" / "baseline.profdata"
+    baseline_prof.parent.mkdir(parents=True, exist_ok=True)
+    baseline_prof.write_bytes(b"BASELINE_PROFDATA")
+
+    monkeypatch.setenv("CARGO_TARGET_DIR", str(tmp_path / "rs-target"))
+    cfg = RustPgoConfig(profile_dir=raw_dir, llvm_profdata_bin="llvm-profdata")
+    phases: list[str] = []
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = False,
+        env: dict[str, str] | None = None,
+        cwd: Path | None = None,
+        capture_output: bool = False,
+        text: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        exe = Path(cmd[0]).name
+        rustflags = (env or {}).get("RUSTFLAGS", "")
+        if exe == "cargo":
+            mode = (
+                "gen" if "-Cprofile-generate=" in rustflags else ("use" if "-Cprofile-use=" in rustflags else "plain")
+            )
+            phases.append(f"cargo:{mode}")
+        elif exe == "maturin":
+            mode = (
+                "gen" if "-Cprofile-generate=" in rustflags else ("use" if "-Cprofile-use=" in rustflags else "plain")
+            )
+            phases.append(f"maturin:{mode}")
+        elif exe == "llvm-profdata":
+            subcmd = cmd[1]
+            phases.append(f"profdata:{subcmd}")
+            if subcmd == "merge":
+                out_idx = cmd.index("-o") + 1
+                out_file = Path(cmd[out_idx])
+                out_file.parent.mkdir(parents=True, exist_ok=True)
+                out_file.write_bytes(b"MERGED_LLVM_PROFDATA")
+        return subprocess.CompletedProcess(cmd, 0, stdout="Total functions: 12\n", stderr="")
+
+    monkeypatch.setattr(packaging_pgo.subprocess, "run", fake_run)
+
+    observed_profile_env: list[str] = []
+
+    def fake_workload(active_cfg: RustPgoConfig, release_dir: Path) -> None:
+        observed_profile_env.append(os.environ.get("LLVM_PROFILE_FILE", ""))
+        assert release_dir == tmp_path / "rs-target" / "release"
+        phases.append("workload")
+        (active_cfg.profile_dir / "vtb-1001.profraw").write_bytes(b"RAW_PROFILE")
+
+    result = run_pgo_pipeline(
+        cfg,
+        profdata_output=merged_out,
+        baseline_profdata=baseline_prof,
+        workload_runner=fake_workload,
+    )
+    assert isinstance(result, PgoPipelineResult)
+    assert result.used_pgo is True
+    assert result.profdata_valid is True
+    assert result.profdata_bytes == len(b"MERGED_LLVM_PROFDATA")
+    assert result.release_dir == tmp_path / "rs-target" / "release"
+    assert len(result.extension_manifests) == 3
+    assert observed_profile_env and observed_profile_env[0].endswith(".profraw")
+    assert phases == [
+        "cargo:gen",
+        "maturin:gen",
+        "maturin:gen",
+        "maturin:gen",
+        "workload",
+        "profdata:merge",
+        "profdata:merge",
+        "profdata:show",
+        "cargo:use",
+        "maturin:use",
+        "maturin:use",
+        "maturin:use",
+    ]
+
+    phases.clear()
+    exit_code = tools_rust_pgo.main(
+        [
+            "--profile-dir",
+            str(raw_dir),
+            "--profdata",
+            str(merged_out),
+            "--llvm-profdata",
+            "llvm-profdata",
+            "--use-existing",
+        ]
+    )
+    assert exit_code == 0
+    assert phases == [
+        "profdata:show",
+        "cargo:use",
+        "maturin:use",
+        "maturin:use",
+        "maturin:use",
+    ]
+
+
+def test_live_llvm_profdata_rejects_corrupt_data_when_installed(tmp_path: Path) -> None:
+    """Exercise the real host llvm-profdata binary against corrupt input when available."""
+    try:
+        llvm_bin = find_llvm_profdata()
+    except FileNotFoundError:
+        pytest.skip("llvm-profdata is not installed on this host")
+
+    assert Path(llvm_bin).is_file()
+    corrupt = tmp_path / "bad.profdata"
+    corrupt.write_bytes(b"corrupt-profdata-bytes")
+    assert validate_profdata(corrupt, llvm_profdata=llvm_bin) is False
