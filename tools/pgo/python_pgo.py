@@ -1,12 +1,14 @@
-"""CPython PGO, LTO, and BOLT optimization detection and platform support matrix."""
+"""CPython PGO, LTO, BOLT, tail-call interpreter, and JIT optimization detection."""
 
-import json
+import os
 import platform
 import subprocess
 import sys
 import sysconfig
 
 import msgspec
+
+from vertebra.utils.serializers import decode_json
 
 __all__ = (
     "CPYTHON_PGO_FLAGS",
@@ -27,6 +29,11 @@ class PythonBuildInfo(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     is_lto: bool
     is_debug: bool
     architecture: str
+    is_tail_call_interp: bool = False
+    is_jit_available: bool = False
+    is_jit_enabled: bool = False
+    is_free_threaded: bool = False
+    has_frame_pointers: bool = False
 
 
 class PlatformSupport(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
@@ -44,6 +51,8 @@ CPYTHON_PGO_FLAGS: dict[str, str] = {
     "--enable-optimizations": "Enables CPython Profile-Guided Optimization (PGO) for 10-20% interpreter speedup.",
     "--with-lto": "Enables Link-Time Optimization (LTO) across translation units.",
     "--enable-bolt": "Enables LLVM BOLT post-link binary layout optimization.",
+    "--with-tail-call-interp": "Enables CPython 3.14/3.15 tail-calling bytecode interpreter dispatch.",
+    "--enable-experimental-jit": "Enables CPython 3.14/3.15 copy-and-patch JIT compiler support.",
 }
 
 PLATFORM_MATRIX: list[PlatformSupport] = [
@@ -94,23 +103,35 @@ def detect_python_build(executable: str = "python") -> PythonBuildInfo:
     """Inspect the specified Python interpreter and return its PythonBuildInfo."""
     config_vars = _query_sysconfig(executable)
     version = _query_version(executable)
+    jit_available, jit_enabled = _detect_jit(executable, config_vars)
     return PythonBuildInfo(
         version=version,
         is_pgo=_detect_pgo(config_vars),
         is_lto=_detect_lto(config_vars),
         is_debug=_detect_debug(config_vars),
         architecture=platform.machine(),
+        is_tail_call_interp=_detect_tail_call_interp(config_vars),
+        is_jit_available=jit_available,
+        is_jit_enabled=jit_enabled,
+        is_free_threaded=_detect_free_threaded(config_vars),
+        has_frame_pointers=_detect_frame_pointers(config_vars),
     )
 
 
 def check_pgo_availability(executable: str = "python") -> dict[str, bool]:
-    """Return a dictionary of active optimization flags (pgo, lto, bolt, debug)."""
+    """Return a dictionary of active optimization flags across PGO, LTO, BOLT, JIT, and 3.15 capabilities."""
     config_vars = _query_sysconfig(executable)
+    jit_available, jit_enabled = _detect_jit(executable, config_vars)
     return {
         "pgo": _detect_pgo(config_vars),
         "lto": _detect_lto(config_vars),
         "bolt": _detect_bolt(config_vars),
         "debug": _detect_debug(config_vars),
+        "tail_call_interp": _detect_tail_call_interp(config_vars),
+        "jit_available": jit_available,
+        "jit_enabled": jit_enabled,
+        "free_threaded": _detect_free_threaded(config_vars),
+        "frame_pointers": _detect_frame_pointers(config_vars),
     }
 
 
@@ -147,9 +168,9 @@ def _query_sysconfig(executable: str) -> dict[str, str]:
             check=True,
             timeout=15,
         )
-        parsed = json.loads(result.stdout)
+        parsed = decode_json(result.stdout.encode("utf-8"))
         return {str(k): str(v) for k, v in parsed.items()} if isinstance(parsed, dict) else {}
-    except (subprocess.SubprocessError, FileNotFoundError, json.JSONDecodeError, ValueError):
+    except (subprocess.SubprocessError, FileNotFoundError, msgspec.DecodeError, ValueError):
         return {}
 
 
@@ -197,3 +218,56 @@ def _detect_debug(config_vars: dict[str, str]) -> bool:
     if "--with-pydebug" in config_vars.get("CONFIG_ARGS", ""):
         return True
     return config_vars.get("Py_DEBUG", "0") not in {"0", ""}
+
+
+def _detect_tail_call_interp(config_vars: dict[str, str]) -> bool:
+    if "--with-tail-call-interp" in config_vars.get("CONFIG_ARGS", ""):
+        return True
+    return config_vars.get("Py_TAIL_CALL_INTERP", "0") not in {"0", ""}
+
+
+def _detect_free_threaded(config_vars: dict[str, str]) -> bool:
+    if "--disable-gil" in config_vars.get("CONFIG_ARGS", ""):
+        return True
+    return config_vars.get("Py_GIL_DISABLED", "0") not in {"0", ""}
+
+
+def _detect_frame_pointers(config_vars: dict[str, str]) -> bool:
+    flag_keys = ("CFLAGS", "CFLAGS_NODIST", "PY_CFLAGS", "PY_CFLAGS_NODIST")
+    combined = " ".join(config_vars.get(k, "") for k in flag_keys)
+    return "-fno-omit-frame-pointer" in combined or "-mno-omit-leaf-frame-pointer" in combined
+
+
+def _detect_jit(executable: str, config_vars: dict[str, str]) -> tuple[bool, bool]:
+    if executable in {"python", sys.executable}:
+        jit_mod = getattr(sys, "_jit", None)
+        if jit_mod is not None:
+            avail_fn = getattr(jit_mod, "is_available", None)
+            enabled_fn = getattr(jit_mod, "is_enabled", None)
+            avail = bool(avail_fn()) if callable(avail_fn) else False
+            enabled = bool(enabled_fn()) if callable(enabled_fn) else False
+            return avail, enabled
+        configured = "--enable-experimental-jit" in config_vars.get("CONFIG_ARGS", "")
+        return configured, configured and os.environ.get("PYTHON_JIT", "") in {"1", "true", "yes"}
+
+    script = (
+        "import sys; j = getattr(sys, '_jit', None); "
+        "a = bool(j.is_available()) if j and hasattr(j, 'is_available') else False; "
+        "e = bool(j.is_enabled()) if j and hasattr(j, 'is_enabled') else False; "
+        "print(f'{int(a)},{int(e)}')"
+    )
+    try:
+        result = subprocess.run(
+            [executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        parts = result.stdout.strip().split(",")
+        if len(parts) == 2:
+            return parts[0] == "1", parts[1] == "1"
+    except (subprocess.SubprocessError, FileNotFoundError, ValueError):
+        pass
+    configured = "--enable-experimental-jit" in config_vars.get("CONFIG_ARGS", "")
+    return configured, False

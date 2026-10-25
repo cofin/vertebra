@@ -32,7 +32,7 @@ impl std::io::Write for MemoryLogSink {
 }
 
 /// Dedicated log sink draining byte records off-GIL.
-#[pyclass(name = "LogSink")]
+#[pyclass(name = "LogSink", immutable_type)]
 pub struct LogSink {
     core: Option<AsyncLogCore>,
     memory_buf: Option<Arc<Mutex<Vec<Vec<u8>>>>>,
@@ -322,7 +322,7 @@ pub fn sanitize_sql(sql: &str) -> String {
 }
 
 /// HS256 JWT validator executing in Rust.
-#[pyclass(name = "JwtGuard")]
+#[pyclass(name = "JwtGuard", immutable_type)]
 pub struct JwtGuard {
     secret: Vec<u8>,
     leeway_secs: u64,
@@ -355,7 +355,7 @@ impl JwtGuard {
 }
 
 /// Token bucket rate limiter executing in Rust.
-#[pyclass(name = "RateLimiter")]
+#[pyclass(name = "RateLimiter", immutable_type)]
 pub struct RateLimiter {
     capacity: f64,
     refill_rate_per_sec: f64,

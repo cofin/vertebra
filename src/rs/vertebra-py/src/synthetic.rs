@@ -44,8 +44,12 @@ impl SyntheticRequest {
         handler_id: u64,
         http_version: &str,
     ) -> Arc<BatchSnapshot> {
-        let path_bytes = path.as_bytes();
-        let query_bytes = query.unwrap_or("").as_bytes();
+        let (clean_path, clean_query) = match query {
+            Some(q) => (path, q),
+            None => path.split_once('?').unwrap_or((path, "")),
+        };
+        let path_bytes = clean_path.as_bytes();
+        let query_bytes = clean_query.as_bytes();
         let mut slab = Vec::with_capacity(
             path_bytes.len() + query_bytes.len() + headers_raw.len() + body.len(),
         );

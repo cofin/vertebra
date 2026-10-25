@@ -57,3 +57,4 @@ windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_Syst
 lto = true
 codegen-units = 1
 opt-level = 3
+panic = "abort"

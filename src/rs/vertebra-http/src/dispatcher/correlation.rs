@@ -108,31 +108,38 @@ impl InFlightRequests {
         Some(CorrelationId::encode(shard, index as u32, generation))
     }
 
-    /// Complete a correlation by sending the response through the oneshot.
-    pub fn complete(&mut self, id: CorrelationId, response: PendingResponse) -> bool {
+    /// Pop a matching reply sender from the slab so the caller can invoke `send` outside locks.
+    #[inline]
+    pub fn take_completed(
+        &mut self,
+        id: CorrelationId,
+    ) -> Option<oneshot::Sender<PendingResponse>> {
         let index = id.slot();
         let expected_gen = id.generation();
 
-        if index >= self.capacity {
-            return false;
-        }
-        if self.generations[index] != expected_gen {
-            return false;
+        if index >= self.capacity || self.generations[index] != expected_gen {
+            return None;
         }
 
-        if let Some(entry) = self.slots[index].take() {
-            let _ = entry.reply.send(response);
-            self.free_list.push(index as u32);
+        let entry = self.slots[index].take()?;
+        self.free_list.push(index as u32);
+        Some(entry.reply)
+    }
+
+    /// Complete a correlation by sending the response through the oneshot.
+    pub fn complete(&mut self, id: CorrelationId, response: PendingResponse) -> bool {
+        if let Some(reply) = self.take_completed(id) {
+            let _ = reply.send(response);
             true
         } else {
             false
         }
     }
 
-    /// Sweep for expired entries older than `timeout`.
-    pub fn sweep_expired(&mut self, timeout: Duration) -> usize {
+    /// Remove and return expired reply senders older than `timeout`.
+    pub fn take_expired(&mut self, timeout: Duration) -> Vec<oneshot::Sender<PendingResponse>> {
         let now = Instant::now();
-        let mut count = 0;
+        let mut expired = Vec::new();
 
         for index in 0..self.capacity {
             let is_expired = if let Some(entry) = &self.slots[index] {
@@ -142,23 +149,35 @@ impl InFlightRequests {
             };
 
             if is_expired && let Some(entry) = self.slots[index].take() {
-                let _ = entry.reply.send(PendingResponse {
-                    status: 504,
-                    headers_mp: bytes::Bytes::new(),
-                    body: bytes::Bytes::from_static(b"Gateway Timeout"),
-                    stream_rx: None,
-                });
                 self.free_list.push(index as u32);
-                count += 1;
+                expired.push(entry.reply);
             }
         }
 
+        expired
+    }
+
+    /// Sweep for expired entries older than `timeout`.
+    pub fn sweep_expired(&mut self, timeout: Duration) -> usize {
+        let expired = self.take_expired(timeout);
+        let count = expired.len();
+        for reply in expired {
+            let _ = reply.send(PendingResponse {
+                status: 504,
+                headers_mp: bytes::Bytes::new(),
+                body: bytes::Bytes::from_static(b"Gateway Timeout"),
+                stream_rx: None,
+            });
+        }
         count
     }
 
-    /// Sweep for entries targeting a specific dead worker.
-    pub fn sweep_for_worker(&mut self, dead_worker_id: u32) -> usize {
-        let mut count = 0;
+    /// Remove and return reply senders targeting a specific dead worker.
+    pub fn take_for_worker(
+        &mut self,
+        dead_worker_id: u32,
+    ) -> Vec<oneshot::Sender<PendingResponse>> {
+        let mut targets = Vec::new();
 
         for index in 0..self.capacity {
             let is_target = if let Some(entry) = &self.slots[index] {
@@ -168,17 +187,26 @@ impl InFlightRequests {
             };
 
             if is_target && let Some(entry) = self.slots[index].take() {
-                let _ = entry.reply.send(PendingResponse {
-                    status: 502,
-                    headers_mp: bytes::Bytes::new(),
-                    body: bytes::Bytes::from_static(b"Bad Gateway"),
-                    stream_rx: None,
-                });
                 self.free_list.push(index as u32);
-                count += 1;
+                targets.push(entry.reply);
             }
         }
 
+        targets
+    }
+
+    /// Sweep for entries targeting a specific dead worker.
+    pub fn sweep_for_worker(&mut self, dead_worker_id: u32) -> usize {
+        let targets = self.take_for_worker(dead_worker_id);
+        let count = targets.len();
+        for reply in targets {
+            let _ = reply.send(PendingResponse {
+                status: 502,
+                headers_mp: bytes::Bytes::new(),
+                body: bytes::Bytes::from_static(b"Bad Gateway"),
+                stream_rx: None,
+            });
+        }
         count
     }
 

@@ -1,17 +1,54 @@
 //! Server configuration.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::backpressure::{BackpressureConfig, CircuitBreakerConfig};
+use crate::compression::CompressionOffloadConfig;
+use crate::cors::CorsOffloadConfig;
 use crate::http3::Http3Config;
 use crate::tls::{MtlsConfig, TrustedProxyConfig};
+
+/// Static asset mount specification offloaded from Python frameworks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StaticMountConfig {
+    pub path_prefix: String,
+    pub directories: Vec<String>,
+    pub html_mode: bool,
+    pub send_as_attachment: bool,
+    pub headers: HashMap<String, String>,
+}
+
+/// Pre-rendered OpenAPI JSON payload specification offloaded to Rust.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenApiCacheConfig {
+    pub schema_path: String,
+    pub body: String,
+    pub etag: String,
+    pub content_type: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct OffloadPlanPayload {
+    pub compression: Option<CompressionOffloadConfig>,
+    pub cors: Option<CorsOffloadConfig>,
+    pub static_mounts: Vec<StaticMountConfig>,
+    pub openapi: Option<OpenApiCacheConfig>,
+}
 
 /// Top-level server configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// Address to bind on.
     pub bind: SocketAddr,
+    /// Enable `SO_REUSEPORT` on Unix TCP listeners for multi-process worker scaling.
+    pub reuse_port: bool,
     /// Number of worker threads for the Tokio runtime.
     /// Defaults to the number of logical CPUs.
     pub worker_threads: usize,
@@ -47,10 +84,20 @@ pub struct ServerConfig {
     pub h2_keep_alive_interval_ms: Option<u64>,
     /// Enable RFC 9113 HTTP/1.1 `Upgrade: h2c` negotiation on cleartext sockets.
     pub enable_h2c_upgrade: bool,
+    /// Enable cleartext HTTP/2 prior-knowledge `MSG_PEEK` detection (disabled by default for zero-peek HTTP/1.1 fastpath).
+    pub enable_h2c_prior_knowledge: bool,
     /// CIDR-verified reverse proxies permitted to supply identity headers.
     pub trusted_proxies: TrustedProxyConfig,
     /// HTTP/3 over QUIC configuration and `Alt-Svc` advertisement settings.
     pub http3: Http3Config,
+    /// Optional Rust CORS preflight and response header offload configuration.
+    pub cors: Option<CorsOffloadConfig>,
+    /// Optional Rust response compression offload configuration.
+    pub compression: Option<CompressionOffloadConfig>,
+    /// Optional Rust static file mount configurations.
+    pub static_mounts: Vec<StaticMountConfig>,
+    /// Optional pre-rendered OpenAPI schema cache served directly in Rust.
+    pub openapi_cache: Option<OpenApiCacheConfig>,
 }
 
 /// Runtime topology for Vertebra.
@@ -67,8 +114,8 @@ impl std::str::FromStr for Topology {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "embedded" => Ok(Self::Embedded),
+        match s.trim().to_lowercase().as_str() {
+            "auto" | "embedded" => Ok(Self::Embedded),
             "shm" => Ok(Self::Shm),
             _ => Err(format!("invalid topology: {s}")),
         }
@@ -120,6 +167,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             bind: "127.0.0.1:8000".parse().unwrap(),
+            reuse_port: false,
             worker_threads: num_cpus(),
             batch_size: 64,
             batch_timeout: Duration::from_millis(1),
@@ -137,13 +185,36 @@ impl Default for ServerConfig {
             h2_max_concurrent_streams: None,
             h2_keep_alive_interval_ms: None,
             enable_h2c_upgrade: true,
+            enable_h2c_prior_knowledge: false,
             trusted_proxies: TrustedProxyConfig::default(),
             http3: Http3Config::default(),
+            cors: None,
+            compression: None,
+            static_mounts: Vec::new(),
+            openapi_cache: None,
         }
     }
 }
 
 impl ServerConfig {
+    /// Parse a JSON middleware offload payload (`VERTEBRA_OFFLOAD_CONFIG`) into this `ServerConfig`.
+    pub fn apply_offload_json(&mut self, raw: &str) -> Result<(), serde_json::Error> {
+        let parsed: OffloadPlanPayload = serde_json::from_str(raw)?;
+        if let Some(comp) = parsed.compression {
+            self.compression = Some(comp);
+        }
+        if let Some(cors) = parsed.cors {
+            self.cors = Some(cors);
+        }
+        if !parsed.static_mounts.is_empty() {
+            self.static_mounts = parsed.static_mounts;
+        }
+        if let Some(openapi) = parsed.openapi {
+            self.openapi_cache = Some(openapi);
+        }
+        Ok(())
+    }
+
     /// Build config from environment variables, falling back to defaults.
     ///
     /// Reads `VERTEBRA_HOST` and `VERTEBRA_PORT` to construct the bind address.
@@ -164,6 +235,20 @@ impl ServerConfig {
             std::env::var("VERTEBRA_DEV").as_deref(),
             Ok("1") | Ok("true") | Ok("TRUE") | Ok("True")
         );
+        config.reuse_port = matches!(
+            std::env::var("VERTEBRA_REUSE_PORT").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("True")
+        );
+        config.enable_h2c_prior_knowledge = matches!(
+            std::env::var("VERTEBRA_H2C").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("True")
+        );
+        if let Ok(raw_offload) = std::env::var("VERTEBRA_OFFLOAD_CONFIG")
+            && !raw_offload.trim().is_empty()
+            && let Err(e) = config.apply_offload_json(&raw_offload)
+        {
+            eprintln!("[vertebra] warning: failed to parse VERTEBRA_OFFLOAD_CONFIG: {e}");
+        }
 
         // TLS config
         let tls_cert = std::env::var("VERTEBRA_TLS_CERT").ok();
@@ -185,17 +270,30 @@ impl ServerConfig {
         }
 
         // Topology config
-        if let Ok(top) = std::env::var("VERTEBRA_TOPOLOGY")
+        let explicit_topology = std::env::var("VERTEBRA_TOPOLOGY").ok().and_then(|v| {
+            let trimmed = v.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_lowercase())
+        });
+        if let Some(ref top) = explicit_topology
             && let Ok(t) = top.parse::<Topology>()
         {
             config.topology = t;
         }
 
-        // Thread scaling config
+        // Thread scaling config (clamped to available_parallelism / taskset affinity for Tokio)
+        let available_cpus = num_cpus();
         if let Ok(threads) = std::env::var("VERTEBRA_THREADS")
             && let Ok(n) = threads.parse::<usize>()
+            && n > 0
         {
             config.thread_count = n;
+            config.worker_threads = n.min(available_cpus).max(1);
+        }
+        if let Ok(tokio_threads) = std::env::var("VERTEBRA_TOKIO_THREADS")
+            && let Ok(n) = tokio_threads.parse::<usize>()
+            && n > 0
+        {
+            config.worker_threads = n;
         }
 
         // Worker config
@@ -203,10 +301,13 @@ impl ServerConfig {
             && let Ok(n) = count.parse::<usize>()
         {
             config.workers.count = n;
-            // If workers > 0 and topology was not explicitly set to Embedded,
-            // assume SHM for backward compatibility.
-            if n > 0 && std::env::var("VERTEBRA_TOPOLOGY").is_err() {
+            #[cfg(not(unix))]
+            if n > 1 && explicit_topology.as_deref() != Some("embedded") {
                 config.topology = Topology::Shm;
+            }
+            #[cfg(unix)]
+            if n > 1 && config.topology == Topology::Embedded {
+                config.reuse_port = true;
             }
         }
         if let Ok(python) = std::env::var("VERTEBRA_PYTHON_BIN") {
@@ -281,4 +382,74 @@ fn num_cpus() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compression::CompressionBackend;
+
+    #[test]
+    fn apply_offload_json_parses_litestar_offload_plan_payload() {
+        let payload = r#"{
+            "compression": {
+                "backend": "zstd",
+                "minimum_size": 256,
+                "gzip_compress_level": 6,
+                "brotli_quality": 4,
+                "zstd_level": 3,
+                "exclude_patterns": ["/healthz"],
+                "excluded_paths": ["/raw"]
+            },
+            "cors": {
+                "allow_origins": ["https://app.example.com"],
+                "allow_methods": ["GET", "POST"],
+                "allow_headers": ["Authorization"],
+                "allow_credentials": true,
+                "expose_headers": ["X-Trace-Id"],
+                "max_age": 600,
+                "allow_origin_regex": null
+            },
+            "static_mounts": [
+                {
+                    "path_prefix": "/static",
+                    "directories": ["/var/www/static"],
+                    "html_mode": true,
+                    "send_as_attachment": false,
+                    "headers": {"cache-control": "public, max-age=3600"}
+                }
+            ],
+            "openapi": {
+                "schema_path": "/schema/openapi.json",
+                "body": "{\"openapi\":\"3.1.0\"}",
+                "etag": "\"abc123\"",
+                "content_type": "application/vnd.oai.openapi+json"
+            }
+        }"#;
+
+        let mut cfg = ServerConfig::default();
+        cfg.apply_offload_json(payload)
+            .expect("valid offload payload");
+
+        let comp = cfg.compression.expect("compression populated");
+        assert_eq!(comp.backend, CompressionBackend::Zstd);
+        assert_eq!(comp.minimum_size, 256);
+        assert_eq!(comp.excluded_paths, vec!["/raw".to_string()]);
+
+        let cors = cfg.cors.expect("cors populated");
+        assert_eq!(
+            cors.allow_origins,
+            vec!["https://app.example.com".to_string()]
+        );
+        assert!(cors.allow_credentials);
+        assert_eq!(cors.max_age, 600);
+
+        assert_eq!(cfg.static_mounts.len(), 1);
+        assert_eq!(cfg.static_mounts[0].path_prefix, "/static");
+        assert!(cfg.static_mounts[0].html_mode);
+
+        let openapi = cfg.openapi_cache.expect("openapi cache populated");
+        assert_eq!(openapi.schema_path, "/schema/openapi.json");
+        assert_eq!(openapi.etag, "\"abc123\"");
+    }
 }

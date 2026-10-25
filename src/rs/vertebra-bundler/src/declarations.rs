@@ -8,7 +8,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 /// Fast `.d.ts` declaration generator powered by `oxc_parser` AST analysis.
-#[pyclass]
+#[pyclass(immutable_type)]
 #[derive(Clone, Debug, Default)]
 pub struct IsolatedDeclarationsGenerator {
     strip_internal: bool,

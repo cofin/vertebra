@@ -1,6 +1,6 @@
 """Type stubs for the vertebra._vertebra native extension module."""
 
-from collections.abc import Awaitable, Buffer
+from collections.abc import Awaitable, Buffer, Sequence
 from typing import Any, Self, final
 
 __version__: str
@@ -12,6 +12,7 @@ __all__ = [
     "GIL_USED",
     "AlloyDbDialer",
     "ArrowCursor",
+    "AsgiProtocol",
     "AsgiScope",
     "AsgiScopeIterator",
     "BrokerStats",
@@ -22,6 +23,8 @@ __all__ = [
     "LeaseBroker",
     "LeaseGrant",
     "LogSink",
+    "PyEmptyAwaitable",
+    "PyValueAwaitable",
     "RateLimiter",
     "Request",
     "RequestBatch",
@@ -40,6 +43,7 @@ __all__ = [
     "WsgiInput",
     "_WsgiStartResponse",
     "__version__",
+    "cancel_request_sleep",
     "classify_jsonrpc_frame",
     "clear_request_notification",
     "crc16_xmodem",
@@ -50,6 +54,8 @@ __all__ = [
     "decode_oracle_vector_i8",
     "decode_oson_payload",
     "decode_pgcopy_rows",
+    "drive_asgi_batch",
+    "drive_rsgi_batch",
     "duckdb_bootstrap_statements",
     "encode_alloydb_metadata_exchange",
     "encode_hello3_handshake",
@@ -70,6 +76,7 @@ __all__ = [
     "parse_cluster_redirect",
     "parse_tnsnames_ora",
     "parse_traceparent",
+    "prepare_request_sleep",
     "redis_hash_slot",
     "resolve_tns_alias",
     "rewrite_mssql_placeholders",
@@ -89,6 +96,7 @@ __all__ = [
 @final
 class Request:
     def __new__(cls) -> Request: ...
+    def __buffer__(self, flags: int, /) -> memoryview: ...
     def __repr__(self, /) -> str: ...
     def as_dict(self, /) -> dict[str, object]: ...
     def asgi_scope(self, /, root_path: str | None = None) -> AsgiScope: ...
@@ -122,7 +130,7 @@ class Request:
     @property
     def raw_path(self) -> bytes: ...
     @property
-    def raw_query(self) -> bytes | None: ...
+    def raw_query(self) -> bytes: ...
     @property
     def request_id(self) -> int: ...
     def rsgi_protocol(self, /) -> RsgiHttpProtocol: ...
@@ -132,6 +140,7 @@ class Request:
         scheme: str = "http",
         server: str = "127.0.0.1:8000",
         client: str = "127.0.0.1:0",
+        root_path: str = "",
     ) -> RsgiScope: ...
     def wsgi_environ(
         self,
@@ -261,6 +270,44 @@ class AsgiScopeIterator:
     def __repr__(self, /) -> str: ...
 
 @final
+class PyEmptyAwaitable:
+    def __new__(cls) -> PyEmptyAwaitable: ...
+    def __await__(self, /) -> PyEmptyAwaitable: ...
+    def __iter__(self, /) -> PyEmptyAwaitable: ...
+    def __next__(self, /) -> None: ...
+    def __repr__(self, /) -> str: ...
+
+@final
+class PyValueAwaitable:
+    def __new__(cls, value: Any = None) -> PyValueAwaitable: ...
+    def __await__(self, /) -> PyValueAwaitable: ...
+    def __iter__(self, /) -> PyValueAwaitable: ...
+    def __next__(self, /) -> Any: ...
+    def __repr__(self, /) -> str: ...
+
+@final
+class AsgiProtocol:
+    def __new__(
+        cls,
+        body: Buffer | str | None = None,
+        request_id: int = 0,
+        *,
+        direct_submit: bool = False,
+        loop_obj: object = None,
+    ) -> AsgiProtocol: ...
+    def __repr__(self, /) -> str: ...
+    @property
+    def complete(self) -> bool: ...
+    def notify_disconnect(self, /) -> None: ...
+    def receive(self, /) -> Awaitable[dict[str, Any]]: ...
+    def send(self, /, message: dict[str, Any]) -> Awaitable[None]: ...
+    @property
+    def started(self) -> bool: ...
+    @property
+    def status(self) -> int: ...
+    def take_response(self, /) -> Response: ...
+
+@final
 class WsgiEnviron:
     def __new__(cls) -> WsgiEnviron: ...
     def __contains__(self, key: object, /) -> bool: ...
@@ -346,6 +393,7 @@ class RsgiScope:
         scheme: str = "http",
         method: str = "GET",
         path: str = "/",
+        root_path: str = "",
         query_string: str = "",
         headers: list[tuple[str, str]] | None = None,
         authority: str | None = None,
@@ -368,6 +416,8 @@ class RsgiScope:
     @property
     def query_string(self) -> str: ...
     @property
+    def root_path(self) -> str: ...
+    @property
     def rsgi_version(self) -> str: ...
     @property
     def scheme(self) -> str: ...
@@ -378,8 +428,10 @@ class RsgiScope:
 class RsgiHttpProtocol:
     def __new__(
         cls,
-        body: bytes | None = None,
+        body: Buffer | str | None = None,
         request_id: int = 0,
+        *,
+        direct_submit: bool = False,
     ) -> RsgiHttpProtocol: ...
     def __call__(self, /, *args: Any, **kwargs: Any) -> Awaitable[bytes]: ...
     def __repr__(self, /) -> str: ...
@@ -487,6 +539,8 @@ def init_transport(
 def get_batch(timeout_ms: int = 100) -> RequestBatch | None: ...
 def get_request_notify_fd() -> int: ...
 def clear_request_notification() -> None: ...
+def prepare_request_sleep() -> bool: ...
+def cancel_request_sleep() -> None: ...
 def try_get_batch() -> RequestBatch | None: ...
 def submit_results(responses: list[Response]) -> None: ...
 def submit_response(response: Response) -> None: ...
@@ -501,10 +555,12 @@ def submit_raw_response(
 def submit_response_raw(
     request_id: int,
     status: int,
-    body: bytes,
-    headers_raw: bytes | None = None,
+    body: Buffer,
+    headers_raw: Buffer | None = None,
 ) -> None: ...
-def submit_batch_raw(items: list[tuple[int, int, bytes]]) -> None: ...
+def submit_batch_raw(
+    items: Sequence[tuple[int, int, Buffer] | tuple[int, int, Buffer, Buffer | None]],
+) -> None: ...
 def stream_file_chunks(
     path: str,
     start: int | None = None,
@@ -516,6 +572,26 @@ def run_wsgi_callable(
     environ: WsgiEnviron,
     request_id: int = 0,
 ) -> Response: ...
+def drive_asgi_batch(
+    app: object,
+    batch: RequestBatch | Sequence[Request],
+    *,
+    loop_obj: object = None,
+    root_path: str = "",
+    lifespan_state: dict[str, Any] | None = None,
+    indices: Sequence[int] | None = None,
+) -> int: ...
+def drive_rsgi_batch(
+    app: object,
+    batch: RequestBatch | Sequence[Request],
+    *,
+    loop_obj: object = None,
+    root_path: str = "",
+    scheme: str = "http",
+    server: str = "127.0.0.1:8000",
+    client: str = "127.0.0.1:0",
+    indices: Sequence[int] | None = None,
+) -> int: ...
 def parse_traceparent(header: str) -> tuple[str, str, int] | None: ...
 def format_traceparent(trace_id: str, span_id: str, trace_flags: int) -> str: ...
 def sanitize_sql(sql: str) -> str: ...

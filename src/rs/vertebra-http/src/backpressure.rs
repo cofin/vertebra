@@ -4,14 +4,14 @@
 //! from short-lived unary request permits (`in_flight` / `max_in_flight`), provides
 //! `high_watermark` / `low_watermark` atomic pause/resume notifications (`Notify`),
 //! allows configured `priority_routes` (`/healthz`, `/readyz`, `/__vertebra/health`) to
-//! bypass concurrency shedding, and enforces strict probe countdown in `CircuitPhase::HalfOpen`.
+//! bypass concurrency shedding, and enforces strict lock-free probe countdown in `HalfOpen`.
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Notify;
+use vertebra_core::buffer::CacheLine;
 
 /// Tunable thresholds for the admission and stream flow controller.
 #[derive(Debug, Clone)]
@@ -129,51 +129,65 @@ pub enum CircuitState {
     HalfOpen,
 }
 
-/// Internal phase tracking exact remaining half-open probe permits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CircuitPhase {
-    Closed,
-    Open { opened_at: Instant },
-    HalfOpen { remaining_probes: u32 },
+const PHASE_CLOSED: u64 = 0;
+const PHASE_OPEN: u64 = 1;
+const PHASE_HALF_OPEN: u64 = 2;
+const PHASE_SHIFT: u32 = 62;
+const OPEN_UNTIL_MASK: u64 = 0x3FFF_FFFF_FFFF_FFFF;
+const HALF_OPEN_COUNT_MASK: u64 = 0x7FFF_FFFF;
+const HALF_OPEN_REM_SHIFT: u32 = 31;
+
+const BUCKET_SHARDS: usize = 4;
+const NUM_BUCKETS: usize = 16;
+const BUCKET_EPOCH_SHIFT: u32 = 36;
+const BUCKET_TOTAL_SHIFT: u32 = 18;
+const BUCKET_SAMPLE_MASK: u64 = 0x0003_FFFF;
+
+static NEXT_THREAD_SHARD: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    static THREAD_BUCKET_SHARD: usize =
+        NEXT_THREAD_SHARD.fetch_add(1, Ordering::Relaxed) & (BUCKET_SHARDS - 1);
+}
+
+#[inline]
+fn current_bucket_shard() -> usize {
+    THREAD_BUCKET_SHARD.with(|&s| s)
+}
+
+#[inline]
+fn encode_open_word(until_ms: u64) -> u64 {
+    (PHASE_OPEN << PHASE_SHIFT) | (until_ms & OPEN_UNTIL_MASK)
+}
+
+#[inline]
+fn encode_half_open_word(remaining_probes: u32, successes: u32) -> u64 {
+    (PHASE_HALF_OPEN << PHASE_SHIFT)
+        | (((remaining_probes as u64) & HALF_OPEN_COUNT_MASK) << HALF_OPEN_REM_SHIFT)
+        | ((successes as u64) & HALF_OPEN_COUNT_MASK)
 }
 
 #[derive(Debug)]
-struct CircuitBreakerInner {
-    phase: CircuitPhase,
-    samples: VecDeque<(Instant, bool)>,
-    failure_count: usize,
-    half_open_successes: u64,
+struct QueueWakeState {
+    queue_depth: CacheLine<AtomicUsize>,
+    slot_notify: Notify,
 }
 
-impl CircuitBreakerInner {
-    fn new() -> Self {
-        Self {
-            phase: CircuitPhase::Closed,
-            samples: VecDeque::new(),
-            failure_count: 0,
-            half_open_successes: 0,
-        }
-    }
+/// Lock-free RAII guard for an admitted unary or priority HTTP request.
+#[derive(Debug)]
+pub struct AdmissionPermit {
+    counter: Arc<CacheLine<AtomicUsize>>,
+    wake: Option<Arc<QueueWakeState>>,
+}
 
-    fn state(&self) -> CircuitState {
-        match self.phase {
-            CircuitPhase::Closed => CircuitState::Closed,
-            CircuitPhase::Open { .. } => CircuitState::Open,
-            CircuitPhase::HalfOpen { .. } => CircuitState::HalfOpen,
-        }
-    }
-
-    fn prune(&mut self, now: Instant, window: Duration) {
-        while let Some(&(ts, _)) = self.samples.front() {
-            if now.duration_since(ts) > window {
-                if let Some((_, is_failure)) = self.samples.pop_front()
-                    && is_failure
-                {
-                    self.failure_count = self.failure_count.saturating_sub(1);
-                }
-            } else {
-                break;
-            }
+impl Drop for AdmissionPermit {
+    fn drop(&mut self) {
+        self.counter.0.fetch_sub(1, Ordering::AcqRel);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if let Some(ref wake) = self.wake
+            && wake.queue_depth.0.load(Ordering::Acquire) > 0
+        {
+            wake.slot_notify.notify_one();
         }
     }
 }
@@ -190,38 +204,132 @@ impl Drop for StreamGuard {
     }
 }
 
-/// Admission and stream flow-control coordinator.
+/// Lock-free admission and stream flow-control coordinator.
 pub struct BackpressureController {
     config: BackpressureConfig,
-    semaphore: Arc<Semaphore>,
-    priority_semaphore: Arc<Semaphore>,
+    max_in_flight: usize,
+    max_priority_in_flight: usize,
+    in_flight: Arc<CacheLine<AtomicUsize>>,
+    priority_in_flight: Arc<CacheLine<AtomicUsize>>,
+    wake_state: Arc<QueueWakeState>,
     active_streams: Arc<AtomicUsize>,
     buffered_chunks: AtomicUsize,
     paused: AtomicBool,
     resume_notify: Notify,
-    queue_depth: AtomicUsize,
     metrics: Arc<BackpressureMetrics>,
-    circuit_state: AtomicU8,
-    circuit: Mutex<CircuitBreakerInner>,
+    clock_origin: Instant,
+    window_ms: u64,
+    bucket_ms: u64,
+    half_open_probes: u32,
+    circuit_word: CacheLine<AtomicU64>,
+    buckets: Box<[[CacheLine<AtomicU64>; NUM_BUCKETS]; BUCKET_SHARDS]>,
 }
 
 impl BackpressureController {
     /// Create a new controller from `config`.
     pub fn new(config: BackpressureConfig) -> Self {
-        let max = config.max_in_flight.max(1);
+        let max_in_flight = config.max_in_flight.max(1);
+        let max_priority_in_flight = max_in_flight.max(16);
+        let window_ms = (config.circuit_breaker.window.as_millis() as u64).max(1);
+        let bucket_ms = window_ms.div_ceil(NUM_BUCKETS as u64).max(1);
+        let half_open_probes = (config
+            .circuit_breaker
+            .half_open_probe_count
+            .min(HALF_OPEN_COUNT_MASK) as u32)
+            .max(1);
+        let buckets = Box::new(std::array::from_fn(|_| {
+            std::array::from_fn(|_| CacheLine(AtomicU64::new(0)))
+        }));
+
         Self {
             config,
-            semaphore: Arc::new(Semaphore::new(max)),
-            priority_semaphore: Arc::new(Semaphore::new(max.max(16))),
+            max_in_flight,
+            max_priority_in_flight,
+            in_flight: Arc::new(CacheLine(AtomicUsize::new(0))),
+            priority_in_flight: Arc::new(CacheLine(AtomicUsize::new(0))),
+            wake_state: Arc::new(QueueWakeState {
+                queue_depth: CacheLine(AtomicUsize::new(0)),
+                slot_notify: Notify::new(),
+            }),
             active_streams: Arc::new(AtomicUsize::new(0)),
             buffered_chunks: AtomicUsize::new(0),
             paused: AtomicBool::new(false),
             resume_notify: Notify::new(),
-            queue_depth: AtomicUsize::new(0),
             metrics: Arc::new(BackpressureMetrics::default()),
-            circuit_state: AtomicU8::new(0),
-            circuit: Mutex::new(CircuitBreakerInner::new()),
+            clock_origin: Instant::now(),
+            window_ms,
+            bucket_ms,
+            half_open_probes,
+            circuit_word: CacheLine(AtomicU64::new(0)),
+            buckets,
         }
+    }
+
+    #[inline]
+    fn elapsed_ms(&self) -> u64 {
+        self.clock_origin.elapsed().as_millis() as u64
+    }
+
+    fn clear_buckets(&self) {
+        for shard in self.buckets.iter() {
+            for slot in shard.iter() {
+                slot.0.store(0, Ordering::Release);
+            }
+        }
+    }
+
+    #[inline]
+    fn record_bucket_sample(&self, now_ms: u64, is_failure: bool) {
+        let epoch = (now_ms / self.bucket_ms).wrapping_add(1);
+        let bucket_idx = (epoch as usize) & (NUM_BUCKETS - 1);
+        let shard_idx = current_bucket_shard();
+        let slot = &self.buckets[shard_idx][bucket_idx];
+        let fail_inc = u64::from(is_failure);
+
+        let mut old = slot.0.load(Ordering::Relaxed);
+        loop {
+            let next = if (old >> BUCKET_EPOCH_SHIFT) == epoch {
+                let total = ((old >> BUCKET_TOTAL_SHIFT) & BUCKET_SAMPLE_MASK)
+                    .saturating_add(1)
+                    .min(BUCKET_SAMPLE_MASK);
+                let fails = (old & BUCKET_SAMPLE_MASK)
+                    .saturating_add(fail_inc)
+                    .min(BUCKET_SAMPLE_MASK);
+                (epoch << BUCKET_EPOCH_SHIFT) | (total << BUCKET_TOTAL_SHIFT) | fails
+            } else {
+                (epoch << BUCKET_EPOCH_SHIFT) | (1u64 << BUCKET_TOTAL_SHIFT) | fail_inc
+            };
+
+            match slot
+                .0
+                .compare_exchange_weak(old, next, Ordering::AcqRel, Ordering::Relaxed)
+            {
+                Ok(_) => break,
+                Err(actual) => old = actual,
+            }
+        }
+    }
+
+    fn sum_window_buckets(&self, now_ms: u64) -> (u64, u64) {
+        let current_epoch = (now_ms / self.bucket_ms).wrapping_add(1);
+        let min_epoch = current_epoch
+            .saturating_sub((NUM_BUCKETS as u64) - 1)
+            .max(1);
+        let mut total = 0u64;
+        let mut failures = 0u64;
+
+        for shard in self.buckets.iter() {
+            for slot in shard.iter() {
+                let val = slot.0.load(Ordering::Acquire);
+                let epoch = val >> BUCKET_EPOCH_SHIFT;
+                if epoch >= min_epoch && epoch <= current_epoch {
+                    total += (val >> BUCKET_TOTAL_SHIFT) & BUCKET_SAMPLE_MASK;
+                    failures += val & BUCKET_SAMPLE_MASK;
+                }
+            }
+        }
+
+        (total, failures)
     }
 
     /// Acquire an isolated stream lease (`StreamGuard`) without consuming unary `in_flight` capacity.
@@ -276,6 +384,7 @@ impl BackpressureController {
     }
 
     /// Return `true` if `path` matches a configured priority route.
+    #[inline]
     pub fn is_priority_route(&self, path: &str) -> bool {
         self.config.priority_routes.iter().any(|pattern| {
             if let Some(prefix) = pattern.strip_suffix('*') {
@@ -287,60 +396,114 @@ impl BackpressureController {
     }
 
     fn check_circuit_state(&self) -> CircuitState {
-        if self.circuit_state.load(Ordering::Acquire) == 0 {
-            return CircuitState::Closed;
+        let mut word = self.circuit_word.0.load(Ordering::Acquire);
+        loop {
+            match word >> PHASE_SHIFT {
+                PHASE_CLOSED => return CircuitState::Closed,
+                PHASE_HALF_OPEN => return CircuitState::HalfOpen,
+                PHASE_OPEN => {
+                    let until_ms = word & OPEN_UNTIL_MASK;
+                    if self.elapsed_ms() < until_ms {
+                        return CircuitState::Open;
+                    }
+                    let next = encode_half_open_word(self.half_open_probes, 0);
+                    match self.circuit_word.0.compare_exchange_weak(
+                        word,
+                        next,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return CircuitState::HalfOpen,
+                        Err(actual) => word = actual,
+                    }
+                }
+                _ => return CircuitState::Closed,
+            }
         }
-        let mut inner = self.circuit.lock().expect("circuit mutex");
-        if let CircuitPhase::Open { opened_at } = inner.phase
-            && opened_at.elapsed() >= self.config.circuit_breaker.window
-        {
-            let probes = (self.config.circuit_breaker.half_open_probe_count as u32).max(1);
-            inner.phase = CircuitPhase::HalfOpen {
-                remaining_probes: probes,
-            };
-            inner.half_open_successes = 0;
-            self.circuit_state.store(2, Ordering::Release);
-        }
-        inner.state()
     }
 
+    #[inline]
     fn try_admit_circuit(&self) -> bool {
-        if self.circuit_state.load(Ordering::Acquire) == 0 {
+        let mut word = self.circuit_word.0.load(Ordering::Acquire);
+        if word == 0 {
             return true;
         }
-        let mut inner = self.circuit.lock().expect("circuit mutex");
-        if let CircuitPhase::Open { opened_at } = inner.phase
-            && opened_at.elapsed() >= self.config.circuit_breaker.window
-        {
-            let probes = (self.config.circuit_breaker.half_open_probe_count as u32).max(1);
-            inner.phase = CircuitPhase::HalfOpen {
-                remaining_probes: probes,
-            };
-            inner.half_open_successes = 0;
-            self.circuit_state.store(2, Ordering::Release);
-        }
-
-        match &mut inner.phase {
-            CircuitPhase::Closed => true,
-            CircuitPhase::Open { .. } => false,
-            CircuitPhase::HalfOpen { remaining_probes } => {
-                if *remaining_probes == 0 {
-                    false
-                } else {
-                    *remaining_probes -= 1;
-                    true
+        loop {
+            match word >> PHASE_SHIFT {
+                PHASE_CLOSED => return true,
+                PHASE_OPEN => {
+                    let until_ms = word & OPEN_UNTIL_MASK;
+                    if self.elapsed_ms() < until_ms {
+                        return false;
+                    }
+                    let next = encode_half_open_word(self.half_open_probes.saturating_sub(1), 0);
+                    match self.circuit_word.0.compare_exchange_weak(
+                        word,
+                        next,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return true,
+                        Err(actual) => word = actual,
+                    }
                 }
+                PHASE_HALF_OPEN => {
+                    let rem = ((word >> HALF_OPEN_REM_SHIFT) & HALF_OPEN_COUNT_MASK) as u32;
+                    if rem == 0 {
+                        return false;
+                    }
+                    let succ = (word & HALF_OPEN_COUNT_MASK) as u32;
+                    let next = encode_half_open_word(rem - 1, succ);
+                    match self.circuit_word.0.compare_exchange_weak(
+                        word,
+                        next,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return true,
+                        Err(actual) => word = actual,
+                    }
+                }
+                _ => return true,
+            }
+        }
+    }
+
+    #[inline]
+    fn try_claim_slot(
+        counter: &Arc<CacheLine<AtomicUsize>>,
+        max: usize,
+        wake: Option<Arc<QueueWakeState>>,
+    ) -> Option<AdmissionPermit> {
+        let mut cur = counter.0.load(Ordering::Acquire);
+        loop {
+            if cur >= max {
+                return None;
+            }
+            match counter
+                .0
+                .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    return Some(AdmissionPermit {
+                        counter: Arc::clone(counter),
+                        wake,
+                    });
+                }
+                Err(actual) => cur = actual,
             }
         }
     }
 
     /// Attempt to admit a request for `path`, bypassing unary saturation if `path` is a priority route.
+    #[inline]
     pub async fn try_acquire_for_path(
         &self,
         path: &str,
-    ) -> Result<OwnedSemaphorePermit, RejectionReason> {
+    ) -> Result<AdmissionPermit, RejectionReason> {
         if self.is_priority_route(path)
-            && let Ok(permit) = Arc::clone(&self.priority_semaphore).try_acquire_owned()
+            && let Some(permit) =
+                Self::try_claim_slot(&self.priority_in_flight, self.max_priority_in_flight, None)
         {
             self.metrics.accepted.fetch_add(1, Ordering::Relaxed);
             return Ok(permit);
@@ -348,8 +511,9 @@ impl BackpressureController {
         self.try_acquire().await
     }
 
-    /// Attempt to admit a unary request.
-    pub async fn try_acquire(&self) -> Result<OwnedSemaphorePermit, RejectionReason> {
+    /// Attempt to admit a unary request without locks on the fastpath.
+    #[inline]
+    pub async fn try_acquire(&self) -> Result<AdmissionPermit, RejectionReason> {
         if !self.try_admit_circuit() {
             self.metrics
                 .circuit_rejected
@@ -357,32 +521,56 @@ impl BackpressureController {
             return Err(RejectionReason::CircuitOpen);
         }
 
-        if let Ok(permit) = Arc::clone(&self.semaphore).try_acquire_owned() {
+        if let Some(permit) = Self::try_claim_slot(
+            &self.in_flight,
+            self.max_in_flight,
+            Some(Arc::clone(&self.wake_state)),
+        ) {
             self.metrics.accepted.fetch_add(1, Ordering::Relaxed);
             return Ok(permit);
         }
 
-        let depth = self.queue_depth.fetch_add(1, Ordering::AcqRel);
-        if depth >= self.config.max_queue_depth {
-            self.queue_depth.fetch_sub(1, Ordering::AcqRel);
+        if self.config.max_queue_depth == 0 {
             self.metrics
                 .saturated_rejected
                 .fetch_add(1, Ordering::Relaxed);
             return Err(RejectionReason::Saturated);
         }
 
-        let acquire = Arc::clone(&self.semaphore).acquire_owned();
-        let result = tokio::time::timeout(self.config.max_queue_time, acquire).await;
-        self.queue_depth.fetch_sub(1, Ordering::AcqRel);
+        let depth = self.wake_state.queue_depth.0.fetch_add(1, Ordering::AcqRel);
+        if depth >= self.config.max_queue_depth {
+            self.wake_state.queue_depth.0.fetch_sub(1, Ordering::AcqRel);
+            self.metrics
+                .saturated_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(RejectionReason::Saturated);
+        }
+
+        let wait_fut = async {
+            loop {
+                let notified = self.wake_state.slot_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                std::sync::atomic::fence(Ordering::SeqCst);
+
+                if let Some(permit) = Self::try_claim_slot(
+                    &self.in_flight,
+                    self.max_in_flight,
+                    Some(Arc::clone(&self.wake_state)),
+                ) {
+                    return permit;
+                }
+                notified.await;
+            }
+        };
+
+        let result = tokio::time::timeout(self.config.max_queue_time, wait_fut).await;
+        self.wake_state.queue_depth.0.fetch_sub(1, Ordering::AcqRel);
 
         match result {
-            Ok(Ok(permit)) => {
+            Ok(permit) => {
                 self.metrics.accepted.fetch_add(1, Ordering::Relaxed);
                 Ok(permit)
-            }
-            Ok(Err(_closed)) => {
-                self.metrics.queue_rejected.fetch_add(1, Ordering::Relaxed);
-                Err(RejectionReason::Saturated)
             }
             Err(_elapsed) => {
                 self.metrics
@@ -393,47 +581,122 @@ impl BackpressureController {
         }
     }
 
-    /// Record a successful request (2xx/3xx/4xx).
+    /// Record a successful request (2xx/3xx/4xx) without locks.
+    #[inline]
     pub fn record_success(&self) {
-        let mut inner = self.circuit.lock().expect("circuit mutex");
-        let now = Instant::now();
-        inner.prune(now, self.config.circuit_breaker.window);
-        inner.samples.push_back((now, false));
+        let now_ms = self.elapsed_ms();
+        self.record_bucket_sample(now_ms, false);
 
-        if matches!(inner.phase, CircuitPhase::HalfOpen { .. }) {
-            inner.half_open_successes += 1;
-            if inner.half_open_successes >= self.config.circuit_breaker.half_open_probe_count {
-                inner.phase = CircuitPhase::Closed;
-                inner.samples.clear();
-                inner.failure_count = 0;
-                self.circuit_state.store(0, Ordering::Release);
+        let mut word = self.circuit_word.0.load(Ordering::Acquire);
+        if word == 0 {
+            return;
+        }
+        loop {
+            match word >> PHASE_SHIFT {
+                PHASE_OPEN => {
+                    let until_ms = word & OPEN_UNTIL_MASK;
+                    if now_ms < until_ms {
+                        return;
+                    }
+                    let ho = encode_half_open_word(self.half_open_probes, 0);
+                    match self.circuit_word.0.compare_exchange_weak(
+                        word,
+                        ho,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => word = ho,
+                        Err(actual) => word = actual,
+                    }
+                }
+                PHASE_HALF_OPEN => {
+                    let rem = ((word >> HALF_OPEN_REM_SHIFT) & HALF_OPEN_COUNT_MASK) as u32;
+                    let succ = ((word & HALF_OPEN_COUNT_MASK) as u32).saturating_add(1);
+                    if (succ as u64) >= self.config.circuit_breaker.half_open_probe_count.max(1) {
+                        self.clear_buckets();
+                        match self.circuit_word.0.compare_exchange_weak(
+                            word,
+                            0,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        ) {
+                            Ok(_) => return,
+                            Err(actual) => word = actual,
+                        }
+                    } else {
+                        let next = encode_half_open_word(rem, succ);
+                        match self.circuit_word.0.compare_exchange_weak(
+                            word,
+                            next,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        ) {
+                            Ok(_) => return,
+                            Err(actual) => word = actual,
+                        }
+                    }
+                }
+                _ => return,
             }
         }
     }
 
-    /// Record a failed request (5xx or internal error).
+    /// Record a failed request (5xx or internal error) without locks.
     pub fn record_failure(&self) {
-        let mut inner = self.circuit.lock().expect("circuit mutex");
-        let now = Instant::now();
-        inner.prune(now, self.config.circuit_breaker.window);
-        inner.samples.push_back((now, true));
-        inner.failure_count += 1;
+        let now_ms = self.elapsed_ms();
+        self.record_bucket_sample(now_ms, true);
 
-        if matches!(inner.phase, CircuitPhase::HalfOpen { .. }) {
-            inner.phase = CircuitPhase::Open { opened_at: now };
-            inner.half_open_successes = 0;
-            self.circuit_state.store(1, Ordering::Release);
-            return;
-        }
-
-        if inner.phase == CircuitPhase::Closed
-            && inner.samples.len() as u64 >= self.config.circuit_breaker.min_samples
-        {
-            let failures = inner.failure_count as f64;
-            let total = inner.samples.len() as f64;
-            if failures / total >= self.config.circuit_breaker.failure_rate_threshold {
-                inner.phase = CircuitPhase::Open { opened_at: now };
-                self.circuit_state.store(1, Ordering::Release);
+        let mut word = self.circuit_word.0.load(Ordering::Acquire);
+        loop {
+            match word >> PHASE_SHIFT {
+                PHASE_HALF_OPEN => {
+                    let open_word = encode_open_word(now_ms.saturating_add(self.window_ms));
+                    match self.circuit_word.0.compare_exchange_weak(
+                        word,
+                        open_word,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return,
+                        Err(actual) => word = actual,
+                    }
+                }
+                PHASE_OPEN => {
+                    let until_ms = word & OPEN_UNTIL_MASK;
+                    if now_ms < until_ms {
+                        return;
+                    }
+                    let open_word = encode_open_word(now_ms.saturating_add(self.window_ms));
+                    match self.circuit_word.0.compare_exchange_weak(
+                        word,
+                        open_word,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return,
+                        Err(actual) => word = actual,
+                    }
+                }
+                _ => {
+                    let (total, failures) = self.sum_window_buckets(now_ms);
+                    if total < self.config.circuit_breaker.min_samples {
+                        return;
+                    }
+                    let rate = (failures as f64) / (total as f64);
+                    if rate < self.config.circuit_breaker.failure_rate_threshold {
+                        return;
+                    }
+                    let open_word = encode_open_word(now_ms.saturating_add(self.window_ms));
+                    match self.circuit_word.0.compare_exchange_weak(
+                        word,
+                        open_word,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return,
+                        Err(actual) => word = actual,
+                    }
+                }
             }
         }
     }
@@ -446,9 +709,9 @@ impl BackpressureController {
             queue_rejected: self.metrics.queue_rejected.load(Ordering::Relaxed),
             circuit_rejected: self.metrics.circuit_rejected.load(Ordering::Relaxed),
             timeout_rejected: self.metrics.timeout_rejected.load(Ordering::Relaxed),
-            in_flight: self.config.max_in_flight - self.semaphore.available_permits(),
+            in_flight: self.in_flight.0.load(Ordering::Acquire),
             active_streams: self.active_streams.load(Ordering::Acquire),
-            queue_depth: self.queue_depth.load(Ordering::Acquire),
+            queue_depth: self.wake_state.queue_depth.0.load(Ordering::Acquire),
             circuit_state: self.check_circuit_state(),
         }
     }

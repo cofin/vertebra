@@ -14,7 +14,10 @@ from typing import Any
 
 import pytest
 
+import vertebra
+import vertebra.framework as vertebra_framework
 import vertebra.storage._store as store_mod
+from vertebra._vertebra import Request, init_transport
 from vertebra.build import BuildOrchestrator
 from vertebra.build.codegen import (
     CodegenConfig,
@@ -34,11 +37,14 @@ from vertebra.extensions.litestar import (
     extract_litestar_routes,
     offload_litestar_middlewares,
 )
+from vertebra.server._asgi._runner import AsgiRunner
 from vertebra.server._gil_audit import GilAuditReport
 from vertebra.server._loops import EventLoopPool
+from vertebra.server._rsgi._adapter import RsgiAdapter
 from vertebra.server.platform import ShmAllocationPolicy
 from vertebra.server.worker import _AsgiMountRunner, _instantiate_mount_runners
 from vertebra.storage import ObjectStore
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.portal import PortalProvider
 from vertebra.utils.sync_tools import (
     CapacityLimiter,
@@ -227,3 +233,60 @@ def test_asgi_event_loop_pool_sharded_mount_runners() -> None:
         assert type(runner).__name__ == "_AsgiMountRunner"
     finally:
         pool.stop()
+
+
+def test_event_loop_pool_uses_uvloop_and_supports_inline_single_loop() -> None:
+    """Verify EventLoopPool uses uvloop on POSIX when available and inline_single_loop avoids extra threads."""
+    uvloop_mod = import_optional("uvloop")
+    inline_pool = EventLoopPool(size=1, inline_single_loop=True)
+    try:
+        assert inline_pool.size == 1
+        assert len(inline_pool._threads) == 0
+        if sys.platform != "win32" and uvloop_mod is not None:
+            assert isinstance(inline_pool.primary_loop, uvloop_mod.Loop)
+    finally:
+        inline_pool.stop()
+
+
+def test_asgi_runner_and_rsgi_adapter_spawn_batch_use_rust_drivers() -> None:
+    """Verify AsgiRunner.spawn_batch and RsgiAdapter.spawn_batch execute unary batches via Rust drivers."""
+    init_transport()
+    asgi_seen: list[str] = []
+    rsgi_seen: list[str] = []
+
+    async def fast_asgi(scope: Any, receive: Any, send: Any) -> None:
+        await receive()
+        asgi_seen.append(scope["path"])
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    class FastRsgi:
+        async def __rsgi__(self, scope: Any, protocol: Any) -> None:
+            rsgi_seen.append(scope.path)
+            protocol.response_bytes(200, [], b"ok")
+
+    loop = asyncio.new_event_loop()
+    try:
+        runner = AsgiRunner(fast_asgi, loop=loop, mount_prefix="/v1")
+        rsgi_adapter = RsgiAdapter(FastRsgi(), mount_prefix="/v1")
+        reqs = [
+            Request.from_parts("GET", "/v1/one", b"", request_id=951),
+            Request.from_parts("GET", "/v1/two", b"", request_id=952),
+        ]
+        runner.spawn_batch(reqs)
+        inline_rsgi = rsgi_adapter.spawn_batch(reqs, loop=loop)
+        assert asgi_seen == ["/one", "/two"]
+        assert rsgi_seen == ["/one", "/two"]
+        assert inline_rsgi == 2
+    finally:
+        loop.close()
+
+
+def test_pep810_lazy_modules_declared_on_packages() -> None:
+    """Verify vertebra and vertebra.framework declare PEP 810 __lazy_modules__."""
+    top_lazy = getattr(vertebra, "__lazy_modules__", None)
+    fw_lazy = getattr(vertebra_framework, "__lazy_modules__", None)
+    assert isinstance(top_lazy, list | tuple)
+    assert "vertebra.framework" in top_lazy
+    assert isinstance(fw_lazy, list | tuple)
+    assert "vertebra.framework.openapi" in fw_lazy

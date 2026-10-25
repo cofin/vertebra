@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 
@@ -76,7 +77,7 @@ def find_repo_root(start: Path) -> Path | None:
 
 
 def find_server_binary() -> str:
-    """Find the vertebra-server binary."""
+    """Find the vertebra-server binary, honoring CARGO_TARGET_DIR and freshest release artifacts."""
     if env_path := os.getenv("VERTEBRA_SERVER_BINARY"):
         return env_path
 
@@ -88,17 +89,35 @@ def find_server_binary() -> str:
     if pkg_bin_exe.exists():
         return str(pkg_bin_exe)
 
+    target_dirs: list[Path] = []
+    cargo_target = os.getenv("CARGO_TARGET_DIR")
+    if cargo_target:
+        cargo_dir = Path(cargo_target)
+        explicit_release = cargo_dir / "release" / "vertebra-server"
+        if explicit_release.exists():
+            return str(explicit_release)
+        target_dirs.append(cargo_dir)
+
     repo_root = find_repo_root(Path(__file__).resolve())
     if repo_root:
-        candidates = [
-            repo_root / "target" / "release" / "vertebra-server",
-            repo_root / "src" / "rs" / "target" / "release" / "vertebra-server",
-            repo_root / "target" / "debug" / "vertebra-server",
-            repo_root / "src" / "rs" / "target" / "debug" / "vertebra-server",
+        target_dirs.extend(
+            [
+                repo_root / "target",
+                repo_root / "src" / "rs" / "target",
+            ]
+        )
+
+    default_make_target = Path(tempfile.gettempdir()) / "vtb-cargo-target"
+    if default_make_target not in target_dirs:
+        target_dirs.append(default_make_target)
+
+    for profile in ("release", "debug"):
+        existing = [
+            candidate for target_dir in target_dirs if (candidate := target_dir / profile / "vertebra-server").exists()
         ]
-        for candidate in candidates:
-            if candidate.exists():
-                return str(candidate)
+        if existing:
+            newest = max(existing, key=lambda candidate: candidate.stat().st_mtime_ns)
+            return str(newest)
 
     msg = "Unable to locate vertebra-server binary. Please set VERTEBRA_SERVER_BINARY."
     raise SystemExit(msg)

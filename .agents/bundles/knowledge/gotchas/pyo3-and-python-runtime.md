@@ -1,20 +1,26 @@
 ---
 type: Guide
 title: "PyO3 FFI, Embedded Globals & Python Runtime Gotchas"
-description: "Footguns in Embedded PyO3 module initialization, gil_used = false on 3.14t, task-free ASGI coroutine driving, unanchored body_view lifetimes, and PyO3 rebuilds."
+description: "Footguns in Embedded PyO3 module initialization, gil_used = false and conditional freelist on 3.14t/3.15t, PyBuffer_FillInfo refcounting, C-API ASGI/RSGI stepping, and Litestar v2/v3 parity."
 status: stable
-tags: [gotchas, pyo3, asgi, python, free-threaded]
+tags: [gotchas, pyo3, asgi, python, free-threaded, litestar]
 sources:
   - resource: src/rs/vertebra-py/src/lib.rs
   - resource: src/rs/vertebra-py/src/transport.rs
   - resource: src/rs/vertebra-py/src/request.rs
+  - resource: src/rs/vertebra-py/src/rsgi/http.rs
   - resource: src/rs/vertebra-bundler/src/lib.rs
   - resource: src/rs/vertebra-storage/src/lib.rs
   - resource: src/rs/vertebra-http/src/main.rs
+  - resource: src/py/vertebra/server/worker.py
   - resource: src/py/vertebra/server/_asgi/_runner.py
   - resource: src/py/vertebra/server/_asgi/_wire.py
   - resource: src/py/vertebra/server/_wsgi/_adapter.py
   - resource: src/py/vertebra/server/_gil_audit.py
+  - resource: src/py/vertebra/supervisor/_supervisor.py
+  - resource: src/py/vertebra/extensions/litestar/plugin.py
+  - resource: src/py/vertebra/extensions/litestar/offload.py
+  - resource: src/py/vertebra/extensions/litestar/fastpath.py
   - resource: pyproject.toml
 ---
 
@@ -26,28 +32,28 @@ sources:
 - **Root Cause**: The `vertebra-server` binary (package `vertebra-http`, feature `python`) statically links `vertebra-py` (`_vertebra`), while `.venv/lib/python3.*/site-packages/vertebra/_vertebra.cpython-*.so` is a separate dynamically loadable shared object. If Python executes a file-backed `import vertebra._vertebra`, `dlopen` loads the `.so` from disk with a **second** copy of `static BRIDGE: OnceLock<BatchBridge>` that is uninitialized.
 - **Rule**: In [`src/rs/vertebra-http/src/main.rs`](../../../../src/rs/vertebra-http/src/main.rs), always call `pyo3::append_to_inittab!(pymodule_init)` (imported from `_vertebra`) before the first `Python::attach` (`auto-initialize`), and on the worker thread alias `sys.modules["vertebra._vertebra"] = sys.modules["_vertebra"]` before importing the application or `vertebra.server._dispatch`.
 
-## 2. Missing `#[pymodule(gil_used = false)]` Re-Enables the GIL on Python `3.14t`
+## 2. `#[pymodule(gil_used = false)]`, Global `freelist` Mutex & `RsgiReadyAwaitable` on `3.14t`/`3.15t`
 
-- **Symptom**: `sys._is_gil_enabled()` flips from `False` to `True` with a `RuntimeWarning` when importing native extensions under `python3.14t`.
-- **Root Cause**: CPython `3.14t` automatically re-enables the GIL if any imported C/PyO3 extension module omits `Py_MOD_GIL_NOT_USED`.
-- **Rule**: Every `#[pymodule]` in the workspace ([`vertebra-py/src/lib.rs`](../../../../src/rs/vertebra-py/src/lib.rs), [`vertebra-bundler/src/lib.rs`](../../../../src/rs/vertebra-bundler/src/lib.rs), and [`vertebra-storage/src/lib.rs`](../../../../src/rs/vertebra-storage/src/lib.rs)) must keep `#[pymodule(gil_used = false)]`. At worker startup, [`GilAuditor.audit()`](../../../../src/py/vertebra/server/_gil_audit.py) inspects loaded extensions, logs warnings if the GIL was re-enabled, and raises `RuntimeError` when `VERTEBRA_STRICT_FREE_THREADING=1`.
+- **Missing `gil_used = false` Re-Enables the GIL**: Every `#[pymodule]` ([`vertebra-py/src/lib.rs`](../../../../src/rs/vertebra-py/src/lib.rs), [`vertebra-bundler/src/lib.rs`](../../../../src/rs/vertebra-bundler/src/lib.rs), [`vertebra-storage/src/lib.rs`](../../../../src/rs/vertebra-storage/src/lib.rs)) must keep `#[pymodule(gil_used = false)]`. [`GilAuditReport.audit()`](../../../../src/py/vertebra/server/_gil_audit.py) inspects loaded extensions at startup and raises `RuntimeError` when `VERTEBRA_STRICT_FREE_THREADING=1`.
+- **PyO3 `0.30.1` `freelist` Global `Mutex` Contention**: Under `Py_GIL_DISABLED`, PyO3 `0.30.1` protects `#[pyclass(freelist = N)]` with a global `Mutex`, serializing allocations across worker threads. Gate `freelist = 128` behind `#[cfg_attr(not(Py_GIL_DISABLED), pyclass(..., freelist = 128, immutable_type))]` and omit `freelist` under `#[cfg_attr(Py_GIL_DISABLED, pyclass(..., immutable_type))]` so free-threaded builds use mimalloc thread-local heaps directly.
+- **`RsgiReadyAwaitable` Must Be `frozen`**: In [`rsgi/http.rs`](../../../../src/rs/vertebra-py/src/rsgi/http.rs), `RsgiReadyAwaitable` (`_RsgiReadyAwaitable`) is shared as a cached singleton across concurrent coroutines on `3.14t`/`3.15t`; `__await__` and `__next__` must take `&self` (`frozen`), never `&mut self` (which raises `PyBorrowMutError` under concurrent awaits).
 
-## 3. Task-Free `AsgiRunner` vs `asyncio.current_task()` (`_asgi/_runner.py`)
+## 3. Task-Free `drive_asgi_batch` / `AsgiRunner` vs `asyncio.current_task()` (`_asgi/_runner.py`)
 
-- **Symptom**: ASGI middlewares or libraries that inspect `asyncio.current_task()` before their first `await` observe `None` under [`AsgiRunner`](../../../../src/py/vertebra/server/_asgi/_runner.py).
-- **Root Cause**: By default (`VERTEBRA_ASGI_DIRECT_SEND=1`), `_drive_coro` executes the synchronous first `coro.send(None)` step directly without creating an `asyncio.Task`. On the first suspension, `_handle_yielded` promotes the coroutine into a real `asyncio.Task` running `_resume_coro_in_task`, so subsequent steps have a valid current task.
-- **Rule**: Set `VERTEBRA_ASGI_DIRECT_SEND=0` *before* importing `vertebra.server._asgi._runner` (the flag is read once at module import) when running ASGI code that requires `asyncio.current_task()` during synchronous setup before the first `await`.
+- **Symptom**: ASGI middlewares or libraries that inspect `asyncio.current_task()` before their first suspension point observe `None` under [`AsgiRunner`](../../../../src/py/vertebra/server/_asgi/_runner.py) batch execution.
+- **Root Cause**: Rust `drive_asgi_batch` (via `PyIter_Send`) steps the synchronous prefix of each ASGI coroutine directly on the event-loop thread without allocating an `asyncio.Task`. Only when a coroutine suspends (`PYGEN_NEXT`) does `_SteppedCoroutine` promote it into a real `asyncio.Task` (whereas `AsgiRunner.run_single` runs inside an existing task or coroutine context).
+- **Rule**: Do not assume `asyncio.current_task()` is non-`None` prior to the first real suspension point in batch-dispatched ASGI middleware. Also ensure [`Worker._process_batch`](../../../../src/py/vertebra/server/worker.py) routes single-root ASGI mounts (`"/"` without native routes) through `single_root_asgi.dispatch_app(batch)` rather than falling through to `partition_batch`.
 
-## 4. Unanchored `Request.body_view`, Shared Class Names & `submit_raw_response`
+## 4. `PyBuffer_FillInfo` Refcount Ownership, Native Scope Imports & `CARGO_TARGET_DIR` Freshness
 
-- **Unanchored `Request.body_view` Lifetime**: [`Request.body_view`](../../../../src/rs/vertebra-py/src/request.rs) constructs a read-only `memoryview` via `PyMemoryView_FromMemory` over the `BatchSnapshot` slab without a lifetime anchor. It is valid only during the synchronous handler turn; call `bytes(request.body_view)` before retaining the payload across `await` points or background tasks.
-- **Native vs Fallback Class Name Collisions**: [`vertebra._vertebra.AsgiScope`](../../../../src/rs/vertebra-py/src/lib.rs) and [`vertebra.server._asgi._wire.AsgiScope`](../../../../src/py/vertebra/server/_asgi/_wire.py) (as well as native vs fallback `WsgiEnviron` in [`_wsgi/_adapter.py`](../../../../src/py/vertebra/server/_wsgi/_adapter.py) and `Request` / `Response` in `vertebra.framework._router`) share class names. Import native request-path types from `vertebra._vertebra`; the Python classes are pure-Python fallbacks for unit tests and non-native callers.
-- **`submit_raw_response` In-Process Behavior**: [`submit_raw_response`](../../../../src/rs/vertebra-py/src/transport.rs) transmits frames only when `SHM_TRANSPORT` is initialized; in in-process `BatchBridge` mode it returns the encoded `ResponseSlot` byte frames without submitting them. Use `Response` + `submit_response` / `submit_results` for in-process workers.
+- **`PyBuffer_FillInfo` Calls `Py_XNewRef` Internally**: In [`Request::__getbuffer__`](../../../../src/rs/vertebra-py/src/request.rs), pass borrowed `slf.as_ptr()` to `pyo3::ffi::PyBuffer_FillInfo` — never `slf.into_ptr()`. `PyBuffer_FillInfo` already increments `view.obj`'s reference count via `Py_XNewRef`, so passing an owned pointer leaks one reference per `memoryview(req)` (`Request` + `Arc<BatchSnapshot>`) on release. Note `Request.body_view` now delegates to `PyMemoryView_FromObject(slf)` so the `Arc<BatchSnapshot>` stays anchored until the `memoryview` is released or GC'd, and `.pyi` stubs must declare PEP 688 `def __buffer__(self, flags: int, /) -> memoryview: ...` for `mypy.stubtest`.
+- **Native Request vs Pure-Python Framework Types**: Native request-path classes (`Request`, `Response`, `Headers`, `AsgiScope`, `WsgiEnviron`) live in [`vertebra._vertebra`](../../../../src/rs/vertebra-py/src/lib.rs), whereas [`_asgi/_wire.py`](../../../../src/py/vertebra/server/_asgi/_wire.py) provides wire/header helpers, [`_wsgi/_adapter.py`](../../../../src/py/vertebra/server/_wsgi/_adapter.py) defines `WsgiAdapter`, and `vertebra.framework._router` defines pure-Python framework `Request`/`Response` classes. Import native FFI types explicitly from `vertebra._vertebra` for `isinstance` checks.
+- **`CARGO_TARGET_DIR` Binary Freshness**: [`find_server_binary()`](../../../../src/py/vertebra/supervisor/_supervisor.py) compares `st_mtime_ns` across `CARGO_TARGET_DIR`, `target/{release,debug}`, `src/rs/target/{release,debug}`, and `/tmp/vtb-cargo-target` so `make dev` never shadows a newer `make build` binary (or vice versa), and always run `make dev` after Rust PyO3 edits before `pytest`. Keep `duckdb`, `spikard`, and `granian` isolated in `[dependency-groups].bench` in [`pyproject.toml`](../../../../pyproject.toml).
 
-## 5. Stale PyO3 Extension Binaries & `bench` Dependency Isolation
+## 5. Litestar v2 vs v3 Offload & Fast-Path Disqualifier Traps (`extensions/litestar/`)
 
-- **Rebuild Extensions After Rust Edits**: `uv run pytest` imports compiled `.so` binaries from `.venv` (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`). Always run `make dev` (or `make py-test`) after modifying `vertebra-core`, `vertebra-py`, `vertebra-bundler`, or `vertebra-storage`.
-- **Keep `bench` Dependencies Out of `dev`**: Keep `duckdb`, `spikard`, and `granian` inside `[dependency-groups].bench` in [`pyproject.toml`](../../../../pyproject.toml) so `uv run` on Python `3.14t` never compiles `duckdb` from source during normal test runs.
+- **Litestar v2 In-Place `resolve_opts()` & `ownership_layers`**: Litestar v2 `BaseRouteHandler.resolve_opts()` mutates the handler in place and returns `None` (unlike v3 helpers), and v2 stores router/controller/app `after_request`, `type_decoders`, and `response_class` on `handler.ownership_layers` rather than calling `resolve_*` methods unconditionally. Always inspect both `resolve_*()` and `ownership_layers` in [`fastpath.py`](../../../../src/py/vertebra/extensions/litestar/fastpath.py) and handle `None` returns from `resolve_opts()` in [`router.py`](../../../../src/py/vertebra/extensions/litestar/router.py).
+- **Litestar v3 `zstd_compress_level` & Guarded Python Compression Clearing**: Litestar v3 `CompressionConfig` renames `zstd_level` to `zstd_compress_level` ([`offload.py`](../../../../src/py/vertebra/extensions/litestar/offload.py) checks both). [`LitestarPlugin.on_app_init`](../../../../src/py/vertebra/extensions/litestar/plugin.py) must clear `app_config.compression_config = None` **only** when `VERTEBRA_SERVER_ACTIVE=1` or `VERTEBRA_RUST_OFFLOAD=1` and the backend is supported by Rust (`zstd`, `gzip`, `brotli`); under Litestar `TestClient` or external ASGI servers, Python `CompressionConfig` and `CORSConfig` remain active and must disqualify `LitestarFastPathBypass` so headers and compressed bodies are never skipped.
 
 ## 6. `AsyncLogCore` Batched Newline-Delimited JSONL Buffers vs Pure-Python Fallback
 

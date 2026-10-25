@@ -91,8 +91,11 @@ pub fn write_shm_arrow_frame(shm_name: &str, ipc_bytes: &[u8]) -> Result<(String
     Ok((name, ipc_bytes.len()))
 }
 
-/// Read an Arrow IPC byte stream from a shared-memory `ShmRegion`.
-pub fn read_shm_arrow_frame(shm_name: &str) -> Result<Vec<u8>, String> {
+/// Borrow an Arrow IPC byte stream from a shared-memory `ShmRegion` without intermediate `Vec<u8>` allocation.
+pub fn read_shm_arrow_frame_with<R, F>(shm_name: &str, f: F) -> Result<R, String>
+where
+    F: FnOnce(&[u8]) -> R,
+{
     let name = normalize_shm_name(shm_name);
     if let Some(region_ref) = ACTIVE_ARROW_SHM_REGIONS.get(&name) {
         // SAFETY: Region was initialized by `write_shm_arrow_frame` and is immutable after publication.
@@ -102,7 +105,7 @@ pub fn read_shm_arrow_frame(shm_name: &str) -> Result<Vec<u8>, String> {
         if slice.len() < ShmArrowFrameHeader::SIZE + len {
             return Err("corrupted ShmArrowFrameHeader byte_len exceeds region size".to_string());
         }
-        return Ok(slice[16..16 + len].to_vec());
+        return Ok(f(&slice[16..16 + len]));
     }
 
     #[cfg(unix)]
@@ -114,18 +117,24 @@ pub fn read_shm_arrow_frame(shm_name: &str) -> Result<Vec<u8>, String> {
         let total_size = ShmArrowFrameHeader::SIZE + len;
         if total_size <= probe.len() {
             let slice = unsafe { probe.as_slice() };
-            return Ok(slice[16..16 + len].to_vec());
+            return Ok(f(&slice[16..16 + len]));
         }
         drop(probe);
         let full = ShmRegion::open_named(&name, total_size)
             .map_err(|e| format!("failed to map full Arrow ShmRegion `{name}`: {e}"))?;
         let slice = unsafe { full.as_slice() };
-        Ok(slice[16..16 + len].to_vec())
+        Ok(f(&slice[16..16 + len]))
     }
     #[cfg(not(unix))]
     {
+        let _ = f;
         Err(format!("Arrow ShmRegion `{name}` not found"))
     }
+}
+
+/// Read an Arrow IPC byte stream from a shared-memory `ShmRegion`.
+pub fn read_shm_arrow_frame(shm_name: &str) -> Result<Vec<u8>, String> {
+    read_shm_arrow_frame_with(shm_name, |slice| slice.to_vec())
 }
 
 /// Release and unlink an active shared-memory Arrow IPC `ShmRegion`.

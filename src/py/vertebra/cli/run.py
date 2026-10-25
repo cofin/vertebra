@@ -1,8 +1,10 @@
 """Run command."""
 
 import asyncio
+import logging
 import os
 import sys
+import sysconfig
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,8 @@ from vertebra.utils.serializers import decode_json
 
 __all__ = ("load_config", "run")
 
+logger = logging.getLogger("vertebra.cli.run")
+
 
 @click.command()
 @click.argument("app")
@@ -31,9 +35,14 @@ __all__ = ("load_config", "run")
 @click.option("--threads", type=int, default=None, help="Number of threads per process")
 @click.option(
     "--topology",
-    type=click.Choice(["embedded", "shm"], case_sensitive=False),
-    default="embedded",
-    help="Runtime topology",
+    type=click.Choice(["auto", "embedded", "shm"], case_sensitive=False),
+    default=None,
+    help="Runtime topology (auto, embedded, or shm)",
+)
+@click.option(
+    "--jit/--no-jit",
+    default=None,
+    help="Enable or disable CPython experimental JIT (PYTHON_JIT)",
 )
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Path to application config")
 @click.option("--log-level", default="info", help="Log level")
@@ -66,7 +75,8 @@ def run(
     port: int,
     workers: int | None,
     threads: int | None,
-    topology: str,
+    topology: str | None,
+    jit: bool | None,
     config_path: str | None,
     log_level: str,
     drain_timeout: int,
@@ -85,11 +95,7 @@ def run(
     if oneshot_job:
         sys.exit(_execute_oneshot_cli(app, oneshot_job))
 
-    if workers is None:
-        workers = 1 if topology.lower() == "shm" else 0
-
-    if threads is None:
-        threads = os.cpu_count() or 1
+    resolved_jit = _resolve_jit_setting(jit)
 
     launch_env = ServerLaunchEnv(
         app_path=app,
@@ -99,10 +105,11 @@ def run(
         log_level=log_level,
         dev=False,
         native=not asgi,
+        topology=topology,
+        threads=threads,
+        jit=resolved_jit,
     )
     env = launch_env.to_environ()
-    env["VERTEBRA_THREADS"] = str(threads)
-    env["VERTEBRA_TOPOLOGY"] = topology.lower()
     resolved_interface = "asgi" if asgi and interface.lower() == "auto" else interface.lower()
     env["VERTEBRA_INTERFACE"] = resolved_interface
     env["VERTEBRA_WORKER_ONLY"] = "1" if worker_only else "0"
@@ -134,7 +141,8 @@ def run(
         ) from e
 
     if not no_banner:
-        render_banner(mode="serve", host=host, port=port, workers=workers)
+        banner_workers = _parse_positive_int(env.get("VERTEBRA_WORKERS"), default=1)
+        render_banner(mode="serve", host=host, port=port, workers=banner_workers)
 
     exit_code = run_supervisor(
         server_cmd=server_cmd,
@@ -158,6 +166,44 @@ def load_config(path: Path) -> dict[str, Any]:
         return data
     msg = f"Unsupported config format: {path.suffix}"
     raise ValueError(msg)
+
+
+def _is_free_threaded_runtime() -> bool:
+    """Return True when the active interpreter runs with Py_GIL_DISABLED."""
+    gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
+    if gil_disabled not in (None, 0, "0", ""):
+        return True
+    gil_check = getattr(sys, "_is_gil_enabled", None)
+    if callable(gil_check):
+        return not bool(gil_check())
+    return False
+
+
+def _resolve_jit_setting(jit_flag: bool | None) -> bool | None:
+    """Resolve the requested JIT setting from CLI flag or VERTEBRA_JIT, skipping free-threaded builds."""
+    requested = jit_flag
+    if requested is None:
+        raw = os.environ.get("VERTEBRA_JIT", "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            requested = True
+        elif raw in {"0", "false", "no", "off"}:
+            requested = False
+
+    if requested is True and _is_free_threaded_runtime():
+        logger.warning("CPython JIT is unavailable on free-threaded builds; skipping PYTHON_JIT=1")
+        return False
+    return requested
+
+
+def _parse_positive_int(raw: str | None, *, default: int) -> int:
+    """Parse an integer string or fall back to default when missing or zero."""
+    if raw is not None:
+        try:
+            parsed = int(raw)
+            return parsed if parsed > 0 else default
+        except ValueError:
+            return default
+    return default
 
 
 def _execute_oneshot_cli(app_path: str, job_name: str) -> int:

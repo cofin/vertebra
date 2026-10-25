@@ -163,3 +163,300 @@ async fn multipart_parsing_and_limit_enforcement() {
         .unwrap_err();
     assert_eq!(field_err.status_code(), StatusCode::PAYLOAD_TOO_LARGE);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lockfree_backpressure_multithreaded_cap_and_sliding_window_recovery() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use vertebra_http::backpressure::{
+        BackpressureConfig, BackpressureController, CircuitBreakerConfig, CircuitState,
+        RejectionReason,
+    };
+
+    let controller = Arc::new(BackpressureController::new(BackpressureConfig {
+        max_in_flight: 4,
+        max_queue_depth: 0,
+        max_queue_time: Duration::from_millis(10),
+        circuit_breaker: CircuitBreakerConfig {
+            failure_rate_threshold: 0.5,
+            min_samples: 8,
+            window: Duration::from_millis(120),
+            half_open_probe_count: 3,
+        },
+        ..BackpressureConfig::default()
+    }));
+
+    let peak_observed = Arc::new(AtomicUsize::new(0));
+    let active_now = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::with_capacity(16);
+
+    for _ in 0..16 {
+        let c = Arc::clone(&controller);
+        let peak = Arc::clone(&peak_observed);
+        let active = Arc::clone(&active_now);
+        handles.push(tokio::spawn(async move {
+            let mut local_accepted = 0usize;
+            let mut local_rejected = 0usize;
+            for _ in 0..50 {
+                match c.try_acquire().await {
+                    Ok(permit) => {
+                        local_accepted += 1;
+                        let cur = active.fetch_add(1, Ordering::AcqRel) + 1;
+                        peak.fetch_max(cur, Ordering::AcqRel);
+                        tokio::task::yield_now().await;
+                        active.fetch_sub(1, Ordering::AcqRel);
+                        c.record_success();
+                        drop(permit);
+                    }
+                    Err(RejectionReason::Saturated) => {
+                        local_rejected += 1;
+                    }
+                    Err(other) => panic!("unexpected rejection reason: {other:?}"),
+                }
+            }
+            (local_accepted, local_rejected)
+        }));
+    }
+
+    let mut total_accepted = 0usize;
+    let mut total_rejected = 0usize;
+    for h in handles {
+        let (a, r) = h.await.unwrap();
+        total_accepted += a;
+        total_rejected += r;
+    }
+
+    assert_eq!(total_accepted + total_rejected, 16 * 50);
+    assert!(peak_observed.load(Ordering::Acquire) <= 4);
+    assert_eq!(controller.snapshot().in_flight, 0);
+    assert_eq!(controller.snapshot().circuit_state, CircuitState::Closed);
+
+    // Wait for prior success window to expire, then trip circuit with failures.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    for _ in 0..3 {
+        controller.record_success();
+    }
+    for _ in 0..5 {
+        controller.record_failure();
+    }
+    assert_eq!(controller.snapshot().circuit_state, CircuitState::Open);
+    assert_eq!(
+        controller.try_acquire().await.unwrap_err(),
+        RejectionReason::CircuitOpen
+    );
+
+    // Wait for cooldown -> HalfOpen, admit exactly 3 probes across concurrent tasks.
+    tokio::time::sleep(Duration::from_millis(140)).await;
+    let mut probes = Vec::new();
+    for _ in 0..3 {
+        probes.push(controller.try_acquire().await.expect("probe permit"));
+    }
+    assert_eq!(
+        controller.try_acquire().await.unwrap_err(),
+        RejectionReason::CircuitOpen
+    );
+    for p in probes {
+        controller.record_success();
+        drop(p);
+    }
+    assert_eq!(controller.snapshot().circuit_state, CircuitState::Closed);
+}
+
+#[test]
+fn encode_header_map_compact_preserves_duplicates_and_clamps_bounds() {
+    use http::{HeaderMap, HeaderValue};
+    use vertebra_core::transport::iter_raw_headers;
+    use vertebra_http::response::encode_header_map_compact;
+
+    let mut headers = HeaderMap::new();
+    headers.append("set-cookie", HeaderValue::from_static("a=1; Path=/"));
+    headers.append("set-cookie", HeaderValue::from_static("b=2; HttpOnly"));
+    headers.insert("x-trace-id", HeaderValue::from_static("trace-99"));
+
+    let encoded = encode_header_map_compact(&headers);
+    let decoded: Vec<(&[u8], &[u8])> = iter_raw_headers(&encoded).collect();
+    assert_eq!(
+        decoded,
+        vec![
+            (&b"set-cookie"[..], &b"a=1; Path=/"[..]),
+            (&b"set-cookie"[..], &b"b=2; HttpOnly"[..]),
+            (&b"x-trace-id"[..], &b"trace-99"[..]),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn dispatch_requests_preserves_double_buffer_allocation() {
+    use std::sync::Arc;
+    use tokio::sync::oneshot;
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+    use vertebra_http::batcher::PendingRequest;
+    use vertebra_http::dispatcher::Dispatcher;
+
+    let pair = Arc::new(RingPair::create(RingPairConfig::default()).unwrap());
+    let dispatcher = Dispatcher::new_shm(vec![pair], 64);
+
+    let mut requests = Vec::with_capacity(64);
+    let ptr_before = requests.as_ptr();
+    let cap_before = requests.capacity();
+
+    for i in 0..4u64 {
+        let (tx, _rx) = oneshot::channel();
+        requests.push(PendingRequest {
+            handler_id: i,
+            method_tag: 0,
+            http_version_tag: 1,
+            flags: 0,
+            path_and_query: http::uri::PathAndQuery::from_static("/fast"),
+            headers_mp: Bytes::new(),
+            body: Bytes::new(),
+            reply: tx,
+        });
+    }
+
+    let dispatched = dispatcher.dispatch_requests(&mut requests);
+    assert_eq!(dispatched, 4);
+    assert!(requests.is_empty());
+    assert_eq!(requests.capacity(), cap_before);
+    assert_eq!(requests.as_ptr(), ptr_before);
+}
+
+#[test]
+fn offload_config_json_parses_into_server_config() {
+    use vertebra_http::compression::CompressionBackend;
+    use vertebra_http::config::ServerConfig;
+
+    let mut cfg = ServerConfig::default();
+    let raw = r#"{
+        "compression": {
+            "backend": "zstd",
+            "minimum_size": 256,
+            "gzip_compress_level": 6,
+            "brotli_quality": 4,
+            "zstd_level": 3,
+            "exclude_patterns": ["/metrics"],
+            "exclude_opt_key": "skip_compression",
+            "excluded_paths": ["/raw"]
+        },
+        "cors": {
+            "allow_origins": ["https://app.example"],
+            "allow_methods": ["GET", "POST"],
+            "allow_headers": ["content-type", "authorization"],
+            "allow_credentials": true,
+            "expose_headers": ["x-request-id"],
+            "max_age": 600,
+            "allow_origin_regex": null
+        },
+        "static_mounts": [
+            {
+                "path_prefix": "/static",
+                "directories": ["/tmp"],
+                "html_mode": false,
+                "send_as_attachment": false,
+                "headers": {"x-asset": "1"}
+            }
+        ],
+        "openapi": null
+    }"#;
+
+    cfg.apply_offload_json(raw).expect("valid offload json");
+    let comp = cfg.compression.expect("compression populated");
+    assert_eq!(comp.backend, CompressionBackend::Zstd);
+    assert_eq!(comp.minimum_size, 256);
+    let cors = cfg.cors.expect("cors populated");
+    assert_eq!(cors.allow_origins, vec!["https://app.example"]);
+    assert!(cors.allow_credentials);
+    assert_eq!(cfg.static_mounts.len(), 1);
+    assert_eq!(cfg.static_mounts[0].path_prefix, "/static");
+}
+
+#[test]
+fn cors_and_compression_preserve_vary_skip_incompressible_types_and_align_version_tags() {
+    use http::{HeaderMap, HeaderValue, Version, header};
+    use vertebra_http::batcher::http_version_tag;
+    use vertebra_http::compression::{CompressionBackend, CompressionOffloadConfig};
+    use vertebra_http::cors::CorsOffloadConfig;
+
+    let cors = CorsOffloadConfig {
+        allow_origins: vec!["https://app.example".to_string()],
+        allow_methods: vec!["GET".to_string(), "POST".to_string()],
+        allow_credentials: true,
+        ..CorsOffloadConfig::default()
+    };
+    let comp = CompressionOffloadConfig {
+        backend: CompressionBackend::Zstd,
+        minimum_size: 64,
+        ..CompressionOffloadConfig::default()
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::VARY, HeaderValue::from_static("Accept-Language"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+
+    cors.apply_response_headers("https://app.example", &mut headers);
+    let json_body = Bytes::from(vec![b'j'; 256]);
+    let compressed =
+        comp.compress_if_eligible("/api/data", Some("zstd"), &mut headers, json_body.clone());
+    assert!(compressed.len() < json_body.len());
+
+    cors.apply_response_headers("https://app.example", &mut headers);
+    let vary_str = headers
+        .get(header::VARY)
+        .and_then(|v| v.to_str().ok())
+        .expect("Vary header present");
+    let tokens: Vec<&str> = vary_str.split(',').map(str::trim).collect();
+    assert_eq!(tokens, vec!["Accept-Language", "Origin", "Accept-Encoding"]);
+
+    let mut png_headers = HeaderMap::new();
+    png_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    let png_body = Bytes::from(vec![0x89; 512]);
+    let untouched = comp.compress_if_eligible(
+        "/logo.png",
+        Some("zstd"),
+        &mut png_headers,
+        png_body.clone(),
+    );
+    assert_eq!(untouched, png_body);
+    assert!(png_headers.get(header::CONTENT_ENCODING).is_none());
+
+    assert_eq!(http_version_tag(Version::HTTP_10), 0);
+    assert_eq!(http_version_tag(Version::HTTP_11), 1);
+    assert_eq!(http_version_tag(Version::HTTP_2), 2);
+    assert_eq!(http_version_tag(Version::HTTP_3), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backpressure_queued_waiters_wake_without_lost_notifications() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use vertebra_http::backpressure::{BackpressureConfig, BackpressureController};
+
+    let controller = Arc::new(BackpressureController::new(BackpressureConfig {
+        max_in_flight: 2,
+        max_queue_depth: 32,
+        max_queue_time: Duration::from_millis(500),
+        ..BackpressureConfig::default()
+    }));
+
+    let mut handles = Vec::with_capacity(16);
+    for _ in 0..16 {
+        let c = Arc::clone(&controller);
+        handles.push(tokio::spawn(async move {
+            for _ in 0..30 {
+                let permit = c.try_acquire().await.expect("queued waiter must wake");
+                tokio::task::yield_now().await;
+                c.record_success();
+                drop(permit);
+            }
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+    assert_eq!(controller.snapshot().in_flight, 0);
+}

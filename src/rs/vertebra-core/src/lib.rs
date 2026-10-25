@@ -25,11 +25,12 @@ pub mod transport;
 pub mod util;
 
 // Re-exports for ergonomics
-pub use bridge::{BatchBridge, BridgeResponse, WriteRequest};
+pub use bridge::{BatchBridge, BridgeResponse, ResponseSink, WriteRequest};
 pub use broker::{
     BrokerError, LeaseGrant, LeaseSlot, LeaseTableStats, ShmLeaseTable, ShmStatementCache,
     StatementCacheStats, StatementPlanEntry, StatementSlot,
 };
+pub use channel::{MpmcSlotView, SlotView};
 pub use layout::CacheLine;
 pub use transport::ring_pair::{RingPair, TieredRingSet};
-pub use transport::{BatchSnapshot, TransportError, TransportNode};
+pub use transport::{BatchSnapshot, InProcessRequest, TransportError, TransportNode};

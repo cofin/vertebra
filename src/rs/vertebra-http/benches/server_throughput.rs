@@ -169,7 +169,6 @@ async fn setup_bridge_server(limit: vertebra_http::batcher::BatchLimit) -> Socke
         body::PendingResponse,
         config::ServerConfig,
         dispatcher::Dispatcher,
-        response::encode_response_headers,
         routing::{RouteTable, Router},
         server,
     };
@@ -191,7 +190,7 @@ async fn setup_bridge_server(limit: vertebra_http::batcher::BatchLimit) -> Socke
                     .map(|i| BridgeResponse {
                         request_id: snap.node(i).correlation_id,
                         status: 200,
-                        headers: Vec::new(),
+                        headers_raw: bytes::Bytes::new(),
                         body: bytes::Bytes::from_static(b"ok"),
                     })
                     .collect();
@@ -209,7 +208,7 @@ async fn setup_bridge_server(limit: vertebra_http::batcher::BatchLimit) -> Socke
                     resp.request_id,
                     PendingResponse {
                         status: resp.status,
-                        headers_mp: encode_response_headers(&resp.headers),
+                        headers_mp: resp.headers_raw,
                         body: resp.body,
                         stream_rx: None,
                     },

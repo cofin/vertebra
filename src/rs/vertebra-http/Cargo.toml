@@ -40,6 +40,8 @@ h3-quinn        = { workspace = true, optional = true }
 pyo3 = { workspace = true, features = ["auto-initialize"], optional = true }
 
 # Serialization (for AssetManager manifest)
+base64      = { workspace = true }
+regex       = "1"
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 zstd        = { workspace = true }

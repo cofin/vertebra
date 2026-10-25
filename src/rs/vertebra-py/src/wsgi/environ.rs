@@ -53,12 +53,27 @@ pub fn intern_static_wsgi_key<'py>(py: Python<'py>, key: &str) -> Bound<'py, PyS
         "wsgi.file_wrapper" => pyo3::intern!(py, "wsgi.file_wrapper").clone(),
         "CONTENT_TYPE" => pyo3::intern!(py, "CONTENT_TYPE").clone(),
         "CONTENT_LENGTH" => pyo3::intern!(py, "CONTENT_LENGTH").clone(),
+        "HTTP_HOST" => pyo3::intern!(py, "HTTP_HOST").clone(),
+        "HTTP_USER_AGENT" => pyo3::intern!(py, "HTTP_USER_AGENT").clone(),
+        "HTTP_ACCEPT" => pyo3::intern!(py, "HTTP_ACCEPT").clone(),
+        "HTTP_ACCEPT_ENCODING" => pyo3::intern!(py, "HTTP_ACCEPT_ENCODING").clone(),
+        "HTTP_AUTHORIZATION" => pyo3::intern!(py, "HTTP_AUTHORIZATION").clone(),
+        "HTTP_COOKIE" => pyo3::intern!(py, "HTTP_COOKIE").clone(),
+        "HTTP_CONNECTION" => pyo3::intern!(py, "HTTP_CONNECTION").clone(),
+        "HTTP_UPGRADE" => pyo3::intern!(py, "HTTP_UPGRADE").clone(),
         _ => PyString::new(py, key),
     }
 }
 
 /// Lazy WSGI environ with freelist pooling and interned PEP 3333 keys.
-#[pyclass(mapping, name = "WsgiEnviron", freelist = 128)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(mapping, name = "WsgiEnviron", freelist = 128, immutable_type)
+)]
+#[cfg_attr(
+    Py_GIL_DISABLED,
+    pyclass(mapping, name = "WsgiEnviron", immutable_type)
+)]
 pub struct WsgiEnviron {
     batch: Arc<BatchSnapshot>,
     index: usize,
@@ -121,7 +136,9 @@ impl WsgiEnviron {
     fn build_known(&mut self, py: Python<'_>, key: &str) -> PyResult<Option<Py<PyAny>>> {
         let node = self.batch.node(self.index);
         let obj: Py<PyAny> = match key {
-            "REQUEST_METHOD" => PyString::intern(py, node.method_name()).into_any().unbind(),
+            "REQUEST_METHOD" => crate::request::intern_http_method(py, node.method_name())
+                .into_any()
+                .unbind(),
             "SCRIPT_NAME" => pyo3::intern!(py, "").clone().into_any().unbind(),
             "PATH_INFO" => PyString::new(py, self.batch.path(self.index))
                 .into_any()
@@ -137,13 +154,17 @@ impl WsgiEnviron {
             "SERVER_PROTOCOL" => {
                 let ver = node.http_version();
                 if ver.starts_with("HTTP/") {
-                    PyString::intern(py, ver).into_any().unbind()
+                    crate::request::intern_http_version(py, ver)
+                        .into_any()
+                        .unbind()
                 } else if ver == "1.1" {
                     pyo3::intern!(py, "HTTP/1.1").clone().into_any().unbind()
                 } else if ver == "1.0" {
                     pyo3::intern!(py, "HTTP/1.0").clone().into_any().unbind()
                 } else if ver == "2" || ver == "2.0" {
                     pyo3::intern!(py, "HTTP/2").clone().into_any().unbind()
+                } else if ver == "3" || ver == "3.0" {
+                    pyo3::intern!(py, "HTTP/3").clone().into_any().unbind()
                 } else {
                     PyString::new(py, &format!("HTTP/{ver}"))
                         .into_any()
@@ -513,7 +534,11 @@ impl WsgiEnviron {
 }
 
 /// Iterator over the environ's live keys.
-#[pyclass(name = "WsgiEnvironIterator", freelist = 128)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(name = "WsgiEnvironIterator", freelist = 128, immutable_type)
+)]
+#[cfg_attr(Py_GIL_DISABLED, pyclass(name = "WsgiEnvironIterator", immutable_type))]
 pub struct WsgiEnvironIterator {
     keys: Vec<String>,
     pos: usize,

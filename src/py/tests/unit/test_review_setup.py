@@ -22,9 +22,9 @@ def build_minimal_review_tree(tmp_path: Path) -> Path:
         "[agents]\n"
         'model = "pro"\n'
         'common_preload = ["review-core", "flow-memory-keeper"]\n'
-        'valid_tools = ["read_file", "edit_file", "write_file", "code_search", "run_command", "search_web", "moma_search", "skill_search", "call_mcp_tool", "list_resources", "read_resource", "send_message", "view_file", "grep_search", "find_by_name", "list_dir"]\n'
+        'valid_tools = ["read_file", "edit_file", "write_file", "code_search", "run_command", "search_web", "moma_search", "skill_search", "send_message", "view_file", "grep_search", "find_by_name", "list_dir"]\n'
         'write_tools = ["edit_file", "write_file"]\n'
-        'reviewer_required_tools = ["read_file", "view_file", "grep_search", "find_by_name", "list_dir", "code_search", "run_command", "search_web", "moma_search", "skill_search", "call_mcp_tool", "list_resources", "read_resource", "send_message"]\n'
+        'reviewer_required_tools = ["read_file", "view_file", "grep_search", "find_by_name", "list_dir", "code_search", "run_command", "search_web", "moma_search", "skill_search", "send_message"]\n'
         'specialist_extra_tools = ["edit_file", "write_file"]\n'
         "reviewer_forbidden_commands = ['\\bmake\\s+lint\\b']\n\n"
         "[policy]\n"
@@ -142,9 +142,6 @@ def build_minimal_review_tree(tmp_path: Path) -> Path:
         "  - search_web\n"
         "  - moma_search\n"
         "  - skill_search\n"
-        "  - call_mcp_tool\n"
-        "  - list_resources\n"
-        "  - read_resource\n"
         "  - send_message\n"
     )
 
@@ -322,9 +319,6 @@ def test_agents_catches_write_tool_on_reviewer_and_forbidden_command(
         "  - search_web\n"
         "  - moma_search\n"
         "  - skill_search\n"
-        "  - call_mcp_tool\n"
-        "  - list_resources\n"
-        "  - read_resource\n"
         "  - send_message\n"
         "  - write_file\n"
     )
@@ -356,6 +350,22 @@ def test_agents_catches_write_tool_on_reviewer_and_forbidden_command(
     issues = validator.validate(frozenset({"agents"}))
     assert any("reviewer must not declare write tools" in i.message for i in issues)
     assert any("Allowed Commands contains forbidden command pattern" in i.message for i in issues)
+
+
+def test_agents_rejects_unregistered_lazy_mcp_tools(tmp_path: Path) -> None:
+    """Verify agents rule rejects lazy MCP multiplexer tools absent from the subagent tool registry."""
+    repo = build_minimal_review_tree(tmp_path)
+    rev_path = repo / ".agents/agents/runtime-ipc-reviewer.md"
+    rev_text = rev_path.read_text(encoding="utf-8").replace(
+        "  - send_message\n",
+        "  - call_mcp_tool\n  - list_resources\n  - read_resource\n  - send_message\n",
+    )
+    rev_path.write_text(rev_text, encoding="utf-8")
+
+    validator = ReviewSetupValidator(repo)
+    issues = validator.validate(frozenset({"agents"}))
+    for bad_tool in ("call_mcp_tool", "list_resources", "read_resource"):
+        assert any(f"declared tool '{bad_tool}' is not in valid_tools" in i.message for i in issues)
 
 
 def test_index_catches_missing_area_row(tmp_path: Path) -> None:

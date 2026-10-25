@@ -1,12 +1,13 @@
 ---
 type: Concept
 title: "`vtb` Command-Line Interface"
-description: "CLI commands, options, entry-point plugin discovery, Rich TUI/theme utilities, and structured logging for the vtb executable."
+description: "CLI commands, options, environment preservation, entry-point plugin discovery, Rich TUI/theme utilities, and structured logging for the vtb executable."
 status: stable
 tags: [domains, framework, cli, developer-experience]
 sources:
   - resource: src/py/vertebra/cli/__init__.py
   - resource: src/py/vertebra/cli/run.py
+  - resource: src/py/vertebra/cli/_launch.py
   - resource: src/py/vertebra/cli/dev.py
   - resource: src/py/vertebra/cli/build.py
   - resource: src/py/vertebra/cli/init.py
@@ -28,9 +29,9 @@ sources:
 
 | Command | Module | Options & Behavior |
 |---|---|---|
-| `vtb run [APP]` | [`cli/run.py`](../../../../../src/py/vertebra/cli/run.py) | Resolves `APP` (`--app`, `VERTEBRA_APP`), `--host`, `--port`, `--workers`, `--threads`, `--topology embedded\|shm`, `--interface auto\|asgi\|rsgi\|wsgi`, `--drain-timeout`, `--shutdown-timeout`, and launches `run_supervisor`. |
+| `vtb run [APP]` | [`cli/run.py`](../../../../../src/py/vertebra/cli/run.py), [`cli/_launch.py`](../../../../../src/py/vertebra/cli/_launch.py) | Resolves `APP` (`--app`, `VERTEBRA_APP`), `--host`, `--port`, `--workers`, `--threads`, `--topology auto\|embedded\|shm`, `--interface auto\|asgi\|rsgi\|wsgi` (`--asgi` sets `VERTEBRA_NATIVE=0`), `--jit / --no-jit` (configures `PYTHON_JIT=1` on non-free-threaded Python 3.15+ interpreters; warns and skips on free-threaded builds), `--drain-timeout`, `--shutdown-timeout`, preserves inherited `VERTEBRA_WORKERS`, `VERTEBRA_TOPOLOGY`, `VERTEBRA_THREADS`, and `VERTEBRA_JIT` environment defaults when CLI flags are omitted, and launches `run_supervisor`. |
 | `vtb dev [APP]` | [`cli/dev.py`](../../../../../src/py/vertebra/cli/dev.py) | Runs `BuildOrchestrator` in dev/HMR mode (`SourceWatcher` or Vite dev server), enables `--reload`, and launches `run_supervisor` with the interactive Rich TUI. |
-| `vtb build` | [`cli/build.py`](../../../../../src/py/vertebra/cli/build.py) | Builds `--target frontend\|backend\|all\|<triple>`, `--standalone`, `--onefile`, `--pgo`, `--python-version`, and `--output` via `BuildOrchestrator`, `StandaloneBuilder`, and `OnefileBuilder`. |
+| `vtb build` | [`cli/build.py`](../../../../../src/py/vertebra/cli/build.py) | Builds `--target frontend\|backend\|all\|<triple>`, `--standalone`, `--onefile`, `--pgo`, `--python-version` (`3.12`–`3.15` / `3.14t` / `3.15t`), and `--output` via `BuildOrchestrator`, `StandaloneBuilder`, and `OnefileBuilder`. |
 | `vtb js <subcmd>` | [`cli/js.py`](../../../../../src/py/vertebra/cli/js.py) | Frontend toolchain subcommands: `add`, `remove`, `list`, `install`, `build`, `generate-types` (`TypeExtractor` + TS/Zod/Valibot/OpenAPI/Protobuf/procedures), and `exec`. |
 | `vtb init` | [`cli/init.py`](../../../../../src/py/vertebra/cli/init.py) | Scaffolds a new Vertebra project layout. |
 | `vtb mcp bridge` | [`cli/mcp.py`](../../../../../src/py/vertebra/cli/mcp.py) | Bridges newline-delimited JSON-RPC 2.0 over `stdin`/`stdout` to an application's `McpServer` (`execute_stdio_bridge`). |

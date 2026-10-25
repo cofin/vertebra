@@ -12,7 +12,9 @@ import pytest
 
 from vertebra._vertebra import (
     Response,
+    cancel_request_sleep,
     init_transport,
+    prepare_request_sleep,
     submit_response,
 )
 from vertebra.framework._app import App, _make_handler_id
@@ -149,17 +151,29 @@ def test_worker_main_shm_transport_initialized_once(monkeypatch: pytest.MonkeyPa
 
 
 def test_worker_main_clears_executor_on_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Worker shutdown must shut down its thread pool executor and event loop pool cleanly."""
+    """Worker lazily allocates ThreadPoolExecutor only when needed and shuts it down on exit."""
+    init_calls: list[int] = []
     shutdown_calls: list[bool] = []
     stop_event = threading.Event()
     stop_event.set()
 
-    fake_app = SimpleNamespace(_handlers={}, mounts=[])
+    def blocking_handler() -> bytes:
+        return b"ok"
+
+    inline_only_app = App()
+
+    @inline_only_app.get("/fast")
+    def fast_handler() -> bytes:
+        return b"ok"
+
+    threaded_app = App()
+    threaded_app.get("/block", sync_to_thread=True)(blocking_handler)
+
     orig_worker_cls = server_worker_module.Worker
 
     class FakeExecutor:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
-            return None
+            init_calls.append(1)
 
         def shutdown(self, *, wait: bool = False) -> None:
             shutdown_calls.append(wait)
@@ -168,7 +182,6 @@ def test_worker_main_clears_executor_on_shutdown(monkeypatch: pytest.MonkeyPatch
         kwargs["stop_event"] = stop_event
         return orig_worker_cls(handlers, **kwargs)
 
-    monkeypatch.setattr(worker_module, "import_app", lambda app_path: fake_app)
     monkeypatch.setattr(server_worker_module, "Worker", make_worker)
     monkeypatch.setattr(server_worker_module, "init_transport", lambda **kwargs: None)
     monkeypatch.setattr(server_worker_module, "get_request_notify_fd", lambda: -1)
@@ -177,8 +190,14 @@ def test_worker_main_clears_executor_on_shutdown(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("VERTEBRA_APP", "fake.module:app")
     monkeypatch.setenv("VERTEBRA_WORKERS", "1")
 
+    monkeypatch.setattr(worker_module, "import_app", lambda app_path: inline_only_app)
     worker_module.main()
+    assert init_calls == []
+    assert shutdown_calls == []
 
+    monkeypatch.setattr(worker_module, "import_app", lambda app_path: threaded_app)
+    worker_module.main()
+    assert len(init_calls) == 1
     assert len(shutdown_calls) == 1
     assert not hasattr(server_worker_module, "_wsgi_executor")
 
@@ -240,3 +259,12 @@ def test_non_blocking_dispatch() -> None:
 
     assert elapsed < 0.05
     scheduler.stop()
+
+
+def test_dekker_request_sleep_helpers_roundtrip() -> None:
+    """Verify prepare_request_sleep and cancel_request_sleep FFI helpers execute cleanly."""
+    init_transport()
+    should_sleep = prepare_request_sleep()
+    assert isinstance(should_sleep, bool)
+    assert should_sleep is True
+    cancel_request_sleep()

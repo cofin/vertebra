@@ -2,7 +2,6 @@
 
 import asyncio
 import contextlib
-import importlib
 import inspect
 import os
 from collections.abc import Callable, Iterator, Sequence
@@ -22,6 +21,7 @@ from vertebra.extensions.litestar import (
 )
 from vertebra.server._asgi._runner import AsgiRunner
 from vertebra.server._dispatch import _schedule_coros
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -29,11 +29,11 @@ def _load_litestar_plugin_test_primitives() -> tuple[
     Any, Callable[..., Callable[[Callable[..., Any]], Any]], Any, Any, Any
 ]:
     """Load Litestar plugin test classes or fallback doubles when optional extra is absent."""
-    try:
-        litestar_mod = importlib.import_module("litestar")
-        comp_mod = importlib.import_module("litestar.config.compression")
-        cors_mod = importlib.import_module("litestar.config.cors")
-        plugins_mod = importlib.import_module("litestar.plugins")
+    litestar_mod = import_optional("litestar")
+    comp_mod = import_optional("litestar.config.compression")
+    cors_mod = import_optional("litestar.config.cors")
+    plugins_mod = import_optional("litestar.plugins")
+    if litestar_mod is not None and comp_mod is not None and cors_mod is not None and plugins_mod is not None:
         return (
             litestar_mod.Litestar,
             litestar_mod.get,
@@ -41,136 +41,175 @@ def _load_litestar_plugin_test_primitives() -> tuple[
             cors_mod.CORSConfig,
             plugins_mod.CLIPlugin,
         )
-    except ImportError:
 
-        class CompressionConfigStub(msgspec.Struct, gc=False):
-            backend: str = "gzip"
-            minimum_size: int = 500
-            gzip_compress_level: int = 6
-            brotli_quality: int = 4
-            zstd_level: int = 3
-            exclude: Sequence[str] | str | None = None
-            exclude_opt_key: str | None = None
+    class StateStub:
+        """Non-dict Litestar State double mirroring litestar.datastructures.State."""
 
-        class CORSConfigStub(msgspec.Struct, gc=False):
-            allow_origins: Sequence[str] = ("*",)
-            allow_methods: Sequence[str] = ("*",)
-            allow_headers: Sequence[str] = ("*",)
-            allow_credentials: bool = False
-            expose_headers: Sequence[str] = ()
-            max_age: int = 600
-            allow_origin_regex: str | None = None
+        __slots__ = ("_data",)
 
-        class CLIPluginStub:
-            """Fallback CLIPlugin base class."""
+        def __init__(self, initial: dict[str, Any] | None = None) -> None:
+            self._data: dict[str, Any] = dict(initial or {})
 
-            __slots__ = ()
+        def __getitem__(self, key: str) -> Any:
+            return self._data[key]
 
-        def get_stub(path: str, **_kwargs: Any) -> Callable[[Callable[..., Any]], Any]:
-            def wrap(fn: Callable[..., Any]) -> Any:
-                return SimpleNamespace(
-                    paths={path},
-                    http_methods={"GET"},
-                    fn=fn,
-                    guards=(),
-                    middleware=(),
-                    opt={},
-                )
+        def __setitem__(self, key: str, value: Any) -> None:
+            self._data[key] = value
 
-            return wrap
+        def __contains__(self, key: object) -> bool:
+            return key in self._data
 
-        class LitestarStub:
-            __slots__ = (
-                "before_send",
-                "compression_config",
-                "cors_config",
-                "openapi_config",
-                "openapi_schema",
-                "plugins",
-                "routes",
-                "state",
+        def __delitem__(self, key: str) -> None:
+            del self._data[key]
+
+        def __iter__(self) -> Iterator[str]:
+            return iter(self._data)
+
+        def __len__(self) -> int:
+            return len(self._data)
+
+        def get(self, key: str, default: Any = None) -> Any:
+            return self._data.get(key, default)
+
+        def keys(self) -> Any:
+            return self._data.keys()
+
+        def values(self) -> Any:
+            return self._data.values()
+
+        def items(self) -> Any:
+            return self._data.items()
+
+    class CompressionConfigStub(msgspec.Struct, frozen=True, gc=False):
+        backend: str = "gzip"
+        minimum_size: int = 500
+        gzip_compress_level: int = 6
+        brotli_quality: int = 4
+        zstd_level: int = 3
+        exclude: Sequence[str] | str | None = None
+        exclude_opt_key: str | None = None
+
+    class CORSConfigStub(msgspec.Struct, frozen=True, gc=False):
+        allow_origins: Sequence[str] = ("*",)
+        allow_methods: Sequence[str] = ("*",)
+        allow_headers: Sequence[str] = ("*",)
+        allow_credentials: bool = False
+        expose_headers: Sequence[str] = ()
+        max_age: int = 600
+        allow_origin_regex: str | None = None
+
+    class CLIPluginStub:
+        """Fallback CLIPlugin base class."""
+
+        __slots__ = ()
+
+    def get_stub(path: str, **_kwargs: Any) -> Callable[[Callable[..., Any]], Any]:
+        def wrap(fn: Callable[..., Any]) -> Any:
+            return SimpleNamespace(
+                paths={path},
+                http_methods={"GET"},
+                fn=fn,
+                guards=(),
+                middleware=(),
+                opt={},
             )
 
-            def __init__(
-                self,
-                route_handlers: Sequence[Any] | None = None,
-                *,
-                plugins: Sequence[Any] | None = None,
-                compression_config: Any = None,
-                cors_config: Any = None,
-                **_kwargs: Any,
-            ) -> None:
-                app_config = SimpleNamespace(
-                    route_handlers=list(route_handlers or ()),
-                    plugins=list(plugins or ()),
-                    compression_config=compression_config,
-                    cors_config=cors_config,
-                    before_send=None,
-                    state={},
-                    on_app_init=[],
-                )
-                for plugin in app_config.plugins:
-                    on_init = getattr(plugin, "on_app_init", None)
-                    if callable(on_init):
-                        app_config = on_init(app_config)
+        return wrap
 
-                self.compression_config = app_config.compression_config
-                self.cors_config = app_config.cors_config
-                self.before_send = app_config.before_send
-                self.state = dict(app_config.state)
-                self.plugins = SimpleNamespace(
-                    plugins=list(app_config.plugins),
-                    cli=[p for p in app_config.plugins if hasattr(p, "server_lifespan")],
-                )
-                by_path: dict[str, dict[str, Any]] = {}
-                for handler in app_config.route_handlers:
-                    for path in getattr(handler, "paths", ("/",)):
-                        method_map = by_path.setdefault(path, {})
-                        for method in getattr(handler, "http_methods", ("GET",)):
-                            method_map[method] = handler
-                self.routes = [
-                    SimpleNamespace(path=path, route_handler_map=method_map, path_parameters=())
-                    for path, method_map in by_path.items()
-                ]
-                self.openapi_config = SimpleNamespace(path="/schema")
-                self.openapi_schema = SimpleNamespace(
-                    to_schema=lambda: {
-                        "openapi": "3.1.0",
-                        "paths": {r.path: {} for r in self.routes},
-                    }
-                )
-                for hook in app_config.on_app_init:
-                    hook(self)
-
-            async def __call__(self, scope: Any, _receive: Any, send: Any) -> None:
-                path = scope["path"]
-                method = scope["method"].upper()
-                for route in self.routes:
-                    if route.path == path and method in route.route_handler_map:
-                        handler = route.route_handler_map[method]
-                        out = handler.fn()
-                        if inspect.isawaitable(out):
-                            out = await out
-                        body = bytes(encode_json_bytes(out))
-                        await send(
-                            {
-                                "type": "http.response.start",
-                                "status": 200,
-                                "headers": [(b"content-type", b"application/json")],
-                            }
-                        )
-                        await send({"type": "http.response.body", "body": body, "more_body": False})
-                        return
-                await send({"type": "http.response.start", "status": 404, "headers": []})
-                await send({"type": "http.response.body", "body": b"Not Found", "more_body": False})
-
-        return (
-            LitestarStub,
-            get_stub,
-            CompressionConfigStub,
-            CORSConfigStub,
-            CLIPluginStub,
+    class LitestarStub:
+        __slots__ = (
+            "__vertebra_fastpath__",
+            "before_send",
+            "compression_config",
+            "cors_config",
+            "lifespan",
+            "openapi_config",
+            "openapi_schema",
+            "plugins",
+            "routes",
+            "state",
         )
+
+        def __init__(
+            self,
+            route_handlers: Sequence[Any] | None = None,
+            *,
+            plugins: Sequence[Any] | None = None,
+            compression_config: Any = None,
+            cors_config: Any = None,
+            **_kwargs: Any,
+        ) -> None:
+            app_config = SimpleNamespace(
+                route_handlers=list(route_handlers or ()),
+                plugins=list(plugins or ()),
+                compression_config=compression_config,
+                cors_config=cors_config,
+                before_send=None,
+                state=StateStub(),
+                lifespan=[],
+            )
+            for plugin in app_config.plugins:
+                on_init = getattr(plugin, "on_app_init", None)
+                if callable(on_init):
+                    app_config = on_init(app_config)
+
+            self.__vertebra_fastpath__: Any = None
+            self.compression_config = app_config.compression_config
+            self.cors_config = app_config.cors_config
+            self.before_send = app_config.before_send
+            self.state = StateStub(app_config.state._data)
+            self.lifespan = list(app_config.lifespan)
+            self.plugins = SimpleNamespace(
+                plugins=list(app_config.plugins),
+                cli=[p for p in app_config.plugins if hasattr(p, "server_lifespan")],
+            )
+            by_path: dict[str, dict[str, Any]] = {}
+            for handler in app_config.route_handlers:
+                for path in getattr(handler, "paths", ("/",)):
+                    method_map = by_path.setdefault(path, {})
+                    for method in getattr(handler, "http_methods", ("GET",)):
+                        method_map[method] = handler
+            self.routes = [
+                SimpleNamespace(path=path, route_handler_map=method_map, path_parameters=())
+                for path, method_map in by_path.items()
+            ]
+            self.openapi_config = SimpleNamespace(path="/schema")
+            self.openapi_schema = SimpleNamespace(
+                to_schema=lambda: {
+                    "openapi": "3.1.0",
+                    "paths": {r.path: {} for r in self.routes},
+                }
+            )
+
+        async def __call__(self, scope: Any, _receive: Any, send: Any) -> None:
+            path = scope["path"]
+            method = scope["method"].upper()
+            for route in self.routes:
+                if route.path == path and method in route.route_handler_map:
+                    handler = route.route_handler_map[method]
+                    out = handler.fn()
+                    if inspect.isawaitable(out):
+                        out = await out
+                    body = bytes(encode_json_bytes(out))
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 200,
+                            "headers": [(b"content-type", b"application/json")],
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": body, "more_body": False})
+                    return
+            await send({"type": "http.response.start", "status": 404, "headers": []})
+            await send({"type": "http.response.body", "body": b"Not Found", "more_body": False})
+
+    return (
+        LitestarStub,
+        get_stub,
+        CompressionConfigStub,
+        CORSConfigStub,
+        CLIPluginStub,
+    )
 
 
 Litestar, get, CompressionConfig, CORSConfig, CLIPlugin = _load_litestar_plugin_test_primitives()
@@ -198,8 +237,10 @@ class _LifecycleTrackerPlugin:
 
 
 def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify LitestarPlugin intercepts compression/CORS before trie build and enters CLIPlugin.server_lifespan."""
+    """Verify LitestarPlugin preserves standalone Python compression and strips it only when vertebra-server is active."""
     monkeypatch.delenv("LITESTAR_APP", raising=False)
+    monkeypatch.delenv("VERTEBRA_SERVER_ACTIVE", raising=False)
+    monkeypatch.delenv("VERTEBRA_RUST_OFFLOAD", raising=False)
     tracker = _LifecycleTrackerPlugin()
     vtb_plugin = LitestarPlugin(LitestarConfig(enable_health_endpoint=True, health_path="/_vtb/healthz"))
 
@@ -207,26 +248,40 @@ def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.Mon
     def ping() -> dict[str, str]:
         return {"status": "pong"}
 
-    app = Litestar(
+    standalone_app = Litestar(
         route_handlers=[ping],
         plugins=[vtb_plugin, tracker],
         compression_config=CompressionConfig(backend="zstd", minimum_size=512),
         cors_config=CORSConfig(allow_origins=["https://console.example.com"]),
     )
 
-    assert app.compression_config is None
-    assert app.state["_vertebra_offloaded_compression_config"] is not None
-    assert app.state["_vertebra_offloaded_cors_config"] is not None
+    assert standalone_app.compression_config is not None
+    assert standalone_app.state["_vertebra_offloaded_compression_config"] is not None
+    assert standalone_app.state["_vertebra_offloaded_cors_config"] is not None
     assert vtb_plugin.offload_plan is not None
     assert vtb_plugin.offload_plan.compression is not None
     assert vtb_plugin.offload_plan.compression.backend == "zstd"
     vtb_plugin.on_cli_init(None)
 
-    with enter_litestar_server_lifespan(app, app_path="example.app:app"):
+    with enter_litestar_server_lifespan(standalone_app, app_path="example.app:app"):
         assert tracker.entered is True
         assert tracker.seen_app_env == "example.app:app"
         assert os.environ["LITESTAR_APP"] == "example.app:app"
     assert tracker.exited is True
+
+    monkeypatch.setenv("VERTEBRA_SERVER_ACTIVE", "1")
+    active_plugin = LitestarPlugin(LitestarConfig(enable_health_endpoint=True, health_path="/_vtb/healthz"))
+    active_app = Litestar(
+        route_handlers=[ping],
+        plugins=[active_plugin],
+        compression_config=CompressionConfig(backend="zstd", minimum_size=512),
+        cors_config=CORSConfig(allow_origins=["https://console.example.com"]),
+    )
+    assert active_app.compression_config is None
+    assert active_plugin.offload_plan is not None
+    exported_cfg = decode_json(active_app.state["vertebra_offload_config_json"])
+    assert exported_cfg["compression"]["backend"] == "zstd"
+    assert exported_cfg["cors"]["allow_origins"] == ["https://console.example.com"]
 
     disabled_plugin = LitestarPlugin(
         LitestarConfig(
@@ -249,6 +304,55 @@ def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.Mon
     assert disabled_plugin.offload_plan.cors is None
     assert disabled_plugin.offload_plan.static_mounts == ()
     assert disabled_plugin.offload_plan.openapi is None
+
+
+def test_asgi_runner_invokes_attached_vertebra_fastpath(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify AsgiRunner invokes __vertebra_fastpath__ directly for eligible routes and falls back for unmatched paths."""
+    monkeypatch.delenv("VERTEBRA_SERVER_ACTIVE", raising=False)
+    vtb_plugin = LitestarPlugin()
+
+    @get("/accelerated", sync_to_thread=False)
+    def accelerated() -> dict[str, str]:
+        return {"fast": "yes"}
+
+    litestar_app = Litestar(route_handlers=[accelerated], plugins=[vtb_plugin])
+    bypass = litestar_app.state["vertebra_fastpath_bypass"]
+
+    class _FastPathOnlyAsgiWrapper:
+        def __init__(self, inner: Any, fastpath: Any) -> None:
+            self._inner = inner
+            self.__vertebra_fastpath__ = fastpath
+            self.fallback_paths: list[str] = []
+
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            if scope["path"] == "/accelerated":
+                raise AssertionError("outer ASGI router must be bypassed for eligible fastpath routes")
+            self.fallback_paths.append(scope["path"])
+            await self._inner(scope, receive, send)
+
+    class _SimpleRequest:
+        __slots__ = ("body", "handler_id", "headers", "method", "path", "query", "request_id")
+
+        def __init__(self, path: str, request_id: int) -> None:
+            self.method = "GET"
+            self.path = path
+            self.query = None
+            self.body = b""
+            self.handler_id = 1
+            self.request_id = request_id
+            self.headers: dict[str, str] = {}
+
+    wrapper = _FastPathOnlyAsgiWrapper(litestar_app, bypass)
+    runner = AsgiRunner(wrapper)
+    try:
+        responses = runner([_SimpleRequest("/accelerated", 1), _SimpleRequest("/missing", 2)])
+        assert len(responses) == 2
+        assert responses[0].status == 200
+        assert decode_json(bytes(responses[0].body)) == {"fast": "yes"}
+        assert responses[1].status == 404
+        assert wrapper.fallback_paths == ["/missing"]
+    finally:
+        runner.close()
 
 
 def test_asgi_runner_supports_anyio_task_group() -> None:
@@ -339,3 +443,33 @@ def test_build_orchestrator_exports_litestar_vite_and_asyncapi(tmp_path: Path) -
     assert "asyncapi" in exported
     assert decode_json(exported["vite"].read_text(encoding="utf-8"))["entry"] == "src/main.ts"
     assert decode_json(exported["asyncapi"].read_text(encoding="utf-8"))["asyncapi"] == "3.0.0"
+
+
+def test_litestar_plugin_ensure_finalized_populates_openapi_and_binds_asgi_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify AsgiRunner finalizes LitestarPlugin lazily so __vertebra_fastpath__ and OpenAPI offload bind cleanly."""
+    monkeypatch.setenv("VERTEBRA_SERVER_ACTIVE", "1")
+    plugin = LitestarPlugin()
+
+    @get("/ready-fast", sync_to_thread=False)
+    def ready_fast() -> dict[str, str]:
+        return {"mode": "direct"}
+
+    app = Litestar(
+        route_handlers=[ready_fast],
+        plugins=[plugin],
+        compression_config=CompressionConfig(backend="br", minimum_size=256),
+    )
+
+    runner = AsgiRunner(app)
+    try:
+        plugin.ensure_finalized(app)
+        assert getattr(app, "__vertebra_fastpath__", None) is not None
+        exported = decode_json(app.state["vertebra_offload_config_json"])
+        assert exported["compression"]["backend"] == "brotli"
+        assert exported["openapi"]["schema_path"] == "/schema/openapi.json"
+        assert '"/ready-fast"' in exported["openapi"]["body"]
+        assert runner.dispatch_app is not app
+    finally:
+        runner.close()

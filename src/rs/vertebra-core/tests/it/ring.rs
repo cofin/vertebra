@@ -153,3 +153,101 @@ fn read_slot_zero_copy_rejects_corrupted_shm_len() {
         .expect_err("corrupted slot must return error");
     assert!(matches!(err, ChannelError::CorruptedSlot));
 }
+
+#[test]
+fn spsc_abi_v3_dekker_sleep_wake_skips_awake_and_wakes_sleeping() {
+    use vertebra_core::buffer::ABI_VERSION;
+    use vertebra_core::notify::Notifier;
+
+    assert_eq!(ABI_VERSION, 3);
+    let (_region, ring) = make_spsc(16, 256);
+    let notifier = Notifier::new().expect("notifier");
+
+    // Consumer is awake (consumer_sleeping == 0): producer must skip syscall.
+    ring.try_send(b"awake-msg", 0).expect("send");
+    let notified = ring
+        .notify_if_sleeping(&notifier)
+        .expect("notify_if_sleeping");
+    assert!(!notified, "awake consumer must not trigger notifier write");
+    assert!(
+        !notifier.wait(0).expect("poll"),
+        "notifier fd must remain unreadable when consumer was awake"
+    );
+
+    // While data is queued, prepare_sleep must refuse to sleep.
+    assert!(
+        !ring.prepare_sleep(),
+        "prepare_sleep must return false when ring already has unread data"
+    );
+
+    let mut out = [0u8; 64];
+    let len = ring.try_recv(&mut out).expect("recv");
+    assert_eq!(&out[..len], b"awake-msg");
+
+    // Ring is now empty: prepare_sleep arms consumer_sleeping == 1.
+    assert!(
+        ring.prepare_sleep(),
+        "prepare_sleep must return true when ring is empty"
+    );
+    ring.try_send(b"wake-msg", 0).expect("send while sleeping");
+    let notified = ring
+        .notify_if_sleeping(&notifier)
+        .expect("notify_if_sleeping sleeping");
+    assert!(notified, "sleeping consumer must be notified once");
+    assert!(
+        notifier.wait(50).expect("wait"),
+        "notifier fd must become readable"
+    );
+    notifier.clear().expect("clear");
+
+    // Second notify without re-arming prepare_sleep must coalesce (skip write).
+    let notified_again = ring
+        .notify_if_sleeping(&notifier)
+        .expect("second notify_if_sleeping");
+    assert!(
+        !notified_again,
+        "consumer_sleeping flag must be cleared on wake"
+    );
+    ring.cancel_sleep();
+}
+
+#[test]
+fn spsc_drain_with_zero_copy_and_cached_heads_fifo() {
+    let (_region, ring) = make_spsc(16, 256);
+    let ring = Arc::new(ring);
+
+    assert!(matches!(ring.try_recv_view(), Err(ChannelError::Empty)));
+
+    // Exercise multiple wrap-arounds across 16-slot ring using cached heads + drain_with.
+    let mut next_expected = 0u64;
+    for round in 0..8u64 {
+        for offset in 0..12u64 {
+            let seq = round * 12 + offset;
+            ring.try_send(&seq.to_le_bytes(), (seq & 0xff) as u32)
+                .expect("try_send in burst");
+        }
+        let mut visited = 0usize;
+        let drained = ring
+            .drain_with(8, |slice, flags| {
+                let got = u64::from_le_bytes(slice.try_into().expect("8 bytes"));
+                assert_eq!(got, next_expected);
+                assert_eq!(flags, (next_expected & 0xff) as u32);
+                next_expected += 1;
+                visited += 1;
+            })
+            .expect("drain_with first chunk");
+        assert_eq!(drained, 8);
+        assert_eq!(visited, 8);
+
+        let drained_rest = ring
+            .drain_with(8, |slice, flags| {
+                let got = u64::from_le_bytes(slice.try_into().expect("8 bytes"));
+                assert_eq!(got, next_expected);
+                assert_eq!(flags, (next_expected & 0xff) as u32);
+                next_expected += 1;
+            })
+            .expect("drain_with remainder");
+        assert_eq!(drained_rest, 4);
+    }
+    assert_eq!(next_expected, 96);
+}

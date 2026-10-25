@@ -41,29 +41,29 @@ impl RingTier {
 }
 
 impl Default for TieredRingConfig {
-    /// Default configuration: ~7.25MB total.
+    /// Default configuration: 30 MiB total across tiers.
     ///
-    /// - Small:  4KB   × 64 slots = 256KB
-    /// - Medium: 64KB  × 16 slots = 1MB
-    /// - Large:  512KB × 4 slots  = 2MB
-    /// - XLarge: 2MB   × 2 slots  = 4MB
+    /// - Small:  4 KiB   × 512 slots = 2 MiB (absorbs `c=256+` bursts without overflow)
+    /// - Medium: 32 KiB  × 128 slots = 4 MiB
+    /// - Large:  256 KiB × 32 slots  = 8 MiB
+    /// - XLarge: 2 MiB   × 8 slots   = 16 MiB
     fn default() -> Self {
         Self {
             small: RingTier {
                 slot_size: 4 * 1024,
-                slot_count: 64,
+                slot_count: 512,
             },
             medium: RingTier {
-                slot_size: 64 * 1024,
-                slot_count: 16,
+                slot_size: 32 * 1024,
+                slot_count: 128,
             },
             large: RingTier {
-                slot_size: 512 * 1024,
-                slot_count: 4,
+                slot_size: 256 * 1024,
+                slot_count: 32,
             },
             xlarge: RingTier {
                 slot_size: 2 * 1024 * 1024,
-                slot_count: 2,
+                slot_count: 8,
             },
         }
     }
@@ -103,10 +103,10 @@ mod tests {
     #[test]
     fn default_config_total_bytes() {
         let config = TieredRingConfig::default();
-        // 256KB + 1MB + 2MB + 4MB = 7.25MB = 7602176 bytes
+        // 2 MiB + 4 MiB + 8 MiB + 16 MiB = 30 MiB
         assert_eq!(
             config.total_bytes(),
-            256 * 1024 + 1024 * 1024 + 2048 * 1024 + 4096 * 1024
+            2 * 1024 * 1024 + 4 * 1024 * 1024 + 8 * 1024 * 1024 + 16 * 1024 * 1024
         );
     }
 
@@ -122,14 +122,14 @@ mod tests {
         assert_eq!(config.select_tier(small_cap).unwrap().slot_size, 4 * 1024);
         assert_eq!(
             config.select_tier(small_cap + 1).unwrap().slot_size,
-            64 * 1024
+            32 * 1024
         );
-        assert_eq!(config.select_tier(medium_cap).unwrap().slot_size, 64 * 1024);
+        assert_eq!(config.select_tier(medium_cap).unwrap().slot_size, 32 * 1024);
         assert_eq!(
             config.select_tier(medium_cap + 1).unwrap().slot_size,
-            512 * 1024
+            256 * 1024
         );
-        assert_eq!(config.select_tier(large_cap).unwrap().slot_size, 512 * 1024);
+        assert_eq!(config.select_tier(large_cap).unwrap().slot_size, 256 * 1024);
         assert_eq!(
             config.select_tier(large_cap + 1).unwrap().slot_size,
             2 * 1024 * 1024

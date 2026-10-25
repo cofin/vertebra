@@ -1,10 +1,13 @@
 //! `vertebra-server` binary entrypoint.
 //!
-//! With the `python` feature (default), embeds a Python worker thread that
-//! imports the user's App, extracts routes, and runs the batch worker
-//! loop. Without it, serves hardcoded test routes.
+//! Builds an explicit single-threaded (`current_thread`) or multi-threaded
+//! (`multi_thread`) Tokio runtime sized to `config.worker_threads`, supervises
+//! `SO_REUSEPORT` embedded worker processes when `Topology::Embedded` runs with
+//! `workers > 1`, and spawns free-threaded Python worker pools on `3.14t`/`3.15t`.
 
 use std::sync::Arc;
+#[cfg(feature = "python")]
+use std::thread::JoinHandle;
 
 #[cfg(feature = "python")]
 use pyo3::append_to_inittab;
@@ -20,11 +23,12 @@ use tracing_subscriber::EnvFilter;
 
 use vertebra_core::bridge::BatchBridge;
 
+#[cfg(not(feature = "python"))]
+use vertebra_http::batcher::PendingResponse;
 use vertebra_http::{
-    batcher::{BatchLimit, PendingResponse, RequestBatcher},
-    config::ServerConfig,
+    batcher::{BatchLimit, RequestBatcher},
+    config::{ServerConfig, Topology},
     dispatcher::Dispatcher,
-    response::encode_response_headers,
     routing::{RouteTable, Router},
     server,
 };
@@ -33,12 +37,29 @@ use vertebra_http::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+#[cfg(feature = "python")]
+struct EmbeddedPythonWorkers {
+    stop_event: Py<PyAny>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+#[cfg(feature = "python")]
+impl EmbeddedPythonWorkers {
+    fn shutdown(self) {
+        Python::attach(|py| {
+            let _ = self.stop_event.bind(py).call_method0("set");
+        });
+        for handle in self.handles {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Extract routes from a Python App and build the Rust RouteTable.
 #[cfg(feature = "python")]
 fn build_route_table_from_app(py: Python<'_>, app: &Bound<'_, PyAny>) -> PyResult<RouteTable> {
     let mut table = RouteTable::new();
 
-    // If the app is a raw ASGI function/callable instead of an App, wrap it.
     let app_obj = if app.getattr("handler_index").is_err() && app.is_callable() {
         info!("wrapping raw callable app in ASGI adapter");
         let app_mod = py.import("vertebra.framework._app")?;
@@ -55,31 +76,27 @@ fn build_route_table_from_app(py: Python<'_>, app: &Bound<'_, PyAny>) -> PyResul
     for (_, info) in dict.iter() {
         let method: String = info.getattr("method")?.extract()?;
         let path: String = info.getattr("path")?.extract()?;
-        table.insert(&method, &path);
+        if let Ok(explicit_id) = info.getattr("id").and_then(|v| v.extract::<u64>()) {
+            table.insert_with_id(&method, &path, explicit_id);
+        } else {
+            table.insert(&method, &path);
+        }
         info!(method = %method, path = %path, "registered route");
     }
 
-    // Register mount prefixes as catch-all routes.
     let mounts = app_obj.getattr("mounts")?;
-    for mount in mounts.try_iter()? {
+    for (mount_idx, mount) in mounts.try_iter()?.enumerate() {
         let mount = mount?;
         let prefix: String = mount.get_item(0)?.extract()?;
-        let trimmed = prefix.trim_end_matches('/');
-        let pattern = if trimmed.is_empty() {
-            "/*rest".to_string()
-        } else {
-            format!("{trimmed}/*rest")
-        };
-        for method in &["GET", "POST", "PUT", "DELETE", "PATCH"] {
-            table.insert(method, &pattern);
-        }
-        info!(prefix = %prefix, "registered mount prefix");
+        table.insert_mount_prefix_indexed(&prefix, mount_idx);
+        info!(prefix = %prefix, mount_idx, "registered mount prefix");
     }
 
     Ok(table)
 }
 
-/// Spawn the response reader task that receives from the bridge and completes Hyper futures.
+/// Spawn the fallback response reader task when running without the Python feature.
+#[cfg(not(feature = "python"))]
 fn spawn_response_reader(dispatcher: Arc<Dispatcher>) {
     tokio::spawn(async move {
         let bridge = BatchBridge::get().expect("bridge not initialized");
@@ -89,7 +106,7 @@ fn spawn_response_reader(dispatcher: Arc<Dispatcher>) {
                     resp.request_id,
                     PendingResponse {
                         status: resp.status,
-                        headers_mp: encode_response_headers(&resp.headers),
+                        headers_mp: resp.headers_raw,
                         body: resp.body,
                         stream_rx: None,
                     },
@@ -99,118 +116,218 @@ fn spawn_response_reader(dispatcher: Arc<Dispatcher>) {
     });
 }
 
-/// Spawn the Python worker thread.
 #[cfg(feature = "python")]
-fn spawn_python_worker(app_path: String) {
-    std::thread::spawn(move || {
-        Python::attach(|py| {
-            let result: PyResult<()> = (|| {
-                // Register the built-in _vertebra module as "vertebra._vertebra"
-                // in sys.modules so Python imports resolve to the embedded module
-                // (sharing the same BatchBridge singleton) instead of loading a
-                // separate .so with its own static state.
-                let native_mod = py.import("_vertebra")?;
-                let sys = py.import("sys")?;
-                let modules = sys.getattr("modules")?;
-                modules.set_item("vertebra._vertebra", &native_mod)?;
-
-                let parts: Vec<&str> = app_path.splitn(2, ':').collect();
-                let module = py.import(parts[0])?;
-                let app = module.getattr(parts[1])?;
-
-                // If the app is a raw ASGI function/callable instead of an App, wrap it.
-                let app_obj = if app.getattr("handler_index").is_err() && app.is_callable() {
-                    let app_mod = py.import("vertebra.framework._app")?;
-                    let wrapped = app_mod.getattr("App")?.call0()?;
-                    wrapped.getattr("mount")?.call1(("/", &app))?;
-                    wrapped
-                } else {
-                    app
-                };
-
-                // Initialize the transport (bridge already created by main).
-                native_mod
-                    .getattr("init_transport")?
-                    .call((), Some(&PyDict::new(py)))?;
-
-                let handlers = app_obj.getattr("_handlers")?;
-                let builtins = py.import("builtins")?;
-                let mounts_list = builtins
-                    .getattr("list")?
-                    .call1((app_obj.getattr("mounts")?,))?;
-
-                let runner = py.import("vertebra.server.worker")?;
-                let kwargs = PyDict::new(py);
-                kwargs.set_item("mounts", mounts_list)?;
-
-                // Pass worker_count from VERTEBRA_WORKERS env var (default: 1).
-                let worker_count: usize = std::env::var("VERTEBRA_WORKERS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(1);
-                kwargs.set_item("worker_count", worker_count)?;
-
-                runner
-                    .getattr("run_worker")?
-                    .call((&handlers,), Some(&kwargs))?;
-
-                Ok(())
-            })();
-
-            if let Err(e) = result {
-                error!("Python worker thread failed: {e}");
-                e.print(py);
-            }
-        });
-    });
+struct PreparedEmbeddedApp {
+    handlers: Py<PyAny>,
+    mounts: Py<PyAny>,
+    stop_event: Py<PyAny>,
+    worker_threads: usize,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+/// Initialize the embedded transport and spawn 1 (GIL) or `thread_count` (3.14t/3.15t) Python worker threads.
+#[cfg(feature = "python")]
+fn spawn_python_workers(app_path: String, thread_count: usize) -> PyResult<EmbeddedPythonWorkers> {
+    let prepared = Python::attach(|py| -> PyResult<PreparedEmbeddedApp> {
+        let native_mod = py.import("_vertebra")?;
+        let sys = py.import("sys")?;
+        sys.getattr("modules")?
+            .set_item("vertebra._vertebra", &native_mod)?;
+        let os_mod = py.import("os")?;
+        os_mod
+            .getattr("environ")?
+            .call_method1("setdefault", ("VERTEBRA_SERVER_ACTIVE", "1"))?;
 
-    #[cfg(unix)]
-    vertebra_http::workers::cleanup_stale_shm();
-    vertebra_http::workers::install_panic_cleanup_hook();
+        let parts: Vec<&str> = app_path.splitn(2, ':').collect();
+        let module = py.import(parts[0])?;
+        let app = module.getattr(parts[1])?;
 
-    let server_shutdown_token = tokio_util::sync::CancellationToken::new();
-    let config = Arc::new(ServerConfig::from_env());
+        let app_obj = if app.getattr("handler_index").is_err() && app.is_callable() {
+            let app_mod = py.import("vertebra.framework._app")?;
+            let wrapped = app_mod.getattr("App")?.call0()?;
+            wrapped.getattr("mount")?.call1(("/", &app))?;
+            wrapped
+        } else {
+            app
+        };
 
-    // --- Initialize bridge ---
-    // arena_capacity=256 nodes, slab_capacity=1MB, channel_depth=4
-    // Multi-process SHM uses its own transport, but we still initialize the
-    // bridge singleton for in-process compatibility.
-    BatchBridge::init(256, 1_048_576, 4, config.workers.count)
-        .expect("failed to initialize batch bridge");
+        native_mod
+            .getattr("init_transport")?
+            .call((), Some(&PyDict::new(py)))?;
 
-    // --- Register the _vertebra extension module before Python starts ---
-    // This ensures embedded Python shares the same BatchBridge singleton
-    // as the server binary (avoids duplicated static state from cdylib loading).
-    #[cfg(feature = "python")]
-    {
-        use _vertebra::pymodule_init;
-        append_to_inittab!(pymodule_init);
+        let handlers = app_obj.getattr("_handlers")?.unbind();
+        let builtins = py.import("builtins")?;
+        let mounts = builtins
+            .getattr("list")?
+            .call1((app_obj.getattr("mounts")?,))?
+            .unbind();
+
+        let threading = py.import("threading")?;
+        let stop_event = threading.getattr("Event")?.call0()?.unbind();
+
+        let free_threaded = native_mod
+            .getattr("FREE_THREADED")
+            .and_then(|v| v.extract::<bool>())
+            .unwrap_or(false);
+        let available_cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let worker_threads = if free_threaded {
+            thread_count.min(available_cpus).max(1)
+        } else {
+            1
+        };
+
+        if let Some(bridge) = BatchBridge::get() {
+            bridge.set_consumer_count(worker_threads);
+        }
+
+        Ok(PreparedEmbeddedApp {
+            handlers,
+            mounts,
+            stop_event,
+            worker_threads,
+        })
+    })?;
+
+    let mut handles = Vec::with_capacity(prepared.worker_threads);
+    for idx in 0..prepared.worker_threads {
+        let handlers_ref = Python::attach(|py| prepared.handlers.clone_ref(py));
+        let mounts_ref = Python::attach(|py| prepared.mounts.clone_ref(py));
+        let stop_ref = Python::attach(|py| prepared.stop_event.clone_ref(py));
+        let worker_threads = prepared.worker_threads;
+
+        let handle = std::thread::Builder::new()
+            .name(format!("vtb-py-worker-{idx}"))
+            .spawn(move || {
+                Python::attach(|py| {
+                    let result: PyResult<()> = (|| {
+                        let runner = py.import("vertebra.server.worker")?;
+                        let kwargs = PyDict::new(py);
+                        kwargs.set_item("mounts", mounts_ref.bind(py))?;
+                        kwargs.set_item("worker_count", worker_threads)?;
+                        kwargs.set_item("stop_event", stop_ref.bind(py))?;
+                        runner
+                            .getattr("run_worker")?
+                            .call((handlers_ref.bind(py),), Some(&kwargs))?;
+                        Ok(())
+                    })();
+
+                    if let Err(e) = result {
+                        error!("Python worker thread {idx} failed: {e}");
+                        e.print(py);
+                    }
+                });
+            })
+            .expect("failed to spawn embedded Python worker thread");
+        handles.push(handle);
     }
 
-    // --- Build route table ---
+    Ok(EmbeddedPythonWorkers {
+        stop_event: prepared.stop_event,
+        handles,
+    })
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = signal::ctrl_c() => info!("ctrl-c received"),
+                    _ = sigterm.recv() => info!("SIGTERM received"),
+                }
+            }
+            Err(_) => {
+                let _ = signal::ctrl_c().await;
+                info!("ctrl-c received");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = signal::ctrl_c().await;
+        info!("ctrl-c received");
+    }
+}
+
+fn build_tokio_runtime(worker_threads: usize) -> std::io::Result<tokio::runtime::Runtime> {
+    if worker_threads <= 1 {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(worker_threads)
+            .enable_all()
+            .build()
+    }
+}
+
+#[cfg(feature = "python")]
+fn extract_offload_json_from_app(app_obj: &Bound<'_, PyAny>) -> Option<String> {
+    let state = app_obj.getattr("state").ok()?;
+    if let Ok(plugin) = state.call_method1("get", ("vertebra_plugin",))
+        && !plugin.is_none()
+    {
+        let _ = plugin.call_method1("ensure_finalized", (app_obj,));
+    }
+    let val = state
+        .call_method1("get", ("vertebra_offload_config_json",))
+        .ok()?;
+    if val.is_none() {
+        return None;
+    }
+    val.extract::<String>().ok()
+}
+
+async fn run_server(
+    #[allow(unused_mut)] mut config: ServerConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let server_shutdown_token = tokio_util::sync::CancellationToken::new();
+
+    if config.topology == Topology::Embedded {
+        BatchBridge::init(256, 1_048_576, 16, config.thread_count.max(1))
+            .expect("failed to initialize batch bridge");
+    }
+
     #[cfg(feature = "python")]
     let (table, app_path) = {
         let app_path = std::env::var("VERTEBRA_APP").unwrap_or_else(|_| "app:app".to_string());
-        let table = Python::attach(|py| -> PyResult<RouteTable> {
-            let parts: Vec<&str> = app_path.splitn(2, ':').collect();
-            if parts.len() != 2 {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "VERTEBRA_APP must be 'module:attr', got: {app_path}"
-                )));
-            }
-            let module = py.import(parts[0])?;
-            let app_obj = module.getattr(parts[1])?;
-            build_route_table_from_app(py, &app_obj)
-        })?;
+        let (table, offload_json) =
+            Python::attach(|py| -> PyResult<(RouteTable, Option<String>)> {
+                let native_mod = py.import("_vertebra")?;
+                let sys = py.import("sys")?;
+                sys.getattr("modules")?
+                    .set_item("vertebra._vertebra", &native_mod)?;
+                let os_mod = py.import("os")?;
+                os_mod
+                    .getattr("environ")?
+                    .call_method1("setdefault", ("VERTEBRA_SERVER_ACTIVE", "1"))?;
+
+                let parts: Vec<&str> = app_path.splitn(2, ':').collect();
+                if parts.len() != 2 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "VERTEBRA_APP must be 'module:attr', got: {app_path}"
+                    )));
+                }
+                let module = py.import(parts[0])?;
+                let app_obj = module.getattr(parts[1])?;
+                let extracted_offload = extract_offload_json_from_app(&app_obj);
+                let route_table = build_route_table_from_app(py, &app_obj)?;
+                Ok((route_table, extracted_offload))
+            })?;
+        if std::env::var_os("VERTEBRA_OFFLOAD_CONFIG").is_none()
+            && let Some(raw_json) = offload_json
+            && let Err(e) = config.apply_offload_json(&raw_json)
+        {
+            error!("failed to apply extracted Litestar offload config: {e}");
+        }
         (table, app_path)
     };
+
+    let config = Arc::new(config);
 
     #[cfg(not(feature = "python"))]
     let table = {
@@ -223,16 +340,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let router = Arc::new(Router::from_entries(table.into_entries())?);
     info!("route table built");
 
-    // --- Worker spawning + Dispatcher setup ---
     #[cfg(all(feature = "python", unix))]
     let mut shm_factory: Option<Arc<std::sync::Mutex<vertebra_http::workers::RingFactory>>> = None;
+    #[cfg(feature = "python")]
+    let mut embedded_workers: Option<EmbeddedPythonWorkers> = None;
 
     let dispatcher;
 
     #[cfg(feature = "python")]
     {
-        if config.topology == vertebra_http::config::Topology::Shm {
-            // Multi-process mode: SHM dispatcher + response reader + supervisor
+        if config.topology == Topology::Shm {
             #[cfg(unix)]
             {
                 use std::sync::Mutex;
@@ -240,12 +357,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 use vertebra_http::dispatcher::{ShmDispatcher, shm_reader};
                 use vertebra_http::workers::{RingFactory, Supervisor};
 
-                let worker_count = if config.workers.count > 0 {
-                    config.workers.count
-                } else {
-                    1
-                };
-
+                let worker_count = config.workers.count.max(1);
                 let mut factory = RingFactory::with_broker_config(
                     worker_count,
                     RingPairConfig::default(),
@@ -256,10 +368,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
                 info!(
                     workers = worker_count,
+                    tokio_threads = config.worker_threads,
                     "spawning multi-process workers with SHM transport"
                 );
 
-                // Create SHM dispatcher with ring pairs
                 let ring_pairs = factory.all_ring_pairs().to_vec();
                 let shm = ShmDispatcher::new(ring_pairs.clone(), 65536);
                 dispatcher = Arc::new(
@@ -267,17 +379,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         .with_backpressure(config.backpressure.clone()),
                 );
 
-                // Spawn sweeper
                 shm.spawn_sweeper(server_shutdown_token.clone());
 
-                // Spawn response reader
                 shm_reader::spawn_response_readers(
                     ring_pairs,
                     Arc::clone(&dispatcher),
                     server_shutdown_token.clone(),
                 );
 
-                // Spawn worker processes
                 let children = factory
                     .spawn_all(&app_path, &config.workers.python_bin)
                     .expect("failed to spawn workers");
@@ -296,30 +405,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
             #[cfg(not(unix))]
             {
+                BatchBridge::init(256, 1_048_576, 16, config.thread_count.max(1))
+                    .expect("failed to initialize batch bridge");
                 dispatcher =
                     Arc::new(Dispatcher::new().with_backpressure(config.backpressure.clone()));
-                spawn_response_reader(Arc::clone(&dispatcher));
+                dispatcher.spawn_bridge_sweeper(server_shutdown_token.clone());
+                embedded_workers = Some(spawn_python_workers(
+                    app_path.clone(),
+                    config.thread_count.max(1),
+                )?);
             }
         } else {
-            // In-process mode: bridge dispatcher + bridge response reader
             dispatcher = Arc::new(Dispatcher::new().with_backpressure(config.backpressure.clone()));
-            spawn_response_reader(Arc::clone(&dispatcher));
-            spawn_python_worker(app_path.clone());
+            dispatcher.spawn_bridge_sweeper(server_shutdown_token.clone());
+            embedded_workers = Some(spawn_python_workers(
+                app_path.clone(),
+                config.thread_count.max(1),
+            )?);
         }
-        info!(app = %app_path, bind = %config.bind, topology = ?config.topology, "vertebra-server starting");
+        info!(
+            app = %app_path,
+            bind = %config.bind,
+            topology = ?config.topology,
+            tokio_threads = config.worker_threads,
+            reuse_port = config.reuse_port,
+            "vertebra-server starting"
+        );
     }
 
     #[cfg(not(feature = "python"))]
     {
+        if config.topology != Topology::Embedded {
+            BatchBridge::init(256, 1_048_576, 16, config.thread_count.max(1))
+                .expect("failed to initialize batch bridge");
+        }
         dispatcher = Arc::new(Dispatcher::new().with_backpressure(config.backpressure.clone()));
         spawn_response_reader(Arc::clone(&dispatcher));
         info!(bind = %config.bind, "vertebra-server starting (no python)");
     }
 
-    // --- Collector ---
-    // Shard the collector to break the single-threaded bottleneck.
-    // 8 shards provides better scale for many-core systems.
-    let shard_count = 8;
+    let shard_count = config.worker_threads.clamp(1, 8);
     let collector_shards = RequestBatcher::spawn_pool(
         Arc::clone(&dispatcher),
         BatchLimit::default(),
@@ -327,24 +452,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         16384,
     );
 
-    // --- Start server ---
-    let shutdown = async {
-        signal::ctrl_c().await.expect("failed to listen for ctrl-c");
-        info!("ctrl-c received");
-    };
-
     server::run_with_collector(
         Arc::clone(&config),
         router,
         dispatcher,
         collector_shards,
-        shutdown,
+        wait_for_shutdown_signal(),
     )
     .await?;
 
     server_shutdown_token.cancel();
 
-    // --- Graceful shutdown of SHM workers ---
+    #[cfg(feature = "python")]
+    if let Some(pool) = embedded_workers {
+        pool.shutdown();
+    }
+
     #[cfg(all(feature = "python", unix))]
     if let Some(factory) = shm_factory {
         use vertebra_http::workers::RingFactory;
@@ -360,4 +483,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    let is_embedded_child = std::env::var_os("VERTEBRA_EMBEDDED_WORKER").is_some();
+
+    #[cfg(unix)]
+    if !is_embedded_child {
+        vertebra_http::workers::cleanup_stale_shm();
+    }
+    vertebra_http::workers::install_panic_cleanup_hook();
+
+    let config = ServerConfig::from_env();
+
+    #[cfg(all(feature = "python", unix))]
+    if config.topology == Topology::Embedded && config.workers.count > 1 && !is_embedded_child {
+        let rt = build_tokio_runtime(1)?;
+        return rt.block_on(async move {
+            let mut supervisor = vertebra_http::workers::EmbeddedSupervisor::new(
+                config.workers.count,
+                config.workers.broker_pool_size,
+                config.workers.broker_max_overflow,
+                config.workers.broker_stmt_capacity,
+            )?;
+            supervisor.spawn_all()?;
+            supervisor.run(wait_for_shutdown_signal()).await;
+            Ok(())
+        });
+    }
+
+    #[cfg(feature = "python")]
+    {
+        use _vertebra::pymodule_init;
+        append_to_inittab!(pymodule_init);
+    }
+
+    let rt = build_tokio_runtime(config.worker_threads)?;
+    rt.block_on(run_server(config))
 }

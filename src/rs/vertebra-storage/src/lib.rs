@@ -56,7 +56,7 @@ fn extract_buffer_bytes(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Byt
 }
 
 /// Zero-copy read-only Python buffer wrapping Rust `bytes::Bytes`.
-#[pyclass(name = "StorageBuffer", frozen, from_py_object)]
+#[pyclass(name = "StorageBuffer", frozen, immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
 pub struct StorageBuffer {
     pub data: Bytes,
@@ -79,7 +79,7 @@ impl StorageBuffer {
         flags: std::os::raw::c_int,
     ) -> PyResult<()> {
         let py = slf.py();
-        let slice = &slf.borrow().data[..];
+        let slice = &slf.get().data[..];
         let ptr = if slice.is_empty() {
             std::ptr::NonNull::<u8>::dangling().as_ptr()
         } else {
@@ -87,7 +87,7 @@ impl StorageBuffer {
         };
         let ret = pyo3::ffi::PyBuffer_FillInfo(
             view,
-            slf.into_any().into_ptr(),
+            slf.as_ptr(),
             ptr as *mut std::os::raw::c_void,
             slice.len() as isize,
             1,
@@ -103,7 +103,7 @@ impl StorageBuffer {
     unsafe fn __releasebuffer__(&self, _view: *mut pyo3::ffi::Py_buffer) {}
 }
 
-#[pyclass(name = "_TaskCompletionCallback", frozen)]
+#[pyclass(name = "_TaskCompletionCallback", frozen, immutable_type)]
 struct TaskCompletionCallback {
     future: Py<PyAny>,
     outcome: Mutex<Option<PyResult<Py<PyAny>>>>,
@@ -136,7 +136,7 @@ impl TaskCompletionCallback {
 }
 
 /// Native Rust awaitable backed by the shared Tokio runtime without `asyncio.to_thread`.
-#[pyclass(name = "RustTaskAwaitable", frozen)]
+#[pyclass(name = "RustTaskAwaitable", frozen, immutable_type)]
 pub struct RustTaskAwaitable {
     future: Py<PyAny>,
 }
@@ -188,7 +188,7 @@ where
     })
 }
 
-#[pyclass(frozen, from_py_object)]
+#[pyclass(frozen, immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
 pub struct ObjectMeta {
     #[pyo3(get)]
@@ -222,7 +222,7 @@ impl ObjectMeta {
     }
 }
 
-#[pyclass(frozen)]
+#[pyclass(frozen, immutable_type)]
 pub struct ObjectStore {
     engine: ObjectStoreEngine,
 }

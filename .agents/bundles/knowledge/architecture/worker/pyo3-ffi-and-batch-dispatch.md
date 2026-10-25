@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: "PyO3 FFI & Vectorized Batch Dispatch"
-description: "The vertebra._vertebra module surface, snapshot-backed Request/Headers/Response/RequestBatch types, and how run_worker partitions and schedules each batch."
+description: "The vertebra._vertebra module surface, anchored zero-copy Request/Headers/Response/RequestBatch types, and how Worker and run_worker partition and execute batches."
 status: stable
 tags: [architecture, worker, pyo3, ffi, batch-dispatch]
 sources:
@@ -11,53 +11,37 @@ sources:
   - resource: src/rs/vertebra-py/src/headers.rs
   - resource: src/rs/vertebra-py/src/response.rs
   - resource: src/py/vertebra/_vertebra.pyi
+  - resource: src/py/vertebra/server/worker.py
   - resource: src/py/vertebra/server/_dispatch.py
   - resource: src/py/vertebra/server/_loops.py
 ---
 
 # PyO3 FFI & Vectorized Batch Dispatch
 
-[`vertebra-py`](../../../../../src/rs/vertebra-py/src/lib.rs) builds the `vertebra._vertebra` extension (`#[pymodule(gil_used = false)]`, stub in [`_vertebra.pyi`](../../../../../src/py/vertebra/_vertebra.pyi)). [`run_worker`](../../../../../src/py/vertebra/server/_dispatch.py) pulls request batches through it, runs handlers, and submits native `Response` objects back.
+[`vertebra-py`](../../../../../src/rs/vertebra-py/src/lib.rs) builds the `vertebra._vertebra` extension (`#[pymodule(gil_used = false)]`, typed in [`_vertebra.pyi`](../../../../../src/py/vertebra/_vertebra.pyi)), alongside `_bundler` (`vertebra-bundler`) and `_storage` (`vertebra-storage`). [`Worker`](../../../../../src/py/vertebra/server/worker.py) (`run_worker`) pulls `RequestBatch` snapshots across FFI, executes inline vectorized sync batches and single-thread `uvloop` async/ASGI/RSGI batches, and flushes raw responses back to Rust.
 
 ## Module surface (`lib.rs`, `transport.rs`)
 
-- Constants: `__version__`, `FREE_THREADED` (`cfg(Py_GIL_DISABLED)`), `GIL_USED` (`False`).
-- Request-path classes: `Request`, `Headers`, `HeadersIterator`, `Response`, `RequestBatch`, `RequestBatchIterator`.
-- Protocol classes: `AsgiScope`, `AsgiScopeIterator`, `WsgiEnviron`, `WsgiEnvironIterator`, `WsgiInput`, `WsgiFileWrapper`, `_WsgiStartResponse`, `RsgiHeaders`, `RsgiScope`, `RsgiHttpProtocol`, `RsgiTransport`, `RsgiWebsocketProtocol` (see [ASGI, RSGI & WSGI Runners](asgi-and-wsgi-runners.md)).
-- `init_transport(mode="inprocess", ring_name="default", slot_size=4096, slots=64, batch_size=64)`: `inprocess` uses the process-wide `BatchBridge`; `shm` attaches the inherited ring FDs with `RingPair::from_env` and stores them in the `SHM_TRANSPORT` `OnceLock`.
-- `get_batch(timeout_ms=100)` and `try_get_batch()` return a `RequestBatch` or `None`; `get_batch` releases the GIL while polling. `get_request_notify_fd()` and `clear_request_notification()` support the SHM `asyncio` reader.
-- `submit_response(resp)` and `submit_results(responses)` release the GIL around the send. When an SHM response ring is full, `send_shm_response_with_backpressure` waits with the GIL released.
-- `submit_raw_response(request_id, status, headers, body, flags=FLAG_FINAL, slot_capacity=16384)` encodes `ResponseSlot` frames and splits bodies larger than `slot_capacity` into `FLAG_STREAMING` chunks.
-- `stream_file_chunks` and `run_wsgi_callable` are protocol helpers.
+- **Constants**: `__version__`, `FREE_THREADED` (`cfg(Py_GIL_DISABLED)`), `GIL_USED` (`False`).
+- **Request-path classes**: `Request`, `Headers`, `HeadersIterator`, `Response`, `RequestBatch`, `RequestBatchIterator`. All non-subclassed `#[pyclass]` types declare `immutable_type` (`Py_TPFLAGS_IMMUTABLETYPE` for CPython 3.14/3.15 inline-cache specialization) and gate `freelist = 128` behind `#[cfg_attr(not(Py_GIL_DISABLED), ...)]` so free-threaded `3.14t`/`3.15t` builds use thread-local `mimalloc` without global `Mutex` freelist contention.
+- **Protocol & batch-driver surface**: `AsgiScope`, `AsgiScopeIterator`, `AsgiProtocol`, `PyEmptyAwaitable`, `PyValueAwaitable`, `drive_asgi_batch`, `RsgiScope`, `RsgiHttpProtocol`, `RsgiTransport`, `_RsgiReadyAwaitable`, `drive_rsgi_batch`, `WsgiEnviron`, `WsgiEnvironIterator`, `WsgiInput`, `WsgiFileWrapper`, `_WsgiStartResponse`, `run_wsgi_callable`, and `stream_file_chunks` (see [ASGI, RSGI & WSGI Runners](asgi-and-wsgi-runners.md)).
+- **Transport & Dekker sleep FFI**:
+  - `init_transport(mode="inprocess", ...)`: attaches either the process-wide `BatchBridge` (`inprocess`) or inherited `RingPair::from_env` FDs (`shm`).
+  - `get_batch(timeout_ms=100)` and `try_get_batch()`: return a `RequestBatch` wrapping `Arc<BatchSnapshot>` (`Backing::InProcess` or zero-copy `Backing::ShmSlot(SlotView)`).
+  - `get_request_notify_fd()`, `clear_request_notification()`, `prepare_request_sleep()`, and `cancel_request_sleep()`: drive lost-wakeup-free Dekker `SeqCst` `eventfd`/pipe polling on both `RingPair` (`shm`) and single-consumer `BatchBridge` (`inprocess` when `consumer_count <= 1`).
+  - `submit_response_raw(request_id, status, headers_raw, body)` and `submit_batch_raw(items)`: accept any contiguous buffer-protocol object (`bytes`, `bytearray`, `memoryview`, including `req.body_view`), write directly into the SHM response ring or `BatchBridge` inline without `py.detach` for payloads `<= 64 KiB`, and coalesce `notify_if_sleeping` to once per batch.
+  - `submit_response(resp)`, `submit_results(responses)`, and `submit_raw_response(...)`: object and multi-frame `ResponseSlot` streaming submission helpers.
 
 ## Snapshot-backed types (`request.rs`, `headers.rs`, `response.rs`)
 
-- [`RequestBatch`](../../../../../src/rs/vertebra-py/src/request.rs) wraps `Arc<BatchSnapshot>`; iteration yields `Request` objects without copying slab bytes.
-- [`Request`](../../../../../src/rs/vertebra-py/src/request.rs) (`frozen`, `freelist = 128`) holds `Arc<BatchSnapshot>` plus an index. Properties (`method`, `path`, `raw_path`, `query`, `raw_query`, `body`, `http_version`, `handler_id`, `request_id`, `flags`) read the slab on access. `headers` copies the header block once into a cached `Headers`. `asgi_scope`, `wsgi_environ`, `rsgi_scope`, and `rsgi_protocol` build the protocol objects. `Request.from_parts` builds a standalone request for tests.
-- `Request.body_view` is a read-only `memoryview` over the slab (`PyMemoryView_FromMemory`, `PyBUF_READ`). Nothing keeps the snapshot alive, so the view is valid only while the handler runs; call `bytes(request.body_view)` to keep the body.
-- [`Headers`](../../../../../src/rs/vertebra-py/src/headers.rs) (`frozen`, `freelist = 128`) is a case-insensitive mapping: `__getitem__`, `get`, `keys`, `values`, `items`, `asgi_items`, `as_dict`, `__contains__`, `__len__`, `__iter__`, and `Headers.from_pairs`. `content-type`, `content-length`, `authorization`, `accept`, `host`, `user-agent`, `cookie`, `upgrade`, and `connection` keys are interned with `pyo3::intern!`; other keys allocate a new `PyString`.
-- [`Response`](../../../../../src/rs/vertebra-py/src/response.rs) (`freelist = 128`) holds `status: u16`, `body: Bytes`, `headers: Vec<(Vec<u8>, Vec<u8>)>`, and `request_id: u64`. The constructor and `Response.from_buffer` accept any buffer-protocol body and copy it into `Bytes` while holding the GIL (non-contiguous buffers fall back to `PyBuffer::to_vec`).
-- `RequestBatch.submit_buffers(items)` returns `list[Response]` aligned to the batch; it does not submit.
+- [`RequestBatch`](../../../../../src/rs/vertebra-py/src/request.rs) wraps `Arc<BatchSnapshot>` and yields `Request` instances without copying request headers or bodies.
+- [`Request`](../../../../../src/rs/vertebra-py/src/request.rs) (`frozen`, `immutable_type`, conditional `freelist = 128`) holds `Arc<BatchSnapshot>` + item index and implements CPython's buffer protocol (`__getbuffer__` / `__releasebuffer__`, typed with PEP 688 `def __buffer__(self, flags: int, /) -> memoryview: ...` in `_vertebra.pyi`). `__getbuffer__` passes borrowed `slf.as_ptr()` to `PyBuffer_FillInfo` (which calls `Py_XNewRef` internally), so `memoryview(req)` and `req.body_view` return an anchored zero-copy read-only `memoryview` pinning `Request` -> `Arc<BatchSnapshot>` safely even after `del req`, and flowing zero-copy into `submit_response_raw` / `submit_batch_raw`.
+- [`Headers`](../../../../../src/rs/vertebra-py/src/headers.rs) and [`Response`](../../../../../src/rs/vertebra-py/src/response.rs) allocate byte outputs via `PyBytes::new_with` (PEP 782 `PyBytesWriter` zero-copy initialization on Python 3.15+) and intern common HTTP header names via `pyo3::intern!`.
 
-## Startup handler specs (`_dispatch.py`)
+## Startup handler compilation & batch execution (`worker.py`, `_dispatch.py`, `_loops.py`)
 
-`run_worker` calls `compile_handler_table(handlers)` (`compile_handler_spec(handler)`) for every handler at startup, returning a frozen [`HandlerSpec`](../../../../../src/py/vertebra/server/_dispatch.py) (`msgspec.Struct, frozen=True, gc=False, cache_hash=True`) with `(has_params, is_async, param_names, invoker)` from one `inspect.signature` call.
-
-## `BatchDispatchPlan` partitioning and scheduling
-
-[`_partition_batch(batch, handlers, mount_runners)`](../../../../../src/py/vertebra/server/_dispatch.py) fills a [`BatchDispatchPlan`](../../../../../src/py/vertebra/server/_dispatch.py) (`msgspec.Struct, frozen=True, gc=False`) with four groups. `run_worker` and `_shm_worker_loop` always call `_dispatch_batch(..., async_mode=True)`:
-
-1. `sync_native`: each handler is submitted to the shared `vertebra-wsgi` `ThreadPoolExecutor` (`max(128, cpu_count * 8)` threads) and completed with `submit_response`.
-2. `async_native`: coroutines go to `scheduler.spawn_batch`. `EventLoopPool(size=1)` wakes its loop once per batch; `EventLoopPool(size > 1)` wakes once per non-empty shard. In SHM mode without a pool, `_shm_worker_loop` calls `loop.create_task` on its own running loop.
-3. `mounts` (`dict[str, list[tuple[int, Request]]]`): ASGI mounts use `AsgiRunner.spawn_batch` (or `_AsgiMountRunner` across pool loops), RSGI mounts schedule `RsgiAdapter.handle_request` coroutines, and WSGI mounts go to the executor.
-4. `unmatched`: answered with 404 `not found`.
-
-Handler errors produce 500 `internal server error`. `_coerce_response` passes `Response` objects through (filling `request_id` when it is 0), encodes `str` as UTF-8, passes `bytes` through, and encodes anything else with `encode_json_bytes`.
-
-The blocking `async_mode=False` path (direct callers and tests) runs sync handlers inline and uses `schedule_batch`.
-
-## Scheduler selection (`run_worker`)
-
-- `pool_size` is `worker_count` (passed by the embedded server and SHM workers from `VERTEBRA_WORKERS`), else `VERTEBRA_LOOP_SHARDS` / `VERTEBRA_THREADS`, else `os.cpu_count()`.
-- `use_pool = pool_size > 1 or is_free_threaded()` selects [`EventLoopPool(size=pool_size)`](../../../../../src/py/vertebra/server/_loops.py). Otherwise in-process mode uses `EventLoopPool(size=1)` and SHM mode uses the `asyncio.run` loop.
-- In-process mode loops on `get_batch(timeout_ms=batch_timeout_ms)`. SHM mode runs `_shm_worker_loop`, which registers the request notify FD with `loop.add_reader` and drains with `try_get_batch`.
+- [`compile_handler_table`](../../../../../src/py/vertebra/server/_dispatch.py) inspects every registered route once at startup into a frozen [`HandlerSpec`](../../../../../src/py/vertebra/server/_dispatch.py) (`msgspec.Struct, frozen=True, gc=False, cache_hash=True`) carrying `(has_params, is_async, param_names, invoker, sync_to_thread)`. Route decorators (`@app.get(..., sync_to_thread=False)`) default `sync_to_thread` to `False`.
+- **Inline vectorized sync execution**: default synchronous native routes (`sync_to_thread=False`) run inline in the batch loop and flush together via a single `submit_batch_raw(raw_responses)` call (`0` `ThreadPoolExecutor` submissions and `0` `Future` allocations). Routes opting into `sync_to_thread=True` execute once on `ThreadPoolExecutor` without duplicate inline execution.
+- **Zero-copy buffer serialization & async snapshot release**: `_serialize_result` accepts `bytes`, `bytearray`, and `memoryview` (`_RAW_BUFFER_TYPES`) directly so `return req.body_view` incurs zero payload copies, and encodes structured objects via `encode_json_bytes`. For `async def` native handlers, `_await_async_item` extracts `_AsyncErrorStub(request_id)` and drops the local `Request` reference *before* `await coro` so suspending handlers (`io10 c=256`) never pin `Arc<BatchSnapshot>` (`SlotView`) across I/O waits.
+- **`O(1)` mount resolution**: `vertebra-http` stamps mounted requests with `MOUNT_HANDLER_BASE | mount_idx` (`0xFFFF_0000_0000_0000 | idx`), allowing `Worker._process_batch` and `partition_batch` to index directly into `mounts[mount_idx]` in `O(1)` without decoding `req.path`. When an app has a single root ASGI mount, `Worker._process_batch` passes `single_root_asgi.dispatch_app` directly to `drive_asgi_batch` so attached `__vertebra_fastpath__` handlers (`LitestarFastPathBypass`) run on the batch hot path.
+- **`uvloop` & same-thread `add_reader` polling**: [`_loops.py`](../../../../../src/py/vertebra/server/_loops.py) automatically uses `uvloop.new_event_loop` on POSIX via `import_optional("uvloop")` (falling back to `winloop` on Windows and `asyncio` otherwise) and coalesces multi-loop scheduling in `EventLoopPool.spawn_batch`. When `loop_shards == 1` and a request notify FD is active (SHM mode or single-consumer Embedded mode with async/ASGI/RSGI routes; pure-sync Embedded native apps stay on direct blocking `get_batch`), `Worker._run_inline_event_loop` registers `loop.add_reader(notify_fd, ...)` with Dekker `prepare_request_sleep()` / `cancel_request_sleep()` so polling and coroutine execution share one OS thread with **zero** cross-thread `call_soon_threadsafe` wakeups.

@@ -8,15 +8,24 @@ import selectors
 import signal
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from typing import Any
 
 from vertebra._vertebra import (
+    Request as _NativeRequest,
+)
+from vertebra._vertebra import (
+    RequestBatch,
     Response,
+    cancel_request_sleep,
     clear_request_notification,
+    drive_asgi_batch,
+    drive_rsgi_batch,
     get_batch,
     get_request_notify_fd,
     init_transport,
+    prepare_request_sleep,
+    submit_batch_raw,
     submit_response,
     submit_response_raw,
     try_get_batch,
@@ -25,6 +34,8 @@ from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
 from vertebra.server._asgi._queues import AsgiResponse
 from vertebra.server._asgi._runner import AsgiRunner
 from vertebra.server._dispatch import (
+    _JSON_CONTENT_TYPE_COMPACT,
+    _RAW_BUFFER_TYPES,
     HandlerSpec,
     build_error_response,
     compile_handler_table,
@@ -37,7 +48,7 @@ from vertebra.server._loops import (
     configure_worker_affinity,
     resolve_loop_shards,
 )
-from vertebra.server._protocol import detect_interface
+from vertebra.server._protocol import InterfaceMode, detect_interface
 from vertebra.server._rsgi._adapter import RsgiAdapter
 from vertebra.server._wsgi._adapter import WsgiAdapter
 from vertebra.server.platform import (
@@ -46,6 +57,7 @@ from vertebra.server.platform import (
     ShmAllocationPolicy,
     ZPagesRegistry,
 )
+from vertebra.utils.serializers import encode_json_bytes
 
 __all__ = (
     "Worker",
@@ -56,6 +68,7 @@ __all__ = (
 )
 
 logger = logging.getLogger(__name__)
+_INLINE_DRAIN_BUDGET = 16
 
 
 class _AsgiMountRunner:
@@ -107,8 +120,37 @@ class _AsgiMountRunner:
                 )
         return results
 
-    def spawn_batch(self, requests: Iterable[Any]) -> None:
-        """Schedule each request in ``requests`` across the sharded event loop pool."""
+    def spawn_batch(self, requests: RequestBatch | Iterable[Any]) -> None:
+        """Schedule a batch across the sharded event loop pool via drive_asgi_batch."""
+        if self._runner._on_chunk is None:
+            if isinstance(requests, RequestBatch):
+                if len(requests) == 0:
+                    return
+                drive_asgi_batch(
+                    self._runner.dispatch_app,
+                    requests,
+                    loop_obj=self._pool.next_loop(),
+                    root_path=self._runner.mount_prefix,
+                    lifespan_state=self._runner.lifespan_state or None,
+                )
+                return
+
+            req_list = requests if isinstance(requests, list | tuple) else list(requests)
+            if not req_list:
+                return
+            if isinstance(req_list[0], _NativeRequest):
+                drive_asgi_batch(
+                    self._runner.dispatch_app,
+                    req_list,
+                    loop_obj=self._pool.next_loop(),
+                    root_path=self._runner.mount_prefix,
+                    lifespan_state=self._runner.lifespan_state or None,
+                )
+                return
+            coros = [self._execute_and_submit(req) for req in req_list]
+            self._pool.spawn_batch(coros)
+            return
+
         coros = [self._execute_and_submit(req) for req in requests]
         if coros:
             self._pool.spawn_batch(coros)
@@ -136,9 +178,10 @@ def _instantiate_mount_runners(
         if hasattr(scheduler, "primary_loop")
         else (scheduler.loop if hasattr(scheduler, "loop") else scheduler)
     )
+    configured_iface = _resolve_configured_interface()
     result: list[tuple[str, Any, str]] = []
     for prefix, app, protocol in mounts:
-        resolved: str = detect_interface(app) if protocol == "auto" else protocol
+        resolved: str = detect_interface(app, configured=configured_iface) if protocol == "auto" else protocol
         state = lifespan_states.get(prefix) if lifespan_states is not None else None
         if resolved == "asgi":
             if isinstance(scheduler, EventLoopPool) and scheduler.size > 1:
@@ -298,24 +341,43 @@ class Worker:
         )
 
         shard_count = resolve_loop_shards(audit_report=self._gil_report)
-        loop_pool = EventLoopPool(size=shard_count)
-        executor = ThreadPoolExecutor(
-            max_workers=max(32, self._worker_count * 16),
-            thread_name_prefix="vertebra-worker-sync",
+        compiled_handlers = compile_handler_table(self._handlers)
+        configured_iface = _resolve_configured_interface()
+        resolved_mount_protocols = [
+            detect_interface(app_obj, configured=configured_iface) if protocol == "auto" else protocol
+            for _prefix, app_obj, protocol in self._mounts
+        ]
+        has_async_handlers = any(spec.is_async for spec in compiled_handlers.values())
+        has_sync_thread = any(spec.sync_to_thread for spec in compiled_handlers.values())
+        has_async_mounts = any(proto in {"asgi", "rsgi"} for proto in resolved_mount_protocols)
+        has_wsgi_mounts = any(proto == "wsgi" for proto in resolved_mount_protocols)
+        needs_event_loop = has_async_handlers or has_async_mounts
+        notify_fd = get_request_notify_fd()
+
+        use_inline_event_loop = notify_fd >= 0 and shard_count == 1 and needs_event_loop
+        loop_pool = EventLoopPool(
+            size=shard_count,
+            inline_single_loop=(shard_count == 1 and (use_inline_event_loop or not needs_event_loop)),
+        )
+        executor: ThreadPoolExecutor | None = (
+            ThreadPoolExecutor(
+                max_workers=max(16, self._worker_count * 8),
+                thread_name_prefix="vertebra-worker-sync",
+            )
+            if (has_sync_thread or has_wsgi_mounts)
+            else None
         )
 
-        compiled_handlers = compile_handler_table(self._handlers)
         lifespan_stack = ExitStack()
         lifespan_states: dict[str, dict[str, Any]] = {}
 
         try:
-            for prefix, app_obj, protocol in self._mounts:
-                resolved = detect_interface(app_obj) if protocol == "auto" else protocol
+            for (_prefix, app_obj, _protocol), resolved in zip(self._mounts, resolved_mount_protocols, strict=True):
                 if resolved == "asgi":
                     try:
                         lifespan_stack.enter_context(enter_litestar_server_lifespan(app_obj))
                     except Exception:
-                        logger.exception("ASGI lifespan startup failed for mount %r", prefix)
+                        logger.exception("ASGI lifespan startup failed for mount %r", _prefix)
 
             mount_runners = _instantiate_mount_runners(
                 self._mounts,
@@ -324,68 +386,184 @@ class Worker:
             )
             mount_lookup = {prefix: (adapter, proto) for prefix, adapter, proto in mount_runners}
             has_mounts = bool(mount_runners)
-            all_sync_native = not has_mounts and all(not spec.is_async for spec in compiled_handlers.values())
+            all_sync_native = not has_mounts and not has_async_handlers and not has_sync_thread
+
+            single_root_asgi: AsgiRunner | None = None
+            single_root_rsgi: RsgiAdapter | None = None
+            if not compiled_handlers and len(mount_runners) == 1 and mount_runners[0][0] == "":
+                root_adapter, root_proto = mount_runners[0][1], mount_runners[0][2]
+                if root_proto == "asgi" and isinstance(root_adapter, AsgiRunner) and root_adapter._on_chunk is None:
+                    single_root_asgi = root_adapter
+                elif root_proto == "rsgi" and isinstance(root_adapter, RsgiAdapter):
+                    single_root_rsgi = root_adapter
 
             self._zpages.set_var("worker_state", "ready")
             self._zpages.set_var("worker_id", worker_idx)
 
-            notify_fd = get_request_notify_fd()
-            selector: selectors.BaseSelector | None = None
-            if notify_fd >= 0:
-                try:
-                    sel = selectors.DefaultSelector()
-                    sel.register(notify_fd, selectors.EVENT_READ)
-                    selector = sel
-                except Exception:
-                    selector = None
-
             timeout_sec = max(0.001, self._batch_timeout_ms / 1000.0)
-            batches_processed = 0
 
-            try:
-                while True:
-                    if self._stop_event is not None and self._stop_event.is_set():
-                        break
-                    if self._lame_duck.is_draining and self._lame_duck.in_flight == 0:
-                        break
-                    if self._max_batches is not None and batches_processed >= self._max_batches:
-                        break
+            if use_inline_event_loop:
+                self._run_inline_event_loop(
+                    notify_fd=notify_fd,
+                    timeout_sec=timeout_sec,
+                    compiled_handlers=compiled_handlers,
+                    mount_runners=mount_runners,
+                    mount_lookup=mount_lookup,
+                    all_sync_native=all_sync_native,
+                    single_root_asgi=single_root_asgi,
+                    single_root_rsgi=single_root_rsgi,
+                    loop_pool=loop_pool,
+                    executor=executor,
+                )
+            else:
+                selector: selectors.BaseSelector | None = None
+                if notify_fd >= 0 and transport_mode == "shm":
+                    try:
+                        sel = selectors.DefaultSelector()
+                        sel.register(notify_fd, selectors.EVENT_READ)
+                        selector = sel
+                    except Exception:
+                        selector = None
 
-                    if selector is not None:
-                        batch = try_get_batch()
-                        if batch is None or len(batch) == 0:
-                            events = selector.select(timeout=timeout_sec)
-                            if events:
-                                clear_request_notification()
+                batches_processed = 0
+                try:
+                    while not self._should_stop(batches_processed):
+                        if selector is not None:
                             batch = try_get_batch()
                             if batch is None or len(batch) == 0:
+                                if prepare_request_sleep():
+                                    try:
+                                        events = selector.select(timeout=timeout_sec)
+                                    finally:
+                                        cancel_request_sleep()
+                                    if events:
+                                        clear_request_notification()
+                                batch = try_get_batch()
+                                if batch is None or len(batch) == 0:
+                                    continue
+                        else:
+                            batch = get_batch(self._batch_timeout_ms)
+                            if batch is None or len(batch) == 0:
                                 continue
-                    else:
-                        batch = get_batch(self._batch_timeout_ms)
-                        if batch is None or len(batch) == 0:
-                            continue
 
-                    self._process_batch(
-                        batch,
-                        compiled_handlers=compiled_handlers,
-                        mount_runners=mount_runners,
-                        mount_lookup=mount_lookup,
-                        all_sync_native=all_sync_native,
-                        loop_pool=loop_pool,
-                        executor=executor,
-                    )
-                    batches_processed += 1
-            finally:
-                if selector is not None:
-                    selector.close()
+                        self._process_batch(
+                            batch,
+                            compiled_handlers=compiled_handlers,
+                            mount_runners=mount_runners,
+                            mount_lookup=mount_lookup,
+                            all_sync_native=all_sync_native,
+                            single_root_asgi=single_root_asgi,
+                            single_root_rsgi=single_root_rsgi,
+                            loop_pool=loop_pool,
+                            executor=executor,
+                        )
+                        batches_processed += 1
+                finally:
+                    if selector is not None:
+                        selector.close()
         finally:
             self._zpages.set_var("worker_state", "stopped")
             try:
                 lifespan_stack.close()
             except Exception:
                 logger.exception("ASGI lifespan shutdown error")
-            executor.shutdown(wait=False)
+            if executor is not None:
+                executor.shutdown(wait=False)
             loop_pool.stop()
+
+    def _should_stop(self, batches_processed: int) -> bool:
+        if self._stop_event is not None and self._stop_event.is_set():
+            return True
+        if self._lame_duck.is_draining and self._lame_duck.in_flight == 0:
+            return True
+        return self._max_batches is not None and batches_processed >= self._max_batches
+
+    def _run_inline_event_loop(
+        self,
+        *,
+        notify_fd: int,
+        timeout_sec: float,
+        compiled_handlers: dict[int, HandlerSpec],
+        mount_runners: list[tuple[str, Any, str]],
+        mount_lookup: dict[str, tuple[Any, str]],
+        all_sync_native: bool,
+        single_root_asgi: AsgiRunner | None,
+        single_root_rsgi: RsgiAdapter | None,
+        loop_pool: EventLoopPool,
+        executor: ThreadPoolExecutor | None,
+    ) -> None:
+        loop = loop_pool.primary_loop
+        asyncio.set_event_loop(loop)
+        batches_processed = 0
+        watchdog_sec = max(0.01, min(0.1, timeout_sec))
+
+        def _drain_readable() -> None:
+            nonlocal batches_processed
+            cancel_request_sleep()
+            clear_request_notification()
+            drained = 0
+            while drained < _INLINE_DRAIN_BUDGET:
+                if self._should_stop(batches_processed):
+                    loop.stop()
+                    return
+                batch = try_get_batch()
+                if batch is None or len(batch) == 0:
+                    if not prepare_request_sleep():
+                        cancel_request_sleep()
+                        loop.call_soon(_drain_readable)
+                    elif self._should_stop(batches_processed):
+                        cancel_request_sleep()
+                        loop.stop()
+                    return
+                self._process_batch(
+                    batch,
+                    compiled_handlers=compiled_handlers,
+                    mount_runners=mount_runners,
+                    mount_lookup=mount_lookup,
+                    all_sync_native=all_sync_native,
+                    single_root_asgi=single_root_asgi,
+                    single_root_rsgi=single_root_rsgi,
+                    loop_pool=loop_pool,
+                    executor=executor,
+                )
+                batches_processed += 1
+                drained += 1
+            loop.call_soon(_drain_readable)
+
+        def _watchdog() -> None:
+            nonlocal batches_processed
+            if self._should_stop(batches_processed):
+                cancel_request_sleep()
+                loop.stop()
+                return
+            batch = try_get_batch()
+            if batch is not None and len(batch) > 0:
+                cancel_request_sleep()
+                self._process_batch(
+                    batch,
+                    compiled_handlers=compiled_handlers,
+                    mount_runners=mount_runners,
+                    mount_lookup=mount_lookup,
+                    all_sync_native=all_sync_native,
+                    single_root_asgi=single_root_asgi,
+                    single_root_rsgi=single_root_rsgi,
+                    loop_pool=loop_pool,
+                    executor=executor,
+                )
+                batches_processed += 1
+                loop.call_soon(_drain_readable)
+            loop.call_later(watchdog_sec, _watchdog)
+
+        loop.add_reader(notify_fd, _drain_readable)
+        loop.call_soon(_drain_readable)
+        loop.call_later(watchdog_sec, _watchdog)
+        try:
+            loop.run_forever()
+        finally:
+            cancel_request_sleep()
+            with suppress(Exception):
+                loop.remove_reader(notify_fd)
+            asyncio.set_event_loop(None)
 
     def _process_batch(
         self,
@@ -396,28 +574,64 @@ class Worker:
         mount_lookup: dict[str, tuple[Any, str]],
         all_sync_native: bool,
         loop_pool: EventLoopPool,
-        executor: ThreadPoolExecutor,
+        executor: ThreadPoolExecutor | None = None,
+        single_root_asgi: AsgiRunner | None = None,
+        single_root_rsgi: RsgiAdapter | None = None,
     ) -> None:
         batch_len = len(batch)
         self._lame_duck.acquire_request(batch_len)
         self._zpages.set_var("active_requests", self._lame_duck.in_flight)
         try:
-            if all_sync_native and batch_len == 1:
-                req = batch[0]
-                spec = compiled_handlers.get(req.handler_id)
-                if spec is not None:
+            if all_sync_native:
+                raw_items: list[tuple[int, int, Any] | tuple[int, int, Any, bytes]] = []
+                append_raw = raw_items.append
+                get_spec = compiled_handlers.get
+                for req in batch:
+                    req_id = req.request_id
+                    spec = get_spec(req.handler_id)
+                    if spec is None:
+                        append_raw((req_id, 404, b"not found"))
+                        continue
                     try:
                         raw = spec.invoker(req)
-                        if isinstance(raw, bytes):
-                            submit_response_raw(req.request_id, 200, raw)
-                            return
-                        if isinstance(raw, str):
-                            submit_response_raw(req.request_id, 200, raw.encode("utf-8"))
-                            return
+                        if isinstance(raw, _RAW_BUFFER_TYPES):
+                            append_raw((req_id, 200, raw))
+                        elif isinstance(raw, str):
+                            append_raw((req_id, 200, raw.encode("utf-8")))
+                        elif isinstance(raw, Response):
+                            if raw.request_id == 0:
+                                raw.request_id = req_id
+                            submit_response(raw)
+                        else:
+                            append_raw((req_id, 200, encode_json_bytes(raw), _JSON_CONTENT_TYPE_COMPACT))
                     except Exception as exc:
                         err_resp = build_error_response(exc, req, self._error_handler, Response)
                         submit_response(err_resp)
-                        return
+                if raw_items:
+                    submit_batch_raw(raw_items)
+                return
+
+            if single_root_asgi is not None and isinstance(batch, RequestBatch):
+                drive_asgi_batch(
+                    single_root_asgi.dispatch_app,
+                    batch,
+                    loop_obj=loop_pool.primary_loop,
+                    root_path="",
+                    lifespan_state=single_root_asgi.lifespan_state or None,
+                )
+                return
+
+            if single_root_rsgi is not None and isinstance(batch, RequestBatch):
+                drive_rsgi_batch(
+                    single_root_rsgi._target,
+                    batch,
+                    loop_obj=loop_pool.primary_loop,
+                    root_path="",
+                    scheme=single_root_rsgi._scheme,
+                    server=single_root_rsgi._server,
+                    client=single_root_rsgi._client,
+                )
+                return
 
             partitioned = partition_batch(batch, compiled_handlers, mount_runners)
             dispatch_batch(
@@ -467,3 +681,15 @@ def run_worker(
         max_batches=max_batches,
     )
     worker.run()
+
+
+def _resolve_configured_interface() -> InterfaceMode:
+    """Resolve optional VERTEBRA_INTERFACE override when mount protocol is 'auto'."""
+    raw = os.environ.get("VERTEBRA_INTERFACE", "auto").strip().lower()
+    if raw == "asgi":
+        return "asgi"
+    if raw == "rsgi":
+        return "rsgi"
+    if raw == "wsgi":
+        return "wsgi"
+    return "auto"

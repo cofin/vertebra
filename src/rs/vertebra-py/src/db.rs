@@ -11,7 +11,7 @@ use vertebra_db::dialer::{
     encode_alloydb_metadata_exchange as rs_encode_alloydb_metadata_exchange,
 };
 use vertebra_db::duckdb_engine::{
-    DuckdbConfig, read_shm_arrow_frame, release_shm_arrow_frame, write_shm_arrow_frame,
+    DuckdbConfig, read_shm_arrow_frame_with, release_shm_arrow_frame, write_shm_arrow_frame,
 };
 use vertebra_db::mssql::{
     encode_tds_sql_batch as rs_encode_tds_sql_batch,
@@ -30,7 +30,7 @@ use vertebra_db::oracle::{
     encode_oson_payload as rs_encode_oson_payload,
 };
 use vertebra_db::postgres::{
-    decode_pgcopy_binary_rows, encode_pg_jsonb as rs_encode_pg_jsonb, encode_pgcopy_binary_rows,
+    decode_pgcopy_binary_rows, encode_pgcopy_binary_rows,
     strip_pg_jsonb_header as rs_strip_pg_jsonb_header,
 };
 use vertebra_db::resp3::{
@@ -44,7 +44,7 @@ use vertebra_db::tns::{
 };
 
 /// Zero-sidecar Google Cloud SQL (`:3307`) mTLS dialer.
-#[pyclass(frozen, from_py_object)]
+#[pyclass(frozen, immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
 pub struct CloudSqlDialer {
     inner: RsCloudSqlDialer,
@@ -104,7 +104,7 @@ impl CloudSqlDialer {
 }
 
 /// Zero-sidecar Google Cloud AlloyDB (`:5433`) mTLS and `MetadataExchangeRequest` dialer.
-#[pyclass(frozen, from_py_object)]
+#[pyclass(frozen, immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
 pub struct AlloyDbDialer {
     inner: RsAlloyDbDialer,
@@ -162,14 +162,17 @@ impl AlloyDbDialer {
         py: Python<'py>,
         user_agent: &str,
         token: &str,
-    ) -> Bound<'py, PyBytes> {
+    ) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = self.inner.encode_metadata_exchange(user_agent, token);
-        PyBytes::new(py, &bytes)
+        PyBytes::new_with(py, bytes.len(), |buf| {
+            buf.copy_from_slice(&bytes);
+            Ok(())
+        })
     }
 }
 
 /// Shared-memory Arrow IPC cursor backed by `vertebra_core::shm::ShmRegion`.
-#[pyclass(frozen, from_py_object)]
+#[pyclass(frozen, immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
 pub struct ArrowCursor {
     #[pyo3(get)]
@@ -201,10 +204,13 @@ impl ArrowCursor {
         py: Python<'py>,
         shm_name: &str,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let data = py
-            .detach(|| read_shm_arrow_frame(shm_name))
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        Ok(PyBytes::new(py, &data))
+        read_shm_arrow_frame_with(shm_name, |slice| {
+            PyBytes::new_with(py, slice.len(), |buf| {
+                buf.copy_from_slice(slice);
+                Ok(())
+            })
+        })
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
     }
 
     pub fn read_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
@@ -225,14 +231,17 @@ pub fn encode_alloydb_metadata_exchange<'py>(
     user_agent: &str,
     oauth2_token: &str,
     iam_auth: bool,
-) -> Bound<'py, PyBytes> {
+) -> PyResult<Bound<'py, PyBytes>> {
     let auth = if iam_auth {
         AuthType::Iam
     } else {
         AuthType::Password
     };
     let bytes = rs_encode_alloydb_metadata_exchange(user_agent, oauth2_token, auth);
-    PyBytes::new(py, &bytes)
+    PyBytes::new_with(py, bytes.len(), |buf| {
+        buf.copy_from_slice(&bytes);
+        Ok(())
+    })
 }
 
 /// Decode a 4-byte length-prefixed AlloyDB `MetadataExchangeResponse` protobuf wire frame.
@@ -245,14 +254,20 @@ pub fn decode_alloydb_metadata_response(data: &[u8]) -> PyResult<(u32, String)> 
 #[pyfunction]
 pub fn strip_pg_jsonb_header<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     let stripped = rs_strip_pg_jsonb_header(data).map_err(PyValueError::new_err)?;
-    Ok(PyBytes::new(py, stripped))
+    PyBytes::new_with(py, stripped.len(), |buf| {
+        buf.copy_from_slice(stripped);
+        Ok(())
+    })
 }
 
 /// Prepend the 1-byte PostgreSQL binary `JSONB` version header (`0x01`).
 #[pyfunction]
 pub fn encode_pg_jsonb<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-    let encoded = rs_encode_pg_jsonb(data);
-    Ok(PyBytes::new(py, &encoded))
+    PyBytes::new_with(py, 1 + data.len(), |buf| {
+        buf[0] = 0x01;
+        buf[1..].copy_from_slice(data);
+        Ok(())
+    })
 }
 
 /// Type alias for a batch of binary PostgreSQL `COPY` rows.
@@ -268,7 +283,10 @@ pub fn encode_pgcopy_rows<'py>(
     rows: PgCopyRowBatch,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let encoded = py.detach(move || encode_pgcopy_binary_rows(&rows));
-    Ok(PyBytes::new(py, &encoded))
+    PyBytes::new_with(py, encoded.len(), |buf| {
+        buf.copy_from_slice(&encoded);
+        Ok(())
+    })
 }
 
 /// Decode a PostgreSQL binary `COPY` stream (`PGCOPY\n\xff\r\n\0`) into rows of optional byte slices.
@@ -293,8 +311,15 @@ pub fn resolve_tns_alias(py: Python<'_>, contents: &str, alias: &str) -> Option<
 
 /// Encode an Oracle 26ai `VECTOR(*, FLOAT32)` binary frame.
 #[pyfunction]
-pub fn encode_oracle_vector_f32(py: Python<'_>, values: Vec<f32>) -> Vec<u8> {
-    py.detach(move || rs_encode_oracle_vector_f32(&values).to_vec())
+pub fn encode_oracle_vector_f32<'py>(
+    py: Python<'py>,
+    values: Vec<f32>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = py.detach(move || rs_encode_oracle_vector_f32(&values));
+    PyBytes::new_with(py, bytes.len(), |buf| {
+        buf.copy_from_slice(&bytes);
+        Ok(())
+    })
 }
 
 /// Decode an Oracle 26ai `VECTOR(*, FLOAT32)` binary frame.
@@ -306,8 +331,15 @@ pub fn decode_oracle_vector_f32(py: Python<'_>, data: &[u8]) -> PyResult<Vec<f32
 
 /// Encode an Oracle 26ai `VECTOR(*, FLOAT64)` binary frame.
 #[pyfunction]
-pub fn encode_oracle_vector_f64(py: Python<'_>, values: Vec<f64>) -> Vec<u8> {
-    py.detach(move || rs_encode_oracle_vector_f64(&values).to_vec())
+pub fn encode_oracle_vector_f64<'py>(
+    py: Python<'py>,
+    values: Vec<f64>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = py.detach(move || rs_encode_oracle_vector_f64(&values));
+    PyBytes::new_with(py, bytes.len(), |buf| {
+        buf.copy_from_slice(&bytes);
+        Ok(())
+    })
 }
 
 /// Decode an Oracle 26ai `VECTOR(*, FLOAT64)` binary frame.
@@ -319,8 +351,15 @@ pub fn decode_oracle_vector_f64(py: Python<'_>, data: &[u8]) -> PyResult<Vec<f64
 
 /// Encode an Oracle 26ai `VECTOR(*, INT8)` binary frame.
 #[pyfunction]
-pub fn encode_oracle_vector_i8(py: Python<'_>, values: Vec<i8>) -> Vec<u8> {
-    py.detach(move || rs_encode_oracle_vector_i8(&values).to_vec())
+pub fn encode_oracle_vector_i8<'py>(
+    py: Python<'py>,
+    values: Vec<i8>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = py.detach(move || rs_encode_oracle_vector_i8(&values));
+    PyBytes::new_with(py, bytes.len(), |buf| {
+        buf.copy_from_slice(&bytes);
+        Ok(())
+    })
 }
 
 /// Decode an Oracle 26ai `VECTOR(*, INT8)` binary frame.
@@ -332,8 +371,15 @@ pub fn decode_oracle_vector_i8(py: Python<'_>, data: &[u8]) -> PyResult<Vec<i8>>
 
 /// Encode an Oracle 26ai `VECTOR(*, BINARY)` packed bit-vector binary frame.
 #[pyfunction]
-pub fn encode_oracle_vector_binary(py: Python<'_>, bits: &[u8]) -> Vec<u8> {
-    py.detach(|| rs_encode_oracle_vector_binary(bits).to_vec())
+pub fn encode_oracle_vector_binary<'py>(
+    py: Python<'py>,
+    bits: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = py.detach(|| rs_encode_oracle_vector_binary(bits));
+    PyBytes::new_with(py, bytes.len(), |buf| {
+        buf.copy_from_slice(&bytes);
+        Ok(())
+    })
 }
 
 /// Decode an Oracle 26ai `VECTOR(*, BINARY)` packed bit-vector binary frame.
@@ -345,35 +391,46 @@ pub fn decode_oracle_vector_binary(py: Python<'_>, data: &[u8]) -> PyResult<Vec<
 
 /// Encode JSON bytes with an Oracle 26ai `OSON` binary header (`\xff\x4a\x5a`).
 #[pyfunction]
-pub fn encode_oson_payload(py: Python<'_>, data: &[u8]) -> Vec<u8> {
-    py.detach(|| rs_encode_oson_payload(data).to_vec())
+pub fn encode_oson_payload<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = py.detach(|| rs_encode_oson_payload(data));
+    PyBytes::new_with(py, bytes.len(), |buf| {
+        buf.copy_from_slice(&bytes);
+        Ok(())
+    })
 }
 
 /// Validate an Oracle 26ai `OSON` binary header and return the underlying JSON payload bytes.
 #[pyfunction]
-pub fn decode_oson_payload(py: Python<'_>, data: &[u8]) -> PyResult<Vec<u8>> {
-    py.detach(|| rs_decode_oson_payload(data).map(|s| s.to_vec()))
-        .map_err(PyValueError::new_err)
+pub fn decode_oson_payload<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    let slice = rs_decode_oson_payload(data).map_err(PyValueError::new_err)?;
+    PyBytes::new_with(py, slice.len(), |buf| {
+        buf.copy_from_slice(slice);
+        Ok(())
+    })
 }
 
 /// Encode zero-RTT piggybacked Oracle TTC session attributes (`CLIENT_IDENTIFIER`, `MODULE`, `ACTION`, `ECID`).
 #[pyfunction]
 #[pyo3(signature = (client_id=None, module=None, action=None, ecid=None))]
-pub fn encode_ttc_session_attrs(
-    py: Python<'_>,
+pub fn encode_ttc_session_attrs<'py>(
+    py: Python<'py>,
     client_id: Option<String>,
     module: Option<String>,
     action: Option<String>,
     ecid: Option<String>,
-) -> Vec<u8> {
-    py.detach(move || {
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = py.detach(move || {
         let attrs = OracleSessionAttrs {
             client_identifier: client_id,
             module,
             action,
             ecid,
         };
-        attrs.encode_ttc_piggyback_session_attrs().to_vec()
+        attrs.encode_ttc_piggyback_session_attrs()
+    });
+    PyBytes::new_with(py, bytes.len(), |buf| {
+        buf.copy_from_slice(&bytes);
+        Ok(())
     })
 }
 
@@ -386,8 +443,16 @@ pub fn rewrite_mssql_placeholders(py: Python<'_>, sql: &str) -> (String, usize) 
 /// Encode a TDS 7.4 `SQLBatch` packet with `ALL_HEADERS` `TransactionDescriptor` and UTF-16LE SQL text.
 #[pyfunction]
 #[pyo3(signature = (sql, tx_descriptor=0))]
-pub fn encode_tds_sql_batch(py: Python<'_>, sql: &str, tx_descriptor: u64) -> Vec<u8> {
-    py.detach(|| rs_encode_tds_sql_batch(sql, tx_descriptor).to_vec())
+pub fn encode_tds_sql_batch<'py>(
+    py: Python<'py>,
+    sql: &str,
+    tx_descriptor: u64,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = py.detach(|| rs_encode_tds_sql_batch(sql, tx_descriptor));
+    PyBytes::new_with(py, bytes.len(), |buf| {
+        buf.copy_from_slice(&bytes);
+        Ok(())
+    })
 }
 
 /// Generate DuckDB 2.0-safe post-initialization `SET` statements.
@@ -453,10 +518,17 @@ pub fn sqlite_initialization_pragmas(
 
 /// Encode a Redis or Valkey RESP3 bulk-string array command.
 #[pyfunction]
-pub fn encode_resp_command(py: Python<'_>, args: Vec<Vec<u8>>) -> Vec<u8> {
-    py.detach(move || {
+pub fn encode_resp_command<'py>(
+    py: Python<'py>,
+    args: Vec<Vec<u8>>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = py.detach(move || {
         let refs: Vec<&[u8]> = args.iter().map(|v| v.as_slice()).collect();
-        rs_encode_resp_command(&refs).to_vec()
+        rs_encode_resp_command(&refs)
+    });
+    PyBytes::new_with(py, bytes.len(), |buf| {
+        buf.copy_from_slice(&bytes);
+        Ok(())
     })
 }
 
@@ -469,15 +541,15 @@ pub fn encode_resp_command(py: Python<'_>, args: Vec<Vec<u8>>) -> Vec<u8> {
     enable_tracking_bcast=false,
     prefixes=Vec::new()
 ))]
-pub fn encode_hello3_handshake(
-    py: Python<'_>,
+pub fn encode_hello3_handshake<'py>(
+    py: Python<'py>,
     client_name: &str,
     username: Option<&str>,
     password: Option<&str>,
     enable_tracking_bcast: bool,
     prefixes: Vec<String>,
-) -> Vec<u8> {
-    py.detach(|| {
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = py.detach(|| {
         let prefix_refs: Vec<&str> = prefixes.iter().map(|s| s.as_str()).collect();
         rs_encode_hello3_handshake(
             client_name,
@@ -486,7 +558,10 @@ pub fn encode_hello3_handshake(
             enable_tracking_bcast,
             &prefix_refs,
         )
-        .to_vec()
+    });
+    PyBytes::new_with(py, bytes.len(), |buf| {
+        buf.copy_from_slice(&bytes);
+        Ok(())
     })
 }
 

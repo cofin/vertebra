@@ -1,8 +1,34 @@
 //! Zero-GIL CORS preflight and response header engine offloaded from Litestar `CORSConfig`.
 
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+/// Append `token` to `Vary` without overwriting existing tokens or duplicating entries.
+pub fn append_vary_token(headers: &mut HeaderMap, token: &'static str) {
+    let mut existing_parts: Vec<String> = Vec::new();
+    for val in headers.get_all(header::VARY) {
+        if let Ok(raw) = val.to_str() {
+            for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                if part == "*" || part.eq_ignore_ascii_case(token) {
+                    return;
+                }
+                existing_parts.push(part.to_string());
+            }
+        }
+    }
+    if existing_parts.is_empty() {
+        headers.insert(header::VARY, HeaderValue::from_static(token));
+    } else {
+        existing_parts.push(token.to_string());
+        if let Ok(combined) = HeaderValue::from_str(&existing_parts.join(", ")) {
+            headers.insert(header::VARY, combined);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CorsOffloadConfig {
     pub allow_origins: Vec<String>,
     pub allow_methods: Vec<String>,
@@ -10,15 +36,86 @@ pub struct CorsOffloadConfig {
     pub allow_credentials: bool,
     pub expose_headers: Vec<String>,
     pub max_age: u32,
+    pub allow_origin_regex: Option<String>,
+}
+
+/// Startup-compiled CORS offload engine avoiding per-request regex compilation.
+#[derive(Debug, Clone)]
+pub struct CompiledCorsOffload {
+    config: CorsOffloadConfig,
+    origin_regex: Option<Regex>,
+}
+
+impl CompiledCorsOffload {
+    pub fn new(config: CorsOffloadConfig) -> Self {
+        let origin_regex = config
+            .allow_origin_regex
+            .as_deref()
+            .and_then(|pat| Regex::new(&format!("^(?:{pat})$")).ok());
+        Self {
+            config,
+            origin_regex,
+        }
+    }
+
+    pub fn is_origin_allowed(&self, origin: &str) -> bool {
+        if self
+            .config
+            .allow_origins
+            .iter()
+            .any(|o| o == "*" || o == origin)
+        {
+            return true;
+        }
+        self.origin_regex
+            .as_ref()
+            .is_some_and(|re| re.is_match(origin))
+    }
+
+    pub fn evaluate_preflight(
+        &self,
+        origin: &str,
+        request_method: Option<&str>,
+        request_headers: Option<&str>,
+    ) -> (StatusCode, HeaderMap) {
+        self.config.evaluate_preflight_with_check(
+            origin,
+            self.is_origin_allowed(origin),
+            request_method,
+            request_headers,
+        )
+    }
+
+    pub fn apply_response_headers(&self, origin: &str, headers: &mut HeaderMap) {
+        self.config.apply_response_headers_with_check(
+            origin,
+            self.is_origin_allowed(origin),
+            headers,
+        );
+    }
 }
 
 impl CorsOffloadConfig {
+    pub fn compile(self) -> CompiledCorsOffload {
+        CompiledCorsOffload::new(self)
+    }
+
     pub fn is_origin_allowed(&self, origin: &str) -> bool {
-        self.allow_origins.iter().any(|o| o == "*" || o == origin)
+        if self.allow_origins.iter().any(|o| o == "*" || o == origin) {
+            return true;
+        }
+        self.allow_origin_regex
+            .as_deref()
+            .and_then(|pat| Regex::new(&format!("^(?:{pat})$")).ok())
+            .is_some_and(|re| re.is_match(origin))
     }
 
     pub fn resolve_allow_origin(&self, origin: &str) -> Option<String> {
-        if !self.is_origin_allowed(origin) {
+        self.resolve_allow_origin_checked(origin, self.is_origin_allowed(origin))
+    }
+
+    fn resolve_allow_origin_checked(&self, origin: &str, allowed: bool) -> Option<String> {
+        if !allowed {
             return None;
         }
         if !self.allow_credentials && self.allow_origins.iter().any(|o| o == "*") {
@@ -34,8 +131,23 @@ impl CorsOffloadConfig {
         request_method: Option<&str>,
         request_headers: Option<&str>,
     ) -> (StatusCode, HeaderMap) {
+        self.evaluate_preflight_with_check(
+            origin,
+            self.is_origin_allowed(origin),
+            request_method,
+            request_headers,
+        )
+    }
+
+    fn evaluate_preflight_with_check(
+        &self,
+        origin: &str,
+        origin_allowed: bool,
+        request_method: Option<&str>,
+        request_headers: Option<&str>,
+    ) -> (StatusCode, HeaderMap) {
         let mut headers = HeaderMap::new();
-        let Some(allowed_origin) = self.resolve_allow_origin(origin) else {
+        let Some(allowed_origin) = self.resolve_allow_origin_checked(origin, origin_allowed) else {
             return (StatusCode::BAD_REQUEST, headers);
         };
         if let Some(req_method) = request_method
@@ -78,12 +190,21 @@ impl CorsOffloadConfig {
         if let Ok(val) = HeaderValue::from_str(&self.max_age.to_string()) {
             headers.insert(header::ACCESS_CONTROL_MAX_AGE, val);
         }
-        headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+        append_vary_token(&mut headers, "Origin");
         (StatusCode::NO_CONTENT, headers)
     }
 
     pub fn apply_response_headers(&self, origin: &str, headers: &mut HeaderMap) {
-        let Some(allowed_origin) = self.resolve_allow_origin(origin) else {
+        self.apply_response_headers_with_check(origin, self.is_origin_allowed(origin), headers);
+    }
+
+    fn apply_response_headers_with_check(
+        &self,
+        origin: &str,
+        origin_allowed: bool,
+        headers: &mut HeaderMap,
+    ) {
+        let Some(allowed_origin) = self.resolve_allow_origin_checked(origin, origin_allowed) else {
             return;
         };
         if let Ok(val) = HeaderValue::from_str(&allowed_origin) {
@@ -102,7 +223,7 @@ impl CorsOffloadConfig {
             headers.insert(expose_name, val);
         }
         if allowed_origin != "*" {
-            headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+            append_vary_token(headers, "Origin");
         }
     }
 }

@@ -13,7 +13,10 @@ use crate::body::PendingResponse;
 fn dispatcher_creates_with_empty_state() {
     let d = Dispatcher::new();
     match d.backend() {
-        DispatchBackend::Bridge(b) => assert!(b.pending.is_empty()),
+        DispatchBackend::Bridge(b) => {
+            assert!(b.is_empty());
+            assert_eq!(b.in_flight(), 0);
+        }
         _ => panic!("expected bridge backend"),
     }
 }
@@ -180,4 +183,114 @@ async fn shm_dispatcher_complete_through_correlation() {
     let resp = reply_rx.try_recv().expect("should receive response");
     assert_eq!(resp.status, 200);
     assert_eq!(resp.body.as_ref(), b"world");
+}
+
+#[tokio::test]
+async fn shm_dispatcher_warm_worker_affinity_whole_batch_and_dekker_wake() {
+    use vertebra_core::transport::BatchSnapshot;
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+
+    let pairs: Vec<Arc<RingPair>> = (0..4)
+        .map(|_| Arc::new(RingPair::create(RingPairConfig::default()).unwrap()))
+        .collect();
+    let dispatcher = Dispatcher::new_shm(pairs.clone(), 1024);
+
+    let mut reqs = Vec::new();
+    let mut rxs = Vec::new();
+    for i in 0..4u64 {
+        let (tx, rx) = oneshot::channel();
+        reqs.push(PendingRequest {
+            handler_id: i,
+            method_tag: 0,
+            http_version_tag: 1,
+            flags: 0,
+            path_and_query: PathAndQuery::from_static("/batch"),
+            headers_mp: bytes::Bytes::new(),
+            body: bytes::Bytes::from_static(b"payload"),
+            reply: tx,
+        });
+        rxs.push(rx);
+    }
+
+    assert_eq!(dispatcher.dispatch(Batch { requests: reqs }), 4);
+
+    assert!(
+        !pairs[0].request_notifier.wait(0).unwrap(),
+        "awake worker must not receive redundant eventfd write"
+    );
+
+    let mut buf = vec![0u8; pairs[0].request_ring.payload_capacity()];
+    let len = pairs[0]
+        .request_ring
+        .try_recv(&mut buf)
+        .expect("whole batch should route to worker 0");
+    let snap = BatchSnapshot::deserialize_from(&buf[..len]).unwrap();
+    assert_eq!(snap.len(), 4);
+    for other in &pairs[1..] {
+        assert!(
+            other.request_ring.try_recv(&mut buf).is_err(),
+            "whole batch must not scatter across other workers"
+        );
+    }
+
+    let completions: Vec<(u64, PendingResponse)> = (0..snap.len())
+        .map(|idx| {
+            (
+                snap.node(idx).correlation_id,
+                PendingResponse {
+                    status: 200,
+                    headers_mp: bytes::Bytes::new(),
+                    body: bytes::Bytes::from_static(b"ok"),
+                    stream_rx: None,
+                },
+            )
+        })
+        .collect();
+    dispatcher.complete_many(completions);
+    for mut rx in rxs {
+        assert_eq!(rx.try_recv().unwrap().status, 200);
+    }
+
+    assert!(pairs[0].prepare_request_sleep());
+    let (tx, _rx) = oneshot::channel();
+    dispatcher.dispatch(Batch {
+        requests: vec![PendingRequest {
+            handler_id: 99,
+            method_tag: 0,
+            http_version_tag: 1,
+            flags: 0,
+            path_and_query: PathAndQuery::from_static("/warm"),
+            headers_mp: bytes::Bytes::new(),
+            body: bytes::Bytes::new(),
+            reply: tx,
+        }],
+    });
+    assert!(
+        pairs[0].request_notifier.wait(50).unwrap(),
+        "sleeping warm worker 0 must receive Dekker wakeup and sticky sequential request"
+    );
+    pairs[0].cancel_request_sleep();
+    let _ = pairs[0].request_notifier.clear();
+    assert!(pairs[0].request_ring.try_recv(&mut buf).is_ok());
+}
+
+#[test]
+fn mount_route_registration_includes_options_and_head() {
+    use crate::routing::{RouteTable, Router};
+
+    let mut table = RouteTable::new();
+    table.insert_mount_prefix("/api");
+    table.insert_mount_prefix("/");
+    let router = Router::from_entries(table.into_entries()).expect("compile router");
+
+    for method in &["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"] {
+        assert!(
+            router.lookup(method, "/api/v1/resource").is_ok(),
+            "mounted /api prefix must match {method}"
+        );
+        assert!(
+            router.lookup(method, "/root-check").is_ok(),
+            "mounted / prefix must match {method}"
+        );
+    }
 }

@@ -179,3 +179,52 @@ fn mpmc_try_recv_empty_is_error() {
     let result = ring.try_recv(&mut buf);
     assert!(result.is_err(), "empty ring should return error");
 }
+
+#[test]
+fn mpmc_padded_sequences_zero_copy_slot_views_and_dekker_wake() {
+    use vertebra_core::buffer::{CACHELINE_BYTES, ChannelMode, RingLayout};
+    use vertebra_core::notify::Notifier;
+
+    let layout = RingLayout::new(256, 16, ChannelMode::Mpmc);
+    assert_eq!(
+        layout.seq_size,
+        16 * CACHELINE_BYTES,
+        "each MPMC sequence counter must occupy its own cache line"
+    );
+
+    let ring = Arc::new(MpmcRing::new(256, 4).expect("new mpmc"));
+    assert!(matches!(ring.try_recv_view(), Err(ChannelError::Empty)));
+
+    // Hold multiple concurrent MpmcSlotViews simultaneously and release out-of-order.
+    ring.try_send(b"slot-0", 10).expect("send 0");
+    ring.try_send(b"slot-1", 20).expect("send 1");
+
+    let view0 = ring.try_recv_view().expect("view 0");
+    let view1 = ring.try_recv_view().expect("view 1");
+    assert_eq!(view0.as_slice(), b"slot-0");
+    assert_eq!(view0.flags(), 10);
+    assert_eq!(view1.as_slice(), b"slot-1");
+    assert_eq!(view1.flags(), 20);
+
+    drop(view1);
+    drop(view0);
+
+    // Wrap around all 4 slots to prove out-of-order release restored sequences cleanly.
+    for i in 0..8u32 {
+        ring.try_send(&i.to_le_bytes(), i).expect("wrap send");
+        let v = ring.try_recv_view().expect("wrap view");
+        assert_eq!(u32::from_le_bytes(v.as_slice().try_into().unwrap()), i);
+        assert_eq!(v.flags(), i);
+    }
+
+    // Dekker sleep/wake on MPMC ring.
+    let notifier = Notifier::new().expect("notifier");
+    assert!(ring.prepare_sleep());
+    ring.try_send(b"wake-mpmc", 1).expect("send wake");
+    assert!(ring.notify_if_sleeping(&notifier).expect("notify"));
+    assert!(notifier.wait(50).expect("wait"));
+    notifier.clear().expect("clear");
+    let view = ring.try_recv_view().expect("recv woken");
+    assert_eq!(view.as_slice(), b"wake-mpmc");
+    drop(view);
+}

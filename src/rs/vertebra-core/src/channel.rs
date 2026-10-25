@@ -1,15 +1,16 @@
 //! Lock-free ring buffer channel (SPSC implementation).
 
 use core::ptr;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_utils::Backoff;
 
 use crate::buffer::{
-    ABI_VERSION, ChannelMode, MAGIC, RegionState, RingLayout, ShmHeader, SlotHeader,
+    ABI_VERSION, CacheLine, ChannelMode, MAGIC, RegionState, RingLayout, ShmHeader, SlotHeader,
 };
+use crate::notify::Notifier;
 use crate::shm::{ShmError, ShmRegion};
 use crate::sync::{self, SyncError};
 
@@ -147,6 +148,12 @@ pub struct SpscRing {
     mask: u64,
     /// Tracks if a SlotView is currently borrowing data (prevents concurrent borrows).
     slot_borrowed: std::sync::atomic::AtomicBool,
+    /// Producer-local cached snapshot of `read_head` to avoid cross-core SHM loads while space remains.
+    cached_read_head: CacheLine<AtomicU64>,
+    /// Consumer-local cached snapshot of `write_head` to avoid cross-core SHM loads while draining bursts.
+    cached_write_head: CacheLine<AtomicU64>,
+    /// Last observed `ShmHeader.generation` to invalidate local head caches across `reset()`.
+    cached_generation: AtomicU32,
 }
 
 unsafe impl Send for SpscRing {}
@@ -199,6 +206,8 @@ impl SpscRing {
         header_ref.wait_write.0.store(0, Ordering::Relaxed);
         header_ref.send_waiters.0.store(0, Ordering::Relaxed);
         header_ref.recv_waiters.0.store(0, Ordering::Relaxed);
+        header_ref.consumer_sleeping.0.store(0, Ordering::Relaxed);
+        header_ref.active_flags.0.store(0, Ordering::Relaxed);
         unsafe { Self::from_region(region, layout) }
     }
 
@@ -232,6 +241,10 @@ impl SpscRing {
         }
         // SAFETY: region is a valid shared memory mapping.
         let header = region.as_ptr().cast::<ShmHeader>();
+        let header_ref = unsafe { &*header };
+        let init_read = header_ref.read_head.0.load(Ordering::Acquire);
+        let init_write = header_ref.write_head.0.load(Ordering::Acquire);
+        let init_gen = header_ref.generation.load(Ordering::Acquire);
         let data = unsafe { region.as_ptr().add(layout.header_size) };
         Ok(Self {
             region,
@@ -240,6 +253,9 @@ impl SpscRing {
             layout,
             mask: (layout.slots as u64).wrapping_sub(1),
             slot_borrowed: std::sync::atomic::AtomicBool::new(false),
+            cached_read_head: CacheLine(AtomicU64::new(init_read)),
+            cached_write_head: CacheLine(AtomicU64::new(init_write)),
+            cached_generation: AtomicU32::new(init_gen),
         })
     }
 
@@ -270,10 +286,110 @@ impl SpscRing {
     /// where the actual recv will use proper Acquire ordering.
     #[inline]
     pub fn has_data(&self) -> bool {
-        // Use Relaxed for spin loop efficiency - try_recv uses Acquire
+        self.sync_generation();
         let head = self.read_head().load(Ordering::Relaxed);
+        let cached_tail = self.cached_write_head.0.load(Ordering::Acquire);
+        if head != cached_tail {
+            return true;
+        }
         let tail = self.write_head().load(Ordering::Relaxed);
         head != tail
+    }
+
+    /// Check if data is available using `Acquire` ordering on both cursors.
+    #[inline]
+    pub fn has_data_acquire(&self) -> bool {
+        self.read_head().load(Ordering::Acquire) != self.write_head().load(Ordering::Acquire)
+    }
+
+    #[inline]
+    fn sync_generation(&self) {
+        let generation = unsafe { (*self.header).generation.load(Ordering::Acquire) };
+        let cached = self.cached_generation.load(Ordering::Relaxed);
+        if generation != cached {
+            let read = self.read_head().load(Ordering::Acquire);
+            let write = self.write_head().load(Ordering::Acquire);
+            self.cached_read_head.0.store(read, Ordering::Release);
+            self.cached_write_head.0.store(write, Ordering::Release);
+            self.cached_generation.store(generation, Ordering::Release);
+        }
+    }
+
+    #[inline]
+    fn load_consumer_tail(&self, head: u64) -> u64 {
+        self.sync_generation();
+        let mut tail = self.cached_write_head.0.load(Ordering::Acquire);
+        if head == tail {
+            tail = self.write_head().load(Ordering::Acquire);
+            self.cached_write_head.0.store(tail, Ordering::Release);
+        }
+        tail
+    }
+
+    #[inline]
+    fn has_producer_space(&self, next: u64) -> bool {
+        self.sync_generation();
+        let mut head = self.cached_read_head.0.load(Ordering::Acquire);
+        if next == head {
+            head = self.read_head().load(Ordering::Acquire);
+            self.cached_read_head.0.store(head, Ordering::Release);
+            if next == head {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Access the Dekker `consumer_sleeping` flag in `ShmHeader`.
+    #[inline]
+    pub fn consumer_sleeping(&self) -> &AtomicU32 {
+        unsafe { &(*self.header).consumer_sleeping.0 }
+    }
+
+    /// Access the `active_flags` bitmask in `ShmHeader`.
+    #[inline]
+    pub fn active_flags(&self) -> &AtomicU32 {
+        unsafe { &(*self.header).active_flags.0 }
+    }
+
+    /// Arm the Dekker `consumer_sleeping` flag (`1`) and re-verify the ring is empty.
+    ///
+    /// Returns `true` when the ring remains empty and the caller may safely block on its
+    /// `Notifier`; returns `false` (and resets `consumer_sleeping` to `0`) if unread data is
+    /// already present.
+    #[inline]
+    pub fn prepare_sleep(&self) -> bool {
+        self.consumer_sleeping().store(1, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.read_head().load(Ordering::Acquire) != self.write_head().load(Ordering::Acquire) {
+            self.consumer_sleeping().store(0, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    /// Disarm the Dekker `consumer_sleeping` flag (`0`) after waking or cancelling a wait.
+    #[inline]
+    pub fn cancel_sleep(&self) {
+        self.consumer_sleeping().store(0, Ordering::SeqCst);
+    }
+
+    /// Atomically check and clear `consumer_sleeping` after publishing writes (`SeqCst` Dekker).
+    #[inline]
+    pub fn should_notify_and_clear(&self) -> bool {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        self.consumer_sleeping().swap(0, Ordering::SeqCst) != 0
+    }
+
+    /// Notify `notifier` only if the consumer has armed `consumer_sleeping == 1`.
+    #[inline]
+    pub fn notify_if_sleeping(&self, notifier: &Notifier) -> std::io::Result<bool> {
+        if self.should_notify_and_clear() {
+            notifier.notify()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub fn try_send(&self, payload: &[u8], flags: u32) -> Result<(), ChannelError> {
@@ -284,9 +400,8 @@ impl SpscRing {
             });
         }
         let tail = self.write_head().load(Ordering::Relaxed);
-        let head = self.read_head().load(Ordering::Acquire);
         let next = tail.wrapping_add(1) & self.mask;
-        if next == head {
+        if !self.has_producer_space(next) {
             return Err(ChannelError::Full);
         }
         unsafe {
@@ -307,9 +422,8 @@ impl SpscRing {
             });
         }
         let tail = self.write_head().load(Ordering::Relaxed);
-        let head = self.read_head().load(Ordering::Acquire);
         let next = tail.wrapping_add(1) & self.mask;
-        if next == head {
+        if !self.has_producer_space(next) {
             return Err(ChannelError::Full);
         }
         struct SpscSendGuard {
@@ -431,10 +545,19 @@ impl SpscRing {
     where
         F: FnMut(&mut [u8]),
     {
+        let mut spins = 0u32;
+        let backoff = Backoff::new();
         loop {
             match self.try_send_with(len, flags, &mut writer) {
                 Ok(()) => return Ok(()),
                 Err(ChannelError::Full) => {
+                    if spins < 32 {
+                        spins += 1;
+                        backoff.spin();
+                        continue;
+                    }
+                    spins = 0;
+                    backoff.reset();
                     self.park_send(None)?;
                 }
                 Err(err) => return Err(err),
@@ -443,10 +566,19 @@ impl SpscRing {
     }
 
     pub fn send(&self, payload: &[u8], flags: u32) -> Result<(), ChannelError> {
+        let mut spins = 0u32;
+        let backoff = Backoff::new();
         loop {
             match self.try_send(payload, flags) {
                 Ok(()) => return Ok(()),
                 Err(ChannelError::Full) => {
+                    if spins < 32 {
+                        spins += 1;
+                        backoff.spin();
+                        continue;
+                    }
+                    spins = 0;
+                    backoff.reset();
                     self.park_send(None)?;
                 }
                 Err(err) => return Err(err),
@@ -461,10 +593,22 @@ impl SpscRing {
         timeout: Duration,
     ) -> Result<bool, ChannelError> {
         let deadline = Instant::now() + timeout;
+        let mut spins = 0u32;
+        let backoff = Backoff::new();
         loop {
             match self.try_send(payload, flags) {
                 Ok(()) => return Ok(true),
                 Err(ChannelError::Full) => {
+                    if spins < 32 {
+                        if Instant::now() >= deadline {
+                            return Ok(false);
+                        }
+                        spins += 1;
+                        backoff.spin();
+                        continue;
+                    }
+                    spins = 0;
+                    backoff.reset();
                     if !self.park_send(Some(deadline))? {
                         return Ok(false);
                     }
@@ -479,7 +623,7 @@ impl SpscRing {
             return Err(ChannelError::SlotBorrowed);
         }
         let head = self.read_head().load(Ordering::Relaxed);
-        let tail = self.write_head().load(Ordering::Acquire);
+        let tail = self.load_consumer_tail(head);
         if head == tail {
             return Err(ChannelError::Empty);
         }
@@ -494,7 +638,7 @@ impl SpscRing {
             return Err(ChannelError::SlotBorrowed);
         }
         let head = self.read_head().load(Ordering::Relaxed);
-        let tail = self.write_head().load(Ordering::Acquire);
+        let tail = self.load_consumer_tail(head);
         if head == tail {
             return Err(ChannelError::Empty);
         }
@@ -628,7 +772,16 @@ impl SpscRing {
     /// Only one SlotView can be active at a time per ring. The next recv will
     /// return `SlotBorrowed` until the current SlotView is released.
     pub fn try_recv_view(self: &Arc<Self>) -> Result<SlotView, ChannelError> {
-        // Check if a slot is already borrowed
+        if self.slot_borrowed.load(Ordering::Acquire) {
+            return Err(ChannelError::SlotBorrowed);
+        }
+
+        let head = self.read_head().load(Ordering::Relaxed);
+        let tail = self.load_consumer_tail(head);
+        if head == tail {
+            return Err(ChannelError::Empty);
+        }
+
         if self
             .slot_borrowed
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -638,9 +791,8 @@ impl SpscRing {
         }
 
         let head = self.read_head().load(Ordering::Acquire);
-        let tail = self.write_head().load(Ordering::Acquire);
+        let tail = self.load_consumer_tail(head);
         if head == tail {
-            // Release the borrow since there's no data
             self.slot_borrowed.store(false, Ordering::Release);
             return Err(ChannelError::Empty);
         }
@@ -774,6 +926,97 @@ impl SpscRing {
         results
     }
 
+    /// Drain up to `max_items` slots in-place without allocating heap `Vec<u8>` buffers,
+    /// advancing `read_head` and waking waiting senders once for the entire drained batch.
+    pub fn drain_with<F>(&self, max_items: usize, mut f: F) -> Result<usize, ChannelError>
+    where
+        F: FnMut(&[u8], u32),
+    {
+        if max_items == 0 {
+            return Ok(0);
+        }
+        if self.slot_borrowed.load(Ordering::Acquire) {
+            return Err(ChannelError::SlotBorrowed);
+        }
+
+        let initial_head = self.read_head().load(Ordering::Relaxed);
+        let initial_tail = self.load_consumer_tail(initial_head);
+        if initial_head == initial_tail {
+            return Ok(0);
+        }
+
+        if self
+            .slot_borrowed
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(ChannelError::SlotBorrowed);
+        }
+
+        struct DrainCommitGuard<'a> {
+            ring: &'a SpscRing,
+            head: u64,
+            count: usize,
+        }
+        impl Drop for DrainCommitGuard<'_> {
+            fn drop(&mut self) {
+                if self.count > 0 {
+                    self.ring.read_head().store(self.head, Ordering::Release);
+                    self.ring
+                        .wait_read_ptr()
+                        .fetch_add(self.count as u32, Ordering::SeqCst);
+                    if self.ring.send_waiters().load(Ordering::SeqCst) > 0 {
+                        let _ = sync::wake_all(self.ring.wait_read_ptr());
+                    }
+                }
+                self.ring.slot_borrowed.store(false, Ordering::Release);
+            }
+        }
+
+        let head = self.read_head().load(Ordering::Acquire);
+        let mut tail = self.load_consumer_tail(head);
+        if head == tail {
+            self.slot_borrowed.store(false, Ordering::Release);
+            return Ok(0);
+        }
+
+        let mut guard = DrainCommitGuard {
+            ring: self,
+            head,
+            count: 0,
+        };
+        let cap = self.payload_capacity();
+
+        loop {
+            while guard.head != tail && guard.count < max_items {
+                // SAFETY: guard.head != tail and Acquire load of write_head synchronized slot writes.
+                let (data_ptr, length, flags) = unsafe { self.peek_slot(guard.head) };
+                if length > cap {
+                    return Err(ChannelError::CorruptedSlot);
+                }
+                // SAFETY: length <= payload_capacity() and slot remains borrowed until DrainCommitGuard drops.
+                let slice = unsafe { core::slice::from_raw_parts(data_ptr, length) };
+                guard.head = guard.head.wrapping_add(1) & self.mask;
+                guard.count += 1;
+                f(slice, flags);
+            }
+
+            if guard.count >= max_items {
+                break;
+            }
+            let fresh_tail = self.write_head().load(Ordering::Acquire);
+            if fresh_tail == tail {
+                break;
+            }
+            self.cached_write_head
+                .0
+                .store(fresh_tail, Ordering::Release);
+            tail = fresh_tail;
+        }
+
+        Ok(guard.count)
+    }
+
     /// Helper to read a slot into a new Vec without requiring a pre-allocated buffer.
     ///
     /// # Safety
@@ -804,10 +1047,18 @@ impl SpscRing {
         self.wait_write_ptr().store(0, Ordering::Release);
         self.send_waiters().store(0, Ordering::Release);
         self.recv_waiters().store(0, Ordering::Release);
+        self.consumer_sleeping().store(0, Ordering::Release);
+        self.active_flags().store(0, Ordering::Release);
+        self.cached_read_head.0.store(0, Ordering::Release);
+        self.cached_write_head.0.store(0, Ordering::Release);
         self.slot_borrowed.store(false, Ordering::Release);
         // Bump generation to invalidate any stale references
         let header = unsafe { &*self.header };
-        header.generation.fetch_add(1, Ordering::Release);
+        let next_gen = header
+            .generation
+            .fetch_add(1, Ordering::Release)
+            .wrapping_add(1);
+        self.cached_generation.store(next_gen, Ordering::Release);
     }
 
     fn read_head(&self) -> &core::sync::atomic::AtomicU64 {
@@ -914,6 +1165,88 @@ impl SpscRing {
     }
 }
 
+/// Zero-copy view into an [`MpmcRing`] slot.
+///
+/// Holds a reference to the ring buffer and defers advancing the slot's
+/// sequence number (`head + mask + 1`) until the view is dropped or explicitly
+/// released. Multiple `MpmcSlotView`s for distinct slots may coexist concurrently.
+pub struct MpmcSlotView {
+    ring: Arc<MpmcRing>,
+    slot_index: usize,
+    release_sequence: u64,
+    data_ptr: *const u8,
+    length: usize,
+    flags: u32,
+    released: bool,
+}
+
+// SAFETY: MpmcSlotView holds an Arc<MpmcRing> keeping the underlying SHM region mapped,
+// and the slot remains exclusively owned by this consumer until release_sequence is stored.
+unsafe impl Send for MpmcSlotView {}
+unsafe impl Sync for MpmcSlotView {}
+
+impl MpmcSlotView {
+    /// Get the payload data as a byte slice (zero-copy).
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: data_ptr points to valid memory in the ring slot with validated length,
+        // and the slot cannot be overwritten until release() publishes release_sequence.
+        unsafe { std::slice::from_raw_parts(self.data_ptr, self.length) }
+    }
+
+    /// Get the payload length.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.length
+    }
+
+    /// Check if payload is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+
+    /// Get the message flags.
+    #[inline]
+    pub fn flags(&self) -> u32 {
+        self.flags
+    }
+
+    /// Explicitly release the slot back to the MPMC ring.
+    pub fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        self.ring
+            .sequence(self.slot_index)
+            .store(self.release_sequence, Ordering::Release);
+    }
+}
+
+impl core::fmt::Debug for MpmcSlotView {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MpmcSlotView")
+            .field("slot_index", &self.slot_index)
+            .field("length", &self.length)
+            .field("flags", &self.flags)
+            .field("released", &self.released)
+            .finish()
+    }
+}
+
+impl Drop for MpmcSlotView {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl AsRef<[u8]> for MpmcSlotView {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
 #[derive(Debug)]
 pub struct MpmcRing {
     /// Keeps the shared memory region alive for the lifetime of the ring.
@@ -921,7 +1254,7 @@ pub struct MpmcRing {
     #[allow(dead_code)] // Intentional: Arc kept alive for memory lifetime, not accessed
     region: Arc<ShmRegion>,
     header: *mut ShmHeader,
-    sequences: *mut AtomicU64,
+    sequences: *mut CacheLine<AtomicU64>,
     data: *mut u8,
     layout: RingLayout,
     mask: u64,
@@ -972,12 +1305,17 @@ impl MpmcRing {
         header_ref.wait_write.0.store(0, Ordering::Relaxed);
         header_ref.send_waiters.0.store(0, Ordering::Relaxed);
         header_ref.recv_waiters.0.store(0, Ordering::Relaxed);
+        header_ref.consumer_sleeping.0.store(0, Ordering::Relaxed);
+        header_ref.active_flags.0.store(0, Ordering::Relaxed);
 
-        // Initialize sequences
+        // Initialize cache-line-padded sequences
         unsafe {
-            let sequences = region.as_ptr().add(layout.seq_offset()).cast::<AtomicU64>();
+            let sequences = region
+                .as_ptr()
+                .add(layout.seq_offset())
+                .cast::<CacheLine<AtomicU64>>();
             for i in 0..layout.slots {
-                (*sequences.add(i)).store(i as u64, Ordering::Relaxed);
+                (*sequences.add(i)).0.store(i as u64, Ordering::Relaxed);
             }
             Self::from_region(region, layout)
         }
@@ -1014,7 +1352,12 @@ impl MpmcRing {
             return Err(ChannelError::InvalidLayout);
         }
         let header = region.as_ptr().cast::<ShmHeader>();
-        let sequences = unsafe { region.as_ptr().add(layout.seq_offset()).cast::<AtomicU64>() };
+        let sequences = unsafe {
+            region
+                .as_ptr()
+                .add(layout.seq_offset())
+                .cast::<CacheLine<AtomicU64>>()
+        };
         let data = unsafe { region.as_ptr().add(layout.ring_offset()) };
         Ok(Self {
             region,
@@ -1080,7 +1423,64 @@ impl MpmcRing {
     }
 
     fn sequence(&self, index: usize) -> &AtomicU64 {
-        unsafe { &*self.sequences.add(index) }
+        unsafe { &(*self.sequences.add(index)).0 }
+    }
+
+    /// Access the Dekker `consumer_sleeping` flag in `ShmHeader`.
+    #[inline]
+    pub fn consumer_sleeping(&self) -> &AtomicU32 {
+        unsafe { &(*self.header).consumer_sleeping.0 }
+    }
+
+    /// Access the `active_flags` bitmask in `ShmHeader`.
+    #[inline]
+    pub fn active_flags(&self) -> &AtomicU32 {
+        unsafe { &(*self.header).active_flags.0 }
+    }
+
+    /// Check whether the current head slot has a committed message ready to claim.
+    #[inline]
+    pub fn has_ready_slot(&self) -> bool {
+        let head = self.head().load(Ordering::Acquire);
+        let index = (head & self.mask) as usize;
+        let seq = self.sequence(index).load(Ordering::Acquire);
+        (seq as i64 - (head + 1) as i64) >= 0
+    }
+
+    /// Arm the Dekker `consumer_sleeping` flag (`1`) and re-verify no committed slot is ready.
+    #[inline]
+    pub fn prepare_sleep(&self) -> bool {
+        self.consumer_sleeping().store(1, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.has_ready_slot() {
+            self.consumer_sleeping().store(0, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    /// Disarm the Dekker `consumer_sleeping` flag (`0`).
+    #[inline]
+    pub fn cancel_sleep(&self) {
+        self.consumer_sleeping().store(0, Ordering::SeqCst);
+    }
+
+    /// Atomically check and clear `consumer_sleeping` after publishing a slot (`SeqCst` Dekker).
+    #[inline]
+    pub fn should_notify_and_clear(&self) -> bool {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        self.consumer_sleeping().swap(0, Ordering::SeqCst) != 0
+    }
+
+    /// Notify `notifier` only if the consumer has armed `consumer_sleeping == 1`.
+    #[inline]
+    pub fn notify_if_sleeping(&self, notifier: &Notifier) -> std::io::Result<bool> {
+        if self.should_notify_and_clear() {
+            notifier.notify()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub fn try_send(&self, payload: &[u8], flags: u32) -> Result<(), ChannelError> {
@@ -1334,6 +1734,69 @@ impl MpmcRing {
         }
     }
 
+    /// Try to receive a message as a zero-copy [`MpmcSlotView`].
+    ///
+    /// Multiple `MpmcSlotView`s for distinct slots may coexist simultaneously; each slot's
+    /// sequence counter is released independently when its view is dropped.
+    pub fn try_recv_view(self: &Arc<Self>) -> Result<MpmcSlotView, ChannelError> {
+        let mut head = self.head().load(Ordering::Relaxed);
+        loop {
+            let index = (head & self.mask) as usize;
+            let seq = self.sequence(index).load(Ordering::Acquire);
+            let diff = seq as i64 - (head + 1) as i64;
+
+            if diff == 0 {
+                match self.head().compare_exchange(
+                    head,
+                    head + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        let release_sequence = head + self.mask + 1;
+                        let (len, flags, payload_ptr) = unsafe {
+                            let slot = self.slot_ptr(index);
+                            let header = &*slot.cast::<SlotHeader>();
+                            (
+                                header.len as usize,
+                                header.flags,
+                                slot.add(core::mem::size_of::<SlotHeader>()),
+                            )
+                        };
+                        if (flags & SLOT_FLAG_ABORTED) != 0 {
+                            self.sequence(index)
+                                .store(release_sequence, Ordering::Release);
+                            head = self.head().load(Ordering::Relaxed);
+                            continue;
+                        }
+                        if len > self.payload_capacity() {
+                            self.sequence(index)
+                                .store(release_sequence, Ordering::Release);
+                            return Err(ChannelError::CorruptedSlot);
+                        }
+                        return Ok(MpmcSlotView {
+                            ring: Arc::clone(self),
+                            slot_index: index,
+                            release_sequence,
+                            data_ptr: payload_ptr,
+                            length: len,
+                            flags,
+                            released: false,
+                        });
+                    }
+                    Err(actual) => {
+                        head = actual;
+                        continue;
+                    }
+                }
+            } else if diff < 0 {
+                return Err(ChannelError::Empty);
+            } else {
+                head = self.head().load(Ordering::Relaxed);
+            }
+        }
+    }
+
     /// Zero-copy receive: claim a slot and pass a slice of its payload and flags to `reader`
     /// before releasing the slot's sequence number.
     pub fn try_recv_with<F, R>(&self, reader: F) -> Result<Option<(R, u32)>, ChannelError>
@@ -1517,10 +1980,14 @@ impl MpmcRing {
     pub unsafe fn reset(&self) {
         self.head().store(0, Ordering::Release);
         self.tail().store(0, Ordering::Release);
+        self.consumer_sleeping().store(0, Ordering::Release);
+        self.active_flags().store(0, Ordering::Release);
         // Reset sequences
         unsafe {
             for i in 0..self.layout.slots {
-                (*self.sequences.add(i)).store(i as u64, Ordering::Release);
+                (*self.sequences.add(i))
+                    .0
+                    .store(i as u64, Ordering::Release);
             }
             // Bump generation
             let header = &*self.header;

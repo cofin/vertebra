@@ -1,11 +1,12 @@
 ---
 type: Pattern
 title: "Python Module Structure, Class Layout & PEP 695 Typing"
-description: "Python 3.12+ module layout, PEP 562 lazy root exports, msgspec.Struct value objects, class member ordering, zero inline comments, and PEP 695/604/585 typing."
+description: "Python 3.12+ module layout, PEP 810/562 lazy root exports, msgspec.Struct value objects, class member ordering, zero inline comments, and PEP 695/604/585 typing."
 status: stable
 tags: [patterns, python, code-style, typing, conventions]
 sources:
   - resource: src/py/vertebra/__init__.py
+  - resource: src/py/vertebra/framework/__init__.py
   - resource: src/py/vertebra/framework/_app.py
   - resource: src/py/vertebra/framework/_router.py
   - resource: src/py/vertebra/utils/module_loader.py
@@ -17,11 +18,11 @@ sources:
 
 # Python Module Structure, Class Layout & PEP 695 Typing
 
-All Python code under [`src/py/vertebra/`](../../../../../src/py/vertebra/__init__.py) and [`src/py/tests/`](../../../../../src/py/tests/conftest.py) targets Python 3.12+ (`3.12`, `3.13`, `3.14`, `3.14t`) under strict Ruff (`PLC0415` enforced) and Mypy gates configured in [`pyproject.toml`](../../../../../pyproject.toml).
+All Python code under [`src/py/vertebra/`](../../../../../src/py/vertebra/__init__.py) and [`src/py/tests/`](../../../../../src/py/tests/conftest.py) targets Python 3.12+ (`3.12`, `3.13`, `3.14`, `3.14t`, `3.15`, `3.15t`) under strict Ruff (`PLC0415` enforced) and Mypy gates configured in [`pyproject.toml`](../../../../../pyproject.toml).
 
-## 1. Module Layout & PEP 562 Lazy Root Exports
+## 1. Module Layout, PEP 810 `__lazy_modules__` & PEP 562 Lazy Root Exports
 
-Every module follows a fixed top-to-bottom layout: module docstring $\to$ grouped top-level imports (`stdlib`, third-party, local) $\to$ `if TYPE_CHECKING:` $\to$ `__all__` $\to$ public classes and functions $\to$ module-scoped `_...` helpers. The top-level [`vertebra/__init__.py`](../../../../../src/py/vertebra/__init__.py) uses PEP 562 `__getattr__` lazy loading so `import vertebra` does not import the framework, server, or native extensions until first attribute access (whereas subpackage `__init__.py` files such as `vertebra/framework/__init__.py` and `vertebra/build/__init__.py` re-export their public symbols eagerly):
+Every module follows a fixed top-to-bottom layout: module docstring $\to$ grouped top-level imports (`stdlib`, third-party, local) $\to$ `if TYPE_CHECKING:` $\to$ `__all__` $\to$ public classes and functions $\to$ module-scoped `_...` helpers. Both [`vertebra/__init__.py`](../../../../../src/py/vertebra/__init__.py) and [`vertebra/framework/__init__.py`](../../../../../src/py/vertebra/framework/__init__.py) declare PEP 810 `__lazy_modules__` (honored natively by Python 3.15+ while remaining a harmless `list[str]` on 3.12–3.14), and [`vertebra/__init__.py`](../../../../../src/py/vertebra/__init__.py) pairs it with PEP 562 `__getattr__` lazy loading so `import vertebra` does not import the framework, server, or native extensions until first attribute access:
 
 <!-- truth: start -->
 ```python

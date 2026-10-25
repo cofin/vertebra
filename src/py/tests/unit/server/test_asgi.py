@@ -2,11 +2,20 @@
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
 
-from vertebra._vertebra import AsgiScope, Request
+from vertebra._vertebra import (
+    AsgiProtocol,
+    AsgiScope,
+    PyEmptyAwaitable,
+    PyValueAwaitable,
+    Request,
+    drive_asgi_batch,
+    init_transport,
+)
 from vertebra.server._asgi._queues import (
     AsgiProtocolError,
     AsgiReceive,
@@ -524,3 +533,127 @@ def test_asgi_runner_handle_path_convenience() -> None:
     assert seen[0]["path"] == "/test/path"
     assert seen[0]["method"] == "POST"
     assert seen[0]["body"] == b"payload"
+
+
+def test_rust_empty_and_value_awaitables_complete_without_suspension() -> None:
+    """Verify PyEmptyAwaitable and PyValueAwaitable resolve synchronously and thread-safely."""
+    shared_empty = PyEmptyAwaitable()
+    shared_val = PyValueAwaitable({"ok": True})
+
+    def _step_worker(_idx: int) -> tuple[object, object]:
+        coro_empty = shared_empty.__await__()
+        with pytest.raises(StopIteration) as empty_stop:
+            next(coro_empty)
+        coro_val = shared_val.__await__()
+        with pytest.raises(StopIteration) as val_stop:
+            next(coro_val)
+        return (empty_stop.value.value, val_stop.value.value)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(_step_worker, range(64)))
+
+    assert all(r == (None, {"ok": True}) for r in results)
+
+
+@pytest.mark.anyio
+async def test_asgi_protocol_unary_multi_chunk_and_disconnect() -> None:
+    """Verify AsgiProtocol state machine across unary, multi-chunk, and disconnect events."""
+    proto = AsgiProtocol(b"inbound-body", request_id=41)
+    first_msg = await proto.receive()
+    assert first_msg == {"type": "http.request", "body": b"inbound-body", "more_body": False}
+
+    await proto.send(
+        {
+            "type": "http.response.start",
+            "status": 202,
+            "headers": [(b"content-type", b"text/plain"), (b"x-mode", b"rust")],
+        }
+    )
+    assert proto.started is True
+    assert proto.complete is False
+    await proto.send({"type": "http.response.body", "body": b"part-a|", "more_body": True})
+    assert proto.complete is False
+    await proto.send({"type": "http.response.body", "body": b"part-b", "more_body": False})
+    assert proto.complete is True
+
+    resp = proto.take_response()
+    assert resp.status == 202
+    assert resp.body == b"part-a|part-b"
+    assert resp.request_id == 41
+    assert (b"x-mode", b"rust") in resp.headers
+
+    proto.notify_disconnect()
+    disc_msg = await proto.receive()
+    assert disc_msg == {"type": "http.disconnect"}
+
+
+@pytest.mark.anyio
+async def test_drive_asgi_batch_unary_zero_task_and_suspending_fallback() -> None:
+    """Verify drive_asgi_batch executes unary handlers with zero tasks and resumes suspending coroutines."""
+    init_transport()
+    seen_bodies: list[bytes] = []
+    loop = asyncio.get_running_loop()
+    orig_create_task = loop.create_task
+    task_creations: list[asyncio.Task[Any]] = []
+
+    def tracked_create_task(coro: Any, **kwargs: Any) -> asyncio.Task[Any]:
+        t = orig_create_task(coro, **kwargs)
+        task_creations.append(t)
+        return t
+
+    async def unary_app(scope: Any, receive: Any, send: Any) -> None:
+        event = await receive()
+        seen_bodies.append(event["body"])
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain")],
+            }
+        )
+        await send({"type": "http.response.body", "body": scope["path"].encode("utf-8")})
+
+    reqs = [
+        Request.from_parts("POST", "/u1", b"b1", request_id=501),
+        Request.from_parts("POST", "/u2", b"b2", request_id=502),
+    ]
+    create_task_attr = "create_task"
+    setattr(loop, create_task_attr, tracked_create_task)
+    try:
+        inline_count = drive_asgi_batch(unary_app, reqs, loop_obj=loop)
+    finally:
+        setattr(loop, create_task_attr, orig_create_task)
+
+    assert inline_count == 2
+    assert len(task_creations) == 0
+    assert seen_bodies == [b"b1", b"b2"]
+
+    completed_async: list[str] = []
+
+    async def mixed_app(scope: Any, receive: Any, send: Any) -> None:
+        path = scope["path"]
+        if path == "/boom":
+            raise RuntimeError("boom")
+        if path == "/sleep":
+            await asyncio.sleep(0.005)
+        await receive()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+        completed_async.append(path)
+
+    mixed_reqs = [
+        Request.from_parts("GET", "/fast", b"", request_id=601),
+        Request.from_parts("GET", "/sleep", b"", request_id=602),
+        Request.from_parts("GET", "/boom", b"", request_id=603),
+    ]
+    task_creations.clear()
+    setattr(loop, create_task_attr, tracked_create_task)
+    try:
+        inline_mixed = drive_asgi_batch(mixed_app, mixed_reqs, loop_obj=loop)
+        assert inline_mixed == 2
+        assert len(task_creations) == 1
+        await asyncio.gather(*task_creations)
+    finally:
+        setattr(loop, create_task_attr, orig_create_task)
+
+    assert completed_async == ["/fast", "/sleep"]

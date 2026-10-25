@@ -1,28 +1,42 @@
-//! Arena-backed batch bridge between the HTTP server and Python workers.
+//! Arena-backed and zero-copy in-process batch bridge between the HTTP server and Python workers.
 //!
-//! Requests are written into a shared arena + data slab. When a batch is
-//! sealed, the bridge snapshots the arena+slab atomically and sends the
-//! sealed snapshot through the channel. The arena is then reset for the next
-//! batch without exposing post-seal writes to the worker.
+//! Embedded requests can either be submitted zero-copy as [`InProcessRequest`]
+//! batches (`Bytes`-backed without slab limits or mutex locking) or written
+//! into the shared arena + data slab and sealed atomically.
 //!
-//! The response path uses a `tokio::sync::mpsc` channel for true async
-//! notification — no spawn_blocking, no polling, no sleep.
+//! Responses complete either directly through a registered [`ResponseSink`]
+//! callback on the submitting worker thread or through an unbounded lock-free
+//! `tokio::sync::mpsc` channel.
 
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::Duration;
 
+use crate::layout::CacheLine;
+use crate::notify::Notifier;
 use crate::protocol::codec::CompressionCodec;
 use crate::transport::{
-    BatchSnapshot, BufferPool, DataSlab, Transport, TransportArena, TransportError, TransportNode,
+    BatchSnapshot, BufferPool, DataSlab, InProcessRequest, Transport, TransportArena,
+    TransportError, TransportNode, iter_raw_headers,
 };
 
+/// Direct response completion callback registered by the embedded HTTP dispatcher.
+pub type ResponseSink = Arc<dyn Fn(BridgeResponse) + Send + Sync>;
+
 /// Response data sent from Python workers back to the HTTP server.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BridgeResponse {
     pub request_id: u64,
     pub status: u16,
-    pub headers: Vec<(Vec<u8>, Vec<u8>)>,
+    pub headers_raw: bytes::Bytes,
     pub body: bytes::Bytes,
+}
+
+impl BridgeResponse {
+    /// Iterate zero-copy `(name, value)` byte pairs from [`Self::headers_raw`].
+    pub fn iter_headers(&self) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
+        iter_raw_headers(&self.headers_raw)
+    }
 }
 
 /// Request data to be written into the transport arena and slab.
@@ -40,45 +54,28 @@ pub struct WriteRequest<'a> {
 /// Global batch bridge singleton.
 static BRIDGE: OnceLock<BatchBridge> = OnceLock::new();
 
-/// Arena-backed bidirectional bridge between the HTTP server and Python workers.
-///
-/// # Request path (zero-copy)
-///
-/// The dispatcher writes each request's variable-length data (path, query,
-/// headers, body) into a [`DataSlab`] and pushes a fixed-size
-/// [`TransportNode`] into the [`TransportArena`]. When the batch is sealed,
-/// the bridge snapshots those buffers and sends the immutable snapshot
-/// through the channel.
-///
-/// The worker calls `poll_batch()`, which receives that pre-sealed
-/// [`BatchSnapshot`] as an `Arc` shared across all `Request`
-/// proxies in the batch.
-///
-/// # Response path
-///
-/// Python constructs owned `BridgeResponse` values and submits them through
-/// a `tokio::sync::mpsc` channel. The HTTP server receives responses via
-/// `recv_responses().await` — fully async, no spawn_blocking needed.
+/// Bidirectional in-process bridge between the HTTP server and Python workers.
 pub struct BatchBridge {
-    // Request path: arena + slab + sealed snapshots.
-    // Multi-consumer safe via crossbeam MPMC — N Python worker threads can
-    // call poll_batch() concurrently; each batch is delivered to exactly one.
     arena: TransportArena,
     slab: DataSlab,
     write_lock: Mutex<()>,
     batch_tx: crossbeam_channel::Sender<Arc<BatchSnapshot>>,
     /// Unified abstraction for batch delivery (MPMC).
     pub transport: Transport,
-    // Zero-copy buffer pool: pre-allocated buffer pairs recycled on snapshot drop
     buffer_pool: Arc<BufferPool>,
-    // Response path: tokio::sync::mpsc for async recv on HTTP server side
-    resp_tx: tokio::sync::mpsc::Sender<Vec<BridgeResponse>>,
-    resp_rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<BridgeResponse>>>,
+    resp_tx: tokio::sync::mpsc::UnboundedSender<Vec<BridgeResponse>>,
+    resp_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Vec<BridgeResponse>>>,
+    fast_sink: OnceLock<ResponseSink>,
+    has_override_sink: AtomicBool,
+    override_sink: RwLock<Option<ResponseSink>>,
+    request_notifier: Option<Notifier>,
+    consumer_sleeping: CacheLine<AtomicBool>,
+    consumer_count: AtomicUsize,
     /// Compression codec for batch sealing. `None` disables compression.
     compression_codec: CompressionCodec,
 }
 
-/// Guard that serializes writes for a single batch.
+/// Guard that serializes writes for a single slab-backed batch.
 pub struct BatchWriter<'a> {
     bridge: &'a BatchBridge,
     _guard: MutexGuard<'a, ()>,
@@ -86,11 +83,6 @@ pub struct BatchWriter<'a> {
 
 impl BatchBridge {
     /// Initialize the global bridge. Call once at startup.
-    ///
-    /// - `arena_capacity`: max requests per batch cycle
-    /// - `slab_capacity`: max bytes for variable-length data per batch
-    /// - `channel_depth`: bounded channel capacity for sealed snapshots
-    /// - `max_workers`: number of consumer threads (for buffer pool sizing)
     pub fn init(
         arena_capacity: usize,
         slab_capacity: usize,
@@ -114,12 +106,9 @@ impl BatchBridge {
         max_workers: usize,
         codec: CompressionCodec,
     ) -> Result<(), &'static str> {
-        let (batch_tx, batch_rx) = crossbeam_channel::bounded(channel_depth);
-        let (resp_tx, resp_rx) = tokio::sync::mpsc::channel(channel_depth);
-        // Pool needs: 1 active write buffer + channel_depth queued + max_workers
-        // being dispatched concurrently. BufferPool::take() falls back to heap
-        // allocation if the pool is exhausted, so this is a performance hint.
-        let pool_size = channel_depth + max_workers.max(1);
+        let (batch_tx, batch_rx) = crossbeam_channel::unbounded();
+        let (resp_tx, resp_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pool_size = channel_depth.max(16) + max_workers.max(1);
         BRIDGE
             .set(BatchBridge {
                 arena: TransportArena::new(arena_capacity),
@@ -130,6 +119,12 @@ impl BatchBridge {
                 buffer_pool: Arc::new(BufferPool::new(pool_size, slab_capacity, arena_capacity)),
                 resp_tx,
                 resp_rx: tokio::sync::Mutex::new(resp_rx),
+                fast_sink: OnceLock::new(),
+                has_override_sink: AtomicBool::new(false),
+                override_sink: RwLock::new(None),
+                request_notifier: Notifier::new().ok(),
+                consumer_sleeping: CacheLine::new(AtomicBool::new(false)),
+                consumer_count: AtomicUsize::new(max_workers.max(1)),
                 compression_codec: codec,
             })
             .map_err(|_| "bridge already initialized")
@@ -140,7 +135,105 @@ impl BatchBridge {
         BRIDGE.get()
     }
 
-    /// Acquire exclusive access for writing one batch to the bridge.
+    /// Update the active consumer worker thread count (`1` enables single-consumer `add_reader` FD).
+    pub fn set_consumer_count(&self, count: usize) {
+        self.consumer_count.store(count.max(1), Ordering::Release);
+    }
+
+    /// Return the pollable request notification FD when operating with a single consumer worker.
+    pub fn request_notify_fd(&self) -> i32 {
+        #[cfg(unix)]
+        {
+            if self.consumer_count.load(Ordering::Acquire) <= 1
+                && let Some(ref notifier) = self.request_notifier
+            {
+                return notifier.as_raw_fd();
+            }
+        }
+        -1
+    }
+
+    /// Drain pending request wakeup signals from the embedded notification handle.
+    pub fn clear_request_notification(&self) -> Result<(), TransportError> {
+        if let Some(ref notifier) = self.request_notifier {
+            notifier.clear().map_err(|_| TransportError::Disconnected)?;
+        }
+        Ok(())
+    }
+
+    /// Non-blocking poll for the next sealed batch snapshot.
+    pub fn try_poll_batch(&self) -> Option<Arc<BatchSnapshot>> {
+        self.transport.poll_batch_async()
+    }
+
+    /// Arm Dekker sleep on the embedded request queue (`true` when empty and safe to park).
+    #[inline]
+    pub fn prepare_request_sleep(&self) -> bool {
+        if self.consumer_count.load(Ordering::Acquire) > 1 || self.request_notifier.is_none() {
+            return false;
+        }
+        self.consumer_sleeping.store(true, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if !self.transport.is_empty() {
+            self.consumer_sleeping.store(false, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    /// Disarm Dekker sleep on the embedded request queue.
+    #[inline]
+    pub fn cancel_request_sleep(&self) {
+        if self.consumer_sleeping.load(Ordering::Relaxed) {
+            self.consumer_sleeping.store(false, Ordering::SeqCst);
+        }
+    }
+
+    #[inline]
+    fn notify_consumer_if_sleeping(&self) {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.consumer_sleeping.load(Ordering::SeqCst)
+            && self.consumer_sleeping.swap(false, Ordering::SeqCst)
+            && let Some(ref notifier) = self.request_notifier
+        {
+            let _ = notifier.notify();
+        }
+    }
+
+    /// Register a direct response completion callback that bypasses the async response channel.
+    pub fn set_response_sink(&self, sink: ResponseSink) {
+        if !self.has_override_sink.load(Ordering::Acquire)
+            && self.fast_sink.set(sink.clone()).is_ok()
+        {
+            return;
+        }
+        *self.override_sink.write().unwrap() = Some(sink);
+        self.has_override_sink.store(true, Ordering::Release);
+    }
+
+    /// Clear any registered direct response completion callback, restoring channel delivery.
+    pub fn clear_response_sink(&self) {
+        *self.override_sink.write().unwrap() = None;
+        self.has_override_sink.store(true, Ordering::Release);
+    }
+
+    /// Submit a zero-copy in-process request batch without acquiring `write_lock` or copying into `DataSlab`.
+    pub fn submit_inprocess_batch(
+        &self,
+        requests: Vec<InProcessRequest>,
+    ) -> Result<(), TransportError> {
+        if requests.is_empty() {
+            return Err(TransportError::EmptyBatch);
+        }
+        let snapshot = Arc::new(BatchSnapshot::from_inprocess(requests));
+        self.batch_tx
+            .send(snapshot)
+            .map_err(|_| TransportError::Disconnected)?;
+        self.notify_consumer_if_sleeping();
+        Ok(())
+    }
+
+    /// Acquire exclusive access for writing one slab-backed batch to the bridge.
     pub fn batch_writer(&self) -> BatchWriter<'_> {
         BatchWriter {
             bridge: self,
@@ -148,46 +241,47 @@ impl BatchBridge {
         }
     }
 
-    /// Write a single request into the arena and slab.
-    ///
-    /// Called by the dispatcher for each request in a batch. The path, query,
-    /// headers, and body bytes are written into the data slab; a compact
-    /// [`TransportNode`] with slab offsets is pushed into the arena.
+    /// Write a single request into the arena and slab, auto-sealing if the current non-empty batch is full.
     pub fn push_request(&self, req: &WriteRequest<'_>) -> Result<(), TransportError> {
         self.batch_writer().push_request(req)
     }
 
     fn push_request_locked(&self, req: &WriteRequest<'_>) -> Result<(), TransportError> {
-        let (path_off, path_len) = self.slab.write(req.path)?;
-        let (query_off, query_len) = match req.query {
-            Some(q) if !q.is_empty() => self.slab.write(q)?,
-            _ => (0, 0),
-        };
-        let (hdr_off, hdr_len) = self.slab.write(req.headers_raw)?;
-        let (body_off, body_len) = self.slab.write(req.body)?;
+        let prev_slab_used = self.slab.used();
+        let write_attempt = (|| -> Result<(), TransportError> {
+            let (path_off, path_len) = self.slab.write(req.path)?;
+            let (query_off, query_len) = match req.query {
+                Some(q) if !q.is_empty() => self.slab.write(q)?,
+                _ => (0, 0),
+            };
+            let (hdr_off, hdr_len) = self.slab.write(req.headers_raw)?;
+            let (body_off, body_len) = self.slab.write(req.body)?;
 
-        self.arena.push(TransportNode {
-            method_tag: req.method_tag,
-            http_version_tag: req.http_version_tag,
-            _pad: [0; 2],
-            handler_id: req.handler_id,
-            correlation_id: req.correlation_id,
-            path_offset: path_off,
-            path_len,
-            query_offset: query_off,
-            query_len,
-            headers_offset: hdr_off,
-            headers_len: hdr_len,
-            body_offset: body_off,
-            body_len,
-        })?;
+            self.arena.push(TransportNode {
+                method_tag: req.method_tag,
+                http_version_tag: req.http_version_tag,
+                _pad: [0; 2],
+                handler_id: req.handler_id,
+                correlation_id: req.correlation_id,
+                path_offset: path_off,
+                path_len,
+                query_offset: query_off,
+                query_len,
+                headers_offset: hdr_off,
+                headers_len: hdr_len,
+                body_offset: body_off,
+                body_len,
+            })?;
+            Ok(())
+        })();
 
-        Ok(())
+        if write_attempt.is_err() {
+            self.slab.truncate_to(prev_slab_used);
+        }
+        write_attempt
     }
 
-    /// Seal the current batch and notify the worker.
-    ///
-    /// Blocks if the previous batch hasn't been consumed (back-pressure).
+    /// Seal the current batch and notify the worker without blocking.
     pub fn seal_batch(&self) -> Result<(), TransportError> {
         self.batch_writer().seal()
     }
@@ -198,20 +292,12 @@ impl BatchBridge {
             return Err(TransportError::EmptyBatch);
         }
 
-        // Zero-copy seal: swap the active buffers with fresh ones from the pool.
-        // take_and_replace is O(1) — a pointer swap, not a memcpy.
         let (fresh_slab, fresh_nodes) = self.buffer_pool.take();
         let slab_data = self.slab.take_and_replace(fresh_slab);
         let node_data = self.arena.take_and_replace(fresh_nodes);
 
-        // Try to compress the slab. If compression reduces size, use the
-        // compressed data and return the original slab buffer to the pool.
-        // Otherwise, use pool-backed snapshot for zero-alloc steady state.
         let snapshot = match self.try_compress_slab(&slab_data) {
             Some((compressed, flags)) => {
-                // Compressed slab is a new allocation — original pool buffers
-                // are dropped (pool will allocate fresh ones on next take()).
-                // The compression overhead dwarfs one allocation.
                 drop(slab_data);
                 Arc::new(BatchSnapshot::new_with_flags(compressed, node_data, flags))
             }
@@ -223,14 +309,11 @@ impl BatchBridge {
         };
         self.batch_tx
             .send(snapshot)
-            .map_err(|_| TransportError::Disconnected)
+            .map_err(|_| TransportError::Disconnected)?;
+        self.notify_consumer_if_sleeping();
+        Ok(())
     }
 
-    /// Try to compress slab data if a codec is configured.
-    ///
-    /// Returns `Some((compressed_bytes, flags))` if compression reduced the
-    /// size. Returns `None` if compression is disabled, or the compressed
-    /// output is larger (small payloads).
     fn try_compress_slab(&self, slab_data: &[u8]) -> Option<(Vec<u8>, u32)> {
         #[cfg(feature = "compression")]
         {
@@ -242,26 +325,77 @@ impl BatchBridge {
                 }
             }
         }
-        let _ = slab_data; // suppress unused warning when compression disabled
+        let _ = slab_data;
         None
     }
 
     /// Poll for the next sealed batch snapshot.
-    ///
-    /// Safe to call concurrently from multiple worker threads — each batch
-    /// is delivered to exactly one consumer (MPMC semantics via Transport).
     pub fn poll_batch(&self, timeout: Duration) -> Option<Arc<BatchSnapshot>> {
         self.transport.poll_batch(timeout)
     }
 
-    /// Submit responses from a synchronous context (e.g., Python worker via FFI).
-    ///
-    /// Uses `blocking_send()` — must NOT be called from within a tokio runtime.
+    #[inline]
+    fn try_dispatch_to_sink_single(&self, response: BridgeResponse) -> Result<(), BridgeResponse> {
+        if !self.has_override_sink.load(Ordering::Acquire) {
+            if let Some(sink) = self.fast_sink.get() {
+                sink(response);
+                return Ok(());
+            }
+            return Err(response);
+        }
+        if let Some(sink) = self.override_sink.read().unwrap().as_ref() {
+            sink(response);
+            return Ok(());
+        }
+        Err(response)
+    }
+
+    #[inline]
+    fn try_dispatch_to_sink_batch(
+        &self,
+        responses: Vec<BridgeResponse>,
+    ) -> Result<(), Vec<BridgeResponse>> {
+        if !self.has_override_sink.load(Ordering::Acquire) {
+            if let Some(sink) = self.fast_sink.get() {
+                for resp in responses {
+                    sink(resp);
+                }
+                return Ok(());
+            }
+            return Err(responses);
+        }
+        if let Some(sink) = self.override_sink.read().unwrap().as_ref() {
+            for resp in responses {
+                sink(resp);
+            }
+            return Ok(());
+        }
+        Err(responses)
+    }
+
+    /// Submit a single response without allocating a wrapper vector when a [`ResponseSink`] is registered.
+    pub fn submit_response(&self, response: BridgeResponse) -> Result<(), TransportError> {
+        match self.try_dispatch_to_sink_single(response) {
+            Ok(()) => Ok(()),
+            Err(resp) => self
+                .resp_tx
+                .send(vec![resp])
+                .map_err(|_| TransportError::Disconnected),
+        }
+    }
+
+    /// Submit responses from either a synchronous or asynchronous context (lock-free, never blocks).
     pub fn submit_responses(
         &self,
         responses: Vec<BridgeResponse>,
     ) -> Result<(), tokio::sync::mpsc::error::SendError<Vec<BridgeResponse>>> {
-        self.resp_tx.blocking_send(responses)
+        if responses.is_empty() {
+            return Ok(());
+        }
+        match self.try_dispatch_to_sink_batch(responses) {
+            Ok(()) => Ok(()),
+            Err(resps) => self.resp_tx.send(resps),
+        }
     }
 
     /// Submit responses from an async context.
@@ -269,20 +403,16 @@ impl BatchBridge {
         &self,
         responses: Vec<BridgeResponse>,
     ) -> Result<(), tokio::sync::mpsc::error::SendError<Vec<BridgeResponse>>> {
-        self.resp_tx.send(responses).await
+        self.submit_responses(responses)
     }
 
-    /// Receive responses asynchronously (called by HTTP server response reader).
-    ///
-    /// Returns `None` when the channel is closed (bridge dropped).
+    /// Receive responses asynchronously when no direct [`ResponseSink`] is registered.
     pub async fn recv_responses(&self) -> Option<Vec<BridgeResponse>> {
         let mut rx = self.resp_rx.lock().await;
         rx.recv().await
     }
 
     /// Non-blocking try_recv for responses.
-    ///
-    /// Safe to call from both sync and async contexts (uses `try_lock`).
     pub fn try_recv_responses(&self) -> Option<Vec<BridgeResponse>> {
         let mut rx = self.resp_rx.try_lock().ok()?;
         rx.try_recv().ok()
@@ -290,9 +420,18 @@ impl BatchBridge {
 }
 
 impl BatchWriter<'_> {
-    /// Write a single request into the batch while holding the batch lock.
+    /// Write a single request into the batch while holding the batch lock, auto-sealing if full.
     pub fn push_request(&self, req: &WriteRequest<'_>) -> Result<(), TransportError> {
-        self.bridge.push_request_locked(req)
+        match self.bridge.push_request_locked(req) {
+            Ok(()) => Ok(()),
+            Err(TransportError::SlabFull(_) | TransportError::ArenaFull(_))
+                if !self.bridge.arena.is_empty() =>
+            {
+                self.bridge.seal_batch_locked()?;
+                self.bridge.push_request_locked(req)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Seal the current batch and release the batch lock.
@@ -312,17 +451,23 @@ mod tests {
     }
 
     fn make_bridge_with_codec(codec: CompressionCodec) -> BatchBridge {
-        let (batch_tx, batch_rx) = crossbeam_channel::bounded(4);
-        let (resp_tx, resp_rx) = tokio::sync::mpsc::channel(4);
+        let (batch_tx, batch_rx) = crossbeam_channel::unbounded();
+        let (resp_tx, resp_rx) = tokio::sync::mpsc::unbounded_channel();
         BatchBridge {
             arena: TransportArena::new(64),
             slab: DataSlab::new(65536),
             write_lock: Mutex::new(()),
             batch_tx,
             transport: Transport::new_in_process(batch_rx),
-            buffer_pool: Arc::new(BufferPool::new(8, 65536, 64)),
+            buffer_pool: Arc::new(BufferPool::new(16, 65536, 64)),
             resp_tx,
             resp_rx: tokio::sync::Mutex::new(resp_rx),
+            fast_sink: OnceLock::new(),
+            has_override_sink: AtomicBool::new(false),
+            override_sink: RwLock::new(None),
+            request_notifier: Notifier::new().ok(),
+            consumer_sleeping: CacheLine::new(AtomicBool::new(false)),
+            consumer_count: AtomicUsize::new(1),
             compression_codec: codec,
         }
     }
@@ -405,19 +550,30 @@ mod tests {
     #[tokio::test]
     async fn response_roundtrip() {
         let bridge = make_bridge();
+        let headers_raw: bytes::Bytes = crate::transport::encode_headers_compact(&[(
+            b"content-type".to_vec(),
+            b"text/plain".to_vec(),
+        )])
+        .into();
         let responses = vec![BridgeResponse {
             request_id: 1,
             status: 200,
-            headers: vec![(b"content-type".to_vec(), b"text/plain".to_vec())],
+            headers_raw,
             body: bytes::Bytes::from_static(b"hello world"),
         }];
-        bridge.resp_tx.send(responses).await.unwrap();
+        bridge.submit_responses(responses).unwrap();
 
         let received = bridge.recv_responses().await.unwrap();
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].request_id, 1);
         assert_eq!(received[0].status, 200);
         assert_eq!(received[0].body.as_ref(), b"hello world");
+        let parsed_headers: Vec<_> = received[0].iter_headers().collect();
+        assert_eq!(parsed_headers.len(), 1);
+        assert_eq!(
+            parsed_headers[0],
+            (&b"content-type"[..], &b"text/plain"[..])
+        );
     }
 
     #[test]
@@ -603,6 +759,219 @@ mod tests {
             h.join().unwrap();
         }
         assert_eq!(received.load(Ordering::Relaxed), num_batches as usize);
+    }
+
+    #[test]
+    fn queue_64_batches_single_thread_without_deadlock() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let bridge = make_bridge();
+            for i in 0..64u64 {
+                let path = format!("/batch/{i}");
+                bridge
+                    .push_request(&wr(0, 1, i, path.as_bytes(), None, b"", b"payload"))
+                    .unwrap();
+                bridge.seal_batch().unwrap();
+            }
+
+            let mut polled = 0usize;
+            while let Some(snap) = bridge.poll_batch(Duration::from_millis(10)) {
+                assert_eq!(snap.len(), 1);
+                let corr = snap.node(0).correlation_id;
+                bridge
+                    .submit_responses(vec![BridgeResponse {
+                        request_id: corr,
+                        status: 200,
+                        headers_raw: bytes::Bytes::new(),
+                        body: bytes::Bytes::from_static(b"ok"),
+                    }])
+                    .unwrap();
+                polled += 1;
+                if polled == 64 {
+                    break;
+                }
+            }
+            assert_eq!(polled, 64);
+
+            let mut drained = 0usize;
+            while let Some(batch_resps) = bridge.try_recv_responses() {
+                drained += batch_resps.len();
+            }
+            assert_eq!(drained, 64);
+            let _ = done_tx.send(());
+        });
+
+        done_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("queuing 64 batches and responses on a single thread deadlocked");
+    }
+
+    #[test]
+    fn inprocess_batch_exceeding_1mib_and_direct_response_sink() {
+        let bridge = make_bridge();
+        let captured = Arc::new(Mutex::new(Vec::<BridgeResponse>::new()));
+        let captured_sink = Arc::clone(&captured);
+        bridge.set_response_sink(Arc::new(move |resp| {
+            captured_sink.lock().unwrap().push(resp);
+        }));
+
+        let payload = bytes::Bytes::from(vec![b'x'; 2 * 1024 * 1024]);
+        let headers_raw: bytes::Bytes = crate::transport::encode_headers_compact(&[(
+            b"content-type".to_vec(),
+            b"application/octet-stream".to_vec(),
+        )])
+        .into();
+        let req = InProcessRequest::new(
+            1,
+            1,
+            777,
+            9001,
+            bytes::Bytes::from_static(b"/large"),
+            bytes::Bytes::from_static(b"stream=0"),
+            headers_raw.clone(),
+            payload.clone(),
+            bytes::Bytes::from_static(b"id\x0042"),
+        );
+
+        bridge.submit_inprocess_batch(vec![req]).unwrap();
+
+        let snap = bridge.poll_batch(Duration::from_millis(50)).unwrap();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap.node(0).method_tag, 1);
+        assert_eq!(snap.node(0).handler_id, 777);
+        assert_eq!(snap.node(0).correlation_id, 9001);
+        assert_eq!(snap.path(0), "/large");
+        assert_eq!(snap.query(0), Some("stream=0"));
+        assert_eq!(snap.headers_raw(0), headers_raw.as_ref());
+        assert_eq!(snap.body(0).len(), 2 * 1024 * 1024);
+        assert_eq!(snap.body_bytes_owned(0), payload);
+        assert_eq!(snap.path_params_raw(0), b"id\x0042");
+
+        let mut wire = vec![0u8; snap.serialized_size()];
+        let written = snap.serialize_into(&mut wire);
+        assert_eq!(written, wire.len());
+        let roundtripped = BatchSnapshot::deserialize_from(&wire).unwrap();
+        assert_eq!(roundtripped.path(0), "/large");
+        assert_eq!(roundtripped.query(0), Some("stream=0"));
+        assert_eq!(roundtripped.body(0).len(), 2 * 1024 * 1024);
+
+        bridge
+            .submit_response(BridgeResponse {
+                request_id: 9001,
+                status: 201,
+                headers_raw: headers_raw.clone(),
+                body: bytes::Bytes::from_static(b"accepted"),
+            })
+            .unwrap();
+
+        assert!(bridge.try_recv_responses().is_none());
+        let sink_items = captured.lock().unwrap();
+        assert_eq!(sink_items.len(), 1);
+        assert_eq!(sink_items[0].request_id, 9001);
+        assert_eq!(sink_items[0].status, 201);
+        assert_eq!(sink_items[0].body.as_ref(), b"accepted");
+        drop(sink_items);
+
+        bridge.clear_response_sink();
+        bridge
+            .submit_response(BridgeResponse {
+                request_id: 9002,
+                status: 204,
+                headers_raw: bytes::Bytes::new(),
+                body: bytes::Bytes::new(),
+            })
+            .unwrap();
+        let fallback = bridge.try_recv_responses().unwrap();
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].request_id, 9002);
+    }
+
+    #[test]
+    fn batch_writer_auto_seals_on_slab_or_arena_full() {
+        let (batch_tx, batch_rx) = crossbeam_channel::unbounded();
+        let (resp_tx, resp_rx) = tokio::sync::mpsc::unbounded_channel();
+        let bridge = BatchBridge {
+            arena: TransportArena::new(2),
+            slab: DataSlab::new(64),
+            write_lock: Mutex::new(()),
+            batch_tx,
+            transport: Transport::new_in_process(batch_rx),
+            buffer_pool: Arc::new(BufferPool::new(4, 64, 2)),
+            resp_tx,
+            resp_rx: tokio::sync::Mutex::new(resp_rx),
+            fast_sink: OnceLock::new(),
+            has_override_sink: AtomicBool::new(false),
+            override_sink: RwLock::new(None),
+            request_notifier: Notifier::new().ok(),
+            consumer_sleeping: CacheLine::new(AtomicBool::new(false)),
+            consumer_count: AtomicUsize::new(1),
+            compression_codec: CompressionCodec::None,
+        };
+
+        let writer = bridge.batch_writer();
+        writer
+            .push_request(&wr(0, 1, 10, b"/one", None, b"", &[b'a'; 40]))
+            .unwrap();
+        writer
+            .push_request(&wr(0, 1, 11, b"/two", None, b"", &[b'b'; 40]))
+            .unwrap();
+        writer
+            .push_request(&wr(0, 1, 12, b"/three", None, b"", b"ok"))
+            .unwrap();
+        writer
+            .push_request(&wr(0, 1, 13, b"/four", None, b"", b"ok"))
+            .unwrap();
+        writer
+            .push_request(&wr(0, 1, 14, b"/five", None, b"", b"ok"))
+            .unwrap();
+        writer.seal().unwrap();
+
+        let mut ids = Vec::new();
+        while let Some(snap) = bridge.poll_batch(Duration::from_millis(10)) {
+            for i in 0..snap.len() {
+                ids.push(snap.node(i).correlation_id);
+            }
+        }
+        assert_eq!(ids, vec![10, 11, 12, 13, 14]);
+    }
+
+    #[test]
+    fn dekker_request_notifier_wakes_single_consumer_and_disables_multi_consumer() {
+        let bridge = make_bridge();
+        assert!(bridge.request_notify_fd() >= 0);
+        assert!(bridge.prepare_request_sleep());
+
+        let req = InProcessRequest::new(
+            0,
+            1,
+            101,
+            5001,
+            bytes::Bytes::from_static(b"/inline"),
+            bytes::Bytes::new(),
+            bytes::Bytes::new(),
+            bytes::Bytes::new(),
+            bytes::Bytes::new(),
+        );
+        bridge.submit_inprocess_batch(vec![req]).unwrap();
+        assert!(
+            bridge
+                .request_notifier
+                .as_ref()
+                .unwrap()
+                .wait(10)
+                .expect("notifier wait")
+        );
+        bridge.clear_request_notification().unwrap();
+        assert!(!bridge.prepare_request_sleep());
+        let snap = bridge.try_poll_batch().expect("queued snapshot");
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap.path(0), "/inline");
+        assert!(bridge.prepare_request_sleep());
+        bridge.cancel_request_sleep();
+
+        bridge.set_consumer_count(4);
+        assert_eq!(bridge.request_notify_fd(), -1);
+        assert!(!bridge.prepare_request_sleep());
     }
 
     #[cfg(feature = "compression")]

@@ -2,13 +2,15 @@
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Buffer, Callable
+from collections.abc import Awaitable, Buffer, Callable, Iterable
 from typing import Any
 
 import msgspec
 
 from vertebra._vertebra import (
     AsgiScope,
+    RequestBatch,
+    drive_asgi_batch,
 )
 from vertebra._vertebra import (
     Request as _NativeRequest,
@@ -66,6 +68,8 @@ class AsgiRunner:
 
     __slots__ = (
         "_app",
+        "_dispatch_app",
+        "_fastpath",
         "_last_trailer_frames",
         "_lifespan_state",
         "_loop",
@@ -85,6 +89,10 @@ class AsgiRunner:
         on_chunk: ChunkCallback | None = None,
     ) -> None:
         self._app = app
+        self._fastpath = self._resolve_fastpath(app)
+        self._dispatch_app: Callable[..., Any] = (
+            self._fastpath.wrap_asgi(app) if (self._fastpath is not None and on_chunk is None) else app
+        )
         self._loop = loop
         self._owns_loop = loop is None
         self._owned_pool: EventLoopPool | None = None
@@ -92,6 +100,11 @@ class AsgiRunner:
         self._lifespan_state: dict[str, Any] = lifespan_state if lifespan_state is not None else {}
         self._on_chunk = on_chunk
         self._last_trailer_frames: list[bytes] = []
+
+    @property
+    def dispatch_app(self) -> Callable[..., Any]:
+        """Return the ASGI callable wired with any attached fastpath bypass."""
+        return self._dispatch_app
 
     @property
     def lifespan_state(self) -> dict[str, Any]:
@@ -118,6 +131,24 @@ class AsgiRunner:
         send = AsgiSend(request_id=request_id, on_chunk=self._on_chunk)
 
         try:
+            if self._fastpath is not None and self._on_chunk is None:
+                raw_req_body = body if isinstance(body, bytes) else bytes(body)
+                direct = await self._fastpath.dispatch(scope, receive, send, body=raw_req_body)
+                if direct is not None:
+                    status_code, encoded_headers, raw_body = direct
+                    decoded_headers = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in encoded_headers]
+                    return AsgiResponse(
+                        status=status_code,
+                        headers=decoded_headers,
+                        body=raw_body,
+                        request_id=request_id,
+                    )
+                if send.started:
+                    resp = send.response
+                    if resp.trailers:
+                        self._emit_trailers(resp, request_id)
+                    return resp
+
             await self._app(scope, receive, send)
         except Exception:
             logger.exception("Unhandled exception in ASGI application for %s", getattr(request, "path", "/"))
@@ -184,11 +215,41 @@ class AsgiRunner:
         req_id: int = getattr(request, "request_id", 0)
         return asyncio.run_coroutine_threadsafe(self._execute_and_submit(request, req_id), loop)
 
-    def spawn_batch(self, requests: list[Any]) -> list[Any]:
-        """Spawn each request in ``requests`` as an independent task on the event loop."""
-        if not requests:
+    def spawn_batch(self, requests: RequestBatch | Iterable[Any]) -> list[Any]:
+        """Drive a batch of ASGI requests via Rust drive_asgi_batch or fallback tasks."""
+        if self._on_chunk is None:
+            if isinstance(requests, RequestBatch):
+                if len(requests) == 0:
+                    return []
+                loop = self._ensure_loop()
+                drive_asgi_batch(
+                    self._dispatch_app,
+                    requests,
+                    loop_obj=loop,
+                    root_path=self._mount_prefix,
+                    lifespan_state=self._lifespan_state or None,
+                )
+                return []
+
+            req_list = requests if isinstance(requests, list | tuple) else list(requests)
+            if not req_list:
+                return []
+            if isinstance(req_list[0], _NativeRequest):
+                loop = self._ensure_loop()
+                drive_asgi_batch(
+                    self._dispatch_app,
+                    req_list,
+                    loop_obj=loop,
+                    root_path=self._mount_prefix,
+                    lifespan_state=self._lifespan_state or None,
+                )
+                return []
+            return [self.spawn_single(req) for req in req_list]
+
+        req_items = requests if isinstance(requests, list | tuple) else list(requests)
+        if not req_items:
             return []
-        return [self.spawn_single(req) for req in requests]
+        return [self.spawn_single(req) for req in req_items]
 
     def create_stream_queues(
         self,
@@ -325,6 +386,29 @@ class AsgiRunner:
         if server is not None:
             scope["server"] = server
         return scope
+
+    @staticmethod
+    def _resolve_fastpath(app: Any) -> Any:
+        """Return an attached fastpath bypass dispatcher if exposed by ``app``."""
+        for candidate_app in (app, getattr(app, "_inner", None)):
+            if candidate_app is None:
+                continue
+            cand_state = getattr(candidate_app, "state", None)
+            if cand_state is not None and hasattr(cand_state, "get"):
+                plugin = cand_state.get("vertebra_plugin")
+                ensure_fn = getattr(plugin, "ensure_finalized", None)
+                if callable(ensure_fn):
+                    ensure_fn(candidate_app)
+
+        direct = getattr(app, "__vertebra_fastpath__", None)
+        if direct is not None and callable(getattr(direct, "dispatch", None)):
+            return direct
+        state = getattr(app, "state", None)
+        if state is not None and hasattr(state, "get"):
+            candidate = state.get("vertebra_fastpath_bypass")
+            if candidate is not None and callable(getattr(candidate, "dispatch", None)):
+                return candidate
+        return None
 
     @staticmethod
     def _extract_body(request: Any) -> Buffer:

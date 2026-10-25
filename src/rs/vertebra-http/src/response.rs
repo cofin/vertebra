@@ -6,8 +6,8 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http::{Response, StatusCode};
-use http_body_util::Either;
+use http::{HeaderMap, HeaderValue, Method, Response, StatusCode, header};
+use http_body_util::{Either, Full};
 use hyper::Request;
 use hyper::body::{Body, Incoming};
 use tokio::sync::oneshot;
@@ -16,7 +16,10 @@ use tracing::{debug, warn};
 use vertebra_core::transport::{encode_headers_compact, iter_raw_headers};
 
 use crate::backpressure::{BackpressureMetricsSnapshot, CircuitState, RejectionReason};
-use crate::batcher::{PendingRequest, PendingResponse, method_tag};
+use crate::batcher::{PendingRequest, PendingResponse, http_version_tag, method_tag};
+use crate::compression::CompressionOffloadConfig;
+use crate::cors::CompiledCorsOffload;
+use crate::health::HealthState;
 use crate::hmr;
 use crate::routing::RouterError;
 use crate::server::ServerState;
@@ -41,23 +44,126 @@ pub async fn handle(
 
     // Health endpoint sits above routing and backpressure so probes always
     // work, even when the controller is shedding load.
-    if req.uri().path() == HEALTH_PATH
+    let req_path = req.uri().path();
+    if req_path == HEALTH_PATH
+        && state.health_endpoint.state() == HealthState::Healthy
         && let Some(bp) = state.dispatcher.backpressure()
     {
         return Ok(health_response(Some(bp.snapshot())));
     }
-    if let Some(health_resp) =
-        crate::health::HealthEndpoint::default().try_intercept(req.uri().path())
-    {
+    if let Some(health_resp) = state.health_endpoint.try_intercept(req_path) {
         let (parts, body) = health_resp.into_parts();
         return Ok(Response::from_parts(parts, Either::Left(body)));
+    }
+
+    // Zero-GIL CORS OPTIONS preflight offload.
+    if *req.method() == Method::OPTIONS
+        && let Some(ref cors) = state.cors
+        && let Some(origin) = req
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+        && let Some(req_method) = req
+            .headers()
+            .get(header::ACCESS_CONTROL_REQUEST_METHOD)
+            .and_then(|v| v.to_str().ok())
+    {
+        let req_headers = req
+            .headers()
+            .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
+            .and_then(|v| v.to_str().ok());
+        let (status, preflight_headers) =
+            cors.evaluate_preflight(origin, Some(req_method), req_headers);
+        let mut resp = Response::builder()
+            .status(status)
+            .body(full_body(Bytes::new()))
+            .unwrap();
+        *resp.headers_mut() = preflight_headers;
+        return Ok(resp);
+    }
+
+    // Zero-GIL OpenAPI schema cache offload.
+    if matches!(*req.method(), Method::GET | Method::HEAD)
+        && let Some(ref openapi) = state.openapi_cache
+        && req_path == openapi.schema_path
+    {
+        let inm_matches = req
+            .headers()
+            .get(header::IF_NONE_MATCH)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|inm| inm.trim() == openapi.etag_str);
+        let (status, body) = if inm_matches {
+            (StatusCode::NOT_MODIFIED, Bytes::new())
+        } else if *req.method() == Method::HEAD {
+            (StatusCode::OK, Bytes::new())
+        } else {
+            (StatusCode::OK, openapi.body.clone())
+        };
+        let mut resp = Response::builder()
+            .status(status)
+            .body(full_body(body))
+            .unwrap();
+        let hdrs = resp.headers_mut();
+        hdrs.insert(header::CONTENT_TYPE, openapi.content_type.clone());
+        hdrs.insert(header::ETAG, openapi.etag.clone());
+        hdrs.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=0, must-revalidate"),
+        );
+        if let Some(ref cors) = state.cors
+            && let Some(origin) = req
+                .headers()
+                .get(header::ORIGIN)
+                .and_then(|v| v.to_str().ok())
+        {
+            cors.apply_response_headers(origin, hdrs);
+        }
+        return Ok(resp);
+    }
+
+    // Zero-GIL static asset mount offload.
+    if !state.static_mounts.is_empty() && matches!(*req.method(), Method::GET | Method::HEAD) {
+        for mount in &state.static_mounts {
+            if let Some(rel_path) = mount.match_relative_path(req_path) {
+                for manager in &mount.managers {
+                    if let Some(static_resp) =
+                        manager.serve_static_request(rel_path, req.headers()).await
+                    {
+                        let (mut parts, full) = static_resp.into_parts();
+                        for (name, val) in &mount.headers {
+                            parts.headers.insert(name.clone(), val.clone());
+                        }
+                        if mount.send_as_attachment {
+                            parts.headers.insert(
+                                header::CONTENT_DISPOSITION,
+                                HeaderValue::from_static("attachment"),
+                            );
+                        }
+                        if let Some(ref cors) = state.cors
+                            && let Some(origin) = req
+                                .headers()
+                                .get(header::ORIGIN)
+                                .and_then(|v| v.to_str().ok())
+                        {
+                            cors.apply_response_headers(origin, &mut parts.headers);
+                        }
+                        let body = if *req.method() == Method::HEAD {
+                            Either::Left(Full::new(Bytes::new()))
+                        } else {
+                            Either::Left(full)
+                        };
+                        return Ok(Response::from_parts(parts, body));
+                    }
+                }
+            }
+        }
     }
 
     // Admission control. If a BackpressureController is attached, acquire a
     // permit before doing any real work; hold it for the lifetime of the
     // request via `_permit`.
     let _permit = if let Some(controller) = state.dispatcher.backpressure() {
-        match controller.try_acquire_for_path(req.uri().path()).await {
+        match controller.try_acquire_for_path(req_path).await {
             Ok(permit) => Some(permit),
             Err(reason) => return Ok(rejection_response(reason)),
         }
@@ -106,8 +212,19 @@ pub async fn handle(
         }
     };
 
-    // 3. Encode headers.
-    let headers_mp = encode_headers_mp(&parts.headers);
+    let cors_origin = if state.cors.is_some() {
+        parts.headers.get(header::ORIGIN).cloned()
+    } else {
+        None
+    };
+    let accept_encoding = if state.compression.is_some() {
+        parts.headers.get(header::ACCEPT_ENCODING).cloned()
+    } else {
+        None
+    };
+
+    // 3. Encode headers directly to compact binary format in one pass.
+    let headers_mp = encode_header_map_compact(&parts.headers);
 
     // 4. Create reply channel.
     let (reply_tx, reply_rx) = oneshot::channel::<PendingResponse>();
@@ -117,11 +234,16 @@ pub async fn handle(
         .into_parts()
         .path_and_query
         .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
+    let offload_path = if state.compression.is_some() {
+        Some(path_and_query.clone())
+    } else {
+        None
+    };
 
     let pending = PendingRequest {
         handler_id,
         method_tag: method_tag(method),
-        http_version_tag: version_tag(parts.version),
+        http_version_tag: http_version_tag(parts.version),
         flags: vertebra_core::protocol::flags::NONE,
         path_and_query,
         headers_mp,
@@ -137,9 +259,16 @@ pub async fn handle(
         ));
     }
 
-    // 6. Await response.
+    // 6. Await response and apply configured Rust CORS / compression offloads.
     let mut hyper_resp = match reply_rx.await {
-        Ok(resp) => build_response(resp),
+        Ok(resp) => build_response_with_offloads(
+            resp,
+            state.cors.as_ref(),
+            cors_origin.as_ref(),
+            state.compression.as_ref(),
+            offload_path.as_ref().map(|pq| pq.path()),
+            accept_encoding.as_ref(),
+        ),
         Err(_) => {
             warn!(handler_id, "worker dropped response channel");
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "worker error")
@@ -214,54 +343,92 @@ fn circuit_state_str(state: CircuitState) -> &'static str {
     }
 }
 
-fn encode_headers_mp(headers: &http::HeaderMap) -> Bytes {
+/// Encode an `http::HeaderMap` directly into compact binary `Bytes` in a single allocation.
+///
+/// Wire format per header: `[name_len: u8][name: bytes][value_len: u16 LE][value: bytes]`.
+/// Duplicate header names are preserved in iteration order and oversized components are clamped.
+#[inline]
+pub fn encode_header_map_compact(headers: &HeaderMap) -> Bytes {
     if headers.is_empty() {
         return Bytes::new();
     }
-    // Pre-allocate: estimate ~32 bytes per header (name + value + length prefixes)
-    let mut buf = Vec::with_capacity(headers.len() * 32);
+    let mut total_bytes = 0usize;
+    for (name, value) in headers.iter() {
+        let nlen = name.as_str().len().min(u8::MAX as usize);
+        let vlen = value.as_bytes().len().min(u16::MAX as usize);
+        total_bytes += 3 + nlen + vlen;
+    }
+
+    let mut buf = Vec::with_capacity(total_bytes);
     for (name, value) in headers.iter() {
         let n = name.as_str().as_bytes();
         let v = value.as_bytes();
-        buf.push(n.len() as u8);
-        buf.extend_from_slice(n);
-        let vlen = v.len() as u16;
-        buf.extend_from_slice(&vlen.to_le_bytes());
-        buf.extend_from_slice(v);
+        let nlen = n.len().min(u8::MAX as usize);
+        let vlen = v.len().min(u16::MAX as usize);
+        buf.push(nlen as u8);
+        buf.extend_from_slice(&n[..nlen]);
+        buf.extend_from_slice(&(vlen as u16).to_le_bytes());
+        buf.extend_from_slice(&v[..vlen]);
     }
     Bytes::from(buf)
 }
 
-/// Encode an HTTP version into a compact byte tag.
-fn version_tag(version: http::Version) -> u8 {
-    match version {
-        http::Version::HTTP_10 => 0,
-        http::Version::HTTP_11 => 1,
-        http::Version::HTTP_2 => 2,
-        http::Version::HTTP_3 => 3,
-        _ => 1,
-    }
-}
-
 /// Build an `HttpResponse` from a `PendingResponse`, taking the streaming branch when `stream_rx` is present.
 pub fn build_response(resp: PendingResponse) -> HttpResponse {
-    let mut builder = Response::builder().status(resp.status);
+    build_response_with_offloads(resp, None, None, None, None, None)
+}
 
-    // Decode response headers from compact binary format and set on Hyper response.
+fn build_response_with_offloads(
+    resp: PendingResponse,
+    cors: Option<&CompiledCorsOffload>,
+    cors_origin: Option<&HeaderValue>,
+    compression: Option<&CompressionOffloadConfig>,
+    req_path: Option<&str>,
+    accept_encoding: Option<&HeaderValue>,
+) -> HttpResponse {
+    let mut response = Response::new(full_body(Bytes::new()));
+    *response.status_mut() =
+        StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
     if !resp.headers_mp.is_empty() {
+        let headers = response.headers_mut();
         for (name, value) in iter_raw_headers(&resp.headers_mp) {
-            builder = builder.header(name, value);
+            if let (Ok(hname), Ok(hval)) = (
+                http::HeaderName::from_bytes(name),
+                HeaderValue::from_bytes(value),
+            ) {
+                headers.append(hname, hval);
+            }
         }
     }
 
-    let body = match resp.stream_rx {
-        Some(stream_rx) => stream_body(stream_rx.into_inner()),
-        None => full_body(resp.body),
-    };
+    if let (Some(cors_engine), Some(origin_val)) = (cors, cors_origin)
+        && let Ok(origin_str) = origin_val.to_str()
+    {
+        cors_engine.apply_response_headers(origin_str, response.headers_mut());
+    }
 
-    builder.body(body).unwrap_or_else(|_| {
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, "response build error")
-    })
+    match resp.stream_rx {
+        Some(stream_rx) => {
+            *response.body_mut() = stream_body(stream_rx.into_inner());
+        }
+        None => {
+            let final_body = if let Some(comp) = compression {
+                let accept_str = accept_encoding.and_then(|v| v.to_str().ok());
+                comp.compress_if_eligible(
+                    req_path.unwrap_or("/"),
+                    accept_str,
+                    response.headers_mut(),
+                    resp.body,
+                )
+            } else {
+                resp.body
+            };
+            *response.body_mut() = full_body(final_body);
+        }
+    }
+
+    response
 }
 
 fn error_response(status: StatusCode, msg: &'static str) -> HttpResponse {

@@ -24,6 +24,8 @@ pub struct StaticAssetServeConfig {
     pub immutable_max_age_secs: u64,
     /// Max-age in seconds for non-fingerprinted assets (default: 0 / must-revalidate).
     pub default_max_age_secs: u64,
+    /// Fall back to `index.html` when a requested sub-path does not exist (default: true).
+    pub spa_fallback: bool,
 }
 
 impl Default for StaticAssetServeConfig {
@@ -34,6 +36,7 @@ impl Default for StaticAssetServeConfig {
             range_requests: true,
             immutable_max_age_secs: 31_536_000,
             default_max_age_secs: 0,
+            spa_fallback: true,
         }
     }
 }
@@ -141,13 +144,15 @@ impl AssetManager {
 
         let effective = if file_path.exists() && file_path.is_file() {
             file_path
-        } else {
+        } else if self.config.spa_fallback {
             let index = self.static_dir.join("index.html");
             if index.exists() {
                 index
             } else {
                 return None;
             }
+        } else {
+            return None;
         };
 
         let meta = tokio::fs::metadata(&effective).await.ok()?;

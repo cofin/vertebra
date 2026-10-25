@@ -82,6 +82,7 @@ class RouteDef(msgspec.Struct, frozen=True, gc=False):
     path: str
     handler: Callable[..., Any]
     segments: tuple[str | ParamSpec, ...] = ()
+    sync_to_thread: bool = False
 
     def with_prefix(self, prefix: str) -> "RouteDef":
         normalized_prefix = _normalize_prefix(prefix)
@@ -90,7 +91,11 @@ class RouteDef(msgspec.Struct, frozen=True, gc=False):
             return self
         new_path = f"{normalized_prefix}{normalized_path}"
         return RouteDef(
-            method=self.method, path=new_path, handler=self.handler, segments=_compile_path_template(new_path)
+            method=self.method,
+            path=new_path,
+            handler=self.handler,
+            segments=_compile_path_template(new_path),
+            sync_to_thread=self.sync_to_thread,
         )
 
 
@@ -109,24 +114,24 @@ class Router:
             self.routes.append(route.with_prefix(self.prefix))
 
 
-def get(path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    return _route("GET", path)
+def get(path: str, *, sync_to_thread: bool = False) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    return _route("GET", path, sync_to_thread=sync_to_thread)
 
 
-def post(path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    return _route("POST", path)
+def post(path: str, *, sync_to_thread: bool = False) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    return _route("POST", path, sync_to_thread=sync_to_thread)
 
 
-def put(path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    return _route("PUT", path)
+def put(path: str, *, sync_to_thread: bool = False) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    return _route("PUT", path, sync_to_thread=sync_to_thread)
 
 
-def delete(path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    return _route("DELETE", path)
+def delete(path: str, *, sync_to_thread: bool = False) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    return _route("DELETE", path, sync_to_thread=sync_to_thread)
 
 
-def patch(path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    return _route("PATCH", path)
+def patch(path: str, *, sync_to_thread: bool = False) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    return _route("PATCH", path, sync_to_thread=sync_to_thread)
 
 
 def handler_id(method: str, path: str) -> int:
@@ -171,15 +176,29 @@ def extract_path_params(template: str, path: str) -> dict[str, Any]:
     return _extract_params_from_segments(segments, _normalize_path(path))
 
 
-def _route(method: str, path: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def _route(
+    method: str,
+    path: str,
+    *,
+    sync_to_thread: bool = False,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     normalized_path = _normalize_path(path)
     segments = _compile_path_template(normalized_path)
 
     def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
         routes: list[RouteDef] = getattr(handler, "__vertebra_routes__", [])
-        route = RouteDef(method=method, path=normalized_path, handler=handler, segments=segments)
+        route = RouteDef(
+            method=method,
+            path=normalized_path,
+            handler=handler,
+            segments=segments,
+            sync_to_thread=sync_to_thread,
+        )
         routes.append(route)
-        cast("Any", handler).__vertebra_routes__ = routes
+        target = cast("Any", handler)
+        target.__vertebra_routes__ = routes
+        if sync_to_thread:
+            target.__vertebra_sync_to_thread__ = True
         return handler
 
     return decorator

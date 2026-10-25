@@ -16,14 +16,14 @@ Every pattern chapter contains code-truth blocks (`<!-- truth: start -->` / `<!-
 
 ## Python (`python/`)
 
-- [Python Module Structure, Class Layout & PEP 695 Typing](python/module-and-class-layout.md) — Top-level imports, PEP 562 lazy `__getattr__` root exports, frozen `msgspec.Struct(..., gc=False)` value objects, strict class member ordering, Google-style docstrings without inline `#` comments, and PEP 695/604/585 typing.
-- [Hot-Path Caching & Single-Wake Async Dispatch](python/hot-path-and-async-dispatch.md) — Startup `compile_handler_spec` (`lru_cache(maxsize=512)`), `BatchDispatchPlan` partitioning (`sync_native`, `async_native`, `mounts`, `unmatched`), `EventLoopPool` wakeups, `_drive_coro` ASGI stepping, and `coerce_response`.
+- [Python Module Structure, Class Layout & PEP 695 Typing](python/module-and-class-layout.md) — Top-level imports, PEP 810 `__lazy_modules__` + PEP 562 `__getattr__` lazy root exports, frozen `msgspec.Struct(..., gc=False)` value objects, strict class member ordering, Google-style docstrings without inline `#` comments, and PEP 695/604/585 typing across Python 3.12–3.15/3.15t.
+- [Hot-Path Caching & Single-Wake Async Dispatch](python/hot-path-and-async-dispatch.md) — Startup `compile_handler_spec`, inline vectorized `"sync_inline"` batch execution (`submit_batch_raw`), `uvloop`-backed `EventLoopPool` and single-thread `loop.add_reader` Dekker polling, `O(1)` `MOUNT_HANDLER_BASE` mount dispatch, `drive_asgi_batch` / `drive_rsgi_batch`, and zero-copy `coerce_response`.
 - [Serialization & Python Utility Conventions](python/serialization-and-utils.md) — Centralized `JSONSerializer` (`encode_json`, `encode_json_bytes`, `encode_json_into`, `decode_json`, `format_json`), `dump_schema`, `Portal` sync/async bridging, `LoopShardedResource`, `SyncPool`, and `module_loader` guards.
 
 ## Rust & PyO3 (`rust/`)
 
-- [PyO3 0.30.1 FFI & GIL Discipline](rust/ffi-and-gil-discipline.md) — `#[pymodule(gil_used = false)]` across `_vertebra`, `_bundler`, and `_storage`, `py.detach()` around blocking waits and file I/O, `append_to_inittab!(pymodule_init)`, lazy `Arc<BatchSnapshot>` request proxies (`freelist = 128`), and `pyo3::intern!` header/scope keys.
-- [Lock-Free Shared Memory & Sharded Concurrency](rust/lock-free-shm-and-sharding.md) — `CacheLine<T>` isolation, `Acquire`/`Release`/`SeqCst` futex handshakes, reserve-then-rollback slab atomics, `RequestBatcher` task pool, and `ShmDispatcher` sharded `Mutex<InFlightRequests>` slabs.
+- [PyO3 0.30.1 FFI & GIL Discipline](rust/ffi-and-gil-discipline.md) — `#[pymodule(gil_used = false)]` across `_vertebra`, `_bundler`, and `_storage`, conditional `freelist` / `immutable_type` on `Py_GIL_DISABLED`, PEP 782 `PyBytes::new_with`, PEP 814 `PyFrozenDict::empty` + `PyUnstable_SetImmortal` on Python 3.15, anchored `__getbuffer__` `Request`, and C-API `PyIter_Send` ASGI/RSGI drivers.
+- [Lock-Free Shared Memory & Sharded Concurrency](rust/lock-free-shm-and-sharding.md) — `CacheLine<T>` isolation (`ABI_VERSION = 3`), Dekker `SeqCst` `consumer_sleeping` and `active_flags` handshakes, generation-synchronized cached SPSC heads, cache-line-padded MPMC sequence slots, lock-free `ShmDispatcher` batch routing, and `BackpressureController` sliding-window atomics.
 
 ## TypeScript (`typescript/`)
 
