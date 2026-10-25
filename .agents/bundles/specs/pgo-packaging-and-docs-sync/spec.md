@@ -2,16 +2,16 @@
 type: Spec
 flow_id: pgo-packaging-and-docs-sync
 title: Two-Phase Rust PGO Pipeline, Python 3.15 Packaging, and Documentation Sync
-state: active
+state: completed
 plan_revision: 1
 plan_commit: null
-state_revision: 9
+state_revision: 10
 current_task: null
-last_operation: 20261025T154635Z-flow-executor-checkpoint-phase-2-00
-operation_targets: ["2.1"]
-last_verified_checkpoint: 2dffe05
+last_operation: 20261025T160855Z-flow-executor-complete-spec-00
+operation_targets: []
+last_verified_checkpoint: ffa4d20
 created_at: 2026-10-25T15:21:20Z
-updated_at: 2026-10-25T15:46:35Z
+updated_at: 2026-10-25T16:08:55Z
 description: Wire the two-phase Rust PGO instrumentation and profile-use pipeline across vertebra-http and all PyO3 extensions, extend standalone/onefile packaging and vtb build for Python 3.15/3.15t and SQLAlchemy dialects, and synchronize AGENTS.md and OKF v0.2 documentation.
 tags: [feature, pgo, packaging, python-315, docs]
 parent_prd: null
@@ -60,9 +60,9 @@ research: []
 
 ## Continuity Snapshot
 
-- **Active Flow / Lifecycle**: `pgo-packaging-and-docs-sync` (`active`)
+- **Active Flow / Lifecycle**: `pgo-packaging-and-docs-sync` (`completed`)
 - **Current Task & Claimant**: `none (all tasks closed)`
-- **Last Verified Checkpoint**: `2dffe05`
+- **Last Verified Checkpoint**: `ffa4d20`
 - **Decisions**:
   - Deduplicate `tools/pgo/rust_pgo.py` onto `vertebra.build.packaging.pgo` while keeping `tools/pgo/python_pgo.py` self-contained so monkeypatch unit tests against both modules continue to exercise independent sysconfig/JIT probes.
   - Omit `-m` when invoking `maturin develop` for `vertebra-py` from repository root so root `pyproject.toml` (`module-name = "vertebra._vertebra"`) applies, while passing `-m` for `vertebra-bundler` and `vertebra-storage` which carry crate-local `pyproject.toml` files.
@@ -72,9 +72,9 @@ research: []
   - `vtb build` gained `--entrypoint`, `--profdata`, and `--server-binary`, `BuildTarget` validates `SUPPORTED_PYTHON_VERSIONS` (`3.12`–`3.15`, `3.14t`, `3.15t`) and resolves Linux `musl` triples, and all 12 `pyproject.toml` SQLAlchemy dialect entry points now resolve to `{Postgres,Oracle,Mysql,Sqlite,Mssql,Duckdb}Dialect`.
   - Synchronized `AGENTS.md` and 10 OKF v0.2 bundle chapters (`2dffe05`) with zero broken relative links and zero missing `sources:` paths across all 62 bundle markdown files.
 - **Blockers & Unblock Conditions**: `none`
-- **Next Exact Step**: `Run aggregate verification gates, code-reviewer, and quality-reviewer before complete and archive`
+- **Next Exact Step**: `Archive completed spec via disposable worktree (/flow:archive)`
 - **Plan Identity**: `plan_revision: 1`, `plan_commit: null`
-- **State Identity**: `revision: 9`, `last_operation: 20261025T154635Z-flow-executor-checkpoint-phase-2-00`, `operation_targets: ["2.1"]`
+- **State Identity**: `revision: 10`, `last_operation: 20261025T160855Z-flow-executor-complete-spec-00`, `operation_targets: []`
 - **Relevant Rule / Knowledge Paths**:
   - `AGENTS.md`
   - `.agents/bundles/knowledge/workflow.md`
@@ -86,3 +86,4 @@ research: []
 
 - Phase 1 Checkpoint (`774d920`): `uv run pytest src/py/tests/unit/build/test_packaging_and_pgo.py -q` (`13 passed in 0.73s`), `make lint-all` (`passed`).
 - Phase 2 Checkpoint (`2dffe05`): `make review-check` (`passed`), OKF bundle audit (`62 files, 0 errors`), `git diff --check` (`passed`).
+- Flow Completion Checkpoint (`ffa4d20`): `make lint-all` (`passed`), `uv run pytest -q` (`860 passed`), `code-reviewer` (`Ready to proceed`, `0` findings on `2f110d8..ffa4d20`), `quality-reviewer` (`APPROVED`, `0` findings on `2f110d8..ffa4d20`).
