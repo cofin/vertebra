@@ -56,11 +56,11 @@ sources:
 - **Build Backend**: `maturin` builds `src/rs/vertebra-py/Cargo.toml` into `vertebra._vertebra` (`python-source = "src/py"`, feature `extension-module`). `make dev` and `make build` run two more `maturin develop` calls that build `src/rs/vertebra-bundler/Cargo.toml` into `vertebra._bundler` and `src/rs/vertebra-storage/Cargo.toml` into `vertebra._storage`; `make build-pgo` runs two-phase Rust PGO instrumentation and profile-use compilation via `tools/pgo/rust_pgo.py`.
 - **CLI Entrypoint**: `vtb = "vertebra.cli:cli"` registers `vtb run [--topology auto|embedded|shm] [--interface auto|asgi|rsgi|wsgi] [--jit/--no-jit]`, `vtb dev`, `vtb init`, `vtb js {add,remove,list,install,build,generate-types,exec}`, `vtb build [--target ...] [--standalone|--onefile] [--entrypoint ...] [--pgo] [--profdata ...] [--server-binary ...] [--python-version 3.12|3.13|3.14|3.14t|3.15|3.15t]`, `vtb mcp bridge`, `vtb workers run`, and entry-point plugin commands ([`cli/__init__.py`](../../../src/py/vertebra/cli/__init__.py)).
 - **SQLAlchemy Dialect Entry Points**: `postgresql`, `oracle`, `mysql`, `sqlite`, `mssql`, and `duckdb` each register `.vertebra` and `.vtb` dialects from `vertebra.extensions.sqlalchemy.dialects`.
-- **Optional Extras**: `framework` (`msgspec>=0.18`) and `dev` (`pytest>=8.0`, `pytest-anyio`, `ruff>=0.4`, `mypy>=1.10`); `make install` syncs all extras.
+- **Optional Extras**: `framework` (`msgspec>=0.18`), `sqlspec` (`sqlspec>=0.68.0`), and `dev` (`pytest>=8.0`, `pytest-anyio>=0.0.0`, `ruff>=0.4`, `mypy>=1.10`); `make install` syncs all extras.
 - **Dependency Groups**:
   - `dev`: includes `test` (`pytest`, `pytest-cov>=5.0`, `anyio`), `lint` (`ruff`, `mypy`), and `build` (`maturin>=1.5,<2`).
   - `bench`: separate group (`duckdb>=1.0`, `uvicorn[standard]>=0.30`, `httptools>=0.6`, `uvloop>=0.21`, `granian>=1.6`, `spikard>=0.12`), used only through `uv run --group bench` in `make bench*`.
-- **Mypy Overrides**: `ignore_missing_imports` for optional and native modules (`pydantic.*`, `orjson`, `attrs`, `numpy`, `pyarrow`, `uvloop`, `fastapi`, `litestar`, `django.*`, `_bundler`, `_storage`, `vertebra._storage`, `concurrent.interpreters`).
+- **Mypy Overrides**: `ignore_missing_imports` for optional third-party and runtime modules (`pydantic.*`, `orjson`, `attrs`, `numpy`, `numpy.*`, `pyarrow`, `pyarrow.*`, `uvloop`, `fastapi`, `fastapi.*`, `litestar`, `litestar.*`, `sqlspec`, `sqlspec.*`, `django.*`, `concurrent.interpreters`).
 
 ## TypeScript Package Configuration (`src/ts/vertebra-client/`)
 

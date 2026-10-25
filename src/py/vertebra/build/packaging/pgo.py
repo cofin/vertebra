@@ -484,8 +484,10 @@ def run_default_pgo_workload(
     ext_env["LLVM_PROFILE_FILE"] = str(config.profile_dir / "vtb-ext-%p-%m.profraw")
     ext_script = (
         "import vertebra._vertebra as v, vertebra._bundler, vertebra._storage; "
-        "hdrs = v.Headers([('content-type', 'application/json'), ('x-pgo', '1')]); "
-        "_ = hdrs.get('content-type'); _ = list(hdrs)"
+        "hdrs = v.Headers.from_pairs([('content-type', 'application/json'), ('x-pgo', '1')]); "
+        "req = v.Request.from_parts('POST', '/echo', b'pgo', headers=[('content-type', 'application/json')]); "
+        "resp = v.Response(200, b'ok'); "
+        "_ = hdrs.get('content-type'); _ = list(hdrs); _ = bytes(req.body_view); _ = resp.to_bytes()"
     )
     subprocess.run([sys.executable, "-c", ext_script], check=True, env=ext_env, cwd=_REPO_ROOT)
 
@@ -498,11 +500,12 @@ def run_default_pgo_workload(
         app_path = Path(tmpdir) / "pgo_train_app.py"
         app_path.write_text(
             '"""Temporary PGO training application."""\n'
-            "from vertebra import App, Request, Response\n\n"
+            "from vertebra import App\n"
+            "from vertebra._vertebra import Request, Response\n\n"
             "app = App()\n\n"
             '@app.get("/")\n'
             "def index(request: Request) -> Response:\n"
-            '    return Response.text("ok")\n\n'
+            '    return Response(status=200, body=b"ok")\n\n'
             '@app.get("/json")\n'
             "def json_route(request: Request) -> dict[str, str]:\n"
             '    return {"status": "ok", "runtime": "vertebra"}\n\n'
@@ -514,7 +517,7 @@ def run_default_pgo_workload(
         port = _reserve_loopback_port()
         srv_env = os.environ.copy()
         srv_env["LLVM_PROFILE_FILE"] = str(config.profile_dir / "vtb-server-%p-%m.profraw")
-        srv_env["VERTEBRA_APP_MODULE"] = "pgo_train_app:app"
+        srv_env["VERTEBRA_APP"] = "pgo_train_app:app"
         srv_env["VERTEBRA_HOST"] = "127.0.0.1"
         srv_env["VERTEBRA_PORT"] = str(port)
         srv_env["VERTEBRA_WORKERS"] = "1"
@@ -524,23 +527,26 @@ def run_default_pgo_workload(
             py_parts.append(existing_py_path)
         srv_env["PYTHONPATH"] = os.pathsep.join(py_parts)
 
-        proc = subprocess.Popen(
-            [str(server_bin)],
-            env=srv_env,
-            cwd=_REPO_ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        try:
-            _wait_for_http_ready("127.0.0.1", port, timeout_seconds=15.0)
-            _drive_http_training_requests("127.0.0.1", port, requests_per_route=requests_per_route)
-        finally:
-            proc.terminate()
+        stderr_log = Path(tmpdir) / "vertebra-server.stderr.log"
+        with stderr_log.open("wb") as stderr_handle:
+            proc = subprocess.Popen(
+                [str(server_bin)],
+                env=srv_env,
+                cwd=_REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_handle,
+            )
             try:
-                proc.wait(timeout=10.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5.0)
+                _wait_for_http_ready("127.0.0.1", port, timeout_seconds=15.0, proc=proc, stderr_log=stderr_log)
+                _drive_http_training_requests("127.0.0.1", port, requests_per_route=requests_per_route)
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10.0)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=5.0)
 
 
 def run_pgo_pipeline(
@@ -674,10 +680,29 @@ def _reserve_loopback_port() -> int:
         return int(address[1])
 
 
-def _wait_for_http_ready(host: str, port: int, *, timeout_seconds: float) -> None:
-    """Poll a loopback HTTP server until it responds or timeout_seconds elapses."""
+def _read_stderr_tail(stderr_log: Path | None) -> str:
+    """Read captured server stderr output for diagnostic failure reporting."""
+    if stderr_log is None or not stderr_log.is_file():
+        return ""
+    return stderr_log.read_text(encoding="utf-8", errors="replace").strip()
+
+
+def _wait_for_http_ready(
+    host: str,
+    port: int,
+    *,
+    timeout_seconds: float,
+    proc: subprocess.Popen[bytes] | None = None,
+    stderr_log: Path | None = None,
+) -> None:
+    """Poll a loopback HTTP server until it responds, proc exits, or timeout_seconds elapses."""
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
+        if proc is not None and (exit_code := proc.poll()) is not None:
+            stderr_text = _read_stderr_tail(stderr_log)
+            detail = f": {stderr_text}" if stderr_text else ""
+            msg = f"Instrumented vertebra-server exited prematurely with code {exit_code}{detail}"
+            raise RuntimeError(msg)
         conn = http.client.HTTPConnection(host, port, timeout=1.0)
         try:
             conn.request("GET", "/")
@@ -689,7 +714,9 @@ def _wait_for_http_ready(host: str, port: int, *, timeout_seconds: float) -> Non
             time.sleep(0.05)
         finally:
             conn.close()
-    msg = f"Timed out waiting for instrumented vertebra-server on {host}:{port}"
+    stderr_text = _read_stderr_tail(stderr_log)
+    detail = f": {stderr_text}" if stderr_text else ""
+    msg = f"Timed out waiting for instrumented vertebra-server on {host}:{port}{detail}"
     raise TimeoutError(msg)
 
 

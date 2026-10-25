@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from vertebra.build.packaging import (
     StandaloneBuilder,
     find_llvm_profdata,
     resolve_cargo_release_dir,
+    run_default_pgo_workload,
     run_pgo_pipeline,
 )
 from vertebra.build.packaging import pgo as packaging_pgo
@@ -586,3 +588,215 @@ def test_pyproject_sqlalchemy_dialect_entry_points_resolve() -> None:
         resolved_cls = getattr(module, cls_name)
         assert issubclass(resolved_cls, DialectDescriptor), ep_name
         assert "Vtb" not in cls_name
+
+
+def test_run_default_pgo_workload_executes_extensions_routes_and_fast_fail(tmp_path: Path) -> None:
+    """Verify run_default_pgo_workload runs real PyO3 extension probe, generated routes, VERTEBRA_APP, and fast exit failure."""
+    profile_dir = tmp_path / "raw_profiles"
+    release_dir = tmp_path / "release_bin"
+    release_dir.mkdir(parents=True)
+    cfg = RustPgoConfig(profile_dir=profile_dir)
+
+    server_script = release_dir / "vertebra-server"
+    marker_path = tmp_path / "server_training_report.json"
+    shebang = chr(35) + f"!{sys.executable}\n"
+    server_script.write_text(
+        f"{shebang}"
+        '"""Synthetic vertebra-server verifying generated pgo_train_app and serving loopback HTTP."""\n'
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "import importlib\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "import signal\n"
+        "import sys\n"
+        "from vertebra._vertebra import Request\n"
+        "from vertebra.utils.serializers import format_json\n\n"
+        'app_spec = os.environ.get("VERTEBRA_APP", "")\n'
+        'mod_name, _, attr_name = app_spec.partition(":")\n'
+        "if not mod_name or not attr_name:\n"
+        '    sys.stderr.write("missing VERTEBRA_APP\\n")\n'
+        "    sys.exit(3)\n"
+        "mod = importlib.import_module(mod_name)\n"
+        "train_app = getattr(mod, attr_name)\n"
+        "route_map = {r.path: r.handler for r in train_app.routes}\n"
+        'r_index = route_map["/"](Request.from_parts("GET", "/"))\n'
+        'r_json = route_map["/json"](Request.from_parts("GET", "/json"))\n'
+        'r_echo = route_map["/echo"](Request.from_parts("POST", "/echo", b"echo-bytes"))\n'
+        "counts = {'GET:/': 0, 'GET:/json': 0, 'POST:/echo': 0}\n\n"
+        "class Handler(BaseHTTPRequestHandler):\n"
+        "    def log_message(self, fmt: str, *args: object) -> None:\n"
+        "        return\n\n"
+        "    def do_GET(self) -> None:\n"
+        "        key = f'GET:{self.path}'\n"
+        "        counts[key] = counts.get(key, 0) + 1\n"
+        "        self.send_response(200)\n"
+        "        self.send_header('Content-Length', '2')\n"
+        "        self.end_headers()\n"
+        "        self.wfile.write(b'ok')\n\n"
+        "    def do_POST(self) -> None:\n"
+        "        length = int(self.headers.get('Content-Length', '0'))\n"
+        "        data = self.rfile.read(length)\n"
+        "        key = f'POST:{self.path}'\n"
+        "        counts[key] = counts.get(key, 0) + 1\n"
+        "        self.send_response(200)\n"
+        "        self.send_header('Content-Length', str(len(data)))\n"
+        "        self.end_headers()\n"
+        "        self.wfile.write(data)\n\n"
+        'host = os.environ["VERTEBRA_HOST"]\n'
+        'port = int(os.environ["VERTEBRA_PORT"])\n'
+        "httpd = HTTPServer((host, port), Handler)\n\n"
+        "def _on_term(_signum: int, _frame: object) -> None:\n"
+        "    report = {\n"
+        '        "vertebra_app": app_spec,\n'
+        '        "llvm_profile_file": os.environ.get("LLVM_PROFILE_FILE", ""),\n'
+        '        "index_status": r_index.status,\n'
+        '        "index_body": r_index.body.decode("utf-8"),\n'
+        '        "json_payload": r_json,\n'
+        '        "echo_body": r_echo.body.decode("utf-8"),\n'
+        '        "counts": counts,\n'
+        "    }\n"
+        f"    Path({str(marker_path)!r}).write_text(format_json(report), encoding='utf-8')\n"
+        "    sys.exit(0)\n\n"
+        "signal.signal(signal.SIGTERM, _on_term)\n"
+        "httpd.serve_forever()\n",
+        encoding="utf-8",
+    )
+    server_script.chmod(0o755)
+
+    run_default_pgo_workload(cfg, release_dir, requests_per_route=3)
+
+    assert marker_path.is_file()
+    report = decode_json(marker_path.read_bytes())
+    assert report["vertebra_app"] == "pgo_train_app:app"
+    assert report["llvm_profile_file"].endswith(".profraw")
+    assert report["index_status"] == 200
+    assert report["index_body"] == "ok"
+    assert report["json_payload"] == {"status": "ok", "runtime": "vertebra"}
+    assert report["echo_body"] == "echo-bytes"
+    assert report["counts"]["GET:/"] >= 4
+    assert report["counts"]["GET:/json"] == 3
+    assert report["counts"]["POST:/echo"] == 3
+
+    crashing_dir = tmp_path / "crashing_release"
+    crashing_dir.mkdir(parents=True)
+    crashing_server = crashing_dir / "vertebra-server"
+    crashing_server.write_text(
+        f"{shebang}"
+        '"""Immediate crash stub."""\n'
+        "import sys\n"
+        'sys.stderr.write("fatal startup failure\\n")\n'
+        "sys.exit(2)\n",
+        encoding="utf-8",
+    )
+    crashing_server.chmod(0o755)
+
+    with pytest.raises(RuntimeError, match="exited prematurely with code 2: fatal startup failure"):
+        run_default_pgo_workload(cfg, crashing_dir, requests_per_route=1)
+
+
+def test_standalone_and_onefile_launch_bundled_server_for_app_asgi_and_wsgi(tmp_path: Path) -> None:
+    """Verify packaged standalone and onefile bundles launch bin/vertebra-server for App, ASGI, and WSGI targets."""
+    project_dir = tmp_path / "web_project"
+    project_dir.mkdir(parents=True)
+    (project_dir / "pyproject.toml").write_text('[project]\nname = "web-project"\nversion = "0.1.0"\n')
+    (project_dir / "app.py").write_text(
+        '"""Sample Vertebra, ASGI, and WSGI entrypoints."""\n'
+        "from typing import Any\n"
+        "from vertebra import App\n\n"
+        "app = App()\n\n"
+        '@app.get("/health")\n'
+        "def health() -> str:\n"
+        '    return "healthy"\n\n'
+        "async def asgi_app(scope: dict[str, Any], receive: Any, send: Any) -> None:\n"
+        "    _ = (scope, receive, send)\n\n"
+        "def wsgi_app(environ: dict[str, Any], start_response: Any) -> list[bytes]:\n"
+        "    _ = (environ, start_response)\n"
+        '    return [b"ok"]\n',
+        encoding="utf-8",
+    )
+
+    marker_file = tmp_path / "launched_server.json"
+    shebang = chr(35) + f"!{sys.executable}\n"
+    fake_server = tmp_path / "vertebra-server"
+    fake_server.write_text(
+        f"{shebang}"
+        '"""Fake vertebra-server recording VERTEBRA_APP and verifying PYTHONPATH import."""\n'
+        "import importlib\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "import sys\n"
+        "from vertebra.utils.serializers import format_json\n\n"
+        'spec = os.environ.get("VERTEBRA_APP", "")\n'
+        'mod_name, _, attr_name = spec.partition(":")\n'
+        "mod = importlib.import_module(mod_name)\n"
+        "loaded = getattr(mod, attr_name)\n"
+        "payload = {\n"
+        '    "vertebra_app": spec,\n'
+        '    "type_name": type(loaded).__name__,\n'
+        '    "argv": sys.argv[1:],\n'
+        "}\n"
+        f"Path({str(marker_file)!r}).write_text(format_json(payload), encoding='utf-8')\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    fake_server.chmod(0o755)
+
+    repo_py = str(Path(__file__).resolve().parents[3])
+    runner = CliRunner()
+    for idx, (ep_spec, expected_type) in enumerate(
+        (
+            ("app:app", "App"),
+            ("app:asgi_app", "function"),
+            ("app:wsgi_app", "function"),
+        )
+    ):
+        marker_file.unlink(missing_ok=True)
+        onefile_bin = tmp_path / f"web-onefile-{idx}"
+        res = runner.invoke(
+            build_command,
+            [
+                "--project-dir",
+                str(project_dir),
+                "--standalone",
+                "--onefile",
+                "--entrypoint",
+                ep_spec,
+                "--target",
+                "linux-x86_64",
+                "--python-version",
+                "3.15",
+                "--server-binary",
+                str(fake_server),
+                "--output",
+                str(onefile_bin),
+            ],
+        )
+        assert res.exit_code == 0, res.output
+
+        env = dict(os.environ)
+        env["XDG_CACHE_HOME"] = str(tmp_path / f"cache_{idx}")
+        env["PYTHONPATH"] = repo_py
+        env.pop("VERTEBRA_SERVER_BINARY", None)
+        env.pop("VERTEBRA_APP", None)
+        proc = subprocess.run([str(onefile_bin)], env=env, capture_output=True, text=True, check=False)
+        assert proc.returncode == 0, proc.stderr
+        assert marker_file.is_file()
+        recorded = decode_json(marker_file.read_bytes())
+        assert recorded["vertebra_app"] == ep_spec
+        assert recorded["type_name"] == expected_type
+
+    no_bin_dist = tmp_path / "dist_no_bin"
+    target = BuildTarget.resolve("linux-x86_64", python_version="3.15")
+    StandaloneBuilder(project_dir=project_dir, target=target, entrypoint="app:app").build(no_bin_dist)
+    missing_env = dict(os.environ)
+    missing_env["PYTHONPATH"] = repo_py
+    missing_env["VERTEBRA_SERVER_BINARY"] = str(tmp_path / "does-not-exist-vertebra-server")
+    missing_proc = subprocess.run(
+        [sys.executable, str(no_bin_dist / "__main__.py")],
+        env=missing_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert missing_proc.returncode == 1
+    assert "vertebra-server binary not found" in missing_proc.stderr

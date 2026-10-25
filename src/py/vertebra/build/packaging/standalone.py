@@ -162,33 +162,73 @@ class StandaloneBuilder:
     def _render_bootstrap(self, *, server_binary_rel: str | None = None) -> str:
         module_name, _, attr_name = self.entrypoint.partition(":")
         target_attr = attr_name or "app"
-        os_import = "import os\n" if server_binary_rel is not None else ""
+        entrypoint_spec = f"{module_name}:{target_attr}"
         server_env_line = (
-            f'    os.environ.setdefault("VERTEBRA_SERVER_BINARY", str(root_dir / "{server_binary_rel}"))\n'
+            f'    os.environ.setdefault("VERTEBRA_SERVER_BINARY", str(root_dir / {server_binary_rel!r}))\n'
             if server_binary_rel is not None
             else ""
         )
         return (
             '"""Auto-generated Vertebra standalone bootstrap."""\n\n'
             "import importlib\n"
-            f"{os_import}"
+            "import inspect\n"
+            "import os\n"
             "from pathlib import Path\n"
+            "import subprocess\n"
             "import sys\n\n\n"
+            "def _accepts_zero_positional_args(fn: object) -> bool:\n"
+            "    if not callable(fn) or hasattr(fn, '__rsgi__'):\n"
+            "        return False\n"
+            "    if inspect.iscoroutinefunction(fn) or (\n"
+            "        not inspect.isfunction(fn)\n"
+            "        and not inspect.ismethod(fn)\n"
+            "        and inspect.iscoroutinefunction(getattr(fn, '__call__', None))\n"
+            "    ):\n"
+            "        return False\n"
+            "    try:\n"
+            "        sig = inspect.signature(fn)\n"
+            "    except (TypeError, ValueError):\n"
+            "        return False\n"
+            "    for param in sig.parameters.values():\n"
+            "        if (\n"
+            "            param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)\n"
+            "            and param.default is inspect.Parameter.empty\n"
+            "        ):\n"
+            "            return False\n"
+            "    return True\n\n\n"
+            "def _launch_server_for_app(app_dir: Path, entrypoint_spec: str) -> int:\n"
+            '    server_bin = os.environ.get("VERTEBRA_SERVER_BINARY", "")\n'
+            "    if not server_bin:\n"
+            "        try:\n"
+            "            from vertebra.supervisor._supervisor import find_server_binary\n\n"
+            "            server_bin = find_server_binary()\n"
+            "        except (ImportError, SystemExit):\n"
+            '            server_bin = ""\n'
+            "    if not server_bin or not Path(server_bin).is_file():\n"
+            '        sys.stderr.write("vertebra-server binary not found; bundle with --server-binary or set VERTEBRA_SERVER_BINARY\\n")\n'
+            "        return 1\n"
+            "    srv_env = os.environ.copy()\n"
+            '    srv_env.setdefault("VERTEBRA_APP", entrypoint_spec)\n'
+            '    existing_py_path = srv_env.get("PYTHONPATH", "")\n'
+            "    srv_env['PYTHONPATH'] = (\n"
+            '        f"{app_dir}{os.pathsep}{existing_py_path}" if existing_py_path else str(app_dir)\n'
+            "    )\n"
+            "    return subprocess.run([server_bin, *sys.argv[1:]], env=srv_env, check=False).returncode\n\n\n"
             "def main() -> int:\n"
             "    root_dir = Path(__file__).resolve().parent\n"
             '    app_dir = root_dir / "app"\n'
             f"{server_env_line}"
             "    sys.path.insert(0, str(app_dir))\n"
-            f'    module = importlib.import_module("{module_name}")\n'
-            f'    target = getattr(module, "{target_attr}")\n'
-            "    if callable(target):\n"
+            f"    module = importlib.import_module({module_name!r})\n"
+            f"    target = getattr(module, {target_attr!r})\n"
+            "    if _accepts_zero_positional_args(target):\n"
             "        ret = target()\n"
             "        return ret if isinstance(ret, int) else 0\n"
-            "    runner = getattr(target, 'run', None)\n"
-            "    if callable(runner):\n"
+            "    runner = None if inspect.isclass(target) else getattr(target, 'run', None)\n"
+            "    if _accepts_zero_positional_args(runner):\n"
             "        ret = runner()\n"
             "        return ret if isinstance(ret, int) else 0\n"
-            "    return 0\n\n\n"
+            f"    return _launch_server_for_app(app_dir, {entrypoint_spec!r})\n\n\n"
             'if __name__ == "__main__":\n'
             "    sys.exit(main())\n"
         )
