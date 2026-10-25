@@ -10,6 +10,14 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-10-25] flow-archive | Completed and Archived Two-Phase Rust PGO Pipeline, Python 3.15 Packaging, and Documentation Sync (`pgo-packaging-and-docs-sync`)
+
+- Completed and archived Flow `pgo-packaging-and-docs-sync` (3 tasks across Phases 1–2, final completion commit `78c6c9527fad067e5bc4b8287456d837adc49a4c` on `feat/pgo-packaging-and-docs-sync`).
+- Synthesized OKF v0.2 knowledge across `product/` and `knowledge/`:
+  - `domains/frontend/packaging-and-pgo.md`, `domains/framework/cli.md`, and `testing/benchmarks-and-free-threaded.md`: Documented the unified two-phase Rust PGO pipeline (`run_pgo_pipeline`, `PgoPipelineResult`, `python -m tools.pgo.rust_pgo`, `make build-pgo`) across `vertebra-http` and `EXTENSION_MANIFESTS` (`_vertebra`, `_bundler`, `_storage`), `resolve_cargo_release_dir` (`CARGO_TARGET_DIR`), single-pass `validate_profdata` (`llvm-profdata show`), `run_default_pgo_workload`, `BuildTarget` `SUPPORTED_PYTHON_VERSIONS` (`3.12`–`3.15`, `3.14t`, `3.15t`) and Linux `musl` targets, and `StandaloneBuilder` / `vtb build` `--entrypoint`, `--profdata`, and `--server-binary` staging (`VERTEBRA_SERVER_BINARY` + `VERTEBRA_APP` launch bootstrap).
+  - `product/tech-stack.md`, `product/product-guidelines.md`, `knowledge/workflow.md`, `architecture/runtime/platform-and-lifecycle.md`, `patterns/python/hot-path-and-async-dispatch.md`, `gotchas/pyo3-and-python-runtime.md`, and `testing/polyglot-test-matrix.md`: Synchronized `tools/pgo` lint/type-check coverage, all 12 `pyproject.toml` SQLAlchemy dialect entry points (`{Postgres,Oracle,Mysql,Sqlite,Mssql,Duckdb}Dialect`), the `sqlspec` extra and mypy overrides, and live runtime symbols (`BatchDispatchPlan.sync_native`, `state.health_endpoint.try_intercept(req_path)`, `drive_asgi_batch(single_root_asgi.dispatch_app, batch, ...)`).
+- Contracted `.agents/bundles/specs/` back to lazy (`.gitkeep` only).
+
 ## [2026-10-24] flow-archive | Completed and Archived Runtime Throughput, Multi-Core Scaling, and Python 3.15 Optimizations (`runtime-throughput-and-315`)
 
 - Completed and archived Flow `runtime-throughput-and-315` (12 tasks across Phases 1–5, final completion commit `bc4cfe57817008626ac98602488242a76bf4e580` on `perf/runtime-throughput-and-315`).
