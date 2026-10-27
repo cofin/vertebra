@@ -20,6 +20,8 @@ sources:
   - resource: src/rs/vertebra-http/src/multipart.rs
   - resource: src/rs/vertebra-http/src/access_log.rs
   - resource: src/rs/vertebra-http/src/profile.rs
+  - resource: src/rs/vertebra-http/src/discovery.rs
+  - resource: src/rs/vertebra-http/src/grpc.rs
   - resource: src/rs/vertebra-http/src/sse.rs
   - resource: src/rs/vertebra-http/src/ws_mount.rs
   - resource: src/rs/vertebra-http/src/pubsub.rs
@@ -42,6 +44,13 @@ sources:
 | [`h2c.rs`](../../../../../src/rs/vertebra-http/src/h2c.rs) | `H2C_PREFACE`, `CleartextProtocol`, `detect_cleartext_protocol` | Gated behind `ServerConfig::enable_h2c_prior_knowledge` (`VERTEBRA_H2C=1`); skipped on the default zero-peek `http1::Builder` fastpath |
 | [`http3.rs`](../../../../../src/rs/vertebra-http/src/http3.rs) | `Http3Config` (`enabled: false`, `alt_svc_max_age: 86_400`, `max_concurrent_bidi_streams: 256`, `keep_alive_interval_ms: 15_000`), `inject_alt_svc_header` | Appends `Alt-Svc` when `http3.enabled` is true |
 | [`tls.rs`](../../../../../src/rs/vertebra-http/src/tls.rs) | `TlsAcceptor` (`from_config`, `accept`, `rustls_config`, `peer_identity`), `MtlsConfig`, `ClientAuthMode` | Acceptor used by `serve_tls` (feature `tls`) |
+| [`profile.rs`](../../../../../src/rs/vertebra-http/src/profile.rs) | `ProfileConfig`, `ProfileEndpoint` | Cached on `ServerState::profile_endpoint` (`VERTEBRA_PROFILE=1` / `VERTEBRA_PROFILE_TOKEN`); `try_handle` serves `/debug/pprof/profile` and `/debug/pprof/heap` with constant-time Bearer token validation |
+| [`discovery.rs`](../../../../../src/rs/vertebra-http/src/discovery.rs) | `WellKnownDiscoveryCache`, `CachedDiscoveryDoc`, `DiscoveryResponse` | Cached on `ServerState::discovery`; `serve` answers `/.well-known/agent-card.json` and `/.well-known/mcp.json` (`ETag`/`304 Not Modified`) before backpressure |
+| [`payload.rs`](../../../../../src/rs/vertebra-http/src/payload.rs) | `PayloadLimits`, `PayloadError`, `collect_bounded_body`, `decode_request_payload` | Configured via `ServerConfig::payload_limits`; enforces streaming request body byte caps (`413 Payload Too Large` before full buffering) and bounded `Content-Encoding` decompression in `response::handle` |
+| [`multipart.rs`](../../../../../src/rs/vertebra-http/src/multipart.rs) | `MultipartLimits`, `MultipartPart`, `ParsedMultipart`, `parse_multipart_body` | Configured via `ServerConfig::multipart_limits`; pre-validates `multipart/form-data` part counts and sizes (`413`/`400`) in `response::handle` |
+| [`grpc.rs`](../../../../../src/rs/vertebra-http/src/grpc.rs) | `decode_grpc_frames`, `encode_grpc_frame`, `GrpcStatus` | Configured via `ServerConfig::max_grpc_message_size`; validates `application/grpc` request framing in `response::handle` |
+| [`access_log.rs`](../../../../../src/rs/vertebra-http/src/access_log.rs) | `AccessLogger`, `AccessLogFormat`, `AccessLogEntry`, `format_utc_clf_timestamp` | Cached on `ServerState::access_logger` (`VERTEBRA_ACCESS_LOG`); records formatted CLF or JSON request entries at the end of `response::handle` |
+| [`sse.rs`](../../../../../src/rs/vertebra-http/src/sse.rs), [`pubsub.rs`](../../../../../src/rs/vertebra-http/src/pubsub.rs), [`ws_mount.rs`](../../../../../src/rs/vertebra-http/src/ws_mount.rs) | `SseHub`, `PubSubBroker`, `WsConnectionRegistry` | Retained on `ServerState` (`sse_hub`, `pubsub_broker`, `ws_registry`); `ws_registry.close_all(1001, "Server shutting down")` drains WebSockets on server shutdown |
 
 ## Library only (no production caller in `response::handle`)
 
@@ -50,13 +59,6 @@ sources:
 | `h2c.rs` (upgrade helpers) | `parse_h2c_upgrade_headers`, `build_h2c_switching_protocols_response`, `decode_base64url`, `PrependStream`, `H2cUpgradeParams` | RFC 9113 `Upgrade: h2c` parsing helpers |
 | `http3.rs` (QUIC listener) | `build_quic_server_config`, `serve_http3_endpoint`, `handle_h3_request`, `H3ChannelBody` | Feature `http3`; standalone QUIC endpoint helpers |
 | `tls.rs` (identity helpers) | `IpCidr`, `TrustedProxyConfig`, `ClientIdentity`, `ProxyAuthMetadata`, `extract_client_identity_from_der`, `normalize_trusted_proxy_headers` | Certificate CN and proxy XFCC/IAP header helpers |
-| [`payload.rs`](../../../../../src/rs/vertebra-http/src/payload.rs) | `PayloadLimits`, `PayloadError`, `decode_request_payload` | Bounded request decompression |
-| [`multipart.rs`](../../../../../src/rs/vertebra-http/src/multipart.rs) | `MultipartLimits`, `MultipartPart`, `ParsedMultipart`, `parse_multipart_body` | `multer`-based multipart parser |
-| [`access_log.rs`](../../../../../src/rs/vertebra-http/src/access_log.rs) | `AccessLogger`, `AccessLogFormat`, `AccessLogEntry`, `format_utc_clf_timestamp` | In-memory formatted access log buffer (`drain_buffered`) |
-| [`profile.rs`](../../../../../src/rs/vertebra-http/src/profile.rs) | `ProfileConfig`, `ProfileEndpoint` | Constant-time token-guarded runtime metadata endpoint |
-| [`sse.rs`](../../../../../src/rs/vertebra-http/src/sse.rs) | `SseEvent`, `SseTopicBuffer` (`replay_since`), `SseHub`, `SSE_KEEPALIVE_PING`, `DEFAULT_TOPIC_CHANNEL_CAPACITY` (256) | Used by `pubsub.rs` |
-| [`ws_mount.rs`](../../../../../src/rs/vertebra-http/src/ws_mount.rs) | `WsConfig`, `WebSocketHandshakeDecision`, `WsConnectionRegistry`, `validate_origin`, `negotiate_subprotocol`, `build_handshake_response`, `run_ws_connection` | `is_websocket_upgrade` is called by `hmr.rs` |
-| [`pubsub.rs`](../../../../../src/rs/vertebra-http/src/pubsub.rs) | `PubSubBroker`, `PubSubEnvelope`, `TopicHub`, `ShmBroadcastRing`, `topic_matches_pattern`, `MAX_IDEMPOTENCY_KEYS` (1024), `DEFAULT_BROADCAST_CAPACITY` (1024) | Topic broadcast and idempotency primitives |
 | [`dispatcher/direct.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/direct.rs) | `DirectWorkerPool`, `AdaptiveWorkerConfig`, `run_adaptive_worker`, `BatchHandler` | Consumer for `DispatchBackend::Direct` |
 
 Additional domain-specific modules:

@@ -72,6 +72,23 @@ class CgroupQuota(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             memory_max_bytes=mem_bytes,
         )
 
+    @classmethod
+    def effective_cpu_count(
+        cls,
+        cpu_max_path: str | Path = "/sys/fs/cgroup/cpu.max",
+    ) -> int:
+        """Return container- and affinity-aware effective CPU count for thread/worker auto-sizing."""
+        sched_getaffinity = getattr(os, "sched_getaffinity", None)
+        if callable(sched_getaffinity):
+            try:
+                affinity_cpus = max(1, len(sched_getaffinity(0)))
+            except OSError:
+                affinity_cpus = os.cpu_count() or 1
+        else:
+            affinity_cpus = os.cpu_count() or 1
+        quota = cls.detect(cpu_max_path=cpu_max_path, host_cpus=affinity_cpus)
+        return max(1, min(affinity_cpus, quota.effective_workers))
+
 
 class LameDuckController:
     """Manages graceful lame-duck health check drain before socket closure on SIGTERM."""

@@ -177,6 +177,28 @@ impl ShmRegion {
         Ok(region)
     }
 
+    /// Disarm automatic `shm_unlink` on drop so a peer process can open the named region.
+    #[cfg(unix)]
+    pub fn disarm_unlink(&mut self) {
+        self.unlink_name = None;
+    }
+
+    /// Create a uniquely named one-shot overflow shared memory region with unlink disarmed.
+    ///
+    /// The consumer is responsible for calling [`shm_unlink_named`] after opening the region.
+    #[cfg(unix)]
+    pub fn create_overflow_region(prefix: &str, size: usize) -> Result<(String, Self), ShmError> {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static OVERFLOW_SEQ: AtomicU64 = AtomicU64::new(0);
+
+        let pid = std::process::id();
+        let seq = OVERFLOW_SEQ.fetch_add(1, Ordering::Relaxed);
+        let name = format!("/vtb-{prefix}-{pid:x}-{seq:x}");
+        let mut region = Self::create_named(&name, size)?;
+        region.disarm_unlink();
+        Ok((name, region))
+    }
+
     /// Get the raw bytes as an immutable slice.
     ///
     /// # Safety

@@ -21,16 +21,22 @@ use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tracing::{debug, error, info};
 
+use crate::access_log::AccessLogger;
 use crate::assets::{AssetManager, StaticAssetServeConfig};
 use crate::batcher::PendingRequest;
 use crate::compression::CompressionOffloadConfig;
 use crate::config::{OpenApiCacheConfig, ServerConfig, StaticMountConfig};
 use crate::cors::CompiledCorsOffload;
+use crate::discovery::WellKnownDiscoveryCache;
 use crate::dispatcher::Dispatcher;
 use crate::health::HealthEndpoint;
 use crate::hmr::HmrState;
+use crate::profile::ProfileEndpoint;
+use crate::pubsub::PubSubBroker;
 use crate::response::handle;
 use crate::routing::Router;
+use crate::sse::SseHub;
+use crate::ws_mount::WsConnectionRegistry;
 
 #[cfg(feature = "tls")]
 use crate::tls::TlsAcceptor;
@@ -146,6 +152,12 @@ pub struct ServerState {
     pub compression: Option<CompressionOffloadConfig>,
     pub static_mounts: Vec<StaticAssetMount>,
     pub openapi_cache: Option<CompiledOpenApiCache>,
+    pub profile_endpoint: ProfileEndpoint,
+    pub discovery_cache: WellKnownDiscoveryCache,
+    pub access_logger: Option<Arc<AccessLogger>>,
+    pub sse_hub: Arc<SseHub>,
+    pub pubsub_broker: Arc<PubSubBroker>,
+    pub ws_registry: Arc<WsConnectionRegistry>,
 }
 
 impl ServerState {
@@ -167,6 +179,28 @@ impl ServerState {
             .openapi_cache
             .as_ref()
             .and_then(CompiledOpenApiCache::from_config);
+        let profile_endpoint = ProfileEndpoint::new(config.profile.clone());
+        let discovery_cache = WellKnownDiscoveryCache::new();
+        for (doc_path, body_str) in &config.discovery {
+            let body_bytes = Bytes::copy_from_slice(body_str.as_bytes());
+            match doc_path.as_str() {
+                "/.well-known/agent-card.json" => discovery_cache.register_agent_card(body_bytes),
+                "/.well-known/mcp.json" => discovery_cache.register_mcp_manifest(body_bytes),
+                "/.well-known/oauth-protected-resource" => {
+                    discovery_cache.register_oauth_protected_resource(body_bytes);
+                }
+                other => {
+                    discovery_cache.register_document(other, "application/json", None, body_bytes);
+                }
+            }
+        }
+        let access_logger = config
+            .access_log
+            .clone()
+            .map(|fmt| Arc::new(AccessLogger::new(fmt)));
+        let sse_hub = Arc::new(SseHub::new(256, std::time::Duration::from_secs(15)));
+        let pubsub_broker = Arc::new(PubSubBroker::new(0, 256, Some(Arc::clone(&sse_hub)), None));
+        let ws_registry = Arc::new(WsConnectionRegistry::new());
 
         Self {
             router,
@@ -180,6 +214,12 @@ impl ServerState {
             compression,
             static_mounts,
             openapi_cache,
+            profile_endpoint,
+            discovery_cache,
+            access_logger,
+            sse_hub,
+            pubsub_broker,
+            ws_registry,
         }
     }
 
@@ -312,6 +352,11 @@ pub async fn run_with_listener(
             }
         }
     }
+
+    state
+        .ws_registry
+        .close_all(1001, "Server shutting down")
+        .await;
 
     Ok(())
 }

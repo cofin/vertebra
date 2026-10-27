@@ -52,7 +52,10 @@ impl ShmDispatcher {
     pub fn new(ring_pairs: Vec<Arc<RingPair>>, max_inflight: usize) -> Arc<Self> {
         let workers: Vec<WorkerState> = ring_pairs
             .into_iter()
-            .map(|rp| WorkerState { ring_pair: rp })
+            .map(|rp| WorkerState {
+                ring_pair: rp,
+                healthy: std::sync::atomic::AtomicBool::new(true),
+            })
             .collect();
 
         let shard_capacity = max_inflight / SHM_CORRELATION_SHARDS;
@@ -69,6 +72,23 @@ impl ShmDispatcher {
             pending_streams: Arc::new(PendingRequests::new()),
             lease_table: Mutex::new(None),
         })
+    }
+
+    /// Update the dispatch health status of `worker_id`.
+    ///
+    /// Unhealthy workers are skipped by least-loaded worker selection until
+    /// their replacement process finishes respawning.
+    pub fn set_worker_healthy(&self, worker_id: usize, healthy: bool) {
+        if let Some(worker) = self.workers.get(worker_id) {
+            worker.healthy.store(healthy, Ordering::Release);
+        }
+    }
+
+    /// Return whether `worker_id` is currently marked healthy for dispatch.
+    pub fn is_worker_healthy(&self, worker_id: usize) -> bool {
+        self.workers
+            .get(worker_id)
+            .is_some_and(|w| w.healthy.load(Ordering::Acquire))
     }
 
     #[inline]
@@ -225,6 +245,7 @@ impl ShmDispatcher {
                 });
 
                 let is_fnf = (req_flags & flags::FIRE_AND_FORGET) != 0;
+                #[cfg(not(unix))]
                 if batch_snapshot_serialized_size(1, req_slab_bytes) > max_payload {
                     if !is_fnf {
                         rejected_replies.push(reply);
@@ -350,6 +371,44 @@ impl ShmDispatcher {
                 components,
                 flags: sub_flags,
             };
+
+            #[cfg(unix)]
+            if writer.serialized_size() > max_payload {
+                match writer.write_overflow_envelope() {
+                    Ok((overflow_name, envelope)) => {
+                        match worker.ring_pair.request_ring.try_send_with(
+                            sub_flags | flags::SHM_OVERFLOW,
+                            |slot| {
+                                slot[..envelope.len()].copy_from_slice(&envelope);
+                                envelope.len()
+                            },
+                        ) {
+                            Ok(()) => {
+                                dispatched_count += slice.len();
+                            }
+                            Err(e) => {
+                                let _ = vertebra_core::shm::shm_unlink_named(&overflow_name);
+                                debug!(
+                                    worker = worker_idx,
+                                    error = %e,
+                                    "request ring send failed during overflow sub-batch flush"
+                                );
+                                self.fail_staged_slice(slice);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            worker = worker_idx,
+                            error = %e,
+                            "failed to allocate SHM overflow region for oversized request"
+                        );
+                        self.fail_staged_slice(slice);
+                    }
+                }
+                start = end;
+                continue;
+            }
 
             match worker
                 .ring_pair

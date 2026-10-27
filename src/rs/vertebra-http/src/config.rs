@@ -6,10 +6,15 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::access_log::AccessLogFormat;
 use crate::backpressure::{BackpressureConfig, CircuitBreakerConfig};
 use crate::compression::CompressionOffloadConfig;
 use crate::cors::CorsOffloadConfig;
+use crate::grpc::DEFAULT_MAX_GRPC_MESSAGE_SIZE;
 use crate::http3::Http3Config;
+use crate::multipart::MultipartLimits;
+use crate::payload::PayloadLimits;
+use crate::profile::ProfileConfig;
 use crate::tls::{MtlsConfig, TrustedProxyConfig};
 
 /// Static asset mount specification offloaded from Python frameworks.
@@ -40,6 +45,8 @@ struct OffloadPlanPayload {
     pub cors: Option<CorsOffloadConfig>,
     pub static_mounts: Vec<StaticMountConfig>,
     pub openapi: Option<OpenApiCacheConfig>,
+    pub discovery: HashMap<String, String>,
+    pub payload_limits: Option<PayloadLimits>,
 }
 
 /// Top-level server configuration.
@@ -98,6 +105,18 @@ pub struct ServerConfig {
     pub static_mounts: Vec<StaticMountConfig>,
     /// Optional pre-rendered OpenAPI schema cache served directly in Rust.
     pub openapi_cache: Option<OpenApiCacheConfig>,
+    /// Request body and decompression byte limits (`413 Payload Too Large`).
+    pub payload_limits: PayloadLimits,
+    /// Multipart form-data field and byte limits.
+    pub multipart_limits: MultipartLimits,
+    /// Maximum gRPC message size in bytes (default: 4 MiB).
+    pub max_grpc_message_size: usize,
+    /// Token-guarded `/debug/pprof/*` diagnostic endpoint configuration.
+    pub profile: ProfileConfig,
+    /// Optional compiled HTTP access log format.
+    pub access_log: Option<AccessLogFormat>,
+    /// Pre-registered `/.well-known/*` discovery documents served in Rust.
+    pub discovery: HashMap<String, String>,
 }
 
 /// Runtime topology for Vertebra.
@@ -192,6 +211,12 @@ impl Default for ServerConfig {
             compression: None,
             static_mounts: Vec::new(),
             openapi_cache: None,
+            payload_limits: PayloadLimits::default(),
+            multipart_limits: MultipartLimits::default(),
+            max_grpc_message_size: DEFAULT_MAX_GRPC_MESSAGE_SIZE,
+            profile: ProfileConfig::default(),
+            access_log: None,
+            discovery: HashMap::new(),
         }
     }
 }
@@ -211,6 +236,12 @@ impl ServerConfig {
         }
         if let Some(openapi) = parsed.openapi {
             self.openapi_cache = Some(openapi);
+        }
+        if !parsed.discovery.is_empty() {
+            self.discovery.extend(parsed.discovery);
+        }
+        if let Some(limits) = parsed.payload_limits {
+            self.payload_limits = limits;
         }
         Ok(())
     }
@@ -374,14 +405,86 @@ impl ServerConfig {
             cb.half_open_probe_count = n;
         }
 
+        // Payload, multipart, gRPC, profiling, and access log knobs.
+        if let Ok(v) = std::env::var("VERTEBRA_MAX_BODY_SIZE")
+            && let Ok(n) = v.parse::<usize>()
+            && n > 0
+        {
+            config.payload_limits.max_body_size = n;
+        }
+        if let Ok(v) = std::env::var("VERTEBRA_MAX_DECOMPRESSED_SIZE")
+            && let Ok(n) = v.parse::<usize>()
+            && n > 0
+        {
+            config.payload_limits.max_decompressed_size = n;
+        }
+        if let Ok(v) = std::env::var("VERTEBRA_MULTIPART_MAX_TOTAL_SIZE")
+            && let Ok(n) = v.parse::<usize>()
+            && n > 0
+        {
+            config.multipart_limits.max_total_size = n;
+        }
+        if let Ok(v) = std::env::var("VERTEBRA_MULTIPART_MAX_FILE_SIZE")
+            && let Ok(n) = v.parse::<usize>()
+            && n > 0
+        {
+            config.multipart_limits.max_file_size = n;
+        }
+        if let Ok(v) = std::env::var("VERTEBRA_MULTIPART_MAX_FIELDS")
+            && let Ok(n) = v.parse::<usize>()
+            && n > 0
+        {
+            config.multipart_limits.max_fields = n;
+        }
+        if let Ok(v) = std::env::var("VERTEBRA_GRPC_MAX_MESSAGE_SIZE")
+            && let Ok(n) = v.parse::<usize>()
+            && n > 0
+        {
+            config.max_grpc_message_size = n;
+        }
+        config.profile.enabled = matches!(
+            std::env::var("VERTEBRA_PPROF_ENABLED").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("True")
+        );
+        if let Ok(token) = std::env::var("VERTEBRA_PPROF_TOKEN")
+            && !token.trim().is_empty()
+        {
+            config.profile.bearer_token = Some(token);
+        }
+        if let Ok(raw_log) = std::env::var("VERTEBRA_ACCESS_LOG") {
+            let trimmed = raw_log.trim();
+            if !trimmed.is_empty() && !matches!(trimmed, "0" | "false" | "FALSE" | "off") {
+                config.access_log = Some(match trimmed.to_ascii_lowercase().as_str() {
+                    "1" | "true" | "combined" => AccessLogFormat::Combined,
+                    "common" => AccessLogFormat::Common,
+                    "json" => AccessLogFormat::Json,
+                    _ => AccessLogFormat::Custom(trimmed.to_string()),
+                });
+            }
+        }
+
         config
     }
 }
 
 fn num_cpus() -> usize {
-    std::thread::available_parallelism()
+    let available = std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(1)
+        .unwrap_or(1);
+    #[cfg(target_os = "linux")]
+    if let Ok(raw) = std::fs::read_to_string("/sys/fs/cgroup/cpu.max") {
+        let mut parts = raw.split_whitespace();
+        if let (Some(quota_str), Some(period_str)) = (parts.next(), parts.next())
+            && quota_str != "max"
+            && let (Ok(quota), Ok(period)) = (quota_str.parse::<u64>(), period_str.parse::<u64>())
+            && quota > 0
+            && period > 0
+        {
+            let cgroup_cpus = (quota.div_ceil(period) as usize).max(1);
+            return available.min(cgroup_cpus).max(1);
+        }
+    }
+    available
 }
 
 #[cfg(test)]

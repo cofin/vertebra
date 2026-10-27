@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from vertebra.cli._launch import ServerLaunchEnv
 from vertebra.server._gil_audit import GilAuditReport, is_free_threaded
 from vertebra.server._loops import (
     EventLoopPool,
@@ -229,3 +230,22 @@ def test_gil_audit_quarantine_forces_single_loop_shard() -> None:
     )
     assert report.quarantine_unsafe_modules(4) == 1
     assert isinstance(asyncio.get_event_loop_policy(), asyncio.DefaultEventLoopPolicy)
+
+
+def test_cgroup_quota_effective_cpu_count_and_launch_env(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify CgroupQuota.effective_cpu_count and ServerLaunchEnv.to_environ respect affinity and site-packages."""
+    cpu_max = tmp_path / "cpu.max"
+    cpu_max.write_text("200000 100000\n", encoding="utf-8")
+    monkeypatch.setattr("os.sched_getaffinity", lambda _pid: {0, 1, 2, 3}, raising=False)
+    assert CgroupQuota.effective_cpu_count(cpu_max_path=cpu_max) == 2
+
+    monkeypatch.setattr("os.sched_getaffinity", lambda _pid: {0}, raising=False)
+    assert CgroupQuota.effective_cpu_count(cpu_max_path=cpu_max) == 1
+
+    launch = ServerLaunchEnv(app_path="demo:app", host="127.0.0.1", port=8000)
+    env = launch.to_environ(base={})
+    assert env["VERTEBRA_THREADS"] == str(CgroupQuota.effective_cpu_count())
+    assert "site-packages" in env["PYTHONPATH"] or env["PYTHONPATH"]

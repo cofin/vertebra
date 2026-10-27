@@ -37,9 +37,9 @@ pub struct BackpressureConfig {
 impl Default for BackpressureConfig {
     fn default() -> Self {
         Self {
-            max_in_flight: 1024,
-            max_queue_depth: 1024,
-            max_queue_time: Duration::from_millis(100),
+            max_in_flight: 4096,
+            max_queue_depth: 4096,
+            max_queue_time: Duration::from_millis(5000),
             max_active_streams: 65_536,
             high_watermark: 192,
             low_watermark: 64,

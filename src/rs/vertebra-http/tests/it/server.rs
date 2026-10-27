@@ -589,3 +589,206 @@ async fn test_server_executes_rust_cors_compression_and_static_mounts() {
 
     srv.shutdown().await;
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_server_enforces_payload_limits_profile_discovery_and_access_log() {
+    use std::sync::atomic::AtomicUsize;
+    use vertebra_http::access_log::AccessLogFormat;
+    use vertebra_http::payload::PayloadLimits;
+    use vertebra_http::profile::ProfileConfig;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_bridge();
+    drain_stale();
+
+    let mut table = RouteTable::new();
+    table.insert("POST", "/echo");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let dispatcher = Arc::new(Dispatcher::new());
+    let (collector, collector_tx) =
+        RequestBatcher::new(Arc::clone(&dispatcher), BatchLimit::default(), 128);
+    let collector_handle = tokio::spawn(collector.run());
+
+    let running = Arc::new(AtomicBool::new(true));
+    let worker_running = Arc::clone(&running);
+    let worker_hits = Arc::new(AtomicUsize::new(0));
+    let worker_hits_inner = Arc::clone(&worker_hits);
+
+    let worker_handle = tokio::spawn(async move {
+        while worker_running.load(Ordering::Acquire) {
+            let snapshot = tokio::task::spawn_blocking(|| {
+                BatchBridge::get().and_then(|b| b.poll_batch(Duration::from_millis(5)))
+            })
+            .await
+            .unwrap();
+
+            if let Some(batch) = snapshot {
+                worker_hits_inner.fetch_add(batch.len(), Ordering::AcqRel);
+                let responses: Vec<BridgeResponse> = (0..batch.len())
+                    .map(|i| BridgeResponse {
+                        request_id: batch.node(i).correlation_id,
+                        status: 200,
+                        headers_raw: bytes::Bytes::new(),
+                        body: batch.body_bytes_owned(i),
+                    })
+                    .collect();
+                if let Some(bridge) = BatchBridge::get() {
+                    let _ = bridge.submit_responses_async(responses).await;
+                }
+            }
+        }
+    });
+
+    let dispatcher_for_resp = Arc::clone(&dispatcher);
+    let resp_handle = tokio::spawn(async move {
+        let bridge = BatchBridge::get().expect("bridge not initialized");
+        while let Some(resps) = bridge.recv_responses().await {
+            for resp in resps {
+                dispatcher_for_resp.complete(
+                    resp.request_id,
+                    PendingResponse {
+                        status: resp.status,
+                        headers_mp: resp.headers_raw,
+                        body: resp.body,
+                        stream_rx: None,
+                    },
+                );
+            }
+        }
+    });
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let listener = server::bind_listener("127.0.0.1:0".parse().unwrap(), false).unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let config = Arc::new(ServerConfig {
+        bind: addr,
+        payload_limits: PayloadLimits {
+            max_body_size: 256,
+            max_decompressed_size: 512,
+        },
+        profile: ProfileConfig {
+            enabled: true,
+            bearer_token: Some("secret-prof-token".to_string()),
+        },
+        access_log: Some(AccessLogFormat::Json),
+        discovery: std::collections::HashMap::from([
+            (
+                "/.well-known/agent-card.json".to_string(),
+                r#"{"name":"vertebra-agent","version":"1.0"}"#.to_string(),
+            ),
+            (
+                "/.well-known/mcp.json".to_string(),
+                r#"{"mcpVersion":"2026-07-28"}"#.to_string(),
+            ),
+        ]),
+        ..ServerConfig::default()
+    });
+
+    let server_handle = tokio::spawn(async move {
+        server::run_with_listener(
+            listener,
+            config,
+            router,
+            dispatcher,
+            vec![collector_tx],
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let srv = TestServer {
+        addr,
+        running,
+        shutdown_tx: Some(shutdown_tx),
+        collector_handle,
+        worker_handle,
+        resp_handle,
+        server_handle,
+    };
+
+    let client = http_client();
+
+    let prof_unauth = client
+        .get(format!("http://{addr}/debug/pprof/profile"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(prof_unauth.status(), 401);
+
+    let prof_ok = client
+        .get(format!("http://{addr}/debug/pprof/profile"))
+        .header("Authorization", "Bearer secret-prof-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(prof_ok.status(), 200);
+    let prof_json = prof_ok.text().await.unwrap();
+    assert!(prof_json.contains("\"profile\":\"cpu\""));
+
+    let card_resp = client
+        .get(format!("http://{addr}/.well-known/agent-card.json"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(card_resp.status(), 200);
+    let etag = card_resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+    let card_304 = client
+        .get(format!("http://{addr}/.well-known/agent-card.json"))
+        .header("If-None-Match", &etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(card_304.status(), 304);
+
+    let too_large = client
+        .post(format!("http://{addr}/echo"))
+        .body(vec![b'a'; 300])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(too_large.status(), 413);
+    assert_eq!(worker_hits.load(Ordering::Acquire), 0);
+
+    let chunks: Vec<Result<hyper::body::Frame<bytes::Bytes>, std::io::Error>> = vec![
+        Ok(hyper::body::Frame::data(bytes::Bytes::from(vec![
+            b'x';
+            150
+        ]))),
+        Ok(hyper::body::Frame::data(bytes::Bytes::from(vec![
+            b'y';
+            150
+        ]))),
+    ];
+    let stream_too_large = client
+        .post(format!("http://{addr}/echo"))
+        .body(reqwest::Body::wrap(http_body_util::StreamBody::new(
+            futures_util::stream::iter(chunks),
+        )))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream_too_large.status(), 413);
+    assert_eq!(worker_hits.load(Ordering::Acquire), 0);
+
+    let valid_echo = client
+        .post(format!("http://{addr}/echo"))
+        .body(vec![b'z'; 128])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(valid_echo.status(), 200);
+    assert_eq!(valid_echo.bytes().await.unwrap().len(), 128);
+    assert_eq!(worker_hits.load(Ordering::Acquire), 1);
+
+    srv.shutdown().await;
+}

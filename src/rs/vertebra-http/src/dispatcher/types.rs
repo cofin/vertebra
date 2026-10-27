@@ -2,6 +2,7 @@
 //! helpers for the SHM accounting path.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use vertebra_core::transport::TransportNode;
 use vertebra_core::transport::ring_pair::RingPair;
@@ -11,6 +12,7 @@ use crate::body::PendingResponse;
 /// Per-worker state for SHM dispatch.
 pub(super) struct WorkerState {
     pub(super) ring_pair: Arc<RingPair>,
+    pub(super) healthy: AtomicBool,
 }
 
 /// Borrowed view of the body-shaped components of a pending request.
@@ -34,7 +36,7 @@ pub(super) fn batch_snapshot_serialized_size(node_count: usize, slab_len: usize)
 
 #[inline]
 pub(super) fn worker_ring_has_capacity(worker: &WorkerState) -> bool {
-    worker.ring_pair.request_ring.has_capacity()
+    worker.healthy.load(Ordering::Acquire) && worker.ring_pair.request_ring.has_capacity()
 }
 
 pub(super) fn service_unavailable_response() -> PendingResponse {

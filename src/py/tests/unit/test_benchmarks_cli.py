@@ -28,6 +28,7 @@ def test_micro_benchmarks_emit_expected_keys() -> None:
     expected_samples = {
         "request_headers_materialization",
         "asgi_scope_build_and_copy",
+        "asgi_dispatch_batch",
         "wsgi_environ_items",
         "rsgi_scope_build",
         "response_construct",

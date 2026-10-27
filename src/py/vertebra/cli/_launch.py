@@ -2,9 +2,12 @@
 
 import os
 import sys
+import sysconfig
 from collections.abc import Mapping
 
 import msgspec
+
+from vertebra.server.platform import CgroupQuota
 
 __all__ = ("ServerLaunchEnv",)
 
@@ -33,8 +36,17 @@ class ServerLaunchEnv(msgspec.Struct, frozen=True, gc=False):
         env["VERTEBRA_PYTHON_BIN"] = sys.executable
 
         cwd = os.getcwd()
+        path_entries: list[str] = [cwd]
+        for key in ("purelib", "platlib"):
+            candidate = sysconfig.get_path(key)
+            if candidate and candidate not in path_entries:
+                path_entries.append(candidate)
         existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = f"{cwd}{os.pathsep}{existing}" if existing else cwd
+        if existing:
+            for item in existing.split(os.pathsep):
+                if item and item not in path_entries:
+                    path_entries.append(item)
+        env["PYTHONPATH"] = os.pathsep.join(path_entries)
 
         env["VERTEBRA_HOST"] = self.host
         env["VERTEBRA_PORT"] = str(self.port)
@@ -52,7 +64,7 @@ class ServerLaunchEnv(msgspec.Struct, frozen=True, gc=False):
         if self.threads is not None:
             env["VERTEBRA_THREADS"] = str(self.threads)
         elif "VERTEBRA_THREADS" not in env or not env["VERTEBRA_THREADS"].strip():
-            env["VERTEBRA_THREADS"] = str(os.cpu_count() or 1)
+            env["VERTEBRA_THREADS"] = str(CgroupQuota.effective_cpu_count())
 
         if self.jit is True:
             env["PYTHON_JIT"] = "1"

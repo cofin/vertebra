@@ -436,3 +436,60 @@ async fn test_bridge_256_concurrent_requests_complete_via_direct_response_sink_w
         _ => panic!("expected bridge backend"),
     }
 }
+
+#[tokio::test]
+async fn shm_dispatcher_handles_oversized_request_and_skips_unhealthy_worker() {
+    use vertebra_http::dispatcher::ShmDispatcher;
+
+    let pair_0 = Arc::new(RingPair::create(RingPairConfig::default()).expect("pair 0"));
+    let pair_1 = Arc::new(RingPair::create(RingPairConfig::default()).expect("pair 1"));
+    let shm = ShmDispatcher::new(vec![Arc::clone(&pair_0), Arc::clone(&pair_1)], 32);
+    let dispatcher = Dispatcher::from_shm(Arc::clone(&shm));
+
+    shm.set_worker_healthy(0, false);
+    assert!(!shm.is_worker_healthy(0));
+    assert!(shm.is_worker_healthy(1));
+
+    for _ in 0..4 {
+        let (batch, _rxs) = make_batch(1);
+        assert_eq!(dispatcher.dispatch(batch), 1);
+    }
+
+    assert!(pair_0.request_ring.try_recv_view().is_err());
+    let mut received_on_1 = 0usize;
+    while let Ok(view) = pair_1.request_ring.try_recv_view() {
+        let snap = BatchSnapshot::from_mpmc_slot(view).expect("snapshot on worker 1");
+        received_on_1 += snap.len();
+    }
+    assert_eq!(received_on_1, 4);
+
+    shm.set_worker_healthy(0, true);
+    assert!(shm.is_worker_healthy(0));
+
+    #[cfg(unix)]
+    {
+        let (tx, _rx) = oneshot::channel();
+        let big_body = bytes::Bytes::from(vec![0x5Au8; 256 * 1024]);
+        let mut requests = vec![PendingRequest {
+            handler_id: 99,
+            method_tag: 1,
+            http_version_tag: 1,
+            flags: 0,
+            path_and_query: "/upload".parse().unwrap(),
+            headers_mp: bytes::Bytes::new(),
+            body: big_body.clone(),
+            reply: tx,
+        }];
+        assert_eq!(dispatcher.dispatch_requests(&mut requests), 1);
+
+        let view = pair_0
+            .request_ring
+            .try_recv_view()
+            .or_else(|_| pair_1.request_ring.try_recv_view())
+            .expect("overflow envelope must be queued in request ring");
+        let snap = BatchSnapshot::from_mpmc_slot(view).expect("overflow snapshot");
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap.body(0).len(), 256 * 1024);
+        assert_eq!(snap.body(0), big_body.as_ref());
+    }
+}

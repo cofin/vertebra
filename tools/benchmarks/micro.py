@@ -8,11 +8,13 @@ import statistics
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import msgspec
 
 from vertebra._vertebra import Request, Response
+from vertebra.server._asgi._runner import AsgiRunner
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -187,6 +189,53 @@ def benchmark_serializers_msgpack_json(iterations: int = 2000) -> MicroBenchSamp
     )
 
 
+def benchmark_asgi_dispatch_batch(iterations: int = 2000) -> MicroBenchSample:
+    """Benchmark AsgiRunner batch execution across 8 native ASGI requests."""
+    requests = [
+        Request.from_parts("GET", f"/api/v1/items/{i}", headers=[("accept", "application/json")])
+        for i in range(8)
+    ]
+
+    async def asgi_app(
+        scope: Any,
+        receive: Callable[[], Awaitable[dict[str, Any]]],
+        send: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        del scope, receive
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b'{"ok":true}',
+                "more_body": False,
+            }
+        )
+
+    runner = AsgiRunner(asgi_app)
+    try:
+
+        def run() -> None:
+            _ = runner(requests)
+
+        median_ns, p99_ns, ops_per_sec = _time_callable(run, iterations=iterations)
+    finally:
+        runner.close()
+
+    return MicroBenchSample(
+        name="asgi_dispatch_batch",
+        iterations=iterations,
+        median_ns=median_ns,
+        p99_ns=p99_ns,
+        ops_per_sec=ops_per_sec,
+    )
+
+
 def measure_import_time_ms(module_name: str, rounds: int = 5) -> float:
     """Measure warm subprocess import time in milliseconds."""
     subprocess.run([sys.executable, "-c", f"import {module_name}"], check=True)
@@ -207,6 +256,7 @@ def run_all_micro_benchmarks(*, iterations: int = 2000) -> MicroBenchSuiteResult
     benchmarks = (
         benchmark_request_headers_materialization,
         benchmark_asgi_scope_build_and_copy,
+        benchmark_asgi_dispatch_batch,
         benchmark_wsgi_environ_items,
         benchmark_rsgi_scope_build,
         benchmark_response_construct,

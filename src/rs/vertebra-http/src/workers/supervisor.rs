@@ -53,8 +53,13 @@ impl Supervisor {
                 if !lifecycle.circuit_breaker_tripped() {
                     info!(worker_id = lifecycle.worker_id, "respawning worker");
                     #[cfg(unix)]
-                    if let Err(e) = lifecycle.respawn() {
-                        error!(worker_id = lifecycle.worker_id, error = %e, "failed to respawn worker");
+                    match lifecycle.respawn() {
+                        Ok(()) => {
+                            shm.set_worker_healthy(lifecycle.worker_id, true);
+                        }
+                        Err(e) => {
+                            error!(worker_id = lifecycle.worker_id, error = %e, "failed to respawn worker");
+                        }
                     }
                 } else {
                     error!(
@@ -83,6 +88,7 @@ impl Supervisor {
                 worker_id,
                 "lifecycle not registered in factory, sweeping SHM directly"
             );
+            shm.set_worker_healthy(worker_id, false);
             shm.sweep_worker(worker_id as u32);
         }
     }
@@ -97,6 +103,8 @@ impl Supervisor {
             pid = lifecycle.last_pid,
             "worker exited unexpectedly"
         );
+
+        shm.set_worker_healthy(lifecycle.worker_id, false);
 
         let reclaimed = broker_table.reclaim_worker(lifecycle.last_pid);
         if reclaimed > 0 {
