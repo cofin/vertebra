@@ -712,6 +712,11 @@ impl InProcessRequest {
 enum ShmSlotHolder {
     Mpmc(MpmcSlotView),
     Spsc(SlotView),
+    #[cfg(unix)]
+    Overflow {
+        region: crate::shm::ShmRegion,
+        len: usize,
+    },
 }
 
 impl ShmSlotHolder {
@@ -720,6 +725,8 @@ impl ShmSlotHolder {
         match self {
             Self::Mpmc(view) => view.as_slice(),
             Self::Spsc(view) => view.as_slice(),
+            #[cfg(unix)]
+            Self::Overflow { region, len } => unsafe { &region.as_slice()[..*len] },
         }
     }
 }
@@ -887,6 +894,29 @@ impl BatchSnapshot {
         }
 
         let flags = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        #[cfg(unix)]
+        if flags == REQUEST_OVERFLOW_MAGIC {
+            let total_len = u64::from_le_bytes(data[4..12].try_into().unwrap()) as usize;
+            let name_len = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
+            if (5..=64).contains(&name_len)
+                && data.len() == 16 + name_len
+                && data[16..16 + name_len].starts_with(b"/vtb-")
+            {
+                let name = std::str::from_utf8(&data[16..16 + name_len])
+                    .map_err(|_| TransportError::DeserializeFailed("invalid overflow region name"))?
+                    .to_owned();
+                drop(slot);
+                let region = crate::shm::ShmRegion::open_named(&name, total_len).map_err(|_| {
+                    TransportError::DeserializeFailed("failed to open overflow region")
+                })?;
+                let _ = crate::shm::shm_unlink_named(&name);
+                return Self::from_shm_slot_holder(ShmSlotHolder::Overflow {
+                    region,
+                    len: total_len,
+                });
+            }
+        }
+
         let node_count = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
         let slab_len = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
 
@@ -1352,6 +1382,25 @@ impl BatchSnapshot {
         }
 
         let flags = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        #[cfg(unix)]
+        if flags == REQUEST_OVERFLOW_MAGIC {
+            let total_len = u64::from_le_bytes(data[4..12].try_into().unwrap()) as usize;
+            let name_len = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
+            if (5..=64).contains(&name_len)
+                && data.len() == 16 + name_len
+                && data[16..16 + name_len].starts_with(b"/vtb-")
+            {
+                let name = std::str::from_utf8(&data[16..16 + name_len]).map_err(|_| {
+                    TransportError::DeserializeFailed("invalid overflow region name")
+                })?;
+                let region = crate::shm::ShmRegion::open_named(name, total_len).map_err(|_| {
+                    TransportError::DeserializeFailed("failed to open overflow region")
+                })?;
+                let _ = crate::shm::shm_unlink_named(name);
+                return Self::deserialize_from(unsafe { &region.as_slice()[..total_len] });
+            }
+        }
+
         let node_count = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
         let slab_len = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
         // data[12..16] is padding
@@ -1391,6 +1440,8 @@ impl BatchSnapshot {
 
 /// Fixed header size for batch snapshot wire format.
 const BATCH_HEADER_SIZE: usize = 16; // flags(4) + node_count(4) + slab_len(4) + pad(4)
+/// Magic marker (`"VQOV"`) for out-of-line SHM request batch overflow envelopes.
+pub const REQUEST_OVERFLOW_MAGIC: u32 = 0x56_51_4F_56;
 
 /// Helper for packing multiple request components into a single contiguous slab.
 pub struct ShmBatchWriter<'a> {
@@ -1457,6 +1508,40 @@ impl<'a> ShmBatchWriter<'a> {
             offset += comp.len();
         }
         offset
+    }
+
+    /// Write an oversized batch into a named overflow SHM region and return `(region_name, envelope)`.
+    #[cfg(unix)]
+    pub fn write_overflow_envelope(self) -> Result<(String, Vec<u8>), crate::shm::ShmError> {
+        let total_len = self.serialized_size();
+        let (name, mut region) = crate::shm::ShmRegion::create_overflow_region("rq", total_len)?;
+        let written = self.serialize_into(unsafe { &mut region.as_mut_slice()[..total_len] });
+        debug_assert_eq!(written, total_len);
+        let name_bytes = name.as_bytes();
+        let mut envelope = Vec::with_capacity(16 + name_bytes.len());
+        envelope.extend_from_slice(&REQUEST_OVERFLOW_MAGIC.to_le_bytes());
+        envelope.extend_from_slice(&(total_len as u64).to_le_bytes());
+        envelope.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        envelope.extend_from_slice(name_bytes);
+        Ok((name, envelope))
+    }
+}
+
+impl BatchSnapshot {
+    /// Write an oversized snapshot into a named overflow SHM region and return `(region_name, envelope)`.
+    #[cfg(unix)]
+    pub fn write_overflow_envelope(&self) -> Result<(String, Vec<u8>), crate::shm::ShmError> {
+        let total_len = self.serialized_size();
+        let (name, mut region) = crate::shm::ShmRegion::create_overflow_region("rq", total_len)?;
+        let written = self.serialize_into(unsafe { &mut region.as_mut_slice()[..total_len] });
+        debug_assert_eq!(written, total_len);
+        let name_bytes = name.as_bytes();
+        let mut envelope = Vec::with_capacity(16 + name_bytes.len());
+        envelope.extend_from_slice(&REQUEST_OVERFLOW_MAGIC.to_le_bytes());
+        envelope.extend_from_slice(&(total_len as u64).to_le_bytes());
+        envelope.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        envelope.extend_from_slice(name_bytes);
+        Ok((name, envelope))
     }
 }
 

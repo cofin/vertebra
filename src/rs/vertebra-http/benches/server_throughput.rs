@@ -1,9 +1,10 @@
 //! Throughput benchmark for the `vertebra-http` server.
 //!
-//! Benchmarks:
+//! Benchmarks pure-Rust HTTP ingress, routing, and batch dispatch overhead
+//! without a Python worker in the loop:
 //! - **router**: lookup performance across 100 routes.
-//! - **direct_dispatch**: Direct channel path (no bridge, no arena). Target: >100k req/s.
-//! - **bridge_dispatch**: Full bridge path (arena + slab + async response). Measures overhead.
+//! - **direct_dispatch**: Direct Rust channel path (no bridge, no arena, no Python worker).
+//! - **bridge_dispatch**: Rust bridge batching path (arena + slab + mock Rust consumer, no Python worker).
 //!
 //! Run with:
 //!   cd src/rs && cargo bench --package vertebra-http --bench server_throughput

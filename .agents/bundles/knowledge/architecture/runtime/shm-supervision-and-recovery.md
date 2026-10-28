@@ -6,6 +6,7 @@ status: stable
 tags: [architecture, runtime, shared-memory, process-lifecycle]
 sources:
   - resource: src/rs/vertebra-http/src/workers/factory.rs
+  - resource: src/rs/vertebra-http/src/workers/supervisor.rs
   - resource: src/rs/vertebra-http/src/main.rs
   - resource: src/rs/vertebra-http/src/dispatcher/shm.rs
   - resource: src/rs/vertebra-core/src/process.rs
@@ -46,8 +47,9 @@ In `Topology::Shm` the Rust binary creates every ring before any worker exists, 
 
 `ShmDispatcher::new` ([`dispatcher/shm.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/shm.rs)) spawns a sweep task that runs every second and expires in-flight correlations older than 30 s, so a dead worker's requests eventually complete instead of hanging forever.
 
-## Recovery Helpers
+## Recovery & Supervision (`workers/supervisor.rs`, `workers/factory.rs`)
 
+- **`Supervisor`** ([`workers/supervisor.rs`](../../../../../src/rs/vertebra-http/src/workers/supervisor.rs)): polls worker liveness every `500 ms` (`Supervisor::spawn`). When a worker crashes (`process_worker_exit`), `Supervisor` immediately marks the worker unhealthy in `ShmDispatcher` (`set_worker_healthy(worker_id, false)` so `worker_ring_has_capacity` routes new batches away from its ring), fails any in-flight correlations for that worker with `502 Bad Gateway` (`sweep_for_worker`), reclaims its `RingPair` cursors (`RingPair::reclaim`), and schedules an exponential-backoff respawn (`set_worker_healthy(worker_id, true)` once `lifecycle.respawn()` succeeds).
 - **`RingPair::reclaim`** (`unsafe`, [`ring_pair.rs`](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs)): calls `reset()` on the request ring and each response tier, then clears both notifiers. `SpscRing::reset` zeroes `read_head`, `write_head`, `wait_read`, `wait_write`, `send_waiters`, `recv_waiters`, clears the borrow flag, and bumps `ShmHeader::generation` (`Release`). `MpmcRing::reset` zeroes the cursors, re-seeds the slot sequence array, and bumps `generation`.
 - **`WorkerLifecycle`** (`workers/factory.rs`): tracks a `Child`, opens a Linux pidfd via `platform::linux::pidfd_open` (flags `0`), and checks liveness with `Child::try_wait()`. When `is_alive()` detects worker exit and a broker `ShmLeaseTable` is attached (`with_broker`), `reclaim_worker_leases()` calls `ShmLeaseTable::reclaim_worker(pid)` to free any leaked database connection slots. `respawn_delay()` is `1 s << min(crash_count - 1, 5)` (1 s to 32 s). `record_crash` resets the count after 60 s of uptime. `circuit_breaker_tripped()` is true after more than 10 crashes within 300 s.
 - **`cleanup_stale_shm`** (`workers/factory.rs`): unlinks `/dev/shm` entries starting with `vertebra-`, `vertebra_`, or `vtb-`.

@@ -26,6 +26,8 @@ pub mod flags {
     pub const HEADERS_SENT: u32 = 1 << 8;
     /// Frame carries HTTP/2 or gRPC trailing headers.
     pub const TRAILERS: u32 = 1 << 9;
+    /// Batch or response payload lives in an out-of-line named SHM overflow region.
+    pub const SHM_OVERFLOW: u32 = 1 << 10;
 }
 
 /// Response flags for IPC messages.

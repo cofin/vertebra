@@ -2,11 +2,15 @@
 
 use std::io::Read;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http::StatusCode;
+use http_body_util::BodyExt;
+use hyper::body::Body;
+use serde::{Deserialize, Serialize};
 
 /// Configurable byte limits for incoming HTTP request payloads.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PayloadLimits {
     /// Maximum compressed or uncompressed wire payload size in bytes (default: 10 MiB).
     pub max_body_size: usize,
@@ -34,6 +38,9 @@ pub enum PayloadError {
     UnsupportedEncoding(String),
     #[error("corrupt compressed request payload: {0}")]
     DecompressionFailed(String),
+    ///Error reading the underlying HTTP body stream.
+    #[error("failed to read request body stream: {0}")]
+    StreamRead(String),
 }
 
 impl PayloadError {
@@ -44,9 +51,92 @@ impl PayloadError {
                 StatusCode::PAYLOAD_TOO_LARGE
             }
             Self::UnsupportedEncoding(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Self::DecompressionFailed(_) => StatusCode::BAD_REQUEST,
+            Self::DecompressionFailed(_) | Self::StreamRead(_) => StatusCode::BAD_REQUEST,
         }
     }
+}
+
+/// Streamingly collect an HTTP request body while enforcing `limits.max_body_size` on every frame
+/// and optionally decompressing `Content-Encoding` (`gzip`, `deflate`, `br`, `zstd`).
+pub async fn collect_bounded_body<B>(
+    mut body: B,
+    content_length: Option<usize>,
+    content_encoding: Option<&str>,
+    limits: &PayloadLimits,
+) -> Result<Bytes, PayloadError>
+where
+    B: Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
+    if let Some(len) = content_length
+        && len > limits.max_body_size
+    {
+        return Err(PayloadError::TooLarge {
+            actual: len,
+            limit: limits.max_body_size,
+        });
+    }
+
+    let lower_hint = body.size_hint().lower() as usize;
+    if lower_hint > limits.max_body_size {
+        return Err(PayloadError::TooLarge {
+            actual: lower_hint,
+            limit: limits.max_body_size,
+        });
+    }
+
+    if body.is_end_stream() {
+        return Ok(Bytes::new());
+    }
+
+    let mut first_chunk: Option<Bytes> = None;
+    let mut multi_buf: Option<BytesMut> = None;
+    let mut total_bytes = 0usize;
+
+    while let Some(frame_res) = body.frame().await {
+        let frame = frame_res.map_err(|e| PayloadError::StreamRead(e.to_string()))?;
+        if let Ok(data) = frame.into_data() {
+            if data.is_empty() {
+                continue;
+            }
+            total_bytes = total_bytes.saturating_add(data.len());
+            if total_bytes > limits.max_body_size {
+                return Err(PayloadError::TooLarge {
+                    actual: total_bytes,
+                    limit: limits.max_body_size,
+                });
+            }
+            if let Some(ref mut buf) = multi_buf {
+                buf.extend_from_slice(&data);
+            } else if let Some(prev) = first_chunk.take() {
+                let cap = content_length
+                    .unwrap_or(total_bytes * 2)
+                    .min(limits.max_body_size)
+                    .max(total_bytes);
+                let mut buf = BytesMut::with_capacity(cap);
+                buf.extend_from_slice(&prev);
+                buf.extend_from_slice(&data);
+                multi_buf = Some(buf);
+            } else {
+                first_chunk = Some(data);
+            }
+        }
+    }
+
+    let raw_bytes = if let Some(buf) = multi_buf {
+        buf.freeze()
+    } else {
+        first_chunk.unwrap_or_default()
+    };
+
+    if let Some(enc) = content_encoding {
+        let trimmed = enc.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("identity") {
+            return decode_request_payload(&raw_bytes, Some(trimmed), limits);
+        }
+    }
+
+    Ok(raw_bytes)
 }
 
 fn read_bounded<R: Read>(reader: R, max_decompressed_size: usize) -> Result<Bytes, PayloadError> {

@@ -14,6 +14,7 @@ from vertebra.server._asgi._runner import (
     FLAG_FINAL,
     FLAG_STREAMING,
     FLAG_TRAILERS,
+    AsgiLifespan,
     AsgiRunner,
 )
 from vertebra.server._asgi._sse import (
@@ -43,6 +44,7 @@ __all__ = (
     "FLAG_FINAL",
     "FLAG_STREAMING",
     "FLAG_TRAILERS",
+    "AsgiLifespan",
     "AsgiProtocolError",
     "AsgiReceive",
     "AsgiResponse",

@@ -24,6 +24,8 @@ export CARGO_NET_GIT_FETCH_WITH_CLI=true
 endif
 
 export CARGO_TARGET_DIR ?= /tmp/vtb-cargo-target
+export PATH := $(CURDIR)/.venv/bin:$(PATH)
+export PYO3_PYTHON ?= $(shell if [ -x "$(CURDIR)/.venv/bin/python" ]; then echo "$(CURDIR)/.venv/bin/python"; else uv run which python 2>/dev/null || which python3; fi)
 
 BLUE := $(shell printf "\033[1;34m")
 GREEN := $(shell printf "\033[1;32m")

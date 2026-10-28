@@ -32,7 +32,7 @@ from vertebra._vertebra import (
 )
 from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
 from vertebra.server._asgi._queues import AsgiResponse
-from vertebra.server._asgi._runner import AsgiRunner
+from vertebra.server._asgi._runner import AsgiLifespan, AsgiRunner
 from vertebra.server._dispatch import (
     _JSON_CONTENT_TYPE_COMPACT,
     _RAW_BUFFER_TYPES,
@@ -376,6 +376,8 @@ class Worker:
                 if resolved == "asgi":
                     try:
                         lifespan_stack.enter_context(enter_litestar_server_lifespan(app_obj))
+                        state = lifespan_stack.enter_context(AsgiLifespan(app_obj, loop=loop_pool.primary_loop))
+                        lifespan_states[_prefix] = state
                     except Exception:
                         logger.exception("ASGI lifespan startup failed for mount %r", _prefix)
 

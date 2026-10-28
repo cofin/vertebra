@@ -1,8 +1,9 @@
-"""AsgiRunner: unified ASGI 3.0 application driver and batch runner."""
+"""AsgiRunner: unified ASGI 3.0 application driver, lifespan state machine, and batch runner."""
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import Awaitable, Buffer, Callable, Iterable
+from collections.abc import Awaitable, Buffer, Callable, Iterable, Mapping
 from typing import Any
 
 import msgspec
@@ -42,6 +43,7 @@ __all__ = (
     "FLAG_FINAL",
     "FLAG_STREAMING",
     "FLAG_TRAILERS",
+    "AsgiLifespan",
     "AsgiRunner",
 )
 
@@ -61,6 +63,195 @@ class _InlineAsgiRequest(msgspec.Struct, frozen=True, gc=False):
     headers: Any = None
     body: bytes | None = None
     request_id: int = 0
+
+
+class AsgiLifespan:
+    """ASGI 3.0 lifespan state machine driving startup/shutdown hooks and scope['state']."""
+
+    __slots__ = (
+        "_app",
+        "_loop",
+        "_owns_loop",
+        "_receive_queue",
+        "_received_startup",
+        "_shutdown_complete",
+        "_startup_complete",
+        "_startup_error",
+        "_state",
+        "_supported",
+        "_task",
+        "_timeout",
+    )
+
+    def __init__(
+        self,
+        app: Callable[..., Awaitable[Any]],
+        *,
+        loop: asyncio.AbstractEventLoop | None = None,
+        state: dict[str, Any] | None = None,
+        timeout: float = 30.0,
+    ) -> None:
+        self._app = app
+        self._loop = loop
+        self._owns_loop = False
+        self._state: dict[str, Any] = dict(state) if state is not None else {}
+        self._timeout = timeout
+        self._supported = False
+        self._received_startup = False
+        self._startup_error: BaseException | None = None
+        self._receive_queue: asyncio.Queue[dict[str, Any]] | None = None
+        self._startup_complete: asyncio.Event | None = None
+        self._shutdown_complete: asyncio.Event | None = None
+        self._task: asyncio.Task[Any] | None = None
+
+    @property
+    def state(self) -> dict[str, Any]:
+        """Return the shared lifespan state dictionary."""
+        return self._state
+
+    @property
+    def supported(self) -> bool:
+        """Return True if the application completed lifespan.startup.complete."""
+        return self._supported
+
+    async def startup(self) -> dict[str, Any]:
+        """Execute the ASGI lifespan.startup handshake on the active event loop."""
+        loop = asyncio.get_running_loop()
+        self._receive_queue = asyncio.Queue()
+        self._startup_complete = asyncio.Event()
+        self._shutdown_complete = asyncio.Event()
+        self._received_startup = False
+        self._startup_error = None
+        self._supported = False
+
+        await self._receive_queue.put({"type": "lifespan.startup"})
+        self._task = loop.create_task(self._run_app())
+        await asyncio.wait_for(self._startup_complete.wait(), timeout=self._timeout)
+        if self._startup_error is not None:
+            if self._task is not None and not self._task.done():
+                self._task.cancel()
+                with contextlib.suppress(BaseException):
+                    await self._task
+            raise self._startup_error
+        if not self._supported and self._task is not None and not self._task.done():
+            self._task.cancel()
+            with contextlib.suppress(BaseException):
+                await self._task
+        return self._state
+
+    async def shutdown(self) -> None:
+        """Execute the ASGI lifespan.shutdown handshake if startup succeeded."""
+        if not self._supported or self._task is None or self._receive_queue is None or self._shutdown_complete is None:
+            if self._task is not None and not self._task.done():
+                self._task.cancel()
+                with contextlib.suppress(BaseException):
+                    await self._task
+            return
+        if not self._task.done():
+            await self._receive_queue.put({"type": "lifespan.shutdown"})
+            await asyncio.wait_for(self._shutdown_complete.wait(), timeout=self._timeout)
+        if not self._task.done():
+            await asyncio.wait_for(self._task, timeout=self._timeout)
+
+    async def __aenter__(self) -> dict[str, Any]:
+        """Enter the lifespan context asynchronously and return the state dictionary."""
+        return await self.startup()
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        """Exit the lifespan context asynchronously."""
+        del exc_type, exc, tb
+        await self.shutdown()
+
+    def __enter__(self) -> dict[str, Any]:
+        """Enter the lifespan context synchronously on the configured event loop."""
+        loop = self._ensure_loop()
+        if loop.is_running():
+            fut = asyncio.run_coroutine_threadsafe(self.startup(), loop)
+            return fut.result(timeout=self._timeout)
+        return loop.run_until_complete(self.startup())
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        """Exit the lifespan context synchronously on the configured event loop."""
+        del exc_type, exc, tb
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            if loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(self.shutdown(), loop)
+                fut.result(timeout=self._timeout)
+            else:
+                loop.run_until_complete(self.shutdown())
+        finally:
+            if self._owns_loop and not loop.is_running():
+                loop.close()
+                self._loop = None
+                self._owns_loop = False
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        if self._loop is None or self._loop.is_closed():
+            self._loop = asyncio.new_event_loop()
+            self._owns_loop = True
+        return self._loop
+
+    async def _run_app(self) -> None:
+        assert self._receive_queue is not None
+        assert self._startup_complete is not None
+        assert self._shutdown_complete is not None
+        receive_queue = self._receive_queue
+        startup_complete = self._startup_complete
+        shutdown_complete = self._shutdown_complete
+
+        scope: dict[str, Any] = {
+            "type": "lifespan",
+            "asgi": {"version": "3.0", "spec_version": "2.0"},
+            "state": self._state,
+        }
+
+        async def receive() -> dict[str, Any]:
+            msg = await receive_queue.get()
+            if msg.get("type") == "lifespan.startup":
+                self._received_startup = True
+            return msg
+
+        async def send(message: Mapping[str, Any]) -> None:
+            msg_type = str(message.get("type", ""))
+            if msg_type == "lifespan.startup.complete":
+                scope_state = scope.get("state")
+                if isinstance(scope_state, Mapping) and scope_state is not self._state:
+                    self._state.update(scope_state)
+                self._supported = True
+                startup_complete.set()
+            elif msg_type == "lifespan.startup.failed":
+                err_msg = str(message.get("message", "") or "ASGI lifespan startup failed")
+                self._startup_error = RuntimeError(err_msg)
+                startup_complete.set()
+            elif msg_type == "lifespan.shutdown.complete":
+                shutdown_complete.set()
+            elif msg_type == "lifespan.shutdown.failed":
+                err_msg = str(message.get("message", "") or "ASGI lifespan shutdown failed")
+                logger.error("ASGI lifespan shutdown failed: %s", err_msg)
+                shutdown_complete.set()
+            elif not startup_complete.is_set():
+                self._supported = False
+                startup_complete.set()
+
+        try:
+            await self._app(scope, receive, send)
+        except BaseException as exc:
+            if not startup_complete.is_set():
+                if self._received_startup:
+                    self._startup_error = exc
+                else:
+                    self._supported = False
+                startup_complete.set()
+            elif self._supported and not shutdown_complete.is_set():
+                logger.exception("Unhandled exception during ASGI lifespan")
+        finally:
+            if not startup_complete.is_set():
+                startup_complete.set()
+            if not shutdown_complete.is_set():
+                shutdown_complete.set()
 
 
 class AsgiRunner:

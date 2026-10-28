@@ -22,7 +22,7 @@ from vertebra.server._asgi._queues import (
     AsgiResponse,
     AsgiSend,
 )
-from vertebra.server._asgi._runner import AsgiRunner
+from vertebra.server._asgi._runner import AsgiLifespan, AsgiRunner
 from vertebra.server._asgi._wire import (
     HeaderFilter,
     compile_guard_pattern,
@@ -657,3 +657,58 @@ async def test_drive_asgi_batch_unary_zero_task_and_suspending_fallback() -> Non
         setattr(loop, create_task_attr, orig_create_task)
 
     assert completed_async == ["/fast", "/sleep"]
+
+
+def test_asgi_lifespan_startup_shutdown_state_and_unsupported_app() -> None:
+    """Verify AsgiLifespan executes startup/shutdown hooks, populates state, and ignores HTTP-only apps."""
+    events: list[str] = []
+
+    async def lifespan_app(scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "lifespan":
+            while True:
+                msg = await receive()
+                if msg["type"] == "lifespan.startup":
+                    events.append("startup")
+                    scope["state"]["db_pool"] = "ready"
+                    await send({"type": "lifespan.startup.complete"})
+                elif msg["type"] == "lifespan.shutdown":
+                    events.append("shutdown")
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+        await receive()
+        state_val = scope.get("state", {}).get("db_pool", "missing")
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": state_val.encode("utf-8")})
+
+    with AsgiLifespan(lifespan_app) as state:
+        assert events == ["startup"]
+        assert state == {"db_pool": "ready"}
+        runner = AsgiRunner(lifespan_app, lifespan_state=state)
+        try:
+            res = runner([MockRequest(path="/check")])
+            assert res[0].status == 200
+            assert res[0].body == b"ready"
+        finally:
+            runner.close()
+
+    assert events == ["startup", "shutdown"]
+
+    async def failing_lifespan_app(scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "lifespan":
+            msg = await receive()
+            if msg["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.failed", "message": "db offline"})
+
+    with pytest.raises(RuntimeError, match="db offline"), AsgiLifespan(failing_lifespan_app):
+        pass
+
+    async def http_only_app(scope: Any, receive: Any, send: Any) -> None:
+        assert scope["type"] == "http"
+        await receive()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    lifespan_ctx = AsgiLifespan(http_only_app)
+    with lifespan_ctx as empty_state:
+        assert empty_state == {}
+        assert lifespan_ctx.supported is False

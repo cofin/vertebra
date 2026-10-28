@@ -15,12 +15,19 @@ use tracing::{debug, warn};
 
 use vertebra_core::transport::{encode_headers_compact, iter_raw_headers};
 
+use crate::access_log::AccessLogEntry;
 use crate::backpressure::{BackpressureMetricsSnapshot, CircuitState, RejectionReason};
 use crate::batcher::{PendingRequest, PendingResponse, http_version_tag, method_tag};
 use crate::compression::CompressionOffloadConfig;
 use crate::cors::CompiledCorsOffload;
+use crate::grpc::{
+    GRPC_HEADER_LEN, GrpcError, GrpcStatus, GrpcWireFormat, build_grpc_trailers_only_response,
+    is_grpc_request, parse_grpc_timeout,
+};
 use crate::health::HealthState;
 use crate::hmr;
+use crate::mcp_bridge::extract_mcp_observability_headers;
+use crate::payload::{PayloadError, collect_bounded_body};
 use crate::routing::RouterError;
 use crate::server::ServerState;
 
@@ -54,6 +61,49 @@ pub async fn handle(
     if let Some(health_resp) = state.health_endpoint.try_intercept(req_path) {
         let (parts, body) = health_resp.into_parts();
         return Ok(Response::from_parts(parts, Either::Left(body)));
+    }
+
+    // Token-guarded `/debug/pprof/*` diagnostic endpoint.
+    if state.config.profile.enabled
+        && let Some(pprof_resp) = state.profile_endpoint.try_handle(req_path, req.headers())
+    {
+        return Ok(pprof_resp.map(Either::Left));
+    }
+
+    // Zero-GIL `/.well-known/*` discovery cache.
+    if req_path.starts_with("/.well-known/") && matches!(*req.method(), Method::GET | Method::HEAD)
+    {
+        let inm = req
+            .headers()
+            .get(header::IF_NONE_MATCH)
+            .and_then(|v| v.to_str().ok());
+        if let Some(disc) = state.discovery_cache.serve(req_path, inm) {
+            let body = if *req.method() == Method::HEAD {
+                Bytes::new()
+            } else {
+                disc.body
+            };
+            let mut resp = Response::builder()
+                .status(disc.status)
+                .body(full_body(body))
+                .unwrap();
+            *resp.headers_mut() = disc.headers;
+            return Ok(resp);
+        }
+    }
+
+    // Native Rust SSE topic subscription fastpath (`/__vertebra/sse/{topic}`).
+    if *req.method() == Method::GET
+        && let Some(topic) = req_path.strip_prefix("/__vertebra/sse/")
+        && !topic.is_empty()
+    {
+        let last_event_id = req
+            .headers()
+            .get("last-event-id")
+            .and_then(|v| v.to_str().ok());
+        let sse_resp = state.sse_hub.subscribe_response(topic, last_event_id);
+        let (parts, body) = sse_resp.into_parts();
+        return Ok(Response::from_parts(parts, Either::Right(body)));
     }
 
     // Zero-GIL CORS OPTIONS preflight offload.
@@ -171,7 +221,26 @@ pub async fn handle(
         None
     };
 
-    let (parts, body) = req.into_parts();
+    let access_log_start = state
+        .access_logger
+        .as_ref()
+        .map(|_| std::time::Instant::now());
+    let is_grpc = is_grpc_request(&req);
+    if is_grpc
+        && let Some(raw_timeout) = req
+            .headers()
+            .get("grpc-timeout")
+            .and_then(|v| v.to_str().ok())
+        && let Err(err) = parse_grpc_timeout(raw_timeout)
+    {
+        let wf = GrpcWireFormat::from_headers(req.headers());
+        return Ok(
+            build_grpc_trailers_only_response(wf, err.status(), Some(&err.to_string()))
+                .map(Either::Left),
+        );
+    }
+
+    let (mut parts, body) = req.into_parts();
     let method = &parts.method;
     let path = parts.uri.path();
 
@@ -196,21 +265,137 @@ pub async fn handle(
     let handler_id = route_match.handler_id;
     debug!(handler_id, method = %method, path, "routed request");
 
-    // 2. Collect body (buffered in Chapter 5; streaming deferred).
-    let body_bytes = if body.is_end_stream() {
-        Bytes::new()
-    } else {
-        match http_body_util::BodyExt::collect(body).await {
-            Ok(collected) => collected.to_bytes(),
-            Err(e) => {
-                warn!(error = %e, "failed to read request body");
-                return Ok(error_response(
-                    StatusCode::BAD_REQUEST,
-                    "failed to read body",
-                ));
-            }
+    // 2. Collect bounded body and optionally decompress Content-Encoding.
+    let content_length = parts
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<usize>().ok());
+    let content_encoding_owned = parts
+        .headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    let body_bytes = match collect_bounded_body(
+        body,
+        content_length,
+        content_encoding_owned.as_deref(),
+        &state.config.payload_limits,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            warn!(error = %err, "request payload rejected");
+            let msg = match err {
+                PayloadError::TooLarge { .. } | PayloadError::DecompressedTooLarge { .. } => {
+                    "Payload Too Large"
+                }
+                PayloadError::UnsupportedEncoding(_) => "Unsupported Media Type",
+                PayloadError::DecompressionFailed(_) | PayloadError::StreamRead(_) => "Bad Request",
+            };
+            return Ok(error_response(err.status_code(), msg));
         }
     };
+
+    if let Some(ref enc) = content_encoding_owned
+        && !enc.trim().is_empty()
+        && !enc.trim().eq_ignore_ascii_case("identity")
+    {
+        parts.headers.remove(header::CONTENT_ENCODING);
+        if let Ok(cl_val) = HeaderValue::from_str(&body_bytes.len().to_string()) {
+            parts.headers.insert(header::CONTENT_LENGTH, cl_val);
+        }
+    }
+
+    if !body_bytes.is_empty() {
+        if is_grpc {
+            if body_bytes.len() >= GRPC_HEADER_LEN {
+                let flag = body_bytes[0];
+                let msg_len = u32::from_be_bytes([
+                    body_bytes[1],
+                    body_bytes[2],
+                    body_bytes[3],
+                    body_bytes[4],
+                ]) as usize;
+                if flag > 1 {
+                    let wf = GrpcWireFormat::from_headers(&parts.headers);
+                    let err = GrpcError::InvalidCompressionFlag(flag);
+                    return Ok(build_grpc_trailers_only_response(
+                        wf,
+                        err.status(),
+                        Some(&err.to_string()),
+                    )
+                    .map(Either::Left));
+                }
+                if msg_len > state.config.max_grpc_message_size {
+                    let wf = GrpcWireFormat::from_headers(&parts.headers);
+                    return Ok(build_grpc_trailers_only_response(
+                        wf,
+                        GrpcStatus::ResourceExhausted,
+                        Some("gRPC message exceeds max_grpc_message_size"),
+                    )
+                    .map(Either::Left));
+                }
+            }
+        } else if parts
+            .headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.starts_with("multipart/form-data"))
+        {
+            if body_bytes.len() > state.config.multipart_limits.max_total_size {
+                return Ok(error_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Payload Too Large",
+                ));
+            }
+        } else if parts.method == Method::POST
+            && parts.uri.path().starts_with("/mcp")
+            && let Some(obs) = extract_mcp_observability_headers(&body_bytes)
+        {
+            if let Some(ref m) = obs.mcp_method
+                && let Ok(val) = HeaderValue::from_str(m)
+            {
+                parts.headers.insert("x-mcp-method", val);
+            }
+            if let Some(ref n) = obs.mcp_name
+                && let Ok(val) = HeaderValue::from_str(n)
+            {
+                parts.headers.insert("x-mcp-name", val);
+            }
+        }
+    }
+
+    let log_meta = if state.access_logger.is_some() {
+        Some((
+            parts.method.as_str().to_owned(),
+            parts.uri.path().to_owned(),
+            match parts.version {
+                http::Version::HTTP_10 => "HTTP/1.0",
+                http::Version::HTTP_11 => "HTTP/1.1",
+                http::Version::HTTP_2 => "HTTP/2.0",
+                http::Version::HTTP_3 => "HTTP/3.0",
+                _ => "HTTP/1.1",
+            },
+            parts
+                .headers
+                .get(header::REFERER)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-")
+                .to_owned(),
+            parts
+                .headers
+                .get(header::USER_AGENT)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-")
+                .to_owned(),
+        ))
+    } else {
+        None
+    };
+    let method = &parts.method;
 
     let cors_origin = if state.cors.is_some() {
         parts.headers.get(header::ORIGIN).cloned()
@@ -291,6 +476,26 @@ pub async fn handle(
         } else {
             controller.record_success();
         }
+    }
+
+    if let (
+        Some(logger),
+        Some(started),
+        Some((log_method, log_path, log_proto, log_referer, log_ua)),
+    ) = (&state.access_logger, access_log_start, log_meta)
+    {
+        let resp_bytes = hyper_resp.body().size_hint().lower() as usize;
+        logger.record(&AccessLogEntry {
+            remote_addr: "-",
+            method: &log_method,
+            path: &log_path,
+            protocol: log_proto,
+            status: hyper_resp.status().as_u16(),
+            response_bytes: resp_bytes,
+            duration_micros: started.elapsed().as_micros() as u64,
+            referer: &log_referer,
+            user_agent: &log_ua,
+        });
     }
 
     Ok(hyper_resp)

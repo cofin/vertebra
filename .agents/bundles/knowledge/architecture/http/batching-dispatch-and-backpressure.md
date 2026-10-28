@@ -55,19 +55,19 @@ flowchart LR
 
 ## SharedMemory dispatch (`dispatcher/shm.rs`, `dispatcher/correlation.rs`, `dispatcher/shm_reader.rs`)
 
-- [`ShmDispatcher::new`](../../../../../src/rs/vertebra-http/src/dispatcher/shm.rs) allocates 8 cache-line-padded `Mutex<InFlightRequests>` shards of `max_inflight / 8` slots (`65,536 / 8 = 8,192`) and runs a periodic 1 s sweeper expiring entries older than 30 s (`sweep_for_worker` fails in-flight requests for a crashed worker during `Supervisor` respawn).
+- [`ShmDispatcher::new`](../../../../../src/rs/vertebra-http/src/dispatcher/shm.rs) allocates 8 cache-line-padded `Mutex<InFlightRequests>` shards of `max_inflight / 8` slots (`65,536 / 8 = 8,192`), tracks per-worker health via `WorkerState::healthy` (`set_worker_healthy` / `is_worker_healthy`), and runs a periodic 1 s sweeper expiring entries older than 30 s (`sweep_for_worker` fails in-flight requests for a crashed worker during `Supervisor` respawn after marking it unhealthy).
 - [`InFlightRequests`](../../../../../src/rs/vertebra-http/src/dispatcher/correlation.rs) is a generation-tagged slab (`(generation << 32) | index` combined with shard routing) with `allocate_batch`, `complete`, `complete_many`, `sweep_expired`, and `sweep_for_worker`.
-- `dispatch_shm` operates with **zero** global `Mutex<ShmBatchScratch>`: it routes the entire batch to a single target worker (sticking to the warm MRU worker when total in-flight load is `<= 4` for single-request cache locality, and advancing round-robin per batch under concurrent load), computes the exact serialized batch byte size (passing compact `headers_mp` through untouched), writes directly into the worker's SHM request ring via `request_ring.try_send_with` (falling back to bounded `send_with` on transient ring pressure), and calls `worker.rings.notify_request_if_sleeping()` once per batch using the `ShmHeader` Dekker `consumer_sleeping` flag (`0` `eventfd` syscalls while the Python worker is awake).
-- [`spawn_response_readers`](../../../../../src/rs/vertebra-http/src/dispatcher/shm_reader.rs) runs one Tokio task per worker. Each reader drains responses zero-copy via `drain_responses_with` (`0` intermediate `Vec<u8>` slot copies), extracts `oneshot::Sender`s from the correlation shard while releasing the shard `Mutex` *before* calling `tx.send(response)`, and brackets `AsyncFd` waits with Dekker `prepare_response_sleep` / `cancel_response_sleep`.
+- `dispatch_shm` operates with **zero** global `Mutex<ShmBatchScratch>`: it routes the entire batch to a single healthy target worker (`worker_ring_has_capacity` skips workers where `healthy == false`, sticking to the warm MRU worker when total in-flight load is `<= 4` for single-request cache locality, and advancing round-robin per batch under concurrent load), computes the exact serialized batch byte size (passing compact `headers_mp` through untouched), writes directly into the worker's SHM request ring via `request_ring.try_send_with` (or spills oversized `> 64 KiB` single requests into a one-shot named `ShmRegion` via `ShmBatchWriter::write_overflow_envelope`, falling back to bounded `send_with` on transient ring pressure), and calls `worker.rings.notify_request_if_sleeping()` once per batch using the `ShmHeader` Dekker `consumer_sleeping` flag (`0` `eventfd` syscalls while the Python worker is awake).
+- [`spawn_response_readers`](../../../../../src/rs/vertebra-http/src/dispatcher/shm_reader.rs) runs one Tokio task per worker. Each reader drains responses zero-copy via `drain_responses_with` (`0` intermediate `Vec<u8>` slot copies, automatically opening and unlinking `VROV` named SHM overflow regions for responses `> 2 MiB`), extracts `oneshot::Sender`s from the correlation shard while releasing the shard `Mutex` *before* calling `tx.send(response)`, and brackets `AsyncFd` waits with Dekker `prepare_response_sleep` / `cancel_response_sleep`.
 - `ShmDispatcher::handle_raw_response_slot` forwards multi-frame `ResponseSlot` streams through `PendingRequests` (`register_stream`, `deliver_raw_frame`).
 
 ## `BackpressureController` (`backpressure.rs`)
 
 | Setting (`BackpressureConfig`) | Default | Env override |
 |---|---|---|
-| `max_in_flight` | `1024` | `VERTEBRA_BP_MAX_IN_FLIGHT` |
-| `max_queue_depth` | `1024` waiters | `VERTEBRA_BP_MAX_QUEUE_DEPTH` |
-| `max_queue_time` | `100 ms` | `VERTEBRA_BP_MAX_QUEUE_TIME_MS` |
+| `max_in_flight` | `4096` | `VERTEBRA_BP_MAX_IN_FLIGHT` |
+| `max_queue_depth` | `4096` waiters | `VERTEBRA_BP_MAX_QUEUE_DEPTH` |
+| `max_queue_time` | `5000 ms` | `VERTEBRA_BP_MAX_QUEUE_TIME_MS` |
 | `max_active_streams` | `65,536` | none |
 | `high_watermark` / `low_watermark` | `192` / `64` chunks | none |
 | `priority_routes` | `/healthz`, `/readyz`, `/__vertebra/health` | none |

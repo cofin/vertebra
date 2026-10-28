@@ -36,8 +36,9 @@ Applications mounted via `App.mount(prefix, app, protocol=...)` (or passed direc
   - `PYGEN_NEXT`: wraps `(coro, first_yielded, proto)` in a Rust `_SteppedCoroutine` (`__await__`, `__iter__`, `__next__`, `send`, `throw`, `close`) accepted natively by both `asyncio.BaseEventLoop.create_task` and `uvloop.Loop.create_task` without an intermediate Python wrapper frame.
   - `PYGEN_ERROR`: logs unhandled app exceptions and emits a `500` response if headers were not yet sent.
 
-### `AsgiRunner` (`_asgi/_runner.py`, `_asgi/_queues.py`)
+### `AsgiRunner` and `AsgiLifespan` (`_asgi/_runner.py`, `_asgi/_queues.py`, `worker.py`)
 
+- [`AsgiLifespan`](../../../../../src/py/vertebra/server/_asgi/_runner.py) drives the ASGI 3.0 `lifespan` protocol (`lifespan.startup` -> `lifespan.startup.complete` / `lifespan.startup.failed` on worker entry, and `lifespan.shutdown` -> `lifespan.shutdown.complete` on worker exit). [`Worker.run`](../../../../../src/py/vertebra/server/worker.py) enters `AsgiLifespan` for every mounted ASGI application before serving requests and passes the shared `lifespan_state` dict into `AsgiRunner` so `scope["state"]` exposes lifespan-initialized resources. Apps that do not implement `lifespan` gracefully degrade to HTTP-only mode.
 - [`AsgiRunner`](../../../../../src/py/vertebra/server/_asgi/_runner.py) finalizes attached `LitestarPlugin` state (`ensure_finalized`), exposes `dispatch_app` (wrapping `__vertebra_fastpath__.dispatch` ahead of `app` when present), and routes unary HTTP batches directly to `_vertebra.drive_asgi_batch` on the active `uvloop` / `asyncio` loop.
 - `AsgiReceive`, `AsgiSend`, `AsgiResponse`, and bounded `AsgiStreamQueuePair` (`_asgi/_queues.py`) back standalone `run_single` test invocations, WebSocket upgrades, and full-duplex streaming exchanges.
 

@@ -30,6 +30,11 @@ use crate::tiered_ring::{RingTier, TieredRingConfig};
 /// Magic marker for response wire format validation.
 pub const RESPONSE_MAGIC: u32 = 0x56_52_45_53; // "VRES"
 
+/// Magic marker for out-of-line named SHM overflow responses (`> xlarge` tier).
+pub const RESPONSE_OVERFLOW_MAGIC: u32 = 0x56_52_4F_56; // "VROV"
+/// Maximum response frame size (64 MiB) allowed through a one-shot SHM overflow region.
+pub const MAX_OVERFLOW_RESPONSE_SIZE: usize = 64 * 1024 * 1024;
+
 /// Fixed header size for serialized responses (magic + correlation_id + status + headers_len + body_len).
 const RESPONSE_HEADER_SIZE: usize = 4 + 8 + 2 + 2 + 4; // 20 bytes
 
@@ -81,7 +86,42 @@ impl ResponseData {
         Ok((correlation_id, status, headers_raw, body))
     }
 
+    #[cfg(unix)]
+    fn with_overflow_slice<R, F>(data: &[u8], f: F) -> Result<R, RingPairError>
+    where
+        F: FnOnce(ParsedResponseSlice<'_>) -> R,
+    {
+        if data.len() < 16 {
+            return Err(RingPairError::InvalidResponse("overflow header too short"));
+        }
+        let total_size = u64::from_le_bytes(data[4..12].try_into().unwrap()) as usize;
+        let name_len = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
+        if data.len() < 16 + name_len {
+            return Err(RingPairError::InvalidResponse("overflow header truncated"));
+        }
+        let name = std::str::from_utf8(&data[16..16 + name_len])
+            .map_err(|_| RingPairError::InvalidResponse("invalid overflow region name"))?;
+        let region = ShmRegion::open_named(name, total_size)?;
+        let _ = crate::shm::shm_unlink_named(name);
+        let parsed = Self::parse_slice(unsafe { &region.as_slice()[..total_size] })?;
+        Ok(f(parsed))
+    }
+
     fn deserialize(data: &[u8]) -> Result<Self, RingPairError> {
+        #[cfg(unix)]
+        if data.len() >= 4
+            && u32::from_le_bytes(data[0..4].try_into().unwrap()) == RESPONSE_OVERFLOW_MAGIC
+        {
+            return Self::with_overflow_slice(
+                data,
+                |(correlation_id, status, headers_raw, body)| Self {
+                    correlation_id,
+                    status,
+                    headers_raw: Bytes::copy_from_slice(headers_raw),
+                    body: Bytes::copy_from_slice(body),
+                },
+            );
+        }
         let (correlation_id, status, headers_raw, body) = Self::parse_slice(data)?;
         Ok(Self {
             correlation_id,
@@ -229,9 +269,18 @@ impl TieredRingSet {
             return Err(RingPairError::InvalidResponse("headers exceed 65535 bytes"));
         }
         let total_size = RESPONSE_HEADER_SIZE + headers_raw.len() + body.len();
-        let (ring, bit) = self
-            .select_ring_with_bit(total_size)
-            .ok_or(RingPairError::ResponseTooLarge(total_size))?;
+        let Some((ring, bit)) = self.select_ring_with_bit(total_size) else {
+            #[cfg(unix)]
+            {
+                return self.send_overflow_response(total_size, false, |slot| {
+                    Self::write_response_slot(slot, correlation_id, status, headers_raw, body)
+                });
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(RingPairError::ResponseTooLarge(total_size));
+            }
+        };
 
         self.mark_tier_active(bit);
         if let Err(e) = ring.try_send_with(total_size, 0, |slot| {
@@ -256,9 +305,18 @@ impl TieredRingSet {
             return Err(RingPairError::InvalidResponse("headers exceed 65535 bytes"));
         }
         let total_size = RESPONSE_HEADER_SIZE + headers_raw.len() + body.len();
-        let (ring, bit) = self
-            .select_ring_with_bit(total_size)
-            .ok_or(RingPairError::ResponseTooLarge(total_size))?;
+        let Some((ring, bit)) = self.select_ring_with_bit(total_size) else {
+            #[cfg(unix)]
+            {
+                return self.send_overflow_response(total_size, true, |slot| {
+                    Self::write_response_slot(slot, correlation_id, status, headers_raw, body)
+                });
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(RingPairError::ResponseTooLarge(total_size));
+            }
+        };
 
         self.mark_tier_active(bit);
         if let Err(e) = ring.send_with(total_size, 0, |slot| {
@@ -273,15 +331,65 @@ impl TieredRingSet {
     /// Send a pre-encoded raw response frame through the appropriate tier ring.
     pub fn send_response_bytes(&self, raw_frame: &[u8]) -> Result<(), RingPairError> {
         let total_size = raw_frame.len();
-        let (ring, bit) = self
-            .select_ring_with_bit(total_size)
-            .ok_or(RingPairError::ResponseTooLarge(total_size))?;
+        let Some((ring, bit)) = self.select_ring_with_bit(total_size) else {
+            #[cfg(unix)]
+            {
+                return self.send_overflow_response(total_size, false, |slot| {
+                    slot[..total_size].copy_from_slice(raw_frame);
+                });
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(RingPairError::ResponseTooLarge(total_size));
+            }
+        };
 
         self.mark_tier_active(bit);
         if let Err(e) = ring.try_send_with(total_size, 0, |slot| {
             slot[..total_size].copy_from_slice(raw_frame);
         }) {
             self.clear_tier_if_empty(ring, bit);
+            return Err(RingPairError::Channel(e));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn send_overflow_response<F>(
+        &self,
+        total_size: usize,
+        blocking: bool,
+        write_fn: F,
+    ) -> Result<(), RingPairError>
+    where
+        F: FnOnce(&mut [u8]),
+    {
+        if total_size > MAX_OVERFLOW_RESPONSE_SIZE {
+            return Err(RingPairError::ResponseTooLarge(total_size));
+        }
+        let (name, mut region) = ShmRegion::create_overflow_region("rs", total_size)?;
+        write_fn(unsafe { &mut region.as_mut_slice()[..total_size] });
+        let name_bytes = name.as_bytes();
+        let env_len = 16 + name_bytes.len();
+        self.mark_tier_active(TIER_BIT_SMALL);
+        let send_res = if blocking {
+            self.small.send_with(env_len, 0, |slot| {
+                slot[0..4].copy_from_slice(&RESPONSE_OVERFLOW_MAGIC.to_le_bytes());
+                slot[4..12].copy_from_slice(&(total_size as u64).to_le_bytes());
+                slot[12..16].copy_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+                slot[16..16 + name_bytes.len()].copy_from_slice(name_bytes);
+            })
+        } else {
+            self.small.try_send_with(env_len, 0, |slot| {
+                slot[0..4].copy_from_slice(&RESPONSE_OVERFLOW_MAGIC.to_le_bytes());
+                slot[4..12].copy_from_slice(&(total_size as u64).to_le_bytes());
+                slot[12..16].copy_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+                slot[16..16 + name_bytes.len()].copy_from_slice(name_bytes);
+            })
+        };
+        if let Err(e) = send_res {
+            let _ = crate::shm::shm_unlink_named(&name);
+            self.clear_tier_if_empty(&self.small, TIER_BIT_SMALL);
             return Err(RingPairError::Channel(e));
         }
         Ok(())
@@ -435,6 +543,21 @@ impl TieredRingSet {
             let count = ring
                 .drain_with(remaining, |slice, _flags| {
                     if parse_err.is_some() {
+                        return;
+                    }
+                    #[cfg(unix)]
+                    if slice.len() >= 4
+                        && u32::from_le_bytes(slice[0..4].try_into().unwrap())
+                            == RESPONSE_OVERFLOW_MAGIC
+                    {
+                        if let Err(err) = ResponseData::with_overflow_slice(
+                            slice,
+                            |(corr_id, status, headers_raw, body)| {
+                                f(corr_id, status, headers_raw, body);
+                            },
+                        ) {
+                            parse_err = Some(err);
+                        }
                         return;
                     }
                     match ResponseData::parse_slice(slice) {
@@ -992,9 +1115,30 @@ mod tests {
         let config = TieredRingConfig::default();
         let set = TieredRingSet::create(&config).expect("create");
 
-        let huge_body = vec![0u8; 3 * 1024 * 1024]; // 3MB > 2MB xlarge
-        let result = set.send_response(1, 200, b"", &huge_body);
-        assert!(matches!(result, Err(RingPairError::ResponseTooLarge(_))));
+        #[cfg(unix)]
+        {
+            let overflow_body = vec![0xABu8; 3 * 1024 * 1024];
+            set.send_response(77, 200, b"", &overflow_body)
+                .expect("3 MiB response should spill into SHM overflow region");
+            let received = set
+                .try_recv_response()
+                .expect("recv")
+                .expect("should receive overflow response");
+            assert_eq!(received.correlation_id, 77);
+            assert_eq!(received.status, 200);
+            assert_eq!(received.body.len(), overflow_body.len());
+
+            let too_huge = vec![0u8; MAX_OVERFLOW_RESPONSE_SIZE + 1];
+            let result = set.send_response(78, 200, b"", &too_huge);
+            assert!(matches!(result, Err(RingPairError::ResponseTooLarge(_))));
+        }
+
+        #[cfg(not(unix))]
+        {
+            let huge_body = vec![0u8; 3 * 1024 * 1024];
+            let result = set.send_response(1, 200, b"", &huge_body);
+            assert!(matches!(result, Err(RingPairError::ResponseTooLarge(_))));
+        }
     }
 
     #[test]

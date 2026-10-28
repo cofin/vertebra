@@ -124,10 +124,115 @@ struct PreparedEmbeddedApp {
     worker_threads: usize,
 }
 
+/// Prepend `.venv/bin` and `VIRTUAL_ENV/bin` to `PATH` while single-threaded before CPython initialization.
+#[cfg(feature = "python")]
+fn prepare_embedded_python_env(python_bin: &str) {
+    let mut prepend_dirs = Vec::new();
+    let py_path = std::path::Path::new(python_bin);
+    if py_path.components().count() > 1
+        && let Some(parent) = py_path.parent()
+    {
+        prepend_dirs.push(parent.to_path_buf());
+    }
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        let bin = std::path::PathBuf::from(venv).join("bin");
+        if bin.is_dir() {
+            prepend_dirs.push(bin);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let dot_venv_bin = cwd.join(".venv").join("bin");
+        if dot_venv_bin.is_dir() {
+            prepend_dirs.push(dot_venv_bin);
+        }
+    }
+    if !prepend_dirs.is_empty() {
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        let mut combined = prepend_dirs;
+        combined.extend(std::env::split_paths(&existing));
+        if let Ok(joined) = std::env::join_paths(combined) {
+            // SAFETY: invoked in `main()` before spawning the Tokio runtime or any worker threads.
+            unsafe {
+                std::env::set_var("PATH", joined);
+            }
+        }
+    }
+}
+
+/// Ensure the embedded Python interpreter includes `.`, `PYTHONPATH`, and active `.venv`
+/// `site-packages` directories on `sys.path`.
+#[cfg(feature = "python")]
+fn ensure_embedded_python_path(py: Python<'_>) -> PyResult<()> {
+    let sys = py.import("sys")?;
+    let sys_path = sys.getattr("path")?;
+    let site = py.import("site")?;
+
+    let add_path = |p: &str| -> PyResult<()> {
+        if p.is_empty() {
+            return Ok(());
+        }
+        let contains: bool = sys_path.call_method1("__contains__", (p,))?.extract()?;
+        if !contains {
+            sys_path.call_method1("insert", (0, p))?;
+        }
+        Ok(())
+    };
+
+    if let Ok(cwd) = std::env::current_dir()
+        && let Some(cwd_str) = cwd.to_str()
+    {
+        add_path(cwd_str)?;
+    }
+
+    if let Ok(py_path) = std::env::var("PYTHONPATH") {
+        for entry in std::env::split_paths(&py_path) {
+            if let Some(s) = entry.to_str() {
+                add_path(s)?;
+            }
+        }
+    }
+
+    let mut venv_roots = Vec::new();
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        venv_roots.push(std::path::PathBuf::from(venv));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let dot_venv = cwd.join(".venv");
+        if dot_venv.is_dir() {
+            venv_roots.push(dot_venv);
+        }
+    }
+
+    for root in venv_roots {
+        let lib_dir = root.join("lib");
+        if let Ok(entries) = std::fs::read_dir(&lib_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with("python") {
+                    let site_pkgs = entry.path().join("site-packages");
+                    if site_pkgs.is_dir()
+                        && let Some(s) = site_pkgs.to_str()
+                    {
+                        let _ = site.call_method1("addsitedir", (s,));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Initialize the embedded transport and spawn 1 (GIL) or `thread_count` (3.14t/3.15t) Python worker threads.
 #[cfg(feature = "python")]
-fn spawn_python_workers(app_path: String, thread_count: usize) -> PyResult<EmbeddedPythonWorkers> {
+fn spawn_python_workers(
+    app_path: String,
+    thread_count: usize,
+    shutdown_token: tokio_util::sync::CancellationToken,
+    worker_failed: Arc<std::sync::atomic::AtomicBool>,
+) -> PyResult<EmbeddedPythonWorkers> {
     let prepared = Python::attach(|py| -> PyResult<PreparedEmbeddedApp> {
+        ensure_embedded_python_path(py)?;
         let native_mod = py.import("_vertebra")?;
         let sys = py.import("sys")?;
         sys.getattr("modules")?
@@ -195,6 +300,8 @@ fn spawn_python_workers(app_path: String, thread_count: usize) -> PyResult<Embed
         let mounts_ref = Python::attach(|py| prepared.mounts.clone_ref(py));
         let stop_ref = Python::attach(|py| prepared.stop_event.clone_ref(py));
         let worker_threads = prepared.worker_threads;
+        let shutdown_token = shutdown_token.clone();
+        let worker_failed = Arc::clone(&worker_failed);
 
         let handle = std::thread::Builder::new()
             .name(format!("vtb-py-worker-{idx}"))
@@ -212,9 +319,29 @@ fn spawn_python_workers(app_path: String, thread_count: usize) -> PyResult<Embed
                         Ok(())
                     })();
 
-                    if let Err(e) = result {
-                        error!("Python worker thread {idx} failed: {e}");
-                        e.print(py);
+                    let stop_requested = stop_ref
+                        .bind(py)
+                        .call_method0("is_set")
+                        .and_then(|v| v.extract::<bool>())
+                        .unwrap_or(false);
+
+                    match result {
+                        Err(e) => {
+                            error!("Python worker thread {idx} failed: {e}");
+                            e.print(py);
+                            worker_failed.store(true, std::sync::atomic::Ordering::Release);
+                            let _ = stop_ref.bind(py).call_method0("set");
+                            shutdown_token.cancel();
+                        }
+                        Ok(()) if !stop_requested => {
+                            error!(
+                                "Python worker thread {idx} exited unexpectedly before shutdown"
+                            );
+                            worker_failed.store(true, std::sync::atomic::Ordering::Release);
+                            let _ = stop_ref.bind(py).call_method0("set");
+                            shutdown_token.cancel();
+                        }
+                        Ok(()) => {}
                     }
                 });
             })
@@ -286,6 +413,7 @@ async fn run_server(
     #[allow(unused_mut)] mut config: ServerConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let server_shutdown_token = tokio_util::sync::CancellationToken::new();
+    let embedded_worker_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     if config.topology == Topology::Embedded {
         BatchBridge::init(256, 1_048_576, 16, config.thread_count.max(1))
@@ -297,6 +425,7 @@ async fn run_server(
         let app_path = std::env::var("VERTEBRA_APP").unwrap_or_else(|_| "app:app".to_string());
         let (table, offload_json) =
             Python::attach(|py| -> PyResult<(RouteTable, Option<String>)> {
+                ensure_embedded_python_path(py)?;
                 let native_mod = py.import("_vertebra")?;
                 let sys = py.import("sys")?;
                 sys.getattr("modules")?
@@ -413,6 +542,8 @@ async fn run_server(
                 embedded_workers = Some(spawn_python_workers(
                     app_path.clone(),
                     config.thread_count.max(1),
+                    server_shutdown_token.clone(),
+                    Arc::clone(&embedded_worker_failed),
                 )?);
             }
         } else {
@@ -421,6 +552,8 @@ async fn run_server(
             embedded_workers = Some(spawn_python_workers(
                 app_path.clone(),
                 config.thread_count.max(1),
+                server_shutdown_token.clone(),
+                Arc::clone(&embedded_worker_failed),
             )?);
         }
         info!(
@@ -452,12 +585,20 @@ async fn run_server(
         16384,
     );
 
+    let shutdown_token_for_loop = server_shutdown_token.clone();
     server::run_with_collector(
         Arc::clone(&config),
         router,
         dispatcher,
         collector_shards,
-        wait_for_shutdown_signal(),
+        async move {
+            tokio::select! {
+                _ = wait_for_shutdown_signal() => {}
+                _ = shutdown_token_for_loop.cancelled() => {
+                    error!("stopping accept loop due to worker failure");
+                }
+            }
+        },
     )
     .await?;
 
@@ -480,6 +621,10 @@ async fn run_server(
             .filter_map(|l| l.child.take())
             .collect();
         RingFactory::shutdown_workers(&mut children, std::time::Duration::from_secs(5));
+    }
+
+    if embedded_worker_failed.load(std::sync::atomic::Ordering::Acquire) {
+        return Err("embedded Python worker thread terminated unexpectedly".into());
     }
 
     Ok(())
@@ -518,6 +663,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     #[cfg(feature = "python")]
     {
+        prepare_embedded_python_env(&config.workers.python_bin);
         use _vertebra::pymodule_init;
         append_to_inittab!(pymodule_init);
     }
