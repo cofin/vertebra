@@ -151,7 +151,7 @@ ts-lint:                                            ## Lint TS package with auto
 .PHONY: dev
 dev:                                                ## Install native extensions in debug mode for development
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage)
+	@(cd src/rs && PYO3_PYTHON="$(CURDIR)/.venv/bin/python" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage)
 	@uv run maturin develop --uv
 	@uv run maturin develop --uv -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-storage/Cargo.toml
@@ -162,7 +162,7 @@ dev:                                                ## Install native extensions
 .PHONY: build
 build: ts-build                                     ## Build optimized release binaries + native extension + TS client
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --release)
+	@(cd src/rs && PYO3_PYTHON="$(CURDIR)/.venv/bin/python" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --release --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression)
 	@uv run maturin develop --uv -r
 	@uv run maturin develop --uv -r -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-storage/Cargo.toml

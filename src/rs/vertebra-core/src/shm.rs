@@ -108,8 +108,11 @@ impl ShmRegion {
         validate_name(name)?;
         let size = align_to_page(size)?;
         let cname = CString::new(name)?;
-        // SAFETY: shm_open expects a valid C string, we validated name.
-        let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0o600) };
+        let fd = if name.starts_with("/tmp/vtb-") {
+            unsafe { libc::open(cname.as_ptr(), libc::O_RDWR, 0o600) }
+        } else {
+            unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0o600) }
+        };
         if fd < 0 {
             return Err(io::Error::last_os_error().into());
         }
@@ -183,8 +186,55 @@ impl ShmRegion {
         self.unlink_name = None;
     }
 
+    /// Create a file-backed shared memory region under `/tmp/vtb-*` (Unix only).
+    #[cfg(unix)]
+    pub fn create_file_backed(path: &str, size: usize) -> Result<Self, ShmError> {
+        if !path.starts_with("/tmp/vtb-") || path.len() > 255 {
+            return Err(ShmError::InvalidName);
+        }
+        let size = align_to_page(size)?;
+        let cname = CString::new(path)?;
+        unsafe {
+            let _ = libc::unlink(cname.as_ptr());
+        }
+        let fd = unsafe {
+            libc::open(
+                cname.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        unsafe {
+            if libc::ftruncate(fd, size as libc::off_t) != 0 {
+                let err = io::Error::last_os_error();
+                libc::close(fd);
+                let _ = libc::unlink(cname.as_ptr());
+                return Err(err.into());
+            }
+        }
+        let mut region = match unsafe { map_fd_region(fd, size) } {
+            Ok(region) => region,
+            Err(err) => {
+                unsafe {
+                    libc::close(fd);
+                    let _ = libc::unlink(cname.as_ptr());
+                }
+                return Err(err);
+            }
+        };
+        region.owns_handle = true;
+        region.owns_mapping = true;
+        region.unlink_name = Some(cname);
+        Ok(region)
+    }
+
     /// Create a uniquely named one-shot overflow shared memory region with unlink disarmed.
     ///
+    /// Automatically falls back to `/tmp/vtb-*` when `/dev/shm` free space is constrained
+    /// (`< size + 8 MiB`) or `VERTEBRA_OVERFLOW_BACKEND=tmp` is set.
     /// The consumer is responsible for calling [`shm_unlink_named`] after opening the region.
     #[cfg(unix)]
     pub fn create_overflow_region(prefix: &str, size: usize) -> Result<(String, Self), ShmError> {
@@ -193,10 +243,22 @@ impl ShmRegion {
 
         let pid = std::process::id();
         let seq = OVERFLOW_SEQ.fetch_add(1, Ordering::Relaxed);
-        let name = format!("/vtb-{prefix}-{pid:x}-{seq:x}");
-        let mut region = Self::create_named(&name, size)?;
+        let prefer_tmp = std::env::var("VERTEBRA_OVERFLOW_BACKEND")
+            .is_ok_and(|v| v.trim().eq_ignore_ascii_case("tmp"))
+            || !dev_shm_has_headroom(size.saturating_add(8 * 1024 * 1024));
+
+        if !prefer_tmp {
+            let name = format!("/vtb-{prefix}-{pid:x}-{seq:x}");
+            if let Ok(mut region) = Self::create_named(&name, size) {
+                region.disarm_unlink();
+                return Ok((name, region));
+            }
+        }
+
+        let tmp_name = format!("/tmp/vtb-{prefix}-{pid:x}-{seq:x}");
+        let mut region = Self::create_file_backed(&tmp_name, size)?;
         region.disarm_unlink();
-        Ok((name, region))
+        Ok((tmp_name, region))
     }
 
     /// Get the raw bytes as an immutable slice.
@@ -265,7 +327,11 @@ impl Drop for ShmRegion {
                     libc::close(self.handle);
                 }
                 if let Some(name) = self.unlink_name.take() {
-                    let _ = libc::shm_unlink(name.as_ptr());
+                    if name.as_bytes().starts_with(b"/tmp/vtb-") {
+                        let _ = libc::unlink(name.as_ptr());
+                    } else {
+                        let _ = libc::shm_unlink(name.as_ptr());
+                    }
                 }
             }
             #[cfg(windows)]
@@ -465,7 +531,21 @@ fn validate_name(name: &str) -> Result<(), ShmError> {
     Ok(())
 }
 
-/// Unlink a named shared memory region (Unix only).
+/// Return `true` when `/dev/shm` has at least `min_free_bytes` available (or on non-Linux hosts).
+pub fn dev_shm_has_headroom(min_free_bytes: usize) -> bool {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let mut st: libc::statvfs = core::mem::zeroed();
+        if libc::statvfs(c"/dev/shm".as_ptr(), &mut st) == 0 {
+            let avail = (st.f_bavail as u64).saturating_mul(st.f_frsize as u64);
+            return avail >= min_free_bytes as u64;
+        }
+    }
+    let _ = min_free_bytes;
+    true
+}
+
+/// Unlink a named shared memory region or `/tmp/vtb-*` overflow mapping (Unix only).
 ///
 /// This removes the name from the filesystem so no new processes can open it.
 /// Existing mappings remain valid until all processes unmap.
@@ -473,8 +553,11 @@ fn validate_name(name: &str) -> Result<(), ShmError> {
 pub fn shm_unlink_named(name: &str) -> Result<(), ShmError> {
     validate_name(name)?;
     let cname = CString::new(name)?;
-    // SAFETY: shm_unlink expects a valid C string name.
-    let result = unsafe { libc::shm_unlink(cname.as_ptr()) };
+    let result = if name.starts_with("/tmp/vtb-") {
+        unsafe { libc::unlink(cname.as_ptr()) }
+    } else {
+        unsafe { libc::shm_unlink(cname.as_ptr()) }
+    };
     if result < 0 {
         return Err(io::Error::last_os_error().into());
     }

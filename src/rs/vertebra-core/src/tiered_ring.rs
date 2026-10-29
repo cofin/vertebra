@@ -70,6 +70,33 @@ impl Default for TieredRingConfig {
 }
 
 impl TieredRingConfig {
+    /// Compact container configuration: 8 MiB total across tiers.
+    ///
+    /// - Small:  4 KiB   × 256 slots = 1 MiB
+    /// - Medium: 32 KiB  × 32 slots  = 1 MiB
+    /// - Large:  256 KiB × 8 slots   = 2 MiB
+    /// - XLarge: 2 MiB   × 2 slots   = 4 MiB
+    pub fn compact() -> Self {
+        Self {
+            small: RingTier {
+                slot_size: 4 * 1024,
+                slot_count: 256,
+            },
+            medium: RingTier {
+                slot_size: 32 * 1024,
+                slot_count: 32,
+            },
+            large: RingTier {
+                slot_size: 256 * 1024,
+                slot_count: 8,
+            },
+            xlarge: RingTier {
+                slot_size: 2 * 1024 * 1024,
+                slot_count: 2,
+            },
+        }
+    }
+
     /// Total memory footprint across all tiers.
     pub fn total_bytes(&self) -> usize {
         self.small.total_bytes()

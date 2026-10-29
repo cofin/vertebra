@@ -420,3 +420,38 @@ def test_wsgi_errors_reflects_reassigned_stderr(monkeypatch: pytest.MonkeyPatch)
     errors_stream = env["wsgi.errors"]
     errors_stream.write("wsgi error line\n")
     assert buf.getvalue() == "wsgi error line\n"
+
+
+def test_wsgi_spawn_batch_drives_multiple_requests_and_root_path() -> None:
+    """Verify WsgiAdapter.spawn_batch drives single-chunk, multi-chunk, and write() apps with root_path."""
+    seen: list[tuple[str, str, bytes]] = []
+
+    def batch_wsgi_app(environ: dict[str, Any], start_response: Callable[..., Any]) -> Iterable[bytes]:
+        script_name = environ["SCRIPT_NAME"]
+        path_info = environ["PATH_INFO"]
+        body = environ["wsgi.input"].read()
+        seen.append((script_name, path_info, body))
+        if path_info == "/write":
+            writer = start_response("201 Created", [("X-Mode", "write")])
+            writer(b"via-")
+            writer(b"writer")
+            return []
+        if path_info == "/multi":
+            start_response("200 OK", [("X-Mode", "multi")])
+            return (chunk for chunk in [b"part1-", b"part2"])
+        start_response("200 OK", [("Content-Type", "text/plain")])
+        return [b"single-chunk"]
+
+    requests = [
+        Request.from_parts("POST", "/legacy/single", body=b"abc"),
+        Request.from_parts("POST", "/legacy/write", body=b"def"),
+        Request.from_parts("GET", "/legacy/multi"),
+    ]
+    adapter = WsgiAdapter(batch_wsgi_app, mount_prefix="/legacy")
+    adapter.spawn_batch(requests)
+
+    assert seen == [
+        ("/legacy", "/single", b"abc"),
+        ("/legacy", "/write", b"def"),
+        ("/legacy", "/multi", b""),
+    ]

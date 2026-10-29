@@ -130,6 +130,16 @@ impl Dispatcher {
         }
     }
 
+    /// Return the total number of in-flight requests currently tracked by the dispatcher.
+    #[inline]
+    pub fn in_flight(&self) -> usize {
+        match &self.backend {
+            DispatchBackend::Direct(_) => 0,
+            DispatchBackend::Bridge(bridge) => bridge.in_flight(),
+            DispatchBackend::Shm(shm) => shm.in_flight(),
+        }
+    }
+
     /// Dispatch a batch to workers.
     pub fn dispatch(&self, mut batch: Batch) -> usize {
         self.dispatch_requests(&mut batch.requests)

@@ -122,6 +122,28 @@ impl RingLayout {
         self.slots.is_power_of_two()
     }
 
+    /// Reconstruct the power-of-two slot count from a mapped ring's total byte size.
+    pub fn slots_from_total_size(
+        slot_size: usize,
+        total_size: usize,
+        mode: ChannelMode,
+    ) -> Option<usize> {
+        let header_size = align_up(
+            core::mem::size_of::<ShmHeader>(),
+            CACHELINE_BYTES.max(SLOT_ALIGN),
+        );
+        let remaining = total_size.checked_sub(header_size)?;
+        let per_slot = match mode {
+            ChannelMode::Spsc => slot_size,
+            ChannelMode::Mpmc => slot_size + core::mem::size_of::<CacheLine<AtomicU64>>(),
+        };
+        if per_slot == 0 || !remaining.is_multiple_of(per_slot) {
+            return None;
+        }
+        let slots = remaining / per_slot;
+        (slots > 0 && slots.is_power_of_two()).then_some(slots)
+    }
+
     pub fn seq_offset(&self) -> usize {
         self.header_size
     }

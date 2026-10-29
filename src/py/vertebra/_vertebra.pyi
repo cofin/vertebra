@@ -56,6 +56,7 @@ __all__ = [
     "decode_pgcopy_rows",
     "drive_asgi_batch",
     "drive_rsgi_batch",
+    "drive_wsgi_batch",
     "duckdb_bootstrap_statements",
     "encode_alloydb_metadata_exchange",
     "encode_hello3_handshake",
@@ -380,6 +381,7 @@ class _WsgiStartResponse:
     def __new__(cls) -> _WsgiStartResponse: ...
     def __call__(self, /, *args: Any, **kwargs: Any) -> Any: ...
     def __repr__(self, /) -> str: ...
+    def write(self, /, data: Any) -> None: ...
 
 @final
 class RsgiScope:
@@ -572,6 +574,16 @@ def run_wsgi_callable(
     environ: WsgiEnviron,
     request_id: int = 0,
 ) -> Response: ...
+def drive_wsgi_batch(
+    app: object,
+    batch: RequestBatch | Sequence[Request],
+    *,
+    root_path: str = "",
+    server_name: str = "localhost",
+    server_port: int = 8000,
+    url_scheme: str = "http",
+    indices: Sequence[int] | None = None,
+) -> int: ...
 def drive_asgi_batch(
     app: object,
     batch: RequestBatch | Sequence[Request],

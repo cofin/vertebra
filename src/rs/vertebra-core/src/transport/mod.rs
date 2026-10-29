@@ -900,9 +900,10 @@ impl BatchSnapshot {
         if flags == REQUEST_OVERFLOW_MAGIC {
             let total_len = u64::from_le_bytes(data[4..12].try_into().unwrap()) as usize;
             let name_len = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
-            if (5..=64).contains(&name_len)
+            if (5..=128).contains(&name_len)
                 && data.len() == 16 + name_len
-                && data[16..16 + name_len].starts_with(b"/vtb-")
+                && (data[16..16 + name_len].starts_with(b"/vtb-")
+                    || data[16..16 + name_len].starts_with(b"/tmp/vtb-"))
             {
                 let name = std::str::from_utf8(&data[16..16 + name_len])
                     .map_err(|_| TransportError::DeserializeFailed("invalid overflow region name"))?
@@ -1388,9 +1389,10 @@ impl BatchSnapshot {
         if flags == REQUEST_OVERFLOW_MAGIC {
             let total_len = u64::from_le_bytes(data[4..12].try_into().unwrap()) as usize;
             let name_len = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
-            if (5..=64).contains(&name_len)
+            if (5..=128).contains(&name_len)
                 && data.len() == 16 + name_len
-                && data[16..16 + name_len].starts_with(b"/vtb-")
+                && (data[16..16 + name_len].starts_with(b"/vtb-")
+                    || data[16..16 + name_len].starts_with(b"/tmp/vtb-"))
             {
                 let name = std::str::from_utf8(&data[16..16 + name_len]).map_err(|_| {
                     TransportError::DeserializeFailed("invalid overflow region name")

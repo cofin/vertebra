@@ -618,18 +618,28 @@ def dispatch_batch(
 
                     _schedule_coros(scheduler or loop, rsgi_coros)
             elif protocol == "wsgi":
-                active_exec = executor or ThreadPoolExecutor(max_workers=32, thread_name_prefix="vertebra-wsgi")
-                for _idx, request in entries:
+                if use_native_batch_submit and hasattr(adapter, "spawn_batch"):
+                    adapter.spawn_batch([req for _idx, req in entries])
+                elif executor is not None:
+                    for _idx, request in entries:
 
-                    def _dispatch_wsgi_item(req: Any = request, a: Any = adapter) -> None:
+                        def _dispatch_wsgi_item(req: Any = request, a: Any = adapter) -> None:
+                            try:
+                                resp = a(req)
+                                active_submit(resp)
+                            except Exception as exc:
+                                err_resp = build_error_response(exc, req, error_handler, vr_cls)
+                                active_submit(err_resp)
+
+                        executor.submit(_dispatch_wsgi_item)
+                else:
+                    for _idx, request in entries:
                         try:
-                            resp = a(req)
+                            resp = adapter(request)
                             active_submit(resp)
                         except Exception as exc:
-                            err_resp = build_error_response(exc, req, error_handler, vr_cls)
+                            err_resp = build_error_response(exc, request, error_handler, vr_cls)
                             active_submit(err_resp)
-
-                    active_exec.submit(_dispatch_wsgi_item)
 
     if partitioned.unmatched:
         if use_native_batch_submit:

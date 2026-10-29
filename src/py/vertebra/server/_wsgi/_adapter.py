@@ -1,15 +1,17 @@
 """WsgiAdapter: executes PEP 3333 WSGI callables on the Rust-backed environment."""
 
-import inspect
 from collections.abc import Callable, Iterable
 from typing import Any
 
 from vertebra._vertebra import (
     Request,
+    RequestBatch,
     Response,
     WsgiEnviron,
     WsgiFileWrapper,
+    drive_wsgi_batch,
     run_wsgi_callable,
+    submit_response,
 )
 
 __all__ = (
@@ -25,7 +27,7 @@ class WsgiError(RuntimeError):
 class WsgiAdapter:
     """Adapts a PEP 3333 WSGI callable to Vertebra's request/response pipeline."""
 
-    __slots__ = ("_app", "_is_generator_app", "_mount_prefix")
+    __slots__ = ("_app", "_mount_prefix")
 
     def __init__(
         self,
@@ -34,8 +36,17 @@ class WsgiAdapter:
         mount_prefix: str = "",
     ) -> None:
         self._app = app
-        self._is_generator_app = inspect.isgeneratorfunction(app)
         self._mount_prefix = mount_prefix.rstrip("/")
+
+    @property
+    def app(self) -> Callable[..., Iterable[bytes]]:
+        """Return the underlying PEP 3333 WSGI callable."""
+        return self._app
+
+    @property
+    def mount_prefix(self) -> str:
+        """Return the normalized mount prefix for ``SCRIPT_NAME``."""
+        return self._mount_prefix
 
     def __call__(
         self,
@@ -52,6 +63,56 @@ class WsgiAdapter:
             server_port=server_port,
             url_scheme=url_scheme,
         )
+
+    def spawn_batch(
+        self,
+        requests: RequestBatch | Iterable[Any],
+        *,
+        server_name: str = "localhost",
+        server_port: int = 8000,
+        url_scheme: str = "http",
+    ) -> int:
+        """Execute a batch of WSGI requests in Rust and submit all responses in one batch call."""
+        if isinstance(requests, RequestBatch):
+            if len(requests) == 0:
+                return 0
+            return drive_wsgi_batch(
+                self._app,
+                requests,
+                root_path=self._mount_prefix,
+                server_name=server_name,
+                server_port=server_port,
+                url_scheme=url_scheme,
+            )
+
+        req_list = requests if isinstance(requests, list | tuple) else list(requests)
+        if not req_list:
+            return 0
+        if isinstance(req_list[0], Request):
+            return drive_wsgi_batch(
+                self._app,
+                req_list,
+                root_path=self._mount_prefix,
+                server_name=server_name,
+                server_port=server_port,
+                url_scheme=url_scheme,
+            )
+
+        count = 0
+        for req in req_list:
+            req_id = int(getattr(req, "request_id", 0))
+            try:
+                resp = self.handle_request(
+                    req,
+                    server_name=server_name,
+                    server_port=server_port,
+                    url_scheme=url_scheme,
+                )
+                submit_response(resp)
+            except Exception:
+                submit_response(Response.error(500, req_id))
+            count += 1
+        return count
 
     def handle_request(
         self,
@@ -71,18 +132,16 @@ class WsgiAdapter:
             )
             if self._mount_prefix:
                 self._apply_mount_prefix(environ)
-            if not self._is_generator_app:
-                try:
-                    return run_wsgi_callable(self._app, environ, request_id)
-                except (RuntimeError, ValueError) as exc:
-                    raise WsgiError(str(exc)) from exc
-        else:
-            environ = self._build_environ(
-                request,
-                server_name=server_name,
-                server_port=server_port,
-                url_scheme=url_scheme,
-            )
+            try:
+                return run_wsgi_callable(self._app, environ, request_id)
+            except (RuntimeError, ValueError) as exc:
+                raise WsgiError(str(exc)) from exc
+        environ = self._build_environ(
+            request,
+            server_name=server_name,
+            server_port=server_port,
+            url_scheme=url_scheme,
+        )
         environ["wsgi.file_wrapper"] = WsgiFileWrapper
         return self._run_callable(environ, request_id)
 

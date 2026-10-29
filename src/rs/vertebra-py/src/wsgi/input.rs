@@ -1,24 +1,56 @@
 //! Zero-copy `WsgiInput` and `WsgiFileWrapper` implementations.
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use pyo3::exceptions::PyIOError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
-/// Zero-copy PEP 3333 `wsgi.input` reader backed by `Bytes` without Python `io.BytesIO`.
+use vertebra_core::transport::BatchSnapshot;
+
+enum WsgiInputSource {
+    Snapshot {
+        batch: Arc<BatchSnapshot>,
+        index: usize,
+    },
+    Owned(Bytes),
+}
+
+impl WsgiInputSource {
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Snapshot { batch, index } => batch.body(*index),
+            Self::Owned(data) => data.as_ref(),
+        }
+    }
+}
+
+/// Zero-copy PEP 3333 `wsgi.input` reader backed by `BatchSnapshot` or `Bytes` without Python `io.BytesIO`.
 #[cfg_attr(
     not(Py_GIL_DISABLED),
     pyclass(name = "WsgiInput", freelist = 128, immutable_type)
 )]
 #[cfg_attr(Py_GIL_DISABLED, pyclass(name = "WsgiInput", immutable_type))]
 pub struct WsgiInput {
-    data: Bytes,
+    source: WsgiInputSource,
     pos: usize,
 }
 
 impl WsgiInput {
     pub fn from_bytes(data: Bytes) -> Self {
-        Self { data, pos: 0 }
+        Self {
+            source: WsgiInputSource::Owned(data),
+            pos: 0,
+        }
+    }
+
+    pub fn from_snapshot(batch: Arc<BatchSnapshot>, index: usize) -> Self {
+        Self {
+            source: WsgiInputSource::Snapshot { batch, index },
+            pos: 0,
+        }
     }
 }
 
@@ -28,40 +60,42 @@ impl WsgiInput {
     #[pyo3(signature = (data=None))]
     pub fn py_new(data: Option<&[u8]>) -> Self {
         Self {
-            data: Bytes::copy_from_slice(data.unwrap_or(b"")),
+            source: WsgiInputSource::Owned(Bytes::copy_from_slice(data.unwrap_or(b""))),
             pos: 0,
         }
     }
 
     #[pyo3(signature = (size=-1))]
     pub fn read<'py>(&mut self, py: Python<'py>, size: isize) -> Bound<'py, PyBytes> {
-        let remaining = self.data.len().saturating_sub(self.pos);
+        let data = self.source.as_slice();
+        let remaining = data.len().saturating_sub(self.pos);
         let take = if size < 0 {
             remaining
         } else {
             (size as usize).min(remaining)
         };
-        let slice = &self.data[self.pos..self.pos + take];
+        let slice = &data[self.pos..self.pos + take];
         self.pos += take;
         PyBytes::new(py, slice)
     }
 
     #[pyo3(signature = (size=-1))]
     pub fn readline<'py>(&mut self, py: Python<'py>, size: isize) -> Bound<'py, PyBytes> {
-        if self.pos >= self.data.len() {
+        let data = self.source.as_slice();
+        if self.pos >= data.len() {
             return PyBytes::new(py, b"");
         }
         let max_end = if size < 0 {
-            self.data.len()
+            data.len()
         } else {
-            self.data.len().min(self.pos + (size as usize))
+            data.len().min(self.pos + (size as usize))
         };
-        let window = &self.data[self.pos..max_end];
+        let window = &data[self.pos..max_end];
         let take = match window.iter().position(|&b| b == b'\n') {
             Some(idx) => idx + 1,
             None => window.len(),
         };
-        let slice = &self.data[self.pos..self.pos + take];
+        let slice = &data[self.pos..self.pos + take];
         self.pos += take;
         PyBytes::new(py, slice)
     }
