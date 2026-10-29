@@ -90,9 +90,9 @@ def render_shutdown(*, vc: Console | None = None) -> None:
 
 
 def _get_version() -> str:
-    """Get the vertebra package version."""
+    """Get the vertebra-core package version."""
     try:
-        return importlib.metadata.version("vertebra")
+        return importlib.metadata.version("vertebra-core")
     except importlib.metadata.PackageNotFoundError:
         return __version__ or "dev"
 

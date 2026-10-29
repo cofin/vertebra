@@ -30,6 +30,7 @@ def test_vtb_init_default_scaffolding(tmp_path: Path) -> None:
     assert app_dir.is_dir()
     pyproject = (app_dir / "pyproject.toml").read_text(encoding="utf-8")
     assert 'name = "' in pyproject
+    assert 'dependencies = ["vertebra-core"]' in pyproject
     assert "[tool.vertebra]" in pyproject
     assert 'app = "app:app"' in pyproject
     assert "entry =" not in pyproject

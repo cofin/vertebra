@@ -19,7 +19,7 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 - **[Product Overview](product/product.md)** — Vision, core capabilities, runtime topologies (`Auto`, `Embedded`, and `Shm`, Python `3.12`–`3.15` and free-threaded `3.14t`/`3.15t`), multicloud object storage, database drivers, telemetry, and Litestar/SQLSpec/Alchemy/APEX/gRPC integrations.
 - **[Product & Engineering Guidelines](product/product-guidelines.md)** — Clean-break domain naming rules, zero-copy hot-path invariants, `msgspec.Struct(..., frozen=True, gc=False)` value objects, Python module layout, and Git/PR discipline.
-- **[Technology Stack](product/tech-stack.md)** — Complete Rust workspace (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`), Python (`vertebra`), and TypeScript (`@vertebra/client`) dependency and toolchain matrix.
+- **[Technology Stack](product/tech-stack.md)** — Complete Rust workspace (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`), Python (`vertebra-core` PyPI distribution / `vertebra` import namespace), and TypeScript (`@vertebra/client`) dependency and toolchain matrix.
 
 ## 2. Engineering Knowledge Base (`knowledge/`)
 
