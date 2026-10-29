@@ -2,8 +2,9 @@
 //! helpers for the SHM accounting path.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use vertebra_core::buffer::CacheLine;
 use vertebra_core::transport::TransportNode;
 use vertebra_core::transport::ring_pair::RingPair;
 
@@ -13,6 +14,7 @@ use crate::body::PendingResponse;
 pub(super) struct WorkerState {
     pub(super) ring_pair: Arc<RingPair>,
     pub(super) healthy: AtomicBool,
+    pub(super) in_flight: CacheLine<AtomicUsize>,
 }
 
 /// Borrowed view of the body-shaped components of a pending request.

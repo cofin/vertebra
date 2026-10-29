@@ -89,6 +89,9 @@ pub fn init_transport(
 pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<RequestBatch>> {
     // SHM path: poll from SPSC ring
     if let Some(transport) = SHM_TRANSPORT.get() {
+        if let Some(s) = transport.poll_batch_async() {
+            return Ok(Some(RequestBatch { snapshot: s }));
+        }
         let snapshot = py.detach(|| transport.poll_batch(Duration::from_millis(timeout_ms)));
         return Ok(snapshot.map(|s| RequestBatch { snapshot: s }));
     }
@@ -99,6 +102,10 @@ pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<RequestBatc
             "transport not initialized; call init_transport() first",
         )
     })?;
+
+    if let Some(s) = bridge.try_poll_batch() {
+        return Ok(Some(RequestBatch { snapshot: s }));
+    }
 
     let snapshot = py.detach(|| bridge.poll_batch(Duration::from_millis(timeout_ms)));
     Ok(snapshot.map(|s| RequestBatch { snapshot: s }))

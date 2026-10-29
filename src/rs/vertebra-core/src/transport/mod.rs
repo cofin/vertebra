@@ -132,7 +132,7 @@ impl Transport {
                 if timeout.is_zero() {
                     return None;
                 }
-                for _ in 0..32 {
+                for _ in 0..256 {
                     std::hint::spin_loop();
                     if let Ok(view) = ring_pair.request_ring.try_recv_view() {
                         return BatchSnapshot::from_mpmc_slot(view).ok();
@@ -159,7 +159,9 @@ impl Transport {
                     if ring_pair.prepare_request_sleep() {
                         let _guard = SleepCancelGuard(ring_pair);
                         let wait_ms = (remaining.as_millis() as i32).clamp(1, 5);
-                        if let Ok(true) = ring_pair.request_notifier.wait(wait_ms) {
+                        let notified = ring_pair.request_notifier.wait(wait_ms);
+                        drop(_guard);
+                        if let Ok(true) = notified {
                             let _ = ring_pair.request_notifier.clear();
                         }
                     }

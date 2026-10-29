@@ -294,3 +294,89 @@ fn mount_route_registration_includes_options_and_head() {
         );
     }
 }
+
+#[tokio::test]
+async fn shm_dispatcher_shard_sticky_affinity_and_least_loaded_spillover() {
+    use vertebra_core::transport::BatchSnapshot;
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+
+    let pairs: Vec<Arc<RingPair>> = (0..4)
+        .map(|_| Arc::new(RingPair::create(RingPairConfig::default()).unwrap()))
+        .collect();
+    let shm = ShmDispatcher::new(pairs.clone(), 1024);
+    let dispatcher = Dispatcher::from_shm(Arc::clone(&shm));
+
+    let make_req = |id: u64| {
+        let (tx, rx) = oneshot::channel();
+        (
+            PendingRequest {
+                handler_id: id,
+                method_tag: 0,
+                http_version_tag: 1,
+                flags: 0,
+                path_and_query: PathAndQuery::from_static("/sticky"),
+                headers_mp: bytes::Bytes::new(),
+                body: bytes::Bytes::new(),
+                reply: tx,
+            },
+            rx,
+        )
+    };
+
+    // First batch when idle (`prev_active == 0`) routes to warm worker 0.
+    let (r0, _rx0) = make_req(1);
+    let mut batch0 = vec![r0];
+    assert_eq!(
+        dispatcher.dispatch_requests_from_shard(Some(0), &mut batch0),
+        1
+    );
+    assert_eq!(shm.worker_in_flight(0), 1);
+
+    // Subsequent concurrent batches from shards 1, 2, 3 route to their sticky home workers 1, 2, 3.
+    for shard in 1..4usize {
+        let (req, _rx) = make_req(shard as u64 + 10);
+        let mut reqs = vec![req];
+        assert_eq!(
+            dispatcher.dispatch_requests_from_shard(Some(shard), &mut reqs),
+            1
+        );
+        assert_eq!(shm.worker_in_flight(shard), 1);
+    }
+
+    // If worker 2 is marked unhealthy, shard 2 spills over to a healthy least-loaded worker.
+    shm.set_worker_healthy(2, false);
+    let (spill_req, _spill_rx) = make_req(99);
+    let mut spill_batch = vec![spill_req];
+    assert_eq!(
+        dispatcher.dispatch_requests_from_shard(Some(2), &mut spill_batch),
+        1
+    );
+    assert_eq!(shm.worker_in_flight(2), 1);
+    assert_eq!(shm.worker_in_flight(3), 2);
+    shm.set_worker_healthy(2, true);
+
+    // Drain and complete all correlations and verify per-worker in-flight returns to 0.
+    for pair in &pairs {
+        while let Ok(view) = pair.request_ring.try_recv_view() {
+            let snap = BatchSnapshot::from_mpmc_slot(view).unwrap();
+            let completions: Vec<(u64, PendingResponse)> = (0..snap.len())
+                .map(|i| {
+                    (
+                        snap.node(i).correlation_id,
+                        PendingResponse {
+                            status: 200,
+                            headers_mp: bytes::Bytes::new(),
+                            body: bytes::Bytes::from_static(b"ok"),
+                            stream_rx: None,
+                        },
+                    )
+                })
+                .collect();
+            dispatcher.complete_many(completions);
+        }
+    }
+
+    for worker_id in 0..4 {
+        assert_eq!(shm.worker_in_flight(worker_id), 0);
+    }
+}

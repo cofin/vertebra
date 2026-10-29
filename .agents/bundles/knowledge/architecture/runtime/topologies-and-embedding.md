@@ -34,7 +34,7 @@ flowchart TD
 
 - `vtb run` ([`run.py`](../../../../../src/py/vertebra/cli/run.py)) preserves inherited `VERTEBRA_TOPOLOGY`, `VERTEBRA_WORKERS`, `VERTEBRA_THREADS`, and `VERTEBRA_JIT` environment variables whenever the corresponding CLI options (`--topology auto|embedded|shm`, `--workers`, `--threads`, `--jit/--no-jit`) are omitted, then launches the binary through `run_supervisor` (see [Platform & Lifecycle](platform-and-lifecycle.md)).
 - When `Topology::Embedded` (or `Topology::Auto` on Unix) runs with `config.workers.count > 1` and `VERTEBRA_EMBEDDED_WORKER != "1"`, `EmbeddedSupervisor` pre-initializes shared SHM broker FDs (`ShmLeaseTable` / `ShmStatementCache`) and spawns `W` child `vertebra-server` worker processes (`VERTEBRA_EMBEDDED_WORKER=1`) binding the same port via `SO_REUSEPORT`, computing per-worker `(tokio_threads, py_threads)` against `std::thread::available_parallelism()` to prevent core oversubscription.
-- Explicit `--topology shm` (`VERTEBRA_TOPOLOGY=shm`) runs one central Rust HTTP ingress process dispatching across shared-memory `RingPair`s to `W` Python worker subprocesses. On non-Unix targets `Shm` falls back to the in-process bridge dispatcher.
+- Explicit `--topology shm` (`VERTEBRA_TOPOLOGY=shm`) runs one central Rust HTTP ingress process dispatching across shared-memory `RingPair`s to `W` Python worker subprocesses, sizing `config.worker_threads` (`available_cpus.saturating_sub(W).clamp(1, 4)`) when `VERTEBRA_TOKIO_THREADS` is unset so the central ingress and `W` Python workers share the CPU budget without oversubscription. On non-Unix targets `Shm` falls back to the in-process bridge dispatcher.
 
 ## Startup Sequence (`main.rs`)
 
@@ -45,7 +45,7 @@ flowchart TD
 5. `Python::attach` populates `sys.path` via `ensure_embedded_python_path` (including `.venv`/`VIRTUAL_ENV` `site-packages`), imports `VERTEBRA_APP` (default `app:app`), invokes `extract_offload_json_from_app` (calling `LitestarPlugin.ensure_finalized(app)` and reading `app.state["vertebra_offload_config_json"]` when `VERTEBRA_OFFLOAD_CONFIG` is unset), and `build_route_table_from_app` reads `handler_index` and registers each mount prefix across `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, and `HEAD` encoded with `MOUNT_HANDLER_BASE | mount_idx` (`0xFFFF_0000_0000_0000 | idx`).
 6. `Router::from_entries` builds the router.
 7. Dispatcher selection (next sections).
-8. `RequestBatcher::spawn_pool(dispatcher, BatchLimit::default(), config.worker_threads.clamp(1, 8), 16384)` starts the double-buffered collector tasks.
+8. `RequestBatcher::spawn_pool(dispatcher, BatchLimit::default(), shard_count, 16384)` starts the double-buffered collector tasks (`config.workers.count.clamp(1, 8)` in `Topology::Shm` for 1:1 batcher-to-worker affinity, and `config.worker_threads.clamp(1, 8)` in `Topology::Embedded`).
 9. `server::run_with_collector` serves until `ctrl_c` (`SIGINT`) or `CancellationToken` drain resolves.
 10. In `Shm`, `RingFactory::shutdown_workers(children, 5 s)` stops the subprocesses; in `Embedded`, Python worker `JoinHandle`s are joined cleanly.
 

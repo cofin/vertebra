@@ -138,10 +138,20 @@ impl Dispatcher {
     /// Dispatch requests in-place, draining `requests` while preserving its heap capacity.
     #[inline]
     pub fn dispatch_requests(&self, requests: &mut Vec<PendingRequest>) -> usize {
+        self.dispatch_requests_from_shard(None, requests)
+    }
+
+    /// Dispatch requests from a specific batcher shard (`Some(shard_idx)`), preserving sticky worker affinity.
+    #[inline]
+    pub fn dispatch_requests_from_shard(
+        &self,
+        batcher_shard: Option<usize>,
+        requests: &mut Vec<PendingRequest>,
+    ) -> usize {
         match &self.backend {
             DispatchBackend::Direct(tx) => direct::dispatch_direct_vec(tx, requests),
             DispatchBackend::Bridge(bridge) => bridge::dispatch_bridge_vec(bridge, requests),
-            DispatchBackend::Shm(shm) => shm.dispatch_shm_vec(requests),
+            DispatchBackend::Shm(shm) => shm.dispatch_shm_vec_from_shard(batcher_shard, requests),
         }
     }
 

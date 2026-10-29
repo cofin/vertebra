@@ -577,7 +577,11 @@ async fn run_server(
         info!(bind = %config.bind, "vertebra-server starting (no python)");
     }
 
-    let shard_count = config.worker_threads.clamp(1, 8);
+    let shard_count = if config.topology == Topology::Shm {
+        config.workers.count.clamp(1, 8)
+    } else {
+        config.worker_threads.clamp(1, 8)
+    };
     let collector_shards = RequestBatcher::spawn_pool(
         Arc::clone(&dispatcher),
         BatchLimit::default(),
