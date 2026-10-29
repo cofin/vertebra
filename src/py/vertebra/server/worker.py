@@ -4,7 +4,6 @@ import asyncio
 import concurrent.futures
 import logging
 import os
-import selectors
 import signal
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -418,51 +417,25 @@ class Worker:
                     executor=executor,
                 )
             else:
-                selector: selectors.BaseSelector | None = None
-                if notify_fd >= 0 and transport_mode == "shm":
-                    try:
-                        sel = selectors.DefaultSelector()
-                        sel.register(notify_fd, selectors.EVENT_READ)
-                        selector = sel
-                    except Exception:
-                        selector = None
-
                 batches_processed = 0
-                try:
-                    while not self._should_stop(batches_processed):
-                        if selector is not None:
-                            batch = try_get_batch()
-                            if batch is None or len(batch) == 0:
-                                if prepare_request_sleep():
-                                    try:
-                                        events = selector.select(timeout=timeout_sec)
-                                    finally:
-                                        cancel_request_sleep()
-                                    if events:
-                                        clear_request_notification()
-                                batch = try_get_batch()
-                                if batch is None or len(batch) == 0:
-                                    continue
-                        else:
-                            batch = get_batch(self._batch_timeout_ms)
-                            if batch is None or len(batch) == 0:
-                                continue
+                while not self._should_stop(batches_processed):
+                    batch = get_batch(self._batch_timeout_ms)
+                    if batch is None or len(batch) == 0:
+                        continue
 
-                        self._process_batch(
-                            batch,
-                            compiled_handlers=compiled_handlers,
-                            mount_runners=mount_runners,
-                            mount_lookup=mount_lookup,
-                            all_sync_native=all_sync_native,
-                            single_root_asgi=single_root_asgi,
-                            single_root_rsgi=single_root_rsgi,
-                            loop_pool=loop_pool,
-                            executor=executor,
-                        )
-                        batches_processed += 1
-                finally:
-                    if selector is not None:
-                        selector.close()
+                    self._process_batch(
+                        batch,
+                        compiled_handlers=compiled_handlers,
+                        mount_runners=mount_runners,
+                        mount_lookup=mount_lookup,
+                        all_sync_native=all_sync_native,
+                        single_root_asgi=single_root_asgi,
+                        single_root_rsgi=single_root_rsgi,
+                        loop_pool=loop_pool,
+                        executor=executor,
+                    )
+                    batch = None
+                    batches_processed += 1
         finally:
             self._zpages.set_var("worker_state", "stopped")
             try:

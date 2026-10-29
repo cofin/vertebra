@@ -108,12 +108,12 @@ impl InFlightRequests {
         Some(CorrelationId::encode(shard, index as u32, generation))
     }
 
-    /// Pop a matching reply sender from the slab so the caller can invoke `send` outside locks.
+    /// Pop a matching reply sender and target worker ID from the slab so the caller can invoke `send` outside locks.
     #[inline]
-    pub fn take_completed(
+    pub fn take_completed_with_worker(
         &mut self,
         id: CorrelationId,
-    ) -> Option<oneshot::Sender<PendingResponse>> {
+    ) -> Option<(oneshot::Sender<PendingResponse>, u32)> {
         let index = id.slot();
         let expected_gen = id.generation();
 
@@ -123,7 +123,16 @@ impl InFlightRequests {
 
         let entry = self.slots[index].take()?;
         self.free_list.push(index as u32);
-        Some(entry.reply)
+        Some((entry.reply, entry.worker_id))
+    }
+
+    /// Pop a matching reply sender from the slab so the caller can invoke `send` outside locks.
+    #[inline]
+    pub fn take_completed(
+        &mut self,
+        id: CorrelationId,
+    ) -> Option<oneshot::Sender<PendingResponse>> {
+        self.take_completed_with_worker(id).map(|(reply, _)| reply)
     }
 
     /// Complete a correlation by sending the response through the oneshot.
@@ -136,8 +145,11 @@ impl InFlightRequests {
         }
     }
 
-    /// Remove and return expired reply senders older than `timeout`.
-    pub fn take_expired(&mut self, timeout: Duration) -> Vec<oneshot::Sender<PendingResponse>> {
+    /// Remove and return expired `(reply, worker_id)` pairs older than `timeout`.
+    pub fn take_expired_with_worker(
+        &mut self,
+        timeout: Duration,
+    ) -> Vec<(oneshot::Sender<PendingResponse>, u32)> {
         let now = Instant::now();
         let mut expired = Vec::new();
 
@@ -150,11 +162,19 @@ impl InFlightRequests {
 
             if is_expired && let Some(entry) = self.slots[index].take() {
                 self.free_list.push(index as u32);
-                expired.push(entry.reply);
+                expired.push((entry.reply, entry.worker_id));
             }
         }
 
         expired
+    }
+
+    /// Remove and return expired reply senders older than `timeout`.
+    pub fn take_expired(&mut self, timeout: Duration) -> Vec<oneshot::Sender<PendingResponse>> {
+        self.take_expired_with_worker(timeout)
+            .into_iter()
+            .map(|(reply, _)| reply)
+            .collect()
     }
 
     /// Sweep for expired entries older than `timeout`.

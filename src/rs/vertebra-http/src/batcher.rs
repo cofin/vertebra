@@ -121,6 +121,7 @@ pub struct RequestBatcher {
     rx: mpsc::Receiver<PendingRequest>,
     dispatcher: Arc<Dispatcher>,
     limit: BatchLimit,
+    shard_idx: Option<usize>,
 }
 
 impl RequestBatcher {
@@ -130,12 +131,23 @@ impl RequestBatcher {
         limit: BatchLimit,
         channel_capacity: usize,
     ) -> (Self, mpsc::Sender<PendingRequest>) {
+        Self::with_shard(dispatcher, limit, channel_capacity, None)
+    }
+
+    /// Create a new batcher bound to an optional shard index and return the sender half.
+    pub fn with_shard(
+        dispatcher: Arc<Dispatcher>,
+        limit: BatchLimit,
+        channel_capacity: usize,
+        shard_idx: Option<usize>,
+    ) -> (Self, mpsc::Sender<PendingRequest>) {
         let (tx, rx) = mpsc::channel(channel_capacity);
         (
             Self {
                 rx,
                 dispatcher,
                 limit,
+                shard_idx,
             },
             tx,
         )
@@ -149,8 +161,13 @@ impl RequestBatcher {
         channel_capacity: usize,
     ) -> Vec<mpsc::Sender<PendingRequest>> {
         let mut senders = Vec::with_capacity(shard_count);
-        for _ in 0..shard_count {
-            let (collector, tx) = Self::new(Arc::clone(&dispatcher), limit, channel_capacity);
+        for shard_idx in 0..shard_count {
+            let (collector, tx) = Self::with_shard(
+                Arc::clone(&dispatcher),
+                limit,
+                channel_capacity,
+                Some(shard_idx),
+            );
             tokio::spawn(collector.run());
             senders.push(tx);
         }
@@ -173,6 +190,16 @@ impl RequestBatcher {
                 }
             }
 
+            if pending.len() < max_size {
+                tokio::task::yield_now().await;
+                while pending.len() < max_size {
+                    match self.rx.try_recv() {
+                        Ok(r) => pending.push(r),
+                        Err(_) => break,
+                    }
+                }
+            }
+
             trace!(depth = pending.len(), "queued request(s)");
             std::mem::swap(&mut pending, &mut draining);
             self.drain(&mut draining);
@@ -189,7 +216,8 @@ impl RequestBatcher {
     fn drain(&mut self, draining: &mut Vec<PendingRequest>) {
         let count = draining.len();
         debug!(count, "draining batch");
-        self.dispatcher.dispatch_requests(draining);
+        self.dispatcher
+            .dispatch_requests_from_shard(self.shard_idx, draining);
         draining.clear();
     }
 }

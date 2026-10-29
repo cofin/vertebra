@@ -55,6 +55,7 @@ impl ShmDispatcher {
             .map(|rp| WorkerState {
                 ring_pair: rp,
                 healthy: std::sync::atomic::AtomicBool::new(true),
+                in_flight: CacheLine(AtomicUsize::new(0)),
             })
             .collect();
 
@@ -102,6 +103,29 @@ impl ShmDispatcher {
             .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                 Some(cur.saturating_sub(count))
             });
+    }
+
+    #[inline]
+    fn decrement_worker_active(&self, worker_idx: usize, count: usize) {
+        if count == 0 {
+            return;
+        }
+        if let Some(worker) = self.workers.get(worker_idx) {
+            let _ = worker
+                .in_flight
+                .0
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                    Some(cur.saturating_sub(count))
+                });
+        }
+    }
+
+    /// Return the current number of in-flight requests assigned to `worker_id`.
+    #[inline]
+    pub fn worker_in_flight(&self, worker_id: usize) -> usize {
+        self.workers
+            .get(worker_id)
+            .map_or(0, |w| w.in_flight.0.load(Ordering::Acquire))
     }
 
     /// Attach a shared-memory lease table for dead-worker lease reclamation.
@@ -164,6 +188,58 @@ impl ShmDispatcher {
 
     /// Dispatch requests in-place while preserving `requests` vector capacity.
     pub fn dispatch_shm_vec(&self, requests: &mut Vec<crate::batcher::PendingRequest>) -> usize {
+        self.dispatch_shm_vec_from_shard(None, requests)
+    }
+
+    #[inline]
+    fn select_worker(&self, batcher_shard: Option<usize>, prev_active: usize) -> Option<usize> {
+        let worker_count = self.workers.len();
+        if worker_count == 0 {
+            return None;
+        }
+        if worker_count == 1 {
+            return worker_ring_has_capacity(&self.workers[0]).then_some(0);
+        }
+
+        if let Some(shard) = batcher_shard {
+            if prev_active == 0 {
+                let last = self.last_worker.load(Ordering::Relaxed) % worker_count;
+                if worker_ring_has_capacity(&self.workers[last]) {
+                    return Some(last);
+                }
+            }
+
+            let home = shard % worker_count;
+            let home_worker = &self.workers[home];
+            if worker_ring_has_capacity(home_worker)
+                && home_worker.in_flight.0.load(Ordering::Relaxed) <= 64
+            {
+                return Some(home);
+            }
+
+            return (0..worker_count)
+                .map(|attempt| (home + attempt) % worker_count)
+                .filter(|&idx| worker_ring_has_capacity(&self.workers[idx]))
+                .min_by_key(|&idx| self.workers[idx].in_flight.0.load(Ordering::Relaxed));
+        }
+
+        let preferred_worker = if prev_active == 0 {
+            self.last_worker.load(Ordering::Relaxed) % worker_count
+        } else {
+            self.next_worker.fetch_add(1, Ordering::Relaxed) % worker_count
+        };
+
+        (0..worker_count)
+            .map(|attempt| (preferred_worker + attempt) % worker_count)
+            .find(|&idx| worker_ring_has_capacity(&self.workers[idx]))
+    }
+
+    /// Dispatch requests from an optional batcher shard, preserving sticky shard-to-worker affinity.
+    pub fn dispatch_shm_vec_from_shard(
+        &self,
+        batcher_shard: Option<usize>,
+        requests: &mut Vec<crate::batcher::PendingRequest>,
+    ) -> usize {
         use vertebra_core::protocol::flags;
 
         if requests.is_empty() {
@@ -182,15 +258,7 @@ impl ShmDispatcher {
         }
 
         let prev_active = self.active_requests.0.load(Ordering::Relaxed);
-        let preferred_worker = if prev_active == 0 {
-            self.last_worker.load(Ordering::Relaxed) % worker_count
-        } else {
-            self.next_worker.fetch_add(1, Ordering::Relaxed) % worker_count
-        };
-
-        let worker_idx = (0..worker_count)
-            .map(|attempt| (preferred_worker + attempt) % worker_count)
-            .find(|&idx| worker_ring_has_capacity(&self.workers[idx]));
+        let worker_idx = self.select_worker(batcher_shard, prev_active);
 
         let Some(worker_idx) = worker_idx else {
             warn!("all worker rings full, responding with 503");
@@ -202,7 +270,7 @@ impl ShmDispatcher {
             return 0;
         };
 
-        if prev_active == 0 {
+        if batcher_shard.is_none() && prev_active == 0 {
             self.next_worker
                 .store(worker_idx.wrapping_add(1), Ordering::Relaxed);
         }
@@ -218,8 +286,11 @@ impl ShmDispatcher {
         let mut rejected_replies = Vec::new();
         let mut allocated_non_fnf = 0usize;
 
-        let batch_seq = self.next_batch.fetch_add(1, Ordering::Relaxed);
-        let mut shard_idx = batch_seq & SHM_CORRELATION_MASK;
+        let mut shard_idx = if batcher_shard.is_some() {
+            worker_idx & SHM_CORRELATION_MASK
+        } else {
+            self.next_batch.fetch_add(1, Ordering::Relaxed) & SHM_CORRELATION_MASK
+        };
 
         {
             let mut shard_guard = self.correlation_shards[shard_idx].lock().unwrap();
@@ -318,6 +389,10 @@ impl ShmDispatcher {
 
         if allocated_non_fnf > 0 {
             self.active_requests
+                .0
+                .fetch_add(allocated_non_fnf, Ordering::AcqRel);
+            self.workers[worker_idx]
+                .in_flight
                 .0
                 .fetch_add(allocated_non_fnf, Ordering::AcqRel);
         }
@@ -449,12 +524,13 @@ impl ShmDispatcher {
         for shard in &self.correlation_shards {
             let expired = {
                 let mut slab = shard.lock().unwrap();
-                slab.take_expired(timeout)
+                slab.take_expired_with_worker(timeout)
             };
             if !expired.is_empty() {
                 total += expired.len();
                 self.decrement_active(expired.len());
-                for reply in expired {
+                for (reply, worker_id) in expired {
+                    self.decrement_worker_active(worker_id as usize, 1);
                     let _ = reply.send(PendingResponse {
                         status: 504,
                         headers_mp: bytes::Bytes::new(),
@@ -478,6 +554,7 @@ impl ShmDispatcher {
             if !targets.is_empty() {
                 total += targets.len();
                 self.decrement_active(targets.len());
+                self.decrement_worker_active(worker_id as usize, targets.len());
                 for reply in targets {
                     let _ = reply.send(PendingResponse {
                         status: 502,
@@ -496,12 +573,13 @@ impl ShmDispatcher {
     pub fn complete_one(&self, correlation_id: u64, response: PendingResponse) -> bool {
         let cid = CorrelationId::from_raw(correlation_id);
         let shard_idx = cid.shard() & SHM_CORRELATION_MASK;
-        let tx = {
+        let completed = {
             let mut slab = self.correlation_shards[shard_idx].lock().unwrap();
-            slab.take_completed(cid)
+            slab.take_completed_with_worker(cid)
         };
-        if let Some(tx) = tx {
+        if let Some((tx, worker_id)) = completed {
             self.decrement_active(1);
+            self.decrement_worker_active(worker_id as usize, 1);
             let _ = tx.send(response);
             true
         } else {
@@ -531,7 +609,7 @@ impl ShmDispatcher {
             buckets[shard_idx].push((cid, response));
         }
 
-        let mut ready: Vec<(oneshot::Sender<PendingResponse>, PendingResponse)> = Vec::new();
+        let mut ready: Vec<(oneshot::Sender<PendingResponse>, PendingResponse, u32)> = Vec::new();
         for (shard_idx, bucket) in buckets.into_iter().enumerate() {
             if bucket.is_empty() {
                 continue;
@@ -540,8 +618,8 @@ impl ShmDispatcher {
             {
                 let mut slab = self.correlation_shards[shard_idx].lock().unwrap();
                 for (cid, response) in bucket {
-                    if let Some(tx) = slab.take_completed(cid) {
-                        ready.push((tx, response));
+                    if let Some((tx, worker_id)) = slab.take_completed_with_worker(cid) {
+                        ready.push((tx, response, worker_id));
                     } else {
                         debug!(
                             id = cid.raw(),
@@ -553,8 +631,22 @@ impl ShmDispatcher {
             }
             if !ready.is_empty() {
                 self.decrement_active(ready.len());
-                for (tx, response) in ready.drain(..) {
+                let mut batch_worker = u32::MAX;
+                let mut batch_worker_count = 0usize;
+                for (tx, response, worker_id) in ready.drain(..) {
+                    if worker_id == batch_worker {
+                        batch_worker_count += 1;
+                    } else {
+                        if batch_worker_count > 0 {
+                            self.decrement_worker_active(batch_worker as usize, batch_worker_count);
+                        }
+                        batch_worker = worker_id;
+                        batch_worker_count = 1;
+                    }
                     let _ = tx.send(response);
+                }
+                if batch_worker_count > 0 {
+                    self.decrement_worker_active(batch_worker as usize, batch_worker_count);
                 }
             }
         }

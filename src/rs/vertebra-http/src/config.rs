@@ -313,6 +313,7 @@ impl ServerConfig {
 
         // Thread scaling config (clamped to available_parallelism / taskset affinity for Tokio)
         let available_cpus = num_cpus();
+        let mut explicit_tokio_threads = false;
         if let Ok(threads) = std::env::var("VERTEBRA_THREADS")
             && let Ok(n) = threads.parse::<usize>()
             && n > 0
@@ -325,6 +326,7 @@ impl ServerConfig {
             && n > 0
         {
             config.worker_threads = n;
+            explicit_tokio_threads = true;
         }
 
         // Worker config
@@ -340,6 +342,12 @@ impl ServerConfig {
             if n > 1 && config.topology == Topology::Embedded {
                 config.reuse_port = true;
             }
+        }
+        if config.topology == Topology::Shm && config.workers.count > 1 && !explicit_tokio_threads {
+            config.worker_threads = available_cpus
+                .saturating_sub(config.workers.count)
+                .clamp(1, 4)
+                .min(available_cpus);
         }
         if let Ok(python) = std::env::var("VERTEBRA_PYTHON_BIN") {
             config.workers.python_bin = python;

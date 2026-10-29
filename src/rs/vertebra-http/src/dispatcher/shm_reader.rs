@@ -199,7 +199,17 @@ async fn run_worker_reader_async(
     async_fd: AsyncFd<NotifierFd>,
 ) {
     loop {
-        while drain_worker(&worker, &dispatcher) {}
+        let mut drained_any = false;
+        while drain_worker(&worker, &dispatcher) {
+            drained_any = true;
+        }
+
+        if drained_any {
+            tokio::task::yield_now().await;
+            if drain_worker(&worker, &dispatcher) {
+                continue;
+            }
+        }
 
         if !worker.prepare_response_sleep() {
             continue;
