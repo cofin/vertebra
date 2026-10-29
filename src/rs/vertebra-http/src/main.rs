@@ -489,7 +489,7 @@ async fn run_server(
                 let worker_count = config.workers.count.max(1);
                 let mut factory = RingFactory::with_broker_config(
                     worker_count,
-                    RingPairConfig::default(),
+                    RingPairConfig::for_environment(worker_count),
                     config.workers.broker_pool_size,
                     config.workers.broker_max_overflow,
                 )

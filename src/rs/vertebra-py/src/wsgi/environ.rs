@@ -3,7 +3,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use bytes::Bytes;
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple, PyType};
@@ -13,6 +12,8 @@ use vertebra_core::transport::{BatchSnapshot, encode_headers_compact};
 use super::input::{WsgiFileWrapper, WsgiInput};
 use crate::headers::iter_raw_headers;
 use crate::synthetic::SyntheticRequest;
+
+static WSGI_VERSION_TUPLE: pyo3::sync::PyOnceLock<Py<PyTuple>> = pyo3::sync::PyOnceLock::new();
 
 /// Fixed-layout PEP 3333 WSGI keys exposed by every `WsgiEnviron`.
 pub const STATIC_KEYS: &[&str] = &[
@@ -77,10 +78,12 @@ pub fn intern_static_wsgi_key<'py>(py: Python<'py>, key: &str) -> Bound<'py, PyS
 pub struct WsgiEnviron {
     batch: Arc<BatchSnapshot>,
     index: usize,
+    root_path: String,
     server_name: String,
     server_port: u16,
     url_scheme: String,
-    cached: HashMap<String, Py<PyAny>>,
+    wsgi_input: Option<Py<PyAny>>,
+    cached: Option<HashMap<String, Py<PyAny>>>,
     extras: Option<HashMap<String, Py<PyAny>>>,
     deleted: Option<HashSet<String>>,
     header_cache: Option<HashMap<String, String>>,
@@ -94,13 +97,38 @@ impl WsgiEnviron {
         server_port: u16,
         url_scheme: String,
     ) -> Self {
-        Self {
+        Self::with_root_path(
             batch,
             index,
+            String::new(),
             server_name,
             server_port,
             url_scheme,
-            cached: HashMap::new(),
+        )
+    }
+
+    pub fn with_root_path(
+        batch: Arc<BatchSnapshot>,
+        index: usize,
+        root_path: String,
+        server_name: String,
+        server_port: u16,
+        url_scheme: String,
+    ) -> Self {
+        let normalized_root = if root_path == "/" {
+            String::new()
+        } else {
+            root_path.trim_end_matches('/').to_string()
+        };
+        Self {
+            batch,
+            index,
+            root_path: normalized_root,
+            server_name,
+            server_port,
+            url_scheme,
+            wsgi_input: None,
+            cached: None,
             extras: None,
             deleted: None,
             header_cache: None,
@@ -133,26 +161,42 @@ impl WsgiEnviron {
         self.header_cache.as_ref().unwrap()
     }
 
-    fn build_known(&mut self, py: Python<'_>, key: &str) -> PyResult<Option<Py<PyAny>>> {
-        let node = self.batch.node(self.index);
+    #[inline]
+    fn build_static_key(&mut self, py: Python<'_>, key: &str) -> PyResult<Option<Py<PyAny>>> {
         let obj: Py<PyAny> = match key {
-            "REQUEST_METHOD" => crate::request::intern_http_method(py, node.method_name())
-                .into_any()
-                .unbind(),
-            "SCRIPT_NAME" => pyo3::intern!(py, "").clone().into_any().unbind(),
-            "PATH_INFO" => PyString::new(py, self.batch.path(self.index))
-                .into_any()
-                .unbind(),
-            "QUERY_STRING" => {
-                let q = self.batch.query(self.index).unwrap_or("");
-                PyString::new(py, q).into_any().unbind()
+            "REQUEST_METHOD" => {
+                crate::request::intern_http_method(py, self.batch.node(self.index).method_name())
+                    .into_any()
+                    .unbind()
             }
+            "SCRIPT_NAME" => {
+                if self.root_path.is_empty() {
+                    pyo3::intern!(py, "").clone().into_any().unbind()
+                } else {
+                    PyString::new(py, &self.root_path).into_any().unbind()
+                }
+            }
+            "PATH_INFO" => {
+                let raw_path = self.batch.path(self.index);
+                let path_info =
+                    if !self.root_path.is_empty() && raw_path.starts_with(&self.root_path) {
+                        let stripped = &raw_path[self.root_path.len()..];
+                        if stripped.is_empty() { "/" } else { stripped }
+                    } else {
+                        raw_path
+                    };
+                PyString::new(py, path_info).into_any().unbind()
+            }
+            "QUERY_STRING" => match self.batch.query(self.index) {
+                Some(q) if !q.is_empty() => PyString::new(py, q).into_any().unbind(),
+                _ => pyo3::intern!(py, "").clone().into_any().unbind(),
+            },
             "SERVER_NAME" => PyString::new(py, &self.server_name).into_any().unbind(),
             "SERVER_PORT" => PyString::new(py, &self.server_port.to_string())
                 .into_any()
                 .unbind(),
             "SERVER_PROTOCOL" => {
-                let ver = node.http_version();
+                let ver = self.batch.node(self.index).http_version();
                 if ver.starts_with("HTTP/") {
                     crate::request::intern_http_version(py, ver)
                         .into_any()
@@ -172,22 +216,51 @@ impl WsgiEnviron {
                 }
             }
             "wsgi.version" => {
-                let t = PyTuple::new(py, [1i32.into_pyobject(py)?, 0i32.into_pyobject(py)?])?;
-                t.into_any().unbind()
+                let tup = WSGI_VERSION_TUPLE.get_or_try_init(py, || {
+                    let t = PyTuple::new(py, [1i32.into_pyobject(py)?, 0i32.into_pyobject(py)?])?;
+                    Ok::<Py<PyTuple>, PyErr>(t.unbind())
+                })?;
+                tup.clone_ref(py).into_any()
             }
-            "wsgi.url_scheme" => PyString::new(py, &self.url_scheme).into_any().unbind(),
+            "wsgi.url_scheme" => {
+                if self.url_scheme == "http" {
+                    pyo3::intern!(py, "http").clone().into_any().unbind()
+                } else if self.url_scheme == "https" {
+                    pyo3::intern!(py, "https").clone().into_any().unbind()
+                } else {
+                    PyString::new(py, &self.url_scheme).into_any().unbind()
+                }
+            }
             "wsgi.input" => {
-                let body = Bytes::copy_from_slice(self.batch.body(self.index));
-                Py::new(py, WsgiInput::from_bytes(body))?.into_any()
+                if let Some(ref inp) = self.wsgi_input {
+                    return Ok(Some(inp.clone_ref(py)));
+                }
+                let inp = Py::new(
+                    py,
+                    WsgiInput::from_snapshot(Arc::clone(&self.batch), self.index),
+                )?
+                .into_any();
+                let clone = inp.clone_ref(py);
+                self.wsgi_input = Some(inp);
+                clone
             }
             "wsgi.file_wrapper" => PyType::new::<WsgiFileWrapper>(py).into_any().unbind(),
             "wsgi.errors" => {
-                let stderr = py.import("sys")?.getattr("stderr")?;
+                let stderr = py
+                    .import(pyo3::intern!(py, "sys"))?
+                    .getattr(pyo3::intern!(py, "stderr"))?;
                 stderr.into_any().unbind()
             }
             "wsgi.multithread" => true.into_pyobject(py)?.to_owned().into_any().unbind(),
             "wsgi.multiprocess" => false.into_pyobject(py)?.to_owned().into_any().unbind(),
             "wsgi.run_once" => false.into_pyobject(py)?.to_owned().into_any().unbind(),
+            _ => return Ok(None),
+        };
+        Ok(Some(obj))
+    }
+
+    fn build_header_key(&mut self, py: Python<'_>, key: &str) -> PyResult<Option<Py<PyAny>>> {
+        let obj: Py<PyAny> = match key {
             "CONTENT_TYPE" => {
                 let _ = self.ensure_headers();
                 let cache = self.header_cache.as_ref().unwrap();
@@ -303,21 +376,24 @@ impl WsgiEnviron {
         if self.is_deleted(key) {
             return Err(PyKeyError::new_err(key.to_string()));
         }
-        if key == "wsgi.errors" {
-            let stderr = py.import("sys")?.getattr("stderr")?;
-            return Ok(stderr.into_any().unbind());
-        }
         if let Some(ref extras) = self.extras
             && let Some(v) = extras.get(key)
         {
             return Ok(v.clone_ref(py));
         }
-        if let Some(v) = self.cached.get(key) {
+        if let Some(v) = self.build_static_key(py, key)? {
+            return Ok(v);
+        }
+        if let Some(ref cached) = self.cached
+            && let Some(v) = cached.get(key)
+        {
             return Ok(v.clone_ref(py));
         }
-        if let Some(v) = self.build_known(py, key)? {
+        if let Some(v) = self.build_header_key(py, key)? {
             let clone = v.clone_ref(py);
-            self.cached.insert(key.to_string(), v);
+            self.cached
+                .get_or_insert_with(HashMap::new)
+                .insert(key.to_string(), v);
             return Ok(clone);
         }
         Err(PyKeyError::new_err(key.to_string()))
@@ -337,7 +413,12 @@ impl WsgiEnviron {
             .extras
             .as_mut()
             .is_some_and(|extras| extras.remove(key).is_some());
-        self.cached.remove(key);
+        if key == "wsgi.input" {
+            self.wsgi_input = None;
+        }
+        if let Some(ref mut cached) = self.cached {
+            cached.remove(key);
+        }
         if in_extras
             || STATIC_KEYS.contains(&key)
             || key.starts_with("HTTP_")

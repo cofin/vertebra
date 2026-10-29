@@ -38,11 +38,11 @@ This chapter covers the Python code that launches the Rust binary and runs insid
 
 1. Installs `SIGTERM`/`SIGINT` handlers (main thread only) that stop the `Worker` cleanly at the next batch boundary.
 2. Initializes the transport (`init_transport(mode="shm")` when `VERTEBRA_TRANSPORT_MODE=shm`; otherwise `init_transport()`, a no-op when the bridge already exists).
-3. Compiles handler dispatch specs (`sync_inline` by default, `sync_thread` when `sync_to_thread=True`, or `async_native`) and `MOUNT_HANDLER_BASE | mount_idx` (`0xFFFF_0000_0000_0000 | idx`) mount bindings, entering any Litestar CLI-plugin `server_lifespan` contexts (`LitestarPlugin.ensure_finalized`).
+3. Compiles handler dispatch specs (`sync_inline` by default, `sync_thread` when `sync_to_thread=True`, or `async_native`) and `MOUNT_HANDLER_BASE | mount_idx` (`0xFFFF_0000_0000_0000 | idx`) mount bindings, entering any Litestar CLI-plugin `server_lifespan` contexts (`LitestarPlugin.ensure_finalized`) and starting `AsgiLifespan` (`lifespan.startup`) for mounted ASGI apps (`scope["state"]`).
 4. Calls `configure_worker_affinity(VERTEBRA_WORKER_ID, enable_pinning=VERTEBRA_CPU_AFFINITY in {1,true,TRUE})`, which pins to `worker_index % os.cpu_count()` via `os.sched_setaffinity` on Linux.
 5. Calls `GilAuditReport.audit()`.
-6. Selects the execution loop: when `scheduler.size == 1` and a request `notify_fd` is available (`RingPair` in `shm` or single-consumer `BatchBridge` in `embedded` with async/ASGI/RSGI routes), `_run_inline_event_loop` creates a single `uvloop` (or `asyncio`) loop on the worker thread and registers `loop.add_reader(notify_fd, ...)` with Dekker `prepare_request_sleep()` / `cancel_request_sleep()`. Multi-loop free-threaded pools use `EventLoopPool(size=pool_size)` with single-wakeup `spawn_batch`; pure-sync embedded native workers poll `get_batch` in a tight vector loop and flush via `submit_batch_raw`.
-7. On exit, stops the event loop(s) and optional thread pools (`sync_to_thread` / WSGI).
+6. Selects the execution loop: when `scheduler.size == 1` and a request `notify_fd` is available (`RingPair` in `shm` or single-consumer `BatchBridge` in `embedded` with async/ASGI/RSGI routes), `_run_inline_event_loop` creates a single `uvloop` (or `asyncio`) loop on the worker thread and registers `loop.add_reader(notify_fd, ...)` with Dekker `prepare_request_sleep()` / `cancel_request_sleep()`. Multi-loop free-threaded pools use `EventLoopPool(size=pool_size)` with single-wakeup `spawn_batch`; pure-sync embedded native and single-root WSGI (`single_root_wsgi` -> `drive_wsgi_batch`) workers poll `get_batch` in a tight vector loop and flush via `submit_batch_raw`.
+7. On exit, runs `AsgiLifespan.shutdown()` (`lifespan.shutdown`) and stops the event loop(s) and optional thread pools (`sync_to_thread` / WSGI).
 
 ## Event Loops & Free-Threaded Support
 
@@ -59,7 +59,7 @@ This chapter covers the Python code that launches the Rust binary and runs insid
 
 ## Platform Helpers (`platform.py`)
 
-- **`CgroupQuota.detect()`** ([`platform.py`](../../../../../src/py/vertebra/server/platform.py)): reads cgroup v2 `cpu.max` and `memory.max`; `cpu_quota_cores = quota / period` (host CPU count when the file is missing or `max`), `effective_workers = max(1, ceil(cpu_quota_cores))`, `memory_max_bytes` or `None`.
+- **`CgroupQuota.detect()`** ([`platform.py`](../../../../../src/py/vertebra/server/platform.py)): reads cgroup v2 `cpu.max` and `memory.max` (falling back to Linux `os.sched_getaffinity(0)` CPU mask width when `cpu.max` is missing or `max`); `cpu_quota_cores = quota / period`, `effective_workers = max(1, ceil(cpu_quota_cores))`, `memory_max_bytes` or `None`.
 - **`LameDuckController`**: `enter_lame_duck()` records a timestamp; `readiness_status()` returns `(503, {"status": "lame_duck", ...})` afterwards, else `(200, {"status": "ok"})`.
 - **`ZPagesRegistry`**: `handle_zpage(path)` renders JSON for `/healthz` (delegates to its `LameDuckController`), `/statusz`, `/varz` (`set_var`), and `/rpcz` (`record_rpc`); other paths return 404. `discover_adapters()` loads entry points in the `vertebra.platform_adapters` group.
 - **`PlatformAdapter`**: a `Protocol` with `name` and `configure_server(zpages, quota)`.

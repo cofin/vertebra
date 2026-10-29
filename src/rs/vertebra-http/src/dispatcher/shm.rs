@@ -128,6 +128,12 @@ impl ShmDispatcher {
             .map_or(0, |w| w.in_flight.0.load(Ordering::Acquire))
     }
 
+    /// Return the total number of in-flight requests across all SHM workers.
+    #[inline]
+    pub fn in_flight(&self) -> usize {
+        self.active_requests.0.load(Ordering::Relaxed)
+    }
+
     /// Attach a shared-memory lease table for dead-worker lease reclamation.
     pub fn set_lease_table(&self, lease_table: Arc<vertebra_core::broker::ShmLeaseTable>) {
         *self.lease_table.lock().unwrap() = Some(lease_table);

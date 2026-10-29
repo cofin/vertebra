@@ -20,6 +20,7 @@ from vertebra._vertebra import (
     clear_request_notification,
     drive_asgi_batch,
     drive_rsgi_batch,
+    drive_wsgi_batch,
     get_batch,
     get_request_notify_fd,
     init_transport,
@@ -209,7 +210,7 @@ def _instantiate_mount_runners(
             result.append((prefix, adapter, "rsgi"))
         elif resolved == "wsgi":
             wsgi_adapter = WsgiAdapter(app, mount_prefix=prefix)
-            result.append((prefix, wsgi_adapter.handle_request, "wsgi"))
+            result.append((prefix, wsgi_adapter, "wsgi"))
         else:
             msg = f"Unknown mount protocol: {resolved!r}"
             raise ValueError(msg)
@@ -349,7 +350,6 @@ class Worker:
         has_async_handlers = any(spec.is_async for spec in compiled_handlers.values())
         has_sync_thread = any(spec.sync_to_thread for spec in compiled_handlers.values())
         has_async_mounts = any(proto in {"asgi", "rsgi"} for proto in resolved_mount_protocols)
-        has_wsgi_mounts = any(proto == "wsgi" for proto in resolved_mount_protocols)
         needs_event_loop = has_async_handlers or has_async_mounts
         notify_fd = get_request_notify_fd()
 
@@ -363,7 +363,7 @@ class Worker:
                 max_workers=max(16, self._worker_count * 8),
                 thread_name_prefix="vertebra-worker-sync",
             )
-            if (has_sync_thread or has_wsgi_mounts)
+            if has_sync_thread
             else None
         )
 
@@ -391,12 +391,15 @@ class Worker:
 
             single_root_asgi: AsgiRunner | None = None
             single_root_rsgi: RsgiAdapter | None = None
+            single_root_wsgi: WsgiAdapter | None = None
             if not compiled_handlers and len(mount_runners) == 1 and mount_runners[0][0] == "":
                 root_adapter, root_proto = mount_runners[0][1], mount_runners[0][2]
                 if root_proto == "asgi" and isinstance(root_adapter, AsgiRunner) and root_adapter._on_chunk is None:
                     single_root_asgi = root_adapter
                 elif root_proto == "rsgi" and isinstance(root_adapter, RsgiAdapter):
                     single_root_rsgi = root_adapter
+                elif root_proto == "wsgi" and isinstance(root_adapter, WsgiAdapter):
+                    single_root_wsgi = root_adapter
 
             self._zpages.set_var("worker_state", "ready")
             self._zpages.set_var("worker_id", worker_idx)
@@ -413,6 +416,7 @@ class Worker:
                     all_sync_native=all_sync_native,
                     single_root_asgi=single_root_asgi,
                     single_root_rsgi=single_root_rsgi,
+                    single_root_wsgi=single_root_wsgi,
                     loop_pool=loop_pool,
                     executor=executor,
                 )
@@ -431,6 +435,7 @@ class Worker:
                         all_sync_native=all_sync_native,
                         single_root_asgi=single_root_asgi,
                         single_root_rsgi=single_root_rsgi,
+                        single_root_wsgi=single_root_wsgi,
                         loop_pool=loop_pool,
                         executor=executor,
                     )
@@ -464,6 +469,7 @@ class Worker:
         all_sync_native: bool,
         single_root_asgi: AsgiRunner | None,
         single_root_rsgi: RsgiAdapter | None,
+        single_root_wsgi: WsgiAdapter | None = None,
         loop_pool: EventLoopPool,
         executor: ThreadPoolExecutor | None,
     ) -> None:
@@ -498,6 +504,7 @@ class Worker:
                     all_sync_native=all_sync_native,
                     single_root_asgi=single_root_asgi,
                     single_root_rsgi=single_root_rsgi,
+                    single_root_wsgi=single_root_wsgi,
                     loop_pool=loop_pool,
                     executor=executor,
                 )
@@ -522,6 +529,7 @@ class Worker:
                     all_sync_native=all_sync_native,
                     single_root_asgi=single_root_asgi,
                     single_root_rsgi=single_root_rsgi,
+                    single_root_wsgi=single_root_wsgi,
                     loop_pool=loop_pool,
                     executor=executor,
                 )
@@ -552,6 +560,7 @@ class Worker:
         executor: ThreadPoolExecutor | None = None,
         single_root_asgi: AsgiRunner | None = None,
         single_root_rsgi: RsgiAdapter | None = None,
+        single_root_wsgi: WsgiAdapter | None = None,
     ) -> None:
         batch_len = len(batch)
         self._lame_duck.acquire_request(batch_len)
@@ -605,6 +614,14 @@ class Worker:
                     scheme=single_root_rsgi._scheme,
                     server=single_root_rsgi._server,
                     client=single_root_rsgi._client,
+                )
+                return
+
+            if single_root_wsgi is not None and isinstance(batch, RequestBatch):
+                drive_wsgi_batch(
+                    single_root_wsgi.app,
+                    batch,
+                    root_path="",
                 )
                 return
 

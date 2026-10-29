@@ -35,7 +35,7 @@ In `Topology::Shm` the Rust binary creates every ring before any worker exists, 
 | `VERTEBRA_REQ_NOTIFY_WRITE_FD` / `VERTEBRA_RESP_NOTIFY_WRITE_FD` | pipe write ends; emitted only on non-Linux Unix |
 | `VERTEBRA_BROKER_SHM_FD` / `VERTEBRA_BROKER_SHM_SIZE` | shared-memory database broker (`ShmLeaseTable` + co-located `ShmStatementCache` + `ShmChannelSlot` ring) FD and mapping size when configured via `with_broker()` |
 
-`RingPair::from_env` parses these variables and attaches the inherited shared-memory descriptors.
+`RingPair::from_env` parses these variables, dynamically reconstructs `request_slots` and each response tier's `slot_count` from `VERTEBRA_REQ_RING_SIZE` and `VERTEBRA_RESP_RING_{SMALL,MEDIUM,LARGE,XLARGE}_SIZE` via `RingLayout::slots_from_total_size` (matching both `RingPairConfig::default()` and `RingPairConfig::compact()`), and attaches the inherited shared-memory descriptors.
 
 ## Spawn & Shutdown in `main.rs`
 

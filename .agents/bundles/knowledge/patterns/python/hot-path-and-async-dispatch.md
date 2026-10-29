@@ -10,6 +10,7 @@ sources:
   - resource: src/py/vertebra/server/_loops.py
   - resource: src/py/vertebra/server/_asgi/_runner.py
   - resource: src/py/vertebra/server/_rsgi/_adapter.py
+  - resource: src/py/vertebra/server/_wsgi/_adapter.py
   - resource: src/py/vertebra/utils/sync_tools.py
   - resource: src/py/vertebra/extensions/litestar/fastpath.py
 ---
@@ -44,7 +45,7 @@ def compile_handler_table(handlers: Mapping[int, Callable[..., Any]]) -> dict[in
 
 - **Inline Vectorized Sync Execution (`"sync_inline"`)**: Non-async native handlers default to `sync_to_thread=False`. Both [`Worker._process_batch`](../../../../../src/py/vertebra/server/worker.py) (when `all_sync_native` is true) and [`dispatch_batch`](../../../../../src/py/vertebra/server/_dispatch.py) run inline sync handlers in a tight loop on the worker thread and flush the entire batch via one `submit_batch_raw(raw_items)` call (`0` `ThreadPoolExecutor` submissions). Only handlers explicitly opted into `sync_to_thread=True` (`__vertebra_sync_to_thread__`) allocate the lazy `ThreadPoolExecutor` (`max_workers = max(4, min(32, cpu_count))` on GIL builds).
 - **Single-Thread `uvloop` + `loop.add_reader` Dekker Polling**: [`create_event_loop()`](../../../../../src/py/vertebra/server/_loops.py) automatically installs `uvloop` on POSIX when available (`winloop` on Windows, `asyncio` fallback). In SHM mode and single-worker Embedded mode (`get_request_notify_fd() >= 0`), `Worker._run_inline_event_loop` registers `loop.add_reader(notify_fd, ...)` with Dekker `prepare_request_sleep` / `cancel_request_sleep` barriers so async, ASGI, and RSGI coroutines execute inline on the worker's own event loop without a background loop thread or `call_soon_threadsafe` hop.
-- **`O(1)` `MOUNT_HANDLER_BASE` Mount Dispatch & Single-Root ASGI/RSGI Fast Paths**: Mounted prefixes encode `MOUNT_HANDLER_BASE | mount_idx` (`0xFFFF_0000_0000_0000 | idx`) directly in the Rust `matchit` route table so `partition_batch` resolves mounts via `O(1)` bitmask indexing instead of linear prefix scans. Single-root ASGI apps (`"/"` without native routes) pass `single_root_asgi.dispatch_app` directly into Rust `drive_asgi_batch(single_root_asgi.dispatch_app, batch, ...)`, and RSGI apps route batches directly into Rust `drive_rsgi_batch`.
+- **`O(1)` `MOUNT_HANDLER_BASE` Mount Dispatch & Single-Root ASGI/RSGI/WSGI Fast Paths**: Mounted prefixes encode `MOUNT_HANDLER_BASE | mount_idx` (`0xFFFF_0000_0000_0000 | idx`) directly in the Rust `matchit` route table so `partition_batch` resolves mounts via `O(1)` bitmask indexing instead of linear prefix scans. Single-root ASGI apps (`"/"` without native routes) pass `single_root_asgi.dispatch_app` directly into Rust `drive_asgi_batch(single_root_asgi.dispatch_app, batch, ...)`, RSGI apps route batches directly into Rust `drive_rsgi_batch`, and single-root WSGI apps (`single_root_wsgi` in `Worker._process_batch` and `WsgiAdapter.spawn_batch` in [`_wsgi/_adapter.py`](../../../../../src/py/vertebra/server/_wsgi/_adapter.py)) route batches directly into Rust `drive_wsgi_batch(app, batch, root_path)`.
 
 ## 3. Zero-Copy Response Coercion, Snapshot Unpinning & Loop-Sharded Resources
 

@@ -146,11 +146,56 @@ pub struct RingPairConfig {
 impl Default for RingPairConfig {
     fn default() -> Self {
         Self {
-            // 64KB slots accommodate ~64 requests × 56-byte TransportNode + slab data
+            // 64 KiB slots accommodate ~64 requests × 56-byte TransportNode + slab data;
+            // 256 slots = 16 MiB per worker (~16,384 queued requests, 4x the server admission bound).
             request_slot_size: 64 * 1024,
-            request_slots: 1024, // Increased from 64
+            request_slots: 256,
             response_tiers: TieredRingConfig::default(),
         }
+    }
+}
+
+impl RingPairConfig {
+    /// Compact 12 MiB per-worker profile (`4 MiB` request ring + `8 MiB` response tiers)
+    /// for memory-constrained containers (`<= 1 GiB` cgroup limit or `64 MiB` `/dev/shm`).
+    pub fn compact() -> Self {
+        Self {
+            request_slot_size: 64 * 1024,
+            request_slots: 64,
+            response_tiers: TieredRingConfig::compact(),
+        }
+    }
+
+    /// Select the appropriate `RingPairConfig` for `worker_count` based on `VERTEBRA_SHM_PROFILE`,
+    /// cgroup v2 `memory.max`, and `/dev/shm` available space.
+    pub fn for_environment(worker_count: usize) -> Self {
+        if let Ok(profile) = std::env::var("VERTEBRA_SHM_PROFILE") {
+            if profile.trim().eq_ignore_ascii_case("compact") {
+                return Self::compact();
+            }
+            if profile.trim().eq_ignore_ascii_case("default")
+                || profile.trim().eq_ignore_ascii_case("standard")
+            {
+                return Self::default();
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(raw) = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+                && let Ok(limit_bytes) = raw.trim().parse::<u64>()
+                && limit_bytes <= 1024 * 1024 * 1024
+            {
+                return Self::compact();
+            }
+            let min_shm_bytes = (worker_count.max(1) as u64)
+                .saturating_mul(48 * 1024 * 1024)
+                .max(128 * 1024 * 1024);
+            if !crate::shm::dev_shm_has_headroom(min_shm_bytes as usize) {
+                return Self::compact();
+            }
+        }
+        let _ = worker_count;
+        Self::default()
     }
 }
 
@@ -849,7 +894,7 @@ impl RingPair {
     }
 
     #[cfg(unix)]
-    pub fn from_env(config: RingPairConfig) -> Result<Self, RingPairError> {
+    pub fn from_env(mut config: RingPairConfig) -> Result<Self, RingPairError> {
         fn env_parse<T: std::str::FromStr>(key: &str) -> Result<T, RingPairError> {
             std::env::var(key)
                 .map_err(|_| RingPairError::EnvVar(key.to_owned()))
@@ -860,7 +905,50 @@ impl RingPair {
         }
 
         let req_ring_fd: RawFd = env_parse("VERTEBRA_REQ_RING_FD")?;
-        let _req_ring_size: usize = env_parse("VERTEBRA_REQ_RING_SIZE")?;
+        let req_ring_size: usize = env_parse("VERTEBRA_REQ_RING_SIZE")?;
+        if let Some(slots) = RingLayout::slots_from_total_size(
+            config.request_slot_size,
+            req_ring_size,
+            ChannelMode::Mpmc,
+        ) {
+            config.request_slots = slots;
+        }
+        if let Ok(small_size) = env_parse::<usize>("VERTEBRA_RESP_RING_SMALL_SIZE")
+            && let Some(slots) = RingLayout::slots_from_total_size(
+                config.response_tiers.small.slot_size,
+                small_size,
+                ChannelMode::Spsc,
+            )
+        {
+            config.response_tiers.small.slot_count = slots;
+        }
+        if let Ok(medium_size) = env_parse::<usize>("VERTEBRA_RESP_RING_MEDIUM_SIZE")
+            && let Some(slots) = RingLayout::slots_from_total_size(
+                config.response_tiers.medium.slot_size,
+                medium_size,
+                ChannelMode::Spsc,
+            )
+        {
+            config.response_tiers.medium.slot_count = slots;
+        }
+        if let Ok(large_size) = env_parse::<usize>("VERTEBRA_RESP_RING_LARGE_SIZE")
+            && let Some(slots) = RingLayout::slots_from_total_size(
+                config.response_tiers.large.slot_size,
+                large_size,
+                ChannelMode::Spsc,
+            )
+        {
+            config.response_tiers.large.slot_count = slots;
+        }
+        if let Ok(xlarge_size) = env_parse::<usize>("VERTEBRA_RESP_RING_XLARGE_SIZE")
+            && let Some(slots) = RingLayout::slots_from_total_size(
+                config.response_tiers.xlarge.slot_size,
+                xlarge_size,
+                ChannelMode::Spsc,
+            )
+        {
+            config.response_tiers.xlarge.slot_count = slots;
+        }
         let resp_small_fd: RawFd = env_parse("VERTEBRA_RESP_RING_SMALL_FD")?;
         let resp_medium_fd: RawFd = env_parse("VERTEBRA_RESP_RING_MEDIUM_FD")?;
         let resp_large_fd: RawFd = env_parse("VERTEBRA_RESP_RING_LARGE_FD")?;
@@ -1351,5 +1439,59 @@ mod tests {
         for fd in &fds {
             assert!(*fd >= 0, "all FDs should be valid");
         }
+    }
+
+    #[test]
+    fn ring_pair_compact_profile_and_slot_reconstruction() {
+        let compact = RingPairConfig::compact();
+        assert_eq!(compact.request_slots, 64);
+        assert_eq!(compact.response_tiers.small.slot_count, 256);
+        assert_eq!(compact.response_tiers.medium.slot_count, 32);
+        assert_eq!(compact.response_tiers.large.slot_count, 8);
+        assert_eq!(compact.response_tiers.xlarge.slot_count, 2);
+
+        let req_layout = RingLayout::new(
+            compact.request_slot_size,
+            compact.request_slots,
+            ChannelMode::Mpmc,
+        );
+        assert_eq!(
+            RingLayout::slots_from_total_size(
+                compact.request_slot_size,
+                req_layout.total_size,
+                ChannelMode::Mpmc,
+            ),
+            Some(64)
+        );
+
+        let small_layout = RingLayout::new(
+            compact.response_tiers.small.slot_size,
+            compact.response_tiers.small.slot_count,
+            ChannelMode::Spsc,
+        );
+        assert_eq!(
+            RingLayout::slots_from_total_size(
+                compact.response_tiers.small.slot_size,
+                small_layout.total_size,
+                ChannelMode::Spsc,
+            ),
+            Some(256)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_backed_overflow_round_trip() {
+        let mut region = crate::shm::ShmRegion::create_file_backed("/tmp/vtb-test-ovf", 8192)
+            .expect("create file-backed overflow");
+        region.disarm_unlink();
+        unsafe {
+            std::ptr::copy_nonoverlapping(b"hello-tmp-overflow".as_ptr(), region.as_ptr(), 18);
+        }
+        let opened =
+            crate::shm::ShmRegion::open_named("/tmp/vtb-test-ovf", 8192).expect("open file-backed");
+        let slice = unsafe { std::slice::from_raw_parts(opened.as_ptr(), 18) };
+        assert_eq!(slice, b"hello-tmp-overflow");
+        let _ = crate::shm::shm_unlink_named("/tmp/vtb-test-ovf");
     }
 }

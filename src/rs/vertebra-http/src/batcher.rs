@@ -190,7 +190,8 @@ impl RequestBatcher {
                 }
             }
 
-            if pending.len() < max_size {
+            if pending.len() < max_size && (self.dispatcher.in_flight() > 0 || !self.rx.is_empty())
+            {
                 tokio::task::yield_now().await;
                 while pending.len() < max_size {
                     match self.rx.try_recv() {

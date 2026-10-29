@@ -266,48 +266,56 @@ pub async fn handle(
     debug!(handler_id, method = %method, path, "routed request");
 
     // 2. Collect bounded body and optionally decompress Content-Encoding.
-    let content_length = parts
-        .headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<usize>().ok());
-    let content_encoding_owned = parts
-        .headers
-        .get(header::CONTENT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
+    let body_bytes = if body.size_hint().exact() == Some(0) {
+        Bytes::new()
+    } else {
+        let content_length = parts
+            .headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<usize>().ok());
+        let content_encoding_owned = parts
+            .headers
+            .get(header::CONTENT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
 
-    let body_bytes = match collect_bounded_body(
-        body,
-        content_length,
-        content_encoding_owned.as_deref(),
-        &state.config.payload_limits,
-    )
-    .await
-    {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            warn!(error = %err, "request payload rejected");
-            let msg = match err {
-                PayloadError::TooLarge { .. } | PayloadError::DecompressedTooLarge { .. } => {
-                    "Payload Too Large"
-                }
-                PayloadError::UnsupportedEncoding(_) => "Unsupported Media Type",
-                PayloadError::DecompressionFailed(_) | PayloadError::StreamRead(_) => "Bad Request",
-            };
-            return Ok(error_response(err.status_code(), msg));
+        let collected = match collect_bounded_body(
+            body,
+            content_length,
+            content_encoding_owned.as_deref(),
+            &state.config.payload_limits,
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                warn!(error = %err, "request payload rejected");
+                let msg = match err {
+                    PayloadError::TooLarge { .. } | PayloadError::DecompressedTooLarge { .. } => {
+                        "Payload Too Large"
+                    }
+                    PayloadError::UnsupportedEncoding(_) => "Unsupported Media Type",
+                    PayloadError::DecompressionFailed(_) | PayloadError::StreamRead(_) => {
+                        "Bad Request"
+                    }
+                };
+                return Ok(error_response(err.status_code(), msg));
+            }
+        };
+
+        if let Some(ref enc) = content_encoding_owned
+            && !enc.trim().is_empty()
+            && !enc.trim().eq_ignore_ascii_case("identity")
+        {
+            parts.headers.remove(header::CONTENT_ENCODING);
+            if let Ok(cl_val) = HeaderValue::from_str(&collected.len().to_string()) {
+                parts.headers.insert(header::CONTENT_LENGTH, cl_val);
+            }
         }
+
+        collected
     };
-
-    if let Some(ref enc) = content_encoding_owned
-        && !enc.trim().is_empty()
-        && !enc.trim().eq_ignore_ascii_case("identity")
-    {
-        parts.headers.remove(header::CONTENT_ENCODING);
-        if let Ok(cl_val) = HeaderValue::from_str(&body_bytes.len().to_string()) {
-            parts.headers.insert(header::CONTENT_LENGTH, cl_val);
-        }
-    }
 
     if !body_bytes.is_empty() {
         if is_grpc {
