@@ -6,6 +6,7 @@ status: stable
 tags: [domains, framework, cli, developer-experience]
 sources:
   - resource: src/py/vertebra/cli/__init__.py
+  - resource: src/py/vertebra/cli/banner/renderer.py
   - resource: src/py/vertebra/cli/run.py
   - resource: src/py/vertebra/cli/_launch.py
   - resource: src/py/vertebra/cli/dev.py
@@ -23,7 +24,7 @@ sources:
 
 # `vtb` Command-Line Interface
 
-[`vertebra.cli`](../../../../../src/py/vertebra/cli/__init__.py) (`[project.scripts] vtb = "vertebra.cli:cli"` in `pyproject.toml`) is a `rich-click` command group driving production server execution, HMR development, frontend package management, standalone/onefile builds, MCP stdio bridging, background worker lanes, and third-party CLI plugins.
+[`vertebra.cli`](../../../../../src/py/vertebra/cli/__init__.py) (`[project.scripts] vtb = "vertebra.cli:cli"` in `pyproject.toml`, `@click.version_option(version=__version__, package_name="vertebra-core", prog_name="vertebra")`, and `importlib.metadata.version("vertebra-core")` in [`cli/banner/renderer.py`](../../../../../src/py/vertebra/cli/banner/renderer.py)) is a `rich-click` command group driving production server execution, HMR development, frontend package management, standalone/onefile builds, MCP stdio bridging, background worker lanes, and third-party CLI plugins.
 
 ## 1. Command Matrix
 
@@ -33,7 +34,7 @@ sources:
 | `vtb dev [APP]` | [`cli/dev.py`](../../../../../src/py/vertebra/cli/dev.py) | Runs `BuildOrchestrator` in dev/HMR mode (`SourceWatcher` or Vite dev server), enables `--reload`, and launches `run_supervisor` with the interactive Rich TUI. |
 | `vtb build` | [`cli/build.py`](../../../../../src/py/vertebra/cli/build.py) | Builds `--target frontend\|backend\|all\|<triple>`, `--standalone`, `--onefile`, `--entrypoint`, `--pgo`, `--profdata`, `--server-binary`, `--python-version` (`3.12`–`3.15` / `3.14t` / `3.15t`), and `--output` via `BuildOrchestrator`, `StandaloneBuilder`, and `OnefileBuilder`. |
 | `vtb js <subcmd>` | [`cli/js.py`](../../../../../src/py/vertebra/cli/js.py) | Frontend toolchain subcommands: `add`, `remove`, `list`, `install`, `build`, `generate-types` (`TypeExtractor` + TS/Zod/Valibot/OpenAPI/Protobuf/procedures), and `exec`. |
-| `vtb init` | [`cli/init.py`](../../../../../src/py/vertebra/cli/init.py) | Scaffolds a new Vertebra project layout. |
+| `vtb init` | [`cli/init.py`](../../../../../src/py/vertebra/cli/init.py) | Scaffolds a new Vertebra project layout declaring `dependencies = ["vertebra-core"]` in the generated `pyproject.toml`. |
 | `vtb mcp bridge` | [`cli/mcp.py`](../../../../../src/py/vertebra/cli/mcp.py) | Bridges newline-delimited JSON-RPC 2.0 over `stdin`/`stdout` to an application's `McpServer` (`execute_stdio_bridge`). |
 | `vtb workers run APP` | [`cli/workers.py`](../../../../../src/py/vertebra/cli/workers.py) | Launches admission-controlled [`WorkerRunner`](../server/worker-lanes.md) lanes (`--queues`, `--concurrency`, `--drain-timeout`). |
 

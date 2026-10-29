@@ -2,6 +2,7 @@
 
 import click
 
+from vertebra import __version__
 from vertebra.cli.build import build as build_command
 from vertebra.cli.config import configure_rich_click
 from vertebra.cli.dev import dev as _dev_cmd
@@ -18,7 +19,7 @@ configure_rich_click()
 
 
 @click.group()
-@click.version_option(package_name="vertebra")
+@click.version_option(version=__version__, package_name="vertebra-core", prog_name="vertebra")
 def cli() -> None:
     """Vertebra: High-performance polyglot application backbone.
 

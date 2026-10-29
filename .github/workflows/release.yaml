@@ -20,6 +20,20 @@ jobs:
         if: runner.os == 'Linux'
         uses: docker/setup-qemu-action@v3
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'x86_64-apple-darwin,aarch64-apple-darwin' || '' }}
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build TypeScript client bundle
+        run: |
+          cd src/ts/vertebra-client
+          bun install
+          bun run build
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -33,8 +47,9 @@ jobs:
           CIBW_ARCHS_LINUX: x86_64 aarch64
           CIBW_ARCHS_WINDOWS: AMD64
           CIBW_SKIP: "pp*"
+          CIBW_BEFORE_ALL_LINUX: "curl https://sh.rustup.rs -sSf | sh -s -- -y"
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
           CIBW_TEST_COMMAND: 'python -c "import vertebra; print(vertebra.__version__)"'
-          CIBW_BEFORE_BUILD: "make ts-build"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -46,6 +61,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Build TypeScript client bundle
+        run: |
+          cd src/ts/vertebra-client
+          bun install
+          bun run build
       - uses: astral-sh/setup-uv@v5
       - name: Build sdist
         run: uv build --sdist
@@ -59,7 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/vertebra
+      url: https://pypi.org/p/vertebra-core
     permissions:
       id-token: write
     steps:

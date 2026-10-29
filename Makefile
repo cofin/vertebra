@@ -83,7 +83,7 @@ install: destroy clean setup-env                    ## Install everything (Pytho
 		if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi; \
 	fi
 	@uv python pin 3.12 >/dev/null 2>&1
-	@uv venv >/dev/null 2>&1
+	@uv venv --clear >/dev/null 2>&1
 	@uv sync --all-extras --dev
 	@$(MAKE) ts-install
 	@$(MAKE) ts-build

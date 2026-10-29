@@ -3,7 +3,7 @@ requires = ["maturin>=1.5,<2"]
 build-backend = "maturin"
 
 [project]
-name = "vertebra"
+name = "vertebra-core"
 version = "0.1.0"
 description = "Python-first application backbone with Rust IPC primitives"
 readme = "README.md"
@@ -76,9 +76,15 @@ bench = [
 
 [tool.maturin]
 python-source = "src/py"
+python-packages = ["vertebra"]
 module-name = "vertebra._vertebra"
 manifest-path = "src/rs/vertebra-py/Cargo.toml"
 features = ["extension-module"]
+include = [
+    { path = "src/rs/Cargo.toml", format = "sdist" },
+    { path = "src/rs/Cargo.lock", format = "sdist" },
+    { path = "src/rs/vertebra-*/**/*", format = "sdist" },
+]
 
 [tool.ruff]
 line-length = 120

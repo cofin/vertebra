@@ -10,6 +10,12 @@ Vertebra is a **Python-first, high-performance application backbone** that combi
 ## Quickstart
 
 ```bash
+uv add vertebra-core
+```
+
+For local repository development:
+
+```bash
 make install
 ```
 

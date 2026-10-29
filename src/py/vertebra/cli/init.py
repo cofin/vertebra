@@ -33,7 +33,7 @@ def init(name: str, template: str) -> None:
         f'name = "{name}"\n'
         'version = "0.1.0"\n'
         'description = "Vertebra application"\n'
-        'dependencies = ["vertebra"]\n\n' + "\n".join(tool_lines) + "\n"
+        'dependencies = ["vertebra-core"]\n\n' + "\n".join(tool_lines) + "\n"
     )
     (target_dir / "pyproject.toml").write_text(pyproject_content, encoding="utf-8")
 

@@ -99,16 +99,16 @@
     }
   },
   "devDependencies": {
-    "@angular/core": "^22.2.3",
-    "@biomejs/biome": "^2.5.15",
-    "@types/node": "^26.6.5",
+    "@angular/core": "^22.2.4",
+    "@biomejs/biome": "^2.6.4",
+    "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "react": "^19.3.1",
     "typescript": "^5.9.3",
     "tsup": "^8.5.1",
     "vitest": "^5.0.5",
     "vue": "^3.5.44",
-    "svelte": "^5.57.2",
-    "vite": "^8.3.4"
+    "svelte": "^5.57.3",
+    "vite": "^8.3.5"
   }
 }

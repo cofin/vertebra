@@ -10,6 +10,13 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-10-29] flow-resynthesize | Synchronized OKF v0.2 Knowledge Bundle for `vertebra-core` PyPI Distribution, Maturin `sdist` Workspace Globs, and Release Workflow
+
+- Resynthesized and validated `index.md`, `product/tech-stack.md`, `knowledge/domains/framework/cli.md`, `knowledge/domains/frontend/packaging-and-pgo.md`, and `.agents/skills/flow-memory-keeper/SKILL.md`:
+  - `product/tech-stack.md` and `index.md`: Documented `[project] name = "vertebra-core"` as the PyPI distribution name paired with `[tool.maturin] python-source = "src/py"`, `python-packages = ["vertebra"]`, `module-name = "vertebra._vertebra"`, and `sdist` `include` globs (`src/rs/Cargo.toml`, `src/rs/Cargo.lock`, `src/rs/vertebra-*/**/*`) so `vertebra-core` wheels and source distributions install the top-level `vertebra` import package, and updated `@biomejs/biome` to `^2.6.4`.
+  - `knowledge/domains/framework/cli.md`: Documented `package_name="vertebra-core"` and `prog_name="vertebra"` in `vertebra.cli:main`, `importlib.metadata.version("vertebra-core")` in `vertebra.cli.banner.renderer:_get_version`, and `dependencies = ["vertebra-core"]` in `vtb init` project scaffolding.
+  - `knowledge/domains/frontend/packaging-and-pgo.md`: Documented `.github/workflows/release.yaml` pre-build setup (`dtolnay/rust-toolchain@stable`, `oven-sh/setup-bun@v2`, `src/ts/vertebra-client` bundle build before `cibuildwheel` and `uv build --sdist`, `CIBW_BEFORE_ALL_LINUX` / `CIBW_ENVIRONMENT_LINUX` container Rust provisioning, and PyPI publication to `https://pypi.org/p/vertebra-core`).
+
 ## [2026-10-29] flow-resynthesize | Synchronized OKF v0.2 Knowledge Bundle Across WSGI Batch Runner, Container-Aware SHM Profiles, and Ingress Fast-Paths
 
 - Resynthesized and validated the OKF v0.2 knowledge bundle across `product/`, `knowledge/architecture/`, `knowledge/domains/`, `knowledge/patterns/`, `knowledge/gotchas/`, and `.agents/skills/flow-memory-keeper/SKILL.md` for all runtime, IPC, HTTP ingress, and protocol changes landed in PRs #48, #49, and #50:
