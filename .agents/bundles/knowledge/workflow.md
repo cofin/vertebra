@@ -34,6 +34,8 @@ make install                                              # destroy + clean + se
 make dev                                                  # cargo build of non-extension crates + maturin develop for _vertebra, _bundler, _storage
 make upgrade                                              # uv lock --upgrade, cargo update, bun update, pre-commit autoupdate
 make clean                                                # Remove Python/Rust/TS build artifacts and caches (keeps .venv)
+make release bump=patch                                   # Bump version and synchronize package files via bump-my-version
+make pre-release version=0.2.0-alpha.1                    # Start or advance pre-release version via bump-my-version
 
 # 2. Focused Language Test Suites
 make rs-test                                              # rm -rf /dev/shm/test-* /dev/shm/*vertebra*, then cargo test --workspace --features tls,compression

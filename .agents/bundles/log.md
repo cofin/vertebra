@@ -10,6 +10,12 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-10-29] flow-resynthesize | Added Release Workflow, `bump-my-version` Automation, and Initial 0.1.0 Changelog
+
+- Configured `bump-my-version` in `pyproject.toml` (`[tool.bumpversion]`) to synchronize release versions across `pyproject.toml`, `src/py/vertebra/__init__.py`, `src/rs/Cargo.toml`, `src/rs/vertebra-bundler/pyproject.toml`, `src/rs/vertebra-storage/pyproject.toml`, and `src/ts/vertebra-client/package.json`.
+- Added canonical `make release bump=<patch|minor|major>` and `make pre-release version=<version>` targets in `Makefile` and documented them in `knowledge/workflow.md`.
+- Added initial 0.1.0 release changelog in `docs/changelog.rst` and `CHANGELOG.md`.
+
 ## [2026-10-29] flow-resynthesize | Synchronized OKF v0.2 Knowledge Bundle for `vertebra-core` PyPI Distribution, Maturin `sdist` Workspace Globs, and Release Workflow
 
 - Resynthesized and validated `index.md`, `product/tech-stack.md`, `knowledge/domains/framework/cli.md`, `knowledge/domains/frontend/packaging-and-pgo.md`, and `.agents/skills/flow-memory-keeper/SKILL.md`:

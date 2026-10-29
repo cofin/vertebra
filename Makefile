@@ -330,3 +330,26 @@ bench-baseline:                                     ## Record benchmark baseline
 bench-check:                                        ## Compare current benchmarks against baseline (BASELINE=pre-refactor)
 	@uv run --group bench python -m tools.benchmarks.baseline check --baseline $${BASELINE:-pre-refactor}
 
+# =============================================================================
+# Release
+# =============================================================================
+.PHONY: release
+release:                                             ## Bump version: make release bump=patch|minor|major
+	@if [ -z "$(bump)" ]; then \
+		echo "${ERROR} Usage: make release bump=patch|minor|major"; \
+		exit 1; \
+	fi
+	@echo "${INFO} Preparing release ($(bump))..."
+	@uv run bump-my-version bump $(bump)
+	@echo "${OK} Release bump complete"
+
+.PHONY: pre-release
+pre-release:                                         ## Start a pre-release: make pre-release version=0.2.0-alpha.1
+	@if [ -z "$(version)" ]; then \
+		echo "${ERROR} Usage: make pre-release version=X.Y.Z-alpha.N"; \
+		exit 1; \
+	fi
+	@echo "${INFO} Preparing pre-release $(version)..."
+	@uv run bump-my-version bump --new-version $(version) pre
+	@echo "${OK} Pre-release $(version) complete"
+
