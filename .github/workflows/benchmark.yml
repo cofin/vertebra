@@ -24,7 +24,7 @@ jobs:
   benchmark:
     name: Vertebra Performance
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -44,10 +44,16 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install oha
-        run: cargo install oha
+        uses: taiki-e/install-action@v2
+        with:
+          tool: oha
 
       - name: Install dependencies
-        run: make install
+        run: |
+          uv python pin 3.12
+          uv venv --clear
+          uv sync --all-extras --dev
+          make ts-install
 
       - name: Build Optimized
         run: make build

@@ -789,28 +789,30 @@ impl EmbeddedSupervisor {
 }
 
 /// Clean up stale shared memory regions from previous crashed supervisors.
-#[cfg(unix)]
 pub fn cleanup_stale_shm() {
-    use std::fs;
+    #[cfg(unix)]
+    {
+        use std::fs;
 
-    let shm_dir = std::path::Path::new("/dev/shm");
-    if !shm_dir.exists() {
-        return;
-    }
+        let shm_dir = std::path::Path::new("/dev/shm");
+        if !shm_dir.exists() {
+            return;
+        }
 
-    match fs::read_dir(shm_dir) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str()
-                    && (name.starts_with("vertebra-") || name.starts_with("vertebra_"))
-                {
-                    tracing::warn!(name, "cleaning up stale SHM region");
-                    let _ = fs::remove_file(entry.path());
+        match fs::read_dir(shm_dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str()
+                        && (name.starts_with("vertebra-") || name.starts_with("vertebra_"))
+                    {
+                        tracing::warn!(name, "cleaning up stale SHM region");
+                        let _ = fs::remove_file(entry.path());
+                    }
                 }
             }
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "could not scan /dev/shm for stale regions");
+            Err(e) => {
+                tracing::debug!(error = %e, "could not scan /dev/shm for stale regions");
+            }
         }
     }
 }

@@ -3,14 +3,20 @@
 //! This module provides a unified `Notifier` type that uses platform-optimized
 //! signaling mechanisms:
 //! - Linux: eventfd (single FD, 8-byte counter)
-//! - macOS/BSD/Windows: pipe (read/write FD pair)
+//! - macOS/BSD: pipe (read/write FD pair)
+//! - Windows: `WaitOnAddress` / `WakeByAddressAll` atomic word
 //!
-//! The notifier integrates with asyncio's `loop.add_reader()` by exposing a
+//! On Unix, the notifier integrates with asyncio's `loop.add_reader()` by exposing a
 //! pollable file descriptor. FDs are inheritable (no CLOEXEC) to support
 //! cross-process IPC via fork.
 
+#[cfg(windows)]
+use core::sync::atomic::{AtomicU32, Ordering};
 use std::io;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(windows)]
+use std::time::Duration;
 
 /// Platform-independent notification handle for async signaling.
 ///
@@ -22,10 +28,8 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 ///
 /// ```no_run
 /// use vertebra_core::notify::Notifier;
-/// use std::os::fd::AsRawFd;
 ///
 /// let notifier = Notifier::new().unwrap();
-/// let fd = notifier.as_raw_fd();  // Register with event loop
 ///
 /// // Producer side:
 /// notifier.notify().unwrap();
@@ -49,25 +53,34 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 pub struct Notifier {
     #[cfg(target_os = "linux")]
     fd: OwnedFd,
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     read_fd: OwnedFd,
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     write_fd: OwnedFd,
+    #[cfg(windows)]
+    state: AtomicU32,
 }
 
 impl Notifier {
     /// Create a new notification handle.
     ///
     /// On Linux, this creates an eventfd with `EFD_NONBLOCK` (no CLOEXEC).
-    /// On other platforms, this creates a pipe with non-blocking mode.
+    /// On other Unix platforms, this creates a pipe with non-blocking mode.
+    /// On Windows, this initializes an atomic wait word.
     pub fn new() -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         {
             Self::new_eventfd()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(unix, not(target_os = "linux")))]
         {
             Self::new_pipe()
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                state: AtomicU32::new(0),
+            })
         }
     }
 
@@ -84,7 +97,7 @@ impl Notifier {
         })
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     fn new_pipe() -> io::Result<Self> {
         let mut fds = [0i32; 2];
         // SAFETY: pipe() is a standard POSIX syscall.
@@ -134,7 +147,7 @@ impl Notifier {
         }
     }
 
-    /// Reconstruct a notifier from raw file descriptors (non-Linux).
+    /// Reconstruct a notifier from raw file descriptors (non-Linux Unix).
     ///
     /// For pipe-based platforms, both read and write FDs are needed.
     ///
@@ -143,7 +156,7 @@ impl Notifier {
     /// - Both `read_fd` and `write_fd` must be valid, open file descriptors
     /// - They must be the two ends of a pipe created by `Notifier::new()`
     /// - The caller takes ownership; both will be closed when dropped
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     pub unsafe fn from_raw_fds(read_fd: RawFd, write_fd: RawFd) -> Self {
         Self {
             read_fd: unsafe { OwnedFd::from_raw_fd(read_fd) },
@@ -155,6 +168,7 @@ impl Notifier {
     ///
     /// This FD should be registered with `loop.add_reader()` in Python,
     /// `Bun.file(fd).readable` in TypeScript, or `epoll_ctl()` in native code.
+    #[cfg(unix)]
     pub fn as_raw_fd(&self) -> RawFd {
         #[cfg(target_os = "linux")]
         {
@@ -166,11 +180,11 @@ impl Notifier {
         }
     }
 
-    /// Get the write FD (for non-Linux platforms).
+    /// Get the write FD (for non-Linux Unix platforms).
     ///
     /// On Linux, eventfd uses a single FD for both read and write, so this
     /// returns the same as `as_raw_fd()`.
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     pub fn write_fd(&self) -> RawFd {
         self.write_fd.as_raw_fd()
     }
@@ -184,7 +198,8 @@ impl Notifier {
     /// Signal that data is available.
     ///
     /// This is a non-blocking operation. On Linux, it increments the eventfd
-    /// counter. On other platforms, it writes a single byte to the pipe.
+    /// counter. On other Unix platforms, it writes a single byte to the pipe.
+    /// On Windows, it sets the atomic notification state and wakes waiters.
     pub fn notify(&self) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
@@ -206,7 +221,7 @@ impl Notifier {
             }
             Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(unix, not(target_os = "linux")))]
         {
             let val: u8 = 1;
             let ret = unsafe {
@@ -224,6 +239,12 @@ impl Notifier {
                 }
                 return Err(err);
             }
+            Ok(())
+        }
+        #[cfg(windows)]
+        {
+            self.state.store(1, Ordering::SeqCst);
+            let _ = crate::platform::windows::wake_all(&self.state);
             Ok(())
         }
     }
@@ -246,7 +267,7 @@ impl Notifier {
             // Ignore errors - EAGAIN just means no notifications pending.
             Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(unix, not(target_os = "linux")))]
         {
             // Drain the pipe completely.
             let mut buf = [0u8; 64];
@@ -264,6 +285,11 @@ impl Notifier {
             }
             Ok(())
         }
+        #[cfg(windows)]
+        {
+            self.state.store(0, Ordering::SeqCst);
+            Ok(())
+        }
     }
 
     /// Check if the notifier has pending notifications without blocking.
@@ -271,18 +297,25 @@ impl Notifier {
     /// Returns `true` if there are pending notifications, `false` otherwise.
     #[cfg(test)]
     pub fn has_pending(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        let fd = self.fd.as_raw_fd();
-        #[cfg(not(target_os = "linux"))]
-        let fd = self.read_fd.as_raw_fd();
+        #[cfg(unix)]
+        {
+            #[cfg(target_os = "linux")]
+            let fd = self.fd.as_raw_fd();
+            #[cfg(not(target_os = "linux"))]
+            let fd = self.read_fd.as_raw_fd();
 
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ret = unsafe { libc::poll(&mut pfd, 1, 0) };
-        ret > 0 && (pfd.revents & libc::POLLIN) != 0
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ret = unsafe { libc::poll(&mut pfd, 1, 0) };
+            ret > 0 && (pfd.revents & libc::POLLIN) != 0
+        }
+        #[cfg(windows)]
+        {
+            self.state.load(Ordering::Acquire) != 0
+        }
     }
 
     /// Wait for a notification with timeout.
@@ -290,27 +323,50 @@ impl Notifier {
     /// Returns `Ok(true)` if notification received, `Ok(false)` on timeout,
     /// or `Err` on error.
     pub fn wait(&self, timeout_ms: i32) -> io::Result<bool> {
-        #[cfg(target_os = "linux")]
-        let fd = self.fd.as_raw_fd();
-        #[cfg(not(target_os = "linux"))]
-        let fd = self.read_fd.as_raw_fd();
+        #[cfg(unix)]
+        {
+            #[cfg(target_os = "linux")]
+            let fd = self.fd.as_raw_fd();
+            #[cfg(not(target_os = "linux"))]
+            let fd = self.read_fd.as_raw_fd();
 
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+            if ret < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if ret == 0 {
+                return Ok(false); // Timeout
+            }
+            Ok((pfd.revents & libc::POLLIN) != 0)
         }
-        if ret == 0 {
-            return Ok(false); // Timeout
+        #[cfg(windows)]
+        {
+            if self.state.load(Ordering::Acquire) != 0 {
+                return Ok(true);
+            }
+            if timeout_ms == 0 {
+                return Ok(false);
+            }
+            if timeout_ms < 0 {
+                let _ = crate::platform::windows::wait_on_address(&self.state, 0);
+            } else {
+                let _ = crate::platform::windows::wait_on_address_timeout(
+                    &self.state,
+                    0,
+                    Duration::from_millis(timeout_ms as u64),
+                );
+            }
+            Ok(self.state.load(Ordering::Acquire) != 0)
         }
-        Ok((pfd.revents & libc::POLLIN) != 0)
     }
 }
 
+#[cfg(unix)]
 impl AsRawFd for Notifier {
     fn as_raw_fd(&self) -> RawFd {
         Notifier::as_raw_fd(self)
@@ -348,6 +404,7 @@ mod tests {
         assert!(!notifier.has_pending());
     }
 
+    #[cfg(unix)]
     #[test]
     fn notifier_fd_is_valid() {
         let notifier = Notifier::new().expect("failed to create notifier");
@@ -369,6 +426,7 @@ mod tests {
         assert!(result, "should receive notification");
     }
 
+    #[cfg(unix)]
     #[test]
     fn notifier_no_cloexec() {
         let notifier = Notifier::new().expect("failed to create notifier");
@@ -409,7 +467,7 @@ mod tests {
         assert!(!child_notifier.has_pending());
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     #[test]
     fn notifier_from_raw_fds() {
         let notifier = Notifier::new().expect("failed to create notifier");

@@ -17,7 +17,8 @@ fn http_client() -> reqwest::Client {
 
 async fn spawn_hmr_server(dev_mode: bool) -> (std::net::SocketAddr, oneshot::Sender<()>) {
     let router = Arc::new(Router::from_entries(Vec::new()).unwrap());
-    let dispatcher = Arc::new(Dispatcher::new());
+    let (dispatcher, _direct_rx) = Dispatcher::new_direct(4);
+    let dispatcher = Arc::new(dispatcher);
     let (collector_tx, _collector_rx) = tokio::sync::mpsc::channel(4);
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 

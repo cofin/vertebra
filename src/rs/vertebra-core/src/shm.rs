@@ -5,7 +5,6 @@ use std::io;
 
 #[cfg(unix)]
 use std::ffi::CString;
-#[cfg(unix)]
 use std::ffi::NulError;
 #[cfg(unix)]
 use std::os::fd::RawFd;
@@ -337,10 +336,14 @@ impl Drop for ShmRegion {
             #[cfg(windows)]
             {
                 use windows_sys::Win32::Foundation::CloseHandle;
-                use windows_sys::Win32::System::Memory::UnmapViewOfFile;
+                use windows_sys::Win32::System::Memory::{
+                    MEMORY_MAPPED_VIEW_ADDRESS, UnmapViewOfFile,
+                };
 
                 if self.owns_mapping {
-                    UnmapViewOfFile(self.ptr.as_ptr().cast());
+                    UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+                        Value: self.ptr.as_ptr().cast(),
+                    });
                 }
                 if self.owns_handle && !self.handle.is_null() {
                     CloseHandle(self.handle);
@@ -463,8 +466,7 @@ unsafe fn map_fd_region(fd: RawFd, size: usize) -> Result<ShmRegion, ShmError> {
 
 #[cfg(windows)]
 fn create_windows_region(size: usize) -> Result<ShmRegion, ShmError> {
-    use windows_sys::Win32::Foundation::GetLastError;
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Memory::{
         CreateFileMappingW, FILE_MAP_ALL_ACCESS, MapViewOfFile, PAGE_READWRITE,
     };
@@ -483,9 +485,14 @@ fn create_windows_region(size: usize) -> Result<ShmRegion, ShmError> {
     if handle.is_null() {
         return Err(io::Error::from_raw_os_error(unsafe { GetLastError() } as i32).into());
     }
-    let ptr = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size) } as *mut u8;
+    let view = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size) };
+    let ptr = view.Value.cast::<u8>();
     if ptr.is_null() {
-        return Err(io::Error::from_raw_os_error(unsafe { GetLastError() } as i32).into());
+        let err = io::Error::from_raw_os_error(unsafe { GetLastError() } as i32);
+        unsafe {
+            CloseHandle(handle);
+        }
+        return Err(err.into());
     }
     let ptr = NonNull::new(ptr).ok_or(ShmError::MapFailed)?;
     Ok(ShmRegion {
@@ -504,9 +511,10 @@ unsafe fn map_windows_region(handle: RawHandle, size: usize) -> Result<ShmRegion
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::System::Memory::{FILE_MAP_ALL_ACCESS, MapViewOfFile};
 
-    let ptr = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size) as *mut u8;
+    let view = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size) };
+    let ptr = view.Value.cast::<u8>();
     if ptr.is_null() {
-        return Err(io::Error::from_raw_os_error(GetLastError() as i32).into());
+        return Err(io::Error::from_raw_os_error(unsafe { GetLastError() } as i32).into());
     }
     let ptr = NonNull::new(ptr).ok_or(ShmError::MapFailed)?;
     Ok(ShmRegion {
@@ -582,19 +590,7 @@ fn page_size() -> Result<usize, ShmError> {
     {
         use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
         unsafe {
-            let mut info = SYSTEM_INFO {
-                wProcessorArchitecture: 0,
-                wReserved: 0,
-                dwPageSize: 0,
-                lpMinimumApplicationAddress: std::ptr::null_mut(),
-                lpMaximumApplicationAddress: std::ptr::null_mut(),
-                dwActiveProcessorMask: 0,
-                dwNumberOfProcessors: 0,
-                dwProcessorType: 0,
-                dwAllocationGranularity: 0,
-                wProcessorLevel: 0,
-                wProcessorRevision: 0,
-            };
+            let mut info: SYSTEM_INFO = core::mem::zeroed();
             GetSystemInfo(&mut info);
             if info.dwPageSize == 0 {
                 return Err(ShmError::InvalidSize);
@@ -693,6 +689,7 @@ mod tests {
         assert!(child2.wait().unwrap().success());
     }
 
+    #[cfg(unix)]
     proptest! {
         #[test]
         fn long_names_are_rejected(len in 256usize..512) {
