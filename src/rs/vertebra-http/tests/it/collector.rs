@@ -74,7 +74,7 @@ async fn test_drain_by_size() {
 
     let limit = BatchLimit { max: 4 };
     let (collector, tx) = RequestBatcher::new(Arc::clone(&dispatcher), limit, 64);
-    tokio::spawn(collector.run());
+    let collector_handle = tokio::spawn(collector.run());
 
     for i in 0..4u64 {
         let (req, _rx) = dummy_request(i);
@@ -84,6 +84,9 @@ async fn test_drain_by_size() {
     let total = tokio::task::spawn_blocking(|| collect_all_requests(Duration::from_millis(500)))
         .await
         .unwrap();
+
+    drop(tx);
+    let _ = collector_handle.await;
 
     assert_eq!(total, 4);
 }
@@ -99,7 +102,7 @@ async fn drains_opportunistically_without_linger() {
 
     let limit = BatchLimit { max: 64 };
     let (collector, tx) = RequestBatcher::new(Arc::clone(&dispatcher), limit, 64);
-    tokio::spawn(collector.run());
+    let collector_handle = tokio::spawn(collector.run());
 
     for i in 0..3u64 {
         let (req, _rx) = dummy_request(i);
@@ -109,6 +112,9 @@ async fn drains_opportunistically_without_linger() {
     let total = tokio::task::spawn_blocking(|| collect_all_requests(Duration::from_millis(500)))
         .await
         .unwrap();
+
+    drop(tx);
+    let _ = collector_handle.await;
 
     assert_eq!(total, 3);
 }
@@ -123,12 +129,15 @@ async fn test_no_spurious_drain() {
     let dispatcher = Arc::new(dispatcher);
 
     let limit = BatchLimit { max: 64 };
-    let (collector, _tx) = RequestBatcher::new(Arc::clone(&dispatcher), limit, 64);
-    tokio::spawn(collector.run());
+    let (collector, tx) = RequestBatcher::new(Arc::clone(&dispatcher), limit, 64);
+    let collector_handle = tokio::spawn(collector.run());
 
     let total = tokio::task::spawn_blocking(|| collect_all_requests(Duration::from_millis(30)))
         .await
         .unwrap();
+
+    drop(tx);
+    let _ = collector_handle.await;
 
     assert_eq!(total, 0, "no drain should fire with zero requests");
 }
@@ -144,7 +153,7 @@ async fn test_partial_batch_on_shutdown() {
 
     let limit = BatchLimit { max: 64 };
     let (collector, tx) = RequestBatcher::new(Arc::clone(&dispatcher), limit, 64);
-    tokio::spawn(collector.run());
+    let collector_handle = tokio::spawn(collector.run());
 
     for i in 0..5u64 {
         let (req, _rx) = dummy_request(i);
@@ -153,6 +162,7 @@ async fn test_partial_batch_on_shutdown() {
 
     // Close the sender; collector should flush remaining.
     drop(tx);
+    let _ = collector_handle.await;
 
     let total = tokio::task::spawn_blocking(|| collect_all_requests(Duration::from_millis(500)))
         .await

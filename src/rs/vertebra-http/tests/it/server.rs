@@ -319,46 +319,35 @@ async fn test_bind_listener_so_reuseport_allows_dual_bind() {
     );
     drop(single);
 
-    let mut verified = false;
-    for _ in 0..8 {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = probe.local_addr().unwrap();
-        drop(probe);
-        if let Ok(l1) = server::bind_listener(addr, true) {
-            assert_ne!(
-                get_int_sockopt(l1.as_raw_fd(), libc::SO_REUSEPORT),
-                0,
-                "reuse_port=true must set SO_REUSEPORT on listener socket"
-            );
-            match server::bind_listener(addr, true) {
-                Ok(l2) => {
-                    assert_eq!(l1.local_addr().unwrap(), addr);
-                    assert_eq!(l2.local_addr().unwrap(), addr);
-                    assert!(
-                        server::bind_listener(addr, false).is_err(),
-                        "non-SO_REUSEPORT bind must fail while SO_REUSEPORT listeners hold the port"
-                    );
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
-                    let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
-                    assert_eq!(unsafe { libc::uname(&raw mut uts) }, 0);
-                    let nodename = unsafe { std::ffi::CStr::from_ptr(uts.nodename.as_ptr()) }
-                        .to_string_lossy();
-                    assert_eq!(
-                        nodename, "sandbox",
-                        "dual SO_REUSEPORT listen failed on native kernel ({nodename}): {err}"
-                    );
-                }
-                Err(err) => panic!("unexpected second SO_REUSEPORT bind error: {err}"),
-            }
-            verified = true;
-            break;
-        }
-    }
-    assert!(
-        verified,
-        "failed to reserve ephemeral port for SO_REUSEPORT test"
+    let l1 = server::bind_listener("127.0.0.1:0".parse().unwrap(), true)
+        .expect("first SO_REUSEPORT bind");
+    let addr = l1.local_addr().unwrap();
+    assert_ne!(
+        get_int_sockopt(l1.as_raw_fd(), libc::SO_REUSEPORT),
+        0,
+        "reuse_port=true must set SO_REUSEPORT on listener socket"
     );
+    match server::bind_listener(addr, true) {
+        Ok(l2) => {
+            assert_eq!(l1.local_addr().unwrap(), addr);
+            assert_eq!(l2.local_addr().unwrap(), addr);
+            assert!(
+                server::bind_listener(addr, false).is_err(),
+                "non-SO_REUSEPORT bind must fail while SO_REUSEPORT listeners hold the port"
+            );
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+            let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::uname(&raw mut uts) }, 0);
+            let nodename =
+                unsafe { std::ffi::CStr::from_ptr(uts.nodename.as_ptr()) }.to_string_lossy();
+            assert_eq!(
+                nodename, "sandbox",
+                "dual SO_REUSEPORT listen failed on native kernel ({nodename}): {err}"
+            );
+        }
+        Err(err) => panic!("unexpected second SO_REUSEPORT bind error: {err}"),
+    }
 }
 
 #[tokio::test]
