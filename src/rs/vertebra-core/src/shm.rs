@@ -5,7 +5,6 @@ use std::io;
 
 #[cfg(unix)]
 use std::ffi::CString;
-#[cfg(unix)]
 use std::ffi::NulError;
 #[cfg(unix)]
 use std::os::fd::RawFd;
@@ -693,6 +692,7 @@ mod tests {
         assert!(child2.wait().unwrap().success());
     }
 
+    #[cfg(unix)]
     proptest! {
         #[test]
         fn long_names_are_rejected(len in 256usize..512) {

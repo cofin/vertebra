@@ -24,8 +24,8 @@ export CARGO_NET_GIT_FETCH_WITH_CLI=true
 endif
 
 export CARGO_TARGET_DIR ?= /tmp/vtb-cargo-target
-export PATH := $(CURDIR)/.venv/bin:$(PATH)
-export PYO3_PYTHON ?= $(shell if [ -x "$(CURDIR)/.venv/bin/python" ]; then echo "$(CURDIR)/.venv/bin/python"; else uv run which python 2>/dev/null || which python3; fi)
+export PATH := $(CURDIR)/.venv/bin:$(CURDIR)/.venv/Scripts:$(HOME)/.bun/bin:$(HOME)/.local/bin:$(PATH)
+export PYO3_PYTHON ?= $(shell if [ -x "$(CURDIR)/.venv/bin/python" ]; then echo "$(CURDIR)/.venv/bin/python"; elif [ -x "$(CURDIR)/.venv/Scripts/python.exe" ]; then echo "$(CURDIR)/.venv/Scripts/python.exe"; else uv run which python 2>/dev/null || which python3; fi)
 
 BLUE := $(shell printf "\033[1;34m")
 GREEN := $(shell printf "\033[1;32m")
@@ -151,7 +151,7 @@ ts-lint:                                            ## Lint TS package with auto
 .PHONY: dev
 dev:                                                ## Install native extensions in debug mode for development
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && PYO3_PYTHON="$(CURDIR)/.venv/bin/python" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage)
+	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage)
 	@uv run maturin develop --uv
 	@uv run maturin develop --uv -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-storage/Cargo.toml
@@ -162,7 +162,7 @@ dev:                                                ## Install native extensions
 .PHONY: build
 build: ts-build                                     ## Build optimized release binaries + native extension + TS client
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && PYO3_PYTHON="$(CURDIR)/.venv/bin/python" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --release --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression)
+	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --release --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression)
 	@uv run maturin develop --uv -r
 	@uv run maturin develop --uv -r -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-storage/Cargo.toml

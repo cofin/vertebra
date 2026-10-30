@@ -5,6 +5,9 @@ on:
     types: [published]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build ${{ matrix.target }}
@@ -15,12 +18,20 @@ jobs:
         include:
           - target: linux-x64
             os: ubuntu-latest
+            bin_src: target/release/vertebra-server
+            bin_name: vertebra-server-linux-x64
           - target: darwin-arm64
             os: macos-14
+            bin_src: target/release/vertebra-server
+            bin_name: vertebra-server-darwin-arm64
           - target: darwin-x64
-            os: macos-13
+            os: macos-15-intel
+            bin_src: target/release/vertebra-server
+            bin_name: vertebra-server-darwin-x64
           - target: windows-x64
             os: windows-latest
+            bin_src: target/release/vertebra-server.exe
+            bin_name: vertebra-server-windows-x64.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -28,30 +39,45 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          python-version: "3.12"
 
-      - name: Set up Python
-        run: uv python install 3.12
+      - name: Build TypeScript client bundle
+        shell: bash
+        run: |
+          cd src/ts/vertebra-client
+          bun install
+          bun run build
 
-      - name: Install dependencies
-        run: make install
-
-      - name: Build
-        run: make build
+      - name: Build release binary
+        shell: bash
+        run: |
+          uv venv --python 3.12
+          PY_BIN="$(uv run python -c 'import sys; print(sys.executable)')"
+          CARGO_TARGET_DIR="target" PYO3_PYTHON="$PY_BIN" cargo build \
+            --manifest-path src/rs/Cargo.toml \
+            --bin vertebra-server \
+            --release \
+            --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression
+          mkdir -p dist
+          cp "${{ matrix.bin_src }}" "dist/${{ matrix.bin_name }}"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: vertebra-${{ matrix.target }}
-          path: dist/vertebra*
+          path: dist/${{ matrix.bin_name }}
 
       - name: Upload to Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/vertebra*
+          files: dist/${{ matrix.bin_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

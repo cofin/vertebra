@@ -97,6 +97,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Check Windows target portability
+        working-directory: src/rs
+        run: cargo check -p vertebra-core --target x86_64-pc-windows-msvc --features compression
       - name: Run Rust tests
         run: make rs-test
 
