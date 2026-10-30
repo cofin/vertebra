@@ -135,15 +135,21 @@ fn prepare_embedded_python_env(python_bin: &str) {
         prepend_dirs.push(parent.to_path_buf());
     }
     if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
-        let bin = std::path::PathBuf::from(venv).join("bin");
-        if bin.is_dir() {
-            prepend_dirs.push(bin);
+        let root = std::path::PathBuf::from(venv);
+        for sub in ["bin", "Scripts"] {
+            let dir = root.join(sub);
+            if dir.is_dir() {
+                prepend_dirs.push(dir);
+            }
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
-        let dot_venv_bin = cwd.join(".venv").join("bin");
-        if dot_venv_bin.is_dir() {
-            prepend_dirs.push(dot_venv_bin);
+        let dot_venv = cwd.join(".venv");
+        for sub in ["bin", "Scripts"] {
+            let dir = dot_venv.join(sub);
+            if dir.is_dir() {
+                prepend_dirs.push(dir);
+            }
         }
     }
     if !prepend_dirs.is_empty() {
@@ -204,6 +210,12 @@ fn ensure_embedded_python_path(py: Python<'_>) -> PyResult<()> {
     }
 
     for root in venv_roots {
+        let win_site = root.join("Lib").join("site-packages");
+        if win_site.is_dir()
+            && let Some(s) = win_site.to_str()
+        {
+            let _ = site.call_method1("addsitedir", (s,));
+        }
         let lib_dir = root.join("lib");
         if let Ok(entries) = std::fs::read_dir(&lib_dir) {
             for entry in entries.flatten() {
@@ -639,6 +651,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
+    #[cfg(unix)]
     let is_embedded_child = std::env::var_os("VERTEBRA_EMBEDDED_WORKER").is_some();
 
     #[cfg(unix)]
