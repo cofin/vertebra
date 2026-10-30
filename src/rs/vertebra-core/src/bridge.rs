@@ -325,7 +325,7 @@ impl BatchBridge {
                 }
             }
         }
-        let _ = slab_data;
+        let _ = (&self.compression_codec, slab_data);
         None
     }
 

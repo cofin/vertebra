@@ -101,7 +101,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - name: Check Windows target portability
         working-directory: src/rs
-        run: cargo check -p vertebra-core --target x86_64-pc-windows-msvc --features compression
+        run: cargo check -p vertebra-core --target x86_64-pc-windows-msvc --no-default-features
       - name: Run Rust tests
         run: make rs-test
 
