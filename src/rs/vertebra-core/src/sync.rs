@@ -51,6 +51,7 @@ fn wait_is_unsupported(err: &SyncError) -> bool {
             }
             #[cfg(not(unix))]
             {
+                let _ = io_err;
                 false
             }
         }
