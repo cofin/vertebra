@@ -109,7 +109,7 @@ _UNLOADED_UUID_TYPE: Final[object] = object()
 class _UuidTypeCache:
     """Class-scoped holder for lazy UUID backend."""
 
-    uuid_utils_type: ClassVar[Any] = _UNLOADED_UUID_TYPE
+    uuid_utils_type: ClassVar[type[Any] | None | object] = _UNLOADED_UUID_TYPE
 
 
 def get_default_serializer() -> JSONSerializer:
@@ -157,14 +157,16 @@ def format_json(value: Any, *, indent: int = 2) -> str:
 
 def _get_uuid_utils_type() -> type[Any] | None:
     """Lazy-resolve and cache the uuid-utils UUID type when installed."""
-    if _UuidTypeCache.uuid_utils_type is not _UNLOADED_UUID_TYPE:
-        return cast("type[Any] | None", _UuidTypeCache.uuid_utils_type)
+    cached = _UuidTypeCache.uuid_utils_type
+    if cached is not _UNLOADED_UUID_TYPE:
+        return cast("type[Any] | None", cached)
     if not UUID_UTILS_INSTALLED:
         _UuidTypeCache.uuid_utils_type = None
         return None
     module = _load_uuid_utils()
-    _UuidTypeCache.uuid_utils_type = None if module is None else cast("type[Any]", module.UUID)
-    return _UuidTypeCache.uuid_utils_type
+    resolved: type[Any] | None = None if module is None else cast("type[Any]", getattr(module, "UUID", None))
+    _UuidTypeCache.uuid_utils_type = resolved
+    return resolved
 
 
 def _is_uuid_utils_instance(value: Any) -> bool:
