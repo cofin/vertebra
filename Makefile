@@ -94,7 +94,7 @@ install: destroy clean setup-env                    ## Install everything (Pytho
 clean:                                              ## Remove build artifacts and caches
 	@echo "${INFO} Cleaning..."
 	@# Python caches and artifacts
-	@rm -rf .pytest_cache .ruff_cache .mypy_cache .cache .hypothesis .coverage coverage.xml coverage.json htmlcov .sqlspec >/dev/null 2>&1
+	@rm -rf .pytest_cache .ruff_cache .mypy_cache .cache site .hypothesis .coverage coverage.xml coverage.json htmlcov .sqlspec >/dev/null 2>&1
 	@find . -name '*.egg-info' -o -name '*.pyc' -o -name '*.pyo' -o -name '__pycache__' | xargs rm -rf 2>/dev/null || true
 	@find . -name '*.so' -path '*/vertebra/*' -exec rm -f {} + >/dev/null 2>&1
 	@rm -rf build/ dist/ >/dev/null 2>&1
@@ -214,14 +214,14 @@ coverage:                                           ## Run tests with coverage r
 .PHONY: lint
 lint: ts-lint                                       ## Format and lint everything with auto-fixes (Python, Rust, TS)
 	@echo "${INFO} Linting and fixing Python (Ruff)..."
-	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests tools/scripts tools/pgo
-	@uv run ruff format src/py/vertebra src/py/tests tools/scripts tools/pgo
+	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
+	@uv run ruff format src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
 	@echo "${INFO} Linting and fixing Rust (Fmt & Clippy)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo fmt --all)
 	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,compression -- -D warnings)
 	@echo "${INFO} Running type checks (Mypy)..."
-	@uv run mypy src/py/vertebra tools/scripts tools/pgo
+	@uv run mypy src/py/vertebra tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
 	@if uv run python -c "import vertebra._vertebra, vertebra._bundler, vertebra._storage" >/dev/null 2>&1; then \
 		uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage; \
 	fi
@@ -233,9 +233,9 @@ lint-all:                                           ## Check formatting, linting
 	@echo "${INFO} Checking TS package (Biome)..."
 	@(cd src/ts/vertebra-client && bunx biome check .)
 	@echo "${INFO} Checking Python (Ruff & Mypy)..."
-	@uv run ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo
-	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo
-	@uv run mypy src/py/vertebra tools/scripts tools/pgo
+	@uv run ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
+	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
+	@uv run mypy src/py/vertebra tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
 	@if uv run python -c "import vertebra._vertebra, vertebra._bundler, vertebra._storage" >/dev/null 2>&1; then \
 		uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage; \
 	fi
@@ -256,6 +256,70 @@ review-route:                                       ## Route changed files to ow
 
 .PHONY: check
 check: lint test coverage                           ## Everything: lint, type check, all tests, coverage
+
+
+# =============================================================================
+# Documentation
+# =============================================================================
+.PHONY: docs-clean
+docs-clean:                                         ## Remove built documentation and Zensical cache
+	@rm -rf site .cache
+	@echo "${OK} Docs clean"
+
+.PHONY: docs
+docs: docs-clean                                    ## Build and verify Zensical documentation
+	@echo "${INFO} Building documentation (Zensical)..."
+	@PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts src/py/vertebra
+	@PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.generate_cli_docs --check
+	@PYTHONPATH="src/py:." uv run --no-sync zensical build --clean
+	@PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.postbuild --site-dir site --docs-dir docs --zensical-config zensical.toml
+	@PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.verify_docs_artifacts --site-dir site
+	@echo "${OK} Documentation built and verified in site/"
+
+.PHONY: docs-serve
+docs-serve: docs                                    ## Build and serve documentation locally
+	@PYTHONPATH="src/py:." uv run --no-sync zensical serve
+
+.PHONY: docs-check
+docs-check: docs                                    ## Build docs and verify live zensical serve HTTP 200
+	@echo "${INFO} Verifying zensical serve..."
+	@set -euo pipefail; \
+	server_log="$$(mktemp)"; \
+	server_pid=""; \
+	cleanup() { \
+		if [ -n "$$server_pid" ] && kill -0 "$$server_pid" 2>/dev/null; then \
+			kill "$$server_pid" 2>/dev/null || true; \
+			wait "$$server_pid" 2>/dev/null || true; \
+		fi; \
+		rm -f "$$server_log"; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	PYTHONPATH="src/py:." uv run --no-sync zensical serve --dev-addr 127.0.0.1:8000 >"$$server_log" 2>&1 & \
+	server_pid="$$!"; \
+	for _ in $$(seq 1 50); do \
+		if curl --silent --show-error --fail http://127.0.0.1:8000/ >/dev/null 2>&1 || curl --silent --show-error --fail http://127.0.0.1:8000/vertebra/ >/dev/null 2>&1; then \
+			echo "${OK} Docs server responded with HTTP 200"; \
+			exit 0; \
+		fi; \
+		if ! kill -0 "$$server_pid" 2>/dev/null; then \
+			cat "$$server_log" >&2; \
+			exit 1; \
+		fi; \
+		sleep 0.2; \
+	done; \
+	cat "$$server_log" >&2; \
+	exit 1
+
+.PHONY: docs-rust
+docs-rust:                                          ## Build Rust workspace rustdoc and copy into site/rustdoc/ if site/ exists
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@cargo doc --manifest-path src/rs/Cargo.toml --workspace --no-deps
+	@if [ -d "site" ] && [ -d "$(CARGO_TARGET_DIR)/doc" ]; then \
+		rm -rf site/rustdoc && cp -R "$(CARGO_TARGET_DIR)/doc" site/rustdoc; \
+	elif [ -d "site" ] && [ -d "src/rs/target/doc" ]; then \
+		rm -rf site/rustdoc && cp -R src/rs/target/doc site/rustdoc; \
+	fi
+	@echo "${OK} Rust documentation built"
 
 
 # =============================================================================
