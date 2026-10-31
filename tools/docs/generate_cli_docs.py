@@ -1,17 +1,18 @@
 """Generate pure-Markdown CLI reference documentation from vertebra.cli."""
 
 import argparse
+import importlib
 import importlib.util
 import re
 import sys
 import types
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import click
 
-__all__ = ("DEFAULT_OUTPUT_PATH", "main", "render_cli_reference")
+__all__ = ("DEFAULT_OUTPUT_PATH", "ensure_native_stub_module", "main", "render_cli_reference")
 
 DEFAULT_OUTPUT_PATH = Path("docs/reference/cli.md")
 
@@ -154,15 +155,20 @@ def _make_stub_getattr(
     return _getattr
 
 
+def ensure_native_stub_module() -> None:
+    """Install lightweight native extension placeholders in sys.modules when compiled extensions are absent."""
+    for mod_name in ("vertebra._vertebra", "vertebra._bundler"):
+        if mod_name not in sys.modules and importlib.util.find_spec(mod_name) is None:
+            stub_mod = types.ModuleType(mod_name)
+            stub_mod.__getattr__ = _make_stub_getattr()  # type: ignore[method-assign]
+            sys.modules[mod_name] = stub_mod
+
+
 def _load_default_cli_group() -> click.Group:
     """Import vertebra.cli.cli while providing a lightweight native module placeholder in pure-Python environments."""
-    if "vertebra._vertebra" not in sys.modules and importlib.util.find_spec("vertebra._vertebra") is None:
-        stub_mod = types.ModuleType("vertebra._vertebra")
-        stub_mod.__getattr__ = _make_stub_getattr()  # type: ignore[method-assign]
-        sys.modules["vertebra._vertebra"] = stub_mod
-    from vertebra.cli import cli
-
-    return cli
+    ensure_native_stub_module()
+    cli_mod = importlib.import_module("vertebra.cli")
+    return cast("click.Group", cli_mod.cli)
 
 
 def _collect_leaf_commands(group: click.Group, prefix: str) -> list[tuple[str, click.Command]]:

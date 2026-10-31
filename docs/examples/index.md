@@ -4,7 +4,7 @@ Every code listing on this page is embedded directly from a runnable Python modu
 
 ## Quickstart Application
 
-Create an `App` with typed path parameters and `msgspec.Struct` responses, verified with `TestClient`:
+Create an `App` with typed path parameters and `msgspec.Struct` responses, verified with `extract_path_params` and `handler_id`:
 
 ```python title="docs/examples/quickstart_app.py"
 --8<-- "docs/examples/quickstart_app.py:example"
@@ -44,7 +44,7 @@ Coordinate staged `ObjectStore` uploads with database transactions and automatic
 
 ## Agent MCP Tools
 
-Register typed Python tools on a `ToolRegistry` and dispatch JSON-RPC 2.0 `initialize`, `tools/list`, and `tools/call` requests through `MCPServer`:
+Register typed Python tools with `@tool` and dispatch JSON-RPC 2.0 `tools/list` and `tools/call` requests through `JsonRpcRouter` and `execute_tool_calls`:
 
 ```python title="docs/examples/agent_mcp_tools.py"
 --8<-- "docs/examples/agent_mcp_tools.py:example"

@@ -49,30 +49,32 @@ Or run in production mode with `vtb run`:
 uv run vtb run app:app --host 0.0.0.0 --port 8000 --topology embedded
 ```
 
-## 3. Test with `TestClient`
+## 3. Verify Routes in `pytest`
 
-Verify routes synchronously in `pytest` without opening a network socket using `vertebra.framework.testing.TestClient`:
+Verify route registration, deterministic FNV-1a handler IDs (`handler_id`), and path parameter extraction (`extract_path_params`) directly in `pytest` without opening a network socket:
 
 ```python
-from vertebra.framework.testing import TestClient
-
-from app import app
+from vertebra import App, extract_path_params, handler_id
 
 
-def test_create_item() -> None:
-    client = TestClient(app)
+def test_routes_and_handlers() -> None:
+    app = App()
 
-    health_res = client.get("/health")
-    assert health_res.status == 200
-    assert health_res.json() == {"status": "ok"}
+    @app.get("/items/{item_id:int}")
+    def get_item(item_id: int) -> dict[str, int]:
+        return {"id": item_id}
 
-    item_res = client.post("/items", json={"name": "widget", "quantity": 3})
-    assert item_res.status == 200
-    assert item_res.json() == {"id": 1, "name": "widget", "quantity": 3}
+    params = extract_path_params("/items/{item_id:int}", "/items/42")
+    assert params == {"item_id": "42"}
+
+    hid = handler_id("GET", "/items/{item_id:int}")
+    info = app.get_handler_by_id(hid)
+    assert info is not None
+    assert info.fn(int(params["item_id"])) == {"id": 42}
 ```
 
 ## Next Steps
 
 - Configure runtime topologies and environment variables in [Configuration](configuration.md).
-- Explore controllers, dependency injection, guards, and DTOs in [Routing & Handlers](../usage/routing-and-handlers.md).
+- Explore modular routers, dependency injection, guards, and `msgspec.Struct` models in [Routing & Handlers](../usage/routing-and-handlers.md).
 - Browse runnable scripts in [Examples](../examples/index.md).

@@ -45,15 +45,15 @@ make ts-test                                              # bun run test (vitest
 
 # 3. Aggregate Test, Lint & Pre-PR Verification Gates
 make test                                                 # rs-test + py-test + ts-test
-make lint                                                 # Biome --write --unsafe, ruff (src/py/vertebra src/py/tests tools/scripts tools/pgo), cargo fmt + clippy --fix, mypy + stubtest, review-check
+make lint                                                 # Biome --write --unsafe, ruff (src/py/vertebra src/py/tests tools/scripts tools/pgo tools/docs docs/examples), cargo fmt + clippy --fix, mypy + stubtest, review-check
 make lint-all                                             # Read-only CI gate: biome check, ruff check + format --check, mypy + stubtest, cargo fmt --check, clippy -D warnings, review-check
 make review-check                                         # Validate review capability manifests, skills, agents, and privacy constraints
 make review-route                                         # Route changed files to owning review areas and shards (BASE=origin/main)
 make coverage                                             # uv run pytest src/py/tests --cov, then coverage.xml and htmlcov/ (Python only)
 make check                                                # lint + test + coverage
-make docs                                                 # scan_public_docstrings + generate_cli_docs + zensical build --clean + postbuild + verify_docs_artifacts
-make docs-serve                                           # generate_cli_docs + zensical serve -a localhost:8000
-make docs-check                                           # scan_public_docstrings + generate_cli_docs --check + verify_docs_artifacts
+make docs                                                 # scan_public_docstrings + generate_cli_docs --check + zensical build --clean + postbuild + verify_docs_artifacts
+make docs-serve                                           # make docs + zensical serve --dev-addr 127.0.0.1:8000
+make docs-check                                           # make docs + smoke-test live zensical serve --dev-addr 127.0.0.1:8000 for HTTP 200
 make docs-clean                                           # rm -rf site .cache
 make docs-rust                                            # cargo doc --manifest-path src/rs/Cargo.toml --workspace --no-deps -> site/rustdoc/
 

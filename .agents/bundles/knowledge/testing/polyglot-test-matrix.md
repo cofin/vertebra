@@ -37,13 +37,13 @@ The `Makefile` applies the same host check and exports `NPM_CONFIG_REGISTRY`, `P
 | `make py-test` | `make dev` + `uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage` + `uv run pytest src/py/tests -v` | `.pyi` stub parity against compiled extensions plus Python suites under [`src/py/tests/`](../../../../src/py/tests/conftest.py). |
 | `make ts-test` | `cd src/ts/vertebra-client && NODE_OPTIONS="--localstorage-file=${TMPDIR:-/tmp}/vertebra-vitest-localstorage" bun run test` | Every Vitest suite under `src/ts/vertebra-client/tests/`. |
 | `make test` | `rs-test` + `py-test` + `ts-test` | All three languages. |
-| `make lint-all` | `bunx biome check .` + `ruff check` & `ruff format --check` (`src/py/vertebra src/py/tests tools/scripts tools/pgo`) + `mypy src/py/vertebra tools/scripts tools/pgo` + `mypy.stubtest` + `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --features tls,compression -- -D warnings` + `make review-check` | Read-only lint, type, stub, and review-manifest gate. |
+| `make lint-all` | `bunx biome check .` + `ruff check` & `ruff format --check` (`src/py/vertebra src/py/tests tools/scripts tools/pgo tools/docs docs/examples`) + `mypy src/py/vertebra tools/scripts tools/pgo tools/docs docs/examples` + `mypy.stubtest` + `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --features tls,compression -- -D warnings` + `make review-check` | Read-only lint, type, stub, and review-manifest gate. |
 | `make coverage` | `uv run pytest src/py/tests --cov --quiet` + `coverage xml` + `coverage html` | Python coverage only (`coverage.xml`, `htmlcov/`). |
 | `make check` | `lint` + `test` + `coverage` | Full local gate. `lint` applies auto-fixes. |
 
 ## 3. CI Matrix (`.github/workflows/ci.yml`)
 
-CI runs on pushes to `main` and on every pull request. A `changes` job (`dorny/paths-filter`) classifies paths as `python` (`src/py/**`, `pyproject.toml`, `uv.lock`), `rust` (`src/rs/**`), `typescript` (`src/ts/**`), or `ci` (`.github/**`, `Makefile`, `.pre-commit-config.yaml`, `biome.json`).
+CI runs on pushes to `main` and on every pull request. A `changes` job (`dorny/paths-filter`) classifies paths as `python` (`src/py/**`, `tools/docs/**`, `docs/examples/**`, `pyproject.toml`, `uv.lock`), `rust` (`src/rs/**`), `typescript` (`src/ts/**`), `docs` (`docs/**`, `zensical.toml`, `tools/docs/**`, `.github/workflows/docs.yml`, `src/py/vertebra/**`, `src/ts/vertebra-client/src/**`, `pyproject.toml`, `uv.lock`), or `ci` (`.github/**`, `Makefile`, `.pre-commit-config.yaml`, `biome.json`).
 
 | Job | Runs When | Command | Matrix |
 |---|---|---|---|
@@ -52,6 +52,7 @@ CI runs on pushes to `main` and on every pull request. A `changes` job (`dorny/p
 | `test-rust` | `rust` or `ci` changed | `make rs-test` | `ubuntu-latest` |
 | `test-rust-features` | `rust` or `ci` changed | `cargo test --workspace --features "$CARGO_FEATURES"` | `ubuntu-latest` `tls,compression`; `macos-latest` `tls,compression,macos-ulock` |
 | `test-typescript` | `typescript` or `ci` changed | `make ts-install` + `make ts-build` + `make ts-test` | `ubuntu-latest` |
+| `build-docs` | `docs` or `ci` changed | `uv sync --no-install-project --group doc` + `make docs` | `ubuntu-latest` |
 
 ## 4. Suite Inventory & Test Quality Standards
 

@@ -18,14 +18,13 @@ uv run vtb --help
 
 ## Optional Extras
 
-Vertebra keeps its base dependency footprint minimal (`msgspec` and `rich-click`) and exposes optional extras for integrations:
+Vertebra keeps its base dependency footprint minimal (`msgspec` and `rich-click`) and exposes optional extras in `pyproject.toml`:
 
 | Extra | Install Command | Included Capabilities |
 | --- | --- | --- |
-| `litestar` | `uv add "vertebra-core[litestar]"` | `VertebraLitestarPlugin`, ASGI/RSGI mounting, and Litestar lifespan coordination |
-| `otel` | `uv add "vertebra-core[otel]"` | OpenTelemetry trace and metrics exporters (`vertebra.telemetry`) |
-| `adk` | `uv add "vertebra-core[adk]"` | Google ADK agent runtime integration (`vertebra.agent.adk`) |
-| `pydantic` | `uv add "vertebra-core[pydantic]"` | Pydantic v2 schema adaptation alongside native `msgspec.Struct` |
+| `framework` | `uv add "vertebra-core[framework]"` | Optional schema adapters (`pydantic`, `attrs`, `orjson`) alongside native `msgspec.Struct` |
+| `sqlspec` | `uv add "vertebra-core[sqlspec]"` | `SQLSpecPlugin` (`vertebra.extensions.sqlspec`), `sqlspec` query builder, and `aiosqlite` |
+| `dev` | `uv add "vertebra-core[dev]"` | Development, lint, type-checking, test, and `maturin` build dependencies |
 
 ## Free-Threaded Python (`3.14t` / `3.15t`)
 

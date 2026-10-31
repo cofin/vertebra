@@ -36,10 +36,11 @@ tracker.after_commit()
 ```python
 from vertebra.db.sqlite import SqliteConfig, SyncSqliteDriver
 
-with SyncSqliteDriver(SqliteConfig(path=":memory:")) as db:
-    db.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
-    db.execute("INSERT INTO items (name) VALUES (?)", ("bolt",))
-    rows = db.fetch_all("SELECT id, name FROM items")
+db = SyncSqliteDriver(SqliteConfig(path=":memory:"))
+db.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+db.execute("INSERT INTO items (name) VALUES (?)", ("bolt",))
+rows = db.select("SELECT id, name FROM items")
+db.close()
 ```
 
-For full SQL query building, named `.sql` file loading, and 20+ database adapters, combine Vertebra with `SQLSpecExtension` (`vertebra.extensions.sqlspec`).
+For full SQL query building, named `.sql` file loading, and 20+ database adapters, combine Vertebra with `SQLSpecPlugin` (`vertebra.extensions.sqlspec`).

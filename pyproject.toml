@@ -121,7 +121,7 @@ pythonpath = [".", "src/py"]
 python_version = "3.12"
 strict = true
 mypy_path = ["src/py"]
-files = ["src/py/vertebra", "tools/scripts", "tools/pgo"]
+files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "docs/examples"]
 
 [[tool.mypy.overrides]]
 module = [

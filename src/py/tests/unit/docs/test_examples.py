@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import importlib
 import importlib.util
 import inspect
 import io
@@ -9,12 +10,11 @@ import re
 import sys
 import textwrap
 import tokenize
-from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
-from typing import Any
 
 import pytest
+from tools.docs.generate_cli_docs import ensure_native_stub_module
 
 from vertebra.typing import MissingDependencyError
 
@@ -306,14 +306,60 @@ def _validate_python_fence(
     if "..." in dedented:
         return
     try:
-        ast.parse(dedented, filename=f"{rel}:{fence_start_line}")
+        tree = ast.parse(dedented, filename=f"{rel}:{fence_start_line}")
     except SyntaxError as exc:
         violations.append(f"{rel}:{fence_start_line}: invalid Python syntax in code block: {exc.msg}")
         return
+    _validate_vertebra_imports(tree=tree, rel=rel, fence_start_line=fence_start_line, violations=violations)
     for token in tokenize.generate_tokens(io.StringIO(dedented).readline):
         if token.type == tokenize.COMMENT and not _is_directive_comment(token.string):
             line_no = fence_start_line + token.start[0]
             violations.append(f"{rel}:{line_no}: inline comment in Python code block: {token.string.strip()}")
+
+
+def _validate_vertebra_imports(
+    *,
+    tree: ast.AST,
+    rel: str,
+    fence_start_line: int,
+    violations: list[str],
+) -> None:
+    """Verify that every vertebra.* module and symbol imported in a Markdown fence exists."""
+    ensure_native_stub_module()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "vertebra" or alias.name.startswith("vertebra."):
+                    try:
+                        importlib.import_module(alias.name)
+                    except Exception as exc:
+                        line_no = fence_start_line + getattr(node, "lineno", 1)
+                        violations.append(f"{rel}:{line_no}: unresolvable import '{alias.name}': {exc}")
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and (node.module == "vertebra" or node.module.startswith("vertebra."))
+        ):
+            try:
+                mod = importlib.import_module(node.module)
+            except Exception as exc:
+                line_no = fence_start_line + getattr(node, "lineno", 1)
+                violations.append(f"{rel}:{line_no}: unresolvable module '{node.module}': {exc}")
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                has_attr = hasattr(mod, alias.name)
+                if not has_attr:
+                    submod_name = f"{node.module}.{alias.name}"
+                    try:
+                        importlib.import_module(submod_name)
+                        has_attr = True
+                    except Exception:
+                        has_attr = False
+                if not has_attr:
+                    line_no = fence_start_line + getattr(node, "lineno", 1)
+                    violations.append(f"{rel}:{line_no}: symbol '{alias.name}' does not exist in '{node.module}'")
 
 
 def _is_directive_comment(comment_text: str) -> bool:
@@ -322,27 +368,9 @@ def _is_directive_comment(comment_text: str) -> bool:
     return any(lowered.startswith(prefix) for prefix in DIRECTIVE_PREFIXES)
 
 
-def _make_stub_getattr(
-    fallback_none_attrs: frozenset[str] = frozenset(
-        {"ObjectStore", "SchemaDigestCache", "field_id", "handler_id", "state_id"}
-    ),
-) -> Callable[[str], Any]:
-    """Return a module __getattr__ hook that defers optional native symbols to Python fallbacks."""
-
-    def _getattr(attr_name: str) -> Any:
-        if attr_name in fallback_none_attrs:
-            raise AttributeError(attr_name)
-        return type(attr_name, (), {})
-
-    return _getattr
-
-
 def _load_example_module(path: Path) -> ModuleType:
     """Load an example module by file path under its canonical docs.examples dotted name."""
-    if "vertebra._vertebra" not in sys.modules and importlib.util.find_spec("vertebra._vertebra") is None:
-        stub_mod = ModuleType("vertebra._vertebra")
-        stub_mod.__getattr__ = _make_stub_getattr()  # type: ignore[method-assign]
-        sys.modules["vertebra._vertebra"] = stub_mod
+    ensure_native_stub_module()
     rel_parts = path.relative_to(REPO_ROOT).with_suffix("").parts
     module_name = ".".join(rel_parts)
     spec = importlib.util.spec_from_file_location(module_name, path)

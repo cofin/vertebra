@@ -11,10 +11,10 @@
 
 Vertebra combines Python 3.12–3.15 (and free-threaded 3.14t/3.15t) developer ergonomics with a Rust 2024 runtime and a full-stack TypeScript SDK:
 
-- **Python Framework & Multi-Protocol Runners**: Type-safe APIs (`App`, `Router`, `Controller`, `DTO`, `Provide`, `QueueService`, Inertia v3, QuickJS SSR, MCP/A2A agent protocols, and end-to-end TypeScript/Zod codegen) plus native, ASGI 3.0, WSGI, and RSGI execution.
+- **Python Framework & Multi-Protocol Runners**: Type-safe APIs (`App`, `Router`, `RouteDef`, `ProcedureRouter`, `Provide`, `QueueService`, Inertia v3, QuickJS SSR, MCP/A2A agent protocols, and end-to-end TypeScript/Zod codegen) plus native, ASGI 3.0, WSGI, and RSGI execution.
 - **Rust Shared-Memory & IPC Runtime (`vertebra-core`, `vertebra-py`)**: Lock-free SPSC/MPMC shared-memory ring buffers, arena slot pools, and adaptive `futex`/`ulock` signaling for zero-copy request/response batch dispatch.
 - **Rust HTTP Ingress & Bundler (`vertebra-http`, `vertebra-bundler`)**: Hyper + Tokio HTTP/1.1, HTTP/2, HTTP/3 (QUIC), gRPC framing, WebSocket, SSE, TLS, compression, static serving, embedded Rolldown/Oxc JavaScript bundling, and pooled QuickJS SSR.
-- **Native Storage, Database Pools & Client SDK (`vertebra-storage`, `vertebra-db`, `@vertebra/client`)**: Rust-backed object storage (S3, GCS, Azure, R2, OCI, HTTP, local), native database pools, and a type-safe TypeScript client across React, Vue, Svelte, Angular, HTMX, and Vite.
+- **Native Storage, Database Drivers & Client SDK (`vertebra-storage`, `vertebra-db`, `@vertebra/client`)**: Rust-backed object storage (S3, GCS, Azure, R2, OCI, HTTP, local), native database drivers, and a type-safe TypeScript client across React, Vue, Svelte, Angular, HTMX, and Vite.
 
 ## Quickstart
 
@@ -31,7 +31,7 @@ make install
 ## CLI Usage (`vtb`)
 
 ```bash
-vtb run myapp:app --host 127.0.0.1 --port 8000 --workers 4 --protocol auto
+vtb run myapp:app --host 127.0.0.1 --port 8000 --workers 4 --topology shm
 vtb dev myapp:app --port 8000
 vtb js build
 vtb js generate-types

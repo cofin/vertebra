@@ -1,28 +1,27 @@
 # Packaging & Deployment
 
-Vertebra applications can be deployed as standard Python wheels (`uv run vtb run ...`), OCI containers with automatic cgroup quota detection, or self-contained single-file executables via `PyAppBuilder`.
+Vertebra applications can be deployed as standard Python wheels (`uv run vtb run ...`), OCI containers with automatic cgroup quota detection, or self-contained standalone and single-file executables via `StandaloneBuilder` and `OnefileBuilder`.
 
 ## Standalone Binary Builds (`vtb build`)
 
-`vertebra.build.PyAppBuilder` packages your Python application, compiled Rust extensions (`_vertebra`, `_bundler`, `_storage`), and bundled frontend assets into a standalone executable:
+`vertebra.build.packaging` packages your Python application, compiled Rust extensions (`_vertebra`, `_bundler`, `_storage`), and bundled frontend assets into a relocatable directory or single-file executable:
 
 ```bash
 uv run vtb build --standalone --onefile
 ```
 
-Programmatic configuration is available via `BuildConfig` and `PyAppBuilder`:
+Programmatic configuration is available via `BuildConfig`, `BuildOrchestrator`, `StandaloneBuilder`, and `OnefileBuilder`:
 
 ```python
 from pathlib import Path
-from vertebra.build import BuildConfig, PyAppBuilder
+from vertebra.build import BuildConfig
+from vertebra.build.packaging import BuildTarget, StandaloneBuilder
 
-builder = PyAppBuilder(
-    BuildConfig(
-        project_dir=Path("."),
-        app_target="app:app",
-        standalone=True,
-        onefile=True,
-    )
+config = BuildConfig.load(Path("."))
+builder = StandaloneBuilder(
+    project_dir=Path("."),
+    target=BuildTarget.current(),
+    entrypoint=config.app or "app:app",
 )
 ```
 

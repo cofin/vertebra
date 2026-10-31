@@ -134,7 +134,8 @@ def test_build_postbuild_artifacts_and_cli_main(tmp_path: Path) -> None:
     (assets_dir / "favicon.ico").write_bytes(b"\x00\x00\x01\x00")
     (assets_dir / "favicon.svg").write_text("<svg></svg>\n", encoding="utf-8")
 
-    build_postbuild_artifacts(config_path=config_path, docs_dir=docs_dir, site_dir=site_dir)
+    redirects_count = build_postbuild_artifacts(config_path=config_path, docs_dir=docs_dir, site_dir=site_dir)
+    assert redirects_count >= 1
     assert (site_dir / "llms.txt").is_file()
     assert (site_dir / "llms-full.txt").is_file()
     assert (site_dir / "favicon.ico").is_file()
@@ -143,6 +144,11 @@ def test_build_postbuild_artifacts_and_cli_main(tmp_path: Path) -> None:
 
     rc = postbuild_main(["--config", str(config_path), "--docs-dir", str(docs_dir), "--site-dir", str(site_dir)])
     assert rc == 0
+
+    rc_zensical_flag = postbuild_main(
+        ["--site-dir", str(site_dir), "--docs-dir", str(docs_dir), "--zensical-config", str(config_path)]
+    )
+    assert rc_zensical_flag == 0
 
 
 def test_verify_site_artifacts_accepts_clean_site_and_exemptions(tmp_path: Path) -> None:

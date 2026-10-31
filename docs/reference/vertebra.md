@@ -22,17 +22,17 @@ Top-level application entry points (`App`, `Router`, route decorators), base `ms
 
 ## Base Schemas & Exceptions (`vertebra.typing`)
 
-::: vertebra._typing.BaseStruct
+::: vertebra.typing.BaseStruct
     options:
       heading_level: 3
       members: false
 
-::: vertebra._typing.FrozenBaseStruct
+::: vertebra.typing.FrozenBaseStruct
     options:
       heading_level: 3
       members: false
 
-::: vertebra._typing.VertebraError
+::: vertebra.typing.VertebraError
     options:
       heading_level: 3
       members: false

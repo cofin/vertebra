@@ -11,8 +11,8 @@ Crossing the Rust/Python FFI boundary or waking a shared-memory consumer per ind
 | Protocol | Implementation Details |
 | --- | --- |
 | **HTTP/1.1 & HTTP/2** | Hyper connection state machines with pipelining, keep-alive, and ALPN TLS negotiation via `rustls`. |
-| **HTTP/3 (QUIC)** | Optional UDP/QUIC listener (`--http3`) advertising `Alt-Svc` headers alongside TCP HTTP/2. |
-| **gRPC Framing** | Native 5-byte length-prefixed gRPC frame parser and `grpc-status` trailer encoder bridged to `vertebra.extensions.grpc.GrpcBridge`. |
+| **HTTP/3 (QUIC)** | Optional UDP/QUIC listener (`QuicConfig`) advertising `Alt-Svc` headers alongside TCP HTTP/2. |
+| **gRPC Framing** | Native 5-byte length-prefixed gRPC frame parser and `grpc-status` trailer encoder bridged to `vertebra.extensions.grpc.GrpcServiceRegistry`. |
 | **WebSocket & SSE** | RFC 6455 upgrade and frame demultiplexing plus low-latency Server-Sent Events streaming. |
 
 ## Backpressure & Admission Control (`BackpressureController`)

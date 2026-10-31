@@ -2,6 +2,7 @@
 
 import argparse
 import html
+import os
 import re
 import shutil
 import sys
@@ -54,14 +55,14 @@ def build_postbuild_artifacts(
     site_dir: Path,
     *,
     rust_doc_dir: Path | None = None,
-) -> None:
+) -> int:
     """Generate llms.txt, llms-full.txt, root favicons, optional rustdoc copy, and flat .html redirect files."""
     compact_site_html(site_dir=site_dir)
     generate_llms_files(config_path=config_path, docs_dir=docs_dir, site_dir=site_dir)
     sync_root_brand_assets(docs_dir=docs_dir, site_dir=site_dir)
     if rust_doc_dir is not None:
         sync_rustdoc_artifacts(rust_doc_dir=rust_doc_dir, site_dir=site_dir)
-    emit_legacy_html_redirects(config_path=config_path, site_dir=site_dir)
+    return emit_legacy_html_redirects(config_path=config_path, site_dir=site_dir)
 
 
 def compact_site_html(site_dir: Path) -> int:
@@ -242,22 +243,30 @@ def emit_legacy_html_redirects(config_path: Path, site_dir: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint for post-build documentation artifact generation."""
     parser = argparse.ArgumentParser(description="Generate llms.txt, llms-full.txt, and legacy .html redirects.")
-    parser.add_argument("--config", type=Path, default=Path("zensical.toml"), help="Path to zensical.toml.")
+    parser.add_argument(
+        "--config",
+        "--zensical-config",
+        dest="config",
+        type=Path,
+        default=Path("zensical.toml"),
+        help="Path to zensical.toml.",
+    )
     parser.add_argument("--docs-dir", type=Path, default=Path("docs"), help="Documentation source directory.")
     parser.add_argument("--site-dir", type=Path, default=Path("site"), help="Built site output directory.")
     parser.add_argument(
         "--rust-doc-dir",
         type=Path,
-        default=Path("src/rs/target/doc"),
+        default=Path(os.environ.get("CARGO_TARGET_DIR", "src/rs/target")) / "doc",
         help="Optional Cargo rustdoc output directory to copy into site/rustdoc.",
     )
     args = parser.parse_args(argv)
 
-    compact_site_html(site_dir=args.site_dir)
-    generate_llms_files(config_path=args.config, docs_dir=args.docs_dir, site_dir=args.site_dir)
-    sync_root_brand_assets(docs_dir=args.docs_dir, site_dir=args.site_dir)
-    sync_rustdoc_artifacts(rust_doc_dir=args.rust_doc_dir, site_dir=args.site_dir)
-    redirects_count = emit_legacy_html_redirects(config_path=args.config, site_dir=args.site_dir)
+    redirects_count = build_postbuild_artifacts(
+        config_path=args.config,
+        docs_dir=args.docs_dir,
+        site_dir=args.site_dir,
+        rust_doc_dir=args.rust_doc_dir,
+    )
     sys.stdout.write(
         f"Generated {args.site_dir / 'llms.txt'}, {args.site_dir / 'llms-full.txt'}, "
         f"and {redirects_count} legacy .html redirect stub(s).\n"

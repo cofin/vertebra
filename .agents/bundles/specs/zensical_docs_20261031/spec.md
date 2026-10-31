@@ -13,9 +13,7 @@ tags:
   - branding
   - ci
 created_at: "2026-10-31T00:56:00Z"
-updated_at: "2026-10-31T01:07:00Z"
-sources:
-  - resource: "research/zensical-docs-architecture.md"
+updated_at: "2026-10-31T02:15:00Z"
 verification:
   strategy: tdd
   commands:

@@ -20,7 +20,7 @@ Run in development mode with automatic Python reload and frontend HMR:
 uv run vtb dev app:app --port 8000
 ```
 
-Run in production mode with explicit topology, worker count, TLS, or HTTP/3:
+Run in production mode with explicit topology, worker count, and TLS certificates:
 
 ```bash
 uv run vtb run app:app \
@@ -29,8 +29,7 @@ uv run vtb run app:app \
   --topology shm \
   --workers 4 \
   --tls-cert certs/server.pem \
-  --tls-key certs/server.key \
-  --http3
+  --tls-key certs/server.key
 ```
 
 ### Frontend & TypeScript Codegen (`vtb js`)
@@ -41,7 +40,7 @@ Manage frontend dependencies, bundle assets through `vertebra-bundler` (Rolldown
 uv run vtb js install
 uv run vtb js add zod @vertebra/client
 uv run vtb js build
-uv run vtb js generate-types --app app:app
+uv run vtb js generate-types
 ```
 
 ### Background Queue Workers (`vtb workers`)
@@ -49,16 +48,15 @@ uv run vtb js generate-types --app app:app
 Run dedicated background task queue and cron workers:
 
 ```bash
-uv run vtb workers run app:app --concurrency 16 --queues default,emails
+uv run vtb workers run app:app --concurrency 16 --lanes cpu,io,agent
 ```
 
 ### MCP Stdio-to-HTTP Bridge (`vtb mcp`)
 
-Expose a remote or local Vertebra MCP HTTP endpoint over standard input/output for desktop AI hosts, or serve an app's MCP registry directly over stdio:
+Expose a remote or local Vertebra MCP HTTP endpoint over standard input/output for desktop AI hosts:
 
 ```bash
-uv run vtb mcp bridge --url http://127.0.0.1:8000/mcp
-uv run vtb mcp serve --app app:app
+uv run vtb mcp bridge --url http://127.0.0.1:8000/mcp --timeout 30
 ```
 
 ### Standalone Binary Packaging (`vtb build`)

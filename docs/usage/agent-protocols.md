@@ -55,6 +55,6 @@ a2a = A2AService(
 )
 ```
 
-## Agent Harness & Google ADK (`vertebra.agent.adk`)
+## Agent Harness & Workflow Engine (`vertebra.agent`)
 
-Combine `AgentPlugin`, `TurnBudget`, human-in-the-loop confirmation gates (`ConfirmationDecisionRequest`), and `vertebra.agent.adk` to host Google ADK agents inside Vertebra with persistent session history and live SSE streaming.
+Combine `AgentPlugin`, `AgentRuntime`, `WorkflowEngine`, and human-in-the-loop confirmation gates (`ConfirmationDecisionRequest`) to host multi-turn agents inside Vertebra with persistent session history (`MemorySessionStore`) and live SSE streaming.
