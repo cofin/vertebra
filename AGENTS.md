@@ -41,6 +41,11 @@ make ts-test     # Run the TypeScript Vitest suite with isolated localstorage
 make test        # Run all Rust, Python, and TypeScript test suites
 make coverage    # Run pytest with coverage (coverage.xml, htmlcov/)
 make check       # Full verification gate: make lint + make test + make coverage
+make docs        # Generate CLI docs, build Zensical site, run postbuild, and verify artifacts
+make docs-serve  # Serve Zensical documentation locally at http://localhost:8000
+make docs-check  # Verify public docstrings, CLI docs sync, and built site artifacts
+make docs-clean  # Remove site/ and .cache/ documentation artifacts
+make docs-rust   # Build Rust workspace rustdoc into site/rustdoc/
 make build       # Release build: TS client, Rust crates, release maturin develop of the extensions, uv build
 make build-pgo   # Two-phase Rust PGO instrumentation and profile-use build (or PROFDATA=<path>)
 make bench       # make build, then tools.benchmarks (TARGETS=vtb, SCENARIOS=default by default)

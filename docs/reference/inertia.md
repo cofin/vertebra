@@ -6,12 +6,12 @@ Server-driven single-page application primitives for Inertia v3, pooled QuickJS 
 
 ::: vertebra.framework.inertia.InertiaConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.framework.inertia.InertiaResponse
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.framework.inertia.InertiaMiddleware
@@ -22,29 +22,29 @@ Server-driven single-page application primitives for Inertia v3, pooled QuickJS 
 
 ::: vertebra.framework.inertia.DeferredProp
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.framework.inertia.MergeProp
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.framework.inertia.ScrollProp
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ## QuickJS Server-Side Rendering (`vertebra.framework.ssr`)
 
 ::: vertebra.framework.ssr.SsrConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.framework.ssr.SsrResult
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.framework.ssr.EmbeddedSsrClient

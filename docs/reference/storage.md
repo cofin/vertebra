@@ -16,49 +16,49 @@ Typed object storage configurations, `ObjectStore` operations, HMAC/cloud URL pr
 
 ::: vertebra.storage._store.S3Config
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.storage._store.GcsConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.storage._store.AzureConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.storage._store.R2Config
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.storage._store.OciConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.storage._store.LocalConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.storage._store.MemoryConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ## Metadata, Presigning & Upload Tracking
 
 ::: vertebra.storage._store.ObjectMeta
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.storage._store.SigningConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.storage.pipeline.UploadTracker

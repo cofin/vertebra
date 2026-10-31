@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from vertebra._typing import MissingDependencyError
+from vertebra.typing import MissingDependencyError
 
 __all__ = (
     "test_example_packages_define_docstring_and_dunder_all",

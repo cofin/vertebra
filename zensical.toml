@@ -116,8 +116,6 @@ generator = false
 [project.plugins.redirects.redirect_maps]
 "backpressure.md" = "architecture/http-ingress.md"
 "parallelism.md" = "architecture/pyo3-and-workers.md"
-"changelog.rst" = "changelog/index.md"
-"changelog.md" = "changelog/index.md"
 
 [project.plugins.mkdocstrings]
 default_handler = "python"
@@ -161,7 +159,7 @@ show_source = false
 show_symbol_type_heading = true
 show_symbol_type_toc = false
 signature_crossrefs = false
-summary = { attributes = true, functions = true, classes = false, modules = false }
+summary = { attributes = true, functions = false, classes = false, modules = false }
 unwrap_annotated = true
 filters = ["!^_"]
 

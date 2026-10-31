@@ -16,7 +16,7 @@ sources:
 
 <!-- truth: start -->
 - Task files under `.agents/bundles/specs/<flow_id>/tasks/` are authoritative; `spec.md` is the synchronized checklist and continuity view.
-- Use Vertebra's canonical [`Makefile`](../../../Makefile) targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make review-check`, `make review-route`, `make coverage`, `make check`, `make build`, `make build-pgo`, `make bench`, `make bench-all`, `make bench-ft`, `make bench-report`, `make rs-bench`, `make bench-micro`, `make bench-baseline`, `make bench-check`, `make upgrade`) and rebuild the PyO3 extensions (`_vertebra`, `_bundler`, `_storage`) via `make dev` after any Rust edit before running `pytest`.
+- Use Vertebra's canonical [`Makefile`](../../../Makefile) targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make review-check`, `make review-route`, `make coverage`, `make check`, `make docs`, `make docs-serve`, `make docs-check`, `make docs-clean`, `make docs-rust`, `make build`, `make build-pgo`, `make bench`, `make bench-all`, `make bench-ft`, `make bench-report`, `make rs-bench`, `make bench-micro`, `make bench-baseline`, `make bench-check`, `make upgrade`) and rebuild the PyO3 extensions (`_vertebra`, `_bundler`, `_storage`) via `make dev` after any Rust edit before running `pytest`.
 - Every task declares and justifies one `verification_strategy`; only observable behavior and defect correction require an initial failing test.
 - Record durable findings in the task's `## Notes & Discoveries` and preserve unrelated worktree changes.
 - Consumer operational skills install only under `.agents/skills/`. Product, knowledge, research, and specs remain under `.agents/bundles/` (`specs/` and `research/` are created lazily only when needed).
@@ -51,6 +51,11 @@ make review-check                                         # Validate review capa
 make review-route                                         # Route changed files to owning review areas and shards (BASE=origin/main)
 make coverage                                             # uv run pytest src/py/tests --cov, then coverage.xml and htmlcov/ (Python only)
 make check                                                # lint + test + coverage
+make docs                                                 # scan_public_docstrings + generate_cli_docs + zensical build --clean + postbuild + verify_docs_artifacts
+make docs-serve                                           # generate_cli_docs + zensical serve -a localhost:8000
+make docs-check                                           # scan_public_docstrings + generate_cli_docs --check + verify_docs_artifacts
+make docs-clean                                           # rm -rf site .cache
+make docs-rust                                            # cargo doc --manifest-path src/rs/Cargo.toml --workspace --no-deps -> site/rustdoc/
 
 # 4. Release Builds & Benchmarks (--group bench kept out of dev)
 make build                                                # ts-build, release cargo build of non-extension crates, maturin develop -r for the three extensions, uv build

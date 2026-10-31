@@ -16,12 +16,12 @@ Core framework primitives for dependency injection, security guards, OpenAPI and
 
 ::: vertebra.framework.security.Principal
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.framework.security.SecurityConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.framework.security.Guard
@@ -32,7 +32,7 @@ Core framework primitives for dependency injection, security guards, OpenAPI and
 
 ::: vertebra.framework.openapi.OpenAPIConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.framework.openapi.OpenAPISpecBuilder
@@ -41,7 +41,7 @@ Core framework primitives for dependency injection, security guards, OpenAPI and
 
 ::: vertebra.framework.asyncapi.AsyncAPIConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ## Real-Time `LiveState` & Procedures (`vertebra.framework.live`, `vertebra.framework.procedures`)

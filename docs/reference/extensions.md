@@ -6,7 +6,7 @@ First-party framework extensions connecting Vertebra's Rust HTTP/IPC runtime to 
 
 ::: vertebra.extensions.litestar.config.LitestarConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.extensions.litestar.plugin.LitestarPlugin
@@ -21,7 +21,7 @@ First-party framework extensions connecting Vertebra's Rust HTTP/IPC runtime to 
 
 ::: vertebra.extensions.sqlspec.plugin.SQLSpecConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.extensions.sqlspec.plugin.SQLSpecPlugin

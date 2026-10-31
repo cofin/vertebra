@@ -6,12 +6,12 @@ Build orchestration, end-to-end TypeScript/Zod/Valibot/OpenAPI/Protobuf code gen
 
 ::: vertebra.build._config.JsConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.build._config.BuildConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.build._orchestrator.BuildOrchestrator
@@ -22,7 +22,7 @@ Build orchestration, end-to-end TypeScript/Zod/Valibot/OpenAPI/Protobuf code gen
 
 ::: vertebra.build.codegen.plugin.CodegenConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.build.codegen._typescript.TypeScriptGenerator
@@ -49,19 +49,19 @@ Build orchestration, end-to-end TypeScript/Zod/Valibot/OpenAPI/Protobuf code gen
 
 ::: vertebra.build.packaging.pgo.RustPgoConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ## WebAssembly Sandbox (`vertebra.wasm`)
 
 ::: vertebra.wasm.WasmSandboxPolicy
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.wasm.WasmModuleConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.wasm.WasmPluginHost

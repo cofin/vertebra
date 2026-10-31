@@ -32,12 +32,12 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 
 ::: vertebra._bundler.BundleConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra._bundler.BuildResult
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra._bundler.Bundler
@@ -60,7 +60,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 
 ::: vertebra._storage.ObjectMeta
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra._storage.ObjectStore

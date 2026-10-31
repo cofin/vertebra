@@ -24,6 +24,7 @@ __pycache__/
 .dmypy.json
 .ruff_cache
 /docs/_build/
+/site/
 coverage.*
 coverage/
 setup.py

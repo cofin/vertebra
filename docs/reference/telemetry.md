@@ -6,12 +6,12 @@ Distributed tracing (`TraceContext`, `SpanExporter`), GenAI token/cost instrumen
 
 ::: vertebra.telemetry.otel.TraceContext
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.telemetry.otel.SpanData
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.telemetry.otel.SpanExporter
@@ -22,12 +22,12 @@ Distributed tracing (`TraceContext`, `SpanExporter`), GenAI token/cost instrumen
 
 ::: vertebra.telemetry.otel.GenAiUsage
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.telemetry.otel.ModelPricing
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.telemetry.otel.GenAiRecorder
@@ -36,7 +36,7 @@ Distributed tracing (`TraceContext`, `SpanExporter`), GenAI token/cost instrumen
 
 ::: vertebra.telemetry.otel.DbPoolMetricSample
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.telemetry.otel.DbPoolRecorder
@@ -53,7 +53,7 @@ Distributed tracing (`TraceContext`, `SpanExporter`), GenAI token/cost instrumen
 
 ::: vertebra.telemetry.logger.LoggingConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.telemetry.logger.LogHandler

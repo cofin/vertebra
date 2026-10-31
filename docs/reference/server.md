@@ -10,24 +10,24 @@ Multi-protocol worker lifecycle (`Worker`), isolated execution lanes (`LaneConfi
 
 ::: vertebra.server._dispatch.HandlerSpec
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.server._dispatch.BatchDispatchPlan
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ## Execution Lanes & Event Loop Shards
 
 ::: vertebra.server.lanes.LaneConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.server.lanes.LaneMetrics
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.server._loops.EventLoopPool
@@ -60,5 +60,5 @@ Multi-protocol worker lifecycle (`Worker`), isolated execution lanes (`LaneConfi
 
 ::: vertebra.server._gil_audit.GilAuditReport
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
