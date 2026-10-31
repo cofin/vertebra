@@ -1,18 +1,18 @@
 # Examples
 
-Every code listing on this page is embedded directly from a runnable Python module under `docs/examples/` and executed continuously in the test suite (`pytest src/py/tests/unit/docs/test_examples.py`).
+Every example on this page is embedded directly from a runnable Python file in `docs/examples/` and tested in CI (`pytest src/py/tests/unit/docs/test_examples.py`).
 
 ## Quickstart Application
 
-Create an `App` with typed path parameters and `msgspec.Struct` responses, verified with `extract_path_params` and `handler_id`:
+Create an `App` with typed path parameters and `msgspec.Struct` responses:
 
 ```python title="docs/examples/quickstart_app.py"
 --8<-- "docs/examples/quickstart_app.py:example"
 ```
 
-## Modular Routing & DTO Validation
+## Controllers, Routers & Dependency Injection
 
-Mount a modular `Router` with prefix and tags onto an `App` and validate request/response DTOs:
+Group endpoints on a `Controller` with `Provide` dependencies, mount a `Router` onto an `App`, and validate `msgspec.Struct` request and response models:
 
 ```python title="docs/examples/routing_and_dtos.py"
 --8<-- "docs/examples/routing_and_dtos.py:example"
@@ -28,7 +28,7 @@ Enqueue, lease, and acknowledge background jobs with `MemoryQueueBackend`:
 
 ## Reactive LiveState & Inertia Responses
 
-Dispatch actions on a server-owned `LiveState` component and construct an `InertiaResponse` page payload:
+Run actions on a `LiveState` component and build an `InertiaResponse` page payload:
 
 ```python title="docs/examples/live_state_and_ssr.py"
 --8<-- "docs/examples/live_state_and_ssr.py:example"
@@ -36,7 +36,7 @@ Dispatch actions on a server-owned `LiveState` component and construct an `Inert
 
 ## Transactional Object Storage & SQLite
 
-Coordinate staged `ObjectStore` uploads with database transactions and automatic rollback cleanup via `UploadTracker`:
+Stage `ObjectStore` uploads alongside SQLite transactions with automatic rollback cleanup via `UploadTracker`:
 
 ```python title="docs/examples/storage_and_db.py"
 --8<-- "docs/examples/storage_and_db.py:example"
@@ -44,7 +44,7 @@ Coordinate staged `ObjectStore` uploads with database transactions and automatic
 
 ## Agent MCP Tools
 
-Register typed Python tools with `@tool` and dispatch JSON-RPC 2.0 `tools/list` and `tools/call` requests through `JsonRpcRouter` and `execute_tool_calls`:
+Register typed Python tools with `@tool` and call them over JSON-RPC 2.0 `tools/list` and `tools/call`:
 
 ```python title="docs/examples/agent_mcp_tools.py"
 --8<-- "docs/examples/agent_mcp_tools.py:example"

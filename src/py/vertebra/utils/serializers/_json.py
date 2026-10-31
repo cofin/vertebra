@@ -45,13 +45,14 @@ __all__ = (
 class JSONSerializer:
     """Msgspec-based JSON serializer."""
 
-    __slots__ = ("_decoder", "_encoder")
+    __slots__ = ("_decoder", "_encoder", "_typed_decoders")
 
     _default: ClassVar[JSONSerializer | None] = None
 
     def __init__(self) -> None:
         self._encoder: Final[Encoder] = Encoder(enc_hook=_normalize_supported_value)
         self._decoder: Final[Decoder[Any]] = Decoder()
+        self._typed_decoders: dict[Any, Decoder[Any]] = {}
 
     @classmethod
     def default(cls) -> JSONSerializer:
@@ -73,13 +74,21 @@ class JSONSerializer:
         """Encode Python data directly into a pre-allocated ``bytearray`` at ``offset`` with zero allocation."""
         self._encoder.encode_into(data, buffer, offset)
 
-    def decode(self, data: str | bytes, *, decode_bytes: bool = True) -> Any:
-        """Decode JSON string or bytes into Python data."""
-        if isinstance(data, bytes):
-            if not decode_bytes:
-                return data
-            return self._decoder.decode(data)
-        return self._decoder.decode(data.encode("utf-8"))
+    def decode(self, data: str | bytes, *, decode_bytes: bool = True, type: Any = Any) -> Any:
+        """Decode JSON string or bytes into Python data, optionally into a typed schema."""
+        if isinstance(data, bytes) and not decode_bytes:
+            return data
+        raw = data if isinstance(data, bytes) else data.encode("utf-8")
+        if type is Any or type is object:
+            return self._decoder.decode(raw)
+        try:
+            decoder = self._typed_decoders.get(type)
+            if decoder is None:
+                decoder = Decoder(type=type)
+                self._typed_decoders[type] = decoder
+            return decoder.decode(raw)
+        except TypeError:
+            return Decoder(type=type).decode(raw)
 
 
 def convert_datetime_to_gmt_iso(value: datetime.datetime) -> str:
@@ -100,7 +109,7 @@ _UNLOADED_UUID_TYPE: Final[object] = object()
 class _UuidTypeCache:
     """Class-scoped holder for lazy UUID backend."""
 
-    uuid_utils_type: ClassVar[Any] = _UNLOADED_UUID_TYPE
+    uuid_utils_type: ClassVar[type[Any] | None | object] = _UNLOADED_UUID_TYPE
 
 
 def get_default_serializer() -> JSONSerializer:
@@ -136,9 +145,9 @@ def encode_json(data: Any, *, as_bytes: bool = False) -> str | bytes:
     return encoded if as_bytes else encoded.decode("utf-8")
 
 
-def decode_json(data: str | bytes, *, decode_bytes: bool = True) -> Any:
-    """Decode JSON input into Python data."""
-    return get_default_serializer().decode(data, decode_bytes=decode_bytes)
+def decode_json(data: str | bytes, *, decode_bytes: bool = True, type: Any = Any) -> Any:
+    """Decode JSON input into Python data, optionally into a typed schema."""
+    return get_default_serializer().decode(data, decode_bytes=decode_bytes, type=type)
 
 
 def format_json(value: Any, *, indent: int = 2) -> str:
@@ -148,14 +157,16 @@ def format_json(value: Any, *, indent: int = 2) -> str:
 
 def _get_uuid_utils_type() -> type[Any] | None:
     """Lazy-resolve and cache the uuid-utils UUID type when installed."""
-    if _UuidTypeCache.uuid_utils_type is not _UNLOADED_UUID_TYPE:
-        return cast("type[Any] | None", _UuidTypeCache.uuid_utils_type)
+    cached = _UuidTypeCache.uuid_utils_type
+    if cached is not _UNLOADED_UUID_TYPE:
+        return cast("type[Any] | None", cached)
     if not UUID_UTILS_INSTALLED:
         _UuidTypeCache.uuid_utils_type = None
         return None
     module = _load_uuid_utils()
-    _UuidTypeCache.uuid_utils_type = None if module is None else cast("type[Any]", module.UUID)
-    return cast("type[Any] | None", _UuidTypeCache.uuid_utils_type)
+    resolved: type[Any] | None = None if module is None else cast("type[Any]", getattr(module, "UUID", None))
+    _UuidTypeCache.uuid_utils_type = resolved
+    return resolved
 
 
 def _is_uuid_utils_instance(value: Any) -> bool:

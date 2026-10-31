@@ -40,6 +40,21 @@ Multi-protocol worker lifecycle (`Worker`), isolated execution lanes (`LaneConfi
     options:
       heading_level: 3
 
+::: vertebra.server._asgi.AsgiLifespan
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.server._asgi.SseResponse
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.server._asgi.WebSocketSession
+    options:
+      heading_level: 4
+      members: false
+
 ::: vertebra.server._rsgi._adapter.RsgiAdapter
     options:
       heading_level: 3
@@ -48,7 +63,17 @@ Multi-protocol worker lifecycle (`Worker`), isolated execution lanes (`LaneConfi
     options:
       heading_level: 3
 
-## Container Cgroups, SHM Allocation & Free-Threaded Audit
+::: vertebra.server._wsgi.FlaskWsgiApp
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.server._wsgi.DjangoWsgiApp
+    options:
+      heading_level: 4
+      members: false
+
+## Container Cgroups, Z-Pages, Graceful Drain & Free-Threaded Audit
 
 ::: vertebra.server.platform.CgroupQuota
     options:
@@ -57,6 +82,16 @@ Multi-protocol worker lifecycle (`Worker`), isolated execution lanes (`LaneConfi
 ::: vertebra.server.platform.ShmAllocationPolicy
     options:
       heading_level: 3
+
+::: vertebra.server.platform.LameDuckController
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.server.platform.ZPagesRegistry
+    options:
+      heading_level: 4
+      members: false
 
 ::: vertebra.server._gil_audit.GilAuditReport
     options:

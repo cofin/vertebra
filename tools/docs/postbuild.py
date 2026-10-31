@@ -30,6 +30,7 @@ _HEADING_PATTERN = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 _HTML_BLOCK_PATTERN = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 _PRE_BLOCK_PATTERN = re.compile(r"(<(?:pre|textarea)\b[^>]*>.*?</(?:pre|textarea)>)", re.IGNORECASE | re.DOTALL)
 _LEADING_SPACE_PATTERN = re.compile(r"^[ \t]+", re.MULTILINE)
+_TRAILING_SPACE_PATTERN = re.compile(r"[ \t]+$", re.MULTILINE)
 _MULTI_NEWLINE_PATTERN = re.compile(r"\n{2,}")
 _SECTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _MIN_SNIPPET_RANGE_PARTS = 2
@@ -76,7 +77,7 @@ def compact_site_html(site_dir: Path) -> int:
         updated = "".join(
             part
             if part.lower().startswith(("<pre", "<textarea"))
-            else _LEADING_SPACE_PATTERN.sub("", _MULTI_NEWLINE_PATTERN.sub("\n", part))
+            else _MULTI_NEWLINE_PATTERN.sub("\n", _TRAILING_SPACE_PATTERN.sub("", _LEADING_SPACE_PATTERN.sub("", part)))
             for part in parts
         )
         if updated != raw:

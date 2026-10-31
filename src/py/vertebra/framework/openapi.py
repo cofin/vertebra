@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 
+from vertebra.framework.di import inspect_callable_bindings
 from vertebra.utils.serializers import format_json
 
 if TYPE_CHECKING:
@@ -76,12 +77,26 @@ class OpenAPISpecBuilder:
             if resp_schema is type(None):
                 resp_schema = None
 
+            route_container = app.container.create_child(route.dependencies)
+            request_body_schema: type[Any] | None = None
+            for binding in inspect_callable_bindings(handler):
+                if binding.is_explicit_inject:
+                    continue
+                dep_key = route_container.graph.resolve_param_key(binding)
+                if dep_key is not None and dep_key in route_container.graph.providers:
+                    continue
+                if inspect.isclass(binding.annotation) and issubclass(binding.annotation, msgspec.Struct):
+                    request_body_schema = binding.annotation
+                    break
+
             builder.add_operation(
                 path=route.path,
                 method=route.method,
                 summary=inspect.getdoc(handler) or "",
                 operation_id=getattr(handler, "__name__", None),
                 response_schema=resp_schema,
+                request_body_schema=request_body_schema,
+                tags=route.tags,
             )
         return builder
 
@@ -93,6 +108,7 @@ class OpenAPISpecBuilder:
         summary: str = "",
         operation_id: str | None = None,
         response_schema: type[Any] | None = None,
+        request_body_schema: type[Any] | None = None,
         tags: tuple[str, ...] = (),
     ) -> None:
         """Register an HTTP operation in the OpenAPI 3.1.0 path map."""
@@ -104,7 +120,15 @@ class OpenAPISpecBuilder:
         }
         if tags:
             op["tags"] = list(tags)
-        if response_schema is not None:
+        if request_body_schema is not None and inspect.isclass(request_body_schema):
+            body_name = getattr(request_body_schema, "__name__", "RequestModel")
+            _, body_components = msgspec.json.schema_components((request_body_schema,))
+            self._schemas.update(body_components)
+            op["requestBody"] = {
+                "required": True,
+                "content": {"application/json": {"schema": {"$ref": f"#/components/schemas/{body_name}"}}},
+            }
+        if response_schema is not None and inspect.isclass(response_schema):
             schema_name = getattr(response_schema, "__name__", "ResponseModel")
             _, components = msgspec.json.schema_components((response_schema,))
             self._schemas.update(components)

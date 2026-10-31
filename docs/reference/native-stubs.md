@@ -24,6 +24,11 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
     options:
       heading_level: 3
 
+::: vertebra._vertebra.RsgiScope
+    options:
+      heading_level: 4
+      members: false
+
 ::: vertebra._vertebra.WsgiEnviron
     options:
       heading_level: 3

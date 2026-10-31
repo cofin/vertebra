@@ -49,7 +49,12 @@ Typed object storage configurations, `ObjectStore` operations, HMAC/cloud URL pr
       heading_level: 4
       members: false
 
-## Metadata, Presigning & Upload Tracking
+::: vertebra.storage._store.HttpConfig
+    options:
+      heading_level: 4
+      members: false
+
+## Metadata, Presigning, Random-Access Readers & Upload Tracking
 
 ::: vertebra.storage._store.ObjectMeta
     options:
@@ -57,6 +62,11 @@ Typed object storage configurations, `ObjectStore` operations, HMAC/cloud URL pr
       members: false
 
 ::: vertebra.storage._store.SigningConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.storage._store.ReadableFile
     options:
       heading_level: 4
       members: false

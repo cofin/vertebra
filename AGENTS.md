@@ -1,6 +1,6 @@
 # Vertebra — Agent Instructions
 
-Vertebra is a Python-first, high-performance polyglot application backbone combining Python 3.12–3.15 and free-threaded 3.14t/3.15t developer ergonomics with a Rust 2024 runtime (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`) and a full-stack TypeScript SDK (`@vertebra/client`).
+Vertebra is a Python web framework and server powered by a Rust runtime (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`) and a TypeScript SDK (`@vertebra/client`), supporting Python 3.12–3.15 and free-threaded 3.14t/3.15t.
 
 ## Flow Operational Rule
 
@@ -21,7 +21,7 @@ Commits remain local unless the user explicitly asks for delivery. Never create,
 - [Bundle Index](.agents/bundles/index.md) — OKF v0.2 root index for product, nested knowledge, and lazy specs/research
 - [Product Definition](.agents/bundles/product/product.md) — Product vision, runtime topologies, and protocol capabilities
 - [Product Guidelines](.agents/bundles/product/product-guidelines.md) — Clean-break domain naming rules, hot-path invariants, and module layout
-- [Tech Stack](.agents/bundles/product/tech-stack.md) — Python 3.12–3.15 and 3.14t/3.15t, Rust 2024 crates, and TypeScript client stack
+- [Tech Stack](.agents/bundles/product/tech-stack.md) — Python 3.12–3.15 and 3.14t/3.15t, Rust crates, and TypeScript client stack
 - [Project Workflow](.agents/bundles/knowledge/workflow.md) — Canonical `Makefile` commands, polyglot rebuild cycle, verification strategies, and Flow execution loop
 - [Knowledge Index](.agents/bundles/knowledge/index.md) — Nested architectural (`architecture/{runtime,ipc,http,worker,frontend}/`), domain (`domains/{framework,server,ipc,http,frontend,storage,data,telemetry,extensions,agent}/`), pattern (`patterns/{python,rust,typescript}/`), testing (`testing/`), and gotcha (`gotchas/`) chapters
 

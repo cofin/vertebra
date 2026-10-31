@@ -13,7 +13,7 @@ Initial release of Vertebra (`vertebra-core` on PyPI and `@vertebra/client` on n
   - Lock-free SPSC and MPMC shared-memory ring buffers (`ShmHeader`, `SpscRing`, `MpmcRing`, `TieredRingSet`) and embedded `BatchBridge` with adaptive `futex`/`ulock` and `eventfd` signaling.
   - Opt-in `BackpressureController` with bounded in-flight permits, queue timeouts, and sliding-window circuit breaking.
 - **Python Application Framework & Multi-Protocol Runners (`vertebra.framework`, `vertebra.server`)**:
-  - `App`, `Router`, `RouteDef`, `ProcedureRouter`, `Container`/`DependencyGraph`/`Provide` dependency injection, `Guard`/`SecurityConfig`, `OpenAPIConfig`, `LiveState`, and `QueueService`/`CronScheduler`.
+  - `App`, `Controller`, `Router`, `Route`, `Procedure`, `ProcedureRouter`, `Container`/`DependencyGraph`/`Provide`/`Inject` dependency injection, `Guard`/`SecurityConfig`, `OpenAPIConfig`, `LiveState`, and `QueueService`/`CronScheduler`.
   - Multi-protocol worker execution supporting native `RequestBatch` handlers, ASGI 3.0 (`AsgiRunner`), RSGI 1.6 (`RsgiAdapter`), and PEP 3333 WSGI (`WsgiAdapter`) across isolated worker lanes (`fast`, `async`, `cpu`, `blocking`).
 - **Free-Threaded Python Support (`3.14t` / `3.15t`)**:
   - Native PyO3 extensions (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`) compiled with `gil_used = false` and PEP 561 `.pyi` type stubs.

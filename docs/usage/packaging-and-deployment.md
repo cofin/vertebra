@@ -1,41 +1,67 @@
 # Packaging & Deployment
 
-Vertebra applications can be deployed as standard Python wheels (`uv run vtb run ...`), OCI containers with automatic cgroup quota detection, or self-contained standalone and single-file executables via `StandaloneBuilder` and `OnefileBuilder`.
+Deploy Vertebra applications as standard Python wheels (`uv run vtb run ...`), containers with automatic CPU and shared-memory sizing, or self-contained standalone and single-file binaries (`StandaloneBuilder`, `OnefileBuilder`).
 
-## Standalone Binary Builds (`vtb build`)
+## Standalone & Single-File Binaries (`vtb build`)
 
-`vertebra.build.packaging` packages your Python application, compiled Rust extensions (`_vertebra`, `_bundler`, `_storage`), and bundled frontend assets into a relocatable directory or single-file executable:
+`vertebra.build.packaging` bundles your Python application, compiled Rust extensions (`_vertebra`, `_bundler`, `_storage`), Python Build Standalone runtime, and frontend assets into a relocatable directory (`StandaloneBuilder`) or a self-extracting single-file binary with SHA-256 verification (`OnefileBuilder`):
 
 ```bash
 uv run vtb build --standalone --onefile
 ```
 
-Programmatic configuration is available via `BuildConfig`, `BuildOrchestrator`, `StandaloneBuilder`, and `OnefileBuilder`:
+Programmatic configuration via `BuildConfig`, `BuildTarget`, `StandaloneBuilder`, and `OnefileBuilder`:
 
 ```python
 from pathlib import Path
 from vertebra.build import BuildConfig
-from vertebra.build.packaging import BuildTarget, StandaloneBuilder
+from vertebra.build.packaging import BuildTarget, OnefileBuilder, StandaloneBuilder
 
 config = BuildConfig.load(Path("."))
-builder = StandaloneBuilder(
+standalone = StandaloneBuilder(
     project_dir=Path("."),
     target=BuildTarget.current(),
     entrypoint=config.app or "app:app",
 )
+onefile = OnefileBuilder(project_dir=Path("."), entrypoint=config.app or "app:app")
 ```
 
-## Container & Kubernetes Deployment
+## TypeScript, Zod, OpenAPI & Protobuf Codegen (`vertebra.build.codegen`)
+
+Generate TypeScript route types (`TypeScriptGenerator`), Zod or Valibot validation schemas (`ZodGenerator`, `ValibotGenerator`), RPC procedure clients (`ProcedureClientGenerator`), OpenAPI 3.1 specs (`OpenAPIGenerator`), and `.proto` definitions (`ProtobufGenerator`) from your Python routes and `msgspec.Struct` models:
+
+```bash
+uv run vtb js generate-types
+```
+
+## Profile-Guided Optimization (`make build-pgo`)
+
+Compile the Rust HTTP server and native extensions with two-phase LLVM Profile-Guided Optimization (`RustPgoConfig`, `run_pgo_pipeline`) to optimize hot dispatch and parser paths:
+
+```bash
+make build-pgo
+```
+
+## Container Deployment & Process Supervision
 
 When running inside Docker, Kubernetes, or Cloud Run:
 
-1. **Automatic CPU & Memory Detection**: `CgroupQuota.effective_cpu_count()` reads `/sys/fs/cgroup/cpu.max` so `VERTEBRA_THREADS` matches the pod's CPU limit automatically.
-2. **Shared-Memory Volume Sizing**: When using `--topology shm` in containers, mount `/dev/shm` with sufficient capacity (`emptyDir: { medium: Memory, sizeLimit: 256Mi }` in Kubernetes or `--shm-size=256m` in Docker), or use `--topology embedded` to avoid `/dev/shm` allocation altogether.
+1. **Automatic CPU & Memory Detection**: `CgroupQuota.effective_cpu_count()` reads `/sys/fs/cgroup/cpu.max` so `VERTEBRA_THREADS` matches the container's CPU limit automatically.
+2. **Shared-Memory Allocation (`ShmAllocationPolicy`)**: Uses anonymous `memfd_create` descriptors passed over `SCM_RIGHTS` UNIX sockets (or `/dev/shm` when available) so `--topology shm` works cleanly even on read-only container root filesystems.
+3. **Process Supervision (`vertebra.supervisor`)**: In multi-worker deployments (`--workers > 1`), `run_supervisor` monitors worker processes, coordinates graceful `SIGTERM` drains, and restarts crashed workers.
 
-## Process Supervision (`vertebra.supervisor`)
+## WebAssembly Plugin Sandboxes (`vertebra.wasm`)
 
-In multi-worker deployments (`--topology shm --workers N`), the supervisor monitors worker health, enforces graceful drain timeouts on `SIGTERM`/`SIGINT`, and restarts crashed worker processes with bounded backoff.
+Run untrusted plugins or custom data transforms inside memory-, fuel-, and timeout-bounded WASI WebAssembly sandboxes using `WasmSandboxPolicy`, `WasmModuleConfig`, and `WasmPluginHost`:
 
-## WebAssembly Sandboxes (`vertebra.wasm`)
+```python
+from vertebra.wasm import WasmModuleConfig, WasmPluginHost, WasmSandboxPolicy
 
-Execute untrusted plugin modules or edge transforms safely inside memory- and fuel-bounded WebAssembly sandboxes configured via `WasmSandboxPolicy` and `WasmModuleConfig`.
+policy = WasmSandboxPolicy(
+    max_memory_bytes=32 * 1024 * 1024,
+    max_fuel=5_000_000,
+    epoch_timeout_ms=250,
+    allow_network=False,
+)
+host = WasmPluginHost()
+```

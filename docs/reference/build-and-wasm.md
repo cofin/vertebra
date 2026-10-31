@@ -37,7 +37,27 @@ Build orchestration, end-to-end TypeScript/Zod/Valibot/OpenAPI/Protobuf code gen
     options:
       heading_level: 3
 
+::: vertebra.build.codegen.openapi.OpenAPIGenerator
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.build.codegen.protobuf.ProtobufGenerator
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.build.codegen.procedures.ProcedureClientGenerator
+    options:
+      heading_level: 4
+      members: false
+
 ## Standalone, Onefile & PGO Packaging (`vertebra.build.packaging`)
+
+::: vertebra.build.packaging.standalone.BuildTarget
+    options:
+      heading_level: 4
+      members: false
 
 ::: vertebra.build.packaging.standalone.StandaloneBuilder
     options:
@@ -52,7 +72,7 @@ Build orchestration, end-to-end TypeScript/Zod/Valibot/OpenAPI/Protobuf code gen
       heading_level: 4
       members: false
 
-## WebAssembly Sandbox (`vertebra.wasm`)
+## WebAssembly Sandbox & Supervisor (`vertebra.wasm`, `vertebra.supervisor`)
 
 ::: vertebra.wasm.WasmSandboxPolicy
     options:
@@ -64,6 +84,15 @@ Build orchestration, end-to-end TypeScript/Zod/Valibot/OpenAPI/Protobuf code gen
       heading_level: 4
       members: false
 
+::: vertebra.wasm.WasmExecutionError
+    options:
+      heading_level: 4
+      members: false
+
 ::: vertebra.wasm.WasmPluginHost
     options:
       heading_level: 3
+
+::: vertebra.supervisor._supervisor.run_supervisor
+    options:
+      heading_level: 4

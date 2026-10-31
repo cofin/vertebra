@@ -4,17 +4,17 @@
     <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-inline-light.svg">
     <img alt="Vertebra" src="docs/assets/banner-inline-light.svg" width="520">
   </picture>
-  <p><strong>Python-first, high-performance polyglot application backbone powered by Rust 2024 and TypeScript.</strong></p>
+  <p><strong>Fast Python web framework and server powered by Rust and TypeScript.</strong></p>
 </div>
 
 ---
 
-Vertebra combines Python 3.12–3.15 (and free-threaded 3.14t/3.15t) developer ergonomics with a Rust 2024 runtime and a full-stack TypeScript SDK:
+Vertebra is a Python web framework and server built on a Rust runtime with a TypeScript client SDK. Write standard Python routes, controllers, and background tasks while Rust handles HTTP, shared-memory workers, bundling, object storage, and database pools:
 
-- **Python Framework & Multi-Protocol Runners**: Type-safe APIs (`App`, `Router`, `RouteDef`, `ProcedureRouter`, `Provide`, `QueueService`, Inertia v3, QuickJS SSR, MCP/A2A agent protocols, and end-to-end TypeScript/Zod codegen) plus native, ASGI 3.0, WSGI, and RSGI execution.
-- **Rust Shared-Memory & IPC Runtime (`vertebra-core`, `vertebra-py`)**: Lock-free SPSC/MPMC shared-memory ring buffers, arena slot pools, and adaptive `futex`/`ulock` signaling for zero-copy request/response batch dispatch.
-- **Rust HTTP Ingress & Bundler (`vertebra-http`, `vertebra-bundler`)**: Hyper + Tokio HTTP/1.1, HTTP/2, HTTP/3 (QUIC), gRPC framing, WebSocket, SSE, TLS, compression, static serving, embedded Rolldown/Oxc JavaScript bundling, and pooled QuickJS SSR.
-- **Native Storage, Database Drivers & Client SDK (`vertebra-storage`, `vertebra-db`, `@vertebra/client`)**: Rust-backed object storage (S3, GCS, Azure, R2, OCI, HTTP, local), native database drivers, and a type-safe TypeScript client across React, Vue, Svelte, Angular, HTMX, and Vite.
+- **Python Framework & Server**: Type-safe APIs (`App`, `Controller`, `Router`, `Route`, `Procedure`, `ProcedureRouter`, `Provide`, `Inject`, `QueueService`, Inertia v3, SSR, and MCP/A2A agent protocols) plus native, ASGI, WSGI, and RSGI support.
+- **Rust Worker Runtime (`vertebra-core`, `vertebra-py`)**: Runs Python in-process or across multiple worker processes over shared memory.
+- **Rust HTTP Server & Bundler (`vertebra-http`, `vertebra-bundler`)**: HTTP/1.1, HTTP/2, HTTP/3, gRPC, WebSockets, SSE, TLS, compression, static files, JavaScript bundling, and QuickJS SSR.
+- **Storage, Databases & TypeScript Client (`vertebra-storage`, `vertebra-db`, `@vertebra/client`)**: Object storage (S3, GCS, Azure, R2, OCI, HTTP, local), 9 database drivers (Postgres, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, Redis, Valkey, DataFusion), CTE statement stacking (`QueryPipeline`), Cloud SQL/AlloyDB dialers, and a typed TypeScript client for React, Vue, Svelte, Angular, HTMX, and Vite.
 
 ## Quickstart
 
@@ -60,31 +60,27 @@ make bench       # Run benchmark suite
 ```text
 src/
   py/
-    vertebra/          # Python framework, runners, CLI, agent, storage, db
+    vertebra/          # Python framework, server, CLI, agent, storage, db
     tests/             # Python unit and FFI test suite
   rs/
-    vertebra-core/     # Lock-free MPMC/SPSC rings, futex/ulock, batch IPC
+    vertebra-core/     # Shared-memory rings and worker IPC
     vertebra-py/       # PyO3 native extension (_vertebra)
-    vertebra-http/     # Hyper + Tokio HTTP/1.1, HTTP/2, HTTP/3, gRPC, TLS
-    vertebra-bundler/  # Embedded Rolldown/Oxc bundler and QuickJS SSR
-    vertebra-storage/  # Multi-cloud and local object storage (_storage)
-    vertebra-db/       # Native Postgres, MySQL, and SQLite pools
+    vertebra-http/     # HTTP/1.1, HTTP/2, HTTP/3, gRPC, WebSocket, and TLS server
+    vertebra-bundler/  # JavaScript bundler and QuickJS SSR
+    vertebra-storage/  # Cloud and local object storage (_storage)
+    vertebra-db/       # Postgres, MySQL, and SQLite connection pools
   ts/
     vertebra-client/   # @vertebra/client TypeScript SDK
 ```
 
-## Runtime Topologies
+## Execution Modes
 
-Vertebra automatically selects the execution topology from `--workers` and your Python build (or you can override it explicitly with `--topology embedded` or `--topology shm`):
+Vertebra automatically picks the right worker mode from `--workers` and your Python build (or you can set `--topology embedded` or `--topology shm` yourself):
 
-### 1. Embedded Topology
-- **Selected automatically**: When running a single worker (`--workers 0` or `1`) or on free-threaded Python (`3.14t`/`3.15t`), or explicitly with `--topology embedded`.
-- **Use Case**: Development, single-worker services, and multi-threaded production on free-threaded Python (3.14t/3.15t).
-- **Mechanism**: The Rust HTTP server and Python application run within the same OS process via PyO3 and `BatchBridge`.
-- **Benefits**: Zero IPC serialization overhead, lowest latency, shared memory address space.
+### 1. Embedded Mode
+- **When it runs**: Automatically for a single worker (`--workers 0` or `1`) or on free-threaded Python (`3.14t`/`3.15t`), or when you pass `--topology embedded`.
+- **How it works**: The Rust HTTP server and Python app run inside the same OS process with no cross-process overhead.
 
-### 2. SHM Topology (Scale-out)
-- **Selected automatically**: When `--workers > 1` on standard GIL-enabled Python on POSIX, or explicitly with `--topology shm`.
-- **Use Case**: Multi-process scale-out and fault isolation across OS processes.
-- **Mechanism**: The Rust HTTP server spawns independent Python worker processes connected via shared-memory SPSC ring pairs with `futex`/`ulock` and `eventfd` notification.
-- **Benefits**: Process isolation, scales across multiple GIL-bound Python interpreter processes.
+### 2. Shared-Memory Mode (`shm`)
+- **When it runs**: Automatically when `--workers > 1` on standard GIL-enabled Python on Linux/macOS, or when you pass `--topology shm`.
+- **How it works**: The Rust HTTP server spawns separate Python worker processes and passes requests and responses through shared memory.

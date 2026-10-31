@@ -1,34 +1,34 @@
 # Bundler, QuickJS SSR & TypeScript SDK
 
-Vertebra pairs its Python and Rust backend with an embedded frontend toolchain (`vertebra-bundler` / `vertebra._bundler`) and the `@vertebra/client` TypeScript SDK (`src/ts/vertebra-client/`).
+Vertebra pairs its Python and Rust backend with a built-in frontend bundler (`vertebra-bundler` / `vertebra._bundler`) and the `@vertebra/client` TypeScript SDK (`src/ts/vertebra-client/`).
 
-## Embedded Rolldown/Oxc Bundler (`vertebra-bundler`)
+## Built-In JavaScript Bundler (`vertebra-bundler`)
 
-`vertebra-bundler` embeds the Rust-native Oxc parser/transformer and Rolldown module bundler inside the `vertebra._bundler` PyO3 extension (`Bundler`):
+`vertebra-bundler` embeds the Oxc parser/transformer and Rolldown module bundler inside the `vertebra._bundler` native extension (`Bundler`):
 
-- **Zero External Node Build Daemon**: Compiles TypeScript (`.ts`, `.tsx`), JSX, and CSS entrypoints directly from Python (`vtb js build` or `Bundler().build(BundleConfig(...))`).
-- **Content-Hashed Manifests**: Emits deterministic asset manifests consumed by `vertebra.framework.inertia` and static file middleware.
-- **Hot Module Replacement (HMR)**: In `vtb dev` mode, file changes trigger incremental rebuilds and broadcast update frames to connected browsers via `@vertebra/client/hmr` (`HotReloadClient`).
+- **No External Node Build Server**: Compiles TypeScript (`.ts`, `.tsx`), JSX, and CSS entrypoints directly from Python (`vtb js build` or `Bundler().build(BundleConfig(...))`).
+- **Asset Manifests & `.d.ts` Generation**: Emits content-hashed asset manifests (`BuildResult`) and fast `.d.ts` declarations (`IsolatedDeclarationsGenerator`).
+- **Hot Module Replacement (HMR)**: In `vtb dev` mode, file changes watched by `SourceWatcher` trigger incremental rebuilds and push update frames to connected browsers via `@vertebra/client/hmr` (`HotReloadClient`).
 
-## Pooled QuickJS Server-Side Rendering (`EmbeddedSsrClient`)
+## QuickJS Server-Side Rendering Pool (`SsrPool` / `EmbeddedSsrClient`)
 
-Instead of proxying SSR requests over localhost HTTP to a separate Node.js process, `vertebra-bundler` manages a thread-safe pool of embedded QuickJS runtimes:
+Instead of sending SSR requests over localhost HTTP to a separate Node.js process, `vertebra-bundler` runs an in-process pool of QuickJS JavaScript runtimes (`SsrPool`):
 
-1. Each QuickJS worker pre-evaluates the compiled SSR bundle once at startup.
-2. `EmbeddedSsrClient.render(page)` dispatches the Inertia page payload over an in-memory channel (`SsrFrame`) while releasing the Python GIL (`py.detach`).
-3. The rendered HTML head/body fragments (`SsrResult`) return directly to the Rust/Python response pipeline in sub-millisecond latency.
+1. Each QuickJS worker loads the compiled SSR bundle once at startup.
+2. `EmbeddedSsrClient.render(page)` sends the Inertia page payload to a pooled QuickJS worker in memory while releasing the Python GIL (`py.detach`).
+3. The rendered HTML head and body fragments (`SsrResult`) return directly to Python.
 
 ## `@vertebra/client` Subpath Architecture
 
-The `@vertebra/client` package is organized into tree-shakeable ESM subpaths with zero runtime framework lock-in:
+The `@vertebra/client` package provides 15 tree-shakeable ESM entry points:
 
 | Subpath | Responsibility |
 | --- | --- |
-| `@vertebra/client` | Core `HttpClient`, typed error hierarchy (`ClientError`, `ValidationError`), `SseClient`, `WebSocketClient`, and re-exports |
-| `@vertebra/client/live` | Binary `LiveStateClient`, `HybridLogicalClock`, `OfflineDeltaQueue`, and FNV-1a field/state hashing |
+| `@vertebra/client` | Core `HttpClient`, typed error classes (`ClientError`, `ValidationError`), `SseClient`, `WebSocketClient`, and barrel re-exports |
+| `@vertebra/client/live` | Binary `LiveStateClient`, `HybridLogicalClock`, `OfflineDeltaQueue`, `StateOpcode`, and FNV-1a field/state hashing |
 | `@vertebra/client/agent` | `McpClient`, `A2aClient`, `AgentStreamClient`, and `WorkflowLiveSubscriber` |
 | `@vertebra/client/apex` | `ApexRegion` island mounting and `ApexOfflineOutbox` mutation synchronization |
-| `@vertebra/client/arrow` | Streaming Apache Arrow IPC record batch reader (`ArrowStreamClient`) |
+| `@vertebra/client/arrow` | Binary Apache Arrow IPC stream fetcher (`ArrowStreamClient`) |
 | `@vertebra/client/wasm` | Browser WebAssembly module loader and execution client (`WasmClient`) |
-| `@vertebra/client/telemetry` | W3C `TraceContext` (`traceparent` / `tracestate`) generation and header injection |
-| `@vertebra/client/react`, `/vue`, `/svelte`, `/angular`, `/htmx`, `/vite` | Framework-specific hooks, stores, directives, and Vite plugin integration |
+| `@vertebra/client/telemetry` | W3C `TraceContext` (`traceparent`) parser, generator, and header injector |
+| `@vertebra/client/react`, `/vue`, `/svelte`, `/angular`, `/htmx`, `/vite` | Framework hooks (`useQuery`, `useMutation`), stores, services, HTMX helper (`initHtmx`), and Vite plugin (`vitePlugin`) |

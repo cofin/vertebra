@@ -163,6 +163,7 @@ def resolve_parameter_node(
     for meta in metadata_items:
         if isinstance(meta, NamedDependencyMarker) or type(meta).__name__ in {
             "DependencyKwarg",
+            "Inject",
             "NamedDependencyMarker",
         }:
             include_in_schema = False

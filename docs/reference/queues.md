@@ -2,24 +2,33 @@
 
 Asynchronous background task queues, retry policies, dead-letter tracking, distributed cron leases, and storage backends.
 
-## Queue Configuration & Service
+## Queue Configuration, Dead-Letter Entries & Service
 
 ::: vertebra.framework.queues.base.QueueConfig
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.framework.queues.base.TaskRetryPolicy
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.framework.queues.base.TaskEnvelope
     options:
-      heading_level: 3
+      heading_level: 4
+      members: false
+
+::: vertebra.framework.queues.base.DeadLetterEntry
+    options:
+      heading_level: 4
       members: false
 
 ::: vertebra.framework.queues.base.QueueService
+    options:
+      heading_level: 3
+
+::: vertebra.server.lanes.WorkerRunner
     options:
       heading_level: 3
 
@@ -27,7 +36,7 @@ Asynchronous background task queues, retry policies, dead-letter tracking, distr
 
 ::: vertebra.framework.queues.base.CronSchedule
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
 
 ::: vertebra.framework.queues.scheduler.CronScheduler
@@ -45,6 +54,10 @@ Asynchronous background task queues, retry policies, dead-letter tracking, distr
       heading_level: 3
 
 ::: vertebra.framework.queues.redis.RedisQueueBackend
+    options:
+      heading_level: 3
+
+::: vertebra.framework.queues.redis.ValkeyQueueBackend
     options:
       heading_level: 3
 

@@ -1,48 +1,49 @@
 # Configuration
 
-Vertebra configures both the Python application layer (`App`, `OpenAPIConfig`, `SecurityConfig`, `QueueConfig`, `SsrConfig`) and the Rust HTTP/IPC runtime (`ServerLaunchEnv` and environment variables).
+Vertebra configures both your Python application and the Rust HTTP server using typed config objects and environment variables.
 
-## Runtime Topologies
+## Worker Modes
 
-Vertebra automatically selects the execution topology based on `--workers` and the active Python interpreter (`--topology auto`), or you can override it explicitly with `--topology` on `vtb run` / `VERTEBRA_TOPOLOGY`:
+Vertebra automatically selects the worker mode from `--workers` and your Python build (`--topology auto`), or you can override it explicitly with `--topology` on `vtb run` or `VERTEBRA_TOPOLOGY`:
 
-| Topology | Automatic Selection | Explicit Override | Description |
+| Mode | Automatic Selection | Explicit Override | Description |
 | --- | --- | --- | --- |
-| **Embedded** | Single worker (`<= 1`) or free-threaded Python (`3.14t`/`3.15t`) | `--topology embedded` / `VERTEBRA_TOPOLOGY=embedded` | Runs the Rust Tokio/Hyper server and Python interpreter in a single OS process via `BatchBridge`. Ideal for development and free-threaded Python (`3.14t`/`3.15t`). |
-| **Shared-Memory (`shm`)** | `--workers > 1` on standard GIL Python (POSIX) | `--topology shm` / `VERTEBRA_TOPOLOGY=shm` | Spawns independent Python worker processes connected to the Rust ingress parent over lock-free SPSC shared-memory rings in `/dev/shm` (or POSIX shm). Ideal for multi-process isolation on standard GIL Python. |
+| **Embedded** | Single worker (`<= 1`) or free-threaded Python (`3.14t`/`3.15t`) | `--topology embedded` / `VERTEBRA_TOPOLOGY=embedded` | Runs the Rust HTTP server and Python in a single OS process. Ideal for development, single-worker services, and free-threaded Python (`3.14t`/`3.15t`). |
+| **Shared-Memory (`shm`)** | `--workers > 1` on standard GIL Python (Linux/macOS) | `--topology shm` / `VERTEBRA_TOPOLOGY=shm` | Spawns separate Python worker processes connected to the Rust server over shared memory. Ideal for multi-process scaling on standard GIL Python. |
 
 ## Server Environment Variables
 
-`vtb run` and `vtb dev` populate `ServerLaunchEnv` and export the following runtime environment variables to the Rust HTTP ingress and Python workers:
+`vtb run` and `vtb dev` export the following runtime environment variables to the Rust HTTP server and Python workers:
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `VERTEBRA_APP` | - | Application import path (`module:attribute`). |
 | `VERTEBRA_HOST` | `"127.0.0.1"` | Bind address for the HTTP listener. |
 | `VERTEBRA_PORT` | `"8000"` | TCP/UDP port for HTTP/1.1, HTTP/2, and optional HTTP/3. |
-| `VERTEBRA_TOPOLOGY` | `"auto"` -> `"shm"` (`workers > 1` on GIL POSIX) or `"embedded"` | Execution topology (`auto`, `embedded`, or `shm`). |
+| `VERTEBRA_TOPOLOGY` | `"auto"` | Worker mode (`auto`, `embedded`, or `shm`). |
 | `VERTEBRA_WORKERS` | `"0"` (`embedded`) / `"1"` (`shm`) | Worker process count (`0` runs in-process). |
-| `VERTEBRA_THREADS` | CPU quota | Tokio runtime worker thread count (automatically respects container cgroup v1/v2 quotas via `CgroupQuota.effective_cpu_count()`). |
+| `VERTEBRA_THREADS` | CPU quota | Rust HTTP worker thread count (automatically respects container CPU limits). |
 | `VERTEBRA_LOG_LEVEL` | `"info"` | Log level (`debug`, `info`, `warning`, `error`). |
 | `PYTHON_JIT` | - | Set to `"1"` or `"0"` when `--jit` / `--no-jit` is passed to `vtb run`. |
+| `VERTEBRA_STRICT_FREE_THREADING` | `"0"` | Set to `"1"` to fail startup if an imported C extension re-enables the GIL on `3.14t`/`3.15t`. |
 
-## Backpressure & Admission Control Variables
+## Backpressure & Load Shedding Variables
 
-When `BackpressureController` is enabled on the ingress dispatcher, tune admission control and circuit breaking with:
+Tune request queueing and circuit breaking on the HTTP server with:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `VERTEBRA_BP_MAX_IN_FLIGHT` | `1024` | Maximum concurrent in-flight request permits before queueing. |
-| `VERTEBRA_BP_MAX_QUEUE_DEPTH` | `1024` | Maximum queued waiters before immediate `503 Service Unavailable` load shedding. |
-| `VERTEBRA_BP_MAX_QUEUE_TIME_MS` | `100` | Maximum queue wait duration in milliseconds before `503`. |
-| `VERTEBRA_BP_CB_FAILURE_RATE` | `0.5` | Failure ratio (`0.0`–`1.0`) that trips the circuit breaker to `Open` (`429`). |
-| `VERTEBRA_BP_CB_MIN_SAMPLES` | `20` | Minimum completed requests in the sliding window before circuit evaluation. |
-| `VERTEBRA_BP_CB_WINDOW_MS` | `10000` | Sliding window duration (ms) for failure decay and `Open` -> `HalfOpen` transition. |
-| `VERTEBRA_BP_CB_HALF_OPEN_PROBES` | `5` | Consecutive successful probes in `HalfOpen` required to close the circuit. |
+| `VERTEBRA_BP_MAX_IN_FLIGHT` | `1024` | Maximum concurrent active requests before queueing. |
+| `VERTEBRA_BP_MAX_QUEUE_DEPTH` | `1024` | Maximum queued requests before returning `503 Service Unavailable`. |
+| `VERTEBRA_BP_MAX_QUEUE_TIME_MS` | `100` | Maximum queue wait time in milliseconds before returning `503`. |
+| `VERTEBRA_BP_CB_FAILURE_RATE` | `0.5` | Error rate (`0.0`–`1.0`) that trips the circuit breaker (`429`). |
+| `VERTEBRA_BP_CB_MIN_SAMPLES` | `20` | Minimum completed requests in the window before evaluating the error rate. |
+| `VERTEBRA_BP_CB_WINDOW_MS` | `10000` | Sliding window duration (ms) before the circuit breaker tests recovery. |
+| `VERTEBRA_BP_CB_HALF_OPEN_PROBES` | `5` | Consecutive successful probe requests required to close the circuit breaker. |
 
-## Container & Cgroup Awareness
+## Container CPU & Memory Detection
 
-Vertebra inspects Linux cgroup v2 (`/sys/fs/cgroup/cpu.max`, `memory.max`) and cgroup v1 quotas at startup via `vertebra.server.platform.CgroupQuota` and `ShmAllocationPolicy`:
+Vertebra reads Linux cgroup v2 (`/sys/fs/cgroup/cpu.max`, `memory.max`) and cgroup v1 limits at startup:
 
-- **CPU Sizing**: Defaults `VERTEBRA_THREADS` to the container's effective CPU ceiling rather than the host node's physical core count.
-- **SHM Ring Sizing**: Verifies `/dev/shm` free capacity before allocating shared-memory rings and falls back cleanly when container `/dev/shm` mounts are constrained (such as Docker's default `64 MiB`).
+- **CPU Sizing**: Defaults `VERTEBRA_THREADS` to the container's CPU limit rather than the host node's total core count.
+- **Shared-Memory Sizing**: Checks available `/dev/shm` space before allocating shared memory and falls back cleanly when container `/dev/shm` mounts are small (such as Docker's default `64 MiB`).

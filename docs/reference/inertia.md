@@ -30,7 +30,22 @@ Server-driven single-page application primitives for Inertia v3, pooled QuickJS 
       heading_level: 4
       members: false
 
+::: vertebra.framework.inertia.DeepMergeProp
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.framework.inertia.OnceProp
+    options:
+      heading_level: 4
+      members: false
+
 ::: vertebra.framework.inertia.ScrollProp
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.framework.inertia.OptionalProp
     options:
       heading_level: 4
       members: false
@@ -51,7 +66,17 @@ Server-driven single-page application primitives for Inertia v3, pooled QuickJS 
     options:
       heading_level: 3
 
+::: vertebra.framework.ssr.SidecarSsrClient
+    options:
+      heading_level: 4
+      members: false
+
 ## HTMX Request & Response Helpers (`vertebra.framework.htmx`)
+
+::: vertebra.framework.htmx.HxSwap
+    options:
+      heading_level: 4
+      members: false
 
 ::: vertebra.framework.htmx.HtmxRequest
     options:

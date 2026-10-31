@@ -9,19 +9,19 @@ Full-stack TypeScript SDK (`src/ts/vertebra-client/`) providing typed HTTP reque
 | Import Path | Description |
 | --- | --- |
 | `@vertebra/client` | Root barrel exporting core HTTP, SSE, WebSocket, LiveState, Apex, Arrow, Wasm, HMR, Store, Telemetry, and Agent clients |
-| `@vertebra/client/vite` | Vite plugin and dev-server integration for Vertebra frontends |
-| `@vertebra/client/react` | React 19 hooks and providers for routes, `LiveState`, and SSE streams |
-| `@vertebra/client/vue` | Vue 3.5 composables for reactive `LiveState` and typed API calls |
-| `@vertebra/client/svelte` | Svelte 5 stores and runes integration for `LiveState` and HTTP routes |
-| `@vertebra/client/angular` | Angular injectable services and signal adapters |
-| `@vertebra/client/htmx` | HTMX extension helpers and CSRF/trace header injectors |
+| `@vertebra/client/vite` | Vite plugin (`vitePlugin`) for Vertebra asset bundling, SSR entrypoints, and typegen |
+| `@vertebra/client/react` | React context provider (`ClientProvider`) and typed HTTP query/mutation hooks (`useQuery`, `useMutation`) |
+| `@vertebra/client/vue` | Vue 3 provider (`provideClient`) and typed query/mutation composables (`useQuery`, `useMutation`) |
+| `@vertebra/client/svelte` | Svelte context helpers (`setClient`, `getClient`) and query/mutation stores (`createQuery`, `createMutation`) |
+| `@vertebra/client/angular` | Angular client service (`ClientService`) and query/mutation helpers (`injectQuery`, `injectMutation`) |
+| `@vertebra/client/htmx` | HTMX request header and JSON payload helper (`initHtmx`) |
 | `@vertebra/client/store` | Client-side reactive `SessionStore` and `store` singleton |
 | `@vertebra/client/hmr` | `HotReloadClient`, `initHotReload`, and `ServerMessage` HMR wire protocol |
 | `@vertebra/client/wasm` | `WasmClient`, `WasmClientOptions`, and `WASM_MAGIC_BYTES` loader |
 | `@vertebra/client/arrow` | `ArrowStreamClient`, `ArrowStreamOptions`, and Apache Arrow IPC stream constants |
 | `@vertebra/client/live` | `LiveStateClient`, `HybridLogicalClock`, `OfflineDeltaQueue`, `StateOpcode`, and FNV-1a hashing |
 | `@vertebra/client/apex` | `ApexRegion`, `ApexOfflineOutbox`, and Oracle APEX island hydration descriptors |
-| `@vertebra/client/telemetry` | W3C `TraceContext` (`traceparent` / `tracestate`) propagation |
+| `@vertebra/client/telemetry` | W3C `TraceContext` (`traceparent`) parser, generator, and header injector |
 | `@vertebra/client/agent` | `McpClient`, `A2aClient`, `AgentStreamClient`, and `WorkflowLiveSubscriber` |
 
 ## HTTP Client, Retries & Error Hierarchy
@@ -44,7 +44,7 @@ import {
 
 | Export | Kind | Description |
 | --- | --- | --- |
-| `HttpClient` | Class | Type-safe fetch client with automatic JSON serialization, retry backoff, and W3C trace injection. |
+| `HttpClient` | Class | Type-safe fetch client with automatic JSON serialization, timeout handling, and retry backoff (`baseURL`). |
 | `ClientConfig` | Type | Base URL, default headers, timeout, and `RetryConfig` options for `HttpClient`. |
 | `RetryConfig` | Type | Maximum attempts, base delay, jitter, and retryable HTTP status codes. |
 | `RouteResponse` | Type | Typed response wrapper pairing HTTP status, headers, and decoded payload. |
@@ -109,7 +109,7 @@ import {
 | `LiveStateClient` | Class | Synchronizes component state with `vertebra.framework.live.LiveState` over binary delta frames. |
 | `LiveStateListener` | Type | Listener callback invoked whenever a state snapshot or delta patch is applied. |
 | `StateDeltaMessage` | Type | Decoded state transition message containing `StateOpcode`, field hash, and HLC timestamp. |
-| `StateOpcode` | Const | Numeric opcodes (`SET`, `DELETE`, `INCREMENT`, `APPEND`, `SNAPSHOT`) for binary state deltas. |
+| `StateOpcode` | Const | Numeric opcodes (`FieldSet`, `FieldDelete`, `ObjectReplace`, `SyncRequest`, `SyncResponse`, `ActionCall`, `ActionResult`, `BatchPatch`) for binary state deltas. |
 | `StateOpcodeValue` | Type | Union of valid `StateOpcode` numeric values. |
 | `HybridLogicalClock` | Class | Monotonic physical + logical timestamp generator for causal ordering of offline mutations. |
 | `OfflineDeltaQueue` | Class | Persistent queue buffering local state mutations while disconnected. |
@@ -192,12 +192,23 @@ import {
 
 | Export | Kind | Description |
 | --- | --- | --- |
-| `ArrowStreamClient` | Class | Streams binary Apache Arrow IPC record batches over HTTP with zero JSON parsing overhead. |
-| `ArrowStreamOptions` | Type | Request headers, abort signal, and batch callback options for `ArrowStreamClient`. |
+| `ArrowStreamClient` | Class | Fetches binary Apache Arrow IPC streams (`fetchBytes(): Promise<Uint8Array>`) over HTTP. |
+| `ArrowStreamOptions` | Type | `endpoint` URL and custom request `headers` options for `ArrowStreamClient`. |
 | `ARROW_STREAM_MIME` | Const | MIME type constant (`application/vnd.apache.arrow.stream`). |
 | `ARROW_FILE_MAGIC` | Const | 6-byte `ARROW1` magic header for Arrow IPC files. |
 | `ARROW_CONTINUATION_MARKER` | Const | `0xFFFFFFFF` continuation marker for Arrow IPC message framing. |
 | `WasmClient` | Class | Fetches, validates, compiles, and instantiates WebAssembly modules in the browser. |
 | `WasmClientOptions` | Type | Import object, memory bounds, and caching options for `WasmClient`. |
 | `WASM_MAGIC_BYTES` | Const | 4-byte `\0asm` binary magic header verified before compilation. |
-| `TraceContext` | Class | W3C Trace Context (`traceparent` and `tracestate`) parser, generator, and header injector. |
+| `TraceContext` | Class | W3C Trace Context (`traceparent`) parser, generator, and header injector. |
+
+## Frontend Framework Adapters (`/vite`, `/react`, `/vue`, `/svelte`, `/angular`, `/htmx`)
+
+| Subpath | Exports | Description |
+| --- | --- | --- |
+| `@vertebra/client/vite` | `vitePlugin`, `VertebraViteOptions` | Vite plugin configuring client/SSR entrypoints, hot reload, and automatic `vtb js generate-types` runs. |
+| `@vertebra/client/react` | `ClientProvider`, `useClient`, `useQuery`, `useMutation` | React context provider and typed data-fetching and mutation hooks backed by `HttpClient`. |
+| `@vertebra/client/vue` | `provideClient`, `useClient`, `useQuery`, `useMutation` | Vue 3 dependency injection helpers and reactive query/mutation composables. |
+| `@vertebra/client/svelte` | `setClient`, `getClient`, `createQuery`, `createMutation` | Svelte context helpers and reactive query/mutation stores. |
+| `@vertebra/client/angular` | `ClientService`, `injectQuery`, `injectMutation` | Angular injectable HTTP client wrapper and reactive query/mutation helpers. |
+| `@vertebra/client/htmx` | `initHtmx`, `HtmxConfig` | Attaches custom headers and `Content-Type: application/json` mutation encoding to HTMX requests. |

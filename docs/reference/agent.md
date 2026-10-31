@@ -17,6 +17,16 @@ Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPRegistry`, `MCPConfi
     options:
       heading_level: 3
 
+::: vertebra.agent.runtime.ConfirmationGate
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.agent.core.schema.Tool
+    options:
+      heading_level: 4
+      members: false
+
 ## Model Context Protocol (`vertebra.agent.mcp`)
 
 ::: vertebra.agent.mcp.models.MCPConfig
@@ -38,7 +48,12 @@ Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPRegistry`, `MCPConfi
       heading_level: 4
       members: false
 
-## Agent-to-Agent Protocol (`vertebra.agent.a2a`)
+## Agent-to-Agent Protocol & Bridges (`vertebra.agent.a2a`, `vertebra.agent.bridges`)
+
+::: vertebra.agent.a2a.models.AgentCard
+    options:
+      heading_level: 4
+      members: false
 
 ::: vertebra.agent.a2a.service.A2AConfig
     options:
@@ -49,7 +64,27 @@ Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPRegistry`, `MCPConfi
     options:
       heading_level: 3
 
-## Agent Workflows & Session Stores
+::: vertebra.agent.bridges.McpToolBridge
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.agent.bridges.A2aAgentBridge
+    options:
+      heading_level: 4
+      members: false
+
+## SpecTree, Workflows & Session Stores
+
+::: vertebra.agent.spec.SpecTree
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.agent.workflow.DynamicWorkflow
+    options:
+      heading_level: 4
+      members: false
 
 ::: vertebra.agent.workflow.WorkflowEngine
     options:
@@ -58,3 +93,18 @@ Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPRegistry`, `MCPConfi
 ::: vertebra.agent.sessions.MemorySessionStore
     options:
       heading_level: 3
+
+::: vertebra.agent.sessions.SQLSpecSessionStore
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.agent.sessions.AlchemySessionStore
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.agent.sessions.ObjectStoreSessionStore
+    options:
+      heading_level: 4
+      members: false
