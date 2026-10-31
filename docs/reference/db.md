@@ -4,6 +4,7 @@ Native database configurations, synchronous and asynchronous drivers, single-RTT
 
 | Category | Classes | Highlights |
 | --- | --- | --- |
+| **SQLSpec Adapters (Litestar)** | `PostgresAsyncConfig`, `MysqlAsyncConfig`, `SqliteAsyncConfig`, `OracleAsyncConfig`, `MssqlAsyncConfig`, `DuckdbAsyncConfig` | Canonical Litestar adapter configurations (`vertebra.extensions.sqlspec.adapters`) backed by native Rust drivers and connection leasing |
 | **Registry & CTE Pipelines** | `DatabaseRegistry`, `QueryPipeline`, `CteStep`, `RelOverlay`, `ArrowCursor` | Named driver management, single-RTT read-your-own-writes CTE compilation, and zero-copy Arrow IPC cursors |
 | **Relational & OLAP Configs** | `PostgresConfig`, `MysqlConfig`, `SqliteConfig`, `OracleConfig`, `MssqlConfig`, `DuckdbConfig` | Pooler-aware statement caching, WAL/mmap pragmas, Oracle 26ai `VECTOR`/`OSON` & Cloud Wallets, TDS 7.4 `@P1` rewriting, and DuckDB Arrow streaming |
 | **RESP3 & Federated SQL** | `RedisConfig`, `ValkeyConfig`, `DataFusionEngine` | RESP3 `HELLO 3` client-side cache invalidation, Cluster/Sentinel routing, and cross-engine SQL federation |
@@ -42,6 +43,40 @@ Native database configurations, synchronous and asynchronous drivers, single-RTT
       members: false
 
 ::: vertebra._vertebra.ArrowCursor
+    options:
+      heading_level: 4
+      members: false
+
+## SQLSpec Adapters (`vertebra.extensions.sqlspec.adapters`)
+
+First-class SQLSpec adapter configurations connecting Litestar applications to Vertebra's native Rust drivers.
+
+::: vertebra.extensions.sqlspec.adapters.PostgresAsyncConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.sqlspec.adapters.MysqlAsyncConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.sqlspec.adapters.SqliteAsyncConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.sqlspec.adapters.OracleAsyncConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.sqlspec.adapters.MssqlAsyncConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.sqlspec.adapters.DuckdbAsyncConfig
     options:
       heading_level: 4
       members: false

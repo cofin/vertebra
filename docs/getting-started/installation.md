@@ -4,16 +4,29 @@ Vertebra supports **Python 3.12 through 3.15**, including free-threaded (**GIL-d
 
 ## Install the Python Package
 
-Install `vertebra-core` into your project environment with `uv`:
+Install `vertebra-core` into your project environment:
 
-```bash
-uv add vertebra-core
-```
+=== "uv"
+    ```bash
+    uv add vertebra-core
+    ```
+=== "pip"
+    ```bash
+    pip install vertebra-core
+    ```
+=== "pdm"
+    ```bash
+    pdm add vertebra-core
+    ```
+=== "poetry"
+    ```bash
+    poetry add vertebra-core
+    ```
 
 Verify the installation and `vtb` CLI entrypoint:
 
 ```bash
-uv run vtb --help
+vtb --help
 ```
 
 ## Optional Extras
@@ -36,20 +49,16 @@ uv venv --python 3.14t
 uv sync
 ```
 
-## Install the TypeScript Client SDK
+## TypeScript Client SDK (Native Wheel Distribution)
 
-For full-stack applications using Vite, React, Vue, Svelte, Angular, or HTMX, install `@vertebra/client`:
+Vertebra ships the complete `@vertebra/client` TypeScript SDK directly inside the Python wheel (`vertebra-core`), completely eliminating external NPM registry dependencies:
 
-```bash
-bun add @vertebra/client
-```
-
-## Local Contributor Setup
-
-When developing on the Vertebra repository itself (Rust, Python, and TypeScript):
-
-```bash
-make install   # Set up .venv, install deps, and build debug extensions
-make dev       # Rebuild Rust crates and install debug PyO3 extensions
-make test      # Run Rust, Python, and TypeScript test suites
-```
+- **Browser Applications**: Import directly from the running Vertebra server via native browser ESM without Node.js or `node_modules`:
+  ```html
+  <script type="module" src="/__vertebra/client/index.js"></script>
+  ```
+- **Vite & Full-Stack Projects**: Manage ESM dependencies using `[tool.vtb.js]` in `pyproject.toml` and vendor or link the client bundle into your workspace:
+  ```bash
+  vtb js install
+  ```
+- **Existing NPM/Vite Workspaces (Optional)**: If integrating with an existing external Node.js or Bun build pipeline, the compiled client distribution can also be linked into your project.

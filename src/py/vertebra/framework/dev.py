@@ -187,20 +187,32 @@ class DevMiddleware:
             await self.send_response(send, content.encode("utf-8"), content_type)
             return
 
-        if path == "/__vertebra/client/hmr.js":
-            js_data = None
-            for name in ("server/_js/bundle/hmr.js", "server/_js/bundle/index.js"):
+        if path.startswith("/__vertebra/client/"):
+            rel_client_path = path.removeprefix("/__vertebra/client/")
+            if not rel_client_path:
+                rel_client_path = "index.js"
+
+            candidates = [
+                f"server/_js/bundle/{rel_client_path}",
+                f"server/_js/bundle/{rel_client_path}.js",
+                f"server/_js/bundle/{rel_client_path}/index.js",
+            ]
+            for candidate in candidates:
                 try:
-                    js_data = pkgutil.get_data("vertebra", name)
+                    js_data = pkgutil.get_data("vertebra", candidate)
                     if js_data:
-                        break
+                        content_type = "application/javascript"
+                        if candidate.endswith(".json"):
+                            content_type = "application/json"
+                        elif candidate.endswith(".d.ts"):
+                            content_type = "application/typescript"
+                        await self.send_response(send, js_data, content_type)
+                        return
                 except Exception:
-                    logger.debug("Failed loading HMR client resource %s", name, exc_info=True)
-            if js_data:
-                await self.send_response(send, js_data, "application/javascript")
-                return
-            content = "/* HMR client not found */"
-            await self.send_response(send, content.encode("utf-8"), "application/javascript")
+                    pass
+
+            content = f"/* Vertebra client resource not found: {rel_client_path} */"
+            await self.send_response(send, content.encode("utf-8"), "application/javascript", status=404)
             return
 
         await self.send_response(send, b"Not Found", "text/plain", status=404)

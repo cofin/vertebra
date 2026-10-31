@@ -25,17 +25,24 @@ hide:
 
 ## Install
 
-Install `vertebra-core` with `uv`:
+=== "uv"
+    ```bash
+    uv add vertebra-core
+    ```
+=== "pip"
+    ```bash
+    pip install vertebra-core
+    ```
+=== "pdm"
+    ```bash
+    pdm add vertebra-core
+    ```
+=== "poetry"
+    ```bash
+    poetry add vertebra-core
+    ```
 
-```bash
-uv add vertebra-core
-```
-
-Install the optional `@vertebra/client` TypeScript SDK for frontend applications:
-
-```bash
-bun add @vertebra/client
-```
+The `@vertebra/client` TypeScript SDK is included natively within the wheel distribution and served directly by the server, eliminating external NPM package requirements.
 
 ## First Application
 

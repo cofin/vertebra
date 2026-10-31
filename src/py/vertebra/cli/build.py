@@ -40,12 +40,14 @@ _LEGACY_TARGETS: frozenset[str] = frozenset({"frontend", "backend", "all"})
     "--pgo",
     is_flag=True,
     default=False,
+    hidden=True,
     help="Enable Profile-Guided Optimization metadata during packaging",
 )
 @click.option(
     "--profdata",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
+    hidden=True,
     help="Merged LLVM .profdata file for Rust -Cprofile-use packaging metadata",
 )
 @click.option(

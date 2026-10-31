@@ -2,6 +2,21 @@
 
 The `vtb` command-line interface manages the full lifecycle of a Vertebra project: scaffolding, hot-reload development, production execution, frontend asset bundling, TypeScript client generation, MCP stdio bridges, background queue workers, and standalone binary packaging.
 
+## Running CLI Commands
+
+=== "Direct CLI (Activated Environment)"
+    ```bash
+    vtb --help
+    ```
+=== "uvx (Ad-hoc Execution)"
+    ```bash
+    uvx vertebra-core --help
+    ```
+=== "uv (Project Runner)"
+    ```bash
+    uv run vtb --help
+    ```
+
 ## Common Workflows
 
 ### Scaffold a New Project
@@ -9,7 +24,7 @@ The `vtb` command-line interface manages the full lifecycle of a Vertebra projec
 Create a new project directory with `vtb init`:
 
 ```bash
-uv run vtb init my-service
+vtb init my-service
 ```
 
 ### Development & Production Servers
@@ -17,13 +32,13 @@ uv run vtb init my-service
 Run in development mode with automatic Python reload and frontend HMR:
 
 ```bash
-uv run vtb dev app:app --port 8000
+vtb dev app:app --port 8000
 ```
 
 Run in production mode with multi-worker scale-out (`--workers 4` automatically selects `shm` on standard GIL Python and `embedded` on free-threaded `3.14t`/`3.15t`; pass `--topology embedded` or `--topology shm` to override explicitly) and TLS certificates:
 
 ```bash
-uv run vtb run app:app \
+vtb run app:app \
   --host 0.0.0.0 \
   --port 8443 \
   --workers 4 \
@@ -36,18 +51,20 @@ uv run vtb run app:app \
 Manage frontend dependencies, bundle assets through `vertebra-bundler` (Rolldown/Oxc), and generate end-to-end TypeScript route and DTO types:
 
 ```bash
-uv run vtb js install
-uv run vtb js add zod @vertebra/client
-uv run vtb js build
-uv run vtb js generate-types
+vtb js install
+vtb js add zod
+vtb js build
+vtb js generate-types
 ```
+
+The `@vertebra/client` TypeScript SDK is supplied directly with the Python package distribution and linked automatically without requiring an external NPM install.
 
 ### Background Queue Workers (`vtb workers`)
 
 Run dedicated background task queue and cron workers:
 
 ```bash
-uv run vtb workers run app:app --concurrency 16 --lanes cpu,io,agent
+vtb workers run app:app --concurrency 16 --lanes cpu,io,agent
 ```
 
 ### MCP Stdio-to-HTTP Bridge (`vtb mcp`)
@@ -55,15 +72,15 @@ uv run vtb workers run app:app --concurrency 16 --lanes cpu,io,agent
 Expose a remote or local Vertebra MCP HTTP endpoint over standard input/output for desktop AI hosts:
 
 ```bash
-uv run vtb mcp bridge --url http://127.0.0.1:8000/mcp --timeout 30
+vtb mcp bridge --url http://127.0.0.1:8000/mcp --timeout 30
 ```
 
 ### Standalone Binary Packaging (`vtb build`)
 
-Package your Python application, native extensions, and static assets into a wheel or self-contained PyApp executable:
+Package your Python application, native extensions, and static assets into a relocatable standalone directory or self-contained single-file executable:
 
 ```bash
-uv run vtb build --standalone --onefile
+vtb build --standalone --onefile
 ```
 
 See the complete generated flag reference in the [CLI Reference](../reference/cli.md).

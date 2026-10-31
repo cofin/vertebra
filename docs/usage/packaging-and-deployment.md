@@ -1,13 +1,13 @@
 # Packaging & Deployment
 
-Deploy Vertebra applications as standard Python wheels (`uv run vtb run ...`), containers with automatic CPU and shared-memory sizing, or self-contained standalone and single-file binaries (`StandaloneBuilder`, `OnefileBuilder`).
+Deploy Vertebra applications as standard Python wheels (`vtb run ...`), containers with automatic CPU and shared-memory sizing, or self-contained standalone and single-file binaries (`StandaloneBuilder`, `OnefileBuilder`).
 
 ## Standalone & Single-File Binaries (`vtb build`)
 
 `vertebra.build.packaging` bundles your Python application, compiled Rust extensions (`_vertebra`, `_bundler`, `_storage`), Python Build Standalone runtime, and frontend assets into a relocatable directory (`StandaloneBuilder`) or a self-extracting single-file binary with SHA-256 verification (`OnefileBuilder`):
 
 ```bash
-uv run vtb build --standalone --onefile
+vtb build --standalone --onefile
 ```
 
 Programmatic configuration via `BuildConfig`, `BuildTarget`, `StandaloneBuilder`, and `OnefileBuilder`:
@@ -31,16 +31,12 @@ onefile = OnefileBuilder(project_dir=Path("."), entrypoint=config.app or "app:ap
 Generate TypeScript route types (`TypeScriptGenerator`), Zod or Valibot validation schemas (`ZodGenerator`, `ValibotGenerator`), RPC procedure clients (`ProcedureClientGenerator`), OpenAPI 3.1 specs (`OpenAPIGenerator`), and `.proto` definitions (`ProtobufGenerator`) from your Python routes and `msgspec.Struct` models:
 
 ```bash
-uv run vtb js generate-types
+vtb js generate-types
 ```
 
-## Profile-Guided Optimization (`make build-pgo`)
+## Production Performance & Compiler Optimization
 
-Compile the Rust HTTP server and native extensions with two-phase LLVM Profile-Guided Optimization (`RustPgoConfig`, `run_pgo_pipeline`) to optimize hot dispatch and parser paths:
-
-```bash
-make build-pgo
-```
+Vertebra official release distribution wheels (`vertebra-core`) are pre-compiled and optimized with LLVM Profile-Guided Optimization (PGO) during release CI automation. Applications deployed via standard wheels or `vtb build` inherit these zero-overhead optimizations automatically without requiring manual compiler passes.
 
 ## Container Deployment & Process Supervision
 

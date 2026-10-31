@@ -95,6 +95,7 @@ pub enum BackendConfig {
     Gcs {
         bucket: String,
         service_account_path: Option<String>,
+        service_account_key: Option<String>,
     },
     Azure {
         container: String,
@@ -180,10 +181,14 @@ impl ObjectStoreEngine {
             BackendConfig::Gcs {
                 bucket,
                 service_account_path,
+                service_account_key,
             } => {
                 let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(&bucket);
                 if let Some(sa_path) = service_account_path {
                     builder = builder.with_service_account_path(sa_path);
+                }
+                if let Some(sa_key) = service_account_key {
+                    builder = builder.with_service_account_key(sa_key);
                 }
                 Ok(Self {
                     inner: Arc::new(builder.build()?),
@@ -379,6 +384,7 @@ impl ObjectStoreEngine {
                 Self::new(BackendConfig::Gcs {
                     bucket,
                     service_account_path: opts.get("service_account_path").cloned(),
+                    service_account_key: opts.get("service_account_key").cloned(),
                 })
             }
             "az" | "azure" | "abfs" => {

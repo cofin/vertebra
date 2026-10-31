@@ -33,6 +33,41 @@ registry = StorageRegistry()
 registry.register("uploads", store)
 ```
 
+## Google Cloud Storage & Application Default Credentials (ADC)
+
+Vertebra provides first-class, zero-config integration with Google Cloud Storage (`GcsConfig`). When deployed in Google Cloud environments (Google Kubernetes Engine, Cloud Run, Cloud Functions, Compute Engine) or during local development with `gcloud`, Vertebra automatically resolves credentials via Google Application Default Credentials (ADC) without requiring manual secret configuration:
+
+```python
+import os
+from vertebra.storage import GcsConfig, ObjectStore
+
+store = ObjectStore.from_config(GcsConfig(bucket="app-assets-production"))
+
+sa_store = ObjectStore.from_config(
+    GcsConfig(
+        bucket="app-assets-production",
+        service_account_path="/var/secrets/google/key.json",
+    )
+)
+
+json_store = ObjectStore.from_config(
+    GcsConfig(
+        bucket="app-assets-production",
+        service_account_key=os.environ["GCS_SERVICE_ACCOUNT_JSON"],
+    )
+)
+
+signing_store = ObjectStore.from_config(
+    GcsConfig(
+        bucket="app-assets-production",
+        service_account_email="backend-service@my-project.iam.gserviceaccount.com",
+    )
+)
+```
+
+- **Zero-Config ADC**: Leaving `service_account_path` and `service_account_key` unset activates native Google Application Default Credentials. The underlying Rust runtime (`vertebra-storage` / `object_store::gcp`) discovers credentials from the GCP metadata server or local user credentials automatically.
+- **Keyless V4 Presigning**: Pass `service_account_email` to sign upload and download URLs using Google Cloud IAM's `signBlob` API, eliminating the need to expose long-lived private keys inside runtime containers.
+
 ## Presigned URLs (`SigningConfig`)
 
 Offload large client uploads and downloads directly to your storage origin using `SigningConfig` (`presign_get`, `presign_put`, `verify_presigned_url`), or compute Azure Blob SAS URLs (`SigningConfig.sign_azure_sas`) and OCI RSA-SHA256 request headers (`SigningConfig.sign_oci_headers`):

@@ -1,7 +1,8 @@
-import { copyFileSync, mkdirSync } from "node:fs";
+import { cpSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { defineConfig } from "tsup";
 
+const distDir = path.resolve(__dirname, "dist");
 const pythonBundleDir = path.resolve(__dirname, "../../py/vertebra/server/_js/bundle");
 
 export default defineConfig({
@@ -31,25 +32,14 @@ export default defineConfig({
   treeshake: true,
   external: ["react", "vue", "svelte", "@angular/core", "vite"],
   async onSuccess() {
-    // Custom hook to sync the build to the Python package bundle folder
-    // This allows distributing the library within the Python package.
-    console.log("Build successful. Syncing to Python package bundle...");
+    // Sync the entire compiled dist directory (all subpaths and .d.ts files)
+    // to the Python package bundle folder for native wheel distribution.
+    console.log("Build successful. Syncing full dist to Python package bundle...");
 
     try {
       mkdirSync(pythonBundleDir, { recursive: true });
-
-      // Copy the main bundle and hmr bundle
-      const filesToSync = [
-        ["dist/index.js", "index.js"],
-        ["dist/hmr/index.js", "hmr.js"],
-      ];
-
-      for (const [src, dest] of filesToSync) {
-        const srcPath = path.resolve(__dirname, src);
-        const destPath = path.resolve(pythonBundleDir, dest);
-        copyFileSync(srcPath, destPath);
-        console.log(`Synced ${src} -> ${dest}`);
-      }
+      cpSync(distDir, pythonBundleDir, { recursive: true });
+      console.log(`Synced ${distDir} -> ${pythonBundleDir}`);
     } catch (err) {
       console.error("Failed to sync bundles to Python package:", err);
     }

@@ -1,12 +1,65 @@
 # Databases & Analytics
 
-Vertebra ships native Rust-backed database drivers (`vertebra.db` / `vertebra-db`), single-RTT CTE statement stacking (`QueryPipeline`), zero-sidecar Cloud SQL and AlloyDB dialers, multi-tenant Row-Level Security (`TenantPredicate`), logical replication Change Data Capture (`ChangeFeed`), and Apache Arrow / DataFusion federated analytics (`DataFusionEngine`, `ArrowCursor`) that release the Python GIL during network and disk I/O.
+Vertebra's database architecture is built around first-class integration with **SQLSpec** and **Litestar**. Rather than introducing a custom ORM or proprietary data access pattern, Vertebra leverages SQLSpec (`vertebra.extensions.sqlspec`) as the canonical adapter interface for application data access, session lifecycle, and dependency injection, powered under the hood by native Rust drivers (`vertebra.db` / `vertebra-db`), single-RTT CTE statement stacking (`QueryPipeline`), zero-sidecar Cloud SQL and AlloyDB dialers, and zero-copy Apache Arrow IPC streaming (`ArrowCursor`).
 
-## Architectural Overview
+```mermaid
+flowchart LR
+    A["Litestar Route Handlers"] --> B["SQLSpec Plugin & DI"]
+    B --> C["SQLSpec Adapters\n(Postgres, MySQL, SQLite...)"]
+    C --> D["Vertebra Native Drivers\n(Rust SHM & Broker)"]
+    D --> E[("Databases & Cloud Dialers\n(Cloud SQL, AlloyDB, OLAP)")]
+```
 
-Database access in Vertebra is designed around three latency and concurrency invariants:
+## SQLSpec & Litestar Integration
 
-1. **Single-RTT Statement Stacking (`QueryPipeline`)**: Network round-trips dominate request latency when handlers issue sequential reads and writes. `QueryPipeline` and `RelOverlay` compile multi-step mutations and dependent queries into a single parameterized PostgreSQL CTE statement.
+Vertebra requires SQLSpec adapters for database components. Use `SQLSpecPlugin` with an engine adapter configuration (e.g. `PostgresAsyncConfig`, `MysqlAsyncConfig`, `SqliteAsyncConfig`) to register databases on your Litestar application. The plugin manages connection leasing, shared-memory statement caches, and provides typed sessions directly to route handlers:
+
+```python
+from litestar import Litestar, get
+from vertebra.extensions.sqlspec import SQLSpecPlugin
+from vertebra.extensions.sqlspec.adapters import PostgresAsyncConfig
+
+db_config = PostgresAsyncConfig(
+    url="postgresql://app_user:secret@localhost:5432/production_db",
+    pool_min_size=5,
+    pool_max_size=20,
+)
+
+plugin = SQLSpecPlugin(config=db_config)
+
+
+@get("/orders/{order_id:int}")
+async def get_order(
+    order_id: int,
+    db: PostgresAsyncConfig.driver_type,
+) -> dict:
+    """Fetch order record using injected SQLSpec driver session."""
+    rows = await db.select(
+        "SELECT id, customer_id, total_cents FROM orders WHERE id = :id",
+        {"id": order_id},
+    )
+    return rows[0] if rows else {}
+
+
+app = Litestar(
+    route_handlers=[get_order],
+    plugins=[plugin],
+)
+```
+
+### Native Framework Leverage
+
+All Vertebra framework subsystems leverage SQLSpec adapters directly:
+
+- **AI Agent Sessions (`AgentSessionStore`)**: Persist conversation trajectories and tool calls using `SQLSpecSessionStore` over your configured SQLSpec database.
+- **Transactional Staging (`UploadTracker`)**: Synchronize object storage uploads with SQLSpec database transactions so aborted handlers never leave orphaned blobs.
+- **Replication & Events (`ChangeFeed`, Event Queues)**: Stream change feeds and coordinate worker queues using SQLSpec event store implementations.
+
+## Architectural Invariants
+
+Beneath the SQLSpec adapter layer, Vertebra's native database engine enforces three latency and concurrency invariants:
+
+1. **Single-RTT Statement Stacking (`QueryPipeline`)**: Network round-trips dominate handler latency when code issues sequential reads and writes. `QueryPipeline` and `RelOverlay` compile multi-step mutations and dependent queries into a single parameterized PostgreSQL CTE statement executed in one round-trip.
 2. **Pooler-Safe Connection & Statement Leasing (`DatabaseBroker`, `StatementCache`)**: Across multi-worker deployments (`--topology shm`), workers coordinate connection budgets (`PostgresConfig.compute_worker_pool_budget`) and share compiled query plans in lock-free shared memory (`StatementCache`). When running behind transaction-mode poolers (`PgBouncer`, `PgCat`, `pgdog`), `PostgresConfig.effective_statement_cache_size` automatically disables connection-pinned prepared statements unless `protocol_level_pooler_cache=True` is set.
 3. **Zero-Copy Analytical Streaming (`ArrowCursor`)**: Result sets exceeding `ARROW_SHM_THRESHOLD_ROWS` (`256` rows or `64 KiB`) bypass per-row Python tuple allocation and stream directly as Apache Arrow IPC buffers in shared memory (`write_arrow_shm`, `read_arrow_shm`).
 
@@ -46,36 +99,23 @@ sql, params = pipeline.compile()
 
 - **`RelOverlay`**: Generates a `UNION ALL` / `NOT IN` CTE view over a physical `base_table` and earlier `INSERT ... RETURNING *` or `DELETE ... RETURNING id` steps so subsequent CTE steps in the same statement observe uncommitted mutations immediately.
 - **`QueryPipeline.build_jsonb_object`**: Automatically chunks wide column projections into concatenated `jsonb_build_object(...) || jsonb_build_object(...)` expressions so queries never trip PostgreSQL's 100-argument function limit (`max_pairs_per_call=50`).
-- **SQLSpec Statement Stacking & Batching**: When using [`SQLSpecPlugin`](extensions.md) (`vertebra.extensions.sqlspec`), SQLSpec `StatementStack` pipelines and `execute_many` batches run over shared-memory leases and cached prepared statement plans (`StatementCache`).
+- **SQLSpec Statement Stacking**: When using [`SQLSpecPlugin`](extensions.md) (`vertebra.extensions.sqlspec`), SQLSpec `StatementStack` pipelines and `execute_many` batches run over shared-memory leases and cached prepared statement plans (`StatementCache`).
 
-## Native Database Drivers & Registry (`vertebra.db`)
+## Native Database Drivers & Adapters Matrix
 
-`vertebra.db` provides synchronous and asynchronous drivers across 9 relational, analytical, and key-value engines managed through `DatabaseRegistry`:
+`vertebra.db` and `vertebra.extensions.sqlspec.adapters` provide synchronous and asynchronous drivers across 9 relational, analytical, and key-value engines:
 
-| Engine | Config Class | Sync / Async Drivers | Key Capabilities |
-| --- | --- | --- | --- |
-| **PostgreSQL** | `PostgresConfig` | `SyncPostgresDriver`, `AsyncPostgresDriver` | Binary `PGCOPY`, zero-copy `JSONB` (`strip_pg_jsonb_header`), PgBouncer/PgCat/pgdog pooler modes, `QueryPipeline` |
-| **MySQL / MariaDB** | `MysqlConfig` | `SyncMysqlDriver`, `AsyncMysqlDriver` | Bounded connection pools, binary prepared statements, Cloud SQL `:3307` dialer integration |
-| **SQLite / libSQL** | `SqliteConfig` | `SyncSqliteDriver`, `AsyncSqliteDriver` | WAL mode, `mmap_size`, SQLite 3.45+ binary `JSONB`, SHM single-writer/multi-reader leasing |
-| **Oracle 26ai** | `OracleConfig` | `SyncOracleDriver`, `AsyncOracleDriver` | Pure-Rust Thin TNS/TTC wire framing, 26ai `VECTOR` (`encode_vector_f32`), `OSON` binary JSON, `OracleWallet` |
-| **SQL Server** | `MssqlConfig` | `SyncMssqlDriver`, `AsyncMssqlDriver` | TDS 7.4 framing, state-machine `?` / `$1` to `@P1` parameter rewriter, `ArrowCursor` |
-| **DuckDB** | `DuckdbConfig` | `SyncDuckdbDriver`, `AsyncDuckdbDriver` | Embedded OLAP, Parquet/HTTP metadata caching, zero-copy Arrow IPC via shared memory |
-| **Redis** | `RedisConfig` | `SyncRedisDriver`, `AsyncRedisDriver` | RESP3 (`HELLO 3`), `CLIENT TRACKING` local cache invalidation, Sentinel, Cluster (`CRC16-XMODEM`) |
-| **Valkey** | `ValkeyConfig` | `SyncValkeyDriver`, `AsyncValkeyDriver` | Valkey 8.0+/9.0+ RESP3 client-side caching, Cluster/Sentinel, GCP Memorystore IAM auth |
-| **DataFusion** | `DataFusionConfig` | `DataFusionEngine` | Federated SQL across PostgreSQL, MySQL, SQLite, DuckDB, and Parquet/CSV object storage |
-
-```python
-from vertebra.db import DatabaseRegistry, SqliteConfig, SyncSqliteDriver
-
-registry = DatabaseRegistry()
-registry.register("default", SqliteConfig(path=":memory:"))
-
-db = SyncSqliteDriver(SqliteConfig(path=":memory:"))
-db.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
-db.execute("INSERT INTO items (name) VALUES (?)", ("bolt",))
-rows = db.select("SELECT id, name FROM items")
-db.close()
-```
+| Engine | SQLSpec Adapter Config | Native Config Class | Sync / Async Drivers | Key Capabilities |
+| --- | --- | --- | --- | --- |
+| **PostgreSQL** | `PostgresAsyncConfig`, `PostgresSyncConfig` | `PostgresConfig` | `SyncPostgresDriver`, `AsyncPostgresDriver` | Binary `PGCOPY`, zero-copy `JSONB` (`strip_pg_jsonb_header`), PgBouncer/PgCat/pgdog pooler modes, `QueryPipeline` |
+| **MySQL / MariaDB** | `MysqlAsyncConfig`, `MysqlSyncConfig` | `MysqlConfig` | `SyncMysqlDriver`, `AsyncMysqlDriver` | Bounded connection pools, binary prepared statements, Cloud SQL `:3307` dialer integration |
+| **SQLite / libSQL** | `SqliteAsyncConfig`, `SqliteSyncConfig` | `SqliteConfig` | `SyncSqliteDriver`, `AsyncSqliteDriver` | WAL mode, `mmap_size`, SQLite 3.45+ binary `JSONB`, SHM single-writer/multi-reader leasing |
+| **Oracle 26ai** | `OracleAsyncConfig`, `OracleSyncConfig` | `OracleConfig` | `SyncOracleDriver`, `AsyncOracleDriver` | Pure-Rust Thin TNS/TTC wire framing, 26ai `VECTOR` (`encode_vector_f32`), `OSON` binary JSON, `OracleWallet` |
+| **SQL Server** | `MssqlAsyncConfig`, `MssqlSyncConfig` | `MssqlConfig` | `SyncMssqlDriver`, `AsyncMssqlDriver` | TDS 7.4 framing, state-machine `?` / `$1` to `@P1` parameter rewriter, `ArrowCursor` |
+| **DuckDB** | `DuckdbAsyncConfig`, `DuckdbSyncConfig` | `DuckdbConfig` | `SyncDuckdbDriver`, `AsyncDuckdbDriver` | Embedded OLAP, Parquet/HTTP metadata caching, zero-copy Arrow IPC via shared memory |
+| **Redis** | — | `RedisConfig` | `SyncRedisDriver`, `AsyncRedisDriver` | RESP3 (`HELLO 3`), `CLIENT TRACKING` local cache invalidation, Sentinel, Cluster (`CRC16-XMODEM`) |
+| **Valkey** | — | `ValkeyConfig` | `SyncValkeyDriver`, `AsyncValkeyDriver` | Valkey 8.0+/9.0+ RESP3 client-side caching, Cluster/Sentinel, GCP Memorystore IAM auth |
+| **DataFusion** | — | `DataFusionConfig` | `DataFusionEngine` | Federated SQL across PostgreSQL, MySQL, SQLite, DuckDB, and Parquet/CSV object storage |
 
 ## Cloud SQL & AlloyDB Dialers (`vertebra.db.dialer`)
 

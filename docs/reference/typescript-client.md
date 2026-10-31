@@ -2,6 +2,14 @@
 
 Full-stack TypeScript SDK (`src/ts/vertebra-client/`) providing typed HTTP requests, retries, SSE and WebSocket streaming, binary `LiveState` synchronization, Oracle APEX island bridges, Apache Arrow streaming, WebAssembly execution, MCP/A2A agent clients, and framework adapters.
 
+## Distribution Model: Zero-NPM Wheel-Native Packaging
+
+`@vertebra/client` is packaged and distributed directly within the `vertebra-core` Python wheel (`src/py/vertebra/server/_js/bundle/`), eliminating the requirement to publish to or install from the external NPM registry:
+
+- **Native Runtime Serving**: When running Vertebra applications (`vtb run` or `App`), the runtime serves all 15 ESM modules dynamically under `/__vertebra/client/*` (e.g. `/__vertebra/client/index.js`, `/__vertebra/client/react/index.js`, `/__vertebra/client/live/index.js`) with proper MIME types and cached HTTP headers.
+- **Type Linking (`vtb js`)**: `vtb js install` vendors and links the wheel's TypeScript declarations (`.d.ts`) into `.vertebra/client` and configures `.vertebra/importmap.json` for IDE autocomplete without Node or NPM.
+- **Vite & External Bundler Compatibility**: The package preserves full `package.json` subpath exports and ESM semantics for projects using external Vite, Webpack, or Node.js toolchains.
+
 ## Package Subpath Exports (`package.json`)
 
 `@vertebra/client` exposes 15 tree-shakeable ESM entry points:

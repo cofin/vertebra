@@ -21,7 +21,7 @@ result = Bundler().build(config)
 Or run from the CLI:
 
 ```bash
-uv run vtb js build
+vtb js build
 ```
 
 ## Inertia v3 Protocol & Prop Types (`vertebra.framework.inertia`)
@@ -104,9 +104,24 @@ response = HtmxResponse(
 )
 ```
 
-## TypeScript Client SDK & Framework Adapters (`@vertebra/client`)
+## TypeScript Client SDK & Distribution (`@vertebra/client`)
 
-Generate TypeScript route contracts with `vtb js generate-types` and consume them across `@vertebra/client` and its React, Vue, Svelte, Angular, HTMX, and Vite subpaths:
+### Wheel-Native Zero-NPM Distribution (Default)
+
+Vertebra bundles `@vertebra/client` directly inside the Python wheel (`vertebra-core`). This eliminates the requirement to publish to or install from the external NPM registry, removing supply-chain attack vectors, package-name squatting, and multi-registry release desynchronization:
+
+- **Browser & Vanilla ESM**: When running Vertebra's server (`vtb run` or `App`), the client bundle and all 15 subpath entrypoints are served natively under `/__vertebra/client/*` (e.g. `/__vertebra/client/index.js`, `/__vertebra/client/react/index.js`, `/__vertebra/client/live/index.js`). In vanilla HTML, import modules directly without Node or NPM:
+  ```html
+  <script type="module">
+    import { HttpClient } from "/__vertebra/client/index.js";
+    const client = new HttpClient({ baseURL: "/" });
+  </script>
+  ```
+- **Type Generation & Linking (`vtb js`)**: Run `vtb js install` to link the packaged TypeScript declaration files (`.d.ts`) into `.vertebra/client` and generate `.vertebra/importmap.json` for IDE autocomplete and type checking.
+
+### External Tooling & Vite Integration (Optional)
+
+For teams with existing Node.js pipelines or custom build workflows, `@vertebra/client` preserves standard `package.json` subpath exports and full compatibility with Vite, Webpack, and external bundlers:
 
 ```typescript
 import { HttpClient } from "@vertebra/client";

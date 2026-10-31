@@ -49,7 +49,7 @@ registry.register_resource(list_warehouses)
 - **Stdio-to-HTTP Bridge (`vtb mcp bridge` / `run_stdio_http_bridge`)**: Connect stdio-only MCP desktop clients to remote Vertebra HTTP/SSE MCP endpoints with W3C trace header propagation.
 
 ```bash
-uv run vtb mcp bridge --url http://127.0.0.1:8000/mcp
+vtb mcp bridge --url http://127.0.0.1:8000/mcp
 ```
 
 ## Agent-to-Agent Protocol (`vertebra.agent.a2a`)
