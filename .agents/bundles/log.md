@@ -10,6 +10,14 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-10-31] flow-archive | Completed and Archived Zensical Polyglot Documentation Pipeline & Auto-SHM Topology (`zensical_docs_20261031`)
+
+- Completed and archived Flow `zensical_docs_20261031` (7 tasks across Phases 1–4) plus automatic `shm` topology selection for multi-worker (`--workers > 1`) non-free-threaded Python runtimes.
+- Synthesized OKF v0.2 knowledge across `product/tech-stack.md`, `knowledge/workflow.md`, and `knowledge/architecture/runtime/topologies-and-embedding.md`:
+  - `product/tech-stack.md` & `knowledge/workflow.md`: Documented the Zensical documentation pipeline (`zensical.toml`, `docs/stylesheets/extra.css`, Litestar Gold `#EDB641` + Navy `#202235` branding assets in `docs/assets/`, `tools/docs/{scan_public_docstrings,generate_cli_docs,postbuild,verify_docs_artifacts}.py`, custom Griffe `msgspec.Struct` templates, runnable `docs/examples/` tested by `src/py/tests/unit/docs/test_examples.py`, `make docs` / `make docs-serve` / `make docs-check` / `make docs-rust`, and `.github/workflows/docs.yml`).
+  - `knowledge/architecture/runtime/topologies-and-embedding.md`: Documented `ServerLaunchEnv.to_environ()` (`src/py/vertebra/cli/_launch.py`) and `ServerConfig::from_env()` (`src/rs/vertebra-http/src/config.rs`) automatic `shm` topology selection when `workers > 1` on POSIX standard GIL Python (`not is_free_threaded_runtime()`), preserving `embedded` for single-worker (`<= 1`) or free-threaded (`3.14t`/`3.15t`) runtimes and honoring explicit `--topology embedded|shm` overrides.
+- Contracted `.agents/bundles/specs/` back to lazy (`.gitkeep` only).
+
 ## [2026-10-29] flow-resynthesize | Added Release Workflow, `bump-my-version` Automation, and Initial 0.1.0 Changelog
 
 - Configured `bump-my-version` in `pyproject.toml` (`[tool.bumpversion]`) to synchronize release versions across `pyproject.toml`, `src/py/vertebra/__init__.py`, `src/rs/Cargo.toml`, `src/rs/vertebra-bundler/pyproject.toml`, `src/rs/vertebra-storage/pyproject.toml`, and `src/ts/vertebra-client/package.json`.

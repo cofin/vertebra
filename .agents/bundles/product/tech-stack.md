@@ -17,7 +17,9 @@ sources:
   - resource: src/ts/vertebra-client/tsup.config.ts
   - resource: src/py/vertebra/cli/__init__.py
   - resource: .github/workflows/ci.yml
+  - resource: .github/workflows/docs.yml
   - resource: .github/workflows/release.yaml
+  - resource: zensical.toml
   - resource: Makefile
 ---
 
@@ -35,7 +37,7 @@ sources:
   - `vertebra-storage`: PyO3 `0.30.1` extension `vertebra._storage` (`object_store 0.13.2` with `aws`/`gcp`/`azure`/`http`, `reqwest 0.13` with `rustls`, `rsa 0.9`, `hmac 0.12`, `sha2 0.10`, `chrono 0.4`, `url 2.5`, `base64 0.22`).
   - `vertebra-db`: rlib `vertebra_db` (`vertebra-core`, `url 2.5`, `sha2 0.10`, `base64 0.22`, `bytes 1.12`, `serde_json 1.0`, `tokio 1.54`).
 - **TypeScript (`@vertebra/client` `0.1.0`)**: managed by `bun`, bundled with `tsup ^8.5.1`, type-checked with `typescript ^5.9.3`, linted with `@biomejs/biome ^2.6.4`, tested with `vitest ^5.0.5`. Optional peer dependencies are `react ^19.0.0`, `vue ^3.5.0`, `@angular/core ^22.0.0`, and `vite ^8.0.0`; `svelte ^5.57.2` is a dev dependency only, and the HTMX adapter has no dependency.
-- **Verification Toolchain**: `ruff` (lint + format, `line-length = 120`, `target-version = "py312"`, rules `E,F,I,UP,B,SIM`, covering `src/py/vertebra`, `src/py/tests`, `tools/scripts`, and `tools/pgo`), `mypy` (`strict = true`, `files = ["src/py/vertebra", "tools/scripts", "tools/pgo"]`) + `mypy.stubtest` (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`), `pytest` + `pytest-cov`, `cargo fmt`, `cargo clippy --features tls,compression -- -D warnings`, `cargo test`, `bunx biome check`, `criterion 0.8` microbenchmarks, and the `tools.benchmarks` harness.
+- **Verification & Documentation Toolchain**: `ruff` (lint + format, `line-length = 120`, `target-version = "py312"`, rules `E,F,I,UP,B,SIM`, covering `src/py/vertebra`, `src/py/tests`, `tools/scripts`, `tools/pgo`, `tools/docs`, and `docs/examples`), `mypy` (`strict = true`, `files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "docs/examples"]`) + `mypy.stubtest` (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`), `pytest` + `pytest-cov`, `zensical` (`>=0.0.33`) + `mkdocstrings-python` (`>=2.0.1`) + `griffe-fieldz` (`>=0.3.0`) + `griffe-inherited-docstrings` (`>=1.1.1`) (`tools/docs/`), `cargo fmt`, `cargo clippy --features tls,compression -- -D warnings`, `cargo test`, `bunx biome check`, `criterion 0.8` microbenchmarks, and the `tools.benchmarks` harness.
 <!-- truth: end -->
 
 ## Rust Workspace Crates (`src/rs/Cargo.toml`)
