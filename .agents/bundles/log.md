@@ -10,6 +10,15 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-10-31] flow-archive | Completed and Archived Documentation Branding, Left Sidebar Formatting, Information Architecture & Educational Content (`fix-docs-organization-and-branding`)
+
+- Completed and archived Flow `fix-docs-organization-and-branding` (6 tasks across Phases 1–2):
+  - `zensical.toml`, `src/rs/Cargo.toml`, & `tools/docs/verify_docs_artifacts.py`: Replaced `litestar-org/vertebra`, `vertebra-io/vertebra`, and `https://vertebra.litestar.dev/` with `cofin/vertebra` (`https://github.com/cofin/vertebra` and `https://cofin.github.io/vertebra/`) and added legacy branding strings and empty attribute row patterns to `verify_docs_artifacts.py`.
+  - `docs/stylesheets/extra.css` & `tools/docs/templates/python/material/{summary,docstring}/attributes.html.jinja`: Restored consistent 2px left vertical guide bars across top-level and nested `.doc-contents` blocks (overriding Zensical's `(0, 2, 1)` `div.doc-contents:not(.first)` rule with `--vertebra-doc-guide-border`), separated top-level vs nested `h4.doc-heading` typography, and filtered un-annotated `__init__` attributes lacking both `annotation` and `description` while rendering `Default: <code>...</code>` fallbacks.
+  - `src/py/vertebra/{agent,db,storage,server,_vertebra.pyi}`: Added PEP 257 field docstrings across all rendered `msgspec.Struct` classes and `.pyi` stub classes and exposed curated `members:` lists in `docs/reference/agent.md` and `docs/reference/db.md`.
+  - `zensical.toml`, `docs/usage/{databases,storage,server-and-workers,agent-protocols,index}.md`, & `docs/reference/*.md`: Split `docs/usage/databases-and-storage.md` into dedicated `docs/usage/databases.md` and `docs/usage/storage.md` guides (with a redirect map entry), removed `navigation.indexes` so `.md-sidebar--primary` never renders empty on single-page tabs or hides section `Overview` links, separated `Server & Runtime`, `Databases`, and `Object Storage` into distinct navigation groups, and added architectural overview tables across reference and usage guides.
+- Contracted `.agents/bundles/specs/` back to lazy (`.gitkeep` only).
+
 ## [2026-10-31] flow-archive | Completed and Archived Native `Route`, `Controller`, `Procedure`, Hierarchical DI & Comprehensive Documentation Synthesis (`native_routing_and_di_20261031`)
 
 - Completed and archived Flow `native_routing_and_di_20261031` (4 tasks across Phases 1–2) and comprehensive documentation synthesis across `README.md`, `docs/`, and `.agents/bundles/`:

@@ -89,18 +89,26 @@ class ToolCall(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Tool execution request from a model or caller."""
 
     id: str
+    """Unique correlation identifier for this tool invocation."""
     name: str
+    """Registered tool name to execute."""
     arguments: dict[str, Any] = msgspec.field(default_factory=dict)
+    """Input argument dictionary validated against the tool's JSON Schema."""
 
 
 class ToolResult(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Normalized result of a tool execution."""
 
     call_id: str
+    """Correlation identifier matching the originating `ToolCall.id`."""
     name: str
+    """Executed tool name."""
     output: Any = None
+    """Return value produced by the tool callable when `is_error` is `False`."""
     error: str | None = None
+    """Error message string when tool execution failed (`is_error` is `True`)."""
     is_error: bool = False
+    """Whether the tool invocation raised an exception or failed validation."""
 
 
 class ToolArgumentError(Exception):

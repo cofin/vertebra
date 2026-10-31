@@ -28,12 +28,19 @@ class ModelDelta(msgspec.Struct, frozen=True, gc=False, kw_only=True, omit_defau
     """Incremental chunk produced by a model provider during chat streaming."""
 
     event_type: Literal["delta", "thought", "tool_call", "usage"]
+    """Discriminator identifying text delta, reasoning thought, tool call, or token usage."""
     text: str = ""
+    """Incremental text or reasoning content emitted for `delta` and `thought` events."""
     tool_name: str | None = None
+    """Target tool identifier when `event_type` is `"tool_call"`."""
     call_id: str | None = None
+    """Unique correlation identifier for a `tool_call` invocation."""
     arguments: dict[str, Any] | None = None
+    """Decoded JSON argument mapping supplied for a `tool_call` event."""
     usage: GenAiUsage | None = None
+    """Token consumption metrics attached to `usage` events."""
     provider_metadata: dict[str, Any] | None = None
+    """Provider-specific response metadata."""
 
 
 @runtime_checkable
@@ -98,6 +105,7 @@ class AgentStreamFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, omit
     """Wire frame streamed to subscribers during an active agent turn."""
 
     turn_id: str
+    """Unique identifier of the active conversation turn."""
     event_type: Literal[
         "delta",
         "thought",
@@ -108,12 +116,19 @@ class AgentStreamFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, omit
         "done",
         "error",
     ]
+    """Stream event category mapped to the SSE `event:` header."""
     agent_name: str = ""
+    """Name of the agent currently executing the turn."""
     text: str = ""
+    """Incremental text content or status message."""
     tool_name: str | None = None
+    """Tool name associated with `tool_call`, `tool_result`, or `confirmation_required` frames."""
     call_id: str | None = None
+    """Correlation identifier for the tool invocation."""
     payload: dict[str, Any] | None = None
+    """Structured tool arguments, result envelope, or confirmation ticket dictionary."""
     usage: GenAiUsage | None = None
+    """Cumulative token usage metrics for the turn."""
 
     def to_sse_frame(self, event_id: str) -> SseFrame:
         """Encode this stream frame into a W3C-compliant SSE frame."""
@@ -128,13 +143,21 @@ class ConfirmationTicket(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Pending authorization ticket issued for a mutating tool call."""
 
     token: str
+    """URL-safe cryptographic token identifying the confirmation request."""
     tool_name: str
+    """Name of the mutating tool awaiting human approval."""
     call_id: str
+    """Tool call correlation identifier within the paused turn."""
     arguments: dict[str, Any]
+    """Validated arguments bound to the pending tool invocation."""
     owner_id: str | None = None
+    """Caller ownership key restricting who may approve or reject the ticket."""
     reason: str = ""
+    """Human-readable explanation for the confirmation prompt or decision."""
     status: Literal["pending", "approved", "rejected"] = "pending"
+    """Current authorization state of the ticket."""
     created_at_iso: str = ""
+    """ISO-8601 UTC timestamp when the ticket was issued."""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert ticket to standard dictionary."""
@@ -239,9 +262,13 @@ class RetryPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Exponential backoff with jitter retry configuration."""
 
     max_attempts: int = 3
+    """Maximum number of model generation attempts before failing the turn."""
     base_delay_seconds: float = 0.25
+    """Initial backoff delay in seconds before the first retry."""
     max_delay_seconds: float = 10.0
+    """Upper bound in seconds for exponential backoff delay."""
     jitter_ratio: float = 0.1
+    """Proportional uniform random jitter (`0.0` to `1.0`) applied to each backoff delay."""
 
     def compute_delay(self, attempt: int) -> float:
         """Compute delay in seconds for the given zero-indexed retry attempt."""
@@ -254,15 +281,25 @@ class TurnRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Input payload initiating a conversation turn."""
 
     prompt: str = ""
+    """User prompt text initiating or continuing the conversation turn."""
     message: str | None = None
+    """Optional alias for `prompt` accepted from chat payloads."""
     session_id: str = ""
+    """Session identifier used to load and persist conversation transcripts."""
     turn_id: str | None = None
+    """Explicit turn identifier, or `None` to generate a random turn ID."""
     messages: tuple[AgentMessage, ...] = ()
+    """Prior conversation messages supplied by the caller."""
     history: tuple[AgentMessage, ...] = ()
+    """Optional alias for `messages` containing prior conversation history."""
     agent_name: str | None = None
+    """Target specialist agent name when running against an `AgentGroup`."""
     confirmation_token: str | None = None
+    """Approved `ConfirmationTicket` token resuming a gated tool execution."""
     budget: TurnBudget | None = None
+    """Per-turn step, token, cost, and wall-clock budget override."""
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
+    """Arbitrary caller metadata attached to the turn request."""
 
     @property
     def effective_prompt(self) -> str:
@@ -279,16 +316,27 @@ class TurnResponse(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Result of completing or pausing an agent conversation turn."""
 
     turn_id: str
+    """Unique identifier of the executed turn."""
     session_id: str
+    """Session identifier associated with the conversation transcript."""
     agent_name: str
+    """Name of the agent that produced the final turn state."""
     text: str
+    """Concatenated assistant response text generated during the turn."""
     messages: tuple[AgentMessage, ...] = ()
+    """Complete updated conversation transcript including tool calls and results."""
     tool_calls: tuple[ToolCall, ...] = ()
+    """All tool invocations requested by the model during the turn."""
     tool_results: tuple[ToolResult, ...] = ()
+    """All tool execution results recorded during the turn."""
     confirmation_ticket: ConfirmationTicket | None = None
+    """Pending confirmation ticket when `status` is `"confirmation_required"`."""
     status: Literal["completed", "confirmation_required", "budget_exceeded", "error"] = "completed"
+    """Terminal or paused outcome status of the turn."""
     usage: GenAiUsage | None = None
+    """Aggregated input, output, thought, and cached token usage across all steps."""
     cost_usd: float = 0.0
+    """Estimated monetary cost of the turn in USD."""
 
     @property
     def response(self) -> str:

@@ -29,21 +29,32 @@ class SkillFile(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Immutable descriptor of a single file in a skill package."""
 
     path: str
+    """Relative POSIX path of the file inside the skill directory."""
     digest: str
+    """Expected `sha256:<hex>` integrity digest verified on read."""
     size_bytes: int
+    """File size in bytes enforced against `max_bytes_per_skill`."""
     mime_type: str = "text/markdown"
+    """Detected IANA media type of the skill file."""
     content_bytes: bytes | None = None
+    """Optional in-memory file payload for synthetic skills."""
     real_path: str | None = None
+    """Resolved filesystem path for on-disk skill files."""
 
 
 class Skill(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Immutable representation of an MCP progressive skill package."""
 
     name: str
+    """Unique skill slug used in `skill://<name>` URIs."""
     description: str
+    """One-line summary advertised in the compact skill catalog."""
     body: str
+    """Full Markdown instructions loaded from `SKILL.md`."""
     files: dict[str, SkillFile] = msgspec.field(default_factory=dict)
+    """Map of relative file paths to `SkillFile` descriptors within the skill bundle."""
     frontmatter: dict[str, Any] = msgspec.field(default_factory=dict)
+    """Parsed YAML frontmatter metadata from `SKILL.md`."""
 
     @classmethod
     def build(
@@ -223,10 +234,15 @@ class MCPSkillsConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for MCP progressive skill discovery."""
 
     paths: tuple[str | Path, ...] = (".agents/skills",)
+    """Filesystem directories scanned for `<skill>/SKILL.md` packages."""
     sources: tuple[Any, ...] = ()
+    """Additional `SkillSource` providers supplying programmatic skills."""
     directory_read: bool = True
+    """Allow clients to list relative file paths inside `skill://<name>/` directories."""
     max_files_per_skill: int = 128
+    """Maximum number of files indexed per skill directory."""
     max_bytes_per_skill: int = 2_097_152
+    """Maximum cumulative byte budget (`2 MiB` default) allowed per skill package."""
 
 
 class SkillCatalog:

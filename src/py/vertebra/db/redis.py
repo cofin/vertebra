@@ -392,29 +392,53 @@ class RedisConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Configuration for Redis 7.2+ / 8.0+ standalone, Sentinel, and Cluster connections."""
 
     url: str = "redis://localhost:6379/0"
+    """Redis connection URI (`redis://`, `rediss://`, or `memory://`)."""
     username: str | None = None
+    """Optional Redis 6+ ACL username passed to `HELLO 3 AUTH`."""
     password: str | None = None
+    """Optional Redis password or ACL token passed to `HELLO 3 AUTH`."""
     client_name: str = "vertebra"
+    """Connection name registered via `HELLO 3 ... SETNAME`."""
     protocol: Literal[2, 3] = 3
+    """RESP wire protocol version (`3` for RESP3 with push/tracking support, `2` for legacy RESP2)."""
     topology: Literal["standalone", "sentinel", "cluster"] = "standalone"
+    """Deployment topology mode (`"standalone"`, `"sentinel"`, or `"cluster"`)."""
     sentinel_service_name: str | None = None
+    """Alias for `sentinel_master_name` when discovering the primary via Redis Sentinel."""
     sentinel_master_name: str | None = None
+    """Monitored primary service name queried via `SENTINEL get-master-addr-by-name`."""
     sentinel_nodes: tuple[tuple[str, int] | str, ...] = ()
+    """Seed Redis Sentinel `(host, port)` endpoints."""
     cluster_enabled: bool = False
+    """When True, route commands across the 16,384 CRC16-XMODEM hash slots."""
     cluster_nodes: tuple[tuple[str, int] | str, ...] = ()
+    """Seed Redis Cluster `(host, port)` endpoints used for slot map discovery."""
     max_redirections: int = 5
+    """Maximum number of `-MOVED` or `-ASK` cluster redirections followed per command."""
     enable_client_side_caching: bool = False
+    """When True, cache read responses locally and invalidate on RESP3 `>invalidate` push frames."""
     enable_client_tracking: bool = False
+    """When True, issue `CLIENT TRACKING ON` during connection handshake."""
     client_tracking_prefixes: tuple[str, ...] = ()
+    """Key prefixes subscribed in `BCAST` tracking mode (`PREFIX <prefix>`)."""
     client_cache_capacity: int = 4096
+    """Maximum number of keys retained in the local LRU client-side cache."""
     max_cached_keys: int = 4096
+    """Alias for `client_cache_capacity` specifying maximum locally cached keys."""
     client_cache_ttl_seconds: float | None = None
+    """Optional local TTL in seconds applied to cached RESP3 entries."""
     enable_gcp_iam_auth: bool = False
+    """When True, authenticate using Google Cloud Memorystore IAM tokens."""
     iam_auth_enabled: bool = False
+    """Alias for `enable_gcp_iam_auth` enabling IAM token authentication."""
     token_provider: Any = None
+    """Optional zero-argument callable returning an ephemeral IAM access token."""
     iam_token_provider: Any = None
+    """Alias for `token_provider` supplying IAM authentication tokens."""
     max_connections: int = 32
+    """Maximum pooled sockets maintained per target node."""
     broker: Any = None
+    """Optional shared-memory `DatabaseBroker` or `ShmBrokerTransport` for cross-worker push fan-out."""
 
     @property
     def uses_tls(self) -> bool:

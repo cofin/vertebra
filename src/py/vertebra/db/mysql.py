@@ -31,13 +31,21 @@ class MysqlConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Configuration for MySQL 8.0+/9.0+ and MariaDB connections."""
 
     dsn: str = "mysql://localhost:3306/mysql"
+    """MySQL or MariaDB connection URI."""
     min_size: int = 1
+    """Minimum number of idle connections retained in the worker pool."""
     max_size: int = 10
+    """Maximum number of concurrent connections allowed in the worker pool."""
     cloud_sql_instance: str | None = None
+    """Optional Google Cloud SQL instance connection name (`project:region:instance`) for zero-sidecar port 3307 mTLS."""
     enable_iam_auth: bool = False
+    """When True, authenticate using Google Cloud SQL IAM database authentication tokens."""
     charset: str = "utf8mb4"
+    """Connection character set negotiated during handshake."""
     autocommit: bool = False
+    """When True, execute statements in autocommit mode outside explicit transactions."""
     broker: Any = None
+    """Optional shared-memory `DatabaseBroker` for cross-worker connection and statement leasing."""
 
     def __post_init__(self) -> None:
         if self.min_size < 0 or self.max_size < 1 or self.min_size > self.max_size:

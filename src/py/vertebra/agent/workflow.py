@@ -23,23 +23,36 @@ class StepResult(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Result of an individual workflow node execution step."""
 
     node_name: str
+    """Identifier of the executed `WorkflowNode`."""
     output: Any = None
+    """Value returned by the step callable."""
     status: Literal["completed", "failed", "skipped"] = "completed"
+    """Outcome state of the workflow step."""
     error: str | None = None
+    """Exception message when `status` is `"failed"`."""
     duration_ms: float = 0.0
+    """Wall-clock execution time of the step in milliseconds."""
 
 
 class WorkflowCheckpoint(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Snapshot of a workflow execution state for pause and resume capabilities."""
 
     run_id: str
+    """Unique identifier of the workflow execution run."""
     workflow_name: str
+    """Name of the `DynamicWorkflow` definition."""
     status: str = "running"
+    """Overall run status at the time the checkpoint was captured."""
     completed_nodes: tuple[str, ...] = ()
+    """Sorted tuple of node names that have completed."""
     failed_nodes: tuple[str, ...] = ()
+    """Sorted tuple of node names that raised an exception."""
     skipped_nodes: tuple[str, ...] = ()
+    """Sorted tuple of node names skipped due to unmet conditions or upstream failures."""
     node_outputs: dict[str, Any] = msgspec.field(default_factory=dict)
+    """Mapping of completed node names to their returned outputs."""
     context_state: dict[str, Any] = msgspec.field(default_factory=dict)
+    """Shared key-value dictionary mutated via `WorkflowContext.set`."""
 
     def to_bytes(self) -> bytes:
         """Serialize checkpoint to JSON bytes."""
@@ -91,11 +104,17 @@ class WorkflowNode(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Declarative node within a dynamic workflow DAG."""
 
     name: str
+    """Unique step identifier within the `DynamicWorkflow`."""
     fn: Callable[[WorkflowContext], Any]
+    """Sync or async callable receiving `WorkflowContext` and returning the step output."""
     depends_on: tuple[str, ...] = ()
+    """Upstream node names that must complete before this step is scheduled."""
     description: str = ""
+    """Human-readable description of the workflow step."""
     timeout_seconds: float | None = None
+    """Optional per-step execution timeout in seconds."""
     condition: Callable[[WorkflowContext], bool] | None = None
+    """Optional predicate evaluated before execution; skips the step when `False`."""
 
 
 class WorkflowLiveState(LiveState):

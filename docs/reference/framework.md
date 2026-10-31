@@ -1,8 +1,10 @@
 # `vertebra.framework` — Dependency Injection, Security, OpenAPI & Realtime
 
-Core framework primitives for dependency injection, security guards, OpenAPI and AsyncAPI specification generation, real-time `LiveState` synchronization, typed RPC procedures, and transactional email delivery.
+Core framework primitives for dependency injection (`Provide`, `Container`), security guards (`Guard`, `Principal`, `SecurityConfig`), OpenAPI 3.1 and AsyncAPI 3.0 specification generation, real-time `LiveState` synchronization, typed RPC procedures (`ProcedureRouter`), and transactional email and response cache stores. See [Framework Features](../usage/framework-features.md) for usage examples.
 
 ## Dependency Injection (`vertebra.framework.di`)
+
+`Provide` and `Container` compile a static dependency graph at route registration time, supporting synchronous, asynchronous, and generator-scoped dependencies without per-request reflection overhead.
 
 ::: vertebra.framework.di.Provide
     options:

@@ -1,6 +1,13 @@
 # `vertebra.build`, `vertebra.wasm` & `vertebra.supervisor` — Build, Codegen, Wasm & Supervision
 
-Build orchestration, end-to-end TypeScript/Zod/Valibot/OpenAPI/Protobuf code generation, standalone and single-file binary packaging, PGO pipelines, WebAssembly plugin sandboxes, and multi-worker process supervision.
+Build orchestration (`BuildConfig`, `BuildOrchestrator`), end-to-end TypeScript/Zod/Valibot/OpenAPI/Protobuf code generation, standalone and single-file binary packaging (`StandaloneBuilder`, `OnefileBuilder`), LLVM PGO pipelines (`RustPgoConfig`), WebAssembly plugin sandboxes (`WasmPluginHost`), and multi-worker process supervision (`run_supervisor`). See [Packaging & Deployment](../usage/packaging-and-deployment.md) for CLI and deployment workflows.
+
+| Area | Classes / Functions | Purpose |
+| --- | --- | --- |
+| **Build Orchestration** | `JsConfig`, `BuildConfig`, `BuildOrchestrator` | Coordinate Rust extension builds, TypeScript codegen, and frontend asset bundling from `pyproject.toml` |
+| **Schema & Client Codegen** | `CodegenConfig`, `TypeScriptGenerator`, `ZodGenerator`, `ValibotGenerator`, `OpenAPIGenerator`, `ProtobufGenerator`, `ProcedureClientGenerator` | Emit `.d.ts`, Zod/Valibot validators, OpenAPI 3.1 JSON, `.proto` schemas, and typed RPC clients from Python route signatures |
+| **Standalone, Onefile & PGO** | `BuildTarget`, `StandaloneBuilder`, `OnefileBuilder`, `RustPgoConfig` | Bundle Python + Rust extensions into relocatable directories or self-extracting binaries and run two-phase PGO builds |
+| **Wasm Sandbox & Supervisor** | `WasmSandboxPolicy`, `WasmModuleConfig`, `WasmExecutionError`, `WasmPluginHost`, `run_supervisor` | Execute fuel- and memory-bounded WASI plugins and supervise multi-worker OS processes |
 
 ## Build Configuration & Orchestration (`vertebra.build`)
 

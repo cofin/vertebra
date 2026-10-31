@@ -168,56 +168,82 @@ class AgentInterface(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Transport interface declaration in an A2A 1.0 AgentCard."""
 
     url: str
+    """Full HTTP(S) endpoint URL where the A2A transport is mounted."""
     protocol_binding: Literal["JSONRPC", "GRPC", "HTTP+JSON"] = "JSONRPC"
+    """Wire protocol binding (`"JSONRPC"`, `"GRPC"`, or `"HTTP+JSON"`)."""
     protocol_version: str = "1.0"
+    """A2A specification version supported by this interface."""
 
 
 class AgentCapabilities(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Capabilities advertised by an A2A 1.0 agent."""
 
     streaming: bool = True
+    """Whether `message/stream` and `tasks/resubscribe` SSE streaming are supported."""
     push_notifications: bool = True
+    """Whether `tasks/pushNotificationConfig/*` webhook callbacks are supported."""
     extended_card: bool = True
+    """Whether `agent/authenticatedExtendedCard` is available to authenticated callers."""
 
 
 class AgentProvider(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Organization or author providing the A2A agent."""
 
     organization: str = ""
+    """Name of the organization operating the agent."""
     url: str | None = None
+    """Homepage or documentation URL for the provider organization."""
 
 
 class AgentSkill(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """Discrete skill capability exposed by an agent."""
 
     id: str
+    """Unique identifier for the skill within the `AgentCard`."""
     name: str
+    """Human-readable display name of the skill."""
     description: str = ""
+    """Detailed explanation of what the skill accomplishes."""
     tags: tuple[str, ...] = ()
+    """Searchable capability keywords categorizing the skill."""
     examples: tuple[str, ...] = ()
+    """Sample natural-language prompts demonstrating how to invoke the skill."""
 
 
 class AgentCardSignature(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """RFC 7515 JWS signature envelope verifying AgentCard authenticity."""
 
     protected: str
+    """Base64url-encoded JWS protected header (`alg`, `kid`, `typ`)."""
     signature: str
+    """Base64url-encoded signature over the RFC 8785 JCS-canonicalized `AgentCard`."""
     header: dict[str, Any] | None = None
+    """Optional unprotected JWS header parameters."""
 
 
 class AgentCard(FrozenCamelizedStruct, frozen=True, kw_only=True):
     """A2A 1.0 Agent Card discoverable at /.well-known/agent-card.json."""
 
     name: str
+    """Human-readable agent name."""
     description: str = ""
+    """Summary of the agent's purpose and domain expertise."""
     version: str = "1.0"
+    """Version string of the published agent card."""
     supported_interfaces: tuple[AgentInterface, ...] = ()
+    """Transport endpoints (`JSONRPC`, `GRPC`, `HTTP+JSON`) exposed by the agent."""
     capabilities: AgentCapabilities = msgspec.field(default_factory=AgentCapabilities)
+    """Feature flags indicating streaming, push notification, and extended card support."""
     default_input_modes: tuple[str, ...] = ("text", "data")
+    """Default input part modalities accepted across skills."""
     default_output_modes: tuple[str, ...] = ("text", "data")
+    """Default output part modalities emitted across skills."""
     skills: tuple[AgentSkill, ...] = ()
+    """Skills advertised by this agent for peer discovery and tool bridging."""
     provider: AgentProvider | None = None
+    """Organization metadata for the agent operator."""
     signatures: tuple[AgentCardSignature, ...] = ()
+    """Detached RFC 7515 JWS signatures proving card integrity."""
 
     def validate_for_path(self, route_path: str = "/a2a") -> None:
         """Validate that the agent card advertises a valid 1.0 JSONRPC interface matching route_path."""

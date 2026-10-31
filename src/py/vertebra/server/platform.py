@@ -28,8 +28,11 @@ class CgroupQuota(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Detected Linux cgroup v2 CPU and memory limits for container-aware auto-sizing."""
 
     cpu_quota_cores: float
+    """Detected fractional CPU core quota from Linux cgroup v2 `cpu.max`."""
     effective_workers: int
+    """Recommended worker process count (`max(1, ceil(cpu_quota_cores))`)."""
     memory_max_bytes: int | None
+    """Maximum container memory limit in bytes from `memory.max`, or `None` when unbounded."""
 
     @classmethod
     def detect(
@@ -144,8 +147,11 @@ class ShmAllocationPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Shared-memory allocation policy for Kubernetes (64 MiB /dev/shm) and read-only rootfs."""
 
     prefer_memfd: bool = True
+    """Use anonymous `memfd_create` file descriptors when supported by the kernel."""
     shm_dir: str = "/dev/shm"
+    """Filesystem mount path inspected for free space when `memfd_create` is unavailable."""
     min_free_bytes: int = 16 * 1024 * 1024
+    """Minimum free bytes required in `shm_dir` before falling back to temporary files."""
 
     def validate_environment(self) -> bool:
         """Validate whether the current host or container environment satisfies SHM policy requirements."""

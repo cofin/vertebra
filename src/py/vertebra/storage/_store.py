@@ -44,7 +44,9 @@ class LocalConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for local filesystem object storage."""
 
     root: str | Path
+    """Root directory on the local filesystem under which object keys are resolved."""
     create_dirs: bool = True
+    """When True, automatically create `root` and parent directories on initialization and writes."""
 
     def to_url_and_options(self) -> tuple[str, dict[str, str]]:
         """Convert configuration into a canonical URL and options dictionary."""
@@ -58,13 +60,21 @@ class S3Config(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for AWS S3 or S3-compatible object storage."""
 
     bucket: str
+    """Target S3 bucket name."""
     region: str = "us-east-1"
+    """AWS region used for SigV4 request signing and endpoint resolution."""
     endpoint: str | None = None
+    """Optional custom S3-compatible endpoint URL (e.g. MinIO, LocalStack, or Ceph RGW)."""
     access_key_id: str | None = None
+    """Optional AWS IAM access key ID."""
     secret_access_key: str | None = None
+    """Optional AWS IAM secret access key."""
     session_token: str | None = None
+    """Optional AWS STS temporary session token."""
     virtual_hosted_style: bool = False
+    """When True, address buckets using virtual-hosted-style URLs (`<bucket>.s3.<region>.amazonaws.com`)."""
     allow_http: bool = False
+    """When True, permit unencrypted `http://` endpoints for local emulators."""
 
     def to_url_and_options(self) -> tuple[str, dict[str, str]]:
         """Convert configuration into a canonical URL and options dictionary."""
@@ -86,12 +96,19 @@ class GcsConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for Google Cloud Storage."""
 
     bucket: str
+    """Target Google Cloud Storage bucket name."""
     service_account_path: str | None = None
+    """Optional filesystem path to a Google Cloud service account JSON key file."""
     service_account_key: str | None = None
+    """Optional inline JSON string containing a Google Cloud service account key."""
     application_credentials: str | None = None
+    """Optional fallback path to Application Default Credentials JSON."""
     service_account_email: str | None = None
+    """Optional service account email used for IAM `signBlob` V4 URL signing."""
     iam_endpoint: str = "https://iamcredentials.googleapis.com"
+    """Base URL for the Google Cloud IAM Credentials `signBlob` REST API."""
     access_token: str | None = None
+    """Optional bearer OAuth2 access token used for IAM `signBlob` calls."""
 
     def to_url_and_options(self) -> tuple[str, dict[str, str]]:
         """Convert configuration into a canonical URL and options dictionary."""
@@ -109,14 +126,23 @@ class AzureConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for Azure Blob Storage and ADLS Gen2."""
 
     container: str
+    """Target Azure Blob Storage container or ADLS Gen2 filesystem name."""
     account: str
+    """Azure Storage account name."""
     access_key: str | None = None
+    """Optional Base64-encoded Azure Storage account shared key."""
     sas_token: str | None = None
+    """Optional pre-generated Shared Access Signature (SAS) query string."""
     tenant_id: str | None = None
+    """Optional Microsoft Entra ID (Azure AD) tenant ID for service principal auth."""
     client_id: str | None = None
+    """Optional Microsoft Entra ID application (client) ID."""
     client_secret: str | None = None
+    """Optional Microsoft Entra ID client secret."""
     endpoint: str | None = None
+    """Optional custom Azure Blob endpoint URL."""
     use_emulator: bool = False
+    """When True, connect to the local Azurite emulator endpoint."""
 
     def to_url_and_options(self) -> tuple[str, dict[str, str]]:
         """Convert configuration into a canonical URL and options dictionary."""
@@ -142,14 +168,23 @@ class OciConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for native Oracle Cloud Infrastructure (OCI) Object Storage REST v2."""
 
     bucket: str
+    """Target OCI Object Storage bucket name."""
     namespace: str
+    """OCI Object Storage tenancy namespace string."""
     region: str = "us-ashburn-1"
+    """OCI region identifier (e.g. `"us-ashburn-1"` or `"us-phoenix-1"`)."""
     tenancy_ocid: str | None = None
+    """OCID of the Oracle Cloud tenancy (`ocid1.tenancy.oc1..`)."""
     user_ocid: str | None = None
+    """OCID of the IAM user signing API requests (`ocid1.user.oc1..`)."""
     fingerprint: str | None = None
+    """MD5 fingerprint of the RSA API signing public key."""
     private_key_pem: str | None = None
+    """Inline PEM-encoded RSA private key used for `draft-cavage-http-signatures-08` signing."""
     private_key_path: str | Path | None = None
+    """Filesystem path to a PEM-encoded RSA private key file."""
     endpoint: str | None = None
+    """Optional custom OCI Object Storage REST v2 endpoint URL."""
 
     def to_url_and_options(self) -> tuple[str, dict[str, str]]:
         """Convert configuration into a canonical URL and options dictionary."""
@@ -177,13 +212,21 @@ class R2Config(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for Cloudflare R2 object storage."""
 
     bucket: str
+    """Target Cloudflare R2 bucket name."""
     account_id: str
+    """Cloudflare 32-character hexadecimal account identifier."""
     access_key_id: str | None = None
+    """Optional R2 S3-compatible API token access key ID."""
     secret_access_key: str | None = None
+    """Optional R2 S3-compatible API token secret access key."""
     jurisdiction: Literal["eu", "fedramp"] | str | None = None
+    """Optional R2 data-locality jurisdiction subdomain (`"eu"` or `"fedramp"`)."""
     custom_domain: str | None = None
+    """Optional public custom domain bound to the R2 bucket."""
     endpoint: str | None = None
+    """Optional explicit R2 endpoint URL override."""
     allow_http: bool = False
+    """When True, permit unencrypted `http://` connections for local testing."""
 
     @staticmethod
     def chunk_uniform_parts(data: Buffer, part_size: int = 8 * 1024 * 1024) -> list[bytes]:
@@ -226,7 +269,9 @@ class HttpConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for HTTP/WebDAV object storage."""
 
     url: str
+    """Base `http://` or `https://` origin URL for the HTTP/WebDAV store."""
     headers: dict[str, str] | None = None
+    """Optional static HTTP headers included on every outbound storage request."""
 
     def to_url_and_options(self) -> tuple[str, dict[str, str]]:
         """Convert configuration into a canonical URL and options dictionary."""
@@ -237,6 +282,7 @@ class MemoryConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for in-memory object storage."""
 
     namespace: str = "default"
+    """Logical namespace isolating in-memory object buckets inside the process."""
 
     def to_url_and_options(self) -> tuple[str, dict[str, str]]:
         """Convert configuration into a canonical URL and options dictionary."""
@@ -250,34 +296,53 @@ class ObjectMeta(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Metadata describing an object stored in ObjectStore."""
 
     path: str
+    """Normalized `/`-delimited object key within the bucket or root."""
     size: int
+    """Object payload size in bytes."""
     last_modified: str
+    """RFC 3339 / ISO-8601 UTC timestamp of the object's last modification."""
     etag: str | None = None
+    """Optional content entity tag (`ETag`) returned by the storage backend."""
     version: str | None = None
+    """Optional backend object version identifier."""
 
 
 class PutResult(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Result metadata returned from a write operation."""
 
     path: str
+    """Normalized `/`-delimited object key written to the store."""
     size: int
+    """Number of payload bytes persisted."""
     etag: str | None = None
+    """Content entity tag (`ETag`) assigned to the written object."""
     version: str | None = None
+    """Optional object version identifier created by the write operation."""
 
 
 class SigningConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for HMAC-SHA256, S3 SigV4, and GCS V4 presigned URL generation."""
 
     provider: Literal["hmac", "s3", "gcs"] = "hmac"
+    """URL signing scheme (`"hmac"`, `"s3"`, or `"gcs"`)."""
     bucket: str = ""
+    """Target bucket name embedded in S3 SigV4 or GCS V4 presigned URLs."""
     region: str = "us-east-1"
+    """Region identifier used in the S3 SigV4 credential scope."""
     access_key_id: str = ""
+    """Access key ID or GCS HMAC key ID used to sign presigned requests."""
     secret_access_key: str = ""
+    """Secret access key used to derive the S3 SigV4 or GCS signing key."""
     hmac_secret: str = ""
+    """Shared secret key used when `provider="hmac"`."""
     service_account_email: str = ""
+    """Google Cloud service account email used for GCS V4 IAM `signBlob` signing."""
     iam_endpoint: str = "https://iamcredentials.googleapis.com"
+    """Google Cloud IAM Credentials API base URL used for keyless GCS V4 signing."""
     access_token: str | None = None
+    """Optional OAuth2 bearer token authenticating keyless IAM `signBlob` calls."""
     endpoint: str | None = None
+    """Optional custom origin URL overriding the default cloud storage hostname."""
 
     @staticmethod
     def sign_oci_headers(

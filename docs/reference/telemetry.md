@@ -1,6 +1,13 @@
 # `vertebra.telemetry` — OpenTelemetry Spans, Metrics, SQL Propagation & Logging
 
-Distributed tracing (`TraceContext`, `SpanExporter`), GenAI token/cost instrumentation (`GenAiRecorder`), database connection pool telemetry (`DbPoolRecorder`), SQL `sqlcommenter` trace propagation (`SqlTracePropagator`), and structured JSON logging (`LoggingConfig`).
+Distributed tracing (`TraceContext`, `SpanData`, `SpanExporter`), GenAI token/cost instrumentation (`GenAiUsage`, `ModelPricing`, `GenAiRecorder`), database connection pool telemetry (`DbPoolMetricSample`, `DbPoolRecorder`), SQL `sqlcommenter` trace propagation (`SqlTracePropagator`), and structured JSON logging (`LoggingConfig`, `LogHandler`).
+
+| Subsystem | Classes | Purpose |
+| --- | --- | --- |
+| **Tracing & Span Export** | `TraceContext`, `SpanData`, `SpanExporter` | Propagate W3C `traceparent` contexts across HTTP, SHM rings, and worker lanes and export OTLP spans |
+| **GenAI & DB Pool Metrics** | `GenAiUsage`, `ModelPricing`, `GenAiRecorder`, `DbPoolMetricSample`, `DbPoolRecorder` | Record OpenTelemetry `gen_ai.*` token/cost metrics and `db.client.connections.*` pool utilization |
+| **SQL Trace Propagation** | `SqlTracePropagator` | Inject W3C `traceparent` comments (`/*traceparent='...'*/`) or session GUCs into outbound SQL queries |
+| **Structured Logging** | `LoggingConfig`, `LogHandler` | Emit JSON or console logs automatically enriched with `trace_id` and `span_id` |
 
 ## Tracing & Span Export (`vertebra.telemetry.otel`)
 

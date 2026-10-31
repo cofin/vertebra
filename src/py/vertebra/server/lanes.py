@@ -36,19 +36,28 @@ class LaneConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Per-queue worker lane concurrency and drain timeout configuration."""
 
     queue_name: str
+    """Logical queue name bound to this execution lane."""
     concurrency: int = 10
+    """Maximum number of tasks allowed to execute concurrently in this lane."""
     drain_timeout_s: float = 30.0
+    """Grace period in seconds to await in-flight tasks during lame-duck shutdown."""
     lane_kind: TaskLane = "io"
+    """Workload scheduling class (`"io"`, `"cpu"`, or `"agent"`)."""
 
 
 class LaneMetrics(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Observability metrics for a single worker execution lane."""
 
     queue_name: str
+    """Logical queue name tracked by these metrics."""
     in_flight: int = 0
+    """Number of tasks currently executing in the lane."""
     processed_total: int = 0
+    """Cumulative count of tasks that completed without error."""
     failed_total: int = 0
+    """Cumulative count of task executions that raised an exception."""
     dlq_total: int = 0
+    """Cumulative count of tasks moved to the dead-letter queue after exhausting retries."""
 
 
 class WorkerRunner:

@@ -45,23 +45,41 @@ class ValkeyConfig(RedisConfig, frozen=True, gc=False, kw_only=True):
     """Configuration for Valkey 8.0+ / 9.0+ standalone, Sentinel, Cluster, and GCP Memorystore."""
 
     url: str = "valkey://localhost:6379/0"
+    """Valkey connection URI (`valkey://`, `valkeys://`, `redis://`, `rediss://`, or `memory://`)."""
     client_name: str = "vertebra-valkey"
+    """Connection name registered via `HELLO 3 ... SETNAME`."""
     enable_client_side_caching: bool = True
+    """When True, enable RESP3 local client-side caching with push invalidation."""
     enable_client_tracking: bool = True
+    """When True, issue `CLIENT TRACKING ON` during connection handshake."""
     client_tracking_prefixes: tuple[str, ...] = ()
+    """Key prefixes subscribed in `BCAST` client-tracking mode."""
     client_cache_capacity: int = 4096
+    """Maximum number of keys retained in the local LRU client-side cache."""
     max_cached_keys: int = 4096
+    """Alias for `client_cache_capacity` specifying maximum locally cached keys."""
     client_cache_ttl_seconds: float | None = None
+    """Optional local TTL in seconds applied to cached Valkey entries."""
     enable_gcp_memorystore_iam: bool = False
+    """When True, authenticate using Google Cloud Memorystore for Valkey IAM tokens."""
     iam_auth_enabled: bool = False
+    """Alias for `enable_gcp_memorystore_iam` enabling IAM token authentication."""
     token_provider: Any = None
+    """Optional zero-argument callable returning an ephemeral IAM access token."""
     iam_token_provider: Any = None
+    """Alias for `token_provider` supplying IAM authentication tokens."""
     memorystore_instance_id: str | None = None
+    """Optional Google Cloud Memorystore for Valkey instance resource identifier."""
     sentinel_nodes: tuple[tuple[str, int] | str, ...] = ()
+    """Seed Valkey Sentinel `(host, port)` endpoints."""
     sentinel_master_name: str | None = None
+    """Monitored primary service name queried via Valkey Sentinel."""
     cluster_enabled: bool = False
+    """When True, route commands across the 16,384 CRC16-XMODEM hash slots."""
     cluster_nodes: tuple[tuple[str, int] | str, ...] = ()
+    """Seed Valkey Cluster `(host, port)` endpoints used for slot map discovery."""
     max_redirections: int = 5
+    """Maximum number of `-MOVED` or `-ASK` cluster redirections followed per command."""
 
     @property
     def uses_tls(self) -> bool:

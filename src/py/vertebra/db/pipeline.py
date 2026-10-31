@@ -35,9 +35,13 @@ class RelOverlay(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Intra-statement read-your-own-writes CTE overlay (`UNION ALL` / `EXCEPT` over base table)."""
 
     base_table: str
+    """Physical base table name that the CTE overlay shadows."""
     inserted_cte: str | None = None
+    """Optional CTE name producing newly inserted or updated rows (`UNION ALL`)."""
     deleted_ids_cte: str | None = None
+    """Optional CTE name producing primary keys excluded from the base table (`NOT IN`)."""
     id_column: str = "id"
+    """Primary key column name used to filter deleted rows."""
 
     def __post_init__(self) -> None:
         """Validate all constituent SQL identifiers."""
@@ -65,9 +69,13 @@ class CteStep(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Single named CTE step within a single-RTT ``QueryPipeline``."""
 
     name: str
+    """SQL identifier for the common table expression (`WITH <name> AS (...)`)."""
     sql: str
+    """SQL query or `RETURNING` mutation body wrapped inside the CTE."""
     params: dict[str, Any] = msgspec.field(default_factory=dict)
+    """Step-local named parameters merged into the compiled pipeline bind list."""
     return_json_agg: bool = True
+    """When True, include `coalesce(jsonb_agg(...), '[]'::jsonb)` for this step in the outer `SELECT`."""
 
     def __post_init__(self) -> None:
         """Validate step name identifier."""

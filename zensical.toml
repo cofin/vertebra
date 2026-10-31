@@ -1,9 +1,9 @@
 [project]
 site_name = "Vertebra"
 site_description = "Fast Python web framework and server powered by Rust and TypeScript."
-site_url = "https://vertebra.litestar.dev/"
-repo_url = "https://github.com/litestar-org/vertebra"
-repo_name = "litestar-org/vertebra"
+site_url = "https://cofin.github.io/vertebra/"
+repo_url = "https://github.com/cofin/vertebra"
+repo_name = "cofin/vertebra"
 docs_dir = "docs"
 site_dir = "site"
 use_directory_urls = true
@@ -14,61 +14,72 @@ extra_css = ["stylesheets/extra.css"]
 nav = [
   { "Home" = "index.md" },
   { "Getting Started" = [
-    "getting-started/index.md",
+    { "Overview" = "getting-started/index.md" },
     { "Installation" = "getting-started/installation.md" },
     { "Quickstart" = "getting-started/quickstart.md" },
     { "Configuration" = "getting-started/configuration.md" },
     { "CLI" = "getting-started/cli.md" },
+    { "Examples" = "examples/index.md" },
+    { "Changelog" = "changelog/index.md" },
   ] },
   { "Usage" = [
-    "usage/index.md",
-    { "Routing & Handlers" = "usage/routing-and-handlers.md" },
-    { "Framework Features" = "usage/framework-features.md" },
-    { "Server & Workers" = "usage/server-and-workers.md" },
-    { "Frontend & SSR" = "usage/frontend-and-ssr.md" },
-    { "Databases & Storage" = "usage/databases-and-storage.md" },
-    { "Framework Extensions" = "usage/extensions.md" },
-    { "Agent Protocols (MCP & A2A)" = "usage/agent-protocols.md" },
-    { "Packaging & Deployment" = "usage/packaging-and-deployment.md" },
-    { "Testing" = "usage/testing.md" },
+    { "Overview" = "usage/index.md" },
+    { "Framework & Routing" = [
+      { "Routing & Handlers" = "usage/routing-and-handlers.md" },
+      { "Framework Features" = "usage/framework-features.md" },
+    ] },
+    { "Server & Runtime" = [
+      { "Server & Workers" = "usage/server-and-workers.md" },
+      { "Packaging & Deployment" = "usage/packaging-and-deployment.md" },
+    ] },
+    { "Databases" = [
+      { "Databases & Analytics" = "usage/databases.md" },
+      { "SQLSpec, SQLAlchemy & Extensions" = "usage/extensions.md" },
+    ] },
+    { "Object Storage" = [
+      { "Object Storage" = "usage/storage.md" },
+    ] },
+    { "Frontend, Agents & Testing" = [
+      { "Frontend, Inertia & SSR" = "usage/frontend-and-ssr.md" },
+      { "Agent Protocols (MCP & A2A)" = "usage/agent-protocols.md" },
+      { "Testing" = "usage/testing.md" },
+    ] },
   ] },
   { "Architecture" = [
-    "architecture/index.md",
+    { "Overview" = "architecture/index.md" },
     { "Runtime & Shared-Memory IPC" = "architecture/runtime-and-ipc.md" },
     { "HTTP/1.1, HTTP/2, HTTP/3 & gRPC Ingress" = "architecture/http-ingress.md" },
     { "PyO3 Bridge & Worker Lanes" = "architecture/pyo3-and-workers.md" },
     { "Bundler, QuickJS SSR & TypeScript SDK" = "architecture/bundler-and-client.md" },
   ] },
   { "Reference" = [
-    "reference/index.md",
-    { "Core & Framework" = [
+    { "Overview" = "reference/index.md" },
+    { "Framework & Routing" = [
       { "vertebra" = "reference/vertebra.md" },
       { "Framework" = "reference/framework.md" },
       { "Task Queues" = "reference/queues.md" },
-      { "Inertia & SSR" = "reference/inertia.md" },
+    ] },
+    { "Server & Runtime" = [
       { "Server & Workers" = "reference/server.md" },
-    ] },
-    { "Data, Storage & Telemetry" = [
-      { "Object Storage" = "reference/storage.md" },
-      { "Database Pools" = "reference/db.md" },
       { "Telemetry & Logging" = "reference/telemetry.md" },
-    ] },
-    { "Agents, Extensions & Build" = [
-      { "Agent Runtime (MCP & A2A)" = "reference/agent.md" },
-      { "Framework Extensions" = "reference/extensions.md" },
       { "Build, Wasm & Supervisor" = "reference/build-and-wasm.md" },
       { "CLI Reference" = "reference/cli.md" },
     ] },
-    { "Native & Polyglot SDKs" = [
-      { "PyO3 Native Stubs" = "reference/native-stubs.md" },
+    { "Databases" = [
+      { "Database Drivers & Pools" = "reference/db.md" },
+      { "SQLSpec, Alchemy & Extensions" = "reference/extensions.md" },
+    ] },
+    { "Object Storage" = [
+      { "Object Storage" = "reference/storage.md" },
+    ] },
+    { "Frontend & Client SDK" = [
+      { "Inertia, HTMX & SSR" = "reference/inertia.md" },
       { "@vertebra/client (TypeScript)" = "reference/typescript-client.md" },
     ] },
-  ] },
-  { "Examples" = [
-    "examples/index.md",
-  ] },
-  { "Changelog" = [
-    "changelog/index.md",
+    { "Agents & Native SDKs" = [
+      { "Agent Runtime (MCP & A2A)" = "reference/agent.md" },
+      { "PyO3 Native Stubs" = "reference/native-stubs.md" },
+    ] },
   ] },
 ]
 
@@ -81,7 +92,6 @@ features = [
   "content.code.annotate",
   "content.code.copy",
   "content.tabs.link",
-  "navigation.indexes",
   "navigation.path",
   "navigation.sections",
   "navigation.tabs",
@@ -116,6 +126,7 @@ generator = false
 [project.plugins.redirects.redirect_maps]
 "backpressure.md" = "architecture/http-ingress.md"
 "parallelism.md" = "architecture/pyo3-and-workers.md"
+"usage/databases-and-storage.md" = "usage/databases.md"
 
 [project.plugins.mkdocstrings]
 default_handler = "python"

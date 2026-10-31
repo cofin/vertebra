@@ -33,15 +33,25 @@ class SqliteConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Configuration for SQLite 3.45+ with WAL mode, memory-mapped I/O, and SHM broker leasing."""
 
     path: str = ":memory:"
+    """Filesystem path to the SQLite database file or `":memory:"`."""
     wal_mode: bool = True
+    """When True, enable `PRAGMA journal_mode = WAL` for concurrent readers alongside a single writer."""
     synchronous: str = "NORMAL"
+    """SQLite `PRAGMA synchronous` durability level (`"OFF"`, `"NORMAL"`, `"FULL"`, or `"EXTRA"`)."""
     mmap_size: int = 268_435_456
+    """Maximum memory-mapped I/O window in bytes (`PRAGMA mmap_size`, default 256 MiB)."""
     busy_timeout_ms: int = 5000
+    """Lock contention wait timeout in milliseconds (`PRAGMA busy_timeout`)."""
     max_readers: int = 8
+    """Maximum number of concurrent read connections leased across workers."""
     foreign_keys: bool = True
+    """When True, enforce referential integrity via `PRAGMA foreign_keys = ON`."""
     broker: Any = None
+    """Optional shared-memory `DatabaseBroker` coordinating single-writer/multi-reader leases."""
     database: str | Path | None = None
+    """Optional alias for `path` accepting a `pathlib.Path` or string."""
     enable_jsonb: bool = True
+    """When True, use SQLite 3.45+ binary `JSONB` functions when available."""
 
     def __post_init__(self) -> None:
         if self.database is not None and self.path == ":memory:":

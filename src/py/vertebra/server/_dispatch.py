@@ -142,12 +142,19 @@ class HandlerSpec(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Pre-compiled dispatch specification and invoker for a route handler."""
 
     has_params: bool
+    """Whether the route handler declares one or more parameters."""
     is_async: bool
+    """Whether execution requires awaiting a coroutine (async handler, async DI, or async guard)."""
     param_names: tuple[str, ...]
+    """Ordered tuple of parameter names declared on the handler signature."""
     invoker: Callable[..., Any]
+    """Pre-compiled single-argument callable `invoker(request)` executing guards, DI, and the handler."""
     sync_to_thread: bool = False
+    """When True, offload synchronous handler execution onto the worker thread pool."""
     status_code: int = 200
+    """Default HTTP response status code configured on the route."""
     arg_resolver: Callable[[Any], tuple[Any, ...]] | None = None
+    """Optional pre-compiled callable resolving positional arguments from a `Request`."""
 
 
 def compile_handler_spec(
@@ -544,10 +551,15 @@ class BatchDispatchPlan(msgspec.Struct, frozen=True, gc=False):
     """Result of partitioning a batch into dispatch groups."""
 
     sync_native: list[tuple[int, Any, HandlerSpec]] = msgspec.field(default_factory=list)
+    """Inline synchronous native handlers `(batch_index, request, spec)`."""
     sync_thread: list[tuple[int, Any, HandlerSpec]] = msgspec.field(default_factory=list)
+    """Thread-pool offloaded synchronous handlers `(batch_index, request, spec)`."""
     async_native: list[tuple[int, Any, HandlerSpec]] = msgspec.field(default_factory=list)
+    """Asynchronous native coroutine handlers `(batch_index, request, spec)`."""
     mounts: dict[str, list[tuple[int, Any]]] = msgspec.field(default_factory=dict)
+    """Mounted ASGI/RSGI/WSGI sub-application requests keyed by mount path prefix."""
     unmatched: list[tuple[int, Any]] = msgspec.field(default_factory=list)
+    """Requests with no matching route or mount `(batch_index, request)`."""
 
 
 def partition_batch(

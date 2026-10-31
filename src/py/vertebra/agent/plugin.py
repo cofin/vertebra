@@ -27,12 +27,19 @@ class AgentPluginConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration options for mounting the agentic harness."""
 
     mcp: MCPConfig | None = msgspec.field(default_factory=MCPConfig)
+    """Model Context Protocol server configuration, or `None` to disable MCP endpoints."""
     a2a: A2AConfig | None = None
+    """Agent-to-Agent 1.0 protocol configuration, or `None` to disable A2A endpoints."""
     runtime: AgentRuntime | None = None
+    """Pre-configured `AgentRuntime` instance executing multi-turn agent requests."""
     agent_base_path: str = "/agent"
+    """HTTP route prefix for chat, turn streaming, confirmation, and session endpoints."""
     observability: AgentTelemetryRecorder | None = None
+    """OpenTelemetry `gen_ai.*` span and audit recorder attached to protocol services."""
     queue_service: Any = None
+    """Optional background `QueueService` for durable async turn execution."""
     session_store: Any = None
+    """Optional `AgentSessionStore` backend persisting multi-turn conversation history."""
 
 
 class AgentPlugin:

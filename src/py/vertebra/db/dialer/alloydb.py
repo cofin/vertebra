@@ -42,9 +42,13 @@ class AlloyDbClusterUri(FrozenBaseStruct, frozen=True, gc=False, kw_only=True, c
     """Parsed AlloyDB instance URI (`projects/<p>/locations/<l>/clusters/<c>/instances/<i>`)."""
 
     project: str
+    """Google Cloud project ID owning the AlloyDB cluster."""
     location: str
+    """Google Cloud region hosting the AlloyDB cluster (e.g. `"us-central1"`)."""
     cluster: str
+    """AlloyDB cluster resource ID."""
     instance: str
+    """AlloyDB primary or read-pool instance resource ID."""
 
     @classmethod
     def parse(cls, raw: str) -> AlloyDbClusterUri:
@@ -76,11 +80,17 @@ class AlloyDbConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Configuration for zero-sidecar AlloyDB connections on port 5433."""
 
     instance_uri: str
+    """Full AlloyDB instance URI (`projects/<p>/locations/<l>/clusters/<c>/instances/<i>`)."""
     enable_iam_auth: bool = True
+    """When True, authenticate using `MetadataExchangeRequest` `IAM` mode with an OAuth2 access token."""
     ip_type: str = "PRIVATE"
+    """Preferred AlloyDB instance IP connectivity type (`"PRIVATE"`, `"PUBLIC"`, or `"PSC"`)."""
     enable_columnar_engine: bool = True
+    """When True, enable the AlloyDB columnar engine GUC (`google_columnar_engine.enabled = on`)."""
     port: int = 5433
+    """AlloyDB Auth Proxy protocol TLS port (default `5433`)."""
     user_agent: str = "vertebra-db/0.1"
+    """User-agent string sent during the `MetadataExchangeRequest` protobuf handshake."""
 
 
 class AlloyDbDialer:

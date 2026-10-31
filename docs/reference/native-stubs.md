@@ -1,6 +1,12 @@
 # PyO3 Native Extension Stubs (`_vertebra`, `_bundler`, `_storage`)
 
-Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files (`src/py/vertebra/_vertebra.pyi`, `_bundler.pyi`, `_storage.pyi`) and compiled with `gil_used = false` for free-threaded Python `3.14t`/`3.15t`.
+Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files (`src/py/vertebra/_vertebra.pyi`, `_bundler.pyi`, `_storage.pyi`) and compiled with `gil_used = false` for free-threaded Python `3.14t`/`3.15t`. Most applications interact with these primitives through the higher-level [`vertebra`](vertebra.md), [`vertebra.server`](server.md), [`vertebra.db`](db.md), and [`vertebra.storage`](storage.md) facades.
+
+| Native Module | Key Stub Classes | Backing Rust Crate |
+| --- | --- | --- |
+| **`vertebra._vertebra`** | `Request`, `Headers`, `Response`, `RequestBatch`, `AsgiScope`, `RsgiScope`, `WsgiEnviron` | `vertebra-py`, `vertebra-core`, `vertebra-http`, `vertebra-db` |
+| **`vertebra._bundler`** | `BundleConfig`, `BuildResult`, `Bundler`, `SsrPool`, `IsolatedDeclarationsGenerator` | `vertebra-bundler` (Oxc, Rolldown, QuickJS) |
+| **`vertebra._storage`** | `StorageBuffer`, `ObjectMeta`, `ObjectStore` | `vertebra-storage` (Rust `object_store` + Tokio) |
 
 ## `vertebra._vertebra` — HTTP/IPC Transport, Request Batches & Protocol Drivers
 
@@ -71,3 +77,12 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 ::: vertebra._storage.ObjectStore
     options:
       heading_level: 3
+      members:
+        - put
+        - get
+        - head
+        - delete
+        - list
+        - copy
+        - presign_get
+        - presign_put
