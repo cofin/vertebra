@@ -610,27 +610,49 @@ def sanitize_sql(sql: str) -> str: ...
 
 @final
 class LeaseGrant:
+    """Shared-memory connection lease grant issued by `LeaseBroker`."""
+
     slot_index: int
+    """Zero-based slot index in the shared-memory lease table."""
     generation: int
+    """Monotonic slot generation counter preventing ABA release races."""
     worker_pid: int
+    """OS process identifier of the worker holding the lease."""
     is_overflow: bool
+    """Whether the lease was allocated from the overflow pool tier."""
     acquired_ns: int
+    """Monotonic timestamp in nanoseconds when the lease was acquired."""
     expiry_ns: int
+    """Monotonic expiration deadline in nanoseconds (`0` when unbounded)."""
     bind_key_hash: int
+    """64-bit hash of the tenant or session bind key pinned to the slot."""
 
 @final
 class BrokerStats:
+    """Point-in-time telemetry counters for a shared-memory `LeaseBroker`."""
+
     pool_size: int
+    """Configured primary connection slot capacity."""
     max_overflow: int
+    """Configured burst overflow slot capacity."""
     active_leases: int
+    """Total number of leases currently checked out across all workers."""
     primary_in_use: int
+    """Number of primary pool slots currently leased."""
     overflow_in_use: int
+    """Number of overflow pool slots currently leased."""
     waiting_threads: int
+    """Number of worker threads currently parked on the futex wait queue."""
     total_acquired: int
+    """Cumulative count of leases granted since broker initialization."""
     total_released: int
+    """Cumulative count of leases cleanly returned to the broker."""
     total_expired: int
+    """Cumulative count of TTL-expired leases reaped by the broker."""
     total_timeouts: int
+    """Cumulative count of `acquire` calls that timed out waiting for a slot."""
     total_reclaimed: int
+    """Cumulative count of leases reclaimed from crashed worker PIDs."""
 
 @final
 class LeaseBroker:
@@ -706,19 +728,33 @@ class LeaseBroker:
 
 @final
 class StatementPlan:
+    """Compiled SQL statement plan entry stored in `StatementCache`."""
+
     sql_hash: int
+    """64-bit hash of the raw input SQL statement."""
     dialect_tag: int
+    """Numeric database dialect discriminator."""
     param_count: int
+    """Number of bind parameters extracted from the statement."""
     compiled_sql: bytes
+    """UTF-8 bytes of the dialect-rewritten SQL string."""
     param_plan: bytes
+    """Serialized parameter ordinal mapping bytes."""
 
 @final
 class StatementCacheStats:
+    """Hit/miss and eviction counters for a shared-memory `StatementCache`."""
+
     capacity: int
+    """Maximum number of statement plans stored in the cache."""
     hits: int
+    """Cumulative cache lookup hits."""
     misses: int
+    """Cumulative cache lookup misses."""
     inserts: int
+    """Cumulative statement plan insertions."""
     evictions: int
+    """Cumulative clock-sweep cache evictions."""
 
 @final
 class StatementCache:
@@ -805,8 +841,12 @@ class AlloyDbDialer:
 
 @final
 class ArrowCursor:
+    """Zero-copy shared-memory Arrow IPC cursor backed by `vertebra-core`."""
+
     shm_name: str
+    """POSIX shared-memory segment name holding the Arrow IPC stream."""
     byte_len: int
+    """Length in bytes of the Arrow IPC payload written to the segment."""
     def __new__(cls, shm_name: str, byte_len: int) -> Self: ...
     @staticmethod
     def write_ipc_to_shm(shm_name: str, payload: bytes) -> ArrowCursor: ...

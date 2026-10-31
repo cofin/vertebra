@@ -212,17 +212,29 @@ class MssqlConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Configuration for the native SQL Server (TDS 7.4) driver."""
 
     dsn: str = "mssql://127.0.0.1:1433/master"
+    """SQL Server connection URI (`mssql://host:port/database`)."""
     host: str = "127.0.0.1"
+    """SQL Server TDS endpoint hostname or IP address."""
     port: int = 1433
+    """SQL Server TDS TCP port (default `1433`)."""
     database: str = "master"
+    """Initial database catalog selected during TDS7 Login."""
     user: str = "sa"
+    """SQL Server login username."""
     password: str = ""
+    """SQL Server login password."""
     trust_server_certificate: bool = False
+    """When True, skip X.509 hostname and CA chain verification during TDS Pre-Login TLS negotiation."""
     cloudsql_instance: str | None = None
+    """Optional Google Cloud SQL for SQL Server instance connection name (`project:region:instance`)."""
     pool_min_size: int = 1
+    """Minimum number of pooled TDS sessions per worker."""
     pool_max_size: int = 10
+    """Maximum number of pooled TDS sessions per worker."""
     statement_cache_size: int = 256
+    """Maximum number of rewritten `@P1` statements stored in the shared-memory statement cache."""
     broker: Any = None
+    """Optional shared-memory `DatabaseBroker` coordinating cross-worker connection and statement leases."""
 
     @staticmethod
     def rewrite_placeholders(sql: str) -> tuple[str, int]:

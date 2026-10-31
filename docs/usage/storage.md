@@ -1,0 +1,86 @@
+# Object Storage
+
+Vertebra provides a unified, GIL-free object storage layer (`vertebra.storage` / `vertebra-storage`) backed by the Rust `object_store` crate and a dedicated multi-threaded Tokio runtime. Both synchronous (`put`, `get`, `head`, `delete`, `list`, `copy`) and asynchronous (`put_async`, `get_async`, `head_async`, `delete_async`, `list_async`, `copy_async`) methods operate over zero-copy Python `Buffer` views across 8 cloud and local backends.
+
+## Storage Backend Matrix
+
+All storage configurations inherit from `msgspec.Struct` (`frozen=True, gc=False`) and compile into canonical backend URLs via `ObjectStore.from_config(...)`:
+
+| Backend | Config Class | Canonical URI Scheme | Key Capabilities & Auth Modes |
+| --- | --- | --- | --- |
+| **AWS S3 / S3-Compatible** | `S3Config` | `s3://<bucket>` | AWS IAM keys, STS session tokens, virtual-hosted or path style, MinIO/LocalStack/Ceph endpoints |
+| **Google Cloud Storage** | `GcsConfig` | `gs://<bucket>` | Service account JSON keys, Application Default Credentials, keyless IAM `signBlob` V4 signing |
+| **Azure Blob / ADLS Gen2** | `AzureConfig` | `az://<container>` | Shared account key, SAS tokens, Microsoft Entra ID service principals, Azurite emulator |
+| **Cloudflare R2** | `R2Config` | `r2://<bucket>` | Account ID endpoint resolution, `eu` / `fedramp` jurisdictions, uniform multipart chunking |
+| **Oracle Cloud (OCI)** | `OciConfig` | `oci://<bucket>@<ns>` | Native OCI REST v2 (`draft-cavage-http-signatures-08` RSA-SHA256 signing without S3 shim) |
+| **HTTP / WebDAV** | `HttpConfig` | `https://<origin>` | Read/write over standard HTTP and WebDAV origins with custom static headers |
+| **Local Filesystem** | `LocalConfig` | `file://<root>` | Atomic local file persistence with automatic parent directory creation |
+| **In-Memory** | `MemoryConfig` | `memory://` | Zero-I/O isolated namespaces for fast unit and integration tests |
+
+## Core Operations & `StorageRegistry`
+
+Use `ObjectStore.from_config` to instantiate a backend and `StorageRegistry` to manage named stores (such as `"uploads"`, `"avatars"`, or `"exports"`) across your application:
+
+```python
+from vertebra.storage import MemoryConfig, ObjectStore, StorageRegistry
+
+store = ObjectStore.from_config(MemoryConfig(namespace="uploads"))
+store.put("reports/q1.json", b'{"revenue": 125000}')
+payload = store.get("reports/q1.json")
+meta = store.head("reports/q1.json")
+
+registry = StorageRegistry()
+registry.register("uploads", store)
+```
+
+## Presigned URLs (`SigningConfig`)
+
+Offload large client uploads and downloads directly to your storage origin using `SigningConfig` (`presign_get`, `presign_put`, `verify_presigned_url`), or compute Azure Blob SAS URLs (`SigningConfig.sign_azure_sas`) and OCI RSA-SHA256 request headers (`SigningConfig.sign_oci_headers`):
+
+```python
+from vertebra.storage import ObjectStore, SigningConfig
+
+store = ObjectStore.from_memory(
+    namespace="uploads",
+    signing=SigningConfig(
+        provider="hmac",
+        hmac_secret="hmac-signing-key",
+        endpoint="https://cdn.example.com",
+    ),
+)
+download_url = store.presign_get("avatars/user-1.png", expires_in_secs=900)
+upload_url = store.presign_put("avatars/user-1.png", expires_in_secs=300)
+is_valid = store.verify_presigned_url(download_url, method="GET")
+```
+
+## Random-Access Range Reads (`ReadableFile`) & PyArrow
+
+`store.open_readable(key)` returns a seekable `ReadableFile` supporting `read_at(offset, length)` (HTTP `Range: bytes=start-end` under the hood). Pass `ReadableFile` directly to PyArrow or Parquet readers to inspect metadata footers and column chunks without downloading entire multi-gigabyte objects:
+
+```python
+from vertebra.storage import ObjectStore
+
+store = ObjectStore.from_memory(namespace="analytics")
+store.put("events/2026-10.parquet", b"PAR1...footer...PAR1")
+
+with store.open_readable("events/2026-10.parquet") as reader:
+    magic_header = reader.read_at(0, 4)
+    magic_footer = reader.read_at(reader.size - 4, 4)
+```
+
+## Transactional Upload Staging (`UploadTracker`)
+
+When a route handler writes both database rows and object storage blobs, `UploadTracker` stages uploads and synchronizes them with your database transaction lifecycle (`before_flush`, `after_commit`, `after_rollback`) so rolled-back database transactions automatically clean up staged objects:
+
+```python
+from vertebra.storage import ObjectStore, UploadTracker
+
+store = ObjectStore.from_memory(namespace="uploads")
+tracker = UploadTracker(default_store=store)
+
+tracker.stage_upload("avatars/user-1.png", b"\x89PNG\r\n\x1a\n...")
+tracker.before_flush()
+tracker.after_commit()
+```
+
+See [`vertebra.storage` API Reference](../reference/storage.md) for full configuration classes, `ObjectStore` methods, and `UploadTracker` lifecycle hooks.

@@ -410,21 +410,37 @@ class PostgresConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """PostgreSQL configuration supporting Cloud SQL, AlloyDB, and PgBouncer/PgCat/pgdog poolers."""
 
     dsn: str = "postgresql://localhost:5432/postgres"
+    """Primary PostgreSQL connection URI (may point to a PgBouncer, PgCat, or pgdog pooler)."""
     direct_dsn: str | None = None
+    """Optional unpooled direct PostgreSQL URI used for `LISTEN/NOTIFY`, migrations, and DDL."""
     pooler_mode: PoolerMode = "direct"
+    """Connection pooler multiplexing mode (`"direct"`, `"transaction"`, `"session"`, `"statement"`, or `"auto"`)."""
     protocol_level_pooler_cache: bool = False
+    """When True, retain prepared statements in transaction-mode poolers supporting protocol-level statement caching."""
     max_prepared_statements: int | None = None
+    """Maximum per-connection prepared statement LRU capacity (`None` defaults to `256` when safe)."""
     min_size: int = 1
+    """Minimum number of pooled connections maintained per worker."""
     max_size: int = 10
+    """Maximum number of pooled connections permitted per worker."""
     cloud_sql_instance: str | None = None
+    """Optional Google Cloud SQL instance connection name (`project:region:instance`) for zero-sidecar port 3307 mTLS."""
     alloydb_instance_uri: str | None = None
+    """Optional Google Cloud AlloyDB instance URI (`projects/.../instances/...`) for zero-sidecar port 5433 mTLS."""
     enable_iam_auth: bool = False
+    """When True, authenticate using short-lived Google Cloud IAM OAuth2 tokens."""
     enable_alloydb_columnar_engine: bool = False
+    """When True, enable `google_columnar_engine.enabled = on` in session startup GUCs."""
     application_name: str = "vertebra"
+    """PostgreSQL `application_name` GUC reported in `pg_stat_activity`."""
     statement_timeout_ms: int | None = None
+    """Optional per-statement execution timeout in milliseconds (`statement_timeout` GUC)."""
     idle_in_transaction_session_timeout_ms: int | None = None
+    """Optional timeout in milliseconds before aborting idle open transactions."""
     session_gucs: Mapping[str, str] = msgspec.field(default_factory=dict)
+    """Additional PostgreSQL session GUC key-value pairs applied on connection startup."""
     broker: Any = None
+    """Optional shared-memory `DatabaseBroker` or `ShmBrokerTransport` for cross-worker connection leasing."""
 
     def __post_init__(self) -> None:
         if self.min_size < 0 or self.max_size < 1 or self.min_size > self.max_size:

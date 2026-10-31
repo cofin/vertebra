@@ -27,8 +27,11 @@ class TenantScopeConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for dual-layer PostgreSQL tenant isolation (planner predicate + RLS GUC)."""
 
     guc_name: str = "app.tenant_id"
+    """PostgreSQL session GUC name populated via `set_config(guc_name, tenant_id, true)`."""
     tenant_column: str = "tenant_id"
+    """Column identifier on tenant-scoped tables compared against the bound parameter."""
     parameter_cast: str | None = "uuid"
+    """Optional PostgreSQL type cast applied to the bind parameter (`$1::<cast>`), never the column."""
 
     def __post_init__(self) -> None:
         """Validate configured SQL identifiers."""
@@ -41,8 +44,11 @@ class TenantPredicate(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Positional tenant predicate allowing PostgreSQL index scans without ``security_barrier`` fencing."""
 
     table_alias: str
+    """Table alias prefixing the tenant column in the generated SQL predicate."""
     tenant_value: Any
+    """Bound tenant identifier value passed with the query parameters."""
     config: TenantScopeConfig = TenantScopeConfig()
+    """Tenant column, GUC, and parameter-cast configuration."""
 
     def __post_init__(self) -> None:
         """Validate table alias identifier when supplied."""

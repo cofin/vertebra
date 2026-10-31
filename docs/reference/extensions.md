@@ -1,6 +1,14 @@
 # `vertebra.extensions` — Litestar, SQLSpec, SQLAlchemy, APEX, gRPC & Broker
 
-First-party framework extensions connecting Vertebra's Rust HTTP/IPC runtime to Litestar, SQLSpec, SQLAlchemy, Oracle APEX, gRPC services, and shared-memory database session brokers.
+First-party framework extensions connecting Vertebra's Rust HTTP/IPC runtime to Litestar (`LitestarPlugin`), SQLSpec (`SQLSpecPlugin`), SQLAlchemy (`AlchemyPlugin`), Oracle APEX (`ApexGateway`), gRPC services (`GrpcServiceRegistry`), and shared-memory database session brokers (`BrokerPlugin`). See [SQLSpec, SQLAlchemy & Extensions](../usage/extensions.md) for integration examples.
+
+| Extension | Classes | Purpose |
+| --- | --- | --- |
+| **Litestar** | `LitestarConfig`, `LitestarPlugin`, `LitestarRouteCompiler` | Mount Litestar applications on Vertebra and compile static Litestar routes directly into the Rust radix router |
+| **SQLSpec** | `SQLSpecConfig`, `SQLSpecPlugin` | Bind SQLSpec database sessions, `StatementStack` pipelines, and shared-memory statement caches to request lifecycles |
+| **SQLAlchemy & Alembic** | `AlchemyPlugin`, `AlembicRunner` | Manage SQLAlchemy async/sync engines (`+vtb` dialects), request-scoped sessions, and programmatic Alembic migrations |
+| **Oracle APEX** | `ApexIslandRegistry`, `ApexGateway` | Reverse-proxy Oracle ORDS/APEX sessions, verify ECID/session state, and hydrate TypeScript UI islands |
+| **gRPC & SHM Broker** | `GrpcServiceRegistry`, `BrokerPlugin` | Dispatch HTTP/2 gRPC methods and attach cross-worker `DatabaseBroker` connection/statement leasing |
 
 ## Litestar Integration (`vertebra.extensions.litestar`)
 

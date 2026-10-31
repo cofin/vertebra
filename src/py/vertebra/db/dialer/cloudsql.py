@@ -31,18 +31,26 @@ class EphemeralCertBundle(FrozenBaseStruct, frozen=True, gc=False, kw_only=True)
     """Ephemeral mTLS certificate bundle and server endpoint metadata."""
 
     ca_cert_pem: str
+    """PEM-encoded instance CA certificate returned by the Cloud SQL Admin API."""
     client_cert_pem: str
+    """PEM-encoded ephemeral client certificate signed by the instance CA."""
     private_key_pem: str
+    """PEM-encoded ephemeral client RSA/ECDSA private key."""
     server_ip: str = "127.0.0.1"
+    """Resolved public, private, or PSC IP address of the Cloud SQL instance."""
     expiration_ts: float = 0.0
+    """Unix epoch timestamp when the ephemeral client certificate expires."""
 
 
 class CloudSqlInstanceUri(FrozenBaseStruct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """Parsed Google Cloud SQL instance connection name (`project:region:instance`)."""
 
     project: str
+    """Google Cloud project ID (including optional domain prefix)."""
     region: str
+    """Google Cloud region hosting the Cloud SQL instance."""
     instance: str
+    """Cloud SQL instance resource ID."""
 
     @property
     def expected_server_cn(self) -> str:
@@ -71,11 +79,17 @@ class CloudSqlConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Configuration for zero-sidecar Cloud SQL connections on port 3307."""
 
     instance_connection_name: str
+    """Full Cloud SQL instance connection name (`project:region:instance`)."""
     enable_iam_auth: bool = True
+    """When True, authenticate using IAM database authentication tokens."""
     ip_type: str = "PUBLIC"
+    """Preferred Cloud SQL IP address type (`"PUBLIC"`, `"PRIVATE"`, or `"PSC"`)."""
     admin_api_endpoint: str = "https://sqladmin.googleapis.com"
+    """Base URL for the Cloud SQL Admin v1beta4 REST API."""
     refresh_lead_seconds: int = 240
+    """Lead time in seconds before certificate expiry at which background renewal triggers."""
     port: int = 3307
+    """Cloud SQL Auth Proxy secure mTLS server port (default `3307`)."""
 
 
 class CloudSqlDialer:

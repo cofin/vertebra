@@ -1,6 +1,15 @@
 # Agent Protocols (MCP, A2A & Workflows)
 
-`vertebra.agent` provides a unified protocol layer for exposing application tools, prompts, resources, skills, and multi-step agent workflows over the **Model Context Protocol (MCP)** and **Agent-to-Agent (A2A)** protocol.
+`vertebra.agent` provides a unified protocol layer for exposing application tools, prompts, resources, skills, and multi-step agent workflows over the **Model Context Protocol (MCP)** and **Agent-to-Agent (A2A)** protocol. See [`vertebra.agent` API Reference](../reference/agent.md) for complete class and method signatures.
+
+## Protocol & Runtime Selection Matrix
+
+| Subsystem | Primary Entrypoints | When to Use |
+| --- | --- | --- |
+| **MCP Server (`vertebra.agent.mcp`)** | `MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig` | Expose typed Python `@tool`, `@prompt`, `@resource` functions and `SKILL.md` bundles to IDE/desktop MCP clients |
+| **A2A Server (`vertebra.agent.a2a`)** | `A2AService`, `A2AConfig`, `AgentCard` | Publish `/.well-known/agent-card.json` discovery cards and handle streaming JSON-RPC/SSE multi-agent tasks |
+| **Protocol Bridges (`vertebra.agent.bridges`)** | `McpToolBridge`, `A2aAgentBridge` | Expose remote A2A agents as callable MCP tools or wrap an `MCPRegistry` as an A2A task handler |
+| **Harness & Planning (`vertebra.agent.runtime`, `spec`, `workflow`)** | `AgentRuntime`, `ConfirmationGate`, `SpecTree`, `DynamicWorkflow`, `WorkflowEngine` | Run multi-turn tool-calling loops with human-in-the-loop approval gates, hierarchical task decomposition, and parallel DAG execution |
 
 ## Model Context Protocol (`vertebra.agent.mcp`)
 

@@ -39,6 +39,7 @@ The `Makefile` applies the same host check and exports `NPM_CONFIG_REGISTRY`, `P
 | `make test` | `rs-test` + `py-test` + `ts-test` | All three languages. |
 | `make lint-all` | `bunx biome check .` + `ruff check` & `ruff format --check` (`src/py/vertebra src/py/tests tools/scripts tools/pgo tools/docs docs/examples`) + `mypy src/py/vertebra tools/scripts tools/pgo tools/docs docs/examples` + `mypy.stubtest` + `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --features tls,compression -- -D warnings` + `make review-check` | Read-only lint, type, stub, and review-manifest gate. |
 | `make coverage` | `uv run pytest src/py/tests --cov --quiet` + `coverage xml` + `coverage html` | Python coverage only (`coverage.xml`, `htmlcov/`). |
+| `make docs` | `scan_public_docstrings` + `generate_cli_docs --check` + `zensical build --clean` + `postbuild` + `verify_docs_artifacts` | Docstring/overload/`TypedDict`/`Struct` hygiene, CLI reference parity, Zensical build (`site_url = "https://cofin.github.io/vertebra/"`, `repo_name = "cofin/vertebra"`), `llms.txt`/`llms-full.txt` + legacy `.html` redirects, `<= 120 KB` reference HTML / `<= 14` secondary TOC items, and zero empty `Attributes:` rows (`_EMPTY_ATTRIBUTE_ROW_PATTERN`). |
 | `make check` | `lint` + `test` + `coverage` | Full local gate. `lint` applies auto-fixes. |
 
 ## 3. CI Matrix (`.github/workflows/ci.yml`)

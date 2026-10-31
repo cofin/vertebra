@@ -91,15 +91,25 @@ class OracleConnectDescriptor(FrozenBaseStruct, frozen=True, gc=False):
     """Structured representation of an Oracle TNS `(DESCRIPTION=...)` connect descriptor."""
 
     host: str = "localhost"
+    """Database listener hostname or IP address."""
     port: int = 1521
+    """Oracle Net Listener TCP/TCPS port (`1521` standard, `1522` mTLS wallet)."""
     service_name: str | None = "FREEPDB1"
+    """Pluggable database (PDB) or service name (`SERVICE_NAME`)."""
     sid: str | None = None
+    """Legacy Oracle System Identifier (`SID`) when `service_name` is not used."""
     security_cert_dn: str | None = None
+    """Expected server certificate Distinguished Name (`SSL_SERVER_CERT_DN`) for TCPS verification."""
     retry_count: int = 0
+    """Number of TNS connection retry attempts (`RETRY_COUNT`)."""
     retry_delay: int = 0
+    """Delay in seconds between TNS connection retry attempts (`RETRY_DELAY`)."""
     transport_connect_timeout: int = 0
+    """Socket connection establishment timeout in seconds (`TRANSPORT_CONNECT_TIMEOUT`)."""
     protocol: str = "TCP"
+    """TNS transport protocol (`"TCP"` or `"TCPS"`)."""
     server_mode: str = "DEDICATED"
+    """Oracle server process architecture (`"DEDICATED"`, `"SHARED"`, or `"POOLED"` for DRCP/PRCP)."""
 
     def to_tns_descriptor(self) -> str:
         """Render the connect descriptor as a canonical TNS `(DESCRIPTION=...)` string."""
@@ -266,10 +276,15 @@ class OracleWallet(FrozenBaseStruct, frozen=True, gc=False):
     """In-memory representation of an Oracle Autonomous Database Cloud Wallet."""
 
     tnsnames_ora: str = ""
+    """Raw UTF-8 text of `tnsnames.ora` mapping service aliases to TNS descriptors."""
     sqlnet_ora: str = ""
+    """Raw UTF-8 text of `sqlnet.ora` specifying wallet and SSL settings."""
     ewallet_pem: bytes = b""
+    """Raw PEM-encoded client certificate and private key bundle (`ewallet.pem`)."""
     cwallet_sso: bytes = b""
+    """Raw auto-login SSO wallet payload (`cwallet.sso`)."""
     aliases: dict[str, str] = msgspec.field(default_factory=dict)
+    """Parsed mapping of TNS alias names to canonical `(DESCRIPTION=...)` strings."""
 
     @classmethod
     def from_zip_bytes(cls, data: bytes) -> OracleWallet:
@@ -336,9 +351,13 @@ class OracleSessionAttrs(FrozenBaseStruct, frozen=True, gc=False):
     """Zero-RTT piggybacked Two-Task Common (TTC) end-to-end session tracing attributes."""
 
     client_identifier: str | None = None
+    """Application user or tenant identifier (`V$SESSION.CLIENT_IDENTIFIER`)."""
     module: str | None = None
+    """Application subsystem or service name (`V$SESSION.MODULE`)."""
     action: str | None = None
+    """Current operation or route handler name (`V$SESSION.ACTION`)."""
     ecid: str | None = None
+    """Execution Context ID (`V$SESSION.ECID`) for distributed trace correlation."""
 
     def encode_ttc_piggyback(self) -> bytes:
         """Encode TTC `0x11` piggyback session attribute frame."""
@@ -624,21 +643,37 @@ class OracleConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Configuration for the native Oracle Thin database driver."""
 
     dsn: str = "oracle://localhost:1521/FREEPDB1"
+    """Easy Connect string, TNS `(DESCRIPTION=...)` descriptor, or `oracle://` URI."""
     host: str = "localhost"
+    """Oracle Net Listener hostname when `dsn` or `wallet_path` is not used."""
     port: int = 1521
+    """Oracle Net Listener port (`1521` TCP, `1522` TCPS wallet)."""
     service_name: str = "FREEPDB1"
+    """Target Oracle Pluggable Database (PDB) or service name."""
     user: str = "system"
+    """Database username for O5LOGON authentication."""
     password: str = ""
+    """Database password for O5LOGON authentication."""
     wallet_path: str | None = None
+    """Optional path to an Oracle Cloud Wallet `.zip` archive or extracted wallet directory."""
     tns_alias: str | None = None
+    """Optional TNS alias resolved from the wallet's `tnsnames.ora` (e.g. `"mydb_high"`)."""
     client_identifier: str | None = None
+    """Initial zero-RTT `V$SESSION.CLIENT_IDENTIFIER` tracing attribute."""
     module: str | None = None
+    """Initial zero-RTT `V$SESSION.MODULE` tracing attribute."""
     action: str | None = None
+    """Initial zero-RTT `V$SESSION.ACTION` tracing attribute."""
     ecid: str | None = None
+    """Initial zero-RTT `V$SESSION.ECID` distributed execution context identifier."""
     pool_min_size: int = 1
+    """Minimum number of pooled sessions maintained per worker."""
     pool_max_size: int = 10
+    """Maximum number of pooled sessions permitted per worker."""
     statement_cache_size: int = 256
+    """Maximum number of compiled statements cached in the shared-memory statement cache."""
     broker: Any = None
+    """Optional shared-memory `DatabaseBroker` coordinating cross-worker connection and statement leases."""
 
     def connect_descriptor(self) -> OracleConnectDescriptor:
         """Resolve the effective `OracleConnectDescriptor` from wallet, TNS alias, or DSN."""

@@ -1,5 +1,6 @@
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
 
+:root,
 [data-md-color-scheme="default"] {
   --md-default-bg-color: #ffffff;
   --md-default-bg-color--light: #f8fafc;
@@ -42,6 +43,7 @@
   --vertebra-link-code-hover-border: #93c5fd;
   --vertebra-code-block-border: #e2e8f0;
   --vertebra-code-header-bg: #f1f5f9;
+  --vertebra-doc-guide-border: #cbd5e1;
   --vertebra-hl-class-color: #b45309;
   --vertebra-hl-decorator-color: #0f766e;
   --vertebra-hl-namespace-color: #334155;
@@ -89,6 +91,7 @@
   --vertebra-link-code-hover-border: rgba(147, 197, 253, 0.55);
   --vertebra-code-block-border: #1e293b;
   --vertebra-code-header-bg: #111827;
+  --vertebra-doc-guide-border: rgba(148, 163, 184, 0.28);
   --vertebra-hl-class-color: #fbbf24;
   --vertebra-hl-decorator-color: #2dd4bf;
   --vertebra-hl-namespace-color: #cbd5e1;
@@ -584,24 +587,38 @@
   margin-top: 1.6rem;
 }
 
-.md-typeset h3.doc-heading {
+.md-typeset h3.doc-heading,
+.md-typeset > .doc-object > h4.doc-heading {
   padding-top: 0.75rem;
   border-top: 1px solid var(--md-default-fg-color--lightest);
 }
 
-.md-typeset h4.doc-heading {
+.md-typeset > .doc-object > h4.doc-heading {
+  font-size: 1.08rem;
+}
+
+.md-typeset .doc-children h4.doc-heading,
+.md-typeset .doc-children h5.doc-heading {
   font-size: 0.92rem;
   margin-top: 1.15rem;
 }
 
-.md-typeset .doc-contents {
+.md-typeset .doc-contents,
+.md-typeset div.doc-contents {
+  padding-left: 0.9rem;
   padding-inline-start: 0.9rem;
-  border-inline-start: 2px solid var(--md-default-fg-color--lightest);
+  border-left: 2px solid var(--vertebra-doc-guide-border);
+  border-inline-start: 2px solid var(--vertebra-doc-guide-border);
   margin-bottom: 1.5rem;
 }
 
-.md-typeset .doc-contents:not(.first) {
+.md-typeset .doc-contents:not(.first),
+.md-typeset div.doc-contents:not(.first) {
+  padding-left: 0.85rem;
   padding-inline-start: 0.85rem;
+  margin-left: 0.35rem;
+  border-left: 2px solid var(--vertebra-doc-guide-border);
+  border-inline-start: 2px solid var(--vertebra-doc-guide-border);
 }
 
 .md-typeset .doc-symbol {

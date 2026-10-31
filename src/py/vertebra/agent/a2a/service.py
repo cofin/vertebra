@@ -68,15 +68,25 @@ class A2AConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration options for the A2A 1.0 service."""
 
     path: str = "/a2a"
+    """HTTP route path where the A2A JSON-RPC endpoint is mounted."""
     agent_card_path: str = "/.well-known/agent-card.json"
+    """Well-known discovery route serving the public `AgentCard` JSON."""
     agent_card: AgentCard | None = None
+    """Public `AgentCard` advertised at `agent_card_path`."""
     card_secret: str | None = None
+    """Optional signing secret or key material used to verify/sign the `AgentCard`."""
     extended_card: AgentCard | None = None
+    """Authenticated extended `AgentCard` returned by `agent/authenticatedExtendedCard`."""
     enable_streaming: bool = True
+    """Allow `message/stream` and `tasks/resubscribe` SSE event streams."""
     enable_push_notifications: bool = True
+    """Enable webhook registration and delivery via `PushNotificationDispatcher`."""
     allow_insecure_webhooks: bool = False
+    """Allow plain HTTP or loopback/private-network webhook URLs (for local testing only)."""
     max_tasks: int = 10000
+    """Maximum number of tasks retained in `A2ATaskStore` before LRU eviction."""
     task_ttl_seconds: int = 86400
+    """Time-to-live in seconds (`24 hours` default) for retained task records."""
 
 
 class A2ATaskStore:

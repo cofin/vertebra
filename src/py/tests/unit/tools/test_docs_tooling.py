@@ -28,13 +28,70 @@ __all__ = (
     "test_verify_site_artifacts_accepts_clean_site_and_exemptions",
     "test_verify_site_artifacts_rejects_bloated_secondary_toc",
     "test_verify_site_artifacts_rejects_broken_same_page_anchors",
+    "test_verify_site_artifacts_rejects_empty_attribute_rows",
     "test_verify_site_artifacts_rejects_leaked_docstrings_and_tmp_path",
     "test_verify_site_artifacts_rejects_made_with_zensical",
     "test_verify_site_artifacts_rejects_missing_inventories",
     "test_verify_site_artifacts_rejects_outer_badge_border",
     "test_verify_site_artifacts_rejects_oversized_pages",
     "test_verify_typescript_exports_detects_missing_subpath_and_symbol",
+    "test_zensical_config_branding_uses_cofin_vertebra",
+    "test_zensical_css_and_attribute_templates_enforce_left_bars_and_non_empty_rows",
+    "test_zensical_navigation_separates_server_databases_and_storage",
 )
+
+
+def test_zensical_navigation_separates_server_databases_and_storage() -> None:
+    """Verify zensical.toml separates Server & Runtime, Databases, and Object Storage and omits navigation.indexes."""
+    repo_root = Path(__file__).resolve().parents[5]
+    zensical_text = (repo_root / "zensical.toml").read_text(encoding="utf-8")
+
+    assert '"navigation.indexes"' not in zensical_text
+    assert '{ "Server & Runtime" =' in zensical_text
+    assert '{ "Databases" =' in zensical_text
+    assert '{ "Object Storage" =' in zensical_text
+    assert '"usage/databases.md"' in zensical_text
+    assert '"usage/storage.md"' in zensical_text
+    assert '"usage/databases-and-storage.md" = "usage/databases.md"' in zensical_text
+    assert (repo_root / "docs" / "usage" / "databases.md").is_file()
+    assert (repo_root / "docs" / "usage" / "storage.md").is_file()
+    assert not (repo_root / "docs" / "usage" / "databases-and-storage.md").exists()
+
+
+def test_zensical_css_and_attribute_templates_enforce_left_bars_and_non_empty_rows() -> None:
+    """Verify extra.css overrides div.doc-contents:not(.first) and attribute templates filter blank rows."""
+    repo_root = Path(__file__).resolve().parents[5]
+    css_text = (repo_root / "docs" / "stylesheets" / "extra.css").read_text(encoding="utf-8")
+    agent_ref_text = (repo_root / "docs" / "reference" / "agent.md").read_text(encoding="utf-8")
+    tpl_dir = repo_root / "tools" / "docs" / "templates" / "python" / "material"
+    summary_tpl = (tpl_dir / "summary" / "attributes.html.jinja").read_text(encoding="utf-8")
+    docstring_tpl = (tpl_dir / "docstring" / "attributes.html.jinja").read_text(encoding="utf-8")
+
+    assert "--vertebra-doc-guide-border:" in css_text
+    assert ".md-typeset div.doc-contents:not(.first)" in css_text
+    assert "border-left: 2px solid var(--vertebra-doc-guide-border);" in css_text
+    assert ".md-typeset > .doc-object > h4.doc-heading" in css_text
+    assert "attribute.annotation or attribute.description" in summary_tpl
+    assert "attribute.annotation or attribute.description" in docstring_tpl
+    for store_cls in ("SQLSpecSessionStore", "AlchemySessionStore", "ObjectStoreSessionStore"):
+        assert f"::: vertebra.agent.sessions.{store_cls}\n    options:\n      heading_level: 4\n      members:" in (
+            agent_ref_text
+        )
+
+
+def test_zensical_config_branding_uses_cofin_vertebra() -> None:
+    """Verify zensical.toml and src/rs/Cargo.toml configure cofin/vertebra branding and canonical URLs."""
+    repo_root = Path(__file__).resolve().parents[5]
+    zensical_text = (repo_root / "zensical.toml").read_text(encoding="utf-8")
+    cargo_text = (repo_root / "src" / "rs" / "Cargo.toml").read_text(encoding="utf-8")
+
+    assert 'site_url = "https://cofin.github.io/vertebra/"' in zensical_text
+    assert 'repo_url = "https://github.com/cofin/vertebra"' in zensical_text
+    assert 'repo_name = "cofin/vertebra"' in zensical_text
+    assert "litestar-org/vertebra" not in zensical_text
+    assert "vertebra.litestar.dev" not in zensical_text
+    assert 'repository = "https://github.com/cofin/vertebra"' in cargo_text
+    assert "vertebra-io/vertebra" not in cargo_text
 
 
 def test_generate_llms_files_expands_snippets_and_orders_nav(tmp_path: Path) -> None:
@@ -47,9 +104,9 @@ def test_generate_llms_files_expands_snippets_and_orders_nav(tmp_path: Path) -> 
     llms_full = (site_dir / "llms-full.txt").read_text(encoding="utf-8")
 
     assert llms_txt.startswith("# Vertebra\n\n> Polyglot application backbone for Python, Rust, and TypeScript.")
-    assert "https://vertebra.litestar.dev/" in llms_txt
-    assert "https://vertebra.litestar.dev/getting-started/" in llms_txt
-    assert "https://vertebra.litestar.dev/getting-started/quickstart/" in llms_txt
+    assert "https://cofin.github.io/vertebra/" in llms_txt
+    assert "https://cofin.github.io/vertebra/getting-started/" in llms_txt
+    assert "https://cofin.github.io/vertebra/getting-started/quickstart/" in llms_txt
     assert llms_txt.index("/getting-started/") < llms_txt.index("/getting-started/quickstart/")
 
     assert "    def main() -> int:" in llms_full
@@ -74,7 +131,7 @@ def test_generate_llms_files_fallback_nav_uses_frontmatter_title(tmp_path: Path)
     )
     config_path = tmp_path / "zensical.toml"
     config_path.write_text(
-        '[project]\nsite_name = "Vertebra"\nsite_url = "https://vertebra.litestar.dev/"\nnav = []\n',
+        '[project]\nsite_name = "Vertebra"\nsite_url = "https://cofin.github.io/vertebra/"\nnav = []\n',
         encoding="utf-8",
     )
 
@@ -82,7 +139,7 @@ def test_generate_llms_files_fallback_nav_uses_frontmatter_title(tmp_path: Path)
 
     llms_txt = (site_dir / "llms.txt").read_text(encoding="utf-8")
     llms_full = (site_dir / "llms-full.txt").read_text(encoding="utf-8")
-    assert "- [Frontmatter Guide Title](https://vertebra.litestar.dev/guide/)" in llms_txt
+    assert "- [Frontmatter Guide Title](https://cofin.github.io/vertebra/guide/)" in llms_txt
     assert "hide:" not in llms_full
 
 
@@ -97,7 +154,7 @@ def test_emit_legacy_html_redirects_preserves_hashes(tmp_path: Path) -> None:
 
     backpressure_stub = (site_dir / "backpressure.html").read_text(encoding="utf-8")
     assert "url=/architecture/http-ingress/" in backpressure_stub
-    assert 'href="https://vertebra.litestar.dev/architecture/http-ingress/"' in backpressure_stub
+    assert 'href="https://cofin.github.io/vertebra/architecture/http-ingress/"' in backpressure_stub
     assert "window.location.hash" in backpressure_stub
 
     parallelism_stub = (site_dir / "parallelism.html").read_text(encoding="utf-8")
@@ -109,7 +166,7 @@ def test_emit_legacy_html_redirects_preserves_hashes(tmp_path: Path) -> None:
 
     server_stub = (site_dir / "reference" / "server.html").read_text(encoding="utf-8")
     assert "url=/reference/server/" in server_stub
-    assert 'href="https://vertebra.litestar.dev/reference/server/"' in server_stub
+    assert 'href="https://cofin.github.io/vertebra/reference/server/"' in server_stub
     assert "window.location.hash" in server_stub
 
 
@@ -197,6 +254,8 @@ def test_verify_site_artifacts_rejects_missing_inventories(tmp_path: Path) -> No
         'db_path = tmp_path / "demo.db"',
         '--8<-- "docs/examples/quickstart_app.py:example"',
         '--8 < --"docs/examples/quickstart_app.py:example"',
+        "litestar-org/vertebra",
+        "vertebra.litestar.dev",
     ],
 )
 def test_verify_site_artifacts_rejects_leaked_docstrings_and_tmp_path(tmp_path: Path, leaked_phrase: str) -> None:
@@ -209,6 +268,22 @@ def test_verify_site_artifacts_rejects_leaked_docstrings_and_tmp_path(tmp_path: 
     with pytest.raises(DocsVerificationError) as exc_info:
         verify_site_artifacts(site_dir)
     assert any("leak.html" in item for item in exc_info.value.violations)
+
+
+def test_verify_site_artifacts_rejects_empty_attribute_rows(tmp_path: Path) -> None:
+    """Verify verify_site_artifacts rejects reference pages containing empty Type and Description attribute rows."""
+    site_dir = tmp_path / "site"
+    _write_clean_site(site_dir)
+    empty_attr_page = site_dir / "reference" / "empty_attr.html"
+    empty_attr_page.write_text(
+        "<!doctype html><html><body><table><tbody>"
+        '<tr><td><code>config</code></td><td></td><td><div class="doc-md-description"></div></td></tr>'
+        "</tbody></table></body></html>",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DocsVerificationError, match="empty_attr.html"):
+        verify_site_artifacts(site_dir)
 
 
 def test_verify_site_artifacts_rejects_oversized_pages(tmp_path: Path) -> None:
@@ -381,7 +456,7 @@ def _write_sample_project(root: Path) -> tuple[Path, Path, Path]:
 [project]
 site_name = "Vertebra"
 site_description = "Polyglot application backbone for Python, Rust, and TypeScript."
-site_url = "https://vertebra.litestar.dev/"
+site_url = "https://cofin.github.io/vertebra/"
 docs_dir = "docs"
 site_dir = "site"
 nav = [

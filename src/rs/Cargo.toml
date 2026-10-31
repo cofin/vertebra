@@ -14,7 +14,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Vertebra Contributors"]
 license = "MIT"
-repository = "https://github.com/vertebra-io/vertebra"
+repository = "https://github.com/cofin/vertebra"
 
 [workspace.dependencies]
 async-trait = "0.1"

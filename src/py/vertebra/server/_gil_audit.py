@@ -27,13 +27,21 @@ class GilAuditReport(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Result of auditing CPython's free-threaded GIL state around application import."""
 
     free_threaded_build: bool = msgspec.field(name="is_free_threaded_build", default=False)
+    """Whether the running interpreter was compiled with `Py_GIL_Disabled` (e.g. Python 3.14t/3.15t)."""
     gil_enabled_before: bool = True
+    """Whether the CPython GIL was active prior to importing the target application module."""
     gil_enabled_after: bool = True
+    """Whether the CPython GIL is active after importing the target application module."""
     gil_reenabled_on_import: bool = False
+    """True when importing the application caused CPython to fall back and re-enable the GIL."""
     native_extensions_before: frozenset[str] = frozenset()
+    """Set of native `.so`/`.pyd`/`.dylib` extension module names loaded before import."""
     native_extensions_after: frozenset[str] = frozenset()
+    """Set of native `.so`/`.pyd`/`.dylib` extension module names loaded after import."""
     suspect_extensions: tuple[str, ...] = ()
+    """Newly imported native extensions present when `gil_reenabled_on_import` is True."""
     quarantined_modules: tuple[str, ...] = ()
+    """Loaded modules known to be unsafe under free-threaded execution (e.g. `uvloop<=0.22.1`)."""
 
     @staticmethod
     def gil_enabled() -> bool:

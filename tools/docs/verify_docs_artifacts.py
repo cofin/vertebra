@@ -26,6 +26,14 @@ BANNED_PHRASES: tuple[str, ...] = (
     "Made with Zensical",
     "--8<--",
     "--8 < --",
+    "litestar-org/vertebra",
+    "vertebra-io/vertebra",
+    "vertebra.litestar.dev",
+)
+
+_EMPTY_ATTRIBUTE_ROW_PATTERN = re.compile(
+    r"<td>\s*<code>[^<]+</code>\s*</td>\s*<td>\s*</td>\s*<td>\s*<div class=\"doc-md-description\">\s*</div>\s*</td>",
+    re.DOTALL,
 )
 
 _REQUIRED_ROOT_FILES: tuple[str, ...] = ("objects.inv", "llms.txt", "llms-full.txt")
@@ -87,6 +95,9 @@ def verify_site_artifacts(
             for phrase in BANNED_PHRASES
             if phrase in text
         )
+
+        if rel_posix.startswith("reference/") and _EMPTY_ATTRIBUTE_ROW_PATTERN.search(text):
+            violations.append(f"{rel_posix}: contains Attributes table row with both Type and Description cells empty")
 
         parser = _PageArtifactParser()
         parser.feed(text)

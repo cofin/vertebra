@@ -1,6 +1,13 @@
 # `vertebra.framework.inertia` & `vertebra.framework.ssr` — Inertia v3, QuickJS SSR & HTMX
 
-Server-driven single-page application primitives for Inertia v3, pooled QuickJS server-side rendering (`vertebra.framework.ssr`), and HTMX request/response helpers (`vertebra.framework.htmx`).
+Server-driven single-page application primitives for Inertia v3 (`InertiaConfig`, `InertiaResponse`, `InertiaMiddleware`), pooled QuickJS server-side rendering (`EmbeddedSsrClient`, `SidecarSsrClient`), and HTMX request/response helpers (`HtmxRequest`, `HtmxResponse`). See [Frontend, Inertia & SSR](../usage/frontend-and-ssr.md) for usage examples.
+
+| Subsystem | Classes | Purpose |
+| --- | --- | --- |
+| **Inertia v3 Core** | `InertiaConfig`, `InertiaResponse`, `InertiaMiddleware` | Negotiate `X-Inertia` JSON vs. initial HTML shell responses, asset version mismatches (`409 Conflict`), and partial reloads |
+| **Inertia v3 Props** | `DeferredProp`, `MergeProp`, `DeepMergeProp`, `OnceProp`, `ScrollProp`, `OptionalProp` | Control deferred evaluation, client-side array/object merging, infinite scroll pagination, and lazy props |
+| **QuickJS SSR** | `SsrConfig`, `SsrResult`, `EmbeddedSsrClient`, `SidecarSsrClient` | Pre-render initial page HTML inside the embedded Rust QuickJS pool (`vertebra._bundler.SsrPool`) or an external Node/Bun sidecar |
+| **HTMX Helpers** | `HxSwap`, `HtmxRequest`, `HtmxResponse` | Inspect `HX-*` request headers and emit `HX-Trigger`, `HX-Retarget`, `HX-Push-Url`, and out-of-band swap responses |
 
 ## Inertia v3 Configuration & Responses
 

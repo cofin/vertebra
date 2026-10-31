@@ -11,7 +11,15 @@
         |order_members(config.members_order, summary_members_list)
         |as_attributes_section(check_public=not summary_members_list)
       %}
-      {% if section %}{% include "docstring/attributes.html.jinja" with context %}{% endif %}
+      {% if section %}
+        {% set ns = namespace(has_valid=false) %}
+        {% for attribute in section.value %}
+          {% if attribute.annotation or attribute.description %}
+            {% set ns.has_valid = true %}
+          {% endif %}
+        {% endfor %}
+        {% if ns.has_valid %}{% include "docstring/attributes.html.jinja" with context %}{% endif %}
+      {% endif %}
     {% endwith %}
   {% endwith %}
 {% endif %}

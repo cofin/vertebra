@@ -62,10 +62,10 @@ vtb run app:app --host 127.0.0.1 --port 8000
 
 | Section | What You Will Find |
 | --- | --- |
-| **[Getting Started](getting-started/index.md)** | Installation, quickstart, configuration, and `vtb` CLI commands. |
-| **[Usage](usage/index.md)** | Guides for routes, controllers, DTOs, dependency injection, guards, task queues, Inertia v3, SSR, storage, database pools, framework extensions, and MCP/A2A agents. |
+| **[Getting Started](getting-started/index.md)** | Installation, quickstart, configuration, `vtb` CLI commands, runnable examples, and release changelog. |
+| **[Usage](usage/index.md)** | Subsystem guides for routing & controllers, server & worker topologies, databases & CTE statement stacking, object storage, frontend & SSR, and MCP/A2A agents. |
 | **[Architecture](architecture/index.md)** | How the Rust HTTP server, shared-memory worker rings, PyO3 bridge, and bundler work under the hood. |
-| **[Reference](reference/index.md)** | API documentation for Python packages, native extension stubs, `@vertebra/client`, and the `vtb` CLI. |
+| **[Reference](reference/index.md)** | API documentation organized by Framework, Server & Runtime, Databases, Object Storage, Frontend & Client SDK, and Agents & Native SDKs. |
 | **[Examples](examples/index.md)** | Runnable Python examples covering routing, controllers, background queues, live state, storage, and MCP agent tools. |
 
 ## Core Capabilities
@@ -75,8 +75,9 @@ vtb run app:app --host 127.0.0.1 --port 8000
 | **Rust HTTP Server** | HTTP/1.1, HTTP/2, HTTP/3 (QUIC), gRPC, WebSockets, SSE, TLS, compression, and static file serving in `vertebra-http`. |
 | **Shared-Memory Workers** | Run in-process or scale across worker processes over shared memory in `vertebra-core`. |
 | **Free-Threaded Python Ready** | Supports Python 3.12–3.15 including free-threaded `3.14t`/`3.15t` builds with isolated worker lanes (`fast`, `async`, `cpu`, `blocking`). |
+| **Databases & Analytics** | Nine native database drivers, single-RTT CTE statement stacking (`QueryPipeline`), zero-sidecar Cloud SQL/AlloyDB dialers, RLS, CDC, and Arrow/DataFusion analytics. |
+| **Cloud & Local Object Storage** | Unified GIL-free `ObjectStore` across S3, GCS, Azure, Cloudflare R2, OCI, HTTP, Local, and Memory backends with presigning, `ReadableFile`, and `UploadTracker`. |
 | **Frontend Bundler & SSR** | Built-in JavaScript bundler (`vertebra-bundler`), QuickJS SSR pool, Inertia v3, HTMX, and TypeScript/Zod code generation. |
-| **Databases, Statement Stacks & Storage** | Nine database drivers, CTE statement stacking (`QueryPipeline`), Cloud SQL/AlloyDB dialers, Arrow/DataFusion analytics, and S3/GCS/Azure/R2/OCI object storage. |
 | **Agent Protocols (MCP & A2A)** | Built-in Model Context Protocol (MCP) tools, resources, prompts, skills, stdio bridge, Agent-to-Agent (A2A) services, and DAG workflows. |
 
 ## Runtime Overview

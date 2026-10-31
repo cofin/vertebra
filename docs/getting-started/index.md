@@ -10,6 +10,8 @@ Vertebra is a Python web framework and server that pairs typed Python handlers, 
 | **[Quickstart](quickstart.md)** | Create your first `App`, register routes and controllers with `msgspec.Struct` models, run with `vtb`, and test routes in `pytest`. |
 | **[Configuration](configuration.md)** | Configure worker modes (`embedded` vs. `shm`), worker counts, backpressure, TLS, and environment variables. |
 | **[CLI](cli.md)** | Use the `vtb` CLI to run servers, start hot-reload development, manage frontend packages, generate TypeScript types, and build standalone binaries. |
+| **[Examples](../examples/index.md)** | Runnable end-to-end Python examples covering routing, controllers, background queues, live state, storage, and MCP agent tools. |
+| **[Changelog](../changelog/index.md)** | Release history and notable feature additions across Vertebra versions. |
 
 ## Execution Modes at a Glance
 

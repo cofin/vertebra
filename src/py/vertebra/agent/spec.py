@@ -28,23 +28,36 @@ class AgentMessage(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Normalized message representation in an agent conversation transcript."""
 
     role: Literal["user", "assistant", "system", "tool"]
+    """Conversational speaker role (`"user"`, `"assistant"`, `"system"`, or `"tool"`)."""
     content: str = ""
+    """Text body of the message."""
     name: str | None = None
+    """Optional sender or tool name associated with the message."""
     tool_call_id: str | None = None
+    """Correlation identifier linking a `"tool"` message to its originating `ToolCall`."""
     tool_calls: tuple[ToolCall, ...] = ()
+    """Tool invocations requested by an `"assistant"` turn."""
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
+    """Arbitrary structured metadata attached to the message."""
 
 
 class Agent(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration and tool registry for a single autonomous agent."""
 
     name: str
+    """Unique identifier of the agent within an `AgentRuntime` or `AgentGroup`."""
     description: str = ""
+    """Summary of the agent's responsibilities used for routing and transfers."""
     system_instruction: str = ""
+    """System prompt guiding model behavior during turns."""
     model: str = "gemini-2.5-pro"
+    """Default model identifier used by the `ModelProvider`."""
     tools: tuple[Tool, ...] = ()
+    """Callable `Tool` descriptors registered on this agent."""
     skills: tuple[Any, ...] = ()
+    """Progressive MCP skills attached to this agent."""
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
+    """Custom configuration metadata associated with the agent."""
 
     def __post_init__(self) -> None:
         names: set[str] = set()
@@ -146,15 +159,25 @@ class SpecNode(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Hierarchical goal, subtask, or action item in a SpecTree."""
 
     id: str
+    """Unique node identifier within the `SpecTree`."""
     title: str
+    """Concise summary title of the goal or subtask."""
     description: str = ""
+    """Detailed specification or acceptance criteria for the node."""
     parent_id: str | None = None
+    """Identifier of the parent `SpecNode`, or `None` for top-level goals."""
     depends_on: tuple[str, ...] = ()
+    """Prerequisite node IDs that must complete before this node becomes ready."""
     assigned_agent: str | None = None
+    """Optional specialist `Agent.name` assigned to execute this node."""
     status: SpecNodeStatus = "pending"
+    """Execution lifecycle state (`pending`, `ready`, `running`, `completed`, `failed`, `skipped`)."""
     output: Any = None
+    """Result payload or error details recorded upon node completion."""
     children: tuple[str, ...] = ()
+    """Ordered child subtask node IDs decomposed under this node."""
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
+    """Custom planning metadata attached to the node."""
 
 
 class SpecTree:

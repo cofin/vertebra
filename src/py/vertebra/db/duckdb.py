@@ -38,17 +38,29 @@ class DuckdbConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Configuration for the embedded DuckDB analytical engine."""
 
     path: str = ":memory:"
+    """Filesystem path to the DuckDB database file or `":memory:"`."""
     database: str = ":memory:"
+    """Fallback database path alias used when `path` is left at `":memory:"`."""
     memory_limit_mb: int = 512
+    """Maximum buffer manager memory allowance in MiB (`SET memory_limit`)."""
     threads: int = 4
+    """Number of DuckDB execution threads (`SET threads`)."""
     parquet_metadata_cache: bool = True
+    """When True, enable `SET parquet_metadata_cache = true` after connection bootstrap."""
     httpfs_connection_caching: bool = True
+    """When True, keep remote HTTP/S3 object storage connections warm (`SET http_keep_alive = true`)."""
     enable_http_metadata_cache: bool = True
+    """When True, cache remote HTTP/Parquet `HEAD` metadata (`SET enable_http_metadata_cache = true`)."""
     read_only: bool = False
+    """When True, open the DuckDB file in read-only mode allowing multi-process readers."""
     pool_min_size: int = 1
+    """Minimum number of pooled DuckDB cursors per worker."""
     pool_max_size: int = 10
+    """Maximum number of pooled DuckDB cursors per worker."""
     statement_cache_size: int = 256
+    """Maximum number of prepared analytical statements cached per worker."""
     broker: Any = None
+    """Optional shared-memory `DatabaseBroker` coordinating single-writer/multi-reader leases."""
 
     def resolved_path(self) -> str:
         """Resolve the effective database path from `path` or `database`."""

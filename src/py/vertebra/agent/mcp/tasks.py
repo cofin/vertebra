@@ -31,18 +31,31 @@ class TaskRecord(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Immutable snapshot of an MCP io.modelcontextprotocol/tasks execution record."""
 
     task_id: str
+    """Unique task identifier (`task_<hex>`)."""
     owner_id: str | None
+    """Caller ownership key isolating task visibility across tenants."""
     tool_name: str
+    """Name of the MCP tool executing asynchronously."""
     status: MCPTaskStatus
+    """Current lifecycle state (`working`, `input_required`, `completed`, `failed`, `cancelled`)."""
     created_at_iso: str
+    """ISO-8601 UTC timestamp when the task was created."""
     last_updated_at_iso: str
+    """ISO-8601 UTC timestamp of the most recent status transition."""
     ttl_ms: int
+    """Time-to-live retention window in milliseconds."""
     poll_interval_ms: int = 1000
+    """Recommended client polling interval in milliseconds."""
     status_message: str | None = None
+    """Human-readable progress or error summary."""
     input_requests: dict[str, dict[str, Any]] | None = None
+    """Pending input prompts required from the caller when `status` is `"input_required"`."""
     inputs_received: dict[str, Any] | None = None
+    """Caller-supplied input values submitted to resume the task."""
     result: dict[str, Any] | None = None
+    """Final tool output payload when `status` is `"completed"`."""
     error: dict[str, Any] | None = None
+    """Structured error details when `status` is `"failed"`."""
 
     @property
     def is_terminal(self) -> bool:
@@ -54,9 +67,13 @@ class MCPTaskConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration options for MCP tasks execution."""
 
     enabled: bool = True
+    """Enable durable `tasks/get`, `tasks/list`, `tasks/result`, and `tasks/cancel` methods."""
     default_ttl_ms: int = 300_000
+    """Default retention TTL in milliseconds (`5 minutes`) for newly created tasks."""
     max_ttl_ms: int = 3_600_000
+    """Maximum allowed task TTL in milliseconds (`1 hour`)."""
     poll_interval_ms: int = 1_000
+    """Default polling interval hint in milliseconds returned to MCP clients."""
 
 
 class MCPTaskStore:

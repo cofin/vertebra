@@ -1,6 +1,15 @@
 # Server & Workers
 
-`vertebra.server` connects the Rust HTTP server (`vertebra-http`) and shared-memory transport (`vertebra-core`) to Python handlers, background queue workers, and ASGI, RSGI, and WSGI applications.
+`vertebra.server` connects the Rust HTTP server (`vertebra-http`) and shared-memory transport (`vertebra-core`) to Python handlers, background queue workers, and ASGI, RSGI, and WSGI applications. See [`vertebra.server` API Reference](../reference/server.md) for class and method signatures.
+
+## Runtime Topologies (`embedded` vs. `shm`)
+
+Vertebra supports two execution topologies selectable via `--topology` (or `VERTEBRA_TOPOLOGY`):
+
+| Topology | Flag | When Selected | How Requests Cross Rust & Python |
+| --- | --- | --- | --- |
+| **Embedded** | `--topology embedded` | Default when `--workers 1` or on free-threaded Python `3.14t`/`3.15t` | Zero-IPC in-process `EmbeddedTransport` inside a single OS process |
+| **Shared Memory** | `--topology shm` | Default when `--workers > 1` on standard GIL-enabled Python | Lock-free POSIX shared-memory SPSC ring (`ShmTransport`) with futex/ulock wakeups |
 
 ## Worker Lanes & Task Runners (`vertebra.server.lanes`)
 
