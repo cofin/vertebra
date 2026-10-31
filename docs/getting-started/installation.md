@@ -50,7 +50,7 @@ bun add @vertebra/client
 When developing on the Vertebra repository itself (Rust 2024 + Python + TypeScript):
 
 ```bash
-make install   # Set up .venv, install Python/Bun deps, and compile debug PyO3 extensions
-make dev       # Rebuild Rust crates and install debug PyO3 extensions (_vertebra, _bundler, _storage)
+make install   # Set up .venv, install deps, and build debug extensions
+make dev       # Rebuild Rust crates and install debug PyO3 extensions
 make test      # Run Rust, Python, and TypeScript test suites
 ```

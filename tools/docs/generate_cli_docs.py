@@ -5,7 +5,9 @@ import importlib.util
 import re
 import sys
 import types
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -27,7 +29,6 @@ _JS_COMMANDS: tuple[str, ...] = (
     "js generate-types",
     "js exec",
 )
-_NATIVE_STUB_MODULES: tuple[str, ...] = ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage")
 
 
 def render_cli_reference(group: click.Group | None = None) -> str:
@@ -138,13 +139,27 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _make_stub_getattr(
+    fallback_none_attrs: frozenset[str] = frozenset(
+        {"ObjectStore", "SchemaDigestCache", "field_id", "handler_id", "state_id"}
+    ),
+) -> Callable[[str], Any]:
+    """Return a module __getattr__ hook that defers optional native symbols to Python fallbacks."""
+
+    def _getattr(attr_name: str) -> Any:
+        if attr_name in fallback_none_attrs:
+            raise AttributeError(attr_name)
+        return type(attr_name, (), {})
+
+    return _getattr
+
+
 def _load_default_cli_group() -> click.Group:
-    """Import vertebra.cli.cli while providing lightweight native module placeholders in pure-Python environments."""
-    for mod_name in _NATIVE_STUB_MODULES:
-        if mod_name not in sys.modules and importlib.util.find_spec(mod_name) is None:
-            stub_mod = types.ModuleType(mod_name)
-            stub_mod.__getattr__ = lambda attr_name: type(attr_name, (), {})  # type: ignore[method-assign]
-            sys.modules[mod_name] = stub_mod
+    """Import vertebra.cli.cli while providing a lightweight native module placeholder in pure-Python environments."""
+    if "vertebra._vertebra" not in sys.modules and importlib.util.find_spec("vertebra._vertebra") is None:
+        stub_mod = types.ModuleType("vertebra._vertebra")
+        stub_mod.__getattr__ = _make_stub_getattr()  # type: ignore[method-assign]
+        sys.modules["vertebra._vertebra"] = stub_mod
     from vertebra.cli import cli
 
     return cli

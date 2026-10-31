@@ -42,17 +42,17 @@ vtb build --standalone
 ## Common Make Targets
 
 ```bash
-make dev           # Build Rust crates and install native Python extensions in debug mode
-make build         # Build TypeScript client, release Rust binaries, and Python wheel
-make test          # Run all tests (Rust + Python + TypeScript)
-make rs-test       # Run Rust workspace tests (with tls and compression features)
-make py-test       # Run Python test suite
-make ts-test       # Run TypeScript client tests (Vitest)
-make lint          # Format and lint Python (Ruff + Mypy), Rust (rustfmt + Clippy), and TS (Biome)
-make check         # Run full lint, type checks, all tests, and coverage
-make docs          # Generate CLI docs, build Zensical site, run postbuild, and verify artifacts
-make docs-serve    # Serve Zensical documentation locally with live reload
-make bench         # Run benchmark suite
+make dev         # Build Rust crates and install debug Python extensions
+make build       # Build TS client, release Rust binaries, and wheel
+make test        # Run all tests (Rust + Python + TypeScript)
+make rs-test     # Run Rust workspace tests (tls + compression features)
+make py-test     # Run Python test suite
+make ts-test     # Run TypeScript client tests (Vitest)
+make lint        # Format and lint Python, Rust, and TypeScript
+make check       # Run full lint, type checks, all tests, and coverage
+make docs        # Build Zensical site, postbuild, and verify artifacts
+make docs-serve  # Serve Zensical documentation locally with live reload
+make bench       # Run benchmark suite
 ```
 
 ## Repository Layout
@@ -60,17 +60,17 @@ make bench         # Run benchmark suite
 ```text
 src/
   py/
-    vertebra/          # Python framework, server runners (native/ASGI/WSGI/RSGI), CLI, agent, storage, db, telemetry
+    vertebra/          # Python framework, runners, CLI, agent, storage, db
     tests/             # Python unit and FFI test suite
   rs/
-    vertebra-core/     # Lock-free MPMC/SPSC shared-memory ring buffers, futex/ulock signaling, and batch protocol
-    vertebra-py/       # PyO3 native extension (_vertebra) bridging Rust HTTP/IPC and Python workers
-    vertebra-http/     # Hyper + Tokio HTTP/1.1, HTTP/2, HTTP/3, gRPC, TLS, compression, static files, and HMR
-    vertebra-bundler/  # Embedded Rolldown/Oxc bundler and QuickJS SSR pool (_bundler)
-    vertebra-storage/  # Multi-cloud and local object storage bindings (_storage)
-    vertebra-db/       # Native Postgres, MySQL, and SQLite connection pools and wire codecs
+    vertebra-core/     # Lock-free MPMC/SPSC rings, futex/ulock, batch IPC
+    vertebra-py/       # PyO3 native extension (_vertebra)
+    vertebra-http/     # Hyper + Tokio HTTP/1.1, HTTP/2, HTTP/3, gRPC, TLS
+    vertebra-bundler/  # Embedded Rolldown/Oxc bundler and QuickJS SSR
+    vertebra-storage/  # Multi-cloud and local object storage (_storage)
+    vertebra-db/       # Native Postgres, MySQL, and SQLite pools
   ts/
-    vertebra-client/   # @vertebra/client TypeScript SDK (HTTP, SSE, WS, LiveState, Apex, Wasm, Arrow, MCP/A2A)
+    vertebra-client/   # @vertebra/client TypeScript SDK
 ```
 
 ## Runtime Topologies

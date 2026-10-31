@@ -4,22 +4,21 @@
 
 ## Model Context Protocol (`vertebra.agent.mcp`)
 
-Register typed Python functions as MCP tools, resources, and prompts on `MCPRegistry`. Input JSON Schemas are compiled and cached from function type annotations and `msgspec.Struct` models:
+Register typed Python functions as MCP tools on `MCPRegistry`. Input JSON Schemas are compiled and cached from function type annotations and `msgspec.Struct` models:
 
 ```python
-from vertebra.agent.mcp import MCPConfig, MCPRegistry
+from vertebra.agent.core import tool
+from vertebra.agent.mcp.registry import MCPRegistry
 
-mcp = MCPRegistry(MCPConfig(name="inventory-mcp", version="1.0.0"))
+registry = MCPRegistry()
 
 
-@mcp.tool(description="Look up current stock count for a SKU.")
+@tool(description="Look up current stock count for a SKU.")
 def check_stock(sku: str) -> dict[str, int | str]:
     return {"sku": sku, "available": 42}
 
 
-@mcp.resource("config://warehouse/regions", description="Supported warehouse regions.")
-def warehouse_regions() -> list[str]:
-    return ["us-east", "eu-west", "ap-south"]
+registry.register_tool(check_stock)
 ```
 
 ### MCP Skills & Long-Running Tasks
@@ -33,15 +32,25 @@ def warehouse_regions() -> list[str]:
 Expose an A2A-compliant agent discovery card (`/.well-known/agent.json`) and JSON-RPC/SSE task orchestration endpoints using `A2AConfig`, `A2AService`, and `AgentCard`:
 
 ```python
-from vertebra.agent.a2a import A2AConfig, A2AService, AgentCapabilities, AgentSkill
+from vertebra.agent.a2a import (
+    A2AConfig,
+    A2AService,
+    AgentCapabilities,
+    AgentSkill,
+)
 
+skill = AgentSkill(
+    id="order-lookup",
+    name="Order Lookup",
+    description="Query order status.",
+)
 a2a = A2AService(
     A2AConfig(
         name="OrderSupportAgent",
         description="Resolves order status and shipment inquiries.",
         url="https://agents.example.com/a2a",
         capabilities=AgentCapabilities(streaming=True),
-        skills=[AgentSkill(id="order-lookup", name="Order Lookup", description="Query order status.")],
+        skills=[skill],
     )
 )
 ```
