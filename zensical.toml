@@ -1,0 +1,198 @@
+[project]
+site_name = "Vertebra"
+site_description = "Python-first, high-performance polyglot application backbone powered by a Rust 2024 runtime and a type-safe TypeScript client."
+site_url = "https://vertebra.litestar.dev/"
+repo_url = "https://github.com/litestar-org/vertebra"
+repo_name = "litestar-org/vertebra"
+docs_dir = "docs"
+site_dir = "site"
+use_directory_urls = true
+exclude_docs = """
+examples/*.py
+"""
+extra_css = ["stylesheets/extra.css"]
+nav = [
+  { "Home" = "index.md" },
+  { "Getting Started" = [
+    "getting-started/index.md",
+    { "Installation" = "getting-started/installation.md" },
+    { "Quickstart" = "getting-started/quickstart.md" },
+    { "Configuration" = "getting-started/configuration.md" },
+    { "CLI" = "getting-started/cli.md" },
+  ] },
+  { "Usage" = [
+    "usage/index.md",
+    { "Routing & Handlers" = "usage/routing-and-handlers.md" },
+    { "Framework Features" = "usage/framework-features.md" },
+    { "Server & Workers" = "usage/server-and-workers.md" },
+    { "Frontend & SSR" = "usage/frontend-and-ssr.md" },
+    { "Databases & Storage" = "usage/databases-and-storage.md" },
+    { "Framework Extensions" = "usage/extensions.md" },
+    { "Agent Protocols (MCP & A2A)" = "usage/agent-protocols.md" },
+    { "Packaging & Deployment" = "usage/packaging-and-deployment.md" },
+    { "Testing" = "usage/testing.md" },
+  ] },
+  { "Architecture" = [
+    "architecture/index.md",
+    { "Runtime & Shared-Memory IPC" = "architecture/runtime-and-ipc.md" },
+    { "HTTP/1.1, HTTP/2, HTTP/3 & gRPC Ingress" = "architecture/http-ingress.md" },
+    { "PyO3 Bridge & Worker Lanes" = "architecture/pyo3-and-workers.md" },
+    { "Bundler, QuickJS SSR & TypeScript SDK" = "architecture/bundler-and-client.md" },
+  ] },
+  { "Reference" = [
+    "reference/index.md",
+    { "Core & Framework" = [
+      { "vertebra" = "reference/vertebra.md" },
+      { "Framework" = "reference/framework.md" },
+      { "Task Queues" = "reference/queues.md" },
+      { "Inertia & SSR" = "reference/inertia.md" },
+      { "Server & Workers" = "reference/server.md" },
+    ] },
+    { "Data, Storage & Telemetry" = [
+      { "Object Storage" = "reference/storage.md" },
+      { "Database Pools" = "reference/db.md" },
+      { "Telemetry & Logging" = "reference/telemetry.md" },
+    ] },
+    { "Agents, Extensions & Build" = [
+      { "Agent Runtime (MCP & A2A)" = "reference/agent.md" },
+      { "Framework Extensions" = "reference/extensions.md" },
+      { "Build, Wasm & Supervisor" = "reference/build-and-wasm.md" },
+      { "CLI Reference" = "reference/cli.md" },
+    ] },
+    { "Native & Polyglot SDKs" = [
+      { "PyO3 Native Stubs" = "reference/native-stubs.md" },
+      { "@vertebra/client (TypeScript)" = "reference/typescript-client.md" },
+    ] },
+  ] },
+  { "Examples" = [
+    "examples/index.md",
+  ] },
+  { "Changelog" = [
+    "changelog/index.md",
+  ] },
+]
+
+[project.theme]
+variant = "modern"
+language = "en"
+logo = "assets/logo.svg"
+favicon = "assets/favicon.svg"
+features = [
+  "content.code.annotate",
+  "content.code.copy",
+  "content.tabs.link",
+  "navigation.indexes",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "search.highlight",
+  "toc.follow",
+]
+
+[project.theme.font]
+text = "Inter"
+code = "JetBrains Mono"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "custom"
+accent = "indigo"
+toggle = { icon = "lucide/sun", name = "Switch to dark mode" }
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "custom"
+accent = "indigo"
+toggle = { icon = "lucide/moon", name = "Switch to light mode" }
+
+[project.extra]
+generator = false
+
+[project.plugins.search]
+
+[project.plugins.redirects.redirect_maps]
+"backpressure.md" = "architecture/http-ingress.md"
+"parallelism.md" = "architecture/pyo3-and-workers.md"
+"changelog.rst" = "changelog/index.md"
+"changelog.md" = "changelog/index.md"
+
+[project.plugins.mkdocstrings]
+default_handler = "python"
+custom_templates = "tools/docs/templates"
+enable_inventory = true
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["src/py"]
+inventories = [
+  "https://docs.python.org/3/objects.inv",
+  "https://typing-extensions.readthedocs.io/en/stable/objects.inv",
+  "https://click.palletsprojects.com/en/stable/objects.inv",
+  "https://docs.litestar.dev/latest/objects.inv",
+  "https://msgspec.dev/objects.inv",
+]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+docstring_section_style = "table"
+find_stubs_package = true
+heading_level = 3
+inherited_members = false
+line_length = 80
+members_order = "source"
+merge_init_into_class = false
+modernize_annotations = true
+annotations_path = "brief"
+preload_modules = ["vertebra"]
+separate_signature = true
+show_bases = true
+show_category_heading = false
+show_if_no_docstring = true
+show_labels = false
+show_object_full_path = false
+show_overloads = false
+show_root_full_path = false
+show_root_heading = true
+show_root_toc_entry = true
+show_signature_annotations = false
+show_source = false
+show_symbol_type_heading = true
+show_symbol_type_toc = false
+signature_crossrefs = false
+summary = { attributes = true, functions = true, classes = false, modules = false }
+unwrap_annotated = true
+filters = ["!^_"]
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+tables = {}
+toc = { permalink = true, toc_depth = "2-3" }
+
+[project.markdown_extensions.pymdownx.details]
+[project.markdown_extensions.pymdownx.inlinehilite]
+[project.markdown_extensions.pymdownx.keys]
+
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+line_spans = "__span"
+pygments_lang_class = true
+
+[project.markdown_extensions.pymdownx.snippets]
+base_path = ["."]
+check_paths = true
+dedent_subsections = true
+
+[project.markdown_extensions.pymdownx.superfences]
+custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
+slugify = { object = "pymdownx.slugs.slugify", kwds = { case = "lower" } }
