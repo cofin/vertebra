@@ -51,13 +51,14 @@ dev = [
 dev = [
     { include-group = "test" },
     { include-group = "lint" },
-    { include-group = "doc" },
     { include-group = "build" },
 ]
 doc = [
+    "anyio>=4.0",
     "mkdocstrings-python>=2.0.3",
     "msgspec>=0.18",
     "pymdown-extensions>=10.16",
+    "rich>=13.0",
     "rich-click>=1.7",
     "ruff>=0.4",
     "zensical>=0.0.71",

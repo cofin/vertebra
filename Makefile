@@ -84,7 +84,7 @@ install: destroy clean setup-env                    ## Install everything (Pytho
 	fi
 	@uv python pin 3.12 >/dev/null 2>&1
 	@uv venv --clear >/dev/null 2>&1
-	@uv sync --all-extras --dev
+	@uv sync --all-extras --dev --group doc
 	@$(MAKE) ts-install
 	@$(MAKE) ts-build
 	@$(MAKE) dev
@@ -111,7 +111,7 @@ destroy:                                            ## Destroy virtual environme
 .PHONY: upgrade
 upgrade: setup-env                                  ## Upgrade all dependencies (Python, Rust, TS, CI)
 	@echo "${INFO} Upgrading Python dependencies (uv)..."
-	@uv lock --upgrade && uv sync --all-extras --dev
+	@uv lock --upgrade && uv sync --all-extras --dev --group doc
 	@echo "${INFO} Upgrading Rust dependencies (cargo)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo update)
