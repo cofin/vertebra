@@ -1,4 +1,4 @@
-"""Tests for ShmBrokerTransport, InMemoryBrokerTransport, and ShmSessionBroker."""
+"""Tests for SHMBrokerTransport, InMemoryBrokerTransport, and SHMSessionBroker."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ import time
 
 import pytest
 
-from vertebra.extensions.alchemy.broker import ShmSessionBroker
+from vertebra.extensions.alchemy.broker import SHMSessionBroker
 from vertebra.extensions.broker import (
     BrokerConfig,
     BrokerPlugin,
     InMemoryBrokerTransport,
-    ShmBrokerTransport,
+    SHMBrokerTransport,
 )
 from vertebra.server.platform import ZPagesRegistry
 from vertebra.telemetry.otel import DbPoolRecorder
@@ -54,10 +54,10 @@ def test_in_memory_broker_transport_lifecycle() -> None:
 
 @pytest.mark.anyio
 async def test_shm_broker_transport_async_and_cache() -> None:
-    """Verify ShmBrokerTransport async acquire, release, and prepared statement caching."""
+    """Verify SHMBrokerTransport async acquire, release, and prepared statement caching."""
     name = f"/vtb-test-shm-trans-{os.getpid()}-{int(time.time())}"
     cfg = BrokerConfig(pool_size=3, max_overflow=1, shm_name=name)
-    transport = ShmBrokerTransport(cfg)
+    transport = SHMBrokerTransport(cfg)
 
     lease = await transport.acquire_async(worker_id=os.getpid(), bind_key="app")
     assert lease.worker_id == os.getpid()
@@ -88,11 +88,11 @@ async def test_shm_broker_transport_async_and_cache() -> None:
 
 
 def test_shm_session_broker_checkout_checkin() -> None:
-    """Verify ShmSessionBroker checkout and checkin hook lifecycle."""
+    """Verify SHMSessionBroker checkout and checkin hook lifecycle."""
     name = f"/vtb-test-session-{os.getpid()}-{int(time.time())}"
     cfg = BrokerConfig(pool_size=2, max_overflow=1, shm_name=name)
-    transport = ShmBrokerTransport(cfg)
-    session_broker = ShmSessionBroker(transport=transport)
+    transport = SHMBrokerTransport(cfg)
+    session_broker = SHMSessionBroker(transport=transport)
 
     class FakeConn:
         pass

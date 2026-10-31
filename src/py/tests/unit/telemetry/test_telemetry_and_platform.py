@@ -12,7 +12,7 @@ import msgspec
 from vertebra.server.platform import (
     CgroupQuota,
     LameDuckController,
-    ShmAllocationPolicy,
+    SHMAllocationPolicy,
     ZPagesRegistry,
 )
 from vertebra.server.worker import Worker
@@ -235,10 +235,10 @@ def test_genai_recorder_is_bounded_and_drains() -> None:
 
 
 def test_worker_sigterm_enters_lame_duck_and_validates_shm_policy() -> None:
-    """Verify Worker.handle_sigterm validates ShmAllocationPolicy, enters lame-duck mode, and updates zPages."""
+    """Verify Worker.handle_sigterm validates SHMAllocationPolicy, enters lame-duck mode, and updates zPages."""
     validated_calls: list[bool] = []
 
-    class TrackingShmPolicy(ShmAllocationPolicy):
+    class TrackingShmPolicy(SHMAllocationPolicy):
         def validate_environment(self) -> bool:
             res = super().validate_environment()
             validated_calls.append(res)

@@ -13,8 +13,8 @@ sources:
   - resource: src/rs/vertebra-storage/tests/storage_engine_tests.rs
   - resource: src/py/vertebra/storage/__init__.py
   - resource: src/py/vertebra/storage/_store.py
-  - resource: src/py/vertebra/storage/registry.py
-  - resource: src/py/vertebra/storage/pipeline.py
+  - resource: src/py/vertebra/extensions/alchemy/storage.py
+  - resource: src/py/vertebra/extensions/sqlspec/storage.py
   - resource: src/py/tests/integration/storage/conftest.py
 ---
 
@@ -62,21 +62,15 @@ Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` with 
 - `PresignedUrlSigner.sign_oci_headers` (static) requires the native extension and raises `RuntimeError` without it.
 - `PresignedUrlSigner.sign_azure_sas` (static) uses the native function when available and has a pure-Python HMAC fallback.
 - `R2Config.chunk_uniform_parts` (static) uses `py_chunk_r2_uniform_parts` when available. The Python fallback enforces a 5 MiB minimum part size. `R2Config.resolved_endpoint` builds `https://{account_id}[.{jurisdiction}].r2.cloudflarestorage.com`.
-- `PrefixedObjectStore` wraps an `ObjectStore` with a normalized key prefix (`apply_prefix`, `strip_prefix`), shared by `SQLSpecStore` and `ObjectStoreBackend`.
-- `SyncStore` and `AsyncStore` are thin explicit-mode facades over one `ObjectStore`.
-
-Key handling: `_normalize_key` strips leading `/` and rejects `..` segments. `_resolve_local` rejects paths that escape a `file://` root.
-
-## 4. Registry, Upload Tracking, Range Reads
+## 4. Range Reads & Ecosystem Adapters
 
 | Symbol | Source | Responsibility |
 |---|---|---|
-| [`StorageRegistry`](../../../../../src/py/vertebra/storage/registry.py) | `registry.py` | `RLock`-guarded alias and URI cache (`register_alias`, `register_store`, `resolve_store`, `get`, `aliases`, `clear`). A target with a `to_store()` method is materialized on registration. Calls that pass per-call `options`/`signing` to an alias are not cached. |
-| `StorageRegistry.default()` | `registry.py` | Returns the process-wide `_DEFAULT_REGISTRY`. |
-| [`UploadTracker`](../../../../../src/py/vertebra/storage/pipeline.py) / `StagedUpload` | `pipeline.py` | Stages uploads and deferred deletes around a database transaction: `before_flush` writes staged objects, `after_commit` runs deferred deletes, `after_rollback` deletes the objects written in that transaction. Async variants mirror each hook. `attach_sqlalchemy_session` registers the three SQLAlchemy session events. `async with tracker:` rolls back on exception. Delete failures are suppressed. |
 | [`ReadableFile`](../../../../../src/py/vertebra/storage/_store.py) | `_store.py` | Read-only seekable `io.RawIOBase` backed by `get_range`, with `read_at` / `read_at_async` that leave the cursor alone. It lets PyArrow or Polars read Parquet footers and row groups without downloading the whole object. |
+| [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/alchemy/storage.py) | `extensions/alchemy/storage.py` | Drop-in `advanced_alchemy.types.file_object.StorageBackend` implementation wrapping `ObjectStore` with sync and async file attachments, content streaming, and presigned URLs. |
+| [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/sqlspec/storage.py) | `extensions/sqlspec/storage.py` | Drop-in `sqlspec.protocols.ObjectStoreProtocol` implementation wrapping `ObjectStore` with buffer, streaming, and range operations. |
 
-`UploadTracker` is used by the alchemy storage extension ([sqlspec-alchemy-and-dialects](../extensions/sqlspec-alchemy-and-dialects.md)).
+Vertebra delegates storage registry and multi-store management to upstream ecosystems (`advanced_alchemy.types.file_object.StorageRegistry` and `sqlspec.storage.registry.StorageRegistry`), eliminating redundant internal abstractions.
 
 ## 5. Emulator Fixtures
 

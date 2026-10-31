@@ -35,7 +35,7 @@ FRAME_KIND_BATCH_REQUEST: int = 2
 FRAME_KIND_RESPONSE: int = 3
 
 
-class JsonRpcError(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class JSONRPCError(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """JSON-RPC 2.0 error object."""
 
     code: int
@@ -50,7 +50,7 @@ class JsonRpcError(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return payload
 
 
-class JsonRpcRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True, forbid_unknown_fields=True):
+class JSONRPCRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True, forbid_unknown_fields=True):
     """JSON-RPC 2.0 request or notification envelope."""
 
     method: str
@@ -64,13 +64,13 @@ class JsonRpcRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True, forbid
         return self.id is None
 
 
-class JsonRpcResponse(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class JSONRPCResponse(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """JSON-RPC 2.0 response envelope."""
 
     jsonrpc: str = "2.0"
     id: str | int | None = None
     result: Any = None
-    error: JsonRpcError | None = None
+    error: JSONRPCError | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the response payload to a serializable dictionary."""
@@ -82,12 +82,12 @@ class JsonRpcResponse(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return payload
 
 
-class JsonRpcErrorException(Exception):
+class JSONRPCErrorException(Exception):
     """Exception indicating a structured JSON-RPC error response."""
 
     def __init__(
         self,
-        error: JsonRpcError,
+        error: JSONRPCError,
         request_id: str | int | None = None,
     ) -> None:
         super().__init__(error.message)
@@ -98,7 +98,7 @@ class JsonRpcErrorException(Exception):
 type HandlerCallable = Callable[..., Coroutine[Any, Any, Any] | Any]
 
 
-class JsonRpcRouter:
+class JSONRPCRouter:
     """Dispatches JSON-RPC 2.0 single and batch requests to registered handlers."""
 
     def __init__(self) -> None:
@@ -164,7 +164,7 @@ class JsonRpcRouter:
 
     async def dispatch(
         self,
-        request: JsonRpcRequest,
+        request: JSONRPCRequest,
         context: Any = None,
     ) -> dict[str, Any] | None:
         """Dispatch a single JSON-RPC request and return the response dictionary or None."""
@@ -186,7 +186,7 @@ class JsonRpcRouter:
             if request.is_notification:
                 return None
             return {"jsonrpc": "2.0", "id": request.id, "result": result}
-        except JsonRpcErrorException as exc:
+        except JSONRPCErrorException as exc:
             if request.is_notification:
                 return None
             return {
@@ -253,7 +253,7 @@ class JsonRpcRouter:
                     }
                     return
 
-                req = JsonRpcRequest(
+                req = JSONRPCRequest(
                     method=str(item["method"]),
                     jsonrpc=str(item.get("jsonrpc", "2.0")),
                     params=item.get("params"),
@@ -280,7 +280,7 @@ class JsonRpcRouter:
                 }
                 return encode_json_bytes(error_resp)
 
-            req = JsonRpcRequest(
+            req = JSONRPCRequest(
                 method=str(parsed["method"]),
                 jsonrpc=str(parsed.get("jsonrpc", "2.0")),
                 params=parsed.get("params"),
@@ -307,11 +307,11 @@ __all__ = [
     "INTERNAL_ERROR",
     "INVALID_PARAMS",
     "INVALID_REQUEST",
+    "JSONRPCError",
+    "JSONRPCErrorException",
+    "JSONRPCRequest",
+    "JSONRPCResponse",
+    "JSONRPCRouter",
     "METHOD_NOT_FOUND",
     "PARSE_ERROR",
-    "JsonRpcError",
-    "JsonRpcErrorException",
-    "JsonRpcRequest",
-    "JsonRpcResponse",
-    "JsonRpcRouter",
 ]

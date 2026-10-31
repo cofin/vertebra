@@ -1,16 +1,36 @@
-"""Import map generation from JavaScript dependency configuration."""
+"""Import map generation and wheel-native @vertebra/client synchronization."""
 
+import shutil
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from vertebra.build._config import JsConfig
 from vertebra.utils.serializers import format_json
 
 __all__ = ("ImportMapGenerator",)
 
+_CLIENT_SUBPATHS: tuple[tuple[str, str, str], ...] = (
+    (".", "./index.js", "./index.d.ts"),
+    ("./vite", "./vite/index.js", "./vite/index.d.ts"),
+    ("./react", "./react/index.js", "./react/index.d.ts"),
+    ("./vue", "./vue/index.js", "./vue/index.d.ts"),
+    ("./svelte", "./svelte/index.js", "./svelte/index.d.ts"),
+    ("./angular", "./angular/index.js", "./angular/index.d.ts"),
+    ("./htmx", "./htmx/index.js", "./htmx/index.d.ts"),
+    ("./store", "./store/index.js", "./store/index.d.ts"),
+    ("./hmr", "./hmr/index.js", "./hmr/index.d.ts"),
+    ("./wasm", "./wasm.js", "./wasm.d.ts"),
+    ("./arrow", "./arrow.js", "./arrow.d.ts"),
+    ("./live", "./live/index.js", "./live/index.d.ts"),
+    ("./apex", "./apex/index.js", "./apex/index.d.ts"),
+    ("./telemetry", "./telemetry.js", "./telemetry.d.ts"),
+    ("./agent", "./agent/index.js", "./agent/index.d.ts"),
+)
+
 
 class ImportMapGenerator:
-    """Generate and persist V8-compatible JavaScript import maps."""
+    """Generate V8-compatible JavaScript import maps and extract the wheel-bundled @vertebra/client SDK."""
 
     @staticmethod
     def parse_spec(spec: str) -> tuple[str, str]:
@@ -31,9 +51,14 @@ class ImportMapGenerator:
         js_config: JsConfig | Sequence[str],
         *,
         include_dev: bool = False,
+        include_client: bool = False,
     ) -> dict[str, dict[str, str]]:
         """Generate a V8-compatible import map from *js_config* or package specifiers."""
         imports: dict[str, str] = {}
+
+        if include_client:
+            imports["@vertebra/client"] = "/__vertebra/client/index.js"
+            imports["@vertebra/client/"] = "/__vertebra/client/"
 
         if isinstance(js_config, JsConfig):
             all_specs = list(js_config.dependencies)
@@ -57,9 +82,14 @@ class ImportMapGenerator:
         output_dir: Path,
         *,
         include_dev: bool = False,
+        include_client: bool = False,
     ) -> Path:
         """Generate and write ``import_map.json`` to *output_dir*."""
-        import_map = ImportMapGenerator.generate(js_config, include_dev=include_dev)
+        import_map = ImportMapGenerator.generate(
+            js_config,
+            include_dev=include_dev,
+            include_client=include_client,
+        )
 
         if output_dir.suffix == ".json":
             output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -68,5 +98,35 @@ class ImportMapGenerator:
             output_dir.mkdir(parents=True, exist_ok=True)
             output_path = output_dir / "import_map.json"
         formatted = format_json(import_map, indent=2)
-        output_path.write_text(formatted + "\n")
+        output_path.write_text(formatted + "\n", encoding="utf-8")
         return output_path
+
+    @staticmethod
+    def sync_wheel_client(output_dir: Path) -> Path | None:
+        """Copy the wheel-packaged ``@vertebra/client`` ESM bundle and ``.d.ts`` declarations into *output_dir*."""
+        bundle_dir = Path(__file__).resolve().parents[1] / "server" / "_js" / "bundle"
+        if not bundle_dir.is_dir():
+            return None
+
+        target_dir = output_dir / "client"
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(bundle_dir, target_dir)
+
+        exports_map: dict[str, dict[str, str]] = {
+            subpath: {"types": types_rel, "import": js_rel} for subpath, js_rel, types_rel in _CLIENT_SUBPATHS
+        }
+        pkg_manifest: dict[str, Any] = {
+            "name": "@vertebra/client",
+            "version": "0.1.0",
+            "private": True,
+            "description": "Wheel-packaged TypeScript client SDK for Vertebra",
+            "type": "module",
+            "main": "./index.js",
+            "module": "./index.js",
+            "types": "./index.d.ts",
+            "exports": exports_map,
+        }
+        (target_dir / "package.json").write_text(format_json(pkg_manifest, indent=2) + "\n", encoding="utf-8")
+        return target_dir

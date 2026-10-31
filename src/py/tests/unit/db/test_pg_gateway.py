@@ -2,24 +2,29 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 from unittest.mock import MagicMock
 
 import anyio
+import pyarrow as pa
+import pyarrow.ipc as pa_ipc
+import pyarrow.parquet as pq
 import pytest
 
-from vertebra.db.cdc import CdcConfig, ChangeFeed
+from vertebra.db.cdc import CDCConfig, ChangeFeed
 from vertebra.db.datafusion import DataFusionConfig, DataFusionEngine
-from vertebra.db.pipeline import CteStep, QueryPipeline, RelOverlay
-from vertebra.db.postgres import AsyncPostgresDriver, SyncPostgresDriver
+from vertebra.db.pipeline import CTEStep, QueryPipeline, RelOverlay
+from vertebra.db.postgres import AsyncPostgreSQLDriver, SyncPostgreSQLDriver
 from vertebra.db.rls import TenantPredicate, TenantScopeConfig
 from vertebra.storage import ObjectStore
+from vertebra.typing import MissingDependencyError, reset_dependency_cache
 
 
-def test_changefeed_bounded_history_and_spill_to_object_store() -> None:
+def test_changefeed_bounded_history_and_spill_to_object_store(monkeypatch: pytest.MonkeyPatch) -> None:
     """ChangeFeed must bound in-memory history, spill >7500B payloads to ObjectStore, and flush Parquet."""
     store = ObjectStore("memory://")
-    config = CdcConfig(max_history_size=2, spill_threshold_bytes=100, spill_prefix="cdc/spill")
+    config = CDCConfig(max_history_size=2, spill_threshold_bytes=100, spill_prefix="cdc/spill")
     feed = ChangeFeed(config, store=store)
 
     feed.publish_event("INSERT", {"id": 1, "small": "data"})
@@ -40,15 +45,25 @@ def test_changefeed_bounded_history_and_spill_to_object_store() -> None:
 
     put_res = feed.flush_to_parquet("cdc/archive/batch.parquet")
     assert put_res.path == "cdc/archive/batch.parquet"
-    assert store.get("cdc/archive/batch.parquet").startswith(b"PAR1")
+    parquet_bytes = store.get("cdc/archive/batch.parquet")
+    decoded_table = pq.read_table(pa.BufferReader(parquet_bytes))
+    assert [row["event_id"] for row in decoded_table.to_pylist()] == [2, 3]
 
     store.delete("cdc/spill/2.json")
     with pytest.raises(KeyError, match="Spilled CDC payload for event_id=2 is missing"):
         feed.hydrate_notification(env2)
 
+    monkeypatch.setitem(sys.modules, "pyarrow", None)
+    reset_dependency_cache("pyarrow")
+    try:
+        with pytest.raises(MissingDependencyError):
+            feed.flush_to_parquet("cdc/archive/missing.parquet")
+    finally:
+        reset_dependency_cache("pyarrow")
+
 
 def test_sql_identifier_validation_in_reloverlay_and_ctestep() -> None:
-    """RelOverlay, CteStep, and TenantPredicate must reject unsafe SQL identifiers with ValueError."""
+    """RelOverlay, CTEStep, and TenantPredicate must reject unsafe SQL identifiers with ValueError."""
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
         RelOverlay(base_table="users; DROP TABLE users--")
 
@@ -59,7 +74,7 @@ def test_sql_identifier_validation_in_reloverlay_and_ctestep() -> None:
         RelOverlay(base_table="users", id_column="id; delete")
 
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
-        CteStep(name="cte; DROP TABLE secrets", sql="SELECT 1")
+        CTEStep(name="cte; DROP TABLE secrets", sql="SELECT 1")
 
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
         TenantPredicate(table_alias="t; bad", tenant_value=123)
@@ -102,7 +117,7 @@ def test_query_pipeline_execution_sync_and_async() -> None:
     pipeline = QueryPipeline()
     pipeline.add_step("step1", "SELECT 1 AS num", return_json_agg=True)
 
-    mock_sync_driver = MagicMock(spec=SyncPostgresDriver)
+    mock_sync_driver = MagicMock(spec=SyncPostgreSQLDriver)
     mock_sync_driver.execute_with_description.return_value = (
         [{"payload": '{"step1": [{"num": 1}]}'}],
         [("payload", 25)],
@@ -111,7 +126,7 @@ def test_query_pipeline_execution_sync_and_async() -> None:
     result_sync = pipeline.execute(mock_sync_driver)
     assert result_sync == {"step1": [{"num": 1}]}
 
-    mock_async_driver = MagicMock(spec=AsyncPostgresDriver)
+    mock_async_driver = MagicMock(spec=AsyncPostgreSQLDriver)
     mock_async_driver.execute_with_description = MagicMock()
 
     async def _async_exec(sql: str, params: Any = None) -> tuple[list[dict[str, Any]], list[Any]]:
@@ -131,7 +146,9 @@ def test_datafusion_engine_table_registration_and_execution() -> None:
     """DataFusionEngine must register tables and execute SQL queries returning dicts, arrow, and IPC."""
     engine = DataFusionEngine(DataFusionConfig())
     store = ObjectStore("memory://")
-    store.put("data/metrics.parquet", b"PAR1fake_parquetPAR1")
+    metrics_sink = pa.BufferOutputStream()
+    pq.write_table(pa.Table.from_pylist([{"id": 1, "val": 100}]), metrics_sink)
+    store.put("data/metrics.parquet", metrics_sink.getvalue().to_pybytes())
 
     reg = engine.register_parquet_from_store("metrics", store, "data/metrics.parquet")
     assert reg.name == "metrics"
@@ -148,13 +165,14 @@ def test_datafusion_engine_table_registration_and_execution() -> None:
 
     ipc_bytes = engine.stream_arrow_ipc("SELECT * FROM mock_arrow")
     assert isinstance(ipc_bytes, bytes)
-    assert len(ipc_bytes) > 0
+    decoded_ipc = pa_ipc.open_stream(pa.BufferReader(ipc_bytes)).read_all()
+    assert decoded_ipc.to_pylist() == [{"id": 1, "val": 100}, {"id": 2, "val": 200}]
 
 
 def test_cdc_changefeed_parquet_spill_to_object_store_and_datafusion_arrow_query() -> None:
     """ChangeFeed Parquet spill and DataFusion query execution composition with KeyError refusal."""
     store = ObjectStore("memory://")
-    feed = ChangeFeed(CdcConfig(spill_threshold_bytes=100), store=store)
+    feed = ChangeFeed(CDCConfig(spill_threshold_bytes=100), store=store)
 
     feed.publish_event("INSERT", {"account_id": 10, "amount": 50})
     env2, evt2 = feed.publish_event("INSERT", {"account_id": 20, "amount": 100, "blob": "y" * 300})
@@ -184,7 +202,7 @@ def test_cdc_changefeed_parquet_spill_to_object_store_and_datafusion_arrow_query
 
     ipc_data = engine.stream_arrow_ipc("SELECT * FROM events")
     assert isinstance(ipc_data, bytes)
-    assert len(ipc_data) > 0
+    assert pa_ipc.open_stream(pa.BufferReader(ipc_data)).read_all().num_rows == 2
 
     store.delete("cdc/spill/2.json")
     with pytest.raises(KeyError, match="Spilled CDC payload for event_id=2 is missing"):
@@ -197,7 +215,7 @@ def test_query_pipeline_and_rls_identifier_refusal_and_single_rtt_execution() ->
         RelOverlay(base_table="users; DROP TABLE secrets")
 
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
-        CteStep(name="cte; DROP TABLE secrets", sql="SELECT 1")
+        CTEStep(name="cte; DROP TABLE secrets", sql="SELECT 1")
 
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
         TenantPredicate(table_alias="t; DROP TABLE users", tenant_value=1)
@@ -220,7 +238,7 @@ def test_query_pipeline_and_rls_identifier_refusal_and_single_rtt_execution() ->
     assert "WITH orders AS (SELECT * FROM orders a WHERE a.tenant_id = $1::uuid)" in compiled_sql
     assert "clean_orders AS (SELECT * FROM orders)" in compiled_sql
 
-    mock_driver = MagicMock(spec=SyncPostgresDriver)
+    mock_driver = MagicMock(spec=SyncPostgreSQLDriver)
     mock_driver.execute_with_description.return_value = (
         [{"payload": '{"orders": [{"id": 101, "item": "book"}]}'}],
         [("payload", 25)],

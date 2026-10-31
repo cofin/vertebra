@@ -1,4 +1,4 @@
-"""Unit tests for SyncPostgresDriver, AsyncPostgresDriver, and Arrow binary COPY streaming."""
+"""Unit tests for SyncPostgreSQLDriver, AsyncPostgreSQLDriver, and Arrow binary COPY streaming."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ from typing import Any
 
 import pytest
 
-from vertebra.db import AlloyDbDialer, CloudSqlDialer, DatabaseRegistry
+from vertebra.db import AlloyDBDialer, CloudSQLDialer, DatabaseRegistry
 from vertebra.db.postgres import (
     PGCOPY_BINARY_SIGNATURE,
-    AsyncPostgresDriver,
-    PostgresConfig,
-    SyncPostgresDriver,
+    AsyncPostgreSQLDriver,
+    PostgreSQLConfig,
+    SyncPostgreSQLDriver,
 )
 from vertebra.typing import MissingDependencyError
 
@@ -126,7 +126,7 @@ class MockConnectionPool:
 
 def test_sync_postgres_driver_pool_gucs_and_prepared_statements() -> None:
     """Verify worker pool budget calculation and sync driver pool execution."""
-    budget = PostgresConfig.compute_worker_pool_budget(
+    budget = PostgreSQLConfig.compute_worker_pool_budget(
         100,
         replica_count=3,
         workers_per_replica=3,
@@ -135,14 +135,14 @@ def test_sync_postgres_driver_pool_gucs_and_prepared_statements() -> None:
     assert budget == 10
 
     with pytest.raises(TypeError):
-        PostgresConfig.compute_worker_pool_budget(
+        PostgreSQLConfig.compute_worker_pool_budget(
             100,
             replica_count=3,
             workers_per_replica=3,
             reserved_super_connections=10,
         )
 
-    cfg = PostgresConfig(
+    cfg = PostgreSQLConfig(
         dsn="postgresql://user:pass@127.0.0.1:5432/appdb",
         statement_timeout_ms=5000,
         idle_in_transaction_session_timeout_ms=10000,
@@ -156,7 +156,7 @@ def test_sync_postgres_driver_pool_gucs_and_prepared_statements() -> None:
     assert cfg.effective_statement_cache_size == 256
 
     mock_pool = MockConnectionPool(rows=[(1, "alpha"), (2, "beta")])
-    driver = SyncPostgresDriver(cfg, pool=mock_pool)
+    driver = SyncPostgreSQLDriver(cfg, pool=mock_pool)
     rows, desc = driver.execute_with_description("SELECT id, name FROM items WHERE id > %s", (0,))
     assert rows == [(1, "alpha"), (2, "beta")]
     assert desc is not None
@@ -174,8 +174,8 @@ def test_sync_postgres_driver_pool_gucs_and_prepared_statements() -> None:
 
 def test_postgres_missing_dependency_raises_on_unconnected_dsn() -> None:
     """Verify unmocked live connection attempts raise MissingDependencyError when psycopg is absent."""
-    cfg = PostgresConfig(dsn="postgresql://unreachable-host:5432/db")
-    driver = SyncPostgresDriver(cfg)
+    cfg = PostgreSQLConfig(dsn="postgresql://unreachable-host:5432/db")
+    driver = SyncPostgreSQLDriver(cfg)
     with pytest.raises(MissingDependencyError) as exc_info:
         driver.execute_tuples("SELECT 1")
     assert "psycopg" in exc_info.value.package or "psycopg_pool" in exc_info.value.package
@@ -188,26 +188,26 @@ def test_pgcopy_binary_parser_success_and_error_handling() -> None:
         [b"second", b"val2"],
     ]
     payload = _build_test_pgcopy_payload(valid_rows)
-    parsed = SyncPostgresDriver.parse_pgcopy_binary_rows(payload)
+    parsed = SyncPostgreSQLDriver.parse_pgcopy_binary_rows(payload)
     assert parsed == [(b"first", None), (b"second", b"val2")]
 
     empty_payload = _build_test_pgcopy_payload([])
-    assert SyncPostgresDriver.parse_pgcopy_binary_rows(empty_payload) == []
+    assert SyncPostgreSQLDriver.parse_pgcopy_binary_rows(empty_payload) == []
 
     with pytest.raises(ValueError, match="Invalid PGCOPY binary signature"):
-        SyncPostgresDriver.parse_pgcopy_binary_rows(b"BAD_SIGNATURE_EXTRA")
+        SyncPostgreSQLDriver.parse_pgcopy_binary_rows(b"BAD_SIGNATURE_EXTRA")
 
     with pytest.raises(ValueError, match="Truncated PGCOPY header"):
-        SyncPostgresDriver.parse_pgcopy_binary_rows(PGCOPY_BINARY_SIGNATURE + b"\x00\x00")
+        SyncPostgreSQLDriver.parse_pgcopy_binary_rows(PGCOPY_BINARY_SIGNATURE + b"\x00\x00")
 
     with pytest.raises(ValueError, match="Unexpected EOF before PGCOPY trailer"):
         bad_trailer = _build_test_pgcopy_payload([[b"v"]]).rstrip(b"\xff\xff")
-        SyncPostgresDriver.parse_pgcopy_binary_rows(bad_trailer)
+        SyncPostgreSQLDriver.parse_pgcopy_binary_rows(bad_trailer)
 
 
 @pytest.mark.anyio
 async def test_async_postgres_driver_and_arrow_copy_streaming() -> None:
-    """Verify AsyncPostgresDriver and stream_arrow_batches chunking."""
+    """Verify AsyncPostgreSQLDriver and stream_arrow_batches chunking."""
     rows_data: list[list[bytes | None]] = [
         [b"key1", b"val1"],
         [b"key2", b"val2"],
@@ -218,7 +218,7 @@ async def test_async_postgres_driver_and_arrow_copy_streaming() -> None:
         rows=[(1, "x"), (2, "y")],
         binary_payload=binary_payload,
     )
-    async_driver = AsyncPostgresDriver(PostgresConfig(), pool=mock_pool)
+    async_driver = AsyncPostgreSQLDriver(PostgreSQLConfig(), pool=mock_pool)
 
     tuples = await async_driver.execute_tuples("SELECT id, name FROM tbl")
     assert tuples == [(1, "x"), (2, "y")]
@@ -241,11 +241,11 @@ async def test_async_postgres_driver_and_arrow_copy_streaming() -> None:
 
 
 def test_database_registry_attaches_cloudsql_and_alloydb_dialers_to_postgres_drivers() -> None:
-    """Verify DatabaseRegistry attaches CloudSqlDialer and AlloyDbDialer to sync and async drivers."""
+    """Verify DatabaseRegistry attaches CloudSQLDialer and AlloyDBDialer to sync and async drivers."""
     registry = DatabaseRegistry()
     registry.register(
         "csql_pg",
-        PostgresConfig(
+        PostgreSQLConfig(
             dsn="postgresql://app@127.0.0.1:5432/db",
             cloud_sql_instance="proj:us-central1:pg1",
             enable_iam_auth=True,
@@ -253,26 +253,26 @@ def test_database_registry_attaches_cloudsql_and_alloydb_dialers_to_postgres_dri
     )
     registry.register(
         "alloy_pg",
-        PostgresConfig(
+        PostgreSQLConfig(
             dsn="postgresql://app@127.0.0.1:5432/db",
             alloydb_instance_uri="projects/p/locations/l/clusters/c/instances/i",
         ),
     )
 
     csql_async = registry.get_driver("csql_pg")
-    assert isinstance(csql_async, AsyncPostgresDriver)
-    assert isinstance(csql_async.dialer, CloudSqlDialer)
+    assert isinstance(csql_async, AsyncPostgreSQLDriver)
+    assert isinstance(csql_async.dialer, CloudSQLDialer)
 
     csql_sync = registry.get_sync_driver("csql_pg")
-    assert isinstance(csql_sync, SyncPostgresDriver)
-    assert isinstance(csql_sync.dialer, CloudSqlDialer)
+    assert isinstance(csql_sync, SyncPostgreSQLDriver)
+    assert isinstance(csql_sync.dialer, CloudSQLDialer)
 
     alloy_async = registry.get_driver("alloy_pg")
-    assert isinstance(alloy_async, AsyncPostgresDriver)
-    assert isinstance(alloy_async.dialer, AlloyDbDialer)
+    assert isinstance(alloy_async, AsyncPostgreSQLDriver)
+    assert isinstance(alloy_async.dialer, AlloyDBDialer)
     assert alloy_async.config.build_session_gucs().get("alloydb.enable_columnar_engine") == "on"
 
     alloy_sync = registry.get_sync_driver("alloy_pg")
-    assert isinstance(alloy_sync, SyncPostgresDriver)
-    assert isinstance(alloy_sync.dialer, AlloyDbDialer)
+    assert isinstance(alloy_sync, SyncPostgreSQLDriver)
+    assert isinstance(alloy_sync.dialer, AlloyDBDialer)
     assert alloy_sync.config.build_session_gucs().get("alloydb.enable_columnar_engine") == "on"

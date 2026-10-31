@@ -307,14 +307,14 @@ pub fn sanitize_sql(sql: &str) -> String {
 }
 
 /// HS256 JWT validator executing in Rust.
-#[pyclass(name = "JwtGuard", immutable_type)]
-pub struct JwtGuard {
+#[pyclass(name = "JWTGuard", immutable_type)]
+pub struct JWTGuard {
     secret: Vec<u8>,
     leeway_secs: u64,
 }
 
 #[pymethods]
-impl JwtGuard {
+impl JWTGuard {
     #[new]
     #[pyo3(signature = (secret, leeway_secs=60))]
     pub fn py_new(secret: &[u8], leeway_secs: u64) -> Self {

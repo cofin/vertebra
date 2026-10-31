@@ -36,7 +36,17 @@ Vertebra keeps its base dependency footprint minimal (`msgspec` and `rich-click`
 | Extra | Install Command | Included Capabilities |
 | --- | --- | --- |
 | `framework` | `uv add "vertebra-core[framework]"` | Optional schema adapters (`pydantic`, `attrs`, `orjson`) alongside native `msgspec.Struct` |
-| `sqlspec` | `uv add "vertebra-core[sqlspec]"` | `SQLSpecPlugin` (`vertebra.extensions.sqlspec`), `sqlspec` query builder, and `aiosqlite` |
+| `sqlspec` | `uv add "vertebra-core[sqlspec]"` | First-class `sqlspec` driver adapters, configs, and PyArrow integration |
+| `alchemy` | `uv add "vertebra-core[alchemy]"` | `advanced-alchemy` (1.12+), `sqlalchemy` (2.0.36+), and `alembic` (1.14+) |
+| `arrow` | `uv add "vertebra-core[arrow]"` | Native PyArrow IPC streaming and Parquet datasets |
+| `litestar` | `uv add "vertebra-core[litestar]"` | Core Litestar route compiler, fast-path bypass, channels, and response cache store |
+| `queues` | `uv add "vertebra-core[queues]"` | `litestar-queues` integration (`vertebra.extensions.litestar.queues`) with SHM backends and SQLSpec queues |
+| `security` | `uv add "vertebra-core[security]"` | `litestar-security` integration with native JWT and mTLS identity mechanisms |
+| `autowire` | `uv add "vertebra-core[autowire]"` | `litestar-autowire` automatic controller discovery and bridge |
+| `email` | `uv add "vertebra-core[email]"` | `litestar-email` transactional email with native AWS SigV4 SES backend |
+| `mcp` | `uv add "vertebra-core[mcp]"` | `litestar-mcp` tools, resources, and agent cards |
+| `vite` | `uv add "vertebra-core[vite]"` | `litestar-vite` bundling and client integration |
+| `all` | `uv add "vertebra-core[all]"` | Full ecosystem extras suite |
 | `dev` | `uv add "vertebra-core[dev]"` | Development, lint, type-checking, test, and `maturin` build dependencies |
 
 ## Free-Threaded Python (`3.14t` / `3.15t`)

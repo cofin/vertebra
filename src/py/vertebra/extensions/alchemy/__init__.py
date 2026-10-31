@@ -1,4 +1,6 @@
-"""Advanced Alchemy extension, connection broker, and object storage backend for Vertebra."""
+"""Advanced Alchemy integration factories, session broker, and ObjectStore backend."""
+
+from __future__ import annotations
 
 from vertebra.extensions.alchemy.broker import (
     BrokerConfig,
@@ -8,70 +10,44 @@ from vertebra.extensions.alchemy.broker import (
     ChannelMessage,
     ConnectionLease,
     InMemoryBrokerTransport,
-    ShmBrokerTransport,
-    ShmSessionBroker,
+    SHMBrokerTransport,
+    SHMSessionBroker,
     StatementCache,
     StatementPlan,
 )
+from vertebra.extensions.alchemy.cache import (
+    CacheEntry,
+    CacheStats,
+    SQLAlchemyCacheBackend,
+)
 from vertebra.extensions.alchemy.plugin import (
-    AlchemyPlugin,
-    AsyncSessionConfig,
-    DatabaseService,
-    SQLAlchemyAsyncConfig,
-    SQLAlchemyState,
-    SQLAlchemySyncConfig,
-    SyncSessionConfig,
+    create_alchemy_plugin,
+    create_async_alchemy_config,
+    create_sync_alchemy_config,
 )
 from vertebra.extensions.alchemy.storage import (
-    FileAttachment,
     ObjectStoreBackend,
-    StoredObject,
-)
-from vertebra.extensions.sqlalchemy import (
-    AlembicImpl,
-    BinaryJson,
-    CreateViewOp,
-    DeleteUsingClause,
-    DialectDescriptor,
-    DropViewOp,
-    InsertSentinelSpec,
-    ParameterizedSql,
-    SelectInLoadSpec,
-    SyncEngineAdapter,
-    Vector,
+    register_storage_backend,
 )
 
 __all__ = (
-    "AlchemyPlugin",
-    "AlembicImpl",
-    "AsyncSessionConfig",
-    "BinaryJson",
     "BrokerConfig",
     "BrokerMetrics",
     "BrokerPlugin",
     "BrokerTransport",
+    "CacheEntry",
+    "CacheStats",
     "ChannelMessage",
     "ConnectionLease",
-    "CreateViewOp",
-    "DatabaseService",
-    "DeleteUsingClause",
-    "DialectDescriptor",
-    "DropViewOp",
-    "FileAttachment",
     "InMemoryBrokerTransport",
-    "InsertSentinelSpec",
     "ObjectStoreBackend",
-    "ParameterizedSql",
-    "SQLAlchemyAsyncConfig",
-    "SQLAlchemyState",
-    "SQLAlchemySyncConfig",
-    "SelectInLoadSpec",
-    "ShmBrokerTransport",
-    "ShmSessionBroker",
+    "SHMBrokerTransport",
+    "SHMSessionBroker",
+    "SQLAlchemyCacheBackend",
     "StatementCache",
     "StatementPlan",
-    "StoredObject",
-    "SyncEngineAdapter",
-    "SyncSessionConfig",
-    "Vector",
+    "create_alchemy_plugin",
+    "create_async_alchemy_config",
+    "create_sync_alchemy_config",
+    "register_storage_backend",
 )

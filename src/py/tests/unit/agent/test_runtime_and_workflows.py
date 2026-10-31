@@ -377,7 +377,7 @@ async def test_all_five_session_stores() -> None:
         "PRIMARY KEY (owner, session_id))"
     )
 
-    class SqliteSyncDriver:
+    class SQLiteSyncDriver:
         def __init__(self, db: sqlite3.Connection) -> None:
             self.db = db
 
@@ -403,7 +403,7 @@ async def test_all_five_session_stores() -> None:
             cur = self.execute(query, params)
             return cur.fetchone()
 
-    sql_store = SQLSpecSessionStore(SqliteSyncDriver(conn))
+    sql_store = SQLSpecSessionStore(SQLiteSyncDriver(conn))
     await sql_store.save("elena", "s3", msgs)
     loaded_sql = await sql_store.load("elena", "s3")
     assert loaded_sql is not None

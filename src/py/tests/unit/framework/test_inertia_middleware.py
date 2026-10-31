@@ -14,7 +14,7 @@ from vertebra.framework.inertia import (
     ScrollProp,
     inertia,
 )
-from vertebra.framework.ssr import SsrConfig, SsrResult
+from vertebra.framework.ssr import SSRConfig, SSRResult
 from vertebra.utils.serializers import decode_json
 
 
@@ -37,21 +37,21 @@ def _make_request(
 def _make_mock_ssr_client(*, fail: bool = False) -> object:
     """Build a fake SSR client for testing."""
 
-    class _MockSsrClient:
+    class _MockSSRClient:
         def __init__(self) -> None:
             self.fail = fail
             self.last_page: dict | None = None
 
-        def render(self, page: dict) -> SsrResult:
+        def render(self, page: dict) -> SSRResult:
             self.last_page = page
             if self.fail:
                 raise ConnectionError("SSR server down")
-            return SsrResult(
+            return SSRResult(
                 head=["<title>SSR Page</title>"],
                 body='<div id="app">SSR Content</div>',
             )
 
-    return _MockSsrClient()
+    return _MockSSRClient()
 
 
 def test_inertia_config_defaults() -> None:
@@ -68,7 +68,7 @@ def test_inertia_config_custom_values() -> None:
     cfg = InertiaConfig(
         enabled=True,
         version="abc123",
-        ssr=SsrConfig(),
+        ssr=SSRConfig(),
         shared_data={"app_name": "Test"},
     )
     assert cfg.enabled is True
@@ -509,7 +509,7 @@ def test_html_response_contains_v3_script_tag() -> None:
 
 def test_ssr_integration_renders_head_and_body() -> None:
     client = _make_mock_ssr_client()
-    cfg = InertiaConfig(version="v1", ssr=SsrConfig())
+    cfg = InertiaConfig(version="v1", ssr=SSRConfig())
     mw = InertiaMiddleware(cfg, ssr_client=client)
     req = _make_request()
     resp = InertiaResponse(component="Pages/Home")
@@ -522,7 +522,7 @@ def test_ssr_integration_renders_head_and_body() -> None:
 
 def test_ssr_integration_csr_fallback_on_failure() -> None:
     client = _make_mock_ssr_client(fail=True)
-    cfg = InertiaConfig(version="v1", ssr=SsrConfig())
+    cfg = InertiaConfig(version="v1", ssr=SSRConfig())
     mw = InertiaMiddleware(cfg, ssr_client=client)
     req = _make_request()
     resp = InertiaResponse(component="Pages/Home")
@@ -535,7 +535,7 @@ def test_ssr_integration_csr_fallback_on_failure() -> None:
 
 def test_ssr_integration_not_used_for_inertia_xhr() -> None:
     client = _make_mock_ssr_client()
-    cfg = InertiaConfig(version="v1", ssr=SsrConfig())
+    cfg = InertiaConfig(version="v1", ssr=SSRConfig())
     mw = InertiaMiddleware(cfg, ssr_client=client)
     req = _make_request(headers={"X-Inertia": "true", "X-Inertia-Version": "v1"})
     resp = InertiaResponse(component="Pages/Home")

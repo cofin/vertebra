@@ -25,7 +25,7 @@ Full-stack TypeScript SDK (`src/ts/vertebra-client/`) providing typed HTTP reque
 | `@vertebra/client/htmx` | HTMX request header and JSON payload helper (`initHtmx`) |
 | `@vertebra/client/store` | Client-side reactive `SessionStore` and `store` singleton |
 | `@vertebra/client/hmr` | `HotReloadClient`, `initHotReload`, and `ServerMessage` HMR wire protocol |
-| `@vertebra/client/wasm` | `WasmClient`, `WasmClientOptions`, and `WASM_MAGIC_BYTES` loader |
+| `@vertebra/client/wasm` | `WASMClient`, `WASMClientOptions`, and `WASM_MAGIC_BYTES` loader |
 | `@vertebra/client/arrow` | `ArrowStreamClient`, `ArrowStreamOptions`, and Apache Arrow IPC stream constants |
 | `@vertebra/client/live` | `LiveStateClient`, `HybridLogicalClock`, `OfflineDeltaQueue`, `StateOpcode`, and FNV-1a hashing |
 | `@vertebra/client/apex` | `ApexRegion`, `ApexOfflineOutbox`, and Oracle APEX island hydration descriptors |
@@ -191,8 +191,8 @@ import {
   ARROW_CONTINUATION_MARKER,
   ARROW_FILE_MAGIC,
   ARROW_STREAM_MIME,
-  WasmClient,
-  type WasmClientOptions,
+  WASMClient,
+  type WASMClientOptions,
   WASM_MAGIC_BYTES,
   TraceContext,
 } from "@vertebra/client";
@@ -205,8 +205,8 @@ import {
 | `ARROW_STREAM_MIME` | Const | MIME type constant (`application/vnd.apache.arrow.stream`). |
 | `ARROW_FILE_MAGIC` | Const | 6-byte `ARROW1` magic header for Arrow IPC files. |
 | `ARROW_CONTINUATION_MARKER` | Const | `0xFFFFFFFF` continuation marker for Arrow IPC message framing. |
-| `WasmClient` | Class | Fetches, validates, compiles, and instantiates WebAssembly modules in the browser. |
-| `WasmClientOptions` | Type | Import object, memory bounds, and caching options for `WasmClient`. |
+| `WASMClient` | Class | Fetches, validates, compiles, and instantiates WebAssembly modules in the browser. |
+| `WASMClientOptions` | Type | Import object, memory bounds, and caching options for `WASMClient`. |
 | `WASM_MAGIC_BYTES` | Const | 4-byte `\0asm` binary magic header verified before compilation. |
 | `TraceContext` | Class | W3C Trace Context (`traceparent`) parser, generator, and header injector. |
 

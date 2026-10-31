@@ -16,7 +16,7 @@ from vertebra.framework.asyncapi import AsyncAPISpecBuilder, AsyncChannelDef
 from vertebra.framework.channels import ChannelsBackend
 from vertebra.framework.di import Container, DependencyGraph, Inject, Provide
 from vertebra.framework.email import EmailConfig, EmailMessage, EmailService
-from vertebra.framework.htmx import HtmxRequest, HtmxResponse
+from vertebra.framework.htmx import HTMXRequest, HTMXResponse
 from vertebra.framework.openapi import OpenAPIConfig, OpenAPISpecBuilder
 from vertebra.framework.procedures import Procedure, ProcedureRouter, mutation, query
 from vertebra.framework.queues import CronSchedule, QueueConfig, QueueService, TaskRetryPolicy, task
@@ -34,10 +34,10 @@ from vertebra.framework.security import (
     requires_scope,
     requires_tenant,
 )
-from vertebra.framework.ssr import SsrFrame
+from vertebra.framework.ssr import SSRFrame
 from vertebra.framework.stores import MemoryStore, NamespacedStore
 from vertebra.typing import MissingDependencyError, UnsupportedBackendError
-from vertebra.wasm import WASM_MAGIC_HEADER, WasmModuleConfig, WasmSandboxPolicy
+from vertebra.wasm import WASM_MAGIC_HEADER, WASMModuleConfig, WASMSandboxPolicy
 
 
 class ItemSchema(msgspec.Struct, frozen=True, gc=False):
@@ -230,17 +230,17 @@ async def test_queues_channels_stores_email_and_procedures() -> None:
 
 
 def test_htmx_ssr_openapi_and_asyncapi() -> None:
-    """Verify HtmxRequest/HtmxResponse, SsrFrame, OpenAPI 3.1.0, and AsyncAPI 3.0.0 builders."""
-    hx_req = HtmxRequest.from_headers({"HX-Request": "true", "HX-Target": "main-panel"})
+    """Verify HTMXRequest/HTMXResponse, SSRFrame, OpenAPI 3.1.0, and AsyncAPI 3.0.0 builders."""
+    hx_req = HTMXRequest.from_headers({"HX-Request": "true", "HX-Target": "main-panel"})
     assert hx_req.is_htmx is True
     assert hx_req.target == "main-panel"
 
-    hx_resp = HtmxResponse(html="<div>Updated</div>", reswap="outerHTML", trigger={"saved": True})
+    hx_resp = HTMXResponse(html="<div>Updated</div>", reswap="outerHTML", trigger={"saved": True})
     headers = hx_resp.to_headers()
     assert headers["HX-Reswap"] == "outerHTML"
     assert headers["HX-Trigger"] == '{"saved":true}'
 
-    ssr_frame = SsrFrame.encode("Dashboard", {"count": 3})
+    ssr_frame = SSRFrame.encode("Dashboard", {"count": 3})
     assert int.from_bytes(ssr_frame[:4], "big") == len(ssr_frame) - 4
 
     oa = OpenAPISpecBuilder()
@@ -257,22 +257,22 @@ def test_htmx_ssr_openapi_and_asyncapi() -> None:
 
 
 def test_wasm_module_config_and_litestar_mcp_a2a_delegation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Verify WasmSandboxPolicy bounds, WasmModuleConfig validation, and LitestarPlugin MCP/A2A delegation."""
+    """Verify WASMSandboxPolicy bounds, WASMModuleConfig validation, and LitestarPlugin MCP/A2A delegation."""
     with pytest.raises(ValueError, match="max_memory_bytes must be > 0"):
-        WasmSandboxPolicy(max_memory_bytes=0)
+        WASMSandboxPolicy(max_memory_bytes=0)
     with pytest.raises(ValueError, match="max_fuel must be > 0"):
-        WasmSandboxPolicy(max_fuel=0)
+        WASMSandboxPolicy(max_fuel=0)
     with pytest.raises(ValueError, match="epoch_timeout_ms must be > 0"):
-        WasmSandboxPolicy(epoch_timeout_ms=0)
+        WASMSandboxPolicy(epoch_timeout_ms=0)
 
     wasm_bytes = WASM_MAGIC_HEADER + b"\x00\x00\x00\x00"
     wasm_file = tmp_path / "validator.wasm"
     wasm_file.write_bytes(wasm_bytes)
-    cfg = WasmModuleConfig(name="validator", wasm_source=str(wasm_file), policy=WasmSandboxPolicy(max_fuel=500))
+    cfg = WASMModuleConfig(name="validator", wasm_source=str(wasm_file), policy=WASMSandboxPolicy(max_fuel=500))
     assert isinstance(cfg.wasm_source, Path)
     assert cfg.load_and_validate() == wasm_bytes
 
-    bad_cfg = WasmModuleConfig(name="broken", wasm_source=b"not-wasm")
+    bad_cfg = WASMModuleConfig(name="broken", wasm_source=b"not-wasm")
     with pytest.raises(ValueError, match="Invalid WebAssembly binary header"):
         bad_cfg.load_and_validate()
 

@@ -88,6 +88,7 @@ class LitestarPlugin:
             async def _vertebra_health_probe() -> dict[str, str]:
                 return {"status": "ok"}
 
+            _vertebra_health_probe.opt["exclude_from_auth"] = True
             app_config.route_handlers.append(_vertebra_health_probe)
 
         if self._config.mcp_config is not None:
@@ -119,6 +120,16 @@ class LitestarPlugin:
                 else AgentPlugin(self._config.agent_config)
             )
             agent_plugin.on_app_init(app_config)
+
+        configured_plugins = getattr(app_config, "plugins", None) or ()
+        for raw_plugin in configured_plugins:
+            if type(raw_plugin).__name__ == "AutowirePlugin" and not getattr(raw_plugin, "_autowire_executed", False):
+                on_init = getattr(raw_plugin, "on_app_init", None)
+                if callable(on_init):
+                    raw_plugin._autowire_executed = True
+                    original_on_init = on_init
+                    raw_plugin.on_app_init = lambda cfg: cfg
+                    app_config = original_on_init(app_config)
 
         if self._config.enable_fastpath_bypass:
             try:
@@ -212,8 +223,13 @@ class LitestarPlugin:
                     compiled_routes=self._compiled_routes or None,
                 )
 
-            with contextlib.suppress(AttributeError, TypeError):
+            try:
                 app.__vertebra_fastpath__ = bypass
+            except (AttributeError, TypeError):
+                with contextlib.suppress(AttributeError, TypeError):
+                    type(app).__vertebra_fastpath__ = property(
+                        lambda self: getattr(self, "state", {}).get("vertebra_fastpath_bypass")
+                    )
 
 
 @contextlib.contextmanager
@@ -223,13 +239,24 @@ def enter_litestar_server_lifespan(app: Any, *, app_path: str | None = None) -> 
         os.environ["LITESTAR_APP"] = app_path
 
     plugins = getattr(app, "plugins", None)
-    cli_plugins = getattr(plugins, "cli", None)
-    if cli_plugins is None and plugins is not None:
-        raw_list = getattr(plugins, "plugins", plugins)
-        cli_plugins = [p for p in raw_list if hasattr(p, "server_lifespan")]
+    cli_plugins: list[Any] = []
+    seen: set[int] = set()
+    if plugins is not None:
+        raw_cli = getattr(plugins, "cli", None) or ()
+        for p in raw_cli:
+            if id(p) not in seen and hasattr(p, "server_lifespan"):
+                seen.add(id(p))
+                cli_plugins.append(p)
+        raw_list = getattr(plugins, "plugins", None)
+        if raw_list is None and hasattr(plugins, "__iter__"):
+            raw_list = list(plugins)
+        for p in raw_list or ():
+            if id(p) not in seen and hasattr(p, "server_lifespan"):
+                seen.add(id(p))
+                cli_plugins.append(p)
 
     with contextlib.ExitStack() as stack:
-        for plugin in cli_plugins or ():
+        for plugin in cli_plugins:
             lifespan_fn = getattr(plugin, "server_lifespan", None)
             if callable(lifespan_fn):
                 stack.enter_context(lifespan_fn(app))

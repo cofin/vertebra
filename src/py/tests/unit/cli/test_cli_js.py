@@ -96,3 +96,21 @@ def test_js_remove_removes_dependency(runner: CliRunner, tmp_path: Path) -> None
         assert "react@18" not in js_deps
     finally:
         os.chdir(old_cwd)
+
+
+def test_js_install_syncs_wheel_client_without_npm_deps(runner: CliRunner, tmp_path: Path) -> None:
+    """Verify ``vtb js install`` writes .vertebra/import_map.json and .vertebra/client without NPM."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "zero-npm-app"\n', encoding="utf-8")
+
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(str(tmp_path))
+        result = runner.invoke(cli, ["js", "install"])
+        assert result.exit_code == 0, result.output or ""
+        assert (tmp_path / ".vertebra" / "import_map.json").is_file()
+        assert (tmp_path / ".vertebra" / "client" / "index.js").is_file()
+        assert (tmp_path / ".vertebra" / "client" / "index.d.ts").is_file()
+        assert (tmp_path / ".vertebra" / "client" / "package.json").is_file()
+    finally:
+        os.chdir(old_cwd)

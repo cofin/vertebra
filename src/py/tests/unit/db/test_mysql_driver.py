@@ -6,11 +6,11 @@ from typing import Any
 
 import pytest
 
-from vertebra.db.dialer.cloudsql import CloudSqlConfig, CloudSqlDialer
-from vertebra.db.mysql import AsyncMysqlDriver, MysqlConfig, SyncMysqlDriver
+from vertebra.db.dialer.cloudsql import CloudSQLConfig, CloudSQLDialer
+from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.extensions.sqlalchemy import (
     DBAPIConnection,
-    MysqlDialect,
+    MySQLDialect,
     Vector,
 )
 from vertebra.typing import MissingDependencyError
@@ -141,8 +141,8 @@ class FakeAsyncPool:
 
 
 def test_mysql_config_dsn_parsing() -> None:
-    """Verify MysqlConfig.parse_dsn_params extracts connection parameters correctly."""
-    cfg = MysqlConfig(
+    """Verify MySQLConfig.parse_dsn_params extracts connection parameters correctly."""
+    cfg = MySQLConfig(
         dsn="mysql+vtb://usr:secret@db.internal:3307/appdb?charset=utf8mb4&autocommit=true",
         min_size=2,
         max_size=5,
@@ -156,7 +156,7 @@ def test_mysql_config_dsn_parsing() -> None:
     assert params["charset"] == "utf8mb4"
     assert params["autocommit"] is True
 
-    plain_cfg = MysqlConfig(dsn="mysql://localhost/testdb")
+    plain_cfg = MySQLConfig(dsn="mysql://localhost/testdb")
     plain_params = plain_cfg.parse_dsn_params()
     assert plain_params["host"] == "localhost"
     assert plain_params["port"] == 3306
@@ -167,7 +167,7 @@ def test_mysql_config_dsn_parsing() -> None:
 
 
 def test_sync_mysql_driver_lifecycle_and_pool() -> None:
-    """Verify SyncMysqlDriver pool acquisition, execution, transaction control, and closure."""
+    """Verify SyncMySQLDriver pool acquisition, execution, transaction control, and closure."""
     conns_created: list[FakeSyncConnection] = []
 
     def make_conn(*args: Any, **kwargs: Any) -> FakeSyncConnection:
@@ -176,8 +176,8 @@ def test_sync_mysql_driver_lifecycle_and_pool() -> None:
         conns_created.append(conn)
         return conn
 
-    cfg = MysqlConfig(dsn="mysql://localhost:3306/app", min_size=1, max_size=2)
-    driver = SyncMysqlDriver(cfg, connect_factory=make_conn)
+    cfg = MySQLConfig(dsn="mysql://localhost:3306/app", min_size=1, max_size=2)
+    driver = SyncMySQLDriver(cfg, connect_factory=make_conn)
 
     rows, desc = driver.execute_with_description("SELECT id, name FROM items WHERE id > %s", (0,))
     assert rows == [(1, "alpha"), (2, "beta")]
@@ -199,12 +199,12 @@ def test_sync_mysql_driver_lifecycle_and_pool() -> None:
     driver.close()
     assert conns_created[0].closed is True
 
-    with pytest.raises(RuntimeError, match="SyncMysqlDriver is closed"):
+    with pytest.raises(RuntimeError, match="SyncMySQLDriver is closed"):
         driver.execute_tuples("SELECT 1")
 
 
 def test_sync_mysql_driver_cloudsql_socket_injection() -> None:
-    """Verify SyncMysqlDriver injects a CloudSqlDialer TLS socket when configured."""
+    """Verify SyncMySQLDriver injects a CloudSQLDialer TLS socket when configured."""
     captured_socks: list[Any] = []
 
     def make_conn(*args: Any, **kwargs: Any) -> FakeSyncConnection:
@@ -214,31 +214,31 @@ def test_sync_mysql_driver_cloudsql_socket_injection() -> None:
 
     mock_sock = object()
 
-    class FakeDialer(CloudSqlDialer):
+    class FakeDialer(CloudSQLDialer):
         def connect_sync(self, host: str | None = None, *, ssl_context: Any = None, timeout: float = 10.0) -> Any:
             _ = (host, ssl_context, timeout)
             return mock_sock
 
-    dialer_cfg = CloudSqlConfig(
+    dialer_cfg = CloudSQLConfig(
         instance_connection_name="myproj:us-central1:myinst",
         enable_iam_auth=False,
     )
     dialer = FakeDialer(dialer_cfg)
 
-    mysql_cfg = MysqlConfig(
+    mysql_cfg = MySQLConfig(
         dsn="mysql://localhost:3306/app",
         cloud_sql_instance="myproj:us-central1:myinst",
     )
-    driver = SyncMysqlDriver(mysql_cfg, dialer=dialer, connect_factory=make_conn)
+    driver = SyncMySQLDriver(mysql_cfg, dialer=dialer, connect_factory=make_conn)
 
     driver.execute_tuples("SELECT 1")
     assert captured_socks == [mock_sock]
 
 
 def test_sync_mysql_missing_dependency_refusal() -> None:
-    """Verify unmocked SyncMysqlDriver raises MissingDependencyError when pymysql is missing."""
-    cfg = MysqlConfig(dsn="mysql://localhost:3306/app")
-    driver = SyncMysqlDriver(cfg)
+    """Verify unmocked SyncMySQLDriver raises MissingDependencyError when pymysql is missing."""
+    cfg = MySQLConfig(dsn="mysql://localhost:3306/app")
+    driver = SyncMySQLDriver(cfg)
     with pytest.raises(MissingDependencyError) as exc_info:
         driver.execute_tuples("SELECT 1")
     assert "pymysql" in str(exc_info.value)
@@ -246,10 +246,10 @@ def test_sync_mysql_missing_dependency_refusal() -> None:
 
 @pytest.mark.anyio
 async def test_async_mysql_driver_lifecycle() -> None:
-    """Verify AsyncMysqlDriver executes queries and closes pool."""
+    """Verify AsyncMySQLDriver executes queries and closes pool."""
     pool = FakeAsyncPool()
-    cfg = MysqlConfig(dsn="mysql://localhost:3306/app")
-    driver = AsyncMysqlDriver(cfg, pool=pool)
+    cfg = MySQLConfig(dsn="mysql://localhost:3306/app")
+    driver = AsyncMySQLDriver(cfg, pool=pool)
 
     rows, desc = await driver.execute_with_description("SELECT id, name FROM async_items")
     assert rows == [(10, "async_one"), (20, "async_two")]
@@ -265,18 +265,18 @@ async def test_async_mysql_driver_lifecycle() -> None:
 
 @pytest.mark.anyio
 async def test_async_mysql_missing_dependency_refusal() -> None:
-    """Verify unmocked AsyncMysqlDriver raises MissingDependencyError when asyncmy is missing."""
-    cfg = MysqlConfig(dsn="mysql://localhost:3306/app")
-    driver = AsyncMysqlDriver(cfg)
+    """Verify unmocked AsyncMySQLDriver raises MissingDependencyError when asyncmy is missing."""
+    cfg = MySQLConfig(dsn="mysql://localhost:3306/app")
+    driver = AsyncMySQLDriver(cfg)
     with pytest.raises(MissingDependencyError) as exc_info:
         await driver.execute_tuples("SELECT 1")
     assert "asyncmy" in str(exc_info.value)
 
 
 def test_dbapi_connection_routes_mysql_and_dialect_compilation() -> None:
-    """Verify DBAPIConnection routes mysql+vtb URLs to SyncMysqlDriver and compiles MySQL vector types."""
+    """Verify DBAPIConnection routes mysql+vtb URLs to SyncMySQLDriver and compiles MySQL vector types."""
     mock_conn = FakeSyncConnection()
-    driver = SyncMysqlDriver(MysqlConfig(), connect_factory=lambda **k: mock_conn)
+    driver = SyncMySQLDriver(MySQLConfig(), connect_factory=lambda **k: mock_conn)
 
     conn = DBAPIConnection("mysql+vtb://root:pw@localhost:3306/app", driver=driver)
     cur = conn.cursor()
@@ -295,15 +295,15 @@ def test_dbapi_connection_routes_mysql_and_dialect_compilation() -> None:
     conn.close()
     assert mock_conn.closed is True
 
-    assert MysqlDialect.paramstyle == "format"
-    assert MysqlDialect.use_insertmanyvalues is True
-    assert MysqlDialect.insert_executemany_returning is False
-    assert MysqlDialect.supports_native_jsonb is False
+    assert MySQLDialect.paramstyle == "format"
+    assert MySQLDialect.use_insertmanyvalues is True
+    assert MySQLDialect.insert_executemany_returning is False
+    assert MySQLDialect.supports_native_jsonb is False
 
     vec = Vector(512)
     assert vec.get_col_spec("mysql+vtb") == "VECTOR(512)"
     dist_expr = vec.cosine_distance([0.1, 0.2], param_name="q")
     assert dist_expr.compile_sql("mysql+vtb") == "DISTANCE_COSINE(embedding, :q)"
 
-    adapted = MysqlDialect.type_descriptor(vec)
+    adapted = MySQLDialect.type_descriptor(vec)
     assert adapted is vec

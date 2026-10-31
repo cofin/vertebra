@@ -23,13 +23,13 @@ from vertebra.utils.serializers import decode_json, encode_json_bytes
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from vertebra.db.postgres import PostgresConfig
+    from vertebra.db.postgres import PostgreSQLConfig
 
 __all__ = (
     "CLAIM_POSTGRES_JOBS_SQL",
     "POSTGRES_QUEUE_DDL",
-    "PostgresQueueBackend",
-    "PostgresQueueExecutor",
+    "PostgreSQLQueueBackend",
+    "PostgreSQLQueueExecutor",
 )
 
 POSTGRES_QUEUE_DDL = """
@@ -97,8 +97,8 @@ RETURNING j.task_id, j.task_name, j.lane, j.payload, j.attempt, j.max_retries,
 
 
 @runtime_checkable
-class PostgresQueueExecutor(Protocol):
-    """Database executor interface for PostgresQueueBackend."""
+class PostgreSQLQueueExecutor(Protocol):
+    """Database executor interface for PostgreSQLQueueBackend."""
 
     async def execute(self, query: str, *params: Any) -> int:
         """Execute a query returning affected row count."""
@@ -125,7 +125,7 @@ class PostgresQueueExecutor(Protocol):
         ...
 
 
-class _InMemoryPostgresQueueExecutor:
+class _InMemoryPostgreSQLQueueExecutor:
     """In-memory transactional SQL simulation of PostgreSQL tables, SKIP LOCKED, and LISTEN/NOTIFY."""
 
     __slots__ = ("_dlq", "_jobs", "_leases", "_lock", "_waiters")
@@ -337,7 +337,7 @@ class _InMemoryPostgresQueueExecutor:
             self._waiters.clear()
 
 
-class PostgresQueueBackend:
+class PostgreSQLQueueBackend:
     """PostgreSQL queue backend leveraging FOR UPDATE SKIP LOCKED and zero-poll LISTEN/NOTIFY."""
 
     __slots__ = ("_config", "_direct_dsn", "_executor", "_postgres_config")
@@ -346,13 +346,13 @@ class PostgresQueueBackend:
         self,
         config: QueueConfig | None = None,
         *,
-        postgres_config: PostgresConfig | None = None,
-        executor: PostgresQueueExecutor | None = None,
+        postgres_config: PostgreSQLConfig | None = None,
+        executor: PostgreSQLQueueExecutor | None = None,
     ) -> None:
         self._config = config or QueueConfig()
         self._postgres_config = postgres_config
         self._direct_dsn = postgres_config.effective_direct_dsn if postgres_config else self._config.backend_url
-        self._executor: PostgresQueueExecutor = executor or self._build_executor()
+        self._executor: PostgreSQLQueueExecutor = executor or self._build_executor()
 
     @property
     def direct_dsn(self) -> str:
@@ -626,9 +626,9 @@ class PostgresQueueBackend:
         """Close executor."""
         await self._executor.close()
 
-    def _build_executor(self) -> PostgresQueueExecutor:
+    def _build_executor(self) -> PostgreSQLQueueExecutor:
         """Construct live psycopg/asyncpg executor or fallback in-memory emulator."""
         psycopg = import_optional("psycopg")
         if psycopg is not None and "localhost" not in self._direct_dsn:
             pass
-        return _InMemoryPostgresQueueExecutor()
+        return _InMemoryPostgreSQLQueueExecutor()

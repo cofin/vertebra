@@ -4,28 +4,22 @@
     <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-inline-light.svg">
     <img alt="Vertebra" src="docs/assets/banner-inline-light.svg" width="520">
   </picture>
-  <p><strong>Fast Python web framework and server powered by Rust and TypeScript.</strong></p>
+  <p><strong>One runtime for Python and TypeScript — backend, frontend, web, gRPC, workers, and standalone apps.</strong></p>
 </div>
 
 ---
 
-Vertebra is a Python web framework and server built on a Rust runtime with a TypeScript client SDK. Write standard Python routes, controllers, and background tasks while Rust handles HTTP, shared-memory workers, bundling, object storage, and database pools:
+Vertebra is one unified runtime for Python and TypeScript across backend, frontend, web, gRPC, workers, and standalone apps:
 
 - **Python Framework & Server**: Type-safe APIs (`App`, `Controller`, `Router`, `Route`, `Procedure`, `ProcedureRouter`, `Provide`, `Inject`, `QueueService`, Inertia v3, SSR, and MCP/A2A agent protocols) plus native, ASGI, WSGI, and RSGI support.
-- **Rust Worker Runtime (`vertebra-core`, `vertebra-py`)**: Runs Python in-process or across multiple worker processes over shared memory.
-- **Rust HTTP Server & Bundler (`vertebra-http`, `vertebra-bundler`)**: HTTP/1.1, HTTP/2, HTTP/3, gRPC, WebSockets, SSE, TLS, compression, static files, JavaScript bundling, and QuickJS SSR.
-- **Storage, Databases & TypeScript Client (`vertebra-storage`, `vertebra-db`, `@vertebra/client`)**: Object storage (S3, GCS, Azure, R2, OCI, HTTP, local), 9 database drivers (Postgres, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, Redis, Valkey, DataFusion), CTE statement stacking (`QueryPipeline`), Cloud SQL/AlloyDB dialers, and a typed TypeScript client for React, Vue, Svelte, Angular, HTMX, and Vite.
+- **Worker Runtime (`vertebra-core`, `vertebra-py`)**: Runs Python in-process or across multiple worker processes over shared memory.
+- **HTTP Server & Bundler (`vertebra-http`, `vertebra-bundler`)**: HTTP/1.1, HTTP/2, HTTP/3, gRPC, WebSockets, SSE, TLS, compression, static files, JavaScript bundling, and QuickJS SSR.
+- **Storage, Databases & TypeScript Client (`vertebra-storage`, `vertebra-db`, `@vertebra/client`)**: Multicloud object storage (S3, GCS, Azure, R2, OCI, HTTP, local), database drivers (Postgres, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, Redis, Valkey, DataFusion), CTE statement stacking (`QueryPipeline`), Cloud SQL/AlloyDB dialers, and a typed TypeScript client for React, Vue, Svelte, Angular, HTMX, and Vite.
 
 ## Quickstart
 
 ```bash
 uv add vertebra-core
-```
-
-For local repository development:
-
-```bash
-make install
 ```
 
 ## CLI Usage (`vtb`)

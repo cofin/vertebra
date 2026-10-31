@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from advanced_alchemy.types.file_object import FileObject
 
 import vertebra
 import vertebra.framework as vertebra_framework
@@ -41,7 +42,7 @@ from vertebra.server._asgi._runner import AsgiRunner
 from vertebra.server._gil_audit import GilAuditReport
 from vertebra.server._loops import EventLoopPool
 from vertebra.server._rsgi._adapter import RsgiAdapter
-from vertebra.server.platform import ShmAllocationPolicy
+from vertebra.server.platform import SHMAllocationPolicy
 from vertebra.server.worker import _AsgiMountRunner, _instantiate_mount_runners
 from vertebra.storage import ObjectStore
 from vertebra.utils.module_loader import import_optional
@@ -118,8 +119,8 @@ async def test_storage_and_alchemy_zero_to_thread(tmp_path: Path) -> None:
     assert isinstance(view, memoryview)
     assert bytes(view) == b"zero-copy-payload-12345"
 
-    backend = alchemy_storage_mod.ObjectStoreBackend(store=store, prefix="attachments")
-    attachment = alchemy_storage_mod.FileAttachment(path="doc.bin")
+    backend = alchemy_storage_mod.ObjectStoreBackend(key="stage1_hotpath", store=store, prefix="attachments")
+    attachment = FileObject(backend=backend, filename="doc.bin")
     saved = await backend.save_object_async(attachment, sample_file)
     assert saved.size == 23
     assert await backend.get_content_async("doc.bin") == b"zero-copy-payload-12345"
@@ -192,16 +193,16 @@ def test_gil_audit_and_strict_enforcement() -> None:
 
 
 def test_shm_allocation_policy_and_scm_rights() -> None:
-    """Verify ShmAllocationPolicy allocates anonymous SHM fds and transfers them via SCM_RIGHTS."""
-    policy = ShmAllocationPolicy(prefer_memfd=True)
+    """Verify SHMAllocationPolicy allocates anonymous SHM fds and transfers them via SCM_RIGHTS."""
+    policy = SHMAllocationPolicy(prefer_memfd=True)
     fd, backend = policy.allocate_anonymous_shm_fd("ring-test", 4096)
     try:
         assert fd >= 0
         assert backend in {"memfd", "tmpfile"}
         sock_a, sock_b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            ShmAllocationPolicy.send_fd(sock_a, fd)
-            received_fd = ShmAllocationPolicy.recv_fd(sock_b)
+            SHMAllocationPolicy.send_fd(sock_a, fd)
+            received_fd = SHMAllocationPolicy.recv_fd(sock_b)
             try:
                 assert os.fstat(received_fd).st_size == 4096
             finally:

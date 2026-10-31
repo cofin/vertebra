@@ -19,8 +19,11 @@ from vertebra.utils.module_loader import import_optional
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-__all__ = [
+__all__ = (
+    "AsyncMSSQLDriver",
+    "MSSQLConfig",
     "MSSQL_DIALECT_TAG",
+    "SyncMSSQLDriver",
     "TDS_PKT_ATTENTION",
     "TDS_PKT_BULK_LOAD",
     "TDS_PKT_PRE_LOGIN",
@@ -29,14 +32,11 @@ __all__ = [
     "TDS_PKT_TABULAR_RESULT",
     "TDS_PKT_TDS7_LOGIN",
     "TDS_PKT_TRANS_MGR_REQ",
-    "AsyncMssqlDriver",
-    "MssqlConfig",
-    "SyncMssqlDriver",
     "decode_tds_packet",
     "encode_tds_packet",
     "encode_tds_sql_batch",
     "rewrite_mssql_placeholders",
-]
+)
 
 MSSQL_DIALECT_TAG = 5
 
@@ -208,7 +208,7 @@ def rewrite_mssql_placeholders(sql: str) -> tuple[str, int]:
     return "".join(out), max_param
 
 
-class MssqlConfig(FrozenBaseStruct, frozen=True, gc=False):
+class MSSQLConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Configuration for the native SQL Server (TDS 7.4) driver."""
 
     dsn: str = "mssql://127.0.0.1:1433/master"
@@ -269,11 +269,11 @@ def _normalize_mssql_for_sqlite(
     return sqlite_sql, seq
 
 
-class SyncMssqlDriver:
+class SyncMSSQLDriver:
     """Synchronous SQL Server TDS 7.4 driver with SHM statement cache and Arrow cursor support."""
 
-    def __init__(self, config: MssqlConfig | None = None, *, broker: Any = None) -> None:
-        self.config = config or MssqlConfig()
+    def __init__(self, config: MSSQLConfig | None = None, *, broker: Any = None) -> None:
+        self.config = config or MSSQLConfig()
         self._broker = broker if broker is not None else self.config.broker
         self._conn = sqlite3.connect(":memory:", check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -390,12 +390,12 @@ class SyncMssqlDriver:
         self._conn.close()
 
 
-class AsyncMssqlDriver:
+class AsyncMSSQLDriver:
     """Asynchronous SQL Server TDS 7.4 driver with SHM statement cache and Arrow cursor support."""
 
-    def __init__(self, config: MssqlConfig | None = None, *, broker: Any = None) -> None:
-        self.config = config or MssqlConfig()
-        self._sync = SyncMssqlDriver(self.config, broker=broker)
+    def __init__(self, config: MSSQLConfig | None = None, *, broker: Any = None) -> None:
+        self.config = config or MSSQLConfig()
+        self._sync = SyncMSSQLDriver(self.config, broker=broker)
 
     @property
     def last_rewritten_sql(self) -> str:

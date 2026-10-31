@@ -54,7 +54,7 @@ from vertebra.server._wsgi._adapter import WsgiAdapter
 from vertebra.server.platform import (
     CgroupQuota,
     LameDuckController,
-    ShmAllocationPolicy,
+    SHMAllocationPolicy,
     ZPagesRegistry,
 )
 from vertebra.utils.serializers import encode_json_bytes
@@ -253,7 +253,7 @@ class Worker:
         error_handler: Callable[..., Any] | None = None,
         worker_count: int = 1,
         before_extensions: frozenset[str] | None = None,
-        shm_policy: ShmAllocationPolicy | None = None,
+        shm_policy: SHMAllocationPolicy | None = None,
         lame_duck: LameDuckController | None = None,
         zpages: ZPagesRegistry | None = None,
         stop_event: Any = None,
@@ -276,7 +276,7 @@ class Worker:
         self._error_handler = error_handler
         self._worker_count = worker_count
         self._before_extensions = before_extensions
-        self._shm_policy = shm_policy if shm_policy is not None else ShmAllocationPolicy()
+        self._shm_policy = shm_policy if shm_policy is not None else SHMAllocationPolicy()
         self._lame_duck = lame_duck if lame_duck is not None else LameDuckController()
         self._zpages = zpages if zpages is not None else ZPagesRegistry(lame_duck=self._lame_duck)
         self._stop_event = stop_event
@@ -290,7 +290,7 @@ class Worker:
         return self._lame_duck
 
     @property
-    def shm_policy(self) -> ShmAllocationPolicy:
+    def shm_policy(self) -> SHMAllocationPolicy:
         """Return the worker's shared-memory allocation policy."""
         return self._shm_policy
 
@@ -653,7 +653,7 @@ def run_worker(
     error_handler: Callable[..., Any] | None = None,
     worker_count: int = 1,
     before_extensions: frozenset[str] | None = None,
-    shm_policy: ShmAllocationPolicy | None = None,
+    shm_policy: SHMAllocationPolicy | None = None,
     lame_duck: LameDuckController | None = None,
     zpages: ZPagesRegistry | None = None,
     stop_event: Any = None,

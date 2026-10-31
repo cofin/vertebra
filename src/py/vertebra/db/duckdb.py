@@ -21,20 +21,20 @@ from vertebra.utils.module_loader import import_optional
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-__all__ = [
+__all__ = (
+    "AsyncDuckDBDriver",
     "DUCKDB_DIALECT_TAG",
-    "AsyncDuckdbDriver",
-    "DuckdbConfig",
-    "SyncDuckdbDriver",
+    "DuckDBConfig",
+    "SyncDuckDBDriver",
     "duckdb_bootstrap_statements",
     "read_arrow_shm",
     "write_arrow_shm",
-]
+)
 
 DUCKDB_DIALECT_TAG = 6
 
 
-class DuckdbConfig(FrozenBaseStruct, frozen=True, gc=False):
+class DuckDBConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Configuration for the embedded DuckDB analytical engine."""
 
     path: str = ":memory:"
@@ -93,9 +93,9 @@ class DuckdbConfig(FrozenBaseStruct, frozen=True, gc=False):
         ]
 
 
-def duckdb_bootstrap_statements(config: DuckdbConfig | None = None) -> list[str]:
-    """Generate post-init DuckDB `SET` statements for the given `DuckdbConfig`."""
-    cfg = config or DuckdbConfig()
+def duckdb_bootstrap_statements(config: DuckDBConfig | None = None) -> list[str]:
+    """Generate post-init DuckDB `SET` statements for the given `DuckDBConfig`."""
+    cfg = config or DuckDBConfig()
     return cfg.bootstrap_statements()
 
 
@@ -108,11 +108,11 @@ def _is_write_statement(sql: str) -> bool:
     return verb in {"INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "COPY", "MERGE", "TRUNCATE", "ATTACH"}
 
 
-class SyncDuckdbDriver:
+class SyncDuckDBDriver:
     """Synchronous DuckDB analytical driver with single-writer coordination and SHM Arrow streaming."""
 
-    def __init__(self, config: DuckdbConfig | None = None, *, broker: Any = None) -> None:
-        self.config = config or DuckdbConfig()
+    def __init__(self, config: DuckDBConfig | None = None, *, broker: Any = None) -> None:
+        self.config = config or DuckDBConfig()
         self._broker = broker if broker is not None else self.config.broker
         self._writer_lock = threading.RLock()
         self.executed_bootstrap_statements: tuple[str, ...] = tuple(self.config.bootstrap_statements())
@@ -237,12 +237,12 @@ class SyncDuckdbDriver:
         self._conn.close()
 
 
-class AsyncDuckdbDriver:
+class AsyncDuckDBDriver:
     """Asynchronous DuckDB analytical driver with single-writer coordination and SHM Arrow streaming."""
 
-    def __init__(self, config: DuckdbConfig | None = None, *, broker: Any = None) -> None:
-        self.config = config or DuckdbConfig()
-        self._sync = SyncDuckdbDriver(self.config, broker=broker)
+    def __init__(self, config: DuckDBConfig | None = None, *, broker: Any = None) -> None:
+        self.config = config or DuckDBConfig()
+        self._sync = SyncDuckDBDriver(self.config, broker=broker)
 
     @property
     def executed_bootstrap_statements(self) -> tuple[str, ...]:

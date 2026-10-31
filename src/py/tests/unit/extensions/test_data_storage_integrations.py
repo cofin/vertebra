@@ -1,30 +1,43 @@
-"""Unit tests for SQLSpec and Alchemy storage adapters and plugins."""
+"""Unit tests for real Advanced Alchemy StorageBackend and SQLSpec ObjectStoreProtocol backends."""
 
-import threading
+from __future__ import annotations
+
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
+from advanced_alchemy.types.file_object import FileObject, StorageBackend, StoredObject
+from advanced_alchemy.types.file_object.registry import StorageRegistry as AlchemyStorageRegistry
+from advanced_alchemy.types.file_object.session_tracker import FileObjectSessionTracker
+from sqlspec.protocols import ObjectStoreProtocol
+from sqlspec.storage.pipeline import AsyncStoragePipeline, SyncStoragePipeline
+from sqlspec.storage.registry import StorageRegistry as SQLSpecStorageRegistry
 
-from vertebra.extensions.alchemy import (
-    AlchemyPlugin,
-    FileAttachment,
-    ObjectStoreBackend,
-    SQLAlchemyState,
-)
-from vertebra.extensions.sqlspec import (
-    SQLSPEC_STATE_KEY,
-    SQLSpecPlugin,
-    SQLSpecState,
-    SqlSpecStorageBridge,
-    SQLSpecStore,
-    SQLSpecSyncConfig,
+import vertebra.extensions.alchemy.storage as alchemy_storage_mod
+import vertebra.extensions.sqlspec.storage as sqlspec_storage_mod
+from vertebra.extensions.alchemy.storage import ObjectStoreBackend as AlchemyObjectStoreBackend
+from vertebra.extensions.alchemy.storage import register_storage_backend
+from vertebra.extensions.sqlspec.storage import (
+    ArrowFlightSerializer,
     StreamingStorageResponse,
+    build_duckdb_gcs_secret_sql,
+    register_storage_alias,
 )
-from vertebra.storage import ObjectStore, SigningConfig, StorageRegistry
+from vertebra.extensions.sqlspec.storage import ObjectStoreBackend as SQLSpecObjectStoreBackend
+from vertebra.storage import GCSConfig, ObjectStore, SigningConfig
+from vertebra.utils.serializers import decode_json
 
 
-def test_sqlspec_storage_adapter_crud_jsonl_arrow_parquet_and_streaming() -> None:
-    """Verify SQLSpecStore CRUD, globbing, JSONL, Arrow IPC, Parquet export, and chunked HTTP streaming."""
+def test_duplicated_storage_shims_removed_from_extension_modules() -> None:
+    """Shadow FileAttachment, StoredObject, SQLSpecStore, and SqlSpecStorageBridge are deleted."""
+    assert not hasattr(alchemy_storage_mod, "FileAttachment")
+    assert not hasattr(alchemy_storage_mod, "StoredObject")
+    assert not hasattr(sqlspec_storage_mod, "SQLSpecStore")
+    assert not hasattr(sqlspec_storage_mod, "SqlSpecStorageBridge")
+
+
+def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline() -> None:
+    """SQLSpec ObjectStoreBackend satisfies ObjectStoreProtocol and drives SyncStoragePipeline + PyArrow."""
     store = ObjectStore(
         "memory://",
         signing=SigningConfig(
@@ -33,79 +46,133 @@ def test_sqlspec_storage_adapter_crud_jsonl_arrow_parquet_and_streaming() -> Non
             endpoint="https://exports.example.com",
         ),
     )
-    adapter = SQLSpecStore(store, prefix="warehouse")
+    registry = SQLSpecStorageRegistry()
+    register_storage_alias("lake", store, registry=registry, base_path="warehouse")
 
-    adapter.write_bytes("raw/payload.bin", memoryview(b"0123456789abcdef"))
-    assert adapter.exists("raw/payload.bin")
-    assert adapter.read_bytes("raw/payload.bin") == b"0123456789abcdef"
-    assert adapter.read_range("raw/payload.bin", offset=4, length=6) == b"456789"
+    backend = registry.get("lake")
+    assert isinstance(backend, SQLSpecObjectStoreBackend)
+    assert isinstance(backend, ObjectStoreProtocol)
+    assert backend.supports_signing is True
 
-    meta = adapter.get_metadata("raw/payload.bin")
-    assert meta["path"] == "warehouse/raw/payload.bin"
-    assert meta["size"] == 16
-
-    rows = [{"id": 1, "metric": "latency", "value": 4.2}, {"id": 2, "metric": "qps", "value": 125000.0}]
-    jsonl_meta = adapter.export_jsonl("exports/metrics.jsonl", rows)
-    assert jsonl_meta.size > 0
-    decoded_rows = adapter.read_jsonl("exports/metrics.jsonl")
+    pipeline = SyncStoragePipeline(registry=registry)
+    rows = [
+        {"id": 1, "metric": "latency_ms", "value": 1.25},
+        {"id": 2, "metric": "qps", "value": 185000.0},
+    ]
+    row_telemetry = pipeline.write_rows(rows, "alias://lake/exports/metrics.jsonl")
+    assert row_telemetry["rows_processed"] == 2
+    assert row_telemetry["backend"] == "vertebra"
+    raw_jsonl = b"".join(pipeline.stream_read("alias://lake/exports/metrics.jsonl", chunk_size=16))
+    decoded_rows = [decode_json(line) for line in raw_jsonl.splitlines() if line]
     assert decoded_rows == rows
 
-    arrow_buf = memoryview(b"ARROW1\x00\x00ipc-stream-payload")
-    arrow_meta = adapter.export_arrow_ipc("exports/metrics.arrow", arrow_buf)
-    assert arrow_meta.size == len(arrow_buf)
-    assert bytes(adapter.read_arrow_ipc("exports/metrics.arrow")) == b"ARROW1\x00\x00ipc-stream-payload"
+    table = pa.Table.from_pylist(rows)
+    arrow_telemetry = pipeline.write_arrow(table, "alias://lake/exports/pipeline_metrics.parquet")
+    assert arrow_telemetry["rows_processed"] == 2
+    pipeline_table, read_telemetry = pipeline.read_arrow(
+        "alias://lake/exports/pipeline_metrics.parquet",
+        file_format="parquet",
+    )
+    assert read_telemetry["rows_processed"] == 2
+    assert pipeline_table.to_pylist() == rows
 
-    parquet_meta = adapter.export_parquet("exports/metrics.parquet", rows)
-    assert parquet_meta.size > 0
-    assert adapter.read_parquet("exports/metrics.parquet") == rows
+    backend.write_arrow_sync("exports/metrics.parquet", table)
+    parquet_raw = backend.read_bytes_sync("exports/metrics.parquet")
+    assert parquet_raw[:4] == b"PAR1"
+    assert parquet_raw[-4:] == b"PAR1"
+    parquet_table = backend.read_arrow_sync("exports/metrics.parquet")
+    assert parquet_table.to_pylist() == rows
 
-    assert adapter.glob("*.jsonl") == ["exports/metrics.jsonl"]
-    signed = adapter.presign_download("exports/metrics.parquet", expires_in_secs=900, timestamp=1_700_000_000)
-    assert "X-Vtb-Signature=" in signed
+    streamed_batches = list(backend.stream_arrow_sync("exports/metrics.parquet", batch_size=1))
+    assert sum(batch.num_rows for batch in streamed_batches) == 2
 
-    response = adapter.stream_response(
-        "raw/payload.bin",
-        chunk_size=6,
-        media_type="application/octet-stream",
-        filename="payload.bin",
+    backend.write_arrow_sync("exports/metrics.ipc", table)
+    ipc_table = backend.read_arrow_sync("exports/metrics.ipc")
+    assert ipc_table.to_pylist() == rows
+
+    signed_single = backend.sign_sync("exports/metrics.parquet", expires_in=900)
+    assert "X-Vtb-Signature=" in signed_single
+    signed_upload = backend.sign_sync(["exports/new.parquet"], expires_in=300, for_upload=True)
+    assert len(signed_upload) == 1
+    assert "X-Vtb-Method=PUT" in signed_upload[0]
+
+    response = backend.stream_response(
+        "exports/metrics.parquet",
+        chunk_size=64,
+        media_type="application/vnd.apache.parquet",
+        filename="metrics.parquet",
     )
     assert isinstance(response, StreamingStorageResponse)
-    assert response.media_type == "application/octet-stream"
-    assert response.headers["Content-Disposition"] == 'attachment; filename="payload.bin"'
-    chunks = [bytes(chunk) for chunk in response.iter_chunks()]
-    assert chunks == [b"012345", b"6789ab", b"cdef"]
+    assert response.headers["Content-Disposition"] == 'attachment; filename="metrics.parquet"'
+    assert b"".join(bytes(chunk) for chunk in response.iter_chunks()) == parquet_raw
+
+    descriptor = {"dataset": "metrics", "partition": "2026-10-31"}
+    encoded = ArrowFlightSerializer.serialize_descriptor(descriptor)
+    assert ArrowFlightSerializer.deserialize_descriptor(encoded) == descriptor
 
 
 @pytest.mark.anyio
-async def test_sqlspec_storage_adapter_async_and_plugin() -> None:
-    """Verify async SQLSpecStore methods, async chunk streaming, and SQLSpecPlugin initialization."""
-    store = ObjectStore("memory://")
-    adapter = SQLSpecStore(store, prefix="async_lake")
+async def test_sqlspec_object_store_backend_async_pipeline_and_arrow_streaming(tmp_path: Path) -> None:
+    """AsyncStoragePipeline streams bytes, Arrow tables, and copy/move/delete over ObjectStoreBackend."""
+    local_store = ObjectStore.from_local(tmp_path)
+    registry = SQLSpecStorageRegistry()
+    register_storage_alias("async_lake", local_store, registry=registry, base_path="stage")
+    pipeline = AsyncStoragePipeline(registry=registry)
 
-    await adapter.write_bytes_async("events/batch.bin", b"async-batch-bytes")
-    assert await adapter.exists_async("events/batch.bin")
-    assert await adapter.read_bytes_async("events/batch.bin") == b"async-batch-bytes"
-    assert await adapter.list_objects_async("events") == ["events/batch.bin"]
+    resolved_target = pipeline.resolve_destination("alias://async_lake/notes/readme.jsonl")
+    assert resolved_target.protocol == "file"
 
-    collected: list[bytes] = []
-    async for chunk in adapter.stream_object_chunks_async("events/batch.bin", chunk_size=5):
-        collected.append(bytes(chunk))
-    assert b"".join(collected) == b"async-batch-bytes"
+    await pipeline.write_rows([{"note": "hello-sqlspec-async"}], "alias://async_lake/notes/readme.jsonl")
 
-    await adapter.delete_async("events/batch.bin")
-    assert not await adapter.exists_async("events/batch.bin")
+    chunks: list[bytes] = []
+    async for chunk in await pipeline.stream_read_async("alias://async_lake/notes/readme.jsonl", chunk_size=6):
+        chunks.append(chunk)
+    assert decode_json(b"".join(chunks).strip()) == {"note": "hello-sqlspec-async"}
 
-    plugin: SQLSpecPlugin[object] = SQLSpecPlugin(store=store, storage_prefix="lake")
-    app_state: dict[str, object] = {}
-    state = plugin.install_state(app_state)
-    assert isinstance(state, SQLSpecState)
-    assert app_state[SQLSPEC_STATE_KEY] is state
-    assert state.object_store is not None
+    backend = registry.get("async_lake")
+    assert isinstance(backend, SQLSpecObjectStoreBackend)
+    table = pa.Table.from_pylist([{"k": "a", "v": 10}, {"k": "b", "v": 20}, {"k": "c", "v": 30}])
+    await pipeline.write_arrow(table, "alias://async_lake/tables/events.parquet")
+    read_back, telemetry = await pipeline.read_arrow_async(
+        "alias://async_lake/tables/events.parquet",
+        file_format="parquet",
+    )
+    assert telemetry["backend"] == "vertebra"
+    assert read_back.to_pylist() == table.to_pylist()
+
+    async_rows: list[dict[str, object]] = []
+    async for batch in backend.stream_arrow_async("tables/*.parquet", batch_size=2):
+        async_rows.extend(batch.to_pylist())
+    assert async_rows == [{"k": "a", "v": 10}, {"k": "b", "v": 20}, {"k": "c", "v": 30}]
+
+    await backend.write_text_async("notes/plain.txt", "alpha-beta")
+    assert await backend.read_text_async("notes/plain.txt") == "alpha-beta"
+    await backend.copy_async("notes/plain.txt", "notes/plain_copy.txt")
+    await backend.move_async("notes/plain_copy.txt", "notes/plain_moved.txt")
+    listed = await backend.list_objects_async("notes")
+    assert sorted(listed) == ["notes/plain.txt", "notes/plain_moved.txt", "notes/readme.jsonl"]
+
+    meta = await backend.get_metadata_async("notes/plain_moved.txt")
+    assert meta["size"] == len(b"alpha-beta")
+
+    await backend.delete_async("notes/plain_moved.txt")
+    assert not await backend.exists_async("notes/plain_moved.txt")
+
+
+def test_duckdb_gcs_secret_sql_builder() -> None:
+    """build_duckdb_gcs_secret_sql emits parameterized DuckDB httpfs GCS secret DDL."""
+    cfg = GCSConfig(bucket="lakehouse", access_token="mock-adc-bearer-token")
+    sql, params = build_duckdb_gcs_secret_sql("gcs_lake", cfg)
+    assert sql == "CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN ?)"
+    assert params == ("mock-adc-bearer-token",)
+
+    with pytest.raises(ValueError, match="Invalid SQL identifier"):
+        build_duckdb_gcs_secret_sql("bad-name;DROP TABLE x", cfg)
 
 
 @pytest.mark.anyio
-async def test_alchemy_storage_backend_and_plugin(tmp_path: Path) -> None:
-    """Verify ObjectStoreBackend sync/async save, get, delete, sign, and AlchemyPlugin state registration."""
+async def test_alchemy_storage_backend_file_object_and_session_tracker_rollback(tmp_path: Path) -> None:
+    """ObjectStoreBackend integrates with Advanced Alchemy FileObject, StoredObject, and FileObjectSessionTracker."""
     store = ObjectStore(
         f"file://{tmp_path}",
         signing=SigningConfig(
@@ -114,27 +181,51 @@ async def test_alchemy_storage_backend_and_plugin(tmp_path: Path) -> None:
             endpoint="https://attachments.example.com",
         ),
     )
-    backend = ObjectStoreBackend(key="attachments", store=store, prefix="uploads")
+    registry = AlchemyStorageRegistry()
+    backend = register_storage_backend(
+        store,
+        key="vtb_attachments",
+        prefix="uploads",
+        set_default=True,
+        registry=registry,
+    )
+    assert isinstance(backend, StorageBackend)
+    assert isinstance(backend, AlchemyObjectStoreBackend)
+    assert registry.get_backend("vtb_attachments") is backend
 
-    attachment = FileAttachment(path="users/42/avatar.png", content_type="image/png")
-    saved = backend.save_object(attachment, b"\x89PNG\r\n\x1a\nfake-image")
+    col_type = StoredObject(backend=backend)
+    assert col_type is not None
+
+    avatar = FileObject(
+        backend=backend,
+        filename="users/42/avatar.png",
+        content_type="image/png",
+    )
+    saved = avatar.save(b"\x89PNG\r\n\x1a\nfake-image")
     assert saved.size == 18
     assert saved.etag is not None
-    assert backend.get_content("users/42/avatar.png") == b"\x89PNG\r\n\x1a\nfake-image"
+    assert avatar.get_content() == b"\x89PNG\r\n\x1a\nfake-image"
 
-    signed_url = backend.sign_object_url("users/42/avatar.png", expires_in_secs=1200, timestamp=1_700_000_000)
+    signed_url = avatar.sign(expires_in=1200)
     assert "X-Vtb-Signature=" in signed_url
+    signed_batch = backend.sign(["users/42/avatar.png"], expires_in=600, for_upload=True)
+    assert len(signed_batch) == 1
+    assert "X-Vtb-Method=PUT" in signed_batch[0]
 
-    async_att = FileAttachment(path="users/42/report.pdf", content_type="application/pdf")
-    await backend.save_object_async(async_att, memoryview(b"%PDF-1.7-async-content"))
-    assert async_att.size == 22
-    assert await backend.get_content_async("users/42/report.pdf") == b"%PDF-1.7-async-content"
+    report = FileObject(
+        backend=backend,
+        filename="users/42/report.pdf",
+        content_type="application/pdf",
+    )
+    await report.save_async(memoryview(b"%PDF-1.7-async-content"))
+    assert report.size == 22
+    assert await report.get_content_async() == b"%PDF-1.7-async-content"
 
     source_file = tmp_path / "source_doc.txt"
     source_file.write_bytes(b"path-based-async-upload")
-    path_att = FileAttachment(path="users/42/source_doc.txt", content_type="text/plain")
-    await backend.save_object_async(path_att, source_file)
-    assert path_att.size == 23
+    path_obj = FileObject(backend=backend, filename="users/42/source_doc.txt")
+    await backend.save_object_async(path_obj, source_file)
+    assert path_obj.size == 23
     assert await backend.get_content_async("users/42/source_doc.txt") == b"path-based-async-upload"
 
     class _AsyncReadable:
@@ -143,56 +234,21 @@ async def test_alchemy_storage_backend_and_plugin(tmp_path: Path) -> None:
         async def read(self) -> bytes:
             return b"awaitable-read-stream"
 
-    stream_att = FileAttachment(path="users/42/stream.bin")
-    await backend.save_object_async(stream_att, _AsyncReadable())
-    assert stream_att.size == 21
+    stream_obj = FileObject(backend=backend, filename="users/42/stream.bin")
+    await backend.save_object_async(stream_obj, _AsyncReadable())
+    assert stream_obj.size == 21
     assert await backend.get_content_async("users/42/stream.bin") == b"awaitable-read-stream"
+
+    tracker = FileObjectSessionTracker(raise_on_error=True)
+    staged_obj = FileObject(backend=backend, filename="users/42/tx_orphan.bin")
+    tracker.add_pending_save(staged_obj, b"staged-in-tx")
+    await tracker.commit_async()
+    assert await backend.get_content_async("users/42/tx_orphan.bin") == b"staged-in-tx"
+
+    rollback_tracker = FileObjectSessionTracker(raise_on_error=True)
+    rollback_tracker._saved_in_transaction.add(staged_obj)
+    await rollback_tracker.rollback_async()
+    assert not await store.exists_async("uploads/users/42/tx_orphan.bin")
 
     backend.delete_object("users/42/avatar.png")
     await backend.delete_object_async(["users/42/report.pdf", "users/42/source_doc.txt", "users/42/stream.bin"])
-
-    plugin: AlchemyPlugin[object] = AlchemyPlugin(store=store, storage_key="attachments")
-    app_state: dict[str, object] = {}
-    alchemy_state = plugin.install_state(app_state)
-    assert isinstance(alchemy_state, SQLAlchemyState)
-    assert app_state[AlchemyPlugin.STATE_KEY] is alchemy_state
-    assert isinstance(alchemy_state.storage_backend, ObjectStoreBackend)
-
-
-@pytest.mark.anyio
-async def test_sqlspec_plugin_shutdown() -> None:
-    """Verify SQLSpecPlugin.shutdown offloads sync driver close to SyncPool."""
-    closed_threads: list[str] = []
-
-    class DummySyncPool:
-        def close(self) -> None:
-            closed_threads.append(threading.current_thread().name)
-
-    dummy = DummySyncPool()
-    sync_cfg = SQLSpecSyncConfig(
-        bind_key="primary_db",
-        pool_instance=dummy,
-    )
-    plugin = SQLSpecPlugin(config=sync_cfg)
-    app_state: dict[str, object] = {}
-    plugin.install_state(app_state)
-
-    await plugin.shutdown()
-    assert len(closed_threads) == 1
-
-
-def test_sqlspec_storage_bridge_delegates_to_registry() -> None:
-    """Verify SqlSpecStorageBridge delegates alias and byte operations to StorageRegistry."""
-    registry = StorageRegistry()
-    store = ObjectStore("memory://")
-    bridge = SqlSpecStorageBridge(registry)
-    bridge.register_alias("primary", store)
-
-    resolved = bridge.resolve_store("primary")
-    assert resolved is store
-
-    bridge.put_bytes("primary/data.txt", b"bridge-bytes")
-    assert bridge.get_bytes("primary/data.txt") == b"bridge-bytes"
-
-    bridge.put_json("primary/data.json", {"key": "value"})
-    assert bridge.get_json("primary/data.json") == {"key": "value"}

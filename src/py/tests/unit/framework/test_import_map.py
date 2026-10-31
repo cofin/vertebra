@@ -112,3 +112,19 @@ def test_write_import_map_overwrites_existing(tmp_path: Path) -> None:
     path = ImportMapGenerator.write(js2, tmp_path)
     data = decode_json(path.read_text())
     assert data["imports"]["react"] == "npm:react@^19"
+
+
+def test_generate_import_map_include_client_and_sync_wheel_bundle(tmp_path: Path) -> None:
+    """ImportMapGenerator maps @vertebra/client and extracts the wheel-packaged bundle."""
+    js = JsConfig()
+    mapped = ImportMapGenerator.generate(js, include_client=True)
+    assert mapped["imports"]["@vertebra/client"] == "/__vertebra/client/index.js"
+    assert mapped["imports"]["@vertebra/client/"] == "/__vertebra/client/"
+
+    client_dir = ImportMapGenerator.sync_wheel_client(tmp_path)
+    assert client_dir is not None
+    assert (client_dir / "index.js").is_file()
+    assert (client_dir / "index.d.ts").is_file()
+    pkg = decode_json((client_dir / "package.json").read_text(encoding="utf-8"))
+    assert pkg["name"] == "@vertebra/client"
+    assert "./react" in pkg["exports"]

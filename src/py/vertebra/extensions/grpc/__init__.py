@@ -12,7 +12,7 @@ from typing import Any, Protocol, cast, get_args, get_origin, get_type_hints
 import msgspec
 import msgspec.inspect
 
-from vertebra.utils.serializers import decode_msgpack, encode_msgpack
+from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
 
 __all__ = (
     "GrpcContext",
@@ -288,7 +288,7 @@ class GrpcServiceRegistry:
                 raise GrpcError(GrpcStatus.INVALID_ARGUMENT, "unary RPC requires exactly one request frame")
             req_obj = decode_msgpack(raw_frames[0], type=spec.input_type)
             resp_obj = await (spec.handler(req_obj, ctx) if spec.accepts_context else spec.handler(req_obj))
-            encoded = encode_lpm_frame(encode_msgpack(resp_obj))
+            encoded = encode_lpm_frame(encode_msgpack_bytes(resp_obj))
             await send({"type": "http.response.body", "body": encoded, "more_body": False})
             return
 
@@ -299,7 +299,7 @@ class GrpcServiceRegistry:
             raw_stream = spec.handler(req_obj, ctx) if spec.accepts_context else spec.handler(req_obj)
             stream_out: AsyncIterable[Any] = await self._resolve_async_iterable(raw_stream)
             async for item in stream_out:
-                chunk = encode_lpm_frame(encode_msgpack(item))
+                chunk = encode_lpm_frame(encode_msgpack_bytes(item))
                 await send({"type": "http.response.body", "body": chunk, "more_body": True})
             await send({"type": "http.response.body", "body": b"", "more_body": False})
             return
@@ -307,7 +307,7 @@ class GrpcServiceRegistry:
         if spec.kind is GrpcMethodKind.CLIENT_STREAMING:
             req_stream = self._iter_decoded_requests(raw_frames, spec.input_type)
             resp_obj = await (spec.handler(req_stream, ctx) if spec.accepts_context else spec.handler(req_stream))
-            encoded = encode_lpm_frame(encode_msgpack(resp_obj))
+            encoded = encode_lpm_frame(encode_msgpack_bytes(resp_obj))
             await send({"type": "http.response.body", "body": encoded, "more_body": False})
             return
 
@@ -315,7 +315,7 @@ class GrpcServiceRegistry:
         raw_bidi = spec.handler(req_stream, ctx) if spec.accepts_context else spec.handler(req_stream)
         bidi_out: AsyncIterable[Any] = await self._resolve_async_iterable(raw_bidi)
         async for item in bidi_out:
-            chunk = encode_lpm_frame(encode_msgpack(item))
+            chunk = encode_lpm_frame(encode_msgpack_bytes(item))
             await send({"type": "http.response.body", "body": chunk, "more_body": True})
         await send({"type": "http.response.body", "body": b"", "more_body": False})
 

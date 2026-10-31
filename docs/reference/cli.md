@@ -112,8 +112,6 @@ vtb build [OPTIONS]
 | `--profile` | `text` | `"release"` | Build profile: debug, release |
 | `--standalone` | `flag` | `False` | Assemble a relocatable standalone distribution directory |
 | `--onefile` | `flag` | `False` | Package application into a self-extracting single-file executable |
-| `--pgo` | `flag` | `False` | Enable Profile-Guided Optimization metadata during packaging |
-| `--profdata` | `file` | - | Merged LLVM .profdata file for Rust -Cprofile-use packaging metadata |
 | `--server-binary` | `file` | - | Compiled vertebra-server executable to bundle under bin/ in the staged distribution |
 | `--entrypoint` | `text` | `"app:app"` | Application entrypoint module:attribute (default: app:app) |
 | `--python-version` | `text` | `"3.12"` | Target Python runtime version (3.12, 3.13, 3.14, 3.14t, 3.15, 3.15t) |
@@ -164,7 +162,7 @@ vtb js list
 
 #### `vtb js install`
 
-Resolve JS dependencies and generate import map.
+Sync the wheel-bundled @vertebra/client SDK and generate import map.
 
 ```bash
 vtb js install

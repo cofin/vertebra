@@ -4,16 +4,16 @@
 
 export const WASM_MAGIC_BYTES = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
 
-export interface WasmClientOptions {
+export interface WASMClientOptions {
   readonly maxMemoryPages?: number;
   readonly imports?: WebAssembly.Imports;
 }
 
-export class WasmClient {
+export class WASMClient {
   private readonly maxMemoryPages: number;
   private readonly baseImports: WebAssembly.Imports;
 
-  public constructor(options: WasmClientOptions = {}) {
+  public constructor(options: WASMClientOptions = {}) {
     this.maxMemoryPages = options.maxMemoryPages ?? 256;
     this.baseImports = options.imports ?? {};
   }
@@ -35,7 +35,7 @@ export class WasmClient {
   }
 
   public async instantiateBytes(bytes: Uint8Array): Promise<WebAssembly.WebAssemblyInstantiatedSource> {
-    if (!WasmClient.isValidBinary(bytes)) {
+    if (!WASMClient.isValidBinary(bytes)) {
       throw new Error("Invalid WebAssembly binary magic header");
     }
     const module = await WebAssembly.compile(bytes as unknown as BufferSource);

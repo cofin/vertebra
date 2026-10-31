@@ -116,6 +116,7 @@ def py_sign_gcs_v4_iam_url(
     timestamp: int | None = None,
     iam_endpoint: str = "https://iamcredentials.googleapis.com",
     access_token: str | None = None,
+    private_key_pem: str | None = None,
 ) -> str: ...
 def py_sign_oci_cavage_headers(
     tenancy_ocid: str,

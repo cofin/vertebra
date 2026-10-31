@@ -36,3 +36,21 @@ sources:
 - **[`LitestarFastPathBypass`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py) & [`CompiledLitestarRoute`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py)**: Frozen `msgspec.Struct(gc=False, kw_only=True)` route table compiled by `compile_litestar_fastpath_routes`. `LitestarFastPathBypass.dispatch(scope, receive, send)` executes zero-`Request` `_DirectSignaturePlan` handlers directly and routes DI/DTO/`File`/`ServerSentEvent` handlers through [`dispatch_litestar_handler_direct`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py) (`preseed_litestar_scope_body` guarding `Empty`, `http.response.start` emitted before `http.response.pathsend` and `http.response.body` SSE chunks, JSON-serialized `HTTPException`, and guaranteed `UploadFile.close()` in `finally`). Routes with guards, custom ASGI middleware, `before_request`, `after_request` (including Litestar v2 `ownership_layers`), `before_send`, `after_exception`, custom `exception_handlers`, caching, `csrf_config`, `allowed_hosts`, active un-offloaded Python `compression_config` or `cors_config`, layered `type_decoders` or `response_class`, `response_headers`/`cookies`/`etag`/`background`, or bodies exceeding `request_max_body_size` fall back cleanly to Litestar's full ASGI stack (replaying any consumed `receive()` chunks).
 - **[`ChannelsBackend`](../../../../../src/py/vertebra/extensions/litestar/channels.py)** (`swap_litestar_channels_backend`): Native in-memory/SHM-compatible `ChannelBus` backend for Litestar `ChannelsPlugin` supporting `publish`, `subscribe`, `unsubscribe`, `stream_events`, and bounded history.
 - **[`MemoryStore`](../../../../../src/py/vertebra/extensions/litestar/store.py)** (`swap_litestar_response_cache_store`): Monotonic-clock TTL `ResponseCacheStore` (`get`, `set`, `delete`, `delete_all`, `exists`, `expires_in`) replacing Litestar's default response-cache store.
+
+## 4. First-Party Ecosystem Integrations (`extensions/litestar/*`)
+
+All `litestar-*` ecosystem integrations are nested strictly under `vertebra.extensions.litestar.*`, keeping Vertebra's native built-in framework modules (`vertebra.framework.queues`, `vertebra.framework.security`, `vertebra.framework.autowire`, `vertebra.framework.mcp`) 100% decoupled and independent:
+
+| Subpackage | Canonical Helpers & Adapters | Upstream Integration |
+|---|---|---|
+| `queues` | `create_shm_queue_config()`, `create_sqlspec_queue_config(config)` | Wraps `litestar_queues` (`QueuePlugin`, `QueueConfig`) with Vertebra SHM ring buffers or SQLSpec database queue backends. |
+| `security` | `create_shm_security_config()`, `create_session_security_config()` | Wraps `litestar_security` (`SecurityPlugin`, `SecurityConfig`) with zero-copy session stores and security contexts. |
+| `autowire` | `create_autowire_config()`, `AutowirePlugin` | Wraps `litestar_autowire` with domain package scanning and dependency auto-wiring. |
+| `email` | `create_vertebra_email_config()`, `EmailPlugin` | Bridges `litestar_email` to Vertebra's high-performance transactional email providers. |
+| `mcp` | `create_mcp_config()`, `LitestarMCP`, `LitestarA2A` | Bridges `litestar_mcp` with Model Context Protocol routes and Agent-to-Agent communication. |
+| `vite` | `create_vite_config()`, `VitePlugin` | Bridges `litestar_vite` with `vertebra-bundler` (Rolldown/Oxc) asset compilation and Inertia SSR. |
+| `htmx` | `HTMXPlugin`, `HTMXConfig` | Re-exports `litestar_htmx` plugins and decorators for server-rendered HTML applications. |
+| `saq` | `SAQPlugin`, `SAQConfig` | Re-exports `litestar_saq` background job scheduling. |
+| `asyncapi` | `AsyncAPIPlugin`, `AsyncAPIConfig` | Re-exports `litestar_asyncapi` event documentation. |
+
+All ecosystem integrations are strictly optional (`extra="queues"`, `extra="security"`, etc.) and lazily loaded via PEP 562 in `vertebra.extensions.litestar`.

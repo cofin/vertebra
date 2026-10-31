@@ -32,9 +32,9 @@ from vertebra.agent.core.jsonrpc import (
     INVALID_REQUEST,
     METHOD_NOT_FOUND,
     PARSE_ERROR,
-    JsonRpcErrorException,
-    JsonRpcRequest,
-    JsonRpcRouter,
+    JSONRPCErrorException,
+    JSONRPCRequest,
+    JSONRPCRouter,
 )
 from vertebra.agent.core.schema import (
     SchemaBuilder,
@@ -65,7 +65,7 @@ except ImportError:
 @pytest.mark.anyio
 async def test_jsonrpc_single_batch_and_notification_silence() -> None:
     """Test JSON-RPC single, batch, notification silence, and sensitive error masking."""
-    router = JsonRpcRouter()
+    router = JSONRPCRouter()
 
     router.register("ping", lambda: "pong")
     router.register("echo", lambda message: message)
@@ -76,15 +76,15 @@ async def test_jsonrpc_single_batch_and_notification_silence() -> None:
 
     router.register("fail", failing_handler)
 
-    req = JsonRpcRequest(method="ping", id=1)
+    req = JSONRPCRequest(method="ping", id=1)
     res = await router.dispatch(req)
     assert res == {"jsonrpc": "2.0", "id": 1, "result": "pong"}
 
-    notif = JsonRpcRequest(method="ping", id=None)
+    notif = JSONRPCRequest(method="ping", id=None)
     res_notif = await router.dispatch(notif)
     assert res_notif is None
 
-    fail_req = JsonRpcRequest(method="fail", id=2)
+    fail_req = JSONRPCRequest(method="fail", id=2)
     res_fail = await router.dispatch(fail_req)
     assert res_fail is not None
     assert res_fail["jsonrpc"] == "2.0"
@@ -128,13 +128,13 @@ async def test_jsonrpc_single_batch_and_notification_silence() -> None:
     invalid_res = decode_json(invalid_res_bytes)
     assert invalid_res["error"]["code"] == INVALID_REQUEST
 
-    unknown_res = await router.dispatch(JsonRpcRequest(method="nonexistent", id=99))
+    unknown_res = await router.dispatch(JSONRPCRequest(method="nonexistent", id=99))
     assert unknown_res is not None
     assert unknown_res["error"]["code"] == METHOD_NOT_FOUND
 
-    assert JsonRpcRequest.__struct_config__.forbid_unknown_fields is True
+    assert JSONRPCRequest.__struct_config__.forbid_unknown_fields is True
     with pytest.raises(msgspec.ValidationError):
-        msgspec.convert({"jsonrpc": "2.0", "method": "ping", "extra": True}, JsonRpcRequest)
+        msgspec.convert({"jsonrpc": "2.0", "method": "ping", "extra": True}, JSONRPCRequest)
 
 
 def test_cursor_pagination_roundtrip_and_invalid_cursor() -> None:
@@ -162,11 +162,11 @@ def test_cursor_pagination_roundtrip_and_invalid_cursor() -> None:
     cursor_val = encode_cursor(42)
     assert decode_cursor(cursor_val) == 42
 
-    with pytest.raises(JsonRpcErrorException) as exc_info:
+    with pytest.raises(JSONRPCErrorException) as exc_info:
         decode_cursor("invalid-base64-not-prefixed")
     assert exc_info.value.error.code == INVALID_PARAMS
 
-    with pytest.raises(JsonRpcErrorException) as exc_info2:
+    with pytest.raises(JSONRPCErrorException) as exc_info2:
         decode_cursor("")
     assert exc_info2.value.error.code == INVALID_PARAMS
 

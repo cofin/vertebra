@@ -1,24 +1,35 @@
-"""SQLAlchemy 2.1 +vertebra / +vtb dialects, plain-tuple DBAPI bridge, and 3.14t sync pool adapter."""
+"""SQLAlchemy 2.1 +vertebra / +vtb sync and async dialects, PEP 249 DBAPI bridges, and 3.14t pool adapters."""
 
 from __future__ import annotations
 
+import sqlite3
 import sys
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy.connectors.asyncio import AsyncAdapt_dbapi_connection
+from sqlalchemy.dialects import registry
+from sqlalchemy.dialects.mssql.base import MSDialect
+from sqlalchemy.dialects.mysql.base import MySQLDialect as BaseMySQLDialect
+from sqlalchemy.dialects.oracle.base import OracleDialect as BaseOracleDialect
+from sqlalchemy.dialects.postgresql.base import PGDialect
+from sqlalchemy.dialects.sqlite.base import SQLiteDialect as BaseSQLiteDialect
+from sqlalchemy.engine.default import DefaultDialect
+from sqlalchemy.engine.url import URL
+from sqlalchemy.pool import AsyncAdaptedQueuePool, NullPool, Pool, QueuePool, StaticPool
+
 from vertebra.db._registry import DatabaseRegistry
-from vertebra.db.duckdb import DuckdbConfig, SyncDuckdbDriver
-from vertebra.db.mssql import MssqlConfig, SyncMssqlDriver
-from vertebra.db.mysql import MysqlConfig, SyncMysqlDriver
-from vertebra.db.oracle import OracleConfig, SyncOracleDriver
-from vertebra.db.postgres import PostgresConfig, SyncPostgresDriver
-from vertebra.db.sqlite import SqliteConfig, SyncSqliteDriver
+from vertebra.db.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
+from vertebra.db.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
+from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
+from vertebra.db.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
+from vertebra.db.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.sync_tools import SyncPool
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
-
-    from vertebra.extensions.sqlalchemy import (
+    from vertebra.extensions.sqlalchemy.types import (
         DeleteUsingClause,
         InsertSentinelSpec,
     )
@@ -26,19 +37,38 @@ if TYPE_CHECKING:
 __all__ = (
     "ALL_DIALECT_SCHEMES",
     "DIALECT_SCHEMES",
+    "AsyncDBAPIConnection",
+    "AsyncDBAPICursor",
+    "AsyncDBAPIModule",
     "DBAPIConnection",
     "DBAPICursor",
     "DBAPIModule",
-    "DialectDescriptor",
-    "DuckdbDialect",
-    "MssqlDialect",
-    "MysqlDialect",
+    "DataError",
+    "DatabaseError",
+    "DuckDBAsyncDialect",
+    "DuckDBDialect",
+    "Error",
+    "IntegrityError",
+    "InterfaceError",
+    "InternalError",
+    "MSSQLAsyncDialect",
+    "MSSQLDialect",
+    "MySQLAsyncDialect",
+    "MySQLDialect",
+    "NotSupportedError",
     "NullPool",
+    "OperationalError",
+    "OracleAsyncDialect",
     "OracleDialect",
-    "PostgresDialect",
-    "SqliteDialect",
+    "PostgreSQLAsyncDialect",
+    "PostgreSQLDialect",
+    "ProgrammingError",
+    "SQLiteAsyncDialect",
+    "SQLiteDialect",
     "SyncEngineAdapter",
+    "Warning",
     "attach_serverless_disconnect_guard",
+    "is_free_threaded",
 )
 
 
@@ -47,22 +77,6 @@ def is_free_threaded() -> bool:
     checker = getattr(sys, "_is_gil_enabled", None)
     return bool(checker and not checker())
 
-
-class _FallbackNullPool:
-    """Zero-pooling SQLAlchemy pool class delegating connection lifecycle to the Vertebra SHM broker."""
-
-    is_null_pool: bool = True
-
-
-def _resolve_null_pool() -> type[Any]:
-    sa_pool = import_optional("sqlalchemy.pool")
-    if sa_pool is not None and hasattr(sa_pool, "NullPool"):
-        pool_cls: type[Any] = sa_pool.NullPool
-        return pool_cls
-    return _FallbackNullPool
-
-
-NullPool: type[Any] = _resolve_null_pool()
 
 DIALECT_SCHEMES: tuple[str, ...] = (
     "postgresql+vertebra",
@@ -84,21 +98,78 @@ ALL_DIALECT_SCHEMES: tuple[str, ...] = (
 )
 
 
+class Error(Exception):
+    """Base PEP 249 DBAPI exception."""
+
+    def __getattr__(self, key: str) -> Any:
+        msg = f"{type(self).__name__!r} object has no attribute {key!r}"
+        raise AttributeError(msg)
+
+
+class Warning(Exception):
+    """PEP 249 DBAPI warning exception."""
+
+
+class InterfaceError(Error):
+    """PEP 249 database interface error."""
+
+
+class DatabaseError(Error):
+    """PEP 249 database operation error."""
+
+
+class DataError(DatabaseError):
+    """PEP 249 data processing error."""
+
+
+class OperationalError(DatabaseError):
+    """PEP 249 database operational error."""
+
+
+class IntegrityError(DatabaseError):
+    """PEP 249 relational integrity constraint error."""
+
+
+class InternalError(DatabaseError):
+    """PEP 249 database internal error."""
+
+
+class ProgrammingError(DatabaseError):
+    """PEP 249 SQL programming error."""
+
+
+class NotSupportedError(DatabaseError):
+    """PEP 249 feature not supported error."""
+
+
+Binary = bytes
+
+
 class DBAPICursor:
     """PEP 249 DBAPI 2.0 cursor returning plain Python tuples for SQLAlchemy 2.1 ORM loaders."""
 
-    __slots__ = ("_conn", "_pos", "_rows", "arraysize", "description", "rowcount")
+    __slots__ = ("_conn", "_pos", "_raw_cursor", "_rows", "arraysize", "description", "lastrowid", "rowcount")
 
-    def __init__(self, connection: DBAPIConnection) -> None:
+    def __init__(self, connection: DBAPIConnection, raw_cursor: Any = None) -> None:
+        """Initialize PEP 249 cursor with connection and optional underlying DBAPI cursor."""
         self._conn = connection
+        self._raw_cursor = raw_cursor
         self._rows: list[tuple[Any, ...]] = []
         self._pos: int = 0
         self.description: tuple[tuple[str, Any, None, None, None, None, None], ...] | None = None
         self.rowcount: int = -1
+        self.lastrowid: int | None = None
         self.arraysize: int = 1
 
     def execute(self, operation: str, parameters: Sequence[Any] | dict[str, Any] = ()) -> DBAPICursor:
         """Execute a SQL statement and buffer plain-tuple rows."""
+        if self._raw_cursor is not None:
+            self._raw_cursor.execute(operation, parameters)
+            self.description = getattr(self._raw_cursor, "description", None)
+            self.rowcount = getattr(self._raw_cursor, "rowcount", -1)
+            self.lastrowid = getattr(self._raw_cursor, "lastrowid", None)
+            return self
+
         self._rows, self.description = self._conn.execute_with_description(operation, parameters)
         self._pos = 0
         self.rowcount = len(self._rows)
@@ -106,6 +177,13 @@ class DBAPICursor:
 
     def executemany(self, operation: str, seq_of_parameters: Sequence[Sequence[Any] | dict[str, Any]]) -> DBAPICursor:
         """Execute a parameterized SQL statement across a sequence of parameter sets."""
+        if self._raw_cursor is not None:
+            self._raw_cursor.executemany(operation, seq_of_parameters)
+            self.description = getattr(self._raw_cursor, "description", None)
+            self.rowcount = getattr(self._raw_cursor, "rowcount", -1)
+            self.lastrowid = getattr(self._raw_cursor, "lastrowid", None)
+            return self
+
         total = 0
         last_rows: list[tuple[Any, ...]] = []
         last_desc: tuple[tuple[str, Any, None, None, None, None, None], ...] | None = None
@@ -121,7 +199,10 @@ class DBAPICursor:
         return self
 
     def fetchone(self) -> tuple[Any, ...] | None:
-        """Fetch the next plain-tuple row or ``None``."""
+        """Fetch the next plain-tuple row or None."""
+        if self._raw_cursor is not None:
+            row = self._raw_cursor.fetchone()
+            return tuple(row) if row is not None and not isinstance(row, tuple) else row
         if self._pos >= len(self._rows):
             return None
         row = self._rows[self._pos]
@@ -129,7 +210,10 @@ class DBAPICursor:
         return row
 
     def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
-        """Fetch up to ``size`` plain-tuple rows."""
+        """Fetch up to size plain-tuple rows."""
+        if self._raw_cursor is not None:
+            rows = self._raw_cursor.fetchmany(size if size is not None else self.arraysize)
+            return [tuple(r) if not isinstance(r, tuple) else r for r in rows]
         batch_size = self.arraysize if size is None else size
         batch = self._rows[self._pos : self._pos + batch_size]
         self._pos += len(batch)
@@ -137,20 +221,25 @@ class DBAPICursor:
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         """Fetch all remaining plain-tuple rows."""
+        if self._raw_cursor is not None:
+            rows = self._raw_cursor.fetchall()
+            return [tuple(r) if not isinstance(r, tuple) else r for r in rows]
         rest = self._rows[self._pos :]
         self._pos = len(self._rows)
         return rest
 
     def close(self) -> None:
         """Close the cursor."""
+        if self._raw_cursor is not None and hasattr(self._raw_cursor, "close"):
+            self._raw_cursor.close()
         self._rows = []
         self._pos = 0
 
 
 class DBAPIConnection:
-    """PEP 249 DBAPI 2.0 connection backed by Vertebra's native driver layer."""
+    """PEP 249 DBAPI 2.0 connection backed by Vertebra native drivers or sqlite3."""
 
-    __slots__ = ("_broker", "_config", "_driver", "_sqlite_driver", "_url", "closed")
+    __slots__ = ("_autocommit", "_broker", "_config", "_driver", "_sqlite_conn", "_url", "closed")
 
     def __init__(
         self,
@@ -158,28 +247,48 @@ class DBAPIConnection:
         *,
         driver: Any = None,
         broker: Any = None,
+        database: str | None = None,
+        **kwargs: Any,
     ) -> None:
-        self._url = url
+        """Initialize PEP 249 connection with URL or database parameters."""
+        resolved_url = url
+        if database is not None and (url == "sqlite+vtb:///:memory:" or not url):
+            resolved_url = f"sqlite+vtb:///{database}"
+        self._url = resolved_url
         self._broker = broker
-        self._config = (
-            DatabaseRegistry.parse_url(url, broker=broker) if broker is not None else DatabaseRegistry.parse_url(url)
-        )
+        self._autocommit = False
+        self.closed: bool = False
+
+        self._config: Any = None
+        try:
+            self._config = (
+                DatabaseRegistry.parse_url(resolved_url, broker=broker)
+                if broker is not None
+                else DatabaseRegistry.parse_url(resolved_url)
+            )
+        except Exception:
+            self._config = SQLiteConfig(database=database or ":memory:")
+
         self._driver = driver
+        self._sqlite_conn: sqlite3.Connection | None = None
+
         if self._driver is None:
-            if isinstance(self._config, PostgresConfig):
-                self._driver = SyncPostgresDriver(self._config, broker=broker)
-            elif isinstance(self._config, MysqlConfig):
-                self._driver = SyncMysqlDriver(self._config, broker=broker)
+            if isinstance(self._config, SQLiteConfig):
+                db_target = str(self._config.database or ":memory:")
+                if db_target.startswith("sqlite+"):
+                    db_target = db_target.split(":///", 1)[-1] if ":///" in db_target else ":memory:"
+                self._sqlite_conn = sqlite3.connect(db_target, check_same_thread=False)
+                self._driver = SyncSQLiteDriver(self._config, broker=broker)
+            elif isinstance(self._config, PostgreSQLConfig):
+                self._driver = SyncPostgreSQLDriver(self._config, broker=broker)
+            elif isinstance(self._config, MySQLConfig):
+                self._driver = SyncMySQLDriver(self._config, broker=broker)
             elif isinstance(self._config, OracleConfig):
                 self._driver = SyncOracleDriver(self._config, broker=broker)
-            elif isinstance(self._config, MssqlConfig):
-                self._driver = SyncMssqlDriver(self._config, broker=broker)
-            elif isinstance(self._config, DuckdbConfig):
-                self._driver = SyncDuckdbDriver(self._config, broker=broker)
-        self._sqlite_driver: SyncSqliteDriver | None = (
-            SyncSqliteDriver(self._config, broker=broker) if isinstance(self._config, SqliteConfig) else None
-        )
-        self.closed: bool = False
+            elif isinstance(self._config, MSSQLConfig):
+                self._driver = SyncMSSQLDriver(self._config, broker=broker)
+            elif isinstance(self._config, DuckDBConfig):
+                self._driver = SyncDuckDBDriver(self._config, broker=broker)
 
     @property
     def url(self) -> str:
@@ -199,10 +308,24 @@ class DBAPIConnection:
     @property
     def driver(self) -> Any:
         """Return the active underlying driver instance."""
-        return self._driver if self._driver is not None else self._sqlite_driver
+        return self._driver
+
+    @property
+    def autocommit(self) -> bool:
+        """Return connection autocommit state."""
+        return self._autocommit
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None:
+        """Set connection autocommit state."""
+        self._autocommit = value
+        if self._sqlite_conn is not None:
+            self._sqlite_conn.autocommit = value
 
     def cursor(self) -> DBAPICursor:
         """Create a new plain-tuple DBAPI cursor."""
+        if self._sqlite_conn is not None:
+            return DBAPICursor(self, raw_cursor=self._sqlite_conn.cursor())
         return DBAPICursor(self)
 
     def execute_with_description(
@@ -211,16 +334,19 @@ class DBAPIConnection:
         parameters: Sequence[Any] | dict[str, Any] = (),
     ) -> tuple[list[tuple[Any, ...]], tuple[tuple[str, Any, None, None, None, None, None], ...] | None]:
         """Execute a query returning rows and column descriptions."""
+        if self._sqlite_conn is not None:
+            cur = self._sqlite_conn.cursor()
+            cur.execute(sql, parameters)
+            rows = [tuple(r) for r in cur.fetchall()]
+            desc = cur.description
+            return rows, desc
+
         if self._driver is not None:
             if hasattr(self._driver, "execute_with_description"):
                 raw_res = self._driver.execute_with_description(sql, parameters)
-                if isinstance(raw_res, tuple) and len(raw_res) == 3:
+                if isinstance(raw_res, tuple) and len(raw_res) >= 2:
                     return raw_res[0], raw_res[1]
-                driver_res: tuple[
-                    list[tuple[Any, ...]],
-                    tuple[tuple[str, Any, None, None, None, None, None], ...] | None,
-                ] = raw_res
-                return driver_res
+                return [], None
             if hasattr(self._driver, "execute_tuples"):
                 rows = self._driver.execute_tuples(sql, parameters)
                 desc = (
@@ -229,12 +355,6 @@ class DBAPIConnection:
                     else None
                 )
                 return rows, desc
-        if self._sqlite_driver is not None:
-            rows = self._sqlite_driver.execute_tuples(sql, parameters)
-            desc = (
-                tuple((f"col_{i}", None, None, None, None, None, None) for i in range(len(rows[0]))) if rows else None
-            )
-            return rows, desc
         return [], None
 
     def execute_raw_tuples(
@@ -242,27 +362,31 @@ class DBAPIConnection:
         sql: str,
         parameters: Sequence[Any] | dict[str, Any] = (),
     ) -> list[tuple[Any, ...]]:
-        """Execute a query and return plain Python tuples (`list[tuple[Any, ...]]`)."""
+        """Execute a query and return plain Python tuples."""
         rows, _ = self.execute_with_description(sql, parameters)
         return rows
 
     def commit(self) -> None:
         """Commit the active transaction."""
-        if self._driver is not None and hasattr(self._driver, "commit"):
+        if self._sqlite_conn is not None:
+            self._sqlite_conn.commit()
+        elif self._driver is not None and hasattr(self._driver, "commit"):
             self._driver.commit()
 
     def rollback(self) -> None:
         """Roll back the active transaction."""
-        if self._driver is not None and hasattr(self._driver, "rollback"):
+        if self._sqlite_conn is not None:
+            self._sqlite_conn.rollback()
+        elif self._driver is not None and hasattr(self._driver, "rollback"):
             self._driver.rollback()
 
     def close(self) -> None:
         """Close the underlying driver connection."""
         if not self.closed:
+            if self._sqlite_conn is not None:
+                self._sqlite_conn.close()
             if self._driver is not None and hasattr(self._driver, "close"):
                 self._driver.close()
-            if self._sqlite_driver is not None:
-                self._sqlite_driver.close()
             self.closed = True
 
 
@@ -271,148 +395,318 @@ class DBAPIModule:
 
     apilevel: str = "2.0"
     threadsafety: int = 2
-    Error = Exception
-    DatabaseError = Exception
-    IntegrityError = Exception
-    OperationalError = Exception
-    InterfaceError = Exception
-    ProgrammingError = Exception
-    __slots__ = ("paramstyle",)
+    paramstyle: str = "qmark"
+
+    Error = Error
+    Warning = Warning
+    InterfaceError = InterfaceError
+    DatabaseError = DatabaseError
+    DataError = DataError
+    OperationalError = OperationalError
+    IntegrityError = IntegrityError
+    InternalError = InternalError
+    ProgrammingError = ProgrammingError
+    NotSupportedError = NotSupportedError
+    Binary = Binary
+
+    sqlite_version: str = sqlite3.sqlite_version
+    sqlite_version_info: tuple[int, ...] = sqlite3.sqlite_version_info
 
     def __init__(self, *, paramstyle: str = "qmark") -> None:
+        """Initialize PEP 249 DBAPI module with target parameter style."""
         self.paramstyle = paramstyle
 
-    def connect(self, url: str = "sqlite+vtb:///:memory:", **kwargs: Any) -> DBAPIConnection:
-        """Open a PEP 249 connection for the given URL."""
-        return DBAPIConnection(url, **kwargs)
+    def __getattr__(self, key: str) -> Any:
+        msg = f"{type(self).__name__!r} object has no attribute {key!r}"
+        raise AttributeError(msg)
+
+    def connect(self, *args: Any, **kwargs: Any) -> DBAPIConnection:
+        """Open a PEP 249 connection."""
+        url_arg = "sqlite+vtb:///:memory:"
+        if args and isinstance(args[0], str):
+            url_arg = args[0]
+        elif "url" in kwargs:
+            url_arg = kwargs.pop("url")
+        return DBAPIConnection(url_arg, **kwargs)
 
 
-class DialectDescriptor:
-    """SQLAlchemy 2.1 dialect metadata for `+vertebra` and `+vtb` URL schemes."""
+class AsyncDBAPICursor:
+    """Asynchronous cursor wrapping async drivers and reporting execution metrics to AsyncAdapt."""
 
-    name: str = ""
-    driver: str = "vertebra"
-    paramstyle: str = "qmark"
-    poolclass: type[Any] = NullPool
-    supports_statement_cache: bool = True
-    use_insertmanyvalues: bool = True
-    insert_executemany_returning: bool = True
-    supports_native_jsonb: bool = True
-    returns_plain_tuples: bool = True
+    __slots__ = (
+        "_conn",
+        "_driver",
+        "_pos",
+        "_rows",
+        "arraysize",
+        "description",
+        "lastrowid",
+        "rowcount",
+    )
+
+    def __init__(self, connection: AsyncDBAPIConnection) -> None:
+        """Initialize asynchronous cursor."""
+        self._conn = connection
+        self._driver = connection.driver
+        self._rows: list[tuple[Any, ...]] = []
+        self._pos: int = 0
+        self.description: tuple[tuple[str, Any, None, None, None, None, None], ...] | None = None
+        self.rowcount: int = -1
+        self.lastrowid: int | None = None
+        self.arraysize: int = 1
+
+    async def __aenter__(self) -> AsyncDBAPICursor:
+        """Enter asynchronous cursor context."""
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        """Exit asynchronous cursor context."""
+        await self.close()
+
+    async def execute(
+        self, operation: str, parameters: Sequence[Any] | dict[str, Any] | None = None
+    ) -> AsyncDBAPICursor:
+        """Execute a SQL statement asynchronously."""
+        params = () if parameters is None else parameters
+        if self._driver is not None and hasattr(self._driver, "execute_with_description"):
+            raw_res = await self._driver.execute_with_description(operation, params)
+            if isinstance(raw_res, tuple) and len(raw_res) >= 2:
+                self._rows = raw_res[0]
+                self.description = raw_res[1]
+                self.rowcount = len(self._rows)
+            else:
+                self._rows = []
+                self.description = None
+                self.rowcount = -1
+        elif self._driver is not None and hasattr(self._driver, "execute_tuples"):
+            self._rows = await self._driver.execute_tuples(operation, params)
+            self.description = (
+                tuple((f"col_{i}", None, None, None, None, None, None) for i in range(len(self._rows[0])))
+                if self._rows
+                else None
+            )
+            self.rowcount = len(self._rows)
+        else:
+            self._rows = []
+            self.description = None
+            self.rowcount = -1
+
+        self._pos = 0
+        if operation.strip().upper().startswith("INSERT") and hasattr(self._driver, "_sync"):
+            sync_drv = getattr(self._driver, "_sync", None)
+            raw_conn = getattr(sync_drv, "raw_connection", None)
+            if raw_conn is not None:
+                cur = raw_conn.cursor()
+                cur.execute("SELECT last_insert_rowid()")
+                row = cur.fetchone()
+                if row:
+                    self.lastrowid = row[0]
+        return self
+
+    async def executemany(
+        self,
+        operation: str,
+        seq_of_parameters: Sequence[Sequence[Any] | dict[str, Any]],
+    ) -> AsyncDBAPICursor:
+        """Execute parameterized SQL across multiple parameter sets asynchronously."""
+        total = 0
+        last_rows: list[tuple[Any, ...]] = []
+        last_desc: tuple[tuple[str, Any, None, None, None, None, None], ...] | None = None
+        for params in seq_of_parameters:
+            await self.execute(operation, params)
+            total += self.rowcount
+            last_rows = self._rows
+            last_desc = self.description
+        self._rows = last_rows
+        self.description = last_desc
+        self._pos = 0
+        self.rowcount = total
+        return self
+
+    async def fetchone(self) -> tuple[Any, ...] | None:
+        """Fetch the next row asynchronously."""
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Fetch up to size rows asynchronously."""
+        batch_size = self.arraysize if size is None else size
+        batch = self._rows[self._pos : self._pos + batch_size]
+        self._pos += len(batch)
+        return batch
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        """Fetch all remaining rows asynchronously."""
+        rest = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return rest
+
+    async def close(self) -> None:
+        """Close the asynchronous cursor."""
+        self._rows = []
+        self._pos = 0
+
+
+class AsyncDBAPIConnection:
+    """Asynchronous DBAPI connection adapting Vertebra async drivers."""
+
+    __slots__ = ("_autocommit", "_broker", "_config", "_driver", "_url", "closed")
 
     def __init__(
         self,
+        url: str = "sqlite+vtb_async:///:memory:",
         *,
-        name: str = "",
-        driver: str = "vertebra",
-        paramstyle: str = "qmark",
-        supports_statement_cache: bool = True,
-        use_insertmanyvalues: bool = True,
-        insert_executemany_returning: bool = True,
-        supports_native_jsonb: bool = True,
-        returns_plain_tuples: bool = True,
+        driver: Any = None,
+        broker: Any = None,
+        database: str | None = None,
+        **kwargs: Any,
     ) -> None:
-        self.name = name
-        self.driver = driver
+        """Initialize asynchronous connection."""
+        resolved_url = url
+        if database is not None and (url == "sqlite+vtb_async:///:memory:" or not url):
+            resolved_url = f"sqlite+vtb_async:///{database}"
+        self._url = resolved_url
+        self._broker = broker
+        self._autocommit = False
+        self.closed: bool = False
+
+        self._config: Any = None
+        try:
+            self._config = (
+                DatabaseRegistry.parse_url(resolved_url, broker=broker)
+                if broker is not None
+                else DatabaseRegistry.parse_url(resolved_url)
+            )
+        except Exception:
+            self._config = SQLiteConfig(database=database or ":memory:")
+
+        self._driver = driver
+        if self._driver is None:
+            if isinstance(self._config, SQLiteConfig):
+                self._driver = AsyncSQLiteDriver(self._config, broker=broker)
+            elif isinstance(self._config, PostgreSQLConfig):
+                self._driver = AsyncPostgreSQLDriver(self._config, broker=broker)
+            elif isinstance(self._config, MySQLConfig):
+                self._driver = AsyncMySQLDriver(self._config, broker=broker)
+            elif isinstance(self._config, OracleConfig):
+                self._driver = AsyncOracleDriver(self._config, broker=broker)
+            elif isinstance(self._config, MSSQLConfig):
+                self._driver = AsyncMSSQLDriver(self._config, broker=broker)
+            elif isinstance(self._config, DuckDBConfig):
+                self._driver = AsyncDuckDBDriver(self._config, broker=broker)
+
+    @property
+    def driver(self) -> Any:
+        """Return the active asynchronous driver."""
+        return self._driver
+
+    @property
+    def autocommit(self) -> bool:
+        """Return connection autocommit state."""
+        return self._autocommit
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None:
+        """Set connection autocommit state."""
+        self._autocommit = value
+
+    def __getattr__(self, name: str) -> Any:
+        if self._driver is not None and hasattr(self._driver, name):
+            return getattr(self._driver, name)
+        msg = f"{type(self).__name__!r} object has no attribute {name!r}"
+        raise AttributeError(msg)
+
+    def cursor(self, *args: Any, **kwargs: Any) -> Any:
+        """Create a new asynchronous DBAPI cursor."""
+        _ = (args, kwargs)
+        return AsyncDBAPICursor(self)
+
+    async def commit(self) -> None:
+        """Commit the active asynchronous transaction."""
+        if self._driver is not None and hasattr(self._driver, "commit"):
+            await self._driver.commit()
+
+    async def rollback(self) -> None:
+        """Roll back the active asynchronous transaction."""
+        if self._driver is not None and hasattr(self._driver, "rollback"):
+            await self._driver.rollback()
+
+    async def close(self) -> None:
+        """Close the asynchronous driver connection."""
+        if not self.closed:
+            if self._driver is not None and hasattr(self._driver, "close"):
+                await self._driver.close()
+            self.closed = True
+
+
+class AsyncDBAPIModule:
+    """Asynchronous DBAPI module adapter delegating execution to AsyncDBAPIConnection."""
+
+    apilevel: str = "2.0"
+    threadsafety: int = 2
+    paramstyle: str = "qmark"
+
+    Error = Error
+    Warning = Warning
+    InterfaceError = InterfaceError
+    DatabaseError = DatabaseError
+    DataError = DataError
+    OperationalError = OperationalError
+    IntegrityError = IntegrityError
+    InternalError = InternalError
+    ProgrammingError = ProgrammingError
+    NotSupportedError = NotSupportedError
+    Binary = Binary
+
+    sqlite_version: str = sqlite3.sqlite_version
+    sqlite_version_info: tuple[int, ...] = sqlite3.sqlite_version_info
+
+    def __init__(self, *, paramstyle: str = "qmark") -> None:
+        """Initialize asynchronous DBAPI module."""
         self.paramstyle = paramstyle
-        self.supports_statement_cache = supports_statement_cache
-        self.use_insertmanyvalues = use_insertmanyvalues
-        self.insert_executemany_returning = insert_executemany_returning
-        self.supports_native_jsonb = supports_native_jsonb
-        self.returns_plain_tuples = returns_plain_tuples
+
+    def __getattr__(self, key: str) -> Any:
+        msg = f"{type(self).__name__!r} object has no attribute {key!r}"
+        raise AttributeError(msg)
+
+    def connect(self, *args: Any, **kwargs: Any) -> AsyncAdapt_dbapi_connection:
+        """Establish an asynchronous connection wrapped in SQLAlchemy's AsyncAdapt_dbapi_connection."""
+        url_arg = "sqlite+vtb_async:///:memory:"
+        if args and isinstance(args[0], str):
+            url_arg = args[0]
+        elif "url" in kwargs:
+            url_arg = kwargs.pop("url")
+        async_conn = AsyncDBAPIConnection(url_arg, **kwargs)
+        return AsyncAdapt_dbapi_connection(self, async_conn)
+
+
+class PostgreSQLDialect(PGDialect):
+    """SQLAlchemy 2.1 synchronous dialect for PostgreSQL (+vtb / +vertebra)."""
+
+    driver = "vtb"
+    supports_statement_cache = True
+    paramstyle = "pyformat"
+    use_insertmanyvalues = True
+    insert_executemany_returning = True
+    supports_native_jsonb = True
+
+    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="pyformat"))
 
     @classmethod
-    def get_pool_class(cls, url: Any = None) -> type[Any]:
-        """Return `NullPool` so SQLAlchemy delegates pooling to the Vertebra SHM broker."""
-        _ = url
-        return cls.poolclass
-
-    @classmethod
-    def dbapi(cls) -> DBAPIModule:
-        """Return the PEP 249 DBAPI module."""
-        return DBAPIModule(paramstyle=cls.paramstyle)
-
-    @classmethod
-    def import_dbapi(cls) -> DBAPIModule:
-        """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1 ``import_dbapi()``."""
-        return cls.dbapi()
-
-    @classmethod
-    def dialects(cls) -> dict[str, type[DialectDescriptor]]:
-        """Return all 6 `+vtb` SQLAlchemy dialect classes keyed by URL scheme."""
-        return {
-            "postgresql+vtb": PostgresDialect,
-            "mysql+vtb": MysqlDialect,
-            "sqlite+vtb": SqliteDialect,
-            "oracle+vtb": OracleDialect,
-            "mssql+vtb": MssqlDialect,
-            "duckdb+vtb": DuckdbDialect,
-        }
-
-    @classmethod
-    def register_all(cls, *, include_enterprise_olap: bool = False) -> dict[str, Any]:
-        """Register ``+vertebra`` and ``+vtb`` dialects with SQLAlchemy's dialect registry."""
-        core_mapping: dict[str, Any] = {
-            "postgresql.vertebra": PostgresDialect,
-            "postgresql.vtb": PostgresDialect,
-            "oracle.vertebra": OracleDialect,
-            "oracle.vtb": OracleDialect,
-            "mysql.vertebra": MysqlDialect,
-            "mysql.vtb": MysqlDialect,
-            "sqlite.vertebra": SqliteDialect,
-            "sqlite.vtb": SqliteDialect,
-        }
-        full_mapping: dict[str, Any] = {
-            **core_mapping,
-            "mssql.vertebra": MssqlDialect,
-            "mssql.vtb": MssqlDialect,
-            "duckdb.vertebra": DuckdbDialect,
-            "duckdb.vtb": DuckdbDialect,
-        }
-        sa_dialects = import_optional("sqlalchemy.dialects")
-        if sa_dialects is not None:
-            registry = getattr(sa_dialects, "registry", None)
-            if registry is not None and hasattr(registry, "register"):
-                dialect_cls_names = {
-                    "postgresql": "PostgresDialect",
-                    "oracle": "OracleDialect",
-                    "mysql": "MysqlDialect",
-                    "sqlite": "SqliteDialect",
-                    "mssql": "MssqlDialect",
-                    "duckdb": "DuckdbDialect",
-                }
-                for entry_name in full_mapping:
-                    backend, _driver = entry_name.split(".", 1)
-                    registry.register(
-                        entry_name,
-                        "vertebra.extensions.sqlalchemy.dialects",
-                        dialect_cls_names[backend],
-                    )
-        return full_mapping if include_enterprise_olap else core_mapping
-
-
-class PostgresDialect(DialectDescriptor):
-    """SQLAlchemy 2.1 dialect for PostgreSQL backing +vertebra and +vtb URLs."""
-
-    name: str = "postgresql"
-    driver: str = "vertebra"
-    paramstyle: str = "pyformat"
-    poolclass: type[Any] = NullPool
-    supports_statement_cache: bool = True
-    use_insertmanyvalues: bool = True
-    insert_executemany_returning: bool = True
-    supports_native_jsonb: bool = True
-    returns_plain_tuples: bool = True
-
-    @classmethod
-    def dbapi(cls) -> DBAPIModule:
-        """Return the PEP 249 DBAPI module with pyformat paramstyle."""
-        return DBAPIModule(paramstyle=cls.paramstyle)
-
-    @classmethod
-    def import_dbapi(cls) -> DBAPIModule:
+    def import_dbapi(cls) -> Any:
         """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1."""
         return cls.dbapi()
+
+    @classmethod
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return NullPool when lease brokering is enabled, otherwise standard QueuePool."""
+        query: dict[str, Any] = dict(url.query) if url.query else {}
+        if query.get("shm_broker") in {"true", "1", "yes"}:
+            return NullPool
+        return QueuePool
 
     @classmethod
     def compile_insert_returning_sentinel(
@@ -436,87 +730,158 @@ class PostgresDialect(DialectDescriptor):
 
     @classmethod
     def type_descriptor(cls, col_type: Any) -> Any:
-        """Adapt Vector or BinaryJson column type for the PostgreSQL dialect."""
+        """Adapt Vector or BinaryJSON column type for the PostgreSQL dialect."""
         return col_type
 
 
-class SqliteDialect(DialectDescriptor):
-    """SQLAlchemy 2.1 dialect for SQLite backing +vertebra and +vtb URLs."""
+class PostgreSQLAsyncDialect(PGDialect):
+    """SQLAlchemy 2.1 asynchronous dialect for PostgreSQL (+vtb_async / +vertebra_async)."""
 
-    name: str = "sqlite"
-    driver: str = "vertebra"
-    paramstyle: str = "qmark"
-    poolclass: type[Any] = NullPool
-    supports_statement_cache: bool = True
-    use_insertmanyvalues: bool = True
-    insert_executemany_returning: bool = True
-    supports_native_jsonb: bool = True
-    returns_plain_tuples: bool = True
+    driver = "vtb_async"
+    is_async = True
+    supports_statement_cache = True
+
+    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="pyformat"))
 
     @classmethod
-    def dbapi(cls) -> DBAPIModule:
-        """Return the PEP 249 DBAPI module with qmark paramstyle."""
-        return DBAPIModule(paramstyle=cls.paramstyle)
+    def import_dbapi(cls) -> Any:
+        """Return the asynchronous DBAPI module for SQLAlchemy 2.0/2.1."""
+        return cls.dbapi()
 
     @classmethod
-    def import_dbapi(cls) -> DBAPIModule:
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return NullPool when lease brokering is enabled, otherwise AsyncAdaptedQueuePool."""
+        query: dict[str, Any] = dict(url.query) if url.query else {}
+        if query.get("shm_broker") in {"true", "1", "yes"}:
+            return NullPool
+        return AsyncAdaptedQueuePool
+
+
+class SQLiteDialect(BaseSQLiteDialect):
+    """SQLAlchemy 2.1 synchronous dialect for SQLite (+vtb / +vertebra)."""
+
+    driver = "vtb"
+    supports_statement_cache = True
+
+    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="qmark"))
+
+    @classmethod
+    def import_dbapi(cls) -> Any:
         """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1."""
         return cls.dbapi()
 
+    @classmethod
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return StaticPool for in-memory databases and NullPool when lease brokering is enabled."""
+        query: dict[str, Any] = dict(url.query) if url.query else {}
+        if query.get("shm_broker") in {"true", "1", "yes"}:
+            return NullPool
+        if not url.database or url.database in {":memory:", "memory://", ""}:
+            return StaticPool
+        return QueuePool
 
-class MysqlDialect(DialectDescriptor):
-    """SQLAlchemy 2.1 dialect for MySQL backing +vertebra and +vtb URLs."""
 
-    name: str = "mysql"
-    driver: str = "vertebra"
-    paramstyle: str = "format"
-    poolclass: type[Any] = NullPool
-    supports_statement_cache: bool = True
-    use_insertmanyvalues: bool = True
-    insert_executemany_returning: bool = False
-    supports_native_jsonb: bool = False
-    returns_plain_tuples: bool = True
+class SQLiteAsyncDialect(BaseSQLiteDialect):
+    """SQLAlchemy 2.1 asynchronous dialect for SQLite (+vtb_async / +vertebra_async)."""
+
+    driver = "vtb_async"
+    is_async = True
+    supports_statement_cache = True
+
+    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="qmark"))
 
     @classmethod
-    def dbapi(cls) -> DBAPIModule:
-        """Return the PEP 249 DBAPI module with format paramstyle."""
-        return DBAPIModule(paramstyle=cls.paramstyle)
+    def import_dbapi(cls) -> Any:
+        """Return the asynchronous DBAPI module for SQLAlchemy 2.0/2.1."""
+        return cls.dbapi()
 
     @classmethod
-    def import_dbapi(cls) -> DBAPIModule:
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return StaticPool for in-memory databases and NullPool when lease brokering is enabled."""
+        query: dict[str, Any] = dict(url.query) if url.query else {}
+        if query.get("shm_broker") in {"true", "1", "yes"}:
+            return NullPool
+        if not url.database or url.database in {":memory:", "memory://", ""}:
+            return StaticPool
+        return AsyncAdaptedQueuePool
+
+
+class MySQLDialect(BaseMySQLDialect):
+    """SQLAlchemy 2.1 synchronous dialect for MySQL (+vtb / +vertebra)."""
+
+    driver = "vtb"
+    supports_statement_cache = True
+    paramstyle = "format"
+    use_insertmanyvalues = True
+    insert_executemany_returning = False
+    supports_native_jsonb = False
+
+    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="format"))
+
+    @classmethod
+    def import_dbapi(cls) -> Any:
         """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1."""
         return cls.dbapi()
+
+    @classmethod
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return NullPool when lease brokering is enabled, otherwise QueuePool."""
+        query: dict[str, Any] = dict(url.query) if url.query else {}
+        if query.get("shm_broker") in {"true", "1", "yes"}:
+            return NullPool
+        return QueuePool
 
     @classmethod
     def type_descriptor(cls, col_type: Any) -> Any:
-        """Adapt Vector or BinaryJson column type for the MySQL dialect."""
+        """Adapt Vector or BinaryJSON column type for the MySQL dialect."""
         if isinstance(col_type, type):
             return col_type()
         return col_type
 
 
-class OracleDialect(DialectDescriptor):
-    """SQLAlchemy 2.1 dialect for Oracle backing +vertebra and +vtb URLs."""
+class MySQLAsyncDialect(BaseMySQLDialect):
+    """SQLAlchemy 2.1 asynchronous dialect for MySQL (+vtb_async / +vertebra_async)."""
 
-    name: str = "oracle"
-    driver: str = "vertebra"
-    paramstyle: str = "named"
-    poolclass: type[Any] = NullPool
-    supports_statement_cache: bool = True
-    use_insertmanyvalues: bool = True
-    insert_executemany_returning: bool = True
-    supports_native_jsonb: bool = True
-    returns_plain_tuples: bool = True
+    driver = "vtb_async"
+    is_async = True
+    supports_statement_cache = True
+
+    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="format"))
 
     @classmethod
-    def dbapi(cls) -> DBAPIModule:
-        """Return the PEP 249 DBAPI module with named paramstyle."""
-        return DBAPIModule(paramstyle=cls.paramstyle)
+    def import_dbapi(cls) -> Any:
+        """Return the asynchronous DBAPI module for SQLAlchemy 2.0/2.1."""
+        return cls.dbapi()
 
     @classmethod
-    def import_dbapi(cls) -> DBAPIModule:
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return NullPool when lease brokering is enabled, otherwise AsyncAdaptedQueuePool."""
+        query: dict[str, Any] = dict(url.query) if url.query else {}
+        if query.get("shm_broker") in {"true", "1", "yes"}:
+            return NullPool
+        return AsyncAdaptedQueuePool
+
+
+class OracleDialect(BaseOracleDialect):
+    """SQLAlchemy 2.1 synchronous dialect for Oracle (+vtb / +vertebra)."""
+
+    driver = "vtb"
+    supports_statement_cache = True
+
+    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="named"))
+
+    @classmethod
+    def import_dbapi(cls) -> Any:
         """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1."""
         return cls.dbapi()
+
+    @classmethod
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return NullPool when lease brokering is enabled, otherwise QueuePool."""
+        query: dict[str, Any] = dict(url.query) if url.query else {}
+        if query.get("shm_broker") in {"true", "1", "yes"}:
+            return NullPool
+        return QueuePool
 
     @classmethod
     def compile_insert_returning_sentinel(
@@ -538,76 +903,139 @@ class OracleDialect(DialectDescriptor):
 
     @classmethod
     def type_descriptor(cls, col_type: Any) -> Any:
-        """Adapt Vector or BinaryJson column type for the Oracle dialect."""
+        """Adapt Vector or BinaryJSON column type for the Oracle dialect."""
         if isinstance(col_type, type):
             return col_type()
         return col_type
 
 
-class MssqlDialect(DialectDescriptor):
-    """SQLAlchemy 2.1 dialect for SQL Server (`mssql+vtb`) using `NullPool` and SHM broker."""
+class OracleAsyncDialect(BaseOracleDialect):
+    """SQLAlchemy 2.1 asynchronous dialect for Oracle (+vtb_async / +vertebra_async)."""
 
-    name: str = "mssql"
-    driver: str = "vertebra"
-    paramstyle: str = "qmark"
-    poolclass: type[Any] = NullPool
-    supports_statement_cache: bool = True
-    use_insertmanyvalues: bool = True
-    insert_executemany_returning: bool = True
-    supports_native_jsonb: bool = False
-    returns_plain_tuples: bool = True
+    driver = "vtb_async"
+    is_async = True
+    supports_statement_cache = True
+
+    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="named"))
 
     @classmethod
-    def dbapi(cls) -> DBAPIModule:
-        """Return the PEP 249 DBAPI module with qmark paramstyle."""
-        return DBAPIModule(paramstyle=cls.paramstyle)
+    def import_dbapi(cls) -> Any:
+        """Return the asynchronous DBAPI module for SQLAlchemy 2.0/2.1."""
+        return cls.dbapi()
 
     @classmethod
-    def import_dbapi(cls) -> DBAPIModule:
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return NullPool when lease brokering is enabled, otherwise AsyncAdaptedQueuePool."""
+        query: dict[str, Any] = dict(url.query) if url.query else {}
+        if query.get("shm_broker") in {"true", "1", "yes"}:
+            return NullPool
+        return AsyncAdaptedQueuePool
+
+
+class MSSQLDialect(MSDialect):
+    """SQLAlchemy 2.1 synchronous dialect for Microsoft SQL Server (+vtb / +vertebra)."""
+
+    driver = "vtb"
+    supports_statement_cache = True
+
+    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="qmark"))
+
+    @classmethod
+    def import_dbapi(cls) -> Any:
         """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1."""
         return cls.dbapi()
 
+    @classmethod
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return NullPool when lease brokering is enabled, otherwise QueuePool."""
+        query: dict[str, Any] = dict(url.query) if url.query else {}
+        if query.get("shm_broker") in {"true", "1", "yes"}:
+            return NullPool
+        return QueuePool
 
-class DuckdbDialect(DialectDescriptor):
-    """SQLAlchemy 2.1 dialect for DuckDB (`duckdb+vtb`) using `NullPool` and SHM broker."""
 
-    name: str = "duckdb"
-    driver: str = "vertebra"
-    paramstyle: str = "qmark"
-    poolclass: type[Any] = NullPool
-    supports_statement_cache: bool = True
-    use_insertmanyvalues: bool = True
-    insert_executemany_returning: bool = True
-    supports_native_jsonb: bool = True
-    returns_plain_tuples: bool = True
+class MSSQLAsyncDialect(MSDialect):
+    """SQLAlchemy 2.1 asynchronous dialect for Microsoft SQL Server (+vtb_async / +vertebra_async)."""
+
+    driver = "vtb_async"
+    is_async = True
+    supports_statement_cache = True
+
+    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="qmark"))
 
     @classmethod
-    def dbapi(cls) -> DBAPIModule:
-        """Return the PEP 249 DBAPI module with qmark paramstyle."""
-        return DBAPIModule(paramstyle=cls.paramstyle)
+    def import_dbapi(cls) -> Any:
+        """Return the asynchronous DBAPI module for SQLAlchemy 2.0/2.1."""
+        return cls.dbapi()
 
     @classmethod
-    def import_dbapi(cls) -> DBAPIModule:
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return NullPool when lease brokering is enabled, otherwise AsyncAdaptedQueuePool."""
+        query: dict[str, Any] = dict(url.query) if url.query else {}
+        if query.get("shm_broker") in {"true", "1", "yes"}:
+            return NullPool
+        return AsyncAdaptedQueuePool
+
+
+class DuckDBDialect(DefaultDialect):
+    """SQLAlchemy 2.1 synchronous dialect for DuckDB (+vtb / +vertebra)."""
+
+    name = "duckdb"
+    driver = "vtb"
+    supports_statement_cache = True
+
+    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="qmark"))
+
+    @classmethod
+    def import_dbapi(cls) -> Any:
         """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1."""
         return cls.dbapi()
+
+    @classmethod
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return NullPool when lease brokering is enabled, otherwise QueuePool."""
+        query: dict[str, Any] = dict(url.query) if url.query else {}
+        if query.get("shm_broker") in {"true", "1", "yes"}:
+            return NullPool
+        return QueuePool
+
+
+class DuckDBAsyncDialect(DefaultDialect):
+    """SQLAlchemy 2.1 asynchronous dialect for DuckDB (+vtb_async / +vertebra_async)."""
+
+    name = "duckdb"
+    driver = "vtb_async"
+    is_async = True
+    supports_statement_cache = True
+
+    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="qmark"))
+
+    @classmethod
+    def import_dbapi(cls) -> Any:
+        """Return the asynchronous DBAPI module for SQLAlchemy 2.0/2.1."""
+        return cls.dbapi()
+
+    @classmethod
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return NullPool when lease brokering is enabled, otherwise AsyncAdaptedQueuePool."""
+        query: dict[str, Any] = dict(url.query) if url.query else {}
+        if query.get("shm_broker") in {"true", "1", "yes"}:
+            return NullPool
+        return AsyncAdaptedQueuePool
 
 
 class SyncEngineAdapter:
-    """Optional-``greenlet`` SQLAlchemy 2.1 execution adapter for free-threaded Python ``3.14t``.
-
-    Under free-threaded Python 3.14t (`sys._is_gil_enabled() == False`), synchronous SQLAlchemy
-    ``Session`` and ``Engine`` operations execute with true multi-core parallelism on
-    ``SyncPool`` worker threads without requiring ``greenlet`` context switches.
-    """
+    """Optional-greenlet SQLAlchemy 2.1 execution adapter for free-threaded Python 3.14t."""
 
     __slots__ = ("_pool",)
 
     def __init__(self, *, max_workers: int = 8) -> None:
+        """Initialize SyncEngineAdapter with thread pool capacity."""
         self._pool = SyncPool(max_workers=max_workers)
 
     @property
     def is_free_threaded(self) -> bool:
-        """Return True when the interpreter is running with the GIL disabled (`3.14t`)."""
+        """Return True when the interpreter is running with the GIL disabled (3.14t)."""
         return is_free_threaded()
 
     @property
@@ -633,3 +1061,34 @@ def attach_serverless_disconnect_guard(engine: Any) -> None:
         sa_event.listen(engine, "engine_connect", _on_connect)
     except AttributeError:
         pass
+
+
+_DIALECT_REGISTRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("postgresql.vtb", "vertebra.extensions.sqlalchemy.dialects", "PostgreSQLDialect"),
+    ("postgresql.vertebra", "vertebra.extensions.sqlalchemy.dialects", "PostgreSQLDialect"),
+    ("postgresql.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "PostgreSQLAsyncDialect"),
+    ("postgresql.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "PostgreSQLAsyncDialect"),
+    ("mysql.vtb", "vertebra.extensions.sqlalchemy.dialects", "MySQLDialect"),
+    ("mysql.vertebra", "vertebra.extensions.sqlalchemy.dialects", "MySQLDialect"),
+    ("mysql.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "MySQLAsyncDialect"),
+    ("mysql.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "MySQLAsyncDialect"),
+    ("sqlite.vtb", "vertebra.extensions.sqlalchemy.dialects", "SQLiteDialect"),
+    ("sqlite.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SQLiteDialect"),
+    ("sqlite.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "SQLiteAsyncDialect"),
+    ("sqlite.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "SQLiteAsyncDialect"),
+    ("oracle.vtb", "vertebra.extensions.sqlalchemy.dialects", "OracleDialect"),
+    ("oracle.vertebra", "vertebra.extensions.sqlalchemy.dialects", "OracleDialect"),
+    ("oracle.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "OracleAsyncDialect"),
+    ("oracle.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "OracleAsyncDialect"),
+    ("mssql.vtb", "vertebra.extensions.sqlalchemy.dialects", "MSSQLDialect"),
+    ("mssql.vertebra", "vertebra.extensions.sqlalchemy.dialects", "MSSQLDialect"),
+    ("mssql.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "MSSQLAsyncDialect"),
+    ("mssql.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "MSSQLAsyncDialect"),
+    ("duckdb.vtb", "vertebra.extensions.sqlalchemy.dialects", "DuckDBDialect"),
+    ("duckdb.vertebra", "vertebra.extensions.sqlalchemy.dialects", "DuckDBDialect"),
+    ("duckdb.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "DuckDBAsyncDialect"),
+    ("duckdb.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "DuckDBAsyncDialect"),
+)
+
+for _name, _mod, _cls_name in _DIALECT_REGISTRATIONS:
+    registry.register(_name, _mod, _cls_name)

@@ -12,26 +12,27 @@ flowchart LR
 
 ## SQLSpec & Litestar Integration
 
-Vertebra requires SQLSpec adapters for database components. Use `SQLSpecPlugin` with an engine adapter configuration (e.g. `PostgresAsyncConfig`, `MysqlAsyncConfig`, `SqliteAsyncConfig`) to register databases on your Litestar application. The plugin manages connection leasing, shared-memory statement caches, and provides typed sessions directly to route handlers:
+Vertebra requires SQLSpec adapters for database components. Use `SQLSpecPlugin` with an engine adapter configuration (e.g. `PostgreSQLAsyncConfig`, `MySQLAsyncConfig`, `SQLiteAsyncConfig`) to register databases on your Litestar application. The plugin manages connection leasing, shared-memory statement caches, and provides typed sessions directly to route handlers:
 
 ```python
 from litestar import Litestar, get
 from vertebra.extensions.sqlspec import SQLSpecPlugin
-from vertebra.extensions.sqlspec.adapters import PostgresAsyncConfig
+from vertebra.extensions.sqlspec import create_sqlspec_plugin
+from vertebra.extensions.sqlspec.adapters import PostgreSQLAsyncConfig
 
-db_config = PostgresAsyncConfig(
+db_config = PostgreSQLAsyncConfig(
     url="postgresql://app_user:secret@localhost:5432/production_db",
     pool_min_size=5,
     pool_max_size=20,
 )
 
-plugin = SQLSpecPlugin(config=db_config)
+plugin = create_sqlspec_plugin(db_config)
 
 
 @get("/orders/{order_id:int}")
 async def get_order(
     order_id: int,
-    db: PostgresAsyncConfig.driver_type,
+    db: PostgreSQLAsyncConfig.driver_type,
 ) -> dict:
     """Fetch order record using injected SQLSpec driver session."""
     rows = await db.select(
@@ -52,7 +53,7 @@ app = Litestar(
 All Vertebra framework subsystems leverage SQLSpec adapters directly:
 
 - **AI Agent Sessions (`AgentSessionStore`)**: Persist conversation trajectories and tool calls using `SQLSpecSessionStore` over your configured SQLSpec database.
-- **Transactional Staging (`UploadTracker`)**: Synchronize object storage uploads with SQLSpec database transactions so aborted handlers never leave orphaned blobs.
+- **Model File Attachments (`ObjectStoreBackend`)**: Synchronize object storage attachments with database model transactions via Advanced Alchemy's `FileObject` / `StoredObject` integration so aborted transactions never leave orphaned blobs.
 - **Replication & Events (`ChangeFeed`, Event Queues)**: Stream change feeds and coordinate worker queues using SQLSpec event store implementations.
 
 ## Architectural Invariants
@@ -122,16 +123,21 @@ sql, params = pipeline.compile()
 Connect directly to Google Cloud SQL (`:3307` ephemeral mTLS certificates) and Google Cloud AlloyDB (`:5433` `MetadataExchangeRequest` protobuf handshake) from Rust and Python without running an external Cloud SQL Auth Proxy sidecar container:
 
 ```python
-from vertebra.db import AlloyDbConfig, AlloyDbDialer, CloudSqlConfig, CloudSqlDialer
+from vertebra.db import (
+    AlloyDBConfig,
+    AlloyDBDialer,
+    CloudSQLConfig,
+    CloudSQLDialer,
+)
 
-cloudsql = CloudSqlDialer(
-    CloudSqlConfig(
+cloudsql = CloudSQLDialer(
+    CloudSQLConfig(
         instance_connection_name="my-project:us-central1:orders-db",
         enable_iam_auth=True,
     )
 )
-alloydb = AlloyDbDialer(
-    AlloyDbConfig(
+alloydb = AlloyDBDialer(
+    AlloyDBConfig(
         instance_uri=(
             "projects/my-project/locations/us-central1/"
             "clusters/prod/instances/primary"

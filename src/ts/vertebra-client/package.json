@@ -1,7 +1,7 @@
 {
   "name": "@vertebra/client",
   "version": "0.1.0",
-  "description": "Full-stack type-safe client for Vertebra Ghost Framework",
+  "description": "TypeScript client SDK for Vertebra — one runtime for Python and TypeScript.",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

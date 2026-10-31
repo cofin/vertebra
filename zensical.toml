@@ -1,6 +1,6 @@
 [project]
 site_name = "Vertebra"
-site_description = "Fast Python web framework and server powered by Rust and TypeScript."
+site_description = "One runtime for Python and TypeScript — backend, frontend, web, gRPC, workers, and standalone apps."
 site_url = "https://cofin.github.io/vertebra/"
 repo_url = "https://github.com/cofin/vertebra"
 repo_name = "cofin/vertebra"

@@ -10,6 +10,18 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-10-31] flow-archive | Completed and Archived Ecosystem Drivers, SQLSpec/Alchemy Realignment, Litestar Extensions & Single-Runtime Documentation (`ecosystem_drivers_and_naming_20261031`)
+
+- Completed and archived Flow `ecosystem_drivers_and_naming_20261031` (7 tasks across Phases 1–4):
+  - Standardized packaging and dependencies: pinned `sqlspec>=0.69.0`, `advanced-alchemy>=1.12.0`, and wheel-native `@vertebra/client` TypeScript SDK, resolving PyPI build, sdist, and typing exports.
+  - Aligned naming: `MsgPackSerializer` matches `JSONSerializer`, canonical acronyms (`SQLiteConfig`, `DuckDBConfig`, `MSSQLConfig`, `MySQLConfig`, `CloudSQLConfig`, `AlloyDBConfig`, `JSONRPCRouter`).
+  - Storage consolidation: deleted shadow abstractions (`UploadTracker`, `StagedUpload`, `StorageRegistry`), delegated storage registry to upstream `advanced-alchemy` / `sqlspec`, and provided drop-in `ObjectStoreBackend` implementations.
+  - Database primitives & SQLSpec adapters: implemented Tier-1 `SyncDatabaseConfig` / `AsyncDatabaseConfig` across 6 database engines (`PostgreSQL`, `MySQL`, `SQLite`, `Oracle`, `MSSQL`, `DuckDB`), Tier-2 universal broker proxy `ProxySyncConfig` / `ProxyAsyncConfig`, and CDC `ChangeFeedSyncEventBackend` / `ChangeFeedAsyncEventBackend`.
+  - SQLAlchemy & Advanced Alchemy: implemented real SQLAlchemy 2.1 sync/async `+vtb` dialects (`PostgreSQLDialect_vtb`, etc.) with `NullPool` + `LeaseBroker` connection leasing, Cloud SQL / AlloyDB dialers, `Vector` / `BinaryJSON` column types, and thin plugin factories (`create_sqlspec_plugin`, `create_alchemy_plugin`) returning real upstream classes.
+  - Litestar ecosystem: nested all `litestar-*` plugins under `vertebra.extensions.litestar.*` (`queues`, `security`, `autowire`, `email`, `mcp`, `vite`, `asyncapi`, `htmx`, `saq`) with zero-friction helper functions (`create_shm_queue_config()`, etc.), keeping built-in framework modules (`vertebra.framework.queues`, `vertebra.framework.security`, `vertebra.framework.autowire`, `vertebra.framework.mcp`) completely decoupled.
+  - Unified runtime branding & docs: standardized tagline *"One runtime for Python and TypeScript — backend, frontend, web, gRPC, workers, and standalone apps."* across `README.md`, `docs/index.md`, `zensical.toml`, `pyproject.toml`, `.agents/bundles/index.md`, and `.agents/bundles/product/product.md`, removing "powered by Rust" marketing clichés and eliminating all references to deleted symbols across `docs/` and OKF knowledge chapters.
+- Contracted `.agents/bundles/specs/` back to lazy (`.gitkeep` only).
+
 ## [2026-10-31] flow-archive | Completed and Archived Documentation Branding, Left Sidebar Formatting, Information Architecture & Educational Content (`fix-docs-organization-and-branding`)
 
 - Completed and archived Flow `fix-docs-organization-and-branding` (6 tasks across Phases 1–2):

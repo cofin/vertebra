@@ -1,58 +1,10 @@
 # Framework Extensions
 
-`vertebra.extensions` connects Vertebra's Rust HTTP server, shared-memory worker pools, and object storage to SQLSpec, SQLAlchemy / Advanced Alchemy, Litestar, gRPC, and Oracle APEX.
-
-## SQLSpec Integration, Statement Stacks & SHM Proxy (`vertebra.extensions.sqlspec`)
-
-`SQLSpecPlugin` integrates `sqlspec` query building, named `.sql` file loading, `StatementStack` pipelined execution, and request-scoped database sessions in two modes:
-
-- **Tier-1 Native Drivers**: Typed sync and async adapters (`PostgresSyncConfig`, `PostgresAsyncConfig`, `MysqlSyncConfig`, `MysqlAsyncConfig`, `SqliteSyncConfig`, `SqliteAsyncConfig`, `OracleSyncConfig`, `OracleAsyncConfig`, `MssqlSyncConfig`, `MssqlAsyncConfig`, `DuckdbSyncConfig`, `DuckdbAsyncConfig`).
-- **Tier-2 Shared-Memory Proxy**: `ProxySyncConfig` and `ProxyAsyncConfig` (`SqlSpecProvider`, `ProxySyncDriver`, `ProxyAsyncDriver`) lease pooled connections from the Rust parent process over shared memory so multi-worker deployments share a single database pool, support batched `execute_many` calls, and return zero-copy Arrow result tables (`SharedArrowBuffer`, `SharedArrowTable`).
-- **Streaming Object Storage Export (`SQLSpecStore`)**: Export query results directly to `ObjectStore` as JSON Lines (`export_jsonl`) or Apache Arrow IPC streams (`export_arrow_ipc`, `StreamingStorageResponse`).
-
-```python
-from vertebra.db import SqliteConfig
-from vertebra.extensions.sqlspec import (
-    SQLSpecConfig,
-    SQLSpecPlugin,
-    SqliteSyncConfig,
-)
-
-sqlspec_plugin = SQLSpecPlugin(
-    SQLSpecConfig(
-        configs=[
-            SqliteSyncConfig(
-                connection_config=SqliteConfig(path=":memory:"),
-                commit_mode="autocommit",
-            )
-        ]
-    )
-)
-```
-
-## SQLAlchemy, Advanced Alchemy & `+vtb` Dialects (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
-
-`AlchemyPlugin` (`SQLAlchemySyncConfig`, `SQLAlchemyAsyncConfig`) provides request-scoped ORM sessions, generic `DatabaseService[ModelT]` repositories (`get`, `list`, `list_and_count`, `create`, `update`, `delete`), and `ObjectStoreBackend` (`StoredObject`, `FileAttachment`) for transactional model file attachments.
-
-`vertebra.extensions.sqlalchemy` registers `+vertebra` and `+vtb` SQLAlchemy URL schemes (`postgresql+vtb://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`) backed by Vertebra's Rust drivers, plus:
-
-- **Custom Column Types & Batching**: `Vector(dim)` embeddings, `BinaryJson` (`JSONB` / Oracle `OSON`), `SelectInLoadSpec`, `InsertSentinelSpec` (`RETURNING` / `OUTPUT INSERTED`), and `DeleteUsingClause`.
-- **Free-Threaded & Alembic Support**: `SyncEngineAdapter` for free-threaded `3.14t`/`3.15t` worker pools, and `AlembicRunner` (`AlembicImpl`, `CreateVectorIndexOp`, `CreateViewOp`, `DropViewOp`).
-
-```python
-from vertebra.extensions.alchemy import AlchemyPlugin, SQLAlchemySyncConfig
-from vertebra.extensions.sqlalchemy import AlembicRunner, Vector
-
-alchemy = AlchemyPlugin(
-    SQLAlchemySyncConfig(connection_string="sqlite+vtb:///:memory:")
-)
-embedding_col = Vector(dimensions=768)
-migrations = AlembicRunner(dsn="sqlite+vtb:///:memory:")
-```
+`vertebra.extensions` connects Vertebra's native HTTP server, shared-memory worker pools, and multicloud object storage to Litestar, SQLSpec, SQLAlchemy / Advanced Alchemy, gRPC, and Oracle APEX.
 
 ## Litestar Integration & Middleware Offload (`vertebra.extensions.litestar`)
 
-Use `LitestarPlugin` and `LitestarConfig` to run a Litestar application on Vertebra's Rust HTTP server while offloading CORS, rate limiting, JWT validation, response compression, and static asset serving to Rust (`LitestarOffloadPlan`, `LitestarFastPathBypass`). Also includes `ChannelsBackend` for Litestar Channels and `MemoryStore` for `litestar.stores`:
+Vertebra provides first-class support for Litestar applications. Use `LitestarPlugin` and `LitestarConfig` to run a Litestar application on Vertebra's native HTTP ingress while offloading CORS, response compression, and static asset serving directly to the native server:
 
 ```python
 from litestar import Litestar, get
@@ -68,6 +20,98 @@ app = Litestar(
     route_handlers=[hello],
     plugins=[LitestarPlugin(LitestarConfig())],
 )
+```
+
+### Fast-Path Dispatch & Native Middleware Offload
+
+- **Route Compiler**: `LitestarRouteCompiler` extracts Litestar routes into an optimized route table matched by the native HTTP router.
+- **Fast-Path Bypass**: `LitestarFastPathBypass` dispatches simple handlers directly, bypassing ASGI middleware layers when routes have no custom guards or intermediate transforms.
+- **Realtime Channels**: `ChannelsBackend` integrates with Litestar Channels over shared-memory pub/sub, wrapping client disconnection and cleanup in cancellation-shielded scopes to prevent resource leaks.
+- **Response Caching**: `ResponseCacheStore` backs Litestar's `ResponseCacheConfig` using Vertebra's in-memory / SHM cache store.
+
+### Litestar Ecosystem Plugins (`vertebra.extensions.litestar.*`)
+
+Vertebra provides modular, independently installable extensions for the Litestar ecosystem under `vertebra.extensions.litestar`:
+
+| Plugin | Module | Optional Extra | Description |
+| --- | --- | --- | --- |
+| **Queues** | `vertebra.extensions.litestar.queues` | `queues` | `SHMQueueBackend` with adaptive wakeup clamping, `SHMExecutionBackend`, `create_shm_queue_config`, and `create_sqlspec_queue_config`. |
+| **Security** | `vertebra.extensions.litestar.security` | `security` | `JWTAuthenticationMechanism` accelerated by native `JWTGuard`, `IngressIdentityMechanism` for trusted mTLS/XFCC headers, and `RateLimitGuard`. |
+| **Autowire** | `vertebra.extensions.litestar.autowire` | `autowire` | `AutowireBridgeIntegration` running controller discovery deterministically before the route compiler. |
+| **Email** | `vertebra.extensions.litestar.email` | `email` | `SESEmailBackend` with native AWS SigV4 signing (`py_sign_aws_sigv4_headers`) requiring zero `botocore` dependency. |
+| **MCP** | `vertebra.extensions.litestar.mcp` | `mcp` | `ObjectStoreSkillSource`, `WellKnownAgentCardOffload` with ETag/304 caching, and `JSONRPCFrameAccelerator`. |
+| **Vite** | `vertebra.extensions.litestar.vite` | `vite` | `VitePlugin` integration with automatic resolution of wheel-native `@vertebra/client` assets. |
+| **AsyncAPI** | `vertebra.extensions.litestar.asyncapi` | `asyncapi` | Event and schema documentation for background tasks and WebSocket channels. |
+| **HTMX** | `vertebra.extensions.litestar.htmx` | `htmx` | HTMX response headers, partials, and push-URL directives. |
+| **SAQ** | `vertebra.extensions.litestar.saq` | `saq` | Redis/Valkey-backed task scheduling and worker integration. |
+
+Example of setting up Litestar with zero-boilerplate queues and security:
+
+```python
+from litestar import Litestar
+from vertebra.extensions.litestar import (
+    LitestarConfig,
+    LitestarPlugin,
+    create_shm_queue_config,
+)
+from vertebra.extensions.litestar.security import JWTAuthenticationMechanism
+
+app = Litestar(
+    plugins=[
+        LitestarPlugin(LitestarConfig()),
+    ],
+)
+```
+
+## SQLSpec Integration, Statement Stacks & SHM Proxy (`vertebra.extensions.sqlspec`)
+
+Vertebra provides first-class support for `sqlspec` (`>=0.68.0`) across 6 database engines, CTE statement stacking, and shared-memory connection pooling:
+
+- **Tier-1 Native Drivers**: Typed sync and async database configs (`PostgreSQLSyncConfig`, `PostgreSQLAsyncConfig`, `MySQLSyncConfig`, `MySQLAsyncConfig`, `SQLiteSyncConfig`, `SQLiteAsyncConfig`, `OracleSyncConfig`, `OracleAsyncConfig`, `MSSQLSyncConfig`, `MSSQLAsyncConfig`, `DuckDBSyncConfig`, `DuckDBAsyncConfig`).
+- **Tier-2 Shared-Memory Proxy**: `ProxySyncConfig` and `ProxyAsyncConfig` (`ProxySyncDriver`, `ProxyAsyncDriver`) lease pooled connections over shared memory from the parent process so multi-worker deployments never multiply connection counts.
+- **CTE Statement Pipelining**: Execute stacked queries via `QueryPipeline` in a single round-trip.
+- **Change Feed & CDC**: `ChangeFeedSyncEventBackend` and `ChangeFeedAsyncEventBackend` implement `sqlspec.extensions.events` protocols over PostgreSQL logical replication (`pg_logical_emit_message`) with automatic Parquet spillover for payloads exceeding 7,500 bytes.
+- **Object Storage & Arrow Export**: `ObjectStoreBackend` integrates with `sqlspec.storage.storage_registry` and provides PyArrow IPC and Parquet dataset streaming.
+
+```python
+from sqlspec.adapters.sqlite.config import SqliteConfig
+from vertebra.extensions.sqlspec import (
+    SQLiteSyncConfig,
+    create_sqlspec_plugin,
+)
+
+config = SQLiteSyncConfig(
+    connection_config=SqliteConfig(path=":memory:"),
+)
+sqlspec_plugin = create_sqlspec_plugin(config)
+```
+
+## SQLAlchemy 2.1, Advanced Alchemy 1.12 & `+vtb` Dialects (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
+
+`vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` provide drop-in SQLAlchemy 2.1 and Advanced Alchemy 1.12 support backed by Vertebra's native drivers and connection leasing:
+
+- **Dialects**: Registers `+vertebra` and `+vtb` URL schemes (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`) with automatic `NullPool` wiring and Cloud SQL / AlloyDB dialers.
+- **Type System**: Native `Vector(dimensions)` for vector embeddings and `BinaryJson` for PostgreSQL `JSONB` and Oracle `OSON`.
+- **Object Storage Attachments**: `ObjectStoreBackend` implements Advanced Alchemy's `advanced_alchemy.types.file_object.StorageBackend`, enabling transactional file attachments on models via `FileObject` and `StoredObject`.
+- **Alembic Custom Operations**: Autogenerates vector index and view DDL operations (`CreateVectorIndexOp`, `CreateViewOp`, `DropViewOp`).
+
+```python
+from advanced_alchemy.types.file_object import FileObject
+from vertebra.extensions.alchemy import (
+    ObjectStoreBackend,
+    create_alchemy_plugin,
+    create_async_alchemy_config,
+)
+from vertebra.extensions.sqlalchemy import Vector
+from vertebra.storage import ObjectStore
+
+alchemy_config = create_async_alchemy_config(
+    connection_string="sqlite+vtb_async:///:memory:",
+)
+alchemy_plugin = create_alchemy_plugin(alchemy_config)
+
+store = ObjectStore("memory://")
+backend = ObjectStoreBackend(store=store, prefix="uploads")
 ```
 
 ## gRPC Services & Protobuf Schemas (`vertebra.extensions.grpc`)
@@ -115,4 +159,4 @@ Modernize Oracle APEX applications incrementally without a full rewrite using `v
 
 ## Shared-Memory Session Broker (`vertebra.extensions.broker`)
 
-`BrokerPlugin` (`BrokerConfig`, `ShmSessionBroker`, `LeaseBroker`, `StatementCache`) manages cross-worker database connection leases and prepared statement plans over shared memory so N Python worker processes never multiply database connection counts.
+`BrokerPlugin` (`BrokerConfig`, `SHMSessionBroker`, `LeaseBroker`, `StatementCache`) manages cross-worker database connection leases and prepared statement plans over shared memory so N Python worker processes never multiply database connection counts.

@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import contextlib
-import io
 import sqlite3
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import msgspec
 
-from vertebra.utils.module_loader import import_optional
-from vertebra.utils.serializers import encode_json_bytes
+from vertebra.utils.module_loader import ensure_module, import_optional
 
 if TYPE_CHECKING:
     from vertebra.storage import ObjectStore
@@ -174,19 +172,16 @@ class DataFusionEngine:
 
     def stream_arrow_ipc(self, sql: str) -> bytes:
         """Execute SQL query and serialize result table as Arrow IPC stream bytes."""
+        pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
+        ipc = ensure_module("pyarrow.ipc", package="pyarrow", extra="arrow")
         arrow_table = self.execute_arrow(sql)
-        ipc = import_optional("pyarrow.ipc")
-        if ipc is not None and hasattr(arrow_table, "schema"):
-            with contextlib.suppress(Exception):
-                sink = io.BytesIO()
-                writer = ipc.new_stream(sink, arrow_table.schema)
-                writer.write_table(arrow_table)
-                writer.close()
-                return sink.getvalue()
-
-        rows = self.execute_dicts(sql)
-        header = b"ARROW1\x00\x00\x00\x00"
-        return header + encode_json_bytes(rows)
+        if not hasattr(arrow_table, "schema"):
+            rows = arrow_table.to_pylist() if hasattr(arrow_table, "to_pylist") else self.execute_dicts(sql)
+            arrow_table = pa.Table.from_pylist(rows)
+        sink = pa.BufferOutputStream()
+        with ipc.new_stream(sink, arrow_table.schema) as writer:
+            writer.write_table(arrow_table)
+        return bytes(sink.getvalue().to_pybytes())
 
     def execute_sql(self, sql: str) -> list[dict[str, Any]]:
         """Execute SQL query and return results as a list of dictionaries."""

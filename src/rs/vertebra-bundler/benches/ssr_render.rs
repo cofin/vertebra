@@ -1,6 +1,6 @@
-//! Criterion benchmark for SsrPool rendering (cached vs uncached paths).
+//! Criterion benchmark for SSRPool rendering (cached vs uncached paths).
 
-use _bundler::SsrPool;
+use _bundler::SSRPool;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::io::Write;
@@ -21,7 +21,7 @@ fn bench_ssr_render(c: &mut Criterion) {
         .expect("Failed to write bundle");
     file.flush().expect("Failed to flush bundle");
 
-    let pool = SsrPool::new(file.path().to_str().unwrap(), 4).expect("Failed to create SsrPool");
+    let pool = SSRPool::new(file.path().to_str().unwrap(), 4).expect("Failed to create SSRPool");
 
     c.bench_function("ssr_render_cached", |b| {
         let props = r#"{"title":"Benchmark","content":"Cached SSR payload"}"#;

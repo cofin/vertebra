@@ -536,7 +536,7 @@ fn py_verify_s3_v4_url(
 }
 
 #[pyfunction]
-#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=None, iam_endpoint="https://iamcredentials.googleapis.com", access_token=None))]
+#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=None, iam_endpoint="https://iamcredentials.googleapis.com", access_token=None, private_key_pem=None))]
 #[allow(clippy::too_many_arguments)]
 fn py_sign_gcs_v4_iam_url(
     py: Python<'_>,
@@ -548,12 +548,13 @@ fn py_sign_gcs_v4_iam_url(
     timestamp: Option<i64>,
     iam_endpoint: &str,
     access_token: Option<String>,
+    private_key_pem: Option<String>,
 ) -> PyResult<String> {
     let timestamp = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
     let cfg = GcsSignConfig {
         bucket: bucket.to_string(),
         service_account_email: service_account_email.to_string(),
-        private_key_pem: None,
+        private_key_pem,
         access_token,
     };
     py.detach(|| {

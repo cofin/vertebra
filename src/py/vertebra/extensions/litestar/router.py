@@ -92,6 +92,13 @@ class LitestarRouteCompiler:
 
     def compile(self, app: Any) -> LitestarRouterTable:
         """Compile all HTTP routes on the given Litestar application into a LitestarRouterTable."""
+        plugins = getattr(getattr(app, "plugins", None), "plugins", getattr(app, "plugins", ())) or ()
+        for plugin in plugins:
+            if type(plugin).__name__ == "AutowirePlugin" and not getattr(plugin, "_autowire_executed", False):
+                on_init = getattr(plugin, "on_app_init", None)
+                if callable(on_init) and hasattr(app, "route_handlers"):
+                    plugin._autowire_executed = True
+                    on_init(app)
         return extract_litestar_routes(app)
 
     def extract_entries(self, app: Any) -> list[ExtractedLitestarRoute]:

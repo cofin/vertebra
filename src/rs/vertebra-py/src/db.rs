@@ -44,14 +44,14 @@ use vertebra_db::tns::{
 };
 
 /// Zero-sidecar Google Cloud SQL (`:3307`) mTLS dialer.
-#[pyclass(frozen, immutable_type, from_py_object)]
+#[pyclass(name = "CloudSQLDialer", frozen, immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
-pub struct CloudSqlDialer {
+pub struct CloudSQLDialer {
     inner: RsCloudSqlDialer,
 }
 
 #[pymethods]
-impl CloudSqlDialer {
+impl CloudSQLDialer {
     #[new]
     #[pyo3(signature = (instance_uri, ip_type="PUBLIC", iam_auth=true))]
     pub fn new(instance_uri: &str, ip_type: &str, iam_auth: bool) -> PyResult<Self> {
@@ -104,14 +104,14 @@ impl CloudSqlDialer {
 }
 
 /// Zero-sidecar Google Cloud AlloyDB (`:5433`) mTLS and `MetadataExchangeRequest` dialer.
-#[pyclass(frozen, immutable_type, from_py_object)]
+#[pyclass(name = "AlloyDBDialer", frozen, immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
-pub struct AlloyDbDialer {
+pub struct AlloyDBDialer {
     inner: RsAlloyDbDialer,
 }
 
 #[pymethods]
-impl AlloyDbDialer {
+impl AlloyDBDialer {
     #[new]
     #[pyo3(signature = (cluster_uri, ip_type="PRIVATE", iam_auth=true))]
     pub fn new(cluster_uri: &str, ip_type: &str, iam_auth: bool) -> PyResult<Self> {
@@ -586,8 +586,8 @@ pub fn parse_cluster_redirect(err_msg: &str) -> Option<(String, u16, String, u16
 
 /// Register all `vertebra-db` classes and functions on the `_vertebra` Python module.
 pub fn register_db_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<CloudSqlDialer>()?;
-    m.add_class::<AlloyDbDialer>()?;
+    m.add_class::<CloudSQLDialer>()?;
+    m.add_class::<AlloyDBDialer>()?;
     m.add_class::<ArrowCursor>()?;
 
     m.add_function(wrap_pyfunction!(encode_alloydb_metadata_exchange, m)?)?;

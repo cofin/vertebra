@@ -21,15 +21,15 @@ from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.module_loader import import_optional
 
 __all__ = (
-    "AsyncSqliteDriver",
-    "SqliteConfig",
-    "SyncSqliteDriver",
+    "AsyncSQLiteDriver",
+    "SQLiteConfig",
+    "SyncSQLiteDriver",
 )
 
 _VALID_SYNCHRONOUS = {"OFF", "NORMAL", "FULL", "EXTRA"}
 
 
-class SqliteConfig(FrozenBaseStruct, frozen=True, gc=False):
+class SQLiteConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Configuration for SQLite 3.45+ with WAL mode, memory-mapped I/O, and SHM broker leasing."""
 
     path: str = ":memory:"
@@ -104,13 +104,13 @@ class SqliteConfig(FrozenBaseStruct, frozen=True, gc=False):
         return self.initialization_pragmas()
 
 
-class SyncSqliteDriver:
+class SyncSQLiteDriver:
     """Synchronous SQLite driver returning plain Python tuples with SHM broker and Arrow IPC support."""
 
     __slots__ = ("_broker", "_closed", "_config", "_conn")
 
-    def __init__(self, config: SqliteConfig | None = None, *, broker: Any = None) -> None:
-        self._config = config or SqliteConfig()
+    def __init__(self, config: SQLiteConfig | None = None, *, broker: Any = None) -> None:
+        self._config = config or SQLiteConfig()
         if self._config.synchronous not in _VALID_SYNCHRONOUS:
             msg = f"Invalid synchronous mode: {self._config.synchronous!r}"
             raise ValueError(msg)
@@ -121,8 +121,8 @@ class SyncSqliteDriver:
             self._conn.execute(pragma)
 
     @property
-    def config(self) -> SqliteConfig:
-        """Return the active SqliteConfig."""
+    def config(self) -> SQLiteConfig:
+        """Return the active SQLiteConfig."""
         return self._config
 
     @property
@@ -245,17 +245,17 @@ class SyncSqliteDriver:
         self._conn.close()
 
 
-class AsyncSqliteDriver:
+class AsyncSQLiteDriver:
     """Asynchronous SQLite driver facade compatible with Python 3.12+ and free-threaded 3.14t."""
 
     __slots__ = ("_sync",)
 
-    def __init__(self, config: SqliteConfig | None = None, *, broker: Any = None) -> None:
-        self._sync = SyncSqliteDriver(config, broker=broker)
+    def __init__(self, config: SQLiteConfig | None = None, *, broker: Any = None) -> None:
+        self._sync = SyncSQLiteDriver(config, broker=broker)
 
     @property
-    def config(self) -> SqliteConfig:
-        """Return the active SqliteConfig."""
+    def config(self) -> SQLiteConfig:
+        """Return the active SQLiteConfig."""
         return self._sync.config
 
     @property

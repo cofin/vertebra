@@ -35,7 +35,7 @@ from vertebra.server._dispatch import (
 from vertebra.server._gil_audit import is_free_threaded
 from vertebra.server._loops import EventLoopPool
 from vertebra.server.worker import Worker, run_worker
-from vertebra.utils.serializers import decode_json, encode_json_bytes, encode_msgpack
+from vertebra.utils.serializers import decode_json, encode_json_bytes, encode_msgpack_bytes
 
 
 class MockRequest:
@@ -1127,7 +1127,7 @@ def test_native_dispatch_typed_params_json_msgpack_di_guards_and_generator_teard
             method="POST",
             path="/orders/msgpack/77",
             headers={"x-trace": "tr-1"},
-            body=encode_msgpack(_OrderInput(sku="MP-1", qty=5)),
+            body=encode_msgpack_bytes(_OrderInput(sku="MP-1", qty=5)),
         ),
         MockRequest(
             handler_id=promoted_hid,

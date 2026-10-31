@@ -1,38 +1,35 @@
-"""Transactional object storage staging and SQLite database driver example."""
+"""Transactional object storage and SQLite database driver example."""
 
-from vertebra.db.sqlite import SqliteConfig, SyncSqliteDriver
-from vertebra.storage import ObjectStore, UploadTracker
+from advanced_alchemy.types.file_object import FileObject
+
+from vertebra.db.sqlite import SQLiteConfig, SyncSQLiteDriver
+from vertebra.extensions.alchemy.storage import ObjectStoreBackend
+from vertebra.storage import ObjectStore
 
 __all__ = ("main",)
 
 
 # --8<-- [start:example]
 def main() -> None:
-    """Stage cloud uploads alongside SQLite queries and verify rollback cleanup."""
-    store = ObjectStore.from_memory(namespace="docs-example")
-    tracker = UploadTracker(default_store=store)
+    """Save model file attachments and execute SQLite queries."""
+    store = ObjectStore("memory://")
+    backend = ObjectStoreBackend(store=store, prefix="reports")
 
-    tracker.stage_upload("reports/q1.json", b'{"quarter": "Q1"}')
-    assert tracker.staged_count == 1
-    flushed = tracker.before_flush()
-    assert len(flushed) == 1
-    assert store.exists("reports/q1.json")
+    file_obj = FileObject(backend=backend, filename="q1.json")
+    saved = backend.save_object(file_obj, b'{"quarter": "Q1"}')
+    assert saved.size == 17
+    assert backend.get_content("q1.json") == b'{"quarter": "Q1"}'
 
-    reclaimed = tracker.after_rollback()
-    assert reclaimed == 1
-    assert not store.exists("reports/q1.json")
-
-    db = SyncSqliteDriver(SqliteConfig(path=":memory:"))
+    db = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
     try:
         db.execute("CREATE TABLE reports (id INTEGER PRIMARY KEY, key TEXT NOT NULL)")
-        tracker.stage_upload("reports/q2.json", b'{"quarter": "Q2"}')
-        tracker.before_flush()
+        file_obj2 = FileObject(backend=backend, filename="q2.json")
+        backend.save_object(file_obj2, b'{"quarter": "Q2"}')
         db.execute("INSERT INTO reports (key) VALUES (?)", "reports/q2.json")
         db.commit()
-        tracker.after_commit()
         rows = db.select("SELECT key FROM reports")
         assert rows == [{"key": "reports/q2.json"}]
-        assert store.get("reports/q2.json") == b'{"quarter": "Q2"}'
+        assert backend.get_content("q2.json") == b'{"quarter": "Q2"}'
     finally:
         db.close()
 

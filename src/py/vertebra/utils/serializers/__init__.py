@@ -1,7 +1,4 @@
-"""Serialization utilities for Vertebra.
-
-Aligned with vtb.
-"""
+"""Serialization utilities for Vertebra."""
 
 from vertebra.utils.serializers._json import (
     JSONSerializer,
@@ -10,12 +7,14 @@ from vertebra.utils.serializers._json import (
     encode_json_bytes,
     encode_json_into,
     format_json,
-    get_default_serializer,
+    get_default_json_serializer,
 )
 from vertebra.utils.serializers._msgpack import (
-    MsgpackCodec,
+    MsgPackSerializer,
     decode_msgpack,
-    encode_msgpack,
+    encode_msgpack_bytes,
+    encode_msgpack_into,
+    get_default_msgpack_serializer,
 )
 from vertebra.utils.serializers._schema import (
     BaseStruct,
@@ -30,13 +29,15 @@ __all__ = (
     "FrozenBaseStruct",
     "FrozenCamelizedStruct",
     "JSONSerializer",
-    "MsgpackCodec",
+    "MsgPackSerializer",
     "decode_json",
     "decode_msgpack",
     "encode_json",
     "encode_json_bytes",
     "encode_json_into",
-    "encode_msgpack",
+    "encode_msgpack_bytes",
+    "encode_msgpack_into",
     "format_json",
-    "get_default_serializer",
+    "get_default_json_serializer",
+    "get_default_msgpack_serializer",
 )

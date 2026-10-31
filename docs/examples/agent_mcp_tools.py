@@ -3,7 +3,7 @@
 import asyncio
 from typing import Any
 
-from vertebra.agent.core import JsonRpcRouter, ToolCall, execute_tool_calls, tool
+from vertebra.agent.core import JSONRPCRouter, ToolCall, execute_tool_calls, tool
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
@@ -21,9 +21,9 @@ def add_numbers(a: int, b: int) -> dict[str, int]:
     return {"sum": a + b}
 
 
-def build_router() -> JsonRpcRouter:
+def build_router() -> JSONRPCRouter:
     """Create a JSON-RPC 2.0 router exposing tools/list and tools/call."""
-    router = JsonRpcRouter()
+    router = JSONRPCRouter()
     tools = {add_numbers.name: add_numbers}
 
     async def handle_list(_params: Any = None, _ctx: Any = None) -> dict[str, Any]:

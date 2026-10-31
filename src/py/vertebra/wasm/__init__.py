@@ -10,22 +10,22 @@ from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
 
 __all__ = (
+    "WASMExecutionError",
+    "WASMModuleConfig",
+    "WASMPluginHost",
+    "WASMSandboxPolicy",
     "WASM_MAGIC_HEADER",
-    "WasmExecutionError",
-    "WasmModuleConfig",
-    "WasmPluginHost",
-    "WasmSandboxPolicy",
 )
 
 WASM_MAGIC_HEADER: bytes = b"\x00asm\x01\x00\x00\x00"
 _wasmtime = import_optional("wasmtime")
 
 
-class WasmExecutionError(RuntimeError):
+class WASMExecutionError(RuntimeError):
     """Raised when a WebAssembly guest module traps or exceeds its fuel/memory budget."""
 
 
-class WasmSandboxPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class WASMSandboxPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Capability-based WASI 0.2 sandbox policy for untrusted Wasm plugins and agent tools."""
 
     max_memory_bytes: int = 64 * 1024 * 1024
@@ -47,12 +47,12 @@ class WasmSandboxPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             raise ValueError(msg)
 
 
-class WasmModuleConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class WASMModuleConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for a registered WebAssembly guest module."""
 
     name: str
     wasm_source: str | Path | bytes
-    policy: WasmSandboxPolicy = msgspec.field(default_factory=WasmSandboxPolicy)
+    policy: WASMSandboxPolicy = msgspec.field(default_factory=WASMSandboxPolicy)
 
     def __post_init__(self) -> None:
         if isinstance(self.wasm_source, str):
@@ -77,13 +77,13 @@ class WasmModuleConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return raw
 
 
-class WasmPluginHost:
+class WASMPluginHost:
     """Host registry and sandboxed executor for WASI 0.2 WebAssembly guest modules."""
 
     __slots__ = ("_compiled_modules", "_host_exports", "_modules")
 
     def __init__(self) -> None:
-        self._modules: dict[str, WasmModuleConfig] = {}
+        self._modules: dict[str, WASMModuleConfig] = {}
         self._host_exports: dict[tuple[str, str], Callable[..., Any]] = {}
         self._compiled_modules: dict[str, tuple[Any, Any]] = {}
 
@@ -94,7 +94,7 @@ class WasmPluginHost:
 
     def register_module(
         self,
-        config: WasmModuleConfig,
+        config: WASMModuleConfig,
         *,
         exports: dict[str, Callable[..., Any]] | None = None,
     ) -> None:
@@ -116,12 +116,12 @@ class WasmPluginHost:
             module = _wasmtime.Module(engine, raw)
         except Exception as exc:
             msg = f"Failed to compile Wasm module {config.name!r}: {exc}"
-            raise WasmExecutionError(msg) from exc
+            raise WASMExecutionError(msg) from exc
         self._modules[config.name] = config
         self._compiled_modules[config.name] = (engine, module)
 
-    def get_module(self, name: str) -> WasmModuleConfig:
-        """Retrieve a registered WasmModuleConfig by name."""
+    def get_module(self, name: str) -> WASMModuleConfig:
+        """Retrieve a registered WASMModuleConfig by name."""
         if name not in self._modules:
             msg = f"Wasm module {name!r} is not registered"
             raise KeyError(msg)
@@ -140,13 +140,13 @@ class WasmPluginHost:
         if fn is not None:
             if fuel_cost > cfg.policy.max_fuel:
                 msg = f"Wasm module {module_name!r} exceeded max_fuel budget ({fuel_cost} > {cfg.policy.max_fuel})"
-                raise WasmExecutionError(msg)
+                raise WASMExecutionError(msg)
             return fn(*args)
 
         compiled = self._compiled_modules.get(module_name)
         if compiled is None or _wasmtime is None:
             msg = f"Export {export_name!r} not found in Wasm module {module_name!r}"
-            raise WasmExecutionError(msg)
+            raise WASMExecutionError(msg)
 
         engine, module = compiled
         try:
@@ -157,11 +157,11 @@ class WasmPluginHost:
             exports_map = instance.exports(store)
             if export_name not in exports_map:
                 msg = f"Export {export_name!r} not found in Wasm module {module_name!r}"
-                raise WasmExecutionError(msg)
+                raise WASMExecutionError(msg)
             export_fn = exports_map[export_name]
             return export_fn(store, *args)
-        except WasmExecutionError:
+        except WASMExecutionError:
             raise
         except Exception as exc:
             msg = f"Wasm execution failed in {module_name!r}.{export_name!r}: {exc}"
-            raise WasmExecutionError(msg) from exc
+            raise WASMExecutionError(msg) from exc

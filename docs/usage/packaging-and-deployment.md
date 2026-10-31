@@ -48,16 +48,16 @@ When running inside Docker, Kubernetes, or Cloud Run:
 
 ## WebAssembly Plugin Sandboxes (`vertebra.wasm`)
 
-Run untrusted plugins or custom data transforms inside memory-, fuel-, and timeout-bounded WASI WebAssembly sandboxes using `WasmSandboxPolicy`, `WasmModuleConfig`, and `WasmPluginHost`:
+Run untrusted plugins or custom data transforms inside memory-, fuel-, and timeout-bounded WASI WebAssembly sandboxes using `WASMSandboxPolicy`, `WASMModuleConfig`, and `WASMPluginHost`:
 
 ```python
-from vertebra.wasm import WasmModuleConfig, WasmPluginHost, WasmSandboxPolicy
+from vertebra.wasm import WASMModuleConfig, WASMPluginHost, WASMSandboxPolicy
 
-policy = WasmSandboxPolicy(
+policy = WASMSandboxPolicy(
     max_memory_bytes=32 * 1024 * 1024,
     max_fuel=5_000_000,
     epoch_timeout_ms=250,
     allow_network=False,
 )
-host = WasmPluginHost()
+host = WASMPluginHost()
 ```

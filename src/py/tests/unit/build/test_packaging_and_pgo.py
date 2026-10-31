@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
+from sqlalchemy.engine.interfaces import Dialect
 from tools.pgo import python_pgo as tools_python_pgo
 from tools.pgo import rust_pgo as tools_rust_pgo
 
@@ -19,7 +20,7 @@ from vertebra.build.packaging import (
     SUPPORTED_PYTHON_VERSIONS,
     BuildTarget,
     OnefileBuilder,
-    PgoPipelineResult,
+    PGOPipelineResult,
     StandaloneBuilder,
     find_llvm_profdata,
     resolve_cargo_release_dir,
@@ -31,7 +32,7 @@ from vertebra.build.packaging.pgo import (
     CPYTHON_PGO_FLAGS,
     PLATFORM_MATRIX,
     PythonBuildInfo,
-    RustPgoConfig,
+    RustPGOConfig,
     build_flags,
     build_instrumented_extensions,
     build_optimized,
@@ -46,7 +47,6 @@ from vertebra.build.packaging.pgo import (
 )
 from vertebra.cli import cli
 from vertebra.cli.build import build as build_command
-from vertebra.extensions.sqlalchemy.dialects import DialectDescriptor
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json
 
@@ -112,8 +112,8 @@ def test_standalone_and_onefile_builder_roundtrip(tmp_path: Path) -> None:
     assert proc.returncode == 42, proc.stderr
 
 
-def test_cli_build_standalone_onefile_target_and_pgo_flags(tmp_path: Path) -> None:
-    """Verify vtb build CLI supports --standalone, --onefile, --target, and --pgo options."""
+def test_cli_build_standalone_onefile_and_target_flags(tmp_path: Path) -> None:
+    """Verify vtb build CLI supports --standalone, --onefile, and --target options and rejects --pgo."""
     project_dir = tmp_path / "cli_project"
     app_dir = project_dir / "service"
     app_dir.mkdir(parents=True)
@@ -131,13 +131,24 @@ def test_cli_build_standalone_onefile_target_and_pgo_flags(tmp_path: Path) -> No
             "--onefile",
             "--target",
             "linux-x86_64",
-            "--pgo",
             "--output",
             str(output_bin),
         ],
     )
     assert result.exit_code == 0, result.output
     assert output_bin.exists()
+
+    pgo_rejected = runner.invoke(
+        build_command,
+        [
+            "--project-dir",
+            str(project_dir),
+            "--standalone",
+            "--pgo",
+        ],
+    )
+    assert pgo_rejected.exit_code != 0
+    assert "No such option" in pgo_rejected.output and "--pgo" in pgo_rejected.output
 
     root_out = tmp_path / "out_root" / "cli-service"
     root_result = runner.invoke(
@@ -159,9 +170,9 @@ def test_cli_build_standalone_onefile_target_and_pgo_flags(tmp_path: Path) -> No
 
 
 def test_rust_and_python_pgo_tooling(tmp_path: Path) -> None:
-    """Verify RustPgoConfig flag generation, profraw validation, and CPython PGO inspection."""
+    """Verify RustPGOConfig flag generation, profraw validation, and CPython PGO inspection."""
     profile_dir = tmp_path / "profiles"
-    cfg = RustPgoConfig(crate_name="vertebra-http", profile_dir=profile_dir)
+    cfg = RustPGOConfig(crate_name="vertebra-http", profile_dir=profile_dir)
 
     gen_flags = build_flags(cfg, pgo_mode="generate", target_cpu="native")
     assert f"-Cprofile-generate={profile_dir}" in gen_flags
@@ -236,12 +247,12 @@ def test_resolve_cargo_release_dir_and_multi_extension_manifests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify CARGO_TARGET_DIR resolution, real workspace manifests, and multi-extension maturin invocations."""
-    cfg = RustPgoConfig(profile_dir=tmp_path / "raw")
+    cfg = RustPGOConfig(profile_dir=tmp_path / "raw")
     assert cfg.manifest_path.is_file()
     assert len(EXTENSION_MANIFESTS) == 3
     assert all(manifest.is_file() for manifest in EXTENSION_MANIFESTS)
     assert not hasattr(packaging_pgo, "resolve_llvm_profdata")
-    assert tools_rust_pgo.RustPgoConfig is RustPgoConfig
+    assert tools_rust_pgo.RustPGOConfig is RustPGOConfig
     assert tools_rust_pgo.run_pgo_pipeline is run_pgo_pipeline
 
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
@@ -287,7 +298,7 @@ def test_resolve_cargo_release_dir_and_multi_extension_manifests(
     recorded_cmds.clear()
     valid_profdata = tmp_path / "valid.profdata"
     valid_profdata.write_bytes(b"PROFDATA")
-    cfg_with_bin = RustPgoConfig(profile_dir=tmp_path / "raw", llvm_profdata_bin="llvm-profdata")
+    cfg_with_bin = RustPGOConfig(profile_dir=tmp_path / "raw", llvm_profdata_bin="llvm-profdata")
     build_optimized_extensions(cfg_with_bin, valid_profdata)
     assert len(recorded_cmds) == 3
     assert all(f"-Cprofile-use={valid_profdata}" in flags for _, flags in recorded_cmds)
@@ -327,7 +338,7 @@ def test_build_optimized_falls_back_when_profdata_invalid(
 
     monkeypatch.setattr(packaging_pgo.subprocess, "run", fake_run)
     monkeypatch.setenv("CARGO_TARGET_DIR", str(tmp_path / "target-dir"))
-    cfg = RustPgoConfig(profile_dir=tmp_path / "raw", llvm_profdata_bin="llvm-profdata")
+    cfg = RustPGOConfig(profile_dir=tmp_path / "raw", llvm_profdata_bin="llvm-profdata")
 
     out_dir = build_optimized(cfg, corrupt)
     assert out_dir == tmp_path / "target-dir" / "release"
@@ -350,7 +361,7 @@ def test_two_phase_pgo_pipeline_and_cli_orchestration(
     baseline_prof.write_bytes(b"BASELINE_PROFDATA")
 
     monkeypatch.setenv("CARGO_TARGET_DIR", str(tmp_path / "rs-target"))
-    cfg = RustPgoConfig(profile_dir=raw_dir, llvm_profdata_bin="llvm-profdata")
+    cfg = RustPGOConfig(profile_dir=raw_dir, llvm_profdata_bin="llvm-profdata")
     phases: list[str] = []
 
     def fake_run(
@@ -388,7 +399,7 @@ def test_two_phase_pgo_pipeline_and_cli_orchestration(
 
     observed_profile_env: list[str] = []
 
-    def fake_workload(active_cfg: RustPgoConfig, release_dir: Path) -> None:
+    def fake_workload(active_cfg: RustPGOConfig, release_dir: Path) -> None:
         observed_profile_env.append(os.environ.get("LLVM_PROFILE_FILE", ""))
         assert release_dir == tmp_path / "rs-target" / "release"
         phases.append("workload")
@@ -400,7 +411,7 @@ def test_two_phase_pgo_pipeline_and_cli_orchestration(
         baseline_profdata=baseline_prof,
         workload_runner=fake_workload,
     )
-    assert isinstance(result, PgoPipelineResult)
+    assert isinstance(result, PGOPipelineResult)
     assert result.used_pgo is True
     assert result.profdata_valid is True
     assert result.profdata_bytes == len(b"MERGED_LLVM_PROFDATA")
@@ -482,13 +493,13 @@ def test_build_target_python_315_musl_and_version_validation() -> None:
         BuildTarget.detect_host(python_version="2.7")
 
 
-def test_standalone_and_cli_pgo_profdata_and_server_binary_staging(tmp_path: Path) -> None:
-    """Verify StandaloneBuilder, OnefileBuilder, and vtb build stage server binaries and PGO metadata."""
-    project_dir = tmp_path / "pgo_app"
+def test_standalone_and_cli_server_binary_staging(tmp_path: Path) -> None:
+    """Verify StandaloneBuilder, OnefileBuilder, and vtb build stage server binaries."""
+    project_dir = tmp_path / "staged_app"
     pkg_dir = project_dir / "app"
     pkg_dir.mkdir(parents=True)
-    (project_dir / "pyproject.toml").write_text('[project]\nname = "pgo-app"\nversion = "0.2.0"\n')
-    (pkg_dir / "__init__.py").write_text('"""PGO app package."""\n')
+    (project_dir / "pyproject.toml").write_text('[project]\nname = "staged-app"\nversion = "0.2.0"\n')
+    (pkg_dir / "__init__.py").write_text('"""Staged app package."""\n')
     (pkg_dir / "main.py").write_text(
         '"""Entrypoint verifying bundled server binary path."""\n'
         "import os\n"
@@ -500,11 +511,9 @@ def test_standalone_and_cli_pgo_profdata_and_server_binary_staging(tmp_path: Pat
 
     fake_server = tmp_path / "vertebra-server"
     fake_server.write_bytes(b"#!/bin/sh\nexit 0\n")
-    fake_profdata = tmp_path / "sample.profdata"
-    fake_profdata.write_bytes(b"unvalidated-profdata-payload")
 
     runner = CliRunner()
-    onefile_bin = tmp_path / "dist_out" / "pgo-app-onefile"
+    onefile_bin = tmp_path / "dist_out" / "staged-app-onefile"
     result = runner.invoke(
         build_command,
         [
@@ -518,9 +527,6 @@ def test_standalone_and_cli_pgo_profdata_and_server_binary_staging(tmp_path: Pat
             "linux-x86_64-musl",
             "--python-version",
             "3.15t",
-            "--pgo",
-            "--profdata",
-            str(fake_profdata),
             "--server-binary",
             str(fake_server),
             "--output",
@@ -537,15 +543,10 @@ def test_standalone_and_cli_pgo_profdata_and_server_binary_staging(tmp_path: Pat
     assert os.access(staged_server, os.X_OK)
 
     manifest = decode_json((extracted / "manifest.json").read_bytes())
-    assert manifest["pgo_enabled"] is True
+    assert "pgo_enabled" not in manifest
     assert manifest["server_binary"] == "bin/vertebra-server"
     assert manifest["target"]["python_version"] == "3.15t"
     assert manifest["target"]["rust_triple"] == "x86_64-unknown-linux-musl"
-    assert manifest["profdata_bytes"] == len(b"unvalidated-profdata-payload")
-    assert len(manifest["profdata_sha256"]) == 64
-    assert manifest["profdata_valid"] is False
-    assert isinstance(manifest["python_build"], dict)
-    assert "is_tail_call_interp" in manifest["python_build"]
 
     cache_home = tmp_path / "onefile_cache"
     env = dict(os.environ)
@@ -570,7 +571,7 @@ def test_standalone_and_cli_pgo_profdata_and_server_binary_staging(tmp_path: Pat
 
 
 def test_pyproject_sqlalchemy_dialect_entry_points_resolve() -> None:
-    """Verify all 12 pyproject.toml SQLAlchemy dialect entry points resolve to DialectDescriptor subclasses."""
+    """Verify all 24 pyproject.toml SQLAlchemy dialect entry points resolve to Dialect subclasses."""
     repo_root = Path(__file__).resolve().parents[5]
     pyproject_data = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
     entry_points: dict[str, str] = pyproject_data["project"]["entry-points"]["sqlalchemy.dialects"]
@@ -578,15 +579,16 @@ def test_pyproject_sqlalchemy_dialect_entry_points_resolve() -> None:
     expected_keys = {
         f"{engine}.{suffix}"
         for engine in ("postgresql", "oracle", "mysql", "sqlite", "mssql", "duckdb")
-        for suffix in ("vertebra", "vtb")
+        for suffix in ("vertebra", "vtb", "vertebra_async", "vtb_async")
     }
     assert set(entry_points.keys()) == expected_keys
+    assert len(entry_points) == 24
 
     for ep_name, target_spec in entry_points.items():
         mod_name, _, cls_name = target_spec.partition(":")
         module = ensure_module(mod_name)
         resolved_cls = getattr(module, cls_name)
-        assert issubclass(resolved_cls, DialectDescriptor), ep_name
+        assert issubclass(resolved_cls, Dialect), ep_name
         assert "Vtb" not in cls_name
 
 
@@ -595,7 +597,7 @@ def test_run_default_pgo_workload_executes_extensions_routes_and_fast_fail(tmp_p
     profile_dir = tmp_path / "raw_profiles"
     release_dir = tmp_path / "release_bin"
     release_dir.mkdir(parents=True)
-    cfg = RustPgoConfig(profile_dir=profile_dir)
+    cfg = RustPGOConfig(profile_dir=profile_dir)
 
     server_script = release_dir / "vertebra-server"
     marker_path = tmp_path / "server_training_report.json"

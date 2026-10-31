@@ -44,6 +44,7 @@ class App:
     __slots__ = (
         "_container",
         "_controllers",
+        "_databases",
         "_dependencies",
         "_guards",
         "_handler_index",
@@ -51,6 +52,7 @@ class App:
         "_mounts",
         "_openapi_builder",
         "_openapi_config",
+        "_plugins",
         "_procedure_router",
         "_routers",
         "_routes",
@@ -70,6 +72,8 @@ class App:
         self._routers: list[Router] = []
         self._controllers: list[type[Controller] | Controller] = []
         self._routes: list[Route] = []
+        self._databases: list[Any] = []
+        self._plugins: list[Any] = []
         self._startup_hooks: list[LifecycleHook] = []
         self._shutdown_hooks: list[LifecycleHook] = []
         self._handler_index: dict[int, HandlerInfo] = {}
@@ -144,6 +148,16 @@ class App:
     def mounts(self) -> tuple[tuple[str, Any, str], ...]:
         """All mounted sub-applications as (prefix, app, protocol) tuples."""
         return tuple(self._mounts)
+
+    @property
+    def databases(self) -> tuple[Any, ...]:
+        """Return all registered database configurations."""
+        return tuple(self._databases)
+
+    @property
+    def plugins(self) -> tuple[Any, ...]:
+        """Return all registered application plugins."""
+        return tuple(self._plugins)
 
     def add_route(self, route: Route) -> None:
         """Append a single Route definition, bind its DI context, and index its handler."""
@@ -242,6 +256,23 @@ class App:
                 for route in routes:
                     self.add_route(route)
                 return target
+
+        if hasattr(target, "provide_session") or hasattr(target, "provide_connection"):
+            self._databases.append(target)
+            bind_key = getattr(target, "bind_key", None)
+            session_key = f"{bind_key}_session" if bind_key and bind_key != "default" else "db_session"
+            conn_key = f"{bind_key}_connection" if bind_key and bind_key != "default" else "db_connection"
+            if session_key not in self._dependencies and hasattr(target, "provide_session"):
+                self._dependencies[session_key] = target.provide_session
+                self._container.graph.register(session_key, target.provide_session)
+            if conn_key not in self._dependencies and hasattr(target, "provide_connection"):
+                self._dependencies[conn_key] = target.provide_connection
+                self._container.graph.register(conn_key, target.provide_connection)
+            return target
+
+        if hasattr(target, "on_app_init") or hasattr(target, "server_lifespan"):
+            self._plugins.append(target)
+            return target
 
         msg = "register expects a Router, Controller, ProcedureRouter, Procedure, Route, or decorated handler"
         raise TypeError(msg)
@@ -406,13 +437,27 @@ class App:
         return fn
 
     async def startup(self) -> None:
-        """Execute all registered startup hooks sequentially."""
+        """Execute all registered startup hooks sequentially and initialize database pools."""
+        for db in self._databases:
+            create_pool_fn = getattr(db, "_create_pool", None) or getattr(db, "create_pool", None)
+            if callable(create_pool_fn):
+                res = create_pool_fn()
+                if inspect.isawaitable(res):
+                    await res
         await self._run_hooks(self._startup_hooks)
 
     async def shutdown(self) -> None:
         """Execute all registered shutdown hooks sequentially and close singleton DI resources."""
         try:
             await self._run_hooks(self._shutdown_hooks)
+            for db in self._databases:
+                close_pool_fn = (
+                    getattr(db, "_close_pool", None) or getattr(db, "close_pool", None) or getattr(db, "close", None)
+                )
+                if callable(close_pool_fn):
+                    res = close_pool_fn()
+                    if inspect.isawaitable(res):
+                        await res
         finally:
             await self._container.aclose()
 

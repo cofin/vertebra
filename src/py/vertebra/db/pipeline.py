@@ -12,10 +12,10 @@ from vertebra.utils.serializers import decode_json
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from vertebra.db.postgres import AsyncPostgresDriver, SyncPostgresDriver
+    from vertebra.db.postgres import AsyncPostgreSQLDriver, SyncPostgreSQLDriver
 
 __all__ = (
-    "CteStep",
+    "CTEStep",
     "QueryPipeline",
     "RelOverlay",
 )
@@ -65,7 +65,7 @@ class RelOverlay(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return f"{overlay_name} AS ({base_select})"
 
 
-class CteStep(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class CTEStep(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Single named CTE step within a single-RTT ``QueryPipeline``."""
 
     name: str
@@ -88,11 +88,11 @@ class QueryPipeline:
     __slots__ = ("_overlays", "_steps")
 
     def __init__(self) -> None:
-        self._steps: list[CteStep] = []
+        self._steps: list[CTEStep] = []
         self._overlays: list[tuple[str, RelOverlay]] = []
 
     @property
-    def steps(self) -> tuple[CteStep, ...]:
+    def steps(self) -> tuple[CTEStep, ...]:
         """Return registered CTE steps."""
         return tuple(self._steps)
 
@@ -125,7 +125,7 @@ class QueryPipeline:
         return_json_agg: bool = True,
     ) -> QueryPipeline:
         """Append a named CTE step to the pipeline."""
-        self._steps.append(CteStep(name=name, sql=sql, params=dict(params or {}), return_json_agg=return_json_agg))
+        self._steps.append(CTEStep(name=name, sql=sql, params=dict(params or {}), return_json_agg=return_json_agg))
         return self
 
     def add_overlay(self, overlay_name: str, overlay: RelOverlay) -> QueryPipeline:
@@ -163,7 +163,7 @@ class QueryPipeline:
         full_sql = f"WITH {', '.join(cte_parts)} SELECT {envelope_expr} AS payload"
         return full_sql, merged_params
 
-    def execute(self, driver: SyncPostgresDriver) -> dict[str, Any]:
+    def execute(self, driver: SyncPostgreSQLDriver) -> dict[str, Any]:
         """Execute compiled CTE query synchronously and unpack the result jsonb payload."""
         sql, params = self.compile()
         rows, _ = driver.execute_with_description(sql, params)
@@ -177,7 +177,7 @@ class QueryPipeline:
             return dict(decode_json(payload))
         return dict(payload or {})
 
-    async def execute_async(self, driver: AsyncPostgresDriver) -> dict[str, Any]:
+    async def execute_async(self, driver: AsyncPostgreSQLDriver) -> dict[str, Any]:
         """Execute compiled CTE query asynchronously and unpack the result jsonb payload."""
         sql, params = self.compile()
         rows, _ = await driver.execute_with_description(sql, params)

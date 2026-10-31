@@ -11,20 +11,20 @@ from typing import Any, Literal
 
 import msgspec
 
-from vertebra.db.dialer.alloydb import AlloyDbConfig
-from vertebra.db.dialer.cloudsql import CloudSqlConfig
+from vertebra.db.dialer.alloydb import AlloyDBConfig
+from vertebra.db.dialer.cloudsql import CloudSQLConfig
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
     "ARROW_SHM_THRESHOLD_ROWS",
-    "PGCOPY_BINARY_SIGNATURE",
     "ArrowCursor",
-    "AsyncPostgresDriver",
+    "AsyncPostgreSQLDriver",
+    "PGCOPY_BINARY_SIGNATURE",
     "PoolerMode",
-    "PostgresConfig",
-    "SyncPostgresDriver",
+    "PostgreSQLConfig",
+    "SyncPostgreSQLDriver",
     "decode_pgcopy_rows",
     "encode_pg_jsonb",
     "encode_pgcopy_rows",
@@ -406,7 +406,7 @@ def decode_pgcopy_rows(payload: Buffer) -> list[tuple[bytes | None, ...]]:
     raise ValueError(msg)
 
 
-class PostgresConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
+class PostgreSQLConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """PostgreSQL configuration supporting Cloud SQL, AlloyDB, and PgBouncer/PgCat/pgdog poolers."""
 
     dsn: str = "postgresql://localhost:5432/postgres"
@@ -440,7 +440,7 @@ class PostgresConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     session_gucs: Mapping[str, str] = msgspec.field(default_factory=dict)
     """Additional PostgreSQL session GUC key-value pairs applied on connection startup."""
     broker: Any = None
-    """Optional shared-memory `DatabaseBroker` or `ShmBrokerTransport` for cross-worker connection leasing."""
+    """Optional shared-memory `DatabaseBroker` or `SHMBrokerTransport` for cross-worker connection leasing."""
 
     def __post_init__(self) -> None:
         if self.min_size < 0 or self.max_size < 1 or self.min_size > self.max_size:
@@ -464,8 +464,8 @@ class PostgresConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
         """Return the direct primary DSN for LISTEN/NOTIFY, logical replication, and migrations."""
         return self.direct_dsn or self.dsn
 
-    def derive_direct_config(self) -> PostgresConfig:
-        """Return a session-mode PostgresConfig targeting ``effective_direct_dsn`` (`sqlspec>=0.68.0`)."""
+    def derive_direct_config(self) -> PostgreSQLConfig:
+        """Return a session-mode PostgreSQLConfig targeting ``effective_direct_dsn`` (`sqlspec>=0.68.0`)."""
         if not self.direct_dsn:
             return self
         base = msgspec.structs.asdict(self)
@@ -474,7 +474,7 @@ class PostgresConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
         base["min_size"] = min(1, self.max_size)
         base["max_size"] = min(2, self.max_size)
         base["session_gucs"] = dict(self.session_gucs)
-        return PostgresConfig(**base)
+        return PostgreSQLConfig(**base)
 
     @staticmethod
     def compute_worker_pool_budget(
@@ -504,37 +504,37 @@ class PostgresConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
         gucs.update(self.session_gucs)
         return gucs
 
-    def to_cloud_dialer_config(self) -> CloudSqlConfig | AlloyDbConfig | None:
-        """Return the zero-sidecar CloudSqlConfig or AlloyDbConfig when configured."""
+    def to_cloud_dialer_config(self) -> CloudSQLConfig | AlloyDBConfig | None:
+        """Return the zero-sidecar CloudSQLConfig or AlloyDBConfig when configured."""
         if self.alloydb_instance_uri:
-            return AlloyDbConfig(
+            return AlloyDBConfig(
                 instance_uri=self.alloydb_instance_uri,
                 enable_iam_auth=self.enable_iam_auth,
                 enable_columnar_engine=self.enable_alloydb_columnar_engine or True,
             )
         if self.cloud_sql_instance:
-            return CloudSqlConfig(
+            return CloudSQLConfig(
                 instance_connection_name=self.cloud_sql_instance,
                 enable_iam_auth=self.enable_iam_auth,
             )
         return None
 
 
-class SyncPostgresDriver:
+class SyncPostgreSQLDriver:
     """Synchronous PostgreSQL driver facade supporting plain-tuple, zero-copy JSONB, and COPY streaming."""
 
     __slots__ = ("_broker", "_closed", "_config", "_dialer", "_executor", "_in_memory_rows", "_pool")
 
     def __init__(
         self,
-        config: PostgresConfig | None = None,
+        config: PostgreSQLConfig | None = None,
         *,
         pool: Any = None,
         dialer: Any = None,
         broker: Any = None,
         executor: Callable[[str, Sequence[Any]], list[tuple[Any, ...]]] | None = None,
     ) -> None:
-        self._config = config or PostgresConfig()
+        self._config = config or PostgreSQLConfig()
         self._pool = pool
         self._dialer = dialer
         self._broker = broker if broker is not None else self._config.broker
@@ -543,8 +543,8 @@ class SyncPostgresDriver:
         self._in_memory_rows: list[tuple[Any, ...]] = []
 
     @property
-    def config(self) -> PostgresConfig:
-        """Return the active PostgresConfig."""
+    def config(self) -> PostgreSQLConfig:
+        """Return the active PostgreSQLConfig."""
         return self._config
 
     @property
@@ -838,14 +838,14 @@ class SyncPostgresDriver:
         return self.strip_jsonb_header(raw)
 
 
-class AsyncPostgresDriver:
+class AsyncPostgreSQLDriver:
     """Asynchronous PostgreSQL driver facade supporting plain-tuple, zero-copy JSONB, and COPY streaming."""
 
     __slots__ = ("_async_executor", "_broker", "_closed", "_config", "_dialer", "_pool", "_sync")
 
     def __init__(
         self,
-        config: PostgresConfig | None = None,
+        config: PostgreSQLConfig | None = None,
         *,
         pool: Any = None,
         dialer: Any = None,
@@ -853,13 +853,13 @@ class AsyncPostgresDriver:
         executor: Callable[[str, Sequence[Any]], list[tuple[Any, ...]]] | None = None,
         async_executor: Callable[[str, Sequence[Any]], Awaitable[list[tuple[Any, ...]]]] | None = None,
     ) -> None:
-        self._config = config or PostgresConfig()
+        self._config = config or PostgreSQLConfig()
         self._pool = pool
         self._dialer = dialer
         self._broker = broker if broker is not None else self._config.broker
         self._async_executor = async_executor
         self._closed = False
-        self._sync = SyncPostgresDriver(
+        self._sync = SyncPostgreSQLDriver(
             self._config,
             pool=pool,
             dialer=dialer,
@@ -868,8 +868,8 @@ class AsyncPostgresDriver:
         )
 
     @property
-    def config(self) -> PostgresConfig:
-        """Return the active PostgresConfig."""
+    def config(self) -> PostgreSQLConfig:
+        """Return the active PostgreSQLConfig."""
         return self._config
 
     @property
@@ -1053,7 +1053,7 @@ class AsyncPostgresDriver:
 
     def decode_binary_jsonb(self, raw: Buffer) -> memoryview:
         """Return a zero-copy UTF-8 JSON memoryview from a binary PostgreSQL JSONB column."""
-        return SyncPostgresDriver.strip_jsonb_header(raw)
+        return SyncPostgreSQLDriver.strip_jsonb_header(raw)
 
 
 def _normalize_driver_params(

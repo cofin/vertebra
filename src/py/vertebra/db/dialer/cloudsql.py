@@ -19,9 +19,9 @@ from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
-    "CloudSqlConfig",
-    "CloudSqlDialer",
-    "CloudSqlInstanceUri",
+    "CloudSQLConfig",
+    "CloudSQLDialer",
+    "CloudSQLInstanceURI",
     "EphemeralCertBundle",
     "generate_ephemeral_keypair",
 )
@@ -42,7 +42,7 @@ class EphemeralCertBundle(FrozenBaseStruct, frozen=True, gc=False, kw_only=True)
     """Unix epoch timestamp when the ephemeral client certificate expires."""
 
 
-class CloudSqlInstanceUri(FrozenBaseStruct, frozen=True, gc=False, kw_only=True, cache_hash=True):
+class CloudSQLInstanceURI(FrozenBaseStruct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """Parsed Google Cloud SQL instance connection name (`project:region:instance`)."""
 
     project: str
@@ -58,7 +58,7 @@ class CloudSqlInstanceUri(FrozenBaseStruct, frozen=True, gc=False, kw_only=True,
         return f"{self.project}:{self.instance}"
 
     @classmethod
-    def parse(cls, raw: str) -> CloudSqlInstanceUri:
+    def parse(cls, raw: str) -> CloudSQLInstanceURI:
         """Parse `project:region:instance` (supporting domain-scoped projects)."""
         trimmed = raw.strip()
         parts = trimmed.split(":")
@@ -75,7 +75,7 @@ class CloudSqlInstanceUri(FrozenBaseStruct, frozen=True, gc=False, kw_only=True,
         return f"{base}/sql/v1beta4/projects/{self.project}/instances/{self.instance}:generateEphemeralCert"
 
 
-class CloudSqlConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
+class CloudSQLConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Configuration for zero-sidecar Cloud SQL connections on port 3307."""
 
     instance_connection_name: str
@@ -92,26 +92,26 @@ class CloudSqlConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Cloud SQL Auth Proxy secure mTLS server port (default `3307`)."""
 
 
-class CloudSqlDialer:
+class CloudSQLDialer:
     """Zero-sidecar Cloud SQL TLS 1.3 dialer with proactive IAM token and ephemeral cert caching."""
 
     __slots__ = ("_cached_expiry", "_cached_token", "_config", "_native_dialer", "_uri")
 
-    def __init__(self, config: CloudSqlConfig) -> None:
+    def __init__(self, config: CloudSQLConfig) -> None:
         self._config = config
-        self._uri = CloudSqlInstanceUri.parse(config.instance_connection_name)
+        self._uri = CloudSQLInstanceURI.parse(config.instance_connection_name)
         self._cached_token: str | None = None
         self._cached_expiry: float = 0.0
         self._native_dialer: Any = None
         native_mod = import_optional("vertebra._vertebra")
-        native_cls = getattr(native_mod, "CloudSqlDialer", None) if native_mod is not None else None
+        native_cls = getattr(native_mod, "CloudSQLDialer", None) if native_mod is not None else None
         if native_cls is not None:
             with contextlib.suppress(TypeError, ValueError, RuntimeError):
                 self._native_dialer = native_cls(config.instance_connection_name)
 
     @property
-    def uri(self) -> CloudSqlInstanceUri:
-        """Return the parsed CloudSqlInstanceUri."""
+    def uri(self) -> CloudSQLInstanceURI:
+        """Return the parsed CloudSQLInstanceURI."""
         return self._uri
 
     @property
@@ -124,7 +124,7 @@ class CloudSqlDialer:
         """Generate an ephemeral client public/private keypair in PEM format."""
         native_mod = import_optional("vertebra._vertebra")
         if native_mod is not None and bits == 2048:
-            native_cls = getattr(native_mod, "CloudSqlDialer", None)
+            native_cls = getattr(native_mod, "CloudSQLDialer", None)
             if native_cls is not None and hasattr(native_cls, "generate_ephemeral_keypair"):
                 with contextlib.suppress(TypeError, ValueError, RuntimeError):
                     inst = native_cls("p:r:i")
@@ -290,4 +290,4 @@ class CloudSqlDialer:
 
 def generate_ephemeral_keypair(bits: int = 2048) -> tuple[str, str]:
     """Generate an ephemeral client public/private keypair in PEM format."""
-    return CloudSqlDialer.generate_ephemeral_keypair(bits)
+    return CloudSQLDialer.generate_ephemeral_keypair(bits)

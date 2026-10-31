@@ -9,12 +9,12 @@ from typing import Any
 
 import pytest
 
-from vertebra.db.postgres import PostgresConfig
+from vertebra.db.postgres import PostgreSQLConfig
 from vertebra.framework.queues import (
     CronSchedule,
     MemoryQueueBackend,
     OracleQueueBackend,
-    PostgresQueueBackend,
+    PostgreSQLQueueBackend,
     QueueConfig,
     QueueService,
     RedisQueueBackend,
@@ -46,7 +46,7 @@ def _create_backend_by_url(url: str, config: QueueConfig) -> Any:
     if url.startswith("valkey"):
         return ValkeyQueueBackend(cfg)
     if url.startswith("postgres"):
-        return PostgresQueueBackend(cfg)
+        return PostgreSQLQueueBackend(cfg)
     if url.startswith("oracle"):
         return OracleQueueBackend(cfg)
     msg = f"Unknown backend url: {url}"
@@ -317,13 +317,13 @@ async def test_queue_backends_retry_backoff_and_dlq_replay(backend_url: str) -> 
 
 @pytest.mark.anyio
 async def test_postgres_listen_notify_zero_poll_wakeup_uses_direct_dsn() -> None:
-    """Verify PostgresQueueBackend binds to direct_dsn and wakes on notification in < 50ms."""
-    pg_config = PostgresConfig(
+    """Verify PostgreSQLQueueBackend binds to direct_dsn and wakes on notification in < 50ms."""
+    pg_config = PostgreSQLConfig(
         dsn="postgresql://pooler:6432/db",
         direct_dsn="postgresql://primary:5432/db",
         pooler_mode="transaction",
     )
-    backend = PostgresQueueBackend(postgres_config=pg_config)
+    backend = PostgreSQLQueueBackend(postgres_config=pg_config)
     assert backend.direct_dsn == "postgresql://primary:5432/db"
 
     dequeued_result: list[TaskEnvelope] = []

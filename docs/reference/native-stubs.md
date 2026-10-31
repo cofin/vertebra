@@ -5,7 +5,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 | Native Module | Key Stub Classes | Backing Rust Crate |
 | --- | --- | --- |
 | **`vertebra._vertebra`** | `Request`, `Headers`, `Response`, `RequestBatch`, `AsgiScope`, `RsgiScope`, `WsgiEnviron` | `vertebra-py`, `vertebra-core`, `vertebra-http`, `vertebra-db` |
-| **`vertebra._bundler`** | `BundleConfig`, `BuildResult`, `Bundler`, `SsrPool`, `IsolatedDeclarationsGenerator` | `vertebra-bundler` (Oxc, Rolldown, QuickJS) |
+| **`vertebra._bundler`** | `BundleConfig`, `BuildResult`, `Bundler`, `SSRPool`, `IsolatedDeclarationsGenerator` | `vertebra-bundler` (Oxc, Rolldown, QuickJS) |
 | **`vertebra._storage`** | `StorageBuffer`, `ObjectMeta`, `ObjectStore` | `vertebra-storage` (Rust `object_store` + Tokio) |
 
 ## `vertebra._vertebra` — HTTP/IPC Transport, Request Batches & Protocol Drivers
@@ -55,7 +55,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
     options:
       heading_level: 3
 
-::: vertebra._bundler.SsrPool
+::: vertebra._bundler.SSRPool
     options:
       heading_level: 3
 

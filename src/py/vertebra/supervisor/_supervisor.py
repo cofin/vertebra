@@ -14,7 +14,7 @@ from pathlib import Path
 
 from vertebra.cli.banner import render_shutdown
 from vertebra.cli.tui import LogBuffer, run_dev_tui, stderr_reader
-from vertebra.server.platform import ShmAllocationPolicy
+from vertebra.server.platform import SHMAllocationPolicy
 
 __all__ = (
     "build_server_command",
@@ -44,7 +44,7 @@ def run_supervisor(
         msg = "server_cmd must not be empty"
         raise ValueError(msg)
 
-    ShmAllocationPolicy().validate_environment()
+    SHMAllocationPolicy().validate_environment()
 
     full_env = os.environ | env
     full_env["VERTEBRA_DRAIN_TIMEOUT_MS"] = str(drain_timeout_ms)

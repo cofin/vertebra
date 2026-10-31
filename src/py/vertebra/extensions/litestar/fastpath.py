@@ -1,5 +1,6 @@
 """Fused direct Litestar v2/v3 HTTPRouteHandler execution and ScopeState.body pre-seeding."""
 
+import contextlib
 import enum
 import inspect
 from collections.abc import AsyncGenerator, AsyncIterable, Callable, Generator, Iterable
@@ -377,7 +378,11 @@ async def dispatch_litestar_handler_direct(
                 )
             else:
                 await asgi_response(scope, receive, send)
-        elif resp_cls_name == "ASGIStreamingSSEResponse":
+        elif resp_cls_name in ("ASGIStreamingSSEResponse", "ASGIStreamingResponse") and (
+            hasattr(asgi_response, "_ping_interval")
+            or any(k.lower() == b"x-vertebra-sse-ping-interval" for k, _ in asgi_response.encode_headers())
+            or type(getattr(asgi_response, "iterator", None)).__name__ == "_ServerSentEventIterator"
+        ):
             await _offload_sse_response(asgi_response, send)
         else:
             await asgi_response(scope, receive, send)
@@ -551,6 +556,10 @@ def _compile_routes_from_table(
     app_has_py_cors = (
         (not cors_offloaded) and not _is_empty_sentinel(getattr(app, "cors_config", None)) if app is not None else False
     )
+    app_guards = getattr(app, "guards", None) if app is not None else None
+    has_app_guards = bool(app_guards) and not _is_empty_sentinel(app_guards)
+    app_plugins = getattr(getattr(app, "plugins", None), "plugins", getattr(app, "plugins", ())) or ()
+    has_security_plugin = any(type(p).__name__ == "SecurityPlugin" for p in app_plugins)
     app_requires_pipeline = (
         app_has_middleware or app_has_csrf or app_has_allowed_hosts or app_has_py_compression or app_has_py_cors
     )
@@ -562,6 +571,14 @@ def _compile_routes_from_table(
     for handler_id, entry in router_table.routes.items():
         handler = entry.route_handler
         guards = _get_handler_guards(handler)
+        handler_has_guards = bool(guards) or has_app_guards
+        if has_security_plugin:
+            handler_opt = getattr(handler, "opt", {}) or {}
+            is_exempt = bool(handler_opt.get("exclude_from_auth")) or getattr(
+                handler_opt.get("auth"), "is_public", False
+            )
+            if not is_exempt:
+                handler_has_guards = True
         middleware = _get_handler_middleware(handler)
         has_hooks = (
             _has_lifecycle_hook(handler, app, "before_request", "resolve_before_request")
@@ -583,7 +600,7 @@ def _compile_routes_from_table(
             route_handler=handler,
             kwargs_model=entry.kwargs_model,
             request_class=request_class,
-            has_guards=bool(guards),
+            has_guards=handler_has_guards,
             has_middleware=app_requires_pipeline or bool(middleware) or has_hooks,
             has_before_send=has_before_send,
             after_response=after_response,
@@ -643,8 +660,6 @@ def _handler_has_custom_response_metadata(handler: Any) -> bool:
     for attr_name, resolve_name in (
         ("response_headers", "resolve_response_headers"),
         ("response_cookies", "resolve_response_cookies"),
-        ("type_encoders", "resolve_type_encoders"),
-        ("type_decoders", "resolve_type_decoders"),
     ):
         if v2_layers:
             resolve_fn = getattr(handler, resolve_name, None)
@@ -660,6 +675,33 @@ def _handler_has_custom_response_metadata(handler: Any) -> bool:
         raw_val = getattr(handler, attr_name, None)
         if not _is_empty_sentinel(raw_val) and bool(raw_val):
             return True
+
+    for codec_attr, resolve_codec in (
+        ("type_encoders", "resolve_type_encoders"),
+        ("type_decoders", "resolve_type_decoders"),
+    ):
+        raw_codec = getattr(handler, codec_attr, None)
+        if not _is_empty_sentinel(raw_codec) and bool(raw_codec):
+            return True
+        if resolve_codec in getattr(handler, "__dict__", {}):
+            return True
+        for layer in getattr(handler, "ownership_layers", ()) or ():
+            if layer is not handler:
+                if type(layer).__name__ == "Litestar":
+                    if codec_attr == "type_decoders":
+                        decoders = getattr(layer, "type_decoders", None) or ()
+                        if len(decoders) > 3:
+                            return True
+                    elif codec_attr == "type_encoders":
+                        encoders = getattr(layer, "type_encoders", None) or {}
+                        if len(encoders) > 17:
+                            return True
+                    continue
+                layer_val = getattr(layer, codec_attr, None)
+                if not _is_empty_sentinel(layer_val) and bool(layer_val):
+                    return True
+                if resolve_codec in getattr(layer, "__dict__", {}):
+                    return True
 
     for direct_attr in ("etag", "cache_control", "background"):
         val = getattr(handler, direct_attr, None)
@@ -777,7 +819,12 @@ def _compile_direct_signature_plan(
         body_type=body_type,
         json_headers=[(b"content-type", b"application/json")],
         text_headers=[
-            (b"content-type", media_bytes if media_type.startswith("text/") else b"text/plain; charset=utf-8")
+            (
+                b"content-type",
+                (media_bytes + b"; charset=utf-8")
+                if media_type == "text/plain"
+                else (media_bytes if media_type.startswith("text/") else b"text/plain; charset=utf-8"),
+            )
         ],
         raw_bytes_headers=[
             (b"content-type", media_bytes if media_type != "application/json" else b"application/octet-stream")
@@ -968,7 +1015,13 @@ async def _close_scope_upload_files(scope: Any) -> None:
 async def _offload_sse_response(asgi_response: Any, send: Any) -> None:
     ping_interval = getattr(asgi_response, "_ping_interval", None)
     headers = list(asgi_response.encode_headers())
-    if ping_interval is not None:
+    if ping_interval is None:
+        for k, v in headers:
+            if k.lower() == b"x-vertebra-sse-ping-interval":
+                with contextlib.suppress(ValueError, TypeError):
+                    ping_interval = int(v.decode("latin-1"))
+                break
+    if ping_interval is not None and not any(k.lower() == b"x-vertebra-sse-ping-interval" for k, _ in headers):
         headers.append((b"x-vertebra-sse-ping-interval", str(ping_interval).encode("latin-1")))
     status_code = int(getattr(asgi_response, "status_code", 200))
     await send(

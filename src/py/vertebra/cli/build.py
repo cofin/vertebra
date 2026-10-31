@@ -1,4 +1,4 @@
-"""Build command for frontend assets, standalone directories, onefile binaries, and PGO."""
+"""Build command for frontend assets, standalone directories, and onefile binaries."""
 
 from pathlib import Path
 
@@ -37,20 +37,6 @@ _LEGACY_TARGETS: frozenset[str] = frozenset({"frontend", "backend", "all"})
     help="Package application into a self-extracting single-file executable",
 )
 @click.option(
-    "--pgo",
-    is_flag=True,
-    default=False,
-    hidden=True,
-    help="Enable Profile-Guided Optimization metadata during packaging",
-)
-@click.option(
-    "--profdata",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    default=None,
-    hidden=True,
-    help="Merged LLVM .profdata file for Rust -Cprofile-use packaging metadata",
-)
-@click.option(
     "--server-binary",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
@@ -83,8 +69,6 @@ def build(
     profile: str,
     standalone: bool,
     onefile: bool,
-    pgo: bool,
-    profdata: Path | None,
     server_binary: Path | None,
     entrypoint: str,
     python_version: str,
@@ -93,7 +77,6 @@ def build(
 ) -> None:
     """Build Vertebra application assets, standalone distributions, or onefile binaries."""
     resolved_project = project_dir.resolve()
-    effective_pgo = pgo or (profdata is not None)
 
     if standalone or onefile or target not in _LEGACY_TARGETS:
         platform_spec = None if target in _LEGACY_TARGETS else target
@@ -111,8 +94,6 @@ def build(
             project_dir=resolved_project,
             target=target_tuple,
             entrypoint=entrypoint,
-            pgo_enabled=effective_pgo,
-            profdata_path=profdata,
             server_binary=server_binary,
             profile=profile,
         )
@@ -145,8 +126,6 @@ def build(
             project_dir=resolved_project,
             target=target_tuple,
             entrypoint=entrypoint,
-            pgo_enabled=effective_pgo,
-            profdata_path=profdata,
             server_binary=server_binary,
             profile=profile,
         )

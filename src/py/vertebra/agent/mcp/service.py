@@ -16,9 +16,9 @@ import msgspec
 from vertebra.agent.core.cursor import paginate_sequence
 from vertebra.agent.core.jsonrpc import (
     INVALID_PARAMS,
-    JsonRpcError,
-    JsonRpcErrorException,
-    JsonRpcRouter,
+    JSONRPCError,
+    JSONRPCErrorException,
+    JSONRPCRouter,
 )
 from vertebra.agent.core.schema import ToolArgumentError
 from vertebra.agent.core.sse import SseFrame, SseStreamBroker
@@ -79,7 +79,7 @@ class MCPService:
         self.stream_broker = stream_broker if stream_broker is not None else SseStreamBroker()
         self.task_store = task_store if task_store is not None else MCPTaskStore(stream_broker=self.stream_broker)
         self.skill_catalog = skill_catalog
-        self.router = JsonRpcRouter()
+        self.router = JSONRPCRouter()
         self._resource_subscriptions: dict[str, set[str]] = {}
 
         self._register_handlers()
@@ -181,7 +181,7 @@ class MCPService:
         """Execute a tool invocation with parameter validation and structured outputs."""
         if not isinstance(params, Mapping) or "name" not in params:
             msg = "Missing required 'name' in tools/call parameters"
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
         tool_name = str(params["name"])
         arguments = params.get("arguments", {})
@@ -191,7 +191,7 @@ class MCPService:
         target_tool = self.registry.get_tool(tool_name)
         if target_tool is None:
             msg = f"Unknown tool: {tool_name}"
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
         meta = params.get("_meta", {})
         if isinstance(meta, dict) and meta.get("io.modelcontextprotocol/task") and self.task_store is not None:
@@ -217,8 +217,8 @@ class MCPService:
                 return self._format_tool_output(raw_result, is_error=False)
             except ToolArgumentError as exc:
                 msg = f"Invalid arguments for tool '{tool_name}': {exc.message}"
-                raise JsonRpcErrorException(
-                    JsonRpcError(code=INVALID_PARAMS, message=msg, data={"pointer": exc.pointer})
+                raise JSONRPCErrorException(
+                    JSONRPCError(code=INVALID_PARAMS, message=msg, data={"pointer": exc.pointer})
                 ) from exc
             except Exception as exc:
                 logger.exception("Tool '%s' execution raised exception", tool_name)
@@ -302,7 +302,7 @@ class MCPService:
         """Read content of a static resource or matched template or skill."""
         if not isinstance(params, Mapping) or "uri" not in params:
             msg = "Missing required 'uri' in resources/read parameters"
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
         uri = str(params["uri"])
 
@@ -320,7 +320,7 @@ class MCPService:
                 }
             except Exception as exc:
                 msg = f"Failed to read skill resource '{uri}': {exc}"
-                raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg)) from exc
+                raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg)) from exc
 
         with self.telemetry.span_resource(uri):
             res_entry = self.registry.get_resource(uri)
@@ -361,7 +361,7 @@ class MCPService:
                 }
 
         msg = f"Resource not found: {uri}"
-        raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg))
+        raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
     async def _handle_resources_templates_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """List registered resource URI templates with cursor pagination."""
@@ -389,7 +389,7 @@ class MCPService:
         """Subscribe caller session to resource change notifications."""
         if not isinstance(params, Mapping) or "uri" not in params:
             msg = "Missing required 'uri' in resources/subscribe parameters"
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
         uri = str(params["uri"])
         session_id = getattr(context, "session_id", "default")
@@ -400,7 +400,7 @@ class MCPService:
         """Unsubscribe caller session from resource change notifications."""
         if not isinstance(params, Mapping) or "uri" not in params:
             msg = "Missing required 'uri' in resources/unsubscribe parameters"
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
         uri = str(params["uri"])
         session_id = getattr(context, "session_id", "default")
@@ -445,7 +445,7 @@ class MCPService:
         """Retrieve and instantiate an MCP prompt template."""
         if not isinstance(params, Mapping) or "name" not in params:
             msg = "Missing required 'name' in prompts/get parameters"
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
         prompt_name = str(params["name"])
         arguments = params.get("arguments", {})
@@ -456,7 +456,7 @@ class MCPService:
             prompt_entry = self.registry.get_prompt(prompt_name)
             if prompt_entry is None:
                 msg = f"Prompt not found: {prompt_name}"
-                raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg))
+                raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
             messages: list[dict[str, Any]] = []
             if prompt_entry.getter is not None:
@@ -496,18 +496,18 @@ class MCPService:
         """Retrieve complete skill package details by name or uri."""
         if not isinstance(params, Mapping):
             msg = "Missing required parameters in skills/get"
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
         skill_name = params.get("name") or params.get("uri")
         if not skill_name:
             msg = "Missing required 'name' or 'uri' in skills/get parameters"
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
         if self.skill_catalog is None:
             msg = "Skill catalog not configured"
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
         skill = self.skill_catalog.get_skill(str(skill_name))
         if skill is None:
             msg = f"Skill not found: {skill_name}"
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
         files_summary = {
             k: {"digest": f.digest, "sizeBytes": f.size_bytes, "mimeType": f.mime_type} for k, f in skill.files.items()
         }
@@ -525,7 +525,7 @@ class MCPService:
         """Read directory listing for a skill package URI."""
         if not isinstance(params, Mapping) or "uri" not in params:
             msg = "Missing required 'uri' in resources/directory/read parameters"
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
         if self.skill_catalog is None:
             return {"files": []}
         uri = str(params["uri"])
@@ -541,57 +541,57 @@ class MCPService:
     async def _handle_tasks_get(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Retrieve task execution record by task ID."""
         if not isinstance(params, Mapping):
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Invalid params"))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Invalid params"))
         task_id = params.get("taskId") or params.get("task_id")
         if not task_id:
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'taskId'"))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.get(str(task_id), self._caller_owner(context))
             return {"task": _task_to_dict(task)}
         except TaskLookupError as exc:
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=str(exc))) from exc
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
     async def _handle_tasks_result(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Wait for task result until completion or required input."""
         if not isinstance(params, Mapping):
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Invalid params"))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Invalid params"))
         task_id = params.get("taskId") or params.get("task_id")
         if not task_id:
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'taskId'"))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         timeout = float(params.get("timeoutSeconds", 30.0))
         try:
             task = await self.task_store.wait_for_result(str(task_id), self._caller_owner(context), timeout_s=timeout)
             return {"task": _task_to_dict(task)}
         except TaskLookupError as exc:
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=str(exc))) from exc
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
     async def _handle_tasks_update(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Submit required inputs to resume a waiting task."""
         if not isinstance(params, Mapping):
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Invalid params"))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Invalid params"))
         task_id = params.get("taskId") or params.get("task_id")
         inputs = params.get("inputs") or {}
         if not task_id:
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'taskId'"))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.submit_input(str(task_id), self._caller_owner(context), inputs)
             return {"task": _task_to_dict(task)}
         except (TaskLookupError, TaskStateError) as exc:
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=str(exc))) from exc
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
     async def _handle_tasks_cancel(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Cancel an in-flight task."""
         if not isinstance(params, Mapping):
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Invalid params"))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Invalid params"))
         task_id = params.get("taskId") or params.get("task_id")
         reason = params.get("reason")
         if not task_id:
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'taskId'"))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.cancel(str(task_id), self._caller_owner(context), reason)
             return {"task": _task_to_dict(task)}
         except TaskLookupError as exc:
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message=str(exc))) from exc
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
     async def _handle_tasks_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """List tasks owned by caller."""

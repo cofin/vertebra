@@ -10,11 +10,11 @@ import pytest
 
 from vertebra.storage import (
     AzureConfig,
-    GcsConfig,
+    GCSConfig,
     LocalConfig,
     MemoryConfig,
     ObjectStore,
-    OciConfig,
+    OCIConfig,
     R2Config,
     S3Config,
 )
@@ -57,10 +57,10 @@ def floci_azure_config() -> AzureConfig:
 
 
 @pytest.fixture
-def floci_gcs_config() -> GcsConfig:
-    """Return GcsConfig targeting a local Floci GCS emulator (port 4588)."""
+def floci_gcs_config() -> GCSConfig:
+    """Return GCSConfig targeting a local Floci GCS emulator (port 4588)."""
     iam_endpoint = os.environ.get("FLOCI_GCS_ENDPOINT", "http://127.0.0.1:4588")
-    return GcsConfig(
+    return GCSConfig(
         bucket="vertebra-test",
         service_account_email="test@vertebra.iam.gserviceaccount.com",
         iam_endpoint=iam_endpoint,
@@ -83,10 +83,10 @@ def floci_r2_config() -> R2Config:
 
 
 @pytest.fixture
-def floci_oci_config() -> OciConfig:
-    """Return OciConfig targeting a local mock OCI Object Storage REST v2 endpoint."""
+def floci_oci_config() -> OCIConfig:
+    """Return OCIConfig targeting a local mock OCI Object Storage REST v2 endpoint."""
     endpoint = os.environ.get("FLOCI_OCI_ENDPOINT", "http://127.0.0.1:4599")
-    return OciConfig(
+    return OCIConfig(
         bucket="vertebra-oci",
         namespace="testns",
         region="us-ashburn-1",

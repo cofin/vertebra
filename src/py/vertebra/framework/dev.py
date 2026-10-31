@@ -191,12 +191,18 @@ class DevMiddleware:
             rel_client_path = path.removeprefix("/__vertebra/client/")
             if not rel_client_path:
                 rel_client_path = "index.js"
+            if ".." in Path(rel_client_path).parts:
+                await self.send_response(send, b"Forbidden", "text/plain", status=403)
+                return
 
             candidates = [
                 f"server/_js/bundle/{rel_client_path}",
                 f"server/_js/bundle/{rel_client_path}.js",
                 f"server/_js/bundle/{rel_client_path}/index.js",
             ]
+            if rel_client_path.endswith(".js"):
+                stem = rel_client_path.removesuffix(".js")
+                candidates.append(f"server/_js/bundle/{stem}/index.js")
             for candidate in candidates:
                 try:
                     js_data = pkgutil.get_data("vertebra", candidate)

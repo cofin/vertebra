@@ -33,10 +33,10 @@ from vertebra.agent.core.context import AgentContext
 from vertebra.agent.core.cursor import paginate_sequence
 from vertebra.agent.core.jsonrpc import (
     INVALID_PARAMS,
-    JsonRpcError,
-    JsonRpcErrorException,
-    JsonRpcRequest,
-    JsonRpcRouter,
+    JSONRPCError,
+    JSONRPCErrorException,
+    JSONRPCRequest,
+    JSONRPCRouter,
 )
 from vertebra.agent.core.sse import SseFrame, SseStreamBroker
 from vertebra.agent.telemetry import AgentTelemetryRecorder
@@ -125,10 +125,10 @@ class A2ATaskStore:
         """Retrieve a task under caller ownership, raising TASK_NOT_FOUND on mismatch."""
         entry = self._tasks.get(task_id)
         if entry is None:
-            raise JsonRpcErrorException(JsonRpcError(code=TASK_NOT_FOUND, message=f"Task '{task_id}' not found"))
+            raise JSONRPCErrorException(JSONRPCError(code=TASK_NOT_FOUND, message=f"Task '{task_id}' not found"))
         task, stored_owner, _ = entry
         if stored_owner != owner_id:
-            raise JsonRpcErrorException(JsonRpcError(code=TASK_NOT_FOUND, message=f"Task '{task_id}' not found"))
+            raise JSONRPCErrorException(JSONRPCError(code=TASK_NOT_FOUND, message=f"Task '{task_id}' not found"))
         return task
 
     def list(
@@ -147,8 +147,8 @@ class A2ATaskStore:
         """Cancel a non-terminal task under caller ownership."""
         task = self.get(task_id, owner_id)
         if task.status.state in TERMINAL_A2A_STATES:
-            raise JsonRpcErrorException(
-                JsonRpcError(
+            raise JSONRPCErrorException(
+                JSONRPCError(
                     code=TASK_NOT_CANCELABLE,
                     message=f"Task '{task_id}' cannot be canceled from terminal state '{task.status.state}'",
                 )
@@ -188,39 +188,39 @@ class PushNotificationDispatcher:
         """Validate webhook URL against SSRF and unsupported targets."""
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in ("http", "https"):
-            raise JsonRpcErrorException(
-                JsonRpcError(code=INVALID_PARAMS, message=f"Unsupported webhook scheme: {parsed.scheme}")
+            raise JSONRPCErrorException(
+                JSONRPCError(code=INVALID_PARAMS, message=f"Unsupported webhook scheme: {parsed.scheme}")
             )
         if not self.allow_insecure_webhooks and parsed.scheme != "https":
-            raise JsonRpcErrorException(
-                JsonRpcError(code=INVALID_PARAMS, message="Insecure HTTP webhooks are disallowed; use HTTPS")
+            raise JSONRPCErrorException(
+                JSONRPCError(code=INVALID_PARAMS, message="Insecure HTTP webhooks are disallowed; use HTTPS")
             )
 
         hostname = (parsed.hostname or "").lower()
         if not hostname:
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing hostname in webhook URL"))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing hostname in webhook URL"))
 
         if hostname in ("169.254.169.254", "metadata.google.internal", "instance-data"):
-            raise JsonRpcErrorException(
-                JsonRpcError(code=INVALID_PARAMS, message=f"Webhook URL targets cloud metadata: {hostname}")
+            raise JSONRPCErrorException(
+                JSONRPCError(code=INVALID_PARAMS, message=f"Webhook URL targets cloud metadata: {hostname}")
             )
 
         try:
             ip = ipaddress.ip_address(hostname)
             if ip.is_link_local:
-                raise JsonRpcErrorException(
-                    JsonRpcError(code=INVALID_PARAMS, message=f"Webhook URL targets link-local address: {ip}")
+                raise JSONRPCErrorException(
+                    JSONRPCError(code=INVALID_PARAMS, message=f"Webhook URL targets link-local address: {ip}")
                 )
             if not self.allow_insecure_webhooks and (ip.is_private or ip.is_loopback or ip.is_reserved):
-                raise JsonRpcErrorException(
-                    JsonRpcError(code=INVALID_PARAMS, message=f"Webhook URL targets private/loopback IP: {ip}")
+                raise JSONRPCErrorException(
+                    JSONRPCError(code=INVALID_PARAMS, message=f"Webhook URL targets private/loopback IP: {ip}")
                 )
         except ValueError as err:
             if not self.allow_insecure_webhooks and (
                 hostname == "localhost" or hostname.endswith(".local") or hostname.endswith(".internal")
             ):
-                raise JsonRpcErrorException(
-                    JsonRpcError(code=INVALID_PARAMS, message=f"Webhook URL targets internal hostname: {hostname}")
+                raise JSONRPCErrorException(
+                    JSONRPCError(code=INVALID_PARAMS, message=f"Webhook URL targets internal hostname: {hostname}")
                 ) from err
 
     def set_config(self, task_id: str, config: PushNotificationConfig, owner_id: str) -> None:
@@ -232,8 +232,8 @@ class PushNotificationDispatcher:
         """Retrieve push notification config for a task."""
         entry = self._configs.get(task_id)
         if entry is None or entry[1] != owner_id:
-            raise JsonRpcErrorException(
-                JsonRpcError(code=TASK_NOT_FOUND, message=f"Push notification config for '{task_id}' not found")
+            raise JSONRPCErrorException(
+                JSONRPCError(code=TASK_NOT_FOUND, message=f"Push notification config for '{task_id}' not found")
             )
         return entry[0]
 
@@ -312,7 +312,7 @@ class A2AService:
         self.stream_broker = stream_broker if stream_broker is not None else SseStreamBroker()
         self.telemetry = telemetry if telemetry is not None else AgentTelemetryRecorder()
         self.executor = executor
-        self.router = JsonRpcRouter()
+        self.router = JSONRPCRouter()
         self._event_counter: int = 0
         self._register_routes()
 
@@ -349,7 +349,7 @@ class A2AService:
             results: list[dict[str, Any]] = []
             for item in req_data:
                 if isinstance(item, dict):
-                    req = JsonRpcRequest(
+                    req = JSONRPCRequest(
                         method=item.get("method", ""),
                         id=item.get("id"),
                         params=item.get("params"),
@@ -360,7 +360,7 @@ class A2AService:
             return encode_json_bytes(results)
 
         if isinstance(req_data, dict):
-            req = JsonRpcRequest(
+            req = JSONRPCRequest(
                 method=req_data.get("method", ""),
                 id=req_data.get("id"),
                 params=req_data.get("params"),
@@ -403,8 +403,8 @@ class A2AService:
         try:
             return msgspec.convert(message_data, Message)
         except Exception as exc:
-            raise JsonRpcErrorException(
-                JsonRpcError(code=INVALID_PARAMS, message=f"Invalid Message payload: {exc}")
+            raise JSONRPCErrorException(
+                JSONRPCError(code=INVALID_PARAMS, message=f"Invalid Message payload: {exc}")
             ) from exc
 
     async def execute_task_flow(
@@ -491,7 +491,7 @@ class A2AService:
         """A2A 1.0 message/send RPC handler."""
         with self.telemetry.span_rpc("a2a", "message/send", params=params):
             if "message" not in params:
-                raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'message' in params"))
+                raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'message' in params"))
             message = self._parse_message(params["message"])
             context_id = params.get("contextId") or message.context_id
             task_id = params.get("taskId") or message.task_id or f"task-{secrets.token_hex(6)}"
@@ -508,7 +508,7 @@ class A2AService:
         """A2A 1.0 message/stream RPC handler for initial task creation."""
         with self.telemetry.span_rpc("a2a", "message/stream", params=params):
             if "message" not in params:
-                raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'message' in params"))
+                raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'message' in params"))
             message = self._parse_message(params["message"])
             context_id = params.get("contextId") or message.context_id
             task_id = params.get("taskId") or message.task_id or f"task-{secrets.token_hex(6)}"
@@ -539,7 +539,7 @@ class A2AService:
     ) -> AsyncIterable[SseFrame]:
         """Stream SSE frames for a message execution until completion."""
         if "message" not in params:
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'message' in params"))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'message' in params"))
         message = self._parse_message(params["message"])
         context_id = params.get("contextId") or message.context_id
         task_id = params.get("taskId") or message.task_id or f"task-{secrets.token_hex(6)}"
@@ -573,7 +573,7 @@ class A2AService:
         with self.telemetry.span_rpc("a2a", "tasks/get", params=params):
             task_id = params.get("taskId") or params.get("id")
             if not task_id:
-                raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
+                raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
             owner_id = get_owner_key(context)
             task = self.task_store.get(task_id, owner_id)
             return _serialize_struct(task)
@@ -603,7 +603,7 @@ class A2AService:
         with self.telemetry.span_rpc("a2a", "tasks/cancel", params=params):
             task_id = params.get("taskId") or params.get("id")
             if not task_id:
-                raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
+                raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
             owner_id = get_owner_key(context)
             updated_task = self.task_store.cancel(task_id, owner_id)
             await self._emit_and_dispatch(
@@ -621,7 +621,7 @@ class A2AService:
         with self.telemetry.span_rpc("a2a", "tasks/resubscribe", params=params):
             task_id = params.get("taskId") or params.get("id")
             if not task_id:
-                raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
+                raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
             owner_id = get_owner_key(context)
             task = self.task_store.get(task_id, owner_id)
             return _serialize_struct(task)
@@ -634,7 +634,7 @@ class A2AService:
         """Stream replayed and live SSE frames for tasks/resubscribe."""
         task_id = params.get("taskId") or params.get("id")
         if not task_id:
-            raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
         owner_id = get_owner_key(context)
         task = self.task_store.get(task_id, owner_id)
         last_event_id = params.get("lastEventId")
@@ -670,8 +670,8 @@ class A2AService:
         """A2A 1.0 tasks/pushNotificationConfig/set RPC handler."""
         with self.telemetry.span_rpc("a2a", "tasks/pushNotificationConfig/set", params=params):
             if not self.config.enable_push_notifications:
-                raise JsonRpcErrorException(
-                    JsonRpcError(
+                raise JSONRPCErrorException(
+                    JSONRPCError(
                         code=PUSH_NOTIFICATION_NOT_SUPPORTED,
                         message="Push notifications are disabled",
                     )
@@ -679,8 +679,8 @@ class A2AService:
             task_id = params.get("taskId")
             config_data = params.get("config")
             if not task_id or not config_data:
-                raise JsonRpcErrorException(
-                    JsonRpcError(code=INVALID_PARAMS, message="Missing 'taskId' or 'config' in params")
+                raise JSONRPCErrorException(
+                    JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId' or 'config' in params")
                 )
             owner_id = get_owner_key(context)
             self.task_store.get(task_id, owner_id)
@@ -688,8 +688,8 @@ class A2AService:
             try:
                 config = msgspec.convert(config_data, PushNotificationConfig)
             except Exception as exc:
-                raise JsonRpcErrorException(
-                    JsonRpcError(code=INVALID_PARAMS, message=f"Invalid PushNotificationConfig: {exc}")
+                raise JSONRPCErrorException(
+                    JSONRPCError(code=INVALID_PARAMS, message=f"Invalid PushNotificationConfig: {exc}")
                 ) from exc
 
             self.push_dispatcher.set_config(task_id, config, owner_id)
@@ -704,7 +704,7 @@ class A2AService:
         with self.telemetry.span_rpc("a2a", "tasks/pushNotificationConfig/get", params=params):
             task_id = params.get("taskId")
             if not task_id:
-                raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
+                raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
             owner_id = get_owner_key(context)
             self.task_store.get(task_id, owner_id)
             config = self.push_dispatcher.get_config(task_id, owner_id)
@@ -719,7 +719,7 @@ class A2AService:
         with self.telemetry.span_rpc("a2a", "tasks/pushNotificationConfig/list", params=params):
             task_id = params.get("taskId")
             if not task_id:
-                raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
+                raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
             owner_id = get_owner_key(context)
             self.task_store.get(task_id, owner_id)
             configs = self.push_dispatcher.list_configs(task_id, owner_id)
@@ -734,7 +734,7 @@ class A2AService:
         with self.telemetry.span_rpc("a2a", "tasks/pushNotificationConfig/delete", params=params):
             task_id = params.get("taskId")
             if not task_id:
-                raise JsonRpcErrorException(JsonRpcError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
+                raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId' in params"))
             owner_id = get_owner_key(context)
             self.task_store.get(task_id, owner_id)
             deleted = self.push_dispatcher.delete_config(task_id, owner_id)
@@ -748,12 +748,12 @@ class A2AService:
         """A2A 1.0 agent/authenticatedExtendedCard RPC handler."""
         with self.telemetry.span_rpc("a2a", "agent/authenticatedExtendedCard", params=params):
             if context is None or context.identity is None or not context.identity.is_authenticated:
-                raise JsonRpcErrorException(
-                    JsonRpcError(code=-32000, message="Authentication required for extended card")
+                raise JSONRPCErrorException(
+                    JSONRPCError(code=-32000, message="Authentication required for extended card")
                 )
             if self.config.extended_card is None:
-                raise JsonRpcErrorException(
-                    JsonRpcError(
+                raise JSONRPCErrorException(
+                    JSONRPCError(
                         code=EXTENDED_CARD_NOT_CONFIGURED,
                         message="Authenticated extended card not configured",
                     )

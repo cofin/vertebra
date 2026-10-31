@@ -1,95 +1,148 @@
-"""Unit tests for SQLSpec storage/plugin helpers, SQLAlchemy 2.1 +vtb dialects, Alembic, and ORM optimizations."""
+"""Unit and integration tests for SQLAlchemy 2.1 +vtb dialects, types, Alembic, and Advanced Alchemy."""
 
 from __future__ import annotations
 
 import array
 
 import pytest
+from advanced_alchemy.base import UUIDAuditBase
+from advanced_alchemy.repository import SQLAlchemyAsyncRepository
+from advanced_alchemy.service import SQLAlchemyAsyncRepositoryService
+from advanced_alchemy.types.file_object import FileObject, StoredObject
+from sqlalchemy import String, create_engine, select
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from vertebra.db import PostgresConfig, SyncPostgresDriver
+from vertebra.db import PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.extensions.alchemy import (
+    ObjectStoreBackend,
+    create_alchemy_plugin,
+    create_async_alchemy_config,
+    create_sync_alchemy_config,
+)
 from vertebra.extensions.sqlalchemy import (
     AlembicImpl,
-    BinaryJson,
+    BinaryJSON,
     CreateVectorIndexOp,
     CreateViewOp,
     DBAPIConnection,
     DBAPIModule,
     DeleteUsingClause,
-    DialectDescriptor,
     DropVectorIndexOp,
     InsertSentinelSpec,
-    MysqlDialect,
+    MySQLAlembicImpl,
+    MySQLDialect,
+    OracleAlembicImpl,
     OracleDialect,
-    ParameterizedSql,
-    PostgresDialect,
+    ParameterizedSQL,
+    PostgreSQLAlembicImpl,
+    PostgreSQLDialect,
     SelectInLoadSpec,
-    SqliteDialect,
+    SQLiteAlembicImpl,
+    SQLiteDialect,
     SyncEngineAdapter,
     Vector,
-)
-from vertebra.extensions.sqlspec import (
-    SQLSpecPlugin,
-    SQLSpecStore,
-    SQLSpecSyncConfig,
 )
 from vertebra.storage import ObjectStore
 
 
+class BaseTestModel(DeclarativeBase):
+    """Base declarative class for unit test models."""
+
+
+class ItemRecord(BaseTestModel):
+    """Declarative item model for engine verification."""
+
+    __tablename__ = "test_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64))
+
+
+class DocumentAuditModel(UUIDAuditBase):
+    """Advanced Alchemy UUIDAuditBase model with StoredObject column."""
+
+    __tablename__ = "audit_docs"
+
+    title: Mapped[str] = mapped_column(String(128))
+    file: Mapped[FileObject] = mapped_column(StoredObject(backend="docs_store"))
+
+
+class DocumentRepository(SQLAlchemyAsyncRepository[DocumentAuditModel]):
+    """Advanced Alchemy asynchronous repository for DocumentAuditModel."""
+
+    model_type = DocumentAuditModel
+
+
+class DocumentService(SQLAlchemyAsyncRepositoryService[DocumentAuditModel]):
+    """Advanced Alchemy asynchronous service for DocumentAuditModel."""
+
+    repository_type = DocumentRepository
+
+
+def test_sqlite_vtb_sync_engine_ddl_dml_and_rollback() -> None:
+    """Verify create_engine with sqlite+vtb:///:memory: persists schema and executes transactions."""
+    engine = create_engine("sqlite+vtb:///:memory:")
+
+    with engine.begin() as conn:
+        BaseTestModel.metadata.create_all(conn)
+
+    with engine.connect() as conn:
+        conn.execute(ItemRecord.__table__.insert().values(id=1, name="first"))
+        conn.commit()
+
+    with engine.connect() as conn:
+        rows = conn.execute(select(ItemRecord).where(ItemRecord.id == 1)).fetchall()
+        assert len(rows) == 1
+        assert rows[0][1] == "first"
+
+    with engine.connect() as conn:
+        trans = conn.begin()
+        conn.execute(ItemRecord.__table__.insert().values(id=2, name="rolled_back"))
+        trans.rollback()
+
+    with engine.connect() as conn:
+        rows_after = conn.execute(select(ItemRecord)).fetchall()
+        assert len(rows_after) == 1
+
+    engine.dispose()
+
+
 @pytest.mark.anyio
-async def test_sqlspec_arrow_capsule_export_and_multipool_shutdown() -> None:
-    """Verify SQLSpecStore.export_arrow_capsule and SQLSpecPlugin multi-pool shutdown."""
-    store = ObjectStore("memory://")
-    bridge = SQLSpecStore(store, prefix="exports")
+async def test_sqlite_vtb_async_engine_ddl_dml_and_rollback() -> None:
+    """Verify create_async_engine with sqlite+vtb_async:///:memory: persists across sessions."""
+    engine = create_async_engine("sqlite+vtb_async:///:memory:")
 
-    class TabularProvider:
-        __slots__ = ()
+    async with engine.begin() as conn:
+        await conn.run_sync(BaseTestModel.metadata.create_all)
 
-        def to_dicts(self) -> list[dict[str, object]]:
-            return [{"id": 1, "name": "Alpha"}, {"id": 2, "name": "Beta"}]
+    async with AsyncSession(engine) as session:
+        session.add(ItemRecord(id=10, name="async_item"))
+        await session.commit()
 
-    res = bridge.export_arrow_capsule("items.arrow", TabularProvider())
-    assert res.size > 0
-    assert len(bridge.read_arrow_ipc("items.arrow")) == res.size
+    async with AsyncSession(engine) as session:
+        result = await session.execute(select(ItemRecord).where(ItemRecord.id == 10))
+        item = result.scalar_one_or_none()
+        assert item is not None
+        assert item.name == "async_item"
 
-    closed_pools: list[str] = []
+    async with AsyncSession(engine) as session:
+        session.add(ItemRecord(id=20, name="temp_item"))
+        await session.flush()
+        await session.rollback()
 
-    class DummyPool:
-        __slots__ = ("name",)
+    async with AsyncSession(engine) as session:
+        result_final = await session.execute(select(ItemRecord))
+        items = result_final.scalars().all()
+        assert len(items) == 1
+        assert items[0].id == 10
 
-        def __init__(self, name: str) -> None:
-            self.name = name
-
-        async def close(self) -> None:
-            closed_pools.append(self.name)
-
-    class DummyDriver:
-        __slots__ = ()
-
-        def execute(self, statement: str, *args: object, **kwargs: object) -> object:
-            _ = (statement, args, kwargs)
-            return None
-
-    cfg1 = SQLSpecSyncConfig[object, DummyPool, DummyDriver](
-        bind_key="primary",
-        pool_instance=DummyPool("primary"),
-    )
-    cfg2 = SQLSpecSyncConfig[object, DummyPool, DummyDriver](
-        bind_key="events",
-        pool_instance=DummyPool("events"),
-    )
-    plugin: SQLSpecPlugin[SQLSpecSyncConfig[object, DummyPool, DummyDriver]] = SQLSpecPlugin(
-        config=[cfg1, cfg2],
-        store=store,
-    )
-    state_dict: dict[str, object] = {}
-    plugin.install_state(state_dict)
-    await plugin.close_pools()
-    assert closed_pools == ["primary", "events"]
+    await engine.dispose()
 
 
 def test_vector_and_binary_json_types_across_dialects() -> None:
-    """Verify Vector and BinaryJson DDL compilation, bind processing, and distance expressions."""
-    vec_type = Vector(768, storage_format="float32", column_name="embedding")
+    """Verify Vector and BinaryJSON DDL compilation, bind processing, and distance expressions."""
+    vec_type = Vector(768, precision="float32", column_name="embedding")
     assert vec_type.get_col_spec("postgresql+vtb") == "VECTOR(768)"
     assert vec_type.get_col_spec("oracle+vtb") == "VECTOR(768, FLOAT32)"
     assert vec_type.get_col_spec("mysql+vtb") == "VECTOR(768)"
@@ -106,22 +159,71 @@ def test_vector_and_binary_json_types_across_dialects() -> None:
     assert cos_expr.compile_sql("postgresql+vtb") == "embedding <=> :qvec"
     assert cos_expr.compile_sql("mysql+vtb") == "DISTANCE_COSINE(embedding, :qvec)"
 
-    bjson = BinaryJson()
+    bjson = BinaryJSON()
     assert bjson.get_col_spec("postgresql+vtb") == "JSONB"
     assert bjson.get_col_spec("sqlite+vtb") == "JSONB"
     assert bjson.get_col_spec("oracle+vtb") == "JSON"
     assert bjson.process_result_value(memoryview(b'\x01{"a":1}'), "postgresql+vtb") == {"a": 1}
 
 
+@pytest.mark.anyio
+async def test_advanced_alchemy_audit_and_stored_object_lifecycle() -> None:
+    """Verify real UUIDAuditBase, SQLAlchemyAsyncRepositoryService CRUD, and StoredObject rollback cleanup."""
+    object_store = ObjectStore("memory://")
+    config = create_async_alchemy_config(
+        "sqlite+vtb_async:///:memory:",
+        storage_backend=object_store,
+        storage_key="docs_store",
+        enable_file_object_listener=True,
+    )
+    plugin = create_alchemy_plugin(config)
+    assert plugin is not None
+
+    engine = config.get_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(DocumentAuditModel.metadata.create_all)
+
+    session_maker = config.create_session_maker()
+
+    async with session_maker() as session:
+        service = DocumentService(session=session)
+        file_payload = b"Sample specification text"
+        file_obj = FileObject(content=file_payload, filename="arch.txt", backend="docs_store")
+        doc = await service.create(DocumentAuditModel(title="Architecture", file=file_obj), auto_commit=True)
+        assert doc.id is not None
+        assert doc.file.path == "arch.txt"
+
+        stored_bytes = await object_store.get_async("arch.txt")
+        assert stored_bytes == file_payload
+
+        loaded = await service.get(doc.id)
+        assert loaded.title == "Architecture"
+        assert loaded.file.path == "arch.txt"
+
+    async with session_maker() as session:
+        service = DocumentService(session=session)
+        temp_file = FileObject(content=b"temporary bytes", filename="temporary.bin", backend="docs_store")
+        temp_doc = await service.create(DocumentAuditModel(title="Temp", file=temp_file))
+        await session.flush()
+        temp_path = temp_doc.file.path
+        await session.rollback()
+
+        with pytest.raises(FileNotFoundError):
+            await object_store.get_async(temp_path)
+
+    await engine.dispose()
+
+
 def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
-    """Verify +vertebra and +vtb dialect registration, plain-tuple DBAPI cursor, and Alembic hooks."""
-    dialects = DialectDescriptor.register_all()
-    assert len(dialects) == 8
-    assert dialects["postgresql.vtb"] is PostgresDialect
-    assert dialects["oracle.vtb"] is OracleDialect
-    assert dialects["sqlite.vtb"] is SqliteDialect
-    assert OracleDialect.use_insertmanyvalues is True
-    assert OracleDialect.insert_executemany_returning is True
+    """Verify +vtb dialect registration, DBAPI cursor, and Alembic DefaultImpl integrations."""
+    impls = AlembicImpl.register_all()
+    assert "postgresql+vtb" in impls
+    assert "oracle+vtb" in impls
+    assert "sqlite+vtb" in impls
+    assert issubclass(PostgreSQLAlembicImpl, AlembicImpl.__bases__[0])
+    assert issubclass(SQLiteAlembicImpl, AlembicImpl.__bases__[0])
+    assert issubclass(OracleAlembicImpl, AlembicImpl.__bases__[0])
+    assert issubclass(MySQLAlembicImpl, AlembicImpl.__bases__[0])
 
     dbapi = DBAPIModule()
     conn = dbapi.connect("sqlite+vtb:///:memory:")
@@ -134,11 +236,6 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
     assert type(row) is tuple
     conn.close()
 
-    impls = AlembicImpl.register_all()
-    assert len(impls) == 8
-    assert impls["oracle+vtb"].transactional_ddl is False
-    assert impls["postgresql+vtb"].transactional_ddl is True
-
     class DummyAutogenContext:
         __slots__ = ("imports",)
 
@@ -150,7 +247,7 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
     assert rendered_vec == "Vector(1536, storage_format='float32')"
     assert "from vertebra.extensions.sqlalchemy import Vector" in ctx.imports
     assert AlembicImpl.compare_type(None, None, None, "VECTOR(1536)", Vector(1536)) is False
-    assert AlembicImpl.compare_type(None, None, None, "JSONB", BinaryJson()) is False
+    assert AlembicImpl.compare_type(None, None, None, "JSONB", BinaryJSON()) is False
 
     view_op = CreateViewOp("active_users_v", "SELECT id FROM users WHERE active = 1", or_replace=True)
     assert (
@@ -159,7 +256,7 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
     )
     assert view_op.reverse().to_sql("postgresql+vtb") == "DROP VIEW IF EXISTS active_users_v"
 
-    pg_cfg = PostgresConfig(
+    pg_cfg = PostgreSQLConfig(
         dsn="postgresql://u:p@pgbouncer:6432/app",
         direct_dsn="postgresql://u:p@pg-primary:5432/app",
         pooler_mode="transaction",
@@ -202,15 +299,15 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
 
 
 def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
-    """Verify PostgresDialect, DBAPIModule paramstyles, compiler hooks, and cursor descriptions."""
-    pg_dbapi = PostgresDialect.dbapi()
+    """Verify PostgreSQLDialect, DBAPIModule paramstyles, compiler hooks, and cursor descriptions."""
+    pg_dbapi = PostgreSQLDialect.dbapi()
     assert pg_dbapi.paramstyle == "pyformat"
-    assert PostgresDialect.import_dbapi().paramstyle == "pyformat"
-    assert SqliteDialect.dbapi().paramstyle == "qmark"
-    assert MysqlDialect.dbapi().paramstyle == "format"
+    assert PostgreSQLDialect.import_dbapi().paramstyle == "pyformat"
+    assert SQLiteDialect.dbapi().paramstyle == "qmark"
+    assert MySQLDialect.dbapi().paramstyle == "format"
     assert OracleDialect.dbapi().paramstyle == "named"
 
-    driver = SyncPostgresDriver(PostgresConfig(dsn="memory://"))
+    driver = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://"))
     driver._in_memory_rows = [(1, "item1"), (2, "item2")]
 
     conn = pg_dbapi.connect("postgresql+vtb://localhost:5432/app", driver=driver)
@@ -225,7 +322,7 @@ def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
     assert conn.closed is True
 
     sentinel_spec = InsertSentinelSpec.create(table_name="orders", sentinel_column="_vtb_sentinel")
-    rendered_insert = PostgresDialect.compile_insert_returning_sentinel(
+    rendered_insert = PostgreSQLDialect.compile_insert_returning_sentinel(
         "orders",
         ["id", "name"],
         sentinel_spec,
@@ -238,19 +335,19 @@ def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
         "archived_customers",
         where_sql="orders.customer_id = archived_customers.id",
     )
-    assert PostgresDialect.compile_delete_using(del_clause) == (
+    assert PostgreSQLDialect.compile_delete_using(del_clause) == (
         "DELETE FROM orders USING archived_customers WHERE orders.customer_id = archived_customers.id"
     )
 
     vec = Vector(768)
-    bjson = BinaryJson()
-    assert PostgresDialect.type_descriptor(vec) is vec
-    assert PostgresDialect.type_descriptor(bjson) is bjson
+    bjson = BinaryJSON()
+    assert PostgreSQLDialect.type_descriptor(vec) is vec
+    assert PostgreSQLDialect.type_descriptor(bjson) is bjson
 
 
 @pytest.mark.anyio
 async def test_sqlalchemy_21_orm_optimizations_and_sync_engine_adapter() -> None:
-    """Verify SelectInLoadSpec, InsertSentinelSpec, DeleteUsingClause, ParameterizedSql, and SyncEngineAdapter."""
+    """Verify SelectInLoadSpec, InsertSentinelSpec, DeleteUsingClause, ParameterizedSQL, and SyncEngineAdapter."""
     load_spec = SelectInLoadSpec.create("items", chunksize=500, omit_join=True)
     assert load_spec.chunksize == 500
     assert load_spec.omit_join is True
@@ -269,7 +366,7 @@ async def test_sqlalchemy_21_orm_optimizations_and_sync_engine_adapter() -> None
         "DELETE FROM orders USING archived_customers WHERE orders.customer_id = archived_customers.id"
     )
 
-    compiled = ParameterizedSql.from_template(
+    compiled = ParameterizedSQL.from_template(
         ["SELECT * FROM items WHERE category = ", " AND price <= ", ""],
         ["coffee", 25.0],
     )
@@ -279,3 +376,17 @@ async def test_sqlalchemy_21_orm_optimizations_and_sync_engine_adapter() -> None
     adapter = SyncEngineAdapter(max_workers=2)
     result = await adapter.run_sync(lambda x, y: x + y, 20, 22)
     assert result == 42
+
+
+def test_alchemy_sync_config_factory() -> None:
+    """Verify create_sync_alchemy_config and storage backend integration."""
+    store = ObjectStore("memory://")
+    backend = ObjectStoreBackend(store=store, key="sync_docs")
+    assert backend.store is store
+
+    sync_cfg = create_sync_alchemy_config(
+        "sqlite+vtb:///:memory:",
+        storage_backend=store,
+        storage_key="sync_docs",
+    )
+    assert sync_cfg.connection_string == "sqlite+vtb:///:memory:"

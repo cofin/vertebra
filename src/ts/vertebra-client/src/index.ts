@@ -53,8 +53,8 @@ export { SessionStore, store } from "./store/index";
 export { TraceContext } from "./telemetry";
 export {
   WASM_MAGIC_BYTES,
-  WasmClient,
-  type WasmClientOptions,
+  WASMClient,
+  type WASMClientOptions,
 } from "./wasm";
 export {
   type PubSubWireFrame,

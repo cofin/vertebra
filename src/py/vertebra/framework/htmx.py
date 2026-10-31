@@ -13,8 +13,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 __all__ = (
-    "HtmxRequest",
-    "HtmxResponse",
+    "HTMXRequest",
+    "HTMXResponse",
     "HxSwap",
 )
 
@@ -53,7 +53,7 @@ def _lookup_header(headers: Mapping[str, str], *names: str) -> str | None:
     return None
 
 
-class HtmxRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class HTMXRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Parsed HTMX request headers (HX-Request, HX-Target, HX-Trigger, HX-Boosted)."""
 
     is_htmx: bool = False
@@ -66,8 +66,8 @@ class HtmxRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     trigger_name: str | None = None
 
     @classmethod
-    def from_headers(cls, headers: Mapping[str, str] | Sequence[tuple[bytes, bytes]]) -> HtmxRequest:
-        """Construct an HtmxRequest from case-insensitive HTTP request headers or raw wire tuples."""
+    def from_headers(cls, headers: Mapping[str, str] | Sequence[tuple[bytes, bytes]]) -> HTMXRequest:
+        """Construct an HTMXRequest from case-insensitive HTTP request headers or raw wire tuples."""
         if not isinstance(headers, Mapping):
             raw_map: dict[str, str] = {}
             for k_bytes, v_bytes in headers:
@@ -98,7 +98,7 @@ class HtmxRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         )
 
 
-class HtmxResponse(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class HTMXResponse(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """HTML fragment response with typed HX-* response headers."""
 
     html: str

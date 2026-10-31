@@ -16,12 +16,15 @@ from vertebra.typing import (
     FrozenCamelizedStruct,
 )
 from vertebra.utils.serializers import (
-    MsgpackCodec,
+    MsgPackSerializer,
     decode_json,
     decode_msgpack,
     encode_json,
     encode_json_bytes,
-    encode_msgpack,
+    encode_msgpack_bytes,
+    encode_msgpack_into,
+    get_default_json_serializer,
+    get_default_msgpack_serializer,
 )
 
 
@@ -112,9 +115,9 @@ def test_decode_json_string():
 
 
 def test_msgpack_roundtrip_basic_and_memoryview() -> None:
-    """Verify MsgpackCodec round-trips basic primitives and supports memoryview inputs."""
+    """Verify MsgPackSerializer round-trips basic primitives, buffer writes, and memoryview inputs."""
     payload = {"key": "value", "count": 42, "items": [1, 2, 3]}
-    encoded = encode_msgpack(payload)
+    encoded = encode_msgpack_bytes(payload)
     assert isinstance(encoded, bytes)
 
     decoded = decode_msgpack(encoded)
@@ -123,11 +126,18 @@ def test_msgpack_roundtrip_basic_and_memoryview() -> None:
     view_decoded = decode_msgpack(memoryview(encoded))
     assert view_decoded == payload
 
+    buf = bytearray(b"prefix:")
+    offset = len(buf)
+    encode_msgpack_into(payload, buf, offset=offset)
+    assert decode_msgpack(memoryview(buf)[offset:]) == payload
+    assert get_default_json_serializer() is get_default_json_serializer()
+    assert get_default_msgpack_serializer() is MsgPackSerializer.default()
+
 
 def test_msgpack_struct_and_typed_decode() -> None:
-    """Verify MsgpackCodec encodes msgspec.Struct and decodes typed schemas."""
+    """Verify MsgPackSerializer encodes msgspec.Struct and decodes typed schemas."""
     struct_inst = MyStruct(id=99, data="structured")
-    encoded = encode_msgpack(struct_inst)
+    encoded = encode_msgpack_bytes(struct_inst)
 
     decoded = decode_msgpack(encoded, type=MyStruct)
     assert isinstance(decoded, MyStruct)
@@ -136,28 +146,28 @@ def test_msgpack_struct_and_typed_decode() -> None:
 
 
 def test_msgpack_uuid_datetime_path_hooks() -> None:
-    """Verify MsgpackCodec hooks for UUID, datetime, and Path objects."""
+    """Verify MsgPackSerializer hooks for UUID, datetime, and Path objects."""
     uid = uuid.uuid4()
     now = datetime.datetime(2026, 10, 22, 12, 0, tzinfo=datetime.UTC)
     pth = Path("/var/log/vertebra.log")
 
     payload = {"uid": uid, "time": now, "path": pth}
-    encoded = encode_msgpack(payload)
+    encoded = encode_msgpack_bytes(payload)
     assert isinstance(encoded, bytes)
 
     decoded = decode_msgpack(encoded)
     assert decoded["uid"] == str(uid)
     assert decoded["path"] == str(pth)
 
-    codec = MsgpackCodec.default()
-    assert codec.decode(encoded) == decoded
+    serializer = MsgPackSerializer.default()
+    assert serializer.decode(encoded) == decoded
 
-    path_encoded = encode_msgpack(pth)
+    path_encoded = encode_msgpack_bytes(pth)
     decoded_path = decode_msgpack(path_encoded, type=Path)
     assert isinstance(decoded_path, Path)
     assert decoded_path == pth
 
-    uuid_encoded = encode_msgpack(uid)
+    uuid_encoded = encode_msgpack_bytes(uid)
     decoded_uuid = decode_msgpack(uuid_encoded, type=uuid.UUID)
     assert isinstance(decoded_uuid, uuid.UUID)
     assert decoded_uuid == uid

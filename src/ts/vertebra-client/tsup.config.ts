@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { defineConfig } from "tsup";
 
@@ -37,6 +37,7 @@ export default defineConfig({
     console.log("Build successful. Syncing full dist to Python package bundle...");
 
     try {
+      rmSync(pythonBundleDir, { recursive: true, force: true });
       mkdirSync(pythonBundleDir, { recursive: true });
       cpSync(distDir, pythonBundleDir, { recursive: true });
       console.log(`Synced ${distDir} -> ${pythonBundleDir}`);

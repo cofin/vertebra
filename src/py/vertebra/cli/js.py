@@ -107,17 +107,23 @@ def list_deps() -> None:
 
 @js.command()
 def install() -> None:
-    """Resolve JS dependencies and generate import map."""
+    """Sync the wheel-bundled @vertebra/client SDK and generate import map."""
     project_dir = Path.cwd()
 
     try:
         config = BuildConfig.load(project_dir)
-        if config.js.dependencies or config.js.dev_dependencies:
-            with console.status("Resolving JS dependencies…"):
-                out = ImportMapGenerator.write(config.js, project_dir / ".vertebra", include_dev=True)
-            console.success(f"Generated import map at {out}")
-        else:
-            console.info("No JS dependencies found in pyproject.toml")
+        vertebra_dir = project_dir / ".vertebra"
+        with console.status("Syncing @vertebra/client and resolving JS import map…"):
+            out = ImportMapGenerator.write(
+                config.js,
+                vertebra_dir,
+                include_dev=True,
+                include_client=True,
+            )
+            client_dir = ImportMapGenerator.sync_wheel_client(vertebra_dir)
+        console.success(f"Generated import map at {out}")
+        if client_dir is not None:
+            console.success(f"Synced wheel-bundled @vertebra/client to {client_dir}")
     except Exception as exc:
         raise CLIError(f"Failed to resolve dependencies: {exc}") from None
 

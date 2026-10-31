@@ -39,14 +39,14 @@ from vertebra.framework.inertia import (
     ScrollProp,
     inertia,
 )
-from vertebra.framework.ssr import SsrConfig
+from vertebra.framework.ssr import SSRConfig
 
 app = App()
 
 config = InertiaConfig(
     enabled=True,
     version="1.0",
-    ssr=SsrConfig(bundle_path="static/ssr/ssr.js"),
+    ssr=SSRConfig(bundle_path="static/ssr/ssr.js"),
 )
 
 
@@ -73,10 +73,10 @@ page = InertiaResponse(
 Render JavaScript and TypeScript page components on the server using the embedded QuickJS worker pool (`EmbeddedSsrClient.from_config`), an external HTTP runtime (`SidecarSsrClient`), or static build-time prerendering (`prerender_routes`):
 
 ```python
-from vertebra.framework.ssr import EmbeddedSsrClient, SsrConfig
+from vertebra.framework.ssr import EmbeddedSSRClient, SSRConfig
 
-ssr = EmbeddedSsrClient.from_config(
-    SsrConfig(bundle_path="static/ssr/ssr.js", workers=4)
+ssr = EmbeddedSSRClient.from_config(
+    SSRConfig(bundle_path="static/ssr/ssr.js", workers=4)
 )
 rendered = ssr.render(
     {
@@ -93,14 +93,14 @@ rendered = ssr.render(
 Inspect incoming `HX-*` headers with `HtmxRequest` (`is_htmx`, `boosted`, `target`, `trigger`) and construct partial HTML responses with `HtmxResponse` (`trigger`, `retarget`, `reswap`, `push_url`):
 
 ```python
-from vertebra.framework.htmx import HtmxRequest, HtmxResponse, HxSwap
+from vertebra.framework.htmx import HTMXRequest, HTMXResponse
 
-hx = HtmxRequest.from_headers({"HX-Request": "true", "HX-Target": "items-list"})
-response = HtmxResponse(
+hx = HTMXRequest.from_headers({"HX-Request": "true", "HX-Target": "items-list"})
+response = HTMXResponse(
     "<li>New item</li>",
     trigger="itemAdded",
     retarget="#items-list",
-    reswap=HxSwap.BEFOREEND,
+    reswap="beforeend",
 )
 ```
 

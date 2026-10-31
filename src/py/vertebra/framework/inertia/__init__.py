@@ -16,7 +16,7 @@ from typing import Any
 
 import msgspec
 
-from vertebra.framework.ssr import SsrClient, SsrConfig, SsrResult, render_page_shell
+from vertebra.framework.ssr import SSRClient, SSRConfig, SSRResult, render_page_shell
 from vertebra.utils.serializers import encode_json
 
 __all__ = (
@@ -29,9 +29,9 @@ __all__ = (
     "MergeProp",
     "OnceProp",
     "OptionalProp",
+    "SSRClient",
+    "SSRResult",
     "ScrollProp",
-    "SsrClient",
-    "SsrResult",
     "inertia",
 )
 
@@ -49,7 +49,7 @@ class InertiaConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     enabled: bool = False
     root_template: str = "index.html"
     version: str | None = None
-    ssr: SsrConfig | None = None
+    ssr: SSRConfig | None = None
     shared_data: dict[str, Any] = msgspec.field(default_factory=dict)
     manifest_path: str = "dist/.vite/manifest.json"
 
@@ -141,7 +141,7 @@ class InertiaMiddleware:
 
     __slots__ = ("_config", "_ssr", "_version")
 
-    def __init__(self, config: InertiaConfig | None = None, ssr_client: SsrClient | None = None) -> None:
+    def __init__(self, config: InertiaConfig | None = None, ssr_client: SSRClient | None = None) -> None:
         self._config = config or InertiaConfig()
         self._ssr = ssr_client
         self._version: str | None = self._config.version
@@ -324,7 +324,7 @@ class InertiaMiddleware:
                 body=body,
             )
 
-        ssr_result: SsrResult | None = None
+        ssr_result: SSRResult | None = None
         if self._config.ssr_enabled and self._ssr is not None:
             try:
                 ssr_result = self._ssr.render(page)

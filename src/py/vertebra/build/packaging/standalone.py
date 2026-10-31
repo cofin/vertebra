@@ -1,13 +1,9 @@
 """Standalone relocatable directory builder for Vertebra applications."""
 
-import hashlib
 import py_compile
 import shutil
 from pathlib import Path
 
-import msgspec
-
-from vertebra.build.packaging.pgo import RustPgoConfig, detect_python_build, validate_profdata
 from vertebra.build.packaging.targets import BuildTarget
 from vertebra.utils.serializers import format_json
 
@@ -35,8 +31,6 @@ class StandaloneBuilder:
 
     __slots__ = (
         "entrypoint",
-        "pgo_enabled",
-        "profdata_path",
         "profile",
         "project_dir",
         "server_binary",
@@ -49,16 +43,12 @@ class StandaloneBuilder:
         target: BuildTarget,
         entrypoint: str = "app:app",
         *,
-        pgo_enabled: bool = False,
-        profdata_path: Path | None = None,
         server_binary: Path | None = None,
         profile: str = "release",
     ) -> None:
         self.project_dir = project_dir
         self.target = target
         self.entrypoint = entrypoint
-        self.pgo_enabled = pgo_enabled or (profdata_path is not None)
-        self.profdata_path = profdata_path
         self.server_binary = server_binary
         self.profile = profile
 
@@ -125,33 +115,10 @@ class StandaloneBuilder:
                 "rust_triple": self.target.rust_triple,
                 "pbs_url": self.target.pbs_url,
             },
-            "pgo_enabled": self.pgo_enabled,
             "compiled_modules": compiled_count,
         }
         if staged_binary_rel is not None:
             manifest["server_binary"] = staged_binary_rel
-
-        if self.pgo_enabled:
-            py_info = detect_python_build()
-            rust_pgo = RustPgoConfig(profile_dir=dist_root / "pgo-profiles")
-            manifest["python_pgo_enabled"] = py_info.is_pgo
-            manifest["python_lto_enabled"] = py_info.is_lto
-            manifest["python_build"] = msgspec.to_builtins(py_info)
-            if self.profdata_path is not None:
-                resolved_profdata = self.profdata_path.resolve()
-                if not resolved_profdata.is_file():
-                    msg = f"PGO profdata file does not exist: {resolved_profdata}"
-                    raise FileNotFoundError(msg)
-                raw_profdata = resolved_profdata.read_bytes()
-                profdata_valid = validate_profdata(resolved_profdata)
-                manifest["profdata_bytes"] = len(raw_profdata)
-                manifest["profdata_sha256"] = hashlib.sha256(raw_profdata).hexdigest()
-                manifest["profdata_valid"] = profdata_valid
-                manifest["pgo_mode"] = "use" if profdata_valid else "fallback"
-                manifest["rustflags"] = rust_pgo.use_rustflags(resolved_profdata) if profdata_valid else ""
-            else:
-                manifest["pgo_mode"] = "generate"
-                manifest["rustflags"] = rust_pgo.instrument_rustflags()
 
         formatted = format_json(manifest, indent=2)
         (dist_root / "manifest.json").write_text(formatted + "\n")

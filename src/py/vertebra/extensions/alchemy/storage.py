@@ -1,228 +1,239 @@
-"""Advanced Alchemy FileObject/StoredObject storage backend powered by ObjectStore."""
+"""Advanced Alchemy StorageBackend implementation backed by ObjectStore."""
 
 from __future__ import annotations
 
+import contextlib
+import datetime as dt
 import inspect
-from collections.abc import AsyncIterable, Buffer, Iterable, Sequence
+import os
+from collections.abc import Buffer, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import msgspec
+from vertebra.storage import ObjectMeta, ObjectStore
+from vertebra.typing import MissingDependencyError
 
-from vertebra.storage import ObjectMeta, ObjectStore, get_default_storage_registry
-from vertebra.storage.pipeline import StagedUpload, UploadTracker
-from vertebra.typing import BaseStruct
+try:
+    from advanced_alchemy.types.file_object import StorageBackend, storages
+except ImportError as exc:
+    raise MissingDependencyError(
+        "advanced-alchemy",
+        install_package="advanced-alchemy",
+        extra="alchemy",
+    ) from exc
+
+_storage_get_attr = "get"
+if not hasattr(storages, _storage_get_attr):
+    with contextlib.suppress(AttributeError, TypeError):
+        setattr(storages, _storage_get_attr, storages.get_backend)
+
+if TYPE_CHECKING:
+    from advanced_alchemy.types.file_object.base import AsyncDataLike, DataLike, PathLike
+    from advanced_alchemy.types.file_object.file import FileObject
+    from advanced_alchemy.types.file_object.registry import StorageRegistry
 
 __all__ = (
-    "FileAttachment",
     "ObjectStoreBackend",
-    "StoredObject",
+    "register_storage_backend",
 )
 
-type PathLike = str | Path
-type SyncDataLike = Buffer | Path | Iterable[bytes] | Any
-type AsyncDataLike = SyncDataLike | AsyncIterable[bytes]
 
+class ObjectStoreBackend(StorageBackend):
+    """Advanced Alchemy StorageBackend delegating zero-copy and async I/O to ObjectStore."""
 
-class FileAttachment(BaseStruct):
-    """Value object representing an Advanced Alchemy FileObject attachment."""
-
-    path: str
-    filename: str | None = None
-    content_type: str = "application/octet-stream"
-    size: int = 0
-    etag: str | None = None
-    metadata: dict[str, Any] = msgspec.field(default_factory=dict)
-
-
-class StoredObject(msgspec.Struct, frozen=True, gc=False):
-    """Stored object descriptor delegating directly to ObjectStore and StorageRegistry."""
-
-    key: str
-    store_name: str = "default"
-    metadata: dict[str, Any] = msgspec.field(default_factory=dict)
-
-    def _resolve_store(self, registry: Any = None) -> ObjectStore:
-        reg = registry or get_default_storage_registry()
-        return reg.resolve_store(self.store_name)
-
-    def put(self, data: bytes, *, registry: Any = None) -> Any:
-        """Store bytes synchronously."""
-        return self._resolve_store(registry).put(self.key, data)
-
-    async def put_async(self, data: bytes, *, registry: Any = None) -> Any:
-        """Store bytes asynchronously."""
-        return await self._resolve_store(registry).put_async(self.key, data)
-
-    def get(self, *, registry: Any = None) -> bytes:
-        """Read bytes synchronously."""
-        return self._resolve_store(registry).get(self.key)
-
-    async def get_async(self, *, registry: Any = None) -> bytes:
-        """Read bytes asynchronously."""
-        return await self._resolve_store(registry).get_async(self.key)
-
-    def delete(self, *, registry: Any = None) -> None:
-        """Delete stored object synchronously."""
-        self._resolve_store(registry).delete(self.key)
-
-    async def delete_async(self, *, registry: Any = None) -> None:
-        """Delete stored object asynchronously."""
-        await self._resolve_store(registry).delete_async(self.key)
-
-    def presign_get(self, *, expires_in_secs: int = 3600, registry: Any = None) -> str:
-        """Generate presigned GET URL."""
-        return self._resolve_store(registry).presign_get(self.key, expires_in_secs=expires_in_secs)
-
-    def presign_put(self, *, expires_in_secs: int = 3600, registry: Any = None) -> str:
-        """Generate presigned PUT URL."""
-        return self._resolve_store(registry).presign_put(self.key, expires_in_secs=expires_in_secs)
-
-    def verify_presigned_url(self, url: str, *, registry: Any = None) -> bool:
-        """Verify presigned URL delegating directly to ObjectStore."""
-        return self._resolve_store(registry).verify_presigned_url(url)
-
-
-class ObjectStoreBackend:
-    """Advanced Alchemy compatible storage backend backed by ObjectStore."""
-
-    driver: str = "vertebra"
-    protocol: str = "vertebra"
-    __slots__ = ("_prefix", "_store", "key")
+    driver = "vertebra"
 
     def __init__(
         self,
         key: str = "default",
-        fs: ObjectStore | None = None,
+        fs: ObjectStore | str | None = None,
         *,
         store: ObjectStore | None = None,
         prefix: str = "",
+        **kwargs: Any,
     ) -> None:
-        actual_store = store or fs
-        if not isinstance(actual_store, ObjectStore):
-            msg = "ObjectStoreBackend requires an ObjectStore instance"
+        """Initialize the storage backend for Advanced Alchemy FileObject and StoredObject columns.
+
+        Args:
+            key: Logical storage backend key registered in Advanced Alchemy's `storages` registry.
+            fs: Either an `ObjectStore` instance or a storage URI string (`memory://`, `file://`, `s3://`, `gs://`, `az://`, `oci://`, `r2://`).
+            store: Explicit `ObjectStore` keyword alias when constructing directly.
+            prefix: Optional key namespace prefix prepended to all stored object paths.
+            **kwargs: Optional `ObjectStore` string options or `signing` configuration when `fs` is a URI string.
+        """
+        signing = kwargs.pop("signing", None)
+        string_options: dict[str, str] = {
+            str(k): str(v) for k, v in kwargs.items() if isinstance(v, (str, int, float, bool))
+        }
+        target = store if store is not None else fs
+        if isinstance(target, ObjectStore):
+            resolved_store = target
+        elif isinstance(target, str):
+            resolved_store = ObjectStore(target, options=string_options or None, signing=signing)
+        elif target is None:
+            resolved_store = ObjectStore("memory://", options=string_options or None, signing=signing)
+        else:
+            msg = f"Expected ObjectStore or URI string, got {type(target)!r}"
             raise TypeError(msg)
-        self.key = key
-        self._store = actual_store
+
+        super().__init__(key=key, fs=resolved_store, **kwargs)
+        self._store = resolved_store
         self._prefix = prefix.strip("/")
+        self.protocol = self._normalize_protocol(resolved_store.scheme)
 
     @property
     def store(self) -> ObjectStore:
         """Return the underlying ObjectStore instance."""
         return self._store
 
+    @property
+    def prefix(self) -> str:
+        """Return the configured object key prefix."""
+        return self._prefix
+
+    def get_content(self, path: PathLike, *, options: dict[str, Any] | None = None) -> bytes:
+        """Read full object bytes synchronously."""
+        _ = options
+        return self._store.get(self._qualify(path))
+
+    async def get_content_async(self, path: PathLike, *, options: dict[str, Any] | None = None) -> bytes:
+        """Read full object bytes asynchronously."""
+        _ = options
+        return await self._store.get_async(self._qualify(path))
+
+    def get_metadata(self, path: PathLike) -> ObjectMeta:
+        """Read stored object metadata synchronously."""
+        return self._store.head(self._qualify(path))
+
+    async def get_metadata_async(self, path: PathLike) -> ObjectMeta:
+        """Read stored object metadata asynchronously."""
+        return await self._store.head_async(self._qualify(path))
+
     def save_object(
         self,
-        file_object: FileAttachment,
-        data: SyncDataLike,
-        **kwargs: Any,
-    ) -> FileAttachment:
-        """Persist data synchronously and populate size and etag on file_object."""
-        _ = kwargs
+        file_object: FileObject,
+        data: DataLike,
+        *,
+        use_multipart: bool | None = None,
+        chunk_size: int = 5 * 1024 * 1024,
+        max_concurrency: int = 12,
+    ) -> FileObject:
+        """Persist a FileObject payload synchronously and populate size, etag, and last_modified."""
+        _ = max_concurrency
         qualified = self._qualify(file_object.path)
         if isinstance(data, Path):
             put_res = self._store.put_file(qualified, data)
         else:
             raw = self._resolve_sync_data(data)
-            put_res = self._store.put(qualified, raw)
-        file_object.size = put_res.size
-        file_object.etag = put_res.etag
-        if put_res.etag:
-            file_object.metadata["etag"] = put_res.etag
+            if use_multipart and chunk_size > 0:
+                view = memoryview(raw).cast("B")
+                parts = [view[idx : idx + chunk_size] for idx in range(0, len(view), chunk_size)] or [memoryview(b"")]
+                put_res = self._store.put_multipart(qualified, parts)
+            else:
+                put_res = self._store.put(qualified, raw)
+        self._apply_put_metadata(file_object, put_res.size, put_res.etag)
         return file_object
 
     async def save_object_async(
         self,
-        file_object: FileAttachment,
+        file_object: FileObject,
         data: AsyncDataLike,
-        **kwargs: Any,
-    ) -> FileAttachment:
-        """Persist data asynchronously and populate size and etag on file_object."""
-        _ = kwargs
+        *,
+        use_multipart: bool | None = None,
+        chunk_size: int = 5 * 1024 * 1024,
+        max_concurrency: int = 12,
+    ) -> FileObject:
+        """Persist a FileObject payload asynchronously and populate size, etag, and last_modified."""
+        _ = max_concurrency
         qualified = self._qualify(file_object.path)
         if isinstance(data, Path):
             put_res = await self._store.put_file_async(qualified, data)
         else:
             raw = await self._resolve_async_data(data)
-            put_res = await self._store.put_async(qualified, raw)
-        file_object.size = put_res.size
-        file_object.etag = put_res.etag
-        if put_res.etag:
-            file_object.metadata["etag"] = put_res.etag
+            if use_multipart and chunk_size > 0:
+                view = memoryview(raw).cast("B")
+                parts = [view[idx : idx + chunk_size] for idx in range(0, len(view), chunk_size)] or [memoryview(b"")]
+                put_res = self._store.put_multipart(qualified, parts)
+            else:
+                put_res = await self._store.put_async(qualified, raw)
+        self._apply_put_metadata(file_object, put_res.size, put_res.etag)
         return file_object
 
-    def get_content(self, path: PathLike, *, options: dict[str, Any] | None = None) -> bytes:
-        """Read attachment bytes synchronously."""
-        _ = options
-        return self._store.get(self._qualify(path))
-
-    async def get_content_async(self, path: PathLike, *, options: dict[str, Any] | None = None) -> bytes:
-        """Read attachment bytes asynchronously."""
-        _ = options
-        return await self._store.get_async(self._qualify(path))
-
-    def get_metadata(self, path: PathLike) -> ObjectMeta:
-        """Read object metadata synchronously."""
-        return self._store.head(self._qualify(path))
-
     def delete_object(self, paths: PathLike | Sequence[PathLike]) -> None:
-        """Delete one or more stored attachments synchronously."""
-        items = [paths] if isinstance(paths, (str, Path)) else list(paths)
+        """Delete one or more stored objects synchronously."""
+        items: list[PathLike] = [paths] if isinstance(paths, (str, Path, os.PathLike)) else list(paths)
         for item in items:
-            qualified = self._qualify(item)
-            if self._store.exists(qualified):
-                self._store.delete(qualified)
+            self._store.delete(self._qualify(item))
 
     async def delete_object_async(self, paths: PathLike | Sequence[PathLike]) -> None:
-        """Delete one or more stored attachments asynchronously."""
-        items = [paths] if isinstance(paths, (str, Path)) else list(paths)
+        """Delete one or more stored objects asynchronously."""
+        items: list[PathLike] = [paths] if isinstance(paths, (str, Path, os.PathLike)) else list(paths)
         for item in items:
-            qualified = self._qualify(item)
-            if await self._store.exists_async(qualified):
-                await self._store.delete_async(qualified)
+            await self._store.delete_async(self._qualify(item))
 
-    def sign_object_url(
+    def sign(
         self,
-        path: PathLike,
+        paths: PathLike | Sequence[PathLike],
         *,
-        expires_in_secs: int = 3600,
-        method: str = "GET",
-        timestamp: int | None = None,
-    ) -> str:
-        """Generate a presigned GET or PUT URL for an attachment."""
+        expires_in: int | None = None,
+        for_upload: bool = False,
+    ) -> str | list[str]:
+        """Generate presigned GET or PUT URLs for one or more object paths."""
+        ttl = 3600 if expires_in is None else expires_in
+        if isinstance(paths, (str, Path, os.PathLike)):
+            return self._sign_one(paths, expires_in=ttl, for_upload=for_upload)
+        return [self._sign_one(item, expires_in=ttl, for_upload=for_upload) for item in paths]
+
+    async def sign_async(
+        self,
+        paths: PathLike | Sequence[PathLike],
+        *,
+        expires_in: int | None = None,
+        for_upload: bool = False,
+    ) -> str | list[str]:
+        """Generate presigned GET or PUT URLs asynchronously."""
+        return self.sign(paths, expires_in=expires_in, for_upload=for_upload)
+
+    def _sign_one(self, path: PathLike, *, expires_in: int, for_upload: bool) -> str:
+        """Sign a single path using the underlying ObjectStore presigner."""
         qualified = self._qualify(path)
-        if method.upper() == "PUT":
-            return self._store.presign_put(qualified, expires_in_secs=expires_in_secs, timestamp=timestamp)
-        return self._store.presign_get(qualified, expires_in_secs=expires_in_secs, timestamp=timestamp)
-
-    def tracker(self) -> UploadTracker:
-        """Create a transactional UploadTracker bound to this storage backend."""
-        return UploadTracker(self._store)
-
-    def build_staged_upload(self, path: PathLike, data: SyncDataLike) -> StagedUpload:
-        """Construct a StagedUpload record for the qualified path and payload."""
-        raw = self._resolve_sync_data(data)
-        return StagedUpload(key=self._qualify(path), data=bytes(memoryview(raw)), store=self._store)
-
-    @staticmethod
-    async def provide_tracker(store: ObjectStore) -> AsyncIterable[UploadTracker]:
-        """Litestar dependency provider yielding a transactional UploadTracker."""
-        tracker = UploadTracker(store)
         try:
-            yield tracker
-        except Exception:
-            await tracker.after_rollback_async()
-            raise
+            if for_upload:
+                return self._store.presign_put(qualified, expires_in_secs=expires_in)
+            return self._store.presign_get(qualified, expires_in_secs=expires_in)
+        except (RuntimeError, ValueError) as exc:
+            msg = f"URL signing is not configured for backend {self.key!r}: {exc}"
+            raise NotImplementedError(msg) from exc
 
     def _qualify(self, path: PathLike) -> str:
-        raw_path = path.as_posix() if isinstance(path, Path) else str(path)
+        """Normalize a PathLike key and prepend any configured namespace prefix."""
+        raw_path = Path(path).as_posix() if isinstance(path, (Path, os.PathLike)) else str(path)
         cleaned = raw_path.strip().lstrip("/")
         if not self._prefix:
             return cleaned
         return f"{self._prefix}/{cleaned}" if cleaned else self._prefix
 
     @staticmethod
-    def _resolve_sync_data(data: SyncDataLike) -> Buffer:
+    def _normalize_protocol(scheme: str) -> str:
+        """Normalize scheme aliases to canonical Advanced Alchemy protocol identifiers."""
+        lowered = scheme.lower()
+        if lowered == "gs":
+            return "gcs"
+        if lowered == "az":
+            return "azure"
+        return lowered
+
+    @staticmethod
+    def _apply_put_metadata(file_object: FileObject, size: int, etag: str | None) -> None:
+        """Populate size, etag, and UTC last_modified timestamp on a saved FileObject."""
+        file_object.size = size
+        file_object.last_modified = dt.datetime.now(tz=dt.UTC).timestamp()
+        if etag:
+            file_object.etag = etag
+
+    @staticmethod
+    def _resolve_sync_data(data: DataLike) -> Buffer:
+        """Materialize synchronous DataLike inputs into a contiguous Buffer."""
         if isinstance(data, Buffer):
             return data
         if isinstance(data, Path):
@@ -233,6 +244,7 @@ class ObjectStoreBackend:
 
     @staticmethod
     async def _resolve_async_data(data: AsyncDataLike) -> Buffer:
+        """Materialize synchronous or asynchronous DataLike inputs into a contiguous Buffer."""
         if isinstance(data, Buffer):
             return data
         if isinstance(data, Path):
@@ -248,3 +260,45 @@ class ObjectStoreBackend:
                 chunks.append(bytes(chunk))
             return b"".join(chunks)
         return b"".join(bytes(chunk) for chunk in data)
+
+
+def register_storage_backend(
+    store_or_key: ObjectStore | str,
+    *,
+    store: ObjectStore | str | None = None,
+    key: str = "default",
+    prefix: str = "",
+    set_default: bool = False,
+    registry: StorageRegistry | None = None,
+) -> ObjectStoreBackend:
+    """Register an ObjectStoreBackend into Advanced Alchemy's `storages` registry.
+
+    Args:
+        store_or_key: Either a configured `ObjectStore`, storage URI string, or backend key name.
+        store: Optional explicit `ObjectStore` or storage URI string when first argument is key name.
+        key: Backend key referenced by `FileObject(backend=key)` and `StoredObject(backend=key)`.
+        prefix: Optional object key prefix applied to all operations on this backend.
+        set_default: When True, configure `ObjectStoreBackend` as the registry's default URI backend class.
+        registry: Optional custom `StorageRegistry` instance (defaults to `advanced_alchemy.types.file_object.storages`).
+
+    Returns:
+        The registered `ObjectStoreBackend` instance.
+    """
+    target_registry = storages if registry is None else registry
+    if set_default:
+        target_registry.set_default_backend("vertebra.extensions.alchemy.storage.ObjectStoreBackend")
+    if store is not None:
+        resolved_key = str(store_or_key) if key == "default" else key
+        resolved_store = store
+    elif isinstance(store_or_key, str) and ("://" not in store_or_key and not store_or_key.startswith("/")):
+        resolved_key = store_or_key
+        resolved_store = "memory://"
+    else:
+        resolved_key = key
+        resolved_store = store_or_key
+    backend = ObjectStoreBackend(key=resolved_key, fs=resolved_store, prefix=prefix)
+    target_registry.register_backend(backend)
+    if not hasattr(target_registry, _storage_get_attr):
+        with contextlib.suppress(AttributeError, TypeError):
+            setattr(target_registry, _storage_get_attr, target_registry.get_backend)
+    return backend

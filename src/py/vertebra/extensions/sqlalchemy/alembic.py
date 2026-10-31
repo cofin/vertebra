@@ -1,177 +1,38 @@
-"""Alembic DefaultImpl registrations, Vector/BinaryJson autogenerate hooks, and CreateView DDL."""
+"""Alembic DefaultImpl subclasses, Vector/BinaryJSON autogenerate hooks, and view/index DDL operations."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
+import alembic.ddl.impl as alembic_impl_mod
 import msgspec
+from alembic.ddl.impl import DefaultImpl
+from alembic.ddl.mssql import MSSQLImpl
+from alembic.ddl.mysql import MySQLImpl
+from alembic.ddl.oracle import OracleImpl
+from alembic.ddl.postgresql import PostgresqlImpl
+from alembic.ddl.sqlite import SQLiteImpl
 
-from vertebra.db.mysql import MysqlConfig
-from vertebra.db.postgres import PostgresConfig
-from vertebra.utils.module_loader import ensure_module, import_optional
+from vertebra.db.mysql import MySQLConfig
+from vertebra.db.postgres import PostgreSQLConfig
+from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from vertebra.extensions.sqlalchemy.dialects import DBAPIConnection
 
 __all__ = (
     "AlembicImpl",
-    "AlembicRunner",
     "CreateVectorIndexOp",
     "CreateViewOp",
     "DropVectorIndexOp",
     "DropViewOp",
+    "DuckDBAlembicImpl",
+    "MSSQLAlembicImpl",
+    "MySQLAlembicImpl",
+    "OracleAlembicImpl",
+    "PostgreSQLAlembicImpl",
+    "SQLiteAlembicImpl",
 )
-
-
-class AlembicRunner:
-    """Wrapper around alembic.command for executing programmatic migrations."""
-
-    __slots__ = ("_config",)
-
-    def __init__(self, config: Any = None) -> None:
-        """Initialize runner with optional Alembic configuration."""
-        self._config = config
-
-    def upgrade(self, revision: str = "head") -> None:
-        """Run alembic upgrade to revision."""
-        cmd = import_optional("alembic.command")
-        cfg_mod = import_optional("alembic.config")
-        if cmd is None or cfg_mod is None:
-            return
-        try:
-            cfg = self._config if isinstance(self._config, cfg_mod.Config) else cfg_mod.Config()
-            cmd.upgrade(cfg, revision)
-        except AttributeError:
-            pass
-
-    def downgrade(self, revision: str = "-1") -> None:
-        """Run alembic downgrade to revision."""
-        cmd = import_optional("alembic.command")
-        cfg_mod = import_optional("alembic.config")
-        if cmd is None or cfg_mod is None:
-            return
-        try:
-            cfg = self._config if isinstance(self._config, cfg_mod.Config) else cfg_mod.Config()
-            cmd.downgrade(cfg, revision)
-        except AttributeError:
-            pass
-
-
-class AlembicImpl(msgspec.Struct, frozen=True, gc=False):
-    """Alembic ``DefaultImpl`` descriptor for ``+vertebra`` and ``+vtb`` dialects."""
-
-    __dialect__: str
-    transactional_ddl: bool = True
-    type_synonyms: tuple[frozenset[str], ...] = (
-        frozenset({"JSON", "JSONB"}),
-        frozenset({"VECTOR"}),
-    )
-
-    @classmethod
-    def register_all(cls) -> dict[str, AlembicImpl]:
-        """Register ``+vertebra`` and ``+vtb`` dialect implementations with Alembic when installed."""
-        impls: dict[str, AlembicImpl] = {
-            "postgresql+vertebra": cls(__dialect__="postgresql", transactional_ddl=True),
-            "postgresql+vtb": cls(__dialect__="postgresql", transactional_ddl=True),
-            "oracle+vertebra": cls(__dialect__="oracle", transactional_ddl=False),
-            "oracle+vtb": cls(__dialect__="oracle", transactional_ddl=False),
-            "mysql+vertebra": cls(__dialect__="mysql", transactional_ddl=False),
-            "mysql+vtb": cls(__dialect__="mysql", transactional_ddl=False),
-            "sqlite+vertebra": cls(__dialect__="sqlite", transactional_ddl=True),
-            "sqlite+vtb": cls(__dialect__="sqlite", transactional_ddl=True),
-        }
-        impl_mod = import_optional("alembic.ddl.impl")
-        if impl_mod is not None:
-            default_impl = getattr(impl_mod, "DefaultImpl", None)
-            i_map = getattr(default_impl, "_impls", None) if default_impl is not None else None
-            if isinstance(i_map, dict):
-                for key, desc in impls.items():
-                    base_impl = i_map.get(desc.__dialect__)
-                    if base_impl is not None:
-                        i_map.setdefault(key, base_impl)
-        return impls
-
-    @staticmethod
-    def render_item(
-        type_: str,
-        obj: Any,
-        autogen_context: Any,
-    ) -> str | Literal[False]:
-        """Alembic ``render_item`` hook rendering ``Vector`` and ``BinaryJson`` column types."""
-        if type_ != "type":
-            return False
-        sa_mod = ensure_module("vertebra.extensions.sqlalchemy")
-        imports = getattr(autogen_context, "imports", None)
-        if isinstance(obj, sa_mod.Vector):
-            if isinstance(imports, set):
-                imports.add("from vertebra.extensions.sqlalchemy import Vector")
-            if obj.dim is None:
-                return f"Vector(storage_format={obj.storage_format!r})"
-            return f"Vector({obj.dim}, storage_format={obj.storage_format!r})"
-        if isinstance(obj, sa_mod.BinaryJson):
-            if isinstance(imports, set):
-                imports.add("from vertebra.extensions.sqlalchemy import BinaryJson")
-            return "BinaryJson()"
-        return False
-
-    @staticmethod
-    def compare_type(
-        context: Any,
-        inspected_column: Any,
-        metadata_column: Any,
-        inspected_type: Any,
-        metadata_type: Any,
-    ) -> bool | None:
-        """Alembic ``compare_type`` hook preventing false-positive diffs on ``Vector`` and ``BinaryJson``."""
-        _ = (context, inspected_column, metadata_column)
-        sa_mod = ensure_module("vertebra.extensions.sqlalchemy")
-        if isinstance(metadata_type, sa_mod.Vector):
-            if isinstance(inspected_type, sa_mod.Vector):
-                return bool(
-                    (inspected_type.dim != metadata_type.dim)
-                    or (inspected_type.storage_format != metadata_type.storage_format)
-                )
-            inspected_str = str(inspected_type).upper()
-            if "VECTOR" in inspected_str:
-                return bool(metadata_type.dim is not None and str(metadata_type.dim) not in inspected_str)
-        if isinstance(metadata_type, sa_mod.BinaryJson):
-            if isinstance(inspected_type, sa_mod.BinaryJson):
-                return False
-            inspected_str = str(inspected_type).upper()
-            if inspected_str in ("JSON", "JSONB", "OSON"):
-                return False
-        return None
-
-    @staticmethod
-    def resolve_migration_url(url: PostgresConfig | MysqlConfig | str) -> str:
-        """Return the direct migration DSN, bypassing transaction-mode poolers (PgBouncer/PgCat/pgdog)."""
-        if isinstance(url, PostgresConfig):
-            return url.effective_direct_dsn
-        if isinstance(url, MysqlConfig):
-            dsn = url.dsn
-            if dsn.startswith("mysql://"):
-                return "mysql+vtb://" + dsn[len("mysql://") :]
-            return dsn
-        return str(url)
-
-    @staticmethod
-    def execute_ddl(
-        connection: DBAPIConnection | Any,
-        op: CreateViewOp | DropViewOp | CreateVectorIndexOp | DropVectorIndexOp,
-        *,
-        dialect_name: str = "postgresql",
-    ) -> None:
-        """Compile an Alembic DDL operation and execute it on the connection."""
-        sql = op.to_sql(dialect_name)
-        if hasattr(connection, "cursor"):
-            cur = connection.cursor()
-            try:
-                cur.execute(sql)
-            finally:
-                if hasattr(cur, "close"):
-                    cur.close()
-        elif hasattr(connection, "execute"):
-            connection.execute(sql)
 
 
 class CreateVectorIndexOp(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -227,7 +88,7 @@ class DropVectorIndexOp(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
 
 class CreateViewOp(msgspec.Struct, frozen=True, gc=False):
-    """SQLAlchemy 2.1 ``CreateView`` DDL operation for Alembic migrations."""
+    """SQLAlchemy 2.1 CreateView DDL operation for Alembic migrations."""
 
     view_name: str
     select_sql: str
@@ -235,7 +96,7 @@ class CreateViewOp(msgspec.Struct, frozen=True, gc=False):
     materialized: bool = False
 
     def to_sql(self, dialect_name: str = "postgresql") -> str:
-        """Render the dialect-aware ``CREATE VIEW`` DDL statement."""
+        """Render the dialect-aware CREATE VIEW DDL statement."""
         base = dialect_name.split("+", 1)[0].lower()
         if self.materialized:
             return f"CREATE MATERIALIZED VIEW {self.view_name} AS {self.select_sql}"
@@ -243,20 +104,192 @@ class CreateViewOp(msgspec.Struct, frozen=True, gc=False):
         return f"CREATE {replace_clause}VIEW {self.view_name} AS {self.select_sql}"
 
     def reverse(self) -> DropViewOp:
-        """Return the inverse ``DropViewOp`` for Alembic downgrade migrations."""
+        """Return the inverse DropViewOp for Alembic downgrade migrations."""
         return DropViewOp(view_name=self.view_name, materialized=self.materialized)
 
 
 class DropViewOp(msgspec.Struct, frozen=True, gc=False):
-    """SQLAlchemy 2.1 ``DropView`` DDL operation for Alembic migrations."""
+    """SQLAlchemy 2.1 DropView DDL operation for Alembic migrations."""
 
     view_name: str
     if_exists: bool = True
     materialized: bool = False
 
     def to_sql(self, dialect_name: str = "postgresql") -> str:
-        """Render the dialect-aware ``DROP VIEW`` DDL statement."""
+        """Render the dialect-aware DROP VIEW DDL statement."""
         base = dialect_name.split("+", 1)[0].lower()
         mat = "MATERIALIZED " if self.materialized else ""
         exists_clause = "IF EXISTS " if self.if_exists and base != "oracle" else ""
         return f"DROP {mat}VIEW {exists_clause}{self.view_name}"
+
+
+class PostgreSQLAlembicImpl(PostgresqlImpl):
+    """Alembic DefaultImpl for PostgreSQL +vtb and +vertebra dialects."""
+
+    __dialect__ = "postgresql+vtb"
+    transactional_ddl: bool = True
+
+
+class MySQLAlembicImpl(MySQLImpl):
+    """Alembic DefaultImpl for MySQL +vtb and +vertebra dialects."""
+
+    __dialect__ = "mysql+vtb"
+    transactional_ddl: bool = False
+
+
+class SQLiteAlembicImpl(SQLiteImpl):
+    """Alembic DefaultImpl for SQLite +vtb and +vertebra dialects."""
+
+    __dialect__ = "sqlite+vtb"
+    transactional_ddl: bool = True
+
+
+class OracleAlembicImpl(OracleImpl):
+    """Alembic DefaultImpl for Oracle +vtb and +vertebra dialects."""
+
+    __dialect__ = "oracle+vtb"
+    transactional_ddl: bool = False
+
+
+class MSSQLAlembicImpl(MSSQLImpl):
+    """Alembic DefaultImpl for MSSQL +vtb and +vertebra dialects."""
+
+    __dialect__ = "mssql+vtb"
+    transactional_ddl: bool = True
+
+
+class DuckDBAlembicImpl(DefaultImpl):
+    """Alembic DefaultImpl for DuckDB +vtb and +vertebra dialects."""
+
+    __dialect__ = "duckdb+vtb"
+    transactional_ddl: bool = True
+
+
+def _compare_type_impl(
+    context: Any,
+    inspected_column: Any,
+    metadata_column: Any,
+    inspected_type: Any = None,
+    metadata_type: Any = None,
+    *args: Any,
+    **kwargs: Any,
+) -> bool | None:
+    """Alembic compare_type hook preventing false-positive diffs on Vector and BinaryJSON."""
+    _ = (context, inspected_column, metadata_column, args, kwargs)
+    sa_mod = ensure_module("vertebra.extensions.sqlalchemy")
+    if isinstance(metadata_type, sa_mod.Vector):
+        if isinstance(inspected_type, sa_mod.Vector):
+            return bool(
+                (inspected_type.dimensions != metadata_type.dimensions)
+                or (inspected_type.precision != metadata_type.precision)
+            )
+        inspected_str = str(inspected_type).upper()
+        if "VECTOR" in inspected_str:
+            return bool(metadata_type.dimensions is not None and str(metadata_type.dimensions) not in inspected_str)
+    if isinstance(metadata_type, sa_mod.BinaryJSON):
+        if isinstance(inspected_type, sa_mod.BinaryJSON):
+            return False
+        inspected_str = str(inspected_type).upper()
+        if inspected_str in ("JSON", "JSONB", "OSON"):
+            return False
+    return None
+
+
+class AlembicImpl(DefaultImpl):
+    """Base Alembic implementation and registration coordinator for Vertebra dialects."""
+
+    __dialect__ = "vertebra"
+    transactional_ddl: bool = True
+
+    @classmethod
+    def register_all(cls) -> dict[str, type[DefaultImpl]]:
+        """Register all +vtb and +vertebra dialect implementations with Alembic."""
+        impl_map: dict[str, type[DefaultImpl]] = {
+            "postgresql+vertebra": PostgreSQLAlembicImpl,
+            "postgresql+vtb": PostgreSQLAlembicImpl,
+            "postgresql+vertebra_async": PostgreSQLAlembicImpl,
+            "postgresql+vtb_async": PostgreSQLAlembicImpl,
+            "oracle+vertebra": OracleAlembicImpl,
+            "oracle+vtb": OracleAlembicImpl,
+            "oracle+vertebra_async": OracleAlembicImpl,
+            "oracle+vtb_async": OracleAlembicImpl,
+            "mysql+vertebra": MySQLAlembicImpl,
+            "mysql+vtb": MySQLAlembicImpl,
+            "mysql+vertebra_async": MySQLAlembicImpl,
+            "mysql+vtb_async": MySQLAlembicImpl,
+            "sqlite+vertebra": SQLiteAlembicImpl,
+            "sqlite+vtb": SQLiteAlembicImpl,
+            "sqlite+vertebra_async": SQLiteAlembicImpl,
+            "sqlite+vtb_async": SQLiteAlembicImpl,
+            "mssql+vertebra": MSSQLAlembicImpl,
+            "mssql+vtb": MSSQLAlembicImpl,
+            "mssql+vertebra_async": MSSQLAlembicImpl,
+            "mssql+vtb_async": MSSQLAlembicImpl,
+            "duckdb+vertebra": DuckDBAlembicImpl,
+            "duckdb+vtb": DuckDBAlembicImpl,
+            "duckdb+vertebra_async": DuckDBAlembicImpl,
+            "duckdb+vtb_async": DuckDBAlembicImpl,
+        }
+        for name, impl_cls in impl_map.items():
+            alembic_impl_mod._impls[name] = impl_cls
+        return impl_map
+
+    @staticmethod
+    def render_item(
+        type_: str,
+        obj: Any,
+        autogen_context: Any,
+    ) -> str | Literal[False]:
+        """Alembic render_item hook rendering Vector and BinaryJSON column types."""
+        if type_ != "type":
+            return False
+        sa_mod = ensure_module("vertebra.extensions.sqlalchemy")
+        imports = getattr(autogen_context, "imports", None)
+        if isinstance(obj, sa_mod.Vector):
+            if isinstance(imports, set):
+                imports.add("from vertebra.extensions.sqlalchemy import Vector")
+            dim = obj.dimensions
+            if dim is None:
+                return f"Vector(storage_format={obj.precision!r})"
+            return f"Vector({dim}, storage_format={obj.precision!r})"
+        if isinstance(obj, sa_mod.BinaryJSON):
+            if isinstance(imports, set):
+                imports.add("from vertebra.extensions.sqlalchemy import BinaryJSON")
+            return "BinaryJSON()"
+        return False
+
+    compare_type: Any = staticmethod(_compare_type_impl)
+
+    @staticmethod
+    def resolve_migration_url(url: PostgreSQLConfig | MySQLConfig | str) -> str:
+        """Return the direct migration DSN, bypassing transaction-mode poolers."""
+        if isinstance(url, PostgreSQLConfig):
+            return url.effective_direct_dsn
+        if isinstance(url, MySQLConfig):
+            dsn = url.dsn
+            if dsn.startswith("mysql://"):
+                return "mysql+vtb://" + dsn[len("mysql://") :]
+            return dsn
+        return str(url)
+
+    @staticmethod
+    def execute_ddl(
+        connection: DBAPIConnection | Any,
+        op: CreateViewOp | DropViewOp | CreateVectorIndexOp | DropVectorIndexOp,
+        *,
+        dialect_name: str = "postgresql",
+    ) -> None:
+        """Compile an Alembic DDL operation and execute it on the connection."""
+        sql = op.to_sql(dialect_name)
+        if hasattr(connection, "cursor"):
+            cur = connection.cursor()
+            try:
+                cur.execute(sql)
+            finally:
+                if hasattr(cur, "close"):
+                    cur.close()
+        elif hasattr(connection, "execute"):
+            connection.execute(sql)
+
+
+AlembicImpl.register_all()

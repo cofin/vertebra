@@ -278,7 +278,8 @@ def _is_empty_sentinel(value: Any) -> bool:
     if value is None:
         return True
     type_name = getattr(type(value), "__name__", "")
-    return type_name == "EmptyType" or value.__class__.__name__ == "Empty"
+    val_name = getattr(value, "name", "")
+    return type_name in ("EmptyType", "_EmptyEnum") or val_name == "EMPTY" or value.__class__.__name__ == "Empty"
 
 
 def _get_handler_guards(handler: Any) -> tuple[Any, ...]:
@@ -456,7 +457,7 @@ def _is_default_local_filesystem(fs: Any) -> bool:
     if fs is None:
         return True
     cls_name = type(fs).__name__
-    return cls_name in {"BaseLocalFileSystem", "LocalFileSystem"}
+    return cls_name in {"BaseLocalFileSystem", "LocalFileSystem", "FileSystemAdapter"}
 
 
 def _extract_closure_dict(fn: Any) -> dict[str, Any]:
@@ -515,8 +516,19 @@ def _extract_static_mounts(app: Any) -> tuple[StaticMountOffloadSpec, ...]:
             if "create_static_files_router" not in qualname and "_handle" not in qualname:
                 continue
             freevars = _extract_closure_dict(fn)
-            resolved_dirs = freevars.get("resolved_directories") or freevars.get("directories")
-            fs = freevars.get("file_system")
+            sf = freevars.get("static_files")
+            if sf is not None:
+                resolved_dirs = getattr(sf, "directories", None)
+                html_mode = bool(getattr(sf, "is_html_mode", getattr(sf, "html_mode", False)))
+                send_as_attachment = bool(getattr(sf, "send_as_attachment", False))
+                headers = dict(getattr(sf, "headers", None) or {})
+                fs = getattr(sf, "adapter", getattr(sf, "file_system", None))
+            else:
+                resolved_dirs = freevars.get("resolved_directories") or freevars.get("directories")
+                html_mode = bool(freevars.get("html_mode", False))
+                send_as_attachment = bool(freevars.get("send_as_attachment", False))
+                headers = dict(freevars.get("headers") or {})
+                fs = freevars.get("file_system")
             if not resolved_dirs or not _is_default_local_filesystem(fs):
                 continue
             route_path = str(getattr(route, "path", ""))
@@ -528,9 +540,9 @@ def _extract_static_mounts(app: Any) -> tuple[StaticMountOffloadSpec, ...]:
                 StaticMountOffloadSpec(
                     path_prefix=prefix,
                     directories=tuple(str(Path(d).resolve()) for d in resolved_dirs),
-                    html_mode=bool(freevars.get("html_mode", False)),
-                    send_as_attachment=bool(freevars.get("send_as_attachment", False)),
-                    headers=dict(freevars.get("headers") or {}),
+                    html_mode=html_mode,
+                    send_as_attachment=send_as_attachment,
+                    headers=headers,
                 )
             )
 

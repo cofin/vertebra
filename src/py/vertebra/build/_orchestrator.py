@@ -229,7 +229,8 @@ class BuildOrchestrator:
 
     def _resolve_js_deps(self) -> None:
         vertebra_dir = self.project_dir / ".vertebra"
-        ImportMapGenerator.write(self.config.js, vertebra_dir)
+        ImportMapGenerator.write(self.config.js, vertebra_dir, include_client=True)
+        ImportMapGenerator.sync_wheel_client(vertebra_dir)
 
     def _run_codegen(self, *, output_dir: Path | None = None) -> None:
         if not self._app_path:

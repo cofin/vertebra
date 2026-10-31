@@ -47,6 +47,6 @@ Top-level application entry points (`App`, `Controller`, `Router`, `Route`, rout
     options:
       heading_level: 3
 
-::: vertebra.utils.serializers._msgpack.MsgpackCodec
+::: vertebra.utils.serializers._msgpack.MsgPackSerializer
     options:
       heading_level: 3

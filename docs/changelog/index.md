@@ -21,7 +21,7 @@ Initial release of Vertebra (`vertebra-core` on PyPI and `@vertebra/client` on n
   - Embedded Rolldown/Oxc bundler (`Bundler`, `BundleConfig`) and pooled QuickJS server-side rendering engine (`EmbeddedSsrClient`, `SsrConfig`) with Inertia v3 and HTMX integration.
   - `@vertebra/client` TypeScript SDK providing `HttpClient`, `SseClient`, `WebSocketClient`, `LiveStateClient`, `ApexRegion`, `WasmClient`, `ArrowStreamClient`, `McpClient`, `A2aClient`, and framework adapters for React, Vue, Svelte, Angular, HTMX, and Vite.
 - **Native Storage, Database Drivers & Telemetry (`vertebra.storage`, `vertebra.db`, `vertebra.telemetry`)**:
-  - Multi-cloud and local object storage (`ObjectStore`, `StorageRegistry`, `UploadTracker`) backed by Rust `object_store` (S3, GCS, Azure, R2, OCI, HTTP, Local, Memory) with presigned URLs and multipart uploads.
+  - Multicloud and local object storage (`ObjectStore`, `SyncStore`, `AsyncStore`) backed by Rust `object_store` (S3, GCS with ADC, Azure, R2, OCI, HTTP, Local, Memory) with presigned URLs and PyArrow range readers.
   - Native database drivers (`PostgresConfig`, `MysqlConfig`, `SqliteConfig`, `SyncSqliteDriver`, `AsyncSqliteDriver`) with OpenTelemetry `sqlcommenter` trace propagation.
 - **Agent Protocols (`vertebra.agent`)**:
   - Model Context Protocol (`MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig`, `run_stdio_http_bridge`) and Agent-to-Agent (`A2AService`, `A2AConfig`, `AgentCard`) support plus `AgentRuntime` and `WorkflowEngine`.

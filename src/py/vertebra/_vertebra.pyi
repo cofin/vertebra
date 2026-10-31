@@ -10,16 +10,16 @@ GIL_USED: bool
 __all__ = [
     "FREE_THREADED",
     "GIL_USED",
-    "AlloyDbDialer",
+    "AlloyDBDialer",
     "ArrowCursor",
     "AsgiProtocol",
     "AsgiScope",
     "AsgiScopeIterator",
     "BrokerStats",
-    "CloudSqlDialer",
+    "CloudSQLDialer",
     "Headers",
     "HeadersIterator",
-    "JwtGuard",
+    "JWTGuard",
     "LeaseBroker",
     "LeaseGrant",
     "LogSink",
@@ -513,12 +513,12 @@ class LogSink:
     def metrics(self, /) -> tuple[int, int, int]: ...
 
 @final
-class JwtGuard:
+class JWTGuard:
     def __new__(
         cls,
         secret: bytes,
         leeway_secs: int = 60,
-    ) -> JwtGuard: ...
+    ) -> JWTGuard: ...
     def __repr__(self, /) -> str: ...
     def validate(self, /, token: str) -> str: ...
 
@@ -792,7 +792,7 @@ class SchemaDigestCache:
     def combined_etag(self) -> str: ...
 
 @final
-class CloudSqlDialer:
+class CloudSQLDialer:
     def __new__(
         cls,
         instance_uri: str,
@@ -814,7 +814,7 @@ class CloudSqlDialer:
     def generate_ephemeral_keypair(self) -> tuple[str, str]: ...
 
 @final
-class AlloyDbDialer:
+class AlloyDBDialer:
     def __new__(
         cls,
         cluster_uri: str,

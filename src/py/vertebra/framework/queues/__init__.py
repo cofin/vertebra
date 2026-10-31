@@ -21,8 +21,8 @@ from vertebra.framework.queues.oracle import (
     OracleQueueExecutor,
 )
 from vertebra.framework.queues.postgres import (
-    PostgresQueueBackend,
-    PostgresQueueExecutor,
+    PostgreSQLQueueBackend,
+    PostgreSQLQueueExecutor,
 )
 from vertebra.framework.queues.redis import (
     RedisQueueBackend,
@@ -52,8 +52,8 @@ __all__ = (
     "MemoryQueueBackend",
     "OracleQueueBackend",
     "OracleQueueExecutor",
-    "PostgresQueueBackend",
-    "PostgresQueueExecutor",
+    "PostgreSQLQueueBackend",
+    "PostgreSQLQueueExecutor",
     "QueueBackend",
     "QueueConfig",
     "QueueService",

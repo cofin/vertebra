@@ -1,29 +1,29 @@
-"""Behavioral and unit tests for SqlSpecProvider, ProxySyncDriver, ProxyAsyncDriver, SharedArrowBuffer, and AlchemyPlugin SHM session brokering."""
+"""Behavioral and unit tests for SQLSpecProvider, ProxySyncDriver, ProxyAsyncDriver, SharedArrowBuffer, and AlchemyPlugin SHM session brokering."""
 
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
 from typing import Any
 
 import msgspec
 import pytest
+from advanced_alchemy.extensions.litestar import SQLAlchemyPlugin
 
 from vertebra.extensions.alchemy import (
-    AlchemyPlugin,
     BrokerConfig,
     BrokerPlugin,
     InMemoryBrokerTransport,
-    ShmBrokerTransport,
-    ShmSessionBroker,
-    SQLAlchemyAsyncConfig,
-    SQLAlchemySyncConfig,
+    SHMBrokerTransport,
+    SHMSessionBroker,
+    create_alchemy_plugin,
+    create_sync_alchemy_config,
 )
-from vertebra.extensions.sqlspec import SQLSpecAsyncConfig, SQLSpecSyncConfig
 from vertebra.extensions.sqlspec.provider import (
     BrokerRpcRequest,
     BrokerRpcResponse,
     SharedArrowBuffer,
-    SqlSpecProvider,
+    SQLSpecProvider,
 )
 from vertebra.extensions.sqlspec.proxy import (
     ProxyAsyncDriver,
@@ -36,10 +36,10 @@ from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import encode_json_bytes
 
 
-def _create_broker(config: BrokerConfig) -> ShmBrokerTransport | InMemoryBrokerTransport:
-    """Create a ShmBrokerTransport when native signature matches or fall back to InMemoryBrokerTransport."""
+def _create_broker(config: BrokerConfig) -> SHMBrokerTransport | InMemoryBrokerTransport:
+    """Create a SHMBrokerTransport when native signature matches or fall back to InMemoryBrokerTransport."""
     try:
-        return ShmBrokerTransport(config)
+        return SHMBrokerTransport(config)
     except TypeError:
         return InMemoryBrokerTransport(config)
 
@@ -58,7 +58,7 @@ class StrictPositiveRow(msgspec.Struct, frozen=True, gc=False):
     name: int
 
 
-class _SqliteSyncUpstreamDriver:
+class _SQLiteSyncUpstreamDriver:
     """In-memory SQLite-backed synchronous upstream driver tracking connection and transaction state."""
 
     __slots__ = ("_conn", "begins", "commits", "executed_sql", "rollbacks")
@@ -106,16 +106,16 @@ class _SqliteSyncUpstreamDriver:
         return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
 
 
-class _SqliteAsyncUpstreamDriver:
-    """Asynchronous wrapper around _SqliteSyncUpstreamDriver for testing ProxyAsyncDriver."""
+class _SQLiteAsyncUpstreamDriver:
+    """Asynchronous wrapper around _SQLiteSyncUpstreamDriver for testing ProxyAsyncDriver."""
 
     __slots__ = ("_sync",)
 
-    def __init__(self, sync_driver: _SqliteSyncUpstreamDriver | None = None) -> None:
-        self._sync = sync_driver or _SqliteSyncUpstreamDriver()
+    def __init__(self, sync_driver: _SQLiteSyncUpstreamDriver | None = None) -> None:
+        self._sync = sync_driver or _SQLiteSyncUpstreamDriver()
 
     @property
-    def sync_driver(self) -> _SqliteSyncUpstreamDriver:
+    def sync_driver(self) -> _SQLiteSyncUpstreamDriver:
         """Return the underlying synchronous tracking driver."""
         return self._sync
 
@@ -146,13 +146,14 @@ class _SqliteAsyncUpstreamDriver:
 
 def test_proxy_sync_driver_small_inline_results() -> None:
     """Verify small result sets (< 256 rows) return inline via ProxySyncDriver."""
-    upstream = _SqliteSyncUpstreamDriver()
-    cfg = SQLSpecSyncConfig[Any, Any, _SqliteSyncUpstreamDriver](
+    upstream = _SQLiteSyncUpstreamDriver()
+    cfg = SimpleNamespace(
         bind_key="primary",
         driver_instance=upstream,
+        provide_session=lambda: upstream,
     )
     broker = InMemoryBrokerTransport(BrokerConfig(pool_size=4, max_overflow=2))
-    provider = SqlSpecProvider(cfg, broker=broker, pool_name="primary", arrow_threshold_rows=256)
+    provider = SQLSpecProvider(cfg, broker=broker, pool_name="primary", arrow_threshold_rows=256)
 
     with ProxySyncSessionContext(provider, broker=broker, pool_name="primary") as driver:
         inserted = driver.execute("INSERT INTO items (id, name) VALUES (?, ?)", 1, "alpha")
@@ -208,13 +209,14 @@ def test_proxy_sync_driver_small_inline_results() -> None:
 @pytest.mark.anyio
 async def test_proxy_async_driver_small_inline_results() -> None:
     """Verify small result sets (< 256 rows) return inline via ProxyAsyncDriver."""
-    upstream = _SqliteAsyncUpstreamDriver()
-    cfg = SQLSpecAsyncConfig[Any, Any, _SqliteAsyncUpstreamDriver](
+    upstream = _SQLiteAsyncUpstreamDriver()
+    cfg = SimpleNamespace(
         bind_key="async_pool",
         driver_instance=upstream,
+        provide_session=lambda: upstream,
     )
     broker = _create_broker(BrokerConfig(pool_size=4, max_overflow=2))
-    provider = SqlSpecProvider(cfg, broker=broker, pool_name="async_pool", arrow_threshold_rows=256)
+    provider = SQLSpecProvider(cfg, broker=broker, pool_name="async_pool", arrow_threshold_rows=256)
 
     async with ProxyAsyncSessionContext(provider, broker=broker, pool_name="async_pool") as driver:
         rc = await driver.execute("INSERT INTO items (id, name) VALUES (?, ?)", 10, "ten")
@@ -253,12 +255,12 @@ async def test_proxy_async_driver_small_inline_results() -> None:
 @pytest.mark.anyio
 async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cleanup() -> None:
     """Verify >= 256 row results and select_to_arrow spill to SharedArrowBuffer and always unlink."""
-    upstream = _SqliteSyncUpstreamDriver()
+    upstream = _SQLiteSyncUpstreamDriver()
     batch = [(idx, f"item-{idx}") for idx in range(1, 301)]
     upstream.execute_many("INSERT INTO items (id, name) VALUES (?, ?)", batch)
 
     broker = _create_broker(BrokerConfig(pool_size=4, max_overflow=1))
-    provider = SqlSpecProvider(upstream, broker=broker, arrow_threshold_rows=256)
+    provider = SQLSpecProvider(upstream, broker=broker, arrow_threshold_rows=256)
 
     with ProxySyncDriver(provider, broker=broker) as sync_driver:
         rows = sync_driver.select("SELECT id, name FROM items ORDER BY id")
@@ -300,8 +302,8 @@ async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cle
         assert not SharedArrowBuffer.exists(failed_shm_name)
         assert len(provider.active_arrow_buffers) == 0
 
-    async_upstream = _SqliteAsyncUpstreamDriver(upstream)
-    async_provider = SqlSpecProvider(async_upstream, broker=broker, arrow_threshold_rows=256)
+    async_upstream = _SQLiteAsyncUpstreamDriver(upstream)
+    async_provider = SQLSpecProvider(async_upstream, broker=broker, arrow_threshold_rows=256)
     async with ProxyAsyncDriver(async_provider, broker=broker) as async_driver:
         async_table = await async_driver.select_to_arrow("SELECT id, name FROM items ORDER BY id")
         assert async_table.num_rows == 300
@@ -323,15 +325,15 @@ async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cle
 @pytest.mark.anyio
 async def test_multi_statement_transaction_pinning_sync_and_async() -> None:
     """Verify begin -> execute -> commit/rollback stays pinned to the exact (slot_idx, generation) lease."""
-    session_instances: list[_SqliteSyncUpstreamDriver] = []
-    shared_db = _SqliteSyncUpstreamDriver()
+    session_instances: list[_SQLiteSyncUpstreamDriver] = []
+    shared_db = _SQLiteSyncUpstreamDriver()
 
-    def session_factory() -> _SqliteSyncUpstreamDriver:
+    def session_factory() -> _SQLiteSyncUpstreamDriver:
         session_instances.append(shared_db)
         return shared_db
 
     broker = _create_broker(BrokerConfig(pool_size=2, max_overflow=1))
-    provider = SqlSpecProvider(session_factory, broker=broker)
+    provider = SQLSpecProvider(session_factory, broker=broker)
 
     with ProxySyncDriver(provider, broker=broker) as driver:
         initial_slot = driver.slot_idx
@@ -367,8 +369,8 @@ async def test_multi_statement_transaction_pinning_sync_and_async() -> None:
         assert driver.in_transaction is False
         assert driver.select_value("SELECT COUNT(*) FROM items") == 1
 
-    async_upstream = _SqliteAsyncUpstreamDriver(shared_db)
-    async_provider = SqlSpecProvider(async_upstream, broker=broker)
+    async_upstream = _SQLiteAsyncUpstreamDriver(shared_db)
+    async_provider = SQLSpecProvider(async_upstream, broker=broker)
     async with ProxyAsyncDriver(async_provider, broker=broker) as async_driver:
         slot = async_driver.slot_idx
         gen = async_driver.generation
@@ -381,8 +383,8 @@ async def test_multi_statement_transaction_pinning_sync_and_async() -> None:
 
 def test_raw_frame_serialization_and_error_handling() -> None:
     """Verify handle_raw_frame supports both MessagePack and JSON envelopes and propagates errors."""
-    upstream = _SqliteSyncUpstreamDriver()
-    provider = SqlSpecProvider(upstream)
+    upstream = _SQLiteSyncUpstreamDriver()
+    provider = SQLSpecProvider(upstream)
 
     acq_req = BrokerRpcRequest(request_id=1, op="acquire", pool_name="default", worker_pid=1234)
     raw_resp = provider.handle_raw_frame(encode_json_bytes(acq_req))
@@ -397,9 +399,9 @@ def test_raw_frame_serialization_and_error_handling() -> None:
 
 @pytest.mark.anyio
 async def test_alchemy_plugin_and_shm_session_broker_proxied_sessions() -> None:
-    """Verify AlchemyPlugin and ShmSessionBroker acquire leases, roll back on error, and release cleanly."""
+    """Verify AlchemyPlugin and SHMSessionBroker acquire leases, roll back on error, and release cleanly."""
     transport = _create_broker(BrokerConfig(pool_size=3, max_overflow=1))
-    session_broker = ShmSessionBroker(transport=transport, capacity=3, bind_key="primary")
+    session_broker = SHMSessionBroker(transport=transport, capacity=3, bind_key="primary")
 
     class FakeSession:
         def __init__(self) -> None:
@@ -446,24 +448,18 @@ async def test_alchemy_plugin_and_shm_session_broker_proxied_sessions() -> None:
         created_async.append(s)
         return s
 
-    sync_cfg = SQLAlchemySyncConfig[object, FakeSession, Any](
+    sync_cfg = SimpleNamespace(
         bind_key="primary",
         session_maker_instance=make_sync,
+        provide_session=make_sync,
     )
-    async_cfg = SQLAlchemyAsyncConfig[object, FakeAsyncSession, Any](
+    async_cfg = SimpleNamespace(
         bind_key="primary_async",
         session_maker_instance=make_async,
+        provide_session=make_async,
     )
 
-    plugin: AlchemyPlugin[Any] = AlchemyPlugin(
-        config=[sync_cfg, async_cfg],
-        broker=session_broker,
-    )
-    state_map: dict[str, Any] = {}
-    plugin.install_state(state_map)
-    assert state_map["db_broker"] is transport
-
-    with plugin.provide_proxied_session(sync_cfg) as sess:
+    with session_broker.provide_session(sync_cfg) as sess:
         assert session_broker.in_use == 1
         assert transport.metrics().active_leases == 1
         sess.execute("SELECT 1")
@@ -473,7 +469,7 @@ async def test_alchemy_plugin_and_shm_session_broker_proxied_sessions() -> None:
     assert created_sync[-1].rolled_back is False
     assert created_sync[-1].closed is True
 
-    with pytest.raises(ValueError, match="sync failure"), plugin.provide_proxied_session(sync_cfg) as sess:
+    with pytest.raises(ValueError, match="sync failure"), session_broker.provide_session(sync_cfg) as sess:
         assert transport.metrics().active_leases == 1
         sess.execute("INSERT INTO t VALUES (1)")
         raise ValueError("sync failure")
@@ -483,7 +479,7 @@ async def test_alchemy_plugin_and_shm_session_broker_proxied_sessions() -> None:
     assert created_sync[-1].rolled_back is True
     assert created_sync[-1].closed is True
 
-    async with plugin.provide_proxied_async_session(async_cfg) as async_sess:
+    async with session_broker.provide_async_session(async_cfg) as async_sess:
         assert session_broker.in_use == 1
         assert transport.metrics().active_leases == 1
         await async_sess.execute("SELECT 2")
@@ -494,7 +490,7 @@ async def test_alchemy_plugin_and_shm_session_broker_proxied_sessions() -> None:
     assert created_async[-1].closed is True
 
     with pytest.raises(RuntimeError, match="async failure"):
-        async with plugin.provide_proxied_async_session(async_cfg) as async_sess:
+        async with session_broker.provide_async_session(async_cfg) as async_sess:
             await async_sess.execute("INSERT INTO t VALUES (2)")
             raise RuntimeError("async failure")
 
@@ -506,15 +502,16 @@ async def test_alchemy_plugin_and_shm_session_broker_proxied_sessions() -> None:
     sa_mod = import_optional("sqlalchemy")
     if sa_mod is not None:
         engine = sa_mod.create_engine("sqlite:///:memory:")
-        engine_cfg = SQLAlchemySyncConfig[Any, Any, Any](
-            bind_key="sa_engine",
-            engine_instance=engine,
-        )
         broker_plugin = BrokerPlugin(BrokerConfig(pool_size=4, max_overflow=1), use_shm=True)
-        sa_plugin = AlchemyPlugin(config=engine_cfg, broker=broker_plugin)
-        sa_state_map: dict[str, Any] = {}
-        sa_state = sa_plugin.install_state(sa_state_map)
-        assert sa_state.broker is broker_plugin.transport
+        sa_session_broker = SHMSessionBroker(transport=broker_plugin.transport, bind_key="sa_engine")
+        sa_session_broker.attach_to_engine(engine)
+
+        sa_sync_config = create_sync_alchemy_config(
+            connection_string="sqlite:///:memory:",
+            bind_key="sa_engine",
+        )
+        sa_plugin = create_alchemy_plugin(sa_sync_config)
+        assert isinstance(sa_plugin, SQLAlchemyPlugin)
 
         before_acquired = broker_plugin.transport.metrics().total_acquired
         with engine.connect() as conn:

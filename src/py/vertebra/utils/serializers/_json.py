@@ -38,7 +38,7 @@ __all__ = (
     "encode_json_bytes",
     "encode_json_into",
     "format_json",
-    "get_default_serializer",
+    "get_default_json_serializer",
 )
 
 
@@ -106,25 +106,25 @@ def convert_date_to_iso(value: datetime.date) -> str:
 _UNLOADED_UUID_TYPE: Final[object] = object()
 
 
-class _UuidTypeCache:
+class _UUIDTypeCache:
     """Class-scoped holder for lazy UUID backend."""
 
     uuid_utils_type: ClassVar[type[Any] | None | object] = _UNLOADED_UUID_TYPE
 
 
-def get_default_serializer() -> JSONSerializer:
+def get_default_json_serializer() -> JSONSerializer:
     """Return the default msgspec-backed JSON serializer."""
     return JSONSerializer.default()
 
 
 def encode_json_bytes(data: Any) -> bytes:
     """Encode Python data directly into UTF-8 JSON bytes."""
-    return get_default_serializer().encode_bytes(data)
+    return get_default_json_serializer().encode_bytes(data)
 
 
 def encode_json_into(data: Any, buffer: bytearray, offset: int = 0) -> None:
     """Encode Python data directly into a pre-allocated ``bytearray`` at ``offset``."""
-    get_default_serializer().encode_into(data, buffer, offset)
+    get_default_json_serializer().encode_into(data, buffer, offset)
 
 
 @overload
@@ -141,13 +141,13 @@ def encode_json(data: Any, *, as_bytes: bool = ...) -> str | bytes: ...
 
 def encode_json(data: Any, *, as_bytes: bool = False) -> str | bytes:
     """Encode Python data into JSON."""
-    encoded = get_default_serializer().encode_bytes(data)
+    encoded = get_default_json_serializer().encode_bytes(data)
     return encoded if as_bytes else encoded.decode("utf-8")
 
 
 def decode_json(data: str | bytes, *, decode_bytes: bool = True, type: Any = Any) -> Any:
     """Decode JSON input into Python data, optionally into a typed schema."""
-    return get_default_serializer().decode(data, decode_bytes=decode_bytes, type=type)
+    return get_default_json_serializer().decode(data, decode_bytes=decode_bytes, type=type)
 
 
 def format_json(value: Any, *, indent: int = 2) -> str:
@@ -157,15 +157,15 @@ def format_json(value: Any, *, indent: int = 2) -> str:
 
 def _get_uuid_utils_type() -> type[Any] | None:
     """Lazy-resolve and cache the uuid-utils UUID type when installed."""
-    cached = _UuidTypeCache.uuid_utils_type
+    cached = _UUIDTypeCache.uuid_utils_type
     if cached is not _UNLOADED_UUID_TYPE:
         return cast("type[Any] | None", cached)
     if not UUID_UTILS_INSTALLED:
-        _UuidTypeCache.uuid_utils_type = None
+        _UUIDTypeCache.uuid_utils_type = None
         return None
     module = _load_uuid_utils()
     resolved: type[Any] | None = None if module is None else cast("type[Any]", getattr(module, "UUID", None))
-    _UuidTypeCache.uuid_utils_type = resolved
+    _UUIDTypeCache.uuid_utils_type = resolved
     return resolved
 
 
