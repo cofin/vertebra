@@ -334,7 +334,7 @@ impl ServerConfig {
             && let Ok(n) = count.parse::<usize>()
         {
             config.workers.count = n;
-            #[cfg(not(unix))]
+            #[cfg(all(unix, not(Py_GIL_DISABLED)))]
             if n > 1 && explicit_topology.as_deref() != Some("embedded") {
                 config.topology = Topology::Shm;
             }

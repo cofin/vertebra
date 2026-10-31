@@ -14,27 +14,28 @@ sources:
   - resource: src/py/vertebra/server/worker.py
   - resource: src/py/vertebra/server/_dispatch.py
   - resource: src/py/vertebra/supervisor/_worker.py
+  - resource: src/py/vertebra/cli/_launch.py
   - resource: src/py/vertebra/cli/run.py
 ---
 
 # Runtime Topologies & Python Embedding
 
-The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/src/main.rs)) builds an explicit Tokio runtime (`Builder::new_current_thread` when `worker_threads <= 1`, `Builder::new_multi_thread` clamped to `available_parallelism()` when `> 1`) and hosts Python in one of three configured [`Topology`](../../../../../src/rs/vertebra-http/src/config.rs) modes (`Topology::from_str` accepts `"auto"`, `"embedded"`, and `"shm"`): `Embedded`, `Shm`, or `Auto` (which resolves to multi-process `SO_REUSEPORT` `Embedded` on Unix when `workers > 1`).
+The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/src/main.rs)) builds an explicit Tokio runtime (`Builder::new_current_thread` when `worker_threads <= 1`, `Builder::new_multi_thread` clamped to `available_parallelism()` when `> 1`) and hosts Python in one of three configured [`Topology`](../../../../../src/rs/vertebra-http/src/config.rs) modes (`Topology::from_str` accepts `"auto"`, `"embedded"`, and `"shm"`): `Embedded`, `Shm`, or `Auto` (which automatically resolves to `Shm` on POSIX non-free-threaded Python when `workers > 1`, and `Embedded` for single-worker or free-threaded `3.14t`/`3.15t` runtimes).
 
 ```mermaid
 flowchart TD
     Ingress["Tokio ingress (server::run_with_collector)"]
-    Ingress -->|"Topology::Embedded / Unix Auto"| Bridge["BatchBridge (InProcessRequest + ResponseSink)"]
-    Ingress -->|"Topology::Shm (explicit)"| Shm["RingPair per worker (memfd / shm_open)"]
+    Ingress -->|"Topology::Embedded (single-worker, 3.14t/3.15t, or explicit)"| Bridge["BatchBridge (InProcessRequest + ResponseSink)"]
+    Ingress -->|"Topology::Shm (auto when workers > 1 on GIL Unix, or explicit)"| Shm["RingPair per worker (memfd / shm_open)"]
     Bridge --> PyThread["Embedded Python worker(s) (worker.run_worker)"]
     Shm --> PySub["Python subprocesses (python -m vertebra.supervisor._worker)"]
 ```
 
 ## Topology Selection
 
-- `vtb run` ([`run.py`](../../../../../src/py/vertebra/cli/run.py)) preserves inherited `VERTEBRA_TOPOLOGY`, `VERTEBRA_WORKERS`, `VERTEBRA_THREADS`, and `VERTEBRA_JIT` environment variables whenever the corresponding CLI options (`--topology auto|embedded|shm`, `--workers`, `--threads`, `--jit/--no-jit`) are omitted, then launches the binary through `run_supervisor` (see [Platform & Lifecycle](platform-and-lifecycle.md)).
-- When `Topology::Embedded` (or `Topology::Auto` on Unix) runs with `config.workers.count > 1` and `VERTEBRA_EMBEDDED_WORKER != "1"`, `EmbeddedSupervisor` pre-initializes shared SHM broker FDs (`ShmLeaseTable` / `ShmStatementCache`) and spawns `W` child `vertebra-server` worker processes (`VERTEBRA_EMBEDDED_WORKER=1`) binding the same port via `SO_REUSEPORT`, computing per-worker `(tokio_threads, py_threads)` against `std::thread::available_parallelism()` to prevent core oversubscription.
-- Explicit `--topology shm` (`VERTEBRA_TOPOLOGY=shm`) runs one central Rust HTTP ingress process dispatching across shared-memory `RingPair`s to `W` Python worker subprocesses, sizing `config.worker_threads` (`available_cpus.saturating_sub(W).clamp(1, 4)`) when `VERTEBRA_TOKIO_THREADS` is unset so the central ingress and `W` Python workers share the CPU budget without oversubscription. On non-Unix targets `Shm` falls back to the in-process bridge dispatcher.
+- `vtb run` ([`run.py`](../../../../../src/py/vertebra/cli/run.py)) and `ServerLaunchEnv.to_environ()` ([`_launch.py`](../../../../../src/py/vertebra/cli/_launch.py)) preserve inherited `VERTEBRA_TOPOLOGY`, `VERTEBRA_WORKERS`, `VERTEBRA_THREADS`, and `VERTEBRA_JIT` environment variables whenever the corresponding CLI options (`--topology auto|embedded|shm`, `--workers`, `--threads`, `--jit/--no-jit`) are omitted, automatically resolving `auto`/omitted topology to `"shm"` when `workers > 1` on POSIX standard GIL builds (`not is_free_threaded_runtime()`) and `"embedded"` otherwise before launching the binary through `run_supervisor` (see [Platform & Lifecycle](platform-and-lifecycle.md)).
+- When `Topology::Embedded` runs with `config.workers.count > 1` (either on free-threaded Python or via explicit `--topology embedded`) and `VERTEBRA_EMBEDDED_WORKER != "1"`, `EmbeddedSupervisor` pre-initializes shared SHM broker FDs (`ShmLeaseTable` / `ShmStatementCache`) and spawns `W` child `vertebra-server` worker processes (`VERTEBRA_EMBEDDED_WORKER=1`) binding the same port via `SO_REUSEPORT`, computing per-worker `(tokio_threads, py_threads)` against `std::thread::available_parallelism()` to prevent core oversubscription.
+- `Topology::Shm` (`VERTEBRA_TOPOLOGY=shm`, selected automatically for `workers > 1` on standard GIL Unix or explicitly via `--topology shm`) runs one central Rust HTTP ingress process dispatching across shared-memory `RingPair`s to `W` Python worker subprocesses, sizing `config.worker_threads` (`available_cpus.saturating_sub(W).clamp(1, 4)`) when `VERTEBRA_TOKIO_THREADS` is unset so the central ingress and `W` Python workers share the CPU budget without oversubscription. On non-Unix targets `Shm` falls back to the in-process bridge dispatcher.
 
 ## Startup Sequence (`main.rs`)
 

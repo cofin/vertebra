@@ -9,7 +9,18 @@ import msgspec
 
 from vertebra.server.platform import CgroupQuota
 
-__all__ = ("ServerLaunchEnv",)
+__all__ = ("ServerLaunchEnv", "is_free_threaded_runtime")
+
+
+def is_free_threaded_runtime() -> bool:
+    """Return True when the active interpreter runs with Py_GIL_DISABLED."""
+    gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
+    if gil_disabled not in (None, 0, "0", ""):
+        return True
+    gil_check = getattr(sys, "_is_gil_enabled", None)
+    if callable(gil_check):
+        return not bool(gil_check())
+    return False
 
 
 class ServerLaunchEnv(msgspec.Struct, frozen=True, gc=False):
@@ -53,7 +64,26 @@ class ServerLaunchEnv(msgspec.Struct, frozen=True, gc=False):
         env["VERTEBRA_LOG_LEVEL"] = self.log_level
         env["VERTEBRA_NATIVE"] = "1" if self.native else "0"
 
-        resolved_topology = (self.topology or env.get("VERTEBRA_TOPOLOGY") or "embedded").lower()
+        raw_topology = (self.topology or env.get("VERTEBRA_TOPOLOGY") or "auto").strip().lower()
+        effective_workers = self.workers
+        if effective_workers is None:
+            raw_workers = env.get("VERTEBRA_WORKERS", "").strip()
+            if raw_workers.lstrip("-").isdigit():
+                effective_workers = int(raw_workers)
+
+        if raw_topology in {"", "auto"}:
+            if (
+                effective_workers is not None
+                and effective_workers > 1
+                and os.name == "posix"
+                and not is_free_threaded_runtime()
+            ):
+                resolved_topology = "shm"
+            else:
+                resolved_topology = "embedded"
+        else:
+            resolved_topology = raw_topology
+
         env["VERTEBRA_TOPOLOGY"] = resolved_topology
 
         if self.workers is not None:

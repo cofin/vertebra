@@ -31,7 +31,7 @@ make install
 ## CLI Usage (`vtb`)
 
 ```bash
-vtb run myapp:app --host 127.0.0.1 --port 8000 --workers 4 --topology shm
+vtb run myapp:app --host 127.0.0.1 --port 8000 --workers 4
 vtb dev myapp:app --port 8000
 vtb js build
 vtb js generate-types
@@ -75,16 +75,16 @@ src/
 
 ## Runtime Topologies
 
-Vertebra supports two primary execution modes, selectable via `--topology`:
+Vertebra automatically selects the execution topology from `--workers` and your Python build (or you can override it explicitly with `--topology embedded` or `--topology shm`):
 
-### 1. Embedded Topology (Default)
-- **Select with**: `--topology embedded` (or `--workers 0`)
-- **Use Case**: Development and high-performance production on single-process or free-threaded Python (3.14t/3.15t).
+### 1. Embedded Topology
+- **Selected automatically**: When running a single worker (`--workers 0` or `1`) or on free-threaded Python (`3.14t`/`3.15t`), or explicitly with `--topology embedded`.
+- **Use Case**: Development, single-worker services, and multi-threaded production on free-threaded Python (3.14t/3.15t).
 - **Mechanism**: The Rust HTTP server and Python application run within the same OS process via PyO3 and `BatchBridge`.
 - **Benefits**: Zero IPC serialization overhead, lowest latency, shared memory address space.
 
 ### 2. SHM Topology (Scale-out)
-- **Select with**: `--topology shm`
+- **Selected automatically**: When `--workers > 1` on standard GIL-enabled Python on POSIX, or explicitly with `--topology shm`.
 - **Use Case**: Multi-process scale-out and fault isolation across OS processes.
 - **Mechanism**: The Rust HTTP server spawns independent Python worker processes connected via shared-memory SPSC ring pairs with `futex`/`ulock` and `eventfd` notification.
 - **Benefits**: Process isolation, scales across multiple GIL-bound Python interpreter processes.

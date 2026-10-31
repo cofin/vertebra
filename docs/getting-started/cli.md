@@ -20,13 +20,12 @@ Run in development mode with automatic Python reload and frontend HMR:
 uv run vtb dev app:app --port 8000
 ```
 
-Run in production mode with explicit topology, worker count, and TLS certificates:
+Run in production mode with multi-worker scale-out (`--workers 4` automatically selects `shm` on standard GIL Python and `embedded` on free-threaded `3.14t`/`3.15t`; pass `--topology embedded` or `--topology shm` to override explicitly) and TLS certificates:
 
 ```bash
 uv run vtb run app:app \
   --host 0.0.0.0 \
   --port 8443 \
-  --topology shm \
   --workers 4 \
   --tls-cert certs/server.pem \
   --tls-key certs/server.key

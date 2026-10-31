@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import sys
-import sysconfig
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -12,7 +11,7 @@ from typing import Any
 import click
 
 from vertebra.build import BuildConfig
-from vertebra.cli._launch import ServerLaunchEnv
+from vertebra.cli._launch import ServerLaunchEnv, is_free_threaded_runtime
 from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
@@ -168,17 +167,6 @@ def load_config(path: Path) -> dict[str, Any]:
     raise ValueError(msg)
 
 
-def _is_free_threaded_runtime() -> bool:
-    """Return True when the active interpreter runs with Py_GIL_DISABLED."""
-    gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
-    if gil_disabled not in (None, 0, "0", ""):
-        return True
-    gil_check = getattr(sys, "_is_gil_enabled", None)
-    if callable(gil_check):
-        return not bool(gil_check())
-    return False
-
-
 def _resolve_jit_setting(jit_flag: bool | None) -> bool | None:
     """Resolve the requested JIT setting from CLI flag or VERTEBRA_JIT, skipping free-threaded builds."""
     requested = jit_flag
@@ -189,7 +177,7 @@ def _resolve_jit_setting(jit_flag: bool | None) -> bool | None:
         elif raw in {"0", "false", "no", "off"}:
             requested = False
 
-    if requested is True and _is_free_threaded_runtime():
+    if requested is True and is_free_threaded_runtime():
         logger.warning("CPython JIT is unavailable on free-threaded builds; skipping PYTHON_JIT=1")
         return False
     return requested

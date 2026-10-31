@@ -4,14 +4,14 @@
 
 ## Parallelism Strategies
 
-Vertebra supports two runtime topologies (`embedded` and `shm`) across both standard GIL-enabled CPython (`3.12`–`3.15`) and free-threaded CPython (`3.14t`/`3.15t`):
+Vertebra supports two runtime topologies (`embedded` and `shm`) across both standard GIL-enabled CPython (`3.12`–`3.15`) and free-threaded CPython (`3.14t`/`3.15t`). When `--topology` is omitted (or set to `auto`), `--workers > 1` automatically selects `shm` on standard GIL POSIX builds and stays `embedded` on free-threaded builds:
 
-| Build Flavor | Workers | Topology | Execution Strategy |
+| Build Flavor | Workers | Default Topology (`auto`) | Execution Strategy |
 | --- | --- | --- | --- |
 | Standard GIL Python | `1` (`0`) | `embedded` | Single-process Tokio ingress + Python event loop |
-| Standard GIL Python | `N` | `shm` | Rust parent process + `N` isolated Python worker processes over SPSC shared-memory rings |
+| Standard GIL Python | `N > 1` | `shm` (override with `--topology embedded`) | Rust parent process + `N` isolated Python worker processes over SPSC shared-memory rings |
 | Free-Threaded Python (`3.14t`/`3.15t`) | `N` (`0`) | `embedded` | Single-process multi-threaded Python workers executing in parallel without a GIL (`FREE_THREADED = True`) |
-| Free-Threaded Python (`3.14t`/`3.15t`) | `N` | `shm` | Multi-process SHM isolation combined with free-threaded worker pools per process |
+| Free-Threaded Python (`3.14t`/`3.15t`) | `N` | `--topology shm` (explicit) | Multi-process SHM isolation combined with free-threaded worker pools per process |
 
 ### Compile-Time `FREE_THREADED` Gate
 
