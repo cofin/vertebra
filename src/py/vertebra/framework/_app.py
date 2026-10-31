@@ -218,13 +218,21 @@ class App:
             self._register_procedure_and_mount(target, prefix=self._procedure_router.prefix)
             return target
 
-        if isinstance(target, Controller) or (isinstance(target, type) and issubclass(target, Controller)):
+        if isinstance(target, Controller):
             self._controllers.append(target)
-            ctrl_cls = target if isinstance(target, type) else type(target)
-            ctrl_inst = None if isinstance(target, type) else target
-            for route in ctrl_cls.get_routes(ctrl_inst):
+            ctrl_cls = type(target)
+            for route in ctrl_cls.get_routes(target):
                 self.add_route(route)
-            for proc in ctrl_cls.get_procedures(ctrl_inst):
+            for proc in ctrl_cls.get_procedures(target):
+                self._register_procedure_and_mount(proc, prefix=self._procedure_router.prefix)
+            return target
+
+        if isinstance(target, type) and issubclass(target, Controller):
+            self._controllers.append(target)
+            ctrl_type: type[Controller] = target
+            for route in ctrl_type.get_routes(None):
+                self.add_route(route)
+            for proc in ctrl_type.get_procedures(None):
                 self._register_procedure_and_mount(proc, prefix=self._procedure_router.prefix)
             return target
 

@@ -67,7 +67,7 @@ def render_cli_reference(group: click.Group | None = None) -> str:
         lines.extend(_render_options_table(global_options))
         lines.append("")
 
-    cli_prefix = "vtb" if root_group.name in {None, "cli"} else root_group.name
+    cli_prefix = "vtb" if not root_group.name or root_group.name == "cli" else root_group.name
     flat_commands = _collect_leaf_commands(root_group, prefix=cli_prefix)
     command_map = dict(flat_commands)
     rendered_names: set[str] = set()

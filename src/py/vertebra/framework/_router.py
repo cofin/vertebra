@@ -287,10 +287,9 @@ class Router:
             self.procedures.append(target.with_context(dependencies=self.dependencies, guards=self.guards))
             return target
 
-        if isinstance(target, Controller) or (isinstance(target, type) and issubclass(target, Controller)):
-            ctrl_cls = target if isinstance(target, type) else type(target)
-            ctrl_inst = None if isinstance(target, type) else target
-            for route in ctrl_cls.get_routes(ctrl_inst):
+        if isinstance(target, Controller):
+            ctrl_cls = type(target)
+            for route in ctrl_cls.get_routes(target):
                 self.routes.append(
                     route.with_context(
                         prefix=self.prefix,
@@ -299,7 +298,22 @@ class Router:
                         tags=self.tags,
                     )
                 )
-            for proc in ctrl_cls.get_procedures(ctrl_inst):
+            for proc in ctrl_cls.get_procedures(target):
+                self.procedures.append(proc.with_context(dependencies=self.dependencies, guards=self.guards))
+            return target
+
+        if isinstance(target, type) and issubclass(target, Controller):
+            ctrl_type: type[Controller] = target
+            for route in ctrl_type.get_routes(None):
+                self.routes.append(
+                    route.with_context(
+                        prefix=self.prefix,
+                        dependencies=self.dependencies,
+                        guards=self.guards,
+                        tags=self.tags,
+                    )
+                )
+            for proc in ctrl_type.get_procedures(None):
                 self.procedures.append(proc.with_context(dependencies=self.dependencies, guards=self.guards))
             return target
 

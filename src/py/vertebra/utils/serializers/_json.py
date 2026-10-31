@@ -164,7 +164,7 @@ def _get_uuid_utils_type() -> type[Any] | None:
         return None
     module = _load_uuid_utils()
     _UuidTypeCache.uuid_utils_type = None if module is None else cast("type[Any]", module.UUID)
-    return cast("type[Any] | None", _UuidTypeCache.uuid_utils_type)
+    return _UuidTypeCache.uuid_utils_type
 
 
 def _is_uuid_utils_instance(value: Any) -> bool:
