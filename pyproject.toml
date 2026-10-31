@@ -53,6 +53,16 @@ dev = [
     { include-group = "lint" },
     { include-group = "build" },
 ]
+doc = [
+    "anyio>=4.0",
+    "mkdocstrings-python>=2.0.3",
+    "msgspec>=0.18",
+    "pymdown-extensions>=10.16",
+    "rich>=13.0",
+    "rich-click>=1.7",
+    "ruff>=0.4",
+    "zensical>=0.0.71",
+]
 test = [
     "pytest",
     "pytest-cov>=5.0",
@@ -90,7 +100,12 @@ include = [
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-src = ["src/py"]
+src = ["src/py", "docs/examples", "tools"]
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = 60
+exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -101,12 +116,13 @@ known-first-party = ["vertebra"]
 
 [tool.pytest.ini_options]
 testpaths = ["src/py/tests"]
-pythonpath = ["."]
+pythonpath = [".", "src/py"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src/py/vertebra", "tools/scripts", "tools/pgo"]
+mypy_path = ["src/py"]
+files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "docs/examples"]
 
 [[tool.mypy.overrides]]
 module = [

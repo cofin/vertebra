@@ -146,9 +146,10 @@ def test_vtb_run_preserves_env_workers_topology_and_threads(monkeypatch: pytest.
     assert captured["env"]["VERTEBRA_TOPOLOGY"] == "shm"
     assert captured["env"]["VERTEBRA_THREADS"] == "2"
 
+    monkeypatch.setattr("vertebra.cli._launch.is_free_threaded_runtime", lambda: False)
     auto_result = runner.invoke(cli, ["run", "demo:app", "--topology", "auto", "--workers", "4", "--no-banner"])
     assert auto_result.exit_code == 0, auto_result.output
-    assert captured["env"]["VERTEBRA_TOPOLOGY"] == "auto"
+    assert captured["env"]["VERTEBRA_TOPOLOGY"] == "shm"
     assert captured["env"]["VERTEBRA_WORKERS"] == "4"
 
 
@@ -166,7 +167,7 @@ def test_vtb_run_jit_flag_sets_python_jit_on_gil_and_skips_freethreaded(monkeypa
 
     monkeypatch.setattr(cli_run_mod, "build_server_command", fake_build_cmd)
     monkeypatch.setattr(cli_run_mod, "run_supervisor", fake_supervisor)
-    monkeypatch.setattr(cli_run_mod, "_is_free_threaded_runtime", lambda: False, raising=False)
+    monkeypatch.setattr(cli_run_mod, "is_free_threaded_runtime", lambda: False)
 
     runner = CliRunner()
     jit_on = runner.invoke(cli, ["run", "demo:app", "--jit", "--no-banner"])
@@ -177,7 +178,7 @@ def test_vtb_run_jit_flag_sets_python_jit_on_gil_and_skips_freethreaded(monkeypa
     assert jit_off.exit_code == 0, jit_off.output
     assert captured["env"]["PYTHON_JIT"] == "0"
 
-    monkeypatch.setattr(cli_run_mod, "_is_free_threaded_runtime", lambda: True, raising=False)
+    monkeypatch.setattr(cli_run_mod, "is_free_threaded_runtime", lambda: True)
     monkeypatch.delenv("PYTHON_JIT", raising=False)
     jit_ft = runner.invoke(cli, ["run", "demo:app", "--jit", "--no-banner"])
     assert jit_ft.exit_code == 0, jit_ft.output

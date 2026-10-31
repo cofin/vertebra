@@ -53,6 +53,7 @@ def test_dev_help_shows_options(runner: CliRunner) -> None:
 def test_run_sets_topology_env(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify ``vtb run`` sets ``VERTEBRA_TOPOLOGY`` and resolves workers."""
     run_module = importlib.import_module("vertebra.cli.run")
+    launch_module = importlib.import_module("vertebra.cli._launch")
     captured: dict[str, Any] = {}
 
     def fake_build_server_command() -> list[str]:
@@ -65,6 +66,7 @@ def test_run_sets_topology_env(runner: CliRunner, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(run_module, "build_server_command", fake_build_server_command)
     monkeypatch.setattr(run_module, "run_supervisor", fake_run_supervisor)
     monkeypatch.setattr(run_module, "render_banner", lambda **kwargs: None)
+    monkeypatch.setattr(launch_module, "is_free_threaded_runtime", lambda: False)
 
     runner.invoke(cli, ["run", "sample_app:app", "--no-banner"])
     assert captured["env"]["VERTEBRA_TOPOLOGY"] == "embedded"
@@ -74,6 +76,15 @@ def test_run_sets_topology_env(runner: CliRunner, monkeypatch: pytest.MonkeyPatc
     assert captured["env"]["VERTEBRA_TOPOLOGY"] == "shm"
     assert captured["env"]["VERTEBRA_WORKERS"] == "1"
 
+    runner.invoke(cli, ["run", "sample_app:app", "--workers", "4", "--no-banner"])
+    assert captured["env"]["VERTEBRA_TOPOLOGY"] == "shm"
+    assert captured["env"]["VERTEBRA_WORKERS"] == "4"
+
+    runner.invoke(cli, ["run", "sample_app:app", "--workers", "4", "--topology", "embedded", "--no-banner"])
+    assert captured["env"]["VERTEBRA_TOPOLOGY"] == "embedded"
+    assert captured["env"]["VERTEBRA_WORKERS"] == "4"
+
+    monkeypatch.setattr(launch_module, "is_free_threaded_runtime", lambda: True)
     runner.invoke(cli, ["run", "sample_app:app", "--workers", "4", "--no-banner"])
     assert captured["env"]["VERTEBRA_TOPOLOGY"] == "embedded"
     assert captured["env"]["VERTEBRA_WORKERS"] == "4"
