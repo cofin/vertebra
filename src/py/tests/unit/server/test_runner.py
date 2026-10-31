@@ -7,15 +7,20 @@ import os
 import threading
 import time
 import weakref
+from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
+import msgspec
 import pytest
 
 from vertebra._vertebra import Request, init_transport
+from vertebra.build.codegen.markers import FromCookie, FromHeader, FromQuery, MsgPackBody, Parameter
 from vertebra.framework._app import App
-from vertebra.framework._router import Router, get
+from vertebra.framework._router import Controller, Router, get, post
+from vertebra.framework.di import Inject, Provide
+from vertebra.framework.security import Principal, requires_role
 from vertebra.server import _dispatch, worker
 from vertebra.server._asgi._runner import AsgiRunner
 from vertebra.server._dispatch import (
@@ -30,6 +35,7 @@ from vertebra.server._dispatch import (
 from vertebra.server._gil_audit import is_free_threaded
 from vertebra.server._loops import EventLoopPool
 from vertebra.server.worker import Worker, run_worker
+from vertebra.utils.serializers import decode_json, encode_json_bytes, encode_msgpack
 
 
 class MockRequest:
@@ -989,3 +995,189 @@ def test_worker_process_batch_single_root_asgi_dispatches_via_fastpath_wrapper(
     finally:
         asgi_runner.close()
         pool.stop()
+
+
+class _OrderInput(msgspec.Struct, frozen=True, gc=False):
+    """Typed request payload for native dispatch tests."""
+
+    sku: str
+    qty: int
+
+
+class _OrderOutput(msgspec.Struct, frozen=True, gc=False):
+    """Typed response payload for native dispatch tests."""
+
+    order_id: int
+    sku: str
+    qty: int
+    tenant: str
+    source: str
+
+
+class _TenantService:
+    """Service resolved via hierarchical DI."""
+
+    def __init__(self, prefix: str = "acme") -> None:
+        self.prefix = prefix
+
+    def format_tenant(self, raw_tenant: str) -> str:
+        return f"{self.prefix}:{raw_tenant}"
+
+
+def test_native_dispatch_typed_params_json_msgpack_di_guards_and_generator_teardown() -> None:
+    """Verify native dispatch with typed path/query/header/cookie, Struct bodies, DI, generators, and guards."""
+    cleanup_log: list[str] = []
+
+    def provide_sync_tx() -> Iterator[str]:
+        cleanup_log.append("tx_open")
+        try:
+            yield "sync-tx"
+        finally:
+            cleanup_log.append("tx_close")
+
+    async def provide_async_audit(request: Any) -> AsyncIterator[str]:
+        cleanup_log.append(f"audit_open:{request.path}")
+        try:
+            yield "async-audit"
+        finally:
+            cleanup_log.append(f"audit_close:{request.path}")
+
+    def provide_principal(request: Any) -> Principal:
+        role = (request.headers or {}).get("x-role", "guest")
+        return Principal(subject="u-1", roles=frozenset({role}))
+
+    class OrderController(Controller):
+        path = "/orders"
+        dependencies = {"tenant_svc": _TenantService("ctrl")}
+
+        @post("/{order_id:int}", status_code=201)
+        def create_order(
+            self,
+            order_id: int,
+            payload: _OrderInput,
+            tenant_svc: _TenantService,
+            tx: Annotated[str, Inject("sync_tx")],
+            source: FromQuery[str] = "web",
+            x_tenant: Annotated[str, Parameter(header="x-tenant")] = "default",
+            session_id: FromCookie[str] = "anon",
+        ) -> _OrderOutput:
+            return _OrderOutput(
+                order_id=order_id,
+                sku=payload.sku,
+                qty=payload.qty,
+                tenant=f"{tenant_svc.format_tenant(x_tenant)}:{session_id}",
+                source=f"{source}:{tx}",
+            )
+
+        @post("/msgpack/{order_id:int}")
+        def create_order_msgpack(
+            self,
+            order_id: int,
+            payload: MsgPackBody[_OrderInput],
+            x_trace: FromHeader[str] = "none",
+        ) -> dict[str, Any]:
+            return {"id": order_id, "sku": payload.sku, "qty": payload.qty, "trace": x_trace}
+
+        @get("/async-promoted/{order_id:int}")
+        def sync_handler_with_async_dep(
+            self,
+            order_id: int,
+            audit: Annotated[str, Inject("async_audit")],
+        ) -> dict[str, Any]:
+            return {"id": order_id, "audit": audit}
+
+        @get("/admin", guards=(requires_role("admin"),))
+        def admin_only(self) -> dict[str, bool]:
+            return {"admin": True}
+
+    app = App(
+        route_handlers=[OrderController],
+        dependencies={
+            "sync_tx": Provide(provide_sync_tx, scope="request"),
+            "async_audit": Provide(provide_async_audit, scope="request"),
+            "principal": Provide(provide_principal, scope="request"),
+        },
+    )
+    compiled = compile_handler_table(app._handlers)
+
+    create_hid = next(hid for hid, info in app.handler_index.items() if info.path == "/orders/{order_id:int}")
+    msgpack_hid = next(hid for hid, info in app.handler_index.items() if info.path == "/orders/msgpack/{order_id:int}")
+    promoted_hid = next(
+        hid for hid, info in app.handler_index.items() if info.path == "/orders/async-promoted/{order_id:int}"
+    )
+    admin_hid = next(hid for hid, info in app.handler_index.items() if info.path == "/orders/admin")
+
+    assert compiled[create_hid].is_async is False
+    assert compiled[create_hid].status_code == 201
+    assert compiled[promoted_hid].is_async is True
+
+    batch = [
+        MockRequest(
+            handler_id=create_hid,
+            request_id=1,
+            method="POST",
+            path="/orders/42",
+            query="source=mobile",
+            headers={"x-tenant": "eu", "Cookie": "session_id=s-99; theme=dark"},
+            body=encode_json_bytes(_OrderInput(sku="SKU-7", qty=3)),
+        ),
+        MockRequest(
+            handler_id=msgpack_hid,
+            request_id=2,
+            method="POST",
+            path="/orders/msgpack/77",
+            headers={"x-trace": "tr-1"},
+            body=encode_msgpack(_OrderInput(sku="MP-1", qty=5)),
+        ),
+        MockRequest(
+            handler_id=promoted_hid,
+            request_id=3,
+            method="GET",
+            path="/orders/async-promoted/15",
+        ),
+        MockRequest(
+            handler_id=admin_hid,
+            request_id=4,
+            method="GET",
+            path="/orders/admin",
+            headers={"x-role": "guest"},
+        ),
+        MockRequest(
+            handler_id=admin_hid,
+            request_id=5,
+            method="GET",
+            path="/orders/admin",
+            headers={"x-role": "admin"},
+        ),
+    ]
+
+    loop = asyncio.new_event_loop()
+    try:
+        plan = partition_batch(batch, compiled, [])
+        assert len(plan.sync_native) == 4
+        assert len(plan.async_native) == 1
+        results = dispatch_batch(plan, compiled, [], MockResponse, loop)
+        assert results is not None
+        assert results[0].status == 201
+        assert decode_json(results[0].body, type=_OrderOutput) == _OrderOutput(
+            order_id=42,
+            sku="SKU-7",
+            qty=3,
+            tenant="ctrl:eu:s-99",
+            source="mobile:sync-tx",
+        )
+        assert results[1].status == 200
+        assert decode_json(results[1].body) == {"id": 77, "sku": "MP-1", "qty": 5, "trace": "tr-1"}
+        assert results[2].status == 200
+        assert decode_json(results[2].body) == {"id": 15, "audit": "async-audit"}
+        assert results[3].status == 403
+        assert results[4].status == 200
+        assert decode_json(results[4].body) == {"admin": True}
+        assert cleanup_log == [
+            "tx_open",
+            "tx_close",
+            "audit_open:/orders/async-promoted/15",
+            "audit_close:/orders/async-promoted/15",
+        ]
+    finally:
+        loop.close()

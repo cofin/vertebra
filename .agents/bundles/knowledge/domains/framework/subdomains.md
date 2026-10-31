@@ -30,10 +30,10 @@ sources:
 
 | Subdomain | Key Symbols | Responsibility |
 |---|---|---|
-| [`di.py`](../../../../../src/py/vertebra/framework/di.py) | `Provide`, `DependencyGraph`, `Container`, `Scope` | DAG-validated dependency injection (`SINGLETON`, `REQUEST`, `TASK` scopes) with topological resolution and cycle detection. |
+| [`di.py`](../../../../../src/py/vertebra/framework/di.py) | `Provide`, `Inject`, `ParamBinding`, `RequestScope`, `DependencyGraph`, `Container`, `Scope` | Hierarchical, type- and key-indexed dependency injection (`singleton`, `request`, `transient` scopes) with generator cleanup (`ExitStack` / `AsyncExitStack`), topological resolution, and cycle detection. |
 | [`security.py`](../../../../../src/py/vertebra/framework/security.py) | `SecurityConfig`, `SecurityContext`, `Principal`, `Guard`, `CsrfConfig`, `RateLimitConfig` | Declarative guards (`requires_role`, `requires_scope`, `requires_tenant`, `requires_capability`), CSRF signing, and rate limiting. |
-| [`autowire.py`](../../../../../src/py/vertebra/framework/autowire.py) | `AutowireConfig`, `AutowireLoader` | Convention-based package scanning that discovers and registers routers, procedures, tasks, and plugins. |
-| [`procedures.py`](../../../../../src/py/vertebra/framework/procedures.py) | `ProcedureRouter`, `ProcedureDef`, `ProcedureKind`, `query`, `mutation`, `subscription` | RPC-style typed procedures bridging directly into TypeScript client codegen (`build/codegen/procedures.py`). |
+| [`autowire.py`](../../../../../src/py/vertebra/framework/autowire.py) | `AutowireConfig`, `AutowireLoader` | Convention-based package scanning (`discover_controllers`, `discover_services`, `register_all`) that discovers and registers controllers, routers, and services. |
+| [`procedures.py`](../../../../../src/py/vertebra/framework/procedures.py) | `ProcedureRouter`, `Procedure`, `ProcedureKind`, `query`, `mutation`, `subscription` | RPC-style typed procedures with DI and guards bridging directly into TypeScript client codegen (`build/codegen/procedures.py`). |
 
 ## 2. Frontend Rendering & API Specifications (`htmx`, `ssr`, `openapi`, `asyncapi`)
 

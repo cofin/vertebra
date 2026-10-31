@@ -10,6 +10,13 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-10-31] flow-archive | Completed and Archived Native `Route`, `Controller`, `Procedure`, Hierarchical DI & Comprehensive Documentation Synthesis (`native_routing_and_di_20261031`)
+
+- Completed and archived Flow `native_routing_and_di_20261031` (4 tasks across Phases 1–2) and comprehensive documentation synthesis across `README.md`, `docs/`, and `.agents/bundles/`:
+  - `knowledge/domains/framework/{routing-and-app,subdomains}.md` & `knowledge/domains/server/worker-and-protocols.md`: Documented canonical `Route`, `Controller`, `Procedure`, `Provide`, `Inject`, `Container`, `DependencyGraph`, `RequestScope` (with zero backward-compatibility aliases for `RouteDef`/`ProcedureDef`/`procedure_*`), hierarchical `App -> Router -> Controller -> Route` dependency/guard/tag composition, and pre-compiled parameter/body/guard/DI dispatch in `vertebra.server._dispatch.compile_handler_spec`.
+  - `docs/`: Synthesized plain-English documentation and runnable examples across all subsystems including CTE statement stacking (`QueryPipeline`, `CteStep`, `RelOverlay`), all 9 database drivers, Cloud SQL & AlloyDB dialers, `SQLSpecPlugin` Tier-1/Tier-2 SHM proxy & `SQLSpecStore`, `AlchemyPlugin` & `+vtb` dialects, `GrpcServiceRegistry`, Oracle APEX & 26ai Duality Views, Inertia v3 & HTMX, MCP/A2A/SpecTree/WorkflowEngine, and `@vertebra/client` adapters.
+- Contracted `.agents/bundles/specs/` back to lazy (`.gitkeep` only).
+
 ## [2026-10-31] flow-archive | Completed and Archived Zensical Polyglot Documentation Pipeline & Auto-SHM Topology (`zensical_docs_20261031`)
 
 - Completed and archived Flow `zensical_docs_20261031` (7 tasks across Phases 1–4) plus automatic `shm` topology selection for multi-worker (`--workers > 1`) non-free-threaded Python runtimes.

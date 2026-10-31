@@ -28,7 +28,7 @@ Vertebra keeps its base dependency footprint minimal (`msgspec` and `rich-click`
 
 ## Free-Threaded Python (`3.14t` / `3.15t`)
 
-All three native PyO3 extensions (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`) declare `gil_used = false` and support true multi-core execution inside a single OS process under `--topology embedded`:
+All three native Rust extensions (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`) run without the GIL and support multi-core execution inside a single OS process under `--topology embedded`:
 
 ```bash
 uv python install 3.14t
@@ -46,7 +46,7 @@ bun add @vertebra/client
 
 ## Local Contributor Setup
 
-When developing on the Vertebra repository itself (Rust 2024 + Python + TypeScript):
+When developing on the Vertebra repository itself (Rust, Python, and TypeScript):
 
 ```bash
 make install   # Set up .venv, install deps, and build debug extensions

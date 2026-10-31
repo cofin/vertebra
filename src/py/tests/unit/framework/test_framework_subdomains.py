@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Annotated, Any
 
 import msgspec
 import pytest
@@ -13,11 +14,11 @@ from vertebra.extensions.litestar import LitestarConfig, LitestarPlugin
 from vertebra.framework._app import App
 from vertebra.framework.asyncapi import AsyncAPISpecBuilder, AsyncChannelDef
 from vertebra.framework.channels import ChannelsBackend
-from vertebra.framework.di import Container, DependencyGraph, Provide
+from vertebra.framework.di import Container, DependencyGraph, Inject, Provide
 from vertebra.framework.email import EmailConfig, EmailMessage, EmailService
 from vertebra.framework.htmx import HtmxRequest, HtmxResponse
 from vertebra.framework.openapi import OpenAPIConfig, OpenAPISpecBuilder
-from vertebra.framework.procedures import ProcedureRouter, mutation, query
+from vertebra.framework.procedures import Procedure, ProcedureRouter, mutation, query
 from vertebra.framework.queues import CronSchedule, QueueConfig, QueueService, TaskRetryPolicy, task
 from vertebra.framework.security import (
     CsrfConfig,
@@ -76,6 +77,86 @@ async def test_di_container_topological_resolution_and_cycle_detection() -> None
     cycle_graph.register("b", lambda a: a)
     with pytest.raises(ValueError, match="Circular dependency"):
         cycle_graph.compile()
+
+
+@pytest.mark.anyio
+async def test_di_type_resolution_generators_inject_markers_and_scopes() -> None:
+    """Verify type-indexed DI resolution, Inject markers, sync/async generator teardown, and transient scope."""
+    events: list[str] = []
+
+    class DbConfig(msgspec.Struct, frozen=True, gc=False):
+        dsn: str = "sqlite:///:memory:"
+
+    class SyncSession:
+        def __init__(self, dsn: str) -> None:
+            self.dsn = dsn
+
+    class AsyncSession:
+        def __init__(self, dsn: str) -> None:
+            self.dsn = dsn
+
+    def provide_sync_session(cfg: Annotated[DbConfig, Inject("replica_cfg")]) -> Iterator[SyncSession]:
+        events.append("sync_enter")
+        try:
+            yield SyncSession(cfg.dsn)
+        finally:
+            events.append("sync_exit")
+
+    async def provide_async_session(cfg: DbConfig) -> AsyncIterator[AsyncSession]:
+        events.append("async_enter")
+        try:
+            yield AsyncSession(cfg.dsn)
+        finally:
+            events.append("async_exit")
+
+    counter = 0
+
+    def provide_transient_id() -> int:
+        nonlocal counter
+        counter += 1
+        return counter
+
+    container = Container(
+        {
+            "cfg": DbConfig(dsn="postgres://primary"),
+            "replica_cfg": DbConfig(dsn="postgres://replica"),
+            "sync_session": provide_sync_session,
+            "async_session": provide_async_session,
+            "transient_id": Provide(provide_transient_id, scope="transient"),
+        }
+    )
+
+    with container.scope() as sync_scope:
+        s1 = sync_scope.resolve_sync(SyncSession)
+        s2 = sync_scope.resolve_sync("sync_session")
+        assert s1 is s2
+        assert s1.dsn == "postgres://replica"
+        t1 = sync_scope.resolve_sync("transient_id")
+        t2 = sync_scope.resolve_sync("transient_id")
+        assert (t1, t2) == (1, 2)
+        assert "sync_exit" not in events
+    assert events == ["sync_enter", "sync_exit"]
+
+    events.clear()
+    async with container.scope() as async_scope:
+        a1 = await async_scope.resolve(AsyncSession)
+        a2 = await async_scope.resolve("async_session")
+        assert a1 is a2
+        assert "async_exit" not in events
+    assert events == ["async_enter", "async_exit"]
+
+    rpc = ProcedureRouter(
+        dependencies={"primary": DbConfig(dsn="postgres://rpc-primary")},
+        container=container,
+    )
+
+    @rpc.query()
+    async def read_dsn(cfg: Annotated[DbConfig, Inject("primary")]) -> str:
+        return cfg.dsn
+
+    assert isinstance(read_dsn, Procedure)
+    assert await rpc.call("read_dsn") == "postgres://rpc-primary"
+    await container.aclose()
 
 
 def test_security_principal_and_guards() -> None:

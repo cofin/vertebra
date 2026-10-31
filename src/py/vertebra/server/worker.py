@@ -578,16 +578,17 @@ class Worker:
                         continue
                     try:
                         raw = spec.invoker(req)
+                        status = spec.status_code
                         if isinstance(raw, _RAW_BUFFER_TYPES):
-                            append_raw((req_id, 200, raw))
+                            append_raw((req_id, status, raw))
                         elif isinstance(raw, str):
-                            append_raw((req_id, 200, raw.encode("utf-8")))
+                            append_raw((req_id, status, raw.encode("utf-8")))
                         elif isinstance(raw, Response):
                             if raw.request_id == 0:
                                 raw.request_id = req_id
                             submit_response(raw)
                         else:
-                            append_raw((req_id, 200, encode_json_bytes(raw), _JSON_CONTENT_TYPE_COMPACT))
+                            append_raw((req_id, status, encode_json_bytes(raw), _JSON_CONTENT_TYPE_COMPACT))
                     except Exception as exc:
                         err_resp = build_error_response(exc, req, self._error_handler, Response)
                         submit_response(err_resp)

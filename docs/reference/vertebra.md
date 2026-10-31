@@ -1,6 +1,6 @@
 # `vertebra` — Top-Level Package, Typing & Serializers
 
-Top-level application entry points (`App`, `Router`, route decorators), base `msgspec.Struct` classes (`vertebra.typing`), and centralized JSON/Msgpack serializers (`vertebra.utils.serializers`).
+Top-level application entry points (`App`, `Controller`, `Router`, `Route`, route decorators), base `msgspec.Struct` classes (`vertebra.typing`), and centralized JSON/Msgpack serializers (`vertebra.utils.serializers`).
 
 ## Application & Routing Entry Points
 
@@ -12,11 +12,15 @@ Top-level application entry points (`App`, `Router`, route decorators), base `ms
     options:
       heading_level: 3
 
+::: vertebra.framework._router.Controller
+    options:
+      heading_level: 3
+
 ::: vertebra.framework._router.Router
     options:
       heading_level: 3
 
-::: vertebra.framework._router.RouteDef
+::: vertebra.framework._router.Route
     options:
       heading_level: 3
 

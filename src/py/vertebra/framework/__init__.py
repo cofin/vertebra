@@ -24,11 +24,35 @@ if TYPE_CHECKING:
         stores,
     )
     from vertebra.framework._app import App
-    from vertebra.framework._router import RouteDef, Router, delete, get, patch, post, put
+    from vertebra.framework._router import (
+        Controller,
+        Route,
+        Router,
+        delete,
+        get,
+        patch,
+        post,
+        put,
+    )
+    from vertebra.framework.di import Container, DependencyGraph, Inject, Provide
+    from vertebra.framework.procedures import (
+        Procedure,
+        ProcedureRouter,
+        mutation,
+        query,
+        subscription,
+    )
 
 __all__ = (
     "App",
-    "RouteDef",
+    "Container",
+    "Controller",
+    "DependencyGraph",
+    "Inject",
+    "Procedure",
+    "ProcedureRouter",
+    "Provide",
+    "Route",
     "Router",
     "asyncapi",
     "autowire",
@@ -40,15 +64,18 @@ __all__ = (
     "htmx",
     "inertia",
     "live",
+    "mutation",
     "openapi",
     "patch",
     "post",
     "procedures",
     "put",
+    "query",
     "queues",
     "security",
     "ssr",
     "stores",
+    "subscription",
 )
 
 __lazy_modules__ = [
@@ -72,13 +99,23 @@ __lazy_modules__ = [
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "App": ("vertebra.framework._app", "App"),
-    "RouteDef": ("vertebra.framework._router", "RouteDef"),
+    "Container": ("vertebra.framework.di", "Container"),
+    "Controller": ("vertebra.framework._router", "Controller"),
+    "DependencyGraph": ("vertebra.framework.di", "DependencyGraph"),
+    "Inject": ("vertebra.framework.di", "Inject"),
+    "Procedure": ("vertebra.framework.procedures", "Procedure"),
+    "ProcedureRouter": ("vertebra.framework.procedures", "ProcedureRouter"),
+    "Provide": ("vertebra.framework.di", "Provide"),
+    "Route": ("vertebra.framework._router", "Route"),
     "Router": ("vertebra.framework._router", "Router"),
     "delete": ("vertebra.framework._router", "delete"),
     "get": ("vertebra.framework._router", "get"),
+    "mutation": ("vertebra.framework.procedures", "mutation"),
     "patch": ("vertebra.framework._router", "patch"),
     "post": ("vertebra.framework._router", "post"),
     "put": ("vertebra.framework._router", "put"),
+    "query": ("vertebra.framework.procedures", "query"),
+    "subscription": ("vertebra.framework.procedures", "subscription"),
     "ParamSpec": ("typing", "ParamSpec"),
     "asyncapi": ("vertebra.framework.asyncapi", ""),
     "autowire": ("vertebra.framework.autowire", ""),

@@ -24,9 +24,54 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
     options:
       heading_level: 3
 
+::: vertebra._vertebra.RsgiScope
+    options:
+      heading_level: 4
+      members: false
+
 ::: vertebra._vertebra.WsgiEnviron
     options:
       heading_level: 3
+
+::: vertebra._vertebra.RateLimiter
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra._vertebra.JwtGuard
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra._vertebra.LeaseBroker
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra._vertebra.StatementCache
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra._vertebra.ArrowCursor
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra._vertebra.CloudSqlDialer
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra._vertebra.AlloyDbDialer
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra._vertebra.LogSink
+    options:
+      heading_level: 4
+      members: false
 
 ## `vertebra._bundler` — Embedded Rolldown/Oxc Bundler & QuickJS SSR Pool
 
@@ -47,6 +92,11 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 ::: vertebra._bundler.SsrPool
     options:
       heading_level: 3
+
+::: vertebra._bundler.SourceWatcher
+    options:
+      heading_level: 4
+      members: false
 
 ::: vertebra._bundler.IsolatedDeclarationsGenerator
     options:

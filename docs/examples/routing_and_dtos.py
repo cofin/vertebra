@@ -1,14 +1,16 @@
-"""Modular Router composition, msgspec DTOs, and typed RPC ProcedureRouter example."""
+"""Controller, Router composition, dependency injection, msgspec DTOs, and ProcedureRouter example."""
 
 import asyncio
 
 import msgspec
 
-from vertebra import App, Router, get, post
+from vertebra import App, Controller, Provide, Router, get, post
 from vertebra.framework.procedures import ProcedureRouter
 
 __all__ = (
     "CreateItemRequest",
+    "InventoryService",
+    "ItemController",
     "ItemResponse",
     "build_items_router",
     "build_procedures",
@@ -32,21 +34,34 @@ class ItemResponse(msgspec.Struct, frozen=True, gc=False):
     quantity: int
 
 
-def build_items_router() -> Router:
-    """Build a modular router for inventory item endpoints."""
-    router = Router(prefix="/api/v1/items")
+class InventoryService:
+    """Domain service injected into controllers and routes."""
 
-    @post("/")
-    def create_item(body: CreateItemRequest) -> ItemResponse:
+    def fetch(self, item_id: int) -> ItemResponse:
+        """Fetch an item by identifier."""
+        return ItemResponse(id=item_id, sku="VTB-100", quantity=5)
+
+
+class ItemController(Controller):
+    """Controller grouping item routes under a shared path and dependencies."""
+
+    path = "/items"
+    dependencies = {"service": Provide(InventoryService, scope="singleton")}
+
+    @post("/", status_code=201)
+    def create_item(self, body: CreateItemRequest) -> ItemResponse:
+        """Create a new item from a typed msgspec payload."""
         return ItemResponse(id=1, sku=body.sku, quantity=body.quantity)
 
     @get("/{item_id:int}")
-    def get_item(item_id: int) -> ItemResponse:
-        return ItemResponse(id=item_id, sku="VTB-100", quantity=5)
+    def get_item(self, item_id: int, service: InventoryService) -> ItemResponse:
+        """Return an item using the injected InventoryService."""
+        return service.fetch(item_id)
 
-    router.register(create_item)
-    router.register(get_item)
-    return router
+
+def build_items_router() -> Router:
+    """Build a modular router mounting ItemController under /api/v1."""
+    return Router(prefix="/api/v1", route_handlers=[ItemController])
 
 
 def build_procedures() -> ProcedureRouter:
@@ -62,8 +77,7 @@ def build_procedures() -> ProcedureRouter:
 
 def main() -> None:
     """Mount the items router on an App and invoke the typed RPC procedure."""
-    app = App()
-    app.register(build_items_router())
+    app = App(route_handlers=[build_items_router()])
     assert len(app.routes) == 2
 
     rpc = build_procedures()

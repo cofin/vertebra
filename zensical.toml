@@ -1,6 +1,6 @@
 [project]
 site_name = "Vertebra"
-site_description = "Python-first, high-performance polyglot application backbone powered by a Rust 2024 runtime and a type-safe TypeScript client."
+site_description = "Fast Python web framework and server powered by Rust and TypeScript."
 site_url = "https://vertebra.litestar.dev/"
 repo_url = "https://github.com/litestar-org/vertebra"
 repo_name = "litestar-org/vertebra"

@@ -17,7 +17,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from vertebra.framework._app import App, HandlerInfo, _make_handler_id
     from vertebra.framework._router import (
-        RouteDef,
+        Controller,
+        Route,
         Router,
         delete,
         extract_path_params,
@@ -27,11 +28,26 @@ if TYPE_CHECKING:
         post,
         put,
     )
+    from vertebra.framework.di import Container, DependencyGraph, Inject, Provide
+    from vertebra.framework.procedures import (
+        Procedure,
+        ProcedureRouter,
+        mutation,
+        query,
+        subscription,
+    )
 
 __all__ = (
     "App",
+    "Container",
+    "Controller",
+    "DependencyGraph",
     "HandlerInfo",
-    "RouteDef",
+    "Inject",
+    "Procedure",
+    "ProcedureRouter",
+    "Provide",
+    "Route",
     "Router",
     "__version__",
     "_make_handler_id",
@@ -39,9 +55,12 @@ __all__ = (
     "extract_path_params",
     "get",
     "handler_id",
+    "mutation",
     "patch",
     "post",
     "put",
+    "query",
+    "subscription",
 )
 
 __version__ = "0.1.0"
@@ -64,7 +83,8 @@ __lazy_modules__ = [
 _APP_EXPORTS = frozenset({"App", "HandlerInfo", "_make_handler_id"})
 _ROUTER_EXPORTS = frozenset(
     {
-        "RouteDef",
+        "Controller",
+        "Route",
         "Router",
         "delete",
         "extract_path_params",
@@ -73,6 +93,16 @@ _ROUTER_EXPORTS = frozenset(
         "patch",
         "post",
         "put",
+    }
+)
+_DI_EXPORTS = frozenset({"Container", "DependencyGraph", "Inject", "Provide"})
+_PROCEDURE_EXPORTS = frozenset(
+    {
+        "Procedure",
+        "ProcedureRouter",
+        "mutation",
+        "query",
+        "subscription",
     }
 )
 
@@ -89,6 +119,18 @@ def __getattr__(name: str) -> Any:
         from vertebra.framework import _router
 
         value = getattr(_router, name)
+        globals()[name] = value
+        return value
+    if name in _DI_EXPORTS:
+        from vertebra.framework import di
+
+        value = getattr(di, name)
+        globals()[name] = value
+        return value
+    if name in _PROCEDURE_EXPORTS:
+        from vertebra.framework import procedures
+
+        value = getattr(procedures, name)
         globals()[name] = value
         return value
     msg = f"module {__name__!r} has no attribute {name!r}"

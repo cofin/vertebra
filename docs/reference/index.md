@@ -6,8 +6,8 @@ Complete reference documentation for Vertebra's Python packages (`vertebra.*`), 
 
 | Module / Page | Summary |
 | --- | --- |
-| **[vertebra](vertebra.md)** | Top-level application (`App`), routing (`Router`, `RouteDef`, HTTP method decorators), base `msgspec.Struct` schemas (`BaseStruct`, `FrozenBaseStruct`), and JSON/Msgpack serializers. |
-| **[Framework](framework.md)** | Dependency injection (`Container`, `Provide`), security (`Guard`, `SecurityConfig`, `Principal`), OpenAPI & AsyncAPI builders, `LiveState`, procedures, channels, email, and response cache stores. |
+| **[vertebra](vertebra.md)** | Top-level application (`App`), routing (`Controller`, `Router`, `Route`, HTTP method decorators), base `msgspec.Struct` schemas (`BaseStruct`, `FrozenBaseStruct`), and JSON/Msgpack serializers. |
+| **[Framework](framework.md)** | Dependency injection (`Container`, `Provide`, `Inject`), security (`Guard`, `SecurityConfig`, `Principal`), OpenAPI & AsyncAPI builders, `LiveState`, procedures (`Procedure`, `ProcedureRouter`), channels, email, and response cache stores. |
 | **[Task Queues](queues.md)** | Background task queues (`QueueService`, `QueueConfig`, `TaskRetryPolicy`), cron scheduling (`CronScheduler`), and Memory, PostgreSQL, Redis, Valkey, and Oracle backends. |
 | **[Inertia & SSR](inertia.md)** | Inertia v3 response protocol (`InertiaConfig`, `InertiaResponse`, `DeferredProp`, `MergeProp`, `ScrollProp`), HTMX helpers, and pooled QuickJS SSR (`SsrClient`, `SsrConfig`). |
 | **[Server & Workers](server.md)** | Worker execution loop (`Worker`, `run_worker`), worker lanes (`LaneConfig`, `WorkerRunner`), `EventLoopPool`, ASGI/RSGI/WSGI adapters, and cgroup platform utilities (`CgroupQuota`, `ShmAllocationPolicy`). |

@@ -28,11 +28,46 @@ First-party framework extensions connecting Vertebra's Rust HTTP/IPC runtime to 
     options:
       heading_level: 3
 
+::: vertebra.extensions.sqlspec.plugin.ProxySyncConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.sqlspec.plugin.ProxyAsyncConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.sqlspec.provider.SqlSpecProvider
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.sqlspec.storage.SQLSpecStore
+    options:
+      heading_level: 4
+      members: false
+
 ## SQLAlchemy & Alembic (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
 
 ::: vertebra.extensions.alchemy.plugin.AlchemyPlugin
     options:
       heading_level: 3
+
+::: vertebra.extensions.alchemy.plugin.DatabaseService
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.alchemy.broker.ShmSessionBroker
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.alchemy.storage.ObjectStoreBackend
+    options:
+      heading_level: 4
+      members: false
 
 ::: vertebra.extensions.sqlalchemy.alembic.AlembicRunner
     options:
@@ -48,11 +83,31 @@ First-party framework extensions connecting Vertebra's Rust HTTP/IPC runtime to 
     options:
       heading_level: 3
 
+::: vertebra.extensions.apex.session.ApexSessionContext
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.apex.session.OracleSessionManager
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.apex.openapi.DualityViewSpec
+    options:
+      heading_level: 4
+      members: false
+
 ## gRPC Wire Framing & SHM Broker (`vertebra.extensions.grpc`, `vertebra.extensions.broker`)
 
 ::: vertebra.extensions.grpc.GrpcServiceRegistry
     options:
       heading_level: 3
+
+::: vertebra.extensions.grpc.ProtobufSchemaGenerator
+    options:
+      heading_level: 4
+      members: false
 
 ::: vertebra.extensions.broker.plugin.BrokerPlugin
     options:

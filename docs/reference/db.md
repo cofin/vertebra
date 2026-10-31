@@ -12,6 +12,21 @@ Native database configurations, synchronous and asynchronous drivers, DataFusion
     options:
       heading_level: 3
 
+::: vertebra.db.pipeline.CteStep
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.db.pipeline.RelOverlay
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra._vertebra.ArrowCursor
+    options:
+      heading_level: 4
+      members: false
+
 ## Relational & Analytical Drivers (`postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`)
 
 ::: vertebra.db.postgres.PostgresConfig
@@ -67,7 +82,17 @@ Native database configurations, synchronous and asynchronous drivers, DataFusion
       heading_level: 4
       members: false
 
+::: vertebra.db.dialer.alloydb.AlloyDbDialer
+    options:
+      heading_level: 4
+      members: false
+
 ::: vertebra.db.dialer.cloudsql.CloudSqlConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.db.dialer.cloudsql.CloudSqlDialer
     options:
       heading_level: 4
       members: false
@@ -77,6 +102,11 @@ Native database configurations, synchronous and asynchronous drivers, DataFusion
       heading_level: 3
 
 ::: vertebra.db.rls.TenantScopeConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.db.rls.TenantPredicate
     options:
       heading_level: 4
       members: false

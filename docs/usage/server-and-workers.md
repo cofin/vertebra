@@ -1,26 +1,66 @@
 # Server & Workers
 
-`vertebra.server` bridges the Rust HTTP ingress (`vertebra-http`) and shared-memory transport (`vertebra-core`) to Python execution across native handlers, ASGI 3.0, RSGI 1.6, and PEP 3333 WSGI applications.
+`vertebra.server` connects the Rust HTTP server (`vertebra-http`) and shared-memory transport (`vertebra-core`) to Python handlers, background queue workers, and ASGI, RSGI, and WSGI applications.
 
-## Worker Lanes
+## Worker Lanes & Task Runners (`vertebra.server.lanes`)
 
-To prevent CPU-heavy or blocking I/O handlers from starving low-latency endpoints, Vertebra classifies handlers into four isolated execution lanes (`vertebra.server.lanes`):
+To keep CPU-heavy or blocking I/O work from slowing down fast routes, Vertebra separates work into isolated execution lanes:
 
-| Lane | Purpose | Execution Mechanism |
+| Lane | Purpose | How It Runs |
 | --- | --- | --- |
-| `fast` | Synchronous, non-blocking handlers (`msgspec` DTOs, cached lookups) | Direct vectorized dispatch on the worker poll thread |
-| `async` | Coroutine (`async def`) handlers, SSE, and WebSockets | Sharded `asyncio` `EventLoopPool` (`resolve_loop_shards`) |
-| `cpu` | Compute-bound transformations | Bounded CPU worker pool (`LaneConfig`) |
-| `blocking` | Synchronous file/network I/O and PEP 3333 WSGI | Dedicated blocking `ThreadPoolExecutor` |
+| `fast` | Synchronous, non-blocking handlers (`msgspec` models, cached lookups) | Runs directly on the worker poll thread |
+| `async` | `async def` handlers, SSE streams, and WebSockets | Runs on the `EventLoopPool` (`resolve_loop_shards`) |
+| `cpu` | Compute-heavy work and background CPU tasks | Runs on a bounded CPU worker pool (`LaneConfig`) |
+| `blocking` | Synchronous file/network I/O and WSGI apps | Runs on a dedicated blocking `ThreadPoolExecutor` |
 
-## Multi-Protocol Adapters
+For background queue workers (`vtb workers run`), `WorkerRunner` (`vertebra.framework.queues`) polls `cpu`, `io`, and `agent` lanes concurrently with configurable concurrency per lane:
 
-In addition to native `App` handlers, `vertebra.server` runs standard Python web protocols without an external proxy:
+```bash
+uv run vtb workers run app:queue --lanes io,cpu,agent --concurrency 8
+```
 
-- **ASGI 3.0 (`AsgiRunner`, `AsgiLifespan`)**: Drives Litestar, FastAPI, or Starlette applications over batched PyO3 `drive_asgi_batch` bridges, including WebSocket upgrade and SSE streaming.
-- **RSGI 1.6 (`RsgiAdapter`)**: High-throughput HTTP and WebSocket protocol bridge via `drive_rsgi_batch`.
-- **WSGI (`WsgiAdapter`)**: Runs synchronous PEP 3333 applications (`Flask`, `Django`) inside the `blocking` lane via `drive_wsgi_batch`.
+## Multi-Protocol Adapters (ASGI, RSGI & WSGI)
 
-## Free-Threaded Python (`3.14t` / `3.15t`)
+In addition to native `App` routes and controllers, `vertebra.server` runs standard Python web applications directly:
 
-When compiled against free-threaded CPython (`Py_GIL_DISABLED`), `vertebra._vertebra.FREE_THREADED` is `True`. Under `--topology embedded`, multiple worker threads execute Python handlers concurrently in a single address space with zero cross-process IPC serialization. Use `GilAuditReport` (`vertebra.server._gil_audit`) to verify that loaded C extensions do not re-enable the GIL at runtime.
+- **ASGI 3.0 (`AsgiRunner`, `AsgiLifespan`)**: Runs Litestar, FastAPI, or Starlette apps with full lifespan state machines, Server-Sent Events (`SseEvent`, `SseResponse`), WebSockets (`WebSocketSession`), and file responses (`ZeroCopySendResponse`, `PathSendResponse`).
+- **RSGI 1.6 (`RsgiAdapter`, `detect_interface`)**: Runs RSGI HTTP and WebSocket applications directly over batched Rust-to-Python calls.
+- **WSGI (`WsgiAdapter`, `FlaskWsgiApp`, `DjangoWsgiApp`)**: Runs synchronous PEP 3333 applications (`Flask`, `Django`) inside the `blocking` thread pool.
+
+```python
+from vertebra.server._asgi import AsgiLifespan, AsgiRunner
+from vertebra.server._wsgi import WsgiAdapter
+
+asgi_runner = AsgiRunner(app=my_asgi_app)
+wsgi_adapter = WsgiAdapter(app=my_wsgi_app)
+```
+
+## Diagnostic Z-Pages & Graceful Drain (`vertebra.server.platform`)
+
+`ZPagesRegistry` and `LameDuckController` provide built-in operational endpoints (`/healthz`, `/statusz`, `/varz`, `/rpcz`, `/brokerz`) and graceful connection draining during rollouts:
+
+```python
+from vertebra.server.platform import LameDuckController, ZPagesRegistry
+
+lame_duck = LameDuckController(drain_grace_seconds=10.0)
+zpages = ZPagesRegistry(service_name="orders-api", lame_duck=lame_duck)
+zpages.set_var("version", "1.0.0")
+zpages.record_rpc("GET /orders", ok=True)
+
+status, body = zpages.handle_zpage("/healthz")
+```
+
+When `lame_duck.enter_lame_duck()` is called on `SIGTERM`, `/healthz` immediately returns `503` so load balancers stop sending new traffic while in-flight requests finish draining.
+
+## Free-Threaded Python & GIL Auditing (`3.14t` / `3.15t`)
+
+When compiled for free-threaded Python (`Py_GIL_DISABLED`), `vertebra._vertebra.FREE_THREADED` is `True`. Under `--topology embedded`, multiple worker threads run Python handlers in parallel inside a single process.
+
+Use `GilAuditReport` (`vertebra.server._gil_audit`) or set `VERTEBRA_STRICT_FREE_THREADING=1` to verify that imported C extensions do not re-enable the GIL at runtime:
+
+```python
+from vertebra.server._gil_audit import GilAuditReport, is_free_threaded
+
+report = GilAuditReport.capture()
+assert isinstance(is_free_threaded(), bool)
+```

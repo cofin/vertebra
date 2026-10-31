@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "vertebra-core"
 version = "0.1.0"
-description = "Python-first application backbone with Rust IPC primitives"
+description = "Fast Python web framework and server powered by Rust and TypeScript"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

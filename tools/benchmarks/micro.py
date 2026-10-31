@@ -192,8 +192,7 @@ def benchmark_serializers_msgpack_json(iterations: int = 2000) -> MicroBenchSamp
 def benchmark_asgi_dispatch_batch(iterations: int = 2000) -> MicroBenchSample:
     """Benchmark AsgiRunner batch execution across 8 native ASGI requests."""
     requests = [
-        Request.from_parts("GET", f"/api/v1/items/{i}", headers=[("accept", "application/json")])
-        for i in range(8)
+        Request.from_parts("GET", f"/api/v1/items/{i}", headers=[("accept", "application/json")]) for i in range(8)
     ]
 
     async def asgi_app(

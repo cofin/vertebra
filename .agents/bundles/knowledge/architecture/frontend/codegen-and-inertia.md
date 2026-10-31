@@ -27,7 +27,7 @@ sources:
 
 ```mermaid
 flowchart LR
-    App["App.routes (RouteDef)"] --> Collector["RouteCollector (_extractor.py)"]
+    App["App.routes (Route)"] --> Collector["RouteCollector (_extractor.py)"]
     Collector --> Extractor["TypeExtractor (_extractor.py)"]
     Extractor --> IR["TypeNode IR + RouteMetadata"]
     IR --> TS["TypeScriptGenerator (types.d.ts)"]
@@ -48,7 +48,7 @@ flowchart LR
 
 `TypedDict`, `NamedTuple`, Pydantic models, and `Enum` fall through to `UnknownType`. `extract(handler)` returns one `TypeNode` per non-`self`/`cls` parameter plus the return type; it does not classify path, query, or body locations.
 
-[`RouteCollector.collect(app)`](../../../../../src/py/vertebra/build/codegen/_extractor.py) returns `[]` for anything that is not a Vertebra `App`, and otherwise builds a `RouteMetadata` per `RouteDef` (`operation_id`, `handler_fn`, `source_file`, `params`, `return_type`, `path`, `method`, `handler_name`). `operation_id` is the lowercased method plus path segments joined by `.`, with `{id}` → `by_id`, `-` → `_`, and `root` for `/` (`GET /users/{id}` → `get.users.by_id`).
+[`RouteCollector.collect(app)`](../../../../../src/py/vertebra/build/codegen/_extractor.py) returns `[]` for anything that is not a Vertebra `App`, and otherwise builds a `RouteMetadata` per `Route` (`operation_id`, `handler_fn`, `source_file`, `params`, `return_type`, `path`, `method`, `handler_name`), filtering out DI-injected parameters (`Inject`, `NamedDependencyMarker`, or parameters matching the route/app `DependencyGraph`). `operation_id` is the lowercased method plus path segments joined by `.`, with `{id}` → `by_id`, `-` → `_`, and `root` for `/` (`GET /users/{id}` → `get.users.by_id`).
 
 ## Generators
 

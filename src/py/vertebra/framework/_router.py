@@ -1,13 +1,18 @@
-"""Routing primitives for the native app framework."""
+"""Routing primitives, Controller class, and Router composition for the native app framework."""
 
+import functools
+import inspect
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from uuid import UUID
 
 import msgspec
+
+from vertebra.framework.di import Inject, Provide, inspect_callable_bindings
+from vertebra.framework.procedures import Procedure
 
 try:
     import vertebra._vertebra as _vtb
@@ -17,9 +22,10 @@ except ImportError:
     _native_handler_id = None
 
 __all__ = (
+    "Controller",
     "PARAM_CONVERTERS",
     "ParamSpec",
-    "RouteDef",
+    "Route",
     "Router",
     "delete",
     "extract_path_params",
@@ -42,6 +48,7 @@ _ISO_DURATION_RE = re.compile(
 
 
 def _parse_timedelta(raw: str) -> timedelta:
+    """Parse an ISO-8601 duration or float seconds string into a timedelta."""
     match = _ISO_DURATION_RE.match(raw)
     if match and any(match.groupdict().values()):
         days = int(match.group("days") or 0)
@@ -53,6 +60,7 @@ def _parse_timedelta(raw: str) -> timedelta:
 
 
 def _parse_path_param(raw: str) -> str:
+    """Normalize a greedy path parameter by stripping any leading slash."""
     return raw.lstrip("/")
 
 
@@ -73,65 +81,344 @@ _PARAM_CONVERTERS = PARAM_CONVERTERS
 
 
 class ParamSpec(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
+    """Compiled path template parameter descriptor."""
+
     name: str
     param_type: str
 
 
-class RouteDef(msgspec.Struct, frozen=True, gc=False):
+class Route(msgspec.Struct, frozen=True, gc=False):
+    """HTTP route definition binding method, path, handler, dependencies, guards, and metadata."""
+
     method: str
     path: str
     handler: Callable[..., Any]
     segments: tuple[str | ParamSpec, ...] = ()
     sync_to_thread: bool = False
+    dependencies: dict[str, Any] = msgspec.field(default_factory=dict)
+    guards: tuple[Callable[..., Any], ...] = ()
+    tags: tuple[str, ...] = ()
+    status_code: int = 200
 
-    def with_prefix(self, prefix: str) -> "RouteDef":
+    def __post_init__(self) -> None:
+        """Normalize method and path and compile path segments if not pre-supplied."""
+        norm_method = self.method.upper()
+        if norm_method != self.method:
+            msgspec.structs.force_setattr(self, "method", norm_method)
+        norm_path = _normalize_path(self.path)
+        if norm_path != self.path:
+            msgspec.structs.force_setattr(self, "path", norm_path)
+        if not self.segments and norm_path != "/":
+            msgspec.structs.force_setattr(self, "segments", _compile_path_template(norm_path))
+
+    def with_prefix(self, prefix: str) -> "Route":
+        """Return a copy of this Route with a prepended URL prefix."""
+        return self.with_context(prefix=prefix)
+
+    def with_context(
+        self,
+        *,
+        prefix: str = "",
+        handler: Callable[..., Any] | None = None,
+        dependencies: Mapping[str, Any] | None = None,
+        guards: Sequence[Callable[..., Any]] | None = None,
+        tags: Sequence[str] = (),
+        sync_to_thread: bool | None = None,
+    ) -> "Route":
+        """Return a copy of this Route merging parent prefix, dependencies, guards, and tags."""
         normalized_prefix = _normalize_prefix(prefix)
         normalized_path = _normalize_path(self.path)
-        if not normalized_prefix:
-            return self
-        new_path = f"{normalized_prefix}{normalized_path}"
-        return RouteDef(
+        if normalized_prefix:
+            new_path = normalized_prefix if normalized_path == "/" else f"{normalized_prefix}{normalized_path}"
+        else:
+            new_path = normalized_path
+
+        merged_deps: dict[str, Any] = dict(dependencies) if dependencies else {}
+        merged_deps.update(self.dependencies)
+        merged_guards = (*tuple(guards or ()), *self.guards)
+        merged_tags = tuple(dict.fromkeys((*tags, *self.tags)))
+        resolved_sync = self.sync_to_thread or bool(sync_to_thread)
+
+        return Route(
             method=self.method,
             path=new_path,
-            handler=self.handler,
+            handler=handler if handler is not None else self.handler,
             segments=_compile_path_template(new_path),
-            sync_to_thread=self.sync_to_thread,
+            sync_to_thread=resolved_sync,
+            dependencies=merged_deps,
+            guards=merged_guards,
+            tags=merged_tags,
+            status_code=self.status_code,
         )
 
 
+class Controller:
+    """Declarative class grouping route and procedure methods under shared path, dependencies, and guards."""
+
+    path: ClassVar[str] = ""
+    dependencies: ClassVar[Mapping[str, Any]] = {}
+    guards: ClassVar[Sequence[Callable[..., Any]]] = ()
+    tags: ClassVar[Sequence[str]] = ()
+    sync_to_thread: ClassVar[bool] = False
+
+    @classmethod
+    def get_routes(cls, instance: "Controller | None" = None) -> tuple[Route, ...]:
+        """Collect and bind all HTTP Route definitions declared on this Controller."""
+        resolved_instance, ctrl_deps = cls._resolve_binding_mode(instance)
+        collected: list[Route] = []
+        for base in reversed(cls.__mro__):
+            if base is object or base is Controller:
+                continue
+            for attr_name, raw_val in vars(base).items():
+                if attr_name.startswith("_"):
+                    continue
+                route_defs: Sequence[Route] = getattr(raw_val, "__vertebra_routes__", ())
+                if not route_defs:
+                    continue
+                if resolved_instance is not None:
+                    bound_fn: Callable[..., Any] = getattr(resolved_instance, attr_name)
+                else:
+                    ctrl_key = f"__controller_{cls.__qualname__}__"
+                    bound_fn = _bind_controller_method(raw_val, cls, ctrl_key)
+                for route in route_defs:
+                    collected.append(
+                        route.with_context(
+                            prefix=cls.path,
+                            handler=bound_fn,
+                            dependencies=ctrl_deps,
+                            guards=cls.guards,
+                            tags=cls.tags,
+                            sync_to_thread=cls.sync_to_thread,
+                        )
+                    )
+        return tuple(collected)
+
+    @classmethod
+    def get_procedures(cls, instance: "Controller | None" = None) -> tuple[Procedure, ...]:
+        """Collect and bind all RPC Procedure definitions declared on this Controller."""
+        resolved_instance, ctrl_deps = cls._resolve_binding_mode(instance)
+        collected: list[Procedure] = []
+        for base in reversed(cls.__mro__):
+            if base is object or base is Controller:
+                continue
+            for attr_name, raw_val in vars(base).items():
+                if attr_name.startswith("_") or not isinstance(raw_val, Procedure):
+                    continue
+                if resolved_instance is not None:
+                    bound_fn = raw_val.fn.__get__(resolved_instance, cls)
+                else:
+                    ctrl_key = f"__controller_{cls.__qualname__}__"
+                    bound_fn = _bind_controller_method(raw_val.fn, cls, ctrl_key)
+                collected.append(
+                    raw_val.with_context(
+                        fn=bound_fn,
+                        dependencies=ctrl_deps,
+                        guards=cls.guards,
+                    )
+                )
+        return tuple(collected)
+
+    @classmethod
+    def _resolve_binding_mode(cls, instance: "Controller | None") -> tuple["Controller | None", dict[str, Any]]:
+        """Determine whether to bind to a singleton Controller instance or inject the Controller per request."""
+        merged_deps = dict(cls.dependencies) if cls.dependencies else {}
+        if instance is not None:
+            return instance, merged_deps
+        init_bindings = inspect_callable_bindings(cls)
+        if all(b.has_default for b in init_bindings):
+            return cls(), merged_deps
+        ctrl_key = f"__controller_{cls.__qualname__}__"
+        merged_deps[ctrl_key] = Provide(cls, scope="request")
+        return None, merged_deps
+
+
 class Router:
-    """Group route handlers under a shared prefix."""
+    """Group route handlers, Controllers, and sub-routers under a shared prefix, dependencies, and guards."""
 
-    __slots__ = ("prefix", "routes")
+    __slots__ = ("dependencies", "guards", "prefix", "procedures", "routes", "tags")
 
-    def __init__(self, prefix: str = "") -> None:
+    def __init__(
+        self,
+        prefix: str = "",
+        *,
+        route_handlers: Sequence[Any] = (),
+        dependencies: Mapping[str, Any] | None = None,
+        guards: Sequence[Callable[..., Any]] | None = None,
+        tags: Sequence[str] = (),
+    ) -> None:
+        """Initialize a Router with optional prefix, route_handlers, dependencies, guards, and tags."""
         self.prefix = _normalize_prefix(prefix)
-        self.routes: list[RouteDef] = []
+        self.dependencies: dict[str, Any] = dict(dependencies) if dependencies else {}
+        self.guards: tuple[Callable[..., Any], ...] = tuple(guards) if guards else ()
+        self.tags: tuple[str, ...] = tuple(tags)
+        self.routes: list[Route] = []
+        self.procedures: list[Procedure] = []
+        for item in route_handlers:
+            self.register(item)
 
-    def register(self, handler: Callable[..., Any]) -> None:
-        routes: Sequence[RouteDef] = getattr(handler, "__vertebra_routes__", ())
+    def register(self, target: Any) -> Any:
+        """Register a Route, decorated handler, Controller (class or instance), Procedure, or nested Router."""
+        if isinstance(target, Route):
+            self.routes.append(
+                target.with_context(
+                    prefix=self.prefix,
+                    dependencies=self.dependencies,
+                    guards=self.guards,
+                    tags=self.tags,
+                )
+            )
+            return target
+
+        if isinstance(target, Router):
+            for route in target.routes:
+                self.routes.append(
+                    route.with_context(
+                        prefix=self.prefix,
+                        dependencies=self.dependencies,
+                        guards=self.guards,
+                        tags=self.tags,
+                    )
+                )
+            for proc in target.procedures:
+                self.procedures.append(proc.with_context(dependencies=self.dependencies, guards=self.guards))
+            return target
+
+        if isinstance(target, Procedure):
+            self.procedures.append(target.with_context(dependencies=self.dependencies, guards=self.guards))
+            return target
+
+        if isinstance(target, Controller) or (isinstance(target, type) and issubclass(target, Controller)):
+            ctrl_cls = target if isinstance(target, type) else type(target)
+            ctrl_inst = None if isinstance(target, type) else target
+            for route in ctrl_cls.get_routes(ctrl_inst):
+                self.routes.append(
+                    route.with_context(
+                        prefix=self.prefix,
+                        dependencies=self.dependencies,
+                        guards=self.guards,
+                        tags=self.tags,
+                    )
+                )
+            for proc in ctrl_cls.get_procedures(ctrl_inst):
+                self.procedures.append(proc.with_context(dependencies=self.dependencies, guards=self.guards))
+            return target
+
+        routes: Sequence[Route] = getattr(target, "__vertebra_routes__", ())
         for route in routes:
-            self.routes.append(route.with_prefix(self.prefix))
+            self.routes.append(
+                route.with_context(
+                    prefix=self.prefix,
+                    dependencies=self.dependencies,
+                    guards=self.guards,
+                    tags=self.tags,
+                )
+            )
+        return target
 
 
-def get(path: str, *, sync_to_thread: bool = False) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    return _route("GET", path, sync_to_thread=sync_to_thread)
+def get(
+    path: str = "/",
+    *,
+    sync_to_thread: bool = False,
+    dependencies: Mapping[str, Any] | None = None,
+    guards: Sequence[Callable[..., Any]] | None = None,
+    tags: Sequence[str] = (),
+    status_code: int = 200,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorate a function or Controller method as an HTTP GET route."""
+    return _route(
+        "GET",
+        path,
+        sync_to_thread=sync_to_thread,
+        dependencies=dependencies,
+        guards=guards,
+        tags=tags,
+        status_code=status_code,
+    )
 
 
-def post(path: str, *, sync_to_thread: bool = False) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    return _route("POST", path, sync_to_thread=sync_to_thread)
+def post(
+    path: str = "/",
+    *,
+    sync_to_thread: bool = False,
+    dependencies: Mapping[str, Any] | None = None,
+    guards: Sequence[Callable[..., Any]] | None = None,
+    tags: Sequence[str] = (),
+    status_code: int = 200,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorate a function or Controller method as an HTTP POST route."""
+    return _route(
+        "POST",
+        path,
+        sync_to_thread=sync_to_thread,
+        dependencies=dependencies,
+        guards=guards,
+        tags=tags,
+        status_code=status_code,
+    )
 
 
-def put(path: str, *, sync_to_thread: bool = False) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    return _route("PUT", path, sync_to_thread=sync_to_thread)
+def put(
+    path: str = "/",
+    *,
+    sync_to_thread: bool = False,
+    dependencies: Mapping[str, Any] | None = None,
+    guards: Sequence[Callable[..., Any]] | None = None,
+    tags: Sequence[str] = (),
+    status_code: int = 200,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorate a function or Controller method as an HTTP PUT route."""
+    return _route(
+        "PUT",
+        path,
+        sync_to_thread=sync_to_thread,
+        dependencies=dependencies,
+        guards=guards,
+        tags=tags,
+        status_code=status_code,
+    )
 
 
-def delete(path: str, *, sync_to_thread: bool = False) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    return _route("DELETE", path, sync_to_thread=sync_to_thread)
+def delete(
+    path: str = "/",
+    *,
+    sync_to_thread: bool = False,
+    dependencies: Mapping[str, Any] | None = None,
+    guards: Sequence[Callable[..., Any]] | None = None,
+    tags: Sequence[str] = (),
+    status_code: int = 200,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorate a function or Controller method as an HTTP DELETE route."""
+    return _route(
+        "DELETE",
+        path,
+        sync_to_thread=sync_to_thread,
+        dependencies=dependencies,
+        guards=guards,
+        tags=tags,
+        status_code=status_code,
+    )
 
 
-def patch(path: str, *, sync_to_thread: bool = False) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    return _route("PATCH", path, sync_to_thread=sync_to_thread)
+def patch(
+    path: str = "/",
+    *,
+    sync_to_thread: bool = False,
+    dependencies: Mapping[str, Any] | None = None,
+    guards: Sequence[Callable[..., Any]] | None = None,
+    tags: Sequence[str] = (),
+    status_code: int = 200,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorate a function or Controller method as an HTTP PATCH route."""
+    return _route(
+        "PATCH",
+        path,
+        sync_to_thread=sync_to_thread,
+        dependencies=dependencies,
+        guards=guards,
+        tags=tags,
+        status_code=status_code,
+    )
 
 
 def handler_id(method: str, path: str) -> int:
@@ -181,18 +468,27 @@ def _route(
     path: str,
     *,
     sync_to_thread: bool = False,
+    dependencies: Mapping[str, Any] | None = None,
+    guards: Sequence[Callable[..., Any]] | None = None,
+    tags: Sequence[str] = (),
+    status_code: int = 200,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Construct a route decorator attaching Route metadata to the target callable."""
     normalized_path = _normalize_path(path)
     segments = _compile_path_template(normalized_path)
 
     def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
-        routes: list[RouteDef] = getattr(handler, "__vertebra_routes__", [])
-        route = RouteDef(
+        routes: list[Route] = list(getattr(handler, "__vertebra_routes__", ()))
+        route = Route(
             method=method,
             path=normalized_path,
             handler=handler,
             segments=segments,
             sync_to_thread=sync_to_thread,
+            dependencies=dict(dependencies) if dependencies else {},
+            guards=tuple(guards) if guards else (),
+            tags=tuple(tags),
+            status_code=status_code,
         )
         routes.append(route)
         target = cast("Any", handler)
@@ -202,6 +498,48 @@ def _route(
         return handler
 
     return decorator
+
+
+def _bind_controller_method(
+    raw_fn: Callable[..., Any],
+    ctrl_cls: type[Controller],
+    ctrl_dep_key: str,
+) -> Callable[..., Any]:
+    """Wrap an unbound Controller method so self is resolved via DI per request."""
+    sig = inspect.signature(raw_fn)
+    params = list(sig.parameters.values())
+    ctrl_ann: Any = Inject.__class_getitem__((ctrl_cls, ctrl_dep_key))
+    if params and params[0].name == "self":
+        new_self_param = params[0].replace(
+            name="_controller_self",
+            annotation=ctrl_ann,
+        )
+        new_params = [new_self_param, *params[1:]]
+    else:
+        new_params = params
+
+    new_sig = sig.replace(parameters=new_params)
+    raw_annotations = dict(getattr(raw_fn, "__annotations__", {}) or {})
+    raw_annotations.pop("self", None)
+    raw_annotations["_controller_self"] = ctrl_ann
+
+    if inspect.iscoroutinefunction(raw_fn):
+
+        @functools.wraps(raw_fn)
+        async def _async_bound(_controller_self: Any, *args: Any, **kwargs: Any) -> Any:
+            return await raw_fn(_controller_self, *args, **kwargs)
+
+        cast("Any", _async_bound).__signature__ = new_sig
+        _async_bound.__annotations__ = raw_annotations
+        return _async_bound
+
+    @functools.wraps(raw_fn)
+    def _sync_bound(_controller_self: Any, *args: Any, **kwargs: Any) -> Any:
+        return raw_fn(_controller_self, *args, **kwargs)
+
+    cast("Any", _sync_bound).__signature__ = new_sig
+    _sync_bound.__annotations__ = raw_annotations
+    return _sync_bound
 
 
 def normalize_prefix(prefix: str) -> str:
@@ -225,6 +563,8 @@ def normalize_path(path: str) -> str:
         return "/"
     if not path.startswith("/"):
         return f"/{path}"
+    if len(path) > 1 and path.endswith("/"):
+        return path.rstrip("/")
     return path
 
 
@@ -232,12 +572,14 @@ _normalize_path = normalize_path
 
 
 def _split_path(path: str) -> "list[str]":
+    """Split a URL path into non-empty path segments."""
     if not path or path == "/":
         return []
     return [segment for segment in path.strip("/").split("/") if segment]
 
 
 def _compile_path_template(path: str) -> "tuple[str | ParamSpec, ...]":
+    """Compile a URL path template into static segments and ParamSpec items."""
     template_segments = _split_path(path)
     compiled: list[str | ParamSpec] = []
 
@@ -261,6 +603,7 @@ def _compile_path_template(path: str) -> "tuple[str | ParamSpec, ...]":
 
 
 def _parse_param_segment(segment: str) -> "tuple[str, str] | None":
+    """Parse a '{name:type}' segment into (name, param_type) or None if static."""
     if not (segment.startswith("{") and segment.endswith("}")):
         return None
 
@@ -284,6 +627,7 @@ def _parse_param_segment(segment: str) -> "tuple[str, str] | None":
 
 
 def _extract_params_from_segments(segments: "tuple[str | ParamSpec, ...]", path: str) -> "dict[str, Any]":
+    """Extract and coerce typed path parameters from compiled path segments."""
     path_segments = _split_path(path)
     params: dict[str, Any] = {}
     seg_index = 0
@@ -319,6 +663,7 @@ def _extract_params_from_segments(segments: "tuple[str | ParamSpec, ...]", path:
 
 
 def _coerce_param(param_type: str, value: str) -> Any:
+    """Coerce a raw string path segment into the declared param_type."""
     if param_type in {"str", "string", "path"}:
         return value
     if param_type in {"int", "i64", "u64"}:
@@ -334,6 +679,7 @@ def _coerce_param(param_type: str, value: str) -> Any:
 
 
 def _parse_bool(value: str) -> bool:
+    """Parse a boolean path or query parameter value."""
     value = value.strip().lower()
     if value in {"true", "1", "yes", "y", "t"}:
         return True

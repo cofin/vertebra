@@ -1,10 +1,10 @@
 # Frontend, Inertia v3 & QuickJS SSR
 
-Vertebra embeds a Rust-native JavaScript bundler (`vertebra-bundler` powered by Rolldown and Oxc) and an in-process QuickJS server-side rendering pool (`EmbeddedSsrClient`), paired with the `@vertebra/client` TypeScript SDK.
+Vertebra includes a built-in Rust JavaScript bundler (`vertebra-bundler`), an in-process QuickJS server-side rendering pool (`EmbeddedSsrClient`), Inertia v3 and HTMX server helpers, and the `@vertebra/client` TypeScript SDK.
 
-## Embedded Rolldown/Oxc Bundler
+## Embedded JavaScript Bundler (`vertebra._bundler`)
 
-Compile TypeScript, JSX/TSX, and CSS assets directly from Python without spawning an external Node.js build server:
+Compile TypeScript, JSX/TSX, and CSS assets directly from Python without running a separate Node.js build server:
 
 ```python
 from vertebra._bundler import BundleConfig, Bundler
@@ -24,44 +24,59 @@ Or run from the CLI:
 uv run vtb js build
 ```
 
-## Inertia v3 Protocol (`vertebra.framework.inertia`)
+## Inertia v3 Protocol & Prop Types (`vertebra.framework.inertia`)
 
-Build single-page React, Vue, or Svelte applications driven by server-side handlers without manually building a separate REST layer. Vertebra supports Inertia v3 partial reloads, deferred props (`DeferredProp`), deep/shallow merge props (`MergeProp`), scroll pagination props (`ScrollProp`), and lazy props (`OptionalProp`):
+Build single-page React, Vue, or Svelte applications driven by Python handlers. Vertebra supports the `@inertia("Component")` route decorator, partial reloads, deferred props (`DeferredProp`), shallow and deep merge props (`MergeProp`, `DeepMergeProp`), once-evaluated props (`OnceProp`), scroll pagination props (`ScrollProp`), and on-demand props (`OptionalProp`):
 
 ```python
+from vertebra import App
 from vertebra.framework.inertia import (
     DeferredProp,
     InertiaConfig,
     InertiaResponse,
+    MergeProp,
+    OnceProp,
+    ScrollProp,
+    inertia,
 )
 from vertebra.framework.ssr import SsrConfig
+
+app = App()
 
 config = InertiaConfig(
     enabled=True,
     version="1.0",
     ssr=SsrConfig(bundle_path="static/ssr/ssr.js"),
 )
+
+
+@app.get("/dashboard")
+@inertia("Dashboard/Index")
+def dashboard() -> dict[str, object]:
+    return {
+        "summary": {"active_users": 42},
+        "nav": OnceProp(lambda: ["Home", "Orders", "Settings"]),
+        "events": MergeProp([{"id": 1, "kind": "OrderCreated"}]),
+        "feed": ScrollProp(items=[{"id": 1}], next_page=2),
+        "metrics": DeferredProp(lambda: {"p99_ms": 1.4}, group="analytics"),
+    }
+
+
 page = InertiaResponse(
     component="Dashboard/Index",
-    props={
-        "summary": {"active_users": 42},
-        "metrics": DeferredProp(
-            lambda: {"p99_ms": 1.4},
-            group="analytics",
-        ),
-    },
+    props={"summary": {"active_users": 42}},
 )
 ```
 
-## Pooled QuickJS Server-Side Rendering (`vertebra.framework.ssr`)
+## QuickJS Server-Side Rendering & Prerendering (`vertebra.framework.ssr`)
 
-Render JavaScript/TypeScript page components on the server using the Rust-managed QuickJS worker pool (`SsrConfig`, `EmbeddedSsrClient`, `SsrResult`) with zero local TCP loopback overhead:
+Render JavaScript and TypeScript page components on the server using the embedded QuickJS worker pool (`EmbeddedSsrClient.from_config`), an external HTTP runtime (`SidecarSsrClient`), or static build-time prerendering (`prerender_routes`):
 
 ```python
 from vertebra.framework.ssr import EmbeddedSsrClient, SsrConfig
 
-ssr = EmbeddedSsrClient(
-    SsrConfig(bundle_path="static/ssr/ssr.js", pool_size=4)
+ssr = EmbeddedSsrClient.from_config(
+    SsrConfig(bundle_path="static/ssr/ssr.js", workers=4)
 )
 rendered = ssr.render(
     {
@@ -73,14 +88,44 @@ rendered = ssr.render(
 )
 ```
 
-## TypeScript Client SDK (`@vertebra/client`)
+## HTMX Request & Response Helpers (`vertebra.framework.htmx`)
 
-Generate end-to-end TypeScript route contracts with `vtb js generate-types` and consume them with `@vertebra/client`:
+Inspect incoming `HX-*` headers with `HtmxRequest` (`is_htmx`, `boosted`, `target`, `trigger`) and construct partial HTML responses with `HtmxResponse` (`trigger`, `retarget`, `reswap`, `push_url`):
+
+```python
+from vertebra.framework.htmx import HtmxRequest, HtmxResponse, HxSwap
+
+hx = HtmxRequest.from_headers({"HX-Request": "true", "HX-Target": "items-list"})
+response = HtmxResponse(
+    "<li>New item</li>",
+    trigger="itemAdded",
+    retarget="#items-list",
+    reswap=HxSwap.BEFOREEND,
+)
+```
+
+## TypeScript Client SDK & Framework Adapters (`@vertebra/client`)
+
+Generate TypeScript route contracts with `vtb js generate-types` and consume them across `@vertebra/client` and its React, Vue, Svelte, Angular, HTMX, and Vite subpaths:
 
 ```typescript
 import { HttpClient } from "@vertebra/client";
 import { LiveStateClient } from "@vertebra/client/live";
+import { initHtmx } from "@vertebra/client/htmx";
 
-const client = new HttpClient({ baseUrl: "http://localhost:8000" });
-const live = new LiveStateClient({ url: "ws://localhost:8000/ws/live" });
+const client = new HttpClient({ baseURL: "http://localhost:8000" });
+const live = new LiveStateClient(
+  "counter",
+  { count: 0 },
+  { url: "ws://localhost:8000/ws/live" },
+);
+
+initHtmx({ headers: { "X-App-Client": "vertebra" } });
+```
+
+Framework hooks and providers (`@vertebra/client/react`, `/vue`, `/svelte`, `/angular`, `/vite`):
+
+```tsx
+import { ClientProvider, useQuery, useMutation } from "@vertebra/client/react";
+import { vitePlugin } from "@vertebra/client/vite";
 ```

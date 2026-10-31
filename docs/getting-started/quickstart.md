@@ -46,12 +46,12 @@ uv run vtb dev app:app --port 8000
 Or run in production mode with `vtb run`:
 
 ```bash
-uv run vtb run app:app --host 0.0.0.0 --port 8000 --topology embedded
+uv run vtb run app:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
 ## 3. Verify Routes in `pytest`
 
-Verify route registration, deterministic FNV-1a handler IDs (`handler_id`), and path parameter extraction (`extract_path_params`) directly in `pytest` without opening a network socket:
+Test route registration, handler lookup (`handler_id`), and path parameter extraction (`extract_path_params`) directly in `pytest` without opening a network socket:
 
 ```python
 from vertebra import App, extract_path_params, handler_id

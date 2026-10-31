@@ -1,10 +1,21 @@
-"""Tests for App route registration and handler ID stability."""
+"""Tests for App route registration, Controller, Router, ProcedureRouter, and handler ID stability."""
+
+import sys
+from types import ModuleType
+from typing import Annotated
 
 import msgspec
 import pytest
 
+import vertebra
+import vertebra.framework as vtb_framework
+from vertebra.build.codegen._metadata import RouteCollector
 from vertebra.framework._app import App, HandlerInfo, _make_handler_id
-from vertebra.framework._router import handler_id
+from vertebra.framework._router import Controller, Route, Router, get, handler_id, post
+from vertebra.framework.autowire import AutowireConfig, AutowireLoader
+from vertebra.framework.di import Inject, Provide
+from vertebra.framework.openapi import OpenAPISpecBuilder
+from vertebra.framework.procedures import Procedure, ProcedureRouter, query
 
 
 def test_handler_id_stability_same_method_path_same_id() -> None:
@@ -157,3 +168,153 @@ async def test_vertebra_app_route_registration_lifecycle_hooks_delegate_to_inner
 
     await app.startup()
     assert calls == ["startup"]
+
+
+class _CreateWidgetPayload(msgspec.Struct, frozen=True, gc=False):
+    """Input payload for widget creation tests."""
+
+    title: str
+    count: int = 1
+
+
+class _WidgetDTO(msgspec.Struct, frozen=True, gc=False):
+    """Output DTO for widget endpoints."""
+
+    id: int
+    title: str
+    count: int
+
+
+class _WidgetRepository:
+    """In-memory repository injected into Controllers and Routes."""
+
+    def __init__(self, prefix: str = "W") -> None:
+        self.prefix = prefix
+
+    def fetch(self, widget_id: int) -> _WidgetDTO:
+        return _WidgetDTO(id=widget_id, title=f"{self.prefix}-{widget_id}", count=1)
+
+
+class _WidgetController(Controller):
+    """Controller testing method-level DI, routes, and RPC procedures."""
+
+    path = "/widgets"
+    dependencies = {"repo": Provide(_WidgetRepository, scope="singleton")}
+    tags = ("widgets",)
+
+    @get("/{widget_id:int}")
+    def get_widget(self, widget_id: int, repo: _WidgetRepository) -> _WidgetDTO:
+        return repo.fetch(widget_id)
+
+    @post("/", status_code=201)
+    def create_widget(self, body: _CreateWidgetPayload, repo: _WidgetRepository) -> _WidgetDTO:
+        return _WidgetDTO(id=99, title=f"{repo.prefix}:{body.title}", count=body.count)
+
+    @query()
+    def inspect_widget(self, widget_id: int, repo: _WidgetRepository) -> _WidgetDTO:
+        return repo.fetch(widget_id)
+
+
+class _ConstructorInjectedController(Controller):
+    """Controller testing constructor-level dependency injection."""
+
+    path = "/ctor-widgets"
+
+    def __init__(self, repo: _WidgetRepository) -> None:
+        self.repo = repo
+
+    @get("/{widget_id:int}")
+    def get_by_id(self, widget_id: int) -> _WidgetDTO:
+        return self.repo.fetch(widget_id)
+
+    @query()
+    def inspect_inherited_widget(self, widget_id: int) -> _WidgetDTO:
+        return self.repo.fetch(widget_id)
+
+
+def test_clean_break_domain_exports_and_absence_of_legacy_defs() -> None:
+    """Verify Route, Controller, Procedure, Provide, and Inject are exported and legacy *Def names are absent."""
+    assert vertebra.Route is Route
+    assert vertebra.Controller is Controller
+    assert vertebra.Procedure is Procedure
+    assert vertebra.ProcedureRouter is ProcedureRouter
+    assert vertebra.Provide is Provide
+    assert vertebra.Inject is Inject
+    assert vtb_framework.Route is Route
+    assert vtb_framework.Controller is Controller
+    assert vtb_framework.Procedure is Procedure
+    assert not hasattr(vertebra, "RouteDef")
+    assert not hasattr(vtb_framework, "RouteDef")
+    assert not hasattr(vtb_framework.procedures, "ProcedureDef")
+    assert not hasattr(vtb_framework.procedures, "procedure_query")
+    assert not hasattr(vtb_framework.procedures, "procedure_mutation")
+    assert not hasattr(vtb_framework.procedures, "procedure_subscription")
+
+
+@pytest.mark.anyio
+async def test_controller_router_procedure_registration_and_openapi_codegen_filtering() -> None:
+    """Verify Controller, nested Router, ProcedureRouter, OpenAPI schema, and RouteCollector DI filtering."""
+    api_router = Router(
+        prefix="/api/v1",
+        route_handlers=[_WidgetController, _ConstructorInjectedController],
+        dependencies={"repo": _WidgetRepository("API")},
+        tags=("v1",),
+    )
+    app = App(route_handlers=[api_router])
+
+    paths = {r.path: r for r in app.routes}
+    assert "/api/v1/widgets/{widget_id:int}" in paths
+    assert "/api/v1/widgets" in paths
+    assert "/api/v1/ctor-widgets/{widget_id:int}" in paths
+    assert "/_rpc/inspect_widget" in paths
+    assert paths["/api/v1/widgets"].status_code == 201
+    assert paths["/api/v1/widgets/{widget_id:int}"].tags == ("v1", "widgets")
+
+    rpc_res = await app.call_procedure("inspect_widget", 7)
+    assert rpc_res == _WidgetDTO(id=7, title="W-7", count=1)
+    inherited_rpc_res = await app.call_procedure("inspect_inherited_widget", 7)
+    assert inherited_rpc_res == _WidgetDTO(id=7, title="API-7", count=1)
+
+    oa_doc = OpenAPISpecBuilder.from_app(app).build()
+    post_op = oa_doc["paths"]["/api/v1/widgets"]["post"]
+    assert post_op["tags"] == ["v1", "widgets"]
+    assert post_op["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/_CreateWidgetPayload"
+    }
+
+    collected = RouteCollector().collect(app)
+    by_path = {(m.method, m.path): m for m in collected}
+    get_meta = by_path[("GET", "/api/v1/widgets/{widget_id:int}")]
+    assert set(get_meta.params.keys()) == {"widget_id"}
+    ctor_meta = by_path[("GET", "/api/v1/ctor-widgets/{widget_id:int}")]
+    assert set(ctor_meta.params.keys()) == {"widget_id"}
+
+
+def test_autowire_loader_registers_discovered_services_and_controllers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify AutowireLoader.register_all registers discovered Service and Controller classes on App."""
+    fake_mod = ModuleType("fake_domain_pkg")
+
+    class OrderService:
+        def label(self) -> str:
+            return "orders-ready"
+
+    class OrderController(Controller):
+        path = "/orders"
+
+        @get("/")
+        def status(self, svc: Annotated[OrderService, Inject()]) -> str:
+            return svc.label()
+
+    OrderService.__module__ = "fake_domain_pkg"
+    OrderController.__module__ = "fake_domain_pkg"
+    fake_mod.OrderService = OrderService
+    fake_mod.OrderController = OrderController
+    monkeypatch.setitem(sys.modules, "fake_domain_pkg", fake_mod)
+
+    loader = AutowireLoader(AutowireConfig(domain_packages=("fake_domain_pkg",)))
+    app = App()
+    controllers, services = loader.register_all(app)
+    assert controllers == (OrderController,)
+    assert services == (OrderService,)
+    assert any(r.path == "/orders" for r in app.routes)
+    assert app.container.resolve_sync(OrderService).label() == "orders-ready"

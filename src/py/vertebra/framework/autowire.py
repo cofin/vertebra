@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import pkgutil
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 
+from vertebra.framework._router import Controller, Router
 from vertebra.utils.module_loader import ensure_module
+
+if TYPE_CHECKING:
+    from vertebra.framework.di import Scope
 
 __all__ = (
     "AutowireConfig",
@@ -62,13 +66,35 @@ class AutowireLoader:
                     self._inspect_module(mod)
         return self.controllers, self.services
 
+    def register_all(
+        self,
+        app: Any,
+        *,
+        service_scope: Scope = "singleton",
+    ) -> tuple[tuple[type[Any], ...], tuple[type[Any], ...]]:
+        """Scan configured domain packages and register all services and controllers on app."""
+        if not self._controllers and not self._services and self.config.domain_packages:
+            self.scan()
+        container = getattr(app, "container", None)
+        if container is not None:
+            for svc_cls in self._services:
+                container.graph.register_type(svc_cls, scope=service_scope)
+            container.graph.compile()
+        for ctrl_cls in self._controllers:
+            if issubclass(ctrl_cls, Controller | Router):
+                app.register(ctrl_cls)
+        return self.controllers, self.services
+
     def _inspect_module(self, module: Any) -> None:
+        """Collect public controller and service classes defined in module."""
         for attr_name, obj in vars(module).items():
             if attr_name.startswith("_") or not isinstance(obj, type):
                 continue
             if obj.__module__ != module.__name__:
                 continue
-            if obj.__name__.endswith(self.config.controller_suffixes):
+            if obj in (Controller, Router):
+                continue
+            if obj.__name__.endswith(self.config.controller_suffixes) or issubclass(obj, Controller):
                 self._controllers.append(obj)
             elif obj.__name__.endswith(self.config.service_suffixes):
                 self._services.append(obj)

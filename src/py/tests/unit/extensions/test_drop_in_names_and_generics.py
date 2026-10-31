@@ -10,9 +10,12 @@ import click
 import msgspec
 import pytest
 
+import vertebra
 import vertebra.extensions.alchemy as alchemy_ext
 import vertebra.extensions.litestar as litestar_ext
 import vertebra.extensions.sqlspec as sqlspec_ext
+import vertebra.framework as vtb_framework
+import vertebra.framework.procedures as vtb_procedures
 from vertebra.build.codegen import CodegenConfig, CodegenPlugin
 from vertebra.cli.plugin_registry import (
     CLIPluginProtocol,
@@ -77,6 +80,12 @@ class _DummyAsyncDriver:
 
 def test_canonical_extension_exports() -> None:
     """Verify canonical domain classes are exported and legacy aliases are absent."""
+    assert not hasattr(vertebra, "RouteDef")
+    assert not hasattr(vtb_framework, "RouteDef")
+    assert not hasattr(vtb_procedures, "ProcedureDef")
+    assert not hasattr(vtb_procedures, "procedure_query")
+    assert not hasattr(vtb_procedures, "procedure_mutation")
+    assert not hasattr(vtb_procedures, "procedure_subscription")
     assert not hasattr(litestar_ext, "ServerConfig")
     assert not hasattr(litestar_ext, "VertebraConfig")
     assert not hasattr(litestar_ext, "VertebraPlugin")
