@@ -25,24 +25,35 @@ nav = [
   { "Usage" = [
     { "Overview" = "usage/index.md" },
     { "Framework & Routing" = [
-      { "Routing & Handlers" = "usage/routing-and-handlers.md" },
-      { "Framework Features" = "usage/framework-features.md" },
+      { "Routing, Controllers & Procedures" = "usage/routing-and-handlers.md" },
+      { "DI, Security & OpenAPI" = "usage/framework-features.md" },
+      { "Queues, LiveState, Email & Telemetry" = "usage/queues-and-realtime.md" },
     ] },
     { "Server & Runtime" = [
       { "Server & Workers" = "usage/server-and-workers.md" },
       { "Packaging & Deployment" = "usage/packaging-and-deployment.md" },
+      { "Testing" = "usage/testing.md" },
     ] },
     { "Databases" = [
-      { "Databases & Analytics" = "usage/databases.md" },
+      { "Overview & Drivers" = "usage/databases.md" },
+      { "Query Pipelines & CTE Stacking" = "usage/query-pipelines.md" },
+      { "Cloud Dialers (Cloud SQL & AlloyDB)" = "usage/cloud-dialers.md" },
+      { "RLS, CDC & Arrow Analytics" = "usage/analytics-and-cdc.md" },
       { "SQLSpec, SQLAlchemy & Extensions" = "usage/extensions.md" },
     ] },
     { "Object Storage" = [
-      { "Object Storage" = "usage/storage.md" },
+      { "Overview & Backends" = "usage/storage.md" },
+      { "GCS, Active ADC & Presigning" = "usage/storage-auth-and-signing.md" },
+      { "Range Reads, Parquet & Attachments" = "usage/storage-parquet-and-orm.md" },
     ] },
-    { "Frontend, Agents & Testing" = [
-      { "Frontend, Inertia & SSR" = "usage/frontend-and-ssr.md" },
-      { "Agent Protocols (MCP & A2A)" = "usage/agent-protocols.md" },
-      { "Testing" = "usage/testing.md" },
+    { "AI, Agents & Embeddings" = [
+      { "MCP, Skills & Stdio Bridge" = "usage/agent-protocols.md" },
+      { "A2A, WebMCP & Workflows" = "usage/a2a-and-workflows.md" },
+      { "Vector Embeddings & Slabs" = "usage/embeddings-and-vectors.md" },
+    ] },
+    { "Frontend & Client SDK" = [
+      { "Bundler, Inertia v3 & QuickJS SSR" = "usage/frontend-and-ssr.md" },
+      { "TypeScript SDK & Framework Adapters" = "usage/typescript-sdk.md" },
     ] },
   ] },
   { "Architecture" = [

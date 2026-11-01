@@ -125,9 +125,34 @@
 .md-header__title {
   font-family: var(--md-text-font-family);
   letter-spacing: normal;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.md-header__title > .md-header__ellipsis {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.md-header__topic,
+.md-header__topic + .md-header__topic,
+.md-header__title--active .md-header__topic,
+.md-header__title--active .md-header__topic + .md-header__topic {
+  position: static;
+  opacity: 1;
+  z-index: auto;
+  pointer-events: auto;
+  transform: none;
+  transition: none;
 }
 
 .md-header__topic:first-child {
+  flex-shrink: 0;
   font-family: var(--md-text-font-family);
   font-size: 0.86rem;
   font-weight: 700;
@@ -143,11 +168,54 @@
 }
 
 .md-header__topic + .md-header__topic {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
   font-family: var(--md-text-font-family);
   font-size: 0.84rem;
   font-weight: 600;
   letter-spacing: -0.01em;
   text-transform: none;
+  color: var(--md-default-fg-color--light);
+}
+
+.md-header__topic + .md-header__topic::before {
+  content: "/";
+  margin-right: 0.55rem;
+  color: var(--md-default-fg-color--lighter);
+  font-weight: 400;
+  flex-shrink: 0;
+}
+
+.md-header__topic + .md-header__topic > .md-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body:has(.vertebra-hero) .md-header__topic + .md-header__topic {
+  display: none;
+}
+
+@media screen and (max-width: 44.984375em) {
+  .md-header__title > .md-header__ellipsis {
+    gap: 0.4rem;
+  }
+
+  .md-header__topic:first-child {
+    font-size: 0.8rem;
+    letter-spacing: 0.08em;
+  }
+
+  .md-header__topic + .md-header__topic {
+    font-size: 0.78rem;
+  }
+
+  .md-header__topic + .md-header__topic::before {
+    margin-right: 0.4rem;
+  }
 }
 
 .md-tabs__link {

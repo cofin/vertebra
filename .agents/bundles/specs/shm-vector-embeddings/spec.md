@@ -195,14 +195,14 @@ flowchart TB
 - [x] [`t04-google-grpc-and-sql-pushdown-embedders`](tasks/t04-google-grpc-and-sql-pushdown-embedders.md) — Native HTTP/2 gRPC Packed-Float Codec & Google-First Zero-Weight Embedders (`depends_on: [t01-gcp-adc-token-cache-and-refresh, t02-shm-vector-slab-cache-and-views, t03-binary-vector-db-wire-codecs]`)
 - [x] [`t05-shm-embedding-broker-and-local-models`](tasks/t05-shm-embedding-broker-and-local-models.md) — Single-Instance `EmbeddingBroker`, `GemmaEmbedder`, `FastEmbedder` & Free-Threaded `3.14t`/`3.15t` Quarantine (`depends_on: [t02-shm-vector-slab-cache-and-views, t04-google-grpc-and-sql-pushdown-embedders]`)
 - [x] [`t06-vtb-ai-cli-and-colocated-workers`](tasks/t06-vtb-ai-cli-and-colocated-workers.md) — `vtb ai` (`models` + `mcp`) CLI Consolidation & Co-Located `WorkerRunner` in `vtb run` / `vtb dev` (`depends_on: [t01-gcp-adc-token-cache-and-refresh, t05-shm-embedding-broker-and-local-models]`)
-- [~] [`t07-docs-examples-and-okf-sync`](tasks/t07-docs-examples-and-okf-sync.md) — Embeddings Documentation, Runnable Example & OKF v0.2 Knowledge Base Sync (`depends_on: [t04-google-grpc-and-sql-pushdown-embedders, t05-shm-embedding-broker-and-local-models, t06-vtb-ai-cli-and-colocated-workers]`)
+- [x] [`t07-docs-examples-and-okf-sync`](tasks/t07-docs-examples-and-okf-sync.md) — Embeddings Documentation, Runnable Example & OKF v0.2 Knowledge Base Sync (`depends_on: [t04-google-grpc-and-sql-pushdown-embedders, t05-shm-embedding-broker-and-local-models, t06-vtb-ai-cli-and-colocated-workers]`)
 
 ---
 
 ## 5. Continuity Snapshot
 
-- **Active Phase**: Planned (`plan_revision: 2`, `state: planned` at commit `d3d5f8b`).
-- **Next Action**: Run `/flow:implement` starting with [`t01-gcp-adc-token-cache-and-refresh`](tasks/t01-gcp-adc-token-cache-and-refresh.md) and [`t02-shm-vector-slab-cache-and-views`](tasks/t02-shm-vector-slab-cache-and-views.md).
+- **Active Phase**: Implemented (`plan_revision: 2`, all 7 tasks `completed`).
+- **Next Action**: Run `/flow:review` and `/flow:archive` on `feat/shm-vector-embeddings`.
 
 ---
 

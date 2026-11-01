@@ -8,6 +8,7 @@ sources:
   - resource: src/rs/vertebra-storage/Cargo.toml
   - resource: src/rs/vertebra-storage/src/lib.rs
   - resource: src/rs/vertebra-storage/src/store.rs
+  - resource: src/rs/vertebra-storage/src/gcp_auth.rs
   - resource: src/rs/vertebra-storage/src/oci.rs
   - resource: src/rs/vertebra-storage/src/signing.rs
   - resource: src/rs/vertebra-storage/tests/storage_engine_tests.rs
@@ -19,6 +20,11 @@ sources:
 ---
 
 # Object Storage, Presigning & Upload Tracking
+
+<!-- truth: start -->
+- **Rust Extension & GIL-Free Async Execution (`vertebra-storage`, `vertebra.storage`)**: [`vertebra-storage`](../../../../../src/rs/vertebra-storage/src/lib.rs) is a PyO3 crate built as `_storage` (`#[pymodule(gil_used = false)]`) over `object_store 0.13`. Sync I/O methods release the GIL via `py.detach()`, while `*_async` methods return a [`RustTaskAwaitable`](../../../../../src/rs/vertebra-storage/src/lib.rs) resolved on a dedicated Tokio runtime through `call_soon_threadsafe` without blocking the Python event loop.
+- **Active GCP ADC Credential Caching & Refresh (`gcp_auth.rs`)**: [`RefreshingGcpCredentialProvider`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs) and [`GcpTokenCache`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs) cache [`GcpTokenSnapshot`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs) instances inside an `ArcSwapOption<GcpTokenSnapshot>`, proactively refreshing tokens `300s` (`DEFAULT_REFRESH_SKEW_MS = 300_000`) before expiry under a single-flight `tokio::sync::Mutex<()>` across `AuthorizedUser`, `MetadataServer`, `ImpersonatedServiceAccount`, and `Static` sources.
+<!-- truth: end -->
 
 Object storage has two layers. [`vertebra-storage`](../../../../../src/rs/vertebra-storage/src/lib.rs) is a PyO3 crate built as the `_storage` extension (`#[pymodule(gil_used = false)]`) on top of `object_store 0.13`. [`vertebra.storage`](../../../../../src/py/vertebra/storage/__init__.py) is the public Python API. It loads `vertebra._storage` lazily and falls back to pure-Python code when the extension is missing.
 
@@ -32,6 +38,7 @@ Object storage has two layers. [`vertebra-storage`](../../../../../src/rs/verteb
 | [`ObjectStoreEngine`](../../../../../src/rs/vertebra-storage/src/store.rs) | `store.rs` | Wraps `Arc<dyn ObjectStore>`. `from_url` maps schemes `memory`, `file`, `s3`/`b2`, `r2`, `oci`, `gs`/`gcs`, `az`/`azure`/`abfs`, `http`/`https` to a backend. `b2` resolves to `https://s3.{region}.backblazeb2.com`. |
 | `STORAGE_RUNTIME`, `runtime_handle`, `block_on_storage` | `store.rs` | Private 2-worker Tokio runtime. Sync calls use `block_in_place` when already on a multi-thread runtime. |
 | [`StorageError`](../../../../../src/rs/vertebra-storage/src/store.rs) | `store.rs` | `ObjectStore`, `Io`, `InvalidUrl`, `Signing`. |
+| [`GcpTokenSnapshot`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs), [`GcpTokenCache`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs), [`RefreshingGcpCredentialProvider`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs) | `gcp_auth.rs` | Wait-free `ArcSwapOption` ADC Bearer token cache with `300s` proactive refresh skew (`DEFAULT_REFRESH_SKEW_MS = 300_000`), single-flight `tokio::sync::Mutex` refresh deduplication, generation-checked invalidation (`invalidate_if_generation`), and support for `AuthorizedUser`, `MetadataServer`, `ImpersonatedServiceAccount`, and `Static` sources. Wired into `GoogleCloudStorageBuilder::with_credentials(...)` when no explicit `service_account_path` or `service_account_key` is supplied. |
 | [`OciObjectStore`](../../../../../src/rs/vertebra-storage/src/oci.rs) | `oci.rs` | Native `ObjectStore` impl over the OCI Object Storage REST API (`/n/{ns}/b/{bucket}/o/{name}`, pre-authenticated `par_url`, multipart via `OciMultipartUpload`). Defaults to `https://objectstorage.{region}.oraclecloud.com`. |
 | `OciCavageCredentials`, `sign_oci_cavage_request` | `oci.rs` | RSA-SHA256 `draft-cavage-http-signatures-08` request signing (`Authorization`, `Date`, `Host`, `x-content-sha256`). |
 | `chunk_uniform_parts`, `R2_UNIFORM_PART_SIZE` | `oci.rs` | Splits a payload into equal 8 MiB parts. `ObjectStoreEngine::put_multipart` re-chunks multi-part uploads when the scheme is `r2`, because R2 requires uniform non-trailing part sizes. |

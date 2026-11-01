@@ -23,7 +23,8 @@ Vertebra uses one domain naming model across Python, Rust, and TypeScript: each 
 
 ## Agent Protocols & Harness (`agent/`)
 
-- [Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols](agent/mcp-and-a2a-protocol-harness.md) — Model Context Protocol (`MCP 2026-07-28`) SSE and Stdio transports, Agent-to-Agent (`A2A 1.0`) JCS/RFC 8785 Ed25519/ECDSA signed agent cards, durable DAG workflows, SpecTree execution, Rust PyO3 cryptographic fastpaths, and GenAI telemetry.
+- [Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols](agent/mcp-and-a2a-protocol-harness.md) — Model Context Protocol (`MCP 2026-07-28`) SSE and Stdio transports, Agent-to-Agent (`A2A 1.0`) JCS/RFC 8785 Ed25519/ECDSA signed agent cards with automatic `AgentInterface` and dynamic request URL resolution, durable DAG workflows, SpecTree execution, Rust PyO3 cryptographic fastpaths, and GenAI telemetry.
+- [Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker](agent/embeddings-and-vectors.md) — POSIX shared-memory `VectorSlab` and `VectorCache`, PEP 3118 `VectorView` and `VectorBatchView`, `Embedder`, `VertexEmbedder`, `GeminiEmbedder`, `AlloyDbEmbedder`, `OracleEmbedder`, `GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`, `RemoteEmbedder`, and `1x` RAM `EmbeddingBroker`.
 
 ## Server & Worker Runtime (`server/`)
 

@@ -49,3 +49,11 @@ Register typed Python tools with `@tool` and call them over JSON-RPC 2.0 `tools/
 ```python title="docs/examples/agent_mcp_tools.py"
 --8<-- "docs/examples/agent_mcp_tools.py:example"
 ```
+
+## Shared-Memory Vector Embeddings & Top-k Search
+
+Embed queries and documents into a shared-memory `VectorBatchView`, apply Matryoshka `.truncate()`, encode binary database wire payloads, and run off-GIL top-$k$ cosine search:
+
+```python title="docs/examples/embeddings_app.py"
+--8<-- "docs/examples/embeddings_app.py:example"
+```

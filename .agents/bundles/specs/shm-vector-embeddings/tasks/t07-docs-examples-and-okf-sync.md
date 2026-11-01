@@ -6,7 +6,7 @@ title: "Embeddings Documentation, Runnable Example & OKF v0.2 Knowledge Base Syn
 description: "Author docs/usage/embeddings-and-vectors.md, docs/examples/embeddings_app.py, update zensical.toml, and synchronize OKF v0.2 knowledge chapters for shared-memory vectors, embeddings, active ADC credential refresh, and vtb ai CLI."
 scope: task
 status: draft
-state: in_progress
+state: completed
 strategy: tdd
 depends_on:
   - t04-google-grpc-and-sql-pushdown-embedders
@@ -128,7 +128,11 @@ make docs
 
 ## 4. Task Notes
 
-*(Populated during `/flow:implement` execution.)*
+- Authored `docs/usage/embeddings-and-vectors.md` with linked `pymdownx.tabbed` installation blocks (`uv`, `pip`, `pdm`, `poetry`), a conceptual 4-node Mermaid diagram, and sections covering Google-first zero-weight embedders (`Embedder()`, `VertexEmbedder`, `GeminiEmbedder`, `AlloyDbEmbedder`, `OracleEmbedder`), local `1x` RAM multi-worker embedders (`GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`), PEP 3118 `VectorView` / `VectorBatchView`, `vtb ai models`, and `vtb run --with-workers`.
+- Reorganized `docs/usage/` into focused topic guides (`embeddings-and-vectors.md`, `databases.md`, `query-pipelines.md`, `cloud-dialers.md`, `analytics-and-cdc.md`, `storage.md`, `storage-auth-and-signing.md`, `storage-parquet-and-orm.md`, `agent-protocols.md`, `a2a-and-workflows.md`, `frontend-and-ssr.md`, `typescript-sdk.md`, `framework-features.md`, `queues-and-realtime.md`) and registered them in `zensical.toml` and `docs/usage/index.md`.
+- Created runnable `docs/examples/embeddings_app.py` and registered it in `docs/examples/index.md`.
+- Curated `.agents/bundles/knowledge/domains/agent/embeddings-and-vectors.md` and synchronized `.agents/bundles/knowledge/index.md`, `domains/index.md`, `domains/storage/object-storage.md`, `domains/data/database-drivers-and-dialers.md`, `domains/framework/cli.md`, `domains/server/worker-lanes.md`, and `domains/agent/mcp-and-a2a-protocol-harness.md`.
+- Verified `make docs`, `.venv/bin/python -m tools.scripts.review_setup validate`, and `pytest src/py/tests/unit/docs/test_examples.py src/py/tests/unit/tools/test_docs_tooling.py -v` (all passing with zero errors).
 
 ---
 

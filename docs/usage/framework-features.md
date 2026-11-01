@@ -1,6 +1,6 @@
-# Framework Features
+# Dependency Injection, Security & OpenAPI
 
-Beyond routing, `vertebra.framework` provides scoped dependency injection, security guards, OpenAPI and AsyncAPI schema generation, background task queues, real-time `LiveState` sync, pub/sub channels, response caching, email delivery, and OpenTelemetry instrumentation.
+`vertebra.framework` provides scoped dependency injection (`Provide`, `Inject`, `Container`), declarative route guards and rate limiting (`SecurityConfig`, `Guard`), and automatic OpenAPI 3.1 / Scalar UI and AsyncAPI 3.0 schema builders. See [Queues, LiveState, Email & Telemetry](queues-and-realtime.md) for background tasks, real-time state, stores, and observability.
 
 ## Dependency Injection (`Provide`, `Inject` & `Container`)
 
@@ -92,116 +92,5 @@ openapi_config = OpenAPIConfig(
 )
 asyncapi_builder = AsyncAPISpecBuilder(
     AsyncAPIConfig(title="Orders Events", version="1.0.0")
-)
-```
-
-## Background Task Queues, Backends & Cron
-
-`vertebra.framework.queues` provides background task execution (`QueueService`), retry policies (`TaskRetryPolicy` with exponential backoff and dead-letter queues), delayed scheduling (`enqueue_delayed`), and cron jobs (`CronScheduler` with distributed leader leases):
-
-| Backend | Scheme / Class | Backing Mechanism |
-| --- | --- | --- |
-| **Memory** | `memory://` (`MemoryQueueBackend`) | In-process queue for local dev and unit tests |
-| **PostgreSQL** | `postgresql://` (`PostgresQueueBackend`) | `FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY` wakeups |
-| **Redis** | `redis://` (`RedisQueueBackend`) | Redis Streams consumer groups (`XREADGROUP` / `XACK`) |
-| **Valkey** | `valkey://` (`ValkeyQueueBackend`) | Valkey Streams + sorted-set delayed scheduling |
-| **Oracle** | `oracle://` (`OracleQueueBackend`) | `FOR UPDATE SKIP LOCKED` transactional queue tables |
-
-```python
-from vertebra.framework.queues import (
-    CronSchedule,
-    CronScheduler,
-    QueueConfig,
-    QueueService,
-    TaskRetryPolicy,
-    task,
-)
-
-queue = QueueService(QueueConfig(backend_url="memory://"))
-
-
-@task(
-    name="emails.welcome",
-    lane="io",
-    retry_policy=TaskRetryPolicy(max_retries=3),
-)
-async def send_welcome_email(user_id: int) -> str:
-    return f"sent:{user_id}"
-
-
-queue.register(send_welcome_email)
-scheduler = CronScheduler(
-    queue,
-    schedules=[
-        CronSchedule(
-            name="hourly-sync",
-            cron="0 * * * *",
-            task_name="emails.welcome",
-        )
-    ],
-)
-```
-
-Failed tasks that exhaust `max_retries` move to the dead-letter queue and can be inspected with `await queue.list_dlq()` or re-queued with `await queue.replay_dlq(task_id)`.
-
-## Real-Time `LiveState` & Pub/Sub Channels
-
-Synchronize server state with browser clients over WebSocket binary delta frames using `LiveState` and `@live_action` (`vertebra.framework.live`), or broadcast topic events across workers with `ChannelBus` (`vertebra.framework.channels`):
-
-```python
-from vertebra.framework.channels import ChannelBus
-from vertebra.framework.live import LiveState, LiveStateRoom, live_action
-
-
-class CounterState(LiveState):
-    count: int = 0
-
-    @live_action
-    def increment(self, step: int = 1) -> None:
-        self.count += step
-
-
-room = LiveStateRoom("room:lobby", CounterState())
-bus = ChannelBus()
-```
-
-## Key-Value Stores & Transactional Email
-
-Cache serialized responses or key-value state in `KeyValueStore` (`NamespacedStore`), and send transactional emails through a unified `EmailService` supporting 6 backends (`MemoryEmailBackend`, `SmtpBackend`, `ResendBackend`, `SendGridBackend`, `MailgunBackend`, `SesBackend`):
-
-```python
-from vertebra.framework.email import EmailConfig, EmailMessage, EmailService
-from vertebra.framework.stores import KeyValueStore
-
-cache = KeyValueStore()
-email_service = EmailService.from_config(
-    EmailConfig(backend="memory", default_from="noreply@example.com")
-)
-await email_service.send(
-    EmailMessage(
-        to=["user@example.com"],
-        subject="Welcome",
-        text_body="Hello from Vertebra",
-    )
-)
-```
-
-## Telemetry & Structured Logging (`vertebra.telemetry`)
-
-Configure structured JSON logging (`LoggingConfig`, Rust `LogSink` / `structlog` integration), W3C trace propagation (`TraceContext`, `SpanExporter`), GenAI token/cost metrics (`GenAiRecorder`), and database pool metrics (`DbPoolRecorder`, `SqlTracePropagator`):
-
-```python
-from vertebra.telemetry import (
-    GenAiRecorder,
-    GenAiUsage,
-    LoggingConfig,
-    TraceContext,
-)
-
-log_config = LoggingConfig(level="INFO", json_format=True)
-trace = TraceContext.generate()
-genai_metrics = GenAiRecorder()
-genai_metrics.record(
-    GenAiUsage(model="gemini-2.5-flash", input_tokens=120, output_tokens=45)
 )
 ```

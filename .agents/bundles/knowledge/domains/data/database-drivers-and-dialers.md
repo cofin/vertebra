@@ -34,6 +34,11 @@ sources:
 
 # Database Drivers & Cloud Dialers
 
+<!-- truth: start -->
+- **Binary Vector Wire Codecs (`postgres.rs`, `oracle.rs`, `vertebra-py/src/db.rs`)**: PostgreSQL (`postgres.rs`) encodes and decodes binary `pgvector` (`vector` `f32`, `halfvec` `f16`, and `bit` bit-packed) frames without text formatting, while Oracle 26ai (`oracle.rs`, `vertebra-py/src/db.rs`) encodes and decodes binary `0xDB` `VECTOR` frames directly over PEP 3118 `PyBuffer` views (`encode_oracle_vector_binary`, `decode_oracle_vector_binary`).
+- **Per-Session DuckDB `httpfs` Secret Rotation (`duckdb.py`, `duckdb_engine.rs`)**: Each pooled DuckDB connection tracks `applied_token_generation: u64` against the shared [`GcpTokenCache`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs) and executes `CREATE OR REPLACE SECRET vtb_gcs_adc (TYPE GCS, BEARER_TOKEN '...')` whenever the cached ADC token generation advances.
+<!-- truth: end -->
+
 [`src/rs/vertebra-db`](../../../../../src/rs/vertebra-db/src/lib.rs) and [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py) implement Vertebra's Tier-1 shared-memory database and cache drivers, typed connection configs (`msgspec.Struct(frozen=True, gc=False, kw_only=True)`), zero-copy `ShmRegion` Arrow IPC cursors, and Cloud SQL / AlloyDB mTLS dialers. Query composition, CDC, and tenancy in the same package are covered in [query-pipeline-cdc-and-tenancy](query-pipeline-cdc-and-tenancy.md).
 
 ## 1. Registry (`_registry.py`)

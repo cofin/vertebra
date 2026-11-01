@@ -1,10 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none" role="img" aria-label="Vertebra">
   <title>Vertebra</title>
-  <path d="M64 56L128 32L192 56L168 84H88L64 56Z" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M54 126L128 102L202 126L176 154H80L54 126Z" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M64 196L128 172L192 196L168 224H88L64 196Z" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M128 20V32" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M128 84V102" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M128 154V172" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M128 224V236" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M38 28L128 54L218 28L190 60L128 82L66 60Z" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M48 98L128 124L208 98L182 130L128 152L74 130Z" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M58 168L128 194L198 168L174 200L128 222L82 200Z" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M128 82V124" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M128 152V194" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
