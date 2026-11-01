@@ -46,6 +46,10 @@ function getBrowserModelContext(explicit?: BrowserModelContext | null): BrowserM
   return null;
 }
 
+function isWebMCPManifest(value: WebMCPManifest | RegisterWebMCPOptions | undefined): value is WebMCPManifest {
+  return value !== undefined && "tools" in value && Array.isArray((value as WebMCPManifest).tools);
+}
+
 /**
  * Register server-exposed MCP tools (`/.well-known/webmcp.json` or an explicit `WebMCPManifest`)
  * with the browser's W3C WebMCP `navigator.modelContext` API.
@@ -54,16 +58,14 @@ export async function registerWebMCPTools(
   manifestOrOptions?: WebMCPManifest | RegisterWebMCPOptions,
   options?: RegisterWebMCPOptions,
 ): Promise<BrowserModelContextTool[]> {
-  const isManifest =
-    manifestOrOptions !== undefined &&
-    "tools" in manifestOrOptions &&
-    Array.isArray((manifestOrOptions as WebMCPManifest).tools);
-  const resolvedOptions: RegisterWebMCPOptions = (isManifest ? options : manifestOrOptions) ?? {};
+  const hasManifest = isWebMCPManifest(manifestOrOptions);
+  const resolvedOptions: RegisterWebMCPOptions =
+    (hasManifest ? options : (manifestOrOptions as RegisterWebMCPOptions | undefined)) ?? {};
   const fetchFn = resolvedOptions.fetchImpl ?? globalThis.fetch;
 
   let manifest: WebMCPManifest;
-  if (isManifest) {
-    manifest = manifestOrOptions as WebMCPManifest;
+  if (hasManifest) {
+    manifest = manifestOrOptions;
   } else {
     const url = resolvedOptions.manifestUrl ?? "/.well-known/webmcp.json";
     const resp = await fetchFn(url, {

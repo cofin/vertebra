@@ -22,6 +22,8 @@ _CLIENT_SUBPATHS: tuple[tuple[str, str, str], ...] = (
     ("./hmr", "./hmr/index.js", "./hmr/index.d.ts"),
     ("./wasm", "./wasm.js", "./wasm.d.ts"),
     ("./arrow", "./arrow.js", "./arrow.d.ts"),
+    ("./router", "./router.js", "./router.d.ts"),
+    ("./webmcp", "./webmcp.js", "./webmcp.d.ts"),
     ("./live", "./live/index.js", "./live/index.d.ts"),
     ("./apex", "./apex/index.js", "./apex/index.d.ts"),
     ("./telemetry", "./telemetry.js", "./telemetry.d.ts"),
@@ -105,14 +107,36 @@ class ImportMapGenerator:
     def sync_wheel_client(output_dir: Path) -> Path | None:
         """Copy the wheel-packaged ``@vertebra/client`` ESM bundle and ``.d.ts`` declarations into *output_dir*."""
         bundle_dir = Path(__file__).resolve().parents[1] / "server" / "_js" / "bundle"
-        if not bundle_dir.is_dir():
+        ts_src_dir = Path(__file__).resolve().parents[3] / "ts" / "vertebra-client" / "src"
+        if not bundle_dir.is_dir() and not ts_src_dir.is_dir():
             return None
 
         target_dir = output_dir / "client"
         if target_dir.exists():
             shutil.rmtree(target_dir)
         target_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(bundle_dir, target_dir)
+        if bundle_dir.is_dir():
+            shutil.copytree(bundle_dir, target_dir)
+        else:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for _subpath, js_rel, types_rel in _CLIENT_SUBPATHS:
+                rel_clean = js_rel.removeprefix("./")
+                stem = rel_clean.removesuffix(".js")
+                src_candidates = (
+                    ts_src_dir / f"{stem}.ts",
+                    ts_src_dir / f"{stem}.tsx",
+                    ts_src_dir / stem / "index.ts",
+                    ts_src_dir / stem / "index.tsx",
+                )
+                source_text = next(
+                    (c.read_text(encoding="utf-8") for c in src_candidates if c.is_file()), "export {};\n"
+                )
+                js_target = target_dir / rel_clean
+                dts_target = target_dir / types_rel.removeprefix("./")
+                js_target.parent.mkdir(parents=True, exist_ok=True)
+                dts_target.parent.mkdir(parents=True, exist_ok=True)
+                js_target.write_text(source_text, encoding="utf-8")
+                dts_target.write_text(source_text, encoding="utf-8")
 
         exports_map: dict[str, dict[str, str]] = {
             subpath: {"types": types_rel, "import": js_rel} for subpath, js_rel, types_rel in _CLIENT_SUBPATHS

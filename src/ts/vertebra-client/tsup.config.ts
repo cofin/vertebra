@@ -21,6 +21,8 @@ export default defineConfig({
     "src/telemetry.ts",
     "src/wasm.ts",
     "src/arrow.ts",
+    "src/router.ts",
+    "src/webmcp.ts",
     "src/agent/index.ts",
   ],
   format: ["esm"],

@@ -217,6 +217,23 @@ class DevMiddleware:
                 except Exception:
                     pass
 
+            ts_src_dir = Path(__file__).resolve().parents[3] / "ts" / "vertebra-client" / "src"
+            if ts_src_dir.is_dir():
+                stem = rel_client_path.removesuffix(".d.ts").removesuffix(".js")
+                src_candidates = (
+                    ts_src_dir / f"{stem}.ts",
+                    ts_src_dir / f"{stem}.tsx",
+                    ts_src_dir / stem / "index.ts",
+                    ts_src_dir / stem / "index.tsx",
+                )
+                for src_candidate in src_candidates:
+                    if src_candidate.is_file():
+                        content_type = (
+                            "application/typescript" if rel_client_path.endswith(".d.ts") else "application/javascript"
+                        )
+                        await self.send_response(send, src_candidate.read_bytes(), content_type)
+                        return
+
             content = f"/* Vertebra client resource not found: {rel_client_path} */"
             await self.send_response(send, content.encode("utf-8"), "application/javascript", status=404)
             return

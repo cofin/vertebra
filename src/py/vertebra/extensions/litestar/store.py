@@ -5,13 +5,17 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
-from typing import Any, Self
-
-from litestar.stores.base import Store
+from typing import TYPE_CHECKING, Any, Self
 
 from vertebra.db.redis import AsyncRedisDriver, RedisConfig
 from vertebra.db.valkey import AsyncValkeyDriver, ValkeyConfig
 from vertebra.utils.module_loader import import_optional
+
+if TYPE_CHECKING:
+    from litestar.stores.base import Store as _StoreBase
+else:
+    _base_store_mod = import_optional("litestar.stores.base")
+    _StoreBase = _base_store_mod.Store if _base_store_mod is not None else object
 
 __all__ = (
     "MemoryStore",
@@ -20,7 +24,7 @@ __all__ = (
 )
 
 
-class MemoryStore(Store):
+class MemoryStore(_StoreBase):
     """Litestar store backed by Vertebra monotonic TTL cache with optional Valkey/Redis backing."""
 
     __slots__ = ("_driver", "_entries")
