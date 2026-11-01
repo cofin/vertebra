@@ -1,6 +1,6 @@
 ---
 name: review-core
-description: Foundation review skill providing shared area manifests, checklist items, false-positive catalog, test strength criteria, and finding ledger formats.
+description: Use when auditing or executing code reviews across Vertebra to apply shared area manifests, checklist items, false-positive suppressions, test strength criteria, and finding ledger formats.
 ---
 
 <!-- truth: start -->

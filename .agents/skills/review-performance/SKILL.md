@@ -1,6 +1,6 @@
 ---
 name: review-performance
-description: Reviews hot-path allocation discipline, zero-copy guarantees, Criterion micro-benchmarks, and free-threaded 3.14t contention.
+description: Use when reviewing hot-path allocation discipline, zero-copy guarantees, Criterion micro-benchmarks, or free-threaded Python 3.14t/3.15t contention.
 ---
 
 <!-- truth: start -->

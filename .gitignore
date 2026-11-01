@@ -71,11 +71,8 @@ uv.toml
 !.agents/skills/**
 !.agents/agents/
 !.agents/agents/**
-!.agents/config.json
-.agents/transactions/
+!.agents/setup-state.json
 .agents/scratch/
-.agents/setup-state.json
-.agents/migration-inventory.json
 # Benchmark results (DuckDB, JSONL)
 tools/benchmarks/results/*.jsonl
 tools/benchmarks/results/*.duckdb

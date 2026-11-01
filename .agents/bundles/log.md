@@ -10,6 +10,13 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-11-01] flow-setup | Aligned OKF v0.2 Bundle, Engineering Domain Skills, and Multi-Harness Subagents
+
+- Executed `/flow:setup` brownfield alignment (`Align & True-Up`, `shared` Git tracking policy) on branch `chore/flow-setup-alignment` off `main` (`v0.2.0`):
+  - **Legacy Artifact Removal & Continuity Alignment**: Removed legacy `.agents/transactions/`, `.agents/skills/flow-memory-keeper/`, and `.agents/config.json`; elevated project nuances into `knowledge/workflow.md`; updated `.agents/setup-state.json` and `.gitignore` to track `.agents/setup-state.json`, `.agents/bundles/**`, `.agents/skills/**`, and `.agents/agents/**` while ignoring `.agents/scratch/`.
+  - **OKF v0.2 Bundle & ADRs**: Added bounded `<= 40`-line `<!-- truth: start -->` blocks to `product/product-guidelines.md` and `knowledge/patterns/typescript/client-and-adapter-subpaths.md`, created `product/index.md` and `knowledge/decisions/{index,adr-001-dual-topology-embedded-and-shm-runtime,adr-002-two-tier-shm-database-and-arrow-data-plane,adr-003-pypi-vertebra-core-distribution-and-wheel-bundled-client}.md`, and synchronized `product/product.md` and `product/tech-stack.md` with `v0.2.0` (`@vertebra/client` `0.2.0`, Starlette/FastAPI/Flask/Django extensions, `/router`, `/webmcp`, and C-API `msgspec_bridge`).
+  - **Engineering Domain Skills & Multi-Harness Subagents**: Created stack-specific engineering domain skills in `.agents/skills/{runtime-ipc,http-ingress,pyo3-bridge,python-framework,typescript-client}/{SKILL.md,references/*.md}`, aligned all 16 subagents in `.agents/agents/*-{reviewer,specialist}.md` (`model: inherit`, top-level H1 `# ` headings, `readonly: true` and `disallowedTools` YAML list on reviewers, paired domain skill preloads), and updated `.agents/skills/index.md` and `tools/scripts/review_setup.py`.
+
 ## [2026-11-01] flow-archive | Completed and Archived Unified Runtime (`v0.2.0`), Zero-Copy C-API Fastpaths & Multi-Framework Extensions (`unified-runtime-and-framework-extensions`)
 
 - Completed and archived Master PRD `unified-runtime-and-framework-extensions` and all 6 child Flow specs (`runtime-zero-copy-and-driver-parity`, `vite-parity-and-configurable-docs-mcp`, `starlette-extension-and-fastpath`, `fastapi-extension-and-fastpath`, `wsgi-optimizations-and-flask-extension`, `django-extension-and-db-backends`):

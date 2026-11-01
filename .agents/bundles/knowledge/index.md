@@ -94,3 +94,10 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
 - **[Gotchas & Non-Obvious Footguns Index](gotchas/index.md)**
   - [PyO3 FFI, Embedded Globals & Python Runtime Gotchas](gotchas/pyo3-and-python-runtime.md)
   - [Shared-Memory Rings & Cross-Platform IPC Gotchas](gotchas/shm-and-cross-platform-ipc.md)
+
+## Decisions (`decisions/`)
+
+- **[Architectural Decision Records Index](decisions/index.md)**
+  - [ADR-001: Dual-Topology Embedded and Shared-Memory Runtime](decisions/adr-001-dual-topology-embedded-and-shm-runtime.md)
+  - [ADR-002: Shared-Memory Database Broker and Arrow IPC Data Plane](decisions/adr-002-two-tier-shm-database-and-arrow-data-plane.md)
+  - [ADR-003: PyPI `vertebra-core` Distribution and Wheel-Bundled TypeScript Client](decisions/adr-003-pypi-vertebra-core-distribution-and-wheel-bundled-client.md)

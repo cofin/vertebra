@@ -20,8 +20,8 @@ def build_minimal_review_tree(tmp_path: Path) -> Path:
     areas_toml = (
         "schema_version = 1\n\n"
         "[agents]\n"
-        'model = "pro"\n'
-        'common_preload = ["review-core", "flow-memory-keeper"]\n'
+        'model = "inherit"\n'
+        'common_preload = ["review-core"]\n'
         'valid_tools = ["read_file", "edit_file", "write_file", "code_search", "run_command", "search_web", "moma_search", "skill_search", "send_message", "view_file", "grep_search", "find_by_name", "list_dir"]\n'
         'write_tools = ["edit_file", "write_file"]\n'
         'reviewer_required_tools = ["read_file", "view_file", "grep_search", "find_by_name", "list_dir", "code_search", "run_command", "search_web", "moma_search", "skill_search", "send_message"]\n'
@@ -79,10 +79,6 @@ def build_minimal_review_tree(tmp_path: Path) -> Path:
         "# Core Skill\n"
     )
     (repo / ".agents/skills/review-core/SKILL.md").write_text(core_skill, encoding="utf-8")
-
-    flow_skill = "---\nname: flow-memory-keeper\ndescription: Memory keeper.\n---\n\n# Flow Memory Keeper\n"
-    (repo / ".agents/skills/flow-memory-keeper").mkdir(parents=True, exist_ok=True)
-    (repo / ".agents/skills/flow-memory-keeper/SKILL.md").write_text(flow_skill, encoding="utf-8")
 
     knowledge_file = repo / ".agents/bundles/knowledge/patterns/rust/sample.md"
     knowledge_file.parent.mkdir(parents=True, exist_ok=True)
@@ -158,7 +154,6 @@ def build_minimal_review_tree(tmp_path: Path) -> Path:
         "preloadSkills:\n"
         "  - review-core\n"
         "  - review-runtime-ipc\n"
-        "  - flow-memory-keeper\n"
         "---\n\n"
         "# Reviewer\n\n"
         "## Scope\n\n"
@@ -185,7 +180,6 @@ def build_minimal_review_tree(tmp_path: Path) -> Path:
         "preloadSkills:\n"
         "  - review-core\n"
         "  - review-runtime-ipc\n"
-        "  - flow-memory-keeper\n"
         "---\n\n"
         "# Specialist\n\n"
         "## Scope\n\n"
@@ -335,7 +329,6 @@ def test_agents_catches_write_tool_on_reviewer_and_forbidden_command(
         "preloadSkills:\n"
         "  - review-core\n"
         "  - review-runtime-ipc\n"
-        "  - flow-memory-keeper\n"
         "---\n\n"
         "# Reviewer\n\n"
         "## Scope\n\n"
