@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import binascii
 import builtins
@@ -17,7 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Buffer, Sequence
+from collections.abc import Buffer, Mapping, Sequence
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Self
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -490,8 +489,30 @@ class GcpTokenCache:
 
     __slots__ = ("_allow_ambient_adc", "_config", "_generation", "_lock", "_native", "_refresh_lock", "_snapshot")
 
-    def __init__(self, config: GCSConfig, *, allow_ambient_adc: bool = True) -> None:
-        self._config = config
+    def __init__(
+        self,
+        config: GCSConfig | Mapping[str, str] | None = None,
+        *,
+        allow_ambient_adc: bool = True,
+    ) -> None:
+        raw_opts: dict[str, str] | None = None
+        if isinstance(config, Mapping):
+            raw_opts = {str(k): str(v) for k, v in config.items()}
+            resolved_config = GCSConfig(
+                bucket=raw_opts.get("bucket", ""),
+                service_account_path=raw_opts.get("service_account_path"),
+                service_account_key=raw_opts.get("service_account_key"),
+                application_credentials=raw_opts.get("application_credentials_path"),
+                service_account_email=raw_opts.get("service_account_email"),
+                target_service_account=raw_opts.get("target_service_account"),
+                iam_endpoint=raw_opts.get("iam_endpoint", "https://iamcredentials.googleapis.com"),
+                access_token=raw_opts.get("access_token"),
+            )
+        elif config is None:
+            resolved_config = GCSConfig(bucket="")
+        else:
+            resolved_config = config
+        self._config = resolved_config
         self._allow_ambient_adc = allow_ambient_adc
         self._generation = 0
         self._snapshot: GcpTokenSnapshot | None = None
@@ -500,24 +521,27 @@ class GcpTokenCache:
         self._native: Any = None
         native_mod = ObjectStore._get_native_module()
         if native_mod is not None and hasattr(native_mod, "GcpTokenCache"):
-            opts: dict[str, str] = {
-                "refresh_skew_ms": str(max(0, int(config.refresh_skew_seconds * 1000))),
-                "iam_endpoint": config.iam_endpoint,
-                "allow_ambient_adc": "true" if allow_ambient_adc else "false",
-            }
-            if config.application_credentials:
-                opts["application_credentials_path"] = config.application_credentials
-            if config.target_service_account:
-                opts["target_service_account"] = config.target_service_account
-            if config.access_token:
-                opts["access_token"] = config.access_token
-            if not (
-                config.application_credentials
-                or config.service_account_path
-                or config.service_account_key
-                or config.access_token
-            ):
-                opts["use_metadata_server"] = "true"
+            if raw_opts is not None:
+                opts = dict(raw_opts)
+            else:
+                opts = {
+                    "refresh_skew_ms": str(max(0, int(resolved_config.refresh_skew_seconds * 1000))),
+                    "iam_endpoint": resolved_config.iam_endpoint,
+                    "allow_ambient_adc": "true" if allow_ambient_adc else "false",
+                }
+                if resolved_config.application_credentials:
+                    opts["application_credentials_path"] = resolved_config.application_credentials
+                if resolved_config.target_service_account:
+                    opts["target_service_account"] = resolved_config.target_service_account
+                if resolved_config.access_token:
+                    opts["access_token"] = resolved_config.access_token
+                if not (
+                    resolved_config.application_credentials
+                    or resolved_config.service_account_path
+                    or resolved_config.service_account_key
+                    or resolved_config.access_token
+                ):
+                    opts["use_metadata_server"] = "true"
             try:
                 self._native = native_mod.GcpTokenCache(opts)
             except (RuntimeError, ValueError, OSError):
@@ -616,7 +640,7 @@ class GcpTokenCache:
             with self._lock:
                 if self._snapshot is not None:
                     return self._snapshot
-        return await asyncio.to_thread(self.get_token, force_refresh=force_refresh)
+        return self.get_token(force_refresh=force_refresh)
 
 
 class AzureConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -1371,8 +1395,6 @@ class ObjectStore:
             native_meta = await self._native.put_async(key, view)
             fallback_etag = "" if getattr(native_meta, "etag", None) else f"{view.nbytes:016x}"
             return self._native_to_put_result(native_meta, fallback_etag)
-        if self._local_root is not None:
-            return await asyncio.to_thread(self.put, path, data)
         return self.put(path, data)
 
     async def put_file_async(self, path: str, file_path: str | Path) -> PutResult:
@@ -1381,10 +1403,13 @@ class ObjectStore:
         if self._local_root is not None:
             self._resolve_local(key)
         resolved_src = Path(file_path)
+        if not resolved_src.exists():
+            msg = f"Source file not found: {resolved_src}"
+            raise FileNotFoundError(msg)
         if self._native is not None and hasattr(self._native, "put_file_async"):
             native_meta = await self._native.put_file_async(key, str(resolved_src))
             return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
-        return await asyncio.to_thread(self.put_file, path, resolved_src)
+        return self.put_file(path, resolved_src)
 
     async def put_multipart_async(self, path: str, parts: Sequence[Buffer]) -> PutResult:
         """Asynchronously upload multiple buffer parts atomically."""
@@ -1401,8 +1426,6 @@ class ObjectStore:
                 etag=str(etag),
                 version=native_meta.version,
             )
-        if self._local_root is not None:
-            return await asyncio.to_thread(self.put_multipart, path, parts)
         return self.put_multipart(path, parts)
 
     async def get_async(self, path: str) -> bytes:
@@ -1412,8 +1435,6 @@ class ObjectStore:
             self._resolve_local(key)
         if self._native is not None and hasattr(self._native, "get_async"):
             return bytes(await self._native.get_async(key))
-        if self._local_root is not None:
-            return await asyncio.to_thread(self.get, path)
         return self.get(path)
 
     async def get_view_async(self, path: str) -> memoryview:
@@ -1432,8 +1453,6 @@ class ObjectStore:
             self._resolve_local(key)
         if self._native is not None and hasattr(self._native, "get_range_async"):
             return bytes(await self._native.get_range_async(key, offset, length))
-        if self._local_root is not None:
-            return await asyncio.to_thread(self.get_range, path, offset, length)
         return self.get_range(path, offset, length)
 
     async def head_async(self, path: str) -> ObjectMeta:
@@ -1444,8 +1463,6 @@ class ObjectStore:
         if self._native is not None and hasattr(self._native, "head_async"):
             native_meta = await self._native.head_async(key)
             return self._native_to_object_meta(native_meta)
-        if self._local_root is not None:
-            return await asyncio.to_thread(self.head, path)
         return self.head(path)
 
     async def exists_async(self, path: str) -> bool:
@@ -1455,8 +1472,6 @@ class ObjectStore:
             self._resolve_local(key)
         if self._native is not None and hasattr(self._native, "exists_async"):
             return bool(await self._native.exists_async(key))
-        if self._local_root is not None:
-            return await asyncio.to_thread(self.exists, path)
         return self.exists(path)
 
     async def delete_async(self, path: str) -> None:
@@ -1470,9 +1485,6 @@ class ObjectStore:
             except FileNotFoundError:
                 return
             return
-        if self._local_root is not None:
-            await asyncio.to_thread(self.delete, path)
-            return
         self.delete(path)
 
     async def copy_async(self, src: str, dst: str) -> None:
@@ -1484,9 +1496,6 @@ class ObjectStore:
             self._resolve_local(dst_key)
         if self._native is not None and hasattr(self._native, "copy_async"):
             await self._native.copy_async(src_key, dst_key)
-            return
-        if self._local_root is not None:
-            await asyncio.to_thread(self.copy, src, dst)
             return
         self.copy(src, dst)
 
@@ -1500,8 +1509,6 @@ class ObjectStore:
                 for item in items
                 if not norm_prefix or str(item.path).startswith(norm_prefix)
             ]
-        if self._local_root is not None:
-            return await asyncio.to_thread(self.list, prefix)
         return self.list(prefix)
 
     def open_readable_file(self, path: str, *, size: int | None = None) -> ReadableFile:
@@ -1969,8 +1976,7 @@ class ObjectStore:
                     private_key_pem,
                 )
             )
-        return await asyncio.to_thread(
-            self._sign_gcs_v4_iam,
+        return self._sign_gcs_v4_iam(
             key,
             method=method,
             expires_in_secs=expires_in_secs,

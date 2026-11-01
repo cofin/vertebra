@@ -11,7 +11,6 @@ from typing import Any
 
 import msgspec
 
-from vertebra._storage import GcpTokenCache
 from vertebra._vertebra import (
     VectorBatchView,
     VectorCache,
@@ -22,6 +21,7 @@ from vertebra._vertebra import (
     encode_gemini_embed_grpc_frame,
 )
 from vertebra.embeddings._base import Embedder, MultimodalPart
+from vertebra.storage import GcpTokenCache
 from vertebra.utils.serializers import decode_json, encode_json
 
 __all__ = (

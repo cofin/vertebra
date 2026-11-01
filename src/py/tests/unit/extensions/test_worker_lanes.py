@@ -155,11 +155,15 @@ def test_vtb_workers_run_and_vtb_run_oneshot_cli(monkeypatch: pytest.MonkeyPatch
         queues: str,
         concurrency: str,
         drain_timeout_s: float,
+        oneshot_job: str | None = None,
+        payload: Any = None,
     ) -> int:
         recorded["app_path"] = app_path
         recorded["queues"] = queues
         recorded["concurrency"] = concurrency
         recorded["drain_timeout_s"] = drain_timeout_s
+        recorded["oneshot_job"] = oneshot_job
+        recorded["payload"] = payload
         return 0
 
     monkeypatch.setattr("vertebra.cli.workers.execute_worker_cli", fake_execute_worker_cli)
@@ -183,6 +187,8 @@ def test_vtb_workers_run_and_vtb_run_oneshot_cli(monkeypatch: pytest.MonkeyPatch
         "queues": "default,etl",
         "concurrency": "10,2",
         "drain_timeout_s": 20.0,
+        "oneshot_job": None,
+        "payload": None,
     }
 
     oneshot_recorded: dict[str, str] = {}
