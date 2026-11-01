@@ -51,6 +51,7 @@ from vertebra.server._loops import (
 from vertebra.server._protocol import InterfaceMode, detect_interface
 from vertebra.server._rsgi._adapter import RsgiAdapter
 from vertebra.server._wsgi._adapter import WsgiAdapter
+from vertebra.server.lanes import WorkerRunner
 from vertebra.server.platform import (
     CgroupQuota,
     LameDuckController,
@@ -350,7 +351,12 @@ class Worker:
         has_async_handlers = any(spec.is_async for spec in compiled_handlers.values())
         has_sync_thread = any(spec.sync_to_thread for spec in compiled_handlers.values())
         has_async_mounts = any(proto in {"asgi", "rsgi"} for proto in resolved_mount_protocols)
-        needs_event_loop = has_async_handlers or has_async_mounts
+        has_colocated_workers = os.environ.get("VERTEBRA_WITH_WORKERS", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        needs_event_loop = has_async_handlers or has_async_mounts or has_colocated_workers
         notify_fd = get_request_notify_fd()
 
         use_inline_event_loop = notify_fd >= 0 and shard_count == 1 and needs_event_loop
@@ -366,6 +372,18 @@ class Worker:
             if has_sync_thread
             else None
         )
+
+        colocated_runner: WorkerRunner | None = None
+        colocated_future: concurrent.futures.Future[Any] | None = None
+        if has_colocated_workers:
+            queues_env = os.environ.get("VERTEBRA_WORKER_QUEUES", "default")
+            lane_env = os.environ.get("VERTEBRA_WORKER_LANE_CONCURRENCY", "")
+            lanes = WorkerRunner.parse_lane_concurrency(queues_env, lane_env)
+            colocated_runner = WorkerRunner(lanes, lame_duck=self._lame_duck)
+            if use_inline_event_loop:
+                loop_pool.primary_loop.create_task(colocated_runner.run())
+            else:
+                colocated_future = loop_pool.schedule(colocated_runner.run())
 
         lifespan_stack = ExitStack()
         lifespan_states: dict[str, dict[str, Any]] = {}
@@ -443,6 +461,14 @@ class Worker:
                     batches_processed += 1
         finally:
             self._zpages.set_var("worker_state", "stopped")
+            if colocated_runner is not None:
+                with suppress(Exception):
+                    if use_inline_event_loop:
+                        loop_pool.primary_loop.run_until_complete(colocated_runner.stop())
+                    else:
+                        loop_pool.schedule(colocated_runner.stop()).result(timeout=5.0)
+                        if colocated_future is not None:
+                            colocated_future.result(timeout=2.0)
             try:
                 lifespan_stack.close()
             except Exception:

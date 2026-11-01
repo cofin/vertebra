@@ -3,12 +3,12 @@
 import click
 
 from vertebra import __version__
+from vertebra.cli.ai import ai as _ai_cmd
 from vertebra.cli.build import build as build_command
 from vertebra.cli.config import configure_rich_click
 from vertebra.cli.dev import dev as _dev_cmd
 from vertebra.cli.init import init as _init_cmd
 from vertebra.cli.js import js as _js_cmd
-from vertebra.cli.mcp import mcp as _mcp_cmd
 from vertebra.cli.plugin_registry import discover_entry_point_commands
 from vertebra.cli.run import run as _run_cmd
 from vertebra.cli.workers import workers as _workers_cmd
@@ -31,7 +31,7 @@ cli.add_command(_run_cmd)
 cli.add_command(_dev_cmd)
 cli.add_command(_js_cmd)
 cli.add_command(_init_cmd)
-cli.add_command(_mcp_cmd)
+cli.add_command(_ai_cmd)
 cli.add_command(_workers_cmd)
 cli.add_command(build_command, name="build")
 discover_entry_point_commands(cli)

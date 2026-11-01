@@ -5,8 +5,8 @@ flow_id: shm-vector-embeddings
 title: "vtb ai (models + mcp) CLI Consolidation & Co-Located WorkerRunner in vtb run / vtb dev"
 description: "Create vtb ai CLI with nested models (list, pull, stage, warm) and mcp (serve, bridge) subcommands replacing top-level vtb mcp, add co-located WorkerRunner flags and pyproject config to vtb run and vtb dev, add --oneshot to vtb workers run, and sync CLI reference docs."
 scope: task
-status: draft
-state: in_progress
+status: ready
+state: completed
 strategy: tdd
 depends_on:
   - t01-gcp-adc-token-cache-and-refresh
@@ -33,8 +33,8 @@ sources:
     resource: src/py/vertebra/cli/__init__.py::cli
     title: Vertebra vtb CLI entrypoint and subcommand registration
   - id: cli-mcp
-    resource: src/py/vertebra/cli/mcp.py::mcp
-    title: Existing vtb mcp CLI group
+    resource: src/py/vertebra/cli/ai.py::ai
+    title: Consolidated vtb ai CLI group replacing vtb mcp
   - id: cli-run
     resource: src/py/vertebra/cli/run.py::run
     title: vtb run production server command
@@ -164,14 +164,17 @@ Consolidate AI-related CLI subcommands under `vtb ai` (`vtb ai models` + `vtb ai
 
 ## 4. Task Notes
 
-*(Populated during `/flow:implement` execution.)*
+- Consolidated AI CLI subcommands under `vtb ai` (`src/py/vertebra/cli/ai.py`) with `vtb ai models` (`list`, `pull`, `stage`, `warm`) and `vtb ai mcp` (`serve`, `bridge`), and removed top-level `src/py/vertebra/cli/mcp.py`.
+- Added `--with-workers / --no-workers`, `--queues`, `--lane-concurrency`, and `[tool.vertebra.workers]` support across `ServerLaunchEnv` (`src/py/vertebra/cli/_launch.py`), `vtb run` (`src/py/vertebra/cli/run.py`), `vtb dev` (`src/py/vertebra/cli/dev.py`), `WorkerRunner` (`src/py/vertebra/server/lanes.py`), and `Worker` (`src/py/vertebra/server/worker.py`).
+- Added `--oneshot` and `--payload` options to `vtb workers run` (`src/py/vertebra/cli/workers.py`) and regenerated `docs/reference/cli.md`.
+- Verified with `pytest src/py/tests/unit/cli/ src/py/tests/unit/tools/test_cli_docs.py -v` (125 passed), `generate_cli_docs --check`, `ruff`, `mypy`, and `review_setup validate`.
 
 ---
 
 ## Provenance Footnotes
 
 [^cli-root]: `src/py/vertebra/cli/__init__.py::cli` — Vertebra `vtb` CLI entrypoint and subcommand registration.
-[^cli-mcp]: `src/py/vertebra/cli/mcp.py::mcp` — Existing `vtb mcp` CLI group.
+[^cli-mcp]: `src/py/vertebra/cli/ai.py::ai` — Consolidated `vtb ai` CLI group replacing `vtb mcp`.
 [^cli-run]: `src/py/vertebra/cli/run.py::run` — `vtb run` production server command.
 [^cli-dev]: `src/py/vertebra/cli/dev.py::dev` — `vtb dev` development server command.
 [^cli-workers]: `src/py/vertebra/cli/workers.py::workers` — `vtb workers` background queue runner CLI.

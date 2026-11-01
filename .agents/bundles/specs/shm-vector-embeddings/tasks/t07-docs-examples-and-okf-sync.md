@@ -6,7 +6,7 @@ title: "Embeddings Documentation, Runnable Example & OKF v0.2 Knowledge Base Syn
 description: "Author docs/usage/embeddings-and-vectors.md, docs/examples/embeddings_app.py, update zensical.toml, and synchronize OKF v0.2 knowledge chapters for shared-memory vectors, embeddings, active ADC credential refresh, and vtb ai CLI."
 scope: task
 status: draft
-state: pending
+state: in_progress
 strategy: tdd
 depends_on:
   - t04-google-grpc-and-sql-pushdown-embedders
