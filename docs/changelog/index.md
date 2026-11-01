@@ -2,6 +2,51 @@
 
 All notable changes to Vertebra are documented on this page.
 
+## 0.2.0
+
+Comprehensive release introducing zero-copy serialization bridges, real-time database channels, Advanced Alchemy object storage and cache services, bidirectional Protobuf/gRPC tooling, multi-framework extensions, OpenAPI documentation portals, WebMCP auto-registration, and modernized repository security tooling.
+
+### Added
+
+- **Zero-Copy C-API Serialization & Row Hydration (`_zero_copy.py`, `vertebra.server`)**:
+  - Direct C-API decoding into `msgspec.Struct` without intermediate Python allocations via `Request.decode_msgspec`, `WsgiInput.decode_msgspec`, and `AsgiScope.decode_msgspec` ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+  - Vectorized row hydration via `hydrate_rows_vectorcall` and thread-local scratch arenas in `_zero_copy.py` for high-throughput batch query results ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+  - Direct struct-to-wire response serialization via `encode_msgspec_response` ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+- **Database Channels & Multi-Node Synchronization (`vertebra.db`, `vertebra.server`)**:
+  - Database-backed multi-node channel transport via `DatabaseChannelDriver`, `DatabaseChannelConfig`, `DatabaseChannelSubscription`, and `DatabaseChannelPublisher` supporting PostgreSQL `LISTEN`/`NOTIFY`, MySQL advisory locks, SQLite WAL triggers, and message queuing ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+- **Advanced Alchemy Storage & Cache Integrations (`vertebra.extensions.advanced_alchemy`)**:
+  - Object storage repository service bridge via `ObjectStorageBackend`, `ObjectStorageConfig`, and `ObjectStorageFileService` ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+  - Async cache manager for repository query caching via `AsyncCacheManager` and `AsyncCacheConfig` ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+  - Zero-copy service mixin via `ZeroCopyServiceMixin` providing vectorized ORM-to-wire DTO transformations ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+- **Bidirectional Protobuf/gRPC Tooling & Binary Framing (`vertebra.server._proto`, `_lpm`)**:
+  - Protobuf parser and code generation via `ProtobufParser`, `ProtobufPythonGenerator`, `ProtobufTypeScriptGenerator`, and route-to-proto inspection via `ProtobufGenerator.from_routes` ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+  - Length-prefixed message (LPM) binary framing (`encode_lpm_frame`, `decode_lpm_frame`) for gRPC and streaming RPC transports ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+- **Multi-Framework Extensions (`vertebra.extensions`)**:
+  - Native Vertebra server integration and lifecycle management across Starlette (`StarletteExtension`), FastAPI (`FastAPIExtension`), Flask (`FlaskExtension`), and Django (`DjangoExtension`) ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+  - Six native Django database backends with Arrow acceleration via `DatabaseWrapperMixin`, `ArrowQuerySetMixin`, `VertebraPostgresBackend`, `VertebraMysqlBackend`, `VertebraSqliteBackend`, `VertebraOracleBackend`, `VertebraMssqlBackend`, and `VertebraDuckdbBackend` ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+- **OpenAPI & Interactive Documentation Portals (`vertebra.server._openapi`, `_docs_portal`)**:
+  - Unified interactive API documentation via `OpenAPIPortal` and `DocsPortal` supporting Scalar, Swagger UI, ReDoc, Stoplight Elements, and RapiDoc ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+  - AsyncAPI 3.0 specification generation and Model Context Protocol (MCP) server manifest discovery endpoints (`/.well-known/mcp.json`) ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+- **WebMCP Auto-Registration & Browser Discovery (`@vertebra/client/webmcp`, `vertebra.server._webmcp`)**:
+  - Client and server WebMCP discovery via `registerWebMCPTools`, `WebMCPManifest`, and `/.well-known/webmcp.json` ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+- **CI Modernization, Dependabot & Security Automation**:
+  - Automated weekly dependency update configuration via Dependabot (`.github/dependabot.yml`) for GitHub Actions, Cargo, npm, and pip ecosystems ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+  - Automated GitHub Actions security workflow (`.github/workflows/security.yml`, `.github/zizmor.yml`) with Zizmor analysis and GitHub Advanced Security SARIF reporting ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+
+### Changed
+
+- Decoupled `vertebra.extensions.litestar` from internal `vertebra.framework.*` modules, routing shared routing primitives through `vertebra.server._routing` (`RouteMatch`, `RouteEntry`, `compile_route_pattern`, `match_path`) ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+- Removed redundant `framework` optional dependency extra from `pyproject.toml` now that `msgspec>=0.18` is a core runtime dependency ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+- Modernized all GitHub Actions workflows (`.github/workflows/*.yml`) to latest major versions (`actions/checkout@v7`, `astral-sh/setup-uv@v10`, `dorny/paths-filter@v4`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, `pypa/cibuildwheel@v4.3.5`) on Node 24 runners with credential persistence hardening ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+- Upgraded workspace dependencies via `make upgrade` (including `pytest-databases`) ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+
+### Fixed
+
+- Handled dynamic code object syntax errors in `coverage xml` generation by enabling `ignore_errors = true` in `pyproject.toml` ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+- Restored `@vertebra/client/router` export documentation parity in `docs/reference/typescript-client.md` ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+- Fixed TypeScript `WebMCPManifest` vs `RegisterWebMCPOptions` options typing union resolution in `src/ts/vertebra-client/src/webmcp.ts` for DTS builds ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+- Fixed wheel bundle sync fallback handling when local distribution wheels are present in debug environments ([PR #58](https://github.com/cofin/vertebra/pull/58)).
+
 ## 0.1.0
 
 Initial release of Vertebra (`vertebra-core` on PyPI and `@vertebra/client` on npm).
