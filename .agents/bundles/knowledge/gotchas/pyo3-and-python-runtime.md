@@ -22,6 +22,8 @@ sources:
   - resource: src/py/vertebra/extensions/litestar/plugin.py
   - resource: src/py/vertebra/extensions/litestar/offload.py
   - resource: src/py/vertebra/extensions/litestar/fastpath.py
+  - resource: src/py/vertebra/extensions/litestar/store.py
+  - resource: src/py/vertebra/utils/serializers/_zero_copy.py
   - resource: pyproject.toml
 ---
 
@@ -69,3 +71,9 @@ sources:
 
 - **TNS Character Validation**: Oracle Connect Descriptors constructed via `OracleConnectDescriptor.to_tns_descriptor()` must strictly validate host, port, protocol, service, and SID inputs against safe identifier regexes (`^[A-Za-z0-9._-]+$`) to prevent TNS descriptor injection attacks.
 - **Socket Teardown in Async Database Drivers**: In asyncio driver implementations (such as `AsyncRedisDriver` or loopback server mock harnesses), calling `writer.close()` must be paired with `asyncio.wait_for(writer.wait_closed(), timeout=...)` with a bounded timeout (e.g. 50 ms) to avoid hanging worker event loops during process shutdown.
+
+## 8. `make docs` (`--only-group doc`), `coverage xml` (`dto_transfer_function_*`), and Unbuilt TS Bundles in CI
+
+- **Guarding `vertebra._vertebra` & Optional Frameworks for `make docs`**: CI's `build-docs` job runs `uv sync --no-install-project --only-group doc` followed by `make docs` (`tools.docs.scan_public_docstrings` and `tools.docs.generate_cli_docs --check`). Neither the compiled `vertebra._vertebra` extension nor optional web frameworks (`litestar`, `fastapi`, `django`, `flask`, `starlette`) are installed in that environment. Any module imported transitively by `vertebra` or `vertebra.cli` (such as [`_zero_copy.py`](../../../../src/py/vertebra/utils/serializers/_zero_copy.py) or [`extensions/litestar/store.py`](../../../../src/py/vertebra/extensions/litestar/store.py)) must resolve `vertebra._vertebra` and optional framework base classes via `import_optional(...)` with pure-Python fallbacks so module import and AST/docstring scanning succeed without compiled extensions.
+- **Litestar Dynamic `dto_transfer_function_*` Code Objects in `coverage xml`**: Litestar's `MsgspecDTO` dynamically `compile()`s transfer functions (`dto_transfer_function_<hash>`) with synthetic filenames that have no backing source file on disk. Without `[tool.coverage.run] source = ["src/py/vertebra"]` and `[tool.coverage.report] ignore_errors = true` in [`pyproject.toml`](../../../../pyproject.toml) (plus `-i` on `coverage xml -i` / `coverage html -i` in `Makefile`), `make coverage` fails with `No source for code: '.../dto_transfer_function_...'`.
+- **Fallback to `src/ts/vertebra-client/src` When `make py-test` Runs Without `make ts-build`**: In CI, `test-python` runs `make py-test` without running `make ts-build` first, so `src/py/vertebra/server/_js/bundle/` (which is `.gitignore`d) is absent. `ImportMapGenerator.sync_wheel_client` and `DevMiddleware` must fall back to `src/ts/vertebra-client/dist/` or `src/ts/vertebra-client/src/` when the wheel bundle directory does not exist.

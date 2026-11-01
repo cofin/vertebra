@@ -10,6 +10,8 @@ sources:
   - resource: src/ts/vertebra-client/tsconfig.json
   - resource: src/ts/vertebra-client/biome.json
   - resource: src/ts/vertebra-client/src/index.ts
+  - resource: src/ts/vertebra-client/src/router.ts
+  - resource: src/ts/vertebra-client/src/webmcp.ts
   - resource: src/ts/vertebra-client/src/react/index.tsx
   - resource: src/ts/vertebra-client/src/svelte/index.ts
   - resource: src/ts/vertebra-client/src/vue/index.ts
@@ -28,8 +30,23 @@ The root entry re-exports the core client and every feature module. Framework ad
 <!-- truth: start -->
 ```typescript
 export {
+  A2aClient,
+  type A2aClientOptions,
+  AgentStreamClient,
+  type AgentStreamClientOptions,
+  encodeMcpHeaderValue,
+  MCP_PROTOCOL_VERSION,
+  McpClient,
+  type McpClientOptions,
+  type WorkflowLiveStatePayload,
+  WorkflowLiveSubscriber,
+} from "./agent/index";
+export {
   type ApexGlobalNamespace,
   type ApexItemHandle,
+  type ApexOfflineMutationEntry,
+  type ApexOfflineOperation,
+  ApexOfflineOutbox,
   ApexRegion,
   type ApexRegionBridgeOptions,
   type IslandDescriptor,
@@ -58,6 +75,12 @@ export {
   type StateOpcodeValue,
 } from "./live/index";
 export {
+  interpolateRoutePath,
+  type RouteUrlOptions,
+  routeUrl,
+  wsUrl,
+} from "./router";
+export {
   SseClient,
   type SseClientOptions,
   type SseEventHandler,
@@ -67,9 +90,17 @@ export { SessionStore, store } from "./store/index";
 export { TraceContext } from "./telemetry";
 export {
   WASM_MAGIC_BYTES,
-  WasmClient,
-  type WasmClientOptions,
+  WASMClient,
+  type WASMClientOptions,
 } from "./wasm";
+export {
+  type BrowserModelContext,
+  type BrowserModelContextTool,
+  type RegisterWebMCPOptions,
+  registerWebMCPTools,
+  type WebMCPManifest,
+  type WebMCPToolDescriptor,
+} from "./webmcp";
 export {
   type PubSubWireFrame,
   WebSocketClient,
@@ -78,11 +109,11 @@ export {
 ```
 <!-- truth: end -->
 
-`SseClient`, `WebSocketClient`, `HotReloadClient`, and `initHotReload` are exported from the root entry.
+`SseClient`, `WebSocketClient`, `HotReloadClient`, `initHotReload`, `routeUrl`, `wsUrl`, and `registerWebMCPTools` are exported from the root entry.
 
 ## Subpath exports vs tsup entries
 
-`package.json` declares 14 export keys; [`tsup.config.ts`](../../../../../src/ts/vertebra-client/tsup.config.ts) builds every exported entry.
+`package.json` declares 17 export keys; [`tsup.config.ts`](../../../../../src/ts/vertebra-client/tsup.config.ts) builds every exported entry.
 
 | Export | Source | Contents | tsup entry |
 | --- | --- | --- | --- |
@@ -96,12 +127,15 @@ export {
 | `./store` | `src/store/index.ts` | `SessionStore`, `store` | yes |
 | `./hmr` | `src/hmr/index.ts` | `HotReloadClient`, `initHotReload`, `ServerMessage` | yes |
 | `./live` | `src/live/index.ts` | `LiveStateClient`, `HybridLogicalClock`, `OfflineDeltaQueue`, `StateOpcode`, `fnv1aStateId`, `fnv1aFieldId` | yes |
-| `./apex` | `src/apex/index.ts` | `ApexRegion` | yes |
+| `./apex` | `src/apex/index.ts` | `ApexRegion`, `ApexOfflineOutbox` | yes |
 | `./telemetry` | `src/telemetry.ts` | `TraceContext` | yes |
-| `./wasm` | `src/wasm.ts` | `WasmClient`, `WASM_MAGIC_BYTES` | yes |
+| `./wasm` | `src/wasm.ts` | `WASMClient`, `WASM_MAGIC_BYTES` | yes |
 | `./arrow` | `src/arrow.ts` | `ArrowStreamClient`, `ARROW_*` constants | yes |
+| `./router` | `src/router.ts` | `routeUrl`, `wsUrl`, `interpolateRoutePath`, `RouteUrlOptions` | yes |
+| `./webmcp` | `src/webmcp.ts` | `registerWebMCPTools`, `WebMCPManifest`, `WebMCPToolDescriptor`, `RegisterWebMCPOptions` | yes |
+| `./agent` | `src/agent/index.ts` | `McpClient`, `A2aClient`, `AgentStreamClient`, `WorkflowLiveSubscriber` | yes |
 
-`src/hmr/index.ts` is also a tsup entry; tsup `onSuccess` copies `dist/index.js` and `dist/hmr/index.js` into `src/py/vertebra/server/_js/bundle/` (untracked) for `DevMiddleware`.
+`tsup.config.ts` `onSuccess` copies the full `dist/` directory into `src/py/vertebra/server/_js/bundle/` (untracked) for `DevMiddleware` and `ImportMapGenerator.sync_wheel_client`. When `src/py/vertebra/server/_js/bundle/` is absent in source checkouts (such as `make py-test` running before `make ts-build`), `DevMiddleware` and `ImportMapGenerator.sync_wheel_client` fall back to `src/ts/vertebra-client/dist/` or `src/ts/vertebra-client/src/`.
 
 ## Rules
 

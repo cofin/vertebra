@@ -235,6 +235,13 @@ known-first-party = ["vertebra"]
 testpaths = ["src/py/tests"]
 pythonpath = [".", "src/py"]
 
+[tool.coverage.run]
+source = ["src/py/vertebra"]
+
+[tool.coverage.report]
+fail_under = 80
+ignore_errors = true
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

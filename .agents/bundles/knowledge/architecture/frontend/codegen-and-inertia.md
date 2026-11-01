@@ -48,7 +48,7 @@ flowchart LR
 
 `TypedDict`, `NamedTuple`, Pydantic models, and `Enum` fall through to `UnknownType`. `extract(handler)` returns one `TypeNode` per non-`self`/`cls` parameter plus the return type; it does not classify path, query, or body locations.
 
-[`RouteCollector.collect(app)`](../../../../../src/py/vertebra/build/codegen/_extractor.py) returns `[]` for anything that is not a Vertebra `App`, and otherwise builds a `RouteMetadata` per `Route` (`operation_id`, `handler_fn`, `source_file`, `params`, `return_type`, `path`, `method`, `handler_name`), filtering out DI-injected parameters (`Inject`, `NamedDependencyMarker`, or parameters matching the route/app `DependencyGraph`). `operation_id` is the lowercased method plus path segments joined by `.`, with `{id}` → `by_id`, `-` → `_`, and `root` for `/` (`GET /users/{id}` → `get.users.by_id`).
+[`RouteCollector.collect(app)`](../../../../../src/py/vertebra/build/codegen/_extractor.py) extracts `RouteMetadata` per route from any supported framework application (`vertebra.App`, Litestar, FastAPI, Starlette, Flask, and Django `urlpatterns`), filtering out DI-injected parameters (`Inject`, `NamedDependencyMarker`, or parameters matching the route/app `DependencyGraph`). `operation_id` is the lowercased method plus path segments joined by `.`, with `{id}` → `by_id`, `-` → `_`, and `root` for `/` (`GET /users/{id}` → `get.users.by_id`).
 
 ## Generators
 
@@ -59,7 +59,7 @@ flowchart LR
 | `ManifestGenerator` | `_manifest.py` | `{"routes": {operation_id: {handlerName, method, paramsSchema, procedureId, responseSchema, route}}, "version": 1}`. |
 | `ValibotGenerator` | `valibot.py` | `import * as v from 'valibot';` schemas with the same entry points as `ZodGenerator`. |
 | `OpenAPIGenerator` | `openapi.py` | `generate` / `generate_json` producing an `"openapi": "3.1.0"` document. |
-| `ProtobufGenerator` | `protobuf.py` | `syntax = "proto3";` messages plus one `service` (defaults `package="vertebra.v1"`, `service_name="VertebraService"`). |
+| `ProtobufGenerator` / `ProtoParser` | `protobuf.py` | Bidirectional `.proto` ↔ `TypeNode` IR + `RouteMetadata`: `ProtobufGenerator` emits `syntax = "proto3";` messages plus one `service` (`unary`, `server_streaming`, `client_streaming`, `bidi` RPCs and `google.api.http` annotations), while `ProtoParser` parses `.proto` files into `ProtoFileSpec`, `msgspec.Struct` stubs (`generate_python_stubs`), and `RouteMetadata` (`to_routes`). |
 | `ProcedureClientGenerator` | `procedures.py` | Interfaces plus an `export interface ProcedureRpcClient` map from the `ProcedureRegistry` filled by `@procedure`. |
 
 `procedures.py` also defines Litestar-style parameter markers (`Parameter`, `Body`, `FromPath`, `FromQuery`, `FromHeader`, `FromCookie`, `JSONBody`, `MsgPackBody`, `MultipartBody`, `URLEncodedBody`, `SkipValidation`, `NamedDependency`), `resolve_parameter_node` (used by the Zod, Valibot, and OpenAPI targets to place parameters), and `json_schema_to_type_node`.

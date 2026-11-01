@@ -203,8 +203,8 @@ test: rs-test py-test ts-test                       ## Run all tests (Rust, Pyth
 .PHONY: coverage
 coverage:                                           ## Run tests with coverage report
 	@uv run pytest src/py/tests --cov --quiet
-	@uv run coverage xml >/dev/null 2>&1
-	@uv run coverage html >/dev/null 2>&1
+	@uv run coverage xml -i >/dev/null 2>&1
+	@uv run coverage html -i >/dev/null 2>&1
 	@echo "${OK} Coverage report: htmlcov/index.html"
 
 

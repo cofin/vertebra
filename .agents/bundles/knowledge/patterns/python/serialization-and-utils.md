@@ -10,6 +10,7 @@ sources:
   - resource: src/py/vertebra/utils/serializers/_msgpack.py
   - resource: src/py/vertebra/utils/serializers/_schema.py
   - resource: src/py/vertebra/utils/serializers/_numpy.py
+  - resource: src/py/vertebra/utils/serializers/_zero_copy.py
   - resource: src/py/vertebra/utils/sync_tools.py
   - resource: src/py/vertebra/utils/portal.py
   - resource: src/py/vertebra/utils/module_loader.py
@@ -52,6 +53,8 @@ Anything else raises `TypeError("unsupported JSON value: ...")`.
 Fallbacks: when `msgspec` raises any other `TypeError` or a `ValueError`, `encode_bytes` retries with `json.dumps(default=_normalize_supported_value)`. `decode` retries with `json.loads`. The stdlib path is much slower, so a hot path that keeps hitting it is a bug.
 
 `_numpy.py` also exports `numpy_array_enc_hook`, `numpy_array_dec_hook` (direct one-argument use or Litestar's `(target_type, value)` form), and `numpy_array_predicate`. Each hook returns the value unchanged when NumPy is not installed.
+
+[`_zero_copy.py`](../../../../../src/py/vertebra/utils/serializers/_zero_copy.py) provides `ZeroCopyCodecRegistry` (`TypeAdapterPlan` classification across `msgspec_struct`, `pydantic`, `dataclass`, `attrs`, `typeddict`, `namedtuple`, `dict`, and `primitive`), thread-local `bytearray` scratch-arena encoders (`encode_json_into_arena`, `encode_msgpack_into_arena`), zero-copy gRPC Length-Prefixed-Message helpers (`encode_grpc_frame_into`, `decode_grpc_frame`), and `hydrate_rows_vectorcall` / `hydrate_one_vectorcall` / `orm_to_struct_vectorcall` wrappers that delegate to `vertebra._vertebra` when compiled and fall back cleanly to pure Python during documentation builds (`--only-group doc`).
 
 ## 2. Base Structs & Schema Dumping (`_schema.py`, `typing.py`)
 
