@@ -122,6 +122,8 @@ impl GrpcStatus {
 pub enum GrpcWireFormat {
     /// `application/grpc+msgpack`
     Msgpack,
+    /// `application/grpc+json`
+    Json,
     /// `application/grpc+proto` or `application/grpc`
     #[default]
     Proto,
@@ -132,6 +134,8 @@ impl GrpcWireFormat {
     pub fn from_content_type(ct: &str) -> Self {
         if ct.contains("+msgpack") {
             Self::Msgpack
+        } else if ct.contains("+json") {
+            Self::Json
         } else {
             Self::Proto
         }
@@ -150,6 +154,7 @@ impl GrpcWireFormat {
     pub const fn content_type_str(self) -> &'static str {
         match self {
             Self::Msgpack => "application/grpc+msgpack",
+            Self::Json => "application/grpc+json",
             Self::Proto => "application/grpc+proto",
         }
     }

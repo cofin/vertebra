@@ -1,6 +1,6 @@
 {
   "name": "@vertebra/client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript client SDK for Vertebra — one runtime for Python and TypeScript.",
   "type": "module",
   "main": "./dist/index.js",

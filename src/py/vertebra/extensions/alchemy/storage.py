@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import datetime as dt
 import inspect
@@ -101,6 +102,16 @@ class ObjectStoreBackend(StorageBackend):
         _ = options
         return await self._store.get_async(self._qualify(path))
 
+    def get_range(self, path: PathLike, start: int, end: int) -> bytes:
+        """Read a byte range `[start, end)` synchronously."""
+        length = max(0, end - start)
+        return self._store.get_range(self._qualify(path), start, length)
+
+    async def get_range_async(self, path: PathLike, start: int, end: int) -> bytes:
+        """Read a byte range `[start, end)` asynchronously."""
+        length = max(0, end - start)
+        return await self._store.get_range_async(self._qualify(path), start, length)
+
     def get_metadata(self, path: PathLike) -> ObjectMeta:
         """Read stored object metadata synchronously."""
         return self._store.head(self._qualify(path))
@@ -108,6 +119,14 @@ class ObjectStoreBackend(StorageBackend):
     async def get_metadata_async(self, path: PathLike) -> ObjectMeta:
         """Read stored object metadata asynchronously."""
         return await self._store.head_async(self._qualify(path))
+
+    def exists(self, path: PathLike) -> bool:
+        """Return True if the object path exists synchronously."""
+        return self._store.exists(self._qualify(path))
+
+    async def exists_async(self, path: PathLike) -> bool:
+        """Return True if the object path exists asynchronously."""
+        return await self._store.exists_async(self._qualify(path))
 
     def save_object(
         self,
@@ -125,12 +144,12 @@ class ObjectStoreBackend(StorageBackend):
             put_res = self._store.put_file(qualified, data)
         else:
             raw = self._resolve_sync_data(data)
+            view = memoryview(raw).cast("B")
             if use_multipart and chunk_size > 0:
-                view = memoryview(raw).cast("B")
                 parts = [view[idx : idx + chunk_size] for idx in range(0, len(view), chunk_size)] or [memoryview(b"")]
                 put_res = self._store.put_multipart(qualified, parts)
             else:
-                put_res = self._store.put(qualified, raw)
+                put_res = self._store.put(qualified, view)
         self._apply_put_metadata(file_object, put_res.size, put_res.etag)
         return file_object
 
@@ -150,14 +169,32 @@ class ObjectStoreBackend(StorageBackend):
             put_res = await self._store.put_file_async(qualified, data)
         else:
             raw = await self._resolve_async_data(data)
+            view = memoryview(raw).cast("B")
             if use_multipart and chunk_size > 0:
-                view = memoryview(raw).cast("B")
                 parts = [view[idx : idx + chunk_size] for idx in range(0, len(view), chunk_size)] or [memoryview(b"")]
-                put_res = self._store.put_multipart(qualified, parts)
+                put_res = await self._store.put_multipart_async(qualified, parts)
             else:
-                put_res = await self._store.put_async(qualified, raw)
+                put_res = await self._store.put_async(qualified, view)
         self._apply_put_metadata(file_object, put_res.size, put_res.etag)
         return file_object
+
+    def copy_object(self, src: PathLike, dst: PathLike) -> None:
+        """Copy an object synchronously within the storage backend."""
+        self._store.copy(self._qualify(src), self._qualify(dst))
+
+    async def copy_object_async(self, src: PathLike, dst: PathLike) -> None:
+        """Copy an object asynchronously within the storage backend."""
+        await self._store.copy_async(self._qualify(src), self._qualify(dst))
+
+    def list_objects(self, prefix: PathLike = "") -> builtins.list[ObjectMeta]:
+        """List stored object metadata under the given prefix synchronously."""
+        qualified_prefix = self._qualify(prefix) if prefix else self._prefix
+        return self._store.list(qualified_prefix)
+
+    async def list_objects_async(self, prefix: PathLike = "") -> builtins.list[ObjectMeta]:
+        """List stored object metadata under the given prefix asynchronously."""
+        qualified_prefix = self._qualify(prefix) if prefix else self._prefix
+        return await self._store.list_async(qualified_prefix)
 
     def delete_object(self, paths: PathLike | Sequence[PathLike]) -> None:
         """Delete one or more stored objects synchronously."""
@@ -240,6 +277,12 @@ class ObjectStoreBackend(StorageBackend):
             return data.read_bytes()
         if hasattr(data, "read"):
             return bytes(data.read())
+        file_attr = getattr(data, "file", None)
+        if file_attr is not None and hasattr(file_attr, "read"):
+            return bytes(file_attr.read())
+        stream_attr = getattr(data, "stream", None)
+        if stream_attr is not None and hasattr(stream_attr, "read"):
+            return bytes(stream_attr.read())
         return b"".join(bytes(chunk) for chunk in data)
 
     @staticmethod
@@ -253,7 +296,19 @@ class ObjectStoreBackend(StorageBackend):
             result = data.read()
             if inspect.isawaitable(result):
                 result = await result
-            return bytes(result)
+            return result if isinstance(result, Buffer) else bytes(result)
+        file_attr = getattr(data, "file", None)
+        if file_attr is not None and hasattr(file_attr, "read"):
+            result = file_attr.read()
+            if inspect.isawaitable(result):
+                result = await result
+            return result if isinstance(result, Buffer) else bytes(result)
+        stream_attr = getattr(data, "stream", None)
+        if stream_attr is not None and hasattr(stream_attr, "read"):
+            result = stream_attr.read()
+            if inspect.isawaitable(result):
+                result = await result
+            return result if isinstance(result, Buffer) else bytes(result)
         if hasattr(data, "__aiter__"):
             chunks: list[bytes] = []
             async for chunk in data:

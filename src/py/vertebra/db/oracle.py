@@ -17,6 +17,8 @@ import msgspec
 from vertebra.db.postgres import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
+    _hydrate_rows_with_schema,
+    _table_to_rows_and_cols,
 )
 from vertebra.typing import (
     FrozenBaseStruct,
@@ -41,7 +43,9 @@ __all__ = [
     "AsyncOracleDriver",
     "OracleConfig",
     "OracleConnectDescriptor",
+    "OracleDriverFeatures",
     "OracleSessionAttrs",
+    "OracleTopologyConfig",
     "OracleWallet",
     "SyncOracleDriver",
     "decode_oson",
@@ -639,6 +643,55 @@ def decode_oson(payload: bytes | bytearray | memoryview, *, target_type: Any = A
     return msgspec.convert(decoded, type=target_type)
 
 
+class OracleTopologyConfig(FrozenBaseStruct, frozen=True, gc=False):
+    """Multi-host RAC and Data Guard `(ADDRESS_LIST=...)` topology configuration for Oracle."""
+
+    hosts: tuple[str, ...] = ("localhost",)
+    """Ordered tuple of Oracle RAC or Data Guard listener hostnames."""
+    port: int = 1521
+    """Oracle Net Listener port across the topology hosts."""
+    service_name: str = "FREEPDB1"
+    """Target Oracle service name across the topology."""
+    load_balance: bool = True
+    """When True, include `(LOAD_BALANCE=ON)` in the `(ADDRESS_LIST=...)` block."""
+    failover: bool = True
+    """When True, include `(FAILOVER=ON)` in the `(ADDRESS_LIST=...)` block."""
+    protocol: str = "TCP"
+    """Transport protocol (`"TCP"` or `"TCPS"`)."""
+
+    def to_tns_descriptor(self) -> str:
+        """Render a multi-host `(DESCRIPTION=(ADDRESS_LIST=...)(CONNECT_DATA=...))` TNS string."""
+        lb = "(LOAD_BALANCE=ON)" if self.load_balance else "(LOAD_BALANCE=OFF)"
+        fo = "(FAILOVER=ON)" if self.failover else "(FAILOVER=OFF)"
+        addrs = "".join(f"(ADDRESS=(PROTOCOL={self.protocol})(HOST={h})(PORT={self.port}))" for h in self.hosts)
+        return f"(DESCRIPTION=(ADDRESS_LIST={lb}{fo}{addrs})(CONNECT_DATA=(SERVICE_NAME={self.service_name})))"
+
+
+class OracleDriverFeatures(FrozenBaseStruct, frozen=True, gc=False):
+    """Oracle driver feature flags for 26ai `VECTOR`, `OSON`, Arrow PyCapsules, and Direct Path loads."""
+
+    enable_numpy_vectors: bool = True
+    """When True, register `DB_TYPE_VECTOR` input/output type handlers converting `numpy.ndarray` and `array.array`."""
+    vector_return_format: str = "list"
+    """Return format for `VECTOR` columns (`"list"`, `"numpy"`, or `"array"`)."""
+    enable_lowercase_column_names: bool = True
+    """When True, normalize unquoted uppercase Oracle column names to lowercase in result dictionaries."""
+    enable_uuid_binary: bool = True
+    """When True, bind and decode `RAW(16)` columns as `uuid.UUID` objects."""
+    enable_direct_path_load: bool = True
+    """When True, use Oracle Direct Path Load or batched `executemany` on `load_from_arrow`."""
+    arraysize: int = 100
+    """Cursor `arraysize` controlling the number of rows fetched per network round-trip."""
+    prefetchrows: int = 102
+    """Cursor `prefetchrows` piggybacked onto initial `EXECUTE` packets."""
+    fetch_lobs: bool = False
+    """When False, inline `CLOB`/`BLOB` values directly as `str`/`bytes` without secondary LOB locator round-trips."""
+    fetch_decimals: bool = False
+    """When True, decode `NUMBER` columns as `decimal.Decimal` instead of `int`/`float`."""
+    enable_session_tracing: bool = True
+    """When True, piggyback `CLIENT_IDENTIFIER`, `MODULE`, `ACTION`, and `ECID` on TTC frames."""
+
+
 class OracleConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Configuration for the native Oracle Thin database driver."""
 
@@ -656,8 +709,16 @@ class OracleConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Database password for O5LOGON authentication."""
     wallet_path: str | None = None
     """Optional path to an Oracle Cloud Wallet `.zip` archive or extracted wallet directory."""
+    wallet_zip: str | Path | bytes | None = None
+    """Optional in-memory `.zip` bytes or path to an Oracle Autonomous Database Cloud Wallet archive."""
     tns_alias: str | None = None
     """Optional TNS alias resolved from the wallet's `tnsnames.ora` (e.g. `"mydb_high"`)."""
+    edition: str | None = None
+    """Optional Oracle Edition-Based Redefinition (`ORA$BASE`) edition name."""
+    topology: OracleTopologyConfig | None = None
+    """Optional multi-host RAC or Data Guard `(ADDRESS_LIST=...)` topology configuration."""
+    driver_features: OracleDriverFeatures = msgspec.field(default_factory=OracleDriverFeatures)
+    """Oracle 26ai `VECTOR`, `OSON`, Arrow, and Direct Path driver feature configuration."""
     client_identifier: str | None = None
     """Initial zero-RTT `V$SESSION.CLIENT_IDENTIFIER` tracing attribute."""
     module: str | None = None
@@ -676,19 +737,47 @@ class OracleConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Optional shared-memory `DatabaseBroker` coordinating cross-worker connection and statement leases."""
 
     def connect_descriptor(self) -> OracleConnectDescriptor:
-        """Resolve the effective `OracleConnectDescriptor` from wallet, TNS alias, or DSN."""
+        """Resolve the effective `OracleConnectDescriptor` from wallet, topology, TNS alias, or DSN."""
+        if isinstance(self.wallet_zip, (bytes, bytearray)):
+            wallet = OracleWallet.from_zip_bytes(bytes(self.wallet_zip))
+            alias = self.tns_alias or self.service_name
+            resolved = wallet.resolve_alias(alias)
+            if resolved is not None:
+                return resolved
+        elif self.wallet_zip is not None:
+            wallet = OracleWallet.from_path(self.wallet_zip)
+            alias = self.tns_alias or self.service_name
+            resolved = wallet.resolve_alias(alias)
+            if resolved is not None:
+                return resolved
         if self.wallet_path:
             wallet = OracleWallet.from_path(self.wallet_path)
             alias = self.tns_alias or self.service_name
             resolved = wallet.resolve_alias(alias)
             if resolved is not None:
                 return resolved
+        if self.topology is not None:
+            return OracleConnectDescriptor.from_tns_descriptor(self.topology.to_tns_descriptor())
         if self.dsn:
             return OracleConnectDescriptor.from_tns_descriptor(self.dsn)
         return OracleConnectDescriptor(
             host=self.host,
             port=self.port,
             service_name=self.service_name,
+        )
+
+    def derive_pool(
+        self,
+        *,
+        service_name: str | None = None,
+        edition: str | None = None,
+    ) -> OracleConfig:
+        """Derive a secondary `OracleConfig` targeting a sibling PDB service or EBR edition."""
+        target_svc = service_name or self.service_name
+        return msgspec.structs.replace(
+            self,
+            service_name=target_svc,
+            edition=edition if edition is not None else self.edition,
         )
 
     def session_attrs(self) -> OracleSessionAttrs:
@@ -792,8 +881,14 @@ class SyncOracleDriver:
         finally:
             self._release_broker_lease(grant)
 
-    def select(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
-        """Execute a `SELECT` query and return rows as dictionaries."""
+    def select(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> list[Any]:
+        """Execute a `SELECT` query and return rows as dictionaries or hydrated `schema_type` instances."""
         norm_sql, bound = _normalize_oracle_sql(sql, params)
         grant = self._acquire_broker_lease(sql, len(bound))
         try:
@@ -802,8 +897,63 @@ class SyncOracleDriver:
             rows = cur.fetchall()
             if not rows:
                 return []
-            cols = [col[0] for col in (cur.description or ())]
-            return [dict(zip(cols, tuple(row), strict=False)) for row in rows]
+            cols = [
+                col[0].lower() if self.config.driver_features.enable_lowercase_column_names else col[0]
+                for col in (cur.description or ())
+            ]
+            tuple_rows = [tuple(row) for row in rows]
+            return _hydrate_rows_with_schema(tuple_rows, cols, schema_type)
+        finally:
+            self._release_broker_lease(grant)
+
+    def select_one(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Execute a `SELECT` query and return the first row or raise `ValueError`."""
+        rows = self.select(sql, params, schema_type=schema_type)
+        if not rows:
+            msg = "No row found for select_one"
+            raise ValueError(msg)
+        return rows[0]
+
+    def select_one_or_none(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> Any | None:
+        """Execute a `SELECT` query and return the first row or `None`."""
+        rows = self.select(sql, params, schema_type=schema_type)
+        return rows[0] if rows else None
+
+    def load_from_arrow(
+        self,
+        table_name: str,
+        data: Any,
+        *,
+        columns: Sequence[str] | None = None,
+        direct_path: bool | None = None,
+    ) -> int:
+        """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
+        _ = direct_path
+        rows, cols = _table_to_rows_and_cols(data, columns)
+        if not rows or not cols:
+            return 0
+        placeholders = ", ".join(f":{i + 1}" for i in range(len(cols)))
+        col_list = ", ".join(cols)
+        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+        norm_sql, _ = _normalize_oracle_sql(sql, rows[0])
+        grant = self._acquire_broker_lease(sql, len(cols))
+        try:
+            self._consume_piggyback()
+            self._conn.executemany(norm_sql, rows)
+            self._conn.commit()
+            return len(rows)
         finally:
             self._release_broker_lease(grant)
 
@@ -888,9 +1038,52 @@ class AsyncOracleDriver:
         """Execute a DML or DDL statement asynchronously."""
         return await asyncio.to_thread(self._sync.execute, sql, params)
 
-    async def select(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
-        """Execute a `SELECT` query asynchronously."""
-        return await asyncio.to_thread(self._sync.select, sql, params)
+    async def select(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> list[Any]:
+        """Execute a `SELECT` query asynchronously and return dictionaries or `schema_type` instances."""
+        return await asyncio.to_thread(self._sync.select, sql, params, schema_type=schema_type)
+
+    async def select_one(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Execute a `SELECT` query asynchronously and return the first row or raise `ValueError`."""
+        return await asyncio.to_thread(self._sync.select_one, sql, params, schema_type=schema_type)
+
+    async def select_one_or_none(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> Any | None:
+        """Execute a `SELECT` query asynchronously and return the first row or `None`."""
+        return await asyncio.to_thread(self._sync.select_one_or_none, sql, params, schema_type=schema_type)
+
+    async def load_from_arrow(
+        self,
+        table_name: str,
+        data: Any,
+        *,
+        columns: Sequence[str] | None = None,
+        direct_path: bool | None = None,
+    ) -> int:
+        """Asynchronously bulk-ingest an Arrow Table or `ArrowCursor` into `table_name`."""
+        return await asyncio.to_thread(
+            self._sync.load_from_arrow,
+            table_name,
+            data,
+            columns=columns,
+            direct_path=direct_path,
+        )
 
     async def select_to_arrow(
         self,

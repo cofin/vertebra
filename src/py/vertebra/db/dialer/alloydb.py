@@ -401,6 +401,64 @@ class AlloyDBDialer:
             await writer.wait_closed()
             raise
 
+    def __call__(
+        self,
+        host: str = "127.0.0.1",
+        *,
+        oauth2_token: str = "",
+        ssl_context: ssl.SSLContext | None = None,
+        timeout: float = 10.0,
+    ) -> ssl.SSLSocket:
+        """Callable dialer entrypoint returning a synchronous TLS 1.3 mTLS socket after MetadataExchange."""
+        return self.connect_sync(host, oauth2_token=oauth2_token, ssl_context=ssl_context, timeout=timeout)
+
+    def create_asyncpg_connect_func(
+        self,
+        host: str = "127.0.0.1",
+        *,
+        oauth2_token: str = "",
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> Callable[..., Any]:
+        """Return an asyncpg-compatible `connect` coroutine function dialing AlloyDB port 5433."""
+        ctx = ssl_context or self.build_tls_context()
+
+        async def _connect(*args: Any, **kwargs: Any) -> Any:
+            asyncpg_mod = import_optional("asyncpg")
+            if asyncpg_mod is None:
+                return await self.connect_async(host, oauth2_token=oauth2_token, ssl_context=ctx)
+            kw = dict(kwargs)
+            kw.setdefault("host", host)
+            kw.setdefault("port", self.port)
+            kw["ssl"] = ctx
+            if self._config.enable_iam_auth and oauth2_token:
+                kw["password"] = oauth2_token
+            return await asyncpg_mod.connect(*args, **kw)
+
+        return _connect
+
+    def create_psycopg_connect_func(
+        self,
+        host: str = "127.0.0.1",
+        *,
+        oauth2_token: str = "",
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> Callable[..., Any]:
+        """Return a psycopg-compatible `connect` function dialing AlloyDB port 5433."""
+        ctx = ssl_context or self.build_tls_context()
+
+        def _connect(*args: Any, **kwargs: Any) -> Any:
+            psycopg_mod = import_optional("psycopg")
+            if psycopg_mod is None:
+                return self.connect_sync(host, oauth2_token=oauth2_token, ssl_context=ctx)
+            kw = dict(kwargs)
+            kw.setdefault("host", host)
+            kw.setdefault("port", self.port)
+            if self._config.enable_iam_auth and oauth2_token:
+                kw["password"] = oauth2_token
+            return psycopg_mod.connect(*args, **kw)
+
+        return _connect
+
     @staticmethod
     def _encode_varint(value: int) -> bytes:
         out = bytearray()

@@ -7,6 +7,7 @@ import struct
 import zipfile
 from typing import TYPE_CHECKING
 
+import msgspec
 import pytest
 from sqlalchemy.dialects import registry
 from sqlalchemy.engine.url import URL
@@ -27,10 +28,13 @@ from vertebra.db import (
     CloudSQLDialer,
     DatabaseRegistry,
     DuckDBConfig,
+    DuckDBSecretConfig,
     MSSQLConfig,
     MySQLConfig,
     OracleConfig,
     OracleConnectDescriptor,
+    OracleDriverFeatures,
+    OracleTopologyConfig,
     OracleWallet,
     PostgreSQLConfig,
     SQLiteConfig,
@@ -537,3 +541,87 @@ def test_sqlalchemy_vtb_dialects_nullpool_and_dbapi_broker_forwarding() -> None:
         conn.close()
     assert broker.lease_table.acquired >= 9
     assert broker.lease_table.released >= 9
+
+
+class _LedgerRow(msgspec.Struct, frozen=True, gc=False):
+    """Typed row schema for verifying C-API vectorcall hydration across database drivers."""
+
+    id: int
+    label: str
+
+
+def test_driver_schema_hydration_load_from_arrow_and_topologies() -> None:
+    """Verify schema_type C-API hydration, load_from_arrow, derive_direct_config, OracleTopologyConfig, and DuckDBSecretConfig."""
+    pg_cfg = PostgreSQLConfig(
+        dsn="postgresql://localhost:6432/app",
+        direct_dsn="postgresql://localhost:5432/app",
+        pooler_mode="transaction",
+        pgbouncer=True,
+    )
+    assert pg_cfg.effective_statement_cache_size == 0
+    direct_pg = pg_cfg.derive_direct_config()
+    assert direct_pg.dsn == "postgresql://localhost:5432/app"
+    assert direct_pg.pooler_mode == "session"
+    assert direct_pg.pgbouncer is False
+
+    with pytest.raises(ImproperConfigurationError):
+        PostgreSQLConfig(
+            cloud_sql_instance="p:r:i",
+            alloydb_instance_uri="projects/p/locations/r/clusters/c/instances/i",
+        )
+
+    pg_sync_adapter = PostgreSQLSyncConfig(pg_cfg)
+    direct_sync_adapter = pg_sync_adapter.derive_direct_config()
+    assert direct_sync_adapter.driver_config.pooler_mode == "session"
+
+    topo = OracleTopologyConfig(
+        hosts=("rac1.internal", "rac2.internal"),
+        port=1521,
+        service_name="PROD_SVC",
+        load_balance=True,
+        failover=True,
+    )
+    tns_topo = topo.to_tns_descriptor()
+    assert "(LOAD_BALANCE=ON)" in tns_topo
+    assert "(FAILOVER=ON)" in tns_topo
+    assert "(HOST=rac1.internal)" in tns_topo
+    assert "(HOST=rac2.internal)" in tns_topo
+
+    ora_cfg = OracleConfig(
+        topology=topo,
+        driver_features=OracleDriverFeatures(enable_lowercase_column_names=True),
+    )
+    derived_ora = ora_cfg.derive_pool(service_name="REPORT_SVC", edition="V2")
+    assert derived_ora.service_name == "REPORT_SVC"
+    assert derived_ora.edition == "V2"
+
+    secret = DuckDBSecretConfig(
+        name="s3_prod",
+        secret_type="S3",
+        key_id="key1",
+        secret="sec1",
+        region="us-west-2",
+        endpoint="127.0.0.1:9000",
+    )
+    duck_cfg = DuckDBConfig(secrets=(secret,))
+    stmts = duck_cfg.bootstrap_statements()
+    assert any("CREATE OR REPLACE SECRET s3_prod" in s for s in stmts)
+
+    sqlite_drv = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    sqlite_drv.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)")
+    inserted = sqlite_drv.load_from_arrow(
+        "items",
+        [{"id": 1, "label": "alpha"}, {"id": 2, "label": "beta"}],
+    )
+    assert inserted == 2
+    hydrated = sqlite_drv.select(
+        "SELECT id, label FROM items ORDER BY id",
+        schema_type=_LedgerRow,
+    )
+    assert hydrated == [_LedgerRow(id=1, label="alpha"), _LedgerRow(id=2, label="beta")]
+    assert sqlite_drv.select_one(
+        "SELECT id, label FROM items WHERE id = ?",
+        (1,),
+        schema_type=_LedgerRow,
+    ) == _LedgerRow(id=1, label="alpha")
+    sqlite_drv.close()

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "vertebra-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "One runtime for Python and TypeScript — backend, frontend, web, gRPC, workers, and standalone apps."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -50,7 +50,7 @@ framework = [
     "msgspec>=0.18",
 ]
 sqlspec = [
-    "sqlspec>=0.68.0",
+    "sqlspec>=0.69.0",
 ]
 alchemy = [
     "advanced-alchemy>=1.12.0",
@@ -60,8 +60,30 @@ alchemy = [
 arrow = [
     "pyarrow>=18.0.0",
 ]
+pydantic = [
+    "pydantic>=2.9.0",
+]
+attrs = [
+    "attrs>=24.0.0",
+]
+polars = [
+    "polars>=1.0.0",
+]
 litestar = [
     "litestar>=2.15.0",
+]
+starlette = [
+    "starlette>=0.40.0",
+]
+fastapi = [
+    "fastapi>=0.115.0",
+    "pydantic>=2.9.0",
+]
+flask = [
+    "flask>=3.0.0",
+]
+django = [
+    "django>=5.1.0",
 ]
 queues = [
     "litestar-queues>=0.12.0",
@@ -91,12 +113,19 @@ saq = [
     "litestar-saq>=0.8.0",
 ]
 all = [
-    "sqlspec>=0.68.0",
+    "sqlspec>=0.69.0",
     "advanced-alchemy>=1.12.0",
     "sqlalchemy>=2.0.36",
     "alembic>=1.14.0",
     "pyarrow>=18.0.0",
+    "pydantic>=2.9.0",
+    "attrs>=24.0.0",
+    "polars>=1.0.0",
     "litestar>=2.15.0",
+    "starlette>=0.40.0",
+    "fastapi>=0.115.0",
+    "flask>=3.0.0",
+    "django>=5.1.0",
     "litestar-queues>=0.12.0",
     "litestar-security>=0.6.0",
     "litestar-autowire>=0.2.0",
@@ -106,12 +135,6 @@ all = [
     "litestar-asyncapi>=0.2.0",
     "litestar-htmx>=0.5.0",
     "litestar-saq>=0.8.0",
-]
-dev = [
-    "pytest>=8.0",
-    "pytest-anyio>=0.0.0",
-    "ruff>=0.4",
-    "mypy>=1.10",
 ]
 
 [dependency-groups]
@@ -133,13 +156,21 @@ doc = [
 test = [
     "pytest",
     "pytest-cov>=5.0",
+    "pytest-databases>=0.19.0",
+    "pytest-xdist>=3.6.1",
     "anyio",
-    "sqlspec>=0.68.0",
+    "sqlspec>=0.69.0",
     "advanced-alchemy>=1.12.0",
     "sqlalchemy>=2.0.36",
     "alembic>=1.14.0",
     "pyarrow>=18.0.0",
+    "pydantic>=2.9.0",
+    "attrs>=24.0.0",
     "litestar>=2.15.0",
+    "starlette>=0.40.0",
+    "fastapi>=0.115.0",
+    "flask>=3.0.0",
+    "django>=5.1.0",
     "litestar-queues>=0.12.0",
     "litestar-security>=0.6.0",
     "litestar-autowire>=0.2.0",
@@ -166,6 +197,9 @@ bench = [
     "granian>=1.6",
     "spikard>=0.12",
 ]
+
+[tool.uv.sources]
+pytest-databases = { git = "https://github.com/litestar-org/pytest-databases.git", branch = "test/clientless-all" }
 
 [tool.maturin]
 python-source = "src/py"
@@ -210,15 +244,20 @@ files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "docs/ex
 [[tool.mypy.overrides]]
 module = [
     "pydantic.*",
-    "orjson",
     "attrs",
     "numpy",
     "numpy.*",
     "pyarrow",
     "pyarrow.*",
+    "polars",
+    "polars.*",
     "uvloop",
+    "starlette",
+    "starlette.*",
     "fastapi",
     "fastapi.*",
+    "flask",
+    "flask.*",
     "litestar",
     "litestar.*",
     "litestar_queues",
@@ -247,7 +286,10 @@ module = [
     "alembic.*",
     "sqlspec",
     "sqlspec.*",
+    "django",
     "django.*",
+    "pytest_databases",
+    "pytest_databases.*",
     "concurrent.interpreters",
 ]
 ignore_missing_imports = true
@@ -256,7 +298,7 @@ ignore_missing_imports = true
 allow_dirty = true
 commit = false
 commit_args = "--no-verify"
-current_version = "0.1.0"
+current_version = "0.2.0"
 ignore_missing_files = false
 ignore_missing_version = false
 message = "chore(release): bump to v{new_version}"

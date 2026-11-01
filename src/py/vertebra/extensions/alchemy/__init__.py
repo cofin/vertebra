@@ -1,4 +1,4 @@
-"""Advanced Alchemy integration factories, session broker, and ObjectStore backend."""
+"""Advanced Alchemy integration factories, session broker, caching, and ObjectStore backend."""
 
 from __future__ import annotations
 
@@ -16,13 +16,23 @@ from vertebra.extensions.alchemy.broker import (
     StatementPlan,
 )
 from vertebra.extensions.alchemy.cache import (
+    AsyncCacheManager,
+    CacheConfig,
     CacheEntry,
     CacheStats,
     SQLAlchemyCacheBackend,
+    ZeroCopyServiceMixin,
+    create_cache_config,
+    msgspec_model_deserializer,
+    msgspec_model_serializer,
+    setup_cache_listeners,
 )
 from vertebra.extensions.alchemy.plugin import (
     create_alchemy_plugin,
     create_async_alchemy_config,
+    create_fastapi_alchemy,
+    create_flask_alchemy,
+    create_starlette_alchemy,
     create_sync_alchemy_config,
 )
 from vertebra.extensions.alchemy.storage import (
@@ -31,10 +41,12 @@ from vertebra.extensions.alchemy.storage import (
 )
 
 __all__ = (
+    "AsyncCacheManager",
     "BrokerConfig",
     "BrokerMetrics",
     "BrokerPlugin",
     "BrokerTransport",
+    "CacheConfig",
     "CacheEntry",
     "CacheStats",
     "ChannelMessage",
@@ -46,8 +58,16 @@ __all__ = (
     "SQLAlchemyCacheBackend",
     "StatementCache",
     "StatementPlan",
+    "ZeroCopyServiceMixin",
     "create_alchemy_plugin",
     "create_async_alchemy_config",
+    "create_cache_config",
+    "create_fastapi_alchemy",
+    "create_flask_alchemy",
+    "create_starlette_alchemy",
     "create_sync_alchemy_config",
+    "msgspec_model_deserializer",
+    "msgspec_model_serializer",
     "register_storage_backend",
+    "setup_cache_listeners",
 )

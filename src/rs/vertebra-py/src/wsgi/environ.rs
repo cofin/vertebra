@@ -259,35 +259,119 @@ impl WsgiEnviron {
         Ok(Some(obj))
     }
 
-    fn build_header_key(&mut self, py: Python<'_>, key: &str) -> PyResult<Option<Py<PyAny>>> {
-        let obj: Py<PyAny> = match key {
+    #[inline]
+    fn matches_cgi_header(raw_name: &[u8], cgi_rest: &[u8]) -> bool {
+        if raw_name.len() != cgi_rest.len() {
+            return false;
+        }
+        raw_name.iter().zip(cgi_rest.iter()).all(|(&nb, &kb)| {
+            (nb == b'-' && kb == b'_') || (nb != b'_' && nb.to_ascii_uppercase() == kb)
+        })
+    }
+
+    fn scan_header_in_place(&self, cgi_key: &str) -> Option<String> {
+        let raw = self.batch.headers_raw(self.index);
+        let mut combined: Option<String> = None;
+        match cgi_key {
             "CONTENT_TYPE" => {
-                let _ = self.ensure_headers();
-                let cache = self.header_cache.as_ref().unwrap();
-                let v = cache.get("content-type").map(String::as_str).unwrap_or("");
-                PyString::new(py, v).into_any().unbind()
-            }
-            "CONTENT_LENGTH" => {
-                let _ = self.ensure_headers();
-                let cache = self.header_cache.as_ref().unwrap();
-                let v = cache
-                    .get("content-length")
-                    .map(String::as_str)
-                    .unwrap_or("");
-                PyString::new(py, v).into_any().unbind()
-            }
-            _ if key.starts_with("HTTP_") => {
-                let _ = self.ensure_headers();
-                let cache = self.header_cache.as_ref().unwrap();
-                let header_name = key[5..].to_ascii_lowercase().replace('_', "-");
-                match cache.get(&header_name) {
-                    Some(val) => PyString::new(py, val).into_any().unbind(),
-                    None => return Ok(None),
+                for (name, value) in iter_raw_headers(raw) {
+                    if name.eq_ignore_ascii_case(b"content-type") {
+                        let val_str = String::from_utf8_lossy(value);
+                        if let Some(ref mut existing) = combined {
+                            existing.push_str(", ");
+                            existing.push_str(&val_str);
+                        } else {
+                            combined = Some(val_str.into_owned());
+                        }
+                    }
                 }
             }
-            _ => return Ok(None),
-        };
-        Ok(Some(obj))
+            "CONTENT_LENGTH" => {
+                for (name, value) in iter_raw_headers(raw) {
+                    if name.eq_ignore_ascii_case(b"content-length") {
+                        let val_str = String::from_utf8_lossy(value);
+                        if let Some(ref mut existing) = combined {
+                            existing.push_str(", ");
+                            existing.push_str(&val_str);
+                        } else {
+                            combined = Some(val_str.into_owned());
+                        }
+                    }
+                }
+            }
+            _ if cgi_key.starts_with("HTTP_") => {
+                let rest = &cgi_key.as_bytes()[5..];
+                for (name, value) in iter_raw_headers(raw) {
+                    if Self::matches_cgi_header(name, rest) {
+                        let val_str = String::from_utf8_lossy(value);
+                        if let Some(ref mut existing) = combined {
+                            existing.push_str(", ");
+                            existing.push_str(&val_str);
+                        } else {
+                            combined = Some(val_str.into_owned());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        combined
+    }
+
+    #[inline]
+    fn has_header_in_place(&self, cgi_key: &str) -> bool {
+        let raw = self.batch.headers_raw(self.index);
+        match cgi_key {
+            "CONTENT_TYPE" => {
+                iter_raw_headers(raw).any(|(n, _)| n.eq_ignore_ascii_case(b"content-type"))
+            }
+            "CONTENT_LENGTH" => {
+                iter_raw_headers(raw).any(|(n, _)| n.eq_ignore_ascii_case(b"content-length"))
+            }
+            _ if cgi_key.starts_with("HTTP_") => {
+                let rest = &cgi_key.as_bytes()[5..];
+                iter_raw_headers(raw).any(|(n, _)| Self::matches_cgi_header(n, rest))
+            }
+            _ => false,
+        }
+    }
+
+    fn build_header_key(&mut self, py: Python<'_>, key: &str) -> PyResult<Option<Py<PyAny>>> {
+        if let Some(ref cache) = self.header_cache {
+            let obj: Py<PyAny> = match key {
+                "CONTENT_TYPE" => {
+                    let v = cache.get("content-type").map(String::as_str).unwrap_or("");
+                    PyString::new(py, v).into_any().unbind()
+                }
+                "CONTENT_LENGTH" => {
+                    let v = cache
+                        .get("content-length")
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    PyString::new(py, v).into_any().unbind()
+                }
+                _ if key.starts_with("HTTP_") => {
+                    let header_name = key[5..].to_ascii_lowercase().replace('_', "-");
+                    match cache.get(&header_name) {
+                        Some(val) => PyString::new(py, val).into_any().unbind(),
+                        None => return Ok(None),
+                    }
+                }
+                _ => return Ok(None),
+            };
+            return Ok(Some(obj));
+        }
+        match key {
+            "CONTENT_TYPE" | "CONTENT_LENGTH" => {
+                let val = self.scan_header_in_place(key).unwrap_or_default();
+                Ok(Some(PyString::new(py, &val).into_any().unbind()))
+            }
+            _ if key.starts_with("HTTP_") => match self.scan_header_in_place(key) {
+                Some(val) => Ok(Some(PyString::new(py, &val).into_any().unbind())),
+                None => Ok(None),
+            },
+            _ => Ok(None),
+        }
     }
 
     fn collect_keys(&mut self) -> Vec<String> {
@@ -445,29 +529,25 @@ impl WsgiEnviron {
         {
             return true;
         }
-        if key == "CONTENT_TYPE" || key == "CONTENT_LENGTH" {
-            let _ = self.ensure_headers();
-            let header_name = if key == "CONTENT_TYPE" {
-                "content-type"
-            } else {
-                "content-length"
-            };
-            return self
-                .header_cache
-                .as_ref()
-                .unwrap()
-                .contains_key(header_name);
-        }
-        if let Some(rest) = key.strip_prefix("HTTP_") {
-            let _ = self.ensure_headers();
-            let header_name = rest.to_ascii_lowercase().replace('_', "-");
-            return self
-                .header_cache
-                .as_ref()
-                .unwrap()
-                .contains_key(&header_name);
+        if key == "CONTENT_TYPE" || key == "CONTENT_LENGTH" || key.starts_with("HTTP_") {
+            if let Some(ref cache) = self.header_cache {
+                if key == "CONTENT_TYPE" {
+                    return cache.contains_key("content-type");
+                }
+                if key == "CONTENT_LENGTH" {
+                    return cache.contains_key("content-length");
+                }
+                let header_name = key[5..].to_ascii_lowercase().replace('_', "-");
+                return cache.contains_key(&header_name);
+            }
+            return self.has_header_in_place(key);
         }
         false
+    }
+
+    /// Return the underlying zero-copy `Request` backing this `WsgiEnviron`.
+    pub fn request(&self) -> crate::request::Request {
+        crate::request::Request::new(Arc::clone(&self.batch), self.index)
     }
 
     pub fn __len__(&mut self) -> usize {

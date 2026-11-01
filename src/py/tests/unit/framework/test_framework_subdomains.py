@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import msgspec
 import pytest
@@ -13,7 +13,7 @@ import pytest
 from vertebra.extensions.litestar import LitestarConfig, LitestarPlugin
 from vertebra.framework._app import App
 from vertebra.framework.asyncapi import AsyncAPISpecBuilder, AsyncChannelDef
-from vertebra.framework.channels import ChannelsBackend
+from vertebra.framework.channels import ChannelBus
 from vertebra.framework.di import Container, DependencyGraph, Inject, Provide
 from vertebra.framework.email import EmailConfig, EmailMessage, EmailService
 from vertebra.framework.htmx import HTMXRequest, HTMXResponse
@@ -195,7 +195,7 @@ async def test_queues_channels_stores_email_and_procedures() -> None:
     assert env.lane == "cpu"
     assert await qsvc.drain_once() == [81]
 
-    bus = ChannelsBackend(history=5)
+    bus = ChannelBus(history=5)
     await bus.on_startup()
     await bus.publish(b"evt", ["orders"])
     assert await bus.get_history("orders") == [b"evt"]
@@ -362,7 +362,7 @@ def test_openapi_spec_builder_from_app_and_enable_docs() -> None:
 
 def test_asyncapi_spec_builder_from_channels() -> None:
     """Verify AsyncAPISpecBuilder.from_channels constructs valid AsyncAPI 3.0.0 documents."""
-    bus = ChannelsBackend()
+    bus = ChannelBus()
     bus._subscribed_channels.add("telemetry")
     bus._subscribed_channels.add("alerts")
 
@@ -414,7 +414,7 @@ async def test_queue_and_email_backend_validation_and_policies(monkeypatch: pyte
     assert not_due_results == []
 
     with pytest.raises(UnsupportedBackendError, match="Unsupported email backend"):
-        EmailService(EmailConfig(backend="postmark"))  # type: ignore[arg-type]
+        EmailService(EmailConfig(backend=cast("Any", "postmark")))
 
     mem_svc = EmailService(EmailConfig(backend="memory"))
     receipt = await mem_svc.send(

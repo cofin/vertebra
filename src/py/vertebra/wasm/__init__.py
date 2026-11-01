@@ -8,9 +8,18 @@ import msgspec
 
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
+from vertebra.utils.serializers import (
+    ZeroCopyCodecRegistry,
+    decode_json,
+    decode_msgpack,
+    encode_json_into,
+    encode_msgpack_into,
+)
 
 __all__ = (
     "WASMExecutionError",
+    "WASMHttpEnvelope",
+    "WASMHttpResponse",
     "WASMModuleConfig",
     "WASMPluginHost",
     "WASMSandboxPolicy",
@@ -23,6 +32,23 @@ _wasmtime = import_optional("wasmtime")
 
 class WASMExecutionError(RuntimeError):
     """Raised when a WebAssembly guest module traps or exceeds its fuel/memory budget."""
+
+
+class WASMHttpEnvelope(msgspec.Struct, frozen=True, gc=False, array_like=True):
+    """Compact array-like WASI HTTP request envelope for zero-copy Wasm guest dispatch."""
+
+    method: str
+    path: str
+    headers: list[tuple[str, str]] = msgspec.field(default_factory=list)
+    body: bytes = b""
+
+
+class WASMHttpResponse(msgspec.Struct, frozen=True, gc=False, array_like=True):
+    """Compact array-like WASI HTTP response envelope returned by Wasm guest handlers."""
+
+    status: int = 200
+    headers: list[tuple[str, str]] = msgspec.field(default_factory=list)
+    body: bytes = b""
 
 
 class WASMSandboxPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -165,3 +191,106 @@ class WASMPluginHost:
         except Exception as exc:
             msg = f"Wasm execution failed in {module_name!r}.{export_name!r}: {exc}"
             raise WASMExecutionError(msg) from exc
+
+    def call_json(
+        self,
+        module_name: str,
+        export_name: str,
+        payload: Any,
+        *,
+        return_type: Any = Any,
+        fuel_cost: int = 100,
+    ) -> Any:
+        """Encode payload into a reusable buffer via msgspec.json.Encoder.encode_into and decode the guest response."""
+        buf = bytearray(256)
+        encode_json_into(payload, buf, 0)
+        mv = memoryview(buf)
+        cfg = self.get_module(module_name)
+        if len(mv) > cfg.policy.max_memory_bytes:
+            msg = f"Wasm payload size {len(mv)} exceeds max_memory_bytes ({cfg.policy.max_memory_bytes})"
+            raise WASMExecutionError(msg)
+
+        fn = self._host_exports.get((module_name, export_name))
+        if fn is not None:
+            if fuel_cost > cfg.policy.max_fuel:
+                msg = f"Wasm module {module_name!r} exceeded max_fuel budget ({fuel_cost} > {cfg.policy.max_fuel})"
+                raise WASMExecutionError(msg)
+            raw_out = fn(mv)
+            if isinstance(raw_out, bytes | bytearray | memoryview | str):
+                if isinstance(raw_out, str):
+                    return decode_json(raw_out, type=return_type)
+                plan = ZeroCopyCodecRegistry.compile(return_type)
+                return plan.decode_buffer(raw_out, format="json")
+            if return_type is not Any and not isinstance(raw_out, return_type):
+                return msgspec.convert(raw_out, type=return_type)
+            return raw_out
+
+        raw_res = self.call_export(module_name, export_name, bytes(mv), fuel_cost=fuel_cost)
+        if isinstance(raw_res, bytes | bytearray | memoryview):
+            plan = ZeroCopyCodecRegistry.compile(return_type)
+            return plan.decode_buffer(raw_res, format="json")
+        return decode_json(str(raw_res), type=return_type)
+
+    def call_msgpack(
+        self,
+        module_name: str,
+        export_name: str,
+        payload: Any,
+        *,
+        return_type: Any = Any,
+        fuel_cost: int = 100,
+    ) -> Any:
+        """Encode payload into a reusable buffer via msgspec.msgpack.Encoder.encode_into and decode the guest response."""
+        buf = bytearray(256)
+        encode_msgpack_into(payload, buf, 0)
+        mv = memoryview(buf)
+        cfg = self.get_module(module_name)
+        if len(mv) > cfg.policy.max_memory_bytes:
+            msg = f"Wasm payload size {len(mv)} exceeds max_memory_bytes ({cfg.policy.max_memory_bytes})"
+            raise WASMExecutionError(msg)
+
+        fn = self._host_exports.get((module_name, export_name))
+        if fn is not None:
+            if fuel_cost > cfg.policy.max_fuel:
+                msg = f"Wasm module {module_name!r} exceeded max_fuel budget ({fuel_cost} > {cfg.policy.max_fuel})"
+                raise WASMExecutionError(msg)
+            raw_out = fn(mv)
+            if isinstance(raw_out, bytes | bytearray | memoryview):
+                plan = ZeroCopyCodecRegistry.compile(return_type)
+                return plan.decode_buffer(raw_out, format="msgpack")
+            if return_type is not Any and not isinstance(raw_out, return_type):
+                return msgspec.convert(raw_out, type=return_type)
+            return raw_out
+
+        raw_res = self.call_export(module_name, export_name, bytes(mv), fuel_cost=fuel_cost)
+        if isinstance(raw_res, bytes | bytearray | memoryview):
+            plan = ZeroCopyCodecRegistry.compile(return_type)
+            return plan.decode_buffer(raw_res, format="msgpack")
+        return decode_msgpack(bytes(raw_res), type=return_type)
+
+    def dispatch_http(
+        self,
+        module_name: str,
+        request: Any,
+        *,
+        export_name: str = "handle_http",
+        fuel_cost: int = 100,
+    ) -> WASMHttpResponse:
+        """Dispatch an HTTP Request to a Wasm guest handler using a compact array_like MsgPack envelope."""
+        method = str(getattr(request, "method", "GET"))
+        path = str(getattr(request, "path", "/"))
+        headers_obj = getattr(request, "headers", None)
+        hdrs: list[tuple[str, str]] = (
+            list(headers_obj.items()) if headers_obj is not None and hasattr(headers_obj, "items") else []
+        )
+        bv = getattr(request, "body_view", None)
+        body_bytes = bytes(bv) if bv is not None else (getattr(request, "body", b"") or b"")
+        envelope = WASMHttpEnvelope(method=method, path=path, headers=hdrs, body=body_bytes)
+        res: WASMHttpResponse = self.call_msgpack(
+            module_name,
+            export_name,
+            envelope,
+            return_type=WASMHttpResponse,
+            fuel_cost=fuel_cost,
+        )
+        return res

@@ -68,7 +68,15 @@ from vertebra.build.codegen.procedures import (
     get_procedure_registry,
     procedure,
 )
-from vertebra.build.codegen.protobuf import ProtobufGenerator
+from vertebra.build.codegen.protobuf import (
+    ProtobufGenerator,
+    ProtobufParser,
+    ProtoFieldSpec,
+    ProtoMessageSpec,
+    ProtoMethodSpec,
+    ProtoServiceSpec,
+    ProtoSpec,
+)
 from vertebra.build.codegen.valibot import ValibotGenerator
 from vertebra.build.codegen.zod import ZodGenerator
 
@@ -110,7 +118,13 @@ __all__ = (
     "ProcedureInfo",
     "ProcedureParam",
     "ProcedureRegistry",
+    "ProtoFieldSpec",
+    "ProtoMessageSpec",
+    "ProtoMethodSpec",
+    "ProtoServiceSpec",
+    "ProtoSpec",
     "ProtobufGenerator",
+    "ProtobufParser",
     "Provide",
     "RawType",
     "RouteCollector",

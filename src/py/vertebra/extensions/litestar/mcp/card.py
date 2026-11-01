@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 from litestar.response import Response
 
 from vertebra.utils.module_loader import ensure_module
+from vertebra.utils.serializers import encode_json_bytes
 
 if TYPE_CHECKING:
     from litestar.connection import ASGIConnection
@@ -41,7 +41,7 @@ class WellKnownAgentCardOffload(msgspec.Struct, frozen=True, gc=False, kw_only=T
         elif isinstance(card, str):
             payload = card.encode("utf-8")
         else:
-            payload = json.dumps(card if isinstance(card, dict) else getattr(card, "__dict__", {})).encode("utf-8")
+            payload = encode_json_bytes(card if isinstance(card, dict) else getattr(card, "__dict__", {}))
 
         digest = hashlib.sha256(payload).hexdigest()
         etag = f'"{digest}"'

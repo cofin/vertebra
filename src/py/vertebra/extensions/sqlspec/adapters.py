@@ -25,6 +25,7 @@ from vertebra.db.rls import TenantPredicate
 from vertebra.db.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
+from vertebra.utils.serializers import ZeroCopyCodecRegistry
 
 try:
     from sqlspec import StackResult, StatementStack
@@ -188,15 +189,34 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         _ = (statement_config, kwargs)
         if isinstance(statement, SQL):
             sql, p = statement.compile()
-            res = self.native_driver.select(sql, p) if p else self.native_driver.select(sql)
+            params = p
         else:
             sql = str(statement)
             params = self._normalize_params(parameters)
-            res = self.native_driver.select(sql, params) if params is not None else self.native_driver.select(sql)
-        rows: list[dict[str, Any]] = list(res)
+
         if schema_type is not None and schema_type is not dict:
-            return [msgspec.convert(row, type=schema_type) for row in rows]
-        return rows
+            try:
+                res = (
+                    self.native_driver.select(sql, params, schema_type=schema_type)
+                    if params is not None
+                    else self.native_driver.select(sql, schema_type=schema_type)
+                )
+                return list(res)
+            except TypeError:
+                pass
+
+        res = self.native_driver.select(sql, params) if params is not None else self.native_driver.select(sql)
+        rows: list[Any] = list(res)
+        if not rows or schema_type is None or schema_type is dict:
+            return rows
+        if isinstance(rows[0], schema_type):
+            return rows
+        plan = ZeroCopyCodecRegistry.compile(schema_type)
+        if isinstance(rows[0], dict):
+            cols = tuple(rows[0].keys())
+            tuple_rows = [tuple(r.get(c) for c in cols) for r in rows]
+            return plan.hydrate_rows(tuple_rows, cols)
+        return [msgspec.convert(row, type=schema_type) for row in rows]
 
     def select_one(
         self,
@@ -471,19 +491,36 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         _ = (statement_config, kwargs)
         if isinstance(statement, SQL):
             sql, p = statement.compile()
-            res = await self.native_driver.select(sql, p) if p else await self.native_driver.select(sql)
+            params = p
         else:
             sql = str(statement)
             params = BaseSyncDriver._normalize_params(parameters)
-            res = (
-                await self.native_driver.select(sql, params)
-                if params is not None
-                else await self.native_driver.select(sql)
-            )
-        rows: list[dict[str, Any]] = list(res)
+
         if schema_type is not None and schema_type is not dict:
-            return [msgspec.convert(row, type=schema_type) for row in rows]
-        return rows
+            try:
+                res = (
+                    await self.native_driver.select(sql, params, schema_type=schema_type)
+                    if params is not None
+                    else await self.native_driver.select(sql, schema_type=schema_type)
+                )
+                return list(res)
+            except TypeError:
+                pass
+
+        res = (
+            await self.native_driver.select(sql, params) if params is not None else await self.native_driver.select(sql)
+        )
+        rows: list[Any] = list(res)
+        if not rows or schema_type is None or schema_type is dict:
+            return rows
+        if isinstance(rows[0], schema_type):
+            return rows
+        plan = ZeroCopyCodecRegistry.compile(schema_type)
+        if isinstance(rows[0], dict):
+            cols = tuple(rows[0].keys())
+            tuple_rows = [tuple(r.get(c) for c in cols) for r in rows]
+            return plan.hydrate_rows(tuple_rows, cols)
+        return [msgspec.convert(row, type=schema_type) for row in rows]
 
     async def select_one(
         self,
@@ -944,6 +981,17 @@ class PostgreSQLSyncConfig(SyncAdapterConfig[PostgreSQLConfig, PostgreSQLSyncDri
     _driver_cls: ClassVar[type[SyncPostgreSQLDriver]] = SyncPostgreSQLDriver
     driver_type: ClassVar[type[PostgreSQLSyncDriver]] = PostgreSQLSyncDriver
 
+    def derive_direct_config(self) -> Self:
+        """Derive a session-mode direct configuration for DDL, migrations, and `LISTEN/NOTIFY`."""
+        direct_cfg = self.driver_config.derive_direct_config()
+        return type(self)(
+            direct_cfg,
+            bind_key=f"{self.bind_key}_direct",
+            broker=self.broker,
+            arrow_threshold_rows=self.arrow_threshold_rows,
+            statement_config=self.statement_config,
+        )
+
 
 class PostgreSQLAsyncConfig(AsyncAdapterConfig[PostgreSQLConfig, PostgreSQLAsyncDriver]):
     """Asynchronous SQLSpec adapter configuration for PostgreSQL (postgres+vtb)."""
@@ -952,6 +1000,17 @@ class PostgreSQLAsyncConfig(AsyncAdapterConfig[PostgreSQLConfig, PostgreSQLAsync
     _config_cls: ClassVar[type[PostgreSQLConfig]] = PostgreSQLConfig
     _driver_cls: ClassVar[type[AsyncPostgreSQLDriver]] = AsyncPostgreSQLDriver
     driver_type: ClassVar[type[PostgreSQLAsyncDriver]] = PostgreSQLAsyncDriver
+
+    def derive_direct_config(self) -> Self:
+        """Derive a session-mode direct configuration for DDL, migrations, and `LISTEN/NOTIFY`."""
+        direct_cfg = self.driver_config.derive_direct_config()
+        return type(self)(
+            direct_cfg,
+            bind_key=f"{self.bind_key}_direct",
+            broker=self.broker,
+            arrow_threshold_rows=self.arrow_threshold_rows,
+            statement_config=self.statement_config,
+        )
 
 
 class MySQLSyncConfig(SyncAdapterConfig[MySQLConfig, MySQLSyncDriver]):

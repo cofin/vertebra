@@ -7,7 +7,9 @@
 use crate::errors::{BundlerError, Result};
 use pyo3::prelude::*;
 use rquickjs::function::Rest;
-use rquickjs::{CatchResultExt, Context, Function, Object, Runtime, String as JsString, Value};
+use rquickjs::{
+    CatchResultExt, Context, Function, Module, Object, Runtime, String as JsString, Value,
+};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -142,6 +144,7 @@ pub struct SSRPool {
     available: Mutex<VecDeque<usize>>,
     condvar: Condvar,
     acquire_timeout: Duration,
+    render_timeout: Duration,
     cache: Mutex<BoundedRenderCache>,
 }
 
@@ -162,6 +165,11 @@ impl Drop for SlotLease<'_> {
 impl SSRPool {
     /// Create a new SSR pool with `pool_size` independent QuickJS runtime slots.
     pub fn new(bundle_path: &str, pool_size: usize) -> Result<Self> {
+        Self::new_with_timeout(bundle_path, pool_size, 1000)
+    }
+
+    /// Create a new SSR pool with explicit per-render timeout in milliseconds.
+    pub fn new_with_timeout(bundle_path: &str, pool_size: usize, timeout_ms: u64) -> Result<Self> {
         let resolved_size = pool_size.max(1);
         let path_buf = PathBuf::from(bundle_path);
         let source_raw = std::fs::read_to_string(&path_buf).map_err(BundlerError::Io)?;
@@ -186,6 +194,7 @@ impl SSRPool {
             available: Mutex::new(available),
             condvar: Condvar::new(),
             acquire_timeout: Duration::from_millis(500),
+            render_timeout: Duration::from_millis(timeout_ms.max(1)),
             cache: Mutex::new(BoundedRenderCache::new(256, Duration::from_secs(60))),
         })
     }
@@ -226,9 +235,35 @@ impl SSRPool {
                 .set("console", console)
                 .map_err(|e| BundlerError::Ssr(format!("Failed to set console global: {e}")))?;
 
-            ctx.eval::<(), _>(source.as_bytes())
-                .catch(&ctx)
-                .map_err(|e| BundlerError::Ssr(format!("Bundle eval failed: {e}")))?;
+            let is_esm = source.contains("export default")
+                || source.contains("export function")
+                || source.contains("export const")
+                || source.contains("export {");
+
+            if is_esm {
+                let (module, promise) = Module::declare(ctx.clone(), "ssr.mjs", source.as_bytes())
+                    .catch(&ctx)
+                    .map_err(|e| BundlerError::Ssr(format!("ESM module declare failed: {e}")))?
+                    .eval()
+                    .catch(&ctx)
+                    .map_err(|e| BundlerError::Ssr(format!("ESM module eval failed: {e}")))?;
+                let _ = promise.finish::<Value<'_>>().catch(&ctx);
+                let has_global = globals
+                    .get::<_, Value<'_>>("__ssr_render")
+                    .map(|v| v.is_function())
+                    .unwrap_or(false);
+                if !has_global {
+                    if let Ok(render_fn) = module.get::<_, Function<'_>>("render") {
+                        let _ = globals.set("__ssr_render", render_fn);
+                    } else if let Ok(default_fn) = module.get::<_, Function<'_>>("default") {
+                        let _ = globals.set("__ssr_render", default_fn);
+                    }
+                }
+            } else {
+                ctx.eval::<(), _>(source.as_bytes())
+                    .catch(&ctx)
+                    .map_err(|e| BundlerError::Ssr(format!("Bundle eval failed: {e}")))?;
+            }
 
             Ok::<_, BundlerError>(())
         })?;
@@ -303,7 +338,11 @@ impl SSRPool {
             .as_ref()
             .ok_or_else(|| BundlerError::Ssr("SSR slot unavailable".to_string()))?;
 
-        let render_result = eng.ctx.with(|ctx| {
+        let deadline = Instant::now() + self.render_timeout;
+        eng.runtime
+            .set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
+
+        let render_outcome = eng.ctx.with(|ctx| {
             let globals = ctx.globals();
 
             let render_fn: Function = globals.get("__ssr_render").catch(&ctx).map_err(|e| {
@@ -357,7 +396,23 @@ impl SSRPool {
                 .map_err(|e| BundlerError::Ssr(format!("result.body missing: {e}")))?;
 
             Ok::<_, BundlerError>(SSRResult { head, body })
-        })?;
+        });
+
+        eng.runtime.set_interrupt_handler(None);
+
+        let render_result = match render_outcome {
+            Ok(res) => res,
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    *slot_guard = None;
+                    return Err(BundlerError::Ssr(format!(
+                        "SSR render timed out after {}ms (slot rebuilt): {err}",
+                        self.render_timeout.as_millis()
+                    )));
+                }
+                return Err(err);
+            }
+        };
 
         drop(slot_guard);
         drop(lease);
@@ -423,9 +478,9 @@ impl SSRPool {
 #[pymethods]
 impl SSRPool {
     #[new]
-    #[pyo3(signature = (bundle_path, pool_size=4))]
-    fn py_new(bundle_path: &str, pool_size: usize) -> PyResult<Self> {
-        Ok(Self::new(bundle_path, pool_size)?)
+    #[pyo3(signature = (bundle_path, pool_size=4, timeout_ms=1000))]
+    fn py_new(bundle_path: &str, pool_size: usize, timeout_ms: u64) -> PyResult<Self> {
+        Ok(Self::new_with_timeout(bundle_path, pool_size, timeout_ms)?)
     }
 
     #[pyo3(name = "render")]

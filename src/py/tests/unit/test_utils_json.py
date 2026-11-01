@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import dataclasses
 import datetime
 import decimal
@@ -9,6 +11,16 @@ from pathlib import Path
 import msgspec
 import pytest
 
+from vertebra._vertebra import (
+    Request,
+    WsgiInput,
+    call_vectorcall,
+    hydrate_one_vectorcall,
+    hydrate_rows_vectorcall,
+    instantiate_struct_vectorcall,
+    orm_to_struct_vectorcall,
+    pack_grpc_lpm_frame,
+)
 from vertebra.typing import (
     BaseStruct,
     CamelizedBaseStruct,
@@ -17,14 +29,25 @@ from vertebra.typing import (
 )
 from vertebra.utils.serializers import (
     MsgPackSerializer,
+    ZeroCopyCodecRegistry,
+    decode_grpc_frame,
+    decode_grpc_frames,
     decode_json,
     decode_msgpack,
+    encode_grpc_frame_bytes,
+    encode_grpc_frame_into,
     encode_json,
     encode_json_bytes,
     encode_msgpack_bytes,
     encode_msgpack_into,
     get_default_json_serializer,
     get_default_msgpack_serializer,
+)
+from vertebra.wasm import (
+    WASM_MAGIC_HEADER,
+    WASMHttpResponse,
+    WASMModuleConfig,
+    WASMPluginHost,
 )
 
 
@@ -238,3 +261,133 @@ def test_base_struct_hierarchy_configs_immutability_and_wire_encoding() -> None:
     assert decode_json(encode_json_bytes(mutable_camel)) == {"itemName": "beta"}
     assert "optional_tag" not in repr(frozen_base)
     assert "optional_tag" not in repr(frozen_camel)
+
+
+class _DummyORMRow:
+    """Synthetic ORM entity for vectorcall attribute projection verification."""
+
+    def __init__(self, id: int, data: str) -> None:
+        self.id = id
+        self.data = data
+
+
+class _DummyProtobufMessage:
+    """Synthetic Protobuf message implementing FromString and SerializeToString."""
+
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    @classmethod
+    def FromString(cls, buf: bytes | memoryview) -> _DummyProtobufMessage:
+        return cls(bytes(buf))
+
+    def SerializeToString(self) -> bytes:
+        return self.payload
+
+
+def test_c_api_msgspec_and_vectorcall_bridge() -> None:
+    """Verify Request.decode_msgspec, WsgiInput.decode_msgspec, and C-API vectorcall row/ORM hydration."""
+    raw_json = encode_json_bytes(MyStruct(id=7, data="zero-copy"))
+    req = Request.from_parts("POST", "/items", body=raw_json)
+    decoded = req.decode_msgspec(MyStruct, "json")
+    assert isinstance(decoded, MyStruct)
+    assert decoded.id == 7
+    assert decoded.data == "zero-copy"
+
+    raw_mp = encode_msgpack_bytes(MyStruct(id=8, data="msgpack-zc"))
+    wsgi_in = WsgiInput(raw_mp)
+    assert bytes(wsgi_in.body_view) == raw_mp
+    decoded_mp = wsgi_in.decode_msgspec(MyStruct, "msgpack")
+    assert isinstance(decoded_mp, MyStruct)
+    assert decoded_mp.id == 8
+    assert decoded_mp.data == "msgpack-zc"
+
+    inst = instantiate_struct_vectorcall(MyStruct, (10, "vec"), None)
+    assert isinstance(inst, MyStruct)
+    assert inst.id == 10
+    assert inst.data == "vec"
+
+    called = call_vectorcall(lambda x, y=2: x + y, (5,), {"y": 15})
+    assert called == 20
+
+    row_dict = hydrate_one_vectorcall(MyStruct, {"id": 11, "data": "dict-row"})
+    assert isinstance(row_dict, MyStruct)
+    assert row_dict.id == 11
+
+    rows_seq = hydrate_rows_vectorcall(
+        MyStruct,
+        [(1, "one"), (2, "two")],
+        ("id", "data"),
+    )
+    assert len(rows_seq) == 2
+    assert rows_seq[0] == MyStruct(id=1, data="one")
+    assert rows_seq[1] == MyStruct(id=2, data="two")
+
+    orm_single = orm_to_struct_vectorcall(MyStruct, _DummyORMRow(42, "orm"))
+    assert orm_single == MyStruct(id=42, data="orm")
+    orm_list = orm_to_struct_vectorcall(MyStruct, [_DummyORMRow(1, "a"), _DummyORMRow(2, "b")])
+    assert orm_list == [MyStruct(id=1, data="a"), MyStruct(id=2, data="b")]
+
+
+def test_zero_copy_grpc_lpm_framing_and_codec_registry() -> None:
+    """Verify zero-copy 5-byte LPM gRPC encoding and decoding across msgspec, dataclass, and Protobuf."""
+    item = MyStruct(id=55, data="grpc-lpm")
+    frame_mv = encode_grpc_frame_into(item, format="application/grpc+msgpack")
+    assert len(frame_mv) > 5
+    assert frame_mv[0] == 0
+
+    req = Request.from_parts(
+        "POST",
+        "/vertebra.rpc.ProcedureService/get_item",
+        body=bytes(frame_mv),
+        headers=[("content-type", "application/grpc+msgpack")],
+    )
+    decoded_grpc = req.decode_grpc(MyStruct, "msgpack")
+    assert decoded_grpc == item
+
+    frame_1 = encode_grpc_frame_bytes(MyStruct(id=1, data="first"), format="msgpack")
+    frame_2 = encode_grpc_frame_bytes(MyStruct(id=2, data="second"), format="msgpack")
+    stream_req = Request.from_parts("POST", "/stream", body=frame_1 + frame_2)
+    frames = stream_req.decode_grpc_frames(MyStruct, "msgpack")
+    assert frames == [MyStruct(id=1, data="first"), MyStruct(id=2, data="second")]
+    assert decode_grpc_frames(frame_1 + frame_2, target_type=MyStruct, format="msgpack") == frames
+
+    proto_lpm = pack_grpc_lpm_frame(b"raw-proto-bytes", False)
+    proto_req = Request.from_parts("POST", "/proto", body=proto_lpm)
+    proto_msg = proto_req.decode_grpc(_DummyProtobufMessage, "proto")
+    assert isinstance(proto_msg, _DummyProtobufMessage)
+    assert proto_msg.payload == b"raw-proto-bytes"
+
+    dc_plan = ZeroCopyCodecRegistry.compile(MyData)
+    dc_req = Request.from_parts("POST", "/dc", body=b'{"name":"ada","age":36}')
+    dc_val = dc_plan.decode_request(dc_req, format="json")
+    assert dc_val == MyData(name="ada", age=36)
+    assert (
+        decode_grpc_frame(encode_grpc_frame_bytes(dc_val, format="json"), target_type=MyData, format="json") == dc_val
+    )
+
+
+def test_wasm_linear_memory_json_and_msgpack_bridge() -> None:
+    """Verify WASMPluginHost.call_json, call_msgpack, and dispatch_http zero-copy buffer bridges."""
+    host = WASMPluginHost()
+    cfg = WASMModuleConfig(name="echo_guest", wasm_source=WASM_MAGIC_HEADER)
+    host.register_module(
+        cfg,
+        exports={
+            "echo_json": lambda mv: bytes(mv),
+            "echo_mp": lambda mv: bytes(mv),
+            "handle_http": lambda mv: encode_msgpack_bytes(
+                WASMHttpResponse(status=201, headers=[("x-wasm", "1")], body=bytes(mv))
+            ),
+        },
+    )
+    out_json = host.call_json("echo_guest", "echo_json", MyStruct(id=9, data="wasm-j"), return_type=MyStruct)
+    assert out_json == MyStruct(id=9, data="wasm-j")
+
+    out_mp = host.call_msgpack("echo_guest", "echo_mp", MyStruct(id=12, data="wasm-m"), return_type=MyStruct)
+    assert out_mp == MyStruct(id=12, data="wasm-m")
+
+    req = Request.from_parts("POST", "/wasm", body=b"hello-wasm", headers=[("x-test", "ok")])
+    http_resp = host.dispatch_http("echo_guest", req)
+    assert http_resp.status == 201
+    assert ("x-wasm", "1") in http_resp.headers

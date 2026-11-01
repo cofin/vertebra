@@ -141,6 +141,9 @@ inventories = [
   "https://click.palletsprojects.com/en/stable/objects.inv",
   "https://docs.litestar.dev/latest/objects.inv",
   "https://msgspec.dev/objects.inv",
+  "https://docs.sqlalchemy.org/en/20/objects.inv",
+  "https://docs.advanced-alchemy.litestar.dev/latest/objects.inv",
+  "https://docs.sqlspec.dev/latest/objects.inv",
 ]
 
 [project.plugins.mkdocstrings.handlers.python.options]
@@ -169,7 +172,7 @@ show_signature_annotations = false
 show_source = false
 show_symbol_type_heading = true
 show_symbol_type_toc = false
-signature_crossrefs = false
+signature_crossrefs = true
 summary = { attributes = true, functions = false, classes = false, modules = false }
 unwrap_annotated = true
 filters = ["!^_"]

@@ -44,6 +44,12 @@ export {
   type StateOpcodeValue,
 } from "./live/index";
 export {
+  interpolateRoutePath,
+  type RouteUrlOptions,
+  routeUrl,
+  wsUrl,
+} from "./router";
+export {
   SseClient,
   type SseClientOptions,
   type SseEventHandler,
@@ -56,6 +62,14 @@ export {
   WASMClient,
   type WASMClientOptions,
 } from "./wasm";
+export {
+  type BrowserModelContext,
+  type BrowserModelContextTool,
+  type RegisterWebMCPOptions,
+  registerWebMCPTools,
+  type WebMCPManifest,
+  type WebMCPToolDescriptor,
+} from "./webmcp";
 export {
   type PubSubWireFrame,
   WebSocketClient,

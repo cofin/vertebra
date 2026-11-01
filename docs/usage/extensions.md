@@ -24,9 +24,9 @@ app = Litestar(
 
 ### Fast-Path Dispatch & Native Middleware Offload
 
-- **Route Compiler**: `LitestarRouteCompiler` extracts Litestar routes into an optimized route table matched by the native HTTP router.
-- **Fast-Path Bypass**: `LitestarFastPathBypass` dispatches simple handlers directly, bypassing ASGI middleware layers when routes have no custom guards or intermediate transforms.
-- **Realtime Channels**: `ChannelsBackend` integrates with Litestar Channels over shared-memory pub/sub, wrapping client disconnection and cleanup in cancellation-shielded scopes to prevent resource leaks.
+- **Route Compiler**: `RouteCompiler` extracts Litestar routes into an optimized route table matched by the native HTTP router.
+- **Fast-Path Dispatch**: `FastPath` dispatches simple handlers directly, bypassing ASGI middleware layers when routes have no custom guards or intermediate transforms.
+- **Realtime Channels**: `ChannelsBackend` integrates with Litestar Channels over shared-memory and multi-engine pub/sub (`DatabaseChannelBackend`), wrapping client disconnection and cleanup in cancellation-shielded scopes to prevent resource leaks.
 - **Response Caching**: `ResponseCacheStore` backs Litestar's `ResponseCacheConfig` using Vertebra's in-memory / SHM cache store.
 
 ### Litestar Ecosystem Plugins (`vertebra.extensions.litestar.*`)

@@ -40,7 +40,12 @@ from vertebra.framework.security import (
     Principal,
     SecurityContext,
 )
-from vertebra.utils.serializers import decode_json, decode_msgpack, encode_json_bytes
+from vertebra.utils.serializers import (
+    ZeroCopyCodecRegistry,
+    decode_json,
+    decode_msgpack,
+    encode_json_bytes,
+)
 
 __all__ = (
     "BatchDispatchPlan",
@@ -1044,7 +1049,11 @@ def _compile_non_di_param(
         return _CompiledParamPlan(name=param_name, kind="path", extractor=_extract_path_param), True, False, False
 
     is_struct_body = inspect.isclass(base_type) and (
-        issubclass(base_type, msgspec.Struct) or dataclasses.is_dataclass(base_type)
+        issubclass(base_type, msgspec.Struct)
+        or dataclasses.is_dataclass(base_type)
+        or hasattr(base_type, "__pydantic_validator__")
+        or hasattr(base_type, "__attrs_attrs__")
+        or hasattr(base_type, "FromString")
     )
     if (loc_marker is not None and loc_marker.location == "body") or body_marker is not None or is_struct_body:
         media_type = (
@@ -1052,20 +1061,23 @@ def _compile_non_di_param(
             or (body_marker.media_type if body_marker is not None else None)
             or "application/json"
         )
-        use_msgpack = "msgpack" in media_type
         target_type = base_type if base_type is not Any else Any
+        adapter_plan = ZeroCopyCodecRegistry.compile(target_type)
 
         def _extract_typed_body(
             req: Any,
             _path_map: dict[str, Any],
             _query_map: dict[str, str],
-            _type: Any = target_type,
-            _msgpack: bool = use_msgpack,
+            _plan: Any = adapter_plan,
+            _default_media: str = media_type,
         ) -> Any:
+            req_ct = _lookup_header(getattr(req, "headers", None), "content-type") or _default_media
+            if hasattr(req, "decode_msgspec") or hasattr(req, "body_view"):
+                return _plan.decode_request(req, format=req_ct)
             raw_bytes = _extract_body(req)
-            if _msgpack:
-                return decode_msgpack(raw_bytes, type=_type)
-            return decode_json(raw_bytes, type=_type)
+            if "msgpack" in req_ct:
+                return decode_msgpack(raw_bytes, type=_plan.target_type)
+            return decode_json(raw_bytes, type=_plan.target_type)
 
         return _CompiledParamPlan(name=param_name, kind="body", extractor=_extract_typed_body), False, False, False
 

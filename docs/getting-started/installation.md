@@ -35,19 +35,30 @@ Vertebra keeps its base dependency footprint minimal (`msgspec` and `rich-click`
 
 | Extra | Install Command | Included Capabilities |
 | --- | --- | --- |
-| `framework` | `uv add "vertebra-core[framework]"` | Optional schema adapters (`pydantic`, `attrs`, `orjson`) alongside native `msgspec.Struct` |
-| `sqlspec` | `uv add "vertebra-core[sqlspec]"` | First-class `sqlspec` driver adapters, configs, and PyArrow integration |
+| `framework` | `uv add "vertebra-core[framework]"` | Explicit `msgspec>=0.18` native framework contract |
+| `sqlspec` | `uv add "vertebra-core[sqlspec]"` | First-class `sqlspec` (`>=0.70.0`) driver adapters, configs, and PyArrow integration |
 | `alchemy` | `uv add "vertebra-core[alchemy]"` | `advanced-alchemy` (1.12+), `sqlalchemy` (2.0.36+), and `alembic` (1.14+) |
 | `arrow` | `uv add "vertebra-core[arrow]"` | Native PyArrow IPC streaming and Parquet datasets |
+| `pydantic` | `uv add "vertebra-core[pydantic]"` | Zero-copy `pydantic-core` (`validate_json` / `to_json`) schema integration |
+| `attrs` | `uv add "vertebra-core[attrs]"` | Zero-copy `attrs` (`@attrs.define`) schema integration |
+| `polars` | `uv add "vertebra-core[polars]"` | Zero-copy Polars `DataFrame` / `LazyFrame` Arrow PyCapsule integration |
 | `litestar` | `uv add "vertebra-core[litestar]"` | Core Litestar route compiler, fast-path bypass, channels, and response cache store |
+| `starlette` | `uv add "vertebra-core[starlette]"` | First-class Starlette route compiler, 24-slot `AsgiScope` fastpath, and middleware offload |
+| `fastapi` | `uv add "vertebra-core[fastapi]"` | First-class FastAPI `CompiledDependantPlan` DI solver and zero-copy `pydantic-core` fastpath |
+| `flask` | `uv add "vertebra-core[flask]"` | First-class Flask route compiler, PEP 3118 `WsgiInput` fastpath, and ecosystem bridges |
+| `django` | `uv add "vertebra-core[django]"` | First-class Django route compiler, `vertebra.extensions.django.db.*` backends, and ecosystem bridges |
 | `queues` | `uv add "vertebra-core[queues]"` | `litestar-queues` integration (`vertebra.extensions.litestar.queues`) with SHM backends and SQLSpec queues |
 | `security` | `uv add "vertebra-core[security]"` | `litestar-security` integration with native JWT and mTLS identity mechanisms |
 | `autowire` | `uv add "vertebra-core[autowire]"` | `litestar-autowire` automatic controller discovery and bridge |
 | `email` | `uv add "vertebra-core[email]"` | `litestar-email` transactional email with native AWS SigV4 SES backend |
 | `mcp` | `uv add "vertebra-core[mcp]"` | `litestar-mcp` tools, resources, and agent cards |
 | `vite` | `uv add "vertebra-core[vite]"` | `litestar-vite` bundling and client integration |
+| `asyncapi` | `uv add "vertebra-core[asyncapi]"` | `litestar-asyncapi` AsyncAPI 3.0 specification and channel integration |
+| `htmx` | `uv add "vertebra-core[htmx]"` | `litestar-htmx` server-driven fragment and response helpers |
+| `saq` | `uv add "vertebra-core[saq]"` | `litestar-saq` background worker and queue integration |
 | `all` | `uv add "vertebra-core[all]"` | Full ecosystem extras suite |
-| `dev` | `uv add "vertebra-core[dev]"` | Development, lint, type-checking, test, and `maturin` build dependencies |
+
+Development, lint, type-checking, test, and benchmark dependencies are managed via PEP 735 `[dependency-groups]` (`uv sync --group dev`).
 
 ## Free-Threaded Python (`3.14t` / `3.15t`)
 

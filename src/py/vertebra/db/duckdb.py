@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 from vertebra.db.postgres import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
+    _hydrate_rows_with_schema,
+    _table_to_rows_and_cols,
     read_arrow_shm,
     write_arrow_shm,
 )
@@ -25,6 +27,7 @@ __all__ = (
     "AsyncDuckDBDriver",
     "DUCKDB_DIALECT_TAG",
     "DuckDBConfig",
+    "DuckDBSecretConfig",
     "SyncDuckDBDriver",
     "duckdb_bootstrap_statements",
     "read_arrow_shm",
@@ -32,6 +35,37 @@ __all__ = (
 )
 
 DUCKDB_DIALECT_TAG = 6
+
+
+class DuckDBSecretConfig(FrozenBaseStruct, frozen=True, gc=False):
+    """Cloud storage secret configuration (`CREATE SECRET`) for DuckDB `httpfs` / S3 / GCS / R2."""
+
+    name: str = "default_s3"
+    """Unique DuckDB secret identifier."""
+    secret_type: str = "S3"
+    """DuckDB secret type (`"S3"`, `"GCS"`, `"R2"`, or `"AZURE"`)."""
+    key_id: str = ""
+    """Cloud storage access key ID (`KEY_ID`)."""
+    secret: str = ""
+    """Cloud storage secret access key (`SECRET`)."""
+    region: str = "us-east-1"
+    """Cloud storage region (`REGION`)."""
+    endpoint: str | None = None
+    """Optional custom S3-compatible endpoint (`ENDPOINT`, e.g. RustFS or MinIO)."""
+
+    def to_create_secret_sql(self) -> str:
+        """Render a `CREATE OR REPLACE SECRET` SQL statement for DuckDB."""
+        parts = [f"TYPE {self.secret_type}"]
+        if self.key_id:
+            parts.append(f"KEY_ID '{self.key_id}'")
+        if self.secret:
+            parts.append(f"SECRET '{self.secret}'")
+        if self.region:
+            parts.append(f"REGION '{self.region}'")
+        if self.endpoint:
+            parts.append(f"ENDPOINT '{self.endpoint}'")
+        inner = ", ".join(parts)
+        return f"CREATE OR REPLACE SECRET {self.name} ({inner})"
 
 
 class DuckDBConfig(FrozenBaseStruct, frozen=True, gc=False):
@@ -53,6 +87,8 @@ class DuckDBConfig(FrozenBaseStruct, frozen=True, gc=False):
     """When True, cache remote HTTP/Parquet `HEAD` metadata (`SET enable_http_metadata_cache = true`)."""
     read_only: bool = False
     """When True, open the DuckDB file in read-only mode allowing multi-process readers."""
+    secrets: tuple[DuckDBSecretConfig, ...] = ()
+    """Optional cloud storage secrets (`CREATE OR REPLACE SECRET`) executed at connection bootstrap."""
     pool_min_size: int = 1
     """Minimum number of pooled DuckDB cursors per worker."""
     pool_max_size: int = 10
@@ -80,17 +116,21 @@ class DuckDBConfig(FrozenBaseStruct, frozen=True, gc=False):
                 self.httpfs_connection_caching,
                 self.enable_http_metadata_cache,
             )
-            return [s.replace("SET httpfs_connection_caching = ", "SET http_keep_alive = ") for s in raw_stmts]
-        parquet_flag = "true" if self.parquet_metadata_cache else "false"
-        keep_alive_flag = "true" if self.httpfs_connection_caching else "false"
-        http_meta_flag = "true" if self.enable_http_metadata_cache else "false"
-        return [
-            f"SET memory_limit = '{self.memory_limit_mb}MB'",
-            f"SET threads = {self.threads}",
-            f"SET parquet_metadata_cache = {parquet_flag}",
-            f"SET http_keep_alive = {keep_alive_flag}",
-            f"SET enable_http_metadata_cache = {http_meta_flag}",
-        ]
+            stmts = [s.replace("SET httpfs_connection_caching = ", "SET http_keep_alive = ") for s in raw_stmts]
+        else:
+            parquet_flag = "true" if self.parquet_metadata_cache else "false"
+            keep_alive_flag = "true" if self.httpfs_connection_caching else "false"
+            http_meta_flag = "true" if self.enable_http_metadata_cache else "false"
+            stmts = [
+                f"SET memory_limit = '{self.memory_limit_mb}MB'",
+                f"SET threads = {self.threads}",
+                f"SET parquet_metadata_cache = {parquet_flag}",
+                f"SET http_keep_alive = {keep_alive_flag}",
+                f"SET enable_http_metadata_cache = {http_meta_flag}",
+            ]
+        for secret in self.secrets:
+            stmts.append(secret.to_create_secret_sql())
+        return stmts
 
 
 def duckdb_bootstrap_statements(config: DuckDBConfig | None = None) -> list[str]:
@@ -166,8 +206,14 @@ class SyncDuckDBDriver:
         finally:
             self._release_broker_lease(grant)
 
-    def select(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
-        """Execute an analytical `SELECT` query and return rows as dictionaries."""
+    def select(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> list[Any]:
+        """Execute an analytical `SELECT` query and return rows as dictionaries or `schema_type` instances."""
         bound = tuple(params) if isinstance(params, (list, tuple)) else (params or ())
         grant = self._acquire_broker_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
         try:
@@ -182,7 +228,57 @@ class SyncDuckDBDriver:
                 cols = [col[0] for col in (cur.description or ())]
             if not rows:
                 return []
-            return [dict(zip(cols, tuple(row), strict=False)) for row in rows]
+            tuple_rows = [tuple(row) for row in rows]
+            return _hydrate_rows_with_schema(tuple_rows, cols, schema_type)
+        finally:
+            self._release_broker_lease(grant)
+
+    def select_one(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Execute a `SELECT` query and return the first row or raise `ValueError`."""
+        rows = self.select(sql, params, schema_type=schema_type)
+        if not rows:
+            msg = "No row found for select_one"
+            raise ValueError(msg)
+        return rows[0]
+
+    def select_one_or_none(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> Any | None:
+        """Execute a `SELECT` query and return the first row or `None`."""
+        rows = self.select(sql, params, schema_type=schema_type)
+        return rows[0] if rows else None
+
+    def load_from_arrow(
+        self,
+        table_name: str,
+        data: Any,
+        *,
+        columns: Sequence[str] | None = None,
+    ) -> int:
+        """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
+        rows, cols = _table_to_rows_and_cols(data, columns)
+        if not rows or not cols:
+            return 0
+        placeholders = ", ".join("?" for _ in cols)
+        col_list = ", ".join(cols)
+        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+        grant = self._acquire_broker_lease(sql, len(cols))
+        try:
+            with self._writer_lock:
+                self._conn.executemany(sql, rows)
+                if not self._using_native_duckdb:
+                    self._conn.commit()
+                return len(rows)
         finally:
             self._release_broker_lease(grant)
 
@@ -253,9 +349,45 @@ class AsyncDuckDBDriver:
         """Execute a DDL or DML statement asynchronously."""
         return await asyncio.to_thread(self._sync.execute, sql, params)
 
-    async def select(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+    async def select(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> list[Any]:
         """Execute an analytical `SELECT` query asynchronously."""
-        return await asyncio.to_thread(self._sync.select, sql, params)
+        return await asyncio.to_thread(self._sync.select, sql, params, schema_type=schema_type)
+
+    async def select_one(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Execute a `SELECT` query asynchronously and return the first row or raise `ValueError`."""
+        return await asyncio.to_thread(self._sync.select_one, sql, params, schema_type=schema_type)
+
+    async def select_one_or_none(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> Any | None:
+        """Execute a `SELECT` query asynchronously and return the first row or `None`."""
+        return await asyncio.to_thread(self._sync.select_one_or_none, sql, params, schema_type=schema_type)
+
+    async def load_from_arrow(
+        self,
+        table_name: str,
+        data: Any,
+        *,
+        columns: Sequence[str] | None = None,
+    ) -> int:
+        """Asynchronously bulk-ingest an Arrow Table or `ArrowCursor` into `table_name`."""
+        return await asyncio.to_thread(self._sync.load_from_arrow, table_name, data, columns=columns)
 
     async def select_to_arrow(
         self,

@@ -20,6 +20,7 @@ from typing import Any, Literal, Protocol
 
 import msgspec
 
+from vertebra.build._assets import ResolvedAssetTags, escape_html_json
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json
 from vertebra.utils.sync_tools import SyncPool
@@ -31,6 +32,7 @@ __all__ = (
     "SSRFrame",
     "SSRResult",
     "SidecarSSRClient",
+    "SsrRenderTimeoutError",
     "create_ssr_client",
     "prerender_routes",
     "render_page_shell",
@@ -39,6 +41,10 @@ __all__ = (
 logger = logging.getLogger(__name__)
 
 _bundler = import_optional("vertebra._bundler")
+
+
+class SsrRenderTimeoutError(TimeoutError):
+    """Raised when a native QuickJS or sidecar SSR render exceeds its configured deadline."""
 
 
 class SSRFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -116,18 +122,23 @@ class EmbeddedSSRClient:
         """Instantiate an SSRClient from an SSRConfig."""
         return SSRClient.from_config(config)
 
-    def __init__(self, bundle_path: str, pool_size: int = 4) -> None:
+    def __init__(self, bundle_path: str, pool_size: int = 4, timeout_ms: int = 1000) -> None:
         if _bundler is None:
             msg = "vertebra._bundler native extension is required for EmbeddedSSRClient"
             raise ImportError(msg)
-        self._pool = _bundler.SSRPool(bundle_path, pool_size)
+        self._pool = _bundler.SSRPool(bundle_path, pool_size, timeout_ms)
 
     def render(self, page: dict[str, Any]) -> SSRResult:
         """Render an Inertia page object via the native QuickJS pool."""
-        result = self._pool.render(
-            page.get("component", ""),
-            encode_json(page),
-        )
+        try:
+            result = self._pool.render(
+                page.get("component", ""),
+                encode_json(page),
+            )
+        except Exception as exc:
+            if "timed out" in str(exc).lower():
+                raise SsrRenderTimeoutError(str(exc)) from exc
+            raise
         return SSRResult(
             html=result.body,
             head=list(result.head),
@@ -298,16 +309,45 @@ def render_page_shell(
     page: dict[str, Any],
     result: SSRResult | None = None,
     root_template: str | None = None,
+    *,
+    asset_tags: ResolvedAssetTags | None = None,
+    csp_nonce: str | None = None,
+    static_props: dict[str, Any] | None = None,
 ) -> str:
-    """Render full HTML page shell for Inertia or prerendering."""
-    head_items = result.head if result else []
+    """Render full HTML page shell for Inertia or prerendering with XSS-safe JSON escaping."""
+    head_items = list(result.head) if result else []
+    if asset_tags is not None:
+        head_items.extend(asset_tags.tags)
+    if static_props is not None:
+        nonce_attr = f' nonce="{csp_nonce}"' if csp_nonce else ""
+        escaped_static = escape_html_json(encode_json(static_props))
+        head_items.append(
+            f'<script id="vertebra-static-props" type="application/json"{nonce_attr}>{escaped_static}</script>'
+        )
     body_content = result.body or result.html if result else ""
-    if root_template and ("<!--ssr-body-->" in root_template or "<body" in root_template):
+    page_json = escape_html_json(encode_json(page))
+    nonce_attr = f' nonce="{csp_nonce}"' if csp_nonce else ""
+    app_div = (
+        f'<div id="app">\n{body_content}\n'
+        f'<script data-page="app" type="application/json"{nonce_attr}>\n{page_json}\n</script>\n</div>'
+    )
+    if root_template and (
+        "<!--ssr-body-->" in root_template
+        or "<!--inertia-->" in root_template
+        or "@inertia" in root_template
+        or "<body" in root_template
+    ):
         html = root_template
-        html = html.replace("<!--ssr-head-->", "\n".join(head_items))
-        return html.replace("<!--ssr-body-->", body_content)
+        head_str = "\n".join(head_items)
+        for token in ("<!--ssr-head-->", "<!--inertia-head-->", "@inertiaHead"):
+            html = html.replace(token, head_str)
+        if "<!--ssr-body-->" in html:
+            return html.replace("<!--ssr-body-->", body_content)
+        for token in ("<!--inertia-->", "@inertia"):
+            if token in html:
+                return html.replace(token, app_div)
+        return html
     head_str = "\n".join(head_items)
-    page_json = encode_json(page)
     return (
         "<!DOCTYPE html>\n"
         "<html>\n"
@@ -316,12 +356,7 @@ def render_page_shell(
         f"{head_str}\n"
         "</head>\n"
         "<body>\n"
-        '<div id="app">\n'
-        f"{body_content}\n"
-        '<script data-page="app" type="application/json">\n'
-        f"{page_json}\n"
-        "</script>\n"
-        "</div>\n"
+        f"{app_div}\n"
         "</body>\n"
         "</html>"
     )

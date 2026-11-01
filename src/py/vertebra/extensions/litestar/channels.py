@@ -7,21 +7,20 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
-from vertebra.framework.channels import ChannelBus
+from vertebra.db.channels import DatabaseChannelBackend
 from vertebra.utils.module_loader import import_optional
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable
 
 __all__ = (
-    "ChannelBus",
     "ChannelsBackend",
-    "swap_litestar_channels_backend",
+    "swap_channels_backend",
 )
 
 
-class ChannelsBackend(ChannelBus):
-    """Litestar channels pub/sub backend adapter with cancellation shielding."""
+class ChannelsBackend(DatabaseChannelBackend):
+    """Litestar channels pub/sub backend adapter with cancellation shielding and multi-engine backing."""
 
     __slots__ = ()
 
@@ -56,10 +55,10 @@ class ChannelsBackend(ChannelBus):
                     queues.discard(queue)
 
 
-def swap_litestar_channels_backend(
+def swap_channels_backend(
     app: Any,
-    backend: ChannelsBackend | ChannelBus | None = None,
-) -> ChannelsBackend | ChannelBus | None:
+    backend: ChannelsBackend | DatabaseChannelBackend | None = None,
+) -> ChannelsBackend | DatabaseChannelBackend | None:
     """Transparently replace MemoryChannelsBackend on a Litestar app's ChannelsPlugin."""
     plugins = getattr(app, "plugins", None)
     if plugins is None:
@@ -81,20 +80,20 @@ def swap_litestar_channels_backend(
                 replacement = backend if backend is not None else ChannelsBackend(history=history)
                 plugin._backend = replacement
                 return replacement
-            if isinstance(current_backend, (ChannelsBackend, ChannelBus)):
+            if isinstance(current_backend, (ChannelsBackend, DatabaseChannelBackend)):
                 return current_backend
     return None
 
 
 def _load_channels_types() -> tuple[type[Any] | None, type[Any] | None]:
-    """Load Litestar ChannelsPlugin and MemoryChannelsBackend and register ChannelBus and ChannelsBackend."""
+    """Load Litestar ChannelsPlugin and MemoryChannelsBackend and register DatabaseChannelBackend."""
     ch_mod = import_optional("litestar.channels")
     mem_mod = import_optional("litestar.channels.backends.memory")
     if ch_mod is None or mem_mod is None:
         return None, None
     register_fn = getattr(ch_mod.ChannelsBackend, "register", None)
     if callable(register_fn):
-        register_fn(ChannelBus)
+        register_fn(DatabaseChannelBackend)
         register_fn(ChannelsBackend)
     return ch_mod.ChannelsPlugin, mem_mod.MemoryChannelsBackend
 

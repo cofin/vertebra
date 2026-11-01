@@ -5,13 +5,20 @@ from __future__ import annotations
 import time
 from datetime import timedelta
 
+import msgspec
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import Integer, String, create_engine, text
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from vertebra.extensions.alchemy import (
+    AsyncCacheManager,
     CacheEntry,
     CacheStats,
     SQLAlchemyCacheBackend,
+    ZeroCopyServiceMixin,
+    create_async_alchemy_config,
+    create_cache_config,
+    create_sync_alchemy_config,
 )
 
 
@@ -140,3 +147,70 @@ def test_shm_factory_initialization() -> None:
     assert cache.capacity == 512
     cache["sql"] = "SELECT 42"
     assert cache["sql"] == "SELECT 42"
+
+
+class _CacheBase(DeclarativeBase):
+    pass
+
+
+class _CachedUser(_CacheBase):
+    __tablename__ = "cached_users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64))
+
+
+class _UserDto(msgspec.Struct, frozen=True, gc=False):
+    id: int
+    name: str
+
+
+class _SampleService(ZeroCopyServiceMixin):
+    pass
+
+
+@pytest.mark.anyio
+async def test_async_cache_manager_sync_async_and_zero_copy_schema_projection() -> None:
+    """AsyncCacheManager caches ORM entities, decodes directly into msgspec.Struct, and wires into configs."""
+    cfg = create_cache_config(expiration_time=120, capacity=256)
+    manager = AsyncCacheManager(cfg)
+
+    user = _CachedUser(id=7, name="Ada Lovelace")
+    manager.set_entity_sync("cached_users", 7, user)
+
+    loaded_sync = manager.get_entity_sync("cached_users", 7, _CachedUser)
+    assert loaded_sync is not None
+    assert loaded_sync.id == 7
+    assert loaded_sync.name == "Ada Lovelace"
+
+    dto_sync = manager.get_schema_sync("cached_users", 7, _UserDto)
+    assert dto_sync == _UserDto(id=7, name="Ada Lovelace")
+
+    user_async = _CachedUser(id=8, name="Grace Hopper")
+    await manager.set_entity_async("cached_users", 8, user_async)
+    loaded_async = await manager.get_entity_async("cached_users", 8, _CachedUser)
+    assert loaded_async is not None
+    assert loaded_async.name == "Grace Hopper"
+
+    dto_async = await manager.get_schema_async("cached_users", 8, _UserDto)
+    assert dto_async == _UserDto(id=8, name="Grace Hopper")
+
+    await manager.set_many_async("cached_users:all", [user, user_async])
+    many_dtos = await manager.get_many_schema_async("cached_users:all", _UserDto)
+    assert many_dtos == [
+        _UserDto(id=7, name="Ada Lovelace"),
+        _UserDto(id=8, name="Grace Hopper"),
+    ]
+
+    svc = _SampleService()
+    assert svc.to_schema(user, schema_type=_UserDto) == _UserDto(id=7, name="Ada Lovelace")
+    assert svc.to_schema([user, user_async], schema_type=_UserDto) == [
+        _UserDto(id=7, name="Ada Lovelace"),
+        _UserDto(id=8, name="Grace Hopper"),
+    ]
+
+    async_cfg = create_async_alchemy_config("sqlite+aiosqlite:///:memory:", cache_config="memory://")
+    assert isinstance(async_cfg.cache_manager, AsyncCacheManager)
+
+    sync_cfg = create_sync_alchemy_config("sqlite:///:memory:", cache_config=SQLAlchemyCacheBackend(capacity=64))
+    assert isinstance(sync_cfg.cache_manager, AsyncCacheManager)

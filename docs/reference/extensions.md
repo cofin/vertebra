@@ -4,7 +4,7 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
 
 | Extension | Key Objects | Purpose |
 | --- | --- | --- |
-| **Litestar** | `LitestarConfig`, `LitestarPlugin`, `LitestarRouteCompiler` | Mount Litestar applications on Vertebra and compile static Litestar routes directly into the native router |
+| **Litestar** | `LitestarConfig`, `LitestarPlugin`, `RouteCompiler` | Mount Litestar applications on Vertebra and compile static Litestar routes directly into the native router |
 | **Litestar Ecosystem** | `queues`, `security`, `autowire`, `email`, `mcp`, `vite` | First-party decoupled plugins under `vertebra.extensions.litestar.*` |
 | **SQLSpec** | `create_sqlspec_plugin`, `ProxySyncConfig`, `ProxyAsyncConfig` | Bind SQLSpec database sessions, `StatementStack` pipelines, and shared-memory statement caches to request lifecycles |
 | **SQLAlchemy & Alchemy** | `create_alchemy_plugin`, `ObjectStoreBackend` | Manage SQLAlchemy async/sync engines (`+vtb` dialects), request-scoped sessions, and transactional file attachments |
@@ -22,7 +22,7 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
     options:
       heading_level: 3
 
-::: vertebra.extensions.litestar.router.LitestarRouteCompiler
+::: vertebra.extensions.litestar.router.RouteCompiler
     options:
       heading_level: 3
 

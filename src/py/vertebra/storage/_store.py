@@ -1131,6 +1131,23 @@ class ObjectStore:
             return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
         return self.put_file(path, resolved_src)
 
+    async def put_multipart_async(self, path: str, parts: Sequence[Buffer]) -> PutResult:
+        """Asynchronously upload multiple buffer parts atomically."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None and hasattr(self._native, "put_multipart_async"):
+            views = [memoryview(part).cast("B") for part in parts]
+            native_meta = await self._native.put_multipart_async(key, views)
+            etag = native_meta.etag or f"{int(native_meta.size):016x}"
+            return PutResult(
+                path=str(native_meta.path),
+                size=int(native_meta.size),
+                etag=str(etag),
+                version=native_meta.version,
+            )
+        return self.put_multipart(path, parts)
+
     async def get_async(self, path: str) -> bytes:
         """Asynchronously read an object from the store via Rust Tokio awaitable."""
         key = self._normalize_key(path)

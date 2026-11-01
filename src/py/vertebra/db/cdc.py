@@ -46,7 +46,7 @@ class CDCConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class ChangeFeed:
     """Manages PostgreSQL ``NOTIFY`` payloads, ``>7,500``-byte spill hydration, and logical WAL emission."""
 
-    __slots__ = ("_config", "_history", "_next_id", "_spill_store", "_store")
+    __slots__ = ("_config", "_history", "_listeners", "_next_id", "_spill_store", "_store")
 
     def __init__(
         self,
@@ -58,7 +58,12 @@ class ChangeFeed:
         self._store = store
         self._spill_store: dict[int, dict[str, Any]] = {}
         self._history: collections.deque[ChangeEvent] = collections.deque(maxlen=self._config.max_history_size)
+        self._listeners: list[Any] = []
         self._next_id: int = 1
+
+    def add_listener(self, callback: Any) -> None:
+        """Register a listener callback invoked with each published ChangeEvent."""
+        self._listeners.append(callback)
 
     @property
     def config(self) -> CDCConfig:
@@ -120,6 +125,8 @@ class ChangeFeed:
             spilled=spilled,
         )
         self._history.append(evt)
+        for listener in tuple(self._listeners):
+            listener(evt)
         return wire_envelope, evt
 
     def hydrate_notification(self, wire_envelope: str | bytes) -> ChangeEvent:

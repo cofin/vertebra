@@ -33,10 +33,10 @@ from vertebra.build.packaging import (
     StandaloneBuilder,
 )
 from vertebra.extensions.litestar import (
-    LitestarRouteCompiler,
-    compile_litestar_fastpath_routes,
-    extract_litestar_routes,
-    offload_litestar_middlewares,
+    RouteCompiler,
+    compile_fastpath_routes,
+    extract_routes,
+    offload_middlewares,
 )
 from vertebra.server._asgi._runner import AsgiRunner
 from vertebra.server._gil_audit import GilAuditReport
@@ -78,13 +78,13 @@ def test_subdomain_consolidation_and_shims() -> None:
     assert BuildOrchestrator is not None
     assert CodegenPlugin is not None
     assert TypeScriptGenerator is not None
-    assert callable(extract_litestar_routes)
-    assert callable(offload_litestar_middlewares)
-    assert callable(compile_litestar_fastpath_routes)
+    assert callable(extract_routes)
+    assert callable(offload_middlewares)
+    assert callable(compile_fastpath_routes)
     assert callable(format_typescript)
     assert OnefileBuilder is not None
     assert StandaloneBuilder is not None
-    assert LitestarRouteCompiler is not None
+    assert RouteCompiler is not None
     assert CodegenConfig is not None
 
     valibot_out = ValibotGenerator().emit_schema(

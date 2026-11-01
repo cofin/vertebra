@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use pyo3::exceptions::PyIOError;
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
@@ -130,6 +131,117 @@ impl WsgiInput {
             Some(line)
         }
     }
+
+    /// Return a zero-copy read-only Python `memoryview` anchored to this `WsgiInput`.
+    #[getter]
+    pub fn body_view(slf: Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        unsafe {
+            let mv = ffi::PyMemoryView_FromObject(slf.as_ptr());
+            if mv.is_null() {
+                return Err(PyErr::fetch(py));
+            }
+            Ok(Bound::from_owned_ptr(py, mv).unbind())
+        }
+    }
+
+    /// Decode the unread slice of this `WsgiInput` directly via `msgspec` without a `PyBytes` copy.
+    #[pyo3(signature = (target_type=None, format="json"))]
+    pub fn decode_msgspec<'py>(
+        &mut self,
+        py: Python<'py>,
+        target_type: Option<&Bound<'py, PyAny>>,
+        format: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let data = self.source.as_slice();
+        let remaining = &data[self.pos.min(data.len())..];
+        self.pos = data.len();
+        crate::msgspec_bridge::decode_msgspec_from_slice(py, remaining, target_type, format)
+    }
+
+    /// Decode the unread slice of this `WsgiInput` directly via `pydantic-core` `validate_json`.
+    pub fn decode_pydantic_json<'py>(
+        slf: Bound<'py, Self>,
+        validator_or_type: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let mut borrow = slf.borrow_mut();
+        let slice_vec = {
+            let data = borrow.source.as_slice();
+            let rem = &data[borrow.pos.min(data.len())..];
+            rem.to_vec()
+        };
+        borrow.pos = borrow.source.as_slice().len();
+        drop(borrow);
+        crate::msgspec_bridge::decode_pydantic_from_buffer(
+            py,
+            slf.as_ptr(),
+            validator_or_type,
+            &slice_vec,
+        )
+    }
+
+    /// Decode a unary 5-byte LPM gRPC body from `WsgiInput` in zero copy.
+    #[pyo3(signature = (target_type=None, format="msgpack"))]
+    pub fn decode_grpc<'py>(
+        &mut self,
+        py: Python<'py>,
+        target_type: Option<&Bound<'py, PyAny>>,
+        format: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let data = self.source.as_slice();
+        let remaining = &data[self.pos.min(data.len())..];
+        self.pos = data.len();
+        crate::msgspec_bridge::decode_grpc_unary_from_slice(py, remaining, target_type, format)
+    }
+
+    /// Decode all concatenated 5-byte LPM gRPC frames in `WsgiInput` into a Python `list` in zero copy.
+    #[pyo3(signature = (target_type=None, format="msgpack"))]
+    pub fn decode_grpc_frames<'py>(
+        &mut self,
+        py: Python<'py>,
+        target_type: Option<&Bound<'py, PyAny>>,
+        format: &str,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let data = self.source.as_slice();
+        let remaining = &data[self.pos.min(data.len())..];
+        self.pos = data.len();
+        crate::msgspec_bridge::decode_grpc_frames_from_slice(py, remaining, target_type, format)
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: std::os::raw::c_int,
+    ) -> PyResult<()> {
+        let py = slf.py();
+        let borrow = slf.borrow();
+        let data = borrow.source.as_slice();
+        let slice = &data[borrow.pos.min(data.len())..];
+        let ptr = if slice.is_empty() {
+            std::ptr::NonNull::<u8>::dangling().as_ptr()
+        } else {
+            slice.as_ptr()
+        };
+        let len = slice.len() as ffi::Py_ssize_t;
+        drop(borrow);
+        let ret = ffi::PyBuffer_FillInfo(
+            view,
+            slf.as_ptr(),
+            ptr as *mut std::os::raw::c_void,
+            len,
+            1,
+            flags,
+        );
+        if ret == -1 {
+            return Err(PyErr::fetch(py));
+        }
+        Ok(())
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
 }
 
 /// PEP 3333 `wsgi.file_wrapper` implementation resolving filesystem paths for Rust file reads.

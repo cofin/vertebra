@@ -46,7 +46,7 @@ class AutowireBridgeIntegration:
 
 
 def ensure_autowire_before_route_compiler(app_config: AppConfig) -> AppConfig:
-    """Ensure AutowirePlugin runs on_app_init before LitestarRouteCompiler extracts routes."""
+    """Ensure AutowirePlugin runs on_app_init before RouteCompiler extracts routes."""
     ensure_module("litestar_autowire", extra="autowire")
     plugins = getattr(app_config, "plugins", None)
     if not isinstance(plugins, list):

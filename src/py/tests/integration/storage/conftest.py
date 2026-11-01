@@ -1,10 +1,11 @@
-"""Floci open-source cloud storage emulator fixtures for integration testing."""
+"""Cloud storage emulator and pytest-databases container fixtures for integration testing."""
 
 from __future__ import annotations
 
 import os
 import socket
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -19,6 +20,12 @@ from vertebra.storage import (
     S3Config,
 )
 
+if TYPE_CHECKING:
+    from pytest_databases.docker.azure_blob import AzureBlobService
+    from pytest_databases.docker.floci import FlociService
+    from pytest_databases.docker.minio import MinioService
+    from pytest_databases.docker.rustfs import RustFSService
+
 
 def _is_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
     """Return True if a TCP port is reachable on host."""
@@ -27,6 +34,81 @@ def _is_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
             return True
     except OSError:
         return False
+
+
+@pytest.fixture
+def rustfs_s3_config(rustfs_service: RustFSService, rustfs_default_bucket_name: str) -> S3Config:
+    """Return S3Config targeting the pytest-databases RustFS container."""
+    return S3Config(
+        bucket=rustfs_default_bucket_name,
+        region=rustfs_service.region_name,
+        endpoint=rustfs_service.endpoint,
+        access_key_id=rustfs_service.access_key,
+        secret_access_key=rustfs_service.secret_key,
+        allow_http=True,
+    )
+
+
+@pytest.fixture
+def rustfs_object_store(rustfs_s3_config: S3Config) -> ObjectStore:
+    """Return an ObjectStore backed by the pytest-databases RustFS container."""
+    return ObjectStore.from_config(rustfs_s3_config)
+
+
+@pytest.fixture
+def minio_s3_config(minio_service: MinioService, minio_default_bucket_name: str) -> S3Config:
+    """Return S3Config targeting the pytest-databases MinIO container."""
+    return S3Config(
+        bucket=minio_default_bucket_name,
+        region=minio_service.region_name,
+        endpoint=minio_service.endpoint,
+        access_key_id=minio_service.access_key,
+        secret_access_key=minio_service.secret_key,
+        allow_http=True,
+    )
+
+
+@pytest.fixture
+def minio_object_store(minio_s3_config: S3Config) -> ObjectStore:
+    """Return an ObjectStore backed by the pytest-databases MinIO container."""
+    return ObjectStore.from_config(minio_s3_config)
+
+
+@pytest.fixture
+def floci_container_s3_config(floci_service: FlociService, floci_default_bucket_name: str) -> S3Config:
+    """Return S3Config targeting the pytest-databases Floci container."""
+    return S3Config(
+        bucket=floci_default_bucket_name,
+        region=floci_service.region_name,
+        endpoint=floci_service.endpoint,
+        access_key_id=floci_service.access_key,
+        secret_access_key=floci_service.secret_key,
+        allow_http=True,
+    )
+
+
+@pytest.fixture
+def floci_object_store(floci_container_s3_config: S3Config) -> ObjectStore:
+    """Return an ObjectStore backed by the pytest-databases Floci container."""
+    return ObjectStore.from_config(floci_container_s3_config)
+
+
+@pytest.fixture
+def azurite_azure_config(azure_blob_service: AzureBlobService, azure_blob_default_container_name: str) -> AzureConfig:
+    """Return AzureConfig targeting the pytest-databases Azurite Azure Blob container."""
+    return AzureConfig(
+        container=azure_blob_default_container_name,
+        account=azure_blob_service.account_name,
+        access_key=azure_blob_service.account_key,
+        endpoint=azure_blob_service.endpoint,
+        use_emulator=True,
+    )
+
+
+@pytest.fixture
+def azurite_object_store(azurite_azure_config: AzureConfig) -> ObjectStore:
+    """Return an ObjectStore backed by the pytest-databases Azurite Azure Blob container."""
+    return ObjectStore.from_config(azurite_azure_config)
 
 
 @pytest.fixture

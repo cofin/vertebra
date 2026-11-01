@@ -17,8 +17,75 @@ from vertebra.agent.mcp.models import (
     PromptEntry,
     PromptMessage,
     ResourceEntry,
+    ResourceTemplateEntry,
     TextContent,
 )
+
+
+def mcp_tool(
+    name: str | None = None,
+    description: str | None = None,
+    *,
+    requires_confirmation: bool = False,
+    timeout_seconds: float | None = None,
+    annotations: dict[str, Any] | None = None,
+    webmcp: bool = True,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorator marking a route handler or function as an explicit MCP tool without wrapping its type."""
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        target_fn: Any = fn
+        target_fn._mcp_tool_meta = {
+            "name": name or fn.__name__,
+            "description": description or inspect.getdoc(fn) or "",
+            "requires_confirmation": requires_confirmation,
+            "timeout_seconds": timeout_seconds,
+            "annotations": dict(annotations or {}),
+            "webmcp": webmcp,
+        }
+        return fn
+
+    return decorator
+
+
+def mcp_resource(
+    uri: str,
+    name: str | None = None,
+    description: str | None = None,
+    mime_type: str = "text/plain",
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorator marking a route handler or method as an MCP resource or resource template."""
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        res_name = name or fn.__name__
+        res_desc = description or inspect.getdoc(fn) or ""
+        target_fn: Any = fn
+        if "{" in uri and "}" in uri:
+            target_fn._mcp_resource_template = {
+                "uriTemplate": uri,
+                "name": res_name,
+                "description": res_desc,
+                "mimeType": mime_type,
+            }
+        else:
+            target_fn._mcp_resource = {
+                "uri": uri,
+                "name": res_name,
+                "description": res_desc,
+                "mimeType": mime_type,
+            }
+        return fn
+
+    return decorator
+
+
+def mcp_prompt(
+    name: str | None = None,
+    description: str | None = None,
+    arguments: Sequence[PromptArgument] | None = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorator marking a route handler or method as an MCP prompt template."""
+    return prompt(name=name, description=description, arguments=arguments)
 
 
 def prompt(
@@ -171,11 +238,40 @@ class SkillController(PromptController):
                             timeout_seconds=bound_tool.timeout_seconds,
                         )
                     tools.append(bound_tool)
-            elif callable(val) and hasattr(val, "_tool_meta"):
+            elif callable(val) and (hasattr(val, "_tool_meta") or hasattr(val, "_mcp_tool_meta")):
                 bound_tool = getattr(self, attr_name)
                 if isinstance(bound_tool, Tool):
                     tools.append(bound_tool)
+                elif callable(bound_tool):
+                    meta = getattr(val, "_mcp_tool_meta", {})
+                    tools.append(
+                        Tool(
+                            bound_tool,
+                            name=meta.get("name") or attr_name,
+                            description=meta.get("description") or inspect.getdoc(bound_tool) or "",
+                            requires_confirmation=bool(meta.get("requires_confirmation", False)),
+                            timeout_seconds=meta.get("timeout_seconds"),
+                        )
+                    )
         return tools
+
+    def get_resource_templates(self) -> list[ResourceTemplateEntry]:
+        """Discover all @mcp_resource(uri='.../{param}') template methods on this controller."""
+        entries: list[ResourceTemplateEntry] = []
+        for attr_name in dir(self):
+            val = getattr(self, attr_name)
+            if callable(val) and hasattr(val, "_mcp_resource_template"):
+                meta = val._mcp_resource_template
+                entries.append(
+                    ResourceTemplateEntry(
+                        uriTemplate=meta["uriTemplate"],
+                        name=meta["name"],
+                        description=meta["description"],
+                        mimeType=meta["mimeType"],
+                        reader=val,
+                    )
+                )
+        return entries
 
     def get_resources(self) -> list[ResourceEntry]:
         """Discover all @resource decorated methods on this controller."""
@@ -213,6 +309,9 @@ class SkillController(PromptController):
 __all__ = [
     "PromptController",
     "SkillController",
+    "mcp_prompt",
+    "mcp_resource",
+    "mcp_tool",
     "prompt",
     "resource",
 ]

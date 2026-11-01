@@ -278,6 +278,9 @@ class SchemaBuilder:
             if param_name in ("self", "cls"):
                 continue
 
+            if hasattr(param.default, "dependency"):
+                continue
+
             ann = param.annotation
             ann_name = getattr(ann, "__name__", "")
             if ann_name in strip_names:
@@ -285,13 +288,17 @@ class SchemaBuilder:
 
             origin = get_origin(ann)
             if origin is Annotated:
-                base_ann = get_args(ann)[0]
+                ann_args = get_args(ann)
+                base_ann = ann_args[0]
                 if getattr(base_ann, "__name__", "") in strip_names:
+                    continue
+                if any(hasattr(meta, "dependency") for meta in ann_args[1:]):
                     continue
 
             param_schema = self._type_to_schema(ann)
             if param.default is not inspect.Parameter.empty:
-                param_schema["default"] = param.default
+                if isinstance(param.default, (str, int, float, bool, list, dict)) or param.default is None:
+                    param_schema["default"] = param.default
             else:
                 required.append(param_name)
 
@@ -403,6 +410,12 @@ class Tool:
                 continue
 
             if param_name not in arguments:
+                if hasattr(param.default, "dependency") and callable(param.default.dependency):
+                    dep_res = param.default.dependency()
+                    if inspect.isawaitable(dep_res):
+                        dep_res = await dep_res
+                    call_kwargs[param_name] = dep_res
+                    continue
                 if param.default is inspect.Parameter.empty:
                     raise ToolArgumentError(
                         param_name=param_name,

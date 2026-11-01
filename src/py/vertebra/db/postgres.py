@@ -13,9 +13,13 @@ import msgspec
 
 from vertebra.db.dialer.alloydb import AlloyDBConfig
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
-from vertebra.typing import FrozenBaseStruct
+from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module, import_optional
-from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.utils.serializers import (
+    ZeroCopyCodecRegistry,
+    decode_json,
+    encode_json_bytes,
+)
 
 __all__ = (
     "ARROW_SHM_THRESHOLD_ROWS",
@@ -25,6 +29,9 @@ __all__ = (
     "PoolerMode",
     "PostgreSQLConfig",
     "SyncPostgreSQLDriver",
+    "_hydrate_rows_with_schema",
+    "_normalize_driver_params",
+    "_table_to_rows_and_cols",
     "decode_pgcopy_rows",
     "encode_pg_jsonb",
     "encode_pgcopy_rows",
@@ -415,6 +422,10 @@ class PostgreSQLConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Optional unpooled direct PostgreSQL URI used for `LISTEN/NOTIFY`, migrations, and DDL."""
     pooler_mode: PoolerMode = "direct"
     """Connection pooler multiplexing mode (`"direct"`, `"transaction"`, `"session"`, `"statement"`, or `"auto"`)."""
+    pgbouncer: bool = False
+    """When True, configure transaction-mode PgBouncer settings (`statement_cache_size = 0`)."""
+    pgbouncer_mode: bool = False
+    """Alias for `pgbouncer` matching `sqlspec` driver features."""
     protocol_level_pooler_cache: bool = False
     """When True, retain prepared statements in transaction-mode poolers supporting protocol-level statement caching."""
     max_prepared_statements: int | None = None
@@ -423,10 +434,18 @@ class PostgreSQLConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Minimum number of pooled connections maintained per worker."""
     max_size: int = 10
     """Maximum number of pooled connections permitted per worker."""
+    enable_cloud_sql: bool = False
+    """When True, enable zero-sidecar Google Cloud SQL (:3307) mTLS connection dialing."""
     cloud_sql_instance: str | None = None
     """Optional Google Cloud SQL instance connection name (`project:region:instance`) for zero-sidecar port 3307 mTLS."""
+    cloud_sql_ip_type: Literal["PUBLIC", "PRIVATE", "PSC"] = "PRIVATE"
+    """Preferred Google Cloud SQL IP connectivity mode."""
+    enable_alloydb: bool = False
+    """When True, enable zero-sidecar Google Cloud AlloyDB (:5433) mTLS and MetadataExchange dialing."""
     alloydb_instance_uri: str | None = None
     """Optional Google Cloud AlloyDB instance URI (`projects/.../instances/...`) for zero-sidecar port 5433 mTLS."""
+    alloydb_ip_type: Literal["PUBLIC", "PRIVATE", "PSC"] = "PRIVATE"
+    """Preferred Google Cloud AlloyDB IP connectivity mode."""
     enable_iam_auth: bool = False
     """When True, authenticate using short-lived Google Cloud IAM OAuth2 tokens."""
     enable_alloydb_columnar_engine: bool = False
@@ -446,6 +465,15 @@ class PostgreSQLConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
         if self.min_size < 0 or self.max_size < 1 or self.min_size > self.max_size:
             msg = f"Invalid pool bounds: min_size={self.min_size}, max_size={self.max_size}"
             raise ValueError(msg)
+        has_csql = bool(self.enable_cloud_sql or self.cloud_sql_instance)
+        has_alloy = bool(self.enable_alloydb or self.alloydb_instance_uri)
+        if has_csql and has_alloy:
+            raise ImproperConfigurationError("Cannot enable both Cloud SQL and AlloyDB on the same PostgreSQLConfig")
+        if self.pgbouncer or self.pgbouncer_mode:
+            msgspec.structs.force_setattr(self, "pgbouncer", True)
+            msgspec.structs.force_setattr(self, "pgbouncer_mode", True)
+            if self.pooler_mode in ("direct", "session", "auto"):
+                msgspec.structs.force_setattr(self, "pooler_mode", "transaction")
         msgspec.structs.force_setattr(self, "session_gucs", dict(self.session_gucs))
 
     @property
@@ -470,7 +498,10 @@ class PostgreSQLConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
             return self
         base = msgspec.structs.asdict(self)
         base["dsn"] = self.direct_dsn
+        base["direct_dsn"] = None
         base["pooler_mode"] = "session"
+        base["pgbouncer"] = False
+        base["pgbouncer_mode"] = False
         base["min_size"] = min(1, self.max_size)
         base["max_size"] = min(2, self.max_size)
         base["session_gucs"] = dict(self.session_gucs)
@@ -732,14 +763,58 @@ class SyncPostgreSQLDriver:
         sql: str,
         *params: Any,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> list[dict[str, Any]]:
-        """Execute a SELECT query and return rows as dictionaries."""
+        schema_type: type[Any] | None = None,
+    ) -> list[Any]:
+        """Execute a SELECT query and return rows as dictionaries or hydrated schema_type instances."""
         resolved = _normalize_driver_params(params, parameters)
         rows, desc = self.execute_with_description(sql, resolved)
         if not rows:
             return []
         cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]))]
-        return [{col: (r[i] if i < len(r) else None) for i, col in enumerate(cols)} for r in rows]
+        return _hydrate_rows_with_schema(rows, cols, schema_type)
+
+    def select_one(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Execute a SELECT query and return the first row or raise ValueError."""
+        rows = self.select(sql, *params, parameters=parameters, schema_type=schema_type)
+        if not rows:
+            msg = "No row found for select_one"
+            raise ValueError(msg)
+        return rows[0]
+
+    def select_one_or_none(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any | None:
+        """Execute a SELECT query and return the first row or None."""
+        rows = self.select(sql, *params, parameters=parameters, schema_type=schema_type)
+        return rows[0] if rows else None
+
+    def load_from_arrow(
+        self,
+        table_name: str,
+        data: Any,
+        *,
+        columns: Sequence[str] | None = None,
+    ) -> int:
+        """Bulk-load an Arrow Table, RecordBatch, ArrowCursor, or row sequence into table_name."""
+        tuple_rows, col_names = _table_to_rows_and_cols(data, columns)
+        if not tuple_rows:
+            return 0
+        placeholders = ", ".join("%s" for _ in col_names)
+        cols_sql = ", ".join(col_names)
+        sql = f"INSERT INTO {table_name} ({cols_sql}) VALUES ({placeholders})"
+        for row in tuple_rows:
+            self.execute_tuples(sql, row)
+        return len(tuple_rows)
 
     def select_to_arrow(
         self,
@@ -998,14 +1073,58 @@ class AsyncPostgreSQLDriver:
         sql: str,
         *params: Any,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> list[dict[str, Any]]:
-        """Asynchronously execute a SELECT query and return rows as dictionaries."""
+        schema_type: type[Any] | None = None,
+    ) -> list[Any]:
+        """Asynchronously execute a SELECT query and return rows as dictionaries or hydrated schema_type instances."""
         resolved = _normalize_driver_params(params, parameters)
         rows, desc = await self.execute_with_description(sql, resolved)
         if not rows:
             return []
         cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]))]
-        return [{col: (r[i] if i < len(r) else None) for i, col in enumerate(cols)} for r in rows]
+        return _hydrate_rows_with_schema(rows, cols, schema_type)
+
+    async def select_one(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Asynchronously execute a SELECT query and return the first row or raise ValueError."""
+        rows = await self.select(sql, *params, parameters=parameters, schema_type=schema_type)
+        if not rows:
+            msg = "No row found for select_one"
+            raise ValueError(msg)
+        return rows[0]
+
+    async def select_one_or_none(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any | None:
+        """Asynchronously execute a SELECT query and return the first row or None."""
+        rows = await self.select(sql, *params, parameters=parameters, schema_type=schema_type)
+        return rows[0] if rows else None
+
+    async def load_from_arrow(
+        self,
+        table_name: str,
+        data: Any,
+        *,
+        columns: Sequence[str] | None = None,
+    ) -> int:
+        """Asynchronously bulk-load an Arrow Table, RecordBatch, ArrowCursor, or row sequence into table_name."""
+        tuple_rows, col_names = _table_to_rows_and_cols(data, columns)
+        if not tuple_rows:
+            return 0
+        placeholders = ", ".join("%s" for _ in col_names)
+        cols_sql = ", ".join(col_names)
+        sql = f"INSERT INTO {table_name} ({cols_sql}) VALUES ({placeholders})"
+        for row in tuple_rows:
+            await self.execute_tuples(sql, row)
+        return len(tuple_rows)
 
     async def select_to_arrow(
         self,
@@ -1069,3 +1188,50 @@ def _normalize_driver_params(
         if isinstance(params[0], (tuple, list, dict)):
             return params[0]
     return params
+
+
+def _hydrate_rows_with_schema(
+    rows: Sequence[Any],
+    columns: Sequence[str],
+    schema_type: type[Any] | None = None,
+) -> list[Any]:
+    """Hydrate tabular rows into dictionaries or typed schema_type instances via C-API vectorcall."""
+    if not rows:
+        return []
+    if schema_type is None or schema_type is dict:
+        if isinstance(rows[0], Mapping):
+            return [dict(r) for r in rows]
+        return [{col: (r[i] if i < len(r) else None) for i, col in enumerate(columns)} for r in rows]
+    plan = ZeroCopyCodecRegistry.compile(schema_type)
+    if isinstance(rows[0], Mapping):
+        col_tuple = tuple(columns) if columns else tuple(rows[0].keys())
+        tuple_rows = [tuple(r.get(c) for c in col_tuple) for r in rows]
+        return plan.hydrate_rows(tuple_rows, col_tuple)
+    return plan.hydrate_rows(rows, columns)
+
+
+def _table_to_rows_and_cols(
+    data: Any,
+    columns: Sequence[str] | None = None,
+) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+    """Extract tuple rows and column names from a PyArrow Table, ArrowCursor, Polars DataFrame, or row sequence."""
+    if isinstance(data, ArrowCursor) or hasattr(data, "to_pylist") and callable(data.to_pylist):
+        pylist = data.to_pylist()
+    elif hasattr(data, "to_dicts") and callable(data.to_dicts):
+        pylist = data.to_dicts()
+    elif isinstance(data, Sequence) and not isinstance(data, (str, bytes, bytearray)):
+        if not data:
+            return [], tuple(columns or ())
+        if isinstance(data[0], Mapping):
+            pylist = [dict(r) for r in data]
+        else:
+            tuple_rows = [tuple(r) for r in data]
+            cols = tuple(columns) if columns is not None else tuple(f"col_{i}" for i in range(len(tuple_rows[0])))
+            return tuple_rows, cols
+    else:
+        return [], tuple(columns or ())
+
+    if not pylist:
+        return [], tuple(columns or ())
+    cols = tuple(columns) if columns is not None else tuple(pylist[0].keys())
+    return [tuple(d.get(c) for c in cols) for d in pylist], cols

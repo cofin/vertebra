@@ -40,10 +40,13 @@ from vertebra.extensions.alchemy import (
 from vertebra.extensions.alchemy.storage import register_storage_backend
 from vertebra.extensions.litestar import (
     ChannelsBackend,
+    FastPath,
     LitestarConfig,
     LitestarPlugin,
-    LitestarRouteCompiler,
     MemoryStore,
+    OffloadPlan,
+    RouteCompiler,
+    RouterTable,
 )
 from vertebra.extensions.sqlspec import (
     ProxyAsyncConfig,
@@ -98,7 +101,10 @@ def test_canonical_extension_exports() -> None:
     assert isinstance(ChannelsBackend(history=4), ChannelsBackend)
     assert isinstance(MemoryStore(), MemoryStore)
     assert isinstance(CodegenPlugin(CodegenConfig()), CodegenPlugin)
-    assert LitestarRouteCompiler is not None
+    assert RouteCompiler is not None
+    assert RouterTable is not None
+    assert FastPath is not None
+    assert OffloadPlan is not None
     assert ObjectStoreBackend is not None
 
 

@@ -7,20 +7,20 @@ from types import SimpleNamespace
 from typing import Any
 
 from vertebra.agent.plugin import AgentPlugin
-from vertebra.extensions.litestar.channels import swap_litestar_channels_backend
+from vertebra.extensions.litestar.channels import swap_channels_backend
 from vertebra.extensions.litestar.config import LitestarConfig
 from vertebra.extensions.litestar.fastpath import (
-    CompiledLitestarRoute,
-    LitestarFastPathBypass,
-    compile_litestar_fastpath_routes,
+    CompiledRoute,
+    FastPath,
+    compile_fastpath_routes,
 )
 from vertebra.extensions.litestar.offload import (
-    LitestarOffloadPlan,
+    OffloadPlan,
     _is_rust_offload_active,
-    offload_litestar_middlewares,
+    offload_middlewares,
 )
-from vertebra.extensions.litestar.router import extract_litestar_routes
-from vertebra.extensions.litestar.store import swap_litestar_response_cache_store
+from vertebra.extensions.litestar.router import extract_routes
+from vertebra.extensions.litestar.store import swap_response_cache_store
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
 
@@ -37,8 +37,8 @@ class LitestarPlugin:
 
     def __init__(self, config: LitestarConfig | None = None) -> None:
         self._config = config or LitestarConfig()
-        self._offload_plan: LitestarOffloadPlan | None = None
-        self._compiled_routes: dict[int, CompiledLitestarRoute] = {}
+        self._offload_plan: OffloadPlan | None = None
+        self._compiled_routes: dict[int, CompiledRoute] = {}
         self._router_table: Any = None
         self._finalized_app: Any = None
 
@@ -48,12 +48,12 @@ class LitestarPlugin:
         return self._config
 
     @property
-    def offload_plan(self) -> LitestarOffloadPlan | None:
-        """Return the compiled LitestarOffloadPlan after app initialization."""
+    def offload_plan(self) -> OffloadPlan | None:
+        """Return the compiled OffloadPlan after app initialization."""
         return self._offload_plan
 
     @property
-    def compiled_routes(self) -> dict[int, CompiledLitestarRoute]:
+    def compiled_routes(self) -> dict[int, CompiledRoute]:
         """Return pre-compiled direct-dispatch route descriptors indexed by handler_id."""
         return self._compiled_routes
 
@@ -133,12 +133,12 @@ class LitestarPlugin:
 
         if self._config.enable_fastpath_bypass:
             try:
-                self._router_table = extract_litestar_routes(app_config)
+                self._router_table = extract_routes(app_config)
             except (AttributeError, TypeError, ValueError, KeyError):
                 self._router_table = None
-            app_config.state["vertebra_fastpath_bypass"] = LitestarFastPathBypass(self._router_table)
+            app_config.state["vertebra_fastpath_bypass"] = FastPath(self._router_table)
 
-        self._offload_plan = offload_litestar_middlewares(
+        self._offload_plan = offload_middlewares(
             app_config,
             config=self._config,
             strip_python_middleware=False,
@@ -177,7 +177,7 @@ class LitestarPlugin:
 
     def _finalize_app_acceleration(self, app: Any) -> None:
         rust_active = _is_rust_offload_active()
-        self._offload_plan = offload_litestar_middlewares(
+        self._offload_plan = offload_middlewares(
             app,
             config=self._config,
             strip_python_middleware=rust_active,
@@ -189,26 +189,26 @@ class LitestarPlugin:
                 state["vertebra_offload_config_json"] = offload_json
 
         if self._config.swap_memory_channels:
-            swap_litestar_channels_backend(app)
+            swap_channels_backend(app)
         if self._config.swap_memory_response_cache:
-            swap_litestar_response_cache_store(app)
+            swap_response_cache_store(app)
         if self._config.enable_direct_handler_fastpath:
-            self._compiled_routes = compile_litestar_fastpath_routes(app)
+            self._compiled_routes = compile_fastpath_routes(app)
 
         if self._config.enable_fastpath_bypass:
             try:
-                self._router_table = extract_litestar_routes(app)
+                self._router_table = extract_routes(app)
             except (AttributeError, TypeError, ValueError, KeyError):
                 self._router_table = None
 
-            bypass: LitestarFastPathBypass | None = None
+            bypass: FastPath | None = None
             if state is not None and hasattr(state, "get"):
                 existing = state.get("vertebra_fastpath_bypass")
-                if isinstance(existing, LitestarFastPathBypass):
+                if isinstance(existing, FastPath):
                     bypass = existing
 
             if bypass is None:
-                bypass = LitestarFastPathBypass(
+                bypass = FastPath(
                     self._router_table,
                     app=app,
                     compiled_routes=self._compiled_routes or None,

@@ -10,6 +10,15 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-11-01] flow-archive | Completed and Archived Unified Runtime (`v0.2.0`), Zero-Copy C-API Fastpaths & Multi-Framework Extensions (`unified-runtime-and-framework-extensions`)
+
+- Completed and archived Master PRD `unified-runtime-and-framework-extensions` and all 6 child Flow specs (`runtime-zero-copy-and-driver-parity`, `vite-parity-and-configurable-docs-mcp`, `starlette-extension-and-fastpath`, `fastapi-extension-and-fastpath`, `wsgi-optimizations-and-flask-extension`, `django-extension-and-db-backends`):
+  - **Runtime & Zero-Copy C-API (`vertebra-py`, `vertebra.utils.serializers`)**: Added `Request.decode_msgspec`, `Request.decode_pydantic_json`, `WsgiInput.decode_msgspec`, `WsgiInput.decode_pydantic_json`, `hydrate_rows_vectorcall`, `orm_to_struct_vectorcall`, and `decode_grpc_lpm_frames_zero_copy` in `src/rs/vertebra-py/src/msgspec_bridge.rs`; added `ZeroCopyCodecRegistry` in `src/py/vertebra/utils/serializers/_zero_copy.py`; bumped package versions to `0.2.0` and promoted `msgspec>=0.20.0` to core `[project.dependencies]`.
+  - **Data, Storage, Caching & gRPC Parity**: Added `vertebra.db.channels.ChannelBus` (`Memory`, `SHM`, `Redis`, `Valkey`, `PostgreSQL`, `Oracle`), `AsyncCacheManager`, `ZeroCopyServiceMixin`, and `ObjectStoreBackend` for Advanced Alchemy (`vertebra.extensions.alchemy.{cache,storage}`) and SQLSpec (`vertebra.extensions.sqlspec.storage` with `SyncStoragePipeline` / `AsyncStoragePipeline` + Arrow/Parquet streaming), Cloud Dialers (`CloudSQLDialer`, `AlloyDBDialer`) & PgBouncer across SQLSpec/Alchemy adapters, and bidirectional Protobuf v3 <-> Route codegen (`ProtobufParser`, `routes_to_proto`, `proto_to_python_routes`) with zero-copy gRPC dispatch.
+  - **Vite, Docs Portals & MCP/WebMCP**: Added bundled `@vertebra/client` path helpers (`get_vertebra_client_path`, `get_vertebra_client_vite_aliases`), configurable multi-backend API docs portals (`ScalarDocsConfig`, `SwaggerDocsConfig`, `AsyncAPIDocsConfig`), and route-annotation/controller-driven MCP (`@mcp_tool`, `@mcp_resource`, `@mcp_prompt`, `SkillController`, `PromptController`) and W3C WebMCP (`/.well-known/mcp.json`, `@vertebra/client/webmcp`).
+  - **First-Class Starlette, FastAPI, Flask & Django Extensions**: Implemented `vertebra.extensions.starlette`, `vertebra.extensions.fastapi` (with topological `DependencyPlan` compiler), `vertebra.extensions.flask`, and `vertebra.extensions.django` (with `DjangoPlugin`, `DjangoAppConfig`, `@vertebra_view`, `MsgspecView`, `ArrowQuerySet`, and 6 native `vertebra.extensions.django.db.backends.{postgresql,mysql,sqlite3,oracle,mssql,duckdb}` database backends).
+- Contracted `.agents/bundles/specs/` back to lazy (`.gitkeep` only).
+
 ## [2026-10-31] flow-archive | Completed and Archived Ecosystem Drivers, SQLSpec/Alchemy Realignment, Litestar Extensions & Single-Runtime Documentation (`ecosystem_drivers_and_naming_20261031`)
 
 - Completed and archived Flow `ecosystem_drivers_and_naming_20261031` (7 tasks across Phases 1–4):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -10,6 +9,7 @@ import msgspec
 from vertebra._storage import py_sign_aws_sigv4_headers
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
+from vertebra.utils.serializers import encode_json_bytes
 
 try:
     from litestar_email.backends.base import BaseEmailBackend
@@ -157,7 +157,7 @@ class SESEmailBackend(BaseEmailBackend):
             payload["ReplyToAddresses"] = list(message.reply_to)
 
         url = f"https://email.{self._config.region}.amazonaws.com/v2/email/outbound-emails"
-        body = json.dumps(payload).encode("utf-8")
+        body = encode_json_bytes(payload)
 
         headers = self._sign_request(url, body)
         headers.setdefault("Content-Type", "application/json")

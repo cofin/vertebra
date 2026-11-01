@@ -31,6 +31,7 @@ Full-stack TypeScript SDK (`src/ts/vertebra-client/`) providing typed HTTP reque
 | `@vertebra/client/apex` | `ApexRegion`, `ApexOfflineOutbox`, and Oracle APEX island hydration descriptors |
 | `@vertebra/client/telemetry` | W3C `TraceContext` (`traceparent`) parser, generator, and header injector |
 | `@vertebra/client/agent` | `McpClient`, `A2aClient`, `AgentStreamClient`, and `WorkflowLiveSubscriber` |
+| `@vertebra/client/webmcp` | Browser WebMCP (`navigator.modelContext`) auto-registration (`registerWebMCPTools`, `WebMCPManifest`, `WebMCPToolDescriptor`) |
 
 ## HTTP Client, Retries & Error Hierarchy
 
@@ -44,9 +45,13 @@ import {
   ValidationError,
   throwParsedError,
   computeBackoffDelay,
+  routeUrl,
+  wsUrl,
+  interpolateRoutePath,
   type ClientConfig,
   type RetryConfig,
   type RouteResponse,
+  type RouteUrlOptions,
 } from "@vertebra/client";
 ```
 
@@ -56,6 +61,10 @@ import {
 | `ClientConfig` | Type | Base URL, default headers, timeout, and `RetryConfig` options for `HttpClient`. |
 | `RetryConfig` | Type | Maximum attempts, base delay, jitter, and retryable HTTP status codes. |
 | `RouteResponse` | Type | Typed response wrapper pairing HTTP status, headers, and decoded payload. |
+| `RouteUrlOptions` | Type | Path parameters, query parameters, and base URL options for `routeUrl` and `wsUrl`. |
+| `routeUrl` | Function | Resolves a named route or path template into a formatted HTTP URL with interpolated parameters and query string. |
+| `wsUrl` | Function | Resolves a named route or path template into a `ws://` or `wss://` WebSocket URL. |
+| `interpolateRoutePath` | Function | Interpolates `{param}` placeholders in a route template with URL-encoded parameter values. |
 | `computeBackoffDelay` | Function | Computes exponential backoff delay with bounded jitter for a retry attempt. |
 | `ClientError` | Class | Base error class carrying an optional HTTP `status` code. |
 | `NetworkError` | Class | Raised when the underlying `fetch` call fails due to a transport error. |
@@ -126,7 +135,7 @@ import {
 | `SessionStore` | Class | Reactive key-value store backed by `sessionStorage` / `localStorage` with cross-tab sync. |
 | `store` | Const | Default shared `SessionStore` instance. |
 
-## Agent Protocols: MCP & A2A (`@vertebra/client/agent`)
+## Agent Protocols: MCP, WebMCP & A2A (`@vertebra/client/agent`, `@vertebra/client/webmcp`)
 
 ```typescript
 import {
@@ -140,6 +149,12 @@ import {
   type AgentStreamClientOptions,
   WorkflowLiveSubscriber,
   type WorkflowLiveStatePayload,
+  registerWebMCPTools,
+  type RegisterWebMCPOptions,
+  type WebMCPManifest,
+  type WebMCPToolDescriptor,
+  type BrowserModelContext,
+  type BrowserModelContextTool,
 } from "@vertebra/client";
 ```
 
@@ -155,6 +170,12 @@ import {
 | `AgentStreamClientOptions` | Type | Connection and replay options for `AgentStreamClient`. |
 | `WorkflowLiveSubscriber` | Class | Subscribes to step transitions emitted by `vertebra.agent.workflow.WorkflowEngine`. |
 | `WorkflowLiveStatePayload` | Type | Typed state payload delivered to `WorkflowLiveSubscriber` listeners. |
+| `registerWebMCPTools` | Function | Fetches `/.well-known/webmcp.json` and registers advertised tools with `navigator.modelContext`. |
+| `RegisterWebMCPOptions` | Type | Options (`manifestUrl`, `modelContext`, `fetchImpl`, `headers`) for `registerWebMCPTools`. |
+| `WebMCPManifest` | Type | Discovery payload schema served at `/.well-known/webmcp.json`. |
+| `WebMCPToolDescriptor` | Type | Tool descriptor schema with `name`, `description`, `inputSchema`, `endpoint`, and `requiresConfirmation`. |
+| `BrowserModelContext` | Type | W3C WebMCP `navigator.modelContext` browser interface (`registerTool`, `unregisterTool`, `provideContext`). |
+| `BrowserModelContextTool` | Type | Tool registration object passed to `navigator.modelContext.registerTool`. |
 
 ## Oracle APEX Island Bridge (`@vertebra/client/apex`)
 

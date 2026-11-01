@@ -16,7 +16,11 @@ from vertebra.extensions.sqlspec.provider import (
     SQLSpecProvider,
 )
 from vertebra.typing import ImproperConfigurationError, VertebraError
-from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
+from vertebra.utils.serializers import (
+    ZeroCopyCodecRegistry,
+    decode_msgpack,
+    encode_msgpack_bytes,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -316,6 +320,8 @@ class ProxySyncDriver:
                 finally:
                     self._release_arrow_shm(resp.arrow_shm_name)
 
+            if schema_type is not None and schema_type is not dict:
+                return self._hydrate_raw_rows(resp.rows, resp.columns, schema_type)
             dict_rows = self._rows_to_dicts(resp.rows, resp.columns)
             return self._convert_rows(dict_rows, schema_type)
 
@@ -610,6 +616,27 @@ class ProxySyncDriver:
         first = rows[0]
         col_names = list(columns) if columns else [f"c{idx}" for idx in range(len(first))]
         return [dict(r) if isinstance(r, dict) else dict(zip(col_names, r, strict=False)) for r in rows]
+
+    @staticmethod
+    def _hydrate_raw_rows(
+        rows: Sequence[dict[str, Any] | tuple[Any, ...] | list[Any]],
+        columns: Sequence[str],
+        schema_type: type[Any],
+    ) -> list[Any]:
+        """Hydrate raw tuple/list/dict rows into schema_type via C-API vectorcall without intermediate dicts."""
+        if not rows:
+            return []
+        plan = ZeroCopyCodecRegistry.compile(schema_type)
+        first = rows[0]
+        col_names = (
+            tuple(columns)
+            if columns
+            else (tuple(first.keys()) if isinstance(first, dict) else tuple(f"c{idx}" for idx in range(len(first))))
+        )
+        if isinstance(first, dict):
+            tuple_rows = [tuple(r.get(c) for c in col_names) for r in rows if isinstance(r, dict)]
+            return plan.hydrate_rows(tuple_rows, col_names)
+        return plan.hydrate_rows(rows, col_names)
 
     @staticmethod
     def _convert_rows(rows: list[dict[str, Any]], schema_type: type[Any] | None) -> list[Any]:
@@ -924,6 +951,8 @@ class ProxyAsyncDriver:
                 finally:
                     await self._release_arrow_shm(resp.arrow_shm_name)
 
+            if schema_type is not None and schema_type is not dict:
+                return ProxySyncDriver._hydrate_raw_rows(resp.rows, resp.columns, schema_type)
             dict_rows = ProxySyncDriver._rows_to_dicts(resp.rows, resp.columns)
             return ProxySyncDriver._convert_rows(dict_rows, schema_type)
 

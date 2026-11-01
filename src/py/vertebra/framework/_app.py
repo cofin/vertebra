@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import msgspec
 
+from vertebra._vertebra import Response
 from vertebra.framework._router import (
     Controller,
     Route,
@@ -24,6 +25,7 @@ from vertebra.framework.di import Container, DependencyGraph
 from vertebra.framework.openapi import OpenAPIConfig, OpenAPISpecBuilder
 from vertebra.framework.procedures import Procedure, ProcedureRouter
 from vertebra.typing import LifecycleHook
+from vertebra.utils.serializers import encode_grpc_frame_into
 
 __all__ = ("App", "HandlerInfo", "LifecycleHook", "_make_handler_id")
 
@@ -391,7 +393,7 @@ class App:
         self._mounts.append((_normalize_prefix(prefix), sub_app, protocol))
 
     def enable_docs(self, config: Any = None) -> Any:
-        """Enable OpenAPI schema and Scalar documentation endpoints."""
+        """Enable OpenAPI schema and configured interactive documentation portals."""
         cfg = config or OpenAPIConfig()
         builder = OpenAPISpecBuilder.from_app(self, config=cfg)
         self._openapi_config = cfg
@@ -401,14 +403,15 @@ class App:
         def _openapi_schema() -> dict[str, Any]:
             return builder.build()
 
-        @self.get(cfg.scalar.path)
-        def _scalar_docs() -> str:
-            return (
-                f"<!doctype html><html><head><title>{cfg.title}</title><meta charset='utf-8' />"
-                f"<meta name='viewport' content='width=device-width, initial-scale=1' /></head>"
-                f"<body><script id='api-reference' data-url='{cfg.schema_path}'></script>"
-                f"<script src='https://cdn.jsdelivr.net/npm/@scalar/api-reference'></script></body></html>"
-            )
+        for docs_path, docs_html in cfg.render_docs_routes().items():
+
+            def _make_docs_handler(html_payload: str) -> Callable[[], str]:
+                def _docs_handler() -> str:
+                    return html_payload
+
+                return _docs_handler
+
+            self.get(docs_path)(_make_docs_handler(docs_html))
 
         return builder
 
@@ -462,25 +465,41 @@ class App:
             await self._container.aclose()
 
     def _register_procedure_and_mount(self, proc: Procedure, *, prefix: str) -> None:
-        """Register a Procedure in the app's ProcedureRouter and mount its HTTP RPC endpoint."""
+        """Register a Procedure in the app's ProcedureRouter and mount its HTTP and gRPC endpoints."""
         bound = self._procedure_router.register(proc)
         norm_prefix = _normalize_prefix(prefix) or "/_rpc"
         rpc_path = f"{norm_prefix}/{bound.name}"
+        grpc_path = f"/vertebra.rpc.ProcedureService/{bound.name}"
         proc_name = bound.name
 
         async def _rpc_http_handler(request: Any) -> Any:
-            raw_body = getattr(request, "body", None)
-            payload = raw_body if raw_body else None
-            return await self._procedure_router.call(
+            has_zero_copy = hasattr(request, "decode_msgspec") or hasattr(request, "body_view")
+            payload = None if has_zero_copy else (getattr(request, "body", None) or None)
+            result = await self._procedure_router.call(
                 proc_name,
                 payload,
                 request=request,
                 container=self._container,
             )
+            headers_obj = getattr(request, "headers", None)
+            req_ct = (
+                headers_obj.get("content-type") if headers_obj is not None and hasattr(headers_obj, "get") else None
+            )
+            if req_ct and str(req_ct).startswith("application/grpc"):
+                ct_str = str(req_ct)
+                frame_mv = encode_grpc_frame_into(result, format=ct_str)
+                return Response.from_buffer(
+                    200,
+                    frame_mv,
+                    [("content-type", ct_str), ("grpc-status", "0")],
+                    getattr(request, "request_id", 0),
+                )
+            return result
 
         _rpc_http_handler.__name__ = f"rpc_{proc_name}"
         _rpc_http_handler.__qualname__ = f"App.rpc_{proc_name}"
         self.add_route(Route(method="POST", path=rpc_path, handler=_rpc_http_handler, tags=("rpc",)))
+        self.add_route(Route(method="POST", path=grpc_path, handler=_rpc_http_handler, tags=("rpc", "grpc")))
         if bound.kind == "query":
             self.add_route(Route(method="GET", path=rpc_path, handler=_rpc_http_handler, tags=("rpc",)))
 

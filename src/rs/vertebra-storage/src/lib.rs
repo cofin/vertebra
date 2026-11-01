@@ -304,6 +304,24 @@ impl ObjectStore {
         Ok(ObjectMeta::from(meta))
     }
 
+    fn put_multipart_async(
+        &self,
+        py: Python<'_>,
+        path: String,
+        parts: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<RustTaskAwaitable> {
+        let mut chunks = Vec::with_capacity(parts.len());
+        for part in &parts {
+            chunks.push(extract_buffer_bytes(py, part)?);
+        }
+        let engine = self.engine.clone();
+        spawn_rust_task(
+            py,
+            async move { engine.put_multipart(&path, chunks).await },
+            |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
+        )
+    }
+
     fn get<'py>(&self, py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyBytes>> {
         let engine = self.engine.clone();
         let data = py

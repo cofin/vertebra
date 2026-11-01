@@ -287,6 +287,84 @@ class CloudSQLDialer:
             server_hostname=self._uri.expected_server_cn,
         )
 
+    def __call__(
+        self,
+        host: str | None = None,
+        *,
+        ssl_context: ssl.SSLContext | None = None,
+        timeout: float = 10.0,
+    ) -> ssl.SSLSocket:
+        """Callable dialer entrypoint returning a synchronous TLS 1.3 mTLS socket."""
+        return self.connect_sync(host, ssl_context=ssl_context, timeout=timeout)
+
+    def create_asyncpg_connect_func(
+        self,
+        host: str = "127.0.0.1",
+        *,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> Callable[..., Any]:
+        """Return an asyncpg-compatible `connect` coroutine function dialing port 3307."""
+        ctx = ssl_context or self.build_tls_context()
+
+        async def _connect(*args: Any, **kwargs: Any) -> Any:
+            asyncpg_mod = import_optional("asyncpg")
+            if asyncpg_mod is None:
+                return await self.connect_async(host, ssl_context=ctx)
+            kw = dict(kwargs)
+            kw.setdefault("host", host)
+            kw.setdefault("port", self.port)
+            kw["ssl"] = ctx
+            if self._config.enable_iam_auth and self._cached_token:
+                kw["password"] = self._cached_token
+            return await asyncpg_mod.connect(*args, **kw)
+
+        return _connect
+
+    def create_psycopg_connect_func(
+        self,
+        host: str = "127.0.0.1",
+        *,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> Callable[..., Any]:
+        """Return a psycopg-compatible `connect` function dialing port 3307."""
+        ctx = ssl_context or self.build_tls_context()
+
+        def _connect(*args: Any, **kwargs: Any) -> Any:
+            psycopg_mod = import_optional("psycopg")
+            if psycopg_mod is None:
+                return self.connect_sync(host, ssl_context=ctx)
+            kw = dict(kwargs)
+            kw.setdefault("host", host)
+            kw.setdefault("port", self.port)
+            if self._config.enable_iam_auth and self._cached_token:
+                kw["password"] = self._cached_token
+            return psycopg_mod.connect(*args, **kw)
+
+        return _connect
+
+    def create_asyncmy_creator(
+        self,
+        host: str = "127.0.0.1",
+        *,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> Callable[..., Any]:
+        """Return an asyncmy/MySQL pool creator coroutine dialing port 3307."""
+        ctx = ssl_context or self.build_tls_context()
+
+        async def _creator(*args: Any, **kwargs: Any) -> Any:
+            asyncmy_mod = import_optional("asyncmy")
+            if asyncmy_mod is None:
+                return await self.connect_async(host, ssl_context=ctx)
+            kw = dict(kwargs)
+            kw.setdefault("host", host)
+            kw.setdefault("port", self.port)
+            kw["ssl"] = ctx
+            if self._config.enable_iam_auth and self._cached_token:
+                kw["password"] = self._cached_token
+            return await asyncmy_mod.connect(*args, **kw)
+
+        return _creator
+
 
 def generate_ephemeral_keypair(bits: int = 2048) -> tuple[str, str]:
     """Generate an ephemeral client public/private keypair in PEM format."""

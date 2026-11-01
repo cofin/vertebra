@@ -8,6 +8,7 @@ from vertebra.db.cdc import (
     ChangeEvent,
     ChangeFeed,
 )
+from vertebra.db.channels import DatabaseChannelBackend
 from vertebra.db.datafusion import (
     ARROW_STREAM_MEDIA_TYPE,
     DataFusionConfig,
@@ -27,6 +28,7 @@ from vertebra.db.dialer import (
 from vertebra.db.duckdb import (
     AsyncDuckDBDriver,
     DuckDBConfig,
+    DuckDBSecretConfig,
     SyncDuckDBDriver,
     duckdb_bootstrap_statements,
 )
@@ -42,7 +44,9 @@ from vertebra.db.oracle import (
     AsyncOracleDriver,
     OracleConfig,
     OracleConnectDescriptor,
+    OracleDriverFeatures,
     OracleSessionAttrs,
+    OracleTopologyConfig,
     OracleWallet,
     SyncOracleDriver,
     decode_oson,
@@ -114,13 +118,17 @@ __all__ = (
     "DataFusionConfig",
     "DataFusionEngine",
     "DataFusionMode",
+    "DatabaseChannelBackend",
     "DatabaseRegistry",
     "DuckDBConfig",
+    "DuckDBSecretConfig",
     "MSSQLConfig",
     "MySQLConfig",
     "OracleConfig",
     "OracleConnectDescriptor",
+    "OracleDriverFeatures",
     "OracleSessionAttrs",
+    "OracleTopologyConfig",
     "OracleWallet",
     "PoolerMode",
     "PostgreSQLConfig",

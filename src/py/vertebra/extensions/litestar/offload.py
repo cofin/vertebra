@@ -15,7 +15,7 @@ from vertebra.utils.serializers import encode_json, encode_json_bytes
 __all__ = (
     "CompressionOffloadSpec",
     "CorsOffloadSpec",
-    "LitestarOffloadPlan",
+    "OffloadPlan",
     "OpenApiOffloadSpec",
     "StaticMountOffloadSpec",
     "_get_handler_after_response",
@@ -31,7 +31,7 @@ __all__ = (
     "evaluate_cors_preflight",
     "evaluate_cors_response_headers",
     "evaluate_openapi_cache_request",
-    "offload_litestar_middlewares",
+    "offload_middlewares",
 )
 
 
@@ -79,7 +79,7 @@ class OpenApiOffloadSpec(msgspec.Struct, frozen=True, gc=False):
     content_type: str = "application/vnd.oai.openapi+json"
 
 
-class LitestarOffloadPlan(msgspec.Struct, frozen=True, gc=False):
+class OffloadPlan(msgspec.Struct, frozen=True, gc=False):
     """Complete startup offload plan extracted from an unmodified Litestar v2 or v3 app."""
 
     compression: CompressionOffloadSpec | None
@@ -145,12 +145,12 @@ class LitestarOffloadPlan(msgspec.Struct, frozen=True, gc=False):
         return encode_json(self.to_server_config())
 
 
-def offload_litestar_middlewares(
+def offload_middlewares(
     app: Any,
     *,
     config: Any = None,
     strip_python_middleware: bool = True,
-) -> LitestarOffloadPlan:
+) -> OffloadPlan:
     """Extract CompressionConfig, CORSConfig, StaticFiles, and OpenAPI from a Litestar v2 or v3 app."""
     cfg = config
     if cfg is None:
@@ -177,7 +177,7 @@ def offload_litestar_middlewares(
     cors_spec = _extract_cors_config(app) if enable_cors else None
     static_mounts = _extract_static_mounts(app) if enable_static else ()
     openapi_spec = _extract_openapi_schema_payload(app) if enable_openapi else None
-    return LitestarOffloadPlan(
+    return OffloadPlan(
         compression=compression_spec,
         cors=cors_spec,
         static_mounts=static_mounts,

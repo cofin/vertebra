@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from vertebra.db import (
@@ -11,10 +13,14 @@ from vertebra.db import (
     AlloyDBDialer,
     AsyncSQLiteDriver,
     AsyncValkeyDriver,
+    CDCConfig,
+    ChangeFeed,
     CloudSQLConfig,
     CloudSQLDialer,
     CloudSQLInstanceURI,
+    DatabaseChannelBackend,
     DatabaseRegistry,
+    OracleConfig,
     PostgreSQLConfig,
     RedisConfig,
     SQLiteConfig,
@@ -26,6 +32,7 @@ from vertebra.db import (
     ValkeyConfig,
 )
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
+from vertebra.storage import ObjectStore
 from vertebra.typing import MissingDependencyError
 
 
@@ -98,7 +105,7 @@ def test_postgres_pooler_modes_and_jsonb_strip() -> None:
 async def test_sqlite_plain_tuple_fetching_for_sqlalchemy_21() -> None:
     """Verify SQLite WAL configuration, explicit commit/rollback, and plain-tuple row fetching."""
     with pytest.raises(ValueError, match="Invalid synchronous mode"):
-        SQLiteConfig(synchronous="INVALID")  # type: ignore[arg-type]
+        SQLiteConfig(synchronous=cast("Any", "INVALID"))
 
     driver = AsyncSQLiteDriver(SQLiteConfig(database=":memory:"))
     await driver.execute_tuples("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
@@ -165,3 +172,45 @@ def test_database_registry_url_schemes() -> None:
     sync_sqlite = registry.get_sync_driver("sqlite_mem")
     assert isinstance(sync_sqlite, SyncSQLiteDriver)
     sync_sqlite.close()
+
+
+@pytest.mark.anyio
+async def test_database_channel_backend_multi_engine_and_object_store_spill() -> None:
+    """Verify DatabaseChannelBackend supports PostgreSQL LISTEN/NOTIFY, Oracle AQ, CDC, and ObjectStore spill."""
+    pg_cfg = PostgreSQLConfig(
+        dsn="postgresql://app:secret@pgbouncer:6432/prod",
+        direct_dsn="postgresql://app:secret@pg-primary:5432/prod",
+        pooler_mode="transaction",
+    )
+    store = ObjectStore("memory://")
+    pg_bus = DatabaseChannelBackend.from_postgres(pg_cfg, history=10, object_store=store)
+    assert pg_bus.postgres_driver is not None
+    assert pg_bus.postgres_driver.config.pooler_mode == "session"
+    assert pg_bus.postgres_driver.config.dsn == "postgresql://app:secret@pg-primary:5432/prod"
+
+    await pg_bus.on_startup()
+    await pg_bus.subscribe(["orders"])
+
+    large_payload = b"X" * 8000
+    await pg_bus.publish(large_payload, ["orders"])
+    assert await pg_bus.get_history("orders") == [large_payload]
+
+    pg_bus.ingest_pg_notification("orders", "direct-pg-event")
+    assert await pg_bus.get_history("orders", limit=1) == [b"direct-pg-event"]
+    await pg_bus.on_shutdown()
+
+    ora_bus = DatabaseChannelBackend.from_oracle(OracleConfig(dsn="localhost:1521/FREEPDB1"), history=5)
+    assert ora_bus.oracle_driver is not None
+
+    feed = ChangeFeed(CDCConfig(channel="cdc:orders"), store=store)
+    cdc_bus = DatabaseChannelBackend.from_changefeed(feed, history=5)
+    await cdc_bus.on_startup()
+    await cdc_bus.subscribe(["cdc:orders"])
+    feed.publish_event(
+        "INSERT",
+        {"id": 1, "status": "paid"},
+    )
+    history = await cdc_bus.get_history("cdc:orders")
+    assert len(history) == 1
+    assert b'"operation":"INSERT"' in history[0]
+    await cdc_bus.on_shutdown()

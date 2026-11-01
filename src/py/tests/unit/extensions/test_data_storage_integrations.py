@@ -238,6 +238,22 @@ async def test_alchemy_storage_backend_file_object_and_session_tracker_rollback(
     await backend.save_object_async(stream_obj, _AsyncReadable())
     assert stream_obj.size == 21
     assert await backend.get_content_async("users/42/stream.bin") == b"awaitable-read-stream"
+    assert backend.get_range("users/42/stream.bin", 0, 9) == b"awaitable"
+    assert await backend.get_range_async("users/42/stream.bin", 10, 14) == b"read"
+    assert backend.exists("users/42/stream.bin") is True
+    assert await backend.exists_async("users/42/stream.bin") is True
+
+    backend.copy_object("users/42/stream.bin", "users/42/stream_copy.bin")
+    await backend.copy_object_async("users/42/stream_copy.bin", "users/42/stream_copy_async.bin")
+    listed_sync = backend.list_objects("users/42")
+    listed_async = await backend.list_objects_async("users/42")
+    assert len(listed_sync) >= 5
+    assert [m.path for m in listed_sync] == [m.path for m in listed_async]
+
+    multipart_obj = FileObject(backend=backend, filename="users/42/multipart.bin")
+    await backend.save_object_async(multipart_obj, b"0123456789abcdef", use_multipart=True, chunk_size=4)
+    assert multipart_obj.size == 16
+    assert await backend.get_content_async("users/42/multipart.bin") == b"0123456789abcdef"
 
     tracker = FileObjectSessionTracker(raise_on_error=True)
     staged_obj = FileObject(backend=backend, filename="users/42/tx_orphan.bin")
@@ -251,4 +267,13 @@ async def test_alchemy_storage_backend_file_object_and_session_tracker_rollback(
     assert not await store.exists_async("uploads/users/42/tx_orphan.bin")
 
     backend.delete_object("users/42/avatar.png")
-    await backend.delete_object_async(["users/42/report.pdf", "users/42/source_doc.txt", "users/42/stream.bin"])
+    await backend.delete_object_async(
+        [
+            "users/42/report.pdf",
+            "users/42/source_doc.txt",
+            "users/42/stream.bin",
+            "users/42/stream_copy.bin",
+            "users/42/stream_copy_async.bin",
+            "users/42/multipart.bin",
+        ]
+    )
