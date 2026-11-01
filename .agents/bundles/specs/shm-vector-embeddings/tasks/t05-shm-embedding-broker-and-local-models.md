@@ -6,7 +6,7 @@ title: "Single-Instance EmbeddingBroker, GemmaEmbedder, FastEmbedder & Free-Thre
 description: "Implement EmbeddingBroker over MpmcRing and VectorSlab with token-budgeted length-sorted batching, GemmaEmbedder, FastEmbedder, StaticEmbedder, free-threaded GIL quarantine, and optional [embeddings] packaging."
 scope: task
 status: draft
-state: pending
+state: in_progress
 strategy: tdd
 depends_on:
   - t02-shm-vector-slab-cache-and-views

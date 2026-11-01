@@ -15,6 +15,7 @@ Example::
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from vertebra.embeddings import Embedder, VectorBatchView, VectorView
     from vertebra.framework._app import App, HandlerInfo, _make_handler_id
     from vertebra.framework._router import (
         Controller,
@@ -42,6 +43,7 @@ __all__ = (
     "Container",
     "Controller",
     "DependencyGraph",
+    "Embedder",
     "HandlerInfo",
     "Inject",
     "Procedure",
@@ -49,6 +51,8 @@ __all__ = (
     "Provide",
     "Route",
     "Router",
+    "VectorBatchView",
+    "VectorView",
     "__version__",
     "_make_handler_id",
     "delete",
@@ -70,6 +74,7 @@ __lazy_modules__ = [
     "vertebra.build",
     "vertebra.cli",
     "vertebra.db",
+    "vertebra.embeddings",
     "vertebra.extensions",
     "vertebra.framework",
     "vertebra.server",
@@ -105,6 +110,7 @@ _PROCEDURE_EXPORTS = frozenset(
         "subscription",
     }
 )
+_EMBEDDING_EXPORTS = frozenset({"Embedder", "VectorBatchView", "VectorView"})
 
 
 def __getattr__(name: str) -> Any:
@@ -131,6 +137,12 @@ def __getattr__(name: str) -> Any:
         from vertebra.framework import procedures
 
         value = getattr(procedures, name)
+        globals()[name] = value
+        return value
+    if name in _EMBEDDING_EXPORTS:
+        from vertebra import embeddings
+
+        value = getattr(embeddings, name)
         globals()[name] = value
         return value
     msg = f"module {__name__!r} has no attribute {name!r}"

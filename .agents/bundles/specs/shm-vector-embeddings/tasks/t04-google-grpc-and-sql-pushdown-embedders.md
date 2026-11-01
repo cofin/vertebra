@@ -5,8 +5,8 @@ flow_id: shm-vector-embeddings
 title: "Native HTTP/2 gRPC Packed-Float Codec & Google-First Zero-Weight Embedders"
 description: "Implement compact Protobuf v3 packed-f32 gRPC wire codecs in vertebra-http and the clean-named Google-first embedder hierarchy (Embedder, VertexEmbedder, GeminiEmbedder, AlloyDbEmbedder, OracleEmbedder, RemoteEmbedder) in vertebra.embeddings."
 scope: task
-status: draft
-state: in_progress
+status: ready
+state: completed
 strategy: tdd
 depends_on:
   - t01-gcp-adc-token-cache-and-refresh
@@ -151,7 +151,11 @@ make dev
 
 ## 4. Task Notes
 
-*(Populated during `/flow:implement` execution.)*
+- Re-exported `encode_batch_embed_grpc_request`, `encode_batch_embed_grpc_response_from_slab`, and `decode_batch_embed_grpc_response_into_slab` in `src/rs/vertebra-http/src/grpc.rs` and added `test_batch_embed_grpc_packed_float_reexport_and_mrl_norm`.
+- Implemented `Embedder` (with `__new__` default factory returning `VertexEmbedder("gemini-embedding-001", dimensions=768)`), `MultimodalPart`, `VectorCache` integration, `embed_arrow`, and `similarity_search` in `src/py/vertebra/embeddings/_base.py`.
+- Implemented `VertexEmbedder` (token-budgeted async micro-batching, `GcpTokenCache` auth + `x-goog-user-project`, and `401` retry after `invalidate`), `GeminiEmbedder` (API key + multimodal support), `AlloyDbEmbedder` (`unnest($2::text[]) WITH ORDINALITY` and `.sql_expr()`), and `OracleEmbedder` (`:predict` suffix, `128`-char URL ceiling guard, and `applied_token_generation` credential rotation) in `src/py/vertebra/embeddings/_google.py`.
+- Implemented `RemoteEmbedder` and `create_embedding_grpc_service` in `src/py/vertebra/embeddings/_remote.py` and registered `"vertebra.embeddings"` in `__lazy_modules__` (`src/py/vertebra/__init__.py`).
+- Verified with `cargo test -p vertebra-http`, `pytest src/py/tests/unit/embeddings/test_google_embedders.py -v` (6/6 passed), `ruff`, `mypy`, and `cargo clippy` (0 warnings).
 
 ---
 
