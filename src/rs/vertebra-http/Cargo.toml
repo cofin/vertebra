@@ -51,7 +51,7 @@ libc = { workspace = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Utilities
-brotli     = "7.0"
+brotli     = "9.0"
 flate2     = "1.1"
 multer     = "3.1.0"
 thiserror  = { workspace = true }
