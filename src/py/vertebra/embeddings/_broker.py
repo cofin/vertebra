@@ -71,6 +71,7 @@ class EmbeddingBroker:
         config: EmbeddingBrokerConfig | None = None,
     ) -> None:
         """Initialize the embedding broker with a backend callable, dimensions, and batching config."""
+        self._has_custom_backend = backend_fn is not None
         self._backend_fn = backend_fn or self._deterministic_hash_backend
         self._dimensions = dimensions
         self._config = config or EmbeddingBrokerConfig()
@@ -91,7 +92,7 @@ class EmbeddingBroker:
 
     def should_quarantine_subprocess(self) -> bool:
         """Return True when running on free-threaded 3.14t/3.15t with subprocess GIL quarantine enabled."""
-        return self._config.isolate_gil_subprocess and is_free_threaded()
+        return self._config.isolate_gil_subprocess and is_free_threaded() and not self._has_custom_backend
 
     async def submit_single(self, text: str) -> VectorView:
         """Submit a singular query/document for token-budgeted, length-sorted micro-batching."""

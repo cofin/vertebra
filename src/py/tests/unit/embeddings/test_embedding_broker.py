@@ -218,3 +218,26 @@ async def test_subprocess_quarantine_shm_slab_exchange_and_fastembed_optional_gu
     with pytest.raises(MissingDependencyError, match="fastembed") as exc_info:
         FastEmbedder("BAAI/bge-small-en-v1.5", dimensions=4)
     assert "embeddings" in exc_info.value.install_package
+
+    monkeypatch.setattr("vertebra.embeddings._broker.is_free_threaded", lambda: True)
+    monkeypatch.setattr("vertebra.embeddings._local.is_free_threaded", lambda: True)
+
+    seen_ft_prompts: list[str] = []
+    ft_custom_gemma = GemmaEmbedder(
+        "embeddinggemma-2-270m",
+        dimensions=4,
+        precision="int8",
+        backend_fn=lambda texts, dims: seen_ft_prompts.extend(texts) or [[1.0] * dims for _ in texts],
+    )
+    assert ft_custom_gemma.broker.should_quarantine_subprocess() is False
+    ft_q = await ft_custom_gemma.embed_query("free threaded custom backend")
+    assert ft_q.dimensions == 4
+    assert any("free threaded custom backend" in p for p in seen_ft_prompts)
+
+    ft_quarantined_gemma = GemmaEmbedder("embeddinggemma-2-270m", dimensions=4, precision="int8")
+    assert ft_quarantined_gemma.broker.should_quarantine_subprocess() is True
+    try:
+        ft_sub_vec = await ft_quarantined_gemma.embed_query("free threaded subprocess quarantine")
+        assert ft_sub_vec.dimensions == 4
+    finally:
+        await ft_quarantined_gemma.broker.close()

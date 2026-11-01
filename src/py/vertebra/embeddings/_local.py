@@ -20,6 +20,7 @@ from vertebra.embeddings._broker import (
     EmbeddingBrokerConfig,
 )
 from vertebra.embeddings._models import get_model_spec
+from vertebra.server._gil_audit import is_free_threaded
 from vertebra.utils.module_loader import ensure_module
 
 __all__ = (
@@ -55,7 +56,10 @@ class GemmaEmbedder(Embedder):
         super().__init__(model=model, dimensions=dimensions, cache=cache)
         self._precision = norm_prec
         self._source = str(source) if source is not None else None
-        resolved_backend = backend_fn or self._build_default_backend()
+        quarantine_default = (broker_config is None or broker_config.isolate_gil_subprocess) and is_free_threaded()
+        resolved_backend = (
+            backend_fn if backend_fn is not None else (None if quarantine_default else self._build_default_backend())
+        )
         self._broker = broker or EmbeddingBroker(
             backend_fn=resolved_backend,
             dimensions=dimensions,
@@ -159,7 +163,8 @@ class FastEmbedder(Embedder):
                 raw_vecs = list(fe_instance.embed(texts))
                 return [[float(v) for v in row[:dims]] for row in raw_vecs]
 
-            resolved_backend: BackendInferenceCallable = _fe_backend
+            quarantine_default = (broker_config is None or broker_config.isolate_gil_subprocess) and is_free_threaded()
+            resolved_backend: BackendInferenceCallable | None = None if quarantine_default else _fe_backend
         else:
             resolved_backend = backend_fn
 
