@@ -31,7 +31,7 @@ class A2aAgentBridge:
         cls,
         mcp_service: MCPService,
         *,
-        base_url: str,
+        base_url: str | None = None,
         path: str = "/a2a",
         name: str | None = None,
         description: str = "",
@@ -65,12 +65,16 @@ class A2aAgentBridge:
                 )
             )
 
-        agent_url = f"{base_url.rstrip('/')}{path}"
-        interface = AgentInterface(
-            url=agent_url,
-            protocol_binding="JSONRPC",
-            protocol_version="1.0",
-        )
+        supported_interfaces: tuple[AgentInterface, ...] = ()
+        if base_url:
+            agent_url = f"{base_url.rstrip('/')}{path}"
+            supported_interfaces = (
+                AgentInterface(
+                    url=agent_url,
+                    protocol_binding="JSONRPC",
+                    protocol_version="1.0",
+                ),
+            )
 
         card_name: str = name or str(getattr(mcp_service.config, "server_name", "mcp-agent"))
         card_desc: str = description or str(getattr(mcp_service.config, "instructions", ""))
@@ -79,10 +83,11 @@ class A2aAgentBridge:
             name=card_name,
             description=card_desc,
             version="1.0",
-            supported_interfaces=(interface,),
+            supported_interfaces=supported_interfaces,
             skills=tuple(skills),
         )
-        card.validate_for_path(path)
+        if supported_interfaces:
+            card.validate_for_path(path)
 
         async def _executor(
             message: Message,
@@ -189,6 +194,7 @@ class A2aAgentBridge:
 
         config = A2AConfig(
             path=path,
+            base_url=base_url,
             agent_card=card,
             allow_insecure_webhooks=True,
         )
@@ -203,7 +209,7 @@ class A2aAgentBridge:
 def mcp_service_to_a2a(
     mcp_service: MCPService,
     *,
-    base_url: str,
+    base_url: str | None = None,
     path: str = "/a2a",
     name: str | None = None,
     description: str = "",

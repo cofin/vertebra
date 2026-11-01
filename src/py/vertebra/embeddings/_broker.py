@@ -228,9 +228,7 @@ class EmbeddingBroker:
             t_len = token_lengths[orig_idx]
             exceeds_budget = bool(sub_indices and (sub_token_sum + t_len > self._config.max_batch_tokens))
             exceeds_ratio = bool(
-                sub_indices
-                and sub_min_len > 0
-                and (t_len / sub_min_len) > self._config.outlier_length_ratio
+                sub_indices and sub_min_len > 0 and (t_len / sub_min_len) > self._config.outlier_length_ratio
             )
             if exceeds_budget or exceeds_ratio:
                 self._run_sub_batch(texts, sub_indices, scattered_rows)

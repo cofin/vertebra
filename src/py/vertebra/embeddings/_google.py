@@ -178,7 +178,9 @@ class VertexEmbedder(Embedder):
             titles=titles,
             output_dimensionality=self._dimensions,
         )
-        rpc_url = f"{self._endpoint.rstrip('/')}/google.ai.generativelanguage.v1beta.GenerativeService/BatchEmbedContents"
+        rpc_url = (
+            f"{self._endpoint.rstrip('/')}/google.ai.generativelanguage.v1beta.GenerativeService/BatchEmbedContents"
+        )
         resp_bytes = await self._dispatch_with_auth_retry(rpc_url, grpc_frame)
         return decode_gemini_embed_grpc_frame_to_batch(
             resp_bytes,
@@ -341,9 +343,7 @@ class AlloyDbEmbedder(Embedder):
     ) -> VectorBatchView:
         """Execute batch `unnest($2::text[]) WITH ORDINALITY` in AlloyDB and decode binary pgvector frames."""
         sql = (
-            "SELECT embedding($1, t.txt)::vector "
-            "FROM unnest($2::text[]) WITH ORDINALITY AS t(txt, ord) "
-            "ORDER BY t.ord"
+            "SELECT embedding($1, t.txt)::vector FROM unnest($2::text[]) WITH ORDINALITY AS t(txt, ord) ORDER BY t.ord"
         )
         rows = await self._driver.fetch_all(sql, (self._model, texts))
         decoded_rows: list[list[float]] = []
@@ -432,18 +432,10 @@ class OracleEmbedder(Embedder):
             return
         cred_json = encode_json({"access_token": snap.access_token})
         plsql = (
-            "BEGIN "
-            "DBMS_VECTOR.DROP_CREDENTIAL(credential_name => :cred_name); "
-            "EXCEPTION WHEN OTHERS THEN NULL; "
-            "END;"
+            "BEGIN DBMS_VECTOR.DROP_CREDENTIAL(credential_name => :cred_name); EXCEPTION WHEN OTHERS THEN NULL; END;"
         )
         create_plsql = (
-            "BEGIN "
-            "DBMS_VECTOR.CREATE_CREDENTIAL("
-            "credential_name => :cred_name, "
-            "params => JSON(:cred_params)"
-            "); "
-            "END;"
+            "BEGIN DBMS_VECTOR.CREATE_CREDENTIAL(credential_name => :cred_name, params => JSON(:cred_params)); END;"
         )
         if hasattr(self._driver, "execute"):
             await self._driver.execute(plsql, {"cred_name": self._credential_name})

@@ -6,6 +6,7 @@ instances with camelCase wire serialization and zero GC overhead.
 
 import re
 import urllib.parse
+from collections.abc import Mapping
 from typing import Any, Literal, cast
 
 import msgspec
@@ -164,11 +165,11 @@ class TaskPushNotificationConfig(FrozenCamelizedStruct, frozen=True, kw_only=Tru
     config: PushNotificationConfig
 
 
-class AgentInterface(FrozenCamelizedStruct, frozen=True, kw_only=True):
+class AgentInterface(FrozenCamelizedStruct, frozen=True, kw_only=True, omit_defaults=False):
     """Transport interface declaration in an A2A 1.0 AgentCard."""
 
-    url: str
-    """Full HTTP(S) endpoint URL where the A2A transport is mounted."""
+    url: str = ""
+    """Full HTTP(S) endpoint URL or relative route path where the A2A transport is mounted."""
     protocol_binding: Literal["JSONRPC", "GRPC", "HTTP+JSON"] = "JSONRPC"
     """Wire protocol binding (`"JSONRPC"`, `"GRPC"`, or `"HTTP+JSON"`)."""
     protocol_version: str = "1.0"
@@ -245,6 +246,49 @@ class AgentCard(FrozenCamelizedStruct, frozen=True, kw_only=True):
     signatures: tuple[AgentCardSignature, ...] = ()
     """Detached RFC 7515 JWS signatures proving card integrity."""
 
+    def has_explicit_interfaces(self) -> bool:
+        """Return whether all declared interfaces already have absolute HTTP(S) URLs."""
+        return bool(self.supported_interfaces) and all(
+            iface.url.startswith(("http://", "https://")) for iface in self.supported_interfaces
+        )
+
+    def resolve_for_request(
+        self,
+        *,
+        route_path: str = "/a2a",
+        base_url: str | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> "AgentCard":
+        """Return an AgentCard with auto-populated or dynamically resolved interface URLs.
+
+        When ``supported_interfaces`` is omitted, a default ``JSONRPC`` 1.0
+        ``AgentInterface`` is synthesized for ``route_path``. Relative or empty
+        interface URLs are resolved against ``base_url`` or the incoming
+        ``Forwarded`` / ``X-Forwarded-*`` / ``Host`` request headers.
+        """
+        if self.has_explicit_interfaces():
+            return self
+
+        origin = self._resolve_origin(base_url=base_url, headers=headers)
+        normalized_path = "/" + route_path.strip("/")
+
+        if not self.supported_interfaces:
+            default_iface = AgentInterface(
+                url=f"{origin}{normalized_path}",
+                protocol_binding="JSONRPC",
+                protocol_version="1.0",
+            )
+            return msgspec.structs.replace(self, supported_interfaces=(default_iface,))
+
+        resolved: list[AgentInterface] = []
+        for iface in self.supported_interfaces:
+            if iface.url.startswith(("http://", "https://")):
+                resolved.append(iface)
+            else:
+                rel_path = "/" + iface.url.strip("/") if iface.url.strip("/") else normalized_path
+                resolved.append(msgspec.structs.replace(iface, url=f"{origin}{rel_path}"))
+        return msgspec.structs.replace(self, supported_interfaces=tuple(resolved))
+
     def validate_for_path(self, route_path: str = "/a2a") -> None:
         """Validate that the agent card advertises a valid 1.0 JSONRPC interface matching route_path."""
         normalized_path = "/" + route_path.strip("/")
@@ -274,6 +318,52 @@ class AgentCard(FrozenCamelizedStruct, frozen=True, kw_only=True):
     def to_json_bytes(self) -> bytes:
         """Serialize AgentCard to canonical JSON bytes."""
         return encode_json_bytes(self)
+
+    @staticmethod
+    def _resolve_origin(
+        *,
+        base_url: str | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> str:
+        """Resolve scheme and authority from base_url or HTTP request headers."""
+        if base_url and base_url.strip():
+            cleaned = base_url.strip().rstrip("/")
+            if cleaned.startswith(("http://", "https://")):
+                return cleaned
+            return f"https://{cleaned}"
+
+        lower: dict[str, str] = {k.lower(): v.strip() for k, v in headers.items() if v} if headers else {}
+
+        forwarded = lower.get("forwarded", "")
+        fwd_proto: str | None = None
+        fwd_host: str | None = None
+        if forwarded:
+            first_hop = forwarded.split(",", 1)[0]
+            for part in first_hop.split(";"):
+                key, _, val = part.strip().partition("=")
+                cleaned_val = val.strip().strip('"')
+                if key.lower() == "proto" and cleaned_val:
+                    fwd_proto = cleaned_val.lower()
+                elif key.lower() == "host" and cleaned_val:
+                    fwd_host = cleaned_val
+
+        raw_proto = fwd_proto or lower.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+        raw_host = (
+            fwd_host
+            or lower.get("x-forwarded-host", "").split(",", 1)[0].strip()
+            or lower.get(":authority", "").strip()
+            or lower.get("host", "").split(",", 1)[0].strip()
+        )
+        if not raw_host:
+            return "http://localhost:8000"
+
+        if raw_proto in ("http", "https"):
+            scheme = raw_proto
+        elif "x-forwarded-host" in lower:
+            scheme = "https"
+        else:
+            scheme = "http"
+        return f"{scheme}://{raw_host.rstrip('/')}"
 
 
 __all__ = [

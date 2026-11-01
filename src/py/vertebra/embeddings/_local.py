@@ -98,10 +98,7 @@ class GemmaEmbedder(Embedder):
     ) -> VectorBatchView:
         """Format a batch of Gemma task-steered prompts and submit to `EmbeddingBroker`."""
         resolved_titles = titles if titles is not None else [None] * len(texts)
-        formatted_texts = [
-            format_gemma_prompt(task, txt, title=resolved_titles[idx])
-            for idx, txt in enumerate(texts)
-        ]
+        formatted_texts = [format_gemma_prompt(task, txt, title=resolved_titles[idx]) for idx, txt in enumerate(texts)]
         return await self._broker.submit_batch(formatted_texts)
 
     def _build_default_backend(self) -> BackendInferenceCallable:
@@ -219,10 +216,7 @@ class StaticEmbedder(Embedder):
             if isinstance(first, (int, float)):
                 flat_seq = cast("Sequence[float]", weights)
                 flat = [float(x) for x in flat_seq]
-                weights_2d = [
-                    flat[i : i + dimensions]
-                    for i in range(0, len(flat), dimensions)
-                ]
+                weights_2d = [flat[i : i + dimensions] for i in range(0, len(flat), dimensions)]
             else:
                 nested_seq = cast("Sequence[Sequence[float]]", weights)
                 weights_2d = [[float(x) for x in row] for row in nested_seq]
