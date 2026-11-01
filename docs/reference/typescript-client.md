@@ -12,11 +12,11 @@ Full-stack TypeScript SDK (`src/ts/vertebra-client/`) providing typed HTTP reque
 
 ## Package Subpath Exports (`package.json`)
 
-`@vertebra/client` exposes 15 tree-shakeable ESM entry points:
+`@vertebra/client` exposes 17 tree-shakeable ESM entry points:
 
 | Import Path | Description |
 | --- | --- |
-| `@vertebra/client` | Root barrel exporting core HTTP, SSE, WebSocket, LiveState, Apex, Arrow, Wasm, HMR, Store, Telemetry, and Agent clients |
+| `@vertebra/client` | Root barrel exporting core HTTP, SSE, WebSocket, LiveState, Apex, Arrow, Wasm, HMR, Store, Telemetry, Router, WebMCP, and Agent clients |
 | `@vertebra/client/vite` | Vite plugin (`vitePlugin`) for Vertebra asset bundling, SSR entrypoints, and typegen |
 | `@vertebra/client/react` | React context provider (`ClientProvider`) and typed HTTP query/mutation hooks (`useQuery`, `useMutation`) |
 | `@vertebra/client/vue` | Vue 3 provider (`provideClient`) and typed query/mutation composables (`useQuery`, `useMutation`) |
@@ -30,6 +30,7 @@ Full-stack TypeScript SDK (`src/ts/vertebra-client/`) providing typed HTTP reque
 | `@vertebra/client/live` | `LiveStateClient`, `HybridLogicalClock`, `OfflineDeltaQueue`, `StateOpcode`, and FNV-1a hashing |
 | `@vertebra/client/apex` | `ApexRegion`, `ApexOfflineOutbox`, and Oracle APEX island hydration descriptors |
 | `@vertebra/client/telemetry` | W3C `TraceContext` (`traceparent`) parser, generator, and header injector |
+| `@vertebra/client/router` | Type-safe URL and WebSocket route helpers (`routeUrl`, `wsUrl`, `interpolateRoutePath`, `RouteUrlOptions`) |
 | `@vertebra/client/agent` | `McpClient`, `A2aClient`, `AgentStreamClient`, and `WorkflowLiveSubscriber` |
 | `@vertebra/client/webmcp` | Browser WebMCP (`navigator.modelContext`) auto-registration (`registerWebMCPTools`, `WebMCPManifest`, `WebMCPToolDescriptor`) |
 
