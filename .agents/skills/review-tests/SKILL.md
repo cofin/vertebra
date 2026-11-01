@@ -1,6 +1,6 @@
 ---
 name: review-tests
-description: Evaluates test strength, observable assertions, negative path coverage, concurrency barriers, and test suite hygiene across polyglot test suites.
+description: Use when evaluating test strength, observable assertions, negative path coverage, concurrency barriers, or test suite hygiene across polyglot test suites.
 ---
 
 <!-- truth: start -->

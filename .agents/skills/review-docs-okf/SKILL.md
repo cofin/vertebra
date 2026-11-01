@@ -1,6 +1,6 @@
 ---
 name: review-docs-okf
-description: Reviews OKF v0.2 knowledge chapters, bounded truth blocks, relative link integrity, privacy sanitization, and workflow sync.
+description: Use when reviewing OKF v0.2 knowledge chapters, bounded truth blocks, relative link integrity, privacy sanitization, or workflow sync.
 ---
 
 <!-- truth: start -->

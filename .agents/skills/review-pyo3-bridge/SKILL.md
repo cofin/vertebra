@@ -1,6 +1,6 @@
 ---
 name: review-pyo3-bridge
-description: Reviews PyO3 native extension modules, GIL release discipline, free-threaded Python 3.14t safety, and FFI view lifetimes across vertebra-py and bundler.
+description: Use when reviewing PyO3 native extension modules, GIL release discipline, free-threaded Python 3.14t/3.15t safety, and FFI view lifetimes across vertebra-py and vertebra-bundler.
 ---
 
 <!-- truth: start -->

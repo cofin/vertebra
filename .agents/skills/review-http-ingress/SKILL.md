@@ -1,6 +1,6 @@
 ---
 name: review-http-ingress
-description: Reviews HTTP/1.1, HTTP/2, HTTP/3, and gRPC ingress pipelines, dispatchers, connection lifecycles, and realtime transports in vertebra-http.
+description: Use when reviewing HTTP/1.1, HTTP/2, HTTP/3, or gRPC ingress pipelines, dispatchers, connection lifecycles, and realtime transports in vertebra-http.
 ---
 
 <!-- truth: start -->

@@ -1,6 +1,6 @@
 ---
 name: review-python-framework
-description: Reviews Python framework architecture, server runners, Litestar extensions, msgspec schemas, module layout, and serialization discipline.
+description: Use when reviewing Python framework architecture, server runners, Litestar/Starlette/FastAPI/Flask/Django extensions, msgspec schemas, module layout, or serialization discipline.
 ---
 
 <!-- truth: start -->

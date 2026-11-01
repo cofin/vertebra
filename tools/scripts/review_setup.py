@@ -215,46 +215,85 @@ class MarkdownDocument(msgspec.Struct, frozen=True, gc=False):
 
     @classmethod
     def _parse_simple_yaml(cls, lines: list[str]) -> dict[str, object]:
-        """Parse basic YAML scalars, booleans, and lists without external dependencies."""
+        """Parse YAML scalars, booleans, nested mappings, and lists without external dependencies."""
         result: dict[str, object] = {}
-        current_list_key: str | None = None
-        current_list: list[object] = []
+        current_top_key: str | None = None
+        current_list: list[object] | None = None
+        current_dict: dict[str, object] | None = None
+        current_list_item_dict: dict[str, object] | None = None
 
         for line in lines:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
 
-            if stripped.startswith("- "):
-                if current_list_key is not None:
-                    val = cls._parse_scalar(stripped[2:].strip())
-                    current_list.append(val)
+            indent = len(line) - len(line.lstrip(" "))
+
+            if indent == 0:
+                if current_top_key is not None:
+                    if current_list is not None:
+                        result[current_top_key] = current_list
+                    elif current_dict is not None:
+                        result[current_top_key] = current_dict
+                current_top_key = None
+                current_list = None
+                current_dict = None
+                current_list_item_dict = None
+
+                if ":" in stripped:
+                    key, rest = stripped.split(":", 1)
+                    key = key.strip()
+                    rest = rest.strip()
+                    if not rest:
+                        current_top_key = key
+                    elif rest.startswith("[") and rest.endswith("]"):
+                        inner = rest[1:-1].strip()
+                        if not inner:
+                            result[key] = []
+                        else:
+                            result[key] = [cls._parse_scalar(item.strip()) for item in inner.split(",")]
+                    else:
+                        result[key] = cls._parse_scalar(rest)
                 continue
 
-            if current_list_key is not None:
-                result[current_list_key] = current_list
-                current_list_key = None
-                current_list = []
+            if current_top_key is None:
+                continue
+
+            if stripped.startswith("- "):
+                if current_list is None:
+                    current_list = []
+                item_str = stripped[2:].strip()
+                if ":" in item_str and not (
+                    (item_str.startswith('"') and item_str.endswith('"'))
+                    or (item_str.startswith("'") and item_str.endswith("'"))
+                ):
+                    ik, iv = item_str.split(":", 1)
+                    current_list_item_dict = {ik.strip(): cls._parse_scalar(iv.strip())}
+                    current_list.append(current_list_item_dict)
+                else:
+                    current_list_item_dict = None
+                    current_list.append(cls._parse_scalar(item_str))
+                continue
 
             if ":" in stripped:
-                key, rest = stripped.split(":", 1)
-                key = key.strip()
-                rest = rest.strip()
-                if not rest:
-                    current_list_key = key
-                    current_list = []
-                elif rest.startswith("[") and rest.endswith("]"):
-                    inner = rest[1:-1].strip()
-                    if not inner:
-                        result[key] = []
-                    else:
-                        items = [cls._parse_scalar(item.strip()) for item in inner.split(",")]
-                        result[key] = items
+                ik, iv = stripped.split(":", 1)
+                ik = ik.strip()
+                iv = iv.strip()
+                parsed_val = cls._parse_scalar(iv)
+                if current_list_item_dict is not None:
+                    current_list_item_dict[ik] = parsed_val
                 else:
-                    result[key] = cls._parse_scalar(rest)
+                    if current_dict is None:
+                        current_dict = {}
+                    current_dict[ik] = parsed_val
 
-        if current_list_key is not None:
-            result[current_list_key] = current_list
+        if current_top_key is not None:
+            if current_list is not None:
+                result[current_top_key] = current_list
+            elif current_dict is not None:
+                result[current_top_key] = current_dict
+            else:
+                result[current_top_key] = []
 
         return result
 
@@ -1148,7 +1187,9 @@ class ReviewSetupValidator:
                         )
 
         for child in skills_root.iterdir():
-            if child.is_dir() and child.name.startswith("review-"):
+            if not child.is_dir():
+                continue
+            if child.name.startswith("review-"):
                 if child.name == "review-core":
                     continue
                 area_stem = child.name[len("review-") :]
@@ -1161,6 +1202,81 @@ class ReviewSetupValidator:
                             f"review skill directory '{child.name}' has no area in areas.toml",
                         )
                     )
+                continue
+
+            domain_skill_file = child / "SKILL.md"
+            rel_domain_file = str(domain_skill_file.relative_to(self.repo_root))
+            if not domain_skill_file.exists():
+                issues.append(
+                    ReviewIssue(
+                        "skills",
+                        rel_domain_file,
+                        1,
+                        f"missing SKILL.md in skill directory '{child.name}'",
+                    )
+                )
+                continue
+
+            domain_doc = MarkdownDocument.parse(domain_skill_file)
+            if domain_doc.frontmatter.get("name") != child.name:
+                issues.append(
+                    ReviewIssue(
+                        "skills",
+                        rel_domain_file,
+                        1,
+                        f"frontmatter name must be '{child.name}'",
+                    )
+                )
+            domain_desc = domain_doc.frontmatter.get("description")
+            if not domain_desc or not str(domain_desc).strip():
+                issues.append(
+                    ReviewIssue(
+                        "skills",
+                        rel_domain_file,
+                        1,
+                        "frontmatter description must not be empty",
+                    )
+                )
+            if domain_doc.total_lines > max_lines:
+                issues.append(
+                    ReviewIssue(
+                        "skills",
+                        rel_domain_file,
+                        domain_doc.total_lines,
+                        f"skill line count {domain_doc.total_lines} exceeds budget {max_lines}",
+                    )
+                )
+            if not domain_doc.truth_lines or domain_doc.truth_span is None:
+                issues.append(
+                    ReviewIssue(
+                        "skills",
+                        rel_domain_file,
+                        1,
+                        "missing <!-- truth: start --> .. <!-- truth: end --> block",
+                    )
+                )
+            elif len(domain_doc.truth_lines) > max_truth:
+                issues.append(
+                    ReviewIssue(
+                        "skills",
+                        rel_domain_file,
+                        domain_doc.truth_span[0],
+                        f"truth block line count {len(domain_doc.truth_lines)} exceeds budget {max_truth}",
+                    )
+                )
+            for target, line_no in domain_doc.links:
+                target_clean = target.split("#")[0]
+                if target_clean:
+                    resolved = (domain_skill_file.parent / target_clean).resolve()
+                    if not resolved.exists():
+                        issues.append(
+                            ReviewIssue(
+                                "skills",
+                                rel_domain_file,
+                                line_no,
+                                f"relative link '{target}' does not resolve",
+                            )
+                        )
 
         return issues
 
@@ -1240,13 +1356,13 @@ class ReviewSetupValidator:
                     )
                 )
 
-            if doc.frontmatter.get("model") != agent_policy.model:
+            if doc.frontmatter.get("model") not in {agent_policy.model, "inherit"}:
                 issues.append(
                     ReviewIssue(
                         "agents",
                         rel_file,
                         1,
-                        f"model must be '{agent_policy.model}'",
+                        f"model must be '{agent_policy.model}' or 'inherit'",
                     )
                 )
 
@@ -1256,13 +1372,13 @@ class ReviewSetupValidator:
             if doc.frontmatter.get("subagent") is not True:
                 issues.append(ReviewIssue("agents", rel_file, 1, "subagent must be true"))
 
-            if doc.frontmatter.get("commandExecutionPolicy") != "auto":
+            if doc.frontmatter.get("commandExecutionPolicy") not in {"auto", "off", "sandbox"}:
                 issues.append(
                     ReviewIssue(
                         "agents",
                         rel_file,
                         1,
-                        "commandExecutionPolicy must be 'auto'",
+                        "commandExecutionPolicy must be 'auto', 'off', or 'sandbox'",
                     )
                 )
 
@@ -1316,14 +1432,19 @@ class ReviewSetupValidator:
 
             raw_preloads = doc.frontmatter.get("preloadSkills")
             preloads = list(raw_preloads) if isinstance(raw_preloads, list) else []
-            expected_preloads = set(agent_policy.common_preload) | {f"review-{area_name}"}
-            if set(preloads) != expected_preloads:
+            required_preloads = set(agent_policy.common_preload) | {f"review-{area_name}"}
+            optional_preloads = (
+                {area_name} if (self.repo_root / f".agents/skills/{area_name}/SKILL.md").exists() else set()
+            )
+            allowed_preloads = required_preloads | optional_preloads
+            preload_set = set(preloads)
+            if not required_preloads.issubset(preload_set) or not preload_set.issubset(allowed_preloads):
                 issues.append(
                     ReviewIssue(
                         "agents",
                         rel_file,
                         1,
-                        f"preloadSkills must be exactly {sorted(expected_preloads)}",
+                        f"preloadSkills must include {sorted(required_preloads)} (and optionally {sorted(optional_preloads)})",
                     )
                 )
 
@@ -1369,12 +1490,14 @@ class ReviewSetupValidator:
             if is_reviewer:
                 in_allowed = False
                 in_prohibition = False
+                allowed_heading_re = re.compile(r"^#{1,2}\s+Allowed Commands\s*$")
+                any_section_re = re.compile(r"^#{1,2}\s+")
                 for line_no, line in enumerate(fpath.read_text(encoding="utf-8").splitlines(), start=1):
-                    if line.startswith("## Allowed Commands"):
+                    if allowed_heading_re.match(line):
                         in_allowed = True
                         in_prohibition = False
                         continue
-                    if in_allowed and line.startswith("## "):
+                    if in_allowed and any_section_re.match(line):
                         in_allowed = False
                         in_prohibition = False
                     if in_allowed:
@@ -1539,9 +1662,11 @@ class ReviewSetupValidator:
         tag_slug_re = re.compile(r"^[a-z0-9-]+$")
         reserved_names = {"index.md", "log.md"}
 
-        knowledge_dir = bundles_root / "knowledge"
-        if knowledge_dir.exists():
-            for md_path in knowledge_dir.rglob("*.md"):
+        for subdir_name in ("knowledge", "product"):
+            target_dir = bundles_root / subdir_name
+            if not target_dir.exists():
+                continue
+            for md_path in target_dir.rglob("*.md"):
                 if md_path.name in reserved_names:
                     continue
                 rel_file = str(md_path.relative_to(self.repo_root))
@@ -1582,6 +1707,28 @@ class ReviewSetupValidator:
                                     f"tag '{tag}' must be a lowercase slug",
                                 )
                             )
+
+                sources = doc.frontmatter.get("sources")
+                if isinstance(sources, list):
+                    for src_entry in sources:
+                        res_val: str | None = None
+                        if isinstance(src_entry, dict):
+                            raw_res = src_entry.get("resource")
+                            if isinstance(raw_res, str):
+                                res_val = raw_res
+                        elif isinstance(src_entry, str) and src_entry.startswith("resource:"):
+                            res_val = src_entry.split(":", 1)[1].strip()
+                        if res_val:
+                            file_part = res_val.split("::", 1)[0].strip()
+                            if file_part and not (self.repo_root / file_part).exists():
+                                issues.append(
+                                    ReviewIssue(
+                                        "bundles",
+                                        rel_file,
+                                        1,
+                                        f"source resource '{res_val}' does not exist",
+                                    )
+                                )
 
                 for target, line_no in doc.links:
                     target_clean = target.split("#")[0]

@@ -15,11 +15,11 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 ---
 
-## 1. Product Definition (`product/`)
+## 1. Product Definition ([`product/`](product/index.md))
 
-- **[Product Overview](product/product.md)** — Vision, core capabilities, runtime topologies (`Auto`, `Embedded`, and `Shm`, Python `3.12`–`3.15` and free-threaded `3.14t`/`3.15t`), multicloud object storage, database drivers, telemetry, and Litestar/SQLSpec/Alchemy/APEX/gRPC integrations.
-- **[Product & Engineering Guidelines](product/product-guidelines.md)** — Clean-break domain naming rules, zero-copy hot-path invariants, `msgspec.Struct(..., frozen=True, gc=False)` value objects, Python module layout, and Git/PR discipline.
-- **[Technology Stack](product/tech-stack.md)** — Complete Rust workspace (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`), Python (`vertebra-core` PyPI distribution / `vertebra` import namespace), and TypeScript (`@vertebra/client`) dependency and toolchain matrix.
+- **[Product Overview](product/product.md)** — Vision, core capabilities, runtime topologies (`Auto`, `Embedded`, and `Shm`, Python `3.12`–`3.15` and free-threaded `3.14t`/`3.15t`), multicloud object storage, database drivers, telemetry, and Litestar/Starlette/FastAPI/Flask/Django/SQLSpec/Alchemy/APEX/gRPC integrations.
+- **[Product & Engineering Guidelines](product/product-guidelines.md)** — Clean-break domain naming rules, deep-module seam classification, zero-copy hot-path invariants, `msgspec.Struct(..., frozen=True, gc=False)` value objects, Python module layout, and Git/PR discipline.
+- **[Technology Stack](product/tech-stack.md)** — Complete Rust workspace (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`), Python (`vertebra-core` PyPI distribution / `vertebra` import namespace), and TypeScript (`@vertebra/client` `0.2.0`) dependency and toolchain matrix.
 
 ## 2. Engineering Knowledge Base (`knowledge/`)
 
@@ -47,6 +47,8 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
   - [Polyglot Test Matrix & Environment Setup](knowledge/testing/polyglot-test-matrix.md), [Benchmark Suite & Free-Threaded Python 3.14t/3.15t](knowledge/testing/benchmarks-and-free-threaded.md), [Agentic Review & Benchmark Gates](knowledge/testing/agentic-review.md)
 - **[Gotchas (`knowledge/gotchas/`)](knowledge/gotchas/index.md)**:
   - [PyO3 FFI, Embedded Globals & Python Runtime Gotchas](knowledge/gotchas/pyo3-and-python-runtime.md), [Shared-Memory Rings & Cross-Platform IPC Gotchas](knowledge/gotchas/shm-and-cross-platform-ipc.md)
+- **[Decisions (`knowledge/decisions/`)](knowledge/decisions/index.md)**:
+  - [ADR-001: Dual-Topology Embedded and Shared-Memory Runtime](knowledge/decisions/adr-001-dual-topology-embedded-and-shm-runtime.md), [ADR-002: Shared-Memory Database Broker and Arrow IPC Data Plane](knowledge/decisions/adr-002-two-tier-shm-database-and-arrow-data-plane.md), [ADR-003: PyPI `vertebra-core` Distribution and Wheel-Bundled TypeScript Client](knowledge/decisions/adr-003-pypi-vertebra-core-distribution-and-wheel-bundled-client.md)
 
 ## 3. Specifications, Research & Activity Log
 

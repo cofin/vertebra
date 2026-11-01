@@ -1,6 +1,6 @@
 ---
 name: review-typescript-client
-description: Reviews TypeScript client SDK, Biome linting, tsup builds, framework adapters, bundler integration, and Inertia/SSR interfaces.
+description: Use when reviewing TypeScript client SDK code, Biome linting, tsup builds, framework adapters, bundler integration, or Inertia/SSR/WebMCP interfaces.
 ---
 
 <!-- truth: start -->

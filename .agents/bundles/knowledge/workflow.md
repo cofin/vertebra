@@ -19,7 +19,7 @@ sources:
 - Use Vertebra's canonical [`Makefile`](../../../Makefile) targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make review-check`, `make review-route`, `make coverage`, `make check`, `make docs`, `make docs-serve`, `make docs-check`, `make docs-clean`, `make docs-rust`, `make build`, `make build-pgo`, `make bench`, `make bench-all`, `make bench-ft`, `make bench-report`, `make rs-bench`, `make bench-micro`, `make bench-baseline`, `make bench-check`, `make upgrade`) and rebuild the PyO3 extensions (`_vertebra`, `_bundler`, `_storage`) via `make dev` after any Rust edit before running `pytest`.
 - Every task declares and justifies one `verification_strategy`; only observable behavior and defect correction require an initial failing test.
 - Record durable findings in the task's `## Notes & Discoveries` and preserve unrelated worktree changes.
-- Consumer operational skills install only under `.agents/skills/`. Product, knowledge, research, and specs remain under `.agents/bundles/` (`specs/` and `research/` are created lazily only when needed).
+- Operational project skills install only under `.agents/skills/` and subagents under `.agents/agents/`. Product, knowledge, research, and specs remain under `.agents/bundles/` (`specs/` and `research/` are created lazily only when needed).
 - Flow never creates, moves, force-updates, or deletes Git tags, and never pushes automatically. All changes in Vertebra are made on a dedicated feature/fix branch with signed conventional commits (`commit.gpgsign=true`) and submitted via pull request, never directly on `main`.
 <!-- truth: end -->
 
@@ -74,41 +74,45 @@ make bench-report                                         # Latest benchmark rep
 
 ## Polyglot Rebuild & Hygiene Rules
 
-1. **Rust to Python FFI Rebuild (`make dev`)**: `uv run pytest` loads the compiled `vertebra._vertebra`, `vertebra._bundler`, and `vertebra._storage` extensions from `.venv`. After any `.rs` change in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, or `vertebra-storage`, run `make dev` (or `make py-test`) before `uv run pytest`. `vertebra-http` changes need `make dev` only to rebuild the `vertebra-server` binary.
-2. **Codegen to TypeScript Sync**: When modifying route schemas or [`src/py/vertebra/build/codegen/`](../../../src/py/vertebra/build/codegen/__init__.py), run `make py-test` (`src/py/tests/unit/codegen/`) and `make ts-test`.
-3. **Shared-Memory Cleanup**: `make rs-test` and the autouse `_cleanup_shm` fixture in [`src/py/tests/conftest.py`](../../../src/py/tests/conftest.py) remove `/dev/shm/test-*`, `/dev/shm/*vertebra*`, and `/dev/shm/vtb-*`.
-4. **`--group bench` Isolation**: Keep `duckdb`, `uvicorn`, `httptools`, `uvloop`, `granian`, and `spikard` inside `[dependency-groups].bench` in [`pyproject.toml`](../../../pyproject.toml) so Python `3.14t`/`3.15t` test runs never compile `duckdb` from source.
-5. **TypeScript Build**: `make ts-build` compiles all 13 subpath entrypoints (`index`, `react`, `vue`, `svelte`, `angular`, `htmx`, `vite`, `store`, `live`, `apex`, `telemetry`, `wasm`, `arrow`, plus `hmr`) and generates `.d.ts` declarations cleanly.
+1. **Rust to Python FFI Rebuild (`make dev`)**: `uv run pytest` loads the compiled `vertebra._vertebra`, `vertebra._bundler`, and `vertebra._storage` extensions from `.venv`. After any `.rs` change in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, or `vertebra-db`, run `make dev` (or `make py-test`) before `uv run pytest`. `vertebra-http` changes need `make dev` only to rebuild the `vertebra-server` binary.
+2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml) sets `[project] name = "vertebra-core"` while `[tool.maturin]` sets `python-packages = ["vertebra"]` and `module-name = "vertebra._vertebra"`. `importlib.metadata.version("vertebra-core")` and `vtb init` reference `vertebra-core`, whereas all Python code imports `vertebra`.
+3. **Codegen & Wheel-Bundled TypeScript Sync**: `make ts-build` compiles all 17 `@vertebra/client` entrypoints (`.` plus `./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./vite`, `./store`, `./hmr`, `./live`, `./apex`, `./telemetry`, `./wasm`, `./arrow`, `./router`, `./webmcp`, and `./agent`), emits `.d.ts` declarations, and copies `dist/` into `src/py/vertebra/server/_js/bundle/` for wheel distribution. When modifying route schemas or [`src/py/vertebra/build/codegen/`](../../../src/py/vertebra/build/codegen/__init__.py), run `make py-test` (`src/py/tests/unit/codegen/`) and `make ts-test`.
+4. **Shared-Memory Cleanup**: `make rs-test` and the autouse `_cleanup_shm` fixture in [`src/py/tests/conftest.py`](../../../src/py/tests/conftest.py) remove `/dev/shm/test-*`, `/dev/shm/*vertebra*`, and `/dev/shm/vtb-*`.
+5. **`--group bench` & `--group doc` Isolation**: Keep `duckdb`, `uvicorn`, `httptools`, `uvloop`, `granian`, and `spikard` inside `[dependency-groups].bench` and `zensical`, `mkdocstrings-python`, and `pymdown-extensions` inside `[dependency-groups].doc` in [`pyproject.toml`](../../../pyproject.toml) so Python `3.14t`/`3.15t` test runs never compile `duckdb` C++ or `zensical` Rust sdist dependencies from source.
+6. **Zensical Documentation & Griffe `msgspec.Struct` Hygiene**: Never enable `navigation.indexes` in [`zensical.toml`](../../../zensical.toml) (it hides section `Overview` links and causes empty primary sidebars on single-page tabs). Keep PEP 257 field docstrings on all documented `msgspec.Struct` and `.pyi` stub classes so custom Griffe templates (`tools/docs/templates/python/material/`) render complete attribute tables.
+7. **Pre-Commit Secret Hygiene**: Never use strings matching `ya29.*` (forbidden Google OAuth2 access token prefix) in tests or fixtures; use `"mock-oauth-token"` instead of token prefixes.
 
-## Direct-Read Continuity
+## Direct Markdown Continuity & Execution Loop
 
-1. Resolve `.agents/setup-state.json:root_directory` (local-only, not tracked), falling back to `.agents/config.json` and then `.agents/`.
-2. Before selecting a flow or doing normal work, scan `<configured-root>/transactions/*/journal.md` and the retired `<configured-root>/tasks/transactions/*/journal.md`. Jointly arbitrate every nonterminal journal (`prepared`, `task_writes_started`, `recovery_required`, `contended`, or `rollback_in_progress`); recover the selected transaction from its recorded fragments, or stop on unresolved conflict.
-3. Resolve the configured bundle root, then read its index and candidate spec frontmatter under `specs/<flow_id>/`.
-4. Read authoritative task frontmatter in `tasks/*.md`.
-5. Verify plan/state identity, task dependencies, claims, and checklist agreement.
-6. Select an explicit task, the sole in-progress task, or the first ready task.
-7. Read the complete worksheet, direct dependencies, newest discoveries, and relevant nested knowledge chapters (`architecture/`, `domains/`, `patterns/`, `testing/`, `gotchas/`).
+1. Resolve `.agents/setup-state.json:root_directory` (defaulting to `.agents/`) and `bundle_root` (`.agents/bundles`).
+2. Read the bundle root index ([`.agents/bundles/index.md`](../index.md)) and candidate spec frontmatter under `specs/<flow_id>/spec.md`.
+3. Read authoritative task frontmatter in `specs/<flow_id>/tasks/*.md`.
+4. Run the 5-check preflight before executing a task:
+   - Worksheet completeness (`verification_strategy`, `target_paths`, `acceptance_criteria`).
+   - Target path existence in the repository.
+   - Dependency readiness (every `depends_on` task is `closed`).
+   - Checklist and frontmatter agreement between `tasks/<id>-<slug>.md` and `spec.md`.
+   - Worktree cleanliness (preserve unrelated changes; never revert user edits).
+5. Select an explicit task ID, the sole `in_progress` task, or the first ready (`open`) task.
+6. Read the complete worksheet, direct dependency notes, and relevant nested knowledge chapters (`architecture/`, `domains/`, `patterns/`, `testing/`, `gotchas/`, `decisions/`) plus matching `.agents/skills/<domain>/SKILL.md`.
 
-Hooks and prior conversation are routing hints, not authority. Task files are the single authority for task state.
+Hooks and prior conversation are routing hints, not authority. Task worksheet frontmatter (`tasks/<id>-<slug>.md`) and `spec.md` checklists (`[ ]`, `[~]`, `[x] [<sha>]`, `[!]`, `[-]`), backed by Git commit SHAs, are the single authority for task state.
 
-## Task and State Operations
+## Task State & Lifecycle Operations
 
-A task is ready when `state: open`, all `depends_on` tasks are `closed`, its worksheet is complete, and its plan identity matches the spec.
-
-Resolve the canonical state authority through the active Flow installation. In plugin/default-skip mode, load the active packaged `flow-state` skill and its sibling `references/state.md`; do not require or synthesize a project-local skill path. In a standalone project install, load `.agents/skills/flow-state/SKILL.md` and resolve `references/state.md` relative to it. Every existing-flow mutation must carry the exact observed `expected_plan_revision`, `expected_plan_commit`, and `expected_state_revision`. Create the prepared transaction journal before tracked state changes, write in canonical task-first/spec-last order, reread the journal and semantic read set around each write, and record final validation before marking the journal terminal.
+Write state changes directly to Markdown in canonical task-first, spec-last order: update `tasks/<id>-<slug>.md` YAML frontmatter first, then synchronize the corresponding checklist marker in `spec.md`.
 
 | Operation | Purpose |
 | --- | --- |
-| `claim` | Move one ready task to `in_progress`. |
-| `note` | Append investigation findings to `## Notes & Discoveries`. |
-| `block` / `unblock` | Record or resolve an exact blocker and next step. |
-| `release` | Return an in-progress task to open when the claimant stops. |
-| `close` | Close the sole claimed task with recorded commit SHA. |
-| `reconcile` | Update spec checklist markers from task-file frontmatter via `/flow:sync`. |
-| `complete` | Move an active spec whose tasks are all closed or skipped to `completed` after verification and review. |
-| `archive` | Finish a completed spec: elevate knowledge into nested chapters, log summary in `log.md`, then delete the spec directory. |
-| `recover` | Resume an unresolved transaction journal in its recorded finish-or-rollback direction. |
+| `claim` | Set one ready task's `state: in_progress` (`updated_at`) and mark `[~]` in `spec.md`. |
+| `note` | Append dated investigation findings to `## Notes & Discoveries` in the task worksheet. |
+| `block` / `unblock` | Set `state: blocked` (`[!]`) with an exact blocker and next step, or return to `open` (`[ ]`). |
+| `release` | Return an `in_progress` task to `open` (`[ ]`) when execution pauses before completion. |
+| `close` | Set `state: closed`, record `commit_sha`, check acceptance criteria (`[x]`), and mark `[x] [<sha>]` in `spec.md`. |
+| `sync` | Reconcile `spec.md` checklist markers from task-file frontmatter via `/flow:learn sync`. |
+| `learn` | Assess drift, refresh cross-session context, sharpen the domain glossary, evaluate ADRs, resynthesize OKF chapters, and align `.agents/skills/` and `.agents/agents/` via `/flow:learn`. |
+| `complete` | Move an active spec whose tasks are all `closed` or `skipped` (`[-]`) to `completed` after two-axis review (`@code-reviewer` + `@quality-reviewer`). |
+| `archive` | Elevate durable knowledge into nested OKF chapters (`knowledge/`), log the summary in `log.md`, and remove the completed spec directory (`specs/` returns to lazy `.gitkeep`). |
 
 ## Verification Strategies
 
@@ -125,13 +129,13 @@ Never manufacture a failing unit test for documentation, configuration, generate
 
 ## Execution Sequence & Quality Gates
 
-1. Preflight the worksheet, live targets, dependencies, strategy, plan identity, state revision, and worktree.
-2. Claim the task through the state contract and record discoveries in `## Notes & Discoveries`.
-3. Obtain the strategy's required initial evidence, make the minimum worksheet-scoped change, and obtain focused green evidence.
+1. Preflight the worksheet, live targets, dependencies, strategy, checklist sync, and worktree.
+2. Claim the task (`state: in_progress`, `[~]`) and record discoveries in `## Notes & Discoveries`.
+3. Obtain the strategy's required initial evidence, implement the vertical slice (production code + canonical module tests), and obtain focused green evidence.
 4. Run relevant aggregate gates (`make lint-all`, `make rs-test`, `make py-test`, `make ts-test`) and confirm `git diff --check` is clean.
 5. Stage exact task-owned paths only and create one signed conventional commit (`<type>(<scope>): <description>`) on the feature/fix branch.
-6. Close the task with the commit SHA, exact commands/results, and checked acceptance criteria; reconcile `spec.md` in the same state transaction.
-7. During `/flow:archive`, synthesize reusable learnings into the nested `.agents/bundles/knowledge/{architecture,domains,patterns,testing,gotchas}/**/*.md` tree, append the archive summary to `.agents/bundles/log.md`, and remove the completed spec directory.
+6. Close the task (`state: closed`, `commit_sha`, checked acceptance criteria) and update `spec.md` (`[x] [<sha>]`) in the same turn.
+7. During `/flow:archive`, synthesize reusable learnings across the 5 OKF dimensions (`architecture/`, `domains/`, `patterns/`, `testing/`, `gotchas/`, plus `decisions/` when an ADR threshold is met), prepend the archive summary to `.agents/bundles/log.md`, and remove the completed spec directory.
 
 ## Low-Signal Test & Gate Policy
 
@@ -143,16 +147,16 @@ When replacing a gate, prove the replacement against an isolated violation befor
 
 Use `<type>(<scope>): <description>` with signed commits (`commit.gpgsign=true`) on a dedicated feature/fix branch and stage exact paths. Do not force-add ignored Flow artifacts. A phase checkpoint records affected task ids, the last functional commit, and fresh aggregate evidence; never create an empty checkpoint commit.
 
-Flow may append supplementary Git notes under `refs/notes/flow` only after the canonical Markdown transaction succeeds. Notes are optional, stay local by default, and never become state authority. Git tags are prohibited as evidence or fallback transport.
+Flow may append supplementary Git notes under `refs/notes/flow` only after the canonical Markdown update succeeds. Notes are optional, stay local by default, and never become state authority. Git tags are prohibited as evidence or fallback transport.
 
 ## Knowledge Lifecycle
 
-1. **Capture:** append dated discoveries to the owning task and reusable learnings to the flow's `learnings.md`.
-2. **Synthesize:** integrate reusable current-state guidance into the best matching chapter anywhere under `.agents/bundles/knowledge/**/*.md`, preserving project-shaped nesting (`architecture/`, `domains/`, `patterns/`, `testing/`, `gotchas/`).
+1. **Capture:** append dated discoveries to the owning task (`## Notes & Discoveries`) and reusable learnings to the flow's `learnings.md`.
+2. **Synthesize (`/flow:learn` & `/flow:archive`):** integrate reusable current-state guidance into the best matching chapter under `.agents/bundles/knowledge/{architecture,domains,patterns,testing,gotchas,decisions}/**/*.md`, and keep `.agents/skills/` and `.agents/agents/` aligned with live codebase boundaries.
 3. **Log:** history belongs in `.agents/bundles/log.md`, not in current-state knowledge prose.
 4. **Contract:** after verified completion and archive review, delete the archived spec directory; Git history is the archive.
 
-Operational project skills live only at `.agents/skills/`. Never create `.agents/bundles/skills/`.
+Operational project skills live only at `.agents/skills/` and subagents at `.agents/agents/`. Never create `.agents/bundles/skills/`.
 
 ## Quality Gates
 

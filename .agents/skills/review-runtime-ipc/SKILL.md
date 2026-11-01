@@ -1,6 +1,6 @@
 ---
 name: review-runtime-ipc
-description: Reviews Rust shared-memory rings, futex/ulock handshakes, atomic orderings, SHM lifecycle, and unsafe code across vertebra-core, vertebra-storage, and vertebra-db.
+description: Use when reviewing Rust shared-memory rings, futex/ulock handshakes, atomic orderings, SHM lifecycle, or unsafe code across vertebra-core, vertebra-storage, and vertebra-db.
 ---
 
 <!-- truth: start -->

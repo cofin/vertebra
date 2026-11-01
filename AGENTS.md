@@ -23,7 +23,8 @@ Commits remain local unless the user explicitly asks for delivery. Never create,
 - [Product Guidelines](.agents/bundles/product/product-guidelines.md) — Clean-break domain naming rules, hot-path invariants, and module layout
 - [Tech Stack](.agents/bundles/product/tech-stack.md) — Python 3.12–3.15 and 3.14t/3.15t, Rust crates, and TypeScript client stack
 - [Project Workflow](.agents/bundles/knowledge/workflow.md) — Canonical `Makefile` commands, polyglot rebuild cycle, verification strategies, and Flow execution loop
-- [Knowledge Index](.agents/bundles/knowledge/index.md) — Nested architectural (`architecture/{runtime,ipc,http,worker,frontend}/`), domain (`domains/{framework,server,ipc,http,frontend,storage,data,telemetry,extensions,agent}/`), pattern (`patterns/{python,rust,typescript}/`), testing (`testing/`), and gotcha (`gotchas/`) chapters
+- [Knowledge Index](.agents/bundles/knowledge/index.md) — Nested architectural (`architecture/{runtime,ipc,http,worker,frontend}/`), domain (`domains/{framework,server,ipc,http,frontend,storage,data,telemetry,extensions,agent}/`), pattern (`patterns/{python,rust,typescript}/`), testing (`testing/`), gotcha (`gotchas/`), and decision (`decisions/`) chapters
+- [Skills and Agents Index](.agents/skills/index.md) — Engineering domain skills, review skills, and paired reviewer/specialist subagents
 
 ## Quick Verification Commands
 

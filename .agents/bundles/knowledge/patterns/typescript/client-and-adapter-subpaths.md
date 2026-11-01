@@ -28,6 +28,13 @@ sources:
 The root entry re-exports the core client and every feature module. Framework adapters are subpath-only.
 
 <!-- truth: start -->
+- **Package**: `@vertebra/client` (`"type": "module"`, zero runtime `dependencies`, shipped in the `vertebra-core` Python wheel under `src/py/vertebra/server/_js/bundle/`).
+- **Root Entry (`src/index.ts`)**: Re-exports `HttpClient`, `SseClient`, `WebSocketClient`, `SessionStore`, `LiveStateClient`, `HotReloadClient`, `routeUrl`, `wsUrl`, `registerWebMCPTools`, `ArrowStreamClient`, `WASMClient`, `TraceContext`, `ApexRegion`, and `McpClient`/`A2aClient`.
+- **16 Subpath Exports**: `./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./vite`, `./store`, `./hmr`, `./live`, `./apex`, `./telemetry`, `./wasm`, `./arrow`, `./router`, `./webmcp`, and `./agent` (kept in lockstep across `package.json` `exports` and `tsup.config.ts` `entry`).
+- **Framework Isolation**: Peer framework imports (`react`, `vue`, `svelte`, `@angular/core`, `vite`) live strictly in their subpath modules and are marked `external` in `tsup.config.ts`.
+- **Codegen & Hash Parity**: Route types and `fnv1aStateId` (64-bit) / `fnv1aFieldId` (32-bit) stay synchronized with `src/py/vertebra/build/codegen/` and `LiveState`.
+<!-- truth: end -->
+
 ```typescript
 export {
   A2aClient,
@@ -107,7 +114,6 @@ export {
   type WebSocketClientOptions,
 } from "./websocket";
 ```
-<!-- truth: end -->
 
 `SseClient`, `WebSocketClient`, `HotReloadClient`, `initHotReload`, `routeUrl`, `wsUrl`, and `registerWebMCPTools` are exported from the root entry.
 
