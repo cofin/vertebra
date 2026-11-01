@@ -405,6 +405,8 @@ release:                                             ## Bump version: make relea
 	fi
 	@echo "${INFO} Preparing release ($(bump))..."
 	@uv run bump-my-version bump $(bump)
+	@uv lock --offline
+	@cargo update -w --manifest-path src/rs/Cargo.toml --offline
 	@echo "${OK} Release bump complete"
 
 .PHONY: pre-release
@@ -415,5 +417,7 @@ pre-release:                                         ## Start a pre-release: mak
 	fi
 	@echo "${INFO} Preparing pre-release $(version)..."
 	@uv run bump-my-version bump --new-version $(version) pre
+	@uv lock --offline
+	@cargo update -w --manifest-path src/rs/Cargo.toml --offline
 	@echo "${OK} Pre-release $(version) complete"
 
