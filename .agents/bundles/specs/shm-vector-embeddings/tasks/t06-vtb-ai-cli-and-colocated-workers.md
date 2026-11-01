@@ -6,7 +6,7 @@ title: "vtb ai (models + mcp) CLI Consolidation & Co-Located WorkerRunner in vtb
 description: "Create vtb ai CLI with nested models (list, pull, stage, warm) and mcp (serve, bridge) subcommands replacing top-level vtb mcp, add co-located WorkerRunner flags and pyproject config to vtb run and vtb dev, add --oneshot to vtb workers run, and sync CLI reference docs."
 scope: task
 status: draft
-state: pending
+state: in_progress
 strategy: tdd
 depends_on:
   - t01-gcp-adc-token-cache-and-refresh

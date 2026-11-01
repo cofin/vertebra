@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import importlib
 from collections.abc import Awaitable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -18,6 +17,7 @@ from vertebra._vertebra import (
     VectorView,
 )
 from vertebra.telemetry.genai import GenAiUsage
+from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from vertebra.embeddings._google import VertexEmbedder
@@ -72,7 +72,7 @@ class Embedder:
     ) -> Embedder:
         """Return a default `VertexEmbedder` when `Embedder(...)` is called directly."""
         if cls is Embedder:
-            google_mod = importlib.import_module("vertebra.embeddings._google")
+            google_mod = ensure_module("vertebra.embeddings._google")
             vertex_cls = google_mod.VertexEmbedder
             instance: VertexEmbedder = object.__new__(vertex_cls)
             vertex_cls.__init__(instance, model, dimensions=dimensions, **kwargs)

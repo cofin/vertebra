@@ -5,8 +5,8 @@ flow_id: shm-vector-embeddings
 title: "Single-Instance EmbeddingBroker, GemmaEmbedder, FastEmbedder & Free-Threaded 3.14t/3.15t Quarantine"
 description: "Implement EmbeddingBroker over MpmcRing and VectorSlab with token-budgeted length-sorted batching, GemmaEmbedder, FastEmbedder, StaticEmbedder, free-threaded GIL quarantine, and optional [embeddings] packaging."
 scope: task
-status: draft
-state: in_progress
+status: ready
+state: completed
 strategy: tdd
 depends_on:
   - t02-shm-vector-slab-cache-and-views
@@ -152,7 +152,11 @@ Implement `EmbeddingBroker`, `GemmaEmbedder`, `FastEmbedder`, and `StaticEmbedde
 
 ## 4. Task Notes
 
-*(Populated during `/flow:implement` execution.)*
+- Added `embeddings = ["fastembed>=0.6.0"]` under `[project.optional-dependencies]` in `pyproject.toml`.
+- Implemented `ModelSpec`, `MODEL_CATALOG`, `get_model_spec`, and `list_model_specs` in `src/py/vertebra/embeddings/_models.py`.
+- Implemented `EmbeddingBrokerConfig` and `EmbeddingBroker` in `src/py/vertebra/embeddings/_broker.py` with token-budgeted (`max_batch_tokens=16384`), length-sorted dynamic batching, bulk chunk preemption for interactive queries, and free-threaded `3.14t`/`3.15t` subprocess GIL quarantine over `/dev/shm` `VectorSlab` regions.
+- Implemented `GemmaEmbedder` (with `fp16` activation-overflow guard for `embeddinggemma-2*` and `format_gemma_prompt` task prefixes), `FastEmbedder` (guarded via `ensure_module("fastembed", extra="embeddings")`), and `StaticEmbedder` (`StaticEmbedderCore`) in `src/py/vertebra/embeddings/_local.py`.
+- Verified with `pytest src/py/tests/unit/embeddings/test_embedding_broker.py -v` (5/5 passed), `ruff`, `mypy`, and `python -m tools.scripts.review_setup validate` (0 errors).
 
 ---
 

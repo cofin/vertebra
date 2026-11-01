@@ -109,6 +109,9 @@ htmx = [
 saq = [
     "litestar-saq>=0.8.0",
 ]
+embeddings = [
+    "fastembed>=0.6.0",
+]
 all = [
     "sqlspec>=0.69.0",
     "advanced-alchemy>=1.12.0",
