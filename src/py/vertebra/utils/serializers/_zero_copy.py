@@ -10,16 +10,59 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
 
-from vertebra._vertebra import (
-    hydrate_one_vectorcall,
-    hydrate_rows_vectorcall,
-    instantiate_struct_vectorcall,
-    orm_to_struct_vectorcall,
-    pack_grpc_lpm_frame,
-)
+from vertebra.utils.module_loader import import_optional
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+_native_vtb = import_optional("vertebra._vertebra")
+
+
+def _py_pack_grpc_lpm_frame(payload: Any, compressed: bool = False) -> bytes:
+    mv = memoryview(payload)
+    return _LPM_STRUCT.pack(int(compressed), len(mv)) + bytes(mv)
+
+
+def _py_instantiate_struct_vectorcall(cls: Any, args: Any = None, kwargs: Any = None) -> Any:
+    return cls(*(args or ()), **(kwargs or {}))
+
+
+def _py_hydrate_one_vectorcall(cls: Any, row: Any, columns: Any = None) -> Any:
+    if isinstance(row, dict):
+        return cls(**row)
+    if columns is not None:
+        return cls(**dict(zip(columns, row, strict=False)))
+    if isinstance(row, tuple | list):
+        return cls(*row)
+    names = tuple(getattr(cls, "__struct_fields__", ()))
+    return cls(**{k: getattr(row, k) for k in names})
+
+
+def _py_hydrate_rows_vectorcall(cls: Any, rows: Any, columns: Any = None) -> list[Any]:
+    cols = tuple(columns) if columns is not None else None
+    return [_py_hydrate_one_vectorcall(cls, r, cols) for r in rows]
+
+
+def _py_orm_to_struct_vectorcall(cls: Any, orm_obj: Any, fields: Any = None) -> Any:
+    names = tuple(fields) if fields is not None else tuple(getattr(cls, "__struct_fields__", ()))
+    if isinstance(orm_obj, list | tuple):
+        return [cls(**{k: getattr(item, k) for k in names}) for item in orm_obj]
+    return cls(**{k: getattr(orm_obj, k) for k in names})
+
+
+hydrate_one_vectorcall: Callable[..., Any] = (
+    getattr(_native_vtb, "hydrate_one_vectorcall", None) or _py_hydrate_one_vectorcall
+)
+hydrate_rows_vectorcall: Callable[..., list[Any]] = (
+    getattr(_native_vtb, "hydrate_rows_vectorcall", None) or _py_hydrate_rows_vectorcall
+)
+instantiate_struct_vectorcall: Callable[..., Any] = (
+    getattr(_native_vtb, "instantiate_struct_vectorcall", None) or _py_instantiate_struct_vectorcall
+)
+orm_to_struct_vectorcall: Callable[..., Any] = (
+    getattr(_native_vtb, "orm_to_struct_vectorcall", None) or _py_orm_to_struct_vectorcall
+)
+pack_grpc_lpm_frame: Callable[..., bytes] = getattr(_native_vtb, "pack_grpc_lpm_frame", None) or _py_pack_grpc_lpm_frame
 
 __all__ = (
     "GRPC_LPM_HEADER_LEN",
