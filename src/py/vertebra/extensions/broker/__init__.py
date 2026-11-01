@@ -9,7 +9,7 @@ from vertebra.extensions.broker.transport import (
     ChannelMessage,
     ConnectionLease,
     InMemoryBrokerTransport,
-    ShmBrokerTransport,
+    SHMBrokerTransport,
     StatementPlan,
 )
 
@@ -20,6 +20,6 @@ __all__ = (
     "ChannelMessage",
     "ConnectionLease",
     "InMemoryBrokerTransport",
-    "ShmBrokerTransport",
+    "SHMBrokerTransport",
     "StatementPlan",
 )

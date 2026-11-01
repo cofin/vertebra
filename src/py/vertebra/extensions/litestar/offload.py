@@ -15,7 +15,7 @@ from vertebra.utils.serializers import encode_json, encode_json_bytes
 __all__ = (
     "CompressionOffloadSpec",
     "CorsOffloadSpec",
-    "LitestarOffloadPlan",
+    "OffloadPlan",
     "OpenApiOffloadSpec",
     "StaticMountOffloadSpec",
     "_get_handler_after_response",
@@ -31,7 +31,7 @@ __all__ = (
     "evaluate_cors_preflight",
     "evaluate_cors_response_headers",
     "evaluate_openapi_cache_request",
-    "offload_litestar_middlewares",
+    "offload_middlewares",
 )
 
 
@@ -79,7 +79,7 @@ class OpenApiOffloadSpec(msgspec.Struct, frozen=True, gc=False):
     content_type: str = "application/vnd.oai.openapi+json"
 
 
-class LitestarOffloadPlan(msgspec.Struct, frozen=True, gc=False):
+class OffloadPlan(msgspec.Struct, frozen=True, gc=False):
     """Complete startup offload plan extracted from an unmodified Litestar v2 or v3 app."""
 
     compression: CompressionOffloadSpec | None
@@ -145,12 +145,12 @@ class LitestarOffloadPlan(msgspec.Struct, frozen=True, gc=False):
         return encode_json(self.to_server_config())
 
 
-def offload_litestar_middlewares(
+def offload_middlewares(
     app: Any,
     *,
     config: Any = None,
     strip_python_middleware: bool = True,
-) -> LitestarOffloadPlan:
+) -> OffloadPlan:
     """Extract CompressionConfig, CORSConfig, StaticFiles, and OpenAPI from a Litestar v2 or v3 app."""
     cfg = config
     if cfg is None:
@@ -177,7 +177,7 @@ def offload_litestar_middlewares(
     cors_spec = _extract_cors_config(app) if enable_cors else None
     static_mounts = _extract_static_mounts(app) if enable_static else ()
     openapi_spec = _extract_openapi_schema_payload(app) if enable_openapi else None
-    return LitestarOffloadPlan(
+    return OffloadPlan(
         compression=compression_spec,
         cors=cors_spec,
         static_mounts=static_mounts,
@@ -278,7 +278,8 @@ def _is_empty_sentinel(value: Any) -> bool:
     if value is None:
         return True
     type_name = getattr(type(value), "__name__", "")
-    return type_name == "EmptyType" or value.__class__.__name__ == "Empty"
+    val_name = getattr(value, "name", "")
+    return type_name in ("EmptyType", "_EmptyEnum") or val_name == "EMPTY" or value.__class__.__name__ == "Empty"
 
 
 def _get_handler_guards(handler: Any) -> tuple[Any, ...]:
@@ -456,7 +457,7 @@ def _is_default_local_filesystem(fs: Any) -> bool:
     if fs is None:
         return True
     cls_name = type(fs).__name__
-    return cls_name in {"BaseLocalFileSystem", "LocalFileSystem"}
+    return cls_name in {"BaseLocalFileSystem", "LocalFileSystem", "FileSystemAdapter"}
 
 
 def _extract_closure_dict(fn: Any) -> dict[str, Any]:
@@ -515,8 +516,19 @@ def _extract_static_mounts(app: Any) -> tuple[StaticMountOffloadSpec, ...]:
             if "create_static_files_router" not in qualname and "_handle" not in qualname:
                 continue
             freevars = _extract_closure_dict(fn)
-            resolved_dirs = freevars.get("resolved_directories") or freevars.get("directories")
-            fs = freevars.get("file_system")
+            sf = freevars.get("static_files")
+            if sf is not None:
+                resolved_dirs = getattr(sf, "directories", None)
+                html_mode = bool(getattr(sf, "is_html_mode", getattr(sf, "html_mode", False)))
+                send_as_attachment = bool(getattr(sf, "send_as_attachment", False))
+                headers = dict(getattr(sf, "headers", None) or {})
+                fs = getattr(sf, "adapter", getattr(sf, "file_system", None))
+            else:
+                resolved_dirs = freevars.get("resolved_directories") or freevars.get("directories")
+                html_mode = bool(freevars.get("html_mode", False))
+                send_as_attachment = bool(freevars.get("send_as_attachment", False))
+                headers = dict(freevars.get("headers") or {})
+                fs = freevars.get("file_system")
             if not resolved_dirs or not _is_default_local_filesystem(fs):
                 continue
             route_path = str(getattr(route, "path", ""))
@@ -528,9 +540,9 @@ def _extract_static_mounts(app: Any) -> tuple[StaticMountOffloadSpec, ...]:
                 StaticMountOffloadSpec(
                     path_prefix=prefix,
                     directories=tuple(str(Path(d).resolve()) for d in resolved_dirs),
-                    html_mode=bool(freevars.get("html_mode", False)),
-                    send_as_attachment=bool(freevars.get("send_as_attachment", False)),
-                    headers=dict(freevars.get("headers") or {}),
+                    html_mode=html_mode,
+                    send_as_attachment=send_as_attachment,
+                    headers=headers,
                 )
             )
 

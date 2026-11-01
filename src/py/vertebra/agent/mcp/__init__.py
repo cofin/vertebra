@@ -14,6 +14,9 @@ from vertebra.agent.mcp.client import (
 from vertebra.agent.mcp.controllers import (
     PromptController,
     SkillController,
+    mcp_prompt,
+    mcp_resource,
+    mcp_tool,
     prompt,
     resource,
 )
@@ -57,6 +60,13 @@ from vertebra.agent.mcp.tasks import (
     TaskRecord,
     TaskStateError,
 )
+from vertebra.agent.mcp.webmcp import (
+    WebMCPConfig,
+    WebMCPManifest,
+    WebMCPToolDescriptor,
+    build_webmcp_manifest,
+    render_webmcp_manifest_json,
+)
 
 __all__ = [
     "HEADER_MISMATCH",
@@ -94,11 +104,19 @@ __all__ = [
     "TaskStateError",
     "TextContent",
     "ToolCallOutput",
+    "WebMCPConfig",
+    "WebMCPManifest",
+    "WebMCPToolDescriptor",
+    "build_webmcp_manifest",
     "decode_mcp_header_value",
     "encode_mcp_header_value",
+    "mcp_prompt",
     "mcp_request_headers",
+    "mcp_resource",
+    "mcp_tool",
     "parse_skill_frontmatter",
     "prompt",
+    "render_webmcp_manifest_json",
     "resource",
     "run_stdio_http_bridge",
     "run_stdio_server",

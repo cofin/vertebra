@@ -304,6 +304,24 @@ impl ObjectStore {
         Ok(ObjectMeta::from(meta))
     }
 
+    fn put_multipart_async(
+        &self,
+        py: Python<'_>,
+        path: String,
+        parts: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<RustTaskAwaitable> {
+        let mut chunks = Vec::with_capacity(parts.len());
+        for part in &parts {
+            chunks.push(extract_buffer_bytes(py, part)?);
+        }
+        let engine = self.engine.clone();
+        spawn_rust_task(
+            py,
+            async move { engine.put_multipart(&path, chunks).await },
+            |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
+        )
+    }
+
     fn get<'py>(&self, py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyBytes>> {
         let engine = self.engine.clone();
         let data = py
@@ -536,7 +554,7 @@ fn py_verify_s3_v4_url(
 }
 
 #[pyfunction]
-#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=None, iam_endpoint="https://iamcredentials.googleapis.com", access_token=None))]
+#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=None, iam_endpoint="https://iamcredentials.googleapis.com", access_token=None, private_key_pem=None))]
 #[allow(clippy::too_many_arguments)]
 fn py_sign_gcs_v4_iam_url(
     py: Python<'_>,
@@ -548,12 +566,13 @@ fn py_sign_gcs_v4_iam_url(
     timestamp: Option<i64>,
     iam_endpoint: &str,
     access_token: Option<String>,
+    private_key_pem: Option<String>,
 ) -> PyResult<String> {
     let timestamp = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
     let cfg = GcsSignConfig {
         bucket: bucket.to_string(),
         service_account_email: service_account_email.to_string(),
-        private_key_pem: None,
+        private_key_pem,
         access_token,
     };
     py.detach(|| {

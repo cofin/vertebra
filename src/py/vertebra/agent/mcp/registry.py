@@ -143,12 +143,122 @@ class MCPRegistry:
         if hasattr(inst, "get_resources") and callable(inst.get_resources):
             for r in inst.get_resources():
                 self.register_resource(r)
+        if hasattr(inst, "get_resource_templates") and callable(inst.get_resource_templates):
+            for rt in inst.get_resource_templates():
+                self.register_resource_template(rt)
         if hasattr(inst, "get_prompts") and callable(inst.get_prompts):
             for p in inst.get_prompts():
                 self.register_prompt(p)
         if hasattr(inst, "to_agent_skill") and callable(inst.to_agent_skill):
             ctrl_id = getattr(inst, "skill_id", None) or getattr(inst, "prefix", None) or inst.__class__.__name__
             self._skill_controllers[ctrl_id] = inst
+
+    def register_route_handler(self, handler: Any, *, opt: dict[str, Any] | None = None) -> None:
+        """Inspect a route handler callable and optional opt dictionary for explicit MCP annotations."""
+        fn = getattr(handler, "fn", getattr(handler, "handler", getattr(handler, "endpoint", handler)))
+        if not callable(fn):
+            return
+        options = dict(opt or getattr(handler, "opt", {}) or {})
+
+        tool_meta = getattr(fn, "_mcp_tool_meta", None)
+        opt_tool = options.get("mcp_tool")
+        if tool_meta is not None:
+            self.register_tool(
+                Tool(
+                    fn,
+                    name=tool_meta.get("name") or getattr(fn, "__name__", "tool"),
+                    description=tool_meta.get("description") or "",
+                    requires_confirmation=bool(tool_meta.get("requires_confirmation", False)),
+                    timeout_seconds=tool_meta.get("timeout_seconds"),
+                )
+            )
+        elif opt_tool:
+            tool_name = opt_tool if isinstance(opt_tool, str) else getattr(fn, "__name__", "tool")
+            self.register_tool(Tool(fn, name=tool_name))
+
+        res_meta = getattr(fn, "_mcp_resource", None)
+        opt_res = options.get("mcp_resource")
+        if res_meta is not None:
+            self.register_resource(
+                ResourceEntry(
+                    uri=res_meta["uri"],
+                    name=res_meta["name"],
+                    description=res_meta["description"],
+                    mimeType=res_meta["mimeType"],
+                    reader=fn,
+                )
+            )
+        elif isinstance(opt_res, str):
+            self.register_resource(
+                ResourceEntry(
+                    uri=opt_res,
+                    name=getattr(fn, "__name__", "resource"),
+                    description=getattr(fn, "__doc__", "") or "",
+                    mimeType="text/plain",
+                    reader=fn,
+                )
+            )
+
+        tmpl_meta = getattr(fn, "_mcp_resource_template", None)
+        opt_tmpl = options.get("mcp_resource_template")
+        if tmpl_meta is not None:
+            self.register_resource_template(
+                ResourceTemplateEntry(
+                    uriTemplate=tmpl_meta["uriTemplate"],
+                    name=tmpl_meta["name"],
+                    description=tmpl_meta["description"],
+                    mimeType=tmpl_meta["mimeType"],
+                    reader=fn,
+                )
+            )
+        elif isinstance(opt_tmpl, str):
+            self.register_resource_template(
+                ResourceTemplateEntry(
+                    uriTemplate=opt_tmpl,
+                    name=getattr(fn, "__name__", "template"),
+                    description=getattr(fn, "__doc__", "") or "",
+                    mimeType="text/plain",
+                    reader=fn,
+                )
+            )
+
+        prompt_meta = getattr(fn, "_mcp_prompt", None)
+        opt_prompt = options.get("mcp_prompt")
+        if prompt_meta is not None:
+            self.register_prompt(
+                PromptEntry(
+                    name=prompt_meta["name"],
+                    description=prompt_meta["description"],
+                    arguments=prompt_meta.get("arguments", ()),
+                    getter=fn,
+                )
+            )
+        elif opt_prompt:
+            prompt_name = opt_prompt if isinstance(opt_prompt, str) else getattr(fn, "__name__", "prompt")
+            self.register_prompt(
+                PromptEntry(
+                    name=prompt_name,
+                    description=getattr(fn, "__doc__", "") or "",
+                    arguments=(),
+                    getter=fn,
+                )
+            )
+
+    def discover_app_routes(self, app: Any) -> None:
+        """Scan an application's routes and controllers for explicit MCP annotations."""
+        controllers = getattr(app, "controllers", ()) or ()
+        for ctrl in controllers:
+            if hasattr(ctrl, "get_tools") or hasattr(ctrl, "get_prompts") or hasattr(ctrl, "get_resources"):
+                self.register_controller(ctrl)
+
+        routes = getattr(app, "routes", ()) or ()
+        for route in routes:
+            handler_map = getattr(route, "route_handler_map", None)
+            if isinstance(handler_map, dict):
+                for h_obj in handler_map.values():
+                    self.register_route_handler(h_obj)
+            else:
+                self.register_route_handler(route)
 
 
 __all__ = [

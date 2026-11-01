@@ -187,20 +187,55 @@ class DevMiddleware:
             await self.send_response(send, content.encode("utf-8"), content_type)
             return
 
-        if path == "/__vertebra/client/hmr.js":
-            js_data = None
-            for name in ("server/_js/bundle/hmr.js", "server/_js/bundle/index.js"):
-                try:
-                    js_data = pkgutil.get_data("vertebra", name)
-                    if js_data:
-                        break
-                except Exception:
-                    logger.debug("Failed loading HMR client resource %s", name, exc_info=True)
-            if js_data:
-                await self.send_response(send, js_data, "application/javascript")
+        if path.startswith("/__vertebra/client/"):
+            rel_client_path = path.removeprefix("/__vertebra/client/")
+            if not rel_client_path:
+                rel_client_path = "index.js"
+            if ".." in Path(rel_client_path).parts:
+                await self.send_response(send, b"Forbidden", "text/plain", status=403)
                 return
-            content = "/* HMR client not found */"
-            await self.send_response(send, content.encode("utf-8"), "application/javascript")
+
+            candidates = [
+                f"server/_js/bundle/{rel_client_path}",
+                f"server/_js/bundle/{rel_client_path}.js",
+                f"server/_js/bundle/{rel_client_path}/index.js",
+            ]
+            if rel_client_path.endswith(".js"):
+                stem = rel_client_path.removesuffix(".js")
+                candidates.append(f"server/_js/bundle/{stem}/index.js")
+            for candidate in candidates:
+                try:
+                    js_data = pkgutil.get_data("vertebra", candidate)
+                    if js_data:
+                        content_type = "application/javascript"
+                        if candidate.endswith(".json"):
+                            content_type = "application/json"
+                        elif candidate.endswith(".d.ts"):
+                            content_type = "application/typescript"
+                        await self.send_response(send, js_data, content_type)
+                        return
+                except Exception:
+                    pass
+
+            ts_src_dir = Path(__file__).resolve().parents[3] / "ts" / "vertebra-client" / "src"
+            if ts_src_dir.is_dir():
+                stem = rel_client_path.removesuffix(".d.ts").removesuffix(".js")
+                src_candidates = (
+                    ts_src_dir / f"{stem}.ts",
+                    ts_src_dir / f"{stem}.tsx",
+                    ts_src_dir / stem / "index.ts",
+                    ts_src_dir / stem / "index.tsx",
+                )
+                for src_candidate in src_candidates:
+                    if src_candidate.is_file():
+                        content_type = (
+                            "application/typescript" if rel_client_path.endswith(".d.ts") else "application/javascript"
+                        )
+                        await self.send_response(send, src_candidate.read_bytes(), content_type)
+                        return
+
+            content = f"/* Vertebra client resource not found: {rel_client_path} */"
+            await self.send_response(send, content.encode("utf-8"), "application/javascript", status=404)
             return
 
         await self.send_response(send, b"Not Found", "text/plain", status=404)

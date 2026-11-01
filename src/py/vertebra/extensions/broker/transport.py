@@ -13,7 +13,7 @@ from vertebra._vertebra import (
     LeaseBroker,
     StatementCache,
 )
-from vertebra.utils.serializers import decode_msgpack, encode_msgpack
+from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
 from vertebra.utils.sync_tools import SyncPool
 
 if TYPE_CHECKING:
@@ -26,7 +26,7 @@ __all__ = (
     "ChannelMessage",
     "ConnectionLease",
     "InMemoryBrokerTransport",
-    "ShmBrokerTransport",
+    "SHMBrokerTransport",
     "StatementPlan",
 )
 
@@ -354,7 +354,7 @@ class InMemoryBrokerTransport:
         pass
 
 
-class ShmBrokerTransport:
+class SHMBrokerTransport:
     """Production shared-memory connection broker and statement cache transport."""
 
     _DIALECT_TAGS = {
@@ -424,7 +424,7 @@ class ShmBrokerTransport:
         fd: int,
         size: int = 0,
         config: BrokerConfig | None = None,
-    ) -> ShmBrokerTransport:
+    ) -> SHMBrokerTransport:
         """Attach a broker transport to an inherited shared-memory file descriptor."""
         cfg = config or BrokerConfig()
         native = LeaseBroker.from_fd(fd, size)
@@ -580,7 +580,7 @@ class ShmBrokerTransport:
 
         compiled_sql, param_names = compiler(raw_sql)
         compiled_bytes = compiled_sql.encode("utf-8")
-        param_bytes = encode_msgpack(list(param_names)) if param_names else b""
+        param_bytes = encode_msgpack_bytes(list(param_names)) if param_names else b""
 
         self._stmt_cache.insert(
             dialect_tag=dialect_tag,

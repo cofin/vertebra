@@ -3,13 +3,13 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from vertebra.framework.ssr import SsrResult, prerender_routes
+from vertebra.framework.ssr import SSRResult, prerender_routes
 from vertebra.utils.serializers import decode_json
 
 
 def _mock_ssr_client(head: "list[str] | None" = None, body: str = "<div>rendered</div>") -> MagicMock:
     client = MagicMock()
-    client.render.return_value = SsrResult(
+    client.render.return_value = SSRResult(
         head=head or ["<title>Test</title>"],
         body=body,
     )
@@ -67,7 +67,7 @@ def test_prerender_routes_render_failure_continues(tmp_path: Path) -> None:
     client = MagicMock()
     client.render.side_effect = [
         RuntimeError("fail"),
-        SsrResult(head=[], body="<div>ok</div>"),
+        SSRResult(head=[], body="<div>ok</div>"),
     ]
     routes = [
         {"path": "/bad", "component": "Bad", "props": {}},

@@ -19,9 +19,10 @@ from vertebra.db.valkey import (
     SyncValkeyDriver,
     ValkeyConfig,
 )
+from vertebra.extensions.litestar.channels import ChannelsBackend
 from vertebra.extensions.litestar.store import MemoryStore
-from vertebra.framework.channels import ChannelBus, ChannelsBackend
-from vertebra.framework.stores import KeyValueBackend
+from vertebra.framework.channels import ChannelBus
+from vertebra.framework.stores import KeyValueStore
 
 
 def test_resp3_wire_parser_decodes_primitives_and_collections() -> None:
@@ -273,8 +274,8 @@ async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
 
 @pytest.mark.anyio
 async def test_key_value_backend_and_channel_bus() -> None:
-    """KeyValueBackend and ChannelBus must provide unified caching and pub/sub streaming."""
-    kv = KeyValueBackend.from_valkey("memory://")
+    """KeyValueStore and ChannelBus must provide unified caching and pub/sub streaming."""
+    kv = KeyValueStore.from_valkey("memory://")
     await kv.set("a", "1")
     await kv.set_many({"b": "2", "c": "3"})
 
@@ -289,7 +290,7 @@ async def test_key_value_backend_and_channel_bus() -> None:
     assert await ns.get("user") == b"bob"
 
     bus = ChannelBus.from_redis("memory://")
-    assert isinstance(bus.backend, ChannelsBackend)
+    assert isinstance(bus.backend, ChannelBus)
     await bus.on_startup()
     await bus.subscribe(["events"])
 
@@ -396,7 +397,7 @@ async def test_resp3_loopback_server_pipeline_evalsha_and_valkey_push_invalidati
     invalidated_keys: list[list[str]] = []
     driver.add_invalidation_listener(lambda keys: invalidated_keys.append(list(keys)))
 
-    kv = KeyValueBackend(driver=driver)
+    kv = KeyValueStore(driver=driver)
     await kv.set("user:1", "alice")
     await kv.set_many({"user:2": "bob", "user:3": "carol"})
 

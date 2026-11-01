@@ -165,15 +165,15 @@ room = LiveStateRoom("room:lobby", CounterState())
 bus = ChannelBus()
 ```
 
-## Response Caching & Transactional Email
+## Key-Value Stores & Transactional Email
 
-Cache serialized responses or key-value state in `ResponseCacheStore` (`NamespacedStore`), and send transactional emails through a unified `EmailService` supporting 6 backends (`MemoryEmailBackend`, `SmtpBackend`, `ResendBackend`, `SendGridBackend`, `MailgunBackend`, `SesBackend`):
+Cache serialized responses or key-value state in `KeyValueStore` (`NamespacedStore`), and send transactional emails through a unified `EmailService` supporting 6 backends (`MemoryEmailBackend`, `SmtpBackend`, `ResendBackend`, `SendGridBackend`, `MailgunBackend`, `SesBackend`):
 
 ```python
 from vertebra.framework.email import EmailConfig, EmailMessage, EmailService
-from vertebra.framework.stores import ResponseCacheStore
+from vertebra.framework.stores import KeyValueStore
 
-cache = ResponseCacheStore()
+cache = KeyValueStore()
 email_service = EmailService.from_config(
     EmailConfig(backend="memory", default_from="noreply@example.com")
 )

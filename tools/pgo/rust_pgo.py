@@ -9,9 +9,9 @@ from pathlib import Path
 from vertebra.build.packaging.pgo import (
     CODEGEN_FLAGS,
     EXTENSION_MANIFESTS,
-    PgoMode,
-    PgoPipelineResult,
-    RustPgoConfig,
+    PGOMode,
+    PGOPipelineResult,
+    RustPGOConfig,
     build_cargo_pgo_env,
     build_flags,
     build_instrumented,
@@ -34,9 +34,9 @@ from vertebra.build.packaging.pgo import (
 __all__ = (
     "CODEGEN_FLAGS",
     "EXTENSION_MANIFESTS",
-    "PgoMode",
-    "PgoPipelineResult",
-    "RustPgoConfig",
+    "PGOMode",
+    "PGOPipelineResult",
+    "RustPGOConfig",
     "build_cargo_pgo_env",
     "build_flags",
     "build_instrumented",
@@ -106,8 +106,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    default_cfg = RustPgoConfig()
-    cfg = RustPgoConfig(
+    default_cfg = RustPGOConfig()
+    cfg = RustPGOConfig(
         profile_dir=args.profile_dir if args.profile_dir is not None else default_cfg.profile_dir,
         llvm_profdata_bin=args.llvm_profdata,
     )

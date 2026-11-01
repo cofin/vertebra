@@ -21,13 +21,13 @@ Practical guides for building, scaling, testing, and deploying applications with
 | Guide | Topics Covered |
 | --- | --- |
 | **[Databases & Analytics](databases.md)** | Single-RTT CTE statement stacking (`QueryPipeline`, `RelOverlay`), 9 native database drivers, zero-sidecar Cloud SQL & AlloyDB dialers, Row-Level Security (`TenantPredicate`), CDC (`ChangeFeed`), and DataFusion/Arrow SHM. |
-| **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | `SQLSpecPlugin` (statement stacks & SHM proxy), `AlchemyPlugin` & `+vtb` dialects, `LitestarPlugin`, `GrpcServiceRegistry`, `ApexGateway` & 26ai Duality Views, and `BrokerPlugin`. |
+| **[Framework Extensions](extensions.md)** | `LitestarPlugin` and ecosystem extensions (`queues`, `security`, `autowire`, `email`, `mcp`, `vite`), `create_sqlspec_plugin`, `create_alchemy_plugin` & `+vtb` dialects, `GrpcServiceRegistry`, `ApexGateway`, and `BrokerPlugin`. |
 
 ## Object Storage
 
 | Guide | Topics Covered |
 | --- | --- |
-| **[Object Storage](storage.md)** | Multi-cloud and local object storage (`ObjectStore`, `StorageRegistry`) across S3, GCS, Azure, R2, OCI, HTTP, Local, and Memory backends, presigned URLs (`SigningConfig`), PyArrow `ReadableFile`, and transactional `UploadTracker`. |
+| **[Object Storage](storage.md)** | Multicloud and local object storage (`ObjectStore`, `SyncStore`, `AsyncStore`) across S3, GCS (with ADC), Azure, R2, OCI, HTTP, Local, and Memory backends, presigned URLs (`SigningConfig`), PyArrow `ReadableFile`, and Advanced Alchemy `FileObject` attachments. |
 
 ## Frontend, Agents & Testing
 

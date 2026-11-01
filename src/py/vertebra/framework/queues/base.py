@@ -655,7 +655,7 @@ class QueueService:
             backend_cls = import_string("vertebra.framework.queues.redis.ValkeyQueueBackend")
             return cast("QueueBackend", backend_cls(config))
         if scheme in ("postgresql", "postgres"):
-            backend_cls = import_string("vertebra.framework.queues.postgres.PostgresQueueBackend")
+            backend_cls = import_string("vertebra.framework.queues.postgres.PostgreSQLQueueBackend")
             return cast("QueueBackend", backend_cls(config))
         if scheme in ("oracle",):
             backend_cls = import_string("vertebra.framework.queues.oracle.OracleQueueBackend")

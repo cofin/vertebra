@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any
 
 import click
 import msgspec
 import pytest
+from advanced_alchemy.extensions.litestar import SQLAlchemyPlugin
+from advanced_alchemy.types.file_object import FileObject
+from advanced_alchemy.types.file_object.registry import storages
+from litestar.config.app import AppConfig
 
 import vertebra
 import vertebra.extensions.alchemy as alchemy_ext
@@ -23,43 +26,35 @@ from vertebra.cli.plugin_registry import (
     register_app_cli_plugins,
 )
 from vertebra.extensions.alchemy import (
-    AlchemyPlugin,
     BrokerConfig,
-    BrokerPlugin,
     ChannelMessage,
-    DatabaseService,
-    FileAttachment,
     InMemoryBrokerTransport,
     ObjectStoreBackend,
-    ShmBrokerTransport,
-    ShmSessionBroker,
-    SQLAlchemyAsyncConfig,
-    SQLAlchemySyncConfig,
+    SHMBrokerTransport,
+    SHMSessionBroker,
     StatementCache,
-    StoredObject,
-    SyncSessionConfig,
+    create_alchemy_plugin,
+    create_async_alchemy_config,
+    create_sync_alchemy_config,
 )
+from vertebra.extensions.alchemy.storage import register_storage_backend
 from vertebra.extensions.litestar import (
     ChannelsBackend,
+    FastPath,
     LitestarConfig,
     LitestarPlugin,
-    LitestarRouteCompiler,
     MemoryStore,
+    OffloadPlan,
+    RouteCompiler,
+    RouterTable,
 )
 from vertebra.extensions.sqlspec import (
     ProxyAsyncConfig,
     ProxySyncConfig,
-    SQLSpecAsyncConfig,
-    SQLSpecConfig,
     SQLSpecPlugin,
-    SQLSpecStore,
-    SQLSpecSyncConfig,
+    create_sqlspec_plugin,
 )
-from vertebra.storage import (
-    ObjectStore,
-    StorageRegistry,
-    get_default_storage_registry,
-)
+from vertebra.storage import ObjectStore
 
 
 class _DummySyncDriver:
@@ -90,124 +85,110 @@ def test_canonical_extension_exports() -> None:
     assert not hasattr(litestar_ext, "VertebraConfig")
     assert not hasattr(litestar_ext, "VertebraPlugin")
     assert not hasattr(alchemy_ext, "AdvancedAlchemy")
-    assert not hasattr(alchemy_ext, "SQLAlchemyPlugin")
+    assert not hasattr(alchemy_ext, "AlchemyPlugin")
     assert not hasattr(alchemy_ext, "AlchemyStore")
     assert not hasattr(alchemy_ext, "StorageBackend")
+    assert not hasattr(alchemy_ext, "VertebraAlchemyPlugin")
     assert not hasattr(sqlspec_ext, "SQLSpec")
     assert not hasattr(sqlspec_ext, "SQLSpecStorageBridge")
     assert not hasattr(sqlspec_ext, "VertebraSQLSpecPlugin")
+    assert hasattr(alchemy_ext, "create_alchemy_plugin")
+    assert hasattr(sqlspec_ext, "create_sqlspec_plugin")
+    assert hasattr(sqlspec_ext, "SQLSpecPlugin")
 
     plugin = LitestarPlugin(LitestarConfig(enable_health_endpoint=True))
     assert plugin.config.enable_health_endpoint is True
     assert isinstance(ChannelsBackend(history=4), ChannelsBackend)
     assert isinstance(MemoryStore(), MemoryStore)
     assert isinstance(CodegenPlugin(CodegenConfig()), CodegenPlugin)
-    assert LitestarRouteCompiler is not None
+    assert RouteCompiler is not None
+    assert RouterTable is not None
+    assert FastPath is not None
+    assert OffloadPlan is not None
     assert ObjectStoreBackend is not None
-    assert SQLSpecStore is not None
 
 
 def test_sqlspec_generic_configs_and_pool_defaults() -> None:
-    """Verify PEP 695 generic SQLSpecConfig, ProxySyncConfig, ProxyAsyncConfig, and pool defaults."""
+    """Verify PEP 695 generic ProxySyncConfig, ProxyAsyncConfig, and pool defaults."""
     sync_driver = _DummySyncDriver()
-    sync_cfg = SQLSpecSyncConfig[str, str, _DummySyncDriver](
+    sync_cfg = SimpleNamespace(
         dsn="postgresql://localhost:5432/app",
         bind_key="primary",
         driver_instance=sync_driver,
         connection_instance="sync_conn",
         pool_instance="sync_pool",
+        supports_connection_pooling=True,
+        pool_config={},
+        provide_session=lambda: sync_driver,
+        provide_connection=lambda: "sync_conn",
+        create_pool=lambda: "sync_pool",
     )
-    assert sync_cfg.pool_config["pool_pre_ping"] is True
-    assert sync_cfg.pool_config["pool_recycle"] == 1800
-
-    in_mem_cfg = SQLSpecSyncConfig[str, str, _DummySyncDriver](
-        dsn="sqlite:///:memory:",
-        driver_instance=sync_driver,
-    )
-    assert "pool_pre_ping" not in in_mem_cfg.pool_config
-
-    wrapped = SQLSpecConfig(sync_cfg)
-    assert isinstance(wrapped, SQLSpecConfig)
-    assert wrapped.is_async is False
-    assert wrapped.provide_session() is sync_driver
-
     proxy_sync = ProxySyncConfig(sync_cfg)
     assert proxy_sync.provide_session() is sync_driver
     assert proxy_sync.provide_connection() == "sync_conn"
     assert proxy_sync.create_pool() == "sync_pool"
 
     async_driver = _DummyAsyncDriver()
-    async_cfg = SQLSpecAsyncConfig[str, str, _DummyAsyncDriver](
+    async_cfg = SimpleNamespace(
         dsn="postgresql+asyncpg://localhost:5432/app",
+        bind_key="async_pool",
         driver_instance=async_driver,
+        supports_connection_pooling=True,
+        pool_config={},
+        provide_session=lambda: async_driver,
     )
-    assert async_cfg.pool_config["pool_pre_ping"] is True
     proxy_async = ProxyAsyncConfig(async_cfg)
     assert proxy_async.is_async is True
     assert proxy_async.provide_session() is async_driver
 
-    spec_plugin: SQLSpecPlugin[object] = SQLSpecPlugin(
-        config=[proxy_sync, proxy_async],
-        store=ObjectStore("memory://"),
-    )
-    assert spec_plugin.get_session(proxy_sync) is sync_driver
-    assert spec_plugin.get_session(proxy_async) is async_driver
+    spec_plugin = create_sqlspec_plugin(proxy_sync, proxy_async)
+    assert isinstance(spec_plugin, SQLSpecPlugin)
 
-    app_config = SimpleNamespace(state={}, dependencies={})
+    app_config = AppConfig()
     spec_plugin.on_app_init(app_config)
+    for startup_fn in app_config.on_startup:
+        startup_fn()
     assert "sqlspec" in app_config.state
     assert "db_session" in app_config.dependencies
     assert "db_connection" in app_config.dependencies
 
 
 def test_alchemy_generic_configs_and_attachment_storage() -> None:
-    """Verify SQLAlchemyAsyncConfig, SQLAlchemySyncConfig, AlchemyPlugin, and ObjectStoreBackend."""
-    async_cfg = SQLAlchemyAsyncConfig[str, str, object](
+    """Verify SQLAlchemyAsyncConfig, SQLAlchemySyncConfig, create_alchemy_plugin, and ObjectStoreBackend."""
+    async_cfg = create_async_alchemy_config(
         connection_string="postgresql+asyncpg://localhost/db",
-        engine_instance="async_engine",
-        session_maker_instance=lambda: "async_session",
     )
-    assert async_cfg.engine_config["pool_pre_ping"] is True
-    assert async_cfg.engine_config["pool_recycle"] == 1800
-    assert async_cfg.provide_engine() == "async_engine"
-    assert async_cfg.provide_session() == "async_session"
+    assert async_cfg.engine_config.pool_pre_ping is True
+    assert async_cfg.engine_config.pool_recycle == 1800
 
-    sync_mem_cfg = SQLAlchemySyncConfig[str, str, object](
+    sync_mem_cfg = create_sync_alchemy_config(
         connection_string="sqlite:///:memory:",
-        engine_instance="sync_engine",
-        session_maker_instance=lambda: "sync_session",
     )
-    assert "pool_pre_ping" not in sync_mem_cfg.engine_config
-
-    custom_cfg = SimpleNamespace(connection_string="postgresql://localhost/db", engine_config={})
-    AlchemyPlugin.wrap_config(custom_cfg)
-    assert custom_cfg.engine_config["pool_pre_ping"] is True
+    assert sync_mem_cfg.engine_config.pool_pre_ping is not True
 
     store = ObjectStore("memory://")
-    plugin = AlchemyPlugin(
-        config=async_cfg,
-        store=store,
-        broker=BrokerPlugin(BrokerConfig(pool_size=2, max_overflow=1)),
+    plugin = create_alchemy_plugin(
+        async_cfg,
+        storage_backend=store,
     )
-    app_config = SimpleNamespace(state={}, dependencies={})
-    plugin.on_app_init(app_config)
+    assert isinstance(plugin, SQLAlchemyPlugin)
 
-    aa_state = app_config.state["advanced_alchemy"]
-    assert aa_state.storage_backend is not None
-    assert aa_state.broker is not None
+    app_config = AppConfig()
+    plugin.on_app_init(app_config)
+    for p in app_config.plugins:
+        p.on_app_init(app_config)
     assert "db_session" in app_config.dependencies
     assert "db_engine" in app_config.dependencies
-    assert "db_broker" in app_config.dependencies
-    assert "db_broker_metrics" in app_config.dependencies
 
-    attachment = FileAttachment(path="docs/hello.txt", filename="hello.txt")
-    saved = aa_state.storage_backend.save_object(attachment, b"hello world")
+    backend = ObjectStoreBackend(store=store, prefix="docs")
+    file_obj = FileObject(backend=backend, filename="hello.txt")
+    saved = backend.save_object(file_obj, b"hello world")
     assert saved.size == 11
-    assert aa_state.storage_backend.get_content("docs/hello.txt") == b"hello world"
+    assert backend.get_content("hello.txt") == b"hello world"
 
 
 def test_broker_transport_leasing_and_channel_message() -> None:
-    """Verify InMemoryBrokerTransport, ShmBrokerTransport, lease TTL expiration, and ChannelMessage."""
+    """Verify InMemoryBrokerTransport, SHMBrokerTransport, lease TTL expiration, and ChannelMessage."""
     msg = ChannelMessage(channel="events", payload=b"123", timestamp_ns=42)
     encoded = msgspec.msgpack.encode(msg)
     decoded = msgspec.msgpack.decode(encoded, type=ChannelMessage)
@@ -229,7 +210,7 @@ def test_broker_transport_leasing_and_channel_message() -> None:
     assert metrics.total_timeouts == 1
 
     async def _run_async_broker() -> None:
-        shm_broker = ShmBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
+        shm_broker = SHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
         async with await shm_broker.acquire_async() as async_lease:
             assert not async_lease.is_released
         assert async_lease.is_released
@@ -243,22 +224,14 @@ def test_broker_transport_leasing_and_channel_message() -> None:
 
 
 def test_storage_registry_alias_and_uri_resolution() -> None:
-    """Verify StorageRegistry resolves aliases and URI schemes with caching."""
-    registry = StorageRegistry()
+    """Verify ObjectStoreBackend registration in Advanced Alchemy storages registry."""
     mem_store = ObjectStore("memory://")
     mem_store.put("seed.txt", b"seeded")
-    registry.register_alias("primary", mem_store)
-    registry.register_alias("exports", "memory://")
-
-    assert registry.resolve_store("primary") is mem_store
-    assert registry.resolve_store("primary").get("seed.txt") == b"seeded"
-    exports_store = registry.resolve_store("exports")
-    exports_store.put("out.json", b"{}")
-    assert registry.get("exports") is exports_store
-    assert set(registry.aliases()) == {"exports", "primary"}
-
-    default_reg = get_default_storage_registry()
-    assert isinstance(default_reg, StorageRegistry)
+    backend = register_storage_backend("primary_test_dropin", store=mem_store)
+    assert (
+        storages.get("primary_test_dropin") if hasattr(storages, "get") else storages.get_backend("primary_test_dropin")
+    ) is backend
+    assert backend.get_content("seed.txt") == b"seeded"
 
 
 def test_pluggable_cli_discovery_and_app_plugin_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -303,8 +276,8 @@ def test_pluggable_cli_discovery_and_app_plugin_hooks(monkeypatch: pytest.Monkey
 
 @pytest.mark.anyio
 async def test_shm_session_broker_concurrency_and_lock_safety() -> None:
-    """Verify ShmSessionBroker lock safety, non-underflowing in_use, and O(1) cancelled waiter skip."""
-    broker = ShmSessionBroker(capacity=2)
+    """Verify SHMSessionBroker lock safety, non-underflowing in_use, and O(1) cancelled waiter skip."""
+    broker = SHMSessionBroker(capacity=2)
     assert broker.capacity == 2
     assert broker.in_use == 0
 
@@ -353,39 +326,17 @@ def test_statement_cache_compilation() -> None:
 
 @pytest.mark.anyio
 async def test_database_service_and_stored_object_delegation() -> None:
-    """Verify DatabaseService count/list_and_count queries and StoredObject direct ObjectStore delegation."""
-
-    class FakeSession:
-        def __init__(self) -> None:
-            self.executed: list[Any] = []
-
-        def execute(self, stmt: Any) -> Any:
-            self.executed.append(stmt)
-            return self
-
-        def scalar_one(self) -> int:
-            return 42
-
-        def scalars(self) -> Any:
-            return self
-
-        def all(self) -> list[Any]:
-            return [("row-1", 42), ("row-2", 42)]
-
-    service = DatabaseService(FakeSession(), model_type=str)
-    assert await service.count() == 42
-    items, total = await service.list_and_count()
-    assert len(items) == 2
-    assert total == 42
-
+    """Verify ObjectStoreBackend async delegation and alchemy engine configuration."""
     mem_store = ObjectStore("memory://")
-    registry = StorageRegistry()
-    registry.register_alias("default", mem_store)
+    backend = ObjectStoreBackend(store=mem_store, prefix="reports")
+    file_obj = FileObject(backend=backend, filename="summary.csv")
+    await backend.save_object_async(file_obj, b"col1,col2\n1,2\n")
+    content = await backend.get_content_async("summary.csv")
+    assert content == b"col1,col2\n1,2\n"
 
-    obj = StoredObject(key="reports/summary.csv")
-    obj.put(b"col1,col2\n1,2\n", registry=registry)
-    assert obj.get(registry=registry) == b"col1,col2\n1,2\n"
-
-    sync_cfg = SyncSessionConfig(dsn="postgresql://localhost/app", pool_size=15)
-    assert sync_cfg.effective_engine_config()["pool_size"] == 15
-    assert sync_cfg.effective_engine_config()["pool_pre_ping"] is True
+    sync_cfg = create_sync_alchemy_config(
+        connection_string="postgresql://localhost/app",
+        engine_config={"pool_size": 15},
+    )
+    assert sync_cfg.engine_config.pool_size == 15
+    assert sync_cfg.engine_config.pool_pre_ping is True

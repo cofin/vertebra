@@ -1,4 +1,4 @@
-"""Unit tests for vertebra.extensions.grpc @grpc_method, GrpcServiceRegistry, ProtobufSchemaGenerator, and WasmPluginHost."""
+"""Unit tests for vertebra.extensions.grpc @grpc_method, GrpcServiceRegistry, ProtobufSchemaGenerator, and WASMPluginHost."""
 
 from __future__ import annotations
 
@@ -22,13 +22,13 @@ from vertebra.extensions.grpc import (
     grpc_method,
 )
 from vertebra.typing import MissingDependencyError
-from vertebra.utils.serializers import decode_msgpack, encode_msgpack
+from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
 from vertebra.wasm import (
     WASM_MAGIC_HEADER,
-    WasmExecutionError,
-    WasmModuleConfig,
-    WasmPluginHost,
-    WasmSandboxPolicy,
+    WASMExecutionError,
+    WASMModuleConfig,
+    WASMPluginHost,
+    WASMSandboxPolicy,
 )
 
 
@@ -104,7 +104,7 @@ async def test_grpc_service_registry_unary_and_streaming_asgi_dispatch() -> None
     registry.register(echo_client_stream)
     registry.register(echo_bidi_stream)
 
-    unary_payload = encode_lpm_frame(encode_msgpack(EchoRequest(message="ping", count=7)))
+    unary_payload = encode_lpm_frame(encode_msgpack_bytes(EchoRequest(message="ping", count=7)))
     unary_events = await _invoke_asgi(
         registry,
         path="/vertebra.echo.EchoService/EchoUnary",
@@ -123,7 +123,7 @@ async def test_grpc_service_registry_unary_and_streaming_asgi_dispatch() -> None
     assert trailer_event["type"] == "http.response.trailers"
     assert (b"grpc-status", b"0") in trailer_event["headers"]
 
-    stream_payload = encode_lpm_frame(encode_msgpack(EchoRequest(message="item", count=3)))
+    stream_payload = encode_lpm_frame(encode_msgpack_bytes(EchoRequest(message="item", count=3)))
     stream_events = await _invoke_asgi(
         registry,
         path="/vertebra.echo.EchoService/EchoServerStream",
@@ -140,8 +140,8 @@ async def test_grpc_service_registry_unary_and_streaming_asgi_dispatch() -> None
 
     client_stream_payload = b"".join(
         [
-            encode_lpm_frame(encode_msgpack(EchoRequest(message="a", count=2))),
-            encode_lpm_frame(encode_msgpack(EchoRequest(message="b", count=5))),
+            encode_lpm_frame(encode_msgpack_bytes(EchoRequest(message="a", count=2))),
+            encode_lpm_frame(encode_msgpack_bytes(EchoRequest(message="b", count=5))),
         ]
     )
     client_events = await _invoke_asgi(
@@ -173,7 +173,7 @@ async def test_grpc_error_maps_to_trailers_status_and_percent_encoded_message() 
     registry = GrpcServiceRegistry()
     registry.register(echo_unary)
 
-    bad_payload = encode_lpm_frame(encode_msgpack(EchoRequest(message="bad", count=-1)))
+    bad_payload = encode_lpm_frame(encode_msgpack_bytes(EchoRequest(message="bad", count=-1)))
     events = await _invoke_asgi(
         registry,
         path="/vertebra.echo.EchoService/EchoUnary",
@@ -207,7 +207,7 @@ async def test_grpc_method_injects_grpc_context() -> None:
     registry = GrpcServiceRegistry()
     registry.register(echo_with_ctx)
 
-    payload = encode_lpm_frame(encode_msgpack(EchoRequest(message="hello")))
+    payload = encode_lpm_frame(encode_msgpack_bytes(EchoRequest(message="hello")))
     events = await _invoke_asgi(
         registry,
         path="/vertebra.echo.EchoService/EchoWithCtx",
@@ -250,27 +250,27 @@ def test_protobuf_schema_generator_emits_proto3_definitions() -> None:
 
 
 def test_wasm_plugin_host_execution_and_missing_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify WasmPluginHost executes modules with fuel/memory limits and raises MissingDependencyError when wasmtime is absent."""
+    """Verify WASMPluginHost executes modules with fuel/memory limits and raises MissingDependencyError when wasmtime is absent."""
     wasm_add_bytes = bytes.fromhex("0061736d0100000001070160027f7f017f030201000707010361646400000a09010700200020016a0b")
-    assert WasmModuleConfig.validate_binary(wasm_add_bytes) is True
+    assert WASMModuleConfig.validate_binary(wasm_add_bytes) is True
     assert wasm_add_bytes.startswith(WASM_MAGIC_HEADER)
 
-    host = WasmPluginHost()
+    host = WASMPluginHost()
     host.register_module(
-        WasmModuleConfig(
+        WASMModuleConfig(
             name="host_math",
             wasm_source=wasm_add_bytes,
-            policy=WasmSandboxPolicy(max_fuel=50),
+            policy=WASMSandboxPolicy(max_fuel=50),
         ),
         exports={"add": lambda a, b: a + b},
     )
     assert host.call_export("host_math", "add", 20, 22, fuel_cost=10) == 42
-    with pytest.raises(WasmExecutionError, match="exceeded max_fuel"):
+    with pytest.raises(WASMExecutionError, match="exceeded max_fuel"):
         host.call_export("host_math", "add", 1, 2, fuel_cost=100)
 
     monkeypatch.setattr(wasm_mod, "_wasmtime", None)
     with pytest.raises(MissingDependencyError, match="wasmtime"):
-        host.register_module(WasmModuleConfig(name="guest_missing", wasm_source=wasm_add_bytes))
+        host.register_module(WASMModuleConfig(name="guest_missing", wasm_source=wasm_add_bytes))
 
     class _FakeStore:
         def __init__(self, _engine: Any) -> None:
@@ -304,17 +304,17 @@ def test_wasm_plugin_host_execution_and_missing_dependency(monkeypatch: pytest.M
         Instance=_FakeInstance,
     )
     monkeypatch.setattr(wasm_mod, "_wasmtime", fake_wasmtime)
-    host.register_module(WasmModuleConfig(name="math", wasm_source=wasm_add_bytes))
+    host.register_module(WASMModuleConfig(name="math", wasm_source=wasm_add_bytes))
     assert host.call_export("math", "add", 20, 22) == 42
 
     host.register_module(
-        WasmModuleConfig(
+        WASMModuleConfig(
             name="starved",
             wasm_source=wasm_add_bytes,
-            policy=WasmSandboxPolicy(max_fuel=1),
+            policy=WASMSandboxPolicy(max_fuel=1),
         )
     )
-    with pytest.raises(WasmExecutionError, match="all fuel consumed"):
+    with pytest.raises(WASMExecutionError, match="all fuel consumed"):
         host.call_export("starved", "add", 1, 2)
 
 

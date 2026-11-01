@@ -2,21 +2,63 @@
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from typing import TYPE_CHECKING, Any
 
-from vertebra.framework.channels import ChannelBus
+import anyio
+
+from vertebra.db.channels import DatabaseChannelBackend
 from vertebra.utils.module_loader import import_optional
 
-ChannelsBackend = ChannelBus
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Iterable
 
 __all__ = (
-    "ChannelBus",
     "ChannelsBackend",
-    "swap_litestar_channels_backend",
+    "swap_channels_backend",
 )
 
 
-def swap_litestar_channels_backend(app: Any, backend: ChannelBus | None = None) -> ChannelBus | None:
+class ChannelsBackend(DatabaseChannelBackend):
+    """Litestar channels pub/sub backend adapter with cancellation shielding and multi-engine backing."""
+
+    __slots__ = ()
+
+    async def unsubscribe(self, channels: Iterable[str]) -> None:
+        """Remove subscription topic slots with shielded cancellation cleanup."""
+        with anyio.CancelScope(shield=True):
+            await super().unsubscribe(channels)
+
+    async def on_shutdown(self) -> None:
+        """Flush and clear active subscriptions with shielded cancellation cleanup."""
+        with anyio.CancelScope(shield=True):
+            await super().on_shutdown()
+
+    async def stream_events(self) -> AsyncGenerator[tuple[str, bytes], None]:
+        """Yield (channel, data) events with shielded cleanup on SSE disconnect."""
+        queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
+        self._queues.add(queue)
+        for channel in tuple(self._subscribed_channels):
+            self._subscribers.setdefault(channel, set()).add(queue)
+        try:
+            while self._running:
+                item = await queue.get()
+                if item is None:
+                    break
+                channel, payload = item
+                if channel in self._subscribed_channels:
+                    yield channel, payload
+        finally:
+            with anyio.CancelScope(shield=True):
+                self._queues.discard(queue)
+                for queues in self._subscribers.values():
+                    queues.discard(queue)
+
+
+def swap_channels_backend(
+    app: Any,
+    backend: ChannelsBackend | DatabaseChannelBackend | None = None,
+) -> ChannelsBackend | DatabaseChannelBackend | None:
     """Transparently replace MemoryChannelsBackend on a Litestar app's ChannelsPlugin."""
     plugins = getattr(app, "plugins", None)
     if plugins is None:
@@ -32,24 +74,27 @@ def swap_litestar_channels_backend(app: Any, backend: ChannelBus | None = None) 
                 _MemoryChannelsBackendCls is not None and isinstance(current_backend, _MemoryChannelsBackendCls)
             ) or type(current_backend).__name__ == "MemoryChannelsBackend"
             if is_memory_backend or backend is not None:
-                history = int(getattr(current_backend, "_history", 0) or 0)
-                replacement = backend if backend is not None else ChannelBus(history=history)
+                history = int(
+                    getattr(current_backend, "_max_history_length", 0) or getattr(current_backend, "history", 0) or 0
+                )
+                replacement = backend if backend is not None else ChannelsBackend(history=history)
                 plugin._backend = replacement
                 return replacement
-            if isinstance(current_backend, ChannelBus):
+            if isinstance(current_backend, (ChannelsBackend, DatabaseChannelBackend)):
                 return current_backend
     return None
 
 
 def _load_channels_types() -> tuple[type[Any] | None, type[Any] | None]:
-    """Load Litestar ChannelsPlugin and MemoryChannelsBackend and register ChannelBus."""
+    """Load Litestar ChannelsPlugin and MemoryChannelsBackend and register DatabaseChannelBackend."""
     ch_mod = import_optional("litestar.channels")
     mem_mod = import_optional("litestar.channels.backends.memory")
     if ch_mod is None or mem_mod is None:
         return None, None
     register_fn = getattr(ch_mod.ChannelsBackend, "register", None)
     if callable(register_fn):
-        register_fn(ChannelBus)
+        register_fn(DatabaseChannelBackend)
+        register_fn(ChannelsBackend)
     return ch_mod.ChannelsPlugin, mem_mod.MemoryChannelsBackend
 
 

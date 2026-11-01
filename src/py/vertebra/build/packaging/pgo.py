@@ -24,11 +24,11 @@ __all__ = (
     "CPYTHON_PGO_FLAGS",
     "EXTENSION_MANIFESTS",
     "PLATFORM_MATRIX",
-    "PgoMode",
-    "PgoPipelineResult",
+    "PGOMode",
+    "PGOPipelineResult",
     "PlatformSupport",
     "PythonBuildInfo",
-    "RustPgoConfig",
+    "RustPGOConfig",
     "build_cargo_pgo_env",
     "build_flags",
     "build_instrumented",
@@ -69,7 +69,7 @@ EXTENSION_MANIFESTS: tuple[Path, ...] = (
 _DEFAULT_PROFILE_DIR = _REPO_ROOT / ".profiles" / "raw"
 _DEFAULT_PROFDATA_PATH = _REPO_ROOT / ".profiles" / "merged.profdata"
 
-type PgoMode = Literal["generate", "use", "baseline"]
+type PGOMode = Literal["generate", "use", "baseline"]
 
 CODEGEN_FLAGS: dict[str, str] = {
     "target-cpu": "-Ctarget-cpu={value}",
@@ -111,7 +111,7 @@ class PlatformSupport(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     notes: str
 
 
-class RustPgoConfig(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
+class RustPGOConfig(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Immutable configuration for Rust PGO build stages."""
 
     crate_name: str = "vertebra-http"
@@ -136,7 +136,7 @@ class RustPgoConfig(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
         return " ".join(build_flags(self, pgo_mode="use", profdata_path=profdata_path))
 
 
-class PgoPipelineResult(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
+class PGOPipelineResult(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Summary of an executed Rust PGO build pipeline."""
 
     release_dir: Path
@@ -288,7 +288,7 @@ def find_llvm_profdata() -> str:
 
 
 def resolve_cargo_release_dir(
-    config: RustPgoConfig,
+    config: RustPGOConfig,
     *,
     env: Mapping[str, str] | None = None,
 ) -> Path:
@@ -304,9 +304,9 @@ def resolve_cargo_release_dir(
 
 
 def build_flags(
-    config: RustPgoConfig,
+    config: RustPGOConfig,
     *,
-    pgo_mode: PgoMode,
+    pgo_mode: PGOMode,
     profdata_path: Path | None = None,
     target_cpu: str = "native",
 ) -> list[str]:
@@ -420,7 +420,7 @@ def check_profdata_size(profdata_path: Path) -> int:
     return profdata_path.stat().st_size
 
 
-def build_instrumented(config: RustPgoConfig) -> Path:
+def build_instrumented(config: RustPGOConfig) -> Path:
     """Compile the Rust server crate with -Cprofile-generate instrumentation enabled."""
     config.profile_dir.mkdir(parents=True, exist_ok=True)
     env = build_cargo_pgo_env(build_flags(config, pgo_mode="generate"))
@@ -430,7 +430,7 @@ def build_instrumented(config: RustPgoConfig) -> Path:
 
 
 def build_instrumented_extension(
-    config: RustPgoConfig,
+    config: RustPGOConfig,
     manifest_path: Path | None = None,
 ) -> Path:
     """Compile a PyO3 extension crate with -Cprofile-generate via maturin develop."""
@@ -441,21 +441,21 @@ def build_instrumented_extension(
     return config.profile_dir
 
 
-def build_instrumented_extensions(config: RustPgoConfig) -> Path:
+def build_instrumented_extensions(config: RustPGOConfig) -> Path:
     """Compile all configured PyO3 extension crates with -Cprofile-generate."""
     for manifest in config.extension_manifests:
         build_instrumented_extension(config, manifest_path=manifest)
     return config.profile_dir
 
 
-def build_optimized(config: RustPgoConfig, profdata_path: Path) -> Path:
+def build_optimized(config: RustPGOConfig, profdata_path: Path) -> Path:
     """Compile the Rust server crate with -Cprofile-use, falling back cleanly if profdata is invalid."""
     valid = validate_profdata(profdata_path, llvm_profdata=config.llvm_profdata_bin or None)
     return _build_optimized_cargo(config, profdata_path, valid=valid)
 
 
 def build_optimized_extension(
-    config: RustPgoConfig,
+    config: RustPGOConfig,
     profdata_path: Path,
     manifest_path: Path | None = None,
 ) -> Path:
@@ -464,7 +464,7 @@ def build_optimized_extension(
     return _build_optimized_maturin(config, profdata_path, manifest_path=manifest_path, valid=valid)
 
 
-def build_optimized_extensions(config: RustPgoConfig, profdata_path: Path) -> Path:
+def build_optimized_extensions(config: RustPGOConfig, profdata_path: Path) -> Path:
     """Compile all configured PyO3 extension crates with -Cprofile-use, validating profdata once."""
     valid = validate_profdata(profdata_path, llvm_profdata=config.llvm_profdata_bin or None)
     for manifest in config.extension_manifests:
@@ -473,7 +473,7 @@ def build_optimized_extensions(config: RustPgoConfig, profdata_path: Path) -> Pa
 
 
 def run_default_pgo_workload(
-    config: RustPgoConfig,
+    config: RustPGOConfig,
     release_dir: Path,
     *,
     requests_per_route: int = 250,
@@ -550,18 +550,18 @@ def run_default_pgo_workload(
 
 
 def run_pgo_pipeline(
-    config: RustPgoConfig | None = None,
+    config: RustPGOConfig | None = None,
     *,
     profdata_output: Path | None = None,
     baseline_profdata: Path | None = None,
     workload_cmd: Sequence[str] | None = None,
-    workload_runner: Callable[[RustPgoConfig, Path], None] | None = None,
+    workload_runner: Callable[[RustPGOConfig, Path], None] | None = None,
     build_extensions: bool = True,
     clean_raw_before: bool = True,
     use_existing_profdata: bool = False,
-) -> PgoPipelineResult:
+) -> PGOPipelineResult:
     """Execute the two-phase Rust PGO pipeline across vertebra-server and PyO3 extensions."""
-    cfg = config or RustPgoConfig()
+    cfg = config or RustPGOConfig()
     out_profdata = profdata_output or _DEFAULT_PROFDATA_PATH
     llvm_bin = cfg.llvm_profdata_bin or None
     manifests = cfg.extension_manifests if build_extensions else ()
@@ -572,7 +572,7 @@ def run_pgo_pipeline(
         if build_extensions:
             for manifest in cfg.extension_manifests:
                 _build_optimized_maturin(cfg, out_profdata, manifest_path=manifest, valid=existing_valid)
-        return PgoPipelineResult(
+        return PGOPipelineResult(
             release_dir=release_dir,
             profdata_path=out_profdata,
             profdata_valid=existing_valid,
@@ -619,7 +619,7 @@ def run_pgo_pipeline(
         for manifest in cfg.extension_manifests:
             _build_optimized_maturin(cfg, out_profdata, manifest_path=manifest, valid=valid)
 
-    return PgoPipelineResult(
+    return PGOPipelineResult(
         release_dir=release_dir,
         profdata_path=out_profdata,
         profdata_valid=valid,
@@ -629,7 +629,7 @@ def run_pgo_pipeline(
     )
 
 
-def _build_optimized_cargo(config: RustPgoConfig, profdata_path: Path, *, valid: bool) -> Path:
+def _build_optimized_cargo(config: RustPGOConfig, profdata_path: Path, *, valid: bool) -> Path:
     """Compile the Rust server crate using pre-validated profdata status."""
     cmd = ["cargo", "build", "--release", "--manifest-path", str(config.manifest_path)]
     if not valid:
@@ -642,7 +642,7 @@ def _build_optimized_cargo(config: RustPgoConfig, profdata_path: Path, *, valid:
 
 
 def _build_optimized_maturin(
-    config: RustPgoConfig,
+    config: RustPGOConfig,
     profdata_path: Path,
     *,
     manifest_path: Path | None,
@@ -662,7 +662,7 @@ def _build_optimized_maturin(
     return resolve_cargo_release_dir(config, env=env)
 
 
-def _maturin_develop_command(config: RustPgoConfig, manifest_path: Path | None) -> list[str]:
+def _maturin_develop_command(config: RustPGOConfig, manifest_path: Path | None) -> list[str]:
     """Build the maturin develop argv, omitting -m for root-configured vertebra-py."""
     cmd = ["maturin", "develop", "--uv", "--release"]
     if config.maturin_features:

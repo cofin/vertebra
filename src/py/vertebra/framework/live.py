@@ -10,7 +10,7 @@ from typing import Any, ClassVar
 
 import msgspec
 
-from vertebra.utils.serializers import decode_msgpack, encode_msgpack
+from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
 
 try:
     import vertebra._vertebra as _vtb
@@ -135,7 +135,7 @@ class StateDeltaFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, array
         else:
             msg = f"Unsupported state opcode: {self.opcode}"
             raise ValueError(msg)
-        return encode_msgpack(payload)
+        return encode_msgpack_bytes(payload)
 
     @classmethod
     def decode(cls, data: bytes | bytearray | memoryview) -> StateDeltaFrame:

@@ -179,6 +179,59 @@ impl Request {
         }
     }
 
+    /// Decode this request's body directly from its SHM PEP 3118 buffer via `msgspec` without a `PyBytes` copy.
+    #[pyo3(signature = (target_type=None, format="json"))]
+    pub fn decode_msgspec<'py>(
+        slf: Bound<'py, Self>,
+        target_type: Option<&Bound<'py, PyAny>>,
+        format: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        crate::msgspec_bridge::decode_msgspec_from_buffer(py, slf.as_ptr(), target_type, format)
+    }
+
+    /// Decode this request's body directly from its SHM PEP 3118 buffer via `pydantic-core` `validate_json`.
+    pub fn decode_pydantic_json<'py>(
+        slf: Bound<'py, Self>,
+        validator_or_type: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let req = slf.get();
+        let slice = req.batch.body(req.index);
+        crate::msgspec_bridge::decode_pydantic_from_buffer(
+            py,
+            slf.as_ptr(),
+            validator_or_type,
+            slice,
+        )
+    }
+
+    /// Decode a unary 5-byte LPM gRPC request body directly from the SHM slice in zero copy (`msgspec`, `pydantic`, or Protobuf).
+    #[pyo3(signature = (target_type=None, format="msgpack"))]
+    pub fn decode_grpc<'py>(
+        slf: Bound<'py, Self>,
+        target_type: Option<&Bound<'py, PyAny>>,
+        format: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let req = slf.get();
+        let slice = req.batch.body(req.index);
+        crate::msgspec_bridge::decode_grpc_unary_from_slice(py, slice, target_type, format)
+    }
+
+    /// Decode all concatenated 5-byte LPM gRPC frames in this request's SHM body into a Python `list` in zero copy.
+    #[pyo3(signature = (target_type=None, format="msgpack"))]
+    pub fn decode_grpc_frames<'py>(
+        slf: Bound<'py, Self>,
+        target_type: Option<&Bound<'py, PyAny>>,
+        format: &str,
+    ) -> PyResult<Bound<'py, pyo3::types::PyList>> {
+        let py = slf.py();
+        let req = slf.get();
+        let slice = req.batch.body(req.index);
+        crate::msgspec_bridge::decode_grpc_frames_from_slice(py, slice, target_type, format)
+    }
+
     #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn __getbuffer__(
         slf: Bound<'_, Self>,

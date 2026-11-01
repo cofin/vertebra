@@ -7,7 +7,9 @@
 use crate::errors::{BundlerError, Result};
 use pyo3::prelude::*;
 use rquickjs::function::Rest;
-use rquickjs::{CatchResultExt, Context, Function, Object, Runtime, String as JsString, Value};
+use rquickjs::{
+    CatchResultExt, Context, Function, Module, Object, Runtime, String as JsString, Value,
+};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,9 +17,9 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// Result of an SSR render call.
-#[pyclass(immutable_type, from_py_object)]
+#[pyclass(name = "SSRResult", immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
-pub struct SsrResult {
+pub struct SSRResult {
     /// Head tags emitted by the component (e.g. `<title>`, `<meta>`).
     #[pyo3(get)]
     pub head: Vec<String>,
@@ -27,7 +29,7 @@ pub struct SsrResult {
 }
 
 #[pymethods]
-impl SsrResult {
+impl SSRResult {
     #[new]
     pub fn new(head: Vec<String>, body: String) -> Self {
         Self { head, body }
@@ -37,7 +39,7 @@ impl SsrResult {
 /// Cached render entry with TTL tracking.
 #[derive(Clone)]
 struct CachedRender {
-    result: SsrResult,
+    result: SSRResult,
     created_at: Instant,
     generation: u64,
 }
@@ -59,7 +61,7 @@ impl BoundedRenderCache {
         }
     }
 
-    fn get(&mut self, key: u64, generation: u64) -> Option<SsrResult> {
+    fn get(&mut self, key: u64, generation: u64) -> Option<SSRResult> {
         if let Some(entry) = self.entries.get(&key) {
             if entry.generation == generation && entry.created_at.elapsed() < self.ttl {
                 return Some(entry.result.clone());
@@ -70,7 +72,7 @@ impl BoundedRenderCache {
         None
     }
 
-    fn insert(&mut self, key: u64, result: SsrResult, generation: u64) {
+    fn insert(&mut self, key: u64, result: SSRResult, generation: u64) {
         if self.entries.len() >= self.capacity && !self.entries.contains_key(&key) {
             // Evict expired first
             let mut evicted = false;
@@ -133,8 +135,8 @@ struct SsrSlot {
 }
 
 /// Pool of independent QuickJS runtimes and contexts for SSR rendering.
-#[pyclass(immutable_type)]
-pub struct SsrPool {
+#[pyclass(name = "SSRPool", immutable_type)]
+pub struct SSRPool {
     bundle_path: PathBuf,
     bundle_source: RwLock<Arc<str>>,
     generation: AtomicU64,
@@ -142,11 +144,12 @@ pub struct SsrPool {
     available: Mutex<VecDeque<usize>>,
     condvar: Condvar,
     acquire_timeout: Duration,
+    render_timeout: Duration,
     cache: Mutex<BoundedRenderCache>,
 }
 
 struct SlotLease<'a> {
-    pool: &'a SsrPool,
+    pool: &'a SSRPool,
     idx: usize,
 }
 
@@ -159,9 +162,14 @@ impl Drop for SlotLease<'_> {
     }
 }
 
-impl SsrPool {
+impl SSRPool {
     /// Create a new SSR pool with `pool_size` independent QuickJS runtime slots.
     pub fn new(bundle_path: &str, pool_size: usize) -> Result<Self> {
+        Self::new_with_timeout(bundle_path, pool_size, 1000)
+    }
+
+    /// Create a new SSR pool with explicit per-render timeout in milliseconds.
+    pub fn new_with_timeout(bundle_path: &str, pool_size: usize, timeout_ms: u64) -> Result<Self> {
         let resolved_size = pool_size.max(1);
         let path_buf = PathBuf::from(bundle_path);
         let source_raw = std::fs::read_to_string(&path_buf).map_err(BundlerError::Io)?;
@@ -186,6 +194,7 @@ impl SsrPool {
             available: Mutex::new(available),
             condvar: Condvar::new(),
             acquire_timeout: Duration::from_millis(500),
+            render_timeout: Duration::from_millis(timeout_ms.max(1)),
             cache: Mutex::new(BoundedRenderCache::new(256, Duration::from_secs(60))),
         })
     }
@@ -226,9 +235,35 @@ impl SsrPool {
                 .set("console", console)
                 .map_err(|e| BundlerError::Ssr(format!("Failed to set console global: {e}")))?;
 
-            ctx.eval::<(), _>(source.as_bytes())
-                .catch(&ctx)
-                .map_err(|e| BundlerError::Ssr(format!("Bundle eval failed: {e}")))?;
+            let is_esm = source.contains("export default")
+                || source.contains("export function")
+                || source.contains("export const")
+                || source.contains("export {");
+
+            if is_esm {
+                let (module, promise) = Module::declare(ctx.clone(), "ssr.mjs", source.as_bytes())
+                    .catch(&ctx)
+                    .map_err(|e| BundlerError::Ssr(format!("ESM module declare failed: {e}")))?
+                    .eval()
+                    .catch(&ctx)
+                    .map_err(|e| BundlerError::Ssr(format!("ESM module eval failed: {e}")))?;
+                let _ = promise.finish::<Value<'_>>().catch(&ctx);
+                let has_global = globals
+                    .get::<_, Value<'_>>("__ssr_render")
+                    .map(|v| v.is_function())
+                    .unwrap_or(false);
+                if !has_global {
+                    if let Ok(render_fn) = module.get::<_, Function<'_>>("render") {
+                        let _ = globals.set("__ssr_render", render_fn);
+                    } else if let Ok(default_fn) = module.get::<_, Function<'_>>("default") {
+                        let _ = globals.set("__ssr_render", default_fn);
+                    }
+                }
+            } else {
+                ctx.eval::<(), _>(source.as_bytes())
+                    .catch(&ctx)
+                    .map_err(|e| BundlerError::Ssr(format!("Bundle eval failed: {e}")))?;
+            }
 
             Ok::<_, BundlerError>(())
         })?;
@@ -241,7 +276,7 @@ impl SsrPool {
     }
 
     /// Render a component to HTML, rebuilding the checked-out slot if its generation is stale.
-    pub fn render(&self, component: &str, page_json: &str) -> Result<SsrResult> {
+    pub fn render(&self, component: &str, page_json: &str) -> Result<SSRResult> {
         let current_gen = self.generation.load(Ordering::Acquire);
         let cache_key = self.cache_key(component, page_json);
 
@@ -303,7 +338,11 @@ impl SsrPool {
             .as_ref()
             .ok_or_else(|| BundlerError::Ssr("SSR slot unavailable".to_string()))?;
 
-        let render_result = eng.ctx.with(|ctx| {
+        let deadline = Instant::now() + self.render_timeout;
+        eng.runtime
+            .set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
+
+        let render_outcome = eng.ctx.with(|ctx| {
             let globals = ctx.globals();
 
             let render_fn: Function = globals.get("__ssr_render").catch(&ctx).map_err(|e| {
@@ -356,8 +395,24 @@ impl SsrPool {
                 .catch(&ctx)
                 .map_err(|e| BundlerError::Ssr(format!("result.body missing: {e}")))?;
 
-            Ok::<_, BundlerError>(SsrResult { head, body })
-        })?;
+            Ok::<_, BundlerError>(SSRResult { head, body })
+        });
+
+        eng.runtime.set_interrupt_handler(None);
+
+        let render_result = match render_outcome {
+            Ok(res) => res,
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    *slot_guard = None;
+                    return Err(BundlerError::Ssr(format!(
+                        "SSR render timed out after {}ms (slot rebuilt): {err}",
+                        self.render_timeout.as_millis()
+                    )));
+                }
+                return Err(err);
+            }
+        };
 
         drop(slot_guard);
         drop(lease);
@@ -421,15 +476,15 @@ impl SsrPool {
 }
 
 #[pymethods]
-impl SsrPool {
+impl SSRPool {
     #[new]
-    #[pyo3(signature = (bundle_path, pool_size=4))]
-    fn py_new(bundle_path: &str, pool_size: usize) -> PyResult<Self> {
-        Ok(Self::new(bundle_path, pool_size)?)
+    #[pyo3(signature = (bundle_path, pool_size=4, timeout_ms=1000))]
+    fn py_new(bundle_path: &str, pool_size: usize, timeout_ms: u64) -> PyResult<Self> {
+        Ok(Self::new_with_timeout(bundle_path, pool_size, timeout_ms)?)
     }
 
     #[pyo3(name = "render")]
-    fn py_render(&self, py: Python<'_>, component: &str, page_json: &str) -> PyResult<SsrResult> {
+    fn py_render(&self, py: Python<'_>, component: &str, page_json: &str) -> PyResult<SSRResult> {
         let result = py.detach(|| self.render(component, page_json))?;
         Ok(result)
     }
@@ -483,7 +538,7 @@ mod tests {
     #[test]
     fn test_ssr_pool_creation() {
         let bundle = create_bundle_file(MOCK_BUNDLE);
-        let pool = SsrPool::new(bundle.path().to_str().unwrap(), 2);
+        let pool = SSRPool::new(bundle.path().to_str().unwrap(), 2);
         assert!(pool.is_ok(), "Pool creation failed: {:?}", pool.err());
         let pool = pool.unwrap();
         assert_eq!(pool.generation(), 0);
@@ -493,7 +548,7 @@ mod tests {
     #[test]
     fn test_ssr_render_basic() {
         let bundle = create_bundle_file(MOCK_BUNDLE);
-        let pool = SsrPool::new(bundle.path().to_str().unwrap(), 2).unwrap();
+        let pool = SSRPool::new(bundle.path().to_str().unwrap(), 2).unwrap();
 
         let result = pool.render("Home", r#"{"title":"My Page","msg":"Welcome"}"#);
         assert!(result.is_ok(), "Render failed: {:?}", result.err());
@@ -507,7 +562,7 @@ mod tests {
     #[test]
     fn test_ssr_render_cached() {
         let bundle = create_bundle_file(MOCK_BUNDLE);
-        let pool = SsrPool::new(bundle.path().to_str().unwrap(), 2).unwrap();
+        let pool = SSRPool::new(bundle.path().to_str().unwrap(), 2).unwrap();
 
         let props = r#"{"title":"Cached","msg":"First"}"#;
         let res1 = pool.render("App", props).unwrap();
@@ -521,7 +576,7 @@ mod tests {
     #[test]
     fn test_ssr_cache_key_different_for_different_input() {
         let bundle = create_bundle_file(MOCK_BUNDLE);
-        let pool = SsrPool::new(bundle.path().to_str().unwrap(), 1).unwrap();
+        let pool = SSRPool::new(bundle.path().to_str().unwrap(), 1).unwrap();
 
         let key1 = pool.cache_key("Home", r#"{"a":1}"#);
         let key2 = pool.cache_key("About", r#"{"a":1}"#);
@@ -535,7 +590,7 @@ mod tests {
     #[test]
     fn test_ssr_missing_render_function() {
         let bundle = create_bundle_file("const x = 42;");
-        let pool = SsrPool::new(bundle.path().to_str().unwrap(), 1).unwrap();
+        let pool = SSRPool::new(bundle.path().to_str().unwrap(), 1).unwrap();
 
         let result = pool.render("Home", "{}");
         assert!(result.is_err());
@@ -549,7 +604,7 @@ mod tests {
     #[test]
     fn test_ssr_pool_multiple_contexts() {
         let bundle = create_bundle_file(MOCK_BUNDLE);
-        let pool = SsrPool::new(bundle.path().to_str().unwrap(), 4).unwrap();
+        let pool = SSRPool::new(bundle.path().to_str().unwrap(), 4).unwrap();
 
         for i in 0..8 {
             let props = format!(r#"{{"title":"Page {i}","msg":"{i}"}}"#);
@@ -561,7 +616,7 @@ mod tests {
     #[test]
     fn test_ssr_invalidate_rebuilds_slot_from_updated_bundle() {
         let mut bundle = create_bundle_file(MOCK_BUNDLE);
-        let pool = SsrPool::new(bundle.path().to_str().unwrap(), 1).unwrap();
+        let pool = SSRPool::new(bundle.path().to_str().unwrap(), 1).unwrap();
 
         let res1 = pool.render("App", r#"{"title":"v1"}"#).unwrap();
         assert_eq!(res1.head, vec!["<title>v1</title>"]);
@@ -588,7 +643,7 @@ mod tests {
     #[test]
     fn test_ssr_shutdown_clears_state() {
         let bundle = create_bundle_file(MOCK_BUNDLE);
-        let pool = SsrPool::new(bundle.path().to_str().unwrap(), 2).unwrap();
+        let pool = SSRPool::new(bundle.path().to_str().unwrap(), 2).unwrap();
 
         let _ = pool.render("App", r#"{"title":"test"}"#);
         assert_eq!(pool.cache_len(), 1);
@@ -603,7 +658,7 @@ mod tests {
     #[test]
     fn test_ssr_pool_concurrent_checkout_waits_for_slot() {
         let bundle = create_bundle_file(MOCK_BUNDLE);
-        let pool = Arc::new(SsrPool::new(bundle.path().to_str().unwrap(), 2).unwrap());
+        let pool = Arc::new(SSRPool::new(bundle.path().to_str().unwrap(), 2).unwrap());
 
         let mut handles = Vec::new();
         for i in 0..8 {
@@ -623,7 +678,7 @@ mod tests {
     #[test]
     fn test_ssr_pool_cache_bounded_eviction() {
         let bundle = create_bundle_file(MOCK_BUNDLE);
-        let pool = SsrPool::new(bundle.path().to_str().unwrap(), 2).unwrap();
+        let pool = SSRPool::new(bundle.path().to_str().unwrap(), 2).unwrap();
 
         for i in 0..300 {
             let props = format!(r#"{{"title":"Page {i}","id":{i}}}"#);

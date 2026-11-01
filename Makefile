@@ -203,8 +203,8 @@ test: rs-test py-test ts-test                       ## Run all tests (Rust, Pyth
 .PHONY: coverage
 coverage:                                           ## Run tests with coverage report
 	@uv run pytest src/py/tests --cov --quiet
-	@uv run coverage xml >/dev/null 2>&1
-	@uv run coverage html >/dev/null 2>&1
+	@uv run coverage xml -i >/dev/null 2>&1
+	@uv run coverage html -i >/dev/null 2>&1
 	@echo "${OK} Coverage report: htmlcov/index.html"
 
 
@@ -357,7 +357,7 @@ bench-ft:                                           ## Benchmark with free-threa
 		uv python install "$$FT_PY" 2>/dev/null || true; \
 	fi; \
 	echo "${INFO} Preparing .venv-ft with $$FT_PY dependencies..."; \
-	UV_PROJECT_ENVIRONMENT=.venv-ft uv sync --python "$$FT_PY" --no-dev --extra framework 2>&1 | tail -3; \
+	UV_PROJECT_ENVIRONMENT=.venv-ft uv sync --python "$$FT_PY" --no-dev 2>&1 | tail -3; \
 	echo "${INFO} Building server binary linked against $$FT_PY..."; \
 	if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi; \
 	PYO3_PYTHON=$$(uv python find "$$FT_PY") cargo build \

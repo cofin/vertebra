@@ -13,20 +13,21 @@ import pytest
 from vertebra._vertebra import AsgiProtocol, AsgiScope
 from vertebra.extensions.litestar.channels import (
     ChannelsBackend,
-    swap_litestar_channels_backend,
+    swap_channels_backend,
 )
 from vertebra.extensions.litestar.config import LitestarConfig
 from vertebra.extensions.litestar.fastpath import (
-    LitestarFastPathBypass,
+    FastPath,
     ScopeState,
-    compile_litestar_fastpath_routes,
-    dispatch_litestar_handler_direct,
-    preseed_litestar_scope_body,
+    _is_empty_sentinel,
+    compile_fastpath_routes,
+    dispatch_handler_direct,
+    preseed_scope_body,
 )
-from vertebra.extensions.litestar.router import extract_litestar_routes
+from vertebra.extensions.litestar.router import extract_routes
 from vertebra.extensions.litestar.store import (
     MemoryStore,
-    swap_litestar_response_cache_store,
+    swap_response_cache_store,
 )
 from vertebra.typing import Empty
 from vertebra.utils.module_loader import import_optional
@@ -70,9 +71,26 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
         and resp_mod is not None
         and store_mod is not None
     ):
+
+        class _TestServerSentEvent(resp_mod.ServerSentEvent):
+            """Litestar ServerSentEvent wrapper preserving x-vertebra-sse-ping-interval header."""
+
+            def __init__(self, content: Any, *args: Any, ping_interval: int | None = None, **kwargs: Any) -> None:
+                hdrs = dict(kwargs.pop("headers", None) or {})
+                if ping_interval is not None:
+                    hdrs["x-vertebra-sse-ping-interval"] = str(ping_interval)
+                super().__init__(content, *args, headers=hdrs, **kwargs)
+                self._ping_interval = ping_interval
+
+            def __setattr__(self, name: str, value: Any) -> None:
+                super().__setattr__(name, value)
+                if name == "_ping_interval" and value is not None and hasattr(self, "headers"):
+                    self.headers["x-vertebra-sse-ping-interval"] = str(value)
+
         return {
             "Litestar": litestar_mod.Litestar,
             "Request": litestar_mod.Request,
+            "Router": litestar_mod.Router,
             "get": litestar_mod.get,
             "post": litestar_mod.post,
             "ChannelsPlugin": ch_mod.ChannelsPlugin,
@@ -86,7 +104,7 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
             "MsgspecDTO": dto_mod.MsgspecDTO,
             "NotAuthorizedException": exc_mod.NotAuthorizedException,
             "File": resp_mod.File,
-            "ServerSentEvent": resp_mod.ServerSentEvent,
+            "ServerSentEvent": _TestServerSentEvent,
             "MemoryStore": store_mod.MemoryStore,
         }
 
@@ -343,12 +361,14 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
         "File": FileStub,
         "ServerSentEvent": ServerSentEventStub,
         "MemoryStore": MemoryStore,
+        "Router": None,
     }
 
 
 _PRIMS = _load_litestar_fastpath_test_primitives()
 Litestar = _PRIMS["Litestar"]
 Request = _PRIMS["Request"]
+Router = _PRIMS.get("Router")
 get = _PRIMS["get"]
 post = _PRIMS["post"]
 ChannelsPlugin = _PRIMS["ChannelsPlugin"]
@@ -400,7 +420,7 @@ async def test_preseed_scope_state_body_zero_receive_calls() -> None:
         return body_bytes
 
     app = Litestar(route_handlers=[echo_handler])
-    compiled_map = compile_litestar_fastpath_routes(app)
+    compiled_map = compile_fastpath_routes(app)
     compiled = next(c for c in compiled_map.values() if c.path_template == "/echo")
 
     receive_calls = 0
@@ -415,9 +435,9 @@ async def test_preseed_scope_state_body_zero_receive_calls() -> None:
 
     payload = b'{"hello":"world"}'
     scope = _make_scope(app, method="POST", path="/echo", route_handler=compiled.route_handler)
-    preseed_litestar_scope_body(scope, payload)
+    preseed_scope_body(scope, payload)
 
-    result = await dispatch_litestar_handler_direct(
+    result = await dispatch_handler_direct(
         compiled,
         scope=scope,
         body=payload,
@@ -458,7 +478,7 @@ async def test_direct_dispatch_preserves_di_dto_guards_and_after_response() -> N
         return {"sku": data.sku, "total": data.quantity * multiplier}
 
     app = Litestar(route_handlers=[create_order])
-    compiled_map = compile_litestar_fastpath_routes(app)
+    compiled_map = compile_fastpath_routes(app)
     compiled = next(c for c in compiled_map.values() if c.path_template == "/orders")
 
     body = encode_json_bytes({"sku": "A100", "quantity": 4})
@@ -479,7 +499,7 @@ async def test_direct_dispatch_preserves_di_dto_guards_and_after_response() -> N
             (b"x-api-token", b"secret"),
         ],
     )
-    result = await dispatch_litestar_handler_direct(
+    result = await dispatch_handler_direct(
         compiled,
         scope=auth_scope,
         body=body,
@@ -500,7 +520,7 @@ async def test_direct_dispatch_preserves_di_dto_guards_and_after_response() -> N
         headers=[(b"content-type", b"application/json")],
     )
     with pytest.raises(NotAuthorizedException):
-        await dispatch_litestar_handler_direct(
+        await dispatch_handler_direct(
             compiled,
             scope=unauth_scope,
             body=body,
@@ -521,10 +541,12 @@ async def test_direct_dispatch_file_pathsend_and_sse_ping_offload(tmp_path: Path
 
     @get("/events", sync_to_thread=False)
     def stream_events() -> Any:
-        return ServerSentEvent(iter(["tick-1", "tick-2"]), ping_interval=15)
+        sse = ServerSentEvent(iter(["tick-1", "tick-2"]))
+        sse._ping_interval = 15
+        return sse
 
     app = Litestar(route_handlers=[download_report, stream_events])
-    compiled_map = compile_litestar_fastpath_routes(app)
+    compiled_map = compile_fastpath_routes(app)
     dl_compiled = next(c for c in compiled_map.values() if c.path_template == "/download")
     sse_compiled = next(c for c in compiled_map.values() if c.path_template == "/events")
 
@@ -537,7 +559,7 @@ async def test_direct_dispatch_file_pathsend_and_sse_ping_offload(tmp_path: Path
         sent_messages.append(message)
 
     dl_scope = _make_scope(app, method="GET", path="/download", route_handler=dl_compiled.route_handler)
-    dl_res = await dispatch_litestar_handler_direct(
+    dl_res = await dispatch_handler_direct(
         dl_compiled,
         scope=dl_scope,
         body=b"",
@@ -552,11 +574,16 @@ async def test_direct_dispatch_file_pathsend_and_sse_ping_offload(tmp_path: Path
 
     sent_messages.clear()
     sse_scope = _make_scope(app, method="GET", path="/events", route_handler=sse_compiled.route_handler)
-    sse_res = await dispatch_litestar_handler_direct(
+
+    async def sse_receive() -> dict[str, Any]:
+        await asyncio.sleep(100)
+        return {"type": "http.disconnect"}
+
+    sse_res = await dispatch_handler_direct(
         sse_compiled,
         scope=sse_scope,
         body=b"",
-        receive=noop_receive,
+        receive=sse_receive,
         send=capture_send,
     )
     assert sse_res is None
@@ -568,7 +595,7 @@ async def test_direct_dispatch_file_pathsend_and_sse_ping_offload(tmp_path: Path
 
     dl_proto = AsgiProtocol(b"")
     dl_proto_scope = _make_scope(app, method="GET", path="/download", route_handler=dl_compiled.route_handler)
-    await dispatch_litestar_handler_direct(
+    await dispatch_handler_direct(
         dl_compiled,
         scope=dl_proto_scope,
         body=b"",
@@ -587,7 +614,7 @@ async def test_direct_dispatch_file_pathsend_and_sse_ping_offload(tmp_path: Path
 
     proto_sse_app = Litestar(route_handlers=[stream_events_proto])
     proto_sse_compiled = next(
-        c for c in compile_litestar_fastpath_routes(proto_sse_app).values() if c.path_template == "/events-proto"
+        c for c in compile_fastpath_routes(proto_sse_app).values() if c.path_template == "/events-proto"
     )
     sse_proto = AsgiProtocol(b"")
     sse_proto_scope = _make_scope(
@@ -596,7 +623,7 @@ async def test_direct_dispatch_file_pathsend_and_sse_ping_offload(tmp_path: Path
         path="/events-proto",
         route_handler=proto_sse_compiled.route_handler,
     )
-    await dispatch_litestar_handler_direct(
+    await dispatch_handler_direct(
         proto_sse_compiled,
         scope=sse_proto_scope,
         body=b"",
@@ -628,7 +655,7 @@ async def test_swap_channels_backend_and_response_cache_store() -> None:
         stores={"response_cache": LitestarMemoryStore()},
     )
 
-    swapped_channels = swap_litestar_channels_backend(app)
+    swapped_channels = swap_channels_backend(app)
     assert isinstance(swapped_channels, ChannelsBackend)
     await swapped_channels.on_startup()
     await swapped_channels.subscribe(["alerts"])
@@ -662,7 +689,7 @@ async def test_swap_channels_backend_and_response_cache_store() -> None:
     await swapped_channels.on_shutdown()
     await asyncio.wait_for(consumer_task, timeout=1.0)
 
-    swapped_store = swap_litestar_response_cache_store(app)
+    swapped_store = swap_response_cache_store(app)
     assert isinstance(swapped_store, MemoryStore)
     async with swapped_store as ctx_store:
         assert ctx_store is swapped_store
@@ -682,8 +709,11 @@ async def test_fastpath_bypass_dispatches_eligible_sync_and_async_routes_and_ski
     def sample_guard(_conn: Any, _handler: Any) -> None:
         return None
 
-    async def noop_middleware(app_fn: Any) -> Any:
-        return app_fn
+    def noop_middleware(app: Any) -> Any:
+        async def middleware(scope: Any, receive: Any, send: Any) -> None:
+            await app(scope, receive, send)
+
+        return middleware
 
     @get("/items/{item_id:int}", sync_to_thread=False)
     def get_item(item_id: int, limit: int = 5) -> dict[str, int]:
@@ -702,8 +732,8 @@ async def test_fastpath_bypass_dispatches_eligible_sync_and_async_routes_and_ski
         return {"ok": "wrapped"}
 
     app = Litestar(route_handlers=[get_item, create_fast_order, guarded_route, middleware_route])
-    router_table = extract_litestar_routes(app)
-    bypass = LitestarFastPathBypass(router_table, app=app)
+    router_table = extract_routes(app)
+    bypass = FastPath(router_table, app=app)
 
     async def forbidden_receive() -> dict[str, Any]:
         raise AssertionError("receive() must not be called on GET or pre-supplied POST body")
@@ -758,7 +788,7 @@ async def test_fastpath_wrap_asgi_replays_body_on_fallback_and_handles_empty_sen
         return {"sku": data.sku, "quantity": data.quantity}
 
     app = Litestar(route_handlers=[strict_order])
-    bypass = LitestarFastPathBypass.from_app(app)
+    bypass = FastPath.from_app(app)
 
     fresh_scope: dict[str, Any] = {
         "type": "http",
@@ -768,7 +798,7 @@ async def test_fastpath_wrap_asgi_replays_body_on_fallback_and_handles_empty_sen
         "headers": [(b"content-type", b"application/json")],
     }
     fresh_state = ScopeState.from_scope(fresh_scope)
-    assert fresh_state.body is Empty
+    assert _is_empty_sentinel(fresh_state.body)
 
     invalid_payload = b'{"sku":"BAD","quantity":"not-an-int"}'
     chunks = [
@@ -839,7 +869,7 @@ async def test_fastpath_http_exception_serialization_disqualifiers_query_and_upl
         route_handlers=[deny_route, plain_text_route, custom_headers_route],
         request_max_body_size=16,
     )
-    bypass = LitestarFastPathBypass.from_app(app)
+    bypass = FastPath.from_app(app)
 
     async def noop_receive() -> dict[str, Any]:
         return {"type": "http.request", "body": b"", "more_body": False}
@@ -867,14 +897,14 @@ async def test_fastpath_http_exception_serialization_disqualifiers_query_and_upl
     assert hdr_route.handler_id not in bypass._direct_plans
 
     csrf_app = Litestar(route_handlers=[plain_text_route], csrf_config=CSRFConfig(secret="test-csrf-secret-1234"))
-    csrf_bypass = LitestarFastPathBypass.from_app(csrf_app)
+    csrf_bypass = FastPath.from_app(csrf_app)
     assert (
         await csrf_bypass.dispatch(AsgiScope.from_parts(method="GET", path="/plain-text"), noop_receive, noop_send)
         is None
     )
 
     py_comp_app = Litestar(route_handlers=[plain_text_route], compression_config=CompressionConfig(backend="gzip"))
-    py_comp_bypass = LitestarFastPathBypass.from_app(py_comp_app)
+    py_comp_bypass = FastPath.from_app(py_comp_app)
     assert (
         await py_comp_bypass.dispatch(AsgiScope.from_parts(method="GET", path="/plain-text"), noop_receive, noop_send)
         is None
@@ -892,14 +922,17 @@ async def test_fastpath_http_exception_serialization_disqualifiers_query_and_upl
     @post("/upload", sync_to_thread=False)
     async def upload_handler(request: Any) -> dict[str, str]:
         conn_state = ScopeState.from_scope(request.scope)
-        conn_state._form = {"file": _UploadFileDouble("doc.pdf")}
+        if hasattr(conn_state, "form"):
+            conn_state.form = {"file": _UploadFileDouble("doc.pdf")}
+        else:
+            conn_state._form = {"file": _UploadFileDouble("doc.pdf")}
         return {"uploaded": "yes"}
 
     upload_app = Litestar(route_handlers=[upload_handler])
-    upload_compiled_map = compile_litestar_fastpath_routes(upload_app)
+    upload_compiled_map = compile_fastpath_routes(upload_app)
     upload_compiled = next(c for c in upload_compiled_map.values() if c.path_template == "/upload")
     upload_scope = _make_scope(upload_app, method="POST", path="/upload", route_handler=upload_compiled.route_handler)
-    await dispatch_litestar_handler_direct(
+    await dispatch_handler_direct(
         upload_compiled,
         scope=upload_scope,
         body=b"",
@@ -931,58 +964,22 @@ async def test_v2_ownership_layers_hooks_metadata_and_unoffloaded_middleware_dis
     def v2_after_req_route() -> dict[str, str]:
         return {"ok": "v2"}
 
-    v2_after_req_route.ownership_layers = (SimpleNamespace(after_request=controller_after_request), v2_after_req_route)
-    v2_after_req_route.after_request = None
+    after_req_router = Router(path="/", after_request=controller_after_request, route_handlers=[v2_after_req_route])
 
     @get("/v2-layered-decoders", sync_to_thread=False)
     def v2_decoders_route() -> dict[str, str]:
         return {"ok": "decoders"}
 
-    v2_decoders_route.ownership_layers = (v2_decoders_route,)
-    v2_decoders_route.type_decoders = None
     v2_decoders_route.resolve_type_decoders = lambda: [(lambda x: isinstance(x, str), str)]
 
     @get("/v2-layered-resp-cls", sync_to_thread=False)
     def v2_resp_cls_route() -> dict[str, str]:
         return {"ok": "resp_cls"}
 
-    v2_resp_cls_route.ownership_layers = (SimpleNamespace(response_class=_CustomResponse), v2_resp_cls_route)
-    v2_resp_cls_route.response_class = Empty
-    v2_resp_cls_route.resolve_response_class = lambda: _CustomResponse
+    resp_cls_router = Router(path="/", response_class=_CustomResponse, route_handlers=[v2_resp_cls_route])
 
-    v2_app = SimpleNamespace(
-        before_send=None,
-        after_exception=None,
-        before_request=None,
-        after_request=None,
-        middleware=(),
-        csrf_config=None,
-        allowed_hosts=None,
-        compression_config=None,
-        cors_config=None,
-        exception_handlers={},
-        request_max_body_size=None,
-        request_class=Request,
-        state={},
-        routes=[
-            SimpleNamespace(
-                path="/v2-after-req",
-                route_handler_map={"GET": v2_after_req_route},
-                path_parameters=(),
-            ),
-            SimpleNamespace(
-                path="/v2-layered-decoders",
-                route_handler_map={"GET": v2_decoders_route},
-                path_parameters=(),
-            ),
-            SimpleNamespace(
-                path="/v2-layered-resp-cls",
-                route_handler_map={"GET": v2_resp_cls_route},
-                path_parameters=(),
-            ),
-        ],
-    )
-    v2_bypass = LitestarFastPathBypass.from_app(v2_app)
+    v2_app = Litestar(route_handlers=[after_req_router, v2_decoders_route, resp_cls_router])
+    v2_bypass = FastPath.from_app(v2_app)
     after_req_compiled = next(c for c in v2_bypass._compiled_routes.values() if c.path_template == "/v2-after-req")
     assert after_req_compiled.has_middleware is True
     assert after_req_compiled.is_bypass_eligible is False
@@ -1011,7 +1008,7 @@ async def test_v2_ownership_layers_hooks_metadata_and_unoffloaded_middleware_dis
         route_handlers=[hello_active],
         compression_config=CompressionConfig(backend="gzip"),
     )
-    unstripped_comp_bypass = LitestarFastPathBypass.from_app(unstripped_comp_app)
+    unstripped_comp_bypass = FastPath.from_app(unstripped_comp_app)
     assert (
         await unstripped_comp_bypass.dispatch(
             AsgiScope.from_parts(method="GET", path="/hello-active"),
@@ -1022,7 +1019,7 @@ async def test_v2_ownership_layers_hooks_metadata_and_unoffloaded_middleware_dis
     )
 
     unstripped_comp_app.compression_config = None
-    stripped_comp_bypass = LitestarFastPathBypass.from_app(unstripped_comp_app)
+    stripped_comp_bypass = FastPath.from_app(unstripped_comp_app)
     stripped_res = await stripped_comp_bypass.dispatch(
         AsgiScope.from_parts(method="GET", path="/hello-active"),
         noop_receive,
@@ -1036,7 +1033,7 @@ async def test_v2_ownership_layers_hooks_metadata_and_unoffloaded_middleware_dis
         cors_config=CORSConfig(allow_origins=["https://example.com"]),
     )
     py_cors_app.state["vertebra_config"] = LitestarConfig(offload_cors=False)
-    py_cors_bypass = LitestarFastPathBypass.from_app(py_cors_app)
+    py_cors_bypass = FastPath.from_app(py_cors_app)
     assert (
         await py_cors_bypass.dispatch(
             AsgiScope.from_parts(method="GET", path="/hello-active"),
@@ -1047,7 +1044,7 @@ async def test_v2_ownership_layers_hooks_metadata_and_unoffloaded_middleware_dis
     )
 
     py_cors_app.state["vertebra_config"] = LitestarConfig(offload_cors=True)
-    rust_cors_bypass = LitestarFastPathBypass.from_app(py_cors_app)
+    rust_cors_bypass = FastPath.from_app(py_cors_app)
     rust_cors_res = await rust_cors_bypass.dispatch(
         AsgiScope.from_parts(method="GET", path="/hello-active"),
         noop_receive,
@@ -1061,7 +1058,7 @@ async def test_v2_ownership_layers_hooks_metadata_and_unoffloaded_middleware_dis
         return {"sku": data.sku, "quantity": data.quantity}
 
     mv_app = Litestar(route_handlers=[mv_echo])
-    mv_bypass = LitestarFastPathBypass.from_app(mv_app)
+    mv_bypass = FastPath.from_app(mv_app)
     mv_scope = AsgiScope.from_parts(
         method="POST",
         path="/mv-echo",

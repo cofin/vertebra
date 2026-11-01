@@ -120,3 +120,16 @@ async def test_handle_ws_ping_pong(middleware: DevMiddleware) -> None:
     calls = [c.args[0] for c in send.call_args_list]
     pong_calls = [c for c in calls if c.get("type") == "websocket.send" and "pong" in c.get("text", "")]
     assert len(pong_calls) == 1
+
+
+@pytest.mark.anyio()
+async def test_dev_middleware_serves_wheel_bundled_client_and_hmr_subpath(middleware: DevMiddleware) -> None:
+    """DevMiddleware serves /__vertebra/client/index.js and /__vertebra/client/hmr.js from the wheel bundle."""
+    for req_path in ("/__vertebra/client/index.js", "/__vertebra/client/hmr.js"):
+        send = AsyncMock()
+        await middleware({"type": "http", "path": req_path}, AsyncMock(), send)
+        sent = [c.args[0] for c in send.call_args_list]
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        body = next(m for m in sent if m["type"] == "http.response.body")
+        assert start["status"] == 200
+        assert len(body["body"]) > 50

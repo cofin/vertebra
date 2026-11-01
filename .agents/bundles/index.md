@@ -38,7 +38,7 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
   - `ipc/` & `http/`: [Rust IPC, Shared Memory & Ring Transport Domain](knowledge/domains/ipc/transport-and-rings.md), [Rust HTTP Ingress, Batching & Dispatch Domain](knowledge/domains/http/server-and-dispatch.md)
   - `frontend/`: [Frontend Bundler, Codegen & Client SDK Domain](knowledge/domains/frontend/bundler-and-client-sdk.md), [Standalone & Onefile Packaging and PGO Tooling](knowledge/domains/frontend/packaging-and-pgo.md), [WASM Plugin Host & Browser Bridge](knowledge/domains/frontend/wasm.md)
   - `storage/`, `data/` & `telemetry/`: [Object Storage, Presigning & Upload Tracking](knowledge/domains/storage/object-storage.md), [Shared-Memory Connection Broker & Statement Cache](knowledge/domains/data/broker-and-shm-leases.md), [Database Drivers & Cloud Dialers](knowledge/domains/data/database-drivers-and-dialers.md), [Query Pipelines, Change Feeds, Tenant Predicates & DataFusion](knowledge/domains/data/query-pipeline-cdc-and-tenancy.md), [Logging, Trace Context, SQL Trace Propagation & GenAI Metrics](knowledge/domains/telemetry/logging-tracing-and-genai.md)
-  - `extensions/`: [Litestar Integration: Route Compiler, Middleware Offload, and Fast Path](knowledge/domains/extensions/litestar.md), [SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions](knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md), [Oracle APEX, ORDS & 26ai Duality View Integration](knowledge/domains/extensions/oracle-apex.md), [gRPC Services & Wire Framing](knowledge/domains/extensions/grpc.md)
+  - `extensions/`: [Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django](knowledge/domains/extensions/litestar.md), [SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions](knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md), [Oracle APEX, ORDS & 26ai Duality View Integration](knowledge/domains/extensions/oracle-apex.md), [gRPC Services & Wire Framing](knowledge/domains/extensions/grpc.md)
 - **[Patterns (`knowledge/patterns/`)](knowledge/patterns/index.md)**:
   - `python/`: [Python Module Structure, Class Layout & PEP 695 Typing](knowledge/patterns/python/module-and-class-layout.md), [Hot-Path Caching & Single-Wake Async Dispatch](knowledge/patterns/python/hot-path-and-async-dispatch.md), [Serialization & Python Utility Conventions](knowledge/patterns/python/serialization-and-utils.md)
   - `rust/`: [PyO3 0.30.1 FFI & GIL Discipline](knowledge/patterns/rust/ffi-and-gil-discipline.md), [Lock-Free Shared Memory & Sharded Concurrency](knowledge/patterns/rust/lock-free-shm-and-sharding.md)
@@ -50,6 +50,6 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 ## 3. Specifications, Research & Activity Log
 
-- **`specs/` (lazy)** — Materialized only when active or planned Flow specifications exist.
+- **`specs/` (lazy)** — Materialized only when active Flow specifications or task worksheets exist.
 - **`research/` (lazy)** — Materialized only when un-promoted technical research briefs exist.
 - **[Bundle Activity Log](log.md)** — Chronological log of bundle initialization, syntheses, and archived flows.

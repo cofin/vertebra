@@ -62,6 +62,6 @@ Core framework primitives for dependency injection (`Provide`, `Container`), sec
     options:
       heading_level: 3
 
-::: vertebra.framework.stores.ResponseCacheStore
+::: vertebra.framework.stores.KeyValueStore
     options:
       heading_level: 3

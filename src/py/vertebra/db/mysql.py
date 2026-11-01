@@ -7,11 +7,13 @@ import urllib.parse
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from vertebra.db.dialer.cloudsql import CloudSqlConfig, CloudSqlDialer
+from vertebra.db.dialer.cloudsql import CloudSQLConfig, CloudSQLDialer
 from vertebra.db.postgres import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
+    _hydrate_rows_with_schema,
     _normalize_driver_params,
+    _table_to_rows_and_cols,
     write_arrow_shm,
 )
 from vertebra.typing import FrozenBaseStruct
@@ -21,13 +23,13 @@ if TYPE_CHECKING:
     import ssl
 
 __all__ = (
-    "AsyncMysqlDriver",
-    "MysqlConfig",
-    "SyncMysqlDriver",
+    "AsyncMySQLDriver",
+    "MySQLConfig",
+    "SyncMySQLDriver",
 )
 
 
-class MysqlConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
+class MySQLConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Configuration for MySQL 8.0+/9.0+ and MariaDB connections."""
 
     dsn: str = "mysql://localhost:3306/mysql"
@@ -52,10 +54,10 @@ class MysqlConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
             msg = f"Invalid pool bounds: min_size={self.min_size}, max_size={self.max_size}"
             raise ValueError(msg)
 
-    def to_cloud_dialer_config(self) -> CloudSqlConfig | None:
-        """Return CloudSqlConfig when `cloud_sql_instance` is set."""
+    def to_cloud_dialer_config(self) -> CloudSQLConfig | None:
+        """Return CloudSQLConfig when `cloud_sql_instance` is set."""
         if self.cloud_sql_instance:
-            return CloudSqlConfig(
+            return CloudSQLConfig(
                 instance_connection_name=self.cloud_sql_instance,
                 enable_iam_auth=self.enable_iam_auth,
             )
@@ -84,25 +86,25 @@ class MysqlConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
         }
 
 
-class SyncMysqlDriver:
+class SyncMySQLDriver:
     """Synchronous MySQL driver facade with bounded connection pooling and SHM broker integration."""
 
     __slots__ = ("_broker", "_closed", "_config", "_connect_factory", "_dialer", "_idle_conns", "_in_memory_rows")
 
     def __init__(
         self,
-        config: MysqlConfig | None = None,
+        config: MySQLConfig | None = None,
         *,
-        dialer: CloudSqlDialer | None = None,
+        dialer: CloudSQLDialer | None = None,
         broker: Any = None,
         connect_factory: Any = None,
     ) -> None:
-        self._config = config or MysqlConfig()
+        self._config = config or MySQLConfig()
         self._dialer = dialer
         if self._dialer is None:
             csql_cfg = self._config.to_cloud_dialer_config()
             if csql_cfg is not None:
-                self._dialer = CloudSqlDialer(csql_cfg)
+                self._dialer = CloudSQLDialer(csql_cfg)
         self._broker = broker if broker is not None else self._config.broker
         self._connect_factory = connect_factory
         self._idle_conns: collections.deque[Any] = collections.deque(maxlen=self._config.max_size)
@@ -110,13 +112,13 @@ class SyncMysqlDriver:
         self._in_memory_rows: list[tuple[Any, ...]] = []
 
     @property
-    def config(self) -> MysqlConfig:
-        """Return the active MysqlConfig."""
+    def config(self) -> MySQLConfig:
+        """Return the active MySQLConfig."""
         return self._config
 
     @property
-    def dialer(self) -> CloudSqlDialer | None:
-        """Return the attached CloudSqlDialer if configured."""
+    def dialer(self) -> CloudSQLDialer | None:
+        """Return the attached CloudSQLDialer if configured."""
         return self._dialer
 
     @property
@@ -157,7 +159,7 @@ class SyncMysqlDriver:
     def _acquire(self) -> Any:
         """Acquire an idle connection or create a new connection."""
         if self._closed:
-            msg = "SyncMysqlDriver is closed"
+            msg = "SyncMySQLDriver is closed"
             raise RuntimeError(msg)
         if self._idle_conns:
             return self._idle_conns.pop()
@@ -178,7 +180,7 @@ class SyncMysqlDriver:
     ) -> tuple[list[tuple[Any, ...]], tuple[tuple[str, Any, None, None, None, None, None], ...] | None]:
         """Execute a SQL statement and return plain tuples and column description."""
         if self._closed:
-            msg = "SyncMysqlDriver is closed"
+            msg = "SyncMySQLDriver is closed"
             raise RuntimeError(msg)
 
         lease: Any = None
@@ -259,14 +261,58 @@ class SyncMysqlDriver:
         sql: str,
         *params: Any,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> list[dict[str, Any]]:
-        """Execute a SELECT statement and return rows as dictionaries."""
+        schema_type: type[Any] | None = None,
+    ) -> list[Any]:
+        """Execute a SELECT statement and return rows as dictionaries or hydrated `schema_type` instances."""
         resolved = _normalize_driver_params(params, parameters)
         rows, desc = self.execute_with_description(sql, resolved)
         if not rows:
             return []
         cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]))]
-        return [{col: (r[i] if i < len(r) else None) for i, col in enumerate(cols)} for r in rows]
+        return _hydrate_rows_with_schema(rows, cols, schema_type)
+
+    def select_one(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Execute a SELECT statement and return the first row or raise `ValueError`."""
+        rows = self.select(sql, *params, parameters=parameters, schema_type=schema_type)
+        if not rows:
+            msg = "No row found for select_one"
+            raise ValueError(msg)
+        return rows[0]
+
+    def select_one_or_none(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any | None:
+        """Execute a SELECT statement and return the first row or `None`."""
+        rows = self.select(sql, *params, parameters=parameters, schema_type=schema_type)
+        return rows[0] if rows else None
+
+    def load_from_arrow(
+        self,
+        table_name: str,
+        data: Any,
+        *,
+        columns: Sequence[str] | None = None,
+    ) -> int:
+        """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
+        rows, cols = _table_to_rows_and_cols(data, columns)
+        if not rows or not cols:
+            return 0
+        placeholders = ", ".join("%s" for _ in cols)
+        col_list = ", ".join(cols)
+        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+        for row in rows:
+            self.execute_tuples(sql, row)
+        return len(rows)
 
     def select_to_arrow(
         self,
@@ -312,38 +358,38 @@ class SyncMysqlDriver:
             self._connect_factory.close()
 
 
-class AsyncMysqlDriver:
+class AsyncMySQLDriver:
     """Asynchronous MySQL driver facade backed by asyncmy and SHM broker leasing."""
 
     __slots__ = ("_broker", "_closed", "_config", "_dialer", "_in_memory_rows", "_pool")
 
     def __init__(
         self,
-        config: MysqlConfig | None = None,
+        config: MySQLConfig | None = None,
         *,
-        dialer: CloudSqlDialer | None = None,
+        dialer: CloudSQLDialer | None = None,
         broker: Any = None,
         pool: Any = None,
     ) -> None:
-        self._config = config or MysqlConfig()
+        self._config = config or MySQLConfig()
         self._dialer = dialer
         if self._dialer is None:
             csql_cfg = self._config.to_cloud_dialer_config()
             if csql_cfg is not None:
-                self._dialer = CloudSqlDialer(csql_cfg)
+                self._dialer = CloudSQLDialer(csql_cfg)
         self._broker = broker if broker is not None else self._config.broker
         self._pool = pool
         self._closed: bool = False
         self._in_memory_rows: list[tuple[Any, ...]] = []
 
     @property
-    def config(self) -> MysqlConfig:
-        """Return the active MysqlConfig."""
+    def config(self) -> MySQLConfig:
+        """Return the active MySQLConfig."""
         return self._config
 
     @property
-    def dialer(self) -> CloudSqlDialer | None:
-        """Return the attached CloudSqlDialer if configured."""
+    def dialer(self) -> CloudSQLDialer | None:
+        """Return the attached CloudSQLDialer if configured."""
         return self._dialer
 
     @property
@@ -378,7 +424,7 @@ class AsyncMysqlDriver:
     ) -> tuple[list[tuple[Any, ...]], tuple[tuple[str, Any, None, None, None, None, None], ...] | None]:
         """Asynchronously execute a SQL statement and return rows and column descriptions."""
         if self._closed:
-            msg = "AsyncMysqlDriver is closed"
+            msg = "AsyncMySQLDriver is closed"
             raise RuntimeError(msg)
 
         lease: Any = None
@@ -460,14 +506,58 @@ class AsyncMysqlDriver:
         sql: str,
         *params: Any,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> list[dict[str, Any]]:
-        """Asynchronously execute a SELECT statement and return rows as dictionaries."""
+        schema_type: type[Any] | None = None,
+    ) -> list[Any]:
+        """Asynchronously execute a SELECT statement and return rows as dictionaries or `schema_type` instances."""
         resolved = _normalize_driver_params(params, parameters)
         rows, desc = await self.execute_with_description(sql, resolved)
         if not rows:
             return []
         cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]))]
-        return [{col: (r[i] if i < len(r) else None) for i, col in enumerate(cols)} for r in rows]
+        return _hydrate_rows_with_schema(rows, cols, schema_type)
+
+    async def select_one(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Asynchronously execute a SELECT statement and return the first row or raise `ValueError`."""
+        rows = await self.select(sql, *params, parameters=parameters, schema_type=schema_type)
+        if not rows:
+            msg = "No row found for select_one"
+            raise ValueError(msg)
+        return rows[0]
+
+    async def select_one_or_none(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any | None:
+        """Asynchronously execute a SELECT statement and return the first row or `None`."""
+        rows = await self.select(sql, *params, parameters=parameters, schema_type=schema_type)
+        return rows[0] if rows else None
+
+    async def load_from_arrow(
+        self,
+        table_name: str,
+        data: Any,
+        *,
+        columns: Sequence[str] | None = None,
+    ) -> int:
+        """Asynchronously bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
+        rows, cols = _table_to_rows_and_cols(data, columns)
+        if not rows or not cols:
+            return 0
+        placeholders = ", ".join("%s" for _ in cols)
+        col_list = ", ".join(cols)
+        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+        for row in rows:
+            await self.execute_tuples(sql, row)
+        return len(rows)
 
     async def select_to_arrow(
         self,

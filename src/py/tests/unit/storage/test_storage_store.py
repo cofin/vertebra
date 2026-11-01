@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import vertebra.storage as storage
-from vertebra.storage import ObjectMeta, ObjectStore, PutResult, SigningConfig, StorageRegistry
+from vertebra.storage import ObjectMeta, ObjectStore, PutResult, SigningConfig
 from vertebra.storage._store import ReadableFile
 
 
@@ -151,7 +151,8 @@ def test_object_store_open_readable_file(tmp_path: Path) -> None:
     """ObjectStore.open_readable_file returns a seekable ReadableFile and wrappers are removed."""
     assert not hasattr(storage, "SyncStore")
     assert not hasattr(storage, "AsyncStore")
-    assert not hasattr(StorageRegistry, "register_store")
+    assert not hasattr(storage, "StorageRegistry")
+    assert not hasattr(storage, "UploadTracker")
 
     store = ObjectStore.from_local(tmp_path)
     store.put("data.parquet", b"PAR1-parquet-content-PAR1")

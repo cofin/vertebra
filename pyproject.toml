@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "vertebra-core"
-version = "0.1.0"
-description = "Fast Python web framework and server powered by Rust and TypeScript"
+version = "0.2.0"
+description = "One runtime for Python and TypeScript — backend, frontend, web, gRPC, workers, and standalone apps."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
@@ -20,31 +20,118 @@ dependencies = [
 vtb = "vertebra.cli:cli"
 
 [project.entry-points."sqlalchemy.dialects"]
-"postgresql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:PostgresDialect"
-"postgresql.vtb" = "vertebra.extensions.sqlalchemy.dialects:PostgresDialect"
+"postgresql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:PostgreSQLDialect"
+"postgresql.vtb" = "vertebra.extensions.sqlalchemy.dialects:PostgreSQLDialect"
+"postgresql.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:PostgreSQLAsyncDialect"
+"postgresql.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:PostgreSQLAsyncDialect"
 "oracle.vertebra" = "vertebra.extensions.sqlalchemy.dialects:OracleDialect"
 "oracle.vtb" = "vertebra.extensions.sqlalchemy.dialects:OracleDialect"
-"mysql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:MysqlDialect"
-"mysql.vtb" = "vertebra.extensions.sqlalchemy.dialects:MysqlDialect"
-"sqlite.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SqliteDialect"
-"sqlite.vtb" = "vertebra.extensions.sqlalchemy.dialects:SqliteDialect"
-"mssql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:MssqlDialect"
-"mssql.vtb" = "vertebra.extensions.sqlalchemy.dialects:MssqlDialect"
-"duckdb.vertebra" = "vertebra.extensions.sqlalchemy.dialects:DuckdbDialect"
-"duckdb.vtb" = "vertebra.extensions.sqlalchemy.dialects:DuckdbDialect"
+"oracle.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:OracleAsyncDialect"
+"oracle.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:OracleAsyncDialect"
+"mysql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:MySQLDialect"
+"mysql.vtb" = "vertebra.extensions.sqlalchemy.dialects:MySQLDialect"
+"mysql.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:MySQLAsyncDialect"
+"mysql.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:MySQLAsyncDialect"
+"sqlite.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SQLiteDialect"
+"sqlite.vtb" = "vertebra.extensions.sqlalchemy.dialects:SQLiteDialect"
+"sqlite.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:SQLiteAsyncDialect"
+"sqlite.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:SQLiteAsyncDialect"
+"mssql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:MSSQLDialect"
+"mssql.vtb" = "vertebra.extensions.sqlalchemy.dialects:MSSQLDialect"
+"mssql.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:MSSQLAsyncDialect"
+"mssql.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:MSSQLAsyncDialect"
+"duckdb.vertebra" = "vertebra.extensions.sqlalchemy.dialects:DuckDBDialect"
+"duckdb.vtb" = "vertebra.extensions.sqlalchemy.dialects:DuckDBDialect"
+"duckdb.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:DuckDBAsyncDialect"
+"duckdb.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:DuckDBAsyncDialect"
 
 [project.optional-dependencies]
-framework = [
-    "msgspec>=0.18",
-]
 sqlspec = [
-    "sqlspec>=0.68.0",
+    "sqlspec>=0.69.0",
 ]
-dev = [
-    "pytest>=8.0",
-    "pytest-anyio>=0.0.0",
-    "ruff>=0.4",
-    "mypy>=1.10",
+alchemy = [
+    "advanced-alchemy>=1.12.0",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14.0",
+]
+arrow = [
+    "pyarrow>=18.0.0",
+]
+pydantic = [
+    "pydantic>=2.9.0",
+]
+attrs = [
+    "attrs>=24.0.0",
+]
+polars = [
+    "polars>=1.0.0",
+]
+litestar = [
+    "litestar>=2.15.0",
+]
+starlette = [
+    "starlette>=0.40.0",
+]
+fastapi = [
+    "fastapi>=0.115.0",
+    "pydantic>=2.9.0",
+]
+flask = [
+    "flask>=3.0.0",
+]
+django = [
+    "django>=5.1.0",
+]
+queues = [
+    "litestar-queues>=0.12.0",
+]
+security = [
+    "litestar-security>=0.6.0",
+]
+autowire = [
+    "litestar-autowire>=0.2.0",
+]
+email = [
+    "litestar-email>=0.4.0",
+]
+mcp = [
+    "litestar-mcp>=0.16.0",
+]
+vite = [
+    "litestar-vite>=0.32.0",
+]
+asyncapi = [
+    "litestar-asyncapi>=0.2.0",
+]
+htmx = [
+    "litestar-htmx>=0.5.0",
+]
+saq = [
+    "litestar-saq>=0.8.0",
+]
+all = [
+    "sqlspec>=0.69.0",
+    "advanced-alchemy>=1.12.0",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14.0",
+    "pyarrow>=18.0.0",
+    "pydantic>=2.9.0",
+    "attrs>=24.0.0",
+    "polars>=1.0.0",
+    "litestar>=2.15.0",
+    "starlette>=0.40.0",
+    "fastapi>=0.115.0",
+    "flask>=3.0.0",
+    "django>=5.1.0",
+    "litestar-queues>=0.12.0",
+    "litestar-security>=0.6.0",
+    "litestar-autowire>=0.2.0",
+    "litestar-email>=0.4.0",
+    "litestar-mcp>=0.16.0",
+    "litestar-vite>=0.32.0",
+    "litestar-asyncapi>=0.2.0",
+    "litestar-htmx>=0.5.0",
+    "litestar-saq>=0.8.0",
 ]
 
 [dependency-groups]
@@ -66,7 +153,30 @@ doc = [
 test = [
     "pytest",
     "pytest-cov>=5.0",
+    "pytest-databases>=0.19.0",
+    "pytest-xdist>=3.6.1",
     "anyio",
+    "sqlspec>=0.69.0",
+    "advanced-alchemy>=1.12.0",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14.0",
+    "pyarrow>=18.0.0",
+    "pydantic>=2.9.0",
+    "attrs>=24.0.0",
+    "litestar>=2.15.0",
+    "starlette>=0.40.0",
+    "fastapi>=0.115.0",
+    "flask>=3.0.0",
+    "django>=5.1.0",
+    "litestar-queues>=0.12.0",
+    "litestar-security>=0.6.0",
+    "litestar-autowire>=0.2.0",
+    "litestar-email>=0.4.0",
+    "litestar-mcp>=0.16.0",
+    "litestar-vite>=0.32.0",
+    "litestar-asyncapi>=0.2.0",
+    "litestar-htmx>=0.5.0",
+    "litestar-saq>=0.8.0",
 ]
 lint = [
     "ruff",
@@ -85,6 +195,9 @@ bench = [
     "spikard>=0.12",
 ]
 
+[tool.uv.sources]
+pytest-databases = { git = "https://github.com/litestar-org/pytest-databases.git", branch = "test/clientless-all" }
+
 [tool.maturin]
 python-source = "src/py"
 python-packages = ["vertebra"]
@@ -95,6 +208,7 @@ include = [
     { path = "src/rs/Cargo.toml", format = "sdist" },
     { path = "src/rs/Cargo.lock", format = "sdist" },
     { path = "src/rs/vertebra-*/**/*", format = "sdist" },
+    { path = "src/py/vertebra/server/_js/bundle/**/*", format = ["sdist", "wheel"] },
 ]
 
 [tool.ruff]
@@ -118,6 +232,9 @@ known-first-party = ["vertebra"]
 testpaths = ["src/py/tests"]
 pythonpath = [".", "src/py"]
 
+[tool.coverage.report]
+ignore_errors = true
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
@@ -127,20 +244,52 @@ files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "docs/ex
 [[tool.mypy.overrides]]
 module = [
     "pydantic.*",
-    "orjson",
     "attrs",
     "numpy",
     "numpy.*",
     "pyarrow",
     "pyarrow.*",
+    "polars",
+    "polars.*",
     "uvloop",
+    "starlette",
+    "starlette.*",
     "fastapi",
     "fastapi.*",
+    "flask",
+    "flask.*",
     "litestar",
     "litestar.*",
+    "litestar_queues",
+    "litestar_queues.*",
+    "litestar_security",
+    "litestar_security.*",
+    "litestar_autowire",
+    "litestar_autowire.*",
+    "litestar_email",
+    "litestar_email.*",
+    "litestar_mcp",
+    "litestar_mcp.*",
+    "litestar_vite",
+    "litestar_vite.*",
+    "litestar_asyncapi",
+    "litestar_asyncapi.*",
+    "litestar_htmx",
+    "litestar_htmx.*",
+    "litestar_saq",
+    "litestar_saq.*",
+    "advanced_alchemy",
+    "advanced_alchemy.*",
+    "sqlalchemy",
+    "sqlalchemy.*",
+    "alembic",
+    "alembic.*",
     "sqlspec",
     "sqlspec.*",
+    "django",
     "django.*",
+    "pytest_databases",
+    "pytest_databases.*",
     "concurrent.interpreters",
 ]
 ignore_missing_imports = true
@@ -149,7 +298,7 @@ ignore_missing_imports = true
 allow_dirty = true
 commit = false
 commit_args = "--no-verify"
-current_version = "0.1.0"
+current_version = "0.2.0"
 ignore_missing_files = false
 ignore_missing_version = false
 message = "chore(release): bump to v{new_version}"

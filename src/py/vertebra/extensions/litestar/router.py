@@ -5,21 +5,21 @@ from typing import Any
 
 import msgspec
 
-from vertebra.framework._router import PARAM_CONVERTERS, _make_handler_id
+from vertebra.server._routing import PARAM_CONVERTERS, make_handler_id
 
 __all__ = (
-    "ExtractedLitestarRoute",
-    "LitestarRouteCompiler",
-    "LitestarRouterTable",
+    "ExtractedRoute",
+    "RouteCompiler",
+    "RouterTable",
     "_unpack_route_handler_map_entry",
-    "convert_litestar_path_params",
-    "extract_litestar_route_entries",
-    "extract_litestar_routes",
-    "normalize_litestar_path_for_matchit",
+    "convert_path_params",
+    "extract_route_entries",
+    "extract_routes",
+    "normalize_path_for_matchit",
 )
 
 
-class ExtractedLitestarRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class ExtractedRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Pre-compiled Litestar route entry indexed by stable uint64 handler_id."""
 
     handler_id: int
@@ -33,36 +33,36 @@ class ExtractedLitestarRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True
     regex_pattern: re.Pattern[str]
 
 
-class LitestarRouterTable:
-    """Lookup table mapping Rust handler_id and (method, path) to ExtractedLitestarRoute."""
+class RouterTable:
+    """Lookup table mapping Rust handler_id and (method, path) to ExtractedRoute."""
 
     __slots__ = ("_by_method", "routes")
 
-    def __init__(self, routes: dict[int, ExtractedLitestarRoute]) -> None:
+    def __init__(self, routes: dict[int, ExtractedRoute]) -> None:
         self.routes = routes
-        by_method: dict[str, list[ExtractedLitestarRoute]] = {}
+        by_method: dict[str, list[ExtractedRoute]] = {}
         for entry in routes.values():
             by_method.setdefault(entry.method, []).append(entry)
         self._by_method = by_method
 
-    def get_by_handler_id(self, handler_id: int) -> ExtractedLitestarRoute | None:
+    def get_by_handler_id(self, handler_id: int) -> ExtractedRoute | None:
         """Look up an extracted route by its stable uint64 handler_id."""
         return self.routes.get(handler_id)
 
-    def match(self, method: str, path: str) -> ExtractedLitestarRoute | None:
-        """Match a request method and path to an ExtractedLitestarRoute."""
+    def match(self, method: str, path: str) -> ExtractedRoute | None:
+        """Match a request method and path to an ExtractedRoute."""
         for entry in self._by_method.get(method.upper(), ()):
             if entry.regex_pattern.match(path) is not None:
                 return entry
         return None
 
-    def match_with_params(self, method: str, path: str) -> tuple[ExtractedLitestarRoute, dict[str, Any]] | None:
+    def match_with_params(self, method: str, path: str) -> tuple[ExtractedRoute, dict[str, Any]] | None:
         """Match a request method and path and return the route entry with converted path parameters."""
         for entry in self._by_method.get(method.upper(), ()):
             matched = entry.regex_pattern.match(path)
             if matched is not None:
                 raw_groups = matched.groupdict()
-                params = convert_litestar_path_params(raw_groups, entry.param_types) if raw_groups else {}
+                params = convert_path_params(raw_groups, entry.param_types) if raw_groups else {}
                 return entry, params
         return None
 
@@ -78,28 +78,35 @@ class LitestarRouterTable:
 
     def convert_params(
         self,
-        route_entry: ExtractedLitestarRoute,
+        route_entry: ExtractedRoute,
         raw_params: dict[str, str],
     ) -> dict[str, Any]:
         """Convert raw string path parameters using the route's pre-compiled converters."""
-        return convert_litestar_path_params(raw_params, route_entry.param_types)
+        return convert_path_params(raw_params, route_entry.param_types)
 
 
-class LitestarRouteCompiler:
-    """Compiler extracting Litestar v2 and v3 route handlers into a LitestarRouterTable."""
+class RouteCompiler:
+    """Compiler extracting Litestar v2 and v3 route handlers into a RouterTable."""
 
     __slots__ = ()
 
-    def compile(self, app: Any) -> LitestarRouterTable:
-        """Compile all HTTP routes on the given Litestar application into a LitestarRouterTable."""
-        return extract_litestar_routes(app)
+    def compile(self, app: Any) -> RouterTable:
+        """Compile all HTTP routes on the given Litestar application into a RouterTable."""
+        plugins = getattr(getattr(app, "plugins", None), "plugins", getattr(app, "plugins", ())) or ()
+        for plugin in plugins:
+            if type(plugin).__name__ == "AutowirePlugin" and not getattr(plugin, "_autowire_executed", False):
+                on_init = getattr(plugin, "on_app_init", None)
+                if callable(on_init) and hasattr(app, "route_handlers"):
+                    plugin._autowire_executed = True
+                    on_init(app)
+        return extract_routes(app)
 
-    def extract_entries(self, app: Any) -> list[ExtractedLitestarRoute]:
+    def extract_entries(self, app: Any) -> list[ExtractedRoute]:
         """Return all extracted route descriptors as a list."""
-        return extract_litestar_route_entries(app)
+        return extract_route_entries(app)
 
 
-def normalize_litestar_path_for_matchit(path: str) -> str:
+def normalize_path_for_matchit(path: str) -> str:
     """Convert a Litestar path template into a matchit 0.9 route pattern."""
     if "{" not in path:
         return path
@@ -117,7 +124,7 @@ def normalize_litestar_path_for_matchit(path: str) -> str:
     return "/".join(segments)
 
 
-def convert_litestar_path_params(
+def convert_path_params(
     raw_params: dict[str, str],
     param_types: dict[str, str],
 ) -> dict[str, Any]:
@@ -130,15 +137,15 @@ def convert_litestar_path_params(
     return converted
 
 
-def extract_litestar_routes(app: Any) -> LitestarRouterTable:
+def extract_routes(app: Any) -> RouterTable:
     """Extract all HTTP routes from a Litestar v2 or v3 app by inspecting app.routes."""
-    extracted: dict[int, ExtractedLitestarRoute] = {}
+    extracted: dict[int, ExtractedRoute] = {}
     for route in getattr(app, "routes", ()):
         path_template = getattr(route, "path", None)
         handler_map = getattr(route, "route_handler_map", None)
         if not isinstance(path_template, str) or not isinstance(handler_map, dict):
             continue
-        matchit_path = normalize_litestar_path_for_matchit(path_template)
+        matchit_path = normalize_path_for_matchit(path_template)
         param_types = _extract_param_types_from_path(path_template)
         regex_pattern = _compile_match_regex(path_template)
 
@@ -148,8 +155,8 @@ def extract_litestar_routes(app: Any) -> LitestarRouterTable:
             if kwargs_model is None and hasattr(route_handler, "_get_kwargs_model_for_route"):
                 path_parameters = getattr(route, "path_parameters", ())
                 kwargs_model = route_handler._get_kwargs_model_for_route(path_parameters)
-            handler_id = _make_handler_id(method_upper, matchit_path)
-            extracted[handler_id] = ExtractedLitestarRoute(
+            handler_id = make_handler_id(method_upper, matchit_path)
+            extracted[handler_id] = ExtractedRoute(
                 handler_id=handler_id,
                 method=method_upper,
                 path_template=path_template,
@@ -160,12 +167,12 @@ def extract_litestar_routes(app: Any) -> LitestarRouterTable:
                 param_types=param_types,
                 regex_pattern=regex_pattern,
             )
-    return LitestarRouterTable(extracted)
+    return RouterTable(extracted)
 
 
-def extract_litestar_route_entries(app: Any) -> list[ExtractedLitestarRoute]:
-    """Return a flat list of ExtractedLitestarRoute descriptors from a Litestar v2 or v3 app."""
-    return list(extract_litestar_routes(app).routes.values())
+def extract_route_entries(app: Any) -> list[ExtractedRoute]:
+    """Return a flat list of ExtractedRoute descriptors from a Litestar v2 or v3 app."""
+    return list(extract_routes(app).routes.values())
 
 
 _SEGMENT_PARAM_RE = re.compile(r"^\{([a-zA-Z_][a-zA-Z0-9_]*)(?::([a-zA-Z0-9_]+))?\}$")

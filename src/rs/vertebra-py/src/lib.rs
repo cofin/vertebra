@@ -10,6 +10,7 @@ pub mod broker;
 pub mod db;
 pub mod file_io;
 pub mod headers;
+pub mod msgspec_bridge;
 pub mod request;
 pub mod response;
 pub mod rsgi;
@@ -26,13 +27,17 @@ pub use asgi::{
 pub use broker::{
     BrokerStats, LeaseBroker, LeaseGrant, StatementCache, StatementCacheStats, StatementPlan,
 };
-pub use db::{AlloyDbDialer, ArrowCursor, CloudSqlDialer};
+pub use db::{AlloyDBDialer, ArrowCursor, CloudSQLDialer};
 pub use headers::{Headers, HeadersIterator};
+pub use msgspec_bridge::{
+    call_vectorcall, hydrate_one_vectorcall, hydrate_rows_vectorcall,
+    instantiate_struct_vectorcall, orm_to_struct_vectorcall, pack_grpc_lpm_frame,
+};
 pub use request::{Request, RequestBatch, RequestBatchIterator};
 pub use response::Response;
 pub use rsgi::{RsgiHttpProtocol, RsgiScope, RsgiTransport, drive_rsgi_batch};
 pub use telemetry::{
-    JwtGuard, LogSink, RateLimiter, format_traceparent, parse_traceparent, sanitize_sql,
+    JWTGuard, LogSink, RateLimiter, format_traceparent, parse_traceparent, sanitize_sql,
 };
 pub use wsgi::{
     WsgiEnviron, WsgiEnvironIterator, WsgiFileWrapper, WsgiInput, WsgiStartResponse,
@@ -73,7 +78,7 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<rsgi::RsgiHttpProtocol>()?;
     m.add_class::<rsgi::RsgiTransport>()?;
     m.add_class::<telemetry::LogSink>()?;
-    m.add_class::<telemetry::JwtGuard>()?;
+    m.add_class::<telemetry::JWTGuard>()?;
     m.add_class::<telemetry::RateLimiter>()?;
     m.add_class::<broker::LeaseGrant>()?;
     m.add_class::<broker::BrokerStats>()?;
@@ -111,6 +116,23 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(telemetry::parse_traceparent, m)?)?;
     m.add_function(wrap_pyfunction!(telemetry::format_traceparent, m)?)?;
     m.add_function(wrap_pyfunction!(telemetry::sanitize_sql, m)?)?;
+
+    // Zero-copy msgspec, gRPC LPM, and vectorcall hydration helpers
+    m.add_function(wrap_pyfunction!(
+        msgspec_bridge::instantiate_struct_vectorcall,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(msgspec_bridge::call_vectorcall, m)?)?;
+    m.add_function(wrap_pyfunction!(msgspec_bridge::hydrate_one_vectorcall, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        msgspec_bridge::hydrate_rows_vectorcall,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        msgspec_bridge::orm_to_struct_vectorcall,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(msgspec_bridge::pack_grpc_lpm_frame, m)?)?;
 
     // Native database dialers, wire codecs, and SHM Arrow IPC cursors
     db::register_db_bindings(m)?;

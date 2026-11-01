@@ -438,7 +438,7 @@ class RedisConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     max_connections: int = 32
     """Maximum pooled sockets maintained per target node."""
     broker: Any = None
-    """Optional shared-memory `DatabaseBroker` or `ShmBrokerTransport` for cross-worker push fan-out."""
+    """Optional shared-memory `DatabaseBroker` or `SHMBrokerTransport` for cross-worker push fan-out."""
 
     @property
     def uses_tls(self) -> bool:
@@ -606,7 +606,7 @@ class SyncRedisDriver:
         return self._slot_map
 
     def attach_broker(self, broker: Any) -> None:
-        """Attach a ShmBrokerTransport or DatabaseBroker for push event forwarding."""
+        """Attach a SHMBrokerTransport or DatabaseBroker for push event forwarding."""
         self._broker = broker
 
     @staticmethod
@@ -1573,7 +1573,7 @@ class AsyncRedisDriver:
         return self._slot_map
 
     def attach_broker(self, broker: Any) -> None:
-        """Attach a ShmBrokerTransport or DatabaseBroker for push event forwarding."""
+        """Attach a SHMBrokerTransport or DatabaseBroker for push event forwarding."""
         self._broker = broker
         self._sync.attach_broker(broker)
 

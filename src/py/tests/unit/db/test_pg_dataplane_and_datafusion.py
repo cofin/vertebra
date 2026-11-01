@@ -9,9 +9,9 @@ import pytest
 
 from vertebra.db import (
     ARROW_STREAM_MEDIA_TYPE,
-    CdcConfig,
+    CDCConfig,
     ChangeFeed,
-    CteStep,
+    CTEStep,
     DataFusionConfig,
     DataFusionEngine,
     QueryPipeline,
@@ -20,7 +20,7 @@ from vertebra.db import (
     TenantPredicate,
     TenantScopeConfig,
 )
-from vertebra.server.platform import ShmAllocationPolicy
+from vertebra.server.platform import SHMAllocationPolicy
 
 
 def test_query_pipeline_reloverlay_and_chunked_jsonb() -> None:
@@ -46,7 +46,7 @@ def test_query_pipeline_reloverlay_and_chunked_jsonb() -> None:
     assert params == {"id": 1, "total": 99}
 
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
-        CteStep(name="bad;name", sql="SELECT 1")
+        CTEStep(name="bad;name", sql="SELECT 1")
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
         RelOverlay(base_table="orders; DROP TABLE users")
 
@@ -75,7 +75,7 @@ def test_cdc_listen_notify_spill_and_logical_emit() -> None:
     assert "pg_logical_emit_message" in sql
     assert params == (True, "orders", b'{"id":1}')
 
-    bridge = ChangeFeed(CdcConfig(max_history_size=2))
+    bridge = ChangeFeed(CDCConfig(max_history_size=2))
     small_wire, small_evt = bridge.publish_event("INSERT", {"id": 1})
     assert small_evt.spilled is False
     assert bridge.hydrate_notification(small_wire).payload == {"id": 1}
@@ -100,13 +100,13 @@ def test_embedded_datafusion_and_memfd_scm_rights() -> None:
     assert plan["referenced_tables"] == ["events_archive"]
     assert engine.execute_sql("SELECT 1 AS ok") == [{"ok": 1}]
 
-    fd, _backend = ShmAllocationPolicy.allocate_fd("ring-test", 4096)
+    fd, _backend = SHMAllocationPolicy.allocate_fd("ring-test", 4096)
     try:
         os.write(fd, b"VERTEBRA_MEMFD")
         s1, s2 = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            ShmAllocationPolicy.send_fd(s1, fd, b"HELLO")
-            recv_fd = ShmAllocationPolicy.recv_fd(s2)
+            SHMAllocationPolicy.send_fd(s1, fd, b"HELLO")
+            recv_fd = SHMAllocationPolicy.recv_fd(s2)
             try:
                 os.lseek(recv_fd, 0, os.SEEK_SET)
                 assert os.read(recv_fd, 14) == b"VERTEBRA_MEMFD"

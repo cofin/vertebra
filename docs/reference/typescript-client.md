@@ -2,13 +2,21 @@
 
 Full-stack TypeScript SDK (`src/ts/vertebra-client/`) providing typed HTTP requests, retries, SSE and WebSocket streaming, binary `LiveState` synchronization, Oracle APEX island bridges, Apache Arrow streaming, WebAssembly execution, MCP/A2A agent clients, and framework adapters.
 
+## Distribution Model: Zero-NPM Wheel-Native Packaging
+
+`@vertebra/client` is packaged and distributed directly within the `vertebra-core` Python wheel (`src/py/vertebra/server/_js/bundle/`), eliminating the requirement to publish to or install from the external NPM registry:
+
+- **Native Runtime Serving**: When running Vertebra applications (`vtb run` or `App`), the runtime serves all 15 ESM modules dynamically under `/__vertebra/client/*` (e.g. `/__vertebra/client/index.js`, `/__vertebra/client/react/index.js`, `/__vertebra/client/live/index.js`) with proper MIME types and cached HTTP headers.
+- **Type Linking (`vtb js`)**: `vtb js install` vendors and links the wheel's TypeScript declarations (`.d.ts`) into `.vertebra/client` and configures `.vertebra/importmap.json` for IDE autocomplete without Node or NPM.
+- **Vite & External Bundler Compatibility**: The package preserves full `package.json` subpath exports and ESM semantics for projects using external Vite, Webpack, or Node.js toolchains.
+
 ## Package Subpath Exports (`package.json`)
 
-`@vertebra/client` exposes 15 tree-shakeable ESM entry points:
+`@vertebra/client` exposes 17 tree-shakeable ESM entry points:
 
 | Import Path | Description |
 | --- | --- |
-| `@vertebra/client` | Root barrel exporting core HTTP, SSE, WebSocket, LiveState, Apex, Arrow, Wasm, HMR, Store, Telemetry, and Agent clients |
+| `@vertebra/client` | Root barrel exporting core HTTP, SSE, WebSocket, LiveState, Apex, Arrow, Wasm, HMR, Store, Telemetry, Router, WebMCP, and Agent clients |
 | `@vertebra/client/vite` | Vite plugin (`vitePlugin`) for Vertebra asset bundling, SSR entrypoints, and typegen |
 | `@vertebra/client/react` | React context provider (`ClientProvider`) and typed HTTP query/mutation hooks (`useQuery`, `useMutation`) |
 | `@vertebra/client/vue` | Vue 3 provider (`provideClient`) and typed query/mutation composables (`useQuery`, `useMutation`) |
@@ -17,12 +25,14 @@ Full-stack TypeScript SDK (`src/ts/vertebra-client/`) providing typed HTTP reque
 | `@vertebra/client/htmx` | HTMX request header and JSON payload helper (`initHtmx`) |
 | `@vertebra/client/store` | Client-side reactive `SessionStore` and `store` singleton |
 | `@vertebra/client/hmr` | `HotReloadClient`, `initHotReload`, and `ServerMessage` HMR wire protocol |
-| `@vertebra/client/wasm` | `WasmClient`, `WasmClientOptions`, and `WASM_MAGIC_BYTES` loader |
+| `@vertebra/client/wasm` | `WASMClient`, `WASMClientOptions`, and `WASM_MAGIC_BYTES` loader |
 | `@vertebra/client/arrow` | `ArrowStreamClient`, `ArrowStreamOptions`, and Apache Arrow IPC stream constants |
 | `@vertebra/client/live` | `LiveStateClient`, `HybridLogicalClock`, `OfflineDeltaQueue`, `StateOpcode`, and FNV-1a hashing |
 | `@vertebra/client/apex` | `ApexRegion`, `ApexOfflineOutbox`, and Oracle APEX island hydration descriptors |
 | `@vertebra/client/telemetry` | W3C `TraceContext` (`traceparent`) parser, generator, and header injector |
+| `@vertebra/client/router` | Type-safe URL and WebSocket route helpers (`routeUrl`, `wsUrl`, `interpolateRoutePath`, `RouteUrlOptions`) |
 | `@vertebra/client/agent` | `McpClient`, `A2aClient`, `AgentStreamClient`, and `WorkflowLiveSubscriber` |
+| `@vertebra/client/webmcp` | Browser WebMCP (`navigator.modelContext`) auto-registration (`registerWebMCPTools`, `WebMCPManifest`, `WebMCPToolDescriptor`) |
 
 ## HTTP Client, Retries & Error Hierarchy
 
@@ -36,9 +46,13 @@ import {
   ValidationError,
   throwParsedError,
   computeBackoffDelay,
+  routeUrl,
+  wsUrl,
+  interpolateRoutePath,
   type ClientConfig,
   type RetryConfig,
   type RouteResponse,
+  type RouteUrlOptions,
 } from "@vertebra/client";
 ```
 
@@ -48,6 +62,10 @@ import {
 | `ClientConfig` | Type | Base URL, default headers, timeout, and `RetryConfig` options for `HttpClient`. |
 | `RetryConfig` | Type | Maximum attempts, base delay, jitter, and retryable HTTP status codes. |
 | `RouteResponse` | Type | Typed response wrapper pairing HTTP status, headers, and decoded payload. |
+| `RouteUrlOptions` | Type | Path parameters, query parameters, and base URL options for `routeUrl` and `wsUrl`. |
+| `routeUrl` | Function | Resolves a named route or path template into a formatted HTTP URL with interpolated parameters and query string. |
+| `wsUrl` | Function | Resolves a named route or path template into a `ws://` or `wss://` WebSocket URL. |
+| `interpolateRoutePath` | Function | Interpolates `{param}` placeholders in a route template with URL-encoded parameter values. |
 | `computeBackoffDelay` | Function | Computes exponential backoff delay with bounded jitter for a retry attempt. |
 | `ClientError` | Class | Base error class carrying an optional HTTP `status` code. |
 | `NetworkError` | Class | Raised when the underlying `fetch` call fails due to a transport error. |
@@ -118,7 +136,7 @@ import {
 | `SessionStore` | Class | Reactive key-value store backed by `sessionStorage` / `localStorage` with cross-tab sync. |
 | `store` | Const | Default shared `SessionStore` instance. |
 
-## Agent Protocols: MCP & A2A (`@vertebra/client/agent`)
+## Agent Protocols: MCP, WebMCP & A2A (`@vertebra/client/agent`, `@vertebra/client/webmcp`)
 
 ```typescript
 import {
@@ -132,6 +150,12 @@ import {
   type AgentStreamClientOptions,
   WorkflowLiveSubscriber,
   type WorkflowLiveStatePayload,
+  registerWebMCPTools,
+  type RegisterWebMCPOptions,
+  type WebMCPManifest,
+  type WebMCPToolDescriptor,
+  type BrowserModelContext,
+  type BrowserModelContextTool,
 } from "@vertebra/client";
 ```
 
@@ -147,6 +171,12 @@ import {
 | `AgentStreamClientOptions` | Type | Connection and replay options for `AgentStreamClient`. |
 | `WorkflowLiveSubscriber` | Class | Subscribes to step transitions emitted by `vertebra.agent.workflow.WorkflowEngine`. |
 | `WorkflowLiveStatePayload` | Type | Typed state payload delivered to `WorkflowLiveSubscriber` listeners. |
+| `registerWebMCPTools` | Function | Fetches `/.well-known/webmcp.json` and registers advertised tools with `navigator.modelContext`. |
+| `RegisterWebMCPOptions` | Type | Options (`manifestUrl`, `modelContext`, `fetchImpl`, `headers`) for `registerWebMCPTools`. |
+| `WebMCPManifest` | Type | Discovery payload schema served at `/.well-known/webmcp.json`. |
+| `WebMCPToolDescriptor` | Type | Tool descriptor schema with `name`, `description`, `inputSchema`, `endpoint`, and `requiresConfirmation`. |
+| `BrowserModelContext` | Type | W3C WebMCP `navigator.modelContext` browser interface (`registerTool`, `unregisterTool`, `provideContext`). |
+| `BrowserModelContextTool` | Type | Tool registration object passed to `navigator.modelContext.registerTool`. |
 
 ## Oracle APEX Island Bridge (`@vertebra/client/apex`)
 
@@ -183,8 +213,8 @@ import {
   ARROW_CONTINUATION_MARKER,
   ARROW_FILE_MAGIC,
   ARROW_STREAM_MIME,
-  WasmClient,
-  type WasmClientOptions,
+  WASMClient,
+  type WASMClientOptions,
   WASM_MAGIC_BYTES,
   TraceContext,
 } from "@vertebra/client";
@@ -197,8 +227,8 @@ import {
 | `ARROW_STREAM_MIME` | Const | MIME type constant (`application/vnd.apache.arrow.stream`). |
 | `ARROW_FILE_MAGIC` | Const | 6-byte `ARROW1` magic header for Arrow IPC files. |
 | `ARROW_CONTINUATION_MARKER` | Const | `0xFFFFFFFF` continuation marker for Arrow IPC message framing. |
-| `WasmClient` | Class | Fetches, validates, compiles, and instantiates WebAssembly modules in the browser. |
-| `WasmClientOptions` | Type | Import object, memory bounds, and caching options for `WasmClient`. |
+| `WASMClient` | Class | Fetches, validates, compiles, and instantiates WebAssembly modules in the browser. |
+| `WASMClientOptions` | Type | Import object, memory bounds, and caching options for `WASMClient`. |
 | `WASM_MAGIC_BYTES` | Const | 4-byte `\0asm` binary magic header verified before compilation. |
 | `TraceContext` | Class | W3C Trace Context (`traceparent`) parser, generator, and header injector. |
 

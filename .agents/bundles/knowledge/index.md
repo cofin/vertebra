@@ -67,7 +67,7 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
   - [Database Drivers & Cloud Dialers](domains/data/database-drivers-and-dialers.md)
   - [Query Pipelines, Change Feeds, Tenant Predicates & DataFusion](domains/data/query-pipeline-cdc-and-tenancy.md)
   - [Logging, Trace Context, SQL Trace Propagation & GenAI Metrics](domains/telemetry/logging-tracing-and-genai.md)
-  - [Litestar Integration: Route Compiler, Middleware Offload, and Fast Path](domains/extensions/litestar.md)
+  - [Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django](domains/extensions/litestar.md)
   - [SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions](domains/extensions/sqlspec-alchemy-and-dialects.md)
   - [Oracle APEX, ORDS & 26ai Duality View Integration](domains/extensions/oracle-apex.md)
   - [gRPC Services & Wire Framing](domains/extensions/grpc.md)

@@ -1,12 +1,13 @@
 # `vertebra.extensions` — Litestar, SQLSpec, SQLAlchemy, APEX, gRPC & Broker
 
-First-party framework extensions connecting Vertebra's Rust HTTP/IPC runtime to Litestar (`LitestarPlugin`), SQLSpec (`SQLSpecPlugin`), SQLAlchemy (`AlchemyPlugin`), Oracle APEX (`ApexGateway`), gRPC services (`GrpcServiceRegistry`), and shared-memory database session brokers (`BrokerPlugin`). See [SQLSpec, SQLAlchemy & Extensions](../usage/extensions.md) for integration examples.
+First-party framework extensions connecting Vertebra's native HTTP/IPC runtime to Litestar (`LitestarPlugin`), SQLSpec (`create_sqlspec_plugin`), SQLAlchemy / Advanced Alchemy (`create_alchemy_plugin`), Oracle APEX (`ApexGateway`), gRPC services (`GrpcServiceRegistry`), and shared-memory database session brokers (`BrokerPlugin`). See [Framework Extensions](../usage/extensions.md) for integration guides.
 
-| Extension | Classes | Purpose |
+| Extension | Key Objects | Purpose |
 | --- | --- | --- |
-| **Litestar** | `LitestarConfig`, `LitestarPlugin`, `LitestarRouteCompiler` | Mount Litestar applications on Vertebra and compile static Litestar routes directly into the Rust radix router |
-| **SQLSpec** | `SQLSpecConfig`, `SQLSpecPlugin` | Bind SQLSpec database sessions, `StatementStack` pipelines, and shared-memory statement caches to request lifecycles |
-| **SQLAlchemy & Alembic** | `AlchemyPlugin`, `AlembicRunner` | Manage SQLAlchemy async/sync engines (`+vtb` dialects), request-scoped sessions, and programmatic Alembic migrations |
+| **Litestar** | `LitestarConfig`, `LitestarPlugin`, `RouteCompiler` | Mount Litestar applications on Vertebra and compile static Litestar routes directly into the native router |
+| **Litestar Ecosystem** | `queues`, `security`, `autowire`, `email`, `mcp`, `vite` | First-party decoupled plugins under `vertebra.extensions.litestar.*` |
+| **SQLSpec** | `create_sqlspec_plugin`, `ProxySyncConfig`, `ProxyAsyncConfig` | Bind SQLSpec database sessions, `StatementStack` pipelines, and shared-memory statement caches to request lifecycles |
+| **SQLAlchemy & Alchemy** | `create_alchemy_plugin`, `ObjectStoreBackend` | Manage SQLAlchemy async/sync engines (`+vtb` dialects), request-scoped sessions, and transactional file attachments |
 | **Oracle APEX** | `ApexIslandRegistry`, `ApexGateway` | Reverse-proxy Oracle ORDS/APEX sessions, verify ECID/session state, and hydrate TypeScript UI islands |
 | **gRPC & SHM Broker** | `GrpcServiceRegistry`, `BrokerPlugin` | Dispatch HTTP/2 gRPC methods and attach cross-worker `DatabaseBroker` connection/statement leasing |
 
@@ -21,28 +22,29 @@ First-party framework extensions connecting Vertebra's Rust HTTP/IPC runtime to 
     options:
       heading_level: 3
 
-::: vertebra.extensions.litestar.router.LitestarRouteCompiler
+::: vertebra.extensions.litestar.router.RouteCompiler
     options:
       heading_level: 3
 
 ## SQLSpec Integration (`vertebra.extensions.sqlspec`)
 
-::: vertebra.extensions.sqlspec.plugin.SQLSpecConfig
+::: vertebra.extensions.sqlspec.plugin.ProxySyncConfig
     options:
       heading_level: 4
       members: false
 
-::: vertebra.extensions.sqlspec.plugin.SQLSpecPlugin
+::: vertebra.extensions.sqlspec.plugin.ProxyAsyncConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.sqlspec.provider.SQLSpecProvider
     options:
       heading_level: 3
 
-## SQLAlchemy & Alembic (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
+## SQLAlchemy & Advanced Alchemy (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
 
-::: vertebra.extensions.alchemy.plugin.AlchemyPlugin
-    options:
-      heading_level: 3
-
-::: vertebra.extensions.sqlalchemy.alembic.AlembicRunner
+::: vertebra.extensions.alchemy.storage.ObjectStoreBackend
     options:
       heading_level: 3
 

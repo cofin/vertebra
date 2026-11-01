@@ -21,10 +21,11 @@ use crate::response::Response;
 use crate::synthetic::SyntheticRequest;
 use crate::transport::{ResponseSubmitter, with_buffer_slice};
 
-/// 20 inline ASGI scope slots:
+/// 24 inline ASGI scope slots:
 /// - `0..14`: standard ASGI 3.0 HTTP connection scope keys
 /// - `14..20`: Litestar v2 + v3 hot-path scope keys (`app`, `litestar_app`, `path_params`, `route_handler`, `path_template`, `connection`)
-pub const KNOWN_KEYS: [&str; 20] = [
+/// - `20..24`: Starlette + FastAPI hot-path scope keys (`router`, `endpoint`, `route`, `vertebra_request`)
+pub const KNOWN_KEYS: [&str; 24] = [
     "type",
     "asgi",
     "http_version",
@@ -45,12 +46,16 @@ pub const KNOWN_KEYS: [&str; 20] = [
     "route_handler",
     "path_template",
     "connection",
+    "router",
+    "endpoint",
+    "route",
+    "vertebra_request",
 ];
 
 const IDX_STATE: usize = 12;
 const IDX_EXTENSIONS: usize = 13;
-/// Slots `14..20` begin unset until populated by framework routing or middleware.
-const INITIAL_UNSET_MASK: u32 = 0b11_1111 << 14;
+/// Slots `14..24` begin unset until populated by framework routing or middleware.
+const INITIAL_UNSET_MASK: u32 = 0b11_1111_1111 << 14;
 
 #[inline]
 pub fn known_key_index(key: &str) -> Option<usize> {
@@ -75,6 +80,10 @@ pub fn known_key_index(key: &str) -> Option<usize> {
         "route_handler" => Some(17),
         "path_template" => Some(18),
         "connection" => Some(19),
+        "router" => Some(20),
+        "endpoint" => Some(21),
+        "route" => Some(22),
+        "vertebra_request" => Some(23),
         _ => None,
     }
 }
@@ -102,6 +111,10 @@ fn intern_known_key<'py>(py: Python<'py>, idx: usize) -> &'py Bound<'py, PyStrin
         17 => pyo3::intern!(py, "route_handler"),
         18 => pyo3::intern!(py, "path_template"),
         19 => pyo3::intern!(py, "connection"),
+        20 => pyo3::intern!(py, "router"),
+        21 => pyo3::intern!(py, "endpoint"),
+        22 => pyo3::intern!(py, "route"),
+        23 => pyo3::intern!(py, "vertebra_request"),
         _ => unreachable!(),
     }
 }
@@ -325,7 +338,7 @@ impl AsgiScope {
     /// Construct a standalone `AsgiScope` directly from HTTP components for unit tests and direct dispatch.
     #[staticmethod]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (*, method="GET", path="/", query_string="", headers=None, root_path="", http_version="1.1", scheme="http"))]
+    #[pyo3(signature = (*, method="GET", path="/", query_string="", headers=None, root_path="", http_version="1.1", scheme="http", body=None))]
     pub fn from_parts(
         py: Python<'_>,
         method: &str,
@@ -335,14 +348,19 @@ impl AsgiScope {
         root_path: &str,
         http_version: &str,
         scheme: &str,
-    ) -> Self {
+        body: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
         let raw_headers = encode_headers_compact(&headers.unwrap_or_default());
+        let body_bytes = match body {
+            Some(b) if !b.is_none() => crate::response::extract_buffer_bytes(py, b)?,
+            _ => Bytes::new(),
+        };
         let snapshot = SyntheticRequest::build(
             method,
             path,
             Some(query_string),
             &raw_headers,
-            b"",
+            &body_bytes,
             0,
             0,
             http_version,
@@ -351,12 +369,45 @@ impl AsgiScope {
         scope.cached[4] = Some(PyString::new(py, scheme).into_any().unbind());
         scope.cached[5] = Some(PyString::new(py, path).into_any().unbind());
         scope.cached[6] = Some(PyBytes::new(py, path.as_bytes()).into_any().unbind());
-        scope
+        Ok(scope)
     }
 
     #[staticmethod]
     pub fn known_keys() -> Vec<&'static str> {
         KNOWN_KEYS.to_vec()
+    }
+
+    /// Return a zero-object `Request` proxy backed by this scope's underlying `BatchSnapshot` slot.
+    pub fn request(&self) -> Request {
+        Request::new(Arc::clone(&self.batch), self.index)
+    }
+
+    /// Return the raw request body bytes directly from the underlying `BatchSnapshot` slot.
+    pub fn body_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, self.batch.body(self.index))
+    }
+
+    /// Pre-seed `_body` on a Starlette/FastAPI `Request` instance via `PyObject_GenericSetAttr`.
+    #[pyo3(signature = (request, body=None))]
+    pub fn preseed_request_body(
+        &self,
+        py: Python<'_>,
+        request: &Bound<'_, PyAny>,
+        body: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let body_obj: Bound<'_, PyAny> = match body {
+            Some(b) if !b.is_none() => b.clone(),
+            _ => PyBytes::new(py, self.batch.body(self.index)).into_any(),
+        };
+        let attr_name = pyo3::intern!(py, "_body");
+        let rc = unsafe {
+            ffi::PyObject_GenericSetAttr(request.as_ptr(), attr_name.as_ptr(), body_obj.as_ptr())
+        };
+        if rc < 0 {
+            unsafe { ffi::PyErr_Clear() };
+            request.setattr(attr_name, body_obj)?;
+        }
+        Ok(())
     }
 
     fn __getitem__(&mut self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {

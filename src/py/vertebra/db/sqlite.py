@@ -14,22 +14,24 @@ import msgspec
 
 from vertebra.db.postgres import (
     ArrowCursor,
+    _hydrate_rows_with_schema,
     _normalize_driver_params,
+    _table_to_rows_and_cols,
     write_arrow_shm,
 )
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.module_loader import import_optional
 
 __all__ = (
-    "AsyncSqliteDriver",
-    "SqliteConfig",
-    "SyncSqliteDriver",
+    "AsyncSQLiteDriver",
+    "SQLiteConfig",
+    "SyncSQLiteDriver",
 )
 
 _VALID_SYNCHRONOUS = {"OFF", "NORMAL", "FULL", "EXTRA"}
 
 
-class SqliteConfig(FrozenBaseStruct, frozen=True, gc=False):
+class SQLiteConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Configuration for SQLite 3.45+ with WAL mode, memory-mapped I/O, and SHM broker leasing."""
 
     path: str = ":memory:"
@@ -104,13 +106,13 @@ class SqliteConfig(FrozenBaseStruct, frozen=True, gc=False):
         return self.initialization_pragmas()
 
 
-class SyncSqliteDriver:
+class SyncSQLiteDriver:
     """Synchronous SQLite driver returning plain Python tuples with SHM broker and Arrow IPC support."""
 
     __slots__ = ("_broker", "_closed", "_config", "_conn")
 
-    def __init__(self, config: SqliteConfig | None = None, *, broker: Any = None) -> None:
-        self._config = config or SqliteConfig()
+    def __init__(self, config: SQLiteConfig | None = None, *, broker: Any = None) -> None:
+        self._config = config or SQLiteConfig()
         if self._config.synchronous not in _VALID_SYNCHRONOUS:
             msg = f"Invalid synchronous mode: {self._config.synchronous!r}"
             raise ValueError(msg)
@@ -121,8 +123,8 @@ class SyncSqliteDriver:
             self._conn.execute(pragma)
 
     @property
-    def config(self) -> SqliteConfig:
-        """Return the active SqliteConfig."""
+    def config(self) -> SQLiteConfig:
+        """Return the active SQLiteConfig."""
         return self._config
 
     @property
@@ -205,14 +207,63 @@ class SyncSqliteDriver:
         sql: str,
         *params: Any,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> list[dict[str, Any]]:
-        """Execute a SELECT statement and return rows as dictionaries."""
+        schema_type: type[Any] | None = None,
+    ) -> list[Any]:
+        """Execute a SELECT statement and return rows as dictionaries or hydrated `schema_type` instances."""
         resolved = _normalize_driver_params(params, parameters)
         rows, desc = self.execute_with_description(sql, resolved)
         if not rows:
             return []
         cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]))]
-        return [{col: (r[i] if i < len(r) else None) for i, col in enumerate(cols)} for r in rows]
+        return _hydrate_rows_with_schema(rows, cols, schema_type)
+
+    def select_one(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Execute a SELECT statement and return the first row or raise `ValueError`."""
+        rows = self.select(sql, *params, parameters=parameters, schema_type=schema_type)
+        if not rows:
+            msg = "No row found for select_one"
+            raise ValueError(msg)
+        return rows[0]
+
+    def select_one_or_none(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any | None:
+        """Execute a SELECT statement and return the first row or `None`."""
+        rows = self.select(sql, *params, parameters=parameters, schema_type=schema_type)
+        return rows[0] if rows else None
+
+    def load_from_arrow(
+        self,
+        table_name: str,
+        data: Any,
+        *,
+        columns: Sequence[str] | None = None,
+    ) -> int:
+        """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
+        rows, cols = _table_to_rows_and_cols(data, columns)
+        if not rows or not cols:
+            return 0
+        placeholders = ", ".join("?" for _ in cols)
+        col_list = ", ".join(cols)
+        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+        lease = self._acquire_broker_lease(sql)
+        try:
+            self._conn.executemany(sql, rows)
+            self._conn.commit()
+            return len(rows)
+        finally:
+            if lease is not None and hasattr(lease, "release"):
+                lease.release()
 
     def select_to_arrow(
         self,
@@ -245,17 +296,17 @@ class SyncSqliteDriver:
         self._conn.close()
 
 
-class AsyncSqliteDriver:
+class AsyncSQLiteDriver:
     """Asynchronous SQLite driver facade compatible with Python 3.12+ and free-threaded 3.14t."""
 
     __slots__ = ("_sync",)
 
-    def __init__(self, config: SqliteConfig | None = None, *, broker: Any = None) -> None:
-        self._sync = SyncSqliteDriver(config, broker=broker)
+    def __init__(self, config: SQLiteConfig | None = None, *, broker: Any = None) -> None:
+        self._sync = SyncSQLiteDriver(config, broker=broker)
 
     @property
-    def config(self) -> SqliteConfig:
-        """Return the active SqliteConfig."""
+    def config(self) -> SQLiteConfig:
+        """Return the active SQLiteConfig."""
         return self._sync.config
 
     @property
@@ -299,10 +350,48 @@ class AsyncSqliteDriver:
         sql: str,
         *params: Any,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> list[dict[str, Any]]:
-        """Asynchronously execute a SELECT statement and return rows as dictionaries."""
+        schema_type: type[Any] | None = None,
+    ) -> list[Any]:
+        """Asynchronously execute a SELECT statement and return rows as dictionaries or `schema_type` instances."""
         resolved = _normalize_driver_params(params, parameters)
-        return await asyncio.to_thread(self._sync.select, sql, parameters=resolved)
+        return await asyncio.to_thread(self._sync.select, sql, parameters=resolved, schema_type=schema_type)
+
+    async def select_one(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Asynchronously execute a SELECT statement and return the first row or raise `ValueError`."""
+        resolved = _normalize_driver_params(params, parameters)
+        return await asyncio.to_thread(self._sync.select_one, sql, parameters=resolved, schema_type=schema_type)
+
+    async def select_one_or_none(
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any | None:
+        """Asynchronously execute a SELECT statement and return the first row or `None`."""
+        resolved = _normalize_driver_params(params, parameters)
+        return await asyncio.to_thread(
+            self._sync.select_one_or_none,
+            sql,
+            parameters=resolved,
+            schema_type=schema_type,
+        )
+
+    async def load_from_arrow(
+        self,
+        table_name: str,
+        data: Any,
+        *,
+        columns: Sequence[str] | None = None,
+    ) -> int:
+        """Asynchronously bulk-ingest an Arrow Table or `ArrowCursor` into `table_name`."""
+        return await asyncio.to_thread(self._sync.load_from_arrow, table_name, data, columns=columns)
 
     async def select_to_arrow(
         self,

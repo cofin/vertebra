@@ -1,5 +1,6 @@
 """Fused direct Litestar v2/v3 HTTPRouteHandler execution and ScopeState.body pre-seeding."""
 
+import contextlib
 import enum
 import inspect
 from collections.abc import AsyncGenerator, AsyncIterable, Callable, Generator, Iterable
@@ -20,24 +21,24 @@ from vertebra.extensions.litestar.offload import (
     _supports_v2_layer_resolution,
 )
 from vertebra.extensions.litestar.router import (
-    ExtractedLitestarRoute,
-    LitestarRouterTable,
-    extract_litestar_routes,
+    ExtractedRoute,
+    RouterTable,
+    extract_routes,
 )
 from vertebra.typing import Empty
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
-    "CompiledLitestarRoute",
-    "LitestarFastPathBypass",
-    "compile_litestar_fastpath_routes",
-    "dispatch_litestar_handler_direct",
-    "preseed_litestar_scope_body",
+    "CompiledRoute",
+    "FastPath",
+    "compile_fastpath_routes",
+    "dispatch_handler_direct",
+    "preseed_scope_body",
 )
 
 
-class CompiledLitestarRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class CompiledRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Pre-compiled per-route dispatch metadata for zero-overhead Litestar v2/v3 handler invocation."""
 
     handler_id: int
@@ -75,7 +76,7 @@ class CompiledLitestarRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True)
         )
 
 
-class LitestarFastPathBypass:
+class FastPath:
     """Fast-path bypass router dispatching directly to compiled Litestar routes."""
 
     __slots__ = ("_app", "_compiled_routes", "_direct_plans", "_router_table")
@@ -85,23 +86,23 @@ class LitestarFastPathBypass:
         router_table: Any = None,
         *,
         app: Any = None,
-        compiled_routes: dict[int, CompiledLitestarRoute] | None = None,
+        compiled_routes: dict[int, CompiledRoute] | None = None,
     ) -> None:
         resolved_app = app
         resolved_table = router_table
         if (
             resolved_app is None
             and resolved_table is not None
-            and not isinstance(resolved_table, LitestarRouterTable)
+            and not isinstance(resolved_table, RouterTable)
             and not hasattr(resolved_table, "match")
             and hasattr(resolved_table, "routes")
         ):
             resolved_app = resolved_table
-            resolved_table = extract_litestar_routes(resolved_app)
+            resolved_table = extract_routes(resolved_app)
 
         self._app = resolved_app
-        self._router_table: LitestarRouterTable | None = None
-        self._compiled_routes: dict[int, CompiledLitestarRoute] = {}
+        self._router_table: RouterTable | None = None
+        self._compiled_routes: dict[int, CompiledRoute] = {}
         self._direct_plans: dict[int, _DirectSignaturePlan] = {}
         self.bind_app(resolved_app, router_table=resolved_table, compiled_routes=compiled_routes)
 
@@ -112,9 +113,9 @@ class LitestarFastPathBypass:
 
     @classmethod
     def from_app(cls, app: Any) -> Self:
-        """Construct a bound LitestarFastPathBypass directly from an initialized Litestar application."""
-        table = extract_litestar_routes(app)
-        compiled = compile_litestar_fastpath_routes(app, router_table=table)
+        """Construct a bound FastPath directly from an initialized Litestar application."""
+        table = extract_routes(app)
+        compiled = compile_fastpath_routes(app, router_table=table)
         return cls(table, app=app, compiled_routes=compiled)
 
     def bind_app(
@@ -122,7 +123,7 @@ class LitestarFastPathBypass:
         app: Any,
         *,
         router_table: Any = None,
-        compiled_routes: dict[int, CompiledLitestarRoute] | None = None,
+        compiled_routes: dict[int, CompiledRoute] | None = None,
     ) -> None:
         """Bind or refresh the target Litestar application, router table, and compiled route plans."""
         if app is not None:
@@ -130,7 +131,7 @@ class LitestarFastPathBypass:
         if router_table is not None:
             self._router_table = router_table
         elif self._router_table is None and self._app is not None:
-            self._router_table = extract_litestar_routes(self._app)
+            self._router_table = extract_routes(self._app)
 
         if compiled_routes is not None:
             self._compiled_routes = dict(compiled_routes)
@@ -292,7 +293,7 @@ class LitestarFastPathBypass:
             return None
 
         try:
-            return await dispatch_litestar_handler_direct(
+            return await dispatch_handler_direct(
                 compiled,
                 scope=scope,
                 body=resolved_body,
@@ -306,25 +307,25 @@ class LitestarFastPathBypass:
             raise
 
 
-def preseed_litestar_scope_body(scope: Any, body: bytes) -> Any:
+def preseed_scope_body(scope: Any, body: bytes) -> Any:
     """Pre-populate Litestar ScopeState.body on scope so await request.body() never calls AsgiReceive."""
     connection_state = _get_scope_state_cls().from_scope(scope)
     connection_state.body = body
     return connection_state
 
 
-def compile_litestar_fastpath_routes(
+def compile_fastpath_routes(
     app: Any,
     *,
-    router_table: LitestarRouterTable | None = None,
-) -> dict[int, CompiledLitestarRoute]:
-    """Compile all Litestar routes into CompiledLitestarRoute descriptors keyed by handler_id."""
-    table = router_table if router_table is not None else extract_litestar_routes(app)
+    router_table: RouterTable | None = None,
+) -> dict[int, CompiledRoute]:
+    """Compile all Litestar routes into CompiledRoute descriptors keyed by handler_id."""
+    table = router_table if router_table is not None else extract_routes(app)
     return _compile_routes_from_table(table, app)
 
 
-async def dispatch_litestar_handler_direct(
-    compiled: CompiledLitestarRoute,
+async def dispatch_handler_direct(
+    compiled: CompiledRoute,
     *,
     scope: Any,
     body: bytes,
@@ -332,7 +333,7 @@ async def dispatch_litestar_handler_direct(
     send: Any,
 ) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
     """Execute a middleware-free Litestar v2 or v3 HTTPRouteHandler and return (status, headers, body)."""
-    preseed_litestar_scope_body(scope, body)
+    preseed_scope_body(scope, body)
     request = compiled.request_class(scope=scope, receive=receive, send=send)
     scope["connection"] = request
 
@@ -377,7 +378,11 @@ async def dispatch_litestar_handler_direct(
                 )
             else:
                 await asgi_response(scope, receive, send)
-        elif resp_cls_name == "ASGIStreamingSSEResponse":
+        elif resp_cls_name in ("ASGIStreamingSSEResponse", "ASGIStreamingResponse") and (
+            hasattr(asgi_response, "_ping_interval")
+            or any(k.lower() == b"x-vertebra-sse-ping-interval" for k, _ in asgi_response.encode_headers())
+            or type(getattr(asgi_response, "iterator", None)).__name__ == "_ServerSentEventIterator"
+        ):
             await _offload_sse_response(asgi_response, send)
         else:
             await asgi_response(scope, receive, send)
@@ -530,9 +535,9 @@ def _resolve_max_body_size(handler: Any, app: Any) -> int | None:
 
 
 def _compile_routes_from_table(
-    router_table: LitestarRouterTable,
+    router_table: RouterTable,
     app: Any,
-) -> dict[int, CompiledLitestarRoute]:
+) -> dict[int, CompiledRoute]:
     rust_offload = _is_rust_offload_active()
     app_state = getattr(app, "state", None) if app is not None else None
     vtb_cfg = app_state.get("vertebra_config") if (app_state is not None and hasattr(app_state, "get")) else None
@@ -551,17 +556,29 @@ def _compile_routes_from_table(
     app_has_py_cors = (
         (not cors_offloaded) and not _is_empty_sentinel(getattr(app, "cors_config", None)) if app is not None else False
     )
+    app_guards = getattr(app, "guards", None) if app is not None else None
+    has_app_guards = bool(app_guards) and not _is_empty_sentinel(app_guards)
+    app_plugins = getattr(getattr(app, "plugins", None), "plugins", getattr(app, "plugins", ())) or ()
+    has_security_plugin = any(type(p).__name__ == "SecurityPlugin" for p in app_plugins)
     app_requires_pipeline = (
         app_has_middleware or app_has_csrf or app_has_allowed_hosts or app_has_py_compression or app_has_py_cors
     )
     app_exc_handlers = getattr(app, "exception_handlers", None) if app is not None else None
     has_app_custom_exc = _has_custom_exception_handlers(app_exc_handlers)
 
-    compiled: dict[int, CompiledLitestarRoute] = {}
+    compiled: dict[int, CompiledRoute] = {}
 
     for handler_id, entry in router_table.routes.items():
         handler = entry.route_handler
         guards = _get_handler_guards(handler)
+        handler_has_guards = bool(guards) or has_app_guards
+        if has_security_plugin:
+            handler_opt = getattr(handler, "opt", {}) or {}
+            is_exempt = bool(handler_opt.get("exclude_from_auth")) or getattr(
+                handler_opt.get("auth"), "is_public", False
+            )
+            if not is_exempt:
+                handler_has_guards = True
         middleware = _get_handler_middleware(handler)
         has_hooks = (
             _has_lifecycle_hook(handler, app, "before_request", "resolve_before_request")
@@ -575,7 +592,7 @@ def _compile_routes_from_table(
         has_cache = bool(getattr(handler, "cache", False))
         handler_owns_get_response = callable(getattr(handler, "_get_response_for_request", None))
         max_body_size = _resolve_max_body_size(handler, app)
-        compiled[handler_id] = CompiledLitestarRoute(
+        compiled[handler_id] = CompiledRoute(
             handler_id=handler_id,
             method=entry.method,
             path_template=entry.path_template,
@@ -583,7 +600,7 @@ def _compile_routes_from_table(
             route_handler=handler,
             kwargs_model=entry.kwargs_model,
             request_class=request_class,
-            has_guards=bool(guards),
+            has_guards=handler_has_guards,
             has_middleware=app_requires_pipeline or bool(middleware) or has_hooks,
             has_before_send=has_before_send,
             after_response=after_response,
@@ -643,8 +660,6 @@ def _handler_has_custom_response_metadata(handler: Any) -> bool:
     for attr_name, resolve_name in (
         ("response_headers", "resolve_response_headers"),
         ("response_cookies", "resolve_response_cookies"),
-        ("type_encoders", "resolve_type_encoders"),
-        ("type_decoders", "resolve_type_decoders"),
     ):
         if v2_layers:
             resolve_fn = getattr(handler, resolve_name, None)
@@ -660,6 +675,33 @@ def _handler_has_custom_response_metadata(handler: Any) -> bool:
         raw_val = getattr(handler, attr_name, None)
         if not _is_empty_sentinel(raw_val) and bool(raw_val):
             return True
+
+    for codec_attr, resolve_codec in (
+        ("type_encoders", "resolve_type_encoders"),
+        ("type_decoders", "resolve_type_decoders"),
+    ):
+        raw_codec = getattr(handler, codec_attr, None)
+        if not _is_empty_sentinel(raw_codec) and bool(raw_codec):
+            return True
+        if resolve_codec in getattr(handler, "__dict__", {}):
+            return True
+        for layer in getattr(handler, "ownership_layers", ()) or ():
+            if layer is not handler:
+                if type(layer).__name__ == "Litestar":
+                    if codec_attr == "type_decoders":
+                        decoders = getattr(layer, "type_decoders", None) or ()
+                        if len(decoders) > 3:
+                            return True
+                    elif codec_attr == "type_encoders":
+                        encoders = getattr(layer, "type_encoders", None) or {}
+                        if len(encoders) > 17:
+                            return True
+                    continue
+                layer_val = getattr(layer, codec_attr, None)
+                if not _is_empty_sentinel(layer_val) and bool(layer_val):
+                    return True
+                if resolve_codec in getattr(layer, "__dict__", {}):
+                    return True
 
     for direct_attr in ("etag", "cache_control", "background"):
         val = getattr(handler, direct_attr, None)
@@ -686,8 +728,8 @@ def _handler_has_custom_response_metadata(handler: Any) -> bool:
 
 
 def _compile_direct_signature_plan(
-    entry: ExtractedLitestarRoute,
-    compiled: CompiledLitestarRoute,
+    entry: ExtractedRoute,
+    compiled: CompiledRoute,
 ) -> _DirectSignaturePlan | None:
     handler = compiled.route_handler
     if (
@@ -777,7 +819,12 @@ def _compile_direct_signature_plan(
         body_type=body_type,
         json_headers=[(b"content-type", b"application/json")],
         text_headers=[
-            (b"content-type", media_bytes if media_type.startswith("text/") else b"text/plain; charset=utf-8")
+            (
+                b"content-type",
+                (media_bytes + b"; charset=utf-8")
+                if media_type == "text/plain"
+                else (media_bytes if media_type.startswith("text/") else b"text/plain; charset=utf-8"),
+            )
         ],
         raw_bytes_headers=[
             (b"content-type", media_bytes if media_type != "application/json" else b"application/octet-stream")
@@ -790,7 +837,7 @@ def _fallback_match_with_params(
     table: Any,
     method: str,
     path: str,
-) -> tuple[ExtractedLitestarRoute, dict[str, Any]] | None:
+) -> tuple[ExtractedRoute, dict[str, Any]] | None:
     entry = table.match(method, path)
     if entry is None:
         return None
@@ -829,7 +876,7 @@ async def _resolve_request_body(
         if not message.get("more_body", False):
             break
     resolved = b"" if not chunks else (chunks[0] if len(chunks) == 1 else b"".join(chunks))
-    preseed_litestar_scope_body(scope, resolved)
+    preseed_scope_body(scope, resolved)
     return resolved
 
 
@@ -968,7 +1015,13 @@ async def _close_scope_upload_files(scope: Any) -> None:
 async def _offload_sse_response(asgi_response: Any, send: Any) -> None:
     ping_interval = getattr(asgi_response, "_ping_interval", None)
     headers = list(asgi_response.encode_headers())
-    if ping_interval is not None:
+    if ping_interval is None:
+        for k, v in headers:
+            if k.lower() == b"x-vertebra-sse-ping-interval":
+                with contextlib.suppress(ValueError, TypeError):
+                    ping_interval = int(v.decode("latin-1"))
+                break
+    if ping_interval is not None and not any(k.lower() == b"x-vertebra-sse-ping-interval" for k, _ in headers):
         headers.append((b"x-vertebra-sse-ping-interval", str(ping_interval).encode("latin-1")))
     status_code = int(getattr(asgi_response, "status_code", 200))
     await send(

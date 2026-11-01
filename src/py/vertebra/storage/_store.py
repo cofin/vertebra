@@ -9,8 +9,10 @@ import calendar
 import hashlib
 import hmac
 import io
+import os
 import shutil
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Buffer, Sequence
 from pathlib import Path
@@ -24,13 +26,13 @@ from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
     "AzureConfig",
-    "GcsConfig",
-    "HttpConfig",
+    "GCSConfig",
+    "HTTPConfig",
     "LocalConfig",
     "MemoryConfig",
+    "OCIConfig",
     "ObjectMeta",
     "ObjectStore",
-    "OciConfig",
     "PutResult",
     "R2Config",
     "ReadableFile",
@@ -92,8 +94,8 @@ class S3Config(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return f"s3://{self.bucket}", opts
 
 
-class GcsConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """Configuration for Google Cloud Storage."""
+class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Configuration for Google Cloud Storage with Application Default Credentials (ADC) support."""
 
     bucket: str
     """Target Google Cloud Storage bucket name."""
@@ -102,24 +104,273 @@ class GcsConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     service_account_key: str | None = None
     """Optional inline JSON string containing a Google Cloud service account key."""
     application_credentials: str | None = None
-    """Optional fallback path to Application Default Credentials JSON."""
+    """Optional path to an Application Default Credentials JSON file (`authorized_user`, `external_account`, or `service_account`)."""
     service_account_email: str | None = None
     """Optional service account email used for IAM `signBlob` V4 URL signing."""
+    target_service_account: str | None = None
+    """Optional target service account email for keyless IAM impersonation (`generateAccessToken` / `signBlob`)."""
     iam_endpoint: str = "https://iamcredentials.googleapis.com"
-    """Base URL for the Google Cloud IAM Credentials `signBlob` REST API."""
+    """Base URL for the Google Cloud IAM Credentials REST API."""
     access_token: str | None = None
-    """Optional bearer OAuth2 access token used for IAM `signBlob` calls."""
+    """Optional OAuth2 bearer access token used for GCS REST and IAM `signBlob` calls."""
+    endpoint: str | None = None
+    """Optional custom GCS endpoint URL (or automatically resolved from `STORAGE_EMULATOR_HOST`)."""
+    allow_http: bool = False
+    """When True, permit unencrypted `http://` endpoints for local emulators."""
+    skip_signature: bool = False
+    """When True, send unsigned requests against anonymous buckets or local emulators."""
 
     def to_url_and_options(self) -> tuple[str, dict[str, str]]:
         """Convert configuration into a canonical URL and options dictionary."""
         opts: dict[str, str] = {}
         if self.service_account_path:
             opts["service_account_path"] = self.service_account_path
-        elif self.application_credentials:
-            opts["service_account_path"] = self.application_credentials
+        if self.application_credentials:
+            opts["application_credentials_path"] = self.application_credentials
         if self.service_account_key:
             opts["service_account_key"] = self.service_account_key
+        if self.service_account_email:
+            opts["service_account_email"] = self.service_account_email
+        if self.target_service_account:
+            opts["target_service_account"] = self.target_service_account
+
+        resolved_token = self.access_token
+        if resolved_token is None and self.target_service_account:
+            resolved_token = self.resolve_adc_token()
+        if resolved_token:
+            opts["access_token"] = resolved_token
+
+        emulator_host = os.environ.get("STORAGE_EMULATOR_HOST", "").strip()
+        resolved_endpoint = self.endpoint
+        if resolved_endpoint is None and emulator_host:
+            resolved_endpoint = (
+                emulator_host if emulator_host.startswith(("http://", "https://")) else f"http://{emulator_host}"
+            )
+        if resolved_endpoint:
+            opts["endpoint"] = resolved_endpoint
+
+        if self.allow_http or (resolved_endpoint is not None and resolved_endpoint.startswith("http://")):
+            opts["allow_http"] = "true"
+
+        has_explicit_auth = bool(
+            self.service_account_path
+            or self.service_account_key
+            or self.application_credentials
+            or resolved_token
+            or self.target_service_account
+        )
+        if self.skip_signature or (bool(emulator_host) and self.endpoint is None and not has_explicit_auth):
+            opts["skip_signature"] = "true"
+
         return f"gs://{self.bucket}", opts
+
+    def extract_service_account_identity(self) -> tuple[str | None, str | None]:
+        """Extract `(client_email, private_key_pem)` when service account JSON material is configured."""
+        raw_json: str | bytes | None = None
+        if self.service_account_key:
+            raw_json = self.service_account_key
+        elif self.service_account_path:
+            sa_path = Path(self.service_account_path)
+            if sa_path.is_file():
+                raw_json = sa_path.read_bytes()
+        elif self.application_credentials:
+            adc_path = Path(self.application_credentials)
+            if adc_path.is_file():
+                raw_json = adc_path.read_bytes()
+
+        if raw_json is not None:
+            try:
+                payload = decode_json(raw_json)
+            except (ValueError, TypeError, msgspec.DecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                email = payload.get("client_email")
+                pem = payload.get("private_key")
+                resolved_email = (
+                    self.target_service_account or self.service_account_email or (str(email) if email else None)
+                )
+                resolved_pem = None if self.target_service_account else (str(pem) if pem else None)
+                return resolved_email, resolved_pem
+
+        return self.target_service_account or self.service_account_email, None
+
+    def resolve_adc_token(
+        self,
+        *,
+        scopes: Sequence[str] = (
+            "https://www.googleapis.com/auth/devstorage.full_control",
+            "https://www.googleapis.com/auth/cloud-platform",
+        ),
+    ) -> str | None:
+        """Resolve an OAuth2 bearer token via Application Default Credentials or service-account impersonation."""
+        if self.access_token:
+            return self.access_token
+
+        google_auth = import_optional("google.auth")
+        google_requests = import_optional("google.auth.transport.requests")
+        if google_auth is not None and google_requests is not None:
+            try:
+                creds: Any = None
+                if self.service_account_key:
+                    sa_mod = import_optional("google.oauth2.service_account")
+                    if sa_mod is not None:
+                        info = decode_json(self.service_account_key)
+                        creds = sa_mod.Credentials.from_service_account_info(info, scopes=list(scopes))
+                elif self.service_account_path and Path(self.service_account_path).is_file():
+                    creds, _ = google_auth.load_credentials_from_file(
+                        self.service_account_path,
+                        scopes=list(scopes),
+                    )
+                elif self.application_credentials and Path(self.application_credentials).is_file():
+                    creds, _ = google_auth.load_credentials_from_file(
+                        self.application_credentials,
+                        scopes=list(scopes),
+                    )
+                else:
+                    creds, _ = google_auth.default(scopes=list(scopes))
+
+                if creds is not None and self.target_service_account:
+                    impersonated_mod = import_optional("google.auth.impersonated_credentials")
+                    if impersonated_mod is not None:
+                        creds = impersonated_mod.Credentials(
+                            source_credentials=creds,
+                            target_principal=self.target_service_account,
+                            target_scopes=list(scopes),
+                        )
+
+                if creds is not None:
+                    if not getattr(creds, "valid", False) or not getattr(creds, "token", None):
+                        creds.refresh(google_requests.Request())
+                    token_val = getattr(creds, "token", None)
+                    if token_val:
+                        return str(token_val)
+            except Exception:
+                pass
+
+        source_token = self._exchange_authorized_user_token()
+        if source_token is None:
+            source_token = self._fetch_metadata_server_token()
+        if source_token and self.target_service_account:
+            return self._impersonate_service_account_token(source_token, scopes=scopes)
+        return source_token
+
+    def _resolve_adc_file(self) -> Path | None:
+        """Locate an explicit or ambient Application Default Credentials JSON file."""
+        candidates: list[str] = []
+        if self.application_credentials:
+            candidates.append(self.application_credentials)
+        env_adc = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+        if env_adc:
+            candidates.append(env_adc)
+        xdg_cfg = os.environ.get("CLOUDSDK_CONFIG", "").strip()
+        if xdg_cfg:
+            candidates.append(str(Path(xdg_cfg) / "application_default_credentials.json"))
+        else:
+            candidates.append(str(Path.home() / ".config" / "gcloud" / "application_default_credentials.json"))
+
+        for raw in candidates:
+            candidate = Path(raw)
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _exchange_authorized_user_token(self) -> str | None:
+        """Exchange an ADC `authorized_user` refresh token for a short-lived access token."""
+        adc_file = self._resolve_adc_file()
+        if adc_file is None:
+            return None
+        try:
+            payload = decode_json(adc_file.read_bytes())
+        except (OSError, ValueError, TypeError, msgspec.DecodeError):
+            return None
+        if not isinstance(payload, dict) or payload.get("type") != "authorized_user":
+            return None
+        client_id = payload.get("client_id")
+        client_secret = payload.get("client_secret")
+        refresh_token = payload.get("refresh_token")
+        if not (client_id and client_secret and refresh_token):
+            return None
+        token_uri = str(payload.get("token_uri") or "https://oauth2.googleapis.com/token")
+        form_bytes = urlencode(
+            {
+                "client_id": str(client_id),
+                "client_secret": str(client_secret),
+                "refresh_token": str(refresh_token),
+                "grant_type": "refresh_token",
+            }
+        ).encode("utf-8")
+        headers: dict[str, str] = {"Content-Type": "application/x-www-form-urlencoded"}
+        quota_project = payload.get("quota_project_id")
+        if quota_project:
+            headers["x-goog-user-project"] = str(quota_project)
+        resp_data = self._open_http_json(token_uri, method="POST", body=form_bytes, headers=headers, timeout=5.0)
+        if isinstance(resp_data, dict) and resp_data.get("access_token"):
+            return str(resp_data["access_token"])
+        return None
+
+    @classmethod
+    def _fetch_metadata_server_token(cls) -> str | None:
+        """Query the GCE / Cloud Run / GKE metadata server for an ambient service account token."""
+        metadata_host = os.environ.get("GCE_METADATA_HOST", "metadata.google.internal").strip()
+        url = f"http://{metadata_host}/computeMetadata/v1/instance/service-accounts/default/token"
+        resp_data = cls._open_http_json(
+            url,
+            method="GET",
+            body=None,
+            headers={"Metadata-Flavor": "Google"},
+            timeout=1.5,
+        )
+        if isinstance(resp_data, dict) and resp_data.get("access_token"):
+            return str(resp_data["access_token"])
+        return None
+
+    def _impersonate_service_account_token(self, source_token: str, *, scopes: Sequence[str]) -> str | None:
+        """Exchange a source bearer token for an impersonated service account access token via IAM Credentials."""
+        if not self.target_service_account:
+            return source_token
+        iam_url = (
+            f"{self.iam_endpoint.rstrip('/')}/v1/projects/-/serviceAccounts/"
+            f"{self.target_service_account}:generateAccessToken"
+        )
+        body = bytes(encode_json_bytes({"scope": list(scopes)}))
+        resp_data = self._open_http_json(
+            iam_url,
+            method="POST",
+            body=body,
+            headers={
+                "Authorization": f"Bearer {source_token}",
+                "Content-Type": "application/json",
+            },
+            timeout=5.0,
+        )
+        if isinstance(resp_data, dict) and resp_data.get("accessToken"):
+            return str(resp_data["accessToken"])
+        return None
+
+    @staticmethod
+    def _open_http_json(
+        url: str,
+        *,
+        method: str,
+        body: bytes | None,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> Any:
+        """Execute an HTTP request and decode a JSON response payload, returning None on transport failure."""
+        if not url.startswith(("http://", "https://")):
+            return None
+        parsed = urlparse(url)
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        opener = (
+            urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            if parsed.hostname in {"127.0.0.1", "localhost", "::1", "metadata.google.internal"}
+            else urllib.request.build_opener()
+        )
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                return decode_json(resp.read())
+        except (OSError, urllib.error.URLError, ValueError, TypeError, msgspec.DecodeError):
+            return None
 
 
 class AzureConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -164,7 +415,7 @@ class AzureConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return f"az://{self.container}", opts
 
 
-class OciConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class OCIConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for native Oracle Cloud Infrastructure (OCI) Object Storage REST v2."""
 
     bucket: str
@@ -265,7 +516,7 @@ class R2Config(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return f"r2://{self.bucket}", opts
 
 
-class HttpConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class HTTPConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for HTTP/WebDAV object storage."""
 
     url: str
@@ -289,7 +540,7 @@ class MemoryConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return "memory://", {"namespace": self.namespace}
 
 
-type StorageConfig = LocalConfig | S3Config | GcsConfig | AzureConfig | OciConfig | R2Config | HttpConfig | MemoryConfig
+type StorageConfig = LocalConfig | S3Config | GCSConfig | AzureConfig | OCIConfig | R2Config | HTTPConfig | MemoryConfig
 
 
 class ObjectMeta(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -321,10 +572,10 @@ class PutResult(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
 
 class SigningConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """Configuration for HMAC-SHA256, S3 SigV4, and GCS V4 presigned URL generation."""
+    """Configuration for HMAC-SHA256, S3 SigV4, Azure SAS, and GCS V4 presigned URL generation."""
 
-    provider: Literal["hmac", "s3", "gcs"] = "hmac"
-    """URL signing scheme (`"hmac"`, `"s3"`, or `"gcs"`)."""
+    provider: Literal["hmac", "s3", "gcs", "azure"] = "hmac"
+    """URL signing scheme (`"hmac"`, `"s3"`, `"gcs"`, or `"azure"`)."""
     bucket: str = ""
     """Target bucket name embedded in S3 SigV4 or GCS V4 presigned URLs."""
     region: str = "us-east-1"
@@ -336,11 +587,21 @@ class SigningConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     hmac_secret: str = ""
     """Shared secret key used when `provider="hmac"`."""
     service_account_email: str = ""
-    """Google Cloud service account email used for GCS V4 IAM `signBlob` signing."""
+    """Google Cloud service account email used for GCS V4 signing."""
+    target_service_account: str | None = None
+    """Optional target service account email for keyless IAM `signBlob` impersonation."""
+    private_key_pem: str | None = None
+    """Optional PEM-encoded RSA private key for local zero-network GCS V4 signing."""
     iam_endpoint: str = "https://iamcredentials.googleapis.com"
     """Google Cloud IAM Credentials API base URL used for keyless GCS V4 signing."""
     access_token: str | None = None
     """Optional OAuth2 bearer token authenticating keyless IAM `signBlob` calls."""
+    account: str = ""
+    """Azure Storage account name used when `provider="azure"`."""
+    container: str = ""
+    """Azure Blob container name used when `provider="azure"`."""
+    azure_access_key: str = ""
+    """Base64-encoded Azure Storage shared key used when `provider="azure"`."""
     endpoint: str | None = None
     """Optional custom origin URL overriding the default cloud storage hostname."""
 
@@ -493,7 +754,8 @@ class ObjectStore:
     ) -> ObjectStore:
         """Construct an ObjectStore from any provider StorageConfig."""
         url, options = config.to_url_and_options()
-        return cls(url, options=options, signing=signing)
+        resolved_signing = signing if signing is not None else cls._derive_signing_from_config(config)
+        return cls(url, options=options, signing=resolved_signing)
 
     @classmethod
     def from_local(cls, root: str | Path, *, create_dirs: bool = True) -> ObjectStore:
@@ -525,19 +787,7 @@ class ObjectStore:
             virtual_hosted_style=virtual_hosted_style,
             allow_http=allow_http,
         )
-        default_signing = signing or (
-            SigningConfig(
-                provider="s3",
-                bucket=bucket,
-                region=region,
-                access_key_id=access_key_id or "",
-                secret_access_key=secret_access_key or "",
-                endpoint=endpoint,
-            )
-            if access_key_id and secret_access_key
-            else None
-        )
-        return cls.from_config(cfg, signing=default_signing)
+        return cls.from_config(cfg, signing=signing)
 
     @classmethod
     def from_gcs(
@@ -548,29 +798,27 @@ class ObjectStore:
         service_account_key: str | None = None,
         application_credentials: str | None = None,
         service_account_email: str | None = None,
+        target_service_account: str | None = None,
         iam_endpoint: str = "https://iamcredentials.googleapis.com",
         access_token: str | None = None,
+        endpoint: str | None = None,
+        allow_http: bool = False,
+        skip_signature: bool = False,
+        signing: SigningConfig | None = None,
     ) -> ObjectStore:
         """Construct an ObjectStore backed by Google Cloud Storage."""
-        cfg = GcsConfig(
+        cfg = GCSConfig(
             bucket=bucket,
             service_account_path=service_account_path,
             service_account_key=service_account_key,
             application_credentials=application_credentials,
             service_account_email=service_account_email,
+            target_service_account=target_service_account,
             iam_endpoint=iam_endpoint,
             access_token=access_token,
-        )
-        signing = (
-            SigningConfig(
-                provider="gcs",
-                bucket=bucket,
-                service_account_email=service_account_email,
-                iam_endpoint=iam_endpoint,
-                access_token=access_token,
-            )
-            if service_account_email
-            else None
+            endpoint=endpoint,
+            allow_http=allow_http,
+            skip_signature=skip_signature,
         )
         return cls.from_config(cfg, signing=signing)
 
@@ -587,6 +835,7 @@ class ObjectStore:
         client_secret: str | None = None,
         endpoint: str | None = None,
         use_emulator: bool = False,
+        signing: SigningConfig | None = None,
     ) -> ObjectStore:
         """Construct an ObjectStore backed by Azure Blob Storage or ADLS Gen2."""
         return cls.from_config(
@@ -600,7 +849,8 @@ class ObjectStore:
                 client_secret=client_secret,
                 endpoint=endpoint,
                 use_emulator=use_emulator,
-            )
+            ),
+            signing=signing,
         )
 
     @classmethod
@@ -619,7 +869,7 @@ class ObjectStore:
     ) -> ObjectStore:
         """Construct an ObjectStore backed by native OCI Object Storage REST v2."""
         return cls.from_config(
-            OciConfig(
+            OCIConfig(
                 bucket=bucket,
                 namespace=namespace,
                 region=region,
@@ -644,6 +894,7 @@ class ObjectStore:
         custom_domain: str | None = None,
         endpoint: str | None = None,
         allow_http: bool = False,
+        signing: SigningConfig | None = None,
     ) -> ObjectStore:
         """Construct an ObjectStore backed by Cloudflare R2."""
         cfg = R2Config(
@@ -656,51 +907,17 @@ class ObjectStore:
             endpoint=endpoint,
             allow_http=allow_http,
         )
-        signing = (
-            SigningConfig(
-                provider="s3",
-                bucket=bucket,
-                region="auto",
-                access_key_id=access_key_id,
-                secret_access_key=secret_access_key,
-                endpoint=cfg.resolved_endpoint(),
-            )
-            if access_key_id and secret_access_key
-            else None
-        )
         return cls.from_config(cfg, signing=signing)
 
     @classmethod
     def from_http(cls, url: str, *, headers: dict[str, str] | None = None) -> ObjectStore:
         """Construct an ObjectStore backed by HTTP/WebDAV."""
-        return cls.from_config(HttpConfig(url=url, headers=headers))
+        return cls.from_config(HTTPConfig(url=url, headers=headers))
 
     @classmethod
     def from_memory(cls, namespace: str = "default") -> ObjectStore:
         """Construct an in-memory ObjectStore."""
         return cls.from_config(MemoryConfig(namespace=namespace))
-
-    @staticmethod
-    def _native_to_put_result(native_meta: Any, fallback_etag: str = "") -> PutResult:
-        """Convert a native NativeObjectMeta instance into a PutResult."""
-        etag = getattr(native_meta, "etag", None) or fallback_etag
-        return PutResult(
-            path=str(native_meta.path),
-            size=int(native_meta.size),
-            etag=str(etag) if etag else None,
-            version=getattr(native_meta, "version", None),
-        )
-
-    @staticmethod
-    def _native_to_object_meta(native_meta: Any) -> ObjectMeta:
-        """Convert a native NativeObjectMeta instance into an ObjectMeta."""
-        return ObjectMeta(
-            path=str(native_meta.path),
-            size=int(native_meta.size),
-            last_modified=str(getattr(native_meta, "last_modified", "")),
-            etag=getattr(native_meta, "etag", None),
-            version=getattr(native_meta, "version", None),
-        )
 
     def put(self, path: str, data: Buffer) -> PutResult:
         """Write any Buffer (bytes, bytearray, memoryview) to the given object key."""
@@ -914,6 +1131,23 @@ class ObjectStore:
             return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
         return self.put_file(path, resolved_src)
 
+    async def put_multipart_async(self, path: str, parts: Sequence[Buffer]) -> PutResult:
+        """Asynchronously upload multiple buffer parts atomically."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None and hasattr(self._native, "put_multipart_async"):
+            views = [memoryview(part).cast("B") for part in parts]
+            native_meta = await self._native.put_multipart_async(key, views)
+            etag = native_meta.etag or f"{int(native_meta.size):016x}"
+            return PutResult(
+                path=str(native_meta.path),
+                size=int(native_meta.size),
+                etag=str(etag),
+                version=native_meta.version,
+            )
+        return self.put_multipart(path, parts)
+
     async def get_async(self, path: str) -> bytes:
         """Asynchronously read an object from the store via Rust Tokio awaitable."""
         key = self._normalize_key(path)
@@ -1033,12 +1267,86 @@ class ObjectStore:
             msg = "SigningConfig is required to verify presigned URLs"
             raise RuntimeError(msg)
         now_ts = int(time.time()) if timestamp is None else timestamp
-        if self._signing.provider == "gcs":
-            msg = "GCS V4 RSA-SHA256 presigned URL verification is not supported offline"
+        if self._signing.provider in {"gcs", "azure"}:
+            msg = f"{self._signing.provider.upper()} presigned URL verification is not supported offline"
             raise NotImplementedError(msg)
         if self._signing.provider == "s3":
             return self._verify_s3_v4(signed_url, method=method, now_ts=now_ts)
         return self._verify_hmac(signed_url, method=method, now_ts=now_ts)
+
+    @property
+    def supports_signing(self) -> bool:
+        """Return True if a SigningConfig is attached to this ObjectStore."""
+        return self._signing is not None
+
+    @staticmethod
+    def _derive_signing_from_config(config: StorageConfig) -> SigningConfig | None:
+        """Derive a default SigningConfig from provider credentials when available."""
+        if isinstance(config, S3Config) and config.access_key_id and config.secret_access_key:
+            return SigningConfig(
+                provider="s3",
+                bucket=config.bucket,
+                region=config.region,
+                access_key_id=config.access_key_id,
+                secret_access_key=config.secret_access_key,
+                endpoint=config.endpoint,
+            )
+        if isinstance(config, R2Config) and config.access_key_id and config.secret_access_key:
+            return SigningConfig(
+                provider="s3",
+                bucket=config.bucket,
+                region="auto",
+                access_key_id=config.access_key_id,
+                secret_access_key=config.secret_access_key,
+                endpoint=config.resolved_endpoint(),
+            )
+        if isinstance(config, GCSConfig):
+            email, pem = config.extract_service_account_identity()
+            if email:
+                return SigningConfig(
+                    provider="gcs",
+                    bucket=config.bucket,
+                    service_account_email=email,
+                    target_service_account=config.target_service_account,
+                    private_key_pem=pem,
+                    iam_endpoint=config.iam_endpoint,
+                    access_token=config.access_token,
+                    endpoint=config.endpoint,
+                )
+        if isinstance(config, AzureConfig) and config.access_key:
+            resolved_ep = config.endpoint or (
+                f"http://127.0.0.1:4577/{config.account}" if config.use_emulator else None
+            )
+            return SigningConfig(
+                provider="azure",
+                account=config.account,
+                container=config.container,
+                azure_access_key=config.access_key,
+                endpoint=resolved_ep,
+            )
+        return None
+
+    @staticmethod
+    def _native_to_put_result(native_meta: Any, fallback_etag: str = "") -> PutResult:
+        """Convert a native ObjectMeta instance into a PutResult."""
+        etag = getattr(native_meta, "etag", None) or fallback_etag
+        return PutResult(
+            path=str(native_meta.path),
+            size=int(native_meta.size),
+            etag=str(etag) if etag else None,
+            version=getattr(native_meta, "version", None),
+        )
+
+    @staticmethod
+    def _native_to_object_meta(native_meta: Any) -> ObjectMeta:
+        """Convert a native ObjectMeta instance into an ObjectMeta."""
+        return ObjectMeta(
+            path=str(native_meta.path),
+            size=int(native_meta.size),
+            last_modified=str(getattr(native_meta, "last_modified", "")),
+            etag=getattr(native_meta, "etag", None),
+            version=getattr(native_meta, "version", None),
+        )
 
     def _presign(
         self,
@@ -1057,6 +1365,17 @@ class ObjectStore:
             return self._sign_gcs_v4_iam(key, method=method, expires_in_secs=expires_in_secs, now_ts=now_ts)
         if self._signing.provider == "s3":
             return self._sign_s3_v4(key, method=method, expires_in_secs=expires_in_secs, now_ts=now_ts)
+        if self._signing.provider == "azure":
+            return SigningConfig.sign_azure_sas(
+                self._signing.account,
+                self._signing.azure_access_key,
+                self._signing.container,
+                key,
+                method=method,
+                expires_in_secs=expires_in_secs,
+                now_ts=now_ts,
+                endpoint=self._signing.endpoint,
+            )
         return self._sign_hmac(key, method=method, expires_in_secs=expires_in_secs, now_ts=now_ts)
 
     def _sign_hmac(
@@ -1219,18 +1538,36 @@ class ObjectStore:
         now_ts: int,
     ) -> str:
         assert self._signing is not None
+        effective_email = self._signing.target_service_account or self._signing.service_account_email
+        if not effective_email:
+            msg = "service_account_email or target_service_account is required for GCS V4 URL signing"
+            raise ValueError(msg)
+        private_key_pem = None if self._signing.target_service_account else self._signing.private_key_pem
+        access_token = self._signing.access_token or self._options.get("access_token")
+        if access_token is None and private_key_pem is None:
+            adc_helper = GCSConfig(
+                bucket=self._signing.bucket,
+                service_account_path=self._options.get("service_account_path"),
+                service_account_key=self._options.get("service_account_key"),
+                application_credentials=self._options.get("application_credentials_path"),
+                service_account_email=effective_email,
+                iam_endpoint=self._signing.iam_endpoint,
+            )
+            access_token = adc_helper.resolve_adc_token()
+
         native_mod = self._get_native_module()
         if native_mod is not None:
             return str(
                 native_mod.py_sign_gcs_v4_iam_url(
                     self._signing.bucket,
-                    self._signing.service_account_email,
+                    effective_email,
                     method,
                     key,
                     expires_in_secs,
                     now_ts,
                     self._signing.iam_endpoint,
-                    self._signing.access_token,
+                    access_token,
+                    private_key_pem,
                 )
             )
         goog_date = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now_ts))
@@ -1239,7 +1576,7 @@ class ObjectStore:
         scope = f"{datestamp}/auto/storage/goog4_request"
         query_items = [
             ("X-Goog-Algorithm", "GOOG4-RSA-SHA256"),
-            ("X-Goog-Credential", f"{self._signing.service_account_email}/{scope}"),
+            ("X-Goog-Credential", f"{effective_email}/{scope}"),
             ("X-Goog-Date", goog_date),
             ("X-Goog-Expires", str(expires_in_secs)),
             ("X-Goog-SignedHeaders", "host"),
@@ -1249,18 +1586,15 @@ class ObjectStore:
             f"{method.upper()}\n{canonical_uri}\n{canonical_qs}\nhost:storage.googleapis.com\n\nhost\nUNSIGNED-PAYLOAD"
         )
         string_to_sign = f"GOOG4-RSA-SHA256\n{goog_date}\n{scope}\n{hashlib.sha256(canonical_req.encode()).hexdigest()}"
-        iam_url = (
-            f"{self._signing.iam_endpoint.rstrip('/')}/v1/projects/-/serviceAccounts/"
-            f"{self._signing.service_account_email}:signBlob"
-        )
+        iam_url = f"{self._signing.iam_endpoint.rstrip('/')}/v1/projects/-/serviceAccounts/{effective_email}:signBlob"
         if not iam_url.startswith(("http:", "https:")):
             msg = f"Unsupported IAM endpoint scheme: {iam_url!r}"
             raise ValueError(msg)
         parsed_iam = urlparse(iam_url)
         body_bytes = bytes(encode_json_bytes({"payload": base64.b64encode(string_to_sign.encode()).decode("ascii")}))
         headers = {"Content-Type": "application/json"}
-        if self._signing.access_token:
-            headers["Authorization"] = f"Bearer {self._signing.access_token}"
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
         req = urllib.request.Request(iam_url, data=body_bytes, headers=headers, method="POST")
         opener = (
             urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -1385,6 +1719,15 @@ class ReadableFile(io.RawIOBase):
         data = self._store.get_range(self._key, self._pos, length)
         self._pos += len(data)
         return data
+
+    def readinto(self, b: Buffer) -> int:
+        """Read bytes directly into a writable buffer and return the byte count."""
+        self._ensure_open()
+        view = memoryview(b).cast("B")
+        data = self.read(len(view))
+        count = len(data)
+        view[:count] = data
+        return count
 
     def read_at(self, offset: int, length: int) -> bytes:
         """Read length bytes at offset without mutating the stream cursor."""

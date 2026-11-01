@@ -17,21 +17,54 @@ All storage configurations inherit from `msgspec.Struct` (`frozen=True, gc=False
 | **Local Filesystem** | `LocalConfig` | `file://<root>` | Atomic local file persistence with automatic parent directory creation |
 | **In-Memory** | `MemoryConfig` | `memory://` | Zero-I/O isolated namespaces for fast unit and integration tests |
 
-## Core Operations & `StorageRegistry`
+## Core Operations
 
-Use `ObjectStore.from_config` to instantiate a backend and `StorageRegistry` to manage named stores (such as `"uploads"`, `"avatars"`, or `"exports"`) across your application:
+Use `ObjectStore.from_config` to instantiate a backend across synchronous and asynchronous operations:
 
 ```python
-from vertebra.storage import MemoryConfig, ObjectStore, StorageRegistry
+from vertebra.storage import MemoryConfig, ObjectStore
 
 store = ObjectStore.from_config(MemoryConfig(namespace="uploads"))
 store.put("reports/q1.json", b'{"revenue": 125000}')
 payload = store.get("reports/q1.json")
 meta = store.head("reports/q1.json")
-
-registry = StorageRegistry()
-registry.register("uploads", store)
 ```
+
+## Google Cloud Storage & Application Default Credentials (ADC)
+
+Vertebra provides first-class, zero-config integration with Google Cloud Storage (`GCSConfig`). When deployed in Google Cloud environments (Google Kubernetes Engine, Cloud Run, Cloud Functions, Compute Engine) or during local development with `gcloud`, Vertebra automatically resolves credentials via Google Application Default Credentials (ADC) without requiring manual secret configuration:
+
+```python
+import os
+from vertebra.storage import GCSConfig, ObjectStore
+
+store = ObjectStore.from_config(GCSConfig(bucket="app-assets-production"))
+
+sa_store = ObjectStore.from_config(
+    GCSConfig(
+        bucket="app-assets-production",
+        service_account_path="/var/secrets/google/key.json",
+    )
+)
+
+json_store = ObjectStore.from_config(
+    GCSConfig(
+        bucket="app-assets-production",
+        service_account_key=os.environ["GCS_SERVICE_ACCOUNT_JSON"],
+    )
+)
+
+signing_store = ObjectStore.from_config(
+    GcsConfig(
+        bucket="app-assets-production",
+        service_account_email="backend-service@my-project.iam.gserviceaccount.com",
+    )
+)
+```
+
+- **Zero-Config ADC**: Leaving `service_account_path` and `service_account_key` unset activates native Google Application Default Credentials. The underlying Rust runtime discovers credentials from the GCP metadata server or local user credentials automatically.
+- **Keyless V4 Presigning**: Pass `service_account_email` to sign upload and download URLs using Google Cloud IAM's `signBlob` API, eliminating the need to expose long-lived private keys inside runtime containers.
+- **DuckDB httpfs Secrets**: Generate DuckDB secret creation DDL matching GCS access tokens via `build_duckdb_gcs_secret_sql`.
 
 ## Presigned URLs (`SigningConfig`)
 
@@ -68,19 +101,23 @@ with store.open_readable("events/2026-10.parquet") as reader:
     magic_footer = reader.read_at(reader.size - 4, 4)
 ```
 
-## Transactional Upload Staging (`UploadTracker`)
+## Advanced Alchemy Model File Attachments
 
-When a route handler writes both database rows and object storage blobs, `UploadTracker` stages uploads and synchronizes them with your database transaction lifecycle (`before_flush`, `after_commit`, `after_rollback`) so rolled-back database transactions automatically clean up staged objects:
+Integrate storage directly with database models using Advanced Alchemy's `FileObject` and Vertebra's `ObjectStoreBackend`:
 
 ```python
-from vertebra.storage import ObjectStore, UploadTracker
+from advanced_alchemy.types.file_object import FileObject
+from vertebra.extensions.alchemy.storage import (
+    ObjectStoreBackend,
+    register_storage_backend,
+)
+from vertebra.storage import ObjectStore
 
-store = ObjectStore.from_memory(namespace="uploads")
-tracker = UploadTracker(default_store=store)
+store = ObjectStore("memory://")
+backend = register_storage_backend("documents", store=store)
 
-tracker.stage_upload("avatars/user-1.png", b"\x89PNG\r\n\x1a\n...")
-tracker.before_flush()
-tracker.after_commit()
+file_obj = FileObject(backend=backend, filename="contract.pdf")
+backend.save_object(file_obj, b"%PDF-1.4...")
 ```
 
-See [`vertebra.storage` API Reference](../reference/storage.md) for full configuration classes, `ObjectStore` methods, and `UploadTracker` lifecycle hooks.
+See [`vertebra.storage` API Reference](../reference/storage.md) for full configuration classes and `ObjectStore` methods.

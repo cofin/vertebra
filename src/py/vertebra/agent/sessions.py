@@ -157,16 +157,18 @@ class CacheSessionStore:
 
 
 class SQLSpecSessionStore:
-    """Session store persisting conversation history via parameterized SQL statements."""
+    """Session store persisting conversation history via parameterized SQL statements or ADK store."""
 
     def __init__(
         self,
-        driver: Any,
+        driver: Any = None,
         *,
         table_name: str = "vertebra_agent_sessions",
+        adk_store: Any = None,
     ) -> None:
         self.driver = driver
         self.table_name = table_name
+        self.adk_store = adk_store
         self._locks = _LockManager()
 
     def lock(self, owner: str, session_id: str) -> AbstractAsyncContextManager[None]:
@@ -175,6 +177,8 @@ class SQLSpecSessionStore:
 
     async def _execute(self, query: str, params: dict[str, Any] | tuple[Any, ...]) -> Any:
         """Execute query across async or sync drivers."""
+        if self.driver is None:
+            return None
         if hasattr(self.driver, "execute"):
             fn = self.driver.execute
             if inspect.iscoroutinefunction(fn):
@@ -187,6 +191,8 @@ class SQLSpecSessionStore:
 
     async def _fetch_one(self, query: str, params: dict[str, Any] | tuple[Any, ...]) -> Any:
         """Fetch single result row across async or sync drivers."""
+        if self.driver is None:
+            return None
         if hasattr(self.driver, "fetch_one"):
             fn = self.driver.fetch_one
             if inspect.iscoroutinefunction(fn):
@@ -204,7 +210,28 @@ class SQLSpecSessionStore:
         return None
 
     async def load(self, owner: str, session_id: str) -> list[AgentMessage] | None:
-        """Load session messages from the database table."""
+        """Load session messages from the database table or ADK store."""
+        if self.adk_store is not None:
+            fn = getattr(self.adk_store, "get_session", None) or getattr(self.adk_store, "load", None)
+            if callable(fn):
+                try:
+                    res = fn(session_id)
+                except TypeError:
+                    res = fn(owner, session_id)
+                if inspect.isawaitable(res):
+                    res = await res
+                if res is None:
+                    return None
+                if isinstance(res, list):
+                    return res
+                messages = getattr(res, "messages", None) or getattr(res, "events", None)
+                if messages is not None:
+                    return [
+                        msgspec.convert(item, AgentMessage) if not isinstance(item, AgentMessage) else item
+                        for item in messages
+                    ]
+                return None
+
         query = f"SELECT messages FROM {self.table_name} WHERE owner = :owner AND session_id = :session_id"
         params = {"owner": owner, "session_id": session_id}
         row = await self._fetch_one(query, params)
@@ -217,7 +244,18 @@ class SQLSpecSessionStore:
         return [msgspec.convert(item, AgentMessage) for item in raw_list]
 
     async def save(self, owner: str, session_id: str, messages: Sequence[AgentMessage]) -> None:
-        """Upsert conversation history in the database table."""
+        """Upsert conversation history in the database table or ADK store."""
+        if self.adk_store is not None:
+            fn = getattr(self.adk_store, "save_session", None) or getattr(self.adk_store, "save", None)
+            if callable(fn):
+                try:
+                    res = fn(session_id, messages)
+                except TypeError:
+                    res = fn(owner, session_id, messages)
+                if inspect.isawaitable(res):
+                    await res
+                return
+
         serialized = encode_json_bytes(messages).decode("utf-8")
         now_iso = datetime.now(UTC).isoformat()
 
@@ -245,7 +283,18 @@ class SQLSpecSessionStore:
                 await self._execute(update_query, params)
 
     async def delete(self, owner: str, session_id: str) -> None:
-        """Delete session row from the database table."""
+        """Delete session row from the database table or ADK store."""
+        if self.adk_store is not None:
+            fn = getattr(self.adk_store, "delete_session", None) or getattr(self.adk_store, "delete", None)
+            if callable(fn):
+                try:
+                    res = fn(session_id)
+                except TypeError:
+                    res = fn(owner, session_id)
+                if inspect.isawaitable(res):
+                    await res
+                return
+
         query = f"DELETE FROM {self.table_name} WHERE owner = :owner AND session_id = :session_id"
         params = {"owner": owner, "session_id": session_id}
         await self._execute(query, params)

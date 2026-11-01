@@ -8,6 +8,8 @@ import {
   WorkflowLiveSubscriber,
 } from "../src/agent/index";
 import { fnv1aFieldId, fnv1aStateId, StateOpcode } from "../src/live/index";
+import { interpolateRoutePath, routeUrl, wsUrl } from "../src/router";
+import { type BrowserModelContextTool, registerWebMCPTools } from "../src/webmcp";
 
 describe("@vertebra/client/agent SDK", () => {
   it("encodes MCP headers correctly for ASCII and non-ASCII characters", () => {
@@ -186,5 +188,77 @@ describe("@vertebra/client/agent SDK", () => {
     expect(states).toContain("completed");
 
     unsubscribe();
+  });
+
+  it("routeUrl and wsUrl interpolate typed path and query parameters cleanly", () => {
+    const httpRoutes = {
+      "get.users.by_id": "/users/{id:int}",
+    } as const;
+    const wsRoutes = {
+      chat_room: "/ws/rooms/{room_id:str}",
+    } as const;
+
+    expect(interpolateRoutePath("/items/{id:int}", { id: 42 }, { page: 2 })).toBe("/items/42?page=2");
+    expect(routeUrl(httpRoutes, "get.users.by_id", { id: 7 }, { baseUrl: "https://api.example.com/" })).toBe(
+      "https://api.example.com/users/7",
+    );
+    expect(
+      wsUrl(
+        wsRoutes,
+        "chat_room",
+        { room_id: "general" },
+        { baseUrl: "https://api.example.com", query: { token: "abc" } },
+      ),
+    ).toBe("wss://api.example.com/ws/rooms/general?token=abc");
+  });
+
+  it("registerWebMCPTools registers tools with navigator.modelContext and dispatches JSON-RPC tools/call", async () => {
+    const registered: BrowserModelContextTool[] = [];
+    let capturedHeaders: Headers | null = null;
+    let capturedBody: Record<string, unknown> | null = null;
+
+    const fakeFetch: typeof fetch = async (_input, init) => {
+      capturedHeaders = new Headers(init?.headers);
+      capturedBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: capturedBody.id,
+          result: { status: "created", id: 101 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const tools = await registerWebMCPTools(
+      {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        mcpEndpoint: "https://app.example.com/mcp",
+        tools: [
+          {
+            name: "create_ticket",
+            description: "Create a support ticket",
+            inputSchema: { type: "object", properties: { title: { type: "string" } } },
+          },
+        ],
+      },
+      {
+        fetchImpl: fakeFetch,
+        modelContext: {
+          registerTool: (tool) => {
+            registered.push(tool);
+          },
+        },
+      },
+    );
+
+    expect(tools).toHaveLength(1);
+    expect(registered).toHaveLength(1);
+    const out = await registered[0]?.execute({ title: "Broken login" });
+    expect(out).toEqual({ status: "created", id: 101 });
+    expect(capturedHeaders?.get("MCP-Protocol-Version")).toBe(MCP_PROTOCOL_VERSION);
+    expect(capturedHeaders?.get("Mcp-Method")).toBe("tools/call");
+    expect(capturedHeaders?.get("Mcp-Name")).toBe("create_ticket");
+    expect((capturedBody?.params as { name?: string } | undefined)?.name).toBe("create_ticket");
   });
 });

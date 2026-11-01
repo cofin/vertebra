@@ -19,7 +19,7 @@ __all__ = (
     "CgroupQuota",
     "LameDuckController",
     "PlatformAdapter",
-    "ShmAllocationPolicy",
+    "SHMAllocationPolicy",
     "ZPagesRegistry",
 )
 
@@ -143,7 +143,7 @@ class LameDuckController:
         return 200, {"status": "ok"}
 
 
-class ShmAllocationPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class SHMAllocationPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Shared-memory allocation policy for Kubernetes (64 MiB /dev/shm) and read-only rootfs."""
 
     prefer_memfd: bool = True
@@ -187,7 +187,7 @@ class ShmAllocationPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         cls,
         name: str,
         size: int,
-        policy: "ShmAllocationPolicy | None" = None,
+        policy: "SHMAllocationPolicy | None" = None,
     ) -> tuple[int, str]:
         """Allocate an anonymous shared-memory file descriptor using policy or defaults."""
         active_policy = policy if policy is not None else cls()

@@ -7,7 +7,7 @@ Multi-protocol worker lifecycle (`Worker`), pre-compiled batch dispatch (`Handle
 | **Worker & Batch Dispatch** | `Worker`, `HandlerSpec`, `BatchDispatchPlan` | Poll request batches from `vertebra-core` transport, partition by execution mode, and submit responses |
 | **Lanes & Event Loops** | `LaneConfig`, `LaneMetrics`, `EventLoopPool` | Isolate `io`, `cpu`, and `agent` concurrency and shard `asyncio` loops across worker threads |
 | **Protocol Runners** | `AsgiRunner`, `RsgiAdapter`, `WsgiAdapter` | Run ASGI 3.0, RSGI 1.6, and PEP 3333 WSGI applications (`Litestar`, `FastAPI`, `Flask`, `Django`) |
-| **Platform & GIL Audit** | `CgroupQuota`, `ShmAllocationPolicy`, `LameDuckController`, `ZPagesRegistry`, `GilAuditReport` | Inspect cgroup v2 CPU/SHM limits, serve `/healthz` and `/statusz`, drain traffic on `SIGTERM`, and audit 3.14t GIL state |
+| **Platform & GIL Audit** | `CgroupQuota`, `SHMAllocationPolicy`, `LameDuckController`, `ZPagesRegistry`, `GilAuditReport` | Inspect cgroup v2 CPU/SHM limits, serve `/healthz` and `/statusz`, drain traffic on `SIGTERM`, and audit 3.14t GIL state |
 
 ## Worker Lifecycle & Batch Dispatch
 
@@ -88,7 +88,7 @@ Multi-protocol worker lifecycle (`Worker`), pre-compiled batch dispatch (`Handle
     options:
       heading_level: 3
 
-::: vertebra.server.platform.ShmAllocationPolicy
+::: vertebra.server.platform.SHMAllocationPolicy
     options:
       heading_level: 3
 

@@ -11,14 +11,13 @@ from vertebra.db.redis import AsyncRedisDriver, RedisConfig
 from vertebra.db.valkey import AsyncValkeyDriver, ValkeyConfig
 
 __all__ = (
-    "KeyValueBackend",
+    "KeyValueStore",
     "MemoryStore",
     "NamespacedStore",
-    "ResponseCacheStore",
 )
 
 
-class ResponseCacheStore:
+class KeyValueStore:
     """Lock-free monotonic TTL store with optional Valkey/Redis backing and RESP3 invalidation."""
 
     __slots__ = ("_driver", "_entries")
@@ -29,11 +28,6 @@ class ResponseCacheStore:
         self._driver = driver
         if isinstance(driver, AsyncValkeyDriver):
             driver.add_invalidation_listener(self._on_driver_invalidate)
-
-    def _on_driver_invalidate(self, keys: Any) -> None:
-        """Evict local cache entries matching invalidated keys."""
-        for key in keys:
-            self._entries.pop(key, None)
 
     @classmethod
     def from_valkey(cls, config_or_url: ValkeyConfig | str) -> Self:
@@ -166,13 +160,18 @@ class ResponseCacheStore:
         if self._driver is not None:
             await self._driver.close()
 
+    def _on_driver_invalidate(self, keys: Any) -> None:
+        """Evict local cache entries matching invalidated keys."""
+        for key in keys:
+            self._entries.pop(key, None)
+
 
 class NamespacedStore:
-    """Prefix-isolated view over a ResponseCacheStore."""
+    """Prefix-isolated view over a KeyValueStore."""
 
     __slots__ = ("_namespace", "_store")
 
-    def __init__(self, store: ResponseCacheStore, namespace: str) -> None:
+    def __init__(self, store: KeyValueStore, namespace: str) -> None:
         """Initialize with a backing store and namespace prefix."""
         self._store = store
         self._namespace = namespace.strip(":")
@@ -195,5 +194,4 @@ class NamespacedStore:
         await self._store.delete(f"{self._namespace}:{key}")
 
 
-MemoryStore = ResponseCacheStore
-KeyValueBackend = ResponseCacheStore
+MemoryStore = KeyValueStore

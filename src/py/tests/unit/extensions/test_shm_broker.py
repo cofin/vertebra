@@ -10,12 +10,12 @@ from pathlib import Path
 from vertebra.extensions.broker import (
     BrokerConfig,
     InMemoryBrokerTransport,
-    ShmBrokerTransport,
+    SHMBrokerTransport,
 )
 
 
 def _child_publish_and_compile(shm_name: str, pool_size: int, max_overflow: int, stmt_cap: int) -> None:
-    """Attach to a named ShmBrokerTransport in a child process, compile a statement, and publish a channel message.
+    """Attach to a named SHMBrokerTransport in a child process, compile a statement, and publish a channel message.
 
     Args:
         shm_name: Name of the POSIX shared-memory segment.
@@ -29,7 +29,7 @@ def _child_publish_and_compile(shm_name: str, pool_size: int, max_overflow: int,
         statement_cache_capacity=stmt_cap,
         shm_name=shm_name,
     )
-    transport = ShmBrokerTransport(cfg)
+    transport = SHMBrokerTransport(cfg)
     plan = transport.get_or_compile_statement(
         "postgresql",
         "SELECT id, email FROM users WHERE id = :id",
@@ -42,7 +42,7 @@ def _child_publish_and_compile(shm_name: str, pool_size: int, max_overflow: int,
 
 
 def test_shm_broker_colocated_statement_cache_single_region_and_fd() -> None:
-    """Verify ShmBrokerTransport co-locates statement cache in a single ShmRegion and shares across FD attachment."""
+    """Verify SHMBrokerTransport co-locates statement cache in a single ShmRegion and shares across FD attachment."""
     name = f"/vtb-colocated-{os.getpid()}-{int(time.time() * 1000)}"
     cfg = BrokerConfig(
         pool_size=4,
@@ -50,7 +50,7 @@ def test_shm_broker_colocated_statement_cache_single_region_and_fd() -> None:
         statement_cache_capacity=32,
         shm_name=name,
     )
-    primary = ShmBrokerTransport(cfg)
+    primary = SHMBrokerTransport(cfg)
     assert primary.stmt_capacity == 32
     assert primary.stmt_offset > 0
     assert primary.shm_size > primary.stmt_offset
@@ -75,7 +75,7 @@ def test_shm_broker_colocated_statement_cache_single_region_and_fd() -> None:
     assert compile_count == 1
 
     assert primary.shm_fd is not None
-    fd_attached = ShmBrokerTransport.from_fd(primary.shm_fd, primary.shm_size, cfg)
+    fd_attached = SHMBrokerTransport.from_fd(primary.shm_fd, primary.shm_size, cfg)
     plan2 = fd_attached.get_or_compile_statement(
         "postgresql",
         "SELECT id, email FROM users WHERE id = :id",
@@ -97,9 +97,9 @@ def test_shm_broker_colocated_statement_cache_single_region_and_fd() -> None:
 
 
 def test_shm_broker_active_leases_for_worker_and_reclaim() -> None:
-    """Verify active_leases_for_worker and reclaim_worker on ShmBrokerTransport and InMemoryBrokerTransport."""
+    """Verify active_leases_for_worker and reclaim_worker on SHMBrokerTransport and InMemoryBrokerTransport."""
     cfg = BrokerConfig(pool_size=3, max_overflow=1, statement_cache_capacity=16)
-    shm_transport = ShmBrokerTransport(cfg)
+    shm_transport = SHMBrokerTransport(cfg)
 
     l1 = shm_transport.acquire(worker_id=4100, bind_key="writer")
     l2 = shm_transport.acquire(worker_id=4100, bind_key="reader")
@@ -140,7 +140,7 @@ def test_shm_broker_cross_process_publish_and_drain_channel() -> None:
         statement_cache_capacity=32,
         shm_name=name,
     )
-    parent = ShmBrokerTransport(cfg)
+    parent = SHMBrokerTransport(cfg)
     parent.get_or_compile_statement(
         "postgresql",
         "SELECT id, email FROM users WHERE id = :id",
@@ -166,11 +166,11 @@ def test_shm_broker_cross_process_publish_and_drain_channel() -> None:
 
 
 def test_shm_broker_channel_isolation_and_ring_wraparound() -> None:
-    """Verify multi-channel isolation and bounded ring wraparound on ShmBrokerTransport."""
+    """Verify multi-channel isolation and bounded ring wraparound on SHMBrokerTransport."""
     cfg = BrokerConfig(pool_size=2, max_overflow=1, statement_cache_capacity=16)
-    primary = ShmBrokerTransport(cfg)
+    primary = SHMBrokerTransport(cfg)
     assert primary.shm_fd is not None
-    secondary = ShmBrokerTransport.from_fd(primary.shm_fd, primary.shm_size, cfg)
+    secondary = SHMBrokerTransport.from_fd(primary.shm_fd, primary.shm_size, cfg)
 
     primary.publish("chan.alpha", b"a1", lease_id="0:1")
     secondary.publish("chan.beta", b"b1", lease_id="1:1")

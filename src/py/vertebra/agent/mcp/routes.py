@@ -10,7 +10,7 @@ import email.header
 from collections.abc import AsyncIterable, Mapping
 
 from vertebra.agent.core.context import AgentContext
-from vertebra.agent.core.jsonrpc import JsonRpcError
+from vertebra.agent.core.jsonrpc import JSONRPCError
 from vertebra.agent.mcp.models import (
     HEADER_MISMATCH,
     MCP_PROTOCOL_VERSION,
@@ -174,7 +174,7 @@ class MCPHttpHandler:
 
         proto_ver = lower_headers.get("mcp-protocol-version")
         if proto_ver is not None and proto_ver != MCP_PROTOCOL_VERSION:
-            err = JsonRpcError(
+            err = JSONRPCError(
                 code=UNSUPPORTED_PROTOCOL_VERSION,
                 message=f"Unsupported MCP protocol version: {proto_ver}",
             )
@@ -190,7 +190,7 @@ class MCPHttpHandler:
         try:
             _, frame_method, frame_id = classify_jsonrpc_frame(body)
         except Exception as exc:
-            err = JsonRpcError(code=-32700, message=f"Parse error: {exc}")
+            err = JSONRPCError(code=-32700, message=f"Parse error: {exc}")
             err_body = encode_json_bytes(
                 {
                     "jsonrpc": "2.0",
@@ -202,7 +202,7 @@ class MCPHttpHandler:
 
         mcp_method_header = lower_headers.get("mcp-method")
         if mcp_method_header is not None and frame_method is not None and mcp_method_header != frame_method:
-            err = JsonRpcError(
+            err = JSONRPCError(
                 code=HEADER_MISMATCH,
                 message=f"Header Mcp-Method '{mcp_method_header}' does not match body method '{frame_method}'",
             )
@@ -225,7 +225,7 @@ class MCPHttpHandler:
             if target_val is None and field_name == "taskId":
                 target_val = params.get("task_id")
             if target_val is not None and str(target_val) != decoded_name:
-                err = JsonRpcError(
+                err = JSONRPCError(
                     code=HEADER_MISMATCH,
                     message=f"Header Mcp-Name '{decoded_name}' does not match body parameter '{target_val}'",
                 )

@@ -40,13 +40,13 @@ def create_item(body: CreateItemRequest) -> ItemResponse:
 Start the application with live reload using `vtb dev`:
 
 ```bash
-uv run vtb dev app:app --port 8000
+vtb dev app:app --port 8000
 ```
 
 Or run in production mode with `vtb run`:
 
 ```bash
-uv run vtb run app:app --host 0.0.0.0 --port 8000 --workers 4
+vtb run app:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
 ## 3. Verify Routes in `pytest`

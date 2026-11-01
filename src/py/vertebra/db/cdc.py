@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import collections
-import io
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json, encode_json, encode_json_bytes
 
 if TYPE_CHECKING:
     from vertebra.storage import ObjectStore, PutResult
 
 __all__ = (
-    "CdcConfig",
+    "CDCConfig",
     "ChangeEvent",
     "ChangeFeed",
 )
@@ -31,7 +30,7 @@ class ChangeEvent(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     spilled: bool = False
 
 
-class CdcConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class CDCConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for PostgreSQL change-feed streaming and WAL slot safety."""
 
     channel: str = "vertebra_events"
@@ -47,23 +46,28 @@ class CdcConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class ChangeFeed:
     """Manages PostgreSQL ``NOTIFY`` payloads, ``>7,500``-byte spill hydration, and logical WAL emission."""
 
-    __slots__ = ("_config", "_history", "_next_id", "_spill_store", "_store")
+    __slots__ = ("_config", "_history", "_listeners", "_next_id", "_spill_store", "_store")
 
     def __init__(
         self,
-        config: CdcConfig | None = None,
+        config: CDCConfig | None = None,
         *,
         store: ObjectStore | None = None,
     ) -> None:
-        self._config = config or CdcConfig()
+        self._config = config or CDCConfig()
         self._store = store
         self._spill_store: dict[int, dict[str, Any]] = {}
         self._history: collections.deque[ChangeEvent] = collections.deque(maxlen=self._config.max_history_size)
+        self._listeners: list[Any] = []
         self._next_id: int = 1
 
+    def add_listener(self, callback: Any) -> None:
+        """Register a listener callback invoked with each published ChangeEvent."""
+        self._listeners.append(callback)
+
     @property
-    def config(self) -> CdcConfig:
-        """Return the ``CdcConfig``."""
+    def config(self) -> CDCConfig:
+        """Return the ``CDCConfig``."""
         return self._config
 
     @property
@@ -121,6 +125,8 @@ class ChangeFeed:
             spilled=spilled,
         )
         self._history.append(evt)
+        for listener in tuple(self._listeners):
+            listener(evt)
         return wire_envelope, evt
 
     def hydrate_notification(self, wire_envelope: str | bytes) -> ChangeEvent:
@@ -158,36 +164,32 @@ class ChangeFeed:
         return [evt for evt in self._history if evt.event_id > last_event_id]
 
     def flush_to_parquet(self, path: str) -> PutResult:
-        """Flush in-memory history events to a Parquet object in the attached ObjectStore."""
+        """Flush in-memory history events to a PyArrow Parquet object in the attached ObjectStore."""
         if self._store is None:
             msg = "An ObjectStore must be configured on ChangeFeed to flush to Parquet"
             raise ValueError(msg)
-        raw_data: bytes
-        pa = import_optional("pyarrow")
-        pq = import_optional("pyarrow.parquet")
-        if pa is not None and pq is not None:
-            try:
-                records = [
-                    {
-                        "event_id": evt.event_id,
-                        "channel": evt.channel,
-                        "operation": evt.operation,
-                        "spilled": evt.spilled,
-                        "payload": encode_json(evt.payload),
-                    }
-                    for evt in self._history
-                ]
-                buf = io.BytesIO()
-                table = pa.Table.from_pylist(records)
-                pq.write_table(table, buf)
-                raw_data = buf.getvalue()
-            except Exception:
-                raw_data = (
-                    b"PAR1\x15\x00\x15\x14\x15\x02%\x02\x18\x08event_id\x15\x00\x15\x14\x15\x02%\x02\x18\x07payloadPAR1"
-                )
-        else:
-            raw_data = (
-                b"PAR1\x15\x00\x15\x14\x15\x02%\x02\x18\x08event_id\x15\x00\x15\x14\x15\x02%\x02\x18\x07payloadPAR1"
-            )
-
-        return self._store.put(path, raw_data)
+        pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
+        pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
+        schema = pa.schema(
+            [
+                ("event_id", pa.int64()),
+                ("channel", pa.string()),
+                ("operation", pa.string()),
+                ("spilled", pa.bool_()),
+                ("payload", pa.string()),
+            ]
+        )
+        records = [
+            {
+                "event_id": evt.event_id,
+                "channel": evt.channel,
+                "operation": evt.operation,
+                "spilled": evt.spilled,
+                "payload": encode_json(evt.payload),
+            }
+            for evt in self._history
+        ]
+        table = pa.Table.from_pylist(records, schema=schema)
+        sink = pa.BufferOutputStream()
+        pq.write_table(table, sink)
+        return self._store.put(path, sink.getvalue().to_pybytes())

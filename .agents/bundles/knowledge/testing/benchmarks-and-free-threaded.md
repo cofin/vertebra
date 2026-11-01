@@ -70,7 +70,7 @@ Keep the benchmark-only dependencies (the `duckdb>=1.0` results store and the `u
 
 PyO3 links different CPython ABI symbols when `Py_GIL_DISABLED` is set, so free-threaded artifacts use their own environment and target directory:
 
-1. `UV_PROJECT_ENVIRONMENT=.venv-ft uv sync --python "$FT_PYTHON" --no-dev --extra framework` builds `.venv-ft` (selecting `3.15t` when installed, else `3.14t`).
+1. `UV_PROJECT_ENVIRONMENT=.venv-ft uv sync --python "$FT_PYTHON" --no-dev` builds `.venv-ft` (selecting `3.15t` when installed, else `3.14t`).
 2. `PYO3_PYTHON=$(uv python find "$FT_PYTHON") cargo build --manifest-path src/rs/Cargo.toml --release --target-dir src/rs/target-ft` builds the workspace against `libpython3.15t` / `libpython3.14t` without touching `src/rs/target`.
 3. The harness runs from the default `.venv` (`--group bench`) and launches `src/rs/target-ft/release/vertebra-server` with `.venv-ft` site-packages injected ahead of the repo root through `PYTHONPATH` and `LD_LIBRARY_PATH` (`_ft_env` in `targets.py`).
 

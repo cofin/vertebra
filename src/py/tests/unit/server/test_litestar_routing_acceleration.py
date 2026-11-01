@@ -12,12 +12,12 @@ import pytest
 
 from vertebra._vertebra import AsgiScope
 from vertebra.extensions.litestar.router import (
-    ExtractedLitestarRoute,
-    LitestarRouterTable,
+    ExtractedRoute,
+    RouterTable,
     _unpack_route_handler_map_entry,
-    convert_litestar_path_params,
-    extract_litestar_routes,
-    normalize_litestar_path_for_matchit,
+    convert_path_params,
+    extract_routes,
+    normalize_path_for_matchit,
 )
 
 
@@ -65,12 +65,16 @@ Litestar, get, post = _load_litestar_primitives()
 
 
 def test_asgi_scope_20_known_keys_no_extras_allocation() -> None:
-    """Verify setting Litestar's 6 per-request keys uses fixed slots without allocating extras."""
+    """Verify setting Litestar and Starlette/FastAPI per-request keys uses fixed slots without allocating extras."""
     scope = AsgiScope()
-    assert len(scope.known_keys()) == 20
+    assert len(scope.known_keys()) == 24
     assert "route_handler" not in scope
     assert "path_params" not in scope
     assert "connection" not in scope
+    assert "router" not in scope
+    assert "endpoint" not in scope
+    assert "route" not in scope
+    assert "vertebra_request" not in scope
 
     marker_app = object()
     marker_handler = object()
@@ -119,7 +123,7 @@ def test_normalize_all_10_litestar_path_parameter_types() -> None:
         ("/files/{file_path:path}", "/files/{*file_path}"),
     ]
     for raw_path, expected in cases:
-        assert normalize_litestar_path_for_matchit(raw_path) == expected
+        assert normalize_path_for_matchit(raw_path) == expected
 
 
 def test_convert_all_10_litestar_path_parameter_values() -> None:
@@ -148,7 +152,7 @@ def test_convert_all_10_litestar_path_parameter_values() -> None:
         "span": "PT15M",
         "file_path": "/a/b/c.txt",
     }
-    parsed = convert_litestar_path_params(raw, param_types)
+    parsed = convert_path_params(raw, param_types)
     assert parsed["name"] == "alice"
     assert parsed["user_id"] == 42
     assert parsed["score"] == pytest.approx(3.5)
@@ -174,7 +178,7 @@ def test_unpack_route_handler_map_entry_supports_v2_and_v3() -> None:
 
 
 def test_extract_litestar_routes_and_405_allow_discovery() -> None:
-    """Verify extract_litestar_routes inspects app.routes and discovers 405 Allow headers."""
+    """Verify extract_routes inspects app.routes and discovers 405 Allow headers."""
 
     @get("/items/{item_id:int}", sync_to_thread=False)
     def get_item(item_id: int) -> dict[str, int]:
@@ -185,14 +189,14 @@ def test_extract_litestar_routes_and_405_allow_discovery() -> None:
         return {"item_id": item_id}
 
     app = Litestar(route_handlers=[get_item, update_item])
-    table: LitestarRouterTable = extract_litestar_routes(app)
+    table: RouterTable = extract_routes(app)
 
     methods = {(entry.method, entry.matchit_path) for entry in table.routes.values()}
     assert ("GET", "/items/{item_id}") in methods
     assert ("POST", "/items/{item_id}") in methods
 
     matched_get = table.match("GET", "/items/99")
-    assert isinstance(matched_get, ExtractedLitestarRoute)
+    assert isinstance(matched_get, ExtractedRoute)
     assert table.convert_params(matched_get, {"item_id": "99"}) == {"item_id": 99}
 
     allowed = table.allowed_methods("/items/99")

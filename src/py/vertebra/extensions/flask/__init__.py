@@ -1,0 +1,174 @@
+"""First-class Flask extension for Vertebra."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from vertebra.utils.module_loader import lazy_exports
+
+if TYPE_CHECKING:
+    from vertebra.extensions.flask.cache import CacheBackend, FlaskCachingBackend
+    from vertebra.extensions.flask.channels import ChannelMessage, ChannelsBackend
+    from vertebra.extensions.flask.config import FlaskConfig
+    from vertebra.extensions.flask.fastpath import (
+        CompiledRoute,
+        FastPath,
+        compile_fastpath_routes,
+        dispatch_wsgi_direct,
+        vertebra_route,
+    )
+    from vertebra.extensions.flask.mail import MailBackend, MailConfig, MailMessage
+    from vertebra.extensions.flask.mcp import (
+        MCPConfig,
+        MCPRegistry,
+        PromptController,
+        SkillController,
+        WebMCPConfig,
+        WebMCPManifest,
+        WebMCPToolDescriptor,
+        attach_mcp_routes,
+        build_webmcp_manifest,
+        mcp_prompt,
+        mcp_resource,
+        mcp_tool,
+        render_webmcp_manifest_json,
+    )
+    from vertebra.extensions.flask.offload import offload_middlewares
+    from vertebra.extensions.flask.openapi import (
+        AsyncAPIDocsConfig,
+        OpenAPIConfig,
+        ScalarDocsConfig,
+        ScalarSpecSource,
+        SwaggerDocsConfig,
+        attach_openapi_docs,
+        extract_openapi_schema,
+    )
+    from vertebra.extensions.flask.plugin import FlaskPlugin
+    from vertebra.extensions.flask.queues import QueueBackend, TaskEnvelope
+    from vertebra.extensions.flask.router import RouteCompiler, RouteEntry, convert_werkzeug_rule
+    from vertebra.extensions.flask.security import JWTAuthGuard, RateLimitGuard
+    from vertebra.extensions.flask.storage import (
+        GCSConfig,
+        LocalConfig,
+        MemoryConfig,
+        ObjectStore,
+        S3Config,
+        StorageRegistry,
+        attach_storage,
+        send_storage_file,
+    )
+    from vertebra.extensions.flask.vite import ViteAssetBridge, ViteConfig, attach_vite
+
+__all__ = (
+    "AsyncAPIDocsConfig",
+    "CacheBackend",
+    "ChannelMessage",
+    "ChannelsBackend",
+    "CompiledRoute",
+    "FastPath",
+    "FlaskCachingBackend",
+    "FlaskConfig",
+    "FlaskPlugin",
+    "GCSConfig",
+    "JWTAuthGuard",
+    "LocalConfig",
+    "MCPConfig",
+    "MCPRegistry",
+    "MailBackend",
+    "MailConfig",
+    "MailMessage",
+    "MemoryConfig",
+    "ObjectStore",
+    "OpenAPIConfig",
+    "PromptController",
+    "QueueBackend",
+    "RateLimitGuard",
+    "RouteCompiler",
+    "RouteEntry",
+    "S3Config",
+    "ScalarDocsConfig",
+    "ScalarSpecSource",
+    "SkillController",
+    "StorageRegistry",
+    "SwaggerDocsConfig",
+    "TaskEnvelope",
+    "ViteAssetBridge",
+    "ViteConfig",
+    "WebMCPConfig",
+    "WebMCPManifest",
+    "WebMCPToolDescriptor",
+    "attach_mcp_routes",
+    "attach_openapi_docs",
+    "attach_storage",
+    "attach_vite",
+    "build_webmcp_manifest",
+    "compile_fastpath_routes",
+    "convert_werkzeug_rule",
+    "dispatch_wsgi_direct",
+    "extract_openapi_schema",
+    "mcp_prompt",
+    "mcp_resource",
+    "mcp_tool",
+    "offload_middlewares",
+    "render_webmcp_manifest_json",
+    "send_storage_file",
+    "vertebra_route",
+)
+
+_EXPORT_MAP: dict[str, tuple[str, str]] = {
+    "AsyncAPIDocsConfig": ("vertebra.extensions.flask.openapi", "AsyncAPIDocsConfig"),
+    "CacheBackend": ("vertebra.extensions.flask.cache", "CacheBackend"),
+    "ChannelMessage": ("vertebra.extensions.flask.channels", "ChannelMessage"),
+    "ChannelsBackend": ("vertebra.extensions.flask.channels", "ChannelsBackend"),
+    "CompiledRoute": ("vertebra.extensions.flask.fastpath", "CompiledRoute"),
+    "FastPath": ("vertebra.extensions.flask.fastpath", "FastPath"),
+    "FlaskCachingBackend": ("vertebra.extensions.flask.cache", "FlaskCachingBackend"),
+    "FlaskConfig": ("vertebra.extensions.flask.config", "FlaskConfig"),
+    "FlaskPlugin": ("vertebra.extensions.flask.plugin", "FlaskPlugin"),
+    "GCSConfig": ("vertebra.extensions.flask.storage", "GCSConfig"),
+    "JWTAuthGuard": ("vertebra.extensions.flask.security", "JWTAuthGuard"),
+    "LocalConfig": ("vertebra.extensions.flask.storage", "LocalConfig"),
+    "MCPConfig": ("vertebra.extensions.flask.mcp", "MCPConfig"),
+    "MCPRegistry": ("vertebra.extensions.flask.mcp", "MCPRegistry"),
+    "MailBackend": ("vertebra.extensions.flask.mail", "MailBackend"),
+    "MailConfig": ("vertebra.extensions.flask.mail", "MailConfig"),
+    "MailMessage": ("vertebra.extensions.flask.mail", "MailMessage"),
+    "MemoryConfig": ("vertebra.extensions.flask.storage", "MemoryConfig"),
+    "ObjectStore": ("vertebra.extensions.flask.storage", "ObjectStore"),
+    "OpenAPIConfig": ("vertebra.extensions.flask.openapi", "OpenAPIConfig"),
+    "PromptController": ("vertebra.extensions.flask.mcp", "PromptController"),
+    "QueueBackend": ("vertebra.extensions.flask.queues", "QueueBackend"),
+    "RateLimitGuard": ("vertebra.extensions.flask.security", "RateLimitGuard"),
+    "RouteCompiler": ("vertebra.extensions.flask.router", "RouteCompiler"),
+    "RouteEntry": ("vertebra.extensions.flask.router", "RouteEntry"),
+    "S3Config": ("vertebra.extensions.flask.storage", "S3Config"),
+    "ScalarDocsConfig": ("vertebra.extensions.flask.openapi", "ScalarDocsConfig"),
+    "ScalarSpecSource": ("vertebra.extensions.flask.openapi", "ScalarSpecSource"),
+    "SkillController": ("vertebra.extensions.flask.mcp", "SkillController"),
+    "StorageRegistry": ("vertebra.extensions.flask.storage", "StorageRegistry"),
+    "SwaggerDocsConfig": ("vertebra.extensions.flask.openapi", "SwaggerDocsConfig"),
+    "TaskEnvelope": ("vertebra.extensions.flask.queues", "TaskEnvelope"),
+    "ViteAssetBridge": ("vertebra.extensions.flask.vite", "ViteAssetBridge"),
+    "ViteConfig": ("vertebra.extensions.flask.vite", "ViteConfig"),
+    "WebMCPConfig": ("vertebra.extensions.flask.mcp", "WebMCPConfig"),
+    "WebMCPManifest": ("vertebra.extensions.flask.mcp", "WebMCPManifest"),
+    "WebMCPToolDescriptor": ("vertebra.extensions.flask.mcp", "WebMCPToolDescriptor"),
+    "attach_mcp_routes": ("vertebra.extensions.flask.mcp", "attach_mcp_routes"),
+    "attach_openapi_docs": ("vertebra.extensions.flask.openapi", "attach_openapi_docs"),
+    "attach_storage": ("vertebra.extensions.flask.storage", "attach_storage"),
+    "attach_vite": ("vertebra.extensions.flask.vite", "attach_vite"),
+    "build_webmcp_manifest": ("vertebra.extensions.flask.mcp", "build_webmcp_manifest"),
+    "compile_fastpath_routes": ("vertebra.extensions.flask.fastpath", "compile_fastpath_routes"),
+    "convert_werkzeug_rule": ("vertebra.extensions.flask.router", "convert_werkzeug_rule"),
+    "dispatch_wsgi_direct": ("vertebra.extensions.flask.fastpath", "dispatch_wsgi_direct"),
+    "extract_openapi_schema": ("vertebra.extensions.flask.openapi", "extract_openapi_schema"),
+    "mcp_prompt": ("vertebra.extensions.flask.mcp", "mcp_prompt"),
+    "mcp_resource": ("vertebra.extensions.flask.mcp", "mcp_resource"),
+    "mcp_tool": ("vertebra.extensions.flask.mcp", "mcp_tool"),
+    "offload_middlewares": ("vertebra.extensions.flask.offload", "offload_middlewares"),
+    "render_webmcp_manifest_json": ("vertebra.extensions.flask.mcp", "render_webmcp_manifest_json"),
+    "send_storage_file": ("vertebra.extensions.flask.storage", "send_storage_file"),
+    "vertebra_route": ("vertebra.extensions.flask.fastpath", "vertebra_route"),
+}
+
+__getattr__, __dir__ = lazy_exports(__name__, __all__, _EXPORT_MAP)

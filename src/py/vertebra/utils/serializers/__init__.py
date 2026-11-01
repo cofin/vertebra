@@ -1,7 +1,4 @@
-"""Serialization utilities for Vertebra.
-
-Aligned with vtb.
-"""
+"""Serialization utilities for Vertebra."""
 
 from vertebra.utils.serializers._json import (
     JSONSerializer,
@@ -10,12 +7,14 @@ from vertebra.utils.serializers._json import (
     encode_json_bytes,
     encode_json_into,
     format_json,
-    get_default_serializer,
+    get_default_json_serializer,
 )
 from vertebra.utils.serializers._msgpack import (
-    MsgpackCodec,
+    MsgPackSerializer,
     decode_msgpack,
-    encode_msgpack,
+    encode_msgpack_bytes,
+    encode_msgpack_into,
+    get_default_msgpack_serializer,
 )
 from vertebra.utils.serializers._schema import (
     BaseStruct,
@@ -23,20 +22,44 @@ from vertebra.utils.serializers._schema import (
     FrozenBaseStruct,
     FrozenCamelizedStruct,
 )
+from vertebra.utils.serializers._zero_copy import (
+    GRPC_LPM_HEADER_LEN,
+    TypeAdapterKind,
+    TypeAdapterPlan,
+    ZeroCopyCodecRegistry,
+    decode_grpc_frame,
+    decode_grpc_frames,
+    encode_grpc_frame_bytes,
+    encode_grpc_frame_into,
+    encode_json_into_arena,
+    encode_msgpack_into_arena,
+)
 
 __all__ = (
+    "GRPC_LPM_HEADER_LEN",
     "BaseStruct",
     "CamelizedBaseStruct",
     "FrozenBaseStruct",
     "FrozenCamelizedStruct",
     "JSONSerializer",
-    "MsgpackCodec",
+    "MsgPackSerializer",
+    "TypeAdapterKind",
+    "TypeAdapterPlan",
+    "ZeroCopyCodecRegistry",
+    "decode_grpc_frame",
+    "decode_grpc_frames",
     "decode_json",
     "decode_msgpack",
+    "encode_grpc_frame_bytes",
+    "encode_grpc_frame_into",
     "encode_json",
     "encode_json_bytes",
     "encode_json_into",
-    "encode_msgpack",
+    "encode_json_into_arena",
+    "encode_msgpack_bytes",
+    "encode_msgpack_into",
+    "encode_msgpack_into_arena",
     "format_json",
-    "get_default_serializer",
+    "get_default_json_serializer",
+    "get_default_msgpack_serializer",
 )

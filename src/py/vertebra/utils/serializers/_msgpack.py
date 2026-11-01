@@ -31,27 +31,99 @@ from vertebra.utils.type_guards import (
 )
 from vertebra.utils.uuids import _load_uuid_utils
 
-__all__ = ("MsgpackCodec", "decode_msgpack", "encode_msgpack")
+__all__ = (
+    "MsgPackSerializer",
+    "decode_msgpack",
+    "encode_msgpack_bytes",
+    "encode_msgpack_into",
+    "get_default_msgpack_serializer",
+)
 
 _UNLOADED_UUID_TYPE: Final[object] = object()
 
 
-class _MsgpackUuidTypeCache:
+class _MsgPackUUIDTypeCache:
     """Class-scoped holder for lazy UUID backend."""
 
     uuid_utils_type: ClassVar[Any] = _UNLOADED_UUID_TYPE
 
 
+class MsgPackSerializer:
+    """Msgspec-based MessagePack serializer supporting custom hooks and typed decoding."""
+
+    __slots__ = ("_decoder", "_encoder", "_typed_decoders")
+
+    _default: ClassVar[MsgPackSerializer | None] = None
+
+    def __init__(self) -> None:
+        self._encoder: Final[Encoder] = Encoder(enc_hook=_normalize_msgpack_enc_value)
+        self._decoder: Final[Decoder[Any]] = Decoder(dec_hook=_normalize_msgpack_dec_value)
+        self._typed_decoders: dict[Any, Decoder[Any]] = {}
+
+    @classmethod
+    def default(cls) -> MsgPackSerializer:
+        """Return the process-global default MsgPackSerializer instance."""
+        if cls._default is None:
+            cls._default = cls()
+        return cls._default
+
+    def encode(self, value: Any) -> bytes:
+        """Encode Python data into MessagePack bytes."""
+        return self.encode_bytes(value)
+
+    def encode_bytes(self, value: Any) -> bytes:
+        """Encode Python data directly into MessagePack bytes."""
+        return self._encoder.encode(value)
+
+    def encode_into(self, value: Any, buffer: bytearray, offset: int = 0) -> None:
+        """Encode Python data directly into a pre-allocated ``bytearray`` at ``offset``."""
+        self._encoder.encode_into(value, buffer, offset)
+
+    def decode(self, raw: bytes | bytearray | memoryview, *, type: Any = Any) -> Any:
+        """Decode MessagePack bytes into Python data, optionally into a typed schema."""
+        if type is Any or type is object:
+            return self._decoder.decode(raw)
+        try:
+            decoder = self._typed_decoders.get(type)
+            if decoder is None:
+                decoder = Decoder(type=type, dec_hook=_normalize_msgpack_dec_value)
+                self._typed_decoders[type] = decoder
+            return decoder.decode(raw)
+        except TypeError:
+            decoder = Decoder(type=type, dec_hook=_normalize_msgpack_dec_value)
+            return decoder.decode(raw)
+
+
+def get_default_msgpack_serializer() -> MsgPackSerializer:
+    """Return the default msgspec-backed MessagePack serializer."""
+    return MsgPackSerializer.default()
+
+
+def encode_msgpack_bytes(value: Any) -> bytes:
+    """Encode Python data directly into MessagePack bytes."""
+    return get_default_msgpack_serializer().encode_bytes(value)
+
+
+def encode_msgpack_into(value: Any, buffer: bytearray, offset: int = 0) -> None:
+    """Encode Python data directly into a pre-allocated ``bytearray`` at ``offset``."""
+    get_default_msgpack_serializer().encode_into(value, buffer, offset)
+
+
+def decode_msgpack(raw: bytes | bytearray | memoryview, *, type: Any = Any) -> Any:
+    """Decode MessagePack bytes into Python data, optionally into a typed schema."""
+    return get_default_msgpack_serializer().decode(raw, type=type)
+
+
 def _get_msgpack_uuid_utils_type() -> type[Any] | None:
     """Lazy-resolve and cache the uuid-utils UUID type when installed."""
-    if _MsgpackUuidTypeCache.uuid_utils_type is not _UNLOADED_UUID_TYPE:
-        return cast("type[Any] | None", _MsgpackUuidTypeCache.uuid_utils_type)
+    if _MsgPackUUIDTypeCache.uuid_utils_type is not _UNLOADED_UUID_TYPE:
+        return cast("type[Any] | None", _MsgPackUUIDTypeCache.uuid_utils_type)
     if not UUID_UTILS_INSTALLED:
-        _MsgpackUuidTypeCache.uuid_utils_type = None
+        _MsgPackUUIDTypeCache.uuid_utils_type = None
         return None
     module = _load_uuid_utils()
-    _MsgpackUuidTypeCache.uuid_utils_type = None if module is None else module.UUID
-    return cast("type[Any] | None", _MsgpackUuidTypeCache.uuid_utils_type)
+    _MsgPackUUIDTypeCache.uuid_utils_type = None if module is None else module.UUID
+    return cast("type[Any] | None", _MsgPackUUIDTypeCache.uuid_utils_type)
 
 
 def _is_uuid_instance(value: Any) -> bool:
@@ -108,51 +180,3 @@ def _normalize_msgpack_dec_value(target_type: type[Any], value: Any) -> Any:
             return datetime.date.fromisoformat(value)
     msg = f"unsupported MessagePack decode target: {target_type!r}"
     raise TypeError(msg)
-
-
-class MsgpackCodec:
-    """Msgspec-based MessagePack codec supporting custom hooks and typed decoding."""
-
-    __slots__ = ("_decoder", "_encoder", "_typed_decoders")
-
-    _default: ClassVar[MsgpackCodec | None] = None
-
-    def __init__(self) -> None:
-        self._encoder: Final[Encoder] = Encoder(enc_hook=_normalize_msgpack_enc_value)
-        self._decoder: Final[Decoder[Any]] = Decoder(dec_hook=_normalize_msgpack_dec_value)
-        self._typed_decoders: dict[Any, Decoder[Any]] = {}
-
-    @classmethod
-    def default(cls) -> MsgpackCodec:
-        """Return the process-global default MsgpackCodec instance."""
-        if cls._default is None:
-            cls._default = cls()
-        return cls._default
-
-    def encode(self, value: Any) -> bytes:
-        """Encode Python data into MessagePack bytes."""
-        return self._encoder.encode(value)
-
-    def decode(self, raw: bytes | bytearray | memoryview, *, type: Any = Any) -> Any:
-        """Decode MessagePack bytes into Python data, optionally into a typed schema."""
-        if type is Any or type is object:
-            return self._decoder.decode(raw)
-        try:
-            decoder = self._typed_decoders.get(type)
-            if decoder is None:
-                decoder = Decoder(type=type, dec_hook=_normalize_msgpack_dec_value)
-                self._typed_decoders[type] = decoder
-            return decoder.decode(raw)
-        except TypeError:
-            decoder = Decoder(type=type, dec_hook=_normalize_msgpack_dec_value)
-            return decoder.decode(raw)
-
-
-def encode_msgpack(value: Any) -> bytes:
-    """Encode Python data into MessagePack bytes."""
-    return MsgpackCodec.default().encode(value)
-
-
-def decode_msgpack(raw: bytes | bytearray | memoryview, *, type: Any = Any) -> Any:
-    """Decode MessagePack bytes into Python data, optionally into a typed schema."""
-    return MsgpackCodec.default().decode(raw, type=type)

@@ -1,6 +1,6 @@
 //! Asset serving, Vite manifest resolution, pre-compressed sidecars (`.zst`/`.br`/`.gz`), `ETag`/`304`, and HTTP `Range` (`206`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -133,6 +133,14 @@ impl AssetManager {
         let clean = path.trim_start_matches('/');
         if clean.contains("..") {
             return None;
+        }
+        if is_protected_build_metadata(clean) {
+            return Some(
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            );
         }
         let is_index = clean.is_empty() || clean == "index.html";
 
@@ -267,16 +275,44 @@ impl AssetManager {
             && let Some(entry) = manifest.get("index.html")
         {
             builder = builder.header("Link", format!("</{}>; rel=preload; as=script", entry.file));
+            let mut visited: HashSet<&str> = HashSet::new();
+            visited.insert("index.html");
+            let mut css_seen: HashSet<&str> = HashSet::new();
+            let mut preload_seen: HashSet<&str> = HashSet::new();
             if let Some(css) = &entry.css {
                 for c in css {
-                    builder = builder.header("Link", format!("</{}>; rel=preload; as=style", c));
+                    if css_seen.insert(c.as_str()) {
+                        builder =
+                            builder.header("Link", format!("</{}>; rel=preload; as=style", c));
+                    }
                 }
             }
             if let Some(imports) = &entry.imports {
-                for key in imports {
+                let mut stack: Vec<&str> = imports.iter().map(String::as_str).collect();
+                while let Some(key) = stack.pop() {
+                    if !visited.insert(key) {
+                        continue;
+                    }
                     if let Some(chunk) = manifest.get(key) {
-                        builder = builder
-                            .header("Link", format!("</{}>; rel=preload; as=script", chunk.file));
+                        if preload_seen.insert(chunk.file.as_str()) {
+                            builder = builder.header(
+                                "Link",
+                                format!("</{}>; rel=preload; as=script", chunk.file),
+                            );
+                        }
+                        if let Some(css) = &chunk.css {
+                            for c in css {
+                                if css_seen.insert(c.as_str()) {
+                                    builder = builder
+                                        .header("Link", format!("</{}>; rel=preload; as=style", c));
+                                }
+                            }
+                        }
+                        if let Some(sub_imports) = &chunk.imports {
+                            for sub in sub_imports {
+                                stack.push(sub.as_str());
+                            }
+                        }
                     }
                 }
             }
@@ -284,6 +320,24 @@ impl AssetManager {
 
         Some(builder.body(Full::new(Bytes::from(content))).unwrap())
     }
+}
+
+fn is_protected_build_metadata(clean_path: &str) -> bool {
+    const PROTECTED: &[&str] = &[
+        "manifest.json",
+        ".vite/manifest.json",
+        "ssr-manifest.json",
+        ".vite/ssr-manifest.json",
+        "hot",
+        ".vertebra/importmap.json",
+        ".litestar.json",
+    ];
+    for p in PROTECTED {
+        if clean_path == *p || clean_path.ends_with(&format!("/{p}")) {
+            return true;
+        }
+    }
+    false
 }
 
 fn accepts_encoding(accept_encoding: &str, target: &str) -> bool {

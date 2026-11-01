@@ -20,7 +20,7 @@ from vertebra.utils.serializers import (
     decode_json,
     decode_msgpack,
     encode_json_bytes,
-    encode_msgpack,
+    encode_msgpack_bytes,
 )
 from vertebra.utils.type_guards import is_msgspec_struct
 
@@ -32,12 +32,12 @@ __all__ = (
     "BrokerRpcResponse",
     "SharedArrowBuffer",
     "SharedArrowTable",
-    "SqlSpecProvider",
+    "SQLSpecProvider",
 )
 
 
 class BrokerRpcRequest(msgspec.Struct, frozen=True, gc=False):
-    """RPC request frame dispatched from a worker proxy driver to SqlSpecProvider."""
+    """RPC request frame dispatched from a worker proxy driver to SQLSpecProvider."""
 
     request_id: int = 0
     op: str = "execute"
@@ -53,7 +53,7 @@ class BrokerRpcRequest(msgspec.Struct, frozen=True, gc=False):
 
 
 class BrokerRpcResponse(msgspec.Struct, frozen=True, gc=False):
-    """RPC response frame returned from SqlSpecProvider to a worker proxy driver."""
+    """RPC response frame returned from SQLSpecProvider to a worker proxy driver."""
 
     request_id: int = 0
     ok: bool = True
@@ -146,7 +146,7 @@ class SharedArrowBuffer:
             payload = memoryview(ipc_buf)
         else:
             fallback_rows, fallback_cols = cls._coerce_fallback_rows(table, columns=columns)
-            raw_bytes = encode_msgpack({"columns": fallback_cols, "rows": fallback_rows})
+            raw_bytes = encode_msgpack_bytes({"columns": fallback_cols, "rows": fallback_rows})
             payload = memoryview(raw_bytes)
 
         byte_len = len(payload)
@@ -313,7 +313,7 @@ class SharedArrowBuffer:
         return pa.Table.from_pylist(list(table))
 
 
-class SqlSpecProvider:
+class SQLSpecProvider:
     """Host provider executing SQLSpec driver operations over pinned broker leases and Arrow SHM."""
 
     __slots__ = (
@@ -340,7 +340,7 @@ class SqlSpecProvider:
         arrow_threshold_rows: int = 256,
         arrow_threshold_bytes: int = 65_536,
     ) -> None:
-        """Initialize SqlSpecProvider with an upstream config/driver/factory and optional broker."""
+        """Initialize SQLSpecProvider with an upstream config/driver/factory and optional broker."""
         self.default_pool_name = pool_name
         self.broker = broker
         self.arrow_threshold_rows = arrow_threshold_rows
@@ -717,7 +717,7 @@ class SqlSpecProvider:
             return encode_json_bytes(resp)
         req = decode_msgpack(raw_bytes, type=BrokerRpcRequest)
         resp = self.handle_request(req)
-        return encode_msgpack(resp)
+        return encode_msgpack_bytes(resp)
 
     async def handle_raw_frame_async(self, payload: bytes | bytearray | memoryview) -> bytes:
         """Decode a serialized RPC request frame asynchronously, execute it, and encode the response."""
@@ -730,7 +730,7 @@ class SqlSpecProvider:
             return encode_json_bytes(resp)
         req = decode_msgpack(raw_bytes, type=BrokerRpcRequest)
         resp = await self.handle_request_async(req)
-        return encode_msgpack(resp)
+        return encode_msgpack_bytes(resp)
 
     def close(self) -> None:
         """Release all leased sessions and unlink any remaining shared-memory Arrow buffers."""
@@ -1277,7 +1277,7 @@ class SqlSpecProvider:
         row_count = len(rows)
         should_spill = row_count >= self.arrow_threshold_rows
         if not should_spill and row_count > 0 and self.arrow_threshold_bytes > 0:
-            encoded = encode_msgpack(rows)
+            encoded = encode_msgpack_bytes(rows)
             if len(encoded) >= self.arrow_threshold_bytes:
                 should_spill = True
 

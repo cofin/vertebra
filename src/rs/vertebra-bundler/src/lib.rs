@@ -21,7 +21,7 @@ pub use css::minify_css;
 pub use declarations::IsolatedDeclarationsGenerator;
 pub use errors::BundlerError;
 pub use hmr::{HmrEvent, PySourceWatcher, SourceWatcher};
-pub use ssr::{SsrPool, SsrResult};
+pub use ssr::{SSRPool, SSRResult};
 
 /// Python module definition
 #[pymodule(gil_used = false)]
@@ -33,8 +33,8 @@ fn _bundler(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BuildResult>()?;
     m.add_class::<OutputFile>()?;
     m.add_class::<PySourceWatcher>()?;
-    m.add_class::<SsrPool>()?;
-    m.add_class::<SsrResult>()?;
+    m.add_class::<SSRPool>()?;
+    m.add_class::<SSRResult>()?;
     m.add_class::<IsolatedDeclarationsGenerator>()?;
     m.add_function(wrap_pyfunction!(minify_css, m)?)?;
     Ok(())

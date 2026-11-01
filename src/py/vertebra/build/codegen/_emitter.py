@@ -57,4 +57,8 @@ class SchemaEmitter:
                     continue
                 self._collect_objects(resolution.base_type)
             self._collect_objects(route.return_type)
+            if route.receive_schema is not None:
+                self._collect_objects(route.receive_schema)
+            if route.send_schema is not None:
+                self._collect_objects(route.send_schema)
         return route_list

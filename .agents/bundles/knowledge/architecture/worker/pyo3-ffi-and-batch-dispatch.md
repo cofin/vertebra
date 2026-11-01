@@ -10,6 +10,7 @@ sources:
   - resource: src/rs/vertebra-py/src/request.rs
   - resource: src/rs/vertebra-py/src/headers.rs
   - resource: src/rs/vertebra-py/src/response.rs
+  - resource: src/rs/vertebra-py/src/msgspec_bridge.rs
   - resource: src/py/vertebra/_vertebra.pyi
   - resource: src/py/vertebra/server/worker.py
   - resource: src/py/vertebra/server/_dispatch.py
@@ -32,10 +33,15 @@ sources:
   - `submit_response_raw(request_id, status, headers_raw, body)` and `submit_batch_raw(items)`: accept any contiguous buffer-protocol object (`bytes`, `bytearray`, `memoryview`, including `req.body_view`), write directly into the SHM response ring or `BatchBridge` inline without `py.detach` for payloads `<= 64 KiB`, and coalesce `notify_if_sleeping` to once per batch.
   - `submit_response(resp)`, `submit_results(responses)`, and `submit_raw_response(...)`: object and multi-frame `ResponseSlot` streaming submission helpers.
 
-## Snapshot-backed types (`request.rs`, `headers.rs`, `response.rs`)
+## Snapshot-backed types & C-API zero-copy bridge (`request.rs`, `headers.rs`, `response.rs`, `msgspec_bridge.rs`)
 
 - [`RequestBatch`](../../../../../src/rs/vertebra-py/src/request.rs) wraps `Arc<BatchSnapshot>` and yields `Request` instances without copying request headers or bodies.
 - [`Request`](../../../../../src/rs/vertebra-py/src/request.rs) (`frozen`, `immutable_type`, conditional `freelist = 128`) holds `Arc<BatchSnapshot>` + item index and implements CPython's buffer protocol (`__getbuffer__` / `__releasebuffer__`, typed with PEP 688 `def __buffer__(self, flags: int, /) -> memoryview: ...` in `_vertebra.pyi`). `__getbuffer__` passes borrowed `slf.as_ptr()` to `PyBuffer_FillInfo` (which calls `Py_XNewRef` internally), so `memoryview(req)` and `req.body_view` return an anchored zero-copy read-only `memoryview` pinning `Request` -> `Arc<BatchSnapshot>` safely even after `del req`, and flowing zero-copy into `submit_response_raw` / `submit_batch_raw`.
+- [`msgspec_bridge.rs`](../../../../../src/rs/vertebra-py/src/msgspec_bridge.rs) exposes C-API zero-copy decode, vectorcall row hydration, and gRPC LPM framing primitives on `Request`, `WsgiInput`, `AsgiScope`, and `vertebra._vertebra`:
+  - `Request.decode_msgspec(target_type=None, format="json")`, `WsgiInput.decode_msgspec(...)`, and `AsgiScope.decode_msgspec(body_view, target_type=None, format="json")` invoke cached `msgspec.json.Decoder(ty).decode` or `msgspec.msgpack.Decoder(ty).decode` via `PyObject_CallOneArg(decoder_fn, slf.as_ptr())` so `msgspec._core` reads the zero-copy `__getbuffer__` pointer in-place.
+  - `Request.decode_pydantic_json(adapter_or_model)` invokes `TypeAdapter.validate_json` / `BaseModel.model_validate_json` directly over the `Request` buffer protocol view.
+  - `hydrate_one_vectorcall`, `hydrate_rows_vectorcall`, `instantiate_struct_vectorcall`, and `orm_to_struct_vectorcall` invoke `PyObject_Vectorcall` with stack-allocated/scratch `[*mut PyObject]` argument slices (`PY_VECTORCALL_ARGUMENTS_OFFSET`) to construct `msgspec.Struct`, `@dataclass`, `@attrs.define`, `NamedTuple`, `TypedDict`, or Pydantic v2 instances without intermediate `dict` or `zip()` allocations.
+  - `pack_grpc_lpm_frame(buf, compressed=False)` and `decode_grpc_lpm_frames_zero_copy(payload)` prepend and slice 5-byte gRPC Length-Prefixed-Message headers (`[u8 compressed, u32be length]`) in place over `bytearray` and `PyMemoryView_FromMemory` views.
 - [`Headers`](../../../../../src/rs/vertebra-py/src/headers.rs) and [`Response`](../../../../../src/rs/vertebra-py/src/response.rs) allocate byte outputs via `PyBytes::new_with` (PEP 782 `PyBytesWriter` zero-copy initialization on Python 3.15+) and intern common HTTP header names via `pyo3::intern!`.
 
 ## Startup handler compilation & batch execution (`worker.py`, `_dispatch.py`, `_loops.py`)

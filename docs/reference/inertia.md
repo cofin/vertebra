@@ -6,8 +6,8 @@ Server-driven single-page application primitives for Inertia v3 (`InertiaConfig`
 | --- | --- | --- |
 | **Inertia v3 Core** | `InertiaConfig`, `InertiaResponse`, `InertiaMiddleware` | Negotiate `X-Inertia` JSON vs. initial HTML shell responses, asset version mismatches (`409 Conflict`), and partial reloads |
 | **Inertia v3 Props** | `DeferredProp`, `MergeProp`, `DeepMergeProp`, `OnceProp`, `ScrollProp`, `OptionalProp` | Control deferred evaluation, client-side array/object merging, infinite scroll pagination, and lazy props |
-| **QuickJS SSR** | `SsrConfig`, `SsrResult`, `EmbeddedSsrClient`, `SidecarSsrClient` | Pre-render initial page HTML inside the embedded Rust QuickJS pool (`vertebra._bundler.SsrPool`) or an external Node/Bun sidecar |
-| **HTMX Helpers** | `HxSwap`, `HtmxRequest`, `HtmxResponse` | Inspect `HX-*` request headers and emit `HX-Trigger`, `HX-Retarget`, `HX-Push-Url`, and out-of-band swap responses |
+| **QuickJS SSR** | `SSRConfig`, `SSRResult`, `EmbeddedSSRClient`, `SidecarSSRClient` | Pre-render initial page HTML inside the embedded Rust QuickJS pool (`vertebra._bundler.SSRPool`) or an external Node/Bun sidecar |
+| **HTMX Helpers** | `HxSwap`, `HTMXRequest`, `HTMXResponse` | Inspect `HX-*` request headers and emit `HX-Trigger`, `HX-Retarget`, `HX-Push-Url`, and out-of-band swap responses |
 
 ## Inertia v3 Configuration & Responses
 
@@ -59,21 +59,21 @@ Server-driven single-page application primitives for Inertia v3 (`InertiaConfig`
 
 ## QuickJS Server-Side Rendering (`vertebra.framework.ssr`)
 
-::: vertebra.framework.ssr.SsrConfig
+::: vertebra.framework.ssr.SSRConfig
     options:
       heading_level: 4
       members: false
 
-::: vertebra.framework.ssr.SsrResult
+::: vertebra.framework.ssr.SSRResult
     options:
       heading_level: 4
       members: false
 
-::: vertebra.framework.ssr.EmbeddedSsrClient
+::: vertebra.framework.ssr.EmbeddedSSRClient
     options:
       heading_level: 3
 
-::: vertebra.framework.ssr.SidecarSsrClient
+::: vertebra.framework.ssr.SidecarSSRClient
     options:
       heading_level: 4
       members: false
@@ -85,10 +85,10 @@ Server-driven single-page application primitives for Inertia v3 (`InertiaConfig`
       heading_level: 4
       members: false
 
-::: vertebra.framework.htmx.HtmxRequest
+::: vertebra.framework.htmx.HTMXRequest
     options:
       heading_level: 3
 
-::: vertebra.framework.htmx.HtmxResponse
+::: vertebra.framework.htmx.HTMXResponse
     options:
       heading_level: 3

@@ -11,7 +11,7 @@ import msgspec
 
 from vertebra.extensions.litestar.offload import (
     CorsOffloadSpec,
-    LitestarOffloadPlan,
+    OffloadPlan,
     OpenApiOffloadSpec,
     _get_handler_guards,
     _get_handler_middleware,
@@ -19,7 +19,7 @@ from vertebra.extensions.litestar.offload import (
     evaluate_cors_preflight,
     evaluate_cors_response_headers,
     evaluate_openapi_cache_request,
-    offload_litestar_middlewares,
+    offload_middlewares,
 )
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
@@ -207,7 +207,7 @@ def test_offload_compression_strips_python_middleware_across_v2_and_v3() -> None
         ),
     )
 
-    plan: LitestarOffloadPlan = offload_litestar_middlewares(app)
+    plan: OffloadPlan = offload_middlewares(app)
     assert plan.compression is not None
     assert plan.compression.backend == "gzip"
     assert plan.compression.minimum_size == 256
@@ -239,7 +239,7 @@ def test_offload_cors_preflight_and_response_headers() -> None:
         ),
     )
 
-    plan = offload_litestar_middlewares(app)
+    plan = offload_middlewares(app)
     assert isinstance(plan.cors, CorsOffloadSpec)
     assert plan.cors.allow_origins == ("https://app.example.com",)
     assert plan.cors.allow_credentials is True
@@ -300,7 +300,7 @@ def test_offload_static_files_from_create_static_files_router(tmp_path: Path) ->
     )
     app = Litestar(route_handlers=[static_router])
 
-    plan = offload_litestar_middlewares(app)
+    plan = offload_middlewares(app)
     assert len(plan.static_mounts) == 1
     mount = plan.static_mounts[0]
     assert mount.path_prefix == "/static"
@@ -316,7 +316,7 @@ def test_offload_openapi_schema_etag_and_304() -> None:
         return [{"id": 1}]
 
     app = Litestar(route_handlers=[get_widgets])
-    plan = offload_litestar_middlewares(app)
+    plan = offload_middlewares(app)
 
     assert isinstance(plan.openapi, OpenApiOffloadSpec)
     assert plan.openapi.schema_path == "/schema/openapi.json"
@@ -394,7 +394,7 @@ def test_offload_plan_to_server_config_matches_rust_offload_schema(tmp_path: Pat
         ),
     )
 
-    plan = offload_litestar_middlewares(app)
+    plan = offload_middlewares(app)
     cfg = plan.to_server_config()
     raw_json = plan.to_server_config_json()
     assert decode_json(raw_json) == cfg
@@ -458,7 +458,7 @@ def test_v3_flattened_handler_skips_deprecated_resolve_methods_and_filters_compr
         route_handlers=[custom_codec_route],
         compression_config=CompressionConfig(backend="lz4", minimum_size=128),
     )
-    unsupported_plan = offload_litestar_middlewares(unsupported_app)
+    unsupported_plan = offload_middlewares(unsupported_app)
     assert unsupported_plan.compression is None
     assert unsupported_app.compression_config is not None
 
@@ -466,7 +466,7 @@ def test_v3_flattened_handler_skips_deprecated_resolve_methods_and_filters_compr
         route_handlers=[custom_codec_route],
         compression_config=CompressionConfig(backend="br", minimum_size=128),
     )
-    br_plan = offload_litestar_middlewares(br_app)
+    br_plan = offload_middlewares(br_app)
     assert br_plan.compression is not None
     assert br_plan.compression.backend == "brotli"
 
@@ -504,7 +504,7 @@ def test_v2_inplace_resolve_opts_and_v3_zstd_compress_level_extraction() -> None
         routes=[SimpleNamespace(path="/v2-opt-skip", route_handler_map={"GET": v2_handler}, path_parameters=())],
         asgi_router=None,
     )
-    v2_plan = offload_litestar_middlewares(v2_app)
+    v2_plan = offload_middlewares(v2_app)
     assert v2_plan.compression is not None
     assert v2_plan.compression.zstd_level == 7
     assert v2_plan.compression.excluded_paths == ("/v2-opt-skip",)
@@ -523,6 +523,6 @@ def test_v2_inplace_resolve_opts_and_v3_zstd_compress_level_extraction() -> None
         routes=[],
         asgi_router=None,
     )
-    legacy_plan = offload_litestar_middlewares(legacy_zstd_app)
+    legacy_plan = offload_middlewares(legacy_zstd_app)
     assert legacy_plan.compression is not None
     assert legacy_plan.compression.zstd_level == 4

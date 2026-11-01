@@ -1,0 +1,430 @@
+"""Unit tests for the standalone Django Vertebra extension and native DB backends."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import msgspec
+import pyarrow as pa
+import pydantic
+import pytest
+
+from vertebra._vertebra import Request, WsgiEnviron, run_wsgi_callable
+from vertebra.extensions.django import (
+    ArrowManager,
+    ArrowQuerySet,
+    AsyncAPIDocsConfig,
+    CacheBackend,
+    ChannelLayer,
+    DjangoAppConfig,
+    DjangoConfig,
+    DjangoPlugin,
+    DjangoStorage,
+    EmailBackend,
+    MCPConfig,
+    MemoryConfig,
+    MsgspecView,
+    OpenAPIConfig,
+    ORMBridge,
+    QueuesBackend,
+    SecurityBridge,
+    SwaggerDocsConfig,
+    TemplateBridge,
+    ViteConfig,
+    attach_vite,
+    convert_django_pattern,
+    mcp_tool,
+    vertebra_view,
+)
+from vertebra.extensions.django.db.backends.duckdb import DatabaseWrapper as DuckDBDatabaseWrapper
+from vertebra.extensions.django.db.backends.mssql import DatabaseWrapper as MSSQLDatabaseWrapper
+from vertebra.extensions.django.db.backends.mysql import DatabaseWrapper as MySQLDatabaseWrapper
+from vertebra.extensions.django.db.backends.oracle import DatabaseWrapper as OracleDatabaseWrapper
+from vertebra.extensions.django.db.backends.postgresql import (
+    DatabaseWrapper as PostgresDatabaseWrapper,
+)
+from vertebra.extensions.django.db.backends.sqlite3 import (
+    DatabaseWrapper as SQLiteDatabaseWrapper,
+)
+from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
+from vertebra.utils.serializers import decode_json
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+class OrderInput(msgspec.Struct, frozen=True, gc=False):
+    """Order creation input."""
+
+    sku: str
+    qty: int
+
+
+class OrderRecord(msgspec.Struct, frozen=True, gc=False):
+    """Hydrated order DTO."""
+
+    id: int
+    sku: str
+    qty: int
+
+
+class PydanticOrderInput(pydantic.BaseModel):
+    """Pydantic order creation input."""
+
+    sku: str
+    qty: int
+
+
+class _MockPatternObj:
+    """Minimal Django RoutePattern / RegexPattern double."""
+
+    def __init__(self, route: str, *, regex: str | None = None) -> None:
+        self._route = route
+        self._regex = regex
+
+
+class _MockURLPattern:
+    """Minimal Django URLPattern double."""
+
+    def __init__(
+        self,
+        route: str,
+        callback: Callable[..., Any],
+        *,
+        name: str | None = None,
+        regex: str | None = None,
+    ) -> None:
+        self.pattern = _MockPatternObj(route, regex=regex)
+        self.callback = callback
+        self.name = name
+
+
+class _MockURLResolver:
+    """Minimal Django URLResolver double."""
+
+    def __init__(self, prefix: str, url_patterns: list[Any], *, namespace: str | None = None) -> None:
+        self.pattern = _MockPatternObj(prefix)
+        self.url_patterns = url_patterns
+        self.namespace = namespace
+
+
+class _MockDjangoSettings:
+    """Minimal Django settings object double."""
+
+    def __init__(self, static_root: str) -> None:
+        self.MIDDLEWARE = [
+            "django.middleware.security.SecurityMiddleware",
+            "whitenoise.middleware.WhiteNoiseMiddleware",
+            "corsheaders.middleware.CorsMiddleware",
+            "django.middleware.gzip.GZipMiddleware",
+        ]
+        self.CORS_ALLOWED_ORIGINS = ["https://portal.example.com"]
+        self.CORS_ALLOW_CREDENTIALS = True
+        self.STATIC_URL = "/static/"
+        self.STATIC_ROOT = static_root
+
+
+def test_django_route_compiler_fastpath_openapi_and_mcp(tmp_path: Any) -> None:
+    """Verify Django pattern conversion, nested URLResolver compilation, fastpath, OpenAPI, and MCP."""
+    matchit_route, converters = convert_django_pattern("orders/<int:order_id>/<path:rest>/")
+    assert matchit_route == "/orders/{order_id}/{*rest}/"
+    assert converters == (("order_id", "int"), ("rest", "path"))
+
+    re_route, re_converters = convert_django_pattern(
+        r"^items/(?P<item_id>[0-9]+)/$",
+        is_regex=True,
+    )
+    assert re_route == "/items/{item_id}/"
+    assert re_converters == (("item_id", "int"),)
+
+    @vertebra_view(methods=("POST",), status_code=201)
+    @mcp_tool(name="create_django_order", description="Create an order in Django")
+    def create_order_view(request: Request, order_id: int, body: OrderInput) -> dict[str, Any]:
+        assert request.method == "POST"
+        return {"id": order_id, "sku": body.sku, "qty": body.qty}
+
+    @vertebra_view(methods=("POST",))
+    def create_pydantic_view(body: PydanticOrderInput) -> PydanticOrderInput:
+        return PydanticOrderInput(sku=body.sku.upper(), qty=body.qty + 2)
+
+    class DetailView(MsgspecView):
+        def get(self, request: Request, item_id: int) -> OrderRecord:
+            return OrderRecord(id=item_id, sku="CBV-SKU", qty=5)
+
+    urlpatterns: list[Any] = [
+        _MockURLResolver(
+            "api/",
+            [
+                _MockURLPattern(
+                    "orders/<int:order_id>/",
+                    create_order_view,
+                    name="create_order",
+                ),
+                _MockURLPattern(
+                    "pydantic/",
+                    create_pydantic_view,
+                    name="create_pydantic",
+                ),
+                _MockURLPattern(
+                    r"^items/(?P<item_id>[0-9]+)/$",
+                    DetailView.as_view(),
+                    name="item_detail",
+                    regex=r"^items/(?P<item_id>[0-9]+)/$",
+                ),
+            ],
+            namespace="api",
+        )
+    ]
+
+    static_dir = tmp_path / "staticfiles"
+    static_dir.mkdir()
+    settings = _MockDjangoSettings(str(static_dir))
+
+    plugin = DjangoPlugin(
+        urlpatterns=urlpatterns,
+        settings=settings,
+        config=DjangoConfig(
+            openapi=OpenAPIConfig(
+                title="Django Orders API",
+                version="2.0.0",
+                swagger=SwaggerDocsConfig(path="/swagger"),
+                asyncapi=AsyncAPIDocsConfig(path="/asyncapi"),
+                enabled_docs=("scalar", "swagger", "asyncapi"),
+            ),
+            mcp=MCPConfig(server_name="django-orders-mcp"),
+            vite=ViteConfig(dev_mode=True, dev_server_url="http://localhost:5173"),
+        ),
+    )
+
+    app_cfg = DjangoAppConfig()
+    assert app_cfg.ready() is None
+
+    post_req = Request.from_parts(
+        method="POST",
+        path="/api/orders/77/",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"sku":"WIDGET","qty":4}',
+    )
+    post_resp = plugin.handle_request(post_req)
+    assert post_resp.status == 201
+    assert decode_json(bytes(post_resp.body)) == {"id": 77, "sku": "WIDGET", "qty": 4}
+
+    cbv_req = Request.from_parts(method="GET", path="/api/items/99/")
+    cbv_resp = plugin.handle_request(cbv_req)
+    assert cbv_resp.status == 200
+    assert decode_json(bytes(cbv_resp.body)) == {"id": 99, "sku": "CBV-SKU", "qty": 5}
+
+    def _fallback_wsgi(environ: Any, start_response: Callable[..., Any]) -> list[bytes]:
+        start_response("404 Not Found", [("content-type", "text/plain")])
+        return [b"not-found"]
+
+    wrapped_wsgi = plugin.wrap_wsgi_application(_fallback_wsgi)
+    wsgi_env = WsgiEnviron.from_parts(
+        method="POST",
+        path="/api/pydantic/",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"sku":"bolt","qty":8}',
+    )
+    wsgi_resp = run_wsgi_callable(wrapped_wsgi, wsgi_env)
+    assert wsgi_resp.status == 200
+    assert decode_json(bytes(wsgi_resp.body)) == {"sku": "BOLT", "qty": 10}
+
+    openapi_resp = plugin.handle_request(Request.from_parts(method="GET", path="/openapi.json"))
+    assert openapi_resp.status == 200
+    schema_doc = decode_json(bytes(openapi_resp.body))
+    assert "/api/orders/{order_id}/" in schema_doc["paths"]
+
+    scalar_resp = plugin.handle_request(Request.from_parts(method="GET", path="/docs"))
+    assert scalar_resp.status == 200
+    assert b"@scalar/api-reference" in bytes(scalar_resp.body)
+
+    swagger_resp = plugin.handle_request(Request.from_parts(method="GET", path="/swagger"))
+    assert swagger_resp.status == 200
+    assert b"SwaggerUIBundle" in bytes(swagger_resp.body)
+
+    asyncapi_resp = plugin.handle_request(Request.from_parts(method="GET", path="/asyncapi"))
+    assert asyncapi_resp.status == 200
+
+    mcp_req = Request.from_parts(
+        method="POST",
+        path="/mcp",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+    )
+    mcp_resp = plugin.handle_request(mcp_req)
+    assert mcp_resp.status == 200
+    mcp_data = decode_json(bytes(mcp_resp.body))
+    assert any(t["name"] == "create_django_order" for t in mcp_data["result"]["tools"])
+
+    assert plugin.offload_bundle is not None
+    assert plugin.offload_bundle.compression is not None
+    assert plugin.offload_bundle.cors is not None
+    assert len(plugin.offload_bundle.static_mounts) == 1
+    assert "django.middleware.gzip.GZipMiddleware" not in settings.MIDDLEWARE
+
+
+def test_django_arrow_queryset_orm_bridge_and_db_backends() -> None:
+    """Verify ArrowQuerySet, ORMBridge, and all 6 native Django database backends."""
+    records = [
+        {"id": 1, "sku": "A-100", "qty": 10},
+        {"id": 2, "sku": "B-200", "qty": 25},
+    ]
+    manager = ArrowManager(records)
+    qs: ArrowQuerySet = manager.get_queryset()
+
+    table = qs.to_arrow()
+    assert isinstance(table, pa.Table)
+    assert table.num_rows == 2
+    assert table.column("sku").to_pylist() == ["A-100", "B-200"]
+
+    dtos = qs.to_schema(OrderRecord)
+    assert dtos == [
+        OrderRecord(id=1, sku="A-100", qty=10),
+        OrderRecord(id=2, sku="B-200", qty=25),
+    ]
+
+    reloaded_Manager = ArrowManager()
+    loaded_rows = reloaded_Manager.from_arrow(table)
+    assert loaded_rows == records
+
+    single_struct = ORMBridge.to_struct(records[0], OrderRecord)
+    assert single_struct == OrderRecord(id=1, sku="A-100", qty=10)
+    many_structs = ORMBridge.to_structs(records, OrderRecord)
+    assert len(many_structs) == 2
+
+    pg_wrapper = PostgresDatabaseWrapper(
+        {
+            "HOST": "10.0.0.5",
+            "PORT": 6432,
+            "NAME": "appdb",
+            "OPTIONS": {
+                "pgbouncer": True,
+                "pooler_mode": "transaction",
+                "direct_host": "10.0.0.6",
+                "direct_port": 5432,
+                "alloydb_instance_uri": "projects/p/locations/us-central1/clusters/c/instances/i",
+            },
+        },
+        alias="default",
+    )
+    assert pg_wrapper.engine == "postgresql"
+    assert pg_wrapper.pooler_config.pgbouncer is True
+    assert pg_wrapper.pooler_config.pooler_mode == "transaction"
+    assert pg_wrapper.build_alloydb_dialer() is not None
+    direct_settings = pg_wrapper.derive_direct_settings()
+    assert direct_settings["HOST"] == "10.0.0.6"
+    assert direct_settings["PORT"] == 5432
+    assert direct_settings["OPTIONS"]["pooler_mode"] == "session"
+
+    with pg_wrapper.schema_editor() as editor:
+        assert editor["pooler_mode"] == "session"
+        assert editor["settings"]["PORT"] == 5432
+
+    lease_id = pg_wrapper.acquire_lease()
+    assert lease_id >= 0
+    pg_wrapper.release_lease()
+
+    mysql_wrapper = MySQLDatabaseWrapper(
+        {
+            "NAME": "mydb",
+            "OPTIONS": {"cloud_sql_instance": "proj:us-central1:mysql-inst"},
+        }
+    )
+    assert mysql_wrapper.engine == "mysql"
+    assert mysql_wrapper.build_cloud_sql_dialer() is not None
+
+    sqlite_wrapper = SQLiteDatabaseWrapper({"NAME": ":memory:"})
+    assert sqlite_wrapper.engine == "sqlite3"
+
+    oracle_wrapper = OracleDatabaseWrapper(
+        {
+            "NAME": "FREEPDB1",
+            "OPTIONS": {"wallet_zip": b"PK\x03\x04", "vector_dimensions": 1536},
+        }
+    )
+    assert oracle_wrapper.engine == "oracle"
+    assert oracle_wrapper.wallet_zip == b"PK\x03\x04"
+
+    mssql_wrapper = MSSQLDatabaseWrapper({"NAME": "analytics"})
+    assert mssql_wrapper.engine == "mssql"
+
+    duckdb_wrapper = DuckDBDatabaseWrapper({"NAME": ":memory:"})
+    assert duckdb_wrapper.engine == "duckdb"
+    arrow_out = duckdb_wrapper.select_to_arrow("SELECT 1", rows=records)
+    assert arrow_out.num_rows == 2
+    schema_out = duckdb_wrapper.select_to_schema("SELECT 1", schema_type=OrderRecord, rows=records)
+    assert len(schema_out) == 2
+
+
+@pytest.mark.anyio
+async def test_django_cache_storage_mail_channels_queues_security_and_templates() -> None:
+    """Verify Django CacheBackend, Storage, EmailBackend, ChannelLayer, QueuesBackend, Security, and Templates."""
+    cache = CacheBackend("vertebra://default", {"TIMEOUT": 120, "KEY_PREFIX": "dj"})
+    cache.set("user:1", {"name": "Alice"})
+    assert cache.get("user:1") == {"name": "Alice"}
+    await cache.aset("user:2", {"name": "Bob"})
+    assert await cache.aget("user:2") == {"name": "Bob"}
+    assert await cache.aget_many(["user:1", "user:2"]) == {
+        "user:1": {"name": "Alice"},
+        "user:2": {"name": "Bob"},
+    }
+    assert await cache.aincr("counter", delta=5) == 5
+    assert await cache.adecr("counter", delta=2) == 3
+
+    storage = DjangoStorage(MemoryConfig(), base_url="/media/")
+    saved_name = storage.save("avatars/a.txt", b"avatar-bytes")
+    assert storage.exists(saved_name) is True
+    assert storage.open(saved_name) == b"avatar-bytes"
+    assert storage.size(saved_name) == 12
+    assert storage.url(saved_name) == "/media/avatars/a.txt"
+    await storage.asave("avatars/b.txt", b"async-avatar")
+    assert await storage.aopen("avatars/b.txt") == b"async-avatar"
+    assert await storage.aexists("avatars/b.txt") is True
+    await storage.adelete("avatars/b.txt")
+    assert await storage.aexists("avatars/b.txt") is False
+
+    email_backend = EmailBackend(suppress_send=True)
+    assert email_backend.send_messages([{"subject": "S1"}]) == 1
+    assert await email_backend.asend_messages([{"subject": "S2"}]) == 1
+    assert len(email_backend.outbox) == 2
+
+    layer = ChannelLayer()
+    ch = await layer.new_channel("specific")
+    await layer.group_add("updates", ch)
+    await layer.group_send("updates", {"type": "order.updated", "id": 10})
+    msg = await layer.receive(ch)
+    assert msg == {"type": "order.updated", "id": 10}
+
+    queues = QueuesBackend()
+
+    @queues.task("sum_pair")
+    def sum_pair(x: int, y: int) -> int:
+        return x + y
+
+    await queues.aenqueue("sum_pair", 19, 23)
+    assert queues.run_next() == 42
+
+    sec = SecurityBridge(jwt_secret=b"super-secret-key-at-least-32-bytes-long", rate_limit_capacity=5)
+    assert sec.rate_limiter is not None
+    assert sec.rate_limiter.allow("client-1") is True
+    assert sec.jwt_guard is not None
+    assert sec.jwt_guard.verify_header(None) is None
+
+    attach_vite(config=ViteConfig(dev_mode=True, dev_server_url="http://localhost:5173"))
+    assert "@vite/client" in str(vite_hmr_client())
+    assert "http://localhost:5173/src/main.ts" in str(vite_asset("src/main.ts"))
+
+    class _MockJinjaTemplate:
+        def render(self, **kwargs: Any) -> str:
+            return f"<h1>{kwargs.get('title', '')}</h1>{kwargs['vite_asset']('src/app.ts')}"
+
+    class _MockJinjaEnv:
+        def get_template(self, name: str) -> _MockJinjaTemplate:
+            assert name == "index.html"
+            return _MockJinjaTemplate()
+
+    tpl_bridge = TemplateBridge(jinja_env=_MockJinjaEnv(), default_context={"title": "Dashboard"})
+    rendered_resp = tpl_bridge.render_to_response("index.html")
+    assert rendered_resp.status == 200
+    assert b"<h1>Dashboard</h1>" in bytes(rendered_resp.body)
+    assert b"http://localhost:5173/src/app.ts" in bytes(rendered_resp.body)

@@ -16,7 +16,8 @@ from typing import Any
 
 import msgspec
 
-from vertebra.framework.ssr import SsrClient, SsrConfig, SsrResult, render_page_shell
+from vertebra.build._assets import AssetManifest, EarlyHintsSpec, ResolvedAssetTags
+from vertebra.framework.ssr import SSRClient, SSRConfig, SSRResult, render_page_shell
 from vertebra.utils.serializers import encode_json
 
 __all__ = (
@@ -29,9 +30,9 @@ __all__ = (
     "MergeProp",
     "OnceProp",
     "OptionalProp",
+    "SSRClient",
+    "SSRResult",
     "ScrollProp",
-    "SsrClient",
-    "SsrResult",
     "inertia",
 )
 
@@ -49,9 +50,15 @@ class InertiaConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     enabled: bool = False
     root_template: str = "index.html"
     version: str | None = None
-    ssr: SsrConfig | None = None
+    ssr: SSRConfig | None = None
     shared_data: dict[str, Any] = msgspec.field(default_factory=dict)
+    static_props: dict[str, Any] = msgspec.field(default_factory=dict)
     manifest_path: str = "dist/.vite/manifest.json"
+    asset_manifest: AssetManifest | None = None
+    entry: str = "index.html"
+    asset_url: str = "/static/"
+    early_hints: bool = True
+    csp_nonce_header: str = "X-CSP-Nonce"
 
     @property
     def ssr_enabled(self) -> bool:
@@ -118,6 +125,7 @@ class InertiaHttpResponse(msgspec.Struct, frozen=True, gc=False):
     status: int = 200
     headers: dict[str, str] = msgspec.field(default_factory=dict)
     body: bytes = b""
+    early_hints: EarlyHintsSpec | None = None
 
 
 def inertia(
@@ -141,7 +149,7 @@ class InertiaMiddleware:
 
     __slots__ = ("_config", "_ssr", "_version")
 
-    def __init__(self, config: InertiaConfig | None = None, ssr_client: SsrClient | None = None) -> None:
+    def __init__(self, config: InertiaConfig | None = None, ssr_client: SSRClient | None = None) -> None:
         self._config = config or InertiaConfig()
         self._ssr = ssr_client
         self._version: str | None = self._config.version
@@ -324,7 +332,7 @@ class InertiaMiddleware:
                 body=body,
             )
 
-        ssr_result: SsrResult | None = None
+        ssr_result: SSRResult | None = None
         if self._config.ssr_enabled and self._ssr is not None:
             try:
                 ssr_result = self._ssr.render(page)
@@ -332,14 +340,43 @@ class InertiaMiddleware:
                 logger.warning("SSR render failed, falling back to CSR", exc_info=True)
                 ssr_result = None
 
-        html = render_page_shell(page, ssr_result, self._config.root_template)
+        headers = getattr(request, "headers", None)
+        csp_nonce: str | None = None
+        if headers is not None and hasattr(headers, "get"):
+            raw_nonce = headers.get(self._config.csp_nonce_header) or headers.get(self._config.csp_nonce_header.lower())
+            if raw_nonce:
+                csp_nonce = str(raw_nonce)
+
+        asset_tags: ResolvedAssetTags | None = None
+        early_hints_spec: EarlyHintsSpec | None = None
+        resp_headers: dict[str, str] = {
+            "Content-Type": "text/html; charset=utf-8",
+            "Vary": "X-Inertia",
+        }
+        manifest = self._config.asset_manifest
+        if manifest is not None and self._config.entry in manifest.entries:
+            asset_tags = manifest.resolve_entry(
+                self._config.entry,
+                asset_url=self._config.asset_url,
+                csp_nonce=csp_nonce,
+            )
+            if self._config.early_hints and asset_tags.early_hints.links:
+                early_hints_spec = asset_tags.early_hints
+                resp_headers["Link"] = early_hints_spec.to_link_header()
+
+        html = render_page_shell(
+            page,
+            ssr_result,
+            self._config.root_template,
+            asset_tags=asset_tags,
+            csp_nonce=csp_nonce,
+            static_props=self._config.static_props or None,
+        )
         return InertiaHttpResponse(
             status=200,
-            headers={
-                "Content-Type": "text/html; charset=utf-8",
-                "Vary": "X-Inertia",
-            },
+            headers=resp_headers,
             body=html.encode("utf-8"),
+            early_hints=early_hints_spec,
         )
 
     def _compute_manifest_version(self) -> str:

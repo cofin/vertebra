@@ -95,6 +95,12 @@ pub enum BackendConfig {
     Gcs {
         bucket: String,
         service_account_path: Option<String>,
+        service_account_key: Option<String>,
+        application_credentials_path: Option<String>,
+        access_token: Option<String>,
+        endpoint: Option<String>,
+        allow_http: bool,
+        skip_signature: bool,
     },
     Azure {
         container: String,
@@ -180,10 +186,39 @@ impl ObjectStoreEngine {
             BackendConfig::Gcs {
                 bucket,
                 service_account_path,
+                service_account_key,
+                application_credentials_path,
+                access_token,
+                endpoint,
+                allow_http,
+                skip_signature,
             } => {
-                let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(&bucket);
+                let mut builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(&bucket);
                 if let Some(sa_path) = service_account_path {
                     builder = builder.with_service_account_path(sa_path);
+                }
+                if let Some(sa_key) = service_account_key {
+                    builder = builder.with_service_account_key(sa_key);
+                }
+                if let Some(adc_path) = application_credentials_path {
+                    builder = builder.with_application_credentials(adc_path);
+                }
+                if let Some(token) = access_token {
+                    let creds = Arc::new(object_store::StaticCredentialProvider::new(
+                        object_store::gcp::GcpCredential { bearer: token },
+                    ));
+                    builder = builder.with_credentials(creds);
+                }
+                if let Some(ref ep) = endpoint {
+                    builder = builder.with_base_url(ep);
+                }
+                if allow_http {
+                    builder = builder.with_client_options(
+                        object_store::ClientOptions::new().with_allow_http(true),
+                    );
+                }
+                if skip_signature {
+                    builder = builder.with_skip_signature(true);
                 }
                 Ok(Self {
                     inner: Arc::new(builder.build()?),
@@ -379,6 +414,21 @@ impl ObjectStoreEngine {
                 Self::new(BackendConfig::Gcs {
                     bucket,
                     service_account_path: opts.get("service_account_path").cloned(),
+                    service_account_key: opts.get("service_account_key").cloned(),
+                    application_credentials_path: opts
+                        .get("application_credentials_path")
+                        .or_else(|| opts.get("application_credentials"))
+                        .cloned(),
+                    access_token: opts
+                        .get("access_token")
+                        .or_else(|| opts.get("bearer_token"))
+                        .cloned(),
+                    endpoint: opts
+                        .get("endpoint")
+                        .or_else(|| opts.get("base_url"))
+                        .cloned(),
+                    allow_http: opts.get("allow_http").is_some_and(|v| v == "true"),
+                    skip_signature: opts.get("skip_signature").is_some_and(|v| v == "true"),
                 })
             }
             "az" | "azure" | "abfs" => {

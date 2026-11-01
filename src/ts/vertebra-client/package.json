@@ -1,7 +1,7 @@
 {
   "name": "@vertebra/client",
-  "version": "0.1.0",
-  "description": "Full-stack type-safe client for Vertebra Ghost Framework",
+  "version": "0.2.0",
+  "description": "TypeScript client SDK for Vertebra — one runtime for Python and TypeScript.",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -62,6 +62,14 @@
     "./telemetry": {
       "types": "./dist/telemetry.d.ts",
       "import": "./dist/telemetry.js"
+    },
+    "./router": {
+      "types": "./dist/router.d.ts",
+      "import": "./dist/router.js"
+    },
+    "./webmcp": {
+      "types": "./dist/webmcp.d.ts",
+      "import": "./dist/webmcp.js"
     },
     "./agent": {
       "types": "./dist/agent/index.d.ts",

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from vertebra._vertebra import Request, WsgiEnviron, WsgiInput
+from vertebra._vertebra import Request, WsgiEnviron, WsgiInput, init_transport
 from vertebra.server._wsgi._adapter import WsgiAdapter, WsgiError
 from vertebra.server._wsgi._frameworks import (
     FlaskWsgiApp,
@@ -424,6 +424,7 @@ def test_wsgi_errors_reflects_reassigned_stderr(monkeypatch: pytest.MonkeyPatch)
 
 def test_wsgi_spawn_batch_drives_multiple_requests_and_root_path() -> None:
     """Verify WsgiAdapter.spawn_batch drives single-chunk, multi-chunk, and write() apps with root_path."""
+    init_transport()
     seen: list[tuple[str, str, bytes]] = []
 
     def batch_wsgi_app(environ: dict[str, Any], start_response: Callable[..., Any]) -> Iterable[bytes]:
@@ -455,3 +456,27 @@ def test_wsgi_spawn_batch_drives_multiple_requests_and_root_path() -> None:
         ("/legacy", "/write", b"def"),
         ("/legacy", "/multi", b""),
     ]
+
+
+def test_wsgi_environ_request_and_scan_in_place_headers() -> None:
+    """Verify WsgiEnviron.request() and scan-in-place HTTP_* header lookup without smuggling."""
+    env = WsgiEnviron.from_parts(
+        method="POST",
+        path="/items",
+        headers=[
+            (b"Content-Type", b"application/json"),
+            (b"X-Custom-Token", b"tok-1"),
+            (b"X-Custom-Token", b"tok-2"),
+            (b"X_Spoofed_Token", b"bad"),
+        ],
+        body=b'{"id": 7}',
+    )
+    assert "CONTENT_TYPE" in env
+    assert env["CONTENT_TYPE"] == "application/json"
+    assert "HTTP_X_CUSTOM_TOKEN" in env
+    assert env["HTTP_X_CUSTOM_TOKEN"] == "tok-1, tok-2"
+    assert "HTTP_X_SPOOFED_TOKEN" not in env
+    req = env.request()
+    assert req.method == "POST"
+    assert req.path == "/items"
+    assert req.decode_msgspec() == {"id": 7}

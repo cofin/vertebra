@@ -1,16 +1,16 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { WASM_MAGIC_BYTES, WasmClient } from "../src/wasm";
+import { WASM_MAGIC_BYTES, WASMClient } from "../src/wasm";
 
-describe("WasmClient", () => {
+describe("WASMClient", () => {
   it("validates canonical WebAssembly binary magic header", () => {
-    expect(WasmClient.isValidBinary(WASM_MAGIC_BYTES)).toBe(true);
-    expect(WasmClient.isValidBinary(new Uint8Array([1, 2, 3]))).toBe(false);
+    expect(WASMClient.isValidBinary(WASM_MAGIC_BYTES)).toBe(true);
+    expect(WASMClient.isValidBinary(new Uint8Array([1, 2, 3]))).toBe(false);
   });
 
   it("computes memory limit bytes and rejects invalid headers on instantiate", async () => {
-    const client = new WasmClient({ maxMemoryPages: 64 });
+    const client = new WASMClient({ maxMemoryPages: 64 });
     expect(client.memoryLimitBytes).toBe(64 * 65536);
     await expect(client.instantiateBytes(new Uint8Array([0, 0, 0, 0]))).rejects.toThrow(
       "Invalid WebAssembly binary magic header",
@@ -18,14 +18,14 @@ describe("WasmClient", () => {
   });
 
   it("instantiateBytes returns module and instance on valid binary", async () => {
-    const client = new WasmClient();
+    const client = new WASMClient();
     const result = await client.instantiateBytes(WASM_MAGIC_BYTES);
     expect(result.module).toBeInstanceOf(WebAssembly.Module);
     expect(result.instance).toBeInstanceOf(WebAssembly.Instance);
   });
 
   it("rejects imported memory exceeding memoryLimitBytes", async () => {
-    const client = new WasmClient({
+    const client = new WASMClient({
       maxMemoryPages: 2,
       imports: {
         env: {

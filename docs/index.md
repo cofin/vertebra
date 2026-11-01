@@ -14,7 +14,7 @@ hide:
     <span class="vertebra-brand-text">Vertebra</span>
   </div>
   <p class="vertebra-hero-lead">
-    Fast Python web framework and server powered by a Rust runtime and a TypeScript client SDK.
+    One runtime for Python and TypeScript — backend, frontend, web, gRPC, workers, and standalone apps.
   </p>
   <div class="vertebra-hero-actions">
     <a class="vertebra-cta vertebra-cta--primary" href="getting-started/quickstart/">Get Started</a>
@@ -25,17 +25,24 @@ hide:
 
 ## Install
 
-Install `vertebra-core` with `uv`:
+=== "uv"
+    ```bash
+    uv add vertebra-core
+    ```
+=== "pip"
+    ```bash
+    pip install vertebra-core
+    ```
+=== "pdm"
+    ```bash
+    pdm add vertebra-core
+    ```
+=== "poetry"
+    ```bash
+    poetry add vertebra-core
+    ```
 
-```bash
-uv add vertebra-core
-```
-
-Install the optional `@vertebra/client` TypeScript SDK for frontend applications:
-
-```bash
-bun add @vertebra/client
-```
+The `@vertebra/client` TypeScript SDK is included natively within the wheel distribution and served directly by the server, eliminating external NPM package requirements.
 
 ## First Application
 
@@ -76,7 +83,7 @@ vtb run app:app --host 127.0.0.1 --port 8000
 | **Shared-Memory Workers** | Run in-process or scale across worker processes over shared memory in `vertebra-core`. |
 | **Free-Threaded Python Ready** | Supports Python 3.12–3.15 including free-threaded `3.14t`/`3.15t` builds with isolated worker lanes (`fast`, `async`, `cpu`, `blocking`). |
 | **Databases & Analytics** | Nine native database drivers, single-RTT CTE statement stacking (`QueryPipeline`), zero-sidecar Cloud SQL/AlloyDB dialers, RLS, CDC, and Arrow/DataFusion analytics. |
-| **Cloud & Local Object Storage** | Unified GIL-free `ObjectStore` across S3, GCS, Azure, Cloudflare R2, OCI, HTTP, Local, and Memory backends with presigning, `ReadableFile`, and `UploadTracker`. |
+| **Cloud & Local Object Storage** | Unified GIL-free `ObjectStore` across S3, GCS (with Google Cloud Application Default Credentials and DuckDB `httpfs` secret integration), Azure, Cloudflare R2, OCI, HTTP, Local, and Memory backends with HMAC/SigV4/Azure SAS/OCI Cavage presigning, and PyArrow `ReadableFile`. |
 | **Frontend Bundler & SSR** | Built-in JavaScript bundler (`vertebra-bundler`), QuickJS SSR pool, Inertia v3, HTMX, and TypeScript/Zod code generation. |
 | **Agent Protocols (MCP & A2A)** | Built-in Model Context Protocol (MCP) tools, resources, prompts, skills, stdio bridge, Agent-to-Agent (A2A) services, and DAG workflows. |
 

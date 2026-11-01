@@ -18,7 +18,7 @@ from vertebra.extensions.broker import (
     ChannelMessage,
     ConnectionLease,
     InMemoryBrokerTransport,
-    ShmBrokerTransport,
+    SHMBrokerTransport,
     StatementPlan,
 )
 from vertebra.utils.module_loader import import_optional
@@ -34,8 +34,8 @@ __all__ = (
     "ChannelMessage",
     "ConnectionLease",
     "InMemoryBrokerTransport",
-    "ShmBrokerTransport",
-    "ShmSessionBroker",
+    "SHMBrokerTransport",
+    "SHMSessionBroker",
     "StatementCache",
     "StatementPlan",
 )
@@ -62,7 +62,7 @@ class BrokerTransport(Protocol):
         ...
 
 
-class ShmSessionBroker:
+class SHMSessionBroker:
     """SQLAlchemy connection pool and session broker backed by shared-memory lease table."""
 
     __slots__ = (
@@ -83,15 +83,15 @@ class ShmSessionBroker:
         capacity: int = 10,
         bind_key: str = "sqlalchemy",
     ) -> None:
-        """Initialize ShmSessionBroker with a broker transport and bind key."""
+        """Initialize SHMSessionBroker with a broker transport and bind key."""
         if isinstance(transport, int):
             resolved_capacity = max(1, transport)
-            resolved_transport: Any = ShmBrokerTransport(
+            resolved_transport: Any = SHMBrokerTransport(
                 config or BrokerConfig(pool_size=resolved_capacity, max_overflow=0)
             )
         else:
             resolved_capacity = max(1, capacity)
-            resolved_transport = transport or ShmBrokerTransport(config)
+            resolved_transport = transport or SHMBrokerTransport(config)
         self.transport = resolved_transport
         self.bind_key = bind_key
         self._capacity = resolved_capacity

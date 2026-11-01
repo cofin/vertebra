@@ -4,6 +4,11 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, TimeZone, Utc};
 use hmac::{Hmac, Mac};
+use rsa::RsaPrivateKey;
+use rsa::pkcs1::DecodeRsaPrivateKey;
+use rsa::pkcs1v15::SigningKey;
+use rsa::pkcs8::DecodePrivateKey;
+use rsa::signature::{SignatureEncoding, Signer};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use url::Url;
@@ -249,6 +254,114 @@ struct IamSignBlobResponse {
     signed_blob: String,
 }
 
+#[derive(Deserialize)]
+struct MetadataTokenResponse {
+    access_token: String,
+}
+
+#[derive(Deserialize)]
+struct AdcAuthorizedUserFile {
+    #[serde(rename = "type")]
+    cred_type: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    refresh_token: Option<String>,
+    token_uri: Option<String>,
+}
+
+async fn resolve_gcp_adc_access_token(client: &reqwest::Client) -> Option<String> {
+    for env_var in ["GOOGLE_OAUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN"] {
+        if let Ok(tok) = std::env::var(env_var)
+            && !tok.trim().is_empty()
+        {
+            return Some(tok.trim().to_string());
+        }
+    }
+
+    let adc_candidates: Vec<std::path::PathBuf> = {
+        let mut paths = Vec::new();
+        if let Ok(explicit) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
+            && !explicit.trim().is_empty()
+        {
+            paths.push(std::path::PathBuf::from(explicit));
+        }
+        if let Ok(cfg_dir) = std::env::var("CLOUDSDK_CONFIG")
+            && !cfg_dir.trim().is_empty()
+        {
+            paths.push(
+                std::path::PathBuf::from(cfg_dir).join("application_default_credentials.json"),
+            );
+        }
+        if let Ok(home) = std::env::var("HOME")
+            && !home.trim().is_empty()
+        {
+            paths.push(
+                std::path::PathBuf::from(home)
+                    .join(".config")
+                    .join("gcloud")
+                    .join("application_default_credentials.json"),
+            );
+        }
+        paths
+    };
+
+    for path in adc_candidates {
+        let Ok(raw) = tokio::fs::read_to_string(&path).await else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<AdcAuthorizedUserFile>(&raw) else {
+            continue;
+        };
+        if parsed.cred_type.as_deref() == Some("authorized_user")
+            && let (Some(cid), Some(csec), Some(rtok)) =
+                (parsed.client_id, parsed.client_secret, parsed.refresh_token)
+        {
+            let token_uri = parsed
+                .token_uri
+                .unwrap_or_else(|| "https://oauth2.googleapis.com/token".to_string());
+            let form_body = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("grant_type", "refresh_token")
+                .append_pair("client_id", &cid)
+                .append_pair("client_secret", &csec)
+                .append_pair("refresh_token", &rtok)
+                .finish();
+            if let Ok(resp) = client
+                .post(&token_uri)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(form_body)
+                .send()
+                .await
+                && resp.status().is_success()
+                && let Ok(tok_resp) = resp.json::<MetadataTokenResponse>().await
+            {
+                return Some(tok_resp.access_token);
+            }
+        }
+    }
+
+    let metadata_host = std::env::var("GCE_METADATA_HOST")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_else(|| "metadata.google.internal".to_string());
+    let metadata_url = format!(
+        "http://{}/computeMetadata/v1/instance/service-accounts/default/token",
+        metadata_host.trim_end_matches('/')
+    );
+    if let Ok(resp) = client
+        .get(&metadata_url)
+        .header("Metadata-Flavor", "Google")
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+        && resp.status().is_success()
+        && let Ok(tok_resp) = resp.json::<MetadataTokenResponse>().await
+    {
+        return Some(tok_resp.access_token);
+    }
+
+    None
+}
+
 pub async fn sign_gcs_v4_with_iam_endpoint(
     config: &GcsSignConfig,
     method: &str,
@@ -300,6 +413,19 @@ pub async fn sign_gcs_v4_with_iam_endpoint(
         sha256_hex(canonical_request.as_bytes())
     );
 
+    if let Some(ref pem) = config.private_key_pem {
+        let rsa_key = RsaPrivateKey::from_pkcs8_pem(pem)
+            .or_else(|_| RsaPrivateKey::from_pkcs1_pem(pem))
+            .map_err(|e| StorageError::Signing(format!("invalid GCS RSA private key PEM: {e}")))?;
+        let signing_key = SigningKey::<Sha256>::new(rsa_key);
+        let signature = signing_key.sign(string_to_sign.as_bytes());
+        let hex_sig = hex::encode(signature.to_bytes());
+        return Ok(format!(
+            "https://storage.googleapis.com{}?{}&X-Goog-Signature={}",
+            canonical_uri, canonical_querystring, hex_sig
+        ));
+    }
+
     let url_endpoint = format!(
         "{}/v1/projects/-/serviceAccounts/{}:signBlob",
         iam_base_url.trim_end_matches('/'),
@@ -309,10 +435,17 @@ pub async fn sign_gcs_v4_with_iam_endpoint(
         .no_proxy()
         .build()
         .unwrap_or_default();
+    let effective_token = match config.access_token {
+        Some(ref tok) => Some(tok.clone()),
+        None if iam_base_url.contains("googleapis.com") => {
+            resolve_gcp_adc_access_token(&client).await
+        }
+        None => None,
+    };
     let mut req = client.post(&url_endpoint).json(&IamSignBlobRequest {
         payload: BASE64_STANDARD.encode(string_to_sign.as_bytes()),
     });
-    if let Some(ref token) = config.access_token {
+    if let Some(ref token) = effective_token {
         req = req.bearer_auth(token);
     }
     let resp = req

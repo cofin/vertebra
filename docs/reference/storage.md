@@ -1,16 +1,16 @@
 # `vertebra.storage` — Multi-Cloud & Local Object Storage
 
-Typed object storage configurations, GIL-free `ObjectStore` operations, HMAC and cloud-native URL presigning (`SigningConfig`), random-access range readers (`ReadableFile`), and transactional upload staging (`UploadTracker`) backed by `vertebra-storage`. See the [Object Storage Usage Guide](../usage/storage.md) for backend selection and examples.
+Typed object storage configurations, GIL-free `ObjectStore` operations, HMAC and cloud-native URL presigning (`SigningConfig`), and random-access range readers (`ReadableFile`) backed by `vertebra-storage`. See the [Object Storage Usage Guide](../usage/storage.md) for backend selection and examples.
 
 | Component | Classes | Purpose |
 | --- | --- | --- |
-| **Store & Registry** | `ObjectStore`, `StorageRegistry` | Synchronous and asynchronous object I/O (`put`, `get`, `head`, `delete`, `list`, `copy`) and named bucket registration |
-| **Backend Configs** | `S3Config`, `GcsConfig`, `AzureConfig`, `R2Config`, `OciConfig`, `LocalConfig`, `MemoryConfig`, `HttpConfig` | Frozen `msgspec.Struct` backend configurations for AWS S3, GCS, Azure Blob, Cloudflare R2, native OCI REST v2, local disk, in-memory, and HTTP/WebDAV |
-| **Signing, Range Reads & Staging** | `ObjectMeta`, `SigningConfig`, `ReadableFile`, `UploadTracker` | Presigned URLs (HMAC, SigV4, GCS V4, Azure SAS, OCI Cavage), PyArrow seekable range readers, and DB-transactional upload commit/rollback hooks |
+| **Store** | `ObjectStore`, `SyncStore`, `AsyncStore` | Synchronous and asynchronous object I/O (`put`, `get`, `head`, `delete`, `list`, `copy`) |
+| **Backend Configs** | `S3Config`, `GCSConfig`, `AzureConfig`, `R2Config`, `OCIConfig`, `LocalConfig`, `MemoryConfig`, `HttpConfig` | Frozen `msgspec.Struct` backend configurations for AWS S3, GCS (with ADC), Azure Blob, Cloudflare R2, native OCI REST v2, local disk, in-memory, and HTTP/WebDAV |
+| **Signing & Range Reads** | `ObjectMeta`, `SigningConfig`, `ReadableFile` | Presigned URLs (HMAC, SigV4, GCS V4, Azure SAS, OCI Cavage) and PyArrow seekable range readers |
 
-## Object Store & Registry
+## Object Store
 
-`ObjectStore` wraps the Rust `object_store` runtime with zero-copy `Buffer` support, and `StorageRegistry` indexes named stores across your application.
+`ObjectStore` wraps the Rust `object_store` runtime with zero-copy `Buffer` support.
 
 ::: vertebra.storage._store.ObjectStore
     options:
@@ -26,14 +26,6 @@ Typed object storage configurations, GIL-free `ObjectStore` operations, HMAC and
         - presign
         - open_readable
 
-::: vertebra.storage.registry.StorageRegistry
-    options:
-      heading_level: 3
-      members:
-        - register
-        - get
-        - default
-
 ## Cloud & Local Backend Configurations
 
 ::: vertebra.storage._store.S3Config
@@ -41,7 +33,7 @@ Typed object storage configurations, GIL-free `ObjectStore` operations, HMAC and
       heading_level: 4
       members: false
 
-::: vertebra.storage._store.GcsConfig
+::: vertebra.storage._store.GCSConfig
     options:
       heading_level: 4
       members: false
@@ -56,7 +48,7 @@ Typed object storage configurations, GIL-free `ObjectStore` operations, HMAC and
       heading_level: 4
       members: false
 
-::: vertebra.storage._store.OciConfig
+::: vertebra.storage._store.OCIConfig
     options:
       heading_level: 4
       members: false
@@ -71,12 +63,12 @@ Typed object storage configurations, GIL-free `ObjectStore` operations, HMAC and
       heading_level: 4
       members: false
 
-::: vertebra.storage._store.HttpConfig
+::: vertebra.storage._store.HTTPConfig
     options:
       heading_level: 4
       members: false
 
-## Metadata, Presigning, Random-Access Readers & Upload Tracking
+## Metadata, Presigning & Random-Access Readers
 
 ::: vertebra.storage._store.ObjectMeta
     options:
@@ -92,7 +84,3 @@ Typed object storage configurations, GIL-free `ObjectStore` operations, HMAC and
     options:
       heading_level: 4
       members: false
-
-::: vertebra.storage.pipeline.UploadTracker
-    options:
-      heading_level: 3

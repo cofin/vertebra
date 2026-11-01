@@ -14,8 +14,8 @@ from enum import IntEnum
 from typing import Any
 
 from vertebra.db.dialer.cloudsql import (
-    CloudSqlConfig,
-    CloudSqlDialer,
+    CloudSQLConfig,
+    CloudSQLDialer,
     EphemeralCertBundle,
     generate_ephemeral_keypair,
 )
@@ -24,21 +24,21 @@ from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
-    "AlloyDbAuthType",
-    "AlloyDbClusterUri",
-    "AlloyDbConfig",
-    "AlloyDbDialer",
+    "AlloyDBAuthType",
+    "AlloyDBClusterURI",
+    "AlloyDBConfig",
+    "AlloyDBDialer",
 )
 
 
-class AlloyDbAuthType(IntEnum):
+class AlloyDBAuthType(IntEnum):
     """Authentication mode for AlloyDB MetadataExchangeRequest on port 5433."""
 
     BUILT_IN = 1
     IAM = 2
 
 
-class AlloyDbClusterUri(FrozenBaseStruct, frozen=True, gc=False, kw_only=True, cache_hash=True):
+class AlloyDBClusterURI(FrozenBaseStruct, frozen=True, gc=False, kw_only=True, cache_hash=True):
     """Parsed AlloyDB instance URI (`projects/<p>/locations/<l>/clusters/<c>/instances/<i>`)."""
 
     project: str
@@ -51,7 +51,7 @@ class AlloyDbClusterUri(FrozenBaseStruct, frozen=True, gc=False, kw_only=True, c
     """AlloyDB primary or read-pool instance resource ID."""
 
     @classmethod
-    def parse(cls, raw: str) -> AlloyDbClusterUri:
+    def parse(cls, raw: str) -> AlloyDBClusterURI:
         """Parse `projects/<p>/locations/<l>/clusters/<c>/instances/<i>`."""
         trimmed = raw.strip().strip("/")
         parts = trimmed.split("/")
@@ -76,7 +76,7 @@ class AlloyDbClusterUri(FrozenBaseStruct, frozen=True, gc=False, kw_only=True, c
         return f"{base}/v1beta/projects/{self.project}/locations/{self.location}/clusters/{self.cluster}:generateClientCertificate"
 
 
-class AlloyDbConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
+class AlloyDBConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Configuration for zero-sidecar AlloyDB connections on port 5433."""
 
     instance_uri: str
@@ -93,24 +93,24 @@ class AlloyDbConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """User-agent string sent during the `MetadataExchangeRequest` protobuf handshake."""
 
 
-class AlloyDbDialer:
+class AlloyDBDialer:
     """Zero-sidecar AlloyDB mTLS dialer performing the MetadataExchange handshake on port 5433."""
 
     __slots__ = ("_config", "_native_dialer", "_uri")
 
-    def __init__(self, config: AlloyDbConfig) -> None:
+    def __init__(self, config: AlloyDBConfig) -> None:
         self._config = config
-        self._uri = AlloyDbClusterUri.parse(config.instance_uri)
+        self._uri = AlloyDBClusterURI.parse(config.instance_uri)
         self._native_dialer: Any = None
         native_mod = import_optional("vertebra._vertebra")
-        native_cls = getattr(native_mod, "AlloyDbDialer", None) if native_mod is not None else None
+        native_cls = getattr(native_mod, "AlloyDBDialer", None) if native_mod is not None else None
         if native_cls is not None:
             with contextlib.suppress(TypeError, ValueError, RuntimeError):
                 self._native_dialer = native_cls(config.instance_uri)
 
     @property
-    def uri(self) -> AlloyDbClusterUri:
-        """Return the parsed AlloyDbClusterUri."""
+    def uri(self) -> AlloyDBClusterURI:
+        """Return the parsed AlloyDBClusterURI."""
         return self._uri
 
     @property
@@ -125,19 +125,19 @@ class AlloyDbDialer:
 
     def build_handshake_frame(self, oauth2_token: str = "") -> bytes:
         """Build the initial MetadataExchangeRequest wire frame for port 5433."""
-        mode = AlloyDbAuthType.IAM if self._config.enable_iam_auth else AlloyDbAuthType.BUILT_IN
+        mode = AlloyDBAuthType.IAM if self._config.enable_iam_auth else AlloyDBAuthType.BUILT_IN
         return self.encode_metadata_exchange(self._config.user_agent, mode, oauth2_token)
 
     @staticmethod
     def encode_metadata_exchange(
         user_agent: str,
-        auth_type: AlloyDbAuthType | int = AlloyDbAuthType.IAM,
+        auth_type: AlloyDBAuthType | int = AlloyDBAuthType.IAM,
         oauth2_token: str = "",
     ) -> bytes:
         """Encode a 4-byte big-endian length-prefixed AlloyDB MetadataExchangeRequest protobuf frame."""
         native_mod = import_optional("vertebra._vertebra")
         if native_mod is not None:
-            native_cls = getattr(native_mod, "AlloyDbDialer", None)
+            native_cls = getattr(native_mod, "AlloyDBDialer", None)
             if native_cls is not None and hasattr(native_cls, "encode_metadata_exchange"):
                 with contextlib.suppress(TypeError, ValueError, RuntimeError):
                     res = native_cls.encode_metadata_exchange(user_agent, int(auth_type), oauth2_token)
@@ -155,14 +155,14 @@ class AlloyDbDialer:
         if user_agent:
             ua_bytes = user_agent.encode("utf-8")
             body.append(0x0A)
-            body.extend(AlloyDbDialer._encode_varint(len(ua_bytes)))
+            body.extend(AlloyDBDialer._encode_varint(len(ua_bytes)))
             body.extend(ua_bytes)
         body.append(0x10)
-        body.extend(AlloyDbDialer._encode_varint(int(auth_type)))
+        body.extend(AlloyDBDialer._encode_varint(int(auth_type)))
         if oauth2_token:
             tok_bytes = oauth2_token.encode("utf-8")
             body.append(0x1A)
-            body.extend(AlloyDbDialer._encode_varint(len(tok_bytes)))
+            body.extend(AlloyDBDialer._encode_varint(len(tok_bytes)))
             body.extend(tok_bytes)
         return struct.pack(">I", len(body)) + bytes(body)
 
@@ -179,7 +179,7 @@ class AlloyDbDialer:
             raise ValueError(msg)
 
         user_agent = ""
-        auth_type = AlloyDbAuthType.IAM
+        auth_type = AlloyDBAuthType.IAM
         oauth2_token = ""
         idx = 0
         while idx < len(body):
@@ -198,7 +198,7 @@ class AlloyDbDialer:
                         break
                     shift += 7
                 if field_num == 2:
-                    auth_type = AlloyDbAuthType(val)
+                    auth_type = AlloyDBAuthType(val)
             elif wire_type == 2:
                 length = 0
                 shift = 0
@@ -228,11 +228,11 @@ class AlloyDbDialer:
         """Encode a 4-byte length-prefixed AlloyDB MetadataExchangeResponse protobuf frame."""
         body = bytearray()
         body.append(0x08)
-        body.extend(AlloyDbDialer._encode_varint(code))
+        body.extend(AlloyDBDialer._encode_varint(code))
         if error_message:
             msg_bytes = error_message.encode("utf-8")
             body.append(0x12)
-            body.extend(AlloyDbDialer._encode_varint(len(msg_bytes)))
+            body.extend(AlloyDBDialer._encode_varint(len(msg_bytes)))
             body.extend(msg_bytes)
         return struct.pack(">I", len(body)) + bytes(body)
 
@@ -303,7 +303,7 @@ class AlloyDbDialer:
         client_key_pem: str | None = None,
     ) -> ssl.SSLContext:
         """Build a TLS 1.3 SSLContext for AlloyDB port 5433."""
-        dummy_csql = CloudSqlDialer(CloudSqlConfig(instance_connection_name="dummy:dummy:dummy"))
+        dummy_csql = CloudSQLDialer(CloudSQLConfig(instance_connection_name="dummy:dummy:dummy"))
         return dummy_csql.build_tls_context(
             ca_pem=ca_pem,
             client_cert_pem=client_cert_pem,
@@ -400,6 +400,64 @@ class AlloyDbDialer:
             writer.close()
             await writer.wait_closed()
             raise
+
+    def __call__(
+        self,
+        host: str = "127.0.0.1",
+        *,
+        oauth2_token: str = "",
+        ssl_context: ssl.SSLContext | None = None,
+        timeout: float = 10.0,
+    ) -> ssl.SSLSocket:
+        """Callable dialer entrypoint returning a synchronous TLS 1.3 mTLS socket after MetadataExchange."""
+        return self.connect_sync(host, oauth2_token=oauth2_token, ssl_context=ssl_context, timeout=timeout)
+
+    def create_asyncpg_connect_func(
+        self,
+        host: str = "127.0.0.1",
+        *,
+        oauth2_token: str = "",
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> Callable[..., Any]:
+        """Return an asyncpg-compatible `connect` coroutine function dialing AlloyDB port 5433."""
+        ctx = ssl_context or self.build_tls_context()
+
+        async def _connect(*args: Any, **kwargs: Any) -> Any:
+            asyncpg_mod = import_optional("asyncpg")
+            if asyncpg_mod is None:
+                return await self.connect_async(host, oauth2_token=oauth2_token, ssl_context=ctx)
+            kw = dict(kwargs)
+            kw.setdefault("host", host)
+            kw.setdefault("port", self.port)
+            kw["ssl"] = ctx
+            if self._config.enable_iam_auth and oauth2_token:
+                kw["password"] = oauth2_token
+            return await asyncpg_mod.connect(*args, **kw)
+
+        return _connect
+
+    def create_psycopg_connect_func(
+        self,
+        host: str = "127.0.0.1",
+        *,
+        oauth2_token: str = "",
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> Callable[..., Any]:
+        """Return a psycopg-compatible `connect` function dialing AlloyDB port 5433."""
+        ctx = ssl_context or self.build_tls_context()
+
+        def _connect(*args: Any, **kwargs: Any) -> Any:
+            psycopg_mod = import_optional("psycopg")
+            if psycopg_mod is None:
+                return self.connect_sync(host, oauth2_token=oauth2_token, ssl_context=ctx)
+            kw = dict(kwargs)
+            kw.setdefault("host", host)
+            kw.setdefault("port", self.port)
+            if self._config.enable_iam_auth and oauth2_token:
+                kw["password"] = oauth2_token
+            return psycopg_mod.connect(*args, **kw)
+
+        return _connect
 
     @staticmethod
     def _encode_varint(value: int) -> bytes:

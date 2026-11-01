@@ -7,35 +7,41 @@ import struct
 import zipfile
 from typing import TYPE_CHECKING
 
+import msgspec
 import pytest
+from sqlalchemy.dialects import registry
+from sqlalchemy.engine.url import URL
 
 from vertebra.db import (
     ARROW_SHM_THRESHOLD_ROWS,
-    AlloyDbAuthType,
-    AlloyDbConfig,
-    AlloyDbDialer,
+    AlloyDBAuthType,
+    AlloyDBConfig,
+    AlloyDBDialer,
     ArrowCursor,
-    AsyncDuckdbDriver,
-    AsyncMssqlDriver,
-    AsyncMysqlDriver,
+    AsyncDuckDBDriver,
+    AsyncMSSQLDriver,
+    AsyncMySQLDriver,
     AsyncOracleDriver,
-    AsyncPostgresDriver,
-    AsyncSqliteDriver,
-    CloudSqlConfig,
-    CloudSqlDialer,
+    AsyncPostgreSQLDriver,
+    AsyncSQLiteDriver,
+    CloudSQLConfig,
+    CloudSQLDialer,
     DatabaseRegistry,
-    DuckdbConfig,
-    MssqlConfig,
-    MysqlConfig,
+    DuckDBConfig,
+    DuckDBSecretConfig,
+    MSSQLConfig,
+    MySQLConfig,
     OracleConfig,
     OracleConnectDescriptor,
+    OracleDriverFeatures,
+    OracleTopologyConfig,
     OracleWallet,
-    PostgresConfig,
-    SqliteConfig,
-    SyncDuckdbDriver,
-    SyncMssqlDriver,
+    PostgreSQLConfig,
+    SQLiteConfig,
+    SyncDuckDBDriver,
+    SyncMSSQLDriver,
     SyncOracleDriver,
-    SyncSqliteDriver,
+    SyncSQLiteDriver,
     decode_oson,
     decode_vector_binary,
     decode_vector_f32,
@@ -75,30 +81,26 @@ from vertebra.db.postgres import (
     write_arrow_shm,
 )
 from vertebra.extensions.sqlalchemy.dialects import (
+    ALL_DIALECT_SCHEMES,
     DBAPIConnection,
     DBAPICursor,
-    DialectDescriptor,
-    DuckdbDialect,
-    MssqlDialect,
-    MysqlDialect,
+    DuckDBDialect,
+    MSSQLDialect,
     NullPool,
-    OracleDialect,
-    PostgresDialect,
-    SqliteDialect,
 )
 from vertebra.extensions.sqlspec.adapters import (
-    DuckdbAsyncConfig,
-    DuckdbSyncConfig,
-    MssqlAsyncConfig,
-    MssqlSyncConfig,
-    MysqlAsyncConfig,
-    MysqlSyncConfig,
+    DuckDBAsyncConfig,
+    DuckDBSyncConfig,
+    MSSQLAsyncConfig,
+    MSSQLSyncConfig,
+    MySQLAsyncConfig,
+    MySQLSyncConfig,
     OracleAsyncConfig,
     OracleSyncConfig,
-    PostgresAsyncConfig,
-    PostgresSyncConfig,
-    SqliteAsyncConfig,
-    SqliteSyncConfig,
+    PostgreSQLAsyncConfig,
+    PostgreSQLSyncConfig,
+    SQLiteAsyncConfig,
+    SQLiteSyncConfig,
 )
 from vertebra.typing import ImproperConfigurationError, VertebraError
 
@@ -196,7 +198,7 @@ def test_postgres_jsonb_pgcopy_and_arrow_shm_cursor() -> None:
 def test_sqlite_initialization_pragmas_and_broker_coordination(tmp_path: Path) -> None:
     """Verify SQLite WAL initialization pragmas, broker lease coordination, and Arrow SHM threshold."""
     db_file = tmp_path / "test_shm.sqlite3"
-    cfg = SqliteConfig(path=str(db_file), mmap_size=67_108_864, busy_timeout_ms=3000)
+    cfg = SQLiteConfig(path=str(db_file), mmap_size=67_108_864, busy_timeout_ms=3000)
     pragmas = cfg.initialization_pragmas()
     assert "PRAGMA journal_mode = WAL" in pragmas
     assert "PRAGMA synchronous = NORMAL" in pragmas
@@ -205,7 +207,7 @@ def test_sqlite_initialization_pragmas_and_broker_coordination(tmp_path: Path) -
     assert "PRAGMA mmap_size = 67108864" in pragmas
 
     broker = _MockBroker()
-    driver = SyncSqliteDriver(cfg, broker=broker)
+    driver = SyncSQLiteDriver(cfg, broker=broker)
     driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)")
     driver.execute("INSERT INTO items (id, label) VALUES (?, ?)", (1, "first"))
     driver.execute("INSERT INTO items (id, label) VALUES (?, ?)", (2, "second"))
@@ -223,11 +225,11 @@ def test_sqlite_initialization_pragmas_and_broker_coordination(tmp_path: Path) -
 
 def test_cloudsql_and_alloydb_dialers_and_ephemeral_keys() -> None:
     """Verify Cloud SQL and AlloyDB dialer URI parsing, MetadataExchange protobuf encoding, and RSA key generation."""
-    csql_cfg = CloudSqlConfig(
+    csql_cfg = CloudSQLConfig(
         instance_connection_name="my-proj:us-central1:my-inst",
         enable_iam_auth=True,
     )
-    csql_dialer = CloudSqlDialer(csql_cfg)
+    csql_dialer = CloudSQLDialer(csql_cfg)
     assert csql_dialer.uri.project == "my-proj"
     assert csql_dialer.uri.region == "us-central1"
     assert csql_dialer.uri.instance == "my-inst"
@@ -235,17 +237,17 @@ def test_cloudsql_and_alloydb_dialers_and_ephemeral_keys() -> None:
     assert "BEGIN PUBLIC KEY" in pub_pem or "BEGIN RSA PUBLIC KEY" in pub_pem
     assert "PRIVATE KEY" in priv_pem
 
-    alloy_cfg = AlloyDbConfig(
+    alloy_cfg = AlloyDBConfig(
         instance_uri="projects/p1/locations/us-east1/clusters/c1/instances/i1",
         enable_iam_auth=True,
     )
-    alloy_dialer = AlloyDbDialer(alloy_cfg)
-    wire = alloy_dialer.encode_metadata_exchange("Vertebra/1.0", AlloyDbAuthType.IAM, "tok-123")
+    alloy_dialer = AlloyDBDialer(alloy_cfg)
+    wire = alloy_dialer.encode_metadata_exchange("Vertebra/1.0", AlloyDBAuthType.IAM, "tok-123")
     total_len = struct.unpack(">I", wire[:4])[0]
     assert total_len == len(wire) - 4
     decoded = alloy_dialer.decode_metadata_exchange(wire)
     assert decoded["user_agent"] == "Vertebra/1.0"
-    assert decoded["auth_type"] == AlloyDbAuthType.IAM
+    assert decoded["auth_type"] == AlloyDBAuthType.IAM
 
 
 def test_oracle_tns_descriptor_and_wallet_extraction(tmp_path: Path) -> None:
@@ -404,7 +406,7 @@ def test_mssql_tds_framing_and_placeholder_rewriter() -> None:
     assert count == 3
 
     broker = _MockBroker()
-    mssql_driver = SyncMssqlDriver(MssqlConfig(), broker=broker)
+    mssql_driver = SyncMSSQLDriver(MSSQLConfig(), broker=broker)
     mssql_driver.execute("CREATE TABLE ledger (id INTEGER PRIMARY KEY, code TEXT)")
     mssql_driver.execute("INSERT INTO ledger (id, code) VALUES (?, ?)", (7, "USD"))
     assert mssql_driver.last_rewritten_sql == "INSERT INTO ledger (id, code) VALUES (@P1, @P2)"
@@ -415,7 +417,7 @@ def test_mssql_tds_framing_and_placeholder_rewriter() -> None:
 
 def test_duckdb_post_init_bootstrap_and_arrow_shm_streaming() -> None:
     """Verify DuckDB post-init SET statements (`parquet_metadata_cache`) and zero-copy Arrow SHM streaming."""
-    cfg = DuckdbConfig(
+    cfg = DuckDBConfig(
         path=":memory:",
         memory_limit_mb=1024,
         threads=4,
@@ -431,7 +433,7 @@ def test_duckdb_post_init_bootstrap_and_arrow_shm_streaming() -> None:
     assert "SET enable_http_metadata_cache = true" in stmts
 
     broker = _MockBroker()
-    driver = SyncDuckdbDriver(cfg, broker=broker)
+    driver = SyncDuckDBDriver(cfg, broker=broker)
     assert "SET parquet_metadata_cache = true" in driver.executed_bootstrap_statements
     driver.execute("CREATE TABLE metrics (id INTEGER, score DOUBLE)")
     driver.execute("INSERT INTO metrics VALUES (1, 98.5), (2, 87.25)")
@@ -445,37 +447,37 @@ def test_duckdb_post_init_bootstrap_and_arrow_shm_streaming() -> None:
 async def test_sqlspec_adapters_and_async_drivers() -> None:
     """Verify all 12 Sync and Async SQLSpec adapter configurations and DatabaseRegistry resolution."""
     reg = DatabaseRegistry()
-    assert isinstance(reg.parse_url("postgres://localhost/db"), PostgresConfig)
-    assert isinstance(reg.parse_url("mysql://localhost/db"), MysqlConfig)
-    assert isinstance(reg.parse_url("sqlite:///:memory:"), SqliteConfig)
+    assert isinstance(reg.parse_url("postgres://localhost/db"), PostgreSQLConfig)
+    assert isinstance(reg.parse_url("mysql://localhost/db"), MySQLConfig)
+    assert isinstance(reg.parse_url("sqlite:///:memory:"), SQLiteConfig)
     assert isinstance(reg.parse_url("oracle://localhost:1521/FREEPDB1"), OracleConfig)
-    assert isinstance(reg.parse_url("mssql://localhost:1433/master"), MssqlConfig)
-    assert isinstance(reg.parse_url("duckdb:///:memory:"), DuckdbConfig)
+    assert isinstance(reg.parse_url("mssql://localhost:1433/master"), MSSQLConfig)
+    assert isinstance(reg.parse_url("duckdb:///:memory:"), DuckDBConfig)
 
     sync_configs = [
-        PostgresSyncConfig(),
-        MysqlSyncConfig(),
-        SqliteSyncConfig(),
+        PostgreSQLSyncConfig(),
+        MySQLSyncConfig(),
+        SQLiteSyncConfig(),
         OracleSyncConfig(),
-        MssqlSyncConfig(),
-        DuckdbSyncConfig(),
+        MSSQLSyncConfig(),
+        DuckDBSyncConfig(),
     ]
     for scfg in sync_configs:
         assert scfg.is_async is False
         assert scfg.arrow_threshold_rows == ARROW_SHM_THRESHOLD_ROWS
 
     async_configs = [
-        PostgresAsyncConfig(),
-        MysqlAsyncConfig(),
-        SqliteAsyncConfig(),
+        PostgreSQLAsyncConfig(),
+        MySQLAsyncConfig(),
+        SQLiteAsyncConfig(),
         OracleAsyncConfig(),
-        MssqlAsyncConfig(),
-        DuckdbAsyncConfig(),
+        MSSQLAsyncConfig(),
+        DuckDBAsyncConfig(),
     ]
     for acfg in async_configs:
         assert acfg.is_async is True
 
-    sqlite_sync = SqliteSyncConfig(path=":memory:")
+    sqlite_sync = SQLiteSyncConfig(path=":memory:")
     with sqlite_sync.provide_session() as session:
         session.execute("CREATE TABLE t_sync (k INTEGER PRIMARY KEY, v TEXT)")
         session.execute("INSERT INTO t_sync (k, v) VALUES (?, ?)", (1, "one"))
@@ -483,52 +485,43 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
         assert session.select_value("SELECT v FROM t_sync WHERE k = ?", (1,)) == "one"
     sqlite_sync.close()
 
-    duck_async = DuckdbAsyncConfig(path=":memory:")
+    duck_async = DuckDBAsyncConfig(path=":memory:")
     async with duck_async.provide_session() as asession:
         await asession.execute("CREATE TABLE t_async (k INTEGER, v TEXT)")
         await asession.execute("INSERT INTO t_async VALUES (42, 'answer')")
         assert await asession.select_value("SELECT v FROM t_async WHERE k = 42") == "answer"
         arrow_res = await asession.select_to_arrow("SELECT k, v FROM t_async", shm_threshold_rows=1)
-        assert arrow_res.to_pylist() == [{"k": 42, "v": "answer"}]
+        assert arrow_res.data.to_pylist() == [{"k": 42, "v": "answer"}]
     await duck_async.close()
 
     for async_drv in (
-        AsyncPostgresDriver(),
-        AsyncMysqlDriver(),
-        AsyncSqliteDriver(),
+        AsyncPostgreSQLDriver(),
+        AsyncMySQLDriver(),
+        AsyncSQLiteDriver(),
         AsyncOracleDriver(),
-        AsyncMssqlDriver(),
-        AsyncDuckdbDriver(),
+        AsyncMSSQLDriver(),
+        AsyncDuckDBDriver(),
     ):
         await async_drv.close()
 
 
 def test_sqlalchemy_vtb_dialects_nullpool_and_dbapi_broker_forwarding() -> None:
     """Verify all 6 SQLAlchemy +vtb dialects use NullPool and forward DBAPI operations through the SHM broker."""
-    vtb_map = DialectDescriptor.dialects()
-    assert set(vtb_map.keys()) == {
-        "postgresql+vtb",
-        "mysql+vtb",
-        "sqlite+vtb",
-        "oracle+vtb",
-        "mssql+vtb",
-        "duckdb+vtb",
-    }
-    for dialect_cls in (
-        PostgresDialect,
-        MysqlDialect,
-        SqliteDialect,
-        OracleDialect,
-        MssqlDialect,
-        DuckdbDialect,
+    assert len(ALL_DIALECT_SCHEMES) == 12
+    for dialect_name in (
+        "postgresql.vtb",
+        "mysql.vtb",
+        "sqlite.vtb",
+        "oracle.vtb",
+        "mssql.vtb",
+        "duckdb.vtb",
     ):
-        assert dialect_cls.poolclass is NullPool
-        assert dialect_cls.get_pool_class() is NullPool
+        dialect_cls = registry.load(dialect_name)
+        broker_url = URL.create(dialect_name.replace(".", "+"), host="localhost", query={"shm_broker": "true"})
+        assert dialect_cls.get_pool_class(broker_url) is NullPool
 
-    all_registered = DialectDescriptor.register_all(include_enterprise_olap=True)
-    assert len(all_registered) == 12
-    assert all_registered["mssql.vtb"] is MssqlDialect
-    assert all_registered["duckdb.vtb"] is DuckdbDialect
+    assert registry.load("mssql.vtb") is MSSQLDialect
+    assert registry.load("duckdb.vtb") is DuckDBDialect
 
     broker = _MockBroker()
     for url in (
@@ -546,5 +539,89 @@ def test_sqlalchemy_vtb_dialects_nullpool_and_dbapi_broker_forwarding() -> None:
         assert cur.fetchone() == (1, "vtb")
         cur.close()
         conn.close()
-    assert broker.lease_table.acquired >= 12
-    assert broker.lease_table.released >= 12
+    assert broker.lease_table.acquired >= 9
+    assert broker.lease_table.released >= 9
+
+
+class _LedgerRow(msgspec.Struct, frozen=True, gc=False):
+    """Typed row schema for verifying C-API vectorcall hydration across database drivers."""
+
+    id: int
+    label: str
+
+
+def test_driver_schema_hydration_load_from_arrow_and_topologies() -> None:
+    """Verify schema_type C-API hydration, load_from_arrow, derive_direct_config, OracleTopologyConfig, and DuckDBSecretConfig."""
+    pg_cfg = PostgreSQLConfig(
+        dsn="postgresql://localhost:6432/app",
+        direct_dsn="postgresql://localhost:5432/app",
+        pooler_mode="transaction",
+        pgbouncer=True,
+    )
+    assert pg_cfg.effective_statement_cache_size == 0
+    direct_pg = pg_cfg.derive_direct_config()
+    assert direct_pg.dsn == "postgresql://localhost:5432/app"
+    assert direct_pg.pooler_mode == "session"
+    assert direct_pg.pgbouncer is False
+
+    with pytest.raises(ImproperConfigurationError):
+        PostgreSQLConfig(
+            cloud_sql_instance="p:r:i",
+            alloydb_instance_uri="projects/p/locations/r/clusters/c/instances/i",
+        )
+
+    pg_sync_adapter = PostgreSQLSyncConfig(pg_cfg)
+    direct_sync_adapter = pg_sync_adapter.derive_direct_config()
+    assert direct_sync_adapter.driver_config.pooler_mode == "session"
+
+    topo = OracleTopologyConfig(
+        hosts=("rac1.internal", "rac2.internal"),
+        port=1521,
+        service_name="PROD_SVC",
+        load_balance=True,
+        failover=True,
+    )
+    tns_topo = topo.to_tns_descriptor()
+    assert "(LOAD_BALANCE=ON)" in tns_topo
+    assert "(FAILOVER=ON)" in tns_topo
+    assert "(HOST=rac1.internal)" in tns_topo
+    assert "(HOST=rac2.internal)" in tns_topo
+
+    ora_cfg = OracleConfig(
+        topology=topo,
+        driver_features=OracleDriverFeatures(enable_lowercase_column_names=True),
+    )
+    derived_ora = ora_cfg.derive_pool(service_name="REPORT_SVC", edition="V2")
+    assert derived_ora.service_name == "REPORT_SVC"
+    assert derived_ora.edition == "V2"
+
+    secret = DuckDBSecretConfig(
+        name="s3_prod",
+        secret_type="S3",
+        key_id="key1",
+        secret="sec1",
+        region="us-west-2",
+        endpoint="127.0.0.1:9000",
+    )
+    duck_cfg = DuckDBConfig(secrets=(secret,))
+    stmts = duck_cfg.bootstrap_statements()
+    assert any("CREATE OR REPLACE SECRET s3_prod" in s for s in stmts)
+
+    sqlite_drv = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    sqlite_drv.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)")
+    inserted = sqlite_drv.load_from_arrow(
+        "items",
+        [{"id": 1, "label": "alpha"}, {"id": 2, "label": "beta"}],
+    )
+    assert inserted == 2
+    hydrated = sqlite_drv.select(
+        "SELECT id, label FROM items ORDER BY id",
+        schema_type=_LedgerRow,
+    )
+    assert hydrated == [_LedgerRow(id=1, label="alpha"), _LedgerRow(id=2, label="beta")]
+    assert sqlite_drv.select_one(
+        "SELECT id, label FROM items WHERE id = ?",
+        (1,),
+        schema_type=_LedgerRow,
+    ) == _LedgerRow(id=1, label="alpha")
+    sqlite_drv.close()

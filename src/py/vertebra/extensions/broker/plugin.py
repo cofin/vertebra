@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from vertebra.extensions.broker.transport import (
     BrokerConfig,
     InMemoryBrokerTransport,
-    ShmBrokerTransport,
+    SHMBrokerTransport,
 )
 from vertebra.telemetry.otel import DbPoolMetricSample
 
@@ -33,23 +33,23 @@ class BrokerPlugin:
         self.zpages = zpages
         self.otel_recorder = otel_recorder
 
-        self._transport: ShmBrokerTransport | InMemoryBrokerTransport
+        self._transport: SHMBrokerTransport | InMemoryBrokerTransport
         if self.use_shm:
-            self._transport = ShmBrokerTransport(self.config)
+            self._transport = SHMBrokerTransport(self.config)
         else:
             self._transport = InMemoryBrokerTransport(self.config)
 
         if self.zpages is not None:
             self._register_zpages(self.zpages)
 
-    def install_state(self, state_mapping: dict[str, Any]) -> ShmBrokerTransport | InMemoryBrokerTransport:
+    def install_state(self, state_mapping: dict[str, Any]) -> SHMBrokerTransport | InMemoryBrokerTransport:
         """Register the broker transport and metrics snapshot in state_mapping."""
         state_mapping[self.config.state_key] = self._transport
         state_mapping[self.config.metrics_state_key] = self._transport.metrics()
         return self._transport
 
     @property
-    def transport(self) -> ShmBrokerTransport | InMemoryBrokerTransport:
+    def transport(self) -> SHMBrokerTransport | InMemoryBrokerTransport:
         """Return the active broker transport."""
         return self._transport
 
