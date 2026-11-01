@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.types import JSON, NVARCHAR, TypeDecorator, UserDefinedType
 
+from vertebra import _vertebra
 from vertebra.utils.serializers import decode_json, encode_json
 
 if TYPE_CHECKING:
@@ -104,7 +105,7 @@ class Vector(UserDefinedType[Any]):
     """Dense vector column type supporting PostgreSQL (pgvector), Oracle 26ai, MySQL 9.0, SQLite, MSSQL, and DuckDB."""
 
     cache_ok: bool = True
-    __slots__ = ("column_name", "dimensions", "precision")
+    __slots__ = ("binary_format", "column_name", "dimensions", "precision")
 
     def __init__(
         self,
@@ -114,6 +115,7 @@ class Vector(UserDefinedType[Any]):
         column_name: str = "embedding",
         dim: int | None = None,
         storage_format: VectorStorageFormat | None = None,
+        binary_format: bool = False,
     ) -> None:
         """Initialize dense vector column type with dimensions, precision, and column name."""
         resolved_dim = dim if dim is not None else dimensions
@@ -121,6 +123,7 @@ class Vector(UserDefinedType[Any]):
         self.dimensions = resolved_dim
         self.precision = resolved_prec
         self.column_name = column_name
+        self.binary_format = binary_format
 
     @property
     def dim(self) -> int | None:
@@ -178,15 +181,29 @@ class Vector(UserDefinedType[Any]):
 
     def process_bind_param(
         self,
-        value: Sequence[float] | array.array[float] | None,
+        value: Any,
         dialect_name: str = "postgresql",
     ) -> Any:
-        """Convert a Python float sequence into a dialect-optimal bind representation."""
+        """Convert a Python float sequence or VectorView into a dialect-optimal bind representation."""
         if value is None:
             return None
         base = dialect_name.split("+", 1)[0].lower()
         typecode = "d" if self.precision == "float64" else "f"
+
+        if isinstance(value, _vertebra.VectorView):
+            if base == "oracle":
+                if self.binary_format:
+                    return value.to_oracle_bytes()
+                return array.array(typecode, value.to_list())
+            if base == "sqlite":
+                return value.to_sqlite_blob()
+            if base in ("postgres", "postgresql") and self.binary_format:
+                return value.to_pgvector_bytes()
+            return "[" + ",".join(str(float(x)) for x in value.to_list()) + "]"
+
         if base == "oracle":
+            if self.binary_format:
+                return _vertebra.encode_oracle_vector_f32(value)
             if isinstance(value, array.array):
                 return value
             return array.array(typecode, [float(x) for x in value])
@@ -195,6 +212,8 @@ class Vector(UserDefinedType[Any]):
                 return bytes(value)
             arr = value if isinstance(value, array.array) else array.array(typecode, [float(x) for x in value])
             return arr.tobytes()
+        if base in ("postgres", "postgresql") and self.binary_format:
+            return _vertebra.encode_pgvector_f32(value)
         return "[" + ",".join(str(float(x)) for x in value) + "]"
 
     def process_result_value(
@@ -205,12 +224,21 @@ class Vector(UserDefinedType[Any]):
         """Decode a database vector result into a Python list of floats."""
         if value is None:
             return None
+        if isinstance(value, _vertebra.VectorView):
+            return value.to_list()
         if isinstance(value, array.array):
             return list(value)
         if isinstance(value, list):
             return [float(x) for x in value]
         if isinstance(value, (bytes, bytearray, memoryview)):
             raw = bytes(value)
+            base = dialect_name.split("+", 1)[0].lower()
+            if base == "oracle" and len(raw) >= 8 and raw[0] == 0xDB:
+                return _vertebra.decode_oracle_vector_f32(raw)
+            if base in ("postgres", "postgresql") and len(raw) >= 4:
+                dim, unused = struct.unpack(">HH", raw[:4])
+                if unused == 0 and len(raw) == 4 + dim * 4:
+                    return _vertebra.decode_pgvector_f32(raw)
             count = len(raw) // 4
             return list(struct.unpack(f"<{count}f", raw))
         if isinstance(value, str):

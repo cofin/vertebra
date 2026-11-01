@@ -5,8 +5,8 @@ flow_id: shm-vector-embeddings
 title: "Binary pgvector Wire Codecs, Zero-Copy PyBuffer Oracle 26ai 0xDB, to_arrow_shm & SQLAlchemy Pushdown"
 description: "Implement binary pgvector (vector, halfvec, bit) codecs in vertebra-db, zero-copy PyBuffer input in Oracle 26ai 0xDB codecs, VectorBatchView.to_arrow_shm(), and binary/buffer pushdown in SQLAlchemy Vector."
 scope: task
-status: draft
-state: in_progress
+status: ready
+state: completed
 strategy: tdd
 depends_on:
   - t02-shm-vector-slab-cache-and-views
@@ -138,7 +138,11 @@ make dev
 
 ## 4. Task Notes
 
-*(Populated during `/flow:implement` execution.)*
+- Implemented `encode_pgvector_f32`, `decode_pgvector_f32`, `encode_pgvector_f16`, `decode_pgvector_f16`, `encode_pgvector_bit`, and `decode_pgvector_bit` in `src/rs/vertebra-db/src/postgres.rs` with IEEE-754 `f16` conversion and `NaN`/`Inf`/header validation.
+- Added zero-copy `PyBuffer` / `VectorView` input fastpaths (`with_f32_slice_or_vec`, `with_f64_slice_or_vec`, `with_i8_slice_or_vec`, `with_u8_slice_or_vec`) in `src/rs/vertebra-py/src/db.rs` for `encode_oracle_vector_*` and `encode_pgvector_*`.
+- Added `.to_pgvector_bytes()`, `.to_oracle_bytes()`, and `.to_sqlite_blob()` on `VectorView` and `.to_arrow_shm(column="embedding")` (with `pyarrow` `FixedSizeListArray` IPC stream framing + fallback raw slab framing) on `VectorBatchView` in `src/rs/vertebra-py/src/vector.rs`.
+- Updated `Vector` in `src/py/vertebra/extensions/sqlalchemy/types.py` to push down `VectorView` / `memoryview` directly in `process_bind_param` and decode binary `pgvector` frames in `process_result_value`.
+- Verified with 29 Rust tests in `vertebra-db`, `mypy.stubtest vertebra._vertebra` (0 issues), `pytest src/py/tests/unit/db/test_vector_wire_codecs.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py -v` (12/12 passed), `ruff`, `mypy`, and `cargo clippy` (0 warnings).
 
 ---
 

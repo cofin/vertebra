@@ -21,6 +21,14 @@ use vertebra_core::vector::{
     splice_prefix_tokens as rs_splice_prefix_tokens, top_k_search,
 };
 use vertebra_db::duckdb_engine::write_shm_arrow_frame;
+use vertebra_db::oracle::{
+    encode_oracle_vector_binary as rs_encode_oracle_vector_binary,
+    encode_oracle_vector_f32 as rs_encode_oracle_vector_f32,
+    encode_oracle_vector_i8 as rs_encode_oracle_vector_i8,
+};
+use vertebra_db::postgres::{
+    encode_pgvector_bit as rs_encode_pgvector_bit, encode_pgvector_f32 as rs_encode_pgvector_f32,
+};
 
 use crate::db::ArrowCursor;
 
@@ -294,6 +302,50 @@ impl VectorView {
             buf.copy_from_slice(bytes);
             Ok(())
         })
+    }
+
+    pub fn to_pgvector_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let encoded = match self.slab.dtype() {
+            VectorDtype::Float32 => {
+                rs_encode_pgvector_f32(self.row_f32()?).map_err(PyValueError::new_err)?
+            }
+            VectorDtype::Binary => {
+                rs_encode_pgvector_bit(self.row_bytes()?, self.slab.dimensions())
+                    .map_err(PyValueError::new_err)?
+            }
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "to_pgvector_bytes is not supported for vector dtype {}",
+                    other.as_str()
+                )));
+            }
+        };
+        PyBytes::new_with(py, encoded.len(), |buf| {
+            buf.copy_from_slice(&encoded);
+            Ok(())
+        })
+    }
+
+    pub fn to_oracle_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let encoded = match self.slab.dtype() {
+            VectorDtype::Float32 => rs_encode_oracle_vector_f32(self.row_f32()?),
+            VectorDtype::Int8 => rs_encode_oracle_vector_i8(self.row_i8()?),
+            VectorDtype::Binary => rs_encode_oracle_vector_binary(self.row_bytes()?),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "to_oracle_bytes is not supported for vector dtype {}",
+                    other.as_str()
+                )));
+            }
+        };
+        PyBytes::new_with(py, encoded.len(), |buf| {
+            buf.copy_from_slice(&encoded);
+            Ok(())
+        })
+    }
+
+    pub fn to_sqlite_blob<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        self.to_bytes(py)
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
@@ -684,13 +736,15 @@ impl VectorBatchView {
         })
     }
 
-    #[pyo3(signature = (column_name="embedding", shm_name=None))]
+    #[pyo3(signature = (column="embedding", *, column_name=None, shm_name=None))]
     pub fn to_arrow_shm(
         &self,
         py: Python<'_>,
-        column_name: &str,
+        column: &str,
+        column_name: Option<&str>,
         shm_name: Option<&str>,
     ) -> PyResult<ArrowCursor> {
+        let resolved_col = column_name.unwrap_or(column);
         let resolved_shm_name = match shm_name {
             Some(explicit) => explicit.to_string(),
             None => {
@@ -698,8 +752,46 @@ impl VectorBatchView {
                 format!("/vtb-vec-arrow-{}-{seq}", std::process::id())
             }
         };
+        if self.slab.dtype() == VectorDtype::Float32
+            && let Ok(pa) = py.import("pyarrow")
+        {
+            let count = self.slab.count();
+            let dims = self.slab.dimensions();
+            let flat_byte_len = count * dims * 4;
+            let flat_pybytes = PyBytes::new_with(py, flat_byte_len, |buf| {
+                for i in 0..count {
+                    let row = self.slab.row_bytes(i).map_err(PyValueError::new_err)?;
+                    buf[i * dims * 4..(i + 1) * dims * 4].copy_from_slice(&row[..dims * 4]);
+                }
+                Ok(())
+            })?;
+            let f32_type = pa.call_method0("float32")?;
+            let pa_buf = pa.call_method1("py_buffer", (flat_pybytes,))?;
+            let buffers = pyo3::types::PyList::new(py, [py.None(), pa_buf.unbind()])?;
+            let array_cls = pa.getattr("Array")?;
+            let flat_arr =
+                array_cls.call_method1("from_buffers", (f32_type, count * dims, buffers))?;
+            let fsl_cls = pa.getattr("FixedSizeListArray")?;
+            let fsl_arr = fsl_cls.call_method1("from_arrays", (flat_arr, dims))?;
+            let rb_cls = pa.getattr("RecordBatch")?;
+            let batch = rb_cls.call_method1("from_arrays", ([fsl_arr], [resolved_col]))?;
+            let sink = pa.call_method0("BufferOutputStream")?;
+            let ipc_mod = pa.getattr("ipc")?;
+            let schema = batch.getattr("schema")?;
+            let writer = ipc_mod.call_method1("new_stream", (&sink, schema))?;
+            writer.call_method1("write_batch", (&batch,))?;
+            writer.call_method0("close")?;
+            let pa_out_buf = sink.call_method0("getvalue")?;
+            let ipc_pybytes: Bound<'_, PyBytes> =
+                pa_out_buf.call_method0("to_pybytes")?.cast_into()?;
+            let ipc_vec = ipc_pybytes.as_bytes().to_vec();
+            let (norm_name, byte_len) = py
+                .detach(move || write_shm_arrow_frame(&resolved_shm_name, &ipc_vec))
+                .map_err(PyRuntimeError::new_err)?;
+            return Ok(ArrowCursor::new(norm_name, byte_len));
+        }
         let slab_ref = Arc::clone(&self.slab);
-        let col_owned = column_name.to_string();
+        let col_owned = resolved_col.to_string();
         let (norm_name, byte_len) = py
             .detach(move || -> Result<(String, usize), String> {
                 let mut payload = Vec::with_capacity(64 + slab_ref.data_byte_len());

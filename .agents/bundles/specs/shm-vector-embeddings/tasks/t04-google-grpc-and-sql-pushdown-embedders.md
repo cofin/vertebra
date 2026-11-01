@@ -6,7 +6,7 @@ title: "Native HTTP/2 gRPC Packed-Float Codec & Google-First Zero-Weight Embedde
 description: "Implement compact Protobuf v3 packed-f32 gRPC wire codecs in vertebra-http and the clean-named Google-first embedder hierarchy (Embedder, VertexEmbedder, GeminiEmbedder, AlloyDbEmbedder, OracleEmbedder, RemoteEmbedder) in vertebra.embeddings."
 scope: task
 status: draft
-state: pending
+state: in_progress
 strategy: tdd
 depends_on:
   - t01-gcp-adc-token-cache-and-refresh

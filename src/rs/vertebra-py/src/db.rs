@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -30,9 +31,14 @@ use vertebra_db::oracle::{
     encode_oson_payload as rs_encode_oson_payload,
 };
 use vertebra_db::postgres::{
-    decode_pgcopy_binary_rows, encode_pgcopy_binary_rows,
+    decode_pgcopy_binary_rows, decode_pgvector_bit as rs_decode_pgvector_bit,
+    decode_pgvector_f16 as rs_decode_pgvector_f16, decode_pgvector_f32 as rs_decode_pgvector_f32,
+    encode_pgcopy_binary_rows, encode_pgvector_bit as rs_encode_pgvector_bit,
+    encode_pgvector_f16 as rs_encode_pgvector_f16, encode_pgvector_f32 as rs_encode_pgvector_f32,
     strip_pg_jsonb_header as rs_strip_pg_jsonb_header,
 };
+
+use crate::vector::VectorView;
 use vertebra_db::resp3::{
     crc16_xmodem as rs_crc16_xmodem, encode_hello3_handshake as rs_encode_hello3_handshake,
     encode_resp_command as rs_encode_resp_command,
@@ -309,13 +315,108 @@ pub fn resolve_tns_alias(py: Python<'_>, contents: &str, alias: &str) -> Option<
         .map(|d| (d.host, d.port, d.service_name, d.sid, d.security_cert_dn))
 }
 
+fn with_f32_slice_or_vec<R, F>(obj: &Bound<'_, PyAny>, f: F) -> PyResult<R>
+where
+    F: FnOnce(&[f32]) -> Result<R, String>,
+{
+    if let Ok(view_ref) = obj.extract::<PyRef<'_, VectorView>>() {
+        let slice = view_ref.row_f32()?;
+        return f(slice).map_err(PyValueError::new_err);
+    }
+    if let Ok(buf) = PyBuffer::<f32>::get(obj)
+        && buf.is_c_contiguous()
+    {
+        let len = buf.item_count();
+        let ptr = buf.buf_ptr() as *const f32;
+        let slice = if len == 0 || ptr.is_null() {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(ptr, len) }
+        };
+        return f(slice).map_err(PyValueError::new_err);
+    }
+    let vec: Vec<f32> = obj.extract()?;
+    f(&vec).map_err(PyValueError::new_err)
+}
+
+fn with_f64_slice_or_vec<R, F>(obj: &Bound<'_, PyAny>, f: F) -> PyResult<R>
+where
+    F: FnOnce(&[f64]) -> Result<R, String>,
+{
+    if let Ok(buf) = PyBuffer::<f64>::get(obj)
+        && buf.is_c_contiguous()
+    {
+        let len = buf.item_count();
+        let ptr = buf.buf_ptr() as *const f64;
+        let slice = if len == 0 || ptr.is_null() {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(ptr, len) }
+        };
+        return f(slice).map_err(PyValueError::new_err);
+    }
+    let vec: Vec<f64> = obj.extract()?;
+    f(&vec).map_err(PyValueError::new_err)
+}
+
+fn with_i8_slice_or_vec<R, F>(obj: &Bound<'_, PyAny>, f: F) -> PyResult<R>
+where
+    F: FnOnce(&[i8]) -> Result<R, String>,
+{
+    if let Ok(view_ref) = obj.extract::<PyRef<'_, VectorView>>() {
+        let slice = view_ref.row_i8()?;
+        return f(slice).map_err(PyValueError::new_err);
+    }
+    if let Ok(buf) = PyBuffer::<i8>::get(obj)
+        && buf.is_c_contiguous()
+    {
+        let len = buf.item_count();
+        let ptr = buf.buf_ptr() as *const i8;
+        let slice = if len == 0 || ptr.is_null() {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(ptr, len) }
+        };
+        return f(slice).map_err(PyValueError::new_err);
+    }
+    let vec: Vec<i8> = obj.extract()?;
+    f(&vec).map_err(PyValueError::new_err)
+}
+
+fn with_u8_slice_or_vec<R, F>(obj: &Bound<'_, PyAny>, f: F) -> PyResult<R>
+where
+    F: FnOnce(&[u8]) -> Result<R, String>,
+{
+    if let Ok(view_ref) = obj.extract::<PyRef<'_, VectorView>>() {
+        let slice = view_ref.row_bytes()?;
+        return f(slice).map_err(PyValueError::new_err);
+    }
+    if let Ok(bytes) = obj.extract::<&[u8]>() {
+        return f(bytes).map_err(PyValueError::new_err);
+    }
+    if let Ok(buf) = PyBuffer::<u8>::get(obj)
+        && buf.is_c_contiguous()
+    {
+        let len = buf.item_count();
+        let ptr = buf.buf_ptr() as *const u8;
+        let slice = if len == 0 || ptr.is_null() {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(ptr, len) }
+        };
+        return f(slice).map_err(PyValueError::new_err);
+    }
+    let vec: Vec<u8> = obj.extract()?;
+    f(&vec).map_err(PyValueError::new_err)
+}
+
 /// Encode an Oracle 26ai `VECTOR(*, FLOAT32)` binary frame.
 #[pyfunction]
 pub fn encode_oracle_vector_f32<'py>(
     py: Python<'py>,
-    values: Vec<f32>,
+    values: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let bytes = py.detach(move || rs_encode_oracle_vector_f32(&values));
+    let bytes = with_f32_slice_or_vec(values, |slice| Ok(rs_encode_oracle_vector_f32(slice)))?;
     PyBytes::new_with(py, bytes.len(), |buf| {
         buf.copy_from_slice(&bytes);
         Ok(())
@@ -333,9 +434,9 @@ pub fn decode_oracle_vector_f32(py: Python<'_>, data: &[u8]) -> PyResult<Vec<f32
 #[pyfunction]
 pub fn encode_oracle_vector_f64<'py>(
     py: Python<'py>,
-    values: Vec<f64>,
+    values: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let bytes = py.detach(move || rs_encode_oracle_vector_f64(&values));
+    let bytes = with_f64_slice_or_vec(values, |slice| Ok(rs_encode_oracle_vector_f64(slice)))?;
     PyBytes::new_with(py, bytes.len(), |buf| {
         buf.copy_from_slice(&bytes);
         Ok(())
@@ -353,9 +454,9 @@ pub fn decode_oracle_vector_f64(py: Python<'_>, data: &[u8]) -> PyResult<Vec<f64
 #[pyfunction]
 pub fn encode_oracle_vector_i8<'py>(
     py: Python<'py>,
-    values: Vec<i8>,
+    values: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let bytes = py.detach(move || rs_encode_oracle_vector_i8(&values));
+    let bytes = with_i8_slice_or_vec(values, |slice| Ok(rs_encode_oracle_vector_i8(slice)))?;
     PyBytes::new_with(py, bytes.len(), |buf| {
         buf.copy_from_slice(&bytes);
         Ok(())
@@ -373,9 +474,9 @@ pub fn decode_oracle_vector_i8(py: Python<'_>, data: &[u8]) -> PyResult<Vec<i8>>
 #[pyfunction]
 pub fn encode_oracle_vector_binary<'py>(
     py: Python<'py>,
-    bits: &[u8],
+    bits: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let bytes = py.detach(|| rs_encode_oracle_vector_binary(bits));
+    let bytes = with_u8_slice_or_vec(bits, |slice| Ok(rs_encode_oracle_vector_binary(slice)))?;
     PyBytes::new_with(py, bytes.len(), |buf| {
         buf.copy_from_slice(&bytes);
         Ok(())
@@ -387,6 +488,76 @@ pub fn encode_oracle_vector_binary<'py>(
 pub fn decode_oracle_vector_binary(py: Python<'_>, data: &[u8]) -> PyResult<Vec<u8>> {
     py.detach(|| rs_decode_oracle_vector_binary(data))
         .map_err(PyValueError::new_err)
+}
+
+/// Encode a `pgvector` binary `vector` (`[u16 dim BE][u16 unused=0 BE][f32 BE; dim]`).
+#[pyfunction]
+pub fn encode_pgvector_f32<'py>(
+    py: Python<'py>,
+    values: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = with_f32_slice_or_vec(values, rs_encode_pgvector_f32)?;
+    PyBytes::new_with(py, bytes.len(), |buf| {
+        buf.copy_from_slice(&bytes);
+        Ok(())
+    })
+}
+
+/// Decode a `pgvector` binary `vector` (`[u16 dim BE][u16 unused=0 BE][f32 BE; dim]`).
+#[pyfunction]
+pub fn decode_pgvector_f32(py: Python<'_>, data: &[u8]) -> PyResult<Vec<f32>> {
+    py.detach(|| rs_decode_pgvector_f32(data))
+        .map_err(PyValueError::new_err)
+}
+
+/// Encode a `pgvector` binary `halfvec` (`[u16 dim BE][u16 unused=0 BE][f16 BE; dim]`).
+#[pyfunction]
+pub fn encode_pgvector_f16<'py>(
+    py: Python<'py>,
+    values: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = with_f32_slice_or_vec(values, rs_encode_pgvector_f16)?;
+    PyBytes::new_with(py, bytes.len(), |buf| {
+        buf.copy_from_slice(&bytes);
+        Ok(())
+    })
+}
+
+/// Decode a `pgvector` binary `halfvec` (`[u16 dim BE][u16 unused=0 BE][f16 BE; dim]`).
+#[pyfunction]
+pub fn decode_pgvector_f16(py: Python<'_>, data: &[u8]) -> PyResult<Vec<f32>> {
+    py.detach(|| rs_decode_pgvector_f16(data))
+        .map_err(PyValueError::new_err)
+}
+
+/// Encode a PostgreSQL / `pgvector` binary `bit` (`VARBIT`).
+#[pyfunction]
+pub fn encode_pgvector_bit<'py>(
+    py: Python<'py>,
+    packed_bytes: &Bound<'py, PyAny>,
+    bit_len: usize,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = with_u8_slice_or_vec(packed_bytes, |slice| rs_encode_pgvector_bit(slice, bit_len))?;
+    PyBytes::new_with(py, bytes.len(), |buf| {
+        buf.copy_from_slice(&bytes);
+        Ok(())
+    })
+}
+
+/// Decode a PostgreSQL / `pgvector` binary `bit` (`VARBIT`) into `(packed_bytes, bit_len)`.
+#[pyfunction]
+pub fn decode_pgvector_bit<'py>(
+    py: Python<'py>,
+    data: &[u8],
+) -> PyResult<(Bound<'py, PyBytes>, usize)> {
+    let (raw, bit_len) = py
+        .detach(|| rs_decode_pgvector_bit(data))
+        .map_err(PyValueError::new_err)?;
+    let py_bytes = PyBytes::new_with(py, raw.len(), |buf| {
+        buf.copy_from_slice(&raw);
+        Ok(())
+    })?;
+    Ok((py_bytes, bit_len))
 }
 
 /// Encode JSON bytes with an Oracle 26ai `OSON` binary header (`\xff\x4a\x5a`).
@@ -606,6 +777,12 @@ pub fn register_db_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(decode_oracle_vector_i8, m)?)?;
     m.add_function(wrap_pyfunction!(encode_oracle_vector_binary, m)?)?;
     m.add_function(wrap_pyfunction!(decode_oracle_vector_binary, m)?)?;
+    m.add_function(wrap_pyfunction!(encode_pgvector_f32, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_pgvector_f32, m)?)?;
+    m.add_function(wrap_pyfunction!(encode_pgvector_f16, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_pgvector_f16, m)?)?;
+    m.add_function(wrap_pyfunction!(encode_pgvector_bit, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_pgvector_bit, m)?)?;
     m.add_function(wrap_pyfunction!(encode_oson_payload, m)?)?;
     m.add_function(wrap_pyfunction!(decode_oson_payload, m)?)?;
     m.add_function(wrap_pyfunction!(encode_ttc_session_attrs, m)?)?;
