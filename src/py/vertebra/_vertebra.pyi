@@ -34,9 +34,14 @@ __all__ = [
     "RsgiScope",
     "RsgiTransport",
     "SchemaDigestCache",
+    "SimilarityMatch",
     "StatementCache",
     "StatementCacheStats",
     "StatementPlan",
+    "StaticEmbedderCore",
+    "VectorBatchView",
+    "VectorCache",
+    "VectorView",
     "WsgiEnviron",
     "WsgiEnvironIterator",
     "WsgiFileWrapper",
@@ -49,6 +54,7 @@ __all__ = [
     "clear_request_notification",
     "crc16_xmodem",
     "decode_alloydb_metadata_response",
+    "decode_gemini_embed_grpc_frame_to_batch",
     "decode_oracle_vector_binary",
     "decode_oracle_vector_f32",
     "decode_oracle_vector_f64",
@@ -60,6 +66,8 @@ __all__ = [
     "drive_wsgi_batch",
     "duckdb_bootstrap_statements",
     "encode_alloydb_metadata_exchange",
+    "encode_gemini_embed_grpc_frame",
+    "encode_gemini_embed_grpc_response_frame",
     "encode_hello3_handshake",
     "encode_oracle_vector_binary",
     "encode_oracle_vector_f32",
@@ -71,6 +79,7 @@ __all__ = [
     "encode_resp_command",
     "encode_tds_sql_batch",
     "encode_ttc_session_attrs",
+    "format_gemma_prompt",
     "format_traceparent",
     "get_batch",
     "get_request_notify_fd",
@@ -89,6 +98,7 @@ __all__ = [
     "rewrite_mssql_placeholders",
     "run_wsgi_callable",
     "sanitize_sql",
+    "splice_prefix_tokens",
     "sqlite_initialization_pragmas",
     "stream_file_chunks",
     "strip_pg_jsonb_header",
@@ -967,3 +977,164 @@ def encode_hello3_handshake(
 def crc16_xmodem(data: bytes) -> int: ...
 def redis_hash_slot(key: bytes) -> int: ...
 def parse_cluster_redirect(err_msg: str) -> tuple[str, int, str, int] | None: ...
+
+@final
+class SimilarityMatch:
+    index: int
+    score: float
+    def __new__(cls, index: int, score: float) -> Self: ...
+    def __repr__(self, /) -> str: ...
+
+@final
+class VectorView:
+    def __buffer__(self, flags: int, /) -> memoryview: ...
+    def __len__(self, /) -> int: ...
+    def __repr__(self, /) -> str: ...
+    @staticmethod
+    def from_f32(values: Sequence[float], normalize: bool = False) -> VectorView: ...
+    @staticmethod
+    def from_bytes(
+        data: bytes,
+        dimensions: int,
+        dtype: str = "float32",
+        scale: float = 1.0,
+    ) -> VectorView: ...
+    @property
+    def dimensions(self) -> int: ...
+    @property
+    def dtype(self) -> str: ...
+    @property
+    def nbytes(self) -> int: ...
+    @property
+    def scale(self) -> float: ...
+    def norm(self) -> float: ...
+    def truncate(self, dimensions: int, normalize: bool = True) -> VectorView: ...
+    def quantize_int8(self) -> VectorView: ...
+    def quantize_binary(self) -> VectorView: ...
+    def cosine_similarity(self, other: VectorView) -> float: ...
+    def dot(self, other: VectorView) -> float: ...
+    def hamming_distance(self, other: VectorView) -> int: ...
+    def to_list(self) -> list[float]: ...
+    def to_bytes(self) -> bytes: ...
+
+@final
+class VectorBatchView:
+    def __buffer__(self, flags: int, /) -> memoryview: ...
+    def __len__(self, /) -> int: ...
+    def __getitem__(self, index: int, /) -> VectorView: ...
+    def __repr__(self, /) -> str: ...
+    @staticmethod
+    def from_f32_rows(
+        rows: Sequence[Sequence[float]],
+        normalize: bool = False,
+        shm: bool = False,
+    ) -> VectorBatchView: ...
+    @staticmethod
+    def from_flat_f32(
+        values: Sequence[float],
+        count: int,
+        dimensions: int,
+        normalize: bool = False,
+        shm: bool = False,
+    ) -> VectorBatchView: ...
+    @staticmethod
+    def create_shm(
+        name: str,
+        rows: Sequence[Sequence[float]],
+        normalize: bool = False,
+    ) -> VectorBatchView: ...
+    @staticmethod
+    def open_shm(name: str, min_size: int = 4096) -> VectorBatchView: ...
+    @property
+    def count(self) -> int: ...
+    @property
+    def dimensions(self) -> int: ...
+    @property
+    def dtype(self) -> str: ...
+    @property
+    def nbytes(self) -> int: ...
+    @property
+    def shm_name(self) -> str | None: ...
+    def truncate(self, dimensions: int, normalize: bool = True) -> VectorBatchView: ...
+    def quantize_int8(self) -> VectorBatchView: ...
+    def quantize_binary(self) -> VectorBatchView: ...
+    def top_k(
+        self,
+        query: VectorView,
+        k: int = 10,
+        metric: str = "cosine",
+    ) -> list[SimilarityMatch]: ...
+    def to_list(self) -> list[list[float]]: ...
+    def to_bytes(self) -> bytes: ...
+    def to_arrow_shm(
+        self,
+        column_name: str = "embedding",
+        shm_name: str | None = None,
+    ) -> ArrowCursor: ...
+
+@final
+class VectorCache:
+    def __new__(
+        cls,
+        capacity: int = 4096,
+        dimensions: int = 768,
+        shm_name: str | None = None,
+    ) -> Self: ...
+    @property
+    def capacity(self) -> int: ...
+    @property
+    def dimensions(self) -> int: ...
+    @property
+    def hits(self) -> int: ...
+    @property
+    def misses(self) -> int: ...
+    def lookup(self, model: str, task: str, text: str) -> VectorView | None: ...
+    def insert(self, model: str, task: str, text: str, vector: VectorView) -> None: ...
+    def similarity_search(
+        self,
+        query: VectorView,
+        k: int = 10,
+        metric: str = "cosine",
+    ) -> list[SimilarityMatch]: ...
+
+@final
+class StaticEmbedderCore:
+    def __new__(
+        cls,
+        vocab: dict[str, int] | None = None,
+        weights: Sequence[Sequence[float]] | None = None,
+        vocab_size: int = 8192,
+        dimensions: int = 256,
+        seed: int = 42,
+    ) -> Self: ...
+    @property
+    def dimensions(self) -> int: ...
+    @property
+    def vocab_size(self) -> int: ...
+    def embed_text(self, text: str, dimensions: int | None = None) -> VectorView: ...
+    def embed_batch(
+        self,
+        texts: Sequence[str],
+        dimensions: int | None = None,
+    ) -> VectorBatchView: ...
+
+def format_gemma_prompt(task: str, text: str, title: str | None = None) -> str: ...
+def splice_prefix_tokens(
+    prefix_ids: Sequence[int],
+    doc_ids: Sequence[int],
+    eos_id: int | None = None,
+    max_seq_len: int = 2048,
+) -> list[int]: ...
+def encode_gemini_embed_grpc_frame(
+    model: str,
+    texts: Sequence[str],
+    task: str | None = None,
+    titles: Sequence[str | None] | None = None,
+    output_dimensionality: int | None = None,
+) -> bytes: ...
+def encode_gemini_embed_grpc_response_frame(batch: VectorBatchView) -> bytes: ...
+def decode_gemini_embed_grpc_frame_to_batch(
+    frame: bytes,
+    dimensions: int | None = None,
+    normalize: bool = True,
+) -> VectorBatchView: ...

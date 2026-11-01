@@ -6,7 +6,7 @@ title: "Binary pgvector Wire Codecs, Zero-Copy PyBuffer Oracle 26ai 0xDB, to_arr
 description: "Implement binary pgvector (vector, halfvec, bit) codecs in vertebra-db, zero-copy PyBuffer input in Oracle 26ai 0xDB codecs, VectorBatchView.to_arrow_shm(), and binary/buffer pushdown in SQLAlchemy Vector."
 scope: task
 status: draft
-state: pending
+state: in_progress
 strategy: tdd
 depends_on:
   - t02-shm-vector-slab-cache-and-views

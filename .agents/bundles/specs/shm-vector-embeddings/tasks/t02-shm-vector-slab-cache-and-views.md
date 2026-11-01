@@ -6,7 +6,7 @@ title: "Shared-Memory VectorSlab, VectorCache, SIMD Kernels, StaticEmbedder & PE
 description: "Implement 64-byte-aligned VectorSlab, seqlock VectorCache with SIMD top-k search, Matryoshka L2 normalization, scalar/binary quantization, Gemma task-prefix splicer, StaticEmbedder in vertebra-core, and PEP 3118 VectorView/VectorBatchView in vertebra-py."
 scope: task
 status: draft
-state: pending
+state: completed
 strategy: tdd
 depends_on: []
 traces_to:
@@ -146,7 +146,9 @@ make dev
 
 ## 4. Task Notes
 
-*(Populated during `/flow:implement` execution.)*
+- Implemented `VectorSlab`, `VectorSlabHeader` (`#[repr(C, align(64))]`), `VectorDtype` (`Float32`, `Float64`, `Float16`, `Int8`, `Binary`), `VectorCache` (4-way set-associative seqlock in `ShmRegion` or 64-byte aligned memory), `StaticEmbedderCore`, `EmbeddingTask` + `format_gemma_prompt` + `splice_prefix_tokens`, and compact Protobuf v3 gRPC packed-`f32` wire helpers in `src/rs/vertebra-core/src/vector.rs`.
+- Implemented PEP 3118 `VectorView` (1D) and `VectorBatchView` (2D), `SimilarityMatch`, `VectorCache`, `StaticEmbedderCore`, and Gemma / gRPC helper functions in `src/rs/vertebra-py/src/vector.rs` and updated `src/py/vertebra/_vertebra.pyi`.
+- Verified with `cargo test -p vertebra-core`, `mypy.stubtest vertebra._vertebra`, and `pytest src/py/tests/unit/embeddings/test_vector_views.py -v`.
 
 ---
 
