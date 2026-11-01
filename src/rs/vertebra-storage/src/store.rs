@@ -20,11 +20,14 @@ use crate::oci::{OciCavageCredentials, OciObjectStore};
 use crate::r2::{R2_UNIFORM_PART_SIZE, chunk_uniform_parts};
 
 static STORAGE_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    let default_threads = std::thread::available_parallelism()
+        .map(|n| n.get().clamp(4, 16))
+        .unwrap_or(4);
     let worker_threads = std::env::var("VERTEBRA_STORAGE_IO_THREADS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n > 0)
-        .unwrap_or(2);
+        .unwrap_or(default_threads);
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads)
         .enable_all()
@@ -98,6 +101,7 @@ pub enum BackendConfig {
         service_account_key: Option<String>,
         application_credentials_path: Option<String>,
         access_token: Option<String>,
+        credential_cache: Option<Arc<crate::gcp_auth::GcpTokenCache>>,
         endpoint: Option<String>,
         allow_http: bool,
         skip_signature: bool,
@@ -189,6 +193,7 @@ impl ObjectStoreEngine {
                 service_account_key,
                 application_credentials_path,
                 access_token,
+                credential_cache,
                 endpoint,
                 allow_http,
                 skip_signature,
@@ -200,21 +205,31 @@ impl ObjectStoreEngine {
                 if let Some(sa_key) = service_account_key {
                     builder = builder.with_service_account_key(sa_key);
                 }
-                if let Some(adc_path) = application_credentials_path {
-                    builder = builder.with_application_credentials(adc_path);
-                }
-                if let Some(token) = access_token {
-                    let creds = Arc::new(object_store::StaticCredentialProvider::new(
-                        object_store::gcp::GcpCredential { bearer: token },
-                    ));
+                if let Some(cache) = credential_cache {
+                    let creds =
+                        Arc::new(crate::gcp_auth::RefreshingGcpCredentialProvider::new(cache));
                     builder = builder.with_credentials(creds);
+                } else {
+                    if let Some(adc_path) = application_credentials_path {
+                        builder = builder.with_application_credentials(adc_path);
+                    }
+                    if let Some(token) = access_token {
+                        let creds = Arc::new(object_store::StaticCredentialProvider::new(
+                            object_store::gcp::GcpCredential { bearer: token },
+                        ));
+                        builder = builder.with_credentials(creds);
+                    }
                 }
                 if let Some(ref ep) = endpoint {
                     builder = builder.with_base_url(ep);
                 }
                 if allow_http {
                     builder = builder.with_client_options(
-                        object_store::ClientOptions::new().with_allow_http(true),
+                        object_store::ClientOptions::new()
+                            .with_allow_http(true)
+                            .with_proxy_excludes(
+                                "127.0.0.1,localhost,::1,metadata.google.internal",
+                            ),
                     );
                 }
                 if skip_signature {
@@ -411,6 +426,7 @@ impl ObjectStoreEngine {
             }
             "gs" | "gcs" => {
                 let bucket = parsed.host_str().unwrap_or_default().to_string();
+                let credential_cache = crate::gcp_auth::GcpTokenCache::from_gcs_options(&opts);
                 Self::new(BackendConfig::Gcs {
                     bucket,
                     service_account_path: opts.get("service_account_path").cloned(),
@@ -423,6 +439,7 @@ impl ObjectStoreEngine {
                         .get("access_token")
                         .or_else(|| opts.get("bearer_token"))
                         .cloned(),
+                    credential_cache,
                     endpoint: opts
                         .get("endpoint")
                         .or_else(|| opts.get("base_url"))

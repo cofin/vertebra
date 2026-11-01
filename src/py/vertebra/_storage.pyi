@@ -4,6 +4,8 @@ from collections.abc import Buffer
 from typing import Any, final
 
 __all__ = [
+    "GcpTokenCache",
+    "GcpTokenSnapshot",
     "ObjectMeta",
     "ObjectStore",
     "RustTaskAwaitable",
@@ -12,12 +14,45 @@ __all__ = [
     "py_sign_aws_sigv4_headers",
     "py_sign_azure_sas_url",
     "py_sign_gcs_v4_iam_url",
+    "py_sign_gcs_v4_iam_url_async",
     "py_sign_hmac_url",
     "py_sign_oci_cavage_headers",
     "py_sign_s3_v4_url",
     "py_verify_hmac_url",
     "py_verify_s3_v4_url",
 ]
+
+@final
+class GcpTokenSnapshot:
+    def __new__(
+        cls,
+        *,
+        access_token: str,
+        expires_at_unix_ms: int,
+        generation: int,
+        quota_project_id: str | None = None,
+    ) -> GcpTokenSnapshot: ...
+    @property
+    def access_token(self) -> str: ...
+    @property
+    def expires_at_unix_ms(self) -> int: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def quota_project_id(self) -> str | None: ...
+    def __repr__(self) -> str: ...
+
+@final
+class GcpTokenCache:
+    def __new__(cls, options: dict[str, str]) -> GcpTokenCache: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def refresh_skew_ms(self) -> int: ...
+    def needs_refresh(self, *, now_unix_ms: int | None = None) -> bool: ...
+    def invalidate(self, failed_generation: int) -> None: ...
+    def get_token(self, *, force_refresh: bool = False) -> GcpTokenSnapshot: ...
+    def get_token_async(self, *, force_refresh: bool = False) -> RustTaskAwaitable: ...
 
 @final
 class StorageBuffer:
@@ -119,6 +154,17 @@ def py_sign_gcs_v4_iam_url(
     access_token: str | None = None,
     private_key_pem: str | None = None,
 ) -> str: ...
+def py_sign_gcs_v4_iam_url_async(
+    bucket: str,
+    service_account_email: str,
+    method: str,
+    object_path: str,
+    expires_in_secs: int = 3600,
+    timestamp: int | None = None,
+    iam_endpoint: str = "https://iamcredentials.googleapis.com",
+    access_token: str | None = None,
+    private_key_pem: str | None = None,
+) -> RustTaskAwaitable: ...
 def py_sign_oci_cavage_headers(
     tenancy_ocid: str,
     user_ocid: str,

@@ -1,5 +1,6 @@
 //! `vertebra-storage` crate and `vertebra._storage` PyO3 extension module.
 
+pub mod gcp_auth;
 pub mod oci;
 pub mod r2;
 pub mod signing;
@@ -7,7 +8,7 @@ pub mod store;
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use pyo3::buffer::PyBuffer;
@@ -15,6 +16,10 @@ use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use crate::gcp_auth::{
+    GcpTokenCache as NativeGcpTokenCache, GcpTokenSnapshot as NativeGcpTokenSnapshot,
+    current_unix_ms,
+};
 use crate::oci::{OciCavageCredentials, sign_oci_cavage_request};
 use crate::r2::chunk_uniform_parts;
 use crate::signing::{
@@ -103,17 +108,23 @@ impl StorageBuffer {
     unsafe fn __releasebuffer__(&self, _view: *mut pyo3::ffi::Py_buffer) {}
 }
 
+type OutcomeProducer = Box<dyn FnOnce(Python<'_>) -> PyResult<Py<PyAny>> + Send>;
+
 #[pyclass(name = "_TaskCompletionCallback", frozen, immutable_type)]
 struct TaskCompletionCallback {
     future: Py<PyAny>,
-    outcome: Mutex<Option<PyResult<Py<PyAny>>>>,
+    outcome: Arc<Mutex<Option<OutcomeProducer>>>,
 }
 
 #[pymethods]
 impl TaskCompletionCallback {
     fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let mut guard = self.outcome.lock().expect("lock task completion outcome");
-        if let Some(res) = guard.take() {
+        let producer = self
+            .outcome
+            .lock()
+            .expect("lock task completion outcome")
+            .take();
+        if let Some(produce) = producer {
             let fut = self.future.bind(py);
             let cancelled: bool = fut
                 .call_method0("cancelled")
@@ -122,7 +133,7 @@ impl TaskCompletionCallback {
             if cancelled {
                 return Ok(());
             }
-            match res {
+            match produce(py) {
                 Ok(val) => {
                     let _ = fut.call_method1("set_result", (val,));
                 }
@@ -161,31 +172,157 @@ where
     let loop_ref = loop_obj.unbind();
     let fut_for_cb = py_fut.clone().unbind();
     let fut_for_await = py_fut.unbind();
+    let outcome_slot: Arc<Mutex<Option<OutcomeProducer>>> = Arc::new(Mutex::new(None));
+    let outcome_for_task = Arc::clone(&outcome_slot);
+    let cb = Py::new(
+        py,
+        TaskCompletionCallback {
+            future: fut_for_cb,
+            outcome: outcome_slot,
+        },
+    )?;
 
     runtime_handle().spawn(async move {
         let output = fut.await;
-        Python::attach(|py| {
-            let mapped = match output {
+        {
+            let mut guard = outcome_for_task
+                .lock()
+                .expect("lock task completion outcome");
+            *guard = Some(Box::new(move |py| match output {
                 Ok(val) => map_fn(py, val),
                 Err(err) => Err(to_py_err(err)),
-            };
-            if let Ok(cb) = Py::new(
-                py,
-                TaskCompletionCallback {
-                    future: fut_for_cb,
-                    outcome: Mutex::new(Some(mapped)),
-                },
-            ) {
-                let _ = loop_ref
-                    .bind(py)
-                    .call_method1("call_soon_threadsafe", (cb,));
-            }
+            }));
+        }
+        Python::attach(|py| {
+            let _ = loop_ref
+                .bind(py)
+                .call_method1("call_soon_threadsafe", (&cb,));
         });
     });
 
     Ok(RustTaskAwaitable {
         future: fut_for_await,
     })
+}
+
+#[pyclass(name = "GcpTokenSnapshot", frozen, immutable_type, from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyGcpTokenSnapshot {
+    #[pyo3(get)]
+    pub access_token: String,
+    #[pyo3(get)]
+    pub expires_at_unix_ms: u64,
+    #[pyo3(get)]
+    pub generation: u64,
+    #[pyo3(get)]
+    pub quota_project_id: Option<String>,
+}
+
+impl From<&NativeGcpTokenSnapshot> for PyGcpTokenSnapshot {
+    fn from(value: &NativeGcpTokenSnapshot) -> Self {
+        Self {
+            access_token: value.access_token.clone(),
+            expires_at_unix_ms: value.expires_at_unix_ms,
+            generation: value.generation,
+            quota_project_id: value.quota_project_id.clone(),
+        }
+    }
+}
+
+#[pymethods]
+impl PyGcpTokenSnapshot {
+    #[new]
+    #[pyo3(signature = (*, access_token, expires_at_unix_ms, generation, quota_project_id=None))]
+    fn new(
+        access_token: String,
+        expires_at_unix_ms: u64,
+        generation: u64,
+        quota_project_id: Option<String>,
+    ) -> Self {
+        Self {
+            access_token,
+            expires_at_unix_ms,
+            generation,
+            quota_project_id,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "GcpTokenSnapshot(generation={}, expires_at_unix_ms={}, quota_project_id={:?})",
+            self.generation, self.expires_at_unix_ms, self.quota_project_id
+        )
+    }
+}
+
+#[pyclass(name = "GcpTokenCache", frozen, immutable_type)]
+pub struct PyGcpTokenCache {
+    inner: Arc<NativeGcpTokenCache>,
+}
+
+#[pymethods]
+impl PyGcpTokenCache {
+    #[new]
+    #[pyo3(signature = (options))]
+    fn new(py: Python<'_>, options: HashMap<String, String>) -> PyResult<Self> {
+        let inner = py
+            .detach(|| NativeGcpTokenCache::from_gcs_options(&options))
+            .ok_or_else(|| {
+                PyValueError::new_err("unable to configure GcpTokenCache from options")
+            })?;
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    fn generation(&self) -> u64 {
+        self.inner.generation()
+    }
+
+    #[getter]
+    fn refresh_skew_ms(&self) -> u64 {
+        self.inner.refresh_skew_ms()
+    }
+
+    #[pyo3(signature = (*, now_unix_ms=None))]
+    fn needs_refresh(&self, now_unix_ms: Option<u64>) -> bool {
+        self.inner
+            .needs_refresh(now_unix_ms.unwrap_or_else(current_unix_ms))
+    }
+
+    fn invalidate(&self, failed_generation: u64) {
+        self.inner.invalidate(failed_generation);
+    }
+
+    #[pyo3(signature = (*, force_refresh=false))]
+    fn get_token(&self, py: Python<'_>, force_refresh: bool) -> PyResult<PyGcpTokenSnapshot> {
+        if !force_refresh && let Some(snap) = self.inner.get_cached(current_unix_ms()) {
+            return Ok(PyGcpTokenSnapshot::from(snap.as_ref()));
+        }
+        let cache = Arc::clone(&self.inner);
+        let snap = py
+            .detach(|| {
+                block_on_storage(
+                    async move { cache.get_or_refresh_with_force(force_refresh).await },
+                )
+            })
+            .map_err(PyRuntimeError::new_err)?;
+        Ok(PyGcpTokenSnapshot::from(snap.as_ref()))
+    }
+
+    #[pyo3(signature = (*, force_refresh=false))]
+    fn get_token_async(&self, py: Python<'_>, force_refresh: bool) -> PyResult<RustTaskAwaitable> {
+        let cache = Arc::clone(&self.inner);
+        spawn_rust_task(
+            py,
+            async move {
+                cache
+                    .get_or_refresh_with_force(force_refresh)
+                    .await
+                    .map_err(StorageError::Signing)
+            },
+            |py, snap| Ok(Py::new(py, PyGcpTokenSnapshot::from(snap.as_ref()))?.into_any()),
+        )
+    }
 }
 
 #[pyclass(frozen, immutable_type, from_py_object)]
@@ -231,8 +368,10 @@ pub struct ObjectStore {
 impl ObjectStore {
     #[new]
     #[pyo3(signature = (url, options=None))]
-    fn new(url: &str, options: Option<HashMap<String, String>>) -> PyResult<Self> {
-        let engine = ObjectStoreEngine::from_url(url, options.as_ref()).map_err(to_py_err)?;
+    fn new(py: Python<'_>, url: &str, options: Option<HashMap<String, String>>) -> PyResult<Self> {
+        let engine = py
+            .detach(|| ObjectStoreEngine::from_url(url, options.as_ref()))
+            .map_err(to_py_err)?;
         Ok(Self { engine })
     }
 
@@ -700,17 +839,60 @@ fn py_sign_aws_sigv4_headers(
         .map_err(to_py_err)
 }
 
+#[pyfunction]
+#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=None, iam_endpoint="https://iamcredentials.googleapis.com", access_token=None, private_key_pem=None))]
+#[allow(clippy::too_many_arguments)]
+fn py_sign_gcs_v4_iam_url_async(
+    py: Python<'_>,
+    bucket: String,
+    service_account_email: String,
+    method: String,
+    object_path: String,
+    expires_in_secs: u64,
+    timestamp: Option<i64>,
+    iam_endpoint: &str,
+    access_token: Option<String>,
+    private_key_pem: Option<String>,
+) -> PyResult<RustTaskAwaitable> {
+    let timestamp = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let iam_endpoint = iam_endpoint.to_string();
+    let cfg = GcsSignConfig {
+        bucket,
+        service_account_email,
+        private_key_pem,
+        access_token,
+    };
+    spawn_rust_task(
+        py,
+        async move {
+            sign_gcs_v4_with_iam_endpoint(
+                &cfg,
+                &method,
+                &object_path,
+                expires_in_secs,
+                timestamp,
+                &iam_endpoint,
+            )
+            .await
+        },
+        |py, signed| Ok(signed.into_pyobject(py)?.into_any().unbind()),
+    )
+}
+
 #[pymodule(gil_used = false)]
 pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ObjectStore>()?;
     m.add_class::<ObjectMeta>()?;
     m.add_class::<RustTaskAwaitable>()?;
     m.add_class::<StorageBuffer>()?;
+    m.add_class::<PyGcpTokenSnapshot>()?;
+    m.add_class::<PyGcpTokenCache>()?;
     m.add_function(wrap_pyfunction!(py_sign_hmac_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_verify_hmac_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_s3_v4_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_verify_s3_v4_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_gcs_v4_iam_url, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sign_gcs_v4_iam_url_async, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_oci_cavage_headers, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_azure_sas_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_chunk_r2_uniform_parts, m)?)?;
