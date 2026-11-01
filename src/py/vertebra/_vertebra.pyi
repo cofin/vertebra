@@ -1083,9 +1083,8 @@ class VectorBatchView:
     def to_bytes(self) -> bytes: ...
     def to_arrow_shm(
         self,
-        column: str = "embedding",
+        column_name: str = "embedding",
         *,
-        column_name: str | None = None,
         shm_name: str | None = None,
     ) -> ArrowCursor: ...
 

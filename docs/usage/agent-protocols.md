@@ -46,9 +46,9 @@ registry.register_resource(list_warehouses)
 
 - **Skills (`MCPSkillsConfig`, `SkillController`, `FilesystemSkillSource`)**: Serve structured `SKILL.md` bundles over MCP resources and HTTP endpoints so coding agents can load domain workflows on demand.
 - **Async Tasks (`MCPTaskConfig`, `MCPTaskStore`, `TaskRecord`)**: Track long-running tool calls with progress updates, cancellation, and TTL retention.
-- **Stdio Server & Stdio-to-HTTP Bridge (`vtb ai mcp serve|bridge`)**: Run a local MCP server over stdio (`vtb ai mcp serve app:app`) or bridge stdio-only MCP desktop clients to remote Vertebra HTTP/SSE MCP endpoints with W3C trace header propagation:
+- **Stdio Server & Stdio-to-HTTP Bridge (`vtb ai mcp serve|bridge`)**: Run a local MCP server over stdio (`vtb ai mcp serve --name my-mcp`) or bridge stdio-only MCP desktop clients to remote Vertebra HTTP/SSE MCP endpoints with W3C trace header propagation:
 
 ```bash
-vtb ai mcp serve app:app
+vtb ai mcp serve --name my-mcp
 vtb ai mcp bridge --url http://127.0.0.1:8000/mcp
 ```

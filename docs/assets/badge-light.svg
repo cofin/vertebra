@@ -1,11 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none" role="img" aria-label="Vertebra">
   <title>Vertebra</title>
   <rect x="8" y="8" width="240" height="240" rx="52" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="6"/>
-  <path d="M64 56L128 32L192 56L168 84H88L64 56Z" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M54 126L128 102L202 126L176 154H80L54 126Z" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M64 196L128 172L192 196L168 224H88L64 196Z" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M128 20V32" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M128 84V102" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M128 154V172" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M128 224V236" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M128 26L168 54L128 82L88 54Z" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M88 54L36 40" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M168 54L220 40" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M128 100L164 128L128 156L92 128Z" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M92 128L44 114" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M164 128L212 114" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M128 174L160 202L128 230L96 202Z" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M96 202L54 188" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M160 202L202 188" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M128 82V100" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M128 156V174" fill="none" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

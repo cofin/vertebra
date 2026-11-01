@@ -210,11 +210,11 @@ class VertexEmbedder(Embedder):
     def _ensure_token_cache(self) -> GcpTokenCache:
         """Lazily initialize the default `GcpTokenCache` when not explicitly injected."""
         if self._token_cache is None:
-            opts: dict[str, str] = {}
+            opts: dict[str, str] = {"use_metadata_server": "true"}
             if self._target_service_account:
-                opts["google_target_service_account"] = self._target_service_account
+                opts["target_service_account"] = self._target_service_account
             if self._quota_project_id:
-                opts["google_quota_project_id"] = self._quota_project_id
+                opts["quota_project_id"] = self._quota_project_id
             self._token_cache = GcpTokenCache(opts)
         return self._token_cache
 
@@ -424,6 +424,11 @@ class OracleEmbedder(Embedder):
 
     async def _ensure_oracle_credential_fresh(self) -> None:
         """Rotate `DBMS_VECTOR.CREATE_CREDENTIAL` when `GcpTokenCache` advances to a new generation."""
+        if self._token_cache is None and self._provider == "vertexai":
+            try:
+                self._token_cache = GcpTokenCache({"use_metadata_server": "true"})
+            except ValueError:
+                return
         if self._token_cache is None:
             return
         snap = await self._token_cache.get_token_async()

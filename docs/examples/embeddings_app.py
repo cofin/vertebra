@@ -1,6 +1,7 @@
 """Shared-memory vector embeddings, Matryoshka truncation, and top-k search example."""
 
 import asyncio
+from typing import Annotated
 
 import msgspec
 
@@ -57,7 +58,7 @@ class VectorSearchController(Controller):
     async def search(
         self,
         body: SearchRequest,
-        embedder: Inject[Embedder],
+        embedder: Annotated[Embedder, Inject()],
     ) -> SearchResponse:
         """Embed query and documents into SHM and return top-k matches."""
         query_view = await embedder.embed_query(body.query)

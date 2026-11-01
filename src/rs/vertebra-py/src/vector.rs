@@ -736,15 +736,14 @@ impl VectorBatchView {
         })
     }
 
-    #[pyo3(signature = (column="embedding", *, column_name=None, shm_name=None))]
+    #[pyo3(signature = (column_name="embedding", *, shm_name=None))]
     pub fn to_arrow_shm(
         &self,
         py: Python<'_>,
-        column: &str,
-        column_name: Option<&str>,
+        column_name: &str,
         shm_name: Option<&str>,
     ) -> PyResult<ArrowCursor> {
-        let resolved_col = column_name.unwrap_or(column);
+        let resolved_col = column_name;
         let resolved_shm_name = match shm_name {
             Some(explicit) => explicit.to_string(),
             None => {

@@ -131,7 +131,15 @@ impl GcpTokenCache {
         }
     }
 
-    pub fn from_gcs_options(opts: &HashMap<String, String>) -> Option<Arc<Self>> {
+    pub fn from_gcs_options(raw_opts: &HashMap<String, String>) -> Option<Arc<Self>> {
+        let mut opts: HashMap<String, String> = HashMap::with_capacity(raw_opts.len());
+        for (k, v) in raw_opts {
+            let normalized = k
+                .strip_prefix("google_")
+                .or_else(|| k.strip_prefix("gcs_"))
+                .unwrap_or(k.as_str());
+            opts.insert(normalized.to_string(), v.clone());
+        }
         let skew_ms = opts
             .get("refresh_skew_ms")
             .and_then(|v| v.parse::<u64>().ok())
@@ -227,7 +235,7 @@ impl GcpTokenCache {
                 quota_project_id: quota_project_id.clone(),
                 endpoint,
             });
-        } else if opts.get("target_service_account").is_none()
+        } else if !opts.contains_key("target_service_account")
             && let Some(tok) = opts
                 .get("access_token")
                 .or_else(|| opts.get("bearer_token"))

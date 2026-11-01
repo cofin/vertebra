@@ -1,6 +1,6 @@
 # Vector Embeddings & Shared-Memory Slabs
 
-`vertebra.embeddings` provides shared-memory vector embeddings (`VectorView`, `VectorBatchView`) backed by a POSIX shared-memory `VectorSlab` and a 16-shard lock-free `VectorCache`. It defaults to zero-weight Google HTTP/2 gRPC (`VertexEmbedder`, `GeminiEmbedder`) and in-database SQL pushdown (`AlloyDbEmbedder`, `OracleEmbedder`), while supporting `1x` RAM local models (`GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`) through `EmbeddingBroker`.
+`vertebra.embeddings` provides shared-memory vector embeddings (`VectorView`, `VectorBatchView`) backed by a POSIX shared-memory `VectorSlab` and a set-associative seqlock `VectorCache`. It defaults to zero-weight Google HTTP/2 gRPC (`VertexEmbedder`, `GeminiEmbedder`) and in-database SQL pushdown (`AlloyDbEmbedder`, `OracleEmbedder`), while supporting `1x` RAM local models (`GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`) through `EmbeddingBroker`.
 
 ```mermaid
 flowchart LR
@@ -50,12 +50,12 @@ Zero-weight cloud gRPC (`VertexEmbedder`, `GeminiEmbedder`, `RemoteEmbedder`), d
 | `Embedder` | `gemini-embedding-001` (`768` dims) | Delegates to `VertexEmbedder` by default | None |
 | `VertexEmbedder` | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 gRPC + `RefreshingGcpCredentialProvider` | None |
 | `GeminiEmbedder` | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 gRPC (`x-goog-api-key` or ADC) | None |
-| `AlloyDbEmbedder` | `gemini-embedding-001` (`768` dims) | In-DB `google_ml.embedding()` + binary `pgvector` | None |
-| `OracleEmbedder` | `ALL_MINILM_L12_V2` (`384` dims) | In-DB `DBMS_VECTOR.UTL_TO_EMBEDDING()` + `0xDB` wire | None |
-| `StaticEmbedder` | `minishlab/potion-base-8M` (`256` dims) | Pure-Rust `mmap` token lookup (`<50 µs`) | None |
-| `GemmaEmbedder` | `google/embeddinggemma-300m` (`768` dims) | `1x` RAM `EmbeddingBroker` (`int8` / `q4` / `bf16`) | `[embeddings]` |
+| `AlloyDbEmbedder` | `gemini-embedding-001` (`768` dims) | In-DB `embedding()` + binary `pgvector` | None |
+| `OracleEmbedder` | `gemini-embedding-001` (`768` dims) | In-DB `DBMS_VECTOR.UTL_TO_EMBEDDING()` + `0xDB` wire | None |
+| `StaticEmbedder` | `potion-base-8M` (`512` dims) | Pure-Rust `mmap` token lookup (`<50 µs`) | None |
+| `GemmaEmbedder` | `embeddinggemma-2-270m` (`768` dims) | `1x` RAM `EmbeddingBroker` (`int8` / `q4` / `bf16` / `fp32`) | `[embeddings]` |
 | `FastEmbedder` | `BAAI/bge-small-en-v1.5` (`384` dims) | `1x` RAM `EmbeddingBroker` (ONNX Runtime) | `[embeddings]` |
-| `RemoteEmbedder` | Configurable (`768` dims) | Rust HTTP/2 gRPC `EmbedBatch` or OpenAI HTTP | None |
+| `RemoteEmbedder` | `embeddinggemma-2-270m` (`768` dims) | Rust HTTP/2 gRPC `BatchEmbed` | None |
 
 ## Google Cloud & In-Database SQL Pushdown
 
@@ -78,8 +78,8 @@ vertex_emb = VertexEmbedder(
     dimensions=768,
 )
 gemini_emb = GeminiEmbedder("gemini-embedding-001")
-alloy_emb = AlloyDbEmbedder("gemini-embedding-001")
-oracle_emb = OracleEmbedder("ALL_MINILM_L12_V2")
+alloy_emb = AlloyDbEmbedder(model="gemini-embedding-001")
+oracle_emb = OracleEmbedder(model="gemini-embedding-001")
 ```
 
 ## Local `1x` RAM Broker & `EmbeddingGemma`
@@ -94,16 +94,16 @@ from vertebra.embeddings import (
 )
 
 gemma_emb = GemmaEmbedder(
-    "google/embeddinggemma-300m",
+    "embeddinggemma-2-270m",
     dimensions=256,
-    dtype="int8",
+    precision="int8",
 )
 fast_emb = FastEmbedder("BAAI/bge-small-en-v1.5")
 static_emb = StaticEmbedder(dimensions=256)
 ```
 
 !!! warning "`EmbeddingGemma` Precision"
-    `EmbeddingGemma` activations overflow IEEE 754 `fp16`. `GemmaEmbedder` enforces `dtype` in `{"int8", "q4", "bf16", "fp32"}` and raises `ValueError` if `dtype="fp16"` is requested.
+    `EmbeddingGemma` activations overflow IEEE 754 `fp16`. `GemmaEmbedder` enforces `precision` in `{"int8", "q4", "bf16", "fp32"}` and raises `ValueError` if `precision="fp16"` is requested.
 
 ## Zero-Copy `VectorView`, Matryoshka Truncation & Binary Wire Codecs
 
@@ -119,9 +119,9 @@ Stage model bundles into GCS, S3, R2, Azure, or OCI without a Hugging Face accou
 
 ```bash
 vtb ai models list
-vtb ai models pull google/embeddinggemma-300m --quant int8
-vtb ai models stage google/embeddinggemma-300m --to gs://my-bucket/models/
-vtb ai models warm google/embeddinggemma-300m --from gs://my-bucket/models/
+vtb ai models pull embeddinggemma-2-270m --quant int8
+vtb ai models stage embeddinggemma-2-270m --to gs://my-bucket/models/
+vtb ai models warm embeddinggemma-2-270m --from gs://my-bucket/models/ --shm
 vtb run app:app --with-workers --queues default,embeddings \
-    --lane-concurrency default:8,embeddings:2
+    --lane-concurrency default=8,embeddings=2
 ```

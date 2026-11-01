@@ -190,7 +190,7 @@ class Embedder:
         """Extract `text_column` from an ArrowCursor, RecordBatch, or row sequence and return a SHM `ArrowCursor`."""
         texts = self._extract_texts_from_tabular(cursor_or_table, text_column)
         batch = await self.embed_many(texts, task="document")
-        return batch.to_arrow_shm(column=output_column)
+        return batch.to_arrow_shm(column_name=output_column)
 
     def similarity_search(
         self,

@@ -105,15 +105,18 @@ class GemmaEmbedder(Embedder):
         """Create the local ONNX / fastembed inference callable or deterministic fallback."""
         model_name = self._model
         source_dir = self._source
+        cached_model: Any = None
 
         def _infer(texts: list[str], dims: int) -> list[list[float]]:
-            fe_mod = ensure_module("fastembed", extra="embeddings")
-            text_emb_cls = fe_mod.TextEmbedding
-            kwargs: dict[str, Any] = {}
-            if source_dir:
-                kwargs["specific_model_path"] = source_dir
-            model_obj = text_emb_cls(model_name=model_name, **kwargs)
-            embeddings = list(model_obj.embed(texts))
+            nonlocal cached_model
+            if cached_model is None:
+                fe_mod = ensure_module("fastembed", extra="embeddings")
+                text_emb_cls = fe_mod.TextEmbedding
+                kwargs: dict[str, Any] = {}
+                if source_dir:
+                    kwargs["specific_model_path"] = source_dir
+                cached_model = text_emb_cls(model_name=model_name, **kwargs)
+            embeddings = list(cached_model.embed(texts))
             return [[float(x) for x in vec[:dims]] for vec in embeddings]
 
         return _infer
