@@ -2871,9 +2871,6 @@ fastapi = [
 flask = [
     { name = "flask" },
 ]
-framework = [
-    { name = "msgspec" },
-]
 htmx = [
     { name = "litestar-htmx" },
 ]
@@ -3032,7 +3029,6 @@ requires-dist = [
     { name = "litestar-vite", marker = "extra == 'all'", specifier = ">=0.32.0" },
     { name = "litestar-vite", marker = "extra == 'vite'", specifier = ">=0.32.0" },
     { name = "msgspec", specifier = ">=0.18" },
-    { name = "msgspec", marker = "extra == 'framework'", specifier = ">=0.18" },
     { name = "polars", marker = "extra == 'all'", specifier = ">=1.0.0" },
     { name = "polars", marker = "extra == 'polars'", specifier = ">=1.0.0" },
     { name = "pyarrow", marker = "extra == 'all'", specifier = ">=18.0.0" },
@@ -3049,7 +3045,7 @@ requires-dist = [
     { name = "starlette", marker = "extra == 'all'", specifier = ">=0.40.0" },
     { name = "starlette", marker = "extra == 'starlette'", specifier = ">=0.40.0" },
 ]
-provides-extras = ["framework", "sqlspec", "alchemy", "arrow", "pydantic", "attrs", "polars", "litestar", "starlette", "fastapi", "flask", "django", "queues", "security", "autowire", "email", "mcp", "vite", "asyncapi", "htmx", "saq", "all"]
+provides-extras = ["sqlspec", "alchemy", "arrow", "pydantic", "attrs", "polars", "litestar", "starlette", "fastapi", "flask", "django", "queues", "security", "autowire", "email", "mcp", "vite", "asyncapi", "htmx", "saq", "all"]
 
 [package.metadata.requires-dev]
 bench = [

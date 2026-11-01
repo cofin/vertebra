@@ -35,7 +35,6 @@ Vertebra keeps its base dependency footprint minimal (`msgspec` and `rich-click`
 
 | Extra | Install Command | Included Capabilities |
 | --- | --- | --- |
-| `framework` | `uv add "vertebra-core[framework]"` | Explicit `msgspec>=0.18` native framework contract |
 | `sqlspec` | `uv add "vertebra-core[sqlspec]"` | First-class `sqlspec` (`>=0.70.0`) driver adapters, configs, and PyArrow integration |
 | `alchemy` | `uv add "vertebra-core[alchemy]"` | `advanced-alchemy` (1.12+), `sqlalchemy` (2.0.36+), and `alembic` (1.14+) |
 | `arrow` | `uv add "vertebra-core[arrow]"` | Native PyArrow IPC streaming and Parquet datasets |

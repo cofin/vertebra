@@ -46,9 +46,6 @@ vtb = "vertebra.cli:cli"
 "duckdb.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:DuckDBAsyncDialect"
 
 [project.optional-dependencies]
-framework = [
-    "msgspec>=0.18",
-]
 sqlspec = [
     "sqlspec>=0.69.0",
 ]
