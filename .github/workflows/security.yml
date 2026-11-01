@@ -1,0 +1,33 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: ["**"]
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  zizmor:
+    name: GitHub Actions Security Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@v0.8.0
+        with:
+          config: .github/zizmor.yml
+          advanced-security: false
+          annotations: true

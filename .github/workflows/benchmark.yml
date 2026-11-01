@@ -16,6 +16,9 @@ concurrency:
   group: benchmark
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 env:
   PYTHONUNBUFFERED: "1"
   UV_SYSTEM_PYTHON: "1"
@@ -25,15 +28,18 @@ jobs:
     name: Vertebra Performance
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
@@ -70,7 +76,7 @@ jobs:
           fi
 
       - name: Upload Results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-results-${{ github.sha }}
           path: |
@@ -79,9 +85,11 @@ jobs:
 
       - name: Commit History (on main only)
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add tools/benchmarks/results/*.duckdb
           git diff --staged --quiet || git commit -m "bench: track Vertebra performance [skip ci]"
-          git push
+          git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git HEAD:main

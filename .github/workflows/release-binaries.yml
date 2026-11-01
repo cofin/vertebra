@@ -6,12 +6,14 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -34,7 +36,9 @@ jobs:
             bin_name: vertebra-server-windows-x64.exe
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -43,7 +47,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           python-version: "3.12"
@@ -69,14 +73,14 @@ jobs:
           cp "${{ matrix.bin_src }}" "dist/${{ matrix.bin_name }}"
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vertebra-${{ matrix.target }}
           path: dist/${{ matrix.bin_name }}
 
       - name: Upload to Release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/${{ matrix.bin_name }}
         env:
