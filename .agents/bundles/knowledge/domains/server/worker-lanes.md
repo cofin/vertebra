@@ -5,20 +5,28 @@ description: "Admission-controlled background task worker lanes (LaneConfig, Wor
 status: stable
 tags: [domains, server, worker-lanes, queues, cli]
 sources:
+  - resource: src/py/vertebra/server/lanes.py
   - resource: src/py/vertebra/cli/workers.py
+  - resource: src/py/vertebra/cli/run.py
+  - resource: src/py/vertebra/cli/dev.py
   - resource: src/py/vertebra/extensions/litestar/plugin.py
 ---
 
 # Multi-Lane Worker Runner
 
-[`vertebra.cli.workers`](../../../../../src/py/vertebra/cli/workers.py) provides an admission-controlled background worker runner (`LaneConfig`, `WorkerRunner`) with per-queue `asyncio.Semaphore` isolation and oneshot job execution.
+<!-- truth: start -->
+- **Canonical Server Module (`vertebra.server.lanes`)**: [`LaneConfig`](../../../../../src/py/vertebra/server/lanes.py) and [`WorkerRunner`](../../../../../src/py/vertebra/server/lanes.py) live in `vertebra.server.lanes` and are re-exported by `vertebra.server` and `vertebra.cli.workers`.
+- **Co-Located & Standalone Worker Execution**: `vtb run` and `vtb dev` support `--with-workers / --no-workers`, `--queues`, `--lane-concurrency` (e.g. `high:16,default:8,embeddings:2`), and `[tool.vertebra.workers]` in `pyproject.toml` to co-locate `WorkerRunner` inside the server lifecycle, while `vtb workers run --oneshot <job> --payload <json>` runs standalone or Cloud Run Jobs / Kubernetes Job executions.
+<!-- truth: end -->
 
-## 1. Domain Types (`cli/workers.py`)
+[`vertebra.server.lanes`](../../../../../src/py/vertebra/server/lanes.py) (re-exported by [`vertebra.cli.workers`](../../../../../src/py/vertebra/cli/workers.py)) provides an admission-controlled background worker runner (`LaneConfig`, `WorkerRunner`) with per-queue `asyncio.Semaphore` isolation, co-located HTTP worker execution, and oneshot job execution.
+
+## 1. Domain Types (`server/lanes.py`)
 
 | Symbol | Source | Responsibility |
 |---|---|---|
-| [`LaneConfig`](../../../../../src/py/vertebra/cli/workers.py) | `vertebra.cli.workers` | Frozen `msgspec.Struct(gc=False, kw_only=True)` defining a queue lane's `queue_name`, `concurrency: int = 10`, and `drain_timeout_s: float = 30.0`. |
-| [`WorkerRunner`](../../../../../src/py/vertebra/cli/workers.py) | `vertebra.cli.workers` | Manages per-lane `asyncio.Semaphore` pools and in-flight task tracking (`submit`, `stop`, `parse_lanes`, `resolve_job`, `run_oneshot`, `execute_cli`). |
+| [`LaneConfig`](../../../../../src/py/vertebra/server/lanes.py) | `vertebra.server.lanes` | Frozen `msgspec.Struct(gc=False, kw_only=True)` defining a queue lane's `queue_name`, `concurrency: int = 10`, and `drain_timeout_s: float = 30.0`. |
+| [`WorkerRunner`](../../../../../src/py/vertebra/server/lanes.py) | `vertebra.server.lanes` | Manages per-lane `asyncio.Semaphore` pools and in-flight task tracking (`submit`, `stop`, `parse_lanes`, `parse_lane_concurrency`, `resolve_job`, `run_oneshot`, `execute_cli`). |
 
 ## 2. Admission Control, Draining & Oneshot Execution
 

@@ -1,0 +1,243 @@
+"""Unit tests for EmbeddingBroker, GemmaEmbedder, FastEmbedder, StaticEmbedder, and 3.14t/3.15t quarantine."""
+
+from __future__ import annotations
+
+import asyncio
+import math
+import sys
+
+import pytest
+
+from vertebra._vertebra import VectorBatchView
+from vertebra.embeddings import (
+    MODEL_CATALOG,
+    EmbeddingBroker,
+    EmbeddingBrokerConfig,
+    FastEmbedder,
+    GemmaEmbedder,
+    ModelSpec,
+    StaticEmbedder,
+    get_model_spec,
+    list_model_specs,
+)
+from vertebra.typing import MissingDependencyError
+
+
+def test_model_catalog_and_gemma2_fp16_guard() -> None:
+    """Verify ModelSpec catalog and GemmaEmbedder fp16 activation-overflow guard."""
+    all_specs = list_model_specs()
+    assert len(all_specs) >= 8
+    assert "gemini-embedding-001" in MODEL_CATALOG
+    assert "embeddinggemma-2-270m" in MODEL_CATALOG
+    assert "embeddinggemma-300m" in MODEL_CATALOG
+    assert "BAAI/bge-small-en-v1.5" in MODEL_CATALOG
+    assert "minishlab/potion-base-8M" in MODEL_CATALOG
+
+    gemma2_spec = get_model_spec("embeddinggemma-2-270m")
+    assert isinstance(gemma2_spec, ModelSpec)
+    assert gemma2_spec.forbid_fp16 is True
+
+    with pytest.raises(ValueError, match="float16"):
+        GemmaEmbedder("embeddinggemma-2-270m", precision="fp16")
+
+    with pytest.raises(ValueError, match="float16"):
+        GemmaEmbedder("embeddinggemma-2-270m", precision="float16")
+
+    for allowed in ("int8", "q4", "bf16", "fp32"):
+        emb = GemmaEmbedder(
+            "embeddinggemma-2-270m",
+            precision=allowed,
+            dimensions=8,
+            backend_fn=lambda texts, dims: [[1.0] * dims for _ in texts],
+        )
+        assert emb.precision == allowed
+
+
+@pytest.mark.anyio
+async def test_embedding_broker_token_budgeted_and_length_sorted_dynamic_batching() -> None:
+    """Verify EmbeddingBroker coalesces requests under max_batch_tokens, splits outliers, and preserves order."""
+    forward_batches: list[list[str]] = []
+
+    def fake_backend(texts: list[str], dims: int) -> list[list[float]]:
+        forward_batches.append(list(texts))
+        out: list[list[float]] = []
+        for t in texts:
+            tag = float(int(t.split(":", 1)[0]))
+            out.append([tag, 1.0, 0.0, 0.0][:dims])
+        return out
+
+    broker = EmbeddingBroker(
+        backend_fn=fake_backend,
+        dimensions=4,
+        config=EmbeddingBrokerConfig(
+            max_batch_requests=64,
+            max_batch_tokens=200,
+            coalesce_window_ms=5.0,
+            bulk_chunk_size=4,
+            isolate_gil_subprocess=False,
+        ),
+    )
+
+    short_inputs = [f"{i}:short" for i in range(1, 21)]
+    views = await asyncio.gather(*(broker.submit_single(text) for text in short_inputs))
+    assert len(forward_batches) == 1
+    for idx, view in enumerate(views, start=1):
+        expected_first = idx / math.sqrt(idx * idx + 1.0)
+        assert view.to_list()[0] == pytest.approx(expected_first, rel=1e-5)
+
+    forward_batches.clear()
+    mixed_inputs = [
+        "1:tiny",
+        f"2:{'x' * 1200}",
+        "3:small",
+        "4:compact",
+    ]
+    mixed_views = await asyncio.gather(*(broker.submit_single(t) for t in mixed_inputs))
+    assert len(forward_batches) >= 2
+    for idx, view in enumerate(mixed_views, start=1):
+        expected_first = idx / math.sqrt(idx * idx + 1.0)
+        assert view.to_list()[0] == pytest.approx(expected_first, rel=1e-5)
+
+
+@pytest.mark.anyio
+async def test_embedding_broker_bulk_preemption_for_interactive_query() -> None:
+    """Verify bulk submit_batch yields between chunks so an interactive submit_single completes first."""
+    completion_order: list[str] = []
+
+    def slow_backend(texts: list[str], dims: int) -> list[list[float]]:
+        return [[float(i + 1), 1.0, 0.0, 0.0][:dims] for i in range(len(texts))]
+
+    broker = EmbeddingBroker(
+        backend_fn=slow_backend,
+        dimensions=4,
+        config=EmbeddingBrokerConfig(
+            max_batch_requests=16,
+            max_batch_tokens=4096,
+            coalesce_window_ms=0.5,
+            bulk_chunk_size=2,
+            isolate_gil_subprocess=False,
+        ),
+    )
+
+    async def run_bulk() -> VectorBatchView:
+        res = await broker.submit_batch([f"doc-{i}" for i in range(8)])
+        completion_order.append("bulk")
+        return res
+
+    async def run_interactive() -> None:
+        await asyncio.sleep(0.001)
+        v = await broker.submit_single("interactive-query")
+        assert v.dimensions == 4
+        completion_order.append("interactive")
+
+    bulk_batch, _ = await asyncio.gather(run_bulk(), run_interactive())
+    assert bulk_batch.count == 8
+    assert completion_order[0] == "interactive"
+
+
+@pytest.mark.anyio
+async def test_gemma_and_static_embedders_end_to_end() -> None:
+    """Verify GemmaEmbedder formats task-steered prompts and StaticEmbedder executes in pure Rust."""
+    seen_prompts: list[str] = []
+
+    def spy_backend(texts: list[str], dims: int) -> list[list[float]]:
+        seen_prompts.extend(texts)
+        return [[float(i + 1), 2.0, 3.0, 4.0][:dims] for i in range(len(texts))]
+
+    gemma = GemmaEmbedder(
+        "embeddinggemma-2-270m",
+        dimensions=4,
+        precision="int8",
+        backend_fn=spy_backend,
+    )
+    q_vec = await gemma.embed_query("how does futex work")
+    assert q_vec.dimensions == 4
+    assert any("task: search result | query: how does futex work" in p for p in seen_prompts)
+
+    d_vec = await gemma.embed_document("Futex uses atomic words in shared memory.", title="Futex Guide")
+    assert d_vec.dimensions == 4
+    assert any("title: Futex Guide | text: Futex uses atomic words in shared memory." in p for p in seen_prompts)
+
+    static_emb = StaticEmbedder(
+        vocab={"futex": 0, "shm": 1, "vector": 2, "rust": 3},
+        weights=[
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        ],
+        dimensions=4,
+    )
+    s_vec = await static_emb.embed_query("futex shm")
+    assert s_vec.dimensions == 4
+    inv_sqrt2 = 1.0 / math.sqrt(2.0)
+    assert s_vec.to_list() == pytest.approx([inv_sqrt2, inv_sqrt2, 0.0, 0.0], rel=1e-5)
+
+    s_batch = await static_emb.embed_many(["futex", "vector rust"], titles=["T1", None])
+    assert s_batch.count == 2
+    assert s_batch.dimensions == 4
+
+
+@pytest.mark.anyio
+async def test_subprocess_quarantine_shm_slab_exchange_and_fastembed_optional_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify EmbeddingBroker subprocess quarantine exchanges VectorSlab in /dev/shm and FastEmbedder guards import."""
+    broker = EmbeddingBroker(
+        backend_fn=None,
+        dimensions=4,
+        config=EmbeddingBrokerConfig(
+            isolate_gil_subprocess=True,
+            coalesce_window_ms=0.0,
+        ),
+    )
+    try:
+        sub_batch = await broker.submit_batch_in_subprocess(["alpha", "beta", "gamma"])
+        assert isinstance(sub_batch, VectorBatchView)
+        assert sub_batch.count == 3
+        assert sub_batch.dimensions == 4
+        for idx in range(3):
+            norm = math.sqrt(sum(v * v for v in sub_batch[idx].to_list()))
+            assert norm == pytest.approx(1.0, rel=1e-5)
+    finally:
+        await broker.close()
+
+    monkeypatch.setitem(sys.modules, "fastembed", None)
+    with pytest.raises(MissingDependencyError, match="fastembed") as exc_info:
+        FastEmbedder("BAAI/bge-small-en-v1.5", dimensions=4)
+    assert "embeddings" in exc_info.value.install_package
+
+    monkeypatch.setattr("vertebra.embeddings._broker.is_free_threaded", lambda: True)
+    monkeypatch.setattr("vertebra.embeddings._local.is_free_threaded", lambda: True)
+
+    seen_ft_prompts: list[str] = []
+    ft_custom_gemma = GemmaEmbedder(
+        "embeddinggemma-2-270m",
+        dimensions=4,
+        precision="int8",
+        backend_fn=lambda texts, dims: seen_ft_prompts.extend(texts) or [[1.0] * dims for _ in texts],
+    )
+    assert ft_custom_gemma.broker.should_quarantine_subprocess() is False
+    ft_q = await ft_custom_gemma.embed_query("free threaded custom backend")
+    assert ft_q.dimensions == 4
+    assert any("free threaded custom backend" in p for p in seen_ft_prompts)
+
+    ft_quarantined_gemma = GemmaEmbedder("embeddinggemma-2-270m", dimensions=4, precision="int8")
+    assert ft_quarantined_gemma.broker.should_quarantine_subprocess() is True
+    try:
+        ft_sub_vec = await ft_quarantined_gemma.embed_query("free threaded subprocess quarantine")
+        assert ft_sub_vec.dimensions == 4
+    finally:
+        await ft_quarantined_gemma.broker.close()

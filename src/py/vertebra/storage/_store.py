@@ -6,15 +6,17 @@ import base64
 import binascii
 import builtins
 import calendar
+import datetime
 import hashlib
 import hmac
 import io
 import os
 import shutil
+import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Buffer, Sequence
+from collections.abc import Buffer, Mapping, Sequence
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Self
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -27,6 +29,8 @@ from vertebra.utils.serializers import decode_json, encode_json_bytes
 __all__ = (
     "AzureConfig",
     "GCSConfig",
+    "GcpTokenCache",
+    "GcpTokenSnapshot",
     "HTTPConfig",
     "LocalConfig",
     "MemoryConfig",
@@ -119,10 +123,15 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """When True, permit unencrypted `http://` endpoints for local emulators."""
     skip_signature: bool = False
     """When True, send unsigned requests against anonymous buckets or local emulators."""
+    refresh_skew_seconds: int = 300
+    """Proactive OAuth2 token refresh skew window in seconds before expiration."""
 
     def to_url_and_options(self) -> tuple[str, dict[str, str]]:
         """Convert configuration into a canonical URL and options dictionary."""
-        opts: dict[str, str] = {}
+        opts: dict[str, str] = {
+            "refresh_skew_ms": str(max(0, int(self.refresh_skew_seconds * 1000))),
+            "iam_endpoint": self.iam_endpoint,
+        }
         if self.service_account_path:
             opts["service_account_path"] = self.service_account_path
         if self.application_credentials:
@@ -151,6 +160,14 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
         if self.allow_http or (resolved_endpoint is not None and resolved_endpoint.startswith("http://")):
             opts["allow_http"] = "true"
+            for env_key in ("NO_PROXY", "no_proxy"):
+                existing_no_proxy = os.environ.get(env_key, "")
+                if "127.0.0.1" not in existing_no_proxy:
+                    os.environ[env_key] = (
+                        f"{existing_no_proxy},127.0.0.1,localhost,::1,metadata.google.internal"
+                        if existing_no_proxy
+                        else "127.0.0.1,localhost,::1,metadata.google.internal"
+                    )
 
         has_explicit_auth = bool(
             self.service_account_path
@@ -203,8 +220,34 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         ),
     ) -> str | None:
         """Resolve an OAuth2 bearer token via Application Default Credentials or service-account impersonation."""
+        token, _, _ = self._fetch_adc_token_with_expiry(scopes=scopes)
+        return token
+
+    def _fetch_adc_token_with_expiry(
+        self,
+        *,
+        scopes: Sequence[str] = (
+            "https://www.googleapis.com/auth/devstorage.full_control",
+            "https://www.googleapis.com/auth/cloud-platform",
+        ),
+        allow_ambient_adc: bool = True,
+    ) -> tuple[str | None, int, str | None]:
+        """Resolve `(access_token, expires_at_unix_ms, quota_project_id)` across ADC sources."""
+        now_ms = int(time.time() * 1000)
         if self.access_token:
-            return self.access_token
+            return self.access_token, now_ms + 3_600_000, None
+
+        source_token, expires_at_ms, quota_project = self._exchange_authorized_user_token_with_expiry(
+            allow_ambient=allow_ambient_adc
+        )
+        if source_token is not None:
+            if self.target_service_account:
+                return self._impersonate_service_account_token_with_expiry(
+                    source_token,
+                    scopes=scopes,
+                    quota_project_id=quota_project,
+                )
+            return source_token, expires_at_ms, quota_project
 
         google_auth = import_optional("google.auth")
         google_requests = import_optional("google.auth.transport.requests")
@@ -226,7 +269,7 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
                         self.application_credentials,
                         scopes=list(scopes),
                     )
-                else:
+                elif allow_ambient_adc:
                     creds, _ = google_auth.default(scopes=list(scopes))
 
                 if creds is not None and self.target_service_account:
@@ -243,30 +286,40 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
                         creds.refresh(google_requests.Request())
                     token_val = getattr(creds, "token", None)
                     if token_val:
-                        return str(token_val)
+                        expiry_dt = getattr(creds, "expiry", None)
+                        exp_ms = (
+                            int(expiry_dt.timestamp() * 1000)
+                            if isinstance(expiry_dt, datetime.datetime)
+                            else int(time.time() * 1000) + 3_600_000
+                        )
+                        qp_val = getattr(creds, "quota_project_id", None)
+                        return str(token_val), exp_ms, str(qp_val) if qp_val else None
             except Exception:
                 pass
 
-        source_token = self._exchange_authorized_user_token()
-        if source_token is None:
-            source_token = self._fetch_metadata_server_token()
-        if source_token and self.target_service_account:
-            return self._impersonate_service_account_token(source_token, scopes=scopes)
-        return source_token
+        meta_token, meta_exp_ms = self._fetch_metadata_server_token_with_expiry()
+        if meta_token and self.target_service_account:
+            return self._impersonate_service_account_token_with_expiry(
+                meta_token,
+                scopes=scopes,
+                quota_project_id=None,
+            )
+        return meta_token, meta_exp_ms, None
 
-    def _resolve_adc_file(self) -> Path | None:
+    def _resolve_adc_file(self, *, allow_ambient: bool = True) -> Path | None:
         """Locate an explicit or ambient Application Default Credentials JSON file."""
         candidates: list[str] = []
         if self.application_credentials:
             candidates.append(self.application_credentials)
-        env_adc = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-        if env_adc:
-            candidates.append(env_adc)
-        xdg_cfg = os.environ.get("CLOUDSDK_CONFIG", "").strip()
-        if xdg_cfg:
-            candidates.append(str(Path(xdg_cfg) / "application_default_credentials.json"))
-        else:
-            candidates.append(str(Path.home() / ".config" / "gcloud" / "application_default_credentials.json"))
+        if allow_ambient:
+            env_adc = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+            if env_adc:
+                candidates.append(env_adc)
+            xdg_cfg = os.environ.get("CLOUDSDK_CONFIG", "").strip()
+            if xdg_cfg:
+                candidates.append(str(Path(xdg_cfg) / "application_default_credentials.json"))
+            else:
+                candidates.append(str(Path.home() / ".config" / "gcloud" / "application_default_credentials.json"))
 
         for raw in candidates:
             candidate = Path(raw)
@@ -276,20 +329,29 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
     def _exchange_authorized_user_token(self) -> str | None:
         """Exchange an ADC `authorized_user` refresh token for a short-lived access token."""
-        adc_file = self._resolve_adc_file()
+        token, _, _ = self._exchange_authorized_user_token_with_expiry()
+        return token
+
+    def _exchange_authorized_user_token_with_expiry(
+        self,
+        *,
+        allow_ambient: bool = True,
+    ) -> tuple[str | None, int, str | None]:
+        """Exchange an ADC `authorized_user` refresh token and return `(token, expires_at_ms, quota_project_id)`."""
+        adc_file = self._resolve_adc_file(allow_ambient=allow_ambient)
         if adc_file is None:
-            return None
+            return None, 0, None
         try:
             payload = decode_json(adc_file.read_bytes())
         except (OSError, ValueError, TypeError, msgspec.DecodeError):
-            return None
+            return None, 0, None
         if not isinstance(payload, dict) or payload.get("type") != "authorized_user":
-            return None
+            return None, 0, None
         client_id = payload.get("client_id")
         client_secret = payload.get("client_secret")
         refresh_token = payload.get("refresh_token")
         if not (client_id and client_secret and refresh_token):
-            return None
+            return None, 0, None
         token_uri = str(payload.get("token_uri") or "https://oauth2.googleapis.com/token")
         form_bytes = urlencode(
             {
@@ -300,19 +362,30 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             }
         ).encode("utf-8")
         headers: dict[str, str] = {"Content-Type": "application/x-www-form-urlencoded"}
-        quota_project = payload.get("quota_project_id")
+        quota_project_raw = payload.get("quota_project_id")
+        quota_project = str(quota_project_raw) if quota_project_raw else None
         if quota_project:
-            headers["x-goog-user-project"] = str(quota_project)
+            headers["x-goog-user-project"] = quota_project
+        now_ms = int(time.time() * 1000)
         resp_data = self._open_http_json(token_uri, method="POST", body=form_bytes, headers=headers, timeout=5.0)
         if isinstance(resp_data, dict) and resp_data.get("access_token"):
-            return str(resp_data["access_token"])
-        return None
+            ttl_secs = int(resp_data.get("expires_in") or 3600)
+            return str(resp_data["access_token"]), now_ms + max(0, ttl_secs) * 1000, quota_project
+        return None, 0, None
 
     @classmethod
     def _fetch_metadata_server_token(cls) -> str | None:
         """Query the GCE / Cloud Run / GKE metadata server for an ambient service account token."""
+        token, _ = cls._fetch_metadata_server_token_with_expiry()
+        return token
+
+    @classmethod
+    def _fetch_metadata_server_token_with_expiry(cls) -> tuple[str | None, int]:
+        """Query the metadata server and return `(access_token, expires_at_unix_ms)`."""
         metadata_host = os.environ.get("GCE_METADATA_HOST", "metadata.google.internal").strip()
-        url = f"http://{metadata_host}/computeMetadata/v1/instance/service-accounts/default/token"
+        base = metadata_host if metadata_host.startswith(("http://", "https://")) else f"http://{metadata_host}"
+        url = f"{base.rstrip('/')}/computeMetadata/v1/instance/service-accounts/default/token"
+        now_ms = int(time.time() * 1000)
         resp_data = cls._open_http_json(
             url,
             method="GET",
@@ -321,13 +394,30 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             timeout=1.5,
         )
         if isinstance(resp_data, dict) and resp_data.get("access_token"):
-            return str(resp_data["access_token"])
-        return None
+            ttl_secs = int(resp_data.get("expires_in") or 3600)
+            return str(resp_data["access_token"]), now_ms + max(0, ttl_secs) * 1000
+        return None, 0
 
     def _impersonate_service_account_token(self, source_token: str, *, scopes: Sequence[str]) -> str | None:
         """Exchange a source bearer token for an impersonated service account access token via IAM Credentials."""
+        token, _, _ = self._impersonate_service_account_token_with_expiry(
+            source_token,
+            scopes=scopes,
+            quota_project_id=None,
+        )
+        return token
+
+    def _impersonate_service_account_token_with_expiry(
+        self,
+        source_token: str,
+        *,
+        scopes: Sequence[str],
+        quota_project_id: str | None,
+    ) -> tuple[str | None, int, str | None]:
+        """Exchange a source token for an impersonated service account token with expiration timestamp."""
+        now_ms = int(time.time() * 1000)
         if not self.target_service_account:
-            return source_token
+            return source_token, now_ms + 3_600_000, quota_project_id
         iam_url = (
             f"{self.iam_endpoint.rstrip('/')}/v1/projects/-/serviceAccounts/"
             f"{self.target_service_account}:generateAccessToken"
@@ -344,8 +434,16 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             timeout=5.0,
         )
         if isinstance(resp_data, dict) and resp_data.get("accessToken"):
-            return str(resp_data["accessToken"])
-        return None
+            exp_ms = now_ms + 3_600_000
+            expire_str = resp_data.get("expireTime")
+            if isinstance(expire_str, str) and expire_str:
+                try:
+                    dt = datetime.datetime.fromisoformat(expire_str)
+                    exp_ms = int(dt.timestamp() * 1000)
+                except ValueError:
+                    pass
+            return str(resp_data["accessToken"]), exp_ms, quota_project_id
+        return None, 0, quota_project_id
 
     @staticmethod
     def _open_http_json(
@@ -371,6 +469,178 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
                 return decode_json(resp.read())
         except (OSError, urllib.error.URLError, ValueError, TypeError, msgspec.DecodeError):
             return None
+
+
+class GcpTokenSnapshot(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Immutable snapshot of a cached Google Cloud OAuth2 access token and its generation."""
+
+    access_token: str
+    """Short-lived OAuth2 bearer access token."""
+    expires_at_unix_ms: int
+    """Token expiration timestamp in Unix epoch milliseconds."""
+    generation: int
+    """Monotonically increasing refresh generation counter."""
+    quota_project_id: str | None = None
+    """Optional Google Cloud quota project ID associated with the credential."""
+
+
+class GcpTokenCache:
+    """Thread-safe and async-aware Google Cloud ADC token cache backed by Rust Tokio off-GIL refresh."""
+
+    __slots__ = ("_allow_ambient_adc", "_config", "_generation", "_lock", "_native", "_refresh_lock", "_snapshot")
+
+    def __init__(
+        self,
+        config: GCSConfig | Mapping[str, str] | None = None,
+        *,
+        allow_ambient_adc: bool = True,
+    ) -> None:
+        raw_opts: dict[str, str] | None = None
+        if isinstance(config, Mapping):
+            raw_opts = {str(k): str(v) for k, v in config.items()}
+            resolved_config = GCSConfig(
+                bucket=raw_opts.get("bucket", ""),
+                service_account_path=raw_opts.get("service_account_path"),
+                service_account_key=raw_opts.get("service_account_key"),
+                application_credentials=raw_opts.get("application_credentials_path"),
+                service_account_email=raw_opts.get("service_account_email"),
+                target_service_account=raw_opts.get("target_service_account"),
+                iam_endpoint=raw_opts.get("iam_endpoint", "https://iamcredentials.googleapis.com"),
+                access_token=raw_opts.get("access_token"),
+            )
+        elif config is None:
+            resolved_config = GCSConfig(bucket="")
+        else:
+            resolved_config = config
+        self._config = resolved_config
+        self._allow_ambient_adc = allow_ambient_adc
+        self._generation = 0
+        self._snapshot: GcpTokenSnapshot | None = None
+        self._lock = threading.RLock()
+        self._refresh_lock = threading.Lock()
+        self._native: Any = None
+        native_mod = ObjectStore._get_native_module()
+        if native_mod is not None and hasattr(native_mod, "GcpTokenCache"):
+            if raw_opts is not None:
+                opts = dict(raw_opts)
+            else:
+                opts = {
+                    "refresh_skew_ms": str(max(0, int(resolved_config.refresh_skew_seconds * 1000))),
+                    "iam_endpoint": resolved_config.iam_endpoint,
+                    "allow_ambient_adc": "true" if allow_ambient_adc else "false",
+                }
+                if resolved_config.application_credentials:
+                    opts["application_credentials_path"] = resolved_config.application_credentials
+                if resolved_config.target_service_account:
+                    opts["target_service_account"] = resolved_config.target_service_account
+                if resolved_config.access_token:
+                    opts["access_token"] = resolved_config.access_token
+                if not (
+                    resolved_config.application_credentials
+                    or resolved_config.service_account_path
+                    or resolved_config.service_account_key
+                    or resolved_config.access_token
+                ):
+                    opts["use_metadata_server"] = "true"
+            try:
+                self._native = native_mod.GcpTokenCache(opts)
+            except (RuntimeError, ValueError, OSError):
+                self._native = None
+
+    @property
+    def generation(self) -> int:
+        """Return the current token generation counter (`0` prior to initial fetch)."""
+        if self._native is not None:
+            return int(self._native.generation)
+        with self._lock:
+            return self._generation
+
+    @property
+    def refresh_skew_ms(self) -> int:
+        """Return the proactive refresh skew window in milliseconds."""
+        if self._native is not None:
+            return int(self._native.refresh_skew_ms)
+        return max(0, int(self._config.refresh_skew_seconds * 1000))
+
+    @classmethod
+    def from_gcs_config(cls, config: GCSConfig, *, allow_ambient_adc: bool = True) -> GcpTokenCache:
+        """Construct a `GcpTokenCache` bound to a `GCSConfig`."""
+        return cls(config, allow_ambient_adc=allow_ambient_adc)
+
+    def needs_refresh(self, *, now_unix_ms: int | None = None) -> bool:
+        """Return True when no token is cached or the cached token is within the proactive skew window."""
+        if self._native is not None:
+            return bool(self._native.needs_refresh(now_unix_ms=now_unix_ms))
+        resolved_now = int(time.time() * 1000) if now_unix_ms is None else int(now_unix_ms)
+        with self._lock:
+            if self._snapshot is None:
+                return True
+            return resolved_now + self.refresh_skew_ms >= self._snapshot.expires_at_unix_ms
+
+    def invalidate(self, failed_generation: int) -> None:
+        """Invalidate the cached token if its generation matches `failed_generation`."""
+        if self._native is not None:
+            self._native.invalidate(int(failed_generation))
+            return
+        with self._lock:
+            if self._snapshot is not None and self._snapshot.generation == failed_generation:
+                self._snapshot = None
+
+    def get_token(self, *, force_refresh: bool = False) -> GcpTokenSnapshot:
+        """Return a valid `GcpTokenSnapshot`, refreshing off-GIL under a single-flight lock when needed."""
+        if self._native is not None:
+            raw_snap = self._native.get_token(force_refresh=force_refresh)
+            return GcpTokenSnapshot(
+                access_token=str(raw_snap.access_token),
+                expires_at_unix_ms=int(raw_snap.expires_at_unix_ms),
+                generation=int(raw_snap.generation),
+                quota_project_id=raw_snap.quota_project_id,
+            )
+
+        if not force_refresh and not self.needs_refresh():
+            with self._lock:
+                if self._snapshot is not None:
+                    return self._snapshot
+
+        with self._refresh_lock:
+            if not force_refresh and not self.needs_refresh():
+                with self._lock:
+                    if self._snapshot is not None:
+                        return self._snapshot
+
+            token, expires_at_ms, quota_project = self._config._fetch_adc_token_with_expiry(
+                allow_ambient_adc=self._allow_ambient_adc
+            )
+            if not token:
+                msg = f"Failed to resolve Google Cloud ADC access token for bucket '{self._config.bucket}'"
+                raise RuntimeError(msg)
+
+            with self._lock:
+                self._generation += 1
+                snapshot = GcpTokenSnapshot(
+                    access_token=token,
+                    expires_at_unix_ms=expires_at_ms,
+                    generation=self._generation,
+                    quota_project_id=quota_project,
+                )
+                self._snapshot = snapshot
+                return snapshot
+
+    async def get_token_async(self, *, force_refresh: bool = False) -> GcpTokenSnapshot:
+        """Asynchronously return a valid `GcpTokenSnapshot` via Rust Tokio awaitable without blocking the GIL."""
+        if self._native is not None:
+            raw_snap = await self._native.get_token_async(force_refresh=force_refresh)
+            return GcpTokenSnapshot(
+                access_token=str(raw_snap.access_token),
+                expires_at_unix_ms=int(raw_snap.expires_at_unix_ms),
+                generation=int(raw_snap.generation),
+                quota_project_id=raw_snap.quota_project_id,
+            )
+        if not force_refresh and not self.needs_refresh():
+            with self._lock:
+                if self._snapshot is not None:
+                    return self._snapshot
+        return self.get_token(force_refresh=force_refresh)
 
 
 class AzureConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -691,11 +961,19 @@ class ObjectStore:
 
     def __init__(
         self,
-        url: str = "memory://",
+        url: str | StorageConfig = "memory://",
         *,
         options: dict[str, str] | None = None,
         signing: SigningConfig | None = None,
     ) -> None:
+        if not isinstance(url, str):
+            resolved_url, cfg_opts = url.to_url_and_options()
+            merged_opts = dict(cfg_opts)
+            if options:
+                merged_opts.update(options)
+            signing = signing if signing is not None else self._derive_signing_from_config(url)
+            url = resolved_url
+            options = merged_opts
         self._url = url
         self._options = dict(options or {})
         self._signing = signing
@@ -927,7 +1205,8 @@ class ObjectStore:
         view = memoryview(data).cast("B")
         if self._native is not None:
             native_meta = self._native.put(key, view)
-            return self._native_to_put_result(native_meta, hashlib.sha256(view).hexdigest()[:16])
+            fallback_etag = "" if getattr(native_meta, "etag", None) else f"{view.nbytes:016x}"
+            return self._native_to_put_result(native_meta, fallback_etag)
         digest = hashlib.sha256(view).hexdigest()[:16]
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         if self._local_root is not None:
@@ -1114,7 +1393,8 @@ class ObjectStore:
         view = memoryview(data).cast("B")
         if self._native is not None and hasattr(self._native, "put_async"):
             native_meta = await self._native.put_async(key, view)
-            return self._native_to_put_result(native_meta, hashlib.sha256(view).hexdigest()[:16])
+            fallback_etag = "" if getattr(native_meta, "etag", None) else f"{view.nbytes:016x}"
+            return self._native_to_put_result(native_meta, fallback_etag)
         return self.put(path, data)
 
     async def put_file_async(self, path: str, file_path: str | Path) -> PutResult:
@@ -1245,6 +1525,16 @@ class ObjectStore:
         """Generate a presigned GET URL for the given object key."""
         return self._presign(path, method="GET", expires_in_secs=expires_in_secs, timestamp=timestamp)
 
+    async def presign_get_async(
+        self,
+        path: str,
+        *,
+        expires_in_secs: int = 3600,
+        timestamp: int | None = None,
+    ) -> str:
+        """Asynchronously generate a presigned GET URL via Rust Tokio awaitable without blocking the GIL."""
+        return await self._presign_async(path, method="GET", expires_in_secs=expires_in_secs, timestamp=timestamp)
+
     def presign_put(
         self,
         path: str,
@@ -1254,6 +1544,16 @@ class ObjectStore:
     ) -> str:
         """Generate a presigned PUT URL for the given object key."""
         return self._presign(path, method="PUT", expires_in_secs=expires_in_secs, timestamp=timestamp)
+
+    async def presign_put_async(
+        self,
+        path: str,
+        *,
+        expires_in_secs: int = 3600,
+        timestamp: int | None = None,
+    ) -> str:
+        """Asynchronously generate a presigned PUT URL via Rust Tokio awaitable without blocking the GIL."""
+        return await self._presign_async(path, method="PUT", expires_in_secs=expires_in_secs, timestamp=timestamp)
 
     def verify_presigned_url(
         self,
@@ -1377,6 +1677,28 @@ class ObjectStore:
                 endpoint=self._signing.endpoint,
             )
         return self._sign_hmac(key, method=method, expires_in_secs=expires_in_secs, now_ts=now_ts)
+
+    async def _presign_async(
+        self,
+        path: str,
+        *,
+        method: str,
+        expires_in_secs: int,
+        timestamp: int | None,
+    ) -> str:
+        if self._signing is None:
+            msg = "SigningConfig is required for presigned URL generation"
+            raise RuntimeError(msg)
+        now_ts = int(time.time()) if timestamp is None else timestamp
+        key = self._normalize_key(path)
+        if self._signing.provider == "gcs":
+            return await self._sign_gcs_v4_iam_async(
+                key,
+                method=method,
+                expires_in_secs=expires_in_secs,
+                now_ts=now_ts,
+            )
+        return self._presign(path, method=method, expires_in_secs=expires_in_secs, timestamp=now_ts)
 
     def _sign_hmac(
         self,
@@ -1610,6 +1932,56 @@ class ObjectStore:
             raw_sig = signed_blob_str.encode("utf-8")
         hex_sig = raw_sig.hex()
         return f"https://storage.googleapis.com{canonical_uri}?{canonical_qs}&X-Goog-Signature={hex_sig}"
+
+    async def _sign_gcs_v4_iam_async(
+        self,
+        key: str,
+        *,
+        method: str,
+        expires_in_secs: int,
+        now_ts: int,
+    ) -> str:
+        assert self._signing is not None
+        effective_email = self._signing.target_service_account or self._signing.service_account_email
+        if not effective_email:
+            msg = "service_account_email or target_service_account is required for GCS V4 URL signing"
+            raise ValueError(msg)
+        private_key_pem = None if self._signing.target_service_account else self._signing.private_key_pem
+        access_token = self._signing.access_token or self._options.get("access_token")
+        if access_token is None and private_key_pem is None:
+            adc_helper = GCSConfig(
+                bucket=self._signing.bucket,
+                service_account_path=self._options.get("service_account_path"),
+                service_account_key=self._options.get("service_account_key"),
+                application_credentials=self._options.get("application_credentials_path"),
+                service_account_email=effective_email,
+                iam_endpoint=self._signing.iam_endpoint,
+            )
+            cache = GcpTokenCache.from_gcs_config(adc_helper)
+            snap = await cache.get_token_async()
+            access_token = snap.access_token
+
+        native_mod = self._get_native_module()
+        if native_mod is not None and hasattr(native_mod, "py_sign_gcs_v4_iam_url_async"):
+            return str(
+                await native_mod.py_sign_gcs_v4_iam_url_async(
+                    self._signing.bucket,
+                    effective_email,
+                    method,
+                    key,
+                    expires_in_secs,
+                    now_ts,
+                    self._signing.iam_endpoint,
+                    access_token,
+                    private_key_pem,
+                )
+            )
+        return self._sign_gcs_v4_iam(
+            key,
+            method=method,
+            expires_in_secs=expires_in_secs,
+            now_ts=now_ts,
+        )
 
     def _resolve_local(self, key: str) -> Path:
         assert self._local_root is not None

@@ -16,6 +16,10 @@ pub const GRPC_HEADER_LEN: usize = 5;
 pub const DEFAULT_MAX_GRPC_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
 pub use vertebra_core::ipc::FLAG_TRAILERS;
+pub use vertebra_core::vector::{
+    decode_batch_embed_grpc_response_into_slab, encode_batch_embed_grpc_request,
+    encode_batch_embed_grpc_response_from_slab,
+};
 
 /// Canonical gRPC status codes (`0..=16`).
 #[repr(u8)]
@@ -373,4 +377,39 @@ pub fn build_grpc_trailers_only_response(
     builder
         .body(http_body_util::Full::new(Bytes::new()))
         .expect("trailers-only gRPC response must build")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vertebra_core::vector::{VectorDtype, VectorSlab};
+
+    #[test]
+    fn test_batch_embed_grpc_packed_float_reexport_and_mrl_norm() {
+        let texts = vec!["doc one".to_string(), "doc two".to_string()];
+        let titles = vec![Some("Title 1".to_string()), None];
+        let req_frame = encode_batch_embed_grpc_request(
+            "models/gemini-embedding-001",
+            &texts,
+            Some(2),
+            Some(&titles),
+            Some(4),
+        );
+        assert_eq!(req_frame[0], 0);
+        let mut src_slab = VectorSlab::new_in_memory(2, 8, VectorDtype::Float32, false).unwrap();
+        for i in 0..2 {
+            let row = src_slab.row_f32_mut(i).unwrap();
+            for (j, v) in row.iter_mut().enumerate() {
+                *v = ((i + 1) * (j + 1)) as f32;
+            }
+        }
+        let resp_frame = encode_batch_embed_grpc_response_from_slab(&src_slab).unwrap();
+        let decoded = decode_batch_embed_grpc_response_into_slab(&resp_frame, Some(4), true)
+            .expect("decode must succeed");
+        assert_eq!(decoded.count(), 2);
+        assert_eq!(decoded.dimensions(), 4);
+        let r0 = decoded.row_f32(0).unwrap();
+        let norm0: f32 = r0.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm0 - 1.0).abs() < 1e-5);
+    }
 }

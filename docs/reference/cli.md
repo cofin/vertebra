@@ -52,6 +52,9 @@ vtb run [OPTIONS] <APP>
 | `--tls-key` | `path` | - | Path to PEM private key for HTTPS |
 | `--worker-only` | `flag` | `False` | Run background worker lanes with health probes only |
 | `--oneshot-job` | `text` | - | Execute a single registered job inside the app lifespan and exit |
+| `--with-workers`, `--no-workers` | `flag` | `False` | Co-locate background WorkerRunner lanes inside the server process |
+| `--queues` | `text` | - | Comma-separated queue lane names for co-located workers (e.g. default,embeddings) |
+| `--lane-concurrency` | `text` | - | Comma-separated lane=limit assignments (e.g. default=4,embeddings=1) |
 | `--no-banner` | `flag` | `False` | Disable startup banner |
 
 #### `vtb dev`
@@ -81,6 +84,9 @@ vtb dev [OPTIONS] <APP>
 | `--no-banner` | `flag` | `False` | Suppress startup banner |
 | `--no-tui` | `flag` | `False` | Disable interactive TUI dashboard |
 | `--verbose` | `flag` | `False` | Enable verbose tracebacks with local variables |
+| `--with-workers`, `--no-workers` | `flag` | `False` | Co-locate background WorkerRunner lanes inside the dev server process |
+| `--queues` | `text` | - | Comma-separated queue lane names for co-located workers (e.g. default,embeddings) |
+| `--lane-concurrency` | `text` | - | Comma-separated lane=limit assignments (e.g. default=4,embeddings=1) |
 
 #### `vtb init`
 
@@ -204,12 +210,81 @@ vtb js exec <CMD>...
 
 ## Agent MCP & Background Workers
 
-#### `vtb mcp bridge`
+#### `vtb ai models list`
+
+Display the built-in embedding model catalog and local cache / SHM status.
+
+```bash
+vtb ai models list [OPTIONS]
+```
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--provider` | `choice(vertex | gemini | gemma | fastembed | static)` | - | Filter models by provider |
+| `--json` | `flag` | `False` | Emit catalog as JSON |
+| `--cache-dir` | `path` | - | Local model cache directory |
+
+#### `vtb ai models pull`
+
+Pull model artifacts from an unauthenticated mirror or cloud bucket into the local cache.
+
+```bash
+vtb ai models pull [OPTIONS] <MODEL>
+```
+
+| Argument | Type | Required | Default |
+| --- | --- | --- | --- |
+| `model` | `text` | Yes | - |
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--quant` | `choice(int8 | q4 | bf16 | fp32)` | - | Target model quantization |
+| `--cache-dir` | `path` | - | Local model cache directory |
+| `--source` | `text` | - | Override source mirror or bucket URI |
+
+#### `vtb ai models stage`
+
+Stage a verified model bundle and deterministic manifest.json to a cloud bucket.
+
+```bash
+vtb ai models stage [OPTIONS] <MODEL>
+```
+
+| Argument | Type | Required | Default |
+| --- | --- | --- | --- |
+| `model` | `text` | Yes | - |
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--to` | `text` | - | **Required.** Destination cloud or local store URI (gs://, s3://, file://) |
+| `--quant` | `choice(int8 | q4 | bf16 | fp32)` | - | Target model quantization |
+| `--cache-dir` | `path` | - | Local model cache directory |
+| `--source` | `text` | - | Optional source mirror URI when not yet pulled |
+
+#### `vtb ai models warm`
+
+Fetch a staged model bundle, verify SHA-256 digests, and optionally warm /dev/shm.
+
+```bash
+vtb ai models warm [OPTIONS] <MODEL>
+```
+
+| Argument | Type | Required | Default |
+| --- | --- | --- | --- |
+| `model` | `text` | Yes | - |
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--from` | `text` | - | Staged cloud or local store URI (defaults to VERTEBRA_MODEL_SOURCE) |
+| `--shm` | `flag` | `False` | Map verified model artifacts into /dev/shm (1x RAM across workers) |
+| `--cache-dir` | `path` | - | Local model cache directory |
+
+#### `vtb ai mcp bridge`
 
 Bridge local newline-delimited JSON-RPC 2.0 stdio to a remote HTTP/SSE MCP endpoint.
 
 ```bash
-vtb mcp bridge [OPTIONS]
+vtb ai mcp bridge [OPTIONS]
 ```
 
 | Option | Type | Default | Description |
@@ -218,12 +293,12 @@ vtb mcp bridge [OPTIONS]
 | `--token` | `text` | - | Bearer / OAuth2 / OIDC access token |
 | `--timeout` | `float` | `30.0` | Per-request HTTP timeout in seconds |
 
-#### `vtb mcp serve`
+#### `vtb ai mcp serve`
 
 Run an in-process MCP service over standard input/output (stdio).
 
 ```bash
-vtb mcp serve [OPTIONS]
+vtb ai mcp serve [OPTIONS]
 ```
 
 | Option | Type | Default | Description |
@@ -232,7 +307,7 @@ vtb mcp serve [OPTIONS]
 
 #### `vtb workers run`
 
-Run admission-controlled background worker lanes for APP.
+Run admission-controlled background worker lanes or a single --oneshot job for APP.
 
 ```bash
 vtb workers run [OPTIONS] <APP>
@@ -247,3 +322,5 @@ vtb workers run [OPTIONS] <APP>
 | `--queues` | `text` | `"default"` | Comma-separated queue lane names (e.g. default,etl) |
 | `--concurrency` | `text` | `"10"` | Comma-separated per-lane concurrency limits (e.g. 10,2) |
 | `--drain-timeout` | `float` | `30.0` | Graceful drain timeout in seconds |
+| `--oneshot` | `text` | - | Execute a single registered background job and exit |
+| `--payload` | `text` | - | Optional JSON payload passed to --oneshot job |

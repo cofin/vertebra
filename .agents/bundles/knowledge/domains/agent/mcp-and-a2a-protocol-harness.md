@@ -44,8 +44,8 @@ sources:
 
 [`vertebra.agent.a2a`](../../../../../src/py/vertebra/agent/a2a/service.py) provides peer-to-peer agent collaboration with verifiable cryptographic identity. All A2A 1.0 data models in [`a2a/models.py`](../../../../../src/py/vertebra/agent/a2a/models.py) subclass [`FrozenCamelizedStruct`](../../../../../src/py/vertebra/_typing.py) (`frozen=True, gc=False, rename="camel", omit_defaults=True, repr_omit_defaults=True`), while MCP `2026-07-28` models in [`mcp/models.py`](../../../../../src/py/vertebra/agent/mcp/models.py) subclass [`FrozenBaseStruct`](../../../../../src/py/vertebra/_typing.py).
 
-- **Cryptographic Card Signing (`signing.py`)**: Signs and verifies `AgentCard` manifests using JSON Canonicalization Scheme (JCS, RFC 8785) with Ed25519 (`ed25519`) or ECDSA P-256 (`es256`).
-- **Discovery Endpoint**: Serves `/.well-known/agent.json` containing the public `AgentCard`, supported skills, operational modes, and verification keys.
+- **Cryptographic Card Signing (`signing.py`)**: Signs and verifies `AgentCard` manifests using JSON Canonicalization Scheme (JCS, RFC 8785) with Ed25519 (`ed25519`), ECDSA P-256 (`es256`), or HS256 (`card_secret`).
+- **Automatic Interface & Dynamic URL Discovery (`models.py`, `service.py`, `routes.py`)**: Serves `/.well-known/agent-card.json` containing the public `AgentCard`, supported skills, operational modes, and verification keys. When `AgentCard.supported_interfaces` is omitted (or contains a relative URL), `AgentCard.resolve_for_request()` and `A2AService.resolve_agent_card()` synthesize a default `JSONRPC` 1.0 `AgentInterface` and resolve its public URL dynamically from `A2AConfig.base_url` or the incoming `Forwarded`, `X-Forwarded-Proto`, `X-Forwarded-Host`, and `Host` request headers.
 - **Task Lifecycle**: Enforces strict state transitions across `submitted` $\to$ `working` $\to$ `completed` / `failed` with incremental progress reporting and cancellation handling.
 - **Client SDK (`A2aClient`)**: TypeScript client for querying peer agent capabilities, initiating task handoffs, and validating remote agent card signatures.
 

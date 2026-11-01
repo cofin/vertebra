@@ -13,7 +13,7 @@ __all__ = (
 
 
 def test_render_cli_reference_renders_all_vtb_commands_arguments_and_options_cleanly() -> None:
-    """Verify render_cli_reference emits all 14 vtb leaf commands without Sentinel or Rich leaks."""
+    """Verify render_cli_reference emits all 18 vtb leaf commands without Sentinel or Rich leaks."""
     markdown = render_cli_reference()
 
     assert markdown.startswith("# CLI Reference\n")
@@ -31,8 +31,12 @@ def test_render_cli_reference_renders_all_vtb_commands_arguments_and_options_cle
         "#### `vtb js build`",
         "#### `vtb js generate-types`",
         "#### `vtb js exec`",
-        "#### `vtb mcp bridge`",
-        "#### `vtb mcp serve`",
+        "#### `vtb ai models list`",
+        "#### `vtb ai models pull`",
+        "#### `vtb ai models stage`",
+        "#### `vtb ai models warm`",
+        "#### `vtb ai mcp bridge`",
+        "#### `vtb ai mcp serve`",
         "#### `vtb workers run`",
     )
     for heading in expected_commands:

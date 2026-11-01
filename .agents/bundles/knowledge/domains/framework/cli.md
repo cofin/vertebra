@@ -13,7 +13,7 @@ sources:
   - resource: src/py/vertebra/cli/build.py
   - resource: src/py/vertebra/cli/init.py
   - resource: src/py/vertebra/cli/js.py
-  - resource: src/py/vertebra/cli/mcp.py
+  - resource: src/py/vertebra/cli/ai.py
   - resource: src/py/vertebra/cli/workers.py
   - resource: src/py/vertebra/cli/plugin_registry.py
   - resource: src/py/vertebra/cli/theme.py
@@ -30,13 +30,14 @@ sources:
 
 | Command | Module | Options & Behavior |
 |---|---|---|
-| `vtb run [APP]` | [`cli/run.py`](../../../../../src/py/vertebra/cli/run.py), [`cli/_launch.py`](../../../../../src/py/vertebra/cli/_launch.py) | Resolves `APP` (`--app`, `VERTEBRA_APP`), `--host`, `--port`, `--workers`, `--threads`, `--topology auto\|embedded\|shm`, `--interface auto\|asgi\|rsgi\|wsgi` (`--asgi` sets `VERTEBRA_NATIVE=0`), `--jit / --no-jit` (configures `PYTHON_JIT=1` on non-free-threaded Python 3.15+ interpreters; warns and skips on free-threaded builds), `--drain-timeout`, `--shutdown-timeout`, preserves inherited `VERTEBRA_WORKERS`, `VERTEBRA_TOPOLOGY`, `VERTEBRA_THREADS`, and `VERTEBRA_JIT` environment defaults when CLI flags are omitted, and launches `run_supervisor`. |
-| `vtb dev [APP]` | [`cli/dev.py`](../../../../../src/py/vertebra/cli/dev.py) | Runs `BuildOrchestrator` in dev/HMR mode (`SourceWatcher` or Vite dev server), enables `--reload`, and launches `run_supervisor` with the interactive Rich TUI. |
+| `vtb run [APP]` | [`cli/run.py`](../../../../../src/py/vertebra/cli/run.py), [`cli/_launch.py`](../../../../../src/py/vertebra/cli/_launch.py) | Resolves `APP` (`--app`, `VERTEBRA_APP`), `--host`, `--port`, `--workers`, `--threads`, `--topology auto\|embedded\|shm`, `--interface auto\|asgi\|rsgi\|wsgi` (`--asgi` sets `VERTEBRA_NATIVE=0`), `--jit / --no-jit`, `--with-workers / --no-workers`, `--queues`, `--lane-concurrency` (plus `[tool.vertebra.workers]` in `pyproject.toml`), `--drain-timeout`, `--shutdown-timeout`, preserves inherited `VERTEBRA_WORKERS`, `VERTEBRA_TOPOLOGY`, `VERTEBRA_THREADS`, and `VERTEBRA_JIT` environment defaults when CLI flags are omitted, and launches `run_supervisor`. |
+| `vtb dev [APP]` | [`cli/dev.py`](../../../../../src/py/vertebra/cli/dev.py) | Runs `BuildOrchestrator` in dev/HMR mode (`SourceWatcher` or Vite dev server), enables `--reload`, supports `--with-workers / --no-workers`, `--queues`, and `--lane-concurrency`, and launches `run_supervisor` with the interactive Rich TUI. |
 | `vtb build` | [`cli/build.py`](../../../../../src/py/vertebra/cli/build.py) | Builds `--target frontend\|backend\|all\|<triple>`, `--standalone`, `--onefile`, `--entrypoint`, `--pgo`, `--profdata`, `--server-binary`, `--python-version` (`3.12`–`3.15` / `3.14t` / `3.15t`), and `--output` via `BuildOrchestrator`, `StandaloneBuilder`, and `OnefileBuilder`. |
 | `vtb js <subcmd>` | [`cli/js.py`](../../../../../src/py/vertebra/cli/js.py) | Frontend toolchain subcommands: `add`, `remove`, `list`, `install`, `build`, `generate-types` (`TypeExtractor` + TS/Zod/Valibot/OpenAPI/Protobuf/procedures), and `exec`. |
 | `vtb init` | [`cli/init.py`](../../../../../src/py/vertebra/cli/init.py) | Scaffolds a new Vertebra project layout declaring `dependencies = ["vertebra-core"]` in the generated `pyproject.toml`. |
-| `vtb mcp bridge` | [`cli/mcp.py`](../../../../../src/py/vertebra/cli/mcp.py) | Bridges newline-delimited JSON-RPC 2.0 over `stdin`/`stdout` to an application's `McpServer` (`execute_stdio_bridge`). |
-| `vtb workers run APP` | [`cli/workers.py`](../../../../../src/py/vertebra/cli/workers.py) | Launches admission-controlled [`WorkerRunner`](../server/worker-lanes.md) lanes (`--queues`, `--concurrency`, `--drain-timeout`). |
+| `vtb ai models <subcmd>` | [`cli/ai.py`](../../../../../src/py/vertebra/cli/ai.py) | Embedding model lifecycle subcommands: `list` (`--provider`, `--json`), `pull` (`--quant`, `--cache-dir`, `--source`), `stage` (`--to`, `--quant`), and `warm` (`--from`, `--shm`) with SHA-256 manifest verification and `/dev/shm` `1x` RAM warming. |
+| `vtb ai mcp <subcmd>` | [`cli/ai.py`](../../../../../src/py/vertebra/cli/ai.py) | Model Context Protocol subcommands: `bridge` (`--url`, `--token`, `--timeout`) and `serve` (`--name`) over newline-delimited JSON-RPC 2.0 `stdin`/`stdout`. |
+| `vtb workers run APP` | [`cli/workers.py`](../../../../../src/py/vertebra/cli/workers.py) | Launches admission-controlled [`WorkerRunner`](../server/worker-lanes.md) lanes (`--queues`, `--concurrency`, `--drain-timeout`) or executes a single background job via `--oneshot <job> [--payload <json>]`. |
 
 ## 2. Plugin Discovery, TUI, Theme & Logging
 

@@ -213,6 +213,83 @@ async def test_a2a_http_handler_agent_card_etag_304_and_rust_discovery() -> None
 
 
 @pytest.mark.anyio
+async def test_a2a_agent_card_auto_interfaces_and_dynamic_request_url() -> None:
+    """Verify AgentCard auto-populates JSONRPC 1.0 interface and resolves URL dynamically from request headers."""
+    skill = AgentSkill(
+        id="order-lookup",
+        name="Order Lookup",
+        description="Query order status.",
+    )
+    card = AgentCard(
+        name="OrderSupportAgent",
+        description="Resolves order status and shipment inquiries.",
+        skills=(skill,),
+    )
+    assert card.supported_interfaces == ()
+    assert card.has_explicit_interfaces() is False
+
+    service = A2AService(A2AConfig(path="/a2a", agent_card=card))
+    handler = A2AHttpHandler(service)
+
+    status, headers, body = await handler.handle_request(
+        "GET",
+        "/.well-known/agent-card.json",
+        {
+            "Host": "agents.example.com",
+            "X-Forwarded-Proto": "https",
+        },
+        b"",
+    )
+    assert status == 200
+    assert "Vary" in headers
+    payload = decode_json(body)
+    assert payload["name"] == "OrderSupportAgent"
+    assert payload["supportedInterfaces"] == [
+        {
+            "url": "https://agents.example.com/a2a",
+            "protocolBinding": "JSONRPC",
+            "protocolVersion": "1.0",
+        }
+    ]
+
+    status_fwd, _, body_fwd = await handler.handle_request(
+        "GET",
+        "/.well-known/agent-card.json",
+        {"Forwarded": 'for=192.0.2.60;proto=https;host="mesh.internal.example:8443"'},
+        b"",
+    )
+    assert status_fwd == 200
+    payload_fwd = decode_json(body_fwd)
+    assert payload_fwd["supportedInterfaces"][0]["url"] == "https://mesh.internal.example:8443/a2a"
+
+    class MockDiscoveryCache:
+        registered_body: bytes | None = None
+
+        def register_agent_card(self, payload: bytes) -> None:
+            self.registered_body = payload
+
+    dynamic_cache = MockDiscoveryCache()
+    handler.register_in_discovery_cache(dynamic_cache)
+    assert dynamic_cache.registered_body is None
+
+    static_base_service = A2AService(
+        A2AConfig(
+            path="/a2a",
+            base_url="https://static.agents.example.com",
+            agent_card=card,
+        )
+    )
+    static_base_handler = A2AHttpHandler(static_base_service)
+    static_cache = MockDiscoveryCache()
+    static_base_handler.register_in_discovery_cache(static_cache)
+    assert static_cache.registered_body is not None
+    assert (
+        decode_json(static_cache.registered_body)["supportedInterfaces"][0]["url"]
+        == "https://static.agents.example.com/a2a"
+    )
+
+
+@pytest.mark.anyio
 async def test_a2a_message_send_get_list_and_owner_scoped_cancel() -> None:
     """Verify message/send, tasks/get, tasks/list, and owner isolation on cancellation."""
     card = _sample_card()

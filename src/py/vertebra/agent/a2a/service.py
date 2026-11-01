@@ -10,7 +10,7 @@ import secrets
 import time
 import urllib.parse
 import urllib.request
-from collections.abc import AsyncIterable, Callable, Coroutine
+from collections.abc import AsyncIterable, Callable, Coroutine, Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -29,6 +29,7 @@ from vertebra.agent.a2a.models import (
     TaskStatusUpdateEvent,
     TextPart,
 )
+from vertebra.agent.a2a.signing import AgentCardSigner
 from vertebra.agent.core.context import AgentContext
 from vertebra.agent.core.cursor import paginate_sequence
 from vertebra.agent.core.jsonrpc import (
@@ -69,6 +70,8 @@ class A2AConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
     path: str = "/a2a"
     """HTTP route path where the A2A JSON-RPC endpoint is mounted."""
+    base_url: str | None = None
+    """Optional public origin (`https://agents.example.com`) for `AgentCard` interfaces; derived dynamically from request headers when `None`."""
     agent_card_path: str = "/.well-known/agent-card.json"
     """Well-known discovery route serving the public `AgentCard` JSON."""
     agent_card: AgentCard | None = None
@@ -740,6 +743,26 @@ class A2AService:
             deleted = self.push_dispatcher.delete_config(task_id, owner_id)
             return {"deleted": deleted}
 
+    def resolve_agent_card(
+        self,
+        headers: Mapping[str, str] | None = None,
+        *,
+        base_url: str | None = None,
+        extended: bool = False,
+    ) -> AgentCard | None:
+        """Resolve the public or extended AgentCard with auto-populated interface and URL."""
+        card = self.config.extended_card if extended else self.config.agent_card
+        if card is None:
+            return None
+        resolved = card.resolve_for_request(
+            route_path=self.config.path,
+            base_url=base_url if base_url is not None else self.config.base_url,
+            headers=headers,
+        )
+        if self.config.card_secret and not resolved.signatures:
+            resolved = AgentCardSigner.sign(resolved, self.config.card_secret)
+        return resolved
+
     async def handle_extended_card(
         self,
         params: dict[str, Any] | None = None,
@@ -751,14 +774,19 @@ class A2AService:
                 raise JSONRPCErrorException(
                     JSONRPCError(code=-32000, message="Authentication required for extended card")
                 )
-            if self.config.extended_card is None:
+            req_headers = context.metadata.get("headers") if isinstance(context.metadata, Mapping) else None
+            resolved_card = self.resolve_agent_card(
+                headers=req_headers if isinstance(req_headers, Mapping) else None,
+                extended=True,
+            )
+            if resolved_card is None:
                 raise JSONRPCErrorException(
                     JSONRPCError(
                         code=EXTENDED_CARD_NOT_CONFIGURED,
                         message="Authenticated extended card not configured",
                     )
                 )
-            return self.config.extended_card.to_dict()
+            return resolved_card.to_dict()
 
 
 __all__ = [

@@ -26,6 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          fetch-depth: 2
           persist-credentials: false
       - uses: dorny/paths-filter@v4
         id: filter
@@ -59,6 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [changes]
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.typescript == 'true' || needs.changes.outputs.ci == 'true'
     steps:
       - uses: actions/checkout@v7
         with:
@@ -78,10 +80,10 @@ jobs:
   test-python:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [changes]
+    needs: [changes, lint]
     if: needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         python-version: ["3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]
     steps:
@@ -108,7 +110,7 @@ jobs:
   test-rust:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [changes]
+    needs: [changes, lint]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     steps:
       - uses: actions/checkout@v7
@@ -124,11 +126,11 @@ jobs:
         run: make rs-test
 
   test-rust-features:
-    needs: [changes]
+    needs: [changes, lint]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     timeout-minutes: 15
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - os: ubuntu-latest
@@ -150,7 +152,7 @@ jobs:
   test-typescript:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [changes]
+    needs: [changes, lint]
     if: needs.changes.outputs.typescript == 'true' || needs.changes.outputs.ci == 'true'
     steps:
       - uses: actions/checkout@v7

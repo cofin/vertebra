@@ -100,8 +100,8 @@ class AgentPlugin:
             a2a_srv = self.a2a_service
 
             @app.get("/.well-known/agent-card.json")
-            async def _a2a_agent_card() -> dict[str, Any]:
-                card = a2a_srv.config.agent_card
+            async def _a2a_agent_card(headers: dict[str, str] | None = None) -> dict[str, Any]:
+                card = a2a_srv.resolve_agent_card(headers=headers)
                 if card is None:
                     return {}
                 return cast(dict[str, Any], decode_json(card.to_json_bytes()))
@@ -244,8 +244,8 @@ class AgentPlugin:
         a2a_srv = self.a2a_service
         if a2a_srv is not None:
 
-            async def _litestar_a2a_agent_card() -> dict[str, Any]:
-                card = a2a_srv.config.agent_card
+            async def _litestar_a2a_agent_card(headers: dict[str, str] | None = None) -> dict[str, Any]:
+                card = a2a_srv.resolve_agent_card(headers=headers)
                 if card is None:
                     return {}
                 return cast(dict[str, Any], decode_json(card.to_json_bytes()))

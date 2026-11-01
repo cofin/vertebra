@@ -8,7 +8,11 @@ from pathlib import Path
 import click
 
 from vertebra.build import BuildConfig, BuildOrchestrator
-from vertebra.cli._launch import ServerLaunchEnv
+from vertebra.cli._launch import (
+    ServerLaunchEnv,
+    load_workers_pyproject_config,
+    parse_lane_concurrency_map,
+)
 from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner.renderer import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
@@ -35,6 +39,23 @@ logger = logging.getLogger("vertebra.cli.dev")
 @click.option("--no-banner", is_flag=True, help="Suppress startup banner")
 @click.option("--no-tui", is_flag=True, help="Disable interactive TUI dashboard")
 @click.option("--verbose", is_flag=True, help="Enable verbose tracebacks with local variables")
+@click.option(
+    "--with-workers/--no-workers",
+    default=None,
+    help="Co-locate background WorkerRunner lanes inside the dev server process",
+)
+@click.option(
+    "--queues",
+    "worker_queues",
+    default=None,
+    help="Comma-separated queue lane names for co-located workers (e.g. default,embeddings)",
+)
+@click.option(
+    "--lane-concurrency",
+    "lane_concurrency",
+    default=None,
+    help="Comma-separated lane=limit assignments (e.g. default=4,embeddings=1)",
+)
 def dev(
     app: str,
     host: str,
@@ -46,6 +67,9 @@ def dev(
     no_banner: bool,
     no_tui: bool,
     verbose: bool,
+    with_workers: bool | None,
+    worker_queues: str | None,
+    lane_concurrency: str | None,
 ) -> None:
     """Run Vertebra in development mode.
 
@@ -54,6 +78,12 @@ def dev(
     APP is the application import string (e.g., myapp:app).
     """
     configure_logging(level=log_level, mode="dev", tracebacks_show_locals=verbose)
+    cfg_enabled, cfg_queues, cfg_lanes = load_workers_pyproject_config(Path.cwd())
+    effective_with_workers = cfg_enabled if with_workers is None else with_workers
+    effective_queues = tuple(q.strip() for q in worker_queues.split(",") if q.strip()) if worker_queues else cfg_queues
+    effective_lanes = dict(cfg_lanes)
+    if lane_concurrency:
+        effective_lanes.update(parse_lane_concurrency_map(lane_concurrency))
 
     launch_env = ServerLaunchEnv(
         app_path=app,
@@ -63,6 +93,9 @@ def dev(
         log_level=log_level,
         dev=True,
         native=not asgi,
+        with_workers=effective_with_workers,
+        worker_queues=effective_queues or ("default",),
+        worker_lane_concurrency=effective_lanes,
     )
     env = launch_env.to_environ()
     resolved_interface = "asgi" if asgi and interface.lower() == "auto" else interface.lower()

@@ -97,6 +97,8 @@ class DuckDBConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Maximum number of prepared analytical statements cached per worker."""
     broker: Any = None
     """Optional shared-memory `DatabaseBroker` coordinating single-writer/multi-reader leases."""
+    gcs_token_cache: Any = None
+    """Optional `GcpTokenCache` used to rotate session-local GCS `BEARER_TOKEN` secrets on token refresh."""
 
     def resolved_path(self) -> str:
         """Resolve the effective database path from `path` or `database`."""
@@ -155,6 +157,8 @@ class SyncDuckDBDriver:
         self.config = config or DuckDBConfig()
         self._broker = broker if broker is not None else self.config.broker
         self._writer_lock = threading.RLock()
+        self.applied_token_generation: int = 0
+        self.last_gcs_secret_sql: str = ""
         self.executed_bootstrap_statements: tuple[str, ...] = tuple(self.config.bootstrap_statements())
 
         duckdb_mod = import_optional("duckdb")
@@ -171,29 +175,9 @@ class SyncDuckDBDriver:
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
 
-    def _acquire_broker_lease(self, sql: str, param_count: int) -> Any:
-        if self._broker is None:
-            return None
-        if hasattr(self._broker, "statement_cache"):
-            cached = self._broker.statement_cache.lookup(DUCKDB_DIALECT_TAG, sql)
-            if cached is None:
-                self._broker.statement_cache.insert(
-                    DUCKDB_DIALECT_TAG,
-                    sql,
-                    param_count,
-                    sql.encode("utf-8"),
-                    b"",
-                )
-        if hasattr(self._broker, "lease_table"):
-            return self._broker.lease_table.acquire(os.getpid())
-        return None
-
-    def _release_broker_lease(self, grant: Any) -> None:
-        if grant is not None and self._broker is not None and hasattr(self._broker, "lease_table"):
-            self._broker.lease_table.release(grant.slot_index, grant.generation)
-
     def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None) -> int:
         """Execute a DDL or DML statement under single-writer coordination."""
+        self._sync_gcs_token_secret()
         bound = tuple(params) if isinstance(params, (list, tuple)) else (params or ())
         grant = self._acquire_broker_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
         try:
@@ -214,6 +198,7 @@ class SyncDuckDBDriver:
         schema_type: type[Any] | None = None,
     ) -> list[Any]:
         """Execute an analytical `SELECT` query and return rows as dictionaries or `schema_type` instances."""
+        self._sync_gcs_token_secret()
         bound = tuple(params) if isinstance(params, (list, tuple)) else (params or ())
         grant = self._acquire_broker_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
         try:
@@ -266,6 +251,7 @@ class SyncDuckDBDriver:
         columns: Sequence[str] | None = None,
     ) -> int:
         """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
+        self._sync_gcs_token_secret()
         rows, cols = _table_to_rows_and_cols(data, columns)
         if not rows or not cols:
             return 0
@@ -286,6 +272,7 @@ class SyncDuckDBDriver:
         self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None
     ) -> list[tuple[Any, ...]]:
         """Execute a query and return positional tuples."""
+        self._sync_gcs_token_secret()
         bound = tuple(params) if isinstance(params, (list, tuple)) else (params or ())
         grant = self._acquire_broker_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
         try:
@@ -302,6 +289,7 @@ class SyncDuckDBDriver:
         self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None
     ) -> tuple[list[tuple[Any, ...]], tuple[tuple[Any, ...], ...] | None, int]:
         """Execute SQL and return `(rows, description, rowcount)` for DBAPI compatibility."""
+        self._sync_gcs_token_secret()
         bound = tuple(params) if isinstance(params, (list, tuple)) else (params or ())
         grant = self._acquire_broker_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
         try:
@@ -332,6 +320,47 @@ class SyncDuckDBDriver:
         """Close the underlying DuckDB connection."""
         self._conn.close()
 
+    def _sync_gcs_token_secret(self) -> None:
+        """Ensure this DuckDB session's GCS `BEARER_TOKEN` secret matches the latest `GcpTokenCache` generation."""
+        cache = self.config.gcs_token_cache
+        if cache is None:
+            return
+        if (
+            self.applied_token_generation == 0
+            or cache.needs_refresh()
+            or cache.generation != self.applied_token_generation
+        ):
+            snapshot = cache.get_token()
+            if int(snapshot.generation) != self.applied_token_generation:
+                escaped_token = str(snapshot.access_token).replace("'", "''")
+                secret_sql = f"CREATE OR REPLACE SECRET vertebra_gcs_adc (TYPE GCS, BEARER_TOKEN '{escaped_token}')"
+                self.last_gcs_secret_sql = secret_sql
+                self.applied_token_generation = int(snapshot.generation)
+                if self._using_native_duckdb:
+                    with self._writer_lock, contextlib.suppress(RuntimeError, ValueError, OSError):
+                        self._conn.execute(secret_sql)
+
+    def _acquire_broker_lease(self, sql: str, param_count: int) -> Any:
+        if self._broker is None:
+            return None
+        if hasattr(self._broker, "statement_cache"):
+            cached = self._broker.statement_cache.lookup(DUCKDB_DIALECT_TAG, sql)
+            if cached is None:
+                self._broker.statement_cache.insert(
+                    DUCKDB_DIALECT_TAG,
+                    sql,
+                    param_count,
+                    sql.encode("utf-8"),
+                    b"",
+                )
+        if hasattr(self._broker, "lease_table"):
+            return self._broker.lease_table.acquire(os.getpid())
+        return None
+
+    def _release_broker_lease(self, grant: Any) -> None:
+        if grant is not None and self._broker is not None and hasattr(self._broker, "lease_table"):
+            self._broker.lease_table.release(grant.slot_index, grant.generation)
+
 
 class AsyncDuckDBDriver:
     """Asynchronous DuckDB analytical driver with single-writer coordination and SHM Arrow streaming."""
@@ -345,8 +374,19 @@ class AsyncDuckDBDriver:
         """Return the post-initialization `SET` statements executed on startup."""
         return self._sync.executed_bootstrap_statements
 
+    @property
+    def applied_token_generation(self) -> int:
+        """Return the token generation currently applied to this DuckDB session."""
+        return self._sync.applied_token_generation
+
+    @property
+    def last_gcs_secret_sql(self) -> str:
+        """Return the last `CREATE OR REPLACE SECRET` SQL statement applied for GCS ADC auth."""
+        return self._sync.last_gcs_secret_sql
+
     async def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None) -> int:
         """Execute a DDL or DML statement asynchronously."""
+        await self._ensure_gcs_token_async()
         return await asyncio.to_thread(self._sync.execute, sql, params)
 
     async def select(
@@ -357,6 +397,7 @@ class AsyncDuckDBDriver:
         schema_type: type[Any] | None = None,
     ) -> list[Any]:
         """Execute an analytical `SELECT` query asynchronously."""
+        await self._ensure_gcs_token_async()
         return await asyncio.to_thread(self._sync.select, sql, params, schema_type=schema_type)
 
     async def select_one(
@@ -367,6 +408,7 @@ class AsyncDuckDBDriver:
         schema_type: type[Any] | None = None,
     ) -> Any:
         """Execute a `SELECT` query asynchronously and return the first row or raise `ValueError`."""
+        await self._ensure_gcs_token_async()
         return await asyncio.to_thread(self._sync.select_one, sql, params, schema_type=schema_type)
 
     async def select_one_or_none(
@@ -377,6 +419,7 @@ class AsyncDuckDBDriver:
         schema_type: type[Any] | None = None,
     ) -> Any | None:
         """Execute a `SELECT` query asynchronously and return the first row or `None`."""
+        await self._ensure_gcs_token_async()
         return await asyncio.to_thread(self._sync.select_one_or_none, sql, params, schema_type=schema_type)
 
     async def load_from_arrow(
@@ -387,6 +430,7 @@ class AsyncDuckDBDriver:
         columns: Sequence[str] | None = None,
     ) -> int:
         """Asynchronously bulk-ingest an Arrow Table or `ArrowCursor` into `table_name`."""
+        await self._ensure_gcs_token_async()
         return await asyncio.to_thread(self._sync.load_from_arrow, table_name, data, columns=columns)
 
     async def select_to_arrow(
@@ -397,6 +441,7 @@ class AsyncDuckDBDriver:
         shm_threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
     ) -> ArrowCursor:
         """Execute a query asynchronously and return a zero-copy `ArrowCursor`."""
+        await self._ensure_gcs_token_async()
         return await asyncio.to_thread(
             self._sync.select_to_arrow,
             sql,
@@ -407,3 +452,9 @@ class AsyncDuckDBDriver:
     async def close(self) -> None:
         """Close the underlying DuckDB connection."""
         await asyncio.to_thread(self._sync.close)
+
+    async def _ensure_gcs_token_async(self) -> None:
+        """Pre-refresh the GCS ADC token on the Rust Tokio runtime before dispatching DuckDB work."""
+        cache = self.config.gcs_token_cache
+        if cache is not None and cache.needs_refresh() and hasattr(cache, "get_token_async"):
+            await cache.get_token_async()

@@ -2,6 +2,8 @@
 
 from vertebra.storage._store import (
     AzureConfig,
+    GcpTokenCache,
+    GcpTokenSnapshot,
     GCSConfig,
     HTTPConfig,
     LocalConfig,
@@ -20,6 +22,8 @@ from vertebra.storage._store import (
 __all__ = (
     "AzureConfig",
     "GCSConfig",
+    "GcpTokenCache",
+    "GcpTokenSnapshot",
     "HTTPConfig",
     "LocalConfig",
     "MemoryConfig",

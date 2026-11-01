@@ -11,7 +11,12 @@ from typing import Any
 import click
 
 from vertebra.build import BuildConfig
-from vertebra.cli._launch import ServerLaunchEnv, is_free_threaded_runtime
+from vertebra.cli._launch import (
+    ServerLaunchEnv,
+    is_free_threaded_runtime,
+    load_workers_pyproject_config,
+    parse_lane_concurrency_map,
+)
 from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
@@ -67,6 +72,23 @@ logger = logging.getLogger("vertebra.cli.run")
     default=None,
     help="Execute a single registered job inside the app lifespan and exit",
 )
+@click.option(
+    "--with-workers/--no-workers",
+    default=None,
+    help="Co-locate background WorkerRunner lanes inside the server process",
+)
+@click.option(
+    "--queues",
+    "worker_queues",
+    default=None,
+    help="Comma-separated queue lane names for co-located workers (e.g. default,embeddings)",
+)
+@click.option(
+    "--lane-concurrency",
+    "lane_concurrency",
+    default=None,
+    help="Comma-separated lane=limit assignments (e.g. default=4,embeddings=1)",
+)
 @click.option("--no-banner", is_flag=True, help="Disable startup banner")
 def run(
     app: str,
@@ -86,6 +108,9 @@ def run(
     tls_key: str | None,
     worker_only: bool,
     oneshot_job: str | None,
+    with_workers: bool | None,
+    worker_queues: str | None,
+    lane_concurrency: str | None,
     no_banner: bool,
 ) -> None:
     """Run the Vertebra server."""
@@ -95,6 +120,12 @@ def run(
         sys.exit(_execute_oneshot_cli(app, oneshot_job))
 
     resolved_jit = _resolve_jit_setting(jit)
+    cfg_enabled, cfg_queues, cfg_lanes = load_workers_pyproject_config(Path.cwd())
+    effective_with_workers = cfg_enabled if with_workers is None else with_workers
+    effective_queues = tuple(q.strip() for q in worker_queues.split(",") if q.strip()) if worker_queues else cfg_queues
+    effective_lanes = dict(cfg_lanes)
+    if lane_concurrency:
+        effective_lanes.update(parse_lane_concurrency_map(lane_concurrency))
 
     launch_env = ServerLaunchEnv(
         app_path=app,
@@ -107,6 +138,9 @@ def run(
         topology=topology,
         threads=threads,
         jit=resolved_jit,
+        with_workers=effective_with_workers,
+        worker_queues=effective_queues or ("default",),
+        worker_lane_concurrency=effective_lanes,
     )
     env = launch_env.to_environ()
     resolved_interface = "asgi" if asgi and interface.lower() == "auto" else interface.lower()

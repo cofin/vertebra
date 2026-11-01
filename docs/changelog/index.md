@@ -2,6 +2,39 @@
 
 All notable changes to Vertebra are documented on this page.
 
+## 0.3.0
+
+Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector views, binary database vector codecs, active Google Cloud ADC credential refresh, the `vtb ai` CLI, co-located background worker lanes, automatic A2A `AgentInterface` and dynamic request-origin URL resolution, updated isometric axial vertebrae branding, and expanded topic documentation.
+
+### Added
+
+- **Shared-Memory Vector Primitives & PEP 3118 Views (`vertebra-core`, `vertebra._vertebra`)**:
+  - Cache-line-aligned POSIX shared-memory `VectorSlab` (`VTBVSLAB` header), set-associative seqlock `VectorCache`, `SimilarityMatch`, `StaticEmbedderCore`, Matryoshka `mrl_truncate_and_normalize_f32`, `quantize_f32_to_int8`, `quantize_f32_to_binary`, and SIMD `top_k_*` kernels ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+  - Zero-copy PEP 3118 `VectorView` and `VectorBatchView` with `.truncate()`, `.quantize()`, `.top_k()`, `.to_pgvector_bytes()`, `.to_oracle_bytes()`, `.to_sqlite_blob()`, and `.to_arrow_shm()` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+- **Binary Database Vector Codecs (`vertebra-db`, `vertebra.extensions.sqlalchemy`)**:
+  - PostgreSQL `pgvector` binary wire codecs (`encode_pgvector_f32`, `decode_pgvector_f32`, `encode_pgvector_f16`, `decode_pgvector_f16`, `encode_pgvector_bit`, `decode_pgvector_bit`), Oracle 26ai `0xDB` binary `VECTOR` codecs (`encode_oracle_vector_f32`, `decode_oracle_vector_f32`, `encode_oracle_vector_int8`, `encode_oracle_vector_binary`), and SQLAlchemy `Vector` bind/result pushdown ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+- **Google-First & Local Shared-Memory Embedders (`vertebra.embeddings`, `vertebra-http`)**:
+  - Native HTTP/2 gRPC packed-`f32` framing (`encode_gemini_embed_grpc_frame`, `decode_gemini_embed_grpc_frame_to_batch`) and `Embedder`, `VertexEmbedder`, `GeminiEmbedder`, `AlloyDbEmbedder`, `OracleEmbedder`, `RemoteEmbedder`, and `create_embedding_grpc_service` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+  - `EmbeddingBroker` (`1x` RAM model hosting across workers, token-budgeted length-sorted dynamic batching, and `3.14t`/`3.15t` subprocess GIL quarantine), `GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`, and `ModelSpec` catalog ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+- **Active GCP ADC Credential Refresh & Non-Blocking Storage (`vertebra-storage`, `vertebra.storage`, `vertebra.db.duckdb`)**:
+  - `GcpTokenSnapshot`, `GcpAuthSource`, `GcpTokenCache`, and `RefreshingGcpCredentialProvider` with `300s` proactive refresh skew, single-flight refresh deduplication, generation-checked `401` invalidation, and automatic DuckDB `CREATE OR REPLACE SECRET` token rotation in `SyncDuckDBDriver` and `AsyncDuckDBDriver` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+- **`vtb ai` CLI, Co-Located Workers & Dynamic A2A Discovery (`vertebra.cli`, `vertebra.agent.a2a`)**:
+  - `vtb ai models list|pull|stage|warm` and `vtb ai mcp serve|bridge` in `vertebra.cli.ai` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+  - Co-located `WorkerRunner` execution in `vtb run` and `vtb dev` (`--with-workers`, `--queues`, `--lane-concurrency`, `[tool.vertebra.workers]`) and `--oneshot` / `--payload` in `vtb workers run` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+  - Automatic default `AgentInterface` synthesis on `AgentCard` and dynamic request-origin URL resolution (`Forwarded`, `X-Forwarded-Proto`, `X-Forwarded-Host`, `Host` with `Vary` headers) in `A2AHttpHandler` and `A2AService` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+
+### Changed
+
+- Replaced blocking `runtime().block_on(...)` calls in `vertebra-storage` async PyO3 operations with non-blocking Tokio `spawn_rust_task` execution (`TaskCompletionCallback`) ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+- Replaced top-level `vtb mcp` CLI command group with `vtb ai mcp` (`serve` and `bridge`) ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+- Updated brand logo and icon assets (`docs/assets/`) to an isometric axial vertebrae mark (`#EDB641`), pinned persistent `VERTEBRA / <Current Page>` header context in `docs/stylesheets/extra.css`, and split usage documentation into 14 focused topic guides under `docs/usage/` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+- Updated `.github/dependabot.yml` to use native `bun` and `uv` package ecosystems with grouped minor/patch updates and `open-pull-requests-limit: 1`, gated CI test matrices on `lint` with `fail-fast: true` in `.github/workflows/ci.yml`, and upgraded workspace dependencies via `make upgrade` (`anyio`, `bump-my-version`, `platformdirs`, `pytest-databases`, `python-dateutil`, `sqlparse`, `crc32fast`) ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+
+### Fixed
+
+- Fixed `dorny/paths-filter@v4` shallow-clone `git fetch` failure on `push` events to `main` by setting `fetch-depth: 2` in `.github/workflows/ci.yml`, and removed failing `git push` commit step from `.github/workflows/benchmark.yml` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+- Scoped `[tool.bumpversion.files]` search/replace in `pyproject.toml` to `version = "{current_version}"` so `make release` does not rewrite dependency version floors, and automated `uv.lock` and `Cargo.lock` synchronization in `Makefile` `release`/`pre-release` targets ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+
 ## 0.2.0
 
 Comprehensive release introducing zero-copy serialization bridges, real-time database channels, Advanced Alchemy object storage and cache services, bidirectional Protobuf/gRPC tooling, multi-framework extensions, OpenAPI documentation portals, WebMCP auto-registration, and modernized repository security tooling.

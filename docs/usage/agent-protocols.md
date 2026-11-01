@@ -1,17 +1,17 @@
-# Agent Protocols (MCP, A2A & Workflows)
+# Model Context Protocol (MCP, Skills & Stdio)
 
-`vertebra.agent` provides a unified protocol layer for exposing application tools, prompts, resources, skills, and multi-step agent workflows over the **Model Context Protocol (MCP)** and **Agent-to-Agent (A2A)** protocol. See [`vertebra.agent` API Reference](../reference/agent.md) for complete class and method signatures.
+`vertebra.agent.mcp` exposes typed Python functions, prompt templates, resources, and `SKILL.md` bundles over the **Model Context Protocol (MCP 2026-07-28)**. See [A2A, WebMCP & Workflows](a2a-and-workflows.md), [Vector Embeddings & Slabs](embeddings-and-vectors.md), and the [`vertebra.agent` API Reference](../reference/agent.md) for companion AI subsystems.
 
 ## Protocol & Runtime Selection Matrix
 
 | Subsystem | Primary Entrypoints | When to Use |
 | --- | --- | --- |
 | **MCP Server (`vertebra.agent.mcp`)** | `MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig` | Expose typed Python `@tool`, `@prompt`, `@resource` functions and `SKILL.md` bundles to IDE/desktop MCP clients |
-| **A2A Server (`vertebra.agent.a2a`)** | `A2AService`, `A2AConfig`, `AgentCard` | Publish `/.well-known/agent-card.json` discovery cards and handle streaming JSON-RPC/SSE multi-agent tasks |
-| **Protocol Bridges (`vertebra.agent.bridges`)** | `McpToolBridge`, `A2aAgentBridge` | Expose remote A2A agents as callable MCP tools or wrap an `MCPRegistry` as an A2A task handler |
-| **Harness & Planning (`vertebra.agent.runtime`, `spec`, `workflow`)** | `AgentRuntime`, `ConfirmationGate`, `SpecTree`, `DynamicWorkflow`, `WorkflowEngine` | Run multi-turn tool-calling loops with human-in-the-loop approval gates, hierarchical task decomposition, and parallel DAG execution |
+| **[A2A & WebMCP](a2a-and-workflows.md)** | `A2AService`, `A2AConfig`, `AgentCard`, `@vertebra/client/webmcp` | Publish `/.well-known/agent-card.json` discovery cards, handle streaming A2A tasks, and expose browser `navigator.modelContext` tools |
+| **[Protocol Bridges & Workflows](a2a-and-workflows.md)** | `McpToolBridge`, `A2aAgentBridge`, `AgentRuntime`, `SpecTree`, `DynamicWorkflow` | Bridge MCP and A2A services or run multi-turn tool-calling loops with human-in-the-loop approval gates and DAG workflows |
+| **[Vector Embeddings](embeddings-and-vectors.md)** | `Embedder`, `VertexEmbedder`, `GemmaEmbedder`, `VectorView`, `VectorBatchView` | Generate zero-copy shared-memory embeddings via Google gRPC, in-DB SQL pushdown, or `1x` RAM local models |
 
-## Model Context Protocol (`vertebra.agent.mcp`)
+## Registering Tools, Prompts & Resources (`vertebra.agent.mcp`)
 
 Register typed Python functions as MCP tools (`@tool`), prompt templates (`@prompt`), and resources (`@resource`) on `MCPRegistry`. Input JSON Schemas are compiled automatically from type annotations and `msgspec.Struct` models:
 
@@ -42,91 +42,13 @@ registry.register_prompt(restock_prompt)
 registry.register_resource(list_warehouses)
 ```
 
-## MCP Skills, Long-Running Tasks & Stdio Bridge
+## MCP Skills, Long-Running Tasks & `vtb ai mcp` CLI
 
 - **Skills (`MCPSkillsConfig`, `SkillController`, `FilesystemSkillSource`)**: Serve structured `SKILL.md` bundles over MCP resources and HTTP endpoints so coding agents can load domain workflows on demand.
 - **Async Tasks (`MCPTaskConfig`, `MCPTaskStore`, `TaskRecord`)**: Track long-running tool calls with progress updates, cancellation, and TTL retention.
-- **Stdio-to-HTTP Bridge (`vtb mcp bridge` / `run_stdio_http_bridge`)**: Connect stdio-only MCP desktop clients to remote Vertebra HTTP/SSE MCP endpoints with W3C trace header propagation.
+- **Stdio Server & Stdio-to-HTTP Bridge (`vtb ai mcp serve|bridge`)**: Run a local MCP server over stdio (`vtb ai mcp serve --name my-mcp`) or bridge stdio-only MCP desktop clients to remote Vertebra HTTP/SSE MCP endpoints with W3C trace header propagation:
 
 ```bash
-vtb mcp bridge --url http://127.0.0.1:8000/mcp
+vtb ai mcp serve --name my-mcp
+vtb ai mcp bridge --url http://127.0.0.1:8000/mcp
 ```
-
-## Agent-to-Agent Protocol (`vertebra.agent.a2a`)
-
-Expose an A2A 1.0 discovery card (`/.well-known/agent-card.json`) with optional JWS card signing (`card_secret` / `AgentCardSigner`) and JSON-RPC/SSE task endpoints using `AgentCard`, `AgentInterface`, `A2AConfig`, and `A2AService`:
-
-```python
-from vertebra.agent.a2a import (
-    A2AConfig,
-    A2AService,
-    AgentCapabilities,
-    AgentCard,
-    AgentInterface,
-    AgentSkill,
-)
-
-skill = AgentSkill(
-    id="order-lookup",
-    name="Order Lookup",
-    description="Query order status.",
-)
-card = AgentCard(
-    name="OrderSupportAgent",
-    description="Resolves order status and shipment inquiries.",
-    supported_interfaces=(
-        AgentInterface(
-            url="https://agents.example.com/a2a",
-            protocol_binding="JSONRPC",
-        ),
-    ),
-    capabilities=AgentCapabilities(streaming=True),
-    skills=(skill,),
-)
-a2a = A2AService(A2AConfig(path="/a2a", agent_card=card))
-```
-
-## Bidirectional MCP / A2A Bridges (`vertebra.agent.bridges`)
-
-Bridge MCP tools and A2A agents in either direction using `McpToolBridge`, `A2aAgentBridge`, `a2a_card_to_mcp_tools`, and `mcp_service_to_a2a` so an MCP client can delegate tasks to remote A2A agents or an A2A client can invoke local MCP tools.
-
-## `SpecTree` Planning & DAG Workflows (`vertebra.agent.spec`, `vertebra.agent.workflow`)
-
-Decompose complex goals into hierarchical `SpecTree` task nodes (`SpecNode`) or execute parallel topological waves with `DynamicWorkflow`, `WorkflowNode`, `WorkflowEngine`, and real-time `WorkflowLiveState` delta broadcasting:
-
-```python
-from vertebra.agent.spec import SpecTree
-from vertebra.agent.workflow import (
-    DynamicWorkflow,
-    WorkflowEngine,
-    WorkflowNode,
-)
-
-tree = SpecTree(root_goal="Fulfill enterprise order")
-validate_node = tree.add_node(
-    "validate-inventory",
-    description="Verify warehouse stock",
-)
-ship_node = tree.add_node(
-    "create-shipment",
-    description="Book carrier label",
-    depends_on=(validate_node.id,),
-)
-
-workflow = DynamicWorkflow(
-    name="order-fulfillment",
-    nodes=[
-        WorkflowNode(name="validate", fn=lambda ctx: {"ok": True}),
-        WorkflowNode(
-            name="ship",
-            depends_on=("validate",),
-            fn=lambda ctx: {"shipped": ctx.get_output("validate")["ok"]},
-        ),
-    ],
-)
-engine = WorkflowEngine()
-```
-
-## Agent Runtime, Confirmation Gates & Sessions
-
-Combine `AgentPlugin`, `AgentRuntime`, `GoogleGenAIProvider`, `GuardChain`, `TurnBudget`, and human-in-the-loop `ConfirmationGate` (`ConfirmationTicket`, `ConfirmationDecisionRequest`) with pluggable session stores (`MemorySessionStore`, `CacheSessionStore`, `SQLSpecSessionStore`, `AlchemySessionStore`, `ObjectStoreSessionStore`).

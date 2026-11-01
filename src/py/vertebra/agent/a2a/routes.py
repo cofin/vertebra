@@ -34,10 +34,15 @@ class A2AHttpHandler:
         return False
 
     def register_in_discovery_cache(self, cache: Any) -> None:
-        """Register the AgentCard in Rust WellKnownDiscoveryCache if available."""
+        """Register the AgentCard in Rust WellKnownDiscoveryCache when URLs are static."""
         if self.config.agent_card is None:
             return
-        card_bytes = self.config.agent_card.to_json_bytes()
+        if self.config.base_url is None and not self.config.agent_card.has_explicit_interfaces():
+            return
+        resolved_card = self.service.resolve_agent_card()
+        if resolved_card is None:
+            return
+        card_bytes = resolved_card.to_json_bytes()
         if hasattr(cache, "register_agent_card"):
             cache.register_agent_card(card_bytes)
         elif hasattr(cache, "register_document"):
@@ -72,9 +77,10 @@ class A2AHttpHandler:
         if method == "GET" and (
             normalized_path == agent_card_path or normalized_path == "/.well-known/agent-card.json"
         ):
-            if self.config.agent_card is None:
+            resolved_card = self.service.resolve_agent_card(headers=lower_headers)
+            if resolved_card is None:
                 return 404, {"Content-Type": "text/plain"}, b"AgentCard not configured"
-            card_bytes = self.config.agent_card.to_json_bytes()
+            card_bytes = resolved_card.to_json_bytes()
             etag_hash = hashlib.sha256(card_bytes).hexdigest()[:16]
             current_etag = f'"{etag_hash}"'
 
@@ -86,6 +92,7 @@ class A2AHttpHandler:
                 "ETag": current_etag,
                 "A2A-Version": "1.0",
                 "Cache-Control": "public, max-age=300",
+                "Vary": "Host, X-Forwarded-Host, X-Forwarded-Proto, Forwarded",
             }
             return 200, resp_headers, card_bytes
 

@@ -51,6 +51,7 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
   - [`vtb` Command-Line Interface](domains/framework/cli.md)
 - **Agent Protocols & Harness (`domains/agent/`)**:
   - [Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols](domains/agent/mcp-and-a2a-protocol-harness.md)
+  - [Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker](domains/agent/embeddings-and-vectors.md)
 - **Server & Worker Runtime (`domains/server/`)**:
   - [Python Server, Worker Loop & Protocol Adapters Domain](domains/server/worker-and-protocols.md)
   - [Multi-Lane Worker Runner](domains/server/worker-lanes.md)

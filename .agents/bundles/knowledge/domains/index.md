@@ -19,11 +19,12 @@ Vertebra uses one domain naming model across Python, Rust, and TypeScript: each 
 - [Framework Subdomains](framework/subdomains.md) — `di` (`Container`, `DependencyGraph`, `Provide`, `Inject`), `security` (`SecurityConfig`, `Guard`), `autowire` (`AutowireLoader`), `procedures` (`ProcedureRouter`, `Procedure`), `htmx`, `ssr`, `openapi`, `asyncapi`, `queues`, `channels`, `stores`, `email`, and first-party `litestar-mcp` (`LitestarMCP`, `MCPConfig`, `LitestarA2A`, `A2AConfig`) integration.
 - [Distributed Queues, Cron Leader Election & Transactional Email](framework/distributed-queues-and-email.md) — Pluggable queue backends (`MemoryQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `PostgresQueueBackend`, `OracleQueueBackend`), `CronScheduler` leader election, `WorkerRunner` with priority lanes, and transactional email providers (`SmtpProvider`, `ResendProvider`, `SendGridProvider`, `MailgunProvider`, `SesProvider` with native Rust SigV4 signing).
 - [Live State Synchronization](framework/live-state.md) — `LiveState`, `LiveStateRoom`, `StateDeltaFrame`, `StateOpcode`, `HybridLogicalClock`, `@live_action`, `LwwStateRegister`, and TypeScript `LiveStateClient` / `OfflineDeltaQueue`.
-- [`vtb` Command-Line Interface](framework/cli.md) — `vtb run`, `vtb dev`, `vtb build`, `vtb js`, `vtb init`, `vtb mcp bridge`, `vtb workers run`, `discover_entry_point_commands`, `Console`, and `run_dev_tui`.
+- [`vtb` Command-Line Interface](framework/cli.md) — `vtb run`, `vtb dev`, `vtb build`, `vtb js`, `vtb init`, `vtb ai models`, `vtb ai mcp`, `vtb workers run`, `discover_entry_point_commands`, `Console`, and `run_dev_tui`.
 
 ## Agent Protocols & Harness (`agent/`)
 
-- [Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols](agent/mcp-and-a2a-protocol-harness.md) — Model Context Protocol (`MCP 2026-07-28`) SSE and Stdio transports, Agent-to-Agent (`A2A 1.0`) JCS/RFC 8785 Ed25519/ECDSA signed agent cards, durable DAG workflows, SpecTree execution, Rust PyO3 cryptographic fastpaths, and GenAI telemetry.
+- [Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols](agent/mcp-and-a2a-protocol-harness.md) — Model Context Protocol (`MCP 2026-07-28`) SSE and Stdio transports, Agent-to-Agent (`A2A 1.0`) JCS/RFC 8785 Ed25519/ECDSA signed agent cards with automatic `AgentInterface` and dynamic request URL resolution, durable DAG workflows, SpecTree execution, Rust PyO3 cryptographic fastpaths, and GenAI telemetry.
+- [Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker](agent/embeddings-and-vectors.md) — POSIX shared-memory `VectorSlab` and `VectorCache`, PEP 3118 `VectorView` and `VectorBatchView`, `Embedder`, `VertexEmbedder`, `GeminiEmbedder`, `AlloyDbEmbedder`, `OracleEmbedder`, `GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`, `RemoteEmbedder`, and `1x` RAM `EmbeddingBroker`.
 
 ## Server & Worker Runtime (`server/`)
 

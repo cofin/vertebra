@@ -1,11 +1,11 @@
-"""Unit tests for the vtb mcp bridge CLI and MCP JSON-RPC observability extraction."""
+"""Unit tests for the vtb ai mcp bridge CLI and MCP JSON-RPC observability extraction."""
 
 import io
 from typing import Any
 
 from click.testing import CliRunner
 
-from vertebra.cli.mcp import (
+from vertebra.cli.ai import (
     extract_mcp_headers_from_jsonrpc,
     mcp,
     run_mcp_stdio_bridge,
@@ -58,7 +58,7 @@ def test_vtb_mcp_bridge_cli_command(monkeypatch: Any) -> None:
         invoked["timeout_s"] = timeout_s
         return 0
 
-    monkeypatch.setattr("vertebra.cli.mcp.run_mcp_stdio_bridge", fake_bridge)
+    monkeypatch.setattr("vertebra.cli.ai.run_mcp_stdio_bridge", fake_bridge)
     runner = CliRunner()
     result = runner.invoke(
         mcp,

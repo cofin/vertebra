@@ -23,6 +23,7 @@ pub mod telemetry;
 pub mod tiered_ring;
 pub mod transport;
 pub mod util;
+pub mod vector;
 
 // Re-exports for ergonomics
 pub use bridge::{BatchBridge, BridgeResponse, ResponseSink, WriteRequest};

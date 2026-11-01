@@ -25,6 +25,7 @@ __all__ = (
     "LaneConfig",
     "LaneMetrics",
     "WorkerRunner",
+    "parse_lane_concurrency",
     "parse_lanes",
     "run_oneshot",
 )
@@ -287,6 +288,45 @@ class WorkerRunner:
         return tuple(lanes)
 
     @staticmethod
+    def parse_lane_concurrency(
+        queues: str,
+        lane_concurrency: str = "",
+        *,
+        default_concurrency: int = 10,
+        drain_timeout_s: float = 30.0,
+    ) -> tuple[LaneConfig, ...]:
+        """Parse comma-separated queue names and lane=limit assignments into LaneConfig objects."""
+        queue_names = [q.strip() for q in queues.split(",") if q.strip()]
+        if not queue_names:
+            queue_names = ["default"]
+
+        explicit_limits: dict[str, int] = {}
+        for entry in lane_concurrency.split(","):
+            token = entry.strip()
+            if not token or "=" not in token:
+                continue
+            k, v = token.split("=", 1)
+            key = k.strip()
+            if not key:
+                continue
+            with contextlib.suppress(ValueError):
+                explicit_limits[key] = max(1, int(v.strip()))
+
+        lanes: list[LaneConfig] = []
+        for name in queue_names:
+            limit = explicit_limits.get(name, max(1, default_concurrency))
+            lane_kind: TaskLane = "cpu" if name == "cpu" else ("agent" if name == "agent" else "io")
+            lanes.append(
+                LaneConfig(
+                    queue_name=name,
+                    concurrency=limit,
+                    drain_timeout_s=drain_timeout_s,
+                    lane_kind=lane_kind,
+                )
+            )
+        return tuple(lanes)
+
+    @staticmethod
     def resolve_job(app: Any, job_name: str) -> Callable[..., Any] | None:
         """Look up a named job callable on a Litestar or Vertebra app."""
         state = getattr(app, "state", None)
@@ -302,22 +342,32 @@ class WorkerRunner:
         return None
 
     @classmethod
-    async def run_oneshot(cls, app: Any, job_name: str) -> int:
+    async def run_oneshot(cls, app: Any, job_name: str, *, payload: Any = None) -> int:
         """Enter the application lifespan, run a single named job, and return an exit code."""
         job_fn = cls.resolve_job(app, job_name)
         if job_fn is None:
             log.error("Oneshot job %r is not registered on application", job_name)
             return 1
 
+        def _invoke() -> Any:
+            if payload is not None:
+                try:
+                    sig = inspect.signature(job_fn)
+                    if len(sig.parameters) > 0:
+                        return job_fn(payload)
+                except (TypeError, ValueError):
+                    return job_fn(payload)
+            return job_fn()
+
         lifespan_cm = getattr(app, "lifespan", None)
         try:
             if callable(lifespan_cm):
                 async with lifespan_cm():
-                    res = job_fn()
+                    res = _invoke()
                     if inspect.isawaitable(res):
                         await res
             else:
-                res = job_fn()
+                res = _invoke()
                 if inspect.isawaitable(res):
                     await res
         except Exception:
@@ -327,4 +377,5 @@ class WorkerRunner:
 
 
 parse_lanes = WorkerRunner.parse_lanes
+parse_lane_concurrency = WorkerRunner.parse_lane_concurrency
 run_oneshot = WorkerRunner.run_oneshot

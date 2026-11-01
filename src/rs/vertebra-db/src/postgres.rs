@@ -303,6 +303,196 @@ pub fn decode_pgcopy_binary_rows(buf: &[u8]) -> Result<Vec<Vec<Option<Vec<u8>>>>
     Err("missing PGCOPY -1 trailer".to_string())
 }
 
+#[inline]
+fn f32_to_f16_bits(val: f32) -> u16 {
+    let bits = val.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    let mant = bits & 0x007f_ffff;
+    if exp <= 0 {
+        if exp < -10 {
+            return sign;
+        }
+        let m = (mant | 0x0080_0000) >> (1 - exp);
+        return sign | ((m + 0x0000_1000) >> 13) as u16;
+    } else if exp == 0xff - (127 - 15) {
+        if mant == 0 {
+            return sign | 0x7c00;
+        }
+        return sign | 0x7c00 | ((mant >> 13) as u16).max(1);
+    } else if exp > 30 {
+        return sign | 0x7c00;
+    }
+    sign | ((exp as u16) << 10) | ((mant + 0x0000_1000) >> 13) as u16
+}
+
+#[inline]
+fn f16_bits_to_f32(bits: u16) -> f32 {
+    let sign = ((bits & 0x8000) as u32) << 16;
+    let exp = ((bits >> 10) & 0x1f) as u32;
+    let mant = (bits & 0x03ff) as u32;
+    let f_bits = if exp == 0 {
+        if mant == 0 {
+            sign
+        } else {
+            let mut m = mant;
+            let mut e = 127u32 - 14;
+            while (m & 0x0400) == 0 {
+                m <<= 1;
+                e -= 1;
+            }
+            m &= 0x03ff;
+            sign | (e << 23) | (m << 13)
+        }
+    } else if exp == 31 {
+        sign | 0x7f80_0000 | (mant << 13)
+    } else {
+        sign | ((exp + 127 - 15) << 23) | (mant << 13)
+    };
+    f32::from_bits(f_bits)
+}
+
+/// Encode a `pgvector` binary `vector` (`[u16 dim BE][u16 unused=0 BE][f32 BE; dim]`).
+pub fn encode_pgvector_f32(values: &[f32]) -> Result<Vec<u8>, String> {
+    if values.is_empty() {
+        return Err("pgvector must have at least 1 dimension".to_string());
+    }
+    if values.len() > u16::MAX as usize {
+        return Err(format!(
+            "pgvector dimension {} exceeds u16::MAX",
+            values.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(4 + values.len() * 4);
+    out.extend_from_slice(&(values.len() as u16).to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    for &v in values {
+        if v.is_nan() {
+            return Err("pgvector does not allow NaN values".to_string());
+        }
+        if v.is_infinite() {
+            return Err("pgvector does not allow infinite values".to_string());
+        }
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+    Ok(out)
+}
+
+/// Decode a `pgvector` binary `vector` (`[u16 dim BE][u16 unused=0 BE][f32 BE; dim]`).
+pub fn decode_pgvector_f32(buf: &[u8]) -> Result<Vec<f32>, String> {
+    if buf.len() < 4 {
+        return Err("pgvector binary buffer too short (< 4 bytes)".to_string());
+    }
+    let dim = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+    let unused = u16::from_be_bytes([buf[2], buf[3]]);
+    if unused != 0 {
+        return Err(format!(
+            "pgvector unused header field must be 0, got {unused}"
+        ));
+    }
+    let expected = 4 + dim * 4;
+    if buf.len() != expected {
+        return Err(format!(
+            "pgvector byte length {} does not match expected {expected} for dim {dim}",
+            buf.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(dim);
+    for &chunk in buf[4..].as_chunks::<4>().0 {
+        out.push(f32::from_be_bytes(chunk));
+    }
+    Ok(out)
+}
+
+/// Encode a `pgvector` binary `halfvec` (`[u16 dim BE][u16 unused=0 BE][f16 BE; dim]`).
+pub fn encode_pgvector_f16(values: &[f32]) -> Result<Vec<u8>, String> {
+    if values.is_empty() {
+        return Err("halfvec must have at least 1 dimension".to_string());
+    }
+    if values.len() > u16::MAX as usize {
+        return Err(format!(
+            "halfvec dimension {} exceeds u16::MAX",
+            values.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(4 + values.len() * 2);
+    out.extend_from_slice(&(values.len() as u16).to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    for &v in values {
+        if v.is_nan() || v.is_infinite() {
+            return Err("halfvec does not allow NaN or infinite values".to_string());
+        }
+        out.extend_from_slice(&f32_to_f16_bits(v).to_be_bytes());
+    }
+    Ok(out)
+}
+
+/// Decode a `pgvector` binary `halfvec` (`[u16 dim BE][u16 unused=0 BE][f16 BE; dim]`).
+pub fn decode_pgvector_f16(buf: &[u8]) -> Result<Vec<f32>, String> {
+    if buf.len() < 4 {
+        return Err("halfvec binary buffer too short (< 4 bytes)".to_string());
+    }
+    let dim = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+    let unused = u16::from_be_bytes([buf[2], buf[3]]);
+    if unused != 0 {
+        return Err(format!(
+            "halfvec unused header field must be 0, got {unused}"
+        ));
+    }
+    let expected = 4 + dim * 2;
+    if buf.len() != expected {
+        return Err(format!(
+            "halfvec byte length {} does not match expected {expected} for dim {dim}",
+            buf.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(dim);
+    for &chunk in buf[4..].as_chunks::<2>().0 {
+        let bits = u16::from_be_bytes(chunk);
+        out.push(f16_bits_to_f32(bits));
+    }
+    Ok(out)
+}
+
+/// Encode a PostgreSQL / `pgvector` binary `bit` (`VARBIT`: `[i32 bit_len BE][u8; ceil(bit_len / 8)]`).
+pub fn encode_pgvector_bit(packed_bytes: &[u8], bit_len: usize) -> Result<Vec<u8>, String> {
+    if bit_len == 0 {
+        return Err("pgvector bit_len must be > 0".to_string());
+    }
+    let expected_bytes = bit_len.div_ceil(8);
+    if packed_bytes.len() != expected_bytes {
+        return Err(format!(
+            "packed_bytes length {} does not match bit_len {bit_len} (expected {expected_bytes})",
+            packed_bytes.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(4 + expected_bytes);
+    out.extend_from_slice(&(bit_len as i32).to_be_bytes());
+    out.extend_from_slice(packed_bytes);
+    Ok(out)
+}
+
+/// Decode a PostgreSQL / `pgvector` binary `bit` (`VARBIT`: `[i32 bit_len BE][u8; ceil(bit_len / 8)]`).
+pub fn decode_pgvector_bit(buf: &[u8]) -> Result<(Vec<u8>, usize), String> {
+    if buf.len() < 4 {
+        return Err("pgvector bit buffer too short (< 4 bytes)".to_string());
+    }
+    let bit_len_i32 = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    if bit_len_i32 <= 0 {
+        return Err(format!("invalid pgvector bit_len {bit_len_i32}"));
+    }
+    let bit_len = bit_len_i32 as usize;
+    let expected_bytes = bit_len.div_ceil(8);
+    if buf.len() != 4 + expected_bytes {
+        return Err(format!(
+            "pgvector bit buffer length {} does not match expected {}",
+            buf.len(),
+            4 + expected_bytes
+        ));
+    }
+    Ok((buf[4..].to_vec(), bit_len))
+}
+
 /// Configuration for `PostgresPool`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostgresPoolConfig {
@@ -491,5 +681,30 @@ mod tests {
         assert_eq!(plan.compiled_sql, b"stmt_1");
         pool.release_lease(grant.slot_index, grant.generation)
             .unwrap();
+    }
+
+    #[test]
+    fn test_pgvector_f32_f16_and_bit_codecs() {
+        let vals = [0.25f32, -0.5, 1.0, -2.0];
+        let enc32 = encode_pgvector_f32(&vals).expect("encode f32");
+        assert_eq!(enc32.len(), 20);
+        let dec32 = decode_pgvector_f32(&enc32).expect("decode f32");
+        assert_eq!(dec32, vals);
+
+        let enc16 = encode_pgvector_f16(&vals).expect("encode f16");
+        assert_eq!(enc16.len(), 12);
+        let dec16 = decode_pgvector_f16(&enc16).expect("decode f16");
+        for (a, b) in vals.iter().zip(dec16.iter()) {
+            assert!((a - b).abs() < 1e-3);
+        }
+
+        let bits = [0b1010_0101u8, 0b1100_0011];
+        let enc_bit = encode_pgvector_bit(&bits, 16).expect("encode bit");
+        let (dec_bits, bit_len) = decode_pgvector_bit(&enc_bit).expect("decode bit");
+        assert_eq!(dec_bits, bits);
+        assert_eq!(bit_len, 16);
+
+        assert!(encode_pgvector_f32(&[f32::NAN]).is_err());
+        assert!(encode_pgvector_f32(&[f32::INFINITY]).is_err());
     }
 }
